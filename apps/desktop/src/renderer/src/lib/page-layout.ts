@@ -16,7 +16,7 @@ export const PAGE_CONTAINER = '@container/page'
 /** Content width from which a page puts its sections in two columns. */
 export const PAGE_WIDE_MIN_PX = 940
 
-/** Livestream → Setup: destinations and details | output and health. */
+/** Destinations → Setup: destinations and details | output and health. */
 export const LIVESTREAM_SETUP_GRID =
   'grid @min-[940px]/page:grid-cols-[minmax(0,1.5fr)_minmax(0,1fr)]'
 

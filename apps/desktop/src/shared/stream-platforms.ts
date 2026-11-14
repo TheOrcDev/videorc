@@ -1,4 +1,4 @@
-// Every stream platform, in Livestream order. The StreamPlatform union, the
+// Every stream platform, in the Destinations page's order. The StreamPlatform union, the
 // wire enum and every per-platform list cap derive from this one list, so a
 // new platform can't be half-added again (plan 206: seven hard-coded
 // `maxLength: 7` caps would have failed every audience, viewer and co-host

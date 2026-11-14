@@ -161,8 +161,8 @@ export function removeMessagesReadiness(
 }
 
 /**
- * Platforms whose missing permission one reconnect grants, from Livestream
- * setup or the Stream Manager. YouTube never lacks one (its base scope covers
+ * Platforms whose missing permission one reconnect grants, from Destinations
+ * Setup or the Stream Manager. YouTube never lacks one (its base scope covers
  * deletes) and X authorizes through Authorize X Live instead.
  */
 export const SCOPE_RECONNECT_PLATFORMS = [

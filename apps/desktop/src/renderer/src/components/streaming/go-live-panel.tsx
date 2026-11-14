@@ -72,7 +72,7 @@ import { openWorkspaceTab } from '@/lib/workspace-navigation'
 // its rows, the QR code and the phone list stay out of the eager bundle.
 // Below the imports: the dev server turns `import { lazy }` into a const at
 // that line, so a use above it throws "Cannot access 'lazy' before
-// initialization" and the Livestream page shows its error panel.
+// initialization" and the Destinations page shows its error panel.
 const WatchdogSection = lazy(async () => ({
   default: (await import('./watchdog-section')).WatchdogSection
 }))

@@ -86,7 +86,7 @@ import { broadcastThumbnailHint } from '@/lib/broadcast-info'
 import { streamLanguageOptions } from '@/lib/stream-languages'
 
 /**
- * Livestream (plan 174 S1.6b, A-14): Setup, Upcoming and Guests (plan 224
+ * Destinations (plan 174 S1.6b, A-14; plan 235 D6): Setup, Upcoming and Guests (plan 224
  * D16) in a strip pinned under the toolbar, like Settings; only the view
  * under it scrolls. The view lives in the shell, so the page reopens on the
  * one used last and ⌘K can open Upcoming and Guests by name.
@@ -108,7 +108,7 @@ export function StreamingTab({
   const visibleView = view === 'guests' && !showGuests ? 'setup' : view
   return (
     <PageTabs
-      label="Livestream view"
+      label="Destinations view"
       tabs={livestreamViews(cloudStatus)}
       value={visibleView}
       onValueChange={onViewChange}

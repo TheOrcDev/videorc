@@ -70,7 +70,7 @@ export function youtubeGoLivePausedMessage(pausedUntil: Date | string, now?: Dat
   return `YouTube's API is paused until ${formatResumeTime(pausedUntil, now)}, so Videorc can't create the YouTube broadcast. Go live on YouTube with your stream key instead.`
 }
 
-/** The Livestream page row while paused: what is off, until when, what still works. */
+/** The Destinations page row while paused: what is off, until when, what still works. */
 export function youtubeDestinationPausedMessage(pausedUntil: Date | string, now?: Date): string {
   return `YouTube's API is paused until ${formatResumeTime(pausedUntil, now)}: Videorc's daily YouTube API limit is used up. Chat, viewers and subscribers resume on their own; to go live on YouTube before then, use your stream key.`
 }

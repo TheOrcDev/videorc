@@ -1,7 +1,7 @@
 # Discord go-live announcement
 
 Plan 187 ([issue #634](https://github.com/TheOrcDev/videorc/issues/634)). The
-streamer pastes a Discord webhook URL in **Livestream → Setup → Discord**, one
+streamer pastes a Discord webhook URL in **Destinations → Setup → Discord**, one
 per server, up to ten. After that, every public Go Live posts one message to
 each of those channels:
 
@@ -122,7 +122,7 @@ platform needs its own proof:
 | Any other 4xx                  | It reports `rejected`. Discord's code goes to the log, never to the copy.                           |
 
 A failed post raises one neutral toast wherever the streamer is: "Couldn't
-post to Discord", with **Open Livestream**; the description names the webhook
+post to Discord", with **Open Destinations**; the description names the webhook
 ("The Stream alerts webhook was deleted in Discord. …") so servers tell
 apart, and the newest failure across the webhooks is the one that toasts.
 That webhook's row shows the same line, and a health event records it

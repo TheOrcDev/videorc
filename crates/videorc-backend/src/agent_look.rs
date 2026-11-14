@@ -1256,7 +1256,7 @@ mod tests {
             },
             "destinations": [
                 { "id": "t-1", "platform": "twitch", "label": "Twitch", "on": true, "ready": true, "title": "Building an MCP", "category": "Software and Game Development" },
-                { "id": "y-1", "platform": "youtube", "label": "YouTube", "on": false, "ready": false, "reason": "Connect YouTube in Livestream." }
+                { "id": "y-1", "platform": "youtube", "label": "YouTube", "on": false, "ready": false, "reason": "Connect YouTube in Destinations." }
             ],
             "windows": { "notes": false, "streamManager": true, "preview": false }
         })
@@ -1645,7 +1645,7 @@ mod tests {
             structured(&outcome)["destinations"],
             json!([
                 { "id": "t-1", "platform": "twitch", "label": "Twitch", "on": true, "ready": true, "title": "Building an MCP", "category": "Software and Game Development" },
-                { "id": "y-1", "platform": "youtube", "label": "YouTube", "on": false, "ready": false, "reason": "Connect YouTube in Livestream." }
+                { "id": "y-1", "platform": "youtube", "label": "YouTube", "on": false, "ready": false, "reason": "Connect YouTube in Destinations." }
             ])
         );
         assert_eq!(

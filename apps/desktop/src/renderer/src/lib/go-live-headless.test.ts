@@ -193,7 +193,7 @@ describe('go_live without the dialog (plan 209 S10, D13)', () => {
         destination('youtube-1'),
         destination('twitch-1', {
           ready: false,
-          message: 'Twitch needs a stream key. Add it in Livestream → Setup.'
+          message: 'Twitch needs a stream key. Add it in Destinations → Setup.'
         })
       ],
       issues: [
@@ -201,7 +201,7 @@ describe('go_live without the dialog (plan 209 S10, D13)', () => {
           severity: 'error',
           targetId: 'twitch-1',
           platform: 'twitch',
-          message: 'Twitch needs a stream key. Add it in Livestream → Setup.'
+          message: 'Twitch needs a stream key. Add it in Destinations → Setup.'
         }
       ]
     }
@@ -216,7 +216,7 @@ describe('go_live without the dialog (plan 209 S10, D13)', () => {
     expect(goLiveConfirmGate(input).blocked).toBe(true)
     expect(decideHeadlessGoLive(input)).toEqual({
       kind: 'refuse',
-      message: `Twitch: Twitch needs a stream key. Add it in Livestream → Setup. ${HEADLESS_GO_LIVE_COPY.allowPartialHint}`
+      message: `Twitch: Twitch needs a stream key. Add it in Destinations → Setup. ${HEADLESS_GO_LIVE_COPY.allowPartialHint}`
     })
     // "Go live without Twitch", as the dialog's row offers.
     expect(decideHeadlessGoLive({ ...input, allowPartial: true })).toEqual({
@@ -286,7 +286,7 @@ describe('go_live without the dialog (plan 209 S10, D13)', () => {
         destination('youtube-1', {
           ready: false,
           accountLabel: undefined,
-          message: 'Sign in to YouTube in Livestream → Setup, then go live.'
+          message: 'Sign in to YouTube in Destinations → Setup, then go live.'
         })
       ],
       issues: [
@@ -294,7 +294,7 @@ describe('go_live without the dialog (plan 209 S10, D13)', () => {
           severity: 'error',
           targetId: 'youtube-1',
           platform: 'youtube',
-          message: 'Sign in to YouTube in Livestream → Setup, then go live.'
+          message: 'Sign in to YouTube in Destinations → Setup, then go live.'
         }
       ]
     }
@@ -310,7 +310,7 @@ describe('go_live without the dialog (plan 209 S10, D13)', () => {
         })
       ).toEqual({
         kind: 'refuse',
-        message: 'YouTube: Sign in to YouTube in Livestream → Setup, then go live.'
+        message: 'YouTube: Sign in to YouTube in Destinations → Setup, then go live.'
       })
     }
   })
@@ -380,7 +380,7 @@ describe('go_live without the dialog (plan 209 S10, D13)', () => {
     })
     expect(headlessExclusions(saved, ['kick-1'])).toEqual({
       ok: false,
-      message: 'Kick is off. Turn it on in Livestream → Setup first.'
+      message: 'Kick is off. Turn it on in Destinations → Setup first.'
     })
     expect(headlessExclusions(saved, ['facebook'])).toMatchObject({ ok: false })
   })

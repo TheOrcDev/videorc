@@ -17771,7 +17771,7 @@ mod tests {
         let database = test_database();
 
         // An empty override list parses, so the default fallback never fired
-        // and the Livestream page drew no per-destination rows for months.
+        // and the Destinations page drew no per-destination rows for months.
         database
             .save_setting(
                 "streamMetadataDraft",

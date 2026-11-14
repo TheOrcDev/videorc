@@ -26,7 +26,7 @@ import {
   shownLayout
 } from '@/lib/guests-view'
 
-// Plan 224 C-G2 and C-G3: what Livestream → Guests and the Show stage say,
+// Plan 224 C-G2 and C-G3: what Destinations → Guests and the Show stage say,
 // from the backend's room. Guests are never "participants", and the runner
 // is never a person.
 

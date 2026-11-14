@@ -809,7 +809,7 @@ describe('Buddy tab: Voice commands (plan 140, S6 part A)', () => {
   it('says where to connect when no platform is connected', async () => {
     await render({ core: { platformAccounts: [] }, tab: 'voice' })
     expect(section().querySelector('[data-slot="remove-messages-empty"]')?.textContent).toBe(
-      'Connect YouTube, Twitch, Kick or X under Livestream to remove their chat messages.'
+      'Connect YouTube, Twitch, Kick or X in Destinations to remove their chat messages.'
     )
   })
 })

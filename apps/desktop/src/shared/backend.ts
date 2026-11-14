@@ -5490,7 +5490,7 @@ export interface CloudFeedStatus {
   kbps?: number
 }
 
-/** The Livestream page's section: the switch resolved, the choices beside the value. */
+/** The Destinations page's section: the switch resolved, the choices beside the value. */
 export interface CloudSettingsView {
   enabled: boolean
   holdMaxSeconds: number
@@ -6333,7 +6333,7 @@ export interface VideorcApi {
    * Buddy page on that tab through `buddy:deep-link`. Resolves once sent. */
   openBuddyTabFromCommentsWindow: (command: OpenBuddyTabCommand) => Promise<boolean>
   /** "Use Sign in" on a stream-key X destination's chat row (plan 213 J1):
-   * main shows the main window and opens that destination in Livestream →
+   * main shows the main window and opens that destination in Destinations →
    * Setup through `livestream:open-destination`. Resolves once sent. */
   openDestinationFromCommentsWindow: (command: OpenDestinationCommand) => Promise<boolean>
   /** "Sign in to Videorc" on a chat row that waits on it (plan 215 A3): main
@@ -6565,7 +6565,7 @@ export interface VideorcApi {
   ) => () => void
   /**
    * Plan 213 J1: the Stream Manager asked to open a destination's connection.
-   * Main has shown the window; the shell opens Livestream → Setup on it.
+   * Main has shown the window; the shell opens Destinations → Setup on it.
    */
   onOpenDestination: (callback: (navigation: { targetId: string }) => void) => () => void
   /**
@@ -9445,7 +9445,7 @@ export interface FollowerGain {
 /**
  * `youtube.quota` event (plan 094): the shared YouTube Data API quota breaker.
  * `pausedUntil` is present (RFC 3339) while every YouTube call is paused and
- * absent, never null, once they may resume. One state for the Livestream page,
+ * absent, never null, once they may resume. One state for the Destinations page,
  * the Stream Manager and the Comments destination status.
  */
 export interface YouTubeQuotaStatus {

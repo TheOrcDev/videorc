@@ -48,7 +48,7 @@ describe('openWorkspaceTab', () => {
     expect(readWorkspaceNavigation(sent[0])).toEqual({ tab })
   })
 
-  it('covers all eleven pages, Livestream as `live`', () => {
+  it('covers all eleven pages, Destinations as `live`', () => {
     expect([...EVERY_PAGE].sort()).toEqual(
       [
         'ai',
@@ -99,7 +99,7 @@ describe('openWorkspaceTab', () => {
   })
 
   it('refuses a page that does not exist, at compile time and in the shell', () => {
-    // The old chat-setup toast sent `streaming`; Livestream's id is `live`.
+    // The old chat-setup toast sent `streaming`; Destinations' id is `live`.
     // @ts-expect-error `streaming` is not a page id
     capture(() => openWorkspaceTab('streaming'))
     expect(readWorkspaceNavigation({ tab: 'streaming' })).toBeNull()

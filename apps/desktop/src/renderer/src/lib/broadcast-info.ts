@@ -1,7 +1,7 @@
 import type { StreamPrivacy } from './backend'
 
 // One set of stream-detail rules for every surface that edits them (plan 174
-// S3.4, B-19 and D-21): the Go Live dialog, Livestream → Setup and the
+// S3.4, B-19 and D-21): the Go Live dialog, Destinations → Setup and the
 // Schedule dialog used to count, validate and name the same fields three ways
 // ("Privacy" here, "Visibility" there; a 100-character rule in one, none in
 // the others). YouTube's limits are the strictest of the platforms', so they

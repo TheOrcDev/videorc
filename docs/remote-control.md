@@ -225,7 +225,7 @@ layoutPreset, activeTakeoverId, windows, systemAudioOn, systemAudioAvailable, sa
   that predates plan 069 omits both. While a session runs,
   `recordEnabled` and `streamEnabled` say what that session does (a Record
   take is `true`/`false` whatever Output says), until the stop completes;
-  while idle, they are the saved Output and Livestream settings. Apps up to
+  while idle, they are the saved Output and Destinations settings. Apps up to
   0.20.2 always send the saved settings. `buddyLive` is `true` while Buddy
   Live is on, and `false` until Buddy's settings load. Apps up to 0.20.2
   omit it. `streamManager` is `{ screenId, visible, hiddenFromStream }`:

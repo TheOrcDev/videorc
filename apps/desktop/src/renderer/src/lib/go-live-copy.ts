@@ -58,7 +58,7 @@ export const GO_LIVE_SHORTCUT_LABEL = 'Go Live / end livestream'
  * configured". The Studio button is disabled with the same fact instead.
  */
 export const GO_LIVE_NO_DESTINATION_TITLE = 'Set up a destination to go live'
-export const OPEN_LIVESTREAM_LABEL = 'Open Livestream'
+export const OPEN_DESTINATIONS_LABEL = 'Open Destinations'
 
 /** The Go Live button while its first checks run, from the first click (B-7). */
 export const GO_LIVE_CHECKING_LABEL = 'Checking…'

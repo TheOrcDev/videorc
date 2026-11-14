@@ -2,7 +2,7 @@
 // next stream's Stream details and Destinations, through the Studio's own
 // paths. Stream details are checked with the same validation the Save button
 // runs and saved like it; a destination turns on behind the same entitlement
-// gate as its switch. Both wait while a session runs, like the Livestream page.
+// gate as its switch. Both wait while a session runs, like the Destinations page.
 
 import { isStreamTargetStartReady } from '@/lib/capture'
 import { streamingDestinationEnableGate } from '@/lib/entitlement-ui'

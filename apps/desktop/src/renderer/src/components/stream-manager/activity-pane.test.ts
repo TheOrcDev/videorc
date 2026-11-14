@@ -214,7 +214,7 @@ describe('ActivityPane Show who followed', () => {
     const markup = render(false, true)
     expect(markup).toContain('data-testid="activity-follow-names"')
     expect(markup).toContain('Twitch names each follower once you allow it.')
-    expect(markup).not.toContain('Livestream → Setup')
+    expect(markup).not.toContain('Destinations → Setup')
   })
 
   it('hides it once the permission is granted, or when the window cannot act', () => {

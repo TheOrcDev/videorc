@@ -15,7 +15,7 @@ export type StreamHealthAttribution =
   | 'unknown'
 
 /**
- * The problem in a few words, for the Livestream page's checklist and the
+ * The problem in a few words, for the Destinations page's checklist and the
  * Studio's Stream fact (plan 174 S3.2): one wording on both surfaces.
  */
 export function liveProblemLabel(attribution: StreamHealthAttribution): string {

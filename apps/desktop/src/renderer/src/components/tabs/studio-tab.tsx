@@ -462,7 +462,7 @@ function StudioPreviewPanel(): ReactElement {
  * Where the shown blocked reason is fixed (plan 174 S3.1): the reason line
  * follows the record intent first, then Go Live, so the jump does too. A
  * Record that cannot start points at what records; a Go Live that cannot
- * start points at Livestream.
+ * start points at Destinations.
  */
 function studioBlocker(studio: ReturnType<typeof useStudioCore>): {
   title?: string
@@ -494,14 +494,14 @@ function studioBlocker(studio: ReturnType<typeof useStudioCore>): {
     return {
       title: goLiveEntitlement.upgradeUrl ? 'Premium required' : 'Streaming limit reached',
       jumpTo: 'live',
-      jumpLabel: 'Open Livestream'
+      jumpLabel: 'Open Destinations'
     }
   }
   if (!areEnabledStreamTargetsStartReady(captureConfig.streaming)) {
     return {
       title: 'Finish setting up your destination',
       jumpTo: 'live',
-      jumpLabel: 'Open Livestream'
+      jumpLabel: 'Open Destinations'
     }
   }
   return null

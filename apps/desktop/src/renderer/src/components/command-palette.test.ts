@@ -315,14 +315,14 @@ describe('CommandPalette order and verbs (plan 174 A-9, A-13)', () => {
     await render()
     expect(groupValues('Pages')).toEqual([
       'Open Studio',
-      'Open Buddy',
       'Open Sources',
       'Open Scene',
       'Edit scene',
       'Open Assets',
-      'Open Livestream',
       'Open Captions',
       'Open Output',
+      'Open Destinations',
+      'Open Buddy',
       'Open Library',
       'Open Settings',
       'Open Health',
@@ -342,8 +342,11 @@ describe('CommandPalette order and verbs (plan 174 A-9, A-13)', () => {
     await render()
     await search('layout')
     expect(values()).toContain('Open Scene')
-    await search('destinations')
-    expect(values()).toContain('Open Livestream')
+    // Plan 235 D6: the page's old name still finds it.
+    await search('livestream')
+    expect(values()).toContain('Open Destinations')
+    await search('stream key')
+    expect(values()).toContain('Open Destinations')
     await search('keyboard')
     expect(values()).toContain('Open Settings → Shortcuts')
     await search('support bundle')

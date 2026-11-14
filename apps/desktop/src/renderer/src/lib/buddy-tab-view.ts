@@ -344,9 +344,9 @@ export const BUDDY_VOICE_PREMIUM =
   "Voice commands are part of Videorc Premium. Remove from chat, in a comment's menu, is free for everyone."
 
 export const BUDDY_REMOVE_MESSAGES_NO_ACCOUNT =
-  'Connect YouTube, Twitch, Kick or X under Livestream to remove their chat messages.'
+  'Connect YouTube, Twitch, Kick or X in Destinations to remove their chat messages.'
 
-/** The platforms that can remove a chat message, in the Livestream order. */
+/** The platforms that can remove a chat message, in the Destinations order. */
 const REMOVE_MESSAGES_PLATFORMS = ['youtube', 'twitch', 'kick', 'x'] as const
 
 const REMOVE_MESSAGES_PLATFORM_LABELS: Record<(typeof REMOVE_MESSAGES_PLATFORMS)[number], string> =

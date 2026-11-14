@@ -58,7 +58,7 @@ export function streamingDestinationEnableGate({
 }
 
 /**
- * The destination cap in the Livestream page's words (plan 174 S3.5a, D-14):
+ * The destination cap in the Destinations page's words (plan 174 S3.5a, D-14):
  * the rule for the section description, and the one notice above the list
  * while every allowed destination is on. Never Premium: the cap is a shared
  * pipeline limit, like `destinationsLimitGate`.
