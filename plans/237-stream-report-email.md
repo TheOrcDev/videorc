@@ -6,8 +6,9 @@
 > never read its `.env`. Write and commit every slice of a phase first, then
 > run Rust tests, clippy and `pnpm build` once at the end (owner feedback
 > "Gates at the end"). No test, smoke or dev run may send a real email: tests
-> use a fake Resend, smokes use a fake web server. Do not ship YouTube
-> numbers in the email before the owner answers D3.
+> use a fake Resend, smokes use a fake web server. YouTube's numbers are in
+> the email (D3, decided); the next YouTube compliance report must say so
+> (see "YouTube compliance").
 
 **Drift check** (run before any slice; a non-empty diff means re-read the
 "What exists" facts for the files that moved):
@@ -34,16 +35,17 @@ new switch (D7) against its layout.
 - **Status**: BUILT 2026-11-14 with the recommended answers (D1 free for
   every signed-in account, D2 on by default, D4 numbers only, D5 5 minutes,
   D6 3 days, D7 a section under Watchdog, D8 since the last stream, D9 no
-  YouTube views, D10 `reports@videorc.com`). D3 ships its interim: the
-  service flag `streamReport.youtube` is absent, so YouTube's numbers stay
-  out until the owner decides. Desktop and web PRs; deploy the web first.
+  YouTube views, D10 `reports@videorc.com`). D3 DECIDED by the owner
+  2026-11-14: YouTube's numbers are in the email, with no switch; the
+  privacy policy says so, and the next YouTube compliance report must tell
+  Google (see "YouTube compliance"). Desktop and web PRs; deploy the web
+  first.
   - Differences from the plan, found while building: pending reports live in
     a SQLite table `stream_report_emails` (cascades with the session) instead
     of an `app_settings` queue; the switch is its own "After the stream"
-    section under Watchdog on the Livestream page; while YouTube is left out,
-    tips, supporters and the community counts go too, because they mix
-    platforms; the web migration is `0036` (0034 and 0035 are taken on open
-    branches) and a daily cron deletes send records older than 30 days.
+    section under Watchdog on the Livestream page; the web migration is
+    `0036` (0034 and 0035 are taken on open branches) and a daily cron
+    deletes send records older than 30 days.
   - Owed: the owner's by-eye pass on the email (Gmail web and phone, Apple
     Mail) and on the section in light and dark; a real stream with Send the
     last one after the web deploys.
@@ -59,7 +61,8 @@ new switch (D7) against its layout.
     (D4). The privacy policy changes (B6).
   - YouTube: the v1 compliance reply told Google that session statistics
     stay on the user's computer (`docs/compliance/youtube-tos-report-v1-reply.md:63`).
-    YouTube's counts in the email change that (D3).
+    The email sends YouTube's counts through videorc.com (D3, decided), so
+    the next compliance report must say so (see "YouTube compliance").
 - **Planned at**: desktop `origin/main` `2ba6b232d`, web `origin/main`
   `acc7c54d` (both fetched 2026-11-14).
 - **Route**: Orchestrator (fit 10, `fable-5.1`): desktop, web and a
@@ -189,8 +192,8 @@ The copy never says "reached", "unique viewers" or "audience size".
   (`:2069`, plan 223's phone push) is the closest existing call: best effort,
   8 s timeout, never holds anything up.
 - **Service flags** (`service_flags.rs:31`, `GET /api/desktop/service-flags`)
-  let the web switch desktop behaviour without a release. D3's interim
-  switch rides here.
+  let the web switch desktop behaviour without a release. The email uses
+  none (D3: no switch for YouTube).
 
 ### The web (`origin/main` `acc7c54d`)
 
@@ -255,25 +258,50 @@ no use (owner feedback "Features work with defaults"). Every email has a
 one-click "Stop these emails" link, and the first one says where the switch
 is. Alternative: off, with the switch offered once after the first stream.
 
-### D3. YouTube's numbers through videorc.com ⚑ (blocks shipping YouTube)
+### D3. YouTube's numbers through videorc.com: DECIDED
+
+**Owner, 2026-11-14: "include YouTube stats in the email too. Do not hide
+them behind an off-by-default switch."** YouTube counts like every other
+platform in every block (watching, chat, the subscriber change, and its
+part of tips, supporters and the community counts). There is no service flag
+and no `youtubeOmitted` field.
 
 The email cannot be sent from the user's computer, so the numbers pass
 through videorc.com and Resend. The web never stores them: it renders, sends
-and forgets. Resend keeps the sent email per its own retention.
+and forgets. Resend keeps the sent email per its own retention. The privacy
+policy says so in the same release (B6): the stream report paragraph, and
+the YouTube API Services section's purpose, sharing and retention.
 
-- **Recommended:** include YouTube's counts, update the privacy policy and
-  the compliance doc in the same release, and tell Google in the next
-  compliance report (the v2 cloud draft is open). The v1 reply's "session
-  statistics stay on the user's computer" becomes untrue for accounts with
-  the email on.
-- **Interim, until the owner answers:** a service flag `streamReportYouTube`
-  (default false). While false, the desktop leaves YouTube's numbers out of
-  the payload and the email says "YouTube's numbers are in Videorc", and the
-  headline peak and average are labelled as covering the other platforms.
-- **Also to settle with the legal read (H4 of plan 225 is the precedent):**
-  whether showing YouTube's count inside a combined total is allowed. The
-  Stream Manager already shows the same sum, and the email always shows the
-  per-platform rows beside it.
+- **Still to settle with the legal read (H4 of plan 225 is the
+  precedent):** whether showing YouTube's count inside a combined total is
+  allowed. The Stream Manager already shows the same sum, and the email
+  always shows the per-platform rows beside it.
+
+### YouTube compliance (owed, from D3)
+
+**The next YouTube compliance report must tell Google that stream
+statistics are now sent through videorc.com for the stream report email.**
+The v1 reply (`docs/compliance/youtube-tos-report-v1-reply.md`, III.E.4)
+says "Chat messages and session statistics kept for the user's own session
+history stay on the user's computer", and its table says no Videorc server
+proxies YouTube API calls. The second stays true: every YouTube API call is
+still made from the user's computer. The first is no longer true for an
+account with the stream report email on. The report must say:
+
+- What goes: the stream's YouTube concurrent viewers (peak, average, a
+  48-bar series), chat counts (messages, chatters), the subscriber change,
+  and YouTube's share of tips, supporters and community counts. Never chat
+  text, viewer names or channel identifiers.
+- When and why: once, about a minute after each live stream of 5 minutes or
+  more, to email the signed-in user their own stream's report. On by
+  default, one-click unsubscribe in every email, and a switch in the app.
+- Retention: videorc.com renders the email and keeps none of the numbers
+  (only a report id and a time, deleted after 30 days); Resend delivers the
+  email under its own retention; the copy in the user's inbox is theirs.
+- The privacy policy text that covers it (B6).
+
+Put it in the next report to Google (the v2 cloud draft,
+`docs/compliance/youtube-tos-report-v2-cloud-draft.md`, is the open one).
 
 ### D4. No viewer names in the email ⚑
 
@@ -402,10 +430,10 @@ shape). Peak, average and per-platform numbers use the same rules as
 `stream-manager-stats.ts:176-200`, so the email and the Stream Manager
 agree to the viewer. A platform's average is the mean of its counts over
 the samples that carry it. Series: ≤ 48 buckets, max per bucket. A
-`youtube_allowed: bool` input drops YouTube from every block (D3 interim)
-and from `coverage`. Done when unit tests cover: no samples, one platform,
-four platforms peaking at different times (combined peak < sum of peaks),
-a platform that drops out mid-stream, YouTube excluded, a legacy chat
+YouTube counts like every platform (D3). Done when unit tests cover: no
+samples, one platform, four platforms peaking at different times (combined
+peak < sum of peaks), a platform that drops out mid-stream, YouTube in every
+block, a legacy chat
 session, a 6-hour stream (series still ≤ 48).
 
 **A2. Chatted per platform.** A storage query grouping
@@ -468,8 +496,7 @@ on (one `GET`), and posts it. A queue in `app_settings`
 (`streamReport.queue`, at most 10, each bound to the account id at queue
 time), retries with backoff, sends on next launch within 3 days (D6),
 emptied on sign-out. `VIDEORC_STREAM_REPORT_EMAIL=0` turns it off for a run;
-every smoke runner sets it. Reads `streamReportYouTube` from service flags
-for D3. Done when tests against a mock web (axum, as in
+every smoke runner sets it. Done when tests against a mock web (axum, as in
 `viewer_stats.rs` tests) cover: sent, already-sent, disabled, 401, 404,
 429, a 5xx then success, a short stream (no send), a recording-only session
 (no send), quit before send then relaunch, a 4-day-old queue item (dropped),
@@ -491,9 +518,10 @@ in both themes.
 ## Phase E: docs, compliance, acceptance
 
 - **E1.** `docs/stream-report-email.md` in the desktop repo: what is sent,
-  when, the queue, the env switch, the service flag.
-- **E2.** Update `docs/compliance/youtube-tos-report-v1-reply.md`'s
-  successor (the v2 draft) per the owner's D3 answer.
+  when, the queue, the env switch.
+- **E2.** The next YouTube compliance report tells Google that stream
+  statistics now go through videorc.com for this email (see "YouTube
+  compliance"). Owed by the owner's next report; not done in these PRs.
 - **E3.** Owner try-out: `pnpm dev` on an isolated profile with
   `VIDEORC_API_BASE_URL=https://www.videorc.com` (after the web deploys), a
   short test stream to one platform, the email read on phone and desktop.
@@ -516,7 +544,8 @@ in both themes.
 
 - A design that needs the web to store viewer numbers, titles or names.
 - Any change to OAuth scopes (YouTube Analytics, new Twitch scopes).
-- YouTube numbers in a shipped email before D3 is answered.
+- Shipping the email before the privacy policy covers YouTube's numbers
+  (B6 does, in the web PR).
 - The sender needing a lock or await on the recording, stream or chat
   delivery path.
 
@@ -537,9 +566,8 @@ in both themes.
 1. **D1**: free for every signed-in account (recommended), or Premium only?
 2. **D2**: on by default with a one-click stop (recommended), or off until
    turned on?
-3. **D3**: send YouTube's numbers through videorc.com and update the privacy
-   policy and the Google compliance report (recommended), or keep YouTube
-   out of the email?
+3. ~~**D3**~~: DECIDED 2026-11-14, YouTube's numbers are in the email with
+   no switch; the next compliance report must tell Google.
 4. **D4**: numbers only, no viewer names (recommended)?
 5. **D5**: 5 minutes live as the minimum (recommended), or another floor?
 6. **D7**: the switch beside Phone in Go Live → Watchdog (recommended), or
@@ -552,4 +580,4 @@ people who chatted, and the per-platform breakdown. Route: Orchestrator,
 `fable-5.1`; phases as in Status. Order: A0 → A1–A3 (desktop PR, draft) →
 B1–B6 (web PR; deploy) → C1–C3 (same desktop PR) → E. Start with the drift
 check, then A0. Owner answers for D1–D5 and D7 come before B3 and C3; D3
-gates YouTube only.
+is decided (YouTube in, no switch).

@@ -11,9 +11,10 @@
   - The desktop builds it from what it already saves (viewer samples, chat
     totals, audience); videorc.com renders it through Resend and stores no
     numbers. No viewer names. One switch beside Phone alerts.
-  - Open: D3 (YouTube's numbers through videorc.com; the v1 Google reply
-    says session statistics stay on the computer). Until then the service
-    flag `streamReport.youtube` is absent and YouTube stays out of the email.
+  - D3 decided (owner, 2026-11-14): YouTube's numbers are in the email,
+    with no switch. The next YouTube compliance report must tell Google
+    that stream statistics now go through videorc.com for this email (the
+    v1 reply says they stay on the computer).
 - 2026-11-13: [Plan 233](233-green-screen-without-edge-snow.md), the owner's
   stream on 0.22.1: green "snow" still crawls along the head, ears, hair and
   shoulders, in a new place every frame. EXECUTING 2026-11-13 with the

@@ -14,8 +14,9 @@
 //!   emails (`GET /api/account/stream-report-email`), and only then sends the
 //!   numbers. A report older than 3 days is dropped; a sign-out or another
 //!   account drops it too, so one account's report never reaches another.
-//! - `streamReport.youtube` (service flags, D3) decides whether YouTube's
-//!   numbers go; off by default.
+//! - YouTube's numbers go like every other platform's (owner, plan 237 D3):
+//!   the privacy policy says so, and the next YouTube compliance report must
+//!   tell Google that stream statistics now pass through videorc.com.
 //! - `VIDEORC_STREAM_REPORT_EMAIL=0` turns it all off for a run (smokes and
 //!   the live lab set it). Nothing here touches the recording or stream path:
 //!   a failure only means no email.
@@ -672,13 +673,11 @@ pub(crate) async fn deliver(
         }
         PreferenceAnswer::Retry => return retry_or_fail(),
     }
-    let youtube_allowed = crate::service_flags::stream_report_youtube_allowed(state);
     let built = crate::stream_report::load_report(
         &state.database,
         &report.session_id,
         report.report_id.clone(),
         report.platforms.clone(),
-        youtube_allowed,
     );
     let built = match built {
         Ok(Some(built)) => built,
@@ -935,7 +934,6 @@ pub(crate) async fn send_last(state: &AppState) -> StreamReportSendResult {
         &session_id,
         uuid::Uuid::new_v4().to_string(),
         saved_platforms(&state.database, &session_id),
-        crate::service_flags::stream_report_youtube_allowed(state),
     );
     let built = match built {
         Ok(Some(built)) => built,
@@ -1305,7 +1303,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_due_report_is_sent_with_youtube_left_out_by_default() {
+    async fn a_due_report_is_sent_with_every_platform_youtube_included() {
         let state = test_state();
         let report = queued(&state);
         let (base, web) = fake_web(
@@ -1331,10 +1329,11 @@ mod tests {
         let body = &received[1].1;
         assert_eq!(body["version"], 1);
         assert_eq!(body["reportId"], report.report_id);
-        assert_eq!(body["youtubeOmitted"], true, "D3: the flag is off");
-        assert_eq!(body["viewers"]["peak"], 12);
-        assert_eq!(body["viewers"]["coverage"], json!(["twitch"]));
-        assert!(!body.to_string().contains("\"count\":30"));
+        assert!(body.get("youtubeOmitted").is_none());
+        // D3: YouTube's 30 and Twitch's 12 are one total.
+        assert_eq!(body["viewers"]["peak"], 42);
+        assert_eq!(body["viewers"]["coverage"], json!(["youtube", "twitch"]));
+        assert_eq!(body["platforms"], json!(["youtube", "twitch"]));
         settle(&state.database, &report, delivery, at(3_700));
         assert!(queued_reports(&state.database).unwrap().is_empty());
     }

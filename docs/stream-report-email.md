@@ -15,7 +15,6 @@ The web side (route, email, unsubscribe, privacy copy) is videorc-web's
 | --- | --- |
 | The numbers, from the session's own rows (pure builder + SQLite reads) | `crates/videorc-backend/src/stream_report.rs` |
 | The queue, the sender, the RPCs | `crates/videorc-backend/src/stream_report_email.rs` |
-| The YouTube switch (`streamReport.youtube`) | `crates/videorc-backend/src/service_flags.rs` |
 | The pending reports (`stream_report_emails`) | `crates/videorc-backend/src/storage.rs` |
 | Livestream → After the stream | `apps/desktop/src/renderer/src/components/streaming/stream-report-email-section.tsx` |
 
@@ -49,13 +48,17 @@ address (the web uses the session's own).
 
 ## YouTube (D3)
 
-The v1 compliance reply told Google that session statistics stay on the
-user's computer (`docs/compliance/youtube-tos-report-v1-reply.md`). So until
-the owner turns on the service flag `streamReport.youtube`, the report leaves
-YouTube's counts out of every block, drops the blocks that mix platforms
-(tips, supporters, community counts), and sets `youtubeOmitted`, which the
-email explains. Turn it on only with the privacy policy and the Google
-compliance report updated.
+YouTube's numbers are in the report like every other platform's (owner,
+2026-11-14): concurrent viewers, chat counts, the subscriber change, and the
+YouTube part of tips, supporters and community counts. There is no switch.
+
+This changes what the v1 compliance reply told Google: it said session
+statistics stay on the user's computer
+(`docs/compliance/youtube-tos-report-v1-reply.md`). With the stream report
+email they pass through videorc.com, which renders the email, sends it
+through Resend and keeps none of the numbers. The privacy policy says so, and
+**the next YouTube compliance report must tell Google** (plan 237, "YouTube
+compliance").
 
 ## Switches
 

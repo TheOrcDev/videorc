@@ -12,9 +12,10 @@
 //! - Followers, support and community counts: the audience snapshot, the
 //!   chat totals and Buddy's report (plan 225 D15).
 //!
-//! Never a viewer's name, a message or a link. While the `streamReport.youtube`
-//! service flag is off (plan 237 D3), YouTube's numbers stay out, and so do
-//! the blocks that mix platforms (tips, supporters, community).
+//! Never a viewer's name, a message or a link. YouTube's numbers are in it
+//! like every other platform's (owner, plan 237 D3, 2026-11-14): they pass
+//! through videorc.com for the email, which the privacy policy says and the
+//! next YouTube compliance report must tell Google.
 
 use chrono::{DateTime, TimeZone, Utc};
 use rusqlite::{OptionalExtension, params};
@@ -56,8 +57,6 @@ pub struct StreamReport {
     pub title: Option<String>,
     /// The platforms the stream went live to, in `StreamPlatform` order.
     pub platforms: Vec<StreamPlatform>,
-    /// YouTube's numbers were left out (D3); the email says where they are.
-    pub youtube_omitted: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub viewers: Option<ReportViewers>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -188,8 +187,6 @@ pub struct ReportInput {
     pub audience: Option<AudienceSnapshot>,
     pub community: Option<CohostReportCommunity>,
     pub previous: Option<PreviousStream>,
-    /// `streamReport.youtube` (D3).
-    pub youtube_allowed: bool,
 }
 
 /// The last live session's numbers, for "since your last stream" (D8).
@@ -205,10 +202,6 @@ fn sorted_platforms(mut platforms: Vec<StreamPlatform>) -> Vec<StreamPlatform> {
     platforms
 }
 
-fn kept(platform: StreamPlatform, youtube_allowed: bool) -> bool {
-    youtube_allowed || platform != StreamPlatform::Youtube
-}
-
 fn rounded_mean(sum: u128, count: u128) -> u64 {
     if count == 0 {
         return 0;
@@ -217,14 +210,13 @@ fn rounded_mean(sum: u128, count: u128) -> u64 {
 }
 
 /// Peak, average, per-platform numbers and the chart from the saved samples.
-/// `None` when no kept platform reported a count.
+/// `None` when no platform reported a count.
 pub fn viewer_summary(
     samples: &[ViewerSample],
     started_at: DateTime<Utc>,
     ended_at: DateTime<Utc>,
-    youtube_allowed: bool,
 ) -> Option<ReportViewers> {
-    // (at, total) per sample, with the dropped platforms taken out.
+    // (at, total) per sample.
     let mut points: Vec<(DateTime<Utc>, u64)> = Vec::new();
     // platform → (peak, sum, samples)
     let mut by_platform: Vec<(StreamPlatform, u64, u128, u128)> = Vec::new();
@@ -235,9 +227,6 @@ pub fn viewer_summary(
         let mut total = 0u64;
         let mut any = false;
         for entry in &sample.platforms {
-            if !kept(entry.platform, youtube_allowed) {
-                continue;
-            }
             any = true;
             total = total.saturating_add(entry.count);
             match by_platform
@@ -324,11 +313,7 @@ fn series(
 }
 
 /// Messages and chatters per platform from `session_chat_authors` rows.
-pub fn chat_summary(
-    authors: &[(String, u64)],
-    people: Option<u64>,
-    youtube_allowed: bool,
-) -> Option<ReportChat> {
+pub fn chat_summary(authors: &[(String, u64)], people: Option<u64>) -> Option<ReportChat> {
     let mut by_platform: Vec<ReportPlatformChat> = Vec::new();
     for (key, messages) in authors {
         if *messages == 0 {
@@ -340,9 +325,6 @@ pub fn chat_summary(
         else {
             continue;
         };
-        if !kept(platform, youtube_allowed) {
-            continue;
-        }
         match by_platform
             .iter_mut()
             .find(|entry| entry.platform == platform)
@@ -387,14 +369,8 @@ fn percent_change(current: u64, previous: u64) -> Option<i64> {
 
 /// Builds the report. Pure: the caller loaded every row.
 pub fn build_report(input: ReportInput) -> StreamReport {
-    let youtube_allowed = input.youtube_allowed;
-    let viewers = viewer_summary(
-        &input.samples,
-        input.started_at,
-        input.ended_at,
-        youtube_allowed,
-    );
-    let chat = chat_summary(&input.authors, input.people, youtube_allowed);
+    let viewers = viewer_summary(&input.samples, input.started_at, input.ended_at);
+    let chat = chat_summary(&input.authors, input.people);
 
     // Where it went live: the destinations, else whatever the data shows.
     let mut platforms = input.platforms.clone();
@@ -414,7 +390,6 @@ pub fn build_report(input: ReportInput) -> StreamReport {
         }
     }
     let platforms = sorted_platforms(platforms);
-    let youtube_omitted = !youtube_allowed && platforms.contains(&StreamPlatform::Youtube);
 
     let audience = input
         .audience
@@ -423,7 +398,6 @@ pub fn build_report(input: ReportInput) -> StreamReport {
             let mut entries: Vec<ReportAudience> = snapshot
                 .platforms
                 .iter()
-                .filter(|entry| kept(entry.platform, youtube_allowed))
                 .filter(|entry| {
                     matches!(
                         entry.capability,
@@ -453,25 +427,19 @@ pub fn build_report(input: ReportInput) -> StreamReport {
             raids,
             ..
         }) => {
-            // Tips and supporters mix every platform's money and members;
-            // while YouTube is left out they go too (D3).
-            let mixed_allowed = !youtube_omitted;
             let support = ReportSupport {
                 bits: *bits,
-                supporters: if mixed_allowed { *supporters } else { 0 },
+                supporters: *supporters,
                 raids: *raids,
                 follows: *follows,
-                tips: if mixed_allowed {
-                    tips.iter()
-                        .filter(|tip| tip.amount_micros > 0)
-                        .map(|tip| ReportTip {
-                            currency: tip.currency.clone(),
-                            amount_micros: tip.amount_micros,
-                        })
-                        .collect()
-                } else {
-                    Vec::new()
-                },
+                tips: tips
+                    .iter()
+                    .filter(|tip| tip.amount_micros > 0)
+                    .map(|tip| ReportTip {
+                        currency: tip.currency.clone(),
+                        amount_micros: tip.amount_micros,
+                    })
+                    .collect(),
             };
             let any = support.bits > 0
                 || support.supporters > 0
@@ -487,7 +455,6 @@ pub fn build_report(input: ReportInput) -> StreamReport {
         .community
         .as_ref()
         .filter(|community| !community.is_empty())
-        .filter(|_| !youtube_omitted)
         .map(|community| ReportCommunity {
             regulars_back: community.regulars_back,
             new_regulars: community.new_regulars,
@@ -539,7 +506,6 @@ pub fn build_report(input: ReportInput) -> StreamReport {
         utc_offset_minutes: input.utc_offset_minutes,
         title: input.title.as_deref().and_then(report_title),
         platforms,
-        youtube_omitted,
         viewers,
         chat,
         audience,
@@ -663,7 +629,7 @@ pub fn session_chat_authors(
 
 /// Distinct people who chatted (plan 225's links), `None` when the community
 /// store has nothing for this session or cannot be read.
-pub fn session_people(database: &Database, session_id: &str, youtube_allowed: bool) -> Option<u64> {
+pub fn session_people(database: &Database, session_id: &str) -> Option<u64> {
     let conn = database.lock().ok()?;
     let count: i64 = conn
         .query_row(
@@ -671,9 +637,8 @@ pub fn session_people(database: &Database, session_id: &str, youtube_allowed: bo
              FROM community_attendance AS attendance
              JOIN community_accounts AS accounts
                ON accounts.account_key = attendance.account_key
-             WHERE attendance.session_id = ?1
-               AND (?2 OR accounts.platform != 'youtube')",
-            params![session_id, youtube_allowed],
+             WHERE attendance.session_id = ?1",
+            params![session_id],
             |row| row.get(0),
         )
         .ok()?;
@@ -705,7 +670,6 @@ fn previous_stream(
     database: &Database,
     facts: &SessionFacts,
     started_at_raw: &str,
-    youtube_allowed: bool,
 ) -> Option<PreviousStream> {
     let ids = previous_streamed_sessions(database, started_at_raw, PREVIOUS_SESSIONS_SCAN).ok()?;
     for id in ids {
@@ -717,14 +681,9 @@ fn previous_stream(
         }
         let samples =
             crate::viewer_stats::session_viewer_history(database, &id).unwrap_or_default();
-        let viewers = viewer_summary(
-            &samples,
-            previous.started_at,
-            previous.end(),
-            youtube_allowed,
-        );
+        let viewers = viewer_summary(&samples, previous.started_at, previous.end());
         let authors = session_chat_authors(database, &id).unwrap_or_default();
-        let chatters = chat_summary(&authors, None, youtube_allowed).map(|chat| chat.chatters);
+        let chatters = chat_summary(&authors, None).map(|chat| chat.chatters);
         if viewers.is_some() || chatters.is_some() {
             return Some(PreviousStream { viewers, chatters });
         }
@@ -751,7 +710,6 @@ pub fn load_report(
     session_id: &str,
     report_id: String,
     platforms: Vec<StreamPlatform>,
-    youtube_allowed: bool,
 ) -> anyhow::Result<Option<StreamReport>> {
     let Some(facts) = session_facts(database, session_id)? else {
         return Ok(None);
@@ -766,9 +724,9 @@ pub fn load_report(
     let community = database
         .get_cohost_report(session_id)?
         .and_then(|report| report.community);
-    let people = session_people(database, session_id, youtube_allowed);
+    let people = session_people(database, session_id);
     let previous = raw_started_at(database, session_id)
-        .and_then(|raw| previous_stream(database, &facts, &raw, youtube_allowed));
+        .and_then(|raw| previous_stream(database, &facts, &raw));
     let ended_at = facts.end();
     Ok(Some(build_report(ReportInput {
         report_id,
@@ -784,7 +742,6 @@ pub fn load_report(
         audience,
         community,
         previous,
-        youtube_allowed,
     })))
 }
 
@@ -832,7 +789,6 @@ mod tests {
             audience: None,
             community: None,
             previous: None,
-            youtube_allowed: true,
         }
     }
 
@@ -840,7 +796,7 @@ mod tests {
 
     #[test]
     fn no_samples_means_no_viewers_block() {
-        assert_eq!(viewer_summary(&[], at(0), at(600), true), None);
+        assert_eq!(viewer_summary(&[], at(0), at(600)), None);
         let report = build_report(input());
         assert_eq!(report.viewers, None);
         assert_eq!(report.chat, None);
@@ -850,7 +806,7 @@ mod tests {
         assert!(json.get("viewers").is_none());
         assert!(json.get("audience").is_none());
         assert_eq!(json["platforms"], serde_json::json!(["youtube", "twitch"]));
-        assert_eq!(json["youtubeOmitted"], false);
+        assert!(json.get("youtubeOmitted").is_none());
         assert_eq!(json["utcOffsetMinutes"], 60);
     }
 
@@ -861,7 +817,7 @@ mod tests {
             sample(120, &[(Twitch, 25)]),
             sample(180, &[(Twitch, 20)]),
         ];
-        let viewers = viewer_summary(&samples, at(0), at(600), true).unwrap();
+        let viewers = viewer_summary(&samples, at(0), at(600)).unwrap();
         assert_eq!(viewers.peak, 25);
         assert_eq!(viewers.peak_at_seconds, 120);
         // (10 + 25 + 20) / 3 = 18.33 → 18, as Math.round in the app.
@@ -877,7 +833,7 @@ mod tests {
             sample(120, &[(Youtube, 40), (Twitch, 60), (Kick, 20), (X, 9)]),
             sample(180, &[(Youtube, 80), (Twitch, 30), (Kick, 10), (X, 2)]),
         ];
-        let viewers = viewer_summary(&samples, at(0), at(600), true).unwrap();
+        let viewers = viewer_summary(&samples, at(0), at(600)).unwrap();
         assert_eq!(viewers.peak, 129);
         assert_eq!(viewers.peak_at_seconds, 120);
         let peaks: u64 = viewers.by_platform.iter().map(|entry| entry.peak).sum();
@@ -894,7 +850,7 @@ mod tests {
             sample(120, &[(Twitch, 20)]),
             sample(180, &[(Twitch, 30)]),
         ];
-        let viewers = viewer_summary(&samples, at(0), at(600), true).unwrap();
+        let viewers = viewer_summary(&samples, at(0), at(600)).unwrap();
         let kick = viewers
             .by_platform
             .iter()
@@ -905,9 +861,9 @@ mod tests {
     }
 
     #[test]
-    fn youtube_left_out_recomputes_every_total() {
+    fn youtube_counts_like_every_platform_in_every_block() {
+        // Plan 237 D3 (owner, 2026-11-14): YouTube's numbers are in the email.
         let mut report_input = input();
-        report_input.youtube_allowed = false;
         report_input.samples = vec![
             sample(60, &[(Youtube, 100), (Twitch, 10)]),
             sample(120, &[(Youtube, 200)]),
@@ -946,39 +902,29 @@ mod tests {
             updated_at: at(600).to_rfc3339(),
         });
         let report = build_report(report_input);
-        assert!(report.youtube_omitted);
         let viewers = report.viewers.unwrap();
-        assert_eq!(viewers.coverage, vec![Twitch]);
-        assert_eq!(viewers.peak, 30);
-        assert_eq!(
-            viewers.average, 20,
-            "the YouTube-only sample is not counted"
-        );
+        assert_eq!(viewers.coverage, vec![Youtube, Twitch]);
+        assert_eq!(viewers.peak, 200);
+        assert_eq!(viewers.peak_at_seconds, 120);
+        assert_eq!(viewers.average, 130); // (110 + 200 + 80) / 3
         let chat = report.chat.unwrap();
-        assert_eq!((chat.messages, chat.chatters), (3, 2));
-        assert_eq!(report.audience.len(), 1);
-        assert_eq!(report.audience[0].platform, Twitch);
+        assert_eq!((chat.messages, chat.chatters), (8, 3));
+        assert_eq!(chat.by_platform[0].platform, Youtube);
+        assert_eq!(report.audience.len(), 2);
+        assert_eq!(report.audience[0].platform, Youtube);
+        assert_eq!(report.audience[0].metric, AudienceMetric::Subscribers);
         let support = report.support.unwrap();
-        assert_eq!((support.bits, support.raids, support.follows), (100, 1, 2));
-        assert_eq!(support.supporters, 0, "members mix platforms");
-        assert!(support.tips.is_empty(), "Super Chats mix platforms");
-        assert_eq!(report.community, None, "community counts mix platforms");
-        let json = serde_json::to_string(&viewers.coverage).unwrap();
-        assert!(!json.contains("youtube"));
-    }
-
-    #[test]
-    fn youtube_omitted_only_when_the_stream_went_to_youtube() {
-        let mut report_input = input();
-        report_input.youtube_allowed = false;
-        report_input.platforms = vec![Twitch];
-        report_input.community = Some(CohostReportCommunity {
-            first_timers: 2,
-            ..Default::default()
-        });
-        let report = build_report(report_input);
-        assert!(!report.youtube_omitted);
-        assert_eq!(report.community.unwrap().first_timers, 2);
+        assert_eq!(
+            (
+                support.bits,
+                support.raids,
+                support.follows,
+                support.supporters
+            ),
+            (100, 1, 2, 4)
+        );
+        assert_eq!(support.tips.len(), 1);
+        assert_eq!(report.community.unwrap().regulars_back, 3);
     }
 
     fn audience_entry(
@@ -1011,7 +957,7 @@ mod tests {
         let samples: Vec<ViewerSample> = (0..360)
             .map(|minute| sample(minute * 60, &[(Twitch, minute as u64)]))
             .collect();
-        let viewers = viewer_summary(&samples, at(0), at(6 * 3_600), true).unwrap();
+        let viewers = viewer_summary(&samples, at(0), at(6 * 3_600)).unwrap();
         assert_eq!(viewers.series.len(), SERIES_BUCKETS);
         assert!(viewers.series.iter().all(Option::is_some));
         assert_eq!(viewers.series.last().copied().flatten(), Some(359));
@@ -1024,7 +970,7 @@ mod tests {
         let samples: Vec<ViewerSample> = (0..60)
             .map(|index| sample(index * 10, &[(Twitch, 5)]))
             .collect();
-        let viewers = viewer_summary(&samples, at(0), at(7_200), true).unwrap();
+        let viewers = viewer_summary(&samples, at(0), at(7_200)).unwrap();
         assert_eq!(viewers.series.len(), SERIES_BUCKETS);
         assert_eq!(viewers.series[0], Some(5));
         assert_eq!(viewers.series[47], None, "nothing measured, nothing drawn");
@@ -1039,14 +985,14 @@ mod tests {
             ("x:7".to_string(), 0),
             ("bogus".to_string(), 9),
         ];
-        let chat = chat_summary(&authors, Some(2), true).unwrap();
+        let chat = chat_summary(&authors, Some(2)).unwrap();
         assert_eq!((chat.messages, chat.chatters), (8, 3));
         assert_eq!(chat.people, Some(2));
         assert_eq!(chat.by_platform[0].platform, Twitch);
         assert_eq!(chat.by_platform[1].platform, Kick);
         // As many people as accounts: no merge to mention.
-        assert_eq!(chat_summary(&authors, Some(3), true).unwrap().people, None);
-        assert_eq!(chat_summary(&[], Some(3), true), None);
+        assert_eq!(chat_summary(&authors, Some(3)).unwrap().people, None);
+        assert_eq!(chat_summary(&[], Some(3)), None);
     }
 
     #[test]
@@ -1055,7 +1001,7 @@ mod tests {
         report_input.samples = vec![sample(60, &[(Twitch, 123)])];
         report_input.authors = vec![("twitch:1".to_string(), 1), ("twitch:2".to_string(), 1)];
         report_input.previous = Some(PreviousStream {
-            viewers: viewer_summary(&[sample(60, &[(Twitch, 100)])], at(0), at(600), true),
+            viewers: viewer_summary(&[sample(60, &[(Twitch, 100)])], at(0), at(600)),
             chatters: Some(5),
         });
         let since = build_report(report_input.clone()).since_last.unwrap();
@@ -1107,7 +1053,7 @@ mod tests {
                 None,
             )
             .unwrap();
-        let report = load_report(&database, "live-1", "r".to_string(), vec![Twitch], true)
+        let report = load_report(&database, "live-1", "r".to_string(), vec![Twitch])
             .unwrap()
             .unwrap();
         assert_eq!(report.viewers.unwrap().peak, 42);
@@ -1115,7 +1061,7 @@ mod tests {
         assert_eq!(report.ended_at, "2026-11-14T19:00:00Z");
         assert_eq!(report.title.as_deref(), Some("Friday stream"));
         assert_eq!(
-            load_report(&database, "missing", "r".to_string(), vec![], true).unwrap(),
+            load_report(&database, "missing", "r".to_string(), vec![]).unwrap(),
             None
         );
     }

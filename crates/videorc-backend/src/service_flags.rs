@@ -84,16 +84,6 @@ pub struct BuddyServiceFlags {
     pub remove: bool,
 }
 
-/// Plan 237 D3: the stream report email's switches, the document's optional
-/// top-level `streamReport` object. `youtube` (default false) lets YouTube's
-/// numbers into the email; until the owner turns it on they stay on the
-/// computer, as the v1 compliance reply promised Google.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct StreamReportServiceFlags {
-    pub youtube: bool,
-}
-
 impl Default for BuddyServiceFlags {
     fn default() -> Self {
         Self {
@@ -121,9 +111,6 @@ pub struct YouTubeServiceFlags {
     /// older apps use it.
     #[serde(default, rename = "orcle")]
     pub buddy: BuddyServiceFlags,
-    /// Plan 237 D3, parsed on its own like the Buddy block.
-    #[serde(default)]
-    pub stream_report: StreamReportServiceFlags,
     pub source: ServiceFlagsSource,
     /// What was clamped, ignored or translated, for the log.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -139,7 +126,6 @@ impl Default for YouTubeServiceFlags {
             daily_budget_units: None,
             paused_until: None,
             buddy: BuddyServiceFlags::default(),
-            stream_report: StreamReportServiceFlags::default(),
             source: ServiceFlagsSource::Compiled,
             notes: Vec::new(),
         }
@@ -181,7 +167,6 @@ impl YouTubeServiceFlags {
             && self.daily_budget_units.is_none()
             && self.paused_until.is_none()
             && self.buddy == defaults.buddy
-            && self.stream_report == defaults.stream_report
     }
 
     /// One line for the backend log.
@@ -238,9 +223,6 @@ struct WireDocument {
     /// The web document's key stays `orcle` (plan 170 D22).
     #[serde(default, rename = "orcle")]
     buddy: Option<serde_json::Value>,
-    /// Plan 237: `{ "youtube": bool }`, judged below.
-    #[serde(default, rename = "streamReport")]
-    stream_report: Option<serde_json::Value>,
 }
 
 /// Read one Buddy switch: only a JSON boolean counts; anything else keeps the
@@ -281,42 +263,6 @@ fn parse_buddy_flags(
             BuddyServiceFlags::default()
         }
     }
-}
-
-/// The `streamReport` block (plan 237 D3). Only a JSON `true` lets YouTube's
-/// numbers into the email; anything else keeps them out and leaves a note.
-fn parse_stream_report_flags(
-    value: Option<serde_json::Value>,
-    notes: &mut Vec<String>,
-) -> StreamReportServiceFlags {
-    let object = match value {
-        None | Some(serde_json::Value::Null) => return StreamReportServiceFlags::default(),
-        Some(serde_json::Value::Object(object)) => object,
-        Some(other) => {
-            notes.push(format!(
-                "streamReport {other} is not an object; keeping YouTube out of the email"
-            ));
-            return StreamReportServiceFlags::default();
-        }
-    };
-    let youtube = match object.get("youtube") {
-        None | Some(serde_json::Value::Null) => false,
-        Some(serde_json::Value::Bool(allowed)) => *allowed,
-        Some(other) => {
-            notes.push(format!(
-                "streamReport.youtube {other} is not a boolean; keeping YouTube out of the email"
-            ));
-            false
-        }
-    };
-    StreamReportServiceFlags { youtube }
-}
-
-/// Whether the stream report email may carry YouTube's numbers (plan 237 D3).
-pub fn stream_report_youtube_allowed(state: &AppState) -> bool {
-    crate::youtube_quota::service_flags_in_effect(state)
-        .stream_report
-        .youtube
 }
 
 /// Loose on purpose: every field optional, any JSON type accepted and judged
@@ -372,7 +318,6 @@ pub fn parse_service_flags(body: &str, now: DateTime<Utc>) -> Result<YouTubeServ
         ..YouTubeServiceFlags::default()
     };
     flags.buddy = parse_buddy_flags(document.buddy, &mut flags.notes);
-    flags.stream_report = parse_stream_report_flags(document.stream_report, &mut flags.notes);
     let youtube = match document.youtube {
         None | Some(serde_json::Value::Null) => return Ok(flags),
         Some(value) if value.is_object() => serde_json::from_value::<WireYouTube>(value)
@@ -750,38 +695,6 @@ mod tests {
         assert_eq!(defaults.source, ServiceFlagsSource::Compiled);
         assert!(defaults.summary().contains("compiled defaults"));
         assert!(defaults.summary().contains("fail-open: test"));
-    }
-
-    #[test]
-    fn stream_report_youtube_stays_out_unless_the_document_says_true() {
-        // Plan 237 D3: absent, null, a non-boolean or a broken block keep
-        // YouTube's numbers out of the email.
-        let absent = parse_service_flags(r#"{"version":1}"#, now()).unwrap();
-        assert!(!absent.stream_report.youtube);
-        assert!(absent.is_default_behaviour());
-        let allowed =
-            parse_service_flags(r#"{"version":1,"streamReport":{"youtube":true}}"#, now()).unwrap();
-        assert!(allowed.stream_report.youtube);
-        assert!(!allowed.is_default_behaviour());
-        let text = parse_service_flags(r#"{"version":1,"streamReport":{"youtube":"yes"}}"#, now())
-            .unwrap();
-        assert!(!text.stream_report.youtube);
-        assert!(
-            text.notes[0].contains("streamReport.youtube"),
-            "{:?}",
-            text.notes
-        );
-        let not_object =
-            parse_service_flags(r#"{"version":1,"streamReport":[true]}"#, now()).unwrap();
-        assert!(!not_object.stream_report.youtube);
-        assert_eq!(not_object.notes.len(), 1);
-        // A broken YouTube block never hides the stream report switch.
-        let broken_youtube = parse_service_flags(
-            r#"{"version":1,"youtube":[1],"streamReport":{"youtube":true}}"#,
-            now(),
-        )
-        .unwrap();
-        assert!(broken_youtube.stream_report.youtube);
     }
 
     #[test]
