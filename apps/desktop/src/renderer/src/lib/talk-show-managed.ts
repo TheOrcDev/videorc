@@ -1,4 +1,5 @@
-import type { CloudStatus } from '@/lib/backend'
+import type { CloudRoomStatus, CloudStatus } from '@/lib/backend'
+import type { StageInput } from '@/lib/talk-show-layout'
 
 // What differs on a managed talk show (plan 234 T3): its media runs on
 // LiveKit Cloud, with no node of ours, so there is no runner to take an
@@ -39,4 +40,19 @@ export function programMonitorView(status: CloudStatus | null | undefined): Prog
   const running = Boolean(status?.room?.live || status?.recording?.active)
   if (!running) return { source: 'stage', state: 'empty' }
   return { source: 'stage', state: status?.room?.shown ? 'shown' : 'waiting' }
+}
+
+/** The managed Program is the page's confirmed projection. Never keep an
+ * optimistic stage identity after it disappears from the room. */
+export function managedProgramStageInput(room: CloudRoomStatus | undefined): StageInput {
+  const members = new Set((room?.participants ?? []).map((participant) => participant.identity))
+  const people = (room?.shown?.onStage ?? []).filter((identity) => members.has(identity))
+  const spotlight = room?.stage.spotlight
+  const screen = room?.shown?.screen
+  return {
+    layout: room?.stage.layout ?? 'solo',
+    people,
+    spotlight: spotlight && people.includes(spotlight) ? spotlight : null,
+    screen: screen && members.has(screen) ? screen : null
+  }
 }

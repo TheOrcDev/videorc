@@ -52,7 +52,7 @@ import {
 import { openLivestreamView } from '@/lib/livestream-tabs'
 import type { TalkShowContextValue } from '@/lib/talk-show-context'
 import type { TalkShowPerson } from '@/lib/talk-show-room'
-import { programMonitorView } from '@/lib/talk-show-managed'
+import { managedProgramStageInput, programMonitorView } from '@/lib/talk-show-managed'
 import { PROGRAM_MONITOR_EMPTY } from '@/lib/talk-show-session'
 import {
   planStage,
@@ -488,7 +488,7 @@ function ProgramMonitor({ talkShow }: { talkShow: TalkShowContextValue }): React
 function ProgramStage({ talkShow }: { talkShow: TalkShowContextValue }): ReactElement {
   const { cloudStatus } = useStudioCloud()
   const room = cloudStatus?.room
-  const plan = planStage(STAGE_CANVAS, showStageInput(room))
+  const plan = planStage(STAGE_CANVAS, managedProgramStageInput(room))
   return (
     <>
       {plan.tiles.map((tile) => (

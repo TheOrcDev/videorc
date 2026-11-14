@@ -3,8 +3,13 @@ import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 
 import type { CloudStatus } from '@/lib/backend'
-import { openRoom, talkStatus } from '@/lib/guests-room-fixtures'
-import { MANAGED_NODE_ID, isManagedShow, programMonitorView } from '@/lib/talk-show-managed'
+import { HOST, openRoom, talkStatus } from '@/lib/guests-room-fixtures'
+import {
+  MANAGED_NODE_ID,
+  isManagedShow,
+  managedProgramStageInput,
+  programMonitorView
+} from '@/lib/talk-show-managed'
 
 // Plan 234 D6 (T3): a managed show has no return picture, so its Program
 // monitor draws the Show stage as the program page reports it. These hold
@@ -82,4 +87,27 @@ describe('the Program monitor source', () => {
       state: 'empty'
     })
   })
+})
+
+it('the managed Program follows shorter shown and never draws an identity absent from participants', () => {
+  const room = openRoom()
+  const host = HOST
+  room.stage = {
+    layout: 'side-by-side',
+    onStage: [host, 'g_departed'],
+    spotlight: 'g_departed',
+    screen: 'g_departed'
+  }
+  room.shown = { onStage: [host], screen: 'g_departed' }
+  expect(managedProgramStageInput(room)).toEqual({
+    layout: 'side-by-side',
+    people: [host],
+    spotlight: null,
+    screen: null
+  })
+  room.shown.onStage.push('g_departed')
+  expect(managedProgramStageInput(room).people).toEqual([host])
+  room.shown = { onStage: [] }
+  expect(managedProgramStageInput(room).people).toEqual([])
+  expect(managedProgramStageInput(undefined).people).toEqual([])
 })
