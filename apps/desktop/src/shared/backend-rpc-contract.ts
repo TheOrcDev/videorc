@@ -123,6 +123,10 @@ import type {
   CloudTestParams,
   CloudGuestActParams,
   CloudGuestDecideParams,
+  CloudRecordingDownload,
+  CloudRecordingDownloadParams,
+  CloudRecordingItem,
+  CloudRecordingsList,
   CloudRecordingStatus,
   CloudRoomOverlayEvent,
   CloudRoomClientReportParams,
@@ -588,6 +592,13 @@ export interface BackendRpcMethodMap {
   /** Record in a talk show (D10). */
   'cloud.recording.start': BackendRpcDefinition<undefined, CloudStatus>
   'cloud.recording.stop': BackendRpcDefinition<undefined, CloudStatus>
+  /** Plan 234 T3: the account's cloud recordings, without URLs. */
+  'cloud.recordings.list': BackendRpcDefinition<undefined, CloudRecordingsList>
+  /** Plan 234 T3: a managed recording (segments) as an MP4 on this computer. */
+  'cloud.recordings.download': BackendRpcDefinition<
+    CloudRecordingDownloadParams,
+    CloudRecordingDownload
+  >
   /** The Program monitor's feed (R-G5). */
   'cloud.return.set': BackendRpcDefinition<{ open: boolean }, CloudStatus>
   /** Go Live in a talk show (C-G6): the destinations go to the runner; no local leg. */
@@ -6355,6 +6366,36 @@ const cloudRoomOverlayEventSchema = unionSchema([
     { allowUnknown: false }
   )
 ]) as RuntimeSchema<CloudRoomOverlayEvent>
+// Plan 234 T3: cloud recordings. No URL is part of either shape.
+const cloudRecordingItemSchema = objectSchema(
+  {
+    id: stringSchema({ minLength: 1, maxLength: 128 }),
+    showId: stringSchema({ maxLength: 64 }),
+    orientation: stringSchema({ maxLength: 16 }),
+    startedAt: stringSchema({ maxLength: 64 }),
+    expiresAt: stringSchema({ maxLength: 64 }),
+    seconds: numberSchema({ min: 0 }),
+    bytes: numberSchema({ min: 0 }),
+    format: optionalSchema(stringSchema({ maxLength: 32 }))
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<CloudRecordingItem>
+const cloudRecordingsListSchema = objectSchema(
+  { recordings: arraySchema(cloudRecordingItemSchema, { maxLength: 2000 }) },
+  { allowUnknown: false }
+) as RuntimeSchema<CloudRecordingsList>
+const cloudRecordingDownloadParamsSchema = objectSchema(
+  {
+    id: stringSchema({ minLength: 1, maxLength: 128 }),
+    outputDirectory: optionalSchema(boundedPath),
+    ffmpegPath: optionalSchema(boundedPath)
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<CloudRecordingDownloadParams>
+const cloudRecordingDownloadSchema = objectSchema(
+  { path: boundedPath },
+  { allowUnknown: false }
+) as RuntimeSchema<CloudRecordingDownload>
 
 const runtimeContracts = {
   'session.sources.get': {
@@ -6815,6 +6856,11 @@ const runtimeContracts = {
   'cloud.stage.set': { params: cloudStageSchema, result: cloudStatusSchema },
   'cloud.recording.start': { params: undefinedSchema, result: cloudStatusSchema },
   'cloud.recording.stop': { params: undefinedSchema, result: cloudStatusSchema },
+  'cloud.recordings.list': { params: undefinedSchema, result: cloudRecordingsListSchema },
+  'cloud.recordings.download': {
+    params: cloudRecordingDownloadParamsSchema,
+    result: cloudRecordingDownloadSchema
+  },
   'cloud.return.set': { params: cloudOpenFlagSchema, result: cloudStatusSchema },
   'cloud.show.goLive': { params: cloudTalkGoLiveParamsSchema, result: cloudStatusSchema },
   'cloud.show.legs.end': { params: undefinedSchema, result: cloudStatusSchema },

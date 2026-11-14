@@ -2006,6 +2006,52 @@ impl VideorcApiClient {
         path: &str,
         timeout: std::time::Duration,
     ) -> std::result::Result<T, (crate::cloud_show::CloudApiError, serde_json::Value)> {
+        use crate::cloud_show::CloudApiError;
+        let response = self.cloud_send(request, path, timeout).await?;
+        let status = response.status();
+        response.json().await.map_err(|error| {
+            (
+                CloudApiError::Other {
+                    status: status.as_u16(),
+                    code: "malformed-response".to_string(),
+                    message: format!("Could not read {path}: {error}"),
+                },
+                serde_json::Value::Null,
+            )
+        })
+    }
+
+    /// A cloud route whose answer is text, not JSON (plan 234: a recording's
+    /// playlist). Failures are the same envelope. The text is the caller's
+    /// alone: it is never logged here.
+    async fn cloud_text(
+        &self,
+        request: reqwest::RequestBuilder,
+        path: &str,
+        timeout: std::time::Duration,
+    ) -> std::result::Result<String, crate::cloud_show::CloudApiError> {
+        use crate::cloud_show::CloudApiError;
+        let response = self
+            .cloud_send(request, path, timeout)
+            .await
+            .map_err(|(error, _)| error)?;
+        let status = response.status();
+        response.text().await.map_err(|error| CloudApiError::Other {
+            status: status.as_u16(),
+            code: "malformed-response".to_string(),
+            message: format!("Could not read {path}: {error}"),
+        })
+    }
+
+    /// One cloud request: the response of a 2xx, or the failure classified
+    /// from the `{ error: { code, message } }` envelope, with its body.
+    async fn cloud_send(
+        &self,
+        request: reqwest::RequestBuilder,
+        path: &str,
+        timeout: std::time::Duration,
+    ) -> std::result::Result<reqwest::Response, (crate::cloud_show::CloudApiError, serde_json::Value)>
+    {
         use crate::cloud_show::{CloudApiError, ShowRecord, classify_cloud_failure};
         let response = request.timeout(timeout).send().await.map_err(|error| {
             (
@@ -2015,16 +2061,7 @@ impl VideorcApiClient {
         })?;
         let status = response.status();
         if status.is_success() {
-            return response.json().await.map_err(|error| {
-                (
-                    CloudApiError::Other {
-                        status: status.as_u16(),
-                        code: "malformed-response".to_string(),
-                        message: format!("Could not read {path}: {error}"),
-                    },
-                    serde_json::Value::Null,
-                )
-            });
+            return Ok(response);
         }
         let text = response.text().await.unwrap_or_default();
         let (code, message) = parse_error_envelope(&text);
@@ -3853,6 +3890,41 @@ impl crate::cloud_show::CloudWebApi for VideorcApiClient {
                 .post(self.endpoint(&path))
                 .bearer_auth(bearer)
                 .json(&serde_json::json!({ "on": on })),
+            &path,
+            CLOUD_CONTROL_TIMEOUT,
+        )
+        .await
+    }
+
+    // --- Plan 234: cloud recordings (wire section 13.2) ---
+
+    async fn list_recordings(
+        &self,
+        bearer: &str,
+    ) -> std::result::Result<
+        Vec<crate::cloud_control_web::CloudRecordingItem>,
+        crate::cloud_show::CloudApiError,
+    > {
+        let path = crate::cloud_control_web::RECORDINGS_PATH;
+        self.cloud_json::<crate::cloud_control_web::CloudRecordingsAnswer>(
+            self.http.get(self.endpoint(path)).bearer_auth(bearer),
+            path,
+            CLOUD_REQUEST_TIMEOUT,
+        )
+        .await
+        .map(|answer| answer.recordings)
+    }
+
+    async fn recording_playlist(
+        &self,
+        bearer: &str,
+        recording_id: &str,
+    ) -> std::result::Result<String, crate::cloud_show::CloudApiError> {
+        let path = crate::cloud_control_web::recording_playlist_path(recording_id);
+        // The answer's segment lines are presigned URLs: it goes to the
+        // caller and into nothing this client logs.
+        self.cloud_text(
+            self.http.get(self.endpoint(&path)).bearer_auth(bearer),
             &path,
             CLOUD_CONTROL_TIMEOUT,
         )

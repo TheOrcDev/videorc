@@ -55,7 +55,7 @@ use serde_json::{Value, json};
 use tokio::sync::{mpsc, oneshot, watch};
 
 use crate::cloud_control_web::{
-    ControlRevAnswer, ControlStateAnswer, DestinationsAnswer, DestinationsBody,
+    CloudRecordingItem, ControlRevAnswer, ControlStateAnswer, DestinationsAnswer, DestinationsBody,
     DestinationsFailure, WebControl, WebIntents,
 };
 use crate::cloud_talk::{
@@ -999,6 +999,19 @@ pub trait CloudWebApi: Send + Sync + 'static {
         show_id: &str,
         on: bool,
     ) -> impl Future<Output = std::result::Result<ControlRevAnswer, CloudApiError>> + Send;
+    // --- Plan 234: cloud recordings (wire section 13.2) ---
+    /// `GET /api/cloud/recordings`: the account's recordings, without URLs.
+    fn list_recordings(
+        &self,
+        bearer: &str,
+    ) -> impl Future<Output = std::result::Result<Vec<CloudRecordingItem>, CloudApiError>> + Send;
+    /// `GET /api/cloud/recordings/:id/playlist`: a managed take's playlist.
+    /// Its segment lines are presigned URLs: a secret, never logged.
+    fn recording_playlist(
+        &self,
+        bearer: &str,
+        recording_id: &str,
+    ) -> impl Future<Output = std::result::Result<String, CloudApiError>> + Send;
 }
 
 // --- Wire: the control socket -------------------------------------------------
@@ -5042,6 +5055,12 @@ mod tests {
         /// Answers for the next stage, legs/end and recording calls, in the
         /// order they are made; then `{ ok, rev }`.
         route_errors: VecDeque<CloudApiError>,
+        /// `GET /api/cloud/recordings`, as the web answers it.
+        recording_list: Value,
+        /// The playlist `GET …/recordings/:id/playlist` answers, by id.
+        playlists: HashMap<String, String>,
+        /// Every playlist asked for, by recording id.
+        playlist_calls: Vec<String>,
     }
 
     impl FakeManaged {
@@ -5369,6 +5388,38 @@ mod tests {
             let mut managed = self.managed.lock().unwrap();
             managed.recordings.push(on);
             managed.route_answer()
+        }
+
+        async fn list_recordings(
+            &self,
+            _bearer: &str,
+        ) -> std::result::Result<Vec<CloudRecordingItem>, CloudApiError> {
+            let list = self.managed.lock().unwrap().recording_list.clone();
+            let answer: crate::cloud_control_web::CloudRecordingsAnswer =
+                serde_json::from_value(list).map_err(|error| CloudApiError::Other {
+                    status: 200,
+                    code: "malformed-response".to_string(),
+                    message: error.to_string(),
+                })?;
+            Ok(answer.recordings)
+        }
+
+        async fn recording_playlist(
+            &self,
+            _bearer: &str,
+            recording_id: &str,
+        ) -> std::result::Result<String, CloudApiError> {
+            let mut managed = self.managed.lock().unwrap();
+            managed.playlist_calls.push(recording_id.to_string());
+            managed
+                .playlists
+                .get(recording_id)
+                .cloned()
+                .ok_or_else(|| CloudApiError::Other {
+                    status: 404,
+                    code: "cloud-recording-not-found".to_string(),
+                    message: String::new(),
+                })
         }
     }
 
@@ -12744,5 +12795,229 @@ mod tests {
             error.to_string(),
             "The program return is not available on this show."
         );
+    }
+
+    // Wire section 13.2 (D10): a managed recording is segments and a
+    // playlist of presigned URLs. The desktop fetches the playlist, writes
+    // it to a private temporary file, remuxes with `-c copy`, and removes
+    // the file however the remux ends. No URL reaches an error or a log
+    // line, and nothing of the list's answer carries one to the renderer.
+    #[tokio::test]
+    async fn a_managed_recording_is_fetched_remuxed_and_its_playlist_removed() {
+        use crate::cloud_control_web::{
+            REMUX_PROTOCOL_WHITELIST, RemuxOutcome, download_segments_recording,
+        };
+        const SIGNATURE: &str = "X-Amz-Signature=presignedSECRETsignature";
+        let playlist = format!(
+            "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:2\n#EXTINF:2.0,\nhttps://storage.test/talk/u/sh_abc/h/tk_1/seg_00000.ts?{SIGNATURE}\n#EXT-X-ENDLIST\n"
+        );
+        let harness = harness(true);
+        let web = harness.context.web.clone();
+        {
+            let mut managed = web.managed.lock().unwrap();
+            managed.recording_list = json!({ "recordings": [
+                { "id": "rec_managed", "showId": "sh_abc", "orientation": "h",
+                  "startedAt": "2026-11-13T20:04:09.000Z", "expiresAt": "2026-12-13T20:04:09.000Z",
+                  "seconds": 1800, "bytes": 123456789, "format": "segments",
+                  "downloadUrl": "", "playlistUrl": format!("https://www.videorc.test/x?{SIGNATURE}") },
+                { "id": "rec_node", "showId": "sh_old", "orientation": "v",
+                  "startedAt": "2026-11-08T12:04:00.000Z", "expiresAt": "2026-12-08T12:04:00.000Z",
+                  "seconds": 600, "bytes": 1000, "format": "mp4",
+                  "downloadUrl": format!("https://www.videorc.test/d?{SIGNATURE}") }
+            ] });
+            managed
+                .playlists
+                .insert("rec_managed".to_string(), playlist.clone());
+            managed
+                .playlists
+                .insert("rec_html".to_string(), "<html>sign in</html>".to_string());
+        }
+        // The list: the facts, and no URL of any kind.
+        let recordings = harness
+            .context
+            .cloud_recordings(Some("bearer".to_string()))
+            .await
+            .unwrap();
+        assert_eq!(recordings.len(), 2);
+        assert_eq!(recordings[0].format.as_deref(), Some("segments"));
+        let listed = serde_json::to_string(&recordings).unwrap();
+        assert!(
+            !listed.contains("Url") && !listed.contains(SIGNATURE),
+            "{listed}"
+        );
+        assert_eq!(recordings[0].file_name(), "talk-2026-11-13-2004-h.mp4");
+        assert_eq!(recordings[1].file_name(), "talk-2026-11-08-1204-v.mp4");
+
+        let folder =
+            std::env::temp_dir().join(format!("videorc-recording-test-{}", uuid::Uuid::new_v4()));
+        let seen_playlist = Arc::new(StdMutex::new(None::<std::path::PathBuf>));
+
+        // 1. A remux that works.
+        let saved = {
+            let seen = seen_playlist.clone();
+            let expected = playlist.clone();
+            download_segments_recording(
+                web.as_ref(),
+                "bearer",
+                &recordings[0],
+                &folder,
+                |args| async move {
+                    let args: Vec<String> = args
+                        .iter()
+                        .map(|arg| arg.to_string_lossy().into_owned())
+                        .collect();
+                    // Streams copied, HTTPS segments allowed from a local
+                    // playlist, nothing overwritten, and no URL in sight.
+                    assert_eq!(
+                        &args[..8],
+                        [
+                            "-hide_banner",
+                            "-loglevel",
+                            "error",
+                            "-nostdin",
+                            "-n",
+                            "-protocol_whitelist",
+                            REMUX_PROTOCOL_WHITELIST,
+                            "-i"
+                        ]
+                    );
+                    assert_eq!(&args[9..13], ["-c", "copy", "-movflags", "+faststart"]);
+                    assert_eq!(args.len(), 14);
+                    assert!(args.iter().all(|arg| !arg.contains("://")), "{args:?}");
+                    let playlist_path = std::path::PathBuf::from(&args[8]);
+                    assert_eq!(std::fs::read_to_string(&playlist_path).unwrap(), expected);
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt as _;
+                        let mode = std::fs::metadata(&playlist_path)
+                            .unwrap()
+                            .permissions()
+                            .mode();
+                        assert_eq!(mode & 0o777, 0o600, "only this user reads the playlist");
+                    }
+                    *seen.lock().unwrap() = Some(playlist_path);
+                    std::fs::write(&args[13], b"mp4").unwrap();
+                    Ok(RemuxOutcome {
+                        success: true,
+                        stderr: String::new(),
+                    })
+                },
+            )
+            .await
+            .unwrap()
+        };
+        assert_eq!(saved, folder.join("talk-2026-11-13-2004-h.mp4"));
+        assert_eq!(std::fs::read(&saved).unwrap(), b"mp4");
+        let temporary = seen_playlist.lock().unwrap().take().unwrap();
+        assert!(!temporary.exists(), "the playlist is removed on success");
+        assert_eq!(
+            web.managed.lock().unwrap().playlist_calls,
+            vec!["rec_managed".to_string()]
+        );
+
+        // 2. A remux that fails, and names a presigned URL as it does: the
+        //    playlist and the half-written MP4 are gone, and the error has
+        //    no URL in it. The name already taken is not overwritten.
+        let seen = seen_playlist.clone();
+        let error = download_segments_recording(
+            web.as_ref(),
+            "bearer",
+            &recordings[0],
+            &folder,
+            |args| async move {
+                *seen.lock().unwrap() = Some(std::path::PathBuf::from(&args[8]));
+                assert_eq!(
+                    args[13].to_string_lossy(),
+                    folder_name(&args[13], "talk-2026-11-13-2004-h (2).mp4")
+                );
+                std::fs::write(&args[13], b"half").unwrap();
+                Ok(RemuxOutcome {
+                    success: false,
+                    stderr: format!(
+                        "[https @ 0x1] HTTP error 403 Forbidden\n[hls @ 0x2] Failed to open segment 0 of playlist 0: https://storage.test/talk/u/sh_abc/h/tk_1/seg_00000.ts?{SIGNATURE}\nError opening input files: Server returned 403 Forbidden (access denied)\n"
+                    ),
+                })
+            },
+        )
+        .await
+        .unwrap_err();
+        let text = format!("{error:#}");
+        assert!(text.contains("FFmpeg could not make the MP4"), "{text}");
+        assert!(text.contains("403 Forbidden"), "{text}");
+        assert!(
+            !text.contains(SIGNATURE) && !text.contains("storage.test"),
+            "{text}"
+        );
+        let temporary = seen_playlist.lock().unwrap().take().unwrap();
+        assert!(!temporary.exists(), "the playlist is removed on failure");
+        assert!(!folder.join("talk-2026-11-13-2004-h (2).mp4").exists());
+        assert_eq!(std::fs::read(&saved).unwrap(), b"mp4");
+
+        // 3. An answer that is not a playlist: nothing is written or run.
+        let html = crate::cloud_control_web::CloudRecordingItem {
+            id: "rec_html".to_string(),
+            ..recordings[0].clone()
+        };
+        let error = download_segments_recording(
+            web.as_ref(),
+            "bearer",
+            &html,
+            &folder,
+            |_args| async move {
+                Err::<RemuxOutcome, std::io::Error>(std::io::Error::other("nothing to remux"))
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("playlist"), "{error}");
+
+        // 4. Through the RPC's own path: a node recording is not remuxed
+        //    here, an id that left the account is said, a signed-out
+        //    desktop is refused, and an FFmpeg that is not there leaves no
+        //    playlist behind.
+        let download = |id: &'static str, bearer: Option<&'static str>| {
+            harness.context.download_cloud_recording(
+                bearer.map(str::to_string),
+                id,
+                "videorc-ffmpeg-that-is-not-here".to_string(),
+                folder.clone(),
+            )
+        };
+        let error = download("rec_node", Some("bearer")).await.unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "This recording downloads from your account on videorc.com."
+        );
+        assert!(download("rec_gone", Some("bearer")).await.is_err());
+        assert!(download("rec_managed", None).await.is_err());
+        let error = download("rec_managed", Some("bearer")).await.unwrap_err();
+        assert!(
+            error.to_string().contains("FFmpeg could not be started"),
+            "{error}"
+        );
+        let leftovers: Vec<_> = std::fs::read_dir(std::env::temp_dir())
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("videorc-recording-")
+                    && entry.file_name().to_string_lossy().ends_with(".m3u8")
+            })
+            .filter(|entry| {
+                std::fs::read_to_string(entry.path()).is_ok_and(|text| text.contains(SIGNATURE))
+            })
+            .collect();
+        assert!(leftovers.is_empty(), "{leftovers:?}");
+        let _ = std::fs::remove_dir_all(&folder);
+    }
+
+    /// `name` in the folder of `path`, as a string.
+    fn folder_name(path: &std::ffi::OsStr, name: &str) -> String {
+        std::path::Path::new(path)
+            .with_file_name(name)
+            .to_string_lossy()
+            .into_owned()
     }
 }

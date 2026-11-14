@@ -5573,6 +5573,35 @@ export type CloudRoomOverlayEvent =
       orientation: CloudOverlayOrientation
     }
 
+/**
+ * A cloud recording as `cloud.recordings.list` answers it (plan 234 T3): the
+ * facts and no URL. `format: 'segments'` is a managed recording, which
+ * `cloud.recordings.download` makes into an MP4 on this computer; `'mp4'`
+ * (or no format) is a node recording, downloaded from videorc.com.
+ */
+export interface CloudRecordingItem {
+  id: string
+  showId: string
+  orientation: string
+  startedAt: string
+  expiresAt: string
+  seconds: number
+  bytes: number
+  format?: string
+}
+export interface CloudRecordingsList {
+  recordings: CloudRecordingItem[]
+}
+export interface CloudRecordingDownloadParams {
+  id: string
+  /** Output's "Where recordings go"; the default folder when absent. */
+  outputDirectory?: string
+  ffmpegPath?: string
+}
+export interface CloudRecordingDownload {
+  path: string
+}
+
 /** A guest the host let in, as videorc.com lists them. */
 export interface CloudRoomGuest {
   guestId: string
