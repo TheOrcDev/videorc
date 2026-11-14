@@ -136,6 +136,7 @@ export async function managedHarness(kind, pass = 1) {
     api: await freePort(),
     proxy: await freePort(),
     livekit: await freePort(),
+    livekitHost: await freePort(),
     rtc: await freePort()
   }
   let closing
@@ -144,6 +145,7 @@ export async function managedHarness(kind, pass = 1) {
     backend,
     smoke,
     tap,
+    hostTap,
     timer,
     decode,
     segmentBytes = Buffer.alloc(0),
@@ -162,6 +164,9 @@ export async function managedHarness(kind, pass = 1) {
     kind === 'talk'
       ? {
           url: `ws://127.0.0.1:${ports.livekit}`,
+          // The desktop's own room address: through a tap the smoke can cut,
+          // as a host's network drops. Guests and the listener go direct.
+          hostUrl: `ws://127.0.0.1:${ports.livekitHost}`,
           httpUrl: `http://127.0.0.1:${ports.livekit}`,
           apiKey: randomBytes(12).toString('hex'),
           apiSecret: randomBytes(32).toString('hex')
@@ -332,6 +337,13 @@ export async function managedHarness(kind, pass = 1) {
       await tap.close()
       tap = null
     },
+    async cutHostRoom() {
+      await hostTap?.close()
+      hostTap = null
+    },
+    async forwardHostRoom() {
+      hostTap = await startRtmpTap({ listenPort: ports.livekitHost, targetPort: ports.livekit })
+    },
     async forward() {
       tap = await startRtmpTap({ listenPort: ports.proxy, targetPort: ports.rtmps })
     },
@@ -497,6 +509,7 @@ export async function managedHarness(kind, pass = 1) {
         const results = await Promise.allSettled([
           app?.stop(),
           tap?.close(),
+          hostTap?.close(),
           web?.close(),
           ...children.map((child) => stopProcess(child)),
           ...[...sockets].map((socket) => {
@@ -554,6 +567,7 @@ export async function managedHarness(kind, pass = 1) {
           return false
         }
       }, 'local LiveKit ready')
+      await h.forwardHostRoom()
       const y4m = join(mediaDir, 'host.y4m'),
         wav = join(mediaDir, 'host.wav'),
         ts = join(mediaDir, 'segment.ts')

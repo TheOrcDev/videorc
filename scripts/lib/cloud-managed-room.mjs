@@ -5,6 +5,7 @@ import { createServer } from 'node:http'
 import { join } from 'node:path'
 import { chromium } from 'playwright-core'
 import { WebSocketServer } from 'ws'
+import { setTimeout as sleep } from 'node:timers/promises'
 import { repoRoot } from './app-launcher.mjs'
 import { waitFor } from './cloud-managed-smoke.mjs'
 import { managedWire as w } from './fake-cloud-web-managed.mjs'
@@ -262,12 +263,13 @@ export async function hostReconnect(h) {
   await waitFor(() => h.calls('roomToken', at).length, 'fresh host token')
 }
 
-/** The host's room connection drops and comes back, in the same app: the
- * room removes it, and the renderer reconnects with a fresh token and reports
- * connected (the backend's overlay replay trigger, wire 6.3). */
+/** The host's room connection drops and comes back, in the same app, as a
+ * host's network does: the tap in front of the desktop's room address closes
+ * for 3 s, and the client's own reconnect brings the room back (the renderer
+ * reports connected: the backend's overlay replay trigger, wire 6.3). */
 export async function hostRoomDrop(h) {
-  const at = Date.now()
-  await h.web.roomRpc('RemoveParticipant', { room: h.showId, identity: `host:${h.showId}` })
-  await waitFor(() => h.calls('roomToken', at).length, 'fresh host token after the drop', 45000)
-  await h.status((s) => s.room?.client === 'connected', 'host back in the room', 45000)
+  await h.cutHostRoom()
+  await sleep(3000)
+  await h.forwardHostRoom()
+  await h.status((s) => s.room?.client === 'connected', 'host back in the room', 60000)
 }

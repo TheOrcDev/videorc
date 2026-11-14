@@ -442,7 +442,11 @@ export async function startFakeCloudWebManaged({
           allowance,
           ...(body.kind === 'talk'
             ? {
-                room: { url: livekit?.url ?? '', hostToken: livekit ? tokenFor(s) : '', name: id },
+                room: {
+                  url: livekit?.hostUrl ?? livekit?.url ?? '',
+                  hostToken: livekit ? tokenFor(s) : '',
+                  name: id
+                },
                 invite: s.invite,
                 limits: TALK_LIMITS_MAX
               }
@@ -532,7 +536,8 @@ export async function startFakeCloudWebManaged({
         return send(200, { rev: s.rev, state: copy(s.state) })
       }
       if (s.show.endedAt) return fail(wire.errors.common[3].code)
-      if (route === 'roomToken') return send(200, { url: livekit?.url, hostToken: tokenFor(s) })
+      if (route === 'roomToken')
+        return send(200, { url: livekit?.hostUrl ?? livekit?.url, hostToken: tokenFor(s) })
       if (route === 'room')
         return send(200, {
           room: { title: 'Managed smoke', platforms: [], openDoor: false, limits: TALK_LIMITS_MAX },
