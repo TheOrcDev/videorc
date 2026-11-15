@@ -29,9 +29,18 @@ describe('Studio Sources rows (plan 080 S4)', () => {
     status: 'available'
   }
 
-  function renderInputs(sources: SourceSelection, devices: Device[] = [display, camera]): string {
+  function renderInputs(
+    sources: SourceSelection,
+    devices: Device[] = [display, camera],
+    layout: Partial<typeof defaultCaptureConfig.layout> = {}
+  ): string {
     mocked.core = {
-      captureConfig: { ...defaultCaptureConfig, sources },
+      captureConfig: {
+        ...defaultCaptureConfig,
+        sources,
+        layout: { ...defaultCaptureConfig.layout, ...layout }
+      },
+      applyLayoutPatch: vi.fn(),
       setCaptureConfig: vi.fn(),
       switchSourceDeviceLive: vi.fn(),
       sourceSwitchReason: () => null,
@@ -78,7 +87,9 @@ describe('Studio Sources rows (plan 080 S4)', () => {
     // Captions is a door to its page (plan 174 S3.2, B-13), not a switch row.
     expect(rowLabels(markup)).toEqual(['Screen', 'Camera'])
     expect(markup).not.toContain('System audio')
-    expect(markup).not.toContain('role="switch"')
+    // The one switch is the camera's Green screen, not an audio row.
+    expect([...markup.matchAll(/role="switch"/g)]).toHaveLength(1)
+    expect(markup).toContain('id="studio-green-screen"')
     expect(markup).toMatch(/data-slot="navigable-row"[^>]*>[\s\S]*?>Captions</)
     expect(markup).not.toContain('aria-label="Enable live captions"')
     expect(markup).not.toContain('Mute microphone')
@@ -164,5 +175,32 @@ describe('Studio Sources rows (plan 080 S4)', () => {
     expect(renderInputs({ screenId: 'screen:gone', screenName: 'Display 3' })).toContain(
       'title="Display 3"'
     )
+  })
+
+  it('turns the green screen on and off from the Camera row, with Adjust to its settings', () => {
+    const markup = renderInputs({ screenId: 'screen:2', cameraId: 'camera:1' })
+    const cameraRow = markup.split('data-slot="inspector-row"')[2] ?? ''
+    const line = cameraRow.split('data-slot="green-screen"')[1] ?? ''
+    expect(line).toContain('>Green screen</label>')
+    expect(line).toMatch(/role="switch"[^>]*data-videorc-green-screen=""/)
+    expect(line).toContain('<input id="studio-green-screen"')
+    expect(line).toContain('aria-checked="false"')
+    expect(line).toMatch(/data-videorc-green-screen-settings=""[^>]*>Adjust</)
+  })
+
+  it('says Blue screen while a blue key is on', () => {
+    const markup = renderInputs({ screenId: 'screen:2', cameraId: 'camera:1' }, undefined, {
+      cameraChromaKeyEnabled: true,
+      cameraChromaKeyColor: '#0000ff'
+    })
+    const line = markup.split('data-slot="green-screen"')[1] ?? ''
+    expect(line).toContain('>Blue screen</label>')
+    expect(line).toContain('aria-checked="true"')
+  })
+
+  it('has no green screen while the camera is Off: there is nothing to key', () => {
+    const markup = renderInputs({ screenId: 'screen:2', cameraOff: true })
+    expect(markup).not.toContain('data-slot="green-screen"')
+    expect(markup).not.toContain('role="switch"')
   })
 })

@@ -20,6 +20,7 @@ import {
   LcdPanelKey,
   LcdPanelNavRow,
   LcdPanelPressRow,
+  LcdPanelRow,
   LcdPanelSwitch
 } from '@/components/lcd-panel'
 import { PanelSection } from '@/components/panel-section'
@@ -27,6 +28,7 @@ import { AgentsSessionRow } from '@/components/studio/agents-session-row'
 import { MicLcdMeter } from '@/components/studio/mic-level-meter'
 import type { MicrophoneRowProps, SystemAudioRowProps } from '@/components/studio/audio-section'
 import {
+  type GreenScreenControl,
   type ScreenPrivacyControl,
   useStudioChatDoor,
   useStudioSources
@@ -489,7 +491,8 @@ export function RetroQuickSettings(): ReactElement {
     captureDevices,
     cameras,
     selectedCaptureId,
-    screenPrivacy
+    screenPrivacy,
+    greenScreen
   } = useStudioSources()
   return (
     <>
@@ -542,6 +545,7 @@ export function RetroQuickSettings(): ReactElement {
             }
           />
           <RetroSwitchStatusLine kind="camera" />
+          <RetroGreenScreenRow control={greenScreen} />
         </LcdPanel>
       </PanelSection>
       <PanelSection>
@@ -610,6 +614,21 @@ function RetroScreenPrivacyRow({ control }: { control: ScreenPrivacyControl }): 
     >
       {row}
     </ShortcutTooltip>
+  )
+}
+
+/** Green screen under the camera, as in the default look: On or Off, and Adjust to its settings. */
+function RetroGreenScreenRow({ control }: { control: GreenScreenControl }): ReactElement | null {
+  if (!control.available) return null
+  return (
+    <LcdPanelRow label={control.label}>
+      <LcdPanelAction onClick={control.openSettings}>Adjust</LcdPanelAction>
+      <LcdPanelSwitch
+        aria-label={control.label}
+        checked={control.on}
+        onCheckedChange={control.setOn}
+      />
+    </LcdPanelRow>
   )
 }
 

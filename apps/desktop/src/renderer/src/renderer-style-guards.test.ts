@@ -39,6 +39,7 @@ const COLOUR_LITERAL_ALLOWLIST = new Set([
   'src/lib/buddy-overlay.ts',
   // Chroma-key colours are the key itself.
   'src/lib/capture.ts',
+  'src/lib/green-screen.ts',
   'src/components/tabs/layout-tab.tsx',
   // A QR code must stay black on white for scanners.
   'src/components/phone-remote-section.tsx',
