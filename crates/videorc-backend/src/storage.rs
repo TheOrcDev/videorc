@@ -198,7 +198,9 @@ fn setting_exists(conn: &Connection, key: &str) -> Result<bool> {
 /// store, so `last_capture_session` held those keys in plain text; and a raw
 /// key the renderer still held reached `sessions.output_json` as
 /// `output.rtmp.streamKey`. This removes them from the database file, once,
-/// in three steps, at open, before any other connection exists:
+/// in three steps, at open, before any other connection exists. Only a
+/// database that existed before this open runs it; one the open creates is
+/// marked done instead ([`mark_new_database_purged`]):
 ///
 /// 1. The rows are scrubbed with `secure_delete` on, which zeroes what that
 ///    UPDATE frees. Their own marker is written in the same transaction, so
@@ -250,6 +252,31 @@ fn purge_stored_stream_credentials(conn: &mut Connection) -> Result<StoredCreden
         started.elapsed().as_millis()
     );
     Ok(StoredCredentialsPurge::Done)
+}
+
+/// A database this open created has nothing to scrub or purge, so it gets
+/// both markers, in one transaction, and never runs the scrub, the `VACUUM`
+/// or the checkpoint: every unit test and every new install opens one, and
+/// the purge's disk work there was pure load. The schema itself is not
+/// created in one transaction (`PRAGMA foreign_keys` and the community
+/// schema run outside one), so this runs right after it; a first open cut
+/// off in between leaves no markers, and the next open runs the purge once
+/// on a database that is still all but empty.
+fn mark_new_database_purged(conn: &mut Connection) -> Result<()> {
+    let transaction = conn.transaction()?;
+    let now = Utc::now().to_rfc3339();
+    for key in [
+        STORED_STREAM_CREDENTIALS_SCRUBBED_SETTING_KEY,
+        STORED_STREAM_CREDENTIALS_PURGED_SETTING_KEY,
+    ] {
+        transaction.execute(
+            "INSERT INTO app_settings (key, value_json, updated_at) VALUES (?1, '1', ?2)
+             ON CONFLICT(key) DO NOTHING",
+            params![key, now],
+        )?;
+    }
+    transaction.commit()?;
+    Ok(())
 }
 
 /// The scrub itself, in one transaction with its marker. A remembered
@@ -8430,6 +8457,12 @@ impl Database {
 
     fn migrate(&self) -> Result<()> {
         let mut conn = self.lock()?;
+        // Asked before anything is created: a database with no schema yet is
+        // one this open creates, which no older build ever wrote to.
+        let created_by_this_open =
+            !conn.query_row("SELECT EXISTS (SELECT 1 FROM sqlite_master)", [], |row| {
+                row.get::<_, bool>(0)
+            })?;
         conn.execute_batch(
             "
             PRAGMA foreign_keys = ON;
@@ -9083,6 +9116,10 @@ impl Database {
             CREATE INDEX IF NOT EXISTS idx_agent_activity_agent_at
                 ON agent_activity(agent_id, at DESC, id DESC);",
         )?;
+        if created_by_this_open {
+            mark_new_database_purged(&mut conn)?;
+            return Ok(());
+        }
         // A privacy cleanup never keeps the app from opening its data: what
         // did not finish leaves its marker unwritten, and the next launch
         // tries again.
@@ -13221,6 +13258,119 @@ mod tests {
             purge_stored_stream_credentials(&mut conn).unwrap(),
             StoredCredentialsPurge::AlreadyDone,
             "the next open does nothing"
+        );
+    }
+
+    static PURGE_TRACED_STATEMENTS: AtomicUsize = AtomicUsize::new(0);
+
+    fn count_purge_statement(event: TraceEvent<'_>) {
+        if let TraceEvent::Stmt(statement, _) = event {
+            let sql = statement.sql().to_ascii_lowercase();
+            if sql.contains("vacuum")
+                || sql.contains("wal_checkpoint")
+                || sql.contains("secure_delete")
+            {
+                PURGE_TRACED_STATEMENTS.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+
+    /// A database this open creates never held what older builds stored: it
+    /// gets both markers and no scrub, VACUUM or checkpoint, so the hundreds
+    /// of tests (and every new install) that open one pay nothing for the
+    /// purge. A database that existed before still runs it.
+    #[test]
+    fn a_new_database_is_marked_purged_without_a_vacuum() {
+        let database = Database {
+            conn: Arc::new(Mutex::new(Connection::open_in_memory().unwrap())),
+            path: PathBuf::from(":memory:"),
+        };
+        database
+            .conn
+            .lock()
+            .unwrap()
+            .trace_v2(
+                TraceEventCodes::SQLITE_TRACE_STMT,
+                Some(count_purge_statement),
+            )
+            .unwrap();
+        PURGE_TRACED_STATEMENTS.store(0, Ordering::Relaxed);
+
+        database.migrate().unwrap();
+
+        assert_eq!(
+            PURGE_TRACED_STATEMENTS.load(Ordering::Relaxed),
+            0,
+            "no scrub, VACUUM or checkpoint on a new database"
+        );
+        for key in [
+            STORED_STREAM_CREDENTIALS_SCRUBBED_SETTING_KEY,
+            STORED_STREAM_CREDENTIALS_PURGED_SETTING_KEY,
+        ] {
+            assert!(setting_text(&database, key).is_some(), "{key}");
+        }
+
+        // The same database opened again as one an older build left: the
+        // purge runs, so the trace above would have seen it.
+        as_before_the_credentials_purge(&database);
+        database.migrate().unwrap();
+        assert!(PURGE_TRACED_STATEMENTS.load(Ordering::Relaxed) > 0);
+        assert!(setting_text(&database, STORED_STREAM_CREDENTIALS_PURGED_SETTING_KEY).is_some());
+    }
+
+    /// What one fresh `Database` open costs, and what the purge added to each
+    /// one before new databases skipped it (the same steps on a fresh
+    /// database). Prints the figures.
+    #[test]
+    #[ignore = "timing probe; run with --ignored --nocapture"]
+    fn fresh_database_open_cost_probe() {
+        fn average_ms(total: Duration, runs: u32) -> f64 {
+            total.as_secs_f64() * 1000.0 / f64::from(runs)
+        }
+        let runs = 200;
+        let mut open = Duration::ZERO;
+        let mut purge = Duration::ZERO;
+        for _ in 0..runs {
+            let started = std::time::Instant::now();
+            let database = Database::open_in_memory_for_tests();
+            open += started.elapsed();
+            as_before_the_credentials_purge(&database);
+            let mut conn = database.lock().unwrap();
+            let started = std::time::Instant::now();
+            assert_eq!(
+                purge_stored_stream_credentials(&mut conn).unwrap(),
+                StoredCredentialsPurge::Done
+            );
+            purge += started.elapsed();
+        }
+        eprintln!(
+            "in-memory: open {:.2} ms, the purge on that fresh database {:.2} ms ({runs} runs)",
+            average_ms(open, runs),
+            average_ms(purge, runs)
+        );
+
+        let directory = TestTempDir::new("fresh-open-cost");
+        let runs = 50;
+        let mut open = Duration::ZERO;
+        let mut purge = Duration::ZERO;
+        for run in 0..runs {
+            let path = directory.join(format!("videorc-{run}.sqlite3"));
+            let started = std::time::Instant::now();
+            let database = Database::open_file_for_tests(&path);
+            open += started.elapsed();
+            as_before_the_credentials_purge(&database);
+            let mut conn = database.lock().unwrap();
+            let started = std::time::Instant::now();
+            assert_eq!(
+                purge_stored_stream_credentials(&mut conn).unwrap(),
+                StoredCredentialsPurge::Done
+            );
+            purge += started.elapsed();
+        }
+        eprintln!(
+            "file (WAL, full sync): open {:.2} ms, the purge on that fresh database {:.2} ms ({runs} runs)",
+            average_ms(open, runs),
+            average_ms(purge, runs)
         );
     }
 
