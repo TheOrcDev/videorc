@@ -418,9 +418,10 @@ export function windowsNativeScreenRecordingArtifactGates(screen) {
 
 /**
  * #1042: one line naming where the D3D11 media thread spent its slowest
- * moment. Capture polling, compose, the camera upload, the encoder and the
- * preview share that one thread, so a stall in any of them delays all of
- * them. Returns null for a backend that does not report stage timings.
+ * moment. Capture polling, compose, the camera upload and the preview share
+ * that one thread, so a stall in any of them delays all of them. Each Media
+ * Foundation encoder runs on a worker thread of its own; its calls are named
+ * apart. Returns null for a backend that does not report stage timings.
  */
 export function formatWindowsD3d11MediaStageTimings(media) {
   const timings = media?.mediaStageTimings
@@ -430,16 +431,19 @@ export function formatWindowsD3d11MediaStageTimings(media) {
   const compose = timings.slowestCompose ?? {}
   const parts = [
     `slowest loop ${ms(loop.totalMs)}ms (capture ${ms(loop.capturePollMs)}, compose ${ms(loop.composeMs)}, ` +
-      `encoder submit ${ms(loop.encoderSubmitMs)}, encoder poll ${ms(loop.encoderPollMs)}, ` +
+      `encoder hand-off ${ms(loop.encoderSubmitMs)}, ` +
       `present ${ms(loop.previewPresentMs)}, other ${ms(loop.otherCommandMs)}; ${loop.commands ?? 0} commands)`,
     `slowest compose ${ms(compose.totalMs)}ms (device lock wait ${ms(compose.deviceLockWaitMs)}, ` +
       `camera upload ${ms(compose.cameraUploadMs)}, encoded pass ${ms(compose.encodedPassMs)}, ` +
       `NV12 ${ms(compose.nv12PassMs)}, fence signal ${ms(compose.fenceSignalMs)})`,
-    `worst device lock wait ${ms(timings.deviceLockWait?.maxMs)}ms, ProcessInput ${ms(timings.encoderProcessInput?.maxMs)}ms, ` +
-      `ProcessOutput ${ms(timings.encoderProcessOutput?.maxMs)}ms, ` +
-      `encoder input hold p95 ${ms(timings.encoderInputHold?.p95Ms)}/max ${ms(timings.encoderInputHold?.maxMs)}ms`,
+    `worst device lock wait ${ms(timings.deviceLockWait?.maxMs)}ms`,
+    `encoder worker: ProcessInput p95 ${ms(timings.encoderProcessInput?.p95Ms)}/max ${ms(timings.encoderProcessInput?.maxMs)}ms, ` +
+      `ProcessOutput max ${ms(timings.encoderProcessOutput?.maxMs)}ms, ` +
+      `queue wait p95 ${ms(timings.encoderQueueWait?.p95Ms)}/max ${ms(timings.encoderQueueWait?.maxMs)}ms, ` +
+      `input hold p95 ${ms(timings.encoderInputHold?.p95Ms)}/max ${ms(timings.encoderInputHold?.maxMs)}ms`,
     `encoder refusals: ${timings.encoderCreditRefusals ?? 0} without input credit, ` +
-      `${timings.encoderCapacityRefusals ?? 0} at the in-flight cap (max in flight ${timings.encoderMaxInFlight ?? 0})`
+      `${timings.encoderCapacityRefusals ?? 0} at the in-flight cap (max in flight ${timings.encoderMaxInFlight ?? 0}), ` +
+      `${timings.encoderDroppedInputs ?? 0} dropped on the worker`
   ]
   if (timings.gpu) {
     parts.push(

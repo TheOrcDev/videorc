@@ -2520,6 +2520,9 @@ export interface WindowsD3d11MediaStageTimingDiagnostics {
   encodedPass: WindowsD3d11StageTimingDiagnostics
   nv12Pass: WindowsD3d11StageTimingDiagnostics
   fenceSignal: WindowsD3d11StageTimingDiagnostics
+  /** Each encoder runs on a worker thread of its own; the encoder stages below are
+   * timed there. An accepted input waiting to be submitted (inputs ahead, credit wait). */
+  encoderQueueWait: WindowsD3d11StageTimingDiagnostics
   encoderSubmit: WindowsD3d11StageTimingDiagnostics
   encoderProcessInput: WindowsD3d11StageTimingDiagnostics
   encoderPoll: WindowsD3d11StageTimingDiagnostics
@@ -2528,9 +2531,11 @@ export interface WindowsD3d11MediaStageTimingDiagnostics {
   encoderInputHold: WindowsD3d11StageTimingDiagnostics
   /** Refusals because the transform had issued no input credit. */
   encoderCreditRefusals: number
-  /** Refusals because Videorc's own in-flight cap was full. */
+  /** Refusals because Videorc's own in-flight cap (queued plus held inputs) was full. */
   encoderCapacityRefusals: number
   encoderMaxInFlight: number
+  /** Accepted inputs an encoder worker released unsubmitted. */
+  encoderDroppedInputs: number
   previewPresent: WindowsD3d11StageTimingDiagnostics
   /** Iterations that opened or closed a capture, encoder or preview, kept out of the loop stats. */
   setupLoops: number
@@ -2539,8 +2544,8 @@ export interface WindowsD3d11MediaStageTimingDiagnostics {
     totalMs: number
     capturePollMs: number
     composeMs: number
+    /** Handing encoder inputs to their workers. */
     encoderSubmitMs: number
-    encoderPollMs: number
     previewPresentMs: number
     otherCommandMs: number
     commands: number
