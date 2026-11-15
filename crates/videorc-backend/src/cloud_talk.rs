@@ -1380,6 +1380,8 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
             let mut runtime = lock(&self.slot);
             runtime.keep_remembering(show_id);
             runtime.failed_room_open_end = Some(show_id.to_string());
+            runtime.failed_room_cleanup_generation =
+                runtime.failed_room_cleanup_generation.wrapping_add(1);
         }
         self.hooks.emit_from(&self.slot);
         self.return_room_camera_in_background();

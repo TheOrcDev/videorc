@@ -1461,6 +1461,8 @@ pub struct CloudShowRuntime {
     /// A failed open must finish End before this process can recover its room.
     pub(crate) failed_room_open_end: Option<String>,
     pub(crate) failed_room_end_in_flight: bool,
+    /// Changes whenever failed-open cleanup begins; orders current-show reads.
+    pub(crate) failed_room_cleanup_generation: u64,
     /// C6b: the test that runs or the last one that ran, and the running
     /// test task's cancel switch (`Some` only while it runs).
     test: Option<CloudTestStatus>,
@@ -3343,9 +3345,11 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
             bail!("Sign in to Videorc to resume the stream.");
         }
         if unconfirmed && let Some(bearer) = bearer.as_deref() {
+            let cleanup_generation = lock(&self.slot).failed_room_cleanup_generation;
             match self.web.current_show(bearer).await {
                 Ok(current) => {
-                    self.hold_current_show(bearer, current).await?;
+                    self.hold_current_show(bearer, current, cleanup_generation)
+                        .await?;
                     resumable = lock(&self.slot).resumable_show_id();
                 }
                 Err(error) => {
@@ -4059,20 +4063,22 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
     /// has answered once for this sign-in (plan 222 review L4,
     /// `launch_check_due`); two at once are one.
     pub async fn detect_current_show(&self, bearer: &str) -> Result<CloudStatus> {
-        {
+        let cleanup_generation = {
             let mut runtime = lock(&self.slot);
             if runtime.launch_check_in_flight {
                 return Ok(runtime.status());
             }
             runtime.launch_check_in_flight = true;
-        }
+            runtime.failed_room_cleanup_generation
+        };
         let _in_flight = LaunchCheckInFlight(self.slot.clone());
         let current = self
             .web
             .current_show(bearer)
             .await
             .map_err(anyhow::Error::new)?;
-        self.hold_current_show(bearer, current).await
+        self.hold_current_show(bearer, current, cleanup_generation)
+            .await
     }
 
     /// What `GET current` answered, held: an open show becomes resumable and
@@ -4081,30 +4087,35 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
         &self,
         bearer: &str,
         current: CurrentShowResponse,
+        cleanup_generation: u64,
     ) -> Result<CloudStatus> {
-        let pending_end = lock(&self.slot).failed_room_open_end.clone();
-        if let Some(show_id) = pending_end {
-            if current
-                .show
-                .as_ref()
-                .is_some_and(|show| show.id == show_id && show.status != "ended")
-            {
-                // Camera Return may already have finished. Adopting this
-                // room would race the independent End still owned by us.
-                // Retry only after the preceding attempt has settled; an
-                // HTTP timeout alone does not prove server teardown stopped.
-                self.retry_failed_room_end(bearer, &show_id);
-                bail!("The previous room is still closing. Try again.");
-            }
+        let pending_end = {
             let mut runtime = lock(&self.slot);
-            if runtime.failed_room_open_end.as_deref() == Some(&show_id) {
-                // Current confirms that this account no longer holds it.
+            if runtime.failed_room_cleanup_generation != cleanup_generation {
+                // A no-show (or different-show) response requested before
+                // cleanup began cannot release its barrier or finish detection.
+                bail!("The cloud room changed while checking it. Try again.");
+            }
+            let pending_end = runtime.failed_room_open_end.clone();
+            if let Some(show_id) = pending_end.as_deref()
+                && current
+                    .show
+                    .as_ref()
+                    .is_some_and(|show| show.id == show_id && show.status != "ended")
+            {
+                pending_end
+            } else {
+                // This request began after cleanup: absence is fresh evidence.
                 runtime.failed_room_open_end = None;
                 runtime.failed_room_end_in_flight = false;
+                runtime.launch_checked = true;
+                None
             }
+        };
+        if let Some(show_id) = pending_end {
+            self.retry_failed_room_end(bearer, &show_id);
+            bail!("The previous room is still closing. Try again.");
         }
-        // The web answered: the launch check is done for this sign-in (L4).
-        lock(&self.slot).launch_checked = true;
         let Some(show) = current.show.filter(|show| show.status != "ended") else {
             // Plan 234 (wire section 3, the 401 row): a show on web control
             // whose poll a refused sign-in stopped, and that ended before
@@ -4121,6 +4132,9 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
                 self.forget_talk_show().await;
                 {
                     let mut runtime = lock(&self.slot);
+                    if runtime.failed_room_cleanup_generation != cleanup_generation {
+                        bail!("The cloud room changed while checking it. Try again.");
+                    }
                     if held_without_poll(&runtime) {
                         mark_show_gone(
                             &mut runtime,
@@ -4134,6 +4148,9 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
             }
             let forgot = {
                 let mut runtime = lock(&self.slot);
+                if runtime.failed_room_cleanup_generation != cleanup_generation {
+                    bail!("The cloud room changed while checking it. Try again.");
+                }
                 let forget = runtime.show.is_none() && runtime.remembered_show.is_some();
                 if forget {
                     runtime.forget_remembered_show();
@@ -4151,7 +4168,9 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
         // `Err` carries the generation of a fed show whose poll starts again.
         let generation = 'held: {
             let mut runtime = lock(&self.slot);
-            if runtime.failed_room_open_end.as_deref() == Some(&show.id) {
+            if runtime.failed_room_cleanup_generation != cleanup_generation
+                || runtime.failed_room_open_end.as_deref() == Some(&show.id)
+            {
                 // Recheck under the adoption lock in case cleanup began on
                 // another executor thread after the check above.
                 runtime.launch_checked = false;
@@ -5104,6 +5123,11 @@ mod tests {
         }
     }
 
+    type CurrentReplyGate = (
+        tokio::sync::oneshot::Sender<()>,
+        tokio::sync::oneshot::Receiver<()>,
+    );
+
     /// The web as the tests script it.
     #[derive(Default)]
     struct FakeWeb {
@@ -5118,6 +5142,7 @@ mod tests {
         /// The web cannot be reached for `end` (plan 222 review M1).
         end_fails: std::sync::atomic::AtomicBool,
         current_calls: AtomicUsize,
+        current_reply_gate: StdMutex<Option<CurrentReplyGate>>,
         /// Answers for the lost reports, in order (plan 222 D7); empty means
         /// the web could not be reached.
         lost: StdMutex<VecDeque<std::result::Result<LostShowResponse, CloudApiError>>>,
@@ -5242,11 +5267,18 @@ mod tests {
             _bearer: &str,
         ) -> std::result::Result<CurrentShowResponse, CloudApiError> {
             self.current_calls.fetch_add(1, Ordering::SeqCst);
-            self.current
+            let answer = self
+                .current
                 .lock()
                 .unwrap()
                 .pop_front()
-                .unwrap_or(Err(CloudApiError::NodeUnreachable))
+                .unwrap_or(Err(CloudApiError::NodeUnreachable));
+            let gate = self.current_reply_gate.lock().unwrap().take();
+            if let Some((started, release)) = gate {
+                let _ = started.send(());
+                let _ = release.await;
+            }
+            answer
         }
 
         async fn end_show(
@@ -12594,6 +12626,80 @@ mod tests {
             }
             assert!(lock(&harness.context.slot).failed_room_open_end.is_none());
             assert!(lock(&harness.context.slot).remembered_show().is_none());
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stale_current_absence_cannot_release_new_failed_open_cleanup() {
+        for preparing_session in [false, true] {
+            let harness = harness(true);
+            lock(&harness.context.slot).entitlement = talk_entitlement();
+            lock(&harness.context.slot).keep_remembering("sh_previous");
+            let web = &harness.context.web;
+            web.current
+                .lock()
+                .unwrap()
+                .push_back(Ok(CurrentShowResponse::default()));
+            let (started, ready) = tokio::sync::oneshot::channel();
+            let (release, wait) = tokio::sync::oneshot::channel();
+            *web.current_reply_gate.lock().unwrap() = Some((started, wait));
+            let context = harness.context.clone();
+            let stale = tokio::spawn(async move {
+                if preparing_session {
+                    context
+                        .prepare_session(
+                            "session-stale",
+                            Some("bearer".into()),
+                            Vec::new(),
+                            destinations(),
+                            None,
+                        )
+                        .await
+                        .map(|_| ())
+                } else {
+                    context.detect_current_show("bearer").await.map(|_| ())
+                }
+            });
+            ready.await.unwrap();
+            *web.create.lock().unwrap() = Some(Ok(created_managed_talk()));
+            web.first_state_delay_ms.store(40_000, Ordering::SeqCst);
+            web.end_delay_ms.store(20_000, Ordering::SeqCst);
+            assert!(
+                harness
+                    .context
+                    .open_room(Some("bearer".into()), room_open_params(), false)
+                    .await
+                    .is_err()
+            );
+            assert!(lock(&harness.context.slot).failed_room_end_in_flight);
+            release.send(()).unwrap();
+            assert!(
+                stale
+                    .await
+                    .unwrap()
+                    .unwrap_err()
+                    .to_string()
+                    .contains("changed while checking")
+            );
+            {
+                let runtime = lock(&harness.context.slot);
+                assert_eq!(runtime.failed_room_open_end.as_deref(), Some("sh_abc"));
+                assert!(runtime.failed_room_end_in_flight);
+                assert!(!runtime.launch_checked);
+                assert_eq!(runtime.remembered_show(), Some("sh_abc"));
+                assert!(runtime.show.is_none());
+            }
+            // A request sent after the cleanup started can confirm absence.
+            web.current
+                .lock()
+                .unwrap()
+                .push_back(Ok(CurrentShowResponse::default()));
+            harness.context.detect_current_show("bearer").await.unwrap();
+            let runtime = lock(&harness.context.slot);
+            assert!(runtime.failed_room_open_end.is_none());
+            assert!(!runtime.failed_room_end_in_flight);
+            assert!(runtime.launch_checked);
+            assert!(runtime.remembered_show().is_none());
         }
     }
 
