@@ -1292,8 +1292,18 @@
   :focus-visible {
     @apply outline-2 outline-offset-2 outline-ring/70;
   }
-  /* Native scrollers use the macOS overlay scrollbars and honour the system
-     "Show scroll bars" setting (plan 050, D6): no custom recipe here. */
+  /* Native scrollers keep the macOS overlay scrollbars and honour the system
+     "Show scroll bars" setting (plan 050, D6). With a mouse connected, macOS
+     draws classic bars: a gray track down the pane's edge with a light thumb
+     on it. The standard scrollbar-color and scrollbar-width drop that track
+     and give the thumb ScrollArea's tokens, so only a thin thumb shows. They
+     leave overlay bars as overlays, which fade after a scroll and take no
+     gutter. Never a ::-webkit-scrollbar recipe: that one turns every overlay
+     bar into a bar drawn all the time. */
+  * {
+    scrollbar-color: var(--scrollbar-thumb) transparent;
+    scrollbar-width: thin;
+  }
 
   /* Honour reduced-motion: collapse transitions/animations, keep behaviour. */
   @media (prefers-reduced-motion: reduce) {

@@ -38,7 +38,13 @@ afterEach(() => {
   vi.useRealTimers()
 })
 
-function renderTransport(recording: RecordingStatus, { active = true } = {}): void {
+function renderTransport(
+  recording: RecordingStatus,
+  {
+    active = true,
+    liveStreamBlockedReason = null
+  }: { active?: boolean; liveStreamBlockedReason?: string | null } = {}
+): void {
   const stop = sessionStopControl(recording, false)
   act(() =>
     root.render(
@@ -60,7 +66,7 @@ function renderTransport(recording: RecordingStatus, { active = true } = {}): vo
           stopNote: stop.note,
           startRequestPending: false,
           recordBlockedReason: null,
-          liveStreamBlockedReason: null,
+          liveStreamBlockedReason,
           onRecord: noop,
           onLiveStream: noop,
           onStop: noop
@@ -225,6 +231,43 @@ describe('SessionTransport materials (plan 208 D8)', () => {
     renderTransport({ state: 'streaming', sessionId: 's', streamUrl: STREAM_URL })
     expect(button('End livestream')?.dataset.variant).toBe('record')
     expect(button('End livestream')?.hasAttribute('data-lit')).toBe(true)
+  })
+})
+
+// Record and Go Live both keep "End livestream" in their width, and side by
+// side in flex the pair outgrew the 20rem inspector: Go Live ran past the
+// right gutter (0.28.0). Each button gets one equal column it can't outgrow,
+// with or without a DisabledReason wrapper around it.
+describe('SessionTransport row', () => {
+  const row = (): Element | null | undefined =>
+    container.querySelector('[data-slot=session-transport]')?.firstElementChild
+  const columns = (): string[] =>
+    [...(row()?.children ?? [])]
+      .filter((child) => !child.hasAttribute('hidden'))
+      .map((child) => child.className)
+
+  it('splits Record and Go Live into equal columns that never outgrow the row', () => {
+    renderTransport({ state: 'idle' }, { active: false })
+    expect(row()?.className).toContain('grid auto-cols-fr grid-flow-col')
+    expect(columns()).toHaveLength(2)
+    for (const column of columns()) expect(column.split(' ')).toContain('min-w-0')
+  })
+
+  it('keeps the split when Go Live is blocked and wrapped for its reason', () => {
+    renderTransport(
+      { state: 'idle' },
+      { active: false, liveStreamBlockedReason: 'Add a destination.' }
+    )
+    const wrapper = row()?.querySelector('[data-slot=disabled-reason]')
+    expect(wrapper?.className.split(' ')).toContain('min-w-0')
+    expect(wrapper?.querySelector('button')?.className.split(' ')).toEqual(
+      expect.arrayContaining(['min-w-0', 'flex-1'])
+    )
+  })
+
+  it('gives Record the whole row while a session runs', () => {
+    renderTransport({ state: 'recording', sessionId: 's', startedAt: STARTED_AT })
+    expect(columns()).toHaveLength(1)
   })
 })
 
