@@ -3,9 +3,9 @@ import type { ComponentProps } from 'react'
 import { cn } from '@/lib/utils'
 
 /**
- * Inside a filled button (the chrome primary, destructive, the record LED) the
- * gray glass keycap read at 2.38:1: there the chip takes the button's own text
- * colour on a faint fill of it, with no glass. Matched by ancestry, so no call
+ * Inside a filled button (the chrome primary, destructive, the record LED,
+ * Go Live's copper) the gray glass keycap read at 2.38:1: there the chip
+ * takes the button's own text colour on a faint fill of it, with no glass. Matched by ancestry, so no call
  * site has to remember it.
  */
 const KBD_ON_FILLED_BUTTON = [
@@ -23,7 +23,12 @@ const KBD_ON_FILLED_BUTTON = [
   '[[data-slot=button][data-variant=record]_&]:bg-current/10',
   '[[data-slot=button][data-variant=record]_&]:bg-none',
   '[[data-slot=button][data-variant=record]_&]:text-current',
-  '[[data-slot=button][data-variant=record]_&]:shadow-none'
+  '[[data-slot=button][data-variant=record]_&]:shadow-none',
+  '[[data-slot=button][data-variant=go-live]_&]:border-current/30',
+  '[[data-slot=button][data-variant=go-live]_&]:bg-current/10',
+  '[[data-slot=button][data-variant=go-live]_&]:bg-none',
+  '[[data-slot=button][data-variant=go-live]_&]:text-current',
+  '[[data-slot=button][data-variant=go-live]_&]:shadow-none'
 ].join(' ')
 
 /**

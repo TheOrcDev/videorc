@@ -225,6 +225,20 @@
   --chrome-led-drop: oklch(0 0 0 / 30%);
   --chrome-led-lift: oklch(1 0 0 / 10%);
   --chrome-led-glow: color-mix(in oklch, var(--live) 45%, transparent);
+  /* Go Live (plan 240): polished copper, the same metal in both themes (copper holds
+     its own on porcelain, where silver turns to black chrome). Dark ink, as
+     on dark's silver, keeps it apart from Record's white on red; every stop
+     keeps the ink at 4.5:1 or more (chrome-copper.test.ts). */
+  --chrome-copper-stops:
+    oklch(0.86 0.09 62) 0%, oklch(0.76 0.12 55) 40%, oklch(0.63 0.12 48) 53%,
+    oklch(0.7 0.12 52) 80%, oklch(0.8 0.1 58) 100%;
+  --chrome-copper-flat: oklch(0.72 0.12 52);
+  --chrome-copper-ink: oklch(0.2 0.04 45);
+  --chrome-copper-hi: oklch(1 0 0 / 55%);
+  --chrome-copper-lo: oklch(0.35 0.08 45 / 45%);
+  --chrome-copper-drop: oklch(0.3 0.06 45 / 35%);
+  --chrome-copper-lift: oklch(1 0 0 / 14%);
+  /* The edge a fill or Record gains under Increase Contrast (D12). */
   /* The edge a fill or Record gains under Increase Contrast (D12). */
   --chrome-edge: transparent;
   /* The chromatic ring (Button's `chromatic`): a porcelain face in a ring of
@@ -404,6 +418,17 @@
   --chrome-led-drop: oklch(0 0 0 / 50%);
   --chrome-led-lift: oklch(1 0 0 / 10%);
   --chrome-led-glow: color-mix(in oklch, var(--live) 60%, transparent);
+  /* Go Live: the same polished copper as light, with a deeper drop on the
+     black solid. */
+  --chrome-copper-stops:
+    oklch(0.86 0.09 62) 0%, oklch(0.76 0.12 55) 40%, oklch(0.63 0.12 48) 53%,
+    oklch(0.7 0.12 52) 80%, oklch(0.8 0.1 58) 100%;
+  --chrome-copper-flat: oklch(0.72 0.12 52);
+  --chrome-copper-ink: oklch(0.2 0.04 45);
+  --chrome-copper-hi: oklch(1 0 0 / 55%);
+  --chrome-copper-lo: oklch(0.35 0.08 45 / 45%);
+  --chrome-copper-drop: oklch(0 0 0 / 60%);
+  --chrome-copper-lift: oklch(1 0 0 / 14%);
   --chrome-edge: transparent;
   /* The chromatic ring: a black face, the solid's, in a ring of liquid
      chrome, the same three bands of metal at full brightness. */
@@ -465,6 +490,9 @@
   --chrome-led-shadow:
     inset 0 1px 0 var(--chrome-led-hi), inset 0 -1px 0 var(--chrome-led-lo),
     0 1px 3px var(--chrome-led-drop), 0 0 0 1px var(--chrome-edge);
+  --chrome-copper-shadow:
+    inset 0 1px 0 var(--chrome-copper-hi), inset 0 -1px 0 var(--chrome-copper-lo),
+    0 1px 3px var(--chrome-copper-drop), 0 0 0 1px var(--chrome-edge);
   --chrome-pressed-shadow: inset 0 1px 2px var(--chrome-press), 0 0 0 1px var(--chrome-edge);
 
   /* The chromatic ring's light and shade: glints that run against the bands,
@@ -768,6 +796,8 @@
  *                 knob on a chrome track.
  *   chrome-led    Record and the stop button: metallic red, lit with
  *                 data-lit while a recording or livestream runs (D8).
+ *   chrome-copper Go Live and its End livestream: polished copper, still
+ *                 (plan 240).
  * Each writes its light and shade into --tw-shadow and repeats Tailwind's
  * shadow stack, so a focus or hover ring (ring-*) still composes with it.
  * Fast and flat: no transition, no motion, no backdrop-filter. The one
@@ -882,6 +912,35 @@
     &::after {
       content: none;
     }
+  }
+}
+
+/* Go Live (Button's `go-live`, GoLiveButton): polished copper cut to its
+   edge, with no border or ring, in the fill's five-band shape. Hover lifts
+   it and pressed turns it concave. A busy button (`aria-disabled`, from
+   Base UI's `focusableWhenDisabled`) stays copper and takes no hover.
+   Disabled is flat. Still: no glow and no motion, which stay Record's. */
+@utility chrome-copper {
+  color: var(--chrome-copper-ink);
+  background-color: var(--chrome-copper-flat);
+  background-image: linear-gradient(to bottom, var(--chrome-copper-stops));
+  background-origin: border-box;
+  --tw-shadow: var(--chrome-copper-shadow);
+  box-shadow:
+    var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow),
+    var(--tw-ring-shadow), var(--tw-shadow);
+  &:is(button, a):hover:not(:disabled, [aria-disabled='true']) {
+    background-image:
+      linear-gradient(var(--chrome-copper-lift), var(--chrome-copper-lift)),
+      linear-gradient(to bottom, var(--chrome-copper-stops));
+  }
+  &:is(button, a):active:not(:disabled, [aria-disabled='true']) {
+    background-image: linear-gradient(to top, var(--chrome-copper-stops));
+    --tw-shadow: var(--chrome-pressed-shadow);
+  }
+  &:disabled {
+    background-image: none;
+    --tw-shadow: 0 0 0 1px var(--chrome-edge);
   }
 }
 

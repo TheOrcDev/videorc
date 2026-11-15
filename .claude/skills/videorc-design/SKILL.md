@@ -53,9 +53,9 @@ drift. Fix tokens and primitives, never restyle a screen ad hoc. Plan 174
    structure with the light token column, never a separately designed theme:
    its chrome is the dark chrome inverted.
 4. **Colour is information.** Chrome is monochrome. Saturated colour appears
-   only in source/platform icons, status dots, emphasis chips and the Record
-   LED: red for record, live, and destructive; green for healthy; amber for
-   attention.
+   only in source/platform icons, status dots, emphasis chips, the Record
+   LED and Go Live's copper: red for record, live, and destructive; copper
+   for Go Live alone (plan 240); green for healthy; amber for attention.
    Never tint panels, rows, or text decoratively, and never colour a status
    word: the tone rides on an icon, a dot, a chip or an Alert. The one row
    exception is the member hue as a member row's chrome edge (plan 0011).
@@ -141,7 +141,8 @@ for the owner, not a design choice.
     deeper red at idle; the brand red from the click until the session
     ends, with its glow breathing while it runs. Starting and stopping stay
     lit and focusable and take no click; they never dim. It keeps one width
-    through every state's words. Go Live is the chrome primary. Delete,
+    through every state's words. Go Live is polished copper (plan 240).
+    Delete,
     Remove and every other destructive action keep the quiet `destructive`
     tint, so lit red only ever means record or live.
 - **First-run setup paints Liquid Chrome** (2026-10-27, plans 203, 207 and 208).
@@ -809,9 +810,10 @@ gave them the crisper highlight that matches the chrome controls.
 ## Chrome materials
 
 The Welcome screen's Liquid Chrome in the hand (owner call, plan 208 D2):
-the controls you touch shine, and nothing else does. Four utilities are
+the controls you touch shine, and nothing else does. Five utilities are
 defined once in `styles.css`, each with a dark and a light token column.
-Light is the crisp invert: black chrome on porcelain. Each writes its light
+Light is the crisp invert: black chrome on porcelain. Record's red and Go
+Live's copper are the two metals that keep their colour in both themes. Each writes its light
 and shade into Tailwind's shadow stack, so focus and hover rings still draw.
 No transition on the material, no motion, no `backdrop-filter`. The one
 exception is lit Record's glow, which breathes on opacity alone (D5).
@@ -823,23 +825,28 @@ exception is lit Record's glow, which breathes on opacity alone (D5).
 | `chrome-bead`     | Knobs and thumbs           | A silver bead, black 70% drop         | A pearl bead, black 35% drop, 20% hairline |
 | `chrome-bead-ink` | A knob on a chrome track   | A black bead                          | A pearl bead                               |
 | `chrome-led`      | Record and its stop button | Metallic red, 0.58 top, lit glow 60%  | The same metallic red, lit glow 45%        |
+| `chrome-copper`   | Go Live and End livestream | Polished copper, 0.63 waist, ink 0.2  | The same copper, a softer copper drop      |
 
 A fill and Record carry a top line, a bottom line and a small drop. Record's
 metal takes the fill's five bands: a bright band, a dark horizon just below
 the middle and the light coming back at the foot, a deeper red at idle and
 the brand red once `data-lit`. No stop goes above 0.58 lightness, so the
 white label keeps 4.5:1 (`chrome-led.test.ts`). `data-lit` also adds a 12 px
-`--live` glow on a `::after` layer, which breathes. The exact stops are the
-`--chrome-*` tokens in `styles.css`.
+`--live` glow on a `::after` layer, which breathes. Go Live's copper
+(owner call 2026-11-15, plan 240; plan 006 in videorc-ui) takes the same
+five bands with dark copper-brown ink, and no band goes under 0.62
+lightness, so the ink keeps 4.5:1 (`chrome-copper.test.ts`). It is still:
+no glow, which stays Record's. The exact stops are the `--chrome-*` tokens
+in `styles.css`.
 
 - **States.** A fill or Record lifts a little on hover and turns concave when
   pressed (the gradient flips and the drop goes). Disabled is the flat
-  colour at the Button's 50%, so a disabled Go Live is a flat chrome slab.
+  colour at the Button's 50%, so a disabled Go Live is a flat copper slab.
   Hover on a plated row or segment stays the flat `bg-accent`: the plate
   means selected.
 - **Who wears what.** Only the primitives:
-  - `chrome-fill`: `Button` `default` (the chrome primary: Go Live,
-    Continue, Save), a checked `Checkbox`, the `Switch` track when on,
+  - `chrome-fill`: `Button` `default` (the chrome primary: Continue,
+    Save), a checked `Checkbox`, the `Switch` track when on,
     `Progress`, the range of `Slider`, `ParameterSlider` and `Fader`, and
     the sidebar's Studio slab (plan 235 D5);
   - `chrome-bead`: the `Switch` knob when off and every slider and fader
@@ -848,7 +855,10 @@ white label keeps 4.5:1 (`chrome-led.test.ts`). `data-lit` also adds a 12 px
     pressed `Toggle` and `ToggleGroup` item, the sidebar's current page
     row and `MediaCard` `selected`;
   - `chrome-led`: `Button` `record` only, through `RecordButton`: the
-    Studio's Record (unlit) and stop button (`data-lit`), one control (D8).
+    Studio's Record (unlit) and stop button (`data-lit`), one control (D8);
+  - `chrome-copper`: `Button` `go-live` only, through `GoLiveButton` in the
+    Studio's transport (Go Live, Checking…, End livestream) and on the Go
+    Live dialog's start button (plan 240). Copper only ever means Go Live.
 - **Buttons.** `secondary` is the chip recipe; `outline`, `ghost`, `link`
   and `destructive` stay flat. Delete keeps `destructive`, never `record`.
 - **Everything else stays flat.** Panels, sections, rows, menus, dialogs,
@@ -859,7 +869,7 @@ white label keeps 4.5:1 (`chrome-led.test.ts`). `data-lit` also adds a 12 px
   chrome material outside `components/ui/`, `sidebar.tsx` and
   `media-card.tsx` fails. A screen gets the shine through a primitive's
   variant, never a class.
-- **Increase Contrast** gives a fill and Record a 1 px edge (white 55% ·
+- **Increase Contrast** gives a fill, Record and Go Live a 1 px edge (white 55% ·
   black 60%) and the plate a stronger rim (30% · 28%).
 
 ## Floating surfaces

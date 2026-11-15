@@ -254,15 +254,16 @@ describe('chip tokens', () => {
 
 // Plan 208 S4 (D2): the Welcome screen's Liquid Chrome on the controls you
 // touch. Four materials, defined once, with a dark and a light column; red
-// stays Record's alone (D6, D8). Record's chrome-led is not on the still
-// list: its glow breathes while a session runs, so chrome-led.test.ts holds
-// it to opacity alone (D5).
+// stays Record's alone (D6, D8), and copper Go Live's (plan 240). Record's
+// chrome-led is not on the still list: its glow breathes while a session
+// runs, so chrome-led.test.ts holds it to opacity alone (D5).
 describe('chrome materials (plan 208 S4)', () => {
   const MATERIALS = [
     'chrome-fill',
     'chrome-plate',
     'chrome-bead',
     'chrome-bead-ink',
+    'chrome-copper',
     'chrome-row-live',
     'chrome-row-member'
   ]
@@ -310,6 +311,13 @@ describe('chrome materials (plan 208 S4)', () => {
       '--chrome-led-drop',
       '--chrome-led-lift',
       '--chrome-led-glow',
+      '--chrome-copper-stops',
+      '--chrome-copper-flat',
+      '--chrome-copper-ink',
+      '--chrome-copper-hi',
+      '--chrome-copper-lo',
+      '--chrome-copper-drop',
+      '--chrome-copper-lift',
       '--chrome-edge',
       '--chrome-row-live-top',
       '--chrome-row-live-bottom',
@@ -328,10 +336,11 @@ describe('chrome materials (plan 208 S4)', () => {
     // white ink (D3).
     expect(dark).toContain('--chrome-fill-ink: oklch(0.13 0 0);')
     expect(light).toContain('--chrome-fill-ink: oklch(0.985 0 0);')
-    // The chrome is neutral; only Record carries a hue, the brand red's.
+    // The chrome is neutral; only Record carries a hue, the brand red's, and
+    // Go Live its copper (plan 240).
     for (const column of [light, dark]) {
       const chroma = [
-        ...column.matchAll(/--chrome-(?!led)[\w-]+:[^;]*oklch\(\s*[\d.]+\s+(?!0[\s/)])/g)
+        ...column.matchAll(/--chrome-(?!led|copper)[\w-]+:[^;]*oklch\(\s*[\d.]+\s+(?!0[\s/)])/g)
       ]
       expect(chroma.map(([match]) => match)).toEqual([])
       expect(column).toMatch(

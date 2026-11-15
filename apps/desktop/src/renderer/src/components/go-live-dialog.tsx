@@ -512,6 +512,7 @@ export function GoLiveConfirmationDialog({
               aria-keyshortcuts={shortcutAriaKeys(confirmAccelerator, platform)}
               data-testid="go-live-continue-partial"
               disabled={!canContinuePartial}
+              variant="go-live"
               onClick={onContinuePartial}
             >
               <LivestreamIcon data-icon="inline-start" weight="fill" />
@@ -535,6 +536,7 @@ export function GoLiveConfirmationDialog({
                 aria-keyshortcuts={shortcutAriaKeys(confirmAccelerator, platform)}
                 data-testid="go-live-confirm"
                 disabled={!canConfirm}
+                variant="go-live"
                 onClick={confirm}
               >
                 <LivestreamIcon data-icon="inline-start" weight="fill" />

@@ -76,7 +76,8 @@
     "fader",
     "parameter-slider",
     "lock-reason",
-    "record-button"
+    "record-button",
+    "go-live-button"
   ],
   "keepLocal": ["src/renderer/src/styles.css", "src/renderer/src/components/icons.tsx"]
 }
