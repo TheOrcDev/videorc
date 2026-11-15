@@ -636,3 +636,124 @@ build at a time (the 11-02 kernel panic).
 ## Execution notes
 
 (Empty until S0.)
+
+### S1. Scene library v2 and its migration (2026-11-15)
+
+Done. Nothing is wired to the Studio and nothing user-visible changed.
+
+**Files**
+
+- `lib/scenes.ts`: the model, the tolerant reads, the defaults, the
+  migration and the pure helpers.
+- `hooks/use-scenes.ts`: the library hook.
+- `lib/scenes.test.ts` (47 tests), `hooks/use-scenes.test.ts` (8 tests),
+  and 11 fixtures in `lib/__fixtures__/scenes/`. Each fixture is one
+  profile's localStorage, parsed, by key.
+- Two small edits to shared code: `sceneNameError` and `movedScenes` take
+  any list of `{ id, name }` / `{ id }`, so v2 scenes reuse them.
+
+**Numbers:** typecheck, lint and Prettier green; the full desktop unit run
+is 701 files, 8130 passed, 1 skipped, no flake seen.
+
+**The API S2 uses**
+
+From `lib/scenes.ts`:
+
+- `SCENES_KEY`, types `SceneShows`, `Scene`, `SceneLibrary`, `MainDisplay`,
+  `ShowsSources`, `SceneMigrationConfig`.
+- `hydrateScenes(raw)` → `{ library | null, readOnly, error }`;
+  `normalizeScene(raw)` (throws on a broken scene).
+- `defaultScenes(mainDisplay, now?)`;
+  `migrateToScenes(v1Library, workingScene, captureConfig, globalShortcuts, now?)`
+  → `{ library, globalShortcuts }`.
+- `sceneOnStream(library)`, `sceneAtPosition(scenes, position)` (1-based),
+  `scenePosition(scenes, id)`, `sceneLayout(scene, orientation)`,
+  `sceneShowsWords(scene, orientation)`,
+  `firstSceneWithLayout(scenes, orientation, preset)` (D14),
+  `canDeleteScene({ scenes, id, onStreamId, sessionActive })` →
+  `{ allowed: true, switchToId } | { allowed: false, reason }` (D16), with
+  `KEEP_ONE_SCENE_REASON` and `DELETE_ON_STREAM_REASON`.
+- `showsFromSources(sources)` and `showsSources(shows)`: between a scene's
+  `shows` and the capture part of a source selection. `showsSources` writes
+  every capture key, so a spread clears the previous screen.
+- `sameShows(a, b)`, `withMainDisplay(library, display)`,
+  `horizontalTwin(preset)`, `defaultSceneId(preset)`, `WORKING_SCENE_ID`.
+
+From `hooks/use-scenes.ts`: `useScenes()` returns `scenes`, `onStreamId`,
+`readOnly`, `error`, `migratedShortcuts`, and `insert(scenes, afterId?)`
+(at the end by default, D5), `replace(scene)`, `rename(id, name)`,
+`move(id, toIndex)`, `setOnStream(id)`, `remove(id, { sessionActive })`.
+`loadScenes()` is the read without React.
+
+**What S2 must know**
+
+- **Save the migrated keys.** `migratedShortcuts` is non-null only on the
+  launch that migrated. S2 must write it into `settings.globalShortcuts` on
+  that launch: it has the layout keys as scene keys and no `layouts`. The
+  hook writes one key, `videorc.scenes.v2`, and never the settings. The ids
+  migration makes are stable (`default-screen-camera`,
+  `layout-vertical-camera-bottom`, `migrated-working`), so a migration that
+  runs twice gives the same keys.
+- **The write is an effect.** The hook migrates in its state initializer
+  (reads only) and stores v2 after the first render, once, also under
+  StrictMode. If that write fails the scenes stay in memory and the next
+  change writes them.
+- **A new user's display is not known at launch.** Their three screen
+  scenes show `{ kind: 'display', screenId: '' }`, v1's "nothing chosen
+  yet". Call `withMainDisplay` and `replace` once the device list has the
+  display. An updating user with no screen chosen gets the same.
+- **`showsSources({ kind: 'none' })` says `captureOff: true`.** D18 keeps
+  the capture running under a scene that shows no screen, so S2 must not
+  stop the capture from that flag.
+- **Unknown version:** the hook is read-only, never writes, and holds the
+  four defaults on today's setup in memory, so the Studio still has a scene
+  on stream.
+- **A v2 library with no usable scene** is treated as missing: the hook
+  migrates from v1 again and writes over it.
+- `normalizeScene` reuses v1's layout check, which keeps only the keys of
+  the default layout. `cameraLook` and `cameraChromaKeyEdges` are dropped
+  from a stored scene, as v1 scenes and the working scene drop them today.
+  If S2 wants a scene to keep the key's hide edges, that check needs them.
+- `scenes.ts` does not import `scene-list.ts`, which stays with the lazy
+  scene UI. Keep it that way when `use-studio.tsx` imports `scenes.ts`: the
+  eager bundle has a few hundred bytes left.
+
+**Choices the plan left open** (none changes a decision)
+
+- **Defaults take today's look.** The built-in layouts share one look
+  today, so each default is the working layout with its preset, the
+  remembered framing for that layout, and the working background.
+- **The scene on stream keeps the working look exactly.** Its layout in the
+  studio's orientation and its background are the working ones. A saved
+  scene whose working look drifted from it takes the working look.
+- **A working look that is exactly a default goes on that default,** also
+  after a Screen pick left a saved scene. Only a look no scene has (a
+  dragged camera, Freeform) becomes the extra scene of D15 step 3. The
+  fixture for "left by a Screen pick" has a dragged camera, so it adds
+  "Display 2".
+- **Plan 210 fixture:** the defaults show today's screen, which is Figma.
+  The default Screen + camera would equal the saved Figma scene, so it is
+  left out: Figma, T3 Code, Screen only, Camera only, Side by side. The
+  defaults do not follow the app (`follows: false`), so only the saved
+  scenes answer "Follow the app in front".
+- **A default is left out only when that is safe:** same screen, same 16:9
+  and 9:16 layout, not Freeform; never when it is on stream with another
+  look, and never when its layout key could not move to the saved scene
+  (that scene already has another key).
+- **A 9:16 layout key** goes to the first scene with that 9:16 layout that
+  has no key yet, because a scene has one custom key. With none free, a
+  scene is added: "Camera bottom", or "Vertical screen only" for a twin
+  name.
+- **Camera only shows no screen only for a new user** (D3). On update it
+  shows today's screen like the others, which also keeps the vertical
+  stream right when Follow is off and its 9:16 layout has a screen.
+- **Fill or Fit in 9:16.** A scene has one 9:16 layout for the 9:16 studio
+  and the vertical stream. From a 16:9 studio it takes the vertical
+  stream's framing (`simulcastScreenFraming`, Fit by default), so the
+  vertical stream doesn't change. From a 9:16 studio it keeps the layout's
+  own (`verticalScreenFraming`, Fill by default). A new user's scenes get
+  Fit, where a 9:16 studio starts on Fill today (owner call O1,
+  2026-09-21). S3 owns that default.
+- **Background with no working scene:** a profile with no
+  `videorc.working-scene.v1` gets scenes with no background. S2 can give
+  them the library's applied background if that case matters.

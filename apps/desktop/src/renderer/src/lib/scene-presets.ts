@@ -325,7 +325,7 @@ export function normalizeSceneVisual(raw: unknown): SceneVisual {
 }
 export function sceneNameError(
   name: string,
-  scenes: readonly SavedScene[],
+  scenes: readonly Pick<SavedScene, 'id' | 'name'>[],
   exceptId?: string
 ): string | null {
   const trimmed = name.trim()

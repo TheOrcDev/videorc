@@ -1,0 +1,172 @@
+{
+  "videorc.scene-presets.v1": {
+    "version": 1,
+    "scenes": [
+      {
+        "id": "5d0c8a4e-figma",
+        "name": "Figma",
+        "createdAt": "2026-10-30T09:00:00.000Z",
+        "updatedAt": "2026-10-30T09:00:00.000Z",
+        "visual": {
+          "layout": {
+            "layoutPreset": "screen-camera",
+            "cameraTransformMode": "custom",
+            "cameraTransform": {
+              "x": 0.04,
+              "y": 0.06,
+              "width": 0.22,
+              "height": 0.22
+            },
+            "cameraCorner": "bottom-right",
+            "cameraSize": "medium",
+            "cameraShape": "circle",
+            "cameraCornerRadiusPct": 12,
+            "cameraAspect": "source",
+            "cameraChromaKeyEnabled": false,
+            "cameraChromaKeyColor": "#00FF00",
+            "cameraChromaKeySimilarityPct": 40,
+            "cameraChromaKeySmoothnessPct": 8,
+            "cameraChromaKeySpillPct": 10,
+            "cameraMargin": 32,
+            "cameraFit": "fill",
+            "cameraMirror": false,
+            "cameraZoom": 100,
+            "cameraOffsetX": 0,
+            "cameraOffsetY": 0,
+            "sideBySideSplit": "70-30",
+            "sideBySideCameraSide": "right",
+            "verticalScreenFraming": "fill",
+            "horizontalScreenFraming": "fit",
+            "arrangementMode": "preset",
+            "sourceTransformOverrides": {},
+            "sourceVisibility": {
+              "camera": true,
+              "capture": true
+            }
+          },
+          "sources": {
+            "cameraId": "camera:facetime",
+            "cameraName": "FaceTime HD Camera",
+            "cameraOff": false,
+            "captureOff": false,
+            "windowId": "window:4211",
+            "windowName": "Figma – Landing page",
+            "app": {
+              "bundleId": "com.figma.Desktop",
+              "name": "Figma",
+              "follows": true
+            },
+            "testPattern": false
+          },
+          "background": null
+        }
+      }
+    ]
+  },
+  "videorc.working-scene.v1": {
+    "version": 1,
+    "origin": "saved",
+    "sceneId": null,
+    "visual": {
+      "layout": {
+        "layoutPreset": "screen-camera",
+        "cameraTransformMode": "custom",
+        "cameraTransform": {
+          "x": 0.04,
+          "y": 0.06,
+          "width": 0.22,
+          "height": 0.22
+        },
+        "cameraCorner": "bottom-right",
+        "cameraSize": "medium",
+        "cameraShape": "circle",
+        "cameraCornerRadiusPct": 12,
+        "cameraAspect": "source",
+        "cameraChromaKeyEnabled": false,
+        "cameraChromaKeyColor": "#00FF00",
+        "cameraChromaKeySimilarityPct": 40,
+        "cameraChromaKeySmoothnessPct": 8,
+        "cameraChromaKeySpillPct": 10,
+        "cameraMargin": 32,
+        "cameraFit": "fill",
+        "cameraMirror": false,
+        "cameraZoom": 100,
+        "cameraOffsetX": 0,
+        "cameraOffsetY": 0,
+        "sideBySideSplit": "70-30",
+        "sideBySideCameraSide": "right",
+        "verticalScreenFraming": "fill",
+        "horizontalScreenFraming": "fit",
+        "arrangementMode": "preset",
+        "sourceTransformOverrides": {},
+        "sourceVisibility": {
+          "camera": true,
+          "capture": true
+        }
+      },
+      "sources": {
+        "cameraId": "camera:facetime",
+        "cameraName": "FaceTime HD Camera",
+        "cameraOff": false,
+        "captureOff": false,
+        "screenId": "screen:2",
+        "screenName": "Display 2",
+        "screenUuid": "9A1C0F0E-6C1B-4B1D-8E0A-2F6D5B7C3E11",
+        "testPattern": false
+      },
+      "background": null
+    }
+  },
+  "videorc.captureConfig": {
+    "sources": {
+      "cameraId": "camera:facetime",
+      "cameraName": "FaceTime HD Camera",
+      "cameraOff": false,
+      "captureOff": false,
+      "screenId": "screen:2",
+      "screenName": "Display 2",
+      "screenUuid": "9A1C0F0E-6C1B-4B1D-8E0A-2F6D5B7C3E11",
+      "testPattern": false
+    },
+    "layout": {
+      "layoutPreset": "screen-camera",
+      "cameraTransformMode": "custom",
+      "cameraTransform": {
+        "x": 0.04,
+        "y": 0.06,
+        "width": 0.22,
+        "height": 0.22
+      },
+      "cameraCorner": "bottom-right",
+      "cameraSize": "medium",
+      "cameraShape": "circle",
+      "cameraCornerRadiusPct": 12,
+      "cameraAspect": "source",
+      "cameraChromaKeyEnabled": false,
+      "cameraChromaKeyColor": "#00FF00",
+      "cameraChromaKeySimilarityPct": 40,
+      "cameraChromaKeySmoothnessPct": 8,
+      "cameraChromaKeySpillPct": 10,
+      "cameraMargin": 32,
+      "cameraFit": "fill",
+      "cameraMirror": false,
+      "cameraZoom": 100,
+      "cameraOffsetX": 0,
+      "cameraOffsetY": 0,
+      "sideBySideSplit": "70-30",
+      "sideBySideCameraSide": "right",
+      "verticalScreenFraming": "fill",
+      "horizontalScreenFraming": "fit",
+      "arrangementMode": "preset",
+      "sourceTransformOverrides": {},
+      "sourceVisibility": {
+        "camera": true,
+        "capture": true
+      }
+    },
+    "lastHorizontalPreset": "screen-camera",
+    "lastVerticalPreset": "vertical-camera-top",
+    "simulcastScreenFraming": "fit",
+    "simulcastFollowsProgram": true
+  }
+}
