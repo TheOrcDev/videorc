@@ -1162,6 +1162,27 @@
   }
 }
 
+/* Plan 238: the Preview startup card's segments. The step running breathes
+   on opacity alone; a stalled step and reduced motion (the base layer
+   collapses the loop) rest it at 60%. */
+[data-preview-startup-segment='current'] [data-slot='progress-indicator'] {
+  opacity: 0.6;
+  animation: preview-startup-breathe 1.2s ease-in-out infinite alternate;
+}
+
+[data-preview-startup-segment='stalled'] [data-slot='progress-indicator'] {
+  opacity: 0.6;
+}
+
+@keyframes preview-startup-breathe {
+  from {
+    opacity: 0.3;
+  }
+  to {
+    opacity: 0.7;
+  }
+}
+
 @keyframes typing-dot-shimmer {
   0%,
   70%,

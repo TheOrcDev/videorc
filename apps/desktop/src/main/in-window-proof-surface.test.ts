@@ -44,8 +44,12 @@ class FakeView {
   bounds: Rect | null = null
   visible = true
   radius: number | null = null
+  backgrounds: string[] = []
   setBounds(bounds: Rect): void {
     this.bounds = bounds
+  }
+  setBackgroundColor(color: string): void {
+    this.backgrounds.push(color)
   }
   setVisible(visible: boolean): void {
     this.visible = visible
@@ -203,6 +207,38 @@ describe('InWindowProofSurface', () => {
     expect(view.visible).toBe(false)
     expect(surface.isVisible()).toBe(false)
     expect(main.children).toEqual([view])
+  })
+
+  // Plan 238: the owner keeps the view clear until its page has content.
+  it('gives the view its background colour, once per change', () => {
+    const { surface, view } = harness()
+    expect(surface.backgroundColor()).toBeNull()
+    expect(view.backgrounds).toEqual([])
+
+    surface.setBackgroundColor('#00000000')
+    surface.setBackgroundColor('#00000000')
+    expect(view.backgrounds).toEqual(['#00000000'])
+    expect(surface.backgroundColor()).toBe('#00000000')
+
+    surface.setBackgroundColor('#101014')
+    surface.setBackgroundColor('#00000000')
+    expect(view.backgrounds).toEqual(['#00000000', '#101014', '#00000000'])
+    expect(surface.backgroundColor()).toBe('#00000000')
+  })
+
+  it('keeps its background across a mode switch and ignores one after it is destroyed', () => {
+    const { surface, view, setMode } = harness()
+    surface.setBackgroundColor('#101014')
+    surface.setBounds({ x: 440, y: 168, width: 1320, height: 743 })
+    surface.showInactive()
+    setMode('floating')
+    surface.setBounds({ x: 0, y: 28, width: 960, height: 540 })
+    expect(view.backgrounds).toEqual(['#101014'])
+
+    surface.destroy()
+    surface.setBackgroundColor('#00000000')
+    expect(view.backgrounds).toEqual(['#101014'])
+    expect(surface.backgroundColor()).toBe('#101014')
   })
 
   it('re-parents the live view on a mode switch instead of recreating it', () => {

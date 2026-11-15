@@ -1,5 +1,22 @@
 # Implementation Plans
 
+- 2026-11-15: [Plan 238](238-a-calm-preview-start.md), the owner's ask: get rid
+  of the "blue screen thing" that shows while Videorc loads, and show a loading
+  state with better UX instead. BUILT 2026-11-15 in one PR, with the
+  recommended D1–D4 (owner: "all decisions take recommended"):
+  - The blue thing is the Electron proof surface's diagnostic backdrop: a
+    blue-to-green gradient with stripes, painted over the stage until the first
+    frame. It covers the stage's own waiting card everywhere the Preview
+    shows.
+  - S1: the surface paints nothing before its first frame. On macOS and Linux
+    the in-window view is transparent until its page has pixels. Windows keeps
+    a plain dark ground, because its proof window is the production preview and
+    the opacity trick could not be proven on a Windows host.
+  - S2 and S3: one startup card in the Studio slot with three real steps
+    (engine, sources, first frame) on a segmented shadcn `Progress`. It says
+    what is stuck after 20 s, and the floating Preview window uses the same
+    words.
+
 - 2026-11-14: [Plan 237](237-stream-report-email.md), the owner's ask:
   "report email after each stream that shows how many people we had live,
   biggest concurrent number, from which platforms". BUILT 2026-11-14 with
