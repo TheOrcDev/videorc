@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, type KeyboardEvent, type ReactElement } from 'react'
 
 import { ChatPlatformIcon } from '@/components/chat-platform-icon'
-import { MicrophoneIcon, BuddyIcon, PreviewIcon } from '@/components/icons'
+import { MicrophoneIcon, BuddyPageIcon, PreviewIcon } from '@/components/icons'
 import { BuddyCard } from '@/components/stream-manager/buddy-card'
 import { useBuddyCardKeys } from '@/components/stream-manager/buddy-card-keys'
 import { Button } from '@/components/ui/button'
@@ -155,7 +155,7 @@ function CommandChooser({
     <BuddyCard
       data-command-id={view.commandId}
       decline={{ label: 'Cancel', testId: 'command-cancel' }}
-      icon={BuddyIcon}
+      icon={BuddyPageIcon}
       keys
       label="Which comment did you mean?"
       testId="command-chooser"

@@ -1,4 +1,4 @@
-import { MicrophoneIcon, BuddyIcon } from '@/components/icons'
+import { MicrophoneIcon, BuddyPageIcon } from '@/components/icons'
 import type React from 'react'
 import {
   useEffect,
@@ -281,7 +281,7 @@ export function CohostPane({
     return (
       <>
         <div className="shrink-0 p-2" data-slot="cohost-consent">
-          <Alert aria-label="Sidekick needs cloud AI" role="group" icon={BuddyIcon}>
+          <Alert aria-label="Sidekick needs cloud AI" role="group" icon={BuddyPageIcon}>
             <AlertTitle className="text-xs">Sidekick needs cloud AI</AlertTitle>
             <AlertDescription className="text-xs">
               <ul className="flex list-disc flex-col gap-0.5 pl-4">
@@ -698,10 +698,10 @@ export function BuddyIdentity({
 }
 
 /**
- * The Buddy pane's footer (plan 174 S3.14c, F-10): the Say box (↵ says it
- * talking, ⌘↵ laughing), the reaction chips that play a reaction on air
- * (each disabled when the pack has no such reaction), and the "{name} on
- * stream" switch. Visible on air and off: all of it is free (D6).
+ * The Avatar block's footer (plan 174 S3.14c, F-10; plan 239): the Say box
+ * (↵ says it talking, ⌘↵ laughing), the reaction chips that play a reaction
+ * on air (each disabled when the pack has no such reaction), and the
+ * "{name} on stream" switch. Visible on air and off: all of it is free (D6).
  */
 export function BuddySayFooter({
   buddy,
@@ -711,6 +711,7 @@ export function BuddySayFooter({
   offOutputsNotice = null,
   onSay,
   onShowOnStreamChange,
+  onUseSuggest,
   onReact
 }: {
   buddy: CohostWindowBuddy
@@ -727,6 +728,11 @@ export function BuddySayFooter({
   offOutputsNotice?: BuddyOutputNotice | null
   onSay?: (text: string, state: CohostUtteranceState) => Promise<void> | void
   onShowOnStreamChange?: (showOnStream: boolean) => void
+  /**
+   * The notice's "Use Suggest" (plan 239 D3): asks for Suggest through the
+   * talk control's own consent. Absent, the notice offers Show on stream only.
+   */
+  onUseSuggest?: () => void
   onReact?: (reaction: string) => void
 }): ReactElement {
   const [draft, setDraft] = useState('')
@@ -749,13 +755,40 @@ export function BuddySayFooter({
       data-slot="buddy-footer"
     >
       {offOutputsNotice ? (
-        // Buddy Live is on air, the Buddy on no output: words, not a hidden
-        // switch label, and the way out in one click. Quiet, because it is
-        // the streamer's choice to make, not a failure.
+        // On air with the avatar on no output: words, not a hidden switch
+        // label, and the way out in one click. Quiet, because it is the
+        // streamer's choice to make, not a failure.
         <Alert data-testid="buddy-off-outputs" variant="quiet">
           <AlertTitle>{offOutputsNotice.title}</AlertTitle>
           <AlertDescription>{offOutputsNotice.detail}</AlertDescription>
-          {onShowOnStreamChange ? (
+          {offOutputsNotice.secondaryAction && onUseSuggest ? (
+            // Two ways out (plan 239 D3): a row under the words, since the
+            // corner slot holds one button.
+            <div
+              className="col-start-2 mt-1.5 flex flex-wrap gap-1.5"
+              data-slot="buddy-off-outputs-actions"
+            >
+              {onShowOnStreamChange ? (
+                <Button
+                  size="xs"
+                  type="button"
+                  variant="secondary"
+                  onClick={() => onShowOnStreamChange(true)}
+                >
+                  {offOutputsNotice.action}
+                </Button>
+              ) : null}
+              <Button
+                data-testid="buddy-off-outputs-suggest"
+                size="xs"
+                type="button"
+                variant="ghost"
+                onClick={onUseSuggest}
+              >
+                {offOutputsNotice.secondaryAction}
+              </Button>
+            </div>
+          ) : onShowOnStreamChange ? (
             <AlertAction>
               <Button
                 size="xs"

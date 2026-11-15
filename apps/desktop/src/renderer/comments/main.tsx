@@ -34,6 +34,11 @@ import {
   offCohostWindowState
 } from '@/lib/backend'
 import { applyCohostState } from '@/lib/cohost-state'
+import {
+  BUDDY_BEHAVIOUR_HOMES,
+  BUDDY_BEHAVIOUR_TABS,
+  type BuddyBehaviourId
+} from '@/lib/buddy-auto-chat-view'
 import { ChatGifModeProvider } from '@/lib/chat-gifs'
 import { DEFAULT_TWITCH_GIF_MODE, type TwitchGifMode } from '../../shared/chat-gif'
 import type { CommandAnswer } from '@/components/stream-manager/command-cards'
@@ -831,14 +836,18 @@ function CommentsWindowApp(): ReactElement {
   }
 
   // The behaviour chips (plan 174 S3.14a, D7) link to their one home: main
-  // shows the main window and the shell opens Buddy → Chat.
-  const openBuddyChatSettings = (): void => {
+  // shows the main window and the shell opens the tab, Avatar → Greetings
+  // or Sidekick → Chat (plan 239; the shell knows the page from the id).
+  const openBuddyChatSettings = (behaviour: BuddyBehaviourId): void => {
     void window.videorc
-      ?.openBuddyTabFromCommentsWindow?.({ requestId: crypto.randomUUID(), tab: 'chat' })
+      ?.openBuddyTabFromCommentsWindow?.({
+        requestId: crypto.randomUUID(),
+        tab: BUDDY_BEHAVIOUR_TABS[behaviour]
+      })
       .catch((error) =>
         toastUserError(
           error,
-          { action: 'open', object: 'Sidekick → Chat' },
+          { action: 'open', object: BUDDY_BEHAVIOUR_HOMES[behaviour] },
           { id: 'buddy-open-tab' }
         )
       )

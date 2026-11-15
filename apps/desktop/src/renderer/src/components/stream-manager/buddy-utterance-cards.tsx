@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type ReactElement } from 'react'
 
-import { BuddyIcon } from '@/components/icons'
+import { BuddyPageIcon } from '@/components/icons'
 import { BuddyCard } from '@/components/stream-manager/buddy-card'
 import { useBuddyCardKeys } from '@/components/stream-manager/buddy-card-keys'
 import { removalKeyAnswer } from '@/components/stream-manager/removal-cards'
@@ -180,7 +180,7 @@ export function BuddyUtteranceCards({
               key={`milestone-${utterance.id}`}
               busy={pending}
               data-utterance-id={utterance.id}
-              icon={BuddyIcon}
+              icon={BuddyPageIcon}
               label={`${utterance.milestone!.name}'s milestone`}
               primary={{ label: 'Show on stream', testId: 'buddy-milestone-show' }}
               testId="buddy-milestone-card"
@@ -204,7 +204,7 @@ export function BuddyUtteranceCards({
               busy={pending}
               data-utterance-id={utterance.id}
               decline={{ label: 'Dismiss', testId: 'buddy-utterance-dismiss' }}
-              icon={BuddyIcon}
+              icon={BuddyPageIcon}
               keys={utterance === newest}
               label={`${buddyDisplayName(name)} wants to post`}
               primary={{ label: 'Send', testId: 'buddy-utterance-send' }}
