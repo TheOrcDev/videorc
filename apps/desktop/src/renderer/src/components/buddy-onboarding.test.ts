@@ -77,7 +77,7 @@ function settings(): CohostSettings {
   return {
     persona: {
       id: 'default',
-      name: 'Sidekick',
+      name: 'Flint',
       personality: '',
       bubbleStyle: 'speech',
       images: {},
@@ -331,9 +331,7 @@ describe('BuddyOnboarding (plan 170 D14, D15)', () => {
       BUDDY_OFFICIAL_CATALOG[1]!.personality
     )
     // The step is announced, and the demo's lines are in its name, with a pause (plan 174 G-20, G-21).
-    expect(byTestId('buddy-onboarding-announce')?.textContent).toBe(
-      'Step 1 of 4: Meet your Sidekick'
-    )
+    expect(byTestId('buddy-onboarding-announce')?.textContent).toBe('Step 1 of 4: Meet your avatar')
     expect(byTestId('buddy-stream-demo')?.getAttribute('aria-label')).toContain(
       BUDDY_ONBOARDING_STEP1.demoBubbles[0]
     )
@@ -363,7 +361,7 @@ describe('BuddyOnboarding (plan 170 D14, D15)', () => {
     expect(byTestId('buddy-stream-demo-chip')?.className).toContain('opacity-100')
   })
 
-  it('uses an official Sidekick from the gallery (free) and closes', async () => {
+  it('uses an official avatar from the gallery (free) and closes', async () => {
     const libraryController = fakeLibraryController()
     await render({ client: fakeBackend().client, libraryController, signedIn: false })
     await click(
@@ -610,7 +608,7 @@ describe('BuddyOnboarding (plan 170 D14, D15)', () => {
     await render({ client: fakeBackend({}, full).client, caps: full })
     await walkToCreate()
     expect(gateOf()).toMatchObject({ kind: 'full', actions: [] })
-    expect(gateOf().text).toContain('Your library is full (30 Sidekicks). Delete one to make room.')
+    expect(gateOf().text).toContain('Your library is full (30 avatars). Delete one to make room.')
     expect(create().disabled).toBe(true)
 
     await act(async () => root.unmount())
@@ -624,7 +622,7 @@ describe('BuddyOnboarding (plan 170 D14, D15)', () => {
     expect(create().disabled).toBe(true)
   })
 
-  it('opens on step 4 when a Sidekick is waiting as a draft: Redo, Use as my Sidekick, Discard', async () => {
+  it('opens on step 4 when an avatar is waiting as a draft: Redo, Use as my avatar, Discard', async () => {
     const backend = fakeBackend({ draft: draft(LIBRARY_AVATAR) })
     const libraryController = fakeLibraryController()
     await render({ client: backend.client, libraryController })
@@ -662,7 +660,7 @@ describe('BuddyOnboarding (plan 170 D14, D15)', () => {
     expect(onOpenChange).toHaveBeenCalledWith(false)
   })
 
-  it('Make it Alive keeps the Sidekick, then opens the Alive creator with it (plan 172 D12)', async () => {
+  it('Make it Alive keeps the avatar, then opens the Alive creator with it (plan 172 D12)', async () => {
     mocked.openCreator.mockClear()
     const backend = fakeBackend({ draft: draft(LIBRARY_AVATAR) })
     const libraryController = fakeLibraryController()
@@ -672,7 +670,7 @@ describe('BuddyOnboarding (plan 170 D14, D15)', () => {
         '[data-testid="buddy-onboarding-use"], [data-testid="buddy-onboarding-make-alive"]'
       )
     ]
-    // Secondary first; the primary "Use as my Buddy" sits rightmost (the G owner item).
+    // Secondary first; the primary "Use as my avatar" sits rightmost (the G owner item).
     expect(footer.map((button) => button.dataset.testid)).toEqual([
       'buddy-onboarding-make-alive',
       'buddy-onboarding-use'
@@ -700,9 +698,7 @@ describe('BuddyOnboarding (plan 170 D14, D15)', () => {
     expect(byTestId('buddy-onboarding-back')).not.toBeNull()
     expect(byTestId('buddy-onboarding-discard')?.textContent).toContain('Delete…')
     await click(byTestId('buddy-onboarding-discard'))
-    expect(byTestId('buddy-onboarding-delete-dialog')?.textContent).toContain(
-      'Delete this Sidekick?'
-    )
+    expect(byTestId('buddy-onboarding-delete-dialog')?.textContent).toContain('Delete this avatar?')
     await click(byTestId('buddy-onboarding-delete-cancel'))
     expect(backend.requestTyped).not.toHaveBeenCalledWith(
       'cohost.avatar.discard',

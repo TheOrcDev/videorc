@@ -23,7 +23,7 @@ A banner is your own image placed anywhere on the picture: a sponsor strip,
   fills the canvas (a frame), which is picked by its label or its toolbar
   chip so the sources under it stay reachable. A drag snaps to the canvas,
   the sources and the other banners (never to the highlight, captions or
-  Sidekick zones); Alt drags without snapping.
+  avatar zones); Alt drags without snapping.
   The inspector says how big the banner is drawn on your largest output and
   warns when your image is too small to stay sharp there ("it will look soft
   at this size. Use one at least 2304 × 384 px."). With a vertical
@@ -37,7 +37,7 @@ A banner is your own image placed anywhere on the picture: a sponsor strip,
   200 ms (instant on 4K60 recordings).
 - **Appears in**: each banner has **Stream** and **Recording** switches,
   both on by default. They follow the same rules as the highlight card and
-  the Sidekick ([overlays.md](overlays.md)); when a session cannot honor both,
+  the avatar ([overlays.md](overlays.md)); when a session cannot honor both,
   the Go Live sheet says so ("Recording will include banners while
   streaming vertical.").
 - **Timing** (in the inspector, folded): **Hide after** 10 s to 5 min, and
@@ -46,7 +46,7 @@ A banner is your own image placed anywhere on the picture: a sponsor strip,
   always wins and restarts its cycle.
 - A banner that is showing stays when you switch scenes and after you
   restart Videorc. Banners stay over a takeover and under captions, the
-  Sidekick and the highlight card. Everything can be changed while recording or
+  avatar and the highlight card. Everything can be changed while recording or
   live except deleting a banner that is showing.
 
 ### HTML banners
@@ -142,7 +142,7 @@ hide` and the event `banners.changed`; `importImage` runs on the
   without that FIFO, or the direct D3D11 recording, refuses a banner shown
   after it starts. Electron proof surface (Windows idle and Linux
   previews): `main/preview-surface-banners.ts`.
-- Z order on every path: scene, takeover, banners, captions, Sidekick,
+- Z order on every path: scene, takeover, banners, captions, the avatar,
   highlight card.
 - Scene editor drafts with the stage id `banner:<id>` move the banner's
   picture live on the idle macOS preview: on the live canvas, and in the

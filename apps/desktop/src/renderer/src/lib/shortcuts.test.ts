@@ -19,20 +19,30 @@ describe('SHORTCUTS registry', () => {
         : entry.id.startsWith('nav-')
     )
     expect(
-      navEntries.filter((entry) => /^CmdOrCtrl\+([1-9]|,)$/.test(entry.accelerators[0])).length
+      navEntries.filter((entry) => /^CmdOrCtrl\+([0-9]|,)$/.test(entry.accelerators[0])).length
     ).toBe(WORKSPACE_SHORTCUTS.length)
   })
 
-  // Plan 235 D6 and D8: the keys run down the sidebar.
-  it('labels ⌘7 Destinations and ⌘8 Buddy', () => {
+  // Plan 235 D6 and D8: the keys run down the sidebar; plan 239 D6: Avatar
+  // takes ⌘6 and Library, the tenth page, ⌘0.
+  it('labels ⌘6 Avatar, ⌘8 Destinations, ⌘9 Sidekick and ⌘0 Library', () => {
+    expect(SHORTCUTS.find((entry) => entry.id === 'nav-avatar')).toMatchObject({
+      accelerators: ['CmdOrCtrl+6'],
+      label: 'Avatar'
+    })
     expect(SHORTCUTS.find((entry) => entry.id === 'nav-live')).toMatchObject({
-      accelerators: ['CmdOrCtrl+7'],
+      accelerators: ['CmdOrCtrl+8'],
       label: 'Destinations'
     })
     expect(SHORTCUTS.find((entry) => entry.id === 'nav-ai')).toMatchObject({
-      accelerators: ['CmdOrCtrl+8'],
+      accelerators: ['CmdOrCtrl+9'],
       label: 'Sidekick'
     })
+    expect(SHORTCUTS.find((entry) => entry.id === 'nav-library')).toMatchObject({
+      accelerators: ['CmdOrCtrl+0'],
+      label: 'Library'
+    })
+    expect(navShortcutDigit('library')).toBe('0')
   })
 
   it('has unique ids and accelerators that parse on every platform', () => {

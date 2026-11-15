@@ -65,14 +65,20 @@ for the owner, not a design choice.
   the state and the clock), and a page's own actions sit
   in its body.
 - **Sidekick sits in the sidebar's Livestream group, under Destinations, on
-  ⌘8** (2026-11-14, plan 235 D6 and D8; from 2026-10-10 it sat second under
-  Studio on ⌘9, plan 174 D6 and D8). It keeps Clean cut and every other
-  feature, because the page sells Premium. Never move a feature out of it.
+  ⌘9, and the Avatar page sits in Setup, between Captions and Output, on
+  ⌘6** (plan 239, owner 2026-11-15; Sidekick moved to ⌘8 on 2026-11-14, plan
+  235 D6 and D8, and from 2026-10-10 it sat second under Studio on ⌘9, plan
+  174 D6 and D8). Sidekick keeps Community, Reports, Clean cut and every
+  other feature of the helper, because the page sells Premium: never move
+  one of them out of it. The character's settings (My avatars, the persona,
+  the look, reactions, motion and the greeting lines) live on Avatar.
 - **The sidebar's way home is its big button, and its keys run in order**
   (2026-11-14, plan 235 D5 and D8). Studio is a 40 px slab of the chrome
   primary's metal on every page, never Record's red; ⌘1–⌘9 open the rows top
-  to bottom. Its page row for Sidekick wears a plain glyph, `BuddyPageIcon`
-  (Phosphor UserSound, D7), like every other row.
+  to bottom, and ⌘0 opens the tenth, Library (plan 239 D6, owner
+  2026-11-15). The rows for Sidekick and Avatar wear plain glyphs,
+  `BuddyPageIcon` (Phosphor UserSound, plan 235 D7) and `AvatarPageIcon`
+  (Phosphor Smiley, plan 239), like every other row.
 - **A click on a live chat row puts the message on stream**, and a click on
   the live row takes it off (2026-10-10, D10; plans 055 and 151). There is no
   select-first step and no separate Show button.
@@ -93,8 +99,10 @@ for the owner, not a design choice.
   broadcast convention. Everywhere else the state is "On air".
 - **On macOS the brand lives in About and the Dock**, never in the sidebar
   (2026-09-23).
-- **The Sidekick mark is the real artwork**, never a redrawn glyph (2026-10-04;
-  see [Icons](#icons)).
+- **Sidekick's mark is its plain glyph, and the stone artwork is the default
+  avatar's** (plan 239 D7, owner 2026-11-15; from 2026-10-04 the artwork was
+  Sidekick's mark). The artwork is always the real image, never a redrawn
+  glyph. See [Icons](#icons).
 
 ## The window family
 
@@ -243,17 +251,19 @@ Everything except ⌘K uses the desktop scale.
   row, right above Session; a page's own actions sit in its body (a filter bar, a
   section header, or the PageHeader row). The toolbar never scrolls; only
   `PaneBody` does.
-- **Sidebar** (plan 174 D8, plan 235).
+- **Sidebar** (plan 174 D8, plan 235, plan 239).
   - The top row holds the traffic lights and the ⌘K button.
   - Studio ⌘1 leads as a 40 px `chrome-fill` slab (the chrome primary's
     metal: silver in dark, black chrome in light) with a 20 px icon, which
     fills while Studio is the page you're on. The live dot and the clock
     show on it while a recording or livestream runs, in the slab's ink.
   - "Setup" labels the pages you configure between sessions: Sources ⌘2,
-    Scene ⌘3, Assets ⌘4, Captions ⌘5, Output ⌘6.
-  - "Livestream" labels Destinations ⌘7 (the page that was Livestream) and
-    Buddy ⌘8 (owner call). Library ⌘9 follows under no label: a group of
-    one row carries none. ⌘1–⌘9 run down the rows in order.
+    Scene ⌘3, Assets ⌘4, Captions ⌘5, Avatar ⌘6, Output ⌘7 (plan 239, owner
+    2026-11-15: the avatar is part of the picture).
+  - "Livestream" labels Destinations ⌘8 (the page that was Livestream) and
+    Sidekick ⌘9 (owner call). Library ⌘0 follows under no label: a group of
+    one row carries none. ⌘1–⌘9, then ⌘0, run down the rows in order (plan
+    239 D6, owner 2026-11-15).
   - Settings (⌘,) sits in a bottom block above the account row. Health has
     no row: the status bar's state is its door (D9).
   - Section labels are `SectionLabel` (11 px / 600, tertiary). Rows are
@@ -272,12 +282,13 @@ Everything except ⌘K uses the desktop scale.
   a hairline between sections, and 16 px padding. No border, background,
   radius, or shadow.
 - **Pages with tabs** (Settings, plan 064; Sidekick, plan 150; Destinations,
-  plan 174): `PageTabs`, one segmented `TabsList` in a `PaneStrip` pinned
-  under the toolbar (`border-b px-gutter py-2`). Only the region under it
-  scrolls: the page spreads `PANE_OWNS_SCROLL`, so `PaneBody` stops
-  scrolling for it. The last tab used is remembered on this device, deep
-  links open a named tab (`openWorkspaceTab(tab, subTab?)`), and ⌘K lists
-  every tab. A filter bar pinned under the toolbar is a `PaneStrip` too.
+  plan 174; Avatar, plan 239): `PageTabs`, one segmented `TabsList` in a
+  `PaneStrip` pinned under the toolbar (`border-b px-gutter py-2`). Only the
+  region under it scrolls: the page spreads `PANE_OWNS_SCROLL`, so
+  `PaneBody` stops scrolling for it. The last tab used is remembered on this
+  device, deep links open a named tab (`openWorkspaceTab(tab, subTab?)`),
+  and ⌘K lists every tab. A filter bar pinned under the toolbar is a
+  `PaneStrip` too.
   - Each tab answers one question.
   - A tab body is a `ConfigGrid` of two sections with `CONFIG_GRID_PAIR`,
     or a `PageStack` for one.
@@ -300,7 +311,7 @@ Everything except ⌘K uses the desktop scale.
   `ListRowButton` over itself. A fact row that jumps to the page owning its
   value is a `NavigableRow` (icon, label, value, chevron).
   Cards remain only for objects with a picture (scene thumbnails, takeovers,
-  Sidekicks, library items): `MediaCard`, 8 px radius, white 4% fill, a 1 px
+  avatars, library items): `MediaCard`, 8 px radius, white 4% fill, a 1 px
   hairline, no shadow; `selected` is a brighter rim, never a colour.
   Sources (plan 173) is the reference for rows that carry controls: one
   `SourceItem` per source (`components/sources/source-item.tsx`), a header
@@ -369,9 +380,19 @@ links home.
   between them.
 - **The local file**: Output ("Where recordings go", quality). Recordings
   themselves live in Library.
-- **Sidekick**: the Sidekick page (Profile, Chat, Voice, Reports, Clean cut)
-  creates and sets Sidekick up; the Stream Manager's Sidekick pane operates it
-  live.
+- **Avatar** (plan 239, owner 2026-11-15): the Avatar page (Setup, ⌘6;
+  tabs Profile and Greetings) creates and sets up the character on the
+  stream: My avatars, Name and personality with About you, the Look section
+  (Still or Alive, Test, Import moves…, Create), Reactions, Motion and the
+  greeting lines. Its status row says where the avatar shows and links to
+  Scene ("Place on Scene"), never a third copy of the switches: the Scene
+  canvas places it and holds Show on stream and Show in recording, and the
+  Avatar block of the Stream Manager's Sidekick pane operates it live.
+- **Sidekick** (plan 239, owner 2026-11-15): the Sidekick page (Overview,
+  Chat, Community, Voice, Reports, Clean cut) sets up the helper. Cloud AI's
+  one home is Overview; "Write greetings with AI" sits in Chat → Replies
+  beside Answers and Banter, because it is Sidekick writing. The Sidekick
+  block of the Stream Manager's Sidekick pane operates it live.
 - **Health**: no sidebar row. The status bar state, "Open Health" on a
   degraded alert or an error toast, Settings → About and ⌘K open it. The
   support bundle's one home is Health (`SupportBundleButton`).
@@ -517,14 +538,24 @@ made it chat first: one thin stats bar and fewer words.
 - **ScrollArea content is a block** (plan 177): `ui/scroll-area.tsx`
   overrides Radix's `display: table` wrapper, which let one long unbreakable
   row widen every row past the pane. Never reintroduce it per call site.
-- **The Sidekick pane** has one header: Sidekick's identity (the living preview at
-  32 px, the name, the bubble while one is up), the Alpha tag, listening,
-  the status and the **Sidekick Live** switch. Under it, "Chat posting" is a
-  `SegmentedControl` (Off · Suggest · Auto) with the chosen mode's meaning
-  as a line; it never turns Sidekick on. Greetings, Answers and Banter are
-  read-only summary chips that link to their one home, Sidekick → Chat. The
-  footer holds the Say box, the reaction chips and the "{name} on stream"
-  switch. Every card that waits on the streamer is a `BuddyCard`.
+- **The Sidekick pane** is two blocks (plan 239, owner 2026-11-15), and
+  nothing shows twice. The **Sidekick block** is on top and takes the
+  height: one header with Sidekick's glyph and name, the Alpha tag,
+  listening, the status and the **Sidekick Live** switch, then the command
+  strip, the cards, the listening card and the triage list. The **Avatar
+  block** sits at the foot under one hairline, with no card around it: the
+  avatar's identity (the living preview at 32 px, the name, the bubble while
+  one is up), then "{name} talks", a `SegmentedControl` (Off · Bubble ·
+  Suggest, plan 211) with the chosen value's meaning as a line that names
+  who speaks. It never turns Sidekick on, and nothing said on its own
+  reaches chat. Greetings, Answers and Banter are read-only summary chips
+  that link to their one home: Greetings to Avatar → Greetings, Answers and
+  Banter to Sidekick → Chat. Then the Say box, the reaction chips and the
+  "{name} on stream" switch. While Sidekick Live writes lines in Bubble and
+  the avatar is on no output, the off-picture notice offers "Use Suggest"
+  beside "Show on stream", through the one posting consent (D3). In a short
+  window the pane scrolls as a whole. Every card that waits on the streamer
+  is a `BuddyCard`.
 - **Proof.** `pnpm probe:comments-window` sweeps 320/480/640/800/1040/1280.
   It fails on any overflow, a stats bar taller than one row, main stats
   apart or clipped, a stat cut at the bar's edge, a hidden viewer count, a
@@ -680,23 +711,31 @@ moved onto the utility.
   terms, the build pipeline (`pnpm icons:build`), and the semantic audit.
   Copy never names an icon by its component name ("Trash", not
   `DeleteIcon`); the copy guard fails on it.
-- **The Sidekick mark** (plan 164) is the owner's stone golem, always the
-  real artwork, never a redrawn glyph (the plan 149 owner call, 2026-10-04).
+- **Sidekick's mark is its glyph** (plan 239 D7, owner 2026-11-15).
+  Sidekick wears `BuddyPageIcon` (Phosphor UserSound) wherever the helper
+  shows: its sidebar row and ⌘K group, the Stream Manager pane's header and
+  cards, the Studio's session row, Library's "Sidekick report", and
+  `SidekickMark` (`components/sidekick-mark.tsx`, the glyph on a quiet
+  monochrome tile, `md` or `lg`) on its page's status row and in the
+  Sidekick Live consent dialog. The Avatar page's row wears `AvatarPageIcon`
+  (Phosphor Smiley). Both are plain glyphs like their neighbours, filled
+  while they are the page you're on.
+- **The avatar's artwork** (plan 164) is the owner's stone golem, Flint, the
+  default avatar: always the real artwork, never a redrawn glyph (the plan
+  149 owner call, 2026-10-04), and only on avatar surfaces since plan 239.
   The masters and their export commands live in `assets/brand/buddy/`.
-  - The Buddy page's row in the sidebar and in ⌘K's page list is the page,
-    not Buddy: it wears `BuddyPageIcon` (Phosphor UserSound), a plain glyph
-    like its neighbours, filled while it is the page you're on (plan 235
-    D7). The artwork stays on the Buddy page's intro, the consent dialog,
-    the Stream Manager's Buddy pane and chat rows.
   - `BuddyIcon` is the emblem at icon size: an `<svg>` wrapping the image,
     so `svg`-based slot styles size it like its neighbours. It is the one
     full-colour icon in the registry. `weight` and `currentColor` never
-    change it, so a selected row keeps the same image.
+    change it, so a selected row keeps the same image. `picture` swaps in
+    the streamer's own avatar: ⌘K's Avatar group wears it through
+    `OwnBuddyIcon`.
   - `BuddyEmblem` is the emblem larger, at 32 px (`md`) or 56 px (`lg`)
-    tall: the Sidekick page's intro line and the Sidekick Live consent dialog.
+    tall, with the avatar's own picture when it has one: the Avatar page's
+    status row and the posting consent dialog ("Let {name} post as you?").
   - It is never tinted or filtered, and one file serves both themes. Its
     colours are the art, not a status.
-  - The Videorc app icon stays the orc-head orb. The Sidekick is not the app's
+  - The Videorc app icon stays the orc-head orb. The avatar is not the app's
     logo.
 
 ## Motion
@@ -914,14 +953,20 @@ do not hand-roll it.
 - DON'T add a font, a component library, or a direct icon-package import.
 - DON'T ship an audio control with nothing behind it: no pan, solo, monitor
   or player volume until the backend can do it (plan 093).
-- DO call the companion **Sidekick** in all copy (or the name the streamer
-  gave it), and **Sidekicks** for more than one (plan 236; it was Buddy from
-  plan 171 until speech to text kept hearing "Buddy" as "body"). Code and
-  wire names stay `cohost` and `buddy` (`/api/buddy/*`, `cohost.buddy*`,
-  `buddy_say`, test ids, saved values); saved values keep `orcle` (plan 170
-  D22), like the moderation source `orcle-voice`.
+- DO call the helper **Sidekick**, with no article, and the character on
+  the stream **the avatar** (plan 239, owner 2026-11-15): "avatar" is a
+  lower-case common noun in a sentence ("your avatar", "My avatars"),
+  "Avatar" names the page and the Stream Manager block, and the character
+  goes by its own name wherever one is at hand ("{name} on stream", "{name}
+  talks"). Sidekick writes, the avatar says. Sidekick was Buddy from plan
+  171 until speech to text kept hearing "Buddy" as "body" (plan 236), and
+  it named the character too until plan 239. Code and wire names stay
+  `cohost` and `buddy` (`/api/buddy/*`, `cohost.buddy*`, `buddy_say`,
+  `set_buddy`, `videorc://buddy`, the page id `ai`, test ids, saved values);
+  saved values keep `orcle` (plan 170 D22), like the moderation source
+  `orcle-voice`.
   "golem" names only the stone golem creature (plan 171 D4):
   its slug `golem`, its kind "Golem", its art masters and golem example text;
-  its name is Sidekick. Guard tests fail on "Orcle" and on "Golem" anywhere
-  else in the renderer's sources and the docs, and on "Buddy" in any text a
-  person reads.
+  its name is Flint (plan 239 D2). Guard tests fail on "Orcle" and
+  on "Golem" anywhere else in the renderer's sources and the docs, and on
+  "Buddy" in any text a person reads.

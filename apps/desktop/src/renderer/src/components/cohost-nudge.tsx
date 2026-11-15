@@ -1,4 +1,4 @@
-import { BuddyIcon } from '@/components/icons'
+import { BuddyPageIcon } from '@/components/icons'
 import type { ReactElement } from 'react'
 
 import { Button } from '@/components/ui/button'
@@ -23,7 +23,7 @@ export function CohostNudge({
       className="mt-1.5 flex items-center gap-2 px-0.5 py-1 text-[11px] text-muted-foreground"
       data-slot="cohost-nudge"
     >
-      <BuddyIcon aria-hidden className="size-4 shrink-0" weight="duotone" />
+      <BuddyPageIcon aria-hidden className="size-4 shrink-0" />
       <span className="min-w-0 flex-1">
         Sidekick is off. It can group your chat&apos;s questions and draft replies.
       </span>

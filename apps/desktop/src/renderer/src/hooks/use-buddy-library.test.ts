@@ -121,7 +121,8 @@ describe('createBuddyLibraryController (plan 170 D12, D13)', () => {
       pending: null,
       problem: {
         code: 'cohost-library-not-implemented',
-        message: `Couldn't update your Sidekick library. ${UNKNOWN_REASON}`
+        // The library is the avatar's (plan 239 D1).
+        message: `Couldn't update your avatar library. ${UNKNOWN_REASON}`
       }
     })
     expect(controller.getState().problem?.message).not.toContain(raw)

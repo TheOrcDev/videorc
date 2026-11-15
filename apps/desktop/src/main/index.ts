@@ -3038,7 +3038,8 @@ function createWindow(): void {
     if (!commandModifierHeld(input, process.platform)) {
       return
     }
-    const isDigit = input.key >= '1' && input.key <= '9'
+    // ⌘0 opens the tenth page, Library (plan 239 D6).
+    const isDigit = input.key >= '0' && input.key <= '9'
     if (isDigit || input.key === ',') {
       event.preventDefault()
       if (mainWindow) {
@@ -3627,7 +3628,8 @@ function attachAuxWindowShortcuts(window: BrowserWindow): void {
       }
       return
     }
-    const isDigit = input.key >= '1' && input.key <= '9'
+    // ⌘0 opens the tenth page, Library (plan 239 D6).
+    const isDigit = input.key >= '0' && input.key <= '9'
     if (isDigit || input.key === ',') {
       event.preventDefault()
       if (mainWindow && !mainWindow.isDestroyed()) {

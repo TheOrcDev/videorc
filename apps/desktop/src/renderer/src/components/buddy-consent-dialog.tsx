@@ -1,6 +1,6 @@
 import type { ReactElement } from 'react'
 
-import { BuddyEmblem } from '@/components/buddy-emblem'
+import { SidekickMark } from '@/components/sidekick-mark'
 import { Button } from '@/components/ui/button'
 import {
   Dialog,
@@ -35,10 +35,10 @@ export function BuddyConsentDialog({
     >
       <DialogContent data-testid="buddy-consent-dialog" showCloseButton={false}>
         <DialogHeader>
-          {/* Buddy's emblem leads, the way the Videorc logo leads
-              permissions onboarding (plan 149). */}
+          {/* Sidekick's mark leads (plan 239 D7), the way the Videorc logo
+              leads permissions onboarding (plan 149). */}
           <div className="flex items-center gap-3">
-            <BuddyEmblem size="lg" />
+            <SidekickMark size="lg" />
             <div className="flex flex-col gap-1">
               <DialogTitle>Turn on Sidekick Live?</DialogTitle>
               <DialogDescription>

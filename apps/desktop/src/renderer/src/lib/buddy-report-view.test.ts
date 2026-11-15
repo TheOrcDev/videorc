@@ -670,13 +670,14 @@ describe('report view', () => {
     expect(reportGreetingSkips({ stale: 2, deduped: 1200 })?.sentence).toBe(
       `Greetings skipped: 2 were too old to greet, ${(1200).toLocaleString()} were already greeted.`
     )
-    // Plan 211 D9: Bubble with the Buddy on no output, named; "Buddy" without a name.
+    // Plan 211 D9: Bubble with the avatar on no output, named; the default
+    // avatar's name, Flint, without one (plan 239 D2).
     expect(reportGreetingSkips({ noBubble: 46 }, 'Golmar')).toEqual({
       total: '46',
       sentence: "Greetings skipped: 46 came while Golmar wasn't on stream."
     })
     expect(reportGreetingSkips({ noBubble: 2, modeOff: 3 })?.sentence).toBe(
-      "Greetings skipped: 3 came while Sidekick was set to Off, 2 came while Sidekick wasn't on stream."
+      "Greetings skipped: 3 came while Flint was set to Off, 2 came while Flint wasn't on stream."
     )
     // Absent (an older report, or every greeting went out) or all zero: no line.
     expect(reportGreetingSkips(undefined)).toBeNull()

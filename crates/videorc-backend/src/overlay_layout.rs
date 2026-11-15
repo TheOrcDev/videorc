@@ -138,7 +138,7 @@ impl OverlayItem {
         match self {
             OverlayItem::Highlight => "highlights",
             OverlayItem::Captions => "captions",
-            OverlayItem::Buddy => "the Sidekick",
+            OverlayItem::Buddy => "the avatar",
             OverlayItem::Chat => "chat",
         }
     }
@@ -1365,7 +1365,7 @@ mod tests {
                 },
                 OverlayStartNotice {
                     item: OverlayNoticeItem::Buddy,
-                    notice: "Both the stream and the recording will include the Sidekick: this computer shares one encode for them.".to_string(),
+                    notice: "Both the stream and the recording will include the avatar: this computer shares one encode for them.".to_string(),
                 },
             ]
         );
@@ -1383,7 +1383,7 @@ mod tests {
             vec![
                 "Recording will include highlights while streaming vertical.",
                 "Recording will include captions while streaming vertical.",
-                "The horizontal stream will include the Sidekick while streaming vertical.",
+                "The horizontal stream will include the avatar while streaming vertical.",
             ]
         );
         assert_eq!(

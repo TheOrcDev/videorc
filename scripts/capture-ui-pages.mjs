@@ -75,15 +75,24 @@ const setTheme = async (theme) => {
     process.exit(1)
   }
 }
-// Pages by tab id. The Buddy tab (id `ai`, ⌘8; plan 119) doubles as a probe:
-// it must render Buddy Live's status (its Profile tab, id `live`), or the run
-// fails at the end. The profile under the output folder outlives a run and
-// the tab reopens on the sub-tab used last, so the probe selects Profile
-// itself, with a click: Base UI tabs switch on click, not mousedown.
+// Pages by tab id. The Sidekick page (id `ai`, ⌘9; plan 119) doubles as a
+// probe: it must render Sidekick Live's status (its Overview tab, id `live`),
+// or the run fails at the end. So must the Avatar page (id `avatar`, ⌘6; plan
+// 239) with its status row (its Profile tab). The profile under the output
+// folder outlives a run and each page reopens on the sub-tab used last, so
+// the probe selects its tab itself, with a click: Base UI tabs switch on
+// click, not mousedown.
 // Health has no sidebar row: the status bar's state is its door (`door`).
 const pages = [
   { tab: 'studio' },
   { tab: 'ai', name: 'buddy', subTab: 'live', mustShow: '[data-slot="buddy-live-status"]' },
+  {
+    tab: 'avatar',
+    name: 'avatar',
+    subTab: 'profile',
+    subTabAttribute: 'data-videorc-avatar-tab',
+    mustShow: '[data-slot="avatar-status"]'
+  },
   { tab: 'sources' },
   { tab: 'layout' },
   { tab: 'assets' },
@@ -111,7 +120,7 @@ const shoot = async (name, tag, size, theme) => {
 // Destinations, plan 174): shoot each of its tabs. Triggers are found by the
 // page's data attribute when it has one, else by the strip's tab role.
 const stripTabs = async (selector) => cmd('eval-js', {
-  code: `return [...document.querySelectorAll(${JSON.stringify(selector)})].map((el, index) => ({ index, id: el.getAttribute('data-videorc-settings-tab') ?? el.getAttribute('data-videorc-buddy-tab') ?? el.textContent.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-') }))`
+  code: `return [...document.querySelectorAll(${JSON.stringify(selector)})].map((el, index) => ({ index, id: el.getAttribute('data-videorc-settings-tab') ?? el.getAttribute('data-videorc-buddy-tab') ?? el.getAttribute('data-videorc-avatar-tab') ?? el.textContent.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-') }))`
 }).then(r => r.result ?? [], () => [])
 const shootStripTabs = async (name, selector, tag, size, theme) => {
   const tabs = await stripTabs(selector)
@@ -126,17 +135,17 @@ const shootStripTabs = async (name, selector, tag, size, theme) => {
   return tabs
 }
 const shootAll = async (tag, size, theme) => {
-  for (const { tab, name = tab, subTab, mustShow, door } of pages) {
+  for (const { tab, name = tab, subTab, subTabAttribute, mustShow, door } of pages) {
     try {
       if (door) {
         await cmd('eval-js', {
           code: `(await waitFor(${JSON.stringify(door)}, 30000)).click(); await sleep(600); return true`
         })
       } else if (subTab) {
-        // The Buddy tab is a lazy chunk: its first open in the dev app can take
-        // longer than open-tab's 8 s wait on a busy machine.
+        // A page with tabs is a lazy chunk: its first open in the dev app can
+        // take longer than open-tab's 8 s wait on a busy machine.
         await cmd('open-tab', { tab })
-        const trigger = `[data-videorc-buddy-tab="${subTab}"]`
+        const trigger = `[${subTabAttribute ?? 'data-videorc-buddy-tab'}="${subTab}"]`
         await cmd('eval-js', {
           code: `(await waitFor(${JSON.stringify(trigger)}, 30000)).click(); await waitFor(${JSON.stringify(mustShow)}, 30000); return true`
         })
@@ -154,8 +163,12 @@ const shootAll = async (tag, size, theme) => {
       await shootStripTabs(name, '[data-videorc-settings-tab]', tag, size, theme)
     } else if (name === 'buddy') {
       const buddyTabs = await shootStripTabs(name, '[data-videorc-buddy-tab]', tag, size, theme)
-      // Plan 225 D12: Profile, Chat, Community, Voice, Reports, Clean cut.
+      // Plan 225 D12, plan 239: Overview, Chat, Community, Voice, Reports, Clean cut.
       if (buddyTabs.length !== 6) failures.push(`buddy tabs: expected 6, found ${buddyTabs.length}`)
+    } else if (name === 'avatar') {
+      const avatarTabs = await shootStripTabs(name, '[data-videorc-avatar-tab]', tag, size, theme)
+      // Plan 239: Profile, Greetings.
+      if (avatarTabs.length !== 2) failures.push(`avatar tabs: expected 2, found ${avatarTabs.length}`)
     } else if (name === 'streaming') {
       await shootStripTabs('livestream', 'main [data-slot="pane-strip"] [role="tab"]', tag, size, theme)
     }

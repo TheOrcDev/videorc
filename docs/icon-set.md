@@ -21,10 +21,23 @@ The registry names icons by **meaning**, not by shape: call sites ask for
   variants, two pins, two locks and two spinners — nobody could have answered
   "which icons does Videorc use?" without a grep.
 
-Today (plan 235, 2026-11-14): **95 semantic slots over 91 glyphs** in the shared registry. Eight of the glyphs sit outside the Nucleo count: seven platform brand marks (`KickIcon` is a hand-drawn inline SVG, plan 063; `YoutubeIcon` is YouTube's official icon file, plan 165; `XPlatformIcon` is the path from X's partner kit, plan 167; `TwitchIcon`, `TiktokIcon`, `InstagramIcon` and `FacebookIcon` come from Phosphor) and `BuddyIcon`, Sidekick's own mark (the owner's Sidekick artwork since plan 164; plan 119 added the slot). That leaves 83 inside the Nucleo count. The Stream Manager adds seven slots in its own registry, `components/stream-manager/activity-icons.tsx`: six activity slots (plan 055: follow, supporter, gift, tip, raid, announcement) and the stats bar's viewer count (plan 057). The shared registry ships in every window's eager chunk, and these are only drawn in the Stream Manager. They count toward the same ceiling. Four slots share a glyph
+Today (plan 239, 2026-11-15): **97 semantic slots over 93 glyphs** in the shared registry. Eight of the glyphs sit outside the Nucleo count: seven platform brand marks (`KickIcon` is a hand-drawn inline SVG, plan 063; `YoutubeIcon` is YouTube's official icon file, plan 165; `XPlatformIcon` is the path from X's partner kit, plan 167; `TwitchIcon`, `TiktokIcon`, `InstagramIcon` and `FacebookIcon` come from Phosphor) and `BuddyIcon`, the default avatar's artwork (Flint, the owner's stone character, since plan 164; plan 119 added the slot, and plan 239 D7 gave it to the avatar). That leaves 85 inside the Nucleo count. The Stream Manager adds seven slots in its own registry, `components/stream-manager/activity-icons.tsx`: six activity slots (plan 055: follow, supporter, gift, tip, raid, announcement) and the stats bar's viewer count (plan 057). The shared registry ships in every window's eager chunk, and these are only drawn in the Stream Manager. They count toward the same ceiling. Four slots share a glyph
 (`StudioIcon`/`CameraIcon`, `SourcesIcon`/`DisplayIcon`, `AssetsIcon`/`ImageIcon`,
 `OutputIcon`/`RecordIcon`) — those are exactly the places the audit below
 expects to diverge.
+
+Plan 239 (2026-11-15) added `AvatarPageIcon` (Smiley) for the Avatar page's
+row in the sidebar: a face, the character on the stream, a meaning no slot
+had. It is one more glyph inside the Nucleo count. `BuddyPageIcon`
+(UserSound) is now Sidekick's mark wherever the helper shows (D7): its page
+row, ⌘K's Sidekick group, the Stream Manager pane's header and cards, the
+Studio's session row, Library's "Sidekick report", and the `SidekickMark`
+tile on its page and in its consent dialog.
+`BuddyIcon` and `BuddyEmblem` keep the artwork for the avatar: its own
+picture where one is at hand (⌘K's Avatar group wears it through
+`OwnBuddyIcon`), else Flint's. A recount for this plan found the registry at
+96 slots over 92 glyphs before the new slot, one more of each than the plan
+235 count said.
 
 Plan 235 (2026-11-14) added `BuddyPageIcon` (UserSound) for the Buddy
 page's row in the sidebar and in ⌘K's page list (D7, the owner's pick from
@@ -91,8 +104,8 @@ lands**:
 
 1. **Count.** 100 is the hard ceiling. `pnpm icons:build` refuses to build a
    larger export rather than leaving the count to whoever last added a glyph.
-   With 83 registry glyphs and the Stream Manager's seven inside the count,
-   the app has about 10 of headroom; the audit's divergences would spend
+   With 85 registry glyphs and the Stream Manager's seven inside the count,
+   the app has about 8 of headroom; the audit's divergences would spend
    about 3 of it.
 
 2. **Where the SVGs may live.** Videorc's repository is public and AGPL, which
@@ -175,17 +188,17 @@ like-for-like glyph.
 
 ### Export shopping list
 
-The 95 slots are the authoritative list — read them straight out of
+The 97 slots are the authoritative list: read them straight out of
 `components/icons.tsx`, where each is grouped and documented. Export one SVG
 per slot name in kebab-case (`sources-icon.svg` → `SourcesIcon`), plus solid
 variants for the filled slots noted above.
 
 Eight slots are **not** part of any icon-set migration. `BuddyIcon` is
-Videorc's own mark. `TwitchIcon`, `TiktokIcon`, `InstagramIcon`,
-`FacebookIcon` (Phosphor's `FacebookLogo`, plan 206), `KickIcon`,
-`XPlatformIcon` and `YoutubeIcon` are third-party brand marks with their own
-trademark rules, and the design language keeps app/source marks as the only
-full-colour icons on screen.
+Videorc's own artwork, the default avatar's (plan 239 D7). `TwitchIcon`,
+`TiktokIcon`, `InstagramIcon`, `FacebookIcon` (Phosphor's `FacebookLogo`,
+plan 206), `KickIcon`, `XPlatformIcon` and `YoutubeIcon` are third-party
+brand marks with their own trademark rules, and the design language keeps
+app/source marks as the only full-colour icons on screen.
 
 `XPlatformIcon` is the X mark from X's partner icon kit
 (`assets/brand/x/`, plan 167): the kit's path drawn inline, pure black in

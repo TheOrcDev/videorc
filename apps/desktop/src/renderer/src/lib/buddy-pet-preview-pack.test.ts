@@ -213,7 +213,7 @@ describe('loadBuddyPreviewPack: Still (D2 flat pack)', () => {
       fake
     )
     expect(fake.loadUrl).toHaveBeenLastCalledWith('bundled:idle.webp')
-    expect(pack.notes[0]).toBe('The idle image would not load; the default Sidekick shows instead.')
+    expect(pack.notes[0]).toBe('The idle image would not load; the default avatar shows instead.')
     expect(pack.cells.size).toBe(4)
   })
 

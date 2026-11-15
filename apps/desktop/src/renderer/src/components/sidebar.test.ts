@@ -95,8 +95,8 @@ function rowOf(markup: string, trigger: string): string {
   return pattern.exec(markup)?.[0] ?? ''
 }
 
-describe('sidebar zones (plan 174 D8, plan 235 D6)', () => {
-  it('leads with Studio, then Setup, then Livestream (Destinations and Buddy) and Library, with Settings at the bottom', () => {
+describe('sidebar zones (plan 174 D8, plan 235 D6, plan 239)', () => {
+  it('leads with Studio, then Setup (Avatar before Output), then Livestream (Destinations and Sidekick) and Library, with Settings at the bottom', () => {
     const markup = renderSidebar()
     // Page ids and legacy trigger ids never change: Destinations is `streaming`.
     expect(triggers(markup)).toEqual([
@@ -105,6 +105,7 @@ describe('sidebar zones (plan 174 D8, plan 235 D6)', () => {
       'layout',
       'assets',
       'captions',
+      'avatar',
       'recording',
       'streaming',
       'ai',
@@ -117,6 +118,7 @@ describe('sidebar zones (plan 174 D8, plan 235 D6)', () => {
     )
     expect(labels).toEqual(['Setup', 'Livestream'])
     expect(rowOf(markup, 'streaming')).toContain('>Destinations<')
+    expect(rowOf(markup, 'avatar')).toContain('>Avatar<')
     // Settings sits in the bottom block, after Library, above the account row.
     const bottom = markup.indexOf('data-testid="sidebar-bottom"')
     expect(bottom).toBeGreaterThan(markup.indexOf('data-videorc-tab-trigger="library"'))
@@ -124,11 +126,14 @@ describe('sidebar zones (plan 174 D8, plan 235 D6)', () => {
     expect(markup).not.toContain('data-videorc-tab-trigger="diagnostics"')
   })
 
-  // Plan 235 D8: the shortcuts run down the rows, ⌘1 to ⌘9.
-  it('puts ⌘1–⌘9 on the rows top to bottom', () => {
+  // Plan 235 D8: the shortcuts run down the rows, ⌘1 to ⌘9; plan 239 D6:
+  // Library, the tenth page, takes ⌘0.
+  it('puts ⌘1–⌘9 on the rows top to bottom, then ⌘0 on Library', () => {
     const markup = renderSidebar({ platform: 'darwin' })
     const keys = [...markup.matchAll(/aria-keyshortcuts="Meta\+(\d)"/g)].map((match) => match[1])
-    expect(keys).toEqual(['1', '2', '3', '4', '5', '6', '7', '8', '9'])
+    expect(keys).toEqual(['1', '2', '3', '4', '5', '6', '7', '8', '9', '0'])
+    expect(rowOf(markup, 'avatar')).toContain('aria-keyshortcuts="Meta+6"')
+    expect(rowOf(markup, 'library')).toContain('aria-keyshortcuts="Meta+0"')
   })
 
   // Plan 235 D7: a plain glyph like its neighbours, never the Buddy artwork,
@@ -140,6 +145,22 @@ describe('sidebar zones (plan 174 D8, plan 235 D6)', () => {
     expect(idle).not.toContain('buddy-emblem')
     expect(idle).not.toContain('aria-current')
     const current = rowOf(renderSidebar({ active: 'ai' }), 'ai')
+    expect(current).toContain('aria-current="page"')
+    expect(current).toContain('chrome-plate')
+  })
+
+  // Plan 239: the avatar's row wears a plain glyph too; the streamer's own
+  // avatar shows on the page itself.
+  it('draws the Avatar row with a plain glyph of its own, filled while it is the page', () => {
+    const idle = rowOf(renderSidebar(), 'avatar')
+    expect(idle).toContain('>Avatar<')
+    expect(idle).not.toContain('<image')
+    expect(idle).not.toContain('buddy-emblem')
+    expect(idle).not.toContain('aria-current')
+    expect(idle.replace(/>Avatar</, '')).not.toEqual(
+      rowOf(renderSidebar(), 'ai').replace(/>Sidekick</, '')
+    )
+    const current = rowOf(renderSidebar({ active: 'avatar' }), 'avatar')
     expect(current).toContain('aria-current="page"')
     expect(current).toContain('chrome-plate')
   })

@@ -45,12 +45,15 @@ happens underneath.
   YouTube (other platforms ingest up to 1080p).
 - **Live captions.** Streaming speech-to-text (~1s latency) with optional
   caption burn-in on the stream, the recording, both, or neither.
-- **Sidekick, your AI companion.** Name it, give it a personality and looks, and
-  it catches questions from every platform with a drafted reply you approve,
-  flags spam and abuse against your own rules, greets first-timers and reminds
-  you of your promises. It posts only in the modes you turn on, and everything
-  is off by default. Cloud AI is opt-in, and after each stream a short report
-  stays on your computer. See [docs/buddy.md](docs/buddy.md).
+- **Your avatar and Sidekick.** Your avatar is the character on your stream:
+  name it, give it a personality and a look, and it greets people and reacts
+  in a comic bubble, free. Sidekick is the AI helper only you see: it catches
+  questions from every platform with a drafted reply you approve, flags spam
+  and abuse against your own rules, points out first-timers and reminds you
+  of your promises. It posts in chat only when you click, and everything is
+  off by default. Cloud AI is opt-in, and after each stream a short report
+  stays on your computer. See [docs/avatar.md](docs/avatar.md) and
+  [docs/buddy.md](docs/buddy.md).
 - **Platform-aware preview.** macOS uses a detached native CAMetalLayer preview.
   Windows Alpha currently uses the documented uncompressed, latest-wins Electron
   proof surface; it must not be described as CAMetalLayer or as final native

@@ -16,8 +16,8 @@ import { Switch } from '@/components/ui/switch'
 import { setCohostSensitivity, useCohostSensitivity } from '@/hooks/use-cohost-sensitivity'
 import { useStudioChat, useStudioCore } from '@/hooks/use-studio'
 import type { CohostAutoChat, CohostSettings, CohostSettingsPatch, CohostTone } from '@/lib/backend'
-import { BUDDY_POSTS_PROMISE } from '@/lib/buddy-auto-chat-view'
-import { buddyTabLabel } from '@/lib/buddy-tabs'
+import { AVATAR_TAB_LABEL } from '@/lib/avatar-tabs'
+import { BUDDY_POSTS_PROMISE, buddyDisplayName, greetingsAi } from '@/lib/buddy-auto-chat-view'
 import {
   COHOST_LISTEN_CONSENT_SENTENCE,
   COHOST_SENSITIVITIES,
@@ -153,9 +153,12 @@ export function CohostListenField({
 }
 
 /**
- * Replies (plan 150, Chat tab): how Buddy drafts the replies you approve.
- * The facts it answers from are "About you", under Name and personality
- * (plan 174 G-9): one name, one home.
+ * Replies (plan 150, Chat tab): how Sidekick writes the lines the avatar
+ * says, and drafts the replies you approve. The facts it answers from are
+ * "About you", under the avatar's Name and personality (plan 174 G-9, plan
+ * 239 D4): one name, one home. "Write greetings with AI" sits here since
+ * plan 239: it is Sidekick writing (Premium and cloud AI), while the lines
+ * themselves are the avatar's, on Avatar → Greetings.
  */
 export function BuddyRepliesSection({
   locked: lockedByTab = false
@@ -169,9 +172,10 @@ export function BuddyRepliesSection({
   }
   const autoChat = cohostSettings.autoChat
   const saveAutoChat = (next: CohostAutoChat): void => save({ autoChat: next })
+  const name = buddyDisplayName(cohostSettings.persona.name)
   return (
     <PanelSection
-      description={`How Sidekick writes its replies. It answers from About you, under Name and personality on the ${buddyTabLabel('live')} tab. In Bubble, Sidekick says them on stream; in Suggest, you post them.`}
+      description={`How Sidekick writes what ${name} says. It answers from About you, on the ${AVATAR_TAB_LABEL} page. In Bubble, ${name} says it on stream; in Suggest, you post it.`}
       title="Replies"
     >
       <FieldGroup variant="grouped">
@@ -179,7 +183,7 @@ export function BuddyRepliesSection({
             and cloud AI, like the rest of this tab. */}
         <CohostCooldownField
           cooldown={autoChat.answers.cooldownSeconds}
-          description="A reply when a viewer asks Sidekick by name, or after a minute to a question your notes answer. At most one per cooldown."
+          description={`A reply when a viewer asks ${name} directly, or after a minute to a question your notes answer. At most one per cooldown.`}
           enabled={autoChat.answers.enabled}
           id="cohost-answers"
           label="Answers"
@@ -197,6 +201,26 @@ export function BuddyRepliesSection({
           max={1800}
           onChange={(banter) => saveAutoChat({ ...autoChat, banter })}
         />
+        {/* Plan 192 D3, plan 239: Premium and cloud AI, like Answers and
+            Banter. The lines it writes from stay free on Avatar → Greetings. */}
+        <Field>
+          <div className="flex items-center justify-between gap-3">
+            <div className="flex min-w-0 flex-col gap-0.5">
+              <FieldLabel htmlFor="buddy-greetings-ai">Write greetings with AI</FieldLabel>
+              <FieldDescription>
+                {`In ${name}'s voice. Your line on ${AVATAR_TAB_LABEL} → Greetings is the example and the fallback.`}
+              </FieldDescription>
+            </div>
+            <Switch
+              checked={greetingsAi(autoChat.greetings)}
+              disabled={locked}
+              id="buddy-greetings-ai"
+              onCheckedChange={(ai) =>
+                saveAutoChat({ ...autoChat, greetings: { ...autoChat.greetings, ai } })
+              }
+            />
+          </div>
+        </Field>
         <Field>
           <FieldLabel>Reply tone</FieldLabel>
           <FieldDescription>How the drafted replies read before you edit them.</FieldDescription>

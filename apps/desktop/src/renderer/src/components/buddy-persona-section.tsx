@@ -34,6 +34,7 @@ import { BUDDY_ONBOARDING_STEP3 } from '@/lib/buddy-onboarding-copy'
 import { inlineUserError, toastUserError } from '@/lib/user-error'
 import { BuddyBubbleSample } from '@/components/buddy-bubble-sample'
 import { BUDDY_LIBRARY_CONTEXT_MAX_CHARS } from '../../../shared/buddy-library'
+import { DEFAULT_AVATAR_NAME } from '../../../shared/avatar-name'
 
 /**
  * The Buddy creation screen (plan 164 S-A4): name it, give it a personality,
@@ -100,7 +101,7 @@ export function BuddyPersonaSection(): ReactElement | null {
 
   return (
     <PanelSection
-      description="Name it, give it a personality and tell it about you. It answers to its name in chat and in voice; Stream Manager runs it while you're live."
+      description="Name it, give it a personality and tell it about you. With Sidekick, it answers viewers who ask it by name; Stream Manager runs it while you're live."
       title="Name and personality"
     >
       <div className="flex flex-wrap items-start gap-2" data-slot="buddy-header">
@@ -202,7 +203,7 @@ export function BuddyPersonaSection(): ReactElement | null {
         description={`${persona.name}'s name, personality, pictures and moves are deleted from this computer. Your greetings and chat settings stay.`}
         open={startOverOpen}
         testId="buddy-start-over"
-        title="Start over with a new Sidekick?"
+        title="Start over with a new avatar?"
         onCancel={() => setStartOverOpen(false)}
         onConfirm={() => void startOver()}
       />
@@ -275,7 +276,7 @@ function BuddyNameField({
         className="text-base font-medium"
         id="buddy-name"
         maxLength={BUDDY_NAME_MAX_CHARS}
-        placeholder="Sidekick"
+        placeholder={DEFAULT_AVATAR_NAME}
         value={draft}
         onBlur={commit}
         onChange={(event) => {

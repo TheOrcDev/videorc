@@ -1,5 +1,21 @@
 # Implementation Plans
 
+- 2026-11-15: [Plan 239](239-avatar-and-sidekick.md), the owner's ask: "our
+  sidekick is two things: a moderator and control for stream manager… the
+  avatar that goes on live stream. I want to separate those two."
+  BUILT 2026-11-15, all D1–D7 recommended (the golem is Flint); web
+  videorc-web#114 deploys first, then the desktop PR:
+  - Two products. The **avatar** is the character on the stream: free,
+    with its own page in the Setup group. **Sidekick** is the helper in
+    Stream Manager: Premium, unchanged, still under Livestream. Sidekick
+    writes, the avatar says.
+  - A page, pane and copy change. The engine is already split this way,
+    and every name a program reads stays (plan 236 D1).
+  - Web first (`/avatar`, `/avatar/create`, `/account/avatars`, 308s),
+    then one desktop PR (the Avatar page, the Stream Manager's two blocks,
+    the words and guards), then the Rust UI with its plan 236 pass.
+  - The official stone golem is now Flint (D2). Avatar takes ⌘6 in Setup,
+    and Library moves to ⌘0 (D6).
 - 2026-11-15: [Plan 238](238-a-calm-preview-start.md), the owner's ask: get rid
   of the "blue screen thing" that shows while Videorc loads, and show a loading
   state with better UX instead. BUILT 2026-11-15 in one PR, with the

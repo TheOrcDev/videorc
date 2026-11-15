@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { BuddyPageIcon } from './icons'
+import { AvatarPageIcon, BuddyPageIcon } from './icons'
 import {
   SIDEBAR_ZONES,
   STUDIO_PANELS,
@@ -49,18 +49,20 @@ describe('workspace navigation', () => {
     })
   })
 
-  // Plan 235 D8: the digits run down the sidebar, ⌘1 to ⌘9.
-  it('maps the pages in sidebar order (Captions ⌘5, Destinations ⌘7, Settings ⌘,)', () => {
+  // Plan 235 D8: the digits run down the sidebar, ⌘1 to ⌘9; plan 239 D6:
+  // Avatar takes ⌘6 and Library, the tenth page, ⌘0.
+  it('maps the pages in sidebar order (Captions ⌘5, Avatar ⌘6, Destinations ⌘8, Library ⌘0, Settings ⌘,)', () => {
     expect(WORKSPACE_SHORTCUTS.map((entry) => [entry.digit, entry.tab])).toEqual([
       ['1', 'studio'],
       ['2', 'sources'],
       ['3', 'layouts'],
       ['4', 'assets'],
       ['5', 'captions'],
-      ['6', 'recording'],
-      ['7', 'live'],
-      ['8', 'ai'],
-      ['9', 'library'],
+      ['6', 'avatar'],
+      ['7', 'recording'],
+      ['8', 'live'],
+      ['9', 'ai'],
+      ['0', 'library'],
       [',', 'settings']
     ])
     const digits = WORKSPACE_SHORTCUTS.filter((entry) => entry.digit !== ',')
@@ -93,13 +95,15 @@ describe('workspace navigation', () => {
     expect(WORKSPACE_SHORTCUTS).toHaveLength(reachable.length - noDigit.length)
   })
 
-  // Plan 235 D6: Destinations (the page that was Livestream) and Buddy share
-  // the labelled Livestream group, under Setup. Ids, legacy trigger ids and
-  // deep links stay: Buddy is `ai`, Destinations is `live` (`streaming`).
-  it('groups Destinations and Buddy under Livestream, between Setup and Library', () => {
+  // Plan 235 D6: Destinations (the page that was Livestream) and Sidekick
+  // share the labelled Livestream group, under Setup. Ids, legacy trigger ids
+  // and deep links stay: Sidekick is `ai`, Destinations is `live`
+  // (`streaming`). Plan 239: the avatar is part of the picture, so its page
+  // sits in Setup, before Output.
+  it('groups Destinations and Sidekick under Livestream, between Setup and Library, and Avatar in Setup', () => {
     expect(SIDEBAR_ZONES.map((zone) => [zone.id, zone.label ?? null, zone.pages])).toEqual([
       ['stage', null, ['studio']],
-      ['setup', 'Setup', ['sources', 'layouts', 'assets', 'captions', 'recording']],
+      ['setup', 'Setup', ['sources', 'layouts', 'assets', 'captions', 'avatar', 'recording']],
       ['livestream', 'Livestream', ['live', 'ai']],
       ['library', null, ['library']],
       ['system', null, ['settings']]
@@ -113,8 +117,19 @@ describe('workspace navigation', () => {
       label: 'Sidekick',
       icon: BuddyPageIcon
     })
-    expect(shortcutDigitFor('ai')).toBe('8')
+    expect(shortcutDigitFor('ai')).toBe('9')
     expect(workspaceTabLabel('ai')).toBe('Sidekick')
+    // Plan 239: a full page with a plain glyph of its own, never a Setup panel.
+    expect(WORKSPACE_TABS.find((tab) => tab.id === 'avatar')).toEqual({
+      id: 'avatar',
+      label: 'Avatar',
+      icon: AvatarPageIcon
+    })
+    expect(isStudioPanel('avatar')).toBe(false)
+    expect(isWorkspaceTab('avatar')).toBe(true)
+    expect(shortcutDigitFor('avatar')).toBe('6')
+    expect(workspaceTabLabel('avatar')).toBe('Avatar')
+    expect(workspaceWindowTitle('avatar')).toBe('Avatar – Videorc')
   })
 
   it('names each sidebar page once, and every page but Health has a row', () => {
@@ -132,6 +147,7 @@ describe('workspace navigation', () => {
       'layouts',
       'assets',
       'captions',
+      'avatar',
       'recording',
       'live',
       'ai',

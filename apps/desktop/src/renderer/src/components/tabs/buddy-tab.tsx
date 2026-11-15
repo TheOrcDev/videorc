@@ -7,21 +7,15 @@ import {
   BuddyModerationSection,
   BuddyRepliesSection
 } from '@/components/cohost-settings-section'
-import { BuddyGreetingsSection } from '@/components/buddy-greetings-section'
-import { BuddyLibrarySection } from '@/components/buddy-library-section'
-import { BuddyPersonaSection } from '@/components/buddy-persona-section'
-import { BuddyPetCreator } from '@/components/buddy-pet-creator'
-import { BuddyPetSettings } from '@/components/buddy-pet-settings'
 import { BuddyConsentDialog } from '@/components/buddy-consent-dialog'
-import { BuddyEmblem } from '@/components/buddy-emblem'
 import { BuddyLiveSwitch } from '@/components/cohost-status'
+import { SidekickMark } from '@/components/sidekick-mark'
 import { BuddyReportCard } from '@/components/buddy-report-card'
 import { BuddyVoiceCommands } from '@/components/buddy-voice-commands'
 import { ConfigGrid, CONFIG_GRID_PAIR, PageStack } from '@/components/page'
 import { PageTabs } from '@/components/page-tabs'
 import { LockAlert } from '@/components/lock-alert'
 import { PanelSection } from '@/components/panel-section'
-import { Alert, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import {
@@ -35,11 +29,9 @@ import {
 import { ShortcutKeys } from '@/components/ui/shortcut-keys'
 import { Switch } from '@/components/ui/switch'
 import { TabsContent } from '@/components/ui/tabs'
-import { BUDDY_POSTS_PROMISE, buddyDisplayName } from '@/lib/buddy-auto-chat-view'
-import { buddyPictureUrl } from '@/lib/buddy-picture'
+import { BUDDY_POSTS_PROMISE } from '@/lib/buddy-auto-chat-view'
 import { lockAlertAction } from '@/lib/lock-view'
 import { useCleanCut } from '@/hooks/use-clean-cut'
-import { BuddyLookClientProvider } from '@/hooks/use-buddy-look'
 import {
   useStudioChat,
   useStudioCore,
@@ -60,7 +52,6 @@ import { toastUserError } from '@/lib/user-error'
 import { cn } from '@/lib/utils'
 import type { CleanCutTabRequest } from '@/lib/clean-cut-events'
 import { BUDDY_TABS, type BuddyTabId } from '@/lib/buddy-tabs'
-import { closeBuddyPetCreator, useBuddyPetCreatorOpen } from '@/lib/buddy-pet-creator-nav'
 import { sessionIsLive } from '../../../../shared/capture-state'
 
 // Plan 225 D12: Community is its own chunk, loaded the first time it opens.
@@ -77,14 +68,16 @@ function initialTab(
 }
 
 /**
- * The Buddy tab (plan 150): Videorc's AI tab, right under Studio, built like
- * Settings. Five tabs in a segmented strip under the toolbar, each answering
- * one question: Live (is Buddy on), Chat (how it replies and moderates),
- * Voice (what you can say), Reports (what happened on your streams) and
- * Clean cut (edit your recordings). The strip never scrolls away: the shell
+ * The Sidekick page (plan 150): Videorc's AI helper, under Livestream, built
+ * like Settings. Tabs in a segmented strip under the toolbar, each answering
+ * one question: Overview (is Sidekick on), Chat (how it writes and
+ * moderates), Community, Voice (what you can say), Reports (what happened on
+ * your streams) and Clean cut (edit your recordings). The avatar, the
+ * character on the stream, has its own page since plan 239: its library,
+ * look and greetings left this one. The strip never scrolls away: the shell
  * turns the pane body's scroll off, and only the region under the strip
  * scrolls. The selected tab lives in app-shell, so links open a named tab and
- * Buddy reopens on the one used last.
+ * Sidekick reopens on the one used last.
  *
  * `reportSessionId` is the Library's "Buddy report" ask: Reports opens on
  * that session. Without it the report follows the last stream.
@@ -132,7 +125,6 @@ export function BuddyTab({
     setOwnTab('clean-cut')
   }
   const openLibrarySession = onOpenLibrarySession ?? (() => undefined)
-  const creatorOpen = useBuddyPetCreatorOpen()
 
   return (
     <>
@@ -145,26 +137,18 @@ export function BuddyTab({
         onValueChange={selectTab}
       >
         <TabsContent className="flex flex-1 flex-col" value="live">
-          {/* Profile (plan 174 D7, F-4): one status row leads, then My
-                Buddies and the creation screen, then Buddy Live's details. */}
-          {creatorOpen ? <BuddyPetCreator onClose={closeBuddyPetCreator} /> : null}
-          {/* Plan 170: My Buddies, the look panel and the onboarding share
-                one backend client and one look controller. */}
-          <BuddyLookClientProvider>
-            <PageStack className={creatorOpen ? 'hidden' : undefined}>
-              <BuddyProfileStatus />
-              <BuddyLibrarySection />
-              <BuddyPersonaSection />
-              <BuddyPetSettings />
-              <ConfigGrid className={CONFIG_GRID_PAIR}>
-                <BuddyLiveSection />
-                <div className="flex flex-col">
-                  <BuddyLivePowers onSelectTab={selectTab} />
-                  <CloudAiSection />
-                </div>
-              </ConfigGrid>
-            </PageStack>
-          </BuddyLookClientProvider>
+          {/* Overview (plan 174 D7, F-4; plan 239): one status row leads,
+                then Sidekick Live's details, what it does and Cloud AI. */}
+          <PageStack>
+            <BuddyProfileStatus />
+            <ConfigGrid className={CONFIG_GRID_PAIR}>
+              <BuddyLiveSection />
+              <div className="flex flex-col">
+                <BuddyLivePowers onSelectTab={selectTab} />
+                <CloudAiSection />
+              </div>
+            </ConfigGrid>
+          </PageStack>
         </TabsContent>
         <TabsContent className="flex flex-1 flex-col" value="chat">
           <BuddyChatTab />
@@ -238,11 +222,11 @@ function BuddyUnlockAlert({
 }
 
 /**
- * The Chat tab (plan 150): Greetings (plan 164 S-D5, free) and Replies
- * beside Moderation. When Buddy is locked, one alert above both columns says
- * why and every Premium field under it is disabled (D7), the same reason
- * Live shows; the greetings stay editable, all but their AI switch (plan
- * 192 D3).
+ * The Chat tab (plan 150): Replies beside Moderation. The greeting lines are
+ * the avatar's (Avatar → Greetings, plan 239); Replies keeps "Write
+ * greetings with AI". When Sidekick is locked, one alert above both columns
+ * says why and every Premium field under it is disabled (D7), the same
+ * reason Overview shows.
  */
 function BuddyChatTab(): ReactElement {
   const locked = useBuddyLive().unlock !== null
@@ -254,10 +238,7 @@ function BuddyChatTab(): ReactElement {
         </div>
       ) : null}
       <ConfigGrid className={CONFIG_GRID_PAIR}>
-        <div className="flex flex-col">
-          <BuddyGreetingsSection locked={locked} />
-          <BuddyRepliesSection locked={locked} />
-        </div>
+        <BuddyRepliesSection locked={locked} />
         <BuddyModerationSection locked={locked} />
       </ConfigGrid>
     </>
@@ -276,19 +257,19 @@ function BuddyVoiceTab({ onOpenLive }: { onOpenLive: () => void }): ReactElement
 }
 
 /**
- * The Profile tab's one status row (plan 174 D7, F-4, G-2): Buddy's emblem
- * and name, Buddy Live's status in the one vocabulary (F-20) with its reason,
- * the Buddy Live switch (S3.14a), "Open Stream Manager" with its key, then
- * the one unlock action when the account is locked, and how to put the Buddy
- * on stream while it is not. The switch turns Buddy on and off and nothing
- * else: without cloud-AI consent it asks first, and listening stays its own
- * switch in the Buddy Live section below.
+ * The Overview tab's one status row (plan 174 D7, F-4): Sidekick's mark
+ * (plan 239 D7), Sidekick Live's status in the one vocabulary (F-20) with its
+ * reason, the Sidekick Live switch (S3.14a), "Open Stream Manager" with its
+ * key, then the one unlock action when the account is locked. The switch
+ * turns Sidekick on and off and nothing else: without cloud-AI consent it
+ * asks first, and listening stays its own switch in the Sidekick Live
+ * section below. The avatar's picture and whether it is on stream moved to
+ * the Avatar page (plan 239).
  */
 function BuddyProfileStatus(): ReactElement {
-  const { cohostSettings, overlayLayout, runtimeInfo, setBuddyLive } = useStudioCore()
+  const { runtimeInfo, setBuddyLive } = useStudioCore()
   const { openCommentsWindow } = useStudioShell()
   const view = useBuddyLive()
-  const buddyName = buddyDisplayName(cohostSettings?.persona.name)
   const turnBuddyLive = (on: boolean): void => {
     void setBuddyLive(on).catch((error: unknown) =>
       toastUserError(error, { action: on ? 'turn on' : 'turn off', object: 'Sidekick Live' })
@@ -301,13 +282,13 @@ function BuddyProfileStatus(): ReactElement {
       data-slot="buddy-profile-status"
     >
       <div className="flex flex-wrap items-center gap-3" data-slot="buddy-live-status-block">
-        <BuddyEmblem picture={buddyPictureUrl(cohostSettings?.persona)} size="lg" />
+        <SidekickMark size="lg" />
         <div className="flex min-w-0 flex-1 flex-col gap-0.5">
           <span
             className="truncate text-sm font-medium text-foreground"
             data-slot="buddy-profile-name"
           >
-            {buddyName}
+            Sidekick
           </span>
           <BuddyLiveStatusLine status={view.status} />
         </div>
@@ -337,15 +318,6 @@ function BuddyProfileStatus(): ReactElement {
         ) : null}
       </div>
       <BuddyUnlockAlert />
-      {!overlayLayout.buddy.showOnStream ? (
-        // Plan 174 G-2: nothing else says how a Buddy gets on stream.
-        <Alert data-testid="buddy-on-stream-note" variant="quiet">
-          <AlertTitle>
-            {buddyName} isn&apos;t on stream yet. In Stream Manager, turn on &ldquo;{buddyName} on
-            stream&rdquo; to show it.
-          </AlertTitle>
-        </Alert>
-      ) : null}
     </div>
   )
 }
@@ -457,7 +429,7 @@ function CloudAiSection(): ReactElement {
   const { aiConsent, setAiConsent } = useStudioCore()
   return (
     <PanelSection
-      description="What Sidekick and Clean cut send to Videorc's cloud, and what is kept."
+      description="What Sidekick, creating avatars and Clean cut send to Videorc's cloud, and what is kept."
       title="Cloud AI"
     >
       <FieldGroup variant="grouped">
@@ -506,3 +478,7 @@ function BuddyTabConsentDialog(): ReactElement {
   }
   return <BuddyConsentDialog open={buddyConsentRequested} onAnswer={answer} />
 }
+
+// Plan 239: the Avatar page loads through this module, so the two pages
+// share one chunk and one preload list in the eager shell.
+export { AvatarTab } from '@/components/tabs/avatar-tab'

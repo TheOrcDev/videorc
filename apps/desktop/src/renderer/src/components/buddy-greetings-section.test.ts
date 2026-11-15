@@ -11,6 +11,7 @@ import type {
 } from '@/lib/backend'
 import { COHOST_ACTIVITY_TEMPLATE_KINDS } from '@/lib/backend'
 import { builtinGreeting } from '@/lib/buddy-auto-chat-view'
+import { WORKSPACE_NAVIGATE_EVENT } from '@/lib/workspace-navigation'
 
 import { BuddyGreetingsSection } from './buddy-greetings-section'
 
@@ -76,17 +77,17 @@ async function render(
   {
     greetings,
     premium = true,
-    locked = false,
     talk
   }: {
     greetings?: Partial<CohostGreetings>
     premium?: boolean
-    locked?: boolean
     talk?: CohostTalkMode
   } = {}
 ): Promise<void> {
   mocked.core = {
     cohostSettings: settings(templates, greetings, talk),
+    // The lines are free (plan 192 D1); the section never reads the gate
+    // since its AI switch moved to Sidekick → Chat (plan 239).
     cohostGate: premium
       ? { allowed: true }
       : {
@@ -97,7 +98,7 @@ async function render(
         },
     patchCohostSettings
   }
-  await act(async () => root.render(createElement(BuddyGreetingsSection, { locked })))
+  await act(async () => root.render(createElement(BuddyGreetingsSection)))
 }
 
 /** The `greetings` block of the one save, checked for an `{autoChat}` patch. */
@@ -190,11 +191,11 @@ describe('Greetings editor (plan 164 S-D5)', () => {
     ])
   })
 
-  it('says what Sidekick says, in Bubble and in Suggest, never what it posts as you (plan 211 S-C4)', async () => {
+  it('says what the avatar says, by its name, in Bubble and in Suggest, never what it posts as you (plan 211 S-C4, plan 239)', async () => {
     await render([])
     const description = document.body.textContent ?? ''
     expect(description).toContain(
-      'What Sidekick says when someone chats for the first time, follows, subs or raids. Free: every kind has a line until you write your own. In Bubble, Sidekick says it on stream; in Suggest, you post it.'
+      'What Golmar says when someone chats for the first time, follows, subs or raids. Free: every kind has a line until you write your own. In Bubble, Golmar says it on stream; in Suggest, you post it.'
     )
     expect(description).not.toContain('posts as you')
   })
@@ -251,7 +252,8 @@ describe('Greetings rhythm (plan 168 S-02)', () => {
     await render([])
     const card = document.querySelector('[data-slot="field-group"][data-variant="grouped"]')
     expect(card).toBeTruthy()
-    // Plan 192 D3: the AI switch is the card's second field.
+    // Plan 192 D3, plan 239: the card's second field points at the AI
+    // switch, which lives in Sidekick → Chat → Replies; no switch here.
     expect(card!.children).toHaveLength(2)
     expect([...card!.children].map((child) => child.getAttribute('data-slot'))).toEqual([
       'field',
@@ -261,7 +263,8 @@ describe('Greetings rhythm (plan 168 S-02)', () => {
     expect(card!.querySelector('label[for="buddy-greetings-enabled"]')?.textContent).toBe(
       'Greetings'
     )
-    expect(card!.querySelector('#buddy-greetings-ai')).toBeTruthy()
+    expect(card!.children[1]?.getAttribute('data-testid')).toBe('buddy-greetings-ai-pointer')
+    expect(card!.querySelector('#buddy-greetings-ai')).toBeNull()
     expect(document.body.textContent).not.toContain('Greet activity')
   })
 })
@@ -507,45 +510,56 @@ describe('Welcomes (plan 192 S1.3)', () => {
   })
 })
 
-describe('Write greetings with AI (plan 192 D3)', () => {
-  // The id is on Base UI's hidden input; the label for it names the switch.
-  function aiSwitch(): HTMLElement {
-    const label = document.querySelector('label[for="buddy-greetings-ai"]')
-    return document.querySelector<HTMLElement>(`[role="switch"][aria-labelledby="${label?.id}"]`)!
+// Plan 192 D3, plan 239: writing greetings with AI is Sidekick's (Premium and
+// cloud AI), so its switch lives in Sidekick → Chat → Replies
+// (cohost-settings-section.test.ts). The avatar's Greetings keep one row that
+// says whether it is on and points there.
+describe('Write greetings with AI, pointed at from the avatar (plan 192 D3, plan 239)', () => {
+  function pointer(): HTMLElement {
+    const element = document.querySelector<HTMLElement>(
+      '[data-testid="buddy-greetings-ai-pointer"]'
+    )
+    expect(element).toBeTruthy()
+    return element!
   }
 
-  it("says it writes in Sidekick's own voice, with your line as the example", async () => {
+  it("says Sidekick writes each greeting in the avatar's voice while it is on, else the lines as they are", async () => {
     await render([])
-    expect(document.querySelector('label[for="buddy-greetings-ai"]')?.textContent).toBe(
-      'Write greetings with AI'
-    )
-    expect(document.body.textContent).toContain(
-      "In Golmar's voice. Your line is the example and the fallback."
-    )
+    expect(pointer().textContent).toContain('Write greetings with AI')
     // An older backend omits the switch: on, Rust's default.
-    expect(aiSwitch().getAttribute('aria-checked')).toBe('true')
-    expect(aiSwitch().hasAttribute('data-disabled')).toBe(false)
+    expect(pointer().textContent).toContain(
+      "On: Sidekick writes each greeting in Golmar's voice, with your line as the example."
+    )
+    await render([], { greetings: { ai: false } })
+    expect(pointer().textContent).toContain('Off: Golmar says your lines as they are.')
+    // No switch of its own: the one switch is in Replies.
+    expect(pointer().querySelector('[role="switch"]')).toBeNull()
+    expect(document.getElementById('buddy-greetings-ai')).toBeNull()
   })
 
-  it('saves ai alone in the block, keeping the lines and the welcomes', async () => {
-    const templates: CohostGreetingTemplate[] = [
-      { id: 't1', kind: 'follow', text: 'Hey {name}', state: 'talk', enabled: true }
-    ]
-    const welcomes = { firstTime: { enabled: false }, returning: { enabled: true } }
-    await render(templates, { greetings: { ai: true, welcomes } })
-    await act(async () => aiSwitch().click())
-    expect(savedGreetings()).toEqual({ enabled: true, templates, ai: false, welcomes })
+  it('opens Sidekick → Chat, where the switch lives', async () => {
+    const navigations: unknown[] = []
+    const listen = (event: Event): void => {
+      navigations.push((event as CustomEvent).detail)
+    }
+    window.addEventListener(WORKSPACE_NAVIGATE_EVENT, listen)
+    try {
+      await render([])
+      const button = pointer().querySelector('button')!
+      expect(button.textContent).toBe('Sidekick → Chat')
+      await act(async () => button.click())
+      expect(navigations).toEqual([{ tab: 'ai', buddyTab: 'chat' }])
+      expect(patchCohostSettings).not.toHaveBeenCalled()
+    } finally {
+      window.removeEventListener(WORKSPACE_NAVIGATE_EVENT, listen)
+    }
   })
 
-  it('is Premium like Answers and Banter: disabled under the lock, the lines still free', async () => {
+  it('keeps the lines free on a Basic account: a default row still saves', async () => {
     await render([], { premium: false })
-    expect(aiSwitch().hasAttribute('data-disabled')).toBe(true)
     expect((document.getElementById('buddy-greetings-enabled') as HTMLButtonElement).disabled).toBe(
       false
     )
-    await render([], { locked: true })
-    expect(aiSwitch().hasAttribute('data-disabled')).toBe(true)
-    // The lines stay editable: a default row still saves.
     await act(async () => row('follow').querySelector<HTMLElement>('[role="switch"]')!.click())
     expect(patchCohostSettings).toHaveBeenCalledTimes(1)
   })

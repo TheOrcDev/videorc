@@ -1873,7 +1873,7 @@ const OVERLAY_ITEM_DESCRIPTIONS: Record<OverlayItem, string> = {
   highlight: 'The highlighted message card. Drag it on the stage or snap it to a corner.',
   captions:
     'The caption bar. Drag its edges to set its width; style and text size live in Captions.',
-  buddy: 'Your Sidekick and its speech bubble. Drag it on the stage or snap it to a corner.',
+  buddy: 'Your avatar and its speech bubble. Drag it on the stage or snap it to a corner.',
   // Plan 215 D5: viewers' names go on stream, so the switches say so.
   chat: "The last five chat messages, with each viewer's name. Drag the box on the stage or snap it to a corner."
 }
@@ -1885,7 +1885,7 @@ const OVERLAY_ITEM_DESCRIPTIONS: Record<OverlayItem, string> = {
  * have a picture you'd look for at rest; the highlight card's and the
  * caption bar's chips still say "Off". */
 export const OVERLAY_ITEM_OFF_LINES: Partial<Record<OverlayItem, string>> = {
-  buddy: "Off. Viewers don't see Sidekick.",
+  buddy: "Off. Viewers don't see your avatar.",
   chat: "Off. Viewers don't see chat."
 }
 

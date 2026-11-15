@@ -787,7 +787,7 @@ pub fn parse_pack_id(pack_id: &str) -> Result<PackRef, PetError> {
     }
     Err(PetError::new(
         PetRule::PackId,
-        "The pack id is neither a pack of this Sidekick nor a built-in pack.",
+        "The pack id is neither a pack of this avatar nor a built-in pack.",
     ))
 }
 
@@ -841,7 +841,7 @@ pub fn pack_dir(roots: &[PathBuf], persona_id: &str, pack_id: &str) -> Result<Pa
     if !inside {
         return Err(PetError::new(
             PetRule::PackOutsideRoot,
-            "The pack folder is outside Videorc's Sidekick storage.",
+            "The pack folder is outside Videorc's avatar storage.",
         ));
     }
     if !canonical.is_dir() {
@@ -1115,7 +1115,7 @@ pub struct BuddyPetSummary {
 
 /// The name a person reads for a pack. The bundled default pack's manifest
 /// keeps "Buddy" (its bytes are hashed into the official catalog, plan 236),
-/// so it reads as the default name, "Sidekick".
+/// so it reads as the default name, "Flint" (plan 239 D2).
 fn pack_display_name(pack_id: &str, manifest_name: &str) -> String {
     if pack_id == crate::cohost_library::alive::BUDDY_DEFAULT_ALIVE_PACK_ID
         && manifest_name == "Buddy"
@@ -1558,11 +1558,9 @@ pub(crate) fn load_state_image(
             .iter()
             .any(|ext| file.ends_with(ext));
     if folder != persona_id || !file_ok {
-        return Err("is not one of this Sidekick's images".to_string());
+        return Err("is not one of this avatar's images".to_string());
     }
-    let root = roots
-        .first()
-        .ok_or("has no Sidekick storage to load from")?;
+    let root = roots.first().ok_or("has no avatar storage to load from")?;
     let dir = root.join(folder);
     if !crate::resource_authority::canonical_path_is_within(&dir.join(file), &roots[..1]) {
         return Err("is missing".to_string());
@@ -1648,7 +1646,7 @@ pub fn still_pack(
                     "The {} image {reason}; the {} shows instead.",
                     state.as_str(),
                     if state == CohostAvatarState::Idle {
-                        "default Sidekick"
+                        "default avatar"
                     } else {
                         "idle image"
                     }
@@ -2383,10 +2381,10 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn the_bundled_pack_reads_as_sidekick_and_other_packs_keep_their_names() {
+    fn the_bundled_pack_reads_as_the_default_name_and_other_packs_keep_theirs() {
         // Plan 236: the bundled manifest keeps "Buddy" (hashed into the
         // official catalog); the name a person reads is the default name.
-        assert_eq!(pack_display_name("bundled:buddy", "Buddy"), "Sidekick");
+        assert_eq!(pack_display_name("bundled:buddy", "Buddy"), "Flint");
         assert_eq!(pack_display_name("bundled:buddy", "Grum"), "Grum");
         assert_eq!(pack_display_name("pack-1", "Buddy"), "Buddy");
         assert_eq!(pack_display_name("official:orc", "Golmar"), "Golmar");
@@ -2399,7 +2397,7 @@ pub(crate) mod tests {
         assert_eq!(pack.pack_id, STILL_PACK_ID);
         assert_eq!(pack.sidecar.source, PetSource::Still);
         assert!(pack.notes.is_empty(), "{:?}", pack.notes);
-        assert_eq!(pack.manifest.name, "Sidekick");
+        assert_eq!(pack.manifest.name, "Flint");
         assert_eq!(pack.manifest.neutral, "idle");
         // One gaze cell and three reactions, each on its own bundled cell:
         // the default Buddy talks, laughs and thinks with its own drawings.

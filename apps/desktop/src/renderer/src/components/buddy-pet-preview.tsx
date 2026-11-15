@@ -22,6 +22,7 @@ import {
 import { BUDDY_STILL_PACK_ID } from '@/lib/buddy-pet-view'
 import { cn } from '@/lib/utils'
 import { BUDDY_MOTION_DEFAULTS, type BuddyMotionSettings } from '../../../shared/buddy-pet'
+import { DEFAULT_AVATAR_NAME } from '../../../shared/avatar-name'
 
 /** What the Try buttons and the Stream Manager chips call (plan 168 S-D1). */
 export interface BuddyPetPreviewHandle {
@@ -424,7 +425,7 @@ export function BuddyPetPreview({
     playNow(player, pending)
   }, [active])
 
-  const name = label?.trim() || pack?.name || 'Sidekick'
+  const name = label?.trim() || pack?.name || DEFAULT_AVATAR_NAME
   const status = error ? 'error' : pack ? 'ready' : 'loading'
   const showCanvas = drawn && pack !== null
   return (

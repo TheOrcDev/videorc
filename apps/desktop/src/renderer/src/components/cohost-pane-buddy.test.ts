@@ -131,7 +131,7 @@ async function press(input: HTMLInputElement, init: KeyboardEventInit = {}): Pro
   })
 }
 
-describe('BuddyIdentity and BuddySayFooter (plan 164 S-C4, plan 174 S3.14c)', () => {
+describe('BuddyIdentity and BuddySayFooter, the Avatar block (plan 164 S-C4, plan 174 S3.14c, plan 239)', () => {
   it('shows the state image, the name and the bubble in the header, the switch in the footer', async () => {
     await render(buddy({ state: 'laugh', bubble: 'Welcome to the horde' }))
     const image = container.querySelector<HTMLImageElement>('[data-slot="buddy-state-image"]')
@@ -210,7 +210,7 @@ describe('BuddyIdentity and BuddySayFooter (plan 164 S-C4, plan 174 S3.14c)', ()
     expect(sayInput().disabled).toBe(true)
   })
 
-  it('says in words when the Sidekick is on no output, with the switch one click away', async () => {
+  it('says in words when the avatar is on no output, with the switch one click away', async () => {
     const onShowOnStreamChange = vi.fn()
     const offOutputsNotice = buddyOffOutputsNotice({
       enabled: true,
@@ -232,9 +232,48 @@ describe('BuddyIdentity and BuddySayFooter (plan 164 S-C4, plan 174 S3.14c)', ()
     await render(buddy({ showOnStream: true }), { onShowOnStreamChange })
     expect(container.querySelector('[data-testid="buddy-off-outputs"]')).toBeNull()
   })
+
+  it("offers Use Suggest beside Show on stream while Sidekick's lines have nowhere to show (plan 239 D3)", async () => {
+    const onShowOnStreamChange = vi.fn()
+    const onUseSuggest = vi.fn()
+    const offOutputsNotice = buddyOffOutputsNotice({
+      enabled: true,
+      onAir: true,
+      talk: 'bubble',
+      showOnStream: false,
+      showInRecording: false,
+      name: 'Grum',
+      sidekickWrites: true
+    })
+    await render(buddy({ showOnStream: false }), {
+      offOutputsNotice,
+      onShowOnStreamChange,
+      onUseSuggest
+    })
+    const notice = container.querySelector<HTMLElement>('[data-testid="buddy-off-outputs"]')!
+    expect(notice.textContent).toContain("Sidekick's lines have nowhere to show")
+    // Two ways out, in one row under the words; no corner action.
+    const actions = notice.querySelector<HTMLElement>('[data-slot="buddy-off-outputs-actions"]')!
+    expect([...actions.querySelectorAll('button')].map((button) => button.textContent)).toEqual([
+      'Show on stream',
+      'Use Suggest'
+    ])
+    expect(notice.querySelector('[data-slot="alert-action"]')).toBeNull()
+    await act(async () =>
+      notice.querySelector<HTMLButtonElement>('[data-testid="buddy-off-outputs-suggest"]')!.click()
+    )
+    expect(onUseSuggest).toHaveBeenCalledOnce()
+    expect(onShowOnStreamChange).not.toHaveBeenCalled()
+    await act(async () => actions.querySelector('button')!.click())
+    expect(onShowOnStreamChange).toHaveBeenCalledWith(true)
+    // Without a way to ask for Suggest, the notice keeps its one action.
+    await render(buddy({ showOnStream: false }), { offOutputsNotice, onShowOnStreamChange })
+    expect(container.querySelector('[data-testid="buddy-off-outputs-suggest"]')).toBeNull()
+    expect(container.querySelector('[data-slot="buddy-off-outputs-actions"]')).toBeNull()
+  })
 })
 
-describe('the living Sidekick header (plan 168 S-D3)', () => {
+describe('the living avatar identity (plan 168 S-D3, plan 239)', () => {
   function chips(): HTMLButtonElement[] {
     return [...container.querySelectorAll<HTMLButtonElement>('[data-testid="buddy-reaction-chip"]')]
   }
@@ -287,8 +326,8 @@ describe('the living Sidekick header (plan 168 S-D3)', () => {
     })
     expect(reasons).toEqual([
       null,
-      'Only an Alive Sidekick reacts. Make it Alive on the Sidekick page.',
-      'Only an Alive Sidekick reacts. Make it Alive on the Sidekick page.',
+      'Only an Alive avatar reacts. Make it Alive on the Avatar page.',
+      'Only an Alive avatar reacts. Make it Alive on the Avatar page.',
       null
     ])
     await act(async () => chips()[3]!.click())

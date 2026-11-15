@@ -123,8 +123,8 @@ The wire kinds `show-banner`, `hide-banner` and `hide-banners` join part B's
 ## Spoken greetings (desktop)
 
 "Sidekick, say hello to Jay", "Sidekick, say hi to Jay in the chat", "Sidekick, tell
-Jay welcome" and "Sidekick, greet Jay" take the local `greet` command. Sidekick's
-persona name also works; `Bodhi` is accepted as a transcription of Sidekick.
+Jay welcome" and "Sidekick, greet Jay" take the local `greet` command. The
+avatar's name also works; `Bodhi` is accepted as a transcription of Sidekick.
 These shapes always need the wake word, regardless of `wakeWordRequired`.
 Reported speech ("I said hello to Jay") does nothing. Free-form "Sidekick,
 say …" stays on the existing planner path.
@@ -138,8 +138,8 @@ uses "Hi {name}, welcome to the stream!".
 
 This command uses the Say lane: the bubble appears immediately, replacing a
 current bubble, in every talk mode. "In the chat" never authorizes a chat
-post. With Show on stream off, the command surface says "Sidekick isn't on
-stream, so it can't show the bubble." Session, consent and voice gates are
+post. With Show on stream off, the command surface says "Your avatar isn't
+on stream, so it can't show the bubble." Session, consent and voice gates are
 checked again after the AI call; a newer command retires the old greeting.
 
 ## A. Chat moderation (desktop, S4)

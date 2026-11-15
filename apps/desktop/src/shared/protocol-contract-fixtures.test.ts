@@ -1480,10 +1480,11 @@ describe('shared high-risk protocol fixture', () => {
     // Plan 164 S-A2: the persona and the automatic chat block ride the
     // settings (defaults: the bundled pack; posting Off, with Greetings, AI
     // greetings, both welcomes and Answers on since plan 192) and the patch
-    // (whole objects). Absent images are omitted, never null.
+    // (whole objects). Absent images are omitted, never null. The default
+    // avatar is the official golem, Flint (plan 239 D2).
     expect(fixtures.cohost.settings.persona).toStrictEqual({
       id: 'default',
-      name: 'Sidekick',
+      name: 'Flint',
       personality: '',
       bubbleStyle: 'speech',
       images: {},

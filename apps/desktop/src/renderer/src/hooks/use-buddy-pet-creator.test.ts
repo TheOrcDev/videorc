@@ -289,7 +289,8 @@ describe('the creator controller (plan 168 S-F5)', () => {
     await controller.readReference({ kind: 'persona-idle' })
     const state = controller.getState()
     expect(state.problem?.code).toBe('cohost-pet-store-failed')
-    expect(state.problem?.message).toBe(`Couldn't update Sidekick's look. ${UNKNOWN_REASON}`)
+    // The look is the avatar's (plan 239 D1).
+    expect(state.problem?.message).toBe(`Couldn't update your avatar's look. ${UNKNOWN_REASON}`)
     expect(state.problem?.message).not.toContain(raw)
     expect(state.problem?.message).not.toContain('/Users/streamer')
     controller.dispose()

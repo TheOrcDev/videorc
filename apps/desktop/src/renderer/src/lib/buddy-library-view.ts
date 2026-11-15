@@ -27,6 +27,7 @@ import {
   type BuddyOfficialEntry,
   type BuddyOfficialSlug
 } from '../../../shared/buddy-library'
+import { DEFAULT_AVATAR_NAME } from '../../../shared/avatar-name'
 
 // "My Buddies" and the four-step onboarding (plan 170 D14 to D16): pure
 // derivations the section, the sheet and their tests share. Every string a
@@ -131,7 +132,7 @@ const CATALOG_OFFICIAL_ENTRIES: readonly BuddyOfficialEntry[] = BUDDY_OFFICIAL_C
  * Matches the backend's `check_library` / `library_error` sentence so My
  * Buddies never says the library is empty.
  */
-export const BUDDY_LIBRARY_UNAVAILABLE = 'The Sidekick library is not available right now.'
+export const BUDDY_LIBRARY_UNAVAILABLE = 'The avatar library is not available right now.'
 
 /**
  * The line a pack or import job shows while it runs (plan 172): whose moves
@@ -153,7 +154,7 @@ export function buddyLibraryBusyLine(
       null
     )
   }
-  const name = nameOf(busy.avatarId) ?? personaName ?? 'Sidekick'
+  const name = nameOf(busy.avatarId) ?? personaName ?? DEFAULT_AVATAR_NAME
   switch (busy.kind) {
     case 'alive-download':
       return buddyLibraryAliveDownloading(name)
@@ -188,7 +189,7 @@ export function buddyLibrarySaveOffer({
   if (library.activeAvatarId !== null || persona.libraryAvatarId) return null
   if (!persona.images.idle) return null
   if (capabilities?.cohost?.buddyLibrary?.alive !== true) return null
-  return { name: persona.name.trim() || 'Sidekick' }
+  return { name: persona.name.trim() || DEFAULT_AVATAR_NAME }
 }
 
 /**

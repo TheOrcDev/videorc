@@ -28,10 +28,11 @@ const SHORTCUT_LIST = [
   { id: 'nav-layouts', accelerators: ['CmdOrCtrl+3'], label: 'Scene', group: 'Navigation' },
   { id: 'nav-assets', accelerators: ['CmdOrCtrl+4'], label: 'Assets', group: 'Navigation' },
   { id: 'nav-captions', accelerators: ['CmdOrCtrl+5'], label: 'Captions', group: 'Navigation' },
-  { id: 'nav-recording', accelerators: ['CmdOrCtrl+6'], label: 'Output', group: 'Navigation' },
-  { id: 'nav-live', accelerators: ['CmdOrCtrl+7'], label: 'Destinations', group: 'Navigation' },
-  { id: 'nav-ai', accelerators: ['CmdOrCtrl+8'], label: 'Sidekick', group: 'Navigation' },
-  { id: 'nav-library', accelerators: ['CmdOrCtrl+9'], label: 'Library', group: 'Navigation' },
+  { id: 'nav-avatar', accelerators: ['CmdOrCtrl+6'], label: 'Avatar', group: 'Navigation' },
+  { id: 'nav-recording', accelerators: ['CmdOrCtrl+7'], label: 'Output', group: 'Navigation' },
+  { id: 'nav-live', accelerators: ['CmdOrCtrl+8'], label: 'Destinations', group: 'Navigation' },
+  { id: 'nav-ai', accelerators: ['CmdOrCtrl+9'], label: 'Sidekick', group: 'Navigation' },
+  { id: 'nav-library', accelerators: ['CmdOrCtrl+0'], label: 'Library', group: 'Navigation' },
   { id: 'nav-settings', accelerators: ['CmdOrCtrl+,'], label: 'Settings', group: 'Navigation' },
   // ⌘K is "Search" everywhere it is named (plan 174 A-13, docs/ui-copy.md).
   { id: 'search', accelerators: ['CmdOrCtrl+K'], label: 'Search', group: 'Navigation' },
@@ -208,5 +209,5 @@ export function shortcutsByGroup(): Map<ShortcutEntry['group'], ShortcutEntry[]>
 export function navShortcutDigit(tab: string): string | undefined {
   const entry = SHORTCUTS.find((candidate) => candidate.id === `nav-${tab}`)
   const digit = entry ? parseAccelerator(entry.accelerators[0], 'darwin')?.key : undefined
-  return digit && (/^[1-9]$/.test(digit) || digit === ',') ? digit : undefined
+  return digit && (/^[0-9]$/.test(digit) || digit === ',') ? digit : undefined
 }

@@ -224,7 +224,7 @@ export function BuddyAvatarSection({
         // keys browse and Space or Enter switches (plan 174 G-10).
         <SegmentedControl
           activationMode="manual"
-          aria-label="Avatar"
+          aria-label="Look"
           data-testid="buddy-avatar-kind"
           options={(['still', 'alive'] as const).map((kind) => ({
             value: kind,
@@ -236,7 +236,7 @@ export function BuddyAvatarSection({
         />
       }
       description={`How ${buddyDisplayName(persona.name)} looks on stream and here. Still is your four pictures. Alive moves: it looks around and reacts. Importing moves is free; creating them is part of Videorc Premium.`}
-      title="Avatar"
+      title="Look"
     >
       {view === 'alive' && lookPending ? (
         <Alert data-testid="buddy-avatar-look-pending" icon={SparkleIcon}>

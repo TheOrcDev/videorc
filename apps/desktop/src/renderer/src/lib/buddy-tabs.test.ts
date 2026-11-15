@@ -40,7 +40,7 @@ const throwingStorage: Storage = {
 }
 
 describe('BUDDY_TABS (plan 150)', () => {
-  it('lists the six tabs in strip order (Community after Chat, plan 225 D12)', () => {
+  it('lists the six tabs in strip order, Overview first (Community after Chat, plan 225 D12, plan 239)', () => {
     expect(BUDDY_TABS.map((tab) => tab.id)).toEqual([
       'live',
       'chat',
@@ -49,8 +49,10 @@ describe('BUDDY_TABS (plan 150)', () => {
       'reports',
       'clean-cut'
     ])
+    // Plan 239: the avatar's profile is its own page, so the first tab is
+    // Overview; its `live` id stays (saved tabs, deep links, smokes).
     expect(BUDDY_TABS.map((tab) => tab.label)).toEqual([
-      'Profile',
+      'Overview',
       'Chat',
       'Community',
       'Voice',

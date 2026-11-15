@@ -150,10 +150,14 @@ type _RegistryIconProps = _AssertIconProps<
  * Navigation — one slot per sidebar destination. These are the icons the
  * 2026-08-25 semantic audit reviews first: several are placeholders inherited
  * from the pre-audit set (see the audit table in the Nucleo plan).
- * `BuddyPageIcon` is the Buddy page's row in the sidebar and ⌘K's page list
- * (plan 235 D7, the owner's pick): a plain glyph like its neighbours, a
- * co-host that speaks. The slot is named for the page, so renaming Buddy keeps
- * it. The Buddy artwork itself is `BuddyIcon`, below.
+ * `BuddyPageIcon` is the Sidekick page's row in the sidebar and ⌘K's page
+ * list (plan 235 D7, the owner's pick): a plain glyph like its neighbours, a
+ * helper that speaks. Since plan 239 (D7) it is Sidekick's mark wherever the
+ * helper shows. The slot is named for the page, so renaming keeps it.
+ * `AvatarPageIcon` is the Avatar page's row (plan 239): a face, the
+ * character on the stream, in its own module (`avatar-page-icon.tsx`) so the
+ * registry stays a pure re-export for the eager sidebar. The avatar's own
+ * picture (or the stone character's artwork) is `BuddyIcon`.
  */
 export {
   VideoCamera as StudioIcon,
@@ -168,6 +172,7 @@ export {
   GearSix as SettingsIcon,
   Pulse as HealthIcon
 } from '@phosphor-icons/react'
+export { AvatarPageIcon } from './avatar-page-icon'
 /**
  * Status and feedback. One glyph per meaning: a triangle warns, a circle
  * alerts, a crossed circle is an error. Never introduce a second variant of

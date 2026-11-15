@@ -877,7 +877,7 @@
       "removeConfirm": "confirm",
       "persona": {
         "id": "default",
-        "name": "Sidekick",
+        "name": "Flint",
         "personality": "",
         "bubbleStyle": "speech",
         "images": {},
@@ -1912,7 +1912,7 @@
     },
     "bundledSummary": {
       "packId": "bundled:buddy",
-      "name": "Sidekick",
+      "name": "Flint",
       "cellSize": 640,
       "gazeCount": 25,
       "reactions": ["laugh"],
@@ -2174,7 +2174,7 @@
         {
           "id": "official:golem",
           "slug": "golem",
-          "name": "Sidekick",
+          "name": "Flint",
           "kind": "Golem",
           "tagline": "The original. Steady as stone.",
           "personality": "Calm, warm and a little slow to speak. Greets every follower like an old friend and never rushes anyone.",
@@ -2307,7 +2307,7 @@
         {
           "id": "official:golem",
           "slug": "golem",
-          "name": "Sidekick",
+          "name": "Flint",
           "kind": "Golem",
           "tagline": "The original. Steady as stone.",
           "personality": "Calm, warm and a little slow to speak. Greets every follower like an old friend and never rushes anyone.",

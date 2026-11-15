@@ -48,7 +48,8 @@ const nav = {
   openStudioPanel: vi.fn(),
   closeStudioPanel: vi.fn(),
   openSettings: vi.fn(),
-  openBuddy: vi.fn()
+  openBuddy: vi.fn(),
+  openAvatar: vi.fn()
 }
 
 beforeEach(() => {

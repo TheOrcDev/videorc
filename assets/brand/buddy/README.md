@@ -1,6 +1,9 @@
-# Sidekick emblem and default avatar
+# Avatar emblem and default avatar
 
-The Sidekick feature's mark (plan 164, owner-supplied 2026-10-08).
+The default avatar's artwork, Flint the Golem (plan 164, owner-supplied
+2026-10-08; named Flint in plan 239 D2). Until plan 239 it was also
+Sidekick's mark; Sidekick, the helper, now wears its own glyph
+(`BuddyPageIcon`, plan 239 D7).
 `golem-master.png` is the original artwork, byte-identical: 1312 × 1199 RGBA
 on a transparent background. It is outside every bundle; the app ships
 trimmed exports.
@@ -32,14 +35,14 @@ cwebp -quiet -q 90 -alpha_q 100 -resize 0 640 /tmp/buddy-trim.png \
   -o apps/desktop/src/renderer/src/assets/buddy/default/idle.webp
 ```
 
-| File                    | Size      | Shown at                               |
-| ----------------------- | --------- | -------------------------------------- |
-| `buddy-emblem-64.webp`  | 71 × 64   | icons, and 32 px tall (`size="md"`)    |
-| `buddy-emblem-112.webp` | 124 × 112 | 56 px tall (`size="lg"`)               |
-| `default/idle.webp`     | 711 × 640 | the Sidekick overlay and the tab tiles |
-| `default/talk.webp`     | 669 × 643 | the same, while the Sidekick talks     |
-| `default/laugh.webp`    | 580 × 658 | the same, while it laughs              |
-| `default/think.webp`    | 553 × 646 | the same, while it thinks              |
+| File                    | Size      | Shown at                             |
+| ----------------------- | --------- | ------------------------------------ |
+| `buddy-emblem-64.webp`  | 71 × 64   | icons, and 32 px tall (`size="md"`)  |
+| `buddy-emblem-112.webp` | 124 × 112 | 56 px tall (`size="lg"`)             |
+| `default/idle.webp`     | 711 × 640 | the avatar overlay and the tab tiles |
+| `default/talk.webp`     | 669 × 643 | the same, while the avatar talks     |
+| `default/laugh.webp`    | 580 × 658 | the same, while it laughs            |
+| `default/think.webp`    | 553 × 646 | the same, while it thinks            |
 
 The state masters were exported at the idle image's scale (80.2 %, which
 makes the golem the same height as in `idle.webp`), after clearing the
@@ -61,8 +64,8 @@ their format, heights and byte caps.
 
 ## Official characters (plan 170)
 
-Videorc's official Sidekick library is the stone golem above (Sidekick the Golem)
-plus four characters drawn in the same house look: Golmar the Orc, Nib the Goblin, Captain
+Videorc's official avatars are the stone golem above (Flint the Golem) plus
+four characters drawn in the same house look: Golmar the Orc, Nib the Goblin, Captain
 Barnacle the Pirate and Bolt the Robot. Their names, taglines,
 personalities and the descriptions they were drawn from live in
 `protocol-fixtures/buddy-official-catalog.json`; the website and the app
@@ -75,7 +78,7 @@ through the Vercel AI Gateway on 2026-10-09 by `pnpm buddy:official`
 style anchor (the golem master trimmed onto a 1024 px transparent canvas,
 "art style only, not the character") with the plan 169 house-look prompt,
 and talk, laugh and think are edits of that idle with the same state
-directions as the default Sidekick. The owner reviews every set before it
+directions as the default avatar. The owner reviews every set before it
 ships; to redo one pose:
 
 ```sh
@@ -90,14 +93,14 @@ like the default states (haze below 6 % alpha cleared, trimmed, 2 % pad,
 makes its idle character 615 px tall, the golem's height inside the
 640 px `default/idle.webp` (before the pad), so every
 official character stands at the golem's size and its four poses match. The website serves the same WebP files
-from `public/buddy/official/<slug>/`, and Sidekick the Golem's official files there
+from `public/buddy/official/<slug>/`, and Flint the Golem's official files there
 are copies of `default/*.webp`.
 
 ## Alive packs (plan 172)
 
-All five official Sidekicks are alive: each has a page-pet pack (40 frames of
+All five official avatars are alive: each has a page-pet pack (40 frames of
 640 px: 25 gaze cells, 12 reactions, `talk-a`, `talk-b`, `wave`, one
-3200 × 5120 `mascot.webp`, `manifest.json`, `buddy.json`). Sidekick the Golem's
+3200 × 5120 `mascot.webp`, `manifest.json`, `buddy.json`). Flint the Golem's
 ships in the app as `bundled:buddy` (`apps/desktop/resources/buddy/buddy/`);
 Golmar, Nib, Captain Barnacle and Bolt (`official:<slug>`) download from
 videorc.com (`public/buddy/official/<slug>/alive/1/` in videorc-web) the
@@ -141,7 +144,7 @@ and cost per call, `build.json`); `sources/accepted.json` pins an older
 version of a sheet. Nothing there is committed; each pack's
 `provenance.json` records the SHA-256 of every source it was built from.
 
-**Size** (plan 172 D3, 6 MB line): Sidekick the Golem (7.12 MB lossless) and Nib
+**Size** (plan 172 D3, 6 MB line): Flint the Golem (7.12 MB lossless) and Nib
 (6.22 MB) ship with lossy colour at quality 92 and lossless alpha
 (1.62 MB and 1.49 MB), which looked the same as lossless side by side at
 on-stream size and at twice that on the face; Golmar (5.80 MB), Captain

@@ -96,7 +96,7 @@ export const BUDDY_OFFICIAL_CATALOG: readonly BuddyOfficialCatalogEntry[] = [
   {
     slug: 'golem',
     id: 'official:golem',
-    name: 'Sidekick',
+    name: 'Flint',
     kind: 'Golem',
     tagline: 'The original. Steady as stone.',
     personality:

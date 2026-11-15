@@ -13,8 +13,9 @@ import { CommandPalette } from './command-palette'
 // provider's decision, never straight to stopSession: a livestream asks
 // first, a recording stops at once. Plan 174 S2.2 (D3): it speaks the
 // transport's words, and offers both of its starts. Plan 174 S3.21 (A-9,
-// A-13): Session → Pages → Windows → Scenes → Buddy → Settings → Appearance,
-// one verb for pages, synonyms, and a footer naming the selected action.
+// A-13): Session → Pages → Windows → Scenes → Avatar → Sidekick → Settings →
+// Appearance (Avatar since plan 239), one verb for pages, synonyms, and a
+// footer naming the selected action.
 
 const mocked = vi.hoisted(() => ({
   core: {} as Record<string, unknown>,
@@ -64,7 +65,8 @@ const nav = {
   setActive: vi.fn(),
   openStudioPanel: vi.fn(),
   openSettings: vi.fn(),
-  openBuddy: vi.fn()
+  openBuddy: vi.fn(),
+  openAvatar: vi.fn()
 }
 
 beforeEach(() => {
@@ -302,12 +304,13 @@ describe('CommandPalette session actions (plan 174 S0.1, S2.2)', () => {
 })
 
 describe('CommandPalette order and verbs (plan 174 A-9, A-13)', () => {
-  it('runs Session → Pages → Windows → Scenes → Sidekick → Settings → Appearance', async () => {
+  it('runs Session → Pages → Windows → Scenes → Avatar → Sidekick → Settings → Appearance (plan 239)', async () => {
     await render()
     expect(headings()).toEqual([
       'Session',
       'Pages',
       'Windows',
+      'Avatar',
       'Sidekick',
       'Settings',
       'Appearance'
@@ -319,6 +322,7 @@ describe('CommandPalette order and verbs (plan 174 A-9, A-13)', () => {
       'Pages',
       'Windows',
       'Scenes',
+      'Avatar',
       'Sidekick',
       'Settings',
       'Appearance'
@@ -336,6 +340,7 @@ describe('CommandPalette order and verbs (plan 174 A-9, A-13)', () => {
       'Green screen settings',
       'Open Assets',
       'Open Captions',
+      'Open Avatar',
       'Open Output',
       'Open Destinations',
       'Open Sidekick',
@@ -346,6 +351,9 @@ describe('CommandPalette order and verbs (plan 174 A-9, A-13)', () => {
     ])
     await act(async () => item('Open Scene').click())
     expect(nav.openStudioPanel).toHaveBeenCalledExactlyOnceWith('layouts')
+    await render()
+    await act(async () => item('Open Avatar').click())
+    expect(nav.openAvatar).toHaveBeenCalledExactlyOnceWith()
     await render()
     await act(async () => item('Open Settings').click())
     expect(nav.openSettings).toHaveBeenCalledExactlyOnceWith()
@@ -368,6 +376,40 @@ describe('CommandPalette order and verbs (plan 174 A-9, A-13)', () => {
     await search('support bundle')
     expect(values()).toContain('Open Health')
     expect(values()).not.toContain('Open Library')
+    // Plan 239: the character is found by what people call it; the helper
+    // by what it does.
+    await search('mascot')
+    expect(values()).toContain('Open Avatar')
+    await search('character')
+    expect(values()).toContain('Open Avatar')
+    await search('moderation')
+    expect(values()).toContain('Open Sidekick')
+  })
+
+  // Plan 239 (D7): the avatar's tabs wear the streamer's own avatar; the
+  // helper's wear Sidekick's glyph, never the avatar's artwork.
+  it("lists the avatar's two tabs before Sidekick's six, each opening its own page (plan 239)", async () => {
+    await render()
+    expect(groupValues('Avatar')).toEqual(['Open Avatar → Profile', 'Open Avatar → Greetings'])
+    expect(groupValues('Sidekick')).toEqual([
+      'Open Sidekick → Overview',
+      'Open Sidekick → Chat',
+      'Open Sidekick → Community',
+      'Open Sidekick → Voice',
+      'Open Sidekick → Reports',
+      'Open Sidekick → Clean cut'
+    ])
+    await act(async () => item('Open Avatar → Greetings').click())
+    expect(nav.openAvatar).toHaveBeenCalledExactlyOnceWith('greetings')
+    expect(nav.openBuddy).not.toHaveBeenCalled()
+    await render()
+    await act(async () => item('Open Sidekick → Chat').click())
+    expect(nav.openBuddy).toHaveBeenCalledExactlyOnceWith('chat')
+    await render()
+    await search('my avatars')
+    expect(values()).toContain('Open Avatar → Profile')
+    await search('welcome')
+    expect(values()).toContain('Open Avatar → Greetings')
   })
 
   // Plan 215 D4 (B3): Edit scene after Open Scene, found by what people want
@@ -538,6 +580,7 @@ describe('CommandPalette banners (plan 186 S7)', () => {
       'Windows',
       'Scenes',
       'Banners',
+      'Avatar',
       'Sidekick',
       'Settings',
       'Appearance'

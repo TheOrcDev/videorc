@@ -587,13 +587,9 @@ describe('cohostQuestionToast', () => {
     )
   })
 
-  it("speaks as the streamer's Sidekick when the window knows its name (plan 174 J2-20)", () => {
-    expect(cohostQuestionToastMessage(question({ askers: ['Ada', 'Bo'] }), '⌘J', 'Grum')).toBe(
-      'Grum: 2 people asking: What keyboard is that? · ⌘J'
-    )
-    expect(cohostQuestionToastMessage(question({ askers: ['Ada'] }), '⌘J', '  ')).toBe(
-      'Sidekick: Ada is asking: What keyboard is that? · ⌘J'
-    )
+  it('speaks as Sidekick, the helper that caught the question, never as the avatar (plan 239 D1)', () => {
+    // Plan 174 J2-20 named the character here while the two were one; the
+    // avatar's name never wakes a question toast now.
     expect(
       cohostQuestionToast({
         previous: null,
@@ -606,10 +602,9 @@ describe('cohostQuestionToast', () => {
         paneOpen: false,
         lastToastAtMs: null,
         nowMs: 1_000,
-        shortcut: '⌘J',
-        name: 'Grum'
+        shortcut: '⌘J'
       })?.message
-    ).toBe('Grum: Ada is asking: What keyboard is that? · ⌘J')
+    ).toBe('Sidekick: Ada is asking: What keyboard is that? · ⌘J')
   })
 
   it('writes the shortcut the way the platform does (Ctrl+J on Windows)', () => {

@@ -887,7 +887,7 @@ async fn buddy_look_refuses_before_sending_anything() {
         refused(CohostAvatarCreateParams::default(), env.clone())
             .await
             .message,
-        "Describe your Sidekick or add a picture first."
+        "Describe your avatar or add a picture first."
     );
     assert_eq!(
         refused(describe("   "), env.clone()).await.code,
@@ -1006,7 +1006,7 @@ async fn buddy_look_web_errors_become_the_hints_the_plan_names() {
             StatusCode::FORBIDDEN,
             "premium-required",
             None,
-            "Making your Sidekick's look requires Videorc Premium.",
+            "Making your avatar's look requires Videorc Premium.",
         ),
     ];
     for (status, code, retry_after, hint) in cases {

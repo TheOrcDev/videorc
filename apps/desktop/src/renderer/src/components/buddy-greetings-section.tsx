@@ -1,4 +1,4 @@
-import { CloseIcon, WarningIcon } from '@/components/icons'
+import { ChevronRightIcon, CloseIcon, WarningIcon } from '@/components/icons'
 import { useEffect, useId, useState, type KeyboardEvent, type ReactElement } from 'react'
 
 import { ChatPlatformIcon } from '@/components/chat-platform-icon'
@@ -6,7 +6,15 @@ import { GroupedList, ListRow, ListRowButton } from '@/components/list-row'
 import { PanelSection } from '@/components/panel-section'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { Field, FieldDescription, FieldError, FieldGroup, FieldLabel } from '@/components/ui/field'
+import {
+  Field,
+  FieldContent,
+  FieldDescription,
+  FieldError,
+  FieldGroup,
+  FieldLabel,
+  FieldTitle
+} from '@/components/ui/field'
 import { ShortcutKeys } from '@/components/ui/shortcut-keys'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import {
@@ -54,6 +62,7 @@ import {
   withWelcomeText,
   type BuddyGreetingKind
 } from '@/lib/buddy-auto-chat-view'
+import { buddyTabLabel, openBuddyTab } from '@/lib/buddy-tabs'
 import { inlineUserError } from '@/lib/user-error'
 import { cn } from '@/lib/utils'
 
@@ -70,25 +79,21 @@ const STATE_OPTIONS: SegmentedControlOption<CohostUtteranceState>[] = [
 const PLATFORM_ITEMS = { any: 'Any', ...BUDDY_GREETING_PLATFORM_LABELS }
 
 /**
- * Greetings (plan 164 S-D5, plan 192, Buddy tab → Chat): what Buddy says
- * when someone chats for the first time (the welcomes) or chat does
- * something (the Activity kinds): in its bubble in Bubble, as a card you post
- * in Suggest (plan 211). Every kind has a built-in line until you
- * write your own (plan 192 D1), so an empty list never means silence: a kind
- * with no line of yours shows its built-in one as a Default row, and editing
- * that row or switching it off makes it yours. One row per line; Enter or a
- * click opens the inline editor. The lines are free for every account, so
- * they never follow the tab's Premium lock; only "Write greetings with AI"
- * does, like Answers and Banter (D3). Saves on blur and on every switch; no
- * success toasts (videorc-design).
+ * Greetings (plan 164 S-D5, plan 192; Avatar → Greetings since plan 239):
+ * what the avatar says when someone chats for the first time (the welcomes)
+ * or chat does something (the Activity kinds): in its bubble in Bubble, as a
+ * card you post in Suggest (plan 211). Every kind has a built-in line until
+ * you write your own (plan 192 D1), so an empty list never means silence: a
+ * kind with no line of yours shows its built-in one as a Default row, and
+ * editing that row or switching it off makes it yours. One row per line;
+ * Enter or a click opens the inline editor. The lines are free for every
+ * account. "Write greetings with AI" is Sidekick's (Premium and cloud AI,
+ * like Answers and Banter), so it lives in Sidekick → Chat → Replies and
+ * this section points there. Saves on blur and on every switch; no success
+ * toasts (videorc-design).
  */
-export function BuddyGreetingsSection({
-  locked = false
-}: {
-  /** Buddy Live's unlock reason shows above: the AI switch is disabled (plan 150, D7). */
-  locked?: boolean
-}): ReactElement | null {
-  const { cohostSettings, cohostGate, patchCohostSettings } = useStudioCore()
+export function BuddyGreetingsSection(): ReactElement | null {
+  const { cohostSettings, patchCohostSettings } = useStudioCore()
   const [error, setError] = useState<string | null>(null)
   const [editing, setEditing] = useState<string | null>(null)
   if (!cohostSettings) return null
@@ -126,9 +131,11 @@ export function BuddyGreetingsSection({
     if (open) setEditing(template.id)
   }
 
+  const name = buddyDisplayName(cohostSettings.persona.name)
+
   return (
     <PanelSection
-      description="What Sidekick says when someone chats for the first time, follows, subs or raids. Free: every kind has a line until you write your own. In Bubble, Sidekick says it on stream; in Suggest, you post it."
+      description={`What ${name} says when someone chats for the first time, follows, subs or raids. Free: every kind has a line until you write your own. In Bubble, ${name} says it on stream; in Suggest, you post it.`}
       title="Greetings"
     >
       {/* A settings row sits in a grouped card like every Settings row (plan
@@ -151,23 +158,27 @@ export function BuddyGreetingsSection({
             />
           </div>
         </Field>
-        {/* Plan 192 D3: Premium and cloud AI, like Answers and Banter, so it
-            follows the tab's lock; the lines below stay free. */}
-        <Field>
-          <div className="flex items-center justify-between gap-3">
-            <div className="flex min-w-0 flex-col gap-0.5">
-              <FieldLabel htmlFor="buddy-greetings-ai">Write greetings with AI</FieldLabel>
-              <FieldDescription>
-                {`In ${buddyDisplayName(cohostSettings.persona.name)}'s voice. Your line is the example and the fallback.`}
-              </FieldDescription>
-            </div>
-            <Switch
-              checked={greetingsAi(greetings)}
-              disabled={locked || !cohostGate.allowed}
-              id="buddy-greetings-ai"
-              onCheckedChange={(ai) => saveGreetings({ ...greetings, ai })}
-            />
-          </div>
+        {/* Plan 239: writing them with AI is Sidekick's (Premium and cloud
+            AI), so its switch lives with Answers and Banter. */}
+        <Field orientation="horizontal" data-testid="buddy-greetings-ai-pointer">
+          <FieldContent>
+            <FieldTitle>Write greetings with AI</FieldTitle>
+            <FieldDescription>
+              {greetingsAi(greetings)
+                ? `On: Sidekick writes each greeting in ${name}'s voice, with your line as the example.`
+                : `Off: ${name} says your lines as they are.`}
+            </FieldDescription>
+          </FieldContent>
+          <Button
+            className="shrink-0"
+            size="xs"
+            type="button"
+            variant="ghost"
+            onClick={() => openBuddyTab('chat')}
+          >
+            {`Sidekick → ${buddyTabLabel('chat')}`}
+            <ChevronRightIcon data-icon="inline-end" />
+          </Button>
         </Field>
       </FieldGroup>
       {/* Plan 192 S1.3: the welcomes lead, above the Activity kinds. */}

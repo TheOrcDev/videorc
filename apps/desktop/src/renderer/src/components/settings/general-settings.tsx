@@ -1,6 +1,7 @@
 import {
   AccountIcon,
-  BuddyIcon,
+  AvatarPageIcon,
+  BuddyPageIcon,
   DownloadIcon,
   HealthIcon,
   LivestreamIcon,
@@ -237,10 +238,16 @@ function ElsewhereList(): ReactElement {
         onNavigate={signedIn ? openAccount : signIn}
       />
       <NavigableRow
-        icon={BuddyIcon}
+        icon={BuddyPageIcon}
         label="Sidekick, chat posting and Clean cut"
         value={workspaceTabLabel('ai')}
         onNavigate={() => openWorkspaceTab('ai')}
+      />
+      <NavigableRow
+        icon={AvatarPageIcon}
+        label="Your avatar, its look and greetings"
+        value={workspaceTabLabel('avatar')}
+        onNavigate={() => openWorkspaceTab('avatar')}
       />
       <NavigableRow
         icon={OutputIcon}

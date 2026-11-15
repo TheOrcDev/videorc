@@ -35,7 +35,12 @@ import {
 } from '@/components/cohost-pane'
 import type { BuddyPetPreviewHandle } from '@/components/buddy-pet-preview'
 import { BuddyCardsArea } from '@/components/stream-manager/buddy-cards-area'
-import { BuddyChatControls } from '@/components/stream-manager/buddy-chat-controls'
+import {
+  BuddyChatControls,
+  BuddyPostingConsentDialog,
+  useBuddyTalkRequest
+} from '@/components/stream-manager/buddy-chat-controls'
+import { BuddyPageIcon } from '@/components/icons'
 import {
   LinkMadeCards,
   linkMadeId,
@@ -136,7 +141,8 @@ import {
 } from '@/components/stream-manager/command-cards'
 import { commandChooserView, commandConfirmView, commandStripView } from '@/lib/buddy-command-view'
 import { buddyStateImageUrl } from '@/lib/buddy-default-pack'
-import { buddyOffOutputsNotice } from '@/lib/buddy-output-notice'
+import { buddyOffOutputsNotice, sidekickWritesLines } from '@/lib/buddy-output-notice'
+import { buddyDisplayName, type BuddyBehaviourId } from '@/lib/buddy-auto-chat-view'
 import {
   removalPaneView,
   removeFromChatAvailable,
@@ -419,8 +425,9 @@ export interface StreamManagerProps {
   /** How Buddy talks (plan 174 S3.14a, plan 211 D3): `{talk}` alone, never
    * `enabled` and never the legacy `mode`. */
   onCohostAutoChatChange?: (patch: CohostAutoChatRelayPatch) => void
-  /** The behaviour chips' link to Buddy → Chat, their one home (plan 174 D7). */
-  onCohostOpenChatSettings?: () => void
+  /** A behaviour chip's link to its one home (plan 174 D7): Avatar →
+   * Greetings or Sidekick → Chat (plan 239). */
+  onCohostOpenChatSettings?: (behaviour: BuddyBehaviourId) => void
   /** The Buddy's proposed cards (plan 164 S-D2): Send and Dismiss. */
   onCohostUtteranceApprove?: (utterance: CohostUtterance) => void
   onCohostUtteranceDismiss?: (utterance: CohostUtterance) => void
@@ -644,15 +651,18 @@ export function StreamManager({
   const cohostPaneOpenRef = useRef(true)
   const previousCohostStateRef = useRef<CohostState | null>(null)
   const cohostToastAtRef = useRef<number | null>(null)
-  // The question toast speaks as the streamer's Buddy (plan 174 J2-20). A
-  // ref, so a rename never re-runs the state effect below.
+  // The avatar's name, for the Avatar block. The question toast speaks as
+  // Sidekick, never as the avatar (plan 239 D1).
   const buddyName = cohostBuddy?.persona.name ?? null
   // The header's living preview and the footer's reaction chips share one
   // handle and one reaction list (plan 174 S3.14c).
   const buddyPreviewRef = useRef<BuddyPetPreviewHandle | null>(null)
   const [buddyPackReactions, setBuddyPackReactions] = useState<readonly string[] | null>(null)
-  const buddyNameRef = useRef(buddyName)
-  buddyNameRef.current = buddyName
+  // Plan 239 D3: one talk request for the talk control and the notice's
+  // "Use Suggest", so both ask through the one posting consent.
+  const buddyTalkRequest = useBuddyTalkRequest(cohostAutoChat?.talk ?? 'bubble', (talk) =>
+    onCohostAutoChatChange?.({ talk })
+  )
   const deadAirToastKeyRef = useRef<string | null>(null)
   const [cohostNudgeDismissedSessionId, setCohostNudgeDismissedSessionId] = useState<string | null>(
     null
@@ -667,8 +677,7 @@ export function StreamManager({
       paneOpen: cohostPaneOpenRef.current,
       lastToastAtMs: cohostToastAtRef.current,
       nowMs: Date.now(),
-      shortcut: BUDDY_SHORTCUT,
-      name: buddyNameRef.current
+      shortcut: BUDDY_SHORTCUT
     })
     if (questionToast) {
       cohostToastAtRef.current = questionToast.atMs
@@ -1013,7 +1022,7 @@ export function StreamManager({
     })),
     ...proposedUtteranceIds.map((id) => ({
       id,
-      label: `${buddyName ?? 'Sidekick'} wants to post, it expires soon`
+      label: `${buddyDisplayName(buddyName)} wants to post, it expires soon`
     })),
     ...(communityCall
       ? linkCards.map((link) => ({ id: linkMadeId(link), label: linkMadeTitle(link) }))
@@ -1032,8 +1041,11 @@ export function StreamManager({
     // window's minimum size), the pane scrolls instead of painting the Say
     // box and the on-stream switch under the status bar.
     <div className="flex min-h-0 flex-1 flex-col overflow-y-auto" data-slot="buddy-pane">
-      {/* One pane header (plan 174 S3.14c, F-8, H-9): identity first, then the
-          one Alpha tag, listening, the status, and the Buddy Live switch. */}
+      {/* The Sidekick block (plan 239): one header (plan 174 S3.14c, F-8,
+          H-9) with Sidekick's glyph and name (D7), the one Alpha tag,
+          listening, the status and the Sidekick Live switch. The avatar's
+          identity, talk control and Say box are the Avatar block at the
+          foot. */}
       <div
         className={cn(
           CHAT_HEADER_CONTAINER,
@@ -1041,15 +1053,10 @@ export function StreamManager({
         )}
         data-slot="buddy-pane-header"
       >
-        {cohostBuddy ? (
-          <BuddyIdentity
-            buddy={cohostBuddy}
-            previewRef={buddyPreviewRef}
-            onPackReactions={setBuddyPackReactions}
-          />
-        ) : (
-          <span className="shrink-0 text-xs font-medium">Sidekick</span>
-        )}
+        <BuddyPageIcon aria-hidden className="size-4 shrink-0 text-muted-foreground" />
+        <span className="shrink-0 text-xs font-medium" data-slot="sidekick-name">
+          Sidekick
+        </span>
         <Badge className={cn('shrink-0', CHAT_HEADER_TIGHT_HIDDEN)} variant="outline">
           Alpha
         </Badge>
@@ -1071,20 +1078,6 @@ export function StreamManager({
           />
         ) : null}
       </div>
-      {/* Plan 164 S-D6, plan 174 S3.14a, plan 211 D1: the talk control
-          governs only how Buddy talks on its own; the behaviours are
-          read-only chips linking to Buddy → Chat. Neither touches Buddy Live. */}
-      {cohostPresent && cohostAutoChat && onCohostAutoChatChange ? (
-        <BuddyChatControls
-          aiGreetings={cohostGate?.allowed === true && cohostConsented}
-          autoChat={cohostAutoChat}
-          name={buddyName}
-          picture={cohostBuddy ? buddyStateImageUrl(cohostBuddy.persona, 'idle') : null}
-          // Plan 211 D3: the relay carries `talk` alone, never the legacy `mode`.
-          onTalkChange={(talk) => onCohostAutoChatChange({ talk })}
-          onOpenChatSettings={onCohostOpenChatSettings}
-        />
-      ) : null}
       {/* Everything that waits on the streamer, in one capped scroll region
           (plan 174 H-21): what Buddy heard and did, the chooser or "show it
           anyway?", what it is about to remove because you asked, and what it
@@ -1243,26 +1236,64 @@ export function StreamManager({
           </EmptyHeader>
         </Empty>
       )}
-      {/* The footer (plan 174 S3.14c, F-10): the Say box, the reactions and
-          the on-stream switch, on air and off. All of it is free (D6). */}
-      {cohostBuddy ? (
-        <BuddySayFooter
-          buddy={cohostBuddy}
-          offOutputsNotice={buddyOffOutputsNotice({
-            enabled: cohostEnabled,
-            talk: cohostAutoChat?.talk,
-            onAir,
-            showOnStream: cohostBuddy.showOnStream,
-            showInRecording: cohostBuddy.showInRecording,
-            name: buddyName
-          })}
-          packReactions={buddyPackReactions}
-          previewRef={buddyPreviewRef}
-          sayPending={buddyPending}
-          onReact={onBuddyReact}
-          onSay={onBuddySay}
-          onShowOnStreamChange={onBuddyShowOnStream}
-        />
+      {/* The Avatar block (plan 239): the character on the stream, at the
+          foot under one hairline. Its identity (the living preview, the
+          name, the bubble while one is up), "{name} talks" with the
+          behaviour chips (plan 164 S-D6, plan 211 D1), then the footer
+          (plan 174 S3.14c, F-10): the Say box, the reactions and the
+          on-stream switch. On air and off; all of it is free (D6). */}
+      {cohostBuddy || (cohostAutoChat && onCohostAutoChatChange) ? (
+        <div className="shrink-0 border-t border-border" data-slot="avatar-block">
+          {cohostBuddy ? (
+            <div className="flex min-w-0 px-3 pt-2" data-slot="avatar-block-identity">
+              <BuddyIdentity
+                buddy={cohostBuddy}
+                previewRef={buddyPreviewRef}
+                onPackReactions={setBuddyPackReactions}
+              />
+            </div>
+          ) : null}
+          {cohostAutoChat && onCohostAutoChatChange ? (
+            <BuddyChatControls
+              aiGreetings={cohostGate?.allowed === true && cohostConsented}
+              autoChat={cohostAutoChat}
+              name={buddyName}
+              picture={cohostBuddy ? buddyStateImageUrl(cohostBuddy.persona, 'idle') : null}
+              talkRequest={buddyTalkRequest}
+              // Plan 211 D3: the relay carries `talk` alone, never the legacy `mode`.
+              onTalkChange={(talk) => onCohostAutoChatChange({ talk })}
+              onOpenChatSettings={onCohostOpenChatSettings}
+            />
+          ) : null}
+          {cohostBuddy ? (
+            <BuddySayFooter
+              buddy={cohostBuddy}
+              offOutputsNotice={buddyOffOutputsNotice({
+                enabled: cohostEnabled,
+                talk: cohostAutoChat?.talk,
+                onAir,
+                showOnStream: cohostBuddy.showOnStream,
+                showInRecording: cohostBuddy.showInRecording,
+                name: buddyName,
+                sidekickWrites: sidekickWritesLines(cohostAutoChat)
+              })}
+              packReactions={buddyPackReactions}
+              previewRef={buddyPreviewRef}
+              sayPending={buddyPending}
+              onReact={onBuddyReact}
+              onSay={onBuddySay}
+              onShowOnStreamChange={onBuddyShowOnStream}
+              onUseSuggest={
+                onCohostAutoChatChange ? () => buddyTalkRequest.requestTalk('suggest') : undefined
+              }
+            />
+          ) : null}
+          <BuddyPostingConsentDialog
+            name={buddyName}
+            picture={cohostBuddy ? buddyStateImageUrl(cohostBuddy.persona, 'idle') : null}
+            request={buddyTalkRequest}
+          />
+        </div>
       ) : null}
     </div>
   ) : null

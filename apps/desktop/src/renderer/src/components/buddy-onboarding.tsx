@@ -282,7 +282,7 @@ export function BuddyOnboarding({
       await patchCohostSettings({ persona: settings.persona })
     } catch (error) {
       setActionError(
-        inlineUserError(error, { action: 'save', object: 'your Sidekick' }, 'buddy-onboarding')
+        inlineUserError(error, { action: 'save', object: 'your avatar' }, 'buddy-onboarding')
       )
       return
     }
@@ -507,11 +507,11 @@ export function BuddyOnboarding({
             ) : null}
             <ConfirmDialog
               cancelLabel="Keep it"
-              confirmLabel={draftName ? `Delete ${draftName}` : 'Delete Sidekick'}
+              confirmLabel={draftName ? `Delete ${draftName}` : 'Delete avatar'}
               description={BUDDY_LIBRARY_COPY.deleteBody}
               open={deleteOpen}
               testId="buddy-onboarding-delete"
-              title={buddyLibraryDeleteTitle(draftName ?? 'this Sidekick')}
+              title={buddyLibraryDeleteTitle(draftName ?? 'this avatar')}
               onCancel={() => setDeleteOpen(false)}
               onConfirm={() => {
                 setDeleteOpen(false)

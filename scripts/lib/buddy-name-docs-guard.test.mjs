@@ -98,6 +98,11 @@ const GOLEM_ALLOWED = [
     reason: 'the official stone golem: its name is Sidekick (plan 236), its kind stays Golem (D2)'
   },
   {
+    file: 'docs/avatar.md',
+    text: 'Flint the Golem',
+    reason: 'the official stone golem: its name is Flint (plan 239 D2), its kind stays Golem (D2)'
+  },
+  {
     file: COPY_DOC,
     text: 'Create your own Golem, Orc, Goblin, Pirate, Robot',
     reason: 'the onboarding lead names the creature kinds you can create (D2)'

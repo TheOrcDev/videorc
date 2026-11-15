@@ -54,7 +54,7 @@ export function useBuddyPets(): BuddyPets {
       setError(null)
     } catch (failure: unknown) {
       setError(
-        inlineUserError(failure, { action: 'load', object: "Sidekick's packs" }, 'buddy-pets')
+        inlineUserError(failure, { action: 'load', object: "your avatar's packs" }, 'buddy-pets')
       )
     }
   }, [client])

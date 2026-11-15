@@ -1355,6 +1355,46 @@ mod tests {
     /// constant in the crate is scanned, so a new one can't bring the old
     /// name back. Log lines keep their tags (D1), and machine names are
     /// lowercase `buddy`, which this guard does not read.
+    /// Plan 239 D1, C6: the avatar is the character on the stream and
+    /// Sidekick is the helper, so the modules that make, store, draw and
+    /// place the avatar never say "Sidekick" to a person. Every line above
+    /// their tests is read, comments excepted; a new message that names the
+    /// helper for the character fails here. The helper's modules (commands,
+    /// the planner, captions, removals) keep their words.
+    #[test]
+    fn the_avatar_modules_say_avatar_not_sidekick() {
+        const AVATAR_MODULES: &[&str] = &[
+            "cohost_avatar.rs",
+            "cohost_library.rs",
+            "cohost_library/alive.rs",
+            "buddy_pet.rs",
+            "buddy_pet_create.rs",
+            "buddy_pet_store.rs",
+            "buddy_sprite.rs",
+            "overlay_layout.rs",
+            "agent_chat.rs",
+        ];
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut found = Vec::new();
+        for module in AVATAR_MODULES {
+            let text = std::fs::read_to_string(src.join(module)).unwrap();
+            for (index, line) in text.lines().enumerate() {
+                if line.starts_with("#[cfg(test)]") {
+                    break;
+                }
+                let code = line.trim_start();
+                if !code.starts_with("//") && code.contains("Sidekick") {
+                    found.push(format!("{module}:{}: {code}", index + 1));
+                }
+            }
+        }
+        assert!(found.is_empty(), "{found:#?}");
+        assert_eq!(
+            crate::overlay_layout::OverlayItem::Buddy.label(),
+            "the avatar"
+        );
+    }
+
     #[test]
     fn the_backend_copy_says_sidekick_not_buddy() {
         use crate::cohost::CohostError;
@@ -1401,7 +1441,8 @@ mod tests {
         let offenders: Vec<&String> = table.iter().filter(|text| says_buddy(text)).collect();
         assert!(offenders.is_empty(), "{offenders:?}");
         assert_eq!(BUDDY_AGENT_NAME, "Sidekick");
-        assert_eq!(crate::cohost::COHOST_DEFAULT_PERSONA_NAME, "Sidekick");
+        // Plan 239 D2: the default avatar has its own name; Sidekick is the helper.
+        assert_eq!(crate::cohost::COHOST_DEFAULT_PERSONA_NAME, "Flint");
 
         // The scan: an error message or a text constant that says Buddy. The
         // old default name is the migration's own input (D3).

@@ -228,7 +228,7 @@ function bubble(): HTMLImageElement | null {
   return document.querySelector<HTMLImageElement>('[data-testid="buddy-test-bubble"]')
 }
 
-describe('Test your Sidekick (plan 169 D14)', () => {
+describe('Test your avatar (plan 169 D14, plan 239)', () => {
   it('opens big from the Test button, Idle and alive, on its own non-interactive preview', async () => {
     await render()
     expect(dialog()).toBeNull()
@@ -317,7 +317,7 @@ describe('Test your Sidekick (plan 169 D14)', () => {
     expect(stage()).toMatchObject({ pose: null })
     expect(mocked.log).toContain('react:laugh')
     expect(byTestId('buddy-test-note').textContent).toBe(
-      'These moves have no laugh drawing, so Sidekick hops instead.'
+      'These moves have no laugh drawing, so the avatar hops instead.'
     )
   })
 

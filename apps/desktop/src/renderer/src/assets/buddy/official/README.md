@@ -1,8 +1,8 @@
-# Official Sidekick characters
+# Official avatars
 
 Golmar the Orc, Nib the Goblin, Captain Barnacle the Pirate and Bolt the
 Robot (plan 170 D10, D11), four poses each, exported by `pnpm
 buddy:official` from the masters in `assets/brand/buddy/official/` (see
-`assets/brand/buddy/README.md`). Sidekick the Golem's official poses are `../default/`.
+`assets/brand/buddy/README.md`). Flint the Golem's official poses are `../default/`.
 The backend bundles the same files for the stream overlay. Keep any pose
 under 200 KB; `lib/buddy-official-assets.test.ts` checks every file.

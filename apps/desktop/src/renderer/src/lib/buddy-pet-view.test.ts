@@ -178,10 +178,10 @@ describe('buddyReactionDisabledReason (plan 174 S1.1, F-12)', () => {
     ).toBeNull()
   })
 
-  it('says why a chip is off: a still Sidekick, a pack still loading, a pack without it', () => {
+  it('says why a chip is off: a still avatar, a pack still loading, a pack without it (plan 239)', () => {
     expect(
       buddyReactionDisabledReason({ relay: true, alive: false, packReactions: [], chip: wave })
-    ).toBe('Only an Alive Sidekick reacts. Make it Alive on the Sidekick page.')
+    ).toBe('Only an Alive avatar reacts. Make it Alive on the Avatar page.')
     expect(
       buddyReactionDisabledReason({ relay: true, alive: true, packReactions: null, chip: wave })
     ).toBe("Reactions aren't ready yet.")
@@ -192,6 +192,6 @@ describe('buddyReactionDisabledReason (plan 174 S1.1, F-12)', () => {
         packReactions: ['laugh'],
         chip: wave
       })
-    ).toBe('This Sidekick has no wave reaction.')
+    ).toBe('This avatar has no wave reaction.')
   })
 })

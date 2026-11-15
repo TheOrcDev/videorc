@@ -1,4 +1,4 @@
-// The Buddy onboarding and library copy (plan 170 D14), word for word from
+// The avatar onboarding and library copy (plan 170 D14, plan 239), word for word from
 // `docs/buddy-onboarding-copy.md`, the one source the web
 // (`lib/buddy-onboarding-copy.ts` on videorc-web) and the app share. Change a
 // string in that document first, then here; a test pins the four step titles
@@ -7,14 +7,16 @@
 // `{name}`, `{remaining}`, `{limit}` and `{count}` are filled in by the
 // helpers at the bottom. Pure strings: safe for any chunk.
 
+import { DEFAULT_AVATAR_NAME } from '../../../shared/avatar-name'
+
 export const BUDDY_ONBOARDING_STEP_COUNT = 4
 
 /** The four step titles, in order (pinned by tests on both sides). */
 export const BUDDY_ONBOARDING_STEP_TITLES = [
-  'Meet your Sidekick',
+  'Meet your avatar',
   'Describe it',
   'Give it a personality',
-  'Create your Sidekick'
+  'Create your avatar'
 ] as const
 
 export const BUDDY_ONBOARDING_BUTTONS = {
@@ -38,7 +40,7 @@ export const BUDDY_ONBOARDING_STEP1 = {
   whatItDoesHeading: 'What it does',
   whatItDoes: [
     'Greets followers, subs and raids by name',
-    "Answers viewers' questions from what you tell it",
+    "With Sidekick, answers viewers' questions from what you tell it",
     'Talks in a comic speech bubble, no voice needed',
     'Shows on your stream, in your recordings, or both',
     'Comes alive with Make it Alive'
@@ -66,7 +68,7 @@ export const BUDDY_ONBOARDING_STEP2 = {
 
 export const BUDDY_ONBOARDING_STEP3 = {
   nameLabel: 'Name',
-  namePlaceholder: 'Sidekick',
+  namePlaceholder: DEFAULT_AVATAR_NAME,
   nameHelp: '1 to 24 characters.',
   personalityLabel: 'Personality',
   personalityPlaceholder: 'Grumpy but kind. Calls viewers pebbles.',
@@ -83,12 +85,12 @@ export const BUDDY_ONBOARDING_STEP4 = {
   summaryPersonality: 'Personality',
   summaryAbout: 'About you',
   notSet: 'Not set',
-  primary: 'Create my Sidekick',
+  primary: 'Create my avatar',
   working: 'Drawing the pictures. This takes one to three minutes.',
   poseLabels: { idle: 'Idle', talk: 'Talk', laugh: 'Laugh', think: 'Think' },
   done: 'Saved to your library.',
-  use: 'Use as my Sidekick',
-  /** App only, after "Use as my Buddy" (plan 172 D12). */
+  use: 'Use as my avatar',
+  /** App only, after "Use as my avatar" (plan 172 D12). */
   makeAlive: 'Make it Alive',
   redo: 'Redo',
   poseFailed: 'This pose did not come out. Redo it.'
@@ -96,18 +98,18 @@ export const BUDDY_ONBOARDING_STEP4 = {
 
 /** Step 4 and the library: why creating is not possible now, and its actions. */
 export const BUDDY_ONBOARDING_GATES = {
-  signedOut: 'Sign in to create a Sidekick.',
+  signedOut: 'Sign in to create an avatar.',
   signIn: 'Sign in',
-  free: 'Creating your own Sidekick is part of Videorc Premium.',
+  free: 'Creating your own avatar is part of Videorc Premium.',
   seePremium: 'View Premium',
   startFromOurs: 'Start from one of ours',
   allowanceUsed: "You've used today's images. You get more tomorrow.",
   failed: "Couldn't draw the pictures. Nothing was used from your allowance. Try again.",
-  cloudAiOff: 'Allow cloud AI to create a Sidekick.'
+  cloudAiOff: 'Allow cloud AI to create an avatar.'
 } as const
 
 export const BUDDY_LIBRARY_COPY = {
-  title: 'My Sidekicks',
+  title: 'My avatars',
   official: 'Official',
   mine: 'Made by you',
   active: 'Active',
@@ -117,16 +119,16 @@ export const BUDDY_LIBRARY_COPY = {
   delete: 'Delete',
   makeAlive: 'Make it Alive',
   /** Opens the onboarding, which asks for more: an ellipsis (docs/ui-copy.md). */
-  newBuddy: 'New Sidekick…',
-  emptyMine: 'Sidekicks you create show up here, on videorc.com and in the app.',
+  newBuddy: 'New avatar…',
+  emptyMine: 'Avatars you create show up here, on videorc.com and in the app.',
   deleteBody: 'Its pictures are removed from your Videorc account.',
   cancel: 'Cancel',
-  signedOut: 'Sign in to see the Sidekicks you made on videorc.com.',
-  invitation: 'Make this Sidekick your own, or pick another.',
+  signedOut: 'Sign in to see the avatars you made on videorc.com.',
+  invitation: 'Make this avatar your own, or pick another.',
   invitationAction: 'Start',
-  /** Plan 172 D12: the tag on a card whose Buddy moves. */
+  /** Plan 172 D12: the tag on a card whose avatar moves. */
   alive: 'Alive',
-  /** Plan 172 D10: a Buddy made only on this computer joins the library. */
+  /** Plan 172 D10: an avatar made only on this computer joins the library. */
   saveToLibrary: 'Save to my library'
 } as const
 
@@ -142,9 +144,9 @@ export function buddyOnboardingAllowance(remaining: number): string {
   return `Uses 4 of your ${remaining} images left today.`
 }
 
-/** "Your library is full (30 Buddies). Delete one to make room." */
+/** "Your library is full (30 avatars). Delete one to make room." */
 export function buddyLibraryFullLine(limit: number): string {
-  return `Your library is full (${limit} Sidekicks). Delete one to make room.`
+  return `Your library is full (${limit} avatars). Delete one to make room.`
 }
 
 /** "Delete Grum?" */

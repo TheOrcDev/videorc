@@ -1,4 +1,5 @@
 import type { WorkspaceTab } from '@/components/workspace-nav'
+import type { AvatarTabId } from '@/lib/avatar-tabs'
 import type { BuddyTabId } from '@/lib/buddy-tabs'
 import type { LivestreamViewId } from '@/lib/livestream-tabs'
 import type { SettingsTabId } from '@/lib/settings-tabs'
@@ -9,17 +10,21 @@ import type { SettingsTabId } from '@/lib/settings-tabs'
 // called, and its button did nothing). AppShell reads the event back through
 // `readWorkspaceNavigation` in workspace-nav.tsx.
 //
-// Type imports only: buddy-tabs, livestream-tabs and settings-tabs open their pages through
-// here, so a runtime import back into them would be a cycle.
+// Type imports only: avatar-tabs, buddy-tabs, livestream-tabs and settings-tabs open their
+// pages through here, so a runtime import back into them would be a cycle.
 
 export const WORKSPACE_NAVIGATE_EVENT = 'videorc:navigate-workspace'
 
 /** A page with no sub-tab of its own. */
-export type PlainWorkspaceTab = Exclude<WorkspaceTab, 'settings' | 'ai' | 'library' | 'live'>
+export type PlainWorkspaceTab = Exclude<
+  WorkspaceTab,
+  'settings' | 'ai' | 'avatar' | 'library' | 'live'
+>
 
 export type WorkspaceNavigation =
   | { tab: 'settings'; settingsTab?: SettingsTabId }
   | { tab: 'ai'; buddyTab?: BuddyTabId }
+  | { tab: 'avatar'; avatarTab?: AvatarTabId }
   | { tab: 'live'; livestreamView?: LivestreamViewId }
   | {
       tab: 'library'
@@ -30,8 +35,10 @@ export type WorkspaceNavigation =
 
 /** Opens Settings on `settingsTab`, or on the tab used last. */
 export function openWorkspaceTab(tab: 'settings', settingsTab?: SettingsTabId): void
-/** Opens the Buddy page (id `ai`) on `buddyTab`, or on the tab used last. */
+/** Opens the Sidekick page (id `ai`) on `buddyTab`, or on the tab used last. */
 export function openWorkspaceTab(tab: 'ai', buddyTab?: BuddyTabId): void
+/** Opens the Avatar page on `avatarTab`, or on the tab used last. */
+export function openWorkspaceTab(tab: 'avatar', avatarTab?: AvatarTabId): void
 /** Opens Destinations on `livestreamView` (Setup or Upcoming), or on the view used last. */
 export function openWorkspaceTab(tab: 'live', livestreamView?: LivestreamViewId): void
 /** Opens the Library, about `sessionId` when there is one. */
@@ -52,6 +59,8 @@ function workspaceNavigation(tab: WorkspaceTab, subTab: string | undefined): Wor
       return { tab, settingsTab: subTab as SettingsTabId }
     case 'ai':
       return { tab, buddyTab: subTab as BuddyTabId }
+    case 'avatar':
+      return { tab, avatarTab: subTab as AvatarTabId }
     case 'live':
       return { tab, livestreamView: subTab as LivestreamViewId }
     case 'library':
