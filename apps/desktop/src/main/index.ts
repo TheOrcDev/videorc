@@ -472,6 +472,21 @@ import {
 } from './in-window-proof-surface'
 import { executeProofSurfaceScript, settleWithProofSurface } from './proof-surface-call'
 import {
+  PROOF_SURFACE_CONTENT_RUNTIME_SCRIPT,
+  proofSurfaceContentFromConsoleLine,
+  proofSurfaceViewBackground
+} from './proof-surface-content'
+import {
+  PREVIEW_WINDOW_STEPS_CSS,
+  type PreviewStartupClock,
+  type PreviewWindowHint,
+  previewWindowHintHtml,
+  previewWindowHintScript,
+  previewWindowInitialHint,
+  previewWindowStartupHint,
+  previewWindowWarningHint
+} from './preview-window-startup'
+import {
   meanRectsFromBitmap,
   parseNormalizedRects,
   stageCaptureRect
@@ -1800,10 +1815,6 @@ function clearNativePreviewNativePlacementAuthority(): void {
 // heals a dead pump), assesses the chain each tick, runs the healing ladder,
 // and keeps the preview window's waiting hint truthful.
 const FIRST_FRAME_TICK_MS = 750
-const PREVIEW_WAIT_DETAIL_DEFAULT =
-  process.platform === 'linux'
-    ? 'Linux CPU preview: the Electron proof surface shows the scene as soon as a source publishes frames.'
-    : 'The native surface appears here as soon as the compositor presents.'
 let firstFrameWatchdogTimer: NodeJS.Timeout | null = null
 let firstFrameWatchdogStartedAtMs = 0
 let firstFrameLedger: FirstFrameLedger = emptyFirstFrameLedger()
@@ -1812,8 +1823,13 @@ let firstFrameLastPresentedFrameId: number | null = null
 // `undefined` means no hint state has been published since the watchdog was
 // initialized. `null` is a real state: the wait hint is hidden. Keeping those
 // states distinct makes the first hide update observable without a magic
-// string sentinel (and keeps this source file valid text).
+// string sentinel (and keeps this source file valid text). A shown hint is
+// keyed by its JSON.
 let firstFrameLastHint: string | null | undefined
+// Plan 238 S3: when the floating window's startup step began, and the last
+// compositor status a watchdog tick read (`undefined`: none this run).
+let previewWindowStartupClock: PreviewStartupClock | null = null
+let previewWindowStartupCompositor: CompositorStatus | null | undefined
 // Plan 212 S5: whether the floating Preview's strip says a check holds the
 // picture. `undefined`: nothing published to this window's document yet.
 let previewWindowStripHeld: boolean | undefined
@@ -1848,6 +1864,8 @@ function startFirstFrameWatchdog(): void {
   firstFrameLastFramesRendered = null
   firstFrameLastPresentedFrameId = null
   firstFrameLastHint = undefined
+  previewWindowStartupClock = null
+  previewWindowStartupCompositor = undefined
   previewWindowStripHeld = undefined
   firstFrameLastStandDown = { previewHold: null, dockHidden: null }
   firstFrameWatchdogMode = 'first-frame'
@@ -1866,10 +1884,12 @@ function startWindowsProofFrameWatchdog(): void {
   firstFrameWatchdogStartedAtMs = Date.now()
   firstFrameLastFramesRendered = null
   firstFrameLastHint = undefined
+  previewWindowStartupClock = null
+  previewWindowStartupCompositor = undefined
   nativePreviewProofPendingStartedAtMs = firstFrameWatchdogStartedAtMs
   const reason = 'Waiting for the Windows preview surface to deliver pixels.'
   setFirstFrameStatus('pending', reason)
-  updatePreviewWindowWaitDetail(reason)
+  updatePreviewWindowStartupHint()
   firstFrameWatchdogTimer = setInterval(() => {
     void runWindowsProofFrameWatchdogTick(watchdogRun)
   }, FIRST_FRAME_TICK_MS)
@@ -1933,31 +1953,44 @@ function updatePreviewWindowStripLabel(held: boolean): void {
 // container, don't just repaint its text. The .hint block lives permanently in
 // the preview-window DOM and is only ever OCCLUDED by the separate order-above
 // helper NSWindow; a click that raises the preview window above the helper for
-// one IPC hop would otherwise flash the "Waiting for preview" words. Hiding the
-// container means a z-order flash uncovers only the solid base, never the text.
-function updatePreviewWindowWaitDetail(text: string | null): void {
-  if (text === firstFrameLastHint) {
+// one IPC hop would otherwise flash the waiting words. Hiding the container
+// means a z-order flash uncovers only the solid base, never the text. Plan 238
+// S3: the words are the startup steps (preview-window-startup.ts), or a
+// warning the watchdog declared; the watchdog's own reasons stay in the status.
+function updatePreviewWindowHint(hint: PreviewWindowHint | null): void {
+  // Repaint only on a change: the repaint rebuilds the segments, which would
+  // restart the running step's breath on every tick.
+  const key = hint === null ? null : JSON.stringify(hint)
+  if (key === firstFrameLastHint) {
     return
   }
-  firstFrameLastHint = text
+  firstFrameLastHint = key
   const window = previewWindow
   if (!window || window.isDestroyed() || window.webContents.isDestroyed()) {
     return
   }
-  const detail = text ?? PREVIEW_WAIT_DETAIL_DEFAULT
-  const hidden = text === null
-  void window.webContents
-    .executeJavaScript(
-      `(() => {
-        const hint = document.querySelector('.hint');
-        if (hint) { hint.style.display = ${hidden ? "'none'" : "'flex'"}; }
-        const el = document.getElementById('videorc-wait-detail');
-        if (el) { el.textContent = ${JSON.stringify(detail)} }
-      })()`
-    )
-    .catch(() => {
-      // The hint is best-effort; presentation health is tracked in the status.
-    })
+  void window.webContents.executeJavaScript(previewWindowHintScript(hint)).catch(() => {
+    // The hint is best-effort; presentation health is tracked in the status.
+  })
+}
+
+/**
+ * Plan 238 S3: the startup step the floating window shows, from the
+ * compositor status the watchdog tick read (`undefined`: none read yet, so
+ * the last one this run saw).
+ */
+function updatePreviewWindowStartupHint(compositor?: CompositorStatus | null): void {
+  if (compositor !== undefined) {
+    previewWindowStartupCompositor = compositor
+  }
+  const { hint, clock } = previewWindowStartupHint({
+    backendConnected: backendConnection !== null,
+    compositor: previewWindowStartupCompositor,
+    clock: previewWindowStartupClock,
+    nowMs: Date.now()
+  })
+  previewWindowStartupClock = clock
+  updatePreviewWindowHint(hint)
 }
 
 async function fetchFirstFrameCompositorStatus(): Promise<CompositorStatus | null> {
@@ -2112,7 +2145,7 @@ async function runWindowsProofFrameWatchdogTick(watchdogRun: WatchdogRunToken): 
       if (nativePreviewSurfaceStatus.firstFrameContract !== 'fallback') {
         const reason = 'Waiting for the Windows preview surface to deliver pixels.'
         setFirstFrameStatus('pending', reason)
-        updatePreviewWindowWaitDetail(reason)
+        updatePreviewWindowStartupHint(compositor)
       }
     } else if (assessment === 'met' || assessment === 'not-applicable') {
       nativePreviewProofPendingStartedAtMs = null
@@ -2122,7 +2155,7 @@ async function runWindowsProofFrameWatchdogTick(watchdogRun: WatchdogRunToken): 
             ? 'Windows preview pixels are live.'
             : 'Windows preview compositor output is live.'
         setFirstFrameStatus('met', reason)
-        updatePreviewWindowWaitDetail(null)
+        updatePreviewWindowHint(null)
         logBackend('info', '[proof-preview] presentation watchdog is live')
         firstFrameDecisions.record({ watch: 'proof-preview', decision: 'met', reason })
       }
@@ -2134,7 +2167,7 @@ async function runWindowsProofFrameWatchdogTick(watchdogRun: WatchdogRunToken): 
         pendingElapsedMs
       })
       setFirstFrameStatus('fallback', reason)
-      updatePreviewWindowWaitDetail(reason)
+      updatePreviewWindowHint(previewWindowWarningHint(reason))
       logBackend('warn', `[proof-preview] ${reason}`)
       firstFrameDecisions.record({
         watch: 'proof-preview',
@@ -2238,6 +2271,7 @@ async function runFirstFrameWatchdogTick(watchdogRun: WatchdogRunToken): Promise
       if (!compositor) {
         return
       }
+      previewWindowStartupCompositor = compositor
       runPresentingWatchTick(snapshot)
       return
     }
@@ -2248,7 +2282,7 @@ async function runFirstFrameWatchdogTick(watchdogRun: WatchdogRunToken): Promise
     switch (assessment.kind) {
       case 'met':
         setFirstFrameStatus('met')
-        updatePreviewWindowWaitDetail(null)
+        updatePreviewWindowHint(null)
         firstFrameDecisions.record({
           watch: 'first-frame',
           decision: 'met',
@@ -2263,11 +2297,13 @@ async function runFirstFrameWatchdogTick(watchdogRun: WatchdogRunToken): Promise
         return
       case 'pending':
         setFirstFrameStatus('pending', assessment.reason)
-        updatePreviewWindowWaitDetail(assessment.reason)
+        updatePreviewWindowStartupHint(compositor)
         return
       case 'heal':
+        // Healing is the app's business: the window keeps saying which
+        // startup step it is on, and the reason stays in the status.
         setFirstFrameStatus('healing', assessment.reason)
-        updatePreviewWindowWaitDetail(assessment.reason)
+        updatePreviewWindowStartupHint(compositor)
         logBackend('info', `[first-frame] healing: ${assessment.action}: ${assessment.reason}`)
         firstFrameDecisions.record({
           watch: 'first-frame',
@@ -2280,7 +2316,9 @@ async function runFirstFrameWatchdogTick(watchdogRun: WatchdogRunToken): Promise
         return
       case 'fallback':
         setFirstFrameStatus('fallback', assessment.reason)
-        updatePreviewWindowWaitDetail(`Preview could not start natively: ${assessment.reason}`)
+        updatePreviewWindowHint(
+          previewWindowWarningHint(`Preview could not start natively: ${assessment.reason}`)
+        )
         logBackend('warn', `[first-frame] contract failed: ${assessment.reason}`)
         firstFrameDecisions.record({
           watch: 'first-frame',
@@ -2318,7 +2356,7 @@ function runPresentingWatchTick(snapshot: FirstFrameSnapshot): void {
     case 'presenting':
       if (kindChanged) {
         setFirstFrameStatus('met')
-        updatePreviewWindowWaitDetail(null)
+        updatePreviewWindowHint(null)
         logBackend('info', '[preview-watch] presenting recovered')
         firstFrameDecisions.record({
           watch: 'presenting-watch',
@@ -2333,7 +2371,7 @@ function runPresentingWatchTick(snapshot: FirstFrameSnapshot): void {
       return
     case 'heal':
       setFirstFrameStatus('healing', assessment.reason)
-      updatePreviewWindowWaitDetail(assessment.reason)
+      updatePreviewWindowStartupHint()
       logBackend('info', `[preview-watch] healing: ${assessment.action}: ${assessment.reason}`)
       firstFrameDecisions.record({
         watch: 'presenting-watch',
@@ -2350,7 +2388,7 @@ function runPresentingWatchTick(snapshot: FirstFrameSnapshot): void {
     case 'stalled':
       if (kindChanged) {
         setFirstFrameStatus('fallback', assessment.reason)
-        updatePreviewWindowWaitDetail(`Preview stalled: ${assessment.reason}`)
+        updatePreviewWindowHint(previewWindowWarningHint(`Preview stalled: ${assessment.reason}`))
         logBackend('warn', `[preview-watch] stalled after healing exhausted: ${assessment.reason}`)
         firstFrameDecisions.record({
           watch: 'presenting-watch',
@@ -5475,12 +5513,12 @@ async function reconcileNativePreviewSurfaceForPreviewWindow(
   )
 }
 
-// Linux has no native preview surface (port plan L5, Plan 0007): the Electron
-// proof surface IS the preview there, so the waiting copy names the CPU proof
-// path instead of promising a native surface.
-const PREVIEW_WAIT_TITLE = 'Waiting for preview'
-
-const PREVIEW_WINDOW_HTML = `<!doctype html><html><head><meta charset="utf-8"><style>
+// Plan 238 S3: the waiting hint opens on the startup step main can tell from
+// its backend connection, and the first-frame watchdog keeps it current
+// (updatePreviewWindowHint). The same words on every platform: the steps name
+// what the streamer waits for, never the presenter behind it.
+function previewWindowHtml(initialHint: PreviewWindowHint): string {
+  return `<!doctype html><html><head><meta charset="utf-8"><style>
   /* The whole window is a drag surface: the native video floats above the area
      below the strip and ignores mouse events, so every grab lands here. The
      strip stays visible above the video as the obvious handle. Edge-resize is
@@ -5504,18 +5542,20 @@ const PREVIEW_WINDOW_HTML = `<!doctype html><html><head><meta charset="utf-8"><s
   .drag-bar .label { color: ${DARK_WINDOW_PALETTE.textSecondary}; font-size: 12px; font-weight: 600;
     white-space: nowrap; }
   .hint { position: fixed; top: ${WINDOW_HEADER_HEIGHT.preview}px; left: 0; right: 0; bottom: 0; display: flex;
-    align-items: center; justify-content: center; flex-direction: column; gap: 6px; }
+    align-items: center; justify-content: center; flex-direction: column; gap: 6px;
+    padding: 0 24px; box-sizing: border-box; text-align: center; }
   .hint .title { color: ${DARK_WINDOW_PALETTE.textPrimary}; font-size: 13px; font-weight: 600; }
+  ${PREVIEW_WINDOW_STEPS_CSS}
   /* Docked ("stick") variant: the window is immovable inside the Studio slot,
      so the strip disappears and the hint fills the whole content rect. */
   body.docked { -webkit-app-region: no-drag; }
   body.docked .drag-bar { display: none; }
   body.docked .hint { top: 0; }
 </style></head><body>
-  <div class="hint"><div class="title">${PREVIEW_WAIT_TITLE}</div>
-  <div id="videorc-wait-detail">${PREVIEW_WAIT_DETAIL_DEFAULT}</div></div>
+  <div class="hint">${previewWindowHintHtml(initialHint)}</div>
   <div class="drag-bar"><span class="label">${WINDOW_NAMES.preview}</span></div>
 </body></html>`
+}
 
 async function openPreviewWindow(): Promise<PreviewWindowState> {
   const existingWindow = previewWindow
@@ -5697,7 +5737,9 @@ async function openPreviewWindow(): Promise<PreviewWindowState> {
   })
 
   try {
-    await window.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(PREVIEW_WINDOW_HTML)}`)
+    await window.loadURL(
+      `data:text/html;charset=utf-8,${encodeURIComponent(previewWindowHtml(previewWindowInitialHint(backendConnection !== null)))}`
+    )
   } catch (error) {
     if (previewWindow !== window || window.isDestroyed() || previewWindowClosing) {
       return previewWindowState()
@@ -6502,22 +6544,15 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
       }
 
       body {
-        --stripe-size: 52px;
         /* Child of the detached preview window: never a drag region, never a click target. */
         -webkit-app-region: no-drag;
         pointer-events: none;
         user-select: none;
-        background:
-          radial-gradient(circle at var(--dot-x, 10%) 50%, rgba(255, 255, 255, 0.42), transparent 20%),
-          linear-gradient(135deg, rgba(29, 78, 216, 0.62), rgba(5, 150, 105, 0.58)),
-          repeating-linear-gradient(90deg, rgba(255, 255, 255, 0.28) 0 18px, rgba(17, 24, 39, 0.14) 18px var(--stripe-size));
-        background-position: var(--offset, 0px) 0, 0 0, var(--stripe-offset, 0px) 0;
-      }
-
-      body.surface-live {
-        /* Transparent while live: the layer imgs carry the pixels. A solid dark
-           background here used to read as a black box whenever the imgs were not
-           actually painting (e.g. frame polling suppressed by a native claim). */
+        /* No backdrop in any state (plan 238): the layer imgs carry the
+           pixels, and until one is live the stage under the surface shows
+           through. A solid dark background here used to read as a black box
+           whenever the imgs were not actually painting (e.g. frame polling
+           suppressed by a native claim). */
         background: transparent;
       }
 
@@ -6802,6 +6837,7 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
         ${NATIVE_PREVIEW_PROOF_POLLER_RUNTIME_SCRIPT}
         ${NATIVE_PREVIEW_PROOF_MEASUREMENT_RUNTIME_SCRIPT}
         ${PREVIEW_SURFACE_LIVE_BACKGROUND_RUNTIME_SCRIPT}
+        ${PROOF_SURFACE_CONTENT_RUNTIME_SCRIPT}
 
         function updateProofReadout() {
           // Source polls and compositor presents advance independently. Derive
@@ -6832,6 +6868,7 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
           if (liveLayerCount > 0) {
             document.body.classList.add('surface-live');
           }
+          publishProofSurfaceContent();
           updateProofReadout();
         }
 
@@ -6857,6 +6894,8 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
           framePollingSuppressed = suppressed === true;
           if (framePollingSuppressed) {
             stopAllPollers();
+            // The polled imgs are cleared: the page may have nothing left to draw.
+            publishProofSurfaceContent();
           } else if (wasSuppressed && scene) {
             // Pollers only start from a scene; resume them now rather than
             // waiting for the renderer's next scene push.
@@ -7356,6 +7395,7 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
           if (liveLayerCount === 0) {
             document.body.classList.remove('surface-live');
           }
+          publishProofSurfaceContent();
           updateProofReadout();
         }
 
@@ -7403,11 +7443,6 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
               proofMeasurementEpoch,
               inputToPresentLatencyMs
             );
-            const width = Math.max(1, Number(nextStatus.width ?? window.innerWidth));
-            const x = (frame * 7) % (width + 140);
-            document.body.style.setProperty('--dot-x', String((x / Math.max(1, width)) * 100) + '%');
-            document.body.style.setProperty('--offset', String((frame * 3) % 240) + 'px');
-            document.body.style.setProperty('--stripe-offset', String((frame * 5) % 120) + 'px');
           }
           updateProofReadout();
         }
@@ -7440,6 +7475,8 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
               animationFrameId = null;
             }
             stopAllPollers();
+            // No tick runs while suspended, so the cleared imgs are reported here.
+            publishProofSurfaceContent();
             return;
           }
           frames = 0;
@@ -7471,12 +7508,9 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
           presentLatestCompositorStatus(now);
           // One Map size check per frame while no live background shows.
           drawLiveBackgrounds(now, framePollingMaxWidth);
-          if (!compositorStatus) {
-            const x = (now * 0.045) % Math.max(1, window.innerWidth + 140);
-            document.body.style.setProperty('--dot-x', String((x / Math.max(1, window.innerWidth)) * 100) + '%');
-            document.body.style.setProperty('--offset', String((now * 0.08) % 240) + 'px');
-            document.body.style.setProperty('--stripe-offset', String((now * 0.18) % 120) + 'px');
-          }
+          // A live background's canvas draws its first frame, and is dropped
+          // on a lost context, outside any scene update.
+          publishProofSurfaceContent();
           window.__videorcNativePreviewMetrics = () => {
             const measuredAt = performance.now();
             const measurement = nativePreviewProofMeasurementSnapshot(
@@ -7685,21 +7719,22 @@ function createProofSurfaceBrowserWindow(): BrowserWindow {
 // canvas; the floating one sits in the preview window under its drag strip.
 // The proof-surface role never asks for content protection (the separate
 // window's call was a no-op for it on every platform, window-capture-
-// protection.ts), and the host window carries its own. The opaque base is
-// what the hidden lifecycle window's dark body gave the transparent window.
+// protection.ts), and the host window carries its own. The view starts clear
+// (a WebContentsView is white by default) and takes its opaque base, what the
+// hidden lifecycle window's dark body gave the transparent window, only while
+// its page has content (observeProofSurfaceContentLine, plan 238): until then
+// the stage under it shows its own startup card.
 function createInWindowProofSurface(): InWindowProofSurface {
-  return new InWindowProofSurface({
-    createView: () => {
-      const view = new WebContentsView({ webPreferences: proofSurfaceWebPreferences() })
-      view.setBackgroundColor('#101014')
-      return view
-    },
+  const surface = new InWindowProofSurface({
+    createView: () => new WebContentsView({ webPreferences: proofSurfaceWebPreferences() }),
     resolveParent: () => {
       const host = currentPreviewWindowMode() === 'docked' ? mainWindow : previewWindow
       return host && !host.isDestroyed() ? host : null
     },
     cornerRadius: () => (currentPreviewWindowMode() === 'docked' ? DOCKED_PREVIEW_CORNER_RADIUS : 0)
   })
+  surface.setBackgroundColor(proofSurfaceViewBackground(false))
+  return surface
 }
 
 async function createNativePreviewSurfaceWindow(generation: number): Promise<void> {
@@ -7731,12 +7766,14 @@ async function createNativePreviewSurfaceWindow(generation: number): Promise<voi
       }
     })
     // Plan 190: the surface has no IPC; it reports its live background (moving,
-    // or the poster and why) as one prefixed console line per change.
+    // or the poster and why) as one prefixed console line per change. Plan
+    // 238: and whether its page draws anything of its own, the same way.
     surfaceWindow.webContents.on('console-message', (details) => {
       if (nativePreviewSurfaceWindow !== surfaceWindow) {
         return
       }
       observeProofSurfaceLiveBackgroundLine(details.message)
+      observeProofSurfaceContentLine(surfaceWindow, details.message)
     })
 
     try {
@@ -8330,6 +8367,21 @@ function observeProofSurfaceLiveBackgroundLine(line: string): void {
   }
 }
 
+// Plan 238 S1: the proof surface prints `[proof-preview] content live` when
+// its page starts drawing pixels of its own and `content none` when it stops.
+// A view inside the app window is opaque only in between, so a surface with
+// nothing to draw leaves the stage's startup card in sight instead of a dark
+// box. The separate window keeps the base it was created with: Windows cannot
+// be transparent on a broken GPU (createProofSurfaceBrowserWindow), and the
+// macOS helper diagnostic is transparent already.
+function observeProofSurfaceContentLine(surface: ProofSurfaceHost, line: string): void {
+  const contentLive = proofSurfaceContentFromConsoleLine(line)
+  if (contentLive === null || !(surface instanceof InWindowProofSurface)) {
+    return
+  }
+  surface.setBackgroundColor(proofSurfaceViewBackground(contentLive))
+}
+
 async function applyNativePreviewSurfaceScene(
   params: PreviewSurfaceSceneUpdateParams,
   generation: number
@@ -8894,7 +8946,7 @@ async function presentNativePreviewSurfaceCompositor(
   if (proofSourceAssessment === 'met') {
     if (nativePreviewSurfaceStatus.firstFrameContract !== 'met') {
       setFirstFrameStatus('met', proofSourceLiveReason(process.platform))
-      updatePreviewWindowWaitDetail(null)
+      updatePreviewWindowHint(null)
       logBackend('info', '[proof-preview] source frame delivery is live')
       firstFrameDecisions.record({
         watch: 'proof-preview',
@@ -8906,7 +8958,7 @@ async function presentNativePreviewSurfaceCompositor(
     if (nativePreviewSurfaceStatus.firstFrameContract !== 'fallback') {
       const reason = proofSourceStalledReason(process.platform, sourceFrameAgeMs ?? 0)
       setFirstFrameStatus('fallback', reason)
-      updatePreviewWindowWaitDetail(reason)
+      updatePreviewWindowHint(previewWindowWarningHint(reason))
       logBackend('warn', `[proof-preview] ${reason}`)
       firstFrameDecisions.record({
         watch: 'proof-preview',
@@ -9028,7 +9080,7 @@ function applyBackendWindowsD3d11PresenterStatus(
   nativePreviewNativeFailureFallbackActive = proofFallbackActive
   if (canonical) {
     nativePreviewNativePresentConfirmedAtMs = Date.now()
-    updatePreviewWindowWaitDetail(null)
+    updatePreviewWindowHint(null)
   } else {
     clearNativePreviewNativePlacementAuthority()
   }
@@ -13330,6 +13382,8 @@ async function runSmokePreviewMotionCommand(
             : null,
         forwardedInput:
           surface instanceof InWindowProofSurface ? surface.forwardedInputCounts() : null,
+        // Plan 238: clear until the surface's page has content, then opaque.
+        viewBackground: surface instanceof InWindowProofSurface ? surface.backgroundColor() : null,
         ...smokeNativeWindowIdentity(surface instanceof BrowserWindow ? surface : null),
         captureProtectionMarkerInstalled: captureProtectionMarkerInstalled(
           surface instanceof BrowserWindow ? surface : null

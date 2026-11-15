@@ -51,6 +51,7 @@ function proofScene() {
     syncLiveBackgroundLayer: noop,
     liveBackgroundNow: () => 0,
     markLive: noop,
+    publishProofSurfaceContent: noop,
     updateProofReadout: noop
   })
   runInContext(sceneCallbacksSource(), context)

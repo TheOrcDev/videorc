@@ -210,6 +210,7 @@ export class InWindowProofSurface extends EventEmitter implements ProofSurfaceHo
   private screenBounds: Rect = { x: 0, y: 0, width: 1, height: 1 }
   private viewBounds: Rect | null = null
   private appliedCornerRadius: number | null = null
+  private background: string | null = null
   private visible = false
   private destroyed = false
   private held: HeldMouseButtons = { ...NO_HELD_MOUSE_BUTTONS }
@@ -347,6 +348,22 @@ export class InWindowProofSurface extends EventEmitter implements ProofSurfaceHo
 
   // Input always passes through to the host window (see forwardedMouseEvent).
   setIgnoreMouseEvents(_ignore: boolean): void {}
+
+  // The view's base colour under its page. Its owner keeps it clear
+  // (`#00000000`) until the page draws something of its own (plan 238), so
+  // the host window's stage shows through a surface that has nothing to show.
+  setBackgroundColor(color: string): void {
+    if (this.isDestroyed() || color === this.background) {
+      return
+    }
+    this.view.setBackgroundColor(color)
+    this.background = color
+  }
+
+  // The colour last given to the view; null before the first (diagnostics).
+  backgroundColor(): string | null {
+    return this.background
+  }
 
   moveTop(): void {
     const parent = this.parent
