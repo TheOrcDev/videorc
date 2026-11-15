@@ -1,17 +1,12 @@
 import { describe, expect, it } from 'vitest'
 import { defaultCaptureConfig } from './capture'
-import {
-  appWindowFailureCopy,
-  resolveSceneWindow,
-  sceneForFrontApp,
-  scenesForApps
-} from './scene-apps'
+import { appWindowFailureCopy, resolveSceneWindow, sceneForFrontApp } from './scene-apps'
 import {
   hydrateSceneLibrary,
   hydrateWorkingScene,
   normalizeSceneVisual,
-  sceneNameError,
   sceneSourceGaps,
+  type SavedScene,
   type SceneVisual
 } from './scene-presets'
 
@@ -21,31 +16,32 @@ const look = (): SceneVisual =>
     sources: { cameraId: 'camera', screenId: 'display' },
     background: null
   })
-const options = { id: () => 'id', now: () => '2026-10-28' }
 const app = {
   bundleId: 'com.figma.Desktop',
   name: 'Figma',
   frontWindowId: 'window',
   frontWindowName: 'Design'
 }
-const make = () => scenesForApps([app], look(), [], options)[0]
+/** A plan 210 (v1) scene for Figma, as New scene… made them: following, no audio. */
+const make = (): SavedScene => ({
+  id: 'id',
+  name: 'Figma',
+  createdAt: '2026-10-28',
+  updatedAt: '2026-10-28',
+  visual: normalizeSceneVisual({
+    ...look(),
+    sources: {
+      cameraId: 'camera',
+      windowId: app.frontWindowId,
+      windowName: app.frontWindowName,
+      captureOff: false,
+      testPattern: false,
+      app: { bundleId: app.bundleId, name: app.name, follows: true }
+    }
+  })
+})
 
 describe('scenes for apps', () => {
-  it('keeps the look, follows, clears display and audio, and clones the snapshot', () => {
-    const working = look()
-    const scene = scenesForApps([app], working, [], options)[0]
-    expect(scene.visual.sources).toMatchObject({
-      cameraId: 'camera',
-      windowId: 'window',
-      app: { bundleId: app.bundleId, name: 'Figma', follows: true }
-    })
-    expect(scene.visual.sources.screenId).toBeUndefined()
-    expect(scene).not.toHaveProperty('audio')
-    expect(scene.createdAt).toBe('2026-10-28')
-    scene.visual.layout.cameraZoom = 123
-    expect(scene.visual.layout).not.toEqual(working.layout)
-    expect(working.sources.screenId).toBe('display')
-  })
   it('round trips library and working scenes at v1', () => {
     const scene = make()
     expect(
@@ -112,19 +108,6 @@ describe('scenes for apps', () => {
       normalizeSceneVisual({ ...scene.visual, sources: { ...legacySources, futureKey: {} } })
         .sources
     ).toEqual(legacySources)
-  })
-  it('dedupes existing and new names case insensitively within 80 characters', () => {
-    const names = scenesForApps(
-      [app, { ...app, name: 'figma' }],
-      look(),
-      [{ ...make(), name: 'FIGMA' }],
-      options
-    ).map((s) => s.name)
-    expect(names).toEqual(['Figma 2', 'figma 3'])
-    const long = { ...app, name: 'x'.repeat(100) }
-    const scenes = scenesForApps([long, long], look(), [], options)
-    expect(scenes.map((s) => s.name.length)).toEqual([80, 80])
-    expect(sceneNameError(scenes[1].name, [scenes[0]])).toBeNull()
   })
   it('requests app resolution even with a stale window, with no missing-window gap', () => {
     const scene = make()

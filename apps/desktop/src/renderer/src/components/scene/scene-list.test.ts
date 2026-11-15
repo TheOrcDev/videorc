@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { defaultCaptureConfig } from '@/lib/capture'
 import { normalizeSceneVisual, type SavedScene, type VisualSources } from '@/lib/scene-presets'
+import { showsFromSources, type Scene } from '@/lib/scenes'
 import { SceneList } from './scene-list'
 
 const mocked = vi.hoisted(() => ({ core: {} as Record<string, unknown>, editScene: vi.fn() }))
@@ -35,6 +36,19 @@ const t3 = () =>
   })
 const display = () =>
   scene('display', 'Desk', { screenId: 'screen:screencapturekit:1', screenName: 'Display 1' })
+/** A listed scene as the library stores it: its screen and both layouts. */
+const storedFor = (listed: SavedScene): Scene => ({
+  id: listed.id,
+  name: listed.name,
+  createdAt: listed.createdAt,
+  updatedAt: listed.updatedAt,
+  shows: showsFromSources(listed.visual.sources),
+  layouts: {
+    horizontal: listed.visual.layout,
+    vertical: { ...defaultCaptureConfig.layout, layoutPreset: 'vertical-camera-top' }
+  },
+  background: null
+})
 const workingAudio = {
   microphoneId: 'mic',
   microphoneName: 'Shure',
@@ -57,13 +71,26 @@ beforeEach(() => {
     sceneLibraryError: null,
     sceneLibraryActions: {
       readOnly: false,
-      workingVisual: figma().visual,
       workingAudio,
-      insert: vi.fn(() => true),
+      stored: (id: string) =>
+        [figma(), t3(), display()].map(storedFor).find((scene) => scene.id === id),
+      add: vi.fn(() => true),
+      edit: vi.fn(() => true),
       move: vi.fn(() => true),
       replace: vi.fn(() => true),
-      listAppPreviews: vi.fn(async () => ({ apps: [] }))
+      listAppPreviews: vi.fn(async () => ({
+        apps: [
+          {
+            bundleId: 'com.google.Chrome',
+            name: 'Chrome',
+            pid: 7,
+            windowCount: 3,
+            frontWindowId: 'window:9'
+          }
+        ]
+      }))
     },
+    sceneOnStream: storedFor(figma()),
     captureConfig: {
       ...defaultCaptureConfig,
       layout: { ...defaultCaptureConfig.layout, layoutPreset: 'screen-camera' },
@@ -75,6 +102,14 @@ beforeEach(() => {
         {
           id: 'window:7',
           name: 'Figma - Board',
+          kind: 'window',
+          status: 'available',
+          app: { bundleId: 'com.figma.Desktop', name: 'Figma', pid: 4 }
+        },
+        {
+          id: 'window:8',
+          name: 'Figma - Notes',
+          windowTitle: 'Notes',
           kind: 'window',
           status: 'available',
           app: { bundleId: 'com.figma.Desktop', name: 'Figma', pid: 4 }
@@ -93,11 +128,11 @@ beforeEach(() => {
     isSessionActive: false,
     layoutSwitchPending: null,
     applyCameraPreset: vi.fn(),
-    canSaveScene: true,
+    sourceSwitchReason: () => null,
+    switchSourceDeviceLive: vi.fn(async () => undefined),
     wsStatus: 'connected',
     scene: { id: 'scene:default', sources: [] },
     sceneEditMode: false,
-    saveScene: vi.fn(() => true),
     renameSavedScene: vi.fn(() => true),
     deleteSavedScene: vi.fn(async () => true),
     applySavedSceneResult: vi.fn(async () => ({ ok: true })),
@@ -239,20 +274,16 @@ describe('the Scene page scene list (plan 210 D6)', () => {
     expect(rowButton('Desk').getAttribute('aria-current')).toBe('true')
   })
 
-  it('says why Save scene… is off', async () => {
-    mocked.core.canSaveScene = false
-    mocked.core.wsStatus = 'connecting'
+  it('never offers Save scene…: Add scene… makes scenes (plan 231 D6)', async () => {
     await render()
-    const save = container.querySelector<HTMLButtonElement>('[data-testid="scene-save"]')!
-    expect(save.disabled).toBe(true)
-    const reason = document.getElementById(
-      save.closest('[aria-describedby]')!.getAttribute('aria-describedby')!
-    )
-    expect(reason?.textContent).toBe('Videorc is reconnecting. Try again in a moment.')
+    expect(container.querySelector('[data-testid="scene-save"]')).toBeNull()
+    expect(document.body.textContent).not.toContain('Save scene')
+    await act(async () => button('Add scene…')!.click())
+    expect(document.querySelector('[data-testid="add-scene-dialog"]')).not.toBeNull()
   })
 
-  // Plan 215 D4 (B2): the editor's door beside Save and New, until it's on.
-  it('offers Edit scene beside Save and New while the editor is off', async () => {
+  // Plan 215 D4 (B2): the editor's door beside Add scene…, until it's on.
+  it('offers Edit scene beside Add scene… while the editor is off', async () => {
     mocked.editScene.mockClear()
     await render()
     const edit = container.querySelector<HTMLButtonElement>('[data-testid="scene-edit"]')!
@@ -260,7 +291,7 @@ describe('the Scene page scene list (plan 210 D6)', () => {
     const header = [...edit.parentElement!.querySelectorAll('button')].map(
       (button) => button.textContent
     )
-    expect(header.slice(-3)).toEqual(['Edit scene', 'Save scene…', 'New scene…'])
+    expect(header.slice(-2)).toEqual(['Edit scene', 'Add scene…'])
     await act(async () => edit.click())
     expect(mocked.editScene).toHaveBeenCalledOnce()
 
@@ -300,30 +331,42 @@ describe('the Scene page scene list (plan 210 D6)', () => {
   })
 })
 
-describe('a saved scene’s ⋯ menu', () => {
-  it('holds the plan’s actions, app ones only for app scenes', async () => {
-    await render()
+describe('a scene’s ⋯ menu', () => {
+  const items = async (name: string) => {
     const trigger = container.querySelector<HTMLButtonElement>(
-      'button[aria-label="Actions for Figma"]'
+      `button[aria-label="Actions for ${name}"]`
     )!
     await act(async () => trigger.click())
-    expect(
-      [...document.querySelectorAll('[role="menuitem"]')].map((item) => item.textContent)
-    ).toEqual([
+    const labels = [...document.querySelectorAll('[role="menuitem"]')].map(
+      (item) => item.textContent
+    )
+    await act(async () => trigger.click())
+    return labels
+  }
+
+  it('reads in the plan’s order, Follow only for app scenes (plan 231 D11)', async () => {
+    await render()
+    expect(await items('Figma')).toEqual([
       'Rename…',
+      'Change screen…',
       'Set key…',
-      'Change app…',
-      'Duplicate',
-      'Save audio to scene',
       'Stop following',
+      'Save audio to scene',
+      'Duplicate',
       'Delete'
     ])
-    await act(async () =>
-      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
-    )
+    expect(await items('Desk')).toEqual([
+      'Rename…',
+      'Change screen…',
+      'Set key…',
+      'Save audio to scene',
+      'Duplicate',
+      'Delete'
+    ])
+    expect(document.body.textContent).not.toContain('Change app')
   })
 
-  it('renames, duplicates after the original, and saves audio without a toast', async () => {
+  it('renames, duplicates at the end, and saves audio without a toast', async () => {
     await render()
     await menu('Desk', 'Rename…')
     const input = document.querySelector<HTMLInputElement>('#scene-preset-name')!
@@ -339,10 +382,13 @@ describe('a saved scene’s ⋯ menu', () => {
     expect(mocked.core.renameSavedScene).toHaveBeenCalledExactlyOnceWith('display', 'Desk wide')
 
     await menu('Figma', 'Duplicate')
-    expect(actions().insert).toHaveBeenCalledWith(
-      [expect.objectContaining({ name: 'Figma 2', visual: figma().visual })],
-      'figma'
-    )
+    expect(actions().add).toHaveBeenCalledExactlyOnceWith([
+      expect.objectContaining({
+        name: 'Figma 2',
+        shows: { kind: 'app', ...figmaApp },
+        layouts: storedFor(figma()).layouts
+      })
+    ])
 
     await menu('Figma', 'Save audio to scene')
     expect(actions().replace).toHaveBeenLastCalledWith(
@@ -384,6 +430,141 @@ describe('a saved scene’s ⋯ menu', () => {
     await menu('Figma', 'Delete')
     await act(async () => button('Delete scene')!.click())
     expect(mocked.core.deleteSavedScene).toHaveBeenCalledExactlyOnceWith('figma')
+  })
+
+  describe('Change screen… (plan 231 D2, D6)', () => {
+    const settle = async () => act(async () => new Promise((resolve) => setTimeout(resolve, 0)))
+    const choose = async (key: string) => {
+      await settle()
+      await act(async () =>
+        document.querySelector<HTMLButtonElement>(`[data-pick="${key}"]`)!.click()
+      )
+      await act(async () =>
+        document.querySelector<HTMLButtonElement>('[data-testid="change-screen-apply"]')!.click()
+      )
+    }
+    const stream = () => [
+      mocked.core.applySavedSceneResult,
+      mocked.core.switchSourceDeviceLive,
+      mocked.core.applyCameraPreset
+    ]
+
+    it('changes only that scene when it isn’t on stream', async () => {
+      await render()
+      await menu('Desk', 'Change screen…')
+      expect(document.body.textContent).toContain(
+        'Choose what “Desk” shows. It keeps its layout, keys and audio.'
+      )
+      await choose('app:com.google.chrome')
+      expect(actions().edit).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({
+          id: 'display',
+          name: 'Desk',
+          shows: { kind: 'app', bundleId: 'com.google.Chrome', name: 'Chrome', follows: true }
+        }),
+        'window:9'
+      )
+      for (const call of stream()) expect(call).not.toHaveBeenCalled()
+    })
+
+    it('keeps a specific window for a scene that isn’t on stream', async () => {
+      await render()
+      await menu('T3 Code', 'Change screen…')
+      await settle()
+      await act(async () => button('A specific window')!.click())
+      await choose('window:window:8')
+      expect(actions().edit).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({
+          id: 't3',
+          // Named after its app before, after the window's app now (Figma is taken).
+          name: 'Figma 2',
+          shows: { kind: 'window', windowId: 'window:8', windowName: 'Figma - Notes' }
+        }),
+        undefined
+      )
+      for (const call of stream()) expect(call).not.toHaveBeenCalled()
+    })
+
+    it('changes the stream for the scene on stream: a window through the Screen pick', async () => {
+      await render()
+      await menu('Figma', 'Change screen…')
+      expect(document.body.textContent).toContain('It’s on stream, so the stream changes too.')
+      await settle()
+      await act(async () => button('A specific window')!.click())
+      await choose('window:window:8')
+      // The Screen pick of D2: it writes the scene's screen itself.
+      expect(mocked.core.switchSourceDeviceLive).toHaveBeenCalledExactlyOnceWith(
+        'capture',
+        expect.objectContaining({ windowId: 'window:8', screenId: undefined })
+      )
+      expect(actions().edit).not.toHaveBeenCalled()
+      expect(mocked.core.applySavedSceneResult).not.toHaveBeenCalled()
+    })
+
+    it('changes the stream for the scene on stream: an app goes on with its front window', async () => {
+      await render()
+      await menu('Figma', 'Change screen…')
+      await choose('app:com.google.chrome')
+      expect(actions().edit).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({
+          id: 'figma',
+          name: 'Chrome',
+          shows: expect.objectContaining({ bundleId: 'com.google.Chrome' })
+        }),
+        'window:9'
+      )
+      expect(mocked.core.applySavedSceneResult).toHaveBeenCalledExactlyOnceWith(
+        'figma',
+        expect.objectContaining({
+          sources: expect.objectContaining({
+            windowId: 'window:9',
+            app: { bundleId: 'com.google.Chrome', name: 'Chrome', follows: true }
+          })
+        })
+      )
+      expect(mocked.core.switchSourceDeviceLive).not.toHaveBeenCalled()
+    })
+
+    it('No screen puts the scene on stream on Camera only, keeping the capture (D18)', async () => {
+      await render()
+      await menu('Figma', 'Change screen…')
+      await choose('none')
+      expect(actions().edit).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({
+          id: 'figma',
+          shows: { kind: 'none' },
+          layouts: expect.objectContaining({
+            horizontal: expect.objectContaining({ layoutPreset: 'camera-only' }),
+            vertical: expect.objectContaining({ layoutPreset: 'vertical-camera-only' })
+          })
+        }),
+        undefined
+      )
+      expect(mocked.core.applyCameraPreset).toHaveBeenCalledExactlyOnceWith({
+        layoutPreset: 'camera-only'
+      })
+      expect(mocked.core.switchSourceDeviceLive).not.toHaveBeenCalled()
+      expect(mocked.core.applySavedSceneResult).not.toHaveBeenCalled()
+    })
+
+    it('is off for the scene on stream while its screen can’t change, saying why', async () => {
+      mocked.core.sourceSwitchReason = () => 'Stop recording to change the screen.'
+      await render()
+      const trigger = container.querySelector<HTMLButtonElement>(
+        'button[aria-label="Actions for Figma"]'
+      )!
+      await act(async () => trigger.click())
+      const item = [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].find(
+        (entry) => entry.textContent === 'Change screen…'
+      )!
+      expect(
+        item.getAttribute('aria-disabled') ?? item.getAttribute('data-disabled')
+      ).not.toBeNull()
+      await act(async () => trigger.click())
+      // Another scene's screen can still change.
+      await menu('Desk', 'Change screen…')
+      expect(document.querySelector('[data-testid="change-screen-dialog"]')).not.toBeNull()
+    })
   })
 
   it('Set key… records the scene’s global key', async () => {

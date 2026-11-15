@@ -470,7 +470,7 @@ export interface BackendRpcMethodMap {
   'account.sign_out': BackendRpcDefinition<undefined, VideorcAccountSnapshot>
   'platformAccounts.oauth.complete': BackendRpcDefinition<OAuthCompleteParams, OAuthCallbackResult>
   'sources.resolve_app_window': BackendRpcDefinition<ResolveAppWindowParams, ResolveAppWindowResult>
-  // Plan 210 S4: New scene…'s picker, only while it is open.
+  // Plan 210 S4: Add scene…'s picker (plan 231 D6), only while it is open.
   'sources.app_previews': BackendRpcDefinition<AppPreviewsParams | undefined, AppPreviewsResult>
   'devices.list': BackendRpcDefinition<{ ffmpegPath?: string } | undefined, DeviceList>
   'recording.status': BackendRpcDefinition<undefined, RecordingStatus>

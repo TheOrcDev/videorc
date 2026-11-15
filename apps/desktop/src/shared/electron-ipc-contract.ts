@@ -1801,7 +1801,7 @@ const specificRuntimeInvokeContracts = {
     undefinedSchema
   ),
   'app:self-bundle-ids': invokeContract(noArgs, arraySchema(stringSchema({ maxLength: 1024 }))),
-  // Plan 210 S4/S5: icons for the apps New scene… lists, by bundle id.
+  // Plan 210 S4/S5: icons for the apps Add scene… lists, by bundle id.
   'app:icons': invokeContract(
     tupleSchema([
       arraySchema(stringSchema({ minLength: 1, maxLength: 1024 }), { maxLength: APP_ICONS_MAX_IDS })

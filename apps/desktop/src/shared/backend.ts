@@ -396,7 +396,7 @@ export type ResolveAppWindowResult =
   | { ok: true; windowId: string; title: string; width: number; height: number }
   | { ok: false; reason: 'not-running' | 'no-window' | 'minimized' }
 
-/** Plan 210 S4: New scene…'s picker asks for these only while it is open. */
+/** Plan 210 S4: Add scene…'s picker asks for these only while it is open. */
 export interface AppPreviewsParams {
   /** The widest picture to return, in pixels. */
   maxWidth?: number

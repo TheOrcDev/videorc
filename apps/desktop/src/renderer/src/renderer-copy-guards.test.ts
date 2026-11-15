@@ -262,7 +262,7 @@ const CAPITALIZED_NAMES = new Set([
 
 /**
  * A command's visible label: its JSX text, with each string an expression child
- * can render ("{busy ? 'Saving…' : 'Save scene…'}") read as its own label. An
+ * can render ("{busy ? 'Saving…' : 'Rename…'}") read as its own label. An
  * icon or other element child splits nothing: it is not a word.
  */
 function commandLabels(path: string, source: string): Array<{ line: number; text: string }> {

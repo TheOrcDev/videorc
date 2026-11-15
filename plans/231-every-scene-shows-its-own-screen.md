@@ -1367,3 +1367,165 @@ Capture script: `S6/scratch/capture-scenes.mjs` (not committed).
   `smoke:freeform-editor`). `[data-videorc-screen-privacy]` moved from the
   inspector to the Scenes section (lazy, below the preview); the two smokes
   that click it wait for it, so they should pass as they are.
+
+### S7. Add scene… and Change screen… (2026-11-15)
+
+Done. Renderer only: no backend, contract or smoke script change (four
+contract and IPC comments now say Add scene…).
+
+**Add scene…** (`components/scene/scene-picker-dialog.tsx`, which was
+`new-scene-dialog.tsx`; its pure model is `lib/scene-app-picker.ts`)
+
+- One picker, three groups, several choices: **Apps** (macOS: the
+  front-window picture through `sources.app_previews`, the icon, "2 windows"),
+  **Displays** (a card whose well takes `DisplayChoice.picture` once S5 fills
+  it, the display glyph until then; macOS names a display "Built-in Retina
+  Display · 3024 × 1964", so the card shows the name and the size as its
+  line) and **Camera** (one "Camera only" card, its line the camera's name or
+  "Camera is off"). Search filters apps and displays. Windows and Linux show
+  Displays and Camera only.
+- The button reads "Add scene" or "Add 3 scenes" (`plural`); nothing chosen
+  says "Choose at least one."
+- `newScenes(picks, sceneOnStream, scenes, { cameraOn })`: each scene is named
+  after what it shows, unique across the batch too ("Figma 2", "Figma 3",
+  "Camera only 2"); it copies the stored scene on stream's two layouts (camera
+  spot, shape, size, framing) and background, made to show its screen (Camera
+  only becomes Screen + camera, a camera layout with the camera off its
+  screen-only twin, the screen visible), or Camera only in both orientations
+  for the camera card; no audio (D10); app scenes follow (plan 210 D10); the
+  app's front window is the scene's window hint (plan 210 D5).
+- Scenes are added in the list's order (apps A to Z, displays, camera), not
+  the click order, through the new `sceneLibraryActions.add` at the end (D5).
+  Nothing is applied and `onStreamId` doesn't move.
+
+**Change screen…** (the same picker, `mode: 'change'`)
+
+- Apps, then **A specific window** (a `Collapsible` under Apps, open when the
+  scene keeps a window; rows of title and app, never Videorc's own), Displays,
+  and Camera's **No screen**. It starts on what the scene shows, and the
+  button says "“Figma” already shows this." until another is chosen.
+- A scene that isn't on stream: only it changes (`sceneLibraryActions.edit`).
+- The scene on stream (D2): a display or window goes through
+  `switchSourceDeviceLive`, the Screen pick S2 built, which writes the
+  scene's `shows`; an app is written and the scene applied again with the
+  app's front window (plan 210's Change app path); No screen is written and,
+  when the layout drew a screen, `applyCameraPreset` puts it on Camera only
+  (D18 keeps the capture running).
+- **No screen puts both layouts on Camera only** (my call): a scene that
+  shows no screen then never holds a layout that needs one, which is D19's
+  rule seen from the other side. The card says "Puts the scene on Camera
+  only" when that happens.
+- A screen chosen for a scene whose layout draws none says so under the
+  list ("“Camera only” uses Camera only, which shows no screen. Change its
+  layout to show it."); its layout is not changed.
+- Names: a scene named after what it showed (an app, a window's app, a
+  display, "Figma 2") takes the new one's name; a typed name and a default
+  scene's layout name ("Camera only") stay.
+- For the scene on stream the button and ⋯ item are off with
+  `sourceSwitchReason('capture')` (a Linux session, a switch in flight).
+- **D19:** S6's `SceneScreenDialog` is gone. The Layout field calls
+  `onChangeScreen({ forLayout })`; the picker then offers no No screen and
+  says "Screen + camera shows a screen, and “Camera only” shows none yet.";
+  Cancel keeps the layout. S6's "apply once the screen lands" effect moved to
+  `useSceneDialogs`: the layout goes on once the capture is on the chosen
+  screen (or after an app's apply lands), and is dropped when another scene
+  goes on or another layout is chosen meanwhile.
+
+**The ⋯ menu** reads Rename…, Change screen…, Set key… | Follow the app or
+Stop following (app scenes), Save audio to scene | Duplicate | Delete.
+Duplicate copies the stored scene (both layouts, screen, audio) to the end;
+its keys stay with the original.
+
+**Save scene… is gone**
+
+- The Scene page header is Edit scene and Add scene… (the same picker; its
+  test id `scene-new` stays for `smoke:smart-scenes`). The name dialog is
+  Rename only.
+- ⌘K's Scenes group leads with **Add scene…** (context "Studio", off while the
+  library is read-only): `lib/scene-add-request.ts` opens Studio and the
+  Scenes section takes the request at mount or by its event. The scenes'
+  context reads "Scene", not "Saved scene".
+- Deleted: `saveSceneBlockedReason`, `suggestedSceneName`, `sceneWithApp`,
+  the view-based `duplicatedScene`, `lookForAppScenes`, `newAppScenes`,
+  `newCaptureScene`, `captureChoices` and `scenesForApps` (test fixtures that
+  used it are literals now).
+- The provider: `canSaveScene`, `saveScene` and `useSceneLibrary.save` left the
+  core. `SceneLibraryActions` lost `workingVisual` and the view `insert`, and
+  gained `stored(id)`, `add(scenes, windowHints)` and `edit(scene, hint)` on
+  stored scenes. The dev smoke harness keeps `save(name, id?)` and
+  `state().canSave` with the old behaviour (compiled out of production) for
+  the smokes; the integration tests reach them through two helpers.
+- `ScenesSection` lost its `onAddScene` and `onChangeScreen` props (both are
+  built in). `SceneOnStreamFields` requires `onChangeScreen` and takes
+  `changeScreenReason`; its Retro LCD Screen row is a Change screen… action
+  (`LcdPanelAction` gained `disabled`). Its `DevicePicker` and
+  `LcdDevicePicker` fallbacks are gone.
+- `git grep -n "Save scene"` in `apps/`, `scripts/`, `docs/ui-copy.md`,
+  `CONTEXT.md` and the skill finds only tests that assert it's absent; the
+  changelog, an acceptance doc and the plans keep their history.
+
+**Tests:** `lib/scene-app-picker.test.ts` (naming "Figma 2"/"Figma 3", the look
+of the scene on stream, Camera only, end placement with ⌃⌥6 to ⌃⌥9 and none
+for the tenth, displays and windows, Change screen's shows and names, No
+screen, a default keeping its name, Duplicate);
+`scene-picker-dialog.test.ts` (groups, "Add 3 scenes", search, pictures,
+grant, Windows, Change screen's start, A specific window, No screen, the
+layout note, D19); `scene-list.test.ts` (no Save scene…, the ⋯ order, Change
+screen… on another scene, a specific window, on stream by window, app and No
+screen, the disabled reason); `scene-presets.test.ts` (Add scene… never
+touches the stream, ⌘K at mount and while mounted, Change screen… from the
+field, D19 Cancel keeps the layout and the layout follows the screen);
+`scene-on-stream.test.ts`; `command-palette.test.ts`; and in
+`studio-provider.integration.test.ts` Add scene… through the real provider:
+appended last, the same scene on stream in state and storage, and no
+`scene.*` or `session.source*` command sent.
+
+**Numbers:** `pnpm typecheck`, `pnpm lint`, Prettier on the 34 touched files
+and `git diff --check` green. `studio-provider.integration.test.ts`: 216
+passed. Full desktop run (`--maxWorkers=2 --minWorkers=1`): 705 files, 8,219
+passed, 1 skipped, no flake seen.
+
+|                         |       raw |    gzip |
+| ----------------------- | --------: | ------: |
+| Before S7 (`736669532`) | 2,380,784 | 489,575 |
+| After S7                | 2,378,584 | 489,155 |
+| Cap                     | 2,365,000 | 487,000 |
+
+S7 takes 2,200 raw and 420 gzip bytes off the first paint (Save scene…'s
+provider code); the budget is still over by S2's amount, the owner's call.
+The new UI is lazy: ⌘K's request module is its own 0.49 kB chunk, the
+picker and dialogs ride the scene-dialogs chunk (`scene-shortcut-keys`,
+45.74 to 56.54 kB), and the Scenes chunk fell from 41.64 to 37.33 kB.
+
+**By hand** (the real dev app, an isolated profile, `S7/scratch/capture-s7*.mjs`,
+not committed): Add scene… with Chrome, T3 Code (Nightly) and Discord read "Add
+3 scenes" and appended them as positions 5 to 7 with ⌃⌥5 to ⌃⌥7, the scene on
+stream unchanged in storage and state; Change screen… → A specific window →
+Discord's window made that scene a fixed window; D19 on Camera only: Cancel
+kept Camera only, a display chosen put the screen on and then Screen + camera,
+the scene keeping its name. Figma isn't installed on this Mac.
+
+**Screenshots** (light and dark) in `/Users/orcdev/projects/plan-231-run/S7/shots/`:
+`videorc-ui-add-scene-{light,dark}` (three chosen, "Add 3 scenes"),
+`-add-scene-bottom-` (Displays and Camera), `-studio-added-` (the new cards at
+the end), `-scene-menu-` (the ⋯ menu), `-change-screen-` (A specific window
+open), `-change-screen-d19-`, `-scene-page-`, and `-studio-fixed-window-dark`,
+`-d19-landed-dark`.
+
+**What S8 must know:** `docs/ui-copy.md` ("New scene…" makes scenes for
+apps), the design skill's "Where things live" (New scene…, Change app…, Save as
+new scene…) and `CONTEXT.md` (line 128, "New scene…") still have the old words;
+the copy is now Add scene…, Change screen…, A specific window, No screen,
+Camera only. The Scene page header is done; its rows are still its own list.
+
+**What S5 must know:** fill `DisplayChoice.picture` where the picker builds
+its displays (`displayChoices(deviceList.devices, platform)` in
+`scene-picker-dialog.tsx`, keyed by display id), and the cards' `pictures`.
+
+**What S9 and S11 must know:** ⌘K's Scenes group is "Add scene…" then
+"Switch to {name}" (context "Scene"). The smokes' `save()` and `canSave` are
+the dev harness's own now; `smoke:smart-scenes`'s `scene-new`,
+`data-app-choice` and `new-scene-add` still match, the new picker's are
+`add-scene-dialog`, `change-screen-dialog`, `change-screen-apply` and
+`data-pick`; S6's `scene-screen-dialog` is gone; and
+`scripts/lib/smart-scenes-gate.mjs` still says "New scene… keeps none".

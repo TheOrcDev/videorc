@@ -1,8 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { Device, ResolveAppWindowResult } from './backend'
 import { defaultCaptureConfig, mergeSourceKind } from './capture'
-import { scenesForApps } from './scene-apps'
-import { hydrateWorkingScene, type SceneVisual } from './scene-presets'
+import { hydrateWorkingScene, type SavedScene, type SceneVisual } from './scene-presets'
 import {
   heldAppWindow,
   rememberedSceneApps,
@@ -105,7 +104,13 @@ describe('scene window wiring', () => {
     expect((await resolveSceneWindowForApply(legacy, [], rpc)).kind).toBe('resolve-sources')
   })
   it('fills separate device memory, prunes deleted scenes and caps it at 200', () => {
-    const scene = scenesForApps([{ ...app }], visual(), [], { id: () => 's', now: () => '' })[0]
+    const scene: SavedScene = {
+      id: 's',
+      name: app.name,
+      createdAt: '',
+      updatedAt: '',
+      visual: { ...visual(), sources: { ...visual().sources, app } }
+    }
     const legacy = { windowId: device.id }
     expect(rememberSceneWindowApp({}, 's', legacy, [device], [scene])).toEqual({ s: app.bundleId })
     expect(rememberedSceneApps({ s: app.bundleId, gone: app.bundleId, bad: 4 }, [scene])).toEqual({

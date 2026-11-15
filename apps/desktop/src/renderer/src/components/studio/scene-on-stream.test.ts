@@ -10,11 +10,12 @@ import type { Scene, SceneShows } from '@/lib/scenes'
 import { SCREEN_HIDE_UNAVAILABLE } from '@/lib/studio-actions/privacy'
 import { SceneOnStreamFields } from './scene-on-stream'
 
-// Plan 231 D8 (S6): under Studio's scene cards, the scene on stream's own
-// fields. Screen says what the scene shows, with Change… and Hide screen
-// (moved here from Studio's Screen row, plan 210 S8b); Layout saves into the
-// scene on stream (D11), and asks for a screen first on a scene that shows
-// none (D19); Fill or Fit; and the 9:16 layout with a vertical stream armed.
+// Plan 231 D8 (S6, S7): under Studio's scene cards, the scene on stream's own
+// fields. Screen says what the scene shows, with Change screen… and Hide
+// screen (moved here from Studio's Screen row, plan 210 S8b); Layout saves
+// into the scene on stream (D11), and asks Change screen… for a screen first
+// on a scene that shows none (D19); Fill or Fit; and the 9:16 layout with a
+// vertical stream armed.
 
 const mocked = vi.hoisted(() => ({ core: {} as Record<string, unknown> }))
 vi.mock('@/hooks/use-studio', () => ({
@@ -55,6 +56,7 @@ beforeEach(() => {
   root = createRoot(container)
   Element.prototype.scrollIntoView = vi.fn()
   toastUserError.mockReset()
+  onChangeScreen.mockReset()
 })
 
 afterEach(async () => {
@@ -168,8 +170,9 @@ function core(
 async function render(view: () => ReactElement): Promise<void> {
   await act(async () => root.render(createElement(TooltipProvider, { delay: 0, children: view() })))
 }
-const fields = (props: Parameters<typeof SceneOnStreamFields>[0] = {}) =>
-  createElement(SceneOnStreamFields, props)
+const onChangeScreen = vi.fn()
+const fields = (props: Partial<Parameters<typeof SceneOnStreamFields>[0]> = {}) =>
+  createElement(SceneOnStreamFields, { onChangeScreen, ...props })
 
 const screenField = (): HTMLElement =>
   container.querySelector<HTMLElement>('[data-slot="scene-screen-field"]')!
@@ -231,28 +234,26 @@ describe('the scene on stream’s Screen (plan 231 D8)', () => {
     expect(screenField().textContent).toContain('Not shown in Camera only')
   })
 
-  it('changes the scene’s screen from Change…, the screen picker Sources uses', async () => {
+  it('opens Change screen… for the scene on stream', async () => {
     const { switchSourceDeviceLive } = core()
     await render(fields)
-    const trigger = screenField().querySelector<HTMLButtonElement>(
-      'button[aria-label="Change screen"]'
-    )!
-    expect(trigger.getAttribute('role')).toBe('combobox')
-    expect(trigger.textContent).toBe('Change…')
-    await pick('Change screen', 'screen:screencapturekit:3')
-    expect(switchSourceDeviceLive).toHaveBeenCalledExactlyOnceWith(
-      'capture',
-      expect.objectContaining({ screenId: 'screen:screencapturekit:3' })
-    )
+    // The scene's words say what it shows; the button only what it does.
+    expect(screenField().querySelector('[role="combobox"]')).toBeNull()
+    await act(async () => buttonNamed('Change screen…')!.click())
+    expect(onChangeScreen).toHaveBeenCalledExactlyOnceWith()
+    expect(switchSourceDeviceLive).not.toHaveBeenCalled()
   })
 
-  it('hands Change… to the dialog a later slice gives it', async () => {
+  it('says why Change screen… can’t change the stream’s screen now', async () => {
     core()
-    const onChangeScreen = vi.fn()
-    await render(() => fields({ onChangeScreen }))
-    expect(screenField().querySelector('button[aria-label="Change screen"]')).toBeNull()
-    await act(async () => buttonNamed('Change screen…')!.click())
-    expect(onChangeScreen).toHaveBeenCalledOnce()
+    await render(() => fields({ changeScreenReason: 'Stop recording to change the screen.' }))
+    const change = buttonNamed('Change screen…')!
+    expect(change.disabled).toBe(true)
+    expect(
+      document.getElementById(
+        change.closest('[aria-describedby]')!.getAttribute('aria-describedby')!
+      )?.textContent
+    ).toBe('Stop recording to change the screen.')
   })
 
   it('keeps the Screen Recording alert with the Screen', async () => {
@@ -387,48 +388,18 @@ describe('the scene on stream’s Layout (plan 231 D8, D11, D19)', () => {
     )
   })
 
-  it('asks for a screen first on a scene that shows none, and Cancel keeps the layout (D19)', async () => {
+  it('asks Change screen… for a screen first on a scene that shows none (D19)', async () => {
     const { applyCameraPreset, switchSourceDeviceLive } = core({
       shows: { kind: 'none' },
       layout: { layoutPreset: 'camera-only' }
     })
     await render(fields)
     await act(async () => layoutRadio('Screen + camera').click())
-    expect(applyCameraPreset).not.toHaveBeenCalled()
-    const dialog = document.querySelector('[data-testid="scene-screen-dialog"]')!
-    expect(dialog.textContent).toContain('Choose a screen')
-    expect(dialog.textContent).toContain(
-      'Screen + camera shows a screen, and “Figma” shows none yet.'
-    )
-    expect(buttonNamed('Use this screen')!.disabled).toBe(true)
-    await act(async () => buttonNamed('Cancel')!.click())
-    expect(document.querySelector('[data-testid="scene-screen-dialog"]')).toBeNull()
+    // The layout waits for the screen; Change screen… applies it once the
+    // screen lands, and its Cancel keeps this one (scene-presets.test.ts).
+    expect(onChangeScreen).toHaveBeenCalledExactlyOnceWith({ forLayout: 'screen-camera' })
     expect(applyCameraPreset).not.toHaveBeenCalled()
     expect(switchSourceDeviceLive).not.toHaveBeenCalled()
-
-    // Again, and choose: the screen goes on first, then the layout.
-    await act(async () => layoutRadio('Screen + camera').click())
-    await pick('Screen', 'screen:screencapturekit:3')
-    await act(async () => buttonNamed('Use this screen')!.click())
-    expect(switchSourceDeviceLive).toHaveBeenCalledExactlyOnceWith(
-      'capture',
-      expect.objectContaining({ screenId: 'screen:screencapturekit:3' })
-    )
-    expect(applyCameraPreset).not.toHaveBeenCalled()
-    // The pick landed: the scene shows Display 3, and the layout follows.
-    mocked.core = {
-      ...mocked.core,
-      captureConfig: {
-        ...(mocked.core.captureConfig as object),
-        sources: { screenId: 'screen:screencapturekit:3', cameraId: 'camera:1' }
-      },
-      sceneOnStream: stored(
-        { kind: 'display', screenId: 'screen:screencapturekit:3', screenName: 'Display 3' },
-        { layoutPreset: 'camera-only' }
-      )
-    }
-    await render(fields)
-    expect(applyCameraPreset).toHaveBeenCalledExactlyOnceWith({ layoutPreset: 'screen-camera' })
   })
 
   it('needs no screen for a camera layout on a scene that shows none', async () => {
@@ -439,7 +410,7 @@ describe('the scene on stream’s Layout (plan 231 D8, D11, D19)', () => {
     await render(fields)
     await act(async () => layoutRadio('Camera only').click())
     expect(applyCameraPreset).toHaveBeenCalledExactlyOnceWith({ layoutPreset: 'camera-only' })
-    expect(document.querySelector('[data-testid="scene-screen-dialog"]')).toBeNull()
+    expect(onChangeScreen).not.toHaveBeenCalled()
   })
 
   it('offers Fill or Fit as Framing for the screen layouts that have it', async () => {
@@ -507,10 +478,13 @@ describe('Retro LCD: the scene on stream on a screen (plan 197, plan 231 S6)', (
     expect(screen).not.toBeNull()
     expect(screen.textContent).toContain('On stream')
     expect(screen.textContent).toContain('Figma')
-    // On a screen a value is its own dropdown: the scene's words open the list.
-    const trigger = screen.querySelector<HTMLButtonElement>('button[aria-label="Screen"]')!
-    expect(trigger.getAttribute('role')).toBe('combobox')
-    expect(trigger.textContent).toContain('Figma · front window')
+    // The scene's words, and Change screen… as the screen's action.
+    expect(screen.textContent).toContain('Figma · front window')
+    const change = [...screen.querySelectorAll<HTMLButtonElement>('button')].find((button) =>
+      button.textContent?.includes('Change screen…')
+    )!
+    await act(async () => change.click())
+    expect(onChangeScreen).toHaveBeenCalledExactlyOnceWith()
     expect(screen.querySelector('button[aria-label="Layout"]')?.textContent).toContain(
       'Screen + camera'
     )

@@ -1,11 +1,11 @@
-import { useState, useSyncExternalStore, type ReactElement } from 'react'
+import { useEffect, useState, useSyncExternalStore, type ReactElement } from 'react'
 
 import { withGlobalShortcut } from '../../../../shared/global-shortcut-bindings'
 import { globalShortcutEntries } from '../../../../shared/global-shortcuts'
 import { ConfirmDialog } from '@/components/confirm-dialog'
 import { DevicePicker } from '@/components/device-picker'
 import type { KebabMenuItem } from '@/components/kebab-menu'
-import { NewSceneDialog } from '@/components/scene/new-scene-dialog'
+import { ScenePickerDialog, type ScenePickerMode } from '@/components/scene/scene-picker-dialog'
 import { ShortcutRecorderField } from '@/components/shortcut-recorder'
 import { Alert, AlertTitle } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
@@ -20,17 +20,16 @@ import {
 import { Field, FieldDescription, FieldGroup, FieldLabel } from '@/components/ui/field'
 import { Input } from '@/components/ui/input'
 import { useStudioCore } from '@/hooks/use-studio'
-import type { Device } from '@/lib/backend'
+import type { LayoutPreset } from '@/lib/backend'
+import {
+  buildCaptureSources,
+  hasSelectedCameraSource,
+  layoutPresetOrientation
+} from '@/lib/capture'
 import { globalShortcutRegistration } from '@/lib/global-shortcuts'
 import { globalShortcutTakenReason } from '@/lib/global-shortcut-owner'
-import { newAppScenes, newCaptureScene, type AppChoice } from '@/lib/scene-app-picker'
-import {
-  duplicatedScene,
-  sceneWithApp,
-  sceneWithAudio,
-  sceneWithFollow,
-  suggestedSceneName
-} from '@/lib/scene-list'
+import { newScenes, sceneShowingPick, type ScreenPick } from '@/lib/scene-app-picker'
+import { duplicatedScene, sceneWithAudio, sceneWithFollow } from '@/lib/scene-list'
 import {
   normalizeSceneAudio,
   normalizeSceneVisual,
@@ -39,13 +38,13 @@ import {
   type SavedScene,
   type SceneVisual
 } from '@/lib/scene-presets'
-import { canDeleteScene } from '@/lib/scenes'
+import { canDeleteScene, showsSources } from '@/lib/scenes'
 
 /** One dialog at a time, for the scene list and the Studio gallery alike. */
 export type SceneDialogRequest =
-  | { kind: 'new' }
-  | { kind: 'change-app'; scene: SavedScene }
-  | { kind: 'save' }
+  | { kind: 'add' }
+  /** `forLayout`: D19, the layout chosen on a scene that shows no screen. */
+  | { kind: 'change-screen'; scene: SavedScene; forLayout?: LayoutPreset }
   | { kind: 'rename'; scene: SavedScene }
   | { kind: 'key'; scene: SavedScene }
   | { kind: 'delete'; scene: SavedScene }
@@ -53,15 +52,41 @@ export type SceneDialogRequest =
 
 const READ_ONLY_REASON = 'Update Videorc to change your scenes.'
 
+/** D19: the layout that waits for the screen Change screen… put on stream. */
+type LayoutAfterScreen = {
+  preset: LayoutPreset
+  sceneId: string
+  /** The capture that means the screen landed; null for an app's window, any capture. */
+  captureId: string | null
+  /** The layout on stream when it was asked: another layout chosen since wins. */
+  layoutBefore: LayoutPreset
+}
+
 /**
- * Plan 210 S5: New scene…, Save scene…, a saved scene's ⋯ actions and their
- * dialogs, in one place, so the Scene page's list and the Studio gallery say
- * and do the same. Nothing here toasts a success: the list and the stage
- * show it (owner call, 2026-07-16).
+ * Why Change screen… can't change a scene now, or null. Only the scene on
+ * stream can be refused: its screen is the stream's (a Linux session can't
+ * change screens mid-session, a switch in flight).
+ */
+export function changeScreenBlockedReason(
+  studio: Pick<
+    ReturnType<typeof useStudioCore>,
+    'sceneLibraryActions' | 'activeSavedSceneId' | 'sourceSwitchReason'
+  >,
+  sceneId: string
+): string | null {
+  if (studio.sceneLibraryActions.readOnly) return READ_ONLY_REASON
+  return sceneId === studio.activeSavedSceneId ? studio.sourceSwitchReason('capture') : null
+}
+
+/**
+ * Add scene…, Change screen…, a scene's ⋯ actions and their dialogs, in one
+ * place, so the Scene page's list and Studio's Scenes section say and do the
+ * same (plan 210 S5, plan 231 S7). Nothing here toasts a success: the list
+ * and the stage show it (owner call, 2026-07-16).
  */
 export function useSceneDialogs(): {
   open: (request: SceneDialogRequest) => void
-  /** Put a saved scene on stream; one whose sources are gone asks for new ones. */
+  /** Put a scene on stream; one whose sources are gone asks for new ones. */
   select: (scene: SavedScene) => void
   /** Whether a scene needs its sources chosen again before it can go on. */
   needsSources: (scene: SavedScene) => boolean
@@ -70,11 +95,28 @@ export function useSceneDialogs(): {
   element: ReactElement
 } {
   const studio = useStudioCore()
-  const { savedScenes, sceneLibraryActions, deviceList } = studio
+  const { savedScenes, sceneLibraryActions, deviceList, captureConfig, applyCameraPreset } = studio
   const [request, setRequest] = useState<SceneDialogRequest | null>(null)
   const [busy, setBusy] = useState(false)
+  const [afterScreen, setAfterScreen] = useState<LayoutAfterScreen | null>(null)
   const now = (): string => new Date().toISOString()
   const close = (): void => setRequest(null)
+
+  // D19: the layout goes on once the stream shows the screen chosen for it,
+  // never on the screen before. Cancel never gets here: the layout stays.
+  const sceneOnStreamId = studio.sceneOnStream?.id
+  const layoutOnStream = captureConfig.layout.layoutPreset
+  const capturing = captureConfig.sources.screenId ?? captureConfig.sources.windowId
+  useEffect(() => {
+    if (!afterScreen) return
+    if (sceneOnStreamId !== afterScreen.sceneId || layoutOnStream !== afterScreen.layoutBefore) {
+      setAfterScreen(null)
+      return
+    }
+    if (afterScreen.captureId ? capturing !== afterScreen.captureId : !capturing) return
+    setAfterScreen(null)
+    applyCameraPreset({ layoutPreset: afterScreen.preset })
+  }, [afterScreen, capturing, sceneOnStreamId, layoutOnStream, applyCameraPreset])
 
   const needsSources = (scene: SavedScene): boolean => {
     const rememberedApp = studio.savedSceneWindowApps?.[scene.id]
@@ -118,27 +160,72 @@ export function useSceneDialogs(): {
     else void apply(scene)
   }
 
-  const chooseApps = (apps: AppChoice[]): void => {
-    if (request?.kind === 'change-app') {
-      const choice = apps[0]
-      if (!choice) return
-      const scene = sceneWithApp(request.scene, choice, savedScenes, now())
-      if (!sceneLibraryActions.replace(scene)) return
-      close()
-      // The scene on stream shows its new app at once.
-      if (studio.activeSavedSceneId === scene.id) void apply(scene, scene.visual)
-      return
-    }
-    const scenes = newAppScenes(apps, sceneLibraryActions.workingVisual, savedScenes)
-    if (sceneLibraryActions.insert(scenes)) close()
+  /**
+   * Add scene… (D6): each pick a scene in the look of the scene on stream, at
+   * the end of the list with its position key (D5). What's on stream stays:
+   * nothing is applied and the scene on stream doesn't change.
+   */
+  const addScenes = (picks: readonly ScreenPick[]): void => {
+    const template = studio.sceneOnStream
+    if (!template || picks.length === 0) return
+    const { scenes, windowHints } = newScenes(picks, template, savedScenes, {
+      cameraOn: hasSelectedCameraSource(captureConfig.sources),
+      id: () => crypto.randomUUID(),
+      now
+    })
+    if (sceneLibraryActions.add(scenes, windowHints)) close()
   }
 
-  const chooseCapture = (device: Device): void => {
-    const scene = newCaptureScene(device, sceneLibraryActions.workingVisual, savedScenes, {
-      id: crypto.randomUUID(),
-      now: now()
+  /**
+   * Change screen… (D6): the scene shows the pick. On the scene on stream the
+   * stream changes with it (D2), through the same paths as a Screen pick and
+   * a scene switch; any other scene changes alone.
+   */
+  const changeScreen = (pick: ScreenPick): void => {
+    if (request?.kind !== 'change-screen') return
+    const { scene: listed, forLayout } = request
+    const stored = sceneLibraryActions.stored(listed.id)
+    if (!stored) return
+    const next = sceneShowingPick(stored, pick, savedScenes, now())
+    const windowHint = pick.kind === 'app' ? pick.app.frontWindowId : undefined
+    if (listed.id !== studio.activeSavedSceneId) {
+      if (sceneLibraryActions.edit(next, windowHint)) close()
+      return
+    }
+    close()
+    const after = (captureId: string | null): LayoutAfterScreen | null =>
+      forLayout
+        ? { preset: forLayout, sceneId: listed.id, captureId, layoutBefore: layoutOnStream }
+        : null
+    if (pick.kind === 'display' || pick.kind === 'window') {
+      // The Screen pick of D2: it writes the scene's screen (S2).
+      if (next.name !== stored.name) studio.renameSavedScene(listed.id, next.name)
+      setAfterScreen(after(pick.device.id))
+      void studio
+        .switchSourceDeviceLive(
+          'capture',
+          buildCaptureSources(captureConfig.sources, [pick.device], pick.device.id)
+        )
+        .catch(() => setAfterScreen(null))
+      return
+    }
+    if (!sceneLibraryActions.edit(next, windowHint)) return
+    if (pick.kind === 'none') {
+      // No screen: the scene is on Camera only now (D18 keeps the capture).
+      const layout = next.layouts[layoutPresetOrientation(layoutOnStream)]
+      if (layout.layoutPreset !== layoutOnStream)
+        applyCameraPreset({ layoutPreset: layout.layoutPreset })
+      return
+    }
+    // An app: the scene goes on again with the app's front window, then the
+    // layout D19 asked for.
+    const visual: SceneVisual = {
+      ...listed.visual,
+      sources: { ...listed.visual.sources, ...showsSources(next.shows), windowId: windowHint }
+    }
+    void apply({ ...listed, name: next.name, visual }, visual).then((ok) => {
+      if (ok) setAfterScreen(after(null))
     })
-    if (sceneLibraryActions.insert([scene])) close()
   }
 
   const deleteVerdict = (scene: SavedScene): ReturnType<typeof canDeleteScene> =>
@@ -160,11 +247,16 @@ export function useSceneDialogs(): {
       : `“${scene.name}” and its key are deleted. What’s on stream stays as it is.`
   }
 
+  /**
+   * The ⋯ menu (D11): Rename…, Change screen…, Set key…; Follow or Stop
+   * following (app scenes) and Save audio to scene; Duplicate; Delete.
+   */
   const menuItems = (scene: SavedScene): KebabMenuItem[] => {
     const app = scene.visual.sources.app
     const readOnly = sceneLibraryActions.readOnly
     const writes = { disabled: readOnly, disabledReason: readOnly ? READ_ONLY_REASON : null }
     const deletion = deleteVerdict(scene)
+    const screenReason = changeScreenBlockedReason(studio, scene.id)
     const audioKept =
       scene.audio !== undefined &&
       JSON.stringify(scene.audio) ===
@@ -178,6 +270,14 @@ export function useSceneDialogs(): {
         onSelect: () => setRequest({ kind: 'rename', scene })
       },
       {
+        id: 'screen',
+        label: 'Change screen…',
+        group: 'edit',
+        disabled: screenReason !== null,
+        disabledReason: screenReason,
+        onSelect: () => setRequest({ kind: 'change-screen', scene })
+      },
+      {
         id: 'key',
         label: 'Set key…',
         group: 'edit',
@@ -186,26 +286,15 @@ export function useSceneDialogs(): {
       ...(app
         ? [
             {
-              id: 'change-app',
-              label: 'Change app…',
-              group: 'edit',
+              id: 'follow',
+              label: app.follows ? 'Stop following' : 'Follow the app',
+              group: 'keeps',
               ...writes,
-              onSelect: () => setRequest({ kind: 'change-app', scene })
+              onSelect: () =>
+                sceneLibraryActions.replace(sceneWithFollow(scene, !app.follows, now()))
             }
           ]
         : []),
-      {
-        id: 'duplicate',
-        label: 'Duplicate',
-        group: 'edit',
-        ...writes,
-        onSelect: () => {
-          sceneLibraryActions.insert(
-            [duplicatedScene(scene, savedScenes, { id: crypto.randomUUID(), now: now() })],
-            scene.id
-          )
-        }
-      },
       {
         id: 'audio',
         label: 'Save audio to scene',
@@ -221,18 +310,20 @@ export function useSceneDialogs(): {
             sceneWithAudio(scene, sceneLibraryActions.workingAudio, now())
           )
       },
-      ...(app
-        ? [
-            {
-              id: 'follow',
-              label: app.follows ? 'Stop following' : 'Follow the app',
-              group: 'keeps',
-              ...writes,
-              onSelect: () =>
-                sceneLibraryActions.replace(sceneWithFollow(scene, !app.follows, now()))
-            }
-          ]
-        : []),
+      {
+        id: 'duplicate',
+        label: 'Duplicate',
+        group: 'copy',
+        ...writes,
+        // Another one like this, at the end (D5, D6).
+        onSelect: () => {
+          const stored = sceneLibraryActions.stored(scene.id)
+          if (stored)
+            sceneLibraryActions.add([
+              duplicatedScene(stored, savedScenes, { id: crypto.randomUUID(), now: now() })
+            ])
+        }
+      },
       {
         id: 'delete',
         label: 'Delete',
@@ -246,47 +337,38 @@ export function useSceneDialogs(): {
     ]
   }
 
+  const changing = request?.kind === 'change-screen' ? request : null
+  const changingStored = changing ? sceneLibraryActions.stored(changing.scene.id) : undefined
+  const pickerMode: ScenePickerMode | null =
+    request?.kind === 'add'
+      ? { kind: 'add' }
+      : changing && changingStored
+        ? {
+            kind: 'change',
+            scene: changingStored,
+            onStream: changing.scene.id === studio.activeSavedSceneId,
+            forLayout: changing.forLayout
+          }
+        : null
+
   const element = (
     <>
-      <NewSceneDialog
-        mode={
-          request?.kind === 'change-app'
-            ? {
-                kind: 'change-app',
-                sceneName: request.scene.name,
-                bundleId: request.scene.visual.sources.app?.bundleId
-              }
-            : { kind: 'new' }
-        }
-        open={request?.kind === 'new' || request?.kind === 'change-app'}
-        onChooseApps={chooseApps}
-        onChooseCapture={chooseCapture}
+      <ScenePickerDialog
+        mode={pickerMode ?? { kind: 'add' }}
+        open={pickerMode !== null}
+        onAdd={addScenes}
+        onChange={changeScreen}
         onOpenChange={(open) => {
           if (!open) close()
         }}
       />
-      {request?.kind === 'save' || request?.kind === 'rename' ? (
-        <SceneNameDialog
-          key={request.kind === 'rename' ? `rename-${request.scene.id}` : 'save'}
-          canSave={request.kind === 'rename' || studio.canSaveScene}
-          exceptId={request.kind === 'rename' ? request.scene.id : undefined}
-          initialName={
-            request.kind === 'rename'
-              ? request.scene.name
-              : suggestedSceneName(
-                  sceneLibraryActions.workingVisual,
-                  deviceList.devices,
-                  savedScenes
-                )
-          }
-          kind={request.kind}
+      {request?.kind === 'rename' ? (
+        <RenameSceneDialog
+          key={request.scene.id}
+          scene={request.scene}
           scenes={savedScenes}
           onClose={close}
-          onSubmit={(name) =>
-            request.kind === 'rename'
-              ? studio.renameSavedScene(request.scene.id, name)
-              : studio.saveScene(name)
-          }
+          onSubmit={(name) => studio.renameSavedScene(request.scene.id, name)}
         />
       ) : null}
       {request?.kind === 'key' ? (
@@ -332,34 +414,28 @@ export function useSceneDialogs(): {
   return { open: setRequest, select, needsSources, menuItems, busy, element }
 }
 
-/** Save scene… and Rename…: one name, unique, 1 to 80 characters. */
-function SceneNameDialog({
-  kind,
-  initialName,
+/** Rename…: one name, unique, 1 to 80 characters. */
+function RenameSceneDialog({
+  scene,
   scenes,
-  exceptId,
-  canSave,
   onSubmit,
   onClose
 }: {
-  kind: 'save' | 'rename'
-  initialName: string
+  scene: SavedScene
   scenes: readonly SavedScene[]
-  exceptId?: string
-  canSave: boolean
   onSubmit: (name: string) => boolean
   onClose: () => void
 }): ReactElement {
-  const [name, setName] = useState(initialName)
+  const [name, setName] = useState(scene.name)
   const [error, setError] = useState<string | null>(null)
   const submit = (): void => {
-    const invalid = sceneNameError(name, scenes, exceptId)
+    const invalid = sceneNameError(name, scenes, scene.id)
     if (invalid) {
       setError(invalid)
       return
     }
     if (onSubmit(name)) onClose()
-    else setError("Couldn't save. Wait for the scene to finish changing, or check your free space.")
+    else setError("Couldn't rename the scene. Check your free space, then try again.")
   }
   return (
     <Dialog
@@ -368,17 +444,10 @@ function SceneNameDialog({
         if (!open) onClose()
       }}
     >
-      <DialogContent size={kind === 'rename' ? 'sm' : 'md'}>
+      <DialogContent size="sm">
         <DialogHeader>
-          <DialogTitle>{kind === 'rename' ? 'Rename scene' : 'Save scene'}</DialogTitle>
-          {kind === 'save' ? (
-            <DialogDescription>
-              Saves your screen, camera, microphone, system audio, framing and background. Levels,
-              recording and streaming settings stay separate.
-            </DialogDescription>
-          ) : (
-            <DialogDescription className="sr-only">Give the scene a new name.</DialogDescription>
-          )}
+          <DialogTitle>Rename scene</DialogTitle>
+          <DialogDescription className="sr-only">Give the scene a new name.</DialogDescription>
         </DialogHeader>
         <Field data-invalid={Boolean(error)}>
           <FieldLabel htmlFor="scene-preset-name">Name</FieldLabel>
@@ -406,9 +475,7 @@ function SceneNameDialog({
           <Button variant="ghost" onClick={onClose}>
             Cancel
           </Button>
-          <Button disabled={!canSave} onClick={submit}>
-            {kind === 'rename' ? 'Rename' : 'Save'}
-          </Button>
+          <Button onClick={submit}>Rename</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

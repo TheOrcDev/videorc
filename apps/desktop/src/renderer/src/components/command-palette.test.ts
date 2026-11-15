@@ -57,6 +57,8 @@ vi.mock('next-themes', () => ({
 }))
 const editScene = vi.hoisted(() => vi.fn())
 vi.mock('@/hooks/use-edit-scene', () => ({ useEditScene: () => editScene }))
+const openAddScene = vi.hoisted(() => vi.fn())
+vi.mock('@/lib/scene-add-request', () => ({ openAddScene }))
 
 let root: Root
 let container: HTMLDivElement
@@ -92,6 +94,7 @@ beforeEach(() => {
     screenPrivacy: { hidden: false },
     toggleScreenHidden: vi.fn(async () => true),
     savedScenes: [],
+    sceneLibraryActions: { readOnly: false },
     applySavedSceneResult: vi.fn(async () => ({ ok: true })),
     applySavedScene: vi.fn(async () => true),
     captureConfig: {
@@ -327,7 +330,20 @@ describe('CommandPalette order and verbs (plan 174 A-9, A-13)', () => {
       'Settings',
       'Appearance'
     ])
-    expect(groupValues('Scenes')).toEqual(['Switch to Talking head'])
+    // Plan 231 D14: Add scene… leads, then every scene; never Save scene….
+    expect(groupValues('Scenes')).toEqual(['Add scene…', 'Switch to Talking head'])
+    expect(values().some((value) => value.includes('Save scene'))).toBe(false)
+  })
+
+  it('opens Add scene… in Studio, off while the scenes are read-only (plan 231 D14)', async () => {
+    mocked.core.savedScenes = [{ id: 's1', name: 'Talking head' }]
+    openAddScene.mockClear()
+    await render()
+    await act(async () => item('Add scene…').click())
+    expect(openAddScene).toHaveBeenCalledOnce()
+    mocked.core.sceneLibraryActions = { readOnly: true }
+    await render()
+    expect(item('Add scene…').getAttribute('aria-disabled')).toBe('true')
   })
 
   it('opens every page with one verb, in sidebar order, Health last', async () => {

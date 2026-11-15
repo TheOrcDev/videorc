@@ -10,14 +10,15 @@ import {
   type AppChoice
 } from '@/lib/scene-app-picker'
 
-/** S4 draws pictures at most this wide; the cards are about 170 px. */
+/** Pictures at most this wide; the cards are about 170 px. */
 const PICTURE_MAX_WIDTH = 320
 
 let loggedFallback = false
 
 /**
- * New scene…'s apps (plan 210 S5). S4's `sources.app_previews` brings a
- * picture of each app's front window, only while the picker is open. When
+ * Add scene…'s and Change screen…'s apps (plan 210 S5, plan 231 D6).
+ * `sources.app_previews` brings a picture of each app's front window, only
+ * while the picker is open. When
  * Videorc doesn't know that request yet (or it fails), the device list
  * stands in: windows grouped by app, no pictures. The fallback is quiet,
  * logged once.
@@ -25,8 +26,10 @@ let loggedFallback = false
 export function useAppChoices(open: boolean): {
   apps: AppChoice[]
   loading: boolean
-  /** Whether the cards can show pictures (S4 answered). */
+  /** Whether the cards can show pictures (the pictures request answered). */
   pictures: boolean
+  /** Videorc's own apps, never offered (its windows included). */
+  selfBundleIds: readonly string[]
   /** Every screen and window waits on Screen Recording. */
   grantMissing: boolean
   refresh: () => void
@@ -81,6 +84,7 @@ export function useAppChoices(open: boolean): {
       : appChoicesFromDevices(deviceList.devices, selfBundleIds),
     loading,
     pictures: previews !== null,
+    selfBundleIds,
     grantMissing:
       captureDevices.length > 0 &&
       captureDevices.every((device) => device.status === 'permission-required'),

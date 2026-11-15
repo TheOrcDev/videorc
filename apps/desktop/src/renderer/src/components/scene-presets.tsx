@@ -13,7 +13,7 @@ import type { StudioLook } from '@/components/lcd-panel'
 import { PanelSection } from '@/components/panel-section'
 import { AppIconImage, SceneGlyphIcon } from '@/components/scene/app-icon'
 import { FollowFrontAppSwitch } from '@/components/scene/follow-front-app-switch'
-import { useSceneDialogs } from '@/components/scene/scene-dialogs'
+import { changeScreenBlockedReason, useSceneDialogs } from '@/components/scene/scene-dialogs'
 import { SceneShortcutKeys } from '@/components/scene/scene-shortcut-keys'
 import { SceneSwitchPending, SceneSwitchStatus } from '@/components/scene/scene-switch-status'
 import { SceneCard, SceneGalleryReason } from '@/components/studio/scene-card'
@@ -32,6 +32,7 @@ import {
   type LayoutOrientation
 } from '@/lib/capture'
 import { EDIT_SCENE_LABEL } from '@/lib/edit-scene'
+import { ADD_SCENE_EVENT, takeAddSceneRequest } from '@/lib/scene-add-request'
 import { shortcutAriaKeys } from '@/lib/platform'
 import {
   MOVE_SCENE_LEFT_ACCELERATOR,
@@ -71,21 +72,16 @@ const STUDIO_ORIENTATION_OPTIONS: SegmentedControlOption<LayoutOrientation>[] = 
  * move with the positions (D5). Under the cards, the scene on stream's own
  * fields. A lazy chunk: the dialogs and fields stay out of the first paint.
  *
- * The seams for later slices: `pictures` takes each scene's still (scene id
- * → image URL, from `useScenePictures`); `onAddScene` and `onChangeScreen`
- * take S7's Add scene… and Change screen… dialogs. Without them, Add scene…
- * opens New scene… and Change… opens the screen picker.
+ * Add scene… and Change screen… (S7) are `useSceneDialogs`' picker, here
+ * and on the Scene page; ⌘K's Add scene… opens it here. `pictures` takes
+ * each scene's still (scene id → image URL, from `useScenePictures`, S5).
  */
 export function ScenesSection({
   look = 'default',
-  pictures,
-  onAddScene,
-  onChangeScreen
+  pictures
 }: {
   look?: StudioLook
   pictures?: ReadonlyMap<string, string>
-  onAddScene?: () => void
-  onChangeScreen?: () => void
 }): ReactElement {
   const studio = useStudioCore()
   const {
@@ -120,6 +116,17 @@ export function ScenesSection({
   ])
   const camera = sceneCardsCameraGaps(savedScenes, deviceList.devices)
   const keys = sceneSlotKeysLine(settings.globalShortcuts, platform)
+  const openDialog = dialogs.open
+
+  // ⌘K's Add scene… (D14): taken once at mount, or heard while mounted.
+  useEffect(() => {
+    const take = (): void => {
+      if (takeAddSceneRequest() && !readOnly) openDialog({ kind: 'add' })
+    }
+    take()
+    window.addEventListener(ADD_SCENE_EVENT, take)
+    return () => window.removeEventListener(ADD_SCENE_EVENT, take)
+  }, [openDialog, readOnly])
 
   // The scene on stream goes on in its own layout for the other orientation
   // (the preset only names it); the orientation⇄canvas coupling in
@@ -167,7 +174,7 @@ export function ScenesSection({
               data-testid="scene-add"
               disabled={readOnly}
               variant="outline"
-              onClick={onAddScene ?? (() => dialogs.open({ kind: 'new' }))}
+              onClick={() => dialogs.open({ kind: 'add' })}
             >
               Add scene…
             </Button>
@@ -346,7 +353,16 @@ export function ScenesSection({
         }
         reason={camera.reason}
       />
-      <SceneOnStreamFields look={look} onChangeScreen={onChangeScreen} />
+      <SceneOnStreamFields
+        changeScreenReason={
+          activeSavedSceneId ? changeScreenBlockedReason(studio, activeSavedSceneId) : null
+        }
+        look={look}
+        onChangeScreen={(options) => {
+          const listed = savedScenes.find((entry) => entry.id === activeSavedSceneId)
+          if (listed) dialogs.open({ kind: 'change-screen', scene: listed, ...options })
+        }}
+      />
       {dialogs.element}
     </PanelSection>
   )

@@ -5,12 +5,12 @@ import { appWindowFailureCopy } from './scene-apps'
 import {
   sceneSourceProblems,
   normalizeSceneAudio,
-  normalizeSceneVisual,
   type SavedScene,
   type SceneAudio,
   type SceneVisual
 } from './scene-presets'
 import type { SceneAppState } from './scene-window-resolution'
+import type { Scene } from './scenes'
 
 // Plan 231 D2: the Scene page leads with one list, the scenes in library
 // order (a new scene goes at the end, a drag or ⌥↑ ⌥↓ moves one). A scene is
@@ -128,102 +128,26 @@ export function uniqueSceneName(
 }
 
 /**
- * Save scene…'s starting name (plan 210 §4: the field used to start empty):
- * the app or display the scene shows, else its layout, made unique.
- */
-export function suggestedSceneName(
-  visual: SceneVisual,
-  devices: readonly Device[],
-  scenes: readonly Pick<SavedScene, 'id' | 'name'>[]
-): string {
-  const { sources } = visual
-  const window = sources.windowId
-    ? devices.find((device) => device.id === sources.windowId)
-    : undefined
-  const base = !showsScreen(visual)
-    ? layoutPresetLabel(visual.layout.layoutPreset)
-    : (sources.app?.name ??
-      window?.app?.name ??
-      sources.windowName ??
-      sources.screenName ??
-      layoutPresetLabel(visual.layout.layoutPreset))
-  return uniqueSceneName(base, scenes)
-}
-
-/**
- * Duplicate: the same look, sources and audio under "{name} 2", placed right
- * after the original. Its key stays with the original.
+ * Duplicate (plan 231 D6): "another one like this", both layouts, its screen,
+ * background and audio, under "{name} 2". It goes at the end like every new
+ * scene (D5), and its keys stay with the original.
  */
 export function duplicatedScene(
-  scene: SavedScene,
-  scenes: readonly SavedScene[],
+  scene: Scene,
+  scenes: readonly Pick<Scene, 'id' | 'name'>[],
   options: { id: string; now: string }
-): SavedScene {
+): Scene {
   return {
     ...structuredClone(scene),
     id: options.id,
     name: uniqueSceneName(scene.name, scenes),
     createdAt: options.now,
-    updatedAt: options.now,
-    visual: normalizeSceneVisual(scene.visual)
+    updatedAt: options.now
   }
-}
-
-/**
- * Why "Save scene…" can't run, or null (plan 210 §8: it was disabled without
- * saying why). Offline wins: nothing commits without Videorc.
- */
-export function saveSceneBlockedReason(input: {
-  readOnly: boolean
-  connected: boolean
-  canSave: boolean
-}): string | null {
-  if (input.canSave) return null
-  if (input.readOnly) return 'Update Videorc to save scenes. Your saved scenes are kept.'
-  if (!input.connected) return 'Videorc is reconnecting. Try again in a moment.'
-  return 'Wait for the scene to finish changing.'
 }
 
 // The ⋯ menu's edits. Each is the streamer's own action, so each may change
 // what the scene shows or hears; nothing else does (D3, D4).
-
-/**
- * Change app…: the scene shows another app's front window, and keeps its
- * look, audio and following. A name that was the old app's ("Figma",
- * "Figma 2") becomes the new app's; a name the streamer typed stays.
- */
-export function sceneWithApp(
-  scene: SavedScene,
-  app: { bundleId: string; name: string; frontWindowId?: string; frontWindowTitle?: string },
-  scenes: readonly SavedScene[],
-  now: string
-): SavedScene {
-  const previous = scene.visual.sources.app
-  const namedAfterApp =
-    previous &&
-    new RegExp(`^${previous.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}( \\d+)?$`, 'i').test(
-      scene.name
-    )
-  return {
-    ...scene,
-    name: namedAfterApp ? uniqueSceneName(app.name, scenes, scene.id) : scene.name,
-    updatedAt: now,
-    visual: normalizeSceneVisual({
-      ...scene.visual,
-      sources: {
-        ...scene.visual.sources,
-        screenId: undefined,
-        screenName: undefined,
-        screenUuid: undefined,
-        windowId: app.frontWindowId,
-        windowName: app.frontWindowTitle,
-        captureOff: false,
-        testPattern: false,
-        app: { bundleId: app.bundleId, name: app.name, follows: previous?.follows ?? true }
-      }
-    })
-  }
-}
 
 /** Stop following / Follow the app (D10): only scenes made for an app follow. */
 export function sceneWithFollow(scene: SavedScene, follows: boolean, now: string): SavedScene {

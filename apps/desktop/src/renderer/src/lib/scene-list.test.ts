@@ -3,17 +3,13 @@ import { describe, expect, it } from 'vitest'
 import type { Device } from './backend'
 import { defaultCaptureConfig } from './capture'
 import {
-  duplicatedScene,
   movedScenes,
-  saveSceneBlockedReason,
   savedSceneBlockedReason,
   sceneGlyph,
   sceneMoveKeyStep,
   sceneShows,
-  sceneWithApp,
   sceneWithAudio,
   sceneWithFollow,
-  suggestedSceneName,
   uniqueSceneName
 } from './scene-list'
 import { normalizeSceneVisual, type SavedScene, type VisualSources } from './scene-presets'
@@ -142,46 +138,13 @@ describe('the scene list (plan 210 D6)', () => {
     ).toBe('Camera unavailable. Choose a replacement in Sources.')
   })
 
-  it('names a scene uniquely and suggests the name of what it shows', () => {
+  it('names a scene uniquely: Figma, then Figma 3 while Figma 2 is taken', () => {
     const scenes = [scene('a', 'Figma'), scene('b', 'figma 2')]
     expect(uniqueSceneName('Figma', scenes)).toBe('Figma 3')
     expect(uniqueSceneName('Figma', scenes, 'a')).toBe('Figma')
     expect(uniqueSceneName('  ', [])).toBe('Scene')
     expect(uniqueSceneName('x'.repeat(90), [scene('a', 'x'.repeat(80))])).toBe(
       `${'x'.repeat(78)} 2`
-    )
-    const devices = [window('window:1', 'com.apple.Notes', 'Notes')]
-    expect(suggestedSceneName(scene('w', 'W', { windowId: 'window:1' }).visual, devices, [])).toBe(
-      'Notes'
-    )
-    expect(suggestedSceneName(scene('d', 'D').visual, [], [scene('a', 'Display 1')])).toBe(
-      'Display 1 2'
-    )
-    expect(suggestedSceneName(scene('c', 'C', {}, 'camera-only').visual, [], [])).toBe(
-      'Camera only'
-    )
-  })
-
-  it('duplicates the look, sources and audio under a new id and name', () => {
-    const original = { ...figma(), audio: sceneWithAudio(figma(), audio, 'now').audio }
-    const copy = duplicatedScene(original, [original], { id: 'copy', now: 'later' })
-    expect(copy).toMatchObject({ id: 'copy', name: 'Figma 2', createdAt: 'later' })
-    expect(copy.visual).toEqual(original.visual)
-    expect(copy.audio).toEqual(original.audio)
-    copy.visual.layout.cameraZoom = 180
-    expect(original.visual.layout.cameraZoom).not.toBe(180)
-  })
-
-  it('reports why Save scene… is off', () => {
-    expect(saveSceneBlockedReason({ readOnly: false, connected: true, canSave: true })).toBeNull()
-    expect(saveSceneBlockedReason({ readOnly: true, connected: true, canSave: false })).toBe(
-      'Update Videorc to save scenes. Your saved scenes are kept.'
-    )
-    expect(saveSceneBlockedReason({ readOnly: false, connected: false, canSave: false })).toBe(
-      'Videorc is reconnecting. Try again in a moment.'
-    )
-    expect(saveSceneBlockedReason({ readOnly: false, connected: true, canSave: false })).toBe(
-      'Wait for the scene to finish changing.'
     )
   })
 })
@@ -194,29 +157,6 @@ const audio = {
 }
 
 describe('the ⋯ edits', () => {
-  it('Change app… keeps the look, audio and following; renames an app-named scene', () => {
-    const original = { ...sceneWithFollow(figma(), false, 'now'), audio }
-    const sketch = {
-      bundleId: 'com.bohemiancoding.sketch3',
-      name: 'Sketch',
-      frontWindowId: 'window:9'
-    }
-    const changed = sceneWithApp(original, sketch, [original], 'later')
-    expect(changed.name).toBe('Sketch')
-    expect(changed.audio).toEqual(audio)
-    expect(changed.visual.layout).toEqual(original.visual.layout)
-    expect(changed.visual.sources).toMatchObject({
-      windowId: 'window:9',
-      app: { bundleId: sketch.bundleId, name: 'Sketch', follows: false }
-    })
-    const named = { ...figma(), name: 'Design review' }
-    expect(sceneWithApp(named, sketch, [named], 'later').name).toBe('Design review')
-    const second = { ...figma(), name: 'Figma 2' }
-    expect(sceneWithApp(second, sketch, [second, scene('s', 'Sketch')], 'later').name).toBe(
-      'Sketch 2'
-    )
-  })
-
   it('turns following off and on only for scenes made for an app', () => {
     expect(sceneWithFollow(figma(), false, 'now').visual.sources.app?.follows).toBe(false)
     const display = scene('d', 'D')

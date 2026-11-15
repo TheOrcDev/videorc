@@ -9,6 +9,8 @@ import {
   getFollowSettings,
   resetFollowSettingsForTest
 } from '@/lib/follow-settings'
+import { openAddScene } from '@/lib/scene-add-request'
+import type { Scene } from '@/lib/scenes'
 import { ScenesSection } from './scene-presets'
 const mocked = vi.hoisted(() => ({ core: {} as Record<string, unknown> }))
 vi.mock('@/hooks/use-studio', () => ({
@@ -32,13 +34,13 @@ beforeEach(() => {
     savedScenePendingId: null,
     savedSceneAppStates: {},
     savedSceneWindowApps: {},
-    canSaveScene: true,
     sceneLibraryError: null,
     sceneLibraryActions: {
       readOnly: false,
-      workingVisual: saved().visual,
       workingAudio: { microphoneOff: false, systemAudioEnabled: false },
-      insert: vi.fn(() => true),
+      stored: (id: string) => (id === 'scene-a' ? stored() : undefined),
+      add: vi.fn(() => true),
+      edit: vi.fn(() => true),
       move: vi.fn(() => true),
       replace: vi.fn(() => true),
       listAppPreviews: vi.fn(async () => ({ apps: [] }))
@@ -53,6 +55,8 @@ beforeEach(() => {
     sceneOnStream: null,
     applyCameraPreset: vi.fn(),
     sourceSwitchReason: () => null,
+    sourceSelectionState: { pending: null, checking: false, error: null, snapshot: null },
+    retrySourceStatus: vi.fn(),
     switchSourceDeviceLive: vi.fn(async () => undefined),
     allowCaptureNone: true,
     screenPrivacy: { hidden: false },
@@ -60,7 +64,6 @@ beforeEach(() => {
     showScreen: vi.fn(async () => ({ ok: true })),
     setSceneEditMode: vi.fn(),
     setSelectedSceneSourceId: vi.fn(),
-    saveScene: vi.fn(() => true),
     deleteSavedScene: vi.fn(async () => true),
     renameSavedScene: vi.fn(() => true),
     applySavedSceneResult: vi.fn(async () => ({ ok: true })),
@@ -105,6 +108,23 @@ function saved() {
     })
   }
 }
+/** Presentation as the library stores it: both layouts, its screen. */
+function stored(extra: Partial<Scene> = {}): Scene {
+  return {
+    id: 'scene-a',
+    name: 'Presentation',
+    createdAt: '2026-09-22',
+    updatedAt: '2026-09-22',
+    shows: { kind: 'test-pattern' },
+    layouts: {
+      horizontal: { ...defaultCaptureConfig.layout, layoutPreset: 'screen-only' },
+      vertical: { ...defaultCaptureConfig.layout, layoutPreset: 'vertical-camera-top' }
+    },
+    background: null,
+    ...extra
+  }
+}
+const actions = () => mocked.core.sceneLibraryActions as Record<string, ReturnType<typeof vi.fn>>
 async function menu(action: string): Promise<void> {
   const trigger = document.querySelector<HTMLButtonElement>(
     'button[aria-label="Actions for Presentation"]'
@@ -138,27 +158,184 @@ describe("Studio's Scenes section (plan 231 D8)", () => {
       'Add scene…'
     ])
     expect(container.textContent).not.toMatch(/Save scene|New scene|Update|Modified|Layouts/)
-    // Until S7's dialog, Add scene… opens New scene…, which adds at the end.
     await click('Add scene…')
-    expect(document.querySelector('[data-testid="new-scene-dialog"]')).not.toBeNull()
+    expect(document.querySelector('[data-testid="add-scene-dialog"]')).not.toBeNull()
   })
 
-  it('duplicates from ⋯ after the original', async () => {
+  it('duplicates from ⋯ at the end: another one like this (plan 231 D5, D6)', async () => {
     mocked.core.savedScenes = [saved()]
     mocked.core.activeSavedSceneId = 'scene-a'
     await render()
     await menu('Duplicate')
-    expect(
-      (mocked.core.sceneLibraryActions as { insert: ReturnType<typeof vi.fn> }).insert
-    ).toHaveBeenCalledWith([expect.objectContaining({ name: 'Presentation 2' })], 'scene-a')
+    expect(actions().add).toHaveBeenCalledExactlyOnceWith([
+      expect.objectContaining({
+        name: 'Presentation 2',
+        shows: { kind: 'test-pattern' },
+        layouts: stored().layouts
+      })
+    ])
   })
 
-  it('hands Add scene… to the dialog a later slice gives it', async () => {
-    const onAddScene = vi.fn()
-    await render({ onAddScene })
+  it('adds scenes at the end without touching what’s on stream (plan 231 D6)', async () => {
+    mocked.core.savedScenes = [saved()]
+    mocked.core.activeSavedSceneId = 'scene-a'
+    mocked.core.sceneOnStream = stored()
+    mocked.core.deviceList = {
+      devices: [
+        { id: 'screen:screencapturekit:1', name: 'Display 1', kind: 'screen', status: 'available' }
+      ]
+    }
+    await render()
     await click('Add scene…')
-    expect(onAddScene).toHaveBeenCalledOnce()
-    expect(document.querySelector('[data-testid="new-scene-dialog"]')).toBeNull()
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 0)))
+    await act(async () =>
+      document
+        .querySelector<HTMLButtonElement>('[data-pick="display:screen:screencapturekit:1"]')!
+        .click()
+    )
+    await act(async () => document.querySelector<HTMLButtonElement>('[data-pick="none"]')!.click())
+    await click('Add 2 scenes')
+    expect(actions().add).toHaveBeenCalledExactlyOnceWith(
+      [
+        expect.objectContaining({
+          name: 'Display 1',
+          shows: expect.objectContaining({ kind: 'display' })
+        }),
+        expect.objectContaining({ name: 'Camera only', shows: { kind: 'none' } })
+      ],
+      {}
+    )
+    // The picker closed, and nothing was put on stream.
+    expect(document.querySelector('[data-testid="add-scene-dialog"]')).toBeNull()
+    expect(mocked.core.applySavedSceneResult).not.toHaveBeenCalled()
+    expect(mocked.core.applyCameraPreset).not.toHaveBeenCalled()
+    expect(mocked.core.switchSourceDeviceLive).not.toHaveBeenCalled()
+    expect(actions().edit).not.toHaveBeenCalled()
+  })
+
+  it('opens Add scene… for ⌘K, at mount or while mounted (plan 231 D14)', async () => {
+    openAddScene()
+    expect(openWorkspaceTab).toHaveBeenLastCalledWith('studio')
+    await render()
+    expect(document.querySelector('[data-testid="add-scene-dialog"]')).not.toBeNull()
+    await click('Cancel')
+    expect(document.querySelector('[data-testid="add-scene-dialog"]')).toBeNull()
+    await act(async () => openAddScene())
+    expect(document.querySelector('[data-testid="add-scene-dialog"]')).not.toBeNull()
+  })
+
+  describe('Change screen… (plan 231 D2, D6)', () => {
+    const display1 = {
+      id: 'screen:screencapturekit:1',
+      name: 'Display 1',
+      kind: 'screen',
+      status: 'available'
+    }
+    const camera = { id: 'camera:1', name: 'FaceTime', kind: 'camera', status: 'available' }
+    const pick = async (key: string) => {
+      await act(async () => new Promise((resolve) => setTimeout(resolve, 0)))
+      await act(async () =>
+        document.querySelector<HTMLButtonElement>(`[data-pick="${key}"]`)!.click()
+      )
+    }
+    const applyButton = () =>
+      document.querySelector<HTMLButtonElement>('[data-testid="change-screen-apply"]')!
+
+    it('changes the stream from the Screen field: the scene on stream’s screen', async () => {
+      mocked.core.savedScenes = [saved()]
+      mocked.core.activeSavedSceneId = 'scene-a'
+      mocked.core.sceneOnStream = stored()
+      mocked.core.deviceList = { devices: [display1, camera] }
+      await render()
+      await click('Change screen…')
+      expect(document.body.textContent).toContain(
+        'Choose what “Presentation” shows. It’s on stream, so the stream changes too.'
+      )
+      await pick('display:screen:screencapturekit:1')
+      await act(async () => applyButton().click())
+      expect(mocked.core.switchSourceDeviceLive).toHaveBeenCalledExactlyOnceWith(
+        'capture',
+        expect.objectContaining({ screenId: 'screen:screencapturekit:1', screenName: 'Display 1' })
+      )
+      // A name the streamer typed stays, and nothing else switched.
+      expect(mocked.core.renameSavedScene).not.toHaveBeenCalled()
+      expect(mocked.core.applySavedSceneResult).not.toHaveBeenCalled()
+      expect(document.querySelector('[data-testid="change-screen-dialog"]')).toBeNull()
+    })
+
+    it('says why it can’t change the stream’s screen now', async () => {
+      mocked.core.savedScenes = [saved()]
+      mocked.core.activeSavedSceneId = 'scene-a'
+      mocked.core.sceneOnStream = stored()
+      mocked.core.sourceSwitchReason = () => 'Stop recording to change the screen.'
+      await render()
+      const change = container.querySelector<HTMLButtonElement>(
+        '[data-testid="scene-change-screen"]'
+      )!
+      expect(change.disabled).toBe(true)
+      expect(
+        document.getElementById(
+          change.closest('[aria-describedby]')!.getAttribute('aria-describedby')!
+        )?.textContent
+      ).toBe('Stop recording to change the screen.')
+    })
+
+    it('asks for a screen first, Cancel keeps the layout, and the layout follows the screen (D19)', async () => {
+      const cameraOnly = stored({
+        shows: { kind: 'none' },
+        layouts: {
+          horizontal: { ...defaultCaptureConfig.layout, layoutPreset: 'camera-only' },
+          vertical: { ...defaultCaptureConfig.layout, layoutPreset: 'vertical-camera-only' }
+        }
+      })
+      mocked.core.savedScenes = [saved()]
+      mocked.core.activeSavedSceneId = 'scene-a'
+      mocked.core.sceneLibraryActions = {
+        ...(mocked.core.sceneLibraryActions as object),
+        stored: () => cameraOnly
+      }
+      mocked.core.sceneOnStream = cameraOnly
+      mocked.core.deviceList = { devices: [display1, camera] }
+      const sources = { screenId: 'screen:screencapturekit:9', cameraId: 'camera:1' }
+      mocked.core.captureConfig = {
+        ...defaultCaptureConfig,
+        sources,
+        layout: { ...defaultCaptureConfig.layout, layoutPreset: 'camera-only' }
+      }
+      await render()
+      const layoutRadio = () =>
+        container.querySelector<HTMLButtonElement>(
+          '[data-slot="scene-layout-field"] [role="radio"][aria-label="Screen + camera"]'
+        )!
+      await act(async () => layoutRadio().click())
+      expect(document.body.textContent).toContain(
+        'Screen + camera shows a screen, and “Presentation” shows none yet.'
+      )
+      expect(document.querySelector('[data-pick="none"]')).toBeNull()
+      await click('Cancel')
+      expect(document.querySelector('[data-testid="change-screen-dialog"]')).toBeNull()
+      expect(mocked.core.applyCameraPreset).not.toHaveBeenCalled()
+      expect(mocked.core.switchSourceDeviceLive).not.toHaveBeenCalled()
+
+      // Again, and choose: the screen goes on first, then the layout.
+      await act(async () => layoutRadio().click())
+      await pick('display:screen:screencapturekit:1')
+      await act(async () => applyButton().click())
+      expect(mocked.core.switchSourceDeviceLive).toHaveBeenCalledExactlyOnceWith(
+        'capture',
+        expect.objectContaining({ screenId: 'screen:screencapturekit:1' })
+      )
+      expect(mocked.core.applyCameraPreset).not.toHaveBeenCalled()
+      // The pick landed: the capture is on Display 1, and the layout follows.
+      mocked.core.captureConfig = {
+        ...(mocked.core.captureConfig as object),
+        sources: { ...sources, screenId: 'screen:screencapturekit:1' }
+      }
+      await render()
+      expect(mocked.core.applyCameraPreset).toHaveBeenCalledExactlyOnceWith({
+        layoutPreset: 'screen-camera'
+      })
+    })
   })
 
   it('says why Add scene… is off and shows future-version recovery', async () => {

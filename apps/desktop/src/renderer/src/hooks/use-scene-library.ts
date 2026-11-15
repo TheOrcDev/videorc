@@ -1,15 +1,7 @@
 import { useCallback, useMemo, useRef } from 'react'
 import { useScenes } from '@/hooks/use-scenes'
 import type { AppPreviewsParams, AppPreviewsResult, Device } from '@/lib/backend'
-import {
-  normalizeSceneAudio,
-  normalizeSceneVisual,
-  sceneNameError,
-  type SavedScene,
-  type SceneAudio,
-  type SceneOrientation,
-  type SceneVisual
-} from '@/lib/scene-presets'
+import type { SavedScene, SceneAudio, SceneOrientation, SceneVisual } from '@/lib/scene-presets'
 import {
   sceneDisplayRefreshed,
   sceneEditAutosave,
@@ -18,23 +10,30 @@ import {
   savedSceneView,
   type SceneCamera
 } from '@/lib/scene-studio'
-import { sceneOnStream, type Scene, type SceneShows } from '@/lib/scenes'
-import { toast } from '@/lib/toast'
+import type { Scene, SceneShows } from '@/lib/scenes'
 
 /**
- * Plan 210 S5: what New scene…, the scene list and its ⋯ menu need beyond
- * apply, save, rename and delete. The Studio provides it.
+ * What Add scene…, Change screen…, the scene lists and their ⋯ menus need
+ * beyond apply, rename and delete (plan 210 S5, plan 231 S7). The Studio
+ * provides it.
  */
 export type SceneLibraryActions = {
   readOnly: boolean
-  /** The look on stream: New scene… makes its scenes in it. */
-  workingVisual: SceneVisual
   /** What's on now: Save audio to scene writes it. */
   workingAudio: SceneAudio
-  insert: (scenes: readonly SavedScene[], afterId?: string) => boolean
+  /** A stored scene, both layouts, as it is now. */
+  stored: (id: string) => Scene | undefined
+  /**
+   * Add scene… and Duplicate: stored scenes, at the end (plan 231 D5). An
+   * app scene looks for its window in `windowHints` first (plan 210 D5).
+   */
+  add: (scenes: readonly Scene[], windowHints?: Readonly<Record<string, string>>) => boolean
+  /** Change screen…: a stored scene in its place. */
+  edit: (scene: Scene, windowHint?: string) => boolean
   move: (id: string, toIndex: number) => boolean
+  /** A ⋯ edit made on the scene as the Studio lists it (following, audio, repaired sources). */
   replace: (scene: SavedScene) => boolean
-  /** S4's pictures of each app's front window, only while the picker is open. */
+  /** The pictures of each app's front window, only while the picker is open. */
   listAppPreviews: (params?: AppPreviewsParams) => Promise<AppPreviewsResult>
 }
 
@@ -61,52 +60,11 @@ export function useSceneLibrary(orientation: SceneOrientation, camera: SceneCame
       id ? latest.current.read().scenes.find((scene) => scene.id === id) : undefined,
     []
   )
-  const onStream = useCallback((): Scene => sceneOnStream(latest.current.read()), [])
-  /** Save scene…: a scene from the current look, at the end (D5), or an edit of `id`. */
-  const save = useCallback(
-    (
-      name: string,
-      visual: SceneVisual,
-      audio: SceneAudio | undefined,
-      id?: string
-    ): string | null => {
-      const error = sceneNameError(name, latest.current.read().scenes, id)
-      if (error) {
-        toast.error(error)
-        return null
-      }
-      const previous = stored(id)
-      const now = new Date().toISOString()
-      const sceneAudio = normalizeSceneAudio(audio)
-      const scene = sceneFromSaved(
-        {
-          id: previous?.id ?? crypto.randomUUID(),
-          name: name.trim(),
-          createdAt: previous?.createdAt ?? now,
-          updatedAt: now,
-          visual: normalizeSceneVisual(visual),
-          ...(sceneAudio ? { audio: sceneAudio } : {})
-        },
-        previous ?? onStream()
-      )
-      return (previous ? latest.current.replace(scene) : latest.current.insert([scene]))
-        ? scene.id
-        : null
-    },
-    [onStream, stored]
-  )
-  /** New scenes go at the end (D5); a duplicate goes right after its original. */
-  const insert = useCallback(
-    (added: readonly SavedScene[], afterId?: string): boolean => {
-      const template = stored(afterId) ?? onStream()
-      return latest.current.insert(
-        added.map((scene) => sceneFromSaved(scene, template)),
-        afterId
-      )
-    },
-    [onStream, stored]
-  )
-  /** A ⋯ edit (Change app…, following, audio, repaired sources): the scene in its place. */
+  /** New scenes go at the end (D5), the stored scenes as they are. */
+  const insert = useCallback((added: readonly Scene[]): boolean => latest.current.insert(added), [])
+  /** A stored scene in its place (Change screen…). */
+  const edit = useCallback((scene: Scene): boolean => latest.current.replace(scene), [])
+  /** A ⋯ edit (following, audio, repaired sources): the scene in its place. */
   const replace = useCallback(
     (scene: SavedScene): boolean => {
       const previous = stored(scene.id)
@@ -179,10 +137,10 @@ export function useSceneLibrary(orientation: SceneOrientation, camera: SceneCame
     error: library.error,
     readOnly: library.readOnly,
     migratedShortcuts: library.migratedShortcuts,
-    save,
     rename,
     remove,
     insert,
+    edit,
     move,
     replace,
     autosave,

@@ -162,7 +162,7 @@ function PasswordManagerIcon({
 }
 
 /**
- * Add app…: the open apps (New scene…'s list, S5), minus those already on
+ * Add app…: the open apps (Add scene…'s list, plan 210 S5), minus those already on
  * the list, searchable. Choosing one stores its bundle id and name.
  */
 function AddPasswordManagerButton({

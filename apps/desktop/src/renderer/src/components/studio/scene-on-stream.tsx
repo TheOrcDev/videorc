@@ -1,8 +1,6 @@
 import { HiddenIcon } from '@/components/icons'
-import { useEffect, useId, useRef, useState, type ReactElement, type ReactNode } from 'react'
+import { useId, useRef, useState, type ReactElement, type ReactNode } from 'react'
 
-import { DevicePicker } from '@/components/device-picker'
-import { LcdDevicePicker } from '@/components/lcd-device-picker'
 import {
   LCD_LIST_GROUP,
   LCD_LIST_ITEM,
@@ -33,14 +31,6 @@ import {
 } from '@/components/studio/vertical-stream-layout-control'
 import { Button } from '@/components/ui/button'
 import { Command, CommandGroup, CommandItem, CommandList } from '@/components/ui/command'
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle
-} from '@/components/ui/dialog'
 import { DisabledReason } from '@/components/ui/disabled-reason'
 import { LcdDisplaySeparator } from '@/components/ui/lcd-display'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
@@ -58,8 +48,6 @@ import { ShortcutTooltip } from '@/components/ui/shortcut-tooltip'
 import { useStudioCore } from '@/hooks/use-studio'
 import type { LayoutPreset, VerticalScreenFraming } from '@/lib/backend'
 import {
-  buildCaptureSources,
-  capturePickerDevices,
   hasSelectedCameraSource,
   hasSelectedScreenSource,
   layoutPresetNeedsCamera,
@@ -88,10 +76,10 @@ import { cn } from '@/lib/utils'
 
 // Plan 231 D8: under the cards, the scene on stream's own fields. This is
 // the answer to "the relation between screen and scene": the Screen the
-// scene shows (with Change… and Hide screen, which moved here from Studio's
-// Sources rows), its Layout for the studio's mode, Fill or Fit, and with a
-// vertical stream armed its 9:16 layout. Every edit saves into the scene on
-// stream (D11). Part of the lazy Scenes chunk.
+// scene shows (with Change screen… and Hide screen, which moved here from
+// Studio's Sources rows), its Layout for the studio's mode, Fill or Fit, and
+// with a vertical stream armed its 9:16 layout. Every edit saves into the
+// scene on stream (D11). Part of the lazy Scenes chunk.
 
 /** What both looks' Hide screen controls show and do (the line and the Retro LCD's row). */
 export interface ScreenPrivacyControl {
@@ -135,75 +123,28 @@ export function useScreenPrivacyControl(): ScreenPrivacyControl {
   }
 }
 
-/** The screen picker's state: the same list and words as Sources' Screen. */
-function useScreenPicker() {
-  const {
-    captureConfig,
-    deviceList,
-    selectedCaptureDevice,
-    allowCaptureNone,
-    sourceSwitchReason,
-    switchSourceDeviceLive,
-    wsStatus
-  } = useStudioCore()
-  const devices = capturePickerDevices(deviceList.devices)
-  const { sources } = captureConfig
-  return {
-    devices,
-    value: sources.screenId ?? sources.windowId ?? sources.wantedWindowId ?? sources.wantedScreenId,
-    selectedDevice: selectedCaptureDevice,
-    selectedName:
-      sources.screenName ??
-      sources.windowName ??
-      sources.wantedWindowName ??
-      sources.wantedScreenName,
-    noneLabel: allowCaptureNone ? 'None' : undefined,
-    discoveryPending: wsStatus !== 'connected',
-    disabled: Boolean(sourceSwitchReason('capture')),
-    standIn: sourceStandIn(sources, 'capture', deviceList.devices),
-    // Plan 231 D2: a Screen pick changes the screen of the scene on stream.
-    choose: (captureId: string | undefined): Promise<void> =>
-      switchSourceDeviceLive('capture', buildCaptureSources(sources, devices, captureId))
-  }
-}
-
 /**
  * The scene on stream's fields, under Studio's scene cards. `onChangeScreen`
- * is the seam for S7's Change screen…: without it, Change… opens the screen
- * picker Sources uses.
+ * opens Change screen… for the scene on stream; with `forLayout` it is D19:
+ * a layout that draws a screen, chosen on a scene that shows none, asks for
+ * the screen first, and Cancel keeps the old layout.
  */
 export function SceneOnStreamFields({
   look = 'default',
+  changeScreenReason = null,
   onChangeScreen
 }: {
   look?: StudioLook
-  onChangeScreen?: () => void
+  /** Why Change screen… can't change the scene on stream now, or null. */
+  changeScreenReason?: string | null
+  onChangeScreen: (options?: { forLayout?: LayoutPreset }) => void
 }): ReactElement | null {
   const studio = useStudioCore()
-  const { sceneOnStream, captureConfig, applyCameraPreset, sceneLibraryActions } = studio
-  const picker = useScreenPicker()
+  const { sceneOnStream, captureConfig, applyCameraPreset, sceneLibraryActions, deviceList } =
+    studio
   const privacy = useScreenPrivacyControl()
-  // D19, the simple version: a layout that draws a screen on a scene that
-  // shows none asks for the screen first, and Cancel keeps the old layout.
-  const [askScreenFor, setAskScreenFor] = useState<LayoutPreset | null>(null)
-  const [afterScreen, setAfterScreen] = useState<{
-    preset: LayoutPreset
-    sceneId: string
-    captureId: string
-  } | null>(null)
   const { sources } = captureConfig
-  const capturing = sources.screenId ?? sources.windowId
-  useEffect(() => {
-    if (!afterScreen) return
-    // Another scene went on stream: the layout was for the one before.
-    if (sceneOnStream?.id !== afterScreen.sceneId) {
-      setAfterScreen(null)
-      return
-    }
-    if (capturing !== afterScreen.captureId) return
-    setAfterScreen(null)
-    applyCameraPreset({ layoutPreset: afterScreen.preset })
-  }, [afterScreen, capturing, sceneOnStream?.id, applyCameraPreset])
+  const standIn = sourceStandIn(sources, 'capture', deviceList.devices)
 
   if (!sceneOnStream) return null
   const layout = captureConfig.layout
@@ -216,9 +157,8 @@ export function SceneOnStreamFields({
   const cameraLine = sceneLayoutCameraLine(choices)
   const layoutName = freeform ? 'Freeform' : layoutPresetLabel(layout.layoutPreset)
   const chooseLayout = (preset: LayoutPreset): void => {
-    setAfterScreen(null)
     if (layoutAsksForScreen(sceneOnStream.shows, preset)) {
-      setAskScreenFor(preset)
+      onChangeScreen({ forLayout: preset })
       return
     }
     applyCameraPreset({ layoutPreset: preset })
@@ -241,21 +181,16 @@ export function SceneOnStreamFields({
         : null
   // D8: with a vertical stream armed beside a 16:9 studio, the scene's 9:16 layout too.
   const verticalStream = orientation === 'horizontal' && simulcastArmed(captureConfig)
-  const dialog = askScreenFor ? (
-    <SceneScreenDialog
-      devices={picker.devices}
-      discoveryPending={picker.discoveryPending}
-      layoutLabel={layoutPresetLabel(askScreenFor)}
-      sceneName={sceneOnStream.name}
-      onCancel={() => setAskScreenFor(null)}
-      onChoose={(captureId) => {
-        const preset = askScreenFor
-        setAskScreenFor(null)
-        setAfterScreen({ preset, sceneId: sceneOnStream.id, captureId })
-        void picker.choose(captureId).catch(() => setAfterScreen(null))
-      }}
-    />
-  ) : null
+  const changeScreenButton = (
+    <Button
+      data-testid="scene-change-screen"
+      disabled={changeScreenReason !== null}
+      variant="outline"
+      onClick={() => onChangeScreen()}
+    >
+      Change screen…
+    </Button>
+  )
 
   if (look === 'lcd') {
     const vertical = sceneOnStream.layouts.vertical
@@ -274,35 +209,24 @@ export function SceneOnStreamFields({
             <LcdPanelValue data-testid="scene-on-stream-name">{sceneOnStream.name}</LcdPanelValue>
           </LcdPanelRow>
           <LcdDisplaySeparator />
-          {onChangeScreen ? (
-            <LcdPanelRow label="Screen">
-              <LcdPanelValue>{words}</LcdPanelValue>
-              <LcdPanelAction onClick={onChangeScreen}>Change screen…</LcdPanelAction>
-            </LcdPanelRow>
-          ) : (
-            // On a screen a value is its own dropdown: the words open the list.
-            <LcdDevicePicker
-              devices={picker.devices}
-              disabled={picker.disabled}
-              discoveryPending={picker.discoveryPending}
-              groupByKind
-              kind="capture"
-              label="Screen"
-              noneLabel={picker.noneLabel}
-              selectedDevice={picker.selectedDevice}
-              selectedName={picker.selectedName}
-              selectionLabel={words}
-              value={picker.value}
-              onChange={(captureId) => void picker.choose(captureId)}
-            />
-          )}
+          <LcdPanelRow label="Screen">
+            <LcdPanelValue>{words}</LcdPanelValue>
+            <DisabledReason reason={changeScreenReason}>
+              <LcdPanelAction
+                disabled={changeScreenReason !== null}
+                onClick={() => onChangeScreen()}
+              >
+                Change screen…
+              </LcdPanelAction>
+            </DisabledReason>
+          </LcdPanelRow>
           {note ? <p className={LCD_MESSAGE}>{note}</p> : null}
           <div aria-live="polite" className={cn(LCD_MESSAGE, 'empty:sr-only')}>
             <SourceSwitchStatus kind="capture" look="lcd" />
           </div>
-          {picker.standIn ? (
+          {standIn ? (
             <p className={LCD_MESSAGE} data-slot="source-stand-in">
-              {standInLine(picker.standIn)}
+              {standInLine(standIn)}
             </p>
           ) : null}
           <RetroScreenPrivacyRow control={privacy} />
@@ -346,7 +270,6 @@ export function SceneOnStreamFields({
           ) : null}
         </LcdPanel>
         <SourcePermissionAlerts className="px-0 pt-0" only="screen-recording" />
-        {dialog}
       </div>
     )
   }
@@ -366,29 +289,11 @@ export function SceneOnStreamFields({
       </p>
       <SceneField
         control={
-          onChangeScreen ? (
-            <Button variant="outline" onClick={onChangeScreen}>
-              Change screen…
-            </Button>
+          // The words say what the scene shows; the button says what it does.
+          changeScreenReason ? (
+            <DisabledReason reason={changeScreenReason}>{changeScreenButton}</DisabledReason>
           ) : (
-            // The screen picker Sources uses (S7 replaces it with Change
-            // screen…). The words say what the scene shows, so the trigger
-            // only says what it does.
-            <DevicePicker
-              devices={picker.devices}
-              disabled={picker.disabled}
-              discoveryPending={picker.discoveryPending}
-              groupByKind
-              kind="capture"
-              label="Change screen"
-              labelHidden
-              noneLabel={picker.noneLabel}
-              selectedDevice={picker.selectedDevice}
-              selectedName={picker.selectedName}
-              selectionLabel="Change…"
-              value={picker.value}
-              onChange={(captureId) => void picker.choose(captureId)}
-            />
+            changeScreenButton
           )
         }
         field="screen"
@@ -399,9 +304,9 @@ export function SceneOnStreamFields({
         <div className="text-xs text-muted-foreground empty:hidden">
           <SourceSwitchStatus kind="capture" />
         </div>
-        {picker.standIn ? (
+        {standIn ? (
           <p className="text-xs text-muted-foreground" data-slot="source-stand-in">
-            {standInLine(picker.standIn)}
+            {standInLine(standIn)}
           </p>
         ) : null}
         <ScreenPrivacyLine control={privacy} />
@@ -491,7 +396,6 @@ export function SceneOnStreamFields({
           <VerticalStreamLayoutControl framingLabel="Framing" />
         </div>
       ) : null}
-      {dialog}
     </div>
   )
 }
@@ -699,64 +603,5 @@ function LcdChoicePicker<T extends string>({
         </PopoverContent>
       </Popover>
     </LcdPanelRow>
-  )
-}
-
-/**
- * D19, the simple version (S7 polishes it): the scene on stream shows no
- * screen, and the layout chosen draws one. Choose the screen first; Cancel
- * keeps the old layout.
- */
-function SceneScreenDialog({
-  sceneName,
-  layoutLabel,
-  devices,
-  discoveryPending,
-  onCancel,
-  onChoose
-}: {
-  sceneName: string
-  layoutLabel: string
-  devices: ReturnType<typeof capturePickerDevices>
-  discoveryPending: boolean
-  onCancel: () => void
-  onChoose: (captureId: string) => void
-}): ReactElement {
-  const [choice, setChoice] = useState<string | undefined>()
-  return (
-    <Dialog
-      open
-      onOpenChange={(open) => {
-        if (!open) onCancel()
-      }}
-    >
-      <DialogContent data-testid="scene-screen-dialog" size="sm">
-        <DialogHeader>
-          <DialogTitle>Choose a screen</DialogTitle>
-          <DialogDescription>
-            {layoutLabel} shows a screen, and “{sceneName}” shows none yet. The scene keeps the
-            screen you choose.
-          </DialogDescription>
-        </DialogHeader>
-        <DevicePicker
-          devices={devices}
-          discoveryPending={discoveryPending}
-          groupByKind
-          kind="capture"
-          label="Screen"
-          searchable
-          value={choice}
-          onChange={setChoice}
-        />
-        <DialogFooter>
-          <Button variant="ghost" onClick={onCancel}>
-            Cancel
-          </Button>
-          <Button disabled={!choice} onClick={() => choice && onChoose(choice)}>
-            Use this screen
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
   )
 }

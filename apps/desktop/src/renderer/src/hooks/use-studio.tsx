@@ -75,6 +75,7 @@ import { prepareScenes, scenesStored } from '@/hooks/use-scenes'
 import {
   cameraSources,
   captureSources,
+  sceneFromSaved,
   sceneKeepsCapture,
   sceneOnStreamAtLaunch
 } from '@/lib/scene-studio'
@@ -83,6 +84,7 @@ import type { Scene as StoredScene, SceneShows } from '@/lib/scenes'
 import {
   hydrateWorkingScene,
   WORKING_SCENE_KEY,
+  normalizeSceneAudio,
   normalizeSceneVisual,
   visualSources,
   usingVisualSources,
@@ -93,6 +95,7 @@ import {
   sameSceneVisual,
   sceneAudio,
   sceneMicrophone,
+  sceneNameError,
   sceneSourceProblems,
   sceneSourcesTurnedOff,
   sourceVisibilityFromScene,
@@ -1596,15 +1599,13 @@ export type StudioContextValue = {
   savedScenePendingId: string | null
   savedSceneModified: boolean
   sceneLibraryError: string | null
-  canSaveScene: boolean
   setSceneGesturePending: (pending: boolean) => void
-  saveScene: (name: string, updateId?: string) => boolean
   renameSavedScene: (id: string, name: string) => boolean
   /** Plan 231 D16; off air, the scene on stream switches to the one before it first. */
   deleteSavedScene: (id: string) => Promise<boolean>
   savedSceneWindowApps: Readonly<Record<string, string>>
   savedSceneAppStates: Readonly<Record<string, SceneAppState | undefined>>
-  /** Plan 210 S5: New scene…, the scene list's order and its ⋯ edits. */
+  /** Add scene…, Change screen…, the scene lists' order and their ⋯ edits (plan 231 S7). */
   sceneLibraryActions: SceneLibraryActions
   applySavedSceneResult: (
     id: string,
@@ -5097,7 +5098,6 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
     }
   }, [sceneLibrary.scenes])
   const {
-    save: saveSceneEntry,
     remove: removeSceneEntry,
     autosave: autosaveSavedScene,
     refreshDisplay: refreshSavedSceneDisplay,
@@ -11429,43 +11429,6 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
           !sameSceneAudio(entry.audio, workingAudio))
     )
   )
-  const canSaveScene =
-    !sceneLibrary.readOnly &&
-    !visualTransactionPending &&
-    layoutSwitchPending === null &&
-    savedScenePendingId === null &&
-    sourceDeviceSwitchPending === null &&
-    !sceneGesturePending &&
-    !sceneTransformPending &&
-    !sceneVisibilityPending &&
-    wsStatus === 'connected' &&
-    scene !== null &&
-    sameSceneVisual(workingVisual, confirmedVisualRef.current)
-  const saveScene = useCallback(
-    (name: string, updateId?: string): boolean => {
-      if (!canSaveScene || layoutIntentAwaitingProofRef.current !== null) return false
-      const id = saveSceneEntry(name, workingVisual, workingAudio, updateId)
-      if (!id) return false
-      activeSavedSceneIdRef.current = id
-      setWorkingOrigin('saved')
-      setActiveSavedSceneId(id)
-      persistWorkingVisual(
-        captureConfigRef.current.layout,
-        captureConfigRef.current.sources,
-        workingBackgroundRef.current,
-        id
-      )
-      return true
-    },
-    [
-      canSaveScene,
-      saveSceneEntry,
-      workingVisual,
-      workingAudio,
-      persistWorkingVisual,
-      setWorkingOrigin
-    ]
-  )
   // Plan 231 D16: the last scene stays. Off air, deleting the scene on stream
   // first switches to the scene before it; while recording or live it can't
   // be deleted.
@@ -11803,19 +11766,23 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
   const {
     readOnly: sceneLibraryReadOnly,
     insert: insertScenes,
+    edit: editScene,
     move: moveScene,
     replace: replaceScene
   } = sceneLibrary
   const sceneLibraryActions = useMemo<SceneLibraryActions>(
     () => ({
       readOnly: sceneLibraryReadOnly,
-      workingVisual,
       workingAudio,
+      stored: storedScene,
       // The picker's front window is where an app's scene looks first (D5).
-      insert: (scenes, afterId) => {
-        for (const { id, visual } of scenes)
-          if (visual.sources.app) sceneWindowHintsRef.current[id] = visual.sources.windowId
-        return insertScenes(scenes, afterId)
+      add: (scenes, windowHints) => {
+        Object.assign(sceneWindowHintsRef.current, windowHints)
+        return insertScenes(scenes)
+      },
+      edit: (scene, windowHint) => {
+        if (windowHint) sceneWindowHintsRef.current[scene.id] = windowHint
+        return editScene(scene)
       },
       move: moveScene,
       replace: (scene) => {
@@ -11828,7 +11795,15 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
         return clientRef.current.requestTyped('sources.app_previews', params)
       }
     }),
-    [sceneLibraryReadOnly, insertScenes, moveScene, replaceScene, workingVisual, workingAudio]
+    [
+      sceneLibraryReadOnly,
+      storedScene,
+      insertScenes,
+      editScene,
+      moveScene,
+      replaceScene,
+      workingAudio
+    ]
   )
 
   // Plan 207 S4: "Your look" writes state only. The scene reload commits it
@@ -19792,13 +19767,64 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
   )
 
   // Development smoke harness: delegates to the same public actions as the UI.
-  // No parallel apply implementation or production exposure.
+  // No parallel apply implementation or production exposure. Plan 231 S7
+  // took saving the look on stream as a new scene out of the app (Add scene…
+  // and Duplicate make scenes now); `save` and `canSave` keep that behaviour
+  // here only, for the smokes and tests that build their scenes with it
+  // (S11 moves the smokes to Add scene…). None of it ships.
   useEffect(() => {
     if (!import.meta.env.DEV) return
     const smokeWindow = window as Window & { __videorcSmokeScenePresets?: unknown }
+    // The look on stream is settled: nothing is changing it.
+    const canSave =
+      !sceneLibrary.readOnly &&
+      !visualTransactionPending &&
+      layoutSwitchPending === null &&
+      savedScenePendingId === null &&
+      sourceDeviceSwitchPending === null &&
+      !sceneGesturePending &&
+      !sceneTransformPending &&
+      !sceneVisibilityPending &&
+      wsStatus === 'connected' &&
+      scene !== null &&
+      sameSceneVisual(workingVisual, confirmedVisualRef.current)
+    /** The look on stream as a new scene at the end (or into `updateId`), put on stream. */
+    const save = (name: string, updateId?: string): boolean => {
+      if (!canSave || layoutIntentAwaitingProofRef.current !== null) return false
+      const error = sceneNameError(name, storedScenes(), updateId)
+      if (error) {
+        toast.error(error)
+        return false
+      }
+      const previous = storedScene(updateId)
+      const now = new Date().toISOString()
+      const audio = normalizeSceneAudio(workingAudio)
+      const saved = sceneFromSaved(
+        {
+          id: previous?.id ?? crypto.randomUUID(),
+          name: name.trim(),
+          createdAt: previous?.createdAt ?? now,
+          updatedAt: now,
+          visual: normalizeSceneVisual(workingVisual),
+          ...(audio ? { audio } : {})
+        },
+        previous ?? storedScene(activeSavedSceneIdRef.current) ?? storedScenes()[0]!
+      )
+      if (!(previous ? editScene(saved) : insertScenes([saved]))) return false
+      activeSavedSceneIdRef.current = saved.id
+      setWorkingOrigin('saved')
+      setActiveSavedSceneId(saved.id)
+      persistWorkingVisual(
+        captureConfigRef.current.layout,
+        captureConfigRef.current.sources,
+        workingBackgroundRef.current,
+        saved.id
+      )
+      return true
+    }
     smokeWindow.__videorcSmokeScenePresets = {
       state: () => ({
-        canSave: value.canSaveScene,
+        canSave,
         scenes: value.savedScenes,
         activeId: value.activeSavedSceneId,
         pendingId: value.savedScenePendingId,
@@ -19840,7 +19866,7 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
         recording: recording.state,
         backgroundSlots: backgroundRegistry.slots.map(({ id, assetId }) => ({ id, assetId }))
       }),
-      save: value.saveScene,
+      save,
       apply: value.applySavedScene,
       remove: value.deleteSavedScene,
       retrySourceStatus,
@@ -20059,9 +20085,7 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
       savedScenePendingId,
       savedSceneModified,
       sceneLibraryError: sceneLibrary.error,
-      canSaveScene,
       setSceneGesturePending,
-      saveScene,
       renameSavedScene: sceneLibrary.rename,
       deleteSavedScene,
       applySavedScene,
@@ -20311,8 +20335,6 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
       activeSavedSceneId,
       savedScenePendingId,
       savedSceneModified,
-      canSaveScene,
-      saveScene,
       deleteSavedScene,
       applySavedScene,
       applySavedSceneResult,

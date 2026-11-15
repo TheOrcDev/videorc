@@ -18,7 +18,6 @@ import { EDIT_SCENE_LABEL } from '@/lib/edit-scene'
 import {
   MOVE_SCENE_DOWN_ACCELERATOR,
   MOVE_SCENE_UP_ACCELERATOR,
-  saveSceneBlockedReason,
   savedSceneBlockedReason,
   sceneGlyph,
   sceneMoveKeyStep,
@@ -54,9 +53,6 @@ export function SceneList({
     deviceList,
     settings,
     runtimeInfo,
-    canSaveScene,
-    wsStatus,
-    scene,
     sceneEditMode
   } = studio
   const dialogs = useSceneDialogs()
@@ -68,11 +64,6 @@ export function SceneList({
     [...glyphs.values()].flatMap((glyph) => (glyph.kind === 'app' ? [glyph.bundleId] : []))
   )
   const readOnly = sceneLibraryActions.readOnly
-  const saveReason = saveSceneBlockedReason({
-    readOnly,
-    connected: wsStatus === 'connected' && scene !== null,
-    canSave: canSaveScene
-  })
 
   const [draggingId, setDraggingId] = useState<string | null>(null)
   const [dropIndex, setDropIndex] = useState<number | null>(null)
@@ -81,19 +72,6 @@ export function SceneList({
     setDraggingId(null)
     setDropIndex(null)
   }
-
-  const saveButton = (
-    <DisabledReason reason={saveReason}>
-      <Button
-        data-testid="scene-save"
-        disabled={saveReason !== null}
-        variant="outline"
-        onClick={() => dialogs.open({ kind: 'save' })}
-      >
-        Save scene…
-      </Button>
-    </DisabledReason>
-  )
 
   return (
     <PanelSection
@@ -113,14 +91,14 @@ export function SceneList({
           >
             {EDIT_SCENE_LABEL}
           </Button>
-          {saveButton}
+          {/* Plan 231 D6: the same Add scene… as Studio's Scenes section. */}
           <DisabledReason reason={readOnly ? READ_ONLY_REASON : null}>
             <Button
               data-testid="scene-new"
               disabled={readOnly}
-              onClick={() => dialogs.open({ kind: 'new' })}
+              onClick={() => dialogs.open({ kind: 'add' })}
             >
-              New scene…
+              Add scene…
             </Button>
           </DisabledReason>
         </>
