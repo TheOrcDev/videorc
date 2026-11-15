@@ -109,6 +109,7 @@ export const WINDOWS_D3D11_REQUIRED_RUST_TESTS = Object.freeze({
     'windows_d3d11_stage_timing::tests::setup_iterations_never_become_the_slowest_loop',
     'windows_d3d11_stage_timing::tests::slowest_loop_and_compose_keep_the_whole_breakdown_of_one_moment',
     'windows_d3d11_stage_timing::tests::stage_samples_report_count_p95_and_all_time_max',
+    'windows_d3d11_stage_timing::tests::two_encoder_workers_add_runs_and_keep_the_worse_p95_and_max',
     'windows_d3d11_test_pattern::tests::odd_bgra_dimensions_are_covered_without_gaps',
     'windows_d3d11_test_pattern::tests::two_by_two_hash_matches_quadrant_bgra_order',
     'windows_d3d11_test_pattern::tests::windows_d3d11_test_pattern_changes_every_frame'

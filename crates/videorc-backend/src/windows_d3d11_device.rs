@@ -1838,14 +1838,16 @@ mod runtime {
         WindowsD3d11OutputDimensions, WindowsD3d11ScenePlan, WindowsD3d11UploadPixelOrder,
     };
     use crate::windows_d3d11_encoder_contract::{
-        WindowsD3d11EncoderRole, WindowsD3d11EncoderSubmissionMetadata,
+        WindowsD3d11EncoderLeaseRelease, WindowsD3d11EncoderRole,
+        WindowsD3d11EncoderSubmissionMetadata,
     };
     use crate::windows_d3d11_preview::{
         WindowsD3d11Presenter, WindowsD3d11PresenterStatus, WindowsD3d11PreviewFrameMetadata,
         WindowsD3d11PreviewPlacement,
     };
     use crate::windows_d3d11_stage_timing::{
-        WindowsD3d11ComposeBreakdown, WindowsD3d11MediaLoopBreakdown, WindowsD3d11MediaStageTimers,
+        WindowsD3d11ComposeBreakdown, WindowsD3d11EncoderStageTimers,
+        WindowsD3d11MediaLoopBreakdown, WindowsD3d11MediaStageTimers,
     };
     use crate::windows_d3d11_test_pattern::{
         WindowsD3d11TestPatternMetadata, render_bgra_test_pattern,
@@ -2478,24 +2480,16 @@ mod runtime {
     }
 
     impl WindowsD3d11EncoderRuntime {
-        fn status(&self) -> WindowsD3d11EncoderStatus {
-            WindowsD3d11EncoderStatus {
-                role: self.role,
-                identity: self.encoder.identity().to_string(),
-                pending_frame_count: self.encoder.pending_frame_count(),
-                retained_texture_leases: self.retained_tickets.len(),
-                diagnostics: self.encoder.diagnostics(),
-            }
-        }
-
-        fn apply_progress(
+        /// Matches each tracked release the transform reported to the ticket
+        /// it retains and drops that ticket, which returns its role lease.
+        fn apply_releases(
             &mut self,
             generation: u64,
-            progress: MediaFoundationD3d11EncoderProgress,
-        ) -> Result<WindowsD3d11EncoderProgress, WindowsD3d11Error> {
+            releases: Vec<WindowsD3d11EncoderLeaseRelease>,
+        ) -> Result<Vec<WindowsD3d11LeaseRelease>, WindowsD3d11Error> {
             let expected_encoder_role = encoder_role(self.role)?;
-            let mut released_leases = Vec::with_capacity(progress.released_leases.len());
-            for release in progress.released_leases {
+            let mut released_leases = Vec::with_capacity(releases.len());
+            for release in releases {
                 if release.generation != generation || release.role != expected_encoder_role {
                     return Err(WindowsD3d11Error::new(
                         WindowsD3d11ErrorCode::StaleGeneration,
@@ -2534,13 +2528,581 @@ mod runtime {
                     role: self.role,
                 });
             }
-            Ok(WindowsD3d11EncoderProgress {
-                role: self.role,
-                encoded_frames: progress.encoded_frames,
-                released_leases,
-                status: self.status(),
-            })
+            Ok(released_leases)
         }
+    }
+
+    /// How often an idle encoder worker collects the transform's events and
+    /// tracked-sample releases. `thread::sleep` uses a high-resolution timer,
+    /// so this holds without raising the system timer resolution.
+    const ENCODER_WORKER_POLL_INTERVAL: Duration = Duration::from_millis(1);
+    /// How long an accepted input may wait on the worker for the transform's
+    /// input credit before it is released unsubmitted and counted dropped.
+    const ENCODER_WORKER_CREDIT_WAIT: Duration = Duration::from_millis(250);
+    const ENCODER_WORKER_STARTUP_TIMEOUT: Duration = Duration::from_secs(15);
+    /// Inputs are already bounded by the in-flight cap; this leaves room for
+    /// a drain or shutdown command behind a full cap.
+    const ENCODER_WORKER_COMMAND_SLACK: usize = 4;
+
+    /// One accepted encoder input on its way to the worker. The ticket keeps
+    /// the NV12 role lease until the transform releases the sample (or the
+    /// worker drops the input unsubmitted).
+    struct WindowsD3d11EncoderWorkerSubmission {
+        ticket: WindowsD3d11TextureLeaseTicket,
+        texture: ID3D11Texture2D,
+        metadata: WindowsD3d11EncoderSubmissionMetadata,
+        accepted_at: Instant,
+    }
+
+    enum WindowsD3d11EncoderWorkerCommand {
+        Submit(WindowsD3d11EncoderWorkerSubmission),
+        Drain {
+            timeout_ms: u32,
+            reply: SyncSender<Result<WindowsD3d11EncoderProgress, WindowsD3d11Error>>,
+        },
+        Shutdown {
+            timeout_ms: u32,
+            reply: SyncSender<Result<WindowsD3d11EncoderShutdown, WindowsD3d11Error>>,
+        },
+    }
+
+    struct WindowsD3d11EncoderShutdown {
+        progress: WindowsD3d11EncoderProgress,
+        diagnostics: MediaFoundationD3d11EncoderDiagnostics,
+    }
+
+    /// What one encoder worker has produced since the writer last asked, and
+    /// what it holds. The media thread, the worker and the writer share it.
+    struct WindowsD3d11EncoderWorkerState {
+        identity: String,
+        diagnostics: MediaFoundationD3d11EncoderDiagnostics,
+        encoded_frames: Vec<MediaFoundationEncodedFrame>,
+        released_leases: Vec<WindowsD3d11LeaseRelease>,
+        /// Accepted by the media thread, not yet submitted or dropped.
+        queued: usize,
+        /// Submitted inputs the transform still holds.
+        retained: usize,
+        /// Inputs submitted that have no output yet.
+        pending_frames: usize,
+        /// Inputs the media thread refused at the in-flight cap.
+        capacity_refusals: u64,
+        /// The first failure; every later call reports it.
+        error: Option<WindowsD3d11Error>,
+        timers: WindowsD3d11EncoderStageTimers,
+    }
+
+    /// #1042: one Media Foundation encoder on a thread of its own. Intel's
+    /// Quick Sync MFT in its pipelined mode blocks in `ProcessInput` for up to
+    /// tens of milliseconds; on the media thread that delayed composition, the
+    /// preview and the other encoder. Here it delays only this encoder's
+    /// queue. The media thread still validates each ticket against its pool
+    /// and resolves the texture; the worker owns the transform and every
+    /// ticket the transform holds, so the lease contract is unchanged.
+    struct WindowsD3d11EncoderWorkerShared {
+        role: WindowsD3d11MediaRole,
+        in_flight_capacity: usize,
+        commands: SyncSender<WindowsD3d11EncoderWorkerCommand>,
+        stop: AtomicBool,
+        state: Mutex<WindowsD3d11EncoderWorkerState>,
+    }
+
+    type WindowsD3d11EncoderRegistry =
+        Arc<Mutex<BTreeMap<WindowsD3d11MediaRole, Arc<WindowsD3d11EncoderWorkerShared>>>>;
+
+    impl WindowsD3d11EncoderWorkerShared {
+        fn lock_state(&self) -> std::sync::MutexGuard<'_, WindowsD3d11EncoderWorkerState> {
+            self.state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+        }
+
+        fn status_of(&self, state: &WindowsD3d11EncoderWorkerState) -> WindowsD3d11EncoderStatus {
+            WindowsD3d11EncoderStatus {
+                role: self.role,
+                identity: state.identity.clone(),
+                pending_frame_count: state.pending_frames.saturating_add(state.queued),
+                retained_texture_leases: state.retained,
+                diagnostics: state.diagnostics,
+            }
+        }
+
+        fn status(&self) -> WindowsD3d11EncoderStatus {
+            let state = self.lock_state();
+            self.status_of(&state)
+        }
+
+        /// Hands the writer everything collected since it last asked.
+        fn take_progress_locked(
+            &self,
+            state: &mut WindowsD3d11EncoderWorkerState,
+        ) -> WindowsD3d11EncoderProgress {
+            WindowsD3d11EncoderProgress {
+                role: self.role,
+                encoded_frames: mem::take(&mut state.encoded_frames),
+                released_leases: mem::take(&mut state.released_leases),
+                status: self.status_of(state),
+            }
+        }
+
+        /// The writer's poll: never waits on the worker or the media thread.
+        fn poll(&self) -> Result<WindowsD3d11EncoderProgress, WindowsD3d11Error> {
+            let mut state = self.lock_state();
+            if let Some(error) = &state.error {
+                return Err(error.clone());
+            }
+            Ok(self.take_progress_locked(&mut state))
+        }
+    }
+
+    /// The media thread's handle on one worker. Dropping it stops the worker
+    /// and joins it, so the transform and its tickets are gone before the
+    /// texture pool and the device drop.
+    struct WindowsD3d11EncoderWorker {
+        shared: Arc<WindowsD3d11EncoderWorkerShared>,
+        join: Option<JoinHandle<()>>,
+    }
+
+    impl WindowsD3d11EncoderWorker {
+        #[allow(clippy::too_many_arguments)]
+        fn spawn(
+            generation: u64,
+            role: WindowsD3d11MediaRole,
+            config: MediaFoundationEncoderConfig,
+            in_flight_capacity: usize,
+            device: ID3D11Device5,
+            adapter_luid: DxgiAdapterLuid,
+        ) -> Result<Self, WindowsD3d11Error> {
+            let encoder_role = encoder_role(role)?;
+            let (command_sender, command_receiver) =
+                mpsc::sync_channel(in_flight_capacity.saturating_add(ENCODER_WORKER_COMMAND_SLACK));
+            let (startup_sender, startup_receiver) = mpsc::sync_channel(1);
+            let shared = Arc::new(WindowsD3d11EncoderWorkerShared {
+                role,
+                in_flight_capacity,
+                commands: command_sender,
+                stop: AtomicBool::new(false),
+                state: Mutex::new(WindowsD3d11EncoderWorkerState {
+                    identity: String::new(),
+                    diagnostics: MediaFoundationD3d11EncoderDiagnostics::default(),
+                    encoded_frames: Vec::new(),
+                    released_leases: Vec::new(),
+                    queued: 0,
+                    retained: 0,
+                    pending_frames: 0,
+                    capacity_refusals: 0,
+                    error: None,
+                    timers: WindowsD3d11EncoderStageTimers::default(),
+                }),
+            });
+            let worker_shared = Arc::clone(&shared);
+            let join = thread::Builder::new()
+                .name(format!("videorc-d3d11-encoder-{role:?}-{generation}").to_lowercase())
+                .spawn(move || {
+                    let created = MediaFoundationD3d11H264Encoder::new_on_encoder_thread(
+                        config,
+                        &device,
+                        adapter_luid.as_u64(),
+                        generation,
+                        encoder_role,
+                        in_flight_capacity,
+                    );
+                    drop(device);
+                    let encoder = match created {
+                        Ok(encoder) => encoder,
+                        Err(error) => {
+                            let _ = startup_sender.send(Err(WindowsD3d11Error::new(
+                                WindowsD3d11ErrorCode::EncoderUnavailable,
+                                format!(
+                                    "creating the {role:?} D3D11 Media Foundation encoder failed: {error}"
+                                ),
+                            )));
+                            return;
+                        }
+                    };
+                    {
+                        let mut state = worker_shared.lock_state();
+                        state.identity = encoder.identity().to_string();
+                        state.diagnostics = encoder.diagnostics();
+                    }
+                    // A media thread that gave up waiting has dropped the
+                    // receiver; the transform then drops here, its owner.
+                    if startup_sender.send(Ok(())).is_err() {
+                        return;
+                    }
+                    run_encoder_worker(
+                        generation,
+                        WindowsD3d11EncoderRuntime {
+                            role,
+                            encoder,
+                            retained_tickets: BTreeMap::new(),
+                        },
+                        &worker_shared,
+                        command_receiver,
+                    );
+                })
+                .map_err(|error| {
+                    WindowsD3d11Error::new(
+                        WindowsD3d11ErrorCode::EncoderUnavailable,
+                        format!("spawning the {role:?} encoder worker failed: {error}"),
+                    )
+                })?;
+            let mut worker = Self {
+                shared,
+                join: Some(join),
+            };
+            match startup_receiver.recv_timeout(ENCODER_WORKER_STARTUP_TIMEOUT) {
+                Ok(Ok(())) => Ok(worker),
+                Ok(Err(error)) => {
+                    worker.stop_and_join();
+                    Err(error)
+                }
+                Err(error) => {
+                    // The worker still owns a transform it may finish
+                    // creating; it sees the stop flag and tears it down.
+                    worker.shared.stop.store(true, AtomicOrdering::Release);
+                    worker.join = None;
+                    Err(WindowsD3d11Error::new(
+                        WindowsD3d11ErrorCode::ResponseTimeout,
+                        format!("the {role:?} encoder worker did not start in time: {error}"),
+                    ))
+                }
+            }
+        }
+
+        fn stop_and_join(&mut self) {
+            self.shared.stop.store(true, AtomicOrdering::Release);
+            if let Some(join) = self.join.take()
+                && join.join().is_err()
+            {
+                tracing::warn!(
+                    role = ?self.shared.role,
+                    "D3D11 encoder worker panicked while stopping"
+                );
+            }
+        }
+    }
+
+    impl Drop for WindowsD3d11EncoderWorker {
+        fn drop(&mut self) {
+            self.stop_and_join();
+        }
+    }
+
+    fn run_encoder_worker(
+        generation: u64,
+        mut runtime: WindowsD3d11EncoderRuntime,
+        shared: &WindowsD3d11EncoderWorkerShared,
+        commands: Receiver<WindowsD3d11EncoderWorkerCommand>,
+    ) {
+        while !shared.stop.load(AtomicOrdering::Acquire) {
+            match commands.try_recv() {
+                Ok(WindowsD3d11EncoderWorkerCommand::Submit(submission)) => {
+                    worker_submit(generation, &mut runtime, shared, submission);
+                }
+                Ok(WindowsD3d11EncoderWorkerCommand::Drain { timeout_ms, reply }) => {
+                    let _ =
+                        reply.try_send(worker_drain(generation, &mut runtime, shared, timeout_ms));
+                }
+                Ok(WindowsD3d11EncoderWorkerCommand::Shutdown { timeout_ms, reply }) => {
+                    let outcome = worker_shutdown(generation, &mut runtime, shared, timeout_ms);
+                    let finished = outcome.is_ok();
+                    let _ = reply.try_send(outcome);
+                    if finished {
+                        break;
+                    }
+                }
+                Err(mpsc::TryRecvError::Empty) => {
+                    worker_poll(generation, &mut runtime, shared);
+                    thread::sleep(ENCODER_WORKER_POLL_INTERVAL);
+                }
+                Err(mpsc::TryRecvError::Disconnected) => break,
+            }
+        }
+        // Inputs still queued return their leases as their tickets drop.
+        while let Ok(command) = commands.try_recv() {
+            drop(command);
+        }
+        // Field order: the transform tears down before its retained tickets.
+        drop(runtime);
+    }
+
+    /// Records a worker failure once; later calls on this encoder report it.
+    fn worker_fail(shared: &WindowsD3d11EncoderWorkerShared, error: WindowsD3d11Error) {
+        let mut state = shared.lock_state();
+        if state.error.is_none() {
+            tracing::warn!(role = ?shared.role, %error, "D3D11 encoder worker failed");
+            state.error = Some(error);
+        }
+    }
+
+    /// Publishes what one transform call produced: its output, the leases the
+    /// transform released, and the counts the media thread's cap reads.
+    /// `ended_input` takes a submitted (or refused) input off the queue in
+    /// the same step that counts it retained, so the cap never sees it in
+    /// neither.
+    fn worker_publish(
+        generation: u64,
+        runtime: &mut WindowsD3d11EncoderRuntime,
+        shared: &WindowsD3d11EncoderWorkerShared,
+        progress: MediaFoundationD3d11EncoderProgress,
+        ended_input: bool,
+    ) {
+        let released = runtime.apply_releases(generation, progress.released_leases);
+        let mut state = shared.lock_state();
+        if ended_input {
+            state.queued = state.queued.saturating_sub(1);
+        }
+        state.encoded_frames.extend(progress.encoded_frames);
+        match released {
+            Ok(released) => state.released_leases.extend(released),
+            Err(error) => {
+                if state.error.is_none() {
+                    state.error = Some(error);
+                }
+            }
+        }
+        state.retained = runtime.retained_tickets.len();
+        state.pending_frames = runtime.encoder.pending_frame_count();
+        state.diagnostics = runtime.encoder.diagnostics();
+        if progress.call_timings.input_releases > 0 {
+            state
+                .timers
+                .observe_input_hold(u64::from(progress.call_timings.input_hold_max_micros));
+        }
+    }
+
+    fn worker_poll(
+        generation: u64,
+        runtime: &mut WindowsD3d11EncoderRuntime,
+        shared: &WindowsD3d11EncoderWorkerShared,
+    ) {
+        if shared.lock_state().error.is_some() {
+            return;
+        }
+        let started_at = Instant::now();
+        match runtime.encoder.poll() {
+            Ok(progress) => {
+                let micros = micros_since(started_at);
+                let timings = progress.call_timings;
+                if !progress.encoded_frames.is_empty() || !progress.released_leases.is_empty() {
+                    let process_output_max = (timings.process_output_calls > 0)
+                        .then_some(u64::from(timings.process_output_max_micros));
+                    shared
+                        .lock_state()
+                        .timers
+                        .observe_poll(micros, process_output_max);
+                }
+                worker_publish(generation, runtime, shared, progress, false);
+            }
+            Err(error) => worker_fail(
+                shared,
+                WindowsD3d11Error::new(
+                    WindowsD3d11ErrorCode::EncoderUnavailable,
+                    format!(
+                        "polling the {:?} Media Foundation encoder failed: {error}",
+                        runtime.role
+                    ),
+                ),
+            ),
+        }
+    }
+
+    /// Ends one accepted input that was never submitted. Dropping its ticket
+    /// returns the role lease.
+    fn worker_drop_input(
+        shared: &WindowsD3d11EncoderWorkerShared,
+        submission: WindowsD3d11EncoderWorkerSubmission,
+    ) {
+        drop(submission);
+        let mut state = shared.lock_state();
+        state.queued = state.queued.saturating_sub(1);
+        state.timers.note_dropped_input();
+    }
+
+    fn worker_submit(
+        generation: u64,
+        runtime: &mut WindowsD3d11EncoderRuntime,
+        shared: &WindowsD3d11EncoderWorkerShared,
+        submission: WindowsD3d11EncoderWorkerSubmission,
+    ) {
+        let role = runtime.role;
+        let lease_id = submission.metadata.lease_id;
+        if shared.lock_state().error.is_some() {
+            worker_drop_input(shared, submission);
+            return;
+        }
+        if runtime.retained_tickets.contains_key(&lease_id) {
+            worker_drop_input(shared, submission);
+            worker_fail(
+                shared,
+                WindowsD3d11Error::new(
+                    WindowsD3d11ErrorCode::InvalidLease,
+                    format!("{role:?} encoder already retains texture lease {lease_id}"),
+                ),
+            );
+            return;
+        }
+        // Wait here, off the media thread, for the transform's input credit.
+        // In its pipelined mode it rarely withholds one; in low-latency mode
+        // (a live leg) it issues them one at a time.
+        let credit_deadline = submission.accepted_at + ENCODER_WORKER_CREDIT_WAIT;
+        while !runtime.encoder.has_input_credit() {
+            worker_poll(generation, runtime, shared);
+            if runtime.encoder.has_input_credit() {
+                break;
+            }
+            if shared.lock_state().error.is_some()
+                || shared.stop.load(AtomicOrdering::Acquire)
+                || Instant::now() >= credit_deadline
+            {
+                worker_drop_input(shared, submission);
+                return;
+            }
+            thread::sleep(ENCODER_WORKER_POLL_INTERVAL);
+        }
+        let WindowsD3d11EncoderWorkerSubmission {
+            ticket,
+            texture,
+            metadata,
+            accepted_at,
+        } = submission;
+        let queue_wait_micros = micros_since(accepted_at);
+        let submit_started_at = Instant::now();
+        let submitted = runtime.encoder.try_submit_nv12_texture(&texture, metadata);
+        let submit_micros = micros_since(submit_started_at);
+        drop(texture);
+        let call_timings = match &submitted {
+            Ok(progress) => progress.call_timings,
+            Err(failure) => failure.progress.call_timings,
+        };
+        {
+            let mut state = shared.lock_state();
+            state.timers.observe_queue_wait(queue_wait_micros);
+            state.timers.observe_submit(
+                submit_micros,
+                call_timings.process_input_micros.map(u64::from),
+            );
+            if call_timings.process_output_calls > 0 {
+                state
+                    .timers
+                    .observe_process_output(u64::from(call_timings.process_output_max_micros));
+            }
+        }
+        match submitted {
+            Ok(progress) => {
+                runtime.retained_tickets.insert(lease_id, ticket);
+                worker_publish(generation, runtime, shared, progress, true);
+            }
+            Err(failure) => {
+                let release_matches_ticket = failure.release.generation == generation
+                    && failure.release.role == metadata.role
+                    && failure.release.lease_id == lease_id;
+                let backpressure =
+                    failure.kind == MediaFoundationD3d11SubmissionFailureKind::Backpressure;
+                let detail = failure.to_string();
+                worker_publish(generation, runtime, shared, failure.progress, true);
+                // `ticket` was never inserted after a rejected ProcessInput.
+                // Its Drop sends the explicit unsubmitted role release.
+                drop(ticket);
+                if !release_matches_ticket {
+                    worker_fail(
+                        shared,
+                        WindowsD3d11Error::new(
+                            WindowsD3d11ErrorCode::InvalidLease,
+                            "Media Foundation rejected a ticket with a mismatched explicit release",
+                        ),
+                    );
+                } else if backpressure {
+                    shared.lock_state().timers.note_dropped_input();
+                } else {
+                    worker_fail(
+                        shared,
+                        WindowsD3d11Error::new(WindowsD3d11ErrorCode::EncoderUnavailable, detail),
+                    );
+                }
+            }
+        }
+    }
+
+    /// Ends the stream: every input queued ahead of the drain was submitted
+    /// first. The reply carries the output not yet handed to the writer.
+    fn worker_drain(
+        generation: u64,
+        runtime: &mut WindowsD3d11EncoderRuntime,
+        shared: &WindowsD3d11EncoderWorkerShared,
+        timeout_ms: u32,
+    ) -> Result<WindowsD3d11EncoderProgress, WindowsD3d11Error> {
+        if let Some(error) = shared.lock_state().error.clone() {
+            return Err(error);
+        }
+        let drained = runtime
+            .encoder
+            .drain(Duration::from_millis(u64::from(timeout_ms)))
+            .map_err(|error| {
+                WindowsD3d11Error::new(
+                    WindowsD3d11ErrorCode::EncoderUnavailable,
+                    format!(
+                        "draining the {:?} Media Foundation encoder failed: {error}",
+                        runtime.role
+                    ),
+                )
+            })?;
+        worker_publish(generation, runtime, shared, drained, false);
+        let mut state = shared.lock_state();
+        if let Some(error) = state.error.clone() {
+            return Err(error);
+        }
+        Ok(shared.take_progress_locked(&mut state))
+    }
+
+    /// Flushes and waits for the transform's tracked releases. On success the
+    /// worker exits and drops the transform before any ticket it may still
+    /// reference; a timeout leaves the encoder and its tickets in place.
+    fn worker_shutdown(
+        generation: u64,
+        runtime: &mut WindowsD3d11EncoderRuntime,
+        shared: &WindowsD3d11EncoderWorkerShared,
+        timeout_ms: u32,
+    ) -> Result<WindowsD3d11EncoderShutdown, WindowsD3d11Error> {
+        let role = runtime.role;
+        let released = runtime
+            .encoder
+            .flush(Duration::from_millis(u64::from(timeout_ms)))
+            .map_err(|error| {
+                WindowsD3d11Error::new(
+                    WindowsD3d11ErrorCode::EncoderUnavailable,
+                    format!("flushing the {role:?} Media Foundation encoder failed: {error}"),
+                )
+            })?;
+        let released = runtime.apply_releases(generation, released)?;
+        if !runtime.encoder.is_drained() {
+            return Err(WindowsD3d11Error::new(
+                WindowsD3d11ErrorCode::EncoderUnavailable,
+                format!(
+                    "{role:?} encoder shutdown retained {} callback-owned texture leases",
+                    runtime.retained_tickets.len()
+                ),
+            ));
+        }
+        // A drained encoder has produced every output, so any ticket still
+        // retained is a surface the MFT itself references (NVIDIA keeps its
+        // last input). The worker drops the transform before its tickets, so
+        // no lease returns while the transform can read it.
+        let transform_held = runtime.retained_tickets.len();
+        if transform_held > 0 {
+            tracing::info!(
+                "{role:?} encoder released {transform_held} transform-held texture lease(s) at teardown"
+            );
+        }
+        let diagnostics = runtime.encoder.diagnostics();
+        let mut state = shared.lock_state();
+        state.released_leases.extend(released);
+        state.diagnostics = diagnostics;
+        let progress = shared.take_progress_locked(&mut state);
+        Ok(WindowsD3d11EncoderShutdown {
+            progress,
+            diagnostics,
+        })
     }
 
     struct CaptureInput {
@@ -2608,7 +3170,11 @@ mod runtime {
         /// Plan 190 S4: created by the first composition with a live
         /// background, released by the first one without.
         live_background: Option<crate::live_background::d3d11::LiveBackgroundD3d11Renderer>,
-        encoders: BTreeMap<WindowsD3d11MediaRole, WindowsD3d11EncoderRuntime>,
+        /// #1042: each encoder's worker thread. The handle joins its worker
+        /// when dropped, so this map must drop before the texture pool.
+        encoders: BTreeMap<WindowsD3d11MediaRole, WindowsD3d11EncoderWorker>,
+        /// The same workers' shared state, which clients read directly.
+        encoder_registry: WindowsD3d11EncoderRegistry,
         presenter: Option<WindowsD3d11Presenter>,
         presenter_last_error: Option<WindowsD3d11Error>,
         /// Encoder ownership counters survive successful shutdown/removal so
@@ -2622,6 +3188,7 @@ mod runtime {
         fn new(
             generation: u64,
             compositor: Result<WindowsD3d11Compositor, WindowsD3d11CompositorError>,
+            encoder_registry: WindowsD3d11EncoderRegistry,
         ) -> Result<Self, WindowsD3d11Error> {
             Ok(Self {
                 contract: WindowsD3d11MediaAuthorityState::new(generation, compositor.is_ok())?,
@@ -2631,6 +3198,7 @@ mod runtime {
                 compositor,
                 live_background: None,
                 encoders: BTreeMap::new(),
+                encoder_registry,
                 presenter: None,
                 presenter_last_error: None,
                 retired_encoder_counters: WindowsD3d11MediaRuntimeCounters::default(),
@@ -2643,8 +3211,8 @@ mod runtime {
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum MediaCommandStage {
         Compose,
+        /// Handing an input to an encoder worker.
         EncoderSubmit,
-        EncoderPoll,
         /// Status reads and capture acquisition: steady-state bookkeeping.
         Other,
         /// Opening or closing a capture, encoder or preview. Its seconds-long
@@ -2657,17 +3225,13 @@ mod runtime {
             match command {
                 WindowsD3d11MediaCommand::ComposeScene { .. } => Self::Compose,
                 WindowsD3d11MediaCommand::SubmitEncoderTexture { .. } => Self::EncoderSubmit,
-                WindowsD3d11MediaCommand::PollEncoder { .. } => Self::EncoderPoll,
                 WindowsD3d11MediaCommand::Status { .. }
                 | WindowsD3d11MediaCommand::AcquireCapture { .. }
-                | WindowsD3d11MediaCommand::EncoderStatus { .. }
                 | WindowsD3d11MediaCommand::PreviewStatus { .. } => Self::Other,
                 WindowsD3d11MediaCommand::RenderTestPattern { .. }
                 | WindowsD3d11MediaCommand::StartCapture { .. }
                 | WindowsD3d11MediaCommand::StopCapture { .. }
                 | WindowsD3d11MediaCommand::CreateEncoder { .. }
-                | WindowsD3d11MediaCommand::DrainEncoder { .. }
-                | WindowsD3d11MediaCommand::FlushEncoder { .. }
                 | WindowsD3d11MediaCommand::ShutdownEncoder { .. }
                 | WindowsD3d11MediaCommand::ConfigurePreview { .. }
                 | WindowsD3d11MediaCommand::DestroyPreview { .. } => Self::Setup,
@@ -2877,10 +3441,6 @@ mod runtime {
             in_flight_capacity: usize,
             reply: SyncSender<Result<WindowsD3d11EncoderStatus, WindowsD3d11Error>>,
         },
-        EncoderStatus {
-            role: WindowsD3d11MediaRole,
-            reply: SyncSender<Result<WindowsD3d11EncoderStatus, WindowsD3d11Error>>,
-        },
         SubmitEncoderTexture {
             ticket: WindowsD3d11TextureLeaseTicket,
             input_pts_100ns: i64,
@@ -2889,20 +3449,6 @@ mod runtime {
             reply: SyncSender<
                 Result<WindowsD3d11EncoderProgress, WindowsD3d11EncoderSubmissionFailure>,
             >,
-        },
-        PollEncoder {
-            role: WindowsD3d11MediaRole,
-            reply: SyncSender<Result<WindowsD3d11EncoderProgress, WindowsD3d11Error>>,
-        },
-        DrainEncoder {
-            role: WindowsD3d11MediaRole,
-            timeout_ms: u32,
-            reply: SyncSender<Result<WindowsD3d11EncoderProgress, WindowsD3d11Error>>,
-        },
-        FlushEncoder {
-            role: WindowsD3d11MediaRole,
-            timeout_ms: u32,
-            reply: SyncSender<Result<WindowsD3d11EncoderProgress, WindowsD3d11Error>>,
         },
         ShutdownEncoder {
             role: WindowsD3d11MediaRole,
@@ -2936,6 +3482,10 @@ mod runtime {
         generation: u64,
         preview_slot: Arc<Mutex<Option<WindowsD3d11QueuedPreviewFrame>>>,
         preview_replaced_frames: Arc<AtomicU64>,
+        /// #1042: the live encoder workers. Polls, status reads and drains go
+        /// straight to them; only submissions pass through the media thread,
+        /// which owns the texture pool the tickets are checked against.
+        encoders: WindowsD3d11EncoderRegistry,
     }
 
     /// One bounded capture request. Polling never waits on the native driver;
@@ -3162,19 +3712,32 @@ mod runtime {
             receive_response(response)
         }
 
+        fn encoder_worker(
+            &self,
+            role: WindowsD3d11MediaRole,
+        ) -> Result<Arc<WindowsD3d11EncoderWorkerShared>, WindowsD3d11Error> {
+            validate_encoder_role(role)?;
+            self.encoders
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .get(&role)
+                .cloned()
+                .ok_or_else(|| encoder_missing(role))
+        }
+
         pub(crate) fn encoder_status(
             &self,
             role: WindowsD3d11MediaRole,
         ) -> Result<WindowsD3d11EncoderStatus, WindowsD3d11Error> {
-            validate_encoder_role(role)?;
-            let (reply, response) = mpsc::sync_channel(1);
-            self.enqueue(WindowsD3d11MediaCommand::EncoderStatus { role, reply })?;
-            receive_response(response)
+            Ok(self.encoder_worker(role)?.status())
         }
 
         /// Transfers one role-bound NV12 ticket to the media authority. On
-        /// success the caller no longer owns recycling authority; the runtime
-        /// retains it until IMFTrackedSample reports the scalar lease release.
+        /// success the caller no longer owns recycling authority: the media
+        /// thread checks the ticket against its pool and hands it to the
+        /// role's encoder worker, which retains it until IMFTrackedSample
+        /// reports the scalar lease release. Success means accepted, not yet
+        /// encoded; a worker failure surfaces on the next poll or submit.
         pub(crate) fn submit_encoder_texture(
             &self,
             ticket: WindowsD3d11TextureLeaseTicket,
@@ -3214,43 +3777,31 @@ mod runtime {
             receive_encoder_submission(response)
         }
 
+        /// The output and releases the role's worker collected since the last
+        /// call. Reads shared state only: it never waits on the media thread
+        /// or on a transform call in progress.
         pub(crate) fn poll_encoder(
             &self,
             role: WindowsD3d11MediaRole,
         ) -> Result<WindowsD3d11EncoderProgress, WindowsD3d11Error> {
-            validate_encoder_role(role)?;
-            let (reply, response) = mpsc::sync_channel(1);
-            self.enqueue(WindowsD3d11MediaCommand::PollEncoder { role, reply })?;
-            receive_response(response)
+            self.encoder_worker(role)?.poll()
         }
 
+        /// Submits every input already accepted, then drains the transform.
+        /// The writer receives every submit's answer before it drains, so
+        /// those inputs are already in the worker's queue.
         pub(crate) fn drain_encoder(
             &self,
             role: WindowsD3d11MediaRole,
             timeout_ms: u32,
         ) -> Result<WindowsD3d11EncoderProgress, WindowsD3d11Error> {
             validate_encoder_wait(role, timeout_ms)?;
+            let worker = self.encoder_worker(role)?;
             let (reply, response) = mpsc::sync_channel(1);
-            self.enqueue(WindowsD3d11MediaCommand::DrainEncoder {
-                role,
-                timeout_ms,
-                reply,
-            })?;
-            receive_response_with_timeout(response, encoder_response_timeout(timeout_ms))
-        }
-
-        pub(crate) fn flush_encoder(
-            &self,
-            role: WindowsD3d11MediaRole,
-            timeout_ms: u32,
-        ) -> Result<WindowsD3d11EncoderProgress, WindowsD3d11Error> {
-            validate_encoder_wait(role, timeout_ms)?;
-            let (reply, response) = mpsc::sync_channel(1);
-            self.enqueue(WindowsD3d11MediaCommand::FlushEncoder {
-                role,
-                timeout_ms,
-                reply,
-            })?;
+            worker
+                .commands
+                .try_send(WindowsD3d11EncoderWorkerCommand::Drain { timeout_ms, reply })
+                .map_err(|error| encoder_worker_send_error(role, &error))?;
             receive_response_with_timeout(response, encoder_response_timeout(timeout_ms))
         }
 
@@ -3727,6 +4278,8 @@ mod runtime {
             let thread_preview_slot = Arc::clone(&preview_slot);
             let preview_replaced_frames = Arc::new(AtomicU64::new(0));
             let thread_preview_replaced_frames = Arc::clone(&preview_replaced_frames);
+            let encoders: WindowsD3d11EncoderRegistry = Arc::new(Mutex::new(BTreeMap::new()));
+            let thread_encoders = Arc::clone(&encoders);
             let join = thread::Builder::new()
                 .name(format!("videorc-d3d11-media-{generation}"))
                 .spawn(move || {
@@ -3738,6 +4291,7 @@ mod runtime {
                         release_receiver,
                         thread_preview_slot,
                         thread_preview_replaced_frames,
+                        thread_encoders,
                         startup_sender,
                         thread_cancel,
                     );
@@ -3768,6 +4322,7 @@ mod runtime {
                     generation,
                     preview_slot,
                     preview_replaced_frames,
+                    encoders,
                 },
                 shutdown_requested: cancel_startup,
                 join: Some(join),
@@ -3817,6 +4372,7 @@ mod runtime {
         release_receiver: Receiver<WindowsD3d11LeaseRelease>,
         preview_slot: Arc<Mutex<Option<WindowsD3d11QueuedPreviewFrame>>>,
         preview_replaced_frames: Arc<AtomicU64>,
+        encoder_registry: WindowsD3d11EncoderRegistry,
         startup_sender: SyncSender<Result<MediaThreadStartup, WindowsD3d11Error>>,
         cancel_startup: Arc<AtomicBool>,
     ) {
@@ -3827,7 +4383,8 @@ mod runtime {
             let texture_pool =
                 WindowsD3d11TexturePoolOwner::create(&device, generation, pool_config)?;
             let compositor = WindowsD3d11Compositor::new(&device, generation);
-            let mut media_runtime = WindowsD3d11MediaRuntimeState::new(generation, compositor)?;
+            let mut media_runtime =
+                WindowsD3d11MediaRuntimeState::new(generation, compositor, encoder_registry)?;
             media_runtime.wake_event = Some(event.clone());
             Ok::<_, WindowsD3d11Error>((apartment, event, device, texture_pool, media_runtime))
         })();
@@ -3924,7 +4481,6 @@ mod runtime {
                             MediaCommandStage::EncoderSubmit => {
                                 &mut breakdown.encoder_submit_micros
                             }
-                            MediaCommandStage::EncoderPoll => &mut breakdown.encoder_poll_micros,
                             MediaCommandStage::Other => &mut breakdown.other_command_micros,
                             MediaCommandStage::Setup => {
                                 breakdown.ran_setup = true;
@@ -3998,6 +4554,14 @@ mod runtime {
                 let _ = unsafe { SetEvent(event.0) };
             }
         }
+        // Clients still holding this generation now see its encoders as
+        // gone; dropping the handles then stops and joins every worker, so
+        // each transform and its tickets are gone before the pool and device.
+        media_runtime
+            .encoder_registry
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear();
         drop(media_runtime);
         drop(texture_pool);
         drop(device);
@@ -4113,21 +4677,24 @@ mod runtime {
                 .ok()
                 .and_then(WindowsD3d11Compositor::gpu_timings),
         );
-        for encoder in media_runtime.encoders.values() {
-            let ownership = encoder.encoder.diagnostics().ownership;
+        for worker in media_runtime.encoders.values() {
+            let state = worker.shared.lock_state();
+            let diagnostics = state.diagnostics;
+            let ownership = diagnostics.ownership;
+            stage_timings.include_encoder(state.timers.summary());
             stage_timings.encoder_credit_refusals = stage_timings
                 .encoder_credit_refusals
                 .saturating_add(ownership.credit_refusals);
+            // The worker's own refusals plus the media thread's, which
+            // count inputs queued for the worker against the same cap.
             stage_timings.encoder_capacity_refusals = stage_timings
                 .encoder_capacity_refusals
-                .saturating_add(ownership.capacity_refusals);
+                .saturating_add(ownership.capacity_refusals)
+                .saturating_add(state.capacity_refusals);
             stage_timings.encoder_max_in_flight = stage_timings
                 .encoder_max_in_flight
                 .max(ownership.max_in_flight);
-        }
-        counters.stage_timings = Some(stage_timings);
-        for encoder in media_runtime.encoders.values() {
-            let diagnostics = encoder.encoder.diagnostics();
+            drop(state);
             counters.include_encoder_totals(
                 diagnostics.ownership.gpu_nv12_samples_submitted,
                 diagnostics.ownership.system_memory_i420_samples_submitted,
@@ -4137,6 +4704,7 @@ mod runtime {
                 diagnostics.ownership.stale_release_callbacks,
             );
         }
+        counters.stage_timings = Some(stage_timings);
         counters
     }
 
@@ -4260,15 +4828,6 @@ mod runtime {
                 let _ = reply.try_send(response);
                 false
             }
-            WindowsD3d11MediaCommand::EncoderStatus { role, reply } => {
-                let response = media_runtime
-                    .encoders
-                    .get(&role)
-                    .map(WindowsD3d11EncoderRuntime::status)
-                    .ok_or_else(|| encoder_missing(role));
-                let _ = reply.try_send(response);
-                false
-            }
             WindowsD3d11MediaCommand::SubmitEncoderTexture {
                 ticket,
                 input_pts_100ns,
@@ -4288,36 +4847,12 @@ mod runtime {
                 let _ = reply.try_send(response);
                 false
             }
-            WindowsD3d11MediaCommand::PollEncoder { role, reply } => {
-                let response = poll_encoder_runtime(generation, role, media_runtime);
-                let _ = reply.try_send(response);
-                false
-            }
-            WindowsD3d11MediaCommand::DrainEncoder {
-                role,
-                timeout_ms,
-                reply,
-            } => {
-                let response = drain_encoder_runtime(generation, role, timeout_ms, media_runtime);
-                let _ = reply.try_send(response);
-                false
-            }
-            WindowsD3d11MediaCommand::FlushEncoder {
-                role,
-                timeout_ms,
-                reply,
-            } => {
-                let response = flush_encoder_runtime(generation, role, timeout_ms, media_runtime);
-                let _ = reply.try_send(response);
-                false
-            }
             WindowsD3d11MediaCommand::ShutdownEncoder {
                 role,
                 timeout_ms,
                 reply,
             } => {
-                let response =
-                    shutdown_encoder_runtime(generation, role, timeout_ms, media_runtime);
+                let response = shutdown_encoder_runtime(role, timeout_ms, media_runtime);
                 let _ = reply.try_send(response);
                 false
             }
@@ -4420,7 +4955,7 @@ mod runtime {
         texture_pool: &WindowsD3d11TexturePoolOwner,
         media_runtime: &mut WindowsD3d11MediaRuntimeState,
     ) -> Result<WindowsD3d11EncoderStatus, WindowsD3d11Error> {
-        let encoder_role = encoder_role(role)?;
+        encoder_role(role)?;
         if media_runtime.encoders.contains_key(&role) {
             return Err(WindowsD3d11Error::new(
                 WindowsD3d11ErrorCode::EncoderUnavailable,
@@ -4456,29 +4991,29 @@ mod runtime {
                 ),
             ));
         }
-        let encoder = MediaFoundationD3d11H264Encoder::new_on_media_thread(
-            config,
-            device,
+        // The transform is created on, used on and dropped on its worker.
+        let worker = WindowsD3d11EncoderWorker::spawn(
             generation,
-            encoder_role,
-            in_flight_capacity,
-        )
-        .map_err(|error| {
-            WindowsD3d11Error::new(
-                WindowsD3d11ErrorCode::EncoderUnavailable,
-                format!("creating the {role:?} D3D11 Media Foundation encoder failed: {error}"),
-            )
-        })?;
-        let runtime = WindowsD3d11EncoderRuntime {
             role,
-            encoder,
-            retained_tickets: BTreeMap::new(),
-        };
-        let status = runtime.status();
-        media_runtime.encoders.insert(role, runtime);
+            config,
+            in_flight_capacity,
+            device.raw_device().clone(),
+            device.adapter_luid(),
+        )?;
+        let status = worker.shared.status();
+        media_runtime
+            .encoder_registry
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(role, Arc::clone(&worker.shared));
+        media_runtime.encoders.insert(role, worker);
         Ok(status)
     }
 
+    /// Checks one encoder input against the pool and hands it to the role's
+    /// worker without waiting for the transform (#1042). Inputs queued for
+    /// the worker count against the encoder's in-flight cap together with
+    /// the inputs the transform holds, so the NV12 bucket math is unchanged.
     #[allow(clippy::too_many_arguments)]
     fn submit_encoder_texture_runtime(
         generation: u64,
@@ -4489,6 +5024,7 @@ mod runtime {
         texture_pool: &WindowsD3d11TexturePoolOwner,
         media_runtime: &mut WindowsD3d11MediaRuntimeState,
     ) -> Result<WindowsD3d11EncoderProgress, WindowsD3d11EncoderSubmissionFailure> {
+        let accepted_at = Instant::now();
         let ticket_metadata = ticket.metadata();
         let role = ticket_metadata.role;
         let encoder_role = encoder_role(role).map_err(encoder_submission_error)?;
@@ -4503,18 +5039,14 @@ mod runtime {
         }
         let texture = texture_pool
             .texture_for_ticket(&ticket)
-            .map_err(encoder_submission_error)?;
-        let runtime = media_runtime
+            .map_err(encoder_submission_error)?
+            .clone();
+        let worker = media_runtime
             .encoders
-            .get_mut(&role)
+            .get(&role)
             .ok_or_else(|| encoder_submission_error(encoder_missing(role)))?;
+        let shared = &worker.shared;
         let lease_id = ticket_metadata.lease_id.as_u64();
-        if runtime.retained_tickets.contains_key(&lease_id) {
-            return Err(encoder_submission_error(WindowsD3d11Error::new(
-                WindowsD3d11ErrorCode::InvalidLease,
-                format!("{role:?} encoder already retains texture lease {lease_id}"),
-            )));
-        }
         let metadata = WindowsD3d11EncoderSubmissionMetadata {
             generation,
             role: encoder_role,
@@ -4523,187 +5055,108 @@ mod runtime {
             duration_100ns,
             submitted_at_micros,
         };
-        let submit_started_at = Instant::now();
-        let submitted = runtime.encoder.try_submit_nv12_texture(texture, metadata);
-        let submit_micros = micros_since(submit_started_at);
-        let call_timings = match &submitted {
-            Ok(progress) => progress.call_timings,
-            Err(failure) => failure.progress.call_timings,
-        };
-        media_runtime.stage_timers.observe_encoder_submit(
-            submit_micros,
-            call_timings.process_input_micros.map(u64::from),
-        );
-        if call_timings.process_output_calls > 0 {
-            media_runtime
-                .stage_timers
-                .observe_process_output(u64::from(call_timings.process_output_max_micros));
+        let mut state = shared.lock_state();
+        if let Some(error) = state.error.clone() {
+            let progress = shared.take_progress_locked(&mut state);
+            return Err(WindowsD3d11EncoderSubmissionFailure {
+                error,
+                progress: Some(Box::new(progress)),
+            });
         }
-        if call_timings.input_releases > 0 {
-            media_runtime
-                .stage_timers
-                .observe_encoder_input_hold(u64::from(call_timings.input_hold_max_micros));
+        let outstanding = state.queued.saturating_add(state.retained);
+        if !encoder_worker_accepts(outstanding, shared.in_flight_capacity) {
+            state.capacity_refusals = state.capacity_refusals.saturating_add(1);
+            let progress = shared.take_progress_locked(&mut state);
+            // `ticket` drops here unsubmitted and returns its role lease.
+            return Err(WindowsD3d11EncoderSubmissionFailure {
+                error: WindowsD3d11Error::new(
+                    WindowsD3d11ErrorCode::EncoderBackpressure,
+                    format!(
+                        "{role:?} encoder has {outstanding} of its {} inputs queued or in flight",
+                        shared.in_flight_capacity
+                    ),
+                ),
+                progress: Some(Box::new(progress)),
+            });
         }
-        let runtime = media_runtime
-            .encoders
-            .get_mut(&role)
-            .ok_or_else(|| encoder_submission_error(encoder_missing(role)))?;
-        match submitted {
-            Ok(progress) => {
-                runtime.retained_tickets.insert(lease_id, ticket);
-                runtime
-                    .apply_progress(generation, progress)
-                    .map_err(encoder_submission_error)
-            }
-            Err(failure) => {
-                let release_matches_ticket = failure.release.generation == generation
-                    && failure.release.role == encoder_role
-                    && failure.release.lease_id == lease_id;
-                let error_code =
-                    if failure.kind == MediaFoundationD3d11SubmissionFailureKind::Backpressure {
-                        WindowsD3d11ErrorCode::EncoderBackpressure
-                    } else {
-                        WindowsD3d11ErrorCode::EncoderUnavailable
-                    };
-                let detail = failure.to_string();
-                let progress = runtime
-                    .apply_progress(generation, failure.progress)
-                    .map_err(encoder_submission_error)?;
-                if !release_matches_ticket {
-                    return Err(WindowsD3d11EncoderSubmissionFailure {
-                        error: WindowsD3d11Error::new(
-                            WindowsD3d11ErrorCode::InvalidLease,
-                            "Media Foundation rejected a ticket with a mismatched explicit release",
-                        ),
-                        progress: Some(Box::new(progress)),
-                    });
-                }
-                // `ticket` was never inserted after a rejected ProcessInput.
-                // Its Drop sends the explicit unsubmitted role release.
-                Err(WindowsD3d11EncoderSubmissionFailure {
-                    error: WindowsD3d11Error::new(error_code, detail),
-                    progress: Some(Box::new(progress)),
-                })
-            }
+        state.queued = state.queued.saturating_add(1);
+        drop(state);
+        let sent = shared
+            .commands
+            .try_send(WindowsD3d11EncoderWorkerCommand::Submit(
+                WindowsD3d11EncoderWorkerSubmission {
+                    ticket,
+                    texture,
+                    metadata,
+                    accepted_at,
+                },
+            ));
+        let mut state = shared.lock_state();
+        if let Err(error) = sent {
+            state.queued = state.queued.saturating_sub(1);
+            let progress = shared.take_progress_locked(&mut state);
+            drop(state);
+            // The unsent command, and its ticket, drop with `error`.
+            return Err(WindowsD3d11EncoderSubmissionFailure {
+                error: encoder_worker_send_error(role, &error),
+                progress: Some(Box::new(progress)),
+            });
         }
+        Ok(shared.take_progress_locked(&mut state))
     }
 
-    fn poll_encoder_runtime(
-        generation: u64,
+    /// Whether one more input fits the encoder's in-flight cap, counting the
+    /// inputs queued for its worker and those the transform holds.
+    const fn encoder_worker_accepts(outstanding: usize, capacity: usize) -> bool {
+        outstanding < capacity
+    }
+
+    fn encoder_worker_send_error<T>(
         role: WindowsD3d11MediaRole,
-        media_runtime: &mut WindowsD3d11MediaRuntimeState,
-    ) -> Result<WindowsD3d11EncoderProgress, WindowsD3d11Error> {
-        let runtime = media_runtime
-            .encoders
-            .get_mut(&role)
-            .ok_or_else(|| encoder_missing(role))?;
-        let poll_started_at = Instant::now();
-        let polled = runtime.encoder.poll();
-        let poll_micros = micros_since(poll_started_at);
-        let poll_timings = polled.as_ref().ok().map(|progress| progress.call_timings);
-        let process_output_max = poll_timings
-            .filter(|timings| timings.process_output_calls > 0)
-            .map(|timings| u64::from(timings.process_output_max_micros));
-        media_runtime
-            .stage_timers
-            .observe_encoder_poll(poll_micros, process_output_max);
-        if let Some(timings) = poll_timings.filter(|timings| timings.input_releases > 0) {
-            media_runtime
-                .stage_timers
-                .observe_encoder_input_hold(u64::from(timings.input_hold_max_micros));
-        }
-        let progress = polled.map_err(|error| {
-            WindowsD3d11Error::new(
+        error: &TrySendError<T>,
+    ) -> WindowsD3d11Error {
+        match error {
+            TrySendError::Full(_) => WindowsD3d11Error::new(
+                WindowsD3d11ErrorCode::EncoderBackpressure,
+                format!("the {role:?} encoder worker's queue is full"),
+            ),
+            TrySendError::Disconnected(_) => WindowsD3d11Error::new(
                 WindowsD3d11ErrorCode::EncoderUnavailable,
-                format!("polling the {role:?} Media Foundation encoder failed: {error}"),
-            )
-        })?;
-        let runtime = media_runtime
-            .encoders
-            .get_mut(&role)
-            .ok_or_else(|| encoder_missing(role))?;
-        runtime.apply_progress(generation, progress)
+                format!("the {role:?} encoder worker has stopped"),
+            ),
+        }
     }
 
-    fn drain_encoder_runtime(
-        generation: u64,
-        role: WindowsD3d11MediaRole,
-        timeout_ms: u32,
-        media_runtime: &mut WindowsD3d11MediaRuntimeState,
-    ) -> Result<WindowsD3d11EncoderProgress, WindowsD3d11Error> {
-        validate_encoder_wait(role, timeout_ms)?;
-        let runtime = media_runtime
-            .encoders
-            .get_mut(&role)
-            .ok_or_else(|| encoder_missing(role))?;
-        let progress = runtime
-            .encoder
-            .drain(Duration::from_millis(u64::from(timeout_ms)))
-            .map_err(|error| {
-                WindowsD3d11Error::new(
-                    WindowsD3d11ErrorCode::EncoderUnavailable,
-                    format!("draining the {role:?} Media Foundation encoder failed: {error}"),
-                )
-            })?;
-        runtime.apply_progress(generation, progress)
-    }
-
-    fn flush_encoder_runtime(
-        generation: u64,
-        role: WindowsD3d11MediaRole,
-        timeout_ms: u32,
-        media_runtime: &mut WindowsD3d11MediaRuntimeState,
-    ) -> Result<WindowsD3d11EncoderProgress, WindowsD3d11Error> {
-        validate_encoder_wait(role, timeout_ms)?;
-        let runtime = media_runtime
-            .encoders
-            .get_mut(&role)
-            .ok_or_else(|| encoder_missing(role))?;
-        let released_leases = runtime
-            .encoder
-            .flush(Duration::from_millis(u64::from(timeout_ms)))
-            .map_err(|error| {
-                WindowsD3d11Error::new(
-                    WindowsD3d11ErrorCode::EncoderUnavailable,
-                    format!("flushing the {role:?} Media Foundation encoder failed: {error}"),
-                )
-            })?;
-        runtime.apply_progress(
-            generation,
-            MediaFoundationD3d11EncoderProgress {
-                encoded_frames: Vec::new(),
-                released_leases,
-                ..Default::default()
-            },
-        )
-    }
-
+    /// Flushes, waits for tracked releases, and removes one encoder role.
+    /// A failure or timeout leaves the worker, its encoder and all retained
+    /// tickets in place.
     fn shutdown_encoder_runtime(
-        generation: u64,
         role: WindowsD3d11MediaRole,
         timeout_ms: u32,
         media_runtime: &mut WindowsD3d11MediaRuntimeState,
     ) -> Result<WindowsD3d11EncoderProgress, WindowsD3d11Error> {
-        let progress = flush_encoder_runtime(generation, role, timeout_ms, media_runtime)?;
-        let runtime = media_runtime
+        validate_encoder_wait(role, timeout_ms)?;
+        let worker = media_runtime
             .encoders
             .get(&role)
             .ok_or_else(|| encoder_missing(role))?;
-        if !runtime.encoder.is_drained() {
-            return Err(WindowsD3d11Error::new(
-                WindowsD3d11ErrorCode::EncoderUnavailable,
-                format!(
-                    "{role:?} encoder shutdown retained {} callback-owned texture leases",
-                    runtime.retained_tickets.len()
-                ),
-            ));
-        }
-        // A drained encoder has produced every output, so any ticket still
-        // here is a surface the MFT itself references (NVIDIA keeps its last
-        // input). Removing the runtime drops the encoder (MFT teardown) before
-        // its tickets, so no lease returns while the transform can read it.
-        let transform_held = runtime.retained_tickets.len();
-        let diagnostics = runtime.encoder.diagnostics();
+        let (reply, response) = mpsc::sync_channel(1);
+        worker
+            .shared
+            .commands
+            .try_send(WindowsD3d11EncoderWorkerCommand::Shutdown { timeout_ms, reply })
+            .map_err(|error| encoder_worker_send_error(role, &error))?;
+        let shutdown =
+            receive_response_with_timeout(response, encoder_response_timeout(timeout_ms))?;
+        media_runtime
+            .encoder_registry
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&role);
+        // The worker has left its loop; dropping the handle joins it once
+        // the transform, then its tickets, have dropped on that thread.
+        drop(media_runtime.encoders.remove(&role));
+        let diagnostics = shutdown.diagnostics;
         media_runtime
             .retired_encoder_counters
             .include_encoder_totals(
@@ -4714,13 +5167,7 @@ mod runtime {
                 diagnostics.ownership.flush_timeouts,
                 diagnostics.ownership.stale_release_callbacks,
             );
-        media_runtime.encoders.remove(&role);
-        if transform_held > 0 {
-            tracing::info!(
-                "{role:?} encoder released {transform_held} transform-held texture lease(s) at teardown"
-            );
-        }
-        Ok(progress)
+        Ok(shutdown.progress)
     }
 
     fn encoder_missing(role: WindowsD3d11MediaRole) -> WindowsD3d11Error {

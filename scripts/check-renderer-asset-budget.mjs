@@ -138,9 +138,16 @@ const htmlPath = resolve(
 // chips) and the strict contract schemas. Raise raw to 2,365,000 and gzip to
 // 485,000, leaving room for the guests' remaining wiring; the entry ceilings
 // hold. Keep new surfaces lazy.
+// 2026-11-15 (owner-approved: "raise budget to 487,000"): main at ab8b8327
+// measures 2,361,337 raw / 485,281 gzip, 281 bytes over. The new eager bytes
+// are spread over the shell and Studio wiring (plans 238 and 239, #1375); the
+// Avatar page, the Preview startup card, the green screen helpers and the RPC
+// contract schemas already load lazily.
+// Raise gzip to 487,000; raw and the entry ceilings hold. Keep new surfaces
+// lazy.
 const budget = {
   maxTotalRawBytes: Number(process.env.VIDEORC_RENDERER_MAX_EAGER_RAW_BYTES ?? 2_365_000),
-  maxTotalGzipBytes: Number(process.env.VIDEORC_RENDERER_MAX_EAGER_GZIP_BYTES ?? 485_000),
+  maxTotalGzipBytes: Number(process.env.VIDEORC_RENDERER_MAX_EAGER_GZIP_BYTES ?? 487_000),
   maxEntryRawBytes: Number(process.env.VIDEORC_RENDERER_MAX_ENTRY_RAW_BYTES ?? 1_200_000),
   maxEntryGzipBytes: Number(process.env.VIDEORC_RENDERER_MAX_ENTRY_GZIP_BYTES ?? 235_000)
 }

@@ -2085,6 +2085,7 @@ describe('backend RPC contract', () => {
             encodedPass: stage(480, 0.3, 1.1),
             nv12Pass: stage(480, 0.2, 0.8),
             fenceSignal: stage(480, 0.05, 0.4),
+            encoderQueueWait: stage(470, 9.5, 66),
             encoderSubmit: stage(470, 1.1, 118.8),
             encoderProcessInput: stage(470, 0.9, 118.2),
             encoderPoll: stage(900, 0.3, 68.8),
@@ -2093,6 +2094,7 @@ describe('backend RPC contract', () => {
             encoderCreditRefusals: 3,
             encoderCapacityRefusals: 12,
             encoderMaxInFlight: 2,
+            encoderDroppedInputs: 1,
             previewPresent: idle,
             setupLoops: 4,
             slowestLoop: {
@@ -2100,7 +2102,6 @@ describe('backend RPC contract', () => {
               capturePollMs: 0.1,
               composeMs: 0,
               encoderSubmitMs: 118.9,
-              encoderPollMs: 0.3,
               previewPresentMs: 0,
               otherCommandMs: 0,
               commands: 2
