@@ -40,9 +40,9 @@ export function BuddyConsentDialog({
           <div className="flex items-center gap-3">
             <BuddyEmblem size="lg" />
             <div className="flex flex-col gap-1">
-              <DialogTitle>Turn on Buddy Live?</DialogTitle>
+              <DialogTitle>Turn on Sidekick Live?</DialogTitle>
               <DialogDescription>
-                Buddy uses Videorc&apos;s cloud AI while you&apos;re live.
+                Sidekick uses Videorc&apos;s cloud AI while you&apos;re live.
               </DialogDescription>
             </div>
           </div>

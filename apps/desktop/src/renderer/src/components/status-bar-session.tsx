@@ -4,6 +4,7 @@ import { StatusDot } from '@/components/status-dot'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { useSessionElapsedMs } from '@/hooks/use-session-elapsed'
 import {
+  sessionAlsoRecords,
   sessionClockLabel,
   sessionStatusLabel,
   sessionStatusPulses,
@@ -18,6 +19,12 @@ import { openWorkspaceTab } from '@/lib/workspace-navigation'
  * socket's enum, with the elapsed time while recording or on air. It is the
  * door to Health, which stays out of the sidebar. The clock ticks here, so
  * only this leaf re-renders each second, never the shell.
+ *
+ * It is the session's one word since the Studio's Ready badge went (plan 235
+ * D1): on air it adds "· Rec" when the livestream is also recorded, the fact
+ * the badge's Rec chip carried. `data-videorc-session-status` holds the state
+ * words alone (no Rec, no clock): the backend-resilience and captions smokes
+ * read it.
  */
 export function StatusBarSessionState({
   recording,
@@ -28,6 +35,9 @@ export function StatusBarSessionState({
 }): ReactElement {
   const label = sessionStatusLabel(recording, wsStatus)
   const pulse = sessionStatusPulses(recording, wsStatus)
+  // Go Live is record+stream, which the backend reports as `recording`
+  // (plan 095 S5): on air, say the file is being written too.
+  const alsoRecords = wsStatus === 'connected' && sessionAlsoRecords(recording)
   const elapsedMs = useSessionElapsedMs(pulse ? (recording.startedAt ?? undefined) : undefined)
   return (
     // A polite live region announces a state change; the clock is hidden from
@@ -44,7 +54,14 @@ export function StatusBarSessionState({
             />
           }
         >
-          <StatusDot label={label} pulse={pulse} tone={sessionStatusTone(recording, wsStatus)} />
+          <span className="flex min-w-0" data-videorc-session-status="">
+            <StatusDot label={label} pulse={pulse} tone={sessionStatusTone(recording, wsStatus)} />
+          </span>
+          {alsoRecords ? (
+            <span className="shrink-0 text-xs" data-testid="session-also-recording">
+              · Rec
+            </span>
+          ) : null}
           {pulse && elapsedMs !== undefined ? (
             <span aria-hidden className="text-xs tabular-nums">
               {sessionClockLabel(elapsedMs)}

@@ -128,6 +128,7 @@ import {
   previewProofLayerFit
 } from '../../../../shared/native-preview-proof-geometry'
 import {
+  sceneCameraOnStage,
   sceneFrameRect,
   scenePictureRect,
   screenBoxIsPicture,
@@ -460,6 +461,8 @@ export function LayoutTab(): ReactElement {
   // selected source's PICTURE, the box the stage shows, and every edit
   // commits the frame that box maps back to.
   const stageMargin = previewProofBackgroundStageMargin(scene?.background ?? null)
+  // Plan 235 (D9 a): the camera of an unkeyed camera-only scene is on the stage.
+  const cameraOnStage = sceneCameraOnStage(sceneSources, captureConfig.layout)
   const pictureBoxOf = (source: SceneSource): FractionRect =>
     scenePictureRect({
       frame: source.transform,
@@ -468,6 +471,7 @@ export function LayoutTab(): ReactElement {
       source: sourcePictureSize(source, sourcePictureSizes),
       crop: source.transform,
       stageMargin,
+      cameraOnStage,
       canvas: captureConfig.video
     })
   const boxIsPictureOf = (source: SceneSource): boolean =>
@@ -487,7 +491,8 @@ export function LayoutTab(): ReactElement {
           source.transform,
           source.kind,
           stageMargin,
-          captureConfig.video
+          captureConfig.video,
+          cameraOnStage
         )
       )
     )
@@ -633,7 +638,7 @@ export function LayoutTab(): ReactElement {
           )
         )
           return null
-        return sceneFrameRect(pictureBoxOf(source), source.kind, stageMargin)
+        return sceneFrameRect(pictureBoxOf(source), source.kind, stageMargin, cameraOnStage)
       })
     )
   }
@@ -1300,7 +1305,8 @@ export function LayoutTab(): ReactElement {
                             selectedSource.transform,
                             selectedSource.kind,
                             stageMargin,
-                            captureConfig.video
+                            captureConfig.video,
+                            cameraOnStage
                           )
                         })
                       )
@@ -1819,7 +1825,7 @@ const OVERLAY_ITEM_DESCRIPTIONS: Record<OverlayItem, string> = {
   highlight: 'The highlighted message card. Drag it on the stage or snap it to a corner.',
   captions:
     'The caption bar. Drag its edges to set its width; style and text size live in Captions.',
-  buddy: 'Your Buddy and its speech bubble. Drag it on the stage or snap it to a corner.',
+  buddy: 'Your Sidekick and its speech bubble. Drag it on the stage or snap it to a corner.',
   // Plan 215 D5: viewers' names go on stream, so the switches say so.
   chat: "The last five chat messages, with each viewer's name. Drag the box on the stage or snap it to a corner."
 }
@@ -1831,7 +1837,7 @@ const OVERLAY_ITEM_DESCRIPTIONS: Record<OverlayItem, string> = {
  * have a picture you'd look for at rest; the highlight card's and the
  * caption bar's chips still say "Off". */
 export const OVERLAY_ITEM_OFF_LINES: Partial<Record<OverlayItem, string>> = {
-  buddy: "Off. Viewers don't see Buddy.",
+  buddy: "Off. Viewers don't see Sidekick.",
   chat: "Off. Viewers don't see chat."
 }
 

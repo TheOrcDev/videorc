@@ -96,7 +96,7 @@ describe('Discord go-live announcement (plan 187)', () => {
     expect(toast).toStrictEqual({
       type: 'error',
       title: "Couldn't post to Discord",
-      description: 'The webhook was deleted in Discord. Paste a new one in Livestream → Setup.',
+      description: 'The webhook was deleted in Discord. Paste a new one in Destinations → Setup.',
       at: '2026-10-22T18:09:00Z'
     })
     expect(discordFailureToast(toast!.at, fresh, now)).toBeNull()
@@ -158,7 +158,7 @@ describe('Discord go-live announcement (plan 187)', () => {
     ).toMatchObject({
       type: 'error',
       description:
-        'The Stream alerts webhook was deleted in Discord. Paste a new one in Livestream → Setup.',
+        'The Stream alerts webhook was deleted in Discord. Paste a new one in Destinations → Setup.',
       at: '2026-10-22T18:09:30Z'
     })
     expect(
@@ -167,6 +167,6 @@ describe('Discord go-live announcement (plan 187)', () => {
         { webhooks: [{ ...alerts, lastError: { code: 'rejected', at: '2026-10-22T18:09:00Z' } }] },
         now
       )?.description
-    ).toBe('Discord refused the post to Stream alerts. Check the webhook in Livestream → Setup.')
+    ).toBe('Discord refused the post to Stream alerts. Check the webhook in Destinations → Setup.')
   })
 })

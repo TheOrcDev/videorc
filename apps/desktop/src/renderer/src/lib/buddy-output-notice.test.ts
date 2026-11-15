@@ -11,7 +11,7 @@ const LIVE_AND_OFF = {
 }
 
 describe('buddyOffOutputsNotice', () => {
-  it('says so when Buddy Live runs on air with both outputs off', () => {
+  it('says so when Sidekick Live runs on air with both outputs off', () => {
     expect(buddyOffOutputsNotice(LIVE_AND_OFF)).toEqual({
       title: "Golmar isn't on stream.",
       detail: "Viewers can't see it, its bubbles or its reactions.",
@@ -25,21 +25,21 @@ describe('buddyOffOutputsNotice', () => {
     expect(buddyOffOutputsNotice({ ...withoutRecording, showInRecording: null })).not.toBeNull()
   })
 
-  it('falls back to Buddy for a nameless persona', () => {
+  it('falls back to Sidekick for a nameless persona', () => {
     expect(buddyOffOutputsNotice({ ...LIVE_AND_OFF, name: null })?.title).toBe(
-      "Buddy isn't on stream."
+      "Sidekick isn't on stream."
     )
     expect(buddyOffOutputsNotice({ ...LIVE_AND_OFF, name: '  ' })?.title).toBe(
-      "Buddy isn't on stream."
+      "Sidekick isn't on stream."
     )
   })
 
-  it('stays quiet while an output carries the Buddy', () => {
+  it('stays quiet while an output carries the Sidekick', () => {
     expect(buddyOffOutputsNotice({ ...LIVE_AND_OFF, showOnStream: true })).toBeNull()
     expect(buddyOffOutputsNotice({ ...LIVE_AND_OFF, showInRecording: true })).toBeNull()
   })
 
-  it('stays quiet while Buddy Live is off, nothing is on air, or the relay has no Buddy', () => {
+  it('stays quiet while Sidekick Live is off, nothing is on air, or the relay has no Sidekick', () => {
     expect(buddyOffOutputsNotice({ ...LIVE_AND_OFF, enabled: false })).toBeNull()
     expect(buddyOffOutputsNotice({ ...LIVE_AND_OFF, onAir: false })).toBeNull()
     expect(buddyOffOutputsNotice({ ...LIVE_AND_OFF, showOnStream: null })).toBeNull()
@@ -47,10 +47,10 @@ describe('buddyOffOutputsNotice', () => {
   })
 })
 
-describe('buddyOffOutputsNotice and how Buddy talks (plan 211 D9)', () => {
+describe('buddyOffOutputsNotice and how Sidekick talks (plan 211 D9)', () => {
   const BUBBLE_DETAIL = "Viewers can't see its bubble, so Bubble says nothing."
 
-  it('shows in Bubble with Buddy Live off: the built-in greetings need no Buddy Live', () => {
+  it('shows in Bubble with Sidekick Live off: the built-in greetings need no Sidekick Live', () => {
     expect(buddyOffOutputsNotice({ ...LIVE_AND_OFF, enabled: false, talk: 'bubble' })).toEqual({
       title: "Golmar isn't on stream.",
       detail: BUBBLE_DETAIL,
@@ -58,11 +58,11 @@ describe('buddyOffOutputsNotice and how Buddy talks (plan 211 D9)', () => {
     })
   })
 
-  it('says the Bubble detail with Buddy Live on too', () => {
+  it('says the Bubble detail with Sidekick Live on too', () => {
     expect(buddyOffOutputsNotice({ ...LIVE_AND_OFF, talk: 'bubble' })?.detail).toBe(BUBBLE_DETAIL)
   })
 
-  it('keeps Suggest and Off as they were: only with Buddy Live on, the old detail', () => {
+  it('keeps Suggest and Off as they were: only with Sidekick Live on, the old detail', () => {
     for (const talk of ['suggest', 'off'] as const) {
       expect(buddyOffOutputsNotice({ ...LIVE_AND_OFF, talk })).toEqual({
         title: "Golmar isn't on stream.",
@@ -73,7 +73,7 @@ describe('buddyOffOutputsNotice and how Buddy talks (plan 211 D9)', () => {
     }
   })
 
-  it('stays quiet in Bubble off air, with Buddy on an output, or before the relay knows', () => {
+  it('stays quiet in Bubble off air, with Sidekick on an output, or before the relay knows', () => {
     const bubble = { ...LIVE_AND_OFF, enabled: false, talk: 'bubble' as const }
     expect(buddyOffOutputsNotice({ ...bubble, onAir: false })).toBeNull()
     expect(buddyOffOutputsNotice({ ...bubble, showOnStream: true })).toBeNull()

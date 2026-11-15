@@ -86,7 +86,7 @@ import { broadcastThumbnailHint } from '@/lib/broadcast-info'
 import { streamLanguageOptions } from '@/lib/stream-languages'
 
 /**
- * Livestream (plan 174 S1.6b, A-14): Setup, Upcoming and Guests (plan 224
+ * Destinations (plan 174 S1.6b, A-14; plan 235 D6): Setup, Upcoming and Guests (plan 224
  * D16) in a strip pinned under the toolbar, like Settings; only the view
  * under it scrolls. The view lives in the shell, so the page reopens on the
  * one used last and ⌘K can open Upcoming and Guests by name.
@@ -108,7 +108,7 @@ export function StreamingTab({
   const visibleView = view === 'guests' && !showGuests ? 'setup' : view
   return (
     <PageTabs
-      label="Livestream view"
+      label="Destinations view"
       tabs={livestreamViews(cloudStatus)}
       value={visibleView}
       onValueChange={onViewChange}
@@ -294,7 +294,7 @@ function StreamingSetup({
             ) : null}
             {isSessionActive && problems.length > 0 && !dismissed ? (
               <StreamFailureBanner
-                onAir={streamTargets.filter((runtime) => runtime.state === 'live').length}
+                onAir={destinationsOnAir(streamTargets)}
                 problems={problems}
                 onDismiss={() => setDismissedKey(problemsKey)}
                 onEndLivestream={() => void requestStopSession('failure-banner')}
@@ -449,6 +449,20 @@ const DESTINATION_PROBLEM_STATES: ReadonlySet<StreamTargetRuntime['state']> = ne
  * whole livestream (every destination and the recording), so it says so and
  * asks through the End livestream dialog (plan 174 S0.1, D-4).
  */
+/**
+ * How many destinations are on air, for the failure banner: this computer's
+ * feed to Videorc Cloud (`videorc-cloud-*`, as stream-target-notices reads
+ * it) is no destination. Here, in the lazy page, so the eager bundle keeps
+ * its bytes.
+ */
+export function destinationsOnAir(
+  targets: readonly Pick<StreamTargetRuntime, 'targetId' | 'state'>[]
+): number {
+  return targets.filter(
+    (target) => target.state === 'live' && !target.targetId.startsWith('videorc-cloud-')
+  ).length
+}
+
 export function StreamFailureBanner({
   problems,
   onAir = 0,

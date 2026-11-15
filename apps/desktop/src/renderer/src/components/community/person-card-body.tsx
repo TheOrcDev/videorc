@@ -284,7 +284,7 @@ export function PersonCardBody({
         />
       ))}
       <div className="flex flex-col gap-1.5" data-slot="person-card-memories">
-        <span className={CARD_LABEL}>Buddy remembers</span>
+        <span className={CARD_LABEL}>Sidekick remembers</span>
         {memoryLock ? (
           <div data-testid="person-card-memory-lock">{memoryLock}</div>
         ) : (person.memories ?? []).length > 0 ? (
@@ -318,7 +318,7 @@ export function PersonCardBody({
           </ul>
         ) : (
           <p className="text-xs text-muted-foreground">
-            Nothing yet. Buddy learns from what {name} says about themselves in chat.
+            Nothing yet. Sidekick learns from what {name} says about themselves in chat.
           </p>
         )}
       </div>
@@ -607,7 +607,7 @@ function NoteField({
           disabled={disabled}
           id={id}
           maxLength={NOTE_MAX_CHARS}
-          placeholder={`Only you see this. Buddy never changes it.`}
+          placeholder={`Only you see this. Sidekick never changes it.`}
           rows={2}
           value={draft}
           onBlur={save}

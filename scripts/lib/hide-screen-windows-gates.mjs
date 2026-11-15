@@ -5,6 +5,8 @@
 // (`hideSpanVerdict` in smart-scenes-gate.mjs), so both platforms are held to
 // one bar.
 
+import { SHARP_HIDDEN_MAX } from './smart-scenes-gate.mjs'
+
 /** A DXGI display id as devices.list lists it on Windows. */
 export const WINDOWS_DXGI_SCREEN_ID = /^screen:dxgi:[0-9a-f]+:\d+$/i
 
@@ -170,23 +172,126 @@ export function anchorHideFile(anchorFromFlash, features, ptsMs, flashes) {
 }
 
 /**
+ * The most a frost may read ahead of the hide press before the file's
+ * alignment, not the capture's latency, is the likelier cause (issue #1329
+ * measured 140 to 170 ms on a D3D11 Desktop Duplication session).
+ */
+export const FROST_LEAD_MAX_MS = 500
+
+/**
+ * How far ahead of the hide press the frost reads in this file's flash-aligned
+ * wall time (issue #1329). The flashes date a frame by the live content in it,
+ * which reaches the file a capture latency after it was drawn; the frost is
+ * built at the capture source from the latest frame and has no such latency.
+ * So the frost reads early by that latency less the hide's own delay, and it
+ * cannot really precede the press: a positive lead is the alignment's error,
+ * measured. The Show edge is published the same way (the held live frame goes
+ * back into the store at the press), so its live frames read early by the same
+ * amount.
+ *
+ * The frost run is the run of frosted frames around the middle of the hidden
+ * span, walked back to its first frame. `null` when the middle is not frosted
+ * (the verdict names that as a leak on its own).
+ * @returns {number|null} ms the run's first frame reads before `hideAtMs`
+ *   (negative when it lands after the press)
+ */
+export function frostLeadMs({
+  features,
+  ptsMs,
+  offsetMs,
+  hideAtMs,
+  showAtMs,
+  sharpHiddenMax = SHARP_HIDDEN_MAX
+}) {
+  const middle = (hideAtMs + showAtMs) / 2
+  const ordered = (features ?? [])
+    .filter((feature) => Number.isFinite(ptsMs[feature.index]))
+    .sort((a, b) => ptsMs[a.index] - ptsMs[b.index])
+  let at = ordered.findIndex((feature) => ptsMs[feature.index] + offsetMs >= middle)
+  if (at < 0 || !(ordered[at].sharp <= sharpHiddenMax)) return null
+  while (at > 0 && ordered[at - 1].sharp <= sharpHiddenMax) at -= 1
+  return Math.round(hideAtMs - (ptsMs[ordered[at].index] + offsetMs))
+}
+
+/**
  * The hide-span budget for a file whose picture changes `liveFps` times a
  * second. The flashes align a file only to within one capture interval (the
  * first white frame lands up to an interval after the flash was drawn), so
  * every frame's wall time can read up to one interval early. The slack
  * before Show grows to that interval; the frost must still cover every frame
  * of the span outside the edges, and `hideEdgeMs` is never shortened.
+ *
+ * With `frostLeadMs` (issue #1329), the slack also grows to the measured lead
+ * plus the hide's cover time (press to the backend's `screen.privacy.changed`,
+ * sent once the stills are in the stores; the lead took that delay off, and
+ * Show has none: the held live frame goes back at once) plus one canvas frame
+ * (the compositor samples each edge on its own tick). That bounds the
+ * un-frost against the Show press on the file's own clock, on either capture
+ * path: a frost lifted more than about two frames before Show is still a
+ * leak, whatever the capture latency.
  * @param {typeof import('./smart-scenes-gate.mjs').SMART_SCENES_BUDGET} budget
  * @param {number|null} liveFps
+ * @param {{frostLeadMs?:number|null, canvasFrameMs?:number, hideCoverMs?:number|null}} [edge]
  */
-export function captureAlignedHideBudget(budget, liveFps) {
-  if (!(liveFps > 0)) return { ...budget, captureIntervalMs: null }
-  const captureIntervalMs = Math.ceil(1000 / liveFps)
-  return {
+export function captureAlignedHideBudget(
+  budget,
+  liveFps,
+  { frostLeadMs = null, canvasFrameMs = 0, hideCoverMs = 0 } = {}
+) {
+  const captureIntervalMs = liveFps > 0 ? Math.ceil(1000 / liveFps) : null
+  const frostAlignedSlackMs =
+    frostLeadMs != null
+      ? Math.ceil(Math.max(0, frostLeadMs + canvasFrameMs + Math.max(0, hideCoverMs ?? 0)))
+      : null
+  const out = {
     ...budget,
     captureIntervalMs,
-    showSlackMs: Math.max(budget.showSlackMs, captureIntervalMs)
+    showSlackMs: Math.max(budget.showSlackMs, captureIntervalMs ?? 0, frostAlignedSlackMs ?? 0)
   }
+  if (frostLeadMs != null) out.frostLeadMs = frostLeadMs
+  return out
+}
+
+/**
+ * The session's frost lead: the largest of the legs' leads within
+ * `FROST_LEAD_MAX_MS`. The legs read one compositor, so the frost reached it
+ * no later than the earliest leg shows it; a leg that shows it later only
+ * repeated its last live frame (issue #1329's CPU-bridge stream leg). Null
+ * when no leg measured one.
+ * @param {Array<number|null|undefined>} leads
+ */
+export function sessionFrostLeadMs(leads) {
+  const usable = (leads ?? []).filter((lead) => Number.isFinite(lead) && lead <= FROST_LEAD_MAX_MS)
+  return usable.length ? Math.max(...usable) : null
+}
+
+/**
+ * How long the backend took to cover the stores after the hide press: the
+ * first `screen.privacy.changed` saying hidden at or after `hideAtMs`, which
+ * `screen.hide` emits only once its stills are published. Null when no such
+ * event arrived.
+ * @param {Array<{event:string, payload?:{hidden?:boolean}, atMs:number}>} events
+ * @param {number} hideAtMs
+ */
+export function hideCoverMs(events, hideAtMs) {
+  const changed = (events ?? []).find(
+    (entry) =>
+      entry?.event === 'screen.privacy.changed' &&
+      entry.payload?.hidden === true &&
+      entry.atMs >= hideAtMs
+  )
+  return changed ? changed.atMs - hideAtMs : null
+}
+
+/**
+ * A frost that reads more than `FROST_LEAD_MAX_MS` ahead of the hide press is
+ * not a capture latency; the file's alignment is broken, and widening the
+ * Show slack by it would hide a real early un-frost. Null when it is in range.
+ * @param {number|null} leadMs
+ */
+export function frostLeadFailure(leadMs) {
+  if (!(leadMs > FROST_LEAD_MAX_MS)) return null
+  return `the frost reads ${leadMs} ms before the hide press (> ${FROST_LEAD_MAX_MS}): the flashes misalign this file by more than a capture latency`
 }
 
 /**

@@ -297,6 +297,7 @@ export const electronInvokeApiMethods = {
   'resource:reveal-session': 'revealSession',
   'resource:reveal-background': 'revealBackgroundAsset',
   'resource:reveal-support-bundle': 'revealSupportBundle',
+  'resource:reveal-cloud-download': 'revealCloudDownload',
   'agents:bridge': 'getAgentBridge',
   'agents:add-to-app': 'addAgentToApp',
   'resource:open-session': 'openSession',
@@ -2055,6 +2056,7 @@ const specificRuntimeInvokeContracts = {
   'resource:reveal-session': invokeContract(tupleSchema([boundedIdentifier])),
   'resource:reveal-background': invokeContract(tupleSchema([boundedIdentifier])),
   'resource:reveal-support-bundle': invokeContract(tupleSchema([pathSchema])),
+  'resource:reveal-cloud-download': invokeContract(tupleSchema([boundedIdentifier])),
   // Plan 209 S7: install (Connect) or not; the bridge's absolute path and
   // whether this install has it. Never a token.
   'agents:bridge': invokeContract(
@@ -2380,7 +2382,7 @@ const specificRuntimeEventSchemas = {
     { allowUnknown: false }
   ),
   // Plan 213 J1: the Stream Manager's "Use Sign in" opens that destination
-  // in Livestream → Setup.
+  // in Destinations → Setup.
   'livestream:open-destination': objectSchema(
     { targetId: stringSchema({ minLength: 1, maxLength: 128 }) },
     { allowUnknown: false }

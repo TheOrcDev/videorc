@@ -30,7 +30,7 @@ const premium: EntitlementUiGate = { allowed: true }
 const basic: EntitlementUiGate = {
   allowed: false,
   featureId: 'live-cohost',
-  reason: 'Buddy requires Videorc Premium.',
+  reason: 'Sidekick requires Videorc Premium.',
   upgradeUrl: 'https://www.videorc.com/premium'
 }
 const petOn = (left: number, limit = 3): AiCapabilities =>
@@ -94,7 +94,7 @@ describe('buddyPetCreatorGate (plan 168 S-F5; the one gate model of plan 174 G-5
     })
     expect(buddyPetCreatorGate({ ...on, gate: basic }).gate).toEqual({
       kind: 'premium',
-      reason: 'Creating an Alive Buddy is part of Videorc Premium.',
+      reason: 'Creating an Alive Sidekick is part of Videorc Premium.',
       action: { kind: 'view-premium', url: basic.upgradeUrl }
     })
     expect(buddyPetCreatorGate({ ...on, consented: false }).gate).toEqual({
@@ -124,8 +124,8 @@ describe('buddyPetCreatorGate (plan 168 S-F5; the one gate model of plan 174 G-5
   })
 
   it('words its gates as one family; the Alert carries the action, so no line points at a tab (plan 174 G-15)', () => {
-    expect(BUDDY_PET_SIGNED_OUT).toBe('Sign in to create an Alive Buddy.')
-    expect(BUDDY_PET_CONSENT_OFF).toBe('Allow cloud AI to create an Alive Buddy.')
+    expect(BUDDY_PET_SIGNED_OUT).toBe('Sign in to create an Alive Sidekick.')
+    expect(BUDDY_PET_CONSENT_OFF).toBe('Allow cloud AI to create an Alive Sidekick.')
     expect(BUDDY_PET_NOT_AVAILABLE).toBe("Creating isn't available right now.")
   })
 })
@@ -135,7 +135,7 @@ describe('buddyPetSaveDescription (plan 174 G-6; plan 172 D10, QA 2026-10-11)', 
   const keeps = { cohost: { tick: 4, buddyLibrary: { alive: true } } } as unknown as AiCapabilities
   const linked = { name: 'Grum', libraryAvatarId: '2f1c8e4a-5b6d-4c7e-8f90-a1b2c3d4e5f6' }
 
-  it('says the moves join the account for a Buddy the streamer made, in the library, when the web keeps them', () => {
+  it('says the moves join the account for a Sidekick the streamer made, in the library, when the web keeps them', () => {
     // QA 2026-10-11: saving Ember QA's moves said "Kept on this computer."
     // while the app sent them to the account library.
     expect(buddyPetSaveDescription(linked, keeps)).toBe(
@@ -143,7 +143,7 @@ describe('buddyPetSaveDescription (plan 174 G-6; plan 172 D10, QA 2026-10-11)', 
     )
   })
 
-  it('keeps them on this computer for an official Buddy, one made only here, or a web that keeps no packs', () => {
+  it('keeps them on this computer for an official Sidekick, one made only here, or a web that keeps no packs', () => {
     expect(buddyPetSaveDescription({ name: 'Nib', libraryAvatarId: 'official:orc' }, keeps)).toBe(
       `Saved on this computer. Nib ${wears}`
     )
@@ -156,7 +156,7 @@ describe('buddyPetSaveDescription (plan 174 G-6; plan 172 D10, QA 2026-10-11)', 
       } as unknown as AiCapabilities)
     ).toBe(`Saved on this computer. Grum ${wears}`)
     expect(buddyPetSaveDescription(linked, null)).toBe(`Saved on this computer. Grum ${wears}`)
-    expect(buddyPetSaveDescription(null)).toBe(`Saved on this computer. Buddy ${wears}`)
+    expect(buddyPetSaveDescription(null)).toBe(`Saved on this computer. Sidekick ${wears}`)
   })
 })
 

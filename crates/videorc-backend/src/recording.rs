@@ -118,10 +118,10 @@ use crate::repair::{
 };
 use crate::scene::{scene_from_capture_config, validate_scene_background};
 use crate::scene_geometry::{
-    PixelRect, SceneFit, SceneMask, SignedPixelRect, background_stage_margin, camera_chroma_key,
-    camera_mask, circle_geometry, resolved_camera_transform, rounded_rect_geometry,
-    scaled_camera_box_size, scaled_camera_margin, scene_crop_from_transform, scene_source_fit,
-    scene_source_rect_pixels, scene_source_render_transform, side_by_side_widths,
+    BackgroundStage, PixelRect, SceneFit, SceneMask, SignedPixelRect, background_stage_margin,
+    camera_chroma_key, camera_mask, circle_geometry, resolved_camera_transform,
+    rounded_rect_geometry, scaled_camera_box_size, scaled_camera_margin, scene_crop_from_transform,
+    scene_source_fit, scene_source_rect_pixels, scene_source_render_transform, side_by_side_widths,
 };
 use crate::screen_capture::{
     is_windows_gdigrab_desktop_screen_id, parse_screencapturekit_display_id,
@@ -5957,8 +5957,11 @@ async fn start_session_with_timeline(
                 .iter()
                 .find(|source| source.visible && matches!(source.kind, SceneSourceKind::Camera))
                 .and_then(|source| {
-                    let transform =
-                        scene_source_render_transform(&source.transform, &source.kind, 0.0);
+                    let transform = scene_source_render_transform(
+                        &source.transform,
+                        &source.kind,
+                        BackgroundStage::NONE,
+                    );
                     // The video processor's destination rect is on-canvas
                     // only; a camera box that hangs off the canvas (plan
                     // 215 E2) keeps the D3D11 scene compositor, which clips.
@@ -8316,17 +8319,26 @@ fn hydrate_stream_key_secret_refs(state: &AppState, params: &mut StartSessionPar
     else {
         return Ok(());
     };
-    let credentials = if streaming.targets.iter().any(|target| {
+    let credentials = stream_key_account_credentials(state, streaming)?;
+    hydrate_stream_key_secret_refs_from_credentials(streaming, &credentials, secrets::get_secret)
+}
+
+/// The connected accounts an OAuth target's key comes from, read only when
+/// an enabled OAuth target names no key of its own.
+fn stream_key_account_credentials(
+    state: &AppState,
+    streaming: &StreamingSettings,
+) -> Result<Vec<PlatformAccountCredentials>> {
+    if streaming.targets.iter().any(|target| {
         target.enabled
             && target.stream_key.trim().is_empty()
             && target.auth_mode == StreamAuthMode::Oauth
             && target.stream_key_secret_ref.is_none()
     }) {
-        state.database.list_platform_account_credentials()?
+        state.database.list_platform_account_credentials()
     } else {
-        Vec::new()
-    };
-    hydrate_stream_key_secret_refs_from_credentials(streaming, &credentials, secrets::get_secret)
+        Ok(Vec::new())
+    }
 }
 
 fn hydrate_stream_key_secret_refs_from_credentials(
@@ -24987,15 +24999,16 @@ fn scene_video_filter(
     let mut canvas_label = "scene_canvas0".to_string();
     let mut layer_index = 0usize;
     // Stage inset sized by the background's visibility setting (0 = full canvas).
-    let stage_margin = background_stage_margin(background);
+    // Which sources sit on it is the compositor's rule (plan 235 D9 a).
+    let stage =
+        BackgroundStage::for_scene(scene, &params.layout, background_stage_margin(background));
 
     for source in scene.sources.iter().filter(|source| source.visible) {
         let Some(input_index) = scene_source_input_index(&source.kind, capture, input_layout)
         else {
             continue;
         };
-        let transform =
-            scene_source_render_transform(&source.transform, &source.kind, stage_margin);
+        let transform = scene_source_render_transform(&source.transform, &source.kind, stage);
         let Some(rect) = scene_source_rect_pixels(&transform, width, height) else {
             continue;
         };
@@ -27656,9 +27669,26 @@ fn cloud_hold_image(state: &AppState) -> Option<String> {
 /// hand-over, and names their platforms for the consent line. No
 /// `StreamTarget` leaves this function: the desktop opens no leg.
 pub(crate) fn cloud_talk_handover(
+    state: &AppState,
     streaming: &StreamingSettings,
 ) -> Result<(Vec<crate::cloud_show::HandoverDestination>, Vec<String>)> {
-    let targets = stream_targets_from_streaming(streaming)?;
+    let credentials = stream_key_account_credentials(state, streaming)?;
+    cloud_talk_handover_with(streaming, &credentials, secrets::get_secret)
+}
+
+/// A talk show's Go Live hands its destinations over with no local session,
+/// so the keys the renderer names only by their secret ref (it never holds a
+/// stored key) are read here, the way a session start reads them
+/// (`hydrate_stream_key_secret_refs`). On a copy: the caller's settings, which
+/// also reach the chat, never carry a key.
+fn cloud_talk_handover_with(
+    streaming: &StreamingSettings,
+    credentials: &[PlatformAccountCredentials],
+    get_secret: impl FnMut(&str) -> Result<String>,
+) -> Result<(Vec<crate::cloud_show::HandoverDestination>, Vec<String>)> {
+    let mut streaming = streaming.clone();
+    hydrate_stream_key_secret_refs_from_credentials(&mut streaming, credentials, get_secret)?;
+    let targets = stream_targets_from_streaming(&streaming)?;
     let mut platforms: Vec<String> = Vec::new();
     for target in &targets {
         let platform = crate::streaming::stream_platform_id(target.platform).to_string();
@@ -27789,7 +27819,7 @@ fn cloud_feed_target(
 /// Dev builds may trust one extra CA, so `smoke:cloud-solo` publishes to its
 /// own MediaMTX with checking on. Packaged builds never read it, like
 /// `VIDEORC_API_BASE_URL`.
-const CLOUD_FEED_CA_FILE_ENV: &str = "VIDEORC_CLOUD_FEED_CA_FILE";
+pub(crate) const CLOUD_FEED_CA_FILE_ENV: &str = "VIDEORC_CLOUD_FEED_CA_FILE";
 const CLOUD_FEED_ROOTS_FILE_NAME: &str = "cloud-feed-roots.pem";
 const PEM_CERTIFICATE_BEGIN: &[u8] = b"-----BEGIN CERTIFICATE-----";
 /// Characters FFmpeg's option dictionary, a tee slave's brackets or
@@ -27823,7 +27853,10 @@ fn cloud_feed_roots_pem(extra_ca_pem: Option<&[u8]>) -> Vec<u8> {
 }
 
 /// The dev override's CA, read in dev builds only; `None` when unset.
-fn cloud_feed_extra_ca_pem(dev_build: bool, env_value: Option<&str>) -> Result<Option<Vec<u8>>> {
+pub(crate) fn cloud_feed_extra_ca_pem(
+    dev_build: bool,
+    env_value: Option<&str>,
+) -> Result<Option<Vec<u8>>> {
     if !dev_build {
         return Ok(None);
     }
@@ -28824,6 +28857,54 @@ mod cloud_seam_tests {
         assert_eq!(
             redact_cloud_test_line("[rtmp @ 0x1] key KEYKEYKEY refused", key),
             "[rtmp @ 0x1] key •••• refused"
+        );
+    }
+
+    /// Plan 234 C4: a managed show's feed goes to LiveKit's RTMPS ingress.
+    /// `ingest_url_problem` takes that address as written, because it is
+    /// RTMPS to a DNS name (the wire contract's contradiction 9: nothing
+    /// had to change). Anything without TLS is still refused in a release
+    /// build, LiveKit's host or not, and the leg is `{serverUrl}/{streamKey}`
+    /// with the certificate checked, as for a node.
+    #[test]
+    fn a_livekit_ingress_is_accepted_as_the_feed_and_nothing_without_tls_is() {
+        use crate::cloud_show::ingest_url_problem;
+        const LIVEKIT: &str = "rtmps://videorc-abc123.rtmp.livekit.cloud/x";
+        for allowed in [
+            LIVEKIT,
+            "rtmps://videorc-abc123.rtmp.livekit.cloud:443/x",
+            "rtmps://ingress.eu.livekit.cloud/live",
+        ] {
+            assert_eq!(ingest_url_problem(allowed, false), None, "{allowed}");
+        }
+        for refused in [
+            "rtmp://videorc-abc123.rtmp.livekit.cloud/x",
+            "rtmp://videorc-abc123.rtmp.livekit.cloud:1935/x",
+            "http://videorc-abc123.rtmp.livekit.cloud/x",
+            "srt://videorc-abc123.rtmp.livekit.cloud:7885",
+            "videorc-abc123.rtmp.livekit.cloud/x",
+        ] {
+            assert!(ingest_url_problem(refused, false).is_some(), "{refused}");
+        }
+        let livekit = ShowIngest {
+            orientation: Horizontal,
+            server_url: LIVEKIT.to_string(),
+            stream_key: INGEST_KEY.to_string(),
+        };
+        let feed =
+            cloud_feed_target(&livekit, None, &roots()).expect("LiveKit's ingress is a feed");
+        assert_eq!(feed.url, format!("{LIVEKIT}/{INGEST_KEY}"));
+        assert_eq!(feed.tls_verification, Some(roots()));
+        assert!(!feed.redacted_url.contains("SECRET"));
+        assert_eq!(feed.target_id, "videorc-cloud-horizontal");
+        // Without TLS the leg is never built in a release build.
+        let plain = ShowIngest {
+            server_url: "rtmp://videorc-abc123.rtmp.livekit.cloud/x".to_string(),
+            ..livekit
+        };
+        assert_eq!(
+            cloud_feed_target(&plain, None, &roots()).is_ok(),
+            cfg!(debug_assertions)
         );
     }
 
@@ -39392,6 +39473,54 @@ mod tests {
     }
 
     #[test]
+    fn a_talk_show_go_live_reads_a_stored_key_by_its_secret_ref() {
+        // Plan 234 smoke: the renderer names a stored key by its secret ref
+        // only, and the talk show's hand-over refused it as missing.
+        let mut streaming =
+            streaming_for(&[(StreamPlatform::Twitch, "rtmp://live.twitch.tv/app", "")]);
+        let twitch = streaming
+            .targets
+            .iter_mut()
+            .find(|target| target.platform == StreamPlatform::Twitch)
+            .unwrap();
+        twitch.auth_mode = StreamAuthMode::ManualRtmp;
+        twitch.stream_key_secret_ref = Some("manual:twitch:stream-key".to_string());
+        twitch.stream_key_present = true;
+
+        let (destinations, platforms) = cloud_talk_handover_with(&streaming, &[], |secret_ref| {
+            assert_eq!(secret_ref, "manual:twitch:stream-key");
+            Ok("secret-twitch-key".to_string())
+        })
+        .unwrap();
+        assert_eq!(destinations.len(), 1);
+        assert_eq!(
+            destinations[0].url,
+            "rtmp://live.twitch.tv/app/secret-twitch-key"
+        );
+        assert_eq!(platforms, vec!["twitch".to_string()]);
+        // The caller's settings never carry the key.
+        assert!(
+            streaming
+                .targets
+                .iter()
+                .all(|target| target.stream_key.is_empty())
+        );
+
+        // A target with neither a key nor a ref is still refused by name.
+        let twitch = streaming
+            .targets
+            .iter_mut()
+            .find(|target| target.platform == StreamPlatform::Twitch)
+            .unwrap();
+        twitch.stream_key_secret_ref = None;
+        let refused = cloud_talk_handover_with(&streaming, &[], |_| {
+            panic!("no secret is read without a ref")
+        })
+        .unwrap_err();
+        assert!(format!("{refused:#}").contains("stream key is missing"));
+    }
+
+    #[test]
     fn manual_stream_targets_hydrate_key_from_target_secret_ref() {
         let mut streaming =
             streaming_for(&[(StreamPlatform::Twitch, "rtmp://live.twitch.tv/app", "")]);
@@ -49090,6 +49219,90 @@ drawbox=x=0:y=ih-ih*0.250000:w=iw:h=ih*0.250000:color=black@0:t=fill:replace=1,"
         let prominent = filter_at(40.0);
         assert!(prominent.contains("scale=60:60:force_original_aspect_ratio=decrease"));
         assert!(prominent.contains("overlay=x=20:y=20"));
+    }
+
+    /// Plan 235 D9 a: the legacy FFmpeg graph asks the compositor's stage
+    /// rule. A camera-only scene with a background puts the camera on the
+    /// stage, on both canvases; Key out background, Visibility 0 and a
+    /// Freeform scene keep it where the scene stores it.
+    #[test]
+    fn camera_only_background_stages_the_camera_in_the_recording_graph() {
+        let filter_for = |preset: LayoutPreset, keyed: bool, freeform: bool, visibility: f64| {
+            let mut params = base_params(true, false);
+            params.output.video.width = 100;
+            params.output.video.height = 100;
+            params.layout.layout_preset = preset;
+            params.layout.camera_chroma_key_enabled = keyed;
+            if freeform {
+                params.layout.arrangement_mode = crate::protocol::ArrangementMode::Freeform;
+            }
+            let mut scene = scene_with_sources(vec![scene_source(
+                "camera",
+                SceneSourceKind::Camera,
+                scene_transform(0.0, 0.0, 1.0, 1.0),
+                true,
+            )]);
+            scene.background = Some(EffectiveSceneBackground {
+                asset_id: "builtin-bg-01".to_string(),
+                managed_asset_path: "/Users/me/Application Support/Videorc/code-demo.webp"
+                    .to_string(),
+                fit: BackgroundFit::Fill,
+                scale: 100.0,
+                offset_x: 0.0,
+                offset_y: 0.0,
+                blur_px: 0.0,
+                dim_percent: 0.0,
+                saturation_percent: 100.0,
+                vignette_percent: 0.0,
+                visibility_percent: visibility,
+                live: None,
+            });
+            params.scene = Some(scene);
+            recording_video_filter(
+                &CaptureInputs {
+                    video: VideoInput::MacScreen { index: 3 },
+                    camera_index: Some(0),
+                    microphone: None,
+                },
+                &InputLayout {
+                    video_input_index: 0,
+                    camera_input_index: Some(1),
+                    screen_overlay_input_index: None,
+                    audio_inputs: Vec::new(),
+                    microphone_graph_gain: false,
+                    microphone_is_linux_pulse: false,
+                },
+                &params,
+                false,
+            )
+        };
+        // The source layer's overlay, never the background's own
+        // (`overlay=x=0:y=0:shortest=0`).
+        let staged = "overlay=x=10:y=10:format=auto";
+        let full_frame = "overlay=x=0:y=0:format=auto";
+        for preset in [LayoutPreset::CameraOnly, LayoutPreset::VerticalCameraOnly] {
+            let filter = filter_for(preset.clone(), false, false, 20.0);
+            assert!(filter.contains("movie=filename="), "{preset:?}: {filter}");
+            assert!(filter.contains(staged), "{preset:?}: {filter}");
+            assert!(!filter.contains(full_frame), "{preset:?}: {filter}");
+
+            let keyed = filter_for(preset.clone(), true, false, 20.0);
+            assert!(keyed.contains(full_frame), "{preset:?} keyed: {keyed}");
+            assert!(!keyed.contains(staged), "{preset:?} keyed: {keyed}");
+
+            let invisible = filter_for(preset.clone(), false, false, 0.0);
+            assert!(invisible.contains(full_frame), "{preset:?}: {invisible}");
+
+            let freeform = filter_for(preset.clone(), false, true, 20.0);
+            assert!(freeform.contains(full_frame), "{preset:?}: {freeform}");
+
+            // Visibility 40: a 60% stage, 20% in.
+            let prominent = filter_for(preset, false, false, 40.0);
+            assert!(
+                prominent.contains("overlay=x=20:y=20:format=auto"),
+                "{prominent}"
+            );
+        }
     }
 
     #[test]

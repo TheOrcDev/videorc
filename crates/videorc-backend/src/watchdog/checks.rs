@@ -744,7 +744,17 @@ impl Checks {
                 DestinationPhase::Failed if destination.cloud => AlertSpec::new(
                     AlertSeverity::Warning,
                     format!("{label} has been down for {}", format_clock(held)),
-                    "Videorc Cloud is retrying. Reconnect starts it over.",
+                    // Plan 234: a leg the cloud gave up on says why (the
+                    // web's fixed reasons, wire 8.5); nothing retries it.
+                    destination
+                        .message
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|message| !message.is_empty())
+                        .map_or_else(
+                            || "Videorc Cloud is retrying. Reconnect starts it over.".to_string(),
+                            str::to_string,
+                        ),
                 )
                 .source(AlertSource::Cloud)
                 .fix(AlertFix::new(
@@ -768,7 +778,7 @@ impl Checks {
                         "Videorc can't reconnect {label} without a gap on the others. Keep going, or end the livestream and go live again."
                     ),
                 )
-                .fix(AlertFix::new(FixKind::OpenLivestream, "Open Livestream")),
+                .fix(AlertFix::new(FixKind::OpenLivestream, "Open Destinations")),
                 DestinationPhase::NotReceiving => AlertSpec::new(
                     AlertSeverity::Warning,
                     format!("{label} isn't receiving your stream"),
@@ -804,7 +814,7 @@ impl Checks {
                     format!("Reconnect {}", first.destination.label),
                 )
             } else {
-                AlertFix::new(FixKind::OpenLivestream, "Open Livestream")
+                AlertFix::new(FixKind::OpenLivestream, "Open Destinations")
             };
             let spec = AlertSpec::new(
                 AlertSeverity::Critical,
@@ -1358,7 +1368,7 @@ mod tests {
         );
         assert!(alert.fixes.is_empty(), "FFmpeg is already doing the work");
 
-        // A failed direct leg: the honest copy and Open Livestream (D8).
+        // A failed direct leg: the honest copy and Open Destinations (D8).
         let legs = [
             destination("youtube", DestinationPhase::Failed, start.now, false),
             destination("twitch", DestinationPhase::Live, start.now, false),
@@ -1569,6 +1579,31 @@ mod tests {
         assert_eq!(alert.fixes[0].kind, FixKind::ReconnectDestination);
         assert_eq!(alert.fixes[0].label, "Reconnect YouTube");
         assert_eq!(alert.target_id.as_deref(), Some("youtube"));
+    }
+
+    #[test]
+    fn a_failed_cloud_leg_says_why_instead_of_retrying() {
+        // Plan 234 copy check: a leg the cloud refused or gave up on read
+        // 'Videorc Cloud is retrying' beside a toast saying it can't.
+        let mut checks = Checks::new();
+        let mut state = WatchdogState::new();
+        let start = clock();
+        let mut failed = destination("youtube", DestinationPhase::Failed, start.now, true);
+        failed.message = Some("Videorc Cloud can't carry this stream address.".to_string());
+        // Another leg on air, or the one card for every leg down opens instead.
+        let legs = [
+            failed,
+            destination("twitch", DestinationPhase::Live, start.now, true),
+        ];
+        let mut signals = live();
+        signals.destinations = &legs;
+        run(&mut checks, &mut state, start, 1, &signals);
+        let alert = state.open_alert("destination-down:youtube").unwrap();
+        assert_eq!(
+            alert.detail,
+            "Videorc Cloud can't carry this stream address."
+        );
+        assert_eq!(alert.fixes[0].kind, FixKind::ReconnectDestination);
     }
 
     #[test]

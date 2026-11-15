@@ -3639,7 +3639,13 @@ mod runtime {
                     let transform = crate::scene_geometry::scene_source_render_transform(
                         &source.transform,
                         &source.kind,
-                        stage_margin,
+                        // One rule for every path (plan 235 D9 a): the camera
+                        // of an unkeyed camera-only scene sits on the stage.
+                        crate::scene_geometry::BackgroundStage::for_scene(
+                            scene,
+                            layout,
+                            stage_margin,
+                        ),
                     );
                     let crop = scene_crop_from_transform(&transform);
                     let is_camera = source.kind == SceneSourceKind::Camera;

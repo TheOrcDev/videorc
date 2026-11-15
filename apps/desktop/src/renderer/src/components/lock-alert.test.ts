@@ -74,7 +74,7 @@ describe('LockAlert', () => {
     const alert = await render(
       h(LockAlert, {
         action: lockAlertAction({ kind: 'sign-in' }),
-        reason: 'Sign in to use Buddy.'
+        reason: 'Sign in to use Sidekick.'
       })
     )
     const button = alert.querySelector('button')!

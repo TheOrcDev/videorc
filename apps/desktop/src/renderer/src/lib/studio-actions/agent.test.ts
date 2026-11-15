@@ -163,7 +163,7 @@ describe('executeAgentIntent', () => {
     expect(live.startRecording).not.toHaveBeenCalled()
   })
 
-  it("never runs a tool outside Buddy's subset for a Buddy intent (plan 209 D15)", async () => {
+  it("never runs a tool outside Sidekick's subset for a Sidekick intent (plan 209 D15)", async () => {
     const openWindow: AgentToolExecutor = vi.fn(async () => ({ ok: true }))
     const notify: AgentToolExecutor = vi.fn(async () => ({ ok: true }))
     const switchScene: AgentToolExecutor = vi.fn(async () => ({ ok: true }))
@@ -171,7 +171,7 @@ describe('executeAgentIntent', () => {
     const buddy = (tool: string): AgentIntent => ({
       ...intent(tool),
       agentId: BUDDY_AGENT_ID,
-      agentName: 'Buddy'
+      agentName: 'Sidekick'
     })
     for (const tool of ['open_window', 'notify']) {
       await expect(executeAgentIntent(buddy(tool), studioContext(), executors)).resolves.toEqual({

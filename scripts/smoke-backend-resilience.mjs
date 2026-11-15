@@ -1,6 +1,7 @@
 // F-014 gate: a dead backend must never leave the app a zombie that reports
-// Ready. Kills the backend mid-run and asserts the Session badge flips to
-// "Videorc is reconnecting…", the supervisor restarts the process, and the badge heals
+// Ready. Kills the backend mid-run and asserts the session state (the status
+// bar's, plan 235 D1) flips to "Videorc is reconnecting…", the supervisor
+// restarts the process, and the state heals
 // back to Ready with a working socket.
 //
 // Live-feedback batch 3 (B1): the crash must also leave durable evidence —
@@ -135,9 +136,11 @@ async function waitForBadge(smoke, expected, label, budgetMs = 30_000) {
   let last = null
   while (Date.now() < deadline) {
     try {
-      // The badge carries a dedicated data hook (studio-tab.tsx). The old
-      // probe grepped main divs for a "Status" text prefix — that prefix died
-      // with the 0.9.7 session-panel declutter, so the smoke saw null forever.
+      // The session's state words carry a dedicated data hook, on the
+      // status bar since plan 235 D1 removed the Studio's Ready badge
+      // (status-bar-session.tsx). The old probe grepped main divs for a
+      // "Status" text prefix — that prefix died with the 0.9.7 session-panel
+      // declutter, so the smoke saw null forever.
       const result = await sendSmokeCommand(smoke, 'eval-js', {
         code: `
           const badge = document.querySelector('[data-videorc-session-status]');

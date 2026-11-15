@@ -34,7 +34,7 @@ pub const CHAT_NOT_RUNNING: &str = "Chat isn't running: posting needs a livestre
 pub const WAITING_FOR_YOU: &str = "Waiting for you to confirm in Videorc.";
 /// `buddy_say` while Buddy is on no output (plan 211 D12). Only this tool
 /// says it: the line would bubble on a picture nobody sees.
-pub const BUDDY_UNSEEN: &str = "Buddy isn't on the picture, so nobody would see it.";
+pub const BUDDY_UNSEEN: &str = "Sidekick isn't on the picture, so nobody would see it.";
 
 fn text_of<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
     value
@@ -387,7 +387,7 @@ pub async fn remove_chat_message(
 pub async fn buddy_say(state: &AppState, _agent: &AgentIdentity, args: Value) -> ToolOutcome {
     use crate::cohost::CohostUtteranceState;
     let Some(text) = text_of(&args, "text") else {
-        return ToolOutcome::refused("Say what Buddy should say: text.");
+        return ToolOutcome::refused("Say what Sidekick should say: text.");
     };
     let mood = match text_of(&args, "mood") {
         Some(mood) => match serde_json::from_value::<CohostUtteranceState>(json!(mood)) {
@@ -414,7 +414,7 @@ pub async fn buddy_say(state: &AppState, _agent: &AgentIdentity, args: Value) ->
         return ToolOutcome::refused(error.to_string());
     }
     ToolOutcome::ok(
-        "Buddy said it in its bubble.",
+        "Sidekick said it in its bubble.",
         Some(json!({ "bubble": true })),
     )
 }
@@ -837,7 +837,7 @@ mod tests {
         assert_eq!(outcome, ToolOutcome::refused(BUDDY_UNSEEN));
         assert_eq!(
             BUDDY_UNSEEN,
-            "Buddy isn't on the picture, so nobody would see it."
+            "Sidekick isn't on the picture, so nobody would see it."
         );
         let outcome = buddy_say(&state, &agent, json!({ "text": "hi", "mood": "shout" })).await;
         assert_eq!(
@@ -871,7 +871,7 @@ mod tests {
         )
         .await;
         assert_eq!(outcome.outcome, crate::storage::AgentActivityOutcome::Ok);
-        assert_eq!(outcome.text, "Buddy said it in its bubble.");
+        assert_eq!(outcome.text, "Sidekick said it in its bubble.");
         assert_eq!(outcome.structured, Some(json!({ "bubble": true })));
         let shown = crate::buddy_overlay::status(&state).await;
         assert_eq!(

@@ -80,7 +80,7 @@ function settings(persona: Partial<CohostSettings['persona']> = {}): CohostSetti
   return {
     persona: {
       id: 'default',
-      name: 'Buddy',
+      name: 'Sidekick',
       personality: '',
       bubbleStyle: 'speech',
       images: {},
@@ -216,7 +216,7 @@ async function openMenu(id: string): Promise<HTMLElement[]> {
   return [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')]
 }
 
-describe('BuddyLibrarySection: My Buddies (plan 170 D16)', () => {
+describe('BuddyLibrarySection: My Sidekicks (plan 170 D16)', () => {
   it('groups the official five and yours, badges the active one and uses another', async () => {
     const backend = fakeBackend()
     await render(backend.client)
@@ -313,7 +313,7 @@ describe('BuddyLibrarySection: My Buddies (plan 170 D16)', () => {
     expect(byTestId('buddy-library-error')?.textContent).toBe(message)
   })
 
-  it('an empty library says where your Buddies will show up', async () => {
+  it('an empty library says where your Sidekicks will show up', async () => {
     await render(fakeBackend(library({ mine: [] })).client)
     expect(byTestId('buddy-library-empty')?.textContent).toBe(BUDDY_LIBRARY_COPY.emptyMine)
   })
@@ -328,7 +328,7 @@ describe('BuddyLibrarySection: My Buddies (plan 170 D16)', () => {
     expect(byTestId('buddy-library-unavailable')?.textContent).toBe(BUDDY_LIBRARY_UNAVAILABLE)
   })
 
-  it('offers the Buddy picked on videorc.com with Use', async () => {
+  it('offers the Sidekick picked on videorc.com with Use', async () => {
     const backend = fakeBackend(library({ activeAvatarId: null, serverActiveAvatarId: PEBBLE }))
     await render(backend.client)
     expect(byTestId('buddy-library-picked-elsewhere')?.textContent).toContain(
@@ -387,7 +387,7 @@ describe('BuddyLibrarySection: My Buddies (plan 170 D16)', () => {
     await click(save)
     expect(byTestId('buddy-library-edit-dialog')).not.toBeNull()
     expect(byTestId('buddy-library-edit-error')?.textContent).toBe(
-      "Couldn't update your Buddy library. Videorc is reconnecting. Try again in a moment."
+      "Couldn't update your Sidekick library. Videorc is reconnecting. Try again in a moment."
     )
     expect((document.getElementById('buddy-library-name') as HTMLInputElement).value).toBe(
       ' Rocky '
@@ -449,7 +449,7 @@ describe('BuddyLibrarySection: My Buddies (plan 170 D16)', () => {
     expect(backend.calls('cohost.library.delete')).toEqual([{ avatarId: PEBBLE }])
   })
 
-  it('Make it Alive uses the Buddy first, then opens the creator once it is the Buddy', async () => {
+  it('Make it Alive uses the Sidekick first, then opens the creator once it is the Sidekick', async () => {
     const backend = fakeBackend()
     await render(backend.client)
     const items = await openMenu(PEBBLE)
@@ -463,7 +463,7 @@ describe('BuddyLibrarySection: My Buddies (plan 170 D16)', () => {
     expect(mocked.openCreator).toHaveBeenCalledWith({ reference: 'persona-idle' })
   })
 
-  it('says Alive on Buddies that move, and keeps Make it Alive for the rest (plan 172 D12)', async () => {
+  it('says Alive on Sidekicks that move, and keeps Make it Alive for the rest (plan 172 D12)', async () => {
     const PACK = '0b1e9f0e-6c8a-4c55-9a3f-3f6d2b1c4e5a'
     const states = ['bundled', 'downloaded', 'available', 'none', 'none'] as const
     await render(
@@ -534,13 +534,13 @@ describe('BuddyLibrarySection: My Buddies (plan 170 D16)', () => {
       )
     )
     await settle()
-    expect(byTestId('buddy-library-busy')?.textContent).toBe('Saving Buddy to your library.')
+    expect(byTestId('buddy-library-busy')?.textContent).toBe('Saving Sidekick to your library.')
     await act(async () => backend.emit('cohost.library.changed', library()))
     await settle()
     expect(byTestId('buddy-library-busy')).toBeNull()
   })
 
-  it('offers Save to my library for a Buddy made only here (plan 172 D10)', async () => {
+  it('offers Save to my library for a Sidekick made only here (plan 172 D10)', async () => {
     const keeps = {
       cohost: { buddyLibrary: { enabled: true, count: 2, limit: 30, alive: true } }
     } as unknown as AiCapabilities
@@ -566,7 +566,7 @@ describe('BuddyLibrarySection: My Buddies (plan 170 D16)', () => {
     expect(byTestId('buddy-library-local-only')).toBeNull()
   })
 
-  it('Make it Alive on the active Buddy opens the creator at once', async () => {
+  it('Make it Alive on the active Sidekick opens the creator at once', async () => {
     const backend = fakeBackend()
     await render(backend.client)
     const items = await openMenu(GRUM)
@@ -575,7 +575,7 @@ describe('BuddyLibrarySection: My Buddies (plan 170 D16)', () => {
     expect(mocked.openCreator).toHaveBeenCalledWith({ reference: 'persona-idle' })
   })
 
-  it('invites the untouched default Buddy into the onboarding, until dismissed', async () => {
+  it('invites the untouched default Sidekick into the onboarding, until dismissed', async () => {
     const backend = fakeBackend(library({ activeAvatarId: 'official:golem' }))
     await render(backend.client, settings({ source: 'default' }))
     expect(byTestId('buddy-library-invitation')?.textContent).toContain(
@@ -597,7 +597,7 @@ describe('BuddyLibrarySection: My Buddies (plan 170 D16)', () => {
     expect(localStorage.getItem(BUDDY_INVITATION_STORAGE_KEY)).toBe('1')
   })
 
-  it('never invites a Buddy of your own, or once dismissed on this machine', async () => {
+  it('never invites a Sidekick of your own, or once dismissed on this machine', async () => {
     await render(fakeBackend(library({ activeAvatarId: GRUM })).client, settings())
     expect(byTestId('buddy-library-invitation')).toBeNull()
     await act(async () => root.unmount())
@@ -610,7 +610,7 @@ describe('BuddyLibrarySection: My Buddies (plan 170 D16)', () => {
     expect(byTestId('buddy-library-invitation')).toBeNull()
   })
 
-  it('New Buddy opens the onboarding on step 1', async () => {
+  it('New Sidekick opens the onboarding on step 1', async () => {
     await render(fakeBackend().client)
     await click(byTestId('buddy-library-new'))
     const sheet = await vi.waitFor(() => {

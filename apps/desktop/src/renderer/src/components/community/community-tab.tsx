@@ -586,13 +586,13 @@ function CommunitySettingsSection({
       >
         <FieldGroup variant="grouped">
           <SettingsRow
-            description="Count who comes back, so chat shows regulars and Buddy can welcome them."
+            description="Count who comes back, so chat shows regulars and Sidekick can welcome them."
             label="Remember my community"
           >
             <Switch checked={settings.enabled} onCheckedChange={(enabled) => save({ enabled })} />
           </SettingsRow>
           <SettingsRow
-            description="Buddy waves and says hi to regulars in its bubble. Nothing goes to chat."
+            description="Sidekick waves and says hi to regulars in its bubble. Nothing goes to chat."
             label="Welcome regulars on stream"
           >
             <DisabledReason reason={off ? offReason : null}>
@@ -604,7 +604,7 @@ function CommunitySettingsSection({
             </DisabledReason>
           </SettingsRow>
           <SettingsRow
-            description="Put a milestone card on stream by itself. Off: you choose on Buddy's card."
+            description="Put a milestone card on stream by itself. Off: you choose on Sidekick's card."
             label="Show milestone cards automatically"
           >
             <DisabledReason reason={off ? offReason : null}>
@@ -650,7 +650,7 @@ function CommunitySettingsSection({
         </Alert>
       </PanelSection>
       <PanelSection
-        description="Buddy remembers what regulars say about themselves, and your community follows you to your other computers, encrypted so Videorc can't read it."
+        description="Sidekick remembers what regulars say about themselves, and your community follows you to your other computers, encrypted so Videorc can't read it."
         title="Premium"
         data-testid="community-premium"
       >
@@ -662,8 +662,8 @@ function CommunitySettingsSection({
         )}
         <FieldGroup variant="grouped">
           <SettingsRow
-            description="After each stream, Buddy keeps a few short facts people told chat about themselves. Never from YouTube."
-            label="Buddy remembers"
+            description="After each stream, Sidekick keeps a few short facts people told chat about themselves. Never from YouTube."
+            label="Sidekick remembers"
           >
             <DisabledReason
               reason={!premium ? BUDDY_REMEMBERS_LOCK_REASON : off ? offReason : null}
@@ -758,7 +758,7 @@ function CommunitySettingsSection({
       <ConfirmDialog
         confirmDisabled={forgetting}
         confirmLabel={forgetting ? 'Forgetting…' : 'Forget everyone'}
-        description="Videorc deletes everything it remembers about your chat on this computer: people, links, notes and Buddy's memories. Your recordings and chat history stay."
+        description="Videorc deletes everything it remembers about your chat on this computer: people, links, notes and Sidekick's memories. Your recordings and chat history stay."
         open={forgetAllOpen}
         testId="community-forget-all"
         title="Forget everyone?"

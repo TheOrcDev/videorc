@@ -51,7 +51,7 @@ const pages = [
     uses: 'function ConfigGrid'
   },
   {
-    name: 'Livestream → Setup',
+    name: 'Destinations → Setup',
     grid: LIVESTREAM_SETUP_GRID,
     file: '../components/tabs/streaming-tab.tsx',
     uses: 'LIVESTREAM_SETUP_GRID'

@@ -131,7 +131,7 @@ const CATALOG_OFFICIAL_ENTRIES: readonly BuddyOfficialEntry[] = BUDDY_OFFICIAL_C
  * Matches the backend's `check_library` / `library_error` sentence so My
  * Buddies never says the library is empty.
  */
-export const BUDDY_LIBRARY_UNAVAILABLE = 'The Buddy library is not available right now.'
+export const BUDDY_LIBRARY_UNAVAILABLE = 'The Sidekick library is not available right now.'
 
 /**
  * The line a pack or import job shows while it runs (plan 172): whose moves
@@ -153,7 +153,7 @@ export function buddyLibraryBusyLine(
       null
     )
   }
-  const name = nameOf(busy.avatarId) ?? personaName ?? 'Buddy'
+  const name = nameOf(busy.avatarId) ?? personaName ?? 'Sidekick'
   switch (busy.kind) {
     case 'alive-download':
       return buddyLibraryAliveDownloading(name)
@@ -188,7 +188,7 @@ export function buddyLibrarySaveOffer({
   if (library.activeAvatarId !== null || persona.libraryAvatarId) return null
   if (!persona.images.idle) return null
   if (capabilities?.cohost?.buddyLibrary?.alive !== true) return null
-  return { name: persona.name.trim() || 'Buddy' }
+  return { name: persona.name.trim() || 'Sidekick' }
 }
 
 /**

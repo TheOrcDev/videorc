@@ -28,8 +28,8 @@ export function showXBroadcastProblem(
   if (step === 'chat') {
     toast.warning(`X chat isn't connected for ${target.label}`, {
       id: `x-chat:${target.id}`,
-      description: 'Your stream is fine. Check X in Livestream.',
-      action: { label: 'Open Livestream', onClick: () => openWorkspaceTab('live') }
+      description: 'Your stream is fine. Check X in Destinations.',
+      action: { label: 'Open Destinations', onClick: () => openWorkspaceTab('live') }
     })
     return
   }
@@ -69,7 +69,7 @@ export function showBrowserApproval(title: string, authUrl: string): void {
 
 /**
  * A chat connector waits on the Videorc sign-in (plan 215 A3). The toast
- * names the account, never X: X is fine, and "Open Livestream" would show it
+ * names the account, never X: X is fine, and "Open Destinations" would show it
  * healthy. Sign in is the fix, and it attaches chat without a restart (A4).
  * One id per platform, so X and Kick each say it once and a repeat replaces.
  */

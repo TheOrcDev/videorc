@@ -473,7 +473,7 @@ export function ChatPane({
             }
           >
             {questionMessageIds.size > 0 || filter.questions ? (
-              <ShortcutTooltip label="Messages behind Buddy's open questions">
+              <ShortcutTooltip label="Messages behind Sidekick's open questions">
                 <ToggleGroupItem className="text-xs" value="questions">
                   Questions
                 </ToggleGroupItem>
@@ -1008,7 +1008,7 @@ export function Composer({
     }
     if (command.kind === 'help') {
       setNotice(
-        `/hide hides your screen and /show shows it again. /marker [title] saves a point on this recording or livestream. /clip saves the last ${clipSeconds(clipContext)} as a clip, and /clip 60 the last ${clipSeconds(clipContext, true)}.${onBanner ? ' /banner [name] shows or hides a banner, and /banner off hides them all.' : ''}${onSound ? ' /sound [name] plays a sound, and /sound stop stops them all.' : ''}${onBuddy ? ' /buddy [words] asks Buddy to do something, like /buddy switch to BRB.' : ''}${commandSummary?.commands.length ? " !name posts that chat command's reply to every chat, and !!name sends it as typed." : ''} // sends a literal slash to chat. Markers are in Library → Session actions → Markers.`
+        `/hide hides your screen and /show shows it again. /marker [title] saves a point on this recording or livestream. /clip saves the last ${clipSeconds(clipContext)} as a clip, and /clip 60 the last ${clipSeconds(clipContext, true)}.${onBanner ? ' /banner [name] shows or hides a banner, and /banner off hides them all.' : ''}${onSound ? ' /sound [name] plays a sound, and /sound stop stops them all.' : ''}${onBuddy ? ' /sidekick [words] asks Sidekick to do something, like /sidekick switch to BRB.' : ''}${commandSummary?.commands.length ? " !name posts that chat command's reply to every chat, and !!name sends it as typed." : ''} // sends a literal slash to chat. Markers are in Library → Session actions → Markers.`
       )
       return
     }
@@ -1166,7 +1166,7 @@ export function Composer({
                 {command.kind === 'marker'
                   ? 'Local · current session'
                   : command.kind === 'buddy'
-                    ? 'Buddy'
+                    ? 'Sidekick'
                     : command.kind === 'chatCommand'
                       ? 'All chats'
                       : 'Local'}
@@ -1340,7 +1340,7 @@ export function Composer({
         (markerContext.voice?.state === 'starting' || markerContext.voice?.message) ? (
           <p className="mt-1 text-[11px] text-muted-foreground" data-slot="marker-voice-status">
             {markerContext.voice?.state === 'starting'
-              ? 'Buddy is connecting to hear marker commands…'
+              ? 'Sidekick is connecting to hear marker commands…'
               : markerContext.voice?.message}
           </p>
         ) : null}
@@ -1376,7 +1376,7 @@ export function Composer({
         ) : null}
         {replyToQuestionId ? (
           <p className="mt-1 text-[11px] text-muted-foreground">
-            Buddy&apos;s draft. <ShortcutKeys accelerator="Enter" variant="text" /> sends it.
+            Sidekick&apos;s draft. <ShortcutKeys accelerator="Enter" variant="text" /> sends it.
           </p>
         ) : null}
         {/* Only exceptions speak here (plan 057, D3): the "To:" picker names

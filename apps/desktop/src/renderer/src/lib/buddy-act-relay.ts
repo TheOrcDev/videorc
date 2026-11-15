@@ -86,7 +86,9 @@ export function startBuddyActRelay(options: BuddyActRelayOptions): () => void {
           requestId: command.requestId,
           ok: false,
           error:
-            error instanceof Error && error.message.trim() ? error.message : "Couldn't ask Buddy."
+            error instanceof Error && error.message.trim()
+              ? error.message
+              : "Couldn't ask Sidekick."
         })
       )
       .catch(() => undefined)

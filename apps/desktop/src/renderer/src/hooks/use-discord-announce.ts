@@ -26,7 +26,7 @@ export interface DiscordAnnounceState {
 }
 
 /**
- * Livestream → Setup → Discord (plan 187). The settings live in the backend
+ * Destinations → Setup → Discord (plan 187). The settings live in the backend
  * (it posts at Go Live), so the section opens its own backend client while
  * it is mounted, as the privacy and chat rows do. `discord.announce.changed`
  * keeps it current, for example when a post fails mid-stream.
@@ -63,7 +63,7 @@ export function useDiscordAnnounce(targets: readonly DiscordLinkTarget[]): Disco
       })
       .catch(() => {
         if (!disposed)
-          setError("Couldn't read the Discord settings. Reopen Livestream to try again.")
+          setError("Couldn't read the Discord settings. Reopen Destinations to try again.")
       })
     return () => {
       disposed = true

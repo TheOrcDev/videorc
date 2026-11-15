@@ -71,12 +71,12 @@ describe('the States row', () => {
     expect(buddyTestStatePlan('talk', BARE)).toMatchObject({
       pose: null,
       talking: true,
-      note: 'These moves have no talking drawings, so Buddy bobs while it talks.'
+      note: 'These moves have no talking drawings, so Sidekick bobs while it talks.'
     })
     expect(buddyTestStatePlan('laugh', BARE)).toMatchObject({
       pose: null,
       react: 'laugh',
-      note: 'These moves have no laugh drawing, so Buddy hops instead.'
+      note: 'These moves have no laugh drawing, so Sidekick hops instead.'
     })
     expect(buddyTestStatePlan('think', BARE)).toMatchObject({
       pose: null,

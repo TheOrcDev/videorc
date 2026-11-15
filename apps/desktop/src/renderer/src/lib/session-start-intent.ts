@@ -1,7 +1,7 @@
 // What a start asks for (plan 174 S3.1, B-3 and A-3). Record and Go Live are
 // explicit intents: each says whether the session writes a file and whether
 // it streams, and neither writes the saved `recordEnabled` / `streamEnabled`.
-// Those saved flags stay what the Output page and the Livestream page make
+// Those saved flags stay what the Output page and the Destinations page make
 // them: "Save local recording" is the only thing that decides whether a Go
 // Live also records, and a destination set up is what makes streaming
 // possible. Pure: no React, so it runs under the node vitest runner.

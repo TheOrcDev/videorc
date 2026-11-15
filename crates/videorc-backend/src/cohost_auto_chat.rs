@@ -1179,9 +1179,9 @@ pub(crate) enum ApproveRefusal {
 impl ApproveRefusal {
     pub(crate) fn message(self) -> &'static str {
         match self {
-            Self::Unknown => "That Buddy card is gone.",
-            Self::NotProposed => "That Buddy card was already answered.",
-            Self::Expired => "That Buddy card expired.",
+            Self::Unknown => "That Sidekick card is gone.",
+            Self::NotProposed => "That Sidekick card was already answered.",
+            Self::Expired => "That Sidekick card expired.",
         }
     }
 }
@@ -2247,7 +2247,9 @@ mod tests {
         let routed = lane.apply_greet_result(
             &bubble,
             pending,
-            Err(CohostApiError::timeout("Buddy did not answer within 3 s.")),
+            Err(CohostApiError::timeout(
+                "Sidekick did not answer within 3 s.",
+            )),
             start + Duration::from_secs(4),
             &now_iso(),
         );

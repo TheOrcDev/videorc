@@ -13,6 +13,17 @@ export function isRunnerIdentity(identity: string): boolean {
   return identity.startsWith(RUNNER_IDENTITY_PREFIX)
 }
 
+/**
+ * LiveKit's recorder (plan 234: the program page of a managed show joins
+ * the room as `EG_…`). It publishes nothing and is nobody: never listed,
+ * never counted, never sent the guests' stage message.
+ */
+export const RECORDER_IDENTITY_PREFIX = 'EG_'
+
+export function isRecorderIdentity(identity: string): boolean {
+  return identity.startsWith(RECORDER_IDENTITY_PREFIX)
+}
+
 /** What the attach path needs of a remote audio track. */
 export interface AttachableAudioTrack<Element> {
   attach(): Element

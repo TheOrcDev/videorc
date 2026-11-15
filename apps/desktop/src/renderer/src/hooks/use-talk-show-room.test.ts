@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest'
 
 import type { CloudStage } from '@/lib/backend'
-import { NO_TALK_SHOW, stageWith } from '@/hooks/use-talk-show-room'
+import { NO_TALK_SHOW, ROOM_JOIN_ERROR_ACTION, stageWith } from '@/hooks/use-talk-show-room'
+import { userErrorMessage } from '@/lib/user-error'
 
 const HOST = 'host:sh_talk'
 
@@ -59,4 +60,13 @@ describe('stageWith', () => {
     await expect(NO_TALK_SHOW.openRoom({})).resolves.toBeUndefined()
     await expect(NO_TALK_SHOW.listDisplaySources()).resolves.toEqual([])
   })
+})
+
+it('names the room once in the failed join toast', () => {
+  expect(
+    userErrorMessage(new Error('join failed'), {
+      action: ROOM_JOIN_ERROR_ACTION,
+      object: 'the room'
+    }).title
+  ).toBe("Couldn't join the room")
 })

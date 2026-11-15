@@ -53,7 +53,9 @@ export function useBuddyPets(): BuddyPets {
       setPacks(await client.requestTyped('cohost.pet.list'))
       setError(null)
     } catch (failure: unknown) {
-      setError(inlineUserError(failure, { action: 'load', object: "Buddy's packs" }, 'buddy-pets'))
+      setError(
+        inlineUserError(failure, { action: 'load', object: "Sidekick's packs" }, 'buddy-pets')
+      )
     }
   }, [client])
 

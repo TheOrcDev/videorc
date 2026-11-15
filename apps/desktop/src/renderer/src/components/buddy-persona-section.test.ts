@@ -34,7 +34,7 @@ function settings(overrides: Partial<CohostSettings['persona']> = {}): CohostSet
     removeConfirm: 'confirm',
     persona: {
       id: 'default',
-      name: 'Buddy',
+      name: 'Sidekick',
       personality: '',
       bubbleStyle: 'speech',
       images: {},
@@ -123,7 +123,7 @@ describe('buddyNameToSave (plan 164 S-A4)', () => {
 describe('BuddyPersonaSection', () => {
   it('requires a name to save, and saves a trimmed one on blur', async () => {
     await render()
-    expect(nameInput().value).toBe('Buddy')
+    expect(nameInput().value).toBe('Sidekick')
     await type(nameInput(), '   ')
     await blur(nameInput())
     expect(patchCohostSettings).not.toHaveBeenCalled()
@@ -177,7 +177,7 @@ describe('BuddyPersonaSection', () => {
     const about = document.getElementById('cohost-notes') as HTMLTextAreaElement
     expect(about.value).toBe('Keyboard: Keychron Q1.')
     expect(document.body.textContent).toContain('About you')
-    expect(document.body.textContent).not.toContain('Buddy notes')
+    expect(document.body.textContent).not.toContain('Sidekick notes')
     await type(about, 'I stream on Fridays.')
     expect(document.body.textContent).toContain('Unsaved. Click away to save.')
     await blur(about)
@@ -235,7 +235,7 @@ describe('BuddyPersonaSection', () => {
   })
 
   it('maps a failed save to user copy and never the raw path', async () => {
-    const raw = 'database error: private storage path /Users/streamer/Buddy'
+    const raw = 'database error: private storage path /Users/streamer/Sidekick'
     patchCohostSettings.mockRejectedValueOnce(Object.assign(new Error(raw), { code: 'failed' }))
     await render()
     await type(nameInput(), 'Grum')
@@ -255,7 +255,7 @@ describe('BuddyPersonaSection', () => {
     ) as HTMLButtonElement
     await act(async () => startOver.click())
     const dialog = document.querySelector('[role="alertdialog"]')
-    expect(dialog?.textContent).toContain('Start over with a new Buddy?')
+    expect(dialog?.textContent).toContain('Start over with a new Sidekick?')
     expect(removeBuddyPersona).not.toHaveBeenCalled()
     const confirm = [...dialog!.querySelectorAll('button')].find(
       (button) => button.textContent?.trim() === 'Start over'
@@ -266,7 +266,7 @@ describe('BuddyPersonaSection', () => {
       patchCohostSettings.mock.calls.at(-1) as unknown as [{ persona: CohostSettings['persona'] }]
     )[0]
     expect(saved.persona.id).not.toBe('p-1')
-    expect(saved.persona).toMatchObject({ name: 'Buddy', images: {}, source: 'default' })
+    expect(saved.persona).toMatchObject({ name: 'Sidekick', images: {}, source: 'default' })
     // Plan 172 D5 (QA 2026-10-11): the fresh Buddy is the default one, Alive
     // with the pack the app ships, as on a fresh install and as Use on the
     // official Buddy card gives; it used to come back Still while its card

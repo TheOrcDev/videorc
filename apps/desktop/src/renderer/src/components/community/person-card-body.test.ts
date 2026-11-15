@@ -95,7 +95,7 @@ async function mount(
       createElement(PersonCardBody, {
         call: call as unknown as CommunityRelayCall,
         memoryLock: options.locked
-          ? createElement('p', null, 'Buddy remembers what your regulars tell it with Premium.')
+          ? createElement('p', null, 'Sidekick remembers what your regulars tell it with Premium.')
           : null,
         target: { platform: 'twitch', authorId: 't1', name: 'Ada' }
       })
@@ -144,7 +144,7 @@ describe('the person card (plan 225 D11)', () => {
     await act(async () => forget?.click())
     expect(document.body.textContent).toContain('Forget this memory?')
     expect(document.body.textContent).toContain(
-      'Buddy stops remembering “Learning Rust” about Ada.'
+      'Sidekick stops remembering “Learning Rust” about Ada.'
     )
     expect(call).not.toHaveBeenCalledWith('cohost.community.memory.delete', expect.anything())
     const confirm = document.body.querySelector<HTMLButtonElement>(
@@ -179,10 +179,10 @@ describe('the person card (plan 225 D11)', () => {
     expect(container.querySelector('textarea')?.value).toBe('Learning Rust')
   })
 
-  it('keeps Buddy remembers on screen behind its lock, never hidden', async () => {
+  it('keeps Sidekick remembers on screen behind its lock, never hidden', async () => {
     await mount(ada, { locked: true })
     expect(container.querySelector('[data-testid="person-card-memory-lock"]')).not.toBeNull()
-    expect(text()).toContain('Buddy remembers what your regulars tell it with Premium.')
+    expect(text()).toContain('Sidekick remembers what your regulars tell it with Premium.')
   })
 
   it('waves through the bubble call and never anything that posts', async () => {

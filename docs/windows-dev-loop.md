@@ -133,6 +133,24 @@ presenter fallback during the check fails as `presenter-fell-back`. On the UHD
 620 laptop the idle Preview is the proof surface. A refused or asleep DXGI
 display is a named SKIP, and the smoke holds an awake display on.
 
+The Preview keeps presenting while overlays change (#1088). With production
+frame polling on it turns Buddy on and off at idle and under Clips, then adds,
+hides and shows a banner, and reads what main presents in each phase:
+
+```powershell
+pnpm smoke:preview-overlay-presentation   # ~1.5 min, test pattern, no grants
+```
+
+Each phase must present at least 80% of the compositor's frames, never stand
+still over 1 s, never heal, and stay on the presenter that owned the Preview at
+idle (the proof surface for the test pattern), with no D3D11 presenter
+fallback. The backend composes no program leg on Windows (the proof surface
+draws the program itself, plan 205 S9), so instead of macOS's
+`previewProgramLeg` bit the smoke reads the proof surface's drawn layers
+through `preview-surface-sample` and holds Buddy and the banner to what the
+program carries. While the D3D11 presenter owns the Preview that check is a
+named SKIP.
+
 System audio and the soundboard (#1088). Both need the capture worker beside
 the bundled FFmpeg: without `vendor/ffmpeg/windows-x64/bin/ffmpeg-capture.exe`
 FFmpeg opens the microphone itself, the session has no audio bus, and the
@@ -147,8 +165,9 @@ pnpm smoke:soundboard     # ~1.5 min: idle, on air, with System audio
 
 Both run with no microphone (the Studio's None) and play a 1 kHz tone through
 the default output (a pre-armed PowerShell `Media.SoundPlayer`), so run them
-somewhere quiet: they record what the computer plays. Toggle-on gets 30 ms of
-Windows attach latency on top of the macOS gate until #1319 is fixed.
+somewhere quiet: they record what the computer plays. Toggle-on is held to the
+macOS gate: the loopback capture waits until it has audio 50 ms past its start
+before it joins the mix (#1319).
 
 Packaged native-screen acceptance (requires `VIDEORC_PERF_APP_EXECUTABLE` plus
 the bundled FFmpeg/FFprobe paths, as configured in `.github/workflows/windows.yml`):
@@ -353,6 +372,15 @@ Full Windows merge gate (release build + package + packaged smoke; slow):
 $env:VIDEORC_ALLOW_UNSUPPORTED_WINDOWS = '1'   # only needed below Windows 11
 pnpm smoke:local-gates:windows
 ```
+
+Run it on AC power. The plan prints `[info] host power: ac|battery|unknown`
+and the manifest records `host.powerSource`; on battery it adds a warning,
+and the native-screen and native-preview smokes print the same. Battery is
+never a blocker or a waiver, but a laptop iGPU's encoder is throttled there:
+on the Intel UHD 620 laptop, Quick Sync recorded 1080p60 at about 43 fps on
+battery. On AC, the 1080p60 screen+camera step still misses the 2%
+frame-count gate in about 1 take in 8, during D3D11 media-thread stalls (#1042,
+`docs/acceptance/2026-11-14-windows-uhd620-d3d11-gates-recheck.md`).
 
 The gate writes `windows-local-gates.manifest.json` under the selected
 acceptance directory. Before each candidate-bound smoke, the parent gate hashes

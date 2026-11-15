@@ -690,6 +690,11 @@ import {
   previewProofLayerShape
 } from '../shared/native-preview-proof-geometry'
 import {
+  previewSurfaceLayerUsesBackgroundStage,
+  previewSurfaceSceneSources,
+  sceneCameraOnStage
+} from '../shared/scene-picture-geometry'
+import {
   DEFAULT_NATIVE_PREVIEW_MAX_HANDOFF_AGE_MS,
   compositorStatusMetalTargetHandoff,
   nativeCametalLayerStatusMatchesHandoff,
@@ -6140,15 +6145,14 @@ function insetTransformForBackground(
 function transformForPreviewBackground(
   transform: SceneTransform,
   sourceKind: PreviewSurfaceSceneLayerKind,
-  stageMargin: number
+  stageMargin: number,
+  cameraOnStage: boolean
 ): SceneTransform {
-  return stageMargin > 0 && previewLayerUsesBackgroundStage(sourceKind)
+  // The compositor's one stage rule (plan 235 D9 a), shared with the Scene
+  // canvas: this surface keeps no kind list of its own.
+  return stageMargin > 0 && previewSurfaceLayerUsesBackgroundStage(sourceKind, cameraOnStage)
     ? insetTransformForBackground(transform, stageMargin)
     : transform
-}
-
-function previewLayerUsesBackgroundStage(sourceKind: PreviewSurfaceSceneLayerKind): boolean {
-  return ['screen', 'window', 'screen-image', 'test-pattern'].includes(sourceKind)
 }
 
 // The poster <img> for every background; plus the live spec for a live one
@@ -6235,6 +6239,7 @@ function buildPreviewSurfaceScene(
   const backgroundStageMargin = backgroundLayer
     ? previewProofBackgroundStageMargin(params.scene?.background)
     : 0
+  const cameraOnStage = sceneCameraOnStage(params.scene?.sources, params.layout)
   const layers: PreviewSurfaceSceneLayer[] = [
     ...(backgroundLayer ? [backgroundLayer] : []),
     ...(params.scene?.sources ?? []).map((source) => ({
@@ -6244,7 +6249,8 @@ function buildPreviewSurfaceScene(
       transform: transformForPreviewBackground(
         source.transform,
         source.kind,
-        backgroundStageMargin
+        backgroundStageMargin,
+        cameraOnStage
       ),
       visible: source.visible,
       frameUrl: nativePreviewSurfaceFramePollingSuppressed
@@ -6265,7 +6271,8 @@ function buildPreviewSurfaceScene(
       transform: transformForPreviewBackground(
         fullFrameTransform(),
         'screen-image',
-        backgroundStageMargin
+        backgroundStageMargin,
+        cameraOnStage
       ),
       visible: true,
       imageUrl: fileUrlFromPath(activeScreen.imagePath),
@@ -6334,6 +6341,10 @@ function buildPreviewSurfaceSceneFromCompositorStatus(
         nativePreviewCommittedCompositorScene?.backgroundStageMargin ??
         0)
       : previewProofBackgroundStageMargin(statusBackground)
+  const cameraOnStage = sceneCameraOnStage(
+    previewSurfaceSceneSources(status.sceneSources ?? []),
+    status.sceneLayout
+  )
   const layers: PreviewSurfaceSceneLayer[] = [
     ...(backgroundLayer ? [backgroundLayer] : []),
     ...(status.sceneSources ?? []).filter(compositorSceneSourceIsPreviewLayer).map((source) => ({
@@ -6343,7 +6354,8 @@ function buildPreviewSurfaceSceneFromCompositorStatus(
       transform: transformForPreviewBackground(
         source.transform,
         source.kind,
-        backgroundStageMargin
+        backgroundStageMargin,
+        cameraOnStage
       ),
       visible: source.visible,
       frameUrl: suppressFramePolling ? undefined : compositorLayerFrameUrl(source),
@@ -11803,6 +11815,8 @@ const MAIN_BACKEND_ADMIN_METHODS = new Set([
   'resource.admin.resolve_session_path',
   'resource.admin.resolve_screen_path',
   'resource.admin.resolve_background_path',
+  // Plan 234: the Library's Show in Finder for a downloaded cloud recording.
+  'resource.admin.resolve_cloud_download_path',
   'resource.admin.preview_surface_bounds',
   'overlays.layout.migrate_highlight_anchor',
   // Plan 214 B3: the saved camera switch, and main's word on the extension.
@@ -13592,7 +13606,7 @@ async function runSmokePreviewMotionCommand(
     }
     const action = typeof params.action === 'string' ? params.action : 'inspect'
     if (action === 'pane') {
-      const pane = params.pane === 'buddy' ? 'Buddy' : 'Chat'
+      const pane = params.pane === 'buddy' ? 'Sidekick' : 'Chat'
       const point = (await run(`(() => {
         const button = Array.from(document.querySelectorAll('[role="tab"], [role="radio"], button'))
           .find((candidate) => candidate.textContent?.trim().startsWith(${jsonForInlineScript(pane)}) && candidate.getBoundingClientRect().width > 0 && (candidate.getAttribute('role') === 'tab' || candidate.closest('[data-slot="pane-tabs-narrow"]')));
@@ -16411,6 +16425,23 @@ async function revealSupportBundle(path: unknown): Promise<void> {
   shell.showItemInFolder(supportBundleRevealPath(path, health?.databasePath))
 }
 
+// Plan 234: Show in Finder for a cloud recording the Library downloaded. The
+// renderer names the download job; the backend answers the MP4 that job
+// saved, while it is still there. A renderer path is never revealed.
+async function revealCloudDownload(jobId: unknown): Promise<void> {
+  if (typeof jobId !== 'string' || !/^[0-9a-f-]{36}$/i.test(jobId)) {
+    throw new Error('Cloud download job id is invalid.')
+  }
+  const result = await requestBackendAdmin<{ path: string }>(
+    'resource.admin.resolve_cloud_download_path',
+    { jobId }
+  )
+  if (!result || typeof result.path !== 'string' || result.path.length === 0) {
+    throw new Error('The downloaded recording is no longer there.')
+  }
+  shell.showItemInFolder(result.path)
+}
+
 async function revealManagedBackground(assetId: unknown): Promise<void> {
   if (typeof assetId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(assetId)) {
     throw new Error('Managed background asset id is invalid.')
@@ -18013,6 +18044,9 @@ app.whenReady().then(async () => {
   secureIpcHandle('resource:reveal-support-bundle', (_event, path: unknown) =>
     revealSupportBundle(path)
   )
+  secureIpcHandle('resource:reveal-cloud-download', (_event, jobId: unknown) =>
+    revealCloudDownload(jobId)
+  )
   // Settings → Remote → Agents (plan 209 S7): the bridge's absolute path for
   // the config line; Connect (`install`) puts the Linux or Windows copy in
   // place (D20, review #8).
@@ -18530,7 +18564,7 @@ app.whenReady().then(async () => {
     }
   )
   // Plan 213 J1: "Use Sign in" on a stream-key X destination's chat row opens
-  // that destination in Livestream → Setup. Main shows the window; the shell
+  // that destination in Destinations → Setup. Main shows the window; the shell
   // opens the card, and drops an id that is not a saved destination.
   secureIpcHandle(
     'comments-window:open-destination',
@@ -18554,7 +18588,7 @@ app.whenReady().then(async () => {
     }
   )
   // Plan 226 S4: ⋯ Chat commands… in the Stream Manager. Main shows the main
-  // window; the shell opens Livestream → Setup and scrolls to the section.
+  // window; the shell opens Destinations → Setup and scrolls to the section.
   secureIpcHandle(
     'comments-window:open-chat-commands',
     async (event, value: unknown): Promise<boolean> => {

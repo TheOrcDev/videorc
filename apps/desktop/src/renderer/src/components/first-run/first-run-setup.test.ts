@@ -339,8 +339,8 @@ describe('FirstRunSetup', () => {
       expect(markup).toContain(`data-first-run-destination="${platform}"`)
     }
     expect(markup.match(/>Sign in…</g)).toHaveLength(4)
-    expect(markup).toContain('Using a stream key, TikTok or Instagram? Set it up in Livestream.')
-    expect(markup).toContain('>Open Livestream<')
+    expect(markup).toContain('Using a stream key, TikTok or Instagram? Set it up in Destinations.')
+    expect(markup).toContain('>Open Destinations<')
     expect(markup).toMatch(/data-first-run-primary=""[^>]*>Open Studio</)
   })
 

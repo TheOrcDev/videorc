@@ -2277,6 +2277,42 @@ export interface UsageStatsSetParams {
   enabled: boolean
 }
 
+/**
+ * `streamReport.email.get` / `.set` (plan 237): Livestream → After the stream,
+ * "Email me a report after each stream". The choice lives on the videorc.com
+ * account; the email's unsubscribe link writes the same one.
+ */
+export interface StreamReportEmailState {
+  signedIn: boolean
+  /** Where the report goes: the account's own address. */
+  email?: string
+  /** The account's choice; `null` when it could not be read (signed out,
+   * offline, or a videorc.com without the route). */
+  enabled: boolean | null
+  /** `VIDEORC_STREAM_REPORT_EMAIL=0` turned it off for this run. */
+  envDisabled: boolean
+}
+
+export interface StreamReportEmailSetParams {
+  enabled: boolean
+}
+
+export type StreamReportSendStatus =
+  | 'sent'
+  | 'already-sent'
+  | 'disabled'
+  | 'no-stream'
+  | 'signed-out'
+  | 'rate-limited'
+  | 'unavailable'
+  | 'failed'
+
+/** `streamReport.email.sendLast`: the latest live stream's report, now. */
+export interface StreamReportSendResult {
+  status: StreamReportSendStatus
+  email?: string
+}
+
 /** One `/dev/dri/renderD*` node as the Linux VAAPI policy saw it (Plan 052). */
 export type LinuxRenderNodeState = 'probed-ok' | 'rejected' | 'quarantined' | 'skipped'
 
@@ -5454,7 +5490,7 @@ export interface CloudFeedStatus {
   kbps?: number
 }
 
-/** The Livestream page's section: the switch resolved, the choices beside the value. */
+/** The Destinations page's section: the switch resolved, the choices beside the value. */
 export interface CloudSettingsView {
   enabled: boolean
   holdMaxSeconds: number
@@ -5534,6 +5570,84 @@ export interface CloudRoomRequest {
   name: string
   askedAt: string
   device: CloudGuestDevice
+}
+
+/**
+ * `cloud.room.overlay` (plan 234 T3): an overlay for the host's renderer to
+ * send to a managed talk show's room, where the program page draws it. Only
+ * the renderer holds the host's room connection, and the page takes
+ * overlays from nobody else. Never sent on a node show or a solo show.
+ *
+ * The event is small: `set` names the picture by `imageId`, and the bytes
+ * come from the backend's HTTP server (`/cloud/overlays/{imageId}`).
+ */
+export type CloudOverlaySlot = 'card' | 'takeover' | 'hold'
+export type CloudOverlayOrientation = 'h' | 'v'
+export interface CloudOverlayRect {
+  x: number
+  y: number
+  w: number
+  h: number
+}
+export type CloudRoomOverlayEvent =
+  | {
+      op: 'set'
+      showId: string
+      slot: CloudOverlaySlot
+      orientation: CloudOverlayOrientation
+      /** Fractions of the canvas, 0 to 1. */
+      rect: CloudOverlayRect
+      /** Whole seconds; absent on an overlay that stays until cleared. */
+      ttlSeconds?: number
+      mimeType: string
+      imageId: string
+    }
+  | {
+      op: 'clear'
+      showId: string
+      slot: CloudOverlaySlot
+      orientation: CloudOverlayOrientation
+    }
+
+/**
+ * A cloud recording as `cloud.recordings.list` answers it (plan 234 T3): the
+ * facts and no URL. `format: 'segments'` is a managed recording, which
+ * `cloud.recordings.download` makes into an MP4 on this computer; `'mp4'`
+ * (or no format) is a node recording, downloaded from videorc.com.
+ */
+export interface CloudRecordingItem {
+  id: string
+  showId: string
+  orientation: string
+  startedAt: string
+  expiresAt: string
+  seconds: number
+  bytes: number
+  format?: string
+}
+export interface CloudRecordingsList {
+  recordings: CloudRecordingItem[]
+}
+export interface CloudRecordingDownloadParams {
+  id: string
+  /** Output's "Where recordings go" as the capability main issued (the
+   * renderer's way); the default folder when absent. */
+  outputDirectoryCapability?: string
+  /** A raw folder: the admin role only (the smokes); refused from the renderer. */
+  outputDirectory?: string
+  ffmpegPath?: string
+}
+export interface CloudRecordingDownload {
+  jobId: string
+}
+export interface CloudRecordingDownloadEvent {
+  jobId: string
+  recordingId: string
+  state: 'running' | 'done' | 'failed' | 'cancelled'
+  doneSegments?: number
+  totalSegments?: number
+  path?: string
+  error?: string
 }
 
 /** A guest the host let in, as videorc.com lists them. */
@@ -6297,7 +6411,7 @@ export interface VideorcApi {
    * Buddy page on that tab through `buddy:deep-link`. Resolves once sent. */
   openBuddyTabFromCommentsWindow: (command: OpenBuddyTabCommand) => Promise<boolean>
   /** "Use Sign in" on a stream-key X destination's chat row (plan 213 J1):
-   * main shows the main window and opens that destination in Livestream →
+   * main shows the main window and opens that destination in Destinations →
    * Setup through `livestream:open-destination`. Resolves once sent. */
   openDestinationFromCommentsWindow: (command: OpenDestinationCommand) => Promise<boolean>
   /** "Sign in to Videorc" on a chat row that waits on it (plan 215 A3): main
@@ -6484,6 +6598,9 @@ export interface VideorcApi {
   /** Shows an exported support bundle in Finder or Explorer (plan 174 S3.18).
    * Main reveals only a bundle file inside the backend's export folder. */
   revealSupportBundle: (path: string) => Promise<void>
+  /** Plan 234: Show in Finder for a cloud recording the Library downloaded,
+   * by its download job. Main reveals only the MP4 that job saved. */
+  revealCloudDownload: (jobId: string) => Promise<void>
   /** Plan 209 S7: where `videorc-mcp` lives, for Settings → Remote → Agents'
    * config lines. `install` (Connect) puts the Linux copy in place (D20). */
   getAgentBridge: (install: boolean) => Promise<AgentBridgeInfo>
@@ -6529,7 +6646,7 @@ export interface VideorcApi {
   ) => () => void
   /**
    * Plan 213 J1: the Stream Manager asked to open a destination's connection.
-   * Main has shown the window; the shell opens Livestream → Setup on it.
+   * Main has shown the window; the shell opens Destinations → Setup on it.
    */
   onOpenDestination: (callback: (navigation: { targetId: string }) => void) => () => void
   /**
@@ -9409,7 +9526,7 @@ export interface FollowerGain {
 /**
  * `youtube.quota` event (plan 094): the shared YouTube Data API quota breaker.
  * `pausedUntil` is present (RFC 3339) while every YouTube call is paused and
- * absent, never null, once they may resume. One state for the Livestream page,
+ * absent, never null, once they may resume. One state for the Destinations page,
  * the Stream Manager and the Comments destination status.
  */
 export interface YouTubeQuotaStatus {

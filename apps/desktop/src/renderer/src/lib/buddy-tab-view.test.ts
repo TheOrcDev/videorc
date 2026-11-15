@@ -34,7 +34,7 @@ const premium: EntitlementUiGate = { allowed: true }
 const basic: EntitlementUiGate = {
   allowed: false,
   featureId: 'live-cohost',
-  reason: 'Buddy requires Videorc Premium.',
+  reason: 'Sidekick requires Videorc Premium.',
   upgradeUrl: 'https://www.videorc.com/premium'
 }
 
@@ -65,13 +65,13 @@ function input(overrides: Partial<BuddyLiveViewInput> = {}): BuddyLiveViewInput 
   }
 }
 
-describe('Buddy tab copy (plan 119 S2)', () => {
-  it('names what Buddy does, each with the tab that holds its settings (plan 150)', () => {
+describe('Sidekick tab copy (plan 119 S2)', () => {
+  it('names what Sidekick does, each with the tab that holds its settings (plan 150)', () => {
     expect(BUDDY_LIVE_POWERS.map((power) => [power.title, power.tab])).toEqual([
       ['Never miss a question', 'chat'],
       ['Chat stays safe', 'chat'],
       ['The room, handled', 'chat'],
-      ['Talk to Buddy', 'voice']
+      ['Talk to Sidekick', 'voice']
     ])
   })
 
@@ -94,15 +94,15 @@ describe('Buddy tab copy (plan 119 S2)', () => {
 
   it('names every cloud use and what is kept, the one list consent shows', () => {
     expect(CLOUD_AI_USES).toEqual([
-      "Buddy reads your live chat with Videorc's cloud AI.",
-      "Buddy hears you while you're live: your microphone audio goes to Videorc's cloud speech-to-text and comes back as text.",
+      "Sidekick reads your live chat with Videorc's cloud AI.",
+      "Sidekick hears you while you're live: your microphone audio goes to Videorc's cloud speech-to-text and comes back as text.",
       // Plan 170 D17: created Buddies live in the account; the inspiration picture is not kept.
-      "Creating a Buddy: your description and any picture you add go to Videorc's cloud AI, and the picture is used once and not kept. The Buddies you create (their pictures, name, personality and About you) are kept in your Videorc account so you can use them on any computer, until you delete them or your account.",
+      "Creating a Sidekick: your description and any picture you add go to Videorc's cloud AI, and the picture is used once and not kept. The Sidekicks you create (their pictures, name, personality and About you) are kept in your Videorc account so you can use them on any computer, until you delete them or your account.",
       // Plan 172 D10 (plan 174 G-6): a library Buddy's moves join the account.
-      "Creating an Alive Buddy: your reference picture and its description go to Videorc's cloud AI. Its moves are kept on this computer and, for a Buddy you made that's in your library, in your Videorc account too, so it moves on any computer, until you remove them or delete the Buddy or your account.",
+      "Creating an Alive Sidekick: your reference picture and its description go to Videorc's cloud AI. Its moves are kept on this computer and, for a Sidekick you made that's in your library, in your Videorc account too, so it moves on any computer, until you remove them or delete the Sidekick or your account.",
       // Plan 192 D3: AI greetings are drafted by the cloud AI too; plan 211
       // D2: they are said in the bubble, and posted only by a Suggest click.
-      "Buddy talks on stream: with Answers, Banter or AI greetings on, its messages are drafted by Videorc's cloud AI. It says them in its bubble, and posts one on your own account only when you click its card in Suggest.",
+      "Sidekick talks on stream: with Answers, Banter or AI greetings on, its messages are drafted by Videorc's cloud AI. It says them in its bubble, and posts one on your own account only when you click its card in Suggest.",
       "Clean cut uploads a recording's audio, never the video, in short chunks for a word-by-word transcript, and sends its sentences to Videorc's cloud AI to find retakes. Neither is kept on Videorc servers after the job finishes."
     ])
     expect(CLOUD_AI_KEEPS).toContain("Videorc servers don't keep your chat or your audio.")
@@ -116,10 +116,10 @@ describe('Buddy tab copy (plan 119 S2)', () => {
     expect([uses.lead, ...uses.others].sort()).toEqual([...CLOUD_AI_USES].sort())
   })
 
-  it('never says Buddy acts on its own while Auto posts (plan 174 F-19)', () => {
+  it('never says Sidekick acts on its own while Auto posts (plan 174 F-19)', () => {
     for (const power of BUDDY_LIVE_POWERS) expect(power.description).not.toMatch(/on its own/)
     expect(BUDDY_LIVE_POWERS.find((power) => power.title === 'Chat stays safe')?.description).toBe(
-      'Spam, scams and abuse are flagged against your own rules. Buddy removes a comment only when you tell it to.'
+      'Spam, scams and abuse are flagged against your own rules. Sidekick removes a comment only when you tell it to.'
     )
   })
 
@@ -130,7 +130,7 @@ describe('Buddy tab copy (plan 119 S2)', () => {
 })
 
 describe('buddyLiveSettingsPatch', () => {
-  it('turns Buddy on and off without touching listening (plan 174 S3.14a, D7)', () => {
+  it('turns Sidekick on and off without touching listening (plan 174 S3.14a, D7)', () => {
     expect(buddyLiveSettingsPatch(true)).toEqual({ enabled: true })
     expect(buddyLiveSettingsPatch(false)).toEqual({ enabled: false })
   })
@@ -148,7 +148,7 @@ describe('buddyLiveUnlock', () => {
   it('offers Premium to a signed-in Basic account, in the one Premium sentence', () => {
     expect(buddyLiveUnlock(true, basic)).toEqual({
       action: { kind: 'view-premium', url: 'https://www.videorc.com/premium' },
-      reason: 'Buddy Live is part of Videorc Premium.'
+      reason: 'Sidekick Live is part of Videorc Premium.'
     })
   })
 
@@ -256,7 +256,7 @@ describe('buddyLiveView', () => {
     ).toBe('Stopped')
   })
 
-  it('needs attention when cloud AI was revoked with Buddy still on', () => {
+  it('needs attention when cloud AI was revoked with Sidekick still on', () => {
     const view = buddyLiveView(input({ consented: false, live: true, state: engine() }))
     expect(view.status).toMatchObject({ kind: 'attention', reason: BUDDY_CONSENT_OFF_REASON })
     // The switch still shows the stored choice; turning it off stays possible.
@@ -305,21 +305,21 @@ describe('Voice commands (plan 140, S6 part A)', () => {
     ])
     const phrases = BUDDY_VOICE_COMMANDS.flatMap((command) => command.phrases)
     for (const phrase of [
-      'Buddy, show up',
-      'Buddy, go away',
-      'Buddy, highlight the comment from coders X',
-      'Buddy, put this one up',
-      'Buddy, take it down',
-      'Buddy, remove it from the screen',
+      'Sidekick, show up',
+      'Sidekick, go away',
+      'Sidekick, highlight the comment from coders X',
+      'Sidekick, put this one up',
+      'Sidekick, take it down',
+      'Sidekick, remove it from the screen',
       'This one is toxic. Remove it from our chat.',
-      'Buddy, delete the comment from coders X',
+      'Sidekick, delete the comment from coders X',
       'Yes',
       'Never mind',
       // Plan 186 S11: banner commands, as cohost_command.rs parses them.
-      'Buddy, show the sponsor banner',
-      'Buddy, hide the banners',
+      'Sidekick, show the sponsor banner',
+      'Sidekick, hide the banners',
       // Plan 174 F-16: the marker command, as marker_voice.rs parses it.
-      'Buddy, make a marker here for the Q&A'
+      'Sidekick, make a marker here for the Q&A'
     ]) {
       expect(phrases).toContain(phrase)
     }
@@ -327,11 +327,14 @@ describe('Voice commands (plan 140, S6 part A)', () => {
     expect(buddyVoicePhrasesLabel(['Yes', 'Do it'])).toBe('“Yes”, “Do it”')
   })
 
-  it("says that Buddy's own name starts a command too (plan 174 F-16)", () => {
-    expect(buddyWakeWordsLine('Grum')).toBe("Start with “Buddy” or your Buddy's own name, “Grum”.")
-    // The backend wakes on a word of three letters or more; "Buddy" is itself.
-    for (const name of [null, '', 'Buddy', 'buddy', 'Io']) {
-      expect(buddyWakeWordsLine(name)).toBe('Start with “Buddy”.')
+  it("says that Sidekick's own name starts a command too (plan 174 F-16)", () => {
+    expect(buddyWakeWordsLine('Grum')).toBe(
+      "Start with “Sidekick” or your Sidekick's own name, “Grum”."
+    )
+    // The backend wakes on a word of three letters or more; a name that is
+    // already a wake word (plan 236 D2), in any spelling, is itself.
+    for (const name of [null, '', 'Sidekick', 'Side kick', 'side-kick', 'buddy', 'Buddy', 'Io']) {
+      expect(buddyWakeWordsLine(name)).toBe('Start with “Sidekick”.')
     }
   })
 
@@ -339,12 +342,12 @@ describe('Voice commands (plan 140, S6 part A)', () => {
     // Plan 164 D4 replaced "never acts on its own" with the per-mode promise;
     // plan 211 D6 makes it true by structure: nothing automatic reaches chat.
     expect(COHOST_ACTS_ON_ASK_COPY).toBe(
-      'Buddy never posts in your chat on its own. It removes a comment only when you tell it to.'
+      'Sidekick never posts in your chat on its own. It removes a comment only when you tell it to.'
     )
     expect(BUDDY_REMOVAL_LIMITS).toContain('20 seconds')
     expect(BUDDY_REMOVAL_LIMITS).toContain('At most 10 removals a minute.')
     expect(BUDDY_REMOVAL_FALLBACK).toBe(
-      "If the platform can't remove it, Buddy hides it in Videorc and tells you viewers may still see it."
+      "If the platform can't remove it, Sidekick hides it in Videorc and tells you viewers may still see it."
     )
     expect(BUDDY_VOICE_PREMIUM).toContain('Voice commands are part of Videorc Premium.')
     expect(BUDDY_VOICE_PREMIUM).toContain('free for everyone')
@@ -389,12 +392,18 @@ describe('Voice commands (plan 140, S6 part A)', () => {
     ).toEqual([
       ['youtube', true, 'Ready', 'Ready', undefined],
       ['twitch', true, 'Ready', 'Ready', undefined],
-      ['kick', false, 'Needs access', 'Reconnect Kick to let Buddy remove messages.', 'Reconnect'],
+      [
+        'kick',
+        false,
+        'Needs access',
+        'Reconnect Kick to let Sidekick remove messages.',
+        'Reconnect'
+      ],
       [
         'x',
         false,
         'Needs access',
-        'Authorize X Live to let Buddy remove messages.',
+        'Authorize X Live to let Sidekick remove messages.',
         'Authorize X Live'
       ]
     ])

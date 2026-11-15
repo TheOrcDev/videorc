@@ -9,7 +9,7 @@ import { cn } from '@/lib/utils'
  *
  *   Stage        the Studio: the preview pane leads. Bespoke.
  *   Bench        Scene: a flush stage pane beside the inspector. Bespoke.
- *   Config grid  Sources, Livestream, Output, Settings: flush sections in
+ *   Config grid  Sources, Destinations, Output, Settings: flush sections in
  *                <ConfigGrid>, one column, two from 940 px of page, split
  *                by hairlines.
  *   Gallery      Assets, Screens: picture cards in <Gallery>.

@@ -104,19 +104,20 @@ const rowLabels = (markup: string): string[] =>
   )
 
 describe('Retro LCD Audio (plans 197 and 201)', () => {
-  it('puts the title, the mute, the dropdown, the level and Gain on one screen', () => {
+  it('puts the mute, the dropdown, the level and Gain on one screen, under no title', () => {
     for (const meter of [
       { kind: 'value', peakDb: -12 } as const,
       { kind: 'source', source: createFrameEmitter<MeterFrame>() } as const
     ]) {
       const markup = renderAudio(meter)
       expect(screens(markup)).toBe(1)
-      // The section's h2 is Audio; the Microphone is its h3.
-      expect(markup).toMatch(/<h2[^>]*>Audio<\/h2>/)
-      expect(markup).toMatch(/<h3[^>]*>Microphone<\/h3>/)
+      // Plan 235 D3: no Audio heading; the Mixer is named Audio, and the
+      // Microphone is the screen's first heading.
+      expect(markup).not.toMatch(/>Audio<\/h/)
+      expect(markup).toContain('aria-label="Audio"')
+      expect(markup).toMatch(/<h2[^>]*>Microphone<\/h2>/)
       const order = [
         '<h2',
-        '<h3',
         'Mute microphone',
         'role="combobox"',
         'role="meter"',
@@ -172,7 +173,7 @@ describe('Retro LCD Audio (plans 197 and 201)', () => {
         markup.indexOf('data-videorc-studio-system-audio=""')
       )
     ).toBeGreaterThan(markup.indexOf('aria-label="Microphone gain"'))
-    expect(rows).toMatch(/<h3[^>]*>System audio<\/h3>/)
+    expect(rows).toMatch(/<h2[^>]*>System audio<\/h2>/)
     expect(rows).toMatch(/role="switch"[^>]*>On</)
     const order = [
       'data-videorc-studio-system-audio-level=""',
@@ -281,13 +282,18 @@ describe('Retro LCD Sources and Takeover (plan 197)', () => {
     }
   }
 
-  it('draws Sources on a screen with its title and the way home, and Captions on its own', () => {
+  it('draws Sources on a screen with the way home, and Captions on its own', () => {
     core({ screenId: 'screen:2', cameraId: 'camera:1' }, [display, camera, systemAudio])
     const markup = renderToStaticMarkup(createElement(RetroQuickSettings))
     const [sources, captions] = markup.split('data-slot="panel-section"').slice(1)
     expect(screens(sources ?? '')).toBe(1)
-    expect(sources).toMatch(/<h2[^>]*>Sources<\/h2>/)
-    expect(sources).toContain('>Open Sources</span>')
+    // Plan 235 D3 and D4: no header; the screen keeps its name, and the way
+    // home is the cog after the Camera picker.
+    expect(sources).not.toContain('<h2')
+    expect(sources).toContain('aria-label="Sources"')
+    expect(sources).not.toContain('>Open Sources</span>')
+    const cog = (sources ?? '').indexOf('aria-label="Open Sources"')
+    expect(cog).toBeGreaterThan((sources ?? '').indexOf('aria-label="Camera"'))
     // System audio is in Audio since plan 201.
     expect(rowLabels(sources ?? '')).toEqual(['Screen', 'Camera'])
     expect(sources).not.toContain('System audio')

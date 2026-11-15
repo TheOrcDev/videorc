@@ -7,17 +7,10 @@ import { QuickSettings } from '@/components/studio/quick-settings'
 import {
   RetroQuickSettings,
   RetroSessionPanel,
-  RetroSessionStatus,
   RetroSessionTransport,
   RetroTakeoverSection
 } from '@/components/studio/retro-lcd-studio'
-import { SessionMicSliver } from '@/components/studio/session-mic-sliver'
-import {
-  SessionPanel,
-  SessionStatusPill,
-  SessionTransport,
-  TakeoverSection
-} from '@/components/studio/session-panel'
+import { SessionPanel, SessionTransport, TakeoverSection } from '@/components/studio/session-panel'
 import { Alert, AlertAction, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
@@ -78,7 +71,6 @@ export function StudioTab(): ReactElement {
   // Settings → General → Retro LCD (plan 197): the inspector on LCD screens.
   const retro = studio.settings.retroLcdStudio === true
   const Transport = retro ? RetroSessionTransport : SessionTransport
-  const StatusPill = retro ? RetroSessionStatus : SessionStatusPill
   const InspectorSession = retro ? RetroSessionPanel : SessionPanel
   const { recording } = useStudioRecordingState()
   const { cloudStatus: talkStatus, talkShow } = useStudioCloud()
@@ -97,7 +89,6 @@ export function StudioTab(): ReactElement {
     requestStopSession,
     noteRecordClick,
     captureConfig,
-    wsStatus,
     sessionStartFailure,
     dismissSessionStartFailure,
     sessionRuntimeNotice,
@@ -112,7 +103,7 @@ export function StudioTab(): ReactElement {
   // Space and a second Go Live click do nothing.
   const startsBusy = shouldIgnoreGoLiveAction({ goLiveConfirmationPending, startRequestPending })
 
-  // Two-button start (plan 174 D3): Record and Go Live…, the same two starts
+  // Two-button start (plan 174 D3): Record and Go Live, the same two starts
   // ⌘K offers, so the provider owns them, and the reasons each is off come
   // from the provider's one function (S3.1). The latency clock arms on the
   // click.
@@ -170,27 +161,6 @@ export function StudioTab(): ReactElement {
     sessionStartIntent?.stream ?? captureConfig.streamEnabled
   )
 
-  // The status pill rides the inspector's transport block, so it exists in
-  // every preview mode, docked included, and the mic sliver shares its one
-  // home.
-  const sessionStatus = (
-    <span className="flex items-center gap-1.5">
-      <SessionMicSliver
-        ink={retro}
-        deviceName={studio.selectedMicrophone?.name}
-        muted={captureConfig.audio.microphoneMuted}
-        sessionActive={active}
-      />
-      {/* "Not ready" only when nothing can start (B-17): one working button
-          is a ready Studio. */}
-      <StatusPill
-        recording={recording}
-        startBlocked={Boolean(recordBlockedReason && liveStreamBlockedReason)}
-        wsStatus={wsStatus}
-      />
-    </span>
-  )
-
   // The docked preview is a native surface glued over its slot: a pinned
   // transport row would scroll under it (lib/studio-layout.ts).
   const previewDocked =
@@ -222,9 +192,10 @@ export function StudioTab(): ReactElement {
         </div>
 
         <div className={studioTransportRowClass(previewDocked)}>
-          {/* Record, Go Live…, and the clock sit at the top of the
-              inspector, right above Session (owner call, 2026-09-23); Space
-              still records. */}
+          {/* Record and Go Live sit at the top of the inspector, right
+              above Session (owner call, 2026-09-23); Space still records.
+              The state and the clock are the status bar's and the sidebar
+              Studio row's (plan 235 D1). */}
           <Transport
             active={active}
             talkShowOutputs={
@@ -250,7 +221,6 @@ export function StudioTab(): ReactElement {
             recordBlockedReason={recordBlockedReason}
             startRequestPending={startRequestPending}
             startingLivestream={sessionStartIntent?.stream === true}
-            status={sessionStatus}
             stopLabel={stopControl.label}
             stopNote={stopControl.note}
             stopOverrun={sessionStopOverrun}
@@ -492,7 +462,7 @@ function StudioPreviewPanel(): ReactElement {
  * Where the shown blocked reason is fixed (plan 174 S3.1): the reason line
  * follows the record intent first, then Go Live, so the jump does too. A
  * Record that cannot start points at what records; a Go Live that cannot
- * start points at Livestream.
+ * start points at Destinations.
  */
 function studioBlocker(studio: ReturnType<typeof useStudioCore>): {
   title?: string
@@ -524,14 +494,14 @@ function studioBlocker(studio: ReturnType<typeof useStudioCore>): {
     return {
       title: goLiveEntitlement.upgradeUrl ? 'Premium required' : 'Streaming limit reached',
       jumpTo: 'live',
-      jumpLabel: 'Open Livestream'
+      jumpLabel: 'Open Destinations'
     }
   }
   if (!areEnabledStreamTargetsStartReady(captureConfig.streaming)) {
     return {
       title: 'Finish setting up your destination',
       jumpTo: 'live',
-      jumpLabel: 'Open Livestream'
+      jumpLabel: 'Open Destinations'
     }
   }
   return null

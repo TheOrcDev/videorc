@@ -245,7 +245,7 @@ async function runPremiumScenario(profile) {
     pass('A0 named markers: no capture write, moderation card or cloud parser request')
 
     // 1. Highlight by name, one command split across two finals.
-    phase('A1: "Buddy, highlight the comment" | "from coders X."')
+    phase('A1: "Sidekick, highlight the comment" | "from coders X."')
     const highlightSince = Date.now()
     await say(events, BUDDY_COMMAND_FINALS.highlightByNameSplit)
     const highlighted = await waitForCommand(
@@ -257,7 +257,7 @@ async function runPremiumScenario(profile) {
     expect(
       highlighted.command.target?.messageId === codersNewest.id &&
         highlighted.command.target?.authorName === 'coders_x' &&
-        highlighted.command.heard === 'buddy highlight the comment from coders x',
+        highlighted.command.heard === 'sidekick highlight the comment from coders x',
       `Highlight by name picked the wrong comment: ${JSON.stringify(highlighted.command)}`
     )
     const autoHighlight = await waitForEvent(
@@ -277,7 +277,7 @@ async function runPremiumScenario(profile) {
     )
 
     // 2. Clear (before the 8 s apply timeout retires the unexecuted card).
-    phase('A2: "Buddy, clear the highlight."')
+    phase('A2: "Side kick, clear the highlight." (the wake word in two words)')
     const clearSince = Date.now()
     await say(events, BUDDY_COMMAND_FINALS.clear)
     const cleared = await waitForCommand(
@@ -298,8 +298,10 @@ async function runPremiumScenario(profile) {
     pass(`A2 clear: ${cleared.command.message}`)
 
     // Plan 225 B5: "Buddy, wave at coders X" waves at a chatter of this
-    // stream: the card says so at once, and nothing reaches chat.
-    phase('A2b: "Buddy, wave at coders X."')
+    // stream: the card says so at once, and nothing reaches chat. Plan 236
+    // D2: it says the old name, which still wakes it, hidden, for two
+    // releases; when "buddy" leaves the wake words, say "Sidekick" here.
+    phase('A2b: "Buddy, wave at coders X." (the hidden old name)')
     const waveSince = Date.now()
     const mainBeforeWave = laneMessages(events, MAIN_LANE).length
     await say(events, ['Buddy, wave at coders X.'])
@@ -320,7 +322,7 @@ async function runPremiumScenario(profile) {
       'A wave must never post to chat.'
     )
     const unknownSince = Date.now()
-    await say(events, ['Buddy, wave at nobody here.'])
+    await say(events, ['Sidekick, wave at nobody here.'])
     const nobody = await waitForCommand(
       events,
       (command) => command.kind === 'wave' && command.status === 'not-found',
@@ -410,9 +412,9 @@ async function runPremiumScenario(profile) {
     )
 
     // 4. A removal cancelled by voice.
-    phase('A4: "Buddy, delete the comment from ana dev." then "No."')
+    phase('A4: "Sidekick, delete the comment from ana dev." then "No."')
     const cancelSince = Date.now()
-    await say(events, ['Buddy, delete the comment from ana dev.'])
+    await say(events, ['Sidekick, delete the comment from ana dev.'])
     const cancelCard = await waitForCommand(
       events,
       (command) =>
@@ -448,9 +450,9 @@ async function runPremiumScenario(profile) {
     pass(`A4 cancel by voice: ${cancelled.outcome} / strip "${cancelDone.command.message}"`)
 
     // 5. Missing scope: the platform cannot delete it, Videorc hides it.
-    phase('A5: "Buddy, delete the comment from kick lurker." then "Yes." (missing scope)')
+    phase('A5: "Sidekick, delete the comment from kick lurker." then "Yes." (missing scope)')
     const hideSince = Date.now()
-    await say(events, ['Buddy, delete the comment from kick lurker.'])
+    await say(events, ['Sidekick, delete the comment from kick lurker.'])
     const hideCard = await waitForCommand(
       events,
       (command) =>
@@ -489,7 +491,7 @@ async function runPremiumScenario(profile) {
     pass(`A5 missing scope: ${hidden.outcome} / row "${hiddenRow.messageText}"`)
 
     // 6. "This one" highlight through the spotlight.
-    phase(`A6: the spotlight finds ana_dev's comment, then "Buddy, put this one up."`)
+    phase(`A6: the spotlight finds ana_dev's comment, then "Side-kick, put this one up."`)
     fakeCohost.setSpotlightMatches([
       { whenTranscriptIncludes: SPOTLIGHT_PHRASE, messageId: anaNewest.id, about: 0.95 }
     ])
@@ -528,9 +530,9 @@ async function runPremiumScenario(profile) {
     pass(`A6 "this one" via the spotlight: ${thisOne.command.message}`)
 
     // 7. Expiry: no answer in 20 s, nothing is removed.
-    phase('A7: "Buddy, remove the comment from coders X." and no answer for 20 s')
+    phase('A7: "Sidekick, remove the comment from coders X." and no answer for 20 s')
     const expirySince = Date.now()
-    await say(events, ['Buddy, remove the comment from coders X.'])
+    await say(events, ['Sidekick, remove the comment from coders X.'])
     const expiryCard = await waitForCommand(
       events,
       (command) =>
@@ -697,7 +699,7 @@ async function runRestartAndKillSwitchScenario(profile, pendingAtKill) {
     )
     await waitUntil(() => captionFake.state.audioAppends > 0, 20_000, 'caption audio')
     const quietSince = Date.now()
-    await say(events, ['Buddy, highlight the comment from coders X.'])
+    await say(events, ['Sidekick, highlight the comment from coders X.'])
     // Buddy did hear it: the words reached its spotlight lane. Only the
     // command was switched off.
     await waitUntil(

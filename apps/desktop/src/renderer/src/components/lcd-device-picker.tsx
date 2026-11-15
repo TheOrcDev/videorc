@@ -1,4 +1,4 @@
-import { useId, useRef, useState, type ReactElement } from 'react'
+import { useId, useRef, useState, type ReactElement, type ReactNode } from 'react'
 
 import {
   LCD_LIST_GROUP,
@@ -52,6 +52,8 @@ export interface LcdDevicePickerProps {
    */
   rowLabel?: string
   disabled?: boolean
+  /** A compact action after the value, at the row's end (the Camera row's cog, plan 235 D4). */
+  trailing?: ReactNode
 }
 
 export function LcdDevicePicker({
@@ -67,7 +69,8 @@ export function LcdDevicePicker({
   discoveryPending = false,
   groupByKind = false,
   rowLabel,
-  disabled = false
+  disabled = false,
+  trailing
 }: LcdDevicePickerProps): ReactElement {
   const id = useId()
   const popupId = `${id}-popup`
@@ -168,6 +171,7 @@ export function LcdDevicePicker({
           </LcdPopupScreen>
         </PopoverContent>
       </Popover>
+      {trailing}
     </LcdPanelRow>
   )
 }

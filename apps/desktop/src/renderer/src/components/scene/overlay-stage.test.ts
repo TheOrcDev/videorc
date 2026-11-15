@@ -55,7 +55,7 @@ describe('overlay stage helpers', () => {
     })
     expect(items[2]).toMatchObject({
       stageId: 'overlay:buddy',
-      label: 'Buddy',
+      label: 'Sidekick',
       badge: 'stream only',
       off: false,
       rect: {
@@ -277,7 +277,7 @@ describe('banners on the stage (plan 186)', () => {
       ['logo-color-600', 'Hidden'],
       ['Highlight', null],
       ['Captions', 'Recording only'],
-      ['Buddy', 'Stream only'],
+      ['Sidekick', 'Stream only'],
       // Plan 215 D5: the chat box ships off for both outputs.
       ['Chat', 'Off']
     ])
@@ -515,7 +515,7 @@ describe('pictures on the schematic canvas', () => {
     expect(stageItemPictureRect(sponsor!.picture!, ghost, LANDSCAPE)).toStrictEqual(ghost)
   })
 
-  it("draws the Buddy's still in its pet's square, and no picture for the empty zones", () => {
+  it("draws the Sidekick's still in its pet's square, and no picture for the empty zones", () => {
     const items = overlayStageItems(DEFAULT_OVERLAY_LAYOUT, 'horizontal', 'idle.webp')
     expect(items.map((item) => item.picture?.fit ?? null)).toEqual([null, null, 'buddy', null])
     expect(items[2]!.picture).toStrictEqual({ href: 'idle.webp', fit: 'buddy', opacity: 1 })
@@ -528,7 +528,7 @@ describe('pictures on the schematic canvas', () => {
     close(stageItemPictureRect(items[2]!.picture!, ghost, LANDSCAPE), buddyPetBox(ghost, LANDSCAPE))
   })
 
-  it("places the Buddy's pet like the backend's buddy_box", () => {
+  it("places the Sidekick's pet like the backend's buddy_box", () => {
     // Lower half: rests on the zone's bottom edge, centred, square in pixels.
     close(buddyPetBox({ x: 0.78, y: 0.6, width: 0.18, height: 0.36 }, LANDSCAPE), {
       x: 0.78,

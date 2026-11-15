@@ -11,7 +11,7 @@ describe('the milestone card (plan 225 B6)', () => {
     const layout = layoutMilestoneCard({
       name: 'Kim',
       label: '10th stream',
-      personaName: 'Buddy',
+      personaName: 'Sidekick',
       canvasWidth: 1920,
       canvasHeight: 1080,
       measure
@@ -21,7 +21,7 @@ describe('the milestone card (plan 225 B6)', () => {
     const metrics = highlightMetrics(1920, 1080)
     expect(card.name).toBe('Kim')
     expect(card.label).toBe('10th stream')
-    expect(card.footer).toBe('with Buddy')
+    expect(card.footer).toBe('with Sidekick')
     expect(card.avatarPx).toBeGreaterThan(metrics.avatarPx)
     expect(card.labelFontPx).toBeGreaterThan(metrics.textFontPx)
     expect(card.footerFontPx).toBeLessThan(metrics.textFontPx)

@@ -176,9 +176,9 @@ describe('GeneralSettings', () => {
     ]
     expect(rows.map((row) => row.textContent)).toEqual([
       'Account and PremiumSign in',
-      'Buddy, chat posting and Clean cutBuddy',
+      'Sidekick, chat posting and Clean cutSidekick',
       'Recording quality and filesOutput',
-      'Destinations and stream detailsLivestream',
+      'Destinations and stream detailsDestinations',
       'Checks and the support bundleHealth'
     ])
     for (const row of rows.slice(1)) await act(async () => row.click())

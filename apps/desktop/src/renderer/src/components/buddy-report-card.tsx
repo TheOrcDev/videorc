@@ -229,7 +229,7 @@ function ReportSwitcher({
 
 /** Plan 225 D15: why the audience summary is locked (Premium, D6). */
 export const REPORT_SUMMARY_LOCK_REASON =
-  'Buddy writes two sentences about your audience with Premium.'
+  'Sidekick writes two sentences about your audience with Premium.'
 
 type SummaryLock = { reason: string; action: Parameters<typeof LockAlert>[0]['action'] }
 
