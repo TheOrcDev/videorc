@@ -32,8 +32,10 @@ first**.
 
 "Sidekick" also wakes it when speech to text writes "side kick" or
 "side-kick", even when the two words land in two captions a moment apart.
-The old name "buddy" (and its "bodhi" transcription) still wakes it for two
-releases as a hidden alias; "body" never does, and neither do real words:
+The hidden "buddy" and "bodhi" aliases expired after 0.26.1. An avatar
+deliberately named "Buddy" still wakes it by that name, but "bodhi" is no
+longer an automatic transcription alias. "body" is never a built-in wake
+word, and neither are real words:
 "Oracle database is slow" and "orca whales" are talk. "Sidekick" only wakes
 it: "thanks sidekick" or "my sidekick is great" on its own does nothing, and
 a command still needs its phrase after the name. Anything else after a clear

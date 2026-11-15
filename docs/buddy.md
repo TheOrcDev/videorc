@@ -243,9 +243,9 @@ captions, and all of them work, as do "sidekicks" and "sidekick's" (plan
 name is your avatar's, and Sidekick is the one that listens. Your avatar's
 own name still wakes it, so a streamer who learned "Grum, put this one up"
 keeps it: each word of the name (lowercased, ASCII-folded, 3+ letters)
-works. The old name "buddy" and its "bodhi" transcription still wake it,
-hidden, for two releases (the release after 0.26.1 removes them, and a test
-fails until it does). "body" never wakes it, and
+works. The hidden "buddy" and "bodhi" aliases expired after 0.26.1. An
+avatar deliberately named "Buddy" still wakes it by that name (D3), without
+adding "bodhi" as a transcription alias. "body" is never a built-in wake word, and
 the Orcle spellings, "oracle" and "orca" are gone. The commands, with
 "Sidekick, show up" and "Sidekick, go away" for your avatar, are in
 [buddy-commands.md](buddy-commands.md).
@@ -528,8 +528,8 @@ Settings and live state:
 - The `cohost.state` event carries the live pane, plus `utterances[]`
   (oldest first, at most 20, omitted while empty) and `autoChatSends`
   (omitted while zero).
-- Wake words: `cohost_command::WAKE_WORDS` = `["sidekick", "sidekicks",
-"buddy", "bodhi"]` plus the persona's name tokens, which live in a
+- Wake words: `cohost_command::WAKE_WORDS` = `["sidekick", "sidekicks"]`
+  plus the persona's name tokens, which live in a
   process-wide slot set on every settings change. `joined_wake` turns "side
   kick" and "side-kick" into "sidekick" before anything looks for a wake
   word: inside one final, and across two finals within

@@ -297,14 +297,12 @@ async function runPremiumScenario(profile) {
     )
     pass(`A2 clear: ${cleared.command.message}`)
 
-    // Plan 225 B5: "Buddy, wave at coders X" waves at a chatter of this
-    // stream: the card says so at once, and nothing reaches chat. Plan 236
-    // D2: it says the old name, which still wakes it, hidden, for two
-    // releases; when "buddy" leaves the wake words, say "Sidekick" here.
-    phase('A2b: "Buddy, wave at coders X." (the hidden old name)')
+    // Plan 225 B5: "Sidekick, wave at coders X" waves at a chatter of this
+    // stream: the card says so at once, and nothing reaches chat.
+    phase('A2b: "Sidekick, wave at coders X."')
     const waveSince = Date.now()
     const mainBeforeWave = laneMessages(events, MAIN_LANE).length
-    await say(events, ['Buddy, wave at coders X.'])
+    await say(events, ['Sidekick, wave at coders X.'])
     const waved = await waitForCommand(
       events,
       (command) => command.kind === 'wave' && command.status === 'done',
@@ -313,7 +311,7 @@ async function runPremiumScenario(profile) {
     )
     expect(
       waved.command.message === 'Waved at coders_x.' &&
-        waved.command.heard === 'buddy wave at coders x',
+        waved.command.heard === 'sidekick wave at coders x',
       `The wave should name the chatter: ${JSON.stringify(waved.command)}`
     )
     await sleep(1_000)

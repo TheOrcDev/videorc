@@ -424,8 +424,8 @@ own word, the avatar. "Sidekick" is the word that wakes it ("Sidekick, clip
 that"); speech to text also writes "side kick" or "side-kick", and all
 three wake it. The avatar's own name still wakes it too, but copy teaches
 "Sidekick" alone. It was called Buddy until plan 236, because speech to
-text heard "Buddy" as "body"; "buddy" still wakes it, hidden, for two
-releases. Names a program reads keep `buddy` (`/api/buddy/*`,
+text heard "Buddy" as "body". The hidden "buddy" and "bodhi" wake aliases
+expired after 0.26.1; a deliberately chosen avatar name "Buddy" still works. Names a program reads keep `buddy` (`/api/buddy/*`,
 `cohost.buddy*`, `set_buddy`, the page id `ai`, saved values).
 _Avoid_: Buddy, buddy, co-host (in copy), the Sidekick, Orcle, Sidekick for
 the character on stream, "your Sidekick", "Sidekicks"

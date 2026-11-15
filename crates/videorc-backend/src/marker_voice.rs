@@ -655,15 +655,15 @@ mod tests {
     }
 
     #[test]
-    fn every_form_of_sidekick_and_the_old_names_wake_the_marker_grammar() {
+    fn every_form_of_sidekick_wakes_the_marker_grammar() {
         // Plan 236 D2: the two words, the hyphen and a chunk boundary between
-        // them are the one wake word; "buddy" stays hidden for two releases.
+        // them are the one wake word.
         for phrase in [
             "Sidekick make a marker here for Boss fight",
             "Side kick make a marker here for Boss fight",
             "Side-kick, make a marker here for Boss fight",
             "Side. Kick make a marker here for Boss fight",
-            "Buddy make a marker here for Boss fight",
+            "Sidekicks make a marker here for Boss fight",
         ] {
             assert_eq!(
                 parse_marker(phrase, 0.0, &[]).unwrap(),

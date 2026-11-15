@@ -1862,9 +1862,9 @@ mod tests {
     #[test]
     fn comments_go_only_for_a_sentence_about_one() {
         let authors = vec!["coders_x".to_string(), "Ana Dev".to_string()];
-        assert!(about_comment("buddy put that question up", &authors));
+        assert!(about_comment("sidekick put that question up", &authors));
         assert!(about_comment("show this one on stream", &authors));
-        assert!(about_comment("buddy what did ana dev say", &authors));
+        assert!(about_comment("sidekick what did ana dev say", &authors));
         assert!(about_comment(
             "highlight coders x",
             &["coders x".to_string()]
@@ -1875,7 +1875,7 @@ mod tests {
         ));
         assert!(!about_comment("end the stream", &authors));
         assert!(!about_comment("move yourself to the top left", &authors));
-        // Review fix 6: Buddy's own name, a one-word everyday or command
+        // Review fix 6: a wake name, a one-word everyday or command
         // name, or a tool word never pulls chat in.
         let viewers = vec![
             "Buddy".to_string(),
@@ -1887,14 +1887,13 @@ mod tests {
             "the".to_string(),
             "orcle".to_string(),
         ];
-        assert!(!about_comment("Buddy, stop the recording", &viewers));
+        assert!(!about_comment("Sidekick, stop the recording", &viewers));
         assert!(!about_comment(
-            "buddy move the banner to the top left",
+            "sidekick move the banner to the top left",
             &viewers
         ));
-        assert!(!about_comment("buddy switch to the brb scene", &viewers));
+        assert!(!about_comment("sidekick switch to the brb scene", &viewers));
         // Plan 236 D2: the Sidekick's names, the two-word one included.
-        assert!(!about_comment("Sidekick, stop the recording", &viewers));
         assert!(!about_comment(
             "side kick move the banner to the top left",
             &viewers
@@ -1905,11 +1904,11 @@ mod tests {
         ));
         // A real name still counts, one word or more.
         assert!(about_comment(
-            "buddy what did zelda say",
+            "sidekick what did zelda say",
             &["Zelda".to_string()]
         ));
         assert!(about_comment(
-            "buddy put stop motion up",
+            "sidekick put stop motion up",
             &["Stop Motion".to_string()]
         ));
     }
