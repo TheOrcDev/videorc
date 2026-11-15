@@ -3,7 +3,12 @@ import { act, createElement } from 'react'
 import { createRoot } from 'react-dom/client'
 import { describe, expect, it, vi } from 'vitest'
 
-import { GLOBAL_ROW_APP_KEYS, globalShortcutRows, ShortcutsSettings } from './shortcuts-settings'
+import {
+  GLOBAL_ROW_APP_KEYS,
+  globalShortcutRows,
+  sceneHudPlatform,
+  ShortcutsSettings
+} from './shortcuts-settings'
 import type { GlobalShortcutsConfig } from '@/lib/backend'
 
 const mocked = vi.hoisted(() => ({
@@ -53,7 +58,9 @@ it('renders the Scenes group in order, names conflicts, and changes or clears a 
       'Scene 1 · Figma',
       'Scene 2 · T3 Code',
       ...Array.from({ length: 7 }, (_, index) => `Scene ${index + 3} · no scene`),
-      'Figma'
+      'Figma',
+      // The key HUD's switch closes the group (plan 231 D20).
+      "Show the scene's name when a key switches it"
     ])
     expect(group.textContent).toContain('Another app uses ⌃⌥3')
     expect(container.textContent).not.toMatch(/Horizontal layouts|Vertical layouts/)
@@ -121,5 +128,58 @@ describe('GLOBAL_ROW_APP_KEYS', () => {
 
   it('claims no in-app key for actions that have none', () => {
     expect(Object.keys(GLOBAL_ROW_APP_KEYS)).toEqual(['record-toggle'])
+  })
+})
+
+describe("Show the scene's name when a key switches it (plan 231 D20)", () => {
+  it('is on by default, turns off and on, and has no switch on Linux', async () => {
+    vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
+    const container = document.createElement('div')
+    document.body.append(container)
+    const root = createRoot(container)
+    let settings: { globalShortcuts: GlobalShortcutsConfig; sceneHud?: boolean } = {
+      globalShortcuts: {}
+    }
+    mocked.core = {
+      settings,
+      setSettings: vi.fn((update: (current: typeof settings) => typeof settings) => {
+        settings = update(settings)
+      }),
+      runtimeInfo: { platform: 'darwin' },
+      deviceList: { devices: [] },
+      savedScenes: []
+    }
+    const render = () => act(async () => root.render(createElement(ShortcutsSettings)))
+    // The id is on Base UI's hidden input; the label for it names the switch.
+    const hudSwitch = () => {
+      const label = container.querySelector('label[for="scene-hud"]')
+      return label
+        ? container.querySelector<HTMLElement>(`[role="switch"][aria-labelledby="${label.id}"]`)
+        : null
+    }
+    try {
+      await render()
+      // An absent key is on: a profile from before the HUD keeps it on.
+      expect(hudSwitch()?.getAttribute('aria-checked')).toBe('true')
+      await act(async () => hudSwitch()!.click())
+      expect(settings.sceneHud).toBe(false)
+      mocked.core.settings = settings
+      await render()
+      expect(hudSwitch()?.getAttribute('aria-checked')).toBe('false')
+      mocked.core.runtimeInfo = { platform: 'linux' }
+      await render()
+      expect(hudSwitch()).toBeNull()
+    } finally {
+      await act(async () => root.unmount())
+      container.remove()
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('exists where a window can be left out of a capture', () => {
+    expect(sceneHudPlatform('darwin')).toBe(true)
+    expect(sceneHudPlatform('win32')).toBe(true)
+    expect(sceneHudPlatform('linux')).toBe(false)
+    expect(sceneHudPlatform(undefined)).toBe(false)
   })
 })

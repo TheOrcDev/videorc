@@ -68,6 +68,14 @@ export const SMOKE_COMMAND_NAMES = new Set([
   'comments-window-state',
   'comments-window-submit-message',
   'comments-window-toggle',
+  // The key HUD (plan 231 D20): its invisibility gate and screenshots, and a
+  // global key as if pressed (the T3 terminal can't post HID events).
+  'scene-hud-state',
+  'scene-hud-set-enabled',
+  'scene-hud-hold-next',
+  'scene-hud-show',
+  'scene-hud-set-smoke-marker',
+  'global-shortcut-trigger',
   'captions-window-close',
   'captions-window-open',
   'captions-window-set-bounds',

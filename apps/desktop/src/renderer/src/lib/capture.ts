@@ -88,6 +88,12 @@ export type SettingsState = {
    */
   globalShortcuts?: GlobalShortcutsConfig
   /**
+   * The key HUD (plan 231 D20): "Show the scene's name when a key switches
+   * it", in Settings → Shortcuts. On by default: an absent key is on
+   * (`sceneHudEnabled`), so a saved profile from before keeps it on.
+   */
+  sceneHud?: boolean
+  /**
    * Scene motion: layout changes glide (320ms ease) in the live output —
    * preview, stream, AND recording — instead of cutting. Default OFF while
    * the glide's interplay with idle camera restarts settles in the field.

@@ -592,6 +592,8 @@ import {
   type VideorcWindowRole,
   WINDOW_CAPTURE_PROTECTION_SMOKE_MARKERS
 } from './window-capture-protection'
+import { SceneHudController, sceneHudWindowOptions, windowsExcludesFromCapture } from './scene-hud'
+import { sceneHudRequest, type SceneHudRequest } from '../shared/scene-hud'
 import {
   COMMENTS_WINDOW_HIDDEN_FROM_STREAM_PREFERENCE_VERSION,
   commentsWindowHiddenFromStreamPreference
@@ -3180,6 +3182,8 @@ function createWindow(): void {
     if (captionsWindow && !captionsWindow.isDestroyed()) {
       captionsWindow.close()
     }
+    // The key HUD goes with the Studio; its renderer asks again on reopen.
+    sceneHud.dispose()
     mainWindow = null
   })
 
@@ -5058,6 +5062,98 @@ function emitCaptionsWindowState(message?: string): void {
         }
       }
     }
+  }
+}
+
+// The key HUD (plan 231 D20, main/scene-hud.ts): one click-through panel the
+// Studio's setting makes or drops. It is not an app window: it never counts
+// toward the app's open windows, takes no broadcast, and closes with the
+// Studio, so closing the Studio still quits off macOS.
+let sceneHudWindow: BrowserWindow | null = null
+
+function isSceneHudWindow(window: BrowserWindow): boolean {
+  return window === sceneHudWindow
+}
+
+async function createSceneHudWindow(): Promise<BrowserWindow | null> {
+  if (appIsQuitting) return null
+  const window = new BrowserWindow({
+    ...sceneHudWindowOptions(process.platform),
+    webPreferences: {
+      preload: join(__dirname, '../preload/index.js'),
+      ...rendererWindowWebPreferences('scene-hud', 'solid'),
+      backgroundThrottling: backgroundThrottlingFor('scene-hud', electronBackgroundPolicy)
+    }
+  })
+  sceneHudWindow = window
+  window.setIgnoreMouseEvents(true)
+  window.setAlwaysOnTop(true, 'screen-saver')
+  if (isMac) {
+    // skipTransformProcessType: the Notes window's lesson (the transform
+    // hides every other window of the app). Every Space, fullscreen too, so
+    // the window is on screen wherever the streamer is.
+    window.setVisibleOnAllWorkspaces(true, {
+      visibleOnFullScreen: true,
+      skipTransformProcessType: true
+    })
+    window.excludedFromShownWindowsMenu = true
+  }
+  registerRendererWindow(window, 'scene-hud')
+  window.on('closed', () => {
+    if (sceneHudWindow === window) sceneHudWindow = null
+    emitSceneHudState()
+  })
+  const rendererUrl = trustedRendererDevServerUrl(process.env.ELECTRON_RENDERER_URL, app.isPackaged)
+  try {
+    if (rendererUrl) {
+      const hudUrl = new URL('scene-hud.html', rendererUrl).toString()
+      trustRendererDocument(window, hudUrl)
+      await window.loadURL(hudUrl)
+    } else {
+      const hudPath = join(__dirname, '../renderer/scene-hud.html')
+      trustRendererDocument(window, pathToFileURL(hudPath).toString())
+      await window.loadFile(hudPath)
+    }
+  } catch (error) {
+    if (!window.isDestroyed()) window.destroy()
+    throw error
+  }
+  return window.isDestroyed() ? null : window
+}
+
+const sceneHud = new SceneHudController<BrowserWindow>({
+  platform: process.platform,
+  createWindow: createSceneHudWindow,
+  protect: (window) => {
+    const result = applyVideorcWindowCaptureProtection(window, 'scene-hud', {
+      onFailure: (reason) =>
+        safeConsole.warn(`Scene HUD content protection could not be enabled: ${reason}`)
+    })
+    return result.protected && windowsExcludesFromCapture(release()) && window.isContentProtected()
+  },
+  cursorWorkArea: () => screen.getDisplayNearestPoint(screen.getCursorScreenPoint()).workArea,
+  videorcWindowFocused: () => BrowserWindow.getFocusedWindow() !== null,
+  appIcon: async (bundleId) => (await getAppIcons([bundleId]))[bundleId],
+  present: (window, presentation) => {
+    if (!window.webContents.isDestroyed()) {
+      sendElectronEvent(window.webContents, 'scene-hud:present', presentation)
+    }
+  },
+  emitState: (state) => {
+    if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()) {
+      sendElectronEvent(mainWindow.webContents, 'scene-hud:state', state)
+    }
+  },
+  setTimeout: (callback, ms) => setTimeout(callback, ms),
+  clearTimeout: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
+  warn: (message) => safeConsole.warn(message)
+})
+
+function emitSceneHudState(): void {
+  if (appIsQuitting) return
+  const state = sceneHud.state()
+  if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()) {
+    sendElectronEvent(mainWindow.webContents, 'scene-hud:state', state)
   }
 }
 
@@ -12479,7 +12575,8 @@ function sendToWindows<TChannel extends ElectronEventChannel>(
       continue
     }
     // Plan 232: an overlay's page is not the app; nothing is sent to it.
-    if (isHtmlOverlayWindow(window)) {
+    // The key HUD (plan 231 D20) only ever takes its own presentation.
+    if (isHtmlOverlayWindow(window) || isSceneHudWindow(window)) {
       continue
     }
     if (window.isDestroyed() || window.webContents.isDestroyed()) {
@@ -13645,6 +13742,79 @@ async function runSmokePreviewMotionCommand(
   // before and during a recording, exactly as the status bar does.
   if (command === 'comments-window-set-hidden-from-stream') {
     return setCommentsWindowHiddenFromStream(params.hidden === true)
+  }
+
+  // The key HUD (plan 231 D20). Its state for the invisibility gate and the
+  // screenshots; a show through the same decision a key's request takes (the
+  // gate alone may skip the focus check, because its motion stimulus is in
+  // front); a hold for screenshots; and the gate's marker, edge to edge.
+  if (command === 'scene-hud-state') {
+    const window = sceneHudWindow
+    const alive = window !== null && !window.isDestroyed()
+    return {
+      ...sceneHud.state(),
+      lastResult: sceneHud.lastResult,
+      requests: sceneHud.requests,
+      bounds: alive ? window.getBounds() : null,
+      visible: alive ? window.isVisible() : false,
+      videorcWindowFocused: BrowserWindow.getFocusedWindow() !== null
+    }
+  }
+
+  if (command === 'scene-hud-set-enabled') {
+    return sceneHud.setEnabled(params.enabled !== false)
+  }
+
+  if (command === 'scene-hud-hold-next') {
+    sceneHud.holdNext(typeof params.ms === 'number' ? params.ms : 0)
+    return { holding: true }
+  }
+
+  if (command === 'scene-hud-show') {
+    const request = sceneHudRequest(params.request)
+    if (!request) throw new Error('Invalid scene HUD request.')
+    return sceneHud.show(request, { ignoreFocus: params.ignoreFocus === true })
+  }
+
+  if (command === 'scene-hud-set-smoke-marker') {
+    const window = sceneHudWindow
+    if (!window || window.isDestroyed()) {
+      return { ...sceneHud.state(), markerInstalled: false }
+    }
+    const current = window.getBounds()
+    window.setBounds({
+      x: typeof params.x === 'number' ? params.x : current.x,
+      y: typeof params.y === 'number' ? params.y : current.y,
+      width: typeof params.width === 'number' ? params.width : current.width,
+      height: typeof params.height === 'number' ? params.height : current.height
+    })
+    // One above the motion stimulus's NSPanel, so a missed exclusion shows.
+    window.setAlwaysOnTop(true, 'screen-saver', 1)
+    window.showInactive()
+    window.moveTop()
+    const color =
+      typeof params.color === 'string' && /^#[0-9a-f]{6}$/i.test(params.color)
+        ? params.color
+        : WINDOW_CAPTURE_PROTECTION_SMOKE_MARKERS['scene-hud']
+    const markerInstalled = await paintCaptureProtectionSmokeMarker(window, 'scene-hud', color)
+    return {
+      ...sceneHud.state(),
+      bounds: window.getBounds(),
+      visible: window.isVisible(),
+      markerInstalled,
+      markerColor: color
+    }
+  }
+
+  // A global key as if pressed (the gate's own callback): the smokes and the
+  // HUD's screenshots drive the real key path without posting HID events.
+  if (command === 'global-shortcut-trigger') {
+    const action = params.action
+    if (!isGlobalShortcutAction(action)) throw new Error('Unknown global shortcut action.')
+    const window = mainWindow
+    if (!window || window.isDestroyed()) throw new Error('The Studio is not open.')
+    sendElectronEvent(window.webContents, 'global-shortcuts:triggered', action)
+    return { sent: action }
   }
 
   // The invisibility smoke's marker: the window painted edge to edge in a
@@ -17971,7 +18141,9 @@ app.on('open-url', (event, url) => {
 /** The app's own windows. An HTML overlay's offscreen window (plan 232) is
  * not one: with only those left, the app has no window open. */
 function appWindowCount(): number {
-  return BrowserWindow.getAllWindows().filter((window) => !isHtmlOverlayWindow(window)).length
+  return BrowserWindow.getAllWindows().filter(
+    (window) => !isHtmlOverlayWindow(window) && !isSceneHudWindow(window)
+  ).length
 }
 
 function appMenuMainWindowOpen(): boolean {
@@ -19740,6 +19912,12 @@ app.whenReady().then(async () => {
       return startScopeReconnect(platform)
     }
   )
+  // The key HUD (plan 231 D20): the Studio's asks; main decides focus.
+  secureIpcHandle('scene-hud:get-state', () => sceneHud.state())
+  secureIpcHandle('scene-hud:set-enabled', (_event, enabled: boolean) =>
+    sceneHud.setEnabled(enabled === true)
+  )
+  secureIpcHandle('scene-hud:show', (_event, request: SceneHudRequest) => sceneHud.show(request))
   secureIpcHandle('captions-window:open', () => openCaptionsWindow())
   secureIpcHandle('captions-window:close', () => closeCaptionsWindow())
   secureIpcHandle('captions-window:toggle', () => toggleCaptionsWindow())

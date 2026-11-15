@@ -108,6 +108,8 @@ export const AUXILIARY_API_KEYS = {
     // What the window sits on (plan 208): a value, read before first paint.
     'windowGround'
   ],
+  // The key HUD (plan 231 D20): it listens for what to show, and nothing else.
+  'scene-hud': ['onSceneHudPresent', 'windowGround'],
   captions: [
     'getCaptionsWindowState',
     'setCaptionsWindowAlwaysOnTop',

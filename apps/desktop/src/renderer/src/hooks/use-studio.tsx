@@ -778,8 +778,18 @@ import {
 import {
   deviceListWithoutProtectedOverlayWindows,
   protectedOverlayWindowIdsFromOverlayWindows,
+  sceneHudProtectedOverlayWindow,
   streamManagerProtectedOverlayWindow
 } from '@/lib/protected-overlay-windows'
+import {
+  sceneHudCaptureConfirmed,
+  sceneHudEnabled,
+  sceneHudExclusionAfterStart,
+  sceneHudExclusionForWindow,
+  screenCaptureRunning,
+  type SceneHudExclusion
+} from '@/lib/scene-hud-capture'
+import type { SceneHudWindowState } from '../../../shared/scene-hud'
 
 export type { GoLivePartialSetup, GoLiveSetupFailure } from '@/lib/go-live-flow'
 
@@ -2605,13 +2615,17 @@ async function currentProtectedOverlayWindowIds(): Promise<number[]> {
   // from the source picker. The one choice (plan 215 D6): the Stream Manager
   // joins the list while its Hide from stream switch is on. The backend
   // applies a changed list to a running capture in place (C2).
-  const [latestNotesWindow, latestCommentsWindow] = await Promise.all([
+  // The key HUD (plan 231 D20) is never part of the show: on macOS its
+  // window is always on the list while it exists.
+  const [latestNotesWindow, latestCommentsWindow, latestSceneHud] = await Promise.all([
     window.videorc?.getNotesWindowState?.().catch(() => null),
-    window.videorc?.getCommentsWindowState?.().catch(() => null)
+    window.videorc?.getCommentsWindowState?.().catch(() => null),
+    Promise.resolve(window.videorc?.getSceneHudWindowState?.()).catch(() => null)
   ])
   return protectedOverlayWindowIdsFromOverlayWindows(
     latestNotesWindow ?? idleNotesWindowState(),
-    streamManagerProtectedOverlayWindow(latestCommentsWindow ?? idleCommentsWindowState())
+    streamManagerProtectedOverlayWindow(latestCommentsWindow ?? idleCommentsWindowState()),
+    sceneHudProtectedOverlayWindow(latestSceneHud)
   )
 }
 
@@ -5109,6 +5123,39 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
   const nativePreviewFramePollingRequestKeyRef = useRef<string | null>(null)
   const nativePreviewCameraKeyRef = useRef<string | null>(null)
   const nativePreviewScreenKeyRef = useRef<string | null>(null)
+  // The key HUD (plan 231 D20): main's window, and whether Videorc's own
+  // screen capture is known to leave it out (lib/scene-hud-capture.ts).
+  const [sceneHudWindow, setSceneHudWindow] = useState<SceneHudWindowState | null>(null)
+  const sceneHudWindowRef = useRef<SceneHudWindowState | null>(null)
+  const sceneHudExclusionRef = useRef<SceneHudExclusion | null>(null)
+  const applySceneHudWindow = useCallback((state: SceneHudWindowState | null) => {
+    sceneHudWindowRef.current = state
+    sceneHudExclusionRef.current = sceneHudExclusionForWindow(
+      state,
+      sceneHudExclusionRef.current,
+      screenCaptureRunning(previewScreenStatusRef.current)
+    )
+    setSceneHudWindow((current) =>
+      JSON.stringify(current) === JSON.stringify(state) ? current : state
+    )
+  }, [])
+  useEffect(
+    () => window.videorc?.onSceneHudWindowState?.(applySceneHudWindow),
+    [applySceneHudWindow]
+  )
+  // Settings → Shortcuts' switch makes or drops main's window.
+  const sceneHudOn = sceneHudEnabled(settings)
+  useEffect(() => {
+    let cancelled = false
+    Promise.resolve(window.videorc?.setSceneHudEnabled?.(sceneHudOn))
+      .then((state) => {
+        if (!cancelled && state) applySceneHudWindow(state)
+      })
+      .catch(() => undefined)
+    return () => {
+      cancelled = true
+    }
+  }, [applySceneHudWindow, sceneHudOn])
   const nativePreviewCommittedSceneRef = useRef<{
     sceneId: string
     sceneRevision: number
@@ -7315,6 +7362,11 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
 
   const applyPreviewScreenStatus = useCallback((status: PreviewScreenStatus) => {
     previewScreenStatusRef.current = status
+    // No capture running: the next start carries the key HUD's window id.
+    const hudExclusion = sceneHudExclusionRef.current
+    if (hudExclusion && !hudExclusion.held && !screenCaptureRunning(status)) {
+      sceneHudExclusionRef.current = { ...hudExclusion, held: true }
+    }
     setPreviewScreenStatus(status)
     setSourcePictureSizes((current) => sourcePictureSizesFromCapture(current, 'screen', status))
     setPortalShareGrantedSourceId((current) => nextPortalShareGrant(current, status))
@@ -13131,6 +13183,12 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
       video: captureConfig.video,
       protectedOverlayWindowIds
     })
+    // The key HUD (plan 231 D20) shows only once the capture took its id.
+    sceneHudExclusionRef.current = sceneHudExclusionAfterStart(
+      sceneHudExclusionRef.current,
+      protectedOverlayWindowIds,
+      status
+    )
     nativePreviewScreenKeyRef.current =
       status.state === 'failed' || status.state === 'source-missing' ? null : key
     applyPreviewScreenStatus(status)
@@ -13742,9 +13800,10 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
     () =>
       protectedOverlayWindowIdsFromOverlayWindows(
         notesWindow,
-        streamManagerProtectedOverlayWindow(commentsWindow)
+        streamManagerProtectedOverlayWindow(commentsWindow),
+        sceneHudProtectedOverlayWindow(sceneHudWindow)
       ).join(','),
-    [notesWindow, commentsWindow]
+    [notesWindow, commentsWindow, sceneHudWindow]
   )
 
   useEffect(() => {
@@ -19999,9 +20058,10 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
       deviceListWithoutProtectedOverlayWindows(
         deviceList,
         notesWindow,
-        streamManagerProtectedOverlayWindow(commentsWindow)
+        streamManagerProtectedOverlayWindow(commentsWindow),
+        sceneHudProtectedOverlayWindow(sceneHudWindow)
       ),
-    [deviceList, notesWindow, commentsWindow]
+    [deviceList, notesWindow, commentsWindow, sceneHudWindow]
   )
   const selectedCaptureDevice = findDevice(
     visibleDeviceList.devices,
@@ -20387,13 +20447,69 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
 
   studioActionSourceRef.current = studioActionSource
 
+  // The key HUD (plan 231 D20): a key or a remote switched the scene (or was
+  // refused). The Studio checks the setting and the capture; main checks that
+  // no Videorc window is in front. The request is built lazily, off the
+  // Studio's first paint.
+  const reportSceneSwitchForHud = useEffectEvent(
+    (
+      source: 'key' | 'remote',
+      sceneId: string,
+      outcome: SavedSceneApplyResult,
+      pressed?: GlobalShortcutAction
+    ) => {
+      const hud = sceneHudWindowRef.current
+      if (!hud?.enabled) return
+      const captureConfirmed = sceneHudCaptureConfirmed({
+        window: hud,
+        exclusion: sceneHudExclusionRef.current,
+        captureRunning: screenCaptureRunning(previewScreenStatusRef.current)
+      })
+      const scenes = sceneLibrary.scenes
+      const index = scenes.findIndex((scene) => scene.id === sceneId)
+      const scene = index >= 0 ? scenes[index] : null
+      const config = settingsRef.current.globalShortcuts ?? {}
+      const enabled = sceneHudEnabled(settingsRef.current)
+      const devices = deviceListRef.current.devices
+      const platform = runtimeInfo?.platform
+      void import('@/lib/scene-hud')
+        .then(({ sceneHudIconFor, sceneHudKey, sceneHudRequestFor }) => {
+          const request = sceneHudRequestFor({
+            source,
+            enabled,
+            captureConfirmed,
+            outcome,
+            scene: scene ? { name: scene.name, icon: sceneHudIconFor(scene, devices) } : null,
+            key: scene
+              ? sceneHudKey({ pressed, sceneId, position: index + 1, config, platform })
+              : undefined
+          })
+          return request ? window.videorc?.showSceneHud?.(request) : undefined
+        })
+        .catch(() => undefined)
+    }
+  )
+
   // An effect event: stable identity for the one-time client subscription,
   // latest closure inside.
   const handleRemoteIntent = useEffectEvent(async (payload: unknown) => {
-    const source = studioActionSource()
-    if (!source) return
+    const studioSource = studioActionSource()
+    if (!studioSource) return
     // The envelope is `{intentId, intent: {kind}}`, not `{kind}`.
     const intentKind = remoteIntentKind(payload)
+    // A Stream Deck or phone scene switch tells the key HUD how it landed.
+    const applyScene = studioSource.applySavedSceneResult
+    const source: StudioActionSource =
+      intentKind === 'sceneApply' && applyScene
+        ? {
+            ...studioSource,
+            applySavedSceneResult: (id: string) =>
+              applyScene(id).then((result) => {
+                reportSceneSwitchForHud('remote', id, result)
+                return result
+              })
+          }
+        : studioSource
     if (intentKind === 'recordStart' || intentKind === 'streamStart') {
       noteRecordClick('start')
     } else if (intentKind === 'recordStop' || intentKind === 'streamStop') {
@@ -20709,6 +20825,7 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
               toast.info(result.message ?? "That scene couldn't be applied", {
                 id: 'scene-shortcut-refused'
               })
+            reportSceneSwitchForHud('key', next.slice(6), result, action)
             return result.ok
           })
           void apply.then(() => {
