@@ -86,6 +86,13 @@ export const DOOR_SWITCH_DESCRIPTION = 'Nobody reaches the stage without Bring o
 export const OPEN_THE_ROOM_FIRST = 'Open the room first.'
 /** The camera is the session's while it records or streams (D6). */
 export const ROOM_WAITS_FOR_SESSION = 'The room opens once your recording or livestream ends.'
+/**
+ * The Studio's Scenes while the room is open: the stage's layouts are the
+ * show's picture, and a scene would change only this computer's picture,
+ * which is not on air (plan 224, "Out of scope"; 0.28.1 left them clickable).
+ */
+export const SCENES_OFF_WHILE_ROOM_OPEN =
+  'Scenes are off while the room is open. Pick a layout on the Show stage.'
 export const CLOSE_ROOM_CONFIRM_DESCRIPTION = 'Your guests leave and the recording finalizes.'
 export const NEW_LINK_CONFIRM_DESCRIPTION =
   'Everyone keeps their place. The old link stops working.'

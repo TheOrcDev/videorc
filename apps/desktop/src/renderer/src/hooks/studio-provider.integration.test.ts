@@ -1655,6 +1655,22 @@ class StudioBackend {
         return { preference: 'auto', quickSyncAvailable: false, envOverride: false }
       case 'encoder.preference.set':
         return { preference: params.preference, quickSyncAvailable: true, envOverride: false }
+      // Plan 224 D17: End livestream in a talk show ends the legs; the room
+      // and the cloud recording stay.
+      case 'cloud.show.legs.end':
+        if (!this.cloudStatus?.room) throw new Error('The room is closed.')
+        this.cloudStatus = {
+          ...this.cloudStatus,
+          room: { ...this.cloudStatus.room, live: false }
+        }
+        return this.cloudStatus
+      case 'cloud.recording.stop':
+        if (!this.cloudStatus?.room) throw new Error('The room is closed.')
+        this.cloudStatus = {
+          ...this.cloudStatus,
+          recording: { active: false, seconds: 0, bytes: 0 }
+        }
+        return this.cloudStatus
       default:
         return null
     }
@@ -6015,6 +6031,90 @@ describe('real StudioProvider lifecycle', () => {
       expect(latest().core.canStop).toBe(true)
     }
   )
+
+  // 0.28.1 (owner, 11-16): the host never got into the room, and End
+  // livestream sent nothing to the cloud; only videorc.com/live ended the
+  // show. The stop must reach the cloud whatever the room connection did.
+  it('ends a live talk show through cloud.show.legs.end from End livestream', async () => {
+    const backend = new StudioBackend()
+    backend.cloudStatus = {
+      ...resumableCloudStatus(),
+      phase: 'live',
+      plan: 'premium',
+      show: { id: 'sh_test', nodeId: 'local-1', resumable: false, kind: 'talk' },
+      room: {
+        phase: 'open',
+        doorOpen: false,
+        declinedCount: 0,
+        stage: { layout: 'solo', onStage: ['host:sh_test'] },
+        hostAway: true,
+        connected: true,
+        client: 'disconnected',
+        returnEnabled: false,
+        stageSet: true,
+        live: true
+      },
+      recording: { active: true, seconds: 0, bytes: 0 }
+    }
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const testDom = installProviderTestEnvironment(
+      createVideorcApi({
+        acknowledge: async () => true,
+        pending: async () => [],
+        acknowledgeProvider: async () => true,
+        pendingProvider: async () => []
+      })
+    )
+    restoreEnvironment = testDom.restore
+    localStorage.setItem(
+      STORAGE_KEYS.captureConfig,
+      JSON.stringify(youtubeOauthStreamCaptureConfig())
+    )
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation => observations.at(-1)!
+    let shell: ReturnType<typeof useStudioShell> | undefined
+    function ShellProbe(): null {
+      const value = useStudioShell()
+      useEffect(() => {
+        shell = value
+      }, [value])
+      return null
+    }
+    root = await mountStudioProvider(
+      testDom.container,
+      (value) => {
+        observations.push(value)
+      },
+      createElement(ShellProbe)
+    )
+    await waitForObservation(() => latest()?.cloud.cloudStatus?.room?.live === true)
+    expect(latest().recording.recording.state).toBe('streaming')
+
+    // The End livestream button asks first, then the confirm is the stop.
+    let asked = true
+    await act(async () => {
+      asked = await latest().core.requestStopSession('button')
+    })
+    expect(asked).toBe(false)
+    await waitForObservation(() => shell?.stopConfirmation?.origin === 'button')
+    await act(async () => shell!.confirmStopSession())
+    await waitForObservation(() =>
+      backend.commands.some((command) => command.method === 'cloud.show.legs.end')
+    )
+    await waitForObservation(() => latest().cloud.cloudStatus?.room?.live === false)
+    // End livestream keeps the room and the cloud recording (D17).
+    expect(backend.commands.map((command) => command.method)).not.toContain('cloud.room.close')
+    await waitForObservation(() => latest().recording.recording.state === 'recording')
+
+    // Stop recording reaches the cloud too, with the host still out of the room.
+    await waitForObservation(() => latest().cloud.talkShow.hostIdentity !== null)
+    await act(async () => {
+      await latest().cloud.talkShow.stopCloudRecording()
+    })
+    expect(backend.commands.map((command) => command.method)).toContain('cloud.recording.stop')
+    await waitForObservation(() => latest().cloud.cloudStatus?.recording?.active === false)
+  })
 
   // Plan 184 C5b: the Resume notice feeds the live cloud show again and sets
   // nothing up on a platform. The runner holds the legs (the live YouTube

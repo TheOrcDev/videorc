@@ -438,7 +438,10 @@ export const RENDERER_DOCUMENT_CSP = [
   "img-src 'self' data: blob: file: videorc-asset: http://127.0.0.1:* http://localhost:*",
   "font-src 'self' data:",
   "media-src 'self' data: blob: file: videorc-asset:",
-  "connect-src 'self' videorc-asset: https://www.videorc.com http://127.0.0.1:* http://localhost:* ws://127.0.0.1:* ws://localhost:*",
+  // LiveKit Cloud (plan 224, plan 234): the talk show's room joins from this
+  // renderer, its signal over wss and its region list over https. Without
+  // them the host never reached the room in 0.28.1 ("Couldn't join").
+  "connect-src 'self' videorc-asset: https://www.videorc.com https://*.livekit.cloud wss://*.livekit.cloud http://127.0.0.1:* http://localhost:* ws://127.0.0.1:* ws://localhost:*",
   "worker-src 'self' blob:",
   "object-src 'none'",
   "base-uri 'none'",

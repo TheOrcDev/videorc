@@ -19503,11 +19503,14 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       toggleCommentsWindow,
       toggleCaptionsWindow,
       // The question belongs to one session: a session that ended, or a later
-      // one, never shows a stale answer sheet.
+      // one, never shows a stale answer sheet. In a talk show the session is
+      // the room's (plan 224 C-G6), as `requestStopSession` asked it: the
+      // local recording is idle there, and reading it hid End livestream's
+      // question, so the click ended nothing (0.28.1).
       stopConfirmation:
         stopConfirmation !== null &&
-        stopConfirmation.sessionId === (recording.sessionId ?? null) &&
-        isActiveRecordingState(recording.state)
+        stopConfirmation.sessionId === ((talkShowSession ?? recording).sessionId ?? null) &&
+        isActiveRecordingState((talkShowSession ?? recording).state)
           ? stopConfirmation
           : null,
       confirmStopSession,
@@ -19534,6 +19537,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       recording.state,
       runtimeInfo,
       stopConfirmation,
+      talkShowSession,
       toggleCommentsWindow,
       toggleCaptionsWindow,
       togglePreviewWindow,
