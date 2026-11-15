@@ -14,6 +14,7 @@ import {
   type ShortcutRecorderAppKey
 } from '@/lib/shortcut-recorder'
 import { cn } from '@/lib/utils'
+import { globalShortcutConflictReason } from '@/lib/global-shortcut-owner'
 
 interface ShortcutRecorderFieldProps {
   id: string
@@ -60,9 +61,7 @@ export function ShortcutRecorderField(props: ShortcutRecorderFieldProps): ReactE
     <SettingsRow
       error={
         message ??
-        (registrationFailed && !armed
-          ? 'Another app already uses this shortcut. Pick another.'
-          : null)
+        globalShortcutConflictReason(props.value, props.platform, registrationFailed && !armed)
       }
       label={label}
     >

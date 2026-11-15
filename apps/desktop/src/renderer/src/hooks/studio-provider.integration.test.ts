@@ -8028,10 +8028,10 @@ describe('real StudioProvider lifecycle', () => {
         globalShortcuts: { scenes: { [saved.id]: 'Control+F13' } }
       }))
       latest().renameSavedScene(saved.id, 'Renamed shortcut target')
-      emit('onGlobalShortcut', 'layout:screen-only')
+      emit('onGlobalShortcut', 'scene-slot-2')
     })
-    // Plan 231 D14: a layout key switches to the first scene with that
-    // layout. It never changes the layout of the scene on stream.
+    // Plan 231 D5: a position key switches to that scene. It never changes
+    // the layout of the scene on stream.
     await waitForObservation(
       () => latest().activeSavedSceneId === screenOnly.id && latest().canSaveScene
     )
@@ -8043,6 +8043,20 @@ describe('real StudioProvider lifecycle', () => {
     await act(async () => {
       emit('onGlobalShortcut', `scene:${saved.id}`)
     })
+    await waitForObservation(
+      () => latest().activeSavedSceneId === saved.id && latest().canSaveScene
+    )
+    // A reorder changes the position key immediately; the id's custom key stays.
+    await act(async () => {
+      latest().sceneLibraryActions.move(screenOnly.id, 0)
+    })
+    await act(async () => emit('onGlobalShortcut', 'scene-slot-1'))
+    await waitForObservation(
+      () => latest().activeSavedSceneId === screenOnly.id && latest().canSaveScene
+    )
+    expect(latest().settings.globalShortcuts?.scenes?.[saved.id]).toBe('Control+F13')
+    await act(async () => latest().sceneLibraryActions.move(screenOnly.id, 1))
+    await act(async () => emit('onGlobalShortcut', `scene:${saved.id}`))
     await waitForObservation(
       () => latest().activeSavedSceneId === saved.id && latest().canSaveScene
     )
@@ -8078,7 +8092,7 @@ describe('real StudioProvider lifecycle', () => {
       () => latest().activeSavedSceneId === screenOnly.id && latest().canSaveScene
     )
     await act(async () => {
-      emit('onGlobalShortcut', 'layout:camera-only')
+      emit('onGlobalShortcut', 'scene-slot-3')
     })
     await waitForObservation(
       () => latest().activeSavedSceneId === cameraOnly.id && latest().canSaveScene
@@ -8091,7 +8105,7 @@ describe('real StudioProvider lifecycle', () => {
     // A scene that needs the missing camera is refused before any commit.
     start = backend.sentCommands.length
     await act(async () => {
-      emit('onGlobalShortcut', 'layout:screen-camera')
+      emit('onGlobalShortcut', 'scene-slot-1')
       await new Promise((resolve) => setTimeout(resolve, 120))
     })
     await waitForObservation(() => latest().canSaveScene)
@@ -8107,19 +8121,17 @@ describe('real StudioProvider lifecycle', () => {
     expect(latest().activeSavedSceneId).not.toBe(screenCamera.id)
     await act(async () => latest().startSession())
     await waitForObservation(() => observations.at(-1)?.recording.recording.state === 'recording')
-    // No scene uses a 9:16 layout in a 16:9 studio: refused, in words.
+    // An empty position and a retired layout action do nothing, even live.
     start = backend.sentCommands.length
     toastSpies.info.mockClear()
     await act(async () => {
+      emit('onGlobalShortcut', 'scene-slot-9')
       emit('onGlobalShortcut', 'layout:vertical-screen-only')
       await new Promise((resolve) => setTimeout(resolve, 120))
     })
     expect(latest().captureConfig.layout.layoutPreset).toBe('screen-only')
     expect(applies(start)).toHaveLength(0)
-    expect(toastSpies.info).toHaveBeenCalledWith(
-      'No scene uses Vertical screen only',
-      expect.objectContaining({ id: 'scene-shortcut-refused' })
-    )
+    expect(toastSpies.info).not.toHaveBeenCalled()
     // Plan 231 D16: a scene that is not on stream can go while recording,
     // and the scene on stream can't.
     await act(async () => {
@@ -8735,7 +8747,7 @@ describe('real StudioProvider lifecycle', () => {
     // in the 9:16 layout the panel gave it.
     from = backend.sentCommands.length
     await act(async () => {
-      emit('onGlobalShortcut', `scene:${screenCamera.id}`)
+      emit('onGlobalShortcut', 'scene-slot-1')
     })
     await waitForObservation(
       () =>
@@ -8758,9 +8770,10 @@ describe('real StudioProvider lifecycle', () => {
     backend.layoutResponseDelayMs = 150
     from = backend.sentCommands.length
     await act(async () => {
-      void latest()!.core.applySavedScene(cameraOnly.id)
-      void latest()!.core.applySavedScene(screenCamera.id)
+      emit('onGlobalShortcut', 'scene-slot-3')
     })
+    await waitForObservation(() => programApplies(from).length > 0)
+    await act(async () => emit('onGlobalShortcut', 'scene-slot-1'))
     await waitForObservation(
       () =>
         latest()?.core.layoutSwitchPending == null &&
@@ -8775,6 +8788,9 @@ describe('real StudioProvider lifecycle', () => {
       verticalScreenFraming: 'fill'
     })
     expect(backend.currentLayout.layoutPreset).toBe('screen-camera')
+    expect(
+      toastSpies.info.mock.calls.some(([message]) => message === "That scene couldn't be applied")
+    ).toBe(false)
     // Leg requests are explicit and never reach the program.
     for (const command of backend.sentCommands) {
       if (command.method !== 'scene.layout.apply_live') continue

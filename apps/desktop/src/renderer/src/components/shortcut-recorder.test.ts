@@ -81,9 +81,7 @@ describe('ShortcutRecorderField', () => {
 
   it('says when another app owns the binding', async () => {
     await render('Cmd+Shift+M', true)
-    expect(container.querySelector('[role="alert"]')?.textContent).toBe(
-      'Another app already uses this shortcut. Pick another.'
-    )
+    expect(container.querySelector('[role="alert"]')?.textContent).toBe('Another app uses ⇧⌘M')
     expect(recorder().getAttribute('aria-invalid')).toBe('true')
   })
 })

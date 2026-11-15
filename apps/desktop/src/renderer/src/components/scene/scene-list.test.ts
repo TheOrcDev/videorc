@@ -160,6 +160,7 @@ describe('the Scene page scene list (plan 210 D6)', () => {
     expect(figmaRow.textContent).toContain('Figma · front window')
     expect(figmaRow.textContent).toContain('Follows')
     expect(figmaRow.querySelector('[data-accelerator="Control+Alt+F"]')).toBeTruthy()
+    expect(figmaRow.querySelector('[data-accelerator="Control+Alt+1"]')).toBeTruthy()
     expect(rowButton('Figma').getAttribute('aria-current')).toBe('true')
     expect(container.querySelector('[data-saved-scene="display"]')!.textContent).toContain(
       'Display 1'

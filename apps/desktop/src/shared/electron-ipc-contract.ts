@@ -849,6 +849,14 @@ const globalShortcutsSchema = runtimeSchema<GlobalShortcutsConfig>(
           if (!id.trim() || id.length > 128) throw new RuntimeSchemaError(path, 'a scene ID')
           stringSchema({ maxLength: 160 }).parse(accelerator, `${path}.scenes.${id}`)
         }
+      } else if (key === 'sceneSlots') {
+        if (!entry || typeof entry !== 'object' || Array.isArray(entry))
+          throw new RuntimeSchemaError(path, 'scene position bindings')
+        for (const [position, accelerator] of Object.entries(entry)) {
+          if (!/^[1-9]$/.test(position))
+            throw new RuntimeSchemaError(path, 'a scene position from 1 to 9')
+          stringSchema({ maxLength: 160 }).parse(accelerator, `${path}.sceneSlots.${position}`)
+        }
       } else if (key === 'layouts') {
         if (!entry || typeof entry !== 'object' || Array.isArray(entry))
           throw new RuntimeSchemaError(path, 'layout bindings')

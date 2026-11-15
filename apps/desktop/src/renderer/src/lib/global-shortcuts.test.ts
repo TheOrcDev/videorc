@@ -1,4 +1,3 @@
-import { nextEligibleLayout } from '../../../shared/global-shortcuts'
 import { describe, expect, it, vi } from 'vitest'
 vi.mock('sonner', () => ({ toast: { error: vi.fn(), info: vi.fn(), warning: vi.fn() } }))
 import { toast } from 'sonner'
@@ -13,13 +12,53 @@ import {
 } from '../../../shared/global-shortcut-bindings'
 import {
   GLOBAL_SHORTCUT_ACTIONS,
+  SCENE_SLOT_ACTIONS,
   globalShortcutEntries,
   isGlobalShortcutAction
 } from '../../../shared/global-shortcuts'
 import type { GlobalShortcutAction } from '../../../shared/global-shortcuts'
 
-describe('global layout shortcuts', () => {
-  it('dispatches every layout action exactly once without microphone fallback', () => {
+describe('global scene shortcuts', () => {
+  it.each(['darwin', 'win32', 'linux'])('defaults all nine positions on %s', (platform) => {
+    const entries = globalShortcutEntries({}, platform)
+    expect(entries.filter(([action]) => action.startsWith('scene-slot-'))).toEqual(
+      SCENE_SLOT_ACTIONS.map((action, index) => [
+        action,
+        `Control+Alt+${platform === 'darwin' ? '' : 'Shift+'}${index + 1}`
+      ])
+    )
+    const changed = withGlobalShortcut({}, 'scene-slot-1', 'F13')
+    const cleared = withGlobalShortcut(changed, 'scene-slot-2', '')
+    expect(globalShortcutEntries(cleared, platform)).toContainEqual(['scene-slot-1', 'F13'])
+    expect(globalShortcutEntries(cleared, platform)).toContainEqual(['scene-slot-2', ''])
+    expect(globalShortcutEntries(cleared, platform)).toContainEqual([
+      'scene-slot-3',
+      `Control+Alt+${platform === 'darwin' ? '' : 'Shift+'}3`
+    ])
+  })
+
+  it('resolves positions at the key press, follows a reorder, and ignores empty slots', () => {
+    const switchScene = vi.fn()
+    const context = {
+      sessionActive: false,
+      startRecording: vi.fn(),
+      startLivestream: vi.fn(),
+      stopSession: vi.fn(),
+      toggleMicrophoneMute: vi.fn(),
+      switchScene,
+      scenes: [{ id: 'figma' }, { id: 't3' }]
+    }
+    executeGlobalShortcut('scene-slot-1', context)
+    context.scenes.reverse()
+    executeGlobalShortcut('scene-slot-1', context)
+    executeGlobalShortcut('scene:figma', context)
+    executeGlobalShortcut('scene-slot-9', context)
+    executeGlobalShortcut('scene-slot-0' as GlobalShortcutAction, context)
+    executeGlobalShortcut('scene-slot-10' as GlobalShortcutAction, context)
+    executeGlobalShortcut('layout:screen-only' as GlobalShortcutAction, context)
+    expect(switchScene.mock.calls).toEqual([['scene:figma'], ['scene:t3'], ['scene:figma']])
+  })
+  it('dispatches Next and Previous scene exactly once without microphone fallback', () => {
     const context = {
       sessionActive: false,
       startRecording: vi.fn(async () => true),
@@ -28,11 +67,11 @@ describe('global layout shortcuts', () => {
       toggleMicrophoneMute: vi.fn(),
       markClip: vi.fn(),
       saveReplay: vi.fn(),
-      switchLayout: vi.fn()
+      switchScene: vi.fn()
     }
     for (const action of GLOBAL_SHORTCUT_ACTIONS.filter((action) => action.startsWith('layout')))
       executeGlobalShortcut(action, context)
-    expect(context.switchLayout).toHaveBeenCalledTimes(12)
+    expect(context.switchScene).toHaveBeenCalledTimes(2)
     expect(context.toggleMicrophoneMute).not.toHaveBeenCalled()
     executeGlobalShortcut('clip-mark', context)
     expect(context.markClip).toHaveBeenCalledOnce()
@@ -49,7 +88,7 @@ describe('global layout shortcuts', () => {
     expect(globalShortcutEntries({}).some(([id]) => (id as string) === 'replay-save')).toBe(false)
     executeGlobalShortcut('invalid' as GlobalShortcutAction, context)
     expect(context.toggleMicrophoneMute).not.toHaveBeenCalled()
-    expect(context.switchLayout).toHaveBeenCalledTimes(12)
+    expect(context.switchScene).toHaveBeenCalledTimes(2)
     expect(context.startRecording).not.toHaveBeenCalled()
     expect(context.startLivestream).not.toHaveBeenCalled()
   })
@@ -86,7 +125,7 @@ describe('global layout shortcuts', () => {
     expect(active.startLivestream).toHaveBeenCalledOnce()
   })
   it('keeps stable IDs, unassigned defaults and validates unknown actions', () => {
-    expect(globalShortcutEntries({})).toHaveLength(19)
+    expect(globalShortcutEntries({})).toHaveLength(18)
     // Plan 068 D6 / plan 181 R4: Save a clip ships unbound.
     expect(globalShortcutEntries({}).find(([id]) => id === 'clip-mark')?.[1]).toBeUndefined()
     expect(withGlobalShortcut({}, 'clip-mark', 'Cmd+Shift+K').clipMark).toBe('Cmd+Shift+K')
@@ -112,10 +151,10 @@ describe('global layout shortcuts', () => {
       'Cmd+Shift+A'
     )
     expect(
-      globalShortcutEntries({ layouts: { 'camera-only': 'Control+Alt+C' } }).find(
-        ([id]) => id === 'layout:camera-only'
-      )?.[1]
-    ).toBe('Control+Alt+C')
+      globalShortcutEntries({ layouts: { 'camera-only': 'Control+Alt+C' } }).some(([id]) =>
+        id.startsWith('layout:')
+      )
+    ).toBe(false)
     expect(isGlobalShortcutAction('layout:made-up')).toBe(false)
     expect(isGlobalShortcutAction('layout-next')).toBe(true)
   })
@@ -168,31 +207,17 @@ describe('system audio shortcut', () => {
   })
 })
 
-describe('layout cycle order', () => {
-  it('wraps and finds the correct predecessor when the current layout is unavailable', () => {
-    expect(
-      nextEligibleLayout('camera-only', -1, ['screen-camera', 'screen-only', 'side-by-side'])
-    ).toBe('screen-only')
-    expect(nextEligibleLayout('screen-camera', -1, ['screen-camera', 'side-by-side'])).toBe(
-      'side-by-side'
-    )
-    expect(
-      nextEligibleLayout('vertical-camera-top', -1, ['vertical-camera-top', 'vertical-camera-only'])
-    ).toBe('vertical-camera-only')
-    expect(nextEligibleLayout('screen-only', 1, ['screen-only'])).toBeNull()
-  })
-})
-
 describe('withGlobalShortcut', () => {
-  it('writes an action row or a layout row and keeps every other binding', () => {
+  it('writes an action row or a position row and keeps every other binding', () => {
     const config = { recordToggle: 'Cmd+Shift+R', layouts: { 'screen-only': 'Ctrl+Alt+2' } }
     expect(withGlobalShortcut(config, 'mic-toggle', 'Cmd+Shift+M')).toEqual({
       ...config,
       micToggle: 'Cmd+Shift+M'
     })
-    expect(withGlobalShortcut(config, 'layout:camera-only', 'Ctrl+Alt+3')).toEqual({
+    expect(withGlobalShortcut(config, 'scene-slot-3', 'Ctrl+Alt+3')).toEqual({
       recordToggle: 'Cmd+Shift+R',
-      layouts: { 'screen-only': 'Ctrl+Alt+2', 'camera-only': 'Ctrl+Alt+3' }
+      layouts: { 'screen-only': 'Ctrl+Alt+2' },
+      sceneSlots: { 3: 'Ctrl+Alt+3' }
     })
     expect(withGlobalShortcut(config, 'record-toggle', '').recordToggle).toBe('')
     expect(withGlobalShortcut(undefined, 'layout-next', 'F13')).toEqual({ layoutNext: 'F13' })
@@ -203,9 +228,7 @@ describe('globalShortcutLabel (plan 174 A-22)', () => {
   it('names what a shortcut does, never its id', () => {
     expect(globalShortcutLabel('stream-toggle')).toBe('Go Live / end livestream')
     expect(globalShortcutLabel('layout-next')).toBe('Next scene')
-    expect(globalShortcutLabel('layout:camera-only')).not.toContain('camera-only')
-    // Out of its list, a vertical layout says so (plan 174 S2.3a).
-    expect(globalShortcutLabel('layout:vertical-screen-camera')).toBe('Vertical screen + camera')
+    expect(globalShortcutLabel('scene-slot-1')).toBe('Scene 1')
     expect(globalShortcutLabel('record-toggle')).toBe('Record / stop recording')
     expect(globalShortcutLabel('mic-toggle')).toBe('Mute / unmute microphone')
     expect(globalShortcutLabel('unknown-action')).toBe('unknown-action')
@@ -268,14 +291,14 @@ describe('GlobalShortcutsRegistrar conflicts', () => {
 })
 
 it('dispatches saved-scene keys through the scene handler', () => {
-  const switchLayout = vi.fn()
+  const switchScene = vi.fn()
   executeGlobalShortcut('scene:figma', {
     sessionActive: false,
     startRecording: vi.fn(),
     startLivestream: vi.fn(),
     stopSession: vi.fn(),
     toggleMicrophoneMute: vi.fn(),
-    switchLayout
+    switchScene
   })
-  expect(switchLayout).toHaveBeenCalledWith('scene:figma')
+  expect(switchScene).toHaveBeenCalledWith('scene:figma')
 })

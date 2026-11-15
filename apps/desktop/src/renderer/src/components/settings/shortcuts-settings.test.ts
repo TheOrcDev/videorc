@@ -1,6 +1,92 @@
-import { describe, expect, it } from 'vitest'
+// @vitest-environment happy-dom
+import { act, createElement } from 'react'
+import { createRoot } from 'react-dom/client'
+import { describe, expect, it, vi } from 'vitest'
 
-import { GLOBAL_ROW_APP_KEYS, globalShortcutRows } from './shortcuts-settings'
+import { GLOBAL_ROW_APP_KEYS, globalShortcutRows, ShortcutsSettings } from './shortcuts-settings'
+import type { GlobalShortcutsConfig } from '@/lib/backend'
+
+const mocked = vi.hoisted(() => ({
+  core: {} as Record<string, unknown>,
+  registered: { 'scene-slot-3': false }
+}))
+vi.mock('@/hooks/use-studio', () => ({ useStudioCore: () => mocked.core }))
+vi.mock('@/lib/global-shortcuts', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/lib/global-shortcuts')>()),
+  globalShortcutRegistration: {
+    subscribe: () => () => undefined,
+    getSnapshot: () => mocked.registered
+  }
+}))
+
+it('renders the Scenes group in order, names conflicts, and changes or clears a position', async () => {
+  vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
+  const container = document.createElement('div')
+  document.body.append(container)
+  const root = createRoot(container)
+  let shortcuts: GlobalShortcutsConfig = { scenes: { figma: 'F13' } }
+  const setSettings = vi.fn(
+    (
+      update: (current: { globalShortcuts: GlobalShortcutsConfig }) => {
+        globalShortcuts: GlobalShortcutsConfig
+      }
+    ) => {
+      shortcuts = update({ globalShortcuts: shortcuts }).globalShortcuts
+    }
+  )
+  mocked.core = {
+    settings: { globalShortcuts: shortcuts },
+    setSettings,
+    runtimeInfo: { platform: 'darwin' },
+    deviceList: { devices: [] },
+    savedScenes: [
+      { id: 'figma', name: 'Figma' },
+      { id: 't3', name: 'T3 Code' }
+    ]
+  }
+  const render = () => act(async () => root.render(createElement(ShortcutsSettings)))
+  try {
+    await render()
+    const group = container.querySelector('fieldset')!
+    expect(group.textContent).toContain('Scenes')
+    expect([...group.querySelectorAll('label')].map((label) => label.textContent)).toEqual([
+      'Scene 1 · Figma',
+      'Scene 2 · T3 Code',
+      ...Array.from({ length: 7 }, (_, index) => `Scene ${index + 3} · no scene`),
+      'Figma'
+    ])
+    expect(group.textContent).toContain('Another app uses ⌃⌥3')
+    expect(container.textContent).not.toMatch(/Horizontal layouts|Vertical layouts/)
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>('[aria-label="Clear the Scene 1 · Figma shortcut"]')!
+        .click()
+    )
+    expect(shortcuts).toEqual({ scenes: { figma: 'F13' }, sceneSlots: { 1: '' } })
+    mocked.core.settings = { globalShortcuts: shortcuts }
+    await render()
+    const recorder = container.querySelector<HTMLButtonElement>('#global-shortcut-scene-slot-1')!
+    await act(async () => recorder.click())
+    await act(async () =>
+      recorder.dispatchEvent(
+        new KeyboardEvent('keydown', { bubbles: true, key: 'F14', code: 'F14' })
+      )
+    )
+    expect(shortcuts.sceneSlots?.[1]).toBe('F14')
+    mocked.core.savedScenes = [
+      { id: 't3', name: 'T3 Code' },
+      { id: 'figma', name: 'Figma' }
+    ]
+    mocked.core.settings = { globalShortcuts: shortcuts }
+    await render()
+    expect(container.querySelector('label')?.textContent).toBe('Hide screen')
+    expect(container.querySelector('fieldset label')?.textContent).toBe('Scene 1 · T3 Code')
+  } finally {
+    await act(async () => root.unmount())
+    container.remove()
+    vi.unstubAllGlobals()
+  }
+})
 
 describe('globalShortcutRows (Linux plan 0019)', () => {
   it('offers the system audio shortcut only where system audio can run', () => {

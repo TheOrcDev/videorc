@@ -36,7 +36,7 @@ import { LazyLiveSourceSelectionController } from '@/lib/live-source-selection-l
 import { confirmedSourceSelection } from '@/lib/source-selection-confirmed'
 import { streamOutputCheckFailureMessage } from '@/lib/stream-output-check-message'
 import type { LiveSourceSelectionState } from '@/lib/live-source-selection'
-import { globalShortcutLayout, withoutSceneShortcut } from '../../../shared/global-shortcuts'
+import { withoutSceneShortcut } from '../../../shared/global-shortcuts'
 import { screenHideAccelerator } from '@/lib/screen-privacy-view'
 import { nextEligibleScene } from '@/lib/scene-shortcut-walk'
 import {
@@ -11738,7 +11738,7 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
   )
   applySavedSceneResultRef.current = applySavedSceneResult
 
-  // Plan 231 D14: a key or a remote that names a layout switches to the first
+  // Plan 231 D14: a remote that names a layout switches to the first
   // scene with that layout in the studio's orientation, or is refused.
   const switchToSceneWithLayout = useCallback(
     (layoutPreset: LayoutPreset): Promise<SavedSceneApplyResult> => {
@@ -19525,65 +19525,41 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
     if (firstRunSetupOpen) return
     const context: GlobalShortcutContext = {
       toggleScreenHidden: privacy.toggleScreenHidden,
-      switchLayout: (layoutAction) => {
-        const current = captureConfigRef.current
-        const direct = globalShortcutLayout(layoutAction)
-        const from = latestRequestedLayoutRef.current ?? current.layout.layoutPreset
-        const orientation = layoutPresetOrientation(from)
-        const step = layoutAction === 'layout-previous' ? -1 : 1
-        const next = layoutAction.startsWith('scene:')
-          ? layoutAction
-          : direct
-            ? `layout:${direct}`
-            : nextEligibleScene({
-                current:
-                  sceneShortcutRequestedRef.current ?? `scene:${activeSavedSceneIdRef.current}`,
-                direction: step,
-                scenes: sceneLibrary.scenes,
-                unavailableSceneIds: sceneLibrary.scenes
-                  .filter(
-                    (scene) =>
-                      sceneSourceProblems(scene.visual, deviceListRef.current.devices).length > 0
-                  )
-                  .map((scene) => scene.id),
-                orientation,
-                sessionActive: sessionOwnsTransport(recordingRef.current),
-                appStates: savedSceneAppStates,
-                // Plan 231 D2: Next and Previous walk the scenes; a layout is
-                // not something to switch to.
-                layouts: []
-              })
+      scenes: sceneLibrary.scenes,
+      switchScene: (sceneAction) => {
+        const next = sceneAction.startsWith('scene:')
+          ? sceneAction
+          : nextEligibleScene({
+              current:
+                sceneShortcutRequestedRef.current ?? `scene:${activeSavedSceneIdRef.current}`,
+              direction: sceneAction === 'layout-previous' ? -1 : 1,
+              scenes: sceneLibrary.scenes,
+              unavailableSceneIds: sceneLibrary.scenes
+                .filter(
+                  (scene) =>
+                    sceneSourceProblems(scene.visual, deviceListRef.current.devices).length > 0
+                )
+                .map((scene) => scene.id),
+              appStates: savedSceneAppStates
+            })
         if (!next) {
           toast.info('No other scene to switch to', { id: 'layout-shortcut-empty' })
           return
         }
-        const target = globalShortcutLayout(next as GlobalShortcutAction)
-        if (
-          target &&
-          layoutIntentAwaitingProofRef.current !== null &&
-          latestRequestedLayoutRef.current === target
-        )
-          return
         sceneShortcutRequestedRef.current = next
-        if (target) latestRequestedLayoutRef.current = target
         if (layoutShortcutTimerRef.current) clearTimeout(layoutShortcutTimerRef.current)
         // Coalesce repeat bursts across the entire scene list.
         layoutShortcutTimerRef.current = setTimeout(() => {
           layoutShortcutTimerRef.current = null
-          // D14: a layout key goes to the first scene with that layout.
-          const apply = (
-            target ? switchToSceneWithLayout(target) : applySavedSceneResult(next.slice(6))
-          ).then((result) => {
+          const apply = applySavedSceneResult(next.slice(6)).then((result) => {
             if (!result.ok && !result.superseded)
               toast.info(result.message ?? "That scene couldn't be applied", {
                 id: 'scene-shortcut-refused'
               })
             return result.ok
           })
-          void apply.then((accepted) => {
+          void apply.then(() => {
             if (sceneShortcutRequestedRef.current === next) sceneShortcutRequestedRef.current = null
-            if (!accepted && target && latestRequestedLayoutRef.current === target)
-              latestRequestedLayoutRef.current = captureConfigRef.current.layout.layoutPreset
           })
         }, 70)
       },
@@ -19608,7 +19584,9 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
       systemAudio: [systemAudioStatus, systemAudioShown],
       setSystemAudioEnabled
     }
-    if (action.startsWith('layout')) return context.switchLayout?.(action)
+    // Keep a walk synchronous: a canvas edit in the same turn cancels its timer.
+    if (action === 'layout-next' || action === 'layout-previous')
+      return context.switchScene?.(action)
     void import('@/lib/global-shortcuts')
       .then(({ executeGlobalShortcut }) => executeGlobalShortcut(action, context))
       .catch(reportError)

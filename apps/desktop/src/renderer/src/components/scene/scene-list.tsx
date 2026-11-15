@@ -7,11 +7,12 @@ import { KebabMenu } from '@/components/kebab-menu'
 import { SceneGlyphIcon } from '@/components/scene/app-icon'
 import { useSceneDialogs } from '@/components/scene/scene-dialogs'
 import { SceneSwitchPending } from '@/components/scene/scene-switch-status'
+import { SceneShortcutKeys } from '@/components/scene/scene-shortcut-keys'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { DisabledReason } from '@/components/ui/disabled-reason'
 import { Label } from '@/components/ui/label'
-import { ShortcutKeys } from '@/components/ui/shortcut-keys'
+import type { GlobalShortcutsConfig } from '@/lib/backend'
 import { Switch } from '@/components/ui/switch'
 import { useAppIcons } from '@/hooks/use-app-icons'
 import { useStudioCore } from '@/hooks/use-studio'
@@ -192,7 +193,8 @@ export function SceneList({
               platform={platform}
               readOnly={readOnly}
               scene={entry}
-              shortcut={settings.globalShortcuts?.scenes?.[entry.id]}
+              shortcutConfig={settings.globalShortcuts}
+              position={index + 1}
               onDragEnd={endDrag}
               onDragEnter={() => {
                 if (draggingId && draggingId !== entry.id) setDropIndex(index)
@@ -227,7 +229,8 @@ function SavedSceneRow({
   needsSources,
   switching,
   readOnly,
-  shortcut,
+  shortcutConfig,
+  position,
   platform,
   icon,
   menu,
@@ -248,7 +251,8 @@ function SavedSceneRow({
   /** This scene is going on stream. Another row's click takes it over (issue #1275). */
   switching: boolean
   readOnly: boolean
-  shortcut: string | undefined
+  shortcutConfig: GlobalShortcutsConfig | undefined
+  position: number
   platform: string | undefined
   icon: ReactElement
   menu: ReturnType<ReturnType<typeof useSceneDialogs>['menuItems']>
@@ -322,7 +326,12 @@ function SavedSceneRow({
       }}
     >
       {app?.follows ? <Badge variant="outline">Follows</Badge> : null}
-      {shortcut ? <ShortcutKeys accelerator={shortcut} platform={platform} /> : null}
+      <SceneShortcutKeys
+        sceneId={scene.id}
+        position={position}
+        config={shortcutConfig}
+        platform={platform}
+      />
       {active ? <CheckIcon aria-label="On stream" className="size-4" weight="bold" /> : null}
       <KebabMenu
         className="relative z-10"

@@ -6289,9 +6289,13 @@ export interface AgentAddResult {
 // --- end Agents (plan 209) ---
 
 export interface GlobalShortcutsConfig {
+  /** Next/Previous scene. Stored names retained for existing bindings. */
   layoutNext?: string
   layoutPrevious?: string
+  /** Migration input only. Layout actions are no longer registered. */
   layouts?: Partial<Record<LayoutPreset, string>>
+  /** Position keys (plan 231 D5). Missing uses the platform default; '' clears. */
+  sceneSlots?: Partial<Record<1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9, string>>
   scenes?: Record<string, string>
   recordToggle?: string
   streamToggle?: string

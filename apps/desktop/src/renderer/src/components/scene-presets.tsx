@@ -4,11 +4,11 @@ import { KebabMenu } from '@/components/kebab-menu'
 import { AppIconImage } from '@/components/scene/app-icon'
 import { useSceneDialogs } from '@/components/scene/scene-dialogs'
 import { SceneSwitchPending } from '@/components/scene/scene-switch-status'
+import { SceneShortcutKeys } from '@/components/scene/scene-shortcut-keys'
 import { SceneCard } from '@/components/studio/scene-card'
 import { LayoutThumb } from '@/components/studio/scenes-gallery'
 import { Button } from '@/components/ui/button'
 import { DisabledReason } from '@/components/ui/disabled-reason'
-import { ShortcutKeys } from '@/components/ui/shortcut-keys'
 import { useAppIcons } from '@/hooks/use-app-icons'
 import { useStudioCore } from '@/hooks/use-studio'
 import { saveSceneBlockedReason, savedSceneBlockedReason } from '@/lib/scene-list'
@@ -80,7 +80,7 @@ export function ScenePresetControls(): ReactElement {
         </p>
       ) : null}
       <div className="grid gap-3 [grid-template-columns:repeat(auto-fill,minmax(104px,1fr))]">
-        {savedScenes.map((entry) => {
+        {savedScenes.map((entry, index) => {
           const app = entry.visual.sources.app
           const selected = activeSavedSceneId === entry.id
           const pending = savedScenePendingId === entry.id
@@ -89,7 +89,6 @@ export function ScenePresetControls(): ReactElement {
             appState: savedSceneAppStates[entry.id],
             devices: deviceList.devices
           })
-          const shortcut = settings.globalShortcuts?.scenes?.[entry.id]
           // One SceneCard for every scene (plan 174 S3.3, B-20): the
           // selected look and its check say which one is on.
           return (
@@ -109,16 +108,19 @@ export function ScenePresetControls(): ReactElement {
                 />
               }
               meta={
-                pending ? (
-                  <SceneSwitchPending />
-                ) : (
-                  (blocked ??
-                  (!app && dialogs.needsSources(entry) ? (
-                    'Resolve sources'
-                  ) : shortcut ? (
-                    <ShortcutKeys accelerator={shortcut} platform={runtimeInfo?.platform} />
-                  ) : undefined))
-                )
+                <span className="flex flex-col gap-1">
+                  {pending ? (
+                    <SceneSwitchPending />
+                  ) : (
+                    (blocked ?? (!app && dialogs.needsSources(entry) ? 'Resolve sources' : null))
+                  )}
+                  <SceneShortcutKeys
+                    sceneId={entry.id}
+                    position={index + 1}
+                    config={settings.globalShortcuts}
+                    platform={runtimeInfo?.platform}
+                  />
+                </span>
               }
               selected={selected}
               thumb={

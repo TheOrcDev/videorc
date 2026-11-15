@@ -95,6 +95,17 @@ async function menu(action: string): Promise<void> {
   await act(async () => (item as HTMLElement).click())
 }
 describe("Studio's saved scenes (plan 210 D6)", () => {
+  it('shows the position key beside its custom key', async () => {
+    mocked.core.savedScenes = [saved()]
+    mocked.core.settings = { globalShortcuts: { scenes: { 'scene-a': 'F13' } } }
+    await render()
+    const card = container.querySelector('[data-saved-scene="scene-a"]')!
+    expect(
+      [...card.querySelectorAll('[data-accelerator]')].map((key) =>
+        key.getAttribute('data-accelerator')
+      )
+    ).toEqual(['Control+Alt+1', 'F13'])
+  })
   it('heads the gallery with Save scene… and New scene…, and never Update or Modified', async () => {
     mocked.core.savedScenes = [saved()]
     mocked.core.activeSavedSceneId = 'scene-a'

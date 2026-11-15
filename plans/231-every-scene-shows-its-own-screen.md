@@ -1097,3 +1097,94 @@ this worktree for the screenshots)
   in 9:16); the stored 9:16 layouts are in `videorc.scenes.v2`. No script in
   `scripts/` sets `lastVerticalPreset`, `simulcastScreenFraming` or
   `simulcastFollowsProgram`.
+
+### S4: keys by position (2026-11-15)
+
+- Added `scene-slot-1` to `scene-slot-9`, with `Control+Alt+N` defaults on
+  macOS and `Control+Alt+Shift+N` on Windows/Linux. Main registers them through
+  the existing owner lifecycle. `globalShortcuts.sceneSlots` holds overrides;
+  a missing entry uses the platform default and `''` releases the key. IPC
+  validates positions 1 to 9. Duplicate checks include the platform defaults.
+- A key resolves the current library position through `sceneAtPosition`, then
+  uses the same `scene:<id>` apply path as a custom key: Follow's hand pick,
+  refusal reasons, and superseding an in-flight switch. Empty positions do
+  nothing. Next/Previous walk scenes only, in library order, wrapping and
+  skipping unavailable sources/apps. Their existing `layout-next` /
+  `layout-previous` action IDs and `layoutNext` / `layoutPrevious` config names
+  stay so saved bindings survive. Their dispatch stays synchronous so a canvas
+  edit in the same turn cancels the pending walk.
+- Per-layout actions, groups, `globalShortcutLayout` and `nextEligibleLayout`
+  are deleted. `layouts` stays typed and accepted by IPC only for S1's migration
+  and downgrade compatibility; none of its keys register. The remote action
+  surface still needs `switchToSceneWithLayout`, so that helper remains for
+  legacy remote requests (D14), with no global-key caller.
+- Settings lists all nine positions with the scene name or `no scene`, then
+  scenes with assigned custom keys. Existing recorder rows still
+  change/clear them. Studio cards and Scene page rows show position and custom
+  keys together, including the words `Another app uses <key>` when registration
+  fails. The shared words come from `global-shortcut-owner.ts`; the new
+  `SceneShortcutKeys` and `scene-shortcuts.ts` live in the existing lazy UI
+  paths. Set key… remains how to create a scene's custom binding.
+
+**Verification:** `pnpm typecheck`, `pnpm lint`, Prettier on the touched files,
+and `git diff --check` pass. The focused Vitest run passed 10 files / 143 tests;
+the standalone `studio-provider.integration.test.ts` run passed all 216 tests.
+The first typecheck found one old per-layout assertion in the shared accelerator
+test; it now checks position/custom ownership and platform defaults instead.
+The first full desktop run failed: an unchanged `unavailable display` provider
+test hit its 5-second timeout, leaving overlapping React `act()` calls and 124
+subsequent failures. No known cloud-resume or quota-toast flake was identified in
+that run. The full rerun, `pnpm --filter @videorc/desktop test --maxWorkers=2
+--minWorkers=1`, passed all 704 files: 8,163 tests passed, 1 skipped, in 371.53 s,
+with no overlapping `act()` warnings. No source changes were needed for this
+timeout cascade. Logs: `desktop-full.log` and `desktop-full-final.log` in S4.
+
+`pnpm build` passed both before and after. `pnpm check:renderer-assets` failed
+both times on the inherited S2 cap overage; the cap is unchanged.
+
+|                         |       raw |    gzip |
+| ----------------------- | --------: | ------: |
+| Before S4 (`960029316`) | 2,381,469 | 489,675 |
+| After S4                | 2,380,657 | 489,492 |
+| Cap                     | 2,365,000 | 487,000 |
+
+S4 removes 812 raw / 183 gzip bytes. The remaining overage is 15,657 raw /
+2,492 gzip bytes, still the owner's budget call. Shadscan baseline and floor
+are 27; the audit command is `pnpm dlx @shadscan/cli@next --json` from
+`apps/desktop`, with the pre-commit result in `S4/shadscan-pre-commit.json`.
+The first attempt from the monorepo root reported an unsupported project;
+running from the desktop package establishes the applicable score.
+
+**macOS and screenshots:** all nine default position keys registered in the
+real Electron app using an isolated profile (`S4/mac-registration.json`), so
+the default-key STOP condition did not occur. The screenshot profile seeds
+`Figma` first, with custom key F13. Both standard capture runs and the focused
+Scenes-group captures passed, and these four PNGs were opened and inspected:
+
+- `/Users/orcdev/projects/plan-231-run/S4/shots/videorc-ui-settings-shortcuts-light.png`
+- `/Users/orcdev/projects/plan-231-run/S4/shots/videorc-ui-settings-shortcuts-dark.png`
+- `/Users/orcdev/projects/plan-231-run/S4/shots/videorc-ui-settings-scenes-light.png`
+- `/Users/orcdev/projects/plan-231-run/S4/shots/videorc-ui-settings-scenes-dark.png`
+
+The standard captures used `VIDEORC_SMOKE_SKIP_PREBUILD=1 node
+scripts/capture-ui-pages.mjs --theme=light|dark
+--out=/Users/orcdev/projects/plan-231-run/S4/shots`; the focused launcher scrolled
+the Scenes fieldset into view and captured each theme (`capture-scenes.log`).
+
+Evidence/logs are under `/Users/orcdev/projects/plan-231-run/S4/`. The screenshot
+apps were stopped and their owned children reaped. The shared checkout's status
+matches the status saved before S4; no work was done there.
+
+**Deviations and owed work:** retained the Next/Previous IDs/config names and
+the legacy remote helper as described above. Windows/Linux defaults and main
+registration have unit coverage; real Windows OS registration is owed to the
+Windows box. S11 owns the heavy recording/remote/preview smokes; none ran in S4.
+Global-key smoke intents must use `scene-slot-*` or `scene:<id>`; retired
+`layout:<preset>` global actions are intentionally rejected.
+
+**What S6 must know:** reuse `SceneShortcutKeys` with the scene ID, its library
+index + 1, `settings.globalShortcuts`, and the platform. It handles both keys,
+cleared positions, scenes after the ninth, and reactive registration conflicts.
+Reordering changes the position key immediately; a custom key stays with the
+scene ID. Settings custom-key rows list assigned keys only. S10 should retain
+the `sceneSlots` storage/registration path when wiring the key HUD.

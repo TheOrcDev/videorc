@@ -261,7 +261,10 @@ export function hydrateScenes(raw: unknown): {
 // The pure reads the Studio, the keys and the remotes share.
 
 /** The scene at a 1-based position: position 1 answers to the first scene key (D5). */
-export function sceneAtPosition(scenes: readonly Scene[], position: number): Scene | undefined {
+export function sceneAtPosition<T extends { id: string }>(
+  scenes: readonly T[],
+  position: number
+): T | undefined {
   return Number.isInteger(position) && position >= 1 ? scenes[position - 1] : undefined
 }
 

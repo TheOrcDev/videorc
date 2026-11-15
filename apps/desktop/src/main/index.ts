@@ -907,7 +907,7 @@ function setGlobalShortcuts(shortcuts: GlobalShortcutsConfig): GlobalShortcutsRe
   // One spelling per platform: a pre-062 hand-typed `Cmd+…` binds Ctrl off
   // macOS, which is what Settings always displayed there.
   return globalShortcutGate.apply(
-    globalShortcutEntries(shortcuts).map(([action, value]) => [
+    globalShortcutEntries(shortcuts, process.platform).map(([action, value]) => [
       action,
       normalizeAccelerator(value, process.platform) ?? value
     ])
