@@ -4,6 +4,7 @@ import { resolve } from 'node:path'
 import tailwindcss from '@tailwindcss/vite'
 import react from '@vitejs/plugin-react'
 import { defineConfig, externalizeDepsPlugin } from 'electron-vite'
+import { build as viteBuild } from 'vite'
 
 import {
   BUILD_FLAGS_FILE_NAME,
@@ -51,6 +52,30 @@ const buildFlagsPlugin = {
   }
 }
 
+// The key HUD's window (plan 231 D20) is its own small build, after the
+// Studio's. As a fifth input it would share React components with the Studio,
+// and Rollup would cut the Studio's eager chunks again (about 2.9 KB more
+// gzip in the eager budget). The dev server serves its page as it is.
+const sceneHudBuildPlugin = {
+  name: 'videorc-scene-hud-build',
+  apply: 'build' as const,
+  async closeBundle(): Promise<void> {
+    await viteBuild({
+      configFile: false,
+      root: resolve('src/renderer'),
+      base: './',
+      logLevel: 'warn',
+      resolve: { alias: { '@': resolve('src/renderer/src') } },
+      plugins: [react(), tailwindcss()],
+      build: {
+        outDir: resolve('out/renderer'),
+        emptyOutDir: false,
+        rollupOptions: { input: { 'scene-hud': resolve('src/renderer/scene-hud.html') } }
+      }
+    })
+  }
+}
+
 export default defineConfig({
   main: {
     define: {
@@ -76,7 +101,7 @@ export default defineConfig({
         '@': resolve('src/renderer/src')
       }
     },
-    plugins: [developmentRendererCspPlugin, react(), tailwindcss()],
+    plugins: [developmentRendererCspPlugin, react(), tailwindcss(), sceneHudBuildPlugin],
     build: {
       rollupOptions: {
         input: {

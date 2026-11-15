@@ -98,8 +98,9 @@ describe('Electron IPC contract', () => {
     // The merged API includes community, Stream Manager screen actions and HTML banners.
     // 180: plan 234 adds resource:reveal-cloud-download (the Library's Show
     // in Finder for a downloaded cloud recording, by its job id).
-    expect(Object.keys(electronInvokeApiMethods)).toHaveLength(180)
-    expect(new Set(Object.values(electronInvokeApiMethods)).size).toBe(180)
+    // 183: plan 231 D20 adds the key HUD's state, its switch and its show.
+    expect(Object.keys(electronInvokeApiMethods)).toHaveLength(183)
+    expect(new Set(Object.values(electronInvokeApiMethods)).size).toBe(183)
     expectTypeOf<ElectronInvokeArgs<'resource:trash-session-deletion'>>().toEqualTypeOf<
       Parameters<VideorcApi['trashSessionDeletion']>
     >()

@@ -2,7 +2,8 @@ import type { ElectronInvokeChannel } from './electron-ipc-contract'
 
 export const RENDERER_ROLE_ARGUMENT_PREFIX = '--videorc-renderer-role='
 
-export type RendererRole = 'main' | 'notes' | 'comments' | 'captions'
+/** `scene-hud` is the key HUD's window (plan 231 D20): it invokes nothing. */
+export type RendererRole = 'main' | 'notes' | 'comments' | 'captions' | 'scene-hud'
 
 const MAIN_ONLY = ['main'] as const
 const MAIN_AND_NOTES = ['main', 'notes'] as const
@@ -241,6 +242,11 @@ export const IPC_INVOKE_ROLES = {
   'captions-window:get-snapshot': MAIN_AND_CAPTIONS,
   'captions-window:push-lines': MAIN_ONLY,
   'captions-window:get-lines': MAIN_ONLY,
+  // The key HUD (plan 231 D20): only the Studio asks; the HUD's own window
+  // only listens to what main sends it.
+  'scene-hud:get-state': MAIN_ONLY,
+  'scene-hud:set-enabled': MAIN_ONLY,
+  'scene-hud:show': MAIN_ONLY,
   'updates:get-status': MAIN_ONLY,
   'updates:check': MAIN_ONLY,
   'updates:download': MAIN_ONLY,
@@ -261,7 +267,13 @@ export function rendererRoleFromArguments(arguments_: readonly string[]): Render
       break
     }
   }
-  return raw === 'main' || raw === 'notes' || raw === 'comments' || raw === 'captions' ? raw : null
+  return raw === 'main' ||
+    raw === 'notes' ||
+    raw === 'comments' ||
+    raw === 'captions' ||
+    raw === 'scene-hud'
+    ? raw
+    : null
 }
 
 export function rendererRoleArgument(role: RendererRole): string {

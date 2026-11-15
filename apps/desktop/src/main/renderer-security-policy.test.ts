@@ -40,6 +40,24 @@ describe('renderer security policy', () => {
       expect(roleCanInvokeChannel(role, 'scheduled-streams:import-thumbnail')).toBe(false)
     }
   })
+  it('gives the key HUD a listen-only window and keeps its asks to the Studio (plan 231 D20)', () => {
+    for (const channel of Object.keys(IPC_INVOKE_ROLES) as (keyof typeof IPC_INVOKE_ROLES)[]) {
+      expect(roleCanInvokeChannel('scene-hud', channel)).toBe(false)
+    }
+    for (const channel of [
+      'scene-hud:get-state',
+      'scene-hud:set-enabled',
+      'scene-hud:show'
+    ] as const) {
+      expect(roleCanInvokeChannel('main', channel)).toBe(true)
+      for (const role of ['notes', 'comments', 'captions', 'scene-hud'] as const) {
+        expect(roleCanInvokeChannel(role, channel)).toBe(false)
+      }
+    }
+    expect(AUXILIARY_API_KEYS['scene-hud']).toEqual(['onSceneHudPresent', 'windowGround'])
+    expect(rendererRoleFromArguments(['--videorc-renderer-role=scene-hud'])).toBe('scene-hud')
+    expect(source('./index.ts')).toContain("registerRendererWindow(window, 'scene-hud')")
+  })
   it('lets only the Studio renderer run a Videorc Camera action (plan 214 E)', () => {
     expect(roleCanInvokeChannel('main', 'virtual-camera:action')).toBe(true)
     for (const role of ['notes', 'comments', 'captions'] as const) {
@@ -634,7 +652,8 @@ describe('renderer security policy', () => {
       '../renderer/index.html',
       '../renderer/comments.html',
       '../renderer/captions.html',
-      '../renderer/notes.html'
+      '../renderer/notes.html',
+      '../renderer/scene-hud.html'
     ]) {
       const html = source(document)
       expect(html).toContain('http-equiv="Content-Security-Policy"')
