@@ -635,6 +635,19 @@ pub struct RecordingDownloadEvent {
     pub error: Option<String>,
 }
 
+// The renderer's string length limit counts UTF-16 code units. Keep whole
+// Unicode scalars without letting supplementary characters reject a snapshot.
+fn download_error_for_wire(error: &str) -> String {
+    let mut units = 0;
+    error
+        .chars()
+        .take_while(|ch| {
+            units += ch.len_utf16();
+            units <= 4096
+        })
+        .collect()
+}
+
 pub(crate) type DownloadEventHook = Arc<dyn Fn(RecordingDownloadEvent) + Send + Sync>;
 type DownloadProgress = Arc<dyn Fn(usize, usize) + Send + Sync>;
 
@@ -656,6 +669,9 @@ const FINISHED_DOWNLOADS_KEPT: usize = 32;
 #[derive(Default)]
 struct DownloadJobsState {
     closing: bool,
+    latest: HashMap<String, RecordingDownloadEvent>,
+    /// Recording ids in terminal-completion order, oldest first.
+    terminal_order: std::collections::VecDeque<String>,
     running: HashMap<String, RunningDownload>,
     /// The MP4 each finished job saved, newest last, by job id: main reveals
     /// one by its id (the Library's Show in Finder), never by a renderer path.
@@ -666,6 +682,35 @@ struct DownloadJobsState {
 pub(crate) struct RecordingDownloadJobs(std::sync::Mutex<DownloadJobsState>);
 
 impl RecordingDownloadJobs {
+    /// Current jobs plus the latest bounded terminal results, for reconnects.
+    pub(crate) fn snapshot(&self) -> Vec<RecordingDownloadEvent> {
+        self.0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .latest
+            .values()
+            .cloned()
+            .collect()
+    }
+
+    fn remember(&self, event: &RecordingDownloadEvent) {
+        let mut jobs = self
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        jobs.terminal_order.retain(|id| id != &event.recording_id);
+        if event.state != DownloadState::Running {
+            jobs.terminal_order.push_back(event.recording_id.clone());
+        }
+        jobs.latest
+            .insert(event.recording_id.clone(), event.clone());
+        while jobs.terminal_order.len() > FINISHED_DOWNLOADS_KEPT {
+            if let Some(id) = jobs.terminal_order.pop_front() {
+                jobs.latest.remove(&id);
+            }
+        }
+    }
+
     fn start<F, Fut>(
         self: &Arc<Self>,
         recording_id: String,
@@ -696,21 +741,27 @@ impl RecordingDownloadJobs {
         let registry = self.clone();
         let key = recording_id.clone();
         let task_key = key.clone();
+        let event = RecordingDownloadEvent {
+            job_id,
+            recording_id,
+            state: DownloadState::Running,
+            done_segments: Some(0),
+            total_segments: None,
+            path: None,
+            error: None,
+        };
+        // A retry is running again; its previous terminal must not evict it.
+        jobs.terminal_order.retain(|id| id != &event.recording_id);
+        // The snapshot must know the job before its start RPC can return.
+        jobs.latest
+            .insert(event.recording_id.clone(), event.clone());
         let task = tokio::spawn(async move {
             use futures_util::FutureExt as _;
-            let event = RecordingDownloadEvent {
-                job_id,
-                recording_id,
-                state: DownloadState::Running,
-                done_segments: Some(0),
-                total_segments: None,
-                path: None,
-                error: None,
-            };
             emit(event.clone());
             let progress: DownloadProgress = {
                 let emit = emit.clone();
                 let event = event.clone();
+                let registry = registry.clone();
                 let last = std::sync::Mutex::new(None::<std::time::Instant>);
                 Arc::new(move |done, total| {
                     let mut last = last.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -719,11 +770,13 @@ impl RecordingDownloadJobs {
                         return;
                     }
                     *last = Some(now);
-                    emit(RecordingDownloadEvent {
+                    let progress = RecordingDownloadEvent {
                         done_segments: Some(done),
                         total_segments: Some(total),
                         ..event.clone()
-                    });
+                    };
+                    registry.remember(&progress);
+                    emit(progress);
                 })
             };
             let outcome = std::panic::AssertUnwindSafe(work(DownloadControl {
@@ -755,7 +808,7 @@ impl RecordingDownloadJobs {
                 Ok(Err(error)) => (
                     DownloadState::Failed,
                     None,
-                    Some(error.to_string().chars().take(4096).collect()),
+                    Some(download_error_for_wire(&error.to_string())),
                 ),
                 Err(_) => (
                     DownloadState::Failed,
@@ -763,14 +816,16 @@ impl RecordingDownloadJobs {
                     Some("The recording download stopped. Try again.".to_string()),
                 ),
             };
-            emit(RecordingDownloadEvent {
+            let terminal = RecordingDownloadEvent {
                 state,
                 path,
                 error,
                 done_segments: None,
                 total_segments: None,
                 ..event
-            });
+            };
+            registry.remember(&terminal);
+            emit(terminal);
             registry
                 .0
                 .lock()
@@ -2169,6 +2224,22 @@ impl<W: CloudWebApi, C: ControlConnector> ControlLoop<W, C> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn download_error_respects_the_renderer_utf16_limit() {
+        let supplementary = super::download_error_for_wire(&"😀".repeat(4096));
+        assert_eq!(supplementary.encode_utf16().count(), 4096);
+        assert_eq!(supplementary.chars().count(), 2048);
+        let odd_boundary = format!("{}😀tail", "x".repeat(4095));
+        assert_eq!(
+            super::download_error_for_wire(&odd_boundary),
+            "x".repeat(4095)
+        );
+        assert_eq!(
+            super::download_error_for_wire(&"x".repeat(4097)),
+            "x".repeat(4096)
+        );
+    }
+
     use super::*;
 
     const KEY: &str = "ytkey-SECRET-0f3a9b";
@@ -2643,6 +2714,10 @@ rtmps://h/app/key 'http://x.test/y'";
             })
             .unwrap();
         assert_eq!(first, duplicate);
+        let snapshot = jobs.snapshot();
+        assert_eq!(snapshot.len(), 1);
+        assert_eq!(snapshot[0].job_id, first.job_id);
+        assert_eq!(snapshot[0].state, DownloadState::Running);
         ready.await.unwrap();
         jobs.cancel(&first.job_id);
         // Shutdown owns the join even if cancellation was requested by RPC.
@@ -2652,10 +2727,65 @@ rtmps://h/app/key 'http://x.test/y'";
         assert_eq!(events.len(), 2);
         assert_eq!(events[0].state, DownloadState::Running);
         assert_eq!(events[1].state, DownloadState::Cancelled);
+        // The renderer can recover the terminal event even after Cancel
+        // becomes a no-op because the running job has already disappeared.
+        jobs.cancel(&first.job_id);
+        let snapshot = jobs.snapshot();
+        assert_eq!(snapshot.len(), 1);
+        assert_eq!(snapshot[0].state, DownloadState::Cancelled);
         let wire = serde_json::to_value(&events[1]).unwrap();
         for absent in ["path", "error", "doneSegments", "totalSegments"] {
             assert!(wire.get(absent).is_none());
         }
+    }
+
+    #[test]
+    fn download_snapshots_evict_oldest_completions_and_preserve_running_retries() {
+        let jobs = RecordingDownloadJobs::default();
+        let event = |id: usize, state| RecordingDownloadEvent {
+            job_id: format!("job_{id}"),
+            recording_id: format!("rec_{id}"),
+            state,
+            done_segments: None,
+            total_segments: None,
+            path: None,
+            error: None,
+        };
+        for id in 0..32 {
+            jobs.remember(&event(id, DownloadState::Done));
+        }
+        // Retry the oldest recording. It no longer occupies a terminal slot.
+        jobs.remember(&event(0, DownloadState::Running));
+        jobs.remember(&event(32, DownloadState::Failed));
+        jobs.remember(&event(33, DownloadState::Cancelled));
+        let snapshot = jobs.snapshot();
+        assert_eq!(snapshot.len(), 33);
+        assert!(
+            snapshot
+                .iter()
+                .any(|e| e.recording_id == "rec_0" && e.state == DownloadState::Running)
+        );
+        assert!(!snapshot.iter().any(|e| e.recording_id == "rec_1"));
+        assert!(snapshot.iter().any(|e| e.recording_id == "rec_32"));
+        // Completion of the retried job is newest, independent of recording id.
+        jobs.remember(&event(0, DownloadState::Done));
+        let snapshot = jobs.snapshot();
+        assert_eq!(snapshot.len(), 32);
+        assert!(!snapshot.iter().any(|e| e.recording_id == "rec_2"));
+        assert!(
+            snapshot
+                .iter()
+                .any(|e| e.recording_id == "rec_0" && e.state == DownloadState::Done)
+        );
+        assert_eq!(
+            jobs.0
+                .lock()
+                .unwrap()
+                .terminal_order
+                .back()
+                .map(String::as_str),
+            Some("rec_0")
+        );
     }
 
     #[tokio::test]

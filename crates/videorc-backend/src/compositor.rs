@@ -9618,6 +9618,15 @@ struct MissingSourcePlaceholderBgra {
     height: usize,
 }
 
+/// Pixel/ownership fixtures publish one frame instead of a continuous camera.
+/// Keep that frame fresh even when other CPU-heavy tests deschedule the fixture
+/// for longer than the real two-second cutoff. `Instant::elapsed` saturates at
+/// zero for this future timestamp. Time/staleness tests use their own instants.
+#[cfg(test)]
+fn sustained_camera_fixture_time() -> Instant {
+    Instant::now() + Duration::from_secs(60 * 60)
+}
+
 fn source_frame_is_too_stale(captured_at: Instant) -> bool {
     captured_at.elapsed() >= COMPOSITOR_MISSING_SOURCE_PLACEHOLDER_AFTER
 }
@@ -24760,7 +24769,7 @@ mod tests {
             &video,
         )
         .await;
-        let captured_at = Instant::now() - Duration::from_millis(77);
+        let captured_at = sustained_camera_fixture_time();
         crate::preview_camera::test_publish_camera_pixels(&state, 7, [0, 0, 255, 255], captured_at)
             .await;
         let mut sources = CompositorLiveSources::default();
@@ -24948,7 +24957,7 @@ mod tests {
             &tiny_video(),
         )
         .await;
-        let new_capture = Instant::now();
+        let new_capture = sustained_camera_fixture_time();
         crate::preview_camera::test_publish_camera_pixels(
             &state,
             43,

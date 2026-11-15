@@ -101,7 +101,8 @@
       "destination-no-app",
       "destination-trailing-slash",
       "destination-key-too-short",
-      "destination-changed"
+      "destination-changed",
+      "destination-ambiguous"
     ],
     "minKeyPieceChars": 12
   },

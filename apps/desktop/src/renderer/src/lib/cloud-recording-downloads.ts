@@ -17,6 +17,8 @@ import { toastUserError, UserFacingError } from '@/lib/user-error'
 // their progress again when the Library opens next.
 
 let downloads: CloudDownloads = new Map()
+const revisions = new Map<string, number>()
+let snapshotGeneration = 0
 const listeners = new Set<() => void>()
 let attached: { client: BackendClient; off: () => void } | null = null
 /** Open Cloud recordings sections: while one is open, the row is the news. */
@@ -82,11 +84,49 @@ function announce(event: CloudRecordingDownloadEvent): void {
 export function attachCloudDownloads(client: BackendClient | null): void {
   if (!client || attached?.client === client) return
   attached?.off()
+  const reconcile = async (): Promise<void> => {
+    const generation = ++snapshotGeneration
+    const before = new Map(revisions)
+    try {
+      const jobs = await client.requestTyped('cloud.recordings.downloads', undefined)
+      if (attached?.client !== client || generation !== snapshotGeneration) return
+      let next = new Map(downloads)
+      const unchanged = (id: string): boolean => (revisions.get(id) ?? 0) === (before.get(id) ?? 0)
+      for (const [id, view] of next) {
+        if (
+          view.state === 'running' &&
+          unchanged(id) &&
+          !jobs.some((job) => job.recordingId === id && job.jobId === view.jobId)
+        )
+          next.delete(id)
+      }
+      for (const event of jobs)
+        if (unchanged(event.recordingId)) next = new Map(reduceCloudDownload(next, event))
+      publish(next)
+    } catch {
+      /* The next ready/lagged event or Cancel retries reconciliation. */
+    }
+  }
   const off = client.on('cloud.recordings.download', (event) => {
+    revisions.set(event.recordingId, (revisions.get(event.recordingId) ?? 0) + 1)
     publish(reduceCloudDownload(downloads, event))
     announce(event)
   })
-  attached = { client, off }
+  const ready = client.on('backend.ready', () => {
+    void reconcile()
+  })
+  const lagged = client.on('events.lagged', () => {
+    void reconcile()
+  })
+  attached = {
+    client,
+    off: () => {
+      off()
+      ready()
+      lagged()
+    }
+  }
+  void reconcile()
 }
 
 /**
@@ -101,17 +141,20 @@ export async function startCloudDownload(
   outputDirectoryCapability?: string
 ): Promise<void> {
   attachCloudDownloads(client)
+  revisions.set(recordingId, (revisions.get(recordingId) ?? 0) + 1)
   publish(new Map(downloads).set(recordingId, { state: 'starting' }))
   try {
     const { jobId } = await client.requestTyped('cloud.recordings.download', {
       id: recordingId,
       ...(outputDirectoryCapability ? { outputDirectoryCapability } : {})
     })
+    revisions.set(recordingId, (revisions.get(recordingId) ?? 0) + 1)
     // An event may have come first (running, or already done): it wins.
     if (downloads.get(recordingId)?.state === 'starting') {
       publish(new Map(downloads).set(recordingId, { state: 'running', jobId }))
     }
   } catch (error) {
+    revisions.set(recordingId, (revisions.get(recordingId) ?? 0) + 1)
     publish(new Map(downloads).set(recordingId, { state: 'failed' }))
     const known = knownCloudDownloadRefusal(error instanceof Error ? error.message : undefined)
     toastUserError(known ? new UserFacingError(known) : error, CONTEXT, {
@@ -124,6 +167,9 @@ export async function startCloudDownload(
 export async function cancelCloudDownload(client: BackendClient, jobId: string): Promise<void> {
   try {
     await client.requestTyped('cloud.recordings.cancelDownload', { jobId })
+    attached?.off()
+    attached = null
+    attachCloudDownloads(client)
   } catch (error) {
     toastUserError(error, { action: 'cancel', object: 'the download' })
   }
@@ -139,6 +185,8 @@ export function resetCloudDownloads(): void {
   attached?.off()
   attached = null
   downloads = new Map()
+  revisions.clear()
+  snapshotGeneration += 1
   listeners.clear()
   openViews = 0
 }

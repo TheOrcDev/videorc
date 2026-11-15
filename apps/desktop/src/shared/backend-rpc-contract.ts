@@ -606,6 +606,7 @@ export interface BackendRpcMethodMap {
     CloudRecordingDownloadParams,
     CloudRecordingDownload
   >
+  'cloud.recordings.downloads': BackendRpcDefinition<undefined, CloudRecordingDownloadEvent[]>
   'cloud.recordings.cancelDownload': BackendRpcDefinition<{ jobId: string }, { ok: true }>
   /** The Program monitor's feed (R-G5). */
   'cloud.return.set': BackendRpcDefinition<{ open: boolean }, CloudStatus>
@@ -6923,6 +6924,10 @@ const runtimeContracts = {
   'cloud.recordings.download': {
     params: cloudRecordingDownloadParamsSchema,
     result: cloudRecordingDownloadSchema
+  },
+  'cloud.recordings.downloads': {
+    params: undefinedSchema,
+    result: arraySchema(cloudRecordingDownloadEventSchema)
   },
   'cloud.recordings.cancelDownload': {
     params: objectSchema(

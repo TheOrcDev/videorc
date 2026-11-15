@@ -4420,10 +4420,13 @@ describe('cloud recording download jobs', () => {
     for (const state of ['running', 'done', 'failed', 'cancelled']) {
       const event = { jobId: 'job_one', recordingId: 'rec_one', state }
       expect(validateBackendEventPayload('cloud.recordings.download', event)).toEqual(event)
+      expect(validateBackendRpcResult('cloud.recordings.downloads', [event])).toEqual([event])
     }
     expect(() =>
       validateBackendRpcResult('cloud.recordings.download', { path: '/tmp/old.mp4' })
     ).toThrow()
+    expect(validateBackendRpcParams('cloud.recordings.downloads', undefined)).toBeUndefined()
+    expect(() => validateBackendRpcResult('cloud.recordings.downloads', [{ path: null }])).toThrow()
     for (const bad of [
       { state: 'other' },
       { path: null },

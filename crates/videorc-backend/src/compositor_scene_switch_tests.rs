@@ -1364,7 +1364,7 @@ async fn source_iso_artifact_fixture() {
                 &state,
                 tick + 1,
                 [0, 0, 100 + (tick % 120) as u8, 255],
-                Instant::now(),
+                sustained_camera_fixture_time(),
             )
             .await;
             let [gpu, iso_screen_gpu, iso_camera_gpu] = gpus.as_mut_slice() else {
@@ -1864,7 +1864,7 @@ async fn source_edit_publication_refuses_stale_camera_and_failed_auxiliary_outpu
             if case == "stale-camera" {
                 Instant::now() - Duration::from_secs(5)
             } else {
-                Instant::now()
+                sustained_camera_fixture_time()
             },
         )
         .await;
@@ -2420,7 +2420,7 @@ async fn hidden_screen_frost_reaches_every_leg() {
             &state,
             2,
             [0, 0, 200, 255],
-            Instant::now(),
+            sustained_camera_fixture_time(),
         )
         .await;
         hide_screen_render(
@@ -2473,7 +2473,7 @@ async fn hidden_screen_frost_reaches_every_leg() {
                 &state,
                 tick + 1,
                 [0, 0, 200, 255],
-                Instant::now(),
+                sustained_camera_fixture_time(),
             )
             .await;
             hide_screen_render(
