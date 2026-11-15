@@ -36632,7 +36632,7 @@ mod tests {
                 crate::protocol::LayoutPreset::ScreenOnly
             } else { crate::protocol::LayoutPreset::CameraOnly };
             let applied = crate::live_layout::apply_layout_live(&state, crate::protocol::SceneLayoutApplyParams {
-                intent_id: None, simulcast_leg: false,
+                intent_id: None, simulcast_leg: false, retain_screen: None,
                 config: crate::protocol::SceneConfigParams { sources: params.sources.clone(), layout,
                     video: Some(params.output.video.clone()), background: None,
                     protected_overlay_window_ids: vec![], transition_ms: Some(100),

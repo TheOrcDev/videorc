@@ -1,0 +1,73 @@
+{
+  "legacy": {
+    "intentId": 1,
+    "sources": {},
+    "layout": {
+      "layoutPreset": "screen-camera",
+      "cameraTransformMode": "preset",
+      "cameraTransform": null,
+      "cameraCorner": "bottom-right",
+      "cameraSize": "medium",
+      "cameraShape": "rectangle",
+      "cameraCornerRadiusPct": 12,
+      "cameraAspect": "source",
+      "cameraChromaKeyEnabled": false,
+      "cameraChromaKeyColor": "#00FF00",
+      "cameraChromaKeySimilarityPct": 40,
+      "cameraChromaKeySmoothnessPct": 8,
+      "cameraChromaKeySpillPct": 10,
+      "cameraMargin": 32,
+      "cameraFit": "fill",
+      "cameraMirror": false,
+      "cameraZoom": 100,
+      "cameraOffsetX": 0,
+      "cameraOffsetY": 0,
+      "sideBySideSplit": "70-30",
+      "sideBySideCameraSide": "right",
+      "verticalScreenFraming": "fill",
+      "horizontalScreenFraming": "fit",
+      "arrangementMode": "preset",
+      "sourceTransformOverrides": {},
+      "sourceVisibility": {
+        "camera": true,
+        "capture": true
+      }
+    }
+  },
+  "retain": {
+    "intentId": 1,
+    "sources": {},
+    "layout": {
+      "layoutPreset": "screen-camera",
+      "cameraTransformMode": "preset",
+      "cameraTransform": null,
+      "cameraCorner": "bottom-right",
+      "cameraSize": "medium",
+      "cameraShape": "rectangle",
+      "cameraCornerRadiusPct": 12,
+      "cameraAspect": "source",
+      "cameraChromaKeyEnabled": false,
+      "cameraChromaKeyColor": "#00FF00",
+      "cameraChromaKeySimilarityPct": 40,
+      "cameraChromaKeySmoothnessPct": 8,
+      "cameraChromaKeySpillPct": 10,
+      "cameraMargin": 32,
+      "cameraFit": "fill",
+      "cameraMirror": false,
+      "cameraZoom": 100,
+      "cameraOffsetX": 0,
+      "cameraOffsetY": 0,
+      "sideBySideSplit": "70-30",
+      "sideBySideCameraSide": "right",
+      "verticalScreenFraming": "fill",
+      "horizontalScreenFraming": "fit",
+      "arrangementMode": "preset",
+      "sourceTransformOverrides": {},
+      "sourceVisibility": {
+        "camera": true,
+        "capture": true
+      }
+    },
+    "retainScreen": true
+  }
+}

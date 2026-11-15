@@ -145,3 +145,10 @@ Optional flags are omitted, never null. Both languages read this fixture:
 
 - Rust: `cargo test -p videorc-backend scene_pictures`
 - TypeScript: `pnpm --filter @videorc/desktop test -- backend-rpc-contract.test.ts`
+
+## `scene-layout-retention.json`
+
+Plan 231 D18's layout request pair: legacy omission and `retainScreen: true`,
+shared by preview/live. It prevents retirement only and never requests startup.
+Rust: `cargo test -p videorc-backend retain_screen`; TypeScript:
+`pnpm --filter @videorc/desktop exec vitest run src/shared/backend-rpc-contract.test.ts`.

@@ -515,12 +515,14 @@ export interface BackendRpcMethodMap {
   'scene.get': BackendRpcDefinition<undefined, Scene>
   'scene.load_from_capture_config': BackendRpcDefinition<SceneConfigParams, SceneCommitStatus>
   'scene.layout.apply_preview': BackendRpcDefinition<
-    SceneConfigParams & { intentId: number },
+    SceneConfigParams & { intentId: number; retainScreen?: true },
     LayoutTransactionResult
   >
   'scene.layout.apply_live': BackendRpcDefinition<
     SceneConfigParams & {
       intentId: number
+      /** Keep an existing screen for retirement only; never start it. */
+      retainScreen?: true
       /** Target the vertical simulcast leg only (refused when none runs). */
       simulcastLeg?: boolean
     },
@@ -2018,7 +2020,8 @@ const layoutTransactionParamsSchema = runtimeSchema<unknown>(
     if (typeof value !== 'object' || value === null || Array.isArray(value)) {
       return sceneConfigSchema.parse(value, path)
     }
-    const { intentId, ...sceneConfig } = value as Record<string, unknown>
+    const { intentId, retainScreen, ...sceneConfig } = value as Record<string, unknown>
+    optionalSchema(literalSchema(true)).parse(retainScreen, `${path}.retainScreen`)
     numberSchema({ integer: true, min: 1 }).parse(intentId, `${path}.intentId`)
     sceneConfigSchema.parse(sceneConfig, path)
     return value

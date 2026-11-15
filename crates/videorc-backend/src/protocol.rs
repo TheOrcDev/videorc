@@ -1141,8 +1141,27 @@ pub struct SceneLayoutApplyParams {
     /// turning the idle program into the portrait leg scene.
     #[serde(default)]
     pub simulcast_leg: bool,
+    /// Retirement only: keep an existing screen capture; never demand/start it.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_retain_screen"
+    )]
+    pub retain_screen: Option<bool>,
     #[serde(flatten)]
     pub config: SceneConfigParams,
+}
+
+fn deserialize_retain_screen<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<bool>, D::Error> {
+    if bool::deserialize(deserializer)? {
+        Ok(Some(true))
+    } else {
+        Err(serde::de::Error::custom(
+            "retainScreen must be true when present",
+        ))
+    }
 }
 
 /// How to finish a transform edit after validating its numeric values.

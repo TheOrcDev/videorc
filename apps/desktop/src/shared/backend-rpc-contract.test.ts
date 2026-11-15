@@ -4597,3 +4597,22 @@ describe('Scene pictures contract (plan 231 S5)', () => {
       expect(() => validateBackendRpcResult('sources.scene_pictures', result)).toThrow()
   })
 })
+
+describe('Retirement-only screen retention (plan 231 D18)', () => {
+  const fixture = JSON.parse(
+    readFileSync(
+      new URL('../../../../protocol-fixtures/scene-layout-retention.json', import.meta.url),
+      'utf8'
+    )
+  )
+  it('accepts legacy omission and retainScreen true on preview and live', () => {
+    for (const method of ['scene.layout.apply_preview', 'scene.layout.apply_live'] as const) {
+      for (const params of [fixture.legacy, fixture.retain])
+        expect(validateBackendRpcParams(method, params)).toEqual(params)
+      for (const retainScreen of [false, null, 'true', 1])
+        expect(() =>
+          validateBackendRpcParams(method, { ...fixture.legacy, retainScreen })
+        ).toThrow()
+    }
+  })
+})

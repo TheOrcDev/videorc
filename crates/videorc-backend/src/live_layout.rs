@@ -569,6 +569,7 @@ pub async fn apply_layout_live(
         None,
         "layout switch",
         request.intent_id,
+        request.retain_screen == Some(true),
     )
     .await
 }
@@ -587,6 +588,7 @@ pub async fn apply_layout_preview(
         None,
         "preview layout switch",
         request.intent_id,
+        request.retain_screen == Some(true),
     )
     .await
 }
@@ -670,6 +672,7 @@ pub async fn apply_source_device_switch_live(
         None,
         "source device switch",
         None,
+        false,
     )
     .await
 }
@@ -1101,6 +1104,7 @@ async fn apply_scene_transaction(
     target_sources_override: Option<&SourceSelection>,
     action_label: &'static str,
     requested_intent_id: Option<u64>,
+    retain_screen: bool,
 ) -> Result<LiveLayoutApplyStatus> {
     if let Some(blocker) = preset_selection_blocker(&params) {
         return Err(blocker.into());
@@ -1109,6 +1113,11 @@ async fn apply_scene_transaction(
     let target_sources = target_sources_override.unwrap_or(&params.sources);
     let scene = scene_from_capture_config(params.clone());
     let needs = required_scene_sources(&scene);
+    // Keep composition/readiness separate: retention may only prevent a stop.
+    let retirement_needs = SceneSourceNeeds {
+        screen: needs.screen || retain_screen,
+        ..needs
+    };
 
     // Orientation classes imply the canvas (vertical = portrait) and the
     // encoder canvas is fixed at session start — crossing classes mid-session
@@ -1147,14 +1156,14 @@ async fn apply_scene_transaction(
     let intent_id = begin_layout_intent_owned(
         state,
         requested_intent_id,
-        needs,
+        retirement_needs,
         None,
         Some(&params.sources),
     )
     .await?;
     let session_active = state.recording.lock().await.is_some();
-    // Plan 216 D1: readiness covers only what this change adds. The full
-    // `needs` still owns the intent, retirement and the geometry resync below.
+    // Plan 216 D1: readiness covers only composition additions. Retention
+    // owns intent/retirement only; `needs` alone owns readiness and resync.
     let readiness = {
         let camera = preview_camera_status(state).await;
         let screen = preview_screen_status(state).await;
@@ -1181,7 +1190,7 @@ async fn apply_scene_transaction(
             ApplyMode::Hot => {
                 let status =
                     commit_scene_for_intent(state, intent_id, &scene, &params, None).await?;
-                retire_unused_sources_after_commit(state, intent_id, needs).await;
+                retire_unused_sources_after_commit(state, intent_id, retirement_needs).await;
                 resync_camera_capture_geometry_after_commit(state, intent_id, &params, needs).await;
                 Ok(layout_apply_status(
                     intent_id,
@@ -1230,7 +1239,7 @@ async fn apply_scene_transaction(
                     Some(message.clone()),
                 )
                 .await?;
-                retire_unused_sources_after_commit(state, intent_id, needs).await;
+                retire_unused_sources_after_commit(state, intent_id, retirement_needs).await;
                 resync_camera_capture_geometry_after_commit(state, intent_id, &params, needs).await;
                 Ok(layout_apply_status(
                     intent_id,
@@ -2743,6 +2752,7 @@ mod tests {
             SceneLayoutApplyParams {
                 intent_id: Some(1),
                 simulcast_leg: false,
+                retain_screen: None,
                 config: params.clone(),
             },
         )
@@ -3046,6 +3056,7 @@ mod tests {
                 SceneLayoutApplyParams {
                     intent_id: Some(3),
                     simulcast_leg: false,
+                    retain_screen: None,
                     config: config(LayoutPreset::CameraOnly, false, true)
                 }
             )
@@ -3060,6 +3071,169 @@ mod tests {
             .unwrap();
         assert_eq!(after.confirmed, committed.confirmed);
         assert_eq!(after.source_revision, committed.source_revision);
+    }
+
+    async fn retain_screen_fixture(
+        live: bool,
+        running_screen: bool,
+    ) -> (AppState, SceneConfigParams) {
+        let state = test_state();
+        if live {
+            *state.recording.lock().await =
+                Some(crate::recording::test_active_recording_stub("retain"));
+        }
+        let mut params = config(LayoutPreset::CameraOnly, true, true);
+        let video = params.video.as_mut().unwrap();
+        video.width = 64;
+        video.height = 36;
+        crate::preview_camera::test_install_live_camera_for_layout(
+            &state,
+            params.sources.camera_id.as_deref().unwrap(),
+            &params.layout,
+            video,
+        )
+        .await;
+        if running_screen {
+            crate::preview_screen::test_install_live_screen_generation(
+                &state,
+                params.sources.screen_id.as_deref().unwrap(),
+                1,
+                1,
+                video,
+            )
+            .await;
+        }
+        if live {
+            state
+                .live_source_switch
+                .lock()
+                .unwrap()
+                .start("retain".into(), params.sources.clone());
+        }
+        (state, params)
+    }
+
+    async fn apply_retain_screen_fixture(
+        state: &AppState,
+        config: SceneConfigParams,
+        live: bool,
+        intent_id: u64,
+        retain_screen: Option<bool>,
+    ) -> LiveLayoutApplyStatus {
+        let request = SceneLayoutApplyParams {
+            intent_id: Some(intent_id),
+            simulcast_leg: false,
+            retain_screen,
+            config,
+        };
+        if live {
+            apply_layout_live(state, request).await
+        } else {
+            apply_layout_preview(state, request).await
+        }
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn retain_screen_preserves_capture_and_a_later_unflagged_commit_retires_it() {
+        for live in [false, true] {
+            let (state, params) = retain_screen_fixture(live, true).await;
+            let before = crate::preview_screen::preview_screen_frame_source(&state)
+                .await
+                .unwrap();
+            let applied =
+                apply_retain_screen_fixture(&state, params.clone(), live, 1, Some(true)).await;
+            assert!(applied.applied);
+            assert!(
+                !required_scene_sources(&applied.scene).screen,
+                "retention must not change composition"
+            );
+            assert!(state.layout_intents.lock().await.latest_needs_screen);
+            // Even an already queued retirement cannot cross this intent's fence.
+            retire_unused_sources_after_commit(&state, 1, required_scene_sources(&applied.scene))
+                .await;
+            assert_eq!(
+                crate::preview_screen::preview_screen_frame_source(&state)
+                    .await
+                    .unwrap()
+                    .generation(),
+                before.generation()
+            );
+            apply_retain_screen_fixture(&state, params, live, 2, None).await;
+            assert!(!state.layout_intents.lock().await.latest_needs_screen);
+            assert!(
+                crate::preview_screen::preview_screen_frame_source(&state)
+                    .await
+                    .is_none()
+            );
+            crate::preview_camera::stop_preview_camera(&state).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn retain_screen_absent_keeps_existing_retirement_behavior() {
+        for live in [false, true] {
+            let (state, params) = retain_screen_fixture(live, true).await;
+            apply_retain_screen_fixture(&state, params, live, 1, None).await;
+            assert!(
+                crate::preview_screen::preview_screen_frame_source(&state)
+                    .await
+                    .is_none()
+            );
+            crate::preview_camera::stop_preview_camera(&state).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn retain_screen_without_a_running_screen_never_starts_one() {
+        for live in [false, true] {
+            let (state, params) = retain_screen_fixture(live, false).await;
+            let before = crate::preview_screen::preview_screen_status(&state).await;
+            let applied = apply_retain_screen_fixture(&state, params, live, 1, Some(true)).await;
+            assert!(applied.applied);
+            assert_ne!(
+                applied.mode, "warm",
+                "retention cannot enter screen warm start"
+            );
+            assert!(
+                crate::preview_screen::preview_screen_frame_source(&state)
+                    .await
+                    .is_none()
+            );
+            assert_eq!(
+                serde_json::to_value(crate::preview_screen::preview_screen_status(&state).await)
+                    .unwrap(),
+                serde_json::to_value(before).unwrap()
+            );
+            crate::preview_camera::stop_preview_camera(&state).await;
+        }
+    }
+
+    #[test]
+    fn retain_screen_wire_contract_omits_absence_and_accepts_only_true() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../protocol-fixtures/scene-layout-retention.json"
+        ))
+        .unwrap();
+        for key in ["legacy", "retain"] {
+            let wire = fixture[key].clone();
+            let request: SceneLayoutApplyParams = serde_json::from_value(wire.clone()).unwrap();
+            assert_eq!(
+                request.retain_screen,
+                if key == "retain" { Some(true) } else { None }
+            );
+            let encoded = serde_json::to_value(request).unwrap();
+            assert_eq!(encoded.get("retainScreen"), wire.get("retainScreen"));
+        }
+        for value in [
+            serde_json::json!(false),
+            serde_json::Value::Null,
+            serde_json::json!("true"),
+        ] {
+            let mut wire = fixture["legacy"].clone();
+            wire["retainScreen"] = value;
+            assert!(serde_json::from_value::<SceneLayoutApplyParams>(wire).is_err());
+        }
     }
 
     #[tokio::test]
@@ -3104,6 +3278,7 @@ mod tests {
                 SceneLayoutApplyParams {
                     intent_id: Some(1),
                     simulcast_leg: false,
+                    retain_screen: None,
                     config: params,
                 },
             )
@@ -3489,6 +3664,7 @@ mod tests {
             SceneLayoutApplyParams {
                 intent_id: Some(1),
                 simulcast_leg: false,
+                retain_screen: None,
                 config: params,
             },
         )
@@ -3768,6 +3944,7 @@ mod tests {
             SceneLayoutApplyParams {
                 intent_id: Some(41),
                 simulcast_leg: false,
+                retain_screen: None,
                 config: vertical,
             },
         )
@@ -3809,6 +3986,7 @@ mod tests {
         let leg_request = |config: SceneConfigParams| SceneLayoutApplyParams {
             intent_id: Some(12),
             simulcast_leg: true,
+            retain_screen: None,
             config,
         };
         let program_before = {
@@ -3897,6 +4075,7 @@ mod tests {
             SceneLayoutApplyParams {
                 intent_id: Some(7),
                 simulcast_leg: false,
+                retain_screen: None,
                 config: config(LayoutPreset::VerticalCameraBottom, true, true),
             },
         )
@@ -4562,6 +4741,7 @@ mod tests {
             SceneLayoutApplyParams {
                 intent_id: Some(1),
                 simulcast_leg: false,
+                retain_screen: None,
                 config: config(LayoutPreset::SideBySide, true, false),
             },
         )
@@ -6132,6 +6312,7 @@ mod tests {
             SceneLayoutApplyParams {
                 intent_id: Some(1),
                 simulcast_leg: false,
+                retain_screen: None,
                 config: params.clone(),
             },
         )
@@ -6158,6 +6339,7 @@ mod tests {
             SceneLayoutApplyParams {
                 intent_id: Some(2),
                 simulcast_leg: false,
+                retain_screen: None,
                 config: freeform_arrangement_of(&params, &installed.scene),
             },
         )
@@ -6204,6 +6386,7 @@ mod tests {
             SceneLayoutApplyParams {
                 intent_id: Some(1),
                 simulcast_leg: false,
+                retain_screen: None,
                 config: screen_only.clone(),
             },
         )
@@ -6234,6 +6417,7 @@ mod tests {
             SceneLayoutApplyParams {
                 intent_id: Some(2),
                 simulcast_leg: false,
+                retain_screen: None,
                 config: with_camera,
             },
         )
@@ -6389,6 +6573,7 @@ mod tests {
             SceneLayoutApplyParams {
                 intent_id: Some(1),
                 simulcast_leg: false,
+                retain_screen: None,
                 config: screen_only,
             },
         )
@@ -6409,6 +6594,7 @@ mod tests {
             SceneLayoutApplyParams {
                 intent_id: Some(2),
                 simulcast_leg: false,
+                retain_screen: None,
                 config: with_camera.clone(),
             },
         )
@@ -6442,6 +6628,7 @@ mod tests {
             SceneLayoutApplyParams {
                 intent_id: Some(3),
                 simulcast_leg: false,
+                retain_screen: None,
                 config: with_camera,
             },
         )
