@@ -36,12 +36,17 @@ export function previewStartupSegmentState(
  * whenever the step changes and runs while the card is mounted.
  */
 export function usePreviewStartupStalled(step: PreviewStartupStep): boolean {
-  const [stalledStep, setStalledStep] = useState<PreviewStartupStep | null>(null)
+  const [clock, setClock] = useState({ step, stalled: false })
+  // A reconnect can revisit a step that stalled earlier. Forget that visit
+  // before rendering its warning; the new visit gets its own full budget.
+  if (clock.step !== step) {
+    setClock({ step, stalled: false })
+  }
   useEffect(() => {
-    const timer = setTimeout(() => setStalledStep(step), PREVIEW_STARTUP_STALL_MS)
+    const timer = setTimeout(() => setClock({ step, stalled: true }), PREVIEW_STARTUP_STALL_MS)
     return () => clearTimeout(timer)
   }, [step])
-  return stalledStep === step
+  return clock.step === step && clock.stalled
 }
 
 /**
