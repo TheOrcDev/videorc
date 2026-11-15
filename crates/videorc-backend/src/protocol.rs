@@ -2683,13 +2683,18 @@ pub struct WindowsD3d11MediaStageTimingDiagnostics {
     pub nv12_pass: WindowsD3d11StageTimingDiagnostics,
     #[serde(default)]
     pub fence_signal: WindowsD3d11StageTimingDiagnostics,
-    /// One encoder submit command, including the events it collects.
+    /// On each encoder's own worker thread, not the media thread: an input
+    /// the media thread accepted, waiting to be submitted (the inputs ahead
+    /// of it and any wait for the transform's input credit).
+    #[serde(default)]
+    pub encoder_queue_wait: WindowsD3d11StageTimingDiagnostics,
+    /// One submit on the encoder worker, including the events it collects.
     #[serde(default)]
     pub encoder_submit: WindowsD3d11StageTimingDiagnostics,
-    /// The transform's `ProcessInput` alone.
+    /// The transform's `ProcessInput` alone, on the encoder worker.
     #[serde(default)]
     pub encoder_process_input: WindowsD3d11StageTimingDiagnostics,
-    /// One encoder poll command.
+    /// One encoder worker poll that collected output or input releases.
     #[serde(default)]
     pub encoder_poll: WindowsD3d11StageTimingDiagnostics,
     /// The slowest `ProcessOutput` within one submit or poll.
@@ -2701,11 +2706,16 @@ pub struct WindowsD3d11MediaStageTimingDiagnostics {
     /// Encoder refusals because the transform had issued no input credit.
     #[serde(default)]
     pub encoder_credit_refusals: u64,
-    /// Encoder refusals because Videorc's own in-flight cap was full.
+    /// Encoder refusals because Videorc's own in-flight cap (inputs queued
+    /// for the worker plus inputs the transform holds) was full.
     #[serde(default)]
     pub encoder_capacity_refusals: u64,
     #[serde(default)]
     pub encoder_max_in_flight: u32,
+    /// Accepted inputs an encoder worker released unsubmitted: no input
+    /// credit within its wait, or the transform refused them.
+    #[serde(default)]
+    pub encoder_dropped_inputs: u64,
     #[serde(default)]
     pub preview_present: WindowsD3d11StageTimingDiagnostics,
     /// Loop iterations that opened or closed a capture, encoder or preview,
@@ -2730,8 +2740,8 @@ pub struct WindowsD3d11MediaLoopBreakdownDiagnostics {
     pub total_ms: f64,
     pub capture_poll_ms: f64,
     pub compose_ms: f64,
+    /// Handing encoder inputs to their workers; the transform calls run there.
     pub encoder_submit_ms: f64,
-    pub encoder_poll_ms: f64,
     pub preview_present_ms: f64,
     pub other_command_ms: f64,
     pub commands: u32,
@@ -10146,6 +10156,8 @@ mod tests {
                 compose: stage(480, 4.5, 101.0),
                 device_lock_wait: stage(480, 0.01, 96.5),
                 encoder_process_output: stage(470, 1.2, 68.75),
+                encoder_queue_wait: stage(470, 9.5, 66.0),
+                encoder_dropped_inputs: 2,
                 slowest_loop: WindowsD3d11MediaLoopBreakdownDiagnostics {
                     total_ms: 119.0,
                     encoder_submit_ms: 118.5,
@@ -10172,6 +10184,9 @@ mod tests {
         assert_eq!(timings["compose"]["maxMs"], 101.0);
         assert_eq!(timings["deviceLockWait"]["p95Ms"], 0.01);
         assert_eq!(timings["encoderProcessOutput"]["samples"], 470);
+        assert_eq!(timings["encoderQueueWait"]["p95Ms"], 9.5);
+        assert_eq!(timings["encoderDroppedInputs"], 2);
+        assert!(timings["slowestLoop"].get("encoderPollMs").is_none());
         assert_eq!(timings["slowestLoop"]["encoderSubmitMs"], 118.5);
         assert_eq!(timings["slowestCompose"]["deviceLockWaitMs"], 96.5);
         assert_eq!(timings["gpu"]["completionLatency"]["maxMs"], 140.0);

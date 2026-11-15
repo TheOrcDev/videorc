@@ -20610,6 +20610,7 @@ fn windows_d3d11_media_stage_timings(
         encoded_pass: stage(timings.encoded_pass),
         nv12_pass: stage(timings.nv12_pass),
         fence_signal: stage(timings.fence_signal),
+        encoder_queue_wait: stage(timings.encoder_queue_wait),
         encoder_submit: stage(timings.encoder_submit),
         encoder_process_input: stage(timings.encoder_process_input),
         encoder_poll: stage(timings.encoder_poll),
@@ -20618,6 +20619,7 @@ fn windows_d3d11_media_stage_timings(
         encoder_credit_refusals: timings.encoder_credit_refusals,
         encoder_capacity_refusals: timings.encoder_capacity_refusals,
         encoder_max_in_flight: timings.encoder_max_in_flight,
+        encoder_dropped_inputs: timings.encoder_dropped_inputs,
         preview_present: stage(timings.preview_present),
         setup_loops: timings.setup_loops,
         slowest_loop: WindowsD3d11MediaLoopBreakdownDiagnostics {
@@ -20625,7 +20627,6 @@ fn windows_d3d11_media_stage_timings(
             capture_poll_ms: ms(slowest_loop.capture_poll_micros),
             compose_ms: ms(slowest_loop.compose_micros),
             encoder_submit_ms: ms(slowest_loop.encoder_submit_micros),
-            encoder_poll_ms: ms(slowest_loop.encoder_poll_micros),
             preview_present_ms: ms(slowest_loop.preview_present_micros),
             other_command_ms: ms(slowest_loop.other_command_micros),
             commands: slowest_loop.commands,
@@ -20692,9 +20693,17 @@ mod windows_d3d11_media_stage_timing_tests {
                 skipped: 3,
                 ..Default::default()
             }),
+            encoder_queue_wait: WindowsD3d11StageTiming {
+                samples: 470,
+                p95_micros: 9_250,
+                max_micros: 66_000,
+            },
+            encoder_dropped_inputs: 4,
             ..Default::default()
         };
         let wire = windows_d3d11_media_stage_timings(timings);
+        assert_eq!(wire.encoder_queue_wait.p95_ms, 9.25);
+        assert_eq!(wire.encoder_dropped_inputs, 4);
         assert_eq!(wire.compose.samples, 480);
         assert_eq!(wire.compose.p95_ms, 4.5);
         assert_eq!(wire.compose.max_ms, 101.0);

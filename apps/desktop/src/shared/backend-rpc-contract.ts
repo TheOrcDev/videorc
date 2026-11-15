@@ -2487,6 +2487,7 @@ const windowsD3d11MediaStageTimingsSchema = objectSchema(
     encodedPass: windowsD3d11StageTimingSchema,
     nv12Pass: windowsD3d11StageTimingSchema,
     fenceSignal: windowsD3d11StageTimingSchema,
+    encoderQueueWait: windowsD3d11StageTimingSchema,
     encoderSubmit: windowsD3d11StageTimingSchema,
     encoderProcessInput: windowsD3d11StageTimingSchema,
     encoderPoll: windowsD3d11StageTimingSchema,
@@ -2495,6 +2496,7 @@ const windowsD3d11MediaStageTimingsSchema = objectSchema(
     encoderCreditRefusals: nonNegativeInteger,
     encoderCapacityRefusals: nonNegativeInteger,
     encoderMaxInFlight: nonNegativeInteger,
+    encoderDroppedInputs: nonNegativeInteger,
     previewPresent: windowsD3d11StageTimingSchema,
     setupLoops: nonNegativeInteger,
     slowestLoop: objectSchema(
@@ -2503,7 +2505,6 @@ const windowsD3d11MediaStageTimingsSchema = objectSchema(
         capturePollMs: nonNegativeMs,
         composeMs: nonNegativeMs,
         encoderSubmitMs: nonNegativeMs,
-        encoderPollMs: nonNegativeMs,
         previewPresentMs: nonNegativeMs,
         otherCommandMs: nonNegativeMs,
         commands: nonNegativeInteger
