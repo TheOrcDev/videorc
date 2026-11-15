@@ -33,6 +33,30 @@ function backendError(code: string, message: string): Error {
 }
 
 describe('userErrorMessage', () => {
+  it('says why Open the room was refused, never the generic next step', () => {
+    // 2026-11-15: the session refusal read "Try again. If it keeps happening…".
+    const room = { action: 'open the room' }
+    expect(
+      userErrorMessage(
+        backendError(
+          'cloud-room-session-active',
+          'Stop the recording or the livestream, then open the room.'
+        ),
+        room
+      )
+    ).toMatchObject({
+      kind: 'known',
+      tone: 'warning',
+      title: "Couldn't open the room",
+      description: 'Stop the recording or the livestream, then open the room.'
+    })
+    expect(userErrorMessage(backendError('cloud-show-live', 'already live'), room)).toMatchObject({
+      kind: 'known',
+      tone: 'warning',
+      description: 'A show is live through Videorc Cloud. End it first.'
+    })
+  })
+
   it('turns an unknown failure into "Couldn\'t {action} {object}" and the one next step', () => {
     const copy = userErrorMessage(new Error('EACCES: permission denied, open /x.png'), IMPORT)
     expect(copy).toEqual({

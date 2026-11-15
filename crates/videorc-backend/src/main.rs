@@ -11743,10 +11743,7 @@ async fn handle_text_message_with_role(
         // session, so it refuses while one runs or finalizes; the show module
         // refuses while a show is live or resumable or a test runs.
         "cloud.selftest.run" => {
-            if !matches!(
-                current_recording_status(state).await.state,
-                RecordingState::Idle
-            ) {
+            if cloud_test_blocked_by(&current_recording_status(state).await) {
                 return ServerResponse::error(
                     command.id,
                     "cloud-test-session-active",
@@ -15760,6 +15757,13 @@ fn cloud_unavailable(id: String) -> ServerResponse {
 
 /// A talk-show refusal's own code (`RoomOpenRefusal`, the web's refusals),
 /// else the arm's default.
+/// Test cloud pushes its own synthetic feed (`cloud_test_feed_args`), so
+/// only a recording or a livestream locks it, never the Clips ring's
+/// buffer-only session, which runs between sessions whenever Clips is on.
+fn cloud_test_blocked_by(recording: &protocol::RecordingStatus) -> bool {
+    !matches!(recording.state, RecordingState::Idle) && !recording.replay_only
+}
+
 fn cloud_talk_error_code(error: &anyhow::Error, default: &'static str) -> &'static str {
     if let Some(refusal) = error.downcast_ref::<cloud_talk::RoomOpenRefusal>() {
         return refusal.code();
@@ -16546,6 +16550,40 @@ async fn ffmpeg_status(ffmpeg_path: &str) -> ToolStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_cloud_runs_beside_the_clips_ring_but_not_a_session() {
+        let idle = recording::idle_status();
+        assert!(!cloud_test_blocked_by(&idle));
+        let ring = protocol::RecordingStatus {
+            state: RecordingState::Recording,
+            replay_only: true,
+            ..recording::idle_status()
+        };
+        assert!(
+            !cloud_test_blocked_by(&ring),
+            "the Clips ring between sessions never locks Test cloud"
+        );
+        let ring_stopping = protocol::RecordingStatus {
+            state: RecordingState::Stopping,
+            ..ring.clone()
+        };
+        assert!(!cloud_test_blocked_by(&ring_stopping));
+        for state in [
+            RecordingState::Recording,
+            RecordingState::Streaming,
+            RecordingState::Stopping,
+        ] {
+            let session = protocol::RecordingStatus {
+                state,
+                ..recording::idle_status()
+            };
+            assert!(
+                cloud_test_blocked_by(&session),
+                "a recording, a livestream or a finalize locks Test cloud"
+            );
+        }
+    }
 
     #[test]
     fn ready_names_the_screens_banners_and_sounds_folders_beside_the_database() {

@@ -36,13 +36,40 @@ export type ReplayReconcileInput = {
    * live instead of retrying (each try would only be refused again).
    */
   waitingForCamera?: boolean
+  /**
+   * Plan 224 D6: a talk show's room holds the camera, from Open the room
+   * until the room has closed. The buffer-only ring steps aside meanwhile:
+   * the backend refuses Open the room beside it and any start while the
+   * room is open, and it comes back once the room is closed.
+   */
+  roomHoldsCamera?: boolean
 }
 
 export type ReplayReconcileAction = 'start' | 'stop' | 'give-up' | null
 
 const ACTIVE = new Set(['starting', 'recording', 'streaming', 'stopping'])
 
+/** True from Open the room until the room has closed (any phase but closed). */
+export function roomHoldsTheCamera(room: { phase: string } | null | undefined): boolean {
+  return room != null && room.phase !== 'closed'
+}
+
+function bufferOnlyRingStoppable(input: ReplayReconcileInput): boolean {
+  return (
+    (input.replayState === 'on' || input.replayState === 'starting') &&
+    input.replayOnlyBuffer &&
+    input.recordingReplayOnly &&
+    ACTIVE.has(input.recordingState) &&
+    !input.startPending &&
+    !input.stopPending &&
+    !input.replayStartInFlight
+  )
+}
+
 export function replayBufferReconcileAction(input: ReplayReconcileInput): ReplayReconcileAction {
+  if (input.roomHoldsCamera) {
+    return bufferOnlyRingStoppable(input) ? 'stop' : null
+  }
   if (input.armed) {
     if (
       // A ring that died with its session ('error') disarms the switch; once
@@ -60,15 +87,7 @@ export function replayBufferReconcileAction(input: ReplayReconcileInput): Replay
     // On, starting, riding a recording, or waiting on a session: nothing to do.
     return null
   }
-  if (
-    (input.replayState === 'on' || input.replayState === 'starting') &&
-    input.replayOnlyBuffer &&
-    input.recordingReplayOnly &&
-    ACTIVE.has(input.recordingState) &&
-    !input.startPending &&
-    !input.stopPending &&
-    !input.replayStartInFlight
-  ) {
+  if (bufferOnlyRingStoppable(input)) {
     return 'stop'
   }
   // A ring riding a recording ends with that recording; the switch only

@@ -107,6 +107,9 @@ const KNOWN_CODES: Readonly<Record<string, string>> = {
   'cloud-test-session-active': "Locked while you're recording or live.",
   'cloud-test-show-live': 'A show is live through Videorc Cloud. End it first.',
   'cloud-test-running': 'A Videorc Cloud test is already running.',
+  // Plan 224: Open the room's refusals (`RoomOpenRefusal`).
+  'cloud-room-session-active': 'Stop the recording or the livestream, then open the room.',
+  'cloud-show-live': 'A show is live through Videorc Cloud. End it first.',
   // A scene whose layout needs a source that is set to None or Off. Trying
   // again cannot help, so the copy says what to pick instead.
   'layout-screen-not-selected':
@@ -124,6 +127,8 @@ const WARNING_CODES = new Set([
   'cloud-test-session-active',
   'cloud-test-show-live',
   'cloud-test-running',
+  'cloud-room-session-active',
+  'cloud-show-live',
   'clean-cut-mutation-blocked',
   'noise-cleanup-mutation-blocked'
 ])
