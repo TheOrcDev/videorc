@@ -27,6 +27,7 @@ import { PanelSection } from '@/components/panel-section'
 import { StatusDot } from '@/components/status-dot'
 import { SessionRuntimeAlert } from '@/components/studio/session-runtime-alert'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
+import { GoLiveButton } from '@/components/go-live-button'
 import { RecordButton, type RecordButtonState } from '@/components/record-button'
 import { Button } from '@/components/ui/button'
 import { DisabledReason } from '@/components/ui/disabled-reason'
@@ -153,7 +154,7 @@ export function SessionTransport({
     >
       <div className="flex gap-2">
         {/* D8 (plan 208): Record and the stop button are metallic red, lit
-            while the session runs; Go Live is the chrome primary. Why a
+            while the session runs; Go Live is polished copper (plan 240). Why a
             start is blocked shows on hover and on keyboard focus (plan 174
             S1.1, B-9): a disabled button never shows a title. */}
         <DisabledReason className="flex-1" reason={recordActive ? null : recordBlockedReason}>
@@ -175,21 +176,15 @@ export function SessionTransport({
             className="flex-1"
             reason={goLivePending || liveActive ? null : liveStreamBlockedReason}
           >
-            <Button
+            <GoLiveButton
               className="flex-1"
               data-testid="go-live-button"
               disabled={liveActive ? !canStop : Boolean(liveStreamBlockedReason) || startsBusy}
+              labels={{ idle: GO_LIVE_LABEL, checking: GO_LIVE_CHECKING_LABEL }}
               size="lg"
-              variant="default"
+              state={liveActive ? 'live' : goLivePending ? 'checking' : 'idle'}
               onClick={liveActive ? onStop : onLiveStream}
-            >
-              <LivestreamIcon data-icon="inline-start" weight="fill" />
-              {liveActive
-                ? 'End livestream'
-                : goLivePending
-                  ? GO_LIVE_CHECKING_LABEL
-                  : GO_LIVE_LABEL}
-            </Button>
+            />
           </DisabledReason>
         )}
       </div>

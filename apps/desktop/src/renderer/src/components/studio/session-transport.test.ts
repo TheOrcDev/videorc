@@ -193,7 +193,7 @@ describe('SessionTransport start labels (plan 174 S2.2)', () => {
         ?.textContent?.replace(key?.textContent ?? '', '')
         .trim()
     ).toBe('Record')
-    expect(buttons[1]?.textContent?.trim()).toBe('Go Live')
+    expect(shown(buttons[1])?.textContent?.trim()).toBe('Go Live')
     expect(container.textContent).not.toMatch(/\bStream\b/)
 
     act(() => buttons[0]?.click())
@@ -204,18 +204,18 @@ describe('SessionTransport start labels (plan 174 S2.2)', () => {
 })
 
 // Plan 208 S4 (D8): Record and the stop button are metallic red, unlit at
-// idle and lit while the session runs; Go Live is the chrome primary.
+// idle and lit while the session runs; Go Live is polished copper (plan 240).
 describe('SessionTransport materials (plan 208 D8)', () => {
   const button = (label: string): HTMLButtonElement | undefined =>
     [...container.querySelectorAll('button')].find((candidate) =>
       shown(candidate)?.textContent?.includes(label)
     )
 
-  it('draws Record unlit and Go Live as the chrome primary', () => {
+  it('draws Record unlit and Go Live in copper', () => {
     renderTransport({ state: 'idle' }, { active: false })
     expect(button('Record')?.dataset.variant).toBe('record')
     expect(button('Record')?.hasAttribute('data-lit')).toBe(false)
-    expect(button('Go Live')?.dataset.variant).toBe('default')
+    expect(button('Go Live')?.dataset.variant).toBe('go-live')
   })
 
   it('lights the stop button while a recording or livestream runs', () => {
@@ -339,8 +339,13 @@ describe('SessionTransport in flight (plan 174 S3.1)', () => {
       )
     )
     const buttons = [...container.querySelectorAll('button')]
-    expect(buttons.map((button) => button.disabled)).toEqual([true, true])
-    expect(buttons[1]?.textContent?.trim()).toBe('Checking…')
+    // Record is off; Go Live holds its click but stays copper and keeps its
+    // focus (aria-disabled, not dimmed), as Record does while it starts.
+    expect(buttons[0]?.disabled).toBe(true)
+    expect(buttons[1]?.disabled).toBe(false)
+    expect(buttons[1]?.getAttribute('aria-disabled')).toBe('true')
+    expect(buttons[1]?.dataset.state).toBe('checking')
+    expect(shown(buttons[1])?.textContent?.trim()).toBe('Checking…')
     expect(container.querySelector('[data-slot="disabled-reason"]')).toBeNull()
   })
 
