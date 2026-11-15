@@ -19,6 +19,7 @@ mod atomic_file;
 mod audience;
 mod audio;
 mod audio_capture_adapter;
+mod autorelease_pool;
 mod backend_authority;
 mod banner_prepare;
 mod banner_timers;

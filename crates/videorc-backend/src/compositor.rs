@@ -7110,7 +7110,7 @@ async fn run_synthetic_compositor_loop(
                 // canvas instead of retaining the loop's startup dimensions.
                 let (width, height) =
                     unpack_render_dimensions(render_dimensions.load(Ordering::Relaxed));
-                let published =
+                let published = crate::autorelease_pool::with_autorelease_pool(|| {
                     publish_compositor_frame(
                         &state,
                         &run_id,
@@ -7154,7 +7154,7 @@ async fn run_synthetic_compositor_loop(
                             presenting: preview_surface_active,
                         },
                     )
-                        .await;
+                });
                 // Adoption at the publish boundary uses the same recovery/
                 // health acknowledgements as the periodic maintenance path.
                 if let Some(change) = live_sources.pending_camera_change.take()
@@ -10151,7 +10151,7 @@ fn caption_overlay_for_output(
 
 // Internal render-loop plumbing; the parameters are the loop's working set, not an API.
 #[allow(clippy::too_many_arguments)]
-async fn publish_compositor_frame(
+fn publish_compositor_frame(
     state: &AppState,
     run_id: &str,
     sequence: u64,
@@ -17781,8 +17781,7 @@ mod tests {
                 ChatOverlayLegs::OFF,
                 LiveBackgroundLeg::unmeasured(&mut None),
                 ProgramLeg::off(&mut None),
-            )
-            .await;
+            );
             let frame = store.lock().unwrap().latest().expect("metadata frame");
             assert_eq!(frame.sequence, sequence);
             assert!(frame.bytes.is_empty(), "native preview never CPU-composes");
@@ -17833,8 +17832,7 @@ mod tests {
                 ChatOverlayLegs::OFF,
                 LiveBackgroundLeg::unmeasured(&mut None),
                 ProgramLeg::off(&mut None),
-            )
-            .await;
+            );
             let frame = store.lock().unwrap().latest().expect("native frame");
             assert!(frame.metadata.has_metal_iosurface_target());
             assert_eq!(
@@ -17900,8 +17898,7 @@ mod tests {
             ChatOverlayLegs::OFF,
             LiveBackgroundLeg::unmeasured(&mut None),
             ProgramLeg::off(&mut None),
-        )
-        .await;
+        );
         assert_eq!(resumed.compositor_backend, CompositorBackend::Metal);
         assert_eq!(store.lock().unwrap().latest().unwrap().sequence, 7);
         assert_eq!(
@@ -18072,8 +18069,7 @@ mod tests {
             ChatOverlayLegs::OFF,
             LiveBackgroundLeg::unmeasured(&mut None),
             ProgramLeg::off(&mut None),
-        )
-        .await;
+        );
         if result.compositor_backend != CompositorBackend::Metal {
             eprintln!("skipping: Metal compositor did not render this frame");
             return;
@@ -18171,8 +18167,7 @@ mod tests {
             ChatOverlayLegs::OFF,
             LiveBackgroundLeg::unmeasured(&mut None),
             ProgramLeg::off(&mut None),
-        )
-        .await;
+        );
         if result.compositor_backend != CompositorBackend::Metal {
             eprintln!("skipping: Metal compositor did not render this frame");
             return;
@@ -18224,8 +18219,7 @@ mod tests {
             ChatOverlayLegs::OFF,
             LiveBackgroundLeg::unmeasured(&mut None),
             ProgramLeg::off(&mut None),
-        )
-        .await;
+        );
     }
 
     fn latest_frame_bytes_len(store: &CompositorFrameStore) -> usize {
@@ -18352,8 +18346,7 @@ mod tests {
             ChatOverlayLegs::OFF,
             LiveBackgroundLeg::unmeasured(&mut None),
             ProgramLeg::off(&mut None),
-        )
-        .await;
+        );
         let store = compositor_frame_store(&state).await;
         let native = store
             .lock()
@@ -18388,8 +18381,7 @@ mod tests {
             ChatOverlayLegs::OFF,
             LiveBackgroundLeg::unmeasured(&mut None),
             ProgramLeg::off(&mut None),
-        )
-        .await;
+        );
         let jpeg_source = store
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -18482,8 +18474,7 @@ mod tests {
             ChatOverlayLegs::OFF,
             LiveBackgroundLeg::unmeasured(&mut None),
             ProgramLeg::off(&mut None),
-        )
-        .await;
+        );
 
         assert_eq!(result.compositor_backend, CompositorBackend::Cpu);
         assert!(result.compositor_fallback_reason.is_none());
@@ -20181,8 +20172,7 @@ mod tests {
             ChatOverlayLegs::OFF,
             LiveBackgroundLeg::unmeasured(&mut None),
             ProgramLeg::off(&mut None),
-        )
-        .await;
+        );
         if result.compositor_backend != CompositorBackend::Metal {
             eprintln!("skipping: Metal compositor did not render recording target");
             return;
@@ -24708,8 +24698,7 @@ mod tests {
             ChatOverlayLegs::OFF,
             LiveBackgroundLeg::unmeasured(&mut None),
             ProgramLeg::off(&mut None),
-        )
-        .await;
+        );
 
         let frame_store = compositor_frame_store(&state).await;
         let latest = frame_store
@@ -24823,8 +24812,7 @@ mod tests {
             ChatOverlayLegs::OFF,
             LiveBackgroundLeg::unmeasured(&mut None),
             ProgramLeg::off(&mut None),
-        )
-        .await;
+        );
         let compositor = state.compositor.lock().await;
         let captured_at = compositor
             .frame_store
@@ -25187,8 +25175,7 @@ mod tests {
                     ChatOverlayLegs::OFF,
                     LiveBackgroundLeg::unmeasured(&mut None),
                     ProgramLeg::off(&mut None),
-                )
-                .await;
+                );
                 let store = compositor_frame_store(&state).await;
                 let frame = store.lock().unwrap().latest().unwrap();
                 assert_eq!(
@@ -27397,7 +27384,6 @@ mod program_leg_tests {
                 presenting: tick.presenting,
             },
         )
-        .await
     }
 
     fn program_store_is_empty(state: &AppState) -> bool {
@@ -28315,8 +28301,7 @@ mod live_background_metal_tests {
                 ChatOverlayLegs::OFF,
                 leg,
                 ProgramLeg::off(&mut None),
-            )
-            .await;
+            );
             assert_eq!(
                 result.compositor_backend,
                 CompositorBackend::Metal,
