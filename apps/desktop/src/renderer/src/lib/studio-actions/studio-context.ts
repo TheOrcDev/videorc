@@ -41,7 +41,7 @@ import {
   VERTICAL_LAYOUT_PRESETS,
   capturePickerDevices,
   microphonePickerDevices,
-  simulcastLegLiveRequest,
+  simulcastLegVideo,
   type CaptureConfig,
   type SettingsState,
   type WsStatus
@@ -323,7 +323,7 @@ export function studioActionContext(studio: StudioActionSource): StudioActionCon
       read: () => {
         const current = captureConfigRef.current
         const orientation = overlayOrientationForCanvas(current.video.width, current.video.height)
-        const verticalLeg = simulcastLegLiveRequest(current)
+        const verticalLeg = simulcastLegVideo(current)
         // The stage's own shapes: the Output, or the vertical stream's 9:16.
         const programAspect = current.video.width / Math.max(1, current.video.height)
         const sessionActive = sessionOwnsTransport(studio.recordingRef.current)
@@ -337,8 +337,8 @@ export function studioActionContext(studio: StudioActionSource): StudioActionCon
             vertical:
               orientation === 'vertical'
                 ? programAspect
-                : verticalLeg?.video
-                  ? verticalLeg.video.width / Math.max(1, verticalLeg.video.height)
+                : verticalLeg
+                  ? verticalLeg.width / Math.max(1, verticalLeg.height)
                   : 9 / 16
           },
           orientation,

@@ -98,13 +98,11 @@ describe('the scene list (plan 210 D6)', () => {
     expect(sceneGlyph(scene('c', 'C', {}, 'camera-only'), devices)).toEqual({ kind: 'camera' })
   })
 
-  it("disables a scene whose app isn't ready, in S2's words, and the other orientation live", () => {
+  it("disables a scene whose app isn't ready, in S2's words, never for its orientation", () => {
     const blocked = (appState: Parameters<typeof savedSceneBlockedReason>[0]['appState']) =>
       savedSceneBlockedReason({
         scene: figma(),
         appState,
-        sessionActive: false,
-        orientation: 'horizontal',
         devices: [camera]
       })
     expect(blocked('ready')).toBeNull()
@@ -112,22 +110,12 @@ describe('the scene list (plan 210 D6)', () => {
     expect(blocked('not-running')).toBe("Figma isn't open")
     expect(blocked('no-window')).toBe('Figma has no window open')
     expect(blocked('minimized')).toBe("Figma's window is minimized")
-    const vertical = scene('v', 'V', {}, 'vertical-screen-camera')
+    // Plan 231 D4: every scene has a layout for each orientation, so a live
+    // take never waits on a scene's orientation (the canvas stays locked).
     expect(
       savedSceneBlockedReason({
-        scene: vertical,
+        scene: scene('v', 'V', {}, 'vertical-screen-camera'),
         appState: undefined,
-        sessionActive: true,
-        orientation: 'horizontal',
-        devices: [camera]
-      })
-    ).toBe('Stop the recording or stream before switching orientation.')
-    expect(
-      savedSceneBlockedReason({
-        scene: vertical,
-        appState: undefined,
-        sessionActive: false,
-        orientation: 'horizontal',
         devices: [camera]
       })
     ).toBeNull()
@@ -136,8 +124,6 @@ describe('the scene list (plan 210 D6)', () => {
       savedSceneBlockedReason({
         scene: figma(),
         appState: 'ready',
-        sessionActive: false,
-        orientation: 'horizontal',
         devices: []
       })
     ).toBe('Camera unavailable. Choose a replacement in Sources.')

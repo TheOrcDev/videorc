@@ -11,6 +11,7 @@ import type {
 } from '../../../shared/backend'
 import { SCENE_LIBRARY_KEY, WORKING_SCENE_KEY, sameSceneVisual } from '../lib/scene-presets'
 import { SCENES_KEY, type Scene as StoredScene, type SceneLibrary } from '../lib/scenes'
+import { editVerticalStreamLayout } from '../components/studio/vertical-stream-layout-control'
 // Loaded up front so the Studio's first-launch migration (its own chunk)
 // resolves inside the mount's `act`, as a stored library does.
 import '../lib/scenes-migration'
@@ -146,6 +147,7 @@ import {
   buildCaptureSources,
   buildMicrophoneSources,
   defaultCaptureConfig,
+  ORIENTATION_DEFAULT_PRESET,
   STORAGE_KEYS,
   videoPresets,
   type CaptureConfig
@@ -8500,7 +8502,88 @@ describe('real StudioProvider lifecycle', () => {
     })
   }, 10000)
 
-  it('re-derives the vertical leg from each committed program scene, even on a fast double switch', async () => {
+  // Plan 231 D4: one list in both orientations. The 16:9 / 9:16 toggle puts
+  // the scene on stream on in its own 9:16 layout, the list keeps every scene
+  // in its order, each drawn in its 9:16 layout, and a switch in a 9:16
+  // studio applies that scene's 9:16 layout.
+  it('a 9:16 studio lists the same scenes in their own 9:16 layouts (plan 231 D4)', async () => {
+    const backend = new StudioBackend()
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const testDom = installProviderTestEnvironment(
+      createVideorcApi({
+        acknowledge: async () => true,
+        pending: async () => [],
+        acknowledgeProvider: async () => true,
+        pendingProvider: async () => []
+      })
+    )
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioCoreContextValue => observations.at(-1)!.core
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(
+      () =>
+        observations.at(-1)?.core.canSaveScene === true &&
+        latest().captureConfig.sources.screenId != null &&
+        latest().captureConfig.sources.cameraId != null
+    )
+    const ids = latest().savedScenes.map((scene) => scene.id)
+    const screenCamera = sceneNamed(latest(), 'Screen + camera')
+    const cameraOnly = sceneNamed(latest(), 'Camera only')
+    expect(latest().activeSavedSceneId).toBe(screenCamera.id)
+
+    // The toggle names the orientation; the scene goes on in its own layout.
+    await act(async () => {
+      latest().applyCameraPreset(
+        { layoutPreset: ORIENTATION_DEFAULT_PRESET.vertical },
+        { toOrientation: true }
+      )
+    })
+    await waitForObservation(
+      () =>
+        latest().captureConfig.layout.layoutPreset === 'vertical-camera-top' &&
+        latest().layoutSwitchPending == null &&
+        latest().canSaveScene
+    )
+    expect(latest().captureConfig.video.height).toBeGreaterThan(latest().captureConfig.video.width)
+    expect(latest().activeSavedSceneId).toBe(screenCamera.id)
+    expect(latest().savedScenes.map((scene) => scene.id)).toEqual(ids)
+    expect(latest().savedScenes.map((scene) => scene.visual.layout.layoutPreset)).toEqual(
+      ids.map(
+        (id) =>
+          storedLibrary().scenes.find((scene) => scene.id === id)!.layouts.vertical.layoutPreset
+      )
+    )
+
+    // A switch in a 9:16 studio applies the scene's own 9:16 layout.
+    const from = backend.sentCommands.length
+    await act(async () => {
+      expect(await latest().applySavedScene(cameraOnly.id)).toBe(true)
+    })
+    await waitForObservation(
+      () => latest().activeSavedSceneId === cameraOnly.id && latest().canSaveScene
+    )
+    const apply = backend.sentCommands
+      .slice(from)
+      .filter((command) => command.method.startsWith('scene.layout.apply'))
+      .at(-1) as { params: { layout: LayoutSettings } }
+    expect(apply.params.layout.layoutPreset).toBe('vertical-camera-only')
+    expect(latest().captureConfig.layout.layoutPreset).toBe('vertical-camera-only')
+    // Each scene keeps its 16:9 layout for the way back.
+    expect(storedSceneNamed('Camera only').layouts.horizontal.layoutPreset).toBe('camera-only')
+    expect(storedSceneNamed('Screen + camera').layouts.horizontal.layoutPreset).toBe(
+      'screen-camera'
+    )
+  }, 15_000)
+
+  // Plan 231 D4: one scene, both orientations. The vertical stream shows the
+  // scene on stream in its own 9:16 layout, so one switch (a click or a key)
+  // cuts both legs to the same scene, and the Vertical stream panel edits
+  // that scene's 9:16 layout.
+  it('cuts both legs to the same scene on one switch, each in its own layout (plan 231 D4)', async () => {
     const backend = new StudioBackend()
     backend.recordingState = 'recording'
     backend.recordingSessionId = 'session-vertical'
@@ -8513,11 +8596,15 @@ describe('real StudioProvider lifecycle', () => {
     TestWebSocket.backend = backend
     vi.stubGlobal('WebSocket', TestWebSocket)
 
+    let emit: (name: string, value: unknown) => void = () => {}
     const api = createVideorcApi({
       acknowledge: async () => true,
       pending: async () => [],
       acknowledgeProvider: async () => true,
-      pendingProvider: async () => []
+      pendingProvider: async () => [],
+      registerEmitter: (next) => {
+        emit = next
+      }
     })
     const testDom = installProviderTestEnvironment(api)
     restoreEnvironment = testDom.restore
@@ -8534,18 +8621,24 @@ describe('real StudioProvider lifecycle', () => {
         latest()?.core.captureConfig.sources.cameraId != null &&
         latest()?.core.deviceList.devices.some((device) => device.id === 'camera:1') === true
     )
+    // A new profile's scenes: Screen + camera (on stream, 9:16 Camera top)
+    // and Camera only (9:16 Camera only) among them.
+    const screenCamera = sceneNamed(latest()!.core, 'Screen + camera')
+    const cameraOnly = sceneNamed(latest()!.core, 'Camera only')
+    expect(latest()!.core.activeSavedSceneId).toBe(screenCamera.id)
+    expect(latest()!.core.sceneOnStream?.layouts.vertical.layoutPreset).toBe('vertical-camera-top')
 
-    // A live horizontal program (Screen + Cam) with the YouTube Vertical leg
-    // armed on its own key, following the program, framed Fit.
+    // A live horizontal program with the YouTube Vertical leg armed on its
+    // own key. The settings that steered the leg before plan 231 say
+    // otherwise: they steer nothing now.
     const config = latest()!.core.captureConfig
     await act(async () => {
       latest()!.core.setCaptureConfig({
         ...config,
         streamEnabled: true,
-        layout: { ...config.layout, layoutPreset: 'screen-camera' },
         lastVerticalPreset: 'vertical-camera-bottom',
-        simulcastFollowsProgram: true,
-        simulcastScreenFraming: 'fit',
+        simulcastFollowsProgram: false,
+        simulcastScreenFraming: 'fill',
         streaming: {
           ...config.streaming,
           enabled: true,
@@ -8560,61 +8653,134 @@ describe('real StudioProvider lifecycle', () => {
     })
     await waitForObservation(() => latest()?.core.captureConfig.streaming.enabled === true)
 
-    // The owner clicks Camera, then straight back to Screen + Cam before the
-    // first commit returns. The second transaction was captured before the
-    // first landed, so comparing snapshots would leave the leg on the camera
-    // twin; deriving from each committed layout must not.
-    backend.layoutResponseDelayMs = 150
-    await act(async () => {
-      latest()!.core.applyCameraPreset({ layoutPreset: 'camera-only' })
-      latest()!.core.applyCameraPreset({ layoutPreset: 'screen-camera' })
-    })
-    // Both program transactions settle (the second one is applied, the
-    // first is superseded) before anything is judged.
-    await waitForObservation(
-      () =>
-        latest()?.core.layoutSwitchPending == null &&
-        latest()?.core.captureConfig.layout.layoutPreset === 'screen-camera' &&
-        backend.simulcastLegLayouts.length >= 2
-    )
-    await act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 400))
-    })
-
-    expect(backend.simulcastLegLayouts.map((layout) => layout.layoutPreset)).toEqual([
-      'vertical-camera-only',
-      'vertical-camera-bottom'
-    ])
-    expect(backend.simulcastLegLayouts.at(-1)?.verticalScreenFraming).toBe('fit')
-    // Leg requests are explicit and never reach the program.
-    expect(backend.currentLayout.layoutPreset).toBe('screen-camera')
-    for (const command of backend.commands) {
-      if (command.method !== 'scene.layout.apply_live') continue
-      const params = command.params as { simulcastLeg?: boolean; layout: LayoutSettings }
-      expect(params.layout.layoutPreset.startsWith('vertical-')).toBe(params.simulcastLeg === true)
-    }
-    expect(toastSpies.error).not.toHaveBeenCalled()
-
-    // A leg edit sends only the leg, and the program stays put.
-    const programCommands = backend.commands.length
-    await act(async () => {
-      latest()!.core.applySimulcastLeg({ simulcastScreenFraming: 'fill' })
-    })
-    await waitForObservation(() => backend.simulcastLegLayouts.length >= 3)
-    expect(backend.simulcastLegLayouts.at(-1)).toMatchObject({
-      layoutPreset: 'vertical-camera-bottom',
-      verticalScreenFraming: 'fill',
-      horizontalScreenFraming: 'fit'
-    })
-    expect(
-      backend.commands
-        .slice(programCommands)
+    const programApplies = (from: number) =>
+      backend.sentCommands
+        .slice(from)
         .filter(
           (command) =>
             command.method === 'scene.layout.apply_live' &&
             (command.params as { simulcastLeg?: boolean }).simulcastLeg !== true
         )
-    ).toEqual([])
+    const legApplies = (from: number) =>
+      backend.sentCommands
+        .slice(from)
+        .filter(
+          (command) =>
+            command.method === 'scene.layout.apply_live' &&
+            (command.params as { simulcastLeg?: boolean }).simulcastLeg === true
+        )
+    const layoutOf = (command: { params?: unknown }) =>
+      (command.params as { layout: LayoutSettings }).layout
+
+    // The Vertical stream panel, from this 16:9 studio: the scene on
+    // stream's 9:16 layout, saved into the scene and sent to the leg only.
+    const panelEdit = (patch: Parameters<typeof editVerticalStreamLayout>[1]): void => {
+      expect(editVerticalStreamLayout(latest()!.core, patch)).toBe(true)
+    }
+    let from = backend.sentCommands.length
+    await act(async () => {
+      panelEdit({ layoutPreset: 'vertical-split' })
+    })
+    await waitForObservation(() => legApplies(from).length === 1)
+    expect(layoutOf(legApplies(from)[0]!)).toMatchObject({
+      layoutPreset: 'vertical-split',
+      verticalScreenFraming: 'fit'
+    })
+    expect(storedSceneNamed('Screen + camera').layouts.vertical).toMatchObject({
+      layoutPreset: 'vertical-split',
+      verticalScreenFraming: 'fit'
+    })
+    expect(storedSceneNamed('Screen + camera').layouts.horizontal.layoutPreset).toBe(
+      'screen-camera'
+    )
+    await waitForObservation(
+      () => latest()?.core.sceneOnStream?.layouts.vertical.layoutPreset === 'vertical-split'
+    )
+    from = backend.sentCommands.length
+    await act(async () => {
+      panelEdit({ verticalScreenFraming: 'fill' })
+    })
+    await waitForObservation(() => legApplies(from).length === 1)
+    expect(layoutOf(legApplies(from)[0]!)).toMatchObject({
+      layoutPreset: 'vertical-split',
+      verticalScreenFraming: 'fill'
+    })
+    expect(storedSceneNamed('Screen + camera').layouts.vertical.verticalScreenFraming).toBe('fill')
+    expect(programApplies(0)).toEqual([])
+    expect(latest()!.core.captureConfig.layout.layoutPreset).toBe('screen-camera')
+
+    // One switch by click: the program commits Camera only, then the leg
+    // takes Camera only's own 9:16 layout. No frame of the old scene's leg
+    // layout follows the program's commit.
+    from = backend.sentCommands.length
+    await act(async () => {
+      expect(await latest()!.core.applySavedScene(cameraOnly.id)).toBe(true)
+    })
+    await waitForObservation(
+      () =>
+        latest()?.core.activeSavedSceneId === cameraOnly.id &&
+        latest()?.core.layoutSwitchPending == null
+    )
+    const clickProgram = programApplies(from)
+    const clickLeg = legApplies(from)
+    expect(clickProgram.map((command) => layoutOf(command).layoutPreset)).toEqual(['camera-only'])
+    expect(clickLeg.map((command) => layoutOf(command).layoutPreset)).toEqual([
+      'vertical-camera-only'
+    ])
+    expect(backend.sentCommands.indexOf(clickLeg[0]!)).toBeGreaterThan(
+      backend.sentCommands.indexOf(clickProgram[0]!)
+    )
+
+    // One switch by key: both legs back on Screen + camera, the vertical one
+    // in the 9:16 layout the panel gave it.
+    from = backend.sentCommands.length
+    await act(async () => {
+      emit('onGlobalShortcut', `scene:${screenCamera.id}`)
+    })
+    await waitForObservation(
+      () =>
+        latest()?.core.activeSavedSceneId === screenCamera.id &&
+        latest()?.core.layoutSwitchPending == null &&
+        legApplies(from).length > 0
+    )
+    const keyProgram = programApplies(from)
+    const keyLeg = legApplies(from)
+    expect(keyProgram.map((command) => layoutOf(command).layoutPreset)).toEqual(['screen-camera'])
+    expect(keyLeg.map((command) => layoutOf(command).layoutPreset)).toEqual(['vertical-split'])
+    expect(layoutOf(keyLeg[0]!).verticalScreenFraming).toBe('fill')
+    expect(backend.sentCommands.indexOf(keyLeg[0]!)).toBeGreaterThan(
+      backend.sentCommands.indexOf(keyProgram[0]!)
+    )
+
+    // A fast double switch: Camera only, then straight back before the first
+    // commit returns. Each commit sends its own scene's leg, in commit order,
+    // so the leg ends on the scene the program ends on.
+    backend.layoutResponseDelayMs = 150
+    from = backend.sentCommands.length
+    await act(async () => {
+      void latest()!.core.applySavedScene(cameraOnly.id)
+      void latest()!.core.applySavedScene(screenCamera.id)
+    })
+    await waitForObservation(
+      () =>
+        latest()?.core.layoutSwitchPending == null &&
+        latest()?.core.activeSavedSceneId === screenCamera.id &&
+        latest()?.core.captureConfig.layout.layoutPreset === 'screen-camera'
+    )
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 400))
+    })
+    expect(backend.simulcastLegLayouts.at(-1)).toMatchObject({
+      layoutPreset: 'vertical-split',
+      verticalScreenFraming: 'fill'
+    })
+    expect(backend.currentLayout.layoutPreset).toBe('screen-camera')
+    // Leg requests are explicit and never reach the program.
+    for (const command of backend.sentCommands) {
+      if (command.method !== 'scene.layout.apply_live') continue
+      const params = command.params as { simulcastLeg?: boolean; layout: LayoutSettings }
+      expect(params.layout.layoutPreset.startsWith('vertical-')).toBe(params.simulcastLeg === true)
+    }
     // Drain: every response lands before unmount, so nothing from this test
     // can surface later, and the whole run stayed free of error toasts.
     await act(async () => {

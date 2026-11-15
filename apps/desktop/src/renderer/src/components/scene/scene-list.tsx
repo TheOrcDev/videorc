@@ -15,7 +15,6 @@ import { ShortcutKeys } from '@/components/ui/shortcut-keys'
 import { Switch } from '@/components/ui/switch'
 import { useAppIcons } from '@/hooks/use-app-icons'
 import { useStudioCore } from '@/hooks/use-studio'
-import { layoutPresetOrientation } from '@/lib/capture'
 import { EDIT_SCENE_LABEL } from '@/lib/edit-scene'
 import { setFollowFrontApp, updateFollowSettings, useFollowSettings } from '@/lib/follow-settings'
 import {
@@ -81,11 +80,9 @@ export function SceneList({
     savedSceneAppStates,
     sceneLibraryActions,
     sceneLibraryError,
-    captureConfig,
     deviceList,
     settings,
     runtimeInfo,
-    isSessionActive,
     canSaveScene,
     wsStatus,
     scene,
@@ -93,7 +90,6 @@ export function SceneList({
   } = studio
   const dialogs = useSceneDialogs()
   const platform = runtimeInfo?.platform
-  const orientation = layoutPresetOrientation(captureConfig.layout.layoutPreset)
   const glyphs = new Map(
     savedScenes.map((entry) => [entry.id, sceneGlyph(entry, deviceList.devices)])
   )
@@ -174,8 +170,6 @@ export function SceneList({
           const blocked = savedSceneBlockedReason({
             scene: entry,
             appState: savedSceneAppStates[entry.id],
-            sessionActive: isSessionActive,
-            orientation,
             devices: deviceList.devices
           })
           return (

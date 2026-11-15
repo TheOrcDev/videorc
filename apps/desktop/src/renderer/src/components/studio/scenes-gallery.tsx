@@ -12,16 +12,19 @@ import { useStudioCore } from '@/hooks/use-studio'
 import type { LayoutPreset, VerticalScreenFraming } from '@/lib/backend'
 import {
   layoutPresetOrientation,
-  studioModeTogglePreset,
+  ORIENTATION_DEFAULT_PRESET,
+  simulcastArmed,
   type LayoutOrientation
 } from '@/lib/capture'
 import { EDIT_SCENE_LABEL } from '@/lib/edit-scene'
 import { LAYOUT_PRESET_LABELS } from '@/lib/layout-labels'
 
-// Plan 231 D2: the gallery shows scenes only, the same list in 16:9 and in
-// 9:16, each in its layout for the studio's orientation. A layout is a choice
-// inside a scene. The orientation toggle in the header flips the canvas (off
-// air only) and puts the scene on stream on in its other layout.
+// Plan 231 D2 and D4: the gallery shows scenes only, the same list in 16:9
+// and in 9:16, each in its layout for the studio's orientation. A layout is a
+// choice inside a scene. The orientation toggle in the header flips the
+// canvas (off air only) and puts the scene on stream on in its other layout.
+// With a vertical stream armed, a click puts the scene on both streams, the
+// vertical one in the scene's 9:16 layout.
 // Names come from the one layout table (plan 174 S1.4, V-X3).
 const scene = (id: LayoutPreset): { id: LayoutPreset; label: string } => ({
   id,
@@ -63,17 +66,14 @@ export function ScenesGallery(): ReactElement {
   const editScene = useEditScene()
   const mode = layoutPresetOrientation(captureConfig.layout.layoutPreset)
 
-  // The scene on stream goes on in its own layout for the other orientation;
-  // the orientation⇄canvas coupling in applyCameraPreset flips the output
-  // profile alongside it.
+  // The scene on stream goes on in its own layout for the other orientation
+  // (the preset only names it); the orientation⇄canvas coupling in
+  // applyCameraPreset flips the output profile alongside it.
   const switchMode = (target: LayoutOrientation): void => {
     if (target === mode) {
       return
     }
-    applyCameraPreset(
-      { layoutPreset: studioModeTogglePreset(target, captureConfig) },
-      { toOrientation: true }
-    )
+    applyCameraPreset({ layoutPreset: ORIENTATION_DEFAULT_PRESET[target] }, { toOrientation: true })
   }
 
   return (
@@ -81,8 +81,10 @@ export function ScenesGallery(): ReactElement {
       title="Scenes"
       description={
         mode === 'vertical'
-          ? 'Click a scene to put it on the 9:16 stream.'
-          : 'Click a scene to put it on stream.'
+          ? 'Click a scene to put it on stream. Each scene keeps its own 9:16 layout.'
+          : simulcastArmed(captureConfig)
+            ? 'Click a scene to put it on both streams, the vertical one in its 9:16 layout.'
+            : 'Click a scene to put it on stream.'
       }
       action={
         <div className="flex items-center gap-1.5">
@@ -142,10 +144,13 @@ export function ScenesGallery(): ReactElement {
 export function ScreenFramingControl({
   value,
   orientation = 'vertical',
+  disabledReason = null,
   onChange
 }: {
   value: VerticalScreenFraming
   orientation?: 'vertical' | 'horizontal'
+  /** Why it can't change now; it is disabled while there is one. */
+  disabledReason?: string | null
   onChange: (value: VerticalScreenFraming) => void
 }): ReactElement {
   return (
@@ -169,6 +174,8 @@ export function ScreenFramingControl({
       <SegmentedControl
         aria-label="Screen framing"
         className="shrink-0"
+        disabled={disabledReason !== null}
+        disabledReason={disabledReason}
         options={SCREEN_FRAMING_OPTIONS}
         value={value}
         onValueChange={onChange}

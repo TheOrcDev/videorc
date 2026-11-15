@@ -166,12 +166,15 @@ export function useSceneLibrary(orientation: SceneOrientation, camera: SceneCame
     (display: Device) => latest.current.nameMainDisplay(display),
     []
   )
+  // `storedList` is the stored scenes as this render has them: it changes
+  // with every stored edit, where `storedScenes()` reads them as they are now.
   return {
     scenes,
     /** A stored scene by id, as it is now. */
     stored,
     /** The stored scenes, as they are now. */
     storedScenes: useCallback((): readonly Scene[] => latest.current.read().scenes, []),
+    storedList: library.scenes,
     onStreamId: library.onStreamId,
     error: library.error,
     readOnly: library.readOnly,

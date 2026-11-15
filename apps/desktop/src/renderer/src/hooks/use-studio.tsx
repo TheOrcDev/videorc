@@ -79,7 +79,7 @@ import {
   sceneOnStreamAtLaunch
 } from '@/lib/scene-studio'
 import { canDeleteScene, firstSceneWithLayout, sceneLayout, showsFromSources } from '@/lib/scenes'
-import type { SceneShows } from '@/lib/scenes'
+import type { Scene as StoredScene, SceneShows } from '@/lib/scenes'
 import {
   hydrateWorkingScene,
   WORKING_SCENE_KEY,
@@ -268,6 +268,7 @@ import {
   separateSourceRecordingsForSession,
   simulcastArmed,
   simulcastLegLiveRequest,
+  simulcastLegVideo,
   smokePreviewCompositorCaptureConfig,
   sourceSelectionChangeEvents,
   layoutPresetMemoryPatch,
@@ -282,8 +283,8 @@ import {
   HORIZONTAL_LAYOUT_PRESETS,
   VERTICAL_LAYOUT_PRESETS,
   type CaptureConfig,
-  type SimulcastLegPatch,
   type SettingsState,
+  type SimulcastScene,
   type WsStatus
 } from '@/lib/capture'
 import {
@@ -1621,11 +1622,12 @@ export type StudioContextValue = {
    */
   liveBackgroundStatus: LiveBackgroundStatusView | null
   /**
-   * Change the vertical simulcast leg (scene, screen framing, follow). Saved
-   * for the next session and, in a running dual-orientation session, applied
-   * to the leg live — the horizontal program is never touched.
+   * Plan 231 D4: the scene on stream as the library stores it, with its 16:9
+   * and its 9:16 layout. Null only while the library has no such scene. An
+   * edit of its 9:16 layout (`sceneLibraryActions.replace` with that layout,
+   * the Vertical stream panel) goes live on the vertical stream only.
    */
-  applySimulcastLeg: (patch: SimulcastLegPatch) => void
+  sceneOnStream: StoredScene | null
   // The layout a switch is applying, if any: its preset and whether it lands
   // in Freeform (drives the one pending control; plan slice D2, plan 216 A4).
   layoutSwitchPending: LayoutSwitchTarget | null
@@ -5116,6 +5118,10 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
   useEffect(() => {
     if (activeSavedSceneId) setSceneOnStream(activeSavedSceneId)
   }, [activeSavedSceneId, setSceneOnStream])
+  const sceneOnStream = useMemo(
+    () => sceneLibrary.storedList.find((scene) => scene.id === activeSavedSceneId) ?? null,
+    [sceneLibrary.storedList, activeSavedSceneId]
+  )
   // D15: on the launch that migrated, the layout keys became scene keys.
   useEffect(() => {
     if (migratedShortcuts)
@@ -5820,7 +5826,7 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
             captureConfig.video,
             captureConfig.streamEnabled ? captureConfig.streaming : undefined
           ),
-          verticalLeg: simulcastLegLiveRequest(captureConfig)?.video,
+          verticalLeg: simulcastLegVideo(captureConfig),
           layout: overlayLayout.buddy
         })
       ),
@@ -10661,32 +10667,35 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
   }, [client])
 
   /**
-   * Send the vertical simulcast leg of a RUNNING dual-orientation session,
-   * re-derived from `config` (program layout + the leg's own settings) and
-   * built exactly like the session-start leg. It is an explicit leg request:
-   * the backend commits it to the leg only (no layout intent, the horizontal
-   * program is untouched) and refuses it, never redirects it, when no leg is
-   * running. Synchronous on purpose: requests go out in call order, so the
-   * latest derivation is the one the leg ends on. Returns the request key so
-   * a caller can skip sending an identical derivation twice.
+   * Send the vertical simulcast leg of a RUNNING dual-orientation session:
+   * `scene`'s 9:16 layout over the program `config` (its sources, and the
+   * camera's look, which `captureConfig` carries), built exactly like the
+   * session-start leg (plan 231 D4).
+   * It is an explicit leg request: the backend commits it to the leg only (no
+   * layout intent, the horizontal program is untouched) and refuses it,
+   * never redirects it, when no leg is running. Synchronous on purpose:
+   * requests go out in call order, so the latest derivation is the one the
+   * leg ends on. `skipIfUnchanged` skips a request equal to the last one sent.
    */
+  const lastSimulcastLegKeyRef = useRef<string | null>(null)
   const sendSimulcastLeg = useCallback(
-    (config: CaptureConfig, skipIfSameAs: string | null = null): string | null => {
+    (config: CaptureConfig, scene: SimulcastScene | undefined, skipIfUnchanged = false): void => {
       if (
         !client ||
         wsStatus !== 'connected' ||
         !isActiveRecordingState(recordingRef.current.state)
       ) {
-        return null
+        return
       }
-      const request = simulcastLegLiveRequest(config)
+      const request = simulcastLegLiveRequest(config, scene)
       if (!request) {
-        return null
+        return
       }
       const key = JSON.stringify(request)
-      if (key === skipIfSameAs) {
-        return key
+      if (skipIfUnchanged && key === lastSimulcastLegKeyRef.current) {
+        return
       }
+      lastSimulcastLegKeyRef.current = key
       client
         .requestTyped('scene.layout.apply_live', {
           ...request,
@@ -10701,27 +10710,16 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
             reportError(error)
           }
         })
-      return key
     },
     [client, reportError, wsStatus]
   )
-
-  const applySimulcastLeg = useCallback(
-    (patch: SimulcastLegPatch): void => {
-      // Written to the ref synchronously (and again in the updater) so a
-      // program commit landing before React re-renders re-derives the leg
-      // from THESE settings, not the ones they replace.
-      const next = { ...captureConfigRef.current, ...patch }
-      captureConfigRef.current = next
-      setCaptureConfig((current) => {
-        const updated = { ...current, ...patch }
-        captureConfigRef.current = updated
-        return updated
-      })
-      sendSimulcastLeg(next)
-    },
-    [sendSimulcastLeg]
-  )
+  // An edit of the scene on stream's 9:16 layout from a 16:9 studio (the
+  // Vertical stream panel) is no commit of the program: it goes live on the
+  // vertical stream from here. Any other write of that scene derives the
+  // leg already sent, which is never sent twice.
+  useEffect(() => {
+    sendSimulcastLeg(captureConfigRef.current, sceneOnStream ?? undefined, true)
+  }, [sceneOnStream, sendSimulcastLeg])
 
   const requestLayoutTransaction = useCallback(
     (
@@ -10942,18 +10940,23 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
           // reconciliation continue below, but a bounded deck ack must not
           // consume their additional preview/readback budget.
           settleCommitReceipt(true)
-          // Dual-orientation: the vertical leg is DERIVED from the program
-          // layout (its twin scene when following, the shared camera
-          // settings) plus the leg's own settings, so every committed program
-          // change re-derives it. Always from the committed layout, never by
-          // comparing against a pre-commit snapshot that a faster click may
-          // already have made stale. Idempotent on the backend.
-          const programAfterCommit = {
-            ...captureConfigRef.current,
-            sources: requestedSources,
-            layout: committedSnapshot.layout
-          }
-          const legSentAtCommit = sessionActive ? sendSimulcastLeg(programAfterCommit) : null
+          // Dual-orientation (plan 231 D4): the vertical leg shows the 9:16
+          // layout of the scene this commit puts or keeps on stream, over the
+          // committed program (its sources, the shared camera settings), so a
+          // scene switch cuts both legs to the same scene, each in its own
+          // layout. Always from what committed, never by comparing against a
+          // pre-commit snapshot that a faster click may already have made
+          // stale. Idempotent on the backend.
+          const legSceneId = committedSnapshot.savedSceneId ?? activeSavedSceneIdRef.current
+          if (sessionActive)
+            sendSimulcastLeg(
+              {
+                ...captureConfigRef.current,
+                sources: requestedSources,
+                layout: committedSnapshot.layout
+              },
+              storedScene(legSceneId)
+            )
           // Intent freshness and backend commit freshness are separate. A may be
           // superseded by B after A commits; remember A before waiting for proof
           // so a failed B can reconcile the renderer to committed backend truth.
@@ -10981,15 +10984,17 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
           // visible would create a third, false scene truth.
           applyLayoutTransactionState(committedSnapshot)
           if (sessionActive) {
-            // A leg edit made while this commit waited for proof was derived
-            // from the pre-commit program; re-derive once, if anything moved.
+            // A Vertical stream edit made while this commit waited for proof
+            // went out for the scene on stream before it; re-derive once for
+            // this commit's scene, if the leg did not end on it.
             sendSimulcastLeg(
               {
                 ...captureConfigRef.current,
                 sources: requestedSources,
                 layout: committedSnapshot.layout
               },
-              legSentAtCommit
+              storedScene(legSceneId),
+              true
             )
           }
           if (disposition === 'apply-unproven') {
@@ -11114,6 +11119,7 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
       rememberLayoutTransactionSnapshot,
       reportError,
       sendSimulcastLeg,
+      storedScene,
       wsStatus
     ]
   )
@@ -11903,7 +11909,7 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
         )
         void requestCameraPresetTransaction(
           {
-            layoutPreset: firstRunLookPreset(captureConfigRef.current, held),
+            layoutPreset: firstRunLookPreset(held),
             ...cameraShapeLayoutPatch(held.cameraShape)
           },
           { backgroundOverride: effectiveSceneBackground(registry) }
@@ -14325,7 +14331,7 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
       streamEnabled: sessionConfig.streamEnabled,
       recordingVideo: sessionConfig.video,
       streamVideo,
-      verticalLeg: simulcastLegLiveRequest(sessionConfig)?.video,
+      verticalLeg: simulcastLegVideo(sessionConfig),
       captionsLayout: overlayLayout.captions
     })
     const candidateKey = latest
@@ -16283,9 +16289,11 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
               console.warn('[session-start] window list read before start failed', error)
             }
           }
+          // Plan 231 D4: the vertical stream starts on the scene's 9:16 layout.
           const sessionParams = buildStartSessionParams({
             captureConfig: sessionCaptureConfig,
             scene: sceneWithBackground,
+            sceneOnStream: storedScene(activeSavedSceneIdRef.current),
             sceneEditMode,
             settings,
             suppressCaptionsForSession: suppressCaptions,
@@ -16540,6 +16548,7 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
       sceneEditMode,
       sceneWithBackground,
       settings,
+      storedScene,
       settleClaimedPlatformLifecycleOwner,
       settlePreparedPlatformLifecycle,
       settlePreviousPlatformLifecycle,
@@ -20083,7 +20092,7 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
       applyWorkingBackgroundStyle,
       applyLiveBackground,
       liveBackgroundStatus,
-      applySimulcastLeg,
+      sceneOnStream,
       layoutSwitchPending,
       sceneSwitchProgress,
       sourceDeviceSwitchPending,
@@ -20333,7 +20342,7 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
       applyWorkingBackgroundStyle,
       applyLiveBackground,
       liveBackgroundStatus,
-      applySimulcastLeg,
+      sceneOnStream,
       layoutSwitchPending,
       sceneSwitchProgress,
       sourceDeviceSwitchPending,

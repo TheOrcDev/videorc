@@ -58,12 +58,6 @@ describe('SceneCard', () => {
     expect(render()).not.toContain('scene-card-check')
   })
 
-  it('keeps the choice apart from what is shown in use when they differ', () => {
-    const markup = render({ selected: false, pressed: true })
-    expect(markup).toContain('aria-pressed="true"')
-    expect(markup).not.toContain('data-selected')
-  })
-
   it('puts the menu beside the button, never inside it', () => {
     const markup = render({ menu: createElement('button', { 'aria-label': 'Actions' }) })
     const button = /<button[^>]*data-slot="scene-card-button"[\s\S]*?<\/button>/.exec(markup)?.[0]
@@ -72,7 +66,7 @@ describe('SceneCard', () => {
   })
 
   it("describes a disabled card's own reason, and only while disabled", () => {
-    const reason = 'Stop the recording or stream before switching orientation.'
+    const reason = 'Figma has no window open'
     const disabled = render({ disabled: true, disabledReason: reason })
     expect(disabled).toContain('disabled=""')
     expect(disabled).toContain(reason)

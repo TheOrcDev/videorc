@@ -12,12 +12,19 @@ import {
   separateSourceRecordingsForSession,
   streamOutputVideosForTargets,
   type CaptureConfig,
-  type SettingsState
+  type SettingsState,
+  type SimulcastScene
 } from './capture'
 
 export function buildStartSessionParams(input: {
   captureConfig: CaptureConfig
   scene: Scene | null
+  /**
+   * The scene on stream: its 9:16 layout is the vertical stream's (plan 231
+   * D4). Without it no vertical stream is built (the Clips ring's own session,
+   * which never streams).
+   */
+  sceneOnStream?: SimulcastScene
   sceneEditMode?: boolean
   settings: SettingsState
   suppressCaptionsForSession?: boolean
@@ -94,14 +101,17 @@ export function buildStartSessionParams(input: {
     },
     // Present only when a vertical destination is armed on a horizontal
     // session — the backend refuses vertical targets without this leg.
-    simulcast: buildSimulcastParams({
-      ...captureConfig,
-      layout: cameraLookLayout(
-        captureConfig.layout,
-        captureConfig.sources.cameraId,
-        settings.cameraLooks
-      )
-    }),
+    simulcast: buildSimulcastParams(
+      {
+        ...captureConfig,
+        layout: cameraLookLayout(
+          captureConfig.layout,
+          captureConfig.sources.cameraId,
+          settings.cameraLooks
+        )
+      },
+      input.sceneOnStream
+    ),
     // `auto` (redesign R2): a ring the user never asked for, which the
     // backend keeps off a software encoder path; a chosen one runs anywhere.
     // Plan 199: the ring always keeps the minute; only a smoke shortens it.

@@ -954,3 +954,146 @@ already called with `layouts: []`.
 - The Stream Deck plugin and the phone list `savedScenes` and light a
   layout key only when `activeSavedSceneId` is null, which never happens
   now (S9).
+
+### S3. One scene, both orientations (2026-11-15)
+
+Done. Renderer only: no backend, contract or smoke script change. Taken over
+from a rate-limited first run: its split of `simulcastLegVideo` out of the leg
+builder, the leg built from a scene, and the migration's inlined copy of the
+old leg rule (same output) are kept; the rest was finished or redone.
+
+**What the vertical stream shows now (D4)**
+
+- The scene on stream's 9:16 layout: `simulcastLegLayout(scene, program)`
+  in `lib/capture.ts`, the one builder for session start
+  (`buildStartSessionParams({ sceneOnStream })`) and live sends. The scene
+  gives the layout, Fill or Fit, the camera's spot, shape, size and zoom, a
+  camera drag and a Freeform arrangement made in a 9:16 studio. The program
+  gives what the sources look like, as before plan 231: the camera's look,
+  mirror and green-screen key (with its Hide edges), and `sourceVisibility`,
+  so one camera reads the same on both legs and a source hidden on stream is
+  hidden on both.
+- A scene switch (click, key, remote, Follow, undo) commits the program, then
+  sends the leg for the scene that commit puts on stream
+  (`committedSnapshot.savedSceneId`), at the same point the leg was re-derived
+  before: plan 210's "each leg cuts on its own scene" is unchanged, with no
+  new window of the old scene on one leg. The re-derive after the commit's
+  proof now skips only a leg equal to the last one sent (a ref), not the one
+  sent at commit, so a Vertical stream edit made during the wait can't leave
+  the leg on the scene before.
+- The Vertical stream panel edits the scene on stream's 9:16 layout and Fill
+  or Fit. It lost its six cards and "Follow horizontal scene". The control is
+  `VerticalStreamLayoutControl` (`components/studio/vertical-stream-layout-control.tsx`,
+  in the lazy bottom-row chunk): "Layout", a `Select` of the six 9:16 layouts
+  with their `LayoutThumb` (six choices are past `SegmentedControl`'s 2 to 4),
+  then the existing Fill / Fit `ScreenFramingControl`. A layout the sources
+  can't show is disabled, with the gallery's one reason line under it (a
+  scene that shows no screen can't take a screen layout here); a read-only
+  library disables both with "Update Videorc to change your scenes."
+- The edit (`editVerticalStreamLayout(core, patch)`) saves through
+  `sceneLibraryActions.replace` with the scene's view carrying the 9:16
+  layout (the ⋯-edit path; `sceneFromSaved` saves a layout of the other
+  orientation as that layout). The provider sends the leg from an effect on
+  `core.sceneOnStream`, deduped against the last leg sent, so the edit goes
+  live on the vertical leg only and any other write of the scene sends
+  nothing new. A layout change is a layout pick (its remembered framing,
+  preset arrangement, no drag); Fill or Fit keeps the arrangement.
+- `lastVerticalPreset`, `lastHorizontalPreset`, `simulcastScreenFraming` and
+  `simulcastFollowsProgram` steer nothing. `simulcastLegPreset`,
+  `studioModeTogglePreset` and `SimulcastLegPatch` are deleted. The 16:9 / 9:16
+  toggles (Studio, Scene page) name the orientation with
+  `ORIENTATION_DEFAULT_PRESET`; first-run setup's toggle lands on the scene on
+  stream's layout there. The fields stay stored and loaded for the migration
+  and a downgrade; the commit point still writes the two layouts, and the
+  panel still writes `lastVerticalPreset` and `simulcastScreenFraming`.
+- `ORIENTATION_SWITCH_LOCK_REASON` is gone, with `savedSceneBlockedReason`'s
+  `sessionActive` and `orientation` inputs. The canvas stays locked while
+  recording or live (`requestLayoutTransaction`'s refusal and the disabled
+  toggle).
+- The gallery is the same list in both modes (verified, and now tested). Its
+  line reads "Click a scene to put it on stream. Each scene keeps its own 9:16
+  layout." in 9:16, and "Click a scene to put it on both streams, the vertical
+  one in its 9:16 layout." in 16:9 with a vertical stream armed.
+
+**O1, owed by S1 (my call):** O1 (2026-09-21) gave the vertical stream Fit (a
+live program's screen is the content) and a 9:16 studio Fill (short-form).
+With one 9:16 layout per scene, a new scene follows O1 by where it is made: in
+a 16:9 studio, where its 9:16 layout is first the vertical stream's, Fit; in a
+9:16 studio, the studio's own Fill. Every new user starts in 16:9, so their
+four scenes are Fit (S1's behaviour, now asserted in `scenes.test.ts`); Add
+scene… copies the scene on stream (D6). The Fill or Fit control is on the
+panel and on the 9:16 gallery.
+
+**API changes:** core `applySimulcastLeg` is gone; core `sceneOnStream`
+(the stored scene on stream, both layouts) is new; `useSceneLibrary` returns
+`storedList` (the stored scenes, reactive). `buildSimulcastParams`,
+`simulcastLegLiveRequest` take the scene; `simulcastLegVideo(config)` is the
+leg's canvas for overlays, captions, banners and the cloud test.
+`SceneCard` lost `pressed` (only the follow case used it).
+
+**Tests:** `capture-simulcast-leg.test.ts` rewritten for scenes (the leg
+follows the scene, never the program's layout or the old settings; what comes
+from the program). `scenes.test.ts` checks on every fixture that the migrated
+scene on stream streams exactly what the leg showed before plan 231 (the old
+builder frozen in the test), and O1 for a new user. Two integration tests:
+one switch by click and one by key, each cutting the program then the leg to
+the target scene's own 9:16 layout, a panel edit landing in `layouts.vertical`
+and on the leg only, and a fast double switch ending on the right leg; and a
+9:16 studio listing the same scenes in their 9:16 layouts and applying one on
+a switch. `vertical-stream-layout-control.test.ts` covers the edit's layout.
+First-run, scene-list, scene-card and capture tests updated.
+
+**Numbers:** `pnpm typecheck`, `pnpm lint`, Prettier on the 27 touched files
+green. Full desktop unit run: 702 files, 8151 passed, 1 skipped, no flake
+seen.
+
+|                         |       raw |    gzip |
+| ----------------------- | --------: | ------: |
+| Before S3 (`e0fdfc93b`) | 2,381,700 | 489,705 |
+| After S3                | 2,381,469 | 489,675 |
+| Cap                     | 2,365,000 | 487,000 |
+
+S3 takes 231 raw and 30 gzip bytes off; the budget is still over by S2's
+amount (the owner's call). A first version with the edit in the provider was
+480 gzip up; the lazy control and the effect took it back. The lazy
+bottom-row chunk grew from 12.75 to 15.46 kB (the control and its `Select`).
+
+**Screenshots** (light and dark, a vertical stream armed through the dev
+smoke API, an isolated profile):
+`/Users/orcdev/projects/plan-231-run/S3/shots/videorc-ui-vertical-stream-{light,dark}.png`
+(the panel) and `…-vertical-stream-layouts-{light,dark}.png` (the layout list
+open). The first shots drew each list item's diagram 14 px wide, unreadable;
+it is 22 px wide now. The list scrolls because the panel is at the page's
+foot. Capture script: `S3/scratch/capture-vertical-stream.mjs` (not
+committed); the backend was built once in this worktree for it (9 min 24 s).
+
+**Deviations**
+
+- The leg takes `sourceVisibility` from the program, beside the camera's
+  look, mirror and key, as before plan 231; the brief named the layout and
+  Fill or Fit only. Everything else is the scene's 9:16 layout.
+- The edit is written by the lazy control through `sceneLibraryActions` and
+  sent by a provider effect, not a provider setter (eager bytes).
+
+**What S4 must know:** nothing in the keys changed. A 9:16 layout key in a
+16:9 studio still goes through `switchToSceneWithLayout`, which looks in the
+studio's orientation only.
+
+**What S6 must know:** mount `<VerticalStreamLayoutControl />` as the
+"Vertical stream layout" row. It reads the core itself, renders nothing beside
+a 9:16 studio or without a scene on stream, and its "Layout" row and Fill or
+Fit are the two controls D8 names. In a 9:16 studio the 9:16 layout is the
+studio's own Layout (`applyCameraPreset`).
+
+**Smokes S11 must run** (none run in S3; the Rust backend was built once in
+this worktree for the screenshots)
+
+- `smoke:multistream:vertical` and `smoke:multistream:vertical-fill` drive the
+  backend directly with their own `simulcast` params
+  (`VIDEORC_SMOKE_VERTICAL_LEG=fit|fill`, `vertical-camera-bottom`), so this
+  renderer change doesn't reach them: they should pass as they are.
+- The new scene smoke's "both legs on a vertical stream": the defaults already
+  differ (Screen + camera streams Camera top, Camera only streams Camera only
+  in 9:16); the stored 9:16 layouts are in `videorc.scenes.v2`. No script in
+  `scripts/` sets `lastVerticalPreset`, `simulcastScreenFraming` or
+  `simulcastFollowsProgram`.

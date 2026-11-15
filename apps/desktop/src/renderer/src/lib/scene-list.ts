@@ -1,5 +1,5 @@
 import type { Device } from './backend'
-import { layoutPresetNeedsScreen, layoutPresetOrientation } from './capture'
+import { layoutPresetNeedsScreen } from './capture'
 import { layoutPresetLabel } from './layout-labels'
 import { appWindowFailureCopy } from './scene-apps'
 import {
@@ -77,13 +77,10 @@ export function sceneGlyph(
   return { kind: 'display' }
 }
 
-export const ORIENTATION_SWITCH_LOCK_REASON =
-  'Stop the recording or stream before switching orientation.'
-
 /**
  * Why a saved scene can't go on stream now, or null. An app that isn't
- * ready says so in S2's words ("Figma isn't open"), and a scene of the other
- * orientation waits for the take to end (the canvas is fixed while it runs).
+ * ready says so in S2's words ("Figma isn't open"). Every scene has a layout
+ * for each orientation (plan 231 D4), so none waits for the take to end.
  * A scene made for an app never asks for its window to be resolved, so a
  * camera it needs and can't use is said here too; any other scene's missing
  * sources open Resolve scene sources instead.
@@ -91,18 +88,11 @@ export const ORIENTATION_SWITCH_LOCK_REASON =
 export function savedSceneBlockedReason(input: {
   scene: Pick<SavedScene, 'visual'>
   appState: SceneAppState | undefined
-  sessionActive: boolean
-  orientation: 'horizontal' | 'vertical'
   devices: readonly Device[]
 }): string | null {
   const app = input.scene.visual.sources.app
   if (app && input.appState && input.appState !== 'ready')
     return appWindowFailureCopy(app.name, `app-${input.appState}`)
-  if (
-    input.sessionActive &&
-    layoutPresetOrientation(input.scene.visual.layout.layoutPreset) !== input.orientation
-  )
-    return ORIENTATION_SWITCH_LOCK_REASON
   // For an app's scene, the problems are its camera's alone (S2 resolves the app).
   if (app) return sceneSourceProblems(input.scene.visual, input.devices)[0] ?? null
   return null

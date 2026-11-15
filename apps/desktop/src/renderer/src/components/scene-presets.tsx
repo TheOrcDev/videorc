@@ -11,7 +11,6 @@ import { DisabledReason } from '@/components/ui/disabled-reason'
 import { ShortcutKeys } from '@/components/ui/shortcut-keys'
 import { useAppIcons } from '@/hooks/use-app-icons'
 import { useStudioCore } from '@/hooks/use-studio'
-import { layoutPresetOrientation } from '@/lib/capture'
 import { saveSceneBlockedReason, savedSceneBlockedReason } from '@/lib/scene-list'
 
 /**
@@ -31,11 +30,9 @@ export function ScenePresetControls(): ReactElement {
     savedSceneAppStates,
     sceneLibraryActions,
     sceneLibraryError,
-    captureConfig,
     deviceList,
     settings,
     runtimeInfo,
-    isSessionActive,
     canSaveScene,
     wsStatus,
     scene
@@ -46,7 +43,6 @@ export function ScenePresetControls(): ReactElement {
       entry.visual.sources.app ? [entry.visual.sources.app.bundleId] : []
     )
   )
-  const orientation = layoutPresetOrientation(captureConfig.layout.layoutPreset)
   const saveReason = saveSceneBlockedReason({
     readOnly: sceneLibraryActions.readOnly,
     connected: wsStatus === 'connected' && scene !== null,
@@ -91,8 +87,6 @@ export function ScenePresetControls(): ReactElement {
           const blocked = savedSceneBlockedReason({
             scene: entry,
             appState: savedSceneAppStates[entry.id],
-            sessionActive: isSessionActive,
-            orientation,
             devices: deviceList.devices
           })
           const shortcut = settings.globalShortcuts?.scenes?.[entry.id]

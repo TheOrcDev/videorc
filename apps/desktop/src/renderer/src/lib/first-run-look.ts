@@ -20,7 +20,7 @@ import {
 import {
   layoutPresetMemoryPatch,
   layoutPresetOrientation,
-  studioModeTogglePreset,
+  ORIENTATION_DEFAULT_PRESET,
   verticalOrientationVideoPatch,
   type CaptureConfig,
   type LayoutOrientation
@@ -60,15 +60,15 @@ export type FirstRunLookChoice = Pick<FirstRunLook, 'orientation' | 'layoutPrese
 
 /**
  * The preset a look lands on: its own when it belongs to the orientation,
- * otherwise the scene remembered for that orientation (the gallery's toggle).
+ * otherwise that orientation's default layout. The step's own orientation
+ * toggle picks the scene's layout there (`useFirstRunLook`, plan 231 D4).
  */
 export function firstRunLookPreset(
-  config: Pick<CaptureConfig, 'lastHorizontalPreset' | 'lastVerticalPreset'>,
   choice: Pick<FirstRunLookChoice, 'orientation' | 'layoutPreset'>
 ): LayoutPreset {
   return layoutPresetOrientation(choice.layoutPreset) === choice.orientation
     ? choice.layoutPreset
-    : studioModeTogglePreset(choice.orientation, config)
+    : ORIENTATION_DEFAULT_PRESET[choice.orientation]
 }
 
 /**
@@ -97,7 +97,7 @@ export function firstRunLookPatch(
   choice: FirstRunLookChoice
 ): CaptureConfig {
   const current = config.layout.layoutPreset
-  const layoutPreset = firstRunLookPreset(config, choice)
+  const layoutPreset = firstRunLookPreset(choice)
   const layout: LayoutSettings = {
     ...config.layout,
     ...recalledLayoutFraming(config.layoutFramingMemory, current, layoutPreset),

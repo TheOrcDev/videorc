@@ -88,8 +88,8 @@ import {
   layoutPresetNeedsCamera,
   layoutPresetNeedsScreen,
   layoutPresetOrientation,
-  simulcastLegLiveRequest,
-  studioModeTogglePreset,
+  ORIENTATION_DEFAULT_PRESET,
+  simulcastLegVideo,
   type LayoutOrientation
 } from '@/lib/capture'
 import { bannerSnapRect } from '@/lib/banner-place'
@@ -424,7 +424,7 @@ export function LayoutTab(): ReactElement {
   // Orientation (D15): the primary canvas places the item's horizontal rect
   // (or its vertical one for a vertical scene); with a vertical stream armed
   // the toggle shows that stream's rects over a greyed 9:16 canvas.
-  const verticalLeg = simulcastLegLiveRequest(captureConfig)
+  const verticalLeg = simulcastLegVideo(captureConfig)
   const primaryOrientation = overlayOrientationForCanvas(
     captureConfig.video.width,
     captureConfig.video.height
@@ -440,8 +440,8 @@ export function LayoutTab(): ReactElement {
   // stream's 9:16 while the stage shows it. A banner's rect converts its
   // image's aspect into these canvas units.
   const stageAspect =
-    verticalView && verticalLeg?.video
-      ? verticalLeg.video.width / Math.max(1, verticalLeg.video.height)
+    verticalView && verticalLeg
+      ? verticalLeg.width / Math.max(1, verticalLeg.height)
       : verticalView
         ? 9 / 16
         : captureConfig.video.width / Math.max(1, captureConfig.video.height)
@@ -675,10 +675,7 @@ export function LayoutTab(): ReactElement {
   // gallery's control, brought here: C-23).
   const switchOrientation = (target: LayoutOrientation): void => {
     if (target === orientation) return
-    applyCameraPreset(
-      { layoutPreset: studioModeTogglePreset(target, captureConfig) },
-      { toOrientation: true }
-    )
+    applyCameraPreset({ layoutPreset: ORIENTATION_DEFAULT_PRESET[target] }, { toOrientation: true })
   }
   const layoutTabPresets =
     orientation === 'vertical' ? VERTICAL_LAYOUT_TAB_PRESETS : HORIZONTAL_LAYOUT_TAB_PRESETS
@@ -1138,7 +1135,7 @@ export function LayoutTab(): ReactElement {
               sizeAdvice={bannerSizeAdvice({
                 banner: selectedBanner,
                 output: captureConfig.video,
-                verticalStream: verticalLeg?.video ?? null
+                verticalStream: verticalLeg ?? null
               })}
               onBringToFront={() => moveSelectedBanner(banners.length - 1)}
               onManage={() => openWorkspaceTab('assets')}

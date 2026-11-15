@@ -123,27 +123,26 @@ export type CaptureConfig = {
    * (verticalOrientationVideoPatch). Null outside vertical mode.
    */
   verticalRestoreVideo: VideoSettings | null
-  /**
-   * Last-used scene per Studio mode: the orientation toggle re-enters a mode
-   * on the scene the user left it in. Kept fresh at the layout-transaction
-   * commit point via layoutPresetMemoryPatch.
-   */
   layoutFramingMemory: LayoutFramingMemory
+  /**
+   * The layout last used in each orientation. Plan 231: these two and the two
+   * vertical stream settings below steer nothing now. Every scene has its own
+   * 16:9 and 9:16 layout, and the vertical stream shows the scene on stream's
+   * 9:16 layout with its own Fill or Fit. They stay stored (the two layouts
+   * kept fresh at the commit point via layoutPresetMemoryPatch) because the
+   * scene migration reads them and an older build still steers by them.
+   */
   lastHorizontalPreset: LayoutPreset
   lastVerticalPreset: LayoutPreset
   /**
-   * Screen framing for the vertical SIMULCAST leg (dual-orientation live
-   * streaming). Separate from layout.verticalScreenFraming on purpose: the
-   * leg mirrors a live program where the shared screen is the content, so it
-   * defaults to 'fit' (whole screen), while vertical Studio mode records
-   * short-form video and keeps the 'fill' law (owner decision O1, 2026-09-21).
+   * Before plan 231, the vertical stream's own Fill or Fit: 'fit' by default
+   * (the shared screen is the content of a live program), while a 9:16 studio
+   * kept the 'fill' law (owner decision O1, 2026-09-21). Migration input only.
    */
   simulcastScreenFraming: VerticalScreenFraming
   /**
-   * The vertical leg follows the horizontal program's scene KIND: a
-   * camera-only program streams the vertical camera scene, a screen-only
-   * program the vertical screen scene, anything else the remembered vertical
-   * scene. Keeps the leg from asking for a source the program is not showing.
+   * Before plan 231, whether the vertical stream took Camera only and Screen
+   * only from the horizontal program. Migration input only.
    */
   simulcastFollowsProgram: boolean
   recordEnabled: boolean
@@ -293,10 +292,8 @@ export function separateSourceRecordingsEncoderNotice(
   return `Separate files at ${formatVideoQuality(video)} use about 3× the encoder. If your Mac falls behind, Videorc stops the separate files and keeps the main recording.`
 }
 
-/** The vertical simulcast leg's user-facing settings. */
-export type SimulcastLegPatch = Partial<
-  Pick<CaptureConfig, 'lastVerticalPreset' | 'simulcastScreenFraming' | 'simulcastFollowsProgram'>
->
+/** The part of a scene the vertical stream needs: its 9:16 layout. */
+export type SimulcastScene = { layouts: { vertical: LayoutSettings } }
 
 export type LegacyStreamKeyMigrationCandidate = {
   targetId: string
@@ -378,9 +375,8 @@ export function coerceVideoToOrientation(
 /**
  * Whether this config arms the dual-orientation simulcast leg: streaming is
  * on, at least one enabled destination is vertical-bound, and the Studio is
- * editing a horizontal scene (the vertical leg composes from vertical-mode
- * memory). In vertical Studio mode the single canvas IS portrait — no second
- * leg exists to arm.
+ * in 16:9 (the vertical leg shows the scene on stream's 9:16 layout). In a
+ * 9:16 studio the single canvas IS portrait — no second leg exists to arm.
  */
 export function simulcastArmed(
   config: Pick<CaptureConfig, 'streamEnabled' | 'streaming' | 'layout'>
@@ -399,22 +395,25 @@ export function simulcastArmed(
 }
 
 /**
- * The vertical leg's session params, built from vertical-mode memory: the
- * remembered vertical scene preset on the transposed (portrait) canvas.
- * Camera transform memory stays preset-mode — vertical scenes are band/full
- * layouts, and a landscape custom drag must never leak into the portrait leg.
+ * The vertical stream's canvas, or undefined when no vertical stream is
+ * armed: the common vertical target profile, in portrait.
  */
-export function buildSimulcastParams(config: CaptureConfig): SimulcastParams | undefined {
-  if (!simulcastArmed(config)) {
-    return undefined
-  }
-  return {
-    layout: simulcastLegLayout(config),
-    video: coerceVideoToOrientation(
-      simulcastStreamVideo(config.video, config.streaming),
-      'vertical'
-    )
-  }
+export function simulcastLegVideo(config: CaptureConfig): VideoSettings | undefined {
+  return simulcastArmed(config)
+    ? coerceVideoToOrientation(simulcastStreamVideo(config.video, config.streaming), 'vertical')
+    : undefined
+}
+
+/**
+ * The vertical leg's session params: the 9:16 layout of the scene on stream
+ * (plan 231 D4) on the transposed (portrait) canvas. None without a scene.
+ */
+export function buildSimulcastParams(
+  config: CaptureConfig,
+  scene: SimulcastScene | undefined
+): SimulcastParams | undefined {
+  const video = scene && simulcastLegVideo(config)
+  return video ? { layout: simulcastLegLayout(scene, config.layout), video } : undefined
 }
 
 /** The single portrait encoder uses the common supported vertical target profile. */
@@ -444,59 +443,49 @@ export function simulcastStreamVideo(
  * commit it to the leg only, and refuse it when no leg is running.
  */
 export function simulcastLegLiveRequest(
-  config: CaptureConfig
+  config: CaptureConfig,
+  scene: SimulcastScene | undefined
 ): (SceneConfigParams & { simulcastLeg: true }) | null {
-  const leg = buildSimulcastParams(config)
+  const leg = buildSimulcastParams(config, scene)
   if (!leg) {
     return null
   }
   return { simulcastLeg: true, sources: config.sources, layout: leg.layout, video: leg.video }
 }
 
-/**
- * The vertical scene the simulcast leg streams for a horizontal program
- * scene. With follow on, the leg mirrors the program's KIND (camera-only and
- * screen-only have exact vertical twins); every other program scene, and
- * follow off, streams the remembered vertical scene.
- */
-export function simulcastLegPreset(
-  config: Pick<CaptureConfig, 'layout' | 'lastVerticalPreset' | 'simulcastFollowsProgram'>,
-  programPreset: LayoutPreset = config.layout.layoutPreset
-): LayoutPreset {
-  if (config.simulcastFollowsProgram) {
-    if (programPreset === 'camera-only') {
-      return 'vertical-camera-only'
-    }
-    if (programPreset === 'screen-only') {
-      return 'vertical-screen-only'
-    }
-  }
-  return config.lastVerticalPreset
-}
+/** What the vertical stream takes from the program, not from its scene. */
+const PROGRAM_SOURCE_KEYS = [
+  'cameraLook',
+  'cameraMirror',
+  'cameraChromaKeyEnabled',
+  'cameraChromaKeyColor',
+  'cameraChromaKeySimilarityPct',
+  'cameraChromaKeySmoothnessPct',
+  'cameraChromaKeySpillPct',
+  'cameraChromaKeyEdges',
+  'sourceVisibility'
+] as const satisfies readonly (keyof LayoutSettings)[]
 
 /**
- * The simulcast leg's layout — ONE builder for session start and for live
+ * The simulcast leg's layout: ONE builder for session start and for live
  * edits of the leg, so what goes live and what a mid-stream change commits
- * can never disagree. Camera transform memory stays preset-mode.
+ * can never disagree.
+ *
+ * It is the 9:16 layout of the scene on stream (plan 231 D4): its layout,
+ * its Fill or Fit, and where and in what shape the camera and the screen
+ * sit, as a 9:16 studio shows that scene. What the sources themselves look
+ * like is the program's, as before plan 231: the camera's mirror, its
+ * green-screen key and its look, and which sources are shown, so one camera
+ * reads the same on both streams and a source hidden on stream is hidden on
+ * both.
  */
-export function simulcastLegLayout(
-  config: Pick<
-    CaptureConfig,
-    'layout' | 'lastVerticalPreset' | 'simulcastFollowsProgram' | 'simulcastScreenFraming'
-  >,
-  programPreset: LayoutPreset = config.layout.layoutPreset
-): LayoutSettings {
-  return {
-    ...config.layout,
-    layoutPreset: simulcastLegPreset(config, programPreset),
-    verticalScreenFraming: config.simulcastScreenFraming,
-    cameraTransformMode: 'preset',
-    cameraTransform: null,
-    // The leg streams its own vertical scene: a freeform horizontal program
-    // (and its overrides) must never leak onto the portrait canvas.
-    arrangementMode: 'preset',
-    sourceTransformOverrides: {}
+export function simulcastLegLayout(scene: SimulcastScene, program: LayoutSettings): LayoutSettings {
+  const leg: Partial<Record<keyof LayoutSettings, unknown>> = { ...scene.layouts.vertical }
+  for (const key of PROGRAM_SOURCE_KEYS) {
+    leg[key] = program[key]
+    if (leg[key] === undefined) delete leg[key]
   }
+  return leg as LayoutSettings
 }
 
 export type ResolutionOption = {
@@ -593,7 +582,10 @@ export function verticalOrientationVideoPatch(
   }
 }
 
-/** Config patch remembering `preset` as its mode's last-used scene. */
+/**
+ * Config patch remembering `preset` as its mode's last-used layout. Plan 231:
+ * kept written for an older build and the scene migration; it steers nothing.
+ */
 export function layoutPresetMemoryPatch(
   preset: LayoutPreset
 ): Partial<Pick<CaptureConfig, 'lastHorizontalPreset' | 'lastVerticalPreset'>> {
@@ -603,22 +595,13 @@ export function layoutPresetMemoryPatch(
 }
 
 /**
- * The scene the Studio mode toggle applies when switching to `target`: the
- * mode's remembered scene, guarded back to its default if the remembered
- * value is somehow cross-class (the mode is derived from the preset, so a
- * wrong-class memory would strand the toggle in the mode it tried to leave).
+ * The layout an orientation starts on when nothing else names one. The
+ * 16:9 / 9:16 toggle names the orientation with it, and the scene on stream
+ * goes on in its own layout for that orientation (plan 231 D4).
  */
-export function studioModeTogglePreset(
-  target: LayoutOrientation,
-  config: Pick<CaptureConfig, 'lastHorizontalPreset' | 'lastVerticalPreset'>
-): LayoutPreset {
-  const remembered = target === 'vertical' ? config.lastVerticalPreset : config.lastHorizontalPreset
-  if (layoutPresetOrientation(remembered) !== target) {
-    return target === 'vertical'
-      ? defaultCaptureConfig.lastVerticalPreset
-      : defaultCaptureConfig.lastHorizontalPreset
-  }
-  return remembered
+export const ORIENTATION_DEFAULT_PRESET: Readonly<Record<LayoutOrientation, LayoutPreset>> = {
+  horizontal: 'screen-camera',
+  vertical: 'vertical-camera-top'
 }
 
 export function hasSelectedScreenSource(sources: SourceSelection): boolean {

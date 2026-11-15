@@ -28,7 +28,6 @@ export function SceneCard({
   icon,
   label,
   selected = false,
-  pressed = selected,
   disabled = false,
   disabledReason,
   meta,
@@ -43,10 +42,8 @@ export function SceneCard({
   icon?: ReactNode
   /** The scene's name, kept while it applies (the pending mark goes in `meta`, issue #1275). */
   label: string
-  /** The scene in use: the card's selected look and the check. */
+  /** The scene in use: the card's selected look, the check and `aria-pressed`. */
   selected?: boolean
-  /** `aria-pressed`, when the choice differs from what is shown in use (the vertical stream follows). */
-  pressed?: boolean
   disabled?: boolean
   /** This card's own reason while disabled; a reason every card shares goes under the gallery. */
   disabledReason?: ReactNode
@@ -54,7 +51,7 @@ export function SceneCard({
   meta?: ReactNode
   /** The card's ⋯ menu (a KebabMenu with `reveal="hover"`). */
   menu?: ReactNode
-  /** `sm` for the denser vertical-stream gallery. */
+  /** `sm` for a denser gallery (first-run setup's look). */
   size?: 'md' | 'sm'
   onSelect: () => void
 } & { [key: `data-${string}`]: string | undefined }): ReactElement {
@@ -67,7 +64,7 @@ export function SceneCard({
     >
       <DisabledReason className="flex min-w-0 flex-1" reason={disabled ? disabledReason : null}>
         <button
-          aria-pressed={pressed}
+          aria-pressed={selected}
           className={cn(
             'flex min-w-0 flex-1 flex-col rounded-row p-2 text-left outline-none focus-visible:ring-3 focus-visible:ring-ring/30',
             size === 'sm' ? 'gap-1.5' : 'gap-2'

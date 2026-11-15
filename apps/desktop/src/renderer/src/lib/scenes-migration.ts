@@ -6,7 +6,6 @@ import {
   layoutPresetOrientation,
   loadCaptureConfig,
   loadJson,
-  simulcastLegLayout,
   STORAGE_KEYS,
   VERTICAL_LAYOUT_PRESETS,
   type CaptureConfig,
@@ -137,16 +136,20 @@ export function migrateToScenes(
    * What the vertical stream shows for a 16:9 layout today. In a 9:16 studio
    * no vertical leg runs, so the layout's own Fill or Fit stays.
    */
-  const legLayout = (layout: LayoutSettings): LayoutSettings =>
-    simulcastLegLayout({
+  const legLayout = (layout: LayoutSettings): LayoutSettings => ({
+    ...presetLayout(
       layout,
-      lastVerticalPreset: captureConfig.lastVerticalPreset,
-      simulcastFollowsProgram: captureConfig.simulcastFollowsProgram,
-      simulcastScreenFraming:
-        orientation === 'vertical'
-          ? layout.verticalScreenFraming
-          : captureConfig.simulcastScreenFraming
-    })
+      captureConfig.simulcastFollowsProgram && layout.layoutPreset === 'camera-only'
+        ? 'vertical-camera-only'
+        : captureConfig.simulcastFollowsProgram && layout.layoutPreset === 'screen-only'
+          ? 'vertical-screen-only'
+          : captureConfig.lastVerticalPreset
+    ),
+    verticalScreenFraming:
+      orientation === 'vertical'
+        ? layout.verticalScreenFraming
+        : captureConfig.simulcastScreenFraming
+  })
   /** Both layouts of a scene from the one layout v1 kept. */
   const layoutsFrom = (layout: LayoutSettings): Scene['layouts'] =>
     layoutPresetOrientation(layout.layoutPreset) === 'vertical'

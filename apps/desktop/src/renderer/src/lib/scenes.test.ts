@@ -42,6 +42,36 @@ import {
 } from './scenes'
 
 const NOW = '2026-11-15T12:00:00.000Z'
+
+/**
+ * What the vertical stream showed for a 16:9 program before plan 231 (the
+ * old leg builder, frozen here): Follow mirrored Camera only and Screen only,
+ * anything else streamed the remembered 9:16 layout, with the leg's own Fill
+ * or Fit and the program's look in preset arrangement.
+ */
+function legBeforePlan231(
+  config: Pick<
+    CaptureConfig,
+    'lastVerticalPreset' | 'simulcastFollowsProgram' | 'simulcastScreenFraming'
+  >,
+  program: LayoutSettings
+): LayoutSettings {
+  const follows = config.simulcastFollowsProgram
+  return {
+    ...program,
+    layoutPreset:
+      follows && program.layoutPreset === 'camera-only'
+        ? 'vertical-camera-only'
+        : follows && program.layoutPreset === 'screen-only'
+          ? 'vertical-screen-only'
+          : config.lastVerticalPreset,
+    verticalScreenFraming: config.simulcastScreenFraming,
+    cameraTransformMode: 'preset',
+    cameraTransform: null,
+    arrangementMode: 'preset',
+    sourceTransformOverrides: {}
+  }
+}
 const FIXTURES = [
   'new-user',
   'plan-210-user',
@@ -126,10 +156,11 @@ describe('migrateToScenes on the fixtures (plan 231 D15)', () => {
     expect(canonicalJson(sceneLayout(on, orientation))).toBe(canonicalJson(visual.layout))
     expect(on.background).toEqual(visual.background)
     expect(sameShows(on.shows, showsFromSources(visual.sources))).toBe(true)
-    // The vertical stream: what the leg builder gives for the program today.
+    // The vertical stream: the scene on stream's 9:16 layout streams what
+    // the leg showed for this program before plan 231 (S3), exactly.
     if (orientation === 'horizontal')
-      expect(canonicalJson(on.layouts.vertical)).toBe(
-        canonicalJson(simulcastLegLayout({ ...config, layout: visual.layout }))
+      expect(canonicalJson(simulcastLegLayout(on, visual.layout))).toBe(
+        canonicalJson(legBeforePlan231(config, visual.layout))
       )
     // Every scene is valid, and the stored library hydrates to itself.
     for (const scene of library.scenes) {
@@ -164,6 +195,12 @@ describe('migrateToScenes on the fixtures (plan 231 D15)', () => {
     expect(library.onStreamId).toBe('default-screen-camera')
     expect(globalShortcuts).toEqual({ scenes: {} })
     expect(library.scenes).toEqual(defaultScenes(null, NOW))
+    // Owner call O1 (2026-09-21) for new scenes (plan 231 S3): a new user
+    // starts in 16:9, where a scene's 9:16 layout is first the vertical
+    // stream's, so it is Fit, the live program's whole screen. A 9:16 studio
+    // keeps its own Fill (the next tests).
+    for (const scene of library.scenes)
+      expect(scene.layouts.vertical.verticalScreenFraming).toBe('fit')
   })
 
   it('plan 210 user: Figma first, on stream, at position 1; T3 Code second with its key', () => {
