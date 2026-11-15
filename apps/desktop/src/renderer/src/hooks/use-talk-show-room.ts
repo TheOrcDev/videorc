@@ -5,7 +5,6 @@ import type {
   CloudGuestAction,
   CloudRoomOpenParams,
   CloudRoomOverlayEvent,
-  CloudRoomTokenAnswer,
   CloudStage,
   CloudStatus,
   Device
@@ -129,14 +128,14 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
   } = deps
   const [snapshot, setSnapshot] = useState<TalkShowRoomSnapshot>(IDLE_SNAPSHOT)
   const clientRef = useRef<TalkShowRoomClient | null>(null)
-  const joiningRef = useRef<Promise<void> | null>(null)
+  const leavingRef = useRef<Promise<void>>(Promise.resolve())
   const audioHostRef = useRef<HTMLElement | null>(null)
-  // Set while the controller is unmounted. A join still loading the room
-  // client when the Studio goes away stops there: it never builds a client
-  // (or touches a document that may be gone) that nothing would disconnect.
+  // A completed leave only hands capture back while the Studio is mounted.
   const disposedRef = useRef(false)
   const roomPhase = cloudStatus?.room?.phase ?? 'closed'
   const roomOpen = roomPhase === 'open'
+  const roomOpenRef = useRef(roomOpen)
+  roomOpenRef.current = roomOpen
   const showId = cloudStatus?.show?.id ?? null
   const stage = cloudStatus?.room?.stage ?? null
   const stageKey = stage ? JSON.stringify(stage.onStage) : ''
@@ -162,70 +161,84 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
   const onCameraReturnedRef = useRef(onCameraReturned)
   onCameraReturnedRef.current = onCameraReturned
 
-  const requestToken = useCallback(async (): Promise<CloudRoomTokenAnswer> => {
-    if (!client) throw new Error('Videorc is offline.')
-    return client.requestTyped('cloud.room.token.refresh')
-  }, [client])
+  const callbacksRef = useRef({ commitCloudStatus, onError })
+  callbacksRef.current = { commitCloudStatus, onError }
 
-  const report = useCallback(
-    (state: TalkShowRoomSnapshot['state'], detail?: string) => {
-      if (!client) return
-      void client
-        .requestTyped('cloud.room.client.report', { state, ...(detail ? { detail } : {}) })
-        .then(commitCloudStatus)
-        .catch(() => {})
-    },
-    [client, commitCloudStatus]
-  )
-
-  // Join when the room opens, leave when it closes (D6: the backend lent the
-  // camera before the status said `open`; it takes it back after the leave).
+  // Each open show owns one join. Closing, changing shows or losing the
+  // backend cancels it, even while the media grant or lazy import is pending.
+  // A replacement waits for teardown so the old leave cannot revoke its grant.
   useEffect(() => {
-    if (!roomOpen || !client) {
-      const current = clientRef.current
-      if (current) {
-        clientRef.current = null
-        void current.disconnect().finally(() => {
-          void window.videorc?.setTalkShowMediaGrant?.({ video: false, screenSourceId: null })
-          onCameraReturnedRef.current()
-        })
-      }
+    setSnapshot(IDLE_SNAPSHOT)
+    if (!roomOpen || !client || !showId) {
       return
     }
-    if (clientRef.current || joiningRef.current) return
-    joiningRef.current = (async () => {
+    let cancelled = false
+    let current: TalkShowRoomClient | null = null
+    let grant: Promise<unknown> | null = null
+    const report = (state: TalkShowRoomSnapshot['state'], detail?: string): void => {
+      if (cancelled) return
+      void client
+        .requestTyped('cloud.room.client.report', { state, ...(detail ? { detail } : {}) })
+        .then((status) => {
+          if (!cancelled) callbacksRef.current.commitCloudStatus(status)
+        })
+        .catch(() => {})
+    }
+    void (async () => {
       try {
-        // Camera video and the screen share need main's grant while the room
-        // is open (the renderer's web permissions allow audio only).
-        await window.videorc?.setTalkShowMediaGrant?.({ video: true, screenSourceId: null })
+        await leavingRef.current
+        if (cancelled) return
+        grant = Promise.resolve(
+          window.videorc?.setTalkShowMediaGrant?.({ video: true, screenSourceId: null })
+        )
+        await grant
+        if (cancelled) return
         const { TalkShowRoomClient } = await loadRoomClient()
-        if (disposedRef.current) return
-        if (!audioHostRef.current) {
-          const host = document.createElement('div')
-          host.setAttribute('data-talk-show-audio-host', '')
-          host.style.display = 'none'
-          document.body.appendChild(host)
-          audioHostRef.current = host
-        }
+        if (cancelled) return
+        const host = document.createElement('div')
+        host.setAttribute('data-talk-show-audio-host', '')
+        host.style.display = 'none'
+        document.body.appendChild(host)
+        audioHostRef.current = host
         const roomClient = new TalkShowRoomClient({
-          requestToken,
+          requestToken: () => client.requestTyped('cloud.room.token.refresh'),
           report,
-          onSnapshot: setSnapshot,
+          onSnapshot: (next) => {
+            if (!cancelled) setSnapshot(next)
+          },
           cameraName: cameraNameRef.current,
           microphoneName: microphoneNameRef.current,
-          audioHost: () => audioHostRef.current
+          audioHost: () => host
         })
+        current = roomClient
         clientRef.current = roomClient
         await roomClient.sendStage(stageRef.current)
+        if (cancelled) return
         await roomClient.connect()
       } catch (error) {
-        onError(error, ROOM_JOIN_ERROR_ACTION)
+        if (cancelled) return
+        callbacksRef.current.onError(error, ROOM_JOIN_ERROR_ACTION)
         report('disconnected', error instanceof Error ? error.message : String(error))
-      } finally {
-        joiningRef.current = null
       }
     })()
-  }, [client, onError, report, requestToken, roomOpen])
+    return () => {
+      cancelled = true
+      if (clientRef.current === current) clientRef.current = null
+      audioHostRef.current?.remove()
+      audioHostRef.current = null
+      if (!grant && !current) return
+      // disconnect stops local tracks before its first await. Do not wait
+      // for a pending connect to finish before releasing capture.
+      leavingRef.current = Promise.allSettled([grant, current?.disconnect()])
+        .then(async () => {
+          await window.videorc?.setTalkShowMediaGrant?.({ video: false, screenSourceId: null })
+        })
+        .catch(() => {})
+        .then(() => {
+          if (!disposedRef.current && !roomOpenRef.current) onCameraReturnedRef.current()
+        })
+    }
+  }, [client, roomOpen, showId])
 
   // The guest page reads the stage from the host's data topic (D11).
   useEffect(() => {
@@ -266,11 +279,6 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
     disposedRef.current = false
     return () => {
       disposedRef.current = true
-      const current = clientRef.current
-      clientRef.current = null
-      void current?.disconnect()
-      audioHostRef.current?.remove()
-      audioHostRef.current = null
     }
   }, [])
 
