@@ -438,6 +438,24 @@ describe('BuddyPetCreator (plan 168 S-F5)', () => {
     expect(readBuddyCreationFile).toHaveBeenCalledWith('default', BUILD, 'pack/mascot.webp')
   })
 
+  it('keeps saved review marks when cancellation fails, and clears them after retry succeeds', async () => {
+    const backend = fakeBackend(reviewCreation())
+    await render({ client: backend.client })
+    await click(byTestId('buddy-pet-mark-reactions-a'))
+    const savedMarks = localStorage.getItem(BUDDY_PET_REVIEW_MARKS_STORAGE_KEY)
+    expect(savedMarks).not.toBeNull()
+    backend.requestTyped.mockRejectedValueOnce(new Error('offline'))
+    await click(byTestId('buddy-pet-cancel'))
+    await click(byTestId('buddy-pet-cancel-confirm'))
+    expect(localStorage.getItem(BUDDY_PET_REVIEW_MARKS_STORAGE_KEY)).toBe(savedMarks)
+    expect(byTestId('buddy-pet-mark-reactions-a')?.getAttribute('aria-pressed')).toBe('true')
+    expect(byTestId('buddy-pet-cancel')).not.toBeNull()
+    await click(byTestId('buddy-pet-cancel'))
+    await click(byTestId('buddy-pet-cancel-confirm'))
+    expect(localStorage.getItem(BUDDY_PET_REVIEW_MARKS_STORAGE_KEY)).toBeNull()
+    expect(byTestId('buddy-pet-cancel')).toBeNull()
+  })
+
   it('cancels after a confirmation, and nothing is left to continue', async () => {
     const backend = fakeBackend(reviewCreation({ step: 'build', build: undefined }))
     await render({ client: backend.client })

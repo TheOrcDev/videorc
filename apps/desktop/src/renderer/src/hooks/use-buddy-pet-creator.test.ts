@@ -92,6 +92,7 @@ function fakeBackend(initial: BuddyPetCreation | null) {
   } as unknown as BuddyPetCreatorClient
   return {
     client,
+    requestTyped,
     calls,
     emit,
     set: (next: BuddyPetCreation | null) => {
@@ -106,6 +107,98 @@ const flush = async (): Promise<void> => {
 }
 
 describe('the creator controller (plan 168 S-F5)', () => {
+  it.each(['cancel', 'startOver'] as const)(
+    'does not restore a creation after %s when an earlier status read finishes',
+    async (action) => {
+      const backend = fakeBackend(creation())
+      const controller = createBuddyPetCreatorController(backend.client)
+      await controller.refresh()
+      let resolveStatus!: (value: { creation: BuddyPetCreation }) => void
+      backend.requestTyped.mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolveStatus = resolve
+          })
+      )
+      const staleRead = controller.refresh()
+      await controller[action]()
+      expect(controller.getState().creation).toBeNull()
+      resolveStatus({ creation: creation() })
+      await staleRead
+      expect(controller.getState().creation).toBeNull()
+      controller.dispose()
+    }
+  )
+
+  it('keeps cancellation pending through late job events, then allows retry after a refusal', async () => {
+    const backend = fakeBackend(creation())
+    const controller = createBuddyPetCreatorController(backend.client)
+    await controller.refresh()
+    let rejectCancel!: (error: Error) => void
+    backend.requestTyped.mockImplementationOnce(
+      () =>
+        new Promise((_resolve, reject) => {
+          rejectCancel = reject
+        })
+    )
+    const cancelling = controller.cancel()
+    backend.emit('cohost.pet.sheet.generated', {
+      buildId: BUILD,
+      sheet: 'gaze-up2',
+      version: 1,
+      opaque: false
+    })
+    backend.emit('cohost.pet.build.progress', {
+      buildId: BUILD,
+      step: 'done',
+      done: 1,
+      total: 1
+    })
+    await flush()
+    expect(controller.getState().pending).toBe('cancel')
+    rejectCancel(new Error('offline'))
+    await cancelling
+    expect(controller.getState().pending).toBeNull()
+    expect(controller.getState().creation?.buildId).toBe(BUILD)
+    expect(controller.getState().problem).not.toBeNull()
+    await controller.cancel()
+    expect(controller.getState().creation).toBeNull()
+    expect(controller.getState().problem).toBeNull()
+    controller.dispose()
+  })
+
+  it('does not request another sheet after leaving during an event status read', async () => {
+    const backend = fakeBackend(creation())
+    const controller = createBuddyPetCreatorController(backend.client)
+    await controller.refresh()
+    await controller.makeSheets()
+    let resolveStatus!: (value: { creation: BuddyPetCreation }) => void
+    backend.requestTyped.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveStatus = resolve
+        })
+    )
+    backend.emit('cohost.pet.sheet.generated', {
+      buildId: BUILD,
+      sheet: 'gaze-up2',
+      version: 1,
+      opaque: false
+    })
+    controller.dispose()
+    resolveStatus({ creation: creation({ sheets: [source('gaze-up2')] }) })
+    await flush()
+    const generated = backend
+      .methods()
+      .filter((method) => method === 'cohost.pet.sheet.generate').length
+    // Reopening still owns the unfinished work and can cancel it.
+    const reopened = createBuddyPetCreatorController(backend.client)
+    await reopened.refresh()
+    await reopened.cancel()
+    reopened.dispose()
+    expect(generated).toBe(1)
+  })
+
   it('opens a creation before reading the first reference', async () => {
     const backend = fakeBackend(null)
     const controller = createBuddyPetCreatorController(backend.client)
@@ -283,7 +376,7 @@ describe('the creator controller (plan 168 S-F5)', () => {
       'Could not write pilot.png: Permission denied (os error 13) /Users/streamer/Sidekick'
     const controller = createBuddyPetCreatorController(backend.client)
     await controller.refresh()
-    vi.mocked(backend.client.requestTyped).mockImplementationOnce(async () => {
+    backend.requestTyped.mockImplementationOnce(async () => {
       throw Object.assign(new Error(raw), { code: 'cohost-pet-store-failed' })
     })
     await controller.readReference({ kind: 'persona-idle' })

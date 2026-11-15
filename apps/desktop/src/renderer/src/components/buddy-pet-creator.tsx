@@ -241,6 +241,14 @@ export function BuddyPetCreator({
     onClose()
   }
 
+  const cancel = async (): Promise<void> => {
+    setCancelOpen(false)
+    if (!(await controller?.cancel())) return
+    setNaming(false)
+    setRedoKey(null)
+    if (creation) forgetMarks(creation.buildId)
+  }
+
   const primary = primaryAction({
     step,
     creation,
@@ -477,13 +485,7 @@ export function BuddyPetCreator({
         testId="buddy-pet-cancel"
         title="Cancel this creation?"
         onCancel={() => setCancelOpen(false)}
-        onConfirm={() => {
-          setCancelOpen(false)
-          setNaming(false)
-          setRedoKey(null)
-          if (creation) forgetMarks(creation.buildId)
-          void controller?.cancel()
-        }}
+        onConfirm={() => void cancel()}
       />
       <CloudAiConsentDialog
         open={consentOpen}

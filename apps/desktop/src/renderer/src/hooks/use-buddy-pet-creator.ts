@@ -96,7 +96,8 @@ export interface BuddyPetCreatorController {
   redoSheet: (key: BuddyPetSheetKey) => Promise<void>
   build: () => Promise<void>
   save: (name: string) => Promise<CohostPetSaved | null>
-  cancel: () => Promise<void>
+  /** True only once the backend confirms cancellation. */
+  cancel: () => Promise<boolean>
   /** Cancel, then open a new creation with nothing in it. */
   startOver: () => Promise<void>
   dispose: () => void
@@ -114,6 +115,10 @@ export function createBuddyPetCreatorController(
   let state = INITIAL
   let autoBuild = false
   let disposed = false
+  // Requests already in flight outlive a cancellation or the page that made
+  // them. Only the current creation lifecycle may publish or continue work.
+  let generation = 0
+  const isCurrent = (at: number): boolean => !disposed && at === generation
   const listeners = new Set<() => void>()
   const set = (patch: Partial<BuddyPetCreatorState>): void => {
     if (disposed) return
@@ -123,15 +128,19 @@ export function createBuddyPetCreatorController(
   const buildId = (): string | null => state.creation?.buildId ?? null
 
   const refresh = async (): Promise<void> => {
+    if (disposed || state.pending === 'cancel' || state.pending === 'save') return
+    const at = generation
     try {
       const status: BuddyPetCreationStatus = await client.requestTyped(
         'cohost.pet.creation.status',
         undefined,
         { timeoutMs: ACCEPT_TIMEOUT_MS }
       )
+      if (!isCurrent(at)) return
       set({ loading: false, creation: status.creation })
       resumeSheets()
     } catch (error) {
+      if (!isCurrent(at)) return
       set({ loading: false, problem: problemOf(error) })
     }
   }
@@ -150,6 +159,8 @@ export function createBuddyPetCreatorController(
     redo: boolean,
     notes?: BuddyPetIdentityNotes
   ): Promise<boolean> => {
+    if (disposed) return false
+    const at = generation
     const id = buildId()
     if (!id) return false
     const sheet =
@@ -170,9 +181,11 @@ export function createBuddyPetCreatorController(
         },
         { timeoutMs: ACCEPT_TIMEOUT_MS }
       )
+      if (!isCurrent(at)) return false
       await refresh()
       return true
     } catch (error) {
+      if (!isCurrent(at)) return false
       const problem = problemOf(error)
       set({
         pending: null,
@@ -187,6 +200,8 @@ export function createBuddyPetCreatorController(
   }
 
   const build = async (): Promise<void> => {
+    if (disposed) return
+    const at = generation
     const id = buildId()
     if (!id) return
     set({ pending: 'build', problem: null, build: null })
@@ -196,8 +211,10 @@ export function createBuddyPetCreatorController(
         { buildId: id },
         { timeoutMs: ACCEPT_TIMEOUT_MS }
       )
+      if (!isCurrent(at)) return
       await refresh()
     } catch (error) {
+      if (!isCurrent(at)) return
       set({ pending: null, problem: problemOf(error) })
     }
   }
@@ -205,7 +222,7 @@ export function createBuddyPetCreatorController(
   /** The next missing sheet, or the build once every sheet is made. */
   const continueSheets = async (): Promise<void> => {
     const creation = state.creation
-    if (!creation || !state.autoSheets) return
+    if (disposed || !creation || !state.autoSheets) return
     const next = buddyPetNextSheet(creation)
     if (next) {
       await generate(next.key, false)
@@ -218,12 +235,14 @@ export function createBuddyPetCreatorController(
 
   const offs = [
     client.on('cohost.pet.identity.read', (event) => {
-      if (event.buildId !== buildId()) return
+      if (event.buildId !== buildId() || state.pending === 'cancel' || state.pending === 'save')
+        return
       set({ pending: null, identityError: event.error?.message ?? null })
       void refresh()
     }),
     client.on('cohost.pet.sheet.generated', (event) => {
-      if (event.buildId !== buildId()) return
+      if (event.buildId !== buildId() || state.pending === 'cancel' || state.pending === 'save')
+        return
       const sheetErrors = { ...state.sheetErrors }
       if (event.error) {
         sheetErrors[event.sheet] = event.error.message
@@ -235,8 +254,10 @@ export function createBuddyPetCreatorController(
       }
       delete sheetErrors[event.sheet]
       set({ pending: null, sheetErrors })
+      const at = generation
       void (async () => {
         await refresh()
+        if (!isCurrent(at)) return
         if (state.autoSheets) {
           await continueSheets()
         } else if (autoBuild) {
@@ -246,7 +267,8 @@ export function createBuddyPetCreatorController(
       })()
     }),
     client.on('cohost.pet.build.progress', (event) => {
-      if (event.buildId !== buildId()) return
+      if (event.buildId !== buildId() || state.pending === 'cancel' || state.pending === 'save')
+        return
       if (event.step === 'done' || event.step === 'failed') {
         set({
           pending: null,
@@ -273,6 +295,8 @@ export function createBuddyPetCreatorController(
     },
     refresh,
     readReference: async (reference) => {
+      if (disposed) return
+      const at = generation
       set({ problem: null, identityError: null })
       if (!state.creation) {
         set({ pending: 'start' })
@@ -282,8 +306,10 @@ export function createBuddyPetCreatorController(
             undefined,
             { timeoutMs: START_TIMEOUT_MS }
           )
+          if (!isCurrent(at)) return
           set({ creation: started.creation })
         } catch (error) {
+          if (!isCurrent(at)) return
           set({ pending: null, problem: problemOf(error) })
           return
         }
@@ -301,6 +327,7 @@ export function createBuddyPetCreatorController(
           { timeoutMs: ACCEPT_TIMEOUT_MS }
         )
       } catch (error) {
+        if (!isCurrent(at)) return
         set({ pending: null, problem: problemOf(error) })
       }
     },
@@ -319,8 +346,10 @@ export function createBuddyPetCreatorController(
     },
     build,
     save: async (name) => {
+      if (disposed) return null
       const id = buildId()
       if (!id) return null
+      const at = ++generation
       set({ pending: 'save', problem: null })
       try {
         const saved = await client.requestTyped(
@@ -328,16 +357,20 @@ export function createBuddyPetCreatorController(
           { buildId: id, name },
           { timeoutMs: SAVE_TIMEOUT_MS }
         )
+        if (!isCurrent(at)) return null
         set({ pending: null, saved, creation: null })
         return saved
       } catch (error) {
+        if (!isCurrent(at)) return null
         set({ pending: null, problem: problemOf(error) })
         return null
       }
     },
     cancel: async () => {
+      if (disposed) return false
       const id = buildId()
-      if (!id) return
+      if (!id) return false
+      const at = ++generation
       sheetsWanted.delete(id)
       set({ pending: 'cancel', problem: null, autoSheets: false })
       autoBuild = false
@@ -347,13 +380,22 @@ export function createBuddyPetCreatorController(
           { buildId: id },
           { timeoutMs: ACCEPT_TIMEOUT_MS }
         )
+        if (!isCurrent(at)) return false
         set({ ...INITIAL, loading: false, creation: status.creation })
+        return true
       } catch (error) {
+        if (!isCurrent(at)) return false
         set({ pending: null, problem: problemOf(error) })
+        return false
       }
     },
     startOver: async () => {
+      if (disposed) return
+      const at = ++generation
       const id = buildId()
+      if (id) sheetsWanted.delete(id)
+      autoBuild = false
+      set({ pending: 'cancel', autoSheets: false, problem: null })
       if (id) {
         try {
           await client.requestTyped(
@@ -362,14 +404,17 @@ export function createBuddyPetCreatorController(
             { timeoutMs: ACCEPT_TIMEOUT_MS }
           )
         } catch (error) {
-          set({ problem: problemOf(error) })
+          if (!isCurrent(at)) return
+          set({ pending: null, problem: problemOf(error) })
           return
         }
       }
+      if (!isCurrent(at)) return
       set({ ...INITIAL, loading: false })
     },
     dispose: () => {
       disposed = true
+      generation += 1
       for (const off of offs) off()
       listeners.clear()
     }
