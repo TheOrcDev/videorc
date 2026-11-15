@@ -13,10 +13,10 @@
 //! word "sidekick" (also heard as "side kick" or "side-kick", joined into one
 //! word by the tokenizer, even across two finals), or a word of the persona's
 //! own name (`wake_words`), starts a command; words before it are ignored.
-//! The old name "buddy" and its "bodhi" transcription stay as hidden aliases
-//! for two releases (`LEGACY_WAKE_WORDS`). Two structured phrases work
-//! without the wake word unless `require_wake_word` is set: a removal that
-//! points at a message ("remove it from our chat", "delete that message",
+//! The hidden "buddy" and "bodhi" aliases expired after 0.26.1. A streamer
+//! can still choose "Buddy" as their persona name (plan 236 D3). Two
+//! structured phrases work without the wake word unless `require_wake_word`
+//! is set: a removal that points at a message ("remove it from our chat", "delete that message",
 //! "this one is toxic, remove it") and a highlight by name with a comment noun
 //! ("highlight the comment from coders x"). The noun decides clear versus
 //! remove: screen, stream, overlay and highlight clear the on-stream card; chat
@@ -76,24 +76,14 @@ const HEARD_MAX_CHARS: usize = 140;
 // --- Vocabulary -----------------------------------------------------------------
 
 /// The wake word that always works (plan 236 D2: "sidekick", which speech to
-/// text spells right where it heard "Buddy" as "body"), its plural, then the
-/// old name "buddy" and its "Bodhi" transcription as hidden aliases. "side
-/// kick" and "side-kick" reach the detector as "sidekick" (`joined_wake`);
+/// text spells right where it heard "Buddy" as "body") and its plural. The
+/// hidden "buddy" and "bodhi" aliases expired after 0.26.1. "side kick"
+/// and "side-kick" reach the detector as "sidekick" (`joined_wake`);
 /// "sidekick's" is "sidekick" with a possessive. "body" is never a wake word:
 /// it is an everyday word. Every wake word only wakes the detector: a command
 /// still needs its phrase after it ("thanks sidekick" is talk). The persona's
 /// own name is added per process by `set_persona_wake_tokens`.
-const WAKE_WORDS: &[&str] = &["sidekick", "sidekicks", "buddy", "bodhi"];
-/// The old names that still wake it for two releases after the rename (plan
-/// 236 D2). The release that removes them is pinned by
-/// `the_old_buddy_wake_words_go_after_their_last_release`.
-#[cfg(test)]
-const LEGACY_WAKE_WORDS: &[&str] = &["buddy", "bodhi"];
-/// The last release that still wakes on `LEGACY_WAKE_WORDS`: the app was at
-/// 0.25.2 when Sidekick replaced Buddy, so the first two releases that say
-/// Sidekick are at most this one. The test fails once the app passes it.
-#[cfg(test)]
-const LEGACY_WAKE_WORDS_LAST_RELEASE: (u32, u32, u32) = (0, 26, 1);
+const WAKE_WORDS: &[&str] = &["sidekick", "sidekicks"];
 /// The shortest name word that can wake the Buddy.
 const NAME_TOKEN_MIN_LETTERS: usize = 3;
 
@@ -2300,7 +2290,7 @@ mod tests {
             "sidekick, say hi to Jay in the chat.",
             "Sidekick, tell Jay welcome.",
             "Sidekick, greet Jay!",
-            "Bodhi, say hello to Jay.",
+            "Side kick, say hello to Jay.",
             "Hey Sidekick, could you please say hello to Jay in chat?",
             "Sidekick, greet Jay please.",
         ] {
@@ -2317,7 +2307,7 @@ mod tests {
             "I said hello to Jay.",
             "I told Sidekick to say hello to Jay.",
             "Sidekick said hello to Jay.",
-            "Bodhi is saying hello to Jay.",
+            "Side kick is saying hello to Jay.",
             "My sidekick says hello to Jay.",
         ] {
             assert!(detect_one(text, &PLAIN).is_none(), "{text}");
@@ -3358,11 +3348,7 @@ mod tests {
         let command = detect_one("This one is toxic. Remove it from our chat.", &PLAIN).unwrap();
         assert_eq!(command.heard, "remove it from our chat");
         assert!(!command.wake_word);
-        // Plan 236 D2: the hidden old name still works for two releases;
-        // "Orcle" and a real word ("oracle") no longer do.
-        let command = detect_one("Buddy, take it down", &PLAIN).unwrap();
-        assert_eq!(command.heard, "buddy take it down");
-        assert!(command.wake_word);
+        // Plan 236 D2: the Orcle aliases and a real word never wake it.
         assert!(detect_one("Orcle, take it down", &PLAIN).is_none());
         assert!(detect_one("Oracle, take it down", &PLAIN).is_none());
         // The two-word form is heard as the one word it is.
@@ -3772,7 +3758,7 @@ mod tests {
     }
 
     #[test]
-    fn the_wake_words_are_sidekick_the_persona_name_and_the_hidden_old_names() {
+    fn the_wake_words_are_sidekick_and_the_persona_name() {
         assert_eq!(
             wake_name_tokens("Grum the Goblin"),
             vec!["grum".to_string(), "goblin".to_string()]
@@ -3783,7 +3769,8 @@ mod tests {
         assert_eq!(wake_name_tokens("Bö Vexlar99"), vec!["vexlar".to_string()]);
         assert_eq!(wake_name_tokens("Zoë"), vec!["zoe".to_string()]);
         assert_eq!(wake_name_tokens("Sidekick"), Vec::<String>::new());
-        assert_eq!(wake_name_tokens("Buddy"), Vec::<String>::new());
+        assert_eq!(wake_name_tokens("Buddy"), vec!["buddy".to_string()]);
+        assert_eq!(wake_name_tokens("Bodhi"), vec!["bodhi".to_string()]);
         assert_eq!(wake_name_tokens("Al"), Vec::<String>::new());
         // Plan 236 D2: "Side Kick" is the wake word in two words, so neither
         // word wakes alone; "kick" in another name is that name's word.
@@ -3797,15 +3784,12 @@ mod tests {
             wake_name_tokens("Kick Master"),
             vec!["kick".to_string(), "master".to_string()]
         );
-        // "sidekick" always works; "buddy" and "bodhi" stay hidden for two
-        // releases; the Orcle spellings, the weak real words and "body" are
-        // never wake words.
+        // "sidekick" always works. Expired aliases and everyday words
+        // must not return as built-in wake words.
         assert_eq!(WAKE_WORDS[0], "sidekick");
-        for word in LEGACY_WAKE_WORDS {
-            assert!(WAKE_WORDS.contains(word), "{word}");
-        }
         for gone in [
-            "orcle", "orkle", "orcel", "orkel", "orcl", "orcal", "oracle", "orca", "body",
+            "buddy", "bodhi", "orcle", "orkle", "orcel", "orkel", "orcl", "orcal", "oracle",
+            "orca", "body",
         ] {
             assert!(!WAKE_WORDS.contains(&gone), "{gone}");
         }
@@ -4014,41 +3998,110 @@ mod tests {
         );
     }
 
-    /// The desktop app's version, without a pre-release tag.
-    fn app_version() -> (u32, u32, u32) {
-        let package: serde_json::Value =
-            serde_json::from_str(include_str!("../../../apps/desktop/package.json"))
-                .expect("apps/desktop/package.json is JSON");
-        let version = package["version"].as_str().expect("a version");
-        let core = version.split(['-', '+']).next().unwrap_or(version);
-        let parts: Vec<u32> = core
-            .split('.')
-            .map(|part| part.parse().expect("a numeric version part"))
-            .collect();
-        (parts[0], parts[1], parts[2])
-    }
-
-    #[test]
-    fn the_old_buddy_wake_words_go_after_their_last_release() {
-        // Plan 236 D2: "buddy" and "bodhi" still wake it, hidden, so a
-        // streamer's habit keeps working through the first two releases that
-        // say Sidekick. The release after 0.26.1 removes them: this test
-        // fails once the app's version passes it.
-        for text in [
-            "Buddy, highlight the last comment",
-            "Bodhi, highlight the last comment",
-            "Hey buddy, take it down",
-        ] {
-            let command = detect_one(text, &WAKE_REQUIRED).unwrap_or_else(|| panic!("{text}"));
-            assert!(command.wake_word, "{text}");
+    #[tokio::test]
+    async fn the_old_buddy_wake_words_go_after_their_last_release() {
+        // Persona tokens belong to the process. Run the real setter and both
+        // grammars alone so concurrent engine tests cannot rename our persona.
+        const CHILD: &str = "VIDEORC_EXPIRED_WAKE_WORDS_TEST";
+        if std::env::var_os(CHILD).is_none() {
+            let mut child = tokio::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "cohost_command::tests::the_old_buddy_wake_words_go_after_their_last_release",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .kill_on_drop(true)
+                .spawn()
+                .expect("start isolated wake-word test");
+            match tokio::time::timeout(Duration::from_secs(30), child.wait()).await {
+                Ok(status) => assert!(status.unwrap().success(), "isolated wake-word test failed"),
+                Err(_) => {
+                    child.kill().await.expect("kill and reap wake-word test");
+                    panic!("isolated wake-word test timed out");
+                }
+            }
+            return;
         }
-        let (major, minor, patch) = LEGACY_WAKE_WORDS_LAST_RELEASE;
-        assert!(
-            app_version() <= LEGACY_WAKE_WORDS_LAST_RELEASE,
-            "Videorc {:?} is past {major}.{minor}.{patch}, the last release that wakes on \
-             {LEGACY_WAKE_WORDS:?} (plan 236 D2): remove them from WAKE_WORDS and the \
-             docs that name them, then delete this test",
-            app_version()
+
+        // Plan 236 D2: 0.26.1 was the last release with hidden aliases.
+        // Neither spelling may wake commands, Unknown/planner requests or
+        // markers by default, even with Commands need Sidekick first off.
+        set_persona_wake_tokens("Sidekick");
+        for word in ["Buddy", "Bodhi", "Body", "Orcle"] {
+            for phrase in [
+                "highlight the last comment",
+                "take it down",
+                "say hello to Jay",
+                "wave at Jay",
+                "show up",
+                "switch to the BRB scene",
+            ] {
+                let text = format!("{word}, {phrase}.");
+                for context in [&PLAIN, &WAKE_REQUIRED] {
+                    assert_eq!(detect_one(&text, context), None, "{text}");
+                }
+            }
+            let marker = format!("{word}, make a marker here for Boss fight");
+            assert!(!crate::marker_voice::marker_candidate(&marker), "{marker}");
+            assert_eq!(
+                crate::marker_voice::parse_marker(&marker, 0.0, &[]).unwrap(),
+                None
+            );
+        }
+
+        // Expiry removes the address, not the existing wake-free grammar.
+        let removal = "Buddy, remove it from our chat.";
+        assert!(detect_one(removal, &WAKE_REQUIRED).is_none());
+        let command = detect_one(removal, &PLAIN).expect("structured removal still works");
+        assert_eq!(command.kind, CommandKind::Remove);
+        assert!(!command.wake_word);
+
+        // The planner may now match an ordinary viewer named Buddy.
+        assert!(crate::buddy_act::about_comment(
+            "Sidekick, what did Buddy say",
+            &["Buddy".to_string()]
+        ));
+
+        // D3: the streamer can deliberately name their avatar Buddy again.
+        // This is the chosen name only, not an implicit Bodhi transcription.
+        set_persona_wake_tokens("Buddy");
+        for word in ["Buddy", "Sidekick"] {
+            let text = format!("{word}, highlight the last comment.");
+            let command = detect_one(&text, &WAKE_REQUIRED).expect("chosen name wakes commands");
+            assert_eq!(command.kind, CommandKind::Highlight);
+            assert!(command.wake_word);
+            let marker = format!("{word}, make a marker here for Boss fight");
+            assert!(crate::marker_voice::marker_candidate(&marker));
+            assert_eq!(
+                crate::marker_voice::parse_marker(&marker, 0.0, &[])
+                    .unwrap()
+                    .expect("chosen name wakes markers")
+                    .label
+                    .as_deref(),
+                Some("Boss fight")
+            );
+        }
+        assert!(detect_one("Bodhi, take it down.", &WAKE_REQUIRED).is_none());
+        assert!(!crate::marker_voice::marker_candidate(
+            "Bodhi, make a marker here"
+        ));
+        assert!(!crate::buddy_act::about_comment(
+            "Buddy, switch to the BRB scene",
+            &["Buddy".to_string()]
+        ));
+
+        // Renaming away from Buddy retires it again for both grammars.
+        set_persona_wake_tokens("Flint");
+        assert!(detect_one("Buddy, take it down.", &WAKE_REQUIRED).is_none());
+        assert!(!crate::marker_voice::marker_candidate(
+            "Buddy, make a marker here"
+        ));
+        assert_eq!(
+            detect_one("Flint, take it down.", &WAKE_REQUIRED)
+                .unwrap()
+                .kind,
+            CommandKind::Clear
         );
     }
 }

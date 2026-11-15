@@ -21135,7 +21135,7 @@ mod tests {
             detect_voice_command(
                 &state,
                 &caption_final(1),
-                &spoken_final("Buddy, highlight coders x.")
+                &spoken_final("Sidekick, highlight coders x.")
             )
             .is_none()
         );
@@ -21176,7 +21176,7 @@ mod tests {
         let (_, command) = detect_voice_command(
             &state,
             &caption_final(2),
-            &spoken_final("Buddy, highlight coders x."),
+            &spoken_final("Sidekick, highlight coders x."),
         )
         .unwrap();
         assert_eq!(command.kind, CommandKind::Highlight);
@@ -21217,11 +21217,11 @@ mod tests {
             )
             .is_none()
         );
-        // ...with "Buddy" first it is a command.
+        // ...with "Sidekick" first it is a command.
         let (session, command) = detect_voice_command(
             &state,
             &caption_final(2),
-            &spoken_final("Buddy, remove it from our chat."),
+            &spoken_final("Sidekick, remove it from our chat."),
         )
         .unwrap();
         assert_eq!(session.session_id, "session-1");
@@ -21706,7 +21706,7 @@ mod tests {
             .observe_final(
                 COMMAND_SESSION,
                 1,
-                "Buddy, say hello to Jay in the chat.",
+                "Sidekick, say hello to Jay in the chat.",
                 Instant::now(),
                 &DetectContext::default(),
             )

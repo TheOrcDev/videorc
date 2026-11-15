@@ -13,8 +13,9 @@ and "Buddy" until plan 236; wire names keep `buddy`).
 Values that were already saved or sent between apps keep the old spelling
 (plan 170 D22): the moderation source `orcle-voice` (the Rust variant
 `BuddyVoice` carries a serde rename) and the service-flags `orcle` section.
-The examples speak the wake word "sidekick"; the hidden old name "buddy"
-still works for two releases (plan 236 D2), and the Orcle aliases are gone.
+The examples speak the wake word "sidekick". The hidden "buddy" and "bodhi"
+aliases expired after 0.26.1 (plan 236 D2), and the Orcle aliases are gone.
+An avatar deliberately named "Buddy" still wakes it by that name (D3).
 
 ## Named session markers (desktop, plan 152)
 
@@ -124,7 +125,7 @@ The wire kinds `show-banner`, `hide-banner` and `hide-banners` join part B's
 
 "Sidekick, say hello to Jay", "Sidekick, say hi to Jay in the chat", "Sidekick, tell
 Jay welcome" and "Sidekick, greet Jay" take the local `greet` command. The
-avatar's name also works; `Bodhi` is accepted as a transcription of Sidekick.
+avatar's name also works; `Bodhi` is no longer a built-in transcription alias.
 These shapes always need the wake word, regardless of `wakeWordRequired`.
 Reported speech ("I said hello to Jay") does nothing. Free-form "Sidekick,
 say …" stays on the existing planner path.
