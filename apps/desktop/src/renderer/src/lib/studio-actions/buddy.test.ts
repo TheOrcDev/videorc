@@ -126,7 +126,8 @@ describe('set_buddy (plan 209 S13)', () => {
     expect(patch).not.toHaveProperty('listen')
     expect(patch.autoChat?.talk).toBe('suggest')
     expect(patch.autoChat?.greetings.templates).toEqual(templates)
-    expect(outcome.message).toBe('Sidekick talks: Suggest.')
+    // The talk control is the avatar's, in its name: Flint without one (plan 239 D2).
+    expect(outcome.message).toBe('Flint talks: Suggest.')
   })
 
   it('refuses Sidekick Live without Premium or consent, but always turns it off', async () => {
@@ -153,7 +154,7 @@ describe('set_buddy (plan 209 S13)', () => {
     expect(on.saveSettings).toHaveBeenCalledWith({ enabled: false })
   })
 
-  it('puts Sidekick on stream through the header switch, and refuses an empty call', async () => {
+  it('puts the avatar on stream through the header switch, and refuses an empty call (plan 239)', async () => {
     const access = buddy()
     const outcome = await executeAgentIntent(
       call('set_buddy', { onStream: true }),
@@ -161,7 +162,7 @@ describe('set_buddy (plan 209 S13)', () => {
     )
     expect(access.setShowOnStream).toHaveBeenCalledWith(true)
     expect(access.saveSettings).not.toHaveBeenCalled()
-    expect(outcome.message).toBe('Sidekick is on stream.')
+    expect(outcome.message).toBe('Your avatar is on stream.')
     expect(await executeAgentIntent(call('set_buddy'), context({ buddy: access }))).toEqual({
       ok: false,
       message: BUDDY_TOOL_COPY.empty

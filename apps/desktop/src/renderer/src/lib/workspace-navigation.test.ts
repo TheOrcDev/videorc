@@ -6,6 +6,7 @@ import {
   readWorkspaceNavigation,
   type WorkspaceTab
 } from '@/components/workspace-nav'
+import { openAvatarTab } from '@/lib/avatar-tabs'
 import { openBuddyTab } from '@/lib/buddy-tabs'
 import { openLivestreamView } from '@/lib/livestream-tabs'
 import { openSettingsTab } from '@/lib/settings-tabs'
@@ -48,11 +49,12 @@ describe('openWorkspaceTab', () => {
     expect(readWorkspaceNavigation(sent[0])).toEqual({ tab })
   })
 
-  it('covers all eleven pages, Destinations as `live`', () => {
+  it('covers all twelve pages, Destinations as `live` (Avatar since plan 239)', () => {
     expect([...EVERY_PAGE].sort()).toEqual(
       [
         'ai',
         'assets',
+        'avatar',
         'captions',
         'diagnostics',
         'layouts',
@@ -66,10 +68,11 @@ describe('openWorkspaceTab', () => {
     )
   })
 
-  it('carries a Settings or Sidekick tab, and the session a Library action is about', () => {
+  it('carries a Settings, Sidekick or Avatar tab, and the session a Library action is about', () => {
     const sent = capture(() => {
       openWorkspaceTab('settings', 'permissions')
       openWorkspaceTab('ai', 'clean-cut')
+      openWorkspaceTab('avatar', 'greetings')
       openWorkspaceTab('library', 'session-1')
       openWorkspaceTab('live')
       openWorkspaceTab('live', 'upcoming')
@@ -77,6 +80,7 @@ describe('openWorkspaceTab', () => {
     expect(sent).toEqual([
       { tab: 'settings', settingsTab: 'permissions' },
       { tab: 'ai', buddyTab: 'clean-cut' },
+      { tab: 'avatar', avatarTab: 'greetings' },
       { tab: 'library', sessionId: 'session-1' },
       { tab: 'live' },
       { tab: 'live', livestreamView: 'upcoming' }
@@ -84,16 +88,18 @@ describe('openWorkspaceTab', () => {
     expect(sent.map(readWorkspaceNavigation)).toEqual(sent)
   })
 
-  it('is how openSettingsTab, openBuddyTab and openLivestreamView open their pages', () => {
+  it('is how openSettingsTab, openBuddyTab, openAvatarTab and openLivestreamView open their pages', () => {
     // Plan 174 S1.6b (A-14): ⌘K's Upcoming used sessionStorage and a bare event.
     const sent = capture(() => {
       openSettingsTab('shortcuts')
       openBuddyTab('voice')
+      openAvatarTab('profile')
       openLivestreamView('upcoming')
     })
     expect(sent).toEqual([
       { tab: 'settings', settingsTab: 'shortcuts' },
       { tab: 'ai', buddyTab: 'voice' },
+      { tab: 'avatar', avatarTab: 'profile' },
       { tab: 'live', livestreamView: 'upcoming' }
     ])
   })
@@ -113,6 +119,18 @@ describe('openWorkspaceTab', () => {
       tab: 'settings'
     })
     expect(readWorkspaceNavigation({ tab: 'ai', buddyTab: 7 })).toEqual({ tab: 'ai' })
+    // Plan 239: each page reads only its own tab ids; a Sidekick tab never
+    // opens Avatar on it, nor an Avatar tab Sidekick.
+    expect(readWorkspaceNavigation({ tab: 'avatar', avatarTab: 'look' })).toEqual({
+      tab: 'avatar'
+    })
+    expect(readWorkspaceNavigation({ tab: 'avatar', avatarTab: 'chat' })).toEqual({
+      tab: 'avatar'
+    })
+    expect(readWorkspaceNavigation({ tab: 'avatar', buddyTab: 'greetings' })).toEqual({
+      tab: 'avatar'
+    })
+    expect(readWorkspaceNavigation({ tab: 'ai', buddyTab: 'greetings' })).toEqual({ tab: 'ai' })
     expect(readWorkspaceNavigation({ tab: 'live', livestreamView: 'drafts' })).toEqual({
       tab: 'live'
     })

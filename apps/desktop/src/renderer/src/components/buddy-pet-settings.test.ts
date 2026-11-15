@@ -278,7 +278,7 @@ describe('BuddyPetSettings: Avatar (plan 168 S-D2)', () => {
     expect(document.querySelector('[data-testid="buddy-create-hint"]')).toBeNull()
     await render({ list: pets([]), consented: false })
     expect(button('buddy-pack-create').disabled).toBe(true)
-    expect(gate().textContent).toContain('Allow cloud AI to create an Alive Sidekick.')
+    expect(gate().textContent).toContain('Allow cloud AI to create an Alive avatar.')
     // The one action opens the one consent dialog; accepting grants consent.
     await act(async () => gate().querySelector('button')!.click())
     const consent = document.querySelector('[data-testid="buddy-avatar-consent"]')!
@@ -354,11 +354,11 @@ describe('BuddyPetSettings: Avatar (plan 168 S-D2)', () => {
     expect(importFolder).toHaveBeenCalledTimes(1)
   })
 
-  it('lists the packs again once when the Sidekick wears one the list does not have (an official download, a synced pack)', async () => {
+  it('lists the packs again once when the avatar wears one the list does not have (an official download, a synced pack)', async () => {
     // QA 2026-10-11: using Golmar downloaded official:orc and the Buddy wore
     // it, but Packs still listed only Buddy (read when the tab opened), no
     // row was checked and Remove stayed off until the tab was reopened.
-    const list = pets([{ ...PACK_B, packId: 'bundled:buddy', name: 'Sidekick' }])
+    const list = pets([{ ...PACK_B, packId: 'bundled:buddy', name: 'Flint' }])
     const worn = settings({ avatar: { kind: 'alive', packId: 'official:orc' } })
     await render({ cohost: worn, list })
     expect(list.refresh).toHaveBeenCalledTimes(1)

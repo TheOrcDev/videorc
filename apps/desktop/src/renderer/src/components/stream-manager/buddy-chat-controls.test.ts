@@ -1,5 +1,5 @@
 // @vitest-environment happy-dom
-import { act, createElement } from 'react'
+import { act, createElement, type ReactElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -12,12 +12,16 @@ import {
 
 import { TooltipProvider } from '@/components/ui/tooltip'
 
-import { BuddyChatControls } from './buddy-chat-controls'
+import {
+  BuddyChatControls,
+  BuddyPostingConsentDialog,
+  useBuddyTalkRequest
+} from './buddy-chat-controls'
 
 let root: Root
 let container: HTMLDivElement
 let onTalkChange: ReturnType<typeof vi.fn<(talk: CohostTalkMode) => void>>
-let onOpenChatSettings: ReturnType<typeof vi.fn<() => void>>
+let onOpenChatSettings: ReturnType<typeof vi.fn<(behaviour: string) => void>>
 
 function autoChat(overrides: Partial<CohostAutoChat> = {}): CohostAutoChat {
   return {
@@ -102,7 +106,7 @@ function dialogButton(testId: string): HTMLButtonElement {
   return button!
 }
 
-describe('How Sidekick talks (plan 164 S-D6, plan 174 S3.14a, plan 211 D1, D5)', () => {
+describe('How the avatar talks (plan 164 S-D6, plan 174 S3.14a, plan 211 D1, D5, plan 239)', () => {
   it('offers Off, Bubble and Suggest in that order, and no Auto', async () => {
     await render(autoChat({ talk: 'bubble' }))
     const options = [...document.querySelectorAll<HTMLButtonElement>('[data-buddy-talk]')]
@@ -141,7 +145,8 @@ describe('How Sidekick talks (plan 164 S-D6, plan 174 S3.14a, plan 211 D1, D5)',
     await render(autoChat({ talk: 'bubble' }))
     await press(talkButton('suggest'))
     expect(onTalkChange).not.toHaveBeenCalled()
-    expect(dialog()?.textContent).toContain('Let Sidekick post as you?')
+    // Nameless, the default avatar's name (plan 239 D2).
+    expect(dialog()?.textContent).toContain('Let Flint post as you?')
     expect(dialog()?.textContent).toContain(buddyPostingConsentSentence(null))
     expect(dialog()?.textContent).not.toMatch(/\bAuto\b/)
     await act(async () => dialogButton('buddy-chat-accept').click())
@@ -170,7 +175,7 @@ describe('How Sidekick talks (plan 164 S-D6, plan 174 S3.14a, plan 211 D1, D5)',
     expect(localStorage.getItem(BUDDY_AUTO_CHAT_CONSENT_STORAGE_KEY)).toBeNull()
   })
 
-  it("names the control and asks in the streamer's name for Sidekick (plan 174 J2-20)", async () => {
+  it("names the control and asks in the streamer's name for its avatar, else Flint (plan 174 J2-20, plan 239 D2)", async () => {
     await render(autoChat(), { name: 'Grum' })
     const control = document.querySelector('[aria-labelledby="buddy-talk-label"]')
     expect(control?.getAttribute('role')).toBe('radiogroup')
@@ -180,10 +185,10 @@ describe('How Sidekick talks (plan 164 S-D6, plan 174 S3.14a, plan 211 D1, D5)',
     expect(dialog()?.textContent).toContain(buddyPostingConsentSentence('Grum'))
     expect(dialog()?.textContent).not.toMatch(/the Sidekick/i)
     await render(autoChat())
-    expect(document.getElementById('buddy-talk-label')?.textContent).toBe('Sidekick talks')
+    expect(document.getElementById('buddy-talk-label')?.textContent).toBe('Flint talks')
   })
 
-  it('shows the Sidekick it names, not the emblem, when it has its own picture', async () => {
+  it('shows the avatar it names, not the emblem, when it has its own picture', async () => {
     const orc = 'videorc-asset://buddy/official-orc/idle.png'
     await render(autoChat(), { name: 'Golmar', picture: orc })
     await press(talkButton('suggest'))
@@ -193,16 +198,18 @@ describe('How Sidekick talks (plan 164 S-D6, plan 174 S3.14a, plan 211 D1, D5)',
     expect(dialog()?.querySelector('[data-slot="buddy-emblem"]')).toBeNull()
   })
 
-  it('keeps the emblem when the Sidekick has no picture to show', async () => {
-    await render(autoChat(), { name: 'Sidekick' })
+  it('keeps the emblem when the avatar has no picture to show', async () => {
+    await render(autoChat(), { name: 'Flint' })
     await press(talkButton('suggest'))
     expect(dialog()?.querySelector('[data-slot="buddy-emblem"]')).toBeTruthy()
     expect(dialog()?.querySelector('[data-slot="buddy-chat-consent-picture"]')).toBeNull()
   })
 
-  it("says what the chosen value means as a visible line, in the Sidekick's name (plan 174 F-12)", async () => {
+  it("says what the chosen value means and who speaks, as a visible line, in the avatar's name (plan 174 F-12, plan 239 B4)", async () => {
     await render(autoChat({ talk: 'bubble' }), { name: 'Golmar' })
-    expect(hint()).toBe('Golmar talks on stream in its bubble. Nothing goes to chat.')
+    expect(hint()).toBe(
+      "Golmar says greetings and Sidekick's lines in its bubble on stream. Nothing goes to chat."
+    )
     expect(
       talkButton('bubble').closest('[role="radiogroup"]')?.getAttribute('aria-describedby')
     ).toBe('buddy-talk-hint')
@@ -213,7 +220,7 @@ describe('How Sidekick talks (plan 164 S-D6, plan 174 S3.14a, plan 211 D1, D5)',
     expect(hint()).toBe(buddyTalkHint('suggest', 'Golmar'))
   })
 
-  it('shows Greetings, Answers and Banter as read-only chips that open Sidekick → Chat', async () => {
+  it('shows Greetings, Answers and Banter as read-only chips that each open their own home (plan 239)', async () => {
     const line = {
       id: 't-1',
       kind: 'follow' as const,
@@ -224,27 +231,38 @@ describe('How Sidekick talks (plan 164 S-D6, plan 174 S3.14a, plan 211 D1, D5)',
     await render(autoChat({ greetings: { enabled: true, templates: [line] } }))
     // No switches: the behaviours have one home (plan 174 F-24, H-8).
     expect(document.querySelector('[role="switch"]')).toBeNull()
-    // Plan 211 D1: what Buddy says, not what it posts.
+    // Plan 211 D1: what the avatar says, not what it posts; in its name.
     expect(
       document.querySelector('[data-slot="buddy-behaviour-chips"]')?.getAttribute('aria-label')
-    ).toBe('What Sidekick says')
+    ).toBe('What Flint says')
     expect(chips().map((chip) => chip.textContent)).toEqual([
       'Greetings on',
       'Answers off',
       'Banter off'
     ])
-    const [greetings, answers] = chips()
+    const [greetings, answers, banter] = chips()
     expect(greetings!.getAttribute('aria-label')).toBe(
-      'Greetings on. Change it in Sidekick → Chat.'
+      'Greetings on. Change it in Avatar → Greetings.'
     )
+    expect(answers!.getAttribute('aria-label')).toBe('Answers off. Change it in Sidekick → Chat.')
     expect(greetings!.hasAttribute('data-on')).toBe(true)
     expect(answers!.hasAttribute('data-on')).toBe(false)
     // The tone rides the chip's dot; the words stay monochrome.
     expect(greetings!.getAttribute('data-variant')).toBe('success')
     expect(answers!.getAttribute('data-variant')).toBe('neutral')
+    // Each chip names its behaviour, so the owner opens its home.
     await act(async () => answers!.click())
-    expect(onOpenChatSettings).toHaveBeenCalledTimes(1)
+    expect(onOpenChatSettings).toHaveBeenLastCalledWith('answers')
+    await act(async () => greetings!.click())
+    expect(onOpenChatSettings).toHaveBeenLastCalledWith('greetings')
+    await act(async () => banter!.click())
+    expect(onOpenChatSettings).toHaveBeenLastCalledWith('banter')
+    expect(onOpenChatSettings).toHaveBeenCalledTimes(3)
     expect(onTalkChange).not.toHaveBeenCalled()
+    await render(autoChat(), { name: 'Golmar' })
+    expect(
+      document.querySelector('[data-slot="buddy-behaviour-chips"]')?.getAttribute('aria-label')
+    ).toBe('What Golmar says')
   })
 
   it('never warns about an empty list: it posts the built-in lines (plan 192 D1)', async () => {
@@ -253,7 +271,7 @@ describe('How Sidekick talks (plan 164 S-D6, plan 174 S3.14a, plan 211 D1, D5)',
     expect(greetings!.textContent).toBe('Greetings on')
     expect(greetings!.getAttribute('data-variant')).toBe('success')
     expect(greetings!.getAttribute('aria-label')).toBe(
-      'Greetings on. Change it in Sidekick → Chat.'
+      'Greetings on. Change it in Avatar → Greetings.'
     )
   })
 
@@ -262,7 +280,7 @@ describe('How Sidekick talks (plan 164 S-D6, plan 174 S3.14a, plan 211 D1, D5)',
     await render(autoChat({ greetings }), { aiGreetings: true })
     expect(chips()[0]!.textContent).toBe('Greetings on · AI')
     expect(chips()[0]!.getAttribute('aria-label')).toBe(
-      'Greetings on · AI. Change it in Sidekick → Chat.'
+      'Greetings on · AI. Change it in Avatar → Greetings.'
     )
     // Without Premium and cloud AI, or with the switch off, the lines go out.
     await render(autoChat({ greetings }))
@@ -271,8 +289,78 @@ describe('How Sidekick talks (plan 164 S-D6, plan 174 S3.14a, plan 211 D1, D5)',
     expect(chips()[0]!.textContent).toBe('Greetings on')
   })
 
-  it('keeps the chips inert without a way to Sidekick → Chat', async () => {
+  it('keeps the chips inert without a way to their homes', async () => {
     await render(autoChat(), { link: false })
     for (const chip of chips()) expect(chip.disabled).toBe(true)
+  })
+})
+
+// Plan 239 D3: the Stream Manager owns one talk request, so the control and
+// the off-the-picture notice's "Use Suggest" ask through the one consent.
+describe('One posting consent for the control and Use Suggest (plan 239 D3)', () => {
+  function Owner({ talk, name }: { talk: CohostTalkMode; name?: string }): ReactElement {
+    const request = useBuddyTalkRequest(talk, onTalkChange)
+    return createElement(
+      TooltipProvider,
+      null,
+      createElement(BuddyChatControls, {
+        autoChat: autoChat({ talk }),
+        name,
+        talkRequest: request,
+        onTalkChange
+      }),
+      createElement(
+        'button',
+        {
+          'data-testid': 'use-suggest',
+          type: 'button',
+          onClick: () => request.requestTalk('suggest')
+        },
+        'Use Suggest'
+      ),
+      createElement(BuddyPostingConsentDialog, { request, name })
+    )
+  }
+
+  async function renderOwner(talk: CohostTalkMode, name?: string): Promise<void> {
+    await act(async () => root.render(createElement(Owner, { talk, name })))
+  }
+
+  it('asks once, through the one dialog, whether the control or the notice asks', async () => {
+    await renderOwner('bubble', 'Grum')
+    await act(async () => dialogButton('use-suggest').click())
+    expect(onTalkChange).not.toHaveBeenCalled()
+    // One dialog: the control renders none of its own under an owner.
+    expect(document.querySelectorAll('[role="dialog"]')).toHaveLength(1)
+    expect(dialog()?.textContent).toContain('Let Grum post as you?')
+    await act(async () => dialogButton('buddy-chat-accept').click())
+    expect(onTalkChange).toHaveBeenLastCalledWith('suggest')
+    expect(dialog()).toBeNull()
+    expect(localStorage.getItem(BUDDY_AUTO_CHAT_CONSENT_STORAGE_KEY)).toBe('1')
+  })
+
+  it('opens the same dialog from the control, and Not now changes nothing', async () => {
+    await renderOwner('bubble')
+    await press(talkButton('suggest'))
+    expect(document.querySelectorAll('[role="dialog"]')).toHaveLength(1)
+    const notNow = [...document.querySelectorAll('button')].find(
+      (candidate) => candidate.textContent?.trim() === 'Not now'
+    )
+    await act(async () => notNow?.click())
+    expect(dialog()).toBeNull()
+    expect(onTalkChange).not.toHaveBeenCalled()
+    expect(localStorage.getItem(BUDDY_AUTO_CHAT_CONSENT_STORAGE_KEY)).toBeNull()
+  })
+
+  it('applies Use Suggest at once once consent was given, and nothing when already there', async () => {
+    localStorage.setItem(BUDDY_AUTO_CHAT_CONSENT_STORAGE_KEY, '1')
+    await renderOwner('bubble')
+    await act(async () => dialogButton('use-suggest').click())
+    expect(dialog()).toBeNull()
+    expect(onTalkChange).toHaveBeenLastCalledWith('suggest')
+    onTalkChange.mockClear()
+    await renderOwner('suggest')
+    await act(async () => dialogButton('use-suggest').click())
+    expect(onTalkChange).not.toHaveBeenCalled()
   })
 })

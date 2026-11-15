@@ -13,7 +13,7 @@ import {
   BUDDY_VOICE_COMMANDS_OFF,
   BUDDY_VOICE_PREMIUM,
   buddyVoicePhrasesLabel,
-  buddyWakeWordsLine,
+  BUDDY_WAKE_WORDS_LINE,
   removeMessagesRows,
   CLOUD_AI_CLEAN_CUT_USE,
   CLOUD_AI_KEEPS,
@@ -96,13 +96,15 @@ describe('Sidekick tab copy (plan 119 S2)', () => {
     expect(CLOUD_AI_USES).toEqual([
       "Sidekick reads your live chat with Videorc's cloud AI.",
       "Sidekick hears you while you're live: your microphone audio goes to Videorc's cloud speech-to-text and comes back as text.",
-      // Plan 170 D17: created Buddies live in the account; the inspiration picture is not kept.
-      "Creating a Sidekick: your description and any picture you add go to Videorc's cloud AI, and the picture is used once and not kept. The Sidekicks you create (their pictures, name, personality and About you) are kept in your Videorc account so you can use them on any computer, until you delete them or your account.",
-      // Plan 172 D10 (plan 174 G-6): a library Buddy's moves join the account.
-      "Creating an Alive Sidekick: your reference picture and its description go to Videorc's cloud AI. Its moves are kept on this computer and, for a Sidekick you made that's in your library, in your Videorc account too, so it moves on any computer, until you remove them or delete the Sidekick or your account.",
+      // Plan 170 D17: created avatars live in the account; the inspiration
+      // picture is not kept. Plan 239 D1: creating one is the avatar's.
+      "Creating an avatar: your description and any picture you add go to Videorc's cloud AI, and the picture is used once and not kept. The avatars you create (their pictures, name, personality and About you) are kept in your Videorc account so you can use them on any computer, until you delete them or your account.",
+      // Plan 172 D10 (plan 174 G-6): a library avatar's moves join the account.
+      "Creating an Alive avatar: your reference picture and its description go to Videorc's cloud AI. Its moves are kept on this computer and, for an avatar you made that's in your library, in your Videorc account too, so it moves on any computer, until you remove them or delete the avatar or your account.",
       // Plan 192 D3: AI greetings are drafted by the cloud AI too; plan 211
       // D2: they are said in the bubble, and posted only by a Suggest click.
-      "Sidekick talks on stream: with Answers, Banter or AI greetings on, its messages are drafted by Videorc's cloud AI. It says them in its bubble, and posts one on your own account only when you click its card in Suggest.",
+      // Plan 239: Sidekick writes the lines, the avatar says them.
+      "Sidekick's lines: with Answers, Banter or AI greetings on, they are drafted by Videorc's cloud AI. Your avatar says them in its bubble, and one is posted on your own account only when you click its card in Suggest.",
       "Clean cut uploads a recording's audio, never the video, in short chunks for a word-by-word transcript, and sends its sentences to Videorc's cloud AI to find retakes. Neither is kept on Videorc servers after the job finishes."
     ])
     expect(CLOUD_AI_KEEPS).toContain("Videorc servers don't keep your chat or your audio.")
@@ -327,15 +329,11 @@ describe('Voice commands (plan 140, S6 part A)', () => {
     expect(buddyVoicePhrasesLabel(['Yes', 'Do it'])).toBe('“Yes”, “Do it”')
   })
 
-  it("says that Sidekick's own name starts a command too (plan 174 F-16)", () => {
-    expect(buddyWakeWordsLine('Grum')).toBe(
-      "Start with “Sidekick” or your Sidekick's own name, “Grum”."
-    )
-    // The backend wakes on a word of three letters or more; a name that is
-    // already a wake word (plan 236 D2), in any spelling, is itself.
-    for (const name of [null, '', 'Sidekick', 'Side kick', 'side-kick', 'buddy', 'Buddy', 'Io']) {
-      expect(buddyWakeWordsLine(name)).toBe('Start with “Sidekick”.')
-    }
+  it('teaches "Sidekick" alone as the word that starts a command (plan 174 F-16, plan 239 decision 5)', () => {
+    // The avatar's own name still wakes it in the backend
+    // (`cohost_command::wake_name_tokens`), but the app stops teaching it:
+    // the name is the avatar's, and Sidekick is the one that listens.
+    expect(BUDDY_WAKE_WORDS_LINE).toBe('Start with “Sidekick”.')
   })
 
   it('keeps the promises plain: never posts on its own, 20 seconds, 10 a minute, free removal', () => {

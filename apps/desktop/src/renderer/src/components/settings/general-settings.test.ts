@@ -166,7 +166,7 @@ describe('GeneralSettings', () => {
     expect(container.innerHTML).toContain('Finish your recording or livestream first.')
   })
 
-  it('opens the page that owns each setting', async () => {
+  it('opens the page that owns each setting, the avatar its own (plan 239)', async () => {
     await act(async () => root.render(createElement(GeneralSettings)))
     const opened: unknown[] = []
     const listen = (event: Event): void => void opened.push((event as CustomEvent).detail)
@@ -177,6 +177,7 @@ describe('GeneralSettings', () => {
     expect(rows.map((row) => row.textContent)).toEqual([
       'Account and PremiumSign in',
       'Sidekick, chat posting and Clean cutSidekick',
+      'Your avatar, its look and greetingsAvatar',
       'Recording quality and filesOutput',
       'Destinations and stream detailsDestinations',
       'Checks and the support bundleHealth'
@@ -185,6 +186,7 @@ describe('GeneralSettings', () => {
     window.removeEventListener(WORKSPACE_NAVIGATE_EVENT, listen)
     expect(opened).toEqual([
       { tab: 'ai' },
+      { tab: 'avatar' },
       { tab: 'recording' },
       { tab: 'live' },
       { tab: 'diagnostics' }

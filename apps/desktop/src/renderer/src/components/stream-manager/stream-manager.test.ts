@@ -310,7 +310,7 @@ describe('StreamManager removal cards (plan 140, S6)', () => {
   })
 })
 
-describe('StreamManager Sidekick Live and how Sidekick talks (plan 174 S3.14a, D7, plan 211 D1)', () => {
+describe('StreamManager Sidekick Live and how the avatar talks (plan 174 S3.14a, D7, plan 211 D1, plan 239)', () => {
   const autoChat = {
     talk: 'suggest' as const,
     mode: 'suggest' as const,
@@ -336,11 +336,7 @@ describe('StreamManager Sidekick Live and how Sidekick talks (plan 174 S3.14a, D
 
   it('puts the Sidekick Live switch in the pane header, with no popover and no second home', () => {
     const markup = renderWith({})
-    const header = between(
-      markup,
-      'data-slot="buddy-pane-header"',
-      'data-slot="buddy-chat-controls"'
-    )
+    const header = between(markup, 'data-slot="buddy-pane-header"', 'data-slot="avatar-block"')
     expect(header).toContain('data-slot="buddy-live-switch"')
     expect(header).toMatch(/role="switch"[^>]*aria-checked="false"/)
     expect(header).not.toContain('cohost-status-enable')
@@ -352,24 +348,76 @@ describe('StreamManager Sidekick Live and how Sidekick talks (plan 174 S3.14a, D
     )
   })
 
-  it('shows how Sidekick talks and the read-only behaviour chips under the header', () => {
+  // Plan 239 B1, B2: the pane is a Sidekick block (its glyph and name lead
+  // the header) and an Avatar block at the foot, under one hairline, with
+  // the avatar's identity, its talk control and the Say box. Nothing twice.
+  it("leads with Sidekick's glyph and name, and keeps the avatar to the Avatar block at the foot", () => {
+    const offStream = {
+      persona: {
+        id: 'p-1',
+        name: 'Golmar',
+        images: {},
+        bubbleStyle: 'speech' as const,
+        source: 'default' as const
+      },
+      state: 'idle' as const,
+      bubble: null,
+      showOnStream: true
+    }
+    const markup = renderWith({ cohostBuddy: offStream })
+    const header = between(markup, 'data-slot="buddy-pane-header"', 'data-slot="buddy-live-switch"')
+    expect(header).toMatch(/<svg[^>]*aria-hidden="true"/)
+    expect(header).toMatch(/data-slot="sidekick-name"[^>]*>Sidekick</)
+    expect(header).not.toContain('Golmar')
+    expect(header).not.toContain('data-slot="buddy-avatar"')
+    expect(header).not.toContain('buddy-emblem')
+    const avatar = markup.slice(markup.indexOf('data-slot="avatar-block"'))
+    expect(markup.indexOf('data-slot="avatar-block"')).toBeGreaterThan(
+      markup.indexOf('data-slot="buddy-pane-header"')
+    )
+    expect(markup).toMatch(/class="[^"]*\bborder-t\b[^"]*" data-slot="avatar-block"/)
+    // Identity, then "{name} talks", then the Say box and the on-stream switch.
+    const identity = avatar.indexOf('data-slot="avatar-block-identity"')
+    const controls = avatar.indexOf('data-slot="buddy-chat-controls"')
+    const footer = avatar.indexOf('data-slot="buddy-footer"')
+    expect(identity).toBeGreaterThan(-1)
+    expect(controls).toBeGreaterThan(identity)
+    expect(footer).toBeGreaterThan(controls)
+    expect(avatar).toContain('Golmar talks')
+    expect(avatar).toContain('data-testid="buddy-show-on-stream"')
+    // One of each in the pane.
+    for (const slot of ['buddy-chat-controls', 'buddy-footer', 'avatar-block-identity']) {
+      expect(markup.match(new RegExp(`data-slot="${slot}"`, 'g'))).toHaveLength(1)
+    }
+  })
+
+  it('shows how the avatar talks and the read-only behaviour chips in the Avatar block', () => {
     const markup = renderWith({ onCohostOpenChatSettings: () => undefined })
     const controls = between(
       markup,
       'data-slot="buddy-chat-controls"',
       'data-slot="buddy-talk-hint"'
     )
-    expect(controls).toContain('Sidekick talks')
+    expect(markup.indexOf('data-slot="buddy-chat-controls"')).toBeGreaterThan(
+      markup.indexOf('data-slot="avatar-block"')
+    )
+    // No persona yet: the default avatar's name (plan 239 D2).
+    expect(controls).toContain('Flint talks')
     expect(controls).toMatch(/data-buddy-talk="suggest"[^>]*aria-checked="true"/)
     expect(controls).not.toContain('data-buddy-talk="auto"')
     expect(controls).not.toContain('role="switch"')
     expect(controls).toContain('Greetings on')
     expect(controls).toContain('Answers off')
     expect(controls).toContain('Banter off')
-    expect(markup).toContain('Each message is a card here; one click posts it to chat as you.')
+    // Each chip names its own home: the lines are the avatar's.
+    expect(controls).toContain('aria-label="Greetings on · AI. Change it in Avatar → Greetings."')
+    expect(controls).toContain('aria-label="Answers off. Change it in Sidekick → Chat."')
+    expect(markup).toContain(
+      'Each line is a card here; one click posts it to chat as you, and Flint says it on stream.'
+    )
   })
 
-  it('says Bubble says nothing while the Sidekick is on no output, Sidekick Live on or off (plan 211 D9)', () => {
+  it('says Bubble says nothing while the avatar is on no output, and offers Use Suggest while Sidekick writes (plan 211 D9, plan 239 D3)', () => {
     const onAir = {
       ...emptyLiveDashboardState('now'),
       sessionId: 's1',
@@ -394,16 +442,40 @@ describe('StreamManager Sidekick Live and how Sidekick talks (plan 174 S3.14a, D
         cohostBuddy: offStream,
         onBuddyShowOnStream: () => undefined,
         ...patch
-      }).match(/data-testid="buddy-off-outputs"[\s\S]*?Show on stream/)?.[0]
-    const bubble = { ...autoChat, talk: 'bubble' as const }
+      }).match(/data-testid="buddy-off-outputs"[\s\S]*?data-slot="buddy-say"/)?.[0]
+    // The lines alone (AI off, Answers and Banter off): the avatar's own.
+    const linesOnly = {
+      ...autoChat,
+      talk: 'bubble' as const,
+      greetings: { ...autoChat.greetings, ai: false }
+    }
     for (const cohostEnabled of [false, true]) {
-      const shown = notice({ cohostAutoChat: bubble, cohostEnabled })
+      const shown = notice({ cohostAutoChat: linesOnly, cohostEnabled })
       expect(shown).toContain('Golmar isn&#x27;t on stream.')
       expect(shown).toContain('Viewers can&#x27;t see its bubble, so Bubble says nothing.')
+      expect(shown).toContain('Show on stream')
+      expect(shown).not.toContain('buddy-off-outputs-suggest')
     }
-    // Suggest is unchanged: only with Buddy Live on.
+    // Plan 239 D3: Sidekick Live writes the greetings with AI (the switch an
+    // older backend omits reads on) in Bubble: its lines have nowhere to
+    // show, and Use Suggest sits beside Show on stream.
+    const writes = { ...autoChat, talk: 'bubble' as const }
+    const both = notice({ cohostAutoChat: writes, cohostEnabled: true })
+    expect(both).toContain('Sidekick&#x27;s lines have nowhere to show')
+    expect(both).toMatch(/data-slot="buddy-off-outputs-actions"[\s\S]*Show on stream/)
+    expect(both).toMatch(/data-testid="buddy-off-outputs-suggest"[^>]*>Use Suggest</)
+    // Sidekick Live off: Sidekick writes nothing, so one way out.
+    expect(notice({ cohostAutoChat: writes, cohostEnabled: false })).not.toContain(
+      'buddy-off-outputs-suggest'
+    )
+    // Without the talk relay there is no way to ask for Suggest.
+    expect(
+      notice({ cohostAutoChat: writes, cohostEnabled: true, onCohostAutoChatChange: undefined })
+    ).not.toContain('buddy-off-outputs-suggest')
+    // Suggest is unchanged: only with Sidekick Live on, and never Use Suggest.
     expect(notice({})).toBeUndefined()
     expect(notice({ cohostEnabled: true })).toContain('its bubbles or its reactions')
+    expect(notice({ cohostEnabled: true })).not.toContain('buddy-off-outputs-suggest')
   })
 
   it('says the greetings are written with AI only with Premium and cloud AI (plan 192 D7)', () => {

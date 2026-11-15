@@ -34,7 +34,7 @@ function settings(overrides: Partial<CohostSettings['persona']> = {}): CohostSet
     removeConfirm: 'confirm',
     persona: {
       id: 'default',
-      name: 'Sidekick',
+      name: 'Flint',
       personality: '',
       bubbleStyle: 'speech',
       images: {},
@@ -123,7 +123,7 @@ describe('buddyNameToSave (plan 164 S-A4)', () => {
 describe('BuddyPersonaSection', () => {
   it('requires a name to save, and saves a trimmed one on blur', async () => {
     await render()
-    expect(nameInput().value).toBe('Sidekick')
+    expect(nameInput().value).toBe('Flint')
     await type(nameInput(), '   ')
     await blur(nameInput())
     expect(patchCohostSettings).not.toHaveBeenCalled()
@@ -246,7 +246,7 @@ describe('BuddyPersonaSection', () => {
     expect(line).not.toContain('/Users/streamer')
   })
 
-  it('starts over behind a confirm: removes the folder and writes a fresh persona', async () => {
+  it('starts over behind a confirm: removes the folder and writes a fresh persona named Flint (plan 239 D2)', async () => {
     await render({
       cohost: settings({ id: 'p-1', name: 'Grum', images: { idle: 'p-1/idle.png' } })
     })
@@ -255,7 +255,7 @@ describe('BuddyPersonaSection', () => {
     ) as HTMLButtonElement
     await act(async () => startOver.click())
     const dialog = document.querySelector('[role="alertdialog"]')
-    expect(dialog?.textContent).toContain('Start over with a new Sidekick?')
+    expect(dialog?.textContent).toContain('Start over with a new avatar?')
     expect(removeBuddyPersona).not.toHaveBeenCalled()
     const confirm = [...dialog!.querySelectorAll('button')].find(
       (button) => button.textContent?.trim() === 'Start over'
@@ -266,7 +266,7 @@ describe('BuddyPersonaSection', () => {
       patchCohostSettings.mock.calls.at(-1) as unknown as [{ persona: CohostSettings['persona'] }]
     )[0]
     expect(saved.persona.id).not.toBe('p-1')
-    expect(saved.persona).toMatchObject({ name: 'Sidekick', images: {}, source: 'default' })
+    expect(saved.persona).toMatchObject({ name: 'Flint', images: {}, source: 'default' })
     // Plan 172 D5 (QA 2026-10-11): the fresh Buddy is the default one, Alive
     // with the pack the app ships, as on a fresh install and as Use on the
     // official Buddy card gives; it used to come back Still while its card

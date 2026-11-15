@@ -41,10 +41,10 @@ function strings(value: unknown): string[] {
 describe('buddy onboarding copy (plan 170 D14)', () => {
   it('pins the four step titles', () => {
     expect(BUDDY_ONBOARDING_STEP_TITLES).toEqual([
-      'Meet your Sidekick',
+      'Meet your avatar',
       'Describe it',
       'Give it a personality',
-      'Create your Sidekick'
+      'Create your avatar'
     ])
     BUDDY_ONBOARDING_STEP_TITLES.forEach((title, index) => {
       expect(doc).toContain(`${index + 1}. ${title}`)
@@ -71,9 +71,9 @@ describe('buddy onboarding copy (plan 170 D14)', () => {
     expect(buddyOnboardingProgress(2)).toBe('Step 2 of 4')
     expect(doc).toContain('"Uses 4 of your {remaining} images left today."')
     expect(buddyOnboardingAllowance(20)).toBe('Uses 4 of your 20 images left today.')
-    expect(doc).toContain('"Your library is full ({limit} Sidekicks). Delete one to make room."')
+    expect(doc).toContain('"Your library is full ({limit} avatars). Delete one to make room."')
     expect(buddyLibraryFullLine(30)).toBe(
-      'Your library is full (30 Sidekicks). Delete one to make room.'
+      'Your library is full (30 avatars). Delete one to make room.'
     )
     expect(doc).toContain('title "Delete {name}?"')
     expect(buddyLibraryDeleteTitle('Grum')).toBe('Delete Grum?')

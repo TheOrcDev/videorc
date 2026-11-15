@@ -1,4 +1,4 @@
-import { readdirSync, readFileSync, statSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
 import { join, relative, sep } from 'node:path'
 import ts from 'typescript'
 import { describe, expect, it } from 'vitest'
@@ -24,6 +24,11 @@ import { describe, expect, it } from 'vitest'
 //   every string or template literal, JSX attributes included. It fails on
 //   "Buddy" or "Buddies" as the name is written, and on a lowercase "buddy"
 //   inside a sentence; the rest is in BUDDY_ALLOWED.
+// - "Sidekick" (plan 239 D1, C6) is the helper's name now; the character on
+//   the stream is the avatar. On the avatar's own surfaces (AVATAR_SIDE_FILES)
+//   the same reader may find "Sidekick" only where a sentence is about the
+//   helper (it answers, it writes): SIDEKICK_ALLOWED. Anything else there is
+//   the avatar called by the helper's name, a copy miss to fix, not to list.
 
 const RENDERER_ROOT = join(__dirname, '..')
 const SELF = 'src/renderer-buddy-name-guard.test.ts'
@@ -125,7 +130,8 @@ const GOLEM_ALLOWED: readonly Allowed[] = [
   },
   {
     file: 'src/assets/buddy/official/README.md',
-    text: "Sidekick the Golem's official poses",
+    // Flint since plan 239 D2; the creature's name, not the feature.
+    text: "Flint the Golem's official poses",
     reason: CREATURE_ART
   },
   {
@@ -184,11 +190,6 @@ const GOLEM_ALLOWED: readonly Allowed[] = [
     reason: CREATURE_ART
   },
   {
-    file: 'src/components/tabs/buddy-tab.test.ts',
-    text: 'not the golem',
-    reason: CREATURE_ART
-  },
-  {
     file: 'src/lib/buddy-picture.test.ts',
     text: 'null for the golem:',
     reason: CREATURE_ART
@@ -213,6 +214,75 @@ const BUDDY_ALLOWED: readonly Allowed[] = [
 ]
 
 /**
+ * The avatar's surfaces (plan 239): the Avatar page, its sections, the
+ * onboarding, the creator, the Test dialog, and the views behind them. Paths
+ * under `apps/desktop/src`, forward slashes; their file names keep `buddy`
+ * (plan 236 D1).
+ */
+const AVATAR_SIDE_FILES: readonly string[] = [
+  'renderer/src/components/tabs/avatar-tab.tsx',
+  'renderer/src/components/buddy-library-section.tsx',
+  'renderer/src/components/buddy-persona-section.tsx',
+  'renderer/src/components/buddy-pet-settings.tsx',
+  'renderer/src/components/buddy-avatar-section.tsx',
+  'renderer/src/components/buddy-look-section.tsx',
+  'renderer/src/components/buddy-look-tiles.tsx',
+  'renderer/src/components/buddy-reactions-section.tsx',
+  'renderer/src/components/buddy-motion-section.tsx',
+  'renderer/src/components/buddy-greetings-section.tsx',
+  'renderer/src/components/buddy-onboarding.tsx',
+  'renderer/src/components/buddy-pet-creator.tsx',
+  'renderer/src/components/buddy-pet-preview.tsx',
+  'renderer/src/components/buddy-test-dialog.tsx',
+  'renderer/src/components/buddy-stream-demo.tsx',
+  'renderer/src/components/buddy-picture-card.tsx',
+  'renderer/src/lib/buddy-onboarding-copy.ts',
+  'renderer/src/lib/buddy-library-view.ts',
+  'renderer/src/lib/buddy-look-view.ts',
+  'renderer/src/lib/buddy-pet-view.ts',
+  'renderer/src/lib/buddy-pet-creator-view.ts',
+  'renderer/src/lib/buddy-test-view.ts',
+  'renderer/src/lib/buddy-create-gate.ts',
+  'renderer/src/lib/buddy-persona-view.ts',
+  'renderer/src/lib/buddy-pet-preview-pack.ts',
+  'renderer/src/lib/avatar-tab-view.ts',
+  'renderer/src/lib/avatar-tabs.ts'
+]
+
+const SIDEKICK_ANSWERS =
+  'Sidekick (the helper, Premium) answers viewers from what the avatar knows; the avatar only says it'
+const SIDEKICK_WRITES =
+  'writing greetings with AI is Sidekick, so the avatar Greetings tab points at its switch in Sidekick → Chat'
+
+const SIDEKICK_ALLOWED: readonly Allowed[] = [
+  {
+    file: 'renderer/src/lib/buddy-onboarding-copy.ts',
+    text: "With Sidekick, answers viewers' questions from what you tell it",
+    reason: `${SIDEKICK_ANSWERS} (docs/buddy-onboarding-copy.md, word for word with the web)`
+  },
+  {
+    file: 'renderer/src/lib/buddy-onboarding-copy.ts',
+    text: "Sidekick answers viewers' questions from this.",
+    reason: `${SIDEKICK_ANSWERS}: About you's help line (docs/buddy-onboarding-copy.md)`
+  },
+  {
+    file: 'renderer/src/components/buddy-persona-section.tsx',
+    text: 'With Sidekick, it answers viewers who ask it by name',
+    reason: SIDEKICK_ANSWERS
+  },
+  {
+    file: 'renderer/src/components/buddy-greetings-section.tsx',
+    text: 'Sidekick → ',
+    reason: `${SIDEKICK_WRITES}: the pointer's button names that page and tab`
+  },
+  {
+    file: 'renderer/src/components/buddy-greetings-section.tsx',
+    text: 'On: Sidekick writes each greeting in ',
+    reason: `${SIDEKICK_WRITES}: the pointer says who writes them while the switch is on`
+  }
+]
+
+/**
  * Every "orcle" in a line, in any case, except the camelCase seam of a word
  * ending in "for" before one starting "Clean" (`streamingForCleanup`).
  */
@@ -234,6 +304,19 @@ function buddyHits(text: string): number {
   const named = [...text.matchAll(/\bBudd(?:y|ies)\b/g)].length
   const spoken = /\s/.test(text.trim())
     ? [...text.matchAll(/(?<![\w.:/-])budd(?:y|ies)\b(?![\w.:/-])/g)].length
+    : 0
+  return named + spoken
+}
+
+/**
+ * Every "Sidekick" or "Sidekicks" in a text as the name is written, and every
+ * lowercase "sidekick" in a sentence, like `buddyHits`. A machine value
+ * (`sidekick-mark`, `data-slot="sidekick-name"`) never counts.
+ */
+function sidekickHits(text: string): number {
+  const named = [...text.matchAll(/\bSidekicks?\b/g)].length
+  const spoken = /\s/.test(text.trim())
+    ? [...text.matchAll(/(?<![\w.:/-])sidekicks?\b(?![\w.:/-])/g)].length
     : 0
   return named + spoken
 }
@@ -289,15 +372,22 @@ function copySources(): string[] {
   return files
 }
 
-/** The readable texts that still say Buddy, and the allow-list entries that excused one. */
-function scanCopy(allowList: readonly Allowed[]): Scan {
+/**
+ * The readable texts that still say an old name (Buddy by default), and the
+ * allow-list entries that excused one. `files` defaults to every copy source.
+ */
+function scanCopy(
+  allowList: readonly Allowed[],
+  hits: (text: string) => number = buddyHits,
+  files: readonly string[] = copySources()
+): Scan {
   const offenders: string[] = []
   const used = new Set<Allowed>()
-  for (const absolute of copySources()) {
+  for (const absolute of files) {
     const path = relative(DESKTOP_SOURCE_ROOT, absolute).split(sep).join('/')
     const allowed = allowList.filter((entry) => entry.file === path)
     for (const { line, text } of readableTexts(path, readFileSync(absolute, 'utf8'))) {
-      if (buddyHits(text) === 0) continue
+      if (hits(text) === 0) continue
       let rest = text
       for (const entry of allowed) {
         if (rest.includes(entry.text)) {
@@ -305,10 +395,17 @@ function scanCopy(allowList: readonly Allowed[]): Scan {
           rest = rest.split(entry.text).join('')
         }
       }
-      if (buddyHits(rest) > 0) offenders.push(`${path}:${line}: ${text.trim().slice(0, 120)}`)
+      if (hits(rest) > 0) offenders.push(`${path}:${line}: ${text.trim().slice(0, 120)}`)
     }
   }
   return { offenders, used }
+}
+
+/** The avatar-side files that exist, as absolute paths. */
+function avatarSideSources(): string[] {
+  return AVATAR_SIDE_FILES.map((file) => join(DESKTOP_SOURCE_ROOT, file)).filter((path) =>
+    existsSync(path)
+  )
 }
 
 function rendererFiles(): string[] {
@@ -445,6 +542,45 @@ describe(
 
     it('gives every allow-list entry a reason', () => {
       for (const entry of BUDDY_ALLOWED) expect(entry.reason.length).toBeGreaterThan(20)
+    })
+  }
+)
+
+describe(
+  "the avatar's surfaces say avatar, and Sidekick only for the helper (plan 239 D1, C6)",
+  { timeout: 30_000 },
+  () => {
+    const { offenders, used } = scanCopy(SIDEKICK_ALLOWED, sidekickHits, avatarSideSources())
+
+    it('finds the name as written and "sidekick" in a sentence, never in code', () => {
+      expect(sidekickHits('Sidekick, Sidekicks and Sidekick’s look')).toBe(3)
+      expect(sidekickHits('meet your sidekick today')).toBe(1)
+      expect(sidekickHits('SidekickMark sidekickWritesLines useSidekick')).toBe(0)
+      expect(sidekickHits('sidekick')).toBe(0)
+      expect(sidekickHits('sidekick-mark data-slot="sidekick-name" /sidekick')).toBe(0)
+      expect(sidekickHits('Your avatar and my buddy')).toBe(0)
+    })
+
+    it('reads every avatar-side file it names', () => {
+      expect(
+        AVATAR_SIDE_FILES.filter((file) => !existsSync(join(DESKTOP_SOURCE_ROOT, file)))
+      ).toEqual([])
+      expect(new Set(AVATAR_SIDE_FILES).size).toBe(AVATAR_SIDE_FILES.length)
+    })
+
+    it('keeps "Sidekick" off the avatar\'s surfaces, but where a sentence is about the helper', () => {
+      expect(offenders).toEqual([])
+    })
+
+    it('has no allow-list entry that matches nothing', () => {
+      expect(staleEntries(SIDEKICK_ALLOWED, used)).toEqual([])
+    })
+
+    it('allows only avatar-side files, each entry with a reason', () => {
+      for (const entry of SIDEKICK_ALLOWED) {
+        expect(AVATAR_SIDE_FILES).toContain(entry.file)
+        expect(entry.reason.length).toBeGreaterThan(20)
+      }
     })
   }
 )

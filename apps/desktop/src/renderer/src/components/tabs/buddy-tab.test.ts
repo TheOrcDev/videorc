@@ -51,8 +51,8 @@ vi.mock('@/hooks/use-clean-cut', () => ({
     subscribe: () => () => undefined
   })
 }))
-// My Buddies (plan 170) has its own tests; here a marker shows where it sits,
-// and the tab's tests stay fast under a loaded suite.
+// My avatars (plan 170) has its own tests; a marker shows it is not here
+// (plan 239: it lives on the Avatar page), and the tests stay fast.
 vi.mock('@/components/buddy-library-section', async () => {
   const { createElement } = await import('react')
   return {
@@ -111,7 +111,7 @@ function settings(overrides: Partial<CohostSettings> = {}): CohostSettings {
     removeConfirm: 'confirm',
     persona: {
       id: 'default',
-      name: 'Sidekick',
+      name: 'Flint',
       personality: '',
       bubbleStyle: 'speech',
       images: {},
@@ -244,12 +244,12 @@ async function pressTab(id: BuddyTabId): Promise<void> {
 }
 
 describe('Sidekick tab strip (plan 150)', () => {
-  it('lists six tabs like Settings and opens on Live', async () => {
+  it('lists six tabs like Settings and opens on Overview (plan 239)', async () => {
     await render()
-    // Plan 174 D7: the page is Buddy, so its first tab is Profile. Plan 225
-    // D12: Community follows Chat.
+    // Plan 239: the avatar's profile is its own page, so the first tab is
+    // Overview; its id stays `live`. Plan 225 D12: Community follows Chat.
     expect(stripTabs().map((tab) => tab.textContent)).toEqual([
-      'Profile',
+      'Overview',
       'Chat',
       'Community',
       'Voice',
@@ -286,26 +286,21 @@ describe('Sidekick tab strip (plan 150)', () => {
 })
 
 describe('Sidekick tab (plan 119 S2)', () => {
-  it('leads with the status row, then My Sidekicks and the creation screen, then its powers', async () => {
+  it('leads Overview with the status row, then its powers, and none of the avatar (plan 239)', async () => {
     await render()
     const text = document.body.textContent ?? ''
-    // Plan 174 D7, F-4: the one status row leads; My Buddies and the creation
-    // screen follow it (plan 170 D16 kept their order).
+    // Plan 174 D7, F-4: the one status row leads. Plan 239: My avatars, the
+    // name and personality, the look, and how to put the avatar on stream
+    // moved to the Avatar page.
     const status = document.querySelector('[data-slot="buddy-profile-status"]')
-    const library = document.querySelector('[data-testid="buddy-library"]')
-    const header = document.querySelector('[data-slot="buddy-header"]')
     expect(status).toBeTruthy()
-    expect(library).toBeTruthy()
-    expect(header).toBeTruthy()
-    expect(
-      status!.compareDocumentPosition(library!) & Node.DOCUMENT_POSITION_FOLLOWING
-    ).toBeTruthy()
-    expect(
-      library!.compareDocumentPosition(header!) & Node.DOCUMENT_POSITION_FOLLOWING
-    ).toBeTruthy()
-    expect(document.getElementById('buddy-name')).toBeTruthy()
-    // Plan 174 J2-20: the on switch has one name, Buddy Live; the
-    // streamer's name for Buddy sits beside the emblem.
+    expect(document.querySelector('[data-testid="buddy-library"]')).toBeNull()
+    expect(document.querySelector('[data-slot="buddy-header"]')).toBeNull()
+    expect(document.getElementById('buddy-name')).toBeNull()
+    expect(document.querySelector('[data-testid="buddy-on-stream-note"]')).toBeNull()
+    expect(text).not.toContain('Flint')
+    // Plan 174 J2-20: the on switch has one name, Sidekick Live; the status
+    // row names Sidekick, the helper, never the avatar (plan 239 D7).
     expect(text).toContain('Sidekick Live')
     expect(text).not.toMatch(/joins my streams/i)
     expect(text).toContain('Alpha')
@@ -314,10 +309,6 @@ describe('Sidekick tab (plan 119 S2)', () => {
         '[data-slot="buddy-live-status-block"] [data-slot="buddy-profile-name"]'
       )?.textContent
     ).toBe('Sidekick')
-    // Plan 174 G-2: how to put the Buddy on stream, while it is not.
-    expect(document.querySelector('[data-testid="buddy-on-stream-note"]')?.textContent).toContain(
-      'turn on “Sidekick on stream”'
-    )
     for (const power of BUDDY_LIVE_POWERS) {
       expect(text).toContain(power.title)
       expect(text).toContain(power.description)
@@ -360,10 +351,12 @@ describe('Sidekick tab (plan 119 S2)', () => {
     await render({ consented: false, consentRequested: true })
     const dialog = document.querySelector('[role="dialog"]')
     expect(dialog?.textContent).toContain('Turn on Sidekick Live?')
-    // Plan 149: Buddy's emblem leads the dialog, at its large size.
-    const emblem = dialog?.querySelector('[data-slot="buddy-emblem"]')
-    expect(emblem?.getAttribute('src')).toContain('buddy-emblem-112')
-    expect(emblem?.getAttribute('alt')).toBe('')
+    // Plan 149: the mark leads the dialog, at its large size; plan 239 D7:
+    // Sidekick's own glyph, never the emblem artwork the avatar wears.
+    const mark = dialog?.querySelector('[data-slot="sidekick-mark"]')
+    expect(mark?.getAttribute('aria-hidden')).toBe('true')
+    expect(mark?.className).toContain('size-14')
+    expect(dialog?.querySelector('[data-slot="buddy-emblem"]')).toBeNull()
     for (const use of CLOUD_AI_USES) expect(dialog?.textContent).toContain(use)
     expect(dialog?.textContent).toContain(CLOUD_AI_KEEPS)
 
@@ -437,16 +430,12 @@ describe('Sidekick tab (plan 119 S2)', () => {
   })
 })
 
-describe('Live and Chat tabs (plan 150 S3, S4)', () => {
-  it('leads Live with the emblem beside the status, and listening under it', async () => {
+describe('Overview and Chat tabs (plan 150 S3, S4, plan 239)', () => {
+  it("leads Overview with Sidekick's mark beside the status, and listening under it (plan 239 D7)", async () => {
     await render()
     const block = document.querySelector('[data-slot="buddy-live-status-block"]') as HTMLElement
-    expect(block.querySelector('[data-slot="buddy-emblem"]')?.getAttribute('src')).toContain(
-      'buddy-emblem-112'
-    )
-    expect(block.querySelector('[data-slot="buddy-emblem"]')?.getAttribute('data-picture')).toBe(
-      'default'
-    )
+    expect(block.querySelector('[data-slot="sidekick-mark"]')?.className).toContain('size-14')
+    expect(block.querySelector('[data-slot="buddy-emblem"]')).toBeNull()
     expect(block.querySelector('#buddy-live-switch')).toBeTruthy()
     expect(block.querySelector('[data-testid="buddy-live-pointer"]')).toBeNull()
     expect(document.getElementById('cohost-listen')).toBeTruthy()
@@ -455,7 +444,7 @@ describe('Live and Chat tabs (plan 150 S3, S4)', () => {
     expect(document.querySelectorAll('[data-power-tab]')).toHaveLength(BUDDY_LIVE_POWERS.length)
   })
 
-  it("puts the streamer's own Sidekick in the header, not the golem", async () => {
+  it("keeps the streamer's own avatar off Sidekick's page: its picture and name are the Avatar page's (plan 239 D7)", async () => {
     const owl = settings()
     owl.persona = {
       ...owl.persona,
@@ -466,10 +455,11 @@ describe('Live and Chat tabs (plan 150 S3, S4)', () => {
     }
     await render({ cohost: owl })
     const block = document.querySelector('[data-slot="buddy-live-status-block"]') as HTMLElement
-    const emblem = block.querySelector('[data-slot="buddy-emblem"]')
-    expect(emblem?.getAttribute('data-picture')).toBe('own')
-    expect(emblem?.getAttribute('src')).toBe('videorc-asset://buddy/p1/idle-0a1b2c3d.png')
-    expect(block.querySelector('[data-slot="buddy-profile-name"]')?.textContent).toBe('Archie')
+    expect(block.querySelector('[data-slot="sidekick-mark"]')).toBeTruthy()
+    expect(document.querySelector('[data-slot="buddy-emblem"]')).toBeNull()
+    expect(document.body.innerHTML).not.toContain('p1/idle-0a1b2c3d.png')
+    expect(block.querySelector('[data-slot="buddy-profile-name"]')?.textContent).toBe('Sidekick')
+    expect(block.textContent).not.toContain('Archie')
   })
 
   it('opens the tab that holds a power when its row is pressed', async () => {
@@ -482,26 +472,28 @@ describe('Live and Chat tabs (plan 150 S3, S4)', () => {
     expect(calls.onTabChange).toHaveBeenLastCalledWith('chat')
   })
 
-  it('splits Chat into Greetings, Replies and Moderation, and leads with one reason when locked', async () => {
+  it('splits Chat into Replies and Moderation, writes greetings with AI in Replies, and leads with one reason when locked (plan 239)', async () => {
     await render({ tab: 'chat' })
     const titles = [...document.querySelectorAll('[data-slot="panel-section"] h2')].map(
       (heading) => heading.textContent
     )
-    // Plan 164 S-D5: Greetings lead the Chat tab, above Replies.
-    expect(titles).toEqual(['Greetings', 'Replies', 'Moderation'])
+    // Plan 239: the greeting lines are the avatar's (Avatar → Greetings);
+    // Sidekick writing them with AI sits in Replies, beside Answers and Banter.
+    expect(titles).toEqual(['Replies', 'Moderation'])
+    expect(document.getElementById('buddy-greetings-enabled')).toBeNull()
+    const replies = document.querySelector<HTMLElement>('[data-slot="panel-section"]')!
+    expect(replies.querySelector('label[for="buddy-greetings-ai"]')?.textContent).toBe(
+      'Write greetings with AI'
+    )
     expect(document.querySelector('[data-testid="buddy-tab-unlock"]')).toBeNull()
     expect((document.getElementById('buddy-greetings-ai') as HTMLButtonElement).disabled).toBe(
       false
     )
 
     await render({ tab: 'chat', gate: basic })
-    // Greetings stay free under the lock, and the lock says so (plan 174 F-19).
+    // The lock names what stays free, and where (plan 174 F-19, plan 239).
     expect(document.querySelector('[data-testid="buddy-tab-unlock"]')?.textContent).toContain(
-      'Sidekick Live is part of Videorc Premium. Greetings are free.'
-    )
-    // Greetings are free (plan 164 D6): editable under the same lock.
-    expect((document.getElementById('buddy-greetings-enabled') as HTMLButtonElement).disabled).toBe(
-      false
+      'Sidekick Live is part of Videorc Premium. Greetings are free on Avatar → Greetings.'
     )
     expect((document.getElementById('cohost-answers') as HTMLButtonElement).disabled).toBe(true)
     // Plan 192 D3: writing them with AI is Premium, like Answers.
@@ -652,8 +644,10 @@ describe('Sidekick tab: Voice commands (plan 140, S6 part A)', () => {
     for (const title of ['Highlight', 'Clear', 'Remove', 'Answer', 'Marker']) {
       expect(text).toContain(title)
     }
-    // Plan 174 F-16: the Buddy's own name starts a command too.
-    expect(text).toContain('Start with “Sidekick”')
+    // Plan 174 F-16, plan 239 decision 5: the app teaches "Sidekick" alone,
+    // never the avatar's name.
+    expect(text).toContain('Start with “Sidekick”.')
+    expect(text).not.toContain('own name')
     expect(text).toContain('“Sidekick, highlight the comment from coders X”')
     expect(text).toContain('“This one is toxic. Remove it from our chat.”')
     expect(text).toContain(
@@ -668,8 +662,9 @@ describe('Sidekick tab: Voice commands (plan 140, S6 part A)', () => {
     await render({ tab: 'voice' })
     const off = section().querySelector('[data-testid="buddy-voice-commands-off"]') as HTMLElement
     expect(off.textContent).toContain('Turn on Sidekick Live to use voice commands.')
-    // Plan 174 F-5: the button names the tab as the strip does, never "Live".
-    expect(off.querySelector('button')?.textContent).toBe('Go to Profile')
+    // Plan 174 F-5: the button names the tab as the strip does, never "Live"
+    // (Overview since plan 239).
+    expect(off.querySelector('button')?.textContent).toBe('Go to Overview')
     await act(async () => off.querySelector('button')!.click())
     expect(calls.onTabChange).toHaveBeenLastCalledWith('live')
   })

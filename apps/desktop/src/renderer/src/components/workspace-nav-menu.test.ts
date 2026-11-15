@@ -30,7 +30,7 @@ function tabFor(key: string): WorkspaceTab {
 const MENU_PAGES = APP_MENU_PAGE_GROUPS.flat()
 
 describe('the application menu mirrors workspace-nav', () => {
-  it('names every ⌘1–⌘9 page once, as the sidebar does', () => {
+  it('names every ⌘1–⌘9 and ⌘0 page once, as the sidebar does', () => {
     expect(MENU_PAGES.map((page) => page.key).sort()).toEqual(
       WORKSPACE_SHORTCUTS.map((entry) => entry.digit)
         .filter((digit) => digit !== ',')
@@ -44,7 +44,8 @@ describe('the application menu mirrors workspace-nav', () => {
   it('keeps sidebar order and its zones: Studio, Setup, Livestream, then Library', () => {
     const order = MENU_PAGES.map((page) => sidebarOrderFor(tabFor(page.key)))
     expect(order).toEqual([...order].sort((left, right) => left - right))
-    // Plan 235 D8: the digits themselves run in order.
+    // Plan 235 D8: the digits themselves run in order; plan 239 D6: the
+    // tenth page, Library, takes 0.
     expect(MENU_PAGES.map((page) => page.key)).toEqual([
       '1',
       '2',
@@ -54,7 +55,8 @@ describe('the application menu mirrors workspace-nav', () => {
       '6',
       '7',
       '8',
-      '9'
+      '9',
+      '0'
     ])
     expect(APP_MENU_PAGE_GROUPS.map((group) => group.map((page) => tabFor(page.key)))).toEqual(
       SIDEBAR_ZONES.filter((zone) => zone.id !== 'system').map((zone) => [...zone.pages])

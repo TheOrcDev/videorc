@@ -43,13 +43,15 @@ describe('BuddyConsentDialog (plan 119 decision 3, plan 174 S0.2)', () => {
     expect(dialog()).toBeNull()
   })
 
-  it('names every cloud use and what is kept, under the emblem', async () => {
+  it("names every cloud use and what is kept, under Sidekick's mark (plan 239 D7)", async () => {
     await render(true, vi.fn())
     const text = dialog()?.textContent ?? ''
     expect(text).toContain('Turn on Sidekick Live?')
     for (const use of CLOUD_AI_USES) expect(text).toContain(use)
     expect(text).toContain(CLOUD_AI_KEEPS)
-    expect(dialog()?.querySelector('[data-slot="buddy-emblem"]')).toBeTruthy()
+    // The emblem artwork is the default avatar's now: Sidekick wears its glyph.
+    expect(dialog()?.querySelector('[data-slot="sidekick-mark"]')).toBeTruthy()
+    expect(dialog()?.querySelector('[data-slot="buddy-emblem"]')).toBeNull()
   })
 
   it('answers Allow with true and Not now with false', async () => {

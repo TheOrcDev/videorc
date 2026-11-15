@@ -83,7 +83,7 @@ describe('buddyLookCreateGate (plan 174 G-5): one model, one line, one action', 
       })
     ).toEqual({
       kind: 'full',
-      reason: 'Your library is full (30 Sidekicks). Delete one to make room.',
+      reason: 'Your library is full (30 avatars). Delete one to make room.',
       action: null
     })
     expect(buddyLookCreateGate({ ...allowed, capabilities: caps(24, undefined, false) })).toEqual({

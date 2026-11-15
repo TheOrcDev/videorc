@@ -223,6 +223,83 @@ describe('under the Sidekick tab', () => {
   })
 })
 
+// Plan 192 D3, plan 239: Sidekick writing the greetings is Premium and cloud
+// AI, like Answers and Banter, so its switch moved here from the avatar's
+// Greetings (Avatar → Greetings keeps the lines and a pointer).
+describe('Write greetings with AI in Replies (plan 192 D3, plan 239)', () => {
+  // The id is on Base UI's hidden input; the label for it names the switch.
+  function aiSwitch(): HTMLElement {
+    const label = document.querySelector('label[for="buddy-greetings-ai"]')
+    const control = document.querySelector<HTMLElement>(
+      `[role="switch"][aria-labelledby="${label?.id}"]`
+    )
+    expect(control).toBeTruthy()
+    return control!
+  }
+
+  const golmar = (overrides: Partial<CohostSettings> = {}): CohostSettings => {
+    const base = settings(overrides)
+    return { ...base, persona: { ...base.persona, name: 'Golmar' } }
+  }
+
+  it("says it writes in the avatar's voice, from your line on Avatar → Greetings", async () => {
+    await render(golmar())
+    const replies = document.querySelector<HTMLElement>('[data-slot="panel-section"]')!
+    expect(replies.querySelector('h2')?.textContent).toBe('Replies')
+    expect(replies.querySelector('label[for="buddy-greetings-ai"]')?.textContent).toBe(
+      'Write greetings with AI'
+    )
+    expect(replies.textContent).toContain(
+      "In Golmar's voice. Your line on Avatar → Greetings is the example and the fallback."
+    )
+    // An older backend omits the switch: on, Rust's default.
+    expect(aiSwitch().getAttribute('aria-checked')).toBe('true')
+    expect(aiSwitch().hasAttribute('data-disabled')).toBe(false)
+  })
+
+  it('saves ai alone in the greetings block, keeping the lines and the welcomes', async () => {
+    const templates = [
+      {
+        id: 't1',
+        kind: 'follow' as const,
+        text: 'Hey {name}',
+        state: 'talk' as const,
+        enabled: true
+      }
+    ]
+    const welcomes = { firstTime: { enabled: false }, returning: { enabled: true } }
+    const current = golmar()
+    await render({
+      ...current,
+      autoChat: {
+        ...current.autoChat,
+        greetings: { enabled: true, templates, ai: true, welcomes }
+      }
+    })
+    await act(async () => aiSwitch().click())
+    const patch = patchCohostSettings.mock.calls[0]![0] as { autoChat: CohostSettings['autoChat'] }
+    expect(Object.keys(patch)).toEqual(['autoChat'])
+    expect(patch.autoChat.greetings).toEqual({ enabled: true, templates, ai: false, welcomes })
+    expect(patch.autoChat.answers).toEqual(current.autoChat.answers)
+  })
+
+  it('is Premium like Answers and Banter: disabled for a Basic account and under the tab lock', async () => {
+    await render(golmar(), {
+      allowed: false,
+      featureId: 'live-cohost',
+      reason: 'Sidekick requires Videorc Premium.'
+    })
+    expect(aiSwitch().hasAttribute('data-disabled')).toBe(true)
+    mocked.core = { cohostSettings: golmar(), cohostGate: { allowed: true }, patchCohostSettings }
+    // The Chat tab passes its lock (Sidekick Live's unlock reason shows above).
+    const Replies = BuddyRepliesSection as (props: {
+      locked?: boolean
+    }) => ReturnType<typeof BuddyRepliesSection>
+    await act(async () => root.render(createElement(Replies, { locked: true })))
+    expect(aiSwitch().hasAttribute('data-disabled')).toBe(true)
+  })
+})
+
 describe('Sidekick hears you while you are live (plan 068)', () => {
   function listenSwitch(): HTMLElement {
     // The id is on Base UI's hidden input, which the label points at; the
@@ -314,7 +391,7 @@ function px(value: string): number {
 // `data-slot="field"`. Answers and Banter once replaced that slot with their
 // own and sat flush against the card's edges and the hairline above them.
 describe('grouped cards (plan 168 Phase 0)', () => {
-  it('pads Answers and Banter exactly like Reply tone', async () => {
+  it('pads Answers, Banter and Write greetings with AI exactly like Reply tone (plan 239)', async () => {
     await render(settings())
     const replies = [...document.querySelectorAll<HTMLElement>('[data-slot="panel-section"]')].find(
       (section) => section.querySelector('h2')?.textContent === 'Replies'
@@ -324,6 +401,7 @@ describe('grouped cards (plan 168 Phase 0)', () => {
     expect(rows.map((row) => row.querySelector('label')?.textContent)).toEqual([
       'Answers',
       'Banter',
+      'Write greetings with AI',
       'Reply tone'
     ])
     await applyTailwind(document.body)

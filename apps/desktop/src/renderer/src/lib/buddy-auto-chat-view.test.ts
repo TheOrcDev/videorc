@@ -8,7 +8,9 @@ import {
   type CohostGreetingTemplate
 } from './backend'
 import {
-  BUDDY_BEHAVIOUR_HOME,
+  BUDDY_BEHAVIOUR_HOMES,
+  BUDDY_BEHAVIOUR_IDS,
+  BUDDY_BEHAVIOUR_TABS,
   BUDDY_BUILTIN_GREETINGS,
   BUDDY_SAMPLE_FIELDS,
   BUDDY_POSTS_PROMISE,
@@ -42,12 +44,12 @@ const BUILTIN_FIXTURE = JSON.parse(
   )
 ) as { version: number; lines: unknown[] }
 
-describe('Sidekick in copy (plan 174 J2-20, F-26)', () => {
-  it("uses the streamer's name when the character acts, else Sidekick", () => {
+describe('Sidekick and the avatar in copy (plan 174 J2-20, F-26, plan 239)', () => {
+  it("uses the streamer's name when the avatar acts, else the default avatar's, Flint (plan 239 D2)", () => {
     expect(buddyDisplayName('Grum')).toBe('Grum')
     expect(buddyDisplayName('  Nib  ')).toBe('Nib')
-    expect(buddyDisplayName('')).toBe('Sidekick')
-    expect(buddyDisplayName(null)).toBe('Sidekick')
+    expect(buddyDisplayName('')).toBe('Flint')
+    expect(buddyDisplayName(null)).toBe('Flint')
     expect(buddyPostingConsentTitle('Grum')).toBe('Let Grum post as you?')
     expect(buddyPostingConsentSentence('Grum')).toBe(
       'Grum posts to your chats as you, on the platforms you stream to, only when you click its card. You can read every message later in Sidekick → Reports.'
@@ -66,7 +68,7 @@ describe('Sidekick in copy (plan 174 J2-20, F-26)', () => {
   })
 })
 
-describe('How Sidekick talks and the behaviour chips (plan 174 S3.14a, D7, plan 211 D1)', () => {
+describe('How the avatar talks and the behaviour chips (plan 174 S3.14a, D7, plan 211 D1, plan 239)', () => {
   it('offers Off, Bubble and Suggest, from least reach to most, and Auto is gone', () => {
     expect(BUDDY_TALK_MODES).toEqual(['off', 'bubble', 'suggest'])
     expect(BUDDY_TALK_MODES.map((talk) => BUDDY_TALK_LABELS[talk])).toEqual([
@@ -77,22 +79,22 @@ describe('How Sidekick talks and the behaviour chips (plan 174 S3.14a, D7, plan 
     expect(Object.keys(BUDDY_TALK_LABELS)).not.toContain('auto')
   })
 
-  it("names the control after the streamer's Sidekick, else Sidekick", () => {
+  it("names the control after the streamer's avatar, else Flint", () => {
     expect(buddyTalkLabel('Golmar')).toBe('Golmar talks')
-    expect(buddyTalkLabel('  ')).toBe('Sidekick talks')
-    expect(buddyTalkLabel(null)).toBe('Sidekick talks')
+    expect(buddyTalkLabel('  ')).toBe('Flint talks')
+    expect(buddyTalkLabel(null)).toBe('Flint talks')
   })
 
-  it('says what each value means, and only Suggest ever reaches chat (plan 211 D1, D6)', () => {
+  it('says what each value means and who speaks, and only Suggest ever reaches chat (plan 211 D1, D6, plan 239 B4)', () => {
     expect(buddyTalkHint('off', 'Golmar')).toBe('Golmar says nothing on its own.')
     expect(buddyTalkHint('bubble', 'Golmar')).toBe(
-      'Golmar talks on stream in its bubble. Nothing goes to chat.'
+      "Golmar says greetings and Sidekick's lines in its bubble on stream. Nothing goes to chat."
     )
     expect(buddyTalkHint('suggest', 'Golmar')).toBe(
-      'Each message is a card here; one click posts it to chat as you.'
+      'Each line is a card here; one click posts it to chat as you, and Golmar says it on stream.'
     )
     expect(buddyTalkHint('bubble', null)).toBe(
-      'Sidekick talks on stream in its bubble. Nothing goes to chat.'
+      "Flint says greetings and Sidekick's lines in its bubble on stream. Nothing goes to chat."
     )
     // Off never means Buddy Live off: that is its own switch.
     for (const talk of BUDDY_TALK_MODES) {
@@ -101,7 +103,7 @@ describe('How Sidekick talks and the behaviour chips (plan 174 S3.14a, D7, plan 
     expect(BUDDY_POSTS_PROMISE).toBe('Sidekick never posts in your chat on its own.')
   })
 
-  it('summarises each behaviour as a read-only chip that names its one home', () => {
+  it('summarises each behaviour as a read-only chip that names its one home (plan 239)', () => {
     const chips = buddyBehaviourChips({
       greetings: {
         enabled: true,
@@ -115,9 +117,28 @@ describe('How Sidekick talks and the behaviour chips (plan 174 S3.14a, D7, plan 
       ['answers', 'Answers off', false],
       ['banter', 'Banter off', false]
     ])
-    expect(BUDDY_BEHAVIOUR_HOME).toBe('Sidekick → Chat')
-    for (const chip of chips) {
-      expect(chip.name).toBe(`${chip.text}. Change it in Sidekick → Chat.`)
+    expect(chips.map((chip) => chip.name)).toEqual([
+      'Greetings on. Change it in Avatar → Greetings.',
+      'Answers off. Change it in Sidekick → Chat.',
+      'Banter off. Change it in Sidekick → Chat.'
+    ])
+  })
+
+  it("homes the greeting lines on the avatar's page, Answers and Banter on Sidekick's (plan 239)", () => {
+    expect(BUDDY_BEHAVIOUR_HOMES).toEqual({
+      greetings: 'Avatar → Greetings',
+      answers: 'Sidekick → Chat',
+      banter: 'Sidekick → Chat'
+    })
+    // The chip opens the tab its home names; the two pages' tab ids never
+    // overlap, so the id alone picks the page.
+    expect(BUDDY_BEHAVIOUR_TABS).toEqual({
+      greetings: 'greetings',
+      answers: 'chat',
+      banter: 'chat'
+    })
+    for (const id of BUDDY_BEHAVIOUR_IDS) {
+      expect(BUDDY_BEHAVIOUR_HOMES[id].toLowerCase()).toContain(BUDDY_BEHAVIOUR_TABS[id])
     }
   })
 
@@ -132,7 +153,7 @@ describe('How Sidekick talks and the behaviour chips (plan 174 S3.14a, D7, plan 
       label: 'Greetings',
       on: true,
       text: 'Greetings on',
-      name: 'Greetings on. Change it in Sidekick → Chat.'
+      name: 'Greetings on. Change it in Avatar → Greetings.'
     })
   })
 
@@ -148,7 +169,7 @@ describe('How Sidekick talks and the behaviour chips (plan 174 S3.14a, D7, plan 
     // An older backend omits the switch: on, like Rust's default.
     expect(greetingsText(autoChat(true), { aiGreetings: true })).toBe('Greetings on · AI')
     expect(buddyBehaviourChips(autoChat(true, true), { aiGreetings: true })[0]!.name).toBe(
-      'Greetings on · AI. Change it in Sidekick → Chat.'
+      'Greetings on · AI. Change it in Avatar → Greetings.'
     )
     // Without Premium and cloud AI, the switch off, or Greetings off: no AI.
     expect(greetingsText(autoChat(true, true))).toBe('Greetings on')
