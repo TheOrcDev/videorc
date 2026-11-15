@@ -30,9 +30,10 @@ use windows::Win32::Graphics::Direct3D11::{
     D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC, D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC_0,
     D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC, D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC_0,
     D3D11_VIDEO_PROCESSOR_STREAM, D3D11_VIDEO_USAGE_OPTIMAL_SPEED, D3D11_VPIV_DIMENSION_TEXTURE2D,
-    D3D11_VPOV_DIMENSION_TEXTURE2D, D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext,
-    ID3D11Multithread, ID3D11Texture2D, ID3D11VideoContext1, ID3D11VideoDevice,
-    ID3D11VideoProcessor, ID3D11VideoProcessorEnumerator, ID3D11VideoProcessorOutputView,
+    D3D11_VPOV_DIMENSION_TEXTURE2D, D3D11CreateDevice, ID3D11Device, ID3D11Device5,
+    ID3D11DeviceContext, ID3D11Multithread, ID3D11Texture2D, ID3D11VideoContext1,
+    ID3D11VideoDevice, ID3D11VideoProcessor, ID3D11VideoProcessorEnumerator,
+    ID3D11VideoProcessorOutputView,
 };
 use windows::Win32::Graphics::Dxgi::Common::{
     DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709, DXGI_COLOR_SPACE_YCBCR_STUDIO_G22_LEFT_P709,
@@ -79,7 +80,6 @@ use windows::core::{ComObject, GUID, IUnknown, Interface, Ref};
 
 use crate::diagnostics::RECORDING_FRAME_ACCOUNTING;
 use crate::frame_store::RetainedD3D11Texture;
-use crate::windows_d3d11_device::WindowsD3d11Device;
 use crate::windows_d3d11_encoder_contract::{
     MediaFoundationInputTopology, WindowsD3d11EncoderContractErrorCode,
     WindowsD3d11EncoderDiagnostics, WindowsD3d11EncoderLeaseRelease,
@@ -488,7 +488,7 @@ fn elapsed_micros(started_at: Instant) -> u32 {
     u32::try_from(started_at.elapsed().as_micros()).unwrap_or(u32::MAX)
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct MediaFoundationD3d11EncoderDiagnostics {
     pub(crate) adapter_luid: u64,
     pub(crate) d3d11_aware: bool,
@@ -2432,12 +2432,16 @@ fn pixel_rect_to_win32(rect: crate::scene_geometry::PixelRect) -> Result<RECT> {
 
 #[allow(dead_code)]
 impl MediaFoundationD3d11H264Encoder {
-    /// Creates an NV12-only hardware encoder on the D3D11 media authority
-    /// thread. `authority` is also installed into the MFT's DXGI device
-    /// manager, so an encoder cannot silently use a second D3D11 device.
-    pub(crate) fn new_on_media_thread(
+    /// Creates an NV12-only hardware encoder on the thread that will own it:
+    /// the D3D11 media authority's encoder worker (#1042). `authority`, the
+    /// media authority's multithread-protected device, is also installed into
+    /// the MFT's DXGI device manager, so an encoder cannot silently use a
+    /// second D3D11 device. COM and `MFStartup` are joined on this thread and
+    /// left again when the encoder drops, so it must also drop on this thread.
+    pub(crate) fn new_on_encoder_thread(
         config: MediaFoundationEncoderConfig,
-        authority: &WindowsD3d11Device,
+        authority: &ID3D11Device5,
+        adapter_luid: u64,
         generation: u64,
         role: WindowsD3d11EncoderRole,
         in_flight_capacity: usize,
@@ -2445,9 +2449,7 @@ impl MediaFoundationD3d11H264Encoder {
         config.validate()?;
         // Validate the pure ownership contract before initializing COM/MF.
         WindowsD3d11EncoderOwnershipState::new(generation, role, in_flight_capacity)?;
-        let adapter_luid = authority.adapter_luid().as_u64();
         let authority_device: IUnknown = authority
-            .raw_device()
             .cast()
             .context("D3D11 authority device did not expose IUnknown")?;
         let profile = config.profile_label();
@@ -2801,6 +2803,13 @@ impl MediaFoundationD3d11H264Encoder {
 
     pub(crate) fn pending_frame_count(&self) -> usize {
         self.submitted_pts.len()
+    }
+
+    /// The transform has issued an input credit not yet spent. The encoder
+    /// worker checks this before it submits, so waiting for a credit is not
+    /// counted as a refusal (#1042).
+    pub(crate) const fn has_input_credit(&self) -> bool {
+        self.ownership.has_input_credit()
     }
 
     /// Submits one texture-backed NV12 sample. Every rejection includes the
@@ -4767,12 +4776,13 @@ mod tests {
     fn windows_d3d11_encoder_gpu_surface_api_is_separate_from_i420_bytes() {
         let _create: fn(
             MediaFoundationEncoderConfig,
-            &WindowsD3d11Device,
+            &ID3D11Device5,
+            u64,
             u64,
             WindowsD3d11EncoderRole,
             usize,
         ) -> Result<MediaFoundationD3d11H264Encoder> =
-            MediaFoundationD3d11H264Encoder::new_on_media_thread;
+            MediaFoundationD3d11H264Encoder::new_on_encoder_thread;
         let _submit: fn(
             &mut MediaFoundationD3d11H264Encoder,
             &ID3D11Texture2D,

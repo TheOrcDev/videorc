@@ -544,16 +544,17 @@ test('the #1042 stage line names the slowest loop, compose and transform calls',
       deviceLockWait: stage(96.5),
       encoderProcessInput: stage(118.2),
       encoderProcessOutput: stage(68.5),
+      encoderQueueWait: { samples: 10, p95Ms: 9.5, maxMs: 66 },
       encoderInputHold: { samples: 10, p95Ms: 18, maxMs: 52 },
       encoderCreditRefusals: 3,
       encoderCapacityRefusals: 12,
       encoderMaxInFlight: 2,
+      encoderDroppedInputs: 1,
       slowestLoop: {
         totalMs: 119.5,
         capturePollMs: 0.1,
         composeMs: 0,
         encoderSubmitMs: 118.9,
-        encoderPollMs: 0.3,
         previewPresentMs: 0,
         otherCommandMs: 0,
         commands: 2
@@ -569,11 +570,17 @@ test('the #1042 stage line names the slowest loop, compose and transform calls',
       gpu: { total: { p95Ms: 3.1, maxMs: 9 }, completionLatency: { p95Ms: 20, maxMs: 140 } }
     }
   })
-  assert.match(line, /slowest loop 119\.5ms \(capture 0\.1, compose 0\.0, encoder submit 118\.9/)
+  assert.match(line, /slowest loop 119\.5ms \(capture 0\.1, compose 0\.0, encoder hand-off 118\.9/)
   assert.match(line, /slowest compose 101\.0ms \(device lock wait 96\.5, camera upload 2\.5/)
-  assert.match(line, /ProcessInput 118\.2ms, ProcessOutput 68\.5ms/)
-  assert.match(line, /encoder input hold p95 18\.0\/max 52\.0ms/)
-  assert.match(line, /3 without input credit, 12 at the in-flight cap \(max in flight 2\)/)
+  assert.match(
+    line,
+    /encoder worker: ProcessInput p95 1\.0\/max 118\.2ms, ProcessOutput max 68\.5ms/
+  )
+  assert.match(line, /queue wait p95 9\.5\/max 66\.0ms, input hold p95 18\.0\/max 52\.0ms/)
+  assert.match(
+    line,
+    /3 without input credit, 12 at the in-flight cap \(max in flight 2\), 1 dropped on the worker/
+  )
   assert.match(line, /GPU completion latency p95 20\.0\/max 140\.0ms/)
   const withoutGpu = formatWindowsD3d11MediaStageTimings({
     mediaStageTimings: { slowestLoop: {}, slowestCompose: {} }
