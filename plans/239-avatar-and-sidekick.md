@@ -21,11 +21,31 @@ One rule joins them: **Sidekick writes, the avatar says.**
 
 ## Status and scope
 
-- **Status: EXECUTING 2026-11-15.** The owner answered the five questions
-  of the suggestion (below), then D1–D7 (2026-11-15): "Go all choices
+- **Status: BUILT 2026-11-15.** The owner answered the five questions of
+  the suggestion (below), then D1–D7 (2026-11-15): "Go all choices
   recommended, execute the entire plan and create a pr." So every D takes
   its recommended answer, and the golem is **Flint** (D2). The desktop
   slices A, B and C land as commits of one PR.
+  - Web: `TheOrcDev/videorc-web#114` (branch `plan-239-avatar-pages`),
+    deploy first. It adds one redirect the plan did not list,
+    `/buddy?use=` → `/avatar?use=`, so the gallery's old sign-in return
+    lands in one hop.
+  - Desktop: one PR from branch `plan-239-avatar-and-sidekick`, merged
+    after the web deploy.
+  - Calls made while building, beyond the slices:
+    - The question toast in Stream Manager speaks as "Sidekick:", not as
+      the avatar's name: catching questions is the helper's job (D1). It
+      named the character since plan 174 J2-20, when the two were one.
+    - Sidekick → Chat's Premium lock says "Greetings are free on Avatar →
+      Greetings."
+    - Settings → General lists the Avatar page beside Sidekick.
+    - Agent tool replies name the Scene item by its label ("Moved Avatar to
+      the top left."), as they do for "Highlight".
+    - `docs/icon-set.md` was one slot short since plan 210; the recount is
+      97 slots over 93 glyphs.
+  - Not run, by the owner's rule for copy and layout changes (2026-11-14:
+    TypeScript gates, unit tests and CI only): the smokes listed under
+    PR A, B and C. The paid web evals wait for the owner's go.
 - Facts are from `origin/main` of each repo on 2026-11-15: desktop
   `161fa472f` (0.26.0), web `a616a306`, Rust UI `dcf02d4f1`. Line numbers
   drift; search for the quoted name.
@@ -598,9 +618,10 @@ copy. Model lane: `opus-5.5`.
 - Goal: a streamer meets two products. The avatar is the character on
   the stream, with its own page, block, web page and words. Sidekick is
   the helper, and it works as it does today.
-- Current state: PLANNED. Nothing is built. The plan is on branch
-  `plan-239-avatar-and-sidekick` in `~/projects/videorc-wt-239`, a
-  worktree that holds `plans/` only.
+- Current state: BUILT. Web PR `TheOrcDev/videorc-web#114` and the desktop
+  PR from branch `plan-239-avatar-and-sidekick` (worktree
+  `~/projects/videorc-wt-239`) wait for the owner: deploy the web, then
+  merge the desktop. The Rust UI port slice waits for its upstream merge.
 - Owner route for the plan: Orchestrator (fit 10), because it spans three
   repos and product words. Model lane: `fable-5.1`. Each PR's route and
   lane are in its slice.

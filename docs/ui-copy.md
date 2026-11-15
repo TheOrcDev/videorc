@@ -26,12 +26,25 @@ app. Two checks hold them (see [Guards](#guards)).
 - Sentence case on every button, menu item, tab, title, label, toast and
   status word: "Save local recording", "Needs reconnect".
 - Capitalize only names:
-  - Videorc, Premium, Sidekick (or the name the streamer gave it), Sidekick Live;
+  - Videorc, Premium, Sidekick, Sidekick Live. Sidekick, with no article,
+    means the helper only: Sidekick Live, reading chat, drafts, flags,
+    removals, voice commands, reports, "Sidekick, …" (plan 239 D1);
+  - the avatar, the character on the stream, is a lower-case common noun in
+    a sentence ("your avatar", "My avatars", "New avatar…", "Use as my
+    avatar"); "Avatar" capitalized names the page and the Stream Manager
+    block. The character goes by its own name wherever one is at hand
+    ("{name} on stream", "{name} talks", "Say something as {name}"). The
+    test for a sentence: about the look, the bubble, reactions, motion, the
+    picture, the library, creating one or being on the stream, it is the
+    avatar; about reading chat, hearing, writing lines, flagging, removing,
+    commands, reports or Premium, it is Sidekick. Sidekick writes, the
+    avatar says;
   - Go Live, as the action's name ("Go Live", "Use for Go Live…"); the verb
     in a sentence is lowercase ("Go live", "when you go live");
   - pages, sidebar groups and windows: Studio, Sources, Scene, Assets,
-    Captions, Output, Destinations, Buddy, Library, Settings, Health, Setup,
-    Livestream (the group), Stream Manager, Preview, Notes, Captions reader;
+    Captions, Avatar, Output, Destinations, Sidekick, Library, Settings,
+    Health, Setup, Livestream (the group), Stream Manager, Preview, Notes,
+    Captions reader;
   - platforms and products: YouTube, Twitch, Kick, X, TikTok, Custom RTMP,
     OBS, macOS, Windows.
 - A status is a word, never a raw value: "Reconnecting", not "closed" or
@@ -120,8 +133,8 @@ One verb pair on every surface (plan 174 S2.2). The strings live in
   automatically", "Sidekick remembers" and "Community sync"; the data actions
   are "Export…", "Import…" and "Forget everyone…" (the confirm "Forget
   everyone?"). The YouTube line is exactly "YouTube viewers are remembered
-  for 30 days after they chat (YouTube's rules)." Sidekick's bubble lines for
-  the viewers' commands are "Done, {name}. I've forgotten you.", "Welcome
+  for 30 days after they chat (YouTube's rules)." The avatar's bubble lines
+  for the viewers' commands are "Done, {name}. I've forgotten you.", "Welcome
   back to the list, {name}.", "Unlinked, {name}." and "Linked: {name} on
   {platform} and {name} on {platform}." (one name when both match); the
   wave says "Hey {name}!". Never promise chat: nothing in Community posts.

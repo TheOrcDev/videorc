@@ -51,14 +51,14 @@ _Avoid_: Live (for a recording, a source or any running session), Streaming (as 
 **Livestream**:
 The broadcast itself; as a noun it is lowercase. "Stream" is its short form in
 running text ("Your stream stopped"). Capitalized, it names the sidebar group
-that holds Destinations and Buddy (plan 235 D6), and the Studio's Session row
+that holds Destinations and Sidekick (plan 235 D6), and the Studio's Session row
 ("Livestream · 4 destinations").
 _Avoid_: broadcast (except a platform's own object, like an X broadcast), live session
 
 **Stream report**:
 The email Videorc sends after a live stream (plan 237): watching at the
 peak and on average, and how many people chatted, platform by platform.
-Buddy's in-app summary stays "Buddy's report" (Buddy → Reports).
+Sidekick's in-app summary stays the "Sidekick report" (Sidekick → Reports).
 _Avoid_: viewers reached, unique viewers, audience size, recap email
 
 **Watching**:
@@ -98,7 +98,7 @@ in Library titled Clip).
 _Avoid_: replay, highlight (for the file)
 
 **On stream**:
-Shown in what viewers see: a chat message, a takeover, Sidekick. The actions
+Shown in what viewers see: a chat message, a takeover, your avatar. The actions
 are "Show on stream" and "Take off stream".
 _Avoid_: On air (for an item), live (for an item)
 
@@ -167,7 +167,7 @@ _Avoid_: screen, takeover screen
 An image the streamer places anywhere on the picture: a sponsor, their
 socials, a logo, a frame. Assets → Banners imports and manages them; the
 Scene page places them and shows or hides them ("Show", "Hide"). A banner
-stays over a takeover and under captions, Sidekick and the highlight card.
+stays over a takeover and under captions, the avatar and the highlight card.
 _Avoid_: overlay (in copy), image source, sticker, sponsor (as the feature's
 name)
 
@@ -191,6 +191,7 @@ _Avoid_: animated background, shader, video background, motion background
 One of a live background's three curated color sets ("Silk · Satin"), chosen
 in its Adjust style. Each live background remembers its own look, Motion
 (Calm or Normal), Visibility and Dim.
+Not the avatar's look (its pictures, Still or Alive, on Avatar → Profile).
 _Avoid_: preset (a preset is quality only), theme, variant, style
 
 **Sound**:
@@ -313,7 +314,8 @@ _Avoid_: onboarding (in copy), Setup alone (also a sidebar group and a
 Destinations tab)
 
 **Stream Manager**:
-The live dashboard window: chat, activity, Sidekick and the stats bar.
+The live dashboard window: chat, activity, the Sidekick pane (with your
+avatar's block at its foot) and the stats bar.
 _Avoid_: Chat window, Comments window, comments (for chat)
 
 **Chat**:
@@ -390,31 +392,58 @@ What docs and the website call the way agents connect. In agent apps the
 server is named `videorc`.
 _Avoid_: Videorc API, MCP server (in the app's own copy)
 
-### Sidekick and Premium
+### Avatar, Sidekick and Premium
+
+Two products since plan 239, joined by one rule: Sidekick writes, the avatar
+says.
+
+**Avatar**:
+The character on the stream: the name, personality and look the streamer
+gave it, its comic bubble, reactions and greeting lines. Viewers see it. In
+a sentence it is a lower-case common noun ("your avatar", "My avatars",
+"New avatar…", "Create your avatar"); capitalized, "Avatar" names the page
+(Setup, ⌘6) and the Stream Manager block. Where its own name is at hand the
+character goes by it ("Flint on stream", "Say something as Flint"). The
+default avatar is Flint the Golem, the official stone character (plan 239
+D2; it was named Sidekick until then); "Golem" names only that creature
+(kind "Golem", slug `golem`), never a product. Free, except a look made
+with AI and creating an Alive avatar. Names a program reads keep `buddy`
+and `cohost` (`overlayLayout.buddy`, `cohost.buddy*`, `buddy_say`,
+`videorc://buddy`, saved values).
+_Avoid_: Sidekick (for the character), the Sidekick, mascot, pet (an Alive
+avatar's pack is a "pet pack" in docs and code; copy says "moves"), Avatars
+(capitalized mid-sentence), Buddy
 
 **Sidekick**:
-Videorc's AI companion on stream, with no article ("Sidekick reads chat"),
-or the name the streamer gave it when the character speaks or acts ("Grum: 5
-people asking…"). "Sidekicks" for more than one. Its default name is
-Sidekick, and it is the word that wakes it ("Sidekick, clip that"); speech
-to text also writes "side kick" or "side-kick", and all three wake it. It was
-called Buddy until plan 236, because speech to text heard "Buddy" as "body";
-"buddy" still wakes it, hidden, for two releases. Names a program reads keep
-`buddy` (`/api/buddy/*`, `cohost.buddy*`, `buddy_say`, saved values). "Golem"
-names only the stone golem creature, never the feature.
-_Avoid_: Buddy, buddy, co-host (in copy), the Sidekick, Orcle, pet
+The helper only the streamer sees, with no article ("Sidekick reads
+chat"): it reads chat, hears the streamer, catches questions, drafts
+replies, flags spam, removes comments when asked, takes voice commands and
+writes the stream's report. Premium with Cloud AI. It was the name of both
+the helper and the character until plan 239, which gave the character its
+own word, the avatar. "Sidekick" is the word that wakes it ("Sidekick, clip
+that"); speech to text also writes "side kick" or "side-kick", and all
+three wake it. The avatar's own name still wakes it too, but copy teaches
+"Sidekick" alone. It was called Buddy until plan 236, because speech to
+text heard "Buddy" as "body"; "buddy" still wakes it, hidden, for two
+releases. Names a program reads keep `buddy` (`/api/buddy/*`,
+`cohost.buddy*`, `set_buddy`, the page id `ai`, saved values).
+_Avoid_: Buddy, buddy, co-host (in copy), the Sidekick, Orcle, Sidekick for
+the character on stream, "your Sidekick", "Sidekicks"
 
 **Sidekick Live**:
 The switch that lets Sidekick join a livestream.
 _Avoid_: Buddy Live, Joins my streams, chat mode (for the on switch)
 
 **{name} talks**:
-How Sidekick talks on its own, named after the streamer's Sidekick ("Golmar
-talks", else "Sidekick talks"): Off, Bubble (in its bubble on stream, never
-in chat) or Suggest (a card; one click posts it to chat as you). Sidekick
-never posts in your chat on its own. It never turns Sidekick on or off;
-Sidekick Live does. Plan 211.
-_Avoid_: Chat posting, chat mode, auto chat, Auto (gone since plan 211)
+How the avatar talks on its own, named after it ("Flint talks"): Off,
+Bubble (in its bubble on stream, never in chat) or Suggest (a card; one
+click posts it to chat as you). It is the avatar talking: its greeting lines
+and the lines Sidekick writes for it (Answers, Banter, greetings written
+with AI). It lives in the Stream Manager's Avatar block. Nothing is ever
+posted in chat on its own. It never turns Sidekick on or off; Sidekick Live
+does. Plans 211 and 239.
+_Avoid_: Chat posting, chat mode, auto chat, Auto (gone since plan 211),
+Sidekick talks
 
 **`/sidekick`**:
 The Stream Manager composer's command that asks Sidekick to do something
@@ -423,10 +452,18 @@ releases.
 _Avoid_: /buddy (in copy)
 
 **Profile**:
-The Sidekick page's first tab: Sidekick Live and its status, My Sidekicks,
-the look, the personality and Cloud AI. The page is Sidekick; its tabs are
-Profile, Chat, Voice, Reports and Clean cut.
-_Avoid_: the Sidekick tab (for the first tab)
+The Avatar page's first tab: where the avatar shows, My avatars, Name and
+personality with About you, the look (Still or Alive), Reactions and Motion.
+Its second tab is Greetings. The page is Avatar; its tabs are Profile and
+Greetings.
+_Avoid_: the Avatar tab (for the first tab)
+
+**Overview**:
+The Sidekick page's first tab (id `live`; it was Profile until plan 239):
+Sidekick Live and its status, listening, What Sidekick does and Cloud AI.
+The page is Sidekick; its tabs are Overview, Chat, Community, Voice,
+Reports and Clean cut.
+_Avoid_: Profile, the Sidekick tab (for the first tab)
 
 **Premium**:
 The paid plan. A locked feature says "{Feature} is part of Videorc Premium."

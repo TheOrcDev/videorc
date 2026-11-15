@@ -126,23 +126,23 @@ called intro done, then stop", "Give me the file of my last recording".
 | `move_on_scene`     | Move or resize an item to where the Scene canvas's snaps would put it         |
 | `set_scene_item`    | Show or hide the camera or screen, its shape, and the overlays' output switch |
 
-Chat and Sidekick, the next stream, settings and the Library:
+Chat, Sidekick and the avatar, the next stream, settings and the Library:
 
-| Tool                  | What it does                                                                                      |
-| --------------------- | ------------------------------------------------------------------------------------------------- |
-| `send_chat_message`   | Post in chat as you, on every chat that takes posts or the ones named                             |
-| `remove_chat_message` | Remove a viewer's message; on YouTube it waits for your click on the card                         |
-| `buddy_say`           | Sidekick says a line in its bubble on the picture, never in chat; refused off the picture         |
-| `set_buddy`           | Sidekick Live on or off, how Sidekick talks (off, bubble or suggest), and whether it is on stream |
-| `update_stream_info`  | The next stream's title, description, privacy and category, shared or per platform                |
-| `set_destinations`    | Turn destinations on or off for the next stream                                                   |
-| `schedule_stream`     | Schedule an upcoming livestream on YouTube or X                                                   |
-| `get_settings`        | The settings agents may change, as they stand                                                     |
-| `update_settings`     | Change those settings (resolution, frame rate, Clips, theme and a few more)                       |
-| `rename_recording`    | Give a recording a new title                                                                      |
-| `delete_recording`    | Move a recording's files to the Trash, where you can put them back                                |
-| `export_recording`    | Make the MP4 of a finished recording, like Export MP4 in the Library                              |
-| `start_clean_cut`     | Start a Clean cut (Premium); its progress and transcript show in `get_recording`                  |
+| Tool                  | What it does                                                                                                   |
+| --------------------- | -------------------------------------------------------------------------------------------------------------- |
+| `send_chat_message`   | Post in chat as you, on every chat that takes posts or the ones named                                          |
+| `remove_chat_message` | Remove a viewer's message; on YouTube it waits for your click on the card                                      |
+| `buddy_say`           | The avatar says a line in its speech bubble on the picture, never in chat; refused while it is off the picture |
+| `set_buddy`           | Sidekick Live on or off, how the avatar talks (off, bubble or suggest), and whether the avatar is on stream    |
+| `update_stream_info`  | The next stream's title, description, privacy and category, shared or per platform                             |
+| `set_destinations`    | Turn destinations on or off for the next stream                                                                |
+| `schedule_stream`     | Schedule an upcoming livestream on YouTube or X                                                                |
+| `get_settings`        | The settings agents may change, as they stand                                                                  |
+| `update_settings`     | Change those settings (resolution, frame rate, Clips, theme and a few more)                                    |
+| `rename_recording`    | Give a recording a new title                                                                                   |
+| `delete_recording`    | Move a recording's files to the Trash, where you can put them back                                             |
+| `export_recording`    | Make the MP4 of a finished recording, like Export MP4 in the Library                                           |
+| `start_clean_cut`     | Start a Clean cut (Premium); its progress and transcript show in `get_recording`                               |
 
 Every action goes through the same code as the button you would press, so
 an agent can't start anything the Studio would refuse; it gets Videorc's own
@@ -215,7 +215,7 @@ when Output's recording is on, as the dialog does.
 
 ### Arranging the picture
 
-"Move Sidekick to the top left and the sponsor banner to the bottom left" are
+"Move the avatar to the top left and the sponsor banner to the bottom left" are
 two `move_on_scene` calls. Each place is one of nine on a 3×3 grid (and the
 full frame for a banner) inside the same margins and safe area the Scene
 inspector's snaps use, so Top left from an agent is Top left from the
@@ -439,7 +439,7 @@ args}` to the Studio's socket: the one that sent `agent.intent.listen`
   is refused in those words), a removal is the grammar's removal card, and
   Sidekick's removals keep its gates (Videorc's removal switch, Premium) on
   the typed path too. Sidekick's D14 questions take only "Sidekick, yes": a bare
-  "yes" leaves the question open. A viewer whose name is Sidekick's, or a single
+  "yes" leaves the question open. A viewer whose name is your avatar's, or a single
   everyday or command word, never pulls chat into a planner request. The Studio projection is published
   while Agents is on or Sidekick may act (Premium), because Sidekick's planner
   reads its scene and destination names. A tool marked `buddy` joins

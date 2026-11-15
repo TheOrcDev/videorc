@@ -11,14 +11,15 @@ works and how to check it.
 
 ## What you can say
 
-Say "Sidekick" first, or your Sidekick's own name (plan 164): "Sidekick, highlight
-the comment from coders X", or "Grum, highlight the comment from coders X"
-when you named it Grum. Every word of the name with three letters or more
-works ("Grum the Goblin" answers to Grum and to Goblin); "sidekick" always works,
-so a name the speech model cannot hear is never a dead end. Two phrases also
-work without the name, out of the box: "remove it from our chat" (or "delete
-this one") and "highlight the comment from coders X". To always require the
-name, turn on **Commands need “Sidekick” first**.
+Say "Sidekick" first: "Sidekick, highlight the comment from coders X".
+"Sidekick" is the word that starts a command (plan 239, owner decision 5):
+Sidekick is the one that listens, and the name you gave your avatar is the
+character's. Your avatar's own name still wakes it, for streamers who
+learned it in plan 164 ("Grum, put this one up"), but Videorc no longer
+teaches it. Two phrases also work without "Sidekick", out of the box:
+"remove it from our chat" (or "delete this one") and "highlight the comment
+from coders X". To always require it, turn on **Commands need “Sidekick”
+first**.
 
 | Command   | Examples                                                                                                                                              | What happens                                                                                |
 | --------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------- |
@@ -27,6 +28,7 @@ name, turn on **Commands need “Sidekick” first**.
 | Remove    | "This one is toxic. Remove it from our chat.", "Sidekick, delete the comment from coders X"                                                           | Shows you the comment first, and removes it from that platform's chat when you confirm.     |
 | Answer    | "Yes", "Do it", "Remove it" / "No", "Cancel", "Never mind"                                                                                            | Confirms or stops a removal.                                                                |
 | Marker    | "Sidekick, make a marker here for Shadcn New Library", "Sidekick, mark this as Shadcn New Library"                                                    | Saves a titled point on the active recording or livestream timeline.                        |
+| On stream | "Sidekick, show up", "Sidekick, come on screen" / "Sidekick, hide", "Sidekick, go away"                                                               | Puts your avatar on the stream, or takes it off: the "{name} on stream" switch.             |
 
 "Sidekick" also wakes it when speech to text writes "side kick" or
 "side-kick", even when the two words land in two captions a moment apart.
@@ -35,8 +37,17 @@ releases as a hidden alias; "body" never does, and neither do real words:
 "Oracle database is slow" and "orca whales" are talk. "Sidekick" only wakes
 it: "thanks sidekick" or "my sidekick is great" on its own does nothing, and
 a command still needs its phrase after the name. Anything else after a clear
-"Sidekick" (or your Sidekick's name) shows "Sidekick didn't catch that: '…'" in the
-strip.
+"Sidekick" shows "Sidekick didn't catch that: '…'" in the strip.
+
+The **On stream** commands are about your avatar itself (the presence
+grammar in `cohost_command.rs`): "show up", "come on screen", "appear",
+"show yourself" or "get on stream" put it on the stream, and "hide", "go
+away", "leave the screen", "get off stream" or "disappear" take it off.
+They always need "Sidekick" first, and a sentence that points at a comment
+("show coders X's question", "show that comment") stays a highlight. They
+flip the same switch as "{name} on stream" in the Stream Manager's Avatar
+block, and the strip says what happened ("Flint is on stream.", "Flint is
+off the stream.").
 
 Removing a message can't be undone, so an answer has to be clear. "Yes",
 "Yes, remove it", "Do it", "Go ahead" or "Sidekick, yes" confirms when you say it
@@ -71,9 +82,10 @@ your computer, whatever the planner said.
   answer and nothing more happens. Removing a message uses the removal card
   above, and showing a comment Sidekick flagged asks "Show it anyway?" as the
   highlight command does (typed, Sidekick says it flagged it instead).
-- **Type it** in the Stream Manager: `/buddy switch to BRB`. No "Sidekick"
-  first and no spoken yes, because typing is deliberate. The answer shows
-  under the composer.
+- **Type it** in the Stream Manager: `/sidekick switch to BRB` (`/buddy`
+  still works, unlisted, for two releases). No "Sidekick" first and no
+  spoken yes, because typing is deliberate. The answer shows under the
+  composer.
 - **The strip** says what happened: "Switched to BRB. Pressed Drum roll."
 - **Activity** (Settings → Remote → Agents) lists everything Sidekick did as
   "Sidekick", the voice commands above included.
@@ -170,13 +182,13 @@ In every case, if the platform cannot remove it, Sidekick hides it in Videorc an
 tells you viewers may still see it. The row then reads **Hidden in Videorc**,
 with the reason on hover. A removed row reads **Removed**.
 
-The Sidekick tab's **Voice commands** section shows each connected platform's
+Sidekick → Voice's **Voice commands** section shows each connected platform's
 "Remove messages" readiness with its one fix, and the Stream Manager shows a
 quiet "Reconnect Twitch to let Sidekick remove messages." row while live.
 
 ## Settings
 
-Under Sidekick Live in the Sidekick tab, **Voice commands**:
+In Sidekick → Voice, **Voice commands**:
 
 - **Commands need “Sidekick” first** (`wakeWordRequired`, default off).
 - **Before Sidekick removes a comment:** Confirm first or 5-second countdown
@@ -185,7 +197,7 @@ Under Sidekick Live in the Sidekick tab, **Voice commands**:
 ## Videorc's switches
 
 Videorc can pause either half remotely (desktop service flags, contract part
-D). The Sidekick tab then says so:
+D). Sidekick → Voice then says so:
 
 - "Voice commands are paused by Videorc." Sidekick stops acting on commands.
 - "Removing messages is paused by Videorc." Voice removals are refused.

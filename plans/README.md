@@ -3,7 +3,8 @@
 - 2026-11-15: [Plan 239](239-avatar-and-sidekick.md), the owner's ask: "our
   sidekick is two things: a moderator and control for stream manager… the
   avatar that goes on live stream. I want to separate those two."
-  EXECUTING 2026-11-15, all D1–D7 recommended (the golem is Flint):
+  BUILT 2026-11-15, all D1–D7 recommended (the golem is Flint); web
+  videorc-web#114 deploys first, then the desktop PR:
   - Two products. The **avatar** is the character on the stream: free,
     with its own page in the Setup group. **Sidekick** is the helper in
     Stream Manager: Premium, unchanged, still under Livestream. Sidekick
