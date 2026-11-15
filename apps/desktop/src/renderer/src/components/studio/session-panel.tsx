@@ -152,14 +152,20 @@ export function SessionTransport({
       className="flex flex-col gap-3 border-b border-border p-gutter"
       data-slot="session-transport"
     >
-      <div className="flex gap-2">
+      {/* One equal column per button; alone, Record takes the row. Each
+          button keeps every state's words in one cell to hold its width, and
+          both keep "End livestream", so side by side in flex the pair
+          outgrew the 20rem inspector and Go Live ran past the right gutter.
+          A column holds its share whatever the words or a DisabledReason
+          wrapper; the words not showing may sit in the button's padding. */}
+      <div className="grid auto-cols-fr grid-flow-col gap-2">
         {/* D8 (plan 208): Record and the stop button are metallic red, lit
             while the session runs; Go Live is polished copper (plan 240). Why a
             start is blocked shows on hover and on keyboard focus (plan 174
             S1.1, B-9): a disabled button never shows a title. */}
-        <DisabledReason className="flex-1" reason={recordActive ? null : recordBlockedReason}>
+        <DisabledReason className="min-w-0" reason={recordActive ? null : recordBlockedReason}>
           <RecordButton
-            className="flex-1"
+            className="min-w-0 flex-1"
             disabled={
               recordActive
                 ? !canStop && !stopRequestPending
@@ -173,11 +179,11 @@ export function SessionTransport({
         </DisabledReason>
         {active && !talkShowOutputs ? null : (
           <DisabledReason
-            className="flex-1"
+            className="min-w-0"
             reason={goLivePending || liveActive ? null : liveStreamBlockedReason}
           >
             <GoLiveButton
-              className="flex-1"
+              className="min-w-0 flex-1"
               data-testid="go-live-button"
               disabled={liveActive ? !canStop : Boolean(liveStreamBlockedReason) || startsBusy}
               labels={{ idle: GO_LIVE_LABEL, checking: GO_LIVE_CHECKING_LABEL }}

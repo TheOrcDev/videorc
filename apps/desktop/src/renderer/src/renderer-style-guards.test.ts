@@ -368,6 +368,17 @@ describe('renderer style guards (plan 050)', SOURCE_SCAN_TIMEOUT, () => {
     )
   })
 
+  it('draws native scrollbars as a thin thumb with no track, never a ::-webkit-scrollbar recipe', () => {
+    // With a mouse connected macOS draws classic bars, a gray track down the
+    // Studio pane's edge (0.28.0). The standard properties drop the track and
+    // keep overlay bars as overlays; a ::-webkit-scrollbar recipe would draw
+    // every bar all the time (plan 050, D6).
+    const styles = files.find(({ path }) => path === 'src/styles.css')?.code ?? ''
+    expect(styles).toMatch(/\*\s*\{\s*scrollbar-color:\s*var\(--scrollbar-thumb\) transparent;/)
+    expect(styles).toMatch(/scrollbar-width:\s*thin;/)
+    expect(offenders(/::-webkit-scrollbar/)).toEqual([])
+  })
+
   it('never uses cursor-pointer: desktop controls use the arrow', () => {
     expect(offenders(/\bcursor-pointer\b|cursor:\s*pointer/)).toEqual([])
   })
