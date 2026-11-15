@@ -20,13 +20,11 @@ import {
   type WorkingScene
 } from './scene-presets'
 import { canonicalJson } from './scene-visibility-identity'
+import { defaultScenes, horizontalTwin, migrateToScenes } from './scenes-migration'
 import {
   canDeleteScene,
-  defaultScenes,
   firstSceneWithLayout,
-  horizontalTwin,
   hydrateScenes,
-  migrateToScenes,
   normalizeScene,
   sameShows,
   sceneAtPosition,

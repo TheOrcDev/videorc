@@ -8,7 +8,6 @@ import {
   saveSceneBlockedReason,
   savedSceneBlockedReason,
   sceneGlyph,
-  sceneListActive,
   sceneMoveKeyStep,
   sceneShows,
   sceneWithApp,
@@ -47,29 +46,6 @@ const window = (id: string, bundleId: string, name: string): Device => ({
 })
 
 describe('the scene list (plan 210 D6)', () => {
-  it('marks a saved scene, a plain layout, or the unsaved scene as on stream', () => {
-    const layout = { layoutPreset: 'screen-only' as const, arrangementMode: 'preset' as const }
-    expect(sceneListActive({ activeSavedSceneId: 'figma', origin: 'saved', layout })).toEqual({
-      kind: 'saved',
-      id: 'figma'
-    })
-    expect(sceneListActive({ activeSavedSceneId: null, origin: 'builtin', layout })).toEqual({
-      kind: 'layout',
-      preset: 'screen-only'
-    })
-    // A saved scene left by choosing another window (D3) is unsaved.
-    expect(sceneListActive({ activeSavedSceneId: null, origin: 'saved', layout })).toEqual({
-      kind: 'unsaved'
-    })
-    expect(
-      sceneListActive({
-        activeSavedSceneId: null,
-        origin: 'builtin',
-        layout: { ...layout, arrangementMode: 'freeform' }
-      })
-    ).toEqual({ kind: 'unsaved' })
-  })
-
   it('moves one scene, and refuses a move that goes nowhere', () => {
     const scenes = [scene('a', 'A'), scene('b', 'B'), scene('c', 'C')]
     expect(movedScenes(scenes, 'c', 0)?.map((entry) => entry.id)).toEqual(['c', 'a', 'b'])

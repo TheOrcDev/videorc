@@ -84,6 +84,8 @@ export interface StudioActionSource extends Omit<
   systemAudioShown: boolean
   setSystemAudioEnabled: (enabled: boolean) => void
   requestCameraPresetTransaction: (patch: Partial<LayoutSettings>) => Promise<boolean>
+  /** Plan 231 D14: the first scene with this layout goes on stream, or a refusal in words. */
+  switchToSceneWithLayout: (layoutPreset: LayoutPreset) => Promise<SavedSceneApplyResult>
   screens: readonly Pick<StreamScreen, 'id'>[]
   activateScreen: (assetId: string) => Promise<boolean>
   clearActiveScreen: () => Promise<boolean>
@@ -206,7 +208,7 @@ export function studioActionContext(studio: StudioActionSource): StudioActionCon
     systemAudio: [studio.systemAudioStatus, studio.systemAudioShown],
     setSystemAudioEnabled: studio.setSystemAudioEnabled,
     knownLayoutPresets,
-    applyLayoutPreset: (layoutPreset) => studio.requestCameraPresetTransaction({ layoutPreset }),
+    applyLayoutPreset: studio.switchToSceneWithLayout,
     hasTakeover: (assetId) => studio.screens.some((screen) => screen.id === assetId),
     activateTakeover: studio.activateScreen,
     clearTakeover: studio.clearActiveScreen,

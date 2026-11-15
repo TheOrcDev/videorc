@@ -669,12 +669,16 @@ export function LayoutTab(): ReactElement {
       })
     )
   }
-  // The orientation control re-enters each mode where it was left; the
-  // orientation ⇄ canvas coupling in applyCameraPreset flips the output
-  // profile alongside it (the Studio gallery's control, brought here: C-23).
+  // The orientation control puts the scene on stream on in its own layout
+  // for that orientation (plan 231 D4); the orientation ⇄ canvas coupling in
+  // applyCameraPreset flips the output profile alongside it (the Studio
+  // gallery's control, brought here: C-23).
   const switchOrientation = (target: LayoutOrientation): void => {
     if (target === orientation) return
-    applyCameraPreset({ layoutPreset: studioModeTogglePreset(target, captureConfig) })
+    applyCameraPreset(
+      { layoutPreset: studioModeTogglePreset(target, captureConfig) },
+      { toOrientation: true }
+    )
   }
   const layoutTabPresets =
     orientation === 'vertical' ? VERTICAL_LAYOUT_TAB_PRESETS : HORIZONTAL_LAYOUT_TAB_PRESETS
@@ -787,9 +791,9 @@ export function LayoutTab(): ReactElement {
     }
   }, [openPreviewWindow, previewWindow.open, setPreviewWindowMode])
 
-  // The canvas edits the scene on stream. A saved scene keeps each edit as it
-  // lands (plan 210 D3), so the section says where they go; there is no
-  // Modified state and no Update to press.
+  // The canvas edits the scene on stream, which keeps each edit as it lands
+  // (plan 231 D11), so the section says where they go; there is no Modified
+  // state and no Update to press.
   const activeSavedScene = savedScenes.find((entry) => entry.id === activeSavedSceneId)
   const canvasDescription = activeSavedScene
     ? `Changes save to “${activeSavedScene.name}” as you make them.`
@@ -861,16 +865,14 @@ export function LayoutTab(): ReactElement {
                     // one, so a click on it supersedes a newer pending switch.
                     onClick:
                       !isFreeform && layout.layoutPreset === preset.id
-                        ? () => applyCameraPreset({ layoutPreset: preset.id }, { keepScene: true })
+                        ? () => applyCameraPreset({ layoutPreset: preset.id })
                         : undefined
                   }
                 })}
                 value={isFreeform ? null : layout.layoutPreset}
-                // Plan 210 D3: a layout picked here edits the scene on stream
-                // (a saved one keeps it); the list's Layouts switch to a layout.
-                onValueChange={(layoutPreset) =>
-                  applyCameraPreset({ layoutPreset }, { keepScene: true })
-                }
+                // Plan 231 D2: a layout picked here is the layout of the scene
+                // on stream, which keeps it (D11).
+                onValueChange={(layoutPreset) => applyCameraPreset({ layoutPreset })}
               />
               <Separator className="data-[orientation=vertical]:h-5" orientation="vertical" />
               {/* Freeform is a mode, not a preset: composition becomes the

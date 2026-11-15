@@ -10,6 +10,10 @@ import type {
   OverlayLayout
 } from '../../../shared/backend'
 import { SCENE_LIBRARY_KEY, WORKING_SCENE_KEY, sameSceneVisual } from '../lib/scene-presets'
+import { SCENES_KEY, type Scene as StoredScene, type SceneLibrary } from '../lib/scenes'
+// Loaded up front so the Studio's first-launch migration (its own chunk)
+// resolves inside the mount's `act`, as a stored library does.
+import '../lib/scenes-migration'
 import { act, createElement, useEffect, type ReactNode } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { Window as TestWindow } from 'happy-dom'
@@ -2060,6 +2064,22 @@ async function openYouTubeAndXGoLiveConfirmation(
   await waitForObservation(() => latest()?.core.goLiveConfirmationOpen === true)
 }
 
+// Plan 231: the Studio always holds scenes (a new profile starts with the four
+// default ones), and a scene saved from the current look goes at the end, so
+// the tests find their scenes by name.
+function sceneNamed(core: Pick<StudioCoreContextValue, 'savedScenes'>, name: string) {
+  return core.savedScenes.find((scene) => scene.name === name)!
+}
+/** The scene as the library stores it (`videorc.scenes.v2`). */
+function storedSceneNamed(name: string): StoredScene {
+  return (JSON.parse(localStorage.getItem(SCENES_KEY)!) as SceneLibrary).scenes.find(
+    (scene) => scene.name === name
+  )!
+}
+function storedLibrary(): SceneLibrary {
+  return JSON.parse(localStorage.getItem(SCENES_KEY)!) as SceneLibrary
+}
+
 describe('real StudioProvider lifecycle', () => {
   let restoreEnvironment: (() => void) | undefined
   let root: Root | null = null
@@ -2944,11 +2964,11 @@ describe('real StudioProvider lifecycle', () => {
     await act(async () => {
       expect(latest().core.saveScene('Identical A')).toBe(true)
     })
-    const first = latest().core.savedScenes[0]
+    const first = sceneNamed(latest().core, 'Identical A')
     await act(async () => {
       expect(latest().core.saveScene('Identical B')).toBe(true)
     })
-    const second = latest().core.savedScenes[1]
+    const second = sceneNamed(latest().core, 'Identical B')
     expect(first.id).not.toBe(second.id)
     expect(sameSceneVisual(first.visual, second.visual)).toBe(true)
     expect(latest().core.activeSavedSceneId).toBe(second.id)
@@ -6340,7 +6360,7 @@ describe('real StudioProvider lifecycle', () => {
     expect(harness!.retrySourceStatus).toBe(latest().retrySourceStatus)
   })
 
-  it('saves complete visual scenes, applies one atomic target and preserves independent builtin framing', async () => {
+  it('saves scenes from the current look, applies one atomic target and keeps a layout inside its scene', async () => {
     const backend = new StudioBackend()
     TestWebSocket.backend = backend
     vi.stubGlobal('WebSocket', TestWebSocket)
@@ -6367,13 +6387,25 @@ describe('real StudioProvider lifecycle', () => {
     await act(async () => {
       expect(latest().saveScene('Presentation')).toBe(true)
     })
-    const first = latest().savedScenes[0]
+    const first = sceneNamed(latest(), 'Presentation')
+    // Plan 231 D5: a scene made from the current look goes at the end, on stream.
+    expect(latest().savedScenes.at(-1)!.id).toBe(first.id)
+    expect(latest().activeSavedSceneId).toBe(first.id)
+    await act(async () => {
+      expect(latest().saveScene('Closeup')).toBe(true)
+    })
+    const closeup = sceneNamed(latest(), 'Closeup')
+    expect(latest().activeSavedSceneId).toBe(closeup.id)
+    // Plan 231 D2: a layout is a choice inside the scene on stream. It never
+    // leaves the scene, and each layout recalls its own camera framing.
     await act(async () => latest().applyCameraPreset({ layoutPreset: 'camera-only' }))
     await waitForObservation(
       () =>
         latest().captureConfig.layout.layoutPreset === 'camera-only' &&
-        latest().layoutSwitchPending === null
+        latest().layoutSwitchPending === null &&
+        sceneNamed(latest(), 'Closeup').visual.layout.layoutPreset === 'camera-only'
     )
+    expect(latest().activeSavedSceneId).toBe(closeup.id)
     expect(latest().captureConfig.layout.cameraZoom).toBe(100)
     await act(async () => latest().applyCameraPreset({ layoutPreset: 'screen-camera' }))
     await waitForObservation(
@@ -6381,15 +6413,17 @@ describe('real StudioProvider lifecycle', () => {
         latest().captureConfig.layout.layoutPreset === 'screen-camera' &&
         latest().layoutSwitchPending === null
     )
+    expect(latest().activeSavedSceneId).toBe(closeup.id)
     expect(latest().captureConfig.layout.cameraZoom).toBe(150)
     await act(async () => latest().applyCameraPreset({ cameraZoom: 175 }))
     await waitForObservation(
       () =>
-        latest().captureConfig.layout.cameraZoom === 175 && latest().layoutSwitchPending === null
+        latest().captureConfig.layout.cameraZoom === 175 &&
+        latest().layoutSwitchPending === null &&
+        sceneNamed(latest(), 'Closeup').visual.layout.cameraZoom === 175
     )
-    await act(async () => {
-      expect(latest().saveScene('Closeup')).toBe(true)
-    })
+    // Only the scene on stream took the edits.
+    expect(sceneNamed(latest(), 'Presentation').visual.layout.cameraZoom).toBe(150)
     const start = backend.sentCommands.length
     await act(async () => {
       await latest().applySavedScene(first.id)
@@ -6403,22 +6437,23 @@ describe('real StudioProvider lifecycle', () => {
         .slice(start)
         .filter((command) => command.method.startsWith('scene.layout.apply'))
     ).toHaveLength(1)
+    // A scene going on stream brings its own framing and leaves the layouts' memory.
     expect(latest().captureConfig.layoutFramingMemory.layouts['screen-camera'].cameraZoom).toBe(175)
     await act(async () => latest().applyCameraPreset({ cameraZoom: 160 }))
-    // Plan 210 D3: an edit made while a saved scene is on saves into it.
+    // Plan 231 D11: an edit made while a scene is on stream saves into it.
     await waitForObservation(
       () =>
         latest().captureConfig.layout.cameraZoom === 160 &&
         latest().layoutSwitchPending === null &&
-        latest().savedScenes[0].visual.layout.cameraZoom === 160
+        sceneNamed(latest(), 'Presentation').visual.layout.cameraZoom === 160
     )
     expect(latest().savedSceneModified).toBe(false)
     expect(JSON.parse(localStorage.getItem(WORKING_SCENE_KEY)!).visual.layout.cameraZoom).toBe(160)
-    expect(
-      JSON.parse(localStorage.getItem(SCENE_LIBRARY_KEY)!).scenes.map(
-        (scene: { visual: { layout: { cameraZoom: number } } }) => scene.visual.layout.cameraZoom
-      )
-    ).toEqual([160, 175])
+    expect(storedSceneNamed('Presentation').layouts.horizontal.cameraZoom).toBe(160)
+    expect(storedSceneNamed('Closeup').layouts.horizontal.cameraZoom).toBe(175)
+    // The library is v2 only: the v1 key is never written (D15).
+    expect(localStorage.getItem(SCENE_LIBRARY_KEY)).toBeNull()
+    expect(storedLibrary().onStreamId).toBe(first.id)
     // Undo is one more commit while the scene is on: it keeps the undone look.
     await act(async () => {
       expect(await latest().undoLayoutPatch()).toBe(true)
@@ -6427,21 +6462,21 @@ describe('real StudioProvider lifecycle', () => {
       () =>
         latest().captureConfig.layout.cameraZoom === 150 &&
         latest().layoutSwitchPending === null &&
-        latest().savedScenes[0].visual.layout.cameraZoom === 150
+        sceneNamed(latest(), 'Presentation').visual.layout.cameraZoom === 150
     )
     expect(latest().activeSavedSceneId).toBe(first.id)
+    // Choosing the layout the scene already has changes nothing and leaves nothing.
     await act(async () => latest().applyCameraPreset({ layoutPreset: 'screen-camera' }))
-    await waitForObservation(
-      () => latest().activeSavedSceneId === null && latest().layoutSwitchPending === null
-    )
-    expect(latest().captureConfig.layout.cameraZoom).toBe(175)
+    await waitForObservation(() => latest().layoutSwitchPending === null)
+    expect(latest().activeSavedSceneId).toBe(first.id)
+    expect(latest().captureConfig.layout.cameraZoom).toBe(150)
   })
 
-  // Plan 210 D3 on a scene made for an app (S2): the Scene page's Freeform
-  // entry (an arrangement and a placement, no preset) saves into the scene on
-  // stream as it lands, with its app kept and still no audio. The same
-  // placement sent with a layout preset and no `keepScene` is a switch to a
-  // built-in layout and leaves the scene: the two are not the same edit.
+  // Plan 231 D11 on a scene made for an app: the Scene page's Freeform entry
+  // (an arrangement and a placement, no preset) saves into the scene on stream
+  // as it lands, with its app kept and still no audio. The same placement sent
+  // with a layout preset is the same kind of edit (D2): it sets the scene's
+  // layout and never leaves the scene.
   it('auto-saves a freeform placement into the app scene on stream and keeps its app and silence', async () => {
     const backend = new StudioBackend()
     backend.deviceList.devices.push({
@@ -6492,7 +6527,10 @@ describe('real StudioProvider lifecycle', () => {
     await act(async () => {
       expect(latest().sceneLibraryActions.insert([appScene])).toBe(true)
     })
-    await waitForObservation(() => latest().savedScenes[0]?.id === appScene.id)
+    // Plan 231 D5: a new scene goes at the end, and what's on stream stays.
+    await waitForObservation(() => latest().savedScenes.at(-1)?.id === appScene.id)
+    expect(latest().activeSavedSceneId).not.toBe(appScene.id)
+    const appSceneNow = () => sceneNamed(latest(), 'Presentation')
     await act(async () => {
       expect(await latest().applySavedSceneResult(appScene.id)).toEqual({ ok: true })
     })
@@ -6503,7 +6541,7 @@ describe('real StudioProvider lifecycle', () => {
         latest().captureConfig.sources.windowId === 'window:2'
     )
     // Putting the scene on stream is a switch, not an edit: nothing written.
-    expect(latest().savedScenes[0].updatedAt).toBe('2026-10-29T10:00:00.000Z')
+    expect(appSceneNow().updatedAt).toBe('2026-10-29T10:00:00.000Z')
 
     const placement = { 'source:base': { x: 0.15, y: 0.15, width: 0.7, height: 0.7 } }
     await act(async () =>
@@ -6516,13 +6554,12 @@ describe('real StudioProvider lifecycle', () => {
       () =>
         latest().captureConfig.layout.arrangementMode === 'freeform' &&
         latest().layoutSwitchPending === null &&
-        latest().savedScenes[0].visual.layout.arrangementMode === 'freeform'
+        appSceneNow().visual.layout.arrangementMode === 'freeform'
     )
-    const saved = latest().savedScenes[0]
+    const saved = appSceneNow()
     expect(latest().activeSavedSceneId).toBe(appScene.id)
-    // The look is what the scene keeps now, with its own sources
-    // (`savedSceneModified` stays true for every scene made for an app: it
-    // compares audio too, and such a scene keeps none by D4).
+    // The look is what the scene keeps now, with its own screen.
+    expect(latest().savedSceneModified).toBe(false)
     expect(
       sameSceneVisual(saved.visual, {
         ...latest().sceneLibraryActions.workingVisual,
@@ -6531,27 +6568,37 @@ describe('real StudioProvider lifecycle', () => {
     ).toBe(true)
     expect(saved.visual.layout.sourceTransformOverrides).toEqual(placement)
     expect(saved.visual.sources.app).toEqual(appScene.visual.sources.app)
-    expect(saved.visual.sources.windowId).toBe('window:2')
+    // The scene keeps the app, never one of its windows: the window on
+    // stream is the working capture's.
+    expect(saved.visual.sources.windowId).toBeUndefined()
+    expect(storedSceneNamed('Presentation').shows).toEqual({
+      kind: 'app',
+      ...appScene.visual.sources.app
+    })
     expect(saved.audio).toBeUndefined()
     expect(saved.updatedAt).not.toBe('2026-10-29T10:00:00.000Z')
-    expect(
-      JSON.parse(localStorage.getItem(SCENE_LIBRARY_KEY)!).scenes[0].visual.layout
-        .sourceTransformOverrides
-    ).toEqual(placement)
+    expect(storedSceneNamed('Presentation').layouts.horizontal.sourceTransformOverrides).toEqual(
+      placement
+    )
 
-    // The same placement with a layout preset and no `keepScene` is a switch
-    // to a built-in layout: it leaves the scene and writes nothing into it.
+    // The same placement with a layout preset sets the scene's layout: the
+    // scene stays on stream and keeps the edit.
+    const moved = { 'source:base': { x: 0.2, y: 0.2, width: 0.6, height: 0.6 } }
     await act(async () =>
       latest().applyCameraPreset({
         layoutPreset: 'screen-only',
         arrangementMode: 'freeform',
-        sourceTransformOverrides: { 'source:base': { x: 0.2, y: 0.2, width: 0.6, height: 0.6 } }
+        sourceTransformOverrides: moved
       })
     )
     await waitForObservation(
-      () => latest().activeSavedSceneId === null && latest().layoutSwitchPending === null
+      () =>
+        latest().layoutSwitchPending === null &&
+        appSceneNow().visual.layout.layoutPreset === 'screen-only'
     )
-    expect(latest().savedScenes[0].visual.layout.sourceTransformOverrides).toEqual(placement)
+    expect(latest().activeSavedSceneId).toBe(appScene.id)
+    expect(appSceneNow().visual.layout.sourceTransformOverrides).toEqual(moved)
+    expect(appSceneNow().visual.sources.app).toEqual(appScene.visual.sources.app)
   })
 
   // Plan 210 D1: quitting and relaunching the app never breaks its scene. At
@@ -6635,9 +6682,11 @@ describe('real StudioProvider lifecycle', () => {
     expect(latest().recordBlockedReason).not.toBe("Presentation isn't open")
   })
 
-  // Owner, 2026-10-27: a saved scene keeps its screen, microphone and System
-  // audio, and choosing it brings all three back, idle and while recording.
-  it('saves the screen, microphone and System audio with a scene and restores them', async () => {
+  // Owner, 2026-10-27: a scene saved from the current look keeps its screen,
+  // microphone and System audio, and choosing it brings its audio back, idle
+  // and while recording. Plan 231 D2: a Screen pick changes the screen of the
+  // scene on stream and never leaves it.
+  it('saves the screen, microphone and System audio with a scene, and a Screen pick edits the scene on stream', async () => {
     const screen1 = 'screen:dxgi:0000000000000001:1'
     const screen2 = 'screen:dxgi:0000000000000001:2'
     const backend = new StudioBackend()
@@ -6700,7 +6749,7 @@ describe('real StudioProvider lifecycle', () => {
     await act(async () => {
       expect(latest().saveScene('Desk')).toBe(true)
     })
-    const desk = latest().savedScenes[0]
+    const desk = sceneNamed(latest(), 'Desk')
     expect(desk.visual.sources.screenId).toBe(screen1)
     expect(desk.audio).toStrictEqual({
       microphoneId: 'mic:1',
@@ -6708,10 +6757,12 @@ describe('real StudioProvider lifecycle', () => {
       microphoneOff: false,
       systemAudioEnabled: false
     })
-    expect(JSON.parse(localStorage.getItem(SCENE_LIBRARY_KEY)!).scenes[0].audio).toMatchObject({
+    expect(storedSceneNamed('Desk').audio).toMatchObject({
       microphoneId: 'mic:1',
       systemAudioEnabled: false
     })
+    expect(storedSceneNamed('Desk').shows).toMatchObject({ kind: 'display', screenId: screen1 })
+    const others = latest().savedScenes.filter((scene) => scene.id !== desk.id)
 
     const devices = latest().deviceList.devices
     const pickOthers = async (): Promise<void> => {
@@ -6749,11 +6800,17 @@ describe('real StudioProvider lifecycle', () => {
         latest().captureConfig.sources.microphoneId === 'mic:2' &&
         latest().captureConfig.audio.systemAudioEnabled
     )
-    // Plan 210 D3: another screen leaves the saved scene instead of
-    // rewriting it, and the scene keeps its own screen and audio.
-    expect(latest().activeSavedSceneId).toBeNull()
-    expect(latest().savedScenes[0].visual.sources.screenId).toBe(screen1)
-    expect(latest().savedScenes[0].audio).toStrictEqual(desk.audio)
+    // Plan 231 D2: another screen is the scene's screen from now on. The
+    // scene stays on stream, no other scene changes, and its audio is its own.
+    expect(latest().activeSavedSceneId).toBe(desk.id)
+    expect(sceneNamed(latest(), 'Desk').visual.sources.screenId).toBe(screen2)
+    expect(storedSceneNamed('Desk').shows).toMatchObject({
+      kind: 'display',
+      screenId: screen2,
+      screenName: 'Display 2'
+    })
+    expect(sceneNamed(latest(), 'Desk').audio).toStrictEqual(desk.audio)
+    expect(latest().savedScenes.filter((scene) => scene.id !== desk.id)).toEqual(others)
 
     const idleFrom = backend.sentCommands.length
     await act(async () => {
@@ -6765,12 +6822,12 @@ describe('real StudioProvider lifecycle', () => {
         latest().captureConfig.sources.microphoneId === 'mic:1' &&
         !latest().captureConfig.audio.systemAudioEnabled
     )
-    expect(latest().captureConfig.sources.screenId).toBe(screen1)
+    expect(latest().captureConfig.sources.screenId).toBe(screen2)
     expect(latest().savedSceneModified).toBe(false)
     const idleSent = backend.sentCommands.slice(idleFrom)
     expect(
       idleSent.find((command) => command.method.startsWith('scene.layout.apply'))?.params
-    ).toMatchObject({ sources: { screenId: screen1, microphoneId: 'mic:1' } })
+    ).toMatchObject({ sources: { screenId: screen2, microphoneId: 'mic:1' } })
     expect(idleSent.some((command) => command.method === 'session.source.switch')).toBe(false)
 
     // While recording, the session switches to the scene's microphone.
@@ -6908,7 +6965,7 @@ describe('real StudioProvider lifecycle', () => {
     expect(latest().captureConfig.sources.microphoneId).toBeUndefined()
   }, 15_000)
 
-  it('restores saved Camera Off after On through device discovery and a finished session', async () => {
+  it('never changes the camera when a scene goes on stream (plan 231 D9), and keeps Camera Off through device discovery and a finished session', async () => {
     const backend = new StudioBackend()
     TestWebSocket.backend = backend
     vi.stubGlobal('WebSocket', TestWebSocket)
@@ -6944,7 +7001,7 @@ describe('real StudioProvider lifecycle', () => {
     await act(async () => {
       expect(latest().saveScene('Camera Off')).toBe(true)
     })
-    const saved = latest().savedScenes[0]
+    const saved = sceneNamed(latest(), 'Camera Off')
     await act(async () =>
       latest().switchSourceDeviceLive(
         'camera',
@@ -6957,42 +7014,64 @@ describe('real StudioProvider lifecycle', () => {
     await act(async () => {
       expect(latest().saveScene('Camera On')).toBe(true)
     })
-    const savedOn = latest().savedScenes[1]
+    const savedOn = sceneNamed(latest(), 'Camera On')
+    // Plan 231 D9: a scene never changes the camera. The scene made while the
+    // camera was off goes on stream with the camera Sources holds now.
+    let start = backend.sentCommands.length
     await act(async () => {
       expect(await latest().applySavedScene(saved.id)).toBe(true)
     })
-    expect(latest().captureConfig.sources.cameraOff).toBe(true)
-    expect(latest().captureConfig.sources.cameraId).toBeUndefined()
-    expect(latest().savedScenes[0].visual.sources).toMatchObject({ cameraOff: true })
-    expect(latest().savedSceneModified).toBe(false)
+    expect(latest().activeSavedSceneId).toBe(saved.id)
+    expect(latest().captureConfig.sources.cameraOff).not.toBe(true)
+    expect(latest().captureConfig.sources.cameraId).toBe('camera:1')
+    expect(
+      backend.sentCommands
+        .slice(start)
+        .find((command) => command.method.startsWith('scene.layout.apply'))?.params
+    ).toMatchObject({ sources: { cameraId: 'camera:1' } })
+    // The library keeps no camera device.
+    expect(JSON.stringify(storedLibrary())).not.toMatch(/cameraId|cameraName|camera:1/)
+    // Camera Off in Sources is every scene's camera too.
+    await act(async () =>
+      latest().switchSourceDeviceLive(
+        'camera',
+        buildCameraSources(latest().captureConfig.sources, cameras, undefined)
+      )
+    )
+    await waitForObservation(
+      () => latest().captureConfig.sources.cameraOff === true && latest().canSaveScene
+    )
+    start = backend.sentCommands.length
     await act(async () => {
       expect(await latest().applySavedScene(savedOn.id)).toBe(true)
     })
-    expect(latest().captureConfig.sources.cameraOff).toBe(false)
-    expect(latest().captureConfig.sources.cameraId).toBe('camera:1')
+    expect(latest().activeSavedSceneId).toBe(savedOn.id)
+    expect(latest().captureConfig.sources.cameraOff).toBe(true)
+    expect(latest().captureConfig.sources.cameraId).toBeUndefined()
+    expect(
+      (
+        backend.sentCommands
+          .slice(start)
+          .find((command) => command.method.startsWith('scene.layout.apply'))?.params as {
+          sources: { cameraId?: string }
+        }
+      ).sources.cameraId
+    ).toBeUndefined()
     expect(latest().savedSceneModified).toBe(false)
-    await act(async () => {
-      expect(await latest().applySavedScene(saved.id)).toBe(true)
-    })
     await act(async () => latest().applyCameraPreset({ cameraZoom: 135 }))
-    // Plan 210 D3: the edit saves into the scene on stream, Camera Off kept.
+    // Plan 231 D11: the edit saves into the scene on stream, Camera Off kept.
     await waitForObservation(
       () =>
         latest().captureConfig.layout.cameraZoom === 135 &&
         latest().canSaveScene &&
-        latest().savedScenes[0].visual.layout.cameraZoom === 135
+        sceneNamed(latest(), 'Camera On').visual.layout.cameraZoom === 135
     )
-    expect(latest().savedScenes[0].visual.sources.cameraOff).toBe(true)
-    expect(latest().savedSceneModified).toBe(false)
-    await act(async () => {
-      expect(latest().saveScene('Camera Off', saved.id)).toBe(true)
-    })
-    expect(latest().savedScenes[0].visual.sources.cameraOff).toBe(true)
+    expect(latest().captureConfig.sources.cameraOff).toBe(true)
     expect(latest().savedSceneModified).toBe(false)
     await act(async () => {
       expect(latest().saveScene('Camera Off copy')).toBe(true)
     })
-    const savedCopy = latest().savedScenes[2]
+    const savedCopy = sceneNamed(latest(), 'Camera Off copy')
     expect(savedCopy.visual.sources.cameraOff).toBe(true)
     backend.deviceList.devices.unshift({
       id: 'camera:new',
@@ -7067,13 +7146,14 @@ describe('real StudioProvider lifecycle', () => {
     await act(async () => {
       expect(latest().saveScene('Visible')).toBe(true)
     })
-    const visible = latest().savedScenes[0]
+    const visible = sceneNamed(latest(), 'Visible')
+    const byId = (id: string) => latest().savedScenes.find((scene) => scene.id === id)!
     const cameraId = latest().scene!.sources.find((source) => source.kind === 'camera')!.id
     await act(async () => latest().setSceneSourceVisible(cameraId, false))
     expect(latest().scene!.sources.find((source) => source.id === cameraId)!.visible).toBe(false)
-    // Plan 210 D3: the scene on stream keeps the edit; there is no Modified.
+    // Plan 231 D11: the scene on stream keeps the edit; there is no Modified.
     await waitForObservation(
-      () => latest().savedScenes[0].visual.layout.sourceVisibility?.camera === false
+      () => byId(visible.id).visual.layout.sourceVisibility?.camera === false
     )
     expect(latest().savedSceneModified).toBe(false)
     expect(latest().captureConfig.sources.cameraId).toBe('camera:1')
@@ -7083,21 +7163,21 @@ describe('real StudioProvider lifecycle', () => {
       expect(latest().saveScene('Hidden', visible.id)).toBe(true)
     })
     expect(latest().savedSceneModified).toBe(false)
-    expect(latest().savedScenes[0].name).toBe('Hidden')
-    expect(latest().savedScenes[0].visual.layout).toHaveProperty('sourceVisibility', {
+    expect(byId(visible.id).name).toBe('Hidden')
+    expect(byId(visible.id).visual.layout).toHaveProperty('sourceVisibility', {
       camera: false,
       capture: true
     })
     await act(async () => {
       expect(latest().saveScene('Hidden copy')).toBe(true)
     })
-    const hidden = latest().savedScenes[0]
+    const hidden = byId(visible.id)
     await act(async () => latest().setSceneSourceVisible(cameraId, true))
     // The copy is on stream: it keeps the camera; Hidden doesn't change.
     await waitForObservation(
-      () => latest().savedScenes[1].visual.layout.sourceVisibility?.camera === true
+      () => sceneNamed(latest(), 'Hidden copy').visual.layout.sourceVisibility?.camera === true
     )
-    expect(latest().savedScenes[0].visual.layout.sourceVisibility?.camera).toBe(false)
+    expect(byId(visible.id).visual.layout.sourceVisibility?.camera).toBe(false)
     expect(latest().savedSceneModified).toBe(false)
     backend.layoutApplyFailure = 'definite'
     await act(async () => {
@@ -7157,21 +7237,19 @@ describe('real StudioProvider lifecycle', () => {
     await act(async () => {
       expect(latest().saveScene('Visible')).toBe(true)
     })
-    const visible = latest().savedScenes[0]
-    // Plan 210 D3: leave Visible first, so hiding the camera makes a second
-    // scene instead of saving into Visible.
-    await act(async () =>
-      latest().applyCameraPreset({ layoutPreset: latest().captureConfig.layout.layoutPreset })
-    )
-    await waitForObservation(
-      () => latest().activeSavedSceneId === null && latest().layoutSwitchPending === null
-    )
-    const cameraId = latest().scene!.sources.find((source) => source.kind === 'camera')!.id
-    await act(async () => latest().setSceneSourceVisible(cameraId, false))
+    const visible = sceneNamed(latest(), 'Visible')
+    // Plan 231 D11: a second scene goes on stream first, so hiding the camera
+    // saves into it instead of into Visible.
     await act(async () => {
       expect(latest().saveScene('Hidden')).toBe(true)
     })
-    const hidden = latest().savedScenes[1]
+    const cameraId = latest().scene!.sources.find((source) => source.kind === 'camera')!.id
+    await act(async () => latest().setSceneSourceVisible(cameraId, false))
+    await waitForObservation(
+      () => sceneNamed(latest(), 'Hidden').visual.layout.sourceVisibility?.camera === false
+    )
+    expect(sceneNamed(latest(), 'Visible').visual.layout.sourceVisibility?.camera).not.toBe(false)
+    const hidden = sceneNamed(latest(), 'Hidden')
     await act(async () => {
       expect(await latest().applySavedScene(visible.id)).toBe(true)
     })
@@ -7195,7 +7273,7 @@ describe('real StudioProvider lifecycle', () => {
     expect(latest().savedSceneModified).toBe(false)
     expect(latest().scene!.sources.find((source) => source.kind === 'camera')!.visible).toBe(false)
     expect(latest().captureConfig.sources.cameraId).toBe(hidden.visual.sources.cameraId)
-    expect(latest().captureConfig.sources.cameraOff).toBe(false)
+    expect(latest().captureConfig.sources.cameraOff).not.toBe(true)
     expect(
       JSON.parse(localStorage.getItem(WORKING_SCENE_KEY)!).visual.layout.sourceVisibility.camera
     ).toBe(false)
@@ -7364,9 +7442,9 @@ describe('real StudioProvider lifecycle', () => {
           await pending
         })
         if (outcome === 'acknowledged' || outcome.startsWith('event-')) {
-          // Plan 210 D3: the acknowledged edit saves into the scene on stream.
+          // Plan 231 D11: the acknowledged edit saves into the scene on stream.
           await waitForObservation(
-            () => latest().savedScenes[0].visual.layout.sourceVisibility?.camera === false
+            () => sceneNamed(latest(), 'Visible').visual.layout.sourceVisibility?.camera === false
           )
           expect(latest().savedSceneModified).toBe(false)
           expect(
@@ -7376,7 +7454,9 @@ describe('real StudioProvider lifecycle', () => {
           expect(latest().captureConfig.layout.sourceVisibility?.camera).toBe(false)
         } else {
           expect(latest().captureConfig.layout.sourceVisibility?.camera).toBe(true)
-          expect(latest().savedScenes[0].visual.layout.sourceVisibility?.camera).not.toBe(false)
+          expect(sceneNamed(latest(), 'Visible').visual.layout.sourceVisibility?.camera).not.toBe(
+            false
+          )
           expect(latest().scene!.sources.find((source) => source.kind === 'camera')!.visible).toBe(
             true
           )
@@ -7417,7 +7497,8 @@ describe('real StudioProvider lifecycle', () => {
     await act(async () => {
       expect(latest().saveScene('Original')).toBe(true)
     })
-    const saved = latest().savedScenes[0]
+    const saved = sceneNamed(latest(), 'Original')
+    const count = latest().savedScenes.length
     const start = backend.sentCommands.length
     await act(async () => {
       expect(
@@ -7441,7 +7522,7 @@ describe('real StudioProvider lifecycle', () => {
     await act(async () => {
       expect(latest().saveScene('Cannot save')).toBe(false)
     })
-    expect(latest().savedScenes).toHaveLength(1)
+    expect(latest().savedScenes).toHaveLength(count)
     storage.mockRestore()
   })
 
@@ -7479,7 +7560,7 @@ describe('real StudioProvider lifecycle', () => {
     await act(async () => {
       expect(latest().saveScene('A')).toBe(true)
     })
-    const first = latest().savedScenes[0]
+    const first = sceneNamed(latest(), 'A')
     const alternate = {
       ...first.visual,
       layout: { ...first.visual.layout, cameraZoom: 175, cameraOffsetY: -25 },
@@ -7503,7 +7584,12 @@ describe('real StudioProvider lifecycle', () => {
     await act(async () => {
       expect(latest().saveScene('B')).toBe(true)
     })
-    const second = latest().savedScenes[1]
+    const second = sceneNamed(latest(), 'B')
+    // Plan 231 D9: the sources chosen again for A carried a camera, and it is
+    // the camera of every scene from then on.
+    expect(latest().captureConfig.sources.cameraId).toBe('camera:2')
+    const firstNow = sceneNamed(latest(), 'A')
+    expect(firstNow.visual.sources.cameraId).toBe('camera:2')
     const memory = latest().captureConfig.layoutFramingMemory
     backend.layoutApplyFailure = 'request-outcome-unknown-after-commit'
     const start = backend.sentCommands.length
@@ -7519,15 +7605,16 @@ describe('real StudioProvider lifecycle', () => {
     expect(applies).toHaveLength(1)
     expect(applies[0].params).toMatchObject({
       layout: first.visual.layout,
-      sources: JSON.parse(JSON.stringify(first.visual.sources)),
+      sources: { screenId: first.visual.sources.screenId, cameraId: 'camera:2' },
       background: { assetId: 'builtin-bg-01', blurPx: 20, scale: 150 }
     })
-    expect(latest().captureConfig.sources.cameraId).toBe(first.visual.sources.cameraId)
+    expect(latest().captureConfig.sources.cameraId).toBe('camera:2')
+    expect(latest().captureConfig.sources.screenId).toBe(first.visual.sources.screenId)
     expect(latest().captureConfig.sources.windowId).toBeUndefined()
     expect(latest().scene?.background?.assetId).toBe('builtin-bg-01')
     expect(latest().captureConfig.layoutFramingMemory).toEqual(memory)
     expect(
-      sameSceneVisual(JSON.parse(localStorage.getItem(WORKING_SCENE_KEY)!).visual, first.visual)
+      sameSceneVisual(JSON.parse(localStorage.getItem(WORKING_SCENE_KEY)!).visual, firstNow.visual)
     ).toBe(true)
     backend.layoutApplyFailure = 'definite'
     await act(async () => {
@@ -7536,7 +7623,7 @@ describe('real StudioProvider lifecycle', () => {
     expect(latest().activeSavedSceneId).toBe(first.id)
     expect(latest().captureConfig.layoutFramingMemory).toEqual(memory)
     expect(
-      sameSceneVisual(JSON.parse(localStorage.getItem(WORKING_SCENE_KEY)!).visual, first.visual)
+      sameSceneVisual(JSON.parse(localStorage.getItem(WORKING_SCENE_KEY)!).visual, firstNow.visual)
     ).toBe(true)
     backend.layoutApplyFailure = null
     await act(async () => latest().applyWorkingBackgroundStyle({ dimPercent: 35 }))
@@ -7546,24 +7633,23 @@ describe('real StudioProvider lifecycle', () => {
     expect(latest().scene?.background?.scale).toBe(150)
     expect(latest().scene?.background?.blurPx).toBe(20)
     expect(second.visual.background?.assetId).toBe('builtin-bg-02')
-    expect(first.visual.background?.dimPercent).toBe(0)
+    // Plan 231 D11: the background edit saved into A, the scene on stream.
+    await waitForObservation(() => sceneNamed(latest(), 'A').visual.background?.dimPercent === 35)
+    expect(sceneNamed(latest(), 'B').visual.background?.assetId).toBe('builtin-bg-02')
+    // Plan 231 D16: off air, deleting the scene on stream first switches to
+    // the scene before it, then deletes.
+    const before = latest().savedScenes[latest().savedScenes.indexOf(sceneNamed(latest(), 'A')) - 1]
     await act(async () => {
-      expect(latest().deleteSavedScene(first.id)).toBe(true)
+      expect(await latest().deleteSavedScene(first.id)).toBe(true)
     })
+    await waitForObservation(
+      () => latest().activeSavedSceneId === before.id && latest().canSaveScene
+    )
+    expect(latest().savedScenes.some((scene) => scene.id === first.id)).toBe(false)
+    expect(storedLibrary().onStreamId).toBe(before.id)
     const checkpoint = JSON.parse(localStorage.getItem(WORKING_SCENE_KEY)!)
-    expect(checkpoint.sceneId).toBeNull()
-    expect(checkpoint.origin).toBe('saved')
-    expect(checkpoint.visual.background.dimPercent).toBe(35)
-    await act(async () => latest().applyCameraPreset({ cameraZoom: 165 }))
-    await waitForObservation(
-      () => latest().captureConfig.layout.cameraZoom === 165 && latest().canSaveScene
-    )
-    await act(async () => latest().applyCameraPreset({ layoutPreset: 'screen-camera' }))
-    await waitForObservation(
-      () =>
-        latest().captureConfig.layout.cameraZoom === memory.layouts['screen-camera'].cameraZoom &&
-        latest().canSaveScene
-    )
+    expect(checkpoint.sceneId).toBe(before.id)
+    expect(latest().captureConfig.layout.layoutPreset).toBe(before.visual.layout.layoutPreset)
   })
 
   it('keeps the latest named identity through overlapping A to B to A and never saves an unresolved target', async () => {
@@ -7592,26 +7678,27 @@ describe('real StudioProvider lifecycle', () => {
     await act(async () => {
       expect(latest().saveScene('A')).toBe(true)
     })
-    const first = latest().savedScenes[0]
-    // Plan 210 D3: leave A, so the edits below make B instead of saving into A.
-    await act(async () =>
-      latest().applyCameraPreset({ layoutPreset: latest().captureConfig.layout.layoutPreset })
-    )
-    await waitForObservation(
-      () => latest().activeSavedSceneId === null && latest().layoutSwitchPending === null
-    )
+    const first = sceneNamed(latest(), 'A')
+    // Plan 231 D11: B goes on stream first, so the edits below save into B
+    // instead of into A.
+    await act(async () => {
+      expect(latest().saveScene('B')).toBe(true)
+    })
     await act(async () => latest().applyCameraPreset({ cameraZoom: 175 }))
     await waitForObservation(
       () => latest().captureConfig.layout.cameraZoom === 175 && latest().canSaveScene
     )
     await act(async () => latest().applyBackgroundSlot('bg-02'))
     await waitForObservation(
-      () => latest().scene?.background?.assetId === 'builtin-bg-02' && latest().canSaveScene
+      () =>
+        latest().scene?.background?.assetId === 'builtin-bg-02' &&
+        latest().canSaveScene &&
+        sceneNamed(latest(), 'B').visual.background?.assetId === 'builtin-bg-02' &&
+        sceneNamed(latest(), 'B').visual.layout.cameraZoom === 175
     )
-    await act(async () => {
-      expect(latest().saveScene('B')).toBe(true)
-    })
-    const second = latest().savedScenes[1]
+    expect(sceneNamed(latest(), 'A').visual.background?.assetId).toBe('builtin-bg-01')
+    const second = sceneNamed(latest(), 'B')
+    const count = latest().savedScenes.length
     // Hold the stale pick at its layout apply (plan 210 S3: the source
     // preflight reads the held device list, with no round trip to hold).
     const release = backend.deferResponse('scene.layout.apply_preview', BACKEND_RESPONSE)
@@ -7653,7 +7740,7 @@ describe('real StudioProvider lifecycle', () => {
     expect(latest().activeSavedSceneId).toBe(first.id)
     expect(latest().sceneSwitchProgress).toBeNull()
     expect(latest().captureConfig.layout.cameraZoom).toBe(first.visual.layout.cameraZoom)
-    expect(latest().savedScenes).toHaveLength(2)
+    expect(latest().savedScenes).toHaveLength(count)
     expect(latest().scene?.background?.assetId).toBe('builtin-bg-01')
     expect(JSON.parse(localStorage.getItem(WORKING_SCENE_KEY)!).visual.background.assetId).toBe(
       'builtin-bg-01'
@@ -7893,7 +7980,7 @@ describe('real StudioProvider lifecycle', () => {
     }
   )
 
-  it('routes global layout shortcuts through confirmed transactions and coalesces repeat bursts', async () => {
+  it('routes global scene and layout keys through confirmed switches and coalesces repeat bursts', async () => {
     const backend = new StudioBackend()
     TestWebSocket.backend = backend
     vi.stubGlobal('WebSocket', TestWebSocket)
@@ -7918,7 +8005,21 @@ describe('real StudioProvider lifecycle', () => {
     await act(async () => {
       expect(latest().saveScene('Named shortcut target')).toBe(true)
     })
-    const saved = latest().savedScenes[0]
+    const saved = sceneNamed(latest(), 'Named shortcut target')
+    // A new profile's scenes: Screen + camera, Screen only, Camera only, Side
+    // by side, then the one saved above.
+    const [screenCamera, screenOnly, cameraOnly] = latest().savedScenes
+    expect(latest().savedScenes.map((scene) => scene.visual.layout.layoutPreset)).toEqual([
+      'screen-camera',
+      'screen-only',
+      'camera-only',
+      'side-by-side',
+      'screen-camera'
+    ])
+    const applies = (from: number) =>
+      backend.sentCommands
+        .slice(from)
+        .filter((entry) => entry.method.startsWith('scene.layout.apply'))
     await act(async () => {
       latest().setSettings((current) => ({
         ...current,
@@ -7927,7 +8028,15 @@ describe('real StudioProvider lifecycle', () => {
       latest().renameSavedScene(saved.id, 'Renamed shortcut target')
       emit('onGlobalShortcut', 'layout:screen-only')
     })
-    await waitForObservation(() => latest().activeSavedSceneId === null && latest().canSaveScene)
+    // Plan 231 D14: a layout key switches to the first scene with that
+    // layout. It never changes the layout of the scene on stream.
+    await waitForObservation(
+      () => latest().activeSavedSceneId === screenOnly.id && latest().canSaveScene
+    )
+    expect(latest().captureConfig.layout.layoutPreset).toBe('screen-only')
+    expect(sceneNamed(latest(), 'Renamed shortcut target').visual.layout.layoutPreset).toBe(
+      'screen-camera'
+    )
     expect(latest().settings.globalShortcuts?.scenes?.[saved.id]).toBe('Control+F13')
     await act(async () => {
       emit('onGlobalShortcut', `scene:${saved.id}`)
@@ -7935,6 +8044,7 @@ describe('real StudioProvider lifecycle', () => {
     await waitForObservation(
       () => latest().activeSavedSceneId === saved.id && latest().canSaveScene
     )
+    // Next and Previous walk the scenes, in their order, and a burst is one switch.
     let start = backend.sentCommands.length
     await act(async () => {
       emit('onGlobalShortcut', 'layout-next')
@@ -7942,71 +8052,86 @@ describe('real StudioProvider lifecycle', () => {
       emit('onGlobalShortcut', 'layout-next')
     })
     await waitForObservation(
-      () => latest().captureConfig.layout.layoutPreset === 'camera-only' && latest().canSaveScene
+      () => latest().activeSavedSceneId === cameraOnly.id && latest().canSaveScene
     )
-    expect(
-      backend.sentCommands
-        .slice(start)
-        .filter((entry) => entry.method.startsWith('scene.layout.apply'))
-    ).toHaveLength(1)
+    expect(latest().captureConfig.layout.layoutPreset).toBe('camera-only')
+    expect(applies(start)).toHaveLength(1)
+    // A layout chosen on the canvas takes a pending key over, and sets the
+    // layout of the scene on stream (D2).
     await act(async () => {
       emit('onGlobalShortcut', 'layout-next')
-      latest().applyCameraPreset({ layoutPreset: 'screen-only' })
+      latest().applyCameraPreset({ cameraZoom: 120 })
     })
     await act(async () => {
       await new Promise((resolve) => setTimeout(resolve, 120))
     })
     await waitForObservation(
-      () => latest().captureConfig.layout.layoutPreset === 'screen-only' && latest().canSaveScene
+      () => latest().captureConfig.layout.cameraZoom === 120 && latest().canSaveScene
     )
+    expect(latest().activeSavedSceneId).toBe(cameraOnly.id)
     await act(async () => {
       emit('onGlobalShortcut', 'layout-previous')
     })
     await waitForObservation(
-      () => latest().captureConfig.layout.layoutPreset === 'screen-camera' && latest().canSaveScene
+      () => latest().activeSavedSceneId === screenOnly.id && latest().canSaveScene
     )
     await act(async () => {
       emit('onGlobalShortcut', 'layout:camera-only')
     })
     await waitForObservation(
-      () => latest().captureConfig.layout.layoutPreset === 'camera-only' && latest().canSaveScene
+      () => latest().activeSavedSceneId === cameraOnly.id && latest().canSaveScene
     )
+    expect(latest().captureConfig.layout.layoutPreset).toBe('camera-only')
     backend.deviceList.devices = backend.deviceList.devices.filter(
       (device) => device.kind !== 'camera'
     )
     await act(async () => latest().refreshBackend({ fresh: true }))
+    // A scene that needs the missing camera is refused before any commit.
     start = backend.sentCommands.length
     await act(async () => {
       emit('onGlobalShortcut', 'layout:screen-camera')
       await new Promise((resolve) => setTimeout(resolve, 120))
     })
-    expect(
-      backend.sentCommands
-        .slice(start)
-        .filter((entry) => entry.method.startsWith('scene.layout.apply'))
-    ).toHaveLength(0)
+    await waitForObservation(() => latest().canSaveScene)
+    expect(applies(start)).toHaveLength(0)
+    expect(latest().activeSavedSceneId).toBe(cameraOnly.id)
+    // Next skips the scenes that need it.
     await act(async () => {
       emit('onGlobalShortcut', 'layout-next')
     })
     await waitForObservation(
-      () => latest().captureConfig.layout.layoutPreset === 'screen-only' && latest().canSaveScene
+      () => latest().activeSavedSceneId === screenOnly.id && latest().canSaveScene
     )
+    expect(latest().activeSavedSceneId).not.toBe(screenCamera.id)
     await act(async () => latest().startSession())
     await waitForObservation(() => observations.at(-1)?.recording.recording.state === 'recording')
+    // No scene uses a 9:16 layout in a 16:9 studio: refused, in words.
     start = backend.sentCommands.length
+    toastSpies.info.mockClear()
     await act(async () => {
       emit('onGlobalShortcut', 'layout:vertical-screen-only')
       await new Promise((resolve) => setTimeout(resolve, 120))
     })
     expect(latest().captureConfig.layout.layoutPreset).toBe('screen-only')
-    expect(
-      backend.sentCommands
-        .slice(start)
-        .filter((entry) => entry.method.startsWith('scene.layout.apply'))
-    ).toHaveLength(0)
+    expect(applies(start)).toHaveLength(0)
+    expect(toastSpies.info).toHaveBeenCalledWith(
+      'No scene uses Vertical screen only',
+      expect.objectContaining({ id: 'scene-shortcut-refused' })
+    )
+    // Plan 231 D16: a scene that is not on stream can go while recording,
+    // and the scene on stream can't.
     await act(async () => {
-      expect(latest().deleteSavedScene(saved.id)).toBe(true)
+      expect(await latest().deleteSavedScene(screenOnly.id)).toBe(false)
     })
+    expect(toastSpies.warning).toHaveBeenCalledWith(
+      'Switch to another scene first.',
+      expect.objectContaining({ id: 'scene-delete-refused' })
+    )
+    await act(async () => {
+      expect(await latest().deleteSavedScene(saved.id)).toBe(true)
+    })
+    expect(latest().savedScenes.some((scene) => scene.id === saved.id)).toBe(false)
+    expect(latest().savedScenes.some((scene) => scene.id === screenOnly.id)).toBe(true)
     expect(latest().settings.globalShortcuts?.scenes?.[saved.id]).toBeUndefined()
   }, 15000)
 
@@ -8048,7 +8173,7 @@ describe('real StudioProvider lifecycle', () => {
     await act(async () => {
       expect(latest().saveScene('Restart')).toBe(true)
     })
-    const saved = latest().savedScenes[0]
+    const saved = sceneNamed(latest(), 'Restart')
     await act(async () => latest().applyCameraPreset({ cameraZoom: 145 }))
     await waitForObservation(
       () => latest().captureConfig.layout.cameraZoom === 145 && latest().canSaveScene
@@ -8071,8 +8196,8 @@ describe('real StudioProvider lifecycle', () => {
     )
     expect(latest().captureConfig.layout.cameraZoom).toBe(145)
     expect(latest().activeSavedSceneId).toBe(saved.id)
-    // Plan 210 D3: the edit saved into the scene before the remount.
-    expect(latest().savedScenes[0].visual.layout.cameraZoom).toBe(145)
+    // Plan 231 D11: the edit saved into the scene before the remount.
+    expect(sceneNamed(latest(), 'Restart').visual.layout.cameraZoom).toBe(145)
     expect(latest().savedSceneModified).toBe(false)
     expect(latest().canSaveScene).toBe(true)
     await act(async () => {
@@ -8106,7 +8231,7 @@ describe('real StudioProvider lifecycle', () => {
     await act(async () => {
       expect(latest().saveScene('Launch')).toBe(true)
     })
-    const saved = latest().savedScenes[0]
+    const saved = sceneNamed(latest(), 'Launch')
     await act(async () => root!.unmount())
     observations.length = 0
     const working = JSON.parse(localStorage.getItem(WORKING_SCENE_KEY)!)
@@ -8131,13 +8256,175 @@ describe('real StudioProvider lifecycle', () => {
     await act(async () => latest().refreshBackend({ fresh: true }))
     expect(latest().activeSavedSceneId).toBe(saved.id)
     expect(latest().captureConfig.layout.cameraZoom).toBe(160)
-    expect(latest().savedScenes[0].visual.layout.cameraZoom).toBe(saved.visual.layout.cameraZoom)
-    expect(
-      JSON.parse(localStorage.getItem(SCENE_LIBRARY_KEY)!).scenes[0].visual.layout.cameraZoom
-    ).toBe(saved.visual.layout.cameraZoom)
+    expect(sceneNamed(latest(), 'Launch').visual.layout.cameraZoom).toBe(
+      saved.visual.layout.cameraZoom
+    )
+    expect(storedSceneNamed('Launch').layouts.horizontal.cameraZoom).toBe(
+      saved.visual.layout.cameraZoom
+    )
     // The streamer's next edit is theirs: it saves.
     await act(async () => latest().applyCameraPreset({ cameraZoom: 170 }))
-    await waitForObservation(() => latest().savedScenes[0].visual.layout.cameraZoom === 170)
+    await waitForObservation(() => sceneNamed(latest(), 'Launch').visual.layout.cameraZoom === 170)
+  })
+
+  // Plan 231 D18: Camera only shows no screen, and going on stream leaves the
+  // running capture as it is, so going back to a screen scene is a swap in
+  // place. Idle and while recording.
+  it('keeps the capture running under a scene that shows no screen (plan 231 D18)', async () => {
+    const backend = new StudioBackend()
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const testDom = installProviderTestEnvironment(
+      createVideorcApi({
+        acknowledge: async () => true,
+        pending: async () => [],
+        acknowledgeProvider: async () => true,
+        pendingProvider: async () => []
+      })
+    )
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioCoreContextValue => observations.at(-1)!.core
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(
+      () =>
+        observations.at(-1)?.core.canSaveScene === true &&
+        latest().captureConfig.sources.screenId != null &&
+        latest().savedScenes[0].visual.sources.screenId != null
+    )
+    const screenId = latest().captureConfig.sources.screenId
+    const [screenCamera, , cameraOnly] = latest().savedScenes
+    expect(latest().activeSavedSceneId).toBe(screenCamera.id)
+    // A new profile: the screen scenes show the main display, Camera only none (D3).
+    expect(storedSceneNamed('Screen + camera').shows).toMatchObject({ kind: 'display', screenId })
+    expect(storedSceneNamed('Camera only').shows).toEqual({ kind: 'none' })
+    const lastApply = (from: number) =>
+      backend.sentCommands
+        .slice(from)
+        .filter((command) => command.method.startsWith('scene.layout.apply'))
+        .at(-1) as
+        | { method: string; params: { layout: LayoutSettings; sources: SourceSelection } }
+        | undefined
+    const switchTo = async (id: string): Promise<NonNullable<ReturnType<typeof lastApply>>> => {
+      const from = backend.sentCommands.length
+      await act(async () => {
+        expect(await latest().applySavedScene(id)).toBe(true)
+      })
+      await waitForObservation(() => latest().activeSavedSceneId === id && latest().canSaveScene)
+      // The capture is never switched, stopped or restarted for it.
+      expect(
+        backend.sentCommands
+          .slice(from)
+          .some((command) => command.method === 'session.source.switch')
+      ).toBe(false)
+      return lastApply(from)!
+    }
+
+    let apply = await switchTo(cameraOnly.id)
+    expect(apply.params.layout.layoutPreset).toBe('camera-only')
+    expect(apply.params.sources.screenId).toBe(screenId)
+    expect(apply.params.sources.captureOff).not.toBe(true)
+    expect(latest().captureConfig.sources.screenId).toBe(screenId)
+    expect(latest().captureConfig.sources.captureOff).not.toBe(true)
+    // An edit made on it saves its look; the screen under it is not its screen.
+    await act(async () => latest().applyCameraPreset({ cameraZoom: 140 }))
+    await waitForObservation(
+      () => sceneNamed(latest(), 'Camera only').visual.layout.cameraZoom === 140
+    )
+    expect(storedSceneNamed('Camera only').shows).toEqual({ kind: 'none' })
+    expect(latest().savedSceneModified).toBe(false)
+
+    apply = await switchTo(screenCamera.id)
+    expect(apply.params.layout.layoutPreset).toBe('screen-camera')
+    expect(apply.params.sources.screenId).toBe(screenId)
+    expect(storedSceneNamed('Screen + camera').shows).toMatchObject({ kind: 'display', screenId })
+
+    await act(async () => latest().startSession())
+    await waitForObservation(() => observations.at(-1)?.recording.recording.state === 'recording')
+    apply = await switchTo(cameraOnly.id)
+    expect(apply.method).toBe('scene.layout.apply_live')
+    expect(apply.params.sources.screenId).toBe(screenId)
+    expect(apply.params.sources.captureOff).not.toBe(true)
+    expect(backend.confirmedSources.screenId).toBe(screenId)
+    apply = await switchTo(screenCamera.id)
+    expect(apply.params.sources.screenId).toBe(screenId)
+    await act(async () => {
+      expect(await latest().stopSession()).toBe(true)
+    })
+  }, 15_000)
+
+  // Plan 231 D15: the launch that makes the scene library moves the layout
+  // keys to scene keys and saves them with the settings, once.
+  it('saves the migrated layout keys as scene keys once (plan 231 D15)', async () => {
+    const backend = new StudioBackend()
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const testDom = installProviderTestEnvironment(
+      createVideorcApi({
+        acknowledge: async () => true,
+        pending: async () => [],
+        acknowledgeProvider: async () => true,
+        pendingProvider: async () => []
+      })
+    )
+    restoreEnvironment = testDom.restore
+    localStorage.setItem(
+      STORAGE_KEYS.settings,
+      JSON.stringify({
+        animateSceneChanges: true,
+        globalShortcuts: {
+          layouts: { 'screen-only': 'Control+F14', 'side-by-side': 'Control+F15' }
+        }
+      })
+    )
+    const observations: StudioObservation[] = []
+    const latest = (): StudioCoreContextValue => observations.at(-1)!.core
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(() => observations.at(-1)?.core.canSaveScene === true)
+    const keys = (name: string): string | undefined =>
+      latest().settings.globalShortcuts?.scenes?.[sceneNamed(latest(), name).id]
+    expect(keys('Screen only')).toBe('Control+F14')
+    expect(keys('Side by side')).toBe('Control+F15')
+    expect(latest().settings.globalShortcuts?.layouts).toBeUndefined()
+    // The other settings are untouched, and the keys are stored with them.
+    expect(latest().settings.animateSceneChanges).toBe(true)
+    await waitForObservation(
+      () =>
+        JSON.parse(localStorage.getItem(STORAGE_KEYS.settings)!).globalShortcuts?.scenes?.[
+          sceneNamed(latest(), 'Screen only').id
+        ] === 'Control+F14'
+    )
+    expect(
+      JSON.parse(localStorage.getItem(STORAGE_KEYS.settings)!).globalShortcuts.layouts
+    ).toBeUndefined()
+
+    // The streamer changes a key: the next launch keeps it, and migrates nothing.
+    await act(async () =>
+      latest().setSettings((current) => ({
+        ...current,
+        globalShortcuts: {
+          ...current.globalShortcuts,
+          scenes: {
+            ...current.globalShortcuts?.scenes,
+            [sceneNamed(latest(), 'Screen only').id]: 'Control+F16'
+          }
+        }
+      }))
+    )
+    await waitForObservation(() => keys('Screen only') === 'Control+F16')
+    await act(async () => root!.unmount())
+    observations.length = 0
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(() => observations.at(-1)?.core.canSaveScene === true)
+    expect(keys('Screen only')).toBe('Control+F16')
+    expect(keys('Side by side')).toBe('Control+F15')
+    expect(latest().settings.globalShortcuts?.layouts).toBeUndefined()
   })
 
   it('keeps named metadata and the committed background when native presentation proof times out', async () => {
@@ -8176,17 +8463,18 @@ describe('real StudioProvider lifecycle', () => {
     await act(async () => {
       expect(latest().saveScene('Native A')).toBe(true)
     })
-    const saved = latest().savedScenes[0]
-    // Plan 210 D3: leave Native A first, so the new background doesn't save into it.
-    await act(async () =>
-      latest().applyCameraPreset({ layoutPreset: latest().captureConfig.layout.layoutPreset })
-    )
-    await waitForObservation(
-      () => latest().activeSavedSceneId === null && latest().layoutSwitchPending === null
-    )
+    const saved = sceneNamed(latest(), 'Native A')
+    // Plan 231 D11: Native B goes on stream first, so the new background
+    // saves into it and not into Native A.
+    await act(async () => {
+      expect(latest().saveScene('Native B')).toBe(true)
+    })
     await act(async () => latest().applyBackgroundSlot('bg-02'))
     await waitForObservation(
-      () => latest().scene?.background?.assetId === 'builtin-bg-02' && latest().canSaveScene
+      () =>
+        latest().scene?.background?.assetId === 'builtin-bg-02' &&
+        latest().canSaveScene &&
+        sceneNamed(latest(), 'Native B').visual.background?.assetId === 'builtin-bg-02'
     )
     const memory = latest().captureConfig.layoutFramingMemory
     showPreview = true
@@ -10693,6 +10981,60 @@ describe('real StudioProvider lifecycle', () => {
           (command.params as { intentId?: string }).intentId === 'ri-test-scene-outcome-unknown'
       )?.params
     ).toEqual({ intentId: 'ri-test-scene-outcome-unknown', ok: true })
+    // Plan 231 D14: a remote's layout is the first scene with that layout. It
+    // went on stream; no scene's layout changed.
+    await waitForObservation(
+      () =>
+        latest()?.core.activeSavedSceneId ===
+        latest()?.core.savedScenes.find(
+          (scene) => scene.visual.layout.layoutPreset === 'side-by-side'
+        )?.id
+    )
+    expect(latest()?.core.savedScenes.map((scene) => scene.visual.layout.layoutPreset)).toEqual([
+      'screen-camera',
+      'screen-only',
+      'camera-only',
+      'side-by-side'
+    ])
+    // A layout no scene uses is refused, in words, with no commit.
+    const start = backend.sentCommands.length
+    await act(async () => {
+      for (const socket of backend.sockets) {
+        socket.onmessage?.({
+          data: JSON.stringify({
+            event: 'remote.intent',
+            payload: {
+              intentId: 'ri-test-scene-no-layout',
+              intent: { kind: 'sceneApply', layoutPreset: 'vertical-split' }
+            }
+          })
+        })
+      }
+    })
+    await waitForObservation(() =>
+      backend.sentCommands.some(
+        (command) =>
+          command.method === 'remote.intent.ack' &&
+          (command.params as { intentId?: string }).intentId === 'ri-test-scene-no-layout'
+      )
+    )
+    expect(
+      backend.sentCommands.find(
+        (command) =>
+          command.method === 'remote.intent.ack' &&
+          (command.params as { intentId?: string }).intentId === 'ri-test-scene-no-layout'
+      )?.params
+    ).toEqual({
+      intentId: 'ri-test-scene-no-layout',
+      ok: false,
+      message: 'No scene uses Split'
+    })
+    expect(
+      backend.sentCommands
+        .slice(start)
+        .some((command) => command.method.startsWith('scene.layout.apply'))
+    ).toBe(false)
+    expect(latest()?.core.captureConfig.layout.layoutPreset).toBe('side-by-side')
   })
 
   it('acks false for definite takeover failure and outcome-unknown clear mismatch', async () => {

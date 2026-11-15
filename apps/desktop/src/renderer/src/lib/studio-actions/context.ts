@@ -89,7 +89,13 @@ export interface StudioActionContext {
    * a live session picks it up through the latest-wins audio update. */
   setSystemAudioEnabled: (enabled: boolean) => void
   knownLayoutPresets: readonly LayoutPreset[]
-  applyLayoutPreset: (layoutPreset: LayoutPreset) => Promise<boolean>
+  /**
+   * Plan 231 D14: a layout named by a remote or an agent switches to the
+   * first scene with that layout, or is refused with its reason.
+   */
+  applyLayoutPreset: (
+    layoutPreset: LayoutPreset
+  ) => Promise<boolean | { ok: boolean; message?: string }>
   hasTakeover: (assetId: string) => boolean
   activateTakeover: (assetId: string) => Promise<boolean>
   clearTakeover: () => Promise<boolean>

@@ -27,7 +27,13 @@ import {
 } from './capture'
 import { recalledLayoutFraming, rememberLayoutFraming } from './layout-framing-memory'
 import { layoutPresetLabel } from './layout-labels'
-import { sceneSourceGaps, usingVisualSources, type SceneSourceGap } from './scene-presets'
+import {
+  sceneSourceGaps,
+  usingVisualSources,
+  type SavedSceneBackground,
+  type SceneSourceGap
+} from './scene-presets'
+import type { Scene } from './scenes'
 
 // Plan 207 S4: the "Your look" step of first-run setup writes the same state
 // the Studio's own controls write, without a layout transaction. A
@@ -270,4 +276,38 @@ export function firstRunLayoutOptions(input: FirstRunLayoutOptionsInput): FirstR
         ? screenOnly
         : current
   return { options, preselected }
+}
+
+/**
+ * First-run setup's look on the scenes (plan 207 S4): `onStreamId` takes the
+ * layout whole, and every default scene still on its own layout takes the
+ * camera's shape and the background, as the built-in layouts shared one look.
+ */
+export function scenesWithFirstRunLook(
+  scenes: readonly Scene[],
+  look: { onStreamId: string; layout: LayoutSettings; background: SavedSceneBackground | null }
+): Scene[] {
+  const orientation = layoutPresetOrientation(look.layout.layoutPreset)
+  const { cameraShape, cameraAspect } = look.layout
+  return scenes.map((scene) => {
+    if (scene.id === look.onStreamId)
+      return {
+        ...scene,
+        layouts: {
+          horizontal: { ...scene.layouts.horizontal, cameraShape, cameraAspect },
+          vertical: { ...scene.layouts.vertical, cameraShape, cameraAspect },
+          [orientation]: look.layout
+        },
+        background: look.background
+      }
+    if (!scene.id.startsWith('default-')) return scene
+    return {
+      ...scene,
+      layouts: {
+        horizontal: { ...scene.layouts.horizontal, cameraShape, cameraAspect },
+        vertical: { ...scene.layouts.vertical, cameraShape, cameraAspect }
+      },
+      background: look.background
+    }
+  })
 }

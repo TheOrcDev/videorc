@@ -757,3 +757,200 @@ From `hooks/use-scenes.ts`: `useScenes()` returns `scenes`, `onStreamId`,
 - **Background with no working scene:** a profile with no
   `videorc.working-scene.v1` gets scenes with no background. S2 can give
   them the library's applied background if that case matters.
+
+### S2. The Studio runs on scenes (2026-11-15)
+
+Done, with one thing owed to the owner: the renderer's eager bundle is over
+its cap (see **Bundle**). No backend change, no contract change.
+
+**How it is built**
+
+- The Studio's apply, preflight, swap in place, Follow and list code read a
+  scene as plan 210's snapshot (`SavedScene`: id, name, `visual`, `audio`).
+  S2 keeps that shape as a **view** of the stored scene, so those paths did
+  not change:
+  - `lib/scene-studio.ts`: `savedSceneView(scene, orientation, camera)` and
+    `sceneFromSaved(saved, template)` go between the two shapes;
+    `sceneEditAutosave` is D11; `sceneKeepsCapture` is D18;
+    `sceneOnStreamAtLaunch` picks the scene on stream at launch.
+  - `hooks/use-scene-library.ts`: `useSceneLibrary(orientation, camera)`
+    wraps `useScenes()` and gives `use-studio.tsx` the API the v1 hook had
+    (`scenes`, `save`, `insert`, `replace`, `rename`, `move`, `remove`,
+    `autosave`, `refreshDisplay`) plus `stored(id)`, `storedScenes()`,
+    `setShows`, `setOnStream`, `editAll`, `nameMainDisplay`,
+    `migratedShortcuts`.
+  - `hooks/use-scene-presets.ts` and `lib/scene-autosave.ts` are deleted.
+- `core.savedScenes` and `core.activeSavedSceneId` keep their names and
+  shape, so the remotes, the Stream Deck plugin, ⌘K, the agent surface and
+  the phone get the v2 scenes with no change (brief item 10).
+  `activeSavedSceneId` is never null now. S6 to S9 can rename them.
+- The view is in the **studio's orientation** (`sceneLayout(scene,
+orientation)`), and its camera is `captureConfig.sources` (D9).
+- `videorc.working-scene.v1` is still written on every commit, as before: it
+  is the launch checkpoint (exact sources, the resolved window), and a
+  downgrade reads it.
+
+**What changed in behaviour**
+
+- **A scene is always on stream.** `activeSavedSceneId` starts from the
+  library's `onStreamId`, moves when a switch commits, and is written back.
+  At launch, a look whose layout is not the named scene's (a seeded capture
+  config, a downgrade and back) is on the first scene with that layout.
+- **A Screen pick edits the scene on stream (D2).** Idle, the pick writes the
+  scene's `shows` at once. While recording or live, the session's
+  confirmation commits it and the autosave writes it. The autosave also
+  writes `shows` whenever the capture changed while the same scene stayed on
+  (a smoke's `configure({ sources })`, an agent). An app's front window
+  changing is not a pick. `capturePickLeavesScene`, `sceneListActive`,
+  `galleryPresetIsActive`, `orientationSwitchPreset`, the Unsaved row and
+  both Layouts groups are gone.
+- **One camera (D9).** A scene going on stream never carries camera keys.
+  Only "Resolve scene sources" (the `repaired` argument) carries a camera,
+  and it then becomes every scene's camera. Camera Off is the same: it is
+  Sources' state, and a scene no longer turns the camera off or on.
+- **D18.** A scene whose `shows` is `none` and whose layout draws no screen
+  goes on stream with the capture sources, and the working app, left as they
+  are. It is the request the built-in Camera only sent before S2 (same
+  sources, a Camera only layout), so it matches today's behaviour by
+  construction; S0's numbers were not available. A `none` scene whose layout
+  draws a screen is refused as before ("No screen is chosen"), and once such
+  a layout is committed on it, the scene takes the screen on stream (S7's
+  D19 replaces this).
+- **Edits save into the scene on stream (D11),** into the layout of the
+  committed orientation; the other orientation's layout and the audio stay.
+- **`applyCameraPreset({ layoutPreset })` sets the layout of the scene on
+  stream.** `keepScene` is gone (it is the only behaviour).
+  `applyCameraPreset(patch, { toOrientation: true })` is the 16:9 / 9:16
+  toggle: the scene goes on in its own layout for that orientation. A preset
+  of the other orientation without that option starts from the scene's own
+  layout there and replaces only the preset, so smokes that call
+  `layout({ layoutPreset: 'vertical-…' })` still land on that preset.
+- **Keys and remotes (D14):** `switchToSceneWithLayout(preset)` switches to
+  `firstSceneWithLayout` in the studio's orientation, or returns
+  `No scene uses {Layout}`. The layout shortcut actions and the remote's
+  `sceneApply` `layoutPreset` use it (`context.applyLayoutPreset` now
+  returns `boolean | { ok, message }`). Next and Previous walk scenes only.
+- **Delete (D16):** `deleteSavedScene` is async. Off air it switches to the
+  scene before first and deletes only when that switch landed. The ⋯ item
+  is disabled with its reason, and the confirm says which scene goes on.
+- **Undo** of a commit that put another scene on stream switches back to
+  that scene through the scene path, so its screen comes back too.
+- **Layout framing memory** (camera zoom and offset per layout) is recalled
+  on every layout change and remembered by every commit that is not a scene
+  switch. Before, a saved scene's edits never reached it.
+- **First-run setup's look** goes on the first scene with its layout, and
+  every `default-*` scene takes its camera shape and background
+  (`scenesWithFirstRunLook`, in the lazy `first-run-look.ts`).
+- **Migration is a chunk of its own.** `lib/scenes-migration.ts` has
+  `migrateToScenes`, `defaultScenes`, `horizontalTwin`, the ids and
+  `migrateStoredScenes`. `StudioProvider` is now a small gate: it renders at
+  once when v2 is stored, and otherwise awaits `prepareScenes()` (which
+  loads the chunk) and then renders. Import those names from
+  `@/lib/scenes-migration`, not `@/lib/scenes`.
+- The migrated keys are saved once (`migratedShortcuts` →
+  `settings.globalShortcuts`), and `nameMainDisplay` names the main display
+  for the scenes that wait for it.
+
+**Numbers:** `pnpm typecheck`, `pnpm lint` and Prettier green. Full desktop
+unit run: 701 files, 8149 passed, 1 skipped, no flake seen.
+`studio-provider.integration.test.ts`: 215 passed (14 scene tests rewritten
+for scenes, 2 added: D18, and the migrated keys saved once).
+
+**Bundle (owed: the owner's call).** `pnpm check:renderer-assets` fails.
+
+|                                         |       raw |    gzip |
+| --------------------------------------- | --------: | ------: |
+| Before S2 (`ed6c50c03`)                 | 2,361,337 | 485,281 |
+| S2, first build                         | 2,389,323 | 491,303 |
+| S2, migration and first-run helper lazy | 2,381,700 | 489,705 |
+| Cap                                     | 2,365,000 | 487,000 |
+
+It is 16,700 raw and 2,705 gzip over. None of it is UI: the gallery and the
+scene list are lazy and lost code. It is the scene model the provider needs
+before first paint (the stored-scene check, the view, D11's autosave, the
+library's edits), on top of plan 210's snapshot code that the view keeps
+alive. The renderer is not minified, so raw moves by whole source bytes.
+What I tried: the migration, its v1 reader and the first-run look helper
+are lazy (7,623 raw, 1,598 gzip back). What is left to move is about 6 KB
+raw (the autosave, delete and layout-key helpers behind the scene-apply
+chunk), which makes every edit's save wait on a chunk and still leaves it
+over. Later slices delete eager v1 code (S3: `lastVerticalPreset`,
+`simulcastFollowsProgram`, `studioModeTogglePreset`; S4: the layout
+shortcut actions; S7: Save scene…), so measure again at the Phase A gate
+before asking for a raise. The cap is untouched.
+
+**Deviations**
+
+- The orientation toggle no longer falls back to a layout the current
+  sources can show (retest 150's `orientationSwitchPreset`). A scene has one
+  9:16 layout (D4); when the sources can't show it, the toggle is refused
+  with the existing reason.
+- "Save scene…" still pins the current audio into the scene it makes, as it
+  did (its dialog says so). D10's "no audio unless pinned" holds for New
+  scene… and for every edit. S7 removes Save scene….
+- A remote `sceneApply` `screenId` is not read by the renderer today (the
+  executor takes `sceneId` or `layoutPreset`), so there was nothing to
+  change. The phone's display list and the agents' `set_sources` go through
+  `switchSourceDeviceLive`, which now edits the scene. S9 owns `screenId`.
+- No screenshots: S2 adds no UI, it removes two groups and a row. S6 and S8
+  own the look.
+
+**What S3 must know**
+
+- The 9:16 studio already applies each scene's `layouts.vertical`, and the
+  toggle already keeps the scene (`toOrientation`). What is left of S3's
+  first bullet is the gallery's wording and `ORIENTATION_SWITCH_LOCK_REASON`
+  (it can no longer trigger: a view's layout is always in the studio's
+  orientation).
+- The vertical leg still streams `simulcastLegLayout(lastVerticalPreset, …)`
+  from `sendSimulcastLeg`. Read the scene there with
+  `storedScene(activeSavedSceneIdRef.current)` and
+  `sceneLayout(scene, 'vertical')`.
+- The autosave writes only the committed orientation's layout. A vertical
+  leg edit made from a 16:9 studio (the Vertical stream panel) is not a
+  layout commit, so S3 must write `layouts.vertical` itself: use
+  `sceneLibrary.replace` with a snapshot in the vertical layout, or add a
+  setter beside `setShows`.
+- `captureConfig.lastHorizontalPreset` and `lastVerticalPreset` are still
+  written by every commit (`layoutPresetMemoryPatch`) and still read by
+  `studioModeTogglePreset`, which now only names the orientation.
+- A new user's 9:16 Fill or Fit default is still S1's (Fit); S3 owns it.
+
+**What S4 must know:** the layout shortcut actions still exist and map to
+scenes (D14). Deleting them removes `switchLayout`'s `direct` branch and
+the `layout:` tokens in `handleGlobalShortcut`; `nextEligibleScene` is
+already called with `layouts: []`.
+
+**Smokes S11 must update** (none run in S2; nothing here was a one-line fix)
+
+- `smoke:scene-presets` (`smoke-scene-presets-app.mjs`): expects
+  `activeId === null` after `layout({ layoutPreset })` (lines 199 and 474;
+  the scene now stays on and takes the layout), and its "saved Off after On"
+  steps expect a scene to bring Camera Off or On back (D9: it never does).
+  A fresh profile also starts with four scenes, so count from a baseline.
+- `smoke:smart-scenes`: its delete step waits for `activeId === null`
+  (line 851; D16 puts the scene before it on stream), `remove()` now returns
+  a promise, its `keepScene` step (line 310) is the same edit as any layout
+  set, and New scene… adds at the end, not the top.
+- `smoke:remote-control`: waits for `activeSavedSceneId === null` after a
+  layout (line 536). A remote `layoutPreset` now switches to the first
+  scene with that layout, and is refused when a `layout()` call before it
+  left no scene with it.
+- `smoke:agent-mcp`: `switch_scene { sceneId: 'screen-only' }` now puts the
+  Screen only scene on stream (the result still says `kind: 'layout'` until
+  S9).
+- `scripts/lib/renderer-profile-seed.mjs` (every seeded smoke): a seed that
+  forgets the working scene keeps `videorc.scenes.v2`. The launch rule above
+  puts the seeded layout on the first scene with it, and the seeded sources
+  become that scene's screen on the next commit. A seed that needs a clean
+  library must also remove `videorc.scenes.v2`.
+- `probe:scene-window-switch`, `smoke:hide-screen:windows`,
+  `smoke:record-latency`: `configure({ sources })` now also changes the
+  screen of the scene on stream. They should pass as they are.
+- The scripts that click `[data-videorc-layout-preset]` (freeform editor,
+  preview interaction stress, the preview window probe) set the layout of
+  the scene on stream, and should pass as they are. No script used
+  `[data-scene-preset]`, which is gone from Studio and the Scene page.
+- The Stream Deck plugin and the phone list `savedScenes` and light a
+  layout key only when `activeSavedSceneId` is null, which never happens
+  now (S9).

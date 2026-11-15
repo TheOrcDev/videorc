@@ -70,9 +70,16 @@ import {
 } from '@/lib/session-stop'
 import type { AppExitKind } from '@/lib/backend'
 import { useTheme } from 'next-themes'
-import { BUILTIN_LAYOUTS } from '@/lib/layout-framing-memory'
-import { useScenePresets, type SceneLibraryActions } from '@/hooks/use-scene-presets'
-import { capturePickLeavesScene } from '@/lib/scene-autosave'
+import { useSceneLibrary, type SceneLibraryActions } from '@/hooks/use-scene-library'
+import { prepareScenes, scenesStored } from '@/hooks/use-scenes'
+import {
+  cameraSources,
+  captureSources,
+  sceneKeepsCapture,
+  sceneOnStreamAtLaunch
+} from '@/lib/scene-studio'
+import { canDeleteScene, firstSceneWithLayout, sceneLayout, showsFromSources } from '@/lib/scenes'
+import type { SceneShows } from '@/lib/scenes'
 import {
   hydrateWorkingScene,
   WORKING_SCENE_KEY,
@@ -1569,7 +1576,12 @@ export type StudioContextValue = {
   /** Takes the last committed layout change back (plan 174 S3.9, D15); false when there is none. */
   undoLayoutPatch: () => Promise<boolean>
   /** `keepScene`: the Scene page's Layout edits the saved scene on stream (plan 210 D3). */
-  applyCameraPreset: (patch: Partial<LayoutSettings>, options?: { keepScene?: boolean }) => void
+  /**
+   * Plan 231 D2: sets the layout (or a framing field) of the scene on stream.
+   * `toOrientation`: the preset only names the orientation, and the scene
+   * goes on in its own layout for it (the 16:9 / 9:16 toggle).
+   */
+  applyCameraPreset: (patch: Partial<LayoutSettings>, options?: { toOrientation?: boolean }) => void
   /**
    * Plan 207 S4: the look chosen in first-run setup, written as state only so
    * the idle scene reload commits it without opening a device. While a
@@ -1587,7 +1599,8 @@ export type StudioContextValue = {
   setSceneGesturePending: (pending: boolean) => void
   saveScene: (name: string, updateId?: string) => boolean
   renameSavedScene: (id: string, name: string) => boolean
-  deleteSavedScene: (id: string) => boolean
+  /** Plan 231 D16; off air, the scene on stream switches to the one before it first. */
+  deleteSavedScene: (id: string) => Promise<boolean>
   savedSceneWindowApps: Readonly<Record<string, string>>
   savedSceneAppStates: Readonly<Record<string, SceneAppState | undefined>>
   /** Plan 210 S5: New scene…, the scene list's order and its ⋯ edits. */
@@ -2765,7 +2778,27 @@ function StudioCloudProvider({
   )
 }
 
-export function StudioProvider({ children }: { children: ReactNode }): ReactElement {
+/**
+ * Plan 231 D15: a profile with no scene library gets one made before the
+ * Studio first renders. The migration is a chunk of its own, loaded only on
+ * that launch; every other launch reads the stored library and renders at once.
+ */
+export function StudioProvider({ children }: { children: ReactNode }): ReactElement | null {
+  const [ready, setReady] = useState(scenesStored)
+  useEffect(() => {
+    if (ready) return
+    let disposed = false
+    void prepareScenes().finally(() => {
+      if (!disposed) setReady(true)
+    })
+    return () => {
+      disposed = true
+    }
+  }, [ready])
+  return ready ? <StudioProviderReady>{children}</StudioProviderReady> : null
+}
+
+function StudioProviderReady({ children }: { children: ReactNode }): ReactElement {
   const [connection, setConnection] = useState<BackendConnection | null>(null)
   const [client, setClient] = useState<BackendClient | null>(null)
   const clientRef = useRef<BackendClient | null>(null)
@@ -5030,7 +5063,12 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   }, [streamTargets])
 
   const { registry: backgroundRegistry, setRegistry: setBackgroundRegistry } = useBackgroundAssets()
-  const sceneLibrary = useScenePresets()
+  // Plan 231 S2: the Studio runs on the scene library (v2), read in the
+  // studio's orientation with the one camera every scene shares (D9).
+  const sceneLibrary = useSceneLibrary(
+    layoutPresetOrientation(captureConfig.layout.layoutPreset),
+    captureConfig.sources
+  )
   const rememberedAppsRef = useRef(
     rememberedSceneApps(loadJson(SCENE_WINDOW_APPS_KEY, {}), sceneLibrary.scenes)
   )
@@ -5060,32 +5098,58 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     save: saveSceneEntry,
     remove: removeSceneEntry,
     autosave: autosaveSavedScene,
-    refreshDisplay: refreshSavedSceneDisplay
+    refreshDisplay: refreshSavedSceneDisplay,
+    stored: storedScene,
+    storedScenes,
+    editAll: editAllScenes,
+    setOnStream: setSceneOnStream,
+    setShows: setSceneShows,
+    nameMainDisplay,
+    migratedShortcuts
   } = sceneLibrary
-  const [activeSavedSceneId, setActiveSavedSceneId] = useState<string | null>(
-    () => hydrateWorkingScene(loadJson(WORKING_SCENE_KEY, null))?.sceneId ?? null
+  // Plan 231 D2: a scene is always on stream. The id moves when a switch
+  // commits, and the library keeps it for the next launch.
+  const [activeSavedSceneId, setActiveSavedSceneId] = useState<string | null>(() =>
+    sceneOnStreamAtLaunch(storedScenes(), sceneLibrary.onStreamId, captureConfig.layout)
   )
   const activeSavedSceneIdRef = useRef(activeSavedSceneId)
+  useEffect(() => {
+    if (activeSavedSceneId) setSceneOnStream(activeSavedSceneId)
+  }, [activeSavedSceneId, setSceneOnStream])
+  // D15: on the launch that migrated, the layout keys became scene keys.
+  useEffect(() => {
+    if (migratedShortcuts)
+      setSettings((current) => ({ ...current, globalShortcuts: migratedShortcuts }))
+  }, [migratedShortcuts])
+  // A new user's scenes show the main display before the device list names it.
+  useEffect(() => {
+    const display = deviceList.devices.find(
+      (device) => device.kind === 'screen' && device.status === 'available'
+    )
+    if (display) nameMainDisplay(display)
+  }, [deviceList.devices, nameMainDisplay])
+  // Plan 210's origin of the working look. Nothing reads it any more (a scene
+  // is always on stream); it stays in the working checkpoint and the undo
+  // entries, where a build before plan 231 reads it.
   const workingOriginRef = useRef<'builtin' | 'saved'>(
-    hydrateWorkingScene(loadJson(WORKING_SCENE_KEY, null))?.origin ??
-      (activeSavedSceneId ? 'saved' : 'builtin')
+    hydrateWorkingScene(loadJson(WORKING_SCENE_KEY, null))?.origin ?? 'saved'
   )
-  // Plan 210 S5: the scene list says "Unsaved scene" for a saved scene's look
-  // that left it, so the origin is state too.
-  const [workingOrigin, setWorkingOriginState] = useState(workingOriginRef.current)
   const setWorkingOrigin = useCallback((origin: 'builtin' | 'saved') => {
     workingOriginRef.current = origin
-    setWorkingOriginState(origin)
   }, [])
+  // Plan 210 D5: the window each app's scene last showed, so its next switch
+  // is answered from the held device list (`heldAppWindow`).
+  const sceneWindowHintsRef = useRef<Record<string, string | undefined>>({})
   // The saved scene and look last persisted, so a commit that only repeats
   // them (an updater run twice) is not mistaken for an edit. Launch starts
   // with none: the scene coming back on stream is not an edit of it, so a
   // working look that drifted before this build (Modified, never Updated)
   // is never written into the scene without the streamer's action.
-  const persistedWorkingRef = useRef<{ sceneId: string | null; key: string }>({
-    sceneId: null,
-    key: ''
-  })
+  const persistedWorkingRef = useRef<{
+    sceneId: string | null
+    key: string
+    shows: SceneShows | null
+  }>({ sceneId: null, key: '', shows: null })
   const [visualTransactionPending, setVisualTransactionPending] = useState(false)
   const [sceneGesturePending, setSceneGesturePending] = useState(false)
   const [sceneTransformPending, setSceneTransformPending] = useState(false)
@@ -5137,14 +5201,18 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         background: snapshotBackground(background)
       })
       confirmedVisualRef.current = visual
-      // Plan 210 D3: every confirmed edit made while a saved scene is on
-      // saves its look into it (never its sources or audio). Out of band,
-      // because some callers run inside a state updater.
+      // Plan 231 D11 (plan 210 D3): every confirmed edit made while a scene
+      // is on stream saves into it: its look, and a picked screen (never its
+      // audio). Out of band, because some callers run inside a state updater.
       const key = JSON.stringify(visual)
       const persisted = persistedWorkingRef.current
       if (persisted.sceneId !== savedSceneId || persisted.key !== key) {
-        persistedWorkingRef.current = { sceneId: savedSceneId, key }
-        queueMicrotask(() => autosaveSavedScene(persisted.sceneId, savedSceneId, visual))
+        persistedWorkingRef.current = {
+          sceneId: savedSceneId,
+          key,
+          shows: showsFromSources(visual.sources)
+        }
+        queueMicrotask(() => autosaveSavedScene(persisted, savedSceneId, visual))
       }
       try {
         localStorage.setItem(
@@ -10495,8 +10563,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       setWorkingOrigin(snapshot.origin ?? 'builtin')
       // A scene going on stream is not an edit of it (D3): its commit saves
       // nothing, even when it was already on (a repaired apply).
-      if (snapshot.sceneSwitch) persistedWorkingRef.current = { sceneId: null, key: '' }
-      const savedId = snapshot.savedSceneId ?? null
+      if (snapshot.sceneSwitch)
+        persistedWorkingRef.current = { sceneId: null, key: '', shows: null }
+      // A scene is always on stream (plan 231 D2): a commit that names none keeps it.
+      const savedId = snapshot.savedSceneId ?? activeSavedSceneIdRef.current
       activeSavedSceneIdRef.current = savedId
       setActiveSavedSceneId(savedId)
       skipNextConfigSceneReloadRef.current = true
@@ -10526,10 +10596,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           sources: snapshot.sources ?? current.sources,
           ...layoutPresetMemoryPatch(snapshot.layout.layoutPreset),
           layout: snapshot.layout,
-          layoutFramingMemory:
-            snapshot.origin === 'saved'
-              ? current.layoutFramingMemory
-              : rememberLayoutFraming(current.layoutFramingMemory, snapshot.layout)
+          // A scene going on stream brings its own framing; an edit is remembered.
+          layoutFramingMemory: snapshot.sceneSwitch
+            ? current.layoutFramingMemory
+            : rememberLayoutFraming(current.layoutFramingMemory, snapshot.layout)
         }
         workingAppRef.current = snapshot.sceneApp
         captureConfigRef.current = next
@@ -10578,7 +10648,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     return {
       sources,
       sceneApp: matchesWorking ? workingAppRef.current : undefined,
-      savedSceneId: matchesWorking ? activeSavedSceneIdRef.current : null,
+      // The scene on stream stays (plan 231 D2). A recovered look that is not
+      // the working one is no edit of it, so it is not saved into the scene.
+      savedSceneId: activeSavedSceneIdRef.current,
+      ...(matchesWorking ? {} : { sceneSwitch: true }),
       origin: matchesWorking ? workingOriginRef.current : ('saved' as const),
       sceneRevision: compositorStatus.sceneRevision,
       scene: sceneAfter,
@@ -11046,6 +11119,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   )
   const requestLayoutTransactionRef = useRef(requestLayoutTransaction)
   requestLayoutTransactionRef.current = requestLayoutTransaction
+  const applySavedSceneResultRef = useRef<(id: string) => Promise<SavedSceneApplyResult>>(
+    async () => ({ ok: false })
+  )
 
   // Library edits request a new working background. Only the committed target
   // drives preview/session parameters; applying a saved snapshot never edits the library.
@@ -11116,6 +11192,13 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const undoLayoutPatch = useCallback(async (): Promise<boolean> => {
     const entry = takeLayoutUndo()
     if (!entry) return false
+    // Plan 231: the undone commit put another scene on stream, so undo
+    // switches back to that scene, its screen included.
+    if (entry.savedSceneId && entry.savedSceneId !== activeSavedSceneIdRef.current) {
+      const switched = (await applySavedSceneResultRef.current(entry.savedSceneId)).ok
+      if (!switched) restoreLayoutUndo(entry)
+      return switched
+    }
     const current = captureConfigRef.current
     const crossesOrientation =
       layoutPresetOrientation(entry.layout.layoutPreset) !==
@@ -11173,17 +11256,34 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     return committed
   }, [requestLayoutTransaction])
 
+  // Plan 231 D2: a layout is a choice inside the scene on stream. This sets
+  // that scene's layout for the studio's orientation (the commit saves it,
+  // D11) and never leaves the scene. A layout of the other orientation starts
+  // from the scene's own layout there (D4); `toOrientation` puts that layout
+  // on as it is, for the 16:9 / 9:16 toggle.
   const requestCameraPresetTransaction = useCallback(
     (
       patch: Partial<LayoutSettings>,
-      options?: { backgroundOverride?: Scene['background'] | null; keepScene?: boolean }
+      options?: { backgroundOverride?: Scene['background'] | null; toOrientation?: boolean }
     ) => {
       const current = captureConfigRef.current
-      const nextPreset = patch.layoutPreset ?? current.layout.layoutPreset
+      const targetOrientation = layoutPresetOrientation(
+        patch.layoutPreset ?? current.layout.layoutPreset
+      )
+      const onStream =
+        targetOrientation !== layoutPresetOrientation(current.layout.layoutPreset)
+          ? storedScene(activeSavedSceneIdRef.current)
+          : undefined
+      const own = onStream ? sceneLayout(onStream, targetOrientation) : undefined
+      const keepsOwn = own !== undefined && options?.toOrientation === true
+      const base = own ?? current.layout
+      const nextPreset = keepsOwn ? own.layoutPreset : (patch.layoutPreset ?? base.layoutPreset)
       if (patch.layoutPreset !== undefined) {
         const issues = sceneSourceProblems(
           {
-            layout: { ...current.layout, layoutPreset: nextPreset, arrangementMode: 'preset' },
+            layout: keepsOwn
+              ? own
+              : { ...base, layoutPreset: nextPreset, arrangementMode: 'preset' },
             sources: usingVisualSources(current.sources),
             background: null
           },
@@ -11230,33 +11330,26 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         : {}
 
       return requestLayoutTransaction(
-        {
-          ...current.layout,
-          ...(patch.layoutPreset !== undefined && workingOriginRef.current === 'saved'
-            ? current.layoutFramingMemory.layouts[nextPreset]
-            : recalledLayoutFraming(
-                current.layoutFramingMemory,
-                current.layout.layoutPreset,
-                nextPreset
-              )),
-          ...arrangementPatch,
-          ...patch,
-          cameraTransformMode: 'preset',
-          cameraTransform: null
-        },
+        keepsOwn
+          ? own
+          : {
+              ...base,
+              ...recalledLayoutFraming(current.layoutFramingMemory, base.layoutPreset, nextPreset),
+              ...arrangementPatch,
+              ...patch,
+              cameraTransformMode: 'preset',
+              cameraTransform: null
+            },
         {
           videoOverride,
           captureConfigPatch,
-          ...(patch.layoutPreset !== undefined && !options?.keepScene
-            ? { savedSceneId: null, origin: 'builtin' as const }
-            : {}),
           ...(options && 'backgroundOverride' in options
             ? { backgroundOverride: options.backgroundOverride }
             : {})
         }
       )
     },
-    [requestLayoutTransaction]
+    [requestLayoutTransaction, storedScene]
   )
 
   const applyBackgroundSlot = useCallback(
@@ -11318,12 +11411,15 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     () => sceneAudio(captureConfig.sources, captureConfig.audio),
     [captureConfig.sources, captureConfig.audio]
   )
+  // The look on stream that the scene has not taken yet (an edit saves as it
+  // lands, D11), or audio that differs from the audio it pins. Its screen is
+  // not part of it: a scene that shows no screen keeps the capture (D18).
   const savedSceneModified = Boolean(
     activeSavedSceneId &&
     sceneLibrary.scenes.some(
       (entry) =>
         entry.id === activeSavedSceneId &&
-        (!sameSceneVisual(entry.visual, workingVisual) ||
+        (!sameSceneVisual({ ...entry.visual, sources: workingVisual.sources }, workingVisual) ||
           !sameSceneAudio(entry.audio, workingAudio))
     )
   )
@@ -11364,26 +11460,32 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       setWorkingOrigin
     ]
   )
+  // Plan 231 D16: the last scene stays. Off air, deleting the scene on stream
+  // first switches to the scene before it; while recording or live it can't
+  // be deleted.
   const deleteSavedScene = useCallback(
-    (id: string): boolean => {
-      if (!removeSceneEntry(id)) return false
+    async (id: string): Promise<boolean> => {
+      const sessionActive = isActiveRecordingState(recordingRef.current.state)
+      const verdict = canDeleteScene({
+        scenes: storedScenes(),
+        id,
+        onStreamId: activeSavedSceneIdRef.current ?? '',
+        sessionActive
+      })
+      if (!verdict.allowed) {
+        if (verdict.reason) toast.warning(verdict.reason, { id: 'scene-delete-refused' })
+        return false
+      }
+      if (verdict.switchToId && !(await applySavedSceneResultRef.current(verdict.switchToId)).ok)
+        return false
+      if (!removeSceneEntry(id, { sessionActive })) return false
       setSettings((current) => ({
         ...current,
         globalShortcuts: withoutSceneShortcut(current.globalShortcuts, id)
       }))
-      if (activeSavedSceneIdRef.current === id) {
-        activeSavedSceneIdRef.current = null
-        setActiveSavedSceneId(null)
-        persistWorkingVisual(
-          captureConfigRef.current.layout,
-          captureConfigRef.current.sources,
-          workingBackgroundRef.current,
-          null
-        )
-      }
       return true
     },
-    [removeSceneEntry, persistWorkingVisual, setSettings]
+    [removeSceneEntry, storedScenes, setSettings]
   )
   // A shortcut or remote request is sent even when it repeats the last one:
   // the retry after a failed start or a lost update.
@@ -11444,6 +11546,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           normalizeSceneVisual(repaired ?? saved.visual),
           deviceListRef.current.devices
         )
+        const windowHint = sceneWindowHintsRef.current[id]
+        if (visual.sources.app && !visual.sources.windowId && windowHint)
+          visual = { ...visual, sources: { ...visual.sources, windowId: windowHint } }
         try {
           const resolved = await sceneApply.resolveSceneWindowForApply(
             visual,
@@ -11495,11 +11600,17 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
               current.verticalRestoreVideo
             )
           : null
+        // Plan 231 D18: a scene that shows no screen leaves the capture, and
+        // the app it follows, as they are: going back is a swap in place.
+        // D9: a scene never changes the camera device; only sources chosen
+        // again for it (Resolve scene sources) carry one.
+        const keepsCapture = !repaired && sceneKeepsCapture(storedScene(id), visual.layout)
         const transaction = requestLayoutTransaction(visual.layout, {
-          sceneApp: visual.sources.app,
+          sceneApp: keepsCapture ? workingAppRef.current : visual.sources.app,
           sourcesOverride: withoutSceneApp({
             ...current.sources,
-            ...visual.sources,
+            ...(keepsCapture ? null : captureSources(visual.sources)),
+            ...(repaired ? cameraSources(visual.sources) : null),
             ...(live ? null : microphone)
           }),
           backgroundOverride: resolveSavedBackground(visual.background),
@@ -11542,6 +11653,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       if (!applied && layoutIntentIdRef.current !== lastIntent)
         return { ok: false, superseded: true }
       if (applied) {
+        sceneWindowHintsRef.current[id] = visual.sources.app ? visual.sources.windowId : undefined
         if (!repaired) refreshSavedSceneDisplay(id, deviceListRef.current.devices)
         rememberedAppsRef.current = sceneApply.rememberSceneWindowApp(
           rememberedAppsRef.current,
@@ -11610,12 +11722,29 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     },
     [
       sceneLibrary.scenes,
+      storedScene,
       refreshSavedSceneDisplay,
       requestLayoutTransaction,
       setSystemAudioEnabled,
       sourceSelectionController,
       reportError
     ]
+  )
+  applySavedSceneResultRef.current = applySavedSceneResult
+
+  // Plan 231 D14: a key or a remote that names a layout switches to the first
+  // scene with that layout in the studio's orientation, or is refused.
+  const switchToSceneWithLayout = useCallback(
+    (layoutPreset: LayoutPreset): Promise<SavedSceneApplyResult> => {
+      const orientation = layoutPresetOrientation(captureConfigRef.current.layout.layoutPreset)
+      const target = firstSceneWithLayout(storedScenes(), orientation, layoutPreset)
+      if (target) return applySavedSceneResult(target.id)
+      const label = layoutPresetLabel(layoutPreset, {
+        bothOrientations: layoutPresetOrientation(layoutPreset) !== orientation
+      })
+      return Promise.resolve({ ok: false, message: `No scene uses ${label}` })
+    },
+    [applySavedSceneResult, storedScenes]
   )
 
   const applySavedScene = useCallback(
@@ -11656,45 +11785,53 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   }
 
   const applyCameraPreset = useCallback(
-    (patch: Partial<LayoutSettings>, options?: { keepScene?: boolean }) => {
+    (patch: Partial<LayoutSettings>, options?: { toOrientation?: boolean }) => {
       sceneShortcutRequestedRef.current = null
       void requestCameraPresetTransaction(
         patch,
-        options?.keepScene ? { keepScene: true } : undefined
+        options?.toOrientation ? { toOrientation: true } : undefined
       )
     },
     [requestCameraPresetTransaction]
   )
+  const {
+    readOnly: sceneLibraryReadOnly,
+    insert: insertScenes,
+    move: moveScene,
+    replace: replaceScene
+  } = sceneLibrary
   const sceneLibraryActions = useMemo<SceneLibraryActions>(
     () => ({
-      readOnly: sceneLibrary.readOnly,
-      workingOrigin,
+      readOnly: sceneLibraryReadOnly,
       workingVisual,
       workingAudio,
-      insert: sceneLibrary.insert,
-      move: sceneLibrary.move,
-      replace: sceneLibrary.replace,
+      // The picker's front window is where an app's scene looks first (D5).
+      insert: (scenes, afterId) => {
+        for (const { id, visual } of scenes)
+          if (visual.sources.app) sceneWindowHintsRef.current[id] = visual.sources.windowId
+        return insertScenes(scenes, afterId)
+      },
+      move: moveScene,
+      replace: (scene) => {
+        if (scene.visual.sources.app && scene.visual.sources.windowId)
+          sceneWindowHintsRef.current[scene.id] = scene.visual.sources.windowId
+        return replaceScene(scene)
+      },
       listAppPreviews: async (params) => {
         if (!clientRef.current) throw offlineError()
         return clientRef.current.requestTyped('sources.app_previews', params)
       }
     }),
-    [
-      sceneLibrary.readOnly,
-      sceneLibrary.insert,
-      sceneLibrary.move,
-      sceneLibrary.replace,
-      workingOrigin,
-      workingVisual,
-      workingAudio
-    ]
+    [sceneLibraryReadOnly, insertScenes, moveScene, replaceScene, workingVisual, workingAudio]
   )
 
   // Plan 207 S4: "Your look" writes state only. The scene reload commits it
   // idle (`scene.load_from_capture_config` starts nothing and carries the
   // background), so no device opens while setup is open. The library sync
   // above sees the fingerprint already applied. Setup's changes start the
-  // Studio with no undo history and no saved-scene origin (a built-in look).
+  // Studio with no undo history. Plan 231: the look goes on the first scene
+  // with its layout (the scene on stream when none has it), and the default
+  // scenes take its camera shape and background.
   // The setup chunk has already loaded the look's helpers when this runs.
   const applyFirstRunLook = useCallback(
     (look: FirstRunLook): void => {
@@ -11709,7 +11846,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         setFirstRunLookHold(null)
       }
       void import('@/lib/first-run-look').then(
-        ({ firstRunBackgroundChoice, firstRunLookPatch }) => {
+        ({ firstRunBackgroundChoice, firstRunLookPatch, scenesWithFirstRunLook }) => {
           const current = captureConfigRef.current
           if (current.layout.arrangementMode === 'freeform') {
             noteLayoutLeavingFreeform(current.layout)
@@ -11717,12 +11854,29 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           const next = firstRunLookPatch(current, look)
           latestRequestedLayoutRef.current = next.layout.layoutPreset
           setWorkingOrigin('builtin')
-          activeSavedSceneIdRef.current = null
-          setActiveSavedSceneId(null)
+          const onStreamId =
+            firstSceneWithLayout(
+              storedScenes(),
+              layoutPresetOrientation(next.layout.layoutPreset),
+              next.layout.layoutPreset
+            )?.id ?? activeSavedSceneIdRef.current
+          // The scene coming on is not an edit of it; the library write below is.
+          persistedWorkingRef.current = { sceneId: null, key: '', shows: null }
+          activeSavedSceneIdRef.current = onStreamId
+          setActiveSavedSceneId(onStreamId)
           setCaptureConfig((latest) => firstRunLookPatch(latest, look))
           const registry = backgroundRegistryRef.current
           const nextRegistry = firstRunBackgroundChoice(registry, look.liveBackgroundId)
           const background = effectiveSceneBackground(nextRegistry)
+          if (onStreamId)
+            editAllScenes((all) =>
+              scenesWithFirstRunLook(all, {
+                onStreamId,
+                layout: normalizeSceneVisual({ layout: next.layout, sources: {}, background: null })
+                  .layout,
+                background: snapshotBackground(background)
+              })
+            )
           libraryBackgroundFingerprintRef.current = JSON.stringify(snapshotBackground(background))
           workingBackgroundRef.current = background
           setWorkingBackground(background)
@@ -11730,7 +11884,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         }
       )
     },
-    [setBackgroundRegistry, setWorkingOrigin]
+    [editAllScenes, storedScenes, setBackgroundRegistry, setWorkingOrigin]
   )
   // A look held behind a running session lands when setup closes, through
   // the Studio's own transaction: one commit with the preset, the shape and
@@ -11770,25 +11924,14 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         return
       }
       if (sourceKind === 'capture') {
-        // Plan 210 D3: another screen or window leaves the saved scene on
-        // stream instead of rewriting it; the list then says "Unsaved scene".
-        const leaves =
-          activeSavedSceneIdRef.current !== null &&
-          capturePickLeavesScene(
-            { ...captureConfigRef.current.sources, app: workingAppRef.current },
-            sources
-          )
+        // Plan 231 D2: a Screen pick changes the screen of the scene on
+        // stream. It never leaves the scene, and a scene made for an app
+        // shows the picked screen from now on.
         workingAppRef.current = undefined
-        if (leaves) {
-          activeSavedSceneIdRef.current = null
-          setActiveSavedSceneId(null)
-          persistWorkingVisual(
-            captureConfigRef.current.layout,
-            captureConfigRef.current.sources,
-            workingBackgroundRef.current,
-            null
-          )
-        }
+        // Idle, the pick is the screen at once. A recording or livestream
+        // confirms the switch first, and that commit saves it (D11).
+        if (!sessionOwnsTransport(recordingRef.current))
+          setSceneShows(activeSavedSceneIdRef.current, showsFromSources(visualSources(sources)))
       }
       if (!sessionOwnsTransport(recordingRef.current)) {
         // Pickers build `sources` from a render-time snapshot; merge only the
@@ -11892,7 +12035,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       loadScene,
       reportError,
       sceneEditMode,
-      persistWorkingVisual
+      setSceneShows
     ]
   )
 
@@ -19063,6 +19206,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       systemAudioShown,
       setSystemAudioEnabled,
       requestCameraPresetTransaction,
+      switchToSceneWithLayout,
       screens,
       activateScreen,
       clearActiveScreen,
@@ -19377,18 +19521,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         const direct = globalShortcutLayout(layoutAction)
         const from = latestRequestedLayoutRef.current ?? current.layout.layoutPreset
         const orientation = layoutPresetOrientation(from)
-        const eligible = BUILTIN_LAYOUTS.filter(
-          ({ id }) =>
-            layoutPresetOrientation(id) === orientation &&
-            sceneSourceProblems(
-              {
-                layout: { ...current.layout, layoutPreset: id, arrangementMode: 'preset' },
-                sources: usingVisualSources(current.sources),
-                background: null
-              },
-              deviceListRef.current.devices
-            ).length === 0
-        )
         const step = layoutAction === 'layout-previous' ? -1 : 1
         const next = layoutAction.startsWith('scene:')
           ? layoutAction
@@ -19396,10 +19528,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             ? `layout:${direct}`
             : nextEligibleScene({
                 current:
-                  sceneShortcutRequestedRef.current ??
-                  (activeSavedSceneIdRef.current
-                    ? `scene:${activeSavedSceneIdRef.current}`
-                    : `layout:${from}`),
+                  sceneShortcutRequestedRef.current ?? `scene:${activeSavedSceneIdRef.current}`,
                 direction: step,
                 scenes: sceneLibrary.scenes,
                 unavailableSceneIds: sceneLibrary.scenes
@@ -19411,7 +19540,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
                 orientation,
                 sessionActive: sessionOwnsTransport(recordingRef.current),
                 appStates: savedSceneAppStates,
-                layouts: eligible.map(({ id }) => id)
+                // Plan 231 D2: Next and Previous walk the scenes; a layout is
+                // not something to switch to.
+                layouts: []
               })
         if (!next) {
           toast.info('No other scene to switch to', { id: 'layout-shortcut-empty' })
@@ -19430,15 +19561,16 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         // Coalesce repeat bursts across the entire scene list.
         layoutShortcutTimerRef.current = setTimeout(() => {
           layoutShortcutTimerRef.current = null
-          const apply = target
-            ? requestCameraPresetTransaction({ layoutPreset: target })
-            : applySavedSceneResult(next.slice(6)).then((result) => {
-                if (!result.ok)
-                  toast.info(result.message ?? "That scene couldn't be applied", {
-                    id: 'scene-shortcut-refused'
-                  })
-                return result.ok
+          // D14: a layout key goes to the first scene with that layout.
+          const apply = (
+            target ? switchToSceneWithLayout(target) : applySavedSceneResult(next.slice(6))
+          ).then((result) => {
+            if (!result.ok && !result.superseded)
+              toast.info(result.message ?? "That scene couldn't be applied", {
+                id: 'scene-shortcut-refused'
               })
+            return result.ok
+          })
           void apply.then((accepted) => {
             if (sceneShortcutRequestedRef.current === next) sceneShortcutRequestedRef.current = null
             if (!accepted && target && latestRequestedLayoutRef.current === target)

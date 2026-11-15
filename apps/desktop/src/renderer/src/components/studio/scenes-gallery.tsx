@@ -1,19 +1,9 @@
-import {
-  galleryPresetIsActive,
-  orientationSwitchPreset,
-  sceneGalleryReason,
-  sceneSourceGaps,
-  usingVisualSources
-} from '@/lib/scene-presets'
-import { ShortcutKeys } from '@/components/ui/shortcut-keys'
 import { DisplayIcon, MobileIcon } from '@/components/icons'
 import { lazy, Suspense, type ReactElement } from 'react'
 const ScenePresetControls = lazy(() => import('@/components/scene-presets'))
 
 import { PanelSection } from '@/components/panel-section'
-import { SceneSwitchPending, SceneSwitchStatus } from '@/components/scene/scene-switch-status'
-import { SectionLabel } from '@/components/section-label'
-import { SceneCard, SceneGalleryReason } from '@/components/studio/scene-card'
+import { SceneSwitchStatus } from '@/components/scene/scene-switch-status'
 import { Button } from '@/components/ui/button'
 import { DisabledReason } from '@/components/ui/disabled-reason'
 import { SegmentedControl, type SegmentedControlOption } from '@/components/ui/segmented-control'
@@ -27,26 +17,18 @@ import {
 } from '@/lib/capture'
 import { EDIT_SCENE_LABEL } from '@/lib/edit-scene'
 import { LAYOUT_PRESET_LABELS } from '@/lib/layout-labels'
-import { openWorkspaceTab } from '@/lib/workspace-navigation'
-import { presetSwitching } from '@/lib/layout-switch-pending'
 
-// Built-in layouts and named visual snapshots share the Scenes surface.
-// The gallery is MODE-SCOPED: horizontal and vertical are two disjoint scene
-// vocabularies, and the orientation toggle in the header is the only way to
-// cross between them (off-air only — the canvas flips with the mode).
+// Plan 231 D2: the gallery shows scenes only, the same list in 16:9 and in
+// 9:16, each in its layout for the studio's orientation. A layout is a choice
+// inside a scene. The orientation toggle in the header flips the canvas (off
+// air only) and puts the scene on stream on in its other layout.
 // Names come from the one layout table (plan 174 S1.4, V-X3).
 const scene = (id: LayoutPreset): { id: LayoutPreset; label: string } => ({
   id,
   label: LAYOUT_PRESET_LABELS[id]
 })
 
-const HORIZONTAL_SCENES: { id: LayoutPreset; label: string }[] = [
-  scene('screen-camera'),
-  scene('screen-only'),
-  scene('camera-only'),
-  scene('side-by-side')
-]
-
+/** The 9:16 layouts, for the Vertical stream panel. */
 export const VERTICAL_SCENES: { id: LayoutPreset; label: string }[] = [
   scene('vertical-camera-top'),
   scene('vertical-camera-bottom'),
@@ -77,60 +59,21 @@ const SCREEN_FRAMING_OPTIONS: SegmentedControlOption<VerticalScreenFraming>[] = 
 ]
 
 export function ScenesGallery(): ReactElement {
-  const {
-    captureConfig,
-    applyCameraPreset,
-    layoutSwitchPending,
-    isSessionActive,
-    activeSavedSceneId,
-    deviceList,
-    settings,
-    runtimeInfo
-  } = useStudioCore()
+  const { captureConfig, applyCameraPreset, isSessionActive } = useStudioCore()
   const editScene = useEditScene()
-  const activePreset = captureConfig.layout.layoutPreset
-  const mode = layoutPresetOrientation(activePreset)
-  const scenes = mode === 'vertical' ? VERTICAL_SCENES : HORIZONTAL_SCENES
+  const mode = layoutPresetOrientation(captureConfig.layout.layoutPreset)
 
-  // Entering a mode re-applies its remembered scene; the orientation⇄canvas
-  // coupling in applyCameraPreset flips the output profile alongside it.
-  // What each scene needs that the current sources lack (plan 174 S3.3).
-  const cards = scenes.map((preset) => ({
-    preset,
-    gaps: sceneSourceGaps(
-      {
-        layout: { ...captureConfig.layout, layoutPreset: preset.id, arrangementMode: 'preset' },
-        sources: usingVisualSources(captureConfig.sources),
-        background: null
-      },
-      deviceList.devices
-    )
-  }))
-  const reason = sceneGalleryReason(
-    cards.map(({ preset, gaps }) => ({ label: preset.label, gaps }))
-  )
-
+  // The scene on stream goes on in its own layout for the other orientation;
+  // the orientation⇄canvas coupling in applyCameraPreset flips the output
+  // profile alongside it.
   const switchMode = (target: LayoutOrientation): void => {
     if (target === mode) {
       return
     }
-    const targetScenes = target === 'vertical' ? VERTICAL_SCENES : HORIZONTAL_SCENES
-    const usable = (layoutPreset: LayoutPreset): boolean =>
-      sceneSourceGaps(
-        {
-          layout: { ...captureConfig.layout, layoutPreset, arrangementMode: 'preset' },
-          sources: usingVisualSources(captureConfig.sources),
-          background: null
-        },
-        deviceList.devices
-      ).length === 0
-    applyCameraPreset({
-      layoutPreset: orientationSwitchPreset(
-        studioModeTogglePreset(target, captureConfig),
-        targetScenes.map((scene) => scene.id),
-        usable
-      )
-    })
+    applyCameraPreset(
+      { layoutPreset: studioModeTogglePreset(target, captureConfig) },
+      { toOrientation: true }
+    )
   }
 
   return (
@@ -173,52 +116,12 @@ export function ScenesGallery(): ReactElement {
         </div>
       }
     >
-      {/* Plan 210 D6: your saved scenes first, in their order, then the
-          layouts, each under its heading. */}
+      {/* Plan 231 D2: the scenes, in their order. */}
       <Suspense fallback={null}>
         <ScenePresetControls />
       </Suspense>
-      <SectionLabel className="px-1">Layouts</SectionLabel>
-      <div className="grid gap-3 [grid-template-columns:repeat(auto-fill,minmax(104px,1fr))]">
-        {cards.map(({ preset, gaps }) => {
-          const active = galleryPresetIsActive(captureConfig.layout, preset.id, activeSavedSceneId)
-          const shortcut = settings.globalShortcuts?.layouts?.[preset.id]
-          return (
-            <SceneCard
-              key={preset.id}
-              data-scene-preset={preset.id}
-              disabled={gaps.length > 0}
-              label={preset.label}
-              meta={
-                presetSwitching(layoutSwitchPending, preset.id) ? (
-                  <SceneSwitchPending />
-                ) : shortcut ? (
-                  <ShortcutKeys accelerator={shortcut} platform={runtimeInfo?.platform} />
-                ) : undefined
-              }
-              selected={active}
-              thumb={
-                <LayoutThumb
-                  framing={captureConfig.layout.verticalScreenFraming}
-                  preset={preset.id}
-                />
-              }
-              onSelect={() => applyCameraPreset({ layoutPreset: preset.id })}
-            />
-          )
-        })}
-      </div>
       {/* Issue #1275: what a slow switch is waiting for. */}
       <SceneSwitchStatus />
-      {/* Why some scenes can't be chosen, once, under the gallery (B-20). */}
-      <SceneGalleryReason
-        action={
-          <Button size="xs" variant="ghost" onClick={() => openWorkspaceTab('sources')}>
-            Open Sources
-          </Button>
-        }
-        reason={reason}
-      />
       {mode === 'vertical' ? (
         <ScreenFramingControl
           value={captureConfig.layout.verticalScreenFraming}

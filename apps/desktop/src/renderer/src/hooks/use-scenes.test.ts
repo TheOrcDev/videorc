@@ -6,8 +6,9 @@ import { act, createElement, StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { SCENE_LIBRARY_KEY } from '@/lib/scene-presets'
-import { defaultScenes, hydrateScenes, SCENES_KEY, type Scene } from '@/lib/scenes'
-import { useScenes } from './use-scenes'
+import { hydrateScenes, SCENES_KEY, type Scene } from '@/lib/scenes'
+import { defaultScenes } from '@/lib/scenes-migration'
+import { prepareScenes, useScenes } from './use-scenes'
 
 vi.mock('@/lib/toast', () => ({ toast: { error: vi.fn() } }))
 import { toast } from '@/lib/toast'
@@ -33,6 +34,8 @@ async function mount(strict = false): Promise<{ current: ReturnType<typeof useSc
     result.current = useScenes()
     return null
   }
+  // As the Studio does before its first render.
+  await prepareScenes()
   const root = createRoot(document.createElement('div'))
   await act(async () =>
     root.render(

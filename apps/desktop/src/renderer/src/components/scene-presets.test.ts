@@ -27,7 +27,6 @@ beforeEach(() => {
     sceneLibraryError: null,
     sceneLibraryActions: {
       readOnly: false,
-      workingOrigin: 'builtin',
       workingVisual: saved().visual,
       workingAudio: { microphoneOff: false, systemAudioEnabled: false },
       insert: vi.fn(() => true),
@@ -43,7 +42,7 @@ beforeEach(() => {
     wsStatus: 'connected',
     scene: { id: 'scene:default', sources: [] },
     saveScene: vi.fn(() => true),
-    deleteSavedScene: vi.fn(() => true),
+    deleteSavedScene: vi.fn(async () => true),
     renameSavedScene: vi.fn(() => true),
     applySavedSceneResult: vi.fn(async () => ({ ok: true })),
     applySavedScene: vi.fn(async () => true)
@@ -145,8 +144,8 @@ describe("Studio's saved scenes (plan 210 D6)", () => {
   })
 
   it('renames from ⋯ and asks before deleting', async () => {
-    mocked.core.savedScenes = [saved()]
-    mocked.core.activeSavedSceneId = 'scene-a'
+    mocked.core.savedScenes = [{ ...saved(), id: 'scene-b', name: 'Desk' }, saved()]
+    mocked.core.activeSavedSceneId = 'scene-b'
     await render()
     await menu('Rename')
     await input('Renamed')
@@ -161,6 +160,45 @@ describe("Studio's saved scenes (plan 210 D6)", () => {
     await click('Delete scene')
     expect(mocked.core.deleteSavedScene).toHaveBeenCalledExactlyOnceWith('scene-a')
     expect(mocked.core.applySavedScene).not.toHaveBeenCalled()
+  })
+
+  it('deleting the scene on stream says which scene goes on (plan 231 D16)', async () => {
+    mocked.core.savedScenes = [{ ...saved(), id: 'scene-b', name: 'Desk' }, saved()]
+    mocked.core.activeSavedSceneId = 'scene-a'
+    await render()
+    await menu('Delete')
+    expect(document.body.textContent).toContain(
+      '“Presentation” and its key are deleted. “Desk” goes on stream.'
+    )
+    await click('Delete scene')
+    expect(mocked.core.deleteSavedScene).toHaveBeenCalledExactlyOnceWith('scene-a')
+  })
+
+  it.each([
+    ['the last scene', false, [saved()], 'Keep at least one scene.'],
+    [
+      'the scene on stream while recording or live',
+      true,
+      [{ ...saved(), id: 'scene-b', name: 'Desk' }, saved()],
+      'Switch to another scene first.'
+    ]
+  ])('Delete is off for %s, with its reason (plan 231 D16)', async (_, live, scenes, reason) => {
+    mocked.core.savedScenes = scenes
+    mocked.core.activeSavedSceneId = 'scene-a'
+    mocked.core.isSessionActive = live
+    await render()
+    const trigger = document.querySelector<HTMLButtonElement>(
+      'button[aria-label="Actions for Presentation"]'
+    )!
+    await act(async () => trigger.click())
+    const item = [...document.querySelectorAll('[role="menuitem"]')].find((entry) =>
+      entry.textContent?.includes('Delete')
+    )!
+    expect(item.getAttribute('aria-disabled') ?? item.getAttribute('data-disabled')).not.toBeNull()
+    expect(document.body.textContent).toContain(reason)
+    await act(async () => (item as HTMLElement).click())
+    expect(document.body.textContent).not.toContain('Delete scene?')
+    expect(mocked.core.deleteSavedScene).not.toHaveBeenCalled()
   })
 
   it('repairs an unavailable window with exact sources, and the scene keeps them', async () => {

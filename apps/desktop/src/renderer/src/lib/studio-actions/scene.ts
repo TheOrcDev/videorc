@@ -1,4 +1,5 @@
-// The picture: a built-in scene by its preset, and a takeover screen.
+// The picture: a scene by its id, or by a layout it uses (plan 231 D14), and
+// a takeover screen.
 
 import type { LayoutPreset } from '@/lib/backend'
 import type { StudioActionExecutor } from './context'
@@ -17,9 +18,12 @@ export const sceneApply: StudioActionExecutor = async (context, fields) => {
   if (!layoutPreset || !(context.knownLayoutPresets as readonly string[]).includes(layoutPreset)) {
     return { ok: false, message: REMOTE_INTENT_COPY.sceneMissing }
   }
-  return (await context.applyLayoutPreset(layoutPreset))
-    ? { ok: true }
-    : { ok: false, message: REMOTE_INTENT_COPY.sceneFailed }
+  const result = await context.applyLayoutPreset(layoutPreset)
+  if (result === true || (typeof result === 'object' && result.ok)) return { ok: true }
+  return {
+    ok: false,
+    message: (typeof result === 'object' && result.message) || REMOTE_INTENT_COPY.sceneFailed
+  }
 }
 
 export const takeoverShow: StudioActionExecutor = async (context, fields) => {

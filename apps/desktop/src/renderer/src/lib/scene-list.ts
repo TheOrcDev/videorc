@@ -1,4 +1,4 @@
-import type { Device, LayoutPreset, LayoutSettings } from './backend'
+import type { Device } from './backend'
 import { layoutPresetNeedsScreen, layoutPresetOrientation } from './capture'
 import { layoutPresetLabel } from './layout-labels'
 import { appWindowFailureCopy } from './scene-apps'
@@ -12,32 +12,10 @@ import {
 } from './scene-presets'
 import type { SceneAppState } from './scene-window-resolution'
 
-// Plan 210 D6: the Scene page leads with one list. Saved scenes come first,
-// in library order (New scene… puts its scenes at the top, a drag or ⌥↑ ⌥↓
-// moves one), then the current orientation's built-in layouts. Studio's
-// gallery, Next scene and Previous scene follow the same order.
-
-/** What the list marks as on stream. */
-export type SceneListActive =
-  | { kind: 'saved'; id: string }
-  | { kind: 'layout'; preset: LayoutPreset }
-  | { kind: 'unsaved' }
-
-/**
- * A saved scene when one is on; a built-in layout when its plain arrangement
- * is on; otherwise "Unsaved scene": a saved scene left by choosing another
- * screen or window (D3), a deleted one's look, or a Freeform arrangement.
- */
-export function sceneListActive(input: {
-  activeSavedSceneId: string | null
-  origin: 'builtin' | 'saved'
-  layout: Pick<LayoutSettings, 'layoutPreset' | 'arrangementMode'>
-}): SceneListActive {
-  if (input.activeSavedSceneId) return { kind: 'saved', id: input.activeSavedSceneId }
-  if (input.origin === 'builtin' && input.layout.arrangementMode !== 'freeform')
-    return { kind: 'layout', preset: input.layout.layoutPreset }
-  return { kind: 'unsaved' }
-}
+// Plan 231 D2: the Scene page leads with one list, the scenes in library
+// order (a new scene goes at the end, a drag or ⌥↑ ⌥↓ moves one). A scene is
+// always on stream. Studio's gallery, Next scene and Previous scene follow
+// the same order.
 
 // The library hook moves scenes too, from the Studio's eager chunk: the move
 // lives in its own module so this one stays with the lazy scene UI.

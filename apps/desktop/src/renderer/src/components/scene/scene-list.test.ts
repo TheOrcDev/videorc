@@ -62,7 +62,6 @@ beforeEach(() => {
     sceneLibraryError: null,
     sceneLibraryActions: {
       readOnly: false,
-      workingOrigin: 'saved',
       workingVisual: figma().visual,
       workingAudio,
       insert: vi.fn(() => true),
@@ -105,7 +104,7 @@ beforeEach(() => {
     sceneEditMode: false,
     saveScene: vi.fn(() => true),
     renameSavedScene: vi.fn(() => true),
-    deleteSavedScene: vi.fn(() => true),
+    deleteSavedScene: vi.fn(async () => true),
     applySavedSceneResult: vi.fn(async () => ({ ok: true })),
     refreshDevices: vi.fn(async () => undefined)
   }
@@ -145,16 +144,14 @@ const button = (label: string) =>
   [...document.querySelectorAll('button')].find((entry) => entry.textContent === label)
 
 describe('the Scene page scene list (plan 210 D6)', () => {
-  it('lists saved scenes in library order, then the orientation’s layouts', async () => {
+  it('lists the scenes in library order, and no layouts (plan 231 D2)', async () => {
     await render()
     expect(savedRows()).toEqual(['figma', 't3', 'display'])
-    const layouts = [...container.querySelectorAll('[data-scene-preset]')].map((row) =>
-      row.getAttribute('data-scene-preset')
-    )
-    expect(layouts).toEqual(['screen-camera', 'screen-only', 'camera-only', 'side-by-side'])
-    // Saved scenes lead, in their own group.
+    // A layout is a choice inside a scene, never a row to switch to.
+    expect(container.querySelector('[data-scene-preset]')).toBeNull()
     const text = container.textContent ?? ''
-    expect(text.indexOf('Saved scenes')).toBeLessThan(text.indexOf('Layouts'))
+    expect(text).not.toContain('Layouts')
+    expect(text).not.toContain('Screen only')
   })
 
   it('shows what each scene shows, its key, Follows, and marks the one on stream', async () => {
@@ -197,15 +194,6 @@ describe('the Scene page scene list (plan 210 D6)', () => {
     expect(document.body.textContent).toContain("couldn't be put on stream")
   })
 
-  it("keeps a layout's name while it applies", async () => {
-    mocked.core.layoutSwitchPending = { layoutPreset: 'screen-only', arrangementMode: 'preset' }
-    await render()
-    const row = container.querySelector('[data-scene-preset="screen-only"]')!
-    expect(row.textContent).toContain('Screen only')
-    expect(row.textContent).toContain('Applying…')
-    expect(rowButton('Screen only').disabled).toBe(false)
-  })
-
   it("disables a scene whose app isn't open, saying so on the row", async () => {
     await render()
     const t3Row = container.querySelector('[data-saved-scene="t3"]')!
@@ -218,10 +206,7 @@ describe('the Scene page scene list (plan 210 D6)', () => {
     await render()
     await act(async () => rowButton('Desk').click())
     expect(mocked.core.applySavedSceneResult).toHaveBeenCalledExactlyOnceWith('display', undefined)
-    await act(async () => rowButton('Screen only').click())
-    expect(mocked.core.applyCameraPreset).toHaveBeenCalledExactlyOnceWith({
-      layoutPreset: 'screen-only'
-    })
+    expect(mocked.core.applyCameraPreset).not.toHaveBeenCalled()
   })
 
   it('moves a focused row with ⌥↑ and ⌥↓, and by dragging', async () => {
@@ -251,21 +236,13 @@ describe('the Scene page scene list (plan 210 D6)', () => {
     expect(actions().move).toHaveBeenLastCalledWith('display', 0)
   })
 
-  it('shows an Unsaved scene row once a saved scene is left (D3)', async () => {
-    mocked.core.activeSavedSceneId = null
-    await render()
-    const unsaved = container.querySelector('[data-unsaved-scene]')!
-    expect(unsaved.textContent).toContain('Unsaved scene')
-    expect(unsaved.textContent).toContain('Save scene…')
-    expect(rowButton('Figma').getAttribute('aria-current')).toBeNull()
-    // A built-in on stream marks its layout row instead.
-    mocked.core = {
-      ...mocked.core,
-      sceneLibraryActions: { ...actions(), workingOrigin: 'builtin' }
-    }
+  it('never shows an unsaved row: a scene is always on stream (plan 231 D2)', async () => {
+    mocked.core.activeSavedSceneId = 'display'
     await render()
     expect(container.querySelector('[data-unsaved-scene]')).toBeNull()
-    expect(rowButton('Screen + camera').getAttribute('aria-current')).toBe('true')
+    expect(document.body.textContent).not.toContain('Unsaved scene')
+    expect(rowButton('Figma').getAttribute('aria-current')).toBeNull()
+    expect(rowButton('Desk').getAttribute('aria-current')).toBe('true')
   })
 
   it('says why Save scene… is off', async () => {
@@ -404,7 +381,10 @@ describe('a saved scene’s ⋯ menu', () => {
     await render()
     await menu('Figma', 'Delete')
     expect(document.body.textContent).toContain('Delete scene?')
-    expect(document.body.textContent).toContain('“Figma” and its key are deleted.')
+    // Plan 231 D16: Figma is on stream, so the scene after it goes on.
+    expect(document.body.textContent).toContain(
+      '“Figma” and its key are deleted. “T3 Code” goes on stream.'
+    )
     await act(async () => button('Cancel')!.click())
     expect(mocked.core.deleteSavedScene).not.toHaveBeenCalled()
     await menu('Figma', 'Delete')

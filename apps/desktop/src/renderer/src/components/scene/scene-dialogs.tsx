@@ -39,6 +39,7 @@ import {
   type SavedScene,
   type SceneVisual
 } from '@/lib/scene-presets'
+import { canDeleteScene } from '@/lib/scenes'
 
 /** One dialog at a time, for the scene list and the Studio gallery alike. */
 export type SceneDialogRequest =
@@ -140,10 +141,30 @@ export function useSceneDialogs(): {
     if (sceneLibraryActions.insert([scene])) close()
   }
 
+  const deleteVerdict = (scene: SavedScene): ReturnType<typeof canDeleteScene> =>
+    canDeleteScene({
+      scenes: savedScenes,
+      id: scene.id,
+      onStreamId: studio.activeSavedSceneId ?? '',
+      sessionActive: studio.isSessionActive
+    })
+  /** What deleting says it does: the scene before it goes on stream when it was on (D16). */
+  const deleteDescription = (scene: SavedScene): string => {
+    const verdict = deleteVerdict(scene)
+    const next =
+      verdict.allowed && verdict.switchToId
+        ? savedScenes.find((entry) => entry.id === verdict.switchToId)
+        : undefined
+    return next
+      ? `“${scene.name}” and its key are deleted. “${next.name}” goes on stream.`
+      : `“${scene.name}” and its key are deleted. What’s on stream stays as it is.`
+  }
+
   const menuItems = (scene: SavedScene): KebabMenuItem[] => {
     const app = scene.visual.sources.app
     const readOnly = sceneLibraryActions.readOnly
     const writes = { disabled: readOnly, disabledReason: readOnly ? READ_ONLY_REASON : null }
+    const deletion = deleteVerdict(scene)
     const audioKept =
       scene.audio !== undefined &&
       JSON.stringify(scene.audio) ===
@@ -216,7 +237,10 @@ export function useSceneDialogs(): {
         id: 'delete',
         label: 'Delete',
         destructive: true,
-        ...writes,
+        // Plan 231 D16: the last scene stays, and so does the scene on stream
+        // while recording or live.
+        disabled: readOnly || !deletion.allowed,
+        disabledReason: readOnly ? READ_ONLY_REASON : deletion.allowed ? null : deletion.reason,
         onSelect: () => setRequest({ kind: 'delete', scene })
       }
     ]
@@ -290,17 +314,16 @@ export function useSceneDialogs(): {
       {/* The model confirm (plan 174 S0.3): what is lost, in one sentence. */}
       <ConfirmDialog
         confirmLabel="Delete scene"
-        description={
-          request?.kind === 'delete'
-            ? `“${request.scene.name}” and its key are deleted. What’s on stream stays as it is.`
-            : ''
-        }
+        description={request?.kind === 'delete' ? deleteDescription(request.scene) : ''}
         open={request?.kind === 'delete'}
         testId="scene-delete"
         title="Delete scene?"
         onCancel={close}
         onConfirm={() => {
-          if (request?.kind === 'delete' && studio.deleteSavedScene(request.scene.id)) close()
+          if (request?.kind !== 'delete') return
+          void studio.deleteSavedScene(request.scene.id).then((deleted) => {
+            if (deleted) close()
+          })
         }}
       />
     </>

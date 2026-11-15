@@ -1,26 +1,15 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { GlobalShortcutsConfig } from '@/lib/backend'
-import {
-  defaultCaptureConfig,
-  loadCaptureConfig,
-  loadJson,
-  STORAGE_KEYS,
-  type SettingsState
-} from '@/lib/capture'
+import { loadJson } from '@/lib/capture'
 import { movedScenes } from '@/lib/scene-order'
-import {
-  hydrateSceneLibrary,
-  hydrateWorkingScene,
-  SCENE_LIBRARY_KEY,
-  sceneNameError,
-  WORKING_SCENE_KEY
-} from '@/lib/scene-presets'
+import { sceneNameError } from '@/lib/scene-presets'
 import {
   canDeleteScene,
   hydrateScenes,
-  migrateToScenes,
   normalizeScene,
   SCENES_KEY,
+  withMainDisplay,
+  type MainDisplay,
   type Scene,
   type SceneLibrary
 } from '@/lib/scenes'
@@ -48,11 +37,32 @@ function read(key: string): unknown {
   }
 }
 
+/** The migration `prepareScenes` made for this launch, when the profile needed one. */
+let prepared: { library: SceneLibrary; globalShortcuts: GlobalShortcutsConfig } | null = null
+
+/** Whether the stored library can be read as it is, with no migration. */
+export function scenesStored(): boolean {
+  return hydrateScenes(read(SCENES_KEY)).library !== null
+}
+
 /**
- * The scene library as stored, or migrated from v1 and the working setup when
- * v2 is missing (plan 231 D15). Reads only: the hook writes the migration.
- * A version this build doesn't know is never written over: the scenes are
- * then today's setup, in memory, read-only.
+ * Before the Studio first renders: a profile with no usable scene library
+ * gets one made from its v1 scenes and working setup (plan 231 D15). The
+ * migration is its own chunk, loaded only on the launch that needs it, so
+ * every later launch reads the stored library with no extra code.
+ */
+export async function prepareScenes(): Promise<void> {
+  const stored = hydrateScenes(read(SCENES_KEY))
+  if (stored.library) return
+  const { migrateStoredScenes } = await import('@/lib/scenes-migration')
+  prepared = migrateStoredScenes({ readOnly: stored.readOnly })
+}
+
+/**
+ * The scene library as stored, or the one `prepareScenes` migrated from v1
+ * and the working setup when v2 is missing. Reads only: the hook writes the
+ * migration. A version this build doesn't know is never written over: the
+ * scenes are then today's setup, in memory, read-only.
  */
 export function loadScenes(): ScenesState {
   const stored = hydrateScenes(read(SCENES_KEY))
@@ -64,23 +74,12 @@ export function loadScenes(): ScenesState {
       migratedShortcuts: null,
       unwritten: false
     }
-  let migrated: ReturnType<typeof migrateToScenes>
-  try {
-    const settings = read(STORAGE_KEYS.settings) as Partial<SettingsState> | null
-    migrated = migrateToScenes(
-      stored.readOnly ? null : hydrateSceneLibrary(read(SCENE_LIBRARY_KEY)).library,
-      hydrateWorkingScene(read(WORKING_SCENE_KEY)),
-      loadCaptureConfig(),
-      settings?.globalShortcuts
-    )
-  } catch {
-    migrated = migrateToScenes(null, null, defaultCaptureConfig, undefined)
-  }
+  if (!prepared) throw new Error('The scene library was read before it was prepared.')
   return {
-    library: migrated.library,
+    library: prepared.library,
     readOnly: stored.readOnly,
     error: stored.error,
-    migratedShortcuts: stored.readOnly ? null : migrated.globalShortcuts,
+    migratedShortcuts: stored.readOnly ? null : prepared.globalShortcuts,
     unwritten: !stored.readOnly
   }
 }
@@ -210,7 +209,41 @@ export function useScenes() {
     },
     [writeScenes]
   )
+  /**
+   * The main display, once the device list names it, for the scenes that show
+   * it without knowing which it is (a new user's defaults). Not an edit.
+   */
+  const nameMainDisplay = useCallback(
+    (display: MainDisplay): boolean => {
+      const { library } = current.current
+      const next = withMainDisplay(library, display)
+      return next !== library && write(next, { quiet: true })
+    },
+    [write]
+  )
+  /** Several scenes edited in one write (first-run setup's look). */
+  const replaceAll = useCallback(
+    (edit: (scenes: readonly Scene[]) => Scene[]): boolean => {
+      const { scenes } = current.current.library
+      let normalized: Scene[]
+      try {
+        normalized = edit(scenes).map(normalizeScene)
+      } catch {
+        return false
+      }
+      if (
+        normalized.length !== scenes.length ||
+        normalized.some((scene, index) => scene.id !== scenes[index]!.id)
+      )
+        return false
+      return writeScenes(normalized)
+    },
+    [writeScenes]
+  )
+  /** The library as written, before the next render shows it. */
+  const read = useCallback((): SceneLibrary => current.current.library, [])
   return {
+    read,
     scenes: state.library.scenes,
     onStreamId: state.library.onStreamId,
     error: state.error,
@@ -221,6 +254,8 @@ export function useScenes() {
     rename,
     move,
     setOnStream,
-    remove
+    remove,
+    nameMainDisplay,
+    replaceAll
   }
 }
