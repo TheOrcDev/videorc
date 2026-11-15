@@ -19,6 +19,18 @@ vi.mock('@/hooks/use-studio', () => ({
   useStudioCore: () => mocked.core,
   useStudioAudio: () => ({ audioMeter: null })
 }))
+// The display stills (S5's hook): what the picker asks for, and what it answers.
+const stills = vi.hoisted(() => ({
+  answer: new Map<string, string>(),
+  asked: [] as { targets: unknown[]; hidden: boolean; busy: boolean }[]
+}))
+vi.mock('@/hooks/use-scene-pictures', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/hooks/use-scene-pictures')>()),
+  useScenePictures: (input: { targets: unknown[]; hidden: boolean; busy: boolean }) => {
+    stills.asked.push(input)
+    return stills.answer
+  }
+}))
 
 let root: Root
 let container: HTMLDivElement
@@ -80,8 +92,12 @@ beforeEach(() => {
   root = createRoot(container)
   onAdd.mockReset()
   onChange.mockReset()
+  stills.answer = new Map()
+  stills.asked = []
   mocked.core = {
     runtimeInfo: { platform: 'darwin' },
+    screenPrivacy: { hidden: false },
+    isSessionActive: false,
     deviceList: { devices },
     captureConfig: {
       ...defaultCaptureConfig,
@@ -241,6 +257,25 @@ describe('Add scene… (plan 231 D6)', () => {
     expect(images).toEqual(['data:image/jpeg;base64,BB', 'data:image/png;base64,AA'])
     expect(card('com.figma.Desktop')!.textContent).toContain('2 windows')
     expect(mocked.core.refreshDevices).not.toHaveBeenCalled()
+  })
+
+  it('pictures each display while it is open, frozen while Hide screen holds (D7, D17)', async () => {
+    stills.answer = new Map([[`display:${display.id}`, 'data:image/jpeg;base64,DD']])
+    await render()
+    expect(stills.asked.at(-1)).toEqual({
+      targets: [{ kind: 'display', screenId: display.id }],
+      hidden: false,
+      busy: false
+    })
+    const image = pick(`display:${display.id}`).querySelector('img')!
+    expect(image.getAttribute('src')).toBe('data:image/jpeg;base64,DD')
+    // A quiet still that fills the well, the same in both themes.
+    expect(image.className).toContain('object-cover')
+
+    mocked.core.screenPrivacy = { hidden: true }
+    mocked.core.isSessionActive = true
+    await render()
+    expect(stills.asked.at(-1)).toMatchObject({ hidden: true, busy: true })
   })
 
   it('says what to do when no app has a window, and still offers the rest', async () => {

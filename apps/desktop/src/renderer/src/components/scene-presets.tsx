@@ -5,13 +5,14 @@ import {
   useState,
   type DragEvent,
   type KeyboardEvent,
-  type ReactElement
+  type ReactElement,
+  type ReactNode
 } from 'react'
 
 import { KebabMenu } from '@/components/kebab-menu'
 import type { StudioLook } from '@/components/lcd-panel'
 import { PanelSection } from '@/components/panel-section'
-import { AppIconImage, SceneGlyphIcon } from '@/components/scene/app-icon'
+import { SceneGlyphIcon } from '@/components/scene/app-icon'
 import { FollowFrontAppSwitch } from '@/components/scene/follow-front-app-switch'
 import { changeScreenBlockedReason, useSceneDialogs } from '@/components/scene/scene-dialogs'
 import { SceneShortcutKeys } from '@/components/scene/scene-shortcut-keys'
@@ -25,6 +26,7 @@ import { SegmentedControl, type SegmentedControlOption } from '@/components/ui/s
 import { ShortcutKeys } from '@/components/ui/shortcut-keys'
 import { useAppIcons } from '@/hooks/use-app-icons'
 import { useEditScene } from '@/hooks/use-edit-scene'
+import { scenePictureTargetKey, useScenePictures } from '@/hooks/use-scene-pictures'
 import { useStudioCore } from '@/hooks/use-studio'
 import {
   layoutPresetOrientation,
@@ -41,7 +43,13 @@ import {
   sceneGlyph,
   sceneMoveKeyStep
 } from '@/lib/scene-list'
-import { sceneCardsCameraGaps, sceneSlotKeysLine } from '@/lib/scene-section'
+import {
+  sceneCardsCameraGaps,
+  sceneCardWords,
+  scenePictureTarget,
+  sceneSlotKeysLine
+} from '@/lib/scene-section'
+import type { SceneVisual } from '@/lib/scene-presets'
 import { cn } from '@/lib/utils'
 import { openWorkspaceTab } from '@/lib/workspace-navigation'
 
@@ -73,16 +81,11 @@ const STUDIO_ORIENTATION_OPTIONS: SegmentedControlOption<LayoutOrientation>[] = 
  * fields. A lazy chunk: the dialogs and fields stay out of the first paint.
  *
  * Add scene… and Change screen… (S7) are `useSceneDialogs`' picker, here
- * and on the Scene page; ⌘K's Add scene… opens it here. `pictures` takes
- * each scene's still (scene id → image URL, from `useScenePictures`, S5).
+ * and on the Scene page; ⌘K's Add scene… opens it here. Each card's still
+ * comes from `useScenePictures` (S5, D17): macOS only, never while recording
+ * or live, and frozen while Hide screen holds.
  */
-export function ScenesSection({
-  look = 'default',
-  pictures
-}: {
-  look?: StudioLook
-  pictures?: ReadonlyMap<string, string>
-}): ReactElement {
+export function ScenesSection({ look = 'default' }: { look?: StudioLook }): ReactElement {
   const studio = useStudioCore()
   const {
     savedScenes,
@@ -96,7 +99,8 @@ export function ScenesSection({
     runtimeInfo,
     captureConfig,
     applyCameraPreset,
-    isSessionActive
+    isSessionActive,
+    screenPrivacy
   } = studio
   const dialogs = useSceneDialogs()
   const editScene = useEditScene()
@@ -114,6 +118,27 @@ export function ScenesSection({
       ...[...glyphs.values()].flatMap((glyph) => (glyph.kind === 'app' ? [glyph.bundleId] : []))
     ])
   ])
+  // D7: one still per thing shown (three scenes on Display 1 share one), and
+  // each card takes its own scene's.
+  const pictureTargets = new Map(
+    savedScenes.flatMap((entry) => {
+      const target = scenePictureTarget(entry.visual)
+      return target ? [[entry.id, target] as const] : []
+    })
+  )
+  const stills = useScenePictures({
+    targets: [
+      ...new Map(
+        [...pictureTargets.values()].map((target) => [scenePictureTargetKey(target), target])
+      ).values()
+    ],
+    hidden: screenPrivacy.hidden,
+    busy: isSessionActive
+  })
+  const pictureOf = (id: string): string | undefined => {
+    const target = pictureTargets.get(id)
+    return target ? stills.get(scenePictureTargetKey(target)) : undefined
+  }
   const camera = sceneCardsCameraGaps(savedScenes, deviceList.devices)
   const keys = sceneSlotKeysLine(settings.globalShortcuts, platform)
   const openDialog = dialogs.open
@@ -227,7 +252,9 @@ export function ScenesSection({
       ) : null}
       <div
         ref={gridRef}
-        className="grid gap-2 [grid-template-columns:repeat(auto-fill,minmax(90px,1fr))]"
+        // Cards at least 160 px wide: a picture big enough to tell one app
+        // from another, and "Screen + camera" on one line.
+        className="grid gap-2 [grid-template-columns:repeat(auto-fill,minmax(160px,1fr))]"
         data-videorc-saved-scenes=""
       >
         {savedScenes.map((entry, index) => {
@@ -282,18 +309,28 @@ export function ScenesSection({
               }}
             >
               {/* One SceneCard for every scene (plan 174 S3.3, B-20): the
-                  selected look and its check say which one is on. */}
+                  selected look, its ring and its check say which one is on. */}
               <SceneCard
                 data-saved-scene={entry.id}
                 // Another scene's click takes a pending switch over (issue #1275).
                 disabled={blocked !== null || cameraBlocked || pending}
                 disabledReason={blocked ?? (cameraBlocked ? camera.reason : null)}
                 icon={
-                  app ? (
-                    <AppIconImage className="size-4" icon={icons.get(app.bundleId)} />
-                  ) : undefined
+                  <SceneGlyphIcon
+                    className={app ? 'size-4' : undefined}
+                    glyph={glyphs.get(entry.id)!}
+                    icons={icons}
+                  />
                 }
                 keyShortcuts={moveKeys}
+                keys={
+                  <SceneShortcutKeys
+                    config={settings.globalShortcuts}
+                    platform={platform}
+                    position={index + 1}
+                    sceneId={entry.id}
+                  />
+                }
                 label={entry.name}
                 menu={
                   <KebabMenu
@@ -303,36 +340,27 @@ export function ScenesSection({
                   />
                 }
                 meta={
-                  <span className="flex flex-col gap-1">
-                    {pending ? (
-                      <SceneSwitchPending />
-                    ) : (
-                      (blocked ??
-                      (!cameraBlocked && !app && dialogs.needsSources(entry)
-                        ? 'Resolve sources'
-                        : null))
-                    )}
-                    <SceneShortcutKeys
-                      config={settings.globalShortcuts}
-                      platform={platform}
-                      position={index + 1}
-                      sceneId={entry.id}
-                    />
-                  </span>
+                  pending ? (
+                    <SceneSwitchPending />
+                  ) : (
+                    (blocked ??
+                    (!cameraBlocked && !app && dialogs.needsSources(entry)
+                      ? 'Resolve sources'
+                      : sceneCardWords(entry)))
+                  )
                 }
                 selected={activeSavedSceneId === entry.id}
                 thumb={
-                  <LayoutThumb
-                    framing={entry.visual.layout.verticalScreenFraming}
+                  <SceneThumb
                     glyph={
                       <SceneGlyphIcon
-                        className="size-5"
+                        className="size-6"
                         glyph={glyphs.get(entry.id)!}
                         icons={icons}
                       />
                     }
-                    picture={pictures?.get(entry.id)}
-                    preset={entry.visual.layout.layoutPreset}
+                    picture={pictureOf(entry.id)}
+                    visual={entry.visual}
                   />
                 }
                 onKeyDown={moveFromKeyboard}
@@ -368,3 +396,39 @@ export function ScenesSection({
   )
 }
 export default ScenesSection
+
+/**
+ * A card's well (D7): the scene's layout for the studio's orientation, its
+ * still in the screen area. 16:9 at the card's width; a 9:16 layout stands
+ * at the height of a 4:3 well in the middle of it, so the 9:16 studio's cards
+ * share one shape and their pictures stay big enough to read.
+ */
+function SceneThumb({
+  visual,
+  picture,
+  glyph
+}: {
+  visual: SceneVisual
+  picture: string | undefined
+  glyph: ReactNode
+}): ReactElement {
+  const { layoutPreset, verticalScreenFraming } = visual.layout
+  const thumb = (className?: string) => (
+    <LayoutThumb
+      className={className}
+      framing={verticalScreenFraming}
+      glyph={glyph}
+      picture={picture}
+      preset={layoutPreset}
+    />
+  )
+  if (layoutPresetOrientation(layoutPreset) === 'horizontal') return thumb()
+  return (
+    <span
+      className="flex aspect-[4/3] w-full items-center justify-center rounded-chip bg-inset py-1"
+      data-slot="scene-thumb-vertical"
+    >
+      {thumb('h-full w-auto')}
+    </span>
+  )
+}

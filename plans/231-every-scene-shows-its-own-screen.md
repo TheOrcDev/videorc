@@ -1529,3 +1529,121 @@ the dev harness's own now; `smoke:smart-scenes`'s `scene-new`,
 `add-scene-dialog`, `change-screen-dialog`, `change-screen-apply` and
 `data-pick`; S6's `scene-screen-dialog` is gone; and
 `scripts/lib/smart-scenes-gate.mjs` still says "New scene… keeps none".
+
+### S6b. Pictures on the cards, and the Scenes section polish (2026-11-15)
+
+Done. Renderer only: no backend, contract or smoke script change. The
+backend binary was rebuilt once (`cargo build -p videorc-backend` in a build
+slot, 6 min 22 s) so the dev app had S5's `sources.scene_pictures` for the
+screenshots.
+
+**Pictures (D7, D17)**
+
+- `ScenesSection` calls `useScenePictures` once. Its targets are what each
+  scene shows when its layout in the studio's orientation draws a screen
+  (`scenePictureTarget` in `lib/scene-section.ts`: the app, before its
+  resolved window; a fixed window; a display), one per thing shown, keyed by
+  `scenePictureTargetKey` (the three default scenes on Display 1 ask once).
+  Camera only, No screen, a test pattern and a main display not yet named ask
+  for none. `hidden` is `screenPrivacy.hidden`, `busy` is `isSessionActive`.
+  Each card takes its scene's still by key; the `pictures` prop is gone.
+- Add scene… and Change screen… ask for the displays while the picker is open
+  and fill `DisplayChoice.picture` (`object-cover` in the well).
+- A still fills the layout's screen area with `object-cover`, the camera area
+  stays a neutral opaque plate (now with the camera glyph at card size), and
+  there is no live badge; the same in both themes. Windows and Linux get no
+  pictures (the hook asks nothing off macOS) and keep their glyphs.
+- On this Mac all 6 stills came back (Discord, Chrome, T3 Code (Nightly) and
+  Display 1 behind the four defaults) and both displays in the picker, through
+  the terminal's Screen Recording grant.
+
+**The cards** (`components/studio/scene-card.tsx`)
+
+- Grid `repeat(auto-fill, minmax(160px, 1fr))`, gap 8. Measured in the app:
+  the Scenes column is 704 px at 1280 × 860 (4 across, 170 px cards) and
+  384 px at 960 × 660 (2 across, 188 px cards).
+- One structure at fixed heights: the picture well; a 20 px name row (the
+  icon of what it shows, for every scene, then the name on one line, then the
+  check, or the ⋯ in the same place on hover and focus); a 20 px meta row
+  (`sceneCardWords`: "Front window", "Figma · front window" for a renamed app
+  scene, the display's name without its size, a window's title, "No screen";
+  or the blocked reason, "Resolve sources", "Applying…"), with the key chips at
+  its end. "Screen + camera" fits whole at 170 px; a cut name (and cut meta
+  words) shows whole in a tooltip, measured after render and on resize.
+- The scene on stream: the chrome plate, a 2 px `outline-foreground` ring
+  around the picture (black in light, white in dark) and the check.
+- A blocked card dims its picture, icon and name, never its reason.
+- 9:16 studio: the upright layout stands in a 4:3 well, so its picture stays
+  readable (a 16:9 well made it 48 px wide).
+- First-run setup's `size="sm"` keeps its wrapping two-line names and the
+  check on the picture (#1083).
+
+**The fields** (`components/studio/scene-on-stream.tsx`)
+
+- "On stream: T3 Code" is an h3 at 13 px / 600 with "Changes here save into
+  this scene." under it, after a hairline and 16 px, as a nested section.
+- Screen: **Hide screen** and **Change screen…** side by side in the row's
+  action area (`HideScreenButton`, 28 px like its neighbour). Its key chip
+  rides inside it while the fields are at least 512 px wide
+  (`@lg/scene-fields`), always in its tooltip. "Screen hidden" sits beside
+  the field's name. `ScreenPrivacyLine` is gone; `data-slot="screen-privacy"`
+  and `[data-videorc-screen-privacy]` stay.
+- Layout: one `Select` in both orientations (my call: the skill's
+  SegmentedControl is for 2 to 4 values and 9:16 has six; one control keeps
+  them consistent, and the Vertical stream's own Select already was one).
+  Each item and the trigger show the layout's icon-size diagram and name
+  (`LayoutChoice`, now `inTrigger`); the Vertical stream's trigger shows its
+  diagram too. `LayoutThumb`'s `compact` now also thins the 9:16 diagram,
+  and it takes a sizing `className`. Items keep `data-scene-layout`, the
+  trigger `data-videorc-scene-layout`.
+
+**Numbers:** `pnpm typecheck`, `pnpm lint`, Prettier on the 13 touched files
+and `git diff --check` green. Full desktop unit run (`--maxWorkers=2
+--minWorkers=1`): 706 files, 8,243 passed, 1 skipped, no flake seen. New or
+rewritten tests: `scene-card.test.ts` (structure, fixed rows, the ring, check
+or ⋯, the dimmed card's reason, the cut name's tooltip, first-run's wrap);
+`scene-presets.test.ts` (targets per card, deduplicated, `hidden` and `busy`,
+pictures to the right cards, glyphs without, the meta words and icons);
+`scene-picker-dialog.test.ts` (display stills, `hidden`, `busy`);
+`scene-on-stream.test.ts` (the heading, Hide screen beside Change screen…
+with its key, the chip by the name, Layout as a Select); `scene-section.test.ts`
+(`scenePictureTarget`, `sceneCardWords`); `scene-list.test.ts`'s fixture.
+
+|                          |       raw |    gzip |
+| ------------------------ | --------: | ------: |
+| Before S6b (`ad21548fc`) | 2,378,584 | 489,160 |
+| After S6b                | 2,378,584 | 489,165 |
+| Cap                      | 2,365,000 | 487,000 |
+
+Nothing new is eager: the entry is byte-for-byte the same size (+5 gzip from
+the lazy chunks' new hashed names in its preload map). The hook rides the lazy
+`scene-shortcut-keys` chunk (56.54 to 61.82 kB), the Scenes chunk is 39.71 kB
+(from 37.33), `scene-card` 7.09 kB (from 3.18, the tooltip). The overage is
+still S2's, the owner's call.
+
+**Screenshots** (light and dark, 1280 × 860 and 960 × 660; an isolated
+profile, Add scene… with T3 Code (Nightly), Google Chrome and Discord moved to
+the front, T3 Code on stream, Follow off so the app in front never takes the
+stream) in `/Users/orcdev/projects/plan-231-run/S6b/shots/`:
+`videorc-ui-scenes-{size}-{theme}` and `-scenes-fields-`, `-add-scene-` (the
+display pictures), `-scenes-9x16-`, `-scenes-9x16-fields-`, `-scenes-lcd-`,
+and at 1280: `-scenes-focused-` (the ⋯ and the whole name's tooltip),
+`-scenes-layout-open-`, `-scenes-9x16-layout-open-`, `-scenes-hidden-` (Hide
+screen holding). Capture script: `S6b/scratch/capture-s6b.mjs` (not
+committed). A card under the real pointer shows its ⋯ in some shots.
+
+**Deviations**
+
+- 960 × 660 shows two cards across, not about three: the column is 384 px,
+  and three across would be 122 px cards, S6's problem again. The brief's
+  160 to 200 px minimum wins.
+- The 9:16 studio's cards use a 4:3 well, not 16:9 (above).
+- The 16:9 Layout is a Select, not a SegmentedControl (above).
+- The camera plate on a card draws the camera glyph.
+
+**What S8, S9 and S11 must know:** the Layout field has no `role="radio"`
+anymore: open `[data-slot="scene-layout-field"] [aria-label="Layout"]` and
+choose `[data-scene-layout="<preset>"]`. Hide screen is a 28 px button whose
+text is "Hide screen" plus its key chip while there is room. The Scene page's
+rows (S8) don't show pictures yet; `scenePictureTarget` and the hook are
+ready for them.

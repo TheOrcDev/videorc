@@ -29,6 +29,7 @@ import { Input } from '@/components/ui/input'
 import { Spinner } from '@/components/ui/spinner'
 import { useAppChoices } from '@/hooks/use-app-choices'
 import { useAppIcons } from '@/hooks/use-app-icons'
+import { scenePictureTargetKey, useScenePictures } from '@/hooks/use-scene-pictures'
 import { useStudioCore } from '@/hooks/use-studio'
 import type { Device, LayoutPreset } from '@/lib/backend'
 import { capturePickerDevices, hasSelectedCameraSource } from '@/lib/capture'
@@ -113,14 +114,29 @@ function Picker({
   onAdd: (picks: ScreenPick[]) => void
   onChange: (pick: ScreenPick) => void
 }): ReactElement {
-  const { runtimeInfo, deviceList, captureConfig } = useStudioCore()
+  const { runtimeInfo, deviceList, captureConfig, screenPrivacy, isSessionActive } = useStudioCore()
   const platform = runtimeInfo?.platform
   // App scenes are macOS only (plan 210 D12): elsewhere the Apps group is absent.
   const mac = platform === 'darwin'
   const change = mode.kind === 'change' ? mode : null
   const apps = useAppChoices(mac)
   const windows = change && mac ? windowChoices(deviceList.devices, apps.selfBundleIds) : []
-  const displays = displayChoices(deviceList.devices, platform)
+  // D7, D17: a still of each display while the picker is open (macOS; never
+  // while recording or live, frozen while Hide screen holds).
+  const displayList = displayChoices(deviceList.devices, platform)
+  const displayStills = useScenePictures({
+    targets: displayList.map(({ device }) => ({ kind: 'display', screenId: device.id })),
+    hidden: screenPrivacy.hidden,
+    busy: isSessionActive
+  })
+  const displays = displayList.map(
+    (choice): DisplayChoice => ({
+      ...choice,
+      picture:
+        displayStills.get(scenePictureTargetKey({ kind: 'display', screenId: choice.device.id })) ??
+        choice.picture
+    })
+  )
   const icons = useAppIcons([
     ...new Set([
       ...apps.apps.map((app) => app.bundleId),
@@ -494,8 +510,9 @@ function DisplayCard({
       selected={selected}
       title={name}
       well={
+        // A quiet still of the whole display, the same in both themes.
         picture ? (
-          <img alt="" className="size-full object-contain" draggable={false} src={picture} />
+          <img alt="" className="size-full object-cover" draggable={false} src={picture} />
         ) : (
           <DisplayIcon aria-hidden className="size-8 text-muted-foreground" />
         )

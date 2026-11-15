@@ -2,7 +2,8 @@
 import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { normalizeSceneVisual } from '@/lib/scene-presets'
+import type { LayoutPreset } from '@/lib/backend'
+import { normalizeSceneVisual, type VisualSources } from '@/lib/scene-presets'
 import { defaultCaptureConfig } from '@/lib/capture'
 import {
   FOLLOW_SETTINGS_STORAGE_KEY,
@@ -21,10 +22,24 @@ vi.mock('@/hooks/use-studio', () => ({
 }))
 const openWorkspaceTab = vi.hoisted(() => vi.fn())
 vi.mock('@/lib/workspace-navigation', () => ({ openWorkspaceTab }))
+// The stills (S5's hook): what the section asks for, and what it answers.
+const stills = vi.hoisted(() => ({
+  answer: new Map<string, string>(),
+  asked: [] as { targets: unknown[]; hidden: boolean; busy: boolean }[]
+}))
+vi.mock('@/hooks/use-scene-pictures', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/hooks/use-scene-pictures')>()),
+  useScenePictures: (input: { targets: unknown[]; hidden: boolean; busy: boolean }) => {
+    stills.asked.push(input)
+    return stills.answer
+  }
+}))
 let root: Root
 let container: HTMLDivElement
 beforeEach(() => {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
+  stills.answer = new Map()
+  stills.asked = []
   container = document.createElement('div')
   document.body.append(container)
   root = createRoot(container)
@@ -303,11 +318,21 @@ describe("Studio's Scenes section (plan 231 D8)", () => {
         layout: { ...defaultCaptureConfig.layout, layoutPreset: 'camera-only' }
       }
       await render()
-      const layoutRadio = () =>
-        container.querySelector<HTMLButtonElement>(
-          '[data-slot="scene-layout-field"] [role="radio"][aria-label="Screen + camera"]'
-        )!
-      await act(async () => layoutRadio().click())
+      const chooseScreenCamera = async () => {
+        await act(async () =>
+          container
+            .querySelector<HTMLElement>('[data-slot="scene-layout-field"] [aria-label="Layout"]')!
+            .click()
+        )
+        await act(async () =>
+          document
+            .querySelector<HTMLElement>(
+              '[data-slot="select-content"][data-open] [data-scene-layout="screen-camera"]'
+            )!
+            .click()
+        )
+      }
+      await chooseScreenCamera()
       expect(document.body.textContent).toContain(
         'Screen + camera shows a screen, and “Presentation” shows none yet.'
       )
@@ -318,7 +343,7 @@ describe("Studio's Scenes section (plan 231 D8)", () => {
       expect(mocked.core.switchSourceDeviceLive).not.toHaveBeenCalled()
 
       // Again, and choose: the screen goes on first, then the layout.
-      await act(async () => layoutRadio().click())
+      await chooseScreenCamera()
       await pick('display:screen:screencapturekit:1')
       await act(async () => applyButton().click())
       expect(mocked.core.switchSourceDeviceLive).toHaveBeenCalledExactlyOnceWith(
@@ -470,17 +495,118 @@ describe("Studio's Scenes section (plan 231 D8)", () => {
   })
 
   it('draws the scene’s picture in its screen area, else what it shows (plan 231 D7)', async () => {
-    mocked.core.savedScenes = [saved(), { ...saved(), id: 'scene-b', name: 'Desk' }]
-    await render({ pictures: new Map([['scene-a', 'data:image/jpeg;base64,AAAA']]) })
-    const screen = (id: string) =>
-      container.querySelector(`[data-saved-scene="${id}"] [data-slot="layout-thumb-screen"]`)!
-    expect(screen('scene-a').querySelector('img')?.getAttribute('src')).toBe(
-      'data:image/jpeg;base64,AAAA'
-    )
-    expect(screen('scene-a').hasAttribute('data-picture')).toBe(true)
+    const scene = (id: string, layoutPreset: LayoutPreset, sources: VisualSources) => ({
+      ...saved(),
+      id,
+      name: id,
+      visual: normalizeSceneVisual({
+        layout: { ...defaultCaptureConfig.layout, layoutPreset },
+        sources,
+        background: null
+      })
+    })
+    const figma = { bundleId: 'com.figma.Desktop', name: 'Figma', follows: true }
+    mocked.core.savedScenes = [
+      scene('figma', 'screen-camera', { app: figma, windowId: 'window:4' }),
+      scene('display', 'screen-only', { screenId: 'screen:1', screenName: 'Display 1' }),
+      scene('beside', 'side-by-side', { screenId: 'screen:1', screenName: 'Display 1' }),
+      scene('window', 'screen-only', { windowId: 'window:9', windowName: 'Notes' }),
+      scene('break', 'camera-only', { screenId: 'screen:1' }),
+      scene('pattern', 'screen-only', { testPattern: true })
+    ]
+    stills.answer = new Map([
+      ['app:com.figma.Desktop', 'data:image/jpeg;base64,FIGMA'],
+      ['display:screen:1', 'data:image/jpeg;base64,DISPLAY']
+    ])
+    await render()
+    // One still per thing shown: the two scenes on Display 1 share one, and a
+    // scene whose layout draws no screen (or a test pattern) asks for none.
+    expect(stills.asked.at(-1)).toEqual({
+      targets: [
+        { kind: 'app', bundleId: 'com.figma.Desktop' },
+        { kind: 'display', screenId: 'screen:1' },
+        { kind: 'window', windowId: 'window:9' }
+      ],
+      hidden: false,
+      busy: false
+    })
+    const screens = (id: string) => [
+      ...container.querySelectorAll(`[data-saved-scene="${id}"] [data-slot="layout-thumb-screen"]`)
+    ]
+    const picture = (id: string) => screens(id)[0]?.querySelector('img')?.getAttribute('src')
+    expect(picture('figma')).toBe('data:image/jpeg;base64,FIGMA')
+    expect(picture('display')).toBe('data:image/jpeg;base64,DISPLAY')
+    expect(picture('beside')).toBe('data:image/jpeg;base64,DISPLAY')
+    expect(screens('display')[0]!.hasAttribute('data-picture')).toBe(true)
     // No picture yet (or not macOS): the layout keeps its glyph.
-    expect(screen('scene-b').querySelector('img')).toBeNull()
-    expect(screen('scene-b').querySelector('svg')).not.toBeNull()
+    expect(picture('window')).toBeUndefined()
+    expect(screens('window')[0]!.querySelector('svg')).not.toBeNull()
+    expect(screens('pattern')[0]!.querySelector('img')).toBeNull()
+    expect(screens('break')).toHaveLength(0)
+  })
+
+  it('freezes the stills while Hide screen holds, and takes none while recording or live (D7, D17)', async () => {
+    mocked.core.savedScenes = [saved()]
+    mocked.core.screenPrivacy = { hidden: true }
+    await render()
+    expect(stills.asked.at(-1)).toMatchObject({ hidden: true, busy: false })
+    mocked.core.screenPrivacy = { hidden: false }
+    mocked.core.isSessionActive = true
+    await render()
+    expect(stills.asked.at(-1)).toMatchObject({ hidden: false, busy: true })
+  })
+
+  it('gives every card a name row and a meta row: what it shows, then its keys', async () => {
+    const figma = { bundleId: 'com.figma.Desktop', name: 'Figma', follows: true }
+    const visual = (layoutPreset: LayoutPreset, sources: VisualSources) =>
+      normalizeSceneVisual({
+        layout: { ...defaultCaptureConfig.layout, layoutPreset },
+        sources,
+        background: null
+      })
+    mocked.core.savedScenes = [
+      { ...saved(), id: 'a', name: 'Figma', visual: visual('screen-only', { app: figma }) },
+      { ...saved(), id: 'b', name: 'Design', visual: visual('screen-only', { app: figma }) },
+      {
+        ...saved(),
+        id: 'c',
+        name: 'Screen + camera',
+        visual: visual('screen-only', {
+          screenId: 'screen:1',
+          screenName: 'Built-in Retina Display · 3024 × 1964'
+        })
+      },
+      {
+        ...saved(),
+        id: 'd',
+        name: 'Camera only',
+        visual: visual('camera-only', { captureOff: true })
+      }
+    ]
+    mocked.core.deviceList = {
+      devices: [
+        {
+          id: 'screen:1',
+          name: 'Built-in Retina Display · 3024 × 1964',
+          kind: 'screen',
+          status: 'available'
+        }
+      ]
+    }
+    await render()
+    const meta = (id: string) =>
+      container.querySelector(`[data-saved-scene="${id}"] [data-slot="scene-card-meta"]`)!
+    expect(meta('a').textContent).toBe('Front window⌃⌥1')
+    expect(meta('b').textContent).toBe('Figma · front window⌃⌥2')
+    expect(meta('c').textContent).toBe('Built-in Retina Display⌃⌥3')
+    expect(meta('d').textContent).toBe('No screen⌃⌥4')
+    // Every card has an icon before its name: the app's own, or what it shows.
+    for (const id of ['a', 'b', 'c', 'd'])
+      expect(
+        container.querySelector(
+          `[data-saved-scene="${id}"] [data-slot="scene-card-name"] :is(img, svg)`
+        )
+      ).not.toBeNull()
   })
 
   it('turns off the scenes that need a camera that is off, saying so once (plan 231 D9)', async () => {

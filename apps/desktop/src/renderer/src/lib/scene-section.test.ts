@@ -6,12 +6,14 @@ import {
   landscapeFramingShows,
   layoutAsksForScreen,
   sceneCardsCameraGaps,
+  sceneCardWords,
   sceneLayoutCameraLine,
+  scenePictureTarget,
   sceneLayoutChoices,
   sceneSlotKeysLine,
   screenFieldWords
 } from './scene-section'
-import { normalizeSceneVisual } from './scene-presets'
+import { normalizeSceneVisual, type VisualSources } from './scene-presets'
 
 // Plan 231 S6: the reads behind Studio's Scenes section.
 
@@ -150,5 +152,71 @@ describe('sceneSlotKeysLine (D5)', () => {
     })
     expect(sceneSlotKeysLine({ sceneSlots: { 9: '' } }, 'darwin')).toBeNull()
     expect(sceneSlotKeysLine({ sceneSlots: { 1: 'F13' } }, 'linux')).toBeNull()
+  })
+})
+
+describe('scenePictureTarget (D7, D17)', () => {
+  const visual = (layoutPreset: Parameters<typeof layout>[0], sources: VisualSources) =>
+    normalizeSceneVisual({ layout: layout(layoutPreset), sources, background: null })
+  const figma = { bundleId: 'com.figma.Desktop', name: 'Figma', follows: true }
+
+  it('asks for what the scene shows: the app before its window, a fixed window, a display', () => {
+    expect(
+      scenePictureTarget(visual('screen-camera', { app: figma, windowId: 'window:4' }))
+    ).toEqual({ kind: 'app', bundleId: 'com.figma.Desktop' })
+    expect(scenePictureTarget(visual('screen-only', { windowId: 'window:9' }))).toEqual({
+      kind: 'window',
+      windowId: 'window:9'
+    })
+    expect(scenePictureTarget(visual('side-by-side', { screenId: 'screen:1' }))).toEqual({
+      kind: 'display',
+      screenId: 'screen:1'
+    })
+  })
+
+  it('asks for nothing a card can’t draw: no screen area, no screen, or a test pattern', () => {
+    expect(scenePictureTarget(visual('camera-only', { screenId: 'screen:1' }))).toBeNull()
+    expect(scenePictureTarget(visual('screen-only', { captureOff: true }))).toBeNull()
+    expect(scenePictureTarget(visual('screen-only', { testPattern: true }))).toBeNull()
+  })
+})
+
+describe('sceneCardWords', () => {
+  const card = (
+    name: string,
+    layoutPreset: Parameters<typeof layout>[0],
+    sources: VisualSources
+  ) => ({
+    name,
+    visual: normalizeSceneVisual({ layout: layout(layoutPreset), sources, background: null })
+  })
+  const figma = { bundleId: 'com.figma.Desktop', name: 'Figma', follows: true }
+
+  it('says what the scene shows in a few words, never its own name again', () => {
+    expect(sceneCardWords(card('Figma', 'screen-camera', { app: figma }))).toBe('Front window')
+    expect(sceneCardWords(card('Figma 2', 'screen-camera', { app: figma }))).toBe('Front window')
+    expect(sceneCardWords(card('Design', 'screen-camera', { app: figma }))).toBe(
+      'Figma · front window'
+    )
+    expect(
+      sceneCardWords(
+        card('Screen + camera', 'screen-camera', {
+          screenId: 'screen:1',
+          screenName: 'Built-in Retina Display · 3024 × 1964'
+        })
+      )
+    ).toBe('Built-in Retina Display')
+    expect(
+      sceneCardWords(
+        card('Display 1', 'screen-only', { screenId: 'screen:1', screenName: 'Display 1' })
+      )
+    ).toBeNull()
+    expect(
+      sceneCardWords(card('Notes', 'screen-only', { windowId: 'window:9', windowName: 'Ideas' }))
+    ).toBe('Ideas')
+    expect(sceneCardWords(card('Camera only', 'camera-only', { screenId: 'screen:1' }))).toBe(
+      'No screen'
+    )
+    expect(sceneCardWords(card('Break', 'screen-only', { captureOff: true }))).toBe('No screen')
   })
 })

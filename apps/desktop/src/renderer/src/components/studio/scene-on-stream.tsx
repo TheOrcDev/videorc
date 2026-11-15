@@ -18,11 +18,7 @@ import {
 import { SectionLabel } from '@/components/section-label'
 import { SourcePermissionAlerts } from '@/components/sources/source-permission-alerts'
 import { StatusBadge } from '@/components/status-badge'
-import {
-  LayoutThumb,
-  ScreenFramingControl,
-  VERTICAL_SCENES
-} from '@/components/studio/scenes-gallery'
+import { ScreenFramingControl, VERTICAL_SCENES } from '@/components/studio/scenes-gallery'
 import { SourceSwitchStatus } from '@/components/studio/source-switch-status'
 import {
   editVerticalStreamLayout,
@@ -34,7 +30,6 @@ import { Command, CommandGroup, CommandItem, CommandList } from '@/components/ui
 import { DisabledReason } from '@/components/ui/disabled-reason'
 import { LcdDisplaySeparator } from '@/components/ui/lcd-display'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
-import { SegmentedControl } from '@/components/ui/segmented-control'
 import {
   Select,
   SelectContent,
@@ -275,30 +270,44 @@ export function SceneOnStreamFields({
   }
 
   return (
+    // A nested section under the cards (the design skill's rhythm): a
+    // hairline, 16 px, the heading, then the fields.
     <div
-      className="flex flex-col gap-3 border-t border-border pt-3"
+      className="@container/scene-fields mt-1 flex flex-col gap-3 border-t border-border pt-4"
       data-scene-on-stream={sceneOnStream.id}
       data-slot="scene-on-stream"
     >
-      <p
-        className="flex min-w-0 items-baseline gap-1 text-meta text-muted-foreground"
-        data-slot="scene-on-stream-name"
-      >
-        <span className="shrink-0">On stream:</span>{' '}
-        <span className="min-w-0 truncate font-medium text-foreground">{sceneOnStream.name}</span>
-      </p>
+      <header className="flex min-w-0 flex-col gap-0.5">
+        <h3
+          className="flex min-w-0 items-baseline gap-1 text-section text-foreground"
+          data-slot="scene-on-stream-name"
+        >
+          <span className="shrink-0 text-muted-foreground">On stream:</span>{' '}
+          <span className="min-w-0 truncate">{sceneOnStream.name}</span>
+        </h3>
+        <p className="text-meta text-muted-foreground">Changes here save into this scene.</p>
+      </header>
       <SceneField
+        // The words say what the scene shows; the buttons say what they do.
         control={
-          // The words say what the scene shows; the button says what it does.
-          changeScreenReason ? (
-            <DisabledReason reason={changeScreenReason}>{changeScreenButton}</DisabledReason>
-          ) : (
-            changeScreenButton
-          )
+          <>
+            <HideScreenButton control={privacy} />
+            {changeScreenReason ? (
+              <DisabledReason reason={changeScreenReason}>{changeScreenButton}</DisabledReason>
+            ) : (
+              changeScreenButton
+            )}
+          </>
         }
         field="screen"
         description={words}
         label="Screen"
+        // While it holds, the chip says so beside the field's name; nothing toasts.
+        status={
+          privacy.hidden ? (
+            <StatusBadge icon={HiddenIcon} tone="warn" value={SCREEN_HIDDEN_LABEL} />
+          ) : null
+        }
         note={note}
       >
         <div className="text-xs text-muted-foreground empty:hidden">
@@ -309,75 +318,59 @@ export function SceneOnStreamFields({
             {standInLine(standIn)}
           </p>
         ) : null}
-        <ScreenPrivacyLine control={privacy} />
         <SourcePermissionAlerts className="px-0 pt-0" only="screen-recording" />
       </SceneField>
       <SceneField
         control={
-          orientation === 'vertical' ? (
-            <Select
-              items={choices}
-              value={layout.layoutPreset}
-              onValueChange={(preset) => {
-                if (preset && preset !== layout.layoutPreset) chooseLayout(preset)
-              }}
-            >
-              <SelectTrigger
-                aria-label="Layout"
-                className="w-44 shrink-0"
-                data-videorc-scene-layout={layout.layoutPreset}
-              >
-                <SelectValue>{layoutName}</SelectValue>
-              </SelectTrigger>
-              <SelectContent>
-                <SelectGroup>
-                  {choices.map((choice) => (
-                    <SelectItem
-                      key={choice.value}
-                      data-scene-layout={choice.value}
-                      disabled={choice.disabled && choice.value !== layout.layoutPreset}
-                      value={choice.value}
-                    >
-                      <LayoutChoice
-                        framing={layout.verticalScreenFraming}
-                        label={choice.label}
-                        preset={choice.value}
-                      />
-                    </SelectItem>
-                  ))}
-                </SelectGroup>
-              </SelectContent>
-            </Select>
-          ) : (
-            // Four choices: the segmented control (plan 174 D13), each a
-            // diagram named by its tooltip. A switch applies live, so arrows
-            // only move focus (manual).
-            <SegmentedControl<LayoutPreset>
-              activationMode="manual"
+          // One Select in both orientations (and for the Vertical stream):
+          // each layout's diagram and name, the chosen one in the trigger.
+          <Select
+            items={choices}
+            value={freeform ? null : layout.layoutPreset}
+            onValueChange={(preset) => {
+              if (preset && (freeform || preset !== layout.layoutPreset)) chooseLayout(preset)
+            }}
+          >
+            <SelectTrigger
               aria-label="Layout"
+              className="w-48 shrink-0"
               data-videorc-scene-layout={layout.layoutPreset}
-              options={choices.map((choice) => ({
-                value: choice.value,
-                label: (
-                  <span aria-hidden className="block w-7">
-                    <LayoutThumb compact preset={choice.value} />
-                  </span>
-                ),
-                'aria-label': choice.label,
-                tooltip: choice.label,
-                disabled: choice.disabled && choice.value !== layout.layoutPreset,
-                'data-scene-layout': choice.value
-              }))}
-              size="sm"
-              value={freeform ? null : layout.layoutPreset}
-              onValueChange={chooseLayout}
-            />
-          )
+            >
+              <SelectValue>
+                {freeform ? (
+                  layoutName
+                ) : (
+                  <LayoutChoice
+                    framing={layout.verticalScreenFraming}
+                    inTrigger
+                    label={layoutName}
+                    preset={layout.layoutPreset}
+                  />
+                )}
+              </SelectValue>
+            </SelectTrigger>
+            <SelectContent>
+              <SelectGroup>
+                {choices.map((choice) => (
+                  <SelectItem
+                    key={choice.value}
+                    data-scene-layout={choice.value}
+                    disabled={choice.disabled && choice.value !== layout.layoutPreset}
+                    value={choice.value}
+                  >
+                    <LayoutChoice
+                      framing={layout.verticalScreenFraming}
+                      label={choice.label}
+                      preset={choice.value}
+                    />
+                  </SelectItem>
+                ))}
+              </SelectGroup>
+            </SelectContent>
+          </Select>
         }
         field="layout"
-        description={
-          orientation === 'vertical' ? 'Each scene keeps its own 9:16 layout.' : layoutName
-        }
+        description={`Each scene keeps its own ${orientation === 'vertical' ? '9:16' : '16:9'} layout.`}
         label="Layout"
       >
         {cameraLine ? <p className="text-xs text-muted-foreground">{cameraLine}</p> : null}
@@ -391,7 +384,7 @@ export function SceneOnStreamFields({
         />
       ) : null}
       {verticalStream ? (
-        <div className="flex flex-col gap-3 border-t border-border pt-3">
+        <div className="mt-1 flex flex-col gap-3 border-t border-border pt-4">
           <SectionLabel>Vertical stream</SectionLabel>
           <VerticalStreamLayoutControl framingLabel="Framing" />
         </div>
@@ -409,6 +402,7 @@ const FRAMING_CHOICES: { value: VerticalScreenFraming; label: string }[] = [
 function SceneField({
   field,
   label,
+  status,
   description,
   note,
   control,
@@ -417,6 +411,8 @@ function SceneField({
   /** Its hook for tests and probes: `data-slot="scene-{field}-field"`. */
   field: 'screen' | 'layout'
   label: string
+  /** A status chip beside the name ("Screen hidden"). */
+  status?: ReactNode
   description: ReactNode
   /** A second line under the value ("Not shown in Camera only"). */
   note?: string | null
@@ -427,7 +423,10 @@ function SceneField({
     <div className="flex flex-col gap-2" data-slot={`scene-${field}-field`}>
       <div className="flex items-center justify-between gap-3">
         <div className="flex min-w-0 flex-col gap-0.5">
-          <span className="text-sm font-medium">{label}</span>
+          <span className="flex flex-wrap items-center gap-x-2 gap-y-1">
+            <span className="text-sm font-medium">{label}</span>
+            {status}
+          </span>
           <span className="line-clamp-2 text-xs break-words text-muted-foreground">
             {description}
           </span>
@@ -441,49 +440,44 @@ function SceneField({
 }
 
 /**
- * Hide screen under the scene's Screen (plan 210 D9; plan 231 D8 moved it
- * here from Studio's Screen row): a 24 px button with its key, never beside
- * Record and Go Live (owner, 2026-10-12). It stays at the right edge in both
- * states, so Show screen is where Hide screen was. While hidden the chip says
- * so; it shows with or without a screen in the scene, because hiding is
- * allowed either way. No toast: the chip and the Preview say it.
+ * Hide screen beside Change screen…, on the Screen field's row (plan 210 D9;
+ * plan 231 D8 moved it here from Studio's Screen row): never beside Record
+ * and Go Live (owner, 2026-10-12). It reads Show screen in the same place
+ * while hidden. Its key rides inside it while the row has room, as the
+ * Preview's buttons carry theirs, and always in its tooltip. It shows with or
+ * without a screen in the scene, because hiding is allowed either way. No
+ * toast: the chip and the Preview say it.
  */
-export function ScreenPrivacyLine({ control }: { control: ScreenPrivacyControl }): ReactElement {
+export function HideScreenButton({ control }: { control: ScreenPrivacyControl }): ReactElement {
   const { hidden, accelerator, platform, disabledReason, toggle } = control
   const label = screenPrivacyActionLabel(hidden)
   const button = (
     <Button
       data-videorc-screen-privacy=""
       disabled={disabledReason !== null}
-      size="xs"
       variant="outline"
       onClick={toggle}
     >
       {label}
+      {accelerator ? (
+        <ShortcutKeys
+          accelerator={accelerator}
+          className="ml-1 hidden @lg/scene-fields:inline-flex"
+          platform={platform}
+        />
+      ) : null}
     </Button>
   )
   return (
-    <div
-      className="flex min-h-7 items-center gap-2"
-      data-hidden={hidden || undefined}
-      data-slot="screen-privacy"
-    >
-      {hidden ? <StatusBadge icon={HiddenIcon} tone="warn" value={SCREEN_HIDDEN_LABEL} /> : null}
-      <div className="ml-auto flex shrink-0 items-center gap-2">
-        {/* The key teaches itself while there is room; while hidden the chip
-            takes that room, and the tooltip keeps the key. */}
-        {accelerator && !hidden ? (
-          <ShortcutKeys accelerator={accelerator} platform={platform} />
-        ) : null}
-        {disabledReason ? (
-          <DisabledReason reason={disabledReason}>{button}</DisabledReason>
-        ) : (
-          <ShortcutTooltip accelerator={accelerator} label={label} platform={platform}>
-            {button}
-          </ShortcutTooltip>
-        )}
-      </div>
-    </div>
+    <span className="flex" data-hidden={hidden || undefined} data-slot="screen-privacy">
+      {disabledReason ? (
+        <DisabledReason reason={disabledReason}>{button}</DisabledReason>
+      ) : (
+        <ShortcutTooltip accelerator={accelerator} label={label} platform={platform}>
+          {button}
+        </ShortcutTooltip>
+      )}
+    </span>
   )
 }
 

@@ -180,6 +180,8 @@ const line = (): HTMLElement =>
   container.querySelector<HTMLElement>('[data-slot="screen-privacy"]')!
 const button = (): HTMLButtonElement =>
   container.querySelector<HTMLButtonElement>('[data-videorc-screen-privacy]')!
+/** The button's words, without the key chip it carries. */
+const words = (): string => button().textContent!.replace(/⌃⌥H$/, '')
 const tooltip = (): string | null | undefined =>
   document.querySelector('[data-slot="tooltip-content"]')?.textContent
 const buttonNamed = (text: string): HTMLButtonElement | undefined =>
@@ -198,9 +200,11 @@ describe('the scene on stream’s Screen (plan 231 D8)', () => {
   it('says which scene is on stream and what it shows, in the scene’s words', async () => {
     core()
     await render(fields)
-    expect(container.querySelector('[data-slot="scene-on-stream-name"]')?.textContent).toBe(
-      'On stream: Figma'
-    )
+    // The heading of the fields under it, a nested section's (h3, 13 px / 600).
+    const heading = container.querySelector('[data-slot="scene-on-stream-name"]')!
+    expect(heading.tagName).toBe('H3')
+    expect(heading.textContent).toBe('On stream: Figma')
+    expect(heading.parentElement!.textContent).toContain('Changes here save into this scene.')
     expect(screenField().textContent).toContain('Screen')
     expect(screenField().textContent).toContain('Figma · front window')
     // The picker's own words never replace the scene's.
@@ -271,15 +275,22 @@ describe('the scene on stream’s Screen (plan 231 D8)', () => {
 })
 
 describe('Hide screen, under the scene’s Screen (plan 210 S8b, plan 231 D8)', () => {
-  it('hides from a 24 px button with the key beside it and in its tooltip', async () => {
+  it('sits beside Change screen… on the Screen row, its key in it and in its tooltip', async () => {
     const { hideScreen, showScreen } = core({ privacy: { hidden: false } })
     await render(fields)
-    // With the Screen, never in the transport.
+    // With the Screen, never in the transport: the row's two actions, side by side.
     expect(screenField().contains(line())).toBe(true)
-    expect(button().textContent).toBe('Hide screen')
-    expect(button().dataset.size).toBe('xs')
-    expect(line().querySelector('[data-slot="status-badge"]')).toBeNull()
-    expect(line().querySelector('kbd')?.dataset.accelerator).toBe('Control+Alt+H')
+    const actions = line().parentElement!
+    expect(actions.contains(buttonNamed('Change screen…')!)).toBe(true)
+    expect(actions.firstElementChild).toBe(line())
+    expect(words()).toBe('Hide screen')
+    // A 28 px button beside a 28 px button (the design skill's control rule).
+    expect(button().dataset.size).not.toBe('xs')
+    expect(screenField().querySelector('[data-slot="status-badge"]')).toBeNull()
+    // The key rides inside the button while the row has room.
+    const key = button().querySelector('kbd')!
+    expect(key.dataset.accelerator).toBe('Control+Alt+H')
+    expect(key.className).toContain('@lg/scene-fields:inline-flex')
     await act(async () => button().focus())
     expect(tooltip()).toContain('Hide screen')
     expect(document.querySelector('[data-slot="tooltip-content"] kbd')?.textContent).toBe('⌃⌥H')
@@ -288,17 +299,19 @@ describe('Hide screen, under the scene’s Screen (plan 210 S8b, plan 231 D8)', 
     expect(showScreen).not.toHaveBeenCalled()
   })
 
-  it('reads Show screen in the same place while hidden, and says Screen hidden', async () => {
+  it('reads Show screen in the same place while hidden, and says Screen hidden by the name', async () => {
     const { hideScreen, showScreen } = core({ privacy: { hidden: true, reason: 'you' } })
     await render(fields)
-    expect(button().textContent).toBe('Show screen')
-    const chip = line().querySelector<HTMLElement>('[data-slot="status-badge"]')!
+    expect(words()).toBe('Show screen')
+    const chip = screenField().querySelector<HTMLElement>('[data-slot="status-badge"]')!
     expect(chip.textContent).toBe('Screen hidden')
+    // Beside the field's name, as a Sources row carries its status chip.
+    expect(chip.parentElement!.textContent).toBe('ScreenScreen hidden')
     // A privacy state, not an error: the attention tone on its icon, no tint.
     expect(chip.dataset.tone).toBe('warn')
     expect(chip.className).not.toContain('glass-chip-tinted')
-    // The button keeps the right edge, after the chip.
-    expect(line().lastElementChild?.contains(button())).toBe(true)
+    // The button keeps its place, first of the row's two actions.
+    expect(line().parentElement!.firstElementChild).toBe(line())
     await act(async () => button().click())
     expect(showScreen).toHaveBeenCalledTimes(1)
     expect(hideScreen).not.toHaveBeenCalled()
@@ -334,7 +347,7 @@ describe('Hide screen, under the scene’s Screen (plan 210 S8b, plan 231 D8)', 
       layout: { layoutPreset: 'camera-only' }
     })
     await render(fields)
-    expect(button().textContent).toBe('Hide screen')
+    expect(words()).toBe('Hide screen')
     expect(button().disabled).toBe(false)
   })
 
@@ -355,21 +368,39 @@ describe('Hide screen, under the scene’s Screen (plan 210 S8b, plan 231 D8)', 
 })
 
 describe('the scene on stream’s Layout (plan 231 D8, D11, D19)', () => {
-  const layoutRadio = (name: string): HTMLButtonElement =>
-    container.querySelector<HTMLButtonElement>(
-      `[data-slot="scene-layout-field"] [role="radio"][aria-label="${name}"]`
-    )!
+  const trigger = (): HTMLElement =>
+    container.querySelector<HTMLElement>('[data-slot="scene-layout-field"] [aria-label="Layout"]')!
+  /** The open Layout list's options: a closed one may still be animating out. */
+  const options = (): HTMLElement[] => [
+    ...document.querySelectorAll<HTMLElement>(
+      '[data-slot="select-content"][data-open] [role="option"]'
+    )
+  ]
+  const option = (name: string): HTMLElement =>
+    options().find((entry) => entry.textContent === name)!
+  const open = async (): Promise<void> => act(async () => trigger().click())
+  const choose = async (name: string): Promise<void> => {
+    await open()
+    await act(async () => option(name).click())
+  }
+  const disabled = (name: string): boolean => option(name).hasAttribute('data-disabled')
 
-  it('offers the four 16:9 layouts and saves the choice into the scene on stream', async () => {
+  it('offers the four 16:9 layouts, each drawn and named, and saves the choice into the scene on stream', async () => {
     const { applyCameraPreset } = core()
     await render(fields)
-    const field = container.querySelector('[data-slot="scene-layout-field"]')!
-    expect(
-      [...field.querySelectorAll('[role="radio"]')].map((radio) => radio.getAttribute('aria-label'))
-    ).toEqual(['Screen + camera', 'Screen only', 'Camera only', 'Side by side'])
-    expect(layoutRadio('Screen + camera').getAttribute('aria-checked')).toBe('true')
-    expect(field.textContent).toContain('Screen + camera')
-    await act(async () => layoutRadio('Side by side').click())
+    // The chosen layout reads in the trigger: its diagram and its name.
+    const value = trigger().querySelector('[data-slot="select-value"]')!
+    expect(value.textContent).toBe('Screen + camera')
+    expect(value.querySelector('[aria-hidden="true"] .aspect-video')).not.toBeNull()
+    await open()
+    expect(options().map((entry) => entry.textContent)).toEqual([
+      'Screen + camera',
+      'Screen only',
+      'Camera only',
+      'Side by side'
+    ])
+    expect(option('Screen + camera').getAttribute('aria-selected')).toBe('true')
+    await act(async () => option('Side by side').click())
     expect(applyCameraPreset).toHaveBeenCalledExactlyOnceWith({ layoutPreset: 'side-by-side' })
   })
 
@@ -379,10 +410,11 @@ describe('the scene on stream’s Layout (plan 231 D8, D11, D19)', () => {
       layout: { layoutPreset: 'screen-only' }
     })
     await render(fields)
-    expect(layoutRadio('Screen only').disabled).toBe(false)
-    expect(layoutRadio('Camera only').disabled).toBe(true)
-    expect(layoutRadio('Side by side').disabled).toBe(true)
-    expect(layoutRadio('Screen + camera').disabled).toBe(true)
+    await open()
+    expect(disabled('Screen only')).toBe(false)
+    expect(disabled('Camera only')).toBe(true)
+    expect(disabled('Side by side')).toBe(true)
+    expect(disabled('Screen + camera')).toBe(true)
     expect(container.querySelector('[data-slot="scene-layout-field"]')!.textContent).toContain(
       'Choose a camera in Sources to use Screen + camera, Camera only, and Side by side.'
     )
@@ -394,7 +426,7 @@ describe('the scene on stream’s Layout (plan 231 D8, D11, D19)', () => {
       layout: { layoutPreset: 'camera-only' }
     })
     await render(fields)
-    await act(async () => layoutRadio('Screen + camera').click())
+    await choose('Screen + camera')
     // The layout waits for the screen; Change screen… applies it once the
     // screen lands, and its Cancel keeps this one (scene-presets.test.ts).
     expect(onChangeScreen).toHaveBeenCalledExactlyOnceWith({ forLayout: 'screen-camera' })
@@ -408,7 +440,7 @@ describe('the scene on stream’s Layout (plan 231 D8, D11, D19)', () => {
       layout: { layoutPreset: 'screen-only' }
     })
     await render(fields)
-    await act(async () => layoutRadio('Camera only').click())
+    await choose('Camera only')
     expect(applyCameraPreset).toHaveBeenCalledExactlyOnceWith({ layoutPreset: 'camera-only' })
     expect(onChangeScreen).not.toHaveBeenCalled()
   })

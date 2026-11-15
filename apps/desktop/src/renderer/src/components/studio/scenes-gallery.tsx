@@ -1,3 +1,4 @@
+import { CameraIcon } from '@/components/icons'
 import { lazy, Suspense, type ReactElement, type ReactNode } from 'react'
 const ScenesSection = lazy(() => import('@/components/scene-presets'))
 
@@ -52,7 +53,7 @@ export function ScenesGallery(): ReactElement {
 function ScenesSectionFallback(): ReactElement {
   return (
     <PanelSection title="Scenes">
-      <Skeleton className="h-24" />
+      <Skeleton className="h-80" />
     </PanelSection>
   )
 }
@@ -142,11 +143,14 @@ function ThumbScreen({
 /** Where a layout draws the camera: a neutral plate, opaque over a picture (D7). */
 function ThumbCamera({
   className,
-  strong = false
+  strong = false,
+  glyph = true
 }: {
   className: string
   /** At icon size the plate needs more contrast to read. */
   strong?: boolean
+  /** The camera's glyph on the plate; too small to read at icon size. */
+  glyph?: boolean
 }): ReactElement {
   return (
     <div
@@ -154,6 +158,12 @@ function ThumbCamera({
       data-slot="layout-thumb-camera"
     >
       <span className={cn('absolute inset-0', strong ? 'bg-foreground/55' : 'bg-foreground/25')} />
+      {/* At card size the plate says what it stands for. */}
+      {glyph ? (
+        <span className="absolute inset-0 flex items-center justify-center">
+          <CameraIcon aria-hidden className="size-3.5 max-h-[60%] text-foreground/45" />
+        </span>
+      ) : null}
     </div>
   )
 }
@@ -166,7 +176,8 @@ export function LayoutThumb({
   framing = 'fill',
   picture,
   glyph,
-  compact = false
+  compact = false,
+  className
 }: {
   preset: LayoutPreset
   /** Vertical scenes only: draws the Fit geometry (geometry truth, like the
@@ -176,72 +187,90 @@ export function LayoutThumb({
   picture?: string
   /** Drawn in the screen area while there is no picture: the app's icon, a display glyph. */
   glyph?: ReactNode
-  /** A 16:9 diagram at icon size (a choice in the Layout field): thinner insets, no glyph. */
+  /** A diagram at icon size (a choice in the Layout field): no glyphs; a 16:9 one has thinner insets. */
   compact?: boolean
+  /** Sizing only: a 9:16 frame is 3/5 of its box's width unless told (`h-full w-auto` in a 16:9 well). */
+  className?: string
 }): ReactElement {
   const screen = { picture, glyph: compact ? undefined : glyph }
-  if (layoutPresetOrientation(preset) === 'vertical' && framing === 'fit') {
-    return (
-      <div className="relative mx-auto aspect-[9/16] w-3/5 overflow-hidden rounded-chip border bg-gradient-to-br from-muted/40 to-muted/70">
-        {preset === 'vertical-camera-top' ? (
-          <>
-            <ThumbCamera className="inset-x-1 top-1 h-[62%] rounded-[2px]" />
-            <ThumbScreen className="inset-x-1 bottom-1 h-[30%] rounded-[2px]" {...screen} />
-          </>
-        ) : null}
-        {preset === 'vertical-camera-bottom' || preset === 'vertical-split' ? (
-          <>
-            <ThumbScreen className="inset-x-1 top-1 h-[30%] rounded-[2px]" {...screen} />
-            <ThumbCamera className="inset-x-1 bottom-1 h-[62%] rounded-[2px]" />
-          </>
-        ) : null}
-        {preset === 'vertical-screen-camera' ? (
-          <>
-            <ThumbScreen className="inset-x-1 top-[35%] h-[30%] rounded-[2px]" {...screen} />
-            <ThumbCamera className="right-1.5 bottom-1.5 h-[13%] w-[38%] rounded-[2px] border border-background/60" />
-          </>
-        ) : null}
-        {preset === 'vertical-screen-only' ? (
-          <ThumbScreen className="inset-x-1 top-[35%] h-[30%] rounded-[2px]" {...screen} />
-        ) : null}
-        {preset === 'vertical-camera-only' ? (
-          <ThumbCamera className="inset-1 rounded-[2px]" />
-        ) : null}
-      </div>
-    )
-  }
+  const plate = { glyph: !compact, strong: compact }
   if (layoutPresetOrientation(preset) === 'vertical') {
+    // At icon size the insets thin to a hairline and the areas get stronger
+    // fills, as the 16:9 diagram does.
+    const v = compact
+      ? {
+          x: 'inset-x-[1.5px]',
+          top: 'top-[1.5px]',
+          bottom: 'bottom-[1.5px]',
+          all: 'inset-[1.5px]',
+          pip: 'right-[2px] bottom-[2px]',
+          round: 'rounded-[1px]',
+          fill: 'bg-foreground/25'
+        }
+      : {
+          x: 'inset-x-1',
+          top: 'top-1',
+          bottom: 'bottom-1',
+          all: 'inset-1',
+          pip: 'right-1.5 bottom-1.5',
+          round: 'rounded-[2px]',
+          fill: undefined
+        }
+    // Fit: the screen keeps its shape (a 16:9 screen is about 30% of the 9:16
+    // canvas) and the camera takes the rest; Fill: the bands the backend composes.
+    const fit = framing === 'fit'
     return (
-      <div className="relative mx-auto aspect-[9/16] w-3/5 overflow-hidden rounded-chip border bg-gradient-to-br from-muted/40 to-muted/70">
+      <div
+        className={cn(
+          'relative mx-auto aspect-[9/16] w-3/5 overflow-hidden rounded-chip border bg-gradient-to-br from-muted/40 to-muted/70',
+          compact && 'border-foreground/25',
+          className
+        )}
+      >
         {preset === 'vertical-camera-top' ? (
           <>
-            <ThumbCamera className="inset-x-1 top-1 h-[37%] rounded-[2px]" />
-            <ThumbScreen className="inset-x-1 bottom-1 h-[55%] rounded-[2px]" {...screen} />
+            <ThumbCamera
+              className={cn(v.x, v.top, v.round, fit ? 'h-[62%]' : 'h-[37%]')}
+              {...plate}
+            />
+            <ThumbScreen
+              className={cn(v.x, v.bottom, v.round, v.fill, fit ? 'h-[30%]' : 'h-[55%]')}
+              {...screen}
+            />
           </>
         ) : null}
-        {preset === 'vertical-camera-bottom' ? (
+        {preset === 'vertical-camera-bottom' || (fit && preset === 'vertical-split') ? (
           <>
-            <ThumbScreen className="inset-x-1 top-1 h-[55%] rounded-[2px]" {...screen} />
-            <ThumbCamera className="inset-x-1 bottom-1 h-[37%] rounded-[2px]" />
+            <ThumbScreen
+              className={cn(v.x, v.top, v.round, v.fill, fit ? 'h-[30%]' : 'h-[55%]')}
+              {...screen}
+            />
+            <ThumbCamera
+              className={cn(v.x, v.bottom, v.round, fit ? 'h-[62%]' : 'h-[37%]')}
+              {...plate}
+            />
           </>
         ) : null}
-        {preset === 'vertical-split' ? (
+        {!fit && preset === 'vertical-split' ? (
           <>
-            <ThumbScreen className="inset-x-1 top-1 h-[46%] rounded-[2px]" {...screen} />
-            <ThumbCamera className="inset-x-1 bottom-1 h-[46%] rounded-[2px]" />
+            <ThumbScreen className={cn(v.x, v.top, v.round, v.fill, 'h-[46%]')} {...screen} />
+            <ThumbCamera className={cn(v.x, v.bottom, v.round, 'h-[46%]')} {...plate} />
           </>
+        ) : null}
+        {preset === 'vertical-screen-camera' || preset === 'vertical-screen-only' ? (
+          <ThumbScreen
+            className={cn(v.round, v.fill, fit ? cn(v.x, 'top-[35%] h-[30%]') : v.all)}
+            {...screen}
+          />
         ) : null}
         {preset === 'vertical-screen-camera' ? (
-          <>
-            <ThumbScreen className="inset-1 rounded-[2px]" {...screen} />
-            <ThumbCamera className="right-1.5 bottom-1.5 h-[13%] w-[38%] rounded-[2px] border border-background/60" />
-          </>
-        ) : null}
-        {preset === 'vertical-screen-only' ? (
-          <ThumbScreen className="inset-1 rounded-[2px]" {...screen} />
+          <ThumbCamera
+            className={cn(v.pip, v.round, 'h-[13%] w-[38%] border border-background/60')}
+            {...plate}
+          />
         ) : null}
         {preset === 'vertical-camera-only' ? (
-          <ThumbCamera className="inset-1 rounded-[2px]" />
+          <ThumbCamera className={cn(v.all, v.round)} {...plate} />
         ) : null}
       </div>
     )
@@ -250,7 +279,8 @@ export function LayoutThumb({
     <div
       className={cn(
         'relative aspect-video w-full overflow-hidden border bg-gradient-to-br from-muted/40 to-muted/70',
-        compact ? 'rounded-[3px] border-foreground/25' : 'rounded-chip'
+        compact ? 'rounded-[3px] border-foreground/25' : 'rounded-chip',
+        className
       )}
     >
       {preset === 'screen-only' || preset === 'screen-camera' ? (
@@ -268,7 +298,7 @@ export function LayoutThumb({
               ? 'inset-x-1/4 inset-y-[2px] rounded-[1px]'
               : 'inset-x-1/4 inset-y-1.5 rounded-[3px]'
           }
-          strong={compact}
+          {...plate}
         />
       ) : null}
       {preset === 'screen-camera' ? (
@@ -278,7 +308,7 @@ export function LayoutThumb({
               ? 'right-[3px] bottom-[3px] h-1/2 w-[34%] rounded-[1px]'
               : 'right-1.5 bottom-1.5 h-2/5 w-[30%] rounded-[2px] border border-background/60'
           }
-          strong={compact}
+          {...plate}
         />
       ) : null}
       {preset === 'side-by-side' ? (
@@ -297,7 +327,7 @@ export function LayoutThumb({
                 ? 'inset-y-[2px] right-[2px] w-[45%] rounded-[1px]'
                 : 'inset-y-1.5 right-1.5 w-[44%] rounded-[3px]'
             }
-            strong={compact}
+            {...plate}
           />
         </>
       ) : null}

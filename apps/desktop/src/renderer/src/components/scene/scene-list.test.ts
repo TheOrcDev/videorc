@@ -126,6 +126,7 @@ beforeEach(() => {
     setSettings: vi.fn(),
     runtimeInfo: { platform: 'darwin' },
     isSessionActive: false,
+    screenPrivacy: { hidden: false },
     layoutSwitchPending: null,
     applyCameraPreset: vi.fn(),
     sourceSwitchReason: () => null,

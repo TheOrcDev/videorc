@@ -1,4 +1,10 @@
-import type { Device, GlobalShortcutsConfig, LayoutPreset, LayoutSettings } from './backend'
+import type {
+  Device,
+  GlobalShortcutsConfig,
+  LayoutPreset,
+  LayoutSettings,
+  ScenePictureTarget
+} from './backend'
 import {
   HORIZONTAL_LAYOUT_PRESETS,
   VERTICAL_LAYOUT_PRESETS,
@@ -53,6 +59,47 @@ export function sceneShowsWords(
   return layoutShowsScreen(layout)
     ? showsWords(scene.shows)
     : layoutPresetLabel(layout.layoutPreset)
+}
+
+/**
+ * What a scene's card asks a picture of (D7, D17): the app (its front
+ * window), the fixed window or the display it shows, or null when its layout
+ * in the studio's orientation draws no screen, or it shows none.
+ */
+export function scenePictureTarget(visual: SceneVisual): ScenePictureTarget | null {
+  if (!layoutShowsScreen(visual.layout)) return null
+  const { sources } = visual
+  if (sources.app) return { kind: 'app', bundleId: sources.app.bundleId }
+  if (sources.windowId) return { kind: 'window', windowId: sources.windowId }
+  if (sources.screenId) return { kind: 'display', screenId: sources.screenId }
+  return null
+}
+
+/** macOS names a display with its size ("Built-in Retina Display · 3024 × 1964"). */
+const DISPLAY_SIZE_SUFFIX = / · \d+ × \d+$/
+
+/**
+ * A card's meta words when nothing is wrong: what the scene shows, short, and
+ * never its own name again. An app's scene says "Front window" (or "Figma ·
+ * front window" when it was renamed), a fixed window its title, a display
+ * its name without the size, and a layout with no screen "No screen".
+ */
+export function sceneCardWords(scene: { name: string; visual: SceneVisual }): string | null {
+  const { sources, layout } = scene.visual
+  const words = !layoutShowsScreen(layout)
+    ? 'No screen'
+    : sources.app
+      ? scene.name.startsWith(sources.app.name)
+        ? 'Front window'
+        : `${sources.app.name} · front window`
+      : sources.windowId
+        ? (sources.windowName ?? 'Window')
+        : sources.screenId || sources.screenName
+          ? (sources.screenName ?? 'Display').replace(DISPLAY_SIZE_SUFFIX, '')
+          : sources.testPattern
+            ? 'Test pattern'
+            : 'No screen'
+  return words === scene.name ? null : words
 }
 
 /** The screen a scene keeps, in a few words, whatever its layout draws. */

@@ -24,6 +24,7 @@ import {
 } from '@/lib/capture'
 import { recalledLayoutFraming, type LayoutFramingMemory } from '@/lib/layout-framing-memory'
 import { sceneGalleryReason, type SceneSourceGap } from '@/lib/scene-presets'
+import { cn } from '@/lib/utils'
 
 const READ_ONLY_REASON = 'Update Videorc to change your scenes.'
 
@@ -90,23 +91,37 @@ export function editVerticalStreamLayout(
   return true
 }
 
-/** A 9:16 layout in a list: its diagram, then its name. */
+/**
+ * A layout in a list: its icon-size diagram, then its name. In a Select's
+ * trigger (`inTrigger`) the diagram fits the trigger's line.
+ */
 export function LayoutChoice({
   preset,
   label,
-  framing
+  framing,
+  inTrigger = false
 }: {
   preset: LayoutPreset
   label: string
   framing: VerticalScreenFraming
+  inTrigger?: boolean
 }): ReactElement {
+  const vertical = layoutPresetOrientation(preset) === 'vertical'
   return (
-    <span className="flex items-center gap-2">
+    <span className="flex min-w-0 items-center gap-2">
       {/* The layout's diagram, never a picture of the stream. */}
-      <span aria-hidden="true" className="block w-9 shrink-0">
-        <LayoutThumb framing={framing} preset={preset} />
+      <span
+        aria-hidden="true"
+        className={cn('flex shrink-0 justify-center', inTrigger ? 'w-7' : 'w-9')}
+      >
+        <LayoutThumb
+          className={vertical && inTrigger ? 'h-5 w-auto' : undefined}
+          compact
+          framing={framing}
+          preset={preset}
+        />
       </span>
-      {label}
+      <span className="min-w-0 truncate">{label}</span>
     </span>
   )
 }
@@ -177,10 +192,19 @@ export function VerticalStreamLayoutControl({
             >
               <SelectTrigger
                 aria-label="Vertical stream layout"
-                className="w-44 shrink-0"
+                className="w-48 shrink-0"
                 data-videorc-vertical-stream-layout={vertical.layoutPreset}
               >
-                <SelectValue>{current ? current.label : null}</SelectValue>
+                <SelectValue>
+                  {current ? (
+                    <LayoutChoice
+                      framing={framing}
+                      inTrigger
+                      label={current.label}
+                      preset={current.id}
+                    />
+                  ) : null}
+                </SelectValue>
               </SelectTrigger>
               <SelectContent>
                 <SelectGroup>
