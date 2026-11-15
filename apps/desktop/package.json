@@ -1,6 +1,6 @@
 {
   "name": "@videorc/desktop",
-  "version": "0.26.0",
+  "version": "0.27.0",
   "private": true,
   "main": "./out/main/index.js",
   "description": "Videorc desktop app.",
