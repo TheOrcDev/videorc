@@ -816,10 +816,16 @@ fn name_can_match(author: &str) -> bool {
         [word] => {
             !crate::cohost_ack::is_stop_word(word)
                 && !COMMAND_WORDS.contains(word)
-                && !agent_tools::catalog()
-                    .tools
-                    .iter()
-                    .any(|tool| tool.name.split('_').any(|part| part == *word))
+                && !agent_tools::catalog().tools.iter().any(|tool| {
+                    // `buddy_say` and `set_buddy` use "buddy" as a product
+                    // prefix, not a command a viewer named Buddy would
+                    // collide with. After plan 236 D2 the hidden alias has
+                    // expired, so that name can stand for a viewer unless
+                    // it is the current persona wake word.
+                    tool.name
+                        .split('_')
+                        .any(|part| part == *word && part != "buddy")
+                })
         }
         _ => true,
     }
@@ -1906,6 +1912,12 @@ mod tests {
         assert!(about_comment(
             "sidekick what did zelda say",
             &["Zelda".to_string()]
+        ));
+        // Plan 236 D2: a viewer named Buddy is ordinary now that the hidden
+        // alias has expired, and is not blocked by the buddy_* tools.
+        assert!(about_comment(
+            "sidekick what did buddy say",
+            &["Buddy".to_string()]
         ));
         assert!(about_comment(
             "sidekick put stop motion up",
