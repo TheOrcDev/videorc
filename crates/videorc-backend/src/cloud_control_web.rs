@@ -635,6 +635,19 @@ pub struct RecordingDownloadEvent {
     pub error: Option<String>,
 }
 
+// The renderer's string length limit counts UTF-16 code units. Keep whole
+// Unicode scalars without letting supplementary characters reject a snapshot.
+fn download_error_for_wire(error: &str) -> String {
+    let mut units = 0;
+    error
+        .chars()
+        .take_while(|ch| {
+            units += ch.len_utf16();
+            units <= 4096
+        })
+        .collect()
+}
+
 pub(crate) type DownloadEventHook = Arc<dyn Fn(RecordingDownloadEvent) + Send + Sync>;
 type DownloadProgress = Arc<dyn Fn(usize, usize) + Send + Sync>;
 
@@ -802,7 +815,7 @@ impl RecordingDownloadJobs {
                 Ok(Err(error)) => (
                     DownloadState::Failed,
                     None,
-                    Some(error.to_string().chars().take(4096).collect()),
+                    Some(download_error_for_wire(&error.to_string())),
                 ),
                 Err(_) => (
                     DownloadState::Failed,
@@ -2218,6 +2231,22 @@ impl<W: CloudWebApi, C: ControlConnector> ControlLoop<W, C> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn download_error_respects_the_renderer_utf16_limit() {
+        let supplementary = super::download_error_for_wire(&"😀".repeat(4096));
+        assert_eq!(supplementary.encode_utf16().count(), 4096);
+        assert_eq!(supplementary.chars().count(), 2048);
+        let odd_boundary = format!("{}😀tail", "x".repeat(4095));
+        assert_eq!(
+            super::download_error_for_wire(&odd_boundary),
+            "x".repeat(4095)
+        );
+        assert_eq!(
+            super::download_error_for_wire(&"x".repeat(4097)),
+            "x".repeat(4096)
+        );
+    }
+
     use super::*;
 
     const KEY: &str = "ytkey-SECRET-0f3a9b";

@@ -89,7 +89,7 @@ Rules for every route below:
 - Routes that act on an existing show work while `VIDEORC_CLOUD_DISABLED` is on, like End and current (W `shows-route.ts:616-620`).
 - ◇ A desktop intent retries at most once, 1 s later, after a network error or a 5xx, never a 4xx. Both attempts and any wait for an earlier destination send share one deadline: 22 s for ordinary control, 7 s for `destinations.set` without `replace: true` (Reconnect and automatic resend). These fit inside the 25 s provider and 10 s Reconnect RPC watchdogs. A retry starts only with at least 3 s left: the delay and 2 s of useful work (D `cloud_control_web.rs:291-322`). Every route is safe to repeat.
 - The web gives each LiveKit call 8 s. LiveKit's error text is never forwarded (section 8.5).
-- ◇ Destinations, `legs/end`, recording and End share a 45 s deadline for their LiveKit calls, inside `maxDuration: 60`. Calls neither start nor keep waiting past it. Destinations, recording and `legs/end` write completed work before answering 503 `cloud-media-unavailable` for an unfinished operation. End still confirms the ended row with `{ ok: true }` and leaves failed teardown to the reaper. The show lease waits at most 5 s and expires after 65 s (section 9). The desktop's shorter deadline can expire before the web finishes; a missing answer does not prove no change occurred.
+- ◇ Destinations, `legs/end`, recording and End share a 45 s deadline for their LiveKit calls, inside `maxDuration: 60`. Calls neither start nor keep waiting past it. Destinations, recording and `legs/end` write completed work before answering 503 `cloud-media-unavailable` for an unfinished operation. End returns 503 and keeps the row pending and its seat reserved until terminal egresses and deletion are confirmed; the reaper retries failed teardown. The show lease waits at most 5 s and expires after 65 s (section 9). The desktop's shorter deadline can expire before the web finishes; a missing answer does not prove no change occurred.
 
 | Status | Common `error.code` | Meaning |
 | --- | --- | --- |
@@ -161,12 +161,12 @@ What the web does per destination. This is the runner's upsert (R:163-177), limi
 | The `id` | The leg now | The web does |
 | --- | --- | --- |
 | New | — | No egress for that orientation: `StartEgress` with this request's accepted URLs of that orientation. Egress running: `UpdateStream` add |
-| Known, same leg ref | `connecting` or `live`, not flagged `resend` | Nothing |
-| Known, same leg ref | `reconnecting`, `failed`, or flagged `resend` | `UpdateStream` remove, then add. The remove is skipped when LiveKit already lists the stream `FAILED`. Clears `resend` |
-| Known, different leg ref | Any, without `replace` | Refused: `destination-changed`. Send the full list with `replace` |
+| Known, same leg ref and full-address identity | `connecting` or `live`, not flagged `resend` | Nothing |
+| Known, same leg ref and full-address identity | `reconnecting`, `failed`, or flagged `resend` | `UpdateStream` remove, then add. The remove is skipped when LiveKit already lists the stream `FAILED`. Clears `resend` |
+| Known, different leg ref or full-address identity | Any, without `replace` | Refused: `destination-changed`. Send the full list with `replace` |
 | Not in the list | Any, without `replace` | Nothing |
-| `replace: true` | Every running leg of the orientation is named with the same ref | The upsert above, nothing more |
-| `replace: true` | Some running leg is not named, or is named with another ref | `StopEgress`, then `StartEgress` with this request's list. Every platform of that orientation reconnects. The current separate recording egress carries on. Only the disabled shared-egress path needs a new take (section 13.2) ◇ |
+| `replace: true` | Every running leg of the orientation is named with the same ref and full-address identity | The upsert above, nothing more |
+| `replace: true` | Some running leg is not named, or is named with another ref or full-address identity | `StopEgress`, then `StartEgress` with this request's list. Every platform of that orientation reconnects. The current separate recording egress carries on. Only the disabled shared-egress path needs a new take (section 13.2) ◇ |
 
 Idempotent: the same list sent twice changes nothing on a leg that runs. Two requests at once for one show take the lease of section 9.
 
@@ -276,7 +276,7 @@ The answer is `{ "rev", "state" }` ◇. `state` deserializes as `RunnerState` wi
 | `liveSeconds` | D `cloud_show.rs:1063-1064` | Seconds since the first on-air beacon, hold included (R:13-18). Worked out at answer time |
 | `feeds[]` | `CloudFeedStatus`, D `cloud_show.rs:344-351` | One per ingress. `connected` from `ingress_started` and `ingress_ended`. `kbps` from `ListIngress`, cached 2 s, omitted when LiveKit reports 0 ⚠ |
 | `legs[]` | `RunnerLeg`, D `cloud_show.rs:1121-1137` | Section 8.3. `legs[].resend` is **new** and optional (section 8.4) |
-| `destinationsSet`  | D `cloud_show.rs:1071-1072`, read at `:2111-2114` | `true` while a streaming egress is `STARTING` or `ACTIVE`, or after `legs/end`. ◇ `true` also after all destinations failed or the restart cap fired; otherwise `false` when any orientation needs repair, even while another streams. Pending End and explicit `legs/end` suppress resends. It is already `true` in the `rev` a `PUT …/destinations` answer names, not first at `egress_started`: otherwise the desktop reads a dead egress and sends the list again |
+| `destinationsSet`  | D `cloud_show.rs:1071-1072`, read at `:2111-2114` | `false` whenever any orientation needs repair, even while another streams or is held by the restart cap. Otherwise `true` while a streaming egress is `STARTING` or `ACTIVE`, after `legs/end`, or when all remaining sides have terminal destination failures or are held. Pending End and explicit `legs/end` suppress resends. It is already `true` in the `rev` a `PUT …/destinations` answer names, not first at `egress_started`: otherwise the desktop reads a dead egress and sends the list again |
 | `restarts` | D `cloud_show.rs:1075-1076`, read at `:2115-2117` | Times a streaming egress ended by itself while the show was open, except one whose every stream was `FAILED` ◇. Not the count of egresses started. An egress the web stopped itself (`replace`, `legs/end`, End) never counts |
 | `holdImageSet` | D `cloud_show.rs:1079-1080` | A hold image is stored |
 | `desktopConnected` | Not read by the desktop (R:316-322) | A state poll in the last 15 s |
@@ -705,7 +705,7 @@ egress.startEgress(
 | `ingress_ended` | That feed's `connected` is false. Starts the 5 s hold fallback |
 | `egress_started` | The egress is known and `STARTING`. Its legs are `connecting` |
 | `egress_updated` | Status and stream results are matched to legs (section 8.3). The first `ACTIVE` starts the meter (section 14) |
-| `egress_ended` | ◇ The meter's last row. A segments result becomes a recording (section 13.2). Every stream `FAILED`: legs `failed`, `restarts` unchanged, `destinationsSet` true. Other self-ended streaming egresses increment `restarts`; legs leave and `destinationsSet` becomes false unless held by the restart cap or another side (section 15). Web-stopped egresses never count |
+| `egress_ended` | ◇ The meter's last row. A segments result becomes a recording (section 13.2). Every stream `FAILED`: legs `failed`, `restarts` unchanged. Other self-ended streaming egresses increment `restarts` and their legs leave. `destinationsSet` is false whenever any side needs repair, even with another side running, terminal or held by the restart cap (section 15). Pending End and explicit `legs/end` suppress resends. Web-stopped egresses never count |
 | The four of today | As today. Participant events refresh `room.participants`; the roles `feed` and `egress` write no minutes row. `room_finished` during a hold ends the show `hold-limit` |
 
 ## 8. Stream keys
@@ -1003,9 +1003,9 @@ Rows go to `cloud_show_usage`, counted once on `(show_id, seq)` as today (W `met
 | One of several destinations dies | That leg `reconnecting`, then `failed` after about 31 s | The watchdog's Reconnect: `PUT …/destinations` with that one id |
 | The only destination dies | That leg `reconnecting` with `resend: true` | `PUT …/destinations` with that one id, by itself (section 8.4) |
 | A destination is refused by the guard | That leg `failed` with the fixed message | None |
-| The streaming egress ends with every stream `FAILED` ◇ | Those legs `failed`, `destinationsSet: true`, `restarts` unchanged | Explicit Reconnect; no automatic full-list resend |
+| The streaming egress ends with every stream `FAILED` ◇ | Those legs `failed`, `restarts` unchanged; `destinationsSet: true` only if no other side needs repair | Explicit Reconnect; no automatic full-list resend |
 | The streaming egress dies otherwise ◇                           | Its legs leave; `restarts` plus one. `destinationsSet: false` for any repairable dead side, even with another side running or held | `PUT …/destinations` with the full list, no `replace`                                                     |
-| The third such death in 10 min on an orientation ◇              | Legs `failed`: `Stop, then go live again to reconnect.`; `destinationsSet: true`                                                   | Requests naming only held sides give 503 `cloud-media-unavailable` for 10 min from that death             |
+| The third such death in 10 min on an orientation ◇              | Legs `failed`: `Stop, then go live again to reconnect.`; `destinationsSet: true` only if no other side needs repair                                                   | Requests naming only held sides give 503 `cloud-media-unavailable` for 10 min from that death             |
 | The egress dies, the desktop is gone | — | The web ends the show `egress-lost` after 60 s |
 | The room closes at the hold limit | `phase: "ended"`, `endReason: "hold-limit"` | None. Go Live starts a new show |
 | The feed cannot connect for 20 s, or LiveKit as a whole is down | Any | `POST …/lost` |
@@ -1090,7 +1090,7 @@ Shared constants. Each has one source. The server imports the page's wire module
 | 31 | `cloud_show_media` is one row per show | `rev` and the state are per show | Database |
 | 32 | Capacity defaults to 1 | The project holds one show today | D13 |
 | 33 | The version on the capabilities path is the User-Agent | Nothing else carries it there | D17, W8 |
-| 34 | Lost: LiveKit silent twice ends the show | Matches the node rule; the reconcile pass cleans up | D9 |
+| 34 | Lost: two silences leave the show open | Silence is unknown; only confirmed absent media permits direct fallback | D9 |
 | 35 | `egress-lost` after 60 s with no desktop | Nobody holds the keys | D9 |
 | 36 | Managed `expiresAt` is the create plus 11 h 55 min | The hold no longer adds | D12 |
 | 37 | ◇ Desktop intents spend one 22 s deadline, or 7 s without destination `replace`; one useful retry at most | Fits the 25 s / 10 s RPC watchdogs, including retry and ordering wait | Section 2 |
@@ -1099,7 +1099,7 @@ Shared constants. Each has one source. The server imports the page's wire module
 | 40 | ◇ End livestream and Stop invalidate the destination generation and follow an in-flight PUT | Retained lists and retries cannot revive a stopped stream | Sections 2.2, 2.3 |
 | 41 | ◇ Destination text refuses controls, lone surrogates and `://` | Stored labels and ids cannot carry addresses or break JSON storage | Section 2.2 |
 | 42 | ◇ Guard requires ASCII, lowercase scheme and exactly app/key; rejects query slashes and broken escapes anywhere | Matches LiveKit's redaction shape; LiveKit refuses a broken escape and repeats the URL in its error | Section 8.1 |
-| 43 | ◇ Redacted-ref collisions are accepted; no full-URL-derived value is stored | Keeps D7's no-key rule despite indistinguishable key rotations | Section 8.2 |
+| 43 | ◇ Store a domain-separated full-address HMAC for equality; reject redacted-ref ambiguity between distinct destination ids | Detect rotated keys without storing URLs or keys; provider results must identify one leg | Section 8.2 |
 | 44 | ◇ Leg results respect `addedAt` with 1 s tolerance; no-start entries win, then latest start and list order | Old failed entries must not defeat a new add | Section 8.3 |
 | 45 | ◇ `legs/end` clears every leg and rejects malformed bodies with 400 | Explicit End livestream must also clear failed and refused legs | Section 2.3 |
 | 46 | ◇ Stage shape errors are 400; an identity of another form, or a guest not in the room, is 422; the host is always accepted | The page can draw only people in the room | Section 2.5 |
@@ -1124,7 +1124,7 @@ Shared constants. Each has one source. The server imports the page's wire module
 | 65 | ◇ Row mutations use xmin compare-and-set in a batch; media operations use a 65 s lease with 5 s wait | No application-spanning transaction; concurrent writes and calls stay ordered | Section 9 |
 | 66 | ◇ JSON stores lifecycle markers, egress history, pending usage, page boots and take revocation metadata | Reconcile must recover interrupted requests without a URL or secret | Section 9 |
 | 67 | ◇ Create batches both rows; pending at 60 s is abandoned; missing media ends at once on state, after 60 s on reaper | Interrupted creates must not strand capacity or an infinite state retry | Section 1 |
-| 68 | ◇ End writes host-ended before teardown, marks web-stopped egresses and confirms the ended row even if cleanup fails | Late webhooks must not count an intentional stop as a crash | Section 2.7 |
+| 68 | ◇ End marks pending and web-stopped egresses before teardown; failure returns 503 and retains the seat until confirmed | Late webhooks must not count intentional stops as crashes; pending cleanup must not permit double streaming | Section 2.7 |
 | 69 | ◇ Talk keeps existing empty timeout, rate and invite rules; quality exempts talk, old-client gate covers all kinds | No ingress or runner exists to justify solo feed rules for a room | Sections 1, 4, 12 |
 | 70 | ◇ All-streams-failed ends are destination failures; other deaths cap at three per 10 min per side | Wrong keys and repeated crashes must not cause endless automatic restart | Sections 3, 15 |
 | 71 | ◇ Reconcile confirms missing rooms by name across two ticks; unknown ingress cleanup needs a successful room list | One missing or failed list is not proof a live room is gone | Section 15 |
@@ -1159,13 +1159,18 @@ Open contradictions and unmeasured behavior:
 
 ◇ **14. The whole state deadline.** _Settled:_ a poll that ends an abandoned create or a test show answers at once and leaves teardown to the reaper, so every state answer fits 30 s.
 
-◇ **15. Overlay changes during a page rejoin.** A successful rejoin in the same boot does not grow `pageJoins`. An untimed overlay changed or cleared while the page was disconnected can therefore stay stale: byte streams are not replayed, and the desktop only replays on a counted page join or its own renderer reconnect (W `media/events.ts:749-752`, `program/source.ts:532-557`; D `cloud_control_web.rs:1911-1915`).
+◇ **15. Overlay changes during a page rejoin.** _Settled:_ a later `joined: true` beacon after a beacon without it, or with a higher join epoch, increments `pageJoins` within the same boot. The desktop replays untimed overlays and clears empty slots. Duplicate and stale beacons do not increment the counter (section 5.3).
 
 
 ### Post-merge review additions
 
 Managed talk RPC follow-up calls share the initial 22 s budget so a slow
 Go Live followed by platform metadata cannot exceed the renderer watchdog.
-The node transport retains its original deadlines. Recording download
+The node transport retains its create and socket deadlines. Before provider
+selection, Open the room bounds local test cancellation and camera handover to
+1 s, reserving the existing 20 s create timeout and at least 1 s for managed
+control within 22 s. A failed managed open remembers the show id before
+returning; background End has a fresh 22 s budget, and only confirmed cleanup
+forgets that id. Camera return also has its own bounded task. Recording download
 snapshots recover missed terminal events; cancellation of an absent job
 triggers a snapshot refresh. These additions do not change node media.

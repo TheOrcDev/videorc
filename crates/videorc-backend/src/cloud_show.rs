@@ -1456,6 +1456,8 @@ pub struct CloudShowRuntime {
     /// Plan 224: the room this desktop holds, beside `show`; cleared with
     /// it. Its token is the one secret in the runtime.
     pub(crate) talk: Option<TalkShowState>,
+    /// A failed open still owns its camera return; a later lend must wait.
+    pub(crate) room_camera_returning: bool,
     /// C6b: the test that runs or the last one that ran, and the running
     /// test task's cancel switch (`Some` only while it runs).
     test: Option<CloudTestStatus>,
@@ -1879,11 +1881,18 @@ impl CloudShowRuntime {
     /// The show left this runtime without the web confirming its end (a
     /// hand-over that failed with the web unreachable): keep remembering it,
     /// so the next launch or Go Live asks the web again.
-    fn keep_remembering(&mut self, show_id: &str) {
+    pub(crate) fn keep_remembering(&mut self, show_id: &str) {
         self.show_seen = None;
         self.remembered_show = Some(show_id.to_string());
         // The next successful entitlement refresh asks the web again (L4).
         self.launch_checked = false;
+    }
+
+    /// A late failed-open cleanup cannot forget a newer or recovered show.
+    pub(crate) fn forget_failed_open_if_remembered(&mut self, show_id: &str) {
+        if self.show.is_none() && self.remembered_show.as_deref() == Some(show_id) {
+            self.forget_remembered_show();
+        }
     }
 
     /// Follows the show into `remembered_show` (a new show is remembered,
@@ -5087,6 +5096,9 @@ mod tests {
         // Plan 224: the talk-show routes, scripted.
         room_tokens: AtomicUsize,
         room_patches: StdMutex<Vec<RoomPatch>>,
+        create_delay_ms: AtomicUsize,
+        first_state_delay_ms: AtomicUsize,
+        end_delay_ms: AtomicUsize,
         patch_delay_ms: AtomicUsize,
         destinations_delay_ms: AtomicUsize,
         rotations: AtomicUsize,
@@ -5179,6 +5191,10 @@ mod tests {
             _bearer: &str,
             request: &CreateShowRequest,
         ) -> std::result::Result<CreateShowResponse, CloudApiError> {
+            let delay = self.create_delay_ms.load(Ordering::SeqCst);
+            if delay > 0 {
+                tokio::time::sleep(Duration::from_millis(delay as u64)).await;
+            }
             self.create_calls.fetch_add(1, Ordering::SeqCst);
             self.create_kinds.lock().unwrap().push(request.kind.clone());
             if let Some(answer) = self.create_queue.lock().unwrap().pop_front() {
@@ -5209,6 +5225,10 @@ mod tests {
             show_id: &str,
         ) -> std::result::Result<(), CloudApiError> {
             self.end_calls.lock().unwrap().push(show_id.to_string());
+            let delay = self.end_delay_ms.load(Ordering::SeqCst);
+            if delay > 0 {
+                tokio::time::sleep(Duration::from_millis(delay as u64)).await;
+            }
             if self.end_fails.load(Ordering::SeqCst) {
                 return Err(CloudApiError::Transport(
                     "videorc.com could not be reached".to_string(),
@@ -5371,6 +5391,10 @@ mod tests {
             _show_id: &str,
             since: Option<u64>,
         ) -> std::result::Result<ControlStateAnswer, CloudApiError> {
+            let delay = self.first_state_delay_ms.load(Ordering::SeqCst);
+            if since.is_none() && delay > 0 {
+                tokio::time::sleep(Duration::from_millis(delay as u64)).await;
+            }
             {
                 let mut managed = self.managed.lock().unwrap();
                 managed.polls.push((since, tokio::time::Instant::now()));
@@ -12411,6 +12435,132 @@ mod tests {
             Some(ControlHandle::Web(_))
         ));
         assert_eq!(harness.context.connector.connects.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn room_open_bounds_preparation_before_creating_any_show() {
+        let mut harness = harness(true);
+        lock(&harness.context.slot).entitlement = talk_entitlement();
+        let camera = harness.camera.clone();
+        harness.context.hooks.camera = Arc::new(move |handover| {
+            let camera = camera.clone();
+            Box::pin(async move {
+                camera.lock().unwrap().push(handover);
+                if handover == crate::cloud_talk::CameraHandover::Lend {
+                    std::future::pending::<()>().await;
+                }
+                Ok(())
+            })
+        });
+        let started = tokio::time::Instant::now();
+        let error = harness
+            .context
+            .open_room(Some("bearer".into()), room_open_params(), false)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("Preparing the room timed out"));
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert_eq!(harness.context.web.create_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            harness.camera.lock().unwrap().last(),
+            Some(&crate::cloud_talk::CameraHandover::Return)
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn managed_room_open_timeout_retains_ownership_until_independent_end_finishes() {
+        for end_fails in [false, true] {
+            let mut harness = harness(true);
+            let camera = harness.camera.clone();
+            harness.context.hooks.camera = Arc::new(move |handover| {
+                let camera = camera.clone();
+                Box::pin(async move {
+                    if handover == crate::cloud_talk::CameraHandover::Return {
+                        tokio::time::sleep(Duration::from_secs(2)).await;
+                    }
+                    camera.lock().unwrap().push(handover);
+                    Ok(())
+                })
+            });
+            lock(&harness.context.slot).entitlement = talk_entitlement();
+            let web = &harness.context.web;
+            *web.create.lock().unwrap() = Some(Ok(created_managed_talk()));
+            web.create_delay_ms.store(19_000, Ordering::SeqCst);
+            web.first_state_delay_ms.store(8_000, Ordering::SeqCst);
+            web.end_delay_ms.store(4_000, Ordering::SeqCst);
+            web.end_fails.store(end_fails, Ordering::SeqCst);
+            let started = tokio::time::Instant::now();
+            let error = harness
+                .context
+                .open_room(Some("bearer".into()), room_open_params(), false)
+                .await
+                .unwrap_err();
+            assert!(error.to_string().contains("timed out"));
+            assert!(started.elapsed() >= Duration::from_secs(22));
+            assert!(started.elapsed() < Duration::from_secs(23));
+            assert_eq!(
+                lock(&harness.context.slot).remembered_show(),
+                Some("sh_abc")
+            );
+            assert_eq!(
+                harness.remembered.lock().unwrap().last(),
+                Some(&Some("sh_abc".into()))
+            );
+            assert!(lock(&harness.context.slot).show.is_none());
+            tokio::task::yield_now().await;
+            assert_eq!(web.end_calls.lock().unwrap().as_slice(), &["sh_abc"]);
+            let reopen = harness
+                .context
+                .open_room(Some("bearer".into()), room_open_params(), false)
+                .await
+                .unwrap_err();
+            assert!(reopen.to_string().contains("still returning"));
+            assert_eq!(web.create_calls.load(Ordering::SeqCst), 1);
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            assert_eq!(
+                harness.camera.lock().unwrap().last(),
+                Some(&crate::cloud_talk::CameraHandover::Return)
+            );
+            assert!(!lock(&harness.context.slot).room_camera_returning);
+            assert_eq!(
+                lock(&harness.context.slot).remembered_show(),
+                end_fails.then_some("sh_abc")
+            );
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn node_room_open_keeps_its_socket_budget_after_slow_create() {
+        let harness = harness(true);
+        lock(&harness.context.slot).entitlement = talk_entitlement();
+        *harness.context.web.create.lock().unwrap() = Some(Ok(created_talk()));
+        harness
+            .context
+            .web
+            .create_delay_ms
+            .store(19_000, Ordering::SeqCst);
+        let context = harness.context.clone();
+        let started = tokio::time::Instant::now();
+        let open = tokio::spawn(async move {
+            context
+                .open_room(Some("bearer".into()), room_open_params(), false)
+                .await
+        });
+        let mut server = harness.context.connector.accept_within(21).await;
+        assert_eq!(server.next_frame().await["t"], "hello");
+        tokio::time::sleep(Duration::from_secs(4)).await;
+        server.send(welcome_talk(false));
+        assert!(open.await.unwrap().is_ok());
+        assert!(started.elapsed() >= Duration::from_secs(23));
+        assert!(harness.context.web.end_calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn failed_room_cleanup_cannot_forget_a_newer_show() {
+        let mut runtime = CloudShowRuntime::default();
+        runtime.keep_remembering("sh_new");
+        runtime.forget_failed_open_if_remembered("sh_old");
+        assert_eq!(runtime.remembered_show(), Some("sh_new"));
     }
 
     fn stage_with_a_guest() -> crate::cloud_talk::CloudStage {

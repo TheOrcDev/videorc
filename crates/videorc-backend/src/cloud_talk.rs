@@ -1336,7 +1336,67 @@ async fn within_room_budget<T>(
     }
 }
 
+// The provider is not known until create returns. Reserve its existing 20 s
+// timeout, plus 1 s for the first state, within the managed 22 s RPC budget.
+// Only local preparation gets this bound; node create/socket timing is unchanged.
+const ROOM_PREPARE_BUDGET: Duration = Duration::from_secs(1);
+
 impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
+    fn return_room_camera_in_background(&self) -> tokio::task::JoinHandle<()> {
+        let camera = self.hooks.camera.clone();
+        let slot = self.slot.clone();
+        lock(&slot).room_camera_returning = true;
+        tokio::spawn(async move {
+            if !matches!(
+                tokio::time::timeout(
+                    crate::cloud_control_web::CONTROL_INTENT_BUDGET,
+                    camera(CameraHandover::Return),
+                )
+                .await,
+                Ok(Ok(()))
+            ) {
+                tracing::warn!("The failed room open could not return the camera in time.");
+            }
+            lock(&slot).room_camera_returning = false;
+        })
+    }
+
+    async fn return_room_camera_until(&self, deadline: tokio::time::Instant) {
+        // Dropping a JoinHandle detaches it: a camera return which outlasts
+        // this RPC still finishes, with its own bounded lifetime.
+        let task = self.return_room_camera_in_background();
+        let _ = tokio::time::timeout_at(deadline, task).await;
+    }
+
+    async fn clean_up_failed_room_open(&self, bearer: &str, show_id: &str, managed: bool) {
+        if !managed {
+            let _ = self.web.end_show(bearer, show_id).await;
+            let _ = (self.hooks.camera)(CameraHandover::Return).await;
+            return;
+        }
+        // Persist ownership before returning the RPC error. Cleanup has its
+        // own budget, and a failed End leaves launch/Go Live recovery armed.
+        lock(&self.slot).keep_remembering(show_id);
+        self.hooks.emit_from(&self.slot);
+        self.return_room_camera_in_background();
+        let context = self.clone();
+        let bearer = bearer.to_string();
+        let show_id = show_id.to_string();
+        tokio::spawn(async move {
+            if matches!(
+                tokio::time::timeout(
+                    crate::cloud_control_web::CONTROL_INTENT_BUDGET,
+                    context.web.end_show(&bearer, &show_id),
+                )
+                .await,
+                Ok(Ok(()))
+            ) {
+                lock(&context.slot).forget_failed_open_if_remembered(&show_id);
+                context.hooks.emit_from(&context.slot);
+            }
+        });
+    }
+
     fn room_rpc_deadline(&self) -> Option<tokio::time::Instant> {
         lock(&self.slot)
             .show
@@ -1363,6 +1423,12 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
             if !runtime.entitlement.talk_shows() {
                 return Err(RoomOpenRefusal::NotEntitled.into());
             }
+            if runtime.room_camera_returning {
+                return Err(RoomOpenRefusal::CameraBusy(
+                    "The camera is still returning from the previous room. Try again.".to_string(),
+                )
+                .into());
+            }
             if runtime.show.is_some() || runtime.talk.is_some() {
                 return Err(RoomOpenRefusal::ShowLive.into());
             }
@@ -1370,11 +1436,23 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
                 return Err(RoomOpenRefusal::SessionActive.into());
             }
         }
-        self.cancel_test().await;
-        // The camera first: a refusal (a take records it) costs nothing on
-        // the web, and a room without the host's camera is no show.
-        if let Err(message) = (self.hooks.camera)(CameraHandover::Lend).await {
-            return Err(RoomOpenRefusal::CameraBusy(message).into());
+        // These local steps precede provider selection. If they stall, no
+        // create starts; returning the camera cannot extend the RPC deadline.
+        match tokio::time::timeout_at(started + ROOM_PREPARE_BUDGET, async {
+            self.cancel_test().await;
+            (self.hooks.camera)(CameraHandover::Lend).await
+        })
+        .await
+        {
+            Ok(Ok(())) => {}
+            Ok(Err(message)) => return Err(RoomOpenRefusal::CameraBusy(message).into()),
+            Err(_) => {
+                self.return_room_camera_until(
+                    started + crate::cloud_control_web::CONTROL_INTENT_BUDGET,
+                )
+                .await;
+                bail!("Preparing the room timed out. Try again.");
+            }
         }
         let outputs: Vec<ShowOutputSpec> =
             crate::recording::cloud_test_output_specs(&params.outputs);
@@ -1396,26 +1474,41 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
                 platforms: platforms.clone(),
             }),
         };
-        let created = match self.web.create_show(&bearer, &request).await {
+        let created = match tokio::time::timeout(
+            crate::videorc_api::CLOUD_CREATE_TIMEOUT,
+            self.web.create_show(&bearer, &request),
+        )
+        .await
+        .unwrap_or_else(|_| {
+            Err(CloudApiError::Transport(
+                "Creating the room timed out.".to_string(),
+            ))
+        }) {
             Ok(created) => created,
             // The web's 403 for talk shows reads as the same lock (L1).
             Err(CloudApiError::NotEntitled) => {
-                let _ = (self.hooks.camera)(CameraHandover::Return).await;
+                self.return_room_camera_until(
+                    started + crate::cloud_control_web::CONTROL_INTENT_BUDGET,
+                )
+                .await;
                 return Err(RoomOpenRefusal::NotEntitled.into());
             }
             Err(error) => {
-                let _ = (self.hooks.camera)(CameraHandover::Return).await;
+                self.return_room_camera_until(
+                    started + crate::cloud_control_web::CONTROL_INTENT_BUDGET,
+                )
+                .await;
                 return Err(anyhow::Error::new(error));
             }
         };
         let show_id = created.show.id.clone();
-        let deadline = (created.control.transport_kind() == ControlKind::Web)
-            .then_some(started + crate::cloud_control_web::CONTROL_INTENT_BUDGET);
+        let managed = created.control.transport_kind() == ControlKind::Web;
+        let deadline = managed.then_some(started + crate::cloud_control_web::CONTROL_INTENT_BUDGET);
         // The create's host token is never kept (L4): the renderer joins
         // with a fresh one through `room_token`.
         let (Some(_), Some(invite)) = (created.room.as_ref(), created.invite.clone()) else {
-            let _ = within_room_budget(deadline, self.web.end_show(&bearer, &show_id)).await;
-            let _ = (self.hooks.camera)(CameraHandover::Return).await;
+            self.clean_up_failed_room_open(&bearer, &show_id, managed)
+                .await;
             bail!("Videorc Cloud created the show without a room.");
         };
         // The socket's address carries the show token and the keys, so it is
@@ -1425,8 +1518,8 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
             && let Some(problem) =
                 crate::cloud_show::control_url_problem(&created.control.url, cfg!(debug_assertions))
         {
-            let _ = within_room_budget(deadline, self.web.end_show(&bearer, &show_id)).await;
-            let _ = (self.hooks.camera)(CameraHandover::Return).await;
+            self.clean_up_failed_room_open(&bearer, &show_id, managed)
+                .await;
             bail!("{problem}");
         }
         let (transport, welcome) = match within_room_budget(
@@ -1438,8 +1531,8 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
         {
             Ok(connected) => connected,
             Err(failure) => {
-                let _ = within_room_budget(deadline, self.web.end_show(&bearer, &show_id)).await;
-                let _ = (self.hooks.camera)(CameraHandover::Return).await;
+                self.clean_up_failed_room_open(&bearer, &show_id, managed)
+                    .await;
                 let message = match failure {
                     HelloFailure::BadToken => "the node refused the show token".to_string(),
                     HelloFailure::NoSuchShow => "the node does not know the show".to_string(),
@@ -2119,6 +2212,12 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
         let bearer = bearer_or_bail(bearer)?;
         let (show_id, held_room, uncontrolled) = {
             let runtime = lock(&self.slot);
+            if runtime.room_camera_returning {
+                return Err(RoomOpenRefusal::CameraBusy(
+                    "The camera is still returning from the previous room. Try again.".to_string(),
+                )
+                .into());
+            }
             let Some(show) = runtime.show.as_ref() else {
                 bail!("There's no Videorc Cloud show to resume.");
             };
