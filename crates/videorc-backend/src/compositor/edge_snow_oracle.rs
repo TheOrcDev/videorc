@@ -724,10 +724,33 @@ impl EdgeSnowMetrics {
     }
 }
 
+/// Runs a CPU oracle in a rayon pool of its own, as wide as the global one.
+///
+/// The oracles key 4K frames through the CPU blit, whose `par_iter`s split
+/// into many jobs. Rayon workers drain their own split jobs before they take
+/// a job injected from outside the pool, so on the global pool every other
+/// test's `rayon::join` (each compositor tick's blits) waited behind them. At
+/// CI's opt-level 0 that wait outran the 2 s camera staleness cutoff
+/// (`COMPOSITOR_MISSING_SOURCE_PLACEHOLDER_AFTER`), and scene-switch tests on
+/// the Linux runner drew a black camera.
+fn in_own_rayon_pool<R: Send>(oracle: impl FnOnce() -> R + Send) -> R {
+    let threads = std::thread::available_parallelism().map_or(2, |n| n.get());
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(threads)
+        .thread_name(|index| format!("edge-snow-oracle-{index}"))
+        .build()
+        .expect("a rayon pool for the CPU oracle")
+        .install(oracle)
+}
+
 /// Plan 233 S0 on the CPU blit: the 4K synthetic camera in the Large slot
 /// keeps at most 10 % of the shipped snow and 90 % of the honest detail.
 #[test]
 fn cpu_keyed_4k_camera_in_the_large_slot_has_no_edge_snow() {
+    in_own_rayon_pool(cpu_keyed_4k_camera_in_the_large_slot_oracle);
+}
+
+fn cpu_keyed_4k_camera_in_the_large_slot_oracle() {
     let camera = SyntheticCamera::build(CAMERA_WIDTH, CAMERA_HEIGHT);
     let spec = default_key_spec();
     let outline = Outline::of_clean_frame(&camera, &spec);
@@ -1020,6 +1043,10 @@ const HEAD_MIDDLE: (u32, u32) = (1536, 648);
 /// and keeps the 40 × 40 patch and the subject.
 #[test]
 fn cpu_keyed_plane_drops_the_owners_speck_and_keeps_a_real_patch() {
+    in_own_rayon_pool(cpu_keyed_plane_speck_oracle);
+}
+
+fn cpu_keyed_plane_speck_oracle() {
     let camera = SyntheticCamera::build(CAMERA_WIDTH, CAMERA_HEIGHT);
     let spec = default_key_spec();
     let frame = frame_with_speck_and_patch(&camera);
