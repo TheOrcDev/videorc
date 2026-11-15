@@ -1365,7 +1365,8 @@ impl VirtualCameraOutput {
                         break;
                     }
                     let now = Instant::now();
-                    let outcome = engine.tick(now);
+                    let outcome =
+                        crate::autorelease_pool::with_autorelease_pool(|| engine.tick(now));
                     deadline = if outcome == TickOutcome::Skipped {
                         now + VIEWER_CHECK_INTERVAL.min(CONNECT_RETRY_INTERVAL)
                     } else {

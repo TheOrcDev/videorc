@@ -265,7 +265,6 @@ async fn publish(
         super::LiveBackgroundLeg::unmeasured(&mut None),
         super::ProgramLeg::off(&mut None),
     )
-    .await
 }
 
 #[tokio::test]
@@ -522,7 +521,6 @@ async fn publish_dual(
         super::LiveBackgroundLeg::unmeasured(&mut None),
         super::ProgramLeg::off(&mut None),
     )
-    .await
 }
 
 /// Plan 210 S3 follow-up: in a dual-orientation session the vertical leg
@@ -1230,8 +1228,7 @@ async fn scene_switch_artifact_fixture() {
                 super::ChatOverlayLegs::OFF,
                 super::LiveBackgroundLeg::unmeasured(&mut None),
                 super::ProgramLeg::off(&mut None),
-            )
-            .await;
+            );
             if metal {
                 assert_eq!(result.compositor_backend, CompositorBackend::Metal);
             }
@@ -1400,8 +1397,7 @@ async fn source_iso_artifact_fixture() {
                 super::ChatOverlayLegs::OFF,
                 super::LiveBackgroundLeg::unmeasured(&mut None),
                 super::ProgramLeg::off(&mut None),
-            )
-            .await;
+            );
             if metal {
                 assert_eq!(result.compositor_backend, CompositorBackend::Metal);
             }
@@ -1508,8 +1504,7 @@ async fn source_iso_artifact_fixture() {
             super::ChatOverlayLegs::OFF,
             super::LiveBackgroundLeg::unmeasured(&mut None),
             super::ProgramLeg::off(&mut None),
-        )
-        .await;
+        );
         let latest_sequence =
             |store: &CompositorFrameStore| store.lock().unwrap().latest().unwrap().sequence;
         assert_eq!(
@@ -1989,8 +1984,7 @@ async fn source_edit_publication_refuses_stale_camera_and_failed_auxiliary_outpu
             super::ChatOverlayLegs::OFF,
             super::LiveBackgroundLeg::unmeasured(&mut None),
             super::ProgramLeg::off(&mut None),
-        )
-        .await;
+        );
         let snapshot = state
             .live_source_switch
             .lock()
@@ -2184,8 +2178,7 @@ async fn source_edit_takeover_pixels_do_not_prove_hidden_capture_and_clear_revea
             super::ChatOverlayLegs::OFF,
             super::LiveBackgroundLeg::unmeasured(&mut None),
             super::ProgramLeg::off(&mut None),
-        )
-        .await;
+        );
         let observed = state
             .live_source_switch
             .lock()
@@ -2592,8 +2585,7 @@ async fn hide_screen_render(
         super::ChatOverlayLegs::OFF,
         super::LiveBackgroundLeg::unmeasured(&mut None),
         super::ProgramLeg::off(&mut None),
-    )
-    .await;
+    );
     if metal {
         assert_eq!(result.compositor_backend, CompositorBackend::Metal);
     }
