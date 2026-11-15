@@ -659,6 +659,16 @@ describe('renderer security policy', () => {
     )
     expect(RENDERER_DOCUMENT_CSP).toContain('connect-src')
     expect(RENDERER_DOCUMENT_CSP).toContain('https://www.videorc.com')
+    // The talk show's room (LiveKit Cloud) joins from the renderer: its
+    // signal and region list, and no wider than LiveKit's own hosts.
+    const connectSources = RENDERER_DOCUMENT_CSP.split('; ')
+      .find((directive) => directive.startsWith('connect-src'))!
+      .split(' ')
+    expect(connectSources).toEqual(
+      expect.arrayContaining(['wss://*.livekit.cloud', 'https://*.livekit.cloud'])
+    )
+    expect(connectSources).not.toContain('https:')
+    expect(connectSources).not.toContain('wss:')
     expect(
       RENDERER_DOCUMENT_CSP.split('; ').find((directive) => directive.startsWith('img-src'))
     ).not.toContain('https:')
