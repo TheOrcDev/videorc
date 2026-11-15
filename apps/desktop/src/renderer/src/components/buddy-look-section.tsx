@@ -87,7 +87,7 @@ export function BuddyLookSection({
     // The provider's copy of the persona follows the backend's.
     await patchCohostSettings({ persona: settings.persona }).catch((error: unknown) =>
       setSaveError(
-        inlineUserError(error, { action: 'save', object: "Sidekick's look" }, 'buddy-look')
+        inlineUserError(error, { action: 'save', object: "your avatar's look" }, 'buddy-look')
       )
     )
   }
@@ -119,7 +119,7 @@ export function BuddyLookSection({
               : view === 'draft'
                 ? `Use it to give ${persona.name} this look. Redo remakes one pose from this idle.`
                 : persona.source === 'default'
-                  ? 'The default Sidekick until you create your own.'
+                  ? 'The default avatar until you create your own.'
                   : `What ${persona.name} wears on stream.`}
           </FieldDescription>
           {view === 'current' ? (

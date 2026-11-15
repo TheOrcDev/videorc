@@ -1,6 +1,7 @@
 import {
   type AppIcon,
   AssetsIcon,
+  AvatarPageIcon,
   BuddyPageIcon,
   CaptionsIcon,
   HealthIcon,
@@ -14,6 +15,7 @@ import {
 } from '@/components/icons'
 import { createContext, useContext } from 'react'
 
+import { AVATAR_TAB_LABEL, isAvatarTabId, type AvatarTabId } from '@/lib/avatar-tabs'
 import { BUDDY_TAB_LABEL, isBuddyTabId, type BuddyTabId } from '@/lib/buddy-tabs'
 import { isLivestreamViewId } from '@/lib/livestream-tabs'
 import { migrateSettingsTabId, type SettingsTabId } from '@/lib/settings-tabs'
@@ -30,7 +32,14 @@ import type { FirstRunSetupRequest, WorkspaceNavigation } from '@/lib/workspace-
 export type StudioPanel = 'sources' | 'layouts' | 'assets' | 'live' | 'captions' | 'recording'
 
 // Full pages: they replace the workspace content area.
-export type WorkspaceTab = 'studio' | StudioPanel | 'library' | 'ai' | 'diagnostics' | 'settings'
+export type WorkspaceTab =
+  | 'studio'
+  | StudioPanel
+  | 'library'
+  | 'avatar'
+  | 'ai'
+  | 'diagnostics'
+  | 'settings'
 
 export type WorkspaceTabMeta = {
   id: WorkspaceTab
@@ -47,11 +56,13 @@ export type StudioPanelMeta = {
   legacyTabId: string
 }
 
-// Buddy (plan 119) keeps the id `ai`, the id deep links, smokes and the
+// Sidekick (plan 119) keeps the id `ai`, the id deep links, smokes and the
 // `data-videorc-tab-trigger` value already use. Its row wears a plain glyph,
-// `BuddyPageIcon` (plan 235 D7); the Buddy artwork stays on the Buddy page.
+// `BuddyPageIcon` (plan 235 D7). The avatar, the character on the stream,
+// has its own page in Setup since plan 239, with its own glyph.
 export const WORKSPACE_TABS: WorkspaceTabMeta[] = [
   { id: 'studio', label: 'Studio', icon: StudioIcon },
+  { id: 'avatar', label: AVATAR_TAB_LABEL, icon: AvatarPageIcon },
   { id: 'ai', label: BUDDY_TAB_LABEL, icon: BuddyPageIcon },
   { id: 'library', label: 'Library', icon: LibraryIcon },
   { id: 'settings', label: 'Settings', icon: SettingsIcon },
@@ -82,30 +93,38 @@ export type SidebarZone = {
 
 // The sidebar, top to bottom (plan 174 D8, plan 235 D6): Studio leads alone as
 // the chrome slab, then the two labelled groups, Setup and Livestream, then
-// Library. The 'system' rows sit in a bottom block above the account row.
-// Health has no row at all: the status bar's state is its door (D9).
+// Library. The avatar is part of the picture, so it sits in Setup (plan 239,
+// owner 2026-11-15); Sidekick stays under Livestream. The 'system' rows sit
+// in a bottom block above the account row. Health has no row at all: the
+// status bar's state is its door (D9).
 export const SIDEBAR_ZONES: readonly SidebarZone[] = [
   { id: 'stage', pages: ['studio'] },
-  { id: 'setup', label: 'Setup', pages: ['sources', 'layouts', 'assets', 'captions', 'recording'] },
+  {
+    id: 'setup',
+    label: 'Setup',
+    pages: ['sources', 'layouts', 'assets', 'captions', 'avatar', 'recording']
+  },
   { id: 'livestream', label: 'Livestream', pages: ['live', 'ai'] },
   { id: 'library', pages: ['library'] },
   { id: 'system', pages: ['settings'] }
 ]
 
-// Page shortcuts run down the sidebar, ⌘1–⌘9 (plan 235 D8). Settings keeps
-// the platform-standard ⌘,. Health intentionally has NO digit — it stays
-// reachable via ⌘K (and the account menu). The main process emits the raw key
-// ('1'–'9' or ',') and AppShell maps whatever is listed here.
+// Page shortcuts run down the sidebar (plan 235 D8): ⌘1–⌘9, then ⌘0 for the
+// tenth page, Library (plan 239 D6). Settings keeps the platform-standard ⌘,.
+// Health intentionally has NO digit — it stays reachable via ⌘K (and the
+// account menu). The main process emits the raw key ('0'–'9' or ',') and
+// AppShell maps whatever is listed here.
 export const WORKSPACE_SHORTCUTS: { digit: string; tab: WorkspaceTab }[] = [
   { digit: '1', tab: 'studio' },
   { digit: '2', tab: 'sources' },
   { digit: '3', tab: 'layouts' },
   { digit: '4', tab: 'assets' },
   { digit: '5', tab: 'captions' },
-  { digit: '6', tab: 'recording' },
-  { digit: '7', tab: 'live' },
-  { digit: '8', tab: 'ai' },
-  { digit: '9', tab: 'library' },
+  { digit: '6', tab: 'avatar' },
+  { digit: '7', tab: 'recording' },
+  { digit: '8', tab: 'live' },
+  { digit: '9', tab: 'ai' },
+  { digit: '0', tab: 'library' },
   { digit: ',', tab: 'settings' }
 ]
 
@@ -166,7 +185,7 @@ export function isWorkspaceTab(value: unknown): value is WorkspaceTab {
  */
 export function readWorkspaceNavigation(detail: unknown): WorkspaceNavigation | null {
   if (!detail || typeof detail !== 'object') return null
-  const { tab, settingsTab, buddyTab, livestreamView, sessionId } = detail as Record<
+  const { tab, settingsTab, buddyTab, avatarTab, livestreamView, sessionId } = detail as Record<
     string,
     unknown
   >
@@ -176,6 +195,7 @@ export function readWorkspaceNavigation(detail: unknown): WorkspaceNavigation | 
     return current ? { tab, settingsTab: current } : { tab }
   }
   if (tab === 'ai') return isBuddyTabId(buddyTab) ? { tab, buddyTab } : { tab }
+  if (tab === 'avatar') return isAvatarTabId(avatarTab) ? { tab, avatarTab } : { tab }
   if (tab === 'live') {
     return isLivestreamViewId(livestreamView) ? { tab, livestreamView } : { tab }
   }
@@ -198,8 +218,10 @@ type WorkspaceNavValue = {
   closeStudioPanel: () => void
   /** Opens Settings on `tab`, or on the tab used last when none is named. */
   openSettings: (tab?: SettingsTabId) => void
-  /** Opens Buddy on `tab`, or on the tab used last when none is named (plan 150). */
+  /** Opens Sidekick on `tab`, or on the tab used last when none is named (plan 150). */
   openBuddy: (tab?: BuddyTabId) => void
+  /** Opens Avatar on `tab`, or on the tab used last when none is named (plan 239). */
+  openAvatar: (tab?: AvatarTabId) => void
 }
 
 export const WorkspaceNavContext = createContext<WorkspaceNavValue | null>(null)

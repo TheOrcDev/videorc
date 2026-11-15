@@ -42,7 +42,7 @@ export const BUDDY_LIVE_POWERS: readonly {
   {
     title: 'The room, handled',
     description:
-      "Sidekick greets first-timers, reminds you of your promises, nudges you in dead air, tells you when viewers say your audio broke, and can put the comment you're talking about on screen.",
+      "Sidekick points out first-timers, reminds you of your promises, nudges you in dead air, tells you when viewers say your audio broke, and can put the comment you're talking about on screen.",
     tab: 'chat'
   },
   {
@@ -61,15 +61,15 @@ export const CLOUD_AI_CLEAN_CUT_USE =
  * dialog (Buddy Live, Clean cut) and the Cloud AI row show this one list, so a
  * feature that needs cloud AI extends the consent here, never in a second
  * store. The lines say what is sent and kept as it is today: an Alive
- * Buddy's moves join the account for a Buddy in your library (plan 172 D10,
- * plan 174 G-6).
+ * avatar's moves join the account for an avatar in your library (plan 172
+ * D10, plan 174 G-6).
  */
 export const CLOUD_AI_USES: readonly string[] = [
   COHOST_CHAT_CONSENT_SENTENCE,
   BUDDY_HEARS_YOU_USE,
-  "Creating a Sidekick: your description and any picture you add go to Videorc's cloud AI, and the picture is used once and not kept. The Sidekicks you create (their pictures, name, personality and About you) are kept in your Videorc account so you can use them on any computer, until you delete them or your account.",
-  "Creating an Alive Sidekick: your reference picture and its description go to Videorc's cloud AI. Its moves are kept on this computer and, for a Sidekick you made that's in your library, in your Videorc account too, so it moves on any computer, until you remove them or delete the Sidekick or your account.",
-  "Sidekick talks on stream: with Answers, Banter or AI greetings on, its messages are drafted by Videorc's cloud AI. It says them in its bubble, and posts one on your own account only when you click its card in Suggest.",
+  "Creating an avatar: your description and any picture you add go to Videorc's cloud AI, and the picture is used once and not kept. The avatars you create (their pictures, name, personality and About you) are kept in your Videorc account so you can use them on any computer, until you delete them or your account.",
+  "Creating an Alive avatar: your reference picture and its description go to Videorc's cloud AI. Its moves are kept on this computer and, for an avatar you made that's in your library, in your Videorc account too, so it moves on any computer, until you remove them or delete the avatar or your account.",
+  "Sidekick's lines: with Answers, Banter or AI greetings on, they are drafted by Videorc's cloud AI. Your avatar says them in its bubble, and one is posted on your own account only when you click its card in Suggest.",
   CLOUD_AI_CLEAN_CUT_USE
 ]
 
@@ -291,10 +291,10 @@ export const BUDDY_VOICE_COMMANDS: readonly {
     ]
   },
   {
-    // The Buddy itself (`cohost_command.rs`, the presence grammar): the same
-    // switch as "{name} on stream" in the Stream Manager's Buddy pane.
+    // The avatar (`cohost_command.rs`, the presence grammar): the same
+    // switch as "{name} on stream" in the Stream Manager's Avatar block.
     title: 'On stream',
-    result: 'Puts Sidekick on the stream, or takes it off.',
+    result: 'Puts your avatar on the stream, or takes it off.',
     phrases: [
       'Sidekick, show up',
       'Sidekick, come on screen',
@@ -323,25 +323,13 @@ export function buddyVoicePhrasesLabel(phrases: readonly string[], count = phras
 }
 
 /**
- * The names that already wake it (plan 236 D2, `cohost_command::WAKE_WORDS`),
- * written without spaces or dashes: "Side kick" and "side-kick" are
- * "sidekick". The old name stays hidden: the line never offers it.
+ * The words that start a command (plan 174 F-16): "Sidekick". The avatar's
+ * own name still wakes it (`cohost_command::wake_name_tokens`, a word of
+ * three letters or more), but since plan 239 (owner decision 5) the app
+ * teaches "Sidekick" alone: the name is the avatar's, and Sidekick is the
+ * one that listens.
  */
-const WAKE_WORD_NAMES = new Set(['sidekick', 'sidekicks', 'buddy', 'bodhi'])
-
-/**
- * The words that start a command (plan 174 F-16): "Sidekick" always, and the
- * name the streamer gave it, the way the backend wakes on it
- * (`cohost_command::wake_name_tokens`: a word of three letters or more).
- */
-export function buddyWakeWordsLine(name: string | null | undefined): string {
-  const own = name?.trim() ?? ''
-  const joined = own.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '')
-  const wakes = own && !WAKE_WORD_NAMES.has(joined) && /[\p{L}\p{N}]{3,}/u.test(own)
-  return wakes
-    ? `Start with “Sidekick” or your Sidekick's own name, “${own}”.`
-    : 'Start with “Sidekick”.'
-}
+export const BUDDY_WAKE_WORDS_LINE = 'Start with “Sidekick”.'
 
 export const BUDDY_VOICE_COMMANDS_DESCRIPTION =
   'Ask Sidekick to put a comment on stream, take it down, or remove it from chat.'

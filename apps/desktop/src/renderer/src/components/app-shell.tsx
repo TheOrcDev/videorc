@@ -45,6 +45,12 @@ import { shortcutAccelerator } from '@/lib/shortcuts'
 import { beginVideorcSignIn } from '@/lib/videorc-web-links'
 import { openBuddyPetCreator } from '@/lib/buddy-pet-creator-nav'
 import {
+  isAvatarTabId,
+  readLastAvatarTab,
+  writeLastAvatarTab,
+  type AvatarTabId
+} from '@/lib/avatar-tabs'
+import {
   isBuddyTabId,
   readLastBuddyTab,
   writeLastBuddyTab,
@@ -88,6 +94,7 @@ const libraryPage = pageChunk(
   async () => (await import('@/components/tabs/library-tab')).LibraryTab
 )
 const buddyPage = pageChunk(async () => (await import('@/components/tabs/buddy-tab')).BuddyTab)
+const avatarPage = pageChunk(async () => (await import('@/components/tabs/avatar-tab')).AvatarTab)
 const recordingPage = pageChunk(
   async () => (await import('@/components/tabs/recording-tab')).RecordingTab
 )
@@ -109,6 +116,7 @@ const PAGE_CHUNKS: Record<WorkspaceTab, PageLoad> = {
   captions: captionsPage,
   recording: recordingPage,
   library: libraryPage,
+  avatar: avatarPage,
   ai: buddyPage,
   diagnostics: diagnosticsPage,
   settings: settingsPage
@@ -124,6 +132,7 @@ const DiagnosticsTab = diagnosticsPage.Page
 const LayoutTab = layoutPage.Page
 const LibraryTab = libraryPage.Page
 const BuddyTab = buddyPage.Page
+const AvatarTab = avatarPage.Page
 const RecordingTab = recordingPage.Page
 const SettingsTab = settingsPage.Page
 const SourcesTab = sourcesPage.Page
@@ -273,6 +282,21 @@ function AppShellContent(): ReactElement {
       setActive('ai')
     },
     [selectBuddyTab, setActive]
+  )
+  // Plan 239: the Avatar page reopens on its tab used last, like Sidekick.
+  const [avatarTab, setAvatarTab] = useState<AvatarTabId>(readLastAvatarTab)
+  const selectAvatarTab = useCallback((tab: AvatarTabId) => {
+    setAvatarTab(tab)
+    writeLastAvatarTab(tab)
+  }, [])
+  const openAvatar = useCallback(
+    (tab?: AvatarTabId) => {
+      if (tab) {
+        selectAvatarTab(tab)
+      }
+      setActive('avatar')
+    },
+    [selectAvatarTab, setActive]
   )
   const openLibrarySession = useCallback((sessionId: string) => {
     setBuddyReportSessionId(null)
@@ -482,25 +506,34 @@ function AppShellContent(): ReactElement {
       if (!navigation) return
       if (navigation.tab === 'settings') openSettings(navigation.settingsTab)
       else if (navigation.tab === 'ai') openBuddy(navigation.buddyTab)
+      else if (navigation.tab === 'avatar') openAvatar(navigation.avatarTab)
       else if (navigation.tab === 'live') openLivestream(navigation.livestreamView)
       else setActive(navigation.tab)
     }
     window.addEventListener(WORKSPACE_NAVIGATE_EVENT, onWorkspaceNavigate)
     return () => window.removeEventListener(WORKSPACE_NAVIGATE_EVENT, onWorkspaceNavigate)
-  }, [openBuddy, openLivestream, openSettings, setActive])
+  }, [openAvatar, openBuddy, openLivestream, openSettings, setActive])
 
-  // Plan 170 D18: `videorc://buddy` opens the Buddy tab (main focused the
+  // Plan 170 D18: `videorc://buddy` opens the avatar's page (main focused the
   // window and synced the library); Make it Alive also opens the creator
   // once main saw the avatar worn. Plan 174 S3.14a: the Stream Manager's
-  // behaviour chips name a tab (Chat); an id this build does not know opens
-  // the first tab.
+  // behaviour chips name a tab: a Sidekick tab (Chat) opens Sidekick, an
+  // Avatar tab (Greetings) opens Avatar (plan 239; the two id sets never
+  // overlap). No tab, or an id this build does not know, opens Avatar →
+  // Profile, the library a `videorc://buddy` link is about.
   useEffect(() => {
     const off = window.videorc?.onBuddyDeepLink?.((navigation) => {
-      openBuddy(isBuddyTabId(navigation.tab) ? navigation.tab : 'live')
-      if (navigation.openCreator) openBuddyPetCreator({ reference: 'persona-idle' })
+      if (navigation.openCreator) {
+        openAvatar('profile')
+        openBuddyPetCreator({ reference: 'persona-idle' })
+      } else if (isBuddyTabId(navigation.tab)) {
+        openBuddy(navigation.tab)
+      } else {
+        openAvatar(isAvatarTabId(navigation.tab) ? navigation.tab : 'profile')
+      }
     })
     return off
-  }, [openBuddy])
+  }, [openAvatar, openBuddy])
 
   // Plan 213 J1: "Use Sign in" in the Stream Manager opens that destination's
   // connection in Destinations → Setup (main has shown the window).
@@ -546,7 +579,8 @@ function AppShellContent(): ReactElement {
         openStudioPanel,
         closeStudioPanel,
         openSettings,
-        openBuddy
+        openBuddy,
+        openAvatar
       }}
     >
       {surface === 'setup' && setupMode ? (
@@ -624,6 +658,9 @@ function AppShellContent(): ReactElement {
                         />
                       ) : null}
                       {active === 'captions' ? <CaptionsTab /> : null}
+                      {active === 'avatar' ? (
+                        <AvatarTab tab={avatarTab} onTabChange={selectAvatarTab} />
+                      ) : null}
                       {active === 'recording' ? <RecordingTab /> : null}
                       {active === 'library' ? (
                         <LibraryTab

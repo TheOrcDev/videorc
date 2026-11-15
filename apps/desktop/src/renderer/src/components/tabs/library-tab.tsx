@@ -8,7 +8,7 @@ import {
   FolderIcon,
   LockIcon,
   MarkerIcon,
-  BuddyIcon,
+  BuddyPageIcon,
   PlayIcon,
   RepairIcon,
   ResetIcon,
@@ -1443,7 +1443,7 @@ function useSessionMenu({
           {
             id: 'buddy-report',
             group: 'open',
-            icon: BuddyIcon,
+            icon: BuddyPageIcon,
             label: 'Sidekick report',
             disabled: live,
             onSelect: onOpenBuddyReport

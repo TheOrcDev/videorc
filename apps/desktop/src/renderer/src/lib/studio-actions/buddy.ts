@@ -84,7 +84,7 @@ async function saveBuddy(
   }
   if (onStream !== undefined) {
     if (onStream !== buddy.showOnStream) await buddy.setShowOnStream(onStream)
-    said.push(onStream ? 'Sidekick is on stream.' : 'Sidekick is off the stream.')
+    said.push(onStream ? 'Your avatar is on stream.' : 'Your avatar is off the stream.')
   }
   return {
     ok: true,

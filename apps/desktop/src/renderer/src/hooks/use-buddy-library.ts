@@ -51,7 +51,7 @@ function problemOf(error: unknown): BuddyLibraryProblem {
     code,
     message: inlineUserError(
       error,
-      { action: 'update', object: 'your Sidekick library' },
+      { action: 'update', object: 'your avatar library' },
       'buddy-library'
     )
   }

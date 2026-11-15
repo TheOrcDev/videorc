@@ -31,7 +31,7 @@ import {
   BUDDY_VOICE_COMMANDS_OFF,
   BUDDY_VOICE_PREMIUM,
   buddyVoicePhrasesLabel,
-  buddyWakeWordsLine,
+  BUDDY_WAKE_WORDS_LINE,
   removeMessagesRows,
   type RemoveMessagesRow
 } from '@/lib/buddy-tab-view'
@@ -143,7 +143,7 @@ export function BuddyVoiceCommands({
 
       <ConfigGrid className={CONFIG_GRID_PAIR}>
         <PanelSection
-          description={`${buddyWakeWordsLine(cohostSettings?.persona.name)} ${BUDDY_VOICE_COMMANDS_DESCRIPTION} ${COHOST_ACTS_ON_ASK_COPY}`}
+          description={`${BUDDY_WAKE_WORDS_LINE} ${BUDDY_VOICE_COMMANDS_DESCRIPTION} ${COHOST_ACTS_ON_ASK_COPY}`}
           title="Commands"
         >
           <GroupedList label="What you can say">

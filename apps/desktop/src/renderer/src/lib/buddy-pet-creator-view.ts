@@ -23,6 +23,7 @@ import {
   type BuddyPetSheetKey
 } from '../../../shared/buddy-pet-creator'
 import { isBuddyUserAvatarId } from '../../../shared/buddy-library'
+import { DEFAULT_AVATAR_NAME } from '../../../shared/avatar-name'
 
 // The Buddy pet creator wizard (plan 168 S-F5): pure derivations the wizard
 // and its tests share. The backend owns the creation; these only read it.
@@ -63,7 +64,7 @@ export function buddyPetSaveDescription(
   persona: Pick<CohostPersona, 'name' | 'libraryAvatarId'> | null,
   capabilities: Pick<AiCapabilities, 'cohost'> | null = null
 ): string {
-  const name = persona?.name.trim() || 'Sidekick'
+  const name = persona?.name.trim() || DEFAULT_AVATAR_NAME
   const wears = `${name} wears them right away; switch back to Still any time.`
   const synced =
     isBuddyUserAvatarId(persona?.libraryAvatarId) &&

@@ -2367,7 +2367,7 @@ const specificRuntimeEventSchemas = {
   'notes-window:document': notesDocumentSchema,
   'notes-window:flush-request': undefinedSchema,
   'oauth:callback-url': oauthCallbackEnvelopeSchema,
-  'shortcut:navigate': enumSchema(['1', '2', '3', '4', '5', '6', '7', '8', '9', ',']),
+  'shortcut:navigate': enumSchema(['1', '2', '3', '4', '5', '6', '7', '8', '9', '0', ',']),
   // Plan 174 S3.1 (D2): which exit is waiting on the End livestream question.
   'app:exit-request': enumSchema(['quit', 'close']),
   // Plan 170 D18: `videorc://buddy` opens the Buddy tab; `openCreator` also

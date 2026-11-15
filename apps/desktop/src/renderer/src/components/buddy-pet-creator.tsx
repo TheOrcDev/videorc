@@ -97,11 +97,12 @@ import {
   BUDDY_PET_REFERENCE_UPLOAD_MAX_BYTES,
   type BuddyPetSheetKey
 } from '../../../shared/buddy-pet-creator'
+import { DEFAULT_AVATAR_NAME } from '../../../shared/avatar-name'
 
 type ReferenceSource = 'persona' | 'upload'
 
 const REFERENCE_SOURCE_OPTIONS: SegmentedControlOption<ReferenceSource>[] = [
-  { value: 'persona', label: "My Sidekick's picture" },
+  { value: 'persona', label: "My avatar's picture" },
   { value: 'upload', label: 'Upload' }
 ]
 
@@ -205,7 +206,7 @@ export function BuddyPetCreator({
   // A row redone from Check keeps Check on screen while it is drawn and the
   // moves are made again; a failed make shows the All poses step instead.
   const [redoKey, setRedoKey] = useState<BuddyPetSheetKey | null>(null)
-  const [name, setName] = useState(() => persona?.name ?? 'Sidekick')
+  const [name, setName] = useState(() => persona?.name ?? DEFAULT_AVATAR_NAME)
 
   const working = state.pending !== null || Boolean(creation?.running)
   const rebuilding =
@@ -320,7 +321,7 @@ export function BuddyPetCreator({
             <ArrowLeftIcon data-icon="inline-start" />
             Back
           </Button>
-          <h2 className="text-sm font-semibold text-foreground">Create an Alive Sidekick</h2>
+          <h2 className="text-sm font-semibold text-foreground">Create an Alive avatar</h2>
           {gate.allowance ? (
             <span
               className="ml-auto text-xs tabular-nums text-muted-foreground"
@@ -554,7 +555,7 @@ function primaryAction({
       }
     case 'pilot':
       return {
-        label: 'Looks like my Sidekick',
+        label: 'Looks like my avatar',
         disabled: off || !web,
         run: () => void controller?.makeSheets(),
         testId: 'buddy-pet-accept-pilot'
@@ -1315,7 +1316,7 @@ function ReviewStep({
     (creation.running?.job === 'sheet' ? (creation.running.sheet as BuddyPetSheetKey) : null)
   return (
     <PanelSection
-      description="Check every row: each pose looks where its arrow points, and every pose looks like the same Sidekick. Redo a row that's wrong; it counts against this creation's redos."
+      description="Check every row: each pose looks where its arrow points, and every pose looks like the same avatar. Redo a row that's wrong; it counts against this creation's redos."
       title="Check"
     >
       <div className="flex flex-wrap items-start gap-6">

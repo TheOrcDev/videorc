@@ -14,6 +14,7 @@ import type {
 } from '@/lib/backend'
 import { CHAT_SEND_PLATFORM_MAX_CHARS } from '@/lib/chat-send'
 import { platformLabel } from '@/lib/platform-copy'
+import { DEFAULT_AVATAR_NAME } from '../../../shared/avatar-name'
 
 // Automatic chat (plan 164 Phase D): the pure side of the greetings editor
 // (Buddy tab → Chat) and the Stream Manager's talk control. The backend
@@ -26,7 +27,7 @@ import { platformLabel } from '@/lib/platform-copy'
  * is always "Buddy", with no article.
  */
 export function buddyDisplayName(name: string | null | undefined): string {
-  return name?.trim() || 'Sidekick'
+  return name?.trim() || DEFAULT_AVATAR_NAME
 }
 
 /**
@@ -61,9 +62,9 @@ export function buddyTalkHint(talk: CohostTalkMode, name: string | null | undefi
     case 'off':
       return `${who} says nothing on its own.`
     case 'bubble':
-      return `${who} talks on stream in its bubble. Nothing goes to chat.`
+      return `${who} says greetings and Sidekick's lines in its bubble on stream. Nothing goes to chat.`
     case 'suggest':
-      return 'Each message is a card here; one click posts it to chat as you.'
+      return `Each line is a card here; one click posts it to chat as you, and ${who} says it on stream.`
   }
 }
 
@@ -78,8 +79,28 @@ export const BUDDY_BEHAVIOUR_LABELS: Record<BuddyBehaviourId, string> = {
   banter: 'Banter'
 }
 
-/** Where the behaviours are turned on and off: their one home (plan 174 D7). */
-export const BUDDY_BEHAVIOUR_HOME = 'Sidekick → Chat'
+/**
+ * Where each behaviour is turned on and off: its one home (plan 174 D7). The
+ * greeting lines are the avatar's since plan 239; Answers and Banter are
+ * Sidekick's writing.
+ */
+export const BUDDY_BEHAVIOUR_HOMES: Record<BuddyBehaviourId, string> = {
+  greetings: 'Avatar → Greetings',
+  answers: 'Sidekick → Chat',
+  banter: 'Sidekick → Chat'
+}
+
+/**
+ * The tab each behaviour's chip opens in the main window (plan 239): the
+ * greeting lines on Avatar → Greetings, Answers and Banter on Sidekick →
+ * Chat. The two pages' tab ids never overlap, so the shell knows the page
+ * from the id alone.
+ */
+export const BUDDY_BEHAVIOUR_TABS: Record<BuddyBehaviourId, 'greetings' | 'chat'> = {
+  greetings: 'greetings',
+  answers: 'chat',
+  banter: 'chat'
+}
 
 export interface BuddyBehaviourChip {
   id: BuddyBehaviourId
@@ -93,7 +114,8 @@ export interface BuddyBehaviourChip {
 
 /**
  * The three behaviours as read-only summary chips (plan 174 S3.14a, D7): each
- * says whether it is on and links to its one home, Buddy → Chat, so the
+ * says whether it is on and links to its one home (Avatar → Greetings or
+ * Sidekick → Chat, plan 239), so the
  * Stream Manager never grows a second set of switches. An empty greetings
  * list posts the built-in lines (plan 192 D1), so "on" never means silent.
  * The chips say what will actually happen (D7): "Greetings on · AI" only
@@ -109,7 +131,7 @@ export function buddyBehaviourChips(
     const on = autoChat[id].enabled
     const ai = id === 'greetings' && on && aiGreetings && greetingsAi(autoChat.greetings)
     const text = `${label} ${on ? 'on' : 'off'}${ai ? ' · AI' : ''}`
-    return { id, label, on, text, name: `${text}. Change it in ${BUDDY_BEHAVIOUR_HOME}.` }
+    return { id, label, on, text, name: `${text}. Change it in ${BUDDY_BEHAVIOUR_HOMES[id]}.` }
   })
 }
 

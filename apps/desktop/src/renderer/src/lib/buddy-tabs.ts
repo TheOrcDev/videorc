@@ -10,21 +10,22 @@ import { openWorkspaceTab } from '@/lib/workspace-navigation'
 export const BUDDY_TAB_LABEL = 'Sidekick'
 
 /**
- * The Buddy tab's own tabs (plan 150, renamed in plan 164), in strip order,
- * built like Settings' (plan 064). Each answers one question: who is my Buddy
- * and is it on (Buddy, formerly Live: the creation screen), how does it reply
- * and moderate (Chat), what can I say to it (Voice), what happened on my
- * streams (Reports), and edit my recordings (Clean cut). Ids are stable: they
- * are stored as the last-used tab and carried by deep links, so the first tab
- * keeps its `live` id. Labels are copy.
+ * The Sidekick page's own tabs (plan 150, renamed in plan 164), in strip
+ * order, built like Settings' (plan 064). Each answers one question: is
+ * Sidekick on and what does it do (Overview), how does it write and moderate
+ * (Chat), who chats on my streams (Community), what can I say to it (Voice),
+ * what happened on my streams (Reports), and edit my recordings (Clean cut).
+ * Ids are stable: they are stored as the last-used tab and carried by deep
+ * links, so the first tab keeps its `live` id. Labels are copy.
  *
  * The shell imports this module, so it sits in the eager chunk: keep it to
  * ids, labels and the storage helpers (no icons, no components).
  */
-// The first tab is Profile (plan 174 D7): the page is Buddy, so its first tab
-// is not Buddy too. Its `live` id stays (saved tabs, deep links, smokes).
+// The first tab was Profile (plan 174 D7); since plan 239 the avatar's
+// profile is its own page, so this one is Overview. Its `live` id stays
+// (saved tabs, deep links, smokes).
 export const BUDDY_TABS = [
-  { id: 'live', label: 'Profile' },
+  { id: 'live', label: 'Overview' },
   { id: 'chat', label: 'Chat' },
   { id: 'community', label: 'Community' },
   { id: 'voice', label: 'Voice' },

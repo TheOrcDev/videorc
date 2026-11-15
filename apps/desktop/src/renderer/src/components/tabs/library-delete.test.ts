@@ -95,7 +95,8 @@ async function render(): Promise<void> {
     openStudioPanel: vi.fn(),
     closeStudioPanel: vi.fn(),
     openSettings: vi.fn(),
-    openBuddy: vi.fn()
+    openBuddy: vi.fn(),
+    openAvatar: vi.fn()
   }
   await act(async () =>
     root.render(

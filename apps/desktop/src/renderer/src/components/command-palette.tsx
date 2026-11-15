@@ -3,6 +3,7 @@ import { DEFAULT_SCREEN_HIDE_SHORTCUT } from '../../../shared/global-shortcuts'
 import {
   AccountIcon,
   AdjustIcon,
+  BuddyPageIcon,
   CaptionsIcon,
   ChatIcon,
   ClipIcon,
@@ -41,6 +42,7 @@ import {
 import { OwnBuddyIcon } from '@/components/own-buddy-icon'
 import { ShortcutKeys } from '@/components/ui/shortcut-keys'
 import { LONG_CLIP_SECONDS } from '../../../shared/clip-marks'
+import { AVATAR_TABS, type AvatarTabId } from '@/lib/avatar-tabs'
 import { BUDDY_TABS, type BuddyTabId } from '@/lib/buddy-tabs'
 import { firstRunReplayLocked } from '@/lib/first-run'
 import { GO_LIVE_COMMAND, START_RECORDING_COMMAND } from '@/lib/go-live-copy'
@@ -85,13 +87,17 @@ import { WINDOW_NAMES } from '../../../shared/window-names'
 
 // ⌘K (plan 174 S3.21, A-9, A-13): Session first (the transport's own
 // actions), then every page with one verb, the windows, the saved scenes,
-// the banners (plan 186), the sounds (plan 189), Buddy's and Settings' tabs, and the look. Each
-// item's value is the words the footer shows for it, and its keywords are what people type instead.
+// the banners (plan 186), the sounds (plan 189), the Avatar's, Sidekick's and Settings' tabs,
+// and the look. Each item's value is the words the footer shows for it, and its keywords are what
+// people type instead.
 
 /** What people type for a page that is not its name. */
 export const PAGE_KEYWORDS: Readonly<Record<WorkspaceTab, readonly string[]>> = {
   studio: ['record', 'go live', 'stage', 'transport'],
-  ai: ['companion', 'ai', 'chat', 'voice', 'reports', 'clean cut'],
+  // Plan 239: the character on the stream. "mascot" and "character" are
+  // what people call it; "sidekick" finds it by the name it had.
+  avatar: ['character', 'mascot', 'pet', 'alive', 'bubble', 'greetings', 'sidekick'],
+  ai: ['assistant', 'ai', 'chat', 'moderation', 'voice', 'reports', 'clean cut'],
   sources: ['camera', 'microphone', 'screen', 'window', 'devices', 'audio', 'mixer'],
   layouts: [
     'layout',
@@ -130,9 +136,14 @@ const SETTINGS_KEYWORDS: Readonly<Record<SettingsTabId, readonly string[]>> = {
   about: ['version', 'update', 'release notes', 'support bundle']
 }
 
+const AVATAR_KEYWORDS: Readonly<Record<AvatarTabId, readonly string[]>> = {
+  // Plan 236: "buddy" still finds the character by its old name.
+  profile: ['persona', 'name', 'personality', 'look', 'my avatars', 'library', 'buddy', 'pet'],
+  greetings: ['welcome', 'follow', 'sub', 'raid', 'lines']
+}
+
 const BUDDY_KEYWORDS: Readonly<Record<BuddyTabId, readonly string[]>> = {
-  // Plan 236: "buddy" still finds the page by its old name.
-  live: ['profile', 'persona', 'sidekick live', 'buddy', 'status'],
+  live: ['overview', 'sidekick live', 'status', 'listen', 'cloud ai'],
   chat: ['posting', 'suggest', 'bubble', 'moderation'],
   community: ['regulars', 'viewers', 'people', 'link', 'forget'],
   voice: ['commands', 'speak', 'listen'],
@@ -159,7 +170,8 @@ export function CommandPalette({
   open: boolean
   onOpenChange: (open: boolean) => void
 }): ReactElement {
-  const { active, setActive, openStudioPanel, openSettings, openBuddy } = useWorkspaceNav()
+  const { active, setActive, openStudioPanel, openSettings, openBuddy, openAvatar } =
+    useWorkspaceNav()
   const { cloudStatus } = useStudioCloud()
   const editScene = useEditScene()
   const {
@@ -231,6 +243,7 @@ export function CommandPalette({
     if (isStudioPanel(id)) openStudioPanel(id)
     else if (id === 'settings') openSettings()
     else if (id === 'ai') openBuddy()
+    else if (id === 'avatar') openAvatar()
     else setActive(id)
   }
 
@@ -660,7 +673,26 @@ export function CommandPalette({
 
         <CommandSeparator />
 
-        {/* Plan 150: every Buddy tab is one jump away, like Settings'. */}
+        {/* Plan 239: the avatar's tabs, wearing the streamer's own avatar. */}
+        <CommandGroup heading="Avatar">
+          {AVATAR_TABS.map((tab) => (
+            <CommandItem
+              key={tab.id}
+              value={`Open Avatar → ${tab.label}`}
+              keywords={[...AVATAR_KEYWORDS[tab.id]]}
+              onSelect={() => run(() => openAvatar(tab.id))}
+            >
+              <OwnBuddyIcon className="size-4" />
+              {tab.label}
+              <Context>Avatar</Context>
+            </CommandItem>
+          ))}
+        </CommandGroup>
+
+        <CommandSeparator />
+
+        {/* Plan 150: every Sidekick tab is one jump away, like Settings'.
+            Sidekick wears its own glyph (plan 239 D7). */}
         <CommandGroup heading="Sidekick">
           {BUDDY_TABS.map((tab) => (
             <CommandItem
@@ -669,7 +701,7 @@ export function CommandPalette({
               keywords={[...BUDDY_KEYWORDS[tab.id]]}
               onSelect={() => run(() => openBuddy(tab.id))}
             >
-              <OwnBuddyIcon className="size-4" />
+              <BuddyPageIcon className="size-4" />
               {tab.label}
               <Context>Sidekick</Context>
             </CommandItem>

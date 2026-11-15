@@ -78,7 +78,7 @@ function problemOf(error: unknown): BuddyPetCreatorProblem {
       : 'failed'
   return {
     code,
-    message: inlineUserError(error, { action: 'update', object: "Sidekick's look" }, 'buddy-pet')
+    message: inlineUserError(error, { action: 'update', object: "your avatar's look" }, 'buddy-pet')
   }
 }
 

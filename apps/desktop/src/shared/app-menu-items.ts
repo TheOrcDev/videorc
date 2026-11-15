@@ -5,8 +5,8 @@
 
 import { WINDOW_NAMES } from './window-names'
 
-/** A key main forwards on `shortcut:navigate`: ⌘1–⌘9 open a page, ⌘, Settings. */
-export type AppMenuPageKey = '1' | '2' | '3' | '4' | '5' | '6' | '7' | '8' | '9' | ','
+/** A key main forwards on `shortcut:navigate`: ⌘1–⌘9 and ⌘0 open a page, ⌘, Settings. */
+export type AppMenuPageKey = '1' | '2' | '3' | '4' | '5' | '6' | '7' | '8' | '9' | '0' | ','
 
 export interface AppMenuPage {
   key: Exclude<AppMenuPageKey, ','>
@@ -16,7 +16,7 @@ export interface AppMenuPage {
 /**
  * The View menu's pages in sidebar order, one group per sidebar zone: Studio,
  * Setup, Livestream, then Library. The digits run down the sidebar (plan 235
- * D8).
+ * D8); Library, the tenth page, takes 0 (plan 239 D6).
  */
 export const APP_MENU_PAGE_GROUPS: readonly (readonly AppMenuPage[])[] = [
   [{ key: '1', label: 'Studio' }],
@@ -25,13 +25,14 @@ export const APP_MENU_PAGE_GROUPS: readonly (readonly AppMenuPage[])[] = [
     { key: '3', label: 'Scene' },
     { key: '4', label: 'Assets' },
     { key: '5', label: 'Captions' },
-    { key: '6', label: 'Output' }
+    { key: '6', label: 'Avatar' },
+    { key: '7', label: 'Output' }
   ],
   [
-    { key: '7', label: 'Destinations' },
-    { key: '8', label: 'Sidekick' }
+    { key: '8', label: 'Destinations' },
+    { key: '9', label: 'Sidekick' }
   ],
-  [{ key: '9', label: 'Library' }]
+  [{ key: '0', label: 'Library' }]
 ]
 
 export type AppMenuWindowId = 'preview' | 'notes' | 'stream-manager' | 'captions'

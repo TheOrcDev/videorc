@@ -234,7 +234,7 @@ export function buddyReactionDisabledReason({
   chip: { id: string; label: string }
 }): string | null {
   if (!relay || packReactions?.includes(chip.id)) return null
-  if (!alive) return 'Only an Alive Sidekick reacts. Make it Alive on the Sidekick page.'
+  if (!alive) return 'Only an Alive avatar reacts. Make it Alive on the Avatar page.'
   if (packReactions === null) return "Reactions aren't ready yet."
-  return `This Sidekick has no ${chip.label.toLowerCase()} reaction.`
+  return `This avatar has no ${chip.label.toLowerCase()} reaction.`
 }

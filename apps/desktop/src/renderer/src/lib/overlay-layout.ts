@@ -31,7 +31,7 @@ const PORTRAIT_BOTTOM_MARGIN = 0.22
 export const OVERLAY_ITEM_LABELS: Record<OverlayItem, string> = {
   highlight: 'Highlight',
   captions: 'Captions',
-  buddy: 'Sidekick',
+  buddy: 'Avatar',
   chat: 'Chat'
 }
 
@@ -39,7 +39,7 @@ export const OVERLAY_ITEM_LABELS: Record<OverlayItem, string> = {
 const OVERLAY_ITEM_SENTENCE_LABELS: Record<OverlayItem, string> = {
   highlight: 'highlights',
   captions: 'captions',
-  buddy: 'the Sidekick',
+  buddy: 'the avatar',
   chat: 'chat'
 }
 

@@ -121,6 +121,7 @@ type _RegistryIconProps = _AssertIconProps<
     | 'SignIn'
     | 'SignOut'
     | 'SlidersHorizontal'
+    | 'Smiley'
     | 'Sparkle'
     | 'SpeakerHigh'
     | 'SpeakerSlash'
@@ -150,10 +151,13 @@ type _RegistryIconProps = _AssertIconProps<
  * Navigation — one slot per sidebar destination. These are the icons the
  * 2026-08-25 semantic audit reviews first: several are placeholders inherited
  * from the pre-audit set (see the audit table in the Nucleo plan).
- * `BuddyPageIcon` is the Buddy page's row in the sidebar and ⌘K's page list
- * (plan 235 D7, the owner's pick): a plain glyph like its neighbours, a
- * co-host that speaks. The slot is named for the page, so renaming Buddy keeps
- * it. The Buddy artwork itself is `BuddyIcon`, below.
+ * `BuddyPageIcon` is the Sidekick page's row in the sidebar and ⌘K's page
+ * list (plan 235 D7, the owner's pick): a plain glyph like its neighbours, a
+ * helper that speaks. Since plan 239 (D7) it is Sidekick's mark wherever the
+ * helper shows. The slot is named for the page, so renaming keeps it.
+ * `AvatarPageIcon` is the Avatar page's row (plan 239): a face, the
+ * character on the stream. The avatar's own picture (or the stone golem's
+ * artwork) is `BuddyIcon`, below.
  */
 export {
   VideoCamera as StudioIcon,
@@ -162,6 +166,7 @@ export {
   ImageSquare as AssetsIcon,
   Broadcast as LivestreamIcon,
   UserSound as BuddyPageIcon,
+  Smiley as AvatarPageIcon,
   ClosedCaptioning as CaptionsIcon,
   Record as OutputIcon,
   FilmReel as LibraryIcon,

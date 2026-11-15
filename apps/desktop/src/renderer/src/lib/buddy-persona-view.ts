@@ -1,6 +1,7 @@
 import type { CohostAvatarState, CohostBubbleStyle, CohostPersona } from './backend'
 import { BUDDY_DEFAULT_OFFICIAL_ID, officialBuddy } from '../../../shared/buddy-library'
 import { BUDDY_MOTION_DEFAULTS } from '../../../shared/buddy-pet'
+import { DEFAULT_AVATAR_NAME } from '../../../shared/avatar-name'
 
 // The Buddy creation screen (plan 164 S-A4): pure derivations the section
 // and its tests share. The look's own derivations live in buddy-look-view.ts
@@ -58,7 +59,7 @@ function defaultBuddyAvatar(): CohostPersona['avatar'] {
 export function freshBuddyPersona(id: string): CohostPersona {
   return {
     id,
-    name: 'Sidekick',
+    name: DEFAULT_AVATAR_NAME,
     personality: '',
     bubbleStyle: 'speech',
     images: {},

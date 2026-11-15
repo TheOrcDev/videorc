@@ -5,7 +5,7 @@ import {
   ImageIcon,
   InfoIcon,
   LivestreamIcon,
-  BuddyIcon
+  BuddyPageIcon
 } from '@/components/icons'
 import {
   lazy,
@@ -635,7 +635,7 @@ export function CohostSessionRow({ look = 'default' }: { look?: StudioLook }): R
   return (
     <FactRow
       look={look}
-      icon={BuddyIcon}
+      icon={BuddyPageIcon}
       label="Sidekick"
       hint={<NavigableRowHintLines lines={hintLines} />}
       value={
