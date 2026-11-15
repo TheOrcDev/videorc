@@ -4553,3 +4553,47 @@ describe('cloud recording download jobs', () => {
     ).toThrow()
   })
 })
+
+describe('Scene pictures contract (plan 231 S5)', () => {
+  const fixture = JSON.parse(
+    readFileSync(
+      new URL('../../../../protocol-fixtures/scene-pictures.json', import.meta.url),
+      'utf8'
+    )
+  )
+  it('accepts every target and the available, hidden and unsupported fixtures', () => {
+    expect(runtimeValidatedBackendRpcMethods).toContain('sources.scene_pictures')
+    expect(validateBackendRpcParams('sources.scene_pictures', fixture.params)).toEqual(
+      fixture.params
+    )
+    for (const result of [fixture.result, fixture.hidden, fixture.unsupported])
+      expect(validateBackendRpcResult('sources.scene_pictures', result)).toEqual(result)
+  })
+  it('rejects unknown, null, malformed and ambiguous fields', () => {
+    for (const params of [
+      {},
+      { targets: [{ kind: 'none' }] },
+      { targets: [{ kind: 'app', bundleId: 'a', windowId: 'w' }] },
+      { ...fixture.params, maxWidth: null },
+      { ...fixture.params, maxWidth: 0 },
+      { ...fixture.params, secret: true },
+      { targets: Array(513).fill({ kind: 'app', bundleId: 'a' }) }
+    ])
+      expect(() => validateBackendRpcParams('sources.scene_pictures', params)).toThrow()
+    const target = fixture.params.targets[0]
+    for (const result of [
+      { ...fixture.result, hidden: null },
+      { ...fixture.result, unsupported: false },
+      { ...fixture.result, extra: true },
+      { ...fixture.result, elapsedMs: -1 },
+      ...[
+        { target, jpegBase64: null },
+        { target, jpegBase64: 'https://example.com/picture.jpg' },
+        { target, jpegBase64: '/9j/4AAQ', unavailable: 'hidden' },
+        { target, unavailable: 'other' },
+        { target, jpegBase64: '/9j/4AAQ', width: 240 }
+      ].map((picture) => ({ pictures: [picture], elapsedMs: 1 }))
+    ])
+      expect(() => validateBackendRpcResult('sources.scene_pictures', result)).toThrow()
+  })
+})

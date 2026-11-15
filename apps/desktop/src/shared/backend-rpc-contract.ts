@@ -163,6 +163,8 @@ import type {
   ResolveAppWindowParams,
   ResolveAppWindowResult,
   AppPreviewsParams,
+  ScenePicturesParams,
+  ScenePicturesResult,
   AppPreviewsResult,
   DiagnosticStats,
   EntitlementsSnapshot,
@@ -472,6 +474,7 @@ export interface BackendRpcMethodMap {
   'sources.resolve_app_window': BackendRpcDefinition<ResolveAppWindowParams, ResolveAppWindowResult>
   // Plan 210 S4: Add scene…'s picker (plan 231 D6), only while it is open.
   'sources.app_previews': BackendRpcDefinition<AppPreviewsParams | undefined, AppPreviewsResult>
+  'sources.scene_pictures': BackendRpcDefinition<ScenePicturesParams, ScenePicturesResult>
   'devices.list': BackendRpcDefinition<{ ffmpegPath?: string } | undefined, DeviceList>
   'recording.status': BackendRpcDefinition<undefined, RecordingStatus>
   'stream.output.topology.probe': BackendRpcDefinition<
@@ -1099,6 +1102,18 @@ const appPreviewPictureSchema = runtimeSchema<string>('a JPEG data URL', (value,
   if (!url.startsWith('data:image/jpeg;base64,'))
     throw new RuntimeSchemaError(path, 'a JPEG data URL')
   return url
+})
+
+const scenePictureTargetSchema = unionSchema([
+  objectSchema({ kind: literalSchema('app'), bundleId: boundedString }, { allowUnknown: false }),
+  objectSchema({ kind: literalSchema('window'), windowId: boundedString }, { allowUnknown: false }),
+  objectSchema({ kind: literalSchema('display'), screenId: boundedString }, { allowUnknown: false })
+])
+const scenePictureJpegSchema = runtimeSchema<string>('base64 JPEG bytes', (value, path) => {
+  const jpeg = stringSchema({ minLength: 4, maxLength: 2_000_000 }).parse(value, path)
+  if (!jpeg.startsWith('/9j/') || !/^[A-Za-z0-9+/]+={0,2}$/.test(jpeg) || jpeg.length % 4 !== 0)
+    throw new RuntimeSchemaError(path, 'base64 JPEG bytes')
+  return jpeg
 })
 
 const deviceSchema = objectSchema(
@@ -6723,6 +6738,44 @@ const runtimeContracts = {
           ),
           { maxLength: 512 }
         )
+      },
+      { allowUnknown: false }
+    )
+  },
+  'sources.scene_pictures': {
+    params: objectSchema(
+      {
+        targets: arraySchema(scenePictureTargetSchema, { maxLength: 512 }),
+        maxWidth: optionalSchema(numberSchema({ integer: true, min: 32, max: 1_920 }))
+      },
+      { allowUnknown: false }
+    ),
+    result: objectSchema(
+      {
+        pictures: arraySchema(
+          unionSchema([
+            objectSchema(
+              { target: scenePictureTargetSchema, jpegBase64: scenePictureJpegSchema },
+              { allowUnknown: false }
+            ),
+            objectSchema(
+              {
+                target: scenePictureTargetSchema,
+                unavailable: enumSchema([
+                  'hidden',
+                  'unsupported',
+                  'source-unavailable',
+                  'screenshot-unavailable'
+                ])
+              },
+              { allowUnknown: false }
+            )
+          ]),
+          { maxLength: 512 }
+        ),
+        elapsedMs: numberSchema({ min: 0 }),
+        hidden: optionalSchema(literalSchema(true)),
+        unsupported: optionalSchema(literalSchema(true))
       },
       { allowUnknown: false }
     )

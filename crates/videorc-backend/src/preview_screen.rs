@@ -4902,6 +4902,24 @@ fn points_to_pixels(points: f64, scale: f64) -> u32 {
         .max(1.0) as u32
 }
 
+#[cfg(target_os = "macos")]
+pub(crate) use macos::window_frame_is_capturable;
+
+/// Shared F-021 decision for live capture and scene stills, independent of SCK.
+#[cfg(any(target_os = "macos", test))]
+pub(crate) fn window_rect_is_capturable(
+    frame: (f64, f64, f64, f64),
+    displays: impl IntoIterator<Item = (f64, f64, f64, f64)>,
+) -> bool {
+    let (x, y, width, height) = frame;
+    [x, y, width, height].iter().all(|value| value.is_finite())
+        && width >= 1.0
+        && height >= 1.0
+        && displays
+            .into_iter()
+            .any(|(dx, dy, dw, dh)| rects_intersect(dx, dy, dw, dh, x, y, width, height))
+}
+
 #[cfg(any(target_os = "macos", test))]
 #[allow(clippy::too_many_arguments)]
 #[cfg_attr(target_os = "windows", allow(dead_code))]
@@ -7518,7 +7536,7 @@ mod macos {
                 // SCContentFilter init — seen as a crash loop when a window
                 // sits on a disconnected display. Reject it as source-missing
                 // BEFORE ScreenCaptureKit touches it.
-                if !window_frame_is_capturable(content, &frame) {
+                if !window_frame_is_capturable(&frame) {
                     return Err(NativeScreenStartup::SourceMissing(format!(
                         "ScreenCaptureKit window {} has no on-display frame (degenerate rect or a disconnected display) and cannot be captured",
                         config.source_id
@@ -8403,35 +8421,27 @@ mod macos {
     // overlaps at least one CURRENT display — SkyLight asserts (aborts the
     // process) on rects it cannot map to a display, e.g. after that display
     // disconnects.
-    fn window_frame_is_capturable(
-        content: &SCShareableContent,
-        window_frame: &objc2_core_foundation::CGRect,
-    ) -> bool {
-        let (x, y) = (window_frame.origin.x, window_frame.origin.y);
-        let (width, height) = (window_frame.size.width, window_frame.size.height);
-        if ![x, y, width, height].iter().all(|value| value.is_finite())
-            || width < 1.0
-            || height < 1.0
-        {
-            return false;
-        }
-        let displays = unsafe { content.displays() };
-        for index in 0..displays.count() {
-            let display_frame = unsafe { displays.objectAtIndex(index).frame() };
-            if rects_intersect(
-                display_frame.origin.x,
-                display_frame.origin.y,
-                display_frame.size.width,
-                display_frame.size.height,
-                x,
-                y,
-                width,
-                height,
-            ) {
-                return true;
-            }
-        }
-        false
+    pub(crate) fn window_frame_is_capturable(window_frame: &objc2_core_foundation::CGRect) -> bool {
+        // SCK content can outlive a display disconnect or rearrangement.
+        // Use fresh online IDs and bounds, never the snapshot's display list.
+        let displays = crate::screen_capture::macos::online_display_ids();
+        super::window_rect_is_capturable(
+            (
+                window_frame.origin.x,
+                window_frame.origin.y,
+                window_frame.size.width,
+                window_frame.size.height,
+            ),
+            displays.into_iter().map(|id| {
+                let frame = CGDisplayBounds(id);
+                (
+                    frame.origin.x,
+                    frame.origin.y,
+                    frame.size.width,
+                    frame.size.height,
+                )
+            }),
+        )
     }
 
     // Resolve the point→pixel scale of the display containing the window's

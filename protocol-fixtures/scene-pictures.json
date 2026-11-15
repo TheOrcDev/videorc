@@ -1,0 +1,98 @@
+{
+  "params": {
+    "targets": [
+      {
+        "kind": "app",
+        "bundleId": "com.figma.Desktop"
+      },
+      {
+        "kind": "window",
+        "windowId": "window:screencapturekit:7"
+      },
+      {
+        "kind": "display",
+        "screenId": "screen:screencapturekit:1"
+      }
+    ]
+  },
+  "result": {
+    "pictures": [
+      {
+        "target": {
+          "kind": "app",
+          "bundleId": "com.figma.Desktop"
+        },
+        "jpegBase64": "/9j/4AAQ"
+      },
+      {
+        "target": {
+          "kind": "window",
+          "windowId": "window:screencapturekit:7"
+        },
+        "unavailable": "source-unavailable"
+      },
+      {
+        "target": {
+          "kind": "display",
+          "screenId": "screen:screencapturekit:1"
+        },
+        "jpegBase64": "/9j/4AAQ"
+      }
+    ],
+    "elapsedMs": 42.5
+  },
+  "hidden": {
+    "pictures": [
+      {
+        "target": {
+          "kind": "app",
+          "bundleId": "com.figma.Desktop"
+        },
+        "unavailable": "hidden"
+      },
+      {
+        "target": {
+          "kind": "window",
+          "windowId": "window:screencapturekit:7"
+        },
+        "unavailable": "hidden"
+      },
+      {
+        "target": {
+          "kind": "display",
+          "screenId": "screen:screencapturekit:1"
+        },
+        "unavailable": "hidden"
+      }
+    ],
+    "elapsedMs": 0.0,
+    "hidden": true
+  },
+  "unsupported": {
+    "pictures": [
+      {
+        "target": {
+          "kind": "app",
+          "bundleId": "com.figma.Desktop"
+        },
+        "unavailable": "unsupported"
+      },
+      {
+        "target": {
+          "kind": "window",
+          "windowId": "window:screencapturekit:7"
+        },
+        "unavailable": "unsupported"
+      },
+      {
+        "target": {
+          "kind": "display",
+          "screenId": "screen:screencapturekit:1"
+        },
+        "unavailable": "unsupported"
+      }
+    ],
+    "elapsedMs": 0.0,
+    "unsupported": true
+  }
+}

@@ -420,6 +420,30 @@ export interface AppPreviewsResult {
   apps: AppPreview[]
 }
 
+/** Plan 231 S5: a still of a scene's own screen, independent of the program. */
+export type ScenePictureTarget =
+  | { kind: 'app'; bundleId: string }
+  | { kind: 'window'; windowId: string }
+  | { kind: 'display'; screenId: string }
+
+export interface ScenePicturesParams {
+  targets: ScenePictureTarget[]
+  /** Defaults to 240 pixels. */
+  maxWidth?: number
+}
+
+export type ScenePicture = { target: ScenePictureTarget } & (
+  | { jpegBase64: string }
+  | { unavailable: 'hidden' | 'unsupported' | 'source-unavailable' | 'screenshot-unavailable' }
+)
+
+export interface ScenePicturesResult {
+  pictures: ScenePicture[]
+  elapsedMs: number
+  hidden?: true
+  unsupported?: true
+}
+
 export interface Device {
   app?: DeviceApp
   windowTitle?: string

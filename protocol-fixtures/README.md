@@ -136,3 +136,12 @@ backend's parser must both reproduce every case byte for byte:
 
 The overlay's RPC and event shapes (`htmlOverlays.*`, a banner with
 `kind: "html"`) ride `high-risk-contracts.json` under `htmlOverlay`.
+
+## `scene-pictures.json`
+
+Scene stills (plan 231 S5): ordered app/window/display targets, JPEG bytes,
+per-target unavailability, Hide screen refusal, and unsupported platforms.
+Optional flags are omitted, never null. Both languages read this fixture:
+
+- Rust: `cargo test -p videorc-backend scene_pictures`
+- TypeScript: `pnpm --filter @videorc/desktop test -- backend-rpc-contract.test.ts`
