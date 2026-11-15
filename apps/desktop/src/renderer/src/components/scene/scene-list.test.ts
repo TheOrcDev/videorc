@@ -624,7 +624,7 @@ describe('a scene’s ⋯ menu', () => {
       expect(mocked.core.switchSourceDeviceLive).not.toHaveBeenCalled()
     })
 
-    it('No screen puts the scene on stream on Camera only, keeping the capture (D18)', async () => {
+    it('No screen explicitly stops the screen and puts the scene on Camera only (D18)', async () => {
       await render()
       await menu('Figma', 'Change screen…')
       await choose('none')
@@ -642,7 +642,10 @@ describe('a scene’s ⋯ menu', () => {
       expect(mocked.core.applyCameraPreset).toHaveBeenCalledExactlyOnceWith({
         layoutPreset: 'camera-only'
       })
-      expect(mocked.core.switchSourceDeviceLive).not.toHaveBeenCalled()
+      expect(mocked.core.switchSourceDeviceLive).toHaveBeenCalledExactlyOnceWith(
+        'capture',
+        expect.objectContaining({ captureOff: true, screenId: undefined, windowId: undefined })
+      )
       expect(mocked.core.applySavedSceneResult).not.toHaveBeenCalled()
     })
 

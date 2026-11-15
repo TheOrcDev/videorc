@@ -8311,90 +8311,144 @@ describe('real StudioProvider lifecycle', () => {
   // Plan 231 D18: Camera only shows no screen, and going on stream leaves the
   // running capture as it is, so going back to a screen scene is a swap in
   // place. Idle and while recording.
-  it('keeps the capture running under a scene that shows no screen (plan 231 D18)', async () => {
-    const backend = new StudioBackend()
-    TestWebSocket.backend = backend
-    vi.stubGlobal('WebSocket', TestWebSocket)
-    const testDom = installProviderTestEnvironment(
-      createVideorcApi({
-        acknowledge: async () => true,
-        pending: async () => [],
-        acknowledgeProvider: async () => true,
-        pendingProvider: async () => []
+  it.each(['live', 'failed'] as const)(
+    'keeps an existing capture under a scene that shows no screen (plan 231 D18, %s)',
+    async (screenState) => {
+      const backend = new StudioBackend()
+      TestWebSocket.backend = backend
+      vi.stubGlobal('WebSocket', TestWebSocket)
+      const testDom = installProviderTestEnvironment(
+        createVideorcApi({
+          acknowledge: async () => true,
+          pending: async () => [],
+          acknowledgeProvider: async () => true,
+          pendingProvider: async () => []
+        })
+      )
+      restoreEnvironment = testDom.restore
+      const observations: StudioObservation[] = []
+      const latest = (): StudioCoreContextValue => observations.at(-1)!.core
+      root = await mountStudioProvider(testDom.container, (value) => {
+        observations.push(value)
       })
-    )
-    restoreEnvironment = testDom.restore
-    const observations: StudioObservation[] = []
-    const latest = (): StudioCoreContextValue => observations.at(-1)!.core
-    root = await mountStudioProvider(testDom.container, (value) => {
-      observations.push(value)
-    })
-    await waitForObservation(
-      () =>
-        canSaveScene() &&
-        latest().captureConfig.sources.screenId != null &&
-        latest().savedScenes[0].visual.sources.screenId != null
-    )
-    const screenId = latest().captureConfig.sources.screenId
-    const [screenCamera, , cameraOnly] = latest().savedScenes
-    expect(latest().activeSavedSceneId).toBe(screenCamera.id)
-    // A new profile: the screen scenes show the main display, Camera only none (D3).
-    expect(storedSceneNamed('Screen + camera').shows).toMatchObject({ kind: 'display', screenId })
-    expect(storedSceneNamed('Camera only').shows).toEqual({ kind: 'none' })
-    const lastApply = (from: number) =>
-      backend.sentCommands
-        .slice(from)
-        .filter((command) => command.method.startsWith('scene.layout.apply'))
-        .at(-1) as
-        | { method: string; params: { layout: LayoutSettings; sources: SourceSelection } }
-        | undefined
-    const switchTo = async (id: string): Promise<NonNullable<ReturnType<typeof lastApply>>> => {
-      const from = backend.sentCommands.length
-      await act(async () => {
-        expect(await latest().applySavedScene(id)).toBe(true)
-      })
-      await waitForObservation(() => latest().activeSavedSceneId === id && canSaveScene())
-      // The capture is never switched, stopped or restarted for it.
-      expect(
+      await waitForObservation(
+        () =>
+          canSaveScene() &&
+          latest().captureConfig.sources.screenId != null &&
+          latest().savedScenes[0].visual.sources.screenId != null
+      )
+      const screenId = latest().captureConfig.sources.screenId
+      const [screenCamera, , cameraOnly] = latest().savedScenes
+      expect(latest().activeSavedSceneId).toBe(screenCamera.id)
+      // A new profile: the screen scenes show the main display, Camera only none (D3).
+      expect(storedSceneNamed('Screen + camera').shows).toMatchObject({ kind: 'display', screenId })
+      expect(storedSceneNamed('Camera only').shows).toEqual({ kind: 'none' })
+      await act(async () =>
+        [...backend.sockets].forEach((socket) =>
+          socket.onmessage?.({
+            data: JSON.stringify({
+              event: 'preview.screen.status',
+              payload: {
+                state: screenState,
+                sourceId: screenId,
+                sourceKind: 'screen',
+                targetFps: 30,
+                framesCaptured: 10,
+                droppedFrames: 0,
+                includeCursor: true,
+                excludeCurrentProcessWindows: true,
+                updatedAt: new Date().toISOString()
+              }
+            })
+          })
+        )
+      )
+      const lastApply = (from: number) =>
         backend.sentCommands
           .slice(from)
-          .some((command) => command.method === 'session.source.switch')
-      ).toBe(false)
-      return lastApply(from)!
-    }
+          .filter((command) => command.method.startsWith('scene.layout.apply'))
+          .at(-1) as
+          | {
+              method: string
+              params: { layout: LayoutSettings; sources: SourceSelection; retainScreen?: true }
+            }
+          | undefined
+      const switchTo = async (id: string): Promise<NonNullable<ReturnType<typeof lastApply>>> => {
+        const from = backend.sentCommands.length
+        await act(async () => {
+          expect(await latest().applySavedScene(id)).toBe(true)
+        })
+        await waitForObservation(() => latest().activeSavedSceneId === id && canSaveScene())
+        // The capture is never switched, stopped or restarted for it.
+        expect(
+          backend.sentCommands
+            .slice(from)
+            .some((command) =>
+              ['session.source.switch', 'preview.screen.stop'].includes(command.method)
+            )
+        ).toBe(false)
+        return lastApply(from)!
+      }
 
-    let apply = await switchTo(cameraOnly.id)
-    expect(apply.params.layout.layoutPreset).toBe('camera-only')
-    expect(apply.params.sources.screenId).toBe(screenId)
-    expect(apply.params.sources.captureOff).not.toBe(true)
-    expect(latest().captureConfig.sources.screenId).toBe(screenId)
-    expect(latest().captureConfig.sources.captureOff).not.toBe(true)
-    // An edit made on it saves its look; the screen under it is not its screen.
-    await act(async () => latest().applyCameraPreset({ cameraZoom: 140 }))
-    await waitForObservation(
-      () => sceneNamed(latest(), 'Camera only').visual.layout.cameraZoom === 140
-    )
-    expect(storedSceneNamed('Camera only').shows).toEqual({ kind: 'none' })
-    expect(latest().savedSceneModified).toBe(false)
+      let apply = await switchTo(cameraOnly.id)
+      expect(apply.params.retainScreen).toBe(screenState === 'live' ? true : undefined)
+      expect(apply.params.layout.layoutPreset).toBe('camera-only')
+      expect(apply.params.sources.screenId).toBe(screenId)
+      expect(apply.params.sources.captureOff).not.toBe(true)
+      expect(latest().captureConfig.sources.screenId).toBe(screenId)
+      expect(latest().captureConfig.sources.captureOff).not.toBe(true)
+      // An edit made on it saves its look; the screen under it is not its screen.
+      await act(async () => latest().applyCameraPreset({ cameraZoom: 140 }))
+      await waitForObservation(
+        () => sceneNamed(latest(), 'Camera only').visual.layout.cameraZoom === 140
+      )
+      expect(storedSceneNamed('Camera only').shows).toEqual({ kind: 'none' })
+      expect(latest().savedSceneModified).toBe(false)
 
-    apply = await switchTo(screenCamera.id)
-    expect(apply.params.layout.layoutPreset).toBe('screen-camera')
-    expect(apply.params.sources.screenId).toBe(screenId)
-    expect(storedSceneNamed('Screen + camera').shows).toMatchObject({ kind: 'display', screenId })
+      apply = await switchTo(screenCamera.id)
+      expect(apply.params.layout.layoutPreset).toBe('screen-camera')
+      expect(apply.params.sources.screenId).toBe(screenId)
+      expect(storedSceneNamed('Screen + camera').shows).toMatchObject({ kind: 'display', screenId })
 
-    await act(async () => latest().startSession())
-    await waitForObservation(() => observations.at(-1)?.recording.recording.state === 'recording')
-    apply = await switchTo(cameraOnly.id)
-    expect(apply.method).toBe('scene.layout.apply_live')
-    expect(apply.params.sources.screenId).toBe(screenId)
-    expect(apply.params.sources.captureOff).not.toBe(true)
-    expect(backend.confirmedSources.screenId).toBe(screenId)
-    apply = await switchTo(screenCamera.id)
-    expect(apply.params.sources.screenId).toBe(screenId)
-    await act(async () => {
-      expect(await latest().stopSession()).toBe(true)
-    })
-  }, 15_000)
+      await act(async () => latest().startSession())
+      await waitForObservation(() => observations.at(-1)?.recording.recording.state === 'recording')
+      apply = await switchTo(cameraOnly.id)
+      expect(apply.method).toBe('scene.layout.apply_live')
+      expect(apply.params.retainScreen).toBe(screenState === 'live' ? true : undefined)
+      expect(apply.params.sources.screenId).toBe(screenId)
+      expect(apply.params.sources.captureOff).not.toBe(true)
+      expect(backend.confirmedSources.screenId).toBe(screenId)
+      apply = await switchTo(screenCamera.id)
+      expect(apply.params.sources.screenId).toBe(screenId)
+      await act(async () => {
+        expect(await latest().stopSession()).toBe(true)
+      })
+      await waitForObservation(
+        () => canSaveScene() && observations.at(-1)?.recording.recording.state === 'idle'
+      )
+      // Sources → No screen is an explicit stop, even with a running owner.
+      const beforeOff = backend.sentCommands.length
+      await act(async () => {
+        await latest().switchSourceDeviceLive('capture', {
+          ...latest().captureConfig.sources,
+          screenId: undefined,
+          screenName: undefined,
+          screenUuid: undefined,
+          windowId: undefined,
+          windowName: undefined,
+          captureOff: true,
+          testPattern: false
+        })
+        latest().applyCameraPreset({ layoutPreset: 'camera-only' })
+      })
+      await waitForObservation(
+        () => canSaveScene() && latest().captureConfig.layout.layoutPreset === 'camera-only'
+      )
+      expect(lastApply(beforeOff)?.params.retainScreen).toBeUndefined()
+      expect(lastApply(beforeOff)?.params.sources.captureOff).toBe(true)
+    },
+    30_000
+  )
 
   // Plan 231 D15: the launch that makes the scene library moves the layout
   // keys to scene keys and saves them with the settings, once.

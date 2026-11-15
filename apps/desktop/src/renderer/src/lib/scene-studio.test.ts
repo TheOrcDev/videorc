@@ -159,11 +159,11 @@ describe('a scene that shows no screen keeps the capture (D18)', () => {
     ).toBe(false)
   })
 
-  it('never for a scene that shows a screen, whatever its layout', () => {
+  it('also keeps a screen-owning scene while its layout draws no screen', () => {
     const scene = figma()
     expect(
       sceneKeepsCapture(scene, { ...scene.layouts.horizontal, layoutPreset: 'camera-only' })
-    ).toBe(false)
+    ).toBe(true)
     expect(sceneKeepsCapture(undefined, scene.layouts.horizontal)).toBe(false)
   })
 })

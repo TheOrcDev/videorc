@@ -211,10 +211,17 @@ export function useSceneDialogs(): {
     }
     if (!sceneLibraryActions.edit(next, windowHint)) return
     if (pick.kind === 'none') {
-      // No screen: the scene is on Camera only now (D18 keeps the capture).
+      // This is an explicit stop, unlike switching to a no-screen scene (D18).
       const layout = next.layouts[layoutPresetOrientation(layoutOnStream)]
-      if (layout.layoutPreset !== layoutOnStream)
-        applyCameraPreset({ layoutPreset: layout.layoutPreset })
+      void studio
+        .switchSourceDeviceLive('capture', {
+          ...captureConfig.sources,
+          ...showsSources(next.shows)
+        })
+        .then(() => {
+          if (layout.layoutPreset !== layoutOnStream)
+            applyCameraPreset({ layoutPreset: layout.layoutPreset })
+        })
       return
     }
     // An app: the scene goes on again with the app's front window, then the

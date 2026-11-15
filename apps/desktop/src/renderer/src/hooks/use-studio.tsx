@@ -79,7 +79,13 @@ import {
   sceneKeepsCapture,
   sceneOnStreamAtLaunch
 } from '@/lib/scene-studio'
-import { canDeleteScene, firstSceneWithLayout, sceneLayout, showsFromSources } from '@/lib/scenes'
+import {
+  canDeleteScene,
+  firstSceneWithLayout,
+  layoutShowsScreen,
+  sceneLayout,
+  showsFromSources
+} from '@/lib/scenes'
 import type { Scene as StoredScene, SceneShows } from '@/lib/scenes'
 import {
   hydrateWorkingScene,
@@ -10893,6 +10899,14 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
             video: options?.videoOverride ?? requestedConfig.video,
             background: requestedBackground,
             protectedOverlayWindowIds,
+            // D18: retain only an existing owner. Explicit Screen picker Off
+            // clears the sources and must keep the backend's retirement path.
+            ...(!layoutShowsScreen(layout) &&
+            requestedSources.captureOff !== true &&
+            (previewScreenStatusRef.current.state === 'live' ||
+              previewScreenStatusRef.current.state === 'starting')
+              ? { retainScreen: true as const }
+              : {}),
             // Scene motion (opt-in): the committed layout glides into place
             // (320ms ease) in preview, stream, and recording alike. Absent =
             // instant cut.
@@ -11919,6 +11933,12 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
         // picked kind so a concurrent confirmation or reconcile is not undone.
         // A buffer-only Clips session is idle here: persist, then the source
         // effect stops the ring and reconcile re-arms it with the new pick.
+        // A chained layout commit (Change screen… → No screen) must read
+        // this pick even before React flushes the state update.
+        captureConfigRef.current = {
+          ...captureConfigRef.current,
+          sources: mergeSourceKind(captureConfigRef.current.sources, sources, sourceKind)
+        }
         setCaptureConfig((current) => {
           const next = {
             ...current,
@@ -12206,9 +12226,9 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
       return status
     }
 
-    // The backend stops an unneeded screen source only after the camera-only scene
-    // has committed, keeping the previous good pixels available through warm-up.
-    if (captureConfig.layout.layoutPreset === 'camera-only') {
+    // A scene that draws no screen leaves its retained owner alone, including
+    // vertical and freeform layouts. Explicit Off above still stops it.
+    if (!layoutShowsScreen(captureConfig.layout)) {
       return previewScreenStatusRef.current
     }
 
@@ -12274,7 +12294,7 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
   }, [
     applyPreviewScreenStatus,
     captureConfig.sources,
-    captureConfig.layout.layoutPreset,
+    captureConfig.layout,
     captureConfig.video,
     client,
     firstRunSetupOpen,

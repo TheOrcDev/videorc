@@ -129,7 +129,7 @@ export function sceneKeepsCapture(
   scene: Pick<Scene, 'shows'> | undefined,
   layout: LayoutSettings
 ): boolean {
-  return scene?.shows.kind === 'none' && !layoutShowsScreen(layout)
+  return scene !== undefined && !layoutShowsScreen(layout)
 }
 
 /**
