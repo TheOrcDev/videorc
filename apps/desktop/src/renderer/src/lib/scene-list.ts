@@ -24,17 +24,28 @@ export { movedScenes } from './scene-order'
 /** The keys a row answers to move (WCAG 2.1.1: never only by dragging). */
 export const MOVE_SCENE_UP_ACCELERATOR = 'Alt+Up'
 export const MOVE_SCENE_DOWN_ACCELERATOR = 'Alt+Down'
+/** The keys a card in Studio's grid answers to move (plan 231 D8). */
+export const MOVE_SCENE_LEFT_ACCELERATOR = 'Alt+Left'
+export const MOVE_SCENE_RIGHT_ACCELERATOR = 'Alt+Right'
 
-/** ⌥↑ or ⌥↓ alone on a focused row: the step, else null. */
-export function sceneMoveKeyStep(event: {
-  key: string
-  altKey: boolean
-  ctrlKey: boolean
-  metaKey: boolean
-  shiftKey: boolean
-}): -1 | 1 | null {
+/**
+ * ⌥↑ or ⌥↓ alone on a focused row (⌥← or ⌥→ on a card in a row of cards):
+ * the step, else null.
+ */
+export function sceneMoveKeyStep(
+  event: {
+    key: string
+    altKey: boolean
+    ctrlKey: boolean
+    metaKey: boolean
+    shiftKey: boolean
+  },
+  axis: 'vertical' | 'horizontal' = 'vertical'
+): -1 | 1 | null {
   if (!event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return null
-  return event.key === 'ArrowUp' ? -1 : event.key === 'ArrowDown' ? 1 : null
+  const [back, forward] =
+    axis === 'horizontal' ? ['ArrowLeft', 'ArrowRight'] : ['ArrowUp', 'ArrowDown']
+  return event.key === back ? -1 : event.key === forward ? 1 : null
 }
 
 function showsScreen(visual: SceneVisual): boolean {

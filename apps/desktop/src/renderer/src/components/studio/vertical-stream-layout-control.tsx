@@ -90,7 +90,8 @@ export function editVerticalStreamLayout(
   return true
 }
 
-function LayoutChoice({
+/** A 9:16 layout in a list: its diagram, then its name. */
+export function LayoutChoice({
   preset,
   label,
   framing
@@ -116,10 +117,15 @@ function LayoutChoice({
  * keeps its own, so a scene switch cuts the vertical stream to that scene's
  * layout. An edit here saves into the scene on stream and, while live, goes
  * to the vertical stream only. The Vertical stream panel holds it; Studio's
- * Scenes section can mount it as its "Vertical stream layout" row (S6). In
+ * Scenes section mounts it too, as its "Vertical stream" fields (S6). In
  * a 9:16 studio the scene's 9:16 layout is the studio's own Layout.
  */
-export function VerticalStreamLayoutControl(): ReactElement | null {
+export function VerticalStreamLayoutControl({
+  framingLabel
+}: {
+  /** Fill or Fit's visible name ("Framing" in Studio's Scenes section). */
+  framingLabel?: string
+} = {}): ReactElement | null {
   const studio = useStudioCore()
   const { sceneOnStream, captureConfig, sceneLibraryActions } = studio
   if (!sceneOnStream || layoutPresetOrientation(captureConfig.layout.layoutPreset) !== 'horizontal')
@@ -197,6 +203,7 @@ export function VerticalStreamLayoutControl(): ReactElement | null {
       </div>
       <ScreenFramingControl
         disabledReason={readOnly ? READ_ONLY_REASON : null}
+        label={framingLabel}
         value={framing}
         onChange={(verticalScreenFraming) => edit({ verticalScreenFraming })}
       />

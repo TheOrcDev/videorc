@@ -11,13 +11,10 @@ import { SceneShortcutKeys } from '@/components/scene/scene-shortcut-keys'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { DisabledReason } from '@/components/ui/disabled-reason'
-import { Label } from '@/components/ui/label'
 import type { GlobalShortcutsConfig } from '@/lib/backend'
-import { Switch } from '@/components/ui/switch'
 import { useAppIcons } from '@/hooks/use-app-icons'
 import { useStudioCore } from '@/hooks/use-studio'
 import { EDIT_SCENE_LABEL } from '@/lib/edit-scene'
-import { setFollowFrontApp, updateFollowSettings, useFollowSettings } from '@/lib/follow-settings'
 import {
   MOVE_SCENE_DOWN_ACCELERATOR,
   MOVE_SCENE_UP_ACCELERATOR,
@@ -37,36 +34,9 @@ const READ_ONLY_REASON = 'Update Videorc to change your scenes.'
  * The Scene page's scene list (plan 231 D2): your scenes in their order, the
  * same list as Studio's. A click puts a scene on stream; the canvas below
  * edits the scene that's on, and it keeps those edits (D11). A layout is a
- * choice inside a scene, made in the Layout section below.
+ * choice inside a scene, made in the Layout section below. "Follow the app
+ * in front" lives in Studio's Scenes section, the home of scenes (D8).
  */
-/**
- * "Follow the app in front" (plan 210 D10), macOS only (D12: absent
- * elsewhere, not disabled). Per device, on by default. Each scene made for
- * an app follows once that app has stayed in front briefly; Videorc itself
- * and apps without a scene keep the current scene. A scene's ⋯ can stop it.
- */
-function FollowFrontAppSwitch(): ReactElement {
-  const follow = useFollowSettings()
-  return (
-    <div className="mr-1 flex items-center gap-2" data-videorc-follow-front-app="">
-      <Label
-        className="text-meta font-normal text-muted-foreground"
-        htmlFor="scene-follow-front-app"
-      >
-        Follow the app in front
-      </Label>
-      <Switch
-        checked={follow.followFrontApp}
-        id="scene-follow-front-app"
-        size="sm"
-        onCheckedChange={(checked) =>
-          updateFollowSettings((current) => setFollowFrontApp(current, checked))
-        }
-      />
-    </div>
-  )
-}
-
 export function SceneList({
   onEditScene
 }: {
@@ -129,7 +99,6 @@ export function SceneList({
     <PanelSection
       action={
         <>
-          {platform === 'darwin' ? <FollowFrontAppSwitch /> : null}
           {/* Plan 215 D4: the editor's door on its own page, until it's on.
               Hidden, never unmounted: the first grab on the stage is what
               turns the editor on, and a header that loses a button at that

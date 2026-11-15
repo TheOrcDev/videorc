@@ -1,6 +1,5 @@
 import type { Device, LayoutPreset, LayoutSettings } from './backend'
 import { layoutPresetNeedsScreen, layoutPresetOrientation } from './capture'
-import { layoutPresetLabel } from './layout-labels'
 import {
   normalizeSceneApp,
   normalizeSceneAudio,
@@ -290,28 +289,6 @@ export function sceneLayout(
 /** Whether a layout puts a screen on stream: Freeform, or a built-in layout with a screen. */
 export function layoutShowsScreen(layout: LayoutSettings): boolean {
   return layout.arrangementMode === 'freeform' || layoutPresetNeedsScreen(layout.layoutPreset)
-}
-
-/** What the scene puts on stream, in a few words: its screen, or its layout when that shows none. */
-export function sceneShowsWords(
-  scene: Pick<Scene, 'shows' | 'layouts'>,
-  orientation: SceneOrientation
-): string {
-  const layout = sceneLayout(scene, orientation)
-  if (!layoutShowsScreen(layout)) return layoutPresetLabel(layout.layoutPreset)
-  const { shows } = scene
-  switch (shows.kind) {
-    case 'app':
-      return `${shows.name} · front window`
-    case 'window':
-      return shows.windowName ? `Window · ${shows.windowName}` : 'Window'
-    case 'display':
-      return shows.screenName ?? 'Display'
-    case 'test-pattern':
-      return 'Test pattern'
-    case 'none':
-      return 'No screen'
-  }
 }
 
 /**

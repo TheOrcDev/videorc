@@ -32,7 +32,6 @@ import {
   sceneOnStream,
   scenePosition,
   SCENES_KEY,
-  sceneShowsWords,
   showsFromSources,
   showsSources,
   withMainDisplay,
@@ -40,6 +39,7 @@ import {
   type SceneLibrary,
   type SceneShows
 } from './scenes'
+import { sceneShowsWords } from './scene-section'
 
 const NOW = '2026-11-15T12:00:00.000Z'
 

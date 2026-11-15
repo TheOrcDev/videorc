@@ -1,5 +1,5 @@
 import { CheckIcon } from '@/components/icons'
-import type { ReactElement, ReactNode } from 'react'
+import type { KeyboardEvent, ReactElement, ReactNode } from 'react'
 
 import { MediaCard } from '@/components/media-card'
 import { Badge } from '@/components/ui/badge'
@@ -11,7 +11,8 @@ import { cn } from '@/lib/utils'
  * to: a built-in scene, a saved scene and a vertical-stream scene. It is
  * `MediaCard`'s look: the layout thumbnail, then the name on up to two lines
  * (V-4: never "Screen …" at 1,280 px) after the app's icon for a scene made
- * for an app (plan 210 D6), then one quiet meta line (a shortcut, "Resolve
+ * for an app (plan 210 D6), in the name's own line so a word never splits,
+ * then one quiet meta line (a shortcut, "Resolve
  * sources", why it can't go on). The scene in use has one marker on every
  * gallery: the card's selected look, a check, and `aria-pressed`. The check
  * sits on the picture's corner, never beside the name: there it took 20 px
@@ -33,7 +34,9 @@ export function SceneCard({
   meta,
   menu,
   size = 'md',
+  keyShortcuts,
   onSelect,
+  onKeyDown,
   ...data
 }: {
   /** The layout diagram (`LayoutThumb`). */
@@ -53,7 +56,10 @@ export function SceneCard({
   menu?: ReactNode
   /** `sm` for a denser gallery (first-run setup's look). */
   size?: 'md' | 'sm'
+  /** The keys the card's button answers besides a click (`aria-keyshortcuts`: ⌥← ⌥→ to move it). */
+  keyShortcuts?: string
   onSelect: () => void
+  onKeyDown?: (event: KeyboardEvent<HTMLButtonElement>) => void
 } & { [key: `data-${string}`]: string | undefined }): ReactElement {
   return (
     <MediaCard
@@ -64,6 +70,7 @@ export function SceneCard({
     >
       <DisabledReason className="flex min-w-0 flex-1" reason={disabled ? disabledReason : null}>
         <button
+          aria-keyshortcuts={keyShortcuts}
           aria-pressed={selected}
           className={cn(
             'flex min-w-0 flex-1 flex-col rounded-row p-2 text-left outline-none focus-visible:ring-3 focus-visible:ring-ring/30',
@@ -73,19 +80,20 @@ export function SceneCard({
           disabled={disabled}
           type="button"
           onClick={onSelect}
+          onKeyDown={onKeyDown}
         >
           {thumb}
-          <span className="flex min-w-0 items-start gap-1.5">
-            {icon ? <span className="mt-px flex shrink-0">{icon}</span> : null}
-            <span
-              className={cn(
-                'line-clamp-2 min-w-0 flex-1 font-medium break-words',
-                size === 'sm' ? 'text-xs' : 'text-sm'
-              )}
-              data-slot="scene-card-label"
-            >
-              {label}
-            </span>
+          {/* The icon flows with the words, so a name too long for the
+              line beside it wraps whole ("Chrome"), never inside a word. */}
+          <span
+            className={cn(
+              'line-clamp-2 min-w-0 font-medium break-words',
+              size === 'sm' ? 'text-xs' : 'text-sm'
+            )}
+            data-slot="scene-card-label"
+          >
+            {icon ? <span className="mr-1 inline-flex align-text-bottom">{icon}</span> : null}
+            {label}
           </span>
           {meta ? <span className="text-xs text-muted-foreground">{meta}</span> : null}
         </button>

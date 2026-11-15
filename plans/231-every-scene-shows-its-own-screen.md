@@ -1188,3 +1188,182 @@ cleared positions, scenes after the ninth, and reactive registration conflicts.
 Reordering changes the position key immediately; a custom key stays with the
 scene ID. Settings custom-key rows list assigned keys only. S10 should retain
 the `sceneSlots` storage/registration path when wiring the key HUD.
+
+### S6. Studio's Scenes section (2026-11-15)
+
+Done. Renderer only: no backend, contract or smoke script change.
+
+**What the streamer sees** (`components/scene-presets.tsx`, the lazy
+`ScenesSection`; `components/studio/scenes-gallery.tsx` is now its shell)
+
+- **Header:** title "Scenes", the line "Each scene shows its own screen. ⌃⌥1
+  to ⌃⌥9 switch them from any app." (the platform's words through
+  `ShortcutKeys`: Ctrl+Alt+Shift+1 on Windows and Linux; a streamer who changed
+  position 1 or 9 reads "A scene's key switches to it from any app."), and
+  **Edit scene** and **Add scene…** at the header's end. Under it, one row:
+  the 16:9 / 9:16 toggle (locked while recording or live) and, on macOS only,
+  **Follow the app in front**. At 960 × 660 the header has room for two
+  buttons beside its line, not four, so the toggle and Follow sit on the row
+  under it (D8 names what the header holds; this is where it fits).
+- **Cards:** every scene, in order, one grid in both modes, no group labels
+  (`minmax(90px, 1fr)`: seven across at the default size, four at the
+  minimum). Each card draws its layout for the studio's orientation; the
+  screen area holds the scene's picture, else its glyph (the app's icon, a
+  display), and the camera area is a neutral opaque plate. Then the app's icon
+  flowing with the name (so "Chrome" wraps whole, never "Chrom e"), the
+  blocked reason ("Figma isn't open") or "Resolve sources", the key chips
+  (`SceneShortcutKeys`), and ⋯. #1312's pending mark and status line are
+  unchanged. Click goes through `useSceneDialogs().select`, as before.
+- **Reorder:** drag a card (a bar shows where it lands), or ⌥← ⌥→ on a
+  focused card (`sceneMoveKeyStep(event, 'horizontal')`,
+  `MOVE_SCENE_LEFT/RIGHT_ACCELERATOR`). The card keeps focus after the move
+  (found again by id: React may move its node). Chips follow positions at
+  once (S4). Read-only libraries don't move.
+- **The camera is one (D9),** so a scene that needs it while it's off or gone
+  is turned off and **one** `SceneGalleryReason` under the cards names them,
+  with Open Sources ("Camera is off. Choose one in Sources to use Camera only
+  and Side by side."). A gone screen stays each card's own "Resolve sources".
+- **Under the cards, the scene on stream's fields**
+  (`components/studio/scene-on-stream.tsx`, `SceneOnStreamFields`):
+  - "On stream: T3 Code";
+  - **Screen:** the scene's words (`showsWords`: "T3 Code · front window",
+    "Display 1", "No screen"; "Not shown in Camera only" under a screen its
+    layout doesn't draw), **Change…**, then **Hide screen** with its key and
+    the "Screen hidden" chip (moved from Studio's Sources), the stand-in and
+    switch status lines, and the Screen Recording alert
+    (`SourcePermissionAlerts only="screen-recording"`);
+  - **Layout:** 16:9 is a `SegmentedControl` of the four layouts drawn as
+    small `LayoutThumb`s (`compact`), each named by its tooltip, the name as
+    the field's line; 9:16 is a `Select` of the six with their diagrams (S3's
+    `LayoutChoice`). It calls `applyCameraPreset({ layoutPreset })`, which
+    saves into the scene on stream (S2). Camera layouts are off without a
+    camera, with one line why;
+  - **Framing** (Fill / Fit, `ScreenFramingControl`, now with a `label`
+    prop): in 9:16, and in 16:9 for Screen + camera and Screen only with a
+    screen, as the Scene page has it;
+  - **Vertical stream** (16:9 studio with a vertical stream armed only): S3's
+    `VerticalStreamLayoutControl` under a "Vertical stream" label, its Fill
+    or Fit labelled "Framing" (new `framingLabel` prop).
+  - **D19, the simple version:** a layout that draws a screen, chosen on a
+    scene that shows none, opens "Choose a screen" (`SceneScreenDialog`, the
+    Sources picker in a small dialog). Cancel keeps the old layout. "Use this
+    screen" picks the screen through `switchSourceDeviceLive` (which edits the
+    scene's `shows`, S2), then applies the layout once the capture is on that
+    screen (an effect on `sources.screenId ?? windowId`), never on a stale
+    one.
+- **Studio's Sources:** no Screen row (default look and Retro LCD); Camera
+  keeps its row, its stand-in and Green screen lines and plan 235's cog.
+  `useStudioSources` lost its capture and Hide screen fields; the Hide screen
+  control is `useScreenPrivacyControl` in the lazy chunk.
+- **Retro LCD:** the same section; the fields are one LCD screen (On stream;
+  Screen, whose value opens the picker as LCD rows do; Hide screen as its
+  press row; Layout, Framing and the vertical pair as LCD choice lists,
+  `LcdChoicePicker`). Header and cards are the same in both looks.
+- **Follow the app in front moved** from the Scene page's list header to this
+  section (`components/scene/follow-front-app-switch.tsx`). The Scene page
+  keeps Save scene…, New scene… and its list until S7 and S8.
+- **Save scene… is gone from Studio** (D6; the S6 header has no place for
+  it). S7 removes it from the Scene page and ⌘K.
+
+**Seams for S7 and S8**
+
+- `ScenesSection({ look, pictures, onAddScene, onChangeScreen })`:
+  - `onAddScene`: wire Add scene… (the header button,
+    `data-testid="scene-add"`). Without it, it opens New scene…
+    (`dialogs.open({ kind: 'new' })`).
+  - `onChangeScreen`: passed to `SceneOnStreamFields`; with it, the Screen
+    field shows a **Change screen…** button (and an LCD action) that calls
+    it, in place of the picker. S7 should also replace `SceneScreenDialog`
+    (D19) with Change screen… and keep "Cancel keeps the old layout" (the
+    `afterScreen` effect is the part to reuse).
+  - `pictures`: `ReadonlyMap<sceneId, imageUrl>`; each card passes
+    `pictures.get(id)` to `LayoutThumb`'s `picture`, which fills every screen
+    area of the layout (`object-cover`; the camera plate stays opaque on top).
+    Call `useScenePictures` in `ScenesSection` (or pass it from
+    `ScenesGallery`); nothing else changes. No picture keeps the glyph.
+- `sceneShowsWords` moved from `lib/scenes.ts` to `lib/scene-section.ts`
+  (lazy), beside `showsWords`: from the eager module, a lazy caller pulled it
+  into the first paint. Import it from `@/lib/scene-section`.
+- S8: the Scene page list still has its own drag (rows, ⌥↑ ⌥↓). The design
+  skill's "Where things live" and `docs/ui-copy.md` still describe the old
+  homes (Hide screen on "Studio's Screen row", Follow on the Scene page);
+  both moved here.
+- The segmented Layout uses `data-scene-layout="<preset>"` on each option and
+  `data-videorc-scene-layout` on the control; the fields carry
+  `data-slot="scene-on-stream"`, `scene-screen-field`, `scene-layout-field`.
+  `[data-videorc-screen-privacy]` stays on the Hide screen button
+  (`smoke:smart-scenes`, `smoke:hide-screen:windows`); its old home was the
+  inspector, now it is in the lazy Scenes chunk below the preview, so a smoke
+  that waits for it on the Studio page still finds it (`waitFor`).
+
+**Numbers:** `pnpm typecheck`, `pnpm lint`, Prettier on the 24 touched files
+and `git diff --check` green. Full desktop unit run
+(`--maxWorkers=2 --minWorkers=1`): 705 files, 8,198 passed, 1 skipped, no
+flake seen. New tests: `lib/scene-section.test.ts`;
+`components/studio/scene-on-stream.test.ts` (the Screen words, Change…, the
+Hide screen tests moved from `screen-privacy-row.test.ts`, the Layout saving
+into the scene on stream, D19 with Cancel and with a screen, Framing, 9:16,
+the vertical stream, Retro LCD); `scene-presets.test.ts` rewritten for the
+section (header, keys line per platform, order, ⌥← ⌥→ with focus kept, drag,
+read-only, pictures, the camera line, Follow); quick-settings (no Screen row)
+and Retro LCD Sources updated.
+
+|                         |       raw |    gzip |
+| ----------------------- | --------: | ------: |
+| Before S6 (`7cc0891d8`) | 2,380,657 | 489,492 |
+| After S6                | 2,380,784 | 489,575 |
+| Cap                     | 2,365,000 | 487,000 |
+
+S6 adds no code to the first paint (the entry diffed against a build of
+`7cc0891d8` differs only in its first line). The +127 raw / +83 gzip is the
+entry's chunk preload map naming five new shared lazy chunks
+(`follow-settings`, `source-switch-status`, `lcd-panel`, `lcd-device-picker`,
+`vertical-stream-layout-control`), split out because the Studio's chunk and
+the new Scenes chunk now share them. A first build was +524 raw: a lazy
+import of `showsWords` from the eager `scenes.ts` pulled it into the entry;
+it lives in `scene-section.ts` now. The Screen row and Hide screen came out
+of the Studio chunk, which is lazy too (77.53 kB from 88.47); the Scenes
+chunk is 41.64 kB (from 6.12). The cap is untouched; the overage is still
+the owner's call.
+
+**Screenshots** (light and dark; isolated profile seeded as the user's day:
+Figma, T3 Code and Chrome first, then the four defaults), in
+`/Users/orcdev/projects/plan-231-run/S6/shots/`:
+
+- the section at 1280 × 860 and 960 × 660:
+  `videorc-ui-scenes-{1280x860,960x660}-{light,dark}.png` and the fields,
+  `videorc-ui-scenes-fields-{size}-{theme}.png`;
+- the standard page sweep (`capture-ui-pages.mjs --themes=light,dark
+--sizes=1280x860,960x660`): `videorc-ui-studio-{size}-{theme}.png`, the
+  Scene page `videorc-ui-layout-…`, Sources `videorc-ui-sources-…`, and the
+  rest;
+- the Change… list `videorc-ui-scenes-change-{theme}.png`; a vertical stream
+  armed `videorc-ui-scenes-vertical-stream-{theme}.png`; the 9:16 studio
+  `videorc-ui-scenes-9x16{,-fields}-{theme}.png`; Retro LCD
+  `videorc-ui-scenes-lcd-{theme}.png`; a scene that shows no screen and
+  D19's dialog `videorc-ui-scenes-{none,d19-dialog}-{theme}.png`.
+
+T3 Code is the scene on stream in them, not Figma: Figma isn't installed on
+this Mac, so its card says "Figma isn't open", and a seeded scene on stream
+whose app the launch checkpoint doesn't hold has its screen saved over by
+S2's autosave at launch (a seed artifact: a real checkpoint holds the app).
+T3 Code went on through the real apply path. What the first shots showed and
+was fixed: "Chrom e" split inside the word (the icon now flows with the
+name), the 16:9 Layout diagrams were too faint at icon size (stronger
+plates), and a Clips toast covered the fields (closed before each shot).
+Capture script: `S6/scratch/capture-scenes.mjs` (not committed).
+
+**Deviations**
+
+- The 16:9 / 9:16 toggle and Follow sit on a row under the header, not in
+  it: four controls don't fit beside the title at 960 × 660.
+- Save scene… is gone from Studio now (S7's job elsewhere).
+- Follow the app in front left the Scene page (D8 "moved"), not mirrored.
+- `sceneShowsWords` moved to `lib/scene-section.ts` (bundle, above).
+- D19 opens a small "Choose a screen" dialog with the Sources picker: the
+  synced `DevicePicker` can't be opened from code, so the popover Change…
+  uses could not be reused for it.
+- Smokes: none run (S11 runs `smoke:scene-item-drag` and
+  `smoke:freeform-editor`). `[data-videorc-screen-privacy]` moved from the
+  inspector to the Scenes section (lazy, below the preview); the two smokes
+  that click it wait for it, so they should pass as they are.

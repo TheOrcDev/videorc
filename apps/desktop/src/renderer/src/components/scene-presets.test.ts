@@ -4,12 +4,21 @@ import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { normalizeSceneVisual } from '@/lib/scene-presets'
 import { defaultCaptureConfig } from '@/lib/capture'
-import { ScenePresetControls } from './scene-presets'
+import {
+  FOLLOW_SETTINGS_STORAGE_KEY,
+  getFollowSettings,
+  resetFollowSettingsForTest
+} from '@/lib/follow-settings'
+import { ScenesSection } from './scene-presets'
 const mocked = vi.hoisted(() => ({ core: {} as Record<string, unknown> }))
 vi.mock('@/hooks/use-studio', () => ({
   useStudioCore: () => mocked.core,
-  useStudioAudio: () => ({ audioMeter: null })
+  useStudioAudio: () => ({ audioMeter: null }),
+  useStudioBanners: () => ({ selectBanner: vi.fn() }),
+  useStudioPreview: () => ({ previewCameraLowFrameRate: false })
 }))
+const openWorkspaceTab = vi.hoisted(() => vi.fn())
+vi.mock('@/lib/workspace-navigation', () => ({ openWorkspaceTab }))
 let root: Root
 let container: HTMLDivElement
 beforeEach(() => {
@@ -41,6 +50,16 @@ beforeEach(() => {
     isSessionActive: false,
     wsStatus: 'connected',
     scene: { id: 'scene:default', sources: [] },
+    sceneOnStream: null,
+    applyCameraPreset: vi.fn(),
+    sourceSwitchReason: () => null,
+    switchSourceDeviceLive: vi.fn(async () => undefined),
+    allowCaptureNone: true,
+    screenPrivacy: { hidden: false },
+    hideScreen: vi.fn(async () => ({ ok: true })),
+    showScreen: vi.fn(async () => ({ ok: true })),
+    setSceneEditMode: vi.fn(),
+    setSelectedSceneSourceId: vi.fn(),
     saveScene: vi.fn(() => true),
     deleteSavedScene: vi.fn(async () => true),
     renameSavedScene: vi.fn(() => true),
@@ -52,9 +71,11 @@ afterEach(async () => {
   await act(async () => root.unmount())
   container.remove()
   vi.unstubAllGlobals()
+  localStorage.removeItem(FOLLOW_SETTINGS_STORAGE_KEY)
+  resetFollowSettingsForTest()
 })
-async function render(): Promise<void> {
-  await act(async () => root.render(createElement(ScenePresetControls)))
+async function render(props: Parameters<typeof ScenesSection>[0] = {}): Promise<void> {
+  await act(async () => root.render(createElement(ScenesSection, props)))
 }
 async function click(label: string): Promise<void> {
   const button = [...document.querySelectorAll('button')].find(
@@ -64,7 +85,8 @@ async function click(label: string): Promise<void> {
   await act(async () => button.click())
 }
 async function input(value: string): Promise<void> {
-  const element = document.querySelector('input')!
+  // The dialog's name field, not the Follow switch's input in the header.
+  const element = document.querySelector<HTMLInputElement>('#scene-preset-name')!
   await act(async () => {
     Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(element, value)
     element.dispatchEvent(new Event('input', { bubbles: true }))
@@ -94,7 +116,7 @@ async function menu(action: string): Promise<void> {
   expect(item).toBeTruthy()
   await act(async () => (item as HTMLElement).click())
 }
-describe("Studio's saved scenes (plan 210 D6)", () => {
+describe("Studio's Scenes section (plan 231 D8)", () => {
   it('shows the position key beside its custom key', async () => {
     mocked.core.savedScenes = [saved()]
     mocked.core.settings = { globalShortcuts: { scenes: { 'scene-a': 'F13' } } }
@@ -106,36 +128,40 @@ describe("Studio's saved scenes (plan 210 D6)", () => {
       )
     ).toEqual(['Control+Alt+1', 'F13'])
   })
-  it('heads the gallery with Save scene… and New scene…, and never Update or Modified', async () => {
+  it('heads the section with Edit scene and Add scene…, never Save scene… (plan 231 D8)', async () => {
     mocked.core.savedScenes = [saved()]
     mocked.core.activeSavedSceneId = 'scene-a'
     await render()
-    const labels = [...container.querySelectorAll('button')]
-      .map((b) => b.textContent)
-      .filter((label) => label?.endsWith('…'))
-    expect(labels).toEqual(['Save scene…', 'New scene…'])
-    expect(container.textContent).not.toMatch(/Update|Modified/)
+    const header = container.querySelector('[data-slot="panel-section-action"]')!
+    expect([...header.querySelectorAll('button')].map((b) => b.textContent)).toEqual([
+      'Edit scene',
+      'Add scene…'
+    ])
+    expect(container.textContent).not.toMatch(/Save scene|New scene|Update|Modified|Layouts/)
+    // Until S7's dialog, Add scene… opens New scene…, which adds at the end.
+    await click('Add scene…')
+    expect(document.querySelector('[data-testid="new-scene-dialog"]')).not.toBeNull()
+  })
+
+  it('duplicates from ⋯ after the original', async () => {
+    mocked.core.savedScenes = [saved()]
+    mocked.core.activeSavedSceneId = 'scene-a'
+    await render()
     await menu('Duplicate')
     expect(
       (mocked.core.sceneLibraryActions as { insert: ReturnType<typeof vi.fn> }).insert
     ).toHaveBeenCalledWith([expect.objectContaining({ name: 'Presentation 2' })], 'scene-a')
   })
 
-  it('starts Save scene… with a name, validates inline and saves only explicitly', async () => {
-    await render()
-    await click('Save scene…')
-    expect(document.querySelector('input')!.value).toBe('Screen only')
-    await input('')
-    await click('Save')
-    expect(document.body.textContent).toContain('between 1 and 80')
-    expect(mocked.core.saveScene).not.toHaveBeenCalled()
-    await input('Presentation')
-    await click('Save')
-    expect(mocked.core.saveScene).toHaveBeenCalledExactlyOnceWith('Presentation')
+  it('hands Add scene… to the dialog a later slice gives it', async () => {
+    const onAddScene = vi.fn()
+    await render({ onAddScene })
+    await click('Add scene…')
+    expect(onAddScene).toHaveBeenCalledOnce()
+    expect(document.querySelector('[data-testid="new-scene-dialog"]')).toBeNull()
   })
 
-  it('says why Save scene… is off and shows future-version recovery', async () => {
-    mocked.core.canSaveScene = false
+  it('says why Add scene… is off and shows future-version recovery', async () => {
     mocked.core.sceneLibraryActions = {
       ...(mocked.core.sceneLibraryActions as object),
       readOnly: true
@@ -143,15 +169,182 @@ describe("Studio's saved scenes (plan 210 D6)", () => {
     mocked.core.sceneLibraryError =
       'Update Videorc to open these scenes. Your saved data is preserved.'
     await render()
-    const save = [...container.querySelectorAll('button')].find(
-      (b) => b.textContent === 'Save scene…'
-    )!
-    expect(save.disabled).toBe(true)
+    const add = container.querySelector<HTMLButtonElement>('[data-testid="scene-add"]')!
+    expect(add.disabled).toBe(true)
     expect(
-      document.getElementById(save.closest('[aria-describedby]')!.getAttribute('aria-describedby')!)
+      document.getElementById(add.closest('[aria-describedby]')!.getAttribute('aria-describedby')!)
         ?.textContent
-    ).toBe('Update Videorc to save scenes. Your saved scenes are kept.')
+    ).toBe('Update Videorc to change your scenes.')
     expect(container.textContent).toContain('saved data is preserved')
+  })
+
+  it('teaches the position keys in the platform’s words (plan 231 D5)', async () => {
+    await render()
+    const description = () =>
+      container.querySelector('[data-slot="panel-section-description"]')!.textContent
+    expect(description()).toBe(
+      'Each scene shows its own screen. ⌃⌥1 to ⌃⌥9 switch them from any app.'
+    )
+    mocked.core.runtimeInfo = { platform: 'win32' }
+    await render()
+    expect(description()).toBe(
+      'Each scene shows its own screen. Ctrl+Alt+Shift+1 to Ctrl+Alt+Shift+9 switch them from any app.'
+    )
+    mocked.core.settings = { globalShortcuts: { sceneSlots: { 1: 'F13' } } }
+    await render()
+    expect(description()).toBe(
+      "Each scene shows its own screen. A scene's key switches to it from any app."
+    )
+  })
+
+  it('lists every scene in order as one set of cards, the one on stream checked', async () => {
+    mocked.core.savedScenes = [
+      saved(),
+      { ...saved(), id: 'scene-b', name: 'Desk' },
+      { ...saved(), id: 'scene-c', name: 'Figma' }
+    ]
+    mocked.core.activeSavedSceneId = 'scene-b'
+    await render()
+    expect(
+      [...container.querySelectorAll('[data-saved-scene]')].map((card) =>
+        card.getAttribute('data-saved-scene')
+      )
+    ).toEqual(['scene-a', 'scene-b', 'scene-c'])
+    expect(container.querySelectorAll('[data-testid="scene-card-check"]')).toHaveLength(1)
+    expect(
+      container
+        .querySelector('[data-saved-scene="scene-b"] [data-slot="scene-card-button"]')!
+        .getAttribute('aria-pressed')
+    ).toBe('true')
+    expect(container.textContent).not.toContain('Saved scenes')
+  })
+
+  it('moves a focused card with ⌥← and ⌥→, keeps its focus, and moves by dragging', async () => {
+    mocked.core.savedScenes = [
+      saved(),
+      { ...saved(), id: 'scene-b', name: 'Desk' },
+      { ...saved(), id: 'scene-c', name: 'Figma' }
+    ]
+    const move = (mocked.core.sceneLibraryActions as { move: ReturnType<typeof vi.fn> }).move
+    await render()
+    const button = (id: string) =>
+      container.querySelector<HTMLButtonElement>(
+        `[data-saved-scene="${id}"] [data-slot="scene-card-button"]`
+      )!
+    expect(button('scene-c').getAttribute('aria-keyshortcuts')).toBe('Alt+ArrowLeft Alt+ArrowRight')
+    const key = async (id: string, key: string, extra = {}) =>
+      act(async () => {
+        button(id).focus()
+        button(id).dispatchEvent(
+          new KeyboardEvent('keydown', { key, altKey: true, bubbles: true, ...extra })
+        )
+      })
+    await key('scene-c', 'ArrowLeft')
+    expect(move).toHaveBeenLastCalledWith('scene-c', 1)
+    // The library moved it: the card keeps the focus where it lands.
+    ;(document.activeElement as HTMLElement | null)?.blur()
+    mocked.core.savedScenes = [
+      saved(),
+      { ...saved(), id: 'scene-c', name: 'Figma' },
+      { ...saved(), id: 'scene-b', name: 'Desk' }
+    ]
+    await render()
+    expect(document.activeElement).toBe(button('scene-c'))
+    await key('scene-a', 'ArrowRight')
+    expect(move).toHaveBeenLastCalledWith('scene-a', 1)
+    move.mockClear()
+    await key('scene-a', 'ArrowRight', { shiftKey: true })
+    await key('scene-a', 'ArrowUp')
+    expect(move).not.toHaveBeenCalled()
+
+    const cards = container.querySelectorAll('[data-scene-drag]')
+    const drag = (target: Element, type: string) =>
+      target.dispatchEvent(
+        Object.assign(new Event(type, { bubbles: true, cancelable: true }), {
+          dataTransfer: { effectAllowed: '' }
+        })
+      )
+    await act(async () => drag(cards[2]!, 'dragstart'))
+    await act(async () => drag(cards[0]!, 'dragenter'))
+    expect(cards[0]!.className).toContain('before:-left-[5px]')
+    await act(async () => drag(cards[0]!, 'drop'))
+    expect(move).toHaveBeenLastCalledWith('scene-b', 0)
+  })
+
+  it('never moves a card in a library this build can’t change', async () => {
+    mocked.core.savedScenes = [saved(), { ...saved(), id: 'scene-b', name: 'Desk' }]
+    mocked.core.sceneLibraryActions = {
+      ...(mocked.core.sceneLibraryActions as object),
+      readOnly: true
+    }
+    await render()
+    const card = container.querySelector('[data-scene-drag="scene-b"]')!
+    expect(card.getAttribute('draggable')).toBe('false')
+    const button = card.querySelector<HTMLButtonElement>('[data-slot="scene-card-button"]')!
+    expect(button.getAttribute('aria-keyshortcuts')).toBeNull()
+    await act(async () =>
+      button.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'ArrowLeft', altKey: true, bubbles: true })
+      )
+    )
+    expect(
+      (mocked.core.sceneLibraryActions as { move: ReturnType<typeof vi.fn> }).move
+    ).not.toHaveBeenCalled()
+  })
+
+  it('draws the scene’s picture in its screen area, else what it shows (plan 231 D7)', async () => {
+    mocked.core.savedScenes = [saved(), { ...saved(), id: 'scene-b', name: 'Desk' }]
+    await render({ pictures: new Map([['scene-a', 'data:image/jpeg;base64,AAAA']]) })
+    const screen = (id: string) =>
+      container.querySelector(`[data-saved-scene="${id}"] [data-slot="layout-thumb-screen"]`)!
+    expect(screen('scene-a').querySelector('img')?.getAttribute('src')).toBe(
+      'data:image/jpeg;base64,AAAA'
+    )
+    expect(screen('scene-a').hasAttribute('data-picture')).toBe(true)
+    // No picture yet (or not macOS): the layout keeps its glyph.
+    expect(screen('scene-b').querySelector('img')).toBeNull()
+    expect(screen('scene-b').querySelector('svg')).not.toBeNull()
+  })
+
+  it('turns off the scenes that need a camera that is off, saying so once (plan 231 D9)', async () => {
+    const cameraScene = (
+      id: string,
+      name: string,
+      layoutPreset: 'camera-only' | 'side-by-side'
+    ) => ({
+      ...saved(),
+      id,
+      name,
+      visual: normalizeSceneVisual({
+        layout: { ...defaultCaptureConfig.layout, layoutPreset },
+        sources: { testPattern: true, cameraOff: true },
+        background: null
+      })
+    })
+    mocked.core.savedScenes = [
+      saved(),
+      cameraScene('cam', 'Camera only', 'camera-only'),
+      cameraScene('side', 'Side by side', 'side-by-side')
+    ]
+    await render()
+    const button = (id: string) =>
+      container.querySelector<HTMLButtonElement>(
+        `[data-saved-scene="${id}"] [data-slot="scene-card-button"]`
+      )!
+    expect(button('scene-a').disabled).toBe(false)
+    expect(button('cam').disabled).toBe(true)
+    expect(button('side').disabled).toBe(true)
+    expect(container.textContent).not.toContain('Resolve sources')
+    const reasons = container.querySelectorAll('[data-slot="scene-gallery-reason"]')
+    expect(reasons).toHaveLength(1)
+    expect(reasons[0]!.textContent).toContain(
+      'Camera is off. Choose one in Sources to use Camera only and Side by side.'
+    )
+    const open = [...reasons[0]!.querySelectorAll('button')].find(
+      (b) => b.textContent === 'Open Sources'
+    )!
+    await act(async () => open.click())
+    expect(openWorkspaceTab).toHaveBeenCalledWith('sources')
   })
 
   it('renames from ⋯ and asks before deleting', async () => {
@@ -294,3 +487,45 @@ it.each([
     expect(document.body.textContent).not.toContain('Resolve scene sources')
   }
 )
+
+describe('Follow the app in front, in the Scenes header (plan 231 D8)', () => {
+  const followSwitch = () =>
+    container.querySelector<HTMLButtonElement>(
+      '[data-videorc-follow-front-app] [data-slot="switch"]'
+    )
+
+  it('sits beside the orientation toggle on macOS, on by default, and turns off per device', async () => {
+    await render()
+    const control = followSwitch()
+    expect(control).not.toBeNull()
+    expect(control!.getAttribute('aria-checked')).toBe('true')
+    expect(container.querySelector('label[for="scene-follow-front-app"]')!.textContent).toBe(
+      'Follow the app in front'
+    )
+    expect(localStorage.getItem(FOLLOW_SETTINGS_STORAGE_KEY)).toBeNull()
+    await act(async () => control!.click())
+    expect(followSwitch()!.getAttribute('aria-checked')).toBe('false')
+    expect(getFollowSettings().followFrontApp).toBe(false)
+    expect(JSON.parse(localStorage.getItem(FOLLOW_SETTINGS_STORAGE_KEY)!)).toEqual({
+      followFrontApp: false
+    })
+    await act(async () => followSwitch()!.click())
+    expect(localStorage.getItem(FOLLOW_SETTINGS_STORAGE_KEY)).toBeNull()
+  })
+
+  it.each(['win32', 'linux'])('is absent on %s, not disabled', async (platform) => {
+    mocked.core.runtimeInfo = { platform }
+    await render()
+    expect(followSwitch()).toBeNull()
+    expect(container.textContent).not.toContain('Follow the app in front')
+  })
+
+  it('locks the orientation toggle while recording or live', async () => {
+    mocked.core.isSessionActive = true
+    await render()
+    const toggle = container.querySelector('[aria-label="Studio orientation"]')!
+    const segments = [...toggle.querySelectorAll('button')]
+    expect(segments.length).toBe(2)
+    expect(segments.every((segment) => segment.disabled)).toBe(true)
+  })
+})

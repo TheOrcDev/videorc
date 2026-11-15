@@ -74,6 +74,19 @@ describe('the scene list (plan 210 D6)', () => {
     expect(key('ArrowDown', { metaKey: true })).toBeNull()
   })
 
+  it('moves a focused card in Studio’s grid with ⌥← and ⌥→ alone (plan 231 D8)', () => {
+    const key = (key: string, extra = {}) =>
+      sceneMoveKeyStep(
+        { key, altKey: true, ctrlKey: false, metaKey: false, shiftKey: false, ...extra },
+        'horizontal'
+      )
+    expect(key('ArrowLeft')).toBe(-1)
+    expect(key('ArrowRight')).toBe(1)
+    expect(key('ArrowUp')).toBeNull()
+    expect(key('ArrowRight', { altKey: false })).toBeNull()
+    expect(key('ArrowLeft', { ctrlKey: true })).toBeNull()
+  })
+
   it('says what each scene shows', () => {
     expect(sceneShows(figma())).toBe('Figma · front window')
     expect(sceneShows(scene('w', 'W', { windowId: 'window:1', windowName: 'Notes - Ideas' }))).toBe(

@@ -1,24 +1,15 @@
-import {
-  type AppIcon,
-  CameraIcon,
-  CaptionsIcon,
-  ChatIcon,
-  DisplayIcon,
-  HiddenIcon
-} from '@/components/icons'
+import { type AppIcon, CameraIcon, CaptionsIcon, ChatIcon } from '@/components/icons'
 import type { ReactElement, ReactNode } from 'react'
 
 import { DevicePicker } from '@/components/device-picker'
 import { GroupedList } from '@/components/list-row'
 import { NavigableRow } from '@/components/navigable-row'
 import { PanelSection } from '@/components/panel-section'
-import { StatusBadge } from '@/components/status-badge'
 import { OpenPageCog } from '@/components/studio/open-page-cog'
 import { SourceSwitchStatus } from '@/components/studio/source-switch-status'
 import { useWorkspaceNav } from '@/components/workspace-nav'
 import { Button } from '@/components/ui/button'
 import { Switch } from '@/components/ui/switch'
-import { DisabledReason } from '@/components/ui/disabled-reason'
 import { ShortcutKeys } from '@/components/ui/shortcut-keys'
 import { ShortcutTooltip } from '@/components/ui/shortcut-tooltip'
 import {
@@ -27,19 +18,7 @@ import {
   useStudioRecordingState,
   useStudioShell
 } from '@/hooks/use-studio'
-import {
-  buildCameraSources,
-  buildCaptureSources,
-  capturePickerDevices,
-  sourceStandIn,
-  type SourceStandIn
-} from '@/lib/capture'
-import {
-  SCREEN_HIDDEN_LABEL,
-  screenHideAccelerator,
-  screenPrivacyActionLabel,
-  screenPrivacyDisabledReason
-} from '@/lib/screen-privacy-view'
+import { buildCameraSources, sourceStandIn, type SourceStandIn } from '@/lib/capture'
 import { shortcutAccelerator } from '@/lib/shortcuts'
 import { standInLine } from '@/lib/source-status'
 import { captionsStatusLabel } from '@/lib/state-labels'
@@ -49,14 +28,14 @@ import {
   openSceneGreenScreen
 } from '@/lib/green-screen'
 import { chatDoorNewLabel } from '@/lib/studio-chat'
-import { toastUserError } from '@/lib/user-error'
 import { openWorkspaceTab } from '@/lib/workspace-navigation'
 import { systemAudioRowDevice, systemAudioSwitchView } from '@/lib/system-audio'
 import { WINDOW_NAMES } from '../../../../shared/window-names'
 
 /**
  * The Studio inspector's mirrors of controls that own their own pages (SD2):
- * Sources (Screen and Camera, with the Open Sources cog as the way home), then
+ * Sources (the Camera, with the Open Sources cog as the way home; plan 231 D8
+ * moved the Screen to the scene that shows it, in the Scenes section), then
  * Captions and Chat on their own, because neither is a source (plan 174 S3.3,
  * B-15 and B-25; plan 213 B1). They edit the SAME captureConfig via the shared builders /
  * setters (one state). Device source edits use the shared session controller.
@@ -70,20 +49,14 @@ export function QuickSettings(): ReactElement {
     captureConfig,
     switchSourceDeviceLive,
     sourceSwitchReason,
-    allowCaptureNone,
-    selectedCaptureDevice,
     selectedCamera,
     isSessionActive,
     captionsStatus,
     openStudioPanel,
     discoveryPending,
-    captureDevices,
     cameras,
-    selectedCaptureId,
     selectedCameraId,
     cameraStandIn,
-    captureStandIn,
-    screenPrivacy,
     greenScreen
   } = useStudioSources()
 
@@ -91,52 +64,10 @@ export function QuickSettings(): ReactElement {
     <>
       {/* No "Sources" title (plan 235 D3): the rows name themselves, and the
           group keeps its name for screen readers. The way to Sources is the
-          cog at the end of the Camera row (D4), the row that stays once
-          plan 231 moves Screen to the Scenes section. */}
+          cog at the end of the Camera row (D4). The Screen lives with the
+          scene that shows it, in the Scenes section (plan 231 D8). */}
       <PanelSection>
         <GroupedList aria-label="Sources" role="group">
-          {/* SCREEN: one click straight to the list (owner, 2026-09-30); the
-            searchable picker stays on Sources. */}
-          <InspectorRow
-            footer={
-              <>
-                <StandInLine standIn={captureStandIn} />
-                <ScreenPrivacyLine control={screenPrivacy} />
-              </>
-            }
-            icon={DisplayIcon}
-            label="Screen"
-            status={<SourceSwitchStatus kind="capture" />}
-          >
-            {/* F-015: the synthetic diagnostic source replaces the screen, so the
-              row says so instead of claiming no screen. */}
-            <DevicePicker
-              devices={captureDevices}
-              disabled={Boolean(sourceSwitchReason('capture'))}
-              discoveryPending={discoveryPending}
-              groupByKind
-              kind="capture"
-              label="Screen"
-              noneLabel={allowCaptureNone ? 'None' : undefined}
-              selectedDevice={selectedCaptureDevice}
-              selectedName={
-                captureConfig.sources.screenName ??
-                captureConfig.sources.windowName ??
-                captureConfig.sources.wantedWindowName ??
-                captureConfig.sources.wantedScreenName
-              }
-              selectionLabel={captureConfig.sources.testPattern ? 'Test pattern' : undefined}
-              trigger="inline"
-              value={selectedCaptureId}
-              onChange={(captureId) =>
-                void switchSourceDeviceLive(
-                  'capture',
-                  buildCaptureSources(captureConfig.sources, captureDevices, captureId)
-                )
-              }
-            />
-          </InspectorRow>
-
           {/* CAMERA: its own row (plan 080 S4). Off is a choice that sticks. */}
           <InspectorRow
             footer={
@@ -272,7 +203,7 @@ function InspectorRow({
   label: string
   /** A live-switch status line under the row; collapses when it renders nothing. */
   status?: ReactNode
-  /** The row's own line under its status (the Screen row's Hide screen). */
+  /** The row's own lines under its status (the Camera row's Green screen). */
   footer?: ReactNode
   /** A compact action at the row's right end, after its control (the Camera row's cog). */
   trailing?: ReactNode
@@ -305,52 +236,6 @@ function StandInLine({ standIn }: { standIn: SourceStandIn | undefined }): React
     <p className="px-3 pb-2 pl-9.5 text-xs text-muted-foreground" data-slot="source-stand-in">
       {standInLine(standIn)}
     </p>
-  )
-}
-
-/**
- * Hide screen on the Screen row (plan 210 D9): a 24 px button with its key,
- * never beside Record and Go Live (owner, 2026-10-12). It stays at the right
- * edge in both states, so Show screen is where Hide screen was. While hidden
- * the chip says so; it shows with or without a screen in the scene, because
- * hiding is allowed either way. No toast: the chip and the Preview say it.
- */
-function ScreenPrivacyLine({ control }: { control: ScreenPrivacyControl }): ReactElement {
-  const { hidden, accelerator, platform, disabledReason, toggle } = control
-  const label = screenPrivacyActionLabel(hidden)
-  const button = (
-    <Button
-      data-videorc-screen-privacy=""
-      disabled={disabledReason !== null}
-      size="xs"
-      variant="outline"
-      onClick={toggle}
-    >
-      {label}
-    </Button>
-  )
-  return (
-    <div
-      className="flex min-h-8 items-center gap-2 pr-1 pb-2 pl-9.5"
-      data-hidden={hidden || undefined}
-      data-slot="screen-privacy"
-    >
-      {hidden ? <StatusBadge icon={HiddenIcon} tone="warn" value={SCREEN_HIDDEN_LABEL} /> : null}
-      <div className="ml-auto flex shrink-0 items-center gap-2">
-        {/* The key teaches itself while there is room; while hidden the chip
-            takes that room, and the tooltip keeps the key. */}
-        {accelerator && !hidden ? (
-          <ShortcutKeys accelerator={accelerator} platform={platform} />
-        ) : null}
-        {disabledReason ? (
-          <DisabledReason reason={disabledReason}>{button}</DisabledReason>
-        ) : (
-          <ShortcutTooltip accelerator={accelerator} label={label} platform={platform}>
-            {button}
-          </ShortcutTooltip>
-        )}
-      </div>
-    </div>
   )
 }
 
@@ -412,17 +297,6 @@ export interface GreenScreenControl {
   openSettings: () => void
 }
 
-/** What both looks' Hide screen controls show and do (the row and the Retro LCD's). */
-export interface ScreenPrivacyControl {
-  hidden: boolean
-  /** The bound key, absent when the streamer cleared it. */
-  accelerator?: string
-  platform?: string
-  /** Why the action is off (a refused hide, Videorc offline), or null. */
-  disabledReason: string | null
-  toggle: () => void
-}
-
 /**
  * What the Studio's Sources rows show and act with: the same state for the
  * inspector's rows and the Retro LCD screen (plan 197), which keeps its
@@ -434,9 +308,7 @@ export function useStudioSources() {
     setCaptureConfig,
     switchSourceDeviceLive,
     sourceSwitchReason,
-    allowCaptureNone,
     deviceList,
-    selectedCaptureDevice,
     selectedCamera,
     isSessionActive,
     audioBusActive,
@@ -446,10 +318,6 @@ export function useStudioSources() {
     systemAudioJoining,
     systemAudioIssue,
     runtimeInfo,
-    settings,
-    screenPrivacy: privacy,
-    hideScreen,
-    showScreen,
     applyLayoutPatch
   } = useStudioCore()
   const { openSettings, openStudioPanel } = useWorkspaceNav()
@@ -466,33 +334,11 @@ export function useStudioSources() {
   // devices…" instead of rendering blank.
   const discoveryPending = wsStatus !== 'connected'
 
-  const captureDevices = capturePickerDevices(deviceList.devices)
   const cameras = deviceList.devices.filter((device) => device.kind === 'camera')
   // Plan 213 E1: what is in use, else the pick itself as the device that is gone.
   const { sources } = captureConfig
-  const selectedCaptureId =
-    sources.screenId ?? sources.windowId ?? sources.wantedWindowId ?? sources.wantedScreenId
   const selectedCameraId = sources.cameraId ?? sources.wantedCameraId
   const cameraStandIn = sourceStandIn(sources, 'camera', deviceList.devices)
-  const captureStandIn = sourceStandIn(sources, 'capture', deviceList.devices)
-  // Plan 210 S8b: the one Studio action, by the state it shows. A failure
-  // says so; a refused hide is the hook's warning, and success is silent.
-  const screenPrivacy: ScreenPrivacyControl = {
-    hidden: privacy.hidden,
-    accelerator: screenHideAccelerator(settings.globalShortcuts?.screenHideToggle),
-    platform: runtimeInfo?.platform,
-    disabledReason: screenPrivacyDisabledReason(privacy, wsStatus === 'connected'),
-    toggle: () => {
-      const hidden = privacy.hidden
-      void (hidden ? showScreen() : hideScreen()).catch((error: unknown) =>
-        toastUserError(
-          error,
-          { action: hidden ? 'show' : 'hide', object: 'your screen' },
-          { id: 'screen-privacy' }
-        )
-      )
-    }
-  }
   // The camera's key, by the Scene page's own layout patch, so a session on
   // air takes it like an edit there.
   const greenScreen: GreenScreenControl = {
@@ -507,8 +353,6 @@ export function useStudioSources() {
     setCaptureConfig,
     switchSourceDeviceLive,
     sourceSwitchReason,
-    allowCaptureNone,
-    selectedCaptureDevice,
     selectedCamera,
     isSessionActive,
     captionsStatus,
@@ -517,13 +361,9 @@ export function useStudioSources() {
     openStudioPanel,
     systemAudio,
     discoveryPending,
-    captureDevices,
     cameras,
-    selectedCaptureId,
     selectedCameraId,
     cameraStandIn,
-    captureStandIn,
-    screenPrivacy,
     greenScreen
   }
 }

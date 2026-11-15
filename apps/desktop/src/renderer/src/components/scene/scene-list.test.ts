@@ -4,11 +4,6 @@ import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { defaultCaptureConfig } from '@/lib/capture'
-import {
-  FOLLOW_SETTINGS_STORAGE_KEY,
-  getFollowSettings,
-  resetFollowSettingsForTest
-} from '@/lib/follow-settings'
 import { normalizeSceneVisual, type SavedScene, type VisualSources } from '@/lib/scene-presets'
 import { SceneList } from './scene-list'
 
@@ -113,8 +108,6 @@ afterEach(async () => {
   await act(async () => root.unmount())
   container.remove()
   vi.unstubAllGlobals()
-  localStorage.removeItem(FOLLOW_SETTINGS_STORAGE_KEY)
-  resetFollowSettingsForTest()
 })
 
 async function render(): Promise<void> {
@@ -410,34 +403,9 @@ describe('a saved scene’s ⋯ menu', () => {
 })
 
 describe('Follow the app in front (plan 210 D10, D12)', () => {
-  const followSwitch = () =>
-    container.querySelector<HTMLButtonElement>(
-      '[data-videorc-follow-front-app] [data-slot="switch"]'
-    )
-
-  it('sits in the header on macOS, on by default, and turns off per device', async () => {
+  it('lives in Studio’s Scenes section now, not on the Scene page (plan 231 D8)', async () => {
     await render()
-    const control = followSwitch()
-    expect(control).not.toBeNull()
-    expect(control!.getAttribute('aria-checked')).toBe('true')
-    expect(container.querySelector('label[for="scene-follow-front-app"]')!.textContent).toBe(
-      'Follow the app in front'
-    )
-    expect(localStorage.getItem(FOLLOW_SETTINGS_STORAGE_KEY)).toBeNull()
-    await act(async () => control!.click())
-    expect(followSwitch()!.getAttribute('aria-checked')).toBe('false')
-    expect(getFollowSettings().followFrontApp).toBe(false)
-    expect(JSON.parse(localStorage.getItem(FOLLOW_SETTINGS_STORAGE_KEY)!)).toEqual({
-      followFrontApp: false
-    })
-    await act(async () => followSwitch()!.click())
-    expect(localStorage.getItem(FOLLOW_SETTINGS_STORAGE_KEY)).toBeNull()
-  })
-
-  it.each(['win32', 'linux'])('is absent on %s, not disabled', async (platform) => {
-    mocked.core.runtimeInfo = { platform }
-    await render()
-    expect(followSwitch()).toBeNull()
+    expect(container.querySelector('[data-videorc-follow-front-app]')).toBeNull()
     expect(container.textContent).not.toContain('Follow the app in front')
   })
 })

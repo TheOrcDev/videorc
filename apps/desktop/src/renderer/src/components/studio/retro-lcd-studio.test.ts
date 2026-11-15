@@ -296,18 +296,16 @@ describe('Retro LCD Sources and Takeover (plan 197)', () => {
     expect(cog).toBeGreaterThan((sources ?? '').indexOf('aria-label="Camera"'))
     // System audio is in Audio since plan 201.
     // Green screen under the Camera picker, with its way to the Scene page.
-    expect(rowLabels(sources ?? '')).toEqual(['Screen', 'Camera', 'Green screen'])
+    // The Screen lives with the scene that shows it (plan 231 D8).
+    expect(rowLabels(sources ?? '')).toEqual(['Camera', 'Green screen'])
     expect(sources).toMatch(
       /aria-label="Green screen"[^>]*role="switch"|role="switch"[^>]*aria-label="Green screen"/
     )
     expect(sources).toMatch(/>Adjust<\/span>/)
     expect(sources).not.toContain('System audio')
-    for (const label of ['Screen', 'Camera']) {
-      expect(new RegExp(`<button[^>]*aria-label="${label}"[^>]*>`).exec(markup)?.[0]).toContain(
-        'role="combobox"'
-      )
-    }
-    expect(sources).toContain('title="Display 2"')
+    expect(/<button[^>]*aria-label="Camera"[^>]*>/.exec(markup)?.[0]).toContain('role="combobox"')
+    expect(markup).not.toContain('aria-label="Screen"')
+    expect(markup).not.toContain('Hide screen')
     // The one switch is the camera's Green screen, never System audio.
     expect([...(sources ?? '').matchAll(/role="switch"/g)]).toHaveLength(1)
     // Captions: under no heading, a door to its page (B-13, B-15).
