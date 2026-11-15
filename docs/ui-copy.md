@@ -45,6 +45,8 @@ app. Two checks hold them (see [Guards](#guards)).
     Captions, Avatar, Output, Destinations, Sidekick, Library, Settings,
     Health, Setup, Livestream (the group), Stream Manager, Preview, Notes,
     Captions reader;
+  - Scenes, Studio's section that is the home of scenes ("Open Scenes",
+    plan 231 D8); a scene in a sentence stays lowercase;
   - platforms and products: YouTube, Twitch, Kick, X, TikTok, Custom RTMP,
     OBS, macOS, Windows.
 - A status is a word, never a raw value: "Reconnecting", not "closed" or
@@ -55,11 +57,14 @@ app. Two checks hold them (see [Guards](#guards)).
 - One character, "…", never three dots ("...").
 - On a command that opens a further step asking for a choice or input:
   "Import…", "Rename…", "Choose thumbnail…", "Edit…", "Go live…" (⌘K), "Pair a
-  phone…", "Run setup again…", "What's new…", "Sign in…" and "Authorize X
-  Live…" (both open an account flow in the browser).
-- Not on a command that acts at once, or one that only opens a page or a
-  window: "Delete", "Open Output", "Open Stream Manager", "Open Destinations".
-  "Set level for me" changes Gain at once, so it has no ellipsis either.
+  phone…", "Run setup again…", "What's new…", "Add scene…", "Change screen…",
+  "Set key…", "Sign in…" and "Authorize X Live…" (both open an account flow in
+  the browser).
+- Not on a command that acts at once, or one that only opens a page, a
+  section or a window: "Delete", "Duplicate", "Open Output", "Open Stream
+  Manager", "Open Destinations", "Open Scenes". A dialog's own button acts, so
+  Add scene…'s reads "Add scene" or "Add 3 scenes". "Set level for me"
+  changes Gain at once, so it has no ellipsis either.
 - On every pending label: "Saving…", "Importing…", "Exporting…",
   "Applying…", "Opening preview…".
 - A pending label never replaces the name of what was clicked. A scene or
@@ -98,12 +103,41 @@ One verb pair on every surface (plan 174 S2.2). The strings live in
 - Quote a control or a page exactly as it reads today, with "→" for a path:
   "Destinations → Setup", "Settings → Shortcuts". Never point at a page, a tab
   or a button that does not exist.
-- Scenes and Hide screen (plan 210) read the same everywhere: "New scene…"
-  makes scenes for apps, a scene for an app says "{App} · front window",
-  "Follow the app in front" is the switch and "Follows" the row's mark
-  ("Stop following" in its ⋯ menu), the control is "Hide screen" and then
-  "Show screen", and the chip while it holds is "Screen hidden". Never
-  "blur", "privacy mode" or "censor".
+- Scenes (plans 210 and 231) read the same everywhere. The words are in the
+  glossary (Scene, Layout, Default scene, Scene key, Add scene…, Change
+  screen…); the strings:
+  - Studio's Scenes section and the Scene page say "Each scene shows its own
+    screen. ⌃⌥1 to ⌃⌥9 switch them from any app." (the platform's keys), or
+    "A scene's key switches to it from any app." once the streamer changed
+    them.
+  - "Add scene…" makes scenes; its picker's button reads "Add scene" or "Add 3
+    scenes", and "Choose at least one." with nothing chosen.
+  - "Change screen…" changes what one scene shows: an app, "A specific
+    window", a display, or "No screen". A scene for an app says "{App} ·
+    front window" ("Front window" on its own card), and a scene whose layout
+    draws no screen says "No screen".
+  - The scene on stream's fields start "On stream: Figma"; Sources → Screen
+    says whose screen it is: "Shown by “Figma”, the scene on stream. Each
+    scene keeps its own screen.", or "“Camera only”, the scene on stream,
+    shows no screen. Each scene keeps its own screen.", with "Open Scenes".
+  - Settings → Shortcuts names a position by the scene in it: "Scene 1 ·
+    Figma", and "Scene 9 · no scene" while it's empty. A key another app
+    holds says "Another app uses ⌃⌥3". The key HUD's switch (plan 231 D20)
+    reads "Show the scene's name when a key switches it".
+  - The refusals, as warnings: "Keep at least one scene." (the last one),
+    "Switch to another scene first." (deleting the scene on stream while
+    recording or live), "No scene uses Side by side" (a remote's old layout
+    request), "Figma isn't open", "“Figma” already shows this.", and "Update
+    Videorc to change your scenes." (a library from a newer Videorc).
+  - "Follow the app in front" is the switch, in Studio's Scenes section, and
+    "Follows" a row's mark ("Stop following" and "Follow the app" in its ⋯
+    menu).
+  - Never "saved scene", "Unsaved scene", "New scene…", "Save scene…",
+    "Change app…", or a layout as something to switch to.
+- Hide screen (plan 210) reads the same everywhere: the control is "Hide
+  screen" and then "Show screen", on the scene's Screen row in Studio's Scenes
+  section, and the chip while it holds is "Screen hidden". Never "blur",
+  "privacy mode" or "censor".
 - Videorc Camera (plan 214) is the camera other apps see, one name
   everywhere: "Videorc Camera", never "virtual cam", "vcam" or "webcam".
   Its home is Output → Camera for other apps; ⌘K reads "Turn Videorc
@@ -178,7 +212,11 @@ the support bundle.
 
 A toast is for news the interface does not already show (the design
 skill's "Toast discipline"). Never a success toast for a scene, layout or
-source change: the stage is the confirmation.
+source change: the stage is the confirmation. The one exception is the key
+HUD (plan 231 D20), and it is not a toast: when a key, the Stream Deck or the
+phone switches the scene while no Videorc window is in front, a chip off
+stream shows the scene's name and key for a moment ("T3 Code ⌃⌥2"), or the
+refusal ("Figma isn't open").
 
 - Shape:
   - the title is the outcome, with no period: "MP4 ready", "Couldn't

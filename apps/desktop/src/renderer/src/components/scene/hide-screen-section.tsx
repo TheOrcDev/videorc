@@ -45,7 +45,8 @@ const LAST_APP_REASON =
  * The Scene page's Hide screen section (plan 210 D9, D11): what viewers see,
  * the key and where to change it, then, on macOS, the password-manager hide
  * and its list (D12: absent elsewhere, not disabled). The action itself lives
- * on the Studio's Screen row; this is where it is set up.
+ * on the scene's Screen row in Studio's Scenes section (plan 231 D8); this is
+ * where it is set up.
  */
 export function HideScreenSection(): ReactElement {
   const { settings, runtimeInfo } = useStudioCore()

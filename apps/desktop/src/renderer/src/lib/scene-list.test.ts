@@ -7,7 +7,6 @@ import {
   savedSceneBlockedReason,
   sceneGlyph,
   sceneMoveKeyStep,
-  sceneShows,
   sceneWithAudio,
   sceneWithFollow,
   uniqueSceneName
@@ -81,16 +80,6 @@ describe('the scene list (plan 210 D6)', () => {
     expect(key('ArrowUp')).toBeNull()
     expect(key('ArrowRight', { altKey: false })).toBeNull()
     expect(key('ArrowLeft', { ctrlKey: true })).toBeNull()
-  })
-
-  it('says what each scene shows', () => {
-    expect(sceneShows(figma())).toBe('Figma · front window')
-    expect(sceneShows(scene('w', 'W', { windowId: 'window:1', windowName: 'Notes - Ideas' }))).toBe(
-      'Window · Notes - Ideas'
-    )
-    expect(sceneShows(scene('d', 'D'))).toBe('Display 1')
-    expect(sceneShows(scene('c', 'C', {}, 'camera-only'))).toBe('Camera only')
-    expect(sceneShows(scene('n', 'N', { captureOff: true }))).toBe('No screen')
   })
 
   it('draws the app icon for app scenes and fixed windows the device list knows', () => {

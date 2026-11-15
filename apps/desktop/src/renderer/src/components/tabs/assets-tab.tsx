@@ -189,8 +189,8 @@ export function AssetsTab(): ReactElement {
     setPendingReplace(null)
   }
 
-  // The scene's own background, which may come from a saved scene rather
-  // than a slot: its row sits inside Backgrounds (C-26). A live background
+  // The scene's own background, which each scene keeps (plan 231 D2) even
+  // once its slot is gone: its row sits inside Backgrounds (C-26). A live background
   // reads as itself and its look ("Silk · Satin", plan 190).
   const sceneBackground = scene?.background ?? null
   const sceneLive =
@@ -200,7 +200,7 @@ export function AssetsTab(): ReactElement {
   const sceneBackgroundName = sceneBackground
     ? sceneLive
       ? liveBackgroundLabel(sceneLive.id, sceneLive.look)
-      : (registry.assets[sceneBackground.assetId]?.name ?? 'A background from a saved scene')
+      : (registry.assets[sceneBackground.assetId]?.name ?? 'A background this scene kept')
     : null
 
   return (
@@ -312,7 +312,7 @@ export function AssetsTab(): ReactElement {
         confirmLabel="Remove background"
         description={
           removingApplied
-            ? 'This empties the library slot and removes the background from the current scene, including a running recording or stream. Saved scenes keep their copy.'
+            ? 'This empties the library slot and removes the background from the current scene, including a running recording or stream. Other scenes keep their copy.'
             : 'The imported image is deleted from this computer. The slot stays empty until you restore its built-in background or import another.'
         }
         open={removingSlotId !== null}

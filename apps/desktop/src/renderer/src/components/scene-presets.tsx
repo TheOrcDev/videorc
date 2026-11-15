@@ -1,13 +1,5 @@
 import { DisplayIcon, MobileIcon } from '@/components/icons'
-import {
-  useEffect,
-  useRef,
-  useState,
-  type DragEvent,
-  type KeyboardEvent,
-  type ReactElement,
-  type ReactNode
-} from 'react'
+import { useEffect, type ReactElement, type ReactNode } from 'react'
 
 import { KebabMenu } from '@/components/kebab-menu'
 import type { StudioLook } from '@/components/lcd-panel'
@@ -15,18 +7,22 @@ import { PanelSection } from '@/components/panel-section'
 import { SceneGlyphIcon } from '@/components/scene/app-icon'
 import { FollowFrontAppSwitch } from '@/components/scene/follow-front-app-switch'
 import { changeScreenBlockedReason, useSceneDialogs } from '@/components/scene/scene-dialogs'
+import {
+  SCENES_READ_ONLY_REASON,
+  ScenesLine,
+  useSceneEntries,
+  useSceneReorder
+} from '@/components/scene/scene-entries'
 import { SceneShortcutKeys } from '@/components/scene/scene-shortcut-keys'
-import { SceneSwitchPending, SceneSwitchStatus } from '@/components/scene/scene-switch-status'
+import { SceneSwitchStatus } from '@/components/scene/scene-switch-status'
 import { SceneCard, SceneGalleryReason } from '@/components/studio/scene-card'
 import { SceneOnStreamFields } from '@/components/studio/scene-on-stream'
 import { LayoutThumb } from '@/components/studio/scenes-gallery'
 import { Button } from '@/components/ui/button'
 import { DisabledReason } from '@/components/ui/disabled-reason'
 import { SegmentedControl, type SegmentedControlOption } from '@/components/ui/segmented-control'
-import { ShortcutKeys } from '@/components/ui/shortcut-keys'
-import { useAppIcons } from '@/hooks/use-app-icons'
 import { useEditScene } from '@/hooks/use-edit-scene'
-import { scenePictureTargetKey, useScenePictures } from '@/hooks/use-scene-pictures'
+import { smoothScrollBehavior } from '@/hooks/use-reduced-motion'
 import { useStudioCore } from '@/hooks/use-studio'
 import {
   layoutPresetOrientation,
@@ -34,26 +30,10 @@ import {
   type LayoutOrientation
 } from '@/lib/capture'
 import { EDIT_SCENE_LABEL } from '@/lib/edit-scene'
-import { ADD_SCENE_EVENT, takeAddSceneRequest } from '@/lib/scene-add-request'
-import { shortcutAriaKeys } from '@/lib/platform'
-import {
-  MOVE_SCENE_LEFT_ACCELERATOR,
-  MOVE_SCENE_RIGHT_ACCELERATOR,
-  savedSceneBlockedReason,
-  sceneGlyph,
-  sceneMoveKeyStep
-} from '@/lib/scene-list'
-import {
-  sceneCardsCameraGaps,
-  sceneCardWords,
-  scenePictureTarget,
-  sceneSlotKeysLine
-} from '@/lib/scene-section'
+import { SCENES_REQUEST_EVENT, takeScenesRequest } from '@/lib/scene-add-request'
 import type { SceneVisual } from '@/lib/scene-presets'
 import { cn } from '@/lib/utils'
 import { openWorkspaceTab } from '@/lib/workspace-navigation'
-
-const READ_ONLY_REASON = 'Update Videorc to change your scenes.'
 
 const STUDIO_ORIENTATION_OPTIONS: SegmentedControlOption<LayoutOrientation>[] = [
   {
@@ -81,76 +61,52 @@ const STUDIO_ORIENTATION_OPTIONS: SegmentedControlOption<LayoutOrientation>[] = 
  * fields. A lazy chunk: the dialogs and fields stay out of the first paint.
  *
  * Add scene… and Change screen… (S7) are `useSceneDialogs`' picker, here
- * and on the Scene page; ⌘K's Add scene… opens it here. Each card's still
- * comes from `useScenePictures` (S5, D17): macOS only, never while recording
- * or live, and frozen while Hide screen holds.
+ * and on the Scene page; ⌘K's Add scene… opens it here, and Sources' Open
+ * Scenes scrolls here. The cards read their scenes through `useSceneEntries`
+ * and move through `useSceneReorder`, as the Scene page's rows do (S8). Each
+ * card's still comes from `useScenePictures` (S5, D17): macOS only, never
+ * while recording or live, and frozen while Hide screen holds.
  */
 export function ScenesSection({ look = 'default' }: { look?: StudioLook }): ReactElement {
   const studio = useStudioCore()
   const {
     savedScenes,
     activeSavedSceneId,
-    savedScenePendingId,
-    savedSceneAppStates,
     sceneLibraryActions,
     sceneLibraryError,
-    deviceList,
     settings,
     runtimeInfo,
     captureConfig,
     applyCameraPreset,
-    isSessionActive,
-    screenPrivacy
+    isSessionActive
   } = studio
   const dialogs = useSceneDialogs()
   const editScene = useEditScene()
   const platform = runtimeInfo?.platform
   const readOnly = sceneLibraryActions.readOnly
   const mode = layoutPresetOrientation(captureConfig.layout.layoutPreset)
-  const glyphs = new Map(
-    savedScenes.map((entry) => [entry.id, sceneGlyph(entry, deviceList.devices)])
-  )
-  const icons = useAppIcons([
-    ...new Set([
-      ...savedScenes.flatMap((entry) =>
-        entry.visual.sources.app ? [entry.visual.sources.app.bundleId] : []
-      ),
-      ...[...glyphs.values()].flatMap((glyph) => (glyph.kind === 'app' ? [glyph.bundleId] : []))
-    ])
-  ])
-  // D7: one still per thing shown (three scenes on Display 1 share one), and
-  // each card takes its own scene's.
-  const pictureTargets = new Map(
-    savedScenes.flatMap((entry) => {
-      const target = scenePictureTarget(entry.visual)
-      return target ? [[entry.id, target] as const] : []
-    })
-  )
-  const stills = useScenePictures({
-    targets: [
-      ...new Map(
-        [...pictureTargets.values()].map((target) => [scenePictureTargetKey(target), target])
-      ).values()
-    ],
-    hidden: screenPrivacy.hidden,
-    busy: isSessionActive
+  // The same entries and reorder as the Scene page's rows (D8).
+  const { entries, icons, cameraReason } = useSceneEntries(dialogs.needsSources)
+  const reorder = useSceneReorder({
+    axis: 'horizontal',
+    focusSelector: '[data-slot="scene-card-button"]'
   })
-  const pictureOf = (id: string): string | undefined => {
-    const target = pictureTargets.get(id)
-    return target ? stills.get(scenePictureTargetKey(target)) : undefined
-  }
-  const camera = sceneCardsCameraGaps(savedScenes, deviceList.devices)
-  const keys = sceneSlotKeysLine(settings.globalShortcuts, platform)
   const openDialog = dialogs.open
 
-  // ⌘K's Add scene… (D14): taken once at mount, or heard while mounted.
+  // ⌘K's Add scene… (D14) opens the picker; Sources' Open Scenes brings the
+  // section into view. Taken once at mount, or heard while mounted.
   useEffect(() => {
     const take = (): void => {
-      if (takeAddSceneRequest() && !readOnly) openDialog({ kind: 'add' })
+      const request = takeScenesRequest()
+      if (request === 'add' && !readOnly) openDialog({ kind: 'add' })
+      if (request === 'show')
+        document
+          .querySelector('[data-videorc-scenes]')
+          ?.scrollIntoView({ behavior: smoothScrollBehavior(), block: 'start' })
     }
     take()
-    window.addEventListener(ADD_SCENE_EVENT, take)
-    return () => window.removeEventListener(ADD_SCENE_EVENT, take)
+    window.addEventListener(SCENES_REQUEST_EVENT, take)
+    return () => window.removeEventListener(SCENES_REQUEST_EVENT, take)
   }, [openDialog, readOnly])
 
   // The scene on stream goes on in its own layout for the other orientation
@@ -161,31 +117,6 @@ export function ScenesSection({ look = 'default' }: { look?: StudioLook }): Reac
     applyCameraPreset({ layoutPreset: ORIENTATION_DEFAULT_PRESET[target] }, { toOrientation: true })
   }
 
-  // Reorder (D8): the Scene page list's drag, across a grid of cards.
-  const [draggingId, setDraggingId] = useState<string | null>(null)
-  const [dropIndex, setDropIndex] = useState<number | null>(null)
-  const draggingIndex = savedScenes.findIndex((entry) => entry.id === draggingId)
-  const endDrag = (): void => {
-    setDraggingId(null)
-    setDropIndex(null)
-  }
-  // A card moved by its keys keeps the focus: React may move its node, and a
-  // moved node loses focus, so it is found again by the scene's id.
-  const gridRef = useRef<HTMLDivElement>(null)
-  const refocusId = useRef<string | null>(null)
-  useEffect(() => {
-    const id = refocusId.current
-    if (!id) return
-    refocusId.current = null
-    const card = [...(gridRef.current?.querySelectorAll('[data-saved-scene]') ?? [])].find(
-      (entry) => entry.getAttribute('data-saved-scene') === id
-    )
-    card?.querySelector<HTMLButtonElement>('[data-slot="scene-card-button"]')?.focus()
-  }, [savedScenes])
-  const moveKeys = readOnly
-    ? undefined
-    : `${shortcutAriaKeys(MOVE_SCENE_LEFT_ACCELERATOR, platform)} ${shortcutAriaKeys(MOVE_SCENE_RIGHT_ACCELERATOR, platform)}`
-
   return (
     <PanelSection
       action={
@@ -194,7 +125,7 @@ export function ScenesSection({ look = 'default' }: { look?: StudioLook }): Reac
           <Button variant="ghost" onClick={editScene}>
             {EDIT_SCENE_LABEL}
           </Button>
-          <DisabledReason reason={readOnly ? READ_ONLY_REASON : null}>
+          <DisabledReason reason={readOnly ? SCENES_READ_ONLY_REASON : null}>
             <Button
               data-testid="scene-add"
               disabled={readOnly}
@@ -207,18 +138,7 @@ export function ScenesSection({ look = 'default' }: { look?: StudioLook }): Reac
         </>
       }
       data-videorc-scenes=""
-      description={
-        keys ? (
-          <>
-            Each scene shows its own screen.{' '}
-            <ShortcutKeys accelerator={keys.first} platform={platform} variant="text" /> to{' '}
-            <ShortcutKeys accelerator={keys.last} platform={platform} variant="text" /> switch them
-            from any app.
-          </>
-        ) : (
-          "Each scene shows its own screen. A scene's key switches to it from any app."
-        )
-      }
+      description={<ScenesLine config={settings.globalShortcuts} platform={platform} />}
       title="Scenes"
     >
       <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2">
@@ -251,120 +171,71 @@ export function ScenesSection({ look = 'default' }: { look?: StudioLook }): Reac
         </p>
       ) : null}
       <div
-        ref={gridRef}
+        ref={reorder.containerRef}
         // Cards at least 160 px wide: a picture big enough to tell one app
         // from another, and "Screen + camera" on one line.
         className="grid gap-2 [grid-template-columns:repeat(auto-fill,minmax(160px,1fr))]"
         data-videorc-saved-scenes=""
       >
-        {savedScenes.map((entry, index) => {
-          const app = entry.visual.sources.app
-          const pending = savedScenePendingId === entry.id
-          const blocked = savedSceneBlockedReason({
-            scene: entry,
-            appState: savedSceneAppStates[entry.id],
-            devices: deviceList.devices
-          })
-          const cameraBlocked = camera.blocked.has(entry.id)
-          const dropEdge =
-            dropIndex === index && draggingIndex >= 0 && draggingIndex !== index
-              ? draggingIndex < index
-                ? 'end'
-                : 'start'
-              : null
-          const moveFromKeyboard = (event: KeyboardEvent<HTMLButtonElement>): void => {
-            if (readOnly) return
-            const step = sceneMoveKeyStep(event, 'horizontal')
-            if (step === null) return
-            event.preventDefault()
-            if (sceneLibraryActions.move(entry.id, index + step)) refocusId.current = entry.id
-          }
+        {entries.map((entry, index) => {
+          const { scene } = entry
+          const dropEdge = reorder.dropEdge(index)
           return (
             <div
-              key={entry.id}
+              key={scene.id}
               className={cn(
                 'relative grid min-w-0',
-                draggingId === entry.id && 'opacity-40',
+                reorder.dragging(scene.id) && 'opacity-40',
                 dropEdge &&
                   'before:absolute before:inset-y-0 before:z-10 before:w-0.5 before:rounded-full before:bg-ring before:content-[""]',
-                dropEdge === 'start' && 'before:-left-[5px]',
-                dropEdge === 'end' && 'before:-right-[5px]'
+                dropEdge === 'before' && 'before:-left-[5px]',
+                dropEdge === 'after' && 'before:-right-[5px]'
               )}
-              data-scene-drag={entry.id}
-              draggable={!readOnly}
-              onDragEnd={endDrag}
-              onDragEnter={() => {
-                if (draggingId && draggingId !== entry.id) setDropIndex(index)
-              }}
-              onDragOver={(event: DragEvent<HTMLDivElement>) => event.preventDefault()}
-              onDragStart={(event: DragEvent<HTMLDivElement>) => {
-                event.dataTransfer.effectAllowed = 'move'
-                setDraggingId(entry.id)
-              }}
-              onDrop={(event: DragEvent<HTMLDivElement>) => {
-                event.preventDefault()
-                if (draggingId && draggingId !== entry.id)
-                  sceneLibraryActions.move(draggingId, index)
-                endDrag()
-              }}
+              data-scene-drag={scene.id}
+              {...reorder.dragProps(scene.id, index)}
             >
               {/* One SceneCard for every scene (plan 174 S3.3, B-20): the
                   selected look, its ring and its check say which one is on. */}
               <SceneCard
-                data-saved-scene={entry.id}
+                data-saved-scene={scene.id}
                 // Another scene's click takes a pending switch over (issue #1275).
-                disabled={blocked !== null || cameraBlocked || pending}
-                disabledReason={blocked ?? (cameraBlocked ? camera.reason : null)}
+                disabled={entry.disabled}
+                disabledReason={entry.disabledReason}
                 icon={
                   <SceneGlyphIcon
-                    className={app ? 'size-4' : undefined}
-                    glyph={glyphs.get(entry.id)!}
+                    className={scene.visual.sources.app ? 'size-4' : undefined}
+                    glyph={entry.glyph}
                     icons={icons}
                   />
                 }
-                keyShortcuts={moveKeys}
+                keyShortcuts={reorder.keyShortcuts}
                 keys={
                   <SceneShortcutKeys
                     config={settings.globalShortcuts}
                     platform={platform}
-                    position={index + 1}
-                    sceneId={entry.id}
+                    position={entry.position}
+                    sceneId={scene.id}
                   />
                 }
-                label={entry.name}
+                label={scene.name}
                 menu={
                   <KebabMenu
-                    items={dialogs.menuItems(entry)}
-                    label={`Actions for ${entry.name}`}
+                    items={dialogs.menuItems(scene)}
+                    label={`Actions for ${scene.name}`}
                     reveal="hover"
                   />
                 }
-                meta={
-                  pending ? (
-                    <SceneSwitchPending />
-                  ) : (
-                    (blocked ??
-                    (!cameraBlocked && !app && dialogs.needsSources(entry)
-                      ? 'Resolve sources'
-                      : sceneCardWords(entry)))
-                  )
-                }
-                selected={activeSavedSceneId === entry.id}
+                meta={entry.meta}
+                selected={entry.onStream}
                 thumb={
                   <SceneThumb
-                    glyph={
-                      <SceneGlyphIcon
-                        className="size-6"
-                        glyph={glyphs.get(entry.id)!}
-                        icons={icons}
-                      />
-                    }
-                    picture={pictureOf(entry.id)}
-                    visual={entry.visual}
+                    glyph={<SceneGlyphIcon className="size-6" glyph={entry.glyph} icons={icons} />}
+                    picture={entry.picture}
+                    visual={scene.visual}
                   />
                 }
-                onKeyDown={moveFromKeyboard}
-                onSelect={() => dialogs.select(entry)}
+                onKeyDown={reorder.onMoveKey(scene.id, index)}
+                onSelect={() => dialogs.select(scene)}
               />
             </div>
           )
@@ -379,7 +250,7 @@ export function ScenesSection({ look = 'default' }: { look?: StudioLook }): Reac
             Open Sources
           </Button>
         }
-        reason={camera.reason}
+        reason={cameraReason}
       />
       <SceneOnStreamFields
         changeScreenReason={

@@ -1,40 +1,41 @@
 import { CheckIcon } from '@/components/icons'
-import { useState, type DragEvent, type KeyboardEvent, type ReactElement } from 'react'
+import type { ReactElement } from 'react'
 
 import { GroupedList, ListRow, ListRowButton } from '@/components/list-row'
 import { PanelSection } from '@/components/panel-section'
 import { KebabMenu } from '@/components/kebab-menu'
 import { SceneGlyphIcon } from '@/components/scene/app-icon'
 import { useSceneDialogs } from '@/components/scene/scene-dialogs'
-import { SceneSwitchPending } from '@/components/scene/scene-switch-status'
+import {
+  SCENES_READ_ONLY_REASON,
+  ScenesLine,
+  useSceneEntries,
+  useSceneReorder,
+  type SceneEntry
+} from '@/components/scene/scene-entries'
 import { SceneShortcutKeys } from '@/components/scene/scene-shortcut-keys'
+import { SceneGalleryReason } from '@/components/studio/scene-card'
+import { LayoutThumb } from '@/components/studio/scenes-gallery'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { DisabledReason } from '@/components/ui/disabled-reason'
-import type { GlobalShortcutsConfig } from '@/lib/backend'
-import { useAppIcons } from '@/hooks/use-app-icons'
 import { useStudioCore } from '@/hooks/use-studio'
+import { layoutPresetOrientation } from '@/lib/capture'
 import { EDIT_SCENE_LABEL } from '@/lib/edit-scene'
-import {
-  MOVE_SCENE_DOWN_ACCELERATOR,
-  MOVE_SCENE_UP_ACCELERATOR,
-  savedSceneBlockedReason,
-  sceneGlyph,
-  sceneMoveKeyStep,
-  sceneShows
-} from '@/lib/scene-list'
-import type { SavedScene } from '@/lib/scene-presets'
-import { shortcutAriaKeys } from '@/lib/platform'
+import type { SceneVisual } from '@/lib/scene-presets'
 import { cn } from '@/lib/utils'
-
-const READ_ONLY_REASON = 'Update Videorc to change your scenes.'
+import { openWorkspaceTab } from '@/lib/workspace-navigation'
 
 /**
- * The Scene page's scene list (plan 231 D2): your scenes in their order, the
- * same list as Studio's. A click puts a scene on stream; the canvas below
- * edits the scene that's on, and it keeps those edits (D11). A layout is a
- * choice inside a scene, made in the Layout section below. "Follow the app
- * in front" lives in Studio's Scenes section, the home of scenes (D8).
+ * The Scene page's scene list (plan 231 D8): the same list as Studio's Scenes
+ * section, the home of scenes, as rows. Every scene in order, each with a
+ * small picture of its layout and screen, the icon of what it shows, its
+ * name, what it shows, its keys and ⋯. A click puts a scene on stream; a drag
+ * or ⌥↑ ⌥↓ moves one, and the position keys move with the places (D5). Rows
+ * and cards read their scenes through `useSceneEntries` and move through
+ * `useSceneReorder`, so the two lists can't drift. The canvas below edits
+ * the scene on stream, which keeps each edit (D11). "Follow the app in
+ * front" lives in Studio's section.
  */
 export function SceneList({
   onEditScene
@@ -42,36 +43,16 @@ export function SceneList({
   /** Plan 215 D4: the page's own Edit scene (the camera, the editor on). */
   onEditScene: () => void
 }): ReactElement {
-  const studio = useStudioCore()
-  const {
-    savedScenes,
-    activeSavedSceneId,
-    savedScenePendingId,
-    savedSceneAppStates,
-    sceneLibraryActions,
-    sceneLibraryError,
-    deviceList,
-    settings,
-    runtimeInfo,
-    sceneEditMode
-  } = studio
+  const { sceneLibraryActions, sceneLibraryError, settings, runtimeInfo, sceneEditMode } =
+    useStudioCore()
   const dialogs = useSceneDialogs()
   const platform = runtimeInfo?.platform
-  const glyphs = new Map(
-    savedScenes.map((entry) => [entry.id, sceneGlyph(entry, deviceList.devices)])
-  )
-  const icons = useAppIcons(
-    [...glyphs.values()].flatMap((glyph) => (glyph.kind === 'app' ? [glyph.bundleId] : []))
-  )
   const readOnly = sceneLibraryActions.readOnly
-
-  const [draggingId, setDraggingId] = useState<string | null>(null)
-  const [dropIndex, setDropIndex] = useState<number | null>(null)
-  const draggingIndex = savedScenes.findIndex((entry) => entry.id === draggingId)
-  const endDrag = (): void => {
-    setDraggingId(null)
-    setDropIndex(null)
-  }
+  const { entries, icons, cameraReason } = useSceneEntries(dialogs.needsSources)
+  const reorder = useSceneReorder({
+    axis: 'vertical',
+    focusSelector: '[data-slot="list-row-button"]'
+  })
 
   return (
     <PanelSection
@@ -86,16 +67,17 @@ export function SceneList({
             className={cn(sceneEditMode && 'invisible')}
             data-testid="scene-edit"
             disabled={sceneEditMode}
-            variant="outline"
+            variant="ghost"
             onClick={onEditScene}
           >
             {EDIT_SCENE_LABEL}
           </Button>
           {/* Plan 231 D6: the same Add scene… as Studio's Scenes section. */}
-          <DisabledReason reason={readOnly ? READ_ONLY_REASON : null}>
+          <DisabledReason reason={readOnly ? SCENES_READ_ONLY_REASON : null}>
             <Button
               data-testid="scene-new"
               disabled={readOnly}
+              variant="outline"
               onClick={() => dialogs.open({ kind: 'add' })}
             >
               Add scene…
@@ -104,7 +86,7 @@ export function SceneList({
         </>
       }
       data-videorc-scene-list=""
-      description="Click a scene to put it on stream. Drag your scenes to change their order."
+      description={<ScenesLine config={settings.globalShortcuts} platform={platform} />}
       title="Scenes"
     >
       {sceneLibraryError ? (
@@ -113,113 +95,76 @@ export function SceneList({
         </p>
       ) : null}
       {/* Plan 231 D2: a scene is always on stream, and every scene is in this list. */}
-      <GroupedList aria-label="Scenes">
-        {savedScenes.map((entry, index) => {
-          const blocked = savedSceneBlockedReason({
-            scene: entry,
-            appState: savedSceneAppStates[entry.id],
-            devices: deviceList.devices
-          })
-          return (
-            <SavedSceneRow
-              key={entry.id}
-              active={activeSavedSceneId === entry.id}
-              blocked={blocked}
-              dropEdge={
-                dropIndex === index && draggingIndex >= 0 && draggingIndex !== index
-                  ? draggingIndex < index
-                    ? 'bottom'
-                    : 'top'
-                  : null
+      <div ref={reorder.containerRef}>
+        <GroupedList aria-label="Scenes">
+          {entries.map((entry, index) => (
+            <SceneRow
+              key={entry.scene.id}
+              dragProps={reorder.dragProps(entry.scene.id, index)}
+              dragging={reorder.dragging(entry.scene.id)}
+              dropEdge={reorder.dropEdge(index)}
+              entry={entry}
+              icon={<SceneGlyphIcon glyph={entry.glyph} icons={icons} />}
+              keyShortcuts={reorder.keyShortcuts}
+              keys={
+                <SceneShortcutKeys
+                  config={settings.globalShortcuts}
+                  platform={platform}
+                  position={entry.position}
+                  sceneId={entry.scene.id}
+                />
               }
-              dragging={draggingId === entry.id}
-              icon={<SceneGlyphIcon glyph={glyphs.get(entry.id)!} icons={icons} />}
-              menu={dialogs.menuItems(entry)}
-              needsSources={!entry.visual.sources.app && dialogs.needsSources(entry)}
-              switching={savedScenePendingId === entry.id}
-              platform={platform}
-              readOnly={readOnly}
-              scene={entry}
-              shortcutConfig={settings.globalShortcuts}
-              position={index + 1}
-              onDragEnd={endDrag}
-              onDragEnter={() => {
-                if (draggingId && draggingId !== entry.id) setDropIndex(index)
-              }}
-              onDragStart={() => setDraggingId(entry.id)}
-              onDrop={() => {
-                if (draggingId && draggingId !== entry.id)
-                  sceneLibraryActions.move(draggingId, index)
-                endDrag()
-              }}
-              onMove={(step) => sceneLibraryActions.move(entry.id, index + step)}
-              onSelect={() => dialogs.select(entry)}
+              menu={dialogs.menuItems(entry.scene)}
+              onMoveKey={reorder.onMoveKey(entry.scene.id, index)}
+              onSelect={() => dialogs.select(entry.scene)}
             />
-          )
-        })}
-      </GroupedList>
+          ))}
+        </GroupedList>
+      </div>
+      {/* Why some scenes can't be chosen, once, under the list (D9), as in Studio. */}
+      <SceneGalleryReason
+        action={
+          <Button size="xs" variant="ghost" onClick={() => openWorkspaceTab('sources')}>
+            Open Sources
+          </Button>
+        }
+        reason={cameraReason}
+      />
       {dialogs.element}
     </PanelSection>
   )
 }
 
 /**
- * One saved scene: its app's icon (or a glyph), its name, what it shows,
- * "Follows" while it follows its app, its key, and ⋯. The name is the row's
- * button, stretched over it; ⌥↑ and ⌥↓ move a focused row, and a drag moves
- * it with the pointer.
+ * One scene: a small picture of its layout with its still in the screen area
+ * (D7), the icon of what it shows, its name, what it shows (or why it can't
+ * go on), "Follows" while it follows its app, its keys, the check while it's
+ * on stream, and ⋯. The name is the row's button, stretched over it.
  */
-function SavedSceneRow({
-  scene,
-  active,
-  blocked,
-  needsSources,
-  switching,
-  readOnly,
-  shortcutConfig,
-  position,
-  platform,
+function SceneRow({
+  entry,
   icon,
+  keys,
   menu,
+  keyShortcuts,
   dragging,
   dropEdge,
+  dragProps,
   onSelect,
-  onMove,
-  onDragStart,
-  onDragEnter,
-  onDragEnd,
-  onDrop
+  onMoveKey
 }: {
-  scene: SavedScene
-  active: boolean
-  /** Why it can't go on stream now ("Figma isn't open"), or null. */
-  blocked: string | null
-  needsSources: boolean
-  /** This scene is going on stream. Another row's click takes it over (issue #1275). */
-  switching: boolean
-  readOnly: boolean
-  shortcutConfig: GlobalShortcutsConfig | undefined
-  position: number
-  platform: string | undefined
+  entry: SceneEntry
   icon: ReactElement
+  keys: ReactElement
   menu: ReturnType<ReturnType<typeof useSceneDialogs>['menuItems']>
+  keyShortcuts: string | undefined
   dragging: boolean
-  dropEdge: 'top' | 'bottom' | null
+  dropEdge: ReturnType<ReturnType<typeof useSceneReorder>['dropEdge']>
+  dragProps: ReturnType<ReturnType<typeof useSceneReorder>['dragProps']>
   onSelect: () => void
-  onMove: (step: -1 | 1) => void
-  onDragStart: () => void
-  onDragEnter: () => void
-  onDragEnd: () => void
-  onDrop: () => void
+  onMoveKey: ReturnType<ReturnType<typeof useSceneReorder>['onMoveKey']>
 }): ReactElement {
-  const app = scene.visual.sources.app
-  const moveFromKeyboard = (event: KeyboardEvent<HTMLButtonElement>): void => {
-    if (readOnly) return
-    const step = sceneMoveKeyStep(event)
-    if (step === null) return
-    event.preventDefault()
-    onMove(step)
-  }
+  const { scene, disabled, onStream } = entry
   return (
     <ListRow
       className={cn(
@@ -227,59 +172,34 @@ function SavedSceneRow({
         dragging && 'opacity-40',
         dropEdge &&
           'before:absolute before:inset-x-0 before:z-10 before:h-0.5 before:bg-ring before:content-[""]',
-        dropEdge === 'top' && 'before:top-0',
-        dropEdge === 'bottom' && 'before:bottom-0'
+        dropEdge === 'before' && 'before:top-0',
+        dropEdge === 'after' && 'before:bottom-0'
       )}
-      context={
-        switching ? (
-          <SceneSwitchPending />
-        ) : (
-          (blocked ?? (needsSources ? 'Resolve sources' : sceneShows(scene)))
-        )
-      }
+      context={entry.meta}
       data-saved-scene={scene.id}
-      draggable={!readOnly}
-      icon={icon}
-      interactive={!blocked}
-      selected={active}
+      icon={<span className={cn('flex', disabled && 'opacity-50')}>{icon}</span>}
+      interactive={!disabled}
+      leading={<SceneRowThumb disabled={disabled} picture={entry.picture} visual={scene.visual} />}
+      selected={onStream}
       title={
-        <DisabledReason reason={blocked}>
+        <DisabledReason reason={disabled ? entry.disabledReason : null}>
           <ListRowButton
-            aria-current={active || undefined}
-            aria-keyshortcuts={
-              readOnly
-                ? undefined
-                : `${shortcutAriaKeys(MOVE_SCENE_UP_ACCELERATOR, platform)} ${shortcutAriaKeys(MOVE_SCENE_DOWN_ACCELERATOR, platform)}`
-            }
+            aria-current={onStream || undefined}
+            aria-keyshortcuts={keyShortcuts}
             className="disabled:text-muted-foreground"
-            disabled={blocked !== null || switching}
+            disabled={disabled}
             onClick={onSelect}
-            onKeyDown={moveFromKeyboard}
+            onKeyDown={onMoveKey}
           >
             {scene.name}
           </ListRowButton>
         </DisabledReason>
       }
-      onDragEnd={onDragEnd}
-      onDragEnter={onDragEnter}
-      onDragOver={(event: DragEvent<HTMLDivElement>) => event.preventDefault()}
-      onDragStart={(event: DragEvent<HTMLDivElement>) => {
-        event.dataTransfer.effectAllowed = 'move'
-        onDragStart()
-      }}
-      onDrop={(event: DragEvent<HTMLDivElement>) => {
-        event.preventDefault()
-        onDrop()
-      }}
+      {...dragProps}
     >
-      {app?.follows ? <Badge variant="outline">Follows</Badge> : null}
-      <SceneShortcutKeys
-        sceneId={scene.id}
-        position={position}
-        config={shortcutConfig}
-        platform={platform}
-      />
-      {active ? <CheckIcon aria-label="On stream" className="size-4" weight="bold" /> : null}
+      {scene.visual.sources.app?.follows ? <Badge variant="outline">Follows</Badge> : null}
+      {keys}
+      {onStream ? <CheckIcon aria-label="On stream" className="size-4" weight="bold" /> : null}
       <KebabMenu
         className="relative z-10"
         items={menu}
@@ -287,5 +207,42 @@ function SavedSceneRow({
         reveal="hover"
       />
     </ListRow>
+  )
+}
+
+/**
+ * The row's picture (D7): the scene's layout for the studio's orientation at
+ * icon size, with its still in the screen area, the same picture as its card
+ * in Studio. A 9:16 layout stands upright in the same 16:9 box, so the names
+ * line up.
+ */
+function SceneRowThumb({
+  visual,
+  picture,
+  disabled
+}: {
+  visual: SceneVisual
+  picture: string | undefined
+  disabled: boolean
+}): ReactElement {
+  const { layoutPreset, verticalScreenFraming } = visual.layout
+  const vertical = layoutPresetOrientation(layoutPreset) === 'vertical'
+  return (
+    <span
+      aria-hidden="true"
+      className={cn(
+        'flex aspect-video h-6 shrink-0 items-center justify-center',
+        disabled && 'opacity-50'
+      )}
+      data-slot="scene-row-thumb"
+    >
+      <LayoutThumb
+        className={vertical ? 'h-full w-auto' : undefined}
+        compact
+        framing={verticalScreenFraming}
+        picture={picture}
+        preset={layoutPreset}
+      />
+    </span>
   )
 }

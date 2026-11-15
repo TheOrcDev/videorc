@@ -221,6 +221,8 @@ const CAPITALIZED_NAMES = new Set([
   'Studio',
   'Sources',
   'Scene',
+  // Plan 231 D8: Studio's Scenes section, the home of scenes ("Open Scenes").
+  'Scenes',
   'Assets',
   // The sidebar group; its page is Destinations (plan 235 D6).
   'Livestream',

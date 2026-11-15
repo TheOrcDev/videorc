@@ -1647,3 +1647,142 @@ choose `[data-scene-layout="<preset>"]`. Hide screen is a 28 px button whose
 text is "Hide screen" plus its key chip while there is room. The Scene page's
 rows (S8) don't show pictures yet; `scenePictureTarget` and the hook are
 ready for them.
+
+### S8. Sources, the Scene page and the words (2026-11-15)
+
+Done. Renderer and docs only: no backend, contract or smoke script change.
+
+**Sources → Screen** (`components/sources/video-sources.tsx`)
+
+- Under the picker and its facts, one line names the scene the screen belongs
+  to, from `savedScenes` and `activeSavedSceneId`, so it follows every switch
+  (`screenSceneLine`): "Shown by “Figma”, the scene on stream. Each scene keeps
+  its own screen." A scene whose layout draws no screen reads "“Camera only”,
+  the scene on stream, shows no screen. Each scene keeps its own screen." (A
+  first "Kept by “Camera only”…" was wrong: under D18 the picker shows the
+  capture left running, which isn't that scene's screen.) Names are in curly
+  quotes, as in the app's other scene sentences.
+- **Open Scenes** (an `xs` ghost button at the line's end, the pattern of
+  "Open Sources" under the cards) opens Studio scrolled to its Scenes
+  section: `openScenes()` in `lib/scene-add-request.ts`, which now carries
+  both requests (`takeScenesRequest()` → `'add' | 'show'`,
+  `SCENES_REQUEST_EVENT`; `ADD_SCENE_EVENT` and `takeAddSceneRequest` are
+  gone). The copy guard allows "Scenes" as the section's name, and
+  `docs/ui-copy.md` lists it under Casing.
+- The picker is unchanged. Checked: its pick is
+  `switchSourceDeviceLive('capture', buildCaptureSources(…))`, the S2 Screen
+  pick that writes the scene on stream's `shows` (the provider test "a Screen
+  pick edits the scene on stream", and a new connected test that the Sources
+  picker calls it). The permission alerts, the lock, the facts and the switch
+  status are as they were.
+
+**The Scene page list** (`components/scene/scene-list.tsx`)
+
+- One shared module, `components/scene/scene-entries.tsx`, for both lists:
+  - `useSceneEntries(needsSources)`: per scene its position, on stream,
+    pending, disabled with its own reason or the camera's (D9), the meta
+    words (the pending mark, the blocked reason, "Resolve sources", else
+    `sceneCardWords`), the glyph and its still; plus the app icons and the
+    one camera line. It calls `useScenePictures` once per list.
+  - `useSceneReorder({ axis, focusSelector })`: drag, ⌥← ⌥→ or ⌥↑ ⌥↓, the
+    `aria-keyshortcuts`, read-only, and the focus kept after a keyboard move.
+  - `ScenesLine` (the header's keys line) and `SCENES_READ_ONLY_REASON`.
+  - Studio's `ScenesSection` now reads its cards through them too (its own
+    copy of that code is gone; its tests pass unchanged).
+- Rows: a 43 × 24 picture (a compact `LayoutThumb` with the still, in
+  `ListRow`'s `leading`; a 9:16 layout stands upright in the same box), the
+  icon, the name, Studio's words ("Front window", "Built-in Retina Display",
+  "No screen"), Follows, the key chips, the check and ⋯. Rows that need a
+  camera that's off turn off, with the one line and Open Sources under the
+  list (new on this page). ⌥↑ ⌥↓ keep the focus now, as the cards do. The
+  header reads like Studio's: the keys line, then a ghost Edit scene and an
+  outline Add scene… (it was the chrome primary).
+- No Layouts group, no Unsaved row (S2), Add scene… in the header (S7),
+  Follow in Studio (S6); the canvas editor and the Hide screen section stay.
+- `useScenePictures` is never called twice in one window: the shell renders
+  one page at a time (`app-shell.tsx`), so Studio's section and the Scene page
+  are never mounted together.
+- `sceneShows` (`lib/scene-list.ts`) is deleted; the rows use
+  `sceneCardWords`.
+
+**The words**
+
+- `CONTEXT.md`: Scene (what it shows and how it's arranged, both layouts, one
+  always on stream, its home), Layout (a choice inside a scene), Default
+  scene, Scene key (positions and a custom key), Add scene… and Change
+  screen…; Scene for an app no longer says New scene…; Follow, Hide screen and
+  Vertical stream say where they live now. "saved scene" and "unsaved scene"
+  are in Scene's _Avoid_.
+- `docs/ui-copy.md`: the ellipsis examples (Add scene…, Change screen…, Set
+  key…; not Duplicate, Open Scenes, "Add 3 scenes"), a Scenes block with the
+  strings (the keys line, Add scene…'s button, Change screen…, "Scene 1 ·
+  Figma", "Another app uses ⌃⌥3", the Shown by line, the HUD switch, the
+  refusals) and what never to write, Hide screen's own bullet, and the HUD as
+  the one exception in Toasts.
+- The design skill: the D20 exception on the "no success toast" owner call,
+  a D8 owner call, the Audio call's Sources mirror (Camera only), "Where
+  things live" (Devices, Scenes, Hide screen), the confirm example ("Delete
+  scene?") and the toast discipline line.
+- Copy: Assets → Backgrounds reads "A background this scene kept" and "Other
+  scenes keep their copy."; v1's unused error "Some invalid scenes couldn't
+  be loaded."; comments that put Hide screen on "Studio's Screen row" now say
+  the scene's Screen row in Studio's Scenes section.
+
+**Numbers:** `pnpm typecheck`, `pnpm lint` (with the em dash gate), Prettier on
+the 21 touched files and `git diff --check` green. Full desktop unit run
+(`--maxWorkers=2 --minWorkers=1`): 706 files, 8,250 passed, 1 skipped, in
+355 s, no flake seen. New or changed tests: `video-sources.test.ts` (the line and its two
+forms, Open Scenes, the lock kept, and wired to the studio: the words follow
+the scene on stream as it changes, the pick goes through the Screen pick, Open
+Scenes opens Studio), `scene-list.test.ts` (Studio's words, the same stills
+and keys as the cards, Hide screen and a session freezing them, the camera
+line with Open Sources, the focus kept after ⌥↑), `scene-presets.test.ts`
+(Open Scenes scrolls the section into view, at mount or while mounted, once
+per request), `lib/scene-list.test.ts` (`sceneShows` gone).
+
+|                         |       raw |    gzip |
+| ----------------------- | --------: | ------: |
+| Before S8 (`c88a7497d`) | 2,378,584 | 489,165 |
+| After S8                | 2,378,551 | 489,148 |
+| Cap                     | 2,365,000 | 487,000 |
+
+Nothing new is eager (the entry is 33 bytes smaller: one lazy chunk fewer in
+its preload map, `scene-card` now rides the `scene-shortcut-keys` chunk with
+`scene-entries`, 61.82 to 70.03 kB). The Scenes chunk fell from 39.71 to
+32.22 kB, the Scene page's from 210.10 to 209.20 kB, Sources' grew from 45.74
+to 47.05 kB, the request module from 0.49 to 0.56 kB. The overage is still
+S2's, the owner's call.
+
+**Screenshots** (light and dark; the dev app on an isolated profile, Add
+scene… with T3 Code (Nightly), Google Chrome and Discord moved to the front, T3
+Code on stream, Follow off) in `/Users/orcdev/projects/plan-231-run/S8/shots/`:
+`videorc-ui-sources-{1280x860,960x660}-{theme}` (the line and Open Scenes),
+`-sources-camera-only-` (the no-screen line), `-scene-page-{size}-{theme}` (the
+rows with their pictures), `-scene-page-focused-` (a focused row and its ⋯),
+`-scene-page-9x16-`, `-open-scenes-` (Studio after Open Scenes, the section at
+the top) and `-studio-scenes-` (the section after the refactor, as in S6b).
+Capture script: `S8/scratch/capture-s8.mjs` (not committed). What the first
+shots showed and was fixed: Open Scenes wrapped onto its own indented line in
+the two-column Sources (it now keeps the line's end), the facts line sat under
+the scene line (back under the picker), and the "Kept by" words.
+
+**Deviations**
+
+- "Open Scenes" opens Studio at its Scenes section (the brief's optional
+  link); "Scenes" joined the copy guard's names for it.
+- The Scene page's header buttons now match Studio's (ghost Edit scene,
+  outline Add scene…).
+- In a 9:16 studio the rows' pictures are small upright diagrams (14 × 24):
+  they show the layout more than the screen. A taller row would cost the list
+  its density; the cards in Studio are the place for big pictures.
+- A few words outside the brief changed with "saved scene": Assets →
+  Backgrounds' two lines and v1's unused error.
+
+**What S9 must know:** `lib/scene-add-request.ts` exports `openAddScene`,
+`openScenes`, `takeScenesRequest` and `SCENES_REQUEST_EVENT`. The Scene page
+keeps its test ids (`scene-new`, `scene-edit`, `[data-saved-scene]` rows with
+`[data-slot="list-row-button"]`); the row picture is
+`[data-slot="scene-row-thumb"]` and Sources' line `[data-slot="screen-scene"]`.
+No script in `scripts/` reads the Scene page's row words, the old event or the
+old description. The design skill and `docs/ui-copy.md` now say remotes,
+agents and ⌘K switch scenes only; S9's code is what makes that true.

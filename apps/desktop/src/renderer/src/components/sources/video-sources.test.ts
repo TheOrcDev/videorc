@@ -1,10 +1,32 @@
-import { createElement } from 'react'
+// @vitest-environment happy-dom
+import { act, createElement } from 'react'
+import { createRoot, type Root } from 'react-dom/client'
 import { renderToStaticMarkup } from 'react-dom/server'
-import { describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { TooltipProvider } from '@/components/ui/tooltip'
 import type { Device } from '@/lib/backend'
-import { VideoSourcesView, type VideoSourcesViewProps } from './video-sources'
+import { defaultCaptureConfig } from '@/lib/capture'
+import { normalizeSceneVisual, type SavedScene } from '@/lib/scene-presets'
+import {
+  screenSceneLine,
+  VideoSources,
+  VideoSourcesView,
+  type VideoSourcesViewProps
+} from './video-sources'
+
+const mocked = vi.hoisted(() => ({ core: {} as Record<string, unknown> }))
+vi.mock('@/hooks/use-studio', () => ({
+  useStudioCore: () => mocked.core,
+  useStudioPreview: () => ({
+    previewCameraStatus: { state: 'idle' },
+    previewCameraLowFrameRate: false,
+    previewScreenStatus: { state: 'live', width: 1920, height: 1080 }
+  }),
+  useStudioDiagnostics: () => ({ diagnosticStats: null })
+}))
+const openWorkspaceTab = vi.hoisted(() => vi.fn())
+vi.mock('@/lib/workspace-navigation', () => ({ openWorkspaceTab }))
 
 // Plan 173: the Video column, Screen and Camera as SourceItems.
 
@@ -174,5 +196,174 @@ describe('Sources Video column (plan 173)', () => {
     })
     const onToggle = on.match(/<span[^>]*data-videorc-camera-low-light-toggle[^>]*>/)?.[0]
     expect(onToggle).toContain('aria-checked="true"')
+  })
+})
+
+describe('Sources → Screen names the scene it belongs to (plan 231 D2, D8)', () => {
+  const scene = { name: 'Figma', showsScreen: true }
+
+  it('says the screen is the scene on stream’s, and that each scene keeps its own', () => {
+    expect(screenSceneLine(scene)).toBe(
+      'Shown by “Figma”, the scene on stream. Each scene keeps its own screen.'
+    )
+    // A layout that draws no screen: the capture running under it (D18) isn't its screen.
+    expect(screenSceneLine({ name: 'Camera only', showsScreen: false })).toBe(
+      '“Camera only”, the scene on stream, shows no screen. Each scene keeps its own screen.'
+    )
+  })
+
+  it('puts the line under the picker, with Open Scenes, and keeps the facts', () => {
+    const markup = render({
+      screen: {
+        devices: screens,
+        value: 'screen:1',
+        selectedName: 'Display 1',
+        allowNone: true,
+        disabled: false,
+        status: { label: 'Receiving', tone: 'good' },
+        facts: '2560 × 1664',
+        scene,
+        onOpenScenes: noop,
+        onChange: noop
+      }
+    })
+    const line = markup.match(/<p[^>]*data-slot="screen-scene"[^>]*>(.*?)<\/p>/)?.[1] ?? ''
+    expect(line).toContain(
+      'Shown by “Figma”, the scene on stream. Each scene keeps its own screen.'
+    )
+    expect(line).toMatch(/<button[^>]*>Open Scenes<\/button>/)
+    expect(markup.indexOf('data-slot="screen-scene"')).toBeGreaterThan(
+      markup.indexOf('Screen / window')
+    )
+    expect(markup).toContain('>2560 × 1664<')
+    // Before the library is read, no line.
+    expect(render()).not.toContain('data-slot="screen-scene"')
+  })
+
+  it('keeps the permission lock: the picker stays locked, the line still says whose it is', () => {
+    const markup = render({
+      screen: {
+        devices: screens.map((device) => ({ ...device, status: 'permission-required' as const })),
+        value: undefined,
+        allowNone: true,
+        disabled: true,
+        status: null,
+        facts: null,
+        scene,
+        onChange: noop
+      }
+    })
+    expect(markup).toMatch(
+      /data-disabled="true"[^>]*data-slot="source-item"[^>]*data-source="screen"/
+    )
+    expect(markup).toContain('Shown by “Figma”')
+  })
+})
+
+describe('Sources → Screen, wired to the studio (plan 231 D2)', () => {
+  let root: Root
+  let container: HTMLDivElement
+  const listed = (id: string, name: string, layoutPreset: 'screen-camera' | 'camera-only') =>
+    ({
+      id,
+      name,
+      createdAt: '2026-11-15',
+      updatedAt: '2026-11-15',
+      visual: normalizeSceneVisual({
+        layout: { ...defaultCaptureConfig.layout, layoutPreset },
+        sources: { screenId: 'screen:screencapturekit:1', screenName: 'Display 1' },
+        background: null
+      })
+    }) satisfies SavedScene
+  const devices: Device[] = [
+    { id: 'screen:screencapturekit:1', name: 'Display 1', kind: 'screen', status: 'available' },
+    { id: 'screen:screencapturekit:2', name: 'Display 2', kind: 'screen', status: 'available' }
+  ]
+
+  beforeEach(() => {
+    vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
+    container = document.createElement('div')
+    document.body.append(container)
+    root = createRoot(container)
+    openWorkspaceTab.mockClear()
+    mocked.core = {
+      deviceList: { devices },
+      captureConfig: {
+        ...defaultCaptureConfig,
+        sources: {
+          ...defaultCaptureConfig.sources,
+          screenId: 'screen:screencapturekit:1',
+          screenName: 'Display 1'
+        }
+      },
+      setCaptureConfig: vi.fn(),
+      isSessionActive: false,
+      layoutSwitchPending: null,
+      sourceDeviceSwitchPending: null,
+      switchSourceDeviceLive: vi.fn(async () => undefined),
+      sourceSwitchReason: () => null,
+      sourceSelectionState: { pending: null, checking: false, error: null, snapshot: null },
+      retrySourceStatus: vi.fn(),
+      allowCaptureNone: true,
+      runtimeInfo: { platform: 'darwin' },
+      mediaAccess: null,
+      wsStatus: 'connected',
+      requestCameraLowLight: vi.fn(),
+      savedScenes: [
+        listed('figma', 'Figma', 'screen-camera'),
+        listed('break', 'Break', 'camera-only')
+      ],
+      activeSavedSceneId: 'figma'
+    }
+  })
+  afterEach(async () => {
+    await act(async () => root.unmount())
+    container.remove()
+    vi.unstubAllGlobals()
+  })
+  const show = async (): Promise<void> => {
+    await act(async () =>
+      root.render(createElement(TooltipProvider, null, createElement(VideoSources)))
+    )
+  }
+  const line = () => container.querySelector('[data-slot="screen-scene"]')?.textContent
+
+  it('follows the scene on stream as it changes', async () => {
+    await show()
+    expect(line()).toContain('Shown by “Figma”, the scene on stream.')
+    mocked.core.activeSavedSceneId = 'break'
+    await show()
+    expect(line()).toContain('“Break”, the scene on stream, shows no screen.')
+    mocked.core.savedScenes = [
+      ...(mocked.core.savedScenes as SavedScene[]),
+      listed('t3', 'T3 Code', 'screen-camera')
+    ]
+    mocked.core.activeSavedSceneId = 't3'
+    await show()
+    expect(line()).toContain('Shown by “T3 Code”, the scene on stream.')
+  })
+
+  it('changes that scene’s screen through the Screen pick, and opens Studio’s Scenes', async () => {
+    await show()
+    const trigger = container.querySelector<HTMLButtonElement>(
+      '[data-source="screen"] button[aria-haspopup]'
+    )!
+    await act(async () => trigger.click())
+    const option = [...document.querySelectorAll<HTMLElement>('[role="option"]')].find((entry) =>
+      entry.textContent?.includes('Display 2')
+    )!
+    expect(option).toBeTruthy()
+    await act(async () => option.click())
+    // D2: the pick S2 made edit the scene on stream (switchSourceDeviceLive).
+    expect(mocked.core.switchSourceDeviceLive).toHaveBeenCalledExactlyOnceWith(
+      'capture',
+      expect.objectContaining({ screenId: 'screen:screencapturekit:2' })
+    )
+
+    const open = [...container.querySelectorAll('button')].find(
+      (button) => button.textContent === 'Open Scenes'
+    )!
+    await act(async () => open.click())
+    expect(openWorkspaceTab).toHaveBeenCalledExactlyOnceWith('studio')
   })
 })

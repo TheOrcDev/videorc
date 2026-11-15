@@ -188,7 +188,22 @@ for the owner, not a design choice.
 - **Toasts are never tinted** (2026-09-29). A toast's type colours its icon
   only, never the panel, its rim or its text.
 - **No success toast for a scene, layout or source change** (2026-07-16):
-  the stage is the confirmation.
+  the stage is the confirmation. One exception, the owner's call on
+  2026-11-15 (plan 231 D20): the off-stream key HUD. When a key, the Stream
+  Deck or the phone switches the scene while no Videorc window is in front,
+  a small chip shows the scene's icon, name and key for 900 ms at the top
+  centre of the display under the pointer, left out of every capture (it
+  doesn't show when that can't be confirmed). With one monitor and Figma in
+  front no stage is visible, so nothing else confirms the switch. Settings →
+  Shortcuts → "Show the scene's name when a key switches it" (on). Nothing
+  else about a scene, layout or source toasts or chips a success.
+- **Studio's Scenes section is the home of scenes** (2026-11-15, plan 231
+  D8; it was the Scene page from plan 210). Every scene shows its own
+  screen, so a scene lives where the streamer switches it: the cards with
+  their pictures, keys and ⋯, Add scene…, Follow the app in front, and the
+  scene on stream's Screen (Change screen…, Hide screen), Layout and Framing.
+  The Scene page mirrors the same list as rows and keeps the canvas. New
+  scenes go at the end (D5), so making one never moves a key in use.
 - **The platform mark closes a chat or Activity row on the far right**, at
   20 px, with YouTube's official icon (plan 165).
 - **The Stream Manager's live chip reads ON AIR** (2026-09-24), the
@@ -202,8 +217,9 @@ for the owner, not a design choice.
 - **The Studio has one Audio section** (2026-10-26, plan 201 D1).
   Microphone and System audio share one audiocn Mixer scale, each with its
   level and Gain. The System audio switch lives here; the Sources mirror
-  keeps Screen and Camera. This replaces the 2026-10-02 call, "Studio keeps
-  the Microphone section, no mixer" (plans 092 and 093).
+  keeps Camera (its Screen row moved to the scene, plan 231 D8). This
+  replaces the 2026-10-02 call, "Studio keeps the Microphone section, no
+  mixer" (plans 092 and 093).
 - **The Studio inspector's groups name themselves** (2026-11-14, plan 235
   D3 and D4; the owner: "leave the takeover title, remove everything else").
   Session, Audio, Sources and the on-air Chat show no title (each keeps its
@@ -535,27 +551,43 @@ One home per control (`docs/ux-ia-refactor-plan.md`). Anywhere else a
 control appears, it is a mirror that edits the same state or a summary that
 links home.
 
-- **Devices**: Sources is the home of every screen, window, camera,
-  microphone and system audio source, with its gain and level. The Studio
-  inspector mirrors the few needed mid-session: the Sources group (Screen,
-  Camera, with the Open Sources cog) and the Audio group: Microphone (picker,
-  level, Gain, mute and its hotkey) and System audio (switch, level, Gain),
-  on one audiocn Mixer scale (plan 201 D1).
+- **Devices**: Sources is the home of every camera, microphone and system
+  audio source, with its gain and level: the camera there is the camera of
+  every scene (plan 231 D9; a scene decides only whether, where and in what
+  shape it shows). The screen belongs to the scene (D2): Sources → Screen is
+  a mirror that changes the screen of the scene on stream and says so
+  ("Shown by “Figma”, the scene on stream. Each scene keeps its own
+  screen.", with Open Scenes). The Studio inspector mirrors the few devices
+  needed mid-session: the Sources group (Camera, with the Open Sources cog)
+  and the Audio group: Microphone (picker, level, Gain, mute and its hotkey)
+  and System audio (switch, level, Gain), on one audiocn Mixer scale (plan
+  201 D1).
 - **Takeovers**: Assets → Takeovers manages them (import, rename, reorder,
   delete). Studio's Takeover section puts one on stream and takes it off.
-- **Scenes**: the Scene page is home (plan 210): its Scene list (your saved
-  scenes, then Layouts) with "New scene…" and the "Follow the app in front"
-  switch in its header, each row's ⋯ menu (Set key…, Change app…, Stop
-  following, Save as new scene…), and the canvas that edits the scene on
-  stream. Studio's Scenes gallery mirrors the list to switch between them;
-  keys, the Deck, the phone and agents switch the same saved scenes.
+- **Scenes**: Studio's Scenes section is home (plan 231 D8, owner call
+  2026-11-15). Its header holds Edit scene and Add scene…, with the 16:9 /
+  9:16 toggle and "Follow the app in front" (macOS) on the row under it.
+  Then every scene as a card (`SceneCard`, `MediaCard`'s look) with its
+  picture, icon, name, words, key chips and ⋯ (Rename…, Change screen…, Set
+  key…, Follow the app or Stop following, Save audio to scene, Duplicate,
+  Delete), dragged or moved with ⌥← ⌥→. Under the cards, the scene on
+  stream's own fields: Screen (Change screen…, Hide screen), Layout, Framing
+  and, with a vertical stream armed, its 9:16 layout. The Scene page mirrors
+  the same list as `ListRow`s (a small picture, the icon, the name, its
+  words, Follows, the keys, ⋯; dragged or moved with ⌥↑ ⌥↓) with the same
+  Add scene…, and keeps the canvas editor (placement, camera look,
+  background, banners) and the Hide screen settings. Both lists read each
+  scene through one hook (`useSceneEntries`) and move through one
+  (`useSceneReorder`, `components/scene/scene-entries.tsx`), so they can't
+  drift. Keys, the Deck, the phone, ⌘K and agents switch the same scenes;
+  nothing switches to a layout.
 - **Hide screen**: the Scene page's Hide screen section is home (the key,
   the password-manager switch and list). The control itself sits where the
-  streamer is: Studio's Screen row in Sources (never the transport area),
-  the Stream Manager status bar, ⌘K, `/hide` and `/show`, the Deck, the
-  phone and MCP's `hide_screen`. Agents and Sidekick hide, never show. While
-  hidden, the Screen row and the Stream Manager show a "Screen hidden" chip
-  and nothing toasts.
+  streamer is: the scene's Screen row in Studio's Scenes section (plan 231
+  D8; never the transport area), the Stream Manager status bar, ⌘K, `/hide`
+  and `/show`, the Deck, the phone and MCP's `hide_screen`. Agents and
+  Sidekick hide, never show. While hidden, the Screen row and the Stream
+  Manager show a "Screen hidden" chip and nothing toasts.
 - **The local file**: Output ("Where recordings go", quality). Recordings
   themselves live in Library.
 - **Avatar** (plan 239, owner 2026-11-15): the Avatar page (Setup, ⌘6;
@@ -620,9 +652,9 @@ Every destructive action either asks first or can be undone (plan 174
 S0.3).
 
 - **Confirm** with `ConfirmDialog`, the one recipe over `AlertDialog`:
-  - the title is "Verb object?": "Delete saved scene?";
-  - one sentence names exactly what is lost: "Only the saved snapshot is
-    deleted. Your current scene and recording continue.";
+  - the title is "Verb object?": "Delete scene?";
+  - one sentence names exactly what is lost, and what happens instead:
+    "“Figma” and its key are deleted. “T3 Code” goes on stream.";
   - the safe answer ("Cancel", or "Keep …") is a ghost button with focus on
     open, and Escape is the same answer;
   - the destructive button reads verb + object: "Delete scene". A
@@ -1022,8 +1054,9 @@ confirming a routine interaction the user just watched succeed. The copy
 
 - **Never toast success for scene, layout, or source changes.** The
   stage/preview is the confirmation (owner call, 2026-07-16: "no green
-  popups on every small thing"). This includes live layout applies, preset
-  clicks, and source device switches.
+  popups on every small thing"). This includes live layout applies, scene
+  clicks, and source device switches. The off-stream key HUD (plan 231 D20)
+  is the one exception, and it is not a toast ([Owner calls](#owner-calls)).
 - **Type by meaning**, and the type colours the icon only (owner call):
   - error: it failed and needs you;
   - warning: it can't happen now, or it is degraded. A refusal ("Renaming takeovers

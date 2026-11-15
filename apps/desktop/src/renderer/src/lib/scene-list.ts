@@ -1,6 +1,5 @@
 import type { Device } from './backend'
 import { layoutPresetNeedsScreen } from './capture'
-import { layoutPresetLabel } from './layout-labels'
 import { appWindowFailureCopy } from './scene-apps'
 import {
   sceneSourceProblems,
@@ -12,10 +11,10 @@ import {
 import type { SceneAppState } from './scene-window-resolution'
 import type { Scene } from './scenes'
 
-// Plan 231 D2: the Scene page leads with one list, the scenes in library
-// order (a new scene goes at the end, a drag or ⌥↑ ⌥↓ moves one). A scene is
-// always on stream. Studio's gallery, Next scene and Previous scene follow
-// the same order.
+// Plan 231 D2, D8: one list of scenes, in library order (a new scene goes at
+// the end, a drag or ⌥← ⌥→ on a card, ⌥↑ ⌥↓ on a row, moves one). A scene is
+// always on stream. Studio's Scenes section (cards), the Scene page (rows),
+// Next scene and Previous scene follow the same order.
 
 // The library hook moves scenes too, from the Studio's eager chunk: the move
 // lives in its own module so this one stays with the lazy scene UI.
@@ -53,17 +52,6 @@ function showsScreen(visual: SceneVisual): boolean {
     visual.layout.arrangementMode === 'freeform' ||
     layoutPresetNeedsScreen(visual.layout.layoutPreset)
   )
-}
-
-/** The row's second line: what the scene puts on stream, in a few words. */
-export function sceneShows(scene: Pick<SavedScene, 'visual'>): string {
-  const { sources, layout } = scene.visual
-  if (!showsScreen(scene.visual)) return layoutPresetLabel(layout.layoutPreset)
-  if (sources.app) return `${sources.app.name} · front window`
-  if (sources.windowId) return sources.windowName ? `Window · ${sources.windowName}` : 'Window'
-  if (sources.screenId) return sources.screenName ?? 'Display'
-  if (sources.testPattern) return 'Test pattern'
-  return 'No screen'
 }
 
 /** The row's icon: the app's own, or a glyph for what the scene shows. */

@@ -1112,7 +1112,8 @@ export function LayoutTab(): ReactElement {
               and visibility now lives in the Inspector. */}
 
           {/* Hide screen's setup (plan 210 D9, D11), under the canvas that
-              shows its frosted picture; the action is on Studio's Screen row. */}
+              shows its frosted picture; the action is on the scene's Screen
+              row in Studio's Scenes section (plan 231 D8). */}
           <HideScreenSection />
         </div>
 

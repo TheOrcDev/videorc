@@ -10,7 +10,7 @@ import {
   getFollowSettings,
   resetFollowSettingsForTest
 } from '@/lib/follow-settings'
-import { openAddScene } from '@/lib/scene-add-request'
+import { openAddScene, openScenes } from '@/lib/scene-add-request'
 import type { Scene } from '@/lib/scenes'
 import { ScenesSection } from './scene-presets'
 const mocked = vi.hoisted(() => ({ core: {} as Record<string, unknown> }))
@@ -237,6 +237,22 @@ describe("Studio's Scenes section (plan 231 D8)", () => {
     expect(document.querySelector('[data-testid="add-scene-dialog"]')).toBeNull()
     await act(async () => openAddScene())
     expect(document.querySelector('[data-testid="add-scene-dialog"]')).not.toBeNull()
+  })
+
+  it('comes into view for Sources’ Open Scenes, at mount or while mounted (plan 231 S8)', async () => {
+    const scrolled = vi.fn()
+    Element.prototype.scrollIntoView = scrolled
+    openScenes()
+    expect(openWorkspaceTab).toHaveBeenLastCalledWith('studio')
+    await render()
+    expect(scrolled).toHaveBeenCalledOnce()
+    expect(scrolled.mock.contexts[0]).toBe(document.querySelector('[data-videorc-scenes]'))
+    // It opens nothing, and a request is taken once.
+    expect(document.querySelector('[data-testid="add-scene-dialog"]')).toBeNull()
+    await render()
+    expect(scrolled).toHaveBeenCalledOnce()
+    await act(async () => openScenes())
+    expect(scrolled).toHaveBeenCalledTimes(2)
   })
 
   describe('Change screen… (plan 231 D2, D6)', () => {

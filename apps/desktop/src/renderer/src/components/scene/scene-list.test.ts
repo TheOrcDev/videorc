@@ -13,6 +13,20 @@ vi.mock('@/hooks/use-studio', () => ({
   useStudioCore: () => mocked.core,
   useStudioAudio: () => ({ audioMeter: null })
 }))
+const openWorkspaceTab = vi.hoisted(() => vi.fn())
+vi.mock('@/lib/workspace-navigation', () => ({ openWorkspaceTab }))
+// The stills (S5's hook), as Studio's section asks for them (plan 231 D7).
+const stills = vi.hoisted(() => ({
+  answer: new Map<string, string>(),
+  asked: [] as { targets: unknown[]; hidden: boolean; busy: boolean }[]
+}))
+vi.mock('@/hooks/use-scene-pictures', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/hooks/use-scene-pictures')>()),
+  useScenePictures: (input: { targets: unknown[]; hidden: boolean; busy: boolean }) => {
+    stills.asked.push(input)
+    return stills.answer
+  }
+}))
 
 let root: Root
 let container: HTMLDivElement
@@ -58,6 +72,9 @@ const workingAudio = {
 
 beforeEach(() => {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
+  stills.answer = new Map()
+  stills.asked = []
+  openWorkspaceTab.mockClear()
   container = document.createElement('div')
   document.body.append(container)
   root = createRoot(container)
@@ -186,16 +203,89 @@ describe('the Scene page scene list (plan 210 D6)', () => {
   it('shows what each scene shows, its key, Follows, and marks the one on stream', async () => {
     await render()
     const figmaRow = container.querySelector('[data-saved-scene="figma"]')!
-    expect(figmaRow.textContent).toContain('Figma · front window')
+    // Studio's card words (plan 231 D8): never the name twice.
+    expect(figmaRow.querySelector('[data-slot="list-row-context"]')!.textContent).toBe(
+      'Front window'
+    )
     expect(figmaRow.textContent).toContain('Follows')
     expect(figmaRow.querySelector('[data-accelerator="Control+Alt+F"]')).toBeTruthy()
     expect(figmaRow.querySelector('[data-accelerator="Control+Alt+1"]')).toBeTruthy()
     expect(rowButton('Figma').getAttribute('aria-current')).toBe('true')
+    expect(figmaRow.querySelector('[aria-label="On stream"]')).toBeTruthy()
     expect(container.querySelector('[data-saved-scene="display"]')!.textContent).toContain(
       'Display 1'
     )
     // T3 Code doesn't follow: no tag.
     expect(container.querySelector('[data-saved-scene="t3"]')!.textContent).not.toContain('Follows')
+  })
+
+  it('reads its scenes as Studio’s cards do: the same words, keys and pictures (plan 231 D8)', async () => {
+    const renamed = scene('renamed', 'Design review', { windowId: 'window:7', app: figmaApp })
+    const pause = scene('pause', 'Break', { screenId: 'screen:screencapturekit:1' })
+    pause.visual.layout = { ...pause.visual.layout, layoutPreset: 'camera-only' }
+    mocked.core.savedScenes = [figma(), display(), renamed, pause]
+    stills.answer = new Map([
+      ['app:com.figma.Desktop', 'data:image/jpeg;base64,FIGMA'],
+      ['display:screen:screencapturekit:1', 'data:image/jpeg;base64,DISPLAY']
+    ])
+    await render()
+    // One still per thing shown, as in Studio: both Figma scenes share one,
+    // and a scene whose layout draws no screen asks for none.
+    expect(stills.asked.at(-1)).toEqual({
+      targets: [
+        { kind: 'app', bundleId: 'com.figma.Desktop' },
+        { kind: 'display', screenId: 'screen:screencapturekit:1' }
+      ],
+      hidden: false,
+      busy: false
+    })
+    const thumb = (id: string) =>
+      container.querySelector(`[data-saved-scene="${id}"] [data-slot="scene-row-thumb"]`)!
+    const picture = (id: string) => thumb(id).querySelector('img')?.getAttribute('src')
+    expect(picture('figma')).toBe('data:image/jpeg;base64,FIGMA')
+    expect(picture('renamed')).toBe('data:image/jpeg;base64,FIGMA')
+    expect(picture('display')).toBe('data:image/jpeg;base64,DISPLAY')
+    // Camera only draws its layout, with no screen to picture.
+    expect(thumb('pause').querySelector('[data-slot="layout-thumb-screen"]')).toBeNull()
+    expect(thumb('pause').querySelector('[data-slot="layout-thumb-camera"]')).not.toBeNull()
+    const words = (id: string) =>
+      container.querySelector(`[data-saved-scene="${id}"] [data-slot="list-row-context"]`)
+        ?.textContent
+    expect(words('renamed')).toBe('Figma · front window')
+    expect(words('pause')).toBe('No screen')
+    // Each row's keys follow its place: the fourth answers to ⌃⌥4.
+    expect(
+      container.querySelector('[data-saved-scene="pause"] [data-accelerator="Control+Alt+4"]')
+    ).toBeTruthy()
+
+    // Hide screen holding freezes them; a recording or livestream takes none.
+    mocked.core.screenPrivacy = { hidden: true }
+    mocked.core.isSessionActive = true
+    await render()
+    expect(stills.asked.at(-1)).toMatchObject({ hidden: true, busy: true })
+  })
+
+  it('turns off the scenes that need a camera that is off, saying so once (plan 231 D9)', async () => {
+    const pause = scene('pause', 'Break', { screenId: 'screen:screencapturekit:1' })
+    pause.visual.layout = { ...pause.visual.layout, layoutPreset: 'camera-only' }
+    pause.visual.sources = { ...pause.visual.sources, cameraId: undefined }
+    const desk = display()
+    desk.visual.layout = { ...desk.visual.layout, layoutPreset: 'screen-only' }
+    mocked.core.savedScenes = [desk, pause]
+    mocked.core.deviceList = {
+      devices: (mocked.core.deviceList as { devices: { kind: string }[] }).devices.filter(
+        (device) => device.kind !== 'camera'
+      )
+    }
+    await render()
+    expect(rowButton('Break').disabled).toBe(true)
+    expect(rowButton('Desk').disabled).toBe(false)
+    // Said once under the list, as under Studio's cards, and on the row's hover.
+    const line = container.querySelector('[data-slot="scene-gallery-reason"]')!
+    expect(line.textContent).toContain('Camera is off. Choose one in Sources to use Break.')
+    expect(rowButton('Break').closest('[aria-describedby]')).toBeTruthy()
+    await act(async () => button('Open Sources')!.click())
+    expect(openWorkspaceTab).toHaveBeenCalledExactlyOnceWith('sources')
   })
 
   it('keeps the name of the scene going on stream, says Applying…, and lets another take over', async () => {
@@ -247,6 +337,14 @@ describe('the Scene page scene list (plan 210 D6)', () => {
       )
     )
     expect(actions().move).toHaveBeenLastCalledWith('display', 1)
+    expect(rowButton('Desk').getAttribute('aria-keyshortcuts')).toBe('Alt+ArrowUp Alt+ArrowDown')
+    // The library moved it: the row keeps the focus where it lands.
+    ;(document.activeElement as HTMLElement | null)?.blur()
+    mocked.core.savedScenes = [figma(), display(), t3()]
+    await render()
+    expect(document.activeElement).toBe(rowButton('Desk'))
+    mocked.core.savedScenes = [figma(), t3(), display()]
+    await render()
     await act(async () =>
       rowButton('Figma').dispatchEvent(
         new KeyboardEvent('keydown', { key: 'ArrowDown', altKey: true, bubbles: true })

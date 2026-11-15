@@ -107,33 +107,90 @@ A source that is producing frames.
 _Avoid_: Live, Active, On air
 
 **Vertical stream**:
-The 9:16 twin of a livestream that goes out beside the horizontal one.
+The 9:16 twin of a livestream that goes out beside the horizontal one. It
+shows the scene on stream in that scene's 9:16 layout (plan 231 D4).
 _Avoid_: vertical leg, simulcast leg
 
 ### Scenes and sources
 
 **Scene**:
-Anything the streamer switches to on stream, built in or saved.
-_Avoid_: layout (for the thing you switch to), preset, view
+What the streamer switches to on stream: what it shows (an app's front
+window, a fixed window, a display, or no screen) and how it's arranged (its
+16:9 layout and its 9:16 layout, the camera's spot and shape, its
+background). One scene works in both orientations: a 16:9 studio, a 9:16
+studio and the vertical stream each take its layout for their shape (plan 231
+D2, D4). One scene is always on stream ("On stream: Figma"). Every Screen
+picker changes that scene's screen, and every edit on the Scene page saves
+into it. Studio's **Scenes** section is the home of scenes (D8): its cards,
+the scene on stream's Screen, Layout and Framing, and Add scene…; the Scene
+page lists the same scenes as rows above the canvas. The camera device is
+one for every scene; a scene only decides whether the camera shows, where
+and in what shape (D9).
+_Avoid_: saved scene, unsaved scene, layout (for the thing you switch to),
+preset, view
 
 **Layout**:
-The arrangement inside a scene: where the screen and the camera sit.
-_Avoid_: scene (for the arrangement), composition
+A choice inside a scene: where the screen and the camera sit. 16:9 has
+Screen + camera, Screen only, Camera only and Side by side; 9:16 has Camera
+top, Camera bottom, Split, Screen + camera, Screen only and Camera only. A
+scene keeps one of each, and choosing one saves into the scene on stream.
+Nobody switches to a layout, only to a scene.
+_Avoid_: scene (for the arrangement), composition, Layouts (as things to
+switch to)
+
+**Default scene**:
+One of the four scenes every library starts with, named after their 16:9
+layouts: Screen + camera, Screen only, Camera only and Side by side (plan 231
+D3). For a new streamer the three screen scenes show the main display and
+Camera only shows no screen; on update they show the screen in use, so
+nothing on stream changes. They are scenes like any other: rename, move,
+change their screen, or delete them.
+_Avoid_: built-in layout, layout card, preset
+
+**Scene key**:
+A key that puts a scene on stream from any app, idle or live (plan 231 D5).
+The first nine scenes answer to their position keys, Control-Option-1 to
+Control-Option-9 on macOS (Ctrl+Alt+Shift+1 to 9 on Windows and Linux, where
+Ctrl+Alt is AltGr); moving a scene moves its position key with the place,
+and each card shows its chip. ⋯ → Set key… gives a scene a custom key that
+stays with it wherever it moves, the only key for a tenth scene and after.
+Settings → Shortcuts lists the positions as "Scene 1 · Figma" and each custom
+key. Next scene and Previous scene walk the same order.
+_Avoid_: layout key, slot, hotkey (in copy)
+
+**Add scene…**:
+The one way to make scenes (plan 231 D6), in Studio's Scenes section, on the
+Scene page and in ⌘K. It offers Apps (macOS), Displays and Camera only, and
+several can be chosen ("Add 3 scenes"). Each new scene is named after what
+it shows ("Figma", then "Figma 2"), takes the look of the scene on stream,
+goes at the end of the list with the next position key, and never changes
+what's on stream. ⋯ → Duplicate makes another one like a scene.
+_Avoid_: New scene…, Save scene…, Save as new scene…, Create scene
+
+**Change screen…**:
+Changes what one scene shows (plan 231 D2, D6): an app (its front window), A
+specific window, a display, or No screen, which puts the scene on Camera
+only. It is in every scene's ⋯ and, for the scene on stream, beside its
+Screen in Studio's Scenes section. Only that scene changes; when it's on
+stream, the stream changes too.
+_Avoid_: Change app…, Change source, Edit screen
 
 **Preset**:
 A quality preset only: resolution, frame rate and bitrate together.
 _Avoid_: preset for a scene or a layout ("Layout preset")
 
 **Scene for an app**:
-A saved scene New scene… makes from an app you show (plan 210): it shows the
-app's front window, whichever window that is, and keeps working after the app
-quits and comes back. Its row reads "Figma · front window".
+A scene that shows an app (plan 210), made with Add scene… → Apps or Change
+screen…: it shows the app's front window, whichever window that is, and keeps
+working after the app quits and comes back. Its Screen reads "Figma · front
+window"; its card says "Front window" under its name.
 _Avoid_: app scene (in copy), window scene, app capture
 
 **Follow the app in front**:
 When the streamer brings an app to the front, the stream switches to that
 app's scene. Each scene for an app follows; its ⋯ menu's "Stop following"
-turns that off, and its row says "Follows" while it does. macOS only.
+turns that off, and its row says "Follows" while it does. The switch sits in
+Studio's Scenes section (plan 231 D8). macOS only.
 _Avoid_: auto-switch, smart switching
 
 **Swap in place**:
@@ -147,8 +204,9 @@ _Avoid_: crossfade (there is none), warm capture, restart
 **Hide screen**:
 Covers the screen on every output (the recording, every stream, Clips and the
 Screen file) with a frosted still of it, while the camera and microphone stay
-on; "Show screen" brings it back. While it holds, the Studio and the Stream
-Manager say "Screen hidden". Its key is Control-Option-H (Ctrl+Alt+H on
+on; "Show screen" brings it back. The button sits on the scene's Screen row in
+Studio's Scenes section (plan 231 D8). While it holds, the Studio and the
+Stream Manager say "Screen hidden". Its key is Control-Option-H (Ctrl+Alt+H on
 Windows and Linux) until changed in Settings → Shortcuts, and on macOS a
 password manager in front hides the screen too. Plan 210.
 _Avoid_: blur (it isn't live), privacy mode, BRB (that's a takeover), censor
