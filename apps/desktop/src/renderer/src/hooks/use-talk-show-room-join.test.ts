@@ -5,6 +5,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { BackendClient } from '@/backendClient'
 import type { CloudStatus } from '@/lib/backend'
+import { IDLE_TALK_SHOW_SNAPSHOT } from '@/lib/talk-show-context'
+import type { TalkShowRoomSnapshot } from '@/lib/talk-show-room'
 
 import {
   guestActionWords,
@@ -28,15 +30,23 @@ const room = vi.hoisted(() => {
     disconnected: 0,
     connect: vi.fn<() => Promise<void>>(),
     disconnect: vi.fn<() => Promise<void>>(),
-    reports: [] as ((state: 'connected') => void)[]
+    reports: [] as ((state: 'connected') => void)[],
+    snapshots: [] as ((snapshot: TalkShowRoomSnapshot) => void)[]
   }
 })
 vi.mock('@/lib/talk-show-room', async () => {
   await room.loaded
   class TalkShowRoomClient {
-    constructor({ report }: { report: (state: 'connected') => void }) {
+    constructor({
+      report,
+      onSnapshot
+    }: {
+      report: (state: 'connected') => void
+      onSnapshot: (snapshot: TalkShowRoomSnapshot) => void
+    }) {
       room.constructed += 1
       room.reports.push(report)
+      room.snapshots.push(onSnapshot)
     }
     async sendStage(): Promise<void> {}
     async connect(): Promise<void> {
@@ -53,6 +63,7 @@ vi.mock('@/lib/talk-show-room', async () => {
 
 let root: Root
 let container: HTMLDivElement
+let shown: TalkShowRoomSnapshot
 
 beforeEach(() => {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
@@ -65,6 +76,8 @@ beforeEach(() => {
   room.connect.mockReset().mockResolvedValue(undefined)
   room.disconnect.mockReset().mockResolvedValue(undefined)
   room.reports = []
+  room.snapshots = []
+  shown = IDLE_TALK_SHOW_SNAPSHOT
 })
 
 afterEach(async () => {
@@ -110,7 +123,7 @@ function deps(onError: TalkShowRoomControllerDeps['onError']): TalkShowRoomContr
 }
 
 function Host({ value }: { value: TalkShowRoomControllerDeps }): ReactElement | null {
-  useTalkShowRoomController(value)
+  shown = useTalkShowRoomController(value).room
   return null
 }
 
@@ -313,6 +326,43 @@ describe('the host room join', () => {
     respond(openRoom)
     await settle()
     expect(value.commitCloudStatus).not.toHaveBeenCalled()
+  })
+
+  it('clears the old snapshot immediately when changing shows during a slow leave', async () => {
+    let leave!: () => void
+    room.disconnect.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          leave = resolve
+        })
+    )
+    const value = deps(vi.fn())
+    act(() => root.render(createElement(Host, { value })))
+    await settle()
+    act(() =>
+      room.snapshots[0]({
+        ...IDLE_TALK_SHOW_SNAPSHOT,
+        state: 'connected',
+        identity: 'host:sh_talk'
+      })
+    )
+    expect(shown.state).toBe('connected')
+    act(() =>
+      root.render(
+        createElement(Host, {
+          value: {
+            ...value,
+            cloudStatus: { ...openRoom, show: { ...openRoom.show!, id: 'sh_new' } }
+          }
+        })
+      )
+    )
+    try {
+      expect(shown).toEqual(IDLE_TALK_SHOW_SNAPSHOT)
+    } finally {
+      leave()
+      await settle()
+    }
   })
 })
 

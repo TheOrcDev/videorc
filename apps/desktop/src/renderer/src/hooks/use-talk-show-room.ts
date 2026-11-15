@@ -168,8 +168,8 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
   // backend cancels it, even while the media grant or lazy import is pending.
   // A replacement waits for teardown so the old leave cannot revoke its grant.
   useEffect(() => {
+    setSnapshot(IDLE_SNAPSHOT)
     if (!roomOpen || !client || !showId) {
-      setSnapshot(IDLE_SNAPSHOT)
       return
     }
     let cancelled = false
@@ -188,7 +188,6 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
       try {
         await leavingRef.current
         if (cancelled) return
-        setSnapshot(IDLE_SNAPSHOT)
         grant = Promise.resolve(
           window.videorc?.setTalkShowMediaGrant?.({ video: true, screenSourceId: null })
         )
