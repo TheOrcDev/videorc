@@ -295,6 +295,10 @@ pub(crate) struct WindowsD3d11EncoderDiagnostics {
     pub(crate) input_credit_overflow_events: u64,
     pub(crate) process_input_failures: u64,
     pub(crate) backpressure_events: u64,
+    /// #1042: the two causes behind `backpressure_events`. The transform had
+    /// issued no input credit, or Videorc's own in-flight cap was full.
+    pub(crate) credit_refusals: u64,
+    pub(crate) capacity_refusals: u64,
     pub(crate) release_callbacks: u64,
     pub(crate) stale_release_callbacks: u64,
     pub(crate) wrong_role_callbacks: u64,
@@ -398,6 +402,7 @@ impl WindowsD3d11EncoderOwnershipState {
         if self.input_credits == 0 {
             self.diagnostics.backpressure_events =
                 self.diagnostics.backpressure_events.saturating_add(1);
+            self.diagnostics.credit_refusals = self.diagnostics.credit_refusals.saturating_add(1);
             return Err(WindowsD3d11EncoderContractError::new(
                 WindowsD3d11EncoderContractErrorCode::NoInputCredit,
                 "asynchronous MFT has not issued an input credit",
@@ -406,6 +411,8 @@ impl WindowsD3d11EncoderOwnershipState {
         if self.reserved.len().saturating_add(self.in_flight.len()) >= self.capacity {
             self.diagnostics.backpressure_events =
                 self.diagnostics.backpressure_events.saturating_add(1);
+            self.diagnostics.capacity_refusals =
+                self.diagnostics.capacity_refusals.saturating_add(1);
             return Err(WindowsD3d11EncoderContractError::new(
                 WindowsD3d11EncoderContractErrorCode::Backpressure,
                 format!("bounded encoder capacity {} is exhausted", self.capacity),
@@ -764,6 +771,11 @@ mod tests {
             WindowsD3d11EncoderContractErrorCode::Backpressure
         );
         assert_eq!(state.diagnostics().max_in_flight, 1);
+        // #1042: each refusal names its cause; the total stays their sum.
+        let diagnostics = state.diagnostics();
+        assert_eq!(diagnostics.credit_refusals, 1);
+        assert_eq!(diagnostics.capacity_refusals, 1);
+        assert_eq!(diagnostics.backpressure_events, 2);
     }
 
     #[test]

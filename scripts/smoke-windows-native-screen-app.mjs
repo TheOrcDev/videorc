@@ -27,6 +27,7 @@ import {
   assertNonblankBmp,
   assertWindowsGraphicsCaptureTexture,
   evaluateWindowsNativeScreenD3d11Diagnostics,
+  formatWindowsD3d11MediaStageTimings,
   nativeWindowsCompositorUsesScreen,
   nativeWindowsD3d11MediaEncodingActive,
   nativeWindowsScreenCandidates,
@@ -461,6 +462,8 @@ try {
   try {
     if (ws) {
       evidenceDiagnostics = await request(ws, 10_000, 'diagnostics.stats')
+      const stageLine = formatWindowsD3d11MediaStageTimings(evidenceDiagnostics?.windowsD3d11Media)
+      if (stageLine) console.log(stageLine)
     }
   } catch {
     // Best effort only; the original failure must keep propagating.

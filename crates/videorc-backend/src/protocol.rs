@@ -2626,6 +2626,10 @@ pub struct WindowsD3d11MediaDiagnostics {
     /// Per-stage evidence behind `texture_pool_pressure_events` (#1042).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub texture_pool_pressure: Option<WindowsD3d11TexturePoolPressureDiagnostics>,
+    /// Where the single D3D11 media thread spends its time, per stage, with
+    /// the slowest loop and compose broken down (#1042).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media_stage_timings: Option<WindowsD3d11MediaStageTimingDiagnostics>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fallback_reason: Option<String>,
     /// Why `capture_backend` is not the Desktop Duplication the session asked
@@ -2634,6 +2638,132 @@ pub struct WindowsD3d11MediaDiagnostics {
     /// Graphics Capture). Absent when the requested backend opened.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capture_route_reason: Option<String>,
+}
+
+/// One media-thread stage's wall time over the generation (#1042): how many
+/// times it ran, the p95 of its last 256 runs, and its worst run ever.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct WindowsD3d11StageTimingDiagnostics {
+    pub samples: u64,
+    pub p95_ms: f64,
+    pub max_ms: f64,
+}
+
+/// The D3D11 media thread's time by stage (#1042). Capture polling, compose,
+/// the camera upload, the encoder and the preview all run on that one
+/// thread, so a stall in any of them delays all of them; these name which.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct WindowsD3d11MediaStageTimingDiagnostics {
+    /// One loop iteration that did work, start to end.
+    #[serde(default)]
+    pub loop_busy: WindowsD3d11StageTimingDiagnostics,
+    /// Completing capture acquisitions (pointer composite and fence signal).
+    #[serde(default)]
+    pub capture_poll: WindowsD3d11StageTimingDiagnostics,
+    /// One compose command on the media thread, start to end.
+    #[serde(default)]
+    pub compose: WindowsD3d11StageTimingDiagnostics,
+    /// Waiting for the device's multithread lock before composing: time the
+    /// capture worker or the encoder held the shared immediate context.
+    #[serde(default)]
+    pub device_lock_wait: WindowsD3d11StageTimingDiagnostics,
+    /// The camera frame's `UpdateSubresource`.
+    #[serde(default)]
+    pub camera_upload: WindowsD3d11StageTimingDiagnostics,
+    /// Other image `UpdateSubresource` calls (backgrounds, overlays).
+    #[serde(default)]
+    pub image_upload: WindowsD3d11StageTimingDiagnostics,
+    #[serde(default)]
+    pub preview_pass: WindowsD3d11StageTimingDiagnostics,
+    #[serde(default)]
+    pub encoded_pass: WindowsD3d11StageTimingDiagnostics,
+    #[serde(default)]
+    pub nv12_pass: WindowsD3d11StageTimingDiagnostics,
+    #[serde(default)]
+    pub fence_signal: WindowsD3d11StageTimingDiagnostics,
+    /// One encoder submit command, including the events it collects.
+    #[serde(default)]
+    pub encoder_submit: WindowsD3d11StageTimingDiagnostics,
+    /// The transform's `ProcessInput` alone.
+    #[serde(default)]
+    pub encoder_process_input: WindowsD3d11StageTimingDiagnostics,
+    /// One encoder poll command.
+    #[serde(default)]
+    pub encoder_poll: WindowsD3d11StageTimingDiagnostics,
+    /// The slowest `ProcessOutput` within one submit or poll.
+    #[serde(default)]
+    pub encoder_process_output: WindowsD3d11StageTimingDiagnostics,
+    /// A successful `ProcessInput` to the transform releasing that input.
+    #[serde(default)]
+    pub encoder_input_hold: WindowsD3d11StageTimingDiagnostics,
+    /// Encoder refusals because the transform had issued no input credit.
+    #[serde(default)]
+    pub encoder_credit_refusals: u64,
+    /// Encoder refusals because Videorc's own in-flight cap was full.
+    #[serde(default)]
+    pub encoder_capacity_refusals: u64,
+    #[serde(default)]
+    pub encoder_max_in_flight: u32,
+    #[serde(default)]
+    pub preview_present: WindowsD3d11StageTimingDiagnostics,
+    /// Loop iterations that opened or closed a capture, encoder or preview,
+    /// kept out of `loop_busy` and `slowest_loop`.
+    #[serde(default)]
+    pub setup_loops: u64,
+    /// The whole breakdown of the single slowest loop iteration.
+    #[serde(default)]
+    pub slowest_loop: WindowsD3d11MediaLoopBreakdownDiagnostics,
+    /// The whole breakdown of the single slowest compose.
+    #[serde(default)]
+    pub slowest_compose: WindowsD3d11ComposeBreakdownDiagnostics,
+    /// GPU durations of the compose passes from timestamp queries. Absent
+    /// when the device refused the queries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gpu: Option<WindowsD3d11ComposeGpuTimingDiagnostics>,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct WindowsD3d11MediaLoopBreakdownDiagnostics {
+    pub total_ms: f64,
+    pub capture_poll_ms: f64,
+    pub compose_ms: f64,
+    pub encoder_submit_ms: f64,
+    pub encoder_poll_ms: f64,
+    pub preview_present_ms: f64,
+    pub other_command_ms: f64,
+    pub commands: u32,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct WindowsD3d11ComposeBreakdownDiagnostics {
+    pub total_ms: f64,
+    pub device_lock_wait_ms: f64,
+    pub fence_refresh_ms: f64,
+    pub camera_upload_ms: f64,
+    pub image_upload_ms: f64,
+    pub preview_pass_ms: f64,
+    pub encoded_pass_ms: f64,
+    pub nv12_pass_ms: f64,
+    pub fence_signal_ms: f64,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct WindowsD3d11ComposeGpuTimingDiagnostics {
+    pub upload: WindowsD3d11StageTimingDiagnostics,
+    pub preview_pass: WindowsD3d11StageTimingDiagnostics,
+    pub encoded_pass: WindowsD3d11StageTimingDiagnostics,
+    pub nv12_pass: WindowsD3d11StageTimingDiagnostics,
+    pub total: WindowsD3d11StageTimingDiagnostics,
+    /// From issuing a compose to seeing its timestamps resolved; long values
+    /// mean the GPU queue ran far behind the CPU.
+    pub completion_latency: WindowsD3d11StageTimingDiagnostics,
+    pub disjoint: u64,
+    pub skipped: u64,
 }
 
 /// Why the D3D11 texture pool ran short (#1042). `texture_pool_pressure_events`
@@ -10002,6 +10132,66 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(legacy.synchronization_timeouts, 0);
+    }
+
+    #[test]
+    fn windows_d3d11_media_stage_timings_are_stable_on_the_wire() {
+        // #1042: the media thread's per-stage time, so one stalled moment
+        // names the call that blocked.
+        let stage = |samples, p95_ms, max_ms| WindowsD3d11StageTimingDiagnostics {
+            samples,
+            p95_ms,
+            max_ms,
+        };
+        let diagnostics = WindowsD3d11MediaDiagnostics {
+            media_stage_timings: Some(WindowsD3d11MediaStageTimingDiagnostics {
+                compose: stage(480, 4.5, 101.0),
+                device_lock_wait: stage(480, 0.01, 96.5),
+                encoder_process_output: stage(470, 1.2, 68.75),
+                slowest_loop: WindowsD3d11MediaLoopBreakdownDiagnostics {
+                    total_ms: 119.0,
+                    encoder_submit_ms: 118.5,
+                    commands: 3,
+                    ..Default::default()
+                },
+                slowest_compose: WindowsD3d11ComposeBreakdownDiagnostics {
+                    total_ms: 101.0,
+                    device_lock_wait_ms: 96.5,
+                    ..Default::default()
+                },
+                gpu: Some(WindowsD3d11ComposeGpuTimingDiagnostics {
+                    total: stage(470, 3.1, 9.0),
+                    completion_latency: stage(470, 20.0, 140.0),
+                    disjoint: 1,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let wire = serde_json::to_value(&diagnostics).unwrap();
+        let timings = &wire["mediaStageTimings"];
+        assert_eq!(timings["compose"]["maxMs"], 101.0);
+        assert_eq!(timings["deviceLockWait"]["p95Ms"], 0.01);
+        assert_eq!(timings["encoderProcessOutput"]["samples"], 470);
+        assert_eq!(timings["slowestLoop"]["encoderSubmitMs"], 118.5);
+        assert_eq!(timings["slowestCompose"]["deviceLockWaitMs"], 96.5);
+        assert_eq!(timings["gpu"]["completionLatency"]["maxMs"], 140.0);
+        assert_eq!(timings["gpu"]["disjoint"], 1);
+        let decoded: WindowsD3d11MediaDiagnostics = serde_json::from_value(wire).unwrap();
+        assert_eq!(decoded, diagnostics);
+
+        let without_gpu = WindowsD3d11MediaDiagnostics {
+            media_stage_timings: Some(WindowsD3d11MediaStageTimingDiagnostics::default()),
+            ..Default::default()
+        };
+        let wire = serde_json::to_value(&without_gpu).unwrap();
+        assert!(
+            wire["mediaStageTimings"].get("gpu").is_none(),
+            "a device that refused timestamp queries omits the GPU block"
+        );
+        let unset = serde_json::to_value(WindowsD3d11MediaDiagnostics::default()).unwrap();
+        assert!(unset.get("mediaStageTimings").is_none());
     }
 
     #[test]

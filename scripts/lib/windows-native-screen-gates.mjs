@@ -415,3 +415,37 @@ export function windowsNativeScreenRecordingArtifactGates(screen) {
       : {})
   }
 }
+
+/**
+ * #1042: one line naming where the D3D11 media thread spent its slowest
+ * moment. Capture polling, compose, the camera upload, the encoder and the
+ * preview share that one thread, so a stall in any of them delays all of
+ * them. Returns null for a backend that does not report stage timings.
+ */
+export function formatWindowsD3d11MediaStageTimings(media) {
+  const timings = media?.mediaStageTimings
+  if (!timings || typeof timings !== 'object') return null
+  const ms = (value) => (Number.isFinite(value) ? value.toFixed(1) : 'n/a')
+  const loop = timings.slowestLoop ?? {}
+  const compose = timings.slowestCompose ?? {}
+  const parts = [
+    `slowest loop ${ms(loop.totalMs)}ms (capture ${ms(loop.capturePollMs)}, compose ${ms(loop.composeMs)}, ` +
+      `encoder submit ${ms(loop.encoderSubmitMs)}, encoder poll ${ms(loop.encoderPollMs)}, ` +
+      `present ${ms(loop.previewPresentMs)}, other ${ms(loop.otherCommandMs)}; ${loop.commands ?? 0} commands)`,
+    `slowest compose ${ms(compose.totalMs)}ms (device lock wait ${ms(compose.deviceLockWaitMs)}, ` +
+      `camera upload ${ms(compose.cameraUploadMs)}, encoded pass ${ms(compose.encodedPassMs)}, ` +
+      `NV12 ${ms(compose.nv12PassMs)}, fence signal ${ms(compose.fenceSignalMs)})`,
+    `worst device lock wait ${ms(timings.deviceLockWait?.maxMs)}ms, ProcessInput ${ms(timings.encoderProcessInput?.maxMs)}ms, ` +
+      `ProcessOutput ${ms(timings.encoderProcessOutput?.maxMs)}ms, ` +
+      `encoder input hold p95 ${ms(timings.encoderInputHold?.p95Ms)}/max ${ms(timings.encoderInputHold?.maxMs)}ms`,
+    `encoder refusals: ${timings.encoderCreditRefusals ?? 0} without input credit, ` +
+      `${timings.encoderCapacityRefusals ?? 0} at the in-flight cap (max in flight ${timings.encoderMaxInFlight ?? 0})`
+  ]
+  if (timings.gpu) {
+    parts.push(
+      `GPU compose p95 ${ms(timings.gpu.total?.p95Ms)}/max ${ms(timings.gpu.total?.maxMs)}ms, ` +
+        `GPU completion latency p95 ${ms(timings.gpu.completionLatency?.p95Ms)}/max ${ms(timings.gpu.completionLatency?.maxMs)}ms`
+    )
+  }
+  return `D3D11 media stages (#1042): ${parts.join('; ')}`
+}

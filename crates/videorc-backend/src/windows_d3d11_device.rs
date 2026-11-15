@@ -1669,6 +1669,9 @@ pub(crate) struct WindowsD3d11MediaRuntimeCounters {
     pub(crate) texture_pool_in_use: u64,
     pub(crate) texture_pool_pressure_events: u64,
     pub(crate) texture_pool: WindowsD3d11TexturePoolDiagnostics,
+    /// #1042: where the media thread spends its time, per stage.
+    pub(crate) stage_timings:
+        Option<crate::windows_d3d11_stage_timing::WindowsD3d11MediaStageTimings>,
 }
 
 impl WindowsD3d11MediaRuntimeCounters {
@@ -1840,6 +1843,9 @@ mod runtime {
     use crate::windows_d3d11_preview::{
         WindowsD3d11Presenter, WindowsD3d11PresenterStatus, WindowsD3d11PreviewFrameMetadata,
         WindowsD3d11PreviewPlacement,
+    };
+    use crate::windows_d3d11_stage_timing::{
+        WindowsD3d11ComposeBreakdown, WindowsD3d11MediaLoopBreakdown, WindowsD3d11MediaStageTimers,
     };
     use crate::windows_d3d11_test_pattern::{
         WindowsD3d11TestPatternMetadata, render_bgra_test_pattern,
@@ -2114,6 +2120,24 @@ mod runtime {
                 ));
             }
             Ok(completed)
+        }
+
+        /// #1042: how long taking the device's multithread lock waited, so a
+        /// compose blocked behind the capture worker or the encoder (which
+        /// share this immediate context) is told from a slow GPU call. Enter
+        /// and leave at once: the probe never holds the lock itself.
+        pub(crate) fn device_lock_wait_micros(&self) -> u64 {
+            let Ok(multithread) = self.immediate_context.cast::<ID3D11Multithread>() else {
+                return 0;
+            };
+            let started_at = Instant::now();
+            // SAFETY: the context is alive; Enter and Leave are paired on
+            // this thread and the lock is recursive.
+            unsafe {
+                multithread.Enter();
+                multithread.Leave();
+            }
+            u64::try_from(started_at.elapsed().as_micros()).unwrap_or(u64::MAX)
         }
 
         fn signal(&mut self, value: u64) -> Result<(), WindowsD3d11Error> {
@@ -2590,6 +2614,8 @@ mod runtime {
         /// Encoder ownership counters survive successful shutdown/removal so
         /// the final authority snapshot includes drain/flush timeout evidence.
         retired_encoder_counters: WindowsD3d11MediaRuntimeCounters,
+        /// #1042: per-stage wall time of this media thread.
+        stage_timers: WindowsD3d11MediaStageTimers,
     }
 
     impl WindowsD3d11MediaRuntimeState {
@@ -2608,8 +2634,49 @@ mod runtime {
                 presenter: None,
                 presenter_last_error: None,
                 retired_encoder_counters: WindowsD3d11MediaRuntimeCounters::default(),
+                stage_timers: WindowsD3d11MediaStageTimers::default(),
             })
         }
+    }
+
+    /// Which stage a queued command's wall time belongs to (#1042).
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum MediaCommandStage {
+        Compose,
+        EncoderSubmit,
+        EncoderPoll,
+        /// Status reads and capture acquisition: steady-state bookkeeping.
+        Other,
+        /// Opening or closing a capture, encoder or preview. Its seconds-long
+        /// device work is expected and is kept out of the busy-loop record.
+        Setup,
+    }
+
+    impl MediaCommandStage {
+        fn of(command: &WindowsD3d11MediaCommand) -> Self {
+            match command {
+                WindowsD3d11MediaCommand::ComposeScene { .. } => Self::Compose,
+                WindowsD3d11MediaCommand::SubmitEncoderTexture { .. } => Self::EncoderSubmit,
+                WindowsD3d11MediaCommand::PollEncoder { .. } => Self::EncoderPoll,
+                WindowsD3d11MediaCommand::Status { .. }
+                | WindowsD3d11MediaCommand::AcquireCapture { .. }
+                | WindowsD3d11MediaCommand::EncoderStatus { .. }
+                | WindowsD3d11MediaCommand::PreviewStatus { .. } => Self::Other,
+                WindowsD3d11MediaCommand::RenderTestPattern { .. }
+                | WindowsD3d11MediaCommand::StartCapture { .. }
+                | WindowsD3d11MediaCommand::StopCapture { .. }
+                | WindowsD3d11MediaCommand::CreateEncoder { .. }
+                | WindowsD3d11MediaCommand::DrainEncoder { .. }
+                | WindowsD3d11MediaCommand::FlushEncoder { .. }
+                | WindowsD3d11MediaCommand::ShutdownEncoder { .. }
+                | WindowsD3d11MediaCommand::ConfigurePreview { .. }
+                | WindowsD3d11MediaCommand::DestroyPreview { .. } => Self::Setup,
+            }
+        }
+    }
+
+    fn micros_since(started_at: Instant) -> u64 {
+        u64::try_from(started_at.elapsed().as_micros()).unwrap_or(u64::MAX)
     }
 
     #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3798,12 +3865,15 @@ mod runtime {
             if cancel_startup.load(AtomicOrdering::Acquire) {
                 break;
             }
+            let iteration_started_at = Instant::now();
+            let mut breakdown = WindowsD3d11MediaLoopBreakdown::default();
             poll_capture_owners(
                 generation,
                 &mut device,
                 &mut texture_pool,
                 &mut media_runtime,
             );
+            breakdown.capture_poll_micros = micros_since(iteration_started_at);
             let message_count = drain_window_messages(&mut shutdown, &mut message_lag_samples);
             metrics.max_message_batch = metrics
                 .max_message_batch
@@ -3837,6 +3907,8 @@ mod runtime {
                         command_lag_samples.observe(command_lag_micros);
                         metrics.command_lag_p95_micros = command_lag_samples.p95();
                         metrics.max_command_lag_micros = command_lag_samples.max;
+                        let stage = MediaCommandStage::of(&queued.command);
+                        let command_started_at = Instant::now();
                         shutdown = handle_command(
                             queued.command,
                             selection,
@@ -3846,6 +3918,21 @@ mod runtime {
                             &mut media_runtime,
                             metrics,
                         );
+                        let command_micros = micros_since(command_started_at);
+                        let slot = match stage {
+                            MediaCommandStage::Compose => &mut breakdown.compose_micros,
+                            MediaCommandStage::EncoderSubmit => {
+                                &mut breakdown.encoder_submit_micros
+                            }
+                            MediaCommandStage::EncoderPoll => &mut breakdown.encoder_poll_micros,
+                            MediaCommandStage::Other => &mut breakdown.other_command_micros,
+                            MediaCommandStage::Setup => {
+                                breakdown.ran_setup = true;
+                                &mut breakdown.other_command_micros
+                            }
+                        };
+                        *slot = slot.saturating_add(command_micros);
+                        breakdown.commands = breakdown.commands.saturating_add(1);
                         media_count += 1;
                     }
                     Err(mpsc::TryRecvError::Empty) => break,
@@ -3871,13 +3958,19 @@ mod runtime {
                     presenter.note_latest_wins_drops(replaced);
                 }
                 if let Some(frame) = preview_frame {
-                    if let Err(error) = present_preview_frame(
+                    let present_started_at = Instant::now();
+                    let presented = present_preview_frame(
                         generation,
                         frame,
                         &device,
                         &texture_pool,
                         &mut media_runtime,
-                    ) {
+                    );
+                    breakdown.preview_present_micros = micros_since(present_started_at);
+                    media_runtime
+                        .stage_timers
+                        .observe_preview_present(breakdown.preview_present_micros);
+                    if let Err(error) = presented {
                         // Any failure before or during Present invalidates the
                         // last canonical-ready status. Keeping the presenter
                         // here would make PreviewStatus return stale success
@@ -3889,6 +3982,12 @@ mod runtime {
                     }
                     media_count += 1;
                 }
+            }
+            breakdown.total_micros = micros_since(iteration_started_at);
+            // An idle wake-up (no command, no present, a capture poll that
+            // found nothing) is not a busy-loop sample.
+            if media_count > 0 || breakdown.capture_poll_micros >= 100 {
+                media_runtime.stage_timers.observe_loop(breakdown);
             }
             metrics.max_media_batch = metrics
                 .max_media_batch
@@ -4007,6 +4106,26 @@ mod runtime {
         counters.texture_pool_in_use = texture_pool.state.in_use() as u64;
         counters.texture_pool_pressure_events = texture_pool.state.pressure_events();
         counters.texture_pool = texture_pool.state.diagnostics();
+        let mut stage_timings = media_runtime.stage_timers.summary(
+            media_runtime
+                .compositor
+                .as_ref()
+                .ok()
+                .and_then(WindowsD3d11Compositor::gpu_timings),
+        );
+        for encoder in media_runtime.encoders.values() {
+            let ownership = encoder.encoder.diagnostics().ownership;
+            stage_timings.encoder_credit_refusals = stage_timings
+                .encoder_credit_refusals
+                .saturating_add(ownership.credit_refusals);
+            stage_timings.encoder_capacity_refusals = stage_timings
+                .encoder_capacity_refusals
+                .saturating_add(ownership.capacity_refusals);
+            stage_timings.encoder_max_in_flight = stage_timings
+                .encoder_max_in_flight
+                .max(ownership.max_in_flight);
+        }
+        counters.stage_timings = Some(stage_timings);
         for encoder in media_runtime.encoders.values() {
             let diagnostics = encoder.encoder.diagnostics();
             counters.include_encoder_totals(
@@ -4404,7 +4523,32 @@ mod runtime {
             duration_100ns,
             submitted_at_micros,
         };
-        match runtime.encoder.try_submit_nv12_texture(texture, metadata) {
+        let submit_started_at = Instant::now();
+        let submitted = runtime.encoder.try_submit_nv12_texture(texture, metadata);
+        let submit_micros = micros_since(submit_started_at);
+        let call_timings = match &submitted {
+            Ok(progress) => progress.call_timings,
+            Err(failure) => failure.progress.call_timings,
+        };
+        media_runtime.stage_timers.observe_encoder_submit(
+            submit_micros,
+            call_timings.process_input_micros.map(u64::from),
+        );
+        if call_timings.process_output_calls > 0 {
+            media_runtime
+                .stage_timers
+                .observe_process_output(u64::from(call_timings.process_output_max_micros));
+        }
+        if call_timings.input_releases > 0 {
+            media_runtime
+                .stage_timers
+                .observe_encoder_input_hold(u64::from(call_timings.input_hold_max_micros));
+        }
+        let runtime = media_runtime
+            .encoders
+            .get_mut(&role)
+            .ok_or_else(|| encoder_submission_error(encoder_missing(role)))?;
+        match submitted {
             Ok(progress) => {
                 runtime.retained_tickets.insert(lease_id, ticket);
                 runtime
@@ -4453,12 +4597,31 @@ mod runtime {
             .encoders
             .get_mut(&role)
             .ok_or_else(|| encoder_missing(role))?;
-        let progress = runtime.encoder.poll().map_err(|error| {
+        let poll_started_at = Instant::now();
+        let polled = runtime.encoder.poll();
+        let poll_micros = micros_since(poll_started_at);
+        let poll_timings = polled.as_ref().ok().map(|progress| progress.call_timings);
+        let process_output_max = poll_timings
+            .filter(|timings| timings.process_output_calls > 0)
+            .map(|timings| u64::from(timings.process_output_max_micros));
+        media_runtime
+            .stage_timers
+            .observe_encoder_poll(poll_micros, process_output_max);
+        if let Some(timings) = poll_timings.filter(|timings| timings.input_releases > 0) {
+            media_runtime
+                .stage_timers
+                .observe_encoder_input_hold(u64::from(timings.input_hold_max_micros));
+        }
+        let progress = polled.map_err(|error| {
             WindowsD3d11Error::new(
                 WindowsD3d11ErrorCode::EncoderUnavailable,
                 format!("polling the {role:?} Media Foundation encoder failed: {error}"),
             )
         })?;
+        let runtime = media_runtime
+            .encoders
+            .get_mut(&role)
+            .ok_or_else(|| encoder_missing(role))?;
         runtime.apply_progress(generation, progress)
     }
 
@@ -4510,6 +4673,7 @@ mod runtime {
             MediaFoundationD3d11EncoderProgress {
                 encoded_frames: Vec::new(),
                 released_leases,
+                ..Default::default()
             },
         )
     }
@@ -5070,7 +5234,10 @@ mod runtime {
             }
         }
 
+        let compose_started_at = Instant::now();
+        let mut breakdown = WindowsD3d11ComposeBreakdown::default();
         texture_pool.refresh_completed(device)?;
+        breakdown.fence_refresh_micros = micros_since(compose_started_at);
         let preview_producer = preview_requested
             .then(|| {
                 texture_pool.state.acquire_for_write_dimensions(
@@ -5162,6 +5329,7 @@ mod runtime {
             _ => plan,
         };
 
+        breakdown.device_lock_wait_micros = device.device_lock_wait_micros();
         let composition = (|| {
             let mut gpu_sources = Vec::with_capacity(sources.len());
             for source in sources {
@@ -5266,7 +5434,17 @@ mod runtime {
             .expect("composition always publishes at least one target")
             .synchronization
             .fence_value;
+        let signal_started_at = Instant::now();
         device.signal(last_fence)?;
+        breakdown.fence_signal_micros = micros_since(signal_started_at);
+        let cpu = frame.cpu_timings;
+        breakdown.camera_upload_micros = cpu.camera_upload_micros.unwrap_or(0);
+        breakdown.image_upload_micros = cpu.image_upload_micros;
+        breakdown.preview_pass_micros = cpu.preview_pass_micros.unwrap_or(0);
+        breakdown.encoded_pass_micros = cpu.encoded_pass_micros;
+        breakdown.nv12_pass_micros = cpu.nv12_pass_micros;
+        breakdown.total_micros = micros_since(compose_started_at);
+        media_runtime.stage_timers.observe_compose(breakdown, cpu);
 
         let mut textures = Vec::with_capacity(published.len());
         let encoded_offset = usize::from(preview_requested);

@@ -1041,15 +1041,26 @@ mod runtime {
         WindowsD3d11PointerTransform, WindowsD3d11Rect, transform_windows_d3d11_pointer,
     };
     use crate::windows_d3d11_device::WindowsD3d11Device;
+    use crate::windows_d3d11_stage_timing::{
+        WindowsD3d11ComposeCpuTimings, WindowsD3d11ComposeGpuTimers, WindowsD3d11ComposeGpuTimings,
+        windows_d3d11_gpu_sample_from_ticks,
+    };
     use std::ffi::c_void;
     use std::marker::PhantomData;
     use std::mem;
     use std::rc::Rc;
+    use std::time::Instant;
+    use windows::Win32::Foundation::{S_FALSE, S_OK};
     use windows::Win32::Graphics::Direct3D::Fxc::{
         D3DCOMPILE_ENABLE_STRICTNESS, D3DCOMPILE_OPTIMIZATION_LEVEL3, D3DCompile,
     };
     use windows::Win32::Graphics::Direct3D::{
         D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST, ID3DBlob, ID3DInclude,
+    };
+    use windows::Win32::Graphics::Direct3D11::{
+        D3D11_ASYNC_GETDATA_DONOTFLUSH, D3D11_QUERY, D3D11_QUERY_DATA_TIMESTAMP_DISJOINT,
+        D3D11_QUERY_DESC, D3D11_QUERY_TIMESTAMP, D3D11_QUERY_TIMESTAMP_DISJOINT,
+        ID3D11DeviceContext, ID3D11Query,
     };
     use windows::Win32::Graphics::Direct3D11::{
         D3D11_BIND_CONSTANT_BUFFER, D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE,
@@ -1070,6 +1081,7 @@ mod runtime {
         DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_NV12, DXGI_FORMAT_R8_UNORM, DXGI_FORMAT_R8G8_UNORM,
         DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_SAMPLE_DESC,
     };
+    use windows::core::HRESULT;
     use windows::core::{Interface, PCSTR};
 
     const MAX_UPLOAD_CACHE_ENTRIES: usize = 32;
@@ -1131,6 +1143,169 @@ mod runtime {
         pub(crate) sequence: u64,
         pub(crate) preview_dimensions: Option<WindowsD3d11OutputDimensions>,
         pub(crate) encoded_outputs: Vec<WindowsD3d11EncodedOutputPlan>,
+        /// #1042: CPU time of each step of this compose on the media thread.
+        pub(crate) cpu_timings: WindowsD3d11ComposeCpuTimings,
+    }
+
+    /// Timestamp slots per query set: start, after uploads, after the
+    /// preview pass, then a (scene end, NV12 end) pair per encoded output.
+    const GPU_TIMESTAMPS_PER_SET: usize = 3 + 2 * MAX_ENCODED_OUTPUTS;
+    /// Sets in flight. At 60 fps eight sets cover about 130 ms of GPU queue
+    /// before a compose goes untimed (counted as skipped).
+    const GPU_QUERY_SETS: usize = 8;
+
+    struct GpuQuerySet {
+        disjoint: ID3D11Query,
+        stamps: [ID3D11Query; GPU_TIMESTAMPS_PER_SET],
+        issued: usize,
+        issued_at: Option<Instant>,
+    }
+
+    /// #1042: GPU timestamp queries around the compose passes, read back with
+    /// `D3D11_ASYNC_GETDATA_DONOTFLUSH` a few frames later so timing never
+    /// waits for the GPU.
+    struct GpuComposeQueries {
+        context: ID3D11DeviceContext,
+        sets: Vec<GpuQuerySet>,
+        timers: WindowsD3d11ComposeGpuTimers,
+    }
+
+    impl GpuComposeQueries {
+        fn new(device: &WindowsD3d11Device) -> Option<Self> {
+            let raw_device = device.raw_device();
+            let context: ID3D11DeviceContext = device.immediate_context().cast().ok()?;
+            let create = |query: D3D11_QUERY| -> Option<ID3D11Query> {
+                let desc = D3D11_QUERY_DESC {
+                    Query: query,
+                    MiscFlags: 0,
+                };
+                let mut created = None;
+                // SAFETY: the descriptor and output Option are valid for the call.
+                unsafe { raw_device.CreateQuery(&desc, Some(&mut created)) }.ok()?;
+                created
+            };
+            let mut sets = Vec::with_capacity(GPU_QUERY_SETS);
+            for _ in 0..GPU_QUERY_SETS {
+                let disjoint = create(D3D11_QUERY_TIMESTAMP_DISJOINT)?;
+                let mut stamps = Vec::with_capacity(GPU_TIMESTAMPS_PER_SET);
+                for _ in 0..GPU_TIMESTAMPS_PER_SET {
+                    stamps.push(create(D3D11_QUERY_TIMESTAMP)?);
+                }
+                sets.push(GpuQuerySet {
+                    disjoint,
+                    stamps: stamps.try_into().ok()?,
+                    issued: 0,
+                    issued_at: None,
+                });
+            }
+            Some(Self {
+                context,
+                sets,
+                timers: WindowsD3d11ComposeGpuTimers::default(),
+            })
+        }
+
+        /// `S_OK` with data, `S_FALSE` while pending, or an error. Calls the
+        /// vtable directly: the wrapper maps `S_FALSE` to `Ok`.
+        fn get_data(&self, query: &ID3D11Query, data: *mut c_void, size: u32) -> HRESULT {
+            // SAFETY: `data` points to `size` writable bytes owned by the caller,
+            // and the query belongs to this context's device.
+            unsafe {
+                (Interface::vtable(&self.context).GetData)(
+                    Interface::as_raw(&self.context),
+                    query.as_raw(),
+                    data,
+                    size,
+                    D3D11_ASYNC_GETDATA_DONOTFLUSH.0 as u32,
+                )
+            }
+        }
+
+        /// Reads every finished set back into the timers. Never blocks.
+        fn collect(&mut self) {
+            for index in 0..self.sets.len() {
+                let Some(issued_at) = self.sets[index].issued_at else {
+                    continue;
+                };
+                let mut disjoint = D3D11_QUERY_DATA_TIMESTAMP_DISJOINT::default();
+                let status = self.get_data(
+                    &self.sets[index].disjoint,
+                    (&raw mut disjoint).cast(),
+                    mem::size_of::<D3D11_QUERY_DATA_TIMESTAMP_DISJOINT>() as u32,
+                );
+                if status == S_FALSE {
+                    continue;
+                }
+                let completion_latency_micros =
+                    u64::try_from(issued_at.elapsed().as_micros()).unwrap_or(u64::MAX);
+                self.sets[index].issued_at = None;
+                if status.is_err() || disjoint.Disjoint.as_bool() {
+                    self.timers.note_disjoint();
+                    continue;
+                }
+                let issued = self.sets[index].issued;
+                let mut ticks = [0_u64; GPU_TIMESTAMPS_PER_SET];
+                let mut complete = true;
+                for (slot, tick) in ticks.iter_mut().enumerate().take(issued) {
+                    let status = self.get_data(
+                        &self.sets[index].stamps[slot],
+                        (tick as *mut u64).cast(),
+                        mem::size_of::<u64>() as u32,
+                    );
+                    complete &= status == S_OK;
+                }
+                match windows_d3d11_gpu_sample_from_ticks(
+                    &ticks[..issued],
+                    disjoint.Frequency,
+                    completion_latency_micros,
+                )
+                .filter(|_| complete)
+                {
+                    Some(sample) => self.timers.observe(sample),
+                    None => self.timers.note_disjoint(),
+                }
+            }
+        }
+
+        /// Opens a set for this compose, or `None` (counted) when every set
+        /// is still in flight.
+        fn begin(&mut self) -> Option<usize> {
+            let Some(index) = self.sets.iter().position(|set| set.issued_at.is_none()) else {
+                self.timers.note_skipped();
+                return None;
+            };
+            let set = &mut self.sets[index];
+            set.issued = 0;
+            // SAFETY: the queries belong to this context's device.
+            unsafe { self.context.Begin(&set.disjoint) };
+            Some(index)
+        }
+
+        fn stamp(&mut self, set: Option<usize>) {
+            let Some(index) = set else {
+                return;
+            };
+            let set = &mut self.sets[index];
+            if set.issued < GPU_TIMESTAMPS_PER_SET {
+                // SAFETY: the query belongs to this context's device.
+                unsafe { self.context.End(&set.stamps[set.issued]) };
+                set.issued += 1;
+            }
+        }
+
+        fn end(&mut self, set: Option<usize>) {
+            let Some(index) = set else {
+                return;
+            };
+            let set = &mut self.sets[index];
+            // SAFETY: the query belongs to this context's device.
+            unsafe { self.context.End(&set.disjoint) };
+            set.issued_at = Some(Instant::now());
+        }
+    }
+
+    fn micros_since(started_at: Instant) -> u64 {
+        u64::try_from(started_at.elapsed().as_micros()).unwrap_or(u64::MAX)
     }
 
     #[cfg(test)]
@@ -1223,6 +1398,9 @@ mod runtime {
         pointer_desktop: Option<PointerDesktopCache>,
         pointer_shape: Option<PointerShapeCache>,
         diagnostics: WindowsD3d11CompositorDiagnostics,
+        /// #1042: created on the first compose; `None` after a refusal.
+        gpu_queries: Option<GpuComposeQueries>,
+        gpu_queries_attempted: bool,
         _thread_affinity: PhantomData<Rc<()>>,
     }
 
@@ -1255,12 +1433,22 @@ mod runtime {
                 pointer_desktop: None,
                 pointer_shape: None,
                 diagnostics: WindowsD3d11CompositorDiagnostics::default(),
+                gpu_queries: None,
+                gpu_queries_attempted: false,
                 _thread_affinity: PhantomData,
             })
         }
 
         pub(crate) fn diagnostics(&self) -> WindowsD3d11CompositorDiagnostics {
             self.diagnostics
+        }
+
+        /// #1042: GPU durations of the compose passes, or `None` when the
+        /// device refused timestamp queries.
+        pub(crate) fn gpu_timings(&self) -> Option<WindowsD3d11ComposeGpuTimings> {
+            self.gpu_queries
+                .as_ref()
+                .map(|queries| queries.timers.summary())
         }
 
         /// Maintains a clean Desktop Duplication surface and composites the
@@ -1510,8 +1698,34 @@ mod runtime {
             preflight_sources(plan, sources)?;
             preflight_targets(plan, targets)?;
 
+            if !self.gpu_queries_attempted {
+                self.gpu_queries_attempted = true;
+                self.gpu_queries = GpuComposeQueries::new(device);
+            }
+            let gpu_set = self.gpu_queries.as_mut().and_then(|queries| {
+                queries.collect();
+                let set = queries.begin();
+                queries.stamp(set);
+                set
+            });
+            let result = self.compose_with_timing(device, plan, sources, targets, gpu_set);
+            if let Some(queries) = self.gpu_queries.as_mut() {
+                queries.end(gpu_set);
+            }
+            result
+        }
+
+        fn compose_with_timing(
+            &mut self,
+            device: &WindowsD3d11Device,
+            plan: &WindowsD3d11ScenePlan,
+            sources: &[WindowsD3d11GpuSource<'_>],
+            targets: WindowsD3d11GpuTargets<'_>,
+            gpu_set: Option<usize>,
+        ) -> Result<WindowsD3d11ComposedFrame, WindowsD3d11CompositorError> {
             let raw_device = device.raw_device();
             let context = device.immediate_context();
+            let mut cpu_timings = WindowsD3d11ComposeCpuTimings::default();
 
             // Resolve every source before changing a destination texture. A
             // bad upload or SRV therefore rejects the whole frame.
@@ -1529,18 +1743,30 @@ mod runtime {
                     WindowsD3d11GpuSourceContent::Texture(texture) => {
                         create_shader_resource(raw_device, texture, "captured source")?
                     }
-                    WindowsD3d11GpuSourceContent::Upload(upload) => self.resolve_upload(
-                        device,
-                        plan.sequence,
-                        layer.source_id,
-                        layer.source_kind,
-                        upload,
-                    )?,
+                    WindowsD3d11GpuSourceContent::Upload(upload) => {
+                        let (shader_resource, upload_micros) = self.resolve_upload(
+                            device,
+                            plan.sequence,
+                            layer.source_id,
+                            layer.source_kind,
+                            upload,
+                        )?;
+                        if let Some(micros) = upload_micros {
+                            if layer.source_kind == WindowsD3d11SceneSourceKind::CameraUpload {
+                                *cpu_timings.camera_upload_micros.get_or_insert(0) += micros;
+                            } else {
+                                cpu_timings.image_upload_micros += micros;
+                            }
+                        }
+                        shader_resource
+                    }
                 };
                 resolved_sources.push(Some(shader_resource));
             }
+            self.stamp_gpu(gpu_set);
 
             if let Some(preview_bgra) = targets.preview_bgra {
+                let pass_started_at = Instant::now();
                 let preview_rtv = create_render_target(raw_device, preview_bgra, "BGRA preview")?;
                 render_scene_target(
                     context,
@@ -1554,9 +1780,12 @@ mod runtime {
                     plan.canvas_dimensions,
                     &preview_rtv,
                 );
+                cpu_timings.preview_pass_micros = Some(micros_since(pass_started_at));
             }
+            self.stamp_gpu(gpu_set);
 
             for output in &plan.encoded_outputs {
+                let pass_started_at = Instant::now();
                 let target = targets
                     .encoded_nv12
                     .iter()
@@ -1576,6 +1805,9 @@ mod runtime {
                     output.dimensions,
                     &scene_render_target,
                 );
+                self.stamp_gpu(gpu_set);
+                cpu_timings.encoded_pass_micros += micros_since(pass_started_at);
+                let nv12_started_at = Instant::now();
                 render_nv12_output(
                     device,
                     &self.shaders,
@@ -1586,6 +1818,8 @@ mod runtime {
                     output.dimensions,
                     target.texture,
                 )?;
+                self.stamp_gpu(gpu_set);
+                cpu_timings.nv12_pass_micros += micros_since(nv12_started_at);
             }
 
             unsafe {
@@ -1599,7 +1833,14 @@ mod runtime {
                 sequence: plan.sequence,
                 preview_dimensions: targets.preview_bgra.map(|_| plan.canvas_dimensions),
                 encoded_outputs: plan.encoded_outputs.clone(),
+                cpu_timings,
             })
+        }
+
+        fn stamp_gpu(&mut self, set: Option<usize>) {
+            if let Some(queries) = self.gpu_queries.as_mut() {
+                queries.stamp(set);
+            }
         }
 
         fn resolve_encoded_scene_surface(
@@ -1652,7 +1893,7 @@ mod runtime {
             source_id: u64,
             source_kind: WindowsD3d11SceneSourceKind,
             upload: WindowsD3d11BgraUpload<'_>,
-        ) -> Result<ID3D11ShaderResourceView, WindowsD3d11CompositorError> {
+        ) -> Result<(ID3D11ShaderResourceView, Option<u64>), WindowsD3d11CompositorError> {
             if source_kind == WindowsD3d11SceneSourceKind::BuddySprite {
                 // A re-scaled pet atlas never goes back to its old size: drop
                 // the leg's stale texture now instead of holding it until the
@@ -1695,7 +1936,9 @@ mod runtime {
             let entry = &mut self.uploads[index];
             let requires_update =
                 !upload.immutable || entry.content_revision != upload.content_revision;
+            let mut upload_micros = None;
             if requires_update {
+                let upload_started_at = Instant::now();
                 // This is the one explicit system-memory upload for camera
                 // frames (and the bounded immutable overlay/image upload path).
                 unsafe {
@@ -1708,6 +1951,7 @@ mod runtime {
                         0,
                     );
                 }
+                upload_micros = Some(micros_since(upload_started_at));
                 entry.content_revision = upload.content_revision;
                 if source_kind == WindowsD3d11SceneSourceKind::CameraUpload {
                     self.diagnostics.camera_upload_frames =
@@ -1715,7 +1959,7 @@ mod runtime {
                 }
             }
             entry.last_used_sequence = sequence;
-            Ok(entry.shader_resource.clone())
+            Ok((entry.shader_resource.clone(), upload_micros))
         }
     }
 

@@ -2066,6 +2066,110 @@ describe('backend RPC contract', () => {
       })
     ).toThrow('sharedTextureHandle')
 
+    // #1042: the media thread's time by stage, and the slowest moment whole.
+    const stage = (samples: number, p95Ms: number, maxMs: number) => ({ samples, p95Ms, maxMs })
+    const idle = stage(0, 0, 0)
+    const withStageTimings = JSON.parse(
+      JSON.stringify({
+        ...diagnostics,
+        windowsD3d11Media: {
+          ...windowsD3d11Media,
+          mediaStageTimings: {
+            loopBusy: stage(980, 2.1, 119),
+            capturePoll: stage(480, 0.2, 1.4),
+            compose: stage(480, 4.5, 101),
+            deviceLockWait: stage(480, 0.01, 96.5),
+            cameraUpload: stage(240, 0.9, 3.2),
+            imageUpload: idle,
+            previewPass: idle,
+            encodedPass: stage(480, 0.3, 1.1),
+            nv12Pass: stage(480, 0.2, 0.8),
+            fenceSignal: stage(480, 0.05, 0.4),
+            encoderSubmit: stage(470, 1.1, 118.8),
+            encoderProcessInput: stage(470, 0.9, 118.2),
+            encoderPoll: stage(900, 0.3, 68.8),
+            encoderProcessOutput: stage(470, 0.6, 68.5),
+            encoderInputHold: stage(470, 18, 52),
+            encoderCreditRefusals: 3,
+            encoderCapacityRefusals: 12,
+            encoderMaxInFlight: 2,
+            previewPresent: idle,
+            setupLoops: 4,
+            slowestLoop: {
+              totalMs: 119.5,
+              capturePollMs: 0.1,
+              composeMs: 0,
+              encoderSubmitMs: 118.9,
+              encoderPollMs: 0.3,
+              previewPresentMs: 0,
+              otherCommandMs: 0,
+              commands: 2
+            },
+            slowestCompose: {
+              totalMs: 101,
+              deviceLockWaitMs: 96.5,
+              fenceRefreshMs: 0.01,
+              cameraUploadMs: 2.5,
+              imageUploadMs: 0,
+              previewPassMs: 0,
+              encodedPassMs: 0.6,
+              nv12PassMs: 0.4,
+              fenceSignalMs: 0.1
+            },
+            gpu: {
+              upload: stage(470, 0.4, 1.2),
+              previewPass: idle,
+              encodedPass: stage(470, 2.2, 6.1),
+              nv12Pass: stage(470, 0.8, 2.4),
+              total: stage(470, 3.1, 9),
+              completionLatency: stage(470, 20, 140),
+              disjoint: 1,
+              skipped: 0
+            }
+          }
+        }
+      })
+    )
+    expect(validateBackendRpcResult('diagnostics.stats', withStageTimings)).toEqual(
+      withStageTimings
+    )
+    const { gpu: _gpu, ...timingsWithoutGpu } = withStageTimings.windowsD3d11Media.mediaStageTimings
+    const withoutGpu = {
+      ...withStageTimings,
+      windowsD3d11Media: {
+        ...withStageTimings.windowsD3d11Media,
+        mediaStageTimings: timingsWithoutGpu
+      }
+    }
+    expect(validateBackendRpcResult('diagnostics.stats', withoutGpu)).toEqual(withoutGpu)
+    expect(() =>
+      validateBackendRpcResult('diagnostics.stats', {
+        ...withStageTimings,
+        windowsD3d11Media: {
+          ...withStageTimings.windowsD3d11Media,
+          mediaStageTimings: {
+            ...withStageTimings.windowsD3d11Media.mediaStageTimings,
+            deviceLockWait: stage(480, 0.01, -1)
+          }
+        }
+      })
+    ).toThrow('maxMs')
+    expect(() =>
+      validateBackendRpcResult('diagnostics.stats', {
+        ...withStageTimings,
+        windowsD3d11Media: {
+          ...withStageTimings.windowsD3d11Media,
+          mediaStageTimings: {
+            ...withStageTimings.windowsD3d11Media.mediaStageTimings,
+            slowestCompose: {
+              ...withStageTimings.windowsD3d11Media.mediaStageTimings.slowestCompose,
+              contextPointer: '0x0000000000000001'
+            }
+          }
+        }
+      })
+    ).toThrow('contextPointer')
+
     expect(() =>
       validateBackendRpcResult('diagnostics.stats', {
         ...diagnostics,

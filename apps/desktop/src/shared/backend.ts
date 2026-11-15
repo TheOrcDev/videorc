@@ -2493,7 +2493,82 @@ export interface WindowsD3d11MediaDiagnostics {
   renderComposeStageMaxMs?: number
   /** Per-stage evidence behind `texturePoolPressureEvents` (#1042). */
   texturePoolPressure?: WindowsD3d11TexturePoolPressureDiagnostics
+  /** Where the single D3D11 media thread spends its time, per stage (#1042). */
+  mediaStageTimings?: WindowsD3d11MediaStageTimingDiagnostics
   fallbackReason?: string
+}
+
+/** One media-thread stage over the generation: runs, p95 of the last 256, worst ever. */
+export interface WindowsD3d11StageTimingDiagnostics {
+  samples: number
+  p95Ms: number
+  maxMs: number
+}
+
+/** The D3D11 media thread's time by stage (#1042). Capture polling, compose, the
+ * camera upload, the encoder and the preview share that one thread, so a stall in
+ * any of them delays all of them; these name which. */
+export interface WindowsD3d11MediaStageTimingDiagnostics {
+  loopBusy: WindowsD3d11StageTimingDiagnostics
+  capturePoll: WindowsD3d11StageTimingDiagnostics
+  compose: WindowsD3d11StageTimingDiagnostics
+  /** Waiting for the device's multithread lock before composing. */
+  deviceLockWait: WindowsD3d11StageTimingDiagnostics
+  cameraUpload: WindowsD3d11StageTimingDiagnostics
+  imageUpload: WindowsD3d11StageTimingDiagnostics
+  previewPass: WindowsD3d11StageTimingDiagnostics
+  encodedPass: WindowsD3d11StageTimingDiagnostics
+  nv12Pass: WindowsD3d11StageTimingDiagnostics
+  fenceSignal: WindowsD3d11StageTimingDiagnostics
+  encoderSubmit: WindowsD3d11StageTimingDiagnostics
+  encoderProcessInput: WindowsD3d11StageTimingDiagnostics
+  encoderPoll: WindowsD3d11StageTimingDiagnostics
+  encoderProcessOutput: WindowsD3d11StageTimingDiagnostics
+  /** A successful ProcessInput to the transform releasing that input. */
+  encoderInputHold: WindowsD3d11StageTimingDiagnostics
+  /** Refusals because the transform had issued no input credit. */
+  encoderCreditRefusals: number
+  /** Refusals because Videorc's own in-flight cap was full. */
+  encoderCapacityRefusals: number
+  encoderMaxInFlight: number
+  previewPresent: WindowsD3d11StageTimingDiagnostics
+  /** Iterations that opened or closed a capture, encoder or preview, kept out of the loop stats. */
+  setupLoops: number
+  /** The whole breakdown of the single slowest loop iteration. */
+  slowestLoop: {
+    totalMs: number
+    capturePollMs: number
+    composeMs: number
+    encoderSubmitMs: number
+    encoderPollMs: number
+    previewPresentMs: number
+    otherCommandMs: number
+    commands: number
+  }
+  /** The whole breakdown of the single slowest compose. */
+  slowestCompose: {
+    totalMs: number
+    deviceLockWaitMs: number
+    fenceRefreshMs: number
+    cameraUploadMs: number
+    imageUploadMs: number
+    previewPassMs: number
+    encodedPassMs: number
+    nv12PassMs: number
+    fenceSignalMs: number
+  }
+  /** GPU durations of the compose passes; absent when the device refused the queries. */
+  gpu?: {
+    upload: WindowsD3d11StageTimingDiagnostics
+    previewPass: WindowsD3d11StageTimingDiagnostics
+    encodedPass: WindowsD3d11StageTimingDiagnostics
+    nv12Pass: WindowsD3d11StageTimingDiagnostics
+    total: WindowsD3d11StageTimingDiagnostics
+    /** Issue to resolve: long values mean the GPU queue ran far behind the CPU. */
+    completionLatency: WindowsD3d11StageTimingDiagnostics
+    disjoint: number
+    skipped: number
+  }
 }
 
 /** Why the D3D11 texture pool ran short (#1042). `texturePoolPressureEvents` is the
