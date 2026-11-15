@@ -434,6 +434,18 @@ async function proveSessionStartStoresNoStreamKey() {
     assert.ok(scrubbed, 'the old remembered capture survives its scrub')
     assert.ok(!scrubbed.includes(oldRowKey), 'the old row lost its key at open')
     assert.ok(scrubbed.includes('stream-target:custom:manual-stream-key'))
+    // The seeded row already names the reference the store answers with, so
+    // drop it: the check after `session.start` then proves the start wrote
+    // its own row.
+    {
+      const database = new DatabaseSync(databasePath)
+      try {
+        database.prepare('DELETE FROM app_settings WHERE key = ?').run('last_capture_session')
+      } finally {
+        database.close()
+      }
+    }
+    assert.equal(readRows().remembered, undefined, 'the seeded row is gone before the start')
 
     const stored = await request(backend, timeoutMs, 'streamTargets.manualKey.store', {
       targetId: 'custom',
