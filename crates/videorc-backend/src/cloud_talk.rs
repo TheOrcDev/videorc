@@ -1376,24 +1376,51 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
         }
         // Persist ownership before returning the RPC error. Cleanup has its
         // own budget, and a failed End leaves launch/Go Live recovery armed.
-        lock(&self.slot).keep_remembering(show_id);
+        {
+            let mut runtime = lock(&self.slot);
+            runtime.keep_remembering(show_id);
+            runtime.failed_room_open_end = Some(show_id.to_string());
+        }
         self.hooks.emit_from(&self.slot);
         self.return_room_camera_in_background();
+        self.retry_failed_room_end(bearer, show_id);
+    }
+
+    /// One cleanup attempt at a time. A timeout is not proof the server
+    /// cancelled End, so keep the recovery barrier until termination is known.
+    pub(crate) fn retry_failed_room_end(&self, bearer: &str, show_id: &str) {
+        {
+            let mut runtime = lock(&self.slot);
+            if runtime.failed_room_open_end.as_deref() != Some(show_id)
+                || runtime.failed_room_end_in_flight
+            {
+                return;
+            }
+            runtime.failed_room_end_in_flight = true;
+        }
         let context = self.clone();
         let bearer = bearer.to_string();
         let show_id = show_id.to_string();
         tokio::spawn(async move {
-            if matches!(
+            let confirmed = matches!(
                 tokio::time::timeout(
                     crate::cloud_control_web::CONTROL_INTENT_BUDGET,
                     context.web.end_show(&bearer, &show_id),
                 )
                 .await,
                 Ok(Ok(()))
-            ) {
-                lock(&context.slot).forget_failed_open_if_remembered(&show_id);
-                context.hooks.emit_from(&context.slot);
+            );
+            {
+                let mut runtime = lock(&context.slot);
+                if runtime.failed_room_open_end.as_deref() == Some(&show_id) {
+                    runtime.failed_room_end_in_flight = false;
+                    if confirmed {
+                        runtime.failed_room_open_end = None;
+                        runtime.forget_failed_open_if_remembered(&show_id);
+                    }
+                }
             }
+            context.hooks.emit_from(&context.slot);
         });
     }
 
@@ -1428,6 +1455,9 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
                     "The camera is still returning from the previous room. Try again.".to_string(),
                 )
                 .into());
+            }
+            if runtime.failed_room_open_end.is_some() {
+                bail!("The previous room is still closing. Try again.");
             }
             if runtime.show.is_some() || runtime.talk.is_some() {
                 return Err(RoomOpenRefusal::ShowLive.into());
@@ -2217,6 +2247,9 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
                     "The camera is still returning from the previous room. Try again.".to_string(),
                 )
                 .into());
+            }
+            if runtime.failed_room_open_end.is_some() {
+                bail!("The previous room is still closing. Try again.");
             }
             let Some(show) = runtime.show.as_ref() else {
                 bail!("There's no Videorc Cloud show to resume.");

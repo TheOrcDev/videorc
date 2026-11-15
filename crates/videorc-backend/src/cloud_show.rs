@@ -1458,6 +1458,9 @@ pub struct CloudShowRuntime {
     pub(crate) talk: Option<TalkShowState>,
     /// A failed open still owns its camera return; a later lend must wait.
     pub(crate) room_camera_returning: bool,
+    /// A failed open must finish End before this process can recover its room.
+    pub(crate) failed_room_open_end: Option<String>,
+    pub(crate) failed_room_end_in_flight: bool,
     /// C6b: the test that runs or the last one that ran, and the running
     /// test task's cancel switch (`Some` only while it runs).
     test: Option<CloudTestStatus>,
@@ -4079,6 +4082,27 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
         bearer: &str,
         current: CurrentShowResponse,
     ) -> Result<CloudStatus> {
+        let pending_end = lock(&self.slot).failed_room_open_end.clone();
+        if let Some(show_id) = pending_end {
+            if current
+                .show
+                .as_ref()
+                .is_some_and(|show| show.id == show_id && show.status != "ended")
+            {
+                // Camera Return may already have finished. Adopting this
+                // room would race the independent End still owned by us.
+                // Retry only after the preceding attempt has settled; an
+                // HTTP timeout alone does not prove server teardown stopped.
+                self.retry_failed_room_end(bearer, &show_id);
+                bail!("The previous room is still closing. Try again.");
+            }
+            let mut runtime = lock(&self.slot);
+            if runtime.failed_room_open_end.as_deref() == Some(&show_id) {
+                // Current confirms that this account no longer holds it.
+                runtime.failed_room_open_end = None;
+                runtime.failed_room_end_in_flight = false;
+            }
+        }
         // The web answered: the launch check is done for this sign-in (L4).
         lock(&self.slot).launch_checked = true;
         let Some(show) = current.show.filter(|show| show.status != "ended") else {
@@ -4127,6 +4151,12 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
         // `Err` carries the generation of a fed show whose poll starts again.
         let generation = 'held: {
             let mut runtime = lock(&self.slot);
+            if runtime.failed_room_open_end.as_deref() == Some(&show.id) {
+                // Recheck under the adoption lock in case cleanup began on
+                // another executor thread after the check above.
+                runtime.launch_checked = false;
+                bail!("The previous room is still closing. Try again.");
+            }
             if runtime
                 .show
                 .as_ref()
@@ -12516,7 +12546,32 @@ mod tests {
                 .unwrap_err();
             assert!(reopen.to_string().contains("still returning"));
             assert_eq!(web.create_calls.load(Ordering::SeqCst), 1);
-            tokio::time::sleep(Duration::from_secs(5)).await;
+            tokio::time::sleep(Duration::from_secs(3)).await;
+            assert!(!lock(&harness.context.slot).room_camera_returning);
+            web.current
+                .lock()
+                .unwrap()
+                .push_back(Ok(held_current(&created_managed_talk())));
+            let recovery = harness
+                .context
+                .detect_current_show("bearer")
+                .await
+                .unwrap_err();
+            assert!(recovery.to_string().contains("still closing"));
+            assert!(lock(&harness.context.slot).show.is_none());
+            assert!(!lock(&harness.context.slot).launch_checked);
+            let resume = harness
+                .context
+                .resume_room(Some("bearer".into()))
+                .await
+                .unwrap_err();
+            assert!(resume.to_string().contains("still closing"));
+            assert_eq!(
+                web.end_calls.lock().unwrap().len(),
+                1,
+                "no concurrent End retry"
+            );
+            tokio::time::sleep(Duration::from_secs(2)).await;
             assert_eq!(
                 harness.camera.lock().unwrap().last(),
                 Some(&crate::cloud_talk::CameraHandover::Return)
@@ -12526,7 +12581,51 @@ mod tests {
                 lock(&harness.context.slot).remembered_show(),
                 end_fails.then_some("sh_abc")
             );
+            if end_fails {
+                web.end_fails.store(false, Ordering::SeqCst);
+                web.current
+                    .lock()
+                    .unwrap()
+                    .push_back(Ok(held_current(&created_managed_talk())));
+                assert!(harness.context.detect_current_show("bearer").await.is_err());
+                tokio::task::yield_now().await;
+                assert_eq!(web.end_calls.lock().unwrap().len(), 2);
+                tokio::time::sleep(Duration::from_secs(5)).await;
+            }
+            assert!(lock(&harness.context.slot).failed_room_open_end.is_none());
+            assert!(lock(&harness.context.slot).remembered_show().is_none());
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn timed_out_failed_room_end_keeps_recovery_blocked_until_a_confirmed_retry() {
+        let harness = harness(true);
+        let web = &harness.context.web;
+        {
+            let mut runtime = lock(&harness.context.slot);
+            runtime.keep_remembering("sh_abc");
+            runtime.failed_room_open_end = Some("sh_abc".into());
+        }
+        web.end_delay_ms.store(40_000, Ordering::SeqCst);
+        harness.context.retry_failed_room_end("bearer", "sh_abc");
+        tokio::task::yield_now().await;
+        tokio::time::sleep(Duration::from_secs(23)).await;
+        assert!(!lock(&harness.context.slot).failed_room_end_in_flight);
+        assert_eq!(
+            lock(&harness.context.slot).failed_room_open_end.as_deref(),
+            Some("sh_abc")
+        );
+        web.end_delay_ms.store(0, Ordering::SeqCst);
+        web.current
+            .lock()
+            .unwrap()
+            .push_back(Ok(held_current(&created_managed_talk())));
+        assert!(harness.context.detect_current_show("bearer").await.is_err());
+        assert!(lock(&harness.context.slot).show.is_none());
+        tokio::task::yield_now().await;
+        assert!(lock(&harness.context.slot).failed_room_open_end.is_none());
+        assert!(lock(&harness.context.slot).remembered_show().is_none());
+        assert_eq!(web.end_calls.lock().unwrap().len(), 2);
     }
 
     #[tokio::test(start_paused = true)]

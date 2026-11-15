@@ -276,7 +276,7 @@ The answer is `{ "rev", "state" }` ◇. `state` deserializes as `RunnerState` wi
 | `liveSeconds` | D `cloud_show.rs:1063-1064` | Seconds since the first on-air beacon, hold included (R:13-18). Worked out at answer time |
 | `feeds[]` | `CloudFeedStatus`, D `cloud_show.rs:344-351` | One per ingress. `connected` from `ingress_started` and `ingress_ended`. `kbps` from `ListIngress`, cached 2 s, omitted when LiveKit reports 0 ⚠ |
 | `legs[]` | `RunnerLeg`, D `cloud_show.rs:1121-1137` | Section 8.3. `legs[].resend` is **new** and optional (section 8.4) |
-| `destinationsSet`  | D `cloud_show.rs:1071-1072`, read at `:2111-2114` | `false` whenever any orientation needs repair, even while another streams or is held by the restart cap. Otherwise `true` while a streaming egress is `STARTING` or `ACTIVE`, after `legs/end`, or when all remaining sides have terminal destination failures or are held. Pending End and explicit `legs/end` suppress resends. It is already `true` in the `rev` a `PUT …/destinations` answer names, not first at `egress_started`: otherwise the desktop reads a dead egress and sends the list again |
+| `destinationsSet`  | D `cloud_show.rs:1071-1072`, read at `:2111-2114` | `false` whenever any orientation needs repair, even while another streams or is held by the restart cap. Otherwise `true` while a streaming egress is `STARTING` or `ACTIVE`, after `legs/end`, or when all remaining sides have terminal destination failures or are held. Pending End and explicit `legs/end` suppress resends. When the PUT leaves no orientation needing repair, it is already `true` in the answer’s `rev`, not first at `egress_started`. A non-replacing PUT for one orientation leaves it `false` if another still needs repair |
 | `restarts` | D `cloud_show.rs:1075-1076`, read at `:2115-2117` | Times a streaming egress ended by itself while the show was open, except one whose every stream was `FAILED` ◇. Not the count of egresses started. An egress the web stopped itself (`replace`, `legs/end`, End) never counts |
 | `holdImageSet` | D `cloud_show.rs:1079-1080` | A hold image is stored |
 | `desktopConnected` | Not read by the desktop (R:316-322) | A state poll in the last 15 s |
@@ -1003,7 +1003,7 @@ Rows go to `cloud_show_usage`, counted once on `(show_id, seq)` as today (W `met
 | One of several destinations dies | That leg `reconnecting`, then `failed` after about 31 s | The watchdog's Reconnect: `PUT …/destinations` with that one id |
 | The only destination dies | That leg `reconnecting` with `resend: true` | `PUT …/destinations` with that one id, by itself (section 8.4) |
 | A destination is refused by the guard | That leg `failed` with the fixed message | None |
-| The streaming egress ends with every stream `FAILED` ◇ | Those legs `failed`, `restarts` unchanged; `destinationsSet: true` only if no other side needs repair | Explicit Reconnect; no automatic full-list resend |
+| The streaming egress ends with every stream `FAILED` ◇ | Those legs `failed`, `restarts` unchanged; `destinationsSet: true` only if no other side needs repair | Explicit Reconnect; this failure alone triggers no automatic full-list resend. Another orientation needing repair may trigger a full-list resend including this one |
 | The streaming egress dies otherwise ◇                           | Its legs leave; `restarts` plus one. `destinationsSet: false` for any repairable dead side, even with another side running or held | `PUT …/destinations` with the full list, no `replace`                                                     |
 | The third such death in 10 min on an orientation ◇              | Legs `failed`: `Stop, then go live again to reconnect.`; `destinationsSet: true` only if no other side needs repair                                                   | Requests naming only held sides give 503 `cloud-media-unavailable` for 10 min from that death             |
 | The egress dies, the desktop is gone | — | The web ends the show `egress-lost` after 60 s |
@@ -1171,6 +1171,6 @@ selection, Open the room bounds local test cancellation and camera handover to
 1 s, reserving the existing 20 s create timeout and at least 1 s for managed
 control within 22 s. A failed managed open remembers the show id before
 returning; background End has a fresh 22 s budget, and only confirmed cleanup
-forgets that id. Camera return also has its own bounded task. Recording download
+forgets that id. Recovery cannot adopt or resume it while End is unconfirmed, even after camera return; a later current-show check retries a failed End one attempt at a time. Camera return also has its own bounded task. Recording download
 snapshots recover missed terminal events; cancellation of an absent job
 triggers a snapshot refresh. These additions do not change node media.

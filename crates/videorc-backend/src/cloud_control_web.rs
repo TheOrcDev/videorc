@@ -670,6 +670,8 @@ const FINISHED_DOWNLOADS_KEPT: usize = 32;
 struct DownloadJobsState {
     closing: bool,
     latest: HashMap<String, RecordingDownloadEvent>,
+    /// Recording ids in terminal-completion order, oldest first.
+    terminal_order: std::collections::VecDeque<String>,
     running: HashMap<String, RunningDownload>,
     /// The MP4 each finished job saved, newest last, by job id: main reveals
     /// one by its id (the Library's Show in Finder), never by a renderer path.
@@ -696,26 +698,15 @@ impl RecordingDownloadJobs {
             .0
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        jobs.terminal_order.retain(|id| id != &event.recording_id);
+        if event.state != DownloadState::Running {
+            jobs.terminal_order.push_back(event.recording_id.clone());
+        }
         jobs.latest
             .insert(event.recording_id.clone(), event.clone());
-        while jobs
-            .latest
-            .values()
-            .filter(|event| event.state != DownloadState::Running)
-            .count()
-            > FINISHED_DOWNLOADS_KEPT
-        {
-            let remove = jobs
-                .latest
-                .iter()
-                .find(|(id, entry)| {
-                    *id != &event.recording_id && entry.state != DownloadState::Running
-                })
-                .map(|(id, _)| id.clone());
-            if let Some(id) = remove {
+        while jobs.terminal_order.len() > FINISHED_DOWNLOADS_KEPT {
+            if let Some(id) = jobs.terminal_order.pop_front() {
                 jobs.latest.remove(&id);
-            } else {
-                break;
             }
         }
     }
@@ -759,6 +750,8 @@ impl RecordingDownloadJobs {
             path: None,
             error: None,
         };
+        // A retry is running again; its previous terminal must not evict it.
+        jobs.terminal_order.retain(|id| id != &event.recording_id);
         // The snapshot must know the job before its start RPC can return.
         jobs.latest
             .insert(event.recording_id.clone(), event.clone());
@@ -2744,6 +2737,55 @@ rtmps://h/app/key 'http://x.test/y'";
         for absent in ["path", "error", "doneSegments", "totalSegments"] {
             assert!(wire.get(absent).is_none());
         }
+    }
+
+    #[test]
+    fn download_snapshots_evict_oldest_completions_and_preserve_running_retries() {
+        let jobs = RecordingDownloadJobs::default();
+        let event = |id: usize, state| RecordingDownloadEvent {
+            job_id: format!("job_{id}"),
+            recording_id: format!("rec_{id}"),
+            state,
+            done_segments: None,
+            total_segments: None,
+            path: None,
+            error: None,
+        };
+        for id in 0..32 {
+            jobs.remember(&event(id, DownloadState::Done));
+        }
+        // Retry the oldest recording. It no longer occupies a terminal slot.
+        jobs.remember(&event(0, DownloadState::Running));
+        jobs.remember(&event(32, DownloadState::Failed));
+        jobs.remember(&event(33, DownloadState::Cancelled));
+        let snapshot = jobs.snapshot();
+        assert_eq!(snapshot.len(), 33);
+        assert!(
+            snapshot
+                .iter()
+                .any(|e| e.recording_id == "rec_0" && e.state == DownloadState::Running)
+        );
+        assert!(!snapshot.iter().any(|e| e.recording_id == "rec_1"));
+        assert!(snapshot.iter().any(|e| e.recording_id == "rec_32"));
+        // Completion of the retried job is newest, independent of recording id.
+        jobs.remember(&event(0, DownloadState::Done));
+        let snapshot = jobs.snapshot();
+        assert_eq!(snapshot.len(), 32);
+        assert!(!snapshot.iter().any(|e| e.recording_id == "rec_2"));
+        assert!(
+            snapshot
+                .iter()
+                .any(|e| e.recording_id == "rec_0" && e.state == DownloadState::Done)
+        );
+        assert_eq!(
+            jobs.0
+                .lock()
+                .unwrap()
+                .terminal_order
+                .back()
+                .map(String::as_str),
+            Some("rec_0")
+        );
     }
 
     #[tokio::test]
