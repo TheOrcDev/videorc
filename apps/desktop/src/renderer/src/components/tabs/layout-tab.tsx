@@ -121,6 +121,13 @@ import {
   SCENE_INSPECTOR_PAIR
 } from '@/lib/page-layout'
 import { openWorkspaceTab } from '@/lib/workspace-navigation'
+import {
+  chromaKeyHex,
+  type GreenScreenColor,
+  greenScreenColor,
+  SCENE_GREEN_SCREEN_EVENT,
+  takeSceneGreenScreenRequest
+} from '@/lib/green-screen'
 import { freeformSwitching, presetSwitching } from '@/lib/layout-switch-pending'
 import {
   effectiveCameraMaskShape,
@@ -134,11 +141,6 @@ import {
   screenBoxIsPicture,
   type FractionRect
 } from '../../../../shared/scene-picture-geometry'
-
-// The two real-world screen colors; the protocol takes any #RRGGBB so a
-// custom picker later needs no wire change.
-const CHROMA_KEY_GREEN = '#00FF00'
-const CHROMA_KEY_BLUE = '#0000FF'
 
 // What a running recording or livestream locks on this page (plan 174, C-22,
 // narrowed by plan 215 D1): where a source sits, until the session says a
@@ -304,7 +306,7 @@ const CAMERA_FIT_OPTIONS: SegmentedControlOption<CameraFit>[] = [
   { value: 'fit', label: 'Fit frame' }
 ]
 
-const CHROMA_KEY_COLOR_OPTIONS: SegmentedControlOption<'green' | 'blue'>[] = [
+const CHROMA_KEY_COLOR_OPTIONS: SegmentedControlOption<GreenScreenColor>[] = [
   { value: 'green', label: 'Green' },
   { value: 'blue', label: 'Blue' }
 ]
@@ -547,6 +549,31 @@ export function LayoutTab(): ReactElement {
     selectedSceneSourceId,
     setSelectedSceneSourceId
   ])
+  // Green screen from the Studio's Camera row or ⌘K: the camera takes the
+  // stage's one selection and its inspector brings Green screen into view.
+  // The request waits for the page (it mounts only while open), and a page
+  // already open hears it.
+  const [greenScreenFocus, setGreenScreenFocus] = useState(false)
+  useEffect(() => {
+    const take = (): void => {
+      if (takeSceneGreenScreenRequest()) setGreenScreenFocus(true)
+    }
+    take()
+    window.addEventListener(SCENE_GREEN_SCREEN_EVENT, take)
+    return () => window.removeEventListener(SCENE_GREEN_SCREEN_EVENT, take)
+  }, [])
+  useEffect(() => {
+    if (!greenScreenFocus || !scene) return
+    const camera = scene.sources.find((source) => source.kind === 'camera')
+    if (!camera) {
+      setGreenScreenFocus(false)
+      return
+    }
+    selectBanner(null)
+    setSelectedOverlayItem(null)
+    setSelectedSceneSourceId(camera.id)
+  }, [greenScreenFocus, scene, selectBanner, setSelectedSceneSourceId])
+  const greenScreenFocused = useCallback(() => setGreenScreenFocus(false), [])
   // A banner selected from elsewhere (Assets → Place on Scene) takes the
   // stage's one selection.
   useEffect(() => {
@@ -1149,6 +1176,7 @@ export function LayoutTab(): ReactElement {
           ) : selectedSource.kind === 'camera' ? (
             <CameraInspector
               aspectLocked={aspectLocked}
+              greenScreenFocus={greenScreenFocus}
               isCameraOnly={isCameraOnly}
               isFreeform={isFreeform}
               isSessionActive={isSessionActive}
@@ -1167,6 +1195,7 @@ export function LayoutTab(): ReactElement {
               onApplyCameraPreset={applyCameraPreset}
               onApplyLayoutPatch={applyLayoutPatch}
               onCameraLookChange={applyCameraLook}
+              onGreenScreenFocused={greenScreenFocused}
               cameraLookDisabledReason={
                 wsStatus !== 'connected'
                   ? 'Videorc is reconnecting.'
@@ -1417,12 +1446,14 @@ function CameraInspector({
   positionLockReason,
   stageDragging,
   aspectLocked,
+  greenScreenFocus,
   outputWidth,
   outputHeight,
   onAspectLockedChange,
   onApplyCameraPreset,
   onApplyLayoutPatch,
   onCameraLookChange,
+  onGreenScreenFocused,
   cameraLookDisabledReason,
   onPatchLayout,
   onTransformCommit,
@@ -1444,17 +1475,29 @@ function CameraInspector({
   positionLockReason: string | null
   stageDragging: boolean
   aspectLocked: boolean
+  /** Bring Green screen into view and focus its switch (the Studio's Adjust, ⌘K). */
+  greenScreenFocus: boolean
   outputWidth: number
   outputHeight: number
   onAspectLockedChange: (locked: boolean) => void
   onApplyCameraPreset: (patch: Partial<CameraLayout>) => void
   onApplyLayoutPatch: (patch: Partial<CameraLayout>) => void
   onCameraLookChange: (look: NonNullable<CameraLayout['cameraLook']>) => void
+  onGreenScreenFocused: () => void
   cameraLookDisabledReason?: string
   onPatchLayout: (patch: Partial<CameraLayout>) => void
   onTransformCommit: (patch: { x?: number; y?: number; width?: number; height?: number }) => void
   onVisibilityChange: (sourceId: string, visible: boolean) => Promise<void>
 }): ReactElement {
+  // The Studio's Adjust and ⌘K land here: Green screen in view, its switch
+  // focused, once per request.
+  useEffect(() => {
+    if (!greenScreenFocus) return
+    const section = document.querySelector<HTMLElement>('[data-videorc-camera-green-screen]')
+    section?.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
+    section?.querySelector<HTMLElement>('[role="switch"]')?.focus({ preventScroll: true })
+    onGreenScreenFocused()
+  }, [greenScreenFocus, onGreenScreenFocused])
   // Plan 215 D1: while recording or live, the box's line says what is locked
   // or where a change lands; the preset copy stays where there is no box.
   const positionLocked = positionLockReason !== null
@@ -1626,6 +1669,92 @@ function CameraInspector({
           }}
         />
       </PanelSection>
+      {/* Green screen right under the camera's name, before Placement: a
+          yes or no people look for first, with its tuning folded until on. */}
+      <PanelSection
+        className="min-w-0"
+        data-videorc-camera-green-screen=""
+        headingLevel={3}
+        title="Green screen"
+      >
+        <Field orientation="horizontal">
+          <FieldContent>
+            <FieldLabel htmlFor="camera-chroma-key">Key out background</FieldLabel>
+            <p className="text-xs text-muted-foreground">
+              Needs an evenly lit green or blue screen behind you.
+            </p>
+          </FieldContent>
+          <Switch
+            checked={layout.cameraChromaKeyEnabled}
+            id="camera-chroma-key"
+            onCheckedChange={(cameraChromaKeyEnabled) =>
+              onApplyLayoutPatch({ cameraChromaKeyEnabled })
+            }
+          />
+        </Field>
+        {layout.cameraChromaKeyEnabled ? (
+          <>
+            <Field>
+              <FieldLabel>Key color</FieldLabel>
+              <SegmentedControl
+                className="w-full"
+                options={CHROMA_KEY_COLOR_OPTIONS}
+                value={greenScreenColor(layout)}
+                onValueChange={(color) =>
+                  onApplyLayoutPatch({ cameraChromaKeyColor: chromaKeyHex(color) })
+                }
+              />
+            </Field>
+            <PowerSlider
+              label="Similarity"
+              max={100}
+              min={0}
+              numericInput
+              step={1}
+              suffix="%"
+              value={layout.cameraChromaKeySimilarityPct}
+              onChange={(cameraChromaKeySimilarityPct) =>
+                onPatchLayout({ cameraChromaKeySimilarityPct })
+              }
+              onCommit={(cameraChromaKeySimilarityPct) =>
+                onApplyLayoutPatch({ cameraChromaKeySimilarityPct })
+              }
+            />
+            <PowerSlider
+              label="Smoothness"
+              max={100}
+              min={0}
+              numericInput
+              step={1}
+              suffix="%"
+              value={layout.cameraChromaKeySmoothnessPct}
+              onChange={(cameraChromaKeySmoothnessPct) =>
+                onPatchLayout({ cameraChromaKeySmoothnessPct })
+              }
+              onCommit={(cameraChromaKeySmoothnessPct) =>
+                onApplyLayoutPatch({ cameraChromaKeySmoothnessPct })
+              }
+            />
+            <PowerSlider
+              label="Spill removal"
+              max={100}
+              min={0}
+              numericInput
+              step={1}
+              suffix="%"
+              value={layout.cameraChromaKeySpillPct}
+              onChange={(cameraChromaKeySpillPct) => onPatchLayout({ cameraChromaKeySpillPct })}
+              onCommit={(cameraChromaKeySpillPct) =>
+                onApplyLayoutPatch({ cameraChromaKeySpillPct })
+              }
+            />
+            <CameraKeyEdgesFields
+              edges={cameraKeyEdgesOf(layout)}
+              onCommit={(cameraChromaKeyEdges) => onApplyLayoutPatch({ cameraChromaKeyEdges })}
+            />
+          </>
+        ) : null}
+      </PanelSection>
       <PanelSection
         className="min-w-0"
         description={placementDescription}
@@ -1700,87 +1829,6 @@ function CameraInspector({
         onChange={onCameraLookChange}
         disabledReason={cameraLookDisabledReason}
       />
-      <PanelSection className="min-w-0" headingLevel={3} title="Green screen">
-        <Field orientation="horizontal">
-          <FieldContent>
-            <FieldLabel htmlFor="camera-chroma-key">Key out background</FieldLabel>
-            <p className="text-xs text-muted-foreground">
-              Needs an evenly lit green or blue screen behind you.
-            </p>
-          </FieldContent>
-          <Switch
-            checked={layout.cameraChromaKeyEnabled}
-            id="camera-chroma-key"
-            onCheckedChange={(cameraChromaKeyEnabled) =>
-              onApplyLayoutPatch({ cameraChromaKeyEnabled })
-            }
-          />
-        </Field>
-        {layout.cameraChromaKeyEnabled ? (
-          <>
-            <Field>
-              <FieldLabel>Key color</FieldLabel>
-              <SegmentedControl
-                className="w-full"
-                options={CHROMA_KEY_COLOR_OPTIONS}
-                value={layout.cameraChromaKeyColor === CHROMA_KEY_BLUE ? 'blue' : 'green'}
-                onValueChange={(color) =>
-                  onApplyLayoutPatch({
-                    cameraChromaKeyColor: color === 'blue' ? CHROMA_KEY_BLUE : CHROMA_KEY_GREEN
-                  })
-                }
-              />
-            </Field>
-            <PowerSlider
-              label="Similarity"
-              max={100}
-              min={0}
-              numericInput
-              step={1}
-              suffix="%"
-              value={layout.cameraChromaKeySimilarityPct}
-              onChange={(cameraChromaKeySimilarityPct) =>
-                onPatchLayout({ cameraChromaKeySimilarityPct })
-              }
-              onCommit={(cameraChromaKeySimilarityPct) =>
-                onApplyLayoutPatch({ cameraChromaKeySimilarityPct })
-              }
-            />
-            <PowerSlider
-              label="Smoothness"
-              max={100}
-              min={0}
-              numericInput
-              step={1}
-              suffix="%"
-              value={layout.cameraChromaKeySmoothnessPct}
-              onChange={(cameraChromaKeySmoothnessPct) =>
-                onPatchLayout({ cameraChromaKeySmoothnessPct })
-              }
-              onCommit={(cameraChromaKeySmoothnessPct) =>
-                onApplyLayoutPatch({ cameraChromaKeySmoothnessPct })
-              }
-            />
-            <PowerSlider
-              label="Spill removal"
-              max={100}
-              min={0}
-              numericInput
-              step={1}
-              suffix="%"
-              value={layout.cameraChromaKeySpillPct}
-              onChange={(cameraChromaKeySpillPct) => onPatchLayout({ cameraChromaKeySpillPct })}
-              onCommit={(cameraChromaKeySpillPct) =>
-                onApplyLayoutPatch({ cameraChromaKeySpillPct })
-              }
-            />
-            <CameraKeyEdgesFields
-              edges={cameraKeyEdgesOf(layout)}
-              onCommit={(cameraChromaKeyEdges) => onApplyLayoutPatch({ cameraChromaKeyEdges })}
-            />
-          </>
-        ) : null}
-      </PanelSection>
     </>
   )
 }

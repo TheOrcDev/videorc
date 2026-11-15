@@ -2,6 +2,7 @@ import { useStudioCloud } from '@/hooks/use-studio'
 import { DEFAULT_SCREEN_HIDE_SHORTCUT } from '../../../shared/global-shortcuts'
 import {
   AccountIcon,
+  AdjustIcon,
   CaptionsIcon,
   ChatIcon,
   ClipIcon,
@@ -66,6 +67,12 @@ import { useVirtualCamera } from '@/hooks/use-virtual-camera'
 import { VIDEORC_CAMERA_COPY, virtualCameraView } from '@/lib/virtual-camera-view'
 import { CONNECT_AGENT_COMMAND, STOP_AGENTS_COMMAND } from '@/lib/agents-view'
 import { EDIT_SCENE_LABEL } from '@/lib/edit-scene'
+import {
+  GREEN_SCREEN_KEYWORDS,
+  GREEN_SCREEN_SETTINGS_LABEL,
+  greenScreenCommandLabel,
+  openSceneGreenScreen
+} from '@/lib/green-screen'
 import {
   useStudioBanners,
   useStudioCore,
@@ -163,6 +170,7 @@ export function CommandPalette({
     applySavedSceneResult,
     captureConfig,
     setCaptureConfig,
+    applyLayoutPatch,
     settings,
     setSettings,
     markClip,
@@ -213,6 +221,11 @@ export function CommandPalette({
   const microphoneMuted = captureConfig.audio.microphoneMuted
   const muteLabel = microphoneMuted ? 'Unmute microphone' : 'Mute microphone'
   const MuteIcon = microphoneMuted ? SpeakerOnIcon : SpeakerOffIcon
+  // The camera's key, as the Studio's Camera row turns it: only with a camera.
+  const cameraPicked = Boolean(
+    captureConfig.sources.cameraId ?? captureConfig.sources.wantedCameraId
+  )
+  const greenScreenCommand = greenScreenCommandLabel(captureConfig.layout)
 
   const openPage = (id: WorkspaceTab): void => {
     if (isStudioPanel(id)) openStudioPanel(id)
@@ -285,6 +298,23 @@ export function CommandPalette({
             {screenPrivacy.hidden ? 'Show screen' : 'Hide screen'}
             {shortcut(settings.globalShortcuts?.screenHideToggle ?? DEFAULT_SCREEN_HIDE_SHORTCUT)}
           </CommandItem>
+          {cameraPicked ? (
+            <CommandItem
+              value={greenScreenCommand}
+              keywords={[...GREEN_SCREEN_KEYWORDS]}
+              onSelect={() =>
+                run(() =>
+                  applyLayoutPatch({
+                    cameraChromaKeyEnabled: !captureConfig.layout.cameraChromaKeyEnabled
+                  })
+                )
+              }
+            >
+              <CameraIcon className="size-4" />
+              {greenScreenCommand}
+              <Context>Camera</Context>
+            </CommandItem>
+          ) : null}
           {/* Plan 214 E2: a mirror of Output → Videorc Camera, never where the
               camera is hidden (the hide rule), off while it can't run. */}
           {cameraView.hidden ? null : (
@@ -402,6 +432,17 @@ export function CommandPalette({
                   >
                     <EditIcon className="size-4" />
                     {EDIT_SCENE_LABEL}
+                    <Context>Scene</Context>
+                  </CommandItem>
+                ) : null}
+                {page.id === 'layouts' ? (
+                  <CommandItem
+                    value={GREEN_SCREEN_SETTINGS_LABEL}
+                    keywords={[...GREEN_SCREEN_KEYWORDS, 'similarity', 'spill', 'smoothness']}
+                    onSelect={() => run(openSceneGreenScreen)}
+                  >
+                    <AdjustIcon className="size-4" />
+                    {GREEN_SCREEN_SETTINGS_LABEL}
                     <Context>Scene</Context>
                   </CommandItem>
                 ) : null}

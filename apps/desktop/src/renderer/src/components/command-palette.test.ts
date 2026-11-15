@@ -92,7 +92,12 @@ beforeEach(() => {
     savedScenes: [],
     applySavedSceneResult: vi.fn(async () => ({ ok: true })),
     applySavedScene: vi.fn(async () => true),
-    captureConfig: { audio: { microphoneMuted: false } },
+    captureConfig: {
+      audio: { microphoneMuted: false },
+      sources: {},
+      layout: { cameraChromaKeyEnabled: false, cameraChromaKeyColor: '#00FF00' }
+    },
+    applyLayoutPatch: vi.fn(),
     setCaptureConfig: vi.fn(),
     settings: {},
     markClip: vi.fn(async () => null),
@@ -258,7 +263,10 @@ describe('CommandPalette session actions (plan 174 S0.1, S2.2)', () => {
       audio: { microphoneMuted: true, gain: 1 }
     })
 
-    mocked.core.captureConfig = { audio: { microphoneMuted: true } }
+    mocked.core.captureConfig = {
+      ...(mocked.core.captureConfig as object),
+      audio: { microphoneMuted: true }
+    }
     await render()
     expect(values()).toContain('Unmute microphone')
     expect(values()).not.toContain('Mute microphone')
@@ -325,6 +333,7 @@ describe('CommandPalette order and verbs (plan 174 A-9, A-13)', () => {
       'Open Sources',
       'Open Scene',
       'Edit scene',
+      'Green screen settings',
       'Open Assets',
       'Open Captions',
       'Open Output',
@@ -373,6 +382,32 @@ describe('CommandPalette order and verbs (plan 174 A-9, A-13)', () => {
     await render()
     await search('scene editor')
     expect(values()).toContain('Open Scene')
+  })
+
+  it('turns the green screen on and off, found by what people call it', async () => {
+    // No camera, nothing to key: the switch stays out, its settings stay in.
+    await render()
+    expect(values()).not.toContain('Turn on green screen')
+    await search('blue screen')
+    expect(values()).toContain('Green screen settings')
+
+    mocked.core.captureConfig = {
+      ...(mocked.core.captureConfig as object),
+      sources: { cameraId: 'camera:1' }
+    }
+    await render()
+    await search('chroma key')
+    expect(values()).toContain('Turn on green screen')
+    await act(async () => item('Turn on green screen').click())
+    expect(mocked.core.applyLayoutPatch).toHaveBeenCalledWith({ cameraChromaKeyEnabled: true })
+
+    mocked.core.captureConfig = {
+      ...(mocked.core.captureConfig as object),
+      layout: { cameraChromaKeyEnabled: true, cameraChromaKeyColor: '#0000FF' }
+    }
+    await render()
+    await search('remove background')
+    expect(values()).toContain('Turn off blue screen')
   })
 
   it('names the selected action in the footer, with the Return chip', async () => {
