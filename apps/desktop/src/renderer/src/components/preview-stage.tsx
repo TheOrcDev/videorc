@@ -13,6 +13,7 @@ import type {
   PreviewSupervisorState,
   PreviewSurfaceStatus,
   PreviewWindowState,
+  SourceSelection,
   SystemPermissionPane
 } from '@/lib/backend'
 import { systemAccessActionLabel } from '@/lib/system-access-view'
@@ -26,6 +27,8 @@ import { useSystemAccessRows } from '@/hooks/use-system-access-rows'
 import { previewHoldLabel } from '@/lib/performance-check'
 import { shortcutAccelerator } from '@/lib/shortcuts'
 import { cn } from '@/lib/utils'
+import { openWorkspaceTab } from '@/lib/workspace-navigation'
+import { DockedPreviewStartup } from '@/components/preview-startup-card'
 import { isNativePreviewCapability } from '../../../shared/native-preview-capability'
 import { WINDOW_NAMES } from '../../../shared/window-names'
 
@@ -73,7 +76,8 @@ export function PreviewStage({
     mediaAccess,
     runtimeInfo,
     performanceCheck,
-    performanceCheckProgress
+    performanceCheckProgress,
+    wsStatus
   } = useStudioCore()
   const accessRows = useSystemAccessRows()
   const { talkShow } = useStudioCloud()
@@ -138,8 +142,13 @@ export function PreviewStage({
         previewWindow={previewWindow}
         permissionAccess={permissionAccess}
         slotRef={slotRef}
+        startup={{
+          engineConnected: wsStatus === 'connected',
+          captureSources: captureConfig.sources
+        }}
         onClose={() => void closePreviewWindow()}
         onOpenPermissions={onOpenPermissions}
+        onOpenSources={() => openWorkspaceTab('sources')}
         onPopOut={() => void setPreviewWindowMode('floating')}
         platform={runtimeInfo?.platform}
       />
@@ -288,6 +297,8 @@ function DockedPreviewFrame({
   onClose,
   permissionAccess,
   onOpenPermissions,
+  onOpenSources,
+  startup,
   platform,
   checkingLabel,
   className
@@ -302,23 +313,27 @@ function DockedPreviewFrame({
   onClose: () => void
   permissionAccess: PreviewPermissionAccess | null
   onOpenPermissions?: (pane: SystemPermissionPane) => void
+  onOpenSources?: () => void
+  /** Plan 238: what the startup card waits for. */
+  startup: { engineConnected: boolean; captureSources: SourceSelection }
   platform?: string
   className?: string
 }): ReactElement {
   const supervisor = previewWindow.supervisor
   const hidden = dockHiddenDisplay(previewWindow.dockHiddenReason)
-  const status =
-    hidden ??
-    dockedSupervisorDisplay(
-      previewSupervisorDisplay(
-        true,
-        supervisor,
-        previewSurfaceStatus,
-        undefined,
-        permissionAccess,
-        platform
-      )
-    )
+  const display = previewSupervisorDisplay(
+    true,
+    supervisor,
+    previewSurfaceStatus,
+    undefined,
+    permissionAccess,
+    platform
+  )
+  const status = hidden ?? dockedSupervisorDisplay(display)
+  // Plan 238: until the first frame covers the slot, the slot says which
+  // startup step is running. A hidden dock and every warning keep their own
+  // words.
+  const showStartup = hidden === null && dockedStageShowsStartup(supervisor, display)
   const permissionPane = previewPermissionPane(supervisor)
   const footprintRatio = previewFootprintRatio(aspect)
   const slotRatio = previewSlotRatio(aspect)
@@ -354,13 +369,25 @@ function DockedPreviewFrame({
           data-videorc-dock-slot="studio"
           style={{ aspectRatio: slotRatio }}
         >
-          <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 px-6 text-center">
-            <CameraIcon className="size-8 text-muted-foreground" weight="duotone" />
-            <span className="text-sm font-medium text-video-ground-foreground">{status.title}</span>
-            {status.detail ? (
-              <span className="text-xs text-video-ground-muted">{status.detail}</span>
-            ) : null}
-          </div>
+          {showStartup ? (
+            <div className="absolute inset-0 flex items-center justify-center">
+              <DockedPreviewStartup
+                captureSources={startup.captureSources}
+                engineConnected={startup.engineConnected}
+                onOpenSources={onOpenSources}
+              />
+            </div>
+          ) : (
+            <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 px-6 text-center">
+              <CameraIcon className="size-8 text-muted-foreground" weight="duotone" />
+              <span className="text-sm font-medium text-video-ground-foreground">
+                {status.title}
+              </span>
+              {status.detail ? (
+                <span className="text-xs text-video-ground-muted">{status.detail}</span>
+              ) : null}
+            </div>
+          )}
         </div>
       </div>
       {/* Slim control row under the bare strip (the docked preview has no
@@ -392,6 +419,16 @@ function DockedPreviewFrame({
       </div>
     </div>
   )
+}
+
+/** Plan 238: the docked slot shows the startup steps whenever it would only
+ * say the Preview is on its way: never over a warning (permission, failure,
+ * a slower path) and never while it closes. */
+export function dockedStageShowsStartup(
+  supervisor: Pick<PreviewSupervisorState, 'lifecycleState'>,
+  display: Pick<PreviewSupervisorDisplay, 'tone'>
+): boolean {
+  return display.tone === 'normal' && supervisor.lifecycleState !== 'closing'
 }
 
 /** The docked slot shows through only while the surface has no picture over

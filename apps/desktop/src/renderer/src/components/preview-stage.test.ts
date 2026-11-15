@@ -10,6 +10,7 @@ import {
   PREVIEW_FALLBACK_LABEL,
   PREVIEW_FLOATING_DETAIL,
   PREVIEW_FLOATING_TITLE,
+  dockedStageShowsStartup,
   dockedSupervisorDisplay,
   previewDisabledCopy,
   previewFallbackLabel,
@@ -296,6 +297,40 @@ describe('the stage with no docked Preview (issue #1273)', () => {
     // The lead action is the chrome primary, not an outline beside it.
     const stickTag = html.slice(html.lastIndexOf('<button', stick), html.indexOf('>', stick))
     expect(stickTag).toContain('data-variant="default"')
+  })
+})
+
+describe('dockedStageShowsStartup', () => {
+  it('shows the startup steps while the Preview is only on its way', () => {
+    for (const lifecycle of [
+      'closed',
+      'opening-window',
+      'open-no-surface',
+      'starting-surface',
+      'surface-live'
+    ] as const) {
+      const state = supervisor('ok', lifecycle)
+      expect(dockedStageShowsStartup(state, previewSupervisorDisplay(true, state)), lifecycle).toBe(
+        true
+      )
+    }
+  })
+
+  it('never covers a warning or a closing Preview', () => {
+    for (const state of [
+      supervisor('camera-required'),
+      { ...supervisor('ok', 'failed'), lastError: 'The camera stopped.' },
+      { ...supervisor('ok', 'surface-fallback'), fallbackReason: 'No Metal device.' },
+      supervisor('ok', 'closing')
+    ]) {
+      expect(
+        dockedStageShowsStartup(
+          state,
+          previewSupervisorDisplay(true, state, undefined, undefined, null, 'darwin')
+        ),
+        state.lifecycleState
+      ).toBe(false)
+    }
   })
 })
 
