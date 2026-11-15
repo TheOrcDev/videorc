@@ -2898,6 +2898,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // A performance check needs an idle studio: the Clips ring steps aside
   // from its request until its completed event.
   const performanceCheckHoldRef = useRef(false)
+  // Open the room in flight (plan 224 D6): the ring stepped aside for it
+  // and stays off until the room's own phase holds the camera.
+  const roomOpenHoldRef = useRef(false)
   const [logs, setLogs] = useState<BackendLogEvent[]>([])
   const [healthEvents, setHealthEvents] = useState<HealthEvent[]>([])
   // Plan 223: the watchdog's alerts, drawn here and in the Stream Manager.
@@ -17042,6 +17045,29 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     // `action` is the whole phrase ("join the room", "let the guest in").
     toastUserError(error, { action }, { id: CLOUD_TOAST_ID })
   }, [])
+  // Plan 224 D6: the room borrows the camera, and the backend refuses Open
+  // the room beside the Clips ring's buffer-only session (on by default, it
+  // runs between sessions). The ring steps aside first, as for an
+  // orientation change, and the reconcile keeps it off until the room has
+  // closed (`roomHoldsCamera`).
+  const talkShowClipsStepAside = useCallback(async (open: () => Promise<void>) => {
+    roomOpenHoldRef.current = true
+    try {
+      if (sessionIsReplayOnly(recordingRef.current)) {
+        await stopReplayBufferRef.current()
+        await waitForRecordingIdle(recordingRef, 5_000)
+      }
+      await open()
+    } finally {
+      roomOpenHoldRef.current = false
+      scheduleReplayReconcileRef.current()
+    }
+  }, [])
+  const talkShowRoomPhase = cloudStatus?.room?.phase ?? 'closed'
+  useEffect(() => {
+    // The room opened elsewhere (a resume) or closed: the ring follows.
+    scheduleReplayReconcileRef.current()
+  }, [talkShowRoomPhase])
   const talkShowCameraId = captureConfig.sources.cameraId ?? null
   const talkShowMicrophoneId = captureConfig.sources.microphoneId ?? null
   const talkShowDeps = useMemo<TalkShowRoomControllerDeps>(
@@ -17056,7 +17082,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       hostShape: talkShowHostShape,
       onCameraReturned: talkShowCameraReturned,
       onError: talkShowError,
-      previewReplacedOverride: smokeTalkShowRoomOpen
+      previewReplacedOverride: smokeTalkShowRoomOpen,
+      clipsStepAside: talkShowClipsStepAside
     }),
     [
       client,
@@ -17066,6 +17093,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       smokeTalkShowRoomOpen,
       talkShowCameraId,
       talkShowCameraReturned,
+      talkShowClipsStepAside,
       talkShowError,
       talkShowHostShape,
       talkShowMicrophoneId,
@@ -18053,29 +18081,33 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // The decision is a lazy chunk (the eager provider keeps the refs and the
   // events); every input is a ref, read after the import resolves.
   const reconcileReplayBuffer = useCallback(() => {
-    void import('@/lib/replay-buffer-reconcile').then(({ replayBufferReconcileAction }) => {
-      const action = replayBufferReconcileAction({
-        armed: replayArmedRef.current,
-        replayState: replayStateRef.current.state,
-        replayOnlyBuffer: replayStateRef.current.replayOnly === true,
-        recordingState: recordingRef.current.state,
-        recordingReplayOnly: sessionIsReplayOnly(recordingRef.current),
-        startPending:
-          sessionStartInFlightRef.current !== null || sessionStartLifecycleActiveRef.current,
-        stopPending: stopSessionInFlightPromiseRef.current !== null,
-        replayStartInFlight:
-          replayStartInFlightRef.current ||
-          replayReconcileHoldRef.current ||
-          replaySceneReloadsRef.current > 0 ||
-          performanceCheckHoldRef.current,
-        failedStarts: replayFailedStartsRef.current,
-        waitingForCamera: replayWaitingForCameraRef.current
-      })
-      if (action === 'start') void startReplayBuffer()
-      else if (action === 'stop') void stopReplayBuffer()
-      // 'give-up': three failed starts in a row; nothing until a source
-      // change or a session's end resets the count (below).
-    })
+    void import('@/lib/replay-buffer-reconcile').then(
+      ({ replayBufferReconcileAction, roomHoldsTheCamera }) => {
+        const action = replayBufferReconcileAction({
+          armed: replayArmedRef.current,
+          replayState: replayStateRef.current.state,
+          replayOnlyBuffer: replayStateRef.current.replayOnly === true,
+          recordingState: recordingRef.current.state,
+          recordingReplayOnly: sessionIsReplayOnly(recordingRef.current),
+          startPending:
+            sessionStartInFlightRef.current !== null || sessionStartLifecycleActiveRef.current,
+          stopPending: stopSessionInFlightPromiseRef.current !== null,
+          replayStartInFlight:
+            replayStartInFlightRef.current ||
+            replayReconcileHoldRef.current ||
+            replaySceneReloadsRef.current > 0 ||
+            performanceCheckHoldRef.current,
+          failedStarts: replayFailedStartsRef.current,
+          waitingForCamera: replayWaitingForCameraRef.current,
+          roomHoldsCamera:
+            roomOpenHoldRef.current || roomHoldsTheCamera(cloudStatusRef.current?.room)
+        })
+        if (action === 'start') void startReplayBuffer()
+        else if (action === 'stop') void stopReplayBuffer()
+        // 'give-up': three failed starts in a row; nothing until a source
+        // change or a session's end resets the count (below).
+      }
+    )
   }, [startReplayBuffer, stopReplayBuffer])
   const reconcileReplayBufferRef = useRef(reconcileReplayBuffer)
   reconcileReplayBufferRef.current = reconcileReplayBuffer

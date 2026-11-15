@@ -6,6 +6,7 @@ import {
   replayBufferShouldRestartForSources,
   replayShouldRearmAfterError,
   replayStartRetryDelayMs,
+  roomHoldsTheCamera,
   type ReplayReconcileInput
 } from './replay-buffer-reconcile'
 
@@ -46,6 +47,51 @@ describe('replayBufferReconcileAction (plan 181 S4)', () => {
         recordingState: 'recording'
       })
     ).toBe('stop')
+  })
+
+  it('steps the buffer-only ring aside while a talk show room holds the camera', () => {
+    // 2026-11-15: Clips on (the default) made every Open the room fail; the
+    // backend refused it beside the ring, which runs between sessions.
+    const ring: ReplayReconcileInput = {
+      ...idle,
+      replayState: 'on',
+      replayOnlyBuffer: true,
+      recordingReplayOnly: true,
+      recordingState: 'recording'
+    }
+    expect(replayBufferReconcileAction({ ...ring, roomHoldsCamera: true })).toBe('stop')
+    expect(
+      replayBufferReconcileAction({ ...ring, roomHoldsCamera: true, replayState: 'starting' })
+    ).toBe('stop')
+    // Never a second stop over one in flight.
+    expect(
+      replayBufferReconcileAction({ ...ring, roomHoldsCamera: true, replayStartInFlight: true })
+    ).toBeNull()
+    // No start while the room holds the camera, armed or not.
+    expect(replayBufferReconcileAction({ ...idle, roomHoldsCamera: true })).toBeNull()
+    expect(
+      replayBufferReconcileAction({ ...idle, roomHoldsCamera: true, failedStarts: 5 })
+    ).toBeNull()
+    // A ring riding a recording is not the room's to stop.
+    expect(
+      replayBufferReconcileAction({
+        ...ring,
+        roomHoldsCamera: true,
+        replayOnlyBuffer: false,
+        recordingReplayOnly: false
+      })
+    ).toBeNull()
+    // The room closed: the switch brings the ring back.
+    expect(replayBufferReconcileAction({ ...idle, roomHoldsCamera: false })).toBe('start')
+  })
+
+  it('reads the room as holding the camera in every phase but closed', () => {
+    expect(roomHoldsTheCamera(null)).toBe(false)
+    expect(roomHoldsTheCamera(undefined)).toBe(false)
+    expect(roomHoldsTheCamera({ phase: 'closed' })).toBe(false)
+    expect(roomHoldsTheCamera({ phase: 'opening' })).toBe(true)
+    expect(roomHoldsTheCamera({ phase: 'open' })).toBe(true)
+    expect(roomHoldsTheCamera({ phase: 'closing' })).toBe(true)
   })
 
   it('waits while a Record or Go Live is in flight: the backend hands over itself', () => {

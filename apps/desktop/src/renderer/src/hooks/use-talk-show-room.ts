@@ -60,6 +60,9 @@ export type TalkShowRoomControllerDeps = {
   /** The lifecycle probe's scripted room (DEV only): hides the Preview with
    * no LiveKit room behind it. */
   previewReplacedOverride: boolean
+  /** Runs `open` once the Clips ring's buffer-only session has stepped
+   * aside: the backend refuses Open the room beside it (D6). */
+  clipsStepAside?: (open: () => Promise<void>) => Promise<void>
 }
 
 /** A guest action in the Studio's error words: "Couldn't {words}". */
@@ -121,7 +124,8 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
     hostShape,
     onCameraReturned,
     onError,
-    previewReplacedOverride
+    previewReplacedOverride,
+    clipsStepAside
   } = deps
   const [snapshot, setSnapshot] = useState<TalkShowRoomSnapshot>(IDLE_SNAPSHOT)
   const clientRef = useRef<TalkShowRoomClient | null>(null)
@@ -319,12 +323,15 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
       room: snapshot,
       previewReplaced,
       hostIdentity,
-      openRoom: async (params) =>
-        call(
-          'cloud.room.open',
-          { ...params, outputs: params.outputs ?? outputs() },
-          'open the room'
-        ),
+      openRoom: async (params) => {
+        const open = (): Promise<void> =>
+          call(
+            'cloud.room.open',
+            { ...params, outputs: params.outputs ?? outputs() },
+            'open the room'
+          )
+        await (clipsStepAside ? clipsStepAside(open) : open())
+      },
       closeRoom: async () => call('cloud.room.close', undefined, 'close the room'),
       resumeRoom: async () => call('cloud.room.resume', undefined, 'resume the show'),
       rotateInvite: async () => call('cloud.room.invite.rotate', undefined, 'make a new link'),
@@ -409,7 +416,17 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
       endTalkShowLivestream: async () =>
         call('cloud.show.legs.end', undefined, 'end the livestream')
     }),
-    [call, hostIdentity, onError, outputs, previewReplaced, setStage, snapshot, stage]
+    [
+      call,
+      clipsStepAside,
+      hostIdentity,
+      onError,
+      outputs,
+      previewReplaced,
+      setStage,
+      snapshot,
+      stage
+    ]
   )
 
   return value
