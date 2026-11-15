@@ -209,6 +209,17 @@ async function click(element: HTMLElement | null | undefined): Promise<void> {
   await settle()
 }
 
+async function onboardingSheet(): Promise<HTMLElement> {
+  // The first open loads a real lazy chunk. Wait for that work and flush
+  // Suspense in act; a DOM poll races cold imports on a busy host.
+  await act(async () => {
+    await vi.dynamicImportSettled()
+  })
+  const sheet = byTestId('buddy-onboarding')
+  expect(sheet).not.toBeNull()
+  return sheet!
+}
+
 async function openMenu(id: string): Promise<HTMLElement[]> {
   const trigger = card(id).querySelector<HTMLElement>('[data-testid="buddy-library-more"]')!
   await act(async () => trigger.click())
@@ -405,12 +416,26 @@ describe('BuddyLibrarySection: My avatars (plan 170 D16, plan 239)', () => {
     await render(fakeBackend().client)
     expect(byTestId('buddy-onboarding')).toBeNull()
     await act(async () => requestBuddyOnboarding())
-    const sheet = await vi.waitFor(() => {
-      const element = byTestId('buddy-onboarding')
-      expect(element).not.toBeNull()
-      return element!
-    })
+    const sheet = await onboardingSheet()
     expect(sheet.dataset.step).toBe('1')
+  })
+
+  it('opens an onboarding request made before the library mounts', async () => {
+    requestBuddyOnboarding(2)
+    await render(fakeBackend().client)
+    const sheet = await onboardingSheet()
+    expect(sheet.dataset.step).toBe('2')
+  })
+
+  it('reopens the onboarding on a fresh request after dismissal', async () => {
+    await render(fakeBackend().client)
+    await act(async () => requestBuddyOnboarding())
+    const sheet = await onboardingSheet()
+    await click(sheet.querySelector<HTMLElement>('[data-slot="dialog-close"]'))
+    await vi.waitFor(() => expect(byTestId('buddy-onboarding')).toBeNull())
+
+    await act(async () => requestBuddyOnboarding(2))
+    expect((await onboardingSheet()).dataset.step).toBe('2')
   })
 
   it('edits the personality and About you of one of yours', async () => {
@@ -582,11 +607,7 @@ describe('BuddyLibrarySection: My avatars (plan 170 D16, plan 239)', () => {
       BUDDY_LIBRARY_COPY.invitation
     )
     await click(byTestId('buddy-library-invitation-start'))
-    const sheet = await vi.waitFor(() => {
-      const element = byTestId('buddy-onboarding')
-      expect(element).not.toBeNull()
-      return element!
-    })
+    const sheet = await onboardingSheet()
     expect(sheet.dataset.step).toBe('1')
     await act(async () =>
       document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
@@ -613,11 +634,7 @@ describe('BuddyLibrarySection: My avatars (plan 170 D16, plan 239)', () => {
   it('New avatar opens the onboarding on step 1', async () => {
     await render(fakeBackend().client)
     await click(byTestId('buddy-library-new'))
-    const sheet = await vi.waitFor(() => {
-      const element = byTestId('buddy-onboarding')
-      expect(element).not.toBeNull()
-      return element!
-    })
+    const sheet = await onboardingSheet()
     expect(sheet.dataset.step).toBe('1')
   })
 })
