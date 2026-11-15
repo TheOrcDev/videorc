@@ -22,7 +22,7 @@ import { shortcutLabel } from './platform'
 import { shortcutAccelerator } from './shortcuts'
 import { formatRelativeTime } from './format-time'
 import { plural } from './format'
-import { BUDDY_POSTS_PROMISE, buddyDisplayName } from './buddy-auto-chat-view'
+import { BUDDY_POSTS_PROMISE } from './buddy-auto-chat-view'
 import type { EntitlementUiGate } from './entitlement-ui'
 
 export {
@@ -511,16 +511,17 @@ export const COHOST_QUESTION_TOAST_THROTTLE_MS = 60_000
 const COHOST_QUESTION_TOAST_TEXT_CAP = 64
 
 /**
- * "Grum: 5 people asking: What keyboard is that? · ⌘J" (Ctrl+J on Windows).
- * The character speaks, so the toast carries the streamer's name for it
- * (plan 174 J2-20); "Buddy" until one is known.
+ * "Sidekick: 5 people asking: What keyboard is that? · ⌘J" (Ctrl+J on
+ * Windows). Catching a question is Sidekick's, the helper only the streamer
+ * sees, so the toast speaks as Sidekick, never as the avatar (plan 239 D1;
+ * it carried the character's name since plan 174 J2-20, when the two were
+ * one).
  */
 export function cohostQuestionToastMessage(
   question: CohostQuestion,
-  shortcut = shortcutLabel(shortcutAccelerator('cohost-focus')),
-  name?: string | null
+  shortcut = shortcutLabel(shortcutAccelerator('cohost-focus'))
 ): string {
-  const speaker = buddyDisplayName(name)
+  const speaker = 'Sidekick'
   const askers = question.askers.length
   const who =
     askers > 1
@@ -549,8 +550,7 @@ export function cohostQuestionToast({
   paneOpen,
   lastToastAtMs,
   nowMs,
-  shortcut,
-  name
+  shortcut
 }: {
   previous: CohostState | null
   next: CohostState
@@ -559,8 +559,6 @@ export function cohostQuestionToast({
   nowMs: number
   /** The key that focuses Buddy, as this platform writes it. */
   shortcut?: string
-  /** The streamer's name for Buddy (`persona.name`), when the window knows it. */
-  name?: string | null
 }): CohostQuestionToast | null {
   if (paneOpen) return null
   if (next.status !== 'listening') return null
@@ -576,7 +574,7 @@ export function cohostQuestionToast({
     (question) => question.priority === 'high' && !known.has(question.id)
   )
   if (!candidate) return null
-  return { message: cohostQuestionToastMessage(candidate, shortcut, name), atMs: nowMs }
+  return { message: cohostQuestionToastMessage(candidate, shortcut), atMs: nowMs }
 }
 
 // --- Promises and recaps (plan 068 D8) --------------------------------------

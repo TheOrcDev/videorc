@@ -917,7 +917,7 @@ fn load_source(
                 Ok(pack) => pack,
                 Err(error) => {
                     notes.push(format!(
-                        "The Sidekick pack {pack_id} could not be loaded ({}); the still Sidekick shows instead.",
+                        "The avatar pack {pack_id} could not be loaded ({}); the still avatar shows instead.",
                         error.message
                     ));
                     crate::buddy_pet::still_pack(persona, roots).map_err(|error| error.message)?

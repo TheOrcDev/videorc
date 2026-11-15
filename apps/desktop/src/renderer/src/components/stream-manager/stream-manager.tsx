@@ -651,8 +651,8 @@ export function StreamManager({
   const cohostPaneOpenRef = useRef(true)
   const previousCohostStateRef = useRef<CohostState | null>(null)
   const cohostToastAtRef = useRef<number | null>(null)
-  // The question toast speaks as the streamer's Buddy (plan 174 J2-20). A
-  // ref, so a rename never re-runs the state effect below.
+  // The avatar's name, for the Avatar block. The question toast speaks as
+  // Sidekick, never as the avatar (plan 239 D1).
   const buddyName = cohostBuddy?.persona.name ?? null
   // The header's living preview and the footer's reaction chips share one
   // handle and one reaction list (plan 174 S3.14c).
@@ -663,8 +663,6 @@ export function StreamManager({
   const buddyTalkRequest = useBuddyTalkRequest(cohostAutoChat?.talk ?? 'bubble', (talk) =>
     onCohostAutoChatChange?.({ talk })
   )
-  const buddyNameRef = useRef(buddyName)
-  buddyNameRef.current = buddyName
   const deadAirToastKeyRef = useRef<string | null>(null)
   const [cohostNudgeDismissedSessionId, setCohostNudgeDismissedSessionId] = useState<string | null>(
     null
@@ -679,8 +677,7 @@ export function StreamManager({
       paneOpen: cohostPaneOpenRef.current,
       lastToastAtMs: cohostToastAtRef.current,
       nowMs: Date.now(),
-      shortcut: BUDDY_SHORTCUT,
-      name: buddyNameRef.current
+      shortcut: BUDDY_SHORTCUT
     })
     if (questionToast) {
       cohostToastAtRef.current = questionToast.atMs

@@ -197,13 +197,13 @@ async fn import_in(
     if persona.id != persona_id {
         return Err(PetRpcError::new(
             COHOST_PET_INVALID,
-            "The pack was copied for another Sidekick. Try the import again.",
+            "The pack was copied for another avatar. Try the import again.",
         ));
     }
     if roots.is_empty() {
         return Err(PetRpcError::new(
             COHOST_PET_UNAVAILABLE,
-            "Sidekick storage is not configured in this process.",
+            "Avatar storage is not configured in this process.",
         ));
     }
     let persona_id = persona_id.to_string();
@@ -254,7 +254,7 @@ async fn remove_in(
     if roots.is_empty() {
         return Err(PetRpcError::new(
             COHOST_PET_UNAVAILABLE,
-            "Sidekick storage is not configured in this process.",
+            "Avatar storage is not configured in this process.",
         ));
     }
     // Refuse a bundled or malformed id before touching the persona.
@@ -340,7 +340,7 @@ async fn request_reaction_in(
     if !reactions.iter().any(|id| id == reaction) {
         return Err(PetRpcError::new(
             COHOST_PET_REACTION_UNKNOWN,
-            format!("The Sidekick's pack has no {reaction} reaction."),
+            format!("The avatar's pack has no {reaction} reaction."),
         ));
     }
     // Queued like any event reaction (D14): it plays after the one on air.

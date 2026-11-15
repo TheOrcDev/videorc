@@ -738,7 +738,7 @@ impl CreatorEnv {
         self.root.clone().ok_or_else(|| {
             BuddyPetCreatorError::new(
                 COHOST_PET_UNAVAILABLE,
-                "Sidekick storage is not configured in this process.",
+                "Avatar storage is not configured in this process.",
             )
         })
     }
@@ -749,13 +749,13 @@ impl CreatorEnv {
         if !self.premium {
             return Err(BuddyPetCreatorError::new(
                 "premium-required",
-                "Creating a Sidekick requires Videorc Premium.",
+                "Creating an Alive avatar requires Videorc Premium.",
             ));
         }
         let Some(token) = self.token.clone() else {
             return Err(BuddyPetCreatorError::new(
                 "signed-out",
-                "Sign in to create a Sidekick.",
+                "Sign in to create an Alive avatar.",
             ));
         };
         let Some(api) = self.api.clone() else {
@@ -908,7 +908,7 @@ fn open_creation(
     if state.persona_id != persona_id {
         return Err(BuddyPetCreatorError::new(
             COHOST_PET_CREATION_NONE,
-            "That creation belongs to another Sidekick.",
+            "That creation belongs to another avatar.",
         ));
     }
     Ok((dir, state))
@@ -1278,7 +1278,7 @@ pub(crate) fn pet_web_error(error: &CohostApiError, now: DateTime<Utc>) -> Buddy
                 _ => next_month_start(now),
             };
             format!(
-                "This month's Sidekick creations are used up. More on {}.",
+                "This month's Alive avatar creations are used up. More on {}.",
                 reset.format("%B %-d")
             )
         }
@@ -1311,8 +1311,8 @@ pub(crate) fn pet_web_error(error: &CohostApiError, now: DateTime<Utc>) -> Buddy
             "The model sent back a sheet that could not be read. Try again.".to_string()
         }
         "ai-gateway-error" => "The image model failed. Try again.".to_string(),
-        "unauthorized" => "Sign in again to create a Sidekick.".to_string(),
-        "premium-required" => "Creating a Sidekick requires Videorc Premium.".to_string(),
+        "unauthorized" => "Sign in again to create an Alive avatar.".to_string(),
+        "premium-required" => "Creating an Alive avatar requires Videorc Premium.".to_string(),
         "ai-user-disabled" => "Cloud AI is turned off for this account.".to_string(),
         "network" => "Could not reach Videorc. Check your connection and try again.".to_string(),
         _ => error.detail.message.clone(),
@@ -1981,7 +1981,12 @@ async fn build_in(
         .begin(&params.build_id, BuddyPetCreatorJob::Build, None)?;
     let name = {
         let name = persona.name.trim();
-        if name.is_empty() { "Sidekick" } else { name }.to_string()
+        if name.is_empty() {
+            crate::cohost::COHOST_DEFAULT_PERSONA_NAME
+        } else {
+            name
+        }
+        .to_string()
     };
     let input = BuildInput {
         name,
@@ -2232,7 +2237,7 @@ async fn save_in(
     .map_err(|error| {
         BuddyPetCreatorError::new(
             error.code(),
-            format!("The pack was saved, but the Sidekick could not wear it: {error}"),
+            format!("The pack was saved, but the avatar could not wear it: {error}"),
         )
     })?;
     state.emit_log(

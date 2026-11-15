@@ -153,8 +153,11 @@ export const BUDDY_SIGNED_OUT_REASON = 'Sign in to use Sidekick Live, part of Vi
  */
 export const BUDDY_LIVE_PREMIUM_REASON = 'Sidekick Live is part of Videorc Premium.'
 
-/** The Chat tab's lock adds what stays free under it. */
-export const BUDDY_CHAT_FREE_NOTE = 'Greetings are free.'
+/**
+ * The Chat tab's lock adds what stays free. The greeting lines left this tab
+ * for the avatar's page (plan 239), so the note names their home.
+ */
+export const BUDDY_CHAT_FREE_NOTE = 'Greetings are free on Avatar → Greetings.'
 
 /** Points at the Cloud AI section beside the status (plan 174 E-6, F-5). */
 export const BUDDY_CONSENT_OFF_REASON =

@@ -519,12 +519,19 @@ pub const COHOST_GREETING_TEXT_MAX_CHARS: usize = 200;
 const COHOST_PERSONA_IMAGE_PATH_MAX_CHARS: usize = 256;
 /// The persona a fresh install has: the bundled default pack under this id.
 pub const COHOST_DEFAULT_PERSONA_ID: &str = "default";
-/// Plan 236 D3: "Sidekick", which speech to text spells right where it
-/// heard "Buddy" as "body".
-pub const COHOST_DEFAULT_PERSONA_NAME: &str = "Sidekick";
+/// Plan 239 D2: the official stone golem's own name, "Flint". Sidekick is the
+/// helper's name since plan 239, so the default avatar has a name of its own
+/// (the renderer's `DEFAULT_AVATAR_NAME`, the catalog's golem entry).
+pub const COHOST_DEFAULT_PERSONA_NAME: &str = "Flint";
 /// The default name before plan 236, which the one-time settings migration
-/// renames (`migrate_cohost_settings`).
+/// renames (`migrate_cohost_settings`, version 1).
 const COHOST_OLD_DEFAULT_PERSONA_NAME: &str = "Buddy";
+/// The default name from plan 236 to plan 239 (D3 of plan 236), which version
+/// 2 renames to Flint while the persona still wears the default golem.
+const COHOST_SIDEKICK_DEFAULT_PERSONA_NAME: &str = "Sidekick";
+/// The official stone golem's library id (plan 170 D10), the avatar a fresh
+/// install wears.
+const COHOST_DEFAULT_GOLEM_AVATAR_ID: &str = "official:golem";
 
 /// The avatar's state images (plan 164 D16). `idle` is required on stream;
 /// the others fall back to it when missing.
@@ -1052,7 +1059,7 @@ pub(crate) fn validate_persona(persona: &CohostPersona) -> Result<CohostPersona,
     let mut valid = persona.clone();
     valid.name = persona.name.trim().to_string();
     if valid.name.is_empty() {
-        return Err("The Sidekick needs a name.".to_string());
+        return Err("The avatar needs a name.".to_string());
     }
     if utf16_len(&valid.name) > COHOST_PERSONA_NAME_MAX_CHARS {
         return Err(format!(
@@ -1339,7 +1346,9 @@ fn normalize_rules(rules: Vec<String>) -> Vec<String> {
 /// strict wire shape never carries bookkeeping (like `overlayLayoutMigration`).
 const COHOST_SETTINGS_MIGRATION_KEY: &str = "cohostSettingsMigration";
 /// Version 1 (plan 236 D3): a persona named exactly "Buddy" is "Sidekick".
-const COHOST_SETTINGS_MIGRATION_VERSION: u32 = 1;
+/// Version 2 (plan 239 D2): a persona named exactly "Sidekick" that still
+/// wears the default golem is "Flint".
+const COHOST_SETTINGS_MIGRATION_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "camelCase")]
@@ -1348,12 +1357,15 @@ struct CohostSettingsMigration {
 }
 
 /// The one-time settings migrations, run once at startup before anything
-/// reads the persona (plan 236 D3). Version 1 renames a persona named exactly
-/// "Buddy", the old default, to "Sidekick"; any other name ("Buddy Bot",
-/// "buddy") is the streamer's choice and stays. The version row is written
-/// only once the renamed settings are saved, so a failed save tries again on
-/// the next launch, and a later load changes nothing, even after the
-/// streamer names it "Buddy" again.
+/// reads the persona. Version 1 (plan 236 D3) renames a persona named exactly
+/// "Buddy", the old default, to "Sidekick". Version 2 (plan 239 D2) renames a
+/// persona named exactly "Sidekick" to "Flint" while it still wears the
+/// default golem: Sidekick is the helper's name now. Any other name ("Buddy
+/// Bot", "buddy"), and "Sidekick" on the streamer's own pictures, is the
+/// streamer's choice and stays. The version row is written only once the
+/// renamed settings are saved, so a failed save tries again on the next
+/// launch, and a later load changes nothing, even after the streamer picks
+/// one of those names again.
 pub fn migrate_cohost_settings(database: &Database, settings: CohostSettings) -> CohostSettings {
     let done = match database.load_setting::<CohostSettingsMigration>(COHOST_SETTINGS_MIGRATION_KEY)
     {
@@ -1366,15 +1378,24 @@ pub fn migrate_cohost_settings(database: &Database, settings: CohostSettings) ->
     if done >= COHOST_SETTINGS_MIGRATION_VERSION {
         return settings;
     }
+    let original = settings.clone();
     let mut next = settings;
-    if next.persona.name == COHOST_OLD_DEFAULT_PERSONA_NAME {
-        next.persona.name = COHOST_DEFAULT_PERSONA_NAME.to_string();
-        if let Err(error) = database.save_setting(COHOST_SETTINGS_KEY, &next) {
-            tracing::warn!("Could not rename the Buddy persona to Sidekick: {error:#}");
-            next.persona.name = COHOST_OLD_DEFAULT_PERSONA_NAME.to_string();
-            return next;
-        }
+    if done < 1 && next.persona.name == COHOST_OLD_DEFAULT_PERSONA_NAME {
+        next.persona.name = COHOST_SIDEKICK_DEFAULT_PERSONA_NAME.to_string();
         tracing::info!("Renamed the persona Buddy to Sidekick (plan 236 D3).");
+    }
+    if done < 2
+        && next.persona.name == COHOST_SIDEKICK_DEFAULT_PERSONA_NAME
+        && wears_the_default_golem(&next.persona)
+    {
+        next.persona.name = COHOST_DEFAULT_PERSONA_NAME.to_string();
+        tracing::info!("Renamed the default avatar Sidekick to Flint (plan 239 D2).");
+    }
+    if next != original
+        && let Err(error) = database.save_setting(COHOST_SETTINGS_KEY, &next)
+    {
+        tracing::warn!("Could not rename the default avatar: {error:#}");
+        return original;
     }
     if let Err(error) = database.save_setting(
         COHOST_SETTINGS_MIGRATION_KEY,
@@ -1385,6 +1406,24 @@ pub fn migrate_cohost_settings(database: &Database, settings: CohostSettings) ->
         tracing::warn!("Could not remember the Buddy settings migration: {error:#}");
     }
     next
+}
+
+/// Whether the persona still wears the default golem (plan 239 D2): linked to
+/// the official golem, or showing the bundled pictures with the bundled moves
+/// or none. Its own pictures or an imported pack are the streamer's own look.
+fn wears_the_default_golem(persona: &CohostPersona) -> bool {
+    match persona.library_avatar_id.as_deref() {
+        Some(id) => id == COHOST_DEFAULT_GOLEM_AVATAR_ID,
+        None => {
+            persona.source == CohostPersonaSource::Default
+                && match &persona.avatar {
+                    BuddyAvatar::Still => true,
+                    BuddyAvatar::Alive { pack_id } => {
+                        pack_id == crate::cohost_library::alive::BUDDY_DEFAULT_ALIVE_PACK_ID
+                    }
+                }
+        }
+    }
 }
 
 pub fn load_cohost_settings(database: &Database) -> CohostSettings {
@@ -9299,7 +9338,7 @@ async fn run_voice_greeting_with<C, F>(
         (!crate::overlay_layout::load_overlay_layout(&state.database)
             .buddy
             .show_on_stream)
-            .then(|| "Sidekick isn't on stream, so it can't show the bubble.".to_string())
+            .then(|| "Your avatar isn't on stream, so it can't show the bubble.".to_string())
     });
     if let Some(message) = refusal {
         record_instant_command(
@@ -9440,13 +9479,13 @@ async fn run_voice_greeting_with<C, F>(
             (!crate::overlay_layout::load_overlay_layout(&state.database)
                 .buddy
                 .show_on_stream)
-                .then(|| "Sidekick isn't on stream, so it can't show the bubble.".to_string())
+                .then(|| "Your avatar isn't on stream, so it can't show the bubble.".to_string())
         });
         let (status, message) = refusal.map_or_else(
             || {
                 (
                     CohostCommandStatus::Done,
-                    "Sidekick said hello in its bubble.".to_string(),
+                    "Your avatar said hello in its bubble.".to_string(),
                 )
             },
             |message| (CohostCommandStatus::Unavailable, message),
@@ -16292,7 +16331,7 @@ mod tests {
         );
         assert_eq!(
             validate_persona(&persona("   ", "")).unwrap_err(),
-            "The Sidekick needs a name."
+            "The avatar needs a name."
         );
         assert!(validate_persona(&persona(&"n".repeat(25), "")).is_err());
         assert!(validate_persona(&persona("Grum", &"p".repeat(1201))).is_err());
@@ -16439,7 +16478,7 @@ mod tests {
     }
 
     #[test]
-    fn the_persona_named_exactly_buddy_becomes_sidekick_once() {
+    fn the_default_avatar_becomes_flint_once_and_own_names_stay() {
         let named = |name: &str| {
             let mut settings = CohostSettings::default();
             settings.persona.name = name.to_string();
@@ -16450,54 +16489,105 @@ mod tests {
                 .load_setting::<CohostSettingsMigration>(COHOST_SETTINGS_MIGRATION_KEY)
                 .unwrap()
         };
-        // Plan 236 D3: exactly "Buddy", the old default, becomes "Sidekick",
-        // saved, and nothing else about the persona changes.
-        let database = Database::open_in_memory_for_tests();
+        let migrated_from = |settings: &CohostSettings| {
+            let database = Database::open_in_memory_for_tests();
+            database
+                .save_setting(COHOST_SETTINGS_KEY, settings)
+                .unwrap();
+            let migrated = migrate_cohost_settings(&database, load_cohost_settings(&database));
+            assert_eq!(load_cohost_settings(&database), migrated);
+            assert_eq!(
+                migration(&database),
+                Some(CohostSettingsMigration { version: 2 })
+            );
+            migrated
+        };
+        // Plan 236 D3, then plan 239 D2: exactly "Buddy", the first default,
+        // on the official golem goes all the way to "Flint", saved, and
+        // nothing else about the persona changes.
         let mut saved = named("Buddy");
         saved.persona.library_avatar_id = Some("official:golem".to_string());
-        database.save_setting(COHOST_SETTINGS_KEY, &saved).unwrap();
-        let migrated = migrate_cohost_settings(&database, load_cohost_settings(&database));
-        assert_eq!(migrated.persona.name, "Sidekick");
-        assert_eq!(load_cohost_settings(&database), migrated);
+        let migrated = migrated_from(&saved);
         let mut expected = saved.clone();
-        expected.persona.name = "Sidekick".to_string();
+        expected.persona.name = "Flint".to_string();
         assert_eq!(migrated, expected);
-        assert_eq!(
-            migration(&database),
-            Some(CohostSettingsMigration { version: 1 })
-        );
+        // Plan 239 D2: "Sidekick", the plan 236 default, becomes "Flint" while
+        // it wears the default golem: the bundled pictures (Still or the
+        // bundled moves) or the official golem from the library.
+        assert_eq!(migrated_from(&named("Sidekick")).persona.name, "Flint");
+        let mut bundled_moves = named("Sidekick");
+        bundled_moves.persona.avatar = BuddyAvatar::Alive {
+            pack_id: "bundled:buddy".to_string(),
+        };
+        assert_eq!(migrated_from(&bundled_moves).persona.name, "Flint");
+        // "Sidekick" on the streamer's own look is their choice and stays:
+        // their pictures, an imported pack, or another library avatar.
+        let mut own_pictures = named("Sidekick");
+        own_pictures.persona.source = CohostPersonaSource::Generated;
+        assert_eq!(migrated_from(&own_pictures).persona.name, "Sidekick");
+        let mut own_moves = named("Sidekick");
+        own_moves.persona.avatar = BuddyAvatar::Alive {
+            pack_id: "pack-1".to_string(),
+        };
+        assert_eq!(migrated_from(&own_moves).persona.name, "Sidekick");
+        let mut other_avatar = named("Sidekick");
+        other_avatar.persona.library_avatar_id =
+            Some("7c9e6679-7425-40de-944b-e07fc1ee9a51".to_string());
+        assert_eq!(migrated_from(&other_avatar).persona.name, "Sidekick");
+        // Any other name is the streamer's choice and stays.
+        for name in [
+            "Buddy Bot",
+            "buddy",
+            "BUDDY",
+            "My Buddy",
+            "Grum",
+            "sidekick",
+        ] {
+            assert_eq!(migrated_from(&named(name)).persona.name, name);
+        }
         // It runs once: a second load changes nothing, even after the
-        // streamer names it "Buddy" again by hand.
+        // streamer names it "Buddy" or "Sidekick" again by hand.
+        let database = Database::open_in_memory_for_tests();
+        database
+            .save_setting(COHOST_SETTINGS_KEY, &named("Sidekick"))
+            .unwrap();
+        let first = migrate_cohost_settings(&database, load_cohost_settings(&database));
+        assert_eq!(first.persona.name, "Flint");
         assert_eq!(
             migrate_cohost_settings(&database, load_cohost_settings(&database)),
-            migrated
+            first
         );
-        database
-            .save_setting(COHOST_SETTINGS_KEY, &named("Buddy"))
-            .unwrap();
-        let again = migrate_cohost_settings(&database, load_cohost_settings(&database));
-        assert_eq!(again.persona.name, "Buddy");
-        assert_eq!(load_cohost_settings(&database).persona.name, "Buddy");
-        // Any other name is the streamer's choice and stays.
-        for name in ["Buddy Bot", "buddy", "BUDDY", "My Buddy", "Grum"] {
-            let database = Database::open_in_memory_for_tests();
+        for name in ["Buddy", "Sidekick"] {
             database
                 .save_setting(COHOST_SETTINGS_KEY, &named(name))
                 .unwrap();
-            let kept = migrate_cohost_settings(&database, load_cohost_settings(&database));
-            assert_eq!(kept.persona.name, name);
+            let again = migrate_cohost_settings(&database, load_cohost_settings(&database));
+            assert_eq!(again.persona.name, name);
             assert_eq!(load_cohost_settings(&database).persona.name, name);
-            assert_eq!(
-                migration(&database),
-                Some(CohostSettingsMigration { version: 1 })
-            );
         }
-        // A fresh install has no settings row and already says Sidekick:
-        // only the version is written.
+        // A profile that ran plan 236's version 1 still gets version 2.
+        let database = Database::open_in_memory_for_tests();
+        database
+            .save_setting(COHOST_SETTINGS_KEY, &named("Sidekick"))
+            .unwrap();
+        database
+            .save_setting(
+                COHOST_SETTINGS_MIGRATION_KEY,
+                &CohostSettingsMigration { version: 1 },
+            )
+            .unwrap();
+        let upgraded = migrate_cohost_settings(&database, load_cohost_settings(&database));
+        assert_eq!(upgraded.persona.name, "Flint");
+        assert_eq!(
+            migration(&database),
+            Some(CohostSettingsMigration { version: 2 })
+        );
+        // A fresh install has no settings row and already says Flint: only
+        // the version is written.
         let database = Database::open_in_memory_for_tests();
         let fresh = migrate_cohost_settings(&database, load_cohost_settings(&database));
         assert_eq!(fresh.persona.name, COHOST_DEFAULT_PERSONA_NAME);
-        assert_eq!(fresh.persona.name, "Sidekick");
+        assert_eq!(fresh.persona.name, "Flint");
         assert_eq!(
             database
                 .load_setting::<CohostSettings>(COHOST_SETTINGS_KEY)
@@ -16506,7 +16596,7 @@ mod tests {
         );
         assert_eq!(
             migration(&database),
-            Some(CohostSettingsMigration { version: 1 })
+            Some(CohostSettingsMigration { version: 2 })
         );
     }
 
@@ -21742,7 +21832,7 @@ mod tests {
         .await;
         assert_eq!(
             state_command(&state).await.message,
-            "Sidekick isn't on stream, so it can't show the bubble."
+            "Your avatar isn't on stream, so it can't show the bubble."
         );
         assert!(crate::buddy_overlay::status(&state).await.bubble.is_none());
         run_voice_greeting_with(&state, &scope, voice_greeting(), false, |_| async {
@@ -21908,7 +21998,7 @@ mod tests {
             (
                 CohostCommandKind::ShowBuddy,
                 CohostCommandStatus::Done,
-                "Sidekick is on stream."
+                "Flint is on stream."
             )
         );
         assert_eq!(shown.heard, "buddy show up");
@@ -21945,7 +22035,7 @@ mod tests {
         .await;
         assert_eq!(
             state_command(&state).await.message,
-            "Sidekick is already on stream."
+            "Flint is already on stream."
         );
         assert!(layout(&state).show_on_stream);
 
@@ -21967,7 +22057,7 @@ mod tests {
             (
                 CohostCommandKind::HideBuddy,
                 CohostCommandStatus::Done,
-                "Sidekick is off the stream."
+                "Flint is off the stream."
             )
         );
         assert!(!layout(&state).show_on_stream);
@@ -23114,7 +23204,7 @@ mod tests {
         assert_eq!(
             prepared.request.persona,
             Some(CohostTickPersona {
-                name: "Sidekick".to_string(),
+                name: "Flint".to_string(),
                 personality: String::new(),
             })
         );
@@ -23962,7 +24052,7 @@ mod tests {
         assert_eq!(
             pending.request.persona,
             Some(CohostTickPersona {
-                name: "Sidekick".to_string(),
+                name: "Flint".to_string(),
                 personality: String::new(),
             })
         );

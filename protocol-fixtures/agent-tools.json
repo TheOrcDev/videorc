@@ -1629,20 +1629,20 @@
     },
     {
       "name": "buddy_say",
-      "title": "Sidekick says a line",
-      "description": "Sidekick says a line in its speech bubble on the picture, like the Stream Manager's Say box, and never in chat. Viewers see it on stream. Refused while Sidekick is off the picture, since nobody would see it.",
+      "title": "The avatar says a line",
+      "description": "The avatar, the character on the stream, says a line in its speech bubble on the picture, like the Stream Manager's Say box, and never in chat. Viewers see it on stream. Refused while the avatar is off the picture, since nobody would see it.",
       "inputSchema": {
         "type": "object",
         "properties": {
           "text": {
             "type": "string",
-            "description": "What Sidekick says, 1 to 200 characters.",
+            "description": "What the avatar says, 1 to 200 characters.",
             "minLength": 1,
             "maxLength": 200
           },
           "mood": {
             "type": "string",
-            "description": "How Sidekick looks while it says it. Default talk.",
+            "description": "How the avatar looks while it says it. Default talk.",
             "enum": ["talk", "laugh", "think"]
           }
         },
@@ -1673,8 +1673,8 @@
     },
     {
       "name": "set_buddy",
-      "title": "Set up Sidekick",
-      "description": "Turn Sidekick Live on or off, choose how Sidekick talks (off: never on its own, bubble: in its speech bubble on the picture, never in chat, suggest: a card the streamer clicks to post in chat), and put Sidekick on the stream or take it off, like the Stream Manager's Sidekick controls. Turning Sidekick Live on needs Premium and the streamer's Cloud AI consent; talk needs neither.",
+      "title": "Set up Sidekick and the avatar",
+      "description": "Turn Sidekick Live on or off, choose how the avatar talks (off: never on its own, bubble: in its speech bubble on the picture, never in chat, suggest: a card the streamer clicks to post in chat), and put the avatar on the stream or take it off, like the Stream Manager's Sidekick and Avatar blocks. Turning Sidekick Live on needs Premium and the streamer's Cloud AI consent; talk needs neither.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -1684,7 +1684,7 @@
           },
           "talk": {
             "type": "string",
-            "description": "How Sidekick talks on its own: off, bubble (the default) or suggest. Sidekick never posts in chat on its own.",
+            "description": "How the avatar talks on its own: off, bubble (the default) or suggest. Sidekick never posts in chat on its own.",
             "enum": ["off", "bubble", "suggest"]
           },
           "chatMode": {
@@ -1693,7 +1693,7 @@
           },
           "onStream": {
             "type": "boolean",
-            "description": "Sidekick shows on the stream's picture."
+            "description": "The avatar shows on the stream's picture."
           }
         },
         "additionalProperties": false
@@ -2827,7 +2827,7 @@
     {
       "name": "get_scene_layout",
       "title": "Read where everything sits on the picture",
-      "description": "List everything on the picture and where it sits: the camera, the screen, Sidekick, the highlight card, the captions bar and each banner, with names, switches and rects per orientation as fractions of the canvas from the top left. Use it before moving things, and to find a banner's id by its name.",
+      "description": "List everything on the picture and where it sits: the camera, the screen, the avatar, the highlight card, the captions bar and each banner, with names, switches and rects per orientation as fractions of the canvas from the top left. Use it before moving things, and to find a banner's id by its name.",
       "inputSchema": {
         "type": "object",
         "properties": {},
@@ -3228,7 +3228,7 @@
     {
       "name": "set_scene_item",
       "title": "Show, hide or shape something on the picture",
-      "description": "Change an item's switches and look, like the Scene inspector: show or hide the camera or the screen, the camera's shape (rectangle, rounded, circle), and Show on stream and Show in recording for Sidekick, the highlight card, the captions bar and banners. Use set_banner to show or hide a banner itself.",
+      "description": "Change an item's switches and look, like the Scene inspector: show or hide the camera or the screen, the camera's shape (rectangle, rounded, circle), and Show on stream and Show in recording for the avatar, the highlight card, the captions bar and banners. Use set_banner to show or hide a banner itself.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -3249,11 +3249,11 @@
           },
           "showOnStream": {
             "type": "boolean",
-            "description": "Sidekick, highlight, captions or a banner: shown on the livestream."
+            "description": "The avatar, highlight, captions or a banner: shown on the livestream."
           },
           "showInRecording": {
             "type": "boolean",
-            "description": "Sidekick, highlight, captions or a banner: shown in the recording."
+            "description": "The avatar, highlight, captions or a banner: shown in the recording."
           }
         },
         "required": ["item"],

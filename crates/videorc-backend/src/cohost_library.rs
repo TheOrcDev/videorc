@@ -190,7 +190,7 @@ impl BuddyOfficialAlive {
 pub const BUDDY_OFFICIAL_CATALOG: [BuddyOfficial; 5] = [
     BuddyOfficial {
         slug: BuddyOfficialSlug::Golem,
-        name: "Sidekick",
+        name: "Flint",
         kind: "Golem",
         tagline: "The original. Steady as stone.",
         personality: "Calm, warm and a little slow to speak. Greets every follower like an old friend and never rushes anyone.",
@@ -783,7 +783,7 @@ impl LibraryEnv {
         self.root.clone().ok_or_else(|| {
             CohostAvatarErrorDetail::new(
                 crate::cohost_avatar::COHOST_AVATAR_ROOT_UNCONFIGURED,
-                "The Sidekick's image folder is not configured.",
+                "The avatar's image folder is not configured.",
             )
         })
     }
@@ -961,7 +961,8 @@ fn entry_of(
     use crate::cohost::truncate_utf16;
     BuddyLibraryEntry {
         id: avatar.id.clone(),
-        name: library_name(&avatar.name).unwrap_or_else(|| "Sidekick".to_string()),
+        name: library_name(&avatar.name)
+            .unwrap_or_else(|| crate::cohost::COHOST_DEFAULT_PERSONA_NAME.to_string()),
         description: truncate_utf16(&avatar.description, 600),
         personality: truncate_utf16(&avatar.personality, 1200),
         context: truncate_utf16(&avatar.context, 4000),
@@ -1059,11 +1060,11 @@ async fn emit_changed(state: &AppState) {
 pub(crate) fn library_error(error: &CohostApiError) -> CohostAvatarErrorDetail {
     let code = error.detail.code.as_str();
     let message = match code {
-        "unauthorized" => "Sign in again to use your Sidekick library.".to_string(),
+        "unauthorized" => "Sign in again to use your avatar library.".to_string(),
         "buddy-storage-unconfigured" | "cohost-disabled" | "ai-gateway-not-configured" => {
-            "The Sidekick library is not available right now.".to_string()
+            "The avatar library is not available right now.".to_string()
         }
-        "buddy-not-found" => "That Sidekick is not in your library any more.".to_string(),
+        "buddy-not-found" => "That avatar is not in your library any more.".to_string(),
         "network" => "Could not reach Videorc. Check your connection and try again.".to_string(),
         "timeout" => "Videorc took too long to answer. Try again.".to_string(),
         _ if error.kind == CohostApiErrorKind::MalformedResponse => {
@@ -1077,7 +1078,7 @@ pub(crate) fn library_error(error: &CohostApiError) -> CohostAvatarErrorDetail {
 fn signed_out_detail() -> CohostAvatarErrorDetail {
     CohostAvatarErrorDetail::new(
         COHOST_LIBRARY_SIGNED_OUT,
-        "Sign in to use your Sidekick library.",
+        "Sign in to use your avatar library.",
     )
 }
 
@@ -1139,13 +1140,13 @@ fn check_library(state: &AppState) -> Result<(), CohostLibraryRefusal> {
     if state.buddy_library.env().token.is_none() {
         return Err(CohostLibraryRefusal::new(
             COHOST_LIBRARY_SIGNED_OUT,
-            "Sign in to use your Sidekick library.",
+            "Sign in to use your avatar library.",
         ));
     }
     if state.buddy_library.known_disabled() {
         return Err(CohostLibraryRefusal::new(
             COHOST_LIBRARY_UNAVAILABLE,
-            "The Sidekick library is not available right now.",
+            "The avatar library is not available right now.",
         ));
     }
     Ok(())
@@ -1341,7 +1342,7 @@ async fn decide(
     if session_live(state).await {
         state.emit_log(
             "info",
-            "Your Sidekick changed on your account; it switches when this session ends.",
+            "Your avatar changed on your account; it switches when this session ends.",
         );
         shared.cache().pending_apply = Some(PendingApply {
             avatar_id: choice,
@@ -1490,7 +1491,7 @@ async fn select_on_account(
             Err(CohostAvatarErrorDetail::new_owned(
                 detail.code,
                 format!(
-                    "Your Sidekick changed here, but your Videorc account could not be told: {}",
+                    "Your avatar changed here, but your Videorc account could not be told: {}",
                     detail.message
                 ),
             ))
@@ -1741,7 +1742,7 @@ fn write_look(
 ) -> Result<WrittenLook, CohostAvatarErrorDetail> {
     let folder = root.join(persona_id);
     std::fs::create_dir_all(&folder)
-        .map_err(|error| store_error("Could not create the Sidekick's folder", error))?;
+        .map_err(|error| store_error("Could not create the avatar's folder", error))?;
     let tag = fresh_tag();
     let mut images = CohostPersonaImages::default();
     let mut written = Vec::new();
@@ -1813,7 +1814,7 @@ async fn save_applied(
             look.written,
             Err(CohostAvatarErrorDetail::new_owned(
                 error.code().to_string(),
-                format!("Your Sidekick could not be saved: {error}"),
+                format!("Your avatar could not be saved: {error}"),
             )),
         ),
     };
@@ -2004,7 +2005,7 @@ async fn set_link(state: &AppState, id: Option<String>) -> Result<(), CohostAvat
     .map_err(|error| {
         CohostAvatarErrorDetail::new_owned(
             error.code().to_string(),
-            format!("Your Sidekick could not be saved: {error}"),
+            format!("Your avatar could not be saved: {error}"),
         )
     })
 }
@@ -2109,7 +2110,7 @@ async fn run_update(
     .map_err(|error| {
         CohostAvatarErrorDetail::new_owned(
             error.code().to_string(),
-            format!("Your Sidekick could not be saved: {error}"),
+            format!("Your avatar could not be saved: {error}"),
         )
     })
 }
