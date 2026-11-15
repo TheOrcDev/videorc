@@ -478,3 +478,7 @@ function BuddyTabConsentDialog(): ReactElement {
   }
   return <BuddyConsentDialog open={buddyConsentRequested} onAnswer={answer} />
 }
+
+// Plan 239: the Avatar page loads through this module, so the two pages
+// share one chunk and one preload list in the eager shell.
+export { AvatarTab } from '@/components/tabs/avatar-tab'

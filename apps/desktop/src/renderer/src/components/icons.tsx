@@ -121,7 +121,6 @@ type _RegistryIconProps = _AssertIconProps<
     | 'SignIn'
     | 'SignOut'
     | 'SlidersHorizontal'
-    | 'Smiley'
     | 'Sparkle'
     | 'SpeakerHigh'
     | 'SpeakerSlash'
@@ -156,8 +155,9 @@ type _RegistryIconProps = _AssertIconProps<
  * helper that speaks. Since plan 239 (D7) it is Sidekick's mark wherever the
  * helper shows. The slot is named for the page, so renaming keeps it.
  * `AvatarPageIcon` is the Avatar page's row (plan 239): a face, the
- * character on the stream. The avatar's own picture (or the stone golem's
- * artwork) is `BuddyIcon`, below.
+ * character on the stream, in its own module (`avatar-page-icon.tsx`) so the
+ * registry stays a pure re-export for the eager sidebar. The avatar's own
+ * picture (or the stone character's artwork) is `BuddyIcon`.
  */
 export {
   VideoCamera as StudioIcon,
@@ -166,13 +166,13 @@ export {
   ImageSquare as AssetsIcon,
   Broadcast as LivestreamIcon,
   UserSound as BuddyPageIcon,
-  Smiley as AvatarPageIcon,
   ClosedCaptioning as CaptionsIcon,
   Record as OutputIcon,
   FilmReel as LibraryIcon,
   GearSix as SettingsIcon,
   Pulse as HealthIcon
 } from '@phosphor-icons/react'
+export { AvatarPageIcon } from './avatar-page-icon'
 /**
  * Status and feedback. One glyph per meaning: a triangle warns, a circle
  * alerts, a crossed circle is an error. Never introduce a second variant of

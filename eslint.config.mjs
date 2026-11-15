@@ -67,7 +67,11 @@ export default tseslint.config(
     ignores: [
       'apps/desktop/src/renderer/src/components/icons.tsx',
       // The Stream Manager's own glyphs stay out of every window's eager chunk.
-      'apps/desktop/src/renderer/src/components/stream-manager/activity-icons.tsx'
+      'apps/desktop/src/renderer/src/components/stream-manager/activity-icons.tsx',
+      // The Avatar page's row draws two weights of one glyph through IconBase,
+      // so the eager sidebar does not carry all six (plan 239). The registry
+      // re-exports it.
+      'apps/desktop/src/renderer/src/components/avatar-page-icon.tsx'
     ],
     rules: {
       // Flat config does not merge rule options: the Radix ban again.

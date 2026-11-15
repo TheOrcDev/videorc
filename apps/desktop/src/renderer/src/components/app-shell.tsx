@@ -43,7 +43,6 @@ import { PAGE_CONTAINER } from '@/lib/page-layout'
 import { navigationShortcutTab, shellShortcutAction } from '@/lib/shell-shortcuts'
 import { shortcutAccelerator } from '@/lib/shortcuts'
 import { beginVideorcSignIn } from '@/lib/videorc-web-links'
-import { openBuddyPetCreator } from '@/lib/buddy-pet-creator-nav'
 import {
   isAvatarTabId,
   readLastAvatarTab,
@@ -94,7 +93,7 @@ const libraryPage = pageChunk(
   async () => (await import('@/components/tabs/library-tab')).LibraryTab
 )
 const buddyPage = pageChunk(async () => (await import('@/components/tabs/buddy-tab')).BuddyTab)
-const avatarPage = pageChunk(async () => (await import('@/components/tabs/avatar-tab')).AvatarTab)
+const avatarPage = pageChunk(async () => (await import('@/components/tabs/buddy-tab')).AvatarTab)
 const recordingPage = pageChunk(
   async () => (await import('@/components/tabs/recording-tab')).RecordingTab
 )
@@ -525,7 +524,11 @@ function AppShellContent(): ReactElement {
     const off = window.videorc?.onBuddyDeepLink?.((navigation) => {
       if (navigation.openCreator) {
         openAvatar('profile')
-        openBuddyPetCreator({ reference: 'persona-idle' })
+        // Loaded on demand (plan 239): the creator's store stays out of the
+        // eager bundle, and the Avatar page imports the same module.
+        void import('@/lib/buddy-pet-creator-nav').then(({ openBuddyPetCreator }) =>
+          openBuddyPetCreator({ reference: 'persona-idle' })
+        )
       } else if (isBuddyTabId(navigation.tab)) {
         openBuddy(navigation.tab)
       } else {
