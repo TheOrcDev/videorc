@@ -2316,28 +2316,6 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
             }
             return Ok(lock(&self.slot).status());
         }
-        let managed = lock(&self.slot)
-            .show
-            .as_ref()
-            .is_some_and(|show| show.control.transport_kind() == ControlKind::Web);
-        if managed {
-            let device = lock(&self.slot).device.clone();
-            let answer = within_room_budget(
-                deadline,
-                self.web.on_air(&bearer, &show_id, &device, "host", "go"),
-            )
-            .await
-            .map_err(anyhow::Error::msg)?
-            .map_err(anyhow::Error::new)?;
-            let mut runtime = lock(&self.slot);
-            runtime.stopped_by = None;
-            if let Some(ControlHandle::Web(tx)) = runtime.control_tx.as_ref() {
-                tx.observe_revision(answer.rev);
-            }
-            if let Some(state) = runtime.runner.as_mut() {
-                state.on_air = answer.on_air;
-            }
-        }
         if let Err(message) = (self.hooks.camera)(CameraHandover::Lend).await {
             return Err(RoomOpenRefusal::CameraBusy(message).into());
         }
@@ -2356,6 +2334,12 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
                     .map_err(anyhow::Error::msg)
                     .and_then(|answer| answer)
         {
+            let _ = (self.hooks.camera)(CameraHandover::Return).await;
+            return Err(error);
+        }
+        // Claim only when all local prerequisites succeeded: a phone may
+        // leave as soon as host/go names this computer.
+        if let Err(error) = self.claim_talk_host(&bearer, &show_id, deadline).await {
             let _ = (self.hooks.camera)(CameraHandover::Return).await;
             return Err(error);
         }
@@ -2396,6 +2380,54 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
         self.spawn_guests_poll(bearer, show_id, generation);
         self.hooks.emit_from(&self.slot);
         Ok(lock(&self.slot).status())
+    }
+
+    pub(crate) async fn claim_talk_host(
+        &self,
+        bearer: &str,
+        show_id: &str,
+        deadline: tokio::time::Instant,
+    ) -> Result<()> {
+        let (managed, device, generation) = {
+            let runtime = lock(&self.slot);
+            let show = runtime
+                .show
+                .as_ref()
+                .filter(|show| show.record.id == show_id)
+                .ok_or_else(|| crate::cloud_show::cloud_refusal("cloud-nothing-to-resume"))?;
+            (
+                show.control.transport_kind() == ControlKind::Web,
+                runtime.device.clone(),
+                runtime.generation,
+            )
+        };
+        if !managed {
+            return Ok(());
+        }
+        let answer = within_room_budget(
+            deadline,
+            self.web.on_air(bearer, show_id, &device, "host", "go"),
+        )
+        .await
+        .map_err(anyhow::Error::msg)?
+        .map_err(anyhow::Error::new)?;
+        let mut runtime = lock(&self.slot);
+        if runtime.generation != generation
+            || runtime
+                .show
+                .as_ref()
+                .is_none_or(|show| show.record.id != show_id)
+        {
+            return Err(crate::cloud_show::cloud_refusal("cloud-nothing-to-resume"));
+        }
+        if let Some(ControlHandle::Web(tx)) = runtime.control_tx.as_ref() {
+            tx.observe_revision(answer.rev);
+        }
+        if let Some(state) = runtime.runner.as_mut() {
+            state.on_air = answer.on_air;
+        }
+        runtime.stopped_by = None;
+        Ok(())
     }
 
     /// Review M1: the resume's own control socket, the way the solo resume

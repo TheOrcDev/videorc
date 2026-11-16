@@ -11993,6 +11993,34 @@ mod tests {
         assert_eq!(web.destination_bodies().len(), 2);
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn r2_a_m3_failed_talk_preparation_never_claims_the_host() {
+        for camera_busy in [true, false] {
+            let harness = harness(true);
+            hold_unconnected_for_review(&harness, true);
+            harness
+                .context
+                .web
+                .set_state(managed_talk_state(json!([]), true, 1));
+            harness.camera_busy.store(camera_busy, Ordering::SeqCst);
+            if !camera_busy {
+                harness
+                    .context
+                    .web
+                    .fail_polls([CloudApiError::Unauthorized]);
+            }
+            assert!(
+                harness
+                    .context
+                    .resume_room(Some("bearer".into()))
+                    .await
+                    .is_err()
+            );
+            assert!(harness.context.web.on_air_calls.lock().unwrap().is_empty());
+            assert!(lock(&harness.context.slot).talk.is_none());
+            assert!(harness.context.web.end_calls.lock().unwrap().is_empty());
+        }
+    }
     fn hold_unconnected_for_review(harness: &Harness, talk: bool) {
         let created = if talk {
             created_managed_talk()
