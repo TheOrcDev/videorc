@@ -41,6 +41,11 @@ import type {
   CloudRoomQuality,
   CloudRoomTokenAnswer
 } from '@/lib/backend'
+import {
+  TalkShowCameraEffects,
+  TalkShowKeyProcessor,
+  type TalkShowCameraSettings
+} from '@/lib/talk-show-camera-effects'
 import { matchMicrophoneDeviceId } from '@/lib/mic-meter'
 import { sendOverlay, type OverlayImage } from '@/lib/talk-show-overlays'
 import {
@@ -127,6 +132,7 @@ export type TalkShowRoomDeps = {
   onSnapshot: (snapshot: TalkShowRoomSnapshot) => void
   /** The Sources page's camera and microphone, by their plain names. */
   cameraName: string | null
+  cameraSettings?: () => TalkShowCameraSettings | undefined
   microphoneName: string | null
   /** Where remote audio plays (a hidden container the hook owns). */
   audioHost: () => HTMLElement | null
@@ -187,6 +193,8 @@ export class TalkShowRoomClient {
   #micMuted = false
   #cameraOff = false
   #camera: LocalVideoTrack | null = null
+  #cameraEffects: TalkShowCameraEffects | null = null
+  #cameraEffectError = false
   #microphone: LocalAudioTrack | null = null
   #screen: LocalVideoTrack | null = null
   #screenGeneration = 0
@@ -284,6 +292,8 @@ export class TalkShowRoomClient {
   }
 
   async setCameraOff(off: boolean): Promise<void> {
+    if (!off && this.#cameraEffectError)
+      throw new Error(this.#problem ?? 'Green screen failed. Reopen the room to retry.')
     this.#cameraOff = off
     if (this.#camera) {
       if (off) await this.#camera.mute()
@@ -449,11 +459,37 @@ export class TalkShowRoomClient {
     return !this.#closed && this.#room === room
   }
 
+  async updateCameraSettings(settings: TalkShowCameraSettings | undefined): Promise<void> {
+    const camera = this.#camera
+    try {
+      await this.#cameraEffects?.update(settings)
+      if (!settings?.layout.cameraChromaKeyEnabled && this.#cameraEffectError) {
+        this.#cameraEffectError = false
+        this.#problem = null
+      }
+      this.#publish()
+    } catch (error) {
+      if (camera && this.#camera === camera) this.#cameraEffectFailed(camera, error)
+    }
+  }
+
+  #cameraEffectFailed(camera: LocalVideoTrack, error: unknown): void {
+    if (this.#camera !== camera) return
+    this.#cameraOff = true
+    this.#cameraEffectError = true
+    void camera.mute().catch(() => camera.stop())
+    this.#problem = `Green screen failed: ${messageOf(error)} Turn off green screen or reopen the room to retry.`
+    this.#deps.report('connected', this.#problem)
+    this.#publish()
+  }
+
   async #publishLocal(): Promise<void> {
     const room = this.#room
     if (!room) return
     if (!this.#owns(room)) return
     const problems: string[] = []
+    let openedCamera: LocalVideoTrack | null = null
+    let openedEffects: TalkShowCameraEffects | null = null
     try {
       const deviceId = await cameraDeviceIdFor(this.#deps.cameraName)
       if (!this.#owns(room)) return
@@ -465,7 +501,21 @@ export class TalkShowRoomClient {
         camera.stop()
         return
       }
+      openedCamera = camera
       this.#camera = camera
+      this.#cameraEffectError = false
+      const effects = new TalkShowCameraEffects(
+        camera,
+        (settings) =>
+          new TalkShowKeyProcessor(settings, (error) => this.#cameraEffectFailed(camera, error))
+      )
+      openedEffects = effects
+      this.#cameraEffects = effects
+      await effects.update(this.#deps.cameraSettings?.())
+      if (!this.#owns(room)) {
+        camera.stop()
+        return
+      }
       await room.localParticipant.publishTrack(camera, {
         source: Track.Source.Camera,
         videoCodec: 'vp8',
@@ -478,6 +528,12 @@ export class TalkShowRoomClient {
       }
       if (this.#cameraOff) await camera.mute()
     } catch (error) {
+      openedEffects?.close()
+      openedCamera?.stop()
+      if (this.#camera === openedCamera) {
+        this.#cameraEffects = null
+        this.#camera = null
+      }
       problems.push(`The camera didn't open: ${messageOf(error)}`)
     }
     if (!this.#owns(room)) return
@@ -506,7 +562,11 @@ export class TalkShowRoomClient {
       problems.push(`The microphone didn't open: ${messageOf(error)}`)
     }
     if (!this.#owns(room)) return
-    this.#problem = problems.length ? problems.join(' ') : null
+    this.#problem = problems.length
+      ? problems.join(' ')
+      : this.#cameraEffectError
+        ? this.#problem
+        : null
     if (this.#problem) this.#deps.report('connected', this.#problem)
   }
 
@@ -515,6 +575,8 @@ export class TalkShowRoomClient {
     const tracks = [this.#camera, this.#microphone, this.#screen].filter(
       (track): track is LocalVideoTrack | LocalAudioTrack => track !== null
     )
+    this.#cameraEffects?.close()
+    this.#cameraEffects = null
     this.#camera = null
     this.#microphone = null
     this.#screen = null

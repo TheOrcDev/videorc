@@ -1,6 +1,8 @@
 // @vitest-environment happy-dom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import vectors from '../../../shared/chroma-key-vectors.json'
+import type { TalkShowCameraSettings } from './talk-show-camera-effects'
 import type { CloudOnAir, CloudRoomClientState, CloudRoomTokenAnswer } from '@/lib/backend'
 import {
   TAKEN_OVER_DETAIL,
@@ -21,7 +23,9 @@ const lk = vi.hoisted(() => {
     mediaStreamTrack: { kind: 'video' } as unknown as MediaStreamTrack,
     mute: async () => {},
     unmute: async () => {},
-    stop: vi.fn()
+    stop: vi.fn(),
+    setProcessor: vi.fn(async () => {}),
+    stopProcessor: vi.fn(async () => {})
   })
   class FakeRoom {
     static rooms: FakeRoom[] = []
@@ -106,7 +110,10 @@ vi.mock('livekit-client', () => ({
   createLocalAudioTrack: lk.audio
 }))
 
-function client(onAir?: () => CloudOnAir | undefined) {
+function client(
+  onAir?: () => CloudOnAir | undefined,
+  cameraSettings?: () => TalkShowCameraSettings
+) {
   let minted = 0
   const requestToken = vi.fn(async (): Promise<CloudRoomTokenAnswer> => {
     minted += 1
@@ -127,6 +134,7 @@ function client(onAir?: () => CloudOnAir | undefined) {
     },
     onSnapshot: () => {},
     cameraName: null,
+    cameraSettings,
     microphoneName: null,
     audioHost: () => null,
     onAir
@@ -149,6 +157,44 @@ afterEach(() => {
 })
 
 describe('the host in the room (C-G4)', () => {
+  it('sets the key before publication and changes settings without republishing', async () => {
+    const camera = lk.fakeLocalTrack()
+    lk.video.mockResolvedValueOnce(camera)
+    const settings = { layout: vectors[0].settings }
+    const { room } = client(undefined, () => settings)
+    await room.connect()
+    expect(camera.setProcessor).toHaveBeenCalledOnce()
+    expect(camera.setProcessor.mock.invocationCallOrder[0]).toBeLessThan(
+      latestRoom().localParticipant.publishTrack.mock.invocationCallOrder[0]
+    )
+    const publishes = latestRoom().localParticipant.publishTrack.mock.calls.length
+    await room.updateCameraSettings({ layout: { ...settings.layout, cameraChromaKeySpillPct: 20 } })
+    expect(camera.setProcessor).toHaveBeenCalledOnce()
+    expect(latestRoom().localParticipant.publishTrack).toHaveBeenCalledTimes(publishes)
+    await room.updateCameraSettings({
+      layout: { ...settings.layout, cameraChromaKeyEnabled: false }
+    })
+    expect(camera.stopProcessor).toHaveBeenCalledOnce()
+    await room.disconnect()
+  })
+
+  it('never publishes raw camera when key initialization fails', async () => {
+    const camera = lk.fakeLocalTrack()
+    camera.setProcessor.mockRejectedValueOnce(new Error('no GPU'))
+    lk.video.mockResolvedValueOnce(camera)
+    const { room } = client(undefined, () => ({ layout: vectors[0].settings }))
+    await room.connect()
+    expect(camera.stop).toHaveBeenCalled()
+    expect(room.snapshot.local.camera).toBeNull()
+    expect(room.snapshot.local.problem).toContain('no GPU')
+    expect(
+      latestRoom().localParticipant.publishTrack.mock.calls.some(
+        (args: unknown[]) => args[0] === camera
+      )
+    ).toBe(false)
+    await room.disconnect()
+  })
+
   it('joins with one fresh token and asks for no other on a timer (review L4)', async () => {
     const { room, requestToken } = client()
     await room.connect()
