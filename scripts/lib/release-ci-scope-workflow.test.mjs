@@ -157,10 +157,18 @@ describe('release CI path-filter wiring', () => {
     assert.match(aggregator, /name: Windows release source gates/)
     assert.match(aggregator, /needs: \[rust, js, js-vitest\]/)
     assert.match(aggregator, /if: \$\{\{ always\(\) \}\}/)
+    assert.match(aggregator, /RUST_WANTED: \$\{\{ inputs\.rust \}\}/)
     assert.match(
       aggregator,
-      /RUST_RESULT" != success \] \|\| \[ "\$JS_RESULT" != success \] \|\| \[ "\$VITEST_RESULT" != success/
+      /"\$RUST_RESULT" != success \] && ! \{ \[ "\$RUST_WANTED" = false \] && \[ "\$RUST_RESULT" = skipped \]; \}/
     )
+    assert.match(aggregator, /"\$JS_RESULT" != success \] \|\| \[ "\$VITEST_RESULT" != success/)
+    // S15: only an explicit rust: false skips the Rust job; releases keep it.
+    assert.match(gates, /rust:\n\s+# Plan 242 S15[\s\S]*?type: boolean\n\s+default: true/)
+    assert.match(rust, /if: \$\{\{ inputs\.rust \}\}/)
+    assert.doesNotMatch(alpha, /rust: false/)
+    assert.match(windows, /rust: \$\{\{ needs\.scope\.outputs\.windows_heavy == 'true' \}\}/)
+    assert.match(windows, /windows_installer == 'true'/)
     assert.match(aggregator, /node scripts\/vitest-shard-report\.mjs check/)
     // S8: the desktop tests run on Windows in three time-balanced shards.
     const windowsVitest = gates.slice(gates.indexOf('\n  js-vitest:'), gates.indexOf('\n  gates:'))

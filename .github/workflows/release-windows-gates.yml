@@ -5,6 +5,13 @@ on:
       source_sha:
         required: true
         type: string
+      rust:
+        # Plan 242 S15: false only for pull requests that change desktop app
+        # source no Rust code reads. Release callers keep the default.
+        description: Run the Windows Rust gates
+        required: false
+        type: boolean
+        default: true
 permissions:
   contents: read
 jobs:
@@ -14,6 +21,7 @@ jobs:
   # their steps, never the aggregator.
   rust:
     name: Windows release Rust gates
+    if: ${{ inputs.rust }}
     runs-on: windows-latest
     # A 75-minute source run timed out during auditor install after completing 25x/3x checks.
     timeout-minutes: 120
@@ -315,14 +323,20 @@ jobs:
       - name: Require every Windows gate job
         env:
           RUST_RESULT: ${{ needs.rust.result }}
+          RUST_WANTED: ${{ inputs.rust }}
           JS_RESULT: ${{ needs.js.result }}
           VITEST_RESULT: ${{ needs.js-vitest.result }}
         run: |
-          echo "Windows release Rust gates: $RUST_RESULT"
+          echo "Windows release Rust gates: $RUST_RESULT (wanted: $RUST_WANTED)"
           echo "Windows release JS gates: $JS_RESULT"
           echo "Windows desktop tests: $VITEST_RESULT"
-          if [ "$RUST_RESULT" != success ] || [ "$JS_RESULT" != success ] || [ "$VITEST_RESULT" != success ]; then
-            echo "Every Windows gate job must succeed."
+          # A skipped Rust job passes only when the caller asked not to run it.
+          if [ "$RUST_RESULT" != success ] && ! { [ "$RUST_WANTED" = false ] && [ "$RUST_RESULT" = skipped ]; }; then
+            echo "The Windows Rust gates must succeed."
+            exit 1
+          fi
+          if [ "$JS_RESULT" != success ] || [ "$VITEST_RESULT" != success ]; then
+            echo "Every Windows JS gate job must succeed."
             exit 1
           fi
 

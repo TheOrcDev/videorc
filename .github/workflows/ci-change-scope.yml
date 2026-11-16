@@ -2,14 +2,16 @@ name: Change scope
 
 # Called by CI, Windows, and Linux. Classifies the push or PR diff so those
 # workflows can skip heavy jobs for version-only release PRs and docs-record
-# PRs. Fail closed: an unreadable or empty diff is treated as code.
+# PRs, and the Rust jobs for PRs that change only desktop app source no Rust
+# code reads (app-ts, pull requests only: plan 242 S15). Fail closed: an
+# unreadable or empty diff is treated as code.
 # This workflow does not compile, test, or publish anything.
 
 on:
   workflow_call:
     outputs:
       kind:
-        description: code, version-release, docs-record, docs, or js-test
+        description: code, version-release, docs-record, docs, js-test, or app-ts
         value: ${{ jobs.scope.outputs.kind }}
       windows_heavy:
         description: Whether Windows source gates and the installer must run
@@ -29,6 +31,12 @@ on:
       macos_sentinel:
         description: Whether the macOS app sentinel (boots the dev app) must run
         value: ${{ jobs.scope.outputs.macos_sentinel }}
+      windows_js:
+        description: Whether the Windows JS gates (desktop tests on Windows) must run
+        value: ${{ jobs.scope.outputs.windows_js }}
+      windows_installer:
+        description: Whether the Windows installer and its packaged-app smokes must run
+        value: ${{ jobs.scope.outputs.windows_installer }}
 
 jobs:
   scope:
@@ -43,6 +51,8 @@ jobs:
       js: ${{ steps.classify.outputs.js }}
       windows_incident_tooling: ${{ steps.classify.outputs.windows_incident_tooling }}
       macos_sentinel: ${{ steps.classify.outputs.macos_sentinel }}
+      windows_js: ${{ steps.classify.outputs.windows_js }}
+      windows_installer: ${{ steps.classify.outputs.windows_installer }}
     steps:
       - name: Check out repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683

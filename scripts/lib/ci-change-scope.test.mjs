@@ -12,6 +12,8 @@ import {
   isJsTestPath,
   isVersionOnlyPackageJson,
   isVersionReleasePath,
+  isAppTsPath,
+  isRustReachableDesktopPath,
   isWindowsIncidentToolingPath,
   scopeToActionOutputs
 } from './ci-change-scope.mjs'
@@ -119,7 +121,9 @@ describe('ci-change-scope', () => {
       macos_rust: 'false',
       js: 'true',
       windows_incident_tooling: 'false',
-      macos_sentinel: 'false'
+      macos_sentinel: 'false',
+      windows_js: 'false',
+      windows_installer: 'false'
     })
     assert.deepEqual(scopeToActionOutputs(HEAVY_CODE_SCOPE), {
       kind: 'code',
@@ -128,7 +132,9 @@ describe('ci-change-scope', () => {
       macos_rust: 'true',
       js: 'true',
       windows_incident_tooling: 'false',
-      macos_sentinel: 'true'
+      macos_sentinel: 'true',
+      windows_js: 'true',
+      windows_installer: 'true'
     })
   })
 
@@ -154,11 +160,11 @@ describe('ci-change-scope', () => {
         eventName: 'pull_request',
         files: ['apps/desktop/src/renderer/src/app-shell.test.tsx', 'plans/210-x.md']
       }),
-      { kind: CI_SCOPE_KINDS.JS_TEST, ...light }
+      { kind: CI_SCOPE_KINDS.JS_TEST, ...light, windowsJs: true }
     )
-    // Any app, script, workflow or Rust path keeps the full gates.
+    // Any script, workflow or Rust path keeps the full gates. (App source no
+    // Rust code reads is the app-ts kind on pull requests: plan 242 S15.)
     for (const extra of [
-      'apps/desktop/src/renderer/src/app-shell.tsx',
       'scripts/lib/ci-change-scope.mjs',
       '.github/workflows/ci.yml',
       'crates/videorc-backend/src/main.rs',
@@ -260,5 +266,81 @@ describe('ci-change-scope', () => {
       ).windows_incident_tooling,
       'true'
     )
+  })
+
+  it('lets an app-only pull request skip the Rust jobs, and only a pull request (plan 242 S15)', () => {
+    const renderer = 'apps/desktop/src/renderer/src/components/studio/session-panel.tsx'
+    const pr = (files) => classifyChangeScope({ eventName: 'pull_request', files })
+    const appOnly = pr([renderer, 'apps/desktop/src/renderer/src/lib/x.test.ts', 'plans/1.md'])
+    assert.deepEqual(appOnly, {
+      kind: CI_SCOPE_KINDS.APP_TS,
+      windowsHeavy: false,
+      linuxHeavy: false,
+      macosRust: false,
+      macosSentinel: true,
+      windowsJs: true,
+      windowsInstaller: false,
+      js: true
+    })
+    assert.deepEqual(scopeToActionOutputs(appOnly), {
+      kind: 'app-ts',
+      windows_heavy: 'false',
+      linux_heavy: 'false',
+      macos_rust: 'false',
+      js: 'true',
+      windows_incident_tooling: 'false',
+      macos_sentinel: 'true',
+      windows_js: 'true',
+      windows_installer: 'false'
+    })
+    // D7: main, preload and window entry pages still build the installer.
+    for (const file of [
+      'apps/desktop/src/main/index.ts',
+      'apps/desktop/src/preload/index.ts',
+      'apps/desktop/src/renderer/index.html'
+    ]) {
+      assert.equal(pr([renderer, file]).windowsInstaller, true, file)
+    }
+    // Rule 1 of the source prompt: main keeps the full suite.
+    assert.deepEqual(classifyChangeScope({ eventName: 'push', files: [renderer] }), {
+      ...HEAVY_CODE_SCOPE
+    })
+    // Every desktop file a Rust crate reads, and everything outside the app
+    // source, keeps every gate.
+    for (const extra of [
+      'apps/desktop/src/renderer/src/styles.css',
+      'apps/desktop/src/main/window-palette.ts',
+      'apps/desktop/src/shared/backend-rpc-contract.ts',
+      'apps/desktop/src/renderer/src/assets/buddy/default/idle.webp',
+      'apps/desktop/package.json',
+      'apps/desktop/vitest.config.ts',
+      'apps/desktop/resources/buddy/manifest.json',
+      'protocol-fixtures/high-risk-contracts.json',
+      'crates/videorc-backend/src/main.rs',
+      'scripts/lib/ci-change-scope.mjs',
+      '.github/workflows/ci.yml',
+      'pnpm-lock.yaml'
+    ]) {
+      assert.deepEqual(pr([renderer, extra]), { ...HEAVY_CODE_SCOPE }, extra)
+    }
+  })
+
+  it('goes red when a Rust-read desktop file hides in an app-only diff (plan 242 S15)', () => {
+    // "Hide a real change from it on purpose and confirm CI goes red": the
+    // palette Rust compiles into the served pages changes inside an
+    // otherwise app-only pull request; every Rust job must still run.
+    const scope = classifyChangeScope({
+      eventName: 'pull_request',
+      files: [
+        'apps/desktop/src/renderer/src/components/sidebar.tsx',
+        'apps/desktop/src/main/window-palette.ts'
+      ]
+    })
+    const outputs = scopeToActionOutputs(scope)
+    assert.equal(outputs.macos_rust, 'true')
+    assert.equal(outputs.windows_heavy, 'true')
+    assert.equal(outputs.linux_heavy, 'true')
+    assert.equal(isRustReachableDesktopPath('apps/desktop/src/main/window-palette.ts'), true)
+    assert.equal(isAppTsPath('apps/desktop/src/main/window-palette.ts'), false)
   })
 })

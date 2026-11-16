@@ -24,15 +24,22 @@ jobs:
 
   gates:
     needs: scope
-    if: ${{ needs.scope.result == 'success' && needs.scope.outputs.windows_heavy == 'true' }}
+    # Plan 242 S15: an app-only pull request (windows_js without
+    # windows_heavy) runs the Windows JS gates and skips the Rust ones.
+    if: >-
+      ${{ needs.scope.result == 'success' &&
+      (needs.scope.outputs.windows_heavy == 'true' || needs.scope.outputs.windows_js == 'true') }}
     uses: ./.github/workflows/release-windows-gates.yml
     with:
       source_sha: ${{ github.sha }}
+      rust: ${{ needs.scope.outputs.windows_heavy == 'true' }}
 
   gates-skip:
     name: gates / Windows release source gates
     needs: scope
-    if: ${{ needs.scope.result == 'success' && needs.scope.outputs.windows_heavy != 'true' }}
+    if: >-
+      ${{ needs.scope.result == 'success' &&
+      needs.scope.outputs.windows_heavy != 'true' && needs.scope.outputs.windows_js != 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -45,7 +52,9 @@ jobs:
   installer:
     name: Windows installer artifact
     needs: scope
-    if: ${{ needs.scope.result == 'success' && needs.scope.outputs.windows_heavy == 'true' }}
+    # Plan 242 D7: code changes and app changes to main, preload or a window
+    # entry page run it; other renderer-only changes skip it.
+    if: ${{ needs.scope.result == 'success' && needs.scope.outputs.windows_installer == 'true' }}
     runs-on: windows-latest
     # Recent green-step runs: 19-27 min (+~5 min for the separate recovery
     # test package). 45 keeps margin without an hour-long hang.
@@ -226,7 +235,7 @@ jobs:
   installer-skip:
     name: Windows installer artifact
     needs: scope
-    if: ${{ needs.scope.result == 'success' && needs.scope.outputs.windows_heavy != 'true' }}
+    if: ${{ needs.scope.result == 'success' && needs.scope.outputs.windows_installer != 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
