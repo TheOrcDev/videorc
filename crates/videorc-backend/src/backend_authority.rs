@@ -310,6 +310,21 @@ mod tests {
     use super::*;
 
     #[test]
+    fn cloud_continuation_mutations_are_renderer_only() {
+        for method in ["cloud.show.handOff", "cloud.show.check"] {
+            assert_eq!(
+                authorize_backend_method(BackendRole::Renderer, method, false),
+                Ok(())
+            );
+            assert_eq!(
+                authorize_backend_method(BackendRole::Admin, method, false),
+                Err(MethodAdmissionError::RendererOnly)
+            );
+            assert!(authorize_backend_method(BackendRole::Remote, method, false).is_err());
+        }
+    }
+
+    #[test]
     fn app_window_resolution_is_local_studio_authority() {
         for role in [BackendRole::Renderer, BackendRole::Admin] {
             assert!(authorize_backend_method(role, "sources.resolve_app_window", false).is_ok());

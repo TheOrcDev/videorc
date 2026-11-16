@@ -19568,7 +19568,8 @@ mod tests {
             lifecycle_exemptions,
             [
                 // Plan 184 C5: Resume is the same atomic Start, bound to the
-                // live cloud show.
+                // live cloud show. Hand-off finalizes through the same Stop.
+                "cloud.show.handOff",
                 "cloud.show.resume",
                 "recording.start_test",
                 "recording.stop",

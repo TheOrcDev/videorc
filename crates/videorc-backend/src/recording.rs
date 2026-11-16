@@ -29746,7 +29746,13 @@ async fn publish_stream_leg_update(
             .targets
             .get(*position)
             .is_some_and(|t| is_cloud_feed_target(&t.target_id));
-        if cloud_feed {
+        let managed = crate::cloud_show::lock(&state.cloud_show)
+            .show
+            .as_ref()
+            .is_some_and(|show| {
+                show.control.transport_kind() == crate::cloud_show::ControlKind::Web
+            });
+        if cloud_feed && managed {
             tokio::time::sleep(Duration::from_secs(3)).await;
             if crate::cloud_show::lock(&state.cloud_show)
                 .stopped_by
