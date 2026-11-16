@@ -17446,11 +17446,13 @@ function registerManagedAssetProtocol(): void {
       if (!resolved) {
         return new Response('Not found', { status: 404 })
       }
-      if (url.host === 'buddy' || url.host === SOUND_ASSET_HOST) {
+      if (url.host === 'buddy' || url.host === SOUND_ASSET_HOST || url.host === 'background') {
         // Buddy pictures (persona looks, drafts, the library cache) are read
         // back on a canvas by the living preview, and the soundboard's
         // monitor fetches and decodes its sounds (plan 189), so both allow
-        // CORS reads. Only files inside their managed roots reach this branch.
+        // CORS reads. Talk-show green screen uploads managed backgrounds to
+        // WebGL, which also requires CORS. Only files inside their managed
+        // roots reach this branch; session-media grants are handled above.
         return withCorsReadHeader(net.fetch(pathToFileURL(resolved).toString()))
       }
       return net.fetch(pathToFileURL(resolved).toString())

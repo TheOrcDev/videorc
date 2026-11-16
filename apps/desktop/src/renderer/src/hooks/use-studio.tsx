@@ -17163,11 +17163,16 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   }, [talkShowRoomPhase])
   const talkShowCameraId = captureConfig.sources.cameraId ?? null
   const talkShowMicrophoneId = captureConfig.sources.microphoneId ?? null
+  const talkShowCameraSettings = useMemo(
+    () => ({ layout: captureConfig.layout, background: activeSceneBackground }),
+    [captureConfig.layout, activeSceneBackground]
+  )
   const talkShowDeps = useMemo<TalkShowRoomControllerDeps>(
     () => ({
       client,
       cloudStatus,
       commitCloudStatus,
+      cameraSettings: talkShowCameraSettings,
       cameraId: talkShowCameraId,
       microphoneId: talkShowMicrophoneId,
       devices: deviceList.devices,
@@ -17185,6 +17190,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       deviceList.devices,
       smokeTalkShowRoomOpen,
       talkShowCameraId,
+      talkShowCameraSettings,
       talkShowCameraReturned,
       talkShowClipsStepAside,
       talkShowError,

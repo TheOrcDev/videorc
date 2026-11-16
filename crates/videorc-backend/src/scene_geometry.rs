@@ -1553,6 +1553,44 @@ mod tests {
         default_layout_settings()
     }
 
+    #[test]
+    fn talk_show_chroma_vectors_match_native_alpha_and_despill() {
+        #[derive(serde::Deserialize)]
+        struct Expected {
+            alpha: u8,
+            rgb: [u8; 3],
+        }
+        #[derive(serde::Deserialize)]
+        struct Vector {
+            name: String,
+            rgb: [u8; 3],
+            settings: serde_json::Value,
+            expected: Expected,
+        }
+        let vectors: Vec<Vector> = serde_json::from_str(include_str!(
+            "../../../apps/desktop/src/shared/chroma-key-vectors.json"
+        ))
+        .unwrap();
+        for vector in vectors {
+            let mut settings = serde_json::to_value(layout()).unwrap();
+            for (key, value) in vector.settings.as_object().unwrap() {
+                settings[key] = value.clone();
+            }
+            let settings: LayoutSettings = serde_json::from_value(settings).unwrap();
+            let spec = camera_chroma_key(&settings).unwrap();
+            let [r, g, b] = vector.rgb;
+            assert!(
+                chroma_key_alpha(&spec, r, g, b).abs_diff(vector.expected.alpha) <= 1,
+                "{} alpha",
+                vector.name
+            );
+            let (r, g, b) = chroma_key_despill(&spec, r, g, b);
+            for (actual, expected) in [r, g, b].into_iter().zip(vector.expected.rgb) {
+                assert!(actual.abs_diff(expected) <= 1, "{} spill", vector.name);
+            }
+        }
+    }
+
     /// Plan 216 B1: the shared fixture pins the Rust picture rect to the TS
     /// `scenePictureRectPixels`, within a pixel, case for case.
     #[test]

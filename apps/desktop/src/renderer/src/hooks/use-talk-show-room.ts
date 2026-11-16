@@ -14,6 +14,7 @@ import {
   NO_TALK_SHOW,
   type TalkShowContextValue
 } from '@/lib/talk-show-context'
+import type { TalkShowCameraSettings } from '@/lib/talk-show-camera-effects'
 import type { TalkShowRoomClient, TalkShowRoomSnapshot } from '@/lib/talk-show-room'
 
 // The host's room, from the Studio's side (plan 224 C-G4). The backend owns
@@ -44,6 +45,7 @@ export type TalkShowRoomControllerDeps = {
   commitCloudStatus: (status: CloudStatus) => void
   /** The Sources page's camera and microphone ids and the device list, for
    * the names Chromium labels its devices with. */
+  cameraSettings?: TalkShowCameraSettings
   cameraId: string | null
   microphoneId: string | null
   devices: readonly Device[]
@@ -156,6 +158,11 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
   const microphoneNameRef = useRef(microphoneName)
   cameraNameRef.current = cameraName
   microphoneNameRef.current = microphoneName
+  const cameraSettingsRef = useRef(deps.cameraSettings)
+  cameraSettingsRef.current = deps.cameraSettings
+  useEffect(() => {
+    void clientRef.current?.updateCameraSettings(deps.cameraSettings)
+  }, [deps.cameraSettings])
   const stageRef = useRef<string[]>([])
   stageRef.current = stage?.onStage ?? []
   const onCameraReturnedRef = useRef(onCameraReturned)
@@ -210,6 +217,7 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
             if (!cancelled) setSnapshot(next)
           },
           cameraName: cameraNameRef.current,
+          cameraSettings: () => cameraSettingsRef.current,
           microphoneName: microphoneNameRef.current,
           audioHost: () => host,
           onAir: () => onAirRef.current
