@@ -27,6 +27,8 @@
 //! now. Each RPC gives up after `RPC_BUDGET`, inside the backend's 10 s
 //! mutation watchdog, so a slow videorc.com never restarts the backend.
 
+pub(crate) mod history;
+
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 

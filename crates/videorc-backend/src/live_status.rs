@@ -396,9 +396,10 @@ impl Sender {
                         .and_then(|v| v.to_str().ok())
                         .and_then(|v| v.parse::<u64>().ok())
                         .unwrap_or(5);
-                    self.retry_at = now
+                    let received_at = Instant::now();
+                    self.retry_at = received_at
                         .checked_add(Duration::from_secs(seconds))
-                        .or_else(|| now.checked_add(HEARTBEAT));
+                        .or_else(|| received_at.checked_add(HEARTBEAT));
                 }
                 _ => {}
             }
@@ -650,13 +651,16 @@ mod sender_tests {
     async fn rate_limit_waits_and_failed_beats_are_not_queued() {
         let (access, web, task) = fake().await;
         let client = reqwest::Client::new();
-        let now = Instant::now();
+        // Model an old request-start clock without delaying the test.
+        let now = Instant::now() - Duration::from_secs(30);
         let mut sender = Sender::default();
         let b = body();
         *web.code.lock().unwrap() = 429;
         sender
             .tick(&client, Some(&access), Some(b.clone()), now)
             .await;
+        let retry_at = sender.retry_at.unwrap();
+        assert!(retry_at >= now + Duration::from_secs(39));
         let mut changed = b.clone();
         changed.recording = true;
         sender
@@ -664,28 +668,18 @@ mod sender_tests {
                 &client,
                 Some(&access),
                 Some(changed.clone()),
-                now + Duration::from_secs(8),
+                retry_at - Duration::from_secs(1),
             )
             .await;
         assert_eq!(web.requests.lock().unwrap().len(), 1);
         *web.code.lock().unwrap() = 503;
         sender
-            .tick(
-                &client,
-                Some(&access),
-                Some(changed.clone()),
-                now + Duration::from_secs(9),
-            )
+            .tick(&client, Some(&access), Some(changed.clone()), retry_at)
             .await;
         changed.title = Some("latest".into());
         *web.code.lock().unwrap() = 200;
         sender
-            .tick(
-                &client,
-                Some(&access),
-                Some(changed),
-                now + Duration::from_secs(12),
-            )
+            .tick(&client, Some(&access), Some(changed), retry_at + CHANGE_GAP)
             .await;
         let requests = web.requests.lock().unwrap();
         assert_eq!(requests.len(), 3);

@@ -27,8 +27,22 @@ git -C ~/projects/videorcweb fetch -q origin && git -C ~/projects/videorcweb dif
 
 ## Status
 
-- **Status**: PLANNED 2026-11-16. The owner answered every shaping question
-  (D1 to D9). D10 to D16 are the orchestrator's defaults (⚑).
+- **Status**: BUILT 2026-11-16 (owner: "execute the entire plan and push to
+  main after each small commit"). The owner answered D1 to D9; D10 to D16
+  shipped as the orchestrator's defaults (⚑), still open to override. Web
+  commits went straight to videorc-web `main` and each Vercel deploy
+  succeeded; desktop slices merged as PRs #1397 to #1404. Owed: the owner's
+  acceptance (E3), by-eye of the After the stream row (#1404) in both themes,
+  the legal read for D14, and sending the YouTube compliance update (E2).
+  - Differences from the plan, found while building: `reason` has four
+    values (`refused` dropped: the desktop can't tell it apart); the history
+    switch lives in `email_preferences.stream_history` (migration 0039) and
+    the live status table is 0038; the not-live page shows the history only
+    when not live or quiet; After the stream also gained a "Your streams"
+    row that opens videorc.com/live (D2's link). No `smoke:multistream` run:
+    the launcher turns the sender off in every smoke, so it would prove
+    nothing about this change (owner feedback "Proportionate
+    verification").
 - **Priority**: P2 (owner ask, 2026-11-16).
 - **Effort**: M to L. Web: one live-status route and table, one history
   table, one maintenance pass, the rebuilt `/live`, one stream page. Desktop:
@@ -663,6 +677,37 @@ Needs Phase B deployed.
 
 ## Progress
 
-| Slice | State              | Where       |
-| ----- | ------------------ | ----------- |
-| Plan  | PLANNED 2026-11-16 | this branch |
+| Slice                                             | State                     | Where                                                                 |
+| ------------------------------------------------- | ------------------------- | --------------------------------------------------------------------- |
+| Plan                                              | Done 2026-11-16           | #1396                                                                 |
+| A1 live status route and table (and A6's cleanup) | Done                      | web `028081b5`                                                        |
+| A2 `buildLiveView`                                | Done                      | web `828d7a33`                                                        |
+| A3, A5 live layout and copy                       | Done                      | web `80f9ff2d`                                                        |
+| A4 guests and recording                           | Done                      | web `9445e0f7`                                                        |
+| A7 privacy (live status) and the Live link        | Done                      | web `6eacc769`                                                        |
+| B1 history storage and the switch's preference    | Done                      | web `e0989c12`                                                        |
+| B2 save on report, privacy (history)              | Done                      | web `eb35a1ce`                                                        |
+| B3, B4 YouTube 30 days, Disconnect, delete routes | Done                      | web `0d575bdf`                                                        |
+| B5, B6 not-live page, stream page, email link     | Done                      | web `c1eedc39`                                                        |
+| A7, B7 docs                                       | Done                      | web `1a7e150a` (`docs/live-status.md`, `docs/stream-report-email.md`) |
+| C1 builder and shared fixture (C3)                | Done                      | #1397                                                                 |
+| C2 sender                                         | Done                      | #1398, retry fix #1403                                                |
+| C4 smoke launcher off switch                      | Done                      | #1400                                                                 |
+| D1 history preference, post when either is on     | Done                      | #1401                                                                 |
+| D2 Save my streams row                            | Done; by-eye owed         | #1404                                                                 |
+| D3 YouTube Disconnect strips the history          | Done                      | #1402                                                                 |
+| E1 docs                                           | Done                      | web docs above                                                        |
+| E2 YouTube compliance draft                       | Written, not sent (owner) | this PR                                                               |
+| E3 owner acceptance                               | Owed                      |                                                                       |
+
+Gates: web `tsc`, eslint, prettier and the full suite (2192 passed) on every
+commit; desktop `cargo fmt`, `cargo check --all-targets` per slice, then
+`cargo test -p videorc-backend live_status stream_report_email watchdog::push`
+(31 passed) and `cargo clippy -p videorc-backend --all-targets -- -D warnings`
+(clean), `pnpm typecheck`, `pnpm lint`, `pnpm format:check`,
+`pnpm test:scripts` and the desktop tests. Production after the deploys:
+`/live` and `/live/streams/<id>` send a signed-out visitor to sign in;
+`PUT /api/desktop/live-status`, `DELETE /api/live/streams` and
+`POST /api/desktop/stream-history/youtube-revoked` answer 401 without a
+session; the privacy page carries the Live status and Stream history
+paragraphs.
