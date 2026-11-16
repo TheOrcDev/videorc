@@ -147,6 +147,7 @@ const METHOD_REQUEST_TIMEOUT_MS: Readonly<Record<string, number>> = {
   // Plan 184 C5b: a resume is a session start bound to the live cloud show.
   'cloud.show.resume': 120_000,
   'session.stop': 120_000,
+  'cloud.show.handOff': 120_000,
   'session.remux_mp4': 10 * 60_000,
   'sessions.import': 10 * 60_000,
   'repair.repair_file': 10 * 60_000

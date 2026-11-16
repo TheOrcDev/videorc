@@ -30,6 +30,13 @@ export const HAND_OFF_LABEL = 'Continue on another device'
 export const HAND_OFF_CONSEQUENCE =
   'viewers see Be right back until you continue on your phone or another computer.'
 
+/**
+ * R2 A-M5: the one neutral line when this computer stopped for a hand-off
+ * but videorc.com could not be told. It is still a hand-off.
+ */
+export const HAND_OFF_UNCONFIRMED =
+  "Videorc Cloud didn't confirm the hand-off. Viewers see Be right back until a device continues."
+
 /** Where a phone picks the show up (the web's `/live/continue`, D5). */
 export const CONTINUE_ON_PHONE = 'On your phone, open videorc.com/live/continue.'
 

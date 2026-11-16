@@ -1,6 +1,12 @@
 import type { BackendClient } from '@/backendClient'
 
-import type { AppExitKind, CloudSettingsPatch, CloudStatus, CloudTestOutput } from './backend'
+import type {
+  AppExitKind,
+  CloudHandOffAnswer,
+  CloudSettingsPatch,
+  CloudStatus,
+  CloudTestOutput
+} from './backend'
 import {
   CLOUD_TOAST_ID,
   cloudFallbackToast,
@@ -9,7 +15,7 @@ import {
   cloudShowCapToast,
   formatCloudCountdown
 } from './cloud-toasts'
-import { cloudTakenOverTitle } from './cloud-handoff-view'
+import { HAND_OFF_UNCONFIRMED, cloudTakenOverTitle } from './cloud-handoff-view'
 import { requestCloudSectionFocus } from './cloud-section-focus'
 import { toast } from './toast'
 import { offlineError, toastUserError } from './user-error'
@@ -87,22 +93,26 @@ export async function endCloudShow(
 /**
  * Plan 243 C5: the hand-off. The backend stops feeding through the hand-off
  * stop (D7) and the show waits for another device; then a leaving app goes.
- * A refusal says why, keeps the app, and lets the provider give the session
- * its broadcasts back when it is still fed.
+ * R2 A-M5: an answer that videorc.com did not confirm is still a hand-off
+ * (this computer stopped), said once in a neutral toast. Only an error, a
+ * refusal that stopped nothing, says why, keeps the app, and lets the
+ * provider give the session its broadcasts back when it is still fed.
  */
 export async function handOffCloudShow(
   client: BackendClient | null,
   exit: AppExitKind | null,
   refused: () => void
 ): Promise<void> {
+  let answer: CloudHandOffAnswer
   try {
     if (!client) throw offlineError()
-    await client.requestTyped('cloud.show.handOff')
+    answer = await client.requestTyped('cloud.show.handOff')
   } catch (error) {
     refused()
     toastUserError(error, { action: 'continue on another device' }, { id: CLOUD_TOAST_ID })
     return
   }
+  if (!answer.confirmed) toast.info(HAND_OFF_UNCONFIRMED, { id: CLOUD_TOAST_ID })
   if (exit) void window.videorc?.exitApp?.(exit)
 }
 

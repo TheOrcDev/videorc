@@ -119,6 +119,7 @@ import type {
   SetBuddyOverlayParams,
   ClearBuddyOverlayParams,
   CloudSettingsPatch,
+  CloudHandOffAnswer,
   CloudStatus,
   CloudTestParams,
   CloudGuestActParams,
@@ -618,8 +619,12 @@ export interface BackendRpcMethodMap {
   'cloud.show.goLive': BackendRpcDefinition<CloudTalkGoLiveParams, CloudStatus>
   /** End livestream in a talk show (D17): the legs end, the room stays. */
   'cloud.show.legs.end': BackendRpcDefinition<undefined, CloudStatus>
-  /** Plan 243 C2: stop feeding the show and keep it live for another device (D7). */
-  'cloud.show.handOff': BackendRpcDefinition<undefined, { ok: true }>
+  /**
+   * Plan 243 C2: stop feeding the show and keep it live for another device
+   * (D7). R2 A-M5: `confirmed` says whether videorc.com was told; the local
+   * stop happened either way. Only a refusal that stopped nothing is an error.
+   */
+  'cloud.show.handOff': BackendRpcDefinition<undefined, CloudHandOffAnswer>
   /** Plan 243 D10: ask videorc.com for a live show now (at most once per 10 s). */
   'cloud.show.check': BackendRpcDefinition<undefined, { ok: true }>
   // --- The stream watchdog (plan 223) ---
@@ -7050,7 +7055,13 @@ const runtimeContracts = {
   'cloud.return.set': { params: cloudOpenFlagSchema, result: cloudStatusSchema },
   'cloud.show.goLive': { params: cloudTalkGoLiveParamsSchema, result: cloudStatusSchema },
   'cloud.show.legs.end': { params: undefinedSchema, result: cloudStatusSchema },
-  'cloud.show.handOff': { params: undefinedSchema, result: okTrueSchema },
+  'cloud.show.handOff': {
+    params: undefinedSchema,
+    result: objectSchema(
+      { ok: literalSchema(true), confirmed: booleanSchema },
+      { allowUnknown: false }
+    ) as RuntimeSchema<CloudHandOffAnswer>
+  },
   'cloud.show.check': { params: undefinedSchema, result: okTrueSchema },
   // --- The stream watchdog (plan 223) ---
   'watchdog.alerts.list': { params: undefinedSchema, result: watchdogAlertsViewSchema },

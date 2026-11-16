@@ -476,6 +476,8 @@ class StudioBackend {
   cloudStatus: CloudStatus | null = null
   /** Plan 243: `cloud.show.handOff` refuses with this code and stops nothing. */
   handOffRefusal: string | null = null
+  /** Plan 243 R2 A-M5: the stop happened, but videorc.com was not told. */
+  handOffConfirmed = true
   youtubeCompleteFailuresRemaining = 0
   /** Plan 094: `complete` refused by the backend's quota breaker (coded). */
   youtubeCompleteQuotaFailuresRemaining = 0
@@ -1697,7 +1699,7 @@ class StudioBackend {
             message: 'Saved.'
           })
         }
-        return { ok: true }
+        return { ok: true, confirmed: this.handOffConfirmed }
       }
       case 'cloud.show.check':
         return { ok: true }
@@ -6818,6 +6820,94 @@ describe('real StudioProvider lifecycle', () => {
     expect(sent('cloud.show.handOff')).toBe(2)
     expect(sent('cloud.show.legs.end')).toBe(0)
     expect(sent('cloud.room.close')).toBe(0)
+  }, 20_000)
+
+  // Plan 243 R2 A-M5: a hand-off that stopped this computer but could not
+  // tell videorc.com is still a hand-off: Quit and keep it live quits, no
+  // broadcast is completed, and one neutral toast says what viewers see.
+  it('quits after an unconfirmed hand-off and completes nothing (plan 243 R2 A-M5)', async () => {
+    const backend = new StudioBackend()
+    enableYouTubeOauthForTest(backend)
+    backend.handOffConfirmed = false
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    let emit: (name: string, value: unknown) => void = () => {}
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => [],
+      registerEmitter: (next) => {
+        emit = next
+      }
+    })
+    const exitApp = vi.fn(async (_kind: 'quit' | 'close') => undefined)
+    ;(api as unknown as { exitApp: typeof exitApp }).exitApp = exitApp
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+    let shell: ReturnType<typeof useStudioShell> | undefined
+    function ShellProbe(): null {
+      const value = useStudioShell()
+      useEffect(() => {
+        shell = value
+      }, [value])
+      return null
+    }
+    root = await mountStudioProvider(
+      testDom.container,
+      (value) => {
+        observations.push(value)
+      },
+      createElement(ShellProbe)
+    )
+    await waitForObservation(
+      () =>
+        latest()?.core.wsStatus === 'connected' &&
+        latest()?.core.captureConfig.sources.microphoneId === 'mic:1'
+    )
+    await openYouTubeGoLiveConfirmation(latest)
+    await act(async () => {
+      await latest()!.core.confirmGoLive()
+    })
+    await waitForObservation(() => latest()?.recording.recording.state === 'recording')
+    await act(async () => {
+      backend.pushEvent('recording.status', {
+        state: 'recording',
+        sessionId: 'session-1',
+        startedAt: now,
+        streamUrl: 'rtmps://localhost:1936/live/***',
+        message: 'Running both session.'
+      })
+      backend.cloudStatus = managedOnAirCloudStatus()
+      backend.pushEvent('cloud.state', backend.cloudStatus)
+      await Promise.resolve()
+    })
+    await waitForObservation(() => latest()?.cloud.cloudStatus?.onAir?.thisDevice === true)
+
+    await act(async () => emit('onExitRequest', 'quit'))
+    await waitForObservation(() => shell?.stopConfirmation?.origin === 'quit')
+    await act(async () => shell!.handOffStopSession())
+    await waitForObservation(() => exitApp.mock.calls.length === 1)
+    expect(exitApp).toHaveBeenCalledExactlyOnceWith('quit')
+    expect(toastSpies.info).toHaveBeenCalledWith(
+      "Videorc Cloud didn't confirm the hand-off. Viewers see Be right back until a device continues.",
+      expect.objectContaining({ id: 'videorc-cloud' })
+    )
+    expect(toastSpies.error).not.toHaveBeenCalled()
+    expect(toastSpies.warning).not.toHaveBeenCalled()
+    await waitForObservation(() => latest()?.recording.recording.state === 'idle')
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 50))
+    })
+    expect(
+      backend.sentCommands.filter(
+        (command) =>
+          command.method === 'streamTargets.youtube.transition' &&
+          (command.params as { status?: string }).status === 'complete'
+      )
+    ).toHaveLength(0)
   }, 20_000)
 
   // Plan 243 D7: a talk show taken over (or handed off) goes on elsewhere, so
