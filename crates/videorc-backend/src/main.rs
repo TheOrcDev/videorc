@@ -16049,19 +16049,6 @@ async fn start_session_command(
         Ok(params) => {
             let streaming = params.streaming.clone();
             let attach_live_chat = session_attaches_live_chat(&params);
-            if params.output.record_enabled || params.output.stream_enabled {
-                let changed = {
-                    let mut runtime = cloud_show::lock(&state.cloud_show);
-                    if runtime.feeding_session().is_none() {
-                        runtime.stopped_by.take().is_some()
-                    } else {
-                        false
-                    }
-                };
-                if changed {
-                    state.emit_event(cloud_show::CLOUD_STATE_EVENT, cloud_show_status(state));
-                }
-            }
             // Plan 184 C6b: a running Test cloud yields to the session, which
             // needs the upload and the encoder; a cloud start also waits for
             // the test's show to end (`prepare_session`).

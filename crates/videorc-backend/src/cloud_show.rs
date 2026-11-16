@@ -5095,7 +5095,6 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
                 break 'held Err(runtime.generation);
             }
             runtime.failed = None;
-            runtime.stopped_by = None;
             runtime.runner = Some(RunnerState {
                 on_air: current.on_air.clone(),
                 ..RunnerState::default()
@@ -12529,6 +12528,35 @@ mod tests {
             }
             assert!(harness.context.web.end_calls.lock().unwrap().is_empty());
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn r2_a_l3_reholding_the_same_show_keeps_the_stop_marker() {
+        let harness = harness(true);
+        hold_unconnected_for_review(&harness, false);
+        lock(&harness.context.slot).stopped_by = Some(CloudStoppedBy::HandOff);
+        harness
+            .context
+            .web
+            .set_state(managed_state("live", live_legs()));
+        harness
+            .context
+            .hold_current_show("bearer", held_current(&created_managed()), 0)
+            .await
+            .unwrap();
+        assert_eq!(
+            lock(&harness.context.slot).stopped_by,
+            Some(CloudStoppedBy::HandOff)
+        );
+        harness
+            .context
+            .finish_resume("bearer", "local-recording")
+            .await
+            .unwrap();
+        assert_eq!(
+            lock(&harness.context.slot).stopped_by,
+            Some(CloudStoppedBy::HandOff)
+        );
     }
     fn hold_unconnected_for_review(harness: &Harness, talk: bool) {
         let created = if talk {
