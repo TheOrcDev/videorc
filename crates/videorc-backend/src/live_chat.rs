@@ -3838,12 +3838,17 @@ pub(crate) async fn try_deliver_messages(
             }
             drop(coordinator);
             state.emit_log(
-            "warn",
-            format!(
-                "Could not persist {} live chat message(s); exact-message retry remains eligible: {error}",
-                authoritative_messages.len()
-            ),
-        );
+                "warn",
+                format!(
+                    "Could not persist {} live chat message(s); {}: {error}",
+                    authoritative_messages.len(),
+                    if error.is_terminal() {
+                        "provider stopped"
+                    } else {
+                        "exact-message retry remains eligible"
+                    }
+                ),
+            );
             return Err(error);
         }
     };

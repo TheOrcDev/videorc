@@ -3548,7 +3548,30 @@ mod tests {
             notifications_sent,
             shutdown,
         ) = spawn_mock_twitch_server_sending_notification_once().await;
-        let state = test_state();
+        let mut state = test_state();
+        state
+            .database
+            .ensure_fake_live_chat_session("session-1")
+            .unwrap();
+        // Missing rows are terminal. Exercise actual transient storage pressure.
+        let ready = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let gate = ready.clone();
+        let database = state.database.clone();
+        state.live_chat_persistence =
+            crate::live_chat_persistence::LiveChatPersistence::with_writer(std::sync::Arc::new(
+                move |messages| {
+                    if !gate.load(Ordering::SeqCst) {
+                        return Err(anyhow::Error::new(rusqlite::Error::SqliteFailure(
+                            rusqlite::ffi::Error {
+                                code: rusqlite::ErrorCode::DatabaseBusy,
+                                extended_code: 5,
+                            },
+                            None,
+                        )));
+                    }
+                    database.save_live_chat_messages(messages)
+                },
+            ));
         let session_generation = {
             let mut coordinator = state.live_chat.lock().await;
             coordinator.start_session("session-1".to_string(), vec![twitch_provider_row()]);
@@ -3576,10 +3599,7 @@ mod tests {
 
         wait_for_persistence_rejection(&state).await;
         assert!(current_status(&state).await.messages.is_empty());
-        state
-            .database
-            .ensure_fake_live_chat_session("session-1")
-            .unwrap();
+        ready.store(true, Ordering::SeqCst);
         let snapshot = wait_for_twitch_message(&state).await;
         wait_for_persisted_message(&state, "chat-1").await;
         connector.abort();

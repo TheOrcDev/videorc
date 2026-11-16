@@ -425,3 +425,10 @@ describe('Clean cut in the Library (E-4)', () => {
     expect(libraryCleanCutReviews({ jobs: [], sessions }).get('tutorial')).toBe('clean')
   })
 })
+
+it('lists cloud shows as livestreams, with a platform label and no media format', () => {
+  const cloud = session({ mode: 'cloud-stream', streamPreset: 'youtube, twitch' })
+  expect(filterLibrarySessions([cloud], 'streams', '')).toEqual([cloud])
+  expect(filterLibrarySessions([cloud], 'recordings', '')).toEqual([])
+  expect(sessionFormatLabel(cloud)).toBe('Cloud show · youtube, twitch')
+})

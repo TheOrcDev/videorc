@@ -46,6 +46,14 @@ function session(overrides: Partial<SessionSummary>): SessionSummary {
 
 const SESSIONS = [
   session({ id: 'stream-1' }),
+  session({
+    id: 'cloud-show',
+    title: 'Cloud Q&A',
+    mode: 'cloud-stream',
+    mp4Path: undefined,
+    streamPreset: 'youtube',
+    commentCount: 3
+  }),
   session({ id: 'stream-only', title: 'Q&A', mode: 'stream', mp4Path: undefined }),
   session({ id: 'recording-1', title: 'Tutorial', mode: 'record' }),
   session({ id: 'live-1', title: 'Live now', mode: 'record+stream', status: 'running' })
@@ -185,4 +193,20 @@ describe('Library → Sidekick report (plan 119 S3)', () => {
     expect(hasBuddyReport({ mode: 'record' })).toBe(false)
     expect(hasBuddyReport({ mode: 'imported' })).toBe(false)
   })
+})
+
+it('shows a cloud show with chat and no local-file actions', async () => {
+  await render()
+  expect(container.textContent).toContain('Cloud Q&A')
+  expect(container.textContent).toContain('Cloud show · youtube')
+  expect(
+    container.querySelector(
+      '[data-videorc-library-row="cloud-show"] button[aria-label="Play recording"]'
+    )
+  ).toBeNull()
+  const actions = labels(await openMenu('cloud-show'))
+  expect(actions).toContain('Sidekick report')
+  for (const forbidden of ['Play', 'Show in Finder', 'Export MP4', 'Repair', 'Check recording']) {
+    expect(actions).not.toContain(forbidden)
+  }
 })

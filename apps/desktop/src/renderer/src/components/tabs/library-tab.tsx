@@ -1145,7 +1145,7 @@ function RowActions({
   const playReason = actions.playDisabledReason
   return (
     <div className="flex items-center justify-end gap-0.5">
-      {playReason ? (
+      {session.mode === 'cloud-stream' ? null : playReason ? (
         <DisabledReason reason={playReason} tabIndex={tabIndex}>
           <Button
             aria-label="Play recording"
@@ -1593,7 +1593,22 @@ function useSessionMenu({
   ]
 
   return {
-    items: sessionMenu,
+    items:
+      session.mode === 'cloud-stream'
+        ? sessionMenu.filter(
+            (item) =>
+              ![
+                'play',
+                'reveal',
+                'export-mp4',
+                'duplicate',
+                'check',
+                'repair',
+                'restore',
+                'noise-cleanup'
+              ].includes(item.id)
+          )
+        : sessionMenu,
     busy,
     disconnected,
     cleanupView,
