@@ -12363,7 +12363,8 @@ mod tests {
                 None,
             )
             .await
-            .unwrap_err();
+            .err()
+            .expect("Go Live must refuse without returning a handover");
         assert_eq!(
             continuation_error_code(&error),
             Some("cloud-show-live-elsewhere")
