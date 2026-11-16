@@ -814,7 +814,10 @@ fn resolve_source(
             "A Noise Cleaned recording cannot be cleaned again.",
         ));
     }
-    if !matches!(source.mode.as_str(), "record" | "record+stream") {
+    if !matches!(
+        source.mode.as_str(),
+        "record" | "record+stream" | "cloud-recording"
+    ) {
         return Err(CleanupFailure::new(
             ERROR_UNSUPPORTED,
             "Only finalized Videorc recordings are supported.",
@@ -826,7 +829,7 @@ fn resolve_source(
             "Test-tone recordings are not supported by Noise Cleanup.",
         ));
     }
-    if source.sources.microphone_id.is_none() {
+    if source.mode != "cloud-recording" && source.sources.microphone_id.is_none() {
         return Err(CleanupFailure::new(
             ERROR_NO_AUDIO,
             "This recording has no selected microphone to clean.",

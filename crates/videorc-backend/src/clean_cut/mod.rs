@@ -194,7 +194,10 @@ fn resolve_source(
             "A Clean cut or Noise Cleaned copy cannot be cut again.",
         ));
     }
-    if !matches!(source.mode.as_str(), "record" | "record+stream") {
+    if !matches!(
+        source.mode.as_str(),
+        "record" | "record+stream" | "cloud-recording"
+    ) {
         return Err(refuse("Only finished recordings can be cut."));
     }
     let duration_ms = source

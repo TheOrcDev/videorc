@@ -56,8 +56,8 @@ consumer contract must exist before a producer can be enabled.
 | S0 / `baseline`           | None                                   | desktop      | desktop: `main`                                                          | No issue / [#1437](https://github.com/TheOrcDev/videorc/pull/1437)                                                                                                 |
 | S1 / `controls`           | S0                                     | desktop      | desktop: `feat/249-s0-cloud-parity-baseline`                             | No issue / [#1438](https://github.com/TheOrcDev/videorc/pull/1438); web [#118](https://github.com/TheOrcDev/videorc-web/pull/118)                                  |
 | S2 / `privacy`            | S0, S1                                 | desktop, web | desktop: `feat/249-s1-cloud-parity`; web: `main`                         | No issue / desktop [#1439](https://github.com/TheOrcDev/videorc/pull/1439), web [#125](https://github.com/TheOrcDev/videorc-web/pull/125); live acceptance not run |
-| S3 / `soundboard`         | S0, S1                                 | desktop, web | desktop: `feat/249-s2-cloud-parity`; web: `feat/249-s2-cloud-parity`     | Paired S3 diffs ready; coordinator owns PRs; live acceptance not run                                                                                               |
-| S4 / `avatar`             | S3                                     | desktop, web | desktop: `feat/249-s3-cloud-parity`; web: `feat/249-s3-cloud-parity`     | Unassigned / not created                                                                                                                                           |
+| S3 / `soundboard`         | S0, S1                                 | desktop, web | desktop: `feat/249-s2-cloud-parity`; web: `feat/249-s2-cloud-parity`     | Desktop #1440 / web #126; live acceptance not run                                                                                                                  |
+| S4 / `avatar`             | S3                                     | desktop, web | desktop: `feat/249-s3-cloud-parity`; web: `feat/249-s3-cloud-parity`     | Desktop #1441 / web #127; live acceptance not run                                                                                                                  |
 | S5 / `avatar-animation`   | S4                                     | desktop, web | desktop: `feat/249-s4-cloud-parity`; web: `feat/249-s4-cloud-parity`     | Unassigned / not created                                                                                                                                           |
 | S6 / `views`              | S3, S4                                 | desktop, web | desktop: `feat/249-s5-cloud-parity`; web: `feat/249-s5-cloud-parity`     | Unassigned / not created                                                                                                                                           |
 | S7a / `microphone-bridge` | S1, S3                                 | desktop      | desktop: `feat/249-s6-cloud-parity`                                      | Unassigned / not created                                                                                                                                           |
@@ -71,11 +71,11 @@ consumer contract must exist before a producer can be enabled.
 | S13b / `camera`           | S13a                                   | desktop      | desktop: `feat/249-s13a-cloud-parity`                                    | Unassigned / not created                                                                                                                                           |
 | S14 / `sources`           | S2, S12, S13a, S13b                    | desktop, web | desktop: `feat/249-s13b-cloud-parity`; web: `feat/249-s13a-cloud-parity` | Unassigned / not created                                                                                                                                           |
 | S15 / `captions`          | S7a, S7b, S9                           | desktop      | desktop: `feat/249-s14-cloud-parity`                                     | Unassigned / not created                                                                                                                                           |
-| S16 / `lifecycle`         | S1                                     | desktop, web | desktop: `feat/249-s15-cloud-parity`; web: `feat/249-s14-cloud-parity`   | Unassigned / not created                                                                                                                                           |
+| S16 / `lifecycle`         | S1                                     | desktop, web | Desktop and web: `feat/249-s4-cloud-parity`                              | Desktop #1442 / web #128; live acceptance not run                                                                                                                  |
 | S17 / `outputs`           | S9, S12, S16                           | desktop, web | desktop: `feat/249-s16-cloud-parity`; web: `feat/249-s16-cloud-parity`   | Unassigned / not created                                                                                                                                           |
 | S18 / `services`          | S1, S16                                | desktop      | desktop: `feat/249-s17-cloud-parity`                                     | Unassigned / not created                                                                                                                                           |
 | S19 / `markers`           | S1, S15                                | desktop      | desktop: `feat/249-s18-cloud-parity`                                     | Unassigned / not created                                                                                                                                           |
-| S20 / `library`           | S1, S16                                | desktop, web | desktop: `feat/249-s19-cloud-parity`; web: `feat/249-s17-cloud-parity`   | Unassigned / not created                                                                                                                                           |
+| S20 / `library`           | S1, S16                                | desktop, web | Desktop and web: `feat/249-s16-cloud-parity`                             | Integrated; coordinator commits/PRs pending; live acceptance not run                                                                                               |
 | S21a / `replay-ring`      | S20                                    | web          | web: `feat/249-s20-cloud-parity`                                         | Unassigned / not created                                                                                                                                           |
 | S21b / `clips`            | S19, S21a                              | desktop, web | desktop: `feat/249-s20-cloud-parity`; web: `feat/249-s21a-cloud-parity`  | Unassigned / not created                                                                                                                                           |
 | S21c / `archive`          | S20, S21a                              | desktop      | desktop: `feat/249-s21b-cloud-parity`                                    | Unassigned / not created                                                                                                                                           |
@@ -92,11 +92,36 @@ S0 is committed/pushed by the coordinator at `570d72926` and open as
 [PR #1438](https://github.com/TheOrcDev/videorc/pull/1438), with live acceptance
 **not run**. S2 is published as desktop [#1439](https://github.com/TheOrcDev/videorc/pull/1439)
 (`27a8380b4`) and web [#125](https://github.com/TheOrcDev/videorc-web/pull/125)
-(`03b31e8e`), with live acceptance **not run**. S3 is implemented in paired
-isolated worktrees for coordinator review; its live acceptance is **not run**.
-S4, S7a and S16 were commissioned in parallel on isolated S2-based branches;
-all other later slices are not started. This checkpoint does not complete Plan 249;
-the coordinator commissions S4 after integrating the S3 stack.
+(`03b31e8e`), with live acceptance **not run**. S3 is published as desktop [#1440](https://github.com/TheOrcDev/videorc/pull/1440)
+(`a93168fc4`) and web [#126](https://github.com/TheOrcDev/videorc-web/pull/126)
+(`a68454e0`); live acceptance remains **not run**.
+
+Parallel ownership (isolated branches; coordinator reconciles dependencies):
+
+- S4 avatar: `S6z:P60l3:G6oxv`.
+- S5 avatar animation: `S6z:P60l3:G7m82`.
+- S6 views: `S6z:P60l3:G9zgb`.
+- S7a bounded PCM: `S6z:P60l3:G67rq`.
+- S16 provider lifecycle: `S6z:P60l3:G6ltc`.
+- S18 chat/Sidekick: `S6z:P60l3:G1q9i` (shares canonical S16 interval dependency).
+- S20 recording/Library and central ledger: `S6z:P60l3:G55dg`.
+
+S4 is published as desktop [#1441](https://github.com/TheOrcDev/videorc/pull/1441)
+(`6a142e936`) and web [#127](https://github.com/TheOrcDev/videorc-web/pull/127)
+(`9f708259`). S16 is published on S4 as desktop
+[#1442](https://github.com/TheOrcDev/videorc/pull/1442) (`5b340c09c`) and web
+[#128](https://github.com/TheOrcDev/videorc-web/pull/128) (`78586c99`). Their live
+acceptance remains **not run**.
+
+S20 paired `feat/249-s20-cloud-parity` worktrees are now reconciled onto those
+exact S16 tips. All six integration seams are resolved, with canonical typed
+interval reads and association after the S16 observer. S4 output-token claims
+and S16 pending-End acknowledgements are preserved. Original frozen diffs are
+backed up at `/tmp/249-s20-before-s16-integration`. See
+`docs/cloud/249-s20-handoff.md` for PR-ready bodies, exact paths and deferred gates.
+S18's separate `app_settings.cloud.showServices` storage does not overlap takes.
+
+All 32 slices remain commissioned; this is a checkpoint, not plan completion.
 
 ## Deferred gates and release blocks
 
@@ -306,3 +331,12 @@ user instruction; the Rust adapter tests are maintained but unexecuted.
   worktree and sent directly to all three threads. V2 certifies auxiliary only;
   graphics and microphone bridge need independent capabilities. No concrete
   incompatible peer contract was reported at this checkpoint.
+
+## S20 checkpoint
+
+- Dedicated issue searches for Plan 249 / recording returned no S20 issue; no issue URL invented.
+- Desktop worktree `/Users/orcdev/projects/videorc-wt-249-s20`; web `/Users/orcdev/projects/videorcweb-wt-249-s20`.
+- Additive SQLite associations/download journal and Postgres take metadata/backfill; no real user database opened or migrated.
+- Downloaded local files retain `cloud-recording` provenance and use existing Play/export/Clean cut/noise cleanup paths. Existing opt-in, entitlements and consent remain enforced.
+- Maintained `library` acceptance uses isolated app/HTTPS fixtures and full artifact analyzer; **not run**. Rust compilation, actual migrations, crash/media/device/live provider validation, full suites and build gates are deferred per user.
+- All production parity qualification flags remain false. S16 source integration is complete with focused fixture evidence; runtime/live acceptance remains not run.

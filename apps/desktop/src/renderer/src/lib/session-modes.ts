@@ -10,6 +10,7 @@ export const SESSION_MODES = {
   record: 'record',
   stream: 'stream',
   cloudStream: 'cloud-stream',
+  cloudRecording: 'cloud-recording',
   recordAndStream: 'record+stream',
   imported: 'imported'
 } as const
@@ -18,6 +19,7 @@ export const SESSION_MODES = {
 export function sessionModeRecorded(mode: string): boolean {
   return (
     mode === SESSION_MODES.record ||
+    mode === SESSION_MODES.cloudRecording ||
     mode === SESSION_MODES.recordAndStream ||
     mode === SESSION_MODES.imported ||
     mode.startsWith('recording')

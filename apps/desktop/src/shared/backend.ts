@@ -5755,6 +5755,11 @@ export type CloudRoomOverlayEvent =
  * (or no format) is a node recording, downloaded from videorc.com.
  */
 export interface CloudRecordingItem {
+  associationKnown?: boolean
+  takeId?: string
+  liveIntervalIds?: string[]
+  availability?: string
+  localSessionId?: string
   id: string
   showId: string
   orientation: string
@@ -5780,6 +5785,7 @@ export interface CloudRecordingDownload {
   jobId: string
 }
 export interface CloudRecordingDownloadEvent {
+  localSessionId?: string
   jobId: string
   recordingId: string
   state: 'running' | 'done' | 'failed' | 'cancelled'

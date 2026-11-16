@@ -11,6 +11,14 @@ import {
 const plan = readParityJson('plan')
 validateParityRegistry(plan, readParityJson('inventory'))
 const selected = parseParityArgs(process.argv.slice(2), plan)
+if (selected.case === 'library') {
+  const { runLibrary } = await import('./lib/cloud-parity-library.mjs')
+  const { output } = await runLibrary()
+  console.log(
+    `Local library fixture passed: ${output}. Managed/runtime acceptance remains not-run.`
+  )
+  process.exit(0)
+}
 if (
   !['baseline', 'controls', 'privacy', 'soundboard', 'avatar', 'lifecycle'].includes(selected.case)
 ) {

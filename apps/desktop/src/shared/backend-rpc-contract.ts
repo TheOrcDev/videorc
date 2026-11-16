@@ -6528,6 +6528,13 @@ const cloudRoomOverlayEventSchema = unionSchema([
 // Plan 234 T3: cloud recordings. No URL is part of either shape.
 const cloudRecordingItemSchema = objectSchema(
   {
+    associationKnown: optionalSchema(booleanSchema),
+    takeId: optionalSchema(stringSchema({ maxLength: 128 })),
+    liveIntervalIds: optionalSchema(
+      arraySchema(stringSchema({ minLength: 1, maxLength: 128 }), { maxLength: 2000 })
+    ),
+    availability: optionalSchema(stringSchema({ maxLength: 32 })),
+    localSessionId: optionalSchema(stringSchema({ maxLength: 256 })),
     id: stringSchema({ minLength: 1, maxLength: 128 }),
     showId: stringSchema({ maxLength: 64 }),
     orientation: stringSchema({ maxLength: 16 }),
@@ -6559,6 +6566,7 @@ const cloudRecordingDownloadSchema = objectSchema(
 
 const cloudRecordingDownloadEventSchema = objectSchema(
   {
+    localSessionId: optionalSchema(stringSchema({ maxLength: 256 })),
     jobId: stringSchema({ minLength: 1, maxLength: 128 }),
     recordingId: stringSchema({ minLength: 1, maxLength: 128 }),
     state: enumSchema(['running', 'done', 'failed', 'cancelled']),
