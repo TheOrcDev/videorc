@@ -11997,11 +11997,11 @@ mod mix_tests {
             }
             // The reader runs for one second, pauses for thirty, then drains
             // its backlog. The cursor advances only by written PCM chunks.
-            if index < 100 || index >= 3100 {
+            if !(100..3100).contains(&index) {
                 while timeline.cursor() < wall_cursor {
                     let position = timeline.cursor();
                     let samples = timeline.render_chunk();
-                    if position >= 48_000 * 2 && position < 48_000 * 30 {
+                    if (48_000 * 2..48_000 * 30).contains(&position) {
                         assert!(samples.iter().all(|sample| *sample == 0.0));
                     }
                     if position >= 48_000 * 32 {
