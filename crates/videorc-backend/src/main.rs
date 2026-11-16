@@ -796,6 +796,7 @@ async fn run_backend(device_changes: tokio::sync::watch::Receiver<u64>) -> Resul
     // Plan 237: the stream report email a minute after each live stream,
     // off the recording path; `VIDEORC_STREAM_REPORT_EMAIL=0` turns it off.
     stream_report_email::spawn(&state);
+    live_status::spawn(&state);
     // Plan 187: the Discord go-live announcement (free, off until a webhook is set).
     discord_announce::spawn(&state);
     // Plan 225: the community store's retention prune (now and daily) and

@@ -1,4 +1,12 @@
 //! Ephemeral, allowlisted status for the account's live page (plan 241).
+use crate::protocol::{RecordingStatus, ServerEvent};
+use crate::state::AppState;
+use crate::stream_report_email::{LiveTracker, WebAccess, web_access};
+use crate::streaming::StreamTargetsSnapshot;
+use crate::watchdog::WatchdogAlertsView;
+use std::time::Duration;
+use tokio::time::Instant;
+
 use std::collections::BTreeMap;
 
 use chrono::{DateTime, SecondsFormat, Utc};
@@ -203,6 +211,526 @@ pub(crate) fn build(
         break;
     }
     body
+}
+
+const PATH: &str = "/api/desktop/live-status";
+const CHANGE_GAP: Duration = Duration::from_secs(3);
+const HEARTBEAT: Duration = Duration::from_secs(15);
+
+#[derive(Default)]
+struct Latest {
+    tracker: LiveTracker,
+    clocks: StateClocks,
+    status: Option<RecordingStatus>,
+    targets: Option<StreamTargetsSnapshot>,
+    alerts: WatchdogAlertsView,
+    cloud_session: Option<String>,
+    cloud_bound: bool,
+}
+
+impl Latest {
+    fn observe(&mut self, event: &ServerEvent, now: DateTime<Utc>) {
+        self.tracker.observe(event, now);
+        match event.event.as_str() {
+            "recording.status" => {
+                if let Ok(status) = serde_json::from_value(event.payload.clone()) {
+                    self.status = Some(status);
+                }
+            }
+            "stream.targets" => {
+                if let Ok(targets) =
+                    serde_json::from_value::<StreamTargetsSnapshot>(event.payload.clone())
+                {
+                    if self
+                        .targets
+                        .as_ref()
+                        .is_none_or(|old| old.session_id != targets.session_id)
+                    {
+                        self.clocks = StateClocks::default();
+                    }
+                    self.clocks.observe(&targets.targets, now);
+                    self.targets = Some(targets);
+                }
+            }
+            "watchdog.alerts" => {
+                if let Ok(alerts) = serde_json::from_value(event.payload.clone()) {
+                    self.alerts = alerts;
+                }
+            }
+            "cloud.state" => {
+                self.cloud_session = event
+                    .payload
+                    .get("sessionId")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_owned);
+                self.cloud_bound = event.payload.get("show").is_some_and(|v| !v.is_null());
+            }
+            _ => {}
+        }
+    }
+
+    fn project(
+        &self,
+        title: &str,
+        clocks: &mut StateClocks,
+        now: DateTime<Utc>,
+    ) -> Option<LiveStatus> {
+        let (id, started_at) = self.tracker.active_live()?;
+        let targets = self
+            .targets
+            .as_ref()
+            .filter(|t| t.session_id == id)
+            .map_or(&[][..], |t| t.targets.as_slice());
+        let alerts = if self.alerts.session_id.as_deref() == Some(id) {
+            &self.alerts.alerts[..]
+        } else {
+            &[]
+        };
+        Some(build(
+            &Snapshot {
+                session_id: id,
+                started_at,
+                title,
+                app_version: &crate::performance_check::desktop_app_version(),
+                recording: self
+                    .status
+                    .as_ref()
+                    .filter(|s| s.session_id.as_deref() == Some(id))
+                    .is_some_and(|s| s.output_path.is_some()),
+                cloud: self.cloud_bound && self.cloud_session.as_deref() == Some(id),
+                targets,
+                alerts,
+            },
+            clocks,
+            0,
+            now,
+        ))
+    }
+}
+
+#[derive(Default)]
+struct Sender {
+    session: Option<String>,
+    account: Option<String>,
+    stopped: bool,
+    seq: u64,
+    last: Option<Instant>,
+    retry_at: Option<Instant>,
+    previous: Option<LiveStatus>,
+}
+
+impl Sender {
+    async fn tick(
+        &mut self,
+        client: &reqwest::Client,
+        web: Option<&WebAccess>,
+        body: Option<LiveStatus>,
+        now: Instant,
+    ) {
+        let id = body.as_ref().map(|b| b.session_id.clone());
+        if id != self.session {
+            if let (Some(old), Some(account), Some(web)) = (&self.session, &self.account, web)
+                && account.eq_ignore_ascii_case(&web.email)
+                && !self.stopped
+            {
+                let _ = client
+                    .delete(format!("{}{PATH}", web.base_url))
+                    .bearer_auth(&web.token)
+                    .json(&serde_json::json!({"sessionId":old}))
+                    .send()
+                    .await;
+            }
+            *self = Self {
+                session: id,
+                ..Self::default()
+            };
+        }
+        let Some(mut body) = body else {
+            return;
+        };
+        let Some(web) = web else {
+            if self.account.is_some() {
+                self.stopped = true;
+            }
+            return;
+        };
+        if self
+            .account
+            .as_ref()
+            .is_some_and(|a| !a.eq_ignore_ascii_case(&web.email))
+        {
+            self.stopped = true;
+        }
+        if self.stopped {
+            return;
+        }
+        self.account.get_or_insert_with(|| web.email.clone());
+        if self.retry_at.is_some_and(|at| now < at) {
+            return;
+        }
+        if let Some(last) = self.last {
+            let elapsed = now.saturating_duration_since(last);
+            if elapsed < CHANGE_GAP
+                || (self.previous.as_ref() == Some(&body) && elapsed < HEARTBEAT)
+            {
+                return;
+            }
+        }
+        self.seq += 1;
+        self.previous = Some(body.clone());
+        body.seq = self.seq;
+        self.last = Some(now);
+        if let Ok(response) = client
+            .put(format!("{}{PATH}", web.base_url))
+            .bearer_auth(&web.token)
+            .json(&body)
+            .send()
+            .await
+        {
+            match response.status().as_u16() {
+                401 => self.stopped = true,
+                429 => {
+                    let seconds = response
+                        .headers()
+                        .get(reqwest::header::RETRY_AFTER)
+                        .and_then(|v| v.to_str().ok())
+                        .and_then(|v| v.parse::<u64>().ok())
+                        .unwrap_or(5);
+                    self.retry_at = now
+                        .checked_add(Duration::from_secs(seconds))
+                        .or_else(|| now.checked_add(HEARTBEAT));
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+pub(crate) fn spawn(state: &AppState) {
+    if crate::stream_report_email::env_disables(
+        std::env::var("VIDEORC_LIVE_STATUS").ok().as_deref(),
+    ) {
+        return;
+    }
+    let state = state.clone();
+    let mut events = state.events.subscribe();
+    let (latest_tx, mut latest_rx) = tokio::sync::watch::channel(Latest::default());
+    // The observer never waits for HTTP; only the latest snapshot is retained.
+    tokio::spawn(async move {
+        loop {
+            match events.recv().await {
+                Ok(event)
+                    if matches!(
+                        event.event.as_str(),
+                        "recording.status" | "stream.targets" | "watchdog.alerts" | "cloud.state"
+                    ) =>
+                {
+                    latest_tx.send_modify(|latest| latest.observe(&event, Utc::now()))
+                }
+                Ok(_) => {}
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(_) => break,
+            }
+        }
+    });
+    tokio::spawn(async move {
+        let Ok(client) = reqwest::Client::builder()
+            .timeout(Duration::from_secs(5))
+            .user_agent(crate::performance_check::desktop_user_agent())
+            .build()
+        else {
+            return;
+        };
+        let mut sender = Sender::default();
+
+        let mut beat = tokio::time::interval(Duration::from_secs(1));
+        beat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tokio::select! { _ = beat.tick() => {}, changed = latest_rx.changed() => { if changed.is_err() { break; } } }
+            let web = web_access(&state).await;
+            let body = {
+                let latest = latest_rx.borrow_and_update();
+                let id = latest.tracker.active_live().map(|(id, _)| id.to_string());
+                let title = id
+                    .as_ref()
+                    .and_then(|id| {
+                        state
+                            .database
+                            .lock()
+                            .ok()?
+                            .query_row("SELECT title FROM sessions WHERE id = ?1", [id], |row| {
+                                row.get::<_, String>(0)
+                            })
+                            .ok()
+                    })
+                    .unwrap_or_default();
+                latest.project(&title, &mut latest.clocks.clone(), Utc::now())
+            };
+            sender
+                .tick(&client, web.as_ref(), body, Instant::now())
+                .await;
+        }
+    });
+}
+
+#[cfg(test)]
+mod sender_tests {
+    use super::*;
+    use axum::{
+        Json, Router,
+        extract::State,
+        http::{HeaderMap, StatusCode},
+        response::IntoResponse,
+        routing::put,
+    };
+    use serde_json::{Value, json};
+    use std::sync::{Arc, Mutex};
+    #[derive(Clone, Default)]
+    struct Web {
+        requests: Arc<Mutex<Vec<(String, Value)>>>,
+        code: Arc<Mutex<u16>>,
+    }
+    async fn fake() -> (WebAccess, Web, tokio::task::JoinHandle<()>) {
+        let web = Web::default();
+        *web.code.lock().unwrap() = 200;
+        let app = Router::new()
+            .route(
+                PATH,
+                put(
+                    |State(w): State<Web>, headers: HeaderMap, Json(body): Json<Value>| async move {
+                        assert_eq!(headers["authorization"], "Bearer fake-token");
+                        w.requests.lock().unwrap().push(("PUT".into(), body));
+                        (
+                            StatusCode::from_u16(*w.code.lock().unwrap()).unwrap(),
+                            [("retry-after", "9")],
+                            Json(json!({"ok":true})),
+                        )
+                            .into_response()
+                    },
+                )
+                .delete(
+                    |State(w): State<Web>, Json(body): Json<Value>| async move {
+                        w.requests.lock().unwrap().push(("DELETE".into(), body));
+                        Json(json!({"ok":true}))
+                    },
+                ),
+            )
+            .with_state(web.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let task = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (
+            WebAccess {
+                base_url,
+                token: "fake-token".into(),
+                email: "ada@example.com".into(),
+            },
+            web,
+            task,
+        )
+    }
+    fn event(name: &str, payload: Value) -> ServerEvent {
+        ServerEvent {
+            event: name.into(),
+            payload,
+        }
+    }
+    fn body() -> LiveStatus {
+        let mut latest = Latest::default();
+        latest.observe(
+            &event(
+                "recording.status",
+                json!({"state":"streaming","sessionId":"s","startedAt":"2026-11-16T18:02:10Z"}),
+            ),
+            Utc::now(),
+        );
+        latest
+            .project("Title", &mut StateClocks::default(), Utc::now())
+            .unwrap()
+    }
+    #[tokio::test]
+    async fn start_change_heartbeat_and_end_delete() {
+        let (access, web, task) = fake().await;
+        let client = reqwest::Client::new();
+        let mut sender = Sender::default();
+        let now = Instant::now();
+        let first = body();
+        sender
+            .tick(&client, Some(&access), Some(first.clone()), now)
+            .await;
+        let mut changed = first.clone();
+        changed.recording = true;
+        sender
+            .tick(
+                &client,
+                Some(&access),
+                Some(changed.clone()),
+                now + Duration::from_secs(2),
+            )
+            .await;
+        assert_eq!(web.requests.lock().unwrap().len(), 1);
+        sender
+            .tick(
+                &client,
+                Some(&access),
+                Some(changed.clone()),
+                now + CHANGE_GAP,
+            )
+            .await;
+        sender
+            .tick(
+                &client,
+                Some(&access),
+                Some(changed.clone()),
+                now + Duration::from_secs(17),
+            )
+            .await;
+        assert_eq!(web.requests.lock().unwrap().len(), 2);
+        sender
+            .tick(
+                &client,
+                Some(&access),
+                Some(changed),
+                now + Duration::from_secs(18),
+            )
+            .await;
+        sender
+            .tick(&client, Some(&access), None, now + Duration::from_secs(19))
+            .await;
+        let requests = web.requests.lock().unwrap();
+        assert_eq!(requests.len(), 4);
+        assert_eq!(requests[0].1["seq"], 1);
+        assert_eq!(requests[2].1["seq"], 3);
+        assert_eq!(requests[3], ("DELETE".into(), json!({"sessionId":"s"})));
+        task.abort();
+    }
+    #[tokio::test]
+    async fn sign_out_and_unauthorized_stop_until_next_session() {
+        let (access, web, task) = fake().await;
+        let client = reqwest::Client::new();
+        let now = Instant::now();
+        let mut sender = Sender::default();
+        let b = body();
+        sender.tick(&client, None, Some(b.clone()), now).await;
+        assert!(web.requests.lock().unwrap().is_empty());
+        sender
+            .tick(&client, Some(&access), Some(b.clone()), now)
+            .await;
+        sender
+            .tick(&client, None, Some(b.clone()), now + HEARTBEAT)
+            .await;
+        sender
+            .tick(&client, Some(&access), Some(b.clone()), now + HEARTBEAT * 2)
+            .await;
+        assert_eq!(web.requests.lock().unwrap().len(), 1);
+        sender
+            .tick(&client, Some(&access), None, now + HEARTBEAT * 3)
+            .await;
+        *web.code.lock().unwrap() = 401;
+        sender
+            .tick(&client, Some(&access), Some(b.clone()), now + HEARTBEAT * 4)
+            .await;
+        sender
+            .tick(&client, Some(&access), Some(b.clone()), now + HEARTBEAT * 5)
+            .await;
+        assert_eq!(web.requests.lock().unwrap().len(), 2);
+        sender
+            .tick(&client, Some(&access), None, now + HEARTBEAT * 6)
+            .await;
+        *web.code.lock().unwrap() = 200;
+        sender
+            .tick(&client, Some(&access), Some(b), now + HEARTBEAT * 7)
+            .await;
+        assert_eq!(web.requests.lock().unwrap().len(), 3);
+        task.abort();
+    }
+    #[tokio::test]
+    async fn rate_limit_waits_and_failed_beats_are_not_queued() {
+        let (access, web, task) = fake().await;
+        let client = reqwest::Client::new();
+        let now = Instant::now();
+        let mut sender = Sender::default();
+        let b = body();
+        *web.code.lock().unwrap() = 429;
+        sender
+            .tick(&client, Some(&access), Some(b.clone()), now)
+            .await;
+        let mut changed = b.clone();
+        changed.recording = true;
+        sender
+            .tick(
+                &client,
+                Some(&access),
+                Some(changed.clone()),
+                now + Duration::from_secs(8),
+            )
+            .await;
+        assert_eq!(web.requests.lock().unwrap().len(), 1);
+        *web.code.lock().unwrap() = 503;
+        sender
+            .tick(
+                &client,
+                Some(&access),
+                Some(changed.clone()),
+                now + Duration::from_secs(9),
+            )
+            .await;
+        changed.title = Some("latest".into());
+        *web.code.lock().unwrap() = 200;
+        sender
+            .tick(
+                &client,
+                Some(&access),
+                Some(changed),
+                now + Duration::from_secs(12),
+            )
+            .await;
+        let requests = web.requests.lock().unwrap();
+        assert_eq!(requests.len(), 3);
+        assert_eq!(requests[2].1["title"], "latest");
+        task.abort();
+    }
+    #[test]
+    fn tracker_excludes_record_only_and_accepts_early_targets() {
+        let mut latest = Latest::default();
+        let now = Utc::now();
+        latest.observe(
+            &event(
+                "recording.status",
+                json!({"state":"recording","sessionId":"r"}),
+            ),
+            now,
+        );
+        assert!(
+            latest
+                .project("", &mut StateClocks::default(), now)
+                .is_none()
+        );
+        latest.observe(&event("stream.targets",json!({"sessionId":"s","targets":[{"targetId":"t","platform":"twitch","label":"Twitch","state":"live"}]})),now);
+        latest.observe(
+            &event(
+                "recording.status",
+                json!({"state":"recording","sessionId":"s","outputPath":"private"}),
+            ),
+            now,
+        );
+        let b = latest
+            .project("", &mut StateClocks::default(), now)
+            .unwrap();
+        assert!(b.recording);
+        assert_eq!(b.destinations.len(), 1);
+        latest.observe(
+            &event("recording.status", json!({"state":"idle","sessionId":"s"})),
+            now,
+        );
+        assert!(
+            latest
+                .project("", &mut StateClocks::default(), now)
+                .is_none()
+        );
+    }
 }
 
 #[cfg(test)]
