@@ -127,6 +127,14 @@ describe('release CI path-filter wiring', () => {
     assert.match(rust, /Source ownership filter selects no test/)
     assert.match(rust, /\$passed -ne \$expected/)
     assert.match(rust, /foreach \(\$pass in 1\.\.25\)/)
+    // S6: the CI-only profile macOS and Linux CI use, and one cache key that
+    // main saves and pull requests restore.
+    assert.match(rust, /name: CI-only fast backend build profile/)
+    assert.match(rust, /\[profile\.dev\.package\.videorc-backend\]\n\s+opt-level = 0/)
+    assert.match(rust, /RUST_MIN_STACK=8388608/)
+    assert.match(rust, /shared-key: windows-gates-v\d+\n/)
+    assert.doesNotMatch(rust, /shared-key: \$\{\{ github\.event_name/)
+    assert.match(rust, /save-if: \$\{\{ github\.event_name != 'pull_request' \}\}/)
     // S3: never build cargo-audit from source again.
     assert.doesNotMatch(gates, /cargo install cargo-audit/)
     assert.match(rust, /taiki-e\/install-action@[0-9a-f]{40}/)

@@ -30,10 +30,35 @@ jobs:
           rustup toolchain install stable --profile minimal --component clippy --component rustfmt --no-self-update
           rustup default stable
 
+      - name: CI-only fast backend build profile
+        # Plan 242 S6: the profile ci.yml (macOS) and linux.yml already use.
+        # The backend crate builds at opt-level 0 with line tables only, and
+        # dependencies keep opt-level 2. A correctness gate, not a perf gate.
+        # Written to CARGO_HOME, not the repo, so release builds are untouched.
+        shell: pwsh
+        run: |
+          $cargoHome = if ($env:CARGO_HOME) { $env:CARGO_HOME } else { Join-Path $env:USERPROFILE '.cargo' }
+          New-Item -ItemType Directory -Force -Path $cargoHome | Out-Null
+          $config = Join-Path $cargoHome 'config.toml'
+          Add-Content -Path $config -Value @'
+          [profile.dev]
+          debug = "line-tables-only"
+          [profile.dev.package.videorc-backend]
+          opt-level = 0
+          '@
+          Get-Content $config
+          # At opt-level 0 the RPC dispatcher's frame outgrows the 2 MiB
+          # default thread stack (see ci.yml); give test threads 8 MiB.
+          Add-Content -Path $env:GITHUB_ENV -Value 'RUST_MIN_STACK=8388608'
+
       - name: Cache cargo build
+        # Plan 242 S6: one key for pull requests and main. Main pushes save
+        # it and pull requests restore it. Pull requests used their own key,
+        # which nothing ever saved, so every PR compiled all ~550
+        # dependencies from scratch. v2: the new profile changes debuginfo.
         uses: Swatinem/rust-cache@401aff9a7a08acb9d27b64936a90db81024cff97 # v2.8.2
         with:
-          shared-key: ${{ github.event_name == 'pull_request' && 'pr-windows-gates-v1' || 'main-windows-gates-v1' }}
+          shared-key: windows-gates-v2
           cache-workspace-crates: false
           save-if: ${{ github.event_name != 'pull_request' }}
 
