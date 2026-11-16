@@ -32,7 +32,7 @@ import { InfoTooltip } from '@/components/ui/info-tooltip'
 import { Empty } from '@/components/ui/empty'
 import { SegmentedControl } from '@/components/ui/segmented-control'
 import { Spinner } from '@/components/ui/spinner'
-import { useStudioCloud } from '@/hooks/use-studio'
+import { useStudioCloud, useStudioCore } from '@/hooks/use-studio'
 import type {
   CloudHostShape,
   CloudRoomParticipant,
@@ -52,6 +52,7 @@ import {
   type RoomPerson
 } from '@/lib/guests-view'
 import { openLivestreamView } from '@/lib/livestream-tabs'
+import { managedScreenAssetUrl } from '@/lib/screen-asset-url'
 import type { TalkShowContextValue } from '@/lib/talk-show-context'
 import type { TalkShowPerson } from '@/lib/talk-show-room'
 import { managedProgramStageInput, programMonitorView } from '@/lib/talk-show-managed'
@@ -446,11 +447,16 @@ function ScreenShareButton({
  */
 function ProgramMonitor({ talkShow }: { talkShow: TalkShowContextValue }): ReactElement {
   const { cloudStatus } = useStudioCloud()
+  const { activeScreen } = useStudioCore()
   const [listening, setListening] = useState(false)
   const audioRef = useRef<HTMLAudioElement>(null)
   const { video, audio } = talkShow.room.monitor
   const live = Boolean(cloudStatus?.room?.live || cloudStatus?.recording?.active)
   const view = programMonitorView(cloudStatus)
+  // The takeover covers the managed program and silences every voice (the
+  // program page's rule), so the monitor draws it over the stage. A node
+  // show's return already carries it.
+  const takeover = view.source === 'stage' && view.state === 'shown' ? activeScreen : null
 
   useEffect(() => {
     const element = audioRef.current
@@ -470,6 +476,11 @@ function ProgramMonitor({ talkShow }: { talkShow: TalkShowContextValue }): React
     >
       <div className="flex min-h-6 items-center justify-between gap-2">
         <span className="text-label text-subtle">Program</span>
+        {takeover ? (
+          <span className="truncate text-label text-subtle" data-testid="show-stage-program-muted">
+            Takeover · everyone muted
+          </span>
+        ) : null}
         {view.source === 'return' ? (
           <Button
             aria-label={listening ? 'Mute the program' : 'Listen to the program'}
@@ -495,7 +506,17 @@ function ProgramMonitor({ talkShow }: { talkShow: TalkShowContextValue }): React
             ) : null}
           </>
         ) : view.state === 'shown' ? (
-          <ProgramStage talkShow={talkShow} />
+          <>
+            <ProgramStage talkShow={talkShow} />
+            {takeover ? (
+              <img
+                alt=""
+                className="absolute inset-0 size-full bg-video-ground object-contain"
+                data-testid="show-stage-program-takeover"
+                src={managedScreenAssetUrl(takeover.imagePath)}
+              />
+            ) : null}
+          </>
         ) : (
           <span className="absolute inset-0 flex items-center justify-center p-2 text-center text-xs text-video-ground-muted">
             {view.state === 'waiting' ? 'Waiting for the program…' : PROGRAM_MONITOR_EMPTY}

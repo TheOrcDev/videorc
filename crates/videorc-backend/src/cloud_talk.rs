@@ -1219,8 +1219,21 @@ impl CloudShowRuntime {
         })
     }
 
+    /// The show id while the room is open, on air or not. A takeover goes to
+    /// the room from here: put up before Go Live, it is already on the
+    /// program when the first leg starts (a managed program page that joins
+    /// later gets it again through `resend_untimed_overlays`; a node keeps it
+    /// for its runner).
+    pub fn talk_show_room_show_id(&self) -> Option<String> {
+        let talk = self.talk.as_ref()?;
+        if talk.phase != CloudRoomPhase::Open {
+            return None;
+        }
+        self.show.as_ref().map(|show| show.record.id.clone())
+    }
+
     /// Plan 224 C-G7: the show id while the room is open and on air (its
-    /// destinations were handed over): cards and takeovers go to the runner.
+    /// destinations were handed over): comment cards go to the runner.
     pub fn talk_show_live_show_id(&self) -> Option<String> {
         let talk = self.talk.as_ref()?;
         if talk.phase != CloudRoomPhase::Open || !talk.live {

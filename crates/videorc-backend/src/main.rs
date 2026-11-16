@@ -8939,6 +8939,91 @@ async fn websocket_session_with_handler_role_and_redaction(
     );
 }
 
+/// Plan 224 D9 (C-G7): in a talk show the desktop composes nothing for the
+/// stream; the takeover goes to the room's `takeover` slot, full frame, per
+/// orientation, each output's own render (review L6: the 9:16 output gets a
+/// 9:16 image, never the 16:9 one with the stage around it). The program
+/// covers the stage with it and silences every voice while it is up, as a
+/// solo takeover mutes the microphone.
+///
+/// It goes while the room is open, on air or not: a takeover put up before
+/// Go Live is on the program from its first frame. Best effort: a refusal is
+/// logged, the local preview still shows the screen.
+async fn forward_takeover_to_room(
+    state: &AppState,
+    active_screen: Option<&protocol::StreamScreen>,
+) {
+    if cloud_talk_show_room_show_id(state).is_none() {
+        return;
+    }
+    let Some(context) = cloud_context(state) else {
+        return;
+    };
+    use cloud_talk::{CloudOverlayOrientation, CloudOverlayRect, CloudOverlaySlot};
+    let Some(screen) = active_screen else {
+        for orientation in [CloudOverlayOrientation::H, CloudOverlayOrientation::V] {
+            if let Err(problem) = context
+                .clear_overlay(CloudOverlaySlot::Takeover, orientation)
+                .await
+            {
+                tracing::debug!("The takeover clear did not reach Videorc Cloud: {problem}");
+            }
+        }
+        return;
+    };
+    let image_path = screen.image_path.clone();
+    let overlays = tokio::task::spawn_blocking(move || cloud_talk::takeover_overlays(&image_path))
+        .await
+        .context("The takeover render task stopped")
+        .and_then(|rendered| rendered);
+    match overlays {
+        Ok(overlays) => {
+            for (orientation, png) in overlays {
+                if let Err(problem) = context
+                    .set_overlay(
+                        CloudOverlaySlot::Takeover,
+                        orientation,
+                        &png,
+                        CloudOverlayRect::FULL,
+                        None,
+                    )
+                    .await
+                {
+                    tracing::warn!(
+                        orientation = orientation.as_str(),
+                        "The takeover did not reach Videorc Cloud: {problem}"
+                    );
+                }
+            }
+        }
+        Err(error) => {
+            tracing::warn!("The takeover image could not be sent to Videorc Cloud: {error:#}");
+        }
+    }
+}
+
+/// A room that just opened (or was resumed) takes the takeover that is
+/// already up: the Studio still shows it as on, so the program must too.
+/// Under the transition lock, so a takeover cleared at the same moment is
+/// never put back.
+async fn push_active_takeover_to_room(state: &AppState) {
+    let _transition = state.active_screen_transition.lock().await;
+    match state.database.active_stream_screen() {
+        Ok(Some(screen)) => forward_takeover_to_room(state, Some(&screen)).await,
+        Ok(None) => {}
+        Err(error) => {
+            tracing::warn!("The takeover could not be read for the room: {error:#}");
+        }
+    }
+}
+
+/// Off the command lane: rendering a 4K takeover twice must not hold the
+/// room's open answer.
+fn spawn_active_takeover_push(state: &AppState) {
+    let state = state.clone();
+    tokio::spawn(async move { push_active_takeover_to_room(&state).await });
+}
+
 async fn apply_active_screen_output(
     state: &AppState,
     active_screen: Option<protocol::StreamScreen>,
@@ -8976,65 +9061,7 @@ async fn apply_active_screen_output(
             }
         }
     }
-    // Plan 224 D9 (C-G7): in a talk show on air the desktop composes nothing
-    // for the stream; the takeover goes to the runner's `takeover` slot, full
-    // frame, per orientation, each output's own render (review L6: the 9:16
-    // output gets a 9:16 image, never the 16:9 one with the stage around
-    // it). Best effort: a refusal is logged, the local preview still shows
-    // the screen below.
-    if cloud_talk_show_live_show_id(state).is_some()
-        && let Some(context) = cloud_context(state)
-    {
-        use cloud_talk::{CloudOverlayOrientation, CloudOverlayRect, CloudOverlaySlot};
-        match active_screen.as_ref() {
-            Some(screen) => {
-                let image_path = screen.image_path.clone();
-                let overlays =
-                    tokio::task::spawn_blocking(move || cloud_talk::takeover_overlays(&image_path))
-                        .await
-                        .context("The takeover render task stopped")
-                        .and_then(|rendered| rendered);
-                match overlays {
-                    Ok(overlays) => {
-                        for (orientation, png) in overlays {
-                            if let Err(problem) = context
-                                .set_overlay(
-                                    CloudOverlaySlot::Takeover,
-                                    orientation,
-                                    &png,
-                                    CloudOverlayRect::FULL,
-                                    None,
-                                )
-                                .await
-                            {
-                                tracing::warn!(
-                                    orientation = orientation.as_str(),
-                                    "The takeover did not reach Videorc Cloud: {problem}"
-                                );
-                            }
-                        }
-                    }
-                    Err(error) => {
-                        tracing::warn!(
-                            "The takeover image could not be sent to Videorc Cloud: {error:#}"
-                        );
-                    }
-                }
-            }
-            None => {
-                for orientation in [CloudOverlayOrientation::H, CloudOverlayOrientation::V] {
-                    if let Err(problem) = context
-                        .clear_overlay(CloudOverlaySlot::Takeover, orientation)
-                        .await
-                    {
-                        tracing::debug!(
-                            "The takeover clear did not reach Videorc Cloud: {problem}"
-                        );
-                    }
-                }
-            }
-        }
-    }
+    forward_takeover_to_room(state, active_screen.as_ref()).await;
     // Standby preview uses the same compositor. Publish the takeover there
     // before changing the authoritative persisted pointer.
     let watched = active_screen.clone();
@@ -11887,7 +11914,10 @@ async fn handle_text_message_with_role(
                     .open_room(account::stored_session_token(), params, session_active)
                     .await
                 {
-                    Ok(status) => ServerResponse::ok(command.id, status),
+                    Ok(status) => {
+                        spawn_active_takeover_push(state);
+                        ServerResponse::ok(command.id, status)
+                    }
                     Err(error) => ServerResponse::error(
                         command.id,
                         cloud_talk_error_code(&error, "cloud-room-open-failed"),
@@ -11913,7 +11943,10 @@ async fn handle_text_message_with_role(
         },
         "cloud.room.resume" => match cloud_context(state) {
             Some(context) => match context.resume_room(account::stored_session_token()).await {
-                Ok(status) => ServerResponse::ok(command.id, status),
+                Ok(status) => {
+                    spawn_active_takeover_push(state);
+                    ServerResponse::ok(command.id, status)
+                }
                 Err(error) => ServerResponse::error(
                     command.id,
                     cloud_talk_error_code(&error, "cloud-room-resume-failed"),
@@ -15900,6 +15933,15 @@ pub(crate) fn cloud_talk_show_live_show_id(state: &AppState) -> Option<String> {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .talk_show_live_show_id()
+}
+
+/// Plan 224: the show id while this desktop's room is open, on air or not.
+fn cloud_talk_show_room_show_id(state: &AppState) -> Option<String> {
+    state
+        .cloud_show
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .talk_show_room_show_id()
 }
 
 /// Plan 224: this desktop holds a talk show's room.
@@ -23680,6 +23722,108 @@ mod tests {
             assert_eq!(frame["orientation"], orientation);
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Reads the next `count` intents off a test runner, answering each.
+    async fn talk_intents(
+        runner: &mut tokio::sync::mpsc::UnboundedReceiver<cloud_show::ControlRequest>,
+        count: usize,
+    ) -> Vec<serde_json::Value> {
+        let mut frames = Vec::new();
+        for _ in 0..count {
+            let intent = runner.recv().await.expect("a talk-show intent");
+            frames.push(intent.answer_for_tests(None));
+        }
+        frames
+    }
+
+    /// A takeover put up in an open room before Go Live goes to the room
+    /// too (the owner, 2026-11-16: "takeover assets are not working in
+    /// room"). Gated on air, it never reached the program, and Go Live put
+    /// the stage on air with the Studio still showing the takeover as on.
+    #[tokio::test]
+    async fn a_takeover_in_an_open_room_before_go_live_goes_to_the_room() {
+        let state = test_state();
+        let mut runner = cloud_talk::open_talk_show_for_tests(&state.cloud_show, "sh_talk", false);
+        let dir = crate::test_temp_dir::TestTempDir::new("talk-takeover-before-live");
+        let path = dir.join("intro.png");
+        image::RgbaImage::from_pixel(160, 90, image::Rgba([255, 64, 0, 255]))
+            .save(&path)
+            .unwrap();
+        let screen = protocol::StreamScreen {
+            id: "intro".to_string(),
+            name: "Intro".to_string(),
+            image_path: path.to_string_lossy().into_owned(),
+            thumbnail_path: None,
+            sort_order: 0,
+            status: protocol::StreamScreenStatus::Ready,
+            created_at: "2026-11-16T10:00:00Z".to_string(),
+            updated_at: "2026-11-16T10:00:00Z".to_string(),
+        };
+
+        let (applied, frames) = tokio::join!(
+            apply_active_screen_output(&state, Some(screen)),
+            talk_intents(&mut runner, 2)
+        );
+        applied.unwrap();
+        for (frame, orientation) in frames.iter().zip(["h", "v"]) {
+            assert_eq!(frame["kind"], "overlay.set");
+            assert_eq!(frame["slot"], "takeover");
+            assert_eq!(frame["orientation"], orientation);
+        }
+
+        let (cleared, frames) = tokio::join!(
+            apply_active_screen_output(&state, None),
+            talk_intents(&mut runner, 2)
+        );
+        cleared.unwrap();
+        for (frame, orientation) in frames.iter().zip(["h", "v"]) {
+            assert_eq!(frame["kind"], "overlay.clear");
+            assert_eq!(frame["slot"], "takeover");
+            assert_eq!(frame["orientation"], orientation);
+        }
+    }
+
+    /// A room that opens while a takeover is already up takes it at once,
+    /// so the program matches what the Studio shows; with none up, the room
+    /// gets nothing; with no room, nothing is sent at all.
+    #[tokio::test]
+    async fn a_room_that_opens_takes_the_takeover_already_up() {
+        let state = test_state();
+        // No room yet: nothing to send to, and nothing fails.
+        push_active_takeover_to_room(&state).await;
+
+        let mut runner = cloud_talk::open_talk_show_for_tests(&state.cloud_show, "sh_talk", false);
+        push_active_takeover_to_room(&state).await;
+        assert!(
+            runner.try_recv().is_err(),
+            "no takeover up: the room gets nothing"
+        );
+
+        let dir = crate::test_temp_dir::TestTempDir::new("talk-takeover-at-open");
+        let source = dir.join("brb.png");
+        std::fs::write(&source, b"source").unwrap();
+        let screen = state
+            .database
+            .import_screen_image_with_optimizer(source.to_str().unwrap(), |_, destination| {
+                image::RgbaImage::from_pixel(160, 90, image::Rgba([0, 200, 80, 255]))
+                    .save_with_format(destination, image::ImageFormat::Png)
+                    .map_err(anyhow::Error::from)
+            })
+            .unwrap();
+        state.database.activate_stream_screen(&screen.id).unwrap();
+
+        let ((), frames) = tokio::join!(
+            push_active_takeover_to_room(&state),
+            talk_intents(&mut runner, 2)
+        );
+        for (frame, orientation) in frames.iter().zip(["h", "v"]) {
+            assert_eq!(frame["kind"], "overlay.set");
+            assert_eq!(frame["slot"], "takeover");
+            assert_eq!(frame["orientation"], orientation);
+            assert!(frame.get("ttlSeconds").is_none());
+        }
+        assert!(runner.try_recv().is_err(), "one intent per output");
     }
 
     /// Plan 215 A5 (D7): the account change goes out as one event the

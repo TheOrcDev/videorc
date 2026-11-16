@@ -4,7 +4,7 @@ import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { TooltipProvider } from '@/components/ui/tooltip'
-import type { CloudRoomGuest, CloudStageLayout, CloudStatus } from '@/lib/backend'
+import type { CloudRoomGuest, CloudStageLayout, CloudStatus, StreamScreen } from '@/lib/backend'
 import { HOST, ada, grace, openRoom, talkStatus } from '@/lib/guests-room-fixtures'
 import { NO_TALK_SHOW, type TalkShowContextValue } from '@/lib/talk-show-context'
 import { planStage } from '@/lib/talk-show-layout'
@@ -16,11 +16,13 @@ import ShowStage from './show-stage'
 // the right identities and guest ids.
 
 const studio = vi.hoisted(() => ({
-  cloud: { cloudStatus: null as CloudStatus | null, talkShow: null as unknown }
+  cloud: { cloudStatus: null as CloudStatus | null, talkShow: null as unknown },
+  core: { activeScreen: null as StreamScreen | null }
 }))
 
 vi.mock('@/hooks/use-studio', () => ({
-  useStudioCloud: () => studio.cloud
+  useStudioCloud: () => studio.cloud,
+  useStudioCore: () => studio.core
 }))
 
 function talkShow(overrides: Partial<TalkShowContextValue> = {}): TalkShowContextValue {
@@ -65,6 +67,7 @@ afterEach(async () => {
   await act(async () => root.unmount())
   container.remove()
   vi.unstubAllGlobals()
+  studio.core.activeScreen = null
 })
 
 async function mount(status: CloudStatus, show: TalkShowContextValue): Promise<void> {
@@ -340,6 +343,43 @@ describe('the Program monitor on a managed show (plan 234 D6)', () => {
     // The picture only: no name plate and no placeholder words in the small frame.
     expect(monitor()?.textContent).toBe('Program')
     expect(speaker()).toBeNull()
+  })
+
+  // The owner, 2026-11-16: a takeover in the room covers the program and
+  // mutes everyone, as a solo takeover does. The program page does both; the
+  // monitor shows it so the host can see what went out.
+  it('draws the takeover over the stage while it is up, and says everyone is muted', async () => {
+    const takeover = () =>
+      monitor()?.querySelector<HTMLImageElement>('[data-testid="show-stage-program-takeover"]') ??
+      null
+    const shownRoom = openRoom({ live: true, shown: { onStage: [HOST] } })
+    studio.core.activeScreen = {
+      id: 'brb',
+      name: 'Be right back',
+      imagePath: '/Users/test/Library/Application Support/Videorc/Screens/brb 1.png',
+      sortOrder: 0,
+      status: 'ready',
+      createdAt: '2026-11-16T10:00:00Z',
+      updatedAt: '2026-11-16T10:00:00Z'
+    }
+    await mount(talkStatus({ show: managedShow, room: shownRoom }), talkShow())
+    expect(takeover()?.getAttribute('src')).toBe('videorc-asset://screen/brb%201.png')
+    expect(monitor()?.textContent).toContain('Takeover · everyone muted')
+
+    // Not running yet: the monitor keeps its empty line, nothing is drawn.
+    await mount(talkStatus({ show: managedShow, room: openRoom() }), talkShow())
+    expect(takeover()).toBeNull()
+    expect(monitor()?.textContent).not.toContain('everyone muted')
+
+    // A node show's return carries the takeover itself: nothing is drawn over it.
+    await mount(talkStatus({ show: nodeShow, room: openRoom({ live: true }) }), talkShow())
+    expect(takeover()).toBeNull()
+
+    // Taken down: the stage again.
+    studio.core.activeScreen = null
+    await mount(talkStatus({ show: managedShow, room: shownRoom }), talkShow())
+    expect(takeover()).toBeNull()
+    expect(monitor()?.textContent).toBe('Program')
   })
 })
 
