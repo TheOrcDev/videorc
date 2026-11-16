@@ -6730,6 +6730,96 @@ describe('real StudioProvider lifecycle', () => {
     expect(sent('cloud.show.end')).toBe(0)
   }, 20_000)
 
+  // Plan 243 R2 B-M1: a live talk show has no local session; its session is
+  // the room's (as End livestream reads it). Quitting or closing the window
+  // asks first, offers the hand-off, and leaves only after it succeeded; a
+  // refusal keeps the app.
+  it('asks before a quit or a window close ends a live talk show (plan 243 R2 B-M1)', async () => {
+    const backend = new StudioBackend()
+    const talk: CloudStatus = {
+      ...resumableCloudStatus(),
+      phase: 'live',
+      plan: 'premium',
+      show: { id: 'sh_talk', nodeId: 'livekit', resumable: false, kind: 'talk' },
+      hold: undefined,
+      room: {
+        phase: 'open',
+        doorOpen: false,
+        declinedCount: 0,
+        stage: { layout: 'solo', onStage: ['host:sh_talk'] },
+        hostAway: false,
+        connected: true,
+        client: 'connected',
+        returnEnabled: false,
+        stageSet: true,
+        live: true
+      },
+      onAir: { kind: 'computer', source: 'host', waiting: false, thisDevice: true, since: now }
+    }
+    backend.cloudStatus = talk
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    let emit: (name: string, value: unknown) => void = () => {}
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => [],
+      registerEmitter: (next) => {
+        emit = next
+      }
+    })
+    const exitApp = vi.fn(async (_kind: 'quit' | 'close') => undefined)
+    ;(api as unknown as { exitApp: typeof exitApp }).exitApp = exitApp
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation => observations.at(-1)!
+    let shell: ReturnType<typeof useStudioShell> | undefined
+    function ShellProbe(): null {
+      const value = useStudioShell()
+      useEffect(() => {
+        shell = value
+      }, [value])
+      return null
+    }
+    root = await mountStudioProvider(
+      testDom.container,
+      (value) => {
+        observations.push(value)
+      },
+      createElement(ShellProbe)
+    )
+    await waitForObservation(() => latest()?.cloud.cloudStatus?.room?.live === true)
+    expect(latest().recording.recording.sessionId).toBe('sh_talk')
+    const sent = (method: string): number =>
+      backend.sentCommands.filter((command) => command.method === method).length
+
+    // A window close asks; a refused hand-off keeps the app and the show.
+    await act(async () => emit('onExitRequest', 'close'))
+    await waitForObservation(() => shell?.stopConfirmation?.origin === 'close-window')
+    expect(exitApp).not.toHaveBeenCalled()
+    expect(offersHandOff(latest().cloud.cloudStatus)).toBe(true)
+    backend.handOffRefusal = 'cloud-not-on-air'
+    await act(async () => shell!.handOffStopSession())
+    await waitForObservation(() => toastSpies.warning.mock.calls.length > 0)
+    expect(sent('cloud.show.handOff')).toBe(1)
+    expect(exitApp).not.toHaveBeenCalled()
+    expect(sent('cloud.show.legs.end')).toBe(0)
+
+    // A quit asks too; Quit and keep it live leaves once the show is handed off.
+    backend.handOffRefusal = null
+    await act(async () => emit('onExitRequest', 'quit'))
+    await waitForObservation(() => shell?.stopConfirmation?.origin === 'quit')
+    expect(exitApp).not.toHaveBeenCalled()
+    await act(async () => shell!.handOffStopSession())
+    await waitForObservation(() => exitApp.mock.calls.length === 1)
+    expect(exitApp).toHaveBeenCalledExactlyOnceWith('quit')
+    expect(sent('cloud.show.handOff')).toBe(2)
+    expect(sent('cloud.show.legs.end')).toBe(0)
+    expect(sent('cloud.room.close')).toBe(0)
+  }, 20_000)
+
   // Plan 243 D7: a talk show taken over (or handed off) goes on elsewhere, so
   // End livestream on this computer ends none of its legs, until Continue
   // here puts this computer back on air.

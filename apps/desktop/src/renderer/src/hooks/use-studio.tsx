@@ -17657,7 +17657,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // 174 S3.1, D2). Not live: nothing to protect, so the exit goes through at
   // once. Live: the End livestream question, with "Keep streaming" focused.
   const handleExitRequest = useEffectEvent((kind: AppExitKind) => {
-    if (!sessionIsLive(recordingRef.current)) {
+    if (!sessionIsLive(talkShowSessionRef.current ?? recordingRef.current)) {
       void window.videorc?.exitApp?.(kind)
       return
     }
