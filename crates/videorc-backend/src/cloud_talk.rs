@@ -2394,7 +2394,7 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
         &self,
         bearer: &str,
         show_id: &str,
-        deadline: tokio::time::Instant,
+        deadline: Option<tokio::time::Instant>,
     ) -> Result<()> {
         let (managed, generation) = {
             let runtime = lock(&self.slot);
