@@ -1,0 +1,108 @@
+import { describe, expect, it } from 'vitest'
+import { RoomPcmBridge } from './room-pcm-bridge'
+import { roomPcmCommand } from '../shared/room-pcm'
+import { RendererSecurityRegistry } from '../shared/renderer-security-policy'
+
+describe('PCM main transport ownership', () => {
+  it('does not resolve credentials or allocate a socket while disabled', async () => {
+    let called = false
+    const bridge = new RoomPcmBridge(
+      async () => {
+        called = true
+        throw new Error('unexpected')
+      },
+      () => false
+    )
+    await expect(bridge.request(roomPcmCommand('open', 1))).rejects.toThrow('disabled')
+    expect(called).toBe(false)
+  })
+  it('cancels opening before credentials arrive without allocating a socket', async () => {
+    let resolve!: (c: { host: string; port: number; token: string }) => void
+    let allocated = false
+    const bridge = new RoomPcmBridge(
+      () =>
+        new Promise((r) => {
+          resolve = r
+        }),
+      () => true,
+      () => {
+        allocated = true
+        throw new Error('unexpected')
+      }
+    )
+    const opening = bridge.request(roomPcmCommand('open', 1))
+    bridge.close()
+    resolve({ host: '127.0.0.1', port: 1, token: 'fixture' })
+    await expect(opening).rejects.toThrow('closed')
+    expect(allocated).toBe(false)
+  })
+  it('denies unregistered senders before application code', () => {
+    const registry = new RendererSecurityRegistry()
+    expect(
+      registry.invokeAllowed('room-pcm:test', {
+        senderId: 1,
+        frameUrl: 'https://attacker.invalid',
+        isMainFrame: true
+      })
+    ).toBe(false)
+  })
+})
+
+it('enforces trusted main-frame origins and denies auxiliary roles', () => {
+  const registry = new RendererSecurityRegistry()
+  registry.register(1, 'main')
+  registry.trustDocument(1, 'http://localhost:5173/index.html')
+  const identity = { senderId: 1, frameUrl: 'http://localhost:5173/index.html', isMainFrame: true }
+  expect(registry.invokeAllowed('room-pcm:test', identity)).toBe(true)
+  expect(registry.invokeAllowed('room-pcm:test', { ...identity, isMainFrame: false })).toBe(false)
+  expect(
+    registry.invokeAllowed('room-pcm:test', {
+      ...identity,
+      frameUrl: 'http://localhost:5174/index.html'
+    })
+  ).toBe(false)
+  registry.register(2, 'comments')
+  registry.trustDocument(2, identity.frameUrl)
+  expect(registry.invokeAllowed('room-pcm:test', { ...identity, senderId: 2 })).toBe(false)
+  expect(registry.invokeAllowed('room-pcm:inspect', { ...identity, senderId: 2 })).toBe(false)
+  expect(registry.invokeAllowed('room-pcm:inspect', { ...identity, isMainFrame: false })).toBe(
+    false
+  )
+})
+
+it('has one pull credit and rejects pending pulls when the owner closes', async () => {
+  const sent: { id: string; method: string }[] = []
+  const fake = {
+    onopen: null as null | (() => void),
+    onmessage: null as null | ((event: { data: string }) => void),
+    onerror: null,
+    onclose: null as null | (() => void),
+    readyState: 1,
+    send: (data: string) => sent.push(JSON.parse(data)),
+    close: () => {
+      fake.readyState = 3
+      fake.onclose?.()
+    }
+  }
+  const bridge = new RoomPcmBridge(
+    async () => ({ host: '127.0.0.1', port: 1, token: 'fixture' }),
+    () => true,
+    () => fake as unknown as WebSocket
+  )
+  const opening = bridge.request(roomPcmCommand('open', 1))
+  await Promise.resolve()
+  fake.onopen?.()
+  await Promise.resolve()
+  expect(sent[0].method).toBe('events.setIncluded')
+  fake.onmessage?.({ data: JSON.stringify({ id: sent[1].id, ok: true, payload: null }) })
+  await opening
+  expect(RoomPcmBridge.resources().sockets).toBe(1)
+  const pull = bridge.request(roomPcmCommand('pull', 1))
+  await expect(bridge.request(roomPcmCommand('pull', 1))).rejects.toThrow('outstanding')
+  const rejected = expect(pull).rejects.toThrow('closed')
+  await bridge.request(roomPcmCommand('close', 1))
+  await rejected
+  expect(fake.onmessage).toBeNull()
+  expect(RoomPcmBridge.resources()).toEqual({ sockets: 0, ipcRequests: 0, timers: 0 })
+  await expect(bridge.request(roomPcmCommand('pull', 1))).rejects.toThrow('disabled')
+})

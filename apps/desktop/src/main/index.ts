@@ -1,3 +1,4 @@
+import { RoomPcmBridge } from './room-pcm-bridge'
 import { createAppIconHandler } from './app-icons'
 import { createFrontAppMonitor, frontAppSenderIsMain, type FrontAppBinding } from './front-app'
 import {
@@ -11879,6 +11880,7 @@ function connectBackendEventSocket(connection: BackendConnection): void {
 }
 
 const MAIN_BACKEND_ADMIN_METHODS = new Set([
+  'room.pcm.test.inspect',
   'resource.capability.register_thumbnail',
   // Plan 232: how an HTML overlay's page stands; only main hosts them.
   'htmlOverlays.host.report',
@@ -18084,6 +18086,70 @@ app.whenReady().then(async () => {
     return backendConnection
   })
   secureIpcHandle('backend:get-logs', () => backendLogs)
+  // One main-frame owner. Navigation/crash/destruction closes the native socket,
+  // which drops the connection-local generator without a detached worker.
+  let pcmOwner: {
+    senderId: number
+    generation: number
+    bridge: RoomPcmBridge
+    detach: () => void
+  } | null = null
+  let pcmLastGeneration = 0
+  secureIpcHandle('room-pcm:inspect', async () => {
+    if (app.isPackaged || process.env.VIDEORC_ROOM_PCM_TEST !== '1')
+      throw new Error('PCM test bridge is disabled.')
+    const native = await requestBackendAdmin<{ nativeSources: number }>(
+      'room.pcm.test.inspect',
+      {},
+      2000
+    )
+    return { ...native, ...RoomPcmBridge.resources() }
+  })
+  secureIpcHandle('room-pcm:test', async (event, command) => {
+    if (app.isPackaged || process.env.VIDEORC_ROOM_PCM_TEST !== '1')
+      throw new Error('PCM test bridge is disabled.')
+    if (command.action === 'open') {
+      if (pcmOwner || command.generation <= pcmLastGeneration)
+        throw new Error('PCM owner already active or stale.')
+      pcmLastGeneration = command.generation
+      const contents = event.sender
+      const bridge = new RoomPcmBridge(
+        () => waitForBackendAdminConnection(2000),
+        () => !app.isPackaged && process.env.VIDEORC_ROOM_PCM_TEST === '1'
+      )
+      const cleanup = (): void => {
+        bridge.close()
+        detach()
+        if (pcmOwner?.bridge === bridge) pcmOwner = null
+      }
+      const detach = (): void => {
+        contents.removeListener('destroyed', cleanup)
+        contents.removeListener('render-process-gone', cleanup)
+        contents.removeListener('did-start-navigation', cleanup)
+      }
+      contents.once('destroyed', cleanup)
+      contents.once('render-process-gone', cleanup)
+      contents.once('did-start-navigation', cleanup)
+      pcmOwner = { senderId: contents.id, generation: command.generation, bridge, detach }
+    }
+    const owner = pcmOwner
+    if (!owner || owner.senderId !== event.sender.id || owner.generation !== command.generation)
+      throw new Error('PCM owner or generation mismatch.')
+    try {
+      return await owner.bridge.request(command)
+    } catch (error) {
+      owner.bridge.close()
+      owner.detach()
+      if (pcmOwner === owner) pcmOwner = null
+      throw error
+    } finally {
+      if (command.action === 'close') {
+        owner.detach()
+        if (pcmOwner === owner) pcmOwner = null
+      }
+    }
+  })
+
   secureIpcHandle('account:begin-sign-in', async (_event, authorizeUrl: string) => {
     if (typeof authorizeUrl !== 'string') {
       throw new Error('Desktop account authorization URL is required.')

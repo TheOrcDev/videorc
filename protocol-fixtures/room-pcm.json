@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "role": "host-microphone-test",
+  "sampleRate": 48000,
+  "channels": 1,
+  "frames": 480,
+  "queueFrames": 1920,
+  "productionQualified": false,
+  "marker": {
+    "syncHz": 3500,
+    "zeroHz": 1500,
+    "oneHz": 2500,
+    "bitFrames": 960,
+    "bits": 12,
+    "frames": 13440
+  }
+}

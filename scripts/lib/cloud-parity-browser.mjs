@@ -9,7 +9,7 @@ import { requireLoopback } from './cloud-parity-contract.mjs'
  * Only fixture API responses and device inputs are synthetic. No Next build,
  * migration, web source edit, fake LiveKit client or unrestricted guest token.
  */
-export async function startParityPages(webRoot, guests, media = null) {
+export async function startParityPages(webRoot, guests, media = null, fixtureAssets = new Map()) {
   const webRequire = createRequire(join(webRoot, 'package.json'))
   const tsxRequire = createRequire(webRequire.resolve('tsx'))
   const { build } = tsxRequire('esbuild')
@@ -86,6 +86,8 @@ export async function startParityPages(webRoot, guests, media = null) {
         res.writeHead(200, { 'content-type': type, 'cache-control': 'no-store' })
         res.end(body)
       }
+      if (fixtureAssets.has(url.pathname))
+        return send('text/javascript', fixtureAssets.get(url.pathname))
       if (url.pathname === '/guest.mjs')
         return send('text/javascript', bundle.outputFiles[0].contents)
       if (url.pathname.startsWith('/guest/'))

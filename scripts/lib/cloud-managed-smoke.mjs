@@ -108,7 +108,7 @@ export function managedPublishAllowed(shows, { action, path }) {
  * A loopback media stand-in observes decoded feed frames; it does not claim to
  * establish LiveKit egress behaviour (the D18 Docker stack is a separate gate).
  */
-export async function managedHarness(kind, pass = 1) {
+export async function managedHarness(kind, pass = 1, { maximumLogEntries = Infinity } = {}) {
   const root = mkdtempSync(
     join(process.env.VIDEORC_SMOKE_OUTPUT_DIR ?? tmpdir(), `videorc-managed-${kind}-${pass}-`)
   )
@@ -495,6 +495,9 @@ export async function managedHarness(kind, pass = 1) {
         onLine: (l) => {
           rawAppLogs.push(l)
           logs.push(redact(l))
+          if (rawAppLogs.length > maximumLogEntries)
+            rawAppLogs.splice(0, rawAppLogs.length - maximumLogEntries)
+          if (logs.length > maximumLogEntries) logs.splice(0, logs.length - maximumLogEntries)
         }
       })
       backend = await connectBackend(app.connections['backend-ready'], 30000)
@@ -503,6 +506,7 @@ export async function managedHarness(kind, pass = 1) {
         try {
           const m = JSON.parse(e.data)
           if (m.event) events.push({ ...m, atMs: Date.now() })
+          if (events.length > maximumLogEntries) events.splice(0, events.length - maximumLogEntries)
         } catch {}
       })
       await h.status((s) => s.entitled && s.settings?.enabled, 'managed entitlement')

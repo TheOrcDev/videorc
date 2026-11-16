@@ -11,6 +11,30 @@ import {
 const plan = readParityJson('plan')
 validateParityRegistry(plan, readParityJson('inventory'))
 const selected = parseParityArgs(process.argv.slice(2), plan)
+if (selected.case === 'microphone-bridge') {
+  const { pcmAcquisitionConfig } = await import('./lib/cloud-parity-pcm-acquisition-contract.mjs')
+  const config = pcmAcquisitionConfig(process.env)
+  let evidenceFile = process.env.VIDEORC_PCM_EVIDENCE
+  if (config.mode !== 'analyze') {
+    const { acquirePcmEvidence } = await import('./lib/cloud-parity-pcm-acquire.mjs')
+    const acquired = await acquirePcmEvidence({
+      desktopRoot: fileURLToPath(new URL('../', import.meta.url)),
+      webRoot: process.env.VIDEORC_PARITY_WEB_ROOT,
+      config
+    })
+    evidenceFile = acquired.evidenceFile
+    console.log(`PCM artifacts acquired (not qualified): ${evidenceFile}`)
+  }
+  if (config.mode !== 'acquire') {
+    const { analyzePcmEvidence } = await import('./lib/cloud-parity-pcm.mjs')
+    const { writeFileSync } = await import('node:fs')
+    const result = await analyzePcmEvidence(evidenceFile)
+    writeFileSync(`${evidenceFile}.qualification.json`, JSON.stringify(result, null, 2) + '\n')
+    console.log(JSON.stringify(result, null, 2))
+    if (result.status !== 'passed') process.exitCode = 1
+  }
+  process.exit(process.exitCode ?? 0)
+}
 if (!['baseline', 'controls', 'privacy', 'soundboard'].includes(selected.case)) {
   throw new Error(
     `${selected.id} case '${selected.case}' is not implemented. Deferred acceptance is not a pass.`

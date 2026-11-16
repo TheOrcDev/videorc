@@ -1,3 +1,4 @@
+import { roomPcmTestResources, setRoomPcmTestEnabled } from '../lib/room-pcm-test-state'
 import { roomHoldsTheCamera } from '@/lib/replay-buffer-reconcile'
 import { outputSessionFacts } from '../../../shared/output-session'
 import type { TalkShowRoomClient, TalkShowRoomSnapshot } from '@/lib/talk-show-room'
@@ -20045,6 +20046,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         ]
         setDeviceList({ devices: fixtures, warnings: [] })
         return fixtures
+      },
+      roomPcmTest: (enabled?: boolean) => {
+        if (enabled !== undefined) setRoomPcmTestEnabled(enabled)
+        return roomPcmTestResources()
       },
       roomSounds: (enabled?: boolean) => {
         if (enabled !== undefined) soundboard.setRoomAuxEnabled(enabled)

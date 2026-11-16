@@ -77,6 +77,7 @@ mod frame_store;
 mod html_overlay;
 mod output_session;
 mod preview_debug_sample;
+mod room_audio_bridge;
 // Plan 168 Phase F: the pet builder (S-F1 to S-F3) and the creator's RPCs (S-F4).
 mod buddy_pet_build;
 mod buddy_pet_create;
@@ -8510,6 +8511,65 @@ struct PreviewFrameReleaseParams {
 // These controls are connection-owned, like the event filter. Never dispatch
 // them as detached work: disconnect must release the retained surface even if
 // the client disappears after acquiring it and before sending its release.
+fn handle_room_pcm_control(
+    role: BackendRole,
+    enabled: bool,
+    bridge: &mut room_audio_bridge::Bridge,
+    text: &str,
+) -> Option<ServerResponse> {
+    // Only the private main/admin socket reaches this connection-owned source.
+    if !text.contains("room.pcm.test") {
+        return None;
+    }
+    #[derive(Deserialize)]
+    struct Envelope<'a> {
+        id: &'a str,
+        method: &'a str,
+    }
+    // Borrow only the envelope; serde skips params without materializing a Value.
+    let envelope = serde_json::from_str::<Envelope<'_>>(text).ok()?;
+    if !matches!(envelope.method, "room.pcm.test" | "room.pcm.test.inspect") {
+        return None;
+    }
+    if role != BackendRole::Admin || !cfg!(debug_assertions) || !enabled {
+        return Some(ServerResponse::error(
+            envelope.id,
+            "pcm-disabled",
+            "PCM test source is unavailable.",
+        ));
+    }
+    if text.len() > 512 {
+        return Some(ServerResponse::error(
+            envelope.id,
+            "invalid-params",
+            "PCM command exceeds its bound.",
+        ));
+    }
+    let command = serde_json::from_str::<ClientCommand>(text).ok()?;
+    if command.method == "room.pcm.test.inspect" {
+        if !rpc_params_are_empty(&command.params) {
+            return Some(ServerResponse::error(
+                command.id,
+                "invalid-params",
+                "PCM inspection takes no parameters.",
+            ));
+        }
+        return Some(ServerResponse::ok(
+            command.id,
+            serde_json::json!({ "nativeSources": room_audio_bridge::active_sources() }),
+        ));
+    }
+    let result = serde_json::from_value::<room_audio_bridge::Command>(command.params)
+        .map_err(|_| "Invalid PCM command")
+        .and_then(|params| bridge.command(params, std::time::Instant::now()));
+    Some(match result {
+        Ok(frame) => {
+            ServerResponse::ok(command.id, serde_json::to_value(frame).unwrap_or_default())
+        }
+        Err(error) => ServerResponse::error(command.id, "pcm-rejected", error),
+    })
+}
+
 async fn handle_preview_frame_lease_control(
     state: &AppState,
     role: BackendRole,
@@ -8758,6 +8818,7 @@ async fn websocket_session_with_handler_role_and_redaction(
         None => (None, None),
     };
     let mut preview_frame_lease = None;
+    let mut room_audio_bridge = room_audio_bridge::Bridge::default();
 
     loop {
         let incoming = tokio::select! {
@@ -8854,6 +8915,25 @@ async fn websocket_session_with_handler_role_and_redaction(
                     role,
                     &event_filter,
                     &mut studio_socket_guard,
+                    text.as_str(),
+                ) {
+                    if !queue_websocket_response(
+                        &outgoing_tx,
+                        &reliable_metrics,
+                        &slow_pressure,
+                        response,
+                    )
+                    .await
+                    {
+                        break;
+                    }
+                    continue;
+                }
+
+                if let Some(response) = handle_room_pcm_control(
+                    role,
+                    state.smoke_rpc_enabled,
+                    &mut room_audio_bridge,
                     text.as_str(),
                 ) {
                     if !queue_websocket_response(
@@ -27316,5 +27396,54 @@ mod agent_role_tests {
                 "{method} has no execution policy"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod room_pcm_admission_tests {
+    use super::*;
+    #[test]
+    fn pcm_test_requires_admin_debug_opt_in_and_bounded_contract() {
+        let command = r#"{"id":"pcm","method":"room.pcm.test","params":{"action":"open","generation":1,"role":"host-microphone-test","sampleRate":48000,"channels":1,"frames":480}}"#;
+        for role in [
+            BackendRole::Renderer,
+            BackendRole::Remote,
+            BackendRole::Agent,
+        ] {
+            let response = handle_room_pcm_control(
+                role,
+                true,
+                &mut room_audio_bridge::Bridge::default(),
+                command,
+            )
+            .unwrap();
+            assert_eq!(serde_json::to_value(response).unwrap()["ok"], false);
+            let inspect = r#"{"id":"pcm","method":"room.pcm.test.inspect","params":{}}"#;
+            let denied = handle_room_pcm_control(
+                role,
+                true,
+                &mut room_audio_bridge::Bridge::default(),
+                inspect,
+            )
+            .unwrap();
+            assert_eq!(serde_json::to_value(denied).unwrap()["ok"], false);
+        }
+        let mut bridge = room_audio_bridge::Bridge::default();
+        let off = handle_room_pcm_control(BackendRole::Admin, false, &mut bridge, command).unwrap();
+        assert_eq!(serde_json::to_value(off).unwrap()["ok"], false);
+        let on = handle_room_pcm_control(BackendRole::Admin, true, &mut bridge, command).unwrap();
+        assert_eq!(
+            serde_json::to_value(on).unwrap()["ok"],
+            cfg!(debug_assertions)
+        );
+        let bad = command.replace("48000", "44100");
+        let result = handle_room_pcm_control(
+            BackendRole::Admin,
+            true,
+            &mut room_audio_bridge::Bridge::default(),
+            &bad,
+        )
+        .unwrap();
+        assert_eq!(serde_json::to_value(result).unwrap()["ok"], false);
     }
 }
