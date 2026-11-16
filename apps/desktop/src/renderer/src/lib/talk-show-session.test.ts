@@ -1,10 +1,11 @@
 import { describe, expect, it, vi } from 'vitest'
 
+import { endTalkShowLivestream } from '@/lib/talk-show-end'
+
 import type { CloudStatus } from '@/lib/backend'
 import {
   TALK_SHOW_STREAM_URL,
   startTalkShowLivestream,
-  endTalkShowLivestream,
   talkShowStartBlockedReason,
   talkShowLiveStartedAt,
   talkShowSessionView

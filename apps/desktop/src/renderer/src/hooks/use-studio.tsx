@@ -171,7 +171,6 @@ import {
   talkShowLiveStartedAt as talkShowLiveStartedAtFrom,
   talkShowStartBlockedReason,
   startTalkShowLivestream,
-  endTalkShowLivestream,
   talkShowSessionView
 } from '@/lib/talk-show-session'
 import { openWorkspaceTab } from '@/lib/workspace-navigation'
@@ -17502,6 +17501,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           if (talkSession.streamUrl) {
             // X must end while its feed is live. YouTube completes only
             // after the cloud confirms its legs stopped (plan 247 D4).
+            const { endTalkShowLivestream, showTalkShowEndFailure } =
+              await import('@/lib/talk-show-end')
             return endTalkShowLivestream(
               async () => {
                 const owner = platformLifecycleOwnerRef.current
@@ -17514,33 +17515,12 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
                 }
                 commitCloudStatus(await client.requestTyped('cloud.show.legs.end'))
               },
-              (error) => {
-                toastUserError(
-                  error,
-                  { action: 'end', object: 'the livestream' },
-                  {
-                    id: CLOUD_TOAST_ID,
-                    action: {
-                      label: 'Close the room',
-                      onClick: () => {
-                        void (async () => {
-                          try {
-                            commitCloudStatus(await client.requestTyped('cloud.room.close'))
-                            const owner = claimPlatformLifecycleOwner(talkSession.sessionId)
-                            if (owner) await settleClaimedPlatformLifecycleOwner(owner)
-                          } catch (closeError) {
-                            toastUserError(
-                              closeError,
-                              { action: 'close', object: 'the room' },
-                              { id: CLOUD_TOAST_ID }
-                            )
-                          }
-                        })()
-                      }
-                    }
-                  }
-                )
-              },
+              (error) =>
+                showTalkShowEndFailure(error, async () => {
+                  commitCloudStatus(await client.requestTyped('cloud.room.close'))
+                  const owner = claimPlatformLifecycleOwner(talkSession.sessionId)
+                  if (owner) await settleClaimedPlatformLifecycleOwner(owner)
+                }),
               () => claimPlatformLifecycleOwner(talkSession.sessionId),
               (owner) =>
                 settleClaimedPlatformLifecycleOwner(owner, (resolved) =>
