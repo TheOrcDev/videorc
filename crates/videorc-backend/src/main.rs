@@ -15732,12 +15732,20 @@ fn cloud_hooks(state: &AppState) -> cloud_show::CloudHooks {
             let state = stop_state.clone();
             Box::pin(async move {
                 live_chat::stop_live_chat_for_capture_end(&state).await;
-                stop_recording_with_intent(state, protocol::SessionStopParams::default())
-                    .await
-                    .map(|_| ())
-                    .map_err(|_| {
-                        "This computer could not stop sending. Try Stop again.".to_string()
-                    })
+                match stop_recording_with_intent(
+                    state.clone(),
+                    protocol::SessionStopParams::default(),
+                )
+                .await
+                {
+                    Ok(_) => Ok(()),
+                    Err(_) if state.recording.lock().await.is_none() => {
+                        Err(cloud_show::CloudStopFailure::NoActiveSession)
+                    }
+                    Err(_) => Err(cloud_show::CloudStopFailure::Failed(
+                        "This computer could not stop sending. Try Stop again.".into(),
+                    )),
+                }
             })
         }),
         emit: std::sync::Arc::new(move |status| {

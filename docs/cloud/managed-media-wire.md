@@ -1179,46 +1179,70 @@ triggers a snapshot refresh. These additions do not change node media.
 
 C1 / W1, W4 (D1, D3, D11): a desktop creates shows with its backend-private
 `device` (22 base62 id in `cloud.deviceId`, computer name, kind `computer`).
-The name is plain text, at most 40 characters. Debug builds alone accept the
-device overrides. Neither identity field enters diagnostics. State and current
-read `onAir`; status projects `thisDevice` and omits the id. Optional fields
-are omitted rather than null. YouTube destinations carry `broadcastId`,
-which is also read from the returned legs. The server scrubs names and
-broadcast ids at show end.
+The name is plain text, at most 40 characters, resolved lazily off the startup
+path on first use. Debug builds alone accept device overrides. Neither identity
+field enters diagnostics. A failed id save omits `device` on create rather than
+sending an empty id. Unknown on-air kind/source values parse without losing the
+state and project as `computer`/`feed`. Status projects `thisDevice`, omits the id
+and omits absent fields rather than sending null. YouTube destinations carry
+`broadcastId`, also read from returned legs; the web scrubs it and names at end.
 
-C2 / W1 (D4, D7, D12): renderer-only `cloud.show.handOff {}` posts
-`hand-off` with the device id, then stops locally even if that POST fails.
-`cloud.state.stoppedBy` is emitted before local Stop; recording finalization
-uses the existing Stop path. This intent never calls `/end`, clears no
-remembered show, and leaves `sessionId` absent and the show resumable. Talk
-overlays are cleared before releasing the host connection; no room close is
-sent. The marker stays until a new session starts or a new show is held.
+C2 / W1 (D4, D7, D12): renderer-only `cloud.show.handOff {}` publishes
+`cloud.state.stoppedBy: "hand-off"` under the continuation intent before its
+POST or any local terminal status. A concurrent ordinary Stop honours that
+intent and cannot end the show. After local Stop succeeds the RPC returns
+`{ ok: true, confirmed: true }` if the POST succeeded, or
+`{ ok: true, confirmed: false }` for any POST failure, including an old web's
+404. Errors are refusals that stopped nothing; a refused local stop clears the
+pending intent. Local recording finalizes through normal Stop, including a
+recording beside a talk room; an already-ended local session counts as stopped.
+The intent never calls `/end`, forgets no remembered show, and leaves the show
+resumable. Talk overlays are cleared and the local host is released without
+closing the room. The marker survives a re-hold and unrelated local starts; it
+clears when a cloud start binds a feeding session (or resumes the host room).
+A continuing session follows the profile's record-while-streaming setting.
 
 C3 / W1, W2 (D1, D7): a managed state naming another device while this
-computer feeds triggers the same local stop with `taken-over`. Talk keeps
-its host seat on `onAir` alone: `host/go` precedes the new host joining,
-which can fail. Only the renderer's confirmed duplicate-identity report
-(`disconnected`, detail `Your show continues on another device.`) releases
-the old desktop's talk state through that continuation stop.
-It sends neither `/hand-off` nor `/end`. Destination recovery is invalidated
-and feed notices are suppressed after takeover. Old-feed failures wait three
-seconds for the corresponding state poll, covering ingress rotation arriving
-before `onAir`. The renderer owns LiveKit's duplicate-identity event (C5).
+computer feeds triggers the same local stop with `taken-over`. Talk keeps its
+seat on `onAir` alone: `host/go` precedes joining, which can fail. Only the
+renderer's confirmed duplicate-identity report (`disconnected`, detail
+`Your show continues on another device.`) releases the old desktop's talk
+state. A still-connected held host reclaims `host/go` once after a five-second
+unjoined-claim window (beyond the renderer's three-second duplicate window).
+Explicit held-room Resume and hand-off also reclaim first when another device
+is named. No continuation stop sends `/end`; takeover sends no `/hand-off`.
+Destination recovery is invalidated. Only user-facing old-feed failure notices
+wait three seconds off the stderr loop; leg state, progress and the feed-down
+clock update immediately. A takeover or recovered leg suppresses stale notices.
 
 C4 / W2, W4 (D2, D3, D6, D10): managed solo Resume calls `on-air`
-`feed/prepare` and uses only its returned ingress. After local startup, a
-browser-to-feed continuation waits up to 20 seconds for every output's
-connected feed, then retries `feed/go` once a second for up to 20 seconds.
-Failure stops this computer through the continuation intent, leaving Resume
-available. Talk Resume calls `host/go` before joining. Node Resume retains
-its existing transport. Idle signed-in discovery checks current every 60
-seconds; renderer-only `cloud.show.check {}` checks on focus with a shared
-10-second minimum interval.
+`feed/prepare` and uses only the returned ingress. After local startup, a
+camera-to-feed continuation tries `feed/go` immediately and retries 409
+`cloud-source-not-ready` and 503 once a second for the full 40-second budget.
+It does not wait for webhook-derived `feeds[].connected`. Only the started
+session bound to that resume can finish the claim; all failed or cancelled
+prepare exits release the claim flags. Final go failure stops locally through
+the continuation intent, leaving Resume available. Talk Resume lends the
+camera, reads room settings and connects control before `host/go`, the last
+network step before returning the status that makes the renderer join. Node
+Resume retains its transport. Managed Resume requires the deployed on-air
+route: an old web's 404 refuses Resume without falling back to stale ingress.
 
-A resumed computer holds its hydrated enabled destinations as in-memory
-reconnect candidates. Platform and orientation must match, with a unique
-label match when ambiguous. Every reconnect and automatic resend uses the
-existing live leg's id, never `replace` or a new id. The server's
-`destination-changed` refusal names a mismatching saved key without exposing
-it. Chat uses the live YouTube leg's `broadcastId`. No destination URL or
-key is persisted or transferred between devices.
+A resumed computer holds hydrated enabled destinations as in-memory reconnect
+candidates. Platform and orientation must match, with a unique label match when
+ambiguous. Reconnects use the live leg id, never `replace` or a new id. The web's
+`destination-changed` refusal names a mismatching saved key without exposing it.
+Chat uses the live YouTube leg's `broadcastId`. No destination URL/key is
+persisted or transferred between devices. Go Live and crash adoption refuse a
+non-waiting show live elsewhere with `cloud-show-live-elsewhere` and the fixed
+copy `Your show is live on another device. Use Continue here, or end it first.`
+No device name enters errors. Adoption permits legacy on-air absence, this
+device, or waiting. Failed destination hand-over can end only a show this
+process created; it cannot end an adopted or discovered show.
+
+Idle signed-in discovery checks current every 60 seconds; renderer-only
+`cloud.show.check {}` checks focus with a shared 10-second minimum interval.
+A held show without a feeding session or destinations polls with `viewer=idle`
+(the web treats it like `viewer=page`, without stamping desktop presence).
+The same control switches to normal polling once it feeds or holds keys to
+re-send, preserving the web's `egress-lost` meaning.

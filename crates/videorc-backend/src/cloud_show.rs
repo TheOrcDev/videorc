@@ -2365,8 +2365,16 @@ pub type CloudLegsHook = Arc<dyn Fn(&str, Vec<StreamTargetRuntime>) + Send + Syn
 /// Persists the remembered show's id (`None`: nothing to remember).
 pub type CloudRememberHook = Arc<dyn Fn(Option<String>) + Send + Sync>;
 
+#[derive(Debug)]
+pub enum CloudStopFailure {
+    NoActiveSession,
+    Failed(String),
+}
+
 pub type CloudStopHook = Arc<
-    dyn Fn() -> Pin<Box<dyn Future<Output = std::result::Result<(), String>> + Send>> + Send + Sync,
+    dyn Fn() -> Pin<Box<dyn Future<Output = std::result::Result<(), CloudStopFailure>> + Send>>
+        + Send
+        + Sync,
 >;
 
 /// How the socket task reaches the app without owning `AppState`: emit the
@@ -4804,7 +4812,15 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
         };
         // Must reach the renderer before the local stop event (D7).
         self.hooks.emit_from(&self.slot);
-        if talk {
+        let stopped = if session.is_some() || talk {
+            match (self.hooks.stop)().await {
+                Ok(()) | Err(CloudStopFailure::NoActiveSession) => Ok(()),
+                Err(CloudStopFailure::Failed(message)) => Err(message),
+            }
+        } else {
+            Ok(())
+        };
+        if talk && stopped.is_ok() {
             for slot in [
                 crate::cloud_talk::CloudOverlaySlot::Card,
                 crate::cloud_talk::CloudOverlaySlot::Takeover,
@@ -4819,11 +4835,6 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
             }
             self.forget_talk_show().await;
         }
-        let stopped = if session.is_some() {
-            (self.hooks.stop)().await
-        } else {
-            Ok(())
-        };
         {
             let mut runtime = lock(&self.slot);
             runtime.continuation_stop_in_flight = false;
@@ -12676,6 +12687,59 @@ mod tests {
         let database = crate::storage::Database::open_in_memory_for_tests();
         let device = load_device(&database);
         assert!(device.name == "This computer");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn r2_a_l6_talk_hand_off_stops_a_local_recording_normally() {
+        let mut harness = harness(true);
+        managed_room(&harness).await;
+        let stops = Arc::new(AtomicUsize::new(0));
+        let observed = stops.clone();
+        harness.context.hooks.stop = Arc::new(move || {
+            observed.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async { Ok(()) })
+        });
+        harness
+            .context
+            .hand_off(Some("bearer".into()))
+            .await
+            .unwrap();
+        assert_eq!(stops.load(Ordering::SeqCst), 1);
+        assert!(harness.context.web.end_calls.lock().unwrap().is_empty());
+        assert!(lock(&harness.context.slot).status().show.unwrap().resumable);
+    }
+    #[tokio::test(start_paused = true)]
+    async fn r2_a_l6_an_already_ended_session_is_a_successful_continuation_stop() {
+        let mut harness = harness(true);
+        managed_live_show(&harness).await;
+        harness.context.hooks.stop =
+            Arc::new(|| Box::pin(async { Err(CloudStopFailure::NoActiveSession) }));
+        harness
+            .context
+            .hand_off(Some("bearer".into()))
+            .await
+            .unwrap();
+        assert!(lock(&harness.context.slot).status().show.unwrap().resumable);
+        assert!(harness.context.web.end_calls.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn r2_a_l6_a_refused_local_stop_retains_the_room_and_clears_the_pending_intent() {
+        let mut harness = harness(true);
+        managed_room(&harness).await;
+        harness.context.hooks.stop =
+            Arc::new(|| Box::pin(async { Err(CloudStopFailure::Failed("still sending".into())) }));
+        assert!(
+            harness
+                .context
+                .hand_off(Some("bearer".into()))
+                .await
+                .is_err()
+        );
+        let status = lock(&harness.context.slot).status();
+        assert!(status.room.is_some());
+        assert_eq!(status.stopped_by, None);
+        assert!(harness.context.web.end_calls.lock().unwrap().is_empty());
     }
 
     fn hold_unconnected_for_review(harness: &Harness, talk: bool) {
