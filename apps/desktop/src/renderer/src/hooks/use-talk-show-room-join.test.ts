@@ -52,6 +52,8 @@ vi.mock('@/lib/talk-show-room', async () => {
       room.snapshots.push(onSnapshot)
       room.onAir.push(onAir)
     }
+    setGraphics(): void {}
+    failGraphics(): void {}
     async sendStage(): Promise<void> {}
     async connect(): Promise<void> {
       room.connected += 1

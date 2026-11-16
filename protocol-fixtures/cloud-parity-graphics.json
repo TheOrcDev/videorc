@@ -1,0 +1,86 @@
+{
+  "version": 1,
+  "snapshot": {
+    "version": 1,
+    "show": "sh_graphics",
+    "publisherSid": "PA_host",
+    "revision": 1,
+    "output": "stream",
+    "orientation": "h",
+    "expiresAt": 30000,
+    "layers": [
+      {
+        "id": "banner",
+        "kind": "banner",
+        "rect": {
+          "x": 0.1,
+          "y": 0.1,
+          "w": 0.3,
+          "h": 0.15
+        },
+        "asset": {
+          "png": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+j5R8AAAAASUVORK5CYII=",
+          "hash": "4eca665b50e14f07dbdd96760e5186ad80efd8e3590c2440762c70a6d90aa764",
+          "width": 1,
+          "height": 1
+        },
+        "opacity": 0.5,
+        "fade": {
+          "at": 1000,
+          "from": 0,
+          "to": 1
+        },
+        "expiresAt": null
+      },
+      {
+        "id": "chat",
+        "kind": "chat",
+        "rect": {
+          "x": 0.1,
+          "y": 0.30000000000000004,
+          "w": 0.3,
+          "h": 0.15
+        },
+        "asset": {
+          "png": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+j5R8AAAAASUVORK5CYII=",
+          "hash": "4eca665b50e14f07dbdd96760e5186ad80efd8e3590c2440762c70a6d90aa764",
+          "width": 1,
+          "height": 1
+        },
+        "opacity": 1,
+        "fade": null,
+        "expiresAt": null
+      },
+      {
+        "id": "highlight",
+        "kind": "highlight",
+        "rect": {
+          "x": 0.1,
+          "y": 0.5,
+          "w": 0.3,
+          "h": 0.15
+        },
+        "asset": {
+          "png": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+j5R8AAAAASUVORK5CYII=",
+          "hash": "4eca665b50e14f07dbdd96760e5186ad80efd8e3590c2440762c70a6d90aa764",
+          "width": 1,
+          "height": 1
+        },
+        "opacity": 1,
+        "fade": null,
+        "expiresAt": 10000
+      }
+    ]
+  },
+  "fade": {
+    "at": 1000,
+    "samples": [
+      [1000, 0],
+      [1050, 0.2890625],
+      [1100, 0.4375],
+      [1200, 0.5],
+      [1500, 0.5]
+    ]
+  },
+  "order": ["takeover", "banner", "caption", "chat", "avatar", "bubble", "highlight", "hold"]
+}

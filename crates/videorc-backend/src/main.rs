@@ -44,6 +44,7 @@ mod chat_overlay;
 mod clean_cut;
 mod clip_marks;
 mod cloud_control_web;
+mod cloud_graphics;
 mod cloud_services;
 mod cloud_show;
 mod cloud_talk;
@@ -5843,6 +5844,7 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "cohost.library.update"
         | "cohost.library.delete"
         | "cohost.library.saveToLibrary"
+        | "cloud.graphics.snapshot"
         | "buddy.cloud.report"
         | "buddy.overlay.set"
         | "buddy.overlay.clear"
@@ -10933,6 +10935,28 @@ async fn handle_text_message_with_role(
         }
         // --- Buddy overlay (plan 164 Phase C) ---
         "cohost.buddy.status" => ServerResponse::ok(command.id, buddy_overlay::status(state).await),
+        "cloud.graphics.snapshot" => {
+            if role != BackendRole::Renderer {
+                return ServerResponse::error(
+                    command.id,
+                    "forbidden",
+                    "Only the room renderer reads public graphics.",
+                );
+            }
+            match serde_json::from_value::<cloud_graphics::SnapshotParams>(command.params) {
+                Ok(params) => match cloud_graphics::snapshot(state, params).await {
+                    Ok(value) => ServerResponse::ok(command.id, value),
+                    Err(error) => ServerResponse::error(
+                        command.id,
+                        "cloud-graphics-unavailable",
+                        error.to_string(),
+                    ),
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
         "buddy.cloud.report" => {
             if role != BackendRole::Renderer {
                 return ServerResponse::error(

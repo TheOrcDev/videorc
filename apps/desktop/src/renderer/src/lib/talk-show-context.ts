@@ -61,6 +61,7 @@ export interface TalkShowContextValue {
   listDisplaySources: () => Promise<TalkShowDisplaySource[]>
   startScreenShare: (sourceId: string) => Promise<void>
   stopScreenShare: () => Promise<void>
+  setGraphicsEnabled: (enabled: boolean) => Promise<void>
   setAvatarEnabled: (enabled: boolean) => Promise<void>
   /** Plan 249 S6 (D4): show the stream's public avatar layers to guest pages. */
   setAvatarGuests: (enabled: boolean) => Promise<void>
@@ -96,6 +97,7 @@ export const NO_TALK_SHOW: TalkShowContextValue = {
   startScreenShare: async () => {},
   stopScreenShare: async () => {},
   setMonitor: async () => {},
+  setGraphicsEnabled: async () => {},
   setAvatarEnabled: async () => {},
   setAvatarGuests: async () => {},
   setMicrophoneMuted: async () => {},
