@@ -1,3 +1,4 @@
+import { RoomSounds } from './room-sounds'
 import { useEffect, useEffectEvent, type ReactElement } from 'react'
 
 import { PanelSection } from '@/components/panel-section'
@@ -45,6 +46,7 @@ export function SoundboardSection(): ReactElement {
       description={soundboardDescription(sessionActive, board.monitor, board.sessionWithoutSounds)}
       title="Soundboard"
     >
+      <RoomSounds />
       {board.sounds.length > 0 ? (
         <>
           <SoundPadBoard

@@ -1,3 +1,4 @@
+import { exerciseSoundboard } from './cloud-parity-soundboard.mjs'
 import { exercisePrivacy } from './cloud-parity-privacy.mjs'
 import {
   prepareParityRoom,
@@ -48,13 +49,19 @@ const recordArtifact = (report, root, file, kind) => {
 /** No build, paid egress, provider destination or live service is started.
  * This is deliberately NOT invoked by focused tests or --help/check modes.
  */
-export async function runBaseline({ desktopRoot, webRoot, controls = false, privacy = false }) {
+export async function runBaseline({
+  desktopRoot,
+  webRoot,
+  controls = false,
+  privacy = false,
+  soundboard = false
+}) {
   const report = baselineReport({
     desktop: revision(desktopRoot),
     web: revision(webRoot),
     template: 'v1'
   })
-  report.case = privacy ? 'privacy' : controls ? 'controls' : 'baseline'
+  report.case = soundboard ? 'soundboard' : privacy ? 'privacy' : controls ? 'controls' : 'baseline'
   // A dirty web consumer makes its revision misleading. Require a dedicated,
   // installed checkout; inspect it read-only and never change the active one.
   const webDirty = execFileSync('git', ['status', '--porcelain', '--untracked-files=no'], {
@@ -152,7 +159,37 @@ export async function runBaseline({ desktopRoot, webRoot, controls = false, priv
         ]
       })
     )
-    pages = await startParityPages(webRoot, guests)
+    pages = await startParityPages(
+      webRoot,
+      guests,
+      soundboard
+        ? {
+            show: h.showId,
+            relay: {
+              participantSession: async (show, identity) =>
+                (await h.web.roomRpc('GetParticipant', { room: show, identity })).sid,
+              auxiliarySid: async (show) => {
+                const host = await h.web.roomRpc('GetParticipant', {
+                  room: show,
+                  identity: `host:${show}`
+                })
+                const tracks = (host.tracks ?? []).filter(
+                  (t) => t.name === 'videorc:v2:host-aux:stereo'
+                )
+                return tracks.length === 1 ? tracks[0].sid : null
+              },
+              send: async (show, payload) =>
+                h.web.roomRpc('SendData', {
+                  room: show,
+                  data: Buffer.from(payload).toString('base64'),
+                  kind: 'RELIABLE',
+                  destinationIdentities: [`host:${show}`],
+                  topic: 'videorc.media-capability.v2'
+                })
+            }
+          }
+        : null
+    )
     browser = await chromium.launch({
       executablePath:
         process.env.VIDEORC_SMOKE_CHROME ??
@@ -323,6 +360,7 @@ export async function runBaseline({ desktopRoot, webRoot, controls = false, priv
       path: soundPath
     })
     const sound = await h.rpc('sounds.import', { sourceCapability: auth.capabilityId })
+    if (soundboard) await exerciseSoundboard({ h, clients, captureAudio, report, sound, guests })
     await h.rpc('sounds.play', { id: sound.id })
     const soundCaptures = await captureAudio('soundboard', clients)
     observations.push({

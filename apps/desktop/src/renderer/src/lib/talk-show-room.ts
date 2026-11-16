@@ -1,3 +1,4 @@
+import { RoomAuxPublisher } from './room-aux-publisher'
 import {
   createPrivateScreen,
   roomScreenPrivacy,
@@ -218,6 +219,7 @@ export async function microphoneDeviceIdFor(
 export class TalkShowRoomClient {
   readonly #deps: TalkShowRoomDeps
   #room: Room | null = null
+  #aux: RoomAuxPublisher | null = null
   #reconnectTimer: number | null = null
   #reconnectAttempt = 0
   #closed = false
@@ -282,6 +284,9 @@ export class TalkShowRoomClient {
     const room = new Room(talkShowRoomOptions())
     this.#room = room
     this.#bind(room)
+    const auxiliaryEnabled = this.#aux?.enabled ?? false
+    this.#aux?.close()
+    this.#aux = new RoomAuxPublisher(room, auxiliaryEnabled)
     // The host subscribes by hand: everyone but the runner, and the runner
     // only while the monitor is on (D7, D11).
     await room.connect(token.url, token.hostToken, { autoSubscribe: false })
@@ -301,6 +306,8 @@ export class TalkShowRoomClient {
   /** Leave: the local tracks stop first (D13 for guests; the same here). */
   async disconnect(): Promise<void> {
     this.#closed = true
+    this.#aux?.close()
+    this.#aux = null
     this.#privacyOff?.()
     this.#privacyOff = null
     if (this.#privacyTimer) clearTimeout(this.#privacyTimer)
@@ -912,6 +919,9 @@ export class TalkShowRoomClient {
       const room = new Room(talkShowRoomOptions())
       this.#room = room
       this.#bind(room)
+      const auxiliaryEnabled = this.#aux?.enabled ?? false
+      this.#aux?.close()
+      this.#aux = new RoomAuxPublisher(room, auxiliaryEnabled)
       await room.connect(token.url, token.hostToken, { autoSubscribe: false })
       if (!this.#owns(room)) {
         await room.disconnect()

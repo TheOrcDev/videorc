@@ -5,7 +5,7 @@
     {
       "id": "A1",
       "feature": "Soundboard pads, keys 1\u20139, press modes, looping, gain, Stop, remote/agent triggers: `B/sound_player.rs:213`, `R/components/studio/soundboard-section.tsx:86`",
-      "sourceState": "missing",
+      "sourceState": "partial",
       "requiredResult": "S3: one audible room/program voice per press, independent monitor gain, stop/reconnect correctness",
       "slices": ["S3"],
       "cases": ["soundboard"],
@@ -19,20 +19,20 @@
           "note": "Native media feeds solo ingress; managed profile/direct-fallback, recording refusal, destination identity and service exceptions remain. Source route only."
         },
         "roomStream": {
-          "status": "missing",
-          "note": "**Missing.** No attached bus gives MonitorOnly (`B/sound_player.rs:281`); renderer connects only to speakers (`R/lib/sound-monitor.ts:237`)"
+          "status": "partial",
+          "note": "S3 source path implemented: opt-in media v2 stereo host auxiliary publication, independent monitor, capable current program/guest sessions, exact-role routing and all allowed guest audio SIDs. Live acceptance not run; unqualified production/automatic enablement remains false."
         },
         "roomRecording": {
-          "status": "missing",
-          "note": "**Missing.** No attached bus gives MonitorOnly (`B/sound_player.rs:281`); renderer connects only to speakers (`R/lib/sound-monitor.ts:237`) Separate recording egress and visibility require independent acceptance."
+          "status": "partial",
+          "note": "S3 source path implemented: opt-in media v2 stereo host auxiliary publication, independent monitor, capable current program/guest sessions, exact-role routing and all allowed guest audio SIDs. Live acceptance not run; unqualified production/automatic enablement remains false."
         },
         "hostMonitor": {
           "status": "supported",
-          "note": "MonitorOnly playback goes to host speakers; this is not on-air evidence."
+          "note": "Independent speaker sink respects monitor off in rooms. Local playback is not remote audibility evidence."
         },
         "guestReturn": {
-          "status": "missing",
-          "note": "S3: one audible room/program voice per press, independent monitor gain, stop/reconnect correctness The pinned guest projection does not supply this program contribution."
+          "status": "partial",
+          "note": "S3 source path implemented: opt-in media v2 stereo host auxiliary publication, independent monitor, capable current program/guest sessions, exact-role routing and all allowed guest audio SIDs. Live acceptance not run; unqualified production/automatic enablement remains false."
         },
         "handoff": {
           "status": "partial",
@@ -40,7 +40,7 @@
         }
       },
       "evidence": {
-        "source": "reviewed-at-pinned-revisions",
+        "source": "S3-implemented-focused-tests-live-acceptance-not-run",
         "localLiveKit": "not-run",
         "managed": "not-run",
         "macos": "not-run",

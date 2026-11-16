@@ -319,3 +319,65 @@ describe('the monitor (plan 189)', () => {
     expect(unplayable).not.toHaveBeenCalled()
   })
 })
+
+describe('auxiliary sink scheduling', () => {
+  it('uses a separate destination and ignores the host monitor setting for publication', async () => {
+    const { audio, deps } = monitorWithFakes()
+    const sink = {} as AudioNode
+    const monitor = createSoundMonitor({ ...deps, destination: () => sink, hears: () => true })
+    monitor.update(snapshot([voice('v-aux', 'a')], { monitor: false }))
+    await flush()
+    expect(audio.gains[0].connect).toHaveBeenCalledWith(sink)
+    monitor.update(snapshot([voice('v-aux', 'a')], { monitor: false, volumeDb: -6 }))
+    expect(audio.gains[0].gain.linearRampToValueAtTime).toHaveBeenCalledWith(dbToGain(-8.7), 5.01)
+    monitor.dispose()
+  })
+  it('does not replay an ended one-shot when a later board snapshot still lists its authoritative id', async () => {
+    const { audio, monitor } = monitorWithFakes()
+    const state = snapshot([voice('v-once', 'a')])
+    monitor.update(state)
+    await flush()
+    audio.sources[0].onended?.()
+    monitor.update(state)
+    await flush()
+    expect(audio.sources).toHaveLength(1)
+    monitor.dispose()
+  })
+  it('cancels decode across Stop and a reimport of the same voice', async () => {
+    const { audio, deps } = monitorWithFakes()
+    let finish!: (value: ArrayBuffer) => void
+    deps.fetchBytes = () =>
+      new Promise((resolve) => {
+        finish = resolve
+      })
+    const monitor = createSoundMonitor(deps)
+    monitor.update(snapshot([voice('v-stale', 'a')]))
+    monitor.update(snapshot([]))
+    finish(new ArrayBuffer(10))
+    await flush()
+    expect(audio.sources).toHaveLength(0)
+    monitor.update(snapshot([voice('v-edit', 'b')]))
+    monitor.update(snapshot([voice('v-edit', 'b')], { sounds: [sound('b', { updatedAt: 'new' })] }))
+    finish(new ArrayBuffer(10))
+    await flush()
+    expect(audio.sources).toHaveLength(0)
+    monitor.dispose()
+  })
+  it('respects monitor off for cloud voices without inventing native onAir', async () => {
+    const { audio, monitor } = monitorWithFakes()
+    const state = snapshot([voice('v-cloud', 'a', { onAir: false })], { monitor: false })
+    state.roomAux = {
+      enabled: true,
+      state: 'published',
+      reason: null,
+      trackSid: 'TR_aux',
+      queuedVoices: ['v-cloud'],
+      observed: {},
+      productionQualified: false
+    }
+    monitor.update(state)
+    await flush()
+    expect(audio.sources).toHaveLength(0)
+    monitor.dispose()
+  })
+})

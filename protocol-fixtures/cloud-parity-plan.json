@@ -67,10 +67,10 @@
       "case": "privacy",
       "repositories": ["desktop", "web"],
       "issueUrl": null,
-      "prUrl": null,
+      "prUrl": "https://github.com/TheOrcDev/videorc/pull/1439",
       "webIssueUrl": null,
-      "webPrUrl": null,
-      "implementation": "ready-for-review",
+      "webPrUrl": "https://github.com/TheOrcDev/videorc-web/pull/125",
+      "implementation": "implemented-review-open",
       "acceptance": "not-run",
       "intendedBranch": "feat/249-s2-cloud-parity",
       "intendedPrTitle": "Plan 249 S2: Enforce screen privacy before publish",
@@ -85,7 +85,9 @@
       "crossRepoNeeds": "Paired desktop/web S2 diffs commissioned. Browser canvas publication privacy v1, generation-tagged screen track names, host-only close topic, cookie-authorized guest observation API, program-token beacon observations and server-only targeted acknowledgement relay. Web PR #118 is independent; reconcile stage.ts and regenerate assets on integration. Acceptance not run; no grant or qualification expansion.",
       "releaseGate": "blocked-until-required-acceptance",
       "baseCommit": "0f9790f869a07102560ee864ac91b001fe73f7e4",
-      "webBaseCommit": "8f90dd74944cf08b9ca202e977a2ebf46ee6b16d"
+      "webBaseCommit": "8f90dd74944cf08b9ca202e977a2ebf46ee6b16d",
+      "commit": "27a8380b496667fc2d12b06fdb356ee48fe571cc",
+      "webCommit": "03b31e8e1c030f0a4fedd8517242f3de8ea06e57"
     },
     {
       "id": "S3",
@@ -97,20 +99,22 @@
       "prUrl": null,
       "webIssueUrl": null,
       "webPrUrl": null,
-      "implementation": "not-started",
+      "implementation": "implemented-awaiting-coordinator",
       "acceptance": "not-run",
       "intendedBranch": "feat/249-s3-cloud-parity",
       "intendedPrTitle": "Plan 249 S3: Publish soundboard auxiliary audio end to end",
       "touches": "`B/sound_player.rs`; new renderer room auxiliary publisher;\n`R/lib/sound-monitor.ts`, `R/lib/talk-show-room.ts`, room audio hook;\n`W/lib/cloud/program/{source,stage,stage-audio}.ts`,\n`W/components/guest/use-guest-connection.ts`,\n`W/components/guest/guest-tracks.tsx`, `W/components/guest/guest-room.tsx`,\n`W/lib/cloud/livekit.ts`, `W/lib/cloud/media/livekit-api.ts`, wire fixtures and sound tests.",
       "gates": "D, B, N, W, WB, C, R, RC, `pnpm smoke:soundboard-fixture`, `pnpm smoke:soundboard`.",
       "deferredReason": "User defers smoke, heavy, real-page, device and managed acceptance until all merges on main. No release qualification.",
-      "relatedPrUrls": [],
+      "relatedPrUrls": ["https://github.com/TheOrcDev/videorc-web/pull/118"],
       "intendedBase": {
         "desktop": "feat/249-s2-cloud-parity",
         "web": "feat/249-s2-cloud-parity"
       },
-      "crossRepoNeeds": "Paired linked consumer/producer PRs; coordinator commissions web checkout; consumers land/deploy before producers enable capability.",
-      "releaseGate": "blocked-until-required-acceptance"
+      "crossRepoNeeds": "Paired S3 producer/consumer diffs stacked on S2. Exact media v2 role, cookie/program-token authenticated current-SID capabilities, old loaded pages block aux. Both PRs required; consumer-first integration. PR118 all-program takeover silence remains independent and S8 owns deliberate speech/aux routing. Source/generated modules match; live/managed/device acceptance not run.",
+      "releaseGate": "blocked-until-required-acceptance",
+      "baseCommit": "27a8380b496667fc2d12b06fdb356ee48fe571cc",
+      "webBaseCommit": "03b31e8e1c030f0a4fedd8517242f3de8ea06e57"
     },
     {
       "id": "S4",
@@ -122,7 +126,7 @@
       "prUrl": null,
       "webIssueUrl": null,
       "webPrUrl": null,
-      "implementation": "not-started",
+      "implementation": "commissioned-parallel",
       "acceptance": "not-run",
       "intendedBranch": "feat/249-s4-cloud-parity",
       "intendedPrTitle": "Plan 249 S4: Put the avatar and bubble on the whole program",
@@ -135,7 +139,8 @@
         "web": "feat/249-s3-cloud-parity"
       },
       "crossRepoNeeds": "Paired linked consumer/producer PRs; coordinator commissions web checkout; consumers land/deploy before producers enable capability.",
-      "releaseGate": "blocked-until-required-acceptance"
+      "releaseGate": "blocked-until-required-acceptance",
+      "parallelCommission": "Coordinator started isolated S2-based work on 2026-11-16; reconcile S3 and declared prerequisites before dependent PR publication. Slice-local handoff owned by the corresponding thread."
     },
     {
       "id": "S5",
@@ -197,7 +202,7 @@
       "prUrl": null,
       "webIssueUrl": null,
       "webPrUrl": null,
-      "implementation": "not-started",
+      "implementation": "commissioned-parallel",
       "acceptance": "not-run",
       "intendedBranch": "feat/249-s7a-cloud-parity",
       "intendedPrTitle": "Plan 249 S7a: Qualify the PCM bridge",
@@ -209,7 +214,8 @@
         "desktop": "feat/249-s6-cloud-parity"
       },
       "crossRepoNeeds": "Desktop change; use compatible web fixtures read-only and recheck source/capabilities before execution.",
-      "releaseGate": "blocked-until-required-acceptance"
+      "releaseGate": "blocked-until-required-acceptance",
+      "parallelCommission": "Coordinator started isolated S2-based work on 2026-11-16; reconcile S3 and declared prerequisites before dependent PR publication. Slice-local handoff owned by the corresponding thread."
     },
     {
       "id": "S7b",
@@ -468,7 +474,7 @@
       "prUrl": null,
       "webIssueUrl": null,
       "webPrUrl": null,
-      "implementation": "not-started",
+      "implementation": "commissioned-parallel",
       "acceptance": "not-run",
       "intendedBranch": "feat/249-s16-cloud-parity",
       "intendedPrTitle": "Plan 249 S16: Fix provider and output lifecycle ownership",
@@ -481,7 +487,8 @@
         "web": "feat/249-s14-cloud-parity"
       },
       "crossRepoNeeds": "Paired linked consumer/producer PRs; coordinator commissions web checkout; consumers land/deploy before producers enable capability.",
-      "releaseGate": "blocked-until-required-acceptance"
+      "releaseGate": "blocked-until-required-acceptance",
+      "parallelCommission": "Coordinator started isolated S2-based work on 2026-11-16; reconcile S3 and declared prerequisites before dependent PR publication. Slice-local handoff owned by the corresponding thread."
     },
     {
       "id": "S17",
@@ -897,5 +904,7 @@
       "status": "recommended-default-authorized-for-implementation",
       "releaseConstraints": "Preserve consent, opt-in, bounded costs and rollout. No paid egress, credentials expansion, deployment or unqualified production enablement."
     }
-  ]
+  ],
+  "roomMediaVersion": 2,
+  "guestMediaVersion": 2
 }

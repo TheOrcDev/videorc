@@ -20046,6 +20046,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         setDeviceList({ devices: fixtures, warnings: [] })
         return fixtures
       },
+      roomSounds: (enabled?: boolean) => {
+        if (enabled !== undefined) soundboard.setRoomAuxEnabled(enabled)
+        return soundboard.getSnapshot().roomAux ?? null
+      },
       roomPrivacyPixels: () => roomControlsRef.current?.screenPrivacyPixels() ?? null,
       roomPrivacy: () => roomControlsRef.current?.snapshot.screenPrivacy ?? null,
       roomScreenShare: () => roomControlsRef.current?.startScreenShare(),

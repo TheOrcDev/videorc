@@ -12,7 +12,17 @@ export type SoundboardClient = {
   request<T>(method: string, params?: unknown, options?: { timeoutMs?: number }): Promise<T>
 }
 
+export type RoomAuxStatus = {
+  enabled: boolean
+  state: 'off' | 'blocked' | 'queued' | 'published'
+  reason: string | null
+  queuedVoices: readonly string[]
+  trackSid: string | null
+  observed: Readonly<Record<string, number>>
+  productionQualified: false
+}
 export interface SoundboardSnapshot {
+  roomAux?: RoomAuxStatus
   /** Null until `sounds.list` first answers: never "No sounds yet" before (J2-8). */
   board: SoundboardState | null
   /** Every playing voice, oldest first, as `sounds.playback` last said. */
@@ -38,6 +48,8 @@ export interface SoundboardStore {
   acceptPlayback: (playback: SoundsPlayback) => void
   /** The removals waiting for their Undo (`soundboard-actions.ts` keeps them). */
   setHidden: (hidden: ReadonlySet<string>) => void
+  setRoomAux: (status: RoomAuxStatus | undefined) => void
+  setRoomAuxEnabled: (enabled: boolean) => void
 }
 
 const NO_VOICES: readonly SoundVoice[] = []
@@ -97,7 +109,13 @@ export function createSoundboardStore(): SoundboardStore {
         voices: playback.voices,
         sessionWithoutSounds: playback.sessionWithoutSounds === true
       }),
-    setHidden: (hidden) => publish({ hidden })
+    setHidden: (hidden) => publish({ hidden }),
+    setRoomAux: (roomAux) => {
+      if (JSON.stringify(snapshot.roomAux) !== JSON.stringify(roomAux)) publish({ roomAux })
+    },
+    setRoomAuxEnabled: (enabled) => {
+      if (snapshot.roomAux) publish({ roomAux: { ...snapshot.roomAux, enabled } })
+    }
   }
 }
 
