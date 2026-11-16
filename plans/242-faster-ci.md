@@ -9,8 +9,12 @@ these properly".
 
 ## Status and scope
 
-- **Status: PLANNED 2026-11-16** from `origin/main` `c179d81b5`. Nothing is
-  built. Decisions D1–D8 are open; the recommended answer comes first in each.
+- **Status: EXECUTING 2026-11-16** from `origin/main` `c179d81b5`. The owner
+  answered "Execute the entire plan and create a pr", so D1 is (b), one PR
+  (commits stay one per slice), and D2–D8 take the recommended answer. The
+  owner then sent the source post. Its image is a full prompt, and it adds
+  slices S0 and S18–S21 below, plus two rules that outrank speed (see "Added
+  from the source prompt").
 - All five ideas from the post are in, mapped to what Videorc runs. So are four
   Windows changes the post does not cover, because they are where most of the
   wait is.
@@ -468,18 +472,23 @@ and each new file runs under 20 s.
 **Out of scope:** the known flake in "resumes the cloud show through
 cloud.show.resume". Note which new file holds it.
 
-### S10: Pool experiment (PR D, measured)
+### S10: Stop reloading the app per test file (PR D)
 
-**Goal:** find out whether vitest's collect time (576 s of worker time) drops
-with a different pool.
+**Goal:** cut vitest's collect time (576 s of worker time), the source
+prompt's "Vitest `isolate: false`, reset state after every file … Run in
+random order to flush out leaks."
 
-**Steps:** on a branch, run the suite five times each with today's config,
-`pool: 'threads'`, and `isolate: false`. The `--no-experimental-webstorage`
-flag lives under `poolOptions.forks` today; find the threads equivalent.
-Keep a change only if all five runs are green and the suite is at least 25%
-faster. Otherwise record the numbers here and change nothing.
+**Steps:** turn on `isolate: false` and `sequence.shuffle`. Add a setup file
+that resets shared state after every file (mocks, timers, stubbed globals,
+module-level registries the leaks point at). Run the suite five times with
+different seeds. A test that fails only without isolation leaks state: fix the
+leak (or reset it in the setup file), never retry or skip it. Write the
+cleanup rules into AGENTS.md. Keep the change only if all five shuffled runs
+are green and the suite is at least 25% faster; otherwise record the leaks
+found, keep `isolate: true`, and keep the leak fixes.
 
-**Done when:** the numbers are recorded, plus the config change if one won.
+**Done when:** five shuffled runs are green and the timings are recorded,
+with the config change if it won.
 
 ### S11: oxlint replaces ESLint, same rules (PR E)
 
@@ -622,6 +631,13 @@ every Rust job.
    `window-palette.ts` → code; `src/shared/` → code; `src/main/` → `app-ts`
    with the installer on (D7 a); any `Cargo.toml`, `crates/`, `scripts/`,
    `.github/` or `protocol-fixtures/` file → code.
+6. The source prompt's rule 1: `app-ts` exists only for `pull_request`. A push
+   to `main` with the same files classifies as code and runs every gate.
+7. "Hide a real change from it on purpose and confirm CI goes red": a test
+   feeds the classifier a diff that edits only a Rust-read desktop file
+   (`window-palette.ts`) and asserts every Rust job runs; the guard test is
+   proven by planting a new `include_str!` of a renderer file and watching it
+   fail.
 
 **Done when:** classifier and guard tests are green, and a real renderer-only
 PR finishes in 10 min or less with the macOS Rust, Linux and Windows Rust
@@ -667,6 +683,93 @@ Only if, after PR G, macOS Rust is still the slowest job and macOS jobs are
 not queueing. Move `Clippy` and `Clippy (release)` (9 min) into a second
 macOS job that restores the same cache. It costs one more macOS runner per
 PR.
+
+## Added from the source prompt
+
+The post's image is a prompt ("Make this repo's CI as fast as possible without
+letting it lie"). What it changes here:
+
+- **Two rules outrank speed.** (1) "The full suite runs before anything
+  reaches main, in a merge queue. Selection only narrows PR feedback." (2)
+  "Never get faster by hiding failures. No retries, wider timeouts or skipped
+  tests." So S15's new skip applies to pull requests only, and pushes to
+  `main` run every gate for code. S16 needs a merge queue to be honest, and
+  GitHub offers merge queues only on organization-owned repositories.
+  `TheOrcDev` is a personal account, so S16 is not built (see the account
+  list). Nothing in this plan adds a retry or widens a timeout. The existing
+  three-attempt loop in "Verify native DXGI/GDI ScreenOnly recording" breaks
+  rule 2 and is a follow-up.
+- **The tools are defaults; keeping an old one needs a measured reason.**
+  pnpm stays: `pnpm install` takes 2 s in CI (store cache), the repo depends
+  on pnpm workspaces and `patches/`, and electron-builder packages from that
+  layout. Bun would save nothing measurable. TypeScript 7 stands in for
+  `bun check` (the prompt's own fallback); the repo does not run on Bun.
+
+### S0: Audit the last 150 runs (done first)
+
+`pnpm ci:audit` (`scripts/ci-timing-audit.mjs`) pulls the last 150 completed
+runs of `ci.yml`, `windows.yml` and `linux.yml` and splits every job into
+waiting (queued → started), setup (checkout, toolchains, caches, installs)
+and running, at p50 and p95. It keys jobs by runner OS so a skip twin never
+dilutes its gate. **Before, 2026-11-16** (2,217 job records over 2.5 days):
+
+| Job | Waiting p50/p95 | Setup p50/p95 | Running p50/p95 | Total p50/p95 |
+| --- | --- | --- | --- | --- |
+| Windows release source gates | 3 s / 4.7 min | 5.3 / 7.2 min | 97.0 / 110.8 min | 101.8 / 118.0 min |
+| Windows startup incident diagnostics | 3 s / 3.9 min | 1.4 / 2.6 min | 46.2 / 50.9 min | 48.0 / 52.3 min |
+| macOS Rust | 3 s / 2.9 min | 1.3 / 1.7 min | 38.0 / 50.1 min | 39.1 / 51.5 min |
+| Windows installer | 3 s / 6.2 min | 2.6 / 3.2 min | 19.7 / 23.2 min | 22.5 / 26.2 min |
+| Linux gates | 3 s / 3.2 min | 36 s / 65 s | 7.6 / 10.7 min | 8.2 / 11.4 min |
+| JS | 3 s / 4.5 min | 18 / 23 s | 5.8 / 8.0 min | 6.2 / 8.3 min |
+
+- A PR's result arrives when the Windows workflow finishes: wall **p50 94.8
+  min, p95 121.2 min** (57 full PR runs). `ci.yml` p50 40.8 min, `linux.yml`
+  p50 11.4 min.
+- Running is the biggest bucket everywhere. Waiting matters only at p95 (up
+  to 6 min, queueing behind other PRs). The Windows gates' 5.3 min setup is
+  the from-source cargo-audit build (S3).
+- Runner minutes per 30 days: Windows 111,050, macOS 26,611, Linux 18,477.
+  Cost today: $0 (public repository).
+
+### S18: Blobless clones where full history is needed
+
+The scope job checks out with `fetch-depth: 0` to diff, so it clones every
+blob in history. Add `filter: blob:none` to that checkout (and to any other
+`fetch-depth: 0` checkout in the touched workflows): history stays complete
+for `git diff --name-only`, and blobs download only when read. **Done when**
+the scope job's checkout step is faster on the PR run and the classifier
+output is unchanged.
+
+### S19: oxfmt beside Prettier
+
+Run `oxfmt --check` with a Prettier-equivalent config over the exact globs of
+`pnpm format:check`, side by side with Prettier, and list every file the two
+disagree on. Switch only if oxfmt agrees on the whole tree (or the
+differences are documented and accepted); otherwise keep Prettier and record
+the measured reason here. Never reformat the tree inside this PR.
+
+### S20: A pre-push hook under 9 s
+
+`.githooks/pre-push`, installed by a root `prepare` script
+(`git config core.hooksPath .githooks`), runs format, lint and typecheck on
+the files the push changes. It fails closed, printing the command to fix
+each failure. `git push --no-verify` stays the escape. A hook, not a line in
+AGENTS.md, "because agents skip steps". **Done when** a push with a planted
+lint error is refused and a clean push passes in under 9 s.
+
+### S21: Budgets that fail
+
+After the PR's runs measure the new times, set each job's `timeout-minutes`
+to its measured p95 plus about 30% headroom, so a job that slows down fails
+instead of quietly costing more. Lower only, never raise.
+
+### Account and bill list (needs the owner)
+
+| Item | Why | Expected monthly cost |
+| --- | --- | --- |
+| Move the repo into a GitHub organization, then turn on the merge queue | The prompt's rule 1; unlocks S16 | $0 (Free organization) |
+| Blacksmith runners for every job | Waiting p95 4–6 min → seconds; faster CPUs | about $2,850 at list price for today's minutes; less after this plan cuts them |
+| Bigger runners (8 cores) for the Rust test compiles | "Buy cores before shards" | priced per minute on the chosen provider; GitHub larger runners are billed even on public repositories |
 
 ## Not in this plan
 
