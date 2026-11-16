@@ -29,7 +29,7 @@ export function cloudOrientationLabel(orientation: string): string {
 export type CloudDownloadView =
   | { state: 'starting' }
   | { state: 'running'; jobId: string; done?: number; total?: number }
-  | { state: 'done'; jobId: string }
+  | { state: 'done'; jobId: string; localSessionId?: string }
   | { state: 'failed'; jobId?: string }
 
 export type CloudDownloads = ReadonlyMap<string, CloudDownloadView>
@@ -50,7 +50,11 @@ export function reduceCloudDownload(
       })
       break
     case 'done':
-      next.set(event.recordingId, { state: 'done', jobId: event.jobId })
+      next.set(event.recordingId, {
+        state: 'done',
+        jobId: event.jobId,
+        ...(event.localSessionId ? { localSessionId: event.localSessionId } : {})
+      })
       break
     case 'failed':
       next.set(event.recordingId, { state: 'failed', jobId: event.jobId })
@@ -76,6 +80,8 @@ export function cloudDownloadPercent(view: CloudDownloadView): number | null {
 const KNOWN_DOWNLOAD_REFUSALS = [
   /^Sign in to (?:see|download) your cloud recordings\.$/,
   /^That recording is not in your account any more\.$/,
+  /^The cloud recording has expired\.$/,
+  /^The recording artifact is no longer available\.$/,
   /^This recording downloads from your account on videorc\.com\.$/,
   /^There isn't enough space to save the recording\.$/,
   /^The recording could not be saved\. Check the folder and available space\.$/,
@@ -123,4 +129,24 @@ export function awaitingCloudRecording(
     const started = Date.parse(recording.startedAt)
     return Number.isFinite(started) && started >= stop.sinceMs - START_SLOP_MS
   })
+}
+
+/** No local file is inferred from a completed cloud take or an old job. */
+export function cloudRecordingAvailability(
+  recording: CloudRecordingItem,
+  now = Date.now()
+): 'available' | 'expired' | 'missing' {
+  if (recording.availability === 'missing') return 'missing'
+  const expires = Date.parse(recording.expiresAt)
+  return recording.availability === 'expired' || (Number.isFinite(expires) && expires <= now)
+    ? 'expired'
+    : 'available'
+}
+export function cloudTakeLabel(recording: CloudRecordingItem): string {
+  const count = recording.liveIntervalIds?.length
+  return !recording.associationKnown || count === undefined
+    ? 'Cloud take'
+    : count === 0
+      ? 'Record-only take'
+      : `Take · ${count} live ${count === 1 ? 'interval' : 'intervals'}`
 }

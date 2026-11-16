@@ -531,3 +531,10 @@ describe('cleanCutReadyTitle', () => {
     expect(cleanCutReadyTitle({ mode: 'clean' })).toBe('Your clean cut is ready')
   })
 })
+
+it('downloaded cloud takes use existing Clean cut eligibility without pretending native capture', () => {
+  expect(cleanCutEligibility(session({ mode: 'cloud-recording' })).eligible).toBe(true)
+  expect(
+    cleanCutEligibility(session({ mode: 'cloud-recording', mp4Path: undefined })).eligible
+  ).toBe(false)
+})

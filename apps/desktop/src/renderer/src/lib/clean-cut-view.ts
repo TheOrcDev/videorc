@@ -110,6 +110,7 @@ export const CLEAN_CUT_PICKER_LIMIT = 20
 export const CLEAN_CUT_LIST_CAP = 6
 
 const CLEAN_CUT_SOURCE_MODES: ReadonlySet<string> = new Set([
+  SESSION_MODES.cloudRecording,
   SESSION_MODES.record,
   SESSION_MODES.recordAndStream
 ])

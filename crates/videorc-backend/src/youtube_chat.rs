@@ -26,9 +26,9 @@ use serde_json::Value;
 use tokio::time::sleep;
 
 use crate::live_chat::{
-    LiveChatEventDetails, LiveChatEventType, LiveChatMessage, LiveChatProviderConnectionState,
-    MembershipKind, ProviderSendReceipt, live_chat_message_id, set_provider_and_emit,
-    try_deliver_messages,
+    LiveChatEventDetails, LiveChatEventType, LiveChatMessage, LiveChatMessageFragment,
+    LiveChatProviderConnectionState, MembershipKind, ProviderSendReceipt, live_chat_message_id,
+    set_provider_and_emit, try_deliver_messages,
 };
 use crate::state::AppState;
 use crate::streaming::StreamPlatform;
@@ -879,6 +879,23 @@ fn normalize_item(
         .clone()
         .filter(|text| !text.is_empty())
         .unwrap_or_else(|| system_text_for(message_type, amount_text.as_deref()));
+    // The official API has no emoji runs or member-emoji catalog. Enrich only
+    // pinned YouTube built-ins, retaining the original text for accessibility,
+    // moderation, unknown aliases and image failures.
+    let fragments = crate::youtube_emotes::tokenize(&message_text)
+        .into_iter()
+        .map(|token| LiveChatMessageFragment {
+            fragment_type: if token.image_url.is_some() {
+                "emote"
+            } else {
+                "text"
+            }
+            .to_string(),
+            text: token.text.to_string(),
+            image_url: token.image_url.map(ToOwned::to_owned),
+            zero_width: false,
+        })
+        .collect();
     Some(LiveChatMessage {
         id: live_chat_message_id(
             session_id,
@@ -904,7 +921,7 @@ fn normalize_item(
             .unwrap_or_else(|| received_at.to_string()),
         received_at: received_at.to_string(),
         message_text,
-        fragments: Vec::new(),
+        fragments,
         event_type,
         amount_text,
         is_deleted: matches!(event_type, LiveChatEventType::Deleted),
@@ -1665,6 +1682,25 @@ mod tests {
             }]
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn screenshot_blue_face_becomes_a_shared_image_fragment() {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../../scripts/fixtures/stream-manager/youtube-chat-emotes.json"
+        ))
+        .unwrap();
+        let response: LiveChatMessagesResponse =
+            serde_json::from_value(fixture["providerPage"].clone()).unwrap();
+        let page = normalize_page(response, "fixture-session", None, "2026-11-16T10:00:01Z");
+        let message = &page.messages[0];
+        assert_eq!(message.author_name, "@vcode_sh");
+        assert_eq!(message.message_text, ":face-blue-smiling:");
+        assert_eq!(message.platform, StreamPlatform::Youtube);
+        assert_eq!(
+            serde_json::to_value(&message.fragments).unwrap(),
+            fixture["message"]["fragments"]
+        );
     }
 
     #[test]

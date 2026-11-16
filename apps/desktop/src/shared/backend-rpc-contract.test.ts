@@ -4588,6 +4588,39 @@ describe('caption service outage contract', () => {
 })
 
 describe('cloud recording download jobs', () => {
+  it('preserves S20 take and local Library identities while refusing credential fields', () => {
+    const row = {
+      id: 'rec_one',
+      showId: 'show',
+      takeId: 'tk_000000000001',
+      associationKnown: true,
+      liveIntervalIds: ['A', 'B'],
+      localSessionId: 'cloud-take-rec_one',
+      availability: 'available',
+      orientation: 'h',
+      startedAt: '2026-11-16T12:00:00Z',
+      expiresAt: '2026-12-16T12:00:00Z',
+      seconds: 12,
+      bytes: 100,
+      format: 'segments'
+    }
+    expect(validateBackendRpcResult('cloud.recordings.list', { recordings: [row] })).toEqual({
+      recordings: [row]
+    })
+    expect(() =>
+      validateBackendRpcResult('cloud.recordings.list', {
+        recordings: [{ ...row, downloadUrl: 'https://secret.invalid' }]
+      })
+    ).toThrow()
+    const done = {
+      jobId: 'job',
+      recordingId: row.id,
+      state: 'done',
+      localSessionId: row.localSessionId
+    }
+    expect(validateBackendEventPayload('cloud.recordings.download', done)).toEqual(done)
+  })
+
   it('validates short start and cancel RPCs and strict progress events', () => {
     expect(validateBackendRpcResult('cloud.recordings.download', { jobId: 'job_one' })).toEqual({
       jobId: 'job_one'

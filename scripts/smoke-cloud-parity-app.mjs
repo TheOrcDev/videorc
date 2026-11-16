@@ -11,10 +11,25 @@ import {
 const plan = readParityJson('plan')
 validateParityRegistry(plan, readParityJson('inventory'))
 const selected = parseParityArgs(process.argv.slice(2), plan)
-if (
-  !['baseline', 'controls', 'privacy', 'soundboard', 'avatar', 'lifecycle', 'services'].includes(
-    selected.case
+if (selected.case === 'library') {
+  const { runLibrary } = await import('./lib/cloud-parity-library.mjs')
+  const { output } = await runLibrary()
+  console.log(
+    `Local library fixture passed: ${output}. Managed/runtime acceptance remains not-run.`
   )
+  process.exit(0)
+}
+if (
+  ![
+    'baseline',
+    'controls',
+    'privacy',
+    'soundboard',
+    'avatar',
+    'lifecycle',
+    'services',
+    'replay-ring'
+  ].includes(selected.case)
 ) {
   throw new Error(
     `${selected.id} case '${selected.case}' is not implemented. Deferred acceptance is not a pass.`
@@ -38,7 +53,8 @@ const { output } = await run({
   controls: selected.case === 'controls',
   privacy: selected.case === 'privacy',
   soundboard: selected.case === 'soundboard',
-  avatar: selected.case === 'avatar'
+  avatar: selected.case === 'avatar',
+  replayRing: selected.case === 'replay-ring'
 })
 console.log(
   `Local real-page ${selected.case} passed: ${output}. Managed/device acceptance remains not-run.`

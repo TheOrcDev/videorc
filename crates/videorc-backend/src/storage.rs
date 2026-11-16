@@ -1,3 +1,4 @@
+mod cloud_recordings;
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
 use std::fs::File;
@@ -1911,6 +1912,9 @@ impl Database {
             path,
         };
         database.migrate()?;
+        if let Err(error) = database.recover_cloud_recording_library() {
+            tracing::warn!("Cloud Library recovery deferred: {error}");
+        }
         Ok(database)
     }
 
@@ -1992,14 +1996,27 @@ impl Database {
             .show
             .as_ref()
             .zip(status.room.as_ref())
-            .filter(|(_, room)| room.live && room.phase == crate::cloud_talk::CloudRoomPhase::Open);
+            .filter(|(_, room)| {
+                (room.live || status.recording.as_ref().is_some_and(|r| r.active))
+                    && room.phase == crate::cloud_talk::CloudRoomPhase::Open
+            });
         let now = Utc::now().to_rfc3339();
+        // S16 owns interval identity; record-only history has no interval.
         let mut conn = self.lock()?;
         let tx = conn.transaction()?;
+        if let (Some(show), Some(interval)) = (status.show.as_ref(), status.live_interval.as_ref())
+        {
+            tx.execute("INSERT INTO cloud_live_intervals(id, show_id, requested_at, live_since, end_requested_at, ended_at)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT(id) DO UPDATE SET
+                live_since = COALESCE(cloud_live_intervals.live_since, excluded.live_since),
+                end_requested_at = COALESCE(cloud_live_intervals.end_requested_at, excluded.end_requested_at),
+                ended_at = COALESCE(cloud_live_intervals.ended_at, excluded.ended_at)",
+                params![interval.id, show.id, interval.requested_at, interval.live_since, interval.end_requested_at, interval.ended_at])?;
+        }
         tx.execute(
             "UPDATE sessions SET status = 'completed', ended_at = ?1,
              duration_ms = MAX(0, CAST((julianday(?1) - julianday(started_at)) * 86400000 AS INTEGER))
-             WHERE mode = 'cloud-stream' AND status = 'running' AND (?2 IS NULL OR id <> ?2)",
+             WHERE mode IN ('cloud-stream', 'cloud-room') AND status = 'running' AND (?2 IS NULL OR id <> ?2)",
             params![now, active.map(|(show, _)| show.id.as_str())],
         )?;
         if let Some((show, room)) = active {
@@ -2011,8 +2028,8 @@ impl Database {
                 test_pattern: false,
             };
             let output = OutputSettings {
-                record_enabled: false,
-                stream_enabled: true,
+                record_enabled: status.recording.as_ref().is_some_and(|r| r.active),
+                stream_enabled: room.live,
                 output_directory: None,
                 ffmpeg_path: None,
                 keep_original_mkv: false,
@@ -2032,14 +2049,17 @@ impl Database {
             };
             tx.execute(
                 "INSERT INTO sessions (id, title, started_at, status, mode, stream_preset, sources_json, layout_json, output_json)
-                 VALUES (?1, ?2, ?3, 'running', 'cloud-stream', ?4, ?5, ?6, ?7)
+                 VALUES (?1, ?2, ?3, 'running', ?8, ?4, ?5, ?6, ?7)
                  ON CONFLICT(id) DO UPDATE SET status = 'running', ended_at = NULL, duration_ms = NULL,
-                 title = excluded.title, stream_preset = excluded.stream_preset
-                 WHERE sessions.mode = 'cloud-stream'",
+                 title = excluded.title, stream_preset = excluded.stream_preset,
+                 mode = CASE WHEN sessions.mode = 'cloud-stream' THEN 'cloud-stream' ELSE excluded.mode END,
+                 output_json = excluded.output_json
+                 WHERE sessions.mode IN ('cloud-stream', 'cloud-room')",
                 params![show.id, room.title.as_deref().filter(|title| !title.trim().is_empty()).unwrap_or("Talk show"),
-                    room.live_since.as_deref().unwrap_or(&now), room.platforms.join(", "),
-                    serde_json::to_string(&sources)?, serde_json::to_string(&crate::protocol::default_layout_settings())?, session_output_json(&output)?],
+                    room.live_since.as_deref().or_else(|| status.recording.as_ref().and_then(|r| r.since.as_deref())).unwrap_or(&now), room.platforms.join(", "),
+                    serde_json::to_string(&sources)?, serde_json::to_string(&crate::protocol::default_layout_settings())?, session_output_json(&output)?, if room.live { "cloud-stream" } else { "cloud-room" }],
             )?;
+            tx.execute("INSERT OR IGNORE INTO cloud_session_associations(session_id, show_id) VALUES (?1, ?1)", params![show.id])?;
             tx.execute("INSERT INTO session_chat_totals (session_id, totals_json) VALUES (?1, ?2) ON CONFLICT(session_id) DO NOTHING",
                 params![show.id, serde_json::to_string(&SessionChatTotals::empty(&show.id))?])?;
         }
@@ -3131,7 +3151,7 @@ impl Database {
         let output: serde_json::Value = serde_json::from_str(&output_json)?;
         Ok(Some(Mp4ExportTakeRow {
             started_at,
-            captured_by_videorc: mode != "imported" && !derived,
+            captured_by_videorc: mode != "imported" && mode != "cloud-recording" && !derived,
             fps: output
                 .get("video")
                 .and_then(|video| video.get("fps"))
@@ -9003,6 +9023,7 @@ impl Database {
             "derived_from_session_id",
             "derived_from_session_id TEXT REFERENCES sessions(id) ON DELETE SET NULL",
         )?;
+        conn.execute_batch(include_str!("storage/cloud_recordings.sql"))?;
         ensure_column(&conn, "sessions", "source_title", "source_title TEXT")?;
         ensure_column(&conn, "sessions", "processing_kind", "processing_kind TEXT")?;
         // Stream Manager (plan 055): structured event facts, reply context and
