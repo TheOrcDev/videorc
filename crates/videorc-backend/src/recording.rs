@@ -29556,14 +29556,15 @@ async fn publish_stream_target_failure_if_active(
         return;
     }
     if let Some((label, snapshot)) = failed_target {
-        let _ = emit_health_event(
+        publish_stream_leg_notice(
             state,
-            Some(session_id),
-            HealthLevel::Warn,
+            session_id,
+            targets,
+            position,
+            StreamTargetState::Failed,
             "stream-target-failed",
-            &format!("Streaming to {label} stopped: {reason}"),
+            format!("Streaming to {label} stopped: {reason}"),
         );
-        note_buddy_destination_failed(state);
         state.emit_event("stream.targets", snapshot);
     }
 }
@@ -29730,6 +29731,61 @@ fn stream_leg_overflow_counts(
         .collect()
 }
 
+/// Only the health notice waits for takeover confirmation. State, progress,
+/// and the feed-down clock keep moving in the stderr consumer.
+fn publish_stream_leg_notice(
+    state: &AppState,
+    session_id: &str,
+    targets: &SharedStreamTargetsSnapshot,
+    position: usize,
+    expected: StreamTargetState,
+    code: &'static str,
+    message: String,
+) {
+    let managed_feed = stream_targets_snapshot_value(targets)
+        .targets
+        .get(position)
+        .is_some_and(|target| is_cloud_feed_target(&target.target_id))
+        && crate::cloud_show::lock(&state.cloud_show)
+            .show
+            .as_ref()
+            .is_some_and(|show| {
+                show.session_id.as_deref() == Some(session_id)
+                    && show.control.transport_kind() == crate::cloud_show::ControlKind::Web
+            });
+    if managed_feed {
+        let state = state.clone();
+        let targets = targets.clone();
+        let session_id = session_id.to_string();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(3)).await;
+            with_active_session(&state, &session_id, || {
+                let still_down = stream_targets_snapshot_value(&targets)
+                    .targets
+                    .get(position)
+                    .is_some_and(|target| target.state == expected);
+                if still_down
+                    && crate::cloud_show::lock(&state.cloud_show)
+                        .stopped_by
+                        .is_none()
+                {
+                    emit_stream_leg_notice(&state, &session_id, code, &message);
+                }
+            })
+            .await;
+        });
+    } else {
+        emit_stream_leg_notice(state, session_id, code, &message);
+    }
+}
+
+fn emit_stream_leg_notice(state: &AppState, session_id: &str, code: &str, message: &str) {
+    let _ = emit_health_event(state, Some(session_id), HealthLevel::Warn, code, message);
+    if code == "stream-target-failed" {
+        note_buddy_destination_failed(state);
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn publish_stream_leg_update(
     state: &AppState,
@@ -29740,31 +29796,6 @@ async fn publish_stream_leg_update(
     stream_bitrate_kbps: Option<u32>,
     update: StreamLegUpdate,
 ) {
-    // Plan 243 C3: ingress rotation can fail the old feed just before the
-    // state poll names the new device. Give that state three seconds to arrive.
-    if let StreamLegUpdate::Reconnecting { position, .. }
-    | StreamLegUpdate::Failed { position, .. } = &update
-    {
-        let cloud_feed = stream_targets_snapshot_value(targets)
-            .targets
-            .get(*position)
-            .is_some_and(|t| is_cloud_feed_target(&t.target_id));
-        let managed = crate::cloud_show::lock(&state.cloud_show)
-            .show
-            .as_ref()
-            .is_some_and(|show| {
-                show.control.transport_kind() == crate::cloud_show::ControlKind::Web
-            });
-        if cloud_feed && managed {
-            tokio::time::sleep(Duration::from_secs(3)).await;
-            if crate::cloud_show::lock(&state.cloud_show)
-                .stopped_by
-                .is_some()
-            {
-                return;
-            }
-        }
-    }
     // A failed destination is terminal: a dead tee slave, a finished output,
     // or a broadcast the platform ended. FFmpeg reconnecting the socket
     // underneath cannot bring the broadcast back, so it never revives one.
@@ -29813,14 +29844,10 @@ async fn publish_stream_leg_update(
                 .entry(position)
                 .or_insert_with(Instant::now);
             with_active_session(state, session_id, || {
-                let _ = emit_health_event(
-                    state,
-                    Some(session_id),
-                    HealthLevel::Warn,
+                publish_stream_leg_notice(
+                    state, session_id, targets, position, StreamTargetState::Reconnecting,
                     STREAM_TARGET_RECONNECTING_CODE,
-                    &format!(
-                        "Streaming to {label} is reconnecting: {reason}. Until it is back, viewers there see nothing; the other destinations keep streaming."
-                    ),
+                    format!("Streaming to {label} is reconnecting: {reason}. Until it is back, viewers there see nothing; the other destinations keep streaming."),
                 );
                 state.emit_event("stream.targets", snapshot);
             })
@@ -40831,6 +40858,72 @@ mod tests {
         assert!(twitch.redacted_url.is_none());
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn r2_a_m2_recovery_lines_never_delay_leg_state_or_progress() {
+        let state = test_state();
+        let session_id = "r2-feed-stderr";
+        *state.recording.lock().await = Some(test_active_recording_stub(session_id));
+        crate::cloud_show::lock(&state.cloud_show).show = Some(crate::cloud_show::ActiveShow {
+            record: serde_json::from_value(serde_json::json!({"id":"sh_r2","kind":"solo"}))
+                .unwrap(),
+            control: crate::cloud_show::ShowControl {
+                kind: Some("web".into()),
+                url: String::new(),
+                token: String::new(),
+            },
+            ingest: None,
+            session_id: Some(session_id.into()),
+            destinations: Vec::new(),
+            handed_over: true,
+            hold_image_png_base64: None,
+            resuming: false,
+        });
+        let targets = Arc::new(StdMutex::new(StreamTargetsSnapshot {
+            session_id: session_id.into(),
+            targets: vec![StreamTargetRuntime {
+                target_id: format!("{CLOUD_FEED_TARGET_PREFIX}horizontal"),
+                platform: StreamPlatform::Custom,
+                label: "Cloud feed".into(),
+                state: StreamTargetState::Live,
+                message: None,
+                redacted_url: None,
+                uplink_overflows: None,
+                uplink_overflow_at: None,
+            }],
+        }));
+        let mut since = std::collections::HashMap::new();
+        let mut throttle = StreamLegOverflowThrottle::default();
+        let started = tokio::time::Instant::now();
+        for _ in 0..20 {
+            tokio::time::timeout(
+                Duration::from_millis(100),
+                publish_stream_leg_update(
+                    &state,
+                    session_id,
+                    &targets,
+                    &mut since,
+                    &mut throttle,
+                    Some(4000),
+                    StreamLegUpdate::Reconnecting {
+                        position: 0,
+                        reason: "Recovery failed".into(),
+                    },
+                ),
+            )
+            .await
+            .expect("stderr draining must not wait for a takeover");
+        }
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert_eq!(
+            stream_targets_snapshot_value(&targets).targets[0].state,
+            StreamTargetState::Reconnecting
+        );
+        assert!(
+            crate::cloud_show::lock(&state.cloud_show)
+                .feed_down_for(tokio::time::Instant::now())
+                .is_some()
+        );
+    }
     #[tokio::test(start_paused = true)]
     async fn cloud_taken_over_suppresses_a_late_stream_output_failure() {
         let state = test_state();
