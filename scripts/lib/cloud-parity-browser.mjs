@@ -114,7 +114,12 @@ export async function startParityPages(webRoot, guests, media = null, fixtureAss
         if (match[2] === '/media' && req.method === 'POST') {
           if (!media) return send('application/json', JSON.stringify({ fixtureReceived: true }))
           const body = JSON.parse(await readBody(req, 1024))
-          const result = await relayCapability(body.capability, guest.identity, body.show)
+          // As the production cookie route: a guest may hold only the guest
+          // graphics lane (plan 249 S6, D4); the host still decides to send.
+          const result = await relayCapability(body.capability, guest.identity, body.show, {
+            output: 'stream',
+            orientation: 'h'
+          })
           return send('application/json', JSON.stringify({ capability: result }))
         }
         if (match[2] === '/privacy' && req.method === 'POST') {
@@ -152,7 +157,13 @@ export async function startParityPages(webRoot, guests, media = null, fixtureAss
         assert.equal(req.headers.authorization, 'Bearer vcp1.dGVzdA.dGVzdA')
         if (beacon.joined && beacon.capability) {
           const identity =
-            beacon.rec && media.graphicsLanes ? 'EG_parity_avatar_recording' : 'EG_parity_baseline'
+            media.graphicsLanes?.EG_parity_graphics_v && beacon.o === 'v'
+              ? beacon.rec
+                ? 'EG_parity_graphics_vrec'
+                : 'EG_parity_graphics_v'
+              : beacon.rec && media.graphicsLanes
+                ? 'EG_parity_avatar_recording'
+                : 'EG_parity_baseline'
           await relayCapability(
             beacon.capability,
             identity,
@@ -160,6 +171,10 @@ export async function startParityPages(webRoot, guests, media = null, fixtureAss
             media.graphicsLanes?.[identity]
           )
         }
+        // Plan 249 S6 `views`: fixture transport of the page's `shown` into
+        // the fake managed web, as the web's room state would carry it.
+        if (media.shown && beacon.shown && beacon.show === media.show)
+          await media.shown(beacon.shown)
       }
       const response = await fetch(target, {
         method: req.method,

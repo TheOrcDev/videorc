@@ -351,3 +351,38 @@ it('projects only confirmed room media fields and no publisher credentials', () 
   })
   expect(JSON.stringify(projected)).not.toContain('private-token')
 })
+
+// Plan 249 S6: the room's program reaches agents by allowlist, only with a
+// room, and always labelled as not encoded output.
+describe('the room program projection (plan 249 S6)', () => {
+  const program = {
+    source: 'program-page-report',
+    encodedOutput: false as const,
+    stage: 'applied' as const,
+    ageSeconds: 2,
+    layout: 'side-by-side' as const,
+    screenShared: false,
+    tiles: [
+      { kind: 'person' as const, role: 'host' as const, rect: { x: 0, y: 0, w: 0.5, h: 0.5 } }
+    ]
+  }
+  const roomMedia = {
+    showId: 'sh_talk',
+    confirmed: true,
+    microphoneMuted: false,
+    cameraOff: false,
+    microphoneAvailable: true
+  }
+
+  it('is published only while a room is open', () => {
+    expect(buildAgentSurface(input(), [], program).roomProgram).toBeUndefined()
+    expect(buildAgentSurface(input({ roomMedia }), [], program).roomProgram).toEqual(program)
+  })
+
+  it('copies field by field: nothing extra rides along', () => {
+    const leaky = { ...program, identity: 'host:sh_secret', encodedOutput: true } as never
+    const surface = buildAgentSurface(input({ roomMedia }), [], leaky)
+    expect(JSON.stringify(surface.roomProgram)).not.toContain('sh_secret')
+    expect(surface.roomProgram?.encodedOutput).toBe(false)
+  })
+})

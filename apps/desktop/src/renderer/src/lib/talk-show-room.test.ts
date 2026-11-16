@@ -12,6 +12,7 @@ import {
   TAKEN_OVER_GRACE_MS,
   TalkShowRoomClient,
   onAirElsewhere,
+  stageMessage,
   talkShowRoomOptions,
   type TalkShowRoomDeps
 } from '@/lib/talk-show-room'
@@ -1015,5 +1016,25 @@ describe('processed microphone room ownership', () => {
     await vi.waitFor(() => expect(factory).toHaveBeenCalledTimes(3))
     await room.disconnect()
     factory.mockRestore()
+  })
+})
+
+// Plan 249 S6 (D4): guests learn which screen the program shows, so they see
+// and hear that one screen. Always present, so a guest can tell a current
+// desktop (null: none) from an older one (absent).
+describe('the stage message (plan 249 S6)', () => {
+  const read = (bytes: Uint8Array) => JSON.parse(new TextDecoder().decode(bytes)) as unknown
+  it('names the selected screen only when it is on stage', () => {
+    expect(read(stageMessage(['host:s', 'g_a'], 'g_a'))).toEqual({
+      v: 1,
+      onStage: ['host:s', 'g_a'],
+      screen: 'g_a'
+    })
+    expect(read(stageMessage(['host:s'], 'g_a'))).toEqual({
+      v: 1,
+      onStage: ['host:s'],
+      screen: null
+    })
+    expect(read(stageMessage(['host:s']))).toEqual({ v: 1, onStage: ['host:s'], screen: null })
   })
 })
