@@ -186,6 +186,7 @@ export function SourcesAudioMixer(): ReactElement {
     deviceList,
     captureConfig,
     setCaptureConfig,
+    requestRemoteMicrophoneMute,
     selectedMicrophone,
     isSessionActive,
     audioBusActive,
@@ -307,7 +308,7 @@ export function SourcesAudioMixer(): ReactElement {
                     setAudio((current) => ({ ...current, microphoneGainDb }))
                   }
                   onMutedChange={(microphoneMuted) =>
-                    setAudio((current) => ({ ...current, microphoneMuted }))
+                    void requestRemoteMicrophoneMute(microphoneMuted ? 'mute' : 'unmute')
                   }
                   onSyncChange={(offsetMs, reason) => {
                     setAudio((current) => applySyncChange(current, offsetMs, reason))

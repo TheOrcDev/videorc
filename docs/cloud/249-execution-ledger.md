@@ -22,8 +22,9 @@ No agent-created commit, push, issue or PR was made in S0.
 - `src repo view --json nameWithOwner` returned exit 1 in both repositories;
   both remotes are GitHub. Source skill read; GitHub queries used afterward.
 - Searched all-state issues/PRs for `249` and `cloud parity`, then all open
-  issues/PRs on 2026-11-16. No dedicated Plan 249 issue/PR exists. Null mappings
-  below are deliberate, not invented issue URLs.
+  issues/PRs on 2026-11-16. The coordinator subsequently opened desktop PR #1437
+  for S0. A fresh S1 query found no dedicated S1 issue/PR; null issue mappings
+  remain deliberate, not invented issue URLs.
 - Reuse/reconcile [web #118](https://github.com/TheOrcDev/videorc-web/pull/118)
   in S1: open takeover all-bus silence fix. D3 calls for speech-only mute with
   deliberate auxiliary sound; inspect it before adding another implementation.
@@ -50,44 +51,47 @@ reconcile all prerequisite tips explicitly and update the ledger. Paired
 desktop/web PRs must link each other and their prerequisite PRs. A qualified
 consumer contract must exist before a producer can be enabled.
 
-| Slice / case              | Dependencies                           | Repo         | Intended base(s)                                                         | Issue / PR               |
-| ------------------------- | -------------------------------------- | ------------ | ------------------------------------------------------------------------ | ------------------------ |
-| S0 / `baseline`           | None                                   | desktop      | desktop: `main`                                                          | Unassigned / not created |
-| S1 / `controls`           | S0                                     | desktop      | desktop: `feat/249-s0-cloud-parity-baseline`                             | Unassigned / not created |
-| S2 / `privacy`            | S0, S1                                 | desktop, web | desktop: `feat/249-s1-cloud-parity`; web: `main`                         | Unassigned / not created |
-| S3 / `soundboard`         | S0, S1                                 | desktop, web | desktop: `feat/249-s2-cloud-parity`; web: `feat/249-s2-cloud-parity`     | Unassigned / not created |
-| S4 / `avatar`             | S3                                     | desktop, web | desktop: `feat/249-s3-cloud-parity`; web: `feat/249-s3-cloud-parity`     | Unassigned / not created |
-| S5 / `avatar-animation`   | S4                                     | desktop, web | desktop: `feat/249-s4-cloud-parity`; web: `feat/249-s4-cloud-parity`     | Unassigned / not created |
-| S6 / `views`              | S3, S4                                 | desktop, web | desktop: `feat/249-s5-cloud-parity`; web: `feat/249-s5-cloud-parity`     | Unassigned / not created |
-| S7a / `microphone-bridge` | S1, S3                                 | desktop      | desktop: `feat/249-s6-cloud-parity`                                      | Unassigned / not created |
-| S7b / `microphone`        | S7a                                    | desktop      | desktop: `feat/249-s7a-cloud-parity`                                     | Unassigned / not created |
-| S8 / `audio-routing`      | S2, S3, S7a, S7b                       | desktop, web | desktop: `feat/249-s7b-cloud-parity`; web: `feat/249-s6-cloud-parity`    | Unassigned / not created |
-| S9 / `graphics`           | S4, S6                                 | desktop, web | desktop: `feat/249-s8-cloud-parity`; web: `feat/249-s8-cloud-parity`     | Unassigned / not created |
-| S10 / `alpha-spike`       | S6                                     | desktop, web | desktop: `feat/249-s9-cloud-parity`; web: `feat/249-s9-cloud-parity`     | Unassigned / not created |
-| S11 / `html`              | S9, S10                                | desktop, web | desktop: `feat/249-s10-cloud-parity`; web: `feat/249-s10-cloud-parity`   | Unassigned / not created |
-| S12 / `scenes`            | S2, S6, S9                             | desktop, web | desktop: `feat/249-s11-cloud-parity`; web: `feat/249-s11-cloud-parity`   | Unassigned / not created |
-| S13a / `camera-bridge`    | S1, S10, S12                           | desktop, web | desktop: `feat/249-s12-cloud-parity`; web: `feat/249-s12-cloud-parity`   | Unassigned / not created |
-| S13b / `camera`           | S13a                                   | desktop      | desktop: `feat/249-s13a-cloud-parity`                                    | Unassigned / not created |
-| S14 / `sources`           | S2, S12, S13a, S13b                    | desktop, web | desktop: `feat/249-s13b-cloud-parity`; web: `feat/249-s13a-cloud-parity` | Unassigned / not created |
-| S15 / `captions`          | S7a, S7b, S9                           | desktop      | desktop: `feat/249-s14-cloud-parity`                                     | Unassigned / not created |
-| S16 / `lifecycle`         | S1                                     | desktop, web | desktop: `feat/249-s15-cloud-parity`; web: `feat/249-s14-cloud-parity`   | Unassigned / not created |
-| S17 / `outputs`           | S9, S12, S16                           | desktop, web | desktop: `feat/249-s16-cloud-parity`; web: `feat/249-s16-cloud-parity`   | Unassigned / not created |
-| S18 / `services`          | S1, S16                                | desktop      | desktop: `feat/249-s17-cloud-parity`                                     | Unassigned / not created |
-| S19 / `markers`           | S1, S15                                | desktop      | desktop: `feat/249-s18-cloud-parity`                                     | Unassigned / not created |
-| S20 / `library`           | S1, S16                                | desktop, web | desktop: `feat/249-s19-cloud-parity`; web: `feat/249-s17-cloud-parity`   | Unassigned / not created |
-| S21a / `replay-ring`      | S20                                    | web          | web: `feat/249-s20-cloud-parity`                                         | Unassigned / not created |
-| S21b / `clips`            | S19, S21a                              | desktop, web | desktop: `feat/249-s20-cloud-parity`; web: `feat/249-s21a-cloud-parity`  | Unassigned / not created |
-| S21c / `archive`          | S20, S21a                              | desktop      | desktop: `feat/249-s21b-cloud-parity`                                    | Unassigned / not created |
-| S22 / `iso`               | S7a, S7b, S20                          | desktop, web | desktop: `feat/249-s21c-cloud-parity`; web: `feat/249-s21b-cloud-parity` | Unassigned / not created |
-| S23 / `virtual-camera`    | S6, S13a, S13b                         | desktop      | desktop: `feat/249-s22-cloud-parity`                                     | Unassigned / not created |
-| S24 / `handoff`           | S5, S9, S16, S18, S20                  | desktop, web | desktop: `feat/249-s23-cloud-parity`; web: `feat/249-s22-cloud-parity`   | Unassigned / not created |
-| S25 / `reporting`         | S18, S20, S24                          | desktop, web | desktop: `feat/249-s24-cloud-parity`; web: `feat/249-s24-cloud-parity`   | Unassigned / not created |
-| S26 / `health`            | S6, S7a, S7b, S17, S24                 | desktop, web | desktop: `feat/249-s25-cloud-parity`; web: `feat/249-s25-cloud-parity`   | Unassigned / not created |
-| S27 / `all`               | All enabled slices (full list in JSON) | desktop, web | desktop: `feat/249-s26-cloud-parity`; web: `feat/249-s26-cloud-parity`   | Unassigned / not created |
+| Slice / case              | Dependencies                           | Repo         | Intended base(s)                                                         | Issue / PR                                                                                      |
+| ------------------------- | -------------------------------------- | ------------ | ------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------- |
+| S0 / `baseline`           | None                                   | desktop      | desktop: `main`                                                          | No issue / [#1437](https://github.com/TheOrcDev/videorc/pull/1437)                              |
+| S1 / `controls`           | S0                                     | desktop      | desktop: `feat/249-s0-cloud-parity-baseline`                             | No issue / coordinator to create; web [#118](https://github.com/TheOrcDev/videorc-web/pull/118) |
+| S2 / `privacy`            | S0, S1                                 | desktop, web | desktop: `feat/249-s1-cloud-parity`; web: `main`                         | Unassigned / not created                                                                        |
+| S3 / `soundboard`         | S0, S1                                 | desktop, web | desktop: `feat/249-s2-cloud-parity`; web: `feat/249-s2-cloud-parity`     | Unassigned / not created                                                                        |
+| S4 / `avatar`             | S3                                     | desktop, web | desktop: `feat/249-s3-cloud-parity`; web: `feat/249-s3-cloud-parity`     | Unassigned / not created                                                                        |
+| S5 / `avatar-animation`   | S4                                     | desktop, web | desktop: `feat/249-s4-cloud-parity`; web: `feat/249-s4-cloud-parity`     | Unassigned / not created                                                                        |
+| S6 / `views`              | S3, S4                                 | desktop, web | desktop: `feat/249-s5-cloud-parity`; web: `feat/249-s5-cloud-parity`     | Unassigned / not created                                                                        |
+| S7a / `microphone-bridge` | S1, S3                                 | desktop      | desktop: `feat/249-s6-cloud-parity`                                      | Unassigned / not created                                                                        |
+| S7b / `microphone`        | S7a                                    | desktop      | desktop: `feat/249-s7a-cloud-parity`                                     | Unassigned / not created                                                                        |
+| S8 / `audio-routing`      | S2, S3, S7a, S7b                       | desktop, web | desktop: `feat/249-s7b-cloud-parity`; web: `feat/249-s6-cloud-parity`    | Unassigned / not created                                                                        |
+| S9 / `graphics`           | S4, S6                                 | desktop, web | desktop: `feat/249-s8-cloud-parity`; web: `feat/249-s8-cloud-parity`     | Unassigned / not created                                                                        |
+| S10 / `alpha-spike`       | S6                                     | desktop, web | desktop: `feat/249-s9-cloud-parity`; web: `feat/249-s9-cloud-parity`     | Unassigned / not created                                                                        |
+| S11 / `html`              | S9, S10                                | desktop, web | desktop: `feat/249-s10-cloud-parity`; web: `feat/249-s10-cloud-parity`   | Unassigned / not created                                                                        |
+| S12 / `scenes`            | S2, S6, S9                             | desktop, web | desktop: `feat/249-s11-cloud-parity`; web: `feat/249-s11-cloud-parity`   | Unassigned / not created                                                                        |
+| S13a / `camera-bridge`    | S1, S10, S12                           | desktop, web | desktop: `feat/249-s12-cloud-parity`; web: `feat/249-s12-cloud-parity`   | Unassigned / not created                                                                        |
+| S13b / `camera`           | S13a                                   | desktop      | desktop: `feat/249-s13a-cloud-parity`                                    | Unassigned / not created                                                                        |
+| S14 / `sources`           | S2, S12, S13a, S13b                    | desktop, web | desktop: `feat/249-s13b-cloud-parity`; web: `feat/249-s13a-cloud-parity` | Unassigned / not created                                                                        |
+| S15 / `captions`          | S7a, S7b, S9                           | desktop      | desktop: `feat/249-s14-cloud-parity`                                     | Unassigned / not created                                                                        |
+| S16 / `lifecycle`         | S1                                     | desktop, web | desktop: `feat/249-s15-cloud-parity`; web: `feat/249-s14-cloud-parity`   | Unassigned / not created                                                                        |
+| S17 / `outputs`           | S9, S12, S16                           | desktop, web | desktop: `feat/249-s16-cloud-parity`; web: `feat/249-s16-cloud-parity`   | Unassigned / not created                                                                        |
+| S18 / `services`          | S1, S16                                | desktop      | desktop: `feat/249-s17-cloud-parity`                                     | Unassigned / not created                                                                        |
+| S19 / `markers`           | S1, S15                                | desktop      | desktop: `feat/249-s18-cloud-parity`                                     | Unassigned / not created                                                                        |
+| S20 / `library`           | S1, S16                                | desktop, web | desktop: `feat/249-s19-cloud-parity`; web: `feat/249-s17-cloud-parity`   | Unassigned / not created                                                                        |
+| S21a / `replay-ring`      | S20                                    | web          | web: `feat/249-s20-cloud-parity`                                         | Unassigned / not created                                                                        |
+| S21b / `clips`            | S19, S21a                              | desktop, web | desktop: `feat/249-s20-cloud-parity`; web: `feat/249-s21a-cloud-parity`  | Unassigned / not created                                                                        |
+| S21c / `archive`          | S20, S21a                              | desktop      | desktop: `feat/249-s21b-cloud-parity`                                    | Unassigned / not created                                                                        |
+| S22 / `iso`               | S7a, S7b, S20                          | desktop, web | desktop: `feat/249-s21c-cloud-parity`; web: `feat/249-s21b-cloud-parity` | Unassigned / not created                                                                        |
+| S23 / `virtual-camera`    | S6, S13a, S13b                         | desktop      | desktop: `feat/249-s22-cloud-parity`                                     | Unassigned / not created                                                                        |
+| S24 / `handoff`           | S5, S9, S16, S18, S20                  | desktop, web | desktop: `feat/249-s23-cloud-parity`; web: `feat/249-s22-cloud-parity`   | Unassigned / not created                                                                        |
+| S25 / `reporting`         | S18, S20, S24                          | desktop, web | desktop: `feat/249-s24-cloud-parity`; web: `feat/249-s24-cloud-parity`   | Unassigned / not created                                                                        |
+| S26 / `health`            | S6, S7a, S7b, S17, S24                 | desktop, web | desktop: `feat/249-s25-cloud-parity`; web: `feat/249-s25-cloud-parity`   | Unassigned / not created                                                                        |
+| S27 / `all`               | All enabled slices (full list in JSON) | desktop, web | desktop: `feat/249-s26-cloud-parity`; web: `feat/249-s26-cloud-parity`   | Unassigned / not created                                                                        |
 
-S0 is implementation-ready for coordinator review; **live acceptance is not
-complete**. S1 is next after integration/commissioning, not automatically started.
-S1–S27 implementation is not started. The entire plan remains in progress.
+S0 is committed/pushed by the coordinator at `570d72926` and open as
+[PR #1437](https://github.com/TheOrcDev/videorc/pull/1437), implemented with
+**live acceptance not run**. S1 is implemented in its child worktree and ready
+for coordinator review; its live acceptance is also **not run**. S2–S27 are not
+started. This S1 checkpoint does not complete Plan 249 or authorize S2 work
+before the coordinator commissions it.
 
 ## Deferred gates and release blocks
 
@@ -182,3 +186,50 @@ Body:
 - `scripts/lib/cloud-parity-media.test.mjs`
 - `scripts/lib/fake-cloud-web-managed.mjs`
 - `scripts/smoke-cloud-parity-app.mjs`
+
+## S1 implementation checkpoint
+
+Worktree `/Users/orcdev/projects/videorc-wt-249-s1`, branch
+`feat/249-s1-cloud-parity`, base `570d72926b0a2679f7816a2e0b531218291ff7a6`.
+PR base is `feat/249-s0-cloud-parity-baseline`; preserve that published branch.
+No S1 commit, push, issue or PR was created by this agent. No web writes.
+
+Native/cloud output adapters now expose independent activity, clocks, freshness,
+allowlisted destinations and confirmed room mic/camera state. Native recording
+state remains untouched by the projection. Publisher epoch, canonical live
+interval/take IDs and effective profiles are explicitly unavailable (`null`)
+where today's protocol supplies none. They must not be synthesized from polling
+edges; later ownership/lifecycle/media slices must populate them before service
+idempotency or quality claims depend on them.
+
+Tile, mixer, palette, global shortcut, deck/phone and agent microphone controls
+reach the room publisher and wait for confirmation. Initial mute happens before
+publication; None/off captures no camera, missing/vanished devices cannot fall
+back to defaults, and control completion is fenced to its room/track. Cloud
+recording/live stops are independent, with provider end ordering preserved.
+Native scene, microphone replacement, screen picker, gain and system-audio
+commands cannot falsely acknowledge room parity; supported stage/share controls
+remain available. Room program pictures are explicitly unavailable to agents
+until their later snapshot implementation. Remote protocol adds only fixed
+output enums/booleans/null, no credentials, destinations or identifiers.
+
+The maintained `controls` case exercises actual UI tile/mixer, the hotkey
+handler, deck protocol, signed phone protocol and agent MCP listener, then
+measures program PCM. It asserts initial None/mute, camera unpublication,
+independent Stop and takeover all-program silence. It is **not run**. Its fake
+cloud Stop checks prove controller behavior only when eventually run; browser
+captures are not encoded managed-egress evidence, physical-device qualification,
+or OS global-key registration proof.
+
+Web PR #118 was reconciled read-only at head
+`af5be462f5d790fd5c808c0acfd4b801382f5e9c`: stage audio fades its bus to zero,
+fallback elements and late voices inherit silence, and stage/timer state calls
+that policy. It remains OPEN. Reuse that work and emitted v1 bundle; no duplicate
+web fix. The desktop no longer says “everyone muted.” D3 speech-only policy
+with enabled auxiliary audio belongs to S8. No web deploy/acceptance is claimed.
+
+Focused verification and exact changed paths are in `249-s1-handoff.md`.
+Shadscan baseline/floor is **27/27**. Final numeric audit is reported by the
+agent after freezing the diff. Backend compile/tests, full suites, all app,
+real-page, smoke, device, media and managed acceptance remain deferred by the
+user instruction; the Rust adapter tests are maintained but unexecuted.

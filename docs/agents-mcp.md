@@ -523,3 +523,22 @@ streamer's key. There is no show tool: agents and Sidekick may hide, but only
 the streamer can show the screen again. The shared action refuses show
 and a toggle that would show from either caller with “Only you can show
 your screen again.” No raw privacy RPC is admitted on an agent socket.
+
+### Plan 249 room activity and controls
+
+`get_status.outputSession` is an allowlisted observation separate from native
+recording state. A room with no output reads `room`; recording and live flags
+are independent. Cloud clocks name their owner, disconnected control state is
+`stale`, and unconfirmed room microphone/camera state is null. The renderer's
+room-media confirmation must match the current show and connected publisher.
+Native scene/system-audio state is not presented as the room's program, and
+`get_picture` refuses an unavailable cloud picture instead of returning a native
+preview. Agent Stop ends the live output first, or the recording when only that
+output runs, keeping the room open.
+
+Publisher epochs, canonical live-interval/take IDs and effective profiles remain
+null until their owner protocols supply them. They are not inferred from timers.
+Cloud destinations include only id/platform/label/state. The projection never
+serializes CloudStatus wholesale: invite URLs, tokens, media tracks, storage
+paths and ingest addresses cannot enter this response. No new tool, method,
+permission or event was added.

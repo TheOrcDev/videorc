@@ -403,3 +403,27 @@ describe('guestActionWords', () => {
     expect(guestActionWords('disallow-screen-share')).toBe("stop the guest's screen share")
   })
 })
+
+it('exports only the current lazy owner and fences stale media callbacks on close', async () => {
+  const controlsRef: NonNullable<TalkShowRoomControllerDeps['controlsRef']> = { current: null }
+  const onMediaSnapshot = vi.fn()
+  const value = {
+    ...deps(vi.fn()),
+    controlsRef,
+    onMediaSnapshot,
+    microphoneMuted: true,
+    cameraOff: true
+  }
+  act(() => root.render(createElement(Host, { value })))
+  await settle()
+  expect(controlsRef.current).not.toBeNull()
+  const publish = room.snapshots.at(-1)!
+  act(() => publish({ ...IDLE_TALK_SHOW_SNAPSHOT, state: 'connected', identity: 'host:sh_talk' }))
+  expect(onMediaSnapshot).toHaveBeenLastCalledWith(expect.objectContaining({ state: 'connected' }))
+  act(() => root.render(createElement(Host, { value: { ...value, cloudStatus: null } })))
+  await settle()
+  expect(controlsRef.current).toBeNull()
+  const calls = onMediaSnapshot.mock.calls.length
+  act(() => publish({ ...IDLE_TALK_SHOW_SNAPSHOT, state: 'connected' }))
+  expect(onMediaSnapshot).toHaveBeenCalledTimes(calls)
+})

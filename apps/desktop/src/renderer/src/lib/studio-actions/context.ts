@@ -67,6 +67,8 @@ export interface StudioActionContext {
     caller: import('./privacy').PrivacyCaller
   ) => Promise<import('./context').StudioActionOutcome>
   client: StudioActionClient
+  outputFacts?: import('../../../../shared/output-session').OutputSessionFacts
+  stopOutput?: (output: 'recording' | 'live') => Promise<boolean>
   sessionActive: boolean
   /**
    * The Studio's two explicit starts (plan 174 S3.1): `recordStart` records

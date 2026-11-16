@@ -1,3 +1,8 @@
+import {
+  prepareParityRoom,
+  assertInitialRoomControls,
+  exerciseControls
+} from './cloud-parity-controls.mjs'
 import assert from 'node:assert/strict'
 import { randomUUID } from 'node:crypto'
 import { execFileSync } from 'node:child_process'
@@ -42,12 +47,13 @@ const recordArtifact = (report, root, file, kind) => {
 /** No build, paid egress, provider destination or live service is started.
  * This is deliberately NOT invoked by focused tests or --help/check modes.
  */
-export async function runBaseline({ desktopRoot, webRoot }) {
+export async function runBaseline({ desktopRoot, webRoot, controls = false }) {
   const report = baselineReport({
     desktop: revision(desktopRoot),
     web: revision(webRoot),
     template: 'v1'
   })
+  report.case = controls ? 'controls' : 'baseline'
   // A dirty web consumer makes its revision misleading. Require a dedicated,
   // installed checkout; inspect it read-only and never change the active one.
   const webDirty = execFileSync('git', ['status', '--porcelain', '--untracked-files=no'], {
@@ -73,7 +79,7 @@ export async function runBaseline({ desktopRoot, webRoot }) {
     videos = [],
     observations = []
   const writeReport = () =>
-    writeFileSync(join(output, 'baseline.json'), JSON.stringify(report, null, 2) + '\n')
+    writeFileSync(join(output, `${report.case}.json`), JSON.stringify(report, null, 2) + '\n')
   const audible = (db) => db > MEDIA.analysis.audibleDbfs
   const captureAudio = async (label, clients) => {
     const captures = await Promise.all(
@@ -107,8 +113,13 @@ export async function runBaseline({ desktopRoot, webRoot }) {
         const samples = new Float32Array(raw.length / 4)
         for (let i = 0; i < samples.length; i++) samples[i] = raw.readFloatLE(i * 4)
         const tones = audioMeasurements(samples)
+        // Preserve the whole artifact and full-window measurements. Controls
+        // allow at most one second for WebRTC/fade settlement, then require
+        // continuous silence/restoration in the remaining decoded window.
+        assert.ok(samples.length >= MEDIA.sampleRate * 2, 'Audio capture is too short')
+        const settledTones = audioMeasurements(samples.subarray(MEDIA.sampleRate))
         recordArtifact(report, h.root, file, 'decoded-output-audio')
-        return { name, tones }
+        return { name, tones, settledTones, settledAfterMs: 1000 }
       })
     )
     report.observations.push({ name: label, captures })
@@ -119,8 +130,9 @@ export async function runBaseline({ desktopRoot, webRoot }) {
     // Replace only the harness-owned device files before Electron opens them.
     writeFileSync(h.env.VIDEORC_SMOKE_FAKE_MEDIA_VIDEO, cameraY4m(MEDIA.colors.host))
     writeFileSync(h.env.VIDEORC_SMOKE_FAKE_MEDIA_AUDIO, toneWav(MEDIA.tones.host))
-    await h.destinations(0)
+    await h.destinations(controls ? 1 : 0)
     await h.launch()
+    const cameraId = await prepareParityRoom(h, controls)
     const opened = await h.rpc('cloud.room.open', {
       outputs: [OUTPUT],
       title: 'Plan 249 baseline',
@@ -128,6 +140,7 @@ export async function runBaseline({ desktopRoot, webRoot }) {
     })
     h.showId = opened.show.id
     await h.status((s) => s.room?.client === 'connected', 'desktop publisher joins')
+    if (controls) await assertInitialRoomControls(h, cameraId)
     requireLoopback(h.livekit.url)
     const guests = new Map(
       ['guest1', 'guest2'].map((name, i) => {
@@ -276,11 +289,21 @@ export async function runBaseline({ desktopRoot, webRoot }) {
       })
       // Media window, not a readiness handshake: analysis below requires the
       // marker in decoded recording frames, independently of this RPC reply.
-      await captureAudio(slot, clients)
+      const captured = await captureAudio(slot, clients)
+      if (controls && slot === 'takeover') {
+        const program = captured.find((c) => c.name === 'program')
+        for (const voice of ['host', 'guest1', 'guest2'])
+          assert.ok(
+            program.settledTones[voice] < MEDIA.analysis.absentDbfs,
+            `Takeover must silence ${voice} in program; web PR #118 is required`
+          )
+        report.takeoverPolicy = 'all-program-silence'
+      }
       await h.rpc('cloud.overlay.clear', { slot, orientation: 'h' })
     }
     await overlay('card', MEDIA.colors.card)
     await overlay('takeover', MEDIA.colors.takeover)
+    if (controls) await exerciseControls({ h, clients, captureAudio, report, cameraId })
 
     const soundPath = join(output, 'soundboard.wav')
     writeFileSync(soundPath, toneWav(MEDIA.tones.soundboard, 8))
@@ -390,9 +413,12 @@ export async function runBaseline({ desktopRoot, webRoot }) {
     )
     writeReport()
     // Retain only the error class: the original cause/stack can contain a JWT URL.
-    failure = new Error(`Cloud parity baseline failed; report: ${join(output, 'baseline.json')}`, {
-      cause: new Error(error.name)
-    })
+    failure = new Error(
+      `Cloud parity baseline failed; report: ${join(output, `${report.case}.json`)}`,
+      {
+        cause: new Error(error.name)
+      }
+    )
   } finally {
     const cleanups = await Promise.allSettled([browser?.close(), pages?.close(), h.close()])
     if (cleanups.some((r) => r.status === 'rejected')) {

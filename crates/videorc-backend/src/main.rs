@@ -75,6 +75,7 @@ mod ffmpeg_work;
 mod fifo;
 mod frame_store;
 mod html_overlay;
+mod output_session;
 mod preview_debug_sample;
 // Plan 168 Phase F: the pet builder (S-F1 to S-F3) and the creator's RPCs (S-F4).
 mod buddy_pet_build;

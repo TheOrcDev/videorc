@@ -16,10 +16,10 @@
       "case": "baseline",
       "repositories": ["desktop"],
       "issueUrl": null,
-      "prUrl": null,
+      "prUrl": "https://github.com/TheOrcDev/videorc/pull/1437",
       "webIssueUrl": null,
       "webPrUrl": null,
-      "implementation": "ready-for-review",
+      "implementation": "implemented-review-open",
       "acceptance": "not-run",
       "intendedBranch": "feat/249-s0-cloud-parity-baseline",
       "intendedPrTitle": "Plan 249 S0: Establish a real-page baseline",
@@ -31,7 +31,8 @@
         "desktop": "main"
       },
       "crossRepoNeeds": "Desktop change; use compatible web fixtures read-only and recheck source/capabilities before execution.",
-      "releaseGate": "blocked-until-required-acceptance"
+      "releaseGate": "blocked-until-required-acceptance",
+      "commit": "570d72926b0a2679f7816a2e0b531218291ff7a6"
     },
     {
       "id": "S1",
@@ -42,8 +43,8 @@
       "issueUrl": null,
       "prUrl": null,
       "webIssueUrl": null,
-      "webPrUrl": null,
-      "implementation": "not-started",
+      "webPrUrl": "https://github.com/TheOrcDev/videorc-web/pull/118",
+      "implementation": "ready-for-review",
       "acceptance": "not-run",
       "intendedBranch": "feat/249-s1-cloud-parity",
       "intendedPrTitle": "Plan 249 S1: Make room controls truthful",
@@ -54,8 +55,9 @@
       "intendedBase": {
         "desktop": "feat/249-s0-cloud-parity-baseline"
       },
-      "crossRepoNeeds": "Inspect existing web PR #118 before changing takeover. Do not duplicate; D3 recommended policy differs from its all-bus silence. A policy change may require a linked web follow-up.",
-      "releaseGate": "blocked-until-required-acceptance"
+      "crossRepoNeeds": "Reuse open web PR #118 (head af5be462f5d790fd5c808c0acfd4b801382f5e9c) for existing all-program takeover silence. No web checkout modified. Coordinator must integrate/coordinate it; controls acceptance requires its emitted v1 bundle. D3 speech-only mute with opt-in auxiliary sound remains S8. No deployed/live proof.",
+      "releaseGate": "blocked-until-required-acceptance",
+      "baseCommit": "570d72926b0a2679f7816a2e0b531218291ff7a6"
     },
     {
       "id": "S2",

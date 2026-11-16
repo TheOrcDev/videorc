@@ -213,19 +213,61 @@ pub async fn get_status(state: &AppState, _agent: &AgentIdentity, _args: Value) 
     let status = crate::current_recording_status(state).await;
     let studio_open = state.agents.studio_open();
     let surface = studio_surface(state);
-    let (word, running) = session_word(&status);
+    let cloud = crate::cloud_show_status(state);
+    let mut facts = crate::output_session::project(&status, &cloud);
+    if facts.freshness == "fresh"
+        && let Some(media) = surface.as_ref().and_then(|s| s.get("roomMedia"))
+        && media.get("showId").and_then(Value::as_str) == facts.show_id
+        && media.get("confirmed").and_then(Value::as_bool) == Some(true)
+        && cloud
+            .room
+            .as_ref()
+            .is_some_and(|r| r.client == crate::cloud_talk::CloudRoomClientState::Connected)
+    {
+        facts.microphone_muted = media.get("microphoneMuted").and_then(Value::as_bool);
+        facts.camera_off = media.get("cameraOff").and_then(Value::as_bool);
+        facts.capabilities.microphone =
+            media.get("microphoneAvailable").and_then(Value::as_bool) == Some(true);
+        facts.capabilities.camera = true;
+    }
+    let cloud_owner = facts.owner == "cloud-room";
+    let (word, running) = if cloud_owner {
+        (
+            if facts.live {
+                "live"
+            } else if facts.recording {
+                "recording"
+            } else {
+                "room"
+            },
+            facts.live || facts.recording,
+        )
+    } else {
+        session_word(&status)
+    };
     let mut out = Map::new();
     out.insert("state".into(), json!(word));
+    out.insert("outputSession".into(), json!(facts));
     out.insert("studioOpen".into(), json!(studio_open));
     let mut sentence = match word {
         "idle" => "Idle".to_string(),
+        "room" => "Room open; no output running".to_string(),
         "starting" => "Starting".to_string(),
         "recording" => "Recording".to_string(),
         "live" => "Live".to_string(),
         "stopping" => "Stopping".to_string(),
         _ => "The last session failed".to_string(),
     };
-    if running && let Some(started_at) = status.started_at.as_deref() {
+    let started_at = if cloud_owner {
+        if facts.live {
+            facts.clock.live_since
+        } else {
+            facts.clock.recording_since
+        }
+    } else {
+        status.started_at.as_deref()
+    };
+    if running && let Some(started_at) = started_at {
         out.insert("startedAt".into(), json!(started_at));
         if let Some(elapsed) = elapsed_seconds(started_at) {
             out.insert("elapsedSeconds".into(), json!(elapsed));
@@ -235,7 +277,20 @@ pub async fn get_status(state: &AppState, _agent: &AgentIdentity, _args: Value) 
 
     // Destinations: their health while live; idle, the ones on for the next
     // stream and whether they're ready.
-    let destinations = if word == "live" {
+    let destinations = if cloud_owner {
+        cloud
+            .legs
+            .iter()
+            .map(|target| {
+                json!({
+                    "id": target.target_id,
+                    "platform": crate::streaming::stream_platform_id(target.platform),
+                    "label": target.label,
+                    "state": target.state
+                })
+            })
+            .collect()
+    } else if word == "live" {
         live_destinations(state).await
     } else {
         list(surface.as_ref(), "destinations")
@@ -272,21 +327,33 @@ pub async fn get_status(state: &AppState, _agent: &AgentIdentity, _args: Value) 
     sentence.push('.');
 
     if let Some(surface) = surface.as_ref() {
-        if let Some(scene) = surface.get("scene").filter(|scene| scene.is_object()) {
+        if let Some(scene) = surface
+            .get("scene")
+            .filter(|scene| !cloud_owner && scene.is_object())
+        {
             let projected = pick(scene, &["id", "name", "kind", "modified"]);
             if let Some(name) = text_of(scene, "name") {
                 sentence.push_str(&format!(" Scene: {name}."));
             }
             out.insert("scene".into(), Value::Object(projected));
         }
-        if let Some(microphone) = surface.get("microphone").filter(|value| value.is_object()) {
-            let projected = pick(microphone, &["muted", "name"]);
-            if bool_of(microphone, "muted") == Some(true) {
+        if let Some(microphone) = surface
+            .get("microphone")
+            .filter(|value| value.is_object() && (!cloud_owner || facts.microphone_muted.is_some()))
+        {
+            let mut projected = pick(microphone, &["muted", "name"]);
+            if cloud_owner {
+                projected.insert("muted".into(), json!(facts.microphone_muted));
+            }
+            if projected.get("muted").and_then(Value::as_bool) == Some(true) {
                 sentence.push_str(" The microphone is muted.");
             }
             out.insert("microphone".into(), Value::Object(projected));
         }
-        if let Some(system_audio) = surface.get("systemAudio").filter(|value| value.is_object()) {
+        if let Some(system_audio) = surface
+            .get("systemAudio")
+            .filter(|value| !cloud_owner && value.is_object())
+        {
             out.insert(
                 "systemAudio".into(),
                 Value::Object(pick(system_audio, &["on", "available"])),
@@ -335,6 +402,11 @@ pub async fn get_status(state: &AppState, _agent: &AgentIdentity, _args: Value) 
     });
 
     let mut warnings = Vec::new();
+    if cloud_owner && facts.freshness == "stale" {
+        warnings.push(
+            "Cloud output state is stale; the last reported outputs may have changed.".to_string(),
+        );
+    }
     if !studio_open {
         warnings.push(format!(
             "{STUDIO_CLOSED} Scenes, sources and audio are unknown until it opens."
@@ -423,6 +495,11 @@ fn cached_picture(state: &AppState, frame: PictureFrame) -> Option<ToolOutcome> 
 }
 
 pub async fn get_picture(state: &AppState, _agent: &AgentIdentity, _args: Value) -> ToolOutcome {
+    if crate::cloud_talk_show_open(state) {
+        return ToolOutcome::refused(
+            "The room owns the picture. Cloud program snapshots are not available yet.",
+        );
+    }
     if let Some(sequence) = crate::compositor::latest_program_sequence(state).await
         && let Some(cached) = cached_picture(state, PictureFrame::Program(sequence))
     {

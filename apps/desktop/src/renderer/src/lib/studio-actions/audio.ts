@@ -22,6 +22,8 @@ function setSystemAudio(
   context: StudioActionContext,
   mode: 'on' | 'off' | 'toggle'
 ): StudioActionOutcome {
+  if (context.outputFacts?.owner === 'cloud-room')
+    return { ok: false, message: 'System audio is not published to the room yet.' }
   const [status, shown] = context.systemAudio
   const target = systemAudioTarget(mode, status, shown)
   if (target === null) return { ok: false, message: REMOTE_INTENT_COPY.systemAudio }

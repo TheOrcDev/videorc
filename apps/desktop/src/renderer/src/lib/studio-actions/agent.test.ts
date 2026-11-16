@@ -190,3 +190,22 @@ describe('executeAgentIntent', () => {
     ).resolves.toEqual({ ok: true })
   })
 })
+
+it('agent Stop follows the live cloud output, then record-only, without native Stop', async () => {
+  const { outputSessionFacts } = await import('../../../../shared/output-session')
+  const { cloudRoom, idleNative } = await import('../../../../shared/output-session.fixture')
+  const stopOutput = vi.fn(async () => true)
+  const context = studioContext({
+    sessionActive: true,
+    sessionLive: true,
+    outputFacts: outputSessionFacts(idleNative, cloudRoom(true, true), true),
+    stopOutput
+  })
+  expect((await executeAgentIntent(intent('stop'), context)).ok).toBe(true)
+  expect(stopOutput).toHaveBeenLastCalledWith('live')
+  context.sessionLive = false
+  context.outputFacts = outputSessionFacts(idleNative, cloudRoom(true, false), true)
+  expect((await executeAgentIntent(intent('stop'), context)).ok).toBe(true)
+  expect(stopOutput).toHaveBeenLastCalledWith('recording')
+  expect(context.stopSession).not.toHaveBeenCalled()
+})

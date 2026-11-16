@@ -1,3 +1,5 @@
+import { outputSessionFacts } from '../../../../shared/output-session'
+import { cloudRoom, idleNative } from '../../../../shared/output-session.fixture'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import type { StudioActionContext } from './context'
@@ -204,4 +206,32 @@ it('applies a saved scene and acknowledges its typed refusal', async () => {
     context
   )
   expect(requests.at(-1)?.params).toEqual({ intentId: 'yes', ok: true })
+})
+
+describe('cloud output owners', () => {
+  it.each(['recordStop', 'streamStop'] as const)(
+    '%s stops only its matching output',
+    async (kind) => {
+      const stopOutput = vi.fn(async () => true)
+      const { context } = studioContext({
+        sessionActive: true,
+        outputFacts: outputSessionFacts(idleNative, cloudRoom(true, true), true),
+        stopOutput
+      })
+      const result = await REMOTE_INTENT_EXECUTORS[kind](context, {})
+      expect(result.ok).toBe(true)
+      expect(stopOutput).toHaveBeenCalledWith(kind === 'recordStop' ? 'recording' : 'live')
+      expect(context.stopSession).not.toHaveBeenCalled()
+    }
+  )
+  it('starts cloud recording alongside a live stream and rejects Stop on an idle room', async () => {
+    const { context } = studioContext({
+      sessionActive: true,
+      outputFacts: outputSessionFacts(idleNative, cloudRoom(false, true), true)
+    })
+    expect((await REMOTE_INTENT_EXECUTORS.recordStart(context, {})).ok).toBe(true)
+    context.outputFacts = outputSessionFacts(idleNative, cloudRoom(), true)
+    expect((await REMOTE_INTENT_EXECUTORS.recordStop(context, {})).ok).toBe(false)
+    expect(context.stopSession).not.toHaveBeenCalled()
+  })
 })

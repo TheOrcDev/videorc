@@ -47,7 +47,6 @@ import {
   TalkShowKeyProcessor,
   type TalkShowCameraSettings
 } from '@/lib/talk-show-camera-effects'
-import { matchMicrophoneDeviceId } from '@/lib/mic-meter'
 import { sendOverlay, type OverlayImage } from '@/lib/talk-show-overlays'
 import {
   RemoteAudioAttachments,
@@ -133,6 +132,8 @@ export type TalkShowRoomDeps = {
   onSnapshot: (snapshot: TalkShowRoomSnapshot) => void
   /** The Sources page's camera and microphone, by their plain names. */
   cameraName: string | null
+  initiallyMuted?: boolean
+  initiallyCameraOff?: boolean
   cameraSettings?: () => TalkShowCameraSettings | undefined
   microphoneName: string | null
   /** Where remote audio plays (a hidden container the hook owns). */
@@ -182,7 +183,9 @@ export async function cameraDeviceIdFor(cameraName: string | null): Promise<stri
   const inputs = devices
     .filter((device) => device.kind === 'videoinput')
     .map((device) => ({ deviceId: device.deviceId, label: device.label }))
-  return matchMicrophoneDeviceId(cameraName, inputs)
+  return inputs.find(
+    (input) => input.label.trim().toLowerCase() === cameraName.trim().toLowerCase()
+  )?.deviceId
 }
 
 export async function microphoneDeviceIdFor(
@@ -193,7 +196,9 @@ export async function microphoneDeviceIdFor(
   const inputs = devices
     .filter((device) => device.kind === 'audioinput')
     .map((device) => ({ deviceId: device.deviceId, label: device.label }))
-  return matchMicrophoneDeviceId(microphoneName, inputs)
+  return inputs.find(
+    (input) => input.label.trim().toLowerCase() === microphoneName.trim().toLowerCase()
+  )?.deviceId
 }
 
 export class TalkShowRoomClient {
@@ -206,6 +211,8 @@ export class TalkShowRoomClient {
   #monitorEnabled = false
   #micMuted = false
   #cameraOff = false
+  #cameraName: string | null
+  #controls: Promise<void> = Promise.resolve()
   #camera: LocalVideoTrack | null = null
   #cameraEffects: TalkShowCameraEffects | null = null
   #cameraEffectError = false
@@ -223,6 +230,9 @@ export class TalkShowRoomClient {
 
   constructor(deps: TalkShowRoomDeps) {
     this.#deps = deps
+    this.#cameraName = deps.cameraName
+    this.#micMuted = deps.initiallyMuted === true || !deps.microphoneName
+    this.#cameraOff = deps.initiallyCameraOff === true || !deps.cameraName
     this.#audio = new RemoteAudioAttachments<HTMLMediaElement>(() => deps.audioHost())
   }
 
@@ -247,9 +257,9 @@ export class TalkShowRoomClient {
       return
     }
     this.#reconnectAttempt = 0
-    this.#setState('connected', null, token.identity)
     await this.#publishLocal()
     if (!this.#owns(room)) return
+    this.#setState('connected', null, token.identity)
     this.#applySubscriptions()
     await this.sendStage(this.#lastStage)
     this.#publish()
@@ -289,24 +299,65 @@ export class TalkShowRoomClient {
     }
   }
 
-  async setMicrophoneMuted(muted: boolean): Promise<void> {
-    this.#micMuted = muted
-    if (this.#microphone) {
-      if (muted) await this.#microphone.mute()
-      else await this.#microphone.unmute()
-    }
-    this.#publish()
+  #control(run: (room: Room) => Promise<void>): Promise<void> {
+    const room = this.#room
+    const next = this.#controls
+      .catch(() => {})
+      .then(async () => {
+        if (!room || !this.#owns(room) || this.#snapshot.state !== 'connected')
+          throw new Error('The room is not connected.')
+        if (onAirElsewhere(this.#deps.onAir?.())) throw new Error(TAKEN_OVER_DETAIL)
+        await run(room)
+        if (!this.#owns(room)) throw new Error('The room changed before the control completed.')
+        this.#publish()
+      })
+    this.#controls = next
+    return next
   }
 
-  async setCameraOff(off: boolean): Promise<void> {
-    if (!off && this.#cameraEffectError)
-      throw new Error(this.#problem ?? 'Green screen failed. Reopen the room to retry.')
-    this.#cameraOff = off
-    if (this.#camera) {
-      if (off) await this.#camera.mute()
-      else await this.#camera.unmute()
-    }
-    this.#publish()
+  setMicrophoneMuted(muted: boolean): Promise<void> {
+    return this.setMicrophoneMode(muted ? 'mute' : 'unmute')
+  }
+
+  setMicrophoneMode(mode: 'mute' | 'unmute' | 'toggle'): Promise<void> {
+    return this.#control(async (room) => {
+      const muted = mode === 'toggle' ? !this.#micMuted : mode === 'mute'
+      const track = this.#microphone
+      if (!track) throw new Error('No microphone is published in the room.')
+      if (muted) await track.mute()
+      else await track.unmute()
+      if (!this.#owns(room) || track !== this.#microphone)
+        throw new Error('The microphone changed.')
+      this.#micMuted = muted
+    })
+  }
+
+  setCameraOff(off: boolean): Promise<void> {
+    return this.setCameraSelection(this.#cameraName, off)
+  }
+
+  setCameraSelection(name: string | null, off: boolean): Promise<void> {
+    return this.#control(async (room) => {
+      // Release capture, not just its publication, for None/off.
+      this.#cameraEffects?.close()
+      this.#cameraEffects = null
+      const old = this.#camera
+      this.#camera = null
+      this.#cameraOff = true
+      if (old) {
+        old.stop()
+        await room.localParticipant.unpublishTrack(old, true)
+      }
+      this.#cameraName = name
+      this.#publish()
+      if (!off && name) {
+        await this.#publishCamera(room)
+        this.#cameraOff = false
+      } else if (!off) {
+        this.#publish()
+        throw new Error('Choose a camera before turning it on.')
+      }
+    })
   }
 
   /** The screen picked through main (`setTalkShowMediaGrant` named the
@@ -492,18 +543,15 @@ export class TalkShowRoomClient {
     this.#publish()
   }
 
-  async #publishLocal(): Promise<void> {
-    const room = this.#room
-    if (!room) return
-    if (!this.#owns(room)) return
-    const problems: string[] = []
+  async #publishCamera(room: Room): Promise<void> {
     let openedCamera: LocalVideoTrack | null = null
     let openedEffects: TalkShowCameraEffects | null = null
     try {
-      const deviceId = await cameraDeviceIdFor(this.#deps.cameraName)
-      if (!this.#owns(room)) return
+      const deviceId = await cameraDeviceIdFor(this.#cameraName)
+      if (!deviceId) throw new Error('The selected camera is unavailable.')
+      if (!this.#owns(room)) throw new Error('The room changed.')
       const camera = await createLocalVideoTrack({
-        deviceId,
+        deviceId: { exact: deviceId },
         resolution: VideoPresets.h720.resolution
       })
       if (!this.#owns(room)) {
@@ -535,7 +583,6 @@ export class TalkShowRoomClient {
         camera.stop()
         return
       }
-      if (this.#cameraOff) await camera.mute()
     } catch (error) {
       openedEffects?.close()
       openedCamera?.stop()
@@ -543,33 +590,58 @@ export class TalkShowRoomClient {
         this.#cameraEffects = null
         this.#camera = null
       }
-      problems.push(`The camera didn't open: ${messageOf(error)}`)
+      this.#cameraOff = true
+      this.#publish()
+      throw error
+    }
+  }
+
+  async #publishLocal(): Promise<void> {
+    const room = this.#room
+    if (!room) return
+    if (!this.#owns(room)) return
+    const problems: string[] = []
+    if (this.#cameraName && !this.#cameraOff) {
+      try {
+        await this.#publishCamera(room)
+      } catch (error) {
+        problems.push(`The camera didn't open: ${messageOf(error)}`)
+      }
     }
     if (!this.#owns(room)) return
-    try {
-      const deviceId = await microphoneDeviceIdFor(this.#deps.microphoneName)
-      if (!this.#owns(room)) return
-      const microphone = await createLocalAudioTrack({
-        deviceId,
-        echoCancellation: true,
-        noiseSuppression: true
-      })
-      if (!this.#owns(room)) {
-        microphone.stop()
-        return
+    if (this.#deps.microphoneName)
+      try {
+        const deviceId = await microphoneDeviceIdFor(this.#deps.microphoneName)
+        if (!this.#owns(room)) return
+        if (!deviceId) throw new Error('The selected microphone is unavailable.')
+        const microphone = await createLocalAudioTrack({
+          deviceId: { exact: deviceId },
+          echoCancellation: true,
+          noiseSuppression: true
+        })
+        if (!this.#owns(room)) {
+          microphone.stop()
+          return
+        }
+        this.#microphone = microphone
+        if (this.#micMuted) await microphone.mute()
+        if (!this.#owns(room)) {
+          microphone.stop()
+          return
+        }
+        await room.localParticipant.publishTrack(microphone, {
+          source: Track.Source.Microphone
+        })
+        if (!this.#owns(room)) {
+          microphone.stop()
+          return
+        }
+      } catch (error) {
+        this.#microphone?.stop()
+        this.#microphone = null
+        this.#micMuted = true
+        problems.push(`The microphone didn't open: ${messageOf(error)}`)
       }
-      this.#microphone = microphone
-      await room.localParticipant.publishTrack(microphone, {
-        source: Track.Source.Microphone
-      })
-      if (!this.#owns(room)) {
-        microphone.stop()
-        return
-      }
-      if (this.#micMuted) await microphone.mute()
-    } catch (error) {
-      problems.push(`The microphone didn't open: ${messageOf(error)}`)
-    }
     if (!this.#owns(room)) return
     this.#problem = problems.length
       ? problems.join(' ')
@@ -662,8 +734,9 @@ export class TalkShowRoomClient {
         return
       }
       this.#reconnectAttempt = 0
-      this.#setState('connected', null, token.identity)
       await this.#publishLocal()
+      if (!this.#owns(room)) return
+      this.#setState('connected', null, token.identity)
       if (!this.#owns(room)) return
       this.#applySubscriptions()
       await this.sendStage(this.#lastStage)
@@ -694,6 +767,7 @@ export class TalkShowRoomClient {
   }
 
   #publish(): void {
+    if (this.#microphone) this.#micMuted = this.#microphone.isMuted ?? this.#micMuted
     if (this.#closed) return
     const room = this.#room
     const people: TalkShowPerson[] = []
@@ -742,7 +816,7 @@ export class TalkShowRoomClient {
         camera: this.#camera?.mediaStreamTrack ?? null,
         microphone: this.#microphone?.mediaStreamTrack ?? null,
         screen: this.#screen?.mediaStreamTrack ?? null,
-        micMuted: this.#micMuted,
+        micMuted: this.#microphone?.isMuted ?? this.#micMuted,
         cameraOff: this.#cameraOff,
         problem: this.#problem
       },
