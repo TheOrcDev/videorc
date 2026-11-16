@@ -1174,3 +1174,15 @@ returning; background End has a fresh 22 s budget, and only confirmed cleanup
 forgets that id. Recovery cannot adopt or resume it while End is unconfirmed, even after camera return; a later current-show check retries a failed End one attempt at a time. Camera return also has its own bounded task. Recording download
 snapshots recover missed terminal events; cancellation of an absent job
 triggers a snapshot refresh. These additions do not change node media.
+
+
+## 19. On air and hand-off (plan 243)
+
+C1 / W1, W4 (D1, D3, D11): a desktop creates shows with its backend-private
+`device` (22 base62 id in `cloud.deviceId`, computer name, kind `computer`).
+The name is plain text, at most 40 characters. Debug builds alone accept the
+device overrides. Neither identity field enters diagnostics. State and current
+read `onAir`; status projects `thisDevice` and omits the id. Optional fields
+are omitted rather than null. YouTube destinations carry `broadcastId`,
+which is also read from the returned legs. The server scrubs names and
+broadcast ids at show end.

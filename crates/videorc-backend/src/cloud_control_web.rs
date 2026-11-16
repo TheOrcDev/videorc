@@ -2248,6 +2248,7 @@ mod tests {
         destinations_set_frame(
             "intent-1",
             &[HandoverDestination {
+                broadcast_id: None,
                 id: "youtube-main".to_string(),
                 platform: "youtube".to_string(),
                 label: "YouTube".to_string(),
@@ -2559,6 +2560,7 @@ mod tests {
         let mut frame = json!({ "t": "intent", "id": "intent-9", "kind": "legs.end" });
         assert_eq!(DestinationsBody::for_legs_end(&frame).as_json(), &json!({}));
         frame["destinations"] = legs_end_destinations(&[HandoverDestination {
+            broadcast_id: None,
             id: "youtube-main".to_string(),
             platform: "youtube".to_string(),
             label: "YouTube".to_string(),
@@ -3138,6 +3140,7 @@ rtmps://h/app/key 'http://x.test/y'";
         // model; only a state this list does not hold reads as a warning.
         for state in fixture["legs"]["states"].as_array().unwrap() {
             let leg = crate::cloud_show::RunnerLeg {
+                broadcast_id: None,
                 id: "leg".to_string(),
                 state: state.as_str().unwrap().to_string(),
                 ..Default::default()
@@ -3151,6 +3154,7 @@ rtmps://h/app/key 'http://x.test/y'";
         // The closed leg messages reach the status as they are.
         for (_, message) in fixture["legs"]["messages"].as_object().unwrap() {
             let leg = crate::cloud_show::RunnerLeg {
+                broadcast_id: None,
                 id: "leg".to_string(),
                 state: "failed".to_string(),
                 error: message.as_str().map(str::to_string),

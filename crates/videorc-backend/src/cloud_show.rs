@@ -69,6 +69,176 @@ use crate::streaming::{
     StreamOutputOrientation, StreamPlatform, StreamTargetRuntime, StreamTargetState,
 };
 
+/// Backend-private identity. Never forwarded to a renderer or diagnostics.
+#[derive(Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudDevice {
+    pub id: String,
+    pub name: String,
+    pub kind: &'static str,
+}
+
+impl std::fmt::Debug for CloudDevice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("CloudDevice(••••)")
+    }
+}
+
+impl Default for CloudDevice {
+    fn default() -> Self {
+        let mut number = uuid::Uuid::new_v4().as_u128();
+        let alphabet = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+        let mut id = [b'0'; 22];
+        for byte in id.iter_mut().rev() {
+            *byte = alphabet[(number % 62) as usize];
+            number /= 62;
+        }
+        Self {
+            id: String::from_utf8(id.to_vec()).expect("base62"),
+            name: "This computer".into(),
+            kind: "computer",
+        }
+    }
+}
+
+pub fn sanitize_device_name(name: &str) -> String {
+    let name: String = name.chars().filter(|c| !c.is_control()).collect();
+    let name = name.replace("://", " ");
+    let name: String = name.trim().chars().take(40).collect();
+    if name.is_empty() {
+        "This computer".into()
+    } else {
+        name
+    }
+}
+
+fn valid_device_id(id: &str) -> bool {
+    id.len() == 22 && id.bytes().all(|b| b.is_ascii_alphanumeric())
+}
+
+pub fn load_device(database: &crate::storage::Database) -> CloudDevice {
+    let mut device = CloudDevice::default();
+    if let Ok(Some(id)) = database.load_setting::<String>("cloud.deviceId")
+        && valid_device_id(&id)
+    {
+        device.id = id;
+    } else {
+        // Fail closed: never create a show with an identity that changes on restart.
+        if database.save_setting("cloud.deviceId", &device.id).is_err() {
+            device.id.clear();
+        }
+    }
+    #[cfg(unix)]
+    {
+        let mut bytes = [0u8; 256];
+        // SAFETY: the writable buffer is valid for the supplied length.
+        if unsafe { libc::gethostname(bytes.as_mut_ptr().cast(), bytes.len()) } == 0 {
+            let end = bytes.iter().position(|b| *b == 0).unwrap_or(bytes.len());
+            device.name = String::from_utf8_lossy(&bytes[..end]).into_owned();
+        }
+    }
+    #[cfg(target_os = "windows")]
+    {
+        device.name = std::env::var("COMPUTERNAME").unwrap_or(device.name);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        use std::process::{Command, Stdio};
+        if let Ok(mut child) = Command::new("/usr/sbin/scutil")
+            .args(["--get", "ComputerName"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+        {
+            let deadline = std::time::Instant::now() + Duration::from_secs(2);
+            loop {
+                match child.try_wait() {
+                    Ok(Some(status)) => {
+                        if status.success()
+                            && let Ok(output) = child.wait_with_output()
+                        {
+                            device.name = String::from_utf8_lossy(&output.stdout).into_owned();
+                        }
+                        break;
+                    }
+                    Ok(None) if std::time::Instant::now() < deadline => {
+                        std::thread::sleep(Duration::from_millis(10))
+                    }
+                    _ => {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    #[cfg(debug_assertions)]
+    {
+        if let Ok(id) = std::env::var("VIDEORC_CLOUD_DEVICE_ID")
+            && valid_device_id(&id)
+        {
+            device.id = id;
+        }
+        if let Ok(name) = std::env::var("VIDEORC_CLOUD_DEVICE_NAME") {
+            device.name = name;
+        }
+    }
+    device.name = sanitize_device_name(&device.name);
+    device
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum CloudDeviceKind {
+    Computer,
+    Phone,
+    Browser,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum CloudAirSource {
+    Feed,
+    Camera,
+    Host,
+}
+#[derive(Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudOnAirWire {
+    #[serde(default)]
+    pub device_id: Option<String>,
+    #[serde(default)]
+    pub name: Option<String>,
+    pub kind: Option<CloudDeviceKind>,
+    pub source: Option<CloudAirSource>,
+    #[serde(default)]
+    pub waiting: bool,
+    #[serde(default)]
+    pub since: String,
+}
+impl std::fmt::Debug for CloudOnAirWire {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("CloudOnAirWire(••••)")
+    }
+}
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudOnAirStatus {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    pub kind: CloudDeviceKind,
+    pub source: CloudAirSource,
+    pub waiting: bool,
+    pub this_device: bool,
+    pub since: String,
+}
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum CloudStoppedBy {
+    HandOff,
+    TakenOver,
+}
+
 pub const CLOUD_SETTINGS_KEY: &str = "cloud.settings";
 /// The backend-private `app_settings` row holding the id of the show this
 /// desktop holds or last held without seeing it end (`null` when none). Not a
@@ -379,6 +549,10 @@ pub struct CloudRestart {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct CloudStatus {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_air: Option<CloudOnAirStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stopped_by: Option<CloudStoppedBy>,
     pub phase: CloudPhase,
     /// The account's `cloud` block says on.
     pub entitled: bool,
@@ -558,6 +732,8 @@ pub struct ShowOutputSpec {
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateShowRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device: Option<CloudDevice>,
     pub kind: String,
     pub outputs: Vec<ShowOutputSpec>,
     pub hold_max_seconds: u32,
@@ -718,6 +894,8 @@ pub struct CreateShowResponse {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CurrentShowResponse {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_air: Option<CloudOnAirWire>,
     #[serde(default)]
     pub show: Option<ShowRecord>,
     #[serde(default)]
@@ -1167,6 +1345,8 @@ impl ControlTransport for WsTransport {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct RunnerState {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_air: Option<CloudOnAirWire>,
     #[serde(default)]
     pub phase: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1234,6 +1414,8 @@ impl Eq for CloudProgram {}
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct RunnerLeg {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub broadcast_id: Option<String>,
     pub id: String,
     #[serde(default)]
     pub platform: String,
@@ -1313,6 +1495,7 @@ fn parse_platform(id: &str) -> StreamPlatform {
 /// value lives in memory only and `Debug` never shows it.
 #[derive(Clone, PartialEq, Eq)]
 pub struct HandoverDestination {
+    pub broadcast_id: Option<String>,
     pub id: String,
     pub platform: String,
     pub label: String,
@@ -1350,13 +1533,16 @@ pub(crate) fn destinations_set_frame(
         "kind": "destinations.set",
         "destinations": destinations
             .iter()
-            .map(|destination| json!({
+            .map(|destination| { let mut value = json!({
                 "id": destination.id,
                 "platform": destination.platform,
                 "label": destination.label,
                 "orientation": destination.orientation,
                 "url": destination.url,
-            }))
+            });
+                if let Some(id) = &destination.broadcast_id { value["broadcastId"] = json!(id); }
+                value
+            })
             .collect::<Vec<_>>(),
     });
     if replace {
@@ -1438,6 +1624,8 @@ pub(crate) struct FailedShow {
 
 #[derive(Default)]
 pub struct CloudShowRuntime {
+    pub(crate) device: CloudDevice,
+    pub(crate) stopped_by: Option<CloudStoppedBy>,
     pub settings: CloudSettings,
     pub entitlement: CloudEntitlement,
     pub(crate) connected: bool,
@@ -1679,6 +1867,17 @@ impl CloudShowRuntime {
     pub fn status(&self) -> CloudStatus {
         let runner = self.runner.as_ref();
         CloudStatus {
+            on_air: runner.and_then(|r| r.on_air.as_ref()).and_then(|air| {
+                Some(CloudOnAirStatus {
+                    name: air.name.as_ref().map(|name| sanitize_device_name(name)),
+                    kind: air.kind.clone()?,
+                    source: air.source.clone()?,
+                    waiting: air.waiting,
+                    this_device: air.device_id.as_deref() == Some(&self.device.id),
+                    since: air.since.clone(),
+                })
+            }),
+            stopped_by: self.stopped_by,
             phase: self.phase(),
             entitled: self.entitlement.entitled(),
             plan: self.entitlement.plan,
@@ -3447,6 +3646,7 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
             return Ok(PrepareOutcome::Direct);
         }
         let request = CreateShowRequest {
+            device: Some(lock(&self.slot).device.clone()),
             kind: "solo".to_string(),
             outputs,
             hold_max_seconds,
@@ -3592,6 +3792,7 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
     ) -> Result<ResumeOutcome> {
         match self.web.current_show(bearer).await {
             Ok(CurrentShowResponse {
+                on_air: None,
                 show: Some(show),
                 control: Some(control),
                 ingest,
@@ -4204,6 +4405,11 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
                 break 'held Err(runtime.generation);
             }
             runtime.failed = None;
+            runtime.stopped_by = None;
+            runtime.runner = Some(RunnerState {
+                on_air: current.on_air.clone(),
+                ..RunnerState::default()
+            });
             runtime.show = Some(ActiveShow {
                 record: show.clone(),
                 control: control.clone(),
@@ -4796,6 +5002,7 @@ impl<W: CloudWebApi, C: ControlConnector> CloudTestRun<W, C> {
     async fn run_inner(&mut self) -> Option<CloudTestResult> {
         // 1. The show: `kind: "test"`, the same outputs a show would carry.
         let request = CreateShowRequest {
+            device: Some(lock(&self.context.slot).device.clone()),
             kind: "test".to_string(),
             outputs: self.outputs.clone(),
             hold_max_seconds: self.hold_max_seconds,
@@ -5035,6 +5242,7 @@ mod tests {
     fn destinations() -> Vec<HandoverDestination> {
         vec![
             HandoverDestination {
+                broadcast_id: None,
                 id: "youtube-main".to_string(),
                 platform: "youtube".to_string(),
                 label: "YouTube".to_string(),
@@ -5042,6 +5250,7 @@ mod tests {
                 url: format!("rtmps://a.rtmp.youtube.com/live2/{YOUTUBE_KEY}"),
             },
             HandoverDestination {
+                broadcast_id: None,
                 id: "twitch-main".to_string(),
                 platform: "twitch".to_string(),
                 label: "Twitch".to_string(),
@@ -5927,6 +6136,7 @@ mod tests {
         );
         // The create carried the room block the web parses.
         let request = CreateShowRequest {
+            device: None,
             kind: "talk".to_string(),
             outputs: Vec::new(),
             hold_max_seconds: 1800,
@@ -6137,6 +6347,7 @@ mod tests {
     fn held_talk_current() -> CurrentShowResponse {
         let created = created_talk();
         CurrentShowResponse {
+            on_air: None,
             show: Some(created.show.clone()),
             control: Some(created.control.clone()),
             ingest: None,
@@ -6296,6 +6507,7 @@ mod tests {
             .lock()
             .unwrap()
             .push_back(Ok(CurrentShowResponse {
+                on_air: None,
                 show: None,
                 control: None,
                 ingest: None,
@@ -6914,6 +7126,8 @@ mod tests {
             "/cloud/statusFallback",
             "/cloud/statusTest",
             "/cloud/statusTalk",
+            "/cloud/statusOnAirElsewhere",
+            "/cloud/statusWaiting",
         ] {
             let wire = high_risk_fixture(pointer);
             let status: CloudStatus = serde_json::from_value(wire.clone()).unwrap();
@@ -6936,6 +7150,29 @@ mod tests {
         assert_eq!(params.outputs.len(), 1);
         assert_eq!(params.outputs[0].video_kbps, 6000);
         assert_eq!(params.ffmpeg_path, None);
+    }
+
+    #[test]
+    fn cloud_device_names_are_plain_and_air_ids_stay_private() {
+        assert_eq!(
+            sanitize_device_name("  My\0Mac\u{0085}://studio  "),
+            "MyMac studio"
+        );
+        assert_eq!(sanitize_device_name(&"é".repeat(50)).chars().count(), 40);
+        assert_eq!(sanitize_device_name("\n"), "This computer");
+        let mut runtime = CloudShowRuntime::default();
+        let wire = json!({"onAir":{"deviceId":runtime.device.id,"name":"Mac", "kind":"computer","source":"feed","waiting":false,"since":"now"},"legs":[{"id":"yt","platform":"youtube","label":"YouTube","orientation":"horizontal","state":"live","broadcastId":"abc_123"}]});
+        runtime.runner = Some(serde_json::from_value(wire).unwrap());
+        assert_eq!(
+            runtime.runner.as_ref().unwrap().legs[0]
+                .broadcast_id
+                .as_deref(),
+            Some("abc_123")
+        );
+        let value = serde_json::to_value(runtime.status()).unwrap();
+        assert_eq!(value["onAir"]["thisDevice"], true);
+        assert!(value["onAir"].get("deviceId").is_none());
+        assert!(!format!("{:?}", runtime.device).contains(&runtime.device.id));
     }
 
     #[test]
@@ -7171,12 +7408,14 @@ mod tests {
             ("something-new", StreamTargetState::Warning),
         ] {
             let leg = RunnerLeg {
+                broadcast_id: None,
                 state: wire.to_string(),
                 ..RunnerLeg::default()
             };
             assert_eq!(runner_leg_to_runtime(&leg).state, expected, "{wire}");
         }
         let unknown_platform = RunnerLeg {
+            broadcast_id: None,
             platform: "mastodon-live".to_string(),
             ..RunnerLeg::default()
         };
@@ -8144,6 +8383,7 @@ mod tests {
             .lock()
             .unwrap()
             .push_back(Ok(CurrentShowResponse {
+                on_air: None,
                 show: Some(ShowRecord {
                     status: "live".to_string(),
                     ..created.show.clone()
@@ -8176,6 +8416,7 @@ mod tests {
             .lock()
             .unwrap()
             .push_back(Ok(CurrentShowResponse {
+                on_air: None,
                 show: Some(ShowRecord {
                     status: "live".to_string(),
                     ..created.show.clone()
@@ -8252,6 +8493,7 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push_back(Ok(CurrentShowResponse {
+                    on_air: None,
                     show: Some(stale.clone()),
                     control: Some(stale_control.clone()),
                     ingest: None,
@@ -8310,6 +8552,7 @@ mod tests {
             .lock()
             .unwrap()
             .push_back(Ok(CurrentShowResponse {
+                on_air: None,
                 show: None,
                 control: None,
                 ingest: None,
@@ -8350,6 +8593,7 @@ mod tests {
             .lock()
             .unwrap()
             .push_back(Ok(CurrentShowResponse {
+                on_air: None,
                 show: Some(created.show.clone()),
                 control: Some(created.control.clone()),
                 ingest: None,
@@ -8371,6 +8615,7 @@ mod tests {
             .lock()
             .unwrap()
             .push_back(Ok(CurrentShowResponse {
+                on_air: None,
                 show: Some(created.show.clone()),
                 control: Some(created.control.clone()),
                 ingest: None,
@@ -8684,6 +8929,7 @@ mod tests {
     /// `GET current` for the held show: no ingest (the web never stores it).
     fn held_current(created: &CreateShowResponse) -> CurrentShowResponse {
         CurrentShowResponse {
+            on_air: None,
             show: Some(ShowRecord {
                 status: "hold".to_string(),
                 ..created.show.clone()
@@ -9381,6 +9627,7 @@ mod tests {
         assert_eq!(info.app, "desktop");
         assert_eq!(info.version, "0.9.143");
         let wire = serde_json::to_value(&CreateShowRequest {
+            device: None,
             kind: "solo".to_string(),
             outputs: Vec::new(),
             hold_max_seconds: 1800,
@@ -10362,6 +10609,7 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push_back(Ok(CurrentShowResponse {
+                    on_air: None,
                     show: Some(created.show.clone()),
                     control: Some(created.control.clone()),
                     ingest: None,
@@ -10455,6 +10703,7 @@ mod tests {
             .lock()
             .unwrap()
             .push_back(Ok(CurrentShowResponse {
+                on_air: None,
                 show: Some(ShowRecord {
                     status: "live".to_string(),
                     ..created().show
@@ -10493,6 +10742,7 @@ mod tests {
             .lock()
             .unwrap()
             .push_back(Ok(CurrentShowResponse {
+                on_air: None,
                 show: Some(ShowRecord {
                     status: "ended".to_string(),
                     ..created().show
@@ -10800,6 +11050,7 @@ mod tests {
     fn managed_current(status: &str) -> CurrentShowResponse {
         let created = created_managed();
         CurrentShowResponse {
+            on_air: None,
             show: Some(ShowRecord {
                 status: status.to_string(),
                 ..created.show
@@ -11922,6 +12173,7 @@ mod tests {
         let web = harness.context.web.clone();
         web.set_state(managed_state("hold", live_legs()));
         let unlisted = || CurrentShowResponse {
+            on_air: None,
             ingest: None,
             ..managed_current("hold")
         };
@@ -13374,6 +13626,7 @@ mod tests {
         let held = || {
             let created = created_managed_talk();
             CurrentShowResponse {
+                on_air: None,
                 show: Some(ShowRecord {
                     status: "live".to_string(),
                     ..created.show

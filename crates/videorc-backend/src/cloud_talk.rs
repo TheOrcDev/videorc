@@ -1491,6 +1491,7 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
         let hold_max_seconds = lock(&self.slot).settings.hold_max_seconds;
         let platforms = params.platforms.clone().unwrap_or_default();
         let request = CreateShowRequest {
+            device: Some(lock(&self.slot).device.clone()),
             kind: "talk".to_string(),
             outputs,
             hold_max_seconds,

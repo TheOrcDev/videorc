@@ -27656,7 +27656,7 @@ async fn prepare_cloud_stream_targets(
     let mut tls = None;
     let targets = resolution.ready;
     let outputs = cloud_output_specs(&params.output.video, &targets);
-    let destinations = cloud_handover_destinations(&targets);
+    let destinations = cloud_handover_destinations(&targets, params.streaming.as_ref());
     let outcome = context
         .prepare_session_with_feed_setup(
             session_id,
@@ -27842,15 +27842,26 @@ fn cloud_talk_handover_with(
             platforms.push(platform);
         }
     }
-    Ok((cloud_handover_destinations(&targets), platforms))
+    Ok((
+        cloud_handover_destinations(&targets, Some(&streaming)),
+        platforms,
+    ))
 }
 
 fn cloud_handover_destinations(
     targets: &[StreamTarget],
+    streaming: Option<&StreamingSettings>,
 ) -> Vec<crate::cloud_show::HandoverDestination> {
     targets
         .iter()
         .map(|target| crate::cloud_show::HandoverDestination {
+            broadcast_id: streaming
+                .and_then(|s| {
+                    s.targets
+                        .iter()
+                        .find(|t| t.id == target.target_id && t.platform == StreamPlatform::Youtube)
+                })
+                .and_then(|t| t.platform_broadcast_id.clone()),
             id: target.target_id.clone(),
             platform: crate::streaming::stream_platform_id(target.platform).to_string(),
             label: target.label.clone(),
@@ -28620,7 +28631,7 @@ mod cloud_seam_tests {
 
     #[test]
     fn handover_carries_plain_keys_that_debug_never_shows() {
-        let destinations = cloud_handover_destinations(&platforms());
+        let destinations = cloud_handover_destinations(&platforms(), None);
         assert_eq!(destinations.len(), 3);
         assert_eq!(destinations[0].platform, "youtube");
         assert_eq!(destinations[0].orientation, "horizontal");
