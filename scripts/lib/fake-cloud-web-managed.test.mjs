@@ -13,6 +13,7 @@ import {
   managedPath,
   maskManagedUrls,
   managedVersionAllowed,
+  managedHandoffAllowed,
   destinationProblem
 } from './fake-cloud-web-managed.mjs'
 
@@ -64,7 +65,7 @@ async function fixture(t, options = {}) {
   })
   t.after(() => web.close())
   const call = async (name, body, id, headers = {}) => {
-    const route = w.routes[name]
+    const route = w.routes[name] ?? { method: 'POST' }
     const res = await fetch(`${web.httpOrigin}${managedPath(name, id)}`, {
       method: route.method,
       headers: {
@@ -656,7 +657,9 @@ test('renderer smoke snippets parse without evaluating or launching the app', as
   const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor
   for (const name of [
     'smoke-cloud-solo-managed-app.mjs',
-    'smoke-cloud-talk-show-managed-app.mjs'
+    'smoke-cloud-talk-show-managed-app.mjs',
+    'lib/cloud-managed-smoke.mjs',
+    'lib/cloud-managed-room.mjs'
   ]) {
     const source = readFileSync(new URL(`../${name}`, import.meta.url), 'utf8')
     const ast = ts.createSourceFile(name, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS)
@@ -667,12 +670,16 @@ test('renderer smoke snippets parse without evaluating or launching the app', as
         ts.isPropertyAccessExpression(node.expression) &&
         node.expression.name.text === 'eval' &&
         node.arguments[0] &&
-        ts.isStringLiteral(node.arguments[0])
+        (ts.isStringLiteral(node.arguments[0]) ||
+          ts.isNoSubstitutionTemplateLiteral(node.arguments[0]) ||
+          ts.isTemplateExpression(node.arguments[0]))
       ) {
-        assert.doesNotThrow(
-          () => new AsyncFunction('params', node.arguments[0].text),
-          `${name}: renderer snippet`
-        )
+        const expression = node.arguments[0]
+        const code = ts.isTemplateExpression(expression)
+          ? expression.head.text +
+            expression.templateSpans.map((span) => 'null' + span.literal.text).join('')
+          : expression.text
+        assert.doesNotThrow(() => new AsyncFunction('params', code), `${name}: renderer snippet`)
         snippets++
       }
       ts.forEachChild(node, visit)
@@ -680,4 +687,272 @@ test('renderer smoke snippets parse without evaluating or launching the app', as
     visit(ast)
     if (name.includes('talk')) assert.ok(snippets > 4)
   }
+})
+
+// Plan 243 C6: route-level fakes; no app, media process or cloud service.
+const device = (id, kind = 'computer') => ({
+  id: id.repeat(22),
+  name: kind === 'phone' ? 'Smoke phone' : 'Smoke computer',
+  kind
+})
+const currentClient = { app: 'desktop', version: '0.29.0' }
+test('handoff version gate refuses malformed and pre-0.29 desktop versions', () => {
+  for (const version of ['0.29.0', '0.29.0-beta.1', '1.0.0'])
+    assert.ok(managedHandoffAllowed(version))
+  for (const version of [undefined, 'garbage', '0.28.99', '0.9.0'])
+    assert.equal(managedHandoffAllowed(version), false)
+})
+test('device create/current/state, broadcastId, page viewer and scrub match plan 243', async (t) => {
+  const { web, call, create } = await fixture(t)
+  const a = device('A')
+  const id = await create('solo', { device: a, client: currentClient })
+  const current = (await call('current')).body
+  assert.equal(current.onAir.deviceId, a.id)
+  assert.equal(current.onAir.source, 'feed')
+  const old = await call('current', undefined, undefined, {
+    'user-agent': 'Videorc-Desktop/0.28.2'
+  })
+  assert.equal(old.body.ingest, undefined)
+  assert.ok(
+    (await call('current', undefined, undefined, { 'user-agent': 'Videorc-Desktop/0.29.0' })).body
+      .ingest.length
+  )
+  const s = web.shows.get(id)
+  assert.equal(s.lastDesktopSeen, undefined)
+  const poll = async (viewer) =>
+    (
+      await fetch(`${web.httpOrigin}${managedPath('state', id)}${viewer ? '?viewer=page' : ''}`, {
+        headers: { authorization: `Bearer ${web.sessionToken}` }
+      })
+    ).json()
+  assert.equal((await poll(true)).state.onAir.deviceId, a.id)
+  assert.equal(s.lastDesktopSeen, undefined)
+  await poll(false)
+  const seen = s.lastDesktopSeen
+  await poll(true)
+  assert.equal(s.lastDesktopSeen, seen)
+  const d = { ...dest(), platform: 'youtube', broadcastId: 'live_123-abc' }
+  assert.equal((await call('destinations', { destinations: [d] }, id)).status, 200)
+  assert.equal(web.snapshot(id).state.legs[0].broadcastId, d.broadcastId)
+  assert.equal(
+    (await call('destinations', { destinations: [{ ...d, broadcastId: 'invalid id' }] }, id))
+      .status,
+    400
+  )
+  assert.equal(JSON.stringify(web.calls).includes(a.id), false)
+  assert.equal(JSON.stringify(web.calls).includes(a.name), false)
+  await call('end', {}, id)
+  assert.equal(s.state.onAir, undefined)
+  assert.equal(s.feedDeviceId, undefined)
+  assert.equal(s.creatingDeviceId, undefined)
+  assert.deepEqual(s.state.legs, [])
+})
+test('hand off only marks the current device waiting; errors never end a show', async (t) => {
+  const { web, call, create } = await fixture(t)
+  const a = device('A'),
+    b = device('B')
+  const id = await create('solo', { device: a, client: currentClient })
+  const before = web.snapshot(id).rev
+  assert.equal(
+    (await call('handOff', { device: { id: b.id } }, id)).body.error.code,
+    'cloud-not-on-air'
+  )
+  const handed = await call('handOff', { device: { id: a.id } }, id)
+  assert.equal(handed.status, 200)
+  assert.ok(handed.body.rev > before)
+  assert.equal(handed.body.onAir.waiting, true)
+  assert.equal(
+    JSON.stringify(web.calls).includes(a.id),
+    false,
+    'minimal hand-off body must mask its device id'
+  )
+  assert.equal(web.shows.get(id).show.endedAt, null)
+  assert.equal(web.calls.filter((c) => c.route === 'end').length, 0)
+  web.hooks.failNext('handOff', 1, 503)
+  assert.equal((await call('handOff', { device: { id: a.id } }, id)).status, 503)
+  assert.equal(web.shows.get(id).show.endedAt, null)
+})
+test('feed prepare rotates a different computer, retains the same computer and retires the old ingress', async (t) => {
+  const rotations = []
+  const { web, call, create } = await fixture(t, {
+    rotateIngest: async (change) => rotations.push(change)
+  })
+  const a = device('A'),
+    b = device('B')
+  const id = await create('solo', { device: a, client: currentClient })
+  const initial = structuredClone(web.shows.get(id).ingest)
+  const claim = (d, step) => call('onAir', { device: d, source: 'feed', step }, id)
+  assert.deepEqual((await claim(a, 'prepare')).body.ingest, initial)
+  assert.equal(rotations.length, 0)
+  const next = await claim(b, 'prepare')
+  assert.equal(next.body.onAir.deviceId, b.id)
+  assert.equal(next.body.onAir.waiting, false)
+  assert.equal(rotations.length, 1)
+  assert.notEqual(next.body.ingest[0].streamKey, initial[0].streamKey)
+  assert.deepEqual(rotations[0].previous, initial[0])
+  assert.equal(web.snapshot(id).state.feeds[0].connected, false)
+  assert.equal((await claim(b, 'go')).status, 200)
+  assert.deepEqual((await claim(b, 'prepare')).body.ingest, next.body.ingest)
+  assert.equal(rotations.length, 1)
+})
+test('camera prepare stays off air, go needs camera publication; feed go needs post-claim publishing for every output', async (t) => {
+  const { web, call, create } = await fixture(t)
+  const a = device('A'),
+    b = device('B'),
+    phone = device('P', 'phone')
+  const id = await create('solo', {
+    device: a,
+    client: currentClient,
+    outputs: [output, { ...output, orientation: 'vertical' }]
+  })
+  const claim = (d, source, step) => call('onAir', { device: d, source, step }, id)
+  const prepared = await claim(phone, 'camera', 'prepare')
+  assert.equal(prepared.body.room.identity, `d_${phone.id}`)
+  assert.equal(prepared.body.onAir.deviceId, a.id)
+  assert.equal((await claim(phone, 'camera', 'go')).body.error.code, 'cloud-source-not-ready')
+  web.hooks.camera(id, phone.id, true)
+  assert.equal((await claim(phone, 'camera', 'go')).body.onAir.deviceId, phone.id)
+  web.hooks.feed(id, true)
+  const previousClaim = web.shows.get(id).feedClaim
+  const feed = await claim(b, 'feed', 'prepare')
+  assert.equal(feed.body.onAir.deviceId, phone.id)
+  assert.equal((await claim(b, 'feed', 'go')).status, 409)
+  web.hooks.feed(id, true, { claim: previousClaim })
+  assert.equal((await claim(b, 'feed', 'go')).status, 409)
+  const claimId = web.shows.get(id).feedClaim
+  web.hooks.feed(id, true, { claim: claimId, orientation: 'horizontal' })
+  assert.equal((await claim(b, 'feed', 'go')).status, 409)
+  web.hooks.feed(id, true, { claim: claimId, orientation: 'vertical' })
+  assert.equal((await claim(b, 'feed', 'go')).body.onAir.deviceId, b.id)
+})
+test('D8 refuses another device on old desktop shows, exempts their creator, and refuses test/node/source mismatches', async (t) => {
+  const { web, call, create } = await fixture(t)
+  const a = device('A'),
+    b = device('B')
+  const id = await create('solo', { device: a, client: { app: 'desktop', version: '0.28.2' } })
+  const claim = (id, d, source = 'feed', step = 'prepare') =>
+    call('onAir', { device: d, source, step }, id)
+  assert.equal((await claim(id, b)).body.error.code, 'cloud-handoff-update')
+  assert.equal((await claim(id, a)).status, 200)
+  assert.equal((await claim(id, b, 'host')).body.error.code, 'cloud-handoff-unsupported')
+  const testId = await create('test', { client: currentClient, device: a })
+  assert.equal((await claim(testId, b)).body.error.code, 'cloud-handoff-unsupported')
+  const talkId = await create('talk', { client: currentClient, device: a })
+  assert.equal((await claim(talkId, b, 'camera')).body.error.code, 'cloud-handoff-unsupported')
+  web.hooks.legacyControl(talkId, { url: 'ws://127.0.0.1:1', token: 'local-fixture' })
+  assert.equal((await claim(talkId, b, 'host')).body.error.code, 'cloud-handoff-unsupported')
+  await call('end', {}, id)
+  assert.equal((await claim(id, b)).body.error.code, 'cloud-show-ended')
+})
+test('host go returns the host seat token without removing the current host or stage', async (t) => {
+  const { web, call, create } = await fixture(t)
+  const a = device('A'),
+    phone = device('P', 'phone')
+  const id = await create('talk', { client: currentClient, device: a })
+  web.hooks.patch(id, (s) => {
+    s.room.participants = [{ identity: `host:${id}`, role: 'host' }]
+  })
+  const stage = structuredClone(web.snapshot(id).state.room.stage)
+  const oldRev = web.snapshot(id).rev
+  const prepare = await call('onAir', { device: phone, source: 'host', step: 'prepare' }, id)
+  assert.equal(prepare.body.rev, oldRev)
+  assert.equal(prepare.body.onAir.deviceId, a.id)
+  const go = await call('onAir', { device: phone, source: 'host', step: 'go' }, id)
+  assert.equal(go.body.room.identity, `host:${id}`)
+  assert.equal(go.body.onAir.deviceId, phone.id)
+  assert.deepEqual(web.snapshot(id).state.room.stage, stage)
+  assert.equal(web.snapshot(id).state.room.participants[0].identity, `host:${id}`)
+  assert.equal(web.calls.filter((c) => c.route === 'end').length, 0)
+})
+
+test('camera tokens carry only camera/microphone publishing grants with a ten-minute TTL', async (t) => {
+  const { call, create } = await fixture(t, {
+    livekit: {
+      url: 'ws://127.0.0.1:1',
+      apiKey: randomBytes(12).toString('hex'),
+      apiSecret: randomBytes(32).toString('hex')
+    }
+  })
+  const id = await create('solo', { device: device('A'), client: currentClient })
+  const result = await call(
+    'onAir',
+    { device: device('P', 'phone'), source: 'camera', step: 'prepare' },
+    id
+  )
+  const claims = JSON.parse(Buffer.from(result.body.room.token.split('.')[1], 'base64url'))
+  // The maintained token helper uses nbf with ten seconds of clock skew,
+  // rather than an iat claim; expiry itself stays ten minutes from minting.
+  assert.equal(claims.exp - claims.nbf, 610)
+  assert.ok(Math.abs(claims.exp - Math.floor(Date.now() / 1000) - 600) <= 1)
+  assert.deepEqual(claims.video, {
+    room: id,
+    roomJoin: true,
+    canPublish: true,
+    canPublishSources: ['camera', 'microphone'],
+    canSubscribe: false,
+    canPublishData: false
+  })
+})
+
+test('configured feature build models its shipping version while other old desktop shows keep D8', async (t) => {
+  const { call, create } = await fixture(t, { buildVersion: '0.28.2' })
+  const a = device('A'),
+    b = device('B')
+  const id = await create('solo', { device: a, client: { app: 'desktop', version: '0.28.2' } })
+  assert.equal(
+    (await call('onAir', { device: b, source: 'feed', step: 'prepare' }, id)).status,
+    200
+  )
+  const old = await create('solo', { device: a, client: { app: 'desktop', version: '0.28.1' } })
+  assert.equal(
+    (await call('onAir', { device: b, source: 'feed', step: 'prepare' }, old)).body.error.code,
+    'cloud-handoff-update'
+  )
+})
+test('competing feed prepares serialize rotation under the show claim', async (t) => {
+  let entered, release
+  const started = new Promise((resolve) => {
+    entered = resolve
+  })
+  const held = new Promise((resolve) => {
+    release = resolve
+  })
+  let rotations = 0
+  const { web, call, create } = await fixture(t, {
+    rotateIngest: async () => {
+      if (++rotations === 1) {
+        entered()
+        await held
+      }
+    }
+  })
+  const id = await create('solo', { device: device('A'), client: currentClient })
+  const b = call('onAir', { device: device('B'), source: 'feed', step: 'prepare' }, id)
+  await started
+  const c = call('onAir', { device: device('C'), source: 'feed', step: 'prepare' }, id)
+  release()
+  assert.equal((await b).status, 200)
+  assert.equal((await c).status, 200)
+  assert.equal(rotations, 2)
+  assert.ok(web.snapshot(id).state.onAir.deviceId === device('C').id)
+})
+
+test('local sink publish authorization retires the old ingress path after rotation', async (t) => {
+  const { managedPublishAllowed } = await import('./cloud-managed-smoke.mjs')
+  const { web, call, create } = await fixture(t)
+  const id = await create('solo', { device: device('A'), client: currentClient })
+  const old = web.shows.get(id).ingest[0]
+  const pathFor = (i) => new URL(i.serverUrl).pathname.slice(1) + '/' + i.streamKey
+  assert.equal(managedPublishAllowed(web.shows, { action: 'publish', path: pathFor(old) }), true)
+  const prepared = await call('onAir', { device: device('B'), source: 'feed', step: 'prepare' }, id)
+  assert.equal(managedPublishAllowed(web.shows, { action: 'publish', path: pathFor(old) }), false)
+  assert.equal(
+    managedPublishAllowed(web.shows, { action: 'publish', path: pathFor(prepared.body.ingest[0]) }),
+    true
+  )
+  await call('end', {}, id)
+  assert.equal(
+    managedPublishAllowed(web.shows, { action: 'publish', path: pathFor(prepared.body.ingest[0]) }),
+    false
+  )
 })

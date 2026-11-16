@@ -382,6 +382,77 @@ try {
     }
   )
   await step(
+    'phone host go leaves the desktop seated until DUPLICATE_IDENTITY, then Continue here takes it back',
+    async () => {
+      await h.rpc('cloud.show.goLive', { streaming: h.streaming() })
+      await h.status((s) => s.room?.client === 'connected', 'desktop host before continuation')
+      const before = structuredClone(h.web.snapshot(h.showId).state.room.stage)
+      const phone = h.newDevice()
+      const at = Date.now()
+      const go = await h.webRequest('on-air', { device: phone, source: 'host', step: 'go' })
+      assert.equal(go.status, 200)
+      assert.ok(go.body.room?.identity === host)
+      // Announcing host/go is not a successful host join. In particular a
+      // failed phone join must not remove the desktop's camera and guests.
+      await holdFor(
+        async () => {
+          const status = await h.rpc('cloud.status')
+          return status.room?.client === 'connected' && !status.stoppedBy
+        },
+        'onAir alone removed the desktop host',
+        4000
+      )
+      h.assertNoPlatformEnd(at)
+      const joinedAt = Date.now()
+      await listener.joinHost(go.body.room)
+      await h.status(
+        (s) => s.stoppedBy === 'taken-over' && s.show?.resumable && !s.room,
+        'confirmed duplicate host releases desktop seat',
+        10000
+      )
+      assert.ok(
+        h.events.some(
+          (e) =>
+            e.atMs >= joinedAt && e.event === 'cloud.state' && e.payload.stoppedBy === 'taken-over'
+        ),
+        'takeover requires the real second host join'
+      )
+      assert.ok(
+        await h.eval(
+          `return document.body.textContent.includes('Your show continues on Smoke phone.')`
+        ),
+        'host takeover toast missing'
+      )
+      await holdFor(
+        () => {
+          const room = h.web.snapshot(h.showId).state.room
+          return (
+            guests.every((id) => room.participants.some((p) => p.identity === id)) &&
+            !h.web.shows.get(h.showId).show.endedAt
+          )
+        },
+        'guests or room ended during host move',
+        3000
+      )
+      assert.deepEqual(h.web.snapshot(h.showId).state.room.stage, before)
+      await h.continueUi()
+      await h.status(
+        (s) => s.room?.client === 'connected' && s.onAir?.thisDevice,
+        'desktop continues as host',
+        60000
+      )
+      await waitFor(
+        () => listener.hostWasReplaced(),
+        'browser host displaced by desktop duplicate identity'
+      )
+      assert.deepEqual(h.web.snapshot(h.showId).state.room.stage, before)
+      assert.ok(h.calls('onAir', at).some((c) => c.body.source === 'host' && c.body.step === 'go'))
+      h.assertNoPlatformEnd(at)
+      await listener.leave(host)
+      h.scanLeaks()
+    }
+  )
+  await step(
     'relaunch Resume sends no stage and no destinations; 401 then sign-in regains room controls',
     async () => {
       // stageSet stays true once a PUT stage succeeded, so the desktop never

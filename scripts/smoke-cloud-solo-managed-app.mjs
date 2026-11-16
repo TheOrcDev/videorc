@@ -12,7 +12,7 @@
  * prove the program page's hold-card pixels: that remains a required D18 gate.
  */
 import assert from 'node:assert/strict'
-import { managedHarness, OUTPUT, waitFor, holdFor } from './lib/cloud-managed-smoke.mjs'
+import { managedHarness, OUTPUT, waitFor, holdFor, playable } from './lib/cloud-managed-smoke.mjs'
 import { assertManagedProgramHold } from './lib/cloud-managed-program.mjs'
 import { managedWire as w } from './lib/fake-cloud-web-managed.mjs'
 
@@ -155,7 +155,7 @@ async function run(pass) {
       h.assertNoDirect()
     })
     await step(
-      'SIGKILL then Resume keeps ingress, sends no destinations, and cannot reconnect without URLs',
+      'SIGKILL then Resume keeps ingress, retains live legs and rebuilds reconnect candidates',
       async () => {
         const ingress = structuredClone(h.web.shows.get(h.showId).ingest)
         await h.kill()
@@ -170,13 +170,11 @@ async function run(pass) {
           3000
         )
         assert.deepEqual(h.web.shows.get(h.showId).ingest, ingress)
-        // Wire 8.4 item 6: a desktop resumed after a relaunch holds no URL, so
-        // it cannot reconnect one destination; it says so and sends nothing.
-        await assert.rejects(
-          h.rpc('cloud.show.reconnectDestination', { targetId: targets[0].id }),
-          /holds this show's keys from before the restart/
-        )
-        assert.equal(h.calls('destinations', at).length, 0)
+        // Plan 243 D3: this profile still owns its saved keys. Resume
+        // retains the live leg ids and sends a candidate only on Reconnect.
+        await h.rpc('cloud.show.reconnectDestination', { targetId: targets[0].id })
+        assert.equal(h.calls('destinations', at).length, 1)
+        assert.equal(h.calls('destinations', at)[0].body.destinations[0].id, targets[0].id)
         h.assertNoDirect()
       }
     )
@@ -248,10 +246,207 @@ async function run(pass) {
       await h.rpc('session.stop')
       h.assertNoDirect()
     })
+    // Plan 243 C6: these are product actions, including the renderer's
+    // broadcast owner. A bare backend start would make the complete check vacuous.
+    const continuationAt = Date.now()
+    await step(
+      'hand off through the dialog preserves YouTube and saves the recording',
+      async () => {
+        await h.addYouTube()
+        const started = await h.startUiLive()
+        h.showId = started.show.id
+        const recording = await h.rpc('recording.status')
+        assert.equal(recording.state, 'recording')
+        assert.ok(
+          [...h.youtube.broadcasts.values()].some((b) => b.status.lifeCycleStatus === 'live'),
+          'renderer must own a live prepared YouTube broadcast'
+        )
+        assert.ok(
+          h.web
+            .snapshot(h.showId)
+            .state.legs.some((l) => l.platform === 'youtube' && l.broadcastId),
+          'broadcastId must reach cloud legs'
+        )
+        const frames = h.feedFrames.length
+        await waitFor(() => h.feedFrames.length >= frames + 45, 'recording contains decoded frames')
+        const at = Date.now()
+        await h.handOffUi()
+        await waitFor(
+          async () => (await h.rpc('recording.status')).state === 'idle',
+          'hand-off terminal status'
+        )
+        await h.status(
+          (s) => s.stoppedBy === 'hand-off' && s.show?.resumable && s.onAir?.waiting,
+          'waiting after hand-off'
+        )
+        assert.equal(h.calls('handOff', at).length, 1)
+        h.assertStopOrder(at, 'hand-off')
+        h.assertNoPlatformEnd(at)
+        const saved = await waitFor(
+          async () => {
+            const page = await h.rpc('sessions.list', { limit: 100 })
+            return page.items.find(
+              (item) =>
+                item.id === recording.sessionId && item.mp4Path && item.status === 'completed'
+            )
+          },
+          'handed-off recording finalized in Library',
+          90000
+        )
+        playable(h, saved.mp4Path)
+        assert.ok(
+          await h.eval(
+            `return Boolean(document.querySelector('[data-testid=cloud-continue-pointer]')?.textContent?.includes('videorc.com/live/continue'))`
+          ),
+          'phone pointer missing'
+        )
+        h.scanLeaks()
+      }
+    )
+    await step(
+      'Continue here on the same computer keeps ingress and streams without a new recording',
+      async () => {
+        const before = structuredClone(h.web.shows.get(h.showId).ingest)
+        const at = Date.now()
+        await h.continueUi()
+        await h.status(
+          (s) => s.sessionId && s.onAir?.thisDevice && !s.onAir.waiting,
+          'same computer continued',
+          45000
+        )
+        const recording = await h.rpc('recording.status')
+        assert.equal(
+          recording.state,
+          'streaming',
+          'Resume must stream without starting another local recording'
+        )
+        assert.deepEqual(h.web.shows.get(h.showId).ingest, before)
+        assert.ok(
+          h.calls('onAir', at).some((c) => c.body.source === 'feed' && c.body.step === 'prepare')
+        )
+        assert.equal(h.calls('destinations', at).length, 0)
+        h.assertNoPlatformEnd(at)
+      }
+    )
+    await step(
+      'a fake phone takes over within three seconds, names it and never ends a platform',
+      async () => {
+        const phone = h.newDevice()
+        assert.equal(
+          (await h.webRequest('on-air', { device: phone, source: 'camera', step: 'prepare' }))
+            .status,
+          200
+        )
+        h.web.hooks.camera(h.showId, phone.id, true)
+        const at = Date.now()
+        assert.equal(
+          (await h.webRequest('on-air', { device: phone, source: 'camera', step: 'go' })).status,
+          200
+        )
+        await waitFor(
+          async () => (await h.rpc('recording.status')).state === 'idle',
+          'phone takeover stop',
+          3000
+        )
+        const status = await h.status(
+          (s) => s.stoppedBy === 'taken-over' && s.show?.resumable && s.onAir?.kind === 'phone',
+          'phone takeover notice'
+        )
+        assert.ok(status.onAir.name === 'Smoke phone')
+        const terminal = h.events.find(
+          (e) => e.atMs >= at && e.event === 'recording.status' && e.payload.state === 'idle'
+        )
+        assert.ok(terminal && terminal.atMs - at <= 3000, 'taken-over stop exceeded three seconds')
+        h.assertStopOrder(at, 'taken-over')
+        h.assertNoPlatformEnd(at)
+        assert.ok(
+          await h.eval(
+            `return document.body.textContent.includes('Your show continues on Smoke phone.')`
+          ),
+          'neutral takeover toast missing'
+        )
+        await waitFor(
+          () =>
+            h.eval(
+              `return document.querySelector('[data-testid=cloud-resume-notice]')?.textContent.includes('Your show is live from Smoke phone.')`
+            ),
+          'notice names the phone'
+        )
+      }
+    )
+    await step(
+      'a fresh computer continues with rotation, matching-key reconnect and changed-key refusal',
+      async () => {
+        const oldDevice = h.deviceId
+        const oldIngress = structuredClone(h.web.shows.get(h.showId).ingest[0])
+        const liveLeg = h.web.snapshot(h.showId).state.legs.find((l) => l.platform === 'custom')
+        const at = Date.now()
+        await h.freshComputer()
+        assert.ok(h.deviceId !== oldDevice, 'computer B needs a new identity')
+        await h.status(
+          (s) => s.show?.id === h.showId && s.show.resumable && s.onAir?.kind === 'phone',
+          'computer B discovers current show'
+        )
+        assert.equal(h.calls('create', at).length, 0)
+        await h.continueUi()
+        await h.status(
+          (s) => s.onAir?.thisDevice && s.onAir.source === 'feed' && s.sessionId,
+          'computer B on air',
+          60000
+        )
+        assert.ok(
+          h.web.shows.get(h.showId).ingest[0].streamKey !== oldIngress.streamKey,
+          'computer B must rotate the ingress'
+        )
+        assert.ok(
+          h.calls('onAir', at).some((c) => c.body.step === 'go' && c.body.source === 'feed'),
+          'camera to feed needs go'
+        )
+        await h.assertRetiredIngress(oldIngress)
+        assert.equal((await h.rpc('recording.status')).state, 'streaming')
+        assert.equal(h.calls('destinations', at).length, 0, 'Resume must retain platform legs')
+        h.web.hooks.failLeg(h.showId, liveLeg.id)
+        const reconnectAt = Date.now()
+        await h.rpc('cloud.show.reconnectDestination', { targetId: liveLeg.id })
+        const sent = h.calls('destinations', reconnectAt)[0]
+        assert.equal(sent.status, 200)
+        assert.equal(sent.body.destinations.length, 1)
+        assert.equal(sent.body.destinations[0].id, liveLeg.id)
+        assert.ok(
+          h.targets.every((t) => t.id !== liveLeg.id),
+          'candidate must use the live leg id rather than B target ids'
+        )
+        assert.equal(sent.body.replace, undefined)
+        // A new resume reads B's changed local key. It may never reconnect a
+        // different platform stream under this show's existing leg.
+        await h.handOffUi()
+        await h.status((s) => s.stoppedBy === 'hand-off' && s.show?.resumable, 'B hand-off')
+        await h.replaceSavedKey(h.targets.find((t) => t.label === liveLeg.label).id)
+        await h.continueUi()
+        await h.status(
+          (s) => s.sessionId && s.onAir?.thisDevice,
+          'B resumes with changed local key',
+          45000
+        )
+        const refusalAt = Date.now()
+        await assert.rejects(
+          h.rpc('cloud.show.reconnectDestination', { targetId: liveLeg.id }),
+          /does not match|destination-changed/
+        )
+        assert.ok(
+          h.calls('destinations', refusalAt).some((c) => c.status === 422),
+          'different saved key must be refused'
+        )
+        h.assertNoPlatformEnd(continuationAt)
+        h.assertNoDirect()
+        h.scanLeaks()
+        await h.rpc('session.stop')
+      }
+    )
     await step('unknown control kind ends cloud before direct streaming', async () => {
       h.web.hooks.controlKind('future-smoke-kind')
       const at = Date.now()
-      await h.rpc('session.start', await h.sessionParams(targets.slice(0, 1)))
+      await h.rpc('session.start', await h.sessionParams(h.targets.slice(0, 1)))
       await waitFor(() => h.directConnections.some((c) => c.atMs >= at), 'direct fallback socket')
       const ended = h.calls('end', at)[0]
       assert.equal(ended?.status, 200)
