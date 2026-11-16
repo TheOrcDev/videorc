@@ -1201,3 +1201,21 @@ It sends neither `/hand-off` nor `/end`. Destination recovery is invalidated
 and feed notices are suppressed after takeover. Old-feed failures wait three
 seconds for the corresponding state poll, covering ingress rotation arriving
 before `onAir`. The renderer owns LiveKit's duplicate-identity event (C5).
+
+C4 / W2, W4 (D2, D3, D6, D10): managed solo Resume calls `on-air`
+`feed/prepare` and uses only its returned ingress. After local startup, a
+browser-to-feed continuation waits up to 20 seconds for every output's
+connected feed, then retries `feed/go` once a second for up to 20 seconds.
+Failure stops this computer through the continuation intent, leaving Resume
+available. Talk Resume calls `host/go` before joining. Node Resume retains
+its existing transport. Idle signed-in discovery checks current every 60
+seconds; renderer-only `cloud.show.check {}` checks on focus with a shared
+10-second minimum interval.
+
+A resumed computer holds its hydrated enabled destinations as in-memory
+reconnect candidates. Platform and orientation must match, with a unique
+label match when ambiguous. Every reconnect and automatic resend uses the
+existing live leg's id, never `replace` or a new id. The server's
+`destination-changed` refusal names a mismatching saved key without exposing
+it. Chat uses the live YouTube leg's `broadcastId`. No destination URL or
+key is persisted or transferred between devices.

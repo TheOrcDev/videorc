@@ -27736,6 +27736,10 @@ async fn resume_cloud_stream_targets(
             cloud_hold_image(state),
         )
         .await?;
+    context.set_reconnect_candidates(cloud_handover_destinations(
+        &resolution.ready,
+        params.streaming.as_ref(),
+    ));
     let feeds = cloud_resume_feed_targets(
         &handover.ingest,
         &resolution.ready,

@@ -2276,6 +2276,25 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
             }
             return Ok(lock(&self.slot).status());
         }
+        let managed = lock(&self.slot)
+            .show
+            .as_ref()
+            .is_some_and(|show| show.control.transport_kind() == ControlKind::Web);
+        if managed {
+            let device = lock(&self.slot).device.clone();
+            let answer = within_room_budget(
+                deadline,
+                self.web.on_air(&bearer, &show_id, &device, "host", "go"),
+            )
+            .await
+            .map_err(anyhow::Error::msg)?
+            .map_err(anyhow::Error::new)?;
+            let mut runtime = lock(&self.slot);
+            runtime.stopped_by = None;
+            if let Some(state) = runtime.runner.as_mut() {
+                state.on_air = answer.on_air;
+            }
+        }
         if let Err(message) = (self.hooks.camera)(CameraHandover::Lend).await {
             return Err(RoomOpenRefusal::CameraBusy(message).into());
         }

@@ -3624,6 +3624,27 @@ impl crate::cloud_show::CloudWebApi for VideorcApiClient {
         .await
     }
 
+    async fn on_air(
+        &self,
+        bearer: &str,
+        show_id: &str,
+        device: &crate::cloud_show::CloudDevice,
+        source: &str,
+        step: &str,
+    ) -> std::result::Result<crate::cloud_show::OnAirAnswer, crate::cloud_show::CloudApiError> {
+        let path = format!("/api/cloud/shows/{show_id}/on-air");
+        self.cloud_json(
+            self.http
+                .post(self.endpoint(&path))
+                .bearer_auth(bearer)
+                .json(&serde_json::json!({"device":device,"source":source,"step":step})),
+            &path,
+            CLOUD_REQUEST_TIMEOUT,
+        )
+        .await
+        .map_err(crate::cloud_show::safe_continuation_error)
+    }
+
     async fn hand_off(
         &self,
         bearer: &str,
@@ -3640,6 +3661,7 @@ impl crate::cloud_show::CloudWebApi for VideorcApiClient {
             CLOUD_REQUEST_TIMEOUT,
         )
         .await
+        .map_err(crate::cloud_show::safe_continuation_error)
         .map(|_| ())
     }
 
