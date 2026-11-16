@@ -12094,7 +12094,7 @@ async fn handle_text_message_with_role(
                             }
                             Err(error) => ServerResponse::error(
                                 command.id,
-                                "cloud-go-live-failed",
+                                cloud_talk_error_code(&error, "cloud-go-live-failed"),
                                 format!("{error:#}"),
                             ),
                         }
