@@ -6286,10 +6286,11 @@ mod tests {
                 .push((source.into(), step.into()));
             let mut state = self.managed.lock().unwrap().state.clone();
             let browser = state["onAir"]["source"] == "camera";
-            if source == "feed" && step == "go" {
-                if let Some(error) = self.go_errors.lock().unwrap().pop_front() {
-                    return Err(error);
-                }
+            if source == "feed"
+                && step == "go"
+                && let Some(error) = self.go_errors.lock().unwrap().pop_front()
+            {
+                return Err(error);
             }
             if step == "go"
                 && source == "feed"
