@@ -61,6 +61,7 @@ export interface TalkShowContextValue {
   listDisplaySources: () => Promise<TalkShowDisplaySource[]>
   startScreenShare: (sourceId: string) => Promise<void>
   stopScreenShare: () => Promise<void>
+  setAvatarEnabled: (enabled: boolean) => Promise<void>
   setMonitor: (enabled: boolean) => Promise<void>
   setMicrophoneMuted: (muted: boolean) => Promise<void>
   setCameraOff: (off: boolean) => Promise<void>
@@ -93,6 +94,7 @@ export const NO_TALK_SHOW: TalkShowContextValue = {
   startScreenShare: async () => {},
   stopScreenShare: async () => {},
   setMonitor: async () => {},
+  setAvatarEnabled: async () => {},
   setMicrophoneMuted: async () => {},
   setCameraOff: async () => {},
   startCloudRecording: async () => {},

@@ -5839,6 +5839,7 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "cohost.library.update"
         | "cohost.library.delete"
         | "cohost.library.saveToLibrary"
+        | "buddy.cloud.report"
         | "buddy.overlay.set"
         | "buddy.overlay.clear"
         | "cohost.pet.import"
@@ -10849,6 +10850,28 @@ async fn handle_text_message_with_role(
         }
         // --- Buddy overlay (plan 164 Phase C) ---
         "cohost.buddy.status" => ServerResponse::ok(command.id, buddy_overlay::status(state).await),
+        "buddy.cloud.report" => {
+            if role != BackendRole::Renderer {
+                return ServerResponse::error(
+                    command.id,
+                    "forbidden",
+                    "Only the room renderer reports avatar output.",
+                );
+            }
+            match serde_json::from_value::<buddy_overlay::CloudAvatarReport>(command.params) {
+                Ok(params) => {
+                    let accepted = state
+                        .cloud_show
+                        .lock()
+                        .unwrap_or_else(|poison| poison.into_inner())
+                        .report_room_avatar(&params.show_id, params.stream, params.recording);
+                    ServerResponse::ok(command.id, json!({ "accepted": accepted }))
+                }
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
         "buddy.overlay.set" => {
             match serde_json::from_value::<buddy_overlay::SetBuddyOverlayParams>(command.params) {
                 Ok(params) => {
