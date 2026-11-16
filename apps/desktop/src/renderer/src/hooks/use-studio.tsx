@@ -22,16 +22,8 @@ import {
   systemAccessRows,
   type SystemAccessContext
 } from '@/lib/system-access'
-import {
-  createTakeoverImporter,
-  screenImportAuthorizationError,
-  type TakeoverImportPhase
-} from '@/lib/takeover-import'
-import {
-  createBannerImporter,
-  type BannerImportKind,
-  type BannerImportPhase
-} from '@/lib/banner-import'
+import type { TakeoverImporter, TakeoverImportPhase } from '@/lib/takeover-import'
+import type { BannerImporter, BannerImportKind, BannerImportPhase } from '@/lib/banner-import'
 import { markChatDeliveryIncomplete } from '../../../shared/chat-delivery'
 import { WINDOW_NAMES } from '../../../shared/window-names'
 import type { CommentsViewSnapshot } from '../../../shared/backend'
@@ -785,6 +777,14 @@ function isPreparedPlatformLifecycleOwner(sessionId: string): boolean {
 
 function loadSessionRuntimeRecovery() {
   return import('@/lib/session-runtime-recovery')
+}
+
+function loadBannerImport() {
+  return import('@/lib/banner-import')
+}
+
+function loadTakeoverImport() {
+  return import('@/lib/takeover-import')
 }
 
 function loadCommandFailurePolicy() {
@@ -4540,7 +4540,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   useLayoutEffect(() => {
     pendingScreenImportsRef.current = pendingScreenImports
   }, [pendingScreenImports])
-  const screenImporter = useRef(createTakeoverImporter())
+  // Made on the first takeover import, from the lazy takeover-import module.
+  const screenImporter = useRef<TakeoverImporter | null>(null)
   const screenListEventRevision = useRef(0)
   const activeScreenEventRevision = useRef(0)
   const [bannerImportPhase, setBannerImportPhase] = useState<BannerImportPhase>('idle')
@@ -4549,22 +4550,24 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // backend says otherwise, and empty again when the connection goes.
   const [htmlOverlayStatuses, setHtmlOverlayStatuses] =
     useState<readonly HtmlOverlayStatus[]>(NO_HTML_OVERLAY_STATUSES)
-  const bannerImporter = useRef(createBannerImporter())
+  // Made on the first banner import, from the lazy banner-import module.
+  const bannerImporter = useRef<BannerImporter | null>(null)
   // Bumped by every `banners.changed`: the reliable full list wins over a
   // late reply, the way the takeover list does.
   const bannerListEventRevision = useRef(0)
   useEffect(() => {
-    screenImporter.current.reset()
+    screenImporter.current?.reset()
     setScreenImportPhase('idle')
-    bannerImporter.current.reset()
+    bannerImporter.current?.reset()
     setBannerImportPhase('idle')
     if (wsStatus !== 'connected') setHtmlOverlayStatuses(NO_HTML_OVERLAY_STATUSES)
     setPendingScreenImports([])
-    const importer = screenImporter.current
-    const bannerImport = bannerImporter.current
+    // The holders, not their values: an importer may be made after this effect.
+    const screenImport = screenImporter
+    const bannerImport = bannerImporter
     return () => {
-      importer.reset()
-      bannerImport.reset()
+      screenImport.current?.reset()
+      bannerImport.current?.reset()
     }
   }, [client, wsStatus])
   const [streamMetadataSavePending, setStreamMetadataSavePending] = useState(false)
@@ -5320,13 +5323,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   useEffect(() => {
     const stopped = pendingScreenImportsRef.current.length
     if (stopped === 0) return
-    reportError(
-      new UserFacingError(
-        stopped === 1
-          ? 'The connection dropped before the last image was imported. Add it again if it is missing.'
-          : `The connection dropped before the last ${stopped} images were imported. Add any missing ones again.`
-      ),
-      { action: 'import', object: 'the images' }
+    void loadTakeoverImport().then(({ takeoverConnectionDropError }) =>
+      reportError(takeoverConnectionDropError(stopped), { action: 'import', object: 'the images' })
     )
   }, [client, reportError, wsStatus])
 
@@ -12976,9 +12974,13 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         return
       }
 
+      // The reliable list event wins over a late reply (including deletion
+      // from another window). Never refresh/reapply the active takeover.
+      const { createTakeoverImporter, runTakeoverBatch } = await loadTakeoverImport()
+      if (clientRef.current !== client) return
       let revision = 0
-      await screenImporter.current.run({
-        pick: () => {
+      await runTakeoverBatch((screenImporter.current ??= createTakeoverImporter()), {
+        authorize: () => {
           setLastError(null)
           return authorize(window.videorc)
         },
@@ -12992,8 +12994,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         onPhase: setScreenImportPhase,
         onPending: setPendingScreenImports,
         onImported: (screen) => {
-          // The reliable list event wins over a late reply (including deletion
-          // from another window). Never refresh/reapply the active takeover.
           if (screenListEventRevision.current !== revision) return
           setScreens((current) =>
             [...(current ?? []).filter((item) => item.id !== screen.id), screen].sort(
@@ -13001,31 +13001,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             )
           )
         },
-        onPickError: (error) =>
-          reportError(screenImportAuthorizationError(error), {
-            action: 'import',
-            object: 'the images'
-          }),
-        // One toast per batch, not one per image: a lone failure names its
-        // file, several say how many of the batch failed and why the first did.
-        onImportErrors: (failures, total) => {
-          const [first] = failures
-          if (!first) return
-          reportError(first.error, {
-            action: 'import',
-            object:
-              failures.length === 1
-                ? first.selection.displayName
-                : `${failures.length} of ${total} images`
-          })
-        },
-        onUnused: (selections) => {
-          void window.videorc
-            ?.releaseScreenImages?.(selections.map((selection) => selection.capabilityId))
-            .catch((error: unknown) =>
-              console.warn('[takeovers] could not hand back unused images', error)
-            )
-        }
+        report: reportError,
+        release: (capabilityIds) => window.videorc?.releaseScreenImages?.(capabilityIds)
       })
     },
     [client, reportError, wsStatus]
@@ -13111,8 +13088,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         console.warn('[banners] no picker for this import in this renderer')
         return
       }
+      const { createBannerImporter } = await loadBannerImport()
+      if (clientRef.current !== client) return
       const revision = bannerListEventRevision.current
-      await bannerImporter.current.run({
+      await (bannerImporter.current ??= createBannerImporter()).run({
         pick: () => pick(),
         importImage: (selection) => {
           setLastError(null)

@@ -2186,7 +2186,8 @@ describe('real StudioProvider lifecycle', () => {
   }
 
   async function mountTakeoverImportProvider(
-    imports: Pick<VideorcApi, 'pickScreenImages' | 'authorizeDroppedScreenImages'>
+    imports: Pick<VideorcApi, 'pickScreenImages' | 'authorizeDroppedScreenImages'> &
+      Partial<Pick<VideorcApi, 'releaseScreenImages'>>
   ): Promise<{ backend: StudioBackend; latest: () => StudioObservation }> {
     const backend = new StudioBackend()
     TestWebSocket.backend = backend
@@ -2307,9 +2308,11 @@ describe('real StudioProvider lifecycle', () => {
   })
 
   it('clears the pending images and says so when the connection drops mid-batch', async () => {
+    const releaseScreenImages = vi.fn<VideorcApi['releaseScreenImages']>(async () => undefined)
     const { backend, latest } = await mountTakeoverImportProvider({
       pickScreenImages: async () => [pickedImage('a'), pickedImage('b')],
-      authorizeDroppedScreenImages: vi.fn()
+      authorizeDroppedScreenImages: vi.fn(),
+      releaseScreenImages
     })
     backend.deferResponse('screens.importImage', takeoverScreen)
     act(() => {
@@ -2321,7 +2324,14 @@ describe('real StudioProvider lifecycle', () => {
 
     await waitForObservation(() => latest().core.pendingScreenImports.length === 0)
     expect(latest().core.screenImportPhase).toBe('idle')
-    expect(latest().core.lastError).toContain('before the last 2 images were imported')
+    // The toast's words come from the lazy takeover-import module.
+    await waitForObservation(() =>
+      Boolean(latest().core.lastError?.includes('before the last 2 images were imported'))
+    )
+    // 'a' was in flight when the connection dropped (the close rejects it);
+    // only 'b' was never used, so only its capability is handed back.
+    await waitForObservation(() => releaseScreenImages.mock.calls.length > 0)
+    expect(releaseScreenImages).toHaveBeenCalledExactlyOnceWith(['b'])
   })
 
   it('shows a refused drop as written, whether the refusal throws or rejects', async () => {
