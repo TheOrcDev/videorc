@@ -171,6 +171,7 @@ import {
   talkShowLiveStartedAt as talkShowLiveStartedAtFrom,
   talkShowStartBlockedReason,
   startTalkShowLivestream,
+  endTalkShowLivestream,
   talkShowSessionView
 } from '@/lib/talk-show-session'
 import { openWorkspaceTab } from '@/lib/workspace-navigation'
@@ -17499,22 +17500,55 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           // Plan 243 D7: handed off or taken over, the show goes on elsewhere.
           if (handedOffRef.current.includes(talkSession.sessionId)) return true
           if (talkSession.streamUrl) {
-            const owner = platformLifecycleOwnerRef.current
-            if (owner) {
-              platformLifecycleOwnerRef.current = null
-              await completePreparedPlatformBroadcasts(owner.streaming, owner.sessionId)
-            }
-            try {
-              commitCloudStatus(await client.requestTyped('cloud.show.legs.end'))
-              return true
-            } catch (error) {
-              toastUserError(
-                error,
-                { action: 'end', object: 'the livestream' },
-                { id: CLOUD_TOAST_ID }
-              )
-              return false
-            }
+            // X must end while its feed is live. YouTube completes only
+            // after the cloud confirms its legs stopped (plan 247 D4).
+            return endTalkShowLivestream(
+              async () => {
+                const owner = platformLifecycleOwnerRef.current
+                if (owner) {
+                  owner.streaming = await endPreparedXBroadcasts(
+                    owner.streaming,
+                    owner.sessionId,
+                    4000
+                  )
+                }
+                commitCloudStatus(await client.requestTyped('cloud.show.legs.end'))
+              },
+              (error) => {
+                toastUserError(
+                  error,
+                  { action: 'end', object: 'the livestream' },
+                  {
+                    id: CLOUD_TOAST_ID,
+                    action: {
+                      label: 'Close the room',
+                      onClick: () => {
+                        void (async () => {
+                          try {
+                            commitCloudStatus(await client.requestTyped('cloud.room.close'))
+                            const owner = claimPlatformLifecycleOwner(talkSession.sessionId)
+                            if (owner) await settleClaimedPlatformLifecycleOwner(owner)
+                          } catch (closeError) {
+                            toastUserError(
+                              closeError,
+                              { action: 'close', object: 'the room' },
+                              { id: CLOUD_TOAST_ID }
+                            )
+                          }
+                        })()
+                      }
+                    }
+                  }
+                )
+              },
+              () => claimPlatformLifecycleOwner(talkSession.sessionId),
+              (owner) =>
+                settleClaimedPlatformLifecycleOwner(owner, (resolved) =>
+                  completePreparedPlatformBroadcasts(resolved.streaming, resolved.sessionId, {
+                    skipXCleanup: true
+                  })
+                )
+            )
           }
           try {
             commitCloudStatus(await client.requestTyped('cloud.recording.stop'))
