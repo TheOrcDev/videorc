@@ -548,3 +548,131 @@ export async function loadBuddyStateImage(
   }
   return resolved.loadUrl(BUDDY_DEFAULT_PACK[state])
 }
+
+/** S4 public raster projection. The local persona object never crosses the room. */
+export async function renderCloudAvatar(params: {
+  persona: Pick<CohostPersona, 'id' | 'avatar' | 'images' | 'bubbleStyle'>
+  state: CohostAvatarState
+  bubble: { text: string; until: string } | null
+  canvas: { width: number; height: number }
+  rect: OverlayRect
+}): Promise<import('../../../shared/cloud-avatar').AvatarLayer[]> {
+  const { avatarHash } = await import('../../../shared/cloud-avatar')
+  const measure = buddyCanvasMeasurer()
+  if (!measure) throw new Error('Avatar canvas unavailable')
+  const layout = layoutBuddyOverlay({
+    text: params.bubble?.text ?? null,
+    style: params.persona.bubbleStyle,
+    canvasWidth: params.canvas.width,
+    canvasHeight: params.canvas.height,
+    rectWidthPx: Math.max(
+      1,
+      Math.floor(
+        Math.min(params.rect.w * params.canvas.width, params.rect.h * params.canvas.height)
+      )
+    ),
+    measure
+  })
+  let image: BuddyImage
+  let release = () => {}
+  if (params.persona.avatar.kind === 'alive') {
+    const { loadBuddyPreviewPack } = await import('@/lib/buddy-pet-preview-pack')
+    const pack = await loadBuddyPreviewPack({
+      personaId: params.persona.id,
+      packId: params.persona.avatar.packId,
+      pixelSize: Math.min(512, layout.metrics.avatarPx)
+    })
+    const images = new Set([...pack.cells.values()].map((cell) => cell.image))
+    release = () => {
+      for (const image of images) image.close?.()
+    }
+    const cell = pack.cells.get(pack.neutral)
+    if (!cell) {
+      release()
+      throw new Error('Avatar neutral frame unavailable')
+    }
+    const canvas = new OffscreenCanvas(layout.metrics.avatarPx, layout.metrics.avatarPx)
+    const context = canvas.getContext('2d')
+    if (!context) {
+      release()
+      throw new Error('Avatar canvas unavailable')
+    }
+    context.drawImage(
+      cell.image.source,
+      ...cell.rect,
+      cell.box[0] * canvas.width,
+      cell.box[1] * canvas.height,
+      cell.box[2] * canvas.width,
+      cell.box[3] * canvas.height
+    )
+    image = { source: canvas, width: canvas.width, height: canvas.height }
+  } else {
+    image = await loadBuddyStateImage(params.persona, params.state)
+    release = () => {
+      if (typeof ImageBitmap !== 'undefined' && image.source instanceof ImageBitmap)
+        image.source.close()
+    }
+  }
+  const layers: import('../../../shared/cloud-avatar').AvatarLayer[] = []
+  // Anchor the character at the selected rect's bottom centre, moving the pair
+  // inside the canvas together so the tail continues to point at its head.
+  const geometryScale = Math.min(
+    1,
+    params.canvas.width / layout.width,
+    params.canvas.height / layout.height
+  )
+  const x = Math.max(
+    0,
+    Math.min(
+      params.canvas.width - layout.width * geometryScale,
+      (params.rect.x + params.rect.w / 2) * params.canvas.width - (layout.width * geometryScale) / 2
+    )
+  )
+  const y = Math.max(
+    0,
+    Math.min(
+      params.canvas.height - layout.height * geometryScale,
+      (params.rect.y + params.rect.h) * params.canvas.height - layout.height * geometryScale
+    )
+  )
+  try {
+    for (const kind of ['avatar', 'bubble'] as const) {
+      if (kind === 'bubble' && !layout.bubble) continue
+      const top = kind === 'avatar' ? layout.avatar.y : 0
+      const height = kind === 'avatar' ? layout.avatar.h + layout.metrics.padPx : layout.avatar.y
+      const rasterScale = Math.min(1, 512 / Math.max(layout.width, height))
+      const canvas = new OffscreenCanvas(
+        Math.ceil(layout.width * rasterScale),
+        Math.ceil(height * rasterScale)
+      )
+      const ctx = canvas.getContext('2d')
+      if (!ctx) throw new Error('Avatar canvas unavailable')
+      ctx.scale(rasterScale, rasterScale)
+      ctx.translate(0, -top)
+      paintBuddyOverlay(
+        ctx,
+        kind === 'avatar'
+          ? { ...layout, bubble: null, tail: [], thoughtDots: [], lines: [] }
+          : layout,
+        kind === 'avatar' ? image : null
+      )
+      const png = await canvasToBase64Png(canvas)
+      if (!png) throw new Error('Avatar raster failed')
+      const bytes = Uint8Array.from(atob(png), (c) => c.charCodeAt(0))
+      layers.push({
+        kind,
+        rect: {
+          x: x / params.canvas.width,
+          y: (y + top * geometryScale) / params.canvas.height,
+          w: (layout.width * geometryScale) / params.canvas.width,
+          h: (height * geometryScale) / params.canvas.height
+        },
+        asset: { png, hash: await avatarHash(bytes), width: canvas.width, height: canvas.height },
+        expiresAt: kind === 'bubble' ? Date.parse(params.bubble!.until) : null
+      })
+    }
+  } finally {
+    release()
+  }
+  return layers
+}

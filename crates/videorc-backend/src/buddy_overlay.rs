@@ -466,7 +466,23 @@ pub fn overlay_enabled(app: &AppState) -> bool {
 /// ("hidden by a takeover"); keep that rule in this one place. Reads the
 /// overlay layout from the database: call it before taking the engine lock.
 pub fn buddy_visible(app: &AppState) -> bool {
-    overlay_enabled(app)
+    let buddy = load_overlay_layout(&app.database).buddy;
+    let cloud = app
+        .cloud_show
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    cloud
+        .room_avatar_visible(buddy.show_on_stream, buddy.show_in_recording)
+        .unwrap_or(buddy.show_on_stream || buddy.show_in_recording)
+}
+
+/// Renderer-only, nonsecret applied-output observation. No prompts or pixels.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CloudAvatarReport {
+    pub show_id: String,
+    pub stream: bool,
+    pub recording: bool,
 }
 
 /// Whether an utterance's words belong in the bubble: a line that reached

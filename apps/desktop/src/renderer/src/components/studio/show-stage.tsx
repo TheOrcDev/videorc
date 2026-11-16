@@ -1,3 +1,5 @@
+import { createAvatarView } from '../../../../shared/cloud-avatar-view'
+import type { AvatarSnapshot } from '../../../../shared/cloud-avatar'
 import { useEffect, useRef, useState, type ReactElement } from 'react'
 
 import { useGuestModeration } from '@/components/guests/guest-moderation'
@@ -445,6 +447,46 @@ function ScreenShareButton({
  * program page reports it. The speaker is not shown: there is no return to
  * listen to, and a control that plays nothing would lie.
  */
+function ProgramAvatar({ snapshot }: { snapshot: AvatarSnapshot | null }): ReactElement {
+  const root = useRef<HTMLDivElement>(null)
+  const view = useRef<ReturnType<typeof createAvatarView> | null>(null)
+  const [failure, setFailure] = useState(false)
+  useEffect(() => {
+    if (!root.current) return
+    const current = createAvatarView(root.current)
+    view.current = current
+    const timer = setInterval(() => current.step(), 50)
+    return () => {
+      clearInterval(timer)
+      current.close()
+      view.current = null
+    }
+  }, [])
+  useEffect(() => {
+    const current = view.current
+    current?.receiver.owner(snapshot?.publisherSid ?? null)
+    if (!snapshot || !current) return
+    let cancelled = false
+    setFailure(false)
+    void current.receiver.accept(snapshot).catch(() => {
+      if (!cancelled) setFailure(true)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [snapshot])
+  return (
+    <>
+      <div ref={root} data-testid="show-stage-avatar" />
+      {failure ? (
+        <span className="absolute inset-x-0 bottom-0 text-xs text-video-ground-muted">
+          Avatar preview failed
+        </span>
+      ) : null}
+    </>
+  )
+}
+
 function ProgramMonitor({ talkShow }: { talkShow: TalkShowContextValue }): ReactElement {
   const { cloudStatus } = useStudioCloud()
   const { activeScreen } = useStudioCore()
@@ -475,7 +517,19 @@ function ProgramMonitor({ talkShow }: { talkShow: TalkShowContextValue }): React
       data-testid="show-stage-program"
     >
       <div className="flex min-h-6 items-center justify-between gap-2">
-        <span className="text-label text-subtle">Program</span>
+        <span className="text-label text-subtle">
+          {view.source === 'stage' ? 'Program preview' : 'Program'}
+        </span>
+        {view.source === 'stage' ? (
+          <Button
+            size="xs"
+            variant="ghost"
+            aria-pressed={talkShow.room.avatar?.enabled === true}
+            onClick={() => void talkShow.setAvatarEnabled(!talkShow.room.avatar?.enabled)}
+          >
+            {talkShow.room.avatar?.enabled ? 'Hide avatar' : 'Enable avatar'}
+          </Button>
+        ) : null}
         {takeover ? (
           <span className="truncate text-label text-subtle" data-testid="show-stage-program-muted">
             Takeover
@@ -522,7 +576,20 @@ function ProgramMonitor({ talkShow }: { talkShow: TalkShowContextValue }): React
             {view.state === 'waiting' ? 'Waiting for the program…' : PROGRAM_MONITOR_EMPTY}
           </span>
         )}
+        {view.source === 'stage' ? (
+          <ProgramAvatar snapshot={talkShow.room.avatar?.preview ?? null} />
+        ) : null}
       </div>
+      {view.source === 'stage' ? (
+        <span className="text-label text-subtle" data-testid="show-stage-avatar-status">
+          {talkShow.room.avatar?.reason ??
+            (talkShow.room.avatar?.state === 'applied'
+              ? 'Avatar applied by each output · Preview reconstruction'
+              : talkShow.room.avatar?.enabled
+                ? 'Avatar preview · Output unconfirmed'
+                : 'Room avatar off · Enable for this room')}
+        </span>
+      ) : null}
       {view.source === 'return' ? <audio muted={!listening} ref={audioRef} /> : null}
     </div>
   )

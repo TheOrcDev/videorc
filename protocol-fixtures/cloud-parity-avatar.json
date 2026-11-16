@@ -1,0 +1,61 @@
+{
+  "version": 1,
+  "productionQualified": false,
+  "snapshot": {
+    "version": 1,
+    "show": "sh_avatar",
+    "publisherSid": "PA_host",
+    "revision": 1,
+    "output": "stream",
+    "orientation": "h",
+    "expiresAt": 30000,
+    "layers": [
+      {
+        "kind": "avatar",
+        "rect": {
+          "x": 0.7,
+          "y": 0.6,
+          "w": 0.2,
+          "h": 0.3
+        },
+        "asset": {
+          "png": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+j5R8AAAAASUVORK5CYII=",
+          "hash": "4eca665b50e14f07dbdd96760e5186ad80efd8e3590c2440762c70a6d90aa764",
+          "width": 1,
+          "height": 1
+        },
+        "expiresAt": null
+      },
+      {
+        "kind": "bubble",
+        "rect": {
+          "x": 0.7,
+          "y": 0.4,
+          "w": 0.2,
+          "h": 0.2
+        },
+        "asset": {
+          "png": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+j5R8AAAAASUVORK5CYII=",
+          "hash": "4eca665b50e14f07dbdd96760e5186ad80efd8e3590c2440762c70a6d90aa764",
+          "width": 1,
+          "height": 1
+        },
+        "expiresAt": 9000
+      }
+    ]
+  },
+  "acceptance": [
+    "preview-before-egress",
+    "stream-and-recording-artifacts",
+    "hide-expiry",
+    "camera-off",
+    "guest-spotlight",
+    "asset-failure",
+    "reconnect",
+    "stream-only",
+    "record-only",
+    "stale-owner",
+    "clear-during-decode",
+    "private-state-absent"
+  ]
+}

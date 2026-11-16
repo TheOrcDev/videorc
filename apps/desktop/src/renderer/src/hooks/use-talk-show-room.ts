@@ -1,3 +1,4 @@
+import type { CohostPersona, BuddyOverlaySnapshot, OverlayItemLayout } from '@/lib/backend'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import type { BackendClient } from '@/backendClient'
@@ -50,6 +51,11 @@ export type TalkShowRoomControllerDeps = {
   onMediaSnapshot?: (snapshot: TalkShowRoomSnapshot) => void
   microphoneMuted?: boolean
   cameraOff?: boolean
+  avatar?: {
+    persona: CohostPersona | null
+    snapshot: BuddyOverlaySnapshot | null
+    layout: OverlayItemLayout
+  }
   cameraSettings?: TalkShowCameraSettings
   cameraId: string | null
   microphoneId: string | null
@@ -268,6 +274,74 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
     }
   }, [client, roomOpen, showId, controlsRef])
 
+  // Only the explicitly public avatar and bubble become raster assets. Private
+  // Sidekick configuration remains in this process and is never serialized.
+  useEffect(() => {
+    const current = clientRef.current
+    if (!current || !roomOpen || !deps.avatar) return
+    let cancelled = false
+    current.setAvatar(null) // invalidates any pending older raster/upload
+    const avatar = deps.avatar
+    if (!avatar?.persona) return
+    void (async () => {
+      const { renderCloudAvatar } = await import('@/lib/buddy-overlay')
+      const content = {
+        h: [],
+        v: [],
+        stream: avatar.layout.showOnStream,
+        recording: avatar.layout.showInRecording
+      } as import('@/lib/room-avatar-publisher').AvatarContent
+      if (content.stream || content.recording) {
+        for (const orientation of ['h', 'v'] as const) {
+          if (cancelled) return
+          content[orientation] = await renderCloudAvatar({
+            persona: avatar.persona!,
+            state: avatar.snapshot?.state ?? 'idle',
+            bubble: avatar.snapshot?.bubble ?? null,
+            canvas:
+              orientation === 'h' ? { width: 1920, height: 1080 } : { width: 1080, height: 1920 },
+            rect: avatar.layout[orientation === 'h' ? 'horizontal' : 'vertical']
+          })
+        }
+      }
+      if (!cancelled) current.setAvatar(content)
+    })().catch((error: unknown) => {
+      if (!cancelled) {
+        current.failAvatar()
+        callbacksRef.current.onError(error, 'render the room avatar')
+      }
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [deps.avatar, roomOpen, showId, snapshot.state])
+
+  useEffect(() => {
+    if (!client || !roomOpen || !showId || !deps.avatar || snapshot.state !== 'connected') return
+    const report = () => {
+      const observed = Object.values(clientRef.current?.snapshot.avatar?.observed ?? {})
+      void client
+        .requestTyped('buddy.cloud.report', {
+          showId,
+          stream:
+            observed.some((o) => o.output === 'stream') &&
+            deps.avatar?.layout.showOnStream === true,
+          recording:
+            observed.some((o) => o.output === 'recording') &&
+            deps.avatar?.layout.showInRecording === true
+        })
+        .catch(() => {})
+    }
+    report()
+    const timer = setInterval(report, 5000)
+    return () => {
+      clearInterval(timer)
+      void client
+        .requestTyped('buddy.cloud.report', { showId, stream: false, recording: false })
+        .catch(() => {})
+    }
+  }, [client, roomOpen, showId, snapshot.state, snapshot.avatar?.observed, deps.avatar])
+
   // The guest page reads the stage from the host's data topic (D11).
   useEffect(() => {
     if (!roomOpen) return
@@ -308,6 +382,10 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
     return () => {
       disposedRef.current = true
     }
+  }, [])
+
+  const setAvatarEnabled = useCallback(async (enabled: boolean) => {
+    clientRef.current?.setAvatarEnabled(enabled)
   }, [])
 
   const call = useCallback(
@@ -432,6 +510,7 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
           })
         }
       },
+      setAvatarEnabled,
       setMonitor: async (enabled) => {
         // Plan 234 D6: a managed show has no return to subscribe to or to
         // ask for; its Program monitor draws the stage.
@@ -487,6 +566,7 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
     [
       call,
       clipsStepAside,
+      setAvatarEnabled,
       hostIdentity,
       onError,
       outputs,

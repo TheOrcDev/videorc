@@ -17239,6 +17239,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     () => ({ layout: captureConfig.layout, background: activeSceneBackground }),
     [captureConfig.layout, activeSceneBackground]
   )
+  const talkShowAvatar = useMemo(
+    () => ({ persona: buddyPersona, snapshot: buddyOverlay, layout: overlayLayout.buddy }),
+    [buddyPersona, buddyOverlay, overlayLayout.buddy]
+  )
   const talkShowDeps = useMemo<TalkShowRoomControllerDeps>(
     () => ({
       client,
@@ -17250,6 +17254,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       microphoneMuted: captureConfig.audio.microphoneMuted,
       cameraOff: captureConfig.sources.cameraOff === true,
       cameraSettings: talkShowCameraSettings,
+      avatar: talkShowAvatar,
       cameraId: talkShowCameraId,
       microphoneId: talkShowMicrophoneId,
       devices: deviceList.devices,
@@ -17271,6 +17276,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       captureConfig.sources.cameraOff,
       talkShowCameraId,
       talkShowCameraSettings,
+      talkShowAvatar,
       talkShowCameraReturned,
       talkShowClipsStepAside,
       talkShowError,
@@ -20045,6 +20051,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         ]
         setDeviceList({ devices: fixtures, warnings: [] })
         return fixtures
+      },
+      roomAvatar: (enabled?: boolean) => {
+        if (enabled !== undefined) roomControlsRef.current?.setAvatarEnabled(enabled)
+        return roomControlsRef.current?.snapshot.avatar ?? null
       },
       roomSounds: (enabled?: boolean) => {
         if (enabled !== undefined) soundboard.setRoomAuxEnabled(enabled)

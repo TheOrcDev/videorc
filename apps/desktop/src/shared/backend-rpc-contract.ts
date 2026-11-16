@@ -595,6 +595,11 @@ export interface BackendRpcMethodMap {
   'cloud.room.door.set': BackendRpcDefinition<{ open: boolean }, CloudStatus>
   /** A fresh 10-minute host token; renderer role only, never logged. */
   'cloud.room.token.refresh': BackendRpcDefinition<undefined, CloudRoomTokenAnswer>
+  /** Renderer-only observation of an applied public avatar output. */
+  'buddy.cloud.report': BackendRpcDefinition<
+    { showId: string; stream: boolean; recording: boolean },
+    { accepted: boolean }
+  >
   /** The renderer's own room connection, for the status copy. */
   'cloud.room.client.report': BackendRpcDefinition<CloudRoomClientReportParams, CloudStatus>
   'cloud.guest.decide': BackendRpcDefinition<CloudGuestDecideParams, CloudStatus>
@@ -7028,6 +7033,17 @@ const runtimeContracts = {
   'cloud.room.invite.rotate': { params: undefinedSchema, result: cloudStatusSchema },
   'cloud.room.door.set': { params: cloudOpenFlagSchema, result: cloudStatusSchema },
   'cloud.room.token.refresh': { params: undefinedSchema, result: cloudRoomTokenAnswerSchema },
+  'buddy.cloud.report': {
+    params: objectSchema(
+      {
+        showId: stringSchema({ minLength: 1, maxLength: 128 }),
+        stream: booleanSchema,
+        recording: booleanSchema
+      },
+      { allowUnknown: false }
+    ),
+    result: objectSchema({ accepted: booleanSchema }, { allowUnknown: false })
+  },
   'cloud.room.client.report': {
     params: cloudRoomClientReportParamsSchema,
     result: cloudStatusSchema

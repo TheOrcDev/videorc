@@ -1,3 +1,4 @@
+import { parseAvatarCapability, type AvatarCapability } from '../../../shared/cloud-avatar'
 /** Plan 249 S3. An exact role, not arbitrary screen/system audio. */
 export const ROOM_MEDIA_VERSION = 2 as const
 export const AUX_TRACK_NAME = 'videorc:v2:host-aux:stereo'
@@ -17,6 +18,7 @@ export type ConsumerCapability = {
   v: 2
   identity: string
   participantSid: string
+  graphics?: AvatarCapability
   auxiliary?: { trackSid: string; rms: number; observedAt: number }
 }
 export type CapabilityReceipt = ConsumerCapability & { at: number }
@@ -31,6 +33,8 @@ export function parseConsumerCapability(value: unknown): ConsumerCapability | nu
     !/^PA_[A-Za-z0-9]{1,64}$/.test(v.participantSid)
   )
     return null
+  const graphics = v.graphics === undefined ? null : parseAvatarCapability(v.graphics)
+  if (v.graphics !== undefined && (!graphics || !v.identity.startsWith('EG_'))) return null
   let auxiliary: ConsumerCapability['auxiliary']
   if (v.auxiliary !== undefined) {
     if (!v.auxiliary || typeof v.auxiliary !== 'object') return null
@@ -53,6 +57,7 @@ export function parseConsumerCapability(value: unknown): ConsumerCapability | nu
     v: 2,
     identity: v.identity,
     participantSid: v.participantSid,
+    ...(graphics ? { graphics } : {}),
     ...(auxiliary ? { auxiliary } : {})
   }
 }
