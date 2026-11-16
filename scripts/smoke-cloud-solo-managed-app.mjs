@@ -254,7 +254,14 @@ async function run(pass) {
       const enabled = await h.eval(
         'return window.__videorcSmokeScenePresets.streamingState().captureConfig.recordEnabled'
       )
-      const recording = await h.rpc('recording.status')
+      const recording = await waitFor(
+        async () => {
+          const status = await h.rpc('recording.status')
+          return ['recording', 'streaming', 'failed'].includes(status.state) && status
+        },
+        'continuing session startup',
+        60000
+      )
       assert.equal(
         recording.state,
         enabled ? 'recording' : 'streaming',
@@ -459,6 +466,7 @@ async function run(pass) {
           'B resumes with changed local key',
           45000
         )
+        const changedKeyRecording = await followsProfile()
         const refusalAt = Date.now()
         await assert.rejects(
           h.rpc('cloud.show.reconnectDestination', { targetId: liveLeg.id }),
@@ -472,6 +480,7 @@ async function run(pass) {
         h.assertNoDirect()
         h.scanLeaks()
         await h.rpc('session.stop')
+        await savedRecording(changedKeyRecording)
       }
     )
     await step('unknown control kind ends cloud before direct streaming', async () => {
