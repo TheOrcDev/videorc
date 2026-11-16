@@ -87,9 +87,9 @@ describe('Studio Sources rows (plan 080 S4)', () => {
     // Captions is a door to its page (plan 174 S3.2, B-13), not a switch row.
     expect(rowLabels(markup)).toEqual(['Screen', 'Camera'])
     expect(markup).not.toContain('System audio')
-    // The one switch is the camera's Green screen, not an audio row.
-    expect([...markup.matchAll(/role="switch"/g)]).toHaveLength(1)
-    expect(markup).toContain('id="studio-green-screen"')
+    // No switch at all: Green screen is a three-way pick, and no audio row.
+    expect(markup).not.toContain('role="switch"')
+    expect(markup).toContain('data-slot="green-screen"')
     expect(markup).toMatch(/data-slot="navigable-row"[^>]*>[\s\S]*?>Captions</)
     expect(markup).not.toContain('aria-label="Enable live captions"')
     expect(markup).not.toContain('Mute microphone')
@@ -177,30 +177,45 @@ describe('Studio Sources rows (plan 080 S4)', () => {
     )
   })
 
-  it('turns the green screen on and off from the Camera row, with Adjust to its settings', () => {
-    const markup = renderInputs({ screenId: 'screen:2', cameraId: 'camera:1' })
-    const cameraRow = markup.split('data-slot="inspector-row"')[2] ?? ''
-    const line = cameraRow.split('data-slot="green-screen"')[1] ?? ''
-    expect(line).toContain('>Green screen</label>')
-    expect(line).toMatch(/role="switch"[^>]*data-videorc-green-screen=""/)
-    expect(line).toContain('<input id="studio-green-screen"')
-    expect(line).toContain('aria-checked="false"')
-    expect(line).toMatch(/data-videorc-green-screen-settings=""[^>]*>Adjust</)
+  const greenScreenLine = (markup: string): string =>
+    (markup.split('data-slot="inspector-row"')[2] ?? '').split('data-slot="green-screen"')[1] ?? ''
+  const radios = (line: string): { label: string; checked: boolean }[] =>
+    [
+      ...line.matchAll(/<button[^>]*aria-checked="(true|false)"[^>]*role="radio"[^>]*>([^<]+)</g)
+    ].map((match) => ({ label: match[2] as string, checked: match[1] === 'true' }))
+
+  it('picks Off, Green screen or Blue screen on the Camera row, with no title and no Adjust (plan 248)', () => {
+    const line = greenScreenLine(renderInputs({ screenId: 'screen:2', cameraId: 'camera:1' }))
+    expect(line).toMatch(/role="radiogroup"/)
+    expect(line).toContain('aria-label="Green screen"')
+    expect(radios(line)).toEqual([
+      { label: 'Off', checked: true },
+      { label: 'Green screen', checked: false },
+      { label: 'Blue screen', checked: false }
+    ])
+    expect(line).not.toContain('<label')
+    expect(line).not.toContain('Adjust')
+    expect(line).not.toContain('role="switch"')
   })
 
-  it('says Blue screen while a blue key is on', () => {
-    const markup = renderInputs({ screenId: 'screen:2', cameraId: 'camera:1' }, undefined, {
-      cameraChromaKeyEnabled: true,
-      cameraChromaKeyColor: '#0000ff'
-    })
-    const line = markup.split('data-slot="green-screen"')[1] ?? ''
-    expect(line).toContain('>Blue screen</label>')
-    expect(line).toContain('aria-checked="true"')
+  it('checks the key colour while a key is on, and Off while it is off', () => {
+    const pick = (cameraChromaKeyEnabled: boolean, cameraChromaKeyColor: string) =>
+      radios(
+        greenScreenLine(
+          renderInputs({ screenId: 'screen:2', cameraId: 'camera:1' }, undefined, {
+            cameraChromaKeyEnabled,
+            cameraChromaKeyColor
+          })
+        )
+      ).find((radio) => radio.checked)?.label
+    expect(pick(true, '#0000ff')).toBe('Blue screen')
+    expect(pick(true, '#00FF00')).toBe('Green screen')
+    expect(pick(false, '#0000FF')).toBe('Off')
   })
 
   it('has no green screen while the camera is Off: there is nothing to key', () => {
     const markup = renderInputs({ screenId: 'screen:2', cameraOff: true })
     expect(markup).not.toContain('data-slot="green-screen"')
-    expect(markup).not.toContain('role="switch"')
+    expect(markup).not.toContain('role="radiogroup"')
   })
 })

@@ -17,7 +17,7 @@ import { OpenPageCog } from '@/components/studio/open-page-cog'
 import { SourceSwitchStatus } from '@/components/studio/source-switch-status'
 import { useWorkspaceNav } from '@/components/workspace-nav'
 import { Button } from '@/components/ui/button'
-import { Switch } from '@/components/ui/switch'
+import { SegmentedControl, type SegmentedControlOption } from '@/components/ui/segmented-control'
 import { DisabledReason } from '@/components/ui/disabled-reason'
 import { ShortcutKeys } from '@/components/ui/shortcut-keys'
 import { ShortcutTooltip } from '@/components/ui/shortcut-tooltip'
@@ -44,9 +44,10 @@ import { shortcutAccelerator } from '@/lib/shortcuts'
 import { standInLine } from '@/lib/source-status'
 import { captionsStatusLabel } from '@/lib/state-labels'
 import {
-  GREEN_SCREEN_SETTINGS_LABEL,
-  greenScreenLabel,
-  openSceneGreenScreen
+  GREEN_SCREEN_MODES,
+  type GreenScreenMode,
+  greenScreenMode,
+  greenScreenModePatch
 } from '@/lib/green-screen'
 import { chatDoorNewLabel } from '@/lib/studio-chat'
 import { toastUserError } from '@/lib/user-error'
@@ -355,61 +356,52 @@ function ScreenPrivacyLine({ control }: { control: ScreenPrivacyControl }): Reac
 }
 
 /**
- * Green screen on the Camera row: the camera's chroma key, on and off in
- * one click, without leaving the Studio. Its settings stay on the Scene
- * page, one click away through Adjust. Like Hide screen it is a line of the
- * row it belongs to, never beside Record and Go Live (owner, 2026-10-12).
- * The stage shows the change, so no toast.
+ * Green screen on the Camera row: the camera's chroma key picked in one
+ * click, without leaving the Studio (plan 248): Off, Green screen or Blue
+ * screen, with no title, because the choices name themselves. The line is one
+ * height whatever is picked, so nothing below it moves. The tuning stays on
+ * the Scene page (⌘K "Green screen settings"). Like Hide screen it is a line
+ * of the row it belongs to, never beside Record and Go Live (owner,
+ * 2026-10-12). The stage shows the change, so no toast.
  */
 function GreenScreenLine({ control }: { control: GreenScreenControl }): ReactElement | null {
   if (!control.available) return null
   return (
     <div
-      className="flex min-h-8 items-center gap-2 pr-1 pb-2 pl-9.5"
-      data-on={control.on || undefined}
+      className="flex min-h-8 items-center pr-1 pb-2 pl-9.5"
+      data-mode={control.mode}
       data-slot="green-screen"
     >
-      <label
-        className="min-w-0 truncate text-xs text-muted-foreground"
-        htmlFor="studio-green-screen"
-      >
-        {control.label}
-      </label>
-      <div className="ml-auto flex shrink-0 items-center gap-2">
-        <ShortcutTooltip label={GREEN_SCREEN_SETTINGS_LABEL}>
-          <Button
-            data-videorc-green-screen-settings=""
-            size="xs"
-            type="button"
-            variant="ghost"
-            onClick={control.openSettings}
-          >
-            Adjust
-          </Button>
-        </ShortcutTooltip>
-        <Switch
-          aria-label={control.label}
-          checked={control.on}
-          data-videorc-green-screen=""
-          id="studio-green-screen"
-          size="sm"
-          onCheckedChange={control.setOn}
-        />
-      </div>
+      <SegmentedControl
+        aria-label="Green screen"
+        className="w-full"
+        data-videorc-green-screen=""
+        options={GREEN_SCREEN_LINE_OPTIONS}
+        size="sm"
+        value={control.mode}
+        onValueChange={control.setMode}
+      />
     </div>
   )
 }
 
+// Off takes the room its word needs; the two screens share the rest evenly.
+const GREEN_SCREEN_LINE_OPTIONS: SegmentedControlOption<GreenScreenMode>[] = GREEN_SCREEN_MODES.map(
+  ({ value, label }) => ({
+    value,
+    label,
+    className: value === 'off' ? 'flex-none' : undefined,
+    'data-videorc-green-screen-mode': value
+  })
+)
+
 /** What both looks' Green screen controls show and do (the row and the Retro LCD's). */
 export interface GreenScreenControl {
-  on: boolean
-  /** "Green screen", or "Blue screen" while a blue key is on. */
-  label: string
+  /** Off, or the key's colour while it is on. */
+  mode: GreenScreenMode
   /** False while the camera is Off: there is nothing to key. */
   available: boolean
-  setOn: (on: boolean) => void
-  /** Opens the Scene page on the camera, with Green screen in view. */
-  openSettings: () => void
+  setMode: (mode: GreenScreenMode) => void
 }
 
 /** What both looks' Hide screen controls show and do (the row and the Retro LCD's). */
@@ -496,11 +488,9 @@ export function useStudioSources() {
   // The camera's key, by the Scene page's own layout patch, so a session on
   // air takes it like an edit there.
   const greenScreen: GreenScreenControl = {
-    on: captureConfig.layout.cameraChromaKeyEnabled,
-    label: greenScreenLabel(captureConfig.layout),
+    mode: greenScreenMode(captureConfig.layout),
     available: Boolean(selectedCameraId),
-    setOn: (cameraChromaKeyEnabled) => applyLayoutPatch({ cameraChromaKeyEnabled }),
-    openSettings: openSceneGreenScreen
+    setMode: (mode) => applyLayoutPatch(greenScreenModePatch(mode))
   }
   return {
     captureConfig,
