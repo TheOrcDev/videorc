@@ -245,7 +245,7 @@ pub fn probe_media_cancellable(
     file_path: &str,
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<MediaProbe, String> {
-    let mut command = Command::new(ffprobe_path);
+    let mut command = background_media_command(ffprobe_path);
     command.args([
         "-v",
         "error",
@@ -610,7 +610,7 @@ fn analyze_audio_balance_in(
     window: Option<AnalysisWindow>,
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<Vec<ChannelLevel>, String> {
-    let mut command = Command::new(ffmpeg_path);
+    let mut command = background_media_command(ffmpeg_path);
     command.args([
         "-hide_banner",
         "-nostats",
@@ -718,7 +718,7 @@ fn detect_freezes_in(
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<Vec<FreezeSegment>, String> {
     let filter = format!("freezedetect=n={noise_db}dB:d={min_freeze_seconds}");
-    let mut command = Command::new(ffmpeg_path);
+    let mut command = background_media_command(ffmpeg_path);
     command.args(["-hide_banner", "-threads", "1", "-filter_threads", "1"]);
     command.args(ffmpeg_window_input_args(window));
     command.args([
@@ -881,7 +881,7 @@ fn detect_repeated_frames_in(
     window: Option<AnalysisWindow>,
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<RepeatedFrameSummary, String> {
-    let mut command = Command::new(ffmpeg_path);
+    let mut command = background_media_command(ffmpeg_path);
     command.args(["-hide_banner", "-nostats", "-threads", "1"]);
     command.args(ffmpeg_window_input_args(window));
     command.args([
@@ -976,7 +976,7 @@ fn detect_audio_gaps_in(
     window: Option<AnalysisWindow>,
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<AudioGapSummary, String> {
-    let mut command = Command::new(ffprobe_path);
+    let mut command = background_media_command(ffprobe_path);
     command.args([
         "-v",
         "error",
@@ -1172,7 +1172,7 @@ pub fn probe_repair_encoder(ffmpeg_path: &str) -> Option<RepairVideoEncoder> {
             return *cached;
         }
     }
-    let probed = Command::new(ffmpeg_path)
+    let probed = background_media_command(ffmpeg_path)
         .args(["-hide_banner", "-encoders"])
         .output()
         .ok()
@@ -2123,7 +2123,7 @@ pub fn repair_recording_cancellable(
     let temp = repair_temp_path(original);
     let temp_str = temp.to_string_lossy().to_string();
 
-    let mut command = Command::new(ffmpeg_path);
+    let mut command = background_media_command(ffmpeg_path);
     command.args(build_repair_args(&path, &temp_str, plan));
     let run = run_output_cancellable(&mut command, is_cancelled);
     match run {
@@ -4689,5 +4689,27 @@ mod tests {
 
         let parsed: RepairJob = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, job);
+    }
+}
+
+/// Repair/analysis must yield CPU to the live media threads. No shell and
+/// no detached grandchildren: cancellation still owns the spawned PID.
+fn background_media_command(program: &str) -> std::process::Command {
+    #[cfg(unix)]
+    {
+        let mut command = std::process::Command::new("/usr/bin/nice");
+        command.args(["-n", "10", program]);
+        command
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        let mut command = std::process::Command::new(program);
+        command.creation_flags(0x00004000); // BELOW_NORMAL_PRIORITY_CLASS
+        command
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        std::process::Command::new(program)
     }
 }
