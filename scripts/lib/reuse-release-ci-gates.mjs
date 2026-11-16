@@ -9,22 +9,29 @@ function gateJob(name, requiredSteps) {
   return Object.freeze({ name, requiredSteps: Object.freeze([...requiredSteps]) })
 }
 
+function shardJobs(nameFor, count) {
+  return Array.from({ length: count }, (_, index) => gateJob(nameFor(index + 1), ['Desktop tests']))
+}
+
 export const RELEASE_CI_GATE_SPECS = Object.freeze({
+  // ci.yml runs the JS gates as parallel jobs (plan 242 S8). `JS (format +
+  // lint + tests)` requires them all and proves every desktop test file ran
+  // in exactly one vitest shard.
   'windows-js-job': Object.freeze({
     id: 'windows-js-job',
     workflowFile: 'ci.yml',
     jobs: Object.freeze([
       gateJob('JS (format + lint + tests)', [
-        'Format check',
-        'Lint',
-        'Typecheck',
-        'Desktop tests',
-        'Node logic tests'
-      ])
+        'Require every JS gate job',
+        'Every desktop test file ran exactly once'
+      ]),
+      gateJob('JS checks (audit, format, lint, typecheck)', ['Format check', 'Lint', 'Typecheck']),
+      gateJob('Node logic tests', ['Node logic tests']),
+      ...shardJobs((shard) => `Desktop tests (${shard}/4)`, 4)
     ])
   }),
-  // release-windows-gates.yml runs these two jobs side by side (plan 242 S4).
-  // Its `gates` job only aggregates them and is never a reuse target.
+  // release-windows-gates.yml runs the Rust and JS gates side by side (plan
+  // 242 S4, S8). Its `gates` job counts only for its shard coverage proof.
   'windows-rust-gates': Object.freeze({
     id: 'windows-rust-gates',
     workflowFile: 'windows.yml',
@@ -45,11 +52,14 @@ export const RELEASE_CI_GATE_SPECS = Object.freeze({
     jobs: Object.freeze([
       gateJob('gates / Windows release JS gates', [
         'Tracked text integrity',
-        'Desktop tests',
         'Node logic tests',
         'Format',
         'TypeScript',
         'ESLint'
+      ]),
+      ...shardJobs((shard) => `gates / Windows desktop tests (${shard}/3)`, 3),
+      gateJob('gates / Windows release source gates', [
+        'Every desktop test file ran exactly once on Windows'
       ])
     ])
   }),

@@ -35,7 +35,36 @@ describe('release CI path-filter wiring', () => {
     assert.match(jsJob, /name: JS \(format \+ lint \+ tests\)/)
     assert.match(jsJob, /outputs\.js == 'true'/)
     assert.match(ci, /js-skip:[\s\S]*outputs\.js != 'true'/)
-    assert.match(jsJob, /pnpm test:scripts/)
+  })
+
+  it('runs every old JS gate command in a parallel job behind the JS check (plan 242 S8)', () => {
+    // A top-level job runs from its key to the next two-space-indented key.
+    const job = (id) => {
+      const start = ci.indexOf(`\n  ${id}:\n`)
+      const next = /\n  [a-z][\w-]*:\n/g
+      next.lastIndex = start + 1
+      const end = next.exec(ci)?.index ?? ci.length
+      return ci.slice(start, end)
+    }
+    const checks = job('js-checks')
+    const build = job('js-build')
+    const node = job('js-node')
+    const vitest = job('js-vitest')
+    for (const [part, commands] of [
+      [checks, ['pnpm audit:js', 'pnpm format:check', 'pnpm lint', 'pnpm typecheck']],
+      [build, ['pnpm build', 'pnpm check:renderer-assets']],
+      [node, ['pnpm test:scripts', 'pnpm smoke:sources']],
+      [vitest, ['pnpm --filter @videorc/desktop exec vitest run --shard=${{ matrix.shard }}/4']]
+    ]) {
+      assert.match(part, /outputs\.js == 'true'/)
+      for (const command of commands) assert.ok(part.includes(command), command)
+    }
+    assert.match(vitest, /shard: \[1, 2, 3, 4\]/)
+    assert.match(vitest, /fail-fast: false/)
+    assert.match(jsJob, /needs: \[scope, js-checks, js-build, js-node, js-vitest\]/)
+    assert.match(jsJob, /if: \$\{\{ always\(\) && needs\.scope\.result == 'success'/)
+    assert.match(jsJob, /name: Require every JS gate job/)
+    assert.match(jsJob, /node scripts\/vitest-shard-report\.mjs check/)
   })
 
   it('preserves Windows and Linux required-check names while skipping only allow-listed diffs', () => {
@@ -87,7 +116,7 @@ describe('release CI path-filter wiring', () => {
 
   it('runs the Windows Rust and JS gates side by side with every old step kept (plan 242 S2–S4)', () => {
     const rust = gates.slice(gates.indexOf('\n  rust:'), gates.indexOf('\n  js:'))
-    const js = gates.slice(gates.indexOf('\n  js:'), gates.indexOf('\n  gates:'))
+    const js = gates.slice(gates.indexOf('\n  js:'), gates.indexOf('\n  js-vitest:'))
     const aggregator = gates.slice(gates.indexOf('\n  gates:'))
     assert.match(rust, /name: Windows release Rust gates/)
     assert.match(rust, /runs-on: windows-latest/)
@@ -106,7 +135,6 @@ describe('release CI path-filter wiring', () => {
     assert.match(js, /runs-on: windows-latest/)
     for (const step of [
       'Tracked text integrity',
-      'Desktop tests',
       'Node logic tests',
       'Format',
       'TypeScript',
@@ -116,9 +144,19 @@ describe('release CI path-filter wiring', () => {
       assert.ok(js.includes(`- name: ${step}\n`), `JS job keeps ${step}`)
     }
     assert.match(aggregator, /name: Windows release source gates/)
-    assert.match(aggregator, /needs: \[rust, js\]/)
+    assert.match(aggregator, /needs: \[rust, js, js-vitest\]/)
     assert.match(aggregator, /if: \$\{\{ always\(\) \}\}/)
-    assert.match(aggregator, /RUST_RESULT" != success \] \|\| \[ "\$JS_RESULT" != success/)
+    assert.match(
+      aggregator,
+      /RUST_RESULT" != success \] \|\| \[ "\$JS_RESULT" != success \] \|\| \[ "\$VITEST_RESULT" != success/
+    )
+    assert.match(aggregator, /node scripts\/vitest-shard-report\.mjs check/)
+    // S8: the desktop tests run on Windows in three time-balanced shards.
+    const windowsVitest = gates.slice(gates.indexOf('\n  js-vitest:'), gates.indexOf('\n  gates:'))
+    assert.match(windowsVitest, /runs-on: windows-latest/)
+    assert.match(windowsVitest, /shard: \[1, 2, 3\]/)
+    assert.match(windowsVitest, /- name: Desktop tests\n/)
+    assert.match(windowsVitest, /vitest run --shard=\$\{\{ matrix\.shard \}\}\/3/)
 
     // S2: one cargo launch per pass, an exact expected count, and a listing
     // that proves each filter still selects a test.

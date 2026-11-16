@@ -20,12 +20,27 @@ const sha = 'a'.repeat(40)
 const otherSha = 'b'.repeat(40)
 const thirdSha = 'c'.repeat(40)
 
-function greenSteps(specId) {
-  return RELEASE_CI_GATE_SPECS[specId].jobs[0].requiredSteps.map((name) => ({
+function greenSteps(specId, gateIndex = 0) {
+  return RELEASE_CI_GATE_SPECS[specId].jobs[gateIndex].requiredSteps.map((name) => ({
     name,
     status: 'completed',
     conclusion: 'success'
   }))
+}
+
+/** A green job for every gate a spec requires (the first keeps `first`'s fields). */
+function gateJobs(specId, first) {
+  return RELEASE_CI_GATE_SPECS[specId].jobs.map((gate, index) =>
+    index === 0
+      ? first
+      : {
+          id: first.id + index,
+          name: gate.name,
+          status: 'completed',
+          conclusion: 'success',
+          steps: greenSteps(specId, index)
+        }
+  )
 }
 
 function jsSuccessRun(overrides = {}) {
@@ -117,9 +132,9 @@ describe('reuse-release-ci-gates', () => {
         },
         '/repos/TheOrcDev/videorc/actions/runs/11/jobs?per_page=100': {
           jobs: [
-            jsSuccessJob(),
+            ...gateJobs('windows-js-job', jsSuccessJob()),
             {
-              id: 1101,
+              id: 1191,
               name: 'Rust (test + clippy + fmt)',
               status: 'completed',
               conclusion: 'cancelled'
@@ -135,7 +150,7 @@ describe('reuse-release-ci-gates', () => {
       runId: 11,
       jobId: 1100,
       jobName: 'JS (format + lint + tests)',
-      jobNames: ['JS (format + lint + tests)'],
+      jobNames: RELEASE_CI_GATE_SPECS['windows-js-job'].jobs.map((gate) => gate.name),
       workflowPath: '.github/workflows/ci.yml',
       htmlUrl: 'https://github.com/TheOrcDev/videorc/actions/runs/11/job/1100',
       headSha: sha
@@ -155,11 +170,14 @@ describe('reuse-release-ci-gates', () => {
         '/repos/TheOrcDev/videorc/actions/runs/22/jobs?per_page=100': {
           jobs: [
             windowsGatesSuccessJob(),
-            windowsGatesSuccessJob({
-              id: 2201,
-              name: 'gates / Windows release JS gates',
-              steps: greenSteps('windows-js-gates')
-            })
+            ...gateJobs(
+              'windows-js-gates',
+              windowsGatesSuccessJob({
+                id: 2201,
+                name: 'gates / Windows release JS gates',
+                steps: greenSteps('windows-js-gates')
+              })
+            )
           ]
         }
       })
@@ -167,6 +185,24 @@ describe('reuse-release-ci-gates', () => {
     assert.equal(result.reused, true)
     assert.equal(result.specId, 'windows-js-gates')
     assert.equal(result.jobName, 'gates / Windows release JS gates')
+  })
+
+  it('refuses JS reuse when one vitest shard did not pass', async () => {
+    const jobs = gateJobs('windows-js-job', jsSuccessJob()).map((job) =>
+      job.name === 'Desktop tests (3/4)' ? { ...job, conclusion: 'failure' } : job
+    )
+    const result = await findFirstReusableReleaseCiGate({
+      specIds: ['windows-js-job'],
+      repository: 'TheOrcDev/videorc',
+      sha,
+      api: apiFrom({
+        [`/repos/TheOrcDev/videorc/actions/workflows/ci.yml/runs?head_sha=${sha}&per_page=20`]: {
+          workflow_runs: [jsSuccessRun()]
+        },
+        '/repos/TheOrcDev/videorc/actions/runs/11/jobs?per_page=100': { jobs }
+      })
+    })
+    assert.equal(result.reused, false)
   })
 
   it('never reuses the green aggregator that only reports the two gate jobs', async () => {

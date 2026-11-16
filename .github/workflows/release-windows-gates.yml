@@ -242,9 +242,6 @@ jobs:
       - name: Tracked text integrity
         run: pnpm check:text-files
 
-      - name: Desktop tests
-        run: pnpm --filter @videorc/desktop test
-
       - name: Node logic tests
         run: pnpm test:scripts
 
@@ -260,21 +257,92 @@ jobs:
       - name: JavaScript advisory audit
         run: pnpm audit:js
 
+  js-vitest:
+    # Plan 242 S8: the desktop tests on Windows (path separators, pnpm spawn
+    # semantics) in three shards split by recorded time.
+    name: Windows desktop tests (${{ matrix.shard }}/3)
+    runs-on: windows-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ inputs.source_sha }}
+          persist-credentials: false
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@a7487c7e89a18df4991f7f222e4898a00d66ddda
+        with:
+          version: 11.0.9
+          run_install: false
+
+      - name: Set up Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24.6.0'
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Desktop tests
+        env:
+          VIDEORC_VITEST_SHARD: ${{ matrix.shard }}/3
+          VIDEORC_VITEST_REPORT: ${{ runner.temp }}/windows-vitest-shard-${{ matrix.shard }}.json
+        run: pnpm --filter @videorc/desktop exec vitest run --shard=${{ matrix.shard }}/3
+
+      - name: Upload shard report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: windows-vitest-shard-${{ matrix.shard }}
+          path: ${{ runner.temp }}/windows-vitest-shard-${{ matrix.shard }}.json
+          if-no-files-found: warn
+          overwrite: true
+          retention-days: 14
+
   gates:
     name: Windows release source gates
-    needs: [rust, js]
+    needs: [rust, js, js-vitest]
     if: ${{ always() }}
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
       - name: Require every Windows gate job
         env:
           RUST_RESULT: ${{ needs.rust.result }}
           JS_RESULT: ${{ needs.js.result }}
+          VITEST_RESULT: ${{ needs.js-vitest.result }}
         run: |
           echo "Windows release Rust gates: $RUST_RESULT"
           echo "Windows release JS gates: $JS_RESULT"
-          if [ "$RUST_RESULT" != success ] || [ "$JS_RESULT" != success ]; then
+          echo "Windows desktop tests: $VITEST_RESULT"
+          if [ "$RUST_RESULT" != success ] || [ "$JS_RESULT" != success ] || [ "$VITEST_RESULT" != success ]; then
             echo "Every Windows gate job must succeed."
             exit 1
           fi
+
+      - name: Check out repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ inputs.source_sha }}
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24.6.0'
+
+      - name: Download shard reports
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: windows-vitest-shard-*
+          path: ${{ runner.temp }}/windows-vitest-shards
+          merge-multiple: true
+
+      - name: Every desktop test file ran exactly once on Windows
+        run: node scripts/vitest-shard-report.mjs check "$RUNNER_TEMP"/windows-vitest-shards/*.json
