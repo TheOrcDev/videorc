@@ -1495,7 +1495,7 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
         let hold_max_seconds = lock(&self.slot).settings.hold_max_seconds;
         let platforms = params.platforms.clone().unwrap_or_default();
         let request = CreateShowRequest {
-            device: Some(lock(&self.slot).device.clone()),
+            device: self.request_device().await,
             kind: "talk".to_string(),
             outputs,
             hold_max_seconds,
@@ -2396,7 +2396,7 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
         show_id: &str,
         deadline: tokio::time::Instant,
     ) -> Result<()> {
-        let (managed, device, generation) = {
+        let (managed, generation) = {
             let runtime = lock(&self.slot);
             let show = runtime
                 .show
@@ -2405,13 +2405,13 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
                 .ok_or_else(|| crate::cloud_show::cloud_refusal("cloud-nothing-to-resume"))?;
             (
                 show.control.transport_kind() == ControlKind::Web,
-                runtime.device.clone(),
                 runtime.generation,
             )
         };
         if !managed {
             return Ok(());
         }
+        let device = self.device().await;
         let answer = within_room_budget(
             deadline,
             self.web.on_air(bearer, show_id, &device, "host", "go"),

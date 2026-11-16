@@ -126,18 +126,30 @@ pub fn load_device(database: &crate::storage::Database) -> CloudDevice {
         // Fail closed: never create a show with an identity that changes on restart.
         device.id.clear();
     }
+    #[cfg(debug_assertions)]
+    if let Ok(id) = std::env::var("VIDEORC_CLOUD_DEVICE_ID")
+        && valid_device_id(&id)
+    {
+        device.id = id;
+    }
+    device
+}
+
+// Called off the startup path, in spawn_blocking on the first cloud request.
+fn resolve_device_name() -> String {
+    let mut name = "This computer".to_string();
     #[cfg(unix)]
     {
         let mut bytes = [0u8; 256];
         // SAFETY: the writable buffer is valid for the supplied length.
         if unsafe { libc::gethostname(bytes.as_mut_ptr().cast(), bytes.len()) } == 0 {
             let end = bytes.iter().position(|b| *b == 0).unwrap_or(bytes.len());
-            device.name = String::from_utf8_lossy(&bytes[..end]).into_owned();
+            name = String::from_utf8_lossy(&bytes[..end]).into_owned();
         }
     }
     #[cfg(target_os = "windows")]
     {
-        device.name = std::env::var("COMPUTERNAME").unwrap_or(device.name);
+        name = std::env::var("COMPUTERNAME").unwrap_or(name);
     }
     #[cfg(target_os = "macos")]
     {
@@ -155,7 +167,7 @@ pub fn load_device(database: &crate::storage::Database) -> CloudDevice {
                         if status.success()
                             && let Ok(output) = child.wait_with_output()
                         {
-                            device.name = String::from_utf8_lossy(&output.stdout).into_owned();
+                            name = String::from_utf8_lossy(&output.stdout).into_owned();
                         }
                         break;
                     }
@@ -172,18 +184,10 @@ pub fn load_device(database: &crate::storage::Database) -> CloudDevice {
         }
     }
     #[cfg(debug_assertions)]
-    {
-        if let Ok(id) = std::env::var("VIDEORC_CLOUD_DEVICE_ID")
-            && valid_device_id(&id)
-        {
-            device.id = id;
-        }
-        if let Ok(name) = std::env::var("VIDEORC_CLOUD_DEVICE_NAME") {
-            device.name = name;
-        }
+    if let Ok(value) = std::env::var("VIDEORC_CLOUD_DEVICE_NAME") {
+        name = value;
     }
-    device.name = sanitize_device_name(&device.name);
-    device
+    sanitize_device_name(&name)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -192,6 +196,8 @@ pub enum CloudDeviceKind {
     Computer,
     Phone,
     Browser,
+    #[serde(other)]
+    Unknown,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -199,6 +205,8 @@ pub enum CloudAirSource {
     Feed,
     Camera,
     Host,
+    #[serde(other)]
+    Unknown,
 }
 #[derive(Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -1777,6 +1785,7 @@ impl Drop for ResumeClaimGuard {
 #[derive(Default)]
 pub struct CloudShowRuntime {
     pub(crate) device: CloudDevice,
+    pub(crate) device_name: Option<Arc<tokio::sync::OnceCell<String>>>,
     pub(crate) stopped_by: Option<CloudStoppedBy>,
     pub settings: CloudSettings,
     pub entitlement: CloudEntitlement,
@@ -2029,8 +2038,14 @@ impl CloudShowRuntime {
             on_air: runner.and_then(|r| r.on_air.as_ref()).and_then(|air| {
                 Some(CloudOnAirStatus {
                     name: air.name.as_ref().map(|name| sanitize_device_name(name)),
-                    kind: air.kind.clone()?,
-                    source: air.source.clone()?,
+                    kind: match air.kind.clone()? {
+                        CloudDeviceKind::Unknown => CloudDeviceKind::Computer,
+                        kind => kind,
+                    },
+                    source: match air.source.clone()? {
+                        CloudAirSource::Unknown => CloudAirSource::Feed,
+                        source => source,
+                    },
                     waiting: air.waiting,
                     this_device: air.device_id.as_deref() == Some(&self.device.id),
                     since: air.since.clone(),
@@ -2650,6 +2665,31 @@ impl ControlHandle {
 }
 
 impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
+    pub(crate) async fn device(&self) -> CloudDevice {
+        let (mut device, name) = {
+            let runtime = lock(&self.slot);
+            (runtime.device.clone(), runtime.device_name.clone())
+        };
+        if let Some(name) = name {
+            device.name = name
+                .get_or_init(|| async {
+                    tokio::task::spawn_blocking(resolve_device_name)
+                        .await
+                        .unwrap_or_else(|_| "This computer".into())
+                })
+                .await
+                .clone();
+        }
+        device
+    }
+
+    pub(crate) async fn request_device(&self) -> Option<CloudDevice> {
+        if lock(&self.slot).device.id.is_empty() {
+            return None;
+        }
+        Some(self.device().await)
+    }
+
     pub(crate) fn destination_frame(&self, frame: Value) -> Value {
         let runtime = lock(&self.slot);
         if runtime
@@ -3953,7 +3993,7 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
             return Ok(PrepareOutcome::Direct);
         }
         let request = CreateShowRequest {
-            device: Some(lock(&self.slot).device.clone()),
+            device: self.request_device().await,
             kind: "solo".to_string(),
             outputs,
             hold_max_seconds,
@@ -4386,7 +4426,7 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
             keep: false,
         };
         let ingest = if control.transport_kind() == ControlKind::Web {
-            let device = lock(&self.slot).device.clone();
+            let device = self.device().await;
             let answer = self
                 .web
                 .on_air(bearer, show_id, &device, "feed", "prepare")
@@ -4525,7 +4565,7 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
 
     /// Runs only after the local session starts: never wait for a feed before sending it.
     pub async fn finish_resume(&self, bearer: &str, started_session: &str) -> Result<()> {
-        let (show_id, device, generation, session_id) = {
+        let (show_id, generation, session_id) = {
             let mut runtime = lock(&self.slot);
             // Only the successful start that bound this prepare may finish it.
             // Local recordings and direct starts do not own a resume claim.
@@ -4544,7 +4584,6 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
                 .ok_or_else(|| cloud_refusal("cloud-nothing-to-resume"))?;
             (
                 show.record.id.clone(),
-                runtime.device.clone(),
                 runtime.generation,
                 show.session_id.clone(),
             )
@@ -4555,6 +4594,7 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
             session_id: started_session.into(),
             keep: false,
         };
+        let device = self.device().await;
         let still_feeding = || {
             let runtime = lock(&self.slot);
             runtime.generation == generation
@@ -4670,6 +4710,7 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
 
     /// Plan 243 D7: stop this computer while leaving every cloud leg open.
     pub async fn hand_off(&self, bearer: Option<String>) -> Result<HandOffAnswer> {
+        let device = self.device().await;
         let (show_id, device, reclaim_host) = {
             let runtime = lock(&self.slot);
             let show = runtime
@@ -4692,7 +4733,7 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
             {
                 return Err(cloud_refusal("cloud-not-on-air"));
             }
-            (show.record.id.clone(), runtime.device.clone(), reclaim_host)
+            (show.record.id.clone(), device, reclaim_host)
         };
         if reclaim_host {
             let token = bearer
@@ -5706,7 +5747,7 @@ impl<W: CloudWebApi, C: ControlConnector> CloudTestRun<W, C> {
     async fn run_inner(&mut self) -> Option<CloudTestResult> {
         // 1. The show: `kind: "test"`, the same outputs a show would carry.
         let request = CreateShowRequest {
-            device: Some(lock(&self.context.slot).device.clone()),
+            device: self.context.request_device().await,
             kind: "test".to_string(),
             outputs: self.outputs.clone(),
             hold_max_seconds: self.hold_max_seconds,
@@ -6051,6 +6092,7 @@ mod tests {
         create_calls: AtomicUsize,
         /// The `kind` of every create, in order (C6b sends `test`).
         create_kinds: StdMutex<Vec<String>>,
+        create_has_device: StdMutex<Vec<bool>>,
         on_air_calls: StdMutex<Vec<(String, String)>>,
         on_air_without_ingest: std::sync::atomic::AtomicBool,
         go_ready: std::sync::atomic::AtomicBool,
@@ -6172,6 +6214,10 @@ mod tests {
             if delay > 0 {
                 tokio::time::sleep(Duration::from_millis(delay as u64)).await;
             }
+            self.create_has_device
+                .lock()
+                .unwrap()
+                .push(request.device.is_some());
             self.create_calls.fetch_add(1, Ordering::SeqCst);
             self.create_kinds.lock().unwrap().push(request.kind.clone());
             if let Some(answer) = self.create_queue.lock().unwrap().pop_front() {
@@ -12599,6 +12645,39 @@ mod tests {
         hand_off.await.unwrap().unwrap();
         assert!(lock(&harness.context.slot).status().show.unwrap().resumable);
     }
+
+    #[test]
+    fn r2_a_l5_unknown_air_enums_do_not_break_state_or_status() {
+        let mut runtime = CloudShowRuntime::default();
+        runtime.runner = Some(serde_json::from_value(json!({"onAir":{"deviceId":"BBBBBBBBBBBBBBBBBBBBBB","kind":"future-device","source":"future-source","waiting":false}})).unwrap());
+        let air = runtime.status().on_air.unwrap();
+        assert_eq!(air.kind, CloudDeviceKind::Computer);
+        assert_eq!(air.source, CloudAirSource::Feed);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn r2_a_l5_missing_persisted_identity_uses_legacy_create() {
+        let harness = harness(true);
+        lock(&harness.context.slot).device.id.clear();
+        managed_live_show(&harness).await;
+        assert_eq!(
+            harness
+                .context
+                .web
+                .create_has_device
+                .lock()
+                .unwrap()
+                .as_slice(),
+            &[false]
+        );
+    }
+    #[test]
+    fn r2_a_l5_loading_identity_defers_the_computer_name_lookup() {
+        let database = crate::storage::Database::open_in_memory_for_tests();
+        let device = load_device(&database);
+        assert!(device.name == "This computer");
+    }
+
     fn hold_unconnected_for_review(harness: &Harness, talk: bool) {
         let created = if talk {
             created_managed_talk()

@@ -1441,7 +1441,11 @@ impl AppState {
                     crate::cloud_show::load_settings(&database),
                     crate::cloud_show::load_remembered_show(&database),
                 );
-                crate::cloud_show::lock(&slot).device = crate::cloud_show::load_device(&database);
+                {
+                    let mut runtime = crate::cloud_show::lock(&slot);
+                    runtime.device = crate::cloud_show::load_device(&database);
+                    runtime.device_name = Some(Arc::new(tokio::sync::OnceCell::new()));
+                }
                 slot
             },
             database,
