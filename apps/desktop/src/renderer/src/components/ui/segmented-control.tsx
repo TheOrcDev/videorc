@@ -74,6 +74,7 @@ type SegmentedControlProps<T extends string = string> = Omit<
   disabledReason?: string | null
   activationMode?: 'automatic' | 'manual'
   size?: 'default' | 'sm'
+  variant?: 'default' | 'lcd'
 }
 
 /**
@@ -137,6 +138,7 @@ function SegmentedControl<T extends string>({
   disabledReason,
   activationMode = 'automatic',
   size = 'default',
+  variant = 'default',
   className,
   'aria-labelledby': ariaLabelledBy,
   'aria-describedby': ariaDescribedBy,
@@ -196,9 +198,13 @@ function SegmentedControl<T extends string>({
         {...buttonProps}
         aria-checked={checked}
         className={cn(
-          tabsTriggerBaseClassName,
-          size === 'sm' ? 'h-5 px-2 text-xs' : 'h-6',
-          'aria-checked:text-foreground aria-checked:chrome-plate',
+          variant === 'lcd'
+            ? 'inline-flex min-w-0 flex-1 items-center justify-center rounded-chip px-1.5 py-0.5 text-(--lcd-display-ink-dim) uppercase outline-none hover:bg-(--lcd-display-ink-unlit) hover:text-(--lcd-display-lit) focus-visible:ring-1 focus-visible:ring-(--lcd-display-lit) aria-checked:bg-(--lcd-display-ink-unlit) aria-checked:text-(--lcd-display-lit) disabled:pointer-events-none disabled:opacity-50'
+            : cn(
+                tabsTriggerBaseClassName,
+                size === 'sm' ? 'h-5 px-2 text-xs' : 'h-6',
+                'aria-checked:text-foreground aria-checked:chrome-plate'
+              ),
           optionClassName
         )}
         data-checked={checked ? '' : undefined}
@@ -240,10 +246,14 @@ function SegmentedControl<T extends string>({
       aria-disabled={disabled || undefined}
       aria-labelledby={labelledBy}
       className={cn(
-        tabsListVariants({ variant: 'default' }),
-        // One row when it fits; a narrow pane wraps it instead of clipping.
-        'flex-wrap',
-        size === 'sm' ? 'min-h-6' : 'min-h-control',
+        variant === 'lcd'
+          ? 'flex w-full min-w-0 items-center gap-1'
+          : cn(
+              tabsListVariants({ variant: 'default' }),
+              // One row when it fits; a narrow pane wraps it instead of clipping.
+              'flex-wrap',
+              size === 'sm' ? 'min-h-6' : 'min-h-control'
+            ),
         className
       )}
       data-size={size}

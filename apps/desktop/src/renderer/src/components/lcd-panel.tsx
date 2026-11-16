@@ -7,6 +7,7 @@ import {
   LcdDisplaySeparator,
   LcdDisplayValue
 } from '@/components/ui/lcd-display'
+import { SegmentedControl } from '@/components/ui/segmented-control'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { cn } from '@/lib/utils'
 
@@ -403,6 +404,38 @@ export function LcdPanelSwitch({
     >
       {checked ? 'On' : 'Off'}
     </button>
+  )
+}
+
+/**
+ * One of a few words on the screen, the twin of the inspector's
+ * `SegmentedControl` (plan 248): the picked word lit on the unlit ink, the
+ * others dim. A radio group with one tab stop; the arrows, Home and End move
+ * and pick, wrapping, as the inspector's control does.
+ */
+export function LcdPanelChoice<T extends string>({
+  options,
+  value,
+  onValueChange,
+  ...props
+}: {
+  options: readonly { value: T; label: string }[]
+  value: T
+  onValueChange: (value: T) => void
+  'aria-label': string
+}): ReactElement {
+  return (
+    <SegmentedControl
+      aria-label={props['aria-label']}
+      options={options.map((option, index) => ({
+        ...option,
+        label: <span className="truncate">{option.label}</span>,
+        className: index === 0 ? 'flex-none' : undefined
+      }))}
+      value={value}
+      variant="lcd"
+      onValueChange={onValueChange}
+    />
   )
 }
 

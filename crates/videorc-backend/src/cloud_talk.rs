@@ -2031,6 +2031,13 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
             }
         }
         match tx.intent(frame, id, ACK_TIMEOUT).await {
+            Ok(Some(answer))
+                if answer.get("ending").and_then(serde_json::Value::as_bool) == Some(true) =>
+            {
+                bail!(
+                    "Videorc Cloud is still stopping the show. Wait for it to finish before completing the broadcast."
+                );
+            }
             Ok(_) => {
                 let mut runtime = lock(&self.slot);
                 if let Some(show) = runtime.show.as_mut() {
