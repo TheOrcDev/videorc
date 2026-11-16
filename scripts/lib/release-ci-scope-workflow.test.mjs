@@ -67,6 +67,53 @@ describe('release CI path-filter wiring', () => {
     assert.doesNotMatch(alpha, /ci-change-scope\.yml/)
     assert.match(gates, /runs-on: windows-latest/)
     assert.match(gates, /Source and audio ownership \(25 stability passes\)/)
+  })
+
+  it('runs the Windows Rust and JS gates side by side with every old step kept (plan 242 S2–S4)', () => {
+    const rust = gates.slice(gates.indexOf('\n  rust:'), gates.indexOf('\n  js:'))
+    const js = gates.slice(gates.indexOf('\n  js:'), gates.indexOf('\n  gates:'))
+    const aggregator = gates.slice(gates.indexOf('\n  gates:'))
+    assert.match(rust, /name: Windows release Rust gates/)
+    assert.match(rust, /runs-on: windows-latest/)
+    for (const step of [
+      'Clippy',
+      'Preview bounds concurrency (25 stability passes)',
+      'Source and audio ownership (25 stability passes)',
+      'Test (3 stability passes)',
+      'Rust format',
+      'Install Rust advisory auditor',
+      'Rust advisory audit'
+    ]) {
+      assert.ok(rust.includes(`- name: ${step}\n`), `Rust job keeps ${step}`)
+    }
+    assert.match(js, /name: Windows release JS gates/)
+    assert.match(js, /runs-on: windows-latest/)
+    for (const step of [
+      'Tracked text integrity',
+      'Desktop tests',
+      'Node logic tests',
+      'Format',
+      'TypeScript',
+      'ESLint',
+      'JavaScript advisory audit'
+    ]) {
+      assert.ok(js.includes(`- name: ${step}\n`), `JS job keeps ${step}`)
+    }
+    assert.match(aggregator, /name: Windows release source gates/)
+    assert.match(aggregator, /needs: \[rust, js\]/)
+    assert.match(aggregator, /if: \$\{\{ always\(\) \}\}/)
+    assert.match(aggregator, /RUST_RESULT" != success \] \|\| \[ "\$JS_RESULT" != success/)
+
+    // S2: one cargo launch per pass, an exact expected count, and a listing
+    // that proves each filter still selects a test.
+    assert.doesNotMatch(rust, /foreach \(\$filter in @\(/)
+    assert.match(rust, /cargo test -p videorc-backend -- @filters/)
+    assert.match(rust, /Source ownership filter selects no test/)
+    assert.match(rust, /\$passed -ne \$expected/)
+    assert.match(rust, /foreach \(\$pass in 1\.\.25\)/)
+    // S3: never build cargo-audit from source again.
+    assert.doesNotMatch(gates, /cargo install cargo-audit/)
+    assert.match(rust, /taiki-e\/install-action@[0-9a-f]{40}/)
     assert.match(linuxAlpha, /name: Run Linux clippy gate/)
     assert.match(linuxAlpha, /name: Run Linux unit gate/)
     assert.match(linuxAlpha, /CARGO_BUILD_JOBS: '2'/)

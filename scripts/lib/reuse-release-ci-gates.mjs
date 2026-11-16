@@ -23,16 +23,31 @@ export const RELEASE_CI_GATE_SPECS = Object.freeze({
       ])
     ])
   }),
-  'windows-source-gates': Object.freeze({
-    id: 'windows-source-gates',
+  // release-windows-gates.yml runs these two jobs side by side (plan 242 S4).
+  // Its `gates` job only aggregates them and is never a reuse target.
+  'windows-rust-gates': Object.freeze({
+    id: 'windows-rust-gates',
     workflowFile: 'windows.yml',
     jobs: Object.freeze([
-      gateJob('gates / Windows release source gates', [
+      gateJob('gates / Windows release Rust gates', [
         'Clippy',
+        'Preview bounds concurrency (25 stability passes)',
         'Source and audio ownership (25 stability passes)',
         'Test (3 stability passes)',
         'Rust format',
+        'Rust advisory audit'
+      ])
+    ])
+  }),
+  'windows-js-gates': Object.freeze({
+    id: 'windows-js-gates',
+    workflowFile: 'windows.yml',
+    jobs: Object.freeze([
+      gateJob('gates / Windows release JS gates', [
+        'Tracked text integrity',
         'Desktop tests',
+        'Node logic tests',
+        'Format',
         'TypeScript',
         'ESLint'
       ])
@@ -48,8 +63,8 @@ export const RELEASE_CI_GATE_SPECS = Object.freeze({
 })
 
 export const RELEASE_CI_GATE_LOOKUPS = Object.freeze({
-  'windows-js': Object.freeze(['windows-source-gates', 'windows-js-job']),
-  'windows-rust': Object.freeze(['windows-source-gates']),
+  'windows-js': Object.freeze(['windows-js-gates', 'windows-js-job']),
+  'windows-rust': Object.freeze(['windows-rust-gates']),
   'linux-rust': Object.freeze(['linux-rust-job'])
 })
 

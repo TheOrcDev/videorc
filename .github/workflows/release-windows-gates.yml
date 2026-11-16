@@ -8,8 +8,12 @@ on:
 permissions:
   contents: read
 jobs:
-  gates:
-    name: Windows release source gates
+  # Plan 242 S4: the Rust and JS gates run side by side; `gates` (below) is
+  # the one green/red check that needs both. Release reuse
+  # (scripts/lib/reuse-release-ci-gates.mjs) reads the two real jobs and
+  # their steps, never the aggregator.
+  rust:
+    name: Windows release Rust gates
     runs-on: windows-latest
     # A 75-minute source run timed out during auditor install after completing 25x/3x checks.
     timeout-minutes: 120
@@ -68,16 +72,47 @@ jobs:
 
       - name: Source and audio ownership (25 stability passes)
         shell: pwsh
+        # Plan 242 S2: one cargo launch per pass runs every filtered test
+        # (libtest takes several filters and runs any test matching one).
+        # It used to be one launch per filter per pass: 750 launches, 38 min.
+        # The listing below proves every filter still selects a test, and
+        # each pass must pass exactly the listed, non-ignored count. Counts
+        # are per test binary on both sides, so nothing is deduplicated.
         run: |
+          $filters = @('websocket_asset_import', "source_audio_tap", "source_iso", 'intermittent_pipe_pressure_', 'fifo_write_virtual_', 'audio_capture_adapter', 'live_source_switch', 'session_audio', 'owned_pcm_silent_drain', 'caption_contract_fixture', 'session_chat_totals_fake_provider_rpc', 'live_control_', 'fifo::windows_tests', 'fenced_layout_join_waits_past_command_timeout_and_starting_clear', 'warm_microphone', 'partial_raw_fifo_bytes_refresh_full_recording_queue_liveness', 'abandoned_live_candidate_cleanup_is_generation_and_latest_intent_fenced', 'auxiliary_edit_uses_intent_before_scene_fence_and_cancels_retired_source_honestly', 'abandoned_screen_stop_admission_does_not_wait_for_native_transition', 'source_edit', 'windows_capture_owner', 'windows_live_', 'windows_source_', 'native_source_output_authority', 'windows_d3d11_cfr', 'cancelled_capture_and_pointer_failure', 'failed_capture_retirement_signal', 'ffmpeg_', 'published_', 'retired_stderr_generation', 'windows_mf_probe')
+          function Get-ListedTests([string[]] $extra) {
+            $listed = cargo test -p videorc-backend -- --list --format terse @extra 2>$null
+            if ($LASTEXITCODE -ne 0) {
+              throw "cargo test --list failed with exit code $LASTEXITCODE"
+            }
+            return @($listed | Where-Object { $_ -match ': test$' } | ForEach-Object { $_ -replace ': test$', '' })
+          }
+          function Select-Filtered([string[]] $names) {
+            return @($names | Where-Object { $name = $_; @($filters | Where-Object { $name.Contains($_) }).Count -gt 0 })
+          }
+          $all = Get-ListedTests @()
+          foreach ($filter in $filters) {
+            if (@($all | Where-Object { $_.Contains($filter) }).Count -eq 0) {
+              throw "Source ownership filter selects no test: $filter"
+            }
+          }
+          $ignored = Get-ListedTests @('--ignored')
+          $expected = (Select-Filtered $all).Count - (Select-Filtered $ignored).Count
+          if ($expected -lt 1) {
+            throw 'Source ownership filters select no runnable test'
+          }
+          Write-Host "Source ownership: $($filters.Count) filters select $expected runnable tests per pass"
           foreach ($pass in 1..25) {
-            foreach ($filter in @('websocket_asset_import', "source_audio_tap", "source_iso", 'intermittent_pipe_pressure_', 'fifo_write_virtual_', 'audio_capture_adapter', 'live_source_switch', 'session_audio', 'owned_pcm_silent_drain', 'caption_contract_fixture', 'session_chat_totals_fake_provider_rpc', 'live_control_', 'fifo::windows_tests', 'fenced_layout_join_waits_past_command_timeout_and_starting_clear', 'warm_microphone', 'partial_raw_fifo_bytes_refresh_full_recording_queue_liveness', 'abandoned_live_candidate_cleanup_is_generation_and_latest_intent_fenced', 'auxiliary_edit_uses_intent_before_scene_fence_and_cancels_retired_source_honestly', 'abandoned_screen_stop_admission_does_not_wait_for_native_transition', 'source_edit', 'windows_capture_owner', 'windows_live_', 'windows_source_', 'native_source_output_authority', 'windows_d3d11_cfr', 'cancelled_capture_and_pointer_failure', 'failed_capture_retirement_signal', 'ffmpeg_', 'published_', 'retired_stderr_generation', 'windows_mf_probe')) {
-              Write-Host "Source ownership $filter pass $pass/25"
-              $result = cargo test -p videorc-backend $filter 2>&1 | Out-String
-              $status = $LASTEXITCODE
-              Write-Host $result
-              if ($status -ne 0 -or $result -notmatch 'test result: ok\. [1-9][0-9]* passed') {
-                throw "Source ownership failed or executed zero tests: $filter pass $pass"
-              }
+            Write-Host "Source ownership pass $pass/25"
+            $result = cargo test -p videorc-backend -- @filters 2>&1 | Out-String
+            $status = $LASTEXITCODE
+            Write-Host $result
+            $passed = 0
+            foreach ($match in [regex]::Matches($result, 'test result: ok\. (\d+) passed')) {
+              $passed += [int]$match.Groups[1].Value
+            }
+            if ($status -ne 0 -or $passed -ne $expected) {
+              throw "Source ownership pass $pass failed or ran $passed of $expected tests"
             }
             Write-Host "OAuth smoke startup ownership pass $pass/25"
             $result = node --test --test-reporter=tap scripts/lib/oauth-smoke-launch.test.mjs 2>&1 | Out-String
@@ -140,6 +175,45 @@ jobs:
             }
           }
 
+      - name: Rust format
+        run: cargo fmt --check --all
+
+      - name: Install Rust advisory auditor
+        # Plan 242 S3: the prebuilt binary, as ci.yml installs it. Building
+        # cargo-audit from source took 5.4 min on every run.
+        uses: taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519 # v2.90.5
+        with:
+          tool: cargo-audit
+
+      - name: Rust advisory audit
+        run: pnpm audit:rust
+
+  js:
+    name: Windows release JS gates
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ inputs.source_sha }}
+          persist-credentials: false
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@a7487c7e89a18df4991f7f222e4898a00d66ddda
+        with:
+          version: 11.0.9
+          run_install: false
+
+      - name: Set up Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24.6.0'
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
       - name: Tracked text integrity
         run: pnpm check:text-files
 
@@ -158,14 +232,24 @@ jobs:
       - name: ESLint
         run: pnpm lint
 
-      - name: Rust format
-        run: cargo fmt --check --all
-
       - name: JavaScript advisory audit
         run: pnpm audit:js
 
-      - name: Install Rust advisory auditor
-        run: cargo install cargo-audit --locked
-
-      - name: Rust advisory audit
-        run: pnpm audit:rust
+  gates:
+    name: Windows release source gates
+    needs: [rust, js]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require every Windows gate job
+        env:
+          RUST_RESULT: ${{ needs.rust.result }}
+          JS_RESULT: ${{ needs.js.result }}
+        run: |
+          echo "Windows release Rust gates: $RUST_RESULT"
+          echo "Windows release JS gates: $JS_RESULT"
+          if [ "$RUST_RESULT" != success ] || [ "$JS_RESULT" != success ]; then
+            echo "Every Windows gate job must succeed."
+            exit 1
+          fi

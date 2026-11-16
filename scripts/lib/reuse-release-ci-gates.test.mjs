@@ -69,11 +69,11 @@ function windowsGatesSuccessRun(overrides = {}) {
 function windowsGatesSuccessJob(overrides = {}) {
   return {
     id: 2200,
-    name: 'gates / Windows release source gates',
+    name: 'gates / Windows release Rust gates',
     status: 'completed',
     conclusion: 'success',
     html_url: 'https://github.com/TheOrcDev/videorc/actions/runs/22/job/2200',
-    steps: greenSteps('windows-source-gates'),
+    steps: greenSteps('windows-rust-gates'),
     ...overrides
   }
 }
@@ -142,7 +142,7 @@ describe('reuse-release-ci-gates', () => {
     })
   })
 
-  it('prefers the Windows source-gate job when that exact-commit job already passed', async () => {
+  it('prefers the Windows JS gate job when that exact-commit job already passed', async () => {
     const result = await findFirstReusableReleaseCiGate({
       lookup: 'windows-js',
       repository: 'TheOrcDev/videorc',
@@ -153,13 +153,44 @@ describe('reuse-release-ci-gates', () => {
             workflow_runs: [windowsGatesSuccessRun()]
           },
         '/repos/TheOrcDev/videorc/actions/runs/22/jobs?per_page=100': {
-          jobs: [windowsGatesSuccessJob()]
+          jobs: [
+            windowsGatesSuccessJob(),
+            windowsGatesSuccessJob({
+              id: 2201,
+              name: 'gates / Windows release JS gates',
+              steps: greenSteps('windows-js-gates')
+            })
+          ]
         }
       })
     })
     assert.equal(result.reused, true)
-    assert.equal(result.specId, 'windows-source-gates')
-    assert.equal(result.jobName, 'gates / Windows release source gates')
+    assert.equal(result.specId, 'windows-js-gates')
+    assert.equal(result.jobName, 'gates / Windows release JS gates')
+  })
+
+  it('never reuses the green aggregator that only reports the two gate jobs', async () => {
+    const aggregator = windowsGatesSuccessJob({
+      id: 2202,
+      name: 'gates / Windows release source gates',
+      steps: [{ name: 'Require every Windows gate job', conclusion: 'success' }]
+    })
+    for (const lookup of ['windows-rust', 'windows-js']) {
+      const result = await findFirstReusableReleaseCiGate({
+        lookup,
+        repository: 'TheOrcDev/videorc',
+        sha,
+        api: apiFrom({
+          [`/repos/TheOrcDev/videorc/actions/workflows/windows.yml/runs?head_sha=${sha}&per_page=20`]:
+            { workflow_runs: [windowsGatesSuccessRun()] },
+          [`/repos/TheOrcDev/videorc/actions/workflows/ci.yml/runs?head_sha=${sha}&per_page=20`]: {
+            workflow_runs: []
+          },
+          '/repos/TheOrcDev/videorc/actions/runs/22/jobs?per_page=100': { jobs: [aggregator] }
+        })
+      })
+      assert.equal(result.reused, false, lookup)
+    }
   })
 
   it('refuses a job from another commit, a pull_request event, or a failed/cancelled job', async () => {
@@ -247,8 +278,8 @@ describe('reuse-release-ci-gates', () => {
   })
 
   it('refuses a green job that is missing one required step, or ran it red', () => {
-    const gate = RELEASE_CI_GATE_SPECS['windows-source-gates'].jobs[0]
-    const steps = greenSteps('windows-source-gates')
+    const gate = RELEASE_CI_GATE_SPECS['windows-rust-gates'].jobs[0]
+    const steps = greenSteps('windows-rust-gates')
     assert.equal(jobProvesGate(windowsGatesSuccessJob(), gate), true)
     assert.equal(jobProvesGate(windowsGatesSuccessJob({ steps: steps.slice(1) }), gate), false)
     assert.equal(
@@ -342,10 +373,14 @@ describe('reuse-release-ci-gates', () => {
     )
   })
 
-  it('exposes the Windows JS lookup as source-gates then the CI JS job', () => {
+  it('exposes the Windows JS lookup as the Windows JS gates then the CI JS job', () => {
     assert.deepEqual(
       resolveReleaseCiGateLookup('windows-js').map((spec) => spec.id),
-      ['windows-source-gates', 'windows-js-job']
+      ['windows-js-gates', 'windows-js-job']
+    )
+    assert.deepEqual(
+      resolveReleaseCiGateLookup('windows-rust').map((spec) => spec.id),
+      ['windows-rust-gates']
     )
   })
 })
