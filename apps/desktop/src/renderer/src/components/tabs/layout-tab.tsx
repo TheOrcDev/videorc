@@ -122,9 +122,10 @@ import {
 } from '@/lib/page-layout'
 import { openWorkspaceTab } from '@/lib/workspace-navigation'
 import {
-  chromaKeyHex,
-  type GreenScreenColor,
-  greenScreenColor,
+  GREEN_SCREEN_MODES,
+  type GreenScreenMode,
+  greenScreenMode,
+  greenScreenModePatch,
   SCENE_GREEN_SCREEN_EVENT,
   takeSceneGreenScreenRequest
 } from '@/lib/green-screen'
@@ -306,10 +307,10 @@ const CAMERA_FIT_OPTIONS: SegmentedControlOption<CameraFit>[] = [
   { value: 'fit', label: 'Fit frame' }
 ]
 
-const CHROMA_KEY_COLOR_OPTIONS: SegmentedControlOption<GreenScreenColor>[] = [
-  { value: 'green', label: 'Green' },
-  { value: 'blue', label: 'Blue' }
-]
+// Off takes the room its word needs; the two screens share the rest evenly.
+const CHROMA_KEY_MODE_OPTIONS: SegmentedControlOption<GreenScreenMode>[] = GREEN_SCREEN_MODES.map(
+  ({ value, label }) => ({ value, label, className: value === 'off' ? 'flex-none' : undefined })
+)
 
 function OpenSourcesLink(): ReactElement {
   return (
@@ -549,7 +550,7 @@ export function LayoutTab(): ReactElement {
     selectedSceneSourceId,
     setSelectedSceneSourceId
   ])
-  // Green screen from the Studio's Camera row or ⌘K: the camera takes the
+  // Green screen settings from ⌘K: the camera takes the
   // stage's one selection and its inspector brings Green screen into view.
   // The request waits for the page (it mounts only while open), and a page
   // already open hears it.
@@ -1475,7 +1476,7 @@ function CameraInspector({
   positionLockReason: string | null
   stageDragging: boolean
   aspectLocked: boolean
-  /** Bring Green screen into view and focus its switch (the Studio's Adjust, ⌘K). */
+  /** Bring Green screen into view and focus its pick (⌘K's Green screen settings). */
   greenScreenFocus: boolean
   outputWidth: number
   outputHeight: number
@@ -1489,13 +1490,15 @@ function CameraInspector({
   onTransformCommit: (patch: { x?: number; y?: number; width?: number; height?: number }) => void
   onVisibilityChange: (sourceId: string, visible: boolean) => Promise<void>
 }): ReactElement {
-  // The Studio's Adjust and ⌘K land here: Green screen in view, its switch
-  // focused, once per request.
+  // ⌘K's Green screen settings lands here: Green screen in view, its picked
+  // choice focused, once per request.
   useEffect(() => {
     if (!greenScreenFocus) return
     const section = document.querySelector<HTMLElement>('[data-videorc-camera-green-screen]')
     section?.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
-    section?.querySelector<HTMLElement>('[role="switch"]')?.focus({ preventScroll: true })
+    section
+      ?.querySelector<HTMLElement>('[role="radio"][aria-checked="true"]')
+      ?.focus({ preventScroll: true })
     onGreenScreenFocused()
   }, [greenScreenFocus, onGreenScreenFocused])
   // Plan 215 D1: while recording or live, the box's line says what is locked
@@ -1677,34 +1680,24 @@ function CameraInspector({
         headingLevel={3}
         title="Green screen"
       >
-        <Field orientation="horizontal">
-          <FieldContent>
-            <FieldLabel htmlFor="camera-chroma-key">Key out background</FieldLabel>
-            <p className="text-xs text-muted-foreground">
-              Needs an evenly lit green or blue screen behind you.
-            </p>
-          </FieldContent>
-          <Switch
-            checked={layout.cameraChromaKeyEnabled}
-            id="camera-chroma-key"
-            onCheckedChange={(cameraChromaKeyEnabled) =>
-              onApplyLayoutPatch({ cameraChromaKeyEnabled })
-            }
+        {/* Plan 248: the same three choices as the Studio's Camera row, so
+            the key and its colour are one pick; the tuning opens under it
+            while a key is on. */}
+        <Field>
+          <SegmentedControl
+            aria-label="Green screen"
+            className="w-full"
+            data-videorc-camera-green-screen-mode=""
+            options={CHROMA_KEY_MODE_OPTIONS}
+            value={greenScreenMode(layout)}
+            onValueChange={(mode) => onApplyLayoutPatch(greenScreenModePatch(mode))}
           />
+          <p className="text-xs text-muted-foreground">
+            Needs an evenly lit green or blue screen behind you.
+          </p>
         </Field>
         {layout.cameraChromaKeyEnabled ? (
           <>
-            <Field>
-              <FieldLabel>Key color</FieldLabel>
-              <SegmentedControl
-                className="w-full"
-                options={CHROMA_KEY_COLOR_OPTIONS}
-                value={greenScreenColor(layout)}
-                onValueChange={(color) =>
-                  onApplyLayoutPatch({ cameraChromaKeyColor: chromaKeyHex(color) })
-                }
-              />
-            </Field>
             <PowerSlider
               label="Similarity"
               max={100}

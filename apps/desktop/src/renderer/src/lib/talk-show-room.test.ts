@@ -1,4 +1,5 @@
 // @vitest-environment happy-dom
+import type { RoomOptions } from 'livekit-client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import vectors from '../../../shared/chroma-key-vectors.json'
@@ -8,7 +9,8 @@ import {
   TAKEN_OVER_DETAIL,
   TAKEN_OVER_GRACE_MS,
   TalkShowRoomClient,
-  onAirElsewhere
+  onAirElsewhere,
+  talkShowRoomOptions
 } from '@/lib/talk-show-room'
 
 // Plan 224 C-G4 and the review of 2026-11-09 (L4, L9's room client): the host
@@ -63,7 +65,7 @@ const lk = vi.hoisted(() => {
         }
       }
     }
-    constructor() {
+    constructor(readonly options: RoomOptions) {
       FakeRoom.rooms.push(this)
     }
     on(event: string, handler: Handler): this {
@@ -195,11 +197,16 @@ describe('the host in the room (C-G4)', () => {
     await room.disconnect()
   })
 
+  it('keeps adaptive stream off for the raw-track stage and dynacast on (plan 247 D1)', () => {
+    expect(talkShowRoomOptions()).toMatchObject({ adaptiveStream: false, dynacast: true })
+  })
+
   it('joins with one fresh token and asks for no other on a timer (review L4)', async () => {
     const { room, requestToken } = client()
     await room.connect()
     expect(requestToken).toHaveBeenCalledTimes(1)
     expect(latestRoom().connectedWith?.token).toBe('lk.host.token.1')
+    expect(latestRoom().options).toMatchObject({ adaptiveStream: false, dynacast: true })
     expect(room.snapshot.state).toBe('connected')
     expect(room.snapshot.identity).toBe('host:sh_talk')
     expect(JSON.stringify(room.snapshot)).not.toContain('lk.host.token')
@@ -219,6 +226,7 @@ describe('the host in the room (C-G4)', () => {
     expect(requestToken).toHaveBeenCalledTimes(2)
     expect(latestRoom()).not.toBe(first)
     expect(latestRoom().connectedWith?.token).toBe('lk.host.token.2')
+    expect(latestRoom().options).toMatchObject({ adaptiveStream: false, dynacast: true })
     expect(room.snapshot.state).toBe('connected')
     expect(reports).toEqual(['connecting', 'connected', 'reconnecting', 'connected'])
     await room.disconnect()

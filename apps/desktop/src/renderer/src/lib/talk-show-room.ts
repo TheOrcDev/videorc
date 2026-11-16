@@ -31,7 +31,8 @@ import {
   type Participant,
   type RemoteParticipant,
   type RemoteTrack,
-  type RemoteTrackPublication
+  type RemoteTrackPublication,
+  type RoomOptions
 } from 'livekit-client'
 
 import type {
@@ -143,6 +144,19 @@ export type TalkShowRoomDeps = {
   onAir?: () => CloudOnAir | undefined
 }
 
+export function talkShowRoomOptions(): RoomOptions {
+  return {
+    // The stage renders raw tracks without track.attach(), so adaptive stream must stay off.
+    adaptiveStream: false,
+    dynacast: true,
+    publishDefaults: {
+      videoCodec: 'vp8',
+      simulcast: true,
+      videoSimulcastLayers: [VideoPresets.h180, VideoPresets.h360]
+    }
+  }
+}
+
 /** The guest page's `StageMessage` (`guest-wire.ts`): the identities on stage. */
 export function stageMessage(onStage: readonly string[]): Uint8Array<ArrayBuffer> {
   return new TextEncoder().encode(JSON.stringify({ v: 1, onStage: [...onStage] }))
@@ -195,6 +209,7 @@ export class TalkShowRoomClient {
   #camera: LocalVideoTrack | null = null
   #cameraEffects: TalkShowCameraEffects | null = null
   #cameraEffectError = false
+  #cameraSettingsRevision = 0
   #microphone: LocalAudioTrack | null = null
   #screen: LocalVideoTrack | null = null
   #screenGeneration = 0
@@ -221,19 +236,11 @@ export class TalkShowRoomClient {
     this.#setState('connecting', null)
     const token = await this.#deps.requestToken()
     if (this.#closed) return
-    const room = new Room({
-      adaptiveStream: true,
-      dynacast: true,
-      // The host subscribes by hand: everyone but the runner, and the runner
-      // only while the monitor is on (D7, D11).
-      publishDefaults: {
-        videoCodec: 'vp8',
-        simulcast: true,
-        videoSimulcastLayers: [VideoPresets.h180, VideoPresets.h360]
-      }
-    })
+    const room = new Room(talkShowRoomOptions())
     this.#room = room
     this.#bind(room)
+    // The host subscribes by hand: everyone but the runner, and the runner
+    // only while the monitor is on (D7, D11).
     await room.connect(token.url, token.hostToken, { autoSubscribe: false })
     if (!this.#owns(room)) {
       await room.disconnect()
@@ -461,8 +468,10 @@ export class TalkShowRoomClient {
 
   async updateCameraSettings(settings: TalkShowCameraSettings | undefined): Promise<void> {
     const camera = this.#camera
+    const revision = ++this.#cameraSettingsRevision
     try {
       await this.#cameraEffects?.update(settings)
+      if (revision !== this.#cameraSettingsRevision || camera !== this.#camera) return
       if (!settings?.layout.cameraChromaKeyEnabled && this.#cameraEffectError) {
         this.#cameraEffectError = false
         this.#problem = null
@@ -644,15 +653,7 @@ export class TalkShowRoomClient {
       // A fresh token: the old one may be past its 10 minutes.
       const token = await this.#deps.requestToken()
       if (this.#closed) return
-      const room = new Room({
-        adaptiveStream: true,
-        dynacast: true,
-        publishDefaults: {
-          videoCodec: 'vp8',
-          simulcast: true,
-          videoSimulcastLayers: [VideoPresets.h180, VideoPresets.h360]
-        }
-      })
+      const room = new Room(talkShowRoomOptions())
       this.#room = room
       this.#bind(room)
       await room.connect(token.url, token.hostToken, { autoSubscribe: false })

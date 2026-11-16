@@ -3,9 +3,10 @@ import { openWorkspaceTab } from '@/lib/workspace-navigation'
 
 // Green screen in reach: the camera's chroma key had one home, the last
 // section of the camera's inspector on the Scene page, and nothing else
-// named it. The Studio's Camera row now turns it on and off and opens its
-// settings, and ⌘K finds it by the words people use for it. The settings
-// (colour, similarity, smoothness, spill, edges) stay on the Scene page.
+// named it. The Studio's Camera row now picks it in one click (Off, Green
+// screen or Blue screen, plan 248), and ⌘K finds it by the words people use
+// for it. The tuning (similarity, smoothness, spill, edges) stays on the
+// Scene page, which picks with the same three choices.
 
 // The two real-world screen colours; the protocol takes any #RRGGBB, so a
 // custom picker later needs no wire change.
@@ -39,6 +40,30 @@ export function greenScreenColor(
 
 export function chromaKeyHex(color: GreenScreenColor): string {
   return color === 'blue' ? CHROMA_KEY_BLUE : CHROMA_KEY_GREEN
+}
+
+/**
+ * The key as one choice: Off, or on with its colour. Enabled and colour stay
+ * two fields on the wire; Off keeps the colour, so the Scene page's tuning and
+ * a later Green or Blue pick find it as it was.
+ */
+export type GreenScreenMode = 'off' | GreenScreenColor
+
+export const GREEN_SCREEN_MODES: readonly { value: GreenScreenMode; label: string }[] = [
+  { value: 'off', label: 'Off' },
+  { value: 'green', label: 'Green screen' },
+  { value: 'blue', label: 'Blue screen' }
+]
+
+export function greenScreenMode(layout: KeyLayout): GreenScreenMode {
+  return layout.cameraChromaKeyEnabled ? greenScreenColor(layout) : 'off'
+}
+
+/** The one layout patch a pick makes: Off touches only the switch. */
+export function greenScreenModePatch(mode: GreenScreenMode): Partial<KeyLayout> {
+  return mode === 'off'
+    ? { cameraChromaKeyEnabled: false }
+    : { cameraChromaKeyEnabled: true, cameraChromaKeyColor: chromaKeyHex(mode) }
 }
 
 /** The control's name: "Blue screen" once a blue key is on, else "Green screen". */

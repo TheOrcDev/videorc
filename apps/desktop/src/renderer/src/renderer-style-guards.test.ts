@@ -40,6 +40,9 @@ const COLOUR_LITERAL_ALLOWLIST = new Set([
   // Chroma-key colours are the key itself.
   'src/lib/capture.ts',
   'src/lib/green-screen.ts',
+  // Published video content: key colours and the composited scene background.
+  'src/lib/chroma-key-reference.ts',
+  'src/lib/talk-show-camera-effects.ts',
   'src/components/tabs/layout-tab.tsx',
   // A QR code must stay black on white for scanners.
   'src/components/phone-remote-section.tsx',
