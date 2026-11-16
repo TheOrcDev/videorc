@@ -4203,8 +4203,16 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
                 .on_air
                 .as_ref()
                 .is_some_and(|air| air.source == Some(CloudAirSource::Camera) && !air.waiting);
+            let ingest = answer.ingest.filter(|entries| !entries.is_empty());
+            if ingest.is_none() {
+                runtime.pending_feed_go = false;
+                runtime.claiming_air = false;
+                bail!(
+                    "Videorc Cloud could not hand back the show's ingest address. Try Continue here again."
+                );
+            }
             runtime.claiming_air = true;
-            answer.ingest
+            ingest
         } else {
             ingest
         };
@@ -5834,6 +5842,7 @@ mod tests {
         /// The `kind` of every create, in order (C6b sends `test`).
         create_kinds: StdMutex<Vec<String>>,
         on_air_calls: StdMutex<Vec<(String, String)>>,
+        on_air_without_ingest: std::sync::atomic::AtomicBool,
         hand_off_calls: AtomicUsize,
         hand_off_fails: std::sync::atomic::AtomicBool,
         end_calls: StdMutex<Vec<String>>,
@@ -6008,7 +6017,11 @@ mod tests {
             Ok(OnAirAnswer {
                 rev: Some(self.managed.lock().unwrap().rev),
                 on_air: serde_json::from_value(state["onAir"].clone()).ok(),
-                ingest: Some(created_managed().ingest),
+                ingest: if self.on_air_without_ingest.load(Ordering::SeqCst) {
+                    None
+                } else {
+                    Some(created_managed().ingest)
+                },
             })
         }
 
@@ -13029,9 +13042,10 @@ mod tests {
     // LiveKit does not answer it is omitted, nothing else can hand it back,
     // and the resume fails with today's message. The show stays resumable.
     #[tokio::test(start_paused = true)]
-    async fn a_resume_whose_ingest_was_not_listed_fails_and_the_show_stays_resumable() {
+    async fn a_resume_whose_prepare_omits_ingest_fails_and_the_show_stays_resumable() {
         let harness = harness(true);
         let web = harness.context.web.clone();
+        web.on_air_without_ingest.store(true, Ordering::SeqCst);
         web.set_state(managed_state("hold", live_legs()));
         let unlisted = || CurrentShowResponse {
             on_air: None,

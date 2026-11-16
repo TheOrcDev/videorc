@@ -61,161 +61,7 @@
         "talkShows": true,
         "guestsOnStage": 5,
         "roomSize": 10,
-        "recordingRetentionDays": 30,
-        "statusOnAirElsewhere": {
-          "phase": "hold",
-          "entitled": true,
-          "plan": "max",
-          "settings": {
-            "enabled": true,
-            "holdMaxSeconds": 1800,
-            "holdMaxChoices": [300, 900, 1800, 3600],
-            "holdImageScreenId": "screen-1"
-          },
-          "allowance": {
-            "enabled": true,
-            "secondsPerMonth": 360000,
-            "secondsUsed": 133200,
-            "overageSeconds": 0,
-            "resetAt": "2026-11-01T00:00:00.000Z",
-            "talkShows": true,
-            "guestsOnStage": 5,
-            "roomSize": 10,
-            "recordingRetentionDays": 30
-          },
-          "show": {
-            "id": "sh_0123456789abcdefghijkl",
-            "nodeId": "eu-hel-1",
-            "createdAt": "2026-10-16T12:00:00.000Z",
-            "expiresAt": "2026-10-17T00:30:00.000Z",
-            "resumable": false
-          },
-          "sessionId": "8c1d9f40-6a62-4f0c-9d7d-1f7a3c2b9e10",
-          "connected": true,
-          "hold": {
-            "active": true,
-            "since": "2026-10-16T12:40:00.000Z",
-            "reason": "feed-lost",
-            "remainingSeconds": 1650
-          },
-          "feeds": [
-            {
-              "orientation": "horizontal",
-              "connected": false,
-              "kbps": 0
-            }
-          ],
-          "legs": [
-            {
-              "targetId": "youtube",
-              "platform": "youtube",
-              "label": "YouTube",
-              "state": "live"
-            },
-            {
-              "targetId": "twitch",
-              "platform": "twitch",
-              "label": "Twitch",
-              "state": "reconnecting",
-              "message": "ingest closed the connection"
-            }
-          ],
-          "liveSeconds": 2400,
-          "directFallbackAvailable": false,
-          "restart": {
-            "at": "2026-10-16T12:39:58.000Z",
-            "destinationsResent": true
-          },
-          "allowancePast": {
-            "seconds": 720
-          },
-          "onAir": {
-            "name": "iPhone",
-            "kind": "phone",
-            "source": "camera",
-            "waiting": false,
-            "thisDevice": false,
-            "since": "2026-11-16T20:01:02.000Z"
-          },
-          "stoppedBy": "taken-over"
-        },
-        "statusWaiting": {
-          "phase": "hold",
-          "entitled": true,
-          "plan": "max",
-          "settings": {
-            "enabled": true,
-            "holdMaxSeconds": 1800,
-            "holdMaxChoices": [300, 900, 1800, 3600],
-            "holdImageScreenId": "screen-1"
-          },
-          "allowance": {
-            "enabled": true,
-            "secondsPerMonth": 360000,
-            "secondsUsed": 133200,
-            "overageSeconds": 0,
-            "resetAt": "2026-11-01T00:00:00.000Z",
-            "talkShows": true,
-            "guestsOnStage": 5,
-            "roomSize": 10,
-            "recordingRetentionDays": 30
-          },
-          "show": {
-            "id": "sh_0123456789abcdefghijkl",
-            "nodeId": "eu-hel-1",
-            "createdAt": "2026-10-16T12:00:00.000Z",
-            "expiresAt": "2026-10-17T00:30:00.000Z",
-            "resumable": false
-          },
-          "sessionId": "8c1d9f40-6a62-4f0c-9d7d-1f7a3c2b9e10",
-          "connected": true,
-          "hold": {
-            "active": true,
-            "since": "2026-10-16T12:40:00.000Z",
-            "reason": "feed-lost",
-            "remainingSeconds": 1650
-          },
-          "feeds": [
-            {
-              "orientation": "horizontal",
-              "connected": false,
-              "kbps": 0
-            }
-          ],
-          "legs": [
-            {
-              "targetId": "youtube",
-              "platform": "youtube",
-              "label": "YouTube",
-              "state": "live"
-            },
-            {
-              "targetId": "twitch",
-              "platform": "twitch",
-              "label": "Twitch",
-              "state": "reconnecting",
-              "message": "ingest closed the connection"
-            }
-          ],
-          "liveSeconds": 2400,
-          "directFallbackAvailable": false,
-          "restart": {
-            "at": "2026-10-16T12:39:58.000Z",
-            "destinationsResent": true
-          },
-          "allowancePast": {
-            "seconds": 720
-          },
-          "onAir": {
-            "name": "iPhone",
-            "kind": "phone",
-            "source": "camera",
-            "waiting": true,
-            "thisDevice": false,
-            "since": "2026-11-16T20:01:02.000Z"
-          },
-          "stoppedBy": "hand-off"
-        }
+        "recordingRetentionDays": 30
       },
       "features": {
         "cloudAiEnabled": true,
@@ -3003,6 +2849,160 @@
       "outputs": [
         { "orientation": "horizontal", "width": 1920, "height": 1080, "fps": 60, "videoKbps": 6000 }
       ]
+    },
+    "statusOnAirElsewhere": {
+      "phase": "hold",
+      "entitled": true,
+      "plan": "max",
+      "settings": {
+        "enabled": true,
+        "holdMaxSeconds": 1800,
+        "holdMaxChoices": [300, 900, 1800, 3600],
+        "holdImageScreenId": "screen-1"
+      },
+      "allowance": {
+        "enabled": true,
+        "secondsPerMonth": 360000,
+        "secondsUsed": 133200,
+        "overageSeconds": 0,
+        "resetAt": "2026-11-01T00:00:00.000Z",
+        "talkShows": true,
+        "guestsOnStage": 5,
+        "roomSize": 10,
+        "recordingRetentionDays": 30
+      },
+      "show": {
+        "id": "sh_0123456789abcdefghijkl",
+        "nodeId": "eu-hel-1",
+        "createdAt": "2026-10-16T12:00:00.000Z",
+        "expiresAt": "2026-10-17T00:30:00.000Z",
+        "resumable": false
+      },
+      "sessionId": "8c1d9f40-6a62-4f0c-9d7d-1f7a3c2b9e10",
+      "connected": true,
+      "hold": {
+        "active": true,
+        "since": "2026-10-16T12:40:00.000Z",
+        "reason": "feed-lost",
+        "remainingSeconds": 1650
+      },
+      "feeds": [
+        {
+          "orientation": "horizontal",
+          "connected": false,
+          "kbps": 0
+        }
+      ],
+      "legs": [
+        {
+          "targetId": "youtube",
+          "platform": "youtube",
+          "label": "YouTube",
+          "state": "live"
+        },
+        {
+          "targetId": "twitch",
+          "platform": "twitch",
+          "label": "Twitch",
+          "state": "reconnecting",
+          "message": "ingest closed the connection"
+        }
+      ],
+      "liveSeconds": 2400,
+      "directFallbackAvailable": false,
+      "restart": {
+        "at": "2026-10-16T12:39:58.000Z",
+        "destinationsResent": true
+      },
+      "allowancePast": {
+        "seconds": 720
+      },
+      "onAir": {
+        "name": "iPhone",
+        "kind": "phone",
+        "source": "camera",
+        "waiting": false,
+        "thisDevice": false,
+        "since": "2026-11-16T20:01:02.000Z"
+      },
+      "stoppedBy": "taken-over"
+    },
+    "statusWaiting": {
+      "phase": "hold",
+      "entitled": true,
+      "plan": "max",
+      "settings": {
+        "enabled": true,
+        "holdMaxSeconds": 1800,
+        "holdMaxChoices": [300, 900, 1800, 3600],
+        "holdImageScreenId": "screen-1"
+      },
+      "allowance": {
+        "enabled": true,
+        "secondsPerMonth": 360000,
+        "secondsUsed": 133200,
+        "overageSeconds": 0,
+        "resetAt": "2026-11-01T00:00:00.000Z",
+        "talkShows": true,
+        "guestsOnStage": 5,
+        "roomSize": 10,
+        "recordingRetentionDays": 30
+      },
+      "show": {
+        "id": "sh_0123456789abcdefghijkl",
+        "nodeId": "eu-hel-1",
+        "createdAt": "2026-10-16T12:00:00.000Z",
+        "expiresAt": "2026-10-17T00:30:00.000Z",
+        "resumable": false
+      },
+      "sessionId": "8c1d9f40-6a62-4f0c-9d7d-1f7a3c2b9e10",
+      "connected": true,
+      "hold": {
+        "active": true,
+        "since": "2026-10-16T12:40:00.000Z",
+        "reason": "feed-lost",
+        "remainingSeconds": 1650
+      },
+      "feeds": [
+        {
+          "orientation": "horizontal",
+          "connected": false,
+          "kbps": 0
+        }
+      ],
+      "legs": [
+        {
+          "targetId": "youtube",
+          "platform": "youtube",
+          "label": "YouTube",
+          "state": "live"
+        },
+        {
+          "targetId": "twitch",
+          "platform": "twitch",
+          "label": "Twitch",
+          "state": "reconnecting",
+          "message": "ingest closed the connection"
+        }
+      ],
+      "liveSeconds": 2400,
+      "directFallbackAvailable": false,
+      "restart": {
+        "at": "2026-10-16T12:39:58.000Z",
+        "destinationsResent": true
+      },
+      "allowancePast": {
+        "seconds": 720
+      },
+      "onAir": {
+        "name": "iPhone",
+        "kind": "phone",
+        "source": "camera",
+        "waiting": true,
+        "thisDevice": false,
+        "since": "2026-11-16T20:01:02.000Z"
+      },
+      "stoppedBy": "hand-off"
     }
   },
   "chatCommand": {
