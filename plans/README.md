@@ -1,5 +1,17 @@
 # Implementation Plans
 
+- 2026-11-16: [Plan 241](241-live-page.md), the owner's ask: make
+  videorc.com/live richer; today it only says live or not live. PLANNED
+  2026-11-16, D1 to D9 answered by the owner:
+  - Every stream, cloud or direct: a signed-in desktop sends a small live
+    status (platforms, open watchdog alerts, recording) every 15 s, kept only
+    while the stream runs.
+  - Not live: the last stream's recap (free) and a 90-day history (Premium)
+    with a page per stream, saved from the plan 237 report behind its own
+    "Save my streams" switch, on by default.
+  - YouTube's numbers leave the history after 30 days, and at once on
+    Disconnect (YouTube API policy III.E.4). Show only: End stream stays the
+    only control.
 - 2026-11-15: [Plan 239](239-avatar-and-sidekick.md), the owner's ask: "our
   sidekick is two things: a moderator and control for stream manager… the
   avatar that goes on live stream. I want to separate those two."
