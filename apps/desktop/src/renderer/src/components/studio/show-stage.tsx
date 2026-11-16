@@ -34,6 +34,7 @@ import { SegmentedControl } from '@/components/ui/segmented-control'
 import { Spinner } from '@/components/ui/spinner'
 import { useStudioCloud } from '@/hooks/use-studio'
 import type {
+  CloudHostShape,
   CloudRoomParticipant,
   CloudRoomRequest,
   CloudStageLayout,
@@ -55,7 +56,13 @@ import type { TalkShowContextValue } from '@/lib/talk-show-context'
 import type { TalkShowPerson } from '@/lib/talk-show-room'
 import { managedProgramStageInput, programMonitorView } from '@/lib/talk-show-managed'
 import { PROGRAM_MONITOR_EMPTY } from '@/lib/talk-show-session'
-import { cameraOffLook, cameraPicture, showsAway } from '@/lib/talk-show-tile'
+import {
+  HOST_CIRCLE_CLIP,
+  cameraOffLook,
+  cameraPicture,
+  hostCircle,
+  showsAway
+} from '@/lib/talk-show-tile'
 import {
   planStage,
   showStageInput,
@@ -142,6 +149,7 @@ function StageWell({ talkShow }: { talkShow: TalkShowContextValue }): ReactEleme
     >
       {plan.tiles.map((tile) => (
         <StageTileView
+          hostShape={room?.stage.hostShape}
           key={`${tile.kind}:${tile.identity}`}
           participant={room?.participants?.find((entry) => entry.identity === tile.identity)}
           talkShow={talkShow}
@@ -197,62 +205,71 @@ function StageTileView({
   tile,
   participant,
   talkShow,
+  hostShape,
   monitor = false
 }: {
   tile: StageTile
   participant: CloudRoomParticipant | undefined
   talkShow: TalkShowContextValue
+  /** The stage's `hostShape`, as sent: the host's circle (plan 247 D-2). */
+  hostShape: CloudHostShape | undefined
   /** In the Program monitor: the picture and its geometry, without words. */
   monitor?: boolean
 }): ReactElement {
   const { track, cameraOff, name } = tileTrack(tile, talkShow)
   const label = monitor ? '' : name || participant?.name || ''
   const look = cameraOffLook(tile.rect.w, tile.rect.h)
+  const circle = hostCircle(tile, talkShow.hostIdentity, hostShape)
   return (
-    <div
-      className="absolute overflow-hidden bg-inset"
-      data-stage-identity={tile.identity}
-      data-stage-kind={tile.kind}
-      data-testid="show-stage-tile"
-      style={{ ...stageRectPercent(STAGE_CANVAS, tile.rect), borderRadius: cqw(tile.cornerRadius) }}
-    >
-      <TrackVideo
-        className={tile.kind === 'screen' ? 'object-contain' : 'object-cover'}
-        track={track}
-      />
-      {cameraOff ? (
-        // The camera-off look, as viewers see it: the circle and the letter.
-        <CameraOffAvatar
-          circle={cqw(look.diameter)}
-          letter={cqw(look.fontPx)}
-          name={name === 'You' ? (participant?.name ?? name) : name || (participant?.name ?? '')}
+    <>
+      <div
+        className="absolute overflow-hidden bg-inset"
+        data-stage-identity={tile.identity}
+        data-stage-kind={tile.kind}
+        data-stage-shape={circle ? 'circle' : 'rounded'}
+        data-testid="show-stage-tile"
+        style={{
+          ...stageRectPercent(STAGE_CANVAS, tile.rect),
+          ...(circle
+            ? { borderRadius: 0, clipPath: HOST_CIRCLE_CLIP }
+            : { borderRadius: cqw(tile.cornerRadius) })
+        }}
+      >
+        <TrackVideo
+          className={tile.kind === 'screen' ? 'object-contain' : 'object-cover'}
+          track={track}
         />
-      ) : !track && !monitor ? (
-        <span className="absolute inset-0 flex items-center justify-center text-sm text-video-ground-muted">
-          {tile.kind === 'screen' ? 'Waiting for the screen' : 'No picture yet'}
-        </span>
-      ) : null}
-      {showsAway(participant?.away, cameraOff) && tile.kind === 'person' ? (
-        <span className="absolute inset-0 flex items-center justify-center bg-video-ground/60 text-sm font-medium text-video-ground-foreground">
-          {monitor ? null : 'Back in a moment'}
-        </span>
-      ) : null}
+        {cameraOff ? (
+          // The camera-off look, as viewers see it: the circle and the letter.
+          <CameraOffAvatar
+            circle={cqw(look.diameter)}
+            letter={cqw(look.fontPx)}
+            name={name === 'You' ? (participant?.name ?? name) : name || (participant?.name ?? '')}
+          />
+        ) : !track && !monitor ? (
+          <span className="absolute inset-0 flex items-center justify-center text-sm text-video-ground-muted">
+            {tile.kind === 'screen' ? 'Waiting for the screen' : 'No picture yet'}
+          </span>
+        ) : null}
+        {showsAway(participant?.away, cameraOff) && tile.kind === 'person' ? (
+          <span className="absolute inset-0 flex items-center justify-center bg-video-ground/60 text-sm font-medium text-video-ground-foreground">
+            {monitor ? null : 'Back in a moment'}
+          </span>
+        ) : null}
+      </div>
+      {/* Beside the tile, as on the program page, so the host's circle never clips it. */}
       {tile.plate && label ? (
         <span
           className="absolute flex items-end"
-          style={{
-            left: cqw(tile.plate.x - tile.rect.x),
-            bottom: cqw(tile.rect.y + tile.rect.h - (tile.plate.y + tile.plate.h)),
-            width: cqw(tile.plate.w),
-            height: cqw(tile.plate.h)
-          }}
+          data-testid="show-stage-plate"
+          style={stageRectPercent(STAGE_CANVAS, tile.plate)}
         >
           <span className="max-w-full truncate rounded-full bg-video-ground/70 px-[max(8px,0.8cqw)] py-[max(2px,0.3cqw)] text-[max(11px,1.3cqw)] font-medium text-video-ground-foreground">
             {label}
           </span>
         </span>
       ) : null}
-    </div>
+    </>
   )
 }
 
@@ -499,6 +516,7 @@ function ProgramStage({ talkShow }: { talkShow: TalkShowContextValue }): ReactEl
     <>
       {plan.tiles.map((tile) => (
         <StageTileView
+          hostShape={room?.stage.hostShape}
           key={`${tile.kind}:${tile.identity}`}
           monitor
           participant={room?.participants?.find((entry) => entry.identity === tile.identity)}
