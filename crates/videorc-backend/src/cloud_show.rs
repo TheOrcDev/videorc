@@ -1059,6 +1059,38 @@ pub fn classify_cloud_failure(
     }
 }
 
+pub(crate) fn cloud_refusal(code: &str) -> anyhow::Error {
+    anyhow::Error::new(CloudApiError::Other {
+        status: 409,
+        code: code.into(),
+        message: match code {
+            "cloud-handoff-update" => {
+                "Update Videorc on the other computer first, or end the stream and go live again."
+            }
+            "cloud-handoff-unsupported" => "This show cannot continue on another device.",
+            "cloud-source-not-ready" => "This computer is not sending to the show yet. Try again.",
+            "cloud-not-on-air" => "This computer is not on air.",
+            _ => "There is no Videorc Cloud show to resume.",
+        }
+        .into(),
+    })
+}
+
+pub(crate) fn continuation_error_code(error: &anyhow::Error) -> Option<&'static str> {
+    let CloudApiError::Other { code, .. } = error.downcast_ref::<CloudApiError>()? else {
+        return None;
+    };
+    [
+        "cloud-handoff-update",
+        "cloud-handoff-unsupported",
+        "cloud-source-not-ready",
+        "cloud-not-on-air",
+        "cloud-nothing-to-resume",
+    ]
+    .into_iter()
+    .find(|known| *known == code)
+}
+
 /// The web API as the show needs it. Implemented by `VideorcApiClient` and by
 /// the tests' fake. Static dispatch keeps the futures `Send` without a trait
 /// object.
@@ -1072,6 +1104,12 @@ pub trait CloudWebApi: Send + Sync + 'static {
         &self,
         bearer: &str,
     ) -> impl Future<Output = std::result::Result<CurrentShowResponse, CloudApiError>> + Send;
+    fn hand_off(
+        &self,
+        bearer: &str,
+        show_id: &str,
+        device: &CloudDevice,
+    ) -> impl Future<Output = std::result::Result<(), CloudApiError>> + Send;
     fn end_show(
         &self,
         bearer: &str,
@@ -1630,6 +1668,7 @@ pub struct CloudShowRuntime {
     pub entitlement: CloudEntitlement,
     pub(crate) connected: bool,
     ending: bool,
+    continuation_stop_in_flight: bool,
     pub(crate) show: Option<ActiveShow>,
     pub(crate) runner: Option<RunnerState>,
     pub(crate) failed: Option<FailedShow>,
@@ -2172,6 +2211,11 @@ pub struct CloudHooks {
     /// Plan 234 T3: `cloud.room.overlay`, an overlay for the host's
     /// renderer to send to the room. Web control only.
     pub overlay: CloudOverlayHook,
+    pub stop: Arc<
+        dyn Fn() -> Pin<Box<dyn Future<Output = std::result::Result<(), String>> + Send>>
+            + Send
+            + Sync,
+    >,
 }
 
 impl CloudHooks {
@@ -3750,6 +3794,7 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
                 hold_image_png_base64: None,
                 resuming: false,
             });
+            runtime.stopped_by = None;
             runtime.end_reason = None;
             runtime.message = None;
             runtime.restart = None;
@@ -4078,6 +4123,7 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
                 show.record = record;
                 show.ingest = Some(ingest.clone());
             }
+            runtime.stopped_by = None;
             runtime.end_reason = None;
             runtime.message = None;
             runtime.restart = None;
@@ -4117,6 +4163,109 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
         )))
     }
 
+    /// Plan 243 D7: stop this computer while leaving every cloud leg open.
+    pub async fn hand_off(&self, bearer: Option<String>) -> Result<()> {
+        let (show_id, device) = {
+            let runtime = lock(&self.slot);
+            let show = runtime
+                .show
+                .as_ref()
+                .ok_or_else(|| cloud_refusal("cloud-nothing-to-resume"))?;
+            if show.control.transport_kind() != ControlKind::Web || show.record.is_test() {
+                return Err(cloud_refusal("cloud-handoff-unsupported"));
+            }
+            if show.session_id.is_none() && runtime.talk.is_none() {
+                return Err(cloud_refusal("cloud-not-on-air"));
+            }
+            if runtime
+                .runner
+                .as_ref()
+                .and_then(|r| r.on_air.as_ref())
+                .is_some_and(|air| air.device_id.as_deref() != Some(&runtime.device.id))
+            {
+                return Err(cloud_refusal("cloud-not-on-air"));
+            }
+            (show.record.id.clone(), runtime.device.clone())
+        };
+        // A failed POST must still leave viewers on the hold card.
+        let posted = match bearer {
+            Some(bearer) => self
+                .web
+                .hand_off(&bearer, &show_id, &device)
+                .await
+                .map_err(anyhow::Error::new),
+            None => Err(anyhow::Error::new(CloudApiError::Unauthorized)),
+        };
+        self.stop_for_continuation(&show_id, CloudStoppedBy::HandOff)
+            .await?;
+        if posted.is_err() {
+            lock(&self.slot).message = Some(
+                "This computer stopped sending. Videorc Cloud could not confirm the hand-off."
+                    .into(),
+            );
+            self.hooks.emit_from(&self.slot);
+        }
+        posted
+    }
+
+    pub(crate) async fn stop_for_continuation(
+        &self,
+        show_id: &str,
+        reason: CloudStoppedBy,
+    ) -> Result<()> {
+        let (session, talk) = {
+            let mut runtime = lock(&self.slot);
+            if runtime.continuation_stop_in_flight
+                || runtime.show.as_ref().is_none_or(|s| s.record.id != show_id)
+            {
+                return Ok(());
+            }
+            runtime.continuation_stop_in_flight = true;
+            runtime.stopped_by = Some(reason);
+            runtime.destinations_generation.stop();
+            runtime.feed_down_since = None;
+            runtime.failed = None;
+            (runtime.feeding_session(), runtime.talk.is_some())
+        };
+        // Must reach the renderer before the local stop event (D7).
+        self.hooks.emit_from(&self.slot);
+        if talk {
+            for slot in [
+                crate::cloud_talk::CloudOverlaySlot::Card,
+                crate::cloud_talk::CloudOverlaySlot::Takeover,
+                crate::cloud_talk::CloudOverlaySlot::Hold,
+            ] {
+                for orientation in [
+                    crate::cloud_talk::CloudOverlayOrientation::H,
+                    crate::cloud_talk::CloudOverlayOrientation::V,
+                ] {
+                    let _ = self.clear_overlay(slot, orientation).await;
+                }
+            }
+            self.forget_talk_show().await;
+        }
+        let stopped = if session.is_some() {
+            (self.hooks.stop)().await
+        } else {
+            Ok(())
+        };
+        {
+            let mut runtime = lock(&self.slot);
+            runtime.continuation_stop_in_flight = false;
+            if stopped.is_ok()
+                && let Some(show) = runtime.show.as_mut().filter(|s| s.record.id == show_id)
+            {
+                show.session_id = None;
+                show.resuming = false;
+                show.destinations.clear();
+                runtime.ending = false;
+                runtime.keep_remembering(show_id);
+            }
+        }
+        self.hooks.emit_from(&self.slot);
+        stopped.map_err(anyhow::Error::msg)
+    }
+
     /// The desktop's Stop (C4): end the show this session fed. The YouTube
     /// `complete` transition stays with the renderer, as today.
     pub async fn on_session_stopped(&self, session_id: &str, bearer: Option<String>) {
@@ -4124,6 +4273,16 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
             let runtime = lock(&self.slot);
             runtime.feeding_session().as_deref() == Some(session_id)
         };
+        if feeding && lock(&self.slot).stopped_by.is_some() {
+            let mut runtime = lock(&self.slot);
+            if let Some(show) = runtime.show.as_mut() {
+                show.session_id = None;
+                show.resuming = false;
+            }
+            drop(runtime);
+            self.hooks.emit_from(&self.slot);
+            return;
+        }
         if feeding {
             let _ = self.end_current_show(bearer).await;
             return;
@@ -5347,6 +5506,8 @@ mod tests {
         create_calls: AtomicUsize,
         /// The `kind` of every create, in order (C6b sends `test`).
         create_kinds: StdMutex<Vec<String>>,
+        hand_off_calls: AtomicUsize,
+        hand_off_fails: std::sync::atomic::AtomicBool,
         end_calls: StdMutex<Vec<String>>,
         /// The web cannot be reached for `end` (plan 222 review M1).
         end_fails: std::sync::atomic::AtomicBool,
@@ -5488,6 +5649,20 @@ mod tests {
                 let _ = release.await;
             }
             answer
+        }
+
+        async fn hand_off(
+            &self,
+            _bearer: &str,
+            _show_id: &str,
+            _device: &CloudDevice,
+        ) -> std::result::Result<(), CloudApiError> {
+            self.hand_off_calls.fetch_add(1, Ordering::SeqCst);
+            if self.hand_off_fails.load(Ordering::SeqCst) {
+                Err(CloudApiError::NodeUnreachable)
+            } else {
+                Ok(())
+            }
         }
 
         async fn end_show(
@@ -5941,6 +6116,7 @@ mod tests {
         let requests = Arc::new(StdMutex::new(Vec::new()));
         let overlays = Arc::new(StdMutex::new(Vec::new()));
         let hooks = CloudHooks {
+            stop: Arc::new(|| Box::pin(async { Ok(()) })),
             emit: {
                 let emitted = emitted.clone();
                 Arc::new(move |status| emitted.lock().unwrap().push(status))
@@ -11394,6 +11570,48 @@ mod tests {
         // A target this show never had sends nothing.
         assert!(harness.context.reconnect_destination("nope").await.is_err());
         assert_eq!(web.destination_bodies().len(), 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cloud_hand_off_keeps_the_show_even_when_the_post_fails() {
+        for fail in [false, true] {
+            let harness = harness(true);
+            managed_live_show(&harness).await;
+            harness
+                .context
+                .web
+                .hand_off_fails
+                .store(fail, Ordering::SeqCst);
+            let result = harness.context.hand_off(Some("bearer".into())).await;
+            assert_eq!(result.is_err(), fail);
+            harness
+                .context
+                .on_session_stopped("session-1", Some("bearer".into()))
+                .await;
+            assert_eq!(harness.context.web.hand_off_calls.load(Ordering::SeqCst), 1);
+            assert!(harness.context.web.end_calls.lock().unwrap().is_empty());
+            let runtime = lock(&harness.context.slot);
+            assert_eq!(runtime.status().stopped_by, Some(CloudStoppedBy::HandOff));
+            assert!(runtime.status().show.unwrap().resumable);
+            assert!(runtime.remembered_show().is_some());
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cloud_hand_off_leaves_the_talk_room_open() {
+        let harness = harness(true);
+        managed_room(&harness).await;
+        harness
+            .context
+            .hand_off(Some("bearer".into()))
+            .await
+            .unwrap();
+        assert!(harness.context.web.end_calls.lock().unwrap().is_empty());
+        let status = lock(&harness.context.slot).status();
+        assert!(status.room.is_none());
+        let show = status.show.unwrap();
+        assert!(show.resumable);
+        assert_eq!(show.kind.as_deref(), Some("talk"));
     }
 
     // Wire section 8.4: a show's only stream dies and LiveKit reports

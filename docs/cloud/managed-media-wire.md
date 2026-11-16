@@ -1186,3 +1186,11 @@ read `onAir`; status projects `thisDevice` and omits the id. Optional fields
 are omitted rather than null. YouTube destinations carry `broadcastId`,
 which is also read from the returned legs. The server scrubs names and
 broadcast ids at show end.
+
+C2 / W1 (D4, D7, D12): renderer-only `cloud.show.handOff {}` posts
+`hand-off` with the device id, then stops locally even if that POST fails.
+`cloud.state.stoppedBy` is emitted before local Stop; recording finalization
+uses the existing Stop path. This intent never calls `/end`, clears no
+remembered show, and leaves `sessionId` absent and the show resumable. Talk
+overlays are cleared before releasing the host connection; no room close is
+sent. The marker stays until a new session starts or a new show is held.

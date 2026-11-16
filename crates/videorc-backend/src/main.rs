@@ -11647,6 +11647,19 @@ async fn handle_text_message_with_role(
         // every answer and the `cloud.state` event are the same secret-free
         // `CloudStatus`.
         "cloud.status" => ServerResponse::ok(command.id, cloud_show_status(state)),
+        "cloud.show.handOff" => {
+            let Some(context) = cloud_context(state) else {
+                return cloud_unavailable(command.id);
+            };
+            match context.hand_off(account::stored_session_token()).await {
+                Ok(()) => ServerResponse::ok(command.id, serde_json::json!({"ok":true})),
+                Err(error) => ServerResponse::error(
+                    command.id,
+                    cloud_show::continuation_error_code(&error).unwrap_or("cloud-handoff-failed"),
+                    error.to_string(),
+                ),
+            }
+        }
         "cloud.settings.set" => {
             match serde_json::from_value::<cloud_show::CloudSettingsPatch>(command.params) {
                 Ok(patch) => match cloud_show_set_settings(state, &patch) {
@@ -15667,7 +15680,20 @@ fn cloud_hooks(state: &AppState) -> cloud_show::CloudHooks {
     let camera_state = state.clone();
     let request_state = state.clone();
     let overlay_state = state.clone();
+    let stop_state = state.clone();
     cloud_show::CloudHooks {
+        stop: std::sync::Arc::new(move || {
+            let state = stop_state.clone();
+            Box::pin(async move {
+                live_chat::stop_live_chat_for_capture_end(&state).await;
+                stop_recording_with_intent(state, protocol::SessionStopParams::default())
+                    .await
+                    .map(|_| ())
+                    .map_err(|_| {
+                        "This computer could not stop sending. Try Stop again.".to_string()
+                    })
+            })
+        }),
         emit: std::sync::Arc::new(move |status| {
             emit_state.emit_event(cloud_show::CLOUD_STATE_EVENT, status);
         }),

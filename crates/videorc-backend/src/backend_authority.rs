@@ -174,6 +174,8 @@ fn renderer_only_method(method: &str) -> bool {
             // Plan 224: the one answer that carries a LiveKit token goes to
             // the renderer that joins the room, never to a remote or main.
             | "cloud.room.token.refresh"
+            | "cloud.show.handOff"
+            | "cloud.show.check"
     )
 }
 

@@ -3624,6 +3624,25 @@ impl crate::cloud_show::CloudWebApi for VideorcApiClient {
         .await
     }
 
+    async fn hand_off(
+        &self,
+        bearer: &str,
+        show_id: &str,
+        device: &crate::cloud_show::CloudDevice,
+    ) -> std::result::Result<(), crate::cloud_show::CloudApiError> {
+        let path = format!("/api/cloud/shows/{show_id}/hand-off");
+        self.cloud_json::<serde_json::Value>(
+            self.http
+                .post(self.endpoint(&path))
+                .bearer_auth(bearer)
+                .json(&serde_json::json!({"device":{"id":device.id}})),
+            &path,
+            CLOUD_REQUEST_TIMEOUT,
+        )
+        .await
+        .map(|_| ())
+    }
+
     async fn end_show(
         &self,
         bearer: &str,
