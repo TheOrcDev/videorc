@@ -19,6 +19,21 @@ import {
 export const managedWire = JSON.parse(
   readFileSync(new URL('../../protocol-fixtures/cloud-managed-wire.json', import.meta.url))
 )
+/** Explicit parity roles: existing callers retain their legacy fixture grant. */
+export function managedParityGrant({ role, room }) {
+  if (role === 'recorder')
+    return {
+      room,
+      roomJoin: true,
+      canPublish: false,
+      canPublishData: false,
+      canSubscribe: true,
+      hidden: true,
+      recorder: true
+    }
+  if (!['host', 'guest'].includes(role)) throw new Error('Unknown parity role')
+  return roomGrantFor({ role, room, screenShare: false, microphone: true })
+}
 const continuationRoutes = {
   onAir: { method: 'POST', path: '/api/cloud/shows/:id/on-air' },
   handOff: { method: 'POST', path: '/api/cloud/shows/:id/hand-off' }
@@ -194,7 +209,7 @@ export async function startFakeCloudWebManaged({
         Math.floor((now - Date.parse(s.state.recording.since)) / 1000)
       )
   }
-  const tokenFor = (s, identity = `host:${s.show.id}`, cameraDevice) => {
+  const tokenFor = (s, identity = `host:${s.show.id}`, cameraDevice, parityRole) => {
     if (!livekit) throw new Error('A local LiveKit room is required')
     const token = mintLiveKitToken({
       apiKey: livekit.apiKey,
@@ -210,7 +225,9 @@ export async function startFakeCloudWebManaged({
             canSubscribe: false,
             canPublishData: false
           }
-        : roomGrantFor({ role: 'host', room: s.show.id }),
+        : parityRole
+          ? managedParityGrant({ role: parityRole, room: s.show.id })
+          : roomGrantFor({ role: 'host', room: s.show.id }),
       ttlSeconds: 600
     })
     tokens.push(token)
@@ -1130,7 +1147,8 @@ export async function startFakeCloudWebManaged({
     recordings,
     tokens,
     roomRpc,
-    tokenFor: (id, identity) => tokenFor(shows.get(id), identity),
+    tokenFor: (id, identity, parityRole) =>
+      tokenFor(shows.get(id), identity, undefined, parityRole),
     snapshot: (id) => ({ rev: shows.get(id).rev, state: copy(shows.get(id).state) }),
     async close() {
       closed = true
