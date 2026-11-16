@@ -5,17 +5,28 @@ import { join } from 'node:path'
 import { describe, it } from 'node:test'
 
 import {
+  RELEASE_CI_GATE_SPECS,
   ReuseReleaseCiError,
   findFirstReusableReleaseCiGate,
+  jobProvesGate,
   parseReleaseRepository,
   parseReleaseSourceSha,
   resolveReleaseCiGateLookup,
   reuseReleaseCiGateOrExplain
 } from './reuse-release-ci-gates.mjs'
-import { main as reuseCli } from '../reuse-release-ci-gates.mjs'
+import { main as reuseCli, sameSourceShas } from '../reuse-release-ci-gates.mjs'
 
 const sha = 'a'.repeat(40)
 const otherSha = 'b'.repeat(40)
+const thirdSha = 'c'.repeat(40)
+
+function greenSteps(specId) {
+  return RELEASE_CI_GATE_SPECS[specId].jobs[0].requiredSteps.map((name) => ({
+    name,
+    status: 'completed',
+    conclusion: 'success'
+  }))
+}
 
 function jsSuccessRun(overrides = {}) {
   return {
@@ -37,6 +48,7 @@ function jsSuccessJob(overrides = {}) {
     status: 'completed',
     conclusion: 'success',
     html_url: 'https://github.com/TheOrcDev/videorc/actions/runs/11/job/1100',
+    steps: greenSteps('windows-js-job'),
     ...overrides
   }
 }
@@ -61,6 +73,7 @@ function windowsGatesSuccessJob(overrides = {}) {
     status: 'completed',
     conclusion: 'success',
     html_url: 'https://github.com/TheOrcDev/videorc/actions/runs/22/job/2200',
+    steps: greenSteps('windows-source-gates'),
     ...overrides
   }
 }
@@ -122,6 +135,7 @@ describe('reuse-release-ci-gates', () => {
       runId: 11,
       jobId: 1100,
       jobName: 'JS (format + lint + tests)',
+      jobNames: ['JS (format + lint + tests)'],
       workflowPath: '.github/workflows/ci.yml',
       htmlUrl: 'https://github.com/TheOrcDev/videorc/actions/runs/11/job/1100',
       headSha: sha
@@ -208,6 +222,126 @@ describe('reuse-release-ci-gates', () => {
     assert.equal(result.reason, 'github-response')
   })
 
+  it('refuses a skip twin that shares the gate name but ran no gate step (0.28.1)', async () => {
+    const twin = windowsGatesSuccessJob({
+      steps: [
+        { name: 'Set up job', conclusion: 'success' },
+        {
+          name: 'Skip heavy Windows source gates for an allow-listed docs or version-only change',
+          conclusion: 'success'
+        },
+        { name: 'Complete job', conclusion: 'success' }
+      ]
+    })
+    const result = await findFirstReusableReleaseCiGate({
+      lookup: 'windows-rust',
+      repository: 'TheOrcDev/videorc',
+      sha,
+      api: apiFrom({
+        [`/repos/TheOrcDev/videorc/actions/workflows/windows.yml/runs?head_sha=${sha}&per_page=20`]:
+          { workflow_runs: [windowsGatesSuccessRun()] },
+        '/repos/TheOrcDev/videorc/actions/runs/22/jobs?per_page=100': { jobs: [twin] }
+      })
+    })
+    assert.equal(result.reused, false)
+  })
+
+  it('refuses a green job that is missing one required step, or ran it red', () => {
+    const gate = RELEASE_CI_GATE_SPECS['windows-source-gates'].jobs[0]
+    const steps = greenSteps('windows-source-gates')
+    assert.equal(jobProvesGate(windowsGatesSuccessJob(), gate), true)
+    assert.equal(jobProvesGate(windowsGatesSuccessJob({ steps: steps.slice(1) }), gate), false)
+    assert.equal(
+      jobProvesGate(
+        windowsGatesSuccessJob({
+          steps: steps.map((step, index) =>
+            index === 1 ? { ...step, conclusion: 'skipped' } : step
+          )
+        }),
+        gate
+      ),
+      false
+    )
+  })
+
+  it('reuses a same-source ancestor when the release commit only has a skip twin', async () => {
+    const result = await findFirstReusableReleaseCiGate({
+      lookup: 'windows-rust',
+      repository: 'TheOrcDev/videorc',
+      sha,
+      sourceShas: [sha, otherSha],
+      api: apiFrom({
+        [`/repos/TheOrcDev/videorc/actions/workflows/windows.yml/runs?head_sha=${sha}&per_page=20`]:
+          { workflow_runs: [windowsGatesSuccessRun()] },
+        '/repos/TheOrcDev/videorc/actions/runs/22/jobs?per_page=100': {
+          jobs: [windowsGatesSuccessJob({ steps: [] })]
+        },
+        [`/repos/TheOrcDev/videorc/actions/workflows/windows.yml/runs?head_sha=${otherSha}&per_page=20`]:
+          { workflow_runs: [windowsGatesSuccessRun({ id: 44, head_sha: otherSha })] },
+        '/repos/TheOrcDev/videorc/actions/runs/44/jobs?per_page=100': {
+          jobs: [windowsGatesSuccessJob({ id: 4400 })]
+        }
+      })
+    })
+    assert.equal(result.reused, true)
+    assert.equal(result.reason, 'ancestor-same-source')
+    assert.equal(result.headSha, sha)
+    assert.equal(result.sourceSha, otherSha)
+    assert.equal(result.runId, 44)
+  })
+
+  it('refuses a candidate list that does not start with the release commit', async () => {
+    await assert.rejects(
+      () =>
+        findFirstReusableReleaseCiGate({
+          lookup: 'linux-rust',
+          repository: 'TheOrcDev/videorc',
+          sha,
+          sourceShas: [otherSha],
+          api: async () => assert.fail('must not call GitHub')
+        }),
+      (error) => error instanceof ReuseReleaseCiError && error.code === 'source-sha'
+    )
+  })
+
+  it('walks first-parent history only while CI would skip the gate for the diff', () => {
+    const seen = []
+    const shas = sameSourceShas({
+      sha,
+      lookup: 'windows-rust',
+      history: () => [sha, otherSha, thirdSha, 'd'.repeat(40)],
+      classify: ({ env }) => {
+        seen.push(env.CI_BASE_SHA)
+        assert.equal(env.GITHUB_EVENT_NAME, 'push')
+        assert.equal(env.CI_HEAD_SHA, sha)
+        // The diff from thirdSha already holds code, so the walk stops there.
+        return { windowsHeavy: env.CI_BASE_SHA !== otherSha }
+      }
+    })
+    assert.deepEqual(shas, [sha, otherSha])
+    assert.deepEqual(seen, [otherSha, thirdSha])
+  })
+
+  it('falls back to the exact commit when git or the lookup is unknown', () => {
+    const boom = () => {
+      throw new Error('shallow clone')
+    }
+    assert.deepEqual(sameSourceShas({ sha, lookup: 'windows-rust', history: boom }), [sha])
+    assert.deepEqual(
+      sameSourceShas({ sha, lookup: 'nope', history: () => assert.fail('no walk') }),
+      [sha]
+    )
+    assert.deepEqual(
+      sameSourceShas({
+        sha,
+        lookup: 'linux-rust',
+        history: () => [sha, otherSha],
+        classify: boom
+      }),
+      [sha]
+    )
+  })
+
   it('exposes the Windows JS lookup as source-gates then the CI JS job', () => {
     assert.deepEqual(
       resolveReleaseCiGateLookup('windows-js').map((spec) => spec.id),
@@ -253,6 +387,7 @@ describe('reuse-release-ci-gates CLI', () => {
           GITHUB_OUTPUT: outputFile
         },
         argv: ['node', 'reuse-release-ci-gates.mjs', '--spec', 'linux-rust'],
+        sourceShasFor: ({ sha: release }) => [release],
         fetchImpl: async (url) => {
           assert.match(url, /api\.github\.com/)
           if (url.includes('/actions/workflows/linux.yml/runs')) {
@@ -283,7 +418,8 @@ describe('reuse-release-ci-gates CLI', () => {
                     name: 'Linux gates (FFmpeg policy + Rust compile/test)',
                     status: 'completed',
                     conclusion: 'success',
-                    html_url: 'https://example.test/job/3300'
+                    html_url: 'https://example.test/job/3300',
+                    steps: greenSteps('linux-rust-job')
                   }
                 ]
               })

@@ -1,12 +1,17 @@
 #!/usr/bin/env node
+import { execFileSync } from 'node:child_process'
 import { appendFile } from 'node:fs/promises'
 import { pathToFileURL } from 'node:url'
 
+import { classifyRepositoryChangeScope } from './ci-change-scope.mjs'
 import {
+  RELEASE_CI_GATE_SCOPE_FLAGS,
   parseReleaseRepository,
   parseReleaseSourceSha,
   reuseReleaseCiGateOrExplain
 } from './lib/reuse-release-ci-gates.mjs'
+
+const MAX_ANCESTORS = 20
 
 async function githubApi(path, token, fetchImpl) {
   const response = await fetchImpl(`https://api.github.com${path}`, {
@@ -23,11 +28,60 @@ async function githubApi(path, token, fetchImpl) {
   return response.json()
 }
 
+function firstParentHistory(sha, cwd) {
+  const output = execFileSync(
+    'git',
+    ['rev-list', '--first-parent', `--max-count=${MAX_ANCESTORS + 1}`, sha],
+    { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }
+  )
+  return output.split('\n').filter(Boolean)
+}
+
+/**
+ * [releaseSha, ...ancestors] whose diff to the release commit CI would skip
+ * this gate family for. Walks first-parent history and stops at the first
+ * ancestor whose diff the gate would run on. Any git failure means exact-commit
+ * reuse only.
+ */
+export function sameSourceShas({
+  sha,
+  lookup,
+  cwd = process.cwd(),
+  history = firstParentHistory,
+  classify = classifyRepositoryChangeScope
+}) {
+  const flag = RELEASE_CI_GATE_SCOPE_FLAGS[lookup]
+  if (!flag) return [sha]
+  let commits
+  try {
+    commits = history(sha, cwd)
+  } catch {
+    return [sha]
+  }
+  if (commits[0] !== sha) return [sha]
+  const shas = [sha]
+  for (const ancestor of commits.slice(1)) {
+    let scope
+    try {
+      scope = classify({
+        env: { GITHUB_EVENT_NAME: 'push', CI_BASE_SHA: ancestor, CI_HEAD_SHA: sha },
+        cwd
+      })
+    } catch {
+      break
+    }
+    if (scope?.[flag] !== false) break
+    shas.push(ancestor)
+  }
+  return shas
+}
+
 export async function main({
   env = process.env,
   fetchImpl = fetch,
   argv = process.argv,
-  output = console
+  output = console,
+  sourceShasFor = sameSourceShas
 } = {}) {
   const specIndex = argv.indexOf('--spec')
   const lookup = specIndex >= 0 ? argv[specIndex + 1] : undefined
@@ -41,11 +95,13 @@ export async function main({
 
   let result
   try {
+    const sourceShas = sourceShasFor({ sha, lookup })
     result = await reuseReleaseCiGateOrExplain({
       api: (path) => githubApi(path, token, fetchImpl),
       repository,
       sha,
-      lookup
+      lookup,
+      sourceShas
     })
   } catch (error) {
     output.error(`reuse-release-ci-gates: ${error.code ?? 'error'}: ${error.message}`)
@@ -53,8 +109,12 @@ export async function main({
   }
 
   if (result.reused) {
+    const from =
+      result.reason === 'ancestor-same-source'
+        ? `ancestor ${result.sourceSha} (its diff to ${result.headSha} is one CI skips this gate for)`
+        : result.headSha
     output.log(
-      `Reusing ${result.jobName} from ${result.workflowPath} run ${result.runId} for ${result.headSha}.`
+      `Reusing ${result.jobName} from ${result.workflowPath} run ${result.runId} for ${from}.`
     )
     if (result.htmlUrl) output.log(result.htmlUrl)
   } else {
@@ -71,7 +131,8 @@ async function writeOutput(env, result) {
     `reason=${result.reason ?? ''}`,
     `run_id=${result.runId ?? ''}`,
     `job_name=${result.jobName ?? ''}`,
-    `html_url=${result.htmlUrl ?? ''}`
+    `html_url=${result.htmlUrl ?? ''}`,
+    `source_sha=${result.sourceSha ?? result.headSha ?? ''}`
   ]
   if (env.GITHUB_OUTPUT) await appendFile(env.GITHUB_OUTPUT, `${lines.join('\n')}\n`)
   return result
