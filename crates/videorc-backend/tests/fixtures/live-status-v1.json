@@ -1,0 +1,44 @@
+{
+  "version": 1,
+  "sessionId": "5f0c2a8e-7d1b-4c1e-9f5a-2b8e6d4c3a10",
+  "seq": 7,
+  "startedAt": "2026-11-16T18:02:10Z",
+  "title": "Building a Rust TUI, part 3",
+  "recording": true,
+  "cloud": false,
+  "destinations": [
+    { "platform": "youtube", "label": "YouTube", "state": "live", "since": "2026-11-16T18:02:14Z" },
+    {
+      "platform": "twitch",
+      "label": "Twitch",
+      "state": "reconnecting",
+      "since": "2026-11-16T18:43:01Z",
+      "reason": "reconnecting"
+    },
+    {
+      "platform": "custom",
+      "label": "Custom",
+      "state": "failed",
+      "since": "2026-11-16T18:40:00Z",
+      "reason": "connect"
+    }
+  ],
+  "alerts": [
+    {
+      "check": "mic-muted",
+      "severity": "critical",
+      "title": "Your microphone is muted",
+      "body": "Muted for 0:42 on the livestream.",
+      "since": "2026-11-16T18:44:02Z"
+    },
+    {
+      "check": "destination-down",
+      "severity": "warning",
+      "title": "Twitch is reconnecting",
+      "body": "Reconnecting for 0:31.",
+      "since": "2026-11-16T18:43:01Z",
+      "platform": "twitch"
+    }
+  ],
+  "app": { "version": "0.29.0", "os": "macos" }
+}
