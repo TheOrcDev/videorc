@@ -956,3 +956,20 @@ test('local sink publish authorization retires the old ingress path after rotati
     false
   )
 })
+
+test('idle viewers never stamp a computer able to restore destinations', async (t) => {
+  const { web, create } = await fixture(t)
+  const id = await create('solo', { device: device('A'), client: currentClient })
+  const show = web.shows.get(id)
+  const poll = (viewer) =>
+    fetch(`${web.httpOrigin}${managedPath('state', id)}${viewer ? '?viewer=idle' : ''}`, {
+      headers: { authorization: `Bearer ${web.sessionToken}` }
+    })
+  assert.equal((await poll(true)).status, 200)
+  assert.equal(show.lastDesktopSeen, undefined)
+  await poll(false)
+  const seen = show.lastDesktopSeen
+  assert.equal(typeof seen, 'number')
+  await poll(true)
+  assert.equal(show.lastDesktopSeen, seen)
+})

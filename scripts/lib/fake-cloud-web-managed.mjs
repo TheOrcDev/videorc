@@ -318,7 +318,7 @@ export async function startFakeCloudWebManaged({
       query: Object.fromEntries(
         [...url.searchParams].map(([key, value]) => [
           key,
-          key === wire.routes.state.query || (key === 'viewer' && value === 'page')
+          key === wire.routes.state.query || (key === 'viewer' && ['page', 'idle'].includes(value))
             ? value
             : '(address withheld)'
         ])
@@ -584,7 +584,8 @@ export async function startFakeCloudWebManaged({
       }
       if (route === 'state') {
         settleTimers(s)
-        if (url.searchParams.get('viewer') !== 'page') s.lastDesktopSeen = Date.now()
+        if (!['page', 'idle'].includes(url.searchParams.get('viewer')))
+          s.lastDesktopSeen = Date.now()
         s.state.desktopConnected = Boolean(
           s.lastDesktopSeen &&
           Date.now() - s.lastDesktopSeen < wire.state.desktopConnectedSeconds * 1000
