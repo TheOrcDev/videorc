@@ -230,6 +230,7 @@ mod x_live;
 mod x_oauth1;
 mod youtube;
 mod youtube_chat;
+mod youtube_emotes;
 mod youtube_quota;
 
 use std::convert::Infallible;

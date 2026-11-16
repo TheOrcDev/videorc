@@ -1,0 +1,43 @@
+{
+  "providerPage": {
+    "items": [
+      {
+        "id": "youtube-blue-face",
+        "snippet": {
+          "type": "textMessageEvent",
+          "publishedAt": "2026-11-16T10:00:00Z",
+          "displayMessage": ":face-blue-smiling:",
+          "textMessageDetails": {
+            "messageText": ":face-blue-smiling:"
+          }
+        },
+        "authorDetails": {
+          "channelId": "fixture-viewer",
+          "displayName": "@vcode_sh"
+        }
+      }
+    ]
+  },
+  "message": {
+    "id": "fixture-session:youtube:default:youtube-blue-face",
+    "providerMessageId": "youtube-blue-face",
+    "platform": "youtube",
+    "sessionId": "fixture-session",
+    "authorId": "fixture-viewer",
+    "authorName": "@vcode_sh",
+    "authorBadges": [],
+    "authorRoles": [],
+    "publishedAt": "2026-11-16T10:00:00Z",
+    "receivedAt": "2026-11-16T10:00:01Z",
+    "messageText": ":face-blue-smiling:",
+    "fragments": [
+      {
+        "type": "emote",
+        "text": ":face-blue-smiling:",
+        "imageUrl": "https://yt3.ggpht.com/cktIaPxFwnrPwn-alHvnvedHLUJwbHi8HCK3AgbHpphrMAW99qw0bDfxuZagSY5ieE9BBrA=w48-h48-c-k-nd"
+      }
+    ],
+    "eventType": "message",
+    "isDeleted": false
+  }
+}
