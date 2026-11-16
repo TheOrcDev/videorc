@@ -41,10 +41,10 @@
       "case": "controls",
       "repositories": ["desktop"],
       "issueUrl": null,
-      "prUrl": null,
+      "prUrl": "https://github.com/TheOrcDev/videorc/pull/1438",
       "webIssueUrl": null,
-      "webPrUrl": "https://github.com/TheOrcDev/videorc-web/pull/118",
-      "implementation": "ready-for-review",
+      "webPrUrl": null,
+      "implementation": "implemented-review-open",
       "acceptance": "not-run",
       "intendedBranch": "feat/249-s1-cloud-parity",
       "intendedPrTitle": "Plan 249 S1: Make room controls truthful",
@@ -57,7 +57,8 @@
       },
       "crossRepoNeeds": "Reuse open web PR #118 (head af5be462f5d790fd5c808c0acfd4b801382f5e9c) for existing all-program takeover silence. No web checkout modified. Coordinator must integrate/coordinate it; controls acceptance requires its emitted v1 bundle. D3 speech-only mute with opt-in auxiliary sound remains S8. No deployed/live proof.",
       "releaseGate": "blocked-until-required-acceptance",
-      "baseCommit": "570d72926b0a2679f7816a2e0b531218291ff7a6"
+      "baseCommit": "570d72926b0a2679f7816a2e0b531218291ff7a6",
+      "commit": "0f9790f869a07102560ee864ac91b001fe73f7e4"
     },
     {
       "id": "S2",
@@ -69,7 +70,7 @@
       "prUrl": null,
       "webIssueUrl": null,
       "webPrUrl": null,
-      "implementation": "not-started",
+      "implementation": "ready-for-review",
       "acceptance": "not-run",
       "intendedBranch": "feat/249-s2-cloud-parity",
       "intendedPrTitle": "Plan 249 S2: Enforce screen privacy before publish",
@@ -81,8 +82,10 @@
         "desktop": "feat/249-s1-cloud-parity",
         "web": "main"
       },
-      "crossRepoNeeds": "Paired linked consumer/producer PRs; coordinator commissions web checkout; consumers land/deploy before producers enable capability.",
-      "releaseGate": "blocked-until-required-acceptance"
+      "crossRepoNeeds": "Paired desktop/web S2 diffs commissioned. Browser canvas publication privacy v1, generation-tagged screen track names, host-only close topic, cookie-authorized guest observation API, program-token beacon observations and server-only targeted acknowledgement relay. Web PR #118 is independent; reconcile stage.ts and regenerate assets on integration. Acceptance not run; no grant or qualification expansion.",
+      "releaseGate": "blocked-until-required-acceptance",
+      "baseCommit": "0f9790f869a07102560ee864ac91b001fe73f7e4",
+      "webBaseCommit": "8f90dd74944cf08b9ca202e977a2ebf46ee6b16d"
     },
     {
       "id": "S3",

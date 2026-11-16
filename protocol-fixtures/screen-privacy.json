@@ -1,21 +1,25 @@
 {
   "$comment": "Hide screen wire shapes (plan 210 S7). Absent fields are omitted, never null. Rust: cargo test -p videorc-backend screen_privacy_fixture. TypeScript: pnpm --filter @videorc/desktop test -- backend-rpc-contract.test.ts",
   "visible": {
-    "hidden": false
+    "hidden": false,
+    "generation": 0
   },
   "hiddenByYou": {
     "hidden": true,
     "since": "2026-10-28T10:15:00+00:00",
-    "reason": "you"
+    "reason": "you",
+    "generation": 1
   },
   "hiddenByPasswordManager": {
     "hidden": true,
     "since": "2026-10-28T10:16:30+00:00",
-    "reason": "password-manager"
+    "reason": "password-manager",
+    "generation": 3
   },
   "unavailableOnLegacySession": {
     "hidden": false,
-    "unavailable": "Hide screen isn't available on this recording. Stop and record again."
+    "unavailable": "Hide screen isn't available on this recording. Stop and record again.",
+    "generation": 0
   },
   "hideParams": {
     "reason": "password-manager"

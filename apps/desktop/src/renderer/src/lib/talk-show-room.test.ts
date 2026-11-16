@@ -2,6 +2,7 @@
 import type { RoomOptions } from 'livekit-client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import * as privacyModule from './room-screen-privacy'
 import vectors from '../../../shared/chroma-key-vectors.json'
 import type { TalkShowCameraSettings } from './talk-show-camera-effects'
 import type { CloudOnAir, CloudRoomClientState, CloudRoomTokenAnswer } from '@/lib/backend'
@@ -108,7 +109,12 @@ vi.mock('livekit-client', () => ({
     h720: { resolution: { width: 1280, height: 720 }, encoding: {} }
   },
   LocalAudioTrack: class {},
-  LocalVideoTrack: class {},
+  LocalVideoTrack: class {
+    constructor(readonly mediaStreamTrack: MediaStreamTrack) {}
+    stop(): void {
+      this.mediaStreamTrack.stop()
+    }
+  },
   createLocalVideoTrack: lk.video,
   createLocalAudioTrack: lk.audio
 }))
@@ -165,6 +171,7 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  vi.restoreAllMocks()
   vi.unstubAllGlobals()
   vi.useRealTimers()
 })
@@ -673,4 +680,115 @@ it('refuses publication if initial mute fails, and uses exact device constraints
   expect(room.snapshot.local.microphone).toBeNull()
   expect(room.snapshot.local.problem).toContain('mute refused')
   await room.disconnect()
+})
+
+describe('S2 screen publication boundary', () => {
+  function fixture() {
+    privacyModule.roomScreenPrivacy.apply(
+      { hidden: false, generation: 0 },
+      privacyModule.roomScreenPrivacy.showIntent(),
+      true
+    )
+    const raw = { stop: vi.fn(), addEventListener: vi.fn() } as unknown as MediaStreamTrack
+    const outputs: { stop: ReturnType<typeof vi.fn>; kind: string }[] = []
+    const adapter = vi.spyOn(privacyModule, 'createPrivateScreen').mockImplementation(() => {
+      const output = { stop: vi.fn(), kind: 'video' }
+      outputs.push(output)
+      return {
+        track: output as unknown as MediaStreamTrack,
+        block: vi.fn(),
+        close: output.stop,
+        pixels: () => []
+      }
+    })
+    return { raw, outputs, adapter }
+  }
+  it('Hide during pending capture publishes only the gated hidden generation, never raw capture', async () => {
+    const { raw, adapter } = fixture()
+    const pending = deferred<MediaStream>()
+    const acquired = deferred<void>()
+    vi.stubGlobal('navigator', {
+      mediaDevices: {
+        getDisplayMedia: () => {
+          acquired.resolve()
+          return pending.promise
+        }
+      }
+    })
+    const { room } = client(undefined, undefined, { cameraName: null, microphoneName: null })
+    await room.connect()
+    const share = room.startScreenShare()
+    await acquired.promise
+    privacyModule.roomScreenPrivacy.hide()
+    pending.resolve({
+      getVideoTracks: () => [raw],
+      getTracks: () => [raw]
+    } as unknown as MediaStream)
+    await share
+    expect(adapter).toHaveBeenCalledWith(raw, privacyModule.roomScreenPrivacy, expect.any(Function))
+    expect(room.snapshot.screenPrivacy?.hidden).toBe(true)
+    expect(room.snapshot.local.screen).not.toBe(raw)
+    expect(latestRoom().localParticipant.publishTrack).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ name: expect.stringMatching(/:1$/) })
+    )
+    await vi.advanceTimersByTimeAsync(5001)
+    expect(room.snapshot.screenPrivacy?.status).toBe('unconfirmed')
+    const current = room.snapshot.screenPrivacy!
+    const ack = (extra: Record<string, unknown>, participant?: object) =>
+      latestRoom().emit(
+        'DataReceived',
+        new TextEncoder().encode(
+          JSON.stringify({
+            epoch: current.epoch,
+            generation: current.generation,
+            hidden: true,
+            appliedAt: Date.now(),
+            receiver: 'program:wide',
+            ...extra
+          })
+        ),
+        participant,
+        undefined,
+        privacyModule.PRIVACY_ACK_TOPIC
+      )
+    ack({ generation: current.generation - 1 })
+    ack({}, { identity: 'g_forged' })
+    expect(room.snapshot.screenPrivacy?.observations).toEqual({})
+    ack({})
+    expect(room.snapshot.screenPrivacy?.status).toBe('observed')
+    expect(room.snapshot.screenPrivacy?.observations['program:wide']).toBeDefined()
+    const guest = 'g_' + '1'.repeat(22)
+    latestRoom().remoteParticipants.set(guest, {
+      identity: guest,
+      sid: 'PA_new',
+      trackPublications: new Map()
+    })
+    ack({ receiver: guest, receiverSession: 'PA_old' })
+    expect(room.snapshot.screenPrivacy?.observations[guest]).toBeUndefined()
+    ack({ receiver: guest, receiverSession: 'PA_new' })
+    expect(room.snapshot.screenPrivacy?.observations[guest]).toBeDefined()
+    latestRoom().emit('Reconnecting')
+    expect(room.snapshot.screenPrivacy?.observations).toEqual({})
+    expect(room.snapshot.screenPrivacy?.status).toBe('unconfirmed')
+    await room.disconnect()
+    expect(raw.stop).toHaveBeenCalled()
+  })
+  it('canvas failure stops and unpublishes without publishing raw as a fallback', async () => {
+    const { raw, adapter } = fixture()
+    adapter.mockImplementation(() => {
+      throw new Error('no canvas')
+    })
+    vi.stubGlobal('navigator', {
+      mediaDevices: { getDisplayMedia: async () => ({ getVideoTracks: () => [raw] }) }
+    })
+    const { room } = client(undefined, undefined, { cameraName: null, microphoneName: null })
+    await room.connect()
+    await room.startScreenShare()
+    expect(latestRoom().localParticipant.publishTrack).not.toHaveBeenCalled()
+    expect(room.snapshot.screenPrivacy?.status).toBe('paused')
+    expect(room.snapshot.local.screen).toBeNull()
+    expect(room.snapshot.local.problem).toContain('privacy')
+    await room.disconnect()
+  })
 })

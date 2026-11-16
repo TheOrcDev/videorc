@@ -34,6 +34,7 @@ export async function startParityPages(webRoot, guests) {
   const program = await startServer()
   program.state.realLiveKit = true
   requireLoopback(program.origin)
+  const privacyObservations = []
   const server = createServer(async (req, res) => {
     try {
       const url = new URL(req.url, 'http://127.0.0.1')
@@ -55,6 +56,19 @@ export async function startParityPages(webRoot, guests) {
           res.writeHead(404)
           res.end()
           return
+        }
+        if (match[2] === '/privacy' && req.method === 'POST') {
+          let text = ''
+          for await (const chunk of req) {
+            text += chunk
+            assert.ok(text.length <= 1024)
+          }
+          const body = JSON.parse(text)
+          assert.equal(body.guestId, guest.identity)
+          privacyObservations.push({ receiver: match[1], receivedAt: Date.now(), ...body.privacy })
+          // Fixture transport receipt only. Production authentication and relay
+          // run in focused web tests; never forge a host confirmation here.
+          return send('application/json', JSON.stringify({ fixtureReceived: true }))
         }
         const body = match[2].startsWith('/join/')
           ? {
@@ -107,6 +121,8 @@ export async function startParityPages(webRoot, guests) {
   return {
     origin: `http://127.0.0.1:${server.address().port}`,
     wire: program.wire,
+    privacyObservations,
+    programBeacons: program.beacons,
     async close() {
       const result = new Promise((resolve) => server.close(resolve))
       server.closeAllConnections()

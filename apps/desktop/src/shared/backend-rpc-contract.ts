@@ -4305,6 +4305,7 @@ const chatCommandReplyFailedSchema = objectSchema(
 const screenPrivacyReasonSchema = enumSchema(['you', 'password-manager'])
 const screenPrivacySchema = objectSchema(
   {
+    generation: optionalSchema(numberSchema({ integer: true, min: 0 })),
     hidden: booleanSchema,
     since: optionalSchema(timestamp),
     reason: optionalSchema(screenPrivacyReasonSchema),

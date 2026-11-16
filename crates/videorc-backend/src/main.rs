@@ -15156,8 +15156,8 @@ async fn handle_text_message_with_role(
                         .hide(params.reason, chrono::Utc::now().to_rfc3339());
                     // The gate is hidden before this runs, so a frame landing
                     // in between frosts itself; this covers a static screen.
-                    preview_screen::hold_screen_now(state).await;
                     state.emit_event("screen.privacy.changed", privacy.clone());
+                    preview_screen::hold_screen_now(state).await;
                     ServerResponse::ok(command.id, privacy)
                 }
             }
@@ -19140,7 +19140,10 @@ mod tests {
         let get = json!({ "id": "get", "method": "screen.privacy.get", "params": {} }).to_string();
         let response = handle_text_message_with_role(&state, &get, BackendRole::Renderer).await;
         assert!(response.ok);
-        assert_eq!(response.payload.unwrap(), json!({ "hidden": false }));
+        assert_eq!(
+            response.payload.unwrap(),
+            json!({ "hidden": false, "generation": 0 })
+        );
 
         let hide = json!({ "id": "hide", "method": "screen.hide", "params": { "reason": "you" } })
             .to_string();
@@ -19174,10 +19177,13 @@ mod tests {
         let show = json!({ "id": "show", "method": "screen.show", "params": {} }).to_string();
         let response = handle_text_message_with_role(&state, &show, BackendRole::Admin).await;
         assert!(response.ok);
-        assert_eq!(response.payload.unwrap(), json!({ "hidden": false }));
+        assert_eq!(
+            response.payload.unwrap(),
+            json!({ "hidden": false, "generation": 2 })
+        );
         let event = events.recv().await.unwrap();
         assert_eq!(event.event, "screen.privacy.changed");
-        assert_eq!(event.payload, json!({ "hidden": false }));
+        assert_eq!(event.payload, json!({ "hidden": false, "generation": 2 }));
         assert!(!state.screen_privacy.view().hidden);
 
         // Never the remote role.
@@ -19212,6 +19218,7 @@ mod tests {
             response.payload.unwrap(),
             json!({
                 "hidden": false,
+                "generation": 0,
                 "unavailable": "Hide screen isn't available on this recording. Stop and record again."
             })
         );

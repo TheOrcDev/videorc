@@ -55,7 +55,7 @@ consumer contract must exist before a producer can be enabled.
 | ------------------------- | -------------------------------------- | ------------ | ------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------- |
 | S0 / `baseline`           | None                                   | desktop      | desktop: `main`                                                          | No issue / [#1437](https://github.com/TheOrcDev/videorc/pull/1437)                              |
 | S1 / `controls`           | S0                                     | desktop      | desktop: `feat/249-s0-cloud-parity-baseline`                             | No issue / coordinator to create; web [#118](https://github.com/TheOrcDev/videorc-web/pull/118) |
-| S2 / `privacy`            | S0, S1                                 | desktop, web | desktop: `feat/249-s1-cloud-parity`; web: `main`                         | Unassigned / not created                                                                        |
+| S2 / `privacy`            | S0, S1                                 | desktop, web | desktop: `feat/249-s1-cloud-parity`; web: `main`                         | Paired diffs ready; issue/PR slots unassigned; live acceptance not run                          |
 | S3 / `soundboard`         | S0, S1                                 | desktop, web | desktop: `feat/249-s2-cloud-parity`; web: `feat/249-s2-cloud-parity`     | Unassigned / not created                                                                        |
 | S4 / `avatar`             | S3                                     | desktop, web | desktop: `feat/249-s3-cloud-parity`; web: `feat/249-s3-cloud-parity`     | Unassigned / not created                                                                        |
 | S5 / `avatar-animation`   | S4                                     | desktop, web | desktop: `feat/249-s4-cloud-parity`; web: `feat/249-s4-cloud-parity`     | Unassigned / not created                                                                        |
@@ -88,10 +88,11 @@ consumer contract must exist before a producer can be enabled.
 
 S0 is committed/pushed by the coordinator at `570d72926` and open as
 [PR #1437](https://github.com/TheOrcDev/videorc/pull/1437), implemented with
-**live acceptance not run**. S1 is implemented in its child worktree and ready
-for coordinator review; its live acceptance is also **not run**. S2–S27 are not
-started. This S1 checkpoint does not complete Plan 249 or authorize S2 work
-before the coordinator commissions it.
+**live acceptance not run**. S1 is committed/pushed at `0f9790f86` and open as
+[PR #1438](https://github.com/TheOrcDev/videorc/pull/1438), with live acceptance
+**not run**. S2 is implemented in paired isolated worktrees, ready for coordinator
+review; live acceptance is **not run**. S3–S27 are not started. This checkpoint
+does not complete Plan 249; the coordinator commissions S3 after integration.
 
 ## Deferred gates and release blocks
 
@@ -233,3 +234,25 @@ Shadscan baseline/floor is **27/27**. Final numeric audit is reported by the
 agent after freezing the diff. Backend compile/tests, full suites, all app,
 real-page, smoke, device, media and managed acceptance remain deferred by the
 user instruction; the Rust adapter tests are maintained but unexecuted.
+
+## S2 paired checkpoint
+
+- Desktop: `/Users/orcdev/projects/videorc-wt-249-s2`, branch
+  `feat/249-s2-cloud-parity`, base `feat/249-s1-cloud-parity` at
+  `0f9790f869a07102560ee864ac91b001fe73f7e4`.
+- Web: `/Users/orcdev/projects/videorcweb-wt-249-s2`, branch
+  `feat/249-s2-cloud-parity`, base `main` at
+  `8f90dd74944cf08b9ca202e977a2ebf46ee6b16d`.
+- Both shared active checkouts, planning worktree, S0 and S1 branches preserved.
+  Source detection selected GitHub. Searches found no dedicated S2 issue or PR;
+  no forge objects created. Null issue mappings are intentional.
+- Web #118 remains open at `af5be462f5d790fd5c808c0acfd4b801382f5e9c`.
+  Its takeover-audio work is independent; do not merge or duplicate it. Reconcile
+  `stage.ts` and re-emit generated assets when integrating both branches.
+- Contract and deferred commands: `docs/cloud/249-s2-handoff.md`; mirrored fixture
+  `protocol-fixtures/cloud-parity-privacy.json` / web
+  `tests/fixtures/cloud-parity-privacy.json`.
+- Consumer-first integration. Older consumers remain unconfirmed; newer consumers
+  cannot infer source protection from legacy track names. Native generation is
+  optional for backwards parsing, but absent generations cannot open browser
+  publication. No LiveKit grants, rollout flags, deployment or paid output changed.

@@ -138,12 +138,16 @@ impl ScreenPrivacyGate {
         if view.hidden {
             ScreenPrivacy {
                 hidden: true,
+                generation: view.span.saturating_mul(2).saturating_sub(1),
                 since: details.since.clone(),
                 reason: details.reason,
                 unavailable: None,
             }
         } else {
-            ScreenPrivacy::default()
+            ScreenPrivacy {
+                generation: view.span.saturating_mul(2),
+                ..ScreenPrivacy::default()
+            }
         }
     }
 }
@@ -917,12 +921,21 @@ mod tests {
         );
         assert_eq!(again.since.as_deref(), Some("2026-10-28T10:00:00+00:00"));
         let shown = gate.show();
-        assert_eq!(shown, ScreenPrivacy::default());
+        assert_eq!(
+            shown,
+            ScreenPrivacy {
+                generation: 2,
+                ..ScreenPrivacy::default()
+            }
+        );
+        assert_eq!(hidden.generation, 1);
+        assert_eq!(again.generation, 1);
         assert_eq!(gate.view().span, 1);
         gate.hide(ScreenPrivacyReason::PasswordManager, "t".into());
         assert_eq!(gate.view().span, 2);
         // The streamer's own hide outranks a password-manager hide.
         let upgraded = gate.hide(ScreenPrivacyReason::You, "later".into());
+        assert_eq!(upgraded.generation, 3);
         assert_eq!(upgraded.reason, Some(ScreenPrivacyReason::You));
         assert_eq!(upgraded.since.as_deref(), Some("t"));
     }
@@ -1207,7 +1220,11 @@ mod tests {
         .expect("protocol-fixtures/screen-privacy.json is valid JSON");
         let visible = serde_json::to_value(ScreenPrivacy::default()).unwrap();
         assert_eq!(visible, fixture["visible"]);
-        assert_eq!(visible.to_string(), r#"{"hidden":false}"#, "no null fields");
+        assert_eq!(
+            visible.to_string(),
+            r#"{"generation":0,"hidden":false}"#,
+            "no null fields"
+        );
         let gate = gate();
         let by_you = gate.hide(ScreenPrivacyReason::You, "2026-10-28T10:15:00+00:00".into());
         assert_eq!(

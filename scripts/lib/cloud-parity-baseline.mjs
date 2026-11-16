@@ -1,3 +1,4 @@
+import { exercisePrivacy } from './cloud-parity-privacy.mjs'
 import {
   prepareParityRoom,
   assertInitialRoomControls,
@@ -47,13 +48,13 @@ const recordArtifact = (report, root, file, kind) => {
 /** No build, paid egress, provider destination or live service is started.
  * This is deliberately NOT invoked by focused tests or --help/check modes.
  */
-export async function runBaseline({ desktopRoot, webRoot, controls = false }) {
+export async function runBaseline({ desktopRoot, webRoot, controls = false, privacy = false }) {
   const report = baselineReport({
     desktop: revision(desktopRoot),
     web: revision(webRoot),
     template: 'v1'
   })
-  report.case = controls ? 'controls' : 'baseline'
+  report.case = privacy ? 'privacy' : controls ? 'controls' : 'baseline'
   // A dirty web consumer makes its revision misleading. Require a dedicated,
   // installed checkout; inspect it read-only and never change the active one.
   const webDirty = execFileSync('git', ['status', '--porcelain', '--untracked-files=no'], {
@@ -304,6 +305,16 @@ export async function runBaseline({ desktopRoot, webRoot, controls = false }) {
     await overlay('card', MEDIA.colors.card)
     await overlay('takeover', MEDIA.colors.takeover)
     if (controls) await exerciseControls({ h, clients, captureAudio, report, cameraId })
+    if (privacy)
+      await exercisePrivacy({
+        h,
+        clients,
+        pages,
+        report,
+        output,
+        newPage,
+        programUrl: `${pages.origin}${pages.wire.PROGRAM_PAGE_PATH}?${search}`
+      })
 
     const soundPath = join(output, 'soundboard.wav')
     writeFileSync(soundPath, toneWav(MEDIA.tones.soundboard, 8))

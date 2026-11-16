@@ -1551,7 +1551,8 @@
         "windows": "not-run",
         "linux": "not-run"
       },
-      "productionParityEnabled": false
+      "productionParityEnabled": false,
+      "implementationEvidence": "S2 implements guarded browser screen publication, receiver pixel observations and authorized per-receiver relay. Live/managed/device acceptance not-run; productionParityEnabled remains false."
     },
     {
       "id": "V12",
@@ -1927,7 +1928,8 @@
         "windows": "not-run",
         "linux": "not-run"
       },
-      "productionParityEnabled": false
+      "productionParityEnabled": false,
+      "implementationEvidence": "S2 implements guarded browser screen publication, receiver pixel observations and authorized per-receiver relay. Live/managed/device acceptance not-run; productionParityEnabled remains false."
     },
     {
       "id": "O3",
