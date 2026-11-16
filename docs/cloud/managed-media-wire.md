@@ -414,7 +414,7 @@ Headers: `Authorization: Bearer <pt>`, `Content-Type: application/json`. At most
 | `phase` | `waiting` (no frame yet), `live` or `hold` |
 | `hold` | Only with `phase: "hold"`. `sinceAt` is the page's `Date.now()` when its stall clock fired |
 | `program` | ◇ Optional, each field optional. D15's fields, defined as the runner's (R:390-396). First appears 1 to 2 s after the solo feed's first frame, or after the talk stage is drawn. `frozenSeconds` only during a hold, once it is 3 or more. Never `avSkewMs` |
-| `shown` | ◇ Talk shows only. `onStage` is the layout as drawn, so it can be shorter than the stage; `screen` is present only for a drawn screen tile. `away` lists everyone on stage with no camera frame for 5 s, drawn or not, including people the 60 s re-flow dropped (W `program/stage.ts`, `shownOf`) |
+| `shown` | ◇ Talk shows only. `onStage` is the layout as drawn, so it can be shorter than the stage; `screen` is present only for a drawn screen tile. `away` lists everyone on stage with no camera frame for 5 s, drawn or not, including people the 60 s re-flow dropped (W `program/stage.ts`, `shownOf`). ◇ Someone whose camera is off (section 5.5) is never in `away`: their tile is drawn and they are present |
 | `joined` | ◇ Optional boolean. The page sends `true` only while connected to the room with its overlay handlers registered; absent at load and while rejoining. A join counts each time it goes from absent to `true` within a `boot`, and at a new `boot` |
 | `join`      | Optional positive per-boot epoch; grows each time `joined` becomes true, preserving reconnects shorter than the beacon interval                                                                                                                                                                    |
 | `rec` | `true` on a recording-only page |
@@ -456,6 +456,16 @@ Stale and out-of-order beacons:
 - A talk page subscribes to the camera and microphone of everyone on stage and to the screen share the stage names, never to anyone backstage (R:747-752).
 - ◇ Managed webhooks handle solo and test shows too. `feed-h`, `feed-v` and `EG_…` are media identities, not foreign people, and write no room-minutes row (W `media/room.ts:46-52`, `media/webhook.ts`).
 
+◇ **Camera off** is a muted camera publication: the guest page's `setCameraEnabled(false)` and the desktop's `camera.mute()` both mute the published camera track, so every other party sees `publication.isMuted === true` (`TrackMuted` on the way in, `TrackUnmuted` on the way out) and the frames stop. Camera off is not away, on every surface:
+
+| Surface | Someone with their camera off |
+| --- | --- |
+| The program page (what viewers see) | Their tile stays where the layout puts it and draws the camera-off look: the tile's ground, a centred circle with the first letter of the name on the plate, set in the plates' font, and the name plate unchanged. The host's circle shape still applies. No frame of theirs is shown, live or copied. They are present: not listed in `shown.away`, and the 5 s away clock and the 60 s re-flow do not run while the camera is off. Someone put on stage with their camera already off gets the same tile at once. When the camera comes back the camera-off look stays until the first fresh frame, so no stale frame flashes, and the away clock starts afresh from that moment |
+| The guest page | The guest's own self-view stays, as the same look with "Camera off" under it; the host's tile and the on-stage tiles show the look for anyone whose camera publication is muted |
+| The desktop host | The on-stage tile and the guests strip thumbnail show the look; "Back in a moment" is never drawn over someone whose camera is off |
+
+The look is the page's own (W `program/stage-view.ts`, `program.css`), not the runner's: the runner had no camera-off tile.
+
 ### 5.6 Console lines and hold timings
 
 | Line | Logged |
@@ -495,6 +505,7 @@ From P0, "What the program page must do". The page lane keeps each one and tests
 - [ ] ◇ The talk mix limiter is an AudioWorklet with a 5 ms look-ahead at −1 dBFS. The solo page plays one feed without a limiter; its Web Audio meter listens beside the sound path.
 - [ ] Play each remote voice in a media element too, or Chrome feeds Web Audio nothing.
 - [ ] Log `START_RECORDING` exactly once.
+- [ ] ◇ Draw a muted camera as the camera-off tile (section 5.5): never its last frame, never "Back in a moment", never out of the layout.
 
 ## 6. Talk shows
 
@@ -517,7 +528,7 @@ From P0, "What the program page must do". The page lane keeps each one and tests
 | `participants[]` | ◇ `ListParticipants`, refreshed on each participant webhook and a poll's first look, then again at the end of its wait, cached 2 s and subject to the 30 s budget. Host first, then join time and identity. `role` from the identity, `onStage` from metadata, `sinceMs` since the join |
 | `participants[].video`, `audio`, `muted`, `screen` | From each participant's tracks, defined as the runner's (R:705-707) |
 | `participants[].quality` | Always `"good"`. LiveKit's server does not report it (D `cloud_talk.rs:367-375`) |
-| `participants[].away`, `hostAway` | The primary page's `shown.away`. `hostAway` is also true while the host is not in the room |
+| `participants[].away`, `hostAway` | The primary page's `shown.away`. `hostAway` is also true while the host is not in the room. ◇ Never true for someone whose camera is off (section 5.5); the desktop reads camera off from the publication itself, not from the state |
 | `layout`, `stage` | The metadata |
 | `stageSet` | True once a `PUT …/stage` succeeded, and from then on, so the desktop never re-sends (D `cloud_show.rs:2489-2498`) |
 | `returnEnabled` | Always `false` |
@@ -1131,6 +1142,7 @@ Shared constants. Each has one source. The server imports the page's wire module
 | 72 | ◇ Reaper budgets calls to 40 s / 15 s per show, visits oldest first, scrubs ended images and names | Slow shows must not starve others or retain interrupted cleanup | Section 15 |
 | 73  | ◇ Lost treats network failures and timeouts as unknown; only confirmed absent media allows ending                                                | Control-plane silence cannot prove media vanished                                                   | Section 15                          |
 | 74 | ◇ Server imports program/wire directly; pin and integration tests exercise both halves | A second copy can drift even when both lanes compile | Section 16 |
+| 75 | ◇ Camera off is a muted camera publication, and is not away: the tile stays, draws the camera-off look, is never in `shown.away`, and the away clock waits for the first fresh frame after the camera is back | A guest who turns their camera off is still in the show; a frozen frame, "Back in a moment" and a re-flow all say they left | Sections 5.3, 5.5, 5.7, 6.2 |
 
 ## 18. Contradictions
 
