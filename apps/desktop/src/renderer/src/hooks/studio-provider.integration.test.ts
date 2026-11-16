@@ -10,7 +10,8 @@ import type {
   OverlayLayout
 } from '../../../shared/backend'
 import { SCENE_LIBRARY_KEY, WORKING_SCENE_KEY, sameSceneVisual } from '../lib/scene-presets'
-import { act, createElement, useEffect, type ReactNode } from 'react'
+import { act, createElement, isValidElement, useEffect, type ReactNode } from 'react'
+import { renderToStaticMarkup } from 'react-dom/server'
 import { createRoot, type Root } from 'react-dom/client'
 import { Window as TestWindow } from 'happy-dom'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -6422,13 +6423,14 @@ describe('real StudioProvider lifecycle', () => {
       message: 'Saved.'
     })
     await waitForObservation(() => latest()?.recording.recording.state === 'idle')
-    await waitForObservation(() =>
-      toastSpies.info.mock.calls.some(([title]) => title === 'Your show continues on iPhone.')
-    )
-    expect(toastSpies.info).toHaveBeenCalledWith(
-      'Your show continues on iPhone.',
-      expect.objectContaining({ id: 'videorc-cloud' })
-    )
+    // The title is React text (R2 B-M2): the device name never meets the guard.
+    const takenOver = () =>
+      toastSpies.info.mock.calls.find(
+        ([title]) =>
+          isValidElement(title) && renderToStaticMarkup(title) === 'Your show continues on iPhone.'
+      )
+    await waitForObservation(() => takenOver() !== undefined)
+    expect(takenOver()?.[1]).toMatchObject({ id: 'videorc-cloud' })
     await act(async () => {
       await new Promise((resolve) => setTimeout(resolve, 50))
     })

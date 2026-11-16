@@ -9,7 +9,7 @@ import {
   cloudShowCapToast,
   formatCloudCountdown
 } from './cloud-toasts'
-import { cloudTakenOverToast } from './cloud-handoff-view'
+import { cloudTakenOverTitle } from './cloud-handoff-view'
 import { requestCloudSectionFocus } from './cloud-section-focus'
 import { toast } from './toast'
 import { offlineError, toastUserError } from './user-error'
@@ -36,7 +36,7 @@ export function toastCloudStatus(previous: CloudStatus | null, next: CloudStatus
   // Plan 243 C5: another device continued the show and this computer
   // stopped. Neutral news: the Studio's notice offers Continue here.
   if (next.stoppedBy === 'taken-over' && previous?.stoppedBy !== 'taken-over') {
-    toast.info(cloudTakenOverToast(next.onAir), { id: CLOUD_TOAST_ID })
+    toast.info(cloudTakenOverTitle(next.onAir), { id: CLOUD_TOAST_ID })
   }
 }
 
