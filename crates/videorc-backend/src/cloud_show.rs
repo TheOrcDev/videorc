@@ -1824,6 +1824,8 @@ pub struct CloudShowRuntime {
     pub(crate) talk: Option<TalkShowState>,
     /// A failed open still owns its camera return; a later lend must wait.
     pub(crate) room_camera_returning: bool,
+    /// Serialize camera acquisition across open and resume, including failed opens.
+    pub(crate) room_open_gate: Arc<tokio::sync::Mutex<()>>,
     /// A failed open must finish End before this process can recover its room.
     pub(crate) failed_room_open_end: Option<String>,
     pub(crate) failed_room_end_in_flight: bool,
@@ -14791,6 +14793,50 @@ mod tests {
         assert!(lock(&harness.context.slot).failed_room_open_end.is_none());
         assert!(lock(&harness.context.slot).remembered_show().is_none());
         assert_eq!(web.end_calls.lock().unwrap().len(), 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn overlapping_room_opens_cannot_replace_the_camera_owner() {
+        let harness = harness(true);
+        lock(&harness.context.slot).entitlement = talk_entitlement();
+        *harness.context.web.create.lock().unwrap() =
+            Some(Err(CloudApiError::Transport("create failed".into())));
+        harness
+            .context
+            .web
+            .create_delay_ms
+            .store(1_000, Ordering::SeqCst);
+        let first = harness
+            .context
+            .open_room(Some("bearer".into()), room_open_params(), false);
+        tokio::pin!(first);
+        assert!(futures_util::poll!(first.as_mut()).is_pending());
+        let second = harness
+            .context
+            .open_room(Some("bearer".into()), room_open_params(), false)
+            .await;
+        assert!(second.unwrap_err().to_string().contains("already opening"));
+        let resume = harness.context.resume_room(Some("bearer".into())).await;
+        assert!(resume.unwrap_err().to_string().contains("already opening"));
+        assert_eq!(
+            harness.camera.lock().unwrap().as_slice(),
+            &[crate::cloud_talk::CameraHandover::Lend]
+        );
+        assert!(first.await.is_err());
+        assert_eq!(
+            harness.camera.lock().unwrap().as_slice(),
+            &[
+                crate::cloud_talk::CameraHandover::Lend,
+                crate::cloud_talk::CameraHandover::Return
+            ]
+        );
+        assert!(
+            lock(&harness.context.slot)
+                .room_open_gate
+                .clone()
+                .try_lock_owned()
+                .is_ok()
+        );
     }
 
     #[tokio::test(start_paused = true)]
