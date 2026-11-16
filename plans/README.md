@@ -10,9 +10,10 @@
     cuts. The post's five ideas are in too.
   - S1 fixes a live release bug first: release reuse accepted a 3-second
     skip-twin job as "Windows Rust gates passed", and did for 0.28.1.
-  - Eight small PRs (A–H). Expected: code PRs ~45–60 min, renderer-only
-    PRs ~6–8 min, JS gates ~2 min. Splitting the backend crate is the only
-    way a code PR gets much faster.
+  - EXECUTED 2026-11-16 as one PR (#1406, the owner's call), recommended
+    D2–D8. Expected: code PRs ~45–60 min, renderer-only PRs ~6–8 min, JS
+    gates ~2 min. Splitting the backend crate is the only way a code PR gets
+    much faster.
 - 2026-11-16: [Plan 241](241-live-page.md), the owner's ask: make
   videorc.com/live richer; today it only says live or not live. BUILT
   2026-11-16 (web straight to main, desktop #1397 to #1404), D1 to D9

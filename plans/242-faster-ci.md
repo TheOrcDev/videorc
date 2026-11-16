@@ -807,9 +807,16 @@ full. CI numbers come from the PR's own runs (below).
   restored a key nothing saved ("No cache found", 548 crates compiled every
   PR). One key now; main saves it.
 - **S7–S8** Time-balanced vitest shards (4 on Linux, 3 on Windows) with a
-  coverage proof in each aggregator. Locally all 702 files ran exactly once;
-  the local balance (1.30) was skewed by host load 17–23.
-- **S9** Not split yet: decided by the PR's measured shard times.
+  coverage proof in each aggregator. PR #1406's first run: 702 test files
+  expected, 702 run, none twice; slowest shard 1.21x the mean (local seed
+  times; refreshed from CI since). Linux shards took 1.5–1.9 min each, the
+  JS check passed 0.1 min after the last one; the Windows desktop tests took
+  3.2–4.5 min per shard (8.8 min in one job before).
+- **S9** Not split, on measurement. On CI the file costs 60.7 s of worker
+  time and its shard took 1.9 min against 1.5–1.8 min for the others.
+  Splitting it would save about 13 s on one shard, not worth refactoring a
+  17,664-line file. The recorded times now come from CI's own shards; with
+  them the split predicts 190.9 s of worker time per shard.
 - **S10** Measured, not adopted. `isolate: false` with shuffled order ran
   the suite in 124 s instead of 293 s (collect 104 s vs 667 s), but 37 files
   (174 tests) failed from shared state: module mocks and globals leaking
@@ -823,7 +830,7 @@ full. CI numbers come from the PR's own runs (below).
   that fail today are off with counts and reasons.
 - **S13** TypeScript 7.0.2 checks the app (4.5 s vs 36 s locally); 5.9
   stays for the compiler-API tests. Same errors on planted mistakes.
-- **S14** The macOS sentinel runs in its own job.
+- **S14** The macOS sentinel runs in its own job: 5.7 min on the PR.
 - **S15** `app-ts` kind for pull requests, with the Rust-reads guard.
 - **S16** Not built: needs a merge queue (see the account list).
 - **S18** Blobless clone in the scope job (about 2 s to clone).
@@ -833,4 +840,13 @@ full. CI numbers come from the PR's own runs (below).
   parallel checks job, off the critical path.
 - **S20** Pre-push hook: the whole branch as one push took 7.4–9.0 s at load
   average 35–42; a planted lint error was refused.
+- **Independent review** (Codex `gpt-6.1-sol` xhigh, after the Fable 5.2
+  review hit a rate limit): 7 findings, all confirmed and fixed. Release
+  reuse walked ancestors across test-only diffs (the Windows Rust job runs
+  Node test files); an ownership filter could lose all its runnable tests
+  silently; ESLint 10's `no-useless-assignment` was missing; and the hook
+  lost its `prepare` installer to a `git reset --hard` while testing, broke on
+  Windows paths with spaces, skipped the typecheck on deletion-only pushes,
+  and could check other contents than the pushed ones. It now refuses those
+  pushes with the reason.
 - **S21** After the PR's runs.
