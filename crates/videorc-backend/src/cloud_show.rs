@@ -4562,6 +4562,10 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
         {
             let mut runtime = lock(&self.slot);
             runtime.continuation_stop_in_flight = false;
+            if stopped.is_err() {
+                runtime.message =
+                    Some("This computer could not stop sending. Try Stop again.".into());
+            }
             if stopped.is_ok()
                 && let Some(show) = runtime.show.as_mut().filter(|s| s.record.id == show_id)
             {
@@ -12030,6 +12034,7 @@ mod tests {
             state["onAir"] = json!({"deviceId":"BBBBBBBBBBBBBBBBBBBBBB","name":"iPhone","kind":"phone","source":if camera {"camera"} else {"feed"},"waiting":false,"since":"now"});
             harness.context.web.set_state(state);
             let mut current = held_current(&created_managed());
+            current.ingest = Some(created_managed().ingest);
             current.ingest.as_mut().unwrap()[0].stream_key = "stale-current-ingress".into();
             harness
                 .context
