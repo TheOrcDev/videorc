@@ -2291,6 +2291,9 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
             .map_err(anyhow::Error::new)?;
             let mut runtime = lock(&self.slot);
             runtime.stopped_by = None;
+            if let Some(ControlHandle::Web(tx)) = runtime.control_tx.as_ref() {
+                tx.observe_revision(answer.rev);
+            }
             if let Some(state) = runtime.runner.as_mut() {
                 state.on_air = answer.on_air;
             }

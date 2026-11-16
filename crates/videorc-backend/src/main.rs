@@ -5714,8 +5714,12 @@ fn websocket_audio_processing_command_id(text: &str) -> Option<String> {
 }
 
 fn websocket_command_is_session_stop(text: &str) -> bool {
-    serde_json::from_str::<ClientCommand>(text)
-        .is_ok_and(|command| command.method == "session.stop")
+    serde_json::from_str::<ClientCommand>(text).is_ok_and(|command| {
+        matches!(
+            command.method.as_str(),
+            "session.stop" | "cloud.show.handOff"
+        )
+    })
 }
 
 fn websocket_command_is_session_start(text: &str) -> bool {
@@ -5740,6 +5744,7 @@ fn websocket_command_has_session_lifecycle_policy(text: &str) -> bool {
             command.method.as_str(),
             "session.start"
                 | "cloud.show.resume"
+                | "cloud.show.handOff"
                 | "session.stop"
                 | "recording.stop"
                 | "recording.start_test"

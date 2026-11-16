@@ -908,6 +908,8 @@ pub struct CurrentShowResponse {
 #[serde(rename_all = "camelCase")]
 pub struct OnAirAnswer {
     #[serde(default)]
+    pub rev: Option<u64>,
+    #[serde(default)]
     pub on_air: Option<CloudOnAirWire>,
     #[serde(default)]
     pub ingest: Option<Vec<ShowIngest>>,
@@ -2268,6 +2270,10 @@ pub type CloudLegsHook = Arc<dyn Fn(&str, Vec<StreamTargetRuntime>) + Send + Syn
 /// Persists the remembered show's id (`None`: nothing to remember).
 pub type CloudRememberHook = Arc<dyn Fn(Option<String>) + Send + Sync>;
 
+pub type CloudStopHook = Arc<
+    dyn Fn() -> Pin<Box<dyn Future<Output = std::result::Result<(), String>> + Send>> + Send + Sync,
+>;
+
 /// How the socket task reaches the app without owning `AppState`: emit the
 /// whole state, hand the runner's legs to the session's leg model, and keep
 /// the remembered show across launches.
@@ -2283,11 +2289,7 @@ pub struct CloudHooks {
     /// Plan 234 T3: `cloud.room.overlay`, an overlay for the host's
     /// renderer to send to the room. Web control only.
     pub overlay: CloudOverlayHook,
-    pub stop: Arc<
-        dyn Fn() -> Pin<Box<dyn Future<Output = std::result::Result<(), String>> + Send>>
-            + Send
-            + Sync,
-    >,
+    pub stop: CloudStopHook,
 }
 
 impl CloudHooks {
@@ -4369,6 +4371,9 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
                 {
                     Ok(Ok(answer)) => {
                         let mut runtime = lock(&self.slot);
+                        if let Some(ControlHandle::Web(tx)) = runtime.control_tx.as_ref() {
+                            tx.observe_revision(answer.rev);
+                        }
                         if let Some(state) = runtime.runner.as_mut() {
                             state.on_air = answer.on_air;
                         }
@@ -5968,6 +5973,7 @@ mod tests {
                 self.set_state(state.clone());
             }
             Ok(OnAirAnswer {
+                rev: Some(self.managed.lock().unwrap().rev),
                 on_air: serde_json::from_value(state["onAir"].clone()).ok(),
                 ingest: Some(created_managed().ingest),
             })

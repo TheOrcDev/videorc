@@ -1471,12 +1471,19 @@ pub(crate) type WebIntentCall = Arc<dyn Fn(Value) -> IntentAnswer + Send + Sync>
 #[derive(Clone)]
 pub(crate) struct WebIntents {
     call: WebIntentCall,
+    floor: Arc<AtomicU64>,
     /// Never sent on. The show's poll watches the other end and stops when
     /// the slot has let go of every handle.
     _held: mpsc::UnboundedSender<ControlRequest>,
 }
 
 impl WebIntents {
+    pub(crate) fn observe_revision(&self, rev: Option<u64>) {
+        if let Some(rev) = rev {
+            self.floor.fetch_max(rev, Ordering::SeqCst);
+        }
+    }
+
     pub(crate) async fn send(&self, frame: Value) -> AckResult {
         (self.call)(frame).await
     }
@@ -1781,6 +1788,7 @@ impl<W: CloudWebApi> WebControl<W> {
     pub(crate) fn intents(&self, held: mpsc::UnboundedSender<ControlRequest>) -> WebIntents {
         WebIntents {
             call: self.call.clone(),
+            floor: self.floor.clone(),
             _held: held,
         }
     }
