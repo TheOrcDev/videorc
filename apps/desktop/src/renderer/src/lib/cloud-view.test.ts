@@ -210,7 +210,11 @@ describe('cloud copy (plan 184)', () => {
     })
     expect(cloudResumeNotice(holding, false)).toEqual({
       detail: 'Viewers see Be right back. The stream ends in 28 min unless you resume.',
-      title: "You're still live through Videorc Cloud."
+      title: "You're still live through Videorc Cloud.",
+      // Plan 243 C5: Resume, not Continue here, for a show this computer fed.
+      action: 'resume',
+      tone: 'warning',
+      pointer: null
     })
     expect(cloudResumeNotice(holding, true)).toBeNull()
     expect(
