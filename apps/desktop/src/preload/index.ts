@@ -60,6 +60,7 @@ const api: VideorcApi = {
       'screens:authorize-dropped-images',
       droppedFilePaths(files, (file) => webUtils.getPathForFile(file))
     ),
+  releaseScreenImages: (capabilityIds) => invoke('screens:release-images', capabilityIds),
   pickBannerImage: () => invoke('banners:pick-image'),
   pickCommunityExportDirectory: () => invoke('community:pick-export-directory'),
   pickCommunityImportFile: () => invoke('community:pick-import-file'),

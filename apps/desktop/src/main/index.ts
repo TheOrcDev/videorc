@@ -747,14 +747,15 @@ import {
 } from '../shared/background-import'
 import {
   SCREEN_IMAGE_BATCH_MAX,
-  SCREEN_IMAGE_CAPABILITY_TTL_MS,
+  screenImageCapabilityTtlMs,
   SCREEN_IMAGE_EXTENSIONS,
   SCREEN_IMAGE_REFUSALS
 } from '../shared/screen-image-files'
 import {
   assertDroppedScreenImagePaths,
   issueAllOrNone,
-  missingAsNotAFile
+  missingAsNotAFile,
+  ScreenImageCapabilityLedger
 } from './screen-image-drop'
 import type {
   AccountCallbackEnvelope,
@@ -16621,16 +16622,42 @@ async function authorizeDroppedScreenImages(paths: string[]): Promise<ResourceSe
   return authorizeScreenImagePaths(paths)
 }
 
-function authorizeScreenImagePaths(paths: string[]): Promise<ResourceSelection[]> {
-  return issueAllOrNone(
+const screenImageCapabilities = new ScreenImageCapabilityLedger()
+
+async function authorizeScreenImagePaths(paths: string[]): Promise<ResourceSelection[]> {
+  const ttlMs = screenImageCapabilityTtlMs(paths.length)
+  const selections = await issueAllOrNone(
     paths,
-    (path) =>
-      issueResourceCapability(path, 'input-file', { ttlMs: SCREEN_IMAGE_CAPABILITY_TTL_MS }),
+    (path) => issueResourceCapability(path, 'input-file', { ttlMs }),
     revokeResourceCapability
   )
+  for (const { capabilityId } of selections) screenImageCapabilities.remember(capabilityId)
+  return selections
 }
 
-async function revokeResourceCapability({ capabilityId }: ResourceSelection): Promise<void> {
+// A takeover batch that stopped early hands back the capabilities it never
+// used, so they end now rather than at their TTL. Best effort: an id main
+// did not issue for a takeover is ignored, and a failed revoke still ends at
+// the TTL.
+async function releaseScreenImages(capabilityIds: string[]): Promise<void> {
+  const revoked = await Promise.allSettled(
+    screenImageCapabilities
+      .take(capabilityIds)
+      .map((capabilityId) => revokeResourceCapability({ capabilityId }))
+  )
+  for (const result of revoked) {
+    if (result.status === 'rejected') {
+      logBackend(
+        'warn',
+        `A takeover capability could not be revoked: ${errorMessageText(result.reason)}`
+      )
+    }
+  }
+}
+
+async function revokeResourceCapability({
+  capabilityId
+}: Pick<ResourceSelection, 'capabilityId'>): Promise<void> {
   mainResourceCapabilities.revoke(capabilityId)
   await requestBackendAdmin('resource.capability.revoke', { capabilityId })
 }
@@ -18178,6 +18205,9 @@ app.whenReady().then(async () => {
   secureIpcHandle('screens:pick-images', () => pickScreenImages())
   secureIpcHandle('screens:authorize-dropped-images', (_event, paths: string[]) =>
     authorizeDroppedScreenImages(paths)
+  )
+  secureIpcHandle('screens:release-images', (_event, capabilityIds: string[]) =>
+    releaseScreenImages(capabilityIds)
   )
   secureIpcHandle('banners:pick-image', () => pickBannerImage())
   secureIpcHandle('banners:pick-html', () => pickBannerHtml())

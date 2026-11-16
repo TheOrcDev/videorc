@@ -4,6 +4,7 @@ import { SCREEN_IMAGE_REFUSALS } from '../shared/screen-image-files'
 import {
   assertDroppedScreenImagePaths,
   issueAllOrNone,
+  ScreenImageCapabilityLedger,
   missingAsNotAFile
 } from './screen-image-drop'
 
@@ -85,5 +86,24 @@ describe('missingAsNotAFile', () => {
   it('lets other stat errors through, so the toast does not blame the file type', () => {
     const denied = Object.assign(new Error('EACCES'), { code: 'EACCES' })
     expect(() => missingAsNotAFile(denied)).toThrow(denied)
+  })
+})
+
+describe('ScreenImageCapabilityLedger', () => {
+  it('hands back only the ids it issued, each once', () => {
+    const ledger = new ScreenImageCapabilityLedger()
+    ledger.remember('resource:a')
+    ledger.remember('resource:b')
+    expect(ledger.take(['resource:a', 'resource:other'])).toEqual(['resource:a'])
+    expect(ledger.take(['resource:a', 'resource:b'])).toEqual(['resource:b'])
+  })
+
+  it('forgets the oldest ids past its limit', () => {
+    const ledger = new ScreenImageCapabilityLedger(2)
+    for (const id of ['resource:1', 'resource:2', 'resource:3']) ledger.remember(id)
+    expect(ledger.take(['resource:1', 'resource:2', 'resource:3'])).toEqual([
+      'resource:2',
+      'resource:3'
+    ])
   })
 })

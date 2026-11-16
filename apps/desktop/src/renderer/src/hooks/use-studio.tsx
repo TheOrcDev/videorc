@@ -133,6 +133,7 @@ import {
   useContext,
   useEffect,
   useEffectEvent,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -4533,8 +4534,12 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const [screenImportPhase, setScreenImportPhase] = useState<TakeoverImportPhase>('idle')
   const screenImportPending = screenImportPhase !== 'idle'
   const [pendingScreenImports, setPendingScreenImports] = useState<readonly ResourceSelection[]>([])
+  // Read by the connection-drop toast: committed state only, so a render
+  // React throws away can't change the count it reports.
   const pendingScreenImportsRef = useRef(pendingScreenImports)
-  pendingScreenImportsRef.current = pendingScreenImports
+  useLayoutEffect(() => {
+    pendingScreenImportsRef.current = pendingScreenImports
+  }, [pendingScreenImports])
   const screenImporter = useRef(createTakeoverImporter())
   const screenListEventRevision = useRef(0)
   const activeScreenEventRevision = useRef(0)
@@ -13001,8 +13006,26 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             action: 'import',
             object: 'the images'
           }),
-        onImportError: (error, selection) =>
-          reportError(error, { action: 'import', object: selection.displayName })
+        // One toast per batch, not one per image: a lone failure names its
+        // file, several say how many of the batch failed and why the first did.
+        onImportErrors: (failures, total) => {
+          const [first] = failures
+          if (!first) return
+          reportError(first.error, {
+            action: 'import',
+            object:
+              failures.length === 1
+                ? first.selection.displayName
+                : `${failures.length} of ${total} images`
+          })
+        },
+        onUnused: (selections) => {
+          void window.videorc
+            ?.releaseScreenImages?.(selections.map((selection) => selection.capabilityId))
+            .catch((error: unknown) =>
+              console.warn('[takeovers] could not hand back unused images', error)
+            )
+        }
       })
     },
     [client, reportError, wsStatus]

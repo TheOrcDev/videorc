@@ -99,10 +99,11 @@ describe('Electron IPC contract', () => {
     // The merged API includes community, Stream Manager screen actions and HTML banners.
     // 180: plan 234 adds resource:reveal-cloud-download (the Library's Show
     // in Finder for a downloaded cloud recording, by its job id).
-    // 181: plan 244 (#704) adds screens:authorize-dropped-images (images
-    // dropped on Takeovers) and makes the takeover picker multi-select.
-    expect(Object.keys(electronInvokeApiMethods)).toHaveLength(181)
-    expect(new Set(Object.values(electronInvokeApiMethods)).size).toBe(181)
+    // 182: plan 244 (#704) adds screens:authorize-dropped-images (images
+    // dropped on Takeovers) and screens:release-images (a stopped batch hands
+    // back its unused capabilities), and makes the takeover picker multi-select.
+    expect(Object.keys(electronInvokeApiMethods)).toHaveLength(182)
+    expect(new Set(Object.values(electronInvokeApiMethods)).size).toBe(182)
     expectTypeOf<ElectronInvokeArgs<'resource:trash-session-deletion'>>().toEqualTypeOf<
       Parameters<VideorcApi['trashSessionDeletion']>
     >()
@@ -384,6 +385,20 @@ describe('Electron IPC contract', () => {
     expect(() =>
       validateElectronInvokeArgs('screens:authorize-dropped-images', [
         Array.from({ length: SCREEN_IMAGE_BATCH_MAX + 1 }, (_, index) => `/tmp/${index}.png`)
+      ])
+    ).toThrow(`at most ${SCREEN_IMAGE_BATCH_MAX} items`)
+  })
+
+  it('hands back a stopped batch as a bounded list of capability ids', () => {
+    expectTypeOf<ElectronInvokeArgs<'screens:release-images'>>().toEqualTypeOf<
+      [capabilityIds: string[]]
+    >()
+    const ids = ['resource:a', 'resource:b']
+    expect(validateElectronInvokeArgs('screens:release-images', [ids])).toEqual([ids])
+    expect(() => validateElectronInvokeArgs('screens:release-images', [['']])).toThrow()
+    expect(() =>
+      validateElectronInvokeArgs('screens:release-images', [
+        Array.from({ length: SCREEN_IMAGE_BATCH_MAX + 1 }, (_, index) => `resource:${index}`)
       ])
     ).toThrow(`at most ${SCREEN_IMAGE_BATCH_MAX} items`)
   })

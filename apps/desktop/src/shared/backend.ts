@@ -6415,6 +6415,8 @@ export interface VideorcApi {
   pickScreenImages: () => Promise<ResourceSelection[]>
   /** Files dropped from Finder or Explorer: one non-image refuses the whole drop. */
   authorizeDroppedScreenImages: (files: File[]) => Promise<ResourceSelection[]>
+  /** A takeover batch that stopped early hands back the capabilities it never used. */
+  releaseScreenImages: (capabilityIds: string[]) => Promise<void>
   /** Assets → Banners → Import image… (plan 186): PNG, JPEG or WebP, as an
    * `input-file` capability for `banners.importImage`. */
   pickBannerImage: () => Promise<ResourceSelection | null>
