@@ -19,6 +19,6 @@
   },
   "releaseSequence": {
     "kind": "successor",
-    "previousReleaseId": "0.28.1-alpha.1"
+    "previousReleaseId": "0.29.0-alpha.1"
   }
 }
