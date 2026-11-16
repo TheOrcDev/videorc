@@ -33,7 +33,7 @@ const lk = vi.hoisted(() => {
   })
   class FakeRoom {
     static rooms: FakeRoom[] = []
-    readonly handlers = new Map<string, Handler>()
+    readonly handlers = new Map<string, Set<Handler>>()
     state = 'disconnected'
     connectedWith: { url: string; token: string } | null = null
     readonly remoteParticipants = new Map()
@@ -46,6 +46,8 @@ const lk = vi.hoisted(() => {
       closed: boolean
     }[] = []
     readonly localParticipant = {
+      trackPublications: new Map(),
+      setTrackSubscriptionPermissions: vi.fn(),
       publishTrack: vi.fn(async () => {}),
       unpublishTrack: async () => {},
       publishData: async () => {},
@@ -71,7 +73,13 @@ const lk = vi.hoisted(() => {
       FakeRoom.rooms.push(this)
     }
     on(event: string, handler: Handler): this {
-      this.handlers.set(event, handler)
+      const handlers = this.handlers.get(event) ?? new Set<Handler>()
+      handlers.add(handler)
+      this.handlers.set(event, handlers)
+      return this
+    }
+    off(event: string, handler: Handler): this {
+      this.handlers.get(event)?.delete(handler)
       return this
     }
     async connect(url: string, token: string): Promise<void> {
@@ -82,7 +90,7 @@ const lk = vi.hoisted(() => {
       this.state = 'disconnected'
     }
     emit(event: string, ...args: unknown[]): void {
-      this.handlers.get(event)?.(...args)
+      for (const handler of this.handlers.get(event) ?? []) handler(...args)
     }
   }
   return { FakeRoom, fakeLocalTrack, video: vi.fn(), audio: vi.fn() }

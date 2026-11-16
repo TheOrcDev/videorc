@@ -1,0 +1,10 @@
+{
+  "version": 2,
+  "auxiliary": {
+    "name": "videorc:v2:host-aux:stereo",
+    "source": "screen_share_audio",
+    "channels": 2,
+    "speechProcessing": false
+  },
+  "productionQualified": false
+}

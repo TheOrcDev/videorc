@@ -9,7 +9,7 @@ import { requireLoopback } from './cloud-parity-contract.mjs'
  * Only fixture API responses and device inputs are synthetic. No Next build,
  * migration, web source edit, fake LiveKit client or unrestricted guest token.
  */
-export async function startParityPages(webRoot, guests) {
+export async function startParityPages(webRoot, guests, media = null) {
   const webRequire = createRequire(join(webRoot, 'package.json'))
   const tsxRequire = createRequire(webRequire.resolve('tsx'))
   const { build } = tsxRequire('esbuild')
@@ -34,6 +34,50 @@ export async function startParityPages(webRoot, guests) {
   const program = await startServer()
   program.state.realLiveKit = true
   requireLoopback(program.origin)
+  // Load the real server relay/validator with injected local SFU calls. The
+  // fixture admission/token boundary is synthetic; route authorization has
+  // focused web tests and still needs managed acceptance.
+  let mediaContract
+  if (media) {
+    const code = await build({
+      stdin: {
+        contents: `export {relayMediaCapability} from './lib/cloud/room-media-relay'; export {parseConsumerCapability} from './lib/cloud/program/room-media-v2';`,
+        resolveDir: webRoot,
+        loader: 'ts'
+      },
+      absWorkingDir: webRoot,
+      bundle: true,
+      write: false,
+      format: 'cjs',
+      platform: 'node',
+      packages: 'external',
+      alias: { '@': webRoot },
+      logLevel: 'silent'
+    })
+    const module = { exports: {} }
+    new Function('require', 'module', 'exports', code.outputFiles[0].text)(
+      webRequire,
+      module,
+      module.exports
+    )
+    mediaContract = module.exports
+  }
+  const readBody = async (req, limit) => {
+    const chunks = []
+    let size = 0
+    for await (const chunk of req) {
+      size += chunk.length
+      assert.ok(size <= limit)
+      chunks.push(chunk)
+    }
+    return Buffer.concat(chunks)
+  }
+  const relayCapability = async (value, identity, show) => {
+    assert.equal(show, media.show)
+    const capability = mediaContract.parseConsumerCapability(value)
+    assert.ok(capability)
+    return mediaContract.relayMediaCapability(media.relay, show, identity, capability, Date.now())
+  }
   const privacyObservations = []
   const server = createServer(async (req, res) => {
     try {
@@ -56,6 +100,12 @@ export async function startParityPages(webRoot, guests) {
           res.writeHead(404)
           res.end()
           return
+        }
+        if (match[2] === '/media' && req.method === 'POST') {
+          if (!media) return send('application/json', JSON.stringify({ fixtureReceived: true }))
+          const body = JSON.parse(await readBody(req, 1024))
+          const result = await relayCapability(body.capability, guest.identity, body.show)
+          return send('application/json', JSON.stringify({ capability: result }))
         }
         if (match[2] === '/privacy' && req.method === 'POST') {
           let text = ''
@@ -85,13 +135,21 @@ export async function startParityPages(webRoot, guests) {
       // stays loopback; credentials never leave this fixture server.
       const target = new URL(req.url, program.origin)
       assert.equal(target.origin, program.origin)
+      let body
+      if (media && req.method === 'POST' && url.pathname === program.wire.PROGRAM_BEACON_PATH) {
+        body = await readBody(req, 4096)
+        const beacon = JSON.parse(body)
+        assert.equal(req.headers.authorization, 'Bearer vcp1.dGVzdA.dGVzdA')
+        if (beacon.joined && beacon.capability)
+          await relayCapability(beacon.capability, 'EG_parity_baseline', beacon.show)
+      }
       const response = await fetch(target, {
         method: req.method,
         headers: {
           'content-type': req.headers['content-type'] ?? 'application/json',
           authorization: req.headers.authorization ?? ''
         },
-        ...(req.method === 'POST' ? { body: req, duplex: 'half' } : {}),
+        ...(req.method === 'POST' ? { body: body ?? req, duplex: 'half' } : {}),
         signal: AbortSignal.timeout(10000),
         redirect: 'error'
       })

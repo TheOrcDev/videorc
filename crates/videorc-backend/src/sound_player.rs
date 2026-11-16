@@ -66,6 +66,8 @@ struct PlayerState {
     /// Oldest first.
     voices: Vec<PlayerVoice>,
     next_key: u64,
+    /// Reserved before decode: Stop/restart cancels an in-flight press.
+    pending: HashMap<String, u64>,
     bus: Option<SessionBus>,
     /// A recording or stream published without a session bus: sounds can't
     /// reach it (release test 147, plan 0001). Its session id.
@@ -181,7 +183,6 @@ impl SoundPlayer {
         let pcm = tokio::task::spawn_blocking(move || load_sound_pcm(&database, &row))
             .await
             .unwrap_or_else(|error| Err(anyhow::anyhow!("Sound load worker failed: {error}")))?;
-        self.lock().library.insert(sound.id.clone(), pcm.clone());
         Ok(pcm)
     }
 
@@ -229,13 +230,46 @@ impl SoundPlayer {
                 on_air: voice.on_air,
             });
         }
-        let pcm = self.ensure_loaded(state, &sound).await?;
+        let key = {
+            let mut inner = self.lock();
+            inner.next_key += 1;
+            let key = inner.next_key;
+            inner.pending.insert(sound.id.clone(), key);
+            key
+        };
+        let decoded = self.ensure_loaded(state, &sound).await;
+        let pcm = match decoded {
+            Ok(pcm) => pcm,
+            Err(error) => {
+                let mut inner = self.lock();
+                if inner.pending.get(&sound.id) == Some(&key) {
+                    inner.pending.remove(&sound.id);
+                }
+                return Err(error);
+            }
+        };
         let looping = sound.mode == SoundMode::Loop;
         let gain = crate::audio::db_to_gain((sound.level_db + f64::from(sound.volume_db)) as f32);
         // Register the voice first, so a stop that races the bus's answer
         // still finds it; the bus hears about it next.
-        let (key, bus, stopped) = {
+        let (bus, stopped) = {
             let mut inner = self.lock();
+            if inner.pending.get(&sound.id) != Some(&key) {
+                return Ok(SoundPlayResult {
+                    voice_id: voice_id(key),
+                    on_air: false,
+                });
+            }
+            inner.pending.remove(&sound.id);
+            if !looping
+                && received_at.elapsed() >= Duration::from_millis(u64::from(sound.duration_ms))
+            {
+                return Ok(SoundPlayResult {
+                    voice_id: voice_id(key),
+                    on_air: false,
+                });
+            }
+            inner.library.insert(sound.id.clone(), pcm.clone());
             let mut stopped: Vec<u64> = inner
                 .voices
                 .iter()
@@ -251,8 +285,6 @@ impl SoundPlayer {
             {
                 stopped.push(oldest.key);
             }
-            inner.next_key += 1;
-            let key = inner.next_key;
             inner.voices.push(PlayerVoice {
                 key,
                 sound_id: sound.id.clone(),
@@ -261,7 +293,7 @@ impl SoundPlayer {
                 looping,
                 on_air: false,
             });
-            (key, inner.bus.clone(), stopped)
+            (inner.bus.clone(), stopped)
         };
         self.stop_keys(&stopped);
         let placement = match bus.as_ref() {
@@ -297,8 +329,10 @@ impl SoundPlayer {
         if !looping {
             let player = state.soundboard.clone();
             let timer_state = state.clone();
+            let remaining = Duration::from_millis(u64::from(sound.duration_ms))
+                .saturating_sub(received_at.elapsed());
             tokio::spawn(async move {
-                tokio::time::sleep(Duration::from_millis(u64::from(sound.duration_ms))).await;
+                tokio::time::sleep(remaining).await;
                 player.end_voice(&timer_state, key);
             });
         }
@@ -315,6 +349,7 @@ impl SoundPlayer {
     pub(crate) async fn press(&self, state: &AppState, sound_id: &str) -> Result<SoundPressResult> {
         let sound = state.database.sound_by_id(sound_id)?;
         if matches!(sound.mode, SoundMode::Toggle | SoundMode::Loop) {
+            let pending = self.lock().pending.remove(sound_id).is_some();
             let playing: Vec<u64> = self
                 .lock()
                 .voices
@@ -322,7 +357,7 @@ impl SoundPlayer {
                 .filter(|voice| voice.sound_id == sound.id)
                 .map(|voice| voice.key)
                 .collect();
-            if !playing.is_empty() {
+            if pending || !playing.is_empty() {
                 let on_air = self.stop_keys(&playing);
                 self.emit(state);
                 return Ok(SoundPressResult {
@@ -340,6 +375,9 @@ impl SoundPlayer {
 
     /// `sounds.stop`: one sound's voices, or every voice.
     pub(crate) fn stop(&self, state: &AppState, sound_id: Option<&str>) -> SoundsPlayback {
+        self.lock()
+            .pending
+            .retain(|id, _| sound_id.is_some_and(|stopped| id != stopped));
         let keys: Vec<u64> = self
             .lock()
             .voices
@@ -396,6 +434,28 @@ mod tests {
             Database::open_file_for_tests(&dir.join("videorc.sqlite3")),
         );
         (dir, state, receiver)
+    }
+
+    #[test]
+    fn stop_and_evict_invalidate_pending_decode_keys_without_reusing_voice_ids() {
+        let (_dir, state, _) = player_state();
+        let player = &state.soundboard;
+        {
+            let mut inner = player.lock();
+            inner.next_key = 42;
+            inner.pending.insert("first".into(), 41);
+            inner.pending.insert("second".into(), 42);
+        }
+        player.stop(&state, Some("first"));
+        assert!(!player.lock().pending.contains_key("first"));
+        assert_eq!(player.lock().pending.get("second"), Some(&42));
+        player.evict(&state, "second");
+        assert!(player.lock().pending.is_empty());
+        player.lock().pending.insert("third".into(), 43);
+        player.stop(&state, None);
+        assert!(player.lock().pending.is_empty());
+        assert_eq!(player.lock().next_key, 42);
+        assert!(player.playback().voices.is_empty());
     }
 
     /// A sound row with a real managed file of `duration_ms` of a tone.

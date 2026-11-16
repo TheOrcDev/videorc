@@ -11,7 +11,7 @@ import {
 const plan = readParityJson('plan')
 validateParityRegistry(plan, readParityJson('inventory'))
 const selected = parseParityArgs(process.argv.slice(2), plan)
-if (!['baseline', 'controls', 'privacy'].includes(selected.case)) {
+if (!['baseline', 'controls', 'privacy', 'soundboard'].includes(selected.case)) {
   throw new Error(
     `${selected.id} case '${selected.case}' is not implemented. Deferred acceptance is not a pass.`
   )
@@ -26,7 +26,8 @@ const { output } = await runBaseline({
   desktopRoot: fileURLToPath(new URL('../', import.meta.url)),
   webRoot,
   controls: selected.case === 'controls',
-  privacy: selected.case === 'privacy'
+  privacy: selected.case === 'privacy',
+  soundboard: selected.case === 'soundboard'
 })
 console.log(
   `Local real-page ${selected.case} passed: ${output}. Managed/device acceptance remains not-run.`
