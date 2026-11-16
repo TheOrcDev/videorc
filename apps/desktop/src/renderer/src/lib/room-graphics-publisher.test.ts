@@ -1,7 +1,12 @@
 import { EventEmitter } from 'node:events'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ConnectionState, RoomEvent, type Room } from 'livekit-client'
-import { RoomGraphicsPublisher, type RoomGraphicsStatus } from './room-graphics-publisher'
+import {
+  RoomGraphicsPublisher,
+  graphicsMotionCards,
+  type GraphicsContent,
+  type RoomGraphicsStatus
+} from './room-graphics-publisher'
 import { CAPABILITY_TOPIC } from './room-media-v2'
 import fixture from '../../../../../..//protocol-fixtures/cloud-parity-graphics.json'
 import type { GraphicsLayer } from '../../../shared/cloud-graphics'
@@ -148,5 +153,72 @@ describe('S6 guest avatar coexistence', () => {
     expect(h.room.localParticipant.streamBytes).not.toHaveBeenCalled()
     expect(h.statuses.at(-1)?.observed).toEqual({})
     h.publisher.close()
+  })
+})
+
+describe('managed graphics card input for the shared orientation simulation', () => {
+  const rect = { x: 0.1, y: 0.6, w: 0.3, h: 0.2 }
+  const content = (): GraphicsContent => ({
+    h: [
+      {
+        ...fixture.snapshot.layers[0],
+        kind: 'highlight',
+        rect,
+        expiresAt: 5000,
+        stream: true,
+        recording: true
+      } as GraphicsContent['h'][number]
+    ],
+    v: [],
+    unsupported: []
+  })
+  const views = [
+    { identity: 'EG_stream', output: 'stream' as const, orientation: 'h' as const },
+    { identity: 'EG_record', output: 'recording' as const, orientation: 'h' as const }
+  ]
+  const status = (): RoomGraphicsStatus => ({
+    enabled: true,
+    state: 'applied',
+    reason: null,
+    revision: 3,
+    preview: null,
+    observed: {
+      EG_stream: { revision: 2, output: 'stream', orientation: 'h' },
+      EG_record: { revision: 3, output: 'recording', orientation: 'h' }
+    },
+    productionQualified: false
+  })
+  it('uses the card only after each animated output acknowledges its own current envelope', () => {
+    expect(graphicsMotionCards(content(), status(), views, 1000)).toEqual({ h: rect, v: null })
+    const pending = status()
+    delete pending.observed.EG_record
+    expect(graphicsMotionCards(content(), pending, views, 1000).h).toBeNull()
+    pending.observed.EG_record = { revision: 3, output: 'stream', orientation: 'h' }
+    expect(graphicsMotionCards(content(), pending, views, 1000).h).toBeNull()
+    expect(graphicsMotionCards(content(), status(), [], 1000).h).toBeNull()
+  })
+  it('never looks at stream-only or recording-only highlights', () => {
+    for (const output of ['stream', 'recording'] as const) {
+      const c = content()
+      c.h[0][output] = false
+      expect(graphicsMotionCards(c, status(), views, 1000).h).toBeNull()
+    }
+  })
+  it('drops expired, cleared, failed, off and unacknowledged cards', () => {
+    expect(graphicsMotionCards(content(), status(), views, 5000).h).toBeNull()
+    expect(graphicsMotionCards(null, status(), views, 1000).h).toBeNull()
+    expect(graphicsMotionCards({ ...content(), h: [] }, status(), views, 1000).h).toBeNull()
+    for (const state of ['failed', 'off'] as const)
+      expect(graphicsMotionCards(content(), { ...status(), state }, views, 1000).h).toBeNull()
+    expect(graphicsMotionCards(content(), { ...status(), observed: {} }, views, 1000).h).toBeNull()
+  })
+  it('scopes acceptance by orientation without splitting stream and recording motion', () => {
+    const c = content()
+    c.v = c.h
+    const wanted = [
+      ...views,
+      { identity: 'EG_vertical', output: 'stream' as const, orientation: 'v' as const }
+    ]
+    expect(graphicsMotionCards(c, status(), wanted, 1000)).toEqual({ h: rect, v: null })
   })
 })

@@ -631,3 +631,43 @@ describe('the backstage strip (C-G3)', () => {
     expect(container.textContent).toContain('Share a screen first for Screen + people.')
   })
 })
+
+// Plan 249 S5: the Program preview says why the avatar does not animate
+// everywhere, in words under the picture, never in the console only.
+describe('the avatar animation line under the Program preview (plan 249 S5)', () => {
+  const managedShow = { id: 'sh_talk', nodeId: 'livekit', resumable: false, kind: 'talk' as const }
+  const line = () =>
+    container.querySelector<HTMLElement>('[data-testid="show-stage-avatar-animation"]')
+  const avatar = (animation?: { state: 'animated' | 'still'; reason: string | null }) =>
+    talkShow({
+      room: {
+        ...NO_TALK_SHOW.room,
+        state: 'connected',
+        avatar: {
+          enabled: true,
+          state: 'applied',
+          reason: null,
+          revision: 3,
+          preview: null,
+          observed: {},
+          productionQualified: false,
+          guests: { enabled: false, capable: 0, applied: 0 },
+          ...(animation ? { animation } : {})
+        }
+      }
+    })
+
+  it('shows a refused atlas, a still output or a motion problem, and nothing when all is well', async () => {
+    const status = talkStatus({ show: managedShow, room: openRoom({ live: true }) })
+    const reason = 'The avatar shows still on cloud outputs: it is too detailed to animate there.'
+    await mount(status, avatar({ state: 'still', reason }))
+    expect(line()?.textContent).toBe(reason)
+    expect(line()?.dataset.avatarAnimation).toBe('still')
+
+    await mount(status, avatar({ state: 'animated', reason: null }))
+    expect(line()).toBeNull()
+    // A still avatar (no Alive pack) has nothing to explain.
+    await mount(status, avatar())
+    expect(line()).toBeNull()
+  })
+})

@@ -1,5 +1,6 @@
 import {
   RoomGraphicsPublisher,
+  graphicsMotionCards,
   type GraphicsContent,
   type RoomGraphicsStatus
 } from './room-graphics-publisher'
@@ -8,8 +9,19 @@ import { createRoomPcmTestSource, type RoomPcmSource } from './room-pcm-source'
 import {
   RoomAvatarPublisher,
   type AvatarContent,
+  type RoomAvatarAnimation,
   type RoomAvatarStatus
 } from './room-avatar-publisher'
+import { RoomAvatarMotion, ROOM_AVATAR_MOTION_FLUSH_MS } from './room-avatar-motion'
+import {
+  AVATAR_MOTION_TOPIC,
+  type MotionInputs,
+  type MotionOrientation,
+  type MotionRect
+} from '../../../shared/cloud-avatar-motion'
+import type { AvatarMotionSource } from '../../../shared/cloud-avatar-view'
+import type { AnimatorSettings } from '../../../shared/buddy-animator'
+import type { CohostPetAnimatorEvent } from '../../../shared/buddy-animator-public'
 import {
   createPrivateScreen,
   roomScreenPrivacy,
@@ -286,6 +298,26 @@ export class TalkShowRoomClient {
   #avatarEnabled = false
   /** Plan 249 S6 (D4): the host shows the stream's public layers to guests. Off per room. */
   #avatarGuests = false
+  /** Plan 249 S5: the avatar's motion stream, per bound room. */
+  #motion: RoomAvatarMotion | null = null
+  #motionTimer: ReturnType<typeof setInterval> | null = null
+  /** What a new producer starts from (a re-bind keeps state, not history). */
+  #motionSeed: { settings: AnimatorSettings; inputs: MotionInputs } | null = null
+  /** Why the worn avatar shows still on cloud outputs (its atlas was refused). */
+  #motionRefused: string | null = null
+  /**
+   * The highlight card each output accepted (the relay took its bytes), per
+   * orientation, until its clear or its time-to-live. The avatar looks at
+   * these only: a card an output never got is no input (`null`).
+   */
+  #cards: Record<MotionOrientation, { rect: MotionRect; until: number | null } | null> = {
+    h: null,
+    v: null
+  }
+  #cardsSent = ''
+  /** The publisher's last status, merged with the animation facts above. */
+  #avatarStatus: RoomAvatarStatus | null = null
+  #animationKey = ''
   /** Overlays go one at a time, in the order they were handed over. */
   #overlays = new Map<string, AbortController>()
 
@@ -351,6 +383,10 @@ export class TalkShowRoomClient {
     this.#avatar = null
     this.#graphicsContent = null
     this.#avatarContent = null
+    this.#stopMotion()
+    this.#motionSeed = null
+    this.#motionRefused = null
+    this.#cards = { h: null, v: null }
     this.#privacyOff?.()
     this.#privacyOff = null
     if (this.#privacyTimer) clearTimeout(this.#privacyTimer)
@@ -600,22 +636,36 @@ export class TalkShowRoomClient {
     image: (imageId: string, signal?: AbortSignal) => Promise<OverlayImage | null>
   ): Promise<void> {
     const room = this.#room
+    // Plan 249 S5: a card coming down stops the avatar's look at once.
+    if (event.slot === 'card' && event.op === 'clear') this.#acceptCard(event.orientation, null)
     if (this.#closed || !room || room.state !== ConnectionState.Connected) return
     const key = `${event.showId}:${event.slot}:${event.orientation}`
     this.#overlays.get(key)?.abort()
     const controller = new AbortController()
     this.#overlays.set(key, controller)
+    let sent = false
     try {
       const result = await sendOverlay(event, {
         publisher: room.localParticipant,
         image,
         signal: controller.signal
       })
-      if (result !== 'sent')
-        console.warn('[talk-show] overlay dropped', event.slot, event.orientation)
+      sent = result === 'sent'
+      if (!sent) console.warn('[talk-show] overlay dropped', event.slot, event.orientation)
     } catch {
       console.warn('[talk-show] overlay dropped', event.slot, event.orientation)
     } finally {
+      // The output got this card (or did not): where the avatar may look.
+      if (event.slot === 'card' && event.op === 'set' && this.#overlays.get(key) === controller)
+        this.#acceptCard(
+          event.orientation,
+          sent
+            ? {
+                rect: { ...event.rect },
+                until: event.ttlSeconds ? Date.now() + event.ttlSeconds * 1000 : null
+              }
+            : null
+        )
       if (this.#overlays.get(key) === controller) this.#overlays.delete(key)
     }
   }
@@ -636,8 +686,10 @@ export class TalkShowRoomClient {
     if (this.#graphicsEnabled) this.#graphics?.fail()
   }
   setGraphicsEnabled(enabled: boolean): void {
+    if (enabled !== this.#graphicsEnabled) this.#cards = { h: null, v: null }
     this.#graphicsEnabled = enabled
     this.#graphics?.set(enabled ? this.#graphicsContent : null)
+    this.#pushCards()
   }
 
   setAvatar(content: AvatarContent | null): void {
@@ -660,6 +712,206 @@ export class TalkShowRoomClient {
     this.#avatar?.guests(enabled)
   }
 
+  /**
+   * Plan 249 S5: animate the avatar for consumers that can. A new seed on a
+   * running stream is a persona switch: the same clock continues. `null`
+   * stops it; with `refused` the avatar shows still and the room says why.
+   */
+  setAvatarMotion(
+    seed: { settings: AnimatorSettings; inputs: MotionInputs } | null,
+    refused: string | null = null
+  ): void {
+    const previous = this.#motionSeed
+    this.#motionSeed = seed
+      ? {
+          ...seed,
+          inputs: {
+            ...seed.inputs,
+            avatarState: previous?.inputs.avatarState ?? seed.inputs.avatarState,
+            cards: this.#currentCards()
+          }
+        }
+      : null
+    this.#motionRefused = seed ? null : refused
+    this.#publishAvatar()
+    if (!seed) {
+      this.#stopMotion()
+      return
+    }
+    if (this.#motion) {
+      this.#motion.layout(seed.inputs.rects)
+      if (previous?.inputs.atlasHash !== seed.inputs.atlasHash)
+        this.#motion.pack(seed.inputs.atlasHash, seed.inputs.pack)
+      if (JSON.stringify(previous?.settings) !== JSON.stringify(seed.settings))
+        this.#motion.backend({ event: { kind: 'settings', settings: seed.settings } })
+    } else if (this.#room && !this.#motionTimer) {
+      this.#startMotion(this.#room)
+    }
+  }
+
+  /**
+   * Plan 249 S5 acceptance: the producer's own simulation, the local
+   * reference program pages are compared with at the same tick. Public
+   * cell ids only.
+   */
+  avatarMotionProbe(): {
+    epoch: string
+    tick: number
+    cells: Record<MotionOrientation, string | null>
+    /** Which outputs have an accepted card the avatar may look at. */
+    cards: Record<MotionOrientation, boolean>
+  } | null {
+    const motion = this.#motion
+    if (!motion) return null
+    const sim = motion.sim
+    return {
+      epoch: motion.epoch,
+      tick: sim.tick,
+      cells: { h: sim.draw('h')?.cell ?? null, v: sim.draw('v')?.cell ?? null },
+      cards: { h: sim.inputs.cards.h !== null, v: sim.inputs.cards.v !== null }
+    }
+  }
+
+  /**
+   * Plan 249 S5: the producer's own simulation for the desktop's Program
+   * preview (`createAvatarView`), the poses the outputs replay a moment
+   * later. Draws nothing while no stream runs or for another atlas.
+   */
+  readonly avatarMotionSource: AvatarMotionSource = (() => {
+    const motion = () => this.#motion
+    return {
+      advance: () => motion()?.advance(),
+      draw: (orientation: MotionOrientation, atlasHash: string) => {
+        const sim = motion()?.sim
+        return sim && sim.inputs.atlasHash === atlasHash ? sim.draw(orientation) : null
+      },
+      get sim() {
+        return motion()?.sim ?? null
+      }
+    }
+  })()
+
+  /** `cohost.pet.animator`: the backend's public projection, nothing else. */
+  avatarMotionEvent(payload: CohostPetAnimatorEvent): void {
+    const seed = this.#motionSeed
+    if (!seed) return
+    if (payload.avatarState) seed.inputs.avatarState = payload.avatarState
+    if (payload.event?.kind === 'settings') seed.settings = payload.event.settings
+    this.#motion?.backend(payload)
+  }
+
+  #acceptCard(
+    orientation: MotionOrientation,
+    card: { rect: MotionRect; until: number | null } | null
+  ): void {
+    // S9 managed highlights have their own applied receipts; legacy sends
+    // cannot certify them or restore a card cleared by the static publisher.
+    if (this.#graphicsEnabled) return
+    this.#cards = { ...this.#cards, [orientation]: card }
+    this.#pushCards()
+  }
+
+  /** Accepted cards still up; a card past its time-to-live is gone from its output. */
+  #currentCards(): Record<MotionOrientation, MotionRect | null> {
+    const now = Date.now()
+    if (this.#graphicsEnabled) {
+      if (this.#closed || this.#room?.state !== ConnectionState.Connected)
+        return { h: null, v: null }
+      return graphicsMotionCards(
+        this.#graphicsContent,
+        this.#snapshot.graphics,
+        this.#avatar?.motionViews() ?? [],
+        now
+      )
+    }
+    const live = (card: { rect: MotionRect; until: number | null } | null) =>
+      card && (card.until === null || card.until > now) ? { ...card.rect } : null
+    return { h: live(this.#cards.h), v: live(this.#cards.v) }
+  }
+
+  #pushCards(): void {
+    const cards = this.#currentCards()
+    const key = JSON.stringify(cards)
+    if (this.#motionSeed) this.#motionSeed.inputs.cards = cards
+    if (!this.#motion || key === this.#cardsSent) return
+    this.#cardsSent = key
+    this.#motion.cards(cards)
+  }
+
+  /** What the Program preview says about animation (absent for a still avatar). */
+  #animation(): RoomAvatarAnimation | undefined {
+    if (this.#motionRefused) return { state: 'still', reason: this.#motionRefused }
+    if (!this.#motionSeed) return undefined
+    const failed = this.#motion?.status().failed ?? null
+    const still = this.#avatar?.motionCoverage().still ?? 0
+    return {
+      state: 'animated',
+      reason:
+        failed ?? (still ? 'Some outputs show the avatar still. Reload them to animate it.' : null)
+    }
+  }
+
+  #publishAvatar(): void {
+    const avatar = this.#avatarStatus
+    if (!avatar || !this.#room || !this.#owns(this.#room)) return
+    const animation = this.#animation()
+    this.#animationKey = JSON.stringify(animation ?? null)
+    this.#snapshot = {
+      ...this.#snapshot,
+      avatar: { ...avatar, enabled: this.#avatarEnabled, ...(animation ? { animation } : {}) }
+    }
+    this.#publish()
+  }
+
+  /**
+   * The producer needs the host SID, which exists only once connected, and a
+   * full reconnect can change it (consumers fence on it): create lazily,
+   * recreate on a new SID. Each tick also refreshes the authorized targets.
+   */
+  #startMotion(room: Room): void {
+    this.#stopMotion()
+    let sid = ''
+    this.#motionTimer = setInterval(() => {
+      const seed = this.#motionSeed
+      if (!seed || !this.#owns(room)) return
+      const current = room.localParticipant.sid
+      if (!current) return
+      if (!this.#motion || sid !== current) {
+        this.#motion?.close()
+        sid = current
+        seed.inputs.cards = this.#currentCards()
+        this.#cardsSent = JSON.stringify(seed.inputs.cards)
+        this.#motion = new RoomAvatarMotion(
+          {
+            show: room.name,
+            publisherSid: current,
+            now: Date.now,
+            send: (bytes, identities) =>
+              room.localParticipant.publishData(bytes, {
+                reliable: true,
+                topic: AVATAR_MOTION_TOPIC,
+                destinationIdentities: identities
+              })
+          },
+          seed.settings,
+          seed.inputs
+        )
+      }
+      this.#pushCards()
+      this.#motion.setConsumers(this.#avatar?.motionTargets() ?? [])
+      void this.#motion.flush()
+      // A delivery problem or an older output shows under the Program preview.
+      if (JSON.stringify(this.#animation() ?? null) !== this.#animationKey) this.#publishAvatar()
+    }, ROOM_AVATAR_MOTION_FLUSH_MS)
+  }
+
+  #stopMotion(): void {
+    if (this.#motionTimer) clearInterval(this.#motionTimer)
+    this.#motionTimer = null
+    this.#motion?.close()
+    this.#motion = null
+  }
+
   #bind(room: Room): void {
     this.#graphics?.close()
     this.#graphics = new RoomGraphicsPublisher(room, (graphics) => {
@@ -668,17 +920,23 @@ export class TalkShowRoomClient {
         ...this.#snapshot,
         graphics: { ...graphics, enabled: this.#graphicsEnabled }
       }
+      this.#pushCards()
       this.#publish()
     })
     this.#graphics.set(this.#graphicsEnabled ? this.#graphicsContent : null)
     this.#avatar?.close()
+    this.#avatarStatus = null
     this.#avatar = new RoomAvatarPublisher(room, (avatar) => {
       if (!this.#owns(room)) return
-      this.#snapshot = { ...this.#snapshot, avatar: { ...avatar, enabled: this.#avatarEnabled } }
-      this.#publish()
+      this.#avatarStatus = avatar
+      this.#pushCards()
+      this.#publishAvatar()
     })
     this.#avatar.set(this.#avatarEnabled ? this.#avatarContent : null)
     this.#avatar.guests(this.#avatarGuests)
+    // No timer without an animated avatar (an idle room keeps no intervals).
+    if (this.#motionSeed) this.#startMotion(room)
+    else this.#stopMotion()
     room
       .on(RoomEvent.DataReceived, (payload, participant, _kind, topic) => {
         // Only server-relayed observations. A participant cannot impersonate this API.
@@ -1084,6 +1342,7 @@ export class TalkShowRoomClient {
     this.#graphics = null
     this.#avatar?.close()
     this.#avatar = null
+    this.#stopMotion()
     this.#room = null
     if (stale) await stale.disconnect().catch(() => {})
     await this.#stopLocal()

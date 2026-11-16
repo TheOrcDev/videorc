@@ -38,6 +38,41 @@ export type RoomGraphicsStatus = {
   >
   productionQualified: false
 }
+/** S5 shares one simulation per orientation. A managed card may influence it
+ * only when both output lanes allow it and every animated view has applied it.
+ * Mixed-output cards deliberately produce no gaze, rather than leak a hidden card. */
+export function graphicsMotionCards(
+  content: GraphicsContent | null,
+  status: RoomGraphicsStatus | undefined,
+  views: { identity: string; output: 'stream' | 'recording'; orientation: 'h' | 'v' }[],
+  now: number
+): Record<'h' | 'v', GraphicsLayer['rect'] | null> {
+  const cards: Record<'h' | 'v', GraphicsLayer['rect'] | null> = { h: null, v: null }
+  if (!content || !status?.enabled || status.state === 'failed' || status.state === 'off')
+    return cards
+  for (const orientation of ['h', 'v'] as const) {
+    const layer = content[orientation].find((item) => item.kind === 'highlight')
+    const wanted = views.filter((view) => view.orientation === orientation)
+    if (
+      !layer ||
+      !layer.stream ||
+      !layer.recording ||
+      layer.expiresAt === null ||
+      layer.expiresAt <= now ||
+      !wanted.length
+    )
+      continue
+    if (
+      wanted.every((view) => {
+        const seen = status.observed[view.identity]
+        return seen?.orientation === orientation && seen.output === view.output
+      })
+    )
+      cards[orientation] = { ...layer.rect }
+  }
+  return cards
+}
+
 /** Independently enabled by the existing graphics output switches. Never broadcasts
  * pixels to guests, or infers graphic support from S3's auxiliary version. */
 export class RoomGraphicsPublisher {

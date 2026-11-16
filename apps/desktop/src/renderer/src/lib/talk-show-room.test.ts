@@ -2,6 +2,16 @@
 import type { RoomOptions } from 'livekit-client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import avatarFixture from '../../../../../../protocol-fixtures/cloud-parity-avatar.json'
+import graphicsFixture from '../../../../../../protocol-fixtures/cloud-parity-graphics.json'
+import { CAPABILITY_TOPIC } from './room-media-v2'
+import {
+  GRAPHICS_TOPIC,
+  type GraphicsContent,
+  type GraphicsSnapshot
+} from '../../../shared/cloud-graphics'
+import type { AvatarLayer } from '../../../shared/cloud-avatar'
+
 import * as privacyModule from './room-screen-privacy'
 import vectors from '../../../shared/chroma-key-vectors.json'
 import type { TalkShowCameraSettings } from './talk-show-camera-effects'
@@ -256,6 +266,253 @@ describe('the host in the room (C-G4)', () => {
     await vi.advanceTimersByTimeAsync(30 * 60 * 1000)
     expect(requestToken).toHaveBeenCalledTimes(1)
     expect(vi.getTimerCount()).toBe(0)
+    await room.disconnect()
+  })
+
+  // Plan 249 S5: what the room client animates the avatar from.
+  const motionSeed = () => {
+    const rect = { x: 0.8, y: 0.7, w: 0.15, h: 0.25 }
+    return {
+      settings: { intensity: 0.45, sleepAfterSeconds: 180, breathing: true },
+      inputs: {
+        avatarState: 'idle' as const,
+        rects: { h: rect, v: rect },
+        cards: { h: null, v: null },
+        atlasHash: 'a'.repeat(64),
+        pack: {
+          neutral: 'look-22',
+          pivot: [0.5, 0.9] as const,
+          headTop: 0.2,
+          talk: [],
+          cells: [{ id: 'look-22', kind: 'gaze' as const, gaze: [0, 0] as const }]
+        }
+      }
+    }
+  }
+
+  it('runs the avatar motion timer only while an animated avatar is set (plan 249 S5)', async () => {
+    const { room } = client()
+    await room.connect()
+    const timers = vi.getTimerCount()
+    room.setAvatarMotion(motionSeed())
+    expect(vi.getTimerCount()).toBe(timers + 1)
+    // Events before any consumer are harmless; nothing is sent without targets.
+    room.avatarMotionEvent({
+      avatarState: 'talk',
+      event: { kind: 'utterance', mood: 'talk', chars: 4, bubbleSeconds: 1 }
+    })
+    await vi.advanceTimersByTimeAsync(500)
+    room.setAvatarMotion(null)
+    expect(vi.getTimerCount()).toBe(timers)
+    await room.disconnect()
+  })
+
+  it('looks only at the card each output accepted, until its clear or its time runs out (plan 249 S5)', async () => {
+    const { room } = client()
+    await room.connect()
+    Object.assign(latestRoom().localParticipant, { sid: 'PA_host' })
+    room.setAvatarMotion(motionSeed())
+    await vi.advanceTimersByTimeAsync(200)
+    expect(room.avatarMotionProbe()?.cards).toEqual({ h: false, v: false })
+    const card = {
+      op: 'set' as const,
+      showId: 'sh_talk',
+      slot: 'card' as const,
+      orientation: 'h' as const,
+      rect: { x: 0.05, y: 0.7, w: 0.3, h: 0.12 },
+      ttlSeconds: 5,
+      mimeType: 'image/png',
+      imageId: 'card-1'
+    }
+    const image = async () => ({ bytes: new Uint8Array(32), mimeType: 'image/png' })
+    await room.sendOverlay(card, image)
+    // The vertical output never got one (its image was gone): no input there.
+    const warning = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    await room.sendOverlay({ ...card, orientation: 'v' }, async () => null)
+    warning.mockRestore()
+    await vi.advanceTimersByTimeAsync(200)
+    expect(room.avatarMotionProbe()?.cards).toEqual({ h: true, v: false })
+    expect(room.avatarMotionProbe()).toBeTruthy()
+    // Managed snapshots own card input while enabled; legacy sends cannot seed it.
+    room.setGraphicsEnabled(true)
+    await room.sendOverlay(card, image)
+    await vi.advanceTimersByTimeAsync(200)
+    expect(room.avatarMotionProbe()?.cards).toEqual({ h: false, v: false })
+    room.setGraphicsEnabled(false)
+    await vi.advanceTimersByTimeAsync(200)
+    expect(room.avatarMotionProbe()?.cards).toEqual({ h: false, v: false })
+    await room.sendOverlay(card, image)
+    await vi.advanceTimersByTimeAsync(200)
+    expect(room.avatarMotionProbe()?.cards.h).toBe(true)
+    // Its time-to-live ends the look without a clear.
+    await vi.advanceTimersByTimeAsync(5000)
+    expect(room.avatarMotionProbe()?.cards).toEqual({ h: false, v: false })
+    await room.sendOverlay({ ...card, ttlSeconds: undefined }, image)
+    await vi.advanceTimersByTimeAsync(200)
+    expect(room.avatarMotionProbe()?.cards.h).toBe(true)
+    await room.sendOverlay(
+      { op: 'clear', showId: 'sh_talk', slot: 'card', orientation: 'h' },
+      image
+    )
+    await vi.advanceTimersByTimeAsync(200)
+    expect(room.avatarMotionProbe()?.cards.h).toBe(false)
+    room.setAvatarMotion(null)
+    await room.disconnect()
+  })
+
+  it('feeds managed card gaze only from current applied snapshots and clears on lifecycle loss', async () => {
+    const { room } = client()
+    await room.connect()
+    const live = latestRoom()
+    Object.assign(live, { name: 'sh_talk' })
+    Object.assign(live.localParticipant, { sid: 'PA_host' })
+    for (const output of ['stream', 'recording'])
+      live.remoteParticipants.set(`EG_${output}`, { identity: `EG_${output}`, sid: `PA_${output}` })
+    const sent = new Map<string, GraphicsSnapshot>()
+    vi.spyOn(live.localParticipant, 'streamBytes').mockImplementation(async (options) => {
+      const chunks: string[] = []
+      return {
+        write: async (bytes) => {
+          chunks.push(new TextDecoder().decode(bytes))
+        },
+        close: async () => {
+          if (options.topic === GRAPHICS_TOPIC && chunks.length) {
+            const snapshot = JSON.parse(chunks.join('')) as GraphicsSnapshot
+            sent.set(snapshot.output, snapshot)
+          }
+        }
+      }
+    })
+    const layers = avatarFixture.snapshot.layers as AvatarLayer[]
+    room.setAvatarEnabled(true)
+    room.setAvatar({
+      h: layers,
+      v: [],
+      stream: true,
+      recording: true,
+      animated: { h: layers, v: [] }
+    })
+    room.setAvatarMotion(motionSeed())
+    const highlight = graphicsFixture.snapshot.layers.find((l) => l.kind === 'highlight')!
+    const content: GraphicsContent = {
+      h: [
+        {
+          ...highlight,
+          kind: 'highlight',
+          expiresAt: Date.now() + 5000,
+          stream: true,
+          recording: true
+        }
+      ],
+      v: [],
+      unsupported: []
+    }
+    room.setGraphics(content)
+    room.setGraphicsEnabled(true)
+    const receipt = (output: 'stream' | 'recording', revision?: number) => {
+      live.emit(
+        'DataReceived',
+        new TextEncoder().encode(
+          JSON.stringify({
+            v: 2,
+            identity: `EG_${output}`,
+            participantSid: `PA_${output}`,
+            at: Date.now(),
+            graphics: {
+              version: 1,
+              output,
+              orientation: 'h',
+              animation: 1,
+              static: {
+                version: 1,
+                ...(revision === undefined
+                  ? {}
+                  : { applied: { publisherSid: 'PA_host', revision } })
+              }
+            }
+          })
+        ),
+        undefined,
+        undefined,
+        CAPABILITY_TOPIC
+      )
+    }
+    const acknowledge = async () => {
+      await vi.advanceTimersByTimeAsync(1100)
+      receipt('stream', sent.get('stream')!.revision)
+      receipt('recording', sent.get('recording')!.revision)
+      await vi.advanceTimersByTimeAsync(100)
+    }
+    receipt('stream')
+    receipt('recording')
+    await vi.advanceTimersByTimeAsync(1100)
+    expect(room.avatarMotionProbe()?.cards.h).toBe(false)
+    receipt('stream', sent.get('stream')!.revision)
+    await vi.advanceTimersByTimeAsync(100)
+    expect(room.avatarMotionProbe()?.cards.h).toBe(false)
+    receipt('recording', sent.get('recording')!.revision)
+    await vi.advanceTimersByTimeAsync(100)
+    expect(room.avatarMotionProbe()?.cards).toEqual({ h: true, v: false })
+    // A new content revision cannot borrow the previous revision's acceptance.
+    room.setGraphics({ ...content, h: [{ ...content.h[0], rect: { ...highlight.rect, x: 0.2 } }] })
+    await vi.advanceTimersByTimeAsync(100)
+    expect(room.avatarMotionProbe()?.cards.h).toBe(false)
+    await acknowledge()
+    expect(room.avatarMotionProbe()?.cards.h).toBe(true)
+    await vi.advanceTimersByTimeAsync(3000)
+    expect(room.avatarMotionProbe()?.cards.h).toBe(false)
+    content.h[0].expiresAt = Date.now() + 20_000
+    room.setGraphics(content)
+    await acknowledge()
+    expect(room.avatarMotionProbe()?.cards.h).toBe(true)
+    room.setGraphics(null)
+    await vi.advanceTimersByTimeAsync(100)
+    expect(room.avatarMotionProbe()?.cards.h).toBe(false)
+    room.setGraphics(content)
+    await acknowledge()
+    expect(room.avatarMotionProbe()?.cards.h).toBe(true)
+    room.failGraphics()
+    await vi.advanceTimersByTimeAsync(100)
+    expect(room.avatarMotionProbe()?.cards.h).toBe(false)
+    room.setGraphics(content)
+    await acknowledge()
+    expect(room.avatarMotionProbe()?.cards.h).toBe(true)
+    live.state = 'reconnecting'
+    live.emit('Reconnecting')
+    await vi.advanceTimersByTimeAsync(100)
+    expect(room.avatarMotionProbe()?.cards.h).toBe(false)
+    await room.disconnect()
+    expect(room.avatarMotionProbe()).toBeNull()
+  })
+
+  it('says under the Program preview why the avatar shows still (plan 249 S5)', async () => {
+    const { room } = client()
+    await room.connect()
+    room.setAvatarMotion(null, 'The avatar shows still on cloud outputs: it is too detailed.')
+    expect(room.snapshot.avatar?.animation).toEqual({
+      state: 'still',
+      reason: 'The avatar shows still on cloud outputs: it is too detailed.'
+    })
+    room.setAvatarMotion(motionSeed())
+    expect(room.snapshot.avatar?.animation).toEqual({ state: 'animated', reason: null })
+    room.setAvatarMotion(null)
+    expect(room.snapshot.avatar?.animation).toBeUndefined()
+    await room.disconnect()
+  })
+
+  it('draws the Program preview from its own simulation, and nothing for another atlas (plan 249 S5)', async () => {
+    const { room } = client()
+    await room.connect()
+    expect(room.avatarMotionSource.sim).toBeNull()
+    expect(room.avatarMotionSource.draw('h', 'a'.repeat(64))).toBeNull()
+    Object.assign(latestRoom().localParticipant, { sid: 'PA_host' })
+    room.setAvatarMotion(motionSeed())
+    await vi.advanceTimersByTimeAsync(500)
+    room.avatarMotionSource.advance()
+    expect(room.avatarMotionSource.sim?.tick).toBeGreaterThan(0)
+    expect(room.avatarMotionSource.draw('h', 'a'.repeat(64))?.cell).toBe('look-22')
+    expect(room.avatarMotionSource.draw('h', 'b'.repeat(64))).toBeNull()
+    room.setAvatarMotion(null)
     await room.disconnect()
   })
 

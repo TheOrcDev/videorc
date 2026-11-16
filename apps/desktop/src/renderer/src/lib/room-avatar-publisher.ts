@@ -19,6 +19,20 @@ export type AvatarContent = {
   v: AvatarLayer[]
   stream: boolean
   recording: boolean
+  /**
+   * Plan 249 S5: the same picture with the avatar as an atlas layer, sent
+   * only to consumers advertising `graphics.animation: 1`; every other
+   * consumer keeps the static layers above.
+   */
+  animated?: { h: AvatarLayer[]; v: AvatarLayer[] }
+}
+/**
+ * Plan 249 S5: whether the worn avatar animates on cloud outputs, with the
+ * streamer's reason when it does not everywhere. Absent for a still avatar.
+ */
+export type RoomAvatarAnimation = {
+  state: 'animated' | 'still'
+  reason: string | null
 }
 export type RoomAvatarStatus = {
   enabled: boolean
@@ -38,6 +52,7 @@ export type RoomAvatarStatus = {
    */
   guests: { enabled: boolean; capable: number; applied: number }
   productionQualified: false
+  animation?: RoomAvatarAnimation
 }
 /** Independently enabled by the existing avatar output switches. Never infers
  * graphic support from S3's auxiliary version. Guests get pixels only after the
@@ -106,7 +121,8 @@ export class RoomAvatarPublisher {
         ? this.#snapshot(
             content.stream ? 'stream' : 'recording',
             'h',
-            content.stream || content.recording ? content.h : []
+            // Plan 249 S5: the Program preview draws what an animating output draws.
+            content.stream || content.recording ? (content.animated?.h ?? content.h) : []
           )
         : null
   }
@@ -282,15 +298,19 @@ export class RoomAvatarPublisher {
       if (!role || !capabilityCurrent(receipt, peer.sid, Date.now()) || !receipt?.graphics) continue
       const { output, orientation } = receipt.graphics
       const content = this.#content
-      // A guest sees the stream's landscape layers, and only while the host
-      // shows them to guests; a recording-only avatar never reaches a guest.
+      // Guests retain S6's static public stream/h fallback. Only program
+      // consumers advertising S5 animation receive an atlas and motion.
+      const variant =
+        role === 'egress' && receipt.graphics.animation === 1 && content?.animated
+          ? content.animated
+          : content
       const layers =
         role === 'guest'
           ? this.#guests && content?.stream
             ? content.h
             : []
-          : content?.[output]
-            ? content[orientation]
+          : content?.[output] && variant
+            ? variant[orientation]
             : []
       if (role === 'guest' && !layers.length && !this.#guestShown.has(peer.identity)) continue
       const key = JSON.stringify([
@@ -359,6 +379,42 @@ export class RoomAvatarPublisher {
       }
       this.#error = null
     }
+  }
+  /**
+   * Plan 249 S5: the EG consumers the motion topic may go to now: a current
+   * receipt that advertises animation, for an output this content shows,
+   * with an atlas variant to draw. Nobody else is sent motion.
+   */
+  motionTargets(): string[] {
+    return this.motionCoverage().animated
+  }
+  /** Current authorized EG motion views; used to fence shared card inputs. */
+  motionViews(): { identity: string; output: 'stream' | 'recording'; orientation: 'h' | 'v' }[] {
+    return this.motionTargets().map((identity) => {
+      const graphics = this.#receipts.get(identity)!.graphics!
+      return { identity, output: graphics.output, orientation: graphics.orientation }
+    })
+  }
+  /** Plan 249 S5: who animates the atlas, and how many outputs that show the
+   * avatar can only draw it still (a page from before animation). */
+  motionCoverage(): { animated: string[]; still: number } {
+    const content = this.#content
+    const coverage: { animated: string[]; still: number } = { animated: [], still: 0 }
+    if (this.#closed || !content?.animated || this.room.state !== ConnectionState.Connected)
+      return coverage
+    for (const peer of this.room.remoteParticipants.values()) {
+      const receipt = this.#receipts.get(peer.identity)
+      if (
+        !peer.identity.startsWith('EG_') ||
+        !capabilityCurrent(receipt, peer.sid, Date.now()) ||
+        !receipt?.graphics ||
+        !content[receipt.graphics.output]
+      )
+        continue
+      if (receipt.graphics.animation === 1) coverage.animated.push(peer.identity)
+      else coverage.still += 1
+    }
+    return coverage
   }
   close(): void {
     this.#closed = true
