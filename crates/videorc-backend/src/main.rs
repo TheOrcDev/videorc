@@ -11692,7 +11692,7 @@ async fn handle_text_message_with_role(
                 return cloud_unavailable(command.id);
             };
             match context.hand_off(account::stored_session_token()).await {
-                Ok(()) => ServerResponse::ok(command.id, serde_json::json!({"ok":true})),
+                Ok(answer) => ServerResponse::ok(command.id, answer),
                 Err(error) => ServerResponse::error(
                     command.id,
                     cloud_show::continuation_error_code(&error).unwrap_or("cloud-handoff-failed"),

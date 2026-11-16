@@ -237,6 +237,12 @@ pub enum CloudStoppedBy {
     TakenOver,
 }
 
+#[derive(Debug, Serialize)]
+pub struct HandOffAnswer {
+    pub ok: bool,
+    pub confirmed: bool,
+}
+
 pub const CLOUD_SETTINGS_KEY: &str = "cloud.settings";
 /// The backend-private `app_settings` row holding the id of the show this
 /// desktop holds or last held without seeing it end (`null` when none). Not a
@@ -4615,7 +4621,7 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
     }
 
     /// Plan 243 D7: stop this computer while leaving every cloud leg open.
-    pub async fn hand_off(&self, bearer: Option<String>) -> Result<()> {
+    pub async fn hand_off(&self, bearer: Option<String>) -> Result<HandOffAnswer> {
         let (show_id, device, reclaim_host) = {
             let runtime = lock(&self.slot);
             let show = runtime
@@ -4669,7 +4675,10 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
             );
             self.hooks.emit_from(&self.slot);
         }
-        posted
+        Ok(HandOffAnswer {
+            ok: true,
+            confirmed: posted.is_ok(),
+        })
     }
 
     pub(crate) async fn stop_for_continuation(
@@ -5984,6 +5993,7 @@ mod tests {
         on_air_without_ingest: std::sync::atomic::AtomicBool,
         hand_off_calls: AtomicUsize,
         hand_off_fails: std::sync::atomic::AtomicBool,
+        hand_off_errors: StdMutex<VecDeque<CloudApiError>>,
         end_calls: StdMutex<Vec<String>>,
         /// The web cannot be reached for `end` (plan 222 review M1).
         end_fails: std::sync::atomic::AtomicBool,
@@ -6171,6 +6181,9 @@ mod tests {
             _device: &CloudDevice,
         ) -> std::result::Result<(), CloudApiError> {
             self.hand_off_calls.fetch_add(1, Ordering::SeqCst);
+            if let Some(error) = self.hand_off_errors.lock().unwrap().pop_front() {
+                return Err(error);
+            }
             if self.hand_off_fails.load(Ordering::SeqCst) {
                 Err(CloudApiError::NodeUnreachable)
             } else {
@@ -12162,6 +12175,40 @@ mod tests {
             assert!(harness.context.web.end_calls.lock().unwrap().is_empty());
         }
     }
+
+    #[tokio::test(start_paused = true)]
+    async fn r2_a_m5_a_completed_local_hand_off_answers_success_even_without_web_confirmation() {
+        for error in [
+            None,
+            Some(CloudApiError::Unauthorized),
+            Some(web_error(404, "not-found")),
+            Some(web_error(503, "cloud-media-unavailable")),
+        ] {
+            let harness = harness(true);
+            managed_live_show(&harness).await;
+            let confirmed = error.is_none();
+            if let Some(error) = error {
+                harness
+                    .context
+                    .web
+                    .hand_off_errors
+                    .lock()
+                    .unwrap()
+                    .push_back(error);
+            }
+            let answer = harness
+                .context
+                .hand_off(Some("bearer".into()))
+                .await
+                .unwrap();
+            assert_eq!(
+                serde_json::to_value(answer).unwrap(),
+                json!({"ok":true,"confirmed":confirmed})
+            );
+            assert!(lock(&harness.context.slot).status().show.unwrap().resumable);
+            assert!(harness.context.web.end_calls.lock().unwrap().is_empty());
+        }
+    }
     fn hold_unconnected_for_review(harness: &Harness, talk: bool) {
         let created = if talk {
             created_managed_talk()
@@ -12283,7 +12330,7 @@ mod tests {
                 .hand_off_fails
                 .store(fail, Ordering::SeqCst);
             let result = harness.context.hand_off(Some("bearer".into())).await;
-            assert_eq!(result.is_err(), fail);
+            assert_eq!(result.unwrap().confirmed, !fail);
             harness
                 .context
                 .on_session_stopped("session-1", Some("bearer".into()))
