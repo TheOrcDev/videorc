@@ -1,0 +1,307 @@
+// Plan 242 S11-S12. ESLint parity lives in "overrides"; on top of it, the
+// correctness, suspicious and perf groups of these plugins are errors, so a
+// rule that passes today cannot regress. Each rule below fails today and is
+// off with its count and reason: follow-ups, each its own PR.
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "plugins": [
+    "eslint",
+    "typescript",
+    "react",
+    "import",
+    "unicorn",
+    "vitest",
+    "oxc",
+    "jsx-a11y",
+    "promise"
+  ],
+  "categories": {
+    "correctness": "error",
+    "suspicious": "error",
+    "perf": "error"
+  },
+  "env": {
+    "builtin": true
+  },
+  "ignorePatterns": [
+    "node_modules/**",
+    "target/**",
+    "vendor/**",
+    "apps/desktop/out/**",
+    "apps/desktop/release/**"
+  ],
+  "rules": {
+    // 6 today. Side-effect imports (CSS, polyfills) are intentional.
+    "import/no-unassigned-import": "off",
+    // 1 today. Accessibility fixes change markup and focus; their own PR.
+    "jsx-a11y/click-events-have-key-events": "off",
+    // 6 today. Accessibility fixes change markup and focus; their own PR.
+    "jsx-a11y/control-has-associated-label": "off",
+    // 1 today. Accessibility fixes change markup and focus; their own PR.
+    "jsx-a11y/img-redundant-alt": "off",
+    // 1 today. Accessibility fixes change markup and focus; their own PR.
+    "jsx-a11y/interactive-supports-focus": "off",
+    // 4 today. Accessibility fixes change markup and focus; their own PR.
+    "jsx-a11y/label-has-associated-control": "off",
+    // 2 today. Accessibility fixes change markup and focus; their own PR.
+    "jsx-a11y/media-has-caption": "off",
+    // 20 today. Accessibility fixes change markup and focus; their own PR.
+    "jsx-a11y/no-autofocus": "off",
+    // 9 today. Accessibility fixes change markup and focus; their own PR.
+    "jsx-a11y/no-noninteractive-element-interactions": "off",
+    // 4 today. Accessibility fixes change markup and focus; their own PR.
+    "jsx-a11y/no-noninteractive-tabindex": "off",
+    // 6 today. Accessibility fixes change markup and focus; their own PR.
+    "jsx-a11y/no-static-element-interactions": "off",
+    // 113 today. Accessibility fixes change markup and focus; their own PR.
+    "jsx-a11y/prefer-tag-over-role": "off",
+    // 2 today. Accessibility fixes change markup and focus; their own PR.
+    "jsx-a11y/role-supports-aria-props": "off",
+    // 291 today. Follow-up.
+    "no-await-in-loop": "off",
+    // 111 today. Follow-up.
+    "no-shadow": "off",
+    // 30 today. Follow-up.
+    "no-underscore-dangle": "off",
+    // 6 today. Follow-up.
+    "no-unmodified-loop-condition": "off",
+    // 5 today. Perf; rewriting spreads in reducers is a refactor of its own.
+    "oxc/no-accumulating-spread": "off",
+    // 45 today. Perf; rewriting spreads in reducers is a refactor of its own.
+    "oxc/no-map-spread": "off",
+    // 197 today. Promise chains change error flow when rewritten; its own PR.
+    "promise/always-return": "off",
+    // 27 today. Promise chains change error flow when rewritten; its own PR.
+    "promise/no-callback-in-promise": "off",
+    // 1 today. Promise chains change error flow when rewritten; its own PR.
+    "promise/no-multiple-resolved": "off",
+    // 4 today. Promise chains change error flow when rewritten; its own PR.
+    "promise/no-promise-in-callback": "off",
+    // 33 today. Fixing changes component behaviour; its own PR.
+    "react/exhaustive-effect-dependencies": "off",
+    // 5 today. Fixing changes component behaviour; its own PR.
+    "react/globals": "off",
+    // 4 today. Fixing changes component behaviour; its own PR.
+    "react/immutability": "off",
+    // 3 today. Fixing changes component behaviour; its own PR.
+    "react/incompatible-library": "off",
+    // 3 today. Fixing changes component behaviour; its own PR.
+    "react/jsx-no-constructed-context-values": "off",
+    // 4 today. Fixing changes component behaviour; its own PR.
+    "react/memo-dependencies": "off",
+    // 16 today. Fixing changes component behaviour; its own PR.
+    "react/no-array-index-key": "off",
+    // 35 today. Fixing changes component behaviour; its own PR.
+    "react/no-children-prop": "off",
+    // 1 today. Fixing changes component behaviour; its own PR.
+    "react/no-deriving-state-in-effects": "off",
+    // 11 today. Fixing changes component behaviour; its own PR.
+    "react/no-object-type-as-default-prop": "off",
+    // 3 today. Fixing changes component behaviour; its own PR.
+    "react/no-unstable-nested-components": "off",
+    // 8 today. Fixing changes component behaviour; its own PR.
+    "react/preserve-manual-memoization": "off",
+    // 5 today. Fixing changes component behaviour; its own PR.
+    "react/purity": "off",
+    // 7060 today. Not for the automatic JSX runtime (tsconfig "jsx": "react-jsx").
+    "react/react-in-jsx-scope": "off",
+    // 88 today. Fixing changes component behaviour; its own PR.
+    "react/refs": "off",
+    // 38 today. Fixing changes component behaviour; its own PR.
+    "react/set-state-in-effect": "off",
+    // 4 today. Static-only classes are an existing API shape; its own PR.
+    "typescript/no-extraneous-class": "off",
+    // 414 today. Style; hoisting closures out of components and tests is a refactor of its own.
+    "unicorn/consistent-function-scoping": "off",
+    // 11 today. toReversed needs the ES2023 lib; the app targets ES2022.
+    "unicorn/no-array-reverse": "off",
+    // 154 today. toSorted needs the ES2023 lib; the app targets ES2022.
+    "unicorn/no-array-sort": "off",
+    // 4 today. Mechanical; follow-up.
+    "unicorn/no-new-array": "off",
+    // 1 today. A test fixture builds a thenable on purpose.
+    "unicorn/no-thenable": "off",
+    // 1 today. Mechanical; follow-up.
+    "unicorn/no-useless-fallback-in-spread": "off",
+    // 5 today. Mechanical; follow-up.
+    "unicorn/no-useless-spread": "off",
+    // 25 today. Changes handler replacement semantics; its own PR.
+    "unicorn/prefer-add-event-listener": "off",
+    // 11 today. Mechanical but touches behaviour on empty results; its own PR.
+    "unicorn/prefer-array-find": "off",
+    // 9 today. Changes value types at call sites; its own PR.
+    "unicorn/prefer-set-has": "off",
+    // 7 today. Mechanical; follow-up.
+    "unicorn/prefer-string-starts-ends-with": "off",
+    // 1 today. Follow-up.
+    "unicorn/require-module-specifiers": "off",
+    // 6 today. Test style; follow-up.
+    "vitest/expect-expect": "off",
+    // 3 today. Test style; follow-up.
+    "vitest/no-commented-out-tests": "off",
+    // 71 today. Test style; follow-up.
+    "vitest/no-conditional-expect": "off",
+    // 1 today. Test style; follow-up.
+    "vitest/no-standalone-expect": "off",
+    // 1646 today. Test style; follow-up.
+    "vitest/require-mock-type-parameters": "off",
+    // 346 today. Test style; follow-up.
+    "vitest/require-to-throw-message": "off",
+    // 194 today. Test style; follow-up.
+    "vitest/valid-expect": "off"
+  },
+  "overrides": [
+    {
+      "files": ["apps/desktop/**/*.{ts,tsx}"],
+      "rules": {
+        "constructor-super": "off",
+        "for-direction": "error",
+        "getter-return": "off",
+        "no-async-promise-executor": "error",
+        "no-case-declarations": "error",
+        "no-class-assign": "off",
+        "no-compare-neg-zero": "error",
+        "no-cond-assign": "error",
+        "no-const-assign": "off",
+        "no-constant-binary-expression": "error",
+        "no-constant-condition": "error",
+        "no-control-regex": "error",
+        "no-debugger": "error",
+        "no-delete-var": "error",
+        "no-dupe-class-members": "off",
+        "no-dupe-else-if": "error",
+        "no-dupe-keys": "off",
+        "no-duplicate-case": "error",
+        "no-empty": "error",
+        "no-empty-character-class": "error",
+        "no-empty-pattern": "error",
+        "no-empty-static-block": "error",
+        "no-ex-assign": "error",
+        "no-extra-boolean-cast": "error",
+        "no-fallthrough": "error",
+        "no-func-assign": "off",
+        "no-global-assign": "error",
+        "no-import-assign": "off",
+        "no-invalid-regexp": "error",
+        "no-irregular-whitespace": "error",
+        "no-loss-of-precision": "error",
+        "no-misleading-character-class": "error",
+        "no-new-native-nonconstructor": "off",
+        "no-nonoctal-decimal-escape": "error",
+        "no-obj-calls": "off",
+        "no-prototype-builtins": "error",
+        "no-redeclare": "off",
+        "no-regex-spaces": "error",
+        "no-self-assign": "error",
+        "no-setter-return": "off",
+        "no-shadow-restricted-names": "error",
+        "no-sparse-arrays": "error",
+        "no-this-before-super": "off",
+        "no-unassigned-vars": "error",
+        "no-unexpected-multiline": "error",
+        "no-unreachable": "off",
+        "no-unsafe-finally": "error",
+        "no-unsafe-negation": "off",
+        "no-unsafe-optional-chaining": "error",
+        "no-unused-labels": "error",
+        "no-unused-private-class-members": "error",
+        "no-unused-vars": [
+          "error",
+          {
+            "argsIgnorePattern": "^_",
+            "caughtErrorsIgnorePattern": "^_",
+            "varsIgnorePattern": "^_"
+          }
+        ],
+        "no-useless-assignment": "error",
+        "no-useless-backreference": "error",
+        "no-useless-catch": "error",
+        "no-useless-escape": "error",
+        "no-with": "off",
+        "preserve-caught-error": "error",
+        "require-yield": "error",
+        "use-isnan": "error",
+        "valid-typeof": "error",
+        "no-var": "error",
+        "prefer-const": "error",
+        "prefer-rest-params": "error",
+        "prefer-spread": "error",
+        "no-array-constructor": "error",
+        "no-unused-expressions": "error",
+        "typescript/ban-ts-comment": "error",
+        "typescript/no-duplicate-enum-values": "error",
+        "typescript/no-empty-object-type": "error",
+        "typescript/no-explicit-any": "off",
+        "typescript/no-extra-non-null-assertion": "error",
+        "typescript/no-misused-new": "error",
+        "typescript/no-namespace": "error",
+        "typescript/no-non-null-asserted-optional-chain": "error",
+        "typescript/no-require-imports": "error",
+        "typescript/no-this-alias": "error",
+        "typescript/no-unnecessary-type-constraint": "error",
+        "typescript/no-unsafe-declaration-merging": "error",
+        "typescript/no-unsafe-function-type": "error",
+        "typescript/no-wrapper-object-types": "error",
+        "typescript/prefer-as-const": "error",
+        "typescript/prefer-namespace-keyword": "error",
+        "typescript/triple-slash-reference": "error",
+        "no-restricted-imports": [
+          "error",
+          {
+            "patterns": [
+              {
+                "group": ["radix-ui", "@radix-ui/*"],
+                "message": "Videorc's UI is on Base UI, from the @videorc registry: use the synced component (pnpm ui:sync), or add what is missing to videorc-ui."
+              }
+            ]
+          }
+        ],
+        "react/exhaustive-deps": "warn",
+        "react/rules-of-hooks": "error"
+      },
+      "plugins": ["typescript", "react"]
+    },
+    {
+      "files": ["apps/desktop/src/renderer/**/*.{ts,tsx}"],
+      "rules": {
+        "no-restricted-imports": [
+          "error",
+          {
+            "paths": [
+              {
+                "name": "@phosphor-icons/react",
+                "message": "Import icons from @/components/icons instead. Add a new semantic slot there only if no existing slot already means the same thing."
+              }
+            ],
+            "patterns": [
+              {
+                "group": ["radix-ui", "@radix-ui/*"],
+                "message": "Videorc's UI is on Base UI, from the @videorc registry: use the synced component (pnpm ui:sync), or add what is missing to videorc-ui."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "files": [
+        "apps/desktop/src/renderer/src/components/icons.tsx",
+        "apps/desktop/src/renderer/src/components/stream-manager/activity-icons.tsx",
+        "apps/desktop/src/renderer/src/components/avatar-page-icon.tsx"
+      ],
+      "rules": {
+        "no-restricted-imports": [
+          "error",
+          {
+            "patterns": [
+              {
+                "group": ["radix-ui", "@radix-ui/*"],
+                "message": "Videorc's UI is on Base UI, from the @videorc registry: use the synced component (pnpm ui:sync), or add what is missing to videorc-ui."
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

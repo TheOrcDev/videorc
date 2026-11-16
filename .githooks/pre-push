@@ -1,0 +1,4 @@
+#!/bin/sh
+# Plan 242 S20: format, lint and typecheck what this push changes.
+# Skip once with `git push --no-verify`.
+exec node "$(git rev-parse --show-toplevel)/scripts/pre-push-check.mjs" "$@"

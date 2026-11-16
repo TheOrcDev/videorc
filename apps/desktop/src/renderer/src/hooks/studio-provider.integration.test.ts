@@ -2555,7 +2555,7 @@ describe('real StudioProvider lifecycle', () => {
 
     await pushIntent('read-1', 'get_scene_layout', {})
     await waitForObservation(() => ack('read-1') !== undefined)
-    const items = (ack('read-1')?.result as { items: { item: string; rects: unknown }[] }).items
+    const items = (ack('read-1')!.result as { items: { item: string; rects: unknown }[] }).items
     expect(items.find((item) => item.item === 'buddy')?.rects).toEqual({
       horizontal: {
         x: overlaySnapRect('buddy', 'horizontal', 'top-left').x,
@@ -4539,7 +4539,7 @@ describe('real StudioProvider lifecycle', () => {
       (command) => command.method === 'diagnostics.supportBundle.export'
     )
     const ring = (
-      exported?.params as {
+      exported!.params as {
         rendererDiagnostics?: { recentUserErrors?: Array<Record<string, unknown>> }
       }
     ).rendererDiagnostics?.recentUserErrors
@@ -7738,7 +7738,7 @@ describe('real StudioProvider lifecycle', () => {
     await waitForObservation(() => observations.at(-1)?.recording.recording.state === 'recording')
     const start = backend.sentCommands.find((command) => command.method === 'session.start')
     expect(
-      (start?.params as { sources?: { microphoneId?: string } }).sources?.microphoneId
+      (start!.params as { sources?: { microphoneId?: string } }).sources?.microphoneId
     ).toBeUndefined()
     expect(backend.confirmedSources.microphoneId).toBeUndefined()
     await act(async () => {
@@ -13534,7 +13534,7 @@ describe('real StudioProvider lifecycle', () => {
       backend.sentCommands.some((command) => command.method === 'session.start')
     )
     const startAudio = (
-      backend.sentCommands.find((command) => command.method === 'session.start')?.params as {
+      backend.sentCommands.find((command) => command.method === 'session.start')!.params as {
         audio?: { microphoneGainDb?: number; microphoneMuted?: boolean }
       }
     ).audio
@@ -13618,7 +13618,7 @@ describe('real StudioProvider lifecycle', () => {
     })
     await waitForObservation(() => latest()?.recording.recording.state === 'recording')
     const startAudio = (
-      backend.sentCommands.find((command) => command.method === 'session.start')?.params as {
+      backend.sentCommands.find((command) => command.method === 'session.start')!.params as {
         audio?: Record<string, unknown>
       }
     ).audio
@@ -14050,7 +14050,7 @@ describe('real StudioProvider lifecycle', () => {
       const { latest, updates } = await startSystemAudioSession(backend, startWithNoiseReduction)
       const started = backend.sentCommands.find((command) => command.method === 'session.start')
       expect(
-        (started?.params as { audio: { microphoneNoiseSuppression?: string } }).audio
+        (started!.params as { audio: { microphoneNoiseSuppression?: string } }).audio
       ).toMatchObject({ microphoneNoiseSuppression: 'rnnoise' })
       await waitForObservation(() => updates().length === 1)
       expect(updates()[0]).toMatchObject({
@@ -14908,7 +14908,7 @@ describe('real StudioProvider lifecycle', () => {
     })
     await waitForObservation(() => latest()?.recording.recording.state === 'recording')
     const start = backend.sentCommands.find((command) => command.method === 'session.start')
-    expect((start?.params as { streaming: StreamingSettings }).streaming.enabledTargetIds).toEqual([
+    expect((start!.params as { streaming: StreamingSettings }).streaming.enabledTargetIds).toEqual([
       'youtube'
     ])
     expect(backend.xPrepareCount).toBe(0)

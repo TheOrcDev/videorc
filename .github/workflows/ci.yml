@@ -119,14 +119,7 @@ jobs:
         timeout-minutes: 15
         run: cargo test -p videorc-backend
 
-      - name: Build backend for process/memory sentinel
-        # The sentinel launches the dev app through `cargo run`. Build the
-        # exact binary first so its 120-second readiness budget measures app
-        # startup rather than a cold Rust binary link on the macOS runner.
-        timeout-minutes: 15
-        run: cargo build -p videorc-backend --bin videorc-backend
-
-      - name: Install dependencies for process/memory sentinel
+      - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
       - name: Videorc Camera extension build and Swift tests
@@ -136,6 +129,64 @@ jobs:
         # unit tests. No profile, no signing identity, no activation.
         timeout-minutes: 15
         run: pnpm test:camera-extension
+
+  sentinel:
+    # Plan 242 S14: the one CI check that boots the app runs beside the Rust
+    # tests instead of after them, and runs for app-only pull requests too.
+    name: macOS app sentinel
+    needs: scope
+    if: ${{ needs.scope.result == 'success' && needs.scope.outputs.macos_sentinel == 'true' }}
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: CI-only fast backend build profile
+        # The same profile as the rust job, so the cache it saved matches.
+        run: |
+          mkdir -p "$HOME/.cargo"
+          cat >> "$HOME/.cargo/config.toml" <<'TOML'
+          [profile.dev]
+          debug = "line-tables-only"
+          [profile.dev.package.videorc-backend]
+          opt-level = 0
+          TOML
+          cat "$HOME/.cargo/config.toml"
+          echo "RUST_MIN_STACK=8388608" >> "$GITHUB_ENV"
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          # rust-cache keys a job's cache by its job id; `rust` restores the
+          # dependencies the rust job saved. Only the rust job saves.
+          shared-key: rust
+          save-if: false
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.0.9
+          run_install: false
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24.6.0'
+          cache: pnpm
+
+      - name: Build backend for process/memory sentinel
+        # The sentinel launches the dev app through `cargo run`. Build the
+        # exact binary first so its 120-second readiness budget measures app
+        # startup rather than a cold Rust binary link on the macOS runner.
+        timeout-minutes: 15
+        run: cargo build -p videorc-backend --bin videorc-backend
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
 
       - name: Short no-device process/memory sentinel
         run: pnpm smoke:process-memory:sentinel
@@ -164,12 +215,15 @@ jobs:
           echo "Skipped the hosted macOS Rust job for a ${{ needs.scope.outputs.kind }} change set."
           echo "Ordinary code PRs still run the identical rust job on macos-15."
 
-  js:
-    name: JS (format + lint + tests)
+  # Plan 242 S8: the JS gates run as parallel jobs. `js` keeps the old check
+  # name and only requires them plus the shard coverage proof. Release reuse
+  # (scripts/lib/reuse-release-ci-gates.mjs) reads every real job and step.
+  js-checks:
+    name: JS checks (audit, format, lint, typecheck)
     needs: scope
     if: ${{ needs.scope.result == 'success' && needs.scope.outputs.js == 'true' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 5
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -201,20 +255,171 @@ jobs:
       - name: Typecheck
         run: pnpm typecheck
 
+  js-build:
+    name: JS build and asset budget
+    needs: scope
+    if: ${{ needs.scope.result == 'success' && needs.scope.outputs.js == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.0.9
+          run_install: false
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24.6.0'
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
       - name: Build renderer for initial asset budget
         run: pnpm build
 
       - name: Initial renderer asset budget
         run: pnpm check:renderer-assets
 
-      - name: Desktop tests
-        run: pnpm --filter @videorc/desktop test
+  js-node:
+    name: Node logic tests
+    needs: scope
+    if: ${{ needs.scope.result == 'success' && needs.scope.outputs.js == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.0.9
+          run_install: false
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24.6.0'
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
 
       - name: Node logic tests
         run: pnpm test:scripts
 
       - name: Source reconciliation smoke
         run: pnpm smoke:sources
+
+  js-vitest:
+    name: Desktop tests (${{ matrix.shard }}/4)
+    needs: scope
+    if: ${{ needs.scope.result == 'success' && needs.scope.outputs.js == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.0.9
+          run_install: false
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24.6.0'
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Desktop tests
+        # Split by recorded time (apps/desktop/vitest-timings.json); each
+        # shard reports the files it ran for the coverage proof in `js`.
+        env:
+          VIDEORC_VITEST_SHARD: ${{ matrix.shard }}/4
+          VIDEORC_VITEST_REPORT: ${{ runner.temp }}/vitest-shard-${{ matrix.shard }}.json
+        run: pnpm --filter @videorc/desktop exec vitest run --shard=${{ matrix.shard }}/4
+
+      - name: Upload shard report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vitest-shard-${{ matrix.shard }}
+          path: ${{ runner.temp }}/vitest-shard-${{ matrix.shard }}.json
+          # warn: a shard that failed early writes no report, and an upload
+          # error would only hide its real failure.
+          if-no-files-found: warn
+          overwrite: true
+          retention-days: 14
+
+  js:
+    name: JS (format + lint + tests)
+    needs: [scope, js-checks, js-build, js-node, js-vitest]
+    if: ${{ always() && needs.scope.result == 'success' && needs.scope.outputs.js == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require every JS gate job
+        env:
+          CHECKS: ${{ needs.js-checks.result }}
+          BUILD: ${{ needs.js-build.result }}
+          NODE_TESTS: ${{ needs.js-node.result }}
+          VITEST: ${{ needs.js-vitest.result }}
+        run: |
+          echo "checks=$CHECKS build=$BUILD node=$NODE_TESTS vitest=$VITEST"
+          for result in "$CHECKS" "$BUILD" "$NODE_TESTS" "$VITEST"; do
+            if [ "$result" != success ]; then
+              echo "Every JS gate job must succeed."
+              exit 1
+            fi
+          done
+
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24.6.0'
+
+      - name: Download shard reports
+        uses: actions/download-artifact@v4
+        with:
+          pattern: vitest-shard-*
+          path: ${{ runner.temp }}/vitest-shards
+          merge-multiple: true
+
+      - name: Every desktop test file ran exactly once
+        run: node scripts/vitest-shard-report.mjs check "$RUNNER_TEMP"/vitest-shards/*.json
+
+      - name: Recorded test times from this run
+        # Download this to refresh apps/desktop/vitest-timings.json when the
+        # check above warns that the shards are unbalanced.
+        if: ${{ github.event_name == 'push' }}
+        run: node scripts/vitest-shard-report.mjs merge "$RUNNER_TEMP"/vitest-shards/*.json
+
+      - name: Upload recorded test times
+        if: ${{ github.event_name == 'push' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: vitest-timings
+          path: apps/desktop/vitest-timings.json
+          overwrite: true
+          retention-days: 30
 
   js-skip:
     name: JS (format + lint + tests)

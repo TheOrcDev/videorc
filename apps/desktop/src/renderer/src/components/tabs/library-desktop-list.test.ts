@@ -374,7 +374,7 @@ describe('Clean cut in the Library (E-4)', () => {
         (item) => item.textContent === 'Review clean cut'
       )!
       await act(async () => review.click())
-      expect((opened.mock.calls[0]?.[0] as CustomEvent).detail).toEqual({
+      expect((opened.mock.calls[0]![0] as CustomEvent).detail).toEqual({
         sessionId: 'bravo',
         mode: 'condensed',
         review: true,

@@ -1,28 +1,90 @@
 const SHA_RE = /^[a-f0-9]{40}$/
 const ALLOWED_EVENTS = Object.freeze(['push', 'workflow_dispatch'])
 
+// A gate counts as passed only when every listed job succeeded AND ran each
+// of its required steps. The skip-twin jobs share their gate's name, so a
+// name and a green conclusion prove nothing: the 0.28.1 Windows alpha reused
+// a 3-second Ubuntu skip as "Windows Rust gates passed" (plan 242 S1).
+function gateJob(name, requiredSteps) {
+  return Object.freeze({ name, requiredSteps: Object.freeze([...requiredSteps]) })
+}
+
+function shardJobs(nameFor, count) {
+  return Array.from({ length: count }, (_, index) => gateJob(nameFor(index + 1), ['Desktop tests']))
+}
+
 export const RELEASE_CI_GATE_SPECS = Object.freeze({
+  // ci.yml runs the JS gates as parallel jobs (plan 242 S8). `JS (format +
+  // lint + tests)` requires them all and proves every desktop test file ran
+  // in exactly one vitest shard.
   'windows-js-job': Object.freeze({
     id: 'windows-js-job',
     workflowFile: 'ci.yml',
-    jobNames: Object.freeze(['JS (format + lint + tests)'])
+    jobs: Object.freeze([
+      gateJob('JS (format + lint + tests)', [
+        'Require every JS gate job',
+        'Every desktop test file ran exactly once'
+      ]),
+      gateJob('JS checks (audit, format, lint, typecheck)', ['Format check', 'Lint', 'Typecheck']),
+      gateJob('Node logic tests', ['Node logic tests']),
+      ...shardJobs((shard) => `Desktop tests (${shard}/4)`, 4)
+    ])
   }),
-  'windows-source-gates': Object.freeze({
-    id: 'windows-source-gates',
+  // release-windows-gates.yml runs the Rust and JS gates side by side (plan
+  // 242 S4, S8). Its `gates` job counts only for its shard coverage proof.
+  'windows-rust-gates': Object.freeze({
+    id: 'windows-rust-gates',
     workflowFile: 'windows.yml',
-    jobNames: Object.freeze(['gates / Windows release source gates'])
+    jobs: Object.freeze([
+      gateJob('gates / Windows release Rust gates', [
+        'Clippy',
+        'Preview bounds concurrency (25 stability passes)',
+        'Source and audio ownership (25 stability passes)',
+        'Test (3 stability passes)',
+        'Rust format',
+        'Rust advisory audit'
+      ])
+    ])
+  }),
+  'windows-js-gates': Object.freeze({
+    id: 'windows-js-gates',
+    workflowFile: 'windows.yml',
+    jobs: Object.freeze([
+      gateJob('gates / Windows release JS gates', [
+        'Tracked text integrity',
+        'Node logic tests',
+        'Format',
+        'TypeScript',
+        'Lint'
+      ]),
+      ...shardJobs((shard) => `gates / Windows desktop tests (${shard}/3)`, 3),
+      gateJob('gates / Windows release source gates', [
+        'Every desktop test file ran exactly once on Windows'
+      ])
+    ])
   }),
   'linux-rust-job': Object.freeze({
     id: 'linux-rust-job',
     workflowFile: 'linux.yml',
-    jobNames: Object.freeze(['Linux gates (FFmpeg policy + Rust compile/test)'])
+    jobs: Object.freeze([
+      gateJob('Linux gates (FFmpeg policy + Rust compile/test)', ['Clippy', 'Test'])
+    ])
   })
 })
 
 export const RELEASE_CI_GATE_LOOKUPS = Object.freeze({
-  'windows-js': Object.freeze(['windows-source-gates', 'windows-js-job']),
-  'windows-rust': Object.freeze(['windows-source-gates']),
+  'windows-js': Object.freeze(['windows-js-gates', 'windows-js-job']),
+  'windows-rust': Object.freeze(['windows-rust-gates']),
   'linux-rust': Object.freeze(['linux-rust-job'])
+})
+
+// The change-scope flag that says whether CI runs this gate family for a diff.
+// An ancestor's gates stand in for the release commit only when CI itself
+// would skip that family for the diff between them (plan 242 D2).
+export const RELEASE_CI_GATE_SCOPE_FLAGS = Object.freeze({
+  'windows-js': 'js',
+  'windows-rust': 'windowsHeavy',
+  'linux-rust': 'linuxHeavy'
 })
 
 export class ReuseReleaseCiError extends Error {
@@ -75,9 +137,18 @@ function workflowPath(file) {
   return `.github/workflows/${file}`
 }
 
-function jobSucceeded(job, jobNames) {
-  return (
-    job && jobNames.includes(job.name) && job.status === 'completed' && job.conclusion === 'success'
+function stepSucceeded(job, stepName) {
+  return (job.steps ?? []).some((step) => step?.name === stepName && step.conclusion === 'success')
+}
+
+/** True when this job is the gate: right name, green, and every required step ran green. */
+export function jobProvesGate(job, gate) {
+  return Boolean(
+    job &&
+    job.name === gate.name &&
+    job.status === 'completed' &&
+    job.conclusion === 'success' &&
+    gate.requiredSteps.every((stepName) => stepSucceeded(job, stepName))
   )
 }
 
@@ -99,7 +170,7 @@ export async function findReusableReleaseCiGate({ api, repository, sha, spec, ma
   const exactSha = parseReleaseSourceSha(sha)
   const exactRepository = parseReleaseRepository(repository)
   requireReuse(
-    spec?.workflowFile && Array.isArray(spec.jobNames),
+    spec?.workflowFile && Array.isArray(spec.jobs) && spec.jobs.length > 0,
     'spec',
     'Reuse spec is incomplete.'
   )
@@ -125,8 +196,9 @@ export async function findReusableReleaseCiGate({ api, repository, sha, spec, ma
     }
     const jobs = await api(`/repos/${exactRepository}/actions/runs/${run.id}/jobs?per_page=100`)
     requireReuse(Array.isArray(jobs?.jobs), 'github-response', 'GitHub returned no job list.')
-    const job = jobs.jobs.find((entry) => jobSucceeded(entry, spec.jobNames))
-    if (!job) continue
+    const proven = spec.jobs.map((gate) => jobs.jobs.find((entry) => jobProvesGate(entry, gate)))
+    if (proven.some((job) => !job)) continue
+    const [job] = proven
     return {
       reused: true,
       reason: 'exact-commit-job-success',
@@ -134,6 +206,7 @@ export async function findReusableReleaseCiGate({ api, repository, sha, spec, ma
       runId: run.id,
       jobId: job.id,
       jobName: job.name,
+      jobNames: proven.map((entry) => entry.name),
       workflowPath: run.path,
       htmlUrl: job.html_url ?? run.html_url,
       headSha: exactSha
@@ -148,20 +221,50 @@ export async function findReusableReleaseCiGate({ api, repository, sha, spec, ma
   }
 }
 
+/**
+ * Tries the release commit first, then each same-source ancestor in order.
+ * `sourceShas` is [releaseSha, ...ancestors]; the caller builds it so that
+ * every ancestor's diff to the release commit is one CI skips this gate
+ * family for. Without it only the exact commit counts.
+ */
 export async function findFirstReusableReleaseCiGate({
   api,
   repository,
   sha,
   lookup,
   specIds,
-  maxRuns
+  maxRuns,
+  sourceShas
 }) {
   const specs = specIds ? specIds.map(resolveReleaseCiGateSpec) : resolveReleaseCiGateLookup(lookup)
+  const releaseSha = parseReleaseSourceSha(sha)
+  const candidates = sourceShas?.length ? sourceShas.map(parseReleaseSourceSha) : [releaseSha]
+  requireReuse(
+    candidates[0] === releaseSha,
+    'source-sha',
+    'The candidate list must start with the release commit.'
+  )
   let lastMiss = null
-  for (const spec of specs) {
-    const result = await findReusableReleaseCiGate({ api, repository, sha, spec, maxRuns })
-    if (result.reused) return result
-    lastMiss = result
+  for (const candidate of candidates) {
+    for (const spec of specs) {
+      const result = await findReusableReleaseCiGate({
+        api,
+        repository,
+        sha: candidate,
+        spec,
+        maxRuns
+      })
+      if (result.reused) {
+        if (candidate === releaseSha) return result
+        return {
+          ...result,
+          reason: 'ancestor-same-source',
+          headSha: releaseSha,
+          sourceSha: candidate
+        }
+      }
+      if (candidate === releaseSha) lastMiss = result
+    }
   }
   return lastMiss ?? { reused: false, reason: 'no-successful-job-for-exact-commit' }
 }

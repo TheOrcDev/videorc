@@ -19,7 +19,8 @@ export const CI_SCOPE_KINDS = Object.freeze({
   VERSION_RELEASE: 'version-release',
   DOCS_RECORD: 'docs-record',
   DOCS: 'docs',
-  JS_TEST: 'js-test'
+  JS_TEST: 'js-test',
+  APP_TS: 'app-ts'
 })
 
 export const CI_SCOPE_EVENTS_WITH_DIFF = Object.freeze(['pull_request', 'push'])
@@ -68,8 +69,61 @@ const JS_TEST_SCOPE = Object.freeze({
   windowsHeavy: false,
   linuxHeavy: false,
   macosRust: false,
+  // The desktop tests also run on Windows (path separators, spawn semantics).
+  windowsJs: true,
   js: true
 })
+
+// Plan 242 S15: desktop app files the Rust crates include or read at build or
+// test time. A change to any of them can change a Rust result, so it is code.
+// scripts/lib/ci-change-scope-rust-reads.test.mjs fails when a Rust file
+// starts reading a desktop path this list does not cover.
+export const RUST_READS_DESKTOP_PREFIXES = Object.freeze([
+  'apps/desktop/src/shared/',
+  'apps/desktop/src/renderer/src/assets/'
+])
+export const RUST_READS_DESKTOP_FILES = Object.freeze([
+  'apps/desktop/src/renderer/src/styles.css',
+  'apps/desktop/src/main/window-palette.ts'
+])
+
+export function isRustReachableDesktopPath(path) {
+  return (
+    RUST_READS_DESKTOP_FILES.includes(path) ||
+    RUST_READS_DESKTOP_PREFIXES.some((prefix) => path.startsWith(prefix))
+  )
+}
+
+/** Desktop app source that no Rust code reads. */
+export function isAppTsPath(path) {
+  return path.startsWith('apps/desktop/src/') && !isRustReachableDesktopPath(path)
+}
+
+/**
+ * The packaged-app smokes in the Windows installer job exercise the main and
+ * preload processes and the window entry pages, so those still run it
+ * (plan 242 D7). Other renderer changes skip it.
+ */
+export function needsWindowsInstaller(path) {
+  return (
+    path.startsWith('apps/desktop/src/main/') ||
+    path.startsWith('apps/desktop/src/preload/') ||
+    /^apps\/desktop\/src\/renderer\/[^/]+\.html$/.test(path)
+  )
+}
+
+function appTsScope(files) {
+  return {
+    kind: CI_SCOPE_KINDS.APP_TS,
+    windowsHeavy: false,
+    linuxHeavy: false,
+    macosRust: false,
+    macosSentinel: true,
+    windowsJs: true,
+    windowsInstaller: files.some(needsWindowsInstaller),
+    js: true
+  }
+}
 
 const VERSION_RELEASE_SCOPE = Object.freeze({
   kind: CI_SCOPE_KINDS.VERSION_RELEASE,
@@ -172,7 +226,43 @@ export function classifyChangeScope({
   // A mix of prose and JS tests needs no more than the JS job either.
   if (files.every((file) => isJsTestPath(file) || isDocsPath(file))) return { ...JS_TEST_SCOPE }
 
+  // Plan 242 S15: a pull request that changes only desktop app source no
+  // Rust code reads skips the Rust jobs. Pull requests only: a push to main
+  // runs every gate for code (the full suite still guards main).
+  if (
+    eventName === 'pull_request' &&
+    files.some(isAppTsPath) &&
+    files.every((file) => isAppTsPath(file) || isJsTestPath(file) || isDocsPath(file))
+  ) {
+    return appTsScope(files)
+  }
+
   return { ...HEAVY_CODE_SCOPE }
+}
+
+// The Windows startup incident diagnostics job (windows.yml `incident`) runs
+// on a pull request only when the pull request changes what that job runs
+// (plan 242 S5). Pushes to main and manual dispatch always run it.
+export const WINDOWS_INCIDENT_TOOLING_PATHS = Object.freeze([
+  '.github/workflows/windows.yml',
+  'scripts/smoke-windows-stream-performance.mjs',
+  'scripts/smoke-windows-mf-probe.mjs',
+  'scripts/probe-windows-openh264-comparison.mjs',
+  'crates/videorc-backend/src/windows_mf_probe.rs'
+])
+export const WINDOWS_INCIDENT_TOOLING_PREFIXES = Object.freeze([
+  'scripts/lib/windows-incident-',
+  'scripts/lib/windows-mf-probe',
+  'scripts/lib/windows-openh264-comparison',
+  'scripts/lib/windows-stream-performance',
+  'scripts/lib/windows-owned-pcm-eof'
+])
+
+export function isWindowsIncidentToolingPath(path) {
+  return (
+    WINDOWS_INCIDENT_TOOLING_PATHS.includes(path) ||
+    WINDOWS_INCIDENT_TOOLING_PREFIXES.some((prefix) => path.startsWith(prefix))
+  )
 }
 
 export function scopeToActionOutputs(scope) {
@@ -181,6 +271,12 @@ export function scopeToActionOutputs(scope) {
     windows_heavy: String(scope.windowsHeavy === true),
     linux_heavy: String(scope.linuxHeavy === true),
     macos_rust: String(scope.macosRust === true),
-    js: String(scope.js === true)
+    js: String(scope.js === true),
+    windows_incident_tooling: String(scope.windowsIncidentTooling === true),
+    // Plan 242 S14: the app sentinel runs wherever the macOS Rust job runs,
+    // unless a scope says otherwise.
+    macos_sentinel: String((scope.macosSentinel ?? scope.macosRust) === true),
+    windows_js: String((scope.windowsJs ?? scope.windowsHeavy) === true),
+    windows_installer: String((scope.windowsInstaller ?? scope.windowsHeavy) === true)
   }
 }
