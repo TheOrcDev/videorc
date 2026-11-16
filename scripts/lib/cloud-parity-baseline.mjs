@@ -56,22 +56,25 @@ export async function runBaseline({
   controls = false,
   privacy = false,
   soundboard = false,
-  avatar = false
+  avatar = false,
+  replayRing = false
 }) {
   const report = baselineReport({
     desktop: revision(desktopRoot),
     web: revision(webRoot),
     template: 'v1'
   })
-  report.case = avatar
-    ? 'avatar'
-    : soundboard
-      ? 'soundboard'
-      : privacy
-        ? 'privacy'
-        : controls
-          ? 'controls'
-          : 'baseline'
+  report.case = replayRing
+    ? 'replay-ring'
+    : avatar
+      ? 'avatar'
+      : soundboard
+        ? 'soundboard'
+        : privacy
+          ? 'privacy'
+          : controls
+            ? 'controls'
+            : 'baseline'
   // A dirty web consumer makes its revision misleading. Require a dedicated,
   // installed checkout; inspect it read-only and never change the active one.
   const webDirty = execFileSync('git', ['status', '--porcelain', '--untracked-files=no'], {
@@ -172,7 +175,7 @@ export async function runBaseline({
     pages = await startParityPages(
       webRoot,
       guests,
-      soundboard || avatar
+      soundboard || avatar || replayRing
         ? {
             ...(avatar
               ? {
@@ -216,7 +219,13 @@ export async function runBaseline({
       args: [
         '--autoplay-policy=no-user-gesture-required',
         '--use-fake-ui-for-media-stream',
-        '--use-fake-device-for-media-stream'
+        ...(replayRing
+          ? [
+              '--auto-select-tab-capture-source-by-title=Videorc Replay Ring',
+              '--enable-usermedia-screen-capturing',
+              '--allow-http-screen-capture'
+            ]
+          : ['--use-fake-device-for-media-stream'])
       ]
     })
     const newPage = async (name) => {
@@ -379,6 +388,10 @@ export async function runBaseline({
       path: soundPath
     })
     const sound = await h.rpc('sounds.import', { sourceCapability: auth.capabilityId })
+    if (replayRing) {
+      const { exerciseReplayRing } = await import('./cloud-parity-replay-ring.mjs')
+      await exerciseReplayRing({ h, program, webRoot, output, report, sound })
+    }
     if (soundboard) await exerciseSoundboard({ h, clients, captureAudio, report, sound, guests })
     await h.rpc('sounds.play', { id: sound.id })
     const soundCaptures = await captureAudio('soundboard', clients)

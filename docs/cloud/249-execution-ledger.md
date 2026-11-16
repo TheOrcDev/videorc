@@ -59,8 +59,8 @@ consumer contract must exist before a producer can be enabled.
 | S3 / `soundboard`         | S0, S1                                 | desktop, web | desktop: `feat/249-s2-cloud-parity`; web: `feat/249-s2-cloud-parity`     | Desktop #1440 / web #126; live acceptance not run                                                                                                                  |
 | S4 / `avatar`             | S3                                     | desktop, web | desktop: `feat/249-s3-cloud-parity`; web: `feat/249-s3-cloud-parity`     | Desktop #1441 / web #127; live acceptance not run                                                                                                                  |
 | S5 / `avatar-animation`   | S4                                     | desktop, web | desktop: `feat/249-s4-cloud-parity`; web: `feat/249-s4-cloud-parity`     | Unassigned / not created                                                                                                                                           |
-| S6 / `views`              | S3, S4                                 | desktop, web | desktop: `feat/249-s5-cloud-parity`; web: `feat/249-s5-cloud-parity`     | Unassigned / not created                                                                                                                                           |
-| S7a / `microphone-bridge` | S1, S3                                 | desktop      | desktop: `feat/249-s6-cloud-parity`                                      | Unassigned / not created                                                                                                                                           |
+| S6 / `views`              | S3, S4                                 | desktop, web | Both: `feat/249-s16-cloud-parity`                                        | Owner restacks onto S16 and completes guest graphics                                                                                                               |
+| S7a / `microphone-bridge` | S1, S3                                 | desktop      | `feat/249-s3-cloud-parity`                                               | Desktop [#1444](https://github.com/TheOrcDev/videorc/pull/1444); acceptance not run                                                                                |
 | S7b / `microphone`        | S7a                                    | desktop      | desktop: `feat/249-s7a-cloud-parity`                                     | Unassigned / not created                                                                                                                                           |
 | S8 / `audio-routing`      | S2, S3, S7a, S7b                       | desktop, web | desktop: `feat/249-s7b-cloud-parity`; web: `feat/249-s6-cloud-parity`    | Unassigned / not created                                                                                                                                           |
 | S9 / `graphics`           | S4, S6                                 | desktop, web | desktop: `feat/249-s8-cloud-parity`; web: `feat/249-s8-cloud-parity`     | Unassigned / not created                                                                                                                                           |
@@ -75,8 +75,8 @@ consumer contract must exist before a producer can be enabled.
 | S17 / `outputs`           | S9, S12, S16                           | desktop, web | desktop: `feat/249-s16-cloud-parity`; web: `feat/249-s16-cloud-parity`   | Unassigned / not created                                                                                                                                           |
 | S18 / `services`          | S1, S16                                | desktop      | desktop: `feat/249-s17-cloud-parity`                                     | Unassigned / not created                                                                                                                                           |
 | S19 / `markers`           | S1, S15                                | desktop      | desktop: `feat/249-s18-cloud-parity`                                     | Unassigned / not created                                                                                                                                           |
-| S20 / `library`           | S1, S16                                | desktop, web | Desktop and web: `feat/249-s16-cloud-parity`                             | Integrated; coordinator commits/PRs pending; live acceptance not run                                                                                               |
-| S21a / `replay-ring`      | S20                                    | web          | web: `feat/249-s20-cloud-parity`                                         | Unassigned / not created                                                                                                                                           |
+| S20 / `library`           | S1, S16                                | desktop, web | Both: `feat/249-s16-cloud-parity`                                        | Desktop [#1443](https://github.com/TheOrcDev/videorc/pull/1443), web [#129](https://github.com/TheOrcDev/videorc-web/pull/129); acceptance not run                 |
+| S21a / `replay-ring`      | S20                                    | desktop, web | Both: `feat/249-s20-cloud-parity`                                        | No dedicated issue; paired diffs ready for coordinator; acceptance not run                                                                                         |
 | S21b / `clips`            | S19, S21a                              | desktop, web | desktop: `feat/249-s20-cloud-parity`; web: `feat/249-s21a-cloud-parity`  | Unassigned / not created                                                                                                                                           |
 | S21c / `archive`          | S20, S21a                              | desktop      | desktop: `feat/249-s21b-cloud-parity`                                    | Unassigned / not created                                                                                                                                           |
 | S22 / `iso`               | S7a, S7b, S20                          | desktop, web | desktop: `feat/249-s21c-cloud-parity`; web: `feat/249-s21b-cloud-parity` | Unassigned / not created                                                                                                                                           |
@@ -104,7 +104,7 @@ Parallel ownership (isolated branches; coordinator reconciles dependencies):
 - S7a bounded PCM: `S6z:P60l3:G67rq`.
 - S16 provider lifecycle: `S6z:P60l3:G6ltc`.
 - S18 chat/Sidekick: `S6z:P60l3:G1q9i` (shares canonical S16 interval dependency).
-- S20 recording/Library and central ledger: `S6z:P60l3:G55dg`.
+- S20 recording/Library (published), S21a ring and central ledger: `S6z:P60l3:G55dg`.
 
 S4 is published as desktop [#1441](https://github.com/TheOrcDev/videorc/pull/1441)
 (`6a142e936`) and web [#127](https://github.com/TheOrcDev/videorc-web/pull/127)
@@ -340,3 +340,33 @@ user instruction; the Rust adapter tests are maintained but unexecuted.
 - Downloaded local files retain `cloud-recording` provenance and use existing Play/export/Clean cut/noise cleanup paths. Existing opt-in, entitlements and consent remain enforced.
 - Maintained `library` acceptance uses isolated app/HTTPS fixtures and full artifact analyzer; **not run**. Rust compilation, actual migrations, crash/media/device/live provider validation, full suites and build gates are deferred per user.
 - All production parity qualification flags remain false. S16 source integration is complete with focused fixture evidence; runtime/live acceptance remains not run.
+
+## S21a paired checkpoint
+
+- S20 published desktop [#1443](https://github.com/TheOrcDev/videorc/pull/1443)
+  at `d3f6a6dcb92c6fa17c166806a64ed1536d44416c` and web
+  [#129](https://github.com/TheOrcDev/videorc-web/pull/129) at
+  `3c72571af05ab374dca752a4616278d85043e26a`. S7a published desktop
+  [#1444](https://github.com/TheOrcDev/videorc/pull/1444) at
+  `58c3ab5cd9a80d8122fbfe5555371bb8b9fd6189`, based on S3. All live acceptance not run.
+- Fresh isolated desktop `/Users/orcdev/projects/videorc-wt-249-s21a` and web
+  `/Users/orcdev/projects/videorcweb-wt-249-s21a`, both branch
+  `feat/249-s21a-cloud-parity`, based on those exact S20 tips. PR bases are
+  `feat/249-s20-cloud-parity`. Shared checkouts and published branches preserved.
+- No dedicated S21a issue/PR found in either repository; null mappings remain
+  deliberate. No forge objects, commits or pushes created by this agent.
+- Implemented bounded ring, strict local growing-HLS acquisition, typed canonical
+  identity projection and owner-session boundary. No migration/provider code or
+  historical timestamps changed. Never deletes source recording objects.
+- Desktop adds the maintained real-program tab + final mixed audio capture,
+  before-finalization ingestion, authorized window reconstruction, decoded
+  pixels/tones/keyframes/packet clocks and strict existing artifact analyzer.
+  This is runnable source, **not-run acceptance**, not measured capability.
+- Managed adapter remains explicitly unimplemented/unavailable. Egress/recording
+  prerequisites, clock uncertainty and provider cost remain unmeasured; production
+  disabled with no environment override, implicit recording start or paid call.
+- Parallel ownership: S6 restacks onto S16 and completes guest graphics; S5 fixes
+  monitor animation/status; S9/S10 wait S6; S18 closes pending-command durability.
+  Independent YouTube emotes thread `G4z27` and its checkout were not touched.
+- Full limits/contracts, paths, PR bodies and deferred commands:
+  `docs/cloud/249-s21a-handoff.md` in each repo. All 32 slices remain commissioned.
