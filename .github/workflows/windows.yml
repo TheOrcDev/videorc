@@ -58,7 +58,7 @@ jobs:
     runs-on: windows-latest
     # Recent green-step runs: 19-27 min (+~5 min for the separate recovery
     # test package). 45 keeps margin without an hour-long hang.
-    timeout-minutes: 45
+    timeout-minutes: 35
     steps:
       - name: Check out repository
         uses: actions/checkout@v4

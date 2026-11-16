@@ -137,7 +137,7 @@ jobs:
     needs: scope
     if: ${{ needs.scope.result == 'success' && needs.scope.outputs.macos_sentinel == 'true' }}
     runs-on: macos-15
-    timeout-minutes: 30
+    timeout-minutes: 20
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -223,7 +223,7 @@ jobs:
     needs: scope
     if: ${{ needs.scope.result == 'success' && needs.scope.outputs.js == 'true' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 5
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -260,7 +260,7 @@ jobs:
     needs: scope
     if: ${{ needs.scope.result == 'success' && needs.scope.outputs.js == 'true' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 5
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -291,7 +291,7 @@ jobs:
     needs: scope
     if: ${{ needs.scope.result == 'success' && needs.scope.outputs.js == 'true' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 5
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -322,7 +322,7 @@ jobs:
     needs: scope
     if: ${{ needs.scope.result == 'success' && needs.scope.outputs.js == 'true' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 5
     strategy:
       fail-fast: false
       matrix:
@@ -371,7 +371,7 @@ jobs:
     needs: [scope, js-checks, js-build, js-node, js-vitest]
     if: ${{ always() && needs.scope.result == 'success' && needs.scope.outputs.js == 'true' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 5
     steps:
       - name: Require every JS gate job
         env:

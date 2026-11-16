@@ -23,8 +23,10 @@ jobs:
     name: Windows release Rust gates
     if: ${{ inputs.rust }}
     runs-on: windows-latest
-    # A 75-minute source run timed out during auditor install after completing 25x/3x checks.
-    timeout-minutes: 120
+    # Plan 242 S21: PR #1406 measured 54.5 min with a cold cache (test compile
+    # 9.4 min at the CI-only profile, ownership loop 25 min, full suite x3
+    # 13 min). The budget fails a run that slows down instead of hiding it.
+    timeout-minutes: 80
     steps:
       - name: Check out repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
@@ -227,7 +229,7 @@ jobs:
   js:
     name: Windows release JS gates
     runs-on: windows-latest
-    timeout-minutes: 45
+    timeout-minutes: 10
     steps:
       - name: Check out repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
@@ -273,7 +275,7 @@ jobs:
     # semantics) in three shards split by recorded time.
     name: Windows desktop tests (${{ matrix.shard }}/3)
     runs-on: windows-latest
-    timeout-minutes: 30
+    timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:
@@ -321,7 +323,7 @@ jobs:
     needs: [rust, js, js-vitest]
     if: ${{ always() }}
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 5
     steps:
       - name: Require every Windows gate job
         env:
