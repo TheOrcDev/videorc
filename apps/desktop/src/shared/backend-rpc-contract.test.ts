@@ -4236,6 +4236,52 @@ describe('Stream watchdog wire contract (plan 223)', () => {
     })
   })
 
+  // Plan 243 C5: the device on air and why a stop was no end, both optional
+  // and strict; the two renderer-only RPCs answer `{ ok: true }`.
+  it('carries the device on air and the hand-off stop on cloud.state (plan 243)', () => {
+    const base = {
+      phase: 'hold',
+      entitled: true,
+      settings: { enabled: true, holdMaxSeconds: 1800, holdMaxChoices: [300, 900, 1800, 3600] },
+      connected: true,
+      directFallbackAvailable: false
+    }
+    const onAir = {
+      name: 'iPhone',
+      kind: 'phone',
+      source: 'camera',
+      waiting: false,
+      thisDevice: false,
+      since: '2026-11-16T20:01:02.000Z'
+    }
+    for (const status of [
+      base,
+      { ...base, onAir },
+      { ...base, onAir: { ...onAir, name: undefined, kind: 'computer', source: 'feed' } },
+      { ...base, onAir: { ...onAir, waiting: true, thisDevice: true }, stoppedBy: 'hand-off' },
+      { ...base, stoppedBy: 'taken-over' }
+    ]) {
+      const parsed = JSON.parse(JSON.stringify(status)) as object
+      expect(validateBackendEventPayload('cloud.state', parsed)).toEqual(parsed)
+    }
+    for (const bad of [
+      { ...base, onAir: null },
+      { ...base, onAir: { ...onAir, deviceId: 'Ab3' } },
+      { ...base, onAir: { ...onAir, kind: 'tablet' } },
+      { ...base, onAir: { ...onAir, source: 'screen' } },
+      { ...base, onAir: { ...onAir, name: '' } },
+      { ...base, stoppedBy: 'ended' },
+      { ...base, stoppedBy: null }
+    ]) {
+      expect(() => validateBackendEventPayload('cloud.state', bad)).toThrow()
+    }
+    for (const method of ['cloud.show.handOff', 'cloud.show.check'] as const) {
+      expect(validateBackendRpcParams(method, undefined)).toBeUndefined()
+      expect(validateBackendRpcResult(method, { ok: true })).toEqual({ ok: true })
+      expect(() => validateBackendRpcResult(method, { ok: false })).toThrow()
+    }
+  })
+
   it('carries the runner program block on cloud.state, every field optional', () => {
     const base = validateBackendEventPayload('cloud.state', {
       phase: 'live',

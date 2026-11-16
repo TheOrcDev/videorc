@@ -5558,6 +5558,25 @@ export interface CloudShowSummary {
   kind?: 'solo' | 'talk' | 'test'
 }
 
+/**
+ * Plan 243: the one device viewers get, as this computer sees it. Device ids
+ * never reach the renderer; `thisDevice` says whether it is this computer.
+ */
+export interface CloudOnAir {
+  /** The device's own name ("MacBook Pro", "iPhone"); absent from an old desktop. */
+  name?: string
+  kind: 'computer' | 'phone' | 'browser'
+  /** A computer's feed (solo), a browser's camera (solo), or the talk host seat. */
+  source: 'feed' | 'camera' | 'host'
+  /** Nobody is on air after a hand-off, and the hold runs. */
+  waiting: boolean
+  thisDevice: boolean
+  since: string
+}
+
+/** Plan 243 D7: why this computer stopped feeding without ending the show. */
+export type CloudStoppedBy = 'hand-off' | 'taken-over'
+
 export interface CloudHoldStatus {
   active: boolean
   since?: string
@@ -5624,6 +5643,13 @@ export interface CloudStatus {
   room?: CloudRoomStatus
   /** Plan 224 D10: the cloud recording, on a talk show. */
   recording?: CloudRecordingStatus
+  /** Plan 243: the device on air, on a managed show. */
+  onAir?: CloudOnAir
+  /**
+   * Plan 243 D7: set on the status sent before this computer's session stops
+   * for a hand-off or a take-over, so no broadcast is completed for it.
+   */
+  stoppedBy?: CloudStoppedBy
 }
 
 // --- Talk shows (plan 224) ---------------------------------------------------
