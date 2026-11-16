@@ -1085,6 +1085,9 @@ pub(crate) fn cloud_refusal(code: &str) -> anyhow::Error {
             "cloud-handoff-unsupported" => "This show cannot continue on another device.",
             "cloud-source-not-ready" => "This computer is not sending to the show yet. Try again.",
             "cloud-not-on-air" => "This computer is not on air.",
+            "cloud-show-live-elsewhere" => {
+                "Your show is live on another device. Use Continue here, or end it first."
+            }
             _ => "There is no Videorc Cloud show to resume.",
         }
         .into(),
@@ -1116,6 +1119,7 @@ pub(crate) fn continuation_error_code(error: &anyhow::Error) -> Option<&'static 
         "cloud-handoff-unsupported",
         "cloud-source-not-ready",
         "cloud-not-on-air",
+        "cloud-show-live-elsewhere",
         "cloud-nothing-to-resume",
     ]
     .into_iter()
@@ -1782,6 +1786,7 @@ pub struct CloudShowRuntime {
     pub(crate) claiming_air: bool,
     // The foreign talk claim already given its duplicate-join grace window.
     talk_claim_seen: Option<(String, String)>,
+    created_this_run: std::collections::HashSet<String>,
     last_discovery: Option<tokio::time::Instant>,
     pub(crate) show: Option<ActiveShow>,
     pub(crate) runner: Option<RunnerState>,
@@ -2166,6 +2171,15 @@ impl CloudShowRuntime {
             .and_then(|runner| runner.on_air.as_ref())
             .and_then(|air| air.device_id.as_deref())
             .is_some_and(|id| id != self.device.id)
+    }
+
+    pub(crate) fn live_elsewhere(&self) -> bool {
+        self.air_names_another_device()
+            && self
+                .runner
+                .as_ref()
+                .and_then(|runner| runner.on_air.as_ref())
+                .is_some_and(|air| !air.waiting)
     }
 
     pub fn feeding_session(&self) -> Option<String> {
@@ -3841,6 +3855,9 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
                 }
             }
         }
+        if lock(&self.slot).live_elsewhere() {
+            return Err(cloud_refusal("cloud-show-live-elsewhere"));
+        }
         let needs_feed = resumable.is_some() || decision == GoLiveDecision::Cloud;
         let hold_image_png_base64 = if needs_feed { feed_setup.await? } else { None };
         if decision != GoLiveDecision::Cloud
@@ -4017,6 +4034,7 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
             };
         {
             let mut runtime = lock(&self.slot);
+            runtime.created_this_run.insert(show_id.clone());
             runtime.show = Some(ActiveShow {
                 record: created.show.clone(),
                 control: created.control.clone(),
@@ -4162,6 +4180,23 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
         let frame = self.destination_frame(destinations_set_frame(&id, destinations, true));
         if let Err(problem) = tx.intent(frame, id, ACK_TIMEOUT).await {
             lock(&self.slot).destinations_generation.stop();
+            if !lock(&self.slot).created_this_run.contains(show_id) {
+                let mut runtime = lock(&self.slot);
+                if let Some(show) = runtime
+                    .show
+                    .as_mut()
+                    .filter(|show| show.record.id == show_id)
+                {
+                    show.session_id = None;
+                    show.resuming = false;
+                    show.destinations.clear();
+                }
+                drop(runtime);
+                self.hooks.emit_from(&self.slot);
+                bail!(
+                    "Videorc Cloud did not take the destinations. Use Continue here to keep the live show."
+                );
+            }
             let end_id = new_intent_id();
             let _ = tx
                 .intent(intent_frame(&end_id, "show.end"), end_id, END_ACK_TIMEOUT)
@@ -4295,6 +4330,26 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
                 show.ingest.clone(),
             )
         };
+        if destinations.is_some() {
+            let runtime = lock(&self.slot);
+            let elsewhere = match current
+                .as_ref()
+                .ok()
+                .and_then(|current| current.on_air.as_ref())
+            {
+                Some(air) => {
+                    !air.waiting
+                        && air
+                            .device_id
+                            .as_deref()
+                            .is_some_and(|id| id != runtime.device.id)
+                }
+                None => runtime.live_elsewhere(),
+            };
+            if elsewhere {
+                return Err(cloud_refusal("cloud-show-live-elsewhere"));
+            }
+        }
         // Plan 234: a show on a control transport this build does not know
         // is neither gone nor lost. The resume fails before anything is
         // asked or reported, and the show stays held.
@@ -12208,6 +12263,93 @@ mod tests {
             assert!(lock(&harness.context.slot).status().show.unwrap().resumable);
             assert!(harness.context.web.end_calls.lock().unwrap().is_empty());
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn r2_a_m6_go_live_never_claims_a_show_live_elsewhere() {
+        let harness = harness(true);
+        hold_unconnected_for_review(&harness, false);
+        lock(&harness.context.slot).runner = Some(serde_json::from_value(json!({"onAir":{"deviceId":"BBBBBBBBBBBBBBBBBBBBBB","name":"Private phone","kind":"phone","source":"camera","waiting":false}})).unwrap());
+        let error = harness
+            .context
+            .prepare_session(
+                "new-live",
+                Some("bearer".into()),
+                managed_outputs(),
+                destinations(),
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(
+            continuation_error_code(&error),
+            Some("cloud-show-live-elsewhere")
+        );
+        assert_eq!(
+            error.to_string(),
+            "Your show is live on another device. Use Continue here, or end it first."
+        );
+        assert!(harness.context.web.on_air_calls.lock().unwrap().is_empty());
+        assert!(harness.context.web.destination_bodies().is_empty());
+        assert!(harness.context.web.end_calls.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn r2_a_m6_failed_handover_never_ends_an_adopted_show() {
+        let harness = harness(true);
+        hold_unconnected_for_review(&harness, false);
+        harness
+            .context
+            .web
+            .set_state(managed_state("live", live_legs()));
+        harness
+            .context
+            .web
+            .managed
+            .lock()
+            .unwrap()
+            .destinations_answers
+            .push_back(Err(DestinationsFailure {
+                error: web_error(422, "invalid-destinations"),
+                refused: Vec::new(),
+            }));
+        assert!(
+            harness
+                .context
+                .resume_into_session("new-live", "bearer", "sh_abc", Some(destinations()), None)
+                .await
+                .is_err()
+        );
+        assert!(harness.context.web.end_calls.lock().unwrap().is_empty());
+        assert!(lock(&harness.context.slot).status().show.unwrap().resumable);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn r2_a_m6_talk_go_live_also_refuses_a_show_live_elsewhere() {
+        let harness = harness(true);
+        managed_room(&harness).await;
+        let mut state = managed_talk_state(live_legs(), true, 1);
+        state["onAir"] = json!({"deviceId":"BBBBBBBBBBBBBBBBBBBBBB","kind":"phone","source":"host","waiting":false});
+        harness.context.web.set_state(state);
+        wait_until(|| {
+            lock(&harness.context.slot)
+                .status()
+                .on_air
+                .is_some_and(|air| !air.this_device)
+        })
+        .await;
+        let error = harness
+            .context
+            .talk_go_live(Some("bearer".into()), destinations(), Vec::new())
+            .await
+            .err()
+            .expect("Go Live must refuse elsewhere");
+        assert_eq!(
+            continuation_error_code(&error),
+            Some("cloud-show-live-elsewhere")
+        );
+        assert!(harness.context.web.destination_bodies().is_empty());
+        assert!(harness.context.web.end_calls.lock().unwrap().is_empty());
     }
     fn hold_unconnected_for_review(harness: &Harness, talk: bool) {
         let created = if talk {

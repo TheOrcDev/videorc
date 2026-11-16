@@ -1950,6 +1950,11 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
         destinations: Vec<HandoverDestination>,
         platforms: Vec<String>,
     ) -> Result<CloudStatus> {
+        if lock(&self.slot).live_elsewhere() {
+            return Err(crate::cloud_show::cloud_refusal(
+                "cloud-show-live-elsewhere",
+            ));
+        }
         let deadline = self.room_rpc_deadline();
         let bearer = bearer_or_bail(bearer)?;
         let show_id = self.open_room_show_id()?;
