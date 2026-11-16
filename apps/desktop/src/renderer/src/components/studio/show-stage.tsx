@@ -14,6 +14,7 @@ import { GroupedList, ListRow } from '@/components/list-row'
 import { MediaCard } from '@/components/media-card'
 import { Gallery } from '@/components/page'
 import { PanelSection } from '@/components/panel-section'
+import { CameraOffAvatar } from '@/components/studio/camera-off-avatar'
 import { PREVIEW_REPLACED_BY_SHOW_STAGE } from '@/components/preview-stage'
 import { StatusDot } from '@/components/status-dot'
 import { Alert, AlertAction, AlertTitle } from '@/components/ui/alert'
@@ -54,6 +55,7 @@ import type { TalkShowContextValue } from '@/lib/talk-show-context'
 import type { TalkShowPerson } from '@/lib/talk-show-room'
 import { managedProgramStageInput, programMonitorView } from '@/lib/talk-show-managed'
 import { PROGRAM_MONITOR_EMPTY } from '@/lib/talk-show-session'
+import { cameraOffLook, cameraPicture, showsAway } from '@/lib/talk-show-tile'
 import {
   planStage,
   showStageInput,
@@ -162,7 +164,11 @@ function StageWell({ talkShow }: { talkShow: TalkShowContextValue }): ReactEleme
   )
 }
 
-/** The track a tile shows: the host's own media, or a guest's from the room. */
+/**
+ * The track a tile shows: the host's own media, or a guest's from the room.
+ * A camera that is off shows no frame (wire contract 5.5): the tile draws
+ * the camera-off look instead.
+ */
 function tileTrack(
   tile: StageTile,
   talkShow: TalkShowContextValue
@@ -172,7 +178,7 @@ function tileTrack(
     const local = talkShow.room.local
     return tile.kind === 'screen'
       ? { track: local.screen, cameraOff: false, name: 'Your screen' }
-      : { track: local.cameraOff ? null : local.camera, cameraOff: local.cameraOff, name: 'You' }
+      : { ...cameraPicture(local.camera, local.cameraOff), name: 'You' }
   }
   const person: TalkShowPerson | undefined = talkShow.room.people.find(
     (entry) => entry.identity === tile.identity
@@ -184,11 +190,7 @@ function tileTrack(
       name: `${person?.name ?? ''}'s screen`
     }
   }
-  return {
-    track: person?.cameraOff ? null : (person?.video ?? null),
-    cameraOff: Boolean(person?.cameraOff),
-    name: person?.name ?? ''
-  }
+  return { ...cameraPicture(person?.video, person?.cameraOff), name: person?.name ?? '' }
 }
 
 function StageTileView({
@@ -205,6 +207,7 @@ function StageTileView({
 }): ReactElement {
   const { track, cameraOff, name } = tileTrack(tile, talkShow)
   const label = monitor ? '' : name || participant?.name || ''
+  const look = cameraOffLook(tile.rect.w, tile.rect.h)
   return (
     <div
       className="absolute overflow-hidden bg-inset"
@@ -217,16 +220,19 @@ function StageTileView({
         className={tile.kind === 'screen' ? 'object-contain' : 'object-cover'}
         track={track}
       />
-      {!track && !monitor ? (
+      {cameraOff ? (
+        // The camera-off look, as viewers see it: the circle and the letter.
+        <CameraOffAvatar
+          circle={cqw(look.diameter)}
+          letter={cqw(look.fontPx)}
+          name={name === 'You' ? (participant?.name ?? name) : name || (participant?.name ?? '')}
+        />
+      ) : !track && !monitor ? (
         <span className="absolute inset-0 flex items-center justify-center text-sm text-video-ground-muted">
-          {cameraOff
-            ? 'Camera off'
-            : tile.kind === 'screen'
-              ? 'Waiting for the screen'
-              : 'No picture yet'}
+          {tile.kind === 'screen' ? 'Waiting for the screen' : 'No picture yet'}
         </span>
       ) : null}
-      {participant?.away && tile.kind === 'person' ? (
+      {showsAway(participant?.away, cameraOff) && tile.kind === 'person' ? (
         <span className="absolute inset-0 flex items-center justify-center bg-video-ground/60 text-sm font-medium text-video-ground-foreground">
           {monitor ? null : 'Back in a moment'}
         </span>
@@ -621,7 +627,9 @@ function StripRow({
 }): ReactElement {
   const local = talkShow.room.local
   const remote = talkShow.room.people.find((entry) => entry.identity === person.identity)
-  const thumbnail = person.host ? (local.cameraOff ? null : local.camera) : (remote?.video ?? null)
+  const thumbnail = person.host
+    ? cameraPicture(local.camera, local.cameraOff)
+    : cameraPicture(remote?.video, remote?.cameraOff)
   const muted = person.host ? local.micMuted : person.muted || Boolean(remote?.micMuted)
   const speaking = !muted && Boolean(remote?.speaking)
   const quality = qualityStatus(person.quality)
@@ -664,7 +672,10 @@ function StripRow({
       data-testid="show-stage-strip-row"
       leading={
         <span className="relative flex h-5 w-9 shrink-0 overflow-hidden rounded-chip bg-video-ground">
-          <TrackVideo className="object-cover" track={thumbnail} />
+          <TrackVideo className="object-cover" track={thumbnail.track} />
+          {thumbnail.cameraOff ? (
+            <CameraOffAvatar circle="14px" letter="9px" name={person.name} />
+          ) : null}
         </span>
       }
       statusIcons={
