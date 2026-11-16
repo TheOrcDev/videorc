@@ -84,6 +84,9 @@ export function hasBuddyReport(session: Pick<SessionSummary, 'mode'>): boolean {
 /** "tee" is the internal ffmpeg fan-out container for record+stream sessions —
  * show the user what the file actually is instead (F-019). */
 export function sessionFormatLabel(session: SessionSummary): string | null {
+  if (session.mode === 'cloud-stream') {
+    return session.streamPreset ? `Cloud show · ${session.streamPreset}` : 'Cloud show'
+  }
   if (session.mp4Path) {
     return 'MP4'
   }

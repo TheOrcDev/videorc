@@ -1593,7 +1593,22 @@ function useSessionMenu({
   ]
 
   return {
-    items: sessionMenu,
+    items:
+      session.mode === 'cloud-stream'
+        ? sessionMenu.filter(
+            (item) =>
+              ![
+                'play',
+                'reveal',
+                'export-mp4',
+                'duplicate',
+                'check',
+                'repair',
+                'restore',
+                'noise-cleanup'
+              ].includes(item.id)
+          )
+        : sessionMenu,
     busy,
     disconnected,
     cleanupView,

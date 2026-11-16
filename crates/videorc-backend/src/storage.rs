@@ -1982,6 +1982,92 @@ impl Database {
         Ok(())
     }
 
+    /// A cloud show owns chat and a Library row, but never a local file.
+    /// Idempotent across Go Live, status polling and resuming the same show.
+    pub(crate) fn sync_cloud_show_session(
+        &self,
+        status: &crate::cloud_show::CloudStatus,
+    ) -> Result<()> {
+        let active = status
+            .show
+            .as_ref()
+            .zip(status.room.as_ref())
+            .filter(|(_, room)| room.live && room.phase == crate::cloud_talk::CloudRoomPhase::Open);
+        let now = Utc::now().to_rfc3339();
+        let mut conn = self.lock()?;
+        let tx = conn.transaction()?;
+        tx.execute(
+            "UPDATE sessions SET status = 'completed', ended_at = ?1,
+             duration_ms = MAX(0, CAST((julianday(?1) - julianday(started_at)) * 86400000 AS INTEGER))
+             WHERE mode = 'cloud-stream' AND status = 'running' AND (?2 IS NULL OR id <> ?2)",
+            params![now, active.map(|(show, _)| show.id.as_str())],
+        )?;
+        if let Some((show, room)) = active {
+            let sources = SourceSelection {
+                screen_id: None,
+                window_id: None,
+                camera_id: None,
+                microphone_id: None,
+                test_pattern: false,
+            };
+            let output = OutputSettings {
+                record_enabled: false,
+                stream_enabled: true,
+                output_directory: None,
+                ffmpeg_path: None,
+                keep_original_mkv: false,
+                separate_source_recordings: None,
+                video: crate::protocol::VideoSettings {
+                    preset: crate::protocol::VideoPreset::StreamSafe1080p30,
+                    width: 1920,
+                    height: 1080,
+                    fps: 30,
+                    bitrate_kbps: 6000,
+                },
+                rtmp: crate::protocol::RtmpSettings {
+                    preset: crate::protocol::RtmpPreset::Custom,
+                    server_url: String::new(),
+                    stream_key: String::new(),
+                },
+            };
+            tx.execute(
+                "INSERT INTO sessions (id, title, started_at, status, mode, stream_preset, sources_json, layout_json, output_json)
+                 VALUES (?1, ?2, ?3, 'running', 'cloud-stream', ?4, ?5, ?6, ?7)
+                 ON CONFLICT(id) DO UPDATE SET status = 'running', ended_at = NULL,
+                 title = excluded.title, stream_preset = excluded.stream_preset
+                 WHERE sessions.mode = 'cloud-stream'",
+                params![show.id, room.title.as_deref().filter(|title| !title.trim().is_empty()).unwrap_or("Talk show"),
+                    room.live_since.as_deref().unwrap_or(&now), room.platforms.join(", "),
+                    serde_json::to_string(&sources)?, serde_json::to_string(&crate::protocol::default_layout_settings())?, session_output_json(&output)?],
+            )?;
+            tx.execute("INSERT INTO session_chat_totals (session_id, totals_json) VALUES (?1, ?2) ON CONFLICT(session_id) DO NOTHING",
+                params![show.id, serde_json::to_string(&SessionChatTotals::empty(&show.id))?])?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn cloud_show_status_for_tests() -> crate::cloud_show::CloudStatus {
+        let mut status = crate::cloud_show::CloudShowRuntime::default().status();
+        status.show = Some(
+            serde_json::from_value(serde_json::json!({
+                "id": "sh_cloud_chat", "nodeId": "web", "resumable": false, "kind": "talk"
+            }))
+            .unwrap(),
+        );
+        status.room = Some(
+            serde_json::from_value(serde_json::json!({
+                "phase": "open", "doorOpen": false, "title": "Cloud Q&A", "platforms": ["youtube"],
+                "declinedCount": 0, "stage": { "layout": "solo", "onStage": [] },
+                "hostAway": false, "connected": true, "client": "idle", "returnEnabled": false,
+                "stageSet": false, "live": true, "liveSince": "2026-11-16T12:00:00Z"
+            }))
+            .unwrap(),
+        );
+        status
+    }
+
     /// Hides a benchmark session from every Library read (`library_hidden`)
     /// and tags it so leftovers from a crash can be swept at the next check.
     pub fn mark_session_performance_check(&self, session_id: &str) -> Result<()> {
@@ -19116,5 +19202,33 @@ mod tests {
         let incomplete = database.incomplete_repair_jobs().unwrap();
         assert_eq!(incomplete.len(), 1);
         assert_eq!(incomplete[0].id, "job-running");
+    }
+}
+
+#[cfg(test)]
+mod cloud_show_session_tests {
+    use super::*;
+
+    #[test]
+    fn cloud_show_row_is_idempotent_and_closes_without_a_local_file() {
+        let db = Database::open_in_memory_for_tests();
+        let mut status = Database::cloud_show_status_for_tests();
+        db.sync_cloud_show_session(&status).unwrap();
+        db.sync_cloud_show_session(&status).unwrap();
+        let rows = db.list_sessions(10).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].title, "Cloud Q&A");
+        assert_eq!(rows[0].mode, "cloud-stream");
+        assert!(rows[0].output_path.is_none());
+        assert!(rows[0].mp4_path.is_none());
+        status.room.as_mut().unwrap().live = false;
+        db.sync_cloud_show_session(&status).unwrap();
+        let rows = db.list_sessions(10).unwrap();
+        assert_eq!(rows[0].status, "completed");
+        assert!(rows[0].ended_at.is_some());
+        assert!(rows[0].duration_ms.is_some_and(|ms| ms >= 0));
+        status.room.as_mut().unwrap().live = true;
+        db.sync_cloud_show_session(&status).unwrap();
+        assert_eq!(db.list_sessions(10).unwrap().len(), 1);
     }
 }
