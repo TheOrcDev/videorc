@@ -75,7 +75,7 @@ fn host_shaped_labels(alert: &WatchdogAlert) -> Vec<String> {
 /// The web's bare-host rule (`lib/alerts/push.ts`): dotted labels with a
 /// letter-only last part of two or more characters, an IPv4 address, or
 /// a port suffix. "Twitch (main)" and "My server" are not hosts.
-fn looks_like_host(label: &str) -> bool {
+pub(crate) fn looks_like_host(label: &str) -> bool {
     let lower = label.trim().to_ascii_lowercase();
     if lower.contains("://")
         || lower.contains("rtmp:")
@@ -101,7 +101,7 @@ fn looks_like_host(label: &str) -> bool {
 }
 
 /// The platform's name for a push, from the alert's platform id.
-fn platform_name(platform: Option<&str>) -> &'static str {
+pub(crate) fn platform_name(platform: Option<&str>) -> &'static str {
     match platform {
         Some("youtube") => "YouTube",
         Some("twitch") => "Twitch",

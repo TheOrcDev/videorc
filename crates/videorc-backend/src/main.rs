@@ -101,6 +101,7 @@ mod live_pipeline;
 mod live_render;
 mod live_scene;
 mod live_source_switch;
+mod live_status;
 mod marker_voice;
 mod metal_compositor;
 mod metrics_journal;
