@@ -1195,7 +1195,11 @@ overlays are cleared before releasing the host connection; no room close is
 sent. The marker stays until a new session starts or a new show is held.
 
 C3 / W1, W2 (D1, D7): a managed state naming another device while this
-computer feeds or hosts triggers the same local stop with `taken-over`.
+computer feeds triggers the same local stop with `taken-over`. Talk keeps
+its host seat on `onAir` alone: `host/go` precedes the new host joining,
+which can fail. Only the renderer's confirmed duplicate-identity report
+(`disconnected`, detail `Your show continues on another device.`) releases
+the old desktop's talk state through that continuation stop.
 It sends neither `/hand-off` nor `/end`. Destination recovery is invalidated
 and feed notices are suppressed after takeover. Old-feed failures wait three
 seconds for the corresponding state poll, covering ingress rotation arriving

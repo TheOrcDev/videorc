@@ -397,6 +397,10 @@ pub enum CloudGuestDevice {
     Computer,
 }
 
+/// Plan 243 C5: sent only after DUPLICATE_IDENTITY and onAir confirmation.
+/// Keep in step with the renderer's talk-show-room.ts (never a device name).
+pub(crate) const TAKEN_OVER_DETAIL: &str = "Your show continues on another device.";
+
 /// The renderer's own room connection, as it reports it
 /// (`cloud.room.client.report`): the Studio's copy and the watchdog read it.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -2100,16 +2104,48 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
     /// The renderer's own room connection, for the status (and the watchdog).
     pub fn report_client(&self, params: RoomClientReportParams) -> CloudStatus {
         let connected = params.state == CloudRoomClientState::Connected;
-        {
+        let taken_over = {
             let mut runtime = lock(&self.slot);
+            // host/go is before the new host joins. Only the renderer's
+            // confirmed duplicate-host report may release our own seat.
+            let taken_over = (params.state == CloudRoomClientState::Disconnected
+                && params.detail.as_deref() == Some(TAKEN_OVER_DETAIL)
+                && runtime.talk.is_some()
+                && runtime
+                    .runner
+                    .as_ref()
+                    .and_then(|r| r.on_air.as_ref())
+                    .is_some_and(|air| {
+                        !air.waiting
+                            && air
+                                .device_id
+                                .as_deref()
+                                .is_some_and(|id| id != runtime.device.id)
+                    }))
+            .then(|| runtime.show.as_ref().map(|show| show.record.id.clone()))
+            .flatten();
+            if taken_over.is_some() {
+                runtime.stopped_by = Some(crate::cloud_show::CloudStoppedBy::TakenOver);
+                runtime.destinations_generation.stop();
+                runtime.failed = None;
+            }
             if let Some(talk) = runtime.talk.as_mut() {
                 talk.client = params.state;
                 talk.message = params.detail.filter(|detail| {
                     !detail.trim().is_empty() && !detail.contains("DUPLICATE_IDENTITY")
                 });
             }
-        }
+            taken_over
+        };
         self.hooks.emit_from(&self.slot);
+        if let Some(show_id) = taken_over {
+            let context = self.clone();
+            tokio::spawn(async move {
+                let _ = context
+                    .stop_for_continuation(&show_id, crate::cloud_show::CloudStoppedBy::TakenOver)
+                    .await;
+            });
+        }
         // Plan 234 (6.3): a renderer whose room connection just came up
         // sent nothing while it was away; what is up goes again.
         if connected {

@@ -3148,8 +3148,7 @@ impl<W: CloudWebApi, C: ControlConnector> ControlLoop<W, C> {
             let taken_over = !runtime.claiming_air
                 && runtime.stopped_by.is_none()
                 && runtime.show.as_ref().is_some_and(|show| {
-                    show.control.transport_kind() == ControlKind::Web
-                        && (show.session_id.is_some() || runtime.talk.is_some())
+                    show.control.transport_kind() == ControlKind::Web && show.session_id.is_some()
                 })
                 && state
                     .on_air
@@ -11991,7 +11990,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn cloud_taken_over_stops_solo_and_talk_without_ending() {
+    async fn cloud_taken_over_stops_solo_but_talk_waits_for_a_duplicate_host() {
         for talk in [false, true] {
             let harness = harness(true);
             if talk {
@@ -12007,6 +12006,28 @@ mod tests {
             };
             state["onAir"] = json!({"deviceId":"BBBBBBBBBBBBBBBBBBBBBB","name":"iPhone","kind":"phone","source":if talk {"host"} else {"camera"},"since":"now","waiting":false});
             harness.context.web.set_state(state);
+            if talk {
+                wait_until(|| {
+                    lock(&harness.context.slot)
+                        .status()
+                        .on_air
+                        .is_some_and(|air| !air.this_device)
+                })
+                .await;
+                // host/go only announces intent. A failed phone join must
+                // leave this desktop's host connection and room intact.
+                tokio::time::sleep(Duration::from_secs(4)).await;
+                let status = lock(&harness.context.slot).status();
+                assert!(status.room.is_some());
+                assert_eq!(status.stopped_by, None);
+                assert!(!status.show.unwrap().resumable);
+                harness
+                    .context
+                    .report_client(crate::cloud_talk::RoomClientReportParams {
+                        state: crate::cloud_talk::CloudRoomClientState::Disconnected,
+                        detail: Some(crate::cloud_talk::TAKEN_OVER_DETAIL.into()),
+                    });
+            }
             wait_until(|| {
                 lock(&harness.context.slot).status().stopped_by == Some(CloudStoppedBy::TakenOver)
             })
