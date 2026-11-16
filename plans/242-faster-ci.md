@@ -786,4 +786,51 @@ instead of quietly costing more. Lower only, never raise.
 
 ## As built
 
-Empty until the first PR lands. Record each PR's measured minutes here.
+One PR, as the owner asked (D1 b), one commit per slice, on branch
+`plan-242-faster-ci` from `c179d81b5`. All lanes ran on Opus 5.5 in one
+worktree: T3's worktree isolation branches from the parent thread's
+checkout, which was on a weeks-old branch, and the host's swap was nearly
+full. CI numbers come from the PR's own runs (below).
+
+- **S0** `pnpm ci:audit`. Baseline above.
+- **S1** Release reuse requires named steps per job. Proven on 0.28.1
+  (`e180003ef`): main's code reuses job 132925525543, the Ubuntu skip twin;
+  the new code refuses it, and for `linux-rust` reuses the real gates of the
+  parent commit `aa8fc4ab` (D2 a: CI skips Linux gates for that version-only
+  diff).
+- **S2–S4** One cargo launch per stability pass with an exact count; prebuilt
+  cargo-audit; Windows Rust and JS gates in parallel jobs behind the `gates`
+  aggregator. Reuse reads the real jobs.
+- **S5** Incident diagnostics: main pushes, dispatch, and PRs that change
+  their tooling.
+- **S6** Windows CI-only profile, plus a cache fix found on the way: PRs
+  restored a key nothing saved ("No cache found", 548 crates compiled every
+  PR). One key now; main saves it.
+- **S7–S8** Time-balanced vitest shards (4 on Linux, 3 on Windows) with a
+  coverage proof in each aggregator. Locally all 702 files ran exactly once;
+  the local balance (1.30) was skewed by host load 17–23.
+- **S9** Not split yet: decided by the PR's measured shard times.
+- **S10** Measured, not adopted. `isolate: false` with shuffled order ran
+  the suite in 124 s instead of 293 s (collect 104 s vs 667 s), but 37 files
+  (174 tests) failed from shared state: module mocks and globals leaking
+  between files (`session-runtime-recovery`, `talk-show-room` with livekit,
+  `banners`, `user-error`, `toast`, `studio-mic-visual-provider`, and 31 more;
+  99 files use `vi.mock`, 162 touch globals). After S8 the JS gates are not on
+  any critical path, so the leak hunt is its own PR; `isolate` stays true.
+- **S11** oxlint with ESLint's rules: same findings side by side; 2 s vs
+  59 s. Nine `(x?.y as T).z` in tests became `x!.y`.
+- **S12** correctness, suspicious and perf on for nine plugins; 59 rules
+  that fail today are off with counts and reasons.
+- **S13** TypeScript 7.0.2 checks the app (4.5 s vs 36 s locally); 5.9
+  stays for the compiler-API tests. Same errors on planted mistakes.
+- **S14** The macOS sentinel runs in its own job.
+- **S15** `app-ts` kind for pull requests, with the Rust-reads guard.
+- **S16** Not built: needs a merge queue (see the account list).
+- **S18** Blobless clone in the scope job (about 2 s to clone).
+- **S19** Prettier stays: oxfmt 0.78 (4 s vs 94 s locally) disagrees on 11
+  of the 1,878 files in scope (typed arrow callbacks, `;)` in empty `for`
+  updates). Switching changes the house style; Prettier now runs in the
+  parallel checks job, off the critical path.
+- **S20** Pre-push hook: the whole branch as one push took 7.4–9.0 s at load
+  average 35–42; a planted lint error was refused.
+- **S21** After the PR's runs.
