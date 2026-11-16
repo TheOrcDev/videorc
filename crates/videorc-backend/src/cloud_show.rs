@@ -4440,10 +4440,11 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
             if let Some(leg) = if matching.len() == 1 {
                 matching.first().copied()
             } else {
-                matching
-                    .iter()
-                    .find(|leg| leg.label == target.label)
-                    .copied()
+                let by_label: Vec<_> = matching
+                    .into_iter()
+                    .filter(|leg| leg.label == target.label)
+                    .collect();
+                (by_label.len() == 1).then(|| by_label[0])
             } {
                 if leg.broadcast_id.is_some() {
                     target.platform_broadcast_id = leg.broadcast_id.clone();
@@ -11903,7 +11904,21 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn cloud_hand_off_keeps_the_show_even_when_the_post_fails() {
         for fail in [false, true] {
-            let harness = harness(true);
+            let mut harness = harness(true);
+            let slot = harness.context.slot.clone();
+            let emitted = harness.emitted.clone();
+            harness.context.hooks.stop = Arc::new(move || {
+                let slot = slot.clone();
+                let emitted = emitted.clone();
+                Box::pin(async move {
+                    assert_eq!(lock(&slot).stopped_by, Some(CloudStoppedBy::HandOff));
+                    assert_eq!(
+                        emitted.lock().unwrap().last().unwrap().stopped_by,
+                        Some(CloudStoppedBy::HandOff)
+                    );
+                    Ok(())
+                })
+            });
             managed_live_show(&harness).await;
             harness
                 .context
@@ -11993,13 +12008,15 @@ mod tests {
             let mut state = managed_state("starting", live_legs());
             state["onAir"] = json!({"deviceId":"BBBBBBBBBBBBBBBBBBBBBB","name":"iPhone","kind":"phone","source":if camera {"camera"} else {"feed"},"waiting":false,"since":"now"});
             harness.context.web.set_state(state);
+            let mut current = held_current(&created_managed());
+            current.ingest.as_mut().unwrap()[0].stream_key = "stale-current-ingress".into();
             harness
                 .context
                 .web
                 .current
                 .lock()
                 .unwrap()
-                .push_back(Ok(held_current(&created_managed())));
+                .push_back(Ok(current));
             let handover = harness
                 .context
                 .resume_session("session-2", Some("bearer".into()), None)
