@@ -216,8 +216,11 @@ never start a new stream. A phone cannot reconnect a platform.
 ### D4. The platform's video is the record: DECIDED (owner answer 4)
 
 The local recording on the first computer stops and is saved at the
-hand-off. A continuing computer streams only (a Resume session never
-records today). Solo cloud recording stays out of scope.
+hand-off. A continuing computer follows its own "record while streaming"
+setting, exactly as Resume does today (plan 184 C5b): with it on, that
+computer records its part locally. Corrected 2026-11-16 during C6: the plan
+first said a Resume never records, which was wrong. Solo cloud recording
+stays out of scope.
 
 ### D5. The phone is a browser page: DECIDED (owner answer 2)
 
@@ -595,7 +598,7 @@ Stop and ask the owner when:
 - Approval from the previous device; auto take-over.
 - A blurred fill for mismatched pictures (D14).
 - Node-path shows (`media = node`): refused.
-- Solo cloud recording; a recording on the continuing computer.
+- Solo cloud recording; one continuous local recording across devices.
 - Carrying scenes or settings between computers.
 
 ## Only the owner can do
