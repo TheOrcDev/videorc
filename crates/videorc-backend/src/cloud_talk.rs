@@ -2372,6 +2372,7 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
             talk.poll_generation = runtime.generation + 1;
             let generation = talk.poll_generation;
             runtime.talk = Some(talk);
+            runtime.stopped_by = None;
             // The stage the program has (H2): the host and whoever the
             // runner still flags on stage, never the host alone over guests.
             runtime.talk_layout_from_runner();
@@ -2434,7 +2435,6 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
         if let Some(state) = runtime.runner.as_mut() {
             state.on_air = answer.on_air;
         }
-        runtime.stopped_by = None;
         Ok(())
     }
 

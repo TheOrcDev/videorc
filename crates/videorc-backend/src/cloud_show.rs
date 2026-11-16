@@ -12745,6 +12745,26 @@ mod tests {
         assert!(harness.context.web.end_calls.lock().unwrap().is_empty());
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn r2_a_l3_a_metadata_reclaim_cannot_clear_a_continuation_stop() {
+        let harness = harness(true);
+        managed_room(&harness).await;
+        lock(&harness.context.slot).stopped_by = Some(CloudStoppedBy::HandOff);
+        harness
+            .context
+            .claim_talk_host(
+                "bearer",
+                "sh_abc",
+                Some(tokio::time::Instant::now() + Duration::from_secs(20)),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            lock(&harness.context.slot).stopped_by,
+            Some(CloudStoppedBy::HandOff)
+        );
+    }
+
     fn hold_unconnected_for_review(harness: &Harness, talk: bool) {
         let created = if talk {
             created_managed_talk()
