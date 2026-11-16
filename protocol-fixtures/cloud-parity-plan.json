@@ -19,7 +19,7 @@
       "prUrl": "https://github.com/TheOrcDev/videorc/pull/1437",
       "webIssueUrl": null,
       "webPrUrl": null,
-      "implementation": "implemented-review-open",
+      "implementation": "implemented-merged",
       "acceptance": "not-run",
       "intendedBranch": "feat/249-s0-cloud-parity-baseline",
       "intendedPrTitle": "Plan 249 S0: Establish a real-page baseline",
@@ -32,7 +32,8 @@
       },
       "crossRepoNeeds": "Desktop change; use compatible web fixtures read-only and recheck source/capabilities before execution.",
       "releaseGate": "blocked-until-required-acceptance",
-      "commit": "570d72926b0a2679f7816a2e0b531218291ff7a6"
+      "commit": "570d72926b0a2679f7816a2e0b531218291ff7a6",
+      "prStatus": "merged"
     },
     {
       "id": "S1",
@@ -44,7 +45,7 @@
       "prUrl": "https://github.com/TheOrcDev/videorc/pull/1438",
       "webIssueUrl": null,
       "webPrUrl": null,
-      "implementation": "implemented-review-open",
+      "implementation": "implemented-merged",
       "acceptance": "not-run",
       "intendedBranch": "feat/249-s1-cloud-parity",
       "intendedPrTitle": "Plan 249 S1: Make room controls truthful",
@@ -58,7 +59,8 @@
       "crossRepoNeeds": "Reuse open web PR #118 (head af5be462f5d790fd5c808c0acfd4b801382f5e9c) for existing all-program takeover silence. No web checkout modified. Coordinator must integrate/coordinate it; controls acceptance requires its emitted v1 bundle. D3 speech-only mute with opt-in auxiliary sound remains S8. No deployed/live proof.",
       "releaseGate": "blocked-until-required-acceptance",
       "baseCommit": "570d72926b0a2679f7816a2e0b531218291ff7a6",
-      "commit": "0f9790f869a07102560ee864ac91b001fe73f7e4"
+      "commit": "0f9790f869a07102560ee864ac91b001fe73f7e4",
+      "prStatus": "merged"
     },
     {
       "id": "S2",
@@ -70,7 +72,7 @@
       "prUrl": "https://github.com/TheOrcDev/videorc/pull/1439",
       "webIssueUrl": null,
       "webPrUrl": "https://github.com/TheOrcDev/videorc-web/pull/125",
-      "implementation": "implemented-review-open",
+      "implementation": "implemented-merged",
       "acceptance": "not-run",
       "intendedBranch": "feat/249-s2-cloud-parity",
       "intendedPrTitle": "Plan 249 S2: Enforce screen privacy before publish",
@@ -87,7 +89,9 @@
       "baseCommit": "0f9790f869a07102560ee864ac91b001fe73f7e4",
       "webBaseCommit": "8f90dd74944cf08b9ca202e977a2ebf46ee6b16d",
       "commit": "27a8380b496667fc2d12b06fdb356ee48fe571cc",
-      "webCommit": "03b31e8e1c030f0a4fedd8517242f3de8ea06e57"
+      "webCommit": "03b31e8e1c030f0a4fedd8517242f3de8ea06e57",
+      "prStatus": "merged",
+      "webPrStatus": "merged"
     },
     {
       "id": "S3",
@@ -99,7 +103,7 @@
       "prUrl": "https://github.com/TheOrcDev/videorc/pull/1440",
       "webIssueUrl": null,
       "webPrUrl": "https://github.com/TheOrcDev/videorc-web/pull/126",
-      "implementation": "implemented-review-open",
+      "implementation": "implemented-merged",
       "acceptance": "not-run",
       "intendedBranch": "feat/249-s3-cloud-parity",
       "intendedPrTitle": "Plan 249 S3: Publish soundboard auxiliary audio end to end",
@@ -116,7 +120,9 @@
       "baseCommit": "27a8380b496667fc2d12b06fdb356ee48fe571cc",
       "webBaseCommit": "03b31e8e1c030f0a4fedd8517242f3de8ea06e57",
       "commit": "a93168fc46b8edc1b1fc6947562ea54e4c7b2be0",
-      "webCommit": "a68454e065e6e331e863e67b7d801bd69e2d24ee"
+      "webCommit": "a68454e065e6e331e863e67b7d801bd69e2d24ee",
+      "prStatus": "merged",
+      "webPrStatus": "merged"
     },
     {
       "id": "S4",
@@ -128,7 +134,7 @@
       "prUrl": "https://github.com/TheOrcDev/videorc/pull/1441",
       "webIssueUrl": null,
       "webPrUrl": "https://github.com/TheOrcDev/videorc-web/pull/127",
-      "implementation": "implemented-review-open",
+      "implementation": "implemented-merged",
       "acceptance": "not-run",
       "intendedBranch": "feat/249-s4-cloud-parity",
       "intendedPrTitle": "Plan 249 S4: Put the avatar and bubble on the whole program",
@@ -145,7 +151,9 @@
       "parallelCommission": "Coordinator started isolated S2-based work on 2026-11-16; reconcile S3 and declared prerequisites before dependent PR publication. Slice-local handoff owned by the corresponding thread.",
       "owner": "S6z:P60l3:G6oxv",
       "commit": "6a142e9361f2eccb52c85762e3ecf6c4adcdf18c",
-      "webCommit": "9f7082594fcbb2c0c31cae98dc2b71609c08e677"
+      "webCommit": "9f7082594fcbb2c0c31cae98dc2b71609c08e677",
+      "prStatus": "merged",
+      "webPrStatus": "merged"
     },
     {
       "id": "S5",
@@ -154,10 +162,10 @@
       "case": "avatar-animation",
       "repositories": ["desktop", "web"],
       "issueUrl": null,
-      "prUrl": null,
+      "prUrl": "https://github.com/TheOrcDev/videorc/pull/1451",
       "webIssueUrl": null,
-      "webPrUrl": null,
-      "implementation": "in-progress-isolated",
+      "webPrUrl": "https://github.com/TheOrcDev/videorc-web/pull/133",
+      "implementation": "source-implemented-review-open",
       "acceptance": "not-run",
       "intendedBranch": "feat/249-s5-cloud-parity",
       "intendedPrTitle": "Plan 249 S5: Complete animated avatar and Sidekick presentation",
@@ -166,13 +174,17 @@
       "deferredReason": "User defers smoke, heavy, real-page, device and managed acceptance until all merges on main. No release qualification.",
       "relatedPrUrls": [],
       "intendedBase": {
-        "desktop": "feat/249-s4-cloud-parity",
-        "web": "feat/249-s4-cloud-parity"
+        "desktop": "main",
+        "web": "main"
       },
-      "crossRepoNeeds": "Paired linked consumer/producer PRs; coordinator commissions web checkout; consumers land/deploy before producers enable capability.",
+      "crossRepoNeeds": "Published paired source; monitor animation/status reconciled by slice owner. Live animation/CPU acceptance not-run.",
       "releaseGate": "blocked-until-required-acceptance",
       "owner": "S6z:P60l3:G7m82",
-      "parallelCommission": "Owner fixes monitor animation/status in isolated worktrees; no takeover by S21a."
+      "parallelCommission": "Prepared in isolated owner worktree; reconcile declared prerequisites before dependent publication. No S21a takeover.",
+      "commit": "3c5f004cbcad02e4d6f446cb2309c247a64349bf",
+      "webCommit": "7935c3b69917f24470392582e99570192d551dec",
+      "prStatus": "open",
+      "webPrStatus": "open"
     },
     {
       "id": "S6",
@@ -181,10 +193,10 @@
       "case": "views",
       "repositories": ["desktop", "web"],
       "issueUrl": null,
-      "prUrl": null,
+      "prUrl": "https://github.com/TheOrcDev/videorc/pull/1452",
       "webIssueUrl": null,
-      "webPrUrl": null,
-      "implementation": "in-progress-isolated",
+      "webPrUrl": "https://github.com/TheOrcDev/videorc-web/pull/134",
+      "implementation": "source-implemented-review-open",
       "acceptance": "not-run",
       "intendedBranch": "feat/249-s6-cloud-parity",
       "intendedPrTitle": "Plan 249 S6: Align room, guest and program views",
@@ -193,13 +205,17 @@
       "deferredReason": "User defers smoke, heavy, real-page, device and managed acceptance until all merges on main. No release qualification.",
       "relatedPrUrls": [],
       "intendedBase": {
-        "desktop": "feat/249-s16-cloud-parity",
-        "web": "feat/249-s16-cloud-parity"
+        "desktop": "main",
+        "web": "main"
       },
-      "crossRepoNeeds": "Paired linked consumer/producer PRs; coordinator commissions web checkout; consumers land/deploy before producers enable capability.",
+      "crossRepoNeeds": "Published paired source from actual origin tips; stale original local branches are not authoritative. Guest graphics included; live acceptance not-run.",
       "releaseGate": "blocked-until-required-acceptance",
       "owner": "S6z:P60l3:G9zgb",
-      "parallelCommission": "Owner restacks onto S16 and completes missing guest graphics; S9/S10 wait for this prerequisite."
+      "parallelCommission": "Waiting approval in isolated owner worktree; reconcile declared prerequisites before dependent publication. No S21a takeover.",
+      "commit": "f27307cd97400b6933ac2324de3c6baffab5dfaf",
+      "webCommit": "b615c28b13997128c50edecae5d03f583a7cb32f",
+      "prStatus": "open",
+      "webPrStatus": "open"
     },
     {
       "id": "S7a",
@@ -211,7 +227,7 @@
       "prUrl": "https://github.com/TheOrcDev/videorc/pull/1444",
       "webIssueUrl": null,
       "webPrUrl": null,
-      "implementation": "implemented-review-open",
+      "implementation": "implemented-merged",
       "acceptance": "not-run",
       "intendedBranch": "feat/249-s7a-cloud-parity",
       "intendedPrTitle": "Plan 249 S7a: Qualify the PCM bridge",
@@ -227,7 +243,8 @@
       "parallelCommission": "Coordinator started isolated S2-based work on 2026-11-16; reconcile S3 and declared prerequisites before dependent PR publication. Slice-local handoff owned by the corresponding thread.",
       "owner": "S6z:P60l3:G67rq",
       "commit": "58c3ab5cd9a80d8122fbfe5555371bb8b9fd6189",
-      "baseCommit": "a93168fc46b8edc1b1fc6947562ea54e4c7b2be0"
+      "baseCommit": "a93168fc46b8edc1b1fc6947562ea54e4c7b2be0",
+      "prStatus": "merged"
     },
     {
       "id": "S7b",
@@ -236,10 +253,10 @@
       "case": "microphone",
       "repositories": ["desktop"],
       "issueUrl": null,
-      "prUrl": null,
+      "prUrl": "https://github.com/TheOrcDev/videorc/pull/1448",
       "webIssueUrl": null,
       "webPrUrl": null,
-      "implementation": "not-started",
+      "implementation": "implemented-review-open",
       "acceptance": "not-run",
       "intendedBranch": "feat/249-s7b-cloud-parity",
       "intendedPrTitle": "Plan 249 S7b: Unify room microphone processing and lifecycle",
@@ -248,10 +265,14 @@
       "deferredReason": "User defers smoke, heavy, real-page, device and managed acceptance until all merges on main. No release qualification.",
       "relatedPrUrls": [],
       "intendedBase": {
-        "desktop": "feat/249-s7a-cloud-parity"
+        "desktop": "main"
       },
       "crossRepoNeeds": "Desktop change; use compatible web fixtures read-only and recheck source/capabilities before execution.",
-      "releaseGate": "blocked-until-required-acceptance"
+      "releaseGate": "blocked-until-required-acceptance",
+      "owner": "S6z:P60l3:G67rq",
+      "parallelCommission": "Published by coordinator; live acceptance not-run.",
+      "commit": "68c623f07754e755af0def3d9ed24383059bd36f",
+      "prStatus": "open"
     },
     {
       "id": "S8",
@@ -263,7 +284,7 @@
       "prUrl": null,
       "webIssueUrl": null,
       "webPrUrl": null,
-      "implementation": "not-started",
+      "implementation": "in-progress-isolated",
       "acceptance": "not-run",
       "intendedBranch": "feat/249-s8-cloud-parity",
       "intendedPrTitle": "Plan 249 S8: Add system audio and deliberate takeover routing",
@@ -276,7 +297,9 @@
         "web": "feat/249-s6-cloud-parity"
       },
       "crossRepoNeeds": "Paired linked consumer/producer PRs; coordinator commissions web checkout; consumers land/deploy before producers enable capability.",
-      "releaseGate": "blocked-until-required-acceptance"
+      "releaseGate": "blocked-until-required-acceptance",
+      "owner": "S6z:P60l3:G67rq",
+      "parallelCommission": "Active per coordinator; separate tree, no S21c takeover."
     },
     {
       "id": "S9",
@@ -285,10 +308,10 @@
       "case": "graphics",
       "repositories": ["desktop", "web"],
       "issueUrl": null,
-      "prUrl": null,
+      "prUrl": "https://github.com/TheOrcDev/videorc/pull/1454",
       "webIssueUrl": null,
-      "webPrUrl": null,
-      "implementation": "not-started",
+      "webPrUrl": "https://github.com/TheOrcDev/videorc-web/pull/136",
+      "implementation": "source-implemented-review-open",
       "acceptance": "not-run",
       "intendedBranch": "feat/249-s9-cloud-parity",
       "intendedPrTitle": "Plan 249 S9: Carry the static graphic stack",
@@ -297,12 +320,17 @@
       "deferredReason": "User defers smoke, heavy, real-page, device and managed acceptance until all merges on main. No release qualification.",
       "relatedPrUrls": [],
       "intendedBase": {
-        "desktop": "feat/249-s8-cloud-parity",
-        "web": "feat/249-s8-cloud-parity"
+        "desktop": "feat/249-s6-cloud-parity",
+        "web": "feat/249-s6-cloud-parity"
       },
-      "crossRepoNeeds": "Paired linked consumer/producer PRs; coordinator commissions web checkout; consumers land/deploy before producers enable capability.",
+      "crossRepoNeeds": "Published paired static graphics on S6. S15 consumes exact committed tips with caption extension; guest avatar remains separate, static graphics EG-only.",
       "releaseGate": "blocked-until-required-acceptance",
-      "parallelCommission": "Await S6 guest graphics and its S16 restack before commissioning dependent work."
+      "parallelCommission": "Waiting S6 in isolated owner worktree; reconcile declared prerequisites before dependent publication. No S21a takeover.",
+      "owner": "S6z:P60l3:G6oxv",
+      "commit": "894810e69650ea71812d78efd6f0771216144836",
+      "webCommit": "c419182892fda1aec058df86710cc425458b0f16",
+      "prStatus": "open",
+      "webPrStatus": "open"
     },
     {
       "id": "S10",
@@ -311,10 +339,10 @@
       "case": "alpha-spike",
       "repositories": ["desktop", "web"],
       "issueUrl": null,
-      "prUrl": null,
+      "prUrl": "https://github.com/TheOrcDev/videorc/pull/1453",
       "webIssueUrl": null,
-      "webPrUrl": null,
-      "implementation": "not-started",
+      "webPrUrl": "https://github.com/TheOrcDev/videorc-web/pull/135",
+      "implementation": "source-implemented-review-open",
       "acceptance": "not-run",
       "intendedBranch": "feat/249-s10-cloud-parity",
       "intendedPrTitle": "Plan 249 S10: Qualify dynamic alpha transport",
@@ -323,12 +351,17 @@
       "deferredReason": "User defers smoke, heavy, real-page, device and managed acceptance until all merges on main. No release qualification.",
       "relatedPrUrls": [],
       "intendedBase": {
-        "desktop": "feat/249-s9-cloud-parity",
-        "web": "feat/249-s9-cloud-parity"
+        "desktop": "feat/249-s6-cloud-parity",
+        "web": "feat/249-s6-cloud-parity"
       },
-      "crossRepoNeeds": "Paired linked consumer/producer PRs; coordinator commissions web checkout; consumers land/deploy before producers enable capability.",
+      "crossRepoNeeds": "Published paired spike on S6. Alpha production path disabled and unqualified.",
       "releaseGate": "blocked-until-required-acceptance",
-      "parallelCommission": "Await S6 guest graphics and its S16 restack before commissioning dependent work."
+      "parallelCommission": "Waiting S6 in isolated owner worktree; reconcile declared prerequisites before dependent publication. No S21a takeover.",
+      "owner": "S6z:P60l3:G6ltc",
+      "commit": "8a2c56c3746d06cd04b3deef2dfc1cbaa56d60fb",
+      "webCommit": "98b54024abb246b247d9a2d5254731e863aa3d78",
+      "prStatus": "open",
+      "webPrStatus": "open"
     },
     {
       "id": "S11",
@@ -365,7 +398,7 @@
       "prUrl": null,
       "webIssueUrl": null,
       "webPrUrl": null,
-      "implementation": "not-started",
+      "implementation": "in-progress-isolated",
       "acceptance": "not-run",
       "intendedBranch": "feat/249-s12-cloud-parity",
       "intendedPrTitle": "Plan 249 S12: Apply saved scenes to cloud composition",
@@ -378,7 +411,9 @@
         "web": "feat/249-s11-cloud-parity"
       },
       "crossRepoNeeds": "Paired linked consumer/producer PRs; coordinator commissions web checkout; consumers land/deploy before producers enable capability.",
-      "releaseGate": "blocked-until-required-acceptance"
+      "releaseGate": "blocked-until-required-acceptance",
+      "owner": "S6z:P60l3:G98zv",
+      "parallelCommission": "Active in isolated owner worktree; reconcile declared prerequisites before dependent publication. No S21a takeover."
     },
     {
       "id": "S13a",
@@ -390,7 +425,7 @@
       "prUrl": null,
       "webIssueUrl": null,
       "webPrUrl": null,
-      "implementation": "not-started",
+      "implementation": "in-progress-isolated",
       "acceptance": "not-run",
       "intendedBranch": "feat/249-s13a-cloud-parity",
       "intendedPrTitle": "Plan 249 S13a: Qualify the frame and clock bridge",
@@ -402,8 +437,10 @@
         "desktop": "feat/249-s12-cloud-parity",
         "web": "feat/249-s12-cloud-parity"
       },
-      "crossRepoNeeds": "Paired linked consumer/producer PRs; coordinator commissions web checkout; consumers land/deploy before producers enable capability.",
-      "releaseGate": "blocked-until-required-acceptance"
+      "crossRepoNeeds": "Owner implements actual camera consumer and native PCM originUs/incarnation mirrors. No committed interface consumed by S15; no native-to-show clock inference or measured uncertainty.",
+      "releaseGate": "blocked-until-required-acceptance",
+      "owner": "S6z:P60l3:G7e0v",
+      "parallelCommission": "Active in isolated owner worktree; reconcile declared prerequisites before dependent publication. No S21a takeover."
     },
     {
       "id": "S13b",
@@ -459,12 +496,12 @@
       "title": "Restore host captions and listening",
       "dependsOn": ["S7a", "S7b", "S9"],
       "case": "captions",
-      "repositories": ["desktop"],
+      "repositories": ["desktop", "web"],
       "issueUrl": null,
       "prUrl": null,
       "webIssueUrl": null,
       "webPrUrl": null,
-      "implementation": "not-started",
+      "implementation": "source-integrated-uncommitted",
       "acceptance": "not-run",
       "intendedBranch": "feat/249-s15-cloud-parity",
       "intendedPrTitle": "Plan 249 S15: Restore host captions and listening",
@@ -473,10 +510,16 @@
       "deferredReason": "User defers smoke, heavy, real-page, device and managed acceptance until all merges on main. No release qualification.",
       "relatedPrUrls": [],
       "intendedBase": {
-        "desktop": "feat/249-s14-cloud-parity"
+        "desktop": "feat/249-s9-cloud-parity + S7b dependency merge",
+        "web": "feat/249-s9-cloud-parity"
       },
-      "crossRepoNeeds": "Desktop change; use compatible web fixtures read-only and recheck source/capabilities before execution.",
-      "releaseGate": "blocked-until-required-acceptance"
+      "crossRepoNeeds": "Actual processed S7b host microphone with no second capture; S9 caption capability/pixels mirrored in web and generated modules. S24 controller-loss watch hook pending published controller; S13a clock uncertainty remains unavailable. Desktop pending merge is resolved but uncommitted; coordinator owns ancestry/commit.",
+      "releaseGate": "blocked-until-required-acceptance",
+      "owner": "S6z:P60l3:G55dg",
+      "baseCommit": "68c623f07754e755af0def3d9ed24383059bd36f",
+      "mergeParent": "894810e69650ea71812d78efd6f0771216144836",
+      "webBaseCommit": "c419182892fda1aec058df86710cc425458b0f16",
+      "qualification": "Focused source/helper checks only. Live host capture, provider cancellation, program pixels, timing and runtime SQLite acceptance not-run; productionQualified false."
     },
     {
       "id": "S16",
@@ -488,7 +531,7 @@
       "prUrl": "https://github.com/TheOrcDev/videorc/pull/1442",
       "webIssueUrl": null,
       "webPrUrl": "https://github.com/TheOrcDev/videorc-web/pull/128",
-      "implementation": "implemented-review-open",
+      "implementation": "implemented-merged",
       "acceptance": "not-run",
       "intendedBranch": "feat/249-s16-cloud-parity",
       "intendedPrTitle": "Plan 249 S16: Fix provider and output lifecycle ownership",
@@ -505,7 +548,9 @@
       "parallelCommission": "Coordinator started isolated S2-based work on 2026-11-16; reconcile S3 and declared prerequisites before dependent PR publication. Slice-local handoff owned by the corresponding thread.",
       "owner": "S6z:P60l3:G6ltc",
       "commit": "5b340c09c50b8500c312a00634bdf122fc04855c",
-      "webCommit": "78586c998d0ae15f5e7f82d81863edeac753b6ae"
+      "webCommit": "78586c998d0ae15f5e7f82d81863edeac753b6ae",
+      "prStatus": "merged",
+      "webPrStatus": "merged"
     },
     {
       "id": "S17",
@@ -539,10 +584,10 @@
       "case": "services",
       "repositories": ["desktop"],
       "issueUrl": null,
-      "prUrl": null,
+      "prUrl": "https://github.com/TheOrcDev/videorc/pull/1447",
       "webIssueUrl": null,
       "webPrUrl": null,
-      "implementation": "in-progress-isolated",
+      "implementation": "implemented-merged",
       "acceptance": "not-run",
       "intendedBranch": "feat/249-s18-cloud-parity",
       "intendedPrTitle": "Plan 249 S18: Reattach chat and Sidekick to the show",
@@ -556,7 +601,8 @@
       "crossRepoNeeds": "Desktop change; use compatible web fixtures read-only and recheck source/capabilities before execution.",
       "releaseGate": "blocked-until-required-acceptance",
       "owner": "S6z:P60l3:G1q9i",
-      "parallelCommission": "Owner closes pending-command durability against S16 canonical intervals; no recording/ring ownership change."
+      "parallelCommission": "Published as PR1447; coordinator owns merging and subsequent integration. Live acceptance remains not-run.",
+      "prStatus": "merged"
     },
     {
       "id": "S19",
@@ -592,7 +638,7 @@
       "prUrl": "https://github.com/TheOrcDev/videorc/pull/1443",
       "webIssueUrl": null,
       "webPrUrl": "https://github.com/TheOrcDev/videorc-web/pull/129",
-      "implementation": "implemented-review-open",
+      "implementation": "implemented-merged",
       "acceptance": "not-run",
       "intendedBranch": "feat/249-s20-cloud-parity",
       "intendedPrTitle": "Plan 249 S20: Link recording takes and Library workflows",
@@ -610,7 +656,9 @@
       "baseCommit": "5b340c09c50b8500c312a00634bdf122fc04855c",
       "webBaseCommit": "78586c998d0ae15f5e7f82d81863edeac753b6ae",
       "commit": "d3f6a6dcb92c6fa17c166806a64ed1536d44416c",
-      "webCommit": "3c72571af05ab374dca752a4616278d85043e26a"
+      "webCommit": "3c72571af05ab374dca752a4616278d85043e26a",
+      "prStatus": "merged",
+      "webPrStatus": "merged"
     },
     {
       "id": "S21a",
@@ -619,27 +667,38 @@
       "case": "replay-ring",
       "repositories": ["desktop", "web"],
       "issueUrl": null,
-      "prUrl": null,
+      "prUrl": "https://github.com/TheOrcDev/videorc/pull/1446",
       "webIssueUrl": null,
-      "webPrUrl": null,
-      "implementation": "implemented-ready-for-coordinator",
+      "webPrUrl": "https://github.com/TheOrcDev/videorc-web/pull/130",
+      "implementation": "groundwork-merged-source-followup-review-open",
       "acceptance": "not-run",
-      "intendedBranch": "feat/249-s21a-cloud-parity",
+      "intendedBranch": "feat/249-s21a-managed-replay",
       "intendedPrTitle": "Plan 249 S21a: Qualify the program segment ring",
       "touches": "Web media/recording segment orchestration and new ring manifest,\ntest fixture endpoints and retention/metering tests.",
       "gates": "N, W, C, artifact analyzer.",
       "deferredReason": "User defers smoke, heavy, real-page, device and managed acceptance until all merges on main. No release qualification.",
       "relatedPrUrls": [],
       "intendedBase": {
-        "desktop": "feat/249-s20-cloud-parity",
-        "web": "feat/249-s20-cloud-parity"
+        "desktop": "main",
+        "web": "main"
       },
-      "crossRepoNeeds": "Web bounded local-HLS ring, owner-session status/read boundary and manifest; desktop maintained actual-program acquisition/reconstruction/analyzer plus central ledger. Managed provider adapter unavailable, cost/clock unmeasured, production disabled. Paired fixture revisions required; no S20 migration or S16 identity changes.",
+      "crossRepoNeeds": "Groundwork desktop1446/web130 merged. Followup restored without runtime conflicts onto fetched current main in fresh feat/249-s21a-managed-replay worktrees; original frozen trees and backups preserved. Web implements LiveKit livePlaylistName on independently requested recording, authorized S3 reads, persistent bounded references/quotas/fenced leases and reaper cleanup. No implicit Record, extra egress, credential expansion, finalized-take polling or SQL migration. S22 confirmed no overlapping recording/schema edits; replay uses no iso/ prefix or extra concurrent-egress reservation.",
       "releaseGate": "blocked-until-required-acceptance",
       "owner": "S6z:P60l3:G55dg",
       "baseCommit": "d3f6a6dcb92c6fa17c166806a64ed1536d44416c",
       "webBaseCommit": "3c72571af05ab374dca752a4616278d85043e26a",
-      "qualification": "not-run; managed adapter unavailable; production disabled"
+      "qualification": "source-integrated; managed availability/cost/clock and actual acceptance not-run; production policy disabled with null pricing",
+      "commit": "f33270b7202de4ce9f6d78ad0d253ffe0b4a9fc6",
+      "webCommit": "158371bf6cc04aac27d135dc273d1f2b6d92ab5b",
+      "followupBaseCommit": "dda61b03ef52a97bd74a6796a2a0032d480878e5",
+      "webFollowupBaseCommit": "59fb8ba6c3cd9559523c5d320bad2065f3cdce1d",
+      "followupPrUrl": "https://github.com/TheOrcDev/videorc/pull/1449",
+      "webFollowupPrUrl": "https://github.com/TheOrcDev/videorc-web/pull/131",
+      "prStatus": "merged",
+      "webPrStatus": "merged",
+      "followupStatus": "open-unmerged",
+      "followupCommit": "183f4812dd8bbf4405d264031eec139176fd9de2",
+      "webFollowupCommit": "cd32e7e7ba1a025f2b4f4c805dd6a8d0a6dea914"
     },
     {
       "id": "S21b",
@@ -671,12 +730,12 @@
       "title": "Offer optional local program archive",
       "dependsOn": ["S20", "S21a"],
       "case": "archive",
-      "repositories": ["desktop"],
+      "repositories": ["desktop", "web"],
       "issueUrl": null,
-      "prUrl": null,
+      "prUrl": "https://github.com/TheOrcDev/videorc/pull/1450",
       "webIssueUrl": null,
-      "webPrUrl": null,
-      "implementation": "not-started",
+      "webPrUrl": "https://github.com/TheOrcDev/videorc-web/pull/132",
+      "implementation": "source-implemented-review-open",
       "acceptance": "not-run",
       "intendedBranch": "feat/249-s21c-cloud-parity",
       "intendedPrTitle": "Plan 249 S21c: Offer optional local program archive",
@@ -685,10 +744,19 @@
       "deferredReason": "User defers smoke, heavy, real-page, device and managed acceptance until all merges on main. No release qualification.",
       "relatedPrUrls": [],
       "intendedBase": {
-        "desktop": "feat/249-s21b-cloud-parity"
+        "desktop": "feat/249-s21a-managed-replay",
+        "web": "feat/249-s21a-managed-replay"
       },
-      "crossRepoNeeds": "Desktop change; use compatible web fixtures read-only and recheck source/capabilities before execution.",
-      "releaseGate": "blocked-until-required-acceptance"
+      "crossRepoNeeds": "Published paired source on open S21a followup. Archive remains opt-in and dependent on disabled/unqualified ring; no artifact/managed acceptance run.",
+      "releaseGate": "blocked-until-required-acceptance",
+      "owner": "S6z:P60l3:G55dg",
+      "baseCommit": "183f4812dd8bbf4405d264031eec139176fd9de2",
+      "webBaseCommit": "cd32e7e7ba1a025f2b4f4c805dd6a8d0a6dea914",
+      "qualification": "production disabled by S21a policy; runtime/Rust/artifact/managed acceptance not-run",
+      "commit": "ba02a8f63ff349a2ed6e42df317af6107949fd7a",
+      "webCommit": "6ec9c36553af46e658a3020289964566acb07c6b",
+      "prStatus": "open",
+      "webPrStatus": "open"
     },
     {
       "id": "S22",
@@ -700,7 +768,7 @@
       "prUrl": null,
       "webIssueUrl": null,
       "webPrUrl": null,
-      "implementation": "not-started",
+      "implementation": "in-progress-isolated",
       "acceptance": "not-run",
       "intendedBranch": "feat/249-s22-cloud-parity",
       "intendedPrTitle": "Plan 249 S22: Add opt-in ISO recording",
@@ -712,8 +780,10 @@
         "desktop": "feat/249-s21c-cloud-parity",
         "web": "feat/249-s21b-cloud-parity"
       },
-      "crossRepoNeeds": "Paired linked consumer/producer PRs; coordinator commissions web checkout; consumers land/deploy before producers enable capability.",
-      "releaseGate": "blocked-until-required-acceptance"
+      "crossRepoNeeds": "Expanded ISO production wiring isolated by owner; additive state.iso/webhook/reaper and local import journal, shared main.rs dispatch and recording Library additions. No S15 source edits; S21c take-file guard reconciliation remains named in ISO handoff.",
+      "releaseGate": "blocked-until-required-acceptance",
+      "owner": "S6z:P60l3:G1wkh",
+      "parallelCommission": "Active in isolated owner worktree; reconcile declared prerequisites before dependent publication. No S21a takeover."
     },
     {
       "id": "S23",
@@ -749,7 +819,7 @@
       "prUrl": null,
       "webIssueUrl": null,
       "webPrUrl": null,
-      "implementation": "not-started",
+      "implementation": "in-progress-isolated",
       "acceptance": "not-run",
       "intendedBranch": "feat/249-s24-cloud-parity",
       "intendedPrTitle": "Plan 249 S24: Persist presentation and hand off safely",
@@ -762,7 +832,9 @@
         "web": "feat/249-s22-cloud-parity"
       },
       "crossRepoNeeds": "Paired linked consumer/producer PRs; coordinator commissions web checkout; consumers land/deploy before producers enable capability.",
-      "releaseGate": "blocked-until-required-acceptance"
+      "releaseGate": "blocked-until-required-acceptance",
+      "owner": "S6z:P60l3:G1q9i",
+      "parallelCommission": "Active in isolated owner worktree; reconcile declared prerequisites before dependent publication. No S21a takeover."
     },
     {
       "id": "S25",
@@ -935,5 +1007,26 @@
     }
   ],
   "roomMediaVersion": 2,
-  "guestMediaVersion": 2
+  "guestMediaVersion": 2,
+  "reconciliation": {
+    "date": "2026-11-16",
+    "baseCommits": {
+      "desktop": "dda61b03ef52a97bd74a6796a2a0032d480878e5",
+      "web": "59fb8ba6c3cd9559523c5d320bad2065f3cdce1d"
+    },
+    "earlierDesktopPrsMerged": [1437, 1438, 1439, 1440, 1441, 1442, 1443, 1444, 1445, 1446, 1447],
+    "earlierWebPrsMerged": [125, 126, 127, 128, 129, 130],
+    "mergeStatusSource": "Coordinator confirmation and fetched main; original stack mappings retained as history",
+    "backupDirectory": "/Users/orcdev/projects/videorc-249-handoffs/s21a-before-main-20261116",
+    "acceptance": "not-run",
+    "productionReplayQualified": false,
+    "unrelatedMergedPrs": [
+      {
+        "url": "https://github.com/TheOrcDev/videorc/pull/1445",
+        "scope": "YouTube emotes; separate task, not a Plan 249 slice"
+      }
+    ]
+  },
+  "ledgerOwner": "S6z:P60l3:G55dg",
+  "ledgerCheckpoint": "S15 source integration; coordinator mappings received 2026-11-17; no live qualification"
 }

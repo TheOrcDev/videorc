@@ -1,7 +1,11 @@
 import { EventEmitter } from 'node:events'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ConnectionState, RoomEvent, type Room } from 'livekit-client'
-import { RoomGraphicsPublisher, type RoomGraphicsStatus } from './room-graphics-publisher'
+import {
+  graphicsLayers,
+  RoomGraphicsPublisher,
+  type RoomGraphicsStatus
+} from './room-graphics-publisher'
 import { CAPABILITY_TOPIC } from './room-media-v2'
 import fixture from '../../../../../..//protocol-fixtures/cloud-parity-graphics.json'
 import type { GraphicsLayer } from '../../../shared/cloud-graphics'
@@ -116,6 +120,48 @@ describe('room static graphics publisher', () => {
 })
 
 describe('S6 guest avatar coexistence', () => {
+  it('does not send caption pixels to a loaded old page until a fresh caption capability arrives', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(1000)
+    const h = harness()
+    const bodies: Uint8Array[] = []
+    h.room.localParticipant.streamBytes.mockImplementation(async () => ({
+      write: vi.fn(async (b: Uint8Array) => {
+        bodies.push(b)
+      }),
+      close: vi.fn(async () => {})
+    }))
+    h.publisher.set({
+      h: [
+        {
+          ...fixture.snapshot.layers[0],
+          id: 'caption',
+          kind: 'caption',
+          fade: null,
+          expiresAt: 9000,
+          stream: true,
+          recording: false
+        }
+      ],
+      v: [],
+      unsupported: []
+    })
+    h.receive({ version: 1, output: 'stream', orientation: 'h', static: { version: 1 } })
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(JSON.parse(new TextDecoder().decode(bodies.at(-1))).layers).toEqual([])
+    expect(h.statuses.at(-1)?.state).toBe('waiting')
+    h.receive({
+      version: 1,
+      output: 'stream',
+      orientation: 'h',
+      static: { version: 1, captions: 1 }
+    })
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(
+      JSON.parse(new TextDecoder().decode(bodies.at(-1))).layers.map((l: GraphicsLayer) => l.kind)
+    ).toEqual(['caption'])
+    h.publisher.close()
+  })
   it('never sends static pixels to a guest claiming static support in a server receipt', async () => {
     vi.useFakeTimers()
     vi.setSystemTime(1000)
@@ -149,4 +195,25 @@ describe('S6 guest avatar coexistence', () => {
     expect(h.statuses.at(-1)?.observed).toEqual({})
     h.publisher.close()
   })
+})
+
+it('selects output-specific caption placement and strips captions for old consumers', () => {
+  const caption = {
+    ...fixture.snapshot.layers[0],
+    kind: 'caption' as const,
+    id: 'caption',
+    fade: null,
+    expiresAt: 2000,
+    stream: true,
+    recording: true,
+    outputRects: {
+      stream: { x: 0, y: 0.6, w: 1, h: 0.1 },
+      recording: { x: 0, y: 0.8, w: 1, h: 0.1 }
+    }
+  }
+  const content = { h: [caption], v: [], unsupported: [] }
+  expect(graphicsLayers(content, 'stream', 'h', false)).toEqual([])
+  expect(graphicsLayers(content, 'stream', 'h', true)[0].rect.y).toBe(0.6)
+  expect(graphicsLayers(content, 'recording', 'h', true)[0].rect.y).toBe(0.8)
+  expect(graphicsLayers(content, 'stream', 'h', true)[0]).not.toHaveProperty('outputRects')
 })

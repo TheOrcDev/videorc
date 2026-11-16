@@ -5810,6 +5810,9 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "resource.capability.register_thumbnail"
         | "account.auth.begin_intent"
         | "account.sign_out"
+        | "cloud.speech.overlay"
+        | "cloud.speech.sync"
+        | "cloud.speech.audio"
         | "captions.start"
         | "captions.stop"
         | "captions.style.set"
@@ -6148,6 +6151,7 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "scheduledStreams.candidates"
         | "account.get"
         | "entitlements.get"
+        | "cloud.speech.transcript"
         | "captions.status.get"
         | "captions.test.snapshot"
         | "comments.highlight.status"
@@ -10468,6 +10472,44 @@ async fn handle_text_message_with_role(
                 ServerResponse::ok(command.id, entitlements::current_entitlements())
             }
         }
+        "cloud.speech.transcript" => match serde_json::from_value(command.params.clone()) {
+            Ok(input) => match captions::cloud_host::transcript(state, input).await {
+                Ok(value) => ServerResponse::ok(command.id, value),
+                Err(error) => {
+                    ServerResponse::error(command.id, "cloud-speech-refused", error.to_string())
+                }
+            },
+            Err(error) => ServerResponse::error(command.id, "invalid-params", error.to_string()),
+        },
+        "cloud.speech.overlay" => match serde_json::from_value(command.params.clone()) {
+            Ok(input) => match captions::cloud_host::install_overlay(state, input).await {
+                Ok(value) => ServerResponse::ok(command.id, value),
+                Err(error) => ServerResponse::error(
+                    command.id,
+                    "cloud-speech-overlay-refused",
+                    error.to_string(),
+                ),
+            },
+            Err(error) => ServerResponse::error(command.id, "invalid-params", error.to_string()),
+        },
+        "cloud.speech.sync" => match serde_json::from_value(command.params.clone()) {
+            Ok(input) => match captions::cloud_host::sync(state, input).await {
+                Ok(value) => ServerResponse::ok(command.id, value),
+                Err(error) => {
+                    ServerResponse::error(command.id, "cloud-speech-refused", error.to_string())
+                }
+            },
+            Err(error) => ServerResponse::error(command.id, "invalid-params", error.to_string()),
+        },
+        "cloud.speech.audio" => match serde_json::from_value(command.params.clone()) {
+            Ok(input) => match captions::cloud_host::audio(state, input).await {
+                Ok(value) => ServerResponse::ok(command.id, value),
+                Err(error) => {
+                    ServerResponse::error(command.id, "cloud-speech-refused", error.to_string())
+                }
+            },
+            Err(error) => ServerResponse::error(command.id, "invalid-params", error.to_string()),
+        },
         "captions.start" => {
             let language = command
                 .params
@@ -10535,6 +10577,13 @@ async fn handle_text_message_with_role(
             ),
         },
         "captions.overlay.set" => {
+            if cloud_graphics::managed_room(state) {
+                return ServerResponse::error(
+                    command.id,
+                    "cloud-speech-owner-required",
+                    "Room caption pixels require the current host speech session.",
+                );
+            }
             match serde_json::from_value::<captions::SetCaptionOverlayParams>(command.params) {
                 Ok(params) => {
                     match captions::install_caption_overlays(&state.caption_overlay, params) {
@@ -19703,6 +19752,23 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn host_speech_mutations_refuse_non_renderer_sources_before_parsing() {
+        let state = test_state();
+        for method in [
+            "cloud.speech.sync",
+            "cloud.speech.audio",
+            "cloud.speech.overlay",
+        ] {
+            let request = json!({"id":"speech", "method":method,"params":{}}).to_string();
+            for role in [BackendRole::Admin, BackendRole::Agent, BackendRole::Remote] {
+                let response = handle_text_message_with_role(&state, &request, role).await;
+                assert!(!response.ok, "{method}");
+                assert_eq!(response.error.unwrap().code, "forbidden-method");
+            }
+        }
+    }
+
     /// Plan 214 A4: the switch through the renderer socket, the platform
     /// report through the admin socket only, with the event and the exact
     /// wire shapes (absent fields omitted, never null).
@@ -25958,7 +26024,7 @@ mod tests {
                 handle_preview_frame_lease_control(&state, role, &mut None, &request.to_string())
                     .await
                     .unwrap();
-            assert_eq!(response.error.unwrap().code, "forbidden");
+            assert_eq!(response.error.unwrap().code, "forbidden-method");
             assert!(response.payload.is_none());
         }
         let mut held = None;

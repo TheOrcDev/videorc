@@ -489,15 +489,17 @@ function ProgramGraphics({
   snapshot: GraphicsSnapshot | null
   children: ReactNode
 }): ReactElement {
+  const caption = useRef<HTMLDivElement>(null)
   const banner = useRef<HTMLDivElement>(null),
     chat = useRef<HTMLDivElement>(null),
     highlight = useRef<HTMLDivElement>(null)
   const view = useRef<ReturnType<typeof createGraphicsView> | null>(null)
   const [failed, setFailed] = useState(false)
   useEffect(() => {
-    if (!banner.current || !chat.current || !highlight.current) return
+    if (!banner.current || !caption.current || !chat.current || !highlight.current) return
     const current = createGraphicsView({
       banner: banner.current,
+      caption: caption.current,
       chat: chat.current,
       highlight: highlight.current
     })
@@ -525,6 +527,7 @@ function ProgramGraphics({
   return (
     <>
       <div ref={banner} data-testid="show-stage-banners" />
+      <div ref={caption} data-testid="show-stage-captions" />
       <div ref={chat} />
       {children}
       <div ref={highlight} />

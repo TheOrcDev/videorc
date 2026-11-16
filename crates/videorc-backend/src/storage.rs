@@ -1,4 +1,6 @@
 mod cloud_recordings;
+mod cloud_speech;
+pub(crate) use cloud_speech::HostTranscriptCue;
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
 use std::fs::File;
@@ -9024,6 +9026,7 @@ impl Database {
             "derived_from_session_id TEXT REFERENCES sessions(id) ON DELETE SET NULL",
         )?;
         conn.execute_batch(include_str!("storage/cloud_recordings.sql"))?;
+        conn.execute_batch(include_str!("storage/cloud_speech.sql"))?;
         ensure_column(&conn, "sessions", "source_title", "source_title TEXT")?;
         ensure_column(&conn, "sessions", "processing_kind", "processing_kind TEXT")?;
         // Stream Manager (plan 055): structured event facts, reply context and

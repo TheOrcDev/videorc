@@ -1,3 +1,4 @@
+import { HostTranscript } from '@/components/captions/host-transcript'
 import type { ReactElement } from 'react'
 
 import { CaptionPreview } from '@/components/captions/caption-preview'
@@ -12,6 +13,7 @@ export function CaptionsTab(): ReactElement {
       </div>
       <div className={PAGE_TRAIL_COLUMN}>
         <CaptionsControls />
+        <HostTranscript />
       </div>
     </div>
   )

@@ -893,6 +893,47 @@ describe('processed microphone room ownership', () => {
     noise: 'off' as const,
     offsetMs: 0
   }
+  it('attaches speech to the published processed host track and revokes it on mute and loss', async () => {
+    const track = { kind: 'audio', stop: vi.fn() } as unknown as MediaStreamTrack
+    const source = {
+      track,
+      close: vi.fn(async () => {}),
+      update: vi.fn(),
+      published: vi.fn(),
+      disconnectFixture: vi.fn(async () => {})
+    }
+    const factory = vi
+      .spyOn(microphoneSource, 'createRoomMicrophoneSource')
+      .mockResolvedValue(source)
+    const tap = { close: vi.fn(async () => {}), setMuted: vi.fn(async () => {}) }
+    let current!: () => boolean
+    const attachHostSpeech = vi.fn((published, show, muted, owns) => {
+      expect(latestRoom().localParticipant.publishTrack).toHaveBeenCalledOnce()
+      expect(published).toBe(track)
+      expect(show).toBe('sh_talk')
+      expect(muted).toBe(false)
+      current = owns
+      return tap
+    })
+    const { room } = client(undefined, undefined, {
+      cameraName: null,
+      microphoneName: 'One',
+      microphoneChoice: choice,
+      attachHostSpeech
+    })
+    await room.connect()
+    expect(attachHostSpeech).toHaveBeenCalledOnce()
+    expect(current()).toBe(true)
+    await room.setMicrophoneMuted(true)
+    expect(tap.setMuted).toHaveBeenLastCalledWith(true)
+    await room.setMicrophoneMuted(false)
+    expect(tap.setMuted).toHaveBeenLastCalledWith(false)
+    latestRoom().emit('Disconnected', 2)
+    expect(current()).toBe(false)
+    expect(tap.close).toHaveBeenCalledOnce()
+    await room.disconnect()
+    factory.mockRestore()
+  })
   it('retires the old producer before switch and None releases publication', async () => {
     const order: string[] = []
     const sources: { close: ReturnType<typeof vi.fn>; update: ReturnType<typeof vi.fn> }[] = []
