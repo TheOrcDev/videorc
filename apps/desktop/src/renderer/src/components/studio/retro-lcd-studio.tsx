@@ -622,7 +622,7 @@ function RetroScreenPrivacyRow({ control }: { control: ScreenPrivacyControl }): 
 function RetroGreenScreenRow({ control }: { control: GreenScreenControl }): ReactElement | null {
   if (!control.available) return null
   return (
-    <LcdDisplayRow className="min-w-0 py-2" data-slot="green-screen">
+    <LcdDisplayRow className="min-w-0 py-2" data-testid="green-screen">
       <LcdPanelChoice
         aria-label="Green screen"
         options={GREEN_SCREEN_MODES}

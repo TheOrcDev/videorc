@@ -298,7 +298,7 @@ describe('Retro LCD Sources and Takeover (plan 197)', () => {
     // Green screen under the Camera picker: Off, Green screen or Blue screen,
     // with no label and no Adjust (plan 248).
     expect(rowLabels(sources ?? '')).toEqual(['Screen', 'Camera'])
-    const greenScreen = (sources ?? '').split('data-slot="green-screen"')[1] ?? ''
+    const greenScreen = (sources ?? '').split('data-testid="green-screen"')[1] ?? ''
     expect(greenScreen).toMatch(
       /aria-label="Green screen"[^>]*role="radiogroup"|role="radiogroup"[^>]*aria-label="Green screen"/
     )
