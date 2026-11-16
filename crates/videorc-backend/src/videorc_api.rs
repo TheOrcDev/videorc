@@ -1866,6 +1866,112 @@ impl VideorcApiClient {
         })
     }
 
+    /// Archive requests remain on the pinned account API; redirects cannot forward a bearer.
+    async fn archive_bytes(
+        &self,
+        token: &str,
+        show: &str,
+        generation: Option<&str>,
+        method: &str,
+        body: Option<serde_json::Value>,
+        segment: Option<u64>,
+        limit: usize,
+    ) -> Result<Vec<u8>> {
+        anyhow::ensure!(
+            !show.is_empty()
+                && show.len() <= 80
+                && show
+                    .bytes()
+                    .all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-'),
+            "invalid-archive-show"
+        );
+        let mut url =
+            reqwest::Url::parse(&self.endpoint(&format!("/api/cloud/shows/{show}/archive")))?;
+        if let Some(g) = generation {
+            url.query_pairs_mut().append_pair("generation", g);
+        }
+        if let Some(s) = segment {
+            url.query_pairs_mut().append_pair("segment", &s.to_string());
+        }
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()?;
+        let mut request = client
+            .request(reqwest::Method::from_bytes(method.as_bytes())?, url)
+            .bearer_auth(token)
+            .timeout(std::time::Duration::from_secs(12));
+        if let Some(body) = body {
+            request = request.json(&body);
+        }
+        let mut response = request
+            .send()
+            .await
+            .map_err(|_| anyhow::anyhow!("archive-network-unavailable"))?;
+        let status = response.status();
+        let bound = if status.is_success() { limit } else { 8192 };
+        let mut bytes = Vec::new();
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(|_| anyhow::anyhow!("archive-network-unavailable"))?
+        {
+            anyhow::ensure!(
+                bytes.len() + chunk.len() <= bound,
+                "archive-response-too-large"
+            );
+            bytes.extend_from_slice(&chunk);
+        }
+        if !status.is_success() {
+            let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap_or_default();
+            let code = value
+                .get("error")
+                .and_then(|v| v.as_str())
+                .unwrap_or("archive-request-refused");
+            anyhow::ensure!(
+                code.len() <= 80 && code.bytes().all(|b| b.is_ascii_lowercase() || b == b'-'),
+                "archive-request-refused"
+            );
+            anyhow::bail!("{code}");
+        }
+        Ok(bytes)
+    }
+    pub(crate) async fn archive_json<T: DeserializeOwned>(
+        &self,
+        token: &str,
+        show: &str,
+        generation: Option<&str>,
+        method: &str,
+        body: Option<serde_json::Value>,
+    ) -> Result<T> {
+        let bytes = self
+            .archive_bytes(token, show, generation, method, body, None, 65536)
+            .await?;
+        serde_json::from_slice(&bytes).context("archive-invalid-response")
+    }
+    pub(crate) async fn archive_segment(
+        &self,
+        token: &str,
+        show: &str,
+        generation: &str,
+        sequence: u64,
+        expected: u64,
+    ) -> Result<Vec<u8>> {
+        anyhow::ensure!(
+            expected > 0 && expected <= 8 * 1024 * 1024,
+            "archive-invalid-size"
+        );
+        self.archive_bytes(
+            token,
+            show,
+            Some(generation),
+            "GET",
+            None,
+            Some(sequence),
+            expected as usize,
+        )
+        .await
+    }
+
     fn endpoint(&self, path: &str) -> String {
         format!("{}/{}", self.base_url, path.trim_start_matches('/'))
     }

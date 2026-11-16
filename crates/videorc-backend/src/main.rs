@@ -43,6 +43,7 @@ mod chat_commands;
 mod chat_overlay;
 mod clean_cut;
 mod clip_marks;
+mod cloud_archive;
 mod cloud_control_web;
 mod cloud_services;
 mod cloud_show;
@@ -6073,6 +6074,9 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "cloud.overlay.set"
         | "cloud.overlay.clear"
         // Plan 234 T3: the account's cloud recordings, from videorc.com.
+        | "cloud.archive.availability"
+        | "cloud.archive.start"
+        | "cloud.archive.resume"
         | "cloud.recordings.list"
         | "repair.restore_file"
         | "preview.snapshot" => Some(Mutation {
@@ -6119,6 +6123,9 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "cloud.show.check"
         | "cloud.room.client.report"
         | "cloud.recordings.download"
+        | "cloud.archive.stop"
+        | "cloud.archive.cancel"
+        | "cloud.archive.discard"
         | "cloud.recordings.cancelDownload" => Some(DEFAULT_MUTATION_POLICY),
 
         "session.start"
@@ -6179,6 +6186,7 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "agents.status"
         | "agents.activity.list"
         | "cloud.status"
+        | "cloud.archive.status"
         | "cloud.recordings.downloads"
         | "compositor.status"
         | "preview.debug.sample"
@@ -12279,6 +12287,116 @@ async fn handle_text_message_with_role(
         }
         // Plan 234 T3 (wire section 13.2): the account's cloud recordings,
         // and a managed one (segments) made into an MP4 on this computer.
+        "cloud.archive.availability" => {
+            let show = command
+                .params
+                .get("showId")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let result: Result<serde_json::Value> = async {
+                let token =
+                    account::stored_session_token().context("Sign in to use the local archive.")?;
+                videorc_api::VideorcApiClient::new()?
+                    .archive_json(&token, show, None, "GET", None)
+                    .await
+            }
+            .await;
+            match result {
+                Ok(value) => ServerResponse::ok(
+                    command.id,
+                    serde_json::json!({"available":value.get("available").and_then(|v|v.as_bool()).unwrap_or(false),"reason":value.get("reason").and_then(|v|v.as_str()).unwrap_or("Archive unavailable.")}),
+                ),
+                Err(_) => ServerResponse::ok(
+                    command.id,
+                    serde_json::json!({"available":false,"reason":"Archive availability could not be confirmed. Sign in and open a cloud room."}),
+                ),
+            }
+        }
+        "cloud.archive.status" => {
+            let result = state
+                .database
+                .cloud_archives()
+                .map(|jobs| jobs.iter().map(|j| j.view()).collect::<Vec<_>>());
+            match result {
+                Ok(jobs) => ServerResponse::ok(command.id, jobs),
+                Err(_) => ServerResponse::error(
+                    command.id,
+                    "archive-unavailable",
+                    "Archive journal is unavailable.",
+                ),
+            }
+        }
+        "cloud.archive.start"
+        | "cloud.archive.resume"
+        | "cloud.archive.stop"
+        | "cloud.archive.cancel"
+        | "cloud.archive.discard" => {
+            let method = command.method.as_str();
+            let result: Result<serde_json::Value> = async {
+                let mut params = command.params.clone();
+                if method == "cloud.archive.start" {
+                    resolve_cloud_download_resource(state, &mut params, role)?;
+                    anyhow::ensure!(
+                        params.get("consent").and_then(|v| v.as_bool()) == Some(true),
+                        "Archive requires explicit consent."
+                    );
+                }
+                let id = params.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                if method == "cloud.archive.stop" || method == "cloud.archive.cancel" {
+                    cloud_archive::signal(id, method == "cloud.archive.cancel")?;
+                    return Ok(serde_json::json!({"ok":true}));
+                }
+                if method == "cloud.archive.discard" {
+                    cloud_archive::discard(&state.database, id)?;
+                    return Ok(serde_json::json!({"ok":true}));
+                }
+                let token = account::stored_session_token()
+                    .context("Sign in to archive the cloud program.")?;
+                let api = videorc_api::VideorcApiClient::new()?;
+                let ffmpeg = resolve_trusted_ffmpeg_path(
+                    params.get("ffmpegPath").and_then(|v| v.as_str()),
+                    role,
+                    state.smoke_rpc_enabled,
+                );
+                let view = if method == "cloud.archive.resume" {
+                    cloud_archive::resume(state.database.clone(), api, token, id, ffmpeg)?
+                } else {
+                    let show = params
+                        .get("showId")
+                        .and_then(|v| v.as_str())
+                        .context("Choose an open cloud room.")?;
+                    let orientation = params
+                        .get("orientation")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("h");
+                    anyhow::ensure!(
+                        orientation == "h" || orientation == "v",
+                        "Invalid archive orientation."
+                    );
+                    let folder = recording::resolve_output_directory(
+                        params.get("outputDirectory").and_then(|v| v.as_str()),
+                    )?;
+                    cloud_archive::start(
+                        state.database.clone(),
+                        api,
+                        token,
+                        show.into(),
+                        orientation.into(),
+                        folder,
+                        ffmpeg,
+                    )
+                    .await?
+                };
+                Ok(serde_json::to_value(view)?)
+            }
+            .await;
+            match result {
+                Ok(value) => ServerResponse::ok(command.id, value),
+                Err(error) => {
+                    ServerResponse::error(command.id, "archive-unavailable", error.to_string())
+                }
+            }
+        }
         "cloud.recordings.list" => match cloud_context(state) {
             Some(context) => match context
                 .cloud_recordings(account::stored_session_token())

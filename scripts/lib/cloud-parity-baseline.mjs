@@ -57,6 +57,7 @@ export async function runBaseline({
   privacy = false,
   soundboard = false,
   avatar = false,
+  archive = false,
   replayRing = false
 }) {
   const report = baselineReport({
@@ -64,17 +65,19 @@ export async function runBaseline({
     web: revision(webRoot),
     template: 'v1'
   })
-  report.case = replayRing
-    ? 'replay-ring'
-    : avatar
-      ? 'avatar'
-      : soundboard
-        ? 'soundboard'
-        : privacy
-          ? 'privacy'
-          : controls
-            ? 'controls'
-            : 'baseline'
+  report.case = archive
+    ? 'archive'
+    : replayRing
+      ? 'replay-ring'
+      : avatar
+        ? 'avatar'
+        : soundboard
+          ? 'soundboard'
+          : privacy
+            ? 'privacy'
+            : controls
+              ? 'controls'
+              : 'baseline'
   // A dirty web consumer makes its revision misleading. Require a dedicated,
   // installed checkout; inspect it read-only and never change the active one.
   const webDirty = execFileSync('git', ['status', '--porcelain', '--untracked-files=no'], {
@@ -438,6 +441,15 @@ export async function runBaseline({
       })
     assert.equal(h.web.snapshot(h.showId).state.legs.length, 0)
     h.assertNoDirect()
+    if (archive) {
+      const { exerciseLocalArchive } = await import('./cloud-parity-archive.mjs')
+      await exerciseLocalArchive({
+        h,
+        artifact: report.replayRing.artifacts[0].file,
+        output,
+        report
+      })
+    }
     await h.rpc('cloud.room.close')
     for (const context of contexts) await context.close()
     contexts.length = 0

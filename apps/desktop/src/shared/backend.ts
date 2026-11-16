@@ -9897,3 +9897,30 @@ export interface SessionSources {
     reason: string | null
   }>
 }
+
+/** Local copy of cloud program; never independent offline capture. */
+export interface CloudArchiveView {
+  id: string
+  showId: string
+  state:
+    | 'waiting'
+    | 'copying'
+    | 'finalizing'
+    | 'interrupted'
+    | 'partial'
+    | 'corrupt'
+    | 'cancelled'
+    | 'complete'
+  reason: string
+  bytes: number
+  segments: number
+  localSessionId: string | null
+}
+export interface CloudArchiveStart {
+  consent: true
+  showId: string
+  orientation: 'h' | 'v'
+  outputDirectoryCapability?: string
+  outputDirectory?: string
+  ffmpegPath?: string
+}

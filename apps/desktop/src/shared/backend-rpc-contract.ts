@@ -1,4 +1,6 @@
 import type {
+  CloudArchiveView,
+  CloudArchiveStart,
   CloudProgram,
   WatchdogAlert,
   WatchdogAlertDevicesView,
@@ -611,6 +613,17 @@ export interface BackendRpcMethodMap {
   'cloud.recording.stop': BackendRpcDefinition<undefined, CloudStatus>
   /** Plan 234 T3: the account's cloud recordings, without URLs. */
   'cloud.recordings.list': BackendRpcDefinition<undefined, CloudRecordingsList>
+  'cloud.archive.availability': BackendRpcDefinition<
+    { showId: string },
+    { available: boolean; reason: string }
+  >
+  'cloud.archive.start': BackendRpcDefinition<CloudArchiveStart, CloudArchiveView>
+  'cloud.archive.resume': BackendRpcDefinition<{ id: string }, CloudArchiveView>
+  'cloud.archive.status': BackendRpcDefinition<undefined, CloudArchiveView[]>
+  'cloud.archive.stop': BackendRpcDefinition<{ id: string }, { ok: true }>
+  'cloud.archive.cancel': BackendRpcDefinition<{ id: string }, { ok: true }>
+  'cloud.archive.discard': BackendRpcDefinition<{ id: string }, { ok: true }>
+
   /** Plan 234 T3: a managed recording (segments) as an MP4 on this computer. */
   'cloud.recordings.download': BackendRpcDefinition<
     CloudRecordingDownloadParams,
@@ -6546,6 +6559,39 @@ const cloudRecordingItemSchema = objectSchema(
   },
   { allowUnknown: false }
 ) as RuntimeSchema<CloudRecordingItem>
+const cloudArchiveViewSchema = objectSchema(
+  {
+    id: boundedString,
+    showId: boundedString,
+    state: enumSchema([
+      'waiting',
+      'copying',
+      'finalizing',
+      'interrupted',
+      'partial',
+      'corrupt',
+      'cancelled',
+      'complete'
+    ]),
+    reason: boundedString,
+    bytes: nonNegativeInteger,
+    segments: nonNegativeInteger,
+    localSessionId: nullableSchema(boundedString)
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<CloudArchiveView>
+const cloudArchiveStartSchema = objectSchema(
+  {
+    consent: literalSchema(true),
+    showId: boundedString,
+    orientation: enumSchema(['h', 'v']),
+    outputDirectoryCapability: optionalSchema(boundedString),
+    outputDirectory: optionalSchema(boundedPath),
+    ffmpegPath: optionalSchema(boundedPath)
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<CloudArchiveStart>
+const cloudArchiveIdSchema = objectSchema({ id: boundedString }, { allowUnknown: false })
 const cloudRecordingsListSchema = objectSchema(
   { recordings: arraySchema(cloudRecordingItemSchema, { maxLength: 2000 }) },
   { allowUnknown: false }
@@ -7062,6 +7108,32 @@ const runtimeContracts = {
   'cloud.recording.start': { params: undefinedSchema, result: cloudStatusSchema },
   'cloud.recording.stop': { params: undefinedSchema, result: cloudStatusSchema },
   'cloud.recordings.list': { params: undefinedSchema, result: cloudRecordingsListSchema },
+  'cloud.archive.availability': {
+    params: objectSchema({ showId: boundedString }, { allowUnknown: false }),
+    result: objectSchema(
+      { available: booleanSchema, reason: boundedString },
+      { allowUnknown: false }
+    )
+  },
+  'cloud.archive.start': { params: cloudArchiveStartSchema, result: cloudArchiveViewSchema },
+  'cloud.archive.resume': { params: cloudArchiveIdSchema, result: cloudArchiveViewSchema },
+  'cloud.archive.status': {
+    params: undefinedSchema,
+    result: arraySchema(cloudArchiveViewSchema, { maxLength: 16 })
+  },
+  'cloud.archive.stop': {
+    params: cloudArchiveIdSchema,
+    result: objectSchema({ ok: literalSchema(true) }, { allowUnknown: false })
+  },
+  'cloud.archive.cancel': {
+    params: cloudArchiveIdSchema,
+    result: objectSchema({ ok: literalSchema(true) }, { allowUnknown: false })
+  },
+  'cloud.archive.discard': {
+    params: cloudArchiveIdSchema,
+    result: objectSchema({ ok: literalSchema(true) }, { allowUnknown: false })
+  },
+
   'cloud.recordings.download': {
     params: cloudRecordingDownloadParamsSchema,
     result: cloudRecordingDownloadSchema

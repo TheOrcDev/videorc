@@ -62,8 +62,8 @@ consumer contract must exist before a producer can be enabled.
 | S5 / `avatar-animation`   | S4                                     | desktop, web | desktop: `feat/249-s4-cloud-parity`; web: `feat/249-s4-cloud-parity`     | Prepared; owner `S6z:P60l3:G7m82`; PR not assigned                                                                                                                                                                     |
 | S6 / `views`              | S3, S4                                 | desktop, web | Both: `feat/249-s16-cloud-parity`                                        | Waiting approval; owner `S6z:P60l3:G9zgb`; PR not assigned                                                                                                                                                             |
 | S7a / `microphone-bridge` | S1, S3                                 | desktop      | `feat/249-s3-cloud-parity`                                               | Desktop [#1444](https://github.com/TheOrcDev/videorc/pull/1444); acceptance not run; earlier PR(s) merged                                                                                                              |
-| S7b / `microphone`        | S7a                                    | desktop      | desktop: `feat/249-s7a-cloud-parity`                                     | Active; owner `S6z:P60l3:G67rq`; PR not assigned                                                                                                                                                                       |
-| S8 / `audio-routing`      | S2, S3, S7a, S7b                       | desktop, web | desktop: `feat/249-s7b-cloud-parity`; web: `feat/249-s6-cloud-parity`    | Unassigned / not created                                                                                                                                                                                               |
+| S7b / `microphone`        | S7a                                    | desktop      | desktop: `feat/249-s7a-cloud-parity`                                     | Open [#1448](https://github.com/TheOrcDev/videorc/pull/1448), owner `S6z:P60l3:G67rq`; acceptance not run                                                                                                              |
+| S8 / `audio-routing`      | S2, S3, S7a, S7b                       | desktop, web | desktop: `feat/249-s7b-cloud-parity`; web: `feat/249-s6-cloud-parity`    | Active; owner `S6z:P60l3:G67rq`                                                                                                                                                                                        |
 | S9 / `graphics`           | S4, S6                                 | desktop, web | desktop: `feat/249-s8-cloud-parity`; web: `feat/249-s8-cloud-parity`     | Waiting S6; owner `S6z:P60l3:G6oxv`; PR not assigned                                                                                                                                                                   |
 | S10 / `alpha-spike`       | S6                                     | desktop, web | desktop: `feat/249-s9-cloud-parity`; web: `feat/249-s9-cloud-parity`     | Waiting S6; owner `S6z:P60l3:G6ltc`; PR not assigned                                                                                                                                                                   |
 | S11 / `html`              | S9, S10                                | desktop, web | desktop: `feat/249-s10-cloud-parity`; web: `feat/249-s10-cloud-parity`   | Unassigned / not created                                                                                                                                                                                               |
@@ -79,7 +79,7 @@ consumer contract must exist before a producer can be enabled.
 | S20 / `library`           | S1, S16                                | desktop, web | Both: `feat/249-s16-cloud-parity`                                        | Desktop [#1443](https://github.com/TheOrcDev/videorc/pull/1443), web [#129](https://github.com/TheOrcDev/videorc-web/pull/129); acceptance not run; earlier PR(s) merged                                               |
 | S21a / `replay-ring`      | S20                                    | desktop, web | Both followups: `main`                                                   | Groundwork desktop [#1446](https://github.com/TheOrcDev/videorc/pull/1446), web [#130](https://github.com/TheOrcDev/videorc-web/pull/130); provider source followup prepared; acceptance not run; earlier PR(s) merged |
 | S21b / `clips`            | S19, S21a                              | desktop, web | desktop: `feat/249-s20-cloud-parity`; web: `feat/249-s21a-cloud-parity`  | Unassigned / not created                                                                                                                                                                                               |
-| S21c / `archive`          | S20, S21a                              | desktop      | desktop: `feat/249-s21b-cloud-parity`                                    | Unassigned / not created                                                                                                                                                                                               |
+| S21c / `archive`          | S20, S21a                              | desktop, web | Both: `feat/249-s21a-managed-replay`                                     | Prepared S21c checkpoint; owner `S6z:P60l3:G55dg`; acceptance not run                                                                                                                                                  |
 | S22 / `iso`               | S7a, S7b, S20                          | desktop, web | desktop: `feat/249-s21c-cloud-parity`; web: `feat/249-s21b-cloud-parity` | Active; owner `S6z:P60l3:G1wkh`; PR not assigned                                                                                                                                                                       |
 | S23 / `virtual-camera`    | S6, S13a, S13b                         | desktop      | desktop: `feat/249-s22-cloud-parity`                                     | Unassigned / not created                                                                                                                                                                                               |
 | S24 / `handoff`           | S5, S9, S16, S18, S20                  | desktop, web | desktop: `feat/249-s23-cloud-parity`; web: `feat/249-s22-cloud-parity`   | Active; owner `S6z:P60l3:G1q9i`; PR not assigned                                                                                                                                                                       |
@@ -99,7 +99,7 @@ S0 is committed/pushed by the coordinator at `570d72926` and merged as
 
 Parallel ownership (current coordinator assignments; isolated trees):
 
-- S7b: `S6z:P60l3:G67rq` — active.
+- S7b: `S6z:P60l3:G67rq` — published open PR #1448; S8 active.
 - S5: `S6z:P60l3:G7m82` — prepared.
 - S6: `S6z:P60l3:G9zgb` — waiting approval.
 - S9: `S6z:P60l3:G6oxv` — waiting S6.
@@ -108,7 +108,7 @@ Parallel ownership (current coordinator assignments; isolated trees):
 - S12: `S6z:P60l3:G98zv` — active.
 - S13a: `S6z:P60l3:G7e0v` — active.
 - S22: `S6z:P60l3:G1wkh` — active.
-- S21a source followup and central ledger: `S6z:P60l3:G55dg` — ready for coordinator.
+- S21a source followup published open #1449/#131; S21c and central ledger: `S6z:P60l3:G55dg`.
 
 S4 is merged as desktop [#1441](https://github.com/TheOrcDev/videorc/pull/1441)
 (`6a142e936`) and web [#127](https://github.com/TheOrcDev/videorc-web/pull/127)
@@ -410,3 +410,33 @@ user instruction; the Rust adapter tests are maintained but unexecuted.
 - Maintained actual-program acquisition/analyzer remains intact and **not run**.
   Focused evidence, exact paths, SDK constraints, PR text and pending acceptance
   are in the revised paired `docs/cloud/249-s21a-handoff.md`.
+
+## Current S21c optional local program archive checkpoint
+
+- S21a source followup is published, **open/unmerged**: desktop
+  [#1449](https://github.com/TheOrcDev/videorc/pull/1449) at
+  `183f4812dd8bbf4405d264031eec139176fd9de2`, web
+  [#131](https://github.com/TheOrcDev/videorc-web/pull/131) at
+  `cd32e7e7ba1a025f2b4f4c805dd6a8d0a6dea914`. Both base main.
+  Groundwork #1446/#130 remains merged; managed qualification remains false.
+- S7b [#1448](https://github.com/TheOrcDev/videorc/pull/1448), commit
+  `68c623f07754e755af0def3d9ed24383059bd36f`, is open on main. S8 owner
+  `S6z:P60l3:G67rq` is active. Other parallel assignments above remain owned.
+- S21c owner/central ledger: `S6z:P60l3:G55dg`. Fresh desktop
+  `/Users/orcdev/projects/videorc-wt-249-s21c` and web
+  `/Users/orcdev/projects/videorcweb-wt-249-s21c`, branch
+  `feat/249-s21c-cloud-parity`, start at the exact S21a source commits above.
+  Both eventual PRs base `feat/249-s21a-managed-replay`; originals untouched.
+- Native bounded journal/downloader/remux and Library registration, archive
+  controls, owner-authorized web projection, and maintained actual-program
+  acquisition/restart/loss/pixel/audio acceptance are implemented. No implicit
+  Record, source deletion, new capture owner, extra egress or grant. A local
+  archive depends on cloud egress/network; it is not an offline-independent backup.
+- S22 preserves the canonical take ID and separate ISO storage. S24 confirms
+  archive reads survive controller transfer; only account/show/take/generation
+  are fenced, with no controller writes or pending-End acknowledgement changes.
+- S21b is **not started**: S19 is unstarted. S21c does not bypass that dependency
+  or implement Clips. All 32 slices remain commissioned, not completed.
+- Source qualification is still false. No smoke/device/real-page/managed/provider,
+  full Rust build, deployment, paid calls or real user DB migration. Exact checks,
+  limits, paths and PR text: `docs/cloud/249-s21c-handoff.md`.
