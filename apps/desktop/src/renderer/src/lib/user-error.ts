@@ -112,7 +112,7 @@ const KNOWN_CODES: Readonly<Record<string, string>> = {
   'cloud-show-live': 'A show is live through Videorc Cloud. End it first.',
   // Plan 243: continuing a show on another device (the web's refusals, D8).
   'cloud-handoff-update':
-    'Update Videorc on the computer that started the show first, or end the stream and go live again.',
+    'Update Videorc on the other computer first, or end the stream and go live again.',
   'cloud-handoff-unsupported': "This show can't continue on another device.",
   'cloud-source-not-ready': "Videorc Cloud didn't get this computer's video in time. Try again.",
   'cloud-not-on-air': 'Your show is live from another device now.',

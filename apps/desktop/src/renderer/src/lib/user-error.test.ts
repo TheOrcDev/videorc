@@ -64,7 +64,7 @@ describe('userErrorMessage', () => {
     const cases: [string, string, 'warning' | 'error'][] = [
       [
         'cloud-handoff-update',
-        'Update Videorc on the computer that started the show first, or end the stream and go live again.',
+        'Update Videorc on the other computer first, or end the stream and go live again.',
         'warning'
       ],
       ['cloud-handoff-unsupported', "This show can't continue on another device.", 'warning'],

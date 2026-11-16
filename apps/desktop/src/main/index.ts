@@ -17847,7 +17847,9 @@ function showMainWindowPage(key: AppMenuPageKey): void {
 // Plan 174 S3.1 (D2): the app leaving while on air. Main holds the quit or
 // the close and asks the renderer to put up the End livestream question; the
 // renderer ends the livestream on a yes and answers through app:exit. Only a
-// renderer that can show the question is asked (exit-guard.ts).
+// renderer that can show the question is asked (exit-guard.ts). Plan 243 C5:
+// on a managed cloud show, "Quit and keep it live" answers through the same
+// app:exit once the show is handed off, with this computer's session stopped.
 function mainRendererCanAnswer(): boolean {
   return Boolean(
     mainWindow &&

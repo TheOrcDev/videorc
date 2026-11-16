@@ -1,6 +1,6 @@
 import type { BackendClient } from '@/backendClient'
 
-import type { CloudSettingsPatch, CloudStatus, CloudTestOutput } from './backend'
+import type { AppExitKind, CloudSettingsPatch, CloudStatus, CloudTestOutput } from './backend'
 import {
   CLOUD_TOAST_ID,
   cloudFallbackToast,
@@ -9,9 +9,10 @@ import {
   cloudShowCapToast,
   formatCloudCountdown
 } from './cloud-toasts'
+import { cloudTakenOverToast } from './cloud-handoff-view'
 import { requestCloudSectionFocus } from './cloud-section-focus'
 import { toast } from './toast'
-import { toastUserError } from './user-error'
+import { offlineError, toastUserError } from './user-error'
 import { openWorkspaceTab } from './workspace-navigation'
 
 // Videorc Cloud's notices and user actions: loaded with the first cloud
@@ -32,6 +33,11 @@ export function toastCloudStatus(previous: CloudStatus | null, next: CloudStatus
   if (cap) toast.warning(cap, { id: CLOUD_TOAST_ID })
   // Plan 222 U5: past the month's hours is news, never a cut (D18).
   if (next.allowancePast) toastCloudAllowancePast(previous, next)
+  // Plan 243 C5: another device continued the show and this computer
+  // stopped. Neutral news: the Studio's notice offers Continue here.
+  if (next.stoppedBy === 'taken-over' && previous?.stoppedBy !== 'taken-over') {
+    toast.info(cloudTakenOverToast(next.onAir), { id: CLOUD_TOAST_ID })
+  }
 }
 
 type CommitCloudStatus = (status: CloudStatus) => void
@@ -76,6 +82,37 @@ export async function endCloudShow(
       { id: CLOUD_TOAST_ID }
     )
   }
+}
+
+/**
+ * Plan 243 C5: the hand-off. The backend stops feeding through the hand-off
+ * stop (D7) and the show waits for another device; then a leaving app goes.
+ * A refusal says why, keeps the app, and lets the provider give the session
+ * its broadcasts back when it is still fed.
+ */
+export async function handOffCloudShow(
+  client: BackendClient | null,
+  exit: AppExitKind | null,
+  refused: () => void
+): Promise<void> {
+  try {
+    if (!client) throw offlineError()
+    await client.requestTyped('cloud.show.handOff')
+  } catch (error) {
+    refused()
+    toastUserError(error, { action: 'continue on another device' }, { id: CLOUD_TOAST_ID })
+    return
+  }
+  if (exit) void window.videorc?.exitApp?.(exit)
+}
+
+/** Plan 243 D10: focus asks videorc.com for a show live elsewhere, once per 10 s. */
+let cloudCheckedAt = 0
+export function checkCloudShow(client: BackendClient, nowMs = Date.now()): void {
+  // A clock set back never blocks the check.
+  if (nowMs >= cloudCheckedAt && nowMs - cloudCheckedAt < 10_000) return
+  cloudCheckedAt = nowMs
+  void client.requestTyped('cloud.show.check').catch(() => {})
 }
 
 /** The row shows the test result; only a refused click needs a warning. */

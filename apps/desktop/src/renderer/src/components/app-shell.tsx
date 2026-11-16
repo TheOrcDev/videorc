@@ -218,6 +218,7 @@ function AppShellContent(): ReactElement {
     toggleCaptionsWindow,
     stopConfirmation,
     confirmStopSession,
+    handOffStopSession,
     cancelStopSession,
     setFirstRunSetupOpen
   } = useStudioShell()
@@ -767,6 +768,7 @@ function AppShellContent(): ReactElement {
             confirmation={stopConfirmation}
             onCancel={cancelStopSession}
             onConfirm={confirmStopSession}
+            onHandOff={handOffStopSession}
           />
         ) : null}
       </Suspense>
