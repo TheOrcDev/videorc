@@ -102,8 +102,9 @@ describe('Electron IPC contract', () => {
     // 182: plan 244 (#704) adds screens:authorize-dropped-images (images
     // dropped on Takeovers) and screens:release-images (a stopped batch hands
     // back its unused capabilities), and makes the takeover picker multi-select.
-    expect(Object.keys(electronInvokeApiMethods)).toHaveLength(182)
-    expect(new Set(Object.values(electronInvokeApiMethods)).size).toBe(182)
+    // 184: plan 249 S7a adds the bounded main-only PCM transport and resource inspection.
+    expect(Object.keys(electronInvokeApiMethods)).toHaveLength(184)
+    expect(new Set(Object.values(electronInvokeApiMethods)).size).toBe(184)
     expectTypeOf<ElectronInvokeArgs<'resource:trash-session-deletion'>>().toEqualTypeOf<
       Parameters<VideorcApi['trashSessionDeletion']>
     >()
@@ -2011,4 +2012,28 @@ describe('the person card relay (plan 225 C2)', () => {
       validateElectronInvokeArgs('comments-window:community', [{ ...ok, extra: 1 }])
     ).toThrow()
   })
+})
+
+it('requires complete observed PCM counters and rejects inspection payloads', () => {
+  expect(validateElectronInvokeArgs('room-pcm:inspect', [])).toEqual([])
+  expect(() => validateElectronInvokeArgs('room-pcm:inspect', [{ origin: 'guest' }])).toThrow()
+  expect(() =>
+    validateElectronInvokeResult('room-pcm:inspect', { sockets: 0, ipcRequests: 0, timers: 0 })
+  ).toThrow()
+  expect(() =>
+    validateElectronInvokeResult('room-pcm:inspect', {
+      nativeSources: NaN,
+      sockets: 0,
+      ipcRequests: 0,
+      timers: 0
+    })
+  ).toThrow()
+  expect(
+    validateElectronInvokeResult('room-pcm:inspect', {
+      nativeSources: 1,
+      sockets: 1,
+      ipcRequests: 1,
+      timers: 1
+    })
+  ).toEqual({ nativeSources: 1, sockets: 1, ipcRequests: 1, timers: 1 })
 })

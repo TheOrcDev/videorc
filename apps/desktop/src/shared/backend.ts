@@ -1,3 +1,4 @@
+import type { RoomPcmCommand, RoomPcmFrame, RoomPcmResources } from './room-pcm'
 import type { ChatDelivery, ChatDeliveryBoundary } from './chat-delivery'
 import type { LiveDashboardState } from './live-dashboard'
 import type { GlobalShortcutAction } from './global-shortcuts'
@@ -6415,6 +6416,8 @@ export type SessionMediaGrantResult =
 export type AppExitKind = 'quit' | 'close'
 
 export interface VideorcApi {
+  getRoomPcmTestResources: () => Promise<RoomPcmResources>
+  roomPcmTest: (command: RoomPcmCommand) => Promise<RoomPcmFrame | null>
   /**
    * What this window sits on (plan 208): the solid base (the default) or the
    * OS glass. Main decides it per window and the preload reads it from

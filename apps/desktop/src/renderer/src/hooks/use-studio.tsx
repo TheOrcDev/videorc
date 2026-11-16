@@ -1,3 +1,4 @@
+import { roomPcmTestResources, setRoomPcmTestEnabled } from '../lib/room-pcm-test-state'
 import { cloudTerminalOwner } from '@/lib/cloud-provider-lifecycle'
 import { roomHoldsTheCamera } from '@/lib/replay-buffer-reconcile'
 import { outputSessionFacts } from '../../../shared/output-session'
@@ -20109,6 +20110,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         ]
         setDeviceList({ devices: fixtures, warnings: [] })
         return fixtures
+      },
+      roomPcmTest: (enabled?: boolean) => {
+        if (enabled !== undefined) setRoomPcmTestEnabled(enabled)
+        return roomPcmTestResources()
       },
       roomAvatar: (enabled?: boolean) => {
         if (enabled !== undefined) roomControlsRef.current?.setAvatarEnabled(enabled)

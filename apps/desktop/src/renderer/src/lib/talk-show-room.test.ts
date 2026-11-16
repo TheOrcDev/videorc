@@ -21,6 +21,9 @@ import {
 // stays out after a terminal end. `livekit-client` is faked: these are the
 // client's own rules, not the SDK's.
 
+const pcm = vi.hoisted(() => ({ create: vi.fn() }))
+vi.mock('./room-pcm-source', () => ({ createRoomPcmTestSource: pcm.create }))
+
 const lk = vi.hoisted(() => {
   type Handler = (...args: unknown[]) => void
   const fakeLocalTrack = () => ({
@@ -46,10 +49,11 @@ const lk = vi.hoisted(() => {
       closed: boolean
     }[] = []
     readonly localParticipant = {
+      identity: 'host:sh_talk',
       trackPublications: new Map(),
       setTrackSubscriptionPermissions: vi.fn(),
       publishTrack: vi.fn(async () => {}),
-      unpublishTrack: async () => {},
+      unpublishTrack: vi.fn(async () => {}),
       publishData: async () => {},
       streamBytes: async (options: {
         topic: string
@@ -116,7 +120,19 @@ vi.mock('livekit-client', () => ({
     h360: {},
     h720: { resolution: { width: 1280, height: 720 }, encoding: {} }
   },
-  LocalAudioTrack: class {},
+  LocalAudioTrack: class {
+    isMuted = false
+    constructor(readonly mediaStreamTrack: MediaStreamTrack) {}
+    stop(): void {
+      this.mediaStreamTrack.stop()
+    }
+    async mute(): Promise<void> {
+      this.isMuted = true
+    }
+    async unmute(): Promise<void> {
+      this.isMuted = false
+    }
+  },
   LocalVideoTrack: class {
     constructor(readonly mediaStreamTrack: MediaStreamTrack) {}
     stop(): void {
@@ -798,5 +814,69 @@ describe('S2 screen publication boundary', () => {
     expect(room.snapshot.local.screen).toBeNull()
     expect(room.snapshot.local.problem).toContain('privacy')
     await room.disconnect()
+  })
+})
+
+describe('S7a opt-in microphone producer', () => {
+  it('publishes only the PCM microphone lane, keeps initial mute, and closes before reconnect replacement', async () => {
+    const signals: AbortSignal[] = []
+    const sources: { track: MediaStreamTrack; close: ReturnType<typeof vi.fn> }[] = []
+    vi.stubGlobal('window', { videorc: { roomPcmTest: vi.fn() } })
+    pcm.create.mockImplementation(async (_api, signal: AbortSignal) => {
+      signals.push(signal)
+      const source = {
+        track: { kind: 'audio', stop: vi.fn() } as unknown as MediaStreamTrack,
+        close: vi.fn(async () => {})
+      }
+      sources.push(source)
+      return source
+    })
+    const { room } = client(undefined, undefined, {
+      cameraName: null,
+      microphoneName: null,
+      pcmTestSource: true,
+      initiallyMuted: true
+    })
+    await room.connect()
+    expect(lk.audio).not.toHaveBeenCalled()
+    const transport = latestRoom()
+    expect(transport.localParticipant.publishTrack).toHaveBeenCalledWith(
+      expect.objectContaining({ isMuted: true }),
+      { source: 'microphone' }
+    )
+    transport.emit('Reconnecting')
+    expect(signals[0].aborted).toBe(true)
+    expect(sources[0].close).toHaveBeenCalled()
+    transport.emit('Reconnected')
+    await vi.waitFor(() => expect(sources).toHaveLength(2))
+    expect(transport.localParticipant.unpublishTrack).toHaveBeenCalledTimes(1)
+    await room.disconnect()
+    expect(signals[1].aborted).toBe(true)
+    expect(sources[1].track.stop).toHaveBeenCalled()
+    vi.unstubAllGlobals()
+  })
+  it('cancels a source that resolves after the room closes without publishing', async () => {
+    vi.stubGlobal('window', { videorc: { roomPcmTest: vi.fn() } })
+    let release!: (source: { track: MediaStreamTrack; close: () => Promise<void> }) => void
+    pcm.create.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          release = resolve
+        })
+    )
+    const { room } = client(undefined, undefined, {
+      cameraName: null,
+      microphoneName: null,
+      pcmTestSource: true
+    })
+    const joining = room.connect()
+    await vi.waitFor(() => expect(release).toBeTypeOf('function'))
+    await room.disconnect()
+    const close = vi.fn(async () => {})
+    release({ track: { kind: 'audio', stop: vi.fn() } as unknown as MediaStreamTrack, close })
+    await joining
+    expect(close).toHaveBeenCalledOnce()
+    expect(latestRoom().localParticipant.publishTrack).not.toHaveBeenCalled()
+    vi.unstubAllGlobals()
   })
 })

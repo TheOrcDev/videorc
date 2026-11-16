@@ -37,6 +37,8 @@ function subscribe<TChannel extends ElectronEventChannel>(
 }
 
 const api: VideorcApi = {
+  getRoomPcmTestResources: () => invoke('room-pcm:inspect'),
+  roomPcmTest: (command) => invoke('room-pcm:test', command),
   onFrontAppChanged: (callback) => subscribe('app:front-changed', callback),
   setFrontWindowWatch: (enabled) => invoke('app:front-window-watch', { enabled }),
   getSelfBundleIds: () => invoke('app:self-bundle-ids'),

@@ -1,4 +1,5 @@
 import { RoomAuxPublisher } from './room-aux-publisher'
+import { createRoomPcmTestSource, type RoomPcmSource } from './room-pcm-source'
 import {
   RoomAvatarPublisher,
   type AvatarContent,
@@ -147,6 +148,9 @@ export const IDLE_TALK_SHOW_ROOM: TalkShowRoomSnapshot = {
 }
 
 export type TalkShowRoomDeps = {
+  /** S7a explicit dev fixture; not inferred from media-v2 or exposed as production mode. */
+  pcmTestSource?: boolean
+  onPcmDiagnostic?: (value: unknown) => void
   requestToken: () => Promise<CloudRoomTokenAnswer>
   /** `cloud.room.client.report`: the backend's status copy. */
   report: (state: CloudRoomClientState, detail?: string) => void
@@ -240,6 +244,10 @@ export class TalkShowRoomClient {
   #cameraEffectError = false
   #cameraSettingsRevision = 0
   #microphone: LocalAudioTrack | null = null
+  #pcmSource: RoomPcmSource | null = null
+  #pcmAbort: AbortController | null = null
+  #pcmRetiring: Promise<unknown> = Promise.resolve()
+  #microphoneGeneration = 0
   #screen: LocalVideoTrack | null = null
   #screenGeneration = 0
   #screenRaw: MediaStreamTrack | null = null
@@ -702,6 +710,7 @@ export class TalkShowRoomClient {
         this.#publish()
       })
       .on(RoomEvent.Reconnecting, () => {
+        if (this.#deps.pcmTestSource && this.#owns(room)) this.#retirePcm(room)
         if (this.#privacy) {
           this.#privacy.observations = {}
           this.#privacy.status = 'unconfirmed'
@@ -709,6 +718,18 @@ export class TalkShowRoomClient {
         this.#setState('reconnecting', 'Reconnecting to the room.')
       })
       .on(RoomEvent.Reconnected, () => {
+        if (this.#deps.pcmTestSource) {
+          const generation = this.#microphoneGeneration
+          void this.#pcmRetiring.then(async () => {
+            if (!this.#owns(room) || generation !== this.#microphoneGeneration) return
+            try {
+              await this.#publishMicrophone(room)
+            } catch (error) {
+              this.#problem = `The PCM test microphone didn't reopen: ${messageOf(error)}`
+            }
+            if (this.#owns(room)) this.#publish()
+          })
+        }
         this.#setState('connected', null)
         void this.sendStage(this.#lastStage)
       })
@@ -827,39 +848,11 @@ export class TalkShowRoomClient {
       }
     }
     if (!this.#owns(room)) return
-    if (this.#deps.microphoneName)
-      try {
-        const deviceId = await microphoneDeviceIdFor(this.#deps.microphoneName)
-        if (!this.#owns(room)) return
-        if (!deviceId) throw new Error('The selected microphone is unavailable.')
-        const microphone = await createLocalAudioTrack({
-          deviceId: { exact: deviceId },
-          echoCancellation: true,
-          noiseSuppression: true
-        })
-        if (!this.#owns(room)) {
-          microphone.stop()
-          return
-        }
-        this.#microphone = microphone
-        if (this.#micMuted) await microphone.mute()
-        if (!this.#owns(room)) {
-          microphone.stop()
-          return
-        }
-        await room.localParticipant.publishTrack(microphone, {
-          source: Track.Source.Microphone
-        })
-        if (!this.#owns(room)) {
-          microphone.stop()
-          return
-        }
-      } catch (error) {
-        this.#microphone?.stop()
-        this.#microphone = null
-        this.#micMuted = true
-        problems.push(`The microphone didn't open: ${messageOf(error)}`)
-      }
+    try {
+      await this.#publishMicrophone(room)
+    } catch (error) {
+      problems.push(`The microphone didn't open: ${messageOf(error)}`)
+    }
     if (!this.#owns(room)) return
     this.#problem = problems.length
       ? problems.join(' ')
@@ -869,7 +862,98 @@ export class TalkShowRoomClient {
     if (this.#problem) this.#deps.report('connected', this.#problem)
   }
 
+  async #publishMicrophone(room: Room): Promise<void> {
+    if (!this.#deps.microphoneName && !this.#deps.pcmTestSource) return
+    const generation = ++this.#microphoneGeneration
+    const current = (): boolean => this.#owns(room) && this.#microphoneGeneration === generation
+    try {
+      let microphone: LocalAudioTrack
+      if (this.#deps.pcmTestSource) {
+        if (!import.meta.env.DEV || !room.localParticipant.identity.startsWith('host:'))
+          throw new Error('PCM test source requires a development host room.')
+        const controller = new AbortController()
+        this.#pcmAbort = controller
+        const source = await createRoomPcmTestSource(
+          window.videorc.roomPcmTest,
+          controller.signal,
+          this.#deps.onPcmDiagnostic,
+          (reason) => {
+            if (!current()) return
+            this.#retirePcm(room)
+            this.#micMuted = true
+            this.#problem = reason
+            this.#publish()
+            this.#deps.report('connected', reason)
+          }
+        )
+        if (!current() || controller.signal.aborted) {
+          source.close()
+          return
+        }
+        this.#pcmSource = source
+        microphone = new LocalAudioTrack(source.track)
+      } else {
+        const deviceId = await microphoneDeviceIdFor(this.#deps.microphoneName!)
+        if (!current()) return
+        if (!deviceId) throw new Error('The selected microphone is unavailable.')
+        microphone = await createLocalAudioTrack({
+          deviceId: { exact: deviceId },
+          echoCancellation: true,
+          noiseSuppression: true
+        })
+      }
+      if (!current()) {
+        microphone.stop()
+        return
+      }
+      this.#microphone = microphone
+      if (this.#micMuted) await microphone.mute()
+      if (!current()) {
+        microphone.stop()
+        return
+      }
+      await room.localParticipant.publishTrack(microphone, {
+        source: Track.Source.Microphone
+      })
+      if (!current()) {
+        microphone.stop()
+        await room.localParticipant.unpublishTrack(microphone, true).catch(() => {})
+        return
+      }
+    } catch (error) {
+      if (!current()) return
+      this.#pcmAbort?.abort()
+      this.#pcmSource?.close()
+      this.#pcmSource = null
+      this.#microphone?.stop()
+      this.#microphone = null
+      this.#micMuted = true
+      throw error
+    }
+  }
+
+  #retirePcm(room: Room): void {
+    ++this.#microphoneGeneration
+    this.#pcmAbort?.abort()
+    this.#pcmAbort = null
+    const closing = this.#pcmSource?.close()
+    this.#pcmSource = null
+    const track = this.#microphone
+    this.#microphone = null
+    track?.stop()
+    this.#pcmRetiring = Promise.all([this.#pcmRetiring, closing])
+      .then(async () => {
+        if (track) await room.localParticipant.unpublishTrack(track, true)
+      })
+      .catch(() => {})
+  }
+
   async #stopLocal(): Promise<void> {
+    ++this.#microphoneGeneration
+    this.#pcmAbort?.abort()
+    this.#pcmAbort = null
+    const closingPcm = this.#pcmSource?.close()
+    this.#pcmSource = null
     const room = this.#room
     ++this.#screenGeneration
     ++this.#privacyGeneration
@@ -888,6 +972,7 @@ export class TalkShowRoomClient {
     this.#screen = null
     // Stop capture synchronously, before waiting for any network unpublish.
     for (const track of tracks) track.stop()
+    await Promise.all([closingPcm, this.#pcmRetiring])
     for (const track of tracks) {
       try {
         if (room) await room.localParticipant.unpublishTrack(track, true)

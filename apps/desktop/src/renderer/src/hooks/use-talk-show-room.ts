@@ -1,3 +1,4 @@
+import { roomPcmTestEnabled } from '../lib/room-pcm-test-state'
 import type { CohostPersona, BuddyOverlaySnapshot, OverlayItemLayout } from '@/lib/backend'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
@@ -226,6 +227,14 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
         document.body.appendChild(host)
         audioHostRef.current = host
         const roomClient = new TalkShowRoomClient({
+          // S7a harness opt-in; main also requires VIDEORC_ROOM_PCM_TEST=1 and
+          // the native source requires a debug build with smoke RPC enabled.
+          pcmTestSource:
+            import.meta.env.DEV &&
+            (roomPcmTestEnabled() ||
+              new URLSearchParams(window.location.search).get('roomPcmTest') === '1'),
+          onPcmDiagnostic: (detail) =>
+            window.dispatchEvent(new CustomEvent('videorc:pcm-test-diagnostic', { detail })),
           requestToken: () => client.requestTyped('cloud.room.token.refresh'),
           report,
           onSnapshot: (next) => {

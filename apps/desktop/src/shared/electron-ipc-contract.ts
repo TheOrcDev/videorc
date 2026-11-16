@@ -1,3 +1,4 @@
+import { parseRoomPcmCommand, parseRoomPcmFrame, parseRoomPcmResources } from './room-pcm'
 import type { FrontAppChanged } from './front-app'
 import { APP_ICONS_MAX_IDS } from './app-icons'
 import {
@@ -130,6 +131,8 @@ type InvokeDefinition<TMethod> = TMethod extends (...args: infer TArgs) => Promi
 export const electronInvokeApiMethods = {
   'backend:get-connection': 'getBackendConnection',
   'backend:get-logs': 'getBackendLogs',
+  'room-pcm:test': 'roomPcmTest',
+  'room-pcm:inspect': 'getRoomPcmTestResources',
   'app:get-runtime-info': 'getRuntimeInfo',
   'app:front-window-watch': 'setFrontWindowWatch',
   'app:self-bundle-ids': 'getSelfBundleIds',
@@ -2067,6 +2070,14 @@ const specificRuntimeInvokeContracts = {
     previewSurfaceStatusSchema
   ),
   'preview-surface:destroy': invokeContract(optionalGenerationOnlyArgs, previewSurfaceStatusSchema),
+  'room-pcm:inspect': invokeContract(
+    noArgs,
+    runtimeSchema('PCM resources', (value) => parseRoomPcmResources(value))
+  ),
+  'room-pcm:test': invokeContract(
+    tupleSchema([runtimeSchema('PCM command', (value) => parseRoomPcmCommand(value))]),
+    nullableSchema(runtimeSchema('PCM frame', (value) => parseRoomPcmFrame(value)))
+  ),
   'preview-surface:status': invokeContract(noArgs, previewSurfaceStatusSchema),
   'preview-window:set-aspect-ratio': invokeContract(
     tupleSchema([numberSchema({ min: 1, max: 65_536 }), numberSchema({ min: 1, max: 65_536 })])

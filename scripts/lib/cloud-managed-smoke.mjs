@@ -110,7 +110,11 @@ export function managedPublishAllowed(shows, { action, path }) {
  */
 /** `youtube` (plan 249 S18) starts the local fake YouTube API for a talk
  * show too; solo always has it. No real provider is ever reached. */
-export async function managedHarness(kind, pass = 1, { youtube: withYouTube = false } = {}) {
+export async function managedHarness(
+  kind,
+  pass = 1,
+  { maximumLogEntries = Infinity, youtube: withYouTube = false } = {}
+) {
   const root = mkdtempSync(
     join(process.env.VIDEORC_SMOKE_OUTPUT_DIR ?? tmpdir(), `videorc-managed-${kind}-${pass}-`)
   )
@@ -497,6 +501,9 @@ export async function managedHarness(kind, pass = 1, { youtube: withYouTube = fa
         onLine: (l) => {
           rawAppLogs.push(l)
           logs.push(redact(l))
+          if (rawAppLogs.length > maximumLogEntries)
+            rawAppLogs.splice(0, rawAppLogs.length - maximumLogEntries)
+          if (logs.length > maximumLogEntries) logs.splice(0, logs.length - maximumLogEntries)
         }
       })
       backend = await connectBackend(app.connections['backend-ready'], 30000)
@@ -505,6 +512,7 @@ export async function managedHarness(kind, pass = 1, { youtube: withYouTube = fa
         try {
           const m = JSON.parse(e.data)
           if (m.event) events.push({ ...m, atMs: Date.now() })
+          if (events.length > maximumLogEntries) events.splice(0, events.length - maximumLogEntries)
         } catch {}
       })
       await h.status((s) => s.entitled && s.settings?.enabled, 'managed entitlement')

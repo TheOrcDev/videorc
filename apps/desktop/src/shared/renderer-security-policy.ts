@@ -17,6 +17,8 @@ const MAIN_AND_CAPTIONS = ['main', 'captions'] as const
 export const IPC_INVOKE_ROLES = {
   'backend:get-connection': MAIN_ONLY,
   'backend:get-logs': MAIN_ONLY,
+  'room-pcm:test': MAIN_ONLY,
+  'room-pcm:inspect': MAIN_ONLY,
   'account:begin-sign-in': MAIN_ONLY,
   'account:refresh': MAIN_ONLY,
   'account:sign-out': MAIN_ONLY,
