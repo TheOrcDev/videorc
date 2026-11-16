@@ -4101,14 +4101,24 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
     ) -> Result<ResumeOutcome> {
         match self.web.current_show(bearer).await {
             Ok(CurrentShowResponse {
-                on_air: None,
+                on_air,
                 show: Some(show),
                 control: Some(control),
                 ingest,
             }) if live.as_ref().is_none_or(|live| live.id == show.id) => {
+                let device_id = lock(&self.slot).device.id.clone();
+                if on_air.as_ref().is_some_and(|air| {
+                    !air.waiting && air.device_id.as_deref().is_some_and(|id| id != device_id)
+                }) {
+                    return Err(cloud_refusal("cloud-show-live-elsewhere"));
+                }
                 let show_id = show.id.clone();
                 {
                     let mut runtime = lock(&self.slot);
+                    runtime.runner = Some(RunnerState {
+                        on_air,
+                        ..RunnerState::default()
+                    });
                     runtime.show = Some(ActiveShow {
                         record: show,
                         control,
@@ -4130,9 +4140,7 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
                 )
                 .await
             }
-            _ => bail!(
-                "You're still live through Videorc Cloud, but the show could not be picked up. End it from videorc.com/live or try again."
-            ),
+            _ => bail!("Your show could not be picked up. Try Continue here again."),
         }
     }
 
@@ -12474,6 +12482,54 @@ mod tests {
         assert_eq!(harness.context.web.on_air_calls.lock().unwrap().len(), 40);
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn r2_a_l2_adopt_accepts_this_device_or_waiting_and_refuses_elsewhere() {
+        for (own, waiting, allowed) in [
+            (true, false, true),
+            (false, true, true),
+            (false, false, false),
+        ] {
+            let harness = harness(true);
+            let mut current = held_current(&created_managed());
+            let id = if own {
+                lock(&harness.context.slot).device.id.clone()
+            } else {
+                "BBBBBBBBBBBBBBBBBBBBBB".into()
+            };
+            current.on_air = Some(CloudOnAirWire {
+                device_id: Some(id),
+                waiting,
+                kind: Some(CloudDeviceKind::Computer),
+                source: Some(CloudAirSource::Feed),
+                ..Default::default()
+            });
+            harness
+                .context
+                .web
+                .current
+                .lock()
+                .unwrap()
+                .push_back(Ok(current));
+            harness
+                .context
+                .web
+                .set_state(managed_state("live", live_legs()));
+            let answer = harness
+                .context
+                .adopt_live_show("new-live", "bearer", None, destinations(), None)
+                .await;
+            assert_eq!(answer.is_ok(), allowed);
+            if !allowed {
+                let error = answer.unwrap_err();
+                assert_eq!(
+                    continuation_error_code(&error),
+                    Some("cloud-show-live-elsewhere")
+                );
+                assert!(!error.to_string().contains("End it"));
+            }
+            assert!(harness.context.web.end_calls.lock().unwrap().is_empty());
+        }
+    }
     fn hold_unconnected_for_review(harness: &Harness, talk: bool) {
         let created = if talk {
             created_managed_talk()
