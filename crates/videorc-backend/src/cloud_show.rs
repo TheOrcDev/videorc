@@ -3057,10 +3057,29 @@ impl<W: CloudWebApi, C: ControlConnector> ControlLoop<W, C> {
         state: RunnerState,
         fresh: impl FnOnce() -> bool,
     ) -> bool {
-        let (session, legs) = {
+        let (session, legs, taken_over) = {
             let mut runtime = lock(&self.context.slot);
             if !fresh() {
                 return false;
+            }
+            let taken_over = runtime.stopped_by.is_none()
+                && runtime.show.as_ref().is_some_and(|show| {
+                    show.control.transport_kind() == ControlKind::Web
+                        && (show.session_id.is_some() || runtime.talk.is_some())
+                })
+                && state
+                    .on_air
+                    .as_ref()
+                    .and_then(|air| air.device_id.as_deref())
+                    .is_some_and(|id| id != runtime.device.id);
+            if taken_over {
+                runtime.stopped_by = Some(CloudStoppedBy::TakenOver);
+                runtime.feed_down_since = None;
+                runtime.failed = None;
+                runtime.destinations_generation.stop();
+                self.resend = None;
+                self.resend_stage = false;
+                self.resend_hold_image = None;
             }
             if state.phase == "live"
                 && let Some(show) = runtime.show.as_mut()
@@ -3147,7 +3166,15 @@ impl<W: CloudWebApi, C: ControlConnector> ControlLoop<W, C> {
             runtime.talk_layout_from_runner();
             runtime.talk_live_from_runner();
             runtime.connected = true;
-            (session, legs)
+            (
+                if runtime.stopped_by.is_some() {
+                    None
+                } else {
+                    session
+                },
+                legs,
+                taken_over,
+            )
         };
         if let Some(session_id) = session
             && !legs.is_empty()
@@ -3155,6 +3182,15 @@ impl<W: CloudWebApi, C: ControlConnector> ControlLoop<W, C> {
             (self.context.hooks.legs)(&session_id, legs);
         }
         self.context.hooks.emit_from(&self.context.slot);
+        if taken_over {
+            let context = self.context.clone();
+            let show_id = self.show_id.clone();
+            tokio::spawn(async move {
+                let _ = context
+                    .stop_for_continuation(&show_id, CloudStoppedBy::TakenOver)
+                    .await;
+            });
+        }
         true
     }
 
@@ -11612,6 +11648,44 @@ mod tests {
         let show = status.show.unwrap();
         assert!(show.resumable);
         assert_eq!(show.kind.as_deref(), Some("talk"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cloud_taken_over_stops_solo_and_talk_without_ending() {
+        for talk in [false, true] {
+            let harness = harness(true);
+            if talk {
+                managed_room(&harness).await;
+            } else {
+                managed_live_show(&harness).await;
+            }
+            note_feed_leg(&harness.context.slot, "session-1", true);
+            let mut state = if talk {
+                managed_talk_state(json!([]), true, 1)
+            } else {
+                managed_state("live", json!([]))
+            };
+            state["onAir"] = json!({"deviceId":"BBBBBBBBBBBBBBBBBBBBBB","name":"iPhone","kind":"phone","source":if talk {"host"} else {"camera"},"since":"now","waiting":false});
+            harness.context.web.set_state(state);
+            wait_until(|| {
+                lock(&harness.context.slot).status().stopped_by == Some(CloudStoppedBy::TakenOver)
+            })
+            .await;
+            wait_until(|| {
+                lock(&harness.context.slot)
+                    .status()
+                    .show
+                    .is_some_and(|show| show.resumable)
+            })
+            .await;
+            harness
+                .context
+                .on_session_stopped("session-1", Some("bearer".into()))
+                .await;
+            assert!(harness.context.web.end_calls.lock().unwrap().is_empty());
+            assert_eq!(harness.context.web.hand_off_calls.load(Ordering::SeqCst), 0);
+            assert!(lock(&harness.context.slot).failed.is_none());
+        }
     }
 
     // Wire section 8.4: a show's only stream dies and LiveKit reports

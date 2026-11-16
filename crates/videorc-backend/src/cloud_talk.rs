@@ -2100,7 +2100,9 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
             let mut runtime = lock(&self.slot);
             if let Some(talk) = runtime.talk.as_mut() {
                 talk.client = params.state;
-                talk.message = params.detail.filter(|detail| !detail.trim().is_empty());
+                talk.message = params.detail.filter(|detail| {
+                    !detail.trim().is_empty() && !detail.contains("DUPLICATE_IDENTITY")
+                });
             }
         }
         self.hooks.emit_from(&self.slot);

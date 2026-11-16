@@ -29733,6 +29733,25 @@ async fn publish_stream_leg_update(
     stream_bitrate_kbps: Option<u32>,
     update: StreamLegUpdate,
 ) {
+    // Plan 243 C3: ingress rotation can fail the old feed just before the
+    // state poll names the new device. Give that state three seconds to arrive.
+    if let StreamLegUpdate::Reconnecting { position, .. }
+    | StreamLegUpdate::Failed { position, .. } = &update
+    {
+        let cloud_feed = stream_targets_snapshot_value(targets)
+            .targets
+            .get(*position)
+            .is_some_and(|t| is_cloud_feed_target(&t.target_id));
+        if cloud_feed {
+            tokio::time::sleep(Duration::from_secs(3)).await;
+            if crate::cloud_show::lock(&state.cloud_show)
+                .stopped_by
+                .is_some()
+            {
+                return;
+            }
+        }
+    }
     // A failed destination is terminal: a dead tee slave, a finished output,
     // or a broadcast the platform ended. FFmpeg reconnecting the socket
     // underneath cannot bring the broadcast back, so it never revives one.

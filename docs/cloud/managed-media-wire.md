@@ -1194,3 +1194,10 @@ uses the existing Stop path. This intent never calls `/end`, clears no
 remembered show, and leaves `sessionId` absent and the show resumable. Talk
 overlays are cleared before releasing the host connection; no room close is
 sent. The marker stays until a new session starts or a new show is held.
+
+C3 / W1, W2 (D1, D7): a managed state naming another device while this
+computer feeds or hosts triggers the same local stop with `taken-over`.
+It sends neither `/hand-off` nor `/end`. Destination recovery is invalidated
+and feed notices are suppressed after takeover. Old-feed failures wait three
+seconds for the corresponding state poll, covering ingress rotation arriving
+before `onAir`. The renderer owns LiveKit's duplicate-identity event (C5).
