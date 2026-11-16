@@ -19,7 +19,61 @@ import { managedWire as w } from './lib/fake-cloud-web-managed.mjs'
 const index = process.argv.indexOf('--repeat')
 const repeat = index < 0 ? 1 : Number(process.argv[index + 1])
 assert.ok(Number.isInteger(repeat) && repeat > 0, '--repeat requires a positive integer')
-for (let pass = 1; pass <= repeat; pass++) await run(pass)
+if (process.argv.includes('--capture-ui')) await captureUi()
+else for (let pass = 1; pass <= repeat; pass++) await run(pass)
+
+// Screenshot-only fixture: it does not repeat or claim the full smoke's gates.
+// Streaming without a local recording keeps its saved-recording toast from
+// covering the continuation notice that this fixture exists to capture.
+async function captureUi() {
+  assert.ok(process.env.VIDEORC_SMOKE_SHOTS_DIR, '--capture-ui requires VIDEORC_SMOKE_SHOTS_DIR')
+  const h = await managedHarness('solo')
+  try {
+    await h.destinations(1)
+    await h.launch()
+    // The full smoke seeds this draft with its fake YouTube setup. The
+    // screenshot-only fixture still needs the normal Go Live prerequisites.
+    await h.rpc('streamTargets.metadata.update', {
+      title: 'Managed continuation capture',
+      description: 'Local fixture only',
+      defaultPrivacy: 'unlisted',
+      targetOverrides: [],
+      updatedAt: new Date().toISOString()
+    })
+    const started = await h.startUiLive({ recordEnabled: false })
+    h.showId = started.show.id
+    await waitFor(() => h.feedFrames.length >= 30, 'capture fixture feed publishing')
+    const at = Date.now()
+    await h.handOffUi()
+    await h.status((s) => s.show?.resumable && s.onAir?.waiting, 'capture fixture waiting')
+    await h.captureUi('waiting', '[data-testid=cloud-resume-notice]')
+    await h.continueUi()
+    await h.status((s) => s.sessionId && s.onAir?.thisDevice, 'capture fixture continued')
+    const phone = h.newDevice()
+    assert.equal(
+      (await h.webRequest('on-air', { device: phone, source: 'camera', step: 'prepare' })).status,
+      200
+    )
+    h.web.hooks.camera(h.showId, phone.id, true)
+    assert.equal(
+      (await h.webRequest('on-air', { device: phone, source: 'camera', step: 'go' })).status,
+      200
+    )
+    await h.status(
+      (s) => s.stoppedBy === 'taken-over' && s.show?.resumable,
+      'capture fixture taken over'
+    )
+    await h.captureUi('taken-over', '[data-sonner-toast]', 'Your show continues on Smoke phone.')
+    await h.captureUi('live-elsewhere', '[data-testid=cloud-resume-notice]')
+    h.assertNoPlatformEnd(at)
+    h.scanLeaks()
+    // Explicit fixture teardown after all continuation evidence is captured.
+    assert.equal((await h.webRequest('end', {})).status, 200)
+    console.log('[managed UI capture] all four continuation states captured in both themes')
+  } finally {
+    await h.close()
+  }
+}
 
 async function run(pass) {
   const h = await managedHarness('solo', pass)
@@ -341,6 +395,7 @@ async function run(pass) {
           ),
           'phone pointer missing'
         )
+        await h.captureUi('waiting', '[data-testid=cloud-resume-notice]')
         h.scanLeaks()
       }
     )
@@ -394,7 +449,6 @@ async function run(pass) {
         )
         assert.ok(terminal && terminal.atMs - at <= 3000, 'taken-over stop exceeded three seconds')
         h.assertStopOrder(at, 'taken-over')
-        await savedRecording(continuedRecording)
         h.assertNoPlatformEnd(at)
         assert.ok(
           await h.eval(
@@ -409,6 +463,9 @@ async function run(pass) {
             ),
           'notice names the phone'
         )
+        await h.captureUi('taken-over', '[data-sonner-toast]')
+        await h.captureUi('live-elsewhere', '[data-testid=cloud-resume-notice]')
+        await savedRecording(continuedRecording)
       }
     )
     await step(

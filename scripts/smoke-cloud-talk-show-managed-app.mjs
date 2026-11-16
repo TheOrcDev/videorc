@@ -384,6 +384,13 @@ try {
   await step(
     'phone host go leaves the desktop seated until DUPLICATE_IDENTITY, then Continue here takes it back',
     async () => {
+      // The preceding Program check deliberately removed this guest. Restore
+      // both publishers before testing that moving the host preserves them.
+      await listener.joinPeer(guests[0], true, { tone: 659, color: '#c02020' })
+      await h.status(
+        (s) => guests.every((id) => s.room?.participants.some((p) => p.identity === id)),
+        'both guests present before host continuation'
+      )
       await h.rpc('cloud.show.goLive', { streaming: h.streaming() })
       await h.status((s) => s.room?.client === 'connected', 'desktop host before continuation')
       const before = structuredClone(h.web.snapshot(h.showId).state.room.stage)
@@ -417,12 +424,17 @@ try {
         ),
         'takeover requires the real second host join'
       )
-      assert.ok(
-        await h.eval(
-          `return document.body.textContent.includes('Your show continues on Smoke phone.')`
-        ),
-        'host takeover toast missing'
+      // The backend socket and the renderer's lazy notice module settle
+      // independently. Require the exact toast after the renderer commits it.
+      await waitFor(
+        () =>
+          h.eval(
+            `return document.body.textContent.includes('Your show continues on Smoke phone.')`
+          ),
+        'host takeover toast',
+        3000
       )
+      await h.captureUi('taken-over', '[data-sonner-toast]', 'Your show continues on Smoke phone.')
       await holdFor(
         () => {
           const room = h.web.snapshot(h.showId).state.room

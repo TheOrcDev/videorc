@@ -2,12 +2,14 @@ import assert from 'node:assert/strict'
 import { spawn, spawnSync } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
 import {
+  copyFileSync,
   existsSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
+  rmSync,
   writeFileSync
 } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -114,7 +116,8 @@ export async function managedHarness(kind, pass = 1) {
     userData = join(root, 'electron')
   const mediaDir = join(root, 'media')
   const profiles = [],
-    privateValues = new Set()
+    privateValues = new Set(),
+    screenshots = new Set()
   const redact = (text) => {
     let safe = maskManagedUrls(String(text))
     for (const secret of privateValues)
@@ -399,6 +402,75 @@ export async function managedHarness(kind, pass = 1) {
     async command(command, params = {}) {
       return requestSmokeCommand(smoke, command, params, { timeoutMs: 15000 })
     },
+    async captureUi(name, selector, toastText) {
+      const directory = process.env.VIDEORC_SMOKE_SHOTS_DIR
+      if (!directory || screenshots.has(name)) return
+      mkdirSync(directory, { recursive: true })
+      await waitFor(
+        () =>
+          h.eval(
+            `return Boolean(document.querySelector(${JSON.stringify(selector)})?.getClientRects().length)`
+          ),
+        `${name} visible for capture`
+      )
+      const original = await h.eval(
+        `return document.documentElement.classList.contains('dark') ? 'dark' : 'light'`
+      )
+      const setTheme = async (theme) => {
+        await h.eval(
+          `localStorage.setItem('videorc.theme', ${JSON.stringify(theme)}); window.dispatchEvent(new StorageEvent('storage', {key:'videorc.theme',newValue:${JSON.stringify(theme)}})); return true`
+        )
+        await waitFor(
+          () =>
+            h.eval(`return document.documentElement.classList.contains(${JSON.stringify(theme)})`),
+          `${theme} capture theme`
+        )
+        await h.eval(
+          'await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))); return true'
+        )
+      }
+      try {
+        for (const theme of ['dark', 'light']) {
+          await setTheme(theme)
+          if (toastText) {
+            await h.eval(
+              `for (const toast of document.querySelectorAll('[data-sonner-toast]')) if (!toast.textContent.includes(${JSON.stringify(toastText)})) toast.querySelector('[aria-label="Dismiss notification"]')?.click(); return true`
+            )
+            await waitFor(
+              () =>
+                h.eval(
+                  `return [...document.querySelectorAll('[data-sonner-toast]')].some(t => t.textContent.includes(${JSON.stringify(toastText)}) && t.dataset.front === 'true')`
+                ),
+              'takeover toast at the front of the notification stack'
+            )
+          }
+          await h.eval(
+            `const target=document.querySelector(${JSON.stringify(selector)}); const surface=target?.closest('[role=dialog], [data-sonner-toast]') ?? target; await Promise.all((surface?.getAnimations({subtree:true}) ?? []).filter(a=>a.effect?.getComputedTiming().endTime <= 1000).map(a=>a.finished.catch(()=>{}))); return true`
+          )
+          const shot = await h.command('capture-page', { name: `${kind}-${pass}-${name}-${theme}` })
+          assert.ok(shot?.file && existsSync(shot.file), 'page capture must produce a PNG')
+          const file = join(directory, `${kind}-${pass}-${name}-${theme}.png`)
+          copyFileSync(shot.file, file)
+          if (process.platform === 'darwin') {
+            // The native window capture includes the glass/vibrancy layer,
+            // which webContents.capturePage omits. Keep the page fallback if
+            // this shell has no screen-capture permission.
+            const { windowId } = await h.command('main-window-id')
+            if (windowId) {
+              const native = file.replace(/\.png$/, '-native.png')
+              const result = spawnSync('screencapture', ['-x', '-l', String(windowId), native], {
+                timeout: 5000
+              })
+              if (result.status === 0 && existsSync(native)) copyFileSync(native, file)
+              rmSync(native, { force: true })
+            }
+          }
+        }
+        screenshots.add(name)
+      } finally {
+        await setTheme(original)
+      }
+    },
     // `account.refresh` is main's (the admin role): the renderer asks main for
     // it over IPC, as the app's own account refresh does. Main defers it while
     // a session captures, so a sign-in is followed, as in the app, by the
@@ -484,8 +556,8 @@ export async function managedHarness(kind, pass = 1) {
         'Studio ready'
       )
     },
-    async startUiLive() {
-      await h.configureStudio({ recordEnabled: true })
+    async startUiLive({ recordEnabled = true } = {}) {
+      await h.configureStudio({ recordEnabled })
       await h.eval('await window.__videorcSmokeScenePresets.start(); return true')
       await waitFor(
         () => h.eval('return window.__videorcSmokeScenePresets.streamingState().confirmationOpen'),
@@ -503,6 +575,7 @@ export async function managedHarness(kind, pass = 1) {
       await h.eval(
         `const buttons=[...document.querySelectorAll('[data-slot=session-transport] button')]; const b=buttons.find(b=>!b.disabled && /Stop|End livestream/.test(b.textContent)); if(!b) throw new Error('No live Stop control'); b.click(); return true`
       )
+      await h.captureUi('end-livestream', '[data-testid=end-livestream-hand-off]')
       await h.clickTestId('end-livestream-hand-off')
     },
     async continueUi() {
