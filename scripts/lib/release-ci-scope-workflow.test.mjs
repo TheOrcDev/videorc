@@ -48,6 +48,22 @@ describe('release CI path-filter wiring', () => {
     assert.match(windows, /name: Cache capture FFmpeg sources/)
     assert.match(windows, /windows-ffmpeg-capture-src-/)
     assert.match(windows, /name: Windows startup incident diagnostics/)
+    // Plan 242 S5: the diagnostics run on pushes and dispatch, and on a pull
+    // request only when it changes their tooling; the twin covers the rest.
+    const incident = windows.slice(
+      windows.indexOf('\n  incident:'),
+      windows.indexOf('\n  incident-skip:')
+    )
+    const incidentSkip = windows.slice(windows.indexOf('\n  incident-skip:'))
+    assert.match(
+      incident,
+      /windows_heavy == 'true' &&\s+\(github\.event_name != 'pull_request' \|\| needs\.scope\.outputs\.windows_incident_tooling == 'true'\)/
+    )
+    assert.match(
+      incidentSkip,
+      /!\(needs\.scope\.outputs\.windows_heavy == 'true' &&\s+\(github\.event_name != 'pull_request' \|\| needs\.scope\.outputs\.windows_incident_tooling == 'true'\)\)/
+    )
+    assert.match(scope, /windows_incident_tooling:/)
 
     assert.match(linux, /uses: \.\/\.github\/workflows\/ci-change-scope\.yml/)
     assert.match(linux, /name: Linux gates \(FFmpeg policy \+ Rust compile\/test\)/)

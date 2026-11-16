@@ -528,6 +528,13 @@ candidate, prove sustained hardware support, or replace physical/provider accept
 The protected stream performance command without `--incident` retains its existing
 installed-candidate requirements and budgets.
 
+In CI, the `Windows startup incident diagnostics` job (`windows.yml`) runs on every
+push to `main`, on manual dispatch, and on pull requests that change its own tooling
+(the scripts below, their `scripts/lib` modules, `windows_mf_probe.rs`, or
+`windows.yml`). Other pull requests skip it (plan 242 S5): it took 48 minutes per
+run and no release reads it. To get fresh evidence for a branch, dispatch
+`windows.yml` on it.
+
 Build a debug backend, fetch the pinned Windows output FFmpeg, and run from PowerShell 7:
 
 ```powershell

@@ -23,6 +23,9 @@ on:
       js:
         description: Whether the JS format/lint/test job must run
         value: ${{ jobs.scope.outputs.js }}
+      windows_incident_tooling:
+        description: Whether a pull request changes the Windows incident diagnostics tooling
+        value: ${{ jobs.scope.outputs.windows_incident_tooling }}
 
 jobs:
   scope:
@@ -35,6 +38,7 @@ jobs:
       linux_heavy: ${{ steps.classify.outputs.linux_heavy }}
       macos_rust: ${{ steps.classify.outputs.macos_rust }}
       js: ${{ steps.classify.outputs.js }}
+      windows_incident_tooling: ${{ steps.classify.outputs.windows_incident_tooling }}
     steps:
       - name: Check out repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683

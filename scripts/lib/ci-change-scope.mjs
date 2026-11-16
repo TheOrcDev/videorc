@@ -175,12 +175,38 @@ export function classifyChangeScope({
   return { ...HEAVY_CODE_SCOPE }
 }
 
+// The Windows startup incident diagnostics job (windows.yml `incident`) runs
+// on a pull request only when the pull request changes what that job runs
+// (plan 242 S5). Pushes to main and manual dispatch always run it.
+export const WINDOWS_INCIDENT_TOOLING_PATHS = Object.freeze([
+  '.github/workflows/windows.yml',
+  'scripts/smoke-windows-stream-performance.mjs',
+  'scripts/smoke-windows-mf-probe.mjs',
+  'scripts/probe-windows-openh264-comparison.mjs',
+  'crates/videorc-backend/src/windows_mf_probe.rs'
+])
+export const WINDOWS_INCIDENT_TOOLING_PREFIXES = Object.freeze([
+  'scripts/lib/windows-incident-',
+  'scripts/lib/windows-mf-probe',
+  'scripts/lib/windows-openh264-comparison',
+  'scripts/lib/windows-stream-performance',
+  'scripts/lib/windows-owned-pcm-eof'
+])
+
+export function isWindowsIncidentToolingPath(path) {
+  return (
+    WINDOWS_INCIDENT_TOOLING_PATHS.includes(path) ||
+    WINDOWS_INCIDENT_TOOLING_PREFIXES.some((prefix) => path.startsWith(prefix))
+  )
+}
+
 export function scopeToActionOutputs(scope) {
   return {
     kind: scope.kind,
     windows_heavy: String(scope.windowsHeavy === true),
     linux_heavy: String(scope.linuxHeavy === true),
     macos_rust: String(scope.macosRust === true),
-    js: String(scope.js === true)
+    js: String(scope.js === true),
+    windows_incident_tooling: String(scope.windowsIncidentTooling === true)
   }
 }

@@ -12,6 +12,7 @@ import {
   isJsTestPath,
   isVersionOnlyPackageJson,
   isVersionReleasePath,
+  isWindowsIncidentToolingPath,
   scopeToActionOutputs
 } from './ci-change-scope.mjs'
 
@@ -116,14 +117,16 @@ describe('ci-change-scope', () => {
       windows_heavy: 'false',
       linux_heavy: 'false',
       macos_rust: 'false',
-      js: 'true'
+      js: 'true',
+      windows_incident_tooling: 'false'
     })
     assert.deepEqual(scopeToActionOutputs(HEAVY_CODE_SCOPE), {
       kind: 'code',
       windows_heavy: 'true',
       linux_heavy: 'true',
       macos_rust: 'true',
-      js: 'true'
+      js: 'true',
+      windows_incident_tooling: 'false'
     })
   })
 
@@ -213,5 +216,47 @@ describe('ci-change-scope', () => {
       }
     })
     assert.deepEqual(prRanges, [`${'c'.repeat(40)}...${'d'.repeat(40)}`])
+  })
+
+  it('flags a change to the Windows incident diagnostics tooling (plan 242 S5)', () => {
+    for (const path of [
+      '.github/workflows/windows.yml',
+      'scripts/smoke-windows-stream-performance.mjs',
+      'scripts/smoke-windows-mf-probe.mjs',
+      'scripts/probe-windows-openh264-comparison.mjs',
+      'scripts/lib/windows-incident-runner.mjs',
+      'scripts/lib/windows-incident-matrix.test.mjs',
+      'scripts/lib/windows-mf-probe.mjs',
+      'scripts/lib/windows-openh264-comparison.mjs',
+      'scripts/lib/windows-stream-performance.mjs',
+      'scripts/lib/windows-owned-pcm-eof.mjs',
+      'crates/videorc-backend/src/windows_mf_probe.rs'
+    ]) {
+      assert.equal(isWindowsIncidentToolingPath(path), true, path)
+    }
+    for (const path of [
+      'crates/videorc-backend/src/main.rs',
+      'scripts/lib/windows-local-gates.mjs',
+      'apps/desktop/src/main/index.ts',
+      '.github/workflows/ci.yml'
+    ]) {
+      assert.equal(isWindowsIncidentToolingPath(path), false, path)
+    }
+
+    const classify = (files) =>
+      classifyRepositoryChangeScope({
+        env: { GITHUB_EVENT_NAME: 'pull_request', CI_BASE_SHA: 'c'.repeat(40), CI_HEAD_SHA: 'd'.repeat(40) },
+        gitChangedFiles: () => files
+      })
+    assert.equal(
+      scopeToActionOutputs(classify(['crates/videorc-backend/src/main.rs'])).windows_incident_tooling,
+      'false'
+    )
+    assert.equal(
+      scopeToActionOutputs(
+        classify(['crates/videorc-backend/src/main.rs', 'scripts/lib/windows-incident-runner.mjs'])
+      ).windows_incident_tooling,
+      'true'
+    )
   })
 })

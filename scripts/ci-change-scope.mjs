@@ -6,6 +6,7 @@ import { pathToFileURL } from 'node:url'
 import {
   classifyChangeScope,
   isBlankGitSha,
+  isWindowsIncidentToolingPath,
   scopeToActionOutputs
 } from './lib/ci-change-scope.mjs'
 
@@ -55,12 +56,13 @@ export function classifyRepositoryChangeScope({
   const range = eventName === 'push' ? `${base}..${head}` : `${base}...${head}`
   const files = gitChangedFiles({ range, cwd })
   const packageJsonTouched = files.includes('apps/desktop/package.json')
-  return classifyChangeScope({
+  const scope = classifyChangeScope({
     eventName,
     files,
     packageJsonBefore: packageJsonTouched ? readJson(base, 'apps/desktop/package.json', cwd) : null,
     packageJsonAfter: packageJsonTouched ? readJson(head, 'apps/desktop/package.json', cwd) : null
   })
+  return { ...scope, windowsIncidentTooling: files.some(isWindowsIncidentToolingPath) }
 }
 
 export async function main({
@@ -71,9 +73,11 @@ export async function main({
 } = {}) {
   const scope = classify({ env, cwd })
   const actionOutputs = scopeToActionOutputs(scope)
-  output.log(
-    `ci-change-scope: ${scope.kind} (windows_heavy=${actionOutputs.windows_heavy} linux_heavy=${actionOutputs.linux_heavy} macos_rust=${actionOutputs.macos_rust} js=${actionOutputs.js})`
-  )
+  const flags = Object.entries(actionOutputs)
+    .filter(([key]) => key !== 'kind')
+    .map(([key, value]) => `${key}=${value}`)
+    .join(' ')
+  output.log(`ci-change-scope: ${scope.kind} (${flags})`)
   if (env.GITHUB_OUTPUT) {
     await appendFile(
       env.GITHUB_OUTPUT,
