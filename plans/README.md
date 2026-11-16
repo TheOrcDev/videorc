@@ -1,8 +1,10 @@
 # Implementation Plans
 
 - 2026-11-16: [Plan 241](241-live-page.md), the owner's ask: make
-  videorc.com/live richer; today it only says live or not live. PLANNED
-  2026-11-16, D1 to D9 answered by the owner:
+  videorc.com/live richer; today it only says live or not live. BUILT
+  2026-11-16 (web straight to main, desktop #1397 to #1404), D1 to D9
+  answered by the owner; owed: owner acceptance, by-eye, D14 legal read,
+  sending the YouTube compliance update:
   - Every stream, cloud or direct: a signed-in desktop sends a small live
     status (platforms, open watchdog alerts, recording) every 15 s, kept only
     while the stream runs.
