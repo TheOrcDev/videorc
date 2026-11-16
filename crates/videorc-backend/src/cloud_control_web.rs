@@ -68,6 +68,9 @@ const LEG_RESEND_SPACING: Duration = Duration::from_secs(30);
 /// report's 20 s then, not when a 25 s poll returns.
 const FEED_CLOCK_LOOK: Duration = Duration::from_secs(1);
 const CODE_SHOW_ENDED: &str = "cloud-show-ended";
+/// Sections 2.3 and 2.7 (plan 247): the show's End is under way, and the
+/// routes under its lease answer this until the show is over.
+const CODE_SHOW_ENDING: &str = "cloud-show-ending";
 const CODE_CONTROL_MISMATCH: &str = "cloud-control-mismatch";
 /// Section 2.4: the hold-image route takes a PNG of at most this many
 /// bytes and this many pixels a side. A node takes up to 8 MiB; the desktop
@@ -404,6 +407,16 @@ fn legs_end_problem(error: &CloudApiError) -> String {
         }
         _ => failure_line(error),
     }
+}
+
+/// 409 `cloud-show-ending` on `POST …/legs/end` (plan 247 D4): the whole
+/// show is ending, and its legs with it. End livestream has what it asked
+/// for, so this is an answer, not a failure. A 4xx is never tried again.
+fn show_is_ending(error: &CloudApiError) -> bool {
+    matches!(
+        error,
+        CloudApiError::Other { status: 409, code, .. } if code == CODE_SHOW_ENDING
+    )
 }
 
 fn refused_line(refused: &[RefusedDestination]) -> String {
@@ -1623,10 +1636,21 @@ async fn send_web_intent_until<W: CloudWebApi>(
         "legs.end" => {
             let _stopping = destinations.stopping().await;
             let body = DestinationsBody::for_legs_end(&frame);
-            with_one_cloud_retry_until(deadline, || web.end_legs(bearer, show_id, &body))
+            match with_one_cloud_retry_until(deadline, || web.end_legs(bearer, show_id, &body))
                 .await
-                .map(|answer| raise_floor(floor, &answer))
-                .map_err(|error| body.scrub(&legs_end_problem(&error)))
+            {
+                Ok(answer) => Ok(raise_floor(floor, &answer)),
+                Err(error) if show_is_ending(&error) => {
+                    tracing::info!(
+                        show = show_id,
+                        "Videorc Cloud is already ending the show; its legs end with it"
+                    );
+                    // Its own ack, so the caller can tell it from an end
+                    // the web carried out for this request.
+                    Ok(Some(json!({ "ending": true })))
+                }
+                Err(error) => Err(body.scrub(&legs_end_problem(&error))),
+            }
         }
         "recording.start" | "recording.stop" => {
             let on = kind == "recording.start";
@@ -2458,11 +2482,35 @@ mod tests {
             other(400, "invalid-request"),
             other(404, "cloud-show-not-found"),
             other(409, CODE_SHOW_ENDED),
+            other(409, CODE_SHOW_ENDING),
             other(422, "cloud-destinations-refused"),
             CloudApiError::Unauthorized,
         ] {
             assert!(!retryable(&never), "{never:?}");
         }
+    }
+
+    /// Plan 247 D4: only the 409 with this code says the show is ending.
+    /// Every other answer to `legs/end` stays a failure in the same words.
+    #[test]
+    fn a_show_that_is_ending_is_an_answer_to_legs_end_and_never_retried() {
+        let ending = other(409, CODE_SHOW_ENDING);
+        assert!(show_is_ending(&ending));
+        assert!(!retryable(&ending));
+        for failure in [
+            other(503, CODE_SHOW_ENDING),
+            other(409, CODE_SHOW_ENDED),
+            other(409, "cloud-legs-end-solo"),
+            other(503, "cloud-media-unavailable"),
+            CloudApiError::Transport("timed out".to_string()),
+            CloudApiError::Unauthorized,
+        ] {
+            assert!(!show_is_ending(&failure), "{failure:?}");
+        }
+        assert_eq!(
+            legs_end_problem(&other(503, "cloud-media-unavailable")),
+            "videorc.com answered 503 cloud-media-unavailable"
+        );
     }
 
     fn png_of(image: &image::RgbaImage) -> Vec<u8> {
@@ -3108,6 +3156,7 @@ rtmps://h/app/key 'http://x.test/y'";
             ("recording", "cloud-recording-solo"),
             ("recording", "cloud-recording-on-air"),
             ("legsEnd", "cloud-legs-end-solo"),
+            ("legsEnd", CODE_SHOW_ENDING),
         ] {
             assert!(
                 codes(list).contains(&(409, code.to_string())),

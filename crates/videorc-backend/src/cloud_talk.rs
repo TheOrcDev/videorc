@@ -2009,6 +2009,10 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
     /// silent runner is reported with its reason; nothing else changes.
     pub async fn legs_end(&self) -> Result<CloudStatus> {
         self.open_room_show_id()?;
+        // Stop recovery before sending End, even if its answer is lost.
+        // The retained destination list still travels on a retry; legs.end
+        // does not use the generation admission gate. Re-enabling recovery
+        // on failure could restart a stream whose stop actually succeeded.
         lock(&self.slot).destinations_generation.stop();
         let tx = self.control_tx().map_err(anyhow::Error::msg)?;
         let id = new_intent_id();
@@ -2027,6 +2031,13 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
             }
         }
         match tx.intent(frame, id, ACK_TIMEOUT).await {
+            Ok(Some(answer))
+                if answer.get("ending").and_then(serde_json::Value::as_bool) == Some(true) =>
+            {
+                bail!(
+                    "Videorc Cloud is still stopping the show. Wait for it to finish before completing the broadcast."
+                );
+            }
             Ok(_) => {
                 let mut runtime = lock(&self.slot);
                 if let Some(show) = runtime.show.as_mut() {

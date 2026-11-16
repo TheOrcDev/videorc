@@ -17499,22 +17499,36 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           // Plan 243 D7: handed off or taken over, the show goes on elsewhere.
           if (handedOffRef.current.includes(talkSession.sessionId)) return true
           if (talkSession.streamUrl) {
-            const owner = platformLifecycleOwnerRef.current
-            if (owner) {
-              platformLifecycleOwnerRef.current = null
-              await completePreparedPlatformBroadcasts(owner.streaming, owner.sessionId)
-            }
-            try {
-              commitCloudStatus(await client.requestTyped('cloud.show.legs.end'))
-              return true
-            } catch (error) {
-              toastUserError(
-                error,
-                { action: 'end', object: 'the livestream' },
-                { id: CLOUD_TOAST_ID }
-              )
-              return false
-            }
+            // X must end while its feed is live. YouTube completes only
+            // after the cloud confirms its legs stopped (plan 247 D4).
+            const { endTalkShowLivestream, showTalkShowEndFailure } =
+              await import('@/lib/talk-show-end')
+            return endTalkShowLivestream(
+              async () => {
+                const owner = platformLifecycleOwnerRef.current
+                if (owner) {
+                  owner.streaming = await endPreparedXBroadcasts(
+                    owner.streaming,
+                    owner.sessionId,
+                    4000
+                  )
+                }
+                commitCloudStatus(await client.requestTyped('cloud.show.legs.end'))
+              },
+              (error) =>
+                showTalkShowEndFailure(error, async () => {
+                  commitCloudStatus(await client.requestTyped('cloud.room.close'))
+                  const owner = claimPlatformLifecycleOwner(talkSession.sessionId)
+                  if (owner) await settleClaimedPlatformLifecycleOwner(owner)
+                }),
+              () => claimPlatformLifecycleOwner(talkSession.sessionId),
+              (owner) =>
+                settleClaimedPlatformLifecycleOwner(owner, (resolved) =>
+                  completePreparedPlatformBroadcasts(resolved.streaming, resolved.sessionId, {
+                    skipXCleanup: true
+                  })
+                )
+            )
           }
           try {
             commitCloudStatus(await client.requestTyped('cloud.recording.stop'))
