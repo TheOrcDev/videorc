@@ -331,3 +331,23 @@ describe('AgentSurfacePublisher', () => {
     publisher.detach()
   })
 })
+
+it('projects only confirmed room media fields and no publisher credentials', () => {
+  const roomMedia = {
+    showId: 'show-1',
+    confirmed: true,
+    microphoneMuted: true,
+    cameraOff: true,
+    microphoneAvailable: true,
+    token: 'private-token'
+  }
+  const projected = buildAgentSurface(input({ roomMedia }), [])
+  expect(projected.roomMedia).toEqual({
+    showId: 'show-1',
+    confirmed: true,
+    microphoneMuted: true,
+    cameraOff: true,
+    microphoneAvailable: true
+  })
+  expect(JSON.stringify(projected)).not.toContain('private-token')
+})

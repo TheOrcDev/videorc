@@ -51,11 +51,18 @@ export interface AgentSurfaceDestination {
 
 export interface AgentSurface {
   version: 1
+  roomMedia?: {
+    showId: string
+    confirmed: boolean
+    microphoneMuted: boolean | null
+    cameraOff: boolean | null
+    microphoneAvailable: boolean
+  }
   recordBlockedReason?: string
   liveBlockedReason?: string
   scene: AgentSurfaceScene & { modified: boolean }
   scenes: AgentSurfaceScene[]
-  microphone: { muted: boolean; name?: string }
+  microphone: { muted: boolean; name?: string; confirmed?: boolean }
   systemAudio: { on: boolean; available: boolean }
   takeoverId?: string
   takeovers: { id: string; name: string }[]
@@ -86,6 +93,8 @@ export interface AgentSurfaceInput {
   activeSavedSceneId: string | null
   savedSceneModified: boolean
   savedScenes: readonly { id: string; name: string }[]
+  roomMedia?: AgentSurface['roomMedia']
+  microphoneConfirmed?: boolean
   microphoneMuted: boolean
   sources: SourceSelection
   devices: DeviceList['devices']
@@ -189,12 +198,24 @@ export function buildAgentSurface(
   const liveBlockedReason = present(input.liveStreamBlockedReason)
   return {
     version: 1,
+    ...(input.roomMedia
+      ? {
+          roomMedia: {
+            showId: input.roomMedia.showId,
+            confirmed: input.roomMedia.confirmed,
+            microphoneMuted: input.roomMedia.microphoneMuted,
+            cameraOff: input.roomMedia.cameraOff,
+            microphoneAvailable: input.roomMedia.microphoneAvailable
+          }
+        }
+      : {}),
     ...(recordBlockedReason ? { recordBlockedReason } : {}),
     ...(liveBlockedReason ? { liveBlockedReason } : {}),
     scene,
     scenes: [...saved, ...layouts],
     microphone: {
       muted: input.microphoneMuted,
+      ...(input.microphoneConfirmed !== undefined ? { confirmed: input.microphoneConfirmed } : {}),
       ...(microphoneName ? { name: microphoneName } : {})
     },
     systemAudio: {

@@ -91,6 +91,7 @@ beforeEach(() => {
     runtimeInfo: { platform: 'darwin', commentsWindowEnabled: false, captionsWindowEnabled: false },
     screenPrivacy: { hidden: false },
     toggleScreenHidden: vi.fn(async () => true),
+    requestRemoteMicrophoneMute: vi.fn(async () => true),
     savedScenes: [],
     applySavedSceneResult: vi.fn(async () => ({ ok: true })),
     applySavedScene: vi.fn(async () => true),
@@ -256,14 +257,11 @@ describe('CommandPalette session actions (plan 174 S0.1, S2.2)', () => {
   })
 
   // Plan 174 A-9: the Session group mirrors the transport, mute included.
-  it('mutes and unmutes the microphone through the capture config', async () => {
+  it('mutes and unmutes through the active microphone owner', async () => {
     await render()
     expect(values()).not.toContain('Unmute microphone')
     await act(async () => item('Mute microphone').click())
-    const update = (mocked.core.setCaptureConfig as ReturnType<typeof vi.fn>).mock.calls[0][0]
-    expect(update({ audio: { microphoneMuted: false, gain: 1 } })).toEqual({
-      audio: { microphoneMuted: true, gain: 1 }
-    })
+    expect(mocked.core.requestRemoteMicrophoneMute).toHaveBeenCalledWith('toggle')
 
     mocked.core.captureConfig = {
       ...(mocked.core.captureConfig as object),

@@ -181,7 +181,7 @@ export function CommandPalette({
     savedScenes,
     applySavedSceneResult,
     captureConfig,
-    setCaptureConfig,
+    requestRemoteMicrophoneMute,
     applyLayoutPatch,
     settings,
     setSettings,
@@ -357,14 +357,7 @@ export function CommandPalette({
           <CommandItem
             value={muteLabel}
             keywords={['mic', 'microphone', 'audio', 'mute', 'silence']}
-            onSelect={() =>
-              run(() =>
-                setCaptureConfig((current) => ({
-                  ...current,
-                  audio: { ...current.audio, microphoneMuted: !current.audio.microphoneMuted }
-                }))
-              )
-            }
+            onSelect={() => run(() => void requestRemoteMicrophoneMute('toggle'))}
           >
             <MuteIcon className="size-4" />
             {muteLabel}

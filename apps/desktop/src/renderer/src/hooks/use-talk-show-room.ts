@@ -45,6 +45,11 @@ export type TalkShowRoomControllerDeps = {
   commitCloudStatus: (status: CloudStatus) => void
   /** The Sources page's camera and microphone ids and the device list, for
    * the names Chromium labels its devices with. */
+  stopOutput?: (output: 'recording' | 'live') => Promise<boolean>
+  controlsRef?: { current: TalkShowRoomClient | null }
+  onMediaSnapshot?: (snapshot: TalkShowRoomSnapshot) => void
+  microphoneMuted?: boolean
+  cameraOff?: boolean
   cameraSettings?: TalkShowCameraSettings
   cameraId: string | null
   microphoneId: string | null
@@ -128,6 +133,7 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
     previewReplacedOverride,
     clipsStepAside
   } = deps
+  const controlsRef = deps.controlsRef
   const [snapshot, setSnapshot] = useState<TalkShowRoomSnapshot>(IDLE_SNAPSHOT)
   const clientRef = useRef<TalkShowRoomClient | null>(null)
   const leavingRef = useRef<Promise<void>>(Promise.resolve())
@@ -168,6 +174,8 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
   const onCameraReturnedRef = useRef(onCameraReturned)
   onCameraReturnedRef.current = onCameraReturned
 
+  const mediaDepsRef = useRef(deps)
+  mediaDepsRef.current = deps
   const callbacksRef = useRef({ commitCloudStatus, onError })
   callbacksRef.current = { commitCloudStatus, onError }
   // Plan 243 C5: the room client reads who is on air when its host seat drops.
@@ -179,6 +187,7 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
   // A replacement waits for teardown so the old leave cannot revoke its grant.
   useEffect(() => {
     setSnapshot(IDLE_SNAPSHOT)
+    mediaDepsRef.current.onMediaSnapshot?.(IDLE_SNAPSHOT)
     if (!roomOpen || !client || !showId) {
       return
     }
@@ -214,9 +223,14 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
           requestToken: () => client.requestTyped('cloud.room.token.refresh'),
           report,
           onSnapshot: (next) => {
-            if (!cancelled) setSnapshot(next)
+            if (!cancelled) {
+              setSnapshot(next)
+              mediaDepsRef.current.onMediaSnapshot?.(next)
+            }
           },
           cameraName: cameraNameRef.current,
+          initiallyMuted: mediaDepsRef.current.microphoneMuted,
+          initiallyCameraOff: mediaDepsRef.current.cameraOff,
           cameraSettings: () => cameraSettingsRef.current,
           microphoneName: microphoneNameRef.current,
           audioHost: () => host,
@@ -224,6 +238,7 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
         })
         current = roomClient
         clientRef.current = roomClient
+        if (controlsRef) controlsRef.current = roomClient
         await roomClient.sendStage(stageRef.current)
         if (cancelled) return
         await roomClient.connect()
@@ -235,6 +250,7 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
     })()
     return () => {
       cancelled = true
+      if (controlsRef?.current === current) controlsRef.current = null
       if (clientRef.current === current) clientRef.current = null
       audioHostRef.current?.remove()
       audioHostRef.current = null
@@ -250,7 +266,7 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
           if (!disposedRef.current && !roomOpenRef.current) onCameraReturnedRef.current()
         })
     }
-  }, [client, roomOpen, showId])
+  }, [client, roomOpen, showId, controlsRef])
 
   // The guest page reads the stage from the host's data topic (D11).
   useEffect(() => {
@@ -314,10 +330,12 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
       params: Parameters<BackendClient['requestTyped']>[1],
       action: string
     ): Promise<void> => {
-      if (!client) return
+      if (!client) throw new Error('The room is not connected.')
       try {
         const status = (await client.requestTyped(method, params as never)) as CloudStatus
         commitCloudStatus(status)
+        if (method === 'cloud.recording.start' && status.recording?.active !== true)
+          throw new Error('The cloud recording did not start.')
       } catch (error) {
         onError(error, action)
         throw error
@@ -428,13 +446,43 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
           'show the Program monitor to the room'
         ).catch(() => {})
       },
-      setMicrophoneMuted: async (muted) => clientRef.current?.setMicrophoneMuted(muted),
-      setCameraOff: async (off) => clientRef.current?.setCameraOff(off),
+      setMicrophoneMuted: async (muted) => {
+        if (!clientRef.current) throw new Error('The room is not connected.')
+        try {
+          await clientRef.current.setMicrophoneMuted(muted)
+        } catch (error) {
+          onError(error, 'change the room microphone')
+          throw error
+        }
+      },
+      setCameraOff: async (off) => {
+        if (!clientRef.current) throw new Error('The room is not connected.')
+        try {
+          await clientRef.current.setCameraOff(off)
+        } catch (error) {
+          onError(error, 'change the room camera')
+          throw error
+        }
+      },
       startCloudRecording: async () =>
         call('cloud.recording.start', undefined, 'start the recording'),
-      stopCloudRecording: async () => call('cloud.recording.stop', undefined, 'stop the recording'),
-      endTalkShowLivestream: async () =>
-        call('cloud.show.legs.end', undefined, 'end the livestream')
+      stopCloudRecording: async () => {
+        if (
+          !mediaDepsRef.current.stopOutput ||
+          !(await mediaDepsRef.current.stopOutput('recording'))
+        ) {
+          const error = new Error('The cloud recording has not stopped.')
+          onError(error, 'stop the cloud recording')
+          throw error
+        }
+      },
+      endTalkShowLivestream: async () => {
+        if (!mediaDepsRef.current.stopOutput || !(await mediaDepsRef.current.stopOutput('live'))) {
+          const error = new Error('The livestream has not stopped.')
+          onError(error, 'end the livestream')
+          throw error
+        }
+      }
     }),
     [
       call,

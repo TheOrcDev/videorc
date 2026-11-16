@@ -10,7 +10,8 @@ import {
   TAKEN_OVER_GRACE_MS,
   TalkShowRoomClient,
   onAirElsewhere,
-  talkShowRoomOptions
+  talkShowRoomOptions,
+  type TalkShowRoomDeps
 } from '@/lib/talk-show-room'
 
 // Plan 224 C-G4 and the review of 2026-11-09 (L4, L9's room client): the host
@@ -23,8 +24,8 @@ const lk = vi.hoisted(() => {
   type Handler = (...args: unknown[]) => void
   const fakeLocalTrack = () => ({
     mediaStreamTrack: { kind: 'video' } as unknown as MediaStreamTrack,
-    mute: async () => {},
-    unmute: async () => {},
+    mute: vi.fn(async () => {}),
+    unmute: vi.fn(async () => {}),
     stop: vi.fn(),
     setProcessor: vi.fn(async () => {}),
     stopProcessor: vi.fn(async () => {})
@@ -114,7 +115,8 @@ vi.mock('livekit-client', () => ({
 
 function client(
   onAir?: () => CloudOnAir | undefined,
-  cameraSettings?: () => TalkShowCameraSettings
+  cameraSettings?: () => TalkShowCameraSettings,
+  overrides: Partial<TalkShowRoomDeps> = {}
 ) {
   let minted = 0
   const requestToken = vi.fn(async (): Promise<CloudRoomTokenAnswer> => {
@@ -135,11 +137,12 @@ function client(
       details.push(detail)
     },
     onSnapshot: () => {},
-    cameraName: null,
+    cameraName: 'Camera',
     cameraSettings,
-    microphoneName: null,
+    microphoneName: 'Microphone',
     audioHost: () => null,
-    onAir
+    onAir,
+    ...overrides
   })
   return { room, requestToken, reports, details }
 }
@@ -147,6 +150,14 @@ function client(
 const latestRoom = () => lk.FakeRoom.rooms[lk.FakeRoom.rooms.length - 1]
 
 beforeEach(() => {
+  vi.stubGlobal('navigator', {
+    mediaDevices: {
+      enumerateDevices: async () => [
+        { kind: 'videoinput', deviceId: 'camera', label: 'Camera' },
+        { kind: 'audioinput', deviceId: 'mic', label: 'Microphone' }
+      ]
+    }
+  })
   vi.useFakeTimers()
   lk.FakeRoom.rooms.length = 0
   lk.video.mockReset().mockImplementation(async () => lk.fakeLocalTrack())
@@ -540,4 +551,126 @@ describe('a second host connection (plan 243 C5)', () => {
     expect(room.snapshot.state).toBe('idle')
     expect(reports).toEqual(['connecting', 'connected'])
   })
+})
+
+describe('room controls own the published tracks (249 S1)', () => {
+  it('mutes before publishing and never opens a None/off camera', async () => {
+    const mic = lk.fakeLocalTrack()
+    lk.audio.mockResolvedValueOnce(mic)
+    const { room } = client(undefined, undefined, { cameraName: null, initiallyMuted: true })
+    await room.connect()
+    expect(lk.video).not.toHaveBeenCalled()
+    expect(mic.mute.mock.invocationCallOrder[0]).toBeLessThan(
+      latestRoom().localParticipant.publishTrack.mock.invocationCallOrder[0]
+    )
+    expect(room.snapshot.local).toMatchObject({ micMuted: true, cameraOff: true, camera: null })
+    await expect(room.setCameraOff(false)).rejects.toThrow('Choose a camera')
+    await room.disconnect()
+  })
+
+  it('does not open defaults for missing device labels or no microphone', async () => {
+    const { room } = client(undefined, undefined, {
+      cameraName: 'Missing camera',
+      microphoneName: null
+    })
+    await room.connect()
+    expect(lk.video).not.toHaveBeenCalled()
+    expect(lk.audio).not.toHaveBeenCalled()
+    await expect(room.setMicrophoneMuted(false)).rejects.toThrow('No microphone')
+    expect(room.snapshot.local.problem).toContain('unavailable')
+    await room.disconnect()
+  })
+
+  it('keeps the last confirmed mute after rejection and serializes opposite commands', async () => {
+    const mic = lk.fakeLocalTrack()
+    lk.audio.mockResolvedValueOnce(mic)
+    const { room } = client()
+    await room.connect()
+    mic.mute.mockRejectedValueOnce(new Error('publisher refused'))
+    await expect(room.setMicrophoneMuted(true)).rejects.toThrow('publisher refused')
+    expect(room.snapshot.local.micMuted).toBe(false)
+    let release!: () => void
+    mic.mute.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          release = resolve
+        })
+    )
+    const mute = room.setMicrophoneMuted(true)
+    const unmute = room.setMicrophoneMuted(false)
+    await vi.waitFor(() => expect(release).toBeTypeOf('function'))
+    expect(mic.unmute).not.toHaveBeenCalled()
+    release()
+    await Promise.all([mute, unmute])
+    expect(room.snapshot.local.micMuted).toBe(false)
+    await room.disconnect()
+    await expect(room.setMicrophoneMuted(true)).rejects.toThrow('not connected')
+  })
+
+  it('stops capture for None, restores a selected camera, and rejects an obsolete mute', async () => {
+    const camera = lk.fakeLocalTrack(),
+      mic = lk.fakeLocalTrack()
+    lk.video.mockResolvedValueOnce(camera)
+    lk.audio.mockResolvedValueOnce(mic)
+    const { room } = client()
+    await room.connect()
+    await room.setCameraSelection(null, true)
+    expect(camera.stop).toHaveBeenCalled()
+    expect(room.snapshot.local.camera).toBeNull()
+    await room.setCameraSelection('Camera', false)
+    expect(lk.video).toHaveBeenCalledTimes(2)
+    let release!: () => void
+    mic.mute.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          release = resolve
+        })
+    )
+    const pending = room.setMicrophoneMuted(true)
+    await vi.waitFor(() => expect(release).toBeTypeOf('function'))
+    await room.disconnect()
+    release()
+    await expect(pending).rejects.toThrow('microphone changed')
+  })
+
+  it('does not capture an initially off selected camera', async () => {
+    const { room } = client(undefined, undefined, { initiallyCameraOff: true })
+    await room.connect()
+    expect(lk.video).not.toHaveBeenCalled()
+    await room.setCameraOff(false)
+    expect(lk.video).toHaveBeenCalledOnce()
+    await room.disconnect()
+  })
+})
+
+it('serializes toggle intents and refuses controls after takeover', async () => {
+  const onAir: { current: CloudOnAir | undefined } = { current: undefined }
+  const { room } = client(() => onAir.current)
+  await room.connect()
+  await Promise.all([room.setMicrophoneMode('toggle'), room.setMicrophoneMode('toggle')])
+  expect(room.snapshot.local.micMuted).toBe(false)
+  onAir.current = {
+    thisDevice: false,
+    waiting: false,
+    kind: 'computer',
+    source: 'host',
+    since: '2026-11-16T00:00:00Z'
+  }
+  await expect(room.setMicrophoneMuted(true)).rejects.toThrow(TAKEN_OVER_DETAIL)
+  await room.disconnect()
+})
+
+it('refuses publication if initial mute fails, and uses exact device constraints', async () => {
+  const microphone = lk.fakeLocalTrack()
+  microphone.mute.mockRejectedValueOnce(new Error('mute refused'))
+  lk.audio.mockResolvedValueOnce(microphone)
+  const { room } = client(undefined, undefined, { initiallyMuted: true })
+  await room.connect()
+  expect(lk.video).toHaveBeenCalledWith(expect.objectContaining({ deviceId: { exact: 'camera' } }))
+  expect(lk.audio).toHaveBeenCalledWith(expect.objectContaining({ deviceId: { exact: 'mic' } }))
+  expect(latestRoom().localParticipant.publishTrack).toHaveBeenCalledTimes(1)
+  expect(microphone.stop).toHaveBeenCalled()
+  expect(room.snapshot.local.microphone).toBeNull()
+  expect(room.snapshot.local.problem).toContain('mute refused')
+  await room.disconnect()
 })

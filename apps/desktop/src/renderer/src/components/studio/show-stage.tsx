@@ -478,7 +478,7 @@ function ProgramMonitor({ talkShow }: { talkShow: TalkShowContextValue }): React
         <span className="text-label text-subtle">Program</span>
         {takeover ? (
           <span className="truncate text-label text-subtle" data-testid="show-stage-program-muted">
-            Takeover · everyone muted
+            Takeover
           </span>
         ) : null}
         {view.source === 'return' ? (

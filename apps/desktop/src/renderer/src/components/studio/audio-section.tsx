@@ -74,6 +74,7 @@ export function AudioSection(): ReactElement {
   const {
     captureConfig,
     setCaptureConfig,
+    requestRemoteMicrophoneMute,
     deviceList,
     selectedMicrophone,
     switchSourceDeviceLive,
@@ -130,7 +131,8 @@ export function AudioSection(): ReactElement {
         buildMicrophoneSources(captureConfig.sources, microphones, microphoneId)
       ),
     onGainChange: (microphoneGainDb) => setAudio((current) => ({ ...current, microphoneGainDb })),
-    onMutedChange: (microphoneMuted) => setAudio((current) => ({ ...current, microphoneMuted }))
+    onMutedChange: (microphoneMuted) =>
+      void requestRemoteMicrophoneMute(microphoneMuted ? 'mute' : 'unmute')
   }
 
   // Retro LCD (plan 201 S3) draws the same rows from the same props.

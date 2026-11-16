@@ -27,7 +27,7 @@ import {
 } from './run-the-show'
 import { sceneApply, takeoverHide, takeoverShow } from './scene'
 import { getSceneLayout, moveOnScene, setSceneItem } from './scene-layout'
-import { recordStart, recordStop } from './session'
+import { recordStart, recordStop, streamStop } from './session'
 import { soundPlay, soundStop } from './sounds'
 import { windowFront } from './windows'
 // Plan 209 PR B, S13 to S15.
@@ -67,7 +67,7 @@ const startRecording: AgentToolExecutor = async (context) => {
 
 const stop: AgentToolExecutor = async (context) => {
   const stopped = context.sessionLive ? 'livestream' : 'recording'
-  const outcome = await recordStop(context, {})
+  const outcome = await (context.sessionLive ? streamStop : recordStop)(context, {})
   if (!outcome.ok) return outcome
   return {
     ok: true,

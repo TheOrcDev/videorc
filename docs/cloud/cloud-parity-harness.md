@@ -84,3 +84,33 @@ for a skipped or unimplemented case. Add each implementation at its owning
 slice, preserve evidence distinctions, and update inventory only with actual
 source and acceptance evidence. Do not enable dynamic alpha, native bridges,
 higher profiles, replay or ISO based on local fixtures alone.
+
+## S1 controls case (not run)
+
+The maintained entrypoint also accepts `--case controls`. Do not run it in this
+implementation sequence. It extends the baseline with initial microphone mute
+and camera None, tile and mixer clicks, the application hotkey handler, a paired
+Stream Deck client, the signed phone client and the agent MCP listener. Every
+mute is checked against decoded program audio, with guest tones still audible;
+unmute must restore the host tone. Complete captures and full-window measurements
+are retained; control assertions allow one second for WebRTC/the takeover fade
+to settle and require silence/restoration in the remaining decoded window.
+This is a bounded functional check, not a measured latency qualification.
+It checks camera unpublication and independent
+record/live Stop while the room stays open and native recording stays idle.
+
+The isolated fake Chromium devices are explicitly selected and their labels
+aliased to an explicit DEV fixture catalog in the test process. No physical
+camera/microphone is required by these seeded browser-device controls. No production
+matcher changes for fake devices. Missing fixture devices fail the case.
+This is not evidence for real-device selection or OS hotkey registration.
+The phone protocol uses loopback here; off-loopback LAN qualification remains
+with the deferred remote-LAN smoke. Remote/agent enablement is confined to the
+disposable profile and cleaned up; existing owner access is never expanded.
+
+Controls also requires the existing all-program takeover silence implementation
+in web PR #118, including its emitted v1 bundle. Older web code must fail that
+assertion. D3 speech-only/auxiliary routing remains a later slice. Controller
+record/stream Stop against the fake web does not prove encoded managed egress
+has ended. `controls.json` preserves managed and physical-device acceptance as
+`not-run`; it cannot qualify production media.

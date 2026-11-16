@@ -23,6 +23,9 @@ type RegisterFn = (shortcuts: GlobalShortcutsConfig) => Promise<GlobalShortcutsR
 
 export interface GlobalShortcutContext {
   toggleScreenHidden?: () => Promise<unknown>
+  recordingActive?: boolean
+  liveActive?: boolean
+  stopRecording?: () => Promise<unknown>
   sessionActive: boolean
   /**
    * The Studio's two explicit starts (plan 174 S3.1, B-3): the record key
@@ -56,13 +59,17 @@ export function executeGlobalShortcut(
     return
   }
   if (action === 'record-toggle') {
-    void (context.sessionActive ? context.stopSession() : context.startRecording())
+    void ((context.recordingActive ?? context.sessionActive)
+      ? (context.stopRecording ?? context.stopSession)()
+      : context.startRecording())
     return
   }
   if (action === 'stream-toggle') {
     // Always a Go Live (plan 174 S3.1): with no destination ready the
     // provider refuses with "Set up a destination to go live" and its fix.
-    void (context.sessionActive ? context.stopSession() : context.startLivestream())
+    void ((context.liveActive ?? context.sessionActive)
+      ? context.stopSession()
+      : context.startLivestream())
     return
   }
   if (action === 'screen-hide-toggle') void context.toggleScreenHidden?.()

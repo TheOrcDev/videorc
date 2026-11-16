@@ -364,7 +364,7 @@ describe('the Program monitor on a managed show (plan 234 D6)', () => {
     }
     await mount(talkStatus({ show: managedShow, room: shownRoom }), talkShow())
     expect(takeover()?.getAttribute('src')).toBe('videorc-asset://screen/brb%201.png')
-    expect(monitor()?.textContent).toContain('Takeover · everyone muted')
+    expect(monitor()?.textContent).toContain('Takeover')
 
     // Not running yet: the monitor keeps its empty line, nothing is drawn.
     await mount(talkStatus({ show: managedShow, room: openRoom() }), talkShow())

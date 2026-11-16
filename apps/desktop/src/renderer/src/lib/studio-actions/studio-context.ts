@@ -72,6 +72,8 @@ export interface StudioActionSource extends Omit<
     caller: import('./privacy').PrivacyCaller
   ) => Promise<import('./context').StudioActionOutcome>
   client: BackendClient
+  outputFacts?: import('../../../../shared/output-session').OutputSessionFacts
+  stopOutput?: (output: 'recording' | 'live') => Promise<boolean>
   recordingRef: Ref<RecordingStatus>
   replayStateRef: Ref<ReplayStateEvent>
   recordBlockedReason: string | null
@@ -193,7 +195,12 @@ export function studioActionContext(studio: StudioActionSource): StudioActionCon
   return {
     client,
     runScreenPrivacy: studio.runScreenPrivacy,
-    sessionActive: sessionOwnsTransport(studio.recordingRef.current),
+    outputFacts: studio.outputFacts,
+    stopOutput: studio.stopOutput,
+    sessionActive:
+      studio.outputFacts?.owner === 'cloud-room'
+        ? studio.outputFacts.recording || studio.outputFacts.live
+        : sessionOwnsTransport(studio.recordingRef.current),
     replayOn: studio.replayStateRef.current.state === 'on',
     recordBlockedReason: studio.recordBlockedReason,
     liveStreamBlockedReason: studio.liveStreamBlockedReason,
@@ -264,7 +271,10 @@ export function studioActionContext(studio: StudioActionSource): StudioActionCon
     banners: studio.bannerListRef.current ?? NO_BANNERS,
     // Plan 209 S6: what agent tools read beside a deck key's fields.
     noteRecordClick: (kind) => studio.noteRecordClick(kind),
-    sessionLive: sessionIsLive(studio.recordingRef.current),
+    sessionLive:
+      studio.outputFacts?.owner === 'cloud-room'
+        ? studio.outputFacts.live
+        : sessionIsLive(studio.recordingRef.current),
     savedScenes: studio.savedScenes,
     applySavedSceneResult: studio.applySavedSceneResult,
     applySavedScene: (id) => studio.applySavedScene(id),

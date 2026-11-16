@@ -3,29 +3,45 @@
 // was saved last, through the Studio's own starts; every stop takes the
 // provider's one stop door, at once (plan 174 D2).
 
-import type { StudioActionExecutor } from './context'
+import type { StudioActionContext, StudioActionExecutor } from './context'
 import { REMOTE_INTENT_COPY } from './copy'
 
+function active(context: StudioActionContext, output: 'recording' | 'live'): boolean {
+  return context.outputFacts?.owner === 'cloud-room'
+    ? context.outputFacts[output]
+    : context.sessionActive
+}
+function stop(context: StudioActionContext, output: 'recording' | 'live'): Promise<boolean> {
+  return context.outputFacts?.owner === 'cloud-room' && context.stopOutput
+    ? context.stopOutput(output)
+    : context.stopSession()
+}
+
 export const recordStart: StudioActionExecutor = async (context) => {
-  if (context.sessionActive) return { ok: false, message: REMOTE_INTENT_COPY.alreadyRunning }
+  if (active(context, 'recording')) return { ok: false, message: REMOTE_INTENT_COPY.alreadyRunning }
   return (await context.startRecording())
     ? { ok: true }
     : { ok: false, message: context.recordBlockedReason ?? REMOTE_INTENT_COPY.recordDidNotStart }
 }
 
 export const recordStop: StudioActionExecutor = async (context) => {
-  if (!context.sessionActive) return { ok: false, message: REMOTE_INTENT_COPY.notRunning }
-  return (await context.stopSession())
+  if (!active(context, 'recording')) return { ok: false, message: REMOTE_INTENT_COPY.notRunning }
+  return (await stop(context, 'recording'))
     ? { ok: true }
     : { ok: false, message: REMOTE_INTENT_COPY.didNotStop }
 }
 
-/** The same stop under the stream key's name: it stops whatever runs. */
-export const streamStop: StudioActionExecutor = recordStop
+/** Cloud outputs stop independently; native sessions keep their existing stop. */
+export const streamStop: StudioActionExecutor = async (context) => {
+  if (!active(context, 'live')) return { ok: false, message: REMOTE_INTENT_COPY.notRunning }
+  return (await stop(context, 'live'))
+    ? { ok: true }
+    : { ok: false, message: REMOTE_INTENT_COPY.didNotStop }
+}
 
 export const recordToggle: StudioActionExecutor = async (context) => {
-  const stopping = context.sessionActive
-  const committed = stopping ? await context.stopSession() : await context.startRecording()
+  const stopping = active(context, 'recording')
+  const committed = stopping ? await stop(context, 'recording') : await context.startRecording()
   return committed
     ? { ok: true }
     : {
@@ -35,7 +51,7 @@ export const recordToggle: StudioActionExecutor = async (context) => {
 }
 
 export const streamStart: StudioActionExecutor = async (context) => {
-  if (context.sessionActive) return { ok: false, message: REMOTE_INTENT_COPY.alreadyRunning }
+  if (active(context, 'live')) return { ok: false, message: REMOTE_INTENT_COPY.alreadyRunning }
   return (await context.startLivestream())
     ? { ok: true }
     : {
