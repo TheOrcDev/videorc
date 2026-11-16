@@ -34,6 +34,7 @@
     "audit:rust": "node scripts/audit-rust.mjs",
     "audit:deps": "pnpm audit:js && pnpm audit:rust",
     "clean:worktrees": "node scripts/clean-worktrees.mjs",
+    "ci:audit": "node scripts/ci-timing-audit.mjs",
     "changelog:build": "node scripts/build-changelog.mjs",
     "changelog:check": "node scripts/build-changelog.mjs --check",
     "check:renderer-assets": "node scripts/check-renderer-asset-budget.mjs",
