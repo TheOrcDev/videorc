@@ -15831,7 +15831,13 @@ fn cloud_hooks(state: &AppState) -> cloud_show::CloudHooks {
             Box::pin(async move {
                 match handover {
                     cloud_talk::CameraHandover::Lend => {
-                        preview_camera::lend_camera_to_talk_show(&state).await
+                        let hold = state.ffmpeg_work.begin_live_hold();
+                        preview_camera::lend_camera_to_talk_show(&state).await?;
+                        *state
+                            .cloud_live_hold
+                            .lock()
+                            .unwrap_or_else(|p| p.into_inner()) = Some(hold);
+                        Ok(())
                     }
                     cloud_talk::CameraHandover::Return => {
                         // The room can end on the website, without an RPC here.
@@ -15847,6 +15853,11 @@ fn cloud_hooks(state: &AppState) -> cloud_show::CloudHooks {
                         if let Some(show_id) = show_id {
                             stop_talk_show_chat(&state, &show_id).await;
                         }
+                        state
+                            .cloud_live_hold
+                            .lock()
+                            .unwrap_or_else(|p| p.into_inner())
+                            .take();
                         preview_camera::return_camera_from_talk_show(&state).await;
                         Ok(())
                     }

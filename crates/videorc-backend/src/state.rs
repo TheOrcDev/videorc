@@ -1128,6 +1128,7 @@ pub struct AppState {
     /// request token — OAuth 1.0a callbacks carry no `state` param).
     pub x_oauth1: Arc<crate::x_oauth1::XOauth1Sessions>,
     pub ffmpeg_work: Arc<FfmpegWorkCoordinator>,
+    pub cloud_live_hold: Arc<StdMutex<Option<crate::ffmpeg_work::LiveHold>>>,
     pub noise_cleanup: Arc<crate::noise_cleanup::NoiseCleanupRegistry>,
     /// Live Clean cut workers by job id (plan 119): cancel and shutdown
     /// interrupt reach the running worker through it.
@@ -1467,6 +1468,7 @@ impl AppState {
                 crate::secrets::delete_secret,
             )),
             x_oauth1: Arc::new(crate::x_oauth1::XOauth1Sessions::default()),
+            cloud_live_hold: Arc::new(StdMutex::new(None)),
             ffmpeg_work: Arc::new(FfmpegWorkCoordinator::new()),
             noise_cleanup: Arc::new(crate::noise_cleanup::NoiseCleanupRegistry::default()),
             clean_cut: Arc::new(crate::clean_cut::CleanCutRegistry::default()),

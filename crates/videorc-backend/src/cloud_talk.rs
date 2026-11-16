@@ -1447,6 +1447,15 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
         params: RoomOpenParams,
         session_active: bool,
     ) -> Result<CloudStatus> {
+        let _opening = lock(&self.slot)
+            .room_open_gate
+            .clone()
+            .try_lock_owned()
+            .map_err(|_| {
+                RoomOpenRefusal::CameraBusy(
+                    "A room is already opening. Try again when it finishes.".into(),
+                )
+            })?;
         let started = tokio::time::Instant::now();
         let Some(bearer) = bearer else {
             return Err(RoomOpenRefusal::SignedOut.into());
@@ -2299,6 +2308,15 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
     /// the show resumable, or forgets it when the node or the web says it
     /// is over.
     pub async fn resume_room(&self, bearer: Option<String>) -> Result<CloudStatus> {
+        let _opening = lock(&self.slot)
+            .room_open_gate
+            .clone()
+            .try_lock_owned()
+            .map_err(|_| {
+                RoomOpenRefusal::CameraBusy(
+                    "A room is already opening. Try again when it finishes.".into(),
+                )
+            })?;
         let deadline = self.room_rpc_deadline();
         let bearer = bearer_or_bail(bearer)?;
         let (show_id, held_room, uncontrolled) = {

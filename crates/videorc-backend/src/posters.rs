@@ -77,10 +77,11 @@ pub async fn ensure_session_poster(
     {
         return false;
     }
-    let _maintenance = state
-        .ffmpeg_work
-        .begin_priority_maintenance_when_idle()
-        .await;
+    let Some(_maintenance) = poster_maintenance(&state.ffmpeg_work).await else {
+        // A live room may last hours. Missing posters can retry later;
+        // they must not outlive the sessions.poster request deadline.
+        return false;
+    };
     // Another request may have generated this poster while we waited.
     if output.exists() {
         return true;
@@ -103,6 +104,17 @@ pub async fn ensure_session_poster(
     ok
 }
 
+async fn poster_maintenance(
+    work: &std::sync::Arc<crate::ffmpeg_work::FfmpegWorkCoordinator>,
+) -> Option<crate::ffmpeg_work::MaintenancePermit> {
+    tokio::time::timeout(
+        std::time::Duration::from_millis(250),
+        work.begin_priority_maintenance_when_idle(),
+    )
+    .await
+    .ok()
+}
+
 /// Delete a session's poster (session deletion, L3).
 pub async fn remove_session_poster(session_id: &str) {
     let _ = tokio::fs::remove_file(poster_path(session_id)).await;
@@ -110,6 +122,20 @@ pub async fn remove_session_poster(session_id: &str) {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test(start_paused = true)]
+    async fn a_live_room_defers_posters_without_leaking_a_priority_waiter() {
+        let work = std::sync::Arc::new(crate::ffmpeg_work::FfmpegWorkCoordinator::new());
+        let hold = work.begin_live_hold();
+        let started = tokio::time::Instant::now();
+        assert!(super::poster_maintenance(&work).await.is_none());
+        assert!(started.elapsed() <= std::time::Duration::from_millis(250));
+        drop(hold);
+        // Ordinary maintenance can start: the cancelled priority waiter
+        // cannot keep it excluded after the room ends.
+        assert!(work.try_begin_maintenance().is_ok());
+        assert!(super::poster_maintenance(&work).await.is_some());
+    }
+
     use super::*;
 
     #[test]
