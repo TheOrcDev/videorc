@@ -1,3 +1,4 @@
+import { cloudRecordingAvailability, cloudTakeLabel } from './cloud-recordings-view'
 import { afterEach, describe, expect, it } from 'vitest'
 
 import type { CloudRecordingDownloadEvent, CloudRecordingItem } from '@/lib/backend'
@@ -149,4 +150,24 @@ describe('after Stop recording on a cloud talk show', () => {
     // the window counts, as before.
     expect(awaitingCloudRecording(stop, [earlier], stoppedAt + 5000)).toBe(false)
   })
+})
+
+it('S20 distinguishes unknown history, record-only, multiple intervals and expiry', () => {
+  expect(cloudTakeLabel(item('old', { liveIntervalIds: [] }))).toBe('Cloud take')
+  expect(cloudTakeLabel(item('solo', { associationKnown: true, liveIntervalIds: [] }))).toBe(
+    'Record-only take'
+  )
+  expect(cloudTakeLabel(item('two', { associationKnown: true, liveIntervalIds: ['A', 'B'] }))).toBe(
+    'Take · 2 live intervals'
+  )
+  expect(cloudRecordingAvailability(item('old'), Date.parse('2027-01-01'))).toBe('expired')
+  expect(cloudRecordingAvailability(item('missing', { availability: 'missing' }))).toBe('missing')
+  expect(
+    reduceCloudDownload(new Map(), {
+      recordingId: 'rec',
+      jobId: 'job',
+      state: 'done',
+      localSessionId: 'local'
+    }).get('rec')
+  ).toEqual({ state: 'done', jobId: 'job', localSessionId: 'local' })
 })

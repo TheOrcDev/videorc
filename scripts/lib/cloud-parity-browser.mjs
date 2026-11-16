@@ -72,11 +72,19 @@ export async function startParityPages(webRoot, guests, media = null, fixtureAss
     }
     return Buffer.concat(chunks)
   }
-  const relayCapability = async (value, identity, show) => {
+  const relayCapability = async (value, identity, show, graphicsLane) => {
     assert.equal(show, media.show)
     const capability = mediaContract.parseConsumerCapability(value)
     assert.ok(capability)
-    return mediaContract.relayMediaCapability(media.relay, show, identity, capability, Date.now())
+    return mediaContract.relayMediaCapability(
+      media.relay,
+      show,
+      identity,
+      capability,
+      Date.now(),
+      undefined,
+      graphicsLane
+    )
   }
   const privacyObservations = []
   const server = createServer(async (req, res) => {
@@ -142,8 +150,16 @@ export async function startParityPages(webRoot, guests, media = null, fixtureAss
         body = await readBody(req, 4096)
         const beacon = JSON.parse(body)
         assert.equal(req.headers.authorization, 'Bearer vcp1.dGVzdA.dGVzdA')
-        if (beacon.joined && beacon.capability)
-          await relayCapability(beacon.capability, 'EG_parity_baseline', beacon.show)
+        if (beacon.joined && beacon.capability) {
+          const identity =
+            beacon.rec && media.graphicsLanes ? 'EG_parity_avatar_recording' : 'EG_parity_baseline'
+          await relayCapability(
+            beacon.capability,
+            identity,
+            beacon.show,
+            media.graphicsLanes?.[identity]
+          )
+        }
       }
       const response = await fetch(target, {
         method: req.method,

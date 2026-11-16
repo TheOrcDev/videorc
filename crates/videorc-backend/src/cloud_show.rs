@@ -555,12 +555,48 @@ pub struct CloudRestart {
     pub destinations_resent: bool,
 }
 
+/// Server-owned streaming interval; absent on legacy runners.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudLiveInterval {
+    pub id: String,
+    pub requested_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub live_since: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_requested_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ended_at: Option<String>,
+}
+
+/// Allowlisted reconciliation facts; no authority or credential fields.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudProviderSettlement {
+    pub destination_id: String,
+    pub provider: String,
+    pub state: String,
+    pub attempts: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub order: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_stopped: Option<bool>,
+}
+
 /// The whole cloud state, sent on every change as `cloud.state` and answered
 /// by `cloud.status`. Secret-free by construction: no url, token or key type
 /// is reachable from it.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct CloudStatus {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub live_interval: Option<CloudLiveInterval>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub provider_lifecycle: Vec<CloudProviderSettlement>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub on_air: Option<CloudOnAirStatus>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1446,6 +1482,10 @@ impl ControlTransport for WsTransport {
 #[serde(rename_all = "camelCase")]
 pub struct RunnerState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub live_interval: Option<CloudLiveInterval>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub provider_lifecycle: Vec<CloudProviderSettlement>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub on_air: Option<CloudOnAirWire>,
     #[serde(default)]
     pub phase: String,
@@ -2047,6 +2087,10 @@ impl CloudShowRuntime {
     pub fn status(&self) -> CloudStatus {
         let runner = self.runner.as_ref();
         CloudStatus {
+            live_interval: runner.and_then(|r| r.live_interval.clone()),
+            provider_lifecycle: runner
+                .map(|r| r.provider_lifecycle.clone())
+                .unwrap_or_default(),
             on_air: runner.and_then(|r| r.on_air.as_ref()).and_then(|air| {
                 Some(CloudOnAirStatus {
                     name: air.name.as_ref().map(|name| sanitize_device_name(name)),
@@ -2184,6 +2228,43 @@ impl CloudShowRuntime {
             }
             None => false,
         }
+    }
+
+    /// Non-secret activation fence for this desktop's accepted room output.
+    pub(crate) fn provider_output_owner(
+        &self,
+        session: &str,
+        target: &str,
+        platform: &str,
+        require_live_leg: bool,
+    ) -> Option<String> {
+        let show = self.show.as_ref()?;
+        let talk = self.talk.as_ref()?;
+        let status = self.status();
+        // Stable across a late first server interval observation. This is a
+        // local activation fence only, never the canonical archival identity.
+        let interval = talk.live_since.as_deref()?;
+        let owned = show
+            .destinations
+            .iter()
+            .any(|destination| destination.id == target && destination.platform == platform);
+        let ready = !require_live_leg
+            || status
+                .legs
+                .iter()
+                .any(|leg| leg.target_id == target && leg.state == StreamTargetState::Live);
+        crate::provider_output::CloudProviderOutput {
+            show_id: &show.record.id,
+            interval,
+            connected: self.connected,
+            live: talk.live,
+            ending: matches!(
+                self.phase(),
+                CloudPhase::Ending | CloudPhase::Failed | CloudPhase::Off
+            ),
+            elsewhere: self.stopped_by.is_some() || self.air_names_another_device(),
+        }
+        .owner_token(session, owned && ready)
     }
 
     /// The local session feeding the show, when there is one.
@@ -4948,7 +5029,11 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
             confirmed = tx
                 .intent(intent_frame(&id, "show.end"), id, END_ACK_TIMEOUT)
                 .await
-                .is_ok();
+                .is_ok_and(|answer| {
+                    !answer.as_ref().is_some_and(|body| {
+                        body.get("ending").and_then(Value::as_bool) == Some(true)
+                    })
+                });
         }
         if let Some(bearer) = bearer {
             let destinations = lock(&self.slot).destinations_generation.clone();
@@ -4979,19 +5064,27 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
                 ),
             }
         }
+        if !confirmed {
+            {
+                let mut runtime = lock(&self.slot);
+                runtime.ending = true;
+                runtime.message = Some(
+                    "Cloud output stop is unconfirmed; provider reconciliation remains pending."
+                        .to_string(),
+                );
+                runtime.keep_remembering(&show_id);
+            }
+            self.hooks.emit_from(&self.slot);
+            anyhow::bail!(
+                "Videorc Cloud has not confirmed the end. Retry End; the show remains reserved."
+            );
+        }
         // Plan 224: the room goes with the show, and its camera comes back
         // before the slot forgets the talk state (`clear_show` drops it).
         self.forget_talk_show().await;
         let status = {
             let mut runtime = lock(&self.slot);
             runtime.clear_show(Some("ended-by-host".to_string()));
-            if !confirmed {
-                tracing::warn!(
-                    show = %show_id,
-                    "Videorc Cloud show end not confirmed by the runner or the web; the show stays remembered"
-                );
-                runtime.keep_remembering(&show_id);
-            }
             runtime.status()
         };
         self.hooks.emit_from(&self.slot);
@@ -6215,6 +6308,7 @@ mod tests {
             match self.route_errors.pop_front() {
                 Some(error) => Err(error),
                 None => Ok(ControlRevAnswer {
+                    ending: false,
                     rev: Some(self.rev),
                 }),
             }
@@ -10449,6 +10543,42 @@ mod tests {
         reconnected.send(welcome_with_legs("live"));
         wait_for_phase(&harness.context.slot, CloudPhase::Live).await;
         assert_eq!(harness.context.web.lost_calls.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn explicit_end_keeps_the_output_until_the_web_confirms() {
+        let harness = harness(true);
+        {
+            let mut runtime = lock(&harness.context.slot);
+            runtime.show = Some(ActiveShow {
+                record: created_managed_talk().show,
+                control: created_managed_talk().control,
+                ingest: None,
+                session_id: None,
+                destinations: Vec::new(),
+                handed_over: true,
+                hold_image_png_base64: None,
+                resuming: false,
+            });
+        }
+        harness.context.web.end_fails.store(true, Ordering::SeqCst);
+        assert!(
+            harness
+                .context
+                .end_current_show(Some("bearer".into()))
+                .await
+                .is_err()
+        );
+        assert_eq!(lock(&harness.context.slot).phase(), CloudPhase::Ending);
+        assert!(lock(&harness.context.slot).status().show.is_some());
+        harness.context.web.end_fails.store(false, Ordering::SeqCst);
+        let ended = harness
+            .context
+            .end_current_show(Some("bearer".into()))
+            .await
+            .unwrap();
+        assert_eq!(ended.phase, CloudPhase::Off);
+        assert!(ended.show.is_none());
     }
 
     /// A hand-over that failed while the web could not confirm the show's

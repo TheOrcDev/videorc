@@ -161,7 +161,7 @@ describe('Library → Cloud recordings', () => {
     expect(client.listCalls()).toBe(1)
     const [first, second] = rows()
     expect(first.dataset.recordingId).toBe('newer')
-    expect(first.textContent).toContain('Talk show')
+    expect(first.textContent).toContain('Cloud take')
     expect(first.textContent).toContain('Vertical')
     expect(first.textContent).toContain('12:34')
     expect(first.textContent).toContain('Kept until')
@@ -322,4 +322,27 @@ describe('Library → Cloud recordings', () => {
     })
     expect(client.listCalls()).toBe(3)
   })
+})
+
+it('opens the registered local take and does not offer an expired cloud download', async () => {
+  const client = fakeClient([
+    [
+      item('local', { format: 'segments', localSessionId: 'cloud-take-local' }),
+      item('expired', { format: 'segments', availability: 'expired' })
+    ]
+  ])
+  mocked.client = client
+  await render()
+  const local = rows().find((row) => row.dataset.recordingId === 'local')!
+  const expired = rows().find((row) => row.dataset.recordingId === 'expired')!
+  const navigate = vi.fn()
+  window.addEventListener('videorc:navigate-workspace', navigate)
+  await act(async () => button(local, 'Open in Library').click())
+  expect(navigate.mock.calls[0][0].detail).toEqual({
+    tab: 'library',
+    sessionId: 'cloud-take-local'
+  })
+  window.removeEventListener('videorc:navigate-workspace', navigate)
+  expect(expired.textContent).toContain('Cloud copy expired')
+  expect(expired.querySelector('button')).toBeNull()
 })

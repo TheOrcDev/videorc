@@ -595,6 +595,11 @@ export interface BackendRpcMethodMap {
   'cloud.room.door.set': BackendRpcDefinition<{ open: boolean }, CloudStatus>
   /** A fresh 10-minute host token; renderer role only, never logged. */
   'cloud.room.token.refresh': BackendRpcDefinition<undefined, CloudRoomTokenAnswer>
+  /** Renderer-only observation of an applied public avatar output. */
+  'buddy.cloud.report': BackendRpcDefinition<
+    { showId: string; stream: boolean; recording: boolean },
+    { accepted: boolean }
+  >
   /** The renderer's own room connection, for the status copy. */
   'cloud.room.client.report': BackendRpcDefinition<CloudRoomClientReportParams, CloudStatus>
   'cloud.guest.decide': BackendRpcDefinition<CloudGuestDecideParams, CloudStatus>
@@ -6523,6 +6528,13 @@ const cloudRoomOverlayEventSchema = unionSchema([
 // Plan 234 T3: cloud recordings. No URL is part of either shape.
 const cloudRecordingItemSchema = objectSchema(
   {
+    associationKnown: optionalSchema(booleanSchema),
+    takeId: optionalSchema(stringSchema({ maxLength: 128 })),
+    liveIntervalIds: optionalSchema(
+      arraySchema(stringSchema({ minLength: 1, maxLength: 128 }), { maxLength: 2000 })
+    ),
+    availability: optionalSchema(stringSchema({ maxLength: 32 })),
+    localSessionId: optionalSchema(stringSchema({ maxLength: 256 })),
     id: stringSchema({ minLength: 1, maxLength: 128 }),
     showId: stringSchema({ maxLength: 64 }),
     orientation: stringSchema({ maxLength: 16 }),
@@ -6554,6 +6566,7 @@ const cloudRecordingDownloadSchema = objectSchema(
 
 const cloudRecordingDownloadEventSchema = objectSchema(
   {
+    localSessionId: optionalSchema(stringSchema({ maxLength: 256 })),
     jobId: stringSchema({ minLength: 1, maxLength: 128 }),
     recordingId: stringSchema({ minLength: 1, maxLength: 128 }),
     state: enumSchema(['running', 'done', 'failed', 'cancelled']),
@@ -7028,6 +7041,17 @@ const runtimeContracts = {
   'cloud.room.invite.rotate': { params: undefinedSchema, result: cloudStatusSchema },
   'cloud.room.door.set': { params: cloudOpenFlagSchema, result: cloudStatusSchema },
   'cloud.room.token.refresh': { params: undefinedSchema, result: cloudRoomTokenAnswerSchema },
+  'buddy.cloud.report': {
+    params: objectSchema(
+      {
+        showId: stringSchema({ minLength: 1, maxLength: 128 }),
+        stream: booleanSchema,
+        recording: booleanSchema
+      },
+      { allowUnknown: false }
+    ),
+    result: objectSchema({ accepted: booleanSchema }, { allowUnknown: false })
+  },
   'cloud.room.client.report': {
     params: cloudRoomClientReportParamsSchema,
     result: cloudStatusSchema

@@ -1,4 +1,5 @@
 import { roomPcmTestResources, setRoomPcmTestEnabled } from '../lib/room-pcm-test-state'
+import { cloudTerminalOwner } from '@/lib/cloud-provider-lifecycle'
 import { roomHoldsTheCamera } from '@/lib/replay-buffer-reconcile'
 import { outputSessionFacts } from '../../../shared/output-session'
 import type { TalkShowRoomClient, TalkShowRoomSnapshot } from '@/lib/talk-show-room'
@@ -2918,6 +2919,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // Open the room in flight (plan 224 D6): the ring stepped aside for it
   // and stays off until the room's own phase holds the camera.
   const roomOpenHoldRef = useRef(false)
+  const [cloudStatus, setCloudStatus] = useState<CloudStatus | null>(null)
   const cloudStatusRef = useRef<CloudStatus | null>(null)
   const [logs, setLogs] = useState<BackendLogEvent[]>([])
   const [healthEvents, setHealthEvents] = useState<HealthEvent[]>([])
@@ -4319,7 +4321,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const goLiveCaptionsReadiness = useMemo(
     () =>
       decideGoLiveCaptionsReadiness({
-        persistedEnabled: captureConfig.captions.enabled,
+        persistedEnabled: captureConfig.captions.enabled && cloudStatus?.room?.phase !== 'open',
         suppressForSession: suppressCaptionsForSession,
         capabilities: aiCapabilities,
         outputReadiness: goLiveCaptionOutputReadiness,
@@ -4328,6 +4330,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     [
       aiCapabilities,
       goLiveCaptionOutputReadiness,
+      cloudStatus?.room?.phase,
       captureConfig.captions.enabled,
       suppressCaptionsForSession,
       captionsPlatformUnavailable
@@ -5562,7 +5565,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       return next
     })
   }, [])
-  const [cloudStatus, setCloudStatus] = useState<CloudStatus | null>(null)
   const commitCloudStatus = useCallback(
     (next: CloudStatus): void => {
       const previous = cloudStatusRef.current
@@ -5574,10 +5576,20 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       if (next.stoppedBy && !previous?.stoppedBy) {
         latchHandOff([next.sessionId, recordingRef.current.sessionId, next.show?.id])
       } else if (here(next) && !here(previous)) handedOffRef.current = []
+      const terminalOwner = cloudTerminalOwner(previous, next)
+      if (
+        terminalOwner &&
+        !handedOffRef.current.includes(terminalOwner) &&
+        !stopSessionInFlightPromiseRef.current
+      ) {
+        platformLifecycleRun.current += 1
+        const owner = claimPlatformLifecycleOwner(terminalOwner)
+        if (owner) void settleClaimedPlatformLifecycleOwnerRef.current?.(owner).catch(reportError)
+      }
       setCloudStatus(next)
       void loadCloudNotices().then((n) => n.toastCloudStatus(previous, next))
     },
-    [latchHandOff]
+    [claimPlatformLifecycleOwner, latchHandOff, reportError]
   )
 
   // --- Live Chat Co-host (Premium cloud AI) --------------------------------
@@ -5771,6 +5783,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   }, [client, commitCloudStatus])
   const endCloudShow = useCallback(async (): Promise<void> => {
     if (!client) return
+    if (cloudStatusRef.current?.room?.live && !(await stopOutputRef.current?.('live'))) return
     return (await loadCloudNotices()).endCloudShow(client, commitCloudStatus)
   }, [client, commitCloudStatus])
   // The result is never a toast: the Livestream row shows it (C6b). Only a
@@ -8438,6 +8451,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       }),
       // A clean cut that finished out of view (plan 119 S15): its copy joins
       // the Library, and the ready toast says so once per cut-list revision.
+      nextClient.on('cloud.recordings.download', (event) => {
+        if (event.state === 'done' && event.localSessionId) void refreshSessions(nextClient)
+      }),
       nextClient.on('cleanCut.status', (job) => {
         setCleanCutJobs((current) => upsertCleanCutJob(current, job))
         if (job.state !== 'completed') return
@@ -13541,7 +13557,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     useMemo((): GoLiveOutput.StreamOutputTopologyRequest | null => {
       // Go Live is an explicit start (plan 174 S3.1): the output check runs
       // whenever a destination is ready, not only in a saved streaming mode.
-      if (!areEnabledStreamTargetsStartReady(captureConfig.streaming)) {
+      if (talkShowRoomOpen || !areEnabledStreamTargetsStartReady(captureConfig.streaming)) {
         return null
       }
       if (rejectedStreamOutputSplitKeys.size > 0 && goLiveOutputChunk) {
@@ -13560,7 +13576,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         ),
         sharedFallbackVideo: null
       }
-    }, [captureConfig, rejectedStreamOutputSplitKeys, suppressCaptionsForSession])
+    }, [captureConfig, rejectedStreamOutputSplitKeys, suppressCaptionsForSession, talkShowRoomOpen])
   const currentStreamOutputTopologyRequest = currentStreamOutputTopology?.params ?? null
   const streamSharedEncodeFallbackVideo = currentStreamOutputTopology?.sharedFallbackVideo ?? null
   const currentStreamOutputTopologyRequestKey = currentStreamOutputTopologyRequest
@@ -13671,6 +13687,15 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       // 209 S10); every other caller reads the session's choice.
       suppressCaptions: boolean = suppressCaptionsForSession
     ): Promise<GoLiveOutput.GoLiveSessionOutput> => {
+      if (talkShowRoomOpenRef.current)
+        return {
+          reason: null,
+          video: captureConfig.video,
+          streaming,
+          sharedFallbackVideo: null,
+          steppedDown: null,
+          belowFloor: null
+        }
       const { settleGoLiveSessionOutput } = await loadGoLiveOutput()
       return settleGoLiveSessionOutput({
         captureConfig,
@@ -15257,6 +15282,16 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             })
           )
 
+          if (talkShowRoomOpenRef.current && sessionId) {
+            const { waitForCloudProviderOutput } = await import('@/lib/cloud-provider-lifecycle')
+            await waitForCloudProviderOutput({
+              showId: sessionId,
+              targetId: target.id,
+              current: () => platformLifecycleRun.current === runId,
+              read: () => client.requestTyped('cloud.status'),
+              sleep: delay
+            })
+          }
           let lastStatus: YouTubeStreamStatusResult | null = null
           for (let attempt = 0; !target.scheduledEventId && attempt < 8; attempt += 1) {
             if (platformLifecycleRun.current !== runId) {
@@ -15414,6 +15449,16 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             })
           )
 
+          if (talkShowRoomOpenRef.current && sessionId) {
+            const { waitForCloudProviderOutput } = await import('@/lib/cloud-provider-lifecycle')
+            await waitForCloudProviderOutput({
+              showId: sessionId,
+              targetId: target.id,
+              current: () => platformLifecycleRun.current === runId,
+              read: () => client.requestTyped('cloud.status'),
+              sleep: delay
+            })
+          }
           // Metadata (title, announce-on-timeline) is derived backend-side
           // from the stream metadata draft — never hardcoded here. A saved
           // broadcast goes live through its own schedule instead of a fresh
@@ -15835,7 +15880,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           // its own (enableAutoStop); retaining it would block every later
           // Record and Go Live until the reset. Network and 5xx keep the
           // retain-and-retry path.
-          const settled = isSettledYouTubeCompletionError(error)
+          const settled =
+            isSettledYouTubeCompletionError(error) &&
+            (!target.scheduledEventId || !isYouTubeQuotaPausedError(error))
           if (!settled) {
             complete = false
           }
@@ -16233,16 +16280,19 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             )
             commitCloudStatus(cloudAfterGoLive)
             const showId = cloudAfterGoLive.show?.id
+            if (!showId) throw new Error('The cloud did not return the owning show.')
+            platformLifecycleOwnerRef.current = { sessionId: showId, streaming: streamingForStart }
             await activatePreparedYouTubeBroadcasts(streamingForStart, lifecycleRunId, showId)
             streamingForStart = await activatePreparedXBroadcasts(
               streamingForStart,
               lifecycleRunId,
               showId
             )
-            platformLifecycleOwnerRef.current = {
-              sessionId: showId ?? 'talk-show',
-              streaming: streamingForStart
-            }
+            if (platformLifecycleRun.current === lifecycleRunId)
+              platformLifecycleOwnerRef.current = {
+                sessionId: showId,
+                streaming: streamingForStart
+              }
             return true
           }
           const optimisticRecording = isActiveRecordingState(recordingRef.current.state)
@@ -17240,6 +17290,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     () => ({ layout: captureConfig.layout, background: activeSceneBackground }),
     [captureConfig.layout, activeSceneBackground]
   )
+  const talkShowAvatar = useMemo(
+    () => ({ persona: buddyPersona, snapshot: buddyOverlay, layout: overlayLayout.buddy }),
+    [buddyPersona, buddyOverlay, overlayLayout.buddy]
+  )
   const talkShowDeps = useMemo<TalkShowRoomControllerDeps>(
     () => ({
       client,
@@ -17251,6 +17305,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       microphoneMuted: captureConfig.audio.microphoneMuted,
       cameraOff: captureConfig.sources.cameraOff === true,
       cameraSettings: talkShowCameraSettings,
+      avatar: talkShowAvatar,
       cameraId: talkShowCameraId,
       microphoneId: talkShowMicrophoneId,
       devices: deviceList.devices,
@@ -17272,6 +17327,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       captureConfig.sources.cameraOff,
       talkShowCameraId,
       talkShowCameraSettings,
+      talkShowAvatar,
       talkShowCameraReturned,
       talkShowClipsStepAside,
       talkShowError,
@@ -17340,7 +17396,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         return Promise.resolve({ kind: 'ignored' })
       }
       const captionsReadiness = headless?.captionsReadiness ?? goLiveCaptionsReadiness
-      if (captionsReadiness.blocksStart) {
+      if (!talkShowRoomOpenRef.current && captionsReadiness.blocksStart) {
         if (!headless) {
           toast.warning("Live captions aren't ready", {
             description: captionsReadiness.description
@@ -17513,7 +17569,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       suppressCaptions: boolean
     }): Promise<boolean> => {
       // A Go Live without the dialog decided on captions before its confirm.
-      if (!headless && goLiveCaptionsReadiness.blocksStart) {
+      if (!talkShowRoomOpenRef.current && !headless && goLiveCaptionsReadiness.blocksStart) {
         toast.warning("Live captions aren't ready", {
           description: goLiveCaptionsReadiness.description
         })
@@ -17601,8 +17657,16 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
                 await import('@/lib/talk-show-end')
               return endTalkShowLivestream(
                 async () => {
+                  const mutation = platformLifecycleMutationRef.current
+                  if (mutation?.sessionId === talkSession.sessionId) {
+                    const streaming = await mutation.promise
+                    if (platformLifecycleOwnerRef.current?.sessionId === talkSession.sessionId)
+                      platformLifecycleOwnerRef.current.streaming = streaming
+                  }
+                  if (handedOffRef.current.includes(talkSession.sessionId))
+                    throw new Error('The show continues on another device.')
                   const owner = platformLifecycleOwnerRef.current
-                  if (owner) {
+                  if (owner?.sessionId === talkSession.sessionId) {
                     owner.streaming = await endPreparedXBroadcasts(
                       owner.streaming,
                       owner.sessionId,
@@ -20050,6 +20114,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       roomPcmTest: (enabled?: boolean) => {
         if (enabled !== undefined) setRoomPcmTestEnabled(enabled)
         return roomPcmTestResources()
+      },
+      roomAvatar: (enabled?: boolean) => {
+        if (enabled !== undefined) roomControlsRef.current?.setAvatarEnabled(enabled)
+        return roomControlsRef.current?.snapshot.avatar ?? null
       },
       roomSounds: (enabled?: boolean) => {
         if (enabled !== undefined) soundboard.setRoomAuxEnabled(enabled)

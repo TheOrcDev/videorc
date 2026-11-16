@@ -230,6 +230,8 @@ pub(crate) fn legs_end_destinations(destinations: &[HandoverDestination]) -> Val
 #[serde(rename_all = "camelCase")]
 pub struct ControlRevAnswer {
     #[serde(default)]
+    pub ending: bool,
+    #[serde(default)]
     pub rev: Option<u64>,
 }
 
@@ -354,6 +356,12 @@ where
 /// is left out on purpose: this line reaches logs and error strings.
 fn failure_line(error: &CloudApiError) -> String {
     match error {
+        CloudApiError::Other { code, .. } if code == "cloud-recording-expired" => {
+            "The cloud recording has expired.".to_string()
+        }
+        CloudApiError::Other { code, .. } if code == "cloud-recording-missing" => {
+            "The recording artifact is no longer available.".to_string()
+        }
         CloudApiError::Other { status, code, .. } => {
             format!("videorc.com answered {status} {code}")
         }
@@ -533,6 +541,16 @@ pub struct CloudRecordingItem {
     pub id: String,
     #[serde(default)]
     pub show_id: String,
+    #[serde(default)]
+    pub take_id: String,
+    #[serde(default)]
+    pub association_known: bool,
+    #[serde(default)]
+    pub live_interval_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub availability: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_session_id: Option<String>,
     /// `h` or `v`.
     #[serde(default)]
     pub orientation: String,
@@ -635,6 +653,8 @@ pub enum DownloadState {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RecordingDownloadEvent {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub local_session_id: Option<String>,
     pub job_id: String,
     pub recording_id: String,
     pub state: DownloadState,
@@ -755,6 +775,7 @@ impl RecordingDownloadJobs {
         let key = recording_id.clone();
         let task_key = key.clone();
         let event = RecordingDownloadEvent {
+            local_session_id: None,
             job_id,
             recording_id,
             state: DownloadState::Running,
@@ -1284,6 +1305,7 @@ async fn download_segments_recording_with_progress<W, R, Fut>(
     recording: &CloudRecordingItem,
     folder: &Path,
     control: DownloadControl,
+    database: Option<&crate::storage::Database>,
     remux: R,
 ) -> Result<PathBuf>
 where
@@ -1318,12 +1340,33 @@ where
         .map_err(|error| anyhow::anyhow!(storage_problem(&error)))?;
     let part = OwnedDownloadFile::part(folder, &recording.file_name(), &job_id)
         .map_err(|error| anyhow::anyhow!(storage_problem(&error)))?;
+    if let Some(database) = database {
+        database.prepare_cloud_recording_partial(recording, part.path())?;
+    }
     let outcome = remux(remux_args(&playlist_path, part.path())).await;
     drop(temporary);
     match outcome {
-        Ok(outcome) if outcome.success => part
-            .finish(folder, &recording.file_name())
-            .map_err(|error| anyhow::anyhow!(storage_problem(&error))),
+        Ok(outcome) if outcome.success => {
+            if let Some(database) = database {
+                std::fs::File::open(part.path())?.sync_all()?;
+                crate::session_ops::sync_session_file_parent(part.path())?;
+                if std::fs::metadata(part.path())?.len() == 0 {
+                    bail!("The recording download stopped. Try again.");
+                }
+                let destination = folder.join(format!("talk-{}.mp4", uuid::Uuid::new_v4()));
+                database.prepare_cloud_recording_file(recording, part.path(), &destination)?;
+                // The durable journal owns this complete file from here, including
+                // a process death between publication and Library registration.
+                let mut part = part;
+                part.0 = None;
+                database
+                    .recover_cloud_recording_file(recording)?
+                    .ok_or_else(|| anyhow::anyhow!("The recording download stopped. Try again."))
+            } else {
+                part.finish(folder, &recording.file_name())
+                    .map_err(|error| anyhow::anyhow!(storage_problem(&error)))
+            }
+        }
         Ok(outcome) => {
             bail!("{}", remux_problem(&outcome.stderr));
         }
@@ -1357,6 +1400,7 @@ where
             cancelled,
             progress: Arc::new(|_, _| {}),
         },
+        None,
         remux,
     )
     .await
@@ -1385,6 +1429,7 @@ impl<W: CloudWebApi, C: ControlConnector> crate::cloud_show::CloudShowContext<W,
         ffmpeg: String,
         folder: PathBuf,
         emit: DownloadEventHook,
+        database: crate::storage::Database,
     ) -> Result<CloudRecordingDownload> {
         if bearer.is_none() {
             bail!("Sign in to download your cloud recordings.");
@@ -1392,9 +1437,26 @@ impl<W: CloudWebApi, C: ControlConnector> crate::cloud_show::CloudShowContext<W,
         let context = self.clone();
         let jobs = lock(&self.slot).downloads.clone();
         let recording_id = recording_id.to_string();
+        let event_database = database.clone();
+        let emit: DownloadEventHook = Arc::new(move |mut event| {
+            if event.state == DownloadState::Done {
+                event.local_session_id = event_database
+                    .cloud_recording_session(&event.recording_id)
+                    .ok()
+                    .flatten();
+            }
+            emit(event);
+        });
         jobs.start(recording_id.clone(), emit, move |control| async move {
             context
-                .perform_cloud_recording_download(bearer, &recording_id, ffmpeg, folder, control)
+                .perform_cloud_recording_download(
+                    bearer,
+                    &recording_id,
+                    ffmpeg,
+                    folder,
+                    control,
+                    database,
+                )
                 .await
         })
     }
@@ -1408,6 +1470,7 @@ impl<W: CloudWebApi, C: ControlConnector> crate::cloud_show::CloudShowContext<W,
         ffmpeg: String,
         folder: PathBuf,
         mut control: DownloadControl,
+        database: crate::storage::Database,
     ) -> Result<PathBuf> {
         let Some(bearer) = bearer else {
             bail!("Sign in to download your cloud recordings.");
@@ -1419,6 +1482,16 @@ impl<W: CloudWebApi, C: ControlConnector> crate::cloud_show::CloudShowContext<W,
         let Some(recording) = recordings.iter().find(|item| item.id == recording_id) else {
             bail!("That recording is not in your account any more.");
         };
+        database.remember_cloud_recording(recording)?;
+        if let Some(path) = database.recover_cloud_recording_file(recording)? {
+            return Ok(path);
+        }
+        if recording.availability.as_deref() == Some("expired")
+            || chrono::DateTime::parse_from_rfc3339(&recording.expires_at)
+                .is_ok_and(|at| at < chrono::Utc::now())
+        {
+            bail!("The cloud recording has expired.");
+        }
         if !recording.is_segments() {
             bail!("This recording downloads from your account on videorc.com.");
         }
@@ -1429,6 +1502,7 @@ impl<W: CloudWebApi, C: ControlConnector> crate::cloud_show::CloudShowContext<W,
             recording,
             &folder,
             control,
+            Some(&database),
             |args| run_ffmpeg_remux(ffmpeg, args, remux_cancel),
         )
         .await
@@ -1679,7 +1753,7 @@ fn raise_floor(floor: &AtomicU64, answer: &ControlRevAnswer) -> Option<Value> {
     if let Some(rev) = answer.rev {
         floor.fetch_max(rev, Ordering::SeqCst);
     }
-    None
+    answer.ending.then(|| json!({ "ending": true }))
 }
 
 // --- The state poll -----------------------------------------------------------------
@@ -2268,6 +2342,17 @@ impl<W: CloudWebApi, C: ControlConnector> ControlLoop<W, C> {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn ending_acknowledgement_survives_the_web_control_adapter() {
+        let answer: super::ControlRevAnswer =
+            serde_json::from_value(serde_json::json!({"ok": true, "ending": true})).unwrap();
+        let floor = std::sync::atomic::AtomicU64::new(4);
+        assert_eq!(
+            super::raise_floor(&floor, &answer),
+            Some(serde_json::json!({"ending": true}))
+        );
+        assert_eq!(floor.load(std::sync::atomic::Ordering::SeqCst), 4);
+    }
+    #[test]
     fn download_error_respects_the_renderer_utf16_limit() {
         let supplementary = super::download_error_for_wire(&"😀".repeat(4096));
         assert_eq!(supplementary.encode_utf16().count(), 4096);
@@ -2812,6 +2897,7 @@ rtmps://h/app/key 'http://x.test/y'";
     fn download_snapshots_evict_oldest_completions_and_preserve_running_retries() {
         let jobs = RecordingDownloadJobs::default();
         let event = |id: usize, state| RecordingDownloadEvent {
+            local_session_id: None,
             job_id: format!("job_{id}"),
             recording_id: format!("rec_{id}"),
             state,

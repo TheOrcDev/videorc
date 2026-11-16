@@ -1,3 +1,4 @@
+import { prepareAvatar, exerciseAvatar, assertAvatarVideo } from './cloud-parity-avatar.mjs'
 import { exerciseSoundboard } from './cloud-parity-soundboard.mjs'
 import { exercisePrivacy } from './cloud-parity-privacy.mjs'
 import {
@@ -54,14 +55,26 @@ export async function runBaseline({
   webRoot,
   controls = false,
   privacy = false,
-  soundboard = false
+  soundboard = false,
+  avatar = false,
+  replayRing = false
 }) {
   const report = baselineReport({
     desktop: revision(desktopRoot),
     web: revision(webRoot),
     template: 'v1'
   })
-  report.case = soundboard ? 'soundboard' : privacy ? 'privacy' : controls ? 'controls' : 'baseline'
+  report.case = replayRing
+    ? 'replay-ring'
+    : avatar
+      ? 'avatar'
+      : soundboard
+        ? 'soundboard'
+        : privacy
+          ? 'privacy'
+          : controls
+            ? 'controls'
+            : 'baseline'
   // A dirty web consumer makes its revision misleading. Require a dedicated,
   // installed checkout; inspect it read-only and never change the active one.
   const webDirty = execFileSync('git', ['status', '--porcelain', '--untracked-files=no'], {
@@ -162,8 +175,16 @@ export async function runBaseline({
     pages = await startParityPages(
       webRoot,
       guests,
-      soundboard
+      soundboard || avatar || replayRing
         ? {
+            ...(avatar
+              ? {
+                  graphicsLanes: {
+                    EG_parity_baseline: { output: 'stream', orientation: 'h' },
+                    EG_parity_avatar_recording: { output: 'recording', orientation: 'h' }
+                  }
+                }
+              : {}),
             show: h.showId,
             relay: {
               participantSession: async (show, identity) =>
@@ -198,7 +219,13 @@ export async function runBaseline({
       args: [
         '--autoplay-policy=no-user-gesture-required',
         '--use-fake-ui-for-media-stream',
-        '--use-fake-device-for-media-stream'
+        ...(replayRing
+          ? [
+              '--auto-select-tab-capture-source-by-title=Videorc Replay Ring',
+              '--enable-usermedia-screen-capturing',
+              '--allow-http-screen-capture'
+            ]
+          : ['--use-fake-device-for-media-stream'])
       ]
     })
     const newPage = async (name) => {
@@ -238,6 +265,7 @@ export async function runBaseline({
       layout: 'side-by-side',
       onStage: [`host:${h.showId}`, ...[...guests.values()].map((g) => g.identity)]
     })
+    if (avatar) await prepareAvatar({ h, report })
     const program = await newPage('program')
     await program.addInitScript(installProgramAudioTap)
     const search = new URLSearchParams({
@@ -360,6 +388,10 @@ export async function runBaseline({
       path: soundPath
     })
     const sound = await h.rpc('sounds.import', { sourceCapability: auth.capabilityId })
+    if (replayRing) {
+      const { exerciseReplayRing } = await import('./cloud-parity-replay-ring.mjs')
+      await exerciseReplayRing({ h, program, webRoot, output, report, sound })
+    }
     if (soundboard) await exerciseSoundboard({ h, clients, captureAudio, report, sound, guests })
     await h.rpc('sounds.play', { id: sound.id })
     const soundCaptures = await captureAudio('soundboard', clients)
@@ -394,6 +426,16 @@ export async function runBaseline({
     })
     await h.rpc('cohost.utterance.say', { text: 'Parity fixture bubble' })
     await captureAudio('avatar', clients)
+    if (avatar)
+      await exerciseAvatar({
+        h,
+        report,
+        clients,
+        newPage,
+        programUrl: `${pages.origin}${pages.wire.PROGRAM_PAGE_PATH}?${search}`,
+        captureAudio,
+        output
+      })
     assert.equal(h.web.snapshot(h.showId).state.legs.length, 0)
     h.assertNoDirect()
     await h.rpc('cloud.room.close')
@@ -436,6 +478,7 @@ export async function runBaseline({
       frameHits[name] = hits
     }
     report.videoMeasurements = { colorPeaks, frameHits, sampledFps: 5 }
+    if (avatar) assertAvatarVideo(report)
     const seen = (key) => frameHits.program[key] >= 5
     observations.push(
       {

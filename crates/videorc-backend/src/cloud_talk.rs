@@ -1107,6 +1107,7 @@ pub(crate) struct TalkShowState {
     /// Plan 234 (web control): the overlays that are up, one per slot and
     /// orientation, with their bytes. Empty on a node show.
     pub(crate) overlays: Vec<StoredOverlay>,
+    pub(crate) avatar_applied: Option<(std::time::Instant, bool, bool)>,
 }
 
 impl std::fmt::Debug for TalkShowState {
@@ -1154,6 +1155,7 @@ impl TalkShowState {
             poll_generation: 0,
             seen_requests: HashSet::new(),
             overlays: Vec::new(),
+            avatar_applied: None,
         }
     }
 
@@ -1217,6 +1219,40 @@ impl CloudShowRuntime {
                 CloudRoomPhase::Opening | CloudRoomPhase::Open | CloudRoomPhase::Closing
             )
         })
+    }
+
+    /// S4: a local preview is never evidence that a cloud output can show a
+    /// generated bubble. Renderer reports expire and are reset on room loss.
+    pub fn room_avatar_visible(&self, stream: bool, recording: bool) -> Option<bool> {
+        self.talk_show_room_show_id()?;
+        let talk = self.talk.as_ref()?;
+        let visible = talk
+            .avatar_applied
+            .is_some_and(|(at, on_stream, in_recording)| {
+                avatar_observation_visible(
+                    at.elapsed(),
+                    (stream, recording),
+                    (on_stream, in_recording),
+                    (
+                        talk.live,
+                        self.runner
+                            .as_ref()
+                            .and_then(|runner| runner.recording.as_ref())
+                            .is_some_and(|r| r.active),
+                    ),
+                )
+            });
+        Some(visible && talk.client == CloudRoomClientState::Connected)
+    }
+
+    pub fn report_room_avatar(&mut self, show_id: &str, stream: bool, recording: bool) -> bool {
+        if self.talk_show_room_show_id().as_deref() != Some(show_id) {
+            return false;
+        }
+        if let Some(talk) = self.talk.as_mut() {
+            talk.avatar_applied = Some((std::time::Instant::now(), stream, recording));
+        }
+        true
     }
 
     /// The show id while the room is open, on air or not. A takeover goes to
@@ -1667,7 +1703,17 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
         }
         self.hooks.emit_from(&self.slot);
         let status = self.end_current_show(bearer).await;
-        self.forget_talk_show().await;
+        match &status {
+            Ok(confirmed) if !matches!(confirmed.phase, crate::cloud_show::CloudPhase::Ending) => {
+                self.forget_talk_show().await
+            }
+            _ => {
+                if let Some(talk) = lock(&self.slot).talk.as_mut() {
+                    talk.phase = CloudRoomPhase::Open;
+                }
+                self.hooks.emit_from(&self.slot);
+            }
+        }
         status
     }
 
@@ -2169,6 +2215,9 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
             }
             if let Some(talk) = runtime.talk.as_mut() {
                 talk.client = params.state;
+                if !connected {
+                    talk.avatar_applied = None;
+                }
                 talk.message = params.detail.filter(|detail| {
                     !detail.trim().is_empty() && !detail.contains("DUPLICATE_IDENTITY")
                 });
@@ -2715,9 +2764,66 @@ pub(crate) fn open_talk_show_for_tests(
     rx
 }
 
+fn avatar_observation_visible(
+    age: std::time::Duration,
+    enabled: (bool, bool),
+    applied: (bool, bool),
+    running: (bool, bool),
+) -> bool {
+    age < std::time::Duration::from_secs(15)
+        && ((enabled.0 && applied.0 && running.0) || (enabled.1 && applied.1 && running.1))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn avatar_spend_needs_fresh_enabled_applied_running_output() {
+        let fresh = std::time::Duration::from_secs(1);
+        assert!(avatar_observation_visible(
+            fresh,
+            (true, false),
+            (true, false),
+            (true, false)
+        ));
+        assert!(avatar_observation_visible(
+            fresh,
+            (false, true),
+            (false, true),
+            (false, true)
+        ));
+        assert!(!avatar_observation_visible(
+            fresh,
+            (true, true),
+            (true, true),
+            (false, false)
+        ));
+        assert!(!avatar_observation_visible(
+            fresh,
+            (false, false),
+            (true, true),
+            (true, true)
+        ));
+        assert!(!avatar_observation_visible(
+            fresh,
+            (true, true),
+            (false, false),
+            (true, true)
+        ));
+        assert!(!avatar_observation_visible(
+            fresh,
+            (true, false),
+            (false, true),
+            (true, true)
+        ));
+        assert!(!avatar_observation_visible(
+            std::time::Duration::from_secs(15),
+            (true, true),
+            (true, true),
+            (true, true)
+        ));
+    }
 
     fn decode(base64_png: &str) -> image::RgbaImage {
         use base64::Engine as _;

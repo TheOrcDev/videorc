@@ -1,6 +1,11 @@
 import { RoomAuxPublisher } from './room-aux-publisher'
 import { createRoomPcmTestSource, type RoomPcmSource } from './room-pcm-source'
 import {
+  RoomAvatarPublisher,
+  type AvatarContent,
+  type RoomAvatarStatus
+} from './room-avatar-publisher'
+import {
   createPrivateScreen,
   roomScreenPrivacy,
   privacyTrackName,
@@ -118,6 +123,7 @@ export type TalkShowRoomSnapshot = {
   people: TalkShowPerson[]
   local: TalkShowLocalMedia
   monitor: TalkShowMonitor
+  avatar?: RoomAvatarStatus
   screenPrivacy?: ScreenPrivacyPublication & {
     sourceBlockedAt: number | null
     status: 'visible' | 'hiding' | 'observed' | 'unconfirmed' | 'paused'
@@ -257,6 +263,9 @@ export class TalkShowRoomClient {
   readonly #audio: RemoteAudioAttachments<HTMLMediaElement>
   #snapshot: TalkShowRoomSnapshot = IDLE_TALK_SHOW_ROOM
   #problem: string | null = null
+  #avatar: RoomAvatarPublisher | null = null
+  #avatarContent: AvatarContent | null = null
+  #avatarEnabled = false
   /** Overlays go one at a time, in the order they were handed over. */
   #overlays = new Map<string, AbortController>()
 
@@ -316,6 +325,9 @@ export class TalkShowRoomClient {
     this.#closed = true
     this.#aux?.close()
     this.#aux = null
+    this.#avatar?.close()
+    this.#avatar = null
+    this.#avatarContent = null
     this.#privacyOff?.()
     this.#privacyOff = null
     if (this.#privacyTimer) clearTimeout(this.#privacyTimer)
@@ -591,7 +603,29 @@ export class TalkShowRoomClient {
     this.#publish()
   }
 
+  setAvatar(content: AvatarContent | null): void {
+    this.#avatarContent = content
+    this.#avatar?.set(this.#avatarEnabled ? content : null)
+  }
+
+  failAvatar(): void {
+    this.#avatarContent = null
+    if (this.#avatarEnabled) this.#avatar?.fail()
+  }
+
+  setAvatarEnabled(enabled: boolean): void {
+    this.#avatarEnabled = enabled
+    this.#avatar?.set(enabled ? this.#avatarContent : null)
+  }
+
   #bind(room: Room): void {
+    this.#avatar?.close()
+    this.#avatar = new RoomAvatarPublisher(room, (avatar) => {
+      if (!this.#owns(room)) return
+      this.#snapshot = { ...this.#snapshot, avatar: { ...avatar, enabled: this.#avatarEnabled } }
+      this.#publish()
+    })
+    this.#avatar.set(this.#avatarEnabled ? this.#avatarContent : null)
     room
       .on(RoomEvent.DataReceived, (payload, participant, _kind, topic) => {
         // Only server-relayed observations. A participant cannot impersonate this API.
@@ -993,6 +1027,8 @@ export class TalkShowRoomClient {
   async #reconnect(): Promise<void> {
     if (this.#closed) return
     const stale = this.#room
+    this.#avatar?.close()
+    this.#avatar = null
     this.#room = null
     if (stale) await stale.disconnect().catch(() => {})
     await this.#stopLocal()

@@ -98,7 +98,7 @@ export function outputSessionFacts(
     showId: cloudOwner ? (cloud?.show?.id ?? null) : null,
     nativeSessionId: cloudOwner ? null : (native.sessionId ?? null),
     publisherEpoch: null,
-    liveIntervalId: null,
+    liveIntervalId: cloud?.liveInterval?.id ?? null,
     recordingTakeId: null,
     clock: {
       origin: cloudOwner ? 'cloud-owner' : 'native-session',

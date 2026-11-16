@@ -433,6 +433,39 @@ pub(crate) fn session_started(state: &AppState, session_id: &str, platforms: Vec
     });
 }
 
+/// Plan 249 S18: the same show's chat attached again after a resume. The
+/// stream row is the same one (`community_record_stream` only adds
+/// platforms and keeps its start), and an arrival set still held for this
+/// show stays, so nobody already greeted is greeted again. With nothing held
+/// (a relaunch) this is an ordinary start; arrivals are looked up in the store.
+pub(crate) fn session_resumed(state: &AppState, session_id: &str, platforms: Vec<StreamPlatform>) {
+    let held = state
+        .community
+        .lock()
+        .session
+        .as_ref()
+        .is_some_and(|session| session.session_id == session_id);
+    if !held {
+        session_started(state, session_id, platforms);
+        return;
+    }
+    let database = state.database.clone();
+    let record_session_id = session_id.to_string();
+    let log_state = state.clone();
+    tokio::spawn(async move {
+        let outcome = tokio::task::spawn_blocking(move || {
+            database.community_record_stream(&record_session_id, Utc::now(), &platforms)
+        })
+        .await;
+        if let Ok(Err(error)) = outcome {
+            log_state.emit_log(
+                "warn",
+                format!("Community: could not record the resumed stream: {error:#}"),
+            );
+        }
+    });
+}
+
 /// The chat session ended: pending `!link` words die with it; its rows
 /// leave the lane (F11: never a newer session's); the report's Community
 /// block (D15) is written once the

@@ -341,7 +341,10 @@ describe('the Program monitor on a managed show (plan 234 D6)', () => {
       expect(tile.style.width).toBe(`${(plan.tiles[index].rect.w / 1920) * 100}%`)
     })
     // The picture only: no name plate and no placeholder words in the small frame.
-    expect(monitor()?.textContent).toBe('Program')
+    expect(monitor()?.textContent).toContain('Program preview')
+    expect(
+      monitor()?.querySelector('[data-testid="show-stage-avatar-status"]')?.textContent
+    ).toContain('Room avatar off')
     expect(speaker()).toBeNull()
   })
 
@@ -379,7 +382,10 @@ describe('the Program monitor on a managed show (plan 234 D6)', () => {
     studio.core.activeScreen = null
     await mount(talkStatus({ show: managedShow, room: shownRoom }), talkShow())
     expect(takeover()).toBeNull()
-    expect(monitor()?.textContent).toBe('Program')
+    expect(monitor()?.textContent).toContain('Program preview')
+    expect(
+      monitor()?.querySelector('[data-testid="show-stage-avatar-status"]')?.textContent
+    ).toContain('Room avatar off')
   })
 })
 

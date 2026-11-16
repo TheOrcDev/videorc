@@ -40,7 +40,7 @@ pub(crate) struct LiveChatPersistenceFailure {
 }
 
 impl LiveChatPersistenceFailure {
-    fn retryable(message: impl Into<String>) -> Self {
+    pub(crate) fn retryable(message: impl Into<String>) -> Self {
         Self {
             kind: LiveChatPersistenceFailureKind::Retryable,
             message: message.into(),
