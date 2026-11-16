@@ -11677,14 +11677,9 @@ async fn handle_text_message_with_role(
             }
             if let (Some(context), Some(bearer)) =
                 (cloud_context(state), account::stored_session_token())
+                && let Err(error) = context.check_current_show(&bearer, true).await
             {
-                if let Err(error) = context.check_current_show(&bearer, true).await {
-                    return ServerResponse::error(
-                        command.id,
-                        "cloud-check-failed",
-                        error.to_string(),
-                    );
-                }
+                return ServerResponse::error(command.id, "cloud-check-failed", error.to_string());
             }
             ServerResponse::ok(command.id, serde_json::json!({"ok":true}))
         }
@@ -16077,17 +16072,16 @@ async fn start_session_command(
             };
             match started {
                 Ok(status) => {
-                    if let Some(context) = cloud_context(state) {
-                        if let Some(bearer) = account::stored_session_token()
-                            && let Err(error) = context.finish_resume(&bearer).await
-                        {
-                            return ServerResponse::error(
-                                command.id,
-                                cloud_show::continuation_error_code(&error)
-                                    .unwrap_or("cloud-source-not-ready"),
-                                error.to_string(),
-                            );
-                        }
+                    if let Some(context) = cloud_context(state)
+                        && let Some(bearer) = account::stored_session_token()
+                        && let Err(error) = context.finish_resume(&bearer).await
+                    {
+                        return ServerResponse::error(
+                            command.id,
+                            cloud_show::continuation_error_code(&error)
+                                .unwrap_or("cloud-source-not-ready"),
+                            error.to_string(),
+                        );
                     }
                     // Plan 187: a fact for the announcer; never waits.
                     discord_announce::on_session_started(state, &status, streaming.as_ref());

@@ -122,11 +122,9 @@ pub fn load_device(database: &crate::storage::Database) -> CloudDevice {
         && valid_device_id(&id)
     {
         device.id = id;
-    } else {
+    } else if database.save_setting("cloud.deviceId", &device.id).is_err() {
         // Fail closed: never create a show with an identity that changes on restart.
-        if database.save_setting("cloud.deviceId", &device.id).is_err() {
-            device.id.clear();
-        }
+        device.id.clear();
     }
     #[cfg(unix)]
     {
@@ -1647,7 +1645,16 @@ fn reconnect_candidates(
                     .into_iter()
                     .filter(|c| c.label == leg.label)
                     .collect();
-                (by_label.len() == 1).then(|| by_label[0])
+                let unique_leg = legs
+                    .iter()
+                    .filter(|other| {
+                        other.platform == leg.platform
+                            && other.orientation == leg.orientation
+                            && other.label == leg.label
+                    })
+                    .count()
+                    == 1;
+                (by_label.len() == 1 && unique_leg).then(|| by_label[0])
             }?;
             let mut destination = candidate.clone();
             destination.id = leg.id.clone();
@@ -4466,9 +4473,10 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
                     .collect();
                 (by_label.len() == 1).then(|| by_label[0])
             } {
-                if leg.broadcast_id.is_some() {
-                    target.platform_broadcast_id = leg.broadcast_id.clone();
-                }
+                target.platform_broadcast_id = leg
+                    .broadcast_id
+                    .clone()
+                    .or_else(|| target.platform_broadcast_id.clone());
             }
         }
     }
