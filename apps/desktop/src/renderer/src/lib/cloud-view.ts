@@ -38,9 +38,24 @@ export const CLOUD_DIRECT_LINE = 'Go Live streams directly from this computer.'
  */
 export const CLOUD_SHOW_HELD_LINE = 'A show is live through Videorc Cloud. Go Live feeds it.'
 
+/**
+ * Plan 243 R2 A-M6: the held show is live from another device, so Go Live is
+ * refused for it; the Studio's notice continues it here.
+ */
+export const CLOUD_SHOW_ELSEWHERE_LINE =
+  'Your show is live on another device. Use Continue here in the Studio.'
+
 /** A show is live through the cloud with no local session feeding it. */
 export function cloudShowHeld(status: CloudStatus | null): boolean {
   return Boolean(status?.show?.resumable)
+}
+
+/** What the held show's line says: Go Live feeds it, unless another device is on air. */
+function cloudShowHeldLine(status: CloudStatus): string {
+  const onAir = status.onAir
+  return onAir && !onAir.thisDevice && !onAir.waiting
+    ? CLOUD_SHOW_ELSEWHERE_LINE
+    : CLOUD_SHOW_HELD_LINE
 }
 
 function hoursOrMinutes(seconds: number): string {
@@ -113,7 +128,7 @@ export function cloudSectionState(status: CloudStatus | null): CloudSectionState
     return {
       kind: 'unavailable',
       reason: cloudShowHeld(status)
-        ? `Videorc Cloud isn't on for your account right now. ${CLOUD_SHOW_HELD_LINE}`
+        ? `Videorc Cloud isn't on for your account right now. ${cloudShowHeldLine(status)}`
         : CLOUD_NOT_YET_REASON
     }
   }
@@ -153,7 +168,7 @@ export function cloudSwitchLines(
 ): string[] {
   if (section.kind !== 'available') return []
   if (!status.settings.enabled) {
-    return [cloudShowHeld(status) ? CLOUD_SHOW_HELD_LINE : CLOUD_DIRECT_LINE]
+    return [cloudShowHeld(status) ? cloudShowHeldLine(status) : CLOUD_DIRECT_LINE]
   }
   return [section.hours, cloudUploadLine(upload)].filter((line): line is string => Boolean(line))
 }

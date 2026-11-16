@@ -80,7 +80,26 @@ export function exportSpaceRefusal(raw: string | undefined): string | null {
 
 const BUSY_REASON = "Videorc was busy and didn't do it. Try again in a moment."
 
-/** Backend error codes with a cause the streamer can act on. */
+/**
+ * Backend error codes with a cause the streamer can act on. Their notes sit
+ * here, not in the object: the renderer build is not minified and keeps a
+ * comment inside an object literal in the eager bundle.
+ *
+ * - `layout-camera-not-ready`, `layout-screen-not-ready` (plan 216 A3, D5): a
+ *   scene switch that adds a source gave up waiting for its first frame. The
+ *   backend's code names the source, so the copy can.
+ * - `cloud-test-*` (plan 184 C6b): the Test cloud's refusals (the button is
+ *   disabled for each, so these cover a click that raced a change).
+ * - `cloud-room-session-active`, `cloud-show-live` (plan 224): Open the room's
+ *   refusals (`RoomOpenRefusal`).
+ * - `cloud-handoff-*`, `cloud-source-not-ready`, `cloud-not-on-air`,
+ *   `cloud-nothing-to-resume` (plan 243): continuing a show on another device
+ *   (the web's refusals, D8); `cloud-show-live-elsewhere` (plan 243 R2 A-M6):
+ *   Go Live on a held show another device is on air for.
+ * - `layout-*-not-selected`: a scene whose layout needs a source that is set
+ *   to None or Off. Trying again cannot help, so the copy says what to pick
+ *   instead.
+ */
 const KNOWN_CODES: Readonly<Record<string, string>> = {
   'request-outcome-unknown':
     "Videorc didn't hear back in time. Check whether it worked before you try again.",
@@ -96,29 +115,23 @@ const KNOWN_CODES: Readonly<Record<string, string>> = {
   'session-rename-invalid': 'A title needs 1 to 120 characters.',
   'youtube-quota-paused':
     "Videorc's daily YouTube API limit is used up. Try again after it resets.",
-  // Plan 216 A3 (D5): a scene switch that adds a source gave up waiting for
-  // its first frame. The backend's code names the source, so the copy can.
   'layout-camera-not-ready':
     "Your camera isn't sending video. Check it in Sources, then try again.",
   'layout-screen-not-ready':
     "Your screen isn't sending video. Check it in Sources, then try again.",
-  // Plan 184 C6b: the Test cloud's refusals (the button is disabled for each,
-  // so these cover a click that raced a change).
   'cloud-test-session-active': "Locked while you're recording or live.",
   'cloud-test-show-live': 'A show is live through Videorc Cloud. End it first.',
   'cloud-test-running': 'A Videorc Cloud test is already running.',
-  // Plan 224: Open the room's refusals (`RoomOpenRefusal`).
   'cloud-room-session-active': 'Stop the recording or the livestream, then open the room.',
   'cloud-show-live': 'A show is live through Videorc Cloud. End it first.',
-  // Plan 243: continuing a show on another device (the web's refusals, D8).
   'cloud-handoff-update':
     'Update Videorc on the other computer first, or end the stream and go live again.',
   'cloud-handoff-unsupported': "This show can't continue on another device.",
   'cloud-source-not-ready': "Videorc Cloud didn't get this computer's video in time. Try again.",
   'cloud-not-on-air': 'Your show is live from another device now.',
   'cloud-nothing-to-resume': "Your show isn't live anymore.",
-  // A scene whose layout needs a source that is set to None or Off. Trying
-  // again cannot help, so the copy says what to pick instead.
+  'cloud-show-live-elsewhere':
+    'Your show is live on another device. Use Continue here, or end it first.',
   'layout-screen-not-selected':
     'This scene needs a screen or window. Pick one in Sources, or choose a camera-only scene.',
   'layout-camera-not-selected':
@@ -131,18 +144,21 @@ const WARNING_CODES = new Set([
   'command-lane-full',
   'screen-import-busy',
   'command-not-applied',
-  'cloud-test-session-active',
-  'cloud-test-show-live',
-  'cloud-test-running',
-  'cloud-room-session-active',
-  'cloud-show-live',
-  'cloud-handoff-update',
-  'cloud-handoff-unsupported',
-  'cloud-not-on-air',
-  'cloud-nothing-to-resume',
   'clean-cut-mutation-blocked',
   'noise-cleanup-mutation-blocked'
 ])
+/**
+ * Every Videorc Cloud code above is a refusal (it can't happen now), so a
+ * warning, but a feed that never arrived, which failed (plan 243 R2 A-M6).
+ */
+const warningCode = (code: string): boolean =>
+  WARNING_CODES.has(code) || (code.startsWith('cloud-') && code !== 'cloud-source-not-ready')
+
+/** A coded backend error's known cause, or null (plan 243: start refusals). */
+export function knownErrorReason(error: unknown): string | null {
+  const code = errorCode(error)
+  return (code && KNOWN_CODES[code]) || null
+}
 
 export type UserErrorContext = {
   /** The verb the streamer asked for: "import", "rename", "turn on". */
@@ -209,7 +225,7 @@ export function userErrorMessage(error: unknown, context?: UserErrorContext): Us
     return shape('known', raw, (error as UserFacingError).tone === 'warning' ? 'warning' : 'error')
   }
   if (code && KNOWN_CODES[code]) {
-    return shape('known', KNOWN_CODES[code], WARNING_CODES.has(code) ? 'warning' : 'error')
+    return shape('known', KNOWN_CODES[code], warningCode(code) ? 'warning' : 'error')
   }
   if (SECURE_STORAGE_UNAVAILABLE.test(raw)) {
     return shape('known', SECURE_STORAGE_REASON, 'error')

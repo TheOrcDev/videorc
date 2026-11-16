@@ -109,6 +109,14 @@ describe('cloudResumeNotice after a hand-off (plan 243 C5)', () => {
     expect(cloudResumeNotice({ ...held, onAir: { ...phone, name: undefined } }, false)?.title).toBe(
       'Your show is live from a phone.'
     )
+    // R2 A-M6: a show this computer holds while another device is on air
+    // always leads with Continue here, resumable or not.
+    expect(
+      cloudResumeNotice({ ...held, show: { ...held.show!, resumable: false }, onAir: phone }, false)
+    ).toMatchObject({ title: 'Your show is live from iPhone.', action: 'continue' })
+    expect(
+      cloudResumeNotice({ ...held, show: { ...held.show!, resumable: false }, onAir: phone }, true)
+    ).toBeNull()
     expect(
       cloudResumeNotice(talk({ ...held, onAir: { ...phone, source: 'host' } }), false)
     ).toMatchObject({

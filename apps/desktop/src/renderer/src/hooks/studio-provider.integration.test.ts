@@ -6910,6 +6910,61 @@ describe('real StudioProvider lifecycle', () => {
     ).toHaveLength(0)
   }, 20_000)
 
+  // Plan 243 R2 A-M6: Go Live on a computer that holds a show another device
+  // is on air for is refused by the backend. Go Live stays where it is and
+  // surfaces the refusal in its own words; the backend's (which may name the
+  // device) never reach the toast or a log.
+  it('surfaces a Go Live refused for a show live elsewhere (plan 243 R2 A-M6)', async () => {
+    const backend = new StudioBackend()
+    enableYouTubeOauthForTest(backend)
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const testDom = installProviderTestEnvironment(
+      createVideorcApi({
+        acknowledge: async () => true,
+        pending: async () => [],
+        acknowledgeProvider: async () => true,
+        pendingProvider: async () => []
+      })
+    )
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(
+      () =>
+        latest()?.core.wsStatus === 'connected' &&
+        latest()?.core.captureConfig.sources.microphoneId === 'mic:1'
+    )
+    const warn = vi.spyOn(console, 'warn')
+    await openYouTubeGoLiveConfirmation(latest)
+    const release = backend.deferFailure(
+      'session.start',
+      Object.assign(new Error('Your show is live from Alice {work}. Continue here.'), {
+        code: 'cloud-show-live-elsewhere'
+      })
+    )
+    let started!: Promise<void>
+    await act(async () => {
+      started = latest()!.core.confirmGoLive()
+      await Promise.resolve()
+    })
+    release()
+    await act(async () => {
+      await started
+    })
+    const copy = 'Your show is live on another device. Use Continue here, or end it first.'
+    await waitForObservation(() => latest()?.core.lastError === copy)
+    expect(toastSpies.error).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({ description: copy })
+    )
+    expect(JSON.stringify(warn.mock.calls)).not.toContain('Alice')
+    expect(latest()?.recording.recording.state).not.toBe('recording')
+  }, 20_000)
+
   // Plan 243 D7: a talk show taken over (or handed off) goes on elsewhere, so
   // End livestream on this computer ends none of its legs, until Continue
   // here puts this computer back on air.
