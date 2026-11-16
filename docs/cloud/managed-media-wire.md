@@ -1175,7 +1175,6 @@ forgets that id. Recovery cannot adopt or resume it while End is unconfirmed, ev
 snapshots recover missed terminal events; cancellation of an absent job
 triggers a snapshot refresh. These additions do not change node media.
 
-
 ## 19. On air and hand-off (plan 243)
 
 C1 / W1, W4 (D1, D3, D11): a desktop creates shows with its backend-private
