@@ -4635,6 +4635,36 @@ impl Database {
         self.live_chat_messages_for_session_locked(&conn, session_id)
     }
 
+    /// Plan 249 S18: which of these message ids this session already
+    /// persisted. A resumed show's provider redelivery older than the
+    /// in-memory transcript is still a duplicate for commands, greetings and
+    /// Sidekick. Chunked to stay under SQLite's parameter limit.
+    pub fn existing_live_chat_message_ids(
+        &self,
+        session_id: &str,
+        ids: &[String],
+    ) -> Result<HashSet<String>> {
+        let mut existing = HashSet::new();
+        if ids.is_empty() {
+            return Ok(existing);
+        }
+        let conn = self.lock()?;
+        for chunk in ids.chunks(400) {
+            let placeholders = vec!["?"; chunk.len()].join(", ");
+            let sql = format!(
+                "SELECT id FROM live_chat_messages WHERE session_id = ? AND id IN ({placeholders})"
+            );
+            let mut statement = conn.prepare(&sql)?;
+            let parameters = std::iter::once(session_id).chain(chunk.iter().map(String::as_str));
+            let rows =
+                statement.query_map(params_from_iter(parameters), |row| row.get::<_, String>(0))?;
+            for row in rows {
+                existing.insert(row?);
+            }
+        }
+        Ok(existing)
+    }
+
     /// Which of these authors already chatted in an earlier session, as
     /// `platform:author_id` keys (plan 055, the first-time-chatter marker).
     pub fn live_chat_returning_authors(

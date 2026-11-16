@@ -581,6 +581,8 @@ const YOUTUBE_LIMIT_REASON: &str =
     "chat posts are paused until Videorc's daily YouTube limit resets.";
 const NOT_TAKING_POSTS_REASON: &str = "the chat isn't taking posts right now.";
 const SEND_FAILED_REASON: &str = "Videorc couldn't send the post.";
+/// Plan 249 S18: a reply whose send the previous process left unconfirmed.
+const INTERRUPTED_UNKNOWN_REASON: &str = "Videorc closed while the reply was sending, so it may already be in chat; it wasn't sent again.";
 
 fn reconnect_reason(platform: StreamPlatform) -> String {
     format!(
@@ -605,6 +607,11 @@ fn collapse_whitespace(text: &str) -> String {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PlannedReply {
     session_id: String,
+    /// The chat row that asked (plan 249 S18): with the destination and part
+    /// it names the reply's durable send operation, so a re-planned reply
+    /// (a resumed show's redelivery) returns the stored operation instead of
+    /// posting twice.
+    trigger_message_id: String,
     destination_id: String,
     platform: StreamPlatform,
     /// Without the `!`.
@@ -734,6 +741,7 @@ impl EngineSession {
         let prefix = mention_prefix(mention_name(message), is_streamer(message));
         Some(PlannedReply {
             session_id: message.session_id.clone(),
+            trigger_message_id: message.id.clone(),
             destination_id,
             platform: message.platform,
             command: name,
@@ -781,10 +789,32 @@ pub(crate) fn note_delivered_messages(
             })
             .collect()
     };
-    for reply in planned {
-        let state = state.clone();
-        tokio::spawn(async move { answer(&state, reply).await });
-    }
+    let considered: Vec<String> = messages
+        .iter()
+        .filter(|message| message.session_id == session_id && new_message_ids.contains(&message.id))
+        .map(|message| message.id.clone())
+        .collect();
+    dispatch_replies(state, session_id, considered, planned);
+}
+
+/// Plan 249 S18: the gates' decisions become durable before any reply runs
+/// (a planned reply keeps its exact text; a declined trigger is settled),
+/// then each reply goes out on its own task. Delivery never waits on this.
+fn dispatch_replies(
+    state: &AppState,
+    session_id: &str,
+    considered: Vec<String>,
+    planned: Vec<PlannedReply>,
+) {
+    let state = state.clone();
+    let session_id = session_id.to_string();
+    tokio::spawn(async move {
+        record_planning(&state, &session_id, considered, &planned).await;
+        for reply in planned {
+            let state = state.clone();
+            tokio::spawn(async move { answer(&state, reply).await });
+        }
+    });
 }
 
 /// Send hook (`execute_send_live_chat_message`): every Videorc post, so its
@@ -833,21 +863,33 @@ async fn post_targets(state: &AppState, session_id: &str) -> Option<Vec<PostTarg
 }
 
 /// One viewer reply, on its own task: only to the chat the viewer asked in.
+/// Its durable intent is settled once the reply reached an outcome (the
+/// send layer then holds it under the stable operation id) or its session
+/// is gone. A running session that lacks the destination for a moment (a
+/// resume reinstalling readers) keeps the intent for recovery.
 async fn answer(state: &AppState, reply: PlannedReply) {
-    let Some(target) = post_targets(state, &reply.session_id)
-        .await
-        .and_then(|targets| {
-            targets
-                .into_iter()
-                .find(|target| target.destination_id == reply.destination_id)
-        })
+    let settle = answer_once(state, &reply).await;
+    if settle {
+        settle_intent(state, &reply.session_id, &reply.trigger_message_id).await;
+    }
+}
+
+/// `false` only when the running session is this one but has no such
+/// destination right now.
+async fn answer_once(state: &AppState, reply: &PlannedReply) -> bool {
+    let Some(targets) = post_targets(state, &reply.session_id).await else {
+        return true;
+    };
+    let Some(target) = targets
+        .into_iter()
+        .find(|target| target.destination_id == reply.destination_id)
     else {
-        return;
+        return false;
     };
     let outcome = match target.write {
         // A chat Videorc can read but not post to is skipped quietly; the
         // Stream Manager's chat strip already says so.
-        CommentsWriteState::ReadOnly => return,
+        CommentsWriteState::ReadOnly => return true,
         CommentsWriteState::MissingScope => Err(reconnect_reason(reply.platform)),
         CommentsWriteState::Failed | CommentsWriteState::Unavailable => {
             Err(NOT_TAKING_POSTS_REASON.to_string())
@@ -864,6 +906,7 @@ async fn answer(state: &AppState, reply: PlannedReply) {
             post_to(
                 state,
                 &reply.session_id,
+                &reply.trigger_message_id,
                 &reply.destination_id,
                 reply.platform,
                 &reply.text,
@@ -872,7 +915,7 @@ async fn answer(state: &AppState, reply: PlannedReply) {
         }
     };
     match outcome {
-        Ok(()) => log_answered(state, &reply),
+        Ok(()) => log_answered(state, reply),
         Err(reason) => {
             report_failure(
                 state,
@@ -885,6 +928,7 @@ async fn answer(state: &AppState, reply: PlannedReply) {
             .await;
         }
     }
+    true
 }
 
 fn send_params(session_id: &str, text: String, destination_ids: Vec<String>) -> CommentsSendParams {
@@ -897,22 +941,53 @@ fn send_params(session_id: &str, text: String, destination_ids: Vec<String>) -> 
     }
 }
 
+/// Plan 249 S18: the send operation id of one part of an automatic reply,
+/// derived from what asked (session, trigger row, destination, part). The
+/// send layer persists an operation before any provider call and returns a
+/// stored one verbatim, so the same reply planned again never posts twice.
+fn reply_operation_id(
+    session_id: &str,
+    trigger_message_id: &str,
+    destination_id: &str,
+    part: usize,
+) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::new()
+        .chain_update(b"videorc.chat-command-reply.v1\0")
+        .chain_update(session_id.as_bytes())
+        .chain_update(b"\0")
+        .chain_update(trigger_message_id.as_bytes())
+        .chain_update(b"\0")
+        .chain_update(destination_id.as_bytes())
+        .chain_update(b"\0")
+        .chain_update(part.to_le_bytes())
+        .finalize();
+    let mut bytes = [0u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    // RFC 9562 version 8 (custom) and the RFC variant: a valid UUID that
+    // never collides with the random v4 ids of typed posts.
+    bytes[6] = (bytes[6] & 0x0f) | 0x80;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    uuid::Uuid::from_bytes(bytes).to_string()
+}
+
 /// Posts `text` to one destination, in parts on X: each part waits for the
 /// one before it, and a part that fails stops the rest.
 async fn post_to(
     state: &AppState,
     session_id: &str,
+    trigger_message_id: &str,
     destination_id: &str,
     platform: StreamPlatform,
     text: &str,
 ) -> std::result::Result<(), String> {
-    for part in parts_for(platform, text) {
-        let operation = send_live_chat_message(
-            state,
-            send_params(session_id, part, vec![destination_id.to_string()]),
-        )
-        .await
-        .map_err(|_| SEND_FAILED_REASON.to_string())?;
+    for (index, part) in parts_for(platform, text).into_iter().enumerate() {
+        let mut params = send_params(session_id, part, vec![destination_id.to_string()]);
+        params.operation_id =
+            reply_operation_id(session_id, trigger_message_id, destination_id, index);
+        let operation = send_live_chat_message(state, params)
+            .await
+            .map_err(|_| SEND_FAILED_REASON.to_string())?;
         delivery_outcome(&operation, destination_id, platform)?;
     }
     Ok(())
@@ -997,6 +1072,14 @@ fn delivery_outcome(
 fn failure_reason(platform: StreamPlatform, delivery: &DestinationDelivery) -> String {
     let label = stream_platform_label(platform);
     match delivery.phase {
+        // Plan 249 S18: the previous process stopped mid-send. Whether the
+        // post reached chat is unknown, so it is never sent again.
+        DestinationDeliveryPhase::TimedOutUnknown
+            if delivery.reason.as_deref()
+                == Some(crate::live_chat::INTERRUPTED_BEFORE_CONFIRMATION) =>
+        {
+            INTERRUPTED_UNKNOWN_REASON.to_string()
+        }
         DestinationDeliveryPhase::TimedOutUnknown => format!("{label} didn't answer in time."),
         DestinationDeliveryPhase::Failed
             if delivery.reason.as_deref().is_some_and(|reason| {
@@ -1074,6 +1157,573 @@ fn log_answered(state: &AppState, reply: &PlannedReply) {
         Ok(entry) => state.emit_event("session.log", entry),
         Err(error) => tracing::warn!("[chat-commands] could not log an answered command: {error}"),
     }
+}
+
+// --- Plan 249 S18: the durable command checkpoint ----------------------------
+//
+// A command trigger is consumed when its row persists: after that, a
+// provider's redelivery is a duplicate and never fires again. Between that
+// moment and the reply's send operation (persisted by the send layer before
+// any provider call) the only record of the reply was in memory, so a process
+// that died there lost it. Now each trigger that may fire is checkpointed in
+// one backend-private `app_settings` row *before* its chat row persists:
+//
+// 1. received: the row may fire (written before the batch persists; a write
+//    failure keeps the batch unpersisted and retryable);
+// 2. planned: the gates let a reply through, with its exact text (a declined
+//    trigger is settled instead);
+// 3. settled: the reply reached an outcome; the send layer holds it under its
+//    stable operation id from then on.
+//
+// A resume (in process or after a relaunch) recovers what is left: received
+// rows are planned through the same gates (D11 freshness against now, the
+// commands as they are now), planned replies are answered once (a send that
+// already started returns its stored operation; one the previous process left
+// unconfirmed is reported as unknown and never sent again), and anything older
+// than D11 allows expires with a log line. One row, one session, bounded.
+
+/// The `app_settings` key. No schema change.
+pub(crate) const PENDING_REPLIES_KEY: &str = "chatCommands.pendingReplies";
+const PENDING_REPLIES_VERSION: u32 = 1;
+/// At most this many triggers wait; the oldest unplanned go first.
+const PENDING_CAP: usize = 64;
+/// A trigger older than this can never fire (D11) or is long settled.
+const PENDING_RETENTION_SECS: i64 = 2 * FRESH_SECS;
+/// How long a recovered reply waits for its chat to take posts again.
+const RECOVERY_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+const RECOVERY_POLL: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// Serializes every read-modify-write of the row (deliveries and reply tasks
+/// run concurrently). Only ever taken inside `spawn_blocking`.
+static PENDING_STORE: StdMutex<()> = StdMutex::new(());
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PendingReplies {
+    version: u32,
+    session_id: String,
+    intents: Vec<PendingIntent>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PendingIntent {
+    trigger_message_id: String,
+    published_at: String,
+    /// `None` until the gates ran; then the reply they let through.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reply: Option<PendingReply>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PendingReply {
+    destination_id: String,
+    platform: StreamPlatform,
+    command: String,
+    text: String,
+}
+
+impl PendingReply {
+    fn of(reply: &PlannedReply) -> Self {
+        Self {
+            destination_id: reply.destination_id.clone(),
+            platform: reply.platform,
+            command: reply.command.clone(),
+            text: reply.text.clone(),
+        }
+    }
+
+    fn planned(&self, session_id: &str, trigger_message_id: &str) -> PlannedReply {
+        PlannedReply {
+            session_id: session_id.to_string(),
+            trigger_message_id: trigger_message_id.to_string(),
+            destination_id: self.destination_id.clone(),
+            platform: self.platform,
+            command: self.command.clone(),
+            text: self.text.clone(),
+        }
+    }
+}
+
+fn published(text: &str) -> Option<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(text.trim())
+        .ok()
+        .map(|at| at.with_timezone(&Utc))
+}
+
+impl PendingReplies {
+    fn new(session_id: &str) -> Self {
+        Self {
+            version: PENDING_REPLIES_VERSION,
+            session_id: session_id.to_string(),
+            intents: Vec::new(),
+        }
+    }
+
+    /// Adds the triggers about to be consumed, drops what can never fire
+    /// again, and keeps the row bounded. Returns how many waiting triggers
+    /// the cap pushed out (said in the log).
+    fn received(&mut self, triggers: Vec<(String, String)>, now: DateTime<Utc>) -> usize {
+        for (id, published_at) in triggers {
+            if !self
+                .intents
+                .iter()
+                .any(|intent| intent.trigger_message_id == id)
+            {
+                self.intents.push(PendingIntent {
+                    trigger_message_id: id,
+                    published_at,
+                    reply: None,
+                });
+            }
+        }
+        let retention = chrono::Duration::seconds(PENDING_RETENTION_SECS);
+        self.intents.retain(|intent| {
+            published(&intent.published_at)
+                .is_some_and(|at| now.signed_duration_since(at) <= retention)
+        });
+        let mut dropped = 0;
+        while self.intents.len() > PENDING_CAP {
+            let oldest = self
+                .intents
+                .iter()
+                .position(|intent| intent.reply.is_none())
+                .unwrap_or(0);
+            self.intents.remove(oldest);
+            dropped += 1;
+        }
+        dropped
+    }
+
+    /// The gates ran over `considered`: a planned trigger keeps its reply, a
+    /// declined one is settled. Triggers never checkpointed are untouched.
+    fn planned(&mut self, considered: &[String], replies: &[(String, PendingReply)]) {
+        self.intents.retain_mut(|intent| {
+            if !considered.contains(&intent.trigger_message_id) {
+                return true;
+            }
+            match replies
+                .iter()
+                .find(|(trigger, _)| *trigger == intent.trigger_message_id)
+            {
+                Some((_, reply)) => {
+                    intent.reply = Some(reply.clone());
+                    true
+                }
+                None => false,
+            }
+        });
+    }
+
+    fn settle(&mut self, trigger_message_id: &str) {
+        self.intents
+            .retain(|intent| intent.trigger_message_id != trigger_message_id);
+    }
+}
+
+/// What a resume does with one waiting trigger.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Recovery {
+    /// Consumed, never planned: plan it now through the gates.
+    Replan(String),
+    /// Planned before the interruption: answer it once.
+    Answer(PlannedReply),
+    /// Older than D11 allows. A send that already started reports its
+    /// stored outcome; otherwise no reply, said in the log.
+    Expired {
+        trigger_message_id: String,
+        reply: Option<PlannedReply>,
+    },
+}
+
+/// Pure: the recovery of `pending` for `session_id` at `now`.
+fn recovery_steps(pending: &PendingReplies, session_id: &str, now: DateTime<Utc>) -> Vec<Recovery> {
+    if pending.session_id != session_id {
+        return Vec::new();
+    }
+    let fresh = chrono::Duration::seconds(FRESH_SECS);
+    pending
+        .intents
+        .iter()
+        .map(|intent| {
+            let id = intent.trigger_message_id.clone();
+            let reply = intent
+                .reply
+                .as_ref()
+                .map(|reply| reply.planned(session_id, &id));
+            let is_fresh = published(&intent.published_at)
+                .is_some_and(|at| now.signed_duration_since(at) <= fresh);
+            match (reply, is_fresh) {
+                (None, true) => Recovery::Replan(id),
+                (Some(reply), true) => Recovery::Answer(reply),
+                (reply, false) => Recovery::Expired {
+                    trigger_message_id: id,
+                    reply,
+                },
+            }
+        })
+        .collect()
+}
+
+/// The stored row, or `None`. A row of an unknown shape is ignored (and
+/// replaced by the next write), never trusted.
+fn load_pending(database: &Database) -> Result<Option<PendingReplies>> {
+    Ok(database
+        .load_setting::<serde_json::Value>(PENDING_REPLIES_KEY)?
+        .and_then(|value| serde_json::from_value::<PendingReplies>(value).ok())
+        .filter(|pending| pending.version == PENDING_REPLIES_VERSION))
+}
+
+/// One serialized read-modify-write. `claim` lets the running session
+/// replace another session's row (that session ended; its replies have
+/// nobody to go to); without it a change for another session is a no-op.
+fn update_pending<R: Default>(
+    database: &Database,
+    session_id: &str,
+    claim: bool,
+    change: impl FnOnce(&mut PendingReplies) -> R,
+) -> Result<R> {
+    let _guard = PENDING_STORE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let stored = load_pending(database)?;
+    let mut pending = match &stored {
+        Some(pending) if pending.session_id == session_id => pending.clone(),
+        _ if claim => PendingReplies::new(session_id),
+        _ => return Ok(R::default()),
+    };
+    let outcome = change(&mut pending);
+    match &stored {
+        Some(stored) if *stored == pending => {}
+        None if pending.intents.is_empty() => {}
+        _ if pending.intents.is_empty() => database.delete_setting(PENDING_REPLIES_KEY)?,
+        _ => database.save_setting(PENDING_REPLIES_KEY, &pending)?,
+    }
+    Ok(outcome)
+}
+
+async fn with_pending<R: Default + Send + 'static>(
+    state: &AppState,
+    session_id: &str,
+    claim: bool,
+    change: impl FnOnce(&mut PendingReplies) -> R + Send + 'static,
+) -> Result<R> {
+    let database = state.database.clone();
+    let session_id = session_id.to_string();
+    tokio::task::spawn_blocking(move || update_pending(&database, &session_id, claim, change))
+        .await
+        .map_err(|error| anyhow::anyhow!("the command checkpoint stopped: {error}"))?
+}
+
+/// The static part of the gates (no engine book): an ordinary chat message
+/// or Super Chat naming an enabled command, not deleted, published after the
+/// session started and within D11. Only these are checkpointed.
+fn may_fire(
+    commands: &ChatCommandsState,
+    message: &LiveChatMessage,
+    started_at: Option<DateTime<Utc>>,
+    now: DateTime<Utc>,
+) -> bool {
+    if !matches!(
+        message.event_type,
+        LiveChatEventType::Message | LiveChatEventType::Paid
+    ) || message.is_deleted
+    {
+        return false;
+    }
+    if first_word_command(&message.message_text)
+        .and_then(|name| resolve(commands, &name).map(|_| ()))
+        .is_none()
+    {
+        return false;
+    }
+    published(&message.published_at).is_some_and(|at| {
+        started_at.is_some_and(|started| at >= started)
+            && now.signed_duration_since(at) <= chrono::Duration::seconds(FRESH_SECS)
+    })
+}
+
+/// Delivery hook, before a batch persists (`live_chat::try_deliver_messages`):
+/// the new rows that may fire a command are checkpointed first. Ordinary chat
+/// writes nothing. An error must keep the batch unpersisted.
+pub(crate) async fn checkpoint_command_triggers(
+    state: &AppState,
+    session_id: &str,
+    started_at: Option<DateTime<Utc>>,
+    messages: &[LiveChatMessage],
+    new_message_ids: &HashSet<String>,
+    persisted_before: &HashSet<String>,
+) -> Result<()> {
+    if !messages
+        .iter()
+        .any(|message| first_word_command(&message.message_text).is_some())
+    {
+        return Ok(());
+    }
+    let commands = state.chat_commands.snapshot();
+    if commands.commands.is_empty() {
+        return Ok(());
+    }
+    let now = Utc::now();
+    let triggers: Vec<(String, String)> = messages
+        .iter()
+        .filter(|message| {
+            message.session_id == session_id
+                && new_message_ids.contains(&message.id)
+                && !persisted_before.contains(&message.id)
+                && may_fire(&commands, message, started_at, now)
+        })
+        .map(|message| (message.id.clone(), message.published_at.clone()))
+        .collect();
+    if triggers.is_empty() {
+        return Ok(());
+    }
+    let dropped = with_pending(state, session_id, true, move |pending| {
+        pending.received(triggers, now)
+    })
+    .await?;
+    if dropped > 0 {
+        state.emit_log(
+            "warn",
+            format!(
+                "chat-command: {dropped} waiting command(s) left the restart checkpoint (it holds {PENDING_CAP})."
+            ),
+        );
+    }
+    Ok(())
+}
+
+/// After the gates: planned replies keep their text, declined triggers go.
+async fn record_planning(
+    state: &AppState,
+    session_id: &str,
+    considered: Vec<String>,
+    planned: &[PlannedReply],
+) {
+    if considered.is_empty() && planned.is_empty() {
+        return;
+    }
+    let replies: Vec<(String, PendingReply)> = planned
+        .iter()
+        .map(|reply| (reply.trigger_message_id.clone(), PendingReply::of(reply)))
+        .collect();
+    if let Err(error) = with_pending(state, session_id, false, move |pending| {
+        pending.planned(&considered, &replies)
+    })
+    .await
+    {
+        // The triggers stay `received`: a recovery plans them again under the
+        // same stable operation ids, so this can cost a late reply, not a
+        // second one.
+        tracing::warn!("[chat-commands] could not record planned replies: {error:#}");
+    }
+}
+
+async fn settle_intent(state: &AppState, session_id: &str, trigger_message_id: &str) {
+    let trigger = trigger_message_id.to_string();
+    if let Err(error) = with_pending(state, session_id, false, move |pending| {
+        pending.settle(&trigger)
+    })
+    .await
+    {
+        tracing::warn!("[chat-commands] could not settle an answered command: {error:#}");
+    }
+}
+
+/// Waits (bounded) until `destination_id` is connected again in the running
+/// `session_id`. `false` when that session is gone.
+async fn wait_for_destination(state: &AppState, session_id: &str, destination_id: &str) -> bool {
+    let deadline = tokio::time::Instant::now() + RECOVERY_WAIT;
+    loop {
+        {
+            let coordinator = state.live_chat.lock().await;
+            if coordinator.session_id() != Some(session_id) {
+                return false;
+            }
+            if coordinator.providers().iter().any(|provider| {
+                provider.id == destination_id
+                    && provider.state
+                        == crate::live_chat::LiveChatProviderConnectionState::Connected
+            }) {
+                return true;
+            }
+        }
+        // Past the wait, `answer` says what it finds (never silent).
+        if tokio::time::Instant::now() >= deadline {
+            return true;
+        }
+        tokio::time::sleep(RECOVERY_POLL).await;
+    }
+}
+
+/// An expired reply whose part-0 send already started: its stored outcome,
+/// with no provider call. `None` when it never started.
+async fn stored_outcome(
+    state: &AppState,
+    reply: &PlannedReply,
+) -> Option<std::result::Result<(), String>> {
+    let database = state.database.clone();
+    let operation_id = reply_operation_id(
+        &reply.session_id,
+        &reply.trigger_message_id,
+        &reply.destination_id,
+        0,
+    );
+    let operation =
+        tokio::task::spawn_blocking(move || database.get_chat_send_operation(&operation_id))
+            .await
+            .ok()?
+            .ok()??;
+    Some(delivery_outcome(
+        &operation,
+        &reply.destination_id,
+        reply.platform,
+    ))
+}
+
+/// Resume hook (`live_chat::resume_live_chat`, after the readers are back):
+/// answers what the previous attach or process consumed but never answered,
+/// once. Awaits every recovered reply.
+pub(crate) async fn recover_pending_replies(
+    state: &AppState,
+    session_id: &str,
+    started_at: Option<DateTime<Utc>>,
+) {
+    let database = state.database.clone();
+    let pending = match tokio::task::spawn_blocking(move || load_pending(&database)).await {
+        Ok(Ok(pending)) => pending,
+        Ok(Err(error)) => {
+            state.emit_log(
+                "warn",
+                format!("chat-command: could not read the restart checkpoint: {error:#}"),
+            );
+            return;
+        }
+        Err(error) => {
+            state.emit_log(
+                "warn",
+                format!("chat-command: could not read the restart checkpoint: {error}"),
+            );
+            return;
+        }
+    };
+    let Some(pending) = pending else {
+        return;
+    };
+    let now = Utc::now();
+    let commands = state.chat_commands.snapshot();
+    let mut answers = Vec::new();
+    let mut replan = Vec::new();
+    for step in recovery_steps(&pending, session_id, now) {
+        match step {
+            Recovery::Replan(id) => replan.push(id),
+            Recovery::Answer(reply) => {
+                // Consent as it is now: a command switched off or deleted
+                // while detached does not answer.
+                if resolve(&commands, &reply.command).is_none() {
+                    settle_intent(state, session_id, &reply.trigger_message_id).await;
+                    continue;
+                }
+                {
+                    let mut engine = state.chat_commands.engine();
+                    let book = engine.session(session_id);
+                    book.remember_answered(&reply.trigger_message_id);
+                    book.last_fired
+                        .insert((reply.destination_id.clone(), reply.command.clone()), now);
+                }
+                answers.push(reply);
+            }
+            Recovery::Expired {
+                trigger_message_id,
+                reply,
+            } => {
+                let stored = match &reply {
+                    Some(reply) => stored_outcome(state, reply).await,
+                    None => None,
+                };
+                match stored {
+                    Some(Ok(())) => {
+                        if let Some(reply) = &reply {
+                            log_answered(state, reply);
+                        }
+                    }
+                    Some(Err(reason)) => {
+                        if let Some(reply) = &reply {
+                            report_failure(
+                                state,
+                                session_id,
+                                &reply.destination_id,
+                                reply.platform,
+                                &reply.command,
+                                &reason,
+                            )
+                            .await;
+                        }
+                    }
+                    None => state.emit_log(
+                        "info",
+                        format!(
+                            "chat-command: a command left waiting by a restart is older than {FRESH_SECS} s, so it wasn't answered."
+                        ),
+                    ),
+                }
+                settle_intent(state, session_id, &trigger_message_id).await;
+            }
+        }
+    }
+    if !replan.is_empty() {
+        let database = state.database.clone();
+        let rows = tokio::task::spawn_blocking(move || {
+            replan
+                .into_iter()
+                .map(|id| {
+                    let row = database.get_live_chat_message(&id);
+                    (id, row)
+                })
+                .collect::<Vec<_>>()
+        })
+        .await
+        .unwrap_or_default();
+        let mut considered = Vec::new();
+        let mut rows_to_plan = Vec::new();
+        for (id, row) in rows {
+            match row {
+                Ok(Some(row)) if row.session_id == session_id => {
+                    considered.push(id);
+                    rows_to_plan.push(row);
+                }
+                // Never consumed: the provider redelivers it as new chat.
+                Ok(_) => settle_intent(state, session_id, &id).await,
+                // Kept for the next resume, never dropped on a read error.
+                Err(error) => state.emit_log(
+                    "warn",
+                    format!("chat-command: could not read a waiting command: {error:#}"),
+                ),
+            }
+        }
+        let planned: Vec<PlannedReply> = {
+            let mut engine = state.chat_commands.engine();
+            let book = engine.session(session_id);
+            // A trigger this process is answering right now is its own.
+            considered.retain(|id| !book.answered.contains(id));
+            rows_to_plan
+                .iter()
+                .filter(|row| considered.contains(&row.id))
+                .filter_map(|row| book.plan(&commands, row, true, started_at, now))
+                .collect()
+        };
+        record_planning(state, session_id, considered, &planned).await;
+        answers.extend(planned);
+    }
+    let recovered = answers.into_iter().map(|reply| async move {
+        if wait_for_destination(state, &reply.session_id, &reply.destination_id).await {
+            answer(state, reply).await;
+        } else {
+            settle_intent(state, &reply.session_id, &reply.trigger_message_id).await;
+        }
+    });
+    futures_util::future::join_all(recovered).await;
 }
 
 /// `chatCommands.post`: the streamer's `!go` in the Stream Manager (D9). The
@@ -1570,6 +2220,158 @@ mod tests {
         message
     }
 
+    /// Plan 249 S18: one durable send operation per (trigger, destination,
+    /// part), so a reply planned again after a resume never posts twice.
+    #[test]
+    fn reply_operations_are_stable_per_trigger_destination_and_part() {
+        let id = reply_operation_id(SESSION, "row-1", "youtube-target", 0);
+        assert_eq!(
+            id,
+            reply_operation_id(SESSION, "row-1", "youtube-target", 0)
+        );
+        let parsed = uuid::Uuid::parse_str(&id).expect("the send layer requires a UUID");
+        assert_eq!(parsed.get_version_num(), 8);
+        for other in [
+            reply_operation_id(SESSION, "row-2", "youtube-target", 0),
+            reply_operation_id(SESSION, "row-1", "twitch-target", 0),
+            reply_operation_id(SESSION, "row-1", "youtube-target", 1),
+            reply_operation_id("another-session", "row-1", "youtube-target", 0),
+        ] {
+            assert_ne!(id, other);
+        }
+    }
+
+    fn intent_ids(pending: &PendingReplies) -> Vec<&str> {
+        pending
+            .intents
+            .iter()
+            .map(|intent| intent.trigger_message_id.as_str())
+            .collect()
+    }
+
+    fn pending_reply(text: &str) -> PendingReply {
+        PendingReply {
+            destination_id: "twitch-target".to_string(),
+            platform: StreamPlatform::Twitch,
+            command: "go".to_string(),
+            text: text.to_string(),
+        }
+    }
+
+    /// Plan 249 S18: the restart checkpoint holds one session's waiting
+    /// triggers, bounded, and each stage maps to exactly one recovery.
+    #[test]
+    fn the_restart_checkpoint_is_bounded_and_recovers_each_stage_once() {
+        let now = at(100);
+        let mut pending = PendingReplies::new(SESSION);
+        let dropped = pending.received(
+            vec![
+                ("row-1".to_string(), at(95).to_rfc3339()),
+                ("row-2".to_string(), at(96).to_rfc3339()),
+                // Past retention it can never fire: it goes at once.
+                ("row-old".to_string(), at(-100).to_rfc3339()),
+            ],
+            now,
+        );
+        assert_eq!(dropped, 0);
+        assert_eq!(intent_ids(&pending), ["row-1", "row-2"]);
+        // A redelivered trigger is held once.
+        pending.received(vec![("row-1".to_string(), at(95).to_rfc3339())], now);
+        assert_eq!(pending.intents.len(), 2);
+        // row-1 planned, row-2 declined by a gate, row-9 never checkpointed.
+        let reply = pending_reply("@ada Go is fast.");
+        pending.planned(
+            &[
+                "row-1".to_string(),
+                "row-2".to_string(),
+                "row-9".to_string(),
+            ],
+            &[("row-1".to_string(), reply.clone())],
+        );
+        assert_eq!(intent_ids(&pending), ["row-1"]);
+        pending.received(vec![("row-3".to_string(), at(99).to_rfc3339())], now);
+        assert_eq!(
+            recovery_steps(&pending, SESSION, now),
+            vec![
+                Recovery::Answer(reply.planned(SESSION, "row-1")),
+                Recovery::Replan("row-3".to_string()),
+            ]
+        );
+        assert!(recovery_steps(&pending, "another-session", now).is_empty());
+        // Past D11 nothing new is sent: both expire.
+        assert_eq!(
+            recovery_steps(&pending, SESSION, at(100 + FRESH_SECS)),
+            vec![
+                Recovery::Expired {
+                    trigger_message_id: "row-1".to_string(),
+                    reply: Some(reply.planned(SESSION, "row-1")),
+                },
+                Recovery::Expired {
+                    trigger_message_id: "row-3".to_string(),
+                    reply: None,
+                },
+            ]
+        );
+        pending.settle("row-1");
+        assert_eq!(intent_ids(&pending), ["row-3"]);
+        // Bounded: the oldest unplanned trigger leaves first; a planned
+        // reply stays.
+        let mut full = PendingReplies::new(SESSION);
+        full.received(vec![("planned".to_string(), at(90).to_rfc3339())], now);
+        full.planned(&["planned".to_string()], &[("planned".to_string(), reply)]);
+        let many = (0..PENDING_CAP)
+            .map(|n| (format!("row-{n}"), at(91).to_rfc3339()))
+            .collect();
+        assert_eq!(full.received(many, now), 1);
+        assert_eq!(full.intents.len(), PENDING_CAP);
+        assert!(intent_ids(&full).contains(&"planned"));
+        assert!(!intent_ids(&full).contains(&"row-0"));
+    }
+
+    /// Plan 249 S18: one backend-private row, owned by the running session.
+    #[test]
+    fn the_restart_checkpoint_is_one_row_owned_by_the_running_session() {
+        let database = Database::open_in_memory_for_tests();
+        let now = Utc::now();
+        update_pending(&database, SESSION, true, |pending| {
+            pending.received(vec![("row-1".to_string(), now.to_rfc3339())], now)
+        })
+        .unwrap();
+        // Another session's settle never touches it.
+        update_pending(&database, "another", false, |pending| {
+            pending.settle("row-1")
+        })
+        .unwrap();
+        assert_eq!(
+            intent_ids(&load_pending(&database).unwrap().unwrap()),
+            ["row-1"]
+        );
+        // A new running session claims the row; the ended one's triggers go.
+        update_pending(&database, "another", true, |pending| {
+            pending.received(vec![("row-2".to_string(), now.to_rfc3339())], now)
+        })
+        .unwrap();
+        let stored = load_pending(&database).unwrap().unwrap();
+        assert_eq!(stored.session_id, "another");
+        assert_eq!(intent_ids(&stored), ["row-2"]);
+        update_pending(&database, "another", false, |pending| {
+            pending.settle("row-2")
+        })
+        .unwrap();
+        assert!(
+            database
+                .load_setting::<Value>(PENDING_REPLIES_KEY)
+                .unwrap()
+                .is_none(),
+            "a settled checkpoint leaves no row"
+        );
+        // A row of an unknown shape is ignored, never trusted.
+        database
+            .save_setting(PENDING_REPLIES_KEY, &json!({ "version": 99 }))
+            .unwrap();
+        assert!(load_pending(&database).unwrap().is_none());
+    }
+
     fn twitch(id: &str, author: &str, text: &str, seconds: i64) -> LiveChatMessage {
         viewer(
             StreamPlatform::Twitch,
@@ -1773,6 +2575,12 @@ mod tests {
             fired,
             PlannedReply {
                 session_id: SESSION.to_string(),
+                trigger_message_id: live_chat_message_id(
+                    SESSION,
+                    StreamPlatform::Twitch,
+                    Some("twitch-target"),
+                    "m6"
+                ),
                 destination_id: "twitch-target".to_string(),
                 platform: StreamPlatform::Twitch,
                 command: "go".to_string(),
@@ -2045,6 +2853,188 @@ mod tests {
                 .len(),
             2
         );
+    }
+
+    /// Plan 249 S18, the interrupted window: the process dies after a
+    /// command's row is stored (consumed) and before its reply is planned.
+    /// The relaunch's resume answers it exactly once under its stable
+    /// operation id; recovering again and the provider's redelivery add
+    /// nothing.
+    #[tokio::test]
+    async fn a_command_consumed_but_never_planned_is_answered_once_after_a_relaunch() {
+        let state = live_state(vec![(
+            "twitch-target",
+            StreamPlatform::Twitch,
+            fake(FakeChatSendBehavior::Sent),
+        )])
+        .await;
+        save(
+            &state,
+            &params(None, "go", "why I'm learning Go", "Go is fast."),
+        )
+        .unwrap();
+        let started_at = Utc::now() - chrono::Duration::seconds(5);
+        let message = now_message(
+            StreamPlatform::Twitch,
+            "twitch-target",
+            "m1",
+            "coder_x",
+            "!go",
+        );
+        // The consuming half of `try_deliver_messages`, in its order: the
+        // checkpoint, then the row. The planning half never runs.
+        checkpoint_command_triggers(
+            &state,
+            SESSION,
+            Some(started_at),
+            std::slice::from_ref(&message),
+            &HashSet::from([message.id.clone()]),
+            &HashSet::new(),
+        )
+        .await
+        .unwrap();
+        state
+            .live_chat_persistence
+            .persist_batch(vec![message.clone()])
+            .await
+            .unwrap();
+        assert_eq!(
+            intent_ids(&load_pending(&state.database).unwrap().unwrap()),
+            [message.id.as_str()]
+        );
+        let database = state.database.clone();
+        drop(state);
+
+        // The relaunch: the startup reconcile, then the show's resume.
+        database.reconcile_orphaned_chat_send_operations().unwrap();
+        let (events, _) = broadcast::channel(64);
+        let relaunched = AppState::new("test-token".to_string(), 1234, events, database.clone());
+        {
+            let mut coordinator = relaunched.live_chat.lock().await;
+            coordinator.resume_session(
+                SESSION.to_string(),
+                vec![provider("twitch-target", StreamPlatform::Twitch)],
+                started_at,
+                vec![message.clone()],
+            );
+            coordinator.register_sender(
+                "twitch-target".to_string(),
+                fake(FakeChatSendBehavior::Sent),
+            );
+        }
+        recover_pending_replies(&relaunched, SESSION, Some(started_at)).await;
+        let operations = database.list_chat_send_operations(SESSION).unwrap();
+        assert_eq!(operations.len(), 1, "{operations:?}");
+        assert_eq!(
+            operations[0].id,
+            reply_operation_id(SESSION, &message.id, "twitch-target", 0)
+        );
+        assert_eq!(operations[0].text, "@coder_x Go is fast.");
+        assert_eq!(
+            operations[0].phase,
+            crate::live_chat::CommentsSendOperationPhase::Sent
+        );
+        assert!(
+            load_pending(&database).unwrap().is_none(),
+            "the trigger is settled"
+        );
+
+        recover_pending_replies(&relaunched, SESSION, Some(started_at)).await;
+        deliver(&relaunched, message.clone()).await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(
+            database.list_chat_send_operations(SESSION).unwrap().len(),
+            1
+        );
+    }
+
+    /// Plan 249 S18: a reply the previous process left mid-send is reported
+    /// as unknown and never sent again (the provider may have it); a command
+    /// left waiting past D11 expires with a log line, not a late reply.
+    #[tokio::test]
+    async fn an_interrupted_reply_is_reported_unknown_and_a_stale_command_expires() {
+        let state = live_state(vec![(
+            "twitch-target",
+            StreamPlatform::Twitch,
+            fake(FakeChatSendBehavior::Sent),
+        )])
+        .await;
+        save(
+            &state,
+            &params(None, "go", "why I'm learning Go", "Go is fast."),
+        )
+        .unwrap();
+        let now = Utc::now();
+        let reply = pending_reply("@ada Go is fast.");
+        let planned = reply.clone();
+        update_pending(&state.database, SESSION, true, move |pending| {
+            pending.received(
+                vec![
+                    ("row-sending".to_string(), now.to_rfc3339()),
+                    (
+                        "row-stale".to_string(),
+                        (now - chrono::Duration::seconds(FRESH_SECS + 5)).to_rfc3339(),
+                    ),
+                ],
+                now,
+            );
+            pending.planned(
+                &["row-sending".to_string()],
+                &[("row-sending".to_string(), planned)],
+            );
+        })
+        .unwrap();
+        // The previous process stored the send, then died before the
+        // provider answered; the startup reconcile marks it unknown.
+        state
+            .database
+            .save_chat_send_operation(&CommentsSendOperation {
+                id: reply_operation_id(SESSION, "row-sending", "twitch-target", 0),
+                session_id: SESSION.to_string(),
+                text: reply.text.clone(),
+                phase: crate::live_chat::CommentsSendOperationPhase::Sending,
+                destinations: vec![DestinationDelivery {
+                    destination_id: "twitch-target".to_string(),
+                    platform: StreamPlatform::Twitch,
+                    phase: DestinationDeliveryPhase::Pending,
+                    provider_message_id: None,
+                    reason: None,
+                }],
+                created_at: now.to_rfc3339(),
+                updated_at: now.to_rfc3339(),
+            })
+            .unwrap();
+        state
+            .database
+            .reconcile_orphaned_chat_send_operations()
+            .unwrap();
+        let mut events = state.events.subscribe();
+        recover_pending_replies(&state, SESSION, Some(now - chrono::Duration::seconds(120))).await;
+
+        let operations = state.database.list_chat_send_operations(SESSION).unwrap();
+        assert_eq!(operations.len(), 1, "{operations:?}");
+        assert_eq!(
+            operations[0].phase,
+            crate::live_chat::CommentsSendOperationPhase::DeliveryUnknown,
+            "never sent again"
+        );
+        let mut seen = Vec::new();
+        while let Ok(event) = events.try_recv() {
+            seen.push(event);
+        }
+        assert!(
+            seen.iter().any(|event| event.event == REPLY_FAILED_EVENT
+                && event.payload["reason"] == INTERRUPTED_UNKNOWN_REASON),
+            "the unknown outcome is said: {seen:?}"
+        );
+        assert!(
+            seen.iter().any(|event| event.event == "log"
+                && event.payload["message"]
+                    .as_str()
+                    .is_some_and(|message| message.contains("wasn't answered"))),
+            "the expired command is said: {seen:?}"
+        );
+        assert!(load_pending(&state.database).unwrap().is_none());
     }
 
     #[tokio::test]

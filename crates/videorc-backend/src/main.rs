@@ -44,6 +44,7 @@ mod chat_overlay;
 mod clean_cut;
 mod clip_marks;
 mod cloud_control_web;
+mod cloud_services;
 mod cloud_show;
 mod cloud_talk;
 mod cohost;
@@ -11848,6 +11849,7 @@ async fn handle_text_message_with_role(
                 match context.close_room(account::stored_session_token()).await {
                     Ok(status) => {
                         live_chat::stop_live_chat(state).await;
+                        forget_cloud_show_services_if_confirmed(state, &status);
                         ServerResponse::ok(command.id, status)
                     }
                     Err(error) => {
@@ -11957,6 +11959,7 @@ async fn handle_text_message_with_role(
             Some(context) => match context.close_room(account::stored_session_token()).await {
                 Ok(status) => {
                     live_chat::stop_live_chat(state).await;
+                    forget_cloud_show_services_if_confirmed(state, &status);
                     ServerResponse::ok(command.id, status)
                 }
                 Err(error) => ServerResponse::error(
@@ -11971,6 +11974,12 @@ async fn handle_text_message_with_role(
             Some(context) => match context.resume_room(account::stored_session_token()).await {
                 Ok(status) => {
                     spawn_active_takeover_push(state);
+                    // Plan 249 S18: chat, viewers and audience follow the show
+                    // to this owner, once, with its history. After a relaunch
+                    // the runner's legs can land just after this answer.
+                    if reattach_cloud_show_services(state).await == Some("not-live") {
+                        spawn_late_cloud_show_reattach(state);
+                    }
                     ServerResponse::ok(command.id, status)
                 }
                 Err(error) => ServerResponse::error(
@@ -12154,6 +12163,10 @@ async fn handle_text_message_with_role(
                             .await
                         {
                             Ok(status) => {
+                                // Plan 249 S18: the interval's nonsecret
+                                // service identity, so a resume or relaunch
+                                // reattaches the same readers.
+                                remember_cloud_show_services(state, &status, &params.streaming);
                                 // The chat attaches to the show the way it
                                 // attaches to a session: its id is the
                                 // session the renderer's cards name.
@@ -12355,6 +12368,9 @@ async fn handle_text_message_with_role(
             Some(context) => match context.legs_end().await {
                 Ok(status) => {
                     live_chat::stop_live_chat(state).await;
+                    if let Some(show) = status.show.as_ref() {
+                        forget_cloud_show_services(state, &show.id);
+                    }
                     ServerResponse::ok(command.id, status)
                 }
                 Err(error) => {
@@ -13525,8 +13541,12 @@ async fn handle_text_message_with_role(
         }
         "liveChat.x.start" => {
             match serde_json::from_value::<live_chat::StartXLiveChatParams>(command.params) {
-                Ok(params) => match live_chat::start_x_live_chat(state, params).await {
-                    Ok(snapshot) => ServerResponse::ok(command.id, snapshot),
+                Ok(params) => match live_chat::start_x_live_chat(state, params.clone()).await {
+                    Ok(snapshot) => {
+                        // Plan 249 S18: a room's X broadcast rides with the show.
+                        note_cloud_show_x_broadcast(state, &params);
+                        ServerResponse::ok(command.id, snapshot)
+                    }
                     Err(error) => ServerResponse::error(
                         command.id,
                         "live-chat-x-start-failed",
@@ -15840,6 +15860,356 @@ async fn stop_talk_show_chat(state: &AppState, show_id: &str) {
     }
 }
 
+/// Plan 249 S18: remember the nonsecret identity of a room's Go Live (the
+/// destinations' channels and broadcast, never a key or URL) with the show
+/// and S16's canonical interval when the server already reports it.
+fn remember_cloud_show_services(
+    state: &AppState,
+    status: &cloud_show::CloudStatus,
+    streaming: &crate::streaming::StreamingSettings,
+) {
+    let Some(show) = status.show.as_ref() else {
+        return;
+    };
+    let device_id = state
+        .cloud_show
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .device
+        .id
+        .clone();
+    let identity = cloud_services::CloudServiceIdentity::capture(
+        &show.id,
+        cloud_services::canonical_live_interval(status).as_ref(),
+        &device_id,
+        &cloud_show::now_rfc3339(),
+        streaming,
+    );
+    save_cloud_show_services(state, Some(&identity));
+}
+
+fn save_cloud_show_services(
+    state: &AppState,
+    identity: Option<&cloud_services::CloudServiceIdentity>,
+) {
+    if let Err(error) = state
+        .database
+        .save_setting(cloud_services::CLOUD_SHOW_SERVICES_KEY, &identity)
+    {
+        tracing::warn!("Could not save the cloud show's service identity: {error:#}");
+    }
+    cloud_services::arm(identity);
+}
+
+/// Plan 249 S18: `liveChat.x.start` named the X broadcast of one of the
+/// show's destinations; keep it with the show so a resume reattaches X.
+fn note_cloud_show_x_broadcast(state: &AppState, params: &live_chat::StartXLiveChatParams) {
+    let Some(target_id) = params.target_id.as_deref() else {
+        return;
+    };
+    let Some(mut identity) =
+        load_cloud_show_services(state).filter(|identity| identity.show_id == params.session_id)
+    else {
+        return;
+    };
+    if identity.note_broadcast(target_id, &params.broadcast_id) {
+        save_cloud_show_services(state, Some(&identity));
+    }
+}
+
+/// Plan 249 S18: every cloud state change (`cloud.state`) is checked against
+/// the services armed here. A web, phone, quota or runner End of their show
+/// or interval releases them; nothing a successor uses is touched. Cheap
+/// when nothing is armed; one release task at a time.
+fn schedule_cloud_show_services_release(state: &AppState, status: &cloud_show::CloudStatus) {
+    static RELEASING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    // After a launch the saved row is armed once, so an End that happened
+    // while the app was closed still clears its identity.
+    static LOADED: std::sync::Once = std::sync::Once::new();
+    LOADED.call_once(|| {
+        if cloud_services::armed().is_none() {
+            cloud_services::arm(load_cloud_show_services(state).as_ref());
+        }
+    });
+    let Some(armed) = cloud_services::armed() else {
+        return;
+    };
+    let interval = cloud_services::canonical_live_interval(status);
+    let facts =
+        cloud_services_terminal_facts(status, interval.as_ref(), Some(armed.show_id.as_str()));
+    if cloud_services::plan_terminal(&armed, &facts) == cloud_services::TerminalAction::Keep {
+        return;
+    }
+    if RELEASING.swap(true, std::sync::atomic::Ordering::AcqRel) {
+        return;
+    }
+    let state = state.clone();
+    tokio::spawn(async move {
+        release_cloud_show_services(&state).await;
+        RELEASING.store(false, std::sync::atomic::Ordering::Release);
+    });
+}
+
+fn cloud_services_terminal_facts<'a>(
+    status: &'a cloud_show::CloudStatus,
+    interval: Option<&'a cloud_services::LiveIntervalView>,
+    chat_session_id: Option<&'a str>,
+) -> cloud_services::TerminalFacts<'a> {
+    let room = status
+        .room
+        .as_ref()
+        .filter(|room| room.phase != cloud_talk::CloudRoomPhase::Closed);
+    cloud_services::TerminalFacts {
+        show_id: status.show.as_ref().map(|show| show.id.as_str()),
+        show_end_observed: status.end_reason.is_some(),
+        interval,
+        room_reported: room.is_some_and(|room| room.connected),
+        room_live: room.is_some_and(|room| room.live),
+        stopped_for_continuation: status.stopped_by.is_some(),
+        chat_session_id,
+    }
+}
+
+/// Re-decide on the current state with the real chat session, then stop only
+/// the armed show's readers and forget its identity.
+async fn release_cloud_show_services(state: &AppState) {
+    let Some(armed) = cloud_services::armed() else {
+        return;
+    };
+    let chat_session_id = state
+        .live_chat
+        .lock()
+        .await
+        .session_id()
+        .map(str::to_string);
+    let status = cloud_show_status(state);
+    let interval = cloud_services::canonical_live_interval(&status);
+    let facts =
+        cloud_services_terminal_facts(&status, interval.as_ref(), chat_session_id.as_deref());
+    let cloud_services::TerminalAction::Release { show_id, reason } =
+        cloud_services::plan_terminal(&armed, &facts)
+    else {
+        return;
+    };
+    tracing::info!("Cloud show services released: {reason}.");
+    // Session-matched: a successor show's chat is never stopped here.
+    stop_talk_show_chat(state, &show_id).await;
+    // Forget only the identity that was armed, not one a new Go Live wrote
+    // while this ran.
+    if load_cloud_show_services(state)
+        .is_some_and(|identity| cloud_services::ArmedServices::from(&identity) == armed)
+    {
+        save_cloud_show_services(state, None);
+    }
+}
+
+fn load_cloud_show_services(state: &AppState) -> Option<cloud_services::CloudServiceIdentity> {
+    match state
+        .database
+        .load_setting::<Option<cloud_services::CloudServiceIdentity>>(
+            cloud_services::CLOUD_SHOW_SERVICES_KEY,
+        ) {
+        Ok(identity) => identity.flatten(),
+        Err(error) => {
+            // A row from an unknown future shape is ignored, not trusted.
+            tracing::warn!("Could not read the cloud show's service identity: {error:#}");
+            None
+        }
+    }
+}
+
+/// The live interval ended here (End livestream, Close): its identity goes.
+/// An empty `show_id` forgets whatever is held. A takeover keeps it: if this
+/// computer takes the show back within the same interval, it reattaches.
+fn forget_cloud_show_services(state: &AppState, show_id: &str) {
+    if load_cloud_show_services(state)
+        .is_some_and(|identity| show_id.is_empty() || identity.show_id == show_id)
+    {
+        save_cloud_show_services(state, None);
+    }
+}
+
+/// Steps of the bounded wait for a resumed room's first legs (500 ms each).
+const CLOUD_SHOW_REATTACH_WAIT_STEPS: u32 = 20;
+
+/// A resume answered before the runner reported the room's legs: wait a
+/// bounded while for them, then reattach once. Stops early when the room
+/// closes or the reattach decides anything else.
+fn spawn_late_cloud_show_reattach(state: &AppState) {
+    let state = state.clone();
+    tokio::spawn(async move {
+        for _ in 0..CLOUD_SHOW_REATTACH_WAIT_STEPS {
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            let room = cloud_show_status(&state).room;
+            match room {
+                None => return,
+                Some(room) if !room.live => continue,
+                Some(_) => {}
+            }
+            if reattach_cloud_show_services(&state).await != Some("not-live") {
+                return;
+            }
+        }
+    });
+}
+
+/// Close answered: forget the identity only once the End is confirmed. A
+/// pending End (`phase: ending`) keeps it armed, and the confirmation that
+/// follows as cloud state releases it (`schedule_cloud_show_services_release`).
+fn forget_cloud_show_services_if_confirmed(state: &AppState, status: &cloud_show::CloudStatus) {
+    if !matches!(status.phase, cloud_show::CloudPhase::Ending) {
+        forget_cloud_show_services(state, "");
+    }
+}
+
+/// Plan 249 S18: after a resume, attach the show's chat, viewer and audience
+/// readers on this owner exactly once, keeping its history, quotas and first
+/// attach time; a leg whose identity or account lives on another computer is
+/// an explicit row, never a guess. Never starts Sidekick (its consent is the
+/// streamer's own Start) and never opens an output. Returns the skip reason
+/// when nothing was attached (`None` once readers were attached or kept).
+async fn reattach_cloud_show_services(state: &AppState) -> Option<&'static str> {
+    let accounts: Vec<cloud_services::LocalAccount> = state
+        .database
+        .list_platform_accounts()
+        .unwrap_or_default()
+        .iter()
+        .map(cloud_services::LocalAccount::from_platform_account)
+        .collect();
+    let snapshot = load_cloud_show_services(state);
+    let chat_session_id = state
+        .live_chat
+        .lock()
+        .await
+        .session_id()
+        .map(str::to_string);
+    let decision = {
+        let runtime = state.cloud_show.lock().unwrap_or_else(|p| p.into_inner());
+        let status = runtime.status();
+        let interval = cloud_services::canonical_live_interval(&status);
+        let facts = cloud_services::ReattachFacts {
+            show_id: status.show.as_ref().map(|show| show.id.as_str()),
+            show_kind: status.show.as_ref().and_then(|show| show.kind.as_deref()),
+            interval: interval.as_ref(),
+            device_id: &runtime.device.id,
+            this_device_owns: runtime.stopped_by.is_none() && !runtime.air_names_another_device(),
+            room_live: status.room.as_ref().is_some_and(|room| room.live),
+            legs: &status.legs,
+            chat_session_id: chat_session_id.as_deref(),
+            accounts: &accounts,
+        };
+        cloud_services::plan_reattach(snapshot.as_ref(), &facts)
+    };
+    let (identity, destinations, unavailable) = match decision {
+        cloud_services::ReattachDecision::Keep => {
+            tracing::info!("Cloud show chat already attached here; kept its readers.");
+            return None;
+        }
+        cloud_services::ReattachDecision::Skip(reason) => {
+            tracing::info!("Cloud show chat not reattached: {reason}.");
+            if reason == "interval-ended" {
+                // Its interval is over: the identity is no longer anyone's.
+                forget_cloud_show_services(state, "");
+            }
+            return Some(reason);
+        }
+        cloud_services::ReattachDecision::Attach {
+            identity,
+            destinations,
+            unavailable,
+        } => (identity, destinations, unavailable),
+    };
+    if snapshot.as_ref() != Some(&identity) {
+        save_cloud_show_services(state, Some(&identity));
+    } else {
+        cloud_services::arm(Some(&identity));
+    }
+    let first_attached_at = chrono::DateTime::parse_from_rfc3339(&identity.attached_at)
+        .map(|at| at.with_timezone(&chrono::Utc))
+        .unwrap_or_else(|_| chrono::Utc::now());
+    let prepared = if destinations.is_empty() {
+        None
+    } else {
+        prepare_session_live_chat(
+            state,
+            &identity.show_id,
+            &identity.streaming_settings(&destinations),
+        )
+        .await
+    };
+    if prepared.is_none() && !destinations.is_empty() {
+        // The show's Library row could not open (logged there): attaching
+        // only the unavailable rows would hide the readable destinations.
+        return Some("chat-preparation-failed");
+    }
+    let mut params = prepared.unwrap_or_else(|| live_chat::LiveChatStartParams {
+        session_id: identity.show_id.clone(),
+        platforms: Vec::new(),
+        destinations: Vec::new(),
+        fake: None,
+        fakes: Vec::new(),
+        youtube: None,
+        twitch: None,
+        x: None,
+        kick: None,
+        audience: Vec::new(),
+        fake_audience: Vec::new(),
+    });
+    for row in &unavailable {
+        params
+            .destinations
+            .push(live_chat::LiveChatDestinationStart {
+                target_id: row.target_id.clone(),
+                platform: row.platform,
+                read: Some(live_chat::CommentsReadState::Unavailable),
+                write: Some(live_chat::CommentsWriteState::Unavailable),
+                preparation_error: None,
+                notice: Some(row.notice()),
+            });
+    }
+    if params.destinations.is_empty() {
+        return Some("no-live-destinations");
+    }
+    live_chat::resume_live_chat(state, params, first_attached_at).await;
+    // X reads chat for the broadcast the renderer attached at Go Live; its
+    // connector takes this computer's X account and Videorc sign-in at
+    // runtime (the existing `liveChat.x.start` path), and parks visibly when
+    // either is missing. Never a provider call from here.
+    for (target_id, broadcast_id) in
+        cloud_services::CloudServiceIdentity::x_broadcasts(&destinations)
+    {
+        if let Err(error) = live_chat::start_x_live_chat(
+            state,
+            live_chat::StartXLiveChatParams {
+                session_id: identity.show_id.clone(),
+                broadcast_id,
+                target_id: Some(target_id),
+            },
+        )
+        .await
+        {
+            tracing::warn!("X comments did not reattach: {error:#}");
+        }
+    }
+    // A takeover or End that landed while the readers attached: only this
+    // show's readers stop, never a successor's.
+    let still_owned = {
+        let runtime = state.cloud_show.lock().unwrap_or_else(|p| p.into_inner());
+        let status = runtime.status();
+        runtime.stopped_by.is_none()
+            && !runtime.air_names_another_device()
+            && status
+                .show
+                .as_ref()
+                .is_some_and(|show| show.id == identity.show_id)
+            && status.room.as_ref().is_some_and(|room| room.live)
+    };
+    if !still_owned {
+        stop_talk_show_chat(state, &identity.show_id).await;
+    }
+    None
+}
+
 fn cloud_hooks(state: &AppState) -> cloud_show::CloudHooks {
     let emit_state = state.clone();
     let legs_state = state.clone();
@@ -15884,6 +16254,7 @@ fn cloud_hooks(state: &AppState) -> cloud_show::CloudHooks {
                 tracing::warn!("Could not update the cloud show's Library entry: {error:#}");
             }
             drop(current);
+            schedule_cloud_show_services_release(&emit_state, &status);
             emit_state.emit_event(cloud_show::CLOUD_STATE_EVENT, status);
         }),
         // Lane 3 F2: the show this desktop holds survives a relaunch, so the

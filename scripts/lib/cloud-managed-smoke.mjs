@@ -108,7 +108,9 @@ export function managedPublishAllowed(shows, { action, path }) {
  * A loopback media stand-in observes decoded feed frames; it does not claim to
  * establish LiveKit egress behaviour (the D18 Docker stack is a separate gate).
  */
-export async function managedHarness(kind, pass = 1) {
+/** `youtube` (plan 249 S18) starts the local fake YouTube API for a talk
+ * show too; solo always has it. No real provider is ever reached. */
+export async function managedHarness(kind, pass = 1, { youtube: withYouTube = false } = {}) {
   const root = mkdtempSync(
     join(process.env.VIDEORC_SMOKE_OUTPUT_DIR ?? tmpdir(), `videorc-managed-${kind}-${pass}-`)
   )
@@ -1059,7 +1061,7 @@ export async function managedHarness(kind, pass = 1) {
       }, 'local TLS receiver ready')
       await h.forward()
     }
-    if (kind === 'solo') {
+    if (kind === 'solo' || withYouTube) {
       const port = await freePort()
       const guard = createServer((socket) => {
         sockets.add(socket)

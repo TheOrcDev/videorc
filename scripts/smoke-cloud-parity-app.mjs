@@ -20,9 +20,16 @@ if (selected.case === 'library') {
   process.exit(0)
 }
 if (
-  !['baseline', 'controls', 'privacy', 'soundboard', 'avatar', 'lifecycle', 'replay-ring'].includes(
-    selected.case
-  )
+  ![
+    'baseline',
+    'controls',
+    'privacy',
+    'soundboard',
+    'avatar',
+    'lifecycle',
+    'services',
+    'replay-ring'
+  ].includes(selected.case)
 ) {
   throw new Error(
     `${selected.id} case '${selected.case}' is not implemented. Deferred acceptance is not a pass.`
@@ -37,7 +44,9 @@ const { runBaseline } = await import('./lib/cloud-parity-baseline.mjs')
 const run =
   selected.case === 'lifecycle'
     ? (await import('./lib/cloud-parity-lifecycle.mjs')).runLifecycle
-    : runBaseline
+    : selected.case === 'services'
+      ? (await import('./lib/cloud-parity-services.mjs')).runServices
+      : runBaseline
 const { output } = await run({
   desktopRoot: fileURLToPath(new URL('../', import.meta.url)),
   webRoot,
