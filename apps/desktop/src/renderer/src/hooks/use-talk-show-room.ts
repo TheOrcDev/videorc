@@ -163,6 +163,9 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
 
   const callbacksRef = useRef({ commitCloudStatus, onError })
   callbacksRef.current = { commitCloudStatus, onError }
+  // Plan 243 C5: the room client reads who is on air when its host seat drops.
+  const onAirRef = useRef(cloudStatus?.onAir)
+  onAirRef.current = cloudStatus?.onAir
 
   // Each open show owns one join. Closing, changing shows or losing the
   // backend cancels it, even while the media grant or lazy import is pending.
@@ -208,7 +211,8 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
           },
           cameraName: cameraNameRef.current,
           microphoneName: microphoneNameRef.current,
-          audioHost: () => host
+          audioHost: () => host,
+          onAir: () => onAirRef.current
         })
         current = roomClient
         clientRef.current = roomClient

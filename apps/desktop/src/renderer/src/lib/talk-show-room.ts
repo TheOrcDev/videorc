@@ -35,6 +35,7 @@ import {
 } from 'livekit-client'
 
 import type {
+  CloudOnAir,
   CloudRoomClientState,
   CloudRoomOverlayEvent,
   CloudRoomQuality,
@@ -53,6 +54,17 @@ export { isRunnerIdentity } from '@/lib/talk-show-room-audio'
 /** The data topic the guest page listens on (`guest-wire.ts`, `STAGE_TOPIC`). */
 export const STAGE_TOPIC = 'videorc.stage'
 const RECONNECT_BACKOFF_MS = [1000, 2000, 4000, 8000, 15000]
+/** Plan 243 C5: how long a duplicate host waits for `onAir` to name the new device. */
+export const TAKEN_OVER_GRACE_MS = 3000
+const TAKEN_OVER_POLL_MS = 100
+/** The room's line once another device holds the host seat (no device name). */
+export const TAKEN_OVER_DETAIL = 'Your show continues on another device.'
+const ROOM_LOST_DETAIL = 'Connection to the room lost.'
+
+/** Another device is on air (it holds the host seat), not a hand-off's wait. */
+export function onAirElsewhere(onAir: CloudOnAir | undefined): boolean {
+  return Boolean(onAir && !onAir.thisDevice && !onAir.waiting)
+}
 
 export type TalkShowPerson = {
   identity: string
@@ -118,6 +130,11 @@ export type TalkShowRoomDeps = {
   microphoneName: string | null
   /** Where remote audio plays (a hidden container the hook owns). */
   audioHost: () => HTMLElement | null
+  /**
+   * Plan 243 C5: the device on air, from the latest `cloud.state`, so a
+   * second host connection that drops this one reads as taken over.
+   */
+  onAir?: () => CloudOnAir | undefined
 }
 
 /** The guest page's `StageMessage` (`guest-wire.ts`): the identities on stage. */
@@ -516,12 +533,14 @@ export class TalkShowRoomClient {
   #scheduleReconnect(reason?: DisconnectReason): void {
     if (this.#closed) return
     const attempt = this.#reconnectAttempt
+    if (reason === DisconnectReason.DUPLICATE_IDENTITY) {
+      void this.#duplicateHost()
+      return
+    }
     const terminal =
-      reason === DisconnectReason.ROOM_DELETED ||
-      reason === DisconnectReason.PARTICIPANT_REMOVED ||
-      reason === DisconnectReason.DUPLICATE_IDENTITY
+      reason === DisconnectReason.ROOM_DELETED || reason === DisconnectReason.PARTICIPANT_REMOVED
     if (terminal || attempt >= RECONNECT_BACKOFF_MS.length) {
-      this.#setState('disconnected', 'Connection to the room lost.')
+      this.#setState('disconnected', ROOM_LOST_DETAIL)
       return
     }
     this.#reconnectAttempt = attempt + 1
@@ -529,6 +548,27 @@ export class TalkShowRoomClient {
     this.#reconnectTimer = window.setTimeout(() => {
       void this.#reconnect()
     }, RECONNECT_BACKOFF_MS[attempt])
+  }
+
+  /**
+   * Plan 243 C5: LiveKit drops this connection when another one joins as
+   * `host:<showId>`, which is how a phone or another computer takes the host
+   * seat. Another device on air now, or within `TAKEN_OVER_GRACE_MS`, is a
+   * take-over (the backend stops this computer; the toast names the device).
+   * Otherwise the room is lost, as before. Never a rejoin: that would take
+   * the seat back.
+   */
+  async #duplicateHost(): Promise<void> {
+    for (
+      let waited = 0;
+      waited < TAKEN_OVER_GRACE_MS && !onAirElsewhere(this.#deps.onAir?.());
+      waited += TAKEN_OVER_POLL_MS
+    ) {
+      await new Promise((resolve) => window.setTimeout(resolve, TAKEN_OVER_POLL_MS))
+      if (this.#closed) return
+    }
+    const takenOver = onAirElsewhere(this.#deps.onAir?.())
+    this.#setState('disconnected', takenOver ? TAKEN_OVER_DETAIL : ROOM_LOST_DETAIL)
   }
 
   async #reconnect(): Promise<void> {
