@@ -145,9 +145,16 @@ const htmlPath = resolve(
 // contract schemas already load lazily.
 // Raise gzip to 487,000; raw and the entry ceilings hold. Keep new surfaces
 // lazy.
+// 2026-11-16 (owner-approved: "yes change", 493,000 for plan 231): every scene
+// shows its own screen. The branch measures 2,389,940 raw / 491,709 gzip on
+// 8620b5fc2, against main's ~485,500 gzip. The new eager bytes are the scene
+// model and its v2 store, Studio's Scenes section (cards, pictures, position
+// keys) and the scene switch wiring in the provider; the v1 migration loads
+// lazily. Raise gzip to 493,000 and raw to 2,397,000; the entry ceilings
+// hold. Keep new surfaces lazy.
 const budget = {
-  maxTotalRawBytes: Number(process.env.VIDEORC_RENDERER_MAX_EAGER_RAW_BYTES ?? 2_365_000),
-  maxTotalGzipBytes: Number(process.env.VIDEORC_RENDERER_MAX_EAGER_GZIP_BYTES ?? 487_000),
+  maxTotalRawBytes: Number(process.env.VIDEORC_RENDERER_MAX_EAGER_RAW_BYTES ?? 2_397_000),
+  maxTotalGzipBytes: Number(process.env.VIDEORC_RENDERER_MAX_EAGER_GZIP_BYTES ?? 493_000),
   maxEntryRawBytes: Number(process.env.VIDEORC_RENDERER_MAX_ENTRY_RAW_BYTES ?? 1_200_000),
   maxEntryGzipBytes: Number(process.env.VIDEORC_RENDERER_MAX_ENTRY_GZIP_BYTES ?? 235_000)
 }
