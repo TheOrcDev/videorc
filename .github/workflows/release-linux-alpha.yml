@@ -148,13 +148,21 @@ jobs:
 
       - name: Run Linux unit gate
         if: ${{ steps.reuse.outputs.reused != 'true' }}
+        # Same CI-only test profile as linux.yml: one rustc job, line tables
+        # only, backend crate at opt-level 0 (8 MiB test stacks). With two jobs
+        # and full debuginfo the hosted runner ran out of memory and "lost
+        # communication with the server" twice on the 0.29.0 candidate
+        # (run 43833037929). Passed as --config so packaging is untouched.
         env:
-          CARGO_BUILD_JOBS: '2'
+          CARGO_BUILD_JOBS: '1'
           CARGO_INCREMENTAL: '0'
+          RUST_MIN_STACK: '8388608'
         run: |
           set -euo pipefail
           run_tests() {
-            cargo test -p videorc-backend
+            cargo test -p videorc-backend \
+              --config 'profile.dev.debug="line-tables-only"' \
+              --config 'profile.dev.package.videorc-backend.opt-level=0'
           }
           if run_tests; then
             exit 0
