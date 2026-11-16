@@ -397,6 +397,10 @@ pub enum CloudGuestDevice {
     Computer,
 }
 
+/// Plan 243 C5: sent only after DUPLICATE_IDENTITY and onAir confirmation.
+/// Keep in step with the renderer's talk-show-room.ts (never a device name).
+pub(crate) const TAKEN_OVER_DETAIL: &str = "Your show continues on another device.";
+
 /// The renderer's own room connection, as it reports it
 /// (`cloud.room.client.report`): the Studio's copy and the watchdog read it.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -1491,6 +1495,7 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
         let hold_max_seconds = lock(&self.slot).settings.hold_max_seconds;
         let platforms = params.platforms.clone().unwrap_or_default();
         let request = CreateShowRequest {
+            device: self.request_device().await,
             kind: "talk".to_string(),
             outputs,
             hold_max_seconds,
@@ -1580,6 +1585,7 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
             let mut runtime = lock(&self.slot);
             runtime.failed = None;
             runtime.fallback = None;
+            runtime.stopped_by = None;
             runtime.show = Some(ActiveShow {
                 record: created.show.clone(),
                 control: created.control.clone(),
@@ -1648,6 +1654,9 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
     pub(crate) async fn forget_talk_show(&self) {
         let held = lock(&self.slot).talk.take().is_some();
         if held {
+            // Release the renderer's host tracks before the native preview
+            // takes the camera back (also used by hand-off, without Close).
+            self.hooks.emit_from(&self.slot);
             if let Err(message) = (self.hooks.camera)(CameraHandover::Return).await {
                 tracing::warn!("The talk show could not return the camera: {message}");
             }
@@ -1941,6 +1950,11 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
         destinations: Vec<HandoverDestination>,
         platforms: Vec<String>,
     ) -> Result<CloudStatus> {
+        if lock(&self.slot).live_elsewhere() {
+            return Err(crate::cloud_show::cloud_refusal(
+                "cloud-show-live-elsewhere",
+            ));
+        }
         let deadline = self.room_rpc_deadline();
         let bearer = bearer_or_bail(bearer)?;
         let show_id = self.open_room_show_id()?;
@@ -2095,14 +2109,48 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
     /// The renderer's own room connection, for the status (and the watchdog).
     pub fn report_client(&self, params: RoomClientReportParams) -> CloudStatus {
         let connected = params.state == CloudRoomClientState::Connected;
-        {
+        let taken_over = {
             let mut runtime = lock(&self.slot);
+            // host/go is before the new host joins. Only the renderer's
+            // confirmed duplicate-host report may release our own seat.
+            let taken_over = (params.state == CloudRoomClientState::Disconnected
+                && params.detail.as_deref() == Some(TAKEN_OVER_DETAIL)
+                && runtime.talk.is_some()
+                && runtime
+                    .runner
+                    .as_ref()
+                    .and_then(|r| r.on_air.as_ref())
+                    .is_some_and(|air| {
+                        !air.waiting
+                            && air
+                                .device_id
+                                .as_deref()
+                                .is_some_and(|id| id != runtime.device.id)
+                    }))
+            .then(|| runtime.show.as_ref().map(|show| show.record.id.clone()))
+            .flatten();
+            if taken_over.is_some() {
+                runtime.stopped_by = Some(crate::cloud_show::CloudStoppedBy::TakenOver);
+                runtime.destinations_generation.stop();
+                runtime.failed = None;
+            }
             if let Some(talk) = runtime.talk.as_mut() {
                 talk.client = params.state;
-                talk.message = params.detail.filter(|detail| !detail.trim().is_empty());
+                talk.message = params.detail.filter(|detail| {
+                    !detail.trim().is_empty() && !detail.contains("DUPLICATE_IDENTITY")
+                });
             }
-        }
+            taken_over
+        };
         self.hooks.emit_from(&self.slot);
+        if let Some(show_id) = taken_over {
+            let context = self.clone();
+            tokio::spawn(async move {
+                let _ = context
+                    .stop_for_continuation(&show_id, crate::cloud_show::CloudStoppedBy::TakenOver)
+                    .await;
+            });
+        }
         // Plan 234 (6.3): a renderer whose room connection just came up
         // sent nothing while it was away; what is up goes again.
         if connected {
@@ -2271,6 +2319,9 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
                     .await
                     .map_err(anyhow::Error::msg)??;
             }
+            if lock(&self.slot).air_names_another_device() {
+                self.claim_talk_host(&bearer, &show_id, deadline).await?;
+            }
             return Ok(lock(&self.slot).status());
         }
         if let Err(message) = (self.hooks.camera)(CameraHandover::Lend).await {
@@ -2291,6 +2342,12 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
                     .map_err(anyhow::Error::msg)
                     .and_then(|answer| answer)
         {
+            let _ = (self.hooks.camera)(CameraHandover::Return).await;
+            return Err(error);
+        }
+        // Claim only when all local prerequisites succeeded: a phone may
+        // leave as soon as host/go names this computer.
+        if let Err(error) = self.claim_talk_host(&bearer, &show_id, deadline).await {
             let _ = (self.hooks.camera)(CameraHandover::Return).await;
             return Err(error);
         }
@@ -2315,6 +2372,7 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
             talk.poll_generation = runtime.generation + 1;
             let generation = talk.poll_generation;
             runtime.talk = Some(talk);
+            runtime.stopped_by = None;
             // The stage the program has (H2): the host and whoever the
             // runner still flags on stage, never the host alone over guests.
             runtime.talk_layout_from_runner();
@@ -2331,6 +2389,53 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
         self.spawn_guests_poll(bearer, show_id, generation);
         self.hooks.emit_from(&self.slot);
         Ok(lock(&self.slot).status())
+    }
+
+    pub(crate) async fn claim_talk_host(
+        &self,
+        bearer: &str,
+        show_id: &str,
+        deadline: Option<tokio::time::Instant>,
+    ) -> Result<()> {
+        let (managed, generation) = {
+            let runtime = lock(&self.slot);
+            let show = runtime
+                .show
+                .as_ref()
+                .filter(|show| show.record.id == show_id)
+                .ok_or_else(|| crate::cloud_show::cloud_refusal("cloud-nothing-to-resume"))?;
+            (
+                show.control.transport_kind() == ControlKind::Web,
+                runtime.generation,
+            )
+        };
+        if !managed {
+            return Ok(());
+        }
+        let device = self.device().await;
+        let answer = within_room_budget(
+            deadline,
+            self.web.on_air(bearer, show_id, &device, "host", "go"),
+        )
+        .await
+        .map_err(anyhow::Error::msg)?
+        .map_err(anyhow::Error::new)?;
+        let mut runtime = lock(&self.slot);
+        if runtime.generation != generation
+            || runtime
+                .show
+                .as_ref()
+                .is_none_or(|show| show.record.id != show_id)
+        {
+            return Err(crate::cloud_show::cloud_refusal("cloud-nothing-to-resume"));
+        }
+        if let Some(ControlHandle::Web(tx)) = runtime.control_tx.as_ref() {
+            tx.observe_revision(answer.rev);
+        }
+        if let Some(state) = runtime.runner.as_mut() {
+            state.on_air = answer.on_air;
+        }
+        Ok(())
     }
 
     /// Review M1: the resume's own control socket, the way the solo resume

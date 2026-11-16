@@ -174,6 +174,8 @@ fn renderer_only_method(method: &str) -> bool {
             // Plan 224: the one answer that carries a LiveKit token goes to
             // the renderer that joins the room, never to a remote or main.
             | "cloud.room.token.refresh"
+            | "cloud.show.handOff"
+            | "cloud.show.check"
     )
 }
 
@@ -306,6 +308,21 @@ fn scrub_ffmpeg_paths_recursive(value: &mut serde_json::Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cloud_continuation_mutations_are_renderer_only() {
+        for method in ["cloud.show.handOff", "cloud.show.check"] {
+            assert_eq!(
+                authorize_backend_method(BackendRole::Renderer, method, false),
+                Ok(())
+            );
+            assert_eq!(
+                authorize_backend_method(BackendRole::Admin, method, false),
+                Err(MethodAdmissionError::RendererOnly)
+            );
+            assert!(authorize_backend_method(BackendRole::Remote, method, false).is_err());
+        }
+    }
 
     #[test]
     fn app_window_resolution_is_local_studio_authority() {

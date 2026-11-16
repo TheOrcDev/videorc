@@ -791,6 +791,23 @@ async fn run_backend(device_changes: tokio::sync::watch::Receiver<u64>) -> Resul
             cloud_show_detect_at_launch(&entitlement_state).await;
         });
     }
+    {
+        let discovery_state = state.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(10));
+            loop {
+                tick.tick().await;
+                if !cloud_test_blocked_by(&current_recording_status(&discovery_state).await)
+                    && let (Some(context), Some(bearer)) = (
+                        cloud_context(&discovery_state),
+                        account::stored_session_token(),
+                    )
+                {
+                    let _ = context.check_current_show(&bearer, false).await;
+                }
+            }
+        });
+    }
     // Plan 094 (S7): remote service flags at startup and every 30 minutes;
     // fails open to compiled defaults.
     tokio::spawn(service_flags::run_service_flags_refresher(state.clone()));
@@ -5700,8 +5717,12 @@ fn websocket_audio_processing_command_id(text: &str) -> Option<String> {
 }
 
 fn websocket_command_is_session_stop(text: &str) -> bool {
-    serde_json::from_str::<ClientCommand>(text)
-        .is_ok_and(|command| command.method == "session.stop")
+    serde_json::from_str::<ClientCommand>(text).is_ok_and(|command| {
+        matches!(
+            command.method.as_str(),
+            "session.stop" | "cloud.show.handOff"
+        )
+    })
 }
 
 fn websocket_command_is_session_start(text: &str) -> bool {
@@ -5726,6 +5747,7 @@ fn websocket_command_has_session_lifecycle_policy(text: &str) -> bool {
             command.method.as_str(),
             "session.start"
                 | "cloud.show.resume"
+                | "cloud.show.handOff"
                 | "session.stop"
                 | "recording.stop"
                 | "recording.start_test"
@@ -6069,12 +6091,14 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "watchdog.settings.set"
         | "watchdog.idle.report"
         | "cloud.show.reconnectDestination"
+        | "cloud.show.check"
         | "cloud.room.client.report"
         | "cloud.recordings.download"
         | "cloud.recordings.cancelDownload" => Some(DEFAULT_MUTATION_POLICY),
 
         "session.start"
         | "cloud.show.resume"
+        | "cloud.show.handOff"
         | "session.stop"
         | "recording.stop"
         | "recording.start_test" => Some(SessionLifecycle),
@@ -11651,6 +11675,31 @@ async fn handle_text_message_with_role(
         // every answer and the `cloud.state` event are the same secret-free
         // `CloudStatus`.
         "cloud.status" => ServerResponse::ok(command.id, cloud_show_status(state)),
+        "cloud.show.check" => {
+            if cloud_test_blocked_by(&current_recording_status(state).await) {
+                return ServerResponse::ok(command.id, serde_json::json!({"ok":true}));
+            }
+            if let (Some(context), Some(bearer)) =
+                (cloud_context(state), account::stored_session_token())
+                && let Err(error) = context.check_current_show(&bearer, true).await
+            {
+                return ServerResponse::error(command.id, "cloud-check-failed", error.to_string());
+            }
+            ServerResponse::ok(command.id, serde_json::json!({"ok":true}))
+        }
+        "cloud.show.handOff" => {
+            let Some(context) = cloud_context(state) else {
+                return cloud_unavailable(command.id);
+            };
+            match context.hand_off(account::stored_session_token()).await {
+                Ok(answer) => ServerResponse::ok(command.id, answer),
+                Err(error) => ServerResponse::error(
+                    command.id,
+                    cloud_show::continuation_error_code(&error).unwrap_or("cloud-handoff-failed"),
+                    error.to_string(),
+                ),
+            }
+        }
         "cloud.settings.set" => {
             match serde_json::from_value::<cloud_show::CloudSettingsPatch>(command.params) {
                 Ok(patch) => match cloud_show_set_settings(state, &patch) {
@@ -12045,7 +12094,7 @@ async fn handle_text_message_with_role(
                             }
                             Err(error) => ServerResponse::error(
                                 command.id,
-                                "cloud-go-live-failed",
+                                cloud_talk_error_code(&error, "cloud-go-live-failed"),
                                 format!("{error:#}"),
                             ),
                         }
@@ -15677,7 +15726,28 @@ fn cloud_hooks(state: &AppState) -> cloud_show::CloudHooks {
     let camera_state = state.clone();
     let request_state = state.clone();
     let overlay_state = state.clone();
+    let stop_state = state.clone();
     cloud_show::CloudHooks {
+        stop: std::sync::Arc::new(move || {
+            let state = stop_state.clone();
+            Box::pin(async move {
+                live_chat::stop_live_chat_for_capture_end(&state).await;
+                match stop_recording_with_intent(
+                    state.clone(),
+                    protocol::SessionStopParams::default(),
+                )
+                .await
+                {
+                    Ok(_) => Ok(()),
+                    Err(_) if state.recording.lock().await.is_none() => {
+                        Err(cloud_show::CloudStopFailure::NoActiveSession)
+                    }
+                    Err(_) => Err(cloud_show::CloudStopFailure::Failed(
+                        "This computer could not stop sending. Try Stop again.".into(),
+                    )),
+                }
+            })
+        }),
         emit: std::sync::Arc::new(move |status| {
             emit_state.emit_event(cloud_show::CLOUD_STATE_EVENT, status);
         }),
@@ -15785,6 +15855,9 @@ fn cloud_test_blocked_by(recording: &protocol::RecordingStatus) -> bool {
 }
 
 fn cloud_talk_error_code(error: &anyhow::Error, default: &'static str) -> &'static str {
+    if let Some(code) = cloud_show::continuation_error_code(error) {
+        return code;
+    }
     if let Some(refusal) = error.downcast_ref::<cloud_talk::RoomOpenRefusal>() {
         return refusal.code();
     }
@@ -16004,13 +16077,31 @@ async fn start_session_command(
             };
             match started {
                 Ok(status) => {
+                    if let Some(context) = cloud_context(state)
+                        && let Some(bearer) = account::stored_session_token()
+                        && let Some(session_id) = status.session_id.as_deref()
+                        && let Err(error) = context.finish_resume(&bearer, session_id).await
+                    {
+                        return ServerResponse::error(
+                            command.id,
+                            cloud_show::continuation_error_code(&error)
+                                .unwrap_or("cloud-source-not-ready"),
+                            error.to_string(),
+                        );
+                    }
                     // Plan 187: a fact for the announcer; never waits.
                     discord_announce::on_session_started(state, &status, streaming.as_ref());
                     if attach_live_chat
                         && let Some(streaming) = streaming.as_ref()
                         && let Some(session_id) = status.session_id.as_deref()
                     {
-                        spawn_session_live_chat(state, session_id, streaming).await;
+                        let mut streaming = streaming.clone();
+                        if kind == SessionStartKind::CloudResume
+                            && let Some(context) = cloud_context(state)
+                        {
+                            context.resume_chat_settings(&mut streaming);
+                        }
+                        spawn_session_live_chat(state, session_id, &streaming).await;
                     }
                     ServerResponse::ok(command.id, status)
                 }
@@ -16032,7 +16123,8 @@ async fn start_session_command(
                     {
                         replay_buffer::SOURCES_NOT_READY_CODE
                     } else {
-                        "session-start-failed"
+                        cloud_show::continuation_error_code(&error)
+                            .unwrap_or("session-start-failed")
                     };
                     ServerResponse::error(command.id, code, error.to_string())
                 }
@@ -19489,7 +19581,8 @@ mod tests {
             lifecycle_exemptions,
             [
                 // Plan 184 C5: Resume is the same atomic Start, bound to the
-                // live cloud show.
+                // live cloud show. Hand-off finalizes through the same Stop.
+                "cloud.show.handOff",
                 "cloud.show.resume",
                 "recording.start_test",
                 "recording.stop",

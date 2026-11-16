@@ -1471,12 +1471,19 @@ pub(crate) type WebIntentCall = Arc<dyn Fn(Value) -> IntentAnswer + Send + Sync>
 #[derive(Clone)]
 pub(crate) struct WebIntents {
     call: WebIntentCall,
+    floor: Arc<AtomicU64>,
     /// Never sent on. The show's poll watches the other end and stops when
     /// the slot has let go of every handle.
     _held: mpsc::UnboundedSender<ControlRequest>,
 }
 
 impl WebIntents {
+    pub(crate) fn observe_revision(&self, rev: Option<u64>) {
+        if let Some(rev) = rev {
+            self.floor.fetch_max(rev, Ordering::SeqCst);
+        }
+    }
+
     pub(crate) async fn send(&self, frame: Value) -> AckResult {
         (self.call)(frame).await
     }
@@ -1695,6 +1702,7 @@ fn read_state_answer(answer: std::result::Result<ControlStateAnswer, CloudApiErr
 /// One show's control over videorc.com: its state long-poll and the way to
 /// its intents.
 pub(crate) struct WebControl<W: CloudWebApi> {
+    slot: crate::cloud_show::CloudShowSlot,
     web: Arc<W>,
     bearer: String,
     show_id: String,
@@ -1720,8 +1728,13 @@ impl<W: CloudWebApi> WebControl<W> {
         bearer: &str,
         show_id: &str,
         destinations: Arc<DestinationGeneration>,
+        slot: crate::cloud_show::CloudShowSlot,
     ) -> std::result::Result<(Self, RunnerState), HelloFailure> {
-        let first = with_one_cloud_retry(|| web.control_state(bearer, show_id, None)).await;
+        let first = with_one_cloud_retry(|| {
+            let idle = crate::cloud_show::lock(&slot).poll_as_idle();
+            web.control_state(bearer, show_id, None, idle)
+        })
+        .await;
         let (rev, state) = match read_state_answer(first) {
             WebPoll::State { rev, state } => (rev, *state),
             WebPoll::Ended(_) => return Err(HelloFailure::NoSuchShow),
@@ -1763,6 +1776,7 @@ impl<W: CloudWebApi> WebControl<W> {
         );
         Ok((
             Self {
+                slot,
                 web,
                 bearer: bearer.to_string(),
                 show_id: show_id.to_string(),
@@ -1781,6 +1795,7 @@ impl<W: CloudWebApi> WebControl<W> {
     pub(crate) fn intents(&self, held: mpsc::UnboundedSender<ControlRequest>) -> WebIntents {
         WebIntents {
             call: self.call.clone(),
+            floor: self.floor.clone(),
             _held: held,
         }
     }
@@ -1790,9 +1805,10 @@ impl<W: CloudWebApi> WebControl<W> {
     /// with the same `since`.
     pub(crate) async fn poll(&mut self) -> WebPoll {
         tokio::time::sleep_until(self.next_at).await;
+        let idle = crate::cloud_show::lock(&self.slot).poll_as_idle();
         let answer = self
             .web
-            .control_state(&self.bearer, &self.show_id, self.since)
+            .control_state(&self.bearer, &self.show_id, self.since, idle)
             .await;
         let poll = read_state_answer(answer);
         let now = tokio::time::Instant::now();
@@ -2051,6 +2067,9 @@ impl<W: CloudWebApi, C: ControlConnector> ControlLoop<W, C> {
     ) {
         let (asked, generation): (Vec<HandoverDestination>, u64) = {
             let runtime = lock(&self.context.slot);
+            if runtime.stopped_by.is_some() {
+                return;
+            }
             let (Some(show), Some(runner)) = (runtime.show.as_ref(), runtime.runner.as_ref())
             else {
                 return;
@@ -2248,6 +2267,7 @@ mod tests {
         destinations_set_frame(
             "intent-1",
             &[HandoverDestination {
+                broadcast_id: None,
                 id: "youtube-main".to_string(),
                 platform: "youtube".to_string(),
                 label: "YouTube".to_string(),
@@ -2559,6 +2579,7 @@ mod tests {
         let mut frame = json!({ "t": "intent", "id": "intent-9", "kind": "legs.end" });
         assert_eq!(DestinationsBody::for_legs_end(&frame).as_json(), &json!({}));
         frame["destinations"] = legs_end_destinations(&[HandoverDestination {
+            broadcast_id: None,
             id: "youtube-main".to_string(),
             platform: "youtube".to_string(),
             label: "YouTube".to_string(),
@@ -3138,6 +3159,7 @@ rtmps://h/app/key 'http://x.test/y'";
         // model; only a state this list does not hold reads as a warning.
         for state in fixture["legs"]["states"].as_array().unwrap() {
             let leg = crate::cloud_show::RunnerLeg {
+                broadcast_id: None,
                 id: "leg".to_string(),
                 state: state.as_str().unwrap().to_string(),
                 ..Default::default()
@@ -3151,6 +3173,7 @@ rtmps://h/app/key 'http://x.test/y'";
         // The closed leg messages reach the status as they are.
         for (_, message) in fixture["legs"]["messages"].as_object().unwrap() {
             let leg = crate::cloud_show::RunnerLeg {
+                broadcast_id: None,
                 id: "leg".to_string(),
                 state: "failed".to_string(),
                 error: message.as_str().map(str::to_string),

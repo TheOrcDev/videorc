@@ -361,6 +361,9 @@ interface HighRiskContractFixtures {
     roomClientReportParams: CloudRoomClientReportParams
     roomTokenAnswer: CloudRoomTokenAnswer
     roomRequestEvent: CloudRoomRequest
+    // Plan 243 C1: another device on air, and a show waiting after a hand-off.
+    statusOnAirElsewhere: CloudStatus
+    statusWaiting: CloudStatus
   }
 }
 
@@ -596,6 +599,27 @@ describe('shared high-risk protocol fixture', () => {
     ).toThrow()
     expect(() =>
       validateBackendEventPayload('entitlements.updated', { ...max, tier: 'max' })
+    ).toThrow()
+  })
+
+  // Plan 243 C1 and C5: the device on air rides the status without its id,
+  // and a show waiting after a hand-off says so. The backend writes these
+  // blocks (cloud_show.rs round-trips them); the renderer's schema is strict.
+  it('carries the device on air and the waiting show across languages (plan 243)', () => {
+    const { statusOnAirElsewhere, statusWaiting } = fixtures.cloud
+    for (const status of [statusOnAirElsewhere, statusWaiting]) {
+      expect(status?.onAir).toBeDefined()
+      expect(jsonShape(validateBackendEventPayload('cloud.state', status))).toEqual(status)
+      expect(jsonShape(validateBackendRpcResult('cloud.status', status))).toEqual(status)
+      expect(JSON.stringify(status)).not.toMatch(/deviceId|rtmps?:|token|streamKey/)
+    }
+    expect(statusOnAirElsewhere.onAir).toMatchObject({ thisDevice: false, waiting: false })
+    expect(statusWaiting.onAir?.waiting).toBe(true)
+    expect(() =>
+      validateBackendEventPayload('cloud.state', {
+        ...statusOnAirElsewhere,
+        onAir: { ...statusOnAirElsewhere.onAir, deviceId: 'Ab3' }
+      })
     ).toThrow()
   })
 

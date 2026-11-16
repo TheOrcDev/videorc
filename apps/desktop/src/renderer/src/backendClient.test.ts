@@ -356,6 +356,14 @@ describe('BackendClient request lifetime', () => {
     expect(backendRequestTimeoutMs('session.sources.get')).toBe(10_000)
   })
 
+  // Plan 243 R2 A-M5: the hand-off is a web POST plus a whole local Stop.
+  it('gives the hand-off the Stop budget', () => {
+    expect(backendRequestTimeoutMs('cloud.show.handOff')).toBe(
+      backendRequestTimeoutMs('session.stop')
+    )
+    expect(backendRequestTimeoutMs('cloud.show.handOff')).toBe(120_000)
+  })
+
   it('gives media jobs a longer finite method-specific timeout', () => {
     expect(backendRequestTimeoutMs('preview.surface.present')).toBe(5_000)
     expect(backendRequestTimeoutMs('liveChat.send')).toBe(12_000)

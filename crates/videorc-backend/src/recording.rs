@@ -12589,6 +12589,9 @@ async fn monitor_session(
     // (`publish_stream_output_failure_if_active`); this is the fallback for a
     // failure that only became known during teardown.
     if let Some(stream_error) = stream_bridge_terminal_failure.as_deref()
+        && crate::cloud_show::lock(&state.cloud_show)
+            .stopped_by
+            .is_none()
         && announce_stream_output_failure_once(&session_id)
     {
         let _ = emit_health_event(
@@ -27656,7 +27659,7 @@ async fn prepare_cloud_stream_targets(
     let mut tls = None;
     let targets = resolution.ready;
     let outputs = cloud_output_specs(&params.output.video, &targets);
-    let destinations = cloud_handover_destinations(&targets);
+    let destinations = cloud_handover_destinations(&targets, params.streaming.as_ref());
     let outcome = context
         .prepare_session_with_feed_setup(
             session_id,
@@ -27736,6 +27739,10 @@ async fn resume_cloud_stream_targets(
             cloud_hold_image(state),
         )
         .await?;
+    context.set_reconnect_candidates(cloud_handover_destinations(
+        &resolution.ready,
+        params.streaming.as_ref(),
+    ));
     let feeds = cloud_resume_feed_targets(
         &handover.ingest,
         &resolution.ready,
@@ -27842,15 +27849,26 @@ fn cloud_talk_handover_with(
             platforms.push(platform);
         }
     }
-    Ok((cloud_handover_destinations(&targets), platforms))
+    Ok((
+        cloud_handover_destinations(&targets, Some(&streaming)),
+        platforms,
+    ))
 }
 
 fn cloud_handover_destinations(
     targets: &[StreamTarget],
+    streaming: Option<&StreamingSettings>,
 ) -> Vec<crate::cloud_show::HandoverDestination> {
     targets
         .iter()
         .map(|target| crate::cloud_show::HandoverDestination {
+            broadcast_id: streaming
+                .and_then(|s| {
+                    s.targets
+                        .iter()
+                        .find(|t| t.id == target.target_id && t.platform == StreamPlatform::Youtube)
+                })
+                .and_then(|t| t.platform_broadcast_id.clone()),
             id: target.target_id.clone(),
             platform: crate::streaming::stream_platform_id(target.platform).to_string(),
             label: target.label.clone(),
@@ -28620,7 +28638,7 @@ mod cloud_seam_tests {
 
     #[test]
     fn handover_carries_plain_keys_that_debug_never_shows() {
-        let destinations = cloud_handover_destinations(&platforms());
+        let destinations = cloud_handover_destinations(&platforms(), None);
         assert_eq!(destinations.len(), 3);
         assert_eq!(destinations[0].platform, "youtube");
         assert_eq!(destinations[0].orientation, "horizontal");
@@ -29538,14 +29556,15 @@ async fn publish_stream_target_failure_if_active(
         return;
     }
     if let Some((label, snapshot)) = failed_target {
-        let _ = emit_health_event(
+        publish_stream_leg_notice(
             state,
-            Some(session_id),
-            HealthLevel::Warn,
+            session_id,
+            targets,
+            position,
+            StreamTargetState::Failed,
             "stream-target-failed",
-            &format!("Streaming to {label} stopped: {reason}"),
+            format!("Streaming to {label} stopped: {reason}"),
         );
-        note_buddy_destination_failed(state);
         state.emit_event("stream.targets", snapshot);
     }
 }
@@ -29712,6 +29731,61 @@ fn stream_leg_overflow_counts(
         .collect()
 }
 
+/// Only the health notice waits for takeover confirmation. State, progress,
+/// and the feed-down clock keep moving in the stderr consumer.
+fn publish_stream_leg_notice(
+    state: &AppState,
+    session_id: &str,
+    targets: &SharedStreamTargetsSnapshot,
+    position: usize,
+    expected: StreamTargetState,
+    code: &'static str,
+    message: String,
+) {
+    let managed_feed = stream_targets_snapshot_value(targets)
+        .targets
+        .get(position)
+        .is_some_and(|target| is_cloud_feed_target(&target.target_id))
+        && crate::cloud_show::lock(&state.cloud_show)
+            .show
+            .as_ref()
+            .is_some_and(|show| {
+                show.session_id.as_deref() == Some(session_id)
+                    && show.control.transport_kind() == crate::cloud_show::ControlKind::Web
+            });
+    if managed_feed {
+        let state = state.clone();
+        let targets = targets.clone();
+        let session_id = session_id.to_string();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(3)).await;
+            with_active_session(&state, &session_id, || {
+                let still_down = stream_targets_snapshot_value(&targets)
+                    .targets
+                    .get(position)
+                    .is_some_and(|target| target.state == expected);
+                if still_down
+                    && crate::cloud_show::lock(&state.cloud_show)
+                        .stopped_by
+                        .is_none()
+                {
+                    emit_stream_leg_notice(&state, &session_id, code, &message);
+                }
+            })
+            .await;
+        });
+    } else {
+        emit_stream_leg_notice(state, session_id, code, &message);
+    }
+}
+
+fn emit_stream_leg_notice(state: &AppState, session_id: &str, code: &str, message: &str) {
+    let _ = emit_health_event(state, Some(session_id), HealthLevel::Warn, code, message);
+    if code == "stream-target-failed" {
+        note_buddy_destination_failed(state);
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn publish_stream_leg_update(
     state: &AppState,
@@ -29770,14 +29844,10 @@ async fn publish_stream_leg_update(
                 .entry(position)
                 .or_insert_with(Instant::now);
             with_active_session(state, session_id, || {
-                let _ = emit_health_event(
-                    state,
-                    Some(session_id),
-                    HealthLevel::Warn,
+                publish_stream_leg_notice(
+                    state, session_id, targets, position, StreamTargetState::Reconnecting,
                     STREAM_TARGET_RECONNECTING_CODE,
-                    &format!(
-                        "Streaming to {label} is reconnecting: {reason}. Until it is back, viewers there see nothing; the other destinations keep streaming."
-                    ),
+                    format!("Streaming to {label} is reconnecting: {reason}. Until it is back, viewers there see nothing; the other destinations keep streaming."),
                 );
                 state.emit_event("stream.targets", snapshot);
             })
@@ -30087,6 +30157,34 @@ pub(crate) fn publish_stream_output_failure_if_active(
     session_id: &str,
     stream_error: &str,
 ) {
+    let managed = crate::cloud_show::lock(&state.cloud_show)
+        .show
+        .as_ref()
+        .is_some_and(|show| {
+            show.session_id.as_deref() == Some(session_id)
+                && show.control.transport_kind() == crate::cloud_show::ControlKind::Web
+        });
+    if managed {
+        let state = state.clone();
+        let session_id = session_id.to_string();
+        let stream_error = stream_error.to_string();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(3)).await;
+            publish_stream_output_failure_now(&state, &session_id, &stream_error);
+        });
+    } else {
+        publish_stream_output_failure_now(state, session_id, stream_error);
+    }
+}
+
+fn publish_stream_output_failure_now(state: &AppState, session_id: &str, stream_error: &str) {
+    let stopped_cloud_session = {
+        let runtime = crate::cloud_show::lock(&state.cloud_show);
+        runtime.stopped_by.is_some() && runtime.feeding_session().as_deref() == Some(session_id)
+    };
+    if stopped_cloud_session {
+        return;
+    }
     let Ok(recording) = state.recording.try_lock() else {
         return;
     };
@@ -40759,6 +40857,134 @@ mod tests {
         assert!(twitch.message.is_some());
         // A skipped target never leaks a URL.
         assert!(twitch.redacted_url.is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn r2_a_m2_recovery_lines_never_delay_leg_state_or_progress() {
+        let state = test_state();
+        let session_id = "r2-feed-stderr";
+        *state.recording.lock().await = Some(test_active_recording_stub(session_id));
+        crate::cloud_show::lock(&state.cloud_show).show = Some(crate::cloud_show::ActiveShow {
+            record: serde_json::from_value(serde_json::json!({"id":"sh_r2","kind":"solo"}))
+                .unwrap(),
+            control: crate::cloud_show::ShowControl {
+                kind: Some("web".into()),
+                url: String::new(),
+                token: String::new(),
+            },
+            ingest: None,
+            session_id: Some(session_id.into()),
+            destinations: Vec::new(),
+            handed_over: true,
+            hold_image_png_base64: None,
+            resuming: false,
+        });
+        let targets = Arc::new(StdMutex::new(StreamTargetsSnapshot {
+            session_id: session_id.into(),
+            targets: vec![StreamTargetRuntime {
+                target_id: format!("{CLOUD_FEED_TARGET_PREFIX}horizontal"),
+                platform: StreamPlatform::Custom,
+                label: "Cloud feed".into(),
+                state: StreamTargetState::Live,
+                message: None,
+                redacted_url: None,
+                uplink_overflows: None,
+                uplink_overflow_at: None,
+            }],
+        }));
+        let mut since = std::collections::HashMap::new();
+        let mut throttle = StreamLegOverflowThrottle::default();
+        let started = tokio::time::Instant::now();
+        for _ in 0..20 {
+            tokio::time::timeout(
+                Duration::from_millis(100),
+                publish_stream_leg_update(
+                    &state,
+                    session_id,
+                    &targets,
+                    &mut since,
+                    &mut throttle,
+                    Some(4000),
+                    StreamLegUpdate::Reconnecting {
+                        position: 0,
+                        reason: "Recovery failed".into(),
+                    },
+                ),
+            )
+            .await
+            .expect("stderr draining must not wait for a takeover");
+        }
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert_eq!(
+            stream_targets_snapshot_value(&targets).targets[0].state,
+            StreamTargetState::Reconnecting
+        );
+        assert!(
+            crate::cloud_show::lock(&state.cloud_show)
+                .feed_down_for(tokio::time::Instant::now())
+                .is_some()
+        );
+    }
+    #[tokio::test(start_paused = true)]
+    async fn r2_a_l3_old_cloud_marker_does_not_hide_a_new_direct_stream_failure() {
+        let state = test_state();
+        let session_id = "direct-after-hand-off";
+        let params = base_params(true, true);
+        state
+            .database
+            .create_session(&NewSession {
+                id: session_id.into(),
+                title: "Direct after hand-off".into(),
+                started_at: Utc::now().to_rfc3339(),
+                mode: "record-stream".into(),
+                output_path: None,
+                container: None,
+                stream_preset: None,
+                sources: params.sources,
+                layout: params.layout,
+                output: params.output,
+            })
+            .expect("the direct session has a health-event owner");
+        let mut events = state.events.subscribe();
+        *state.recording.lock().await = Some(test_active_recording_stub(session_id));
+        crate::cloud_show::lock(&state.cloud_show).stopped_by =
+            Some(crate::cloud_show::CloudStoppedBy::HandOff);
+        publish_stream_output_failure_now(&state, session_id, "direct feed disconnected");
+        let reported = std::iter::from_fn(|| events.try_recv().ok()).any(|event| {
+            event.event == "health.event" && event.payload["code"] == STREAM_OUTPUT_FAILED_CODE
+        });
+        assert!(reported, "the new direct session still reports its failure");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cloud_taken_over_suppresses_a_late_stream_output_failure() {
+        let state = test_state();
+        let session_id = "taken-over-stream-output";
+        let mut events = state.events.subscribe();
+        *state.recording.lock().await = Some(test_active_recording_stub(session_id));
+        {
+            let mut runtime = crate::cloud_show::lock(&state.cloud_show);
+            runtime.stopped_by = Some(crate::cloud_show::CloudStoppedBy::TakenOver);
+            runtime.show = Some(crate::cloud_show::ActiveShow {
+                record: serde_json::from_value(
+                    serde_json::json!({"id":"sh_takeover","kind":"solo"}),
+                )
+                .unwrap(),
+                control: crate::cloud_show::ShowControl {
+                    kind: Some("web".into()),
+                    url: String::new(),
+                    token: String::new(),
+                },
+                ingest: None,
+                session_id: Some(session_id.into()),
+                destinations: Vec::new(),
+                handed_over: true,
+                hold_image_png_base64: None,
+                resuming: false,
+            });
+        }
+        publish_stream_output_failure_now(&state, session_id, "feed disconnected");
+        assert!(events.try_recv().is_err());
     }
 
     #[test]

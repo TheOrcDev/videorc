@@ -19,30 +19,70 @@ import {
 export const managedWire = JSON.parse(
   readFileSync(new URL('../../protocol-fixtures/cloud-managed-wire.json', import.meta.url))
 )
+const continuationRoutes = {
+  onAir: { method: 'POST', path: '/api/cloud/shows/:id/on-air' },
+  handOff: { method: 'POST', path: '/api/cloud/shows/:id/hand-off' }
+}
+const continuationErrors = [
+  'cloud-handoff-unsupported',
+  'cloud-handoff-update',
+  'cloud-source-not-ready',
+  'cloud-not-on-air'
+].map((code) => ({ status: 409, code }))
+const routes = { ...managedWire.routes, ...continuationRoutes }
 export const managedPath = (name, id) =>
-  managedWire.routes[name].path.replace(':id', encodeURIComponent(id ?? ''))
+  routes[name].path.replace(':id', encodeURIComponent(id ?? ''))
 export const managedError = (code) =>
-  Object.values(managedWire.errors)
-    .flat()
-    .find((e) => e.code === code)
+  [...Object.values(managedWire.errors).flat(), ...continuationErrors].find((e) => e.code === code)
 const wire = managedWire
 const copy = (v) => structuredClone(v)
 const instant = () => new Date().toISOString()
 const validText = (v, max) =>
   typeof v === 'string' &&
   Buffer.byteLength(v) <= max &&
-  !/[\u0000-\u001f\u007f]|:\/\/|[\ud800-\udfff]/u.test(v)
+  !/[\u0000-\u001f\u007f-\u009f]|:\/\/|[\ud800-\udfff]/u.test(v)
 export function managedVersionAllowed(version) {
   const m = /^(\d+)\.(\d+)\.(\d+)/.exec(version ?? '')
   return Boolean(m && (Number(m[1]) > 0 || Number(m[2]) >= 26))
 }
+export function managedHandoffAllowed(version) {
+  const m = /^(\d{1,9})\.(\d{1,9})\.(\d{1,9})/.exec(version ?? '')
+  return Boolean(m && (Number(m[1]) > 0 || Number(m[2]) >= 29))
+}
+const validDeviceId = (value) => typeof value === 'string' && /^[A-Za-z0-9]{22}$/.test(value)
+const validDevice = (value) =>
+  value &&
+  validDeviceId(value.id) &&
+  typeof value.name === 'string' &&
+  Array.from(value.name).length >= 1 &&
+  Array.from(value.name).length <= 40 &&
+  validText(value.name, 160) &&
+  ['computer', 'phone', 'browser'].includes(value.kind)
+const selectedDevice = (device, source) => ({
+  deviceId: device?.id ?? null,
+  name: device?.name ?? null,
+  kind: device?.kind ?? 'computer',
+  source,
+  since: instant(),
+  waiting: false
+})
+
 export function maskManagedUrls(value) {
   if (typeof value === 'string')
     return value.replace(/\b[a-z][a-z\d+.-]*:\/\/[^\s"'<>]+/gi, '(address withheld)')
   if (Array.isArray(value)) return value.map(maskManagedUrls)
   if (value && typeof value === 'object')
     return Object.fromEntries(
-      Object.entries(value).map(([k, v]) => [maskManagedUrls(k), maskManagedUrls(v)])
+      Object.entries(value).map(([k, v]) => [
+        maskManagedUrls(k),
+        ['deviceId', 'creatingDeviceId', 'feedDeviceId'].includes(k) ||
+        (k === 'id' && validDeviceId(v)) ||
+        (k === 'name' && (validDevice(value) || ['feed', 'camera', 'host'].includes(value.source)))
+          ? v === null
+            ? null
+            : '(device withheld)'
+          : maskManagedUrls(v)
+      ])
     )
   return value
 }
@@ -61,6 +101,7 @@ export async function startFakeCloudWebManaged({
   segmentBytes = Buffer.alloc(0),
   refreshRoom,
   probeMedia,
+  rotateIngest,
   maxShows = 1,
   managed = true,
   // The exact version of the desktop build under test. A branch is versioned
@@ -106,6 +147,9 @@ export async function startFakeCloudWebManaged({
       legs: []
     }
     s.refs.clear()
+    delete s.feedDeviceId
+    delete s.creatingDeviceId
+    s.cameraPublishers.clear()
     delete s.holdImage
     changed(s)
   }
@@ -150,14 +194,23 @@ export async function startFakeCloudWebManaged({
         Math.floor((now - Date.parse(s.state.recording.since)) / 1000)
       )
   }
-  const tokenFor = (s, identity = `host:${s.show.id}`) => {
+  const tokenFor = (s, identity = `host:${s.show.id}`, cameraDevice) => {
     if (!livekit) throw new Error('A local LiveKit room is required')
     const token = mintLiveKitToken({
       apiKey: livekit.apiKey,
       apiSecret: livekit.apiSecret,
       identity,
-      name: identity.startsWith('host:') ? 'Host' : 'Listener',
-      grant: roomGrantFor({ role: 'host', room: s.show.id }),
+      name: cameraDevice?.name ?? (identity.startsWith('host:') ? 'Host' : 'Listener'),
+      grant: cameraDevice
+        ? {
+            room: s.show.id,
+            roomJoin: true,
+            canPublish: true,
+            canPublishSources: ['camera', 'microphone'],
+            canSubscribe: false,
+            canPublishData: false
+          }
+        : roomGrantFor({ role: 'host', room: s.show.id }),
       ttlSeconds: 600
     })
     tokens.push(token)
@@ -172,7 +225,8 @@ export async function startFakeCloudWebManaged({
         token: wire.control.webToken
       }
     ),
-    ingest: copy(s.ingest)
+    ingest: copy(s.ingest),
+    onAir: copy(s.state.onAir)
   })
   async function roomRpc(method, body, deadlineMs = wire.timers.liveKitCallSeconds * 1000) {
     if (!livekit?.httpUrl) return {}
@@ -264,7 +318,9 @@ export async function startFakeCloudWebManaged({
       query: Object.fromEntries(
         [...url.searchParams].map(([key, value]) => [
           key,
-          key === wire.routes.state.query ? value : '(address withheld)'
+          key === wire.routes.state.query || (key === 'viewer' && ['page', 'idle'].includes(value))
+            ? value
+            : '(address withheld)'
         ])
       ),
       body: maskManagedUrls(body),
@@ -285,7 +341,7 @@ export async function startFakeCloudWebManaged({
       send(error.status, { error: { code: error.code, message: error.code }, ...extra })
     }
     const route =
-      Object.entries(wire.routes).find(
+      Object.entries(routes).find(
         ([, r]) =>
           r.method === req.method && new RegExp(`^${r.path.replace(':id', '[^/]+')}$`).test(path)
       )?.[0] ??
@@ -338,7 +394,16 @@ export async function startFakeCloudWebManaged({
       if (route === 'current') {
         for (const s of shows.values()) settleTimers(s)
         const s = [...shows.values()].find((s) => !s.show.endedAt && s.show.kind !== 'test')
-        return send(200, s ? view(s) : { show: null })
+        if (!s) return send(200, { show: null })
+        const current = view(s)
+        const agent = req.headers['user-agent'] ?? ''
+        if (
+          s.state.onAir?.deviceId &&
+          agent.startsWith('Videorc-Desktop/') &&
+          !managedHandoffAllowed(agent.slice('Videorc-Desktop/'.length))
+        )
+          delete current.ingest
+        return send(200, current)
       }
       if (route === 'create') {
         if ([...shows.values()].filter((s) => !s.show.endedAt).length >= maxShows)
@@ -365,12 +430,27 @@ export async function startFakeCloudWebManaged({
           )
         )
           return fail(wire.errors.create.find((e) => e.status === 422).code)
+        if (body.device !== undefined && !validDevice(body.device)) return fail('invalid-request')
         const id = newShowId(),
           now = instant()
         const s = {
           rev: wire.rev.start,
           controlKind,
           outputs: body.outputs,
+          // Like the web-control build fixture, this exact feature build models
+          // the 0.29.0 release it will ship as. Other versions keep the real D8 gate.
+          client: {
+            ...body.client,
+            version:
+              buildVersion && body.client?.version === buildVersion
+                ? '0.29.0'
+                : body.client?.version
+          },
+          creatingDeviceId: body.device?.id,
+          feedDeviceId: body.kind === 'solo' ? body.device?.id : undefined,
+          feedClaim: 0,
+          readyFeeds: new Set(),
+          cameraPublishers: new Set(),
           refs: new Map(),
           show: {
             id,
@@ -400,6 +480,7 @@ export async function startFakeCloudWebManaged({
                   orientation: o.orientation
                 })),
           state: {
+            onAir: selectedDevice(body.device, body.kind === 'talk' ? 'host' : 'feed'),
             phase: wire.phases[0],
             liveSeconds: 0,
             feeds:
@@ -503,7 +584,12 @@ export async function startFakeCloudWebManaged({
       }
       if (route === 'state') {
         settleTimers(s)
-        s.lastDesktopSeen = Date.now()
+        if (!['page', 'idle'].includes(url.searchParams.get('viewer')))
+          s.lastDesktopSeen = Date.now()
+        s.state.desktopConnected = Boolean(
+          s.lastDesktopSeen &&
+          Date.now() - s.lastDesktopSeen < wire.state.desktopConnectedSeconds * 1000
+        )
         if (url.searchParams.has('since') && !/^\d+$/.test(url.searchParams.get('since')))
           return fail(wire.errors.common.find((e) => e.status === 400).code)
         await refresh(s)
@@ -536,6 +622,160 @@ export async function startFakeCloudWebManaged({
         return send(200, { rev: s.rev, state: copy(s.state) })
       }
       if (s.show.endedAt) return fail(wire.errors.common[3].code)
+      if (route === 'handOff' || route === 'onAir') {
+        const previousClaim = s.claimTail ?? Promise.resolve()
+        let release
+        s.claimTail = new Promise((resolve) => {
+          release = resolve
+        })
+        await previousClaim
+        try {
+          if (s.show.endedAt) return fail('cloud-show-ended')
+          if (
+            s.controlKind !== wire.control.kinds[0] ||
+            (s.controlOverride && s.controlOverride.kind !== wire.control.kinds[0]) ||
+            s.show.kind === 'test'
+          )
+            return fail('cloud-handoff-unsupported')
+          if (route === 'handOff') {
+            if (!validDeviceId(body.device?.id)) return fail('invalid-request')
+            if (s.state.onAir?.deviceId !== body.device.id) return fail('cloud-not-on-air')
+            if (!s.state.onAir.waiting) {
+              s.state.onAir.waiting = true
+              changed(s)
+            }
+            return send(200, { ok: true, rev: s.rev, onAir: copy(s.state.onAir) })
+          }
+          const { device, source, step } = body
+          if (
+            source !== undefined &&
+            !(s.show.kind === 'talk' ? source === 'host' : ['feed', 'camera'].includes(source))
+          )
+            return fail('cloud-handoff-unsupported')
+          if (
+            (!s.client?.app ||
+              !s.client?.version ||
+              (s.client.app === 'desktop' && !managedHandoffAllowed(s.client.version))) &&
+            (!validDevice(device) || s.creatingDeviceId !== device.id)
+          )
+            return fail('cloud-handoff-update')
+          if (
+            !validDevice(device) ||
+            !['feed', 'camera', 'host'].includes(source) ||
+            !['prepare', 'go'].includes(step)
+          )
+            return fail('invalid-request')
+          const answer = (extra) =>
+            send(200, { ok: true, rev: s.rev, onAir: copy(s.state.onAir), ...extra })
+          const select = async () => {
+            if (source !== 'host')
+              await roomRpc('UpdateRoomMetadata', {
+                room: s.show.id,
+                metadata: JSON.stringify({
+                  v: 1,
+                  onAir: source === 'feed' ? 'feed' : `d_${device.id}`
+                })
+              })
+            const previous = s.state.onAir
+            s.state.onAir = selectedDevice(device, source)
+            if (source === 'camera') {
+              s.state.phase = wire.phases[1]
+              s.show.status = s.state.phase
+              s.firstFrameAt ??= Date.now()
+              delete s.state.hold
+            }
+            delete s.pending
+            if (
+              previous?.deviceId !== device.id ||
+              previous?.source !== source ||
+              previous?.waiting
+            )
+              changed(s)
+          }
+          const room = (camera) => {
+            const identity = camera ? `d_${device.id}` : `host:${s.show.id}`
+            const token = livekit
+              ? tokenFor(s, identity, camera ? device : undefined)
+              : randomBytes(24).toString('base64url')
+            if (!livekit) tokens.push(token)
+            return { url: livekit?.url ?? '', token, identity }
+          }
+          if (source === 'host') {
+            if (step === 'prepare') return answer()
+            const grants = room(false)
+            await select()
+            return answer({ room: grants })
+          }
+          if (source === 'camera') {
+            if (step === 'prepare') return answer({ room: room(true) })
+            const people = refreshRoom
+              ? await refreshRoom(s.show.id)
+              : livekit?.httpUrl
+                ? ((await roomRpc('ListParticipants', { room: s.show.id })).participants ?? [])
+                : [...s.cameraPublishers].map((id) => ({
+                    identity: `d_${id}`,
+                    tracks: [{ source: 1, type: 1 }]
+                  }))
+            if (
+              !people?.some(
+                (p) =>
+                  p.identity === `d_${device.id}` &&
+                  (p.cameraPublished === true ||
+                    (p.tracks ?? []).some((t) => t.source === 1 || t.source === 'CAMERA'))
+              )
+            )
+              return fail('cloud-source-not-ready')
+            await select()
+            return answer()
+          }
+          if (step === 'prepare') {
+            s.feedClaim++
+            s.readyFeeds.clear()
+            if (s.feedDeviceId !== device.id) {
+              s.feedDeviceId = device.id
+              for (let i = 0; i < s.ingest.length; i++) {
+                const previous = copy(s.ingest[i])
+                const next = { ...previous, streamKey: randomBytes(16).toString('hex') }
+                s.ingest[i] = next
+                s.state.feeds[i].connected = false
+                if (rotateIngest)
+                  await rotateIngest({
+                    showId: s.show.id,
+                    previous,
+                    ingest: copy(next),
+                    claim: s.feedClaim
+                  })
+              }
+            }
+            if (s.state.onAir?.source === 'feed' || s.state.onAir?.waiting || !s.state.onAir)
+              await select()
+            else {
+              s.pending = { deviceId: device.id, source: 'feed' }
+              changed(s)
+            }
+            return answer({ ingest: copy(s.ingest) })
+          }
+          if (
+            s.state.onAir?.deviceId === device.id &&
+            s.state.onAir.source === 'feed' &&
+            !s.state.onAir.waiting
+          )
+            return answer()
+          if (
+            s.feedDeviceId !== device.id ||
+            !s.outputs.every(
+              (o) =>
+                s.readyFeeds.has(o.orientation) &&
+                s.state.feeds.some((f) => f.orientation === o.orientation && f.connected)
+            )
+          )
+            return fail('cloud-source-not-ready')
+          await select()
+          return answer()
+        } finally {
+          release()
+        }
+      }
       if (route === 'roomToken')
         return send(200, { url: livekit?.hostUrl ?? livekit?.url, hostToken: tokenFor(s) })
       if (route === 'room')
@@ -559,6 +799,9 @@ export async function startFakeCloudWebManaged({
               !validText(d.platform, wire.limits.destinationPlatformBytes) ||
               !validText(d.label, wire.limits.destinationLabelBytes) ||
               !s.outputs.some((o) => o.orientation === d.orientation) ||
+              (d.broadcastId !== undefined &&
+                (typeof d.broadcastId !== 'string' ||
+                  !/^[A-Za-z0-9_-]{1,64}$/.test(d.broadcastId))) ||
               typeof d.url !== 'string' ||
               Buffer.byteLength(d.url) > wire.limits.destinationUrlBytes
           )
@@ -575,7 +818,8 @@ export async function startFakeCloudWebManaged({
             label: d.label,
             orientation: d.orientation,
             state: wire.legs.states[1],
-            since: instant()
+            since: instant(),
+            ...(d.broadcastId ? { broadcastId: d.broadcastId } : {})
           }
           if (code) {
             refused.push({ id: d.id, code })
@@ -814,14 +1058,31 @@ export async function startFakeCloudWebManaged({
         s.room.shown = copy(shown)
       })
     },
-    feed(id, connected) {
+    camera(id, deviceId, publishing) {
       const s = shows.get(id)
-      if (!s || s.show.endedAt) return
-      if (s.state.feeds.every((f) => f.connected === connected)) return
-      s.state.feeds.forEach((f) => {
+      if (!s || !validDeviceId(deviceId)) throw new Error('A known show and device are required')
+      if (publishing) s.cameraPublishers.add(deviceId)
+      else s.cameraPublishers.delete(deviceId)
+    },
+    feed(id, connected, { claim, orientation } = {}) {
+      const s = shows.get(id)
+      if (!s || s.show.endedAt || (claim !== undefined && claim !== s.feedClaim)) return
+      for (const feed of s.state.feeds.filter(
+        (f) => !orientation || f.orientation === orientation
+      )) {
+        if (connected) s.readyFeeds.add(feed.orientation)
+        else s.readyFeeds.delete(feed.orientation)
+      }
+      const feeds = s.state.feeds.filter((f) => !orientation || f.orientation === orientation)
+      if (feeds.every((f) => f.connected === connected)) return
+      feeds.forEach((f) => {
         f.connected = connected
         if (connected) f.kbps = 4000
       })
+      if (s.state.onAir?.source === 'camera' && !s.state.onAir.waiting) {
+        changed(s)
+        return
+      }
       s.state.phase = connected ? wire.phases[1] : wire.phases[2]
       s.show.status = s.state.phase
       if (connected) s.show.startedAt ??= instant()
@@ -888,7 +1149,7 @@ export async function startFakeCloudWebManaged({
   }
 }
 function legRef(url) {
-  return url.slice(0, 3) + url.slice(-3)
+  return createHash('sha256').update(url).digest('hex')
 }
 export function destinationProblem(url, previous, replace) {
   const codes = wire.destinationRefusals.codes

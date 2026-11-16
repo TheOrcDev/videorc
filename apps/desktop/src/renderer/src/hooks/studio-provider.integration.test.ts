@@ -10,7 +10,8 @@ import type {
   OverlayLayout
 } from '../../../shared/backend'
 import { SCENE_LIBRARY_KEY, WORKING_SCENE_KEY, sameSceneVisual } from '../lib/scene-presets'
-import { act, createElement, useEffect, type ReactNode } from 'react'
+import { act, createElement, isValidElement, useEffect, type ReactNode } from 'react'
+import { renderToStaticMarkup } from 'react-dom/server'
 import { createRoot, type Root } from 'react-dom/client'
 import { Window as TestWindow } from 'happy-dom'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -51,6 +52,7 @@ vi.mock('@/lib/caption-overlay', async (importOriginal) => ({
   ) => (vertical ? { pngBase64: 'cG5n', verticalPngBase64: 'cG5n' } : { pngBase64: 'cG5n' })
 }))
 
+import { offersHandOff } from '@/lib/cloud-handoff-view'
 import { revealInFileManagerLabel } from '@/lib/platform'
 import { LayoutTab } from '@/components/tabs/layout-tab'
 import { scenesForApps } from '@/lib/scene-apps'
@@ -472,6 +474,10 @@ class StudioBackend {
   youtubePrepareCount = 0
   /** Plan 184: what `cloud.status` answers; null is an older backend with no cloud. */
   cloudStatus: CloudStatus | null = null
+  /** Plan 243: `cloud.show.handOff` refuses with this code and stops nothing. */
+  handOffRefusal: string | null = null
+  /** Plan 243 R2 A-M5: the stop happened, but videorc.com was not told. */
+  handOffConfirmed = true
   youtubeCompleteFailuresRemaining = 0
   /** Plan 094: `complete` refused by the backend's quota breaker (coded). */
   youtubeCompleteQuotaFailuresRemaining = 0
@@ -566,6 +572,11 @@ class StudioBackend {
     phase: 'idle',
     retryable: false,
     attempts: 0
+  }
+
+  /** An event on the provider's socket, ahead of the reply being built. */
+  pushEvent(event: string, payload: unknown): void {
+    this.sockets[0]?.onmessage?.({ data: JSON.stringify({ event, payload }) })
   }
 
   deferResponse(
@@ -1664,6 +1675,34 @@ class StudioBackend {
           room: { ...this.cloudStatus.room, live: false }
         }
         return this.cloudStatus
+      // Plan 243 C2: the hand-off stop. The status that says so goes out
+      // before the session stops (D7); a refusal stops nothing.
+      case 'cloud.show.handOff': {
+        if (this.handOffRefusal) {
+          throw Object.assign(new Error('Not on air from this device.'), {
+            code: this.handOffRefusal
+          })
+        }
+        const show = this.cloudStatus ?? managedOnAirCloudStatus()
+        this.cloudStatus = {
+          ...show,
+          phase: 'hold',
+          stoppedBy: 'hand-off',
+          ...(show.onAir ? { onAir: { ...show.onAir, waiting: true } } : {})
+        }
+        this.pushEvent('cloud.state', this.cloudStatus)
+        if (this.recordingState !== 'idle') {
+          this.recordingState = 'idle'
+          this.pushEvent('recording.status', {
+            state: 'idle',
+            sessionId: 'session-1',
+            message: 'Saved.'
+          })
+        }
+        return { ok: true, confirmed: this.handOffConfirmed }
+      }
+      case 'cloud.show.check':
+        return { ok: true }
       case 'cloud.recording.stop':
         if (!this.cloudStatus?.room) throw new Error('The room is closed.')
         this.cloudStatus = {
@@ -1891,6 +1930,29 @@ function youtubeOauthStreamCaptureConfig(): CaptureConfig {
           : target
       )
     }
+  }
+}
+
+/** Plan 243: a managed solo show this computer is on air for. */
+function managedOnAirCloudStatus(overrides: Partial<CloudStatus> = {}): CloudStatus {
+  return {
+    phase: 'live',
+    entitled: true,
+    plan: 'max',
+    settings: { enabled: true, holdMaxSeconds: 1800, holdMaxChoices: [300, 900, 1800, 3600] },
+    show: { id: 'sh_managed', nodeId: 'livekit', resumable: false, kind: 'solo' },
+    sessionId: 'session-1',
+    connected: true,
+    directFallbackAvailable: false,
+    onAir: {
+      name: 'Studio Mac',
+      kind: 'computer',
+      source: 'feed',
+      waiting: false,
+      thisDevice: true,
+      since: now
+    },
+    ...overrides
   }
 }
 
@@ -6283,6 +6345,785 @@ describe('real StudioProvider lifecycle', () => {
     expect(exitApp).toHaveBeenCalledExactlyOnceWith('close')
     await waitForObservation(() => latest().recording.recording.state === 'idle')
   })
+
+  // Plan 243 D7: a take-over stops this computer's session and the show goes
+  // on elsewhere, so the stop completes no YouTube broadcast and ends no X
+  // broadcast (the autonomous terminal path), the next Go Live settles nothing
+  // of the old show, and that Go Live's own stop completes as always.
+  it('completes no broadcast when another device takes the show over (plan 243 D7)', async () => {
+    const backend = new StudioBackend()
+    enableYouTubeAndXOauthForTest(backend)
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const testDom = installProviderTestEnvironment(
+      createVideorcApi({
+        acknowledge: async () => true,
+        pending: async () => [],
+        acknowledgeProvider: async () => true,
+        pendingProvider: async () => []
+      })
+    )
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(
+      () =>
+        latest()?.core.wsStatus === 'connected' &&
+        latest()?.core.captureConfig.sources.microphoneId === 'mic:1'
+    )
+    const pushEvent = async (event: string, payload: unknown): Promise<void> => {
+      await act(async () => {
+        backend.pushEvent(event, payload)
+        await Promise.resolve()
+      })
+    }
+    const completions = (): string[] =>
+      backend.sentCommands
+        .filter(
+          (command) =>
+            command.method === 'streamTargets.youtube.transition' &&
+            (command.params as { status?: string }).status === 'complete'
+        )
+        .map((command) => String((command.params as { broadcastId?: string }).broadcastId))
+    const xEnds = (): number =>
+      backend.sentCommands.filter((command) => command.method === 'streamTargets.x.end').length
+    const goLive = async (): Promise<void> => {
+      await openYouTubeAndXGoLiveConfirmation(latest)
+      await act(async () => {
+        await latest()!.core.confirmGoLive()
+      })
+      await waitForObservation(() => latest()?.recording.recording.state === 'recording')
+    }
+
+    await goLive()
+    expect(backend.youtubePrepareCount).toBe(1)
+    expect(backend.xPublishCount).toBe(1)
+    await pushEvent('cloud.state', managedOnAirCloudStatus())
+    // The status that names the take-over comes first, then the session stops.
+    await pushEvent(
+      'cloud.state',
+      managedOnAirCloudStatus({
+        phase: 'hold',
+        onAir: {
+          name: 'iPhone',
+          kind: 'phone',
+          source: 'camera',
+          waiting: false,
+          thisDevice: false,
+          since: now
+        },
+        stoppedBy: 'taken-over'
+      })
+    )
+    backend.recordingState = 'idle'
+    await pushEvent('recording.status', {
+      state: 'idle',
+      sessionId: 'session-1',
+      message: 'Saved.'
+    })
+    await waitForObservation(() => latest()?.recording.recording.state === 'idle')
+    // The title is React text (R2 B-M2): the device name never meets the guard.
+    const takenOver = () =>
+      toastSpies.info.mock.calls.find(
+        ([title]) =>
+          isValidElement(title) && renderToStaticMarkup(title) === 'Your show continues on iPhone.'
+      )
+    await waitForObservation(() => takenOver() !== undefined)
+    expect(takenOver()?.[1]).toMatchObject({ id: 'videorc-cloud' })
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 50))
+    })
+    expect(completions()).toEqual([])
+    expect(xEnds()).toBe(0)
+
+    // A later show of this computer is its own: its stop completes it. (The
+    // fake reuses session ids; the new show's status puts this computer on
+    // air, which ends the latch.)
+    await pushEvent('cloud.state', { ...resumableCloudStatus(), phase: 'off', show: undefined })
+    await goLive()
+    await pushEvent(
+      'cloud.state',
+      managedOnAirCloudStatus({ show: { ...managedOnAirCloudStatus().show!, id: 'sh_next' } })
+    )
+    expect(backend.youtubePrepareCount).toBe(2)
+    expect(completions()).toEqual([])
+    backend.recordingState = 'idle'
+    await pushEvent('recording.status', {
+      state: 'idle',
+      sessionId: 'session-1',
+      message: 'Saved.'
+    })
+    await waitForObservation(() => completions().length === 1)
+    expect(completions()).toEqual(['youtube-broadcast-2'])
+    await waitForObservation(() => xEnds() === 1)
+  }, 20_000)
+
+  // Plan 243 C5 (D7): on a managed show this computer is on air for, the End
+  // livestream question offers the hand-off. Quit and keep it live hands off
+  // and then lets the app go; a refusal leaves the session fed, the app open,
+  // and the broadcast's owner back, so a real End still completes it.
+  it('hands the show off from the quit question and the End livestream question (plan 243)', async () => {
+    const backend = new StudioBackend()
+    enableYouTubeOauthForTest(backend)
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    let emit: (name: string, value: unknown) => void = () => {}
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => [],
+      registerEmitter: (next) => {
+        emit = next
+      }
+    })
+    const exitApp = vi.fn(async (_kind: 'quit' | 'close') => undefined)
+    ;(api as unknown as { exitApp: typeof exitApp }).exitApp = exitApp
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+    let shell: ReturnType<typeof useStudioShell> | undefined
+    function ShellProbe(): null {
+      const value = useStudioShell()
+      useEffect(() => {
+        shell = value
+      }, [value])
+      return null
+    }
+    root = await mountStudioProvider(
+      testDom.container,
+      (value) => {
+        observations.push(value)
+      },
+      createElement(ShellProbe)
+    )
+    await waitForObservation(
+      () =>
+        latest()?.core.wsStatus === 'connected' &&
+        latest()?.core.captureConfig.sources.microphoneId === 'mic:1'
+    )
+    const pushEvent = async (event: string, payload: unknown): Promise<void> => {
+      await act(async () => {
+        backend.pushEvent(event, payload)
+        await Promise.resolve()
+      })
+    }
+    const sent = (method: string): number =>
+      backend.sentCommands.filter((command) => command.method === method).length
+    const completions = (): string[] =>
+      backend.sentCommands
+        .filter(
+          (command) =>
+            command.method === 'streamTargets.youtube.transition' &&
+            (command.params as { status?: string }).status === 'complete'
+        )
+        .map((command) => String((command.params as { broadcastId?: string }).broadcastId))
+    const goLive = async (): Promise<void> => {
+      await openYouTubeGoLiveConfirmation(latest)
+      await act(async () => {
+        await latest()!.core.confirmGoLive()
+      })
+      await waitForObservation(() => latest()?.recording.recording.state === 'recording')
+      // On air: the backend's status carries the (redacted) stream URL.
+      await pushEvent('recording.status', {
+        state: 'recording',
+        sessionId: 'session-1',
+        startedAt: now,
+        streamUrl: 'rtmps://localhost:1936/live/***',
+        message: 'Running both session.'
+      })
+      await waitForObservation(() => Boolean(latest()?.recording.recording.streamUrl))
+      backend.cloudStatus = managedOnAirCloudStatus()
+      await pushEvent('cloud.state', backend.cloudStatus)
+      await waitForObservation(() => latest()?.cloud.cloudStatus?.onAir?.thisDevice === true)
+    }
+
+    // Quit and keep it live: the hand-off, then the app goes; no completion.
+    await goLive()
+    expect(offersHandOff(latest()!.cloud.cloudStatus)).toBe(true)
+    await act(async () => emit('onExitRequest', 'quit'))
+    await waitForObservation(() => shell?.stopConfirmation?.origin === 'quit')
+    expect(exitApp).not.toHaveBeenCalled()
+    await act(async () => shell!.handOffStopSession())
+    await waitForObservation(() => exitApp.mock.calls.length === 1)
+    expect(exitApp).toHaveBeenCalledExactlyOnceWith('quit')
+    expect(sent('cloud.show.handOff')).toBe(1)
+    await waitForObservation(() => latest()?.recording.recording.state === 'idle')
+    expect(shell?.stopConfirmation).toBeNull()
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 50))
+    })
+    expect(sent('session.stop')).toBe(0)
+    expect(completions()).toEqual([])
+
+    // A refused hand-off: the session stays fed and the app stays.
+    await pushEvent('cloud.state', { ...resumableCloudStatus(), phase: 'off', show: undefined })
+    await goLive()
+    backend.handOffRefusal = 'cloud-not-on-air'
+    exitApp.mockClear()
+    await act(async () => {
+      await latest()!.core.requestStopSession('button')
+    })
+    await waitForObservation(() => shell?.stopConfirmation?.origin === 'button')
+    await act(async () => shell!.handOffStopSession())
+    await waitForObservation(() => toastSpies.warning.mock.calls.length > 0)
+    expect(toastSpies.warning).toHaveBeenCalledWith(
+      "Couldn't continue on another device",
+      expect.objectContaining({ description: 'Your show is live from another device now.' })
+    )
+    expect(exitApp).not.toHaveBeenCalled()
+    expect(latest()?.recording.recording.state).toBe('recording')
+
+    // End livestream still completes the broadcast the refusal gave back.
+    await act(async () => {
+      await latest()!.core.requestStopSession('button')
+    })
+    await waitForObservation(() => shell?.stopConfirmation?.origin === 'button')
+    await act(async () => shell!.confirmStopSession())
+    await waitForObservation(() => completions().length === 1)
+    expect(completions()).toEqual(['youtube-broadcast-2'])
+    expect(sent('session.stop')).toBe(1)
+  }, 20_000)
+
+  // Plan 243 R2 B-H1: after a hand-off the phone carries the show, and the
+  // saved destinations a Continue here sends along are reconnect candidates,
+  // never permission to complete. A refused resume completes no YouTube
+  // broadcast, ends no X broadcast and ends no show; the retry continues,
+  // and the continued session's own stop completes nothing either.
+  it('completes nothing when Continue here is refused or the continued session stops (plan 243 R2 B-H1)', async () => {
+    const backend = new StudioBackend()
+    enableYouTubeAndXOauthForTest(backend)
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const testDom = installProviderTestEnvironment(
+      createVideorcApi({
+        acknowledge: async () => true,
+        pending: async () => [],
+        acknowledgeProvider: async () => true,
+        pendingProvider: async () => []
+      })
+    )
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+    let shell: ReturnType<typeof useStudioShell> | undefined
+    function ShellProbe(): null {
+      const value = useStudioShell()
+      useEffect(() => {
+        shell = value
+      }, [value])
+      return null
+    }
+    root = await mountStudioProvider(
+      testDom.container,
+      (value) => {
+        observations.push(value)
+      },
+      createElement(ShellProbe)
+    )
+    await waitForObservation(
+      () =>
+        latest()?.core.wsStatus === 'connected' &&
+        latest()?.core.captureConfig.sources.microphoneId === 'mic:1'
+    )
+    const pushEvent = async (event: string, payload: unknown): Promise<void> => {
+      await act(async () => {
+        backend.pushEvent(event, payload)
+        await Promise.resolve()
+      })
+    }
+    const sent = (method: string): number =>
+      backend.sentCommands.filter((command) => command.method === method).length
+    const completions = (): number =>
+      backend.sentCommands.filter(
+        (command) =>
+          command.method === 'streamTargets.youtube.transition' &&
+          (command.params as { status?: string }).status === 'complete'
+      ).length
+    const settle = async (): Promise<void> => {
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 50))
+      })
+    }
+
+    await openYouTubeAndXGoLiveConfirmation(latest)
+    await act(async () => {
+      await latest()!.core.confirmGoLive()
+    })
+    await waitForObservation(() => latest()?.recording.recording.state === 'recording')
+    await pushEvent('recording.status', {
+      state: 'recording',
+      sessionId: 'session-1',
+      startedAt: now,
+      streamUrl: 'rtmps://localhost:1936/live/***',
+      message: 'Running both session.'
+    })
+    backend.cloudStatus = managedOnAirCloudStatus()
+    await pushEvent('cloud.state', backend.cloudStatus)
+    await waitForObservation(() => latest()?.cloud.cloudStatus?.onAir?.thisDevice === true)
+    await act(async () => {
+      await latest()!.core.requestStopSession('button')
+    })
+    await waitForObservation(() => shell?.stopConfirmation?.origin === 'button')
+    await act(async () => shell!.handOffStopSession())
+    await waitForObservation(() => latest()?.recording.recording.state === 'idle')
+
+    // The phone continues the show; this computer shows Continue here.
+    backend.cloudStatus = managedOnAirCloudStatus({
+      phase: 'live',
+      sessionId: undefined,
+      show: { id: 'sh_managed', nodeId: 'livekit', resumable: true, kind: 'solo' },
+      onAir: {
+        name: 'iPhone',
+        kind: 'phone',
+        source: 'camera',
+        waiting: false,
+        thisDevice: false,
+        since: now
+      }
+    })
+    await pushEvent('cloud.state', backend.cloudStatus)
+    await waitForObservation(() => latest()?.cloud.cloudStatus?.onAir?.thisDevice === false)
+    await settle()
+    expect(completions()).toBe(0)
+
+    // Continue here is refused before any session exists.
+    const release = backend.deferFailure(
+      'cloud.show.resume',
+      Object.assign(new Error('Videorc Cloud could not prepare this computer.'), {
+        code: 'cloud-source-not-ready'
+      })
+    )
+    let refused!: Promise<boolean>
+    await act(async () => {
+      refused = latest()!.cloud.resumeCloudShow()
+      await Promise.resolve()
+    })
+    release()
+    expect(await refused).toBe(false)
+    await settle()
+    expect(sent('cloud.show.resume')).toBe(1)
+    expect(completions()).toBe(0)
+    expect(sent('streamTargets.x.end')).toBe(0)
+    expect(sent('cloud.show.end')).toBe(0)
+
+    // The retry continues the show here; its stop completes nothing either.
+    let continued!: Promise<boolean>
+    await act(async () => {
+      continued = latest()!.cloud.resumeCloudShow()
+    })
+    expect(await continued).toBe(true)
+    await waitForObservation(
+      () => latest()?.recording.recording.sessionId === 'cloud-resume-session'
+    )
+    await pushEvent('recording.status', {
+      state: 'idle',
+      sessionId: 'cloud-resume-session',
+      message: 'Saved.'
+    })
+    await waitForObservation(() => latest()?.recording.recording.state === 'idle')
+    await settle()
+    expect(completions()).toBe(0)
+    expect(sent('streamTargets.x.end')).toBe(0)
+    expect(sent('cloud.show.end')).toBe(0)
+  }, 20_000)
+
+  // Plan 243 R2 B-M1: a live talk show has no local session; its session is
+  // the room's (as End livestream reads it). Quitting or closing the window
+  // asks first, offers the hand-off, and leaves only after it succeeded; a
+  // refusal keeps the app.
+  it('asks before a quit or a window close ends a live talk show (plan 243 R2 B-M1)', async () => {
+    const backend = new StudioBackend()
+    const talk: CloudStatus = {
+      ...resumableCloudStatus(),
+      phase: 'live',
+      plan: 'premium',
+      show: { id: 'sh_talk', nodeId: 'livekit', resumable: false, kind: 'talk' },
+      hold: undefined,
+      room: {
+        phase: 'open',
+        doorOpen: false,
+        declinedCount: 0,
+        stage: { layout: 'solo', onStage: ['host:sh_talk'] },
+        hostAway: false,
+        connected: true,
+        client: 'connected',
+        returnEnabled: false,
+        stageSet: true,
+        live: true
+      },
+      onAir: { kind: 'computer', source: 'host', waiting: false, thisDevice: true, since: now }
+    }
+    backend.cloudStatus = talk
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    let emit: (name: string, value: unknown) => void = () => {}
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => [],
+      registerEmitter: (next) => {
+        emit = next
+      }
+    })
+    const exitApp = vi.fn(async (_kind: 'quit' | 'close') => undefined)
+    ;(api as unknown as { exitApp: typeof exitApp }).exitApp = exitApp
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation => observations.at(-1)!
+    let shell: ReturnType<typeof useStudioShell> | undefined
+    function ShellProbe(): null {
+      const value = useStudioShell()
+      useEffect(() => {
+        shell = value
+      }, [value])
+      return null
+    }
+    root = await mountStudioProvider(
+      testDom.container,
+      (value) => {
+        observations.push(value)
+      },
+      createElement(ShellProbe)
+    )
+    await waitForObservation(() => latest()?.cloud.cloudStatus?.room?.live === true)
+    expect(latest().recording.recording.sessionId).toBe('sh_talk')
+    const sent = (method: string): number =>
+      backend.sentCommands.filter((command) => command.method === method).length
+
+    // A window close asks; a refused hand-off keeps the app and the show.
+    await act(async () => emit('onExitRequest', 'close'))
+    await waitForObservation(() => shell?.stopConfirmation?.origin === 'close-window')
+    expect(exitApp).not.toHaveBeenCalled()
+    expect(offersHandOff(latest().cloud.cloudStatus)).toBe(true)
+    backend.handOffRefusal = 'cloud-not-on-air'
+    await act(async () => shell!.handOffStopSession())
+    await waitForObservation(() => toastSpies.warning.mock.calls.length > 0)
+    expect(sent('cloud.show.handOff')).toBe(1)
+    expect(exitApp).not.toHaveBeenCalled()
+    expect(sent('cloud.show.legs.end')).toBe(0)
+
+    // A quit asks too; Quit and keep it live leaves once the show is handed off.
+    backend.handOffRefusal = null
+    await act(async () => emit('onExitRequest', 'quit'))
+    await waitForObservation(() => shell?.stopConfirmation?.origin === 'quit')
+    expect(exitApp).not.toHaveBeenCalled()
+    await act(async () => shell!.handOffStopSession())
+    await waitForObservation(() => exitApp.mock.calls.length === 1)
+    expect(exitApp).toHaveBeenCalledExactlyOnceWith('quit')
+    expect(sent('cloud.show.handOff')).toBe(2)
+    expect(sent('cloud.show.legs.end')).toBe(0)
+    expect(sent('cloud.room.close')).toBe(0)
+  }, 20_000)
+
+  // Plan 243 R2 A-M5: a hand-off that stopped this computer but could not
+  // tell videorc.com is still a hand-off: Quit and keep it live quits, no
+  // broadcast is completed, and one neutral toast says what viewers see.
+  it('quits after an unconfirmed hand-off and completes nothing (plan 243 R2 A-M5)', async () => {
+    const backend = new StudioBackend()
+    enableYouTubeOauthForTest(backend)
+    backend.handOffConfirmed = false
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    let emit: (name: string, value: unknown) => void = () => {}
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => [],
+      registerEmitter: (next) => {
+        emit = next
+      }
+    })
+    const exitApp = vi.fn(async (_kind: 'quit' | 'close') => undefined)
+    ;(api as unknown as { exitApp: typeof exitApp }).exitApp = exitApp
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+    let shell: ReturnType<typeof useStudioShell> | undefined
+    function ShellProbe(): null {
+      const value = useStudioShell()
+      useEffect(() => {
+        shell = value
+      }, [value])
+      return null
+    }
+    root = await mountStudioProvider(
+      testDom.container,
+      (value) => {
+        observations.push(value)
+      },
+      createElement(ShellProbe)
+    )
+    await waitForObservation(
+      () =>
+        latest()?.core.wsStatus === 'connected' &&
+        latest()?.core.captureConfig.sources.microphoneId === 'mic:1'
+    )
+    await openYouTubeGoLiveConfirmation(latest)
+    await act(async () => {
+      await latest()!.core.confirmGoLive()
+    })
+    await waitForObservation(() => latest()?.recording.recording.state === 'recording')
+    await act(async () => {
+      backend.pushEvent('recording.status', {
+        state: 'recording',
+        sessionId: 'session-1',
+        startedAt: now,
+        streamUrl: 'rtmps://localhost:1936/live/***',
+        message: 'Running both session.'
+      })
+      backend.cloudStatus = managedOnAirCloudStatus()
+      backend.pushEvent('cloud.state', backend.cloudStatus)
+      await Promise.resolve()
+    })
+    await waitForObservation(() => latest()?.cloud.cloudStatus?.onAir?.thisDevice === true)
+
+    await act(async () => emit('onExitRequest', 'quit'))
+    await waitForObservation(() => shell?.stopConfirmation?.origin === 'quit')
+    await act(async () => shell!.handOffStopSession())
+    await waitForObservation(() => exitApp.mock.calls.length === 1)
+    expect(exitApp).toHaveBeenCalledExactlyOnceWith('quit')
+    expect(toastSpies.info).toHaveBeenCalledWith(
+      "Videorc Cloud didn't confirm the hand-off. Viewers see Be right back until a device continues.",
+      expect.objectContaining({ id: 'videorc-cloud' })
+    )
+    expect(toastSpies.error).not.toHaveBeenCalled()
+    expect(toastSpies.warning).not.toHaveBeenCalled()
+    await waitForObservation(() => latest()?.recording.recording.state === 'idle')
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 50))
+    })
+    expect(
+      backend.sentCommands.filter(
+        (command) =>
+          command.method === 'streamTargets.youtube.transition' &&
+          (command.params as { status?: string }).status === 'complete'
+      )
+    ).toHaveLength(0)
+  }, 20_000)
+
+  // Plan 243 R2 A-M6: Go Live on a computer that holds a show another device
+  // is on air for is refused by the backend. Go Live stays where it is and
+  // surfaces the refusal in its own words; the backend's (which may name the
+  // device) never reach the toast or a log.
+  it('surfaces a Go Live refused for a show live elsewhere (plan 243 R2 A-M6)', async () => {
+    const backend = new StudioBackend()
+    enableYouTubeOauthForTest(backend)
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const testDom = installProviderTestEnvironment(
+      createVideorcApi({
+        acknowledge: async () => true,
+        pending: async () => [],
+        acknowledgeProvider: async () => true,
+        pendingProvider: async () => []
+      })
+    )
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(
+      () =>
+        latest()?.core.wsStatus === 'connected' &&
+        latest()?.core.captureConfig.sources.microphoneId === 'mic:1'
+    )
+    const warn = vi.spyOn(console, 'warn')
+    await openYouTubeGoLiveConfirmation(latest)
+    const release = backend.deferFailure(
+      'session.start',
+      Object.assign(new Error('Your show is live from Alice {work}. Continue here.'), {
+        code: 'cloud-show-live-elsewhere'
+      })
+    )
+    let started!: Promise<void>
+    await act(async () => {
+      started = latest()!.core.confirmGoLive()
+      await Promise.resolve()
+    })
+    release()
+    await act(async () => {
+      await started
+    })
+    const copy = 'Your show is live on another device. Use Continue here, or end it first.'
+    await waitForObservation(() => latest()?.core.lastError === copy)
+    expect(toastSpies.error).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({ description: copy })
+    )
+    expect(JSON.stringify(warn.mock.calls)).not.toContain('Alice')
+    expect(latest()?.recording.recording.state).not.toBe('recording')
+  }, 20_000)
+
+  // Plan 243 D7: a talk show taken over (or handed off) goes on elsewhere, so
+  // End livestream on this computer ends none of its legs, until Continue
+  // here puts this computer back on air.
+  it('ends no talk show legs once the show is taken over (plan 243 D7)', async () => {
+    const backend = new StudioBackend()
+    const talk: CloudStatus = {
+      ...resumableCloudStatus(),
+      phase: 'live',
+      plan: 'premium',
+      show: { id: 'sh_talk', nodeId: 'livekit', resumable: false, kind: 'talk' },
+      room: {
+        phase: 'open',
+        doorOpen: false,
+        declinedCount: 0,
+        stage: { layout: 'solo', onStage: ['host:sh_talk'] },
+        hostAway: false,
+        connected: true,
+        client: 'connected',
+        returnEnabled: false,
+        stageSet: true,
+        live: true
+      },
+      onAir: { kind: 'computer', source: 'host', waiting: false, thisDevice: true, since: now }
+    }
+    backend.cloudStatus = talk
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const testDom = installProviderTestEnvironment(
+      createVideorcApi({
+        acknowledge: async () => true,
+        pending: async () => [],
+        acknowledgeProvider: async () => true,
+        pendingProvider: async () => []
+      })
+    )
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation => observations.at(-1)!
+    let shell: ReturnType<typeof useStudioShell> | undefined
+    function ShellProbe(): null {
+      const value = useStudioShell()
+      useEffect(() => {
+        shell = value
+      }, [value])
+      return null
+    }
+    root = await mountStudioProvider(
+      testDom.container,
+      (value) => {
+        observations.push(value)
+      },
+      createElement(ShellProbe)
+    )
+    await waitForObservation(() => latest()?.cloud.cloudStatus?.room?.live === true)
+    await act(async () => {
+      await latest().core.requestStopSession('button')
+    })
+    await waitForObservation(() => shell?.stopConfirmation?.origin === 'button')
+    expect(offersHandOff(latest().cloud.cloudStatus)).toBe(true)
+    await act(async () => shell!.cancelStopSession())
+
+    // Another device took the host seat; the room still reads live here.
+    await act(async () => {
+      backend.pushEvent('cloud.state', {
+        ...talk,
+        onAir: { ...talk.onAir!, name: 'iPad', kind: 'browser', thisDevice: false },
+        stoppedBy: 'taken-over'
+      })
+      await Promise.resolve()
+    })
+    await waitForObservation(() => latest().cloud.cloudStatus?.stoppedBy === 'taken-over')
+    await act(async () => {
+      await latest().core.requestStopSession('button')
+    })
+    await waitForObservation(() => shell?.stopConfirmation?.origin === 'button')
+    expect(offersHandOff(latest().cloud.cloudStatus)).toBe(false)
+    await act(async () => shell!.confirmStopSession())
+    await waitForObservation(() => shell?.stopConfirmation === null)
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 50))
+    })
+    const methods = backend.commands.map((command) => command.method)
+    expect(methods).not.toContain('cloud.show.legs.end')
+    expect(methods).not.toContain('streamTargets.youtube.transition')
+
+    // Continue here (the room's resume) puts this computer back on air: End
+    // livestream ends the legs again.
+    await act(async () => {
+      backend.pushEvent('cloud.state', talk)
+      await Promise.resolve()
+    })
+    await waitForObservation(() => latest().cloud.cloudStatus?.onAir?.thisDevice === true)
+    await act(async () => {
+      await latest().core.requestStopSession('button')
+    })
+    await waitForObservation(() => shell?.stopConfirmation?.origin === 'button')
+    await act(async () => shell!.confirmStopSession())
+    await waitForObservation(() =>
+      backend.commands.some((command) => command.method === 'cloud.show.legs.end')
+    )
+  }, 20_000)
+
+  // Plan 243 D10: focus asks videorc.com for a show live from another
+  // device, at most once per 10 s, and never while this computer is live.
+  it('checks for a show live elsewhere when the window gains focus (plan 243 D10)', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date(now))
+    const backend = new StudioBackend()
+    backend.cloudStatus = { ...resumableCloudStatus(), phase: 'off', show: undefined }
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const testDom = installProviderTestEnvironment(
+      createVideorcApi({
+        acknowledge: async () => true,
+        pending: async () => [],
+        acknowledgeProvider: async () => true,
+        pendingProvider: async () => []
+      })
+    )
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation => observations.at(-1)!
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(() => latest()?.cloud.cloudStatus?.phase === 'off')
+    const checks = (): number =>
+      backend.sentCommands.filter((command) => command.method === 'cloud.show.check').length
+    const focus = async (): Promise<void> => {
+      await act(async () => {
+        window.dispatchEvent(new Event('focus'))
+        await Promise.resolve()
+      })
+    }
+    await focus()
+    await waitForObservation(() => checks() === 1)
+    await focus()
+    vi.setSystemTime(new Date(Date.parse(now) + 9_000))
+    await focus()
+    expect(checks()).toBe(1)
+    vi.setSystemTime(new Date(Date.parse(now) + 10_000))
+    await focus()
+    await waitForObservation(() => checks() === 2)
+
+    await act(async () => {
+      backend.pushEvent('recording.status', {
+        state: 'recording',
+        sessionId: 'go-live-1',
+        startedAt: now,
+        streamUrl: 'rtmp://127.0.0.1/live/***',
+        message: 'Running both session.'
+      })
+      await Promise.resolve()
+    })
+    await waitForObservation(() => latest().recording.recording.sessionId === 'go-live-1')
+    vi.setSystemTime(new Date(Date.parse(now) + 30_000))
+    await focus()
+    expect(checks()).toBe(2)
+  }, 20_000)
 
   it('returns a fully cloneable development scene-preset state with evaluated source diagnostics', async () => {
     const backend = new StudioBackend()

@@ -2094,6 +2094,8 @@ interface StudioShellContextValue {
   /** The End livestream question waiting for an answer, if any (plan 174 S0.1). */
   stopConfirmation: SessionStopConfirmation | null
   confirmStopSession: () => void
+  /** Plan 243: the question's "Continue on another device" answer. */
+  handOffStopSession: () => void
   cancelStopSession: () => void
   /** First-run setup replaces the workspace (plan 203 S5): preview and global keys wait. */
   firstRunSetupOpen: boolean
@@ -4990,6 +4992,20 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     platformLifecycleOwnerRef.current = null
     return owner
   }, [])
+  // Plan 243 D7: a hand-off or a take-over stops this computer's session and
+  // the show goes on, so no broadcast of it is completed or ended: its owner
+  // is dropped, and the session's and the show's ids (a talk show's owner
+  // keys on the show) stay latched until this computer is on air again
+  // (R2 B-H1: a Continue here that fails keeps the protection).
+  const handedOffRef = useRef<(string | undefined)[]>([])
+  const latchHandOff = useCallback((ids: (string | undefined)[]) => {
+    const owner = platformLifecycleOwnerRef.current
+    handedOffRef.current = ids.filter(Boolean)
+    if (!owner || !handedOffRef.current.includes(owner.sessionId)) return null
+    platformLifecycleRun.current += 1
+    platformLifecycleOwnerRef.current = null
+    return owner
+  }, [])
   const settleClaimedPlatformLifecycleOwnerRef = useRef<
     | ((
         owner: PlatformLifecycleOwner,
@@ -5479,12 +5495,22 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // here is news: the Destinations page and the Stream health stat show the rest.
   const [cloudStatus, setCloudStatus] = useState<CloudStatus | null>(null)
   const cloudStatusRef = useRef<CloudStatus | null>(null)
-  const commitCloudStatus = useCallback((next: CloudStatus): void => {
-    const previous = cloudStatusRef.current
-    cloudStatusRef.current = next
-    setCloudStatus(next)
-    void loadCloudNotices().then((n) => n.toastCloudStatus(previous, next))
-  }, [])
+  const commitCloudStatus = useCallback(
+    (next: CloudStatus): void => {
+      const previous = cloudStatusRef.current
+      cloudStatusRef.current = next
+      // Plan 243 D7: sent before the session stops, so its stop completes
+      // nothing; this computer back on air (Continue here) ends the latch.
+      const here = (status: CloudStatus | null) =>
+        status?.onAir?.thisDevice && !status.onAir.waiting
+      if (next.stoppedBy && !previous?.stoppedBy) {
+        latchHandOff([next.sessionId, recordingRef.current.sessionId, next.show?.id])
+      } else if (here(next) && !here(previous)) handedOffRef.current = []
+      setCloudStatus(next)
+      void loadCloudNotices().then((n) => n.toastCloudStatus(previous, next))
+    },
+    [latchHandOff]
+  )
 
   // --- Live Chat Co-host (Premium cloud AI) --------------------------------
   // The BACKEND owns the engine: the tick scheduler, the open-question set,
@@ -10002,6 +10028,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       void refreshEntitlementsForClient(client).catch(() => {
         // Preserve the current fail-closed snapshot on transport failure.
       })
+      // Plan 243 D10: and a show live from another device, unless this
+      // computer is live (the chunk asks at most once per 10 s).
+      if (!sessionIsLive(recordingRef.current)) {
+        void loadCloudNotices().then((n) => n.checkCloudShow(client))
+      }
       if (account?.status === 'signed-in') {
         refreshAccountSnapshot()
       }
@@ -15607,6 +15638,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       if (!client) {
         return { streaming: streamingForCleanup, complete: false }
       }
+      // Plan 243 D7: handed off or taken over, the broadcast goes on elsewhere.
+      if (handedOffRef.current.includes(sessionId)) {
+        return { streaming: streamingForCleanup, complete: true }
+      }
 
       let nextStreaming = streamingForCleanup
       let complete = true
@@ -15927,6 +15962,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       rpc: SessionStartRpc = 'session.start'
     ) => {
       const suppressCaptions = suppressCaptionsOverride ?? suppressCaptionsForSession
+      // R2 B-H1: a resume's saved destinations are reconnect candidates, never
+      // broadcasts this start may complete: no owner, no cleanup, success or not.
       const resumingCloudShow = rpc === 'cloud.show.resume'
       recordLatencyTrackerRef.current.markClick('start', performance.now(), 'session-call')
       const requestSnapshot = {
@@ -15953,7 +15990,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         if (sameRequest) {
           return pendingStart.promise
         }
-        if (streamingOverride) {
+        if (streamingOverride && !resumingCloudShow) {
           return pendingStart.promise
             .catch(() => false)
             .then(() => settlePreparedPlatformLifecycle(streamingOverride))
@@ -16223,6 +16260,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             liveAudioProcessingStartSnapshotRef.current = null
             applyRecordingStatus(status)
             clearLiveChatForTerminalSession(status.sessionId)
+            if (resumingCloudShow) return true
             const pendingSettlement =
               status.sessionId &&
               platformLifecycleSettlementRef.current?.sessionId === status.sessionId
@@ -16256,7 +16294,12 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
               ? { sessionId: status.sessionId, ...startAudioSnapshot }
               : null
           applyRecordingStatus(status)
-          if (startResolution.sessionActive && streamingForStart && status.sessionId) {
+          if (
+            startResolution.sessionActive &&
+            streamingForStart &&
+            status.sessionId &&
+            !resumingCloudShow
+          ) {
             platformLifecycleOwnerRef.current = {
               sessionId: status.sessionId,
               streaming: streamingForStart
@@ -16315,7 +16358,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           }
           return true
         } catch (error) {
-          if (streamingOverride && streamingForStart) {
+          if (streamingOverride && streamingForStart && !resumingCloudShow) {
             const pendingSettlement =
               platformSessionId &&
               platformLifecycleSettlementRef.current?.sessionId === platformSessionId
@@ -17403,6 +17446,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         // recording. Neither touches a local session: there is none.
         const talkSession = talkShowSessionRef.current
         if (talkSession) {
+          // Plan 243 D7: handed off or taken over, the show goes on elsewhere.
+          if (handedOffRef.current.includes(talkSession.sessionId)) return true
           if (talkSession.streamUrl) {
             const owner = platformLifecycleOwnerRef.current
             if (owner) {
@@ -17590,11 +17635,29 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       void stopped.then(leave, leave)
     }
   }, [noteRecordClick, stopConfirmation, stopSession])
+  // Plan 243 C5: "Continue on another device" (or "Quit and keep it live").
+  // The backend stops feeding through the hand-off stop and the show waits
+  // for another device, so nothing here completes a broadcast (D7). A refusal
+  // with the session still fed gives its owner back, and the app stays.
+  const handOffStopSession = useCallback(() => {
+    const exit = stopConfirmation ? exitForStopOrigin(stopConfirmation.origin) : null
+    const cloud = cloudStatusRef.current
+    const session = () => talkShowSessionRef.current ?? recordingRef.current
+    const owner = latchHandOff([session().sessionId, cloud?.sessionId, cloud?.show?.id])
+    setStopConfirmation(null)
+    void loadCloudNotices().then((n) =>
+      n.handOffCloudShow(client, exit, () => {
+        if (cloudStatusRef.current?.stoppedBy || !sessionIsLive(session())) return
+        handedOffRef.current = []
+        platformLifecycleOwnerRef.current ??= owner
+      })
+    )
+  }, [client, latchHandOff, stopConfirmation])
   // Main asks before a quit or a main-window close ends a livestream (plan
   // 174 S3.1, D2). Not live: nothing to protect, so the exit goes through at
   // once. Live: the End livestream question, with "Keep streaming" focused.
   const handleExitRequest = useEffectEvent((kind: AppExitKind) => {
-    if (!sessionIsLive(recordingRef.current)) {
+    if (!sessionIsLive(talkShowSessionRef.current ?? recordingRef.current)) {
       void window.videorc?.exitApp?.(kind)
       return
     }
@@ -19514,6 +19577,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           ? stopConfirmation
           : null,
       confirmStopSession,
+      handOffStopSession,
       cancelStopSession,
       firstRunSetupOpen,
       setFirstRunSetupOpen
@@ -19529,6 +19593,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       connection,
       entitlements?.plan,
       entitlements?.tier,
+      handOffStopSession,
       notesWindow.open,
       openCommentsWindow,
       openNotesWindow,

@@ -1,6 +1,12 @@
 import type { BackendClient } from '@/backendClient'
 
-import type { CloudSettingsPatch, CloudStatus, CloudTestOutput } from './backend'
+import type {
+  AppExitKind,
+  CloudHandOffAnswer,
+  CloudSettingsPatch,
+  CloudStatus,
+  CloudTestOutput
+} from './backend'
 import {
   CLOUD_TOAST_ID,
   cloudFallbackToast,
@@ -9,9 +15,10 @@ import {
   cloudShowCapToast,
   formatCloudCountdown
 } from './cloud-toasts'
+import { HAND_OFF_UNCONFIRMED, cloudTakenOverTitle } from './cloud-handoff-view'
 import { requestCloudSectionFocus } from './cloud-section-focus'
-import { toast } from './toast'
-import { toastUserError } from './user-error'
+import { TOAST_WITH_DESCRIPTION_MS, toast } from './toast'
+import { offlineError, toastUserError } from './user-error'
 import { openWorkspaceTab } from './workspace-navigation'
 
 // Videorc Cloud's notices and user actions: loaded with the first cloud
@@ -20,18 +27,38 @@ import { openWorkspaceTab } from './workspace-navigation'
 // focus request lives in `cloud-section-focus.ts`, which the Livestream
 // section imports without this module's app-wide imports.
 
+/**
+ * Every cloud toast shares one id, so a newer one replaces the older, and
+ * sonner merges a replacement into the toast it replaces. A one-line status
+ * toast must therefore clear what an earlier cloud toast carried (a
+ * description, an action, an endless duration), or it shows under the new
+ * title (plan 243 C6: the take-over toast kept "Set it up in Destinations").
+ */
+export const CLOUD_STATUS_TOAST = {
+  id: CLOUD_TOAST_ID,
+  description: undefined,
+  action: undefined,
+  cancel: undefined,
+  duration: TOAST_WITH_DESCRIPTION_MS
+} as const
+
 /** The provider's status notifications, in their shared toast's priority order. */
 export function toastCloudStatus(previous: CloudStatus | null, next: CloudStatus): void {
   const fallback = cloudFallbackToast(previous, next)
-  if (fallback) toast.warning(fallback, { id: CLOUD_TOAST_ID })
+  if (fallback) toast.warning(fallback, CLOUD_STATUS_TOAST)
   const lost = cloudLostToast(previous, next)
-  if (lost) toast.warning(lost, { id: CLOUD_TOAST_ID })
+  if (lost) toast.warning(lost, CLOUD_STATUS_TOAST)
   const restarted = cloudRestartToast(previous, next)
-  if (restarted) toast.warning(restarted, { id: CLOUD_TOAST_ID })
+  if (restarted) toast.warning(restarted, CLOUD_STATUS_TOAST)
   const cap = cloudShowCapToast(previous, next)
-  if (cap) toast.warning(cap, { id: CLOUD_TOAST_ID })
+  if (cap) toast.warning(cap, CLOUD_STATUS_TOAST)
   // Plan 222 U5: past the month's hours is news, never a cut (D18).
   if (next.allowancePast) toastCloudAllowancePast(previous, next)
+  // Plan 243 C5: another device continued the show and this computer
+  // stopped. Neutral news: the Studio's notice offers Continue here.
+  if (next.stoppedBy === 'taken-over' && previous?.stoppedBy !== 'taken-over') {
+    toast.info(cloudTakenOverTitle(next.onAir), CLOUD_STATUS_TOAST)
+  }
 }
 
 type CommitCloudStatus = (status: CloudStatus) => void
@@ -76,6 +103,41 @@ export async function endCloudShow(
       { id: CLOUD_TOAST_ID }
     )
   }
+}
+
+/**
+ * Plan 243 C5: the hand-off. The backend stops feeding through the hand-off
+ * stop (D7) and the show waits for another device; then a leaving app goes.
+ * R2 A-M5: an answer that videorc.com did not confirm is still a hand-off
+ * (this computer stopped), said once in a neutral toast. Only an error, a
+ * refusal that stopped nothing, says why, keeps the app, and lets the
+ * provider give the session its broadcasts back when it is still fed.
+ */
+export async function handOffCloudShow(
+  client: BackendClient | null,
+  exit: AppExitKind | null,
+  refused: () => void
+): Promise<void> {
+  let answer: CloudHandOffAnswer
+  try {
+    if (!client) throw offlineError()
+    answer = await client.requestTyped('cloud.show.handOff')
+  } catch (error) {
+    refused()
+    toastUserError(error, { action: 'continue on another device' }, { id: CLOUD_TOAST_ID })
+    return
+  }
+  if (!answer.confirmed) toast.info(HAND_OFF_UNCONFIRMED, { id: CLOUD_TOAST_ID })
+  if (exit) void window.videorc?.exitApp?.(exit)
+}
+
+/** Plan 243 D10: focus asks videorc.com for a show live elsewhere, once per 10 s. */
+let cloudCheckedAt = 0
+export function checkCloudShow(client: BackendClient, nowMs = Date.now()): void {
+  // A clock set back never blocks the check.
+  if (nowMs >= cloudCheckedAt && nowMs - cloudCheckedAt < 10_000) return
+  cloudCheckedAt = nowMs
+  void client.requestTyped('cloud.show.check').catch(() => {})
 }
 
 /** The row shows the test result; only a refused click needs a warning. */

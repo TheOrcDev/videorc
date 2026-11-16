@@ -69,6 +69,188 @@ use crate::streaming::{
     StreamOutputOrientation, StreamPlatform, StreamTargetRuntime, StreamTargetState,
 };
 
+/// Backend-private identity. Never forwarded to a renderer or diagnostics.
+#[derive(Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudDevice {
+    pub id: String,
+    pub name: String,
+    pub kind: &'static str,
+}
+
+impl std::fmt::Debug for CloudDevice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("CloudDevice(••••)")
+    }
+}
+
+impl Default for CloudDevice {
+    fn default() -> Self {
+        let mut number = uuid::Uuid::new_v4().as_u128();
+        let alphabet = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+        let mut id = [b'0'; 22];
+        for byte in id.iter_mut().rev() {
+            *byte = alphabet[(number % 62) as usize];
+            number /= 62;
+        }
+        Self {
+            id: String::from_utf8(id.to_vec()).expect("base62"),
+            name: "This computer".into(),
+            kind: "computer",
+        }
+    }
+}
+
+pub fn sanitize_device_name(name: &str) -> String {
+    let name: String = name.chars().filter(|c| !c.is_control()).collect();
+    let name = name.replace("://", " ");
+    let name: String = name.trim().chars().take(40).collect();
+    if name.is_empty() {
+        "This computer".into()
+    } else {
+        name
+    }
+}
+
+fn valid_device_id(id: &str) -> bool {
+    id.len() == 22 && id.bytes().all(|b| b.is_ascii_alphanumeric())
+}
+
+pub fn load_device(database: &crate::storage::Database) -> CloudDevice {
+    let mut device = CloudDevice::default();
+    if let Ok(Some(id)) = database.load_setting::<String>("cloud.deviceId")
+        && valid_device_id(&id)
+    {
+        device.id = id;
+    } else if database.save_setting("cloud.deviceId", &device.id).is_err() {
+        // Fail closed: never create a show with an identity that changes on restart.
+        device.id.clear();
+    }
+    #[cfg(debug_assertions)]
+    if let Ok(id) = std::env::var("VIDEORC_CLOUD_DEVICE_ID")
+        && valid_device_id(&id)
+    {
+        device.id = id;
+    }
+    device
+}
+
+// Called off the startup path, in spawn_blocking on the first cloud request.
+fn resolve_device_name() -> String {
+    let mut name = "This computer".to_string();
+    #[cfg(unix)]
+    {
+        let mut bytes = [0u8; 256];
+        // SAFETY: the writable buffer is valid for the supplied length.
+        if unsafe { libc::gethostname(bytes.as_mut_ptr().cast(), bytes.len()) } == 0 {
+            let end = bytes.iter().position(|b| *b == 0).unwrap_or(bytes.len());
+            name = String::from_utf8_lossy(&bytes[..end]).into_owned();
+        }
+    }
+    #[cfg(target_os = "windows")]
+    {
+        name = std::env::var("COMPUTERNAME").unwrap_or(name);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        use std::process::{Command, Stdio};
+        if let Ok(mut child) = Command::new("/usr/sbin/scutil")
+            .args(["--get", "ComputerName"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+        {
+            let deadline = std::time::Instant::now() + Duration::from_secs(2);
+            loop {
+                match child.try_wait() {
+                    Ok(Some(status)) => {
+                        if status.success()
+                            && let Ok(output) = child.wait_with_output()
+                        {
+                            name = String::from_utf8_lossy(&output.stdout).into_owned();
+                        }
+                        break;
+                    }
+                    Ok(None) if std::time::Instant::now() < deadline => {
+                        std::thread::sleep(Duration::from_millis(10))
+                    }
+                    _ => {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    #[cfg(debug_assertions)]
+    if let Ok(value) = std::env::var("VIDEORC_CLOUD_DEVICE_NAME") {
+        name = value;
+    }
+    sanitize_device_name(&name)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum CloudDeviceKind {
+    Computer,
+    Phone,
+    Browser,
+    #[serde(other)]
+    Unknown,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum CloudAirSource {
+    Feed,
+    Camera,
+    Host,
+    #[serde(other)]
+    Unknown,
+}
+#[derive(Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudOnAirWire {
+    #[serde(default)]
+    pub device_id: Option<String>,
+    #[serde(default)]
+    pub name: Option<String>,
+    pub kind: Option<CloudDeviceKind>,
+    pub source: Option<CloudAirSource>,
+    #[serde(default)]
+    pub waiting: bool,
+    #[serde(default)]
+    pub since: String,
+}
+impl std::fmt::Debug for CloudOnAirWire {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("CloudOnAirWire(••••)")
+    }
+}
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudOnAirStatus {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    pub kind: CloudDeviceKind,
+    pub source: CloudAirSource,
+    pub waiting: bool,
+    pub this_device: bool,
+    pub since: String,
+}
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum CloudStoppedBy {
+    HandOff,
+    TakenOver,
+}
+
+#[derive(Debug, Serialize)]
+pub struct HandOffAnswer {
+    pub ok: bool,
+    pub confirmed: bool,
+}
+
 pub const CLOUD_SETTINGS_KEY: &str = "cloud.settings";
 /// The backend-private `app_settings` row holding the id of the show this
 /// desktop holds or last held without seeing it end (`null` when none). Not a
@@ -379,6 +561,10 @@ pub struct CloudRestart {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct CloudStatus {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_air: Option<CloudOnAirStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stopped_by: Option<CloudStoppedBy>,
     pub phase: CloudPhase,
     /// The account's `cloud` block says on.
     pub entitled: bool,
@@ -558,6 +744,8 @@ pub struct ShowOutputSpec {
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateShowRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device: Option<CloudDevice>,
     pub kind: String,
     pub outputs: Vec<ShowOutputSpec>,
     pub hold_max_seconds: u32,
@@ -718,10 +906,23 @@ pub struct CreateShowResponse {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CurrentShowResponse {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_air: Option<CloudOnAirWire>,
     #[serde(default)]
     pub show: Option<ShowRecord>,
     #[serde(default)]
     pub control: Option<ShowControl>,
+    #[serde(default)]
+    pub ingest: Option<Vec<ShowIngest>>,
+}
+
+#[derive(Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OnAirAnswer {
+    #[serde(default)]
+    pub rev: Option<u64>,
+    #[serde(default)]
+    pub on_air: Option<CloudOnAirWire>,
     #[serde(default)]
     pub ingest: Option<Vec<ShowIngest>>,
 }
@@ -881,6 +1082,68 @@ pub fn classify_cloud_failure(
     }
 }
 
+#[derive(Debug, thiserror::Error)]
+#[error("Your show is live on another device. Use Continue here, or end it first.")]
+struct CloudShowLiveElsewhere;
+
+pub(crate) fn cloud_refusal(code: &str) -> anyhow::Error {
+    if code == "cloud-show-live-elsewhere" {
+        return anyhow::Error::new(CloudShowLiveElsewhere);
+    }
+    anyhow::Error::new(CloudApiError::Other {
+        status: 409,
+        code: code.into(),
+        message: match code {
+            "cloud-handoff-update" => {
+                "Update Videorc on the other computer first, or end the stream and go live again."
+            }
+            "cloud-handoff-unsupported" => "This show cannot continue on another device.",
+            "cloud-source-not-ready" => "This computer is not sending to the show yet. Try again.",
+            "cloud-not-on-air" => "This computer is not on air.",
+            "cloud-show-live-elsewhere" => {
+                "Your show is live on another device. Use Continue here, or end it first."
+            }
+            _ => "There is no Videorc Cloud show to resume.",
+        }
+        .into(),
+    })
+}
+
+pub(crate) fn safe_continuation_error(error: CloudApiError) -> CloudApiError {
+    match error {
+        CloudApiError::Other { status, code, .. } => CloudApiError::Other {
+            status,
+            message: match code.as_str() {
+                "cloud-handoff-update" => "Update Videorc on the other computer first, or end the stream and go live again.",
+                "cloud-handoff-unsupported" => "This show cannot continue on another device.",
+                "cloud-source-not-ready" => "This computer is not sending to the show yet. Try again.",
+                "cloud-not-on-air" => "This computer is not on air.",
+                _ => "Videorc Cloud could not continue the show. Try again.",
+            }.into(), code,
+        },
+        other => other,
+    }
+}
+
+pub(crate) fn continuation_error_code(error: &anyhow::Error) -> Option<&'static str> {
+    if error.is::<CloudShowLiveElsewhere>() {
+        return Some("cloud-show-live-elsewhere");
+    }
+    let CloudApiError::Other { code, .. } = error.downcast_ref::<CloudApiError>()? else {
+        return None;
+    };
+    [
+        "cloud-handoff-update",
+        "cloud-handoff-unsupported",
+        "cloud-source-not-ready",
+        "cloud-not-on-air",
+        "cloud-show-live-elsewhere",
+        "cloud-nothing-to-resume",
+    ]
+    .into_iter()
+    .find(|known| *known == code)
+}
+
 /// The web API as the show needs it. Implemented by `VideorcApiClient` and by
 /// the tests' fake. Static dispatch keeps the futures `Send` without a trait
 /// object.
@@ -894,6 +1157,20 @@ pub trait CloudWebApi: Send + Sync + 'static {
         &self,
         bearer: &str,
     ) -> impl Future<Output = std::result::Result<CurrentShowResponse, CloudApiError>> + Send;
+    fn on_air(
+        &self,
+        bearer: &str,
+        show_id: &str,
+        device: &CloudDevice,
+        source: &str,
+        step: &str,
+    ) -> impl Future<Output = std::result::Result<OnAirAnswer, CloudApiError>> + Send;
+    fn hand_off(
+        &self,
+        bearer: &str,
+        show_id: &str,
+        device: &CloudDevice,
+    ) -> impl Future<Output = std::result::Result<(), CloudApiError>> + Send;
     fn end_show(
         &self,
         bearer: &str,
@@ -960,6 +1237,7 @@ pub trait CloudWebApi: Send + Sync + 'static {
         bearer: &str,
         show_id: &str,
         since: Option<u64>,
+        idle: bool,
     ) -> impl Future<Output = std::result::Result<ControlStateAnswer, CloudApiError>> + Send;
     /// `PUT …/destinations`: the socket's `destinations.set`. The body
     /// carries the stream keys and is never logged.
@@ -1167,6 +1445,8 @@ impl ControlTransport for WsTransport {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct RunnerState {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_air: Option<CloudOnAirWire>,
     #[serde(default)]
     pub phase: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1234,6 +1514,8 @@ impl Eq for CloudProgram {}
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct RunnerLeg {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub broadcast_id: Option<String>,
     pub id: String,
     #[serde(default)]
     pub platform: String,
@@ -1313,6 +1595,7 @@ fn parse_platform(id: &str) -> StreamPlatform {
 /// value lives in memory only and `Debug` never shows it.
 #[derive(Clone, PartialEq, Eq)]
 pub struct HandoverDestination {
+    pub broadcast_id: Option<String>,
     pub id: String,
     pub platform: String,
     pub label: String,
@@ -1350,19 +1633,65 @@ pub(crate) fn destinations_set_frame(
         "kind": "destinations.set",
         "destinations": destinations
             .iter()
-            .map(|destination| json!({
+            .map(|destination| { let mut value = json!({
                 "id": destination.id,
                 "platform": destination.platform,
                 "label": destination.label,
                 "orientation": destination.orientation,
                 "url": destination.url,
-            }))
+            });
+                if let Some(id) = &destination.broadcast_id { value["broadcastId"] = json!(id); }
+                value
+            })
             .collect::<Vec<_>>(),
     });
     if replace {
         frame["replace"] = Value::Bool(true);
     }
     frame
+}
+
+fn reconnect_candidates(
+    legs: &[RunnerLeg],
+    candidates: &[HandoverDestination],
+) -> Vec<HandoverDestination> {
+    legs.iter()
+        .filter_map(|leg| {
+            let matching: Vec<_> = candidates
+                .iter()
+                .filter(|c| c.platform == leg.platform && c.orientation == leg.orientation)
+                .collect();
+            let same_platform_legs = legs
+                .iter()
+                .filter(|other| {
+                    other.platform == leg.platform && other.orientation == leg.orientation
+                })
+                .count();
+            let candidate = if matching.len() == 1 && same_platform_legs == 1 {
+                matching.first().copied()
+            } else {
+                let by_label: Vec<_> = matching
+                    .into_iter()
+                    .filter(|c| c.label == leg.label)
+                    .collect();
+                let unique_leg = legs
+                    .iter()
+                    .filter(|other| {
+                        other.platform == leg.platform
+                            && other.orientation == leg.orientation
+                            && other.label == leg.label
+                    })
+                    .count()
+                    == 1;
+                (by_label.len() == 1 && unique_leg).then(|| by_label[0])
+            }?;
+            let mut destination = candidate.clone();
+            destination.id = leg.id.clone();
+            destination.label = leg.label.clone();
+            destination.broadcast_id = leg.broadcast_id.clone();
+            Some(destination)
+        })
+        .collect()
 }
 
 fn hello_frame(token: &str) -> Value {
@@ -1436,12 +1765,49 @@ pub(crate) struct FailedShow {
     direct_fallback: bool,
 }
 
+/// Clears an abandoned prepare, including cancellation of the resume future.
+struct ResumeClaimGuard {
+    slot: CloudShowSlot,
+    show_id: String,
+    session_id: String,
+    keep: bool,
+}
+
+impl Drop for ResumeClaimGuard {
+    fn drop(&mut self) {
+        if self.keep {
+            return;
+        }
+        let mut runtime = lock(&self.slot);
+        if runtime.show.as_ref().is_some_and(|show| {
+            show.record.id == self.show_id
+                && show
+                    .session_id
+                    .as_deref()
+                    .is_none_or(|id| id == self.session_id)
+        }) {
+            runtime.pending_feed_go = false;
+            runtime.claiming_air = false;
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct CloudShowRuntime {
+    pub(crate) device: CloudDevice,
+    pub(crate) device_name: Option<Arc<tokio::sync::OnceCell<String>>>,
+    pub(crate) stopped_by: Option<CloudStoppedBy>,
     pub settings: CloudSettings,
     pub entitlement: CloudEntitlement,
     pub(crate) connected: bool,
     ending: bool,
+    continuation_stop_in_flight: bool,
+    pub(crate) pending_feed_go: bool,
+    pub(crate) claiming_air: bool,
+    // The foreign talk claim already given its duplicate-join grace window.
+    talk_claim_seen: Option<(String, String)>,
+    created_this_run: std::collections::HashSet<String>,
+    last_discovery: Option<tokio::time::Instant>,
     pub(crate) show: Option<ActiveShow>,
     pub(crate) runner: Option<RunnerState>,
     pub(crate) failed: Option<FailedShow>,
@@ -1679,6 +2045,23 @@ impl CloudShowRuntime {
     pub fn status(&self) -> CloudStatus {
         let runner = self.runner.as_ref();
         CloudStatus {
+            on_air: runner.and_then(|r| r.on_air.as_ref()).and_then(|air| {
+                Some(CloudOnAirStatus {
+                    name: air.name.as_ref().map(|name| sanitize_device_name(name)),
+                    kind: match air.kind.clone()? {
+                        CloudDeviceKind::Unknown => CloudDeviceKind::Computer,
+                        kind => kind,
+                    },
+                    source: match air.source.clone()? {
+                        CloudAirSource::Unknown => CloudAirSource::Feed,
+                        source => source,
+                    },
+                    waiting: air.waiting,
+                    this_device: air.device_id.as_deref() == Some(&self.device.id),
+                    since: air.since.clone(),
+                })
+            }),
+            stopped_by: self.stopped_by,
             phase: self.phase(),
             entitled: self.entitlement.entitled(),
             plan: self.entitlement.plan,
@@ -1802,6 +2185,35 @@ impl CloudShowRuntime {
     }
 
     /// The local session feeding the show, when there is one.
+    pub(crate) fn held_connected_talk(&self) -> bool {
+        self.talk
+            .as_ref()
+            .is_some_and(|talk| talk.client == crate::cloud_talk::CloudRoomClientState::Connected)
+    }
+
+    pub(crate) fn air_names_another_device(&self) -> bool {
+        self.runner
+            .as_ref()
+            .and_then(|runner| runner.on_air.as_ref())
+            .and_then(|air| air.device_id.as_deref())
+            .is_some_and(|id| id != self.device.id)
+    }
+
+    pub(crate) fn live_elsewhere(&self) -> bool {
+        self.air_names_another_device()
+            && self
+                .runner
+                .as_ref()
+                .and_then(|runner| runner.on_air.as_ref())
+                .is_some_and(|air| !air.waiting)
+    }
+
+    pub(crate) fn poll_as_idle(&self) -> bool {
+        self.show
+            .as_ref()
+            .is_some_and(|show| show.session_id.is_none() && show.destinations.is_empty())
+    }
+
     pub fn feeding_session(&self) -> Option<String> {
         self.show.as_ref().and_then(|show| show.session_id.clone())
     }
@@ -1826,6 +2238,8 @@ impl CloudShowRuntime {
             Some(bound) if Some(bound) != active_session_id => {
                 show.session_id = None;
                 show.resuming = false;
+                self.pending_feed_go = false;
+                self.claiming_air = false;
                 true
             }
             _ => false,
@@ -1833,6 +2247,7 @@ impl CloudShowRuntime {
     }
 
     fn bump_generation(&mut self) -> u64 {
+        self.talk_claim_seen = None;
         self.destinations_generation.invalidate();
         self.generation += 1;
         self.control_tx = None;
@@ -1862,6 +2277,8 @@ impl CloudShowRuntime {
     }
 
     pub(crate) fn clear_show(&mut self, end_reason: Option<String>) {
+        self.pending_feed_go = false;
+        self.claiming_air = false;
         self.show = None;
         self.talk = None;
         self.runner = None;
@@ -1958,6 +2375,18 @@ pub type CloudLegsHook = Arc<dyn Fn(&str, Vec<StreamTargetRuntime>) + Send + Syn
 /// Persists the remembered show's id (`None`: nothing to remember).
 pub type CloudRememberHook = Arc<dyn Fn(Option<String>) + Send + Sync>;
 
+#[derive(Debug)]
+pub enum CloudStopFailure {
+    NoActiveSession,
+    Failed(String),
+}
+
+pub type CloudStopHook = Arc<
+    dyn Fn() -> Pin<Box<dyn Future<Output = std::result::Result<(), CloudStopFailure>> + Send>>
+        + Send
+        + Sync,
+>;
+
 /// How the socket task reaches the app without owning `AppState`: emit the
 /// whole state, hand the runner's legs to the session's leg model, and keep
 /// the remembered show across launches.
@@ -1973,6 +2402,7 @@ pub struct CloudHooks {
     /// Plan 234 T3: `cloud.room.overlay`, an overlay for the host's
     /// renderer to send to the room. Web control only.
     pub overlay: CloudOverlayHook,
+    pub stop: CloudStopHook,
 }
 
 impl CloudHooks {
@@ -2128,7 +2558,7 @@ pub(crate) enum ControlLink<T: ControlTransport, W: CloudWebApi> {
     /// The node's control socket, past `hello` and `welcome` (plan 184).
     Node(T),
     /// Web control, past its first state poll (plan 234).
-    Web(WebControl<W>),
+    Web(Box<WebControl<W>>),
 }
 
 impl<T: ControlTransport, W: CloudWebApi> ControlLink<T, W> {
@@ -2253,6 +2683,31 @@ impl ControlHandle {
 }
 
 impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
+    pub(crate) async fn device(&self) -> CloudDevice {
+        let (mut device, name) = {
+            let runtime = lock(&self.slot);
+            (runtime.device.clone(), runtime.device_name.clone())
+        };
+        if let Some(name) = name {
+            device.name = name
+                .get_or_init(|| async {
+                    tokio::task::spawn_blocking(resolve_device_name)
+                        .await
+                        .unwrap_or_else(|_| "This computer".into())
+                })
+                .await
+                .clone();
+        }
+        device
+    }
+
+    pub(crate) async fn request_device(&self) -> Option<CloudDevice> {
+        if lock(&self.slot).device.id.is_empty() {
+            return None;
+        }
+        Some(self.device().await)
+    }
+
     pub(crate) fn destination_frame(&self, frame: Value) -> Value {
         let runtime = lock(&self.slot);
         if runtime
@@ -2284,9 +2739,15 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
             }
             ControlKind::Web => {
                 let destinations = lock(&self.slot).destinations_generation.clone();
-                let (web, first) =
-                    WebControl::open(self.web.clone(), bearer, show_id, destinations).await?;
-                Ok((ControlLink::Web(web), first))
+                let (web, first) = WebControl::open(
+                    self.web.clone(),
+                    bearer,
+                    show_id,
+                    destinations,
+                    self.slot.clone(),
+                )
+                .await?;
+                Ok((ControlLink::Web(Box::new(web)), first))
             }
             ControlKind::Unknown => Err(HelloFailure::Transport(
                 "Videorc Cloud named a control transport this version of Videorc does not know"
@@ -2571,7 +3032,7 @@ impl<W: CloudWebApi, C: ControlConnector> ControlLoop<W, C> {
     ) {
         let exit = match transport {
             ControlLink::Node(socket) => self.run_node(socket, &mut rx).await,
-            ControlLink::Web(web) => self.run_web(web, &mut rx).await,
+            ControlLink::Web(web) => self.run_web(*web, &mut rx).await,
         };
         self.finish(exit).await;
     }
@@ -2814,10 +3275,29 @@ impl<W: CloudWebApi, C: ControlConnector> ControlLoop<W, C> {
         state: RunnerState,
         fresh: impl FnOnce() -> bool,
     ) -> bool {
-        let (session, legs) = {
+        let (session, legs, taken_over, reclaim_host) = {
             let mut runtime = lock(&self.context.slot);
             if !fresh() {
                 return false;
+            }
+            let taken_over = !runtime.claiming_air
+                && runtime.stopped_by.is_none()
+                && runtime.show.as_ref().is_some_and(|show| {
+                    show.control.transport_kind() == ControlKind::Web && show.session_id.is_some()
+                })
+                && state
+                    .on_air
+                    .as_ref()
+                    .and_then(|air| air.device_id.as_deref())
+                    .is_some_and(|id| id != runtime.device.id);
+            if taken_over {
+                runtime.stopped_by = Some(CloudStoppedBy::TakenOver);
+                runtime.feed_down_since = None;
+                runtime.failed = None;
+                runtime.destinations_generation.stop();
+                self.resend = None;
+                self.resend_stage = false;
+                self.resend_hold_image = None;
             }
             if state.phase == "live"
                 && let Some(show) = runtime.show.as_mut()
@@ -2829,7 +3309,7 @@ impl<W: CloudWebApi, C: ControlConnector> ControlLoop<W, C> {
                 .as_ref()
                 .map(|runner| runner.legs.clone())
                 .unwrap_or_default();
-            let restart = if self.restart_seen_on_socket {
+            let restart = if self.restart_seen_on_socket || runtime.stopped_by.is_some() {
                 None
             } else {
                 runtime
@@ -2876,8 +3356,9 @@ impl<W: CloudWebApi, C: ControlConnector> ControlLoop<W, C> {
             // A restarted runner draws its default card until it gets the
             // image again; the agent hands it back (`holdImageSet`), and when
             // it could not (it restarted too) this computer sends its own.
-            if ((restarted && state.hold_image_set != Some(true))
-                || state.hold_image_set == Some(false))
+            if runtime.stopped_by.is_none()
+                && ((restarted && state.hold_image_set != Some(true))
+                    || state.hold_image_set == Some(false))
                 && !self.hold_image_sent_on_socket
                 && let Some(png) = runtime
                     .show
@@ -2890,21 +3371,62 @@ impl<W: CloudWebApi, C: ControlConnector> ControlLoop<W, C> {
             // Plan 224: a restarted runner shows the host alone on Solo
             // until it gets the stage again (`stageSet: false`). A stage
             // this desktop never sent is that default already.
-            let stage_lost = runtime.talk.as_ref().is_some_and(|talk| {
-                talk.stage_sent
-                    && state
-                        .room
-                        .as_ref()
-                        .is_some_and(|room| room.connected && !room.stage_set)
-            });
+            let stage_lost = runtime.stopped_by.is_none()
+                && runtime.talk.as_ref().is_some_and(|talk| {
+                    talk.stage_sent
+                        && state
+                            .room
+                            .as_ref()
+                            .is_some_and(|room| room.connected && !room.stage_set)
+                });
             if stage_lost {
                 self.resend_stage = true;
             }
+            let reclaim_host = if runtime.stopped_by.is_none()
+                && runtime.held_connected_talk()
+                && runtime
+                    .show
+                    .as_ref()
+                    .is_some_and(|show| show.control.transport_kind() == ControlKind::Web)
+            {
+                state
+                    .on_air
+                    .as_ref()
+                    .filter(|air| !air.waiting)
+                    .and_then(|air| {
+                        air.device_id
+                            .as_ref()
+                            .filter(|id| *id != &runtime.device.id)
+                            .map(|id| (id.clone(), air.since.clone()))
+                    })
+            } else {
+                None
+            };
+            let reclaim_host = match reclaim_host {
+                Some(claim) if runtime.talk_claim_seen.as_ref() != Some(&claim) => {
+                    runtime.talk_claim_seen = Some(claim.clone());
+                    Some(claim)
+                }
+                Some(_) => None,
+                None => {
+                    runtime.talk_claim_seen = None;
+                    None
+                }
+            };
             runtime.set_runner(state);
             runtime.talk_layout_from_runner();
             runtime.talk_live_from_runner();
             runtime.connected = true;
-            (session, legs)
+            (
+                if runtime.stopped_by.is_some() {
+                    None
+                } else {
+                    session
+                },
+                legs,
+                taken_over,
+                reclaim_host,
+            )
         };
         if let Some(session_id) = session
             && !legs.is_empty()
@@ -2912,6 +3434,47 @@ impl<W: CloudWebApi, C: ControlConnector> ControlLoop<W, C> {
             (self.context.hooks.legs)(&session_id, legs);
         }
         self.context.hooks.emit_from(&self.context.slot);
+        if let Some(claim) = reclaim_host {
+            let context = self.context.clone();
+            let bearer = self.bearer.clone();
+            let show_id = self.show_id.clone();
+            let generation = self.generation;
+            tokio::spawn(async move {
+                // The renderer waits up to three seconds for duplicate identity.
+                // Only a host still connected after that window may reclaim.
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                let reclaim = {
+                    let runtime = lock(&context.slot);
+                    runtime.generation == generation
+                        && runtime.stopped_by.is_none()
+                        && runtime.held_connected_talk()
+                        && runtime.air_names_another_device()
+                        && runtime.talk_claim_seen.as_ref() == Some(&claim)
+                };
+                if reclaim {
+                    let _ = context
+                        .claim_talk_host(
+                            &bearer,
+                            &show_id,
+                            Some(
+                                tokio::time::Instant::now()
+                                    + crate::cloud_control_web::CONTROL_INTENT_BUDGET,
+                            ),
+                        )
+                        .await;
+                    context.hooks.emit_from(&context.slot);
+                }
+            });
+        }
+        if taken_over {
+            let context = self.context.clone();
+            let show_id = self.show_id.clone();
+            tokio::spawn(async move {
+                let _ = context
+                    .stop_for_continuation(&show_id, CloudStoppedBy::TakenOver)
+                    .await;
+            });
+        }
         true
     }
 
@@ -3365,6 +3928,9 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
                 }
             }
         }
+        if lock(&self.slot).live_elsewhere() {
+            return Err(cloud_refusal("cloud-show-live-elsewhere"));
+        }
         let needs_feed = resumable.is_some() || decision == GoLiveDecision::Cloud;
         let hold_image_png_base64 = if needs_feed { feed_setup.await? } else { None };
         if decision != GoLiveDecision::Cloud
@@ -3447,6 +4013,7 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
             return Ok(PrepareOutcome::Direct);
         }
         let request = CreateShowRequest {
+            device: self.request_device().await,
             kind: "solo".to_string(),
             outputs,
             hold_max_seconds,
@@ -3540,6 +4107,7 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
             };
         {
             let mut runtime = lock(&self.slot);
+            runtime.created_this_run.insert(show_id.clone());
             runtime.show = Some(ActiveShow {
                 record: created.show.clone(),
                 control: created.control.clone(),
@@ -3550,6 +4118,7 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
                 hold_image_png_base64: None,
                 resuming: false,
             });
+            runtime.stopped_by = None;
             runtime.end_reason = None;
             runtime.message = None;
             runtime.restart = None;
@@ -3592,13 +4161,24 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
     ) -> Result<ResumeOutcome> {
         match self.web.current_show(bearer).await {
             Ok(CurrentShowResponse {
+                on_air,
                 show: Some(show),
                 control: Some(control),
                 ingest,
             }) if live.as_ref().is_none_or(|live| live.id == show.id) => {
+                let device_id = lock(&self.slot).device.id.clone();
+                if on_air.as_ref().is_some_and(|air| {
+                    !air.waiting && air.device_id.as_deref().is_some_and(|id| id != device_id)
+                }) {
+                    return Err(cloud_refusal("cloud-show-live-elsewhere"));
+                }
                 let show_id = show.id.clone();
                 {
                     let mut runtime = lock(&self.slot);
+                    runtime.runner = Some(RunnerState {
+                        on_air,
+                        ..RunnerState::default()
+                    });
                     runtime.show = Some(ActiveShow {
                         record: show,
                         control,
@@ -3620,9 +4200,7 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
                 )
                 .await
             }
-            _ => bail!(
-                "You're still live through Videorc Cloud, but the show could not be picked up. End it from videorc.com/live or try again."
-            ),
+            _ => bail!("Your show could not be picked up. Try Continue here again."),
         }
     }
 
@@ -3683,6 +4261,23 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
         let frame = self.destination_frame(destinations_set_frame(&id, destinations, true));
         if let Err(problem) = tx.intent(frame, id, ACK_TIMEOUT).await {
             lock(&self.slot).destinations_generation.stop();
+            if !lock(&self.slot).created_this_run.contains(show_id) {
+                let mut runtime = lock(&self.slot);
+                if let Some(show) = runtime
+                    .show
+                    .as_mut()
+                    .filter(|show| show.record.id == show_id)
+                {
+                    show.session_id = None;
+                    show.resuming = false;
+                    show.destinations.clear();
+                }
+                drop(runtime);
+                self.hooks.emit_from(&self.slot);
+                bail!(
+                    "Videorc Cloud did not take the destinations. Use Continue here to keep the live show."
+                );
+            }
             let end_id = new_intent_id();
             let _ = tx
                 .intent(intent_frame(&end_id, "show.end"), end_id, END_ACK_TIMEOUT)
@@ -3816,6 +4411,26 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
                 show.ingest.clone(),
             )
         };
+        if destinations.is_some() {
+            let runtime = lock(&self.slot);
+            let elsewhere = match current
+                .as_ref()
+                .ok()
+                .and_then(|current| current.on_air.as_ref())
+            {
+                Some(air) => {
+                    !air.waiting
+                        && air
+                            .device_id
+                            .as_deref()
+                            .is_some_and(|id| id != runtime.device.id)
+                }
+                None => runtime.live_elsewhere(),
+            };
+            if elsewhere {
+                return Err(cloud_refusal("cloud-show-live-elsewhere"));
+            }
+        }
         // Plan 234: a show on a control transport this build does not know
         // is neither gone nor lost. The resume fails before anything is
         // asked or reported, and the show stays held.
@@ -3824,6 +4439,37 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
                 "This version of Videorc can't resume this Videorc Cloud show. Update Videorc, or end the show from videorc.com/live."
             );
         }
+        let mut claim = ResumeClaimGuard {
+            slot: self.slot.clone(),
+            show_id: show_id.into(),
+            session_id: session_id.into(),
+            keep: false,
+        };
+        let ingest = if control.transport_kind() == ControlKind::Web {
+            let device = self.device().await;
+            let answer = self
+                .web
+                .on_air(bearer, show_id, &device, "feed", "prepare")
+                .await
+                .map_err(anyhow::Error::new)?;
+            let mut runtime = lock(&self.slot);
+            runtime.pending_feed_go = answer
+                .on_air
+                .as_ref()
+                .is_some_and(|air| air.source == Some(CloudAirSource::Camera) && !air.waiting);
+            let ingest = answer.ingest.filter(|entries| !entries.is_empty());
+            if ingest.is_none() {
+                runtime.pending_feed_go = false;
+                runtime.claiming_air = false;
+                bail!(
+                    "Videorc Cloud could not hand back the show's ingest address. Try Continue here again."
+                );
+            }
+            runtime.claiming_air = true;
+            ingest
+        } else {
+            ingest
+        };
         let (mut transport, mut welcome) = match self.open_control(bearer, show_id, &control).await
         {
             Ok(connected) => connected,
@@ -3877,6 +4523,7 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
                 show.record = record;
                 show.ingest = Some(ingest.clone());
             }
+            runtime.stopped_by = None;
             runtime.end_reason = None;
             runtime.message = None;
             runtime.restart = None;
@@ -3908,12 +4555,319 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
                 send_hold_image(&tx, hold_image_png_base64).await
             }
         }
+        claim.keep = true;
         Ok(ResumeOutcome::Resumed(PrepareOutcome::Cloud(
             SessionHandover {
                 show_id: show_id.to_string(),
                 ingest,
             },
         )))
+    }
+
+    /// D10: idle discovery and a throttled focus check share one clock.
+    pub async fn check_current_show(&self, bearer: &str, focus: bool) -> Result<()> {
+        {
+            let mut runtime = lock(&self.slot);
+            let spacing = Duration::from_secs(if focus { 10 } else { 60 });
+            if runtime.show.is_some()
+                || runtime.talk.is_some()
+                || !runtime.may_own_a_show()
+                || runtime
+                    .last_discovery
+                    .is_some_and(|at| at.elapsed() < spacing)
+            {
+                return Ok(());
+            }
+            runtime.last_discovery = Some(tokio::time::Instant::now());
+        }
+        self.detect_current_show(bearer).await.map(|_| ())
+    }
+
+    /// Runs only after the local session starts: never wait for a feed before sending it.
+    pub async fn finish_resume(&self, bearer: &str, started_session: &str) -> Result<()> {
+        let (show_id, generation, session_id) = {
+            let mut runtime = lock(&self.slot);
+            // Only the successful start that bound this prepare may finish it.
+            // Local recordings and direct starts do not own a resume claim.
+            if !runtime.claiming_air
+                || runtime.feeding_session().as_deref() != Some(started_session)
+            {
+                return Ok(());
+            }
+            if !runtime.pending_feed_go {
+                runtime.claiming_air = false;
+                return Ok(());
+            }
+            let show = runtime
+                .show
+                .as_ref()
+                .ok_or_else(|| cloud_refusal("cloud-nothing-to-resume"))?;
+            (
+                show.record.id.clone(),
+                runtime.generation,
+                show.session_id.clone(),
+            )
+        };
+        let _claim = ResumeClaimGuard {
+            slot: self.slot.clone(),
+            show_id: show_id.clone(),
+            session_id: started_session.into(),
+            keep: false,
+        };
+        let device = self.device().await;
+        let still_feeding = || {
+            let runtime = lock(&self.slot);
+            runtime.generation == generation
+                && runtime.stopped_by.is_none()
+                && runtime.show.as_ref().is_some_and(|show| {
+                    show.record.id == show_id
+                        && show.session_id == session_id
+                        && session_id.is_some()
+                })
+        };
+        let result = async {
+            let go_deadline = tokio::time::Instant::now() + Duration::from_secs(40);
+            loop {
+                if !still_feeding() {
+                    return Err(cloud_refusal("cloud-not-on-air"));
+                }
+                if tokio::time::Instant::now() >= go_deadline {
+                    return Err(cloud_refusal("cloud-source-not-ready"));
+                }
+                match tokio::time::timeout_at(
+                    go_deadline,
+                    self.web.on_air(bearer, &show_id, &device, "feed", "go"),
+                )
+                .await
+                {
+                    Ok(Ok(answer)) => {
+                        let mut runtime = lock(&self.slot);
+                        if let Some(ControlHandle::Web(tx)) = runtime.control_tx.as_ref() {
+                            tx.observe_revision(answer.rev);
+                        }
+                        if let Some(state) = runtime.runner.as_mut() {
+                            state.on_air = answer.on_air;
+                        }
+                        return Ok(());
+                    }
+                    Ok(Err(CloudApiError::Other { status, code, .. }))
+                        if (status == 503
+                            || (status == 409 && code == "cloud-source-not-ready"))
+                            && tokio::time::Instant::now() < go_deadline =>
+                    {
+                        tokio::time::sleep_until(
+                            (tokio::time::Instant::now() + Duration::from_secs(1)).min(go_deadline),
+                        )
+                        .await
+                    }
+                    Ok(Err(error)) => return Err(anyhow::Error::new(error)),
+                    Err(_) => return Err(cloud_refusal("cloud-source-not-ready")),
+                }
+            }
+        }
+        .await;
+        if result.is_err() && still_feeding() {
+            // Use the continuation intent for finalization; preserve the show.
+            self.stop_for_continuation(&show_id, CloudStoppedBy::HandOff)
+                .await?;
+        }
+        {
+            let mut runtime = lock(&self.slot);
+            runtime.pending_feed_go = false;
+            runtime.claiming_air = false;
+        }
+        self.hooks.emit_from(&self.slot);
+        result
+    }
+
+    pub fn set_reconnect_candidates(&self, candidates: Vec<HandoverDestination>) {
+        let mut runtime = lock(&self.slot);
+        let legs = runtime
+            .runner
+            .as_ref()
+            .map(|r| r.legs.clone())
+            .unwrap_or_default();
+        if let Some(show) = runtime.show.as_mut() {
+            show.destinations = reconnect_candidates(&legs, &candidates);
+        }
+    }
+
+    pub fn resume_chat_settings(&self, streaming: &mut crate::streaming::StreamingSettings) {
+        let runtime = lock(&self.slot);
+        let legs = runtime
+            .runner
+            .as_ref()
+            .map(|r| r.legs.as_slice())
+            .unwrap_or_default();
+        for target in streaming
+            .targets
+            .iter_mut()
+            .filter(|t| t.enabled && t.platform == StreamPlatform::Youtube)
+        {
+            let matching: Vec<_> = legs
+                .iter()
+                .filter(|leg| {
+                    leg.platform == "youtube"
+                        && leg.orientation == orientation_id(target.effective_output_orientation())
+                })
+                .collect();
+            if let Some(leg) = if matching.len() == 1 {
+                matching.first().copied()
+            } else {
+                let by_label: Vec<_> = matching
+                    .into_iter()
+                    .filter(|leg| leg.label == target.label)
+                    .collect();
+                (by_label.len() == 1).then(|| by_label[0])
+            } {
+                target.platform_broadcast_id = leg
+                    .broadcast_id
+                    .clone()
+                    .or_else(|| target.platform_broadcast_id.clone());
+            }
+        }
+    }
+
+    /// Plan 243 D7: stop this computer while leaving every cloud leg open.
+    pub async fn hand_off(&self, bearer: Option<String>) -> Result<HandOffAnswer> {
+        let device = self.device().await;
+        let (show_id, device, reclaim_host) = {
+            let runtime = lock(&self.slot);
+            let show = runtime
+                .show
+                .as_ref()
+                .ok_or_else(|| cloud_refusal("cloud-nothing-to-resume"))?;
+            if show.control.transport_kind() != ControlKind::Web || show.record.is_test() {
+                return Err(cloud_refusal("cloud-handoff-unsupported"));
+            }
+            if show.session_id.is_none() && runtime.talk.is_none() {
+                return Err(cloud_refusal("cloud-not-on-air"));
+            }
+            let reclaim_host = runtime.held_connected_talk() && runtime.air_names_another_device();
+            if !reclaim_host
+                && runtime
+                    .runner
+                    .as_ref()
+                    .and_then(|r| r.on_air.as_ref())
+                    .is_some_and(|air| air.device_id.as_deref() != Some(&runtime.device.id))
+            {
+                return Err(cloud_refusal("cloud-not-on-air"));
+            }
+            (show.record.id.clone(), device, reclaim_host)
+        };
+        if reclaim_host {
+            let token = bearer
+                .as_deref()
+                .ok_or_else(|| anyhow::Error::new(CloudApiError::Unauthorized))?;
+            self.claim_talk_host(
+                token,
+                &show_id,
+                Some(tokio::time::Instant::now() + crate::cloud_control_web::CONTROL_INTENT_BUDGET),
+            )
+            .await?;
+        }
+        {
+            let mut runtime = lock(&self.slot);
+            if runtime
+                .show
+                .as_ref()
+                .is_none_or(|show| show.record.id != show_id)
+            {
+                return Err(cloud_refusal("cloud-not-on-air"));
+            }
+            // The isolated Stop lane can run while the POST is pending.
+            runtime.stopped_by = Some(CloudStoppedBy::HandOff);
+        }
+        self.hooks.emit_from(&self.slot);
+        // A failed POST must still leave viewers on the hold card.
+        let posted = match bearer {
+            Some(bearer) => self
+                .web
+                .hand_off(&bearer, &show_id, &device)
+                .await
+                .map_err(anyhow::Error::new),
+            None => Err(anyhow::Error::new(CloudApiError::Unauthorized)),
+        };
+        self.stop_for_continuation(&show_id, CloudStoppedBy::HandOff)
+            .await?;
+        if posted.is_err() {
+            lock(&self.slot).message = Some(
+                "This computer stopped sending. Videorc Cloud could not confirm the hand-off."
+                    .into(),
+            );
+            self.hooks.emit_from(&self.slot);
+        }
+        Ok(HandOffAnswer {
+            ok: true,
+            confirmed: posted.is_ok(),
+        })
+    }
+
+    pub(crate) async fn stop_for_continuation(
+        &self,
+        show_id: &str,
+        reason: CloudStoppedBy,
+    ) -> Result<()> {
+        let (session, talk) = {
+            let mut runtime = lock(&self.slot);
+            if runtime.continuation_stop_in_flight
+                || runtime.show.as_ref().is_none_or(|s| s.record.id != show_id)
+            {
+                return Ok(());
+            }
+            runtime.continuation_stop_in_flight = true;
+            runtime.stopped_by = Some(reason);
+            runtime.destinations_generation.stop();
+            runtime.feed_down_since = None;
+            runtime.failed = None;
+            (runtime.feeding_session(), runtime.talk.is_some())
+        };
+        // Must reach the renderer before the local stop event (D7).
+        self.hooks.emit_from(&self.slot);
+        let stopped = if session.is_some() || talk {
+            match (self.hooks.stop)().await {
+                Ok(()) | Err(CloudStopFailure::NoActiveSession) => Ok(()),
+                Err(CloudStopFailure::Failed(message)) => Err(message),
+            }
+        } else {
+            Ok(())
+        };
+        if talk && stopped.is_ok() {
+            for slot in [
+                crate::cloud_talk::CloudOverlaySlot::Card,
+                crate::cloud_talk::CloudOverlaySlot::Takeover,
+                crate::cloud_talk::CloudOverlaySlot::Hold,
+            ] {
+                for orientation in [
+                    crate::cloud_talk::CloudOverlayOrientation::H,
+                    crate::cloud_talk::CloudOverlayOrientation::V,
+                ] {
+                    let _ = self.clear_overlay(slot, orientation).await;
+                }
+            }
+            self.forget_talk_show().await;
+        }
+        {
+            let mut runtime = lock(&self.slot);
+            runtime.continuation_stop_in_flight = false;
+            if stopped.is_err() {
+                // Nothing stopped: a later ordinary Stop keeps its normal intent.
+                runtime.stopped_by = None;
+                runtime.message =
+                    Some("This computer could not stop sending. Try Stop again.".into());
+            }
+            if stopped.is_ok()
+                && let Some(show) = runtime.show.as_mut().filter(|s| s.record.id == show_id)
+            {
+                show.session_id = None;
+                show.resuming = false;
+                show.destinations.clear();
+                runtime.ending = false;
+                runtime.keep_remembering(show_id);
+            }
+        }
+        self.hooks.emit_from(&self.slot);
+        stopped.map_err(anyhow::Error::msg)
     }
 
     /// The desktop's Stop (C4): end the show this session fed. The YouTube
@@ -3923,6 +4877,16 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
             let runtime = lock(&self.slot);
             runtime.feeding_session().as_deref() == Some(session_id)
         };
+        if feeding && lock(&self.slot).stopped_by.is_some() {
+            let mut runtime = lock(&self.slot);
+            if let Some(show) = runtime.show.as_mut() {
+                show.session_id = None;
+                show.resuming = false;
+            }
+            drop(runtime);
+            self.hooks.emit_from(&self.slot);
+            return;
+        }
         if feeding {
             let _ = self.end_current_show(bearer).await;
             return;
@@ -4052,6 +5016,11 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
             (tx, frame)
         };
         if let Err(problem) = tx.intent(frame, id, ACK_TIMEOUT).await {
+            if problem.contains("destination-changed") {
+                bail!(
+                    "This computer's saved stream key does not match the live show. Use the same key to reconnect this destination."
+                );
+            }
             bail!("Videorc Cloud did not take the reconnect: {problem}");
         }
         Ok(lock(&self.slot).status())
@@ -4065,6 +5034,7 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
     pub async fn detect_current_show(&self, bearer: &str) -> Result<CloudStatus> {
         let cleanup_generation = {
             let mut runtime = lock(&self.slot);
+            runtime.last_discovery = Some(tokio::time::Instant::now());
             if runtime.launch_check_in_flight {
                 return Ok(runtime.status());
             }
@@ -4204,6 +5174,10 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
                 break 'held Err(runtime.generation);
             }
             runtime.failed = None;
+            runtime.runner = Some(RunnerState {
+                on_air: current.on_air.clone(),
+                ..RunnerState::default()
+            });
             runtime.show = Some(ActiveShow {
                 record: show.clone(),
                 control: control.clone(),
@@ -4796,6 +5770,7 @@ impl<W: CloudWebApi, C: ControlConnector> CloudTestRun<W, C> {
     async fn run_inner(&mut self) -> Option<CloudTestResult> {
         // 1. The show: `kind: "test"`, the same outputs a show would carry.
         let request = CreateShowRequest {
+            device: self.context.request_device().await,
             kind: "test".to_string(),
             outputs: self.outputs.clone(),
             hold_max_seconds: self.hold_max_seconds,
@@ -5035,6 +6010,7 @@ mod tests {
     fn destinations() -> Vec<HandoverDestination> {
         vec![
             HandoverDestination {
+                broadcast_id: None,
                 id: "youtube-main".to_string(),
                 platform: "youtube".to_string(),
                 label: "YouTube".to_string(),
@@ -5042,6 +6018,7 @@ mod tests {
                 url: format!("rtmps://a.rtmp.youtube.com/live2/{YOUTUBE_KEY}"),
             },
             HandoverDestination {
+                broadcast_id: None,
                 id: "twitch-main".to_string(),
                 platform: "twitch".to_string(),
                 label: "Twitch".to_string(),
@@ -5138,6 +6115,15 @@ mod tests {
         create_calls: AtomicUsize,
         /// The `kind` of every create, in order (C6b sends `test`).
         create_kinds: StdMutex<Vec<String>>,
+        create_has_device: StdMutex<Vec<bool>>,
+        on_air_calls: StdMutex<Vec<(String, String)>>,
+        on_air_without_ingest: std::sync::atomic::AtomicBool,
+        go_ready: std::sync::atomic::AtomicBool,
+        go_errors: StdMutex<VecDeque<CloudApiError>>,
+        hand_off_gate: StdMutex<Option<CurrentReplyGate>>,
+        hand_off_calls: AtomicUsize,
+        hand_off_fails: std::sync::atomic::AtomicBool,
+        hand_off_errors: StdMutex<VecDeque<CloudApiError>>,
         end_calls: StdMutex<Vec<String>>,
         /// The web cannot be reached for `end` (plan 222 review M1).
         end_fails: std::sync::atomic::AtomicBool,
@@ -5163,6 +6149,7 @@ mod tests {
         // Plan 234: web control, the managed show this web holds.
         managed: StdMutex<FakeManaged>,
         managed_changed: tokio::sync::Notify,
+        poll_idle: StdMutex<Vec<bool>>,
     }
 
     /// Plan 234: the managed show as the fake web holds it (web control). A
@@ -5250,6 +6237,10 @@ mod tests {
             if delay > 0 {
                 tokio::time::sleep(Duration::from_millis(delay as u64)).await;
             }
+            self.create_has_device
+                .lock()
+                .unwrap()
+                .push(request.device.is_some());
             self.create_calls.fetch_add(1, Ordering::SeqCst);
             self.create_kinds.lock().unwrap().push(request.kind.clone());
             if let Some(answer) = self.create_queue.lock().unwrap().pop_front() {
@@ -5279,6 +6270,72 @@ mod tests {
                 let _ = release.await;
             }
             answer
+        }
+
+        async fn on_air(
+            &self,
+            _bearer: &str,
+            _show_id: &str,
+            device: &CloudDevice,
+            source: &str,
+            step: &str,
+        ) -> std::result::Result<OnAirAnswer, CloudApiError> {
+            self.on_air_calls
+                .lock()
+                .unwrap()
+                .push((source.into(), step.into()));
+            let mut state = self.managed.lock().unwrap().state.clone();
+            let browser = state["onAir"]["source"] == "camera";
+            if source == "feed"
+                && step == "go"
+                && let Some(error) = self.go_errors.lock().unwrap().pop_front()
+            {
+                return Err(error);
+            }
+            if step == "go"
+                && source == "feed"
+                && !self.go_ready.load(Ordering::SeqCst)
+                && !state["feeds"]
+                    .as_array()
+                    .is_some_and(|feeds| feeds.iter().all(|f| f["connected"] == true))
+            {
+                return Err(web_error(409, "cloud-source-not-ready"));
+            }
+            if !browser || step == "go" || source == "host" {
+                state["onAir"] = json!({"deviceId":device.id, "name":device.name, "kind":"computer","source":source,"since":"now","waiting":false});
+                self.set_state(state.clone());
+            }
+            Ok(OnAirAnswer {
+                rev: Some(self.managed.lock().unwrap().rev),
+                on_air: serde_json::from_value(state["onAir"].clone()).ok(),
+                ingest: if self.on_air_without_ingest.load(Ordering::SeqCst) {
+                    None
+                } else {
+                    Some(created_managed().ingest)
+                },
+            })
+        }
+
+        async fn hand_off(
+            &self,
+            _bearer: &str,
+            _show_id: &str,
+            _device: &CloudDevice,
+        ) -> std::result::Result<(), CloudApiError> {
+            self.hand_off_calls.fetch_add(1, Ordering::SeqCst);
+            let gate = self.hand_off_gate.lock().unwrap().take();
+            if let Some((entered, held)) = gate {
+                let _ = entered.send(());
+                let _ = held.await;
+            }
+            if let Some(error) = self.hand_off_errors.lock().unwrap().pop_front() {
+                return Err(error);
+            }
+            if self.hand_off_fails.load(Ordering::SeqCst) {
+                Err(CloudApiError::NodeUnreachable)
+            } else {
+                Ok(())
+            }
         }
 
         async fn end_show(
@@ -5452,7 +6509,9 @@ mod tests {
             _bearer: &str,
             _show_id: &str,
             since: Option<u64>,
+            idle: bool,
         ) -> std::result::Result<ControlStateAnswer, CloudApiError> {
+            self.poll_idle.lock().unwrap().push(idle);
             let delay = self.first_state_delay_ms.load(Ordering::SeqCst);
             if since.is_none() && delay > 0 {
                 tokio::time::sleep(Duration::from_millis(delay as u64)).await;
@@ -5732,6 +6791,7 @@ mod tests {
         let requests = Arc::new(StdMutex::new(Vec::new()));
         let overlays = Arc::new(StdMutex::new(Vec::new()));
         let hooks = CloudHooks {
+            stop: Arc::new(|| Box::pin(async { Ok(()) })),
             emit: {
                 let emitted = emitted.clone();
                 Arc::new(move |status| emitted.lock().unwrap().push(status))
@@ -5927,6 +6987,7 @@ mod tests {
         );
         // The create carried the room block the web parses.
         let request = CreateShowRequest {
+            device: None,
             kind: "talk".to_string(),
             outputs: Vec::new(),
             hold_max_seconds: 1800,
@@ -6137,6 +7198,7 @@ mod tests {
     fn held_talk_current() -> CurrentShowResponse {
         let created = created_talk();
         CurrentShowResponse {
+            on_air: None,
             show: Some(created.show.clone()),
             control: Some(created.control.clone()),
             ingest: None,
@@ -6296,6 +7358,7 @@ mod tests {
             .lock()
             .unwrap()
             .push_back(Ok(CurrentShowResponse {
+                on_air: None,
                 show: None,
                 control: None,
                 ingest: None,
@@ -6914,6 +7977,8 @@ mod tests {
             "/cloud/statusFallback",
             "/cloud/statusTest",
             "/cloud/statusTalk",
+            "/cloud/statusOnAirElsewhere",
+            "/cloud/statusWaiting",
         ] {
             let wire = high_risk_fixture(pointer);
             let status: CloudStatus = serde_json::from_value(wire.clone()).unwrap();
@@ -6936,6 +8001,29 @@ mod tests {
         assert_eq!(params.outputs.len(), 1);
         assert_eq!(params.outputs[0].video_kbps, 6000);
         assert_eq!(params.ffmpeg_path, None);
+    }
+
+    #[test]
+    fn cloud_device_names_are_plain_and_air_ids_stay_private() {
+        assert_eq!(
+            sanitize_device_name("  My\0Mac\u{0085}://studio  "),
+            "MyMac studio"
+        );
+        assert_eq!(sanitize_device_name(&"é".repeat(50)).chars().count(), 40);
+        assert_eq!(sanitize_device_name("\n"), "This computer");
+        let mut runtime = CloudShowRuntime::default();
+        let wire = json!({"onAir":{"deviceId":runtime.device.id,"name":"Mac", "kind":"computer","source":"feed","waiting":false,"since":"now"},"legs":[{"id":"yt","platform":"youtube","label":"YouTube","orientation":"horizontal","state":"live","broadcastId":"abc_123"}]});
+        runtime.runner = Some(serde_json::from_value(wire).unwrap());
+        assert_eq!(
+            runtime.runner.as_ref().unwrap().legs[0]
+                .broadcast_id
+                .as_deref(),
+            Some("abc_123")
+        );
+        let value = serde_json::to_value(runtime.status()).unwrap();
+        assert_eq!(value["onAir"]["thisDevice"], true);
+        assert!(value["onAir"].get("deviceId").is_none());
+        assert!(!format!("{:?}", runtime.device).contains(&runtime.device.id));
     }
 
     #[test]
@@ -7171,12 +8259,14 @@ mod tests {
             ("something-new", StreamTargetState::Warning),
         ] {
             let leg = RunnerLeg {
+                broadcast_id: None,
                 state: wire.to_string(),
                 ..RunnerLeg::default()
             };
             assert_eq!(runner_leg_to_runtime(&leg).state, expected, "{wire}");
         }
         let unknown_platform = RunnerLeg {
+            broadcast_id: None,
             platform: "mastodon-live".to_string(),
             ..RunnerLeg::default()
         };
@@ -8144,6 +9234,7 @@ mod tests {
             .lock()
             .unwrap()
             .push_back(Ok(CurrentShowResponse {
+                on_air: None,
                 show: Some(ShowRecord {
                     status: "live".to_string(),
                     ..created.show.clone()
@@ -8176,6 +9267,7 @@ mod tests {
             .lock()
             .unwrap()
             .push_back(Ok(CurrentShowResponse {
+                on_air: None,
                 show: Some(ShowRecord {
                     status: "live".to_string(),
                     ..created.show.clone()
@@ -8252,6 +9344,7 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push_back(Ok(CurrentShowResponse {
+                    on_air: None,
                     show: Some(stale.clone()),
                     control: Some(stale_control.clone()),
                     ingest: None,
@@ -8310,6 +9403,7 @@ mod tests {
             .lock()
             .unwrap()
             .push_back(Ok(CurrentShowResponse {
+                on_air: None,
                 show: None,
                 control: None,
                 ingest: None,
@@ -8350,6 +9444,7 @@ mod tests {
             .lock()
             .unwrap()
             .push_back(Ok(CurrentShowResponse {
+                on_air: None,
                 show: Some(created.show.clone()),
                 control: Some(created.control.clone()),
                 ingest: None,
@@ -8371,6 +9466,7 @@ mod tests {
             .lock()
             .unwrap()
             .push_back(Ok(CurrentShowResponse {
+                on_air: None,
                 show: Some(created.show.clone()),
                 control: Some(created.control.clone()),
                 ingest: None,
@@ -8684,6 +9780,7 @@ mod tests {
     /// `GET current` for the held show: no ingest (the web never stores it).
     fn held_current(created: &CreateShowResponse) -> CurrentShowResponse {
         CurrentShowResponse {
+            on_air: None,
             show: Some(ShowRecord {
                 status: "hold".to_string(),
                 ..created.show.clone()
@@ -9381,6 +10478,7 @@ mod tests {
         assert_eq!(info.app, "desktop");
         assert_eq!(info.version, "0.9.143");
         let wire = serde_json::to_value(&CreateShowRequest {
+            device: None,
             kind: "solo".to_string(),
             outputs: Vec::new(),
             hold_max_seconds: 1800,
@@ -10362,6 +11460,7 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push_back(Ok(CurrentShowResponse {
+                    on_air: None,
                     show: Some(created.show.clone()),
                     control: Some(created.control.clone()),
                     ingest: None,
@@ -10455,6 +11554,7 @@ mod tests {
             .lock()
             .unwrap()
             .push_back(Ok(CurrentShowResponse {
+                on_air: None,
                 show: Some(ShowRecord {
                     status: "live".to_string(),
                     ..created().show
@@ -10493,6 +11593,7 @@ mod tests {
             .lock()
             .unwrap()
             .push_back(Ok(CurrentShowResponse {
+                on_air: None,
                 show: Some(ShowRecord {
                     status: "ended".to_string(),
                     ..created().show
@@ -10800,6 +11901,7 @@ mod tests {
     fn managed_current(status: &str) -> CurrentShowResponse {
         let created = created_managed();
         CurrentShowResponse {
+            on_air: None,
             show: Some(ShowRecord {
                 status: status.to_string(),
                 ..created.show
@@ -11143,6 +12245,961 @@ mod tests {
         // A target this show never had sends nothing.
         assert!(harness.context.reconnect_destination("nope").await.is_err());
         assert_eq!(web.destination_bodies().len(), 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn r2_a_m3_failed_talk_preparation_never_claims_the_host() {
+        for camera_busy in [true, false] {
+            let harness = harness(true);
+            hold_unconnected_for_review(&harness, true);
+            harness
+                .context
+                .web
+                .set_state(managed_talk_state(json!([]), true, 1));
+            harness.camera_busy.store(camera_busy, Ordering::SeqCst);
+            if !camera_busy {
+                harness
+                    .context
+                    .web
+                    .fail_polls([CloudApiError::Unauthorized]);
+            }
+            assert!(
+                harness
+                    .context
+                    .resume_room(Some("bearer".into()))
+                    .await
+                    .is_err()
+            );
+            assert!(harness.context.web.on_air_calls.lock().unwrap().is_empty());
+            assert!(lock(&harness.context.slot).talk.is_none());
+            assert!(harness.context.web.end_calls.lock().unwrap().is_empty());
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn r2_a_m4_connected_host_reclaims_after_an_unjoined_phone_claim() {
+        use crate::cloud_talk::{CloudRoomClientState, RoomClientReportParams};
+        for action in ["hand-off", "resume", "automatic"] {
+            let harness = harness(true);
+            managed_room(&harness).await;
+            harness.context.report_client(RoomClientReportParams {
+                state: CloudRoomClientState::Connected,
+                detail: None,
+            });
+            let mut state = managed_talk_state(json!([]), true, 1);
+            state["onAir"] = json!({"deviceId":"BBBBBBBBBBBBBBBBBBBBBB","kind":"phone","source":"host","waiting":false});
+            harness.context.web.set_state(state);
+            wait_until(|| {
+                lock(&harness.context.slot)
+                    .status()
+                    .on_air
+                    .is_some_and(|air| !air.this_device)
+            })
+            .await;
+            match action {
+                "hand-off" => {
+                    harness
+                        .context
+                        .hand_off(Some("bearer".into()))
+                        .await
+                        .unwrap();
+                }
+                "resume" => {
+                    harness
+                        .context
+                        .resume_room(Some("bearer".into()))
+                        .await
+                        .unwrap();
+                }
+                _ => {
+                    tokio::time::sleep(Duration::from_secs(6)).await;
+                }
+            }
+            assert_eq!(
+                harness.context.web.on_air_calls.lock().unwrap().as_slice(),
+                &[("host".into(), "go".into())]
+            );
+            tokio::time::sleep(Duration::from_secs(10)).await;
+            assert_eq!(harness.context.web.on_air_calls.lock().unwrap().len(), 1);
+            assert!(harness.context.web.end_calls.lock().unwrap().is_empty());
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn r2_a_m5_a_completed_local_hand_off_answers_success_even_without_web_confirmation() {
+        for error in [
+            None,
+            Some(CloudApiError::Unauthorized),
+            Some(web_error(404, "not-found")),
+            Some(web_error(503, "cloud-media-unavailable")),
+        ] {
+            let harness = harness(true);
+            managed_live_show(&harness).await;
+            let confirmed = error.is_none();
+            if let Some(error) = error {
+                harness
+                    .context
+                    .web
+                    .hand_off_errors
+                    .lock()
+                    .unwrap()
+                    .push_back(error);
+            }
+            let answer = harness
+                .context
+                .hand_off(Some("bearer".into()))
+                .await
+                .unwrap();
+            assert_eq!(
+                serde_json::to_value(answer).unwrap(),
+                json!({"ok":true,"confirmed":confirmed})
+            );
+            assert!(lock(&harness.context.slot).status().show.unwrap().resumable);
+            assert!(harness.context.web.end_calls.lock().unwrap().is_empty());
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn r2_a_m6_go_live_never_claims_a_show_live_elsewhere() {
+        let harness = harness(true);
+        hold_unconnected_for_review(&harness, false);
+        lock(&harness.context.slot).runner = Some(serde_json::from_value(json!({"onAir":{"deviceId":"BBBBBBBBBBBBBBBBBBBBBB","name":"Private phone","kind":"phone","source":"camera","waiting":false}})).unwrap());
+        let Err(error) = harness
+            .context
+            .prepare_session(
+                "new-live",
+                Some("bearer".into()),
+                managed_outputs(),
+                destinations(),
+                None,
+            )
+            .await
+        else {
+            panic!("Go Live must refuse without returning a handover");
+        };
+        assert_eq!(
+            continuation_error_code(&error),
+            Some("cloud-show-live-elsewhere")
+        );
+        assert_eq!(
+            error.to_string(),
+            "Your show is live on another device. Use Continue here, or end it first."
+        );
+        assert!(harness.context.web.on_air_calls.lock().unwrap().is_empty());
+        assert!(harness.context.web.destination_bodies().is_empty());
+        assert!(harness.context.web.end_calls.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn r2_a_m6_failed_handover_never_ends_an_adopted_show() {
+        let harness = harness(true);
+        hold_unconnected_for_review(&harness, false);
+        harness
+            .context
+            .web
+            .set_state(managed_state("live", live_legs()));
+        harness
+            .context
+            .web
+            .managed
+            .lock()
+            .unwrap()
+            .destinations_answers
+            .push_back(Err(DestinationsFailure {
+                error: web_error(422, "invalid-destinations"),
+                refused: Vec::new(),
+            }));
+        assert!(
+            harness
+                .context
+                .resume_into_session("new-live", "bearer", "sh_abc", Some(destinations()), None)
+                .await
+                .is_err()
+        );
+        assert!(harness.context.web.end_calls.lock().unwrap().is_empty());
+        assert!(lock(&harness.context.slot).status().show.unwrap().resumable);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn r2_a_m6_talk_go_live_also_refuses_a_show_live_elsewhere() {
+        let harness = harness(true);
+        managed_room(&harness).await;
+        let mut state = managed_talk_state(live_legs(), true, 1);
+        state["onAir"] = json!({"deviceId":"BBBBBBBBBBBBBBBBBBBBBB","kind":"phone","source":"host","waiting":false});
+        harness.context.web.set_state(state);
+        wait_until(|| {
+            lock(&harness.context.slot)
+                .status()
+                .on_air
+                .is_some_and(|air| !air.this_device)
+        })
+        .await;
+        let Err(error) = harness
+            .context
+            .talk_go_live(Some("bearer".into()), destinations(), Vec::new())
+            .await
+        else {
+            panic!("Go Live must refuse elsewhere");
+        };
+        assert_eq!(
+            continuation_error_code(&error),
+            Some("cloud-show-live-elsewhere")
+        );
+        assert!(harness.context.web.destination_bodies().is_empty());
+        assert!(harness.context.web.end_calls.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn r2_a_m7_unfed_keyless_computers_poll_as_idle() {
+        let harness = harness(true);
+        managed_live_show(&harness).await;
+        assert!(
+            harness
+                .context
+                .web
+                .poll_idle
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|idle| !idle)
+        );
+        harness
+            .context
+            .stop_for_continuation("sh_abc", CloudStoppedBy::HandOff)
+            .await
+            .unwrap();
+        harness
+            .context
+            .web
+            .set_state(managed_state("live", live_legs()));
+        tokio::time::sleep(Duration::from_secs(28)).await;
+        assert_eq!(
+            harness.context.web.poll_idle.lock().unwrap().last(),
+            Some(&true)
+        );
+        harness
+            .context
+            .resume_session("resumed", Some("bearer".into()), None)
+            .await
+            .unwrap();
+        harness
+            .context
+            .finish_resume("bearer", "resumed")
+            .await
+            .unwrap();
+        harness
+            .context
+            .web
+            .set_state(managed_state("live", live_legs()));
+        tokio::time::sleep(Duration::from_secs(28)).await;
+        assert_eq!(
+            harness.context.web.poll_idle.lock().unwrap().last(),
+            Some(&false)
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn r2_a_l1_go_uses_the_full_budget_without_a_feed_webhook() {
+        let harness = harness(true);
+        managed_live_show(&harness).await;
+        {
+            let mut runtime = lock(&harness.context.slot);
+            runtime.pending_feed_go = true;
+            runtime.claiming_air = true;
+        }
+        harness.context.web.go_ready.store(true, Ordering::SeqCst);
+        harness
+            .context
+            .web
+            .go_errors
+            .lock()
+            .unwrap()
+            .extend((0..39).map(|i| {
+                web_error(
+                    if i % 2 == 0 { 503 } else { 409 },
+                    if i % 2 == 0 {
+                        "cloud-media-unavailable"
+                    } else {
+                        "cloud-source-not-ready"
+                    },
+                )
+            }));
+        let mut state = managed_state("live", live_legs());
+        state["feeds"][0]["connected"] = json!(false);
+        harness.context.web.set_state(state);
+        let started = tokio::time::Instant::now();
+        harness
+            .context
+            .finish_resume("bearer", "session-1")
+            .await
+            .unwrap();
+        assert!(started.elapsed() >= Duration::from_secs(39));
+        assert!(started.elapsed() < Duration::from_secs(40));
+        assert_eq!(
+            harness
+                .context
+                .web
+                .on_air_calls
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(_, step)| step == "go")
+                .count(),
+            40
+        );
+        assert!(harness.context.web.end_calls.lock().unwrap().is_empty());
+    }
+    #[tokio::test(start_paused = true)]
+    async fn r2_a_l1_an_unready_feed_gets_the_entire_forty_second_budget() {
+        let harness = harness(true);
+        managed_live_show(&harness).await;
+        {
+            let mut runtime = lock(&harness.context.slot);
+            runtime.pending_feed_go = true;
+            runtime.claiming_air = true;
+        }
+        let mut state = managed_state("live", live_legs());
+        state["feeds"][0]["connected"] = json!(false);
+        harness.context.web.set_state(state);
+        let started = tokio::time::Instant::now();
+        let error = harness
+            .context
+            .finish_resume("bearer", "session-1")
+            .await
+            .unwrap_err();
+        assert_eq!(
+            continuation_error_code(&error),
+            Some("cloud-source-not-ready")
+        );
+        assert_eq!(started.elapsed(), Duration::from_secs(40));
+        assert_eq!(harness.context.web.on_air_calls.lock().unwrap().len(), 40);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn r2_a_l2_adopt_accepts_this_device_or_waiting_and_refuses_elsewhere() {
+        for (own, waiting, allowed) in [
+            (true, false, true),
+            (false, true, true),
+            (false, false, false),
+        ] {
+            let harness = harness(true);
+            let mut current = held_current(&created_managed());
+            let id = if own {
+                lock(&harness.context.slot).device.id.clone()
+            } else {
+                "BBBBBBBBBBBBBBBBBBBBBB".into()
+            };
+            current.on_air = Some(CloudOnAirWire {
+                device_id: Some(id),
+                waiting,
+                kind: Some(CloudDeviceKind::Computer),
+                source: Some(CloudAirSource::Feed),
+                ..Default::default()
+            });
+            harness
+                .context
+                .web
+                .current
+                .lock()
+                .unwrap()
+                .push_back(Ok(current));
+            harness
+                .context
+                .web
+                .set_state(managed_state("live", live_legs()));
+            let answer = harness
+                .context
+                .adopt_live_show("new-live", "bearer", None, destinations(), None)
+                .await;
+            assert_eq!(answer.is_ok(), allowed);
+            if !allowed {
+                let error = answer.err().expect("elsewhere is refused");
+                assert_eq!(
+                    continuation_error_code(&error),
+                    Some("cloud-show-live-elsewhere")
+                );
+                assert!(!error.to_string().contains("End it"));
+            }
+            assert!(harness.context.web.end_calls.lock().unwrap().is_empty());
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn r2_a_l3_reholding_the_same_show_keeps_the_stop_marker() {
+        let harness = harness(true);
+        hold_unconnected_for_review(&harness, false);
+        lock(&harness.context.slot).stopped_by = Some(CloudStoppedBy::HandOff);
+        harness
+            .context
+            .web
+            .set_state(managed_state("live", live_legs()));
+        harness
+            .context
+            .hold_current_show("bearer", held_current(&created_managed()), 0)
+            .await
+            .unwrap();
+        assert_eq!(
+            lock(&harness.context.slot).stopped_by,
+            Some(CloudStoppedBy::HandOff)
+        );
+        harness
+            .context
+            .finish_resume("bearer", "local-recording")
+            .await
+            .unwrap();
+        assert_eq!(
+            lock(&harness.context.slot).stopped_by,
+            Some(CloudStoppedBy::HandOff)
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn r2_a_l4_a_concurrent_stop_during_hand_off_never_ends_the_show() {
+        let harness = harness(true);
+        managed_live_show(&harness).await;
+        let (entered, started) = oneshot::channel();
+        let (release, held) = oneshot::channel();
+        *harness.context.web.hand_off_gate.lock().unwrap() = Some((entered, held));
+        let context = harness.context.clone();
+        let hand_off = tokio::spawn(async move { context.hand_off(Some("bearer".into())).await });
+        started.await.unwrap();
+        harness
+            .context
+            .on_session_stopped("session-1", Some("bearer".into()))
+            .await;
+        assert!(harness.context.web.end_calls.lock().unwrap().is_empty());
+        release.send(()).unwrap();
+        hand_off.await.unwrap().unwrap();
+        assert!(lock(&harness.context.slot).status().show.unwrap().resumable);
+    }
+
+    #[test]
+    fn r2_a_l5_unknown_air_enums_do_not_break_state_or_status() {
+        let runtime = CloudShowRuntime { runner: Some(serde_json::from_value(json!({"onAir":{"deviceId":"BBBBBBBBBBBBBBBBBBBBBB","kind":"future-device","source":"future-source","waiting":false}})).unwrap()), ..CloudShowRuntime::default() };
+        let air = runtime.status().on_air.unwrap();
+        assert_eq!(air.kind, CloudDeviceKind::Computer);
+        assert_eq!(air.source, CloudAirSource::Feed);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn r2_a_l5_missing_persisted_identity_uses_legacy_create() {
+        let harness = harness(true);
+        lock(&harness.context.slot).device.id.clear();
+        managed_live_show(&harness).await;
+        assert_eq!(
+            harness
+                .context
+                .web
+                .create_has_device
+                .lock()
+                .unwrap()
+                .as_slice(),
+            &[false]
+        );
+    }
+    #[test]
+    fn r2_a_l5_loading_identity_defers_the_computer_name_lookup() {
+        let database = crate::storage::Database::open_in_memory_for_tests();
+        let device = load_device(&database);
+        assert!(device.name == "This computer");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn r2_a_l6_talk_hand_off_stops_a_local_recording_normally() {
+        let mut harness = harness(true);
+        managed_room(&harness).await;
+        let stops = Arc::new(AtomicUsize::new(0));
+        let observed = stops.clone();
+        harness.context.hooks.stop = Arc::new(move || {
+            observed.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async { Ok(()) })
+        });
+        harness
+            .context
+            .hand_off(Some("bearer".into()))
+            .await
+            .unwrap();
+        assert_eq!(stops.load(Ordering::SeqCst), 1);
+        assert!(harness.context.web.end_calls.lock().unwrap().is_empty());
+        assert!(lock(&harness.context.slot).status().show.unwrap().resumable);
+    }
+    #[tokio::test(start_paused = true)]
+    async fn r2_a_l6_an_already_ended_session_is_a_successful_continuation_stop() {
+        let mut harness = harness(true);
+        managed_live_show(&harness).await;
+        harness.context.hooks.stop =
+            Arc::new(|| Box::pin(async { Err(CloudStopFailure::NoActiveSession) }));
+        harness
+            .context
+            .hand_off(Some("bearer".into()))
+            .await
+            .unwrap();
+        assert!(lock(&harness.context.slot).status().show.unwrap().resumable);
+        assert!(harness.context.web.end_calls.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn r2_a_l6_a_refused_local_stop_retains_the_room_and_clears_the_pending_intent() {
+        let mut harness = harness(true);
+        managed_room(&harness).await;
+        harness.context.hooks.stop =
+            Arc::new(|| Box::pin(async { Err(CloudStopFailure::Failed("still sending".into())) }));
+        assert!(
+            harness
+                .context
+                .hand_off(Some("bearer".into()))
+                .await
+                .is_err()
+        );
+        let status = lock(&harness.context.slot).status();
+        assert!(status.room.is_some());
+        assert_eq!(status.stopped_by, None);
+        assert!(harness.context.web.end_calls.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn r2_a_l3_a_metadata_reclaim_cannot_clear_a_continuation_stop() {
+        let harness = harness(true);
+        managed_room(&harness).await;
+        lock(&harness.context.slot).stopped_by = Some(CloudStoppedBy::HandOff);
+        harness
+            .context
+            .claim_talk_host(
+                "bearer",
+                "sh_abc",
+                Some(tokio::time::Instant::now() + Duration::from_secs(20)),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            lock(&harness.context.slot).stopped_by,
+            Some(CloudStoppedBy::HandOff)
+        );
+    }
+
+    fn hold_unconnected_for_review(harness: &Harness, talk: bool) {
+        let created = if talk {
+            created_managed_talk()
+        } else {
+            created_managed()
+        };
+        lock(&harness.context.slot).show = Some(ActiveShow {
+            record: created.show,
+            control: created.control,
+            ingest: Some(created.ingest),
+            session_id: None,
+            destinations: Vec::new(),
+            handed_over: false,
+            hold_image_png_base64: None,
+            resuming: false,
+        });
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn r2_a_m1_failed_prepare_hello_does_not_poison_a_local_start() {
+        for error in [
+            CloudApiError::Unauthorized,
+            web_error(503, "cloud-media-unavailable"),
+        ] {
+            let harness = harness(true);
+            hold_unconnected_for_review(&harness, false);
+            let mut state = managed_state("live", live_legs());
+            state["onAir"] = json!({"deviceId":"BBBBBBBBBBBBBBBBBBBBBB","source":"camera","kind":"phone","waiting":false});
+            harness.context.web.set_state(state);
+            harness.context.web.fail_polls([error.clone(), error]);
+            assert!(
+                harness
+                    .context
+                    .resume_session("resume", Some("bearer".into()), None)
+                    .await
+                    .is_err()
+            );
+            assert!(!lock(&harness.context.slot).pending_feed_go);
+            assert!(!lock(&harness.context.slot).claiming_air);
+            // The post-start hook for an unrelated, successful local recording.
+            assert!(
+                harness
+                    .context
+                    .finish_resume("bearer", "local-recording")
+                    .await
+                    .is_ok()
+            );
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn r2_a_m1_an_unrelated_start_cannot_finish_another_sessions_claim() {
+        let harness = harness(true);
+        hold_unconnected_for_review(&harness, false);
+        {
+            let mut runtime = lock(&harness.context.slot);
+            runtime.show.as_mut().unwrap().session_id = Some("resume".into());
+            runtime.pending_feed_go = true;
+            runtime.claiming_air = true;
+        }
+        harness
+            .context
+            .finish_resume("bearer", "local-recording")
+            .await
+            .unwrap();
+        assert!(lock(&harness.context.slot).pending_feed_go);
+        assert!(harness.context.web.on_air_calls.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn r2_a_m1_cancelled_hello_releases_the_prepare_claim() {
+        let harness = harness(true);
+        hold_unconnected_for_review(&harness, false);
+        harness
+            .context
+            .web
+            .set_state(managed_state("live", live_legs()));
+        harness
+            .context
+            .web
+            .first_state_delay_ms
+            .store(60_000, Ordering::SeqCst);
+        assert!(
+            tokio::time::timeout(
+                Duration::from_secs(1),
+                harness
+                    .context
+                    .resume_session("resume", Some("bearer".into()), None)
+            )
+            .await
+            .is_err()
+        );
+        assert!(!lock(&harness.context.slot).claiming_air);
+        assert!(!lock(&harness.context.slot).pending_feed_go);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cloud_hand_off_keeps_the_show_even_when_the_post_fails() {
+        for fail in [false, true] {
+            let mut harness = harness(true);
+            let slot = harness.context.slot.clone();
+            let emitted = harness.emitted.clone();
+            harness.context.hooks.stop = Arc::new(move || {
+                let slot = slot.clone();
+                let emitted = emitted.clone();
+                Box::pin(async move {
+                    assert_eq!(lock(&slot).stopped_by, Some(CloudStoppedBy::HandOff));
+                    assert_eq!(
+                        emitted.lock().unwrap().last().unwrap().stopped_by,
+                        Some(CloudStoppedBy::HandOff)
+                    );
+                    Ok(())
+                })
+            });
+            managed_live_show(&harness).await;
+            harness
+                .context
+                .web
+                .hand_off_fails
+                .store(fail, Ordering::SeqCst);
+            let result = harness.context.hand_off(Some("bearer".into())).await;
+            assert_eq!(result.unwrap().confirmed, !fail);
+            harness
+                .context
+                .on_session_stopped("session-1", Some("bearer".into()))
+                .await;
+            assert_eq!(harness.context.web.hand_off_calls.load(Ordering::SeqCst), 1);
+            assert!(harness.context.web.end_calls.lock().unwrap().is_empty());
+            let runtime = lock(&harness.context.slot);
+            assert_eq!(runtime.status().stopped_by, Some(CloudStoppedBy::HandOff));
+            assert!(runtime.status().show.unwrap().resumable);
+            assert!(runtime.remembered_show().is_some());
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cloud_hand_off_leaves_the_talk_room_open() {
+        let harness = harness(true);
+        managed_room(&harness).await;
+        harness
+            .context
+            .hand_off(Some("bearer".into()))
+            .await
+            .unwrap();
+        assert!(harness.context.web.end_calls.lock().unwrap().is_empty());
+        let status = lock(&harness.context.slot).status();
+        assert!(status.room.is_none());
+        let show = status.show.unwrap();
+        assert!(show.resumable);
+        assert_eq!(show.kind.as_deref(), Some("talk"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cloud_taken_over_stops_solo_but_talk_waits_for_a_duplicate_host() {
+        for talk in [false, true] {
+            let harness = harness(true);
+            if talk {
+                managed_room(&harness).await;
+            } else {
+                managed_live_show(&harness).await;
+            }
+            note_feed_leg(&harness.context.slot, "session-1", true);
+            let mut state = if talk {
+                managed_talk_state(json!([]), true, 1)
+            } else {
+                managed_state("live", json!([]))
+            };
+            state["onAir"] = json!({"deviceId":"BBBBBBBBBBBBBBBBBBBBBB","name":"iPhone","kind":"phone","source":if talk {"host"} else {"camera"},"since":"now","waiting":false});
+            harness.context.web.set_state(state);
+            if talk {
+                wait_until(|| {
+                    lock(&harness.context.slot)
+                        .status()
+                        .on_air
+                        .is_some_and(|air| !air.this_device)
+                })
+                .await;
+                // host/go only announces intent. A failed phone join must
+                // leave this desktop's host connection and room intact.
+                tokio::time::sleep(Duration::from_secs(4)).await;
+                let status = lock(&harness.context.slot).status();
+                assert!(status.room.is_some());
+                assert_eq!(status.stopped_by, None);
+                assert!(!status.show.unwrap().resumable);
+                harness
+                    .context
+                    .report_client(crate::cloud_talk::RoomClientReportParams {
+                        state: crate::cloud_talk::CloudRoomClientState::Disconnected,
+                        detail: Some(crate::cloud_talk::TAKEN_OVER_DETAIL.into()),
+                    });
+            }
+            wait_until(|| {
+                lock(&harness.context.slot).status().stopped_by == Some(CloudStoppedBy::TakenOver)
+            })
+            .await;
+            wait_until(|| {
+                lock(&harness.context.slot)
+                    .status()
+                    .show
+                    .is_some_and(|show| show.resumable)
+            })
+            .await;
+            harness
+                .context
+                .on_session_stopped("session-1", Some("bearer".into()))
+                .await;
+            assert!(harness.context.web.end_calls.lock().unwrap().is_empty());
+            assert_eq!(harness.context.web.hand_off_calls.load(Ordering::SeqCst), 0);
+            assert!(lock(&harness.context.slot).failed.is_none());
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cloud_continue_prepares_then_retries_go_until_the_web_accepts_the_feed() {
+        for camera in [false, true] {
+            let harness = harness(true);
+            managed_live_show(&harness).await;
+            harness
+                .context
+                .stop_for_continuation("sh_abc", CloudStoppedBy::HandOff)
+                .await
+                .unwrap();
+            let mut state = managed_state("starting", live_legs());
+            state["onAir"] = json!({"deviceId":"BBBBBBBBBBBBBBBBBBBBBB","name":"iPhone","kind":"phone","source":if camera {"camera"} else {"feed"},"waiting":false,"since":"now"});
+            harness.context.web.set_state(state);
+            let mut current = held_current(&created_managed());
+            current.ingest = Some(created_managed().ingest);
+            current.ingest.as_mut().unwrap()[0].stream_key = "stale-current-ingress".into();
+            harness
+                .context
+                .web
+                .current
+                .lock()
+                .unwrap()
+                .push_back(Ok(current));
+            let handover = harness
+                .context
+                .resume_session("session-2", Some("bearer".into()), None)
+                .await
+                .unwrap();
+            assert_eq!(handover.ingest, created_managed().ingest);
+            assert_eq!(
+                harness.context.web.on_air_calls.lock().unwrap().as_slice(),
+                &[("feed".into(), "prepare".into())]
+            );
+            if camera {
+                let context = harness.context.clone();
+                let go =
+                    tokio::spawn(async move { context.finish_resume("bearer", "session-2").await });
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                assert!(harness.context.web.on_air_calls.lock().unwrap().len() >= 2);
+                let mut state = harness.context.web.managed.lock().unwrap().state.clone();
+                state["feeds"][0]["connected"] = json!(true);
+                harness.context.web.set_state(state);
+                go.await.unwrap().unwrap();
+                assert_eq!(
+                    harness
+                        .context
+                        .web
+                        .on_air_calls
+                        .lock()
+                        .unwrap()
+                        .last()
+                        .unwrap()
+                        .1,
+                    "go"
+                );
+            } else {
+                harness
+                    .context
+                    .finish_resume("bearer", "session-2")
+                    .await
+                    .unwrap();
+                assert_eq!(harness.context.web.on_air_calls.lock().unwrap().len(), 1);
+            }
+            assert!(harness.context.web.end_calls.lock().unwrap().is_empty());
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cloud_continue_failure_leaves_the_show_resumable() {
+        let harness = harness(true);
+        managed_live_show(&harness).await;
+        lock(&harness.context.slot).pending_feed_go = true;
+        lock(&harness.context.slot).claiming_air = true;
+        let mut state = managed_state("starting", live_legs());
+        state["onAir"] = json!({"deviceId":"BBBBBBBBBBBBBBBBBBBBBB","name":"iPhone","kind":"phone","source":"camera","waiting":false,"since":"now"});
+        harness.context.web.set_state(state);
+        let result = harness.context.finish_resume("bearer", "session-1").await;
+        assert_eq!(
+            continuation_error_code(&result.unwrap_err()),
+            Some("cloud-source-not-ready")
+        );
+        assert!(lock(&harness.context.slot).status().show.unwrap().resumable);
+        assert!(harness.context.web.end_calls.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cloud_discovery_checks_every_minute_and_focus_at_most_every_ten_seconds() {
+        let harness = harness(true);
+        for _ in 0..5 {
+            harness
+                .context
+                .web
+                .current
+                .lock()
+                .unwrap()
+                .push_back(Ok(CurrentShowResponse::default()));
+        }
+        harness
+            .context
+            .check_current_show("bearer", false)
+            .await
+            .unwrap();
+        harness
+            .context
+            .check_current_show("bearer", true)
+            .await
+            .unwrap();
+        assert_eq!(harness.context.web.current_calls.load(Ordering::SeqCst), 1);
+        tokio::time::sleep(Duration::from_secs(10)).await;
+        harness
+            .context
+            .check_current_show("bearer", true)
+            .await
+            .unwrap();
+        assert_eq!(harness.context.web.current_calls.load(Ordering::SeqCst), 2);
+        tokio::time::sleep(Duration::from_secs(59)).await;
+        harness
+            .context
+            .check_current_show("bearer", false)
+            .await
+            .unwrap();
+        assert_eq!(harness.context.web.current_calls.load(Ordering::SeqCst), 2);
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        harness
+            .context
+            .check_current_show("bearer", false)
+            .await
+            .unwrap();
+        assert_eq!(harness.context.web.current_calls.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cloud_resume_candidates_use_live_leg_ids_and_refuse_changed_keys() {
+        let harness = harness(true);
+        managed_live_show(&harness).await;
+        let mut candidate = destinations()[0].clone();
+        candidate.id = "a-different-computers-target".into();
+        harness.context.set_reconnect_candidates(vec![candidate]);
+        let before = harness.context.web.destination_bodies().len();
+        harness
+            .context
+            .reconnect_destination("youtube-main")
+            .await
+            .unwrap();
+        let bodies = harness.context.web.destination_bodies();
+        assert_eq!(bodies.len(), before + 1);
+        assert_eq!(
+            bodies.last().unwrap()["destinations"][0]["id"],
+            "youtube-main"
+        );
+        assert!(bodies.last().unwrap().get("replace").is_none());
+        harness
+            .context
+            .web
+            .managed
+            .lock()
+            .unwrap()
+            .destinations_answers
+            .push_back(Err(DestinationsFailure {
+                error: web_error(422, "cloud-destinations-refused"),
+                refused: vec![crate::cloud_control_web::RefusedDestination {
+                    id: "youtube-main".into(),
+                    code: "destination-changed".into(),
+                }],
+            }));
+        let error = harness
+            .context
+            .reconnect_destination("youtube-main")
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("does not match"));
+    }
+
+    #[test]
+    fn cloud_chat_uses_the_live_broadcast_and_candidate_matching_is_unambiguous() {
+        let harness = harness(true);
+        let mut settings = crate::streaming::StreamingSettings {
+            targets: crate::streaming::default_stream_targets(),
+            enabled: true,
+            mode: crate::streaming::StreamMode::Single,
+            selected_target_id: None,
+            default_output_preset: crate::protocol::VideoPreset::Tutorial1080p30,
+            default_bitrate_kbps: 6000,
+            enabled_target_ids: Vec::new(),
+        };
+        let target = settings
+            .targets
+            .iter_mut()
+            .find(|t| t.platform == StreamPlatform::Youtube)
+            .unwrap();
+        target.enabled = true;
+        target.platform_broadcast_id = Some("stale".into());
+        let mut leg: RunnerLeg = serde_json::from_value(live_legs()[0].clone()).unwrap();
+        leg.broadcast_id = Some("live_123".into());
+        lock(&harness.context.slot).runner = Some(RunnerState {
+            legs: vec![leg.clone()],
+            ..RunnerState::default()
+        });
+        harness.context.resume_chat_settings(&mut settings);
+        assert_eq!(
+            settings
+                .targets
+                .iter()
+                .find(|t| t.platform == StreamPlatform::Youtube)
+                .unwrap()
+                .platform_broadcast_id
+                .as_deref(),
+            Some("live_123")
+        );
+        let candidates = vec![destinations()[0].clone(), destinations()[0].clone()];
+        assert!(reconnect_candidates(&[leg], &candidates).is_empty());
     }
 
     // Wire section 8.4: a show's only stream dies and LiveKit reports
@@ -11917,11 +13974,13 @@ mod tests {
     // LiveKit does not answer it is omitted, nothing else can hand it back,
     // and the resume fails with today's message. The show stays resumable.
     #[tokio::test(start_paused = true)]
-    async fn a_resume_whose_ingest_was_not_listed_fails_and_the_show_stays_resumable() {
+    async fn a_resume_whose_prepare_omits_ingest_fails_and_the_show_stays_resumable() {
         let harness = harness(true);
         let web = harness.context.web.clone();
+        web.on_air_without_ingest.store(true, Ordering::SeqCst);
         web.set_state(managed_state("hold", live_legs()));
         let unlisted = || CurrentShowResponse {
+            on_air: None,
             ingest: None,
             ..managed_current("hold")
         };
@@ -13374,6 +15433,7 @@ mod tests {
         let held = || {
             let created = created_managed_talk();
             CurrentShowResponse {
+                on_air: None,
                 show: Some(ShowRecord {
                     status: "live".to_string(),
                     ..created.show

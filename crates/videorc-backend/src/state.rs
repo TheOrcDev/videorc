@@ -1436,10 +1436,18 @@ impl AppState {
             audience: Arc::default(),
             youtube_quota: crate::youtube_quota::new_youtube_quota_slot(),
             platform_token_refresh: Arc::default(),
-            cloud_show: crate::cloud_show::new_cloud_show_slot_remembering(
-                crate::cloud_show::load_settings(&database),
-                crate::cloud_show::load_remembered_show(&database),
-            ),
+            cloud_show: {
+                let slot = crate::cloud_show::new_cloud_show_slot_remembering(
+                    crate::cloud_show::load_settings(&database),
+                    crate::cloud_show::load_remembered_show(&database),
+                );
+                {
+                    let mut runtime = crate::cloud_show::lock(&slot);
+                    runtime.device = crate::cloud_show::load_device(&database);
+                    runtime.device_name = Some(Arc::new(tokio::sync::OnceCell::new()));
+                }
+                slot
+            },
             database,
             remote_control: std::sync::Arc::new(StdMutex::new(
                 crate::remote_control::RemoteControlRuntime::load_from_secrets(),

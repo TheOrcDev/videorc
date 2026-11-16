@@ -1,8 +1,13 @@
 // @vitest-environment happy-dom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import type { CloudRoomClientState, CloudRoomTokenAnswer } from '@/lib/backend'
-import { TalkShowRoomClient } from '@/lib/talk-show-room'
+import type { CloudOnAir, CloudRoomClientState, CloudRoomTokenAnswer } from '@/lib/backend'
+import {
+  TAKEN_OVER_DETAIL,
+  TAKEN_OVER_GRACE_MS,
+  TalkShowRoomClient,
+  onAirElsewhere
+} from '@/lib/talk-show-room'
 
 // Plan 224 C-G4 and the review of 2026-11-09 (L4, L9's room client): the host
 // joins with one fresh token, asks for no other on a timer (LiveKit refreshes
@@ -101,7 +106,7 @@ vi.mock('livekit-client', () => ({
   createLocalAudioTrack: lk.audio
 }))
 
-function client() {
+function client(onAir?: () => CloudOnAir | undefined) {
   let minted = 0
   const requestToken = vi.fn(async (): Promise<CloudRoomTokenAnswer> => {
     minted += 1
@@ -113,15 +118,20 @@ function client() {
     }
   })
   const reports: CloudRoomClientState[] = []
+  const details: (string | undefined)[] = []
   const room = new TalkShowRoomClient({
     requestToken,
-    report: (state) => reports.push(state),
+    report: (state, detail) => {
+      reports.push(state)
+      details.push(detail)
+    },
     onSnapshot: () => {},
     cameraName: null,
     microphoneName: null,
-    audioHost: () => null
+    audioHost: () => null,
+    onAir
   })
-  return { room, requestToken, reports }
+  return { room, requestToken, reports, details }
 }
 
 const latestRoom = () => lk.FakeRoom.rooms[lk.FakeRoom.rooms.length - 1]
@@ -397,5 +407,83 @@ describe('overlays to the program page (plan 234 T3)', () => {
     await room.disconnect()
     await room.sendOverlay(takeover, image)
     expect(latestRoom().streams).toHaveLength(0)
+  })
+})
+
+// Plan 243 C5: another device takes the host seat by joining as
+// `host:<showId>`, and LiveKit drops this connection with DUPLICATE_IDENTITY.
+// With `onAir` naming another device now or within 3 s it is a take-over (no
+// rejoin, and no device name in the report); otherwise the room is lost.
+describe('a second host connection (plan 243 C5)', () => {
+  const DUPLICATE_IDENTITY = 2
+  const iPhone: CloudOnAir = {
+    name: 'iPhone',
+    kind: 'phone',
+    source: 'host',
+    waiting: false,
+    thisDevice: false,
+    since: '2026-11-16T20:01:02.000Z'
+  }
+
+  it('reads another device on air, never this one or a hand-off wait', () => {
+    expect(onAirElsewhere(iPhone)).toBe(true)
+    expect(onAirElsewhere(undefined)).toBe(false)
+    expect(onAirElsewhere({ ...iPhone, thisDevice: true })).toBe(false)
+    expect(onAirElsewhere({ ...iPhone, waiting: true })).toBe(false)
+  })
+
+  it('is taken over at once when another device is already on air', async () => {
+    const { room, requestToken, reports, details } = client(() => iPhone)
+    await room.connect()
+    latestRoom().emit('Disconnected', DUPLICATE_IDENTITY)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(room.snapshot).toMatchObject({ state: 'disconnected', detail: TAKEN_OVER_DETAIL })
+    expect(details.at(-1)).toBe('Your show continues on another device.')
+    expect(JSON.stringify(details)).not.toContain('iPhone')
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(requestToken).toHaveBeenCalledTimes(1)
+    expect(reports).toEqual(['connecting', 'connected', 'disconnected'])
+    await room.disconnect()
+  })
+
+  it('is taken over when onAir names another device within the grace', async () => {
+    const status: { onAir?: CloudOnAir } = {}
+    const { room, requestToken } = client(() => status.onAir)
+    await room.connect()
+    latestRoom().emit('Disconnected', DUPLICATE_IDENTITY)
+    await vi.advanceTimersByTimeAsync(1500)
+    expect(room.snapshot.state).toBe('connected')
+    status.onAir = iPhone
+    await vi.advanceTimersByTimeAsync(200)
+    expect(room.snapshot).toMatchObject({ state: 'disconnected', detail: TAKEN_OVER_DETAIL })
+    expect(requestToken).toHaveBeenCalledTimes(1)
+    await room.disconnect()
+  })
+
+  it('says the room is lost when nobody else is on air within the grace', async () => {
+    const { room, requestToken } = client(() => ({ ...iPhone, thisDevice: true }))
+    await room.connect()
+    latestRoom().emit('Disconnected', DUPLICATE_IDENTITY)
+    await vi.advanceTimersByTimeAsync(TAKEN_OVER_GRACE_MS - 200)
+    expect(room.snapshot.state).toBe('connected')
+    await vi.advanceTimersByTimeAsync(400)
+    expect(room.snapshot).toMatchObject({
+      state: 'disconnected',
+      detail: 'Connection to the room lost.'
+    })
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(requestToken).toHaveBeenCalledTimes(1)
+    await room.disconnect()
+  })
+
+  it('stays quiet when the room is closed during the grace', async () => {
+    const { room, reports } = client(() => undefined)
+    await room.connect()
+    latestRoom().emit('Disconnected', DUPLICATE_IDENTITY)
+    await vi.advanceTimersByTimeAsync(500)
+    await room.disconnect()
+    await vi.advanceTimersByTimeAsync(TAKEN_OVER_GRACE_MS)
+    expect(room.snapshot.state).toBe('idle')
+    expect(reports).toEqual(['connecting', 'connected'])
   })
 })

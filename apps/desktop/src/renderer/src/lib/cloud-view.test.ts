@@ -15,6 +15,7 @@ import {
 import {
   CLOUD_DIRECT_LINE,
   CLOUD_NOT_YET_REASON,
+  CLOUD_SHOW_ELSEWHERE_LINE,
   CLOUD_SHOW_HELD_LINE,
   CLOUD_TEST_DESCRIPTION,
   cloudHoursLine,
@@ -210,7 +211,11 @@ describe('cloud copy (plan 184)', () => {
     })
     expect(cloudResumeNotice(holding, false)).toEqual({
       detail: 'Viewers see Be right back. The stream ends in 28 min unless you resume.',
-      title: "You're still live through Videorc Cloud."
+      title: "You're still live through Videorc Cloud.",
+      // Plan 243 C5: Resume, not Continue here, for a show this computer fed.
+      action: 'resume',
+      tone: 'warning',
+      pointer: null
     })
     expect(cloudResumeNotice(holding, true)).toBeNull()
     expect(
@@ -259,6 +264,36 @@ describe('cloud copy (plan 184)', () => {
     ])
     // Locked: the LockAlert speaks, the row says nothing.
     expect(cloudSwitchLines(rolledBack, cloudSectionState(rolledBack)!, null)).toEqual([])
+
+    // Plan 243 R2 A-M6: a held show another device is on air for is continued
+    // from the Studio's notice; Go Live would be refused.
+    const onAir = {
+      name: 'iPhone',
+      kind: 'phone',
+      source: 'camera',
+      waiting: false,
+      thisDevice: false,
+      since: '2026-11-16T20:01:02.000Z'
+    } as const
+    expect(CLOUD_SHOW_ELSEWHERE_LINE).toBe(
+      'Your show is live on another device. Use Continue here in the Studio.'
+    )
+    const elsewhereOff = status({ settings: off, show: held, onAir })
+    expect(cloudSwitchLines(elsewhereOff, cloudSectionState(elsewhereOff)!, null)).toEqual([
+      CLOUD_SHOW_ELSEWHERE_LINE
+    ])
+    expect(cloudSectionState(status({ entitled: false, show: held, onAir }))).toEqual({
+      kind: 'unavailable',
+      reason: `Videorc Cloud isn't on for your account right now. ${CLOUD_SHOW_ELSEWHERE_LINE}`
+    })
+    // Waiting after a hand-off: Go Live (or Continue here) feeds it.
+    expect(
+      cloudSwitchLines(
+        status({ settings: off, show: held, onAir: { ...onAir, waiting: true } }),
+        cloudSectionState(status({ settings: off, show: held }))!,
+        null
+      )
+    ).toEqual([CLOUD_SHOW_HELD_LINE])
   })
 
   // Plan 222 U2, U3: numbers, never a selling line.

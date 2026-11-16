@@ -58,4 +58,62 @@ describe('LiveExitGuard', () => {
     expect(guard.shouldAsk('quit', false)).toBe(false)
     expect(guard.shouldAsk('close', false)).toBe(false)
   })
+
+  // Plan 243 R2 B-M1: a talk show has no local session; its live state is the
+  // cloud status's room. A live room this computer hosts asks like a local
+  // livestream, until the room closes, the show is handed off or another
+  // device takes the host seat, or the event socket is lost.
+  describe('a talk show this computer hosts', () => {
+    const TALK_LIVE = {
+      phase: 'live',
+      room: { phase: 'open', live: true },
+      onAir: { kind: 'computer', source: 'host', waiting: false, thisDevice: true }
+    }
+
+    it('asks for a quit and a window close while the room is live', () => {
+      const guard = new LiveExitGuard()
+      guard.observeCloudStatus(TALK_LIVE)
+      expect(guard.livestreamOnAir).toBe(true)
+      expect(guard.shouldAsk('quit', true)).toBe(true)
+      expect(guard.shouldAsk('close', true)).toBe(true)
+      // A recording status never clears the room's answer, nor the reverse.
+      guard.observeRecordingStatus(RECORDING)
+      expect(guard.shouldAsk('quit', true)).toBe(true)
+      // An old web sends no onAir: the live room alone is this computer's.
+      guard.observeCloudStatus({ room: { phase: 'open', live: true } })
+      expect(guard.shouldAsk('quit', true)).toBe(true)
+    })
+
+    it('stops asking once the room is not live here', () => {
+      for (const status of [
+        { ...TALK_LIVE, room: { phase: 'open', live: false } },
+        { ...TALK_LIVE, room: { phase: 'closing', live: true } },
+        { ...TALK_LIVE, room: undefined },
+        { ...TALK_LIVE, onAir: { ...TALK_LIVE.onAir, thisDevice: false } },
+        { ...TALK_LIVE, onAir: { ...TALK_LIVE.onAir, waiting: true } },
+        { ...TALK_LIVE, stoppedBy: 'taken-over' },
+        { ...TALK_LIVE, stoppedBy: 'hand-off' },
+        null,
+        'live'
+      ]) {
+        const guard = new LiveExitGuard()
+        guard.observeCloudStatus(TALK_LIVE)
+        guard.observeCloudStatus(status)
+        expect(guard.shouldAsk('quit', true)).toBe(false)
+      }
+      const guard = new LiveExitGuard()
+      guard.observeCloudStatus(TALK_LIVE)
+      guard.transportLost()
+      expect(guard.livestreamOnAir).toBe(false)
+      expect(guard.shouldAsk('close', true)).toBe(false)
+    })
+
+    it('lets the answered exit through once', () => {
+      const guard = new LiveExitGuard()
+      guard.observeCloudStatus(TALK_LIVE)
+      guard.allow('quit')
+      expect(guard.shouldAsk('quit', true)).toBe(false)
+      expect(guard.shouldAsk('quit', true)).toBe(true)
+    })
+  })
 })
