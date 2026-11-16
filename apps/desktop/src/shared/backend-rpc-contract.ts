@@ -492,6 +492,10 @@ export interface BackendRpcMethodMap {
   'usageStats.set': BackendRpcDefinition<UsageStatsSetParams, UsageStatsState>
   'streamReport.email.get': BackendRpcDefinition<undefined, StreamReportEmailState>
   'streamReport.email.set': BackendRpcDefinition<StreamReportEmailSetParams, StreamReportEmailState>
+  'streamReport.history.set': BackendRpcDefinition<
+    StreamReportEmailSetParams,
+    StreamReportEmailState
+  >
   'streamReport.email.sendLast': BackendRpcDefinition<undefined, StreamReportSendResult>
   // --- Discord go-live announcement (plan 187) ---
   'discord.announce.get': BackendRpcDefinition<undefined, DiscordAnnounceSnapshot>
@@ -1289,6 +1293,7 @@ const streamReportEmailStateSchema = objectSchema(
     signedIn: booleanSchema,
     email: optionalSchema(stringSchema({ maxLength: 320 })),
     enabled: nullableSchema(booleanSchema),
+    history: optionalSchema(booleanSchema),
     envDisabled: booleanSchema
   },
   { allowUnknown: false }
@@ -6756,6 +6761,10 @@ const runtimeContracts = {
   'usageStats.set': { params: usageStatsSetParamsSchema, result: usageStatsStateSchema },
   'streamReport.email.get': { params: undefinedSchema, result: streamReportEmailStateSchema },
   'streamReport.email.set': {
+    params: streamReportEmailSetParamsSchema,
+    result: streamReportEmailStateSchema
+  },
+  'streamReport.history.set': {
     params: streamReportEmailSetParamsSchema,
     result: streamReportEmailStateSchema
   },

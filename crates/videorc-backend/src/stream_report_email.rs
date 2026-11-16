@@ -1,7 +1,7 @@
 //! The stream report email (plan 237, Phase C): about a minute after a live
 //! stream ends, the numbers of `stream_report::build_report` go to
-//! videorc.com (`POST /api/desktop/stream-report`), which emails them to the
-//! signed-in account's own address and keeps none of them.
+//! videorc.com (`POST /api/desktop/stream-report`), which applies the signed-in
+//! account's email and history preferences.
 //!
 //! - An observer reads `recording.status` and `stream.targets` from the event
 //!   bus. A live session that ran 5 minutes or more (D5) becomes a row in
@@ -11,7 +11,7 @@
 //!   sent, and deleting the session deletes the row.
 //! - A sender sends due rows one at a time: it checks the row's account is
 //!   still the signed-in one, asks the web whether the account wants these
-//!   emails (`GET /api/account/stream-report-email`), and only then sends the
+//!   emails or history (`GET /api/account/stream-report-email`), and only then sends the
 //!   numbers. A report older than 3 days is dropped; a sign-out or another
 //!   account drops it too, so one account's report never reaches another.
 //! - YouTube's numbers go like every other platform's (owner, plan 237 D3):
@@ -86,6 +86,8 @@ pub struct StreamReportEmailState {
     /// The account's choice; `null` when it could not be read (signed out,
     /// offline, or a videorc.com without the route).
     pub enabled: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub history: Option<bool>,
     /// `VIDEORC_STREAM_REPORT_EMAIL=0` turned it off for this run.
     pub env_disabled: bool,
 }
@@ -312,6 +314,7 @@ pub(crate) fn classify_post(status: u16, body_status: Option<&str>) -> PostAnswe
 pub(crate) enum PreferenceAnswer {
     Known {
         enabled: bool,
+        history: Option<bool>,
         email: Option<String>,
     },
     Unauthorized,
@@ -324,13 +327,29 @@ pub(crate) enum PreferenceAnswer {
 struct WirePreference {
     enabled: bool,
     #[serde(default)]
+    history: Option<bool>,
+    #[serde(default)]
     email: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[allow(dead_code)] // History is web metadata; email status keeps its existing meaning.
 struct WireSendAnswer {
     #[serde(default)]
+    history: Option<HistoryAnswer>,
+    #[serde(default)]
+    history_id: Option<String>,
+    #[serde(default)]
     status: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum HistoryAnswer {
+    Saved,
+    Off,
+    Limit,
 }
 
 pub(crate) fn classify_preference(status: u16, body: Option<&str>) -> PreferenceAnswer {
@@ -339,6 +358,7 @@ pub(crate) fn classify_preference(status: u16, body: Option<&str>) -> Preference
             match body.and_then(|body| serde_json::from_str::<WirePreference>(body).ok()) {
                 Some(preference) => PreferenceAnswer::Known {
                     enabled: preference.enabled,
+                    history: preference.history,
                     email: preference.email.filter(|email| !email.trim().is_empty()),
                 },
                 None => PreferenceAnswer::Retry,
@@ -594,11 +614,16 @@ async fn put_preference(
     client: &reqwest::Client,
     web: &WebAccess,
     enabled: bool,
+    history: bool,
 ) -> PreferenceAnswer {
     let request = client
         .put(format!("{}{PREFERENCE_PATH}", web.base_url))
         .bearer_auth(&web.token)
-        .json(&serde_json::json!({ "enabled": enabled }));
+        .json(&if history {
+            serde_json::json!({ "history": enabled })
+        } else {
+            serde_json::json!({ "enabled": enabled })
+        });
     preference_answer(request.send().await).await
 }
 
@@ -682,8 +707,12 @@ pub(crate) async fn deliver(
     };
     // The account's choice comes first: an "off" account sends no numbers.
     match fetch_preference(client, web).await {
-        PreferenceAnswer::Known { enabled: false, .. } => return Delivery::Disabled,
-        PreferenceAnswer::Known { enabled: true, .. } => {}
+        PreferenceAnswer::Known {
+            enabled: false,
+            history: None | Some(false),
+            ..
+        } => return Delivery::Disabled,
+        PreferenceAnswer::Known { .. } => {}
         PreferenceAnswer::Unauthorized => return Delivery::Dropped,
         PreferenceAnswer::Missing => {
             state
@@ -876,6 +905,7 @@ pub(crate) async fn current_state(state: &AppState) -> StreamReportEmailState {
         signed_in: email.is_some(),
         email,
         enabled: None,
+        history: None,
         env_disabled: state.stream_report.env_disabled.load(Ordering::Acquire),
     }
 }
@@ -889,6 +919,7 @@ async fn read_state(state: &AppState) -> StreamReportEmailState {
             signed_in: email.is_some(),
             email,
             enabled: None,
+            history: None,
             env_disabled,
         };
     };
@@ -904,18 +935,32 @@ pub(crate) async fn set_enabled(
     state: &AppState,
     enabled: bool,
 ) -> anyhow::Result<StreamReportEmailState> {
-    tokio::time::timeout(RPC_BUDGET, save_enabled(state, enabled))
+    tokio::time::timeout(RPC_BUDGET, save_enabled(state, enabled, false))
         .await
         .unwrap_or_else(|_| Err(anyhow::anyhow!("videorc.com didn't answer. Try again.")))
 }
 
-async fn save_enabled(state: &AppState, enabled: bool) -> anyhow::Result<StreamReportEmailState> {
+/// `streamReport.history.set`, with the same account checks and RPC budget.
+pub(crate) async fn set_history(
+    state: &AppState,
+    enabled: bool,
+) -> anyhow::Result<StreamReportEmailState> {
+    tokio::time::timeout(RPC_BUDGET, save_enabled(state, enabled, true))
+        .await
+        .unwrap_or_else(|_| Err(anyhow::anyhow!("videorc.com didn't answer. Try again.")))
+}
+
+async fn save_enabled(
+    state: &AppState,
+    enabled: bool,
+    history: bool,
+) -> anyhow::Result<StreamReportEmailState> {
     let env_disabled = state.stream_report.env_disabled.load(Ordering::Acquire);
     let Some(web) = web_access(state).await else {
-        anyhow::bail!("Sign in to Videorc to get a report by email.");
+        anyhow::bail!("Sign in to Videorc to change stream report preferences.");
     };
     let client = http_client().ok_or_else(|| anyhow::anyhow!("No HTTP client."))?;
-    match put_preference(&client, &web, enabled).await {
+    match put_preference(&client, &web, enabled, history).await {
         answer @ PreferenceAnswer::Known { .. } => Ok(preference_state(&web, answer, env_disabled)),
         PreferenceAnswer::Unauthorized => anyhow::bail!("Sign in to Videorc again."),
         PreferenceAnswer::Missing => anyhow::bail!("videorc.com can't send stream reports yet."),
@@ -928,6 +973,7 @@ fn state_for(web: &WebAccess, enabled: Option<bool>, env_disabled: bool) -> Stre
         signed_in: true,
         email: Some(web.email.clone()),
         enabled,
+        history: None,
         env_disabled,
     }
 }
@@ -938,10 +984,15 @@ fn preference_state(
     env_disabled: bool,
 ) -> StreamReportEmailState {
     match answer {
-        PreferenceAnswer::Known { enabled, email } => StreamReportEmailState {
+        PreferenceAnswer::Known {
+            enabled,
+            history,
+            email,
+        } => StreamReportEmailState {
             signed_in: true,
             email: email.or_else(|| Some(web.email.clone())),
             enabled: Some(enabled),
+            history,
             env_disabled,
         },
         _ => state_for(web, None, env_disabled),
@@ -1199,6 +1250,7 @@ mod tests {
             classify_preference(200, Some(r#"{"enabled":false,"email":"a@b.c"}"#)),
             PreferenceAnswer::Known {
                 enabled: false,
+                history: None,
                 email: Some("a@b.c".to_string())
             }
         );
@@ -1560,5 +1612,113 @@ mod tests {
             "D6: older than 3 days"
         );
         assert!(web.received.lock().unwrap().is_empty());
+    }
+    #[test]
+    fn history_preference_and_extended_answers_are_backward_compatible() {
+        for history in [false, true] {
+            assert_eq!(
+                classify_preference(
+                    200,
+                    Some(&json!({"enabled":false,"history":history}).to_string())
+                ),
+                PreferenceAnswer::Known {
+                    enabled: false,
+                    history: Some(history),
+                    email: None
+                }
+            );
+        }
+        for history in ["saved", "off", "limit"] {
+            let wire: WireSendAnswer = serde_json::from_value(
+                json!({"status":"disabled","history":history,"historyId":"st_example"}),
+            )
+            .unwrap();
+            assert_eq!(
+                classify_post(200, wire.status.as_deref()),
+                PostAnswer::Disabled
+            );
+        }
+        let unknown = StreamReportEmailState {
+            signed_in: false,
+            email: None,
+            enabled: None,
+            history: None,
+            env_disabled: false,
+        };
+        assert!(
+            serde_json::to_value(unknown)
+                .unwrap()
+                .get("history")
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn history_on_posts_when_email_is_off() {
+        let state = test_state();
+        let report = queued(&state);
+        let (base, web) = fake_web(
+            (200, json!({"enabled":false,"history":true})),
+            (
+                200,
+                json!({"status":"disabled","history":"saved","historyId":"st_example"}),
+            ),
+        )
+        .await;
+        let delivery = deliver(
+            &state,
+            &http_client().unwrap(),
+            Some(&access(&base, "ada@example.com")),
+            &report,
+            at(3700),
+        )
+        .await;
+        assert_eq!(delivery, Delivery::Disabled); // Email status retains its meaning.
+        assert_eq!(
+            web.received.lock().unwrap().len(),
+            2,
+            "the report still reached history"
+        );
+    }
+
+    #[tokio::test]
+    async fn history_put_sends_only_history_and_email_put_only_enabled() {
+        let received = Arc::new(StdMutex::new(Vec::<serde_json::Value>::new()));
+        let sink = received.clone();
+        let app = Router::new().route(
+            PREFERENCE_PATH,
+            axum::routing::put(move |Json(body): Json<serde_json::Value>| {
+                let sink = sink.clone();
+                async move {
+                    sink.lock().unwrap().push(body);
+                    Json(json!({"enabled":true,"history":false}))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let web = access(
+            &format!("http://{}", listener.local_addr().unwrap()),
+            "ada@example.com",
+        );
+        let task = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let client = http_client().unwrap();
+        assert!(matches!(
+            put_preference(&client, &web, false, true).await,
+            PreferenceAnswer::Known {
+                history: Some(false),
+                ..
+            }
+        ));
+        assert!(matches!(
+            put_preference(&client, &web, true, false).await,
+            PreferenceAnswer::Known { enabled: true, .. }
+        ));
+        assert_eq!(
+            *received.lock().unwrap(),
+            vec![json!({"history":false}), json!({"enabled":true})]
+        );
+        task.abort();
     }
 }

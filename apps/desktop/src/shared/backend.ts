@@ -2289,6 +2289,8 @@ export interface StreamReportEmailState {
   /** The account's choice; `null` when it could not be read (signed out,
    * offline, or a videorc.com without the route). */
   enabled: boolean | null
+  /** Absent when the web has no history preference yet or is unreachable. */
+  history?: boolean
   /** `VIDEORC_STREAM_REPORT_EMAIL=0` turned it off for this run. */
   envDisabled: boolean
 }
