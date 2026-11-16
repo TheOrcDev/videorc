@@ -6,10 +6,14 @@ import type { CloudStatus } from '@/lib/backend'
 import { HOST, openRoom, talkStatus } from '@/lib/guests-room-fixtures'
 import {
   MANAGED_NODE_ID,
+  agentRoomProgram,
   isManagedShow,
+  managedProgramPreview,
   managedProgramStageInput,
-  programMonitorView
+  programMonitorView,
+  shownLayout
 } from '@/lib/talk-show-managed'
+import { stageKey } from '../../../shared/cloud-presentation-views'
 
 // Plan 234 D6 (T3): a managed show has no return picture, so its Program
 // monitor draws the Show stage as the program page reports it. These hold
@@ -110,4 +114,83 @@ it('the managed Program follows shorter shown and never draws an identity absent
   room.shown = { onStage: [] }
   expect(managedProgramStageInput(room).people).toEqual([])
   expect(managedProgramStageInput(undefined).people).toEqual([])
+})
+
+// Plan 249 S6: the preview draws the layout the page reports, and agents
+// get the program by role and geometry only.
+describe('the program preview (plan 249 S6)', () => {
+  const managedOf = (room: Room) => talkStatus({ show: show(MANAGED_NODE_ID), room })
+  const now = Date.parse('2026-11-16T12:00:30Z')
+
+  it('draws the layout the page drew, and ignores a layout it does not know', () => {
+    const room = openRoom({
+      stage: { layout: 'spotlight', onStage: [HOST] },
+      shown: { onStage: [HOST], layout: 'solo' }
+    })
+    expect(shownLayout(room)).toBe('solo')
+    expect(managedProgramStageInput(room).layout).toBe('solo')
+    const unknown = openRoom({
+      stage: { layout: 'spotlight', onStage: [HOST] },
+      shown: { onStage: [HOST], layout: 'carousel' }
+    })
+    expect(shownLayout(unknown)).toBeNull()
+    expect(managedProgramStageInput(unknown).layout).toBe('spotlight')
+  })
+
+  it('confirms only the stage this desktop sent', () => {
+    const room = openRoom({ live: true })
+    const key = stageKey(room.stage)
+    const applied = managedProgramPreview(
+      managedOf({ ...room, shown: { onStage: [HOST], stageKey: key, at: '2026-11-16T12:00:28Z' } }),
+      now
+    )
+    expect(applied.state).toBe('applied')
+    expect(applied.encodedOutput).toBe(false)
+    expect(managedProgramPreview(managedOf(openRoom()), now).state).toBe('empty')
+  })
+
+  it('gives agents roles and normalized geometry, never identities', () => {
+    const room = openRoom({ live: true, shown: { onStage: [HOST] } })
+    const program = agentRoomProgram(managedOf(room), HOST, { width: 1920, height: 1080 }, now)
+    expect(program).toEqual({
+      source: 'program-page-report',
+      encodedOutput: false,
+      stage: 'unconfirmed',
+      ageSeconds: null,
+      layout: 'solo',
+      screenShared: false,
+      tiles: [{ kind: 'person', role: 'host', rect: { x: 0, y: 0, w: 1, h: 1 } }]
+    })
+    // A node show has its own return: no projection is made up for it.
+    expect(
+      agentRoomProgram(
+        talkStatus({ show: show('eu-hel-1'), room }),
+        HOST,
+        { width: 1920, height: 1080 },
+        now
+      )
+    ).toBeUndefined()
+  })
+})
+
+describe('guest graphics line (plan 249 S6, D4)', () => {
+  it('says off, recording only, waiting, all or some confirmed', async () => {
+    const { guestGraphicsLine } = await import('./talk-show-managed')
+    expect(guestGraphicsLine(undefined, 'stream')).toBe("Guests don't see the avatar")
+    expect(guestGraphicsLine({ enabled: false, capable: 2, applied: 2 }, 'stream')).toBe(
+      "Guests don't see the avatar"
+    )
+    expect(guestGraphicsLine({ enabled: true, capable: 2, applied: 0 }, 'recording')).toBe(
+      'Recording only · Guests see nothing'
+    )
+    expect(guestGraphicsLine({ enabled: true, capable: 0, applied: 0 }, 'stream')).toBe(
+      'Shown to guests · No guest page confirmed'
+    )
+    expect(guestGraphicsLine({ enabled: true, capable: 2, applied: 2 }, 'stream')).toBe(
+      'Guests see the avatar'
+    )
+    expect(guestGraphicsLine({ enabled: true, capable: 3, applied: 1 }, null)).toBe(
+      'Shown to guests · 1 of 3 confirmed'
+    )
+  })
 })

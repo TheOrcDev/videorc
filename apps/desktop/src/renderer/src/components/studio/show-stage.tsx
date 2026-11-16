@@ -20,6 +20,7 @@ import { CameraOffAvatar } from '@/components/studio/camera-off-avatar'
 import { PREVIEW_REPLACED_BY_SHOW_STAGE } from '@/components/preview-stage'
 import { StatusDot } from '@/components/status-dot'
 import { Alert, AlertAction, AlertTitle } from '@/components/ui/alert'
+import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import {
   Dialog,
@@ -57,7 +58,15 @@ import { openLivestreamView } from '@/lib/livestream-tabs'
 import { managedScreenAssetUrl } from '@/lib/screen-asset-url'
 import type { TalkShowContextValue } from '@/lib/talk-show-context'
 import type { TalkShowPerson } from '@/lib/talk-show-room'
-import { managedProgramStageInput, programMonitorView } from '@/lib/talk-show-managed'
+import { setAgentRoomProgram } from '@/lib/agent-room-program'
+import {
+  PROGRAM_PREVIEW_COPY,
+  agentRoomProgram,
+  guestGraphicsLine,
+  managedProgramPreview,
+  managedProgramStageInput,
+  programMonitorView
+} from '@/lib/talk-show-managed'
 import { PROGRAM_MONITOR_EMPTY } from '@/lib/talk-show-session'
 import {
   HOST_CIRCLE_CLIP,
@@ -74,6 +83,7 @@ import {
   type StageTile
 } from '@/lib/talk-show-layout'
 import { cn } from '@/lib/utils'
+import { VIEW_SOURCE, tileFit } from '../../../../shared/cloud-presentation-views'
 
 // The Show stage (plan 224 C-G3, D7, D8): while the room is open it replaces
 // the Studio's Preview. The renderer draws the room's tracks with the
@@ -111,6 +121,14 @@ export default function ShowStage(): ReactElement {
     return () => void setMonitorRef.current(false).catch(() => {})
   }, [connected, hasReturn])
 
+  // Plan 249 S6: agents read the program as the page reports it, labelled
+  // with its source; the store dedupes, and the stage going clears it.
+  const now = usePreviewClock(Boolean(room?.live || cloudStatus?.recording?.active))
+  useEffect(() => {
+    setAgentRoomProgram(agentRoomProgram(cloudStatus, talkShow.hostIdentity, STAGE_CANVAS, now))
+  }, [cloudStatus, talkShow.hostIdentity, now])
+  useEffect(() => () => setAgentRoomProgram(undefined), [])
+
   return (
     <PanelSection
       action={<CloseRoomButton testId="show-stage-close-room" />}
@@ -146,8 +164,11 @@ function StageWell({ talkShow }: { talkShow: TalkShowContextValue }): ReactEleme
   const joining = state === 'connecting' || state === 'reconnecting'
   return (
     <div
+      aria-label="Room view"
       className="relative w-full overflow-hidden rounded-panel bg-video-ground [container-type:inline-size]"
       data-testid="show-stage-well"
+      // Plan 249 S6: the room's own tracks, at room latency. Never the program.
+      data-view-source={VIEW_SOURCE.room}
       style={{ aspectRatio: `${STAGE_CANVAS.width} / ${STAGE_CANVAS.height}` }}
     >
       {plan.tiles.map((tile) => (
@@ -162,6 +183,17 @@ function StageWell({ talkShow }: { talkShow: TalkShowContextValue }): ReactEleme
       {plan.tiles.length === 0 ? (
         <Empty className="absolute inset-0 text-video-ground-muted">Nobody is on stage.</Empty>
       ) : null}
+      <InfoTooltip
+        className="absolute top-3 right-3"
+        content="What you and your guests see in the room now. Viewers see the Program."
+      >
+        <span
+          className="inline-flex items-center rounded-full bg-video-ground/80 px-2.5 py-1 text-xs text-video-ground-foreground"
+          data-testid="show-stage-room-label"
+        >
+          Room
+        </span>
+      </InfoTooltip>
       {joining ? (
         <span
           className="absolute top-3 left-3 inline-flex items-center gap-1.5 rounded-full bg-video-ground/80 px-2.5 py-1 text-xs text-video-ground-foreground"
@@ -239,7 +271,7 @@ function StageTileView({
         }}
       >
         <TrackVideo
-          className={tile.kind === 'screen' ? 'object-contain' : 'object-cover'}
+          className={tileFit(tile.kind) === 'contain' ? 'object-contain' : 'object-cover'}
           track={track}
         />
         {cameraOff ? (
@@ -499,6 +531,10 @@ function ProgramMonitor({ talkShow }: { talkShow: TalkShowContextValue }): React
   // program page's rule), so the monitor draws it over the stage. A node
   // show's return already carries it.
   const takeover = view.source === 'stage' && view.state === 'shown' ? activeScreen : null
+  // Plan 249 S6: does the page report drawing the stage this desktop sent?
+  const now = usePreviewClock(view.source === 'stage' && live)
+  const preview = view.source === 'stage' ? managedProgramPreview(cloudStatus, now) : null
+  const previewCopy = preview ? PROGRAM_PREVIEW_COPY[preview.state] : null
 
   useEffect(() => {
     const element = audioRef.current
@@ -514,12 +550,23 @@ function ProgramMonitor({ talkShow }: { talkShow: TalkShowContextValue }): React
     <div
       className="flex w-1/2 min-w-36 flex-col gap-1.5 self-end @min-[36rem]/show-stage:w-1/4"
       data-program-source={view.source}
+      data-program-stage={preview?.state}
       data-testid="show-stage-program"
+      data-view-source={
+        view.source === 'return' ? VIEW_SOURCE['runner-return'] : VIEW_SOURCE['program-preview']
+      }
     >
       <div className="flex min-h-6 items-center justify-between gap-2">
         <span className="text-label text-subtle">
-          {view.source === 'stage' ? 'Program preview' : 'Program'}
+          {view.source === 'return' ? 'Program' : 'Program preview'}
         </span>
+        {previewCopy?.badge ? (
+          <InfoTooltip content={previewCopy.detail}>
+            <Badge data-testid="show-stage-program-state" variant="outline">
+              {previewCopy.badge}
+            </Badge>
+          </InfoTooltip>
+        ) : null}
         {view.source === 'stage' ? (
           <Button
             size="xs"
@@ -589,6 +636,27 @@ function ProgramMonitor({ talkShow }: { talkShow: TalkShowContextValue }): React
                 ? 'Avatar preview · Output unconfirmed'
                 : 'Room avatar off · Enable for this room')}
         </span>
+      ) : null}
+      {view.source === 'stage' && talkShow.room.avatar?.enabled ? (
+        <div
+          className="flex min-h-6 items-center justify-between gap-2"
+          data-testid="show-stage-guest-graphics"
+        >
+          <span className="truncate text-label text-subtle">
+            {guestGraphicsLine(
+              talkShow.room.avatar.guests,
+              talkShow.room.avatar.preview?.output ?? null
+            )}
+          </span>
+          <Button
+            size="xs"
+            variant="ghost"
+            aria-pressed={talkShow.room.avatar.guests?.enabled === true}
+            onClick={() => void talkShow.setAvatarGuests(!talkShow.room.avatar?.guests?.enabled)}
+          >
+            {talkShow.room.avatar.guests?.enabled ? 'Hide from guests' : 'Show to guests'}
+          </Button>
+        </div>
       ) : null}
       {view.source === 'return' ? <audio muted={!listening} ref={audioRef} /> : null}
     </div>
@@ -852,4 +920,17 @@ function StripRow({
       <KebabMenu disabled={disabled} items={items} label={`More for ${person.name}`} />
     </ListRow>
   )
+}
+
+/** Plan 249 S6: a coarse clock, so a report can go out of date on screen.
+ * Ticks only while something runs; the preview's words change at most every
+ * few seconds. */
+function usePreviewClock(running: boolean): number {
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    if (!running) return
+    const timer = setInterval(() => setNow(Date.now()), 5000)
+    return () => clearInterval(timer)
+  }, [running])
+  return now
 }

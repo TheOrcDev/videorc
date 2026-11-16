@@ -153,7 +153,7 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
   roomOpenRef.current = roomOpen
   const showId = cloudStatus?.show?.id ?? null
   const stage = cloudStatus?.room?.stage ?? null
-  const stageKey = stage ? JSON.stringify(stage.onStage) : ''
+  const stageKey = stage ? JSON.stringify([stage.onStage, stage.screen ?? null]) : ''
   const hostIdentity = roomOpen && showId ? `host:${showId}` : null
 
   const cameraName = useMemo(
@@ -178,6 +178,8 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
   }, [deps.cameraSettings])
   const stageRef = useRef<string[]>([])
   stageRef.current = stage?.onStage ?? []
+  const stageScreenRef = useRef<string | null>(null)
+  stageScreenRef.current = stage?.screen ?? null
   const onCameraReturnedRef = useRef(onCameraReturned)
   onCameraReturnedRef.current = onCameraReturned
 
@@ -254,7 +256,7 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
         current = roomClient
         clientRef.current = roomClient
         if (controlsRef) controlsRef.current = roomClient
-        await roomClient.sendStage(stageRef.current)
+        await roomClient.sendStage(stageRef.current, stageScreenRef.current)
         if (cancelled) return
         await roomClient.connect()
       } catch (error) {
@@ -354,7 +356,7 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
   // The guest page reads the stage from the host's data topic (D11).
   useEffect(() => {
     if (!roomOpen) return
-    void clientRef.current?.sendStage(stageRef.current)
+    void clientRef.current?.sendStage(stageRef.current, stageScreenRef.current)
   }, [roomOpen, stageKey])
 
   // Plan 234 T3 (wire contract 6.3): on a managed show the backend hands
@@ -395,6 +397,10 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
 
   const setAvatarEnabled = useCallback(async (enabled: boolean) => {
     clientRef.current?.setAvatarEnabled(enabled)
+  }, [])
+
+  const setAvatarGuests = useCallback(async (enabled: boolean) => {
+    clientRef.current?.setAvatarGuests(enabled)
   }, [])
 
   const call = useCallback(
@@ -527,6 +533,7 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
         }
       },
       setAvatarEnabled,
+      setAvatarGuests,
       setMonitor: async (enabled) => {
         // Plan 234 D6: a managed show has no return to subscribe to or to
         // ask for; its Program monitor draws the stage.
@@ -583,6 +590,7 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
       call,
       clipsStepAside,
       setAvatarEnabled,
+      setAvatarGuests,
       hostIdentity,
       onError,
       outputs,

@@ -7531,6 +7531,7 @@ mod tests {
             Some(crate::cloud_talk::CloudRoomShown {
                 on_stage: vec!["host:sh_abc".to_string()],
                 screen: Some("g_ada".to_string()),
+                ..Default::default()
             })
         );
         let wire = serde_json::to_value(&room).unwrap();

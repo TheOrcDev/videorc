@@ -20119,6 +20119,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         if (enabled !== undefined) roomControlsRef.current?.setAvatarEnabled(enabled)
         return roomControlsRef.current?.snapshot.avatar ?? null
       },
+      roomAvatarGuests: (enabled?: boolean) => {
+        if (enabled !== undefined) roomControlsRef.current?.setAvatarGuests(enabled)
+        return roomControlsRef.current?.snapshot.avatar?.guests ?? null
+      },
       roomSounds: (enabled?: boolean) => {
         if (enabled !== undefined) soundboard.setRoomAuxEnabled(enabled)
         return soundboard.getSnapshot().roomAux ?? null
