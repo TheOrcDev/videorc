@@ -2709,6 +2709,28 @@ impl RepairJob {
     }
 }
 
+/// Repair/analysis must yield CPU to the live media threads. No shell and
+/// no detached grandchildren: cancellation still owns the spawned PID.
+fn background_media_command(program: &str) -> std::process::Command {
+    #[cfg(unix)]
+    {
+        let mut command = std::process::Command::new("/usr/bin/nice");
+        command.args(["-n", "10", program]);
+        command
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        let mut command = std::process::Command::new(program);
+        command.creation_flags(0x00004000); // BELOW_NORMAL_PRIORITY_CLASS
+        command
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        std::process::Command::new(program)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4689,27 +4711,5 @@ mod tests {
 
         let parsed: RepairJob = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, job);
-    }
-}
-
-/// Repair/analysis must yield CPU to the live media threads. No shell and
-/// no detached grandchildren: cancellation still owns the spawned PID.
-fn background_media_command(program: &str) -> std::process::Command {
-    #[cfg(unix)]
-    {
-        let mut command = std::process::Command::new("/usr/bin/nice");
-        command.args(["-n", "10", program]);
-        command
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        let mut command = std::process::Command::new(program);
-        command.creation_flags(0x00004000); // BELOW_NORMAL_PRIORITY_CLASS
-        command
-    }
-    #[cfg(not(any(unix, windows)))]
-    {
-        std::process::Command::new(program)
     }
 }
