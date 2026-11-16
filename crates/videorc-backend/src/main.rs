@@ -15719,6 +15719,23 @@ fn stored_ai_session_token() -> Result<String> {
 type AppCloudShowContext =
     cloud_show::CloudShowContext<videorc_api::VideorcApiClient, cloud_show::WsConnector>;
 
+async fn stop_talk_show_chat(state: &AppState, show_id: &str) {
+    if live_chat::stop_live_chat_for_session(state, show_id)
+        .await
+        .is_none()
+    {
+        // Chat may have stopped already while Buddy still owns this show.
+        let delivery = state.live_chat_persistence.begin_delivery().await;
+        cohost::stop_cohost_for_session_end_if_matching_before_emit(
+            state,
+            show_id,
+            &delivery,
+            std::future::ready(()),
+        )
+        .await;
+    }
+}
+
 fn cloud_hooks(state: &AppState) -> cloud_show::CloudHooks {
     let emit_state = state.clone();
     let legs_state = state.clone();
@@ -15790,6 +15807,19 @@ fn cloud_hooks(state: &AppState) -> cloud_show::CloudHooks {
                         Ok(())
                     }
                     cloud_talk::CameraHandover::Return => {
+                        // The room can end on the website, without an RPC here.
+                        // Retire its exact chat/Sidekick owner before preview
+                        // and Clips restart; never stop a replacement session.
+                        let show_id = state
+                            .cloud_show
+                            .lock()
+                            .unwrap_or_else(|p| p.into_inner())
+                            .status()
+                            .show
+                            .map(|show| show.id);
+                        if let Some(show_id) = show_id {
+                            stop_talk_show_chat(&state, &show_id).await;
+                        }
                         state
                             .cloud_live_hold
                             .lock()
@@ -26384,6 +26414,22 @@ mod tests {
                 status: PlatformAccountStatus::Connected,
             })
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn externally_ended_show_stops_its_chat_without_stopping_a_replacement() {
+        let state = test_state();
+        live_chat::start_live_chat(&state, fake_live_chat_start_params("sh_ended", "target")).await;
+        stop_talk_show_chat(&state, "sh_ended").await;
+        assert!(state.live_chat.lock().await.session_id().is_none());
+        live_chat::start_live_chat(&state, fake_live_chat_start_params("replacement", "target"))
+            .await;
+        stop_talk_show_chat(&state, "sh_ended").await;
+        assert_eq!(
+            state.live_chat.lock().await.session_id(),
+            Some("replacement")
+        );
+        live_chat::stop_live_chat(&state).await;
     }
 
     #[tokio::test]

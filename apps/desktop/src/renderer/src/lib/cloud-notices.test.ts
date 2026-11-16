@@ -106,3 +106,15 @@ describe('the taken-over toast (plan 243 R2 B-M2)', () => {
     expect(words(sonner.info.mock.calls[0]![0])).toBe('Your show continues on another computer.')
   })
 })
+
+it('announces an external show end once, and never an end requested here', () => {
+  sonner.info.mockReset()
+  const ended: CloudStatus = { ...base, phase: 'off', endReason: 'ended-elsewhere' }
+  toastCloudStatus(base, ended)
+  toastCloudStatus(ended, ended)
+  expect(sonner.info).toHaveBeenCalledTimes(1)
+  expect(sonner.info.mock.calls[0]![0]).toBe('The show was ended from videorc.com.')
+  sonner.info.mockReset()
+  toastCloudStatus(base, { ...base, phase: 'off', endReason: 'ended-by-host' })
+  expect(sonner.info).not.toHaveBeenCalled()
+})

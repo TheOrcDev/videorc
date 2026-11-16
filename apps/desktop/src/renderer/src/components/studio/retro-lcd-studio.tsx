@@ -17,10 +17,10 @@ import {
   LcdPanelAction,
   LcdPanelCog,
   LcdPanelHeader,
+  LcdPanelChoice,
   LcdPanelKey,
   LcdPanelNavRow,
   LcdPanelPressRow,
-  LcdPanelRow,
   LcdPanelSwitch
 } from '@/components/lcd-panel'
 import { PanelSection } from '@/components/panel-section'
@@ -49,13 +49,14 @@ import { SourceSwitchStatus } from '@/components/studio/source-switch-status'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { DisabledReason } from '@/components/ui/disabled-reason'
 import { InfoTooltip } from '@/components/ui/info-tooltip'
-import { LcdDisplaySeparator } from '@/components/ui/lcd-display'
+import { LcdDisplayRow, LcdDisplaySeparator } from '@/components/ui/lcd-display'
 import { Mixer, MixerChannels } from '@/components/ui/mixer'
 import { ShortcutKeys } from '@/components/ui/shortcut-keys'
 import { ShortcutTooltip } from '@/components/ui/shortcut-tooltip'
 import { useWorkspaceNav, WorkspaceNavContext } from '@/components/workspace-nav'
 import { useStudioCore } from '@/hooks/use-studio'
 import { buildCameraSources, buildCaptureSources } from '@/lib/capture'
+import { GREEN_SCREEN_MODES } from '@/lib/green-screen'
 import { GO_LIVE_CHECKING_LABEL, GO_LIVE_LABEL, RECORD_LABEL } from '@/lib/go-live-copy'
 import { MIC_SESSION_LEVEL_UNAVAILABLE_COPY } from '@/lib/mic-meter-input'
 import { screenPrivacyActionLabel } from '@/lib/screen-privacy-view'
@@ -617,18 +618,18 @@ function RetroScreenPrivacyRow({ control }: { control: ScreenPrivacyControl }): 
   )
 }
 
-/** Green screen under the camera, as in the default look: On or Off, and Adjust to its settings. */
+/** Green screen under the camera, as in the default look: Off, Green screen or Blue screen (plan 248). */
 function RetroGreenScreenRow({ control }: { control: GreenScreenControl }): ReactElement | null {
   if (!control.available) return null
   return (
-    <LcdPanelRow label={control.label}>
-      <LcdPanelAction onClick={control.openSettings}>Adjust</LcdPanelAction>
-      <LcdPanelSwitch
-        aria-label={control.label}
-        checked={control.on}
-        onCheckedChange={control.setOn}
+    <LcdDisplayRow className="min-w-0 py-2" data-testid="green-screen">
+      <LcdPanelChoice
+        aria-label="Green screen"
+        options={GREEN_SCREEN_MODES}
+        value={control.mode}
+        onValueChange={control.setMode}
       />
-    </LcdPanelRow>
+    </LcdDisplayRow>
   )
 }
 

@@ -1,5 +1,19 @@
 # Implementation Plans
 
+- 2026-11-16: [Plan 247](247-talk-show-live-test-fixes.md), the owner's ask
+  after the first live talk show test on 0.30.0 (guest blocked, hearing
+  myself, circle only on the stream, no green screen, the show would not end):
+  "investigate everything … plan out fixes", then "execute the entire plan, a
+  PR for each, heavy tests once after all merge". PLANNED and EXECUTING
+  2026-11-16. Owner decisions D-1 to D-3: green screen works in talk shows, the
+  app shows the stream's circle, a cloud show gets a Library entry:
+  - Web: W1 the guest keeps its camera on a weak link, W2 a stalled camera
+    never freezes on the stream, W3 End never fails silently, W4 /live says
+    "Close the room" before air, W5 small items.
+  - Desktop: D1 the host sees a live guest, D2 the circle in the app, D3 chat
+    in cloud shows plus the Library entry, D4 End never strands YouTube, D5 a
+    show ended on the web ends cleanly, D6 no repairs during a show, D7 the mic
+    re-anchor floor, F1 green screen in talk shows.
 - 2026-11-16: [Plan 242](242-faster-ci.md), the owner's ask: check whether
   a post's CI tricks (faster typecheck, oxlint, time-balanced shards,
   diff-scoped tests, everything in parallel) would cut our CI, then "plan out

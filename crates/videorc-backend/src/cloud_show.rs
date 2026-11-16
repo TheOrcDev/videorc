@@ -2974,6 +2974,20 @@ fn restart_leg_rows(
 
 /// The session's rows for a show the runner ended (L5): every leg it last
 /// reported, Stopped, with the end named in plain words.
+/// A host End observed by the poll came from the website only when this
+/// computer did not already request it. Other end causes keep their words.
+fn external_talk_end_reason(
+    reason: Option<String>,
+    talk: bool,
+    ending_here: bool,
+) -> Option<String> {
+    if talk && !ending_here && reason.as_deref() == Some("host-ended") {
+        Some("ended-elsewhere".to_string())
+    } else {
+        reason
+    }
+}
+
 fn stopped_leg_rows(legs: &[RunnerLeg], end_reason: Option<&str>) -> Vec<StreamTargetRuntime> {
     let message = match end_reason {
         Some("hold-limit") => "Videorc Cloud ended the show: the hold ran past its limit.",
@@ -3103,6 +3117,10 @@ impl<W: CloudWebApi, C: ControlConnector> ControlLoop<W, C> {
             }
             LoopExit::Ended(reason) => {
                 if self.current() {
+                    let reason = {
+                        let runtime = lock(&self.context.slot);
+                        external_talk_end_reason(reason, runtime.talk.is_some(), runtime.ending)
+                    };
                     self.context.forget_talk_show().await;
                     // Plan 222 review L5: the rows the runner last reported
                     // go Stopped before the show (their source) is
@@ -15751,5 +15769,25 @@ mod tests {
             .collect();
         assert!(leftovers.is_empty(), "{leftovers:?}");
         let _ = std::fs::remove_dir_all(&folder);
+    }
+}
+
+#[cfg(test)]
+mod external_talk_end_tests {
+    use super::external_talk_end_reason;
+    #[test]
+    fn external_end_is_distinct_from_this_apps_end() {
+        assert_eq!(
+            external_talk_end_reason(Some("host-ended".into()), true, false).as_deref(),
+            Some("ended-elsewhere")
+        );
+        assert_eq!(
+            external_talk_end_reason(Some("host-ended".into()), true, true).as_deref(),
+            Some("host-ended")
+        );
+        assert_eq!(
+            external_talk_end_reason(Some("max-show".into()), true, false).as_deref(),
+            Some("max-show")
+        );
     }
 }
