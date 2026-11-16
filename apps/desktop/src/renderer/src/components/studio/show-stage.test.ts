@@ -153,6 +153,100 @@ describe('the stage (D8)', () => {
   })
 })
 
+// Plan 247 D-2: the stream clips the host's camera to a circle when the
+// stage says `hostShape: 'circle'` (the program page's rule, never in
+// Solo); the Show stage and the Program monitor copy it, and the name plate
+// stays outside the clip.
+describe("the host's circle (plan 247 D-2)", () => {
+  const tiles = (root: ParentNode = container) => [
+    ...root.querySelectorAll<HTMLElement>('[data-testid="show-stage-tile"]')
+  ]
+  const tileOf = (identity: string, root?: ParentNode) =>
+    tiles(root).find((tile) => tile.dataset.stageIdentity === identity) as HTMLElement
+
+  it('clips the host side by side to a circle, never a guest, and keeps the plate', async () => {
+    await mount(
+      talkStatus({
+        room: openRoom({
+          guests: [ada],
+          stage: { layout: 'side-by-side', onStage: [HOST, 'g_ada'], hostShape: 'circle' }
+        })
+      }),
+      talkShow()
+    )
+    const host = tileOf(HOST)
+    expect(host.dataset.stageShape).toBe('circle')
+    expect(host.style.clipPath).toBe('circle(closest-side at 50% 50%)')
+    expect(host.style.borderRadius).toMatch(/^0(px)?$/)
+    const guest = tileOf('g_ada')
+    expect(guest.dataset.stageShape).toBe('rounded')
+    expect(guest.style.clipPath).toBe('')
+    // The plate sits beside the tile, as on the program page, so the clip
+    // never cuts it.
+    const plates = [...container.querySelectorAll<HTMLElement>('[data-testid="show-stage-plate"]')]
+    expect(plates.map((plate) => plate.textContent)).toContain('You')
+    expect(host.querySelector('[data-testid="show-stage-plate"]')).toBeNull()
+  })
+
+  it('keeps Solo square to the frame and a rounded host rounded', async () => {
+    await mount(
+      talkStatus({
+        room: openRoom({ stage: { layout: 'solo', onStage: [HOST], hostShape: 'circle' } })
+      }),
+      talkShow()
+    )
+    expect(tileOf(HOST).dataset.stageShape).toBe('rounded')
+    expect(tileOf(HOST).style.clipPath).toBe('')
+    await mount(
+      talkStatus({
+        room: openRoom({
+          guests: [ada],
+          stage: { layout: 'side-by-side', onStage: [HOST, 'g_ada'], hostShape: 'rounded' }
+        })
+      }),
+      talkShow()
+    )
+    expect(tileOf(HOST).dataset.stageShape).toBe('rounded')
+  })
+
+  it('draws the same circle in the Program monitor of a managed show', async () => {
+    const managedShow = {
+      id: 'sh_talk',
+      nodeId: 'livekit',
+      resumable: false,
+      kind: 'talk' as const
+    }
+    await mount(
+      talkStatus({
+        show: managedShow,
+        room: openRoom({
+          live: true,
+          guests: [ada],
+          participants: [HOST, 'g_ada'].map((identity) => ({
+            identity,
+            name: identity,
+            role: identity === HOST ? ('host' as const) : ('guest' as const),
+            onStage: true,
+            video: true,
+            audio: true,
+            muted: false,
+            screen: false,
+            quality: 'good' as const,
+            sinceMs: 1000,
+            away: false
+          })),
+          stage: { layout: 'side-by-side', onStage: [HOST, 'g_ada'], hostShape: 'circle' },
+          shown: { onStage: [HOST, 'g_ada'] }
+        })
+      }),
+      talkShow()
+    )
+    const monitor = container.querySelector<HTMLElement>('[data-testid="show-stage-program"]')
+    expect(tileOf(HOST, monitor as HTMLElement).dataset.stageShape).toBe('circle')
+    expect(tileOf('g_ada', monitor as HTMLElement).dataset.stageShape).toBe('rounded')
+  })
+})
+
 // Plan 234 D6 (T3): a managed show has no return picture. The Program
 // monitor keeps its frame, its label and its two waiting lines, and draws
 // the Show stage as the program page reports it. Nothing asks for a return.

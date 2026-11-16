@@ -1145,7 +1145,7 @@ function RowActions({
   const playReason = actions.playDisabledReason
   return (
     <div className="flex items-center justify-end gap-0.5">
-      {playReason ? (
+      {session.mode === 'cloud-stream' ? null : playReason ? (
         <DisabledReason reason={playReason} tabIndex={tabIndex}>
           <Button
             aria-label="Play recording"

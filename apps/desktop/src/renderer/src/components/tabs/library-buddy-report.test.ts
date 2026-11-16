@@ -199,6 +199,11 @@ it('shows a cloud show with chat and no local-file actions', async () => {
   await render()
   expect(container.textContent).toContain('Cloud Q&A')
   expect(container.textContent).toContain('Cloud show · youtube')
+  expect(
+    container.querySelector(
+      '[data-videorc-library-row="cloud-show"] button[aria-label="Play recording"]'
+    )
+  ).toBeNull()
   const actions = labels(await openMenu('cloud-show'))
   expect(actions).toContain('Sidekick report')
   for (const forbidden of ['Play', 'Show in Finder', 'Export MP4', 'Repair', 'Check recording']) {

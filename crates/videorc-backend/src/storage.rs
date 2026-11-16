@@ -2033,7 +2033,7 @@ impl Database {
             tx.execute(
                 "INSERT INTO sessions (id, title, started_at, status, mode, stream_preset, sources_json, layout_json, output_json)
                  VALUES (?1, ?2, ?3, 'running', 'cloud-stream', ?4, ?5, ?6, ?7)
-                 ON CONFLICT(id) DO UPDATE SET status = 'running', ended_at = NULL,
+                 ON CONFLICT(id) DO UPDATE SET status = 'running', ended_at = NULL, duration_ms = NULL,
                  title = excluded.title, stream_preset = excluded.stream_preset
                  WHERE sessions.mode = 'cloud-stream'",
                 params![show.id, room.title.as_deref().filter(|title| !title.trim().is_empty()).unwrap_or("Talk show"),
@@ -19229,6 +19229,8 @@ mod cloud_show_session_tests {
         assert!(rows[0].duration_ms.is_some_and(|ms| ms >= 0));
         status.room.as_mut().unwrap().live = true;
         db.sync_cloud_show_session(&status).unwrap();
-        assert_eq!(db.list_sessions(10).unwrap().len(), 1);
+        let reopened = db.list_sessions(10).unwrap();
+        assert_eq!(reopened.len(), 1);
+        assert!(reopened[0].duration_ms.is_none());
     }
 }

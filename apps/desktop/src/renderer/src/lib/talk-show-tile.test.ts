@@ -3,7 +3,16 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
 
 import { CameraOffAvatar } from '@/components/studio/camera-off-avatar'
-import { cameraOffLook, cameraPicture, nameInitial, showsAway } from './talk-show-tile'
+import { HOST, ada } from '@/lib/guests-room-fixtures'
+import { planStage } from '@/lib/talk-show-layout'
+import {
+  HOST_CIRCLE_CLIP,
+  cameraOffLook,
+  cameraPicture,
+  hostCircle,
+  nameInitial,
+  showsAway
+} from './talk-show-tile'
 
 // Wire contract 5.5 (decision 75): camera off is a muted camera publication,
 // the tile stays with the camera-off look, and it is never away.
@@ -48,6 +57,37 @@ describe('cameraOffLook', () => {
   it('is the program page’s: a circle 36 % of the short side, the letter half of it', () => {
     expect(cameraOffLook(944, 531)).toEqual({ diameter: 191, fontPx: 96 })
     expect(cameraOffLook(20, 10).fontPx).toBe(8)
+  })
+})
+
+describe('hostCircle (plan 247 D-2)', () => {
+  const canvas = { width: 1920, height: 1080 }
+  const tilesOf = (layout: 'solo' | 'side-by-side' | 'screen-people') =>
+    planStage(canvas, {
+      layout,
+      people: layout === 'solo' ? [HOST] : [HOST, ada.guestId],
+      screen: layout === 'screen-people' ? HOST : null,
+      spotlight: null
+    }).tiles
+
+  it("is the program page's rule: the host's person tile with corners, when the stage says circle", () => {
+    const [host, guest] = tilesOf('side-by-side')
+    expect(hostCircle(host, HOST, 'circle')).toBe(true)
+    expect(hostCircle(guest, HOST, 'circle')).toBe(false)
+    expect(hostCircle(host, HOST, 'rounded')).toBe(false)
+    expect(hostCircle(host, HOST, undefined)).toBe(false)
+  })
+
+  it('never in Solo, where the tile has no corners, and never on a screen', () => {
+    const [solo] = tilesOf('solo')
+    expect(solo.cornerRadius).toBe(0)
+    expect(hostCircle(solo, HOST, 'circle')).toBe(false)
+    const screen = tilesOf('screen-people').find((tile) => tile.kind === 'screen')
+    expect(screen && hostCircle(screen, HOST, 'circle')).toBe(false)
+  })
+
+  it('clips to the circle inscribed in the tile, centred', () => {
+    expect(HOST_CIRCLE_CLIP).toBe('circle(closest-side at 50% 50%)')
   })
 })
 

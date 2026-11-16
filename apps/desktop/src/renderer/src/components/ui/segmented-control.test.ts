@@ -139,35 +139,39 @@ describe('SegmentedControl', () => {
     expect(tabStops()).toEqual(['Dark'])
   })
 
-  it('moves and checks with the arrows, Home and End, wrapping and skipping disabled options', async () => {
-    const changes: Theme[] = []
-    await render(
-      h(Controlled, {
-        'aria-label': 'Theme',
-        changes,
-        initial: 'light',
-        options: [THEMES[0], { ...THEMES[1], disabled: true }, THEMES[2]]
-      })
-    )
-    radio('Light').focus()
-    await press('ArrowRight')
-    expect(focused()).toBe('System')
-    expect(checkedLabels()).toEqual(['System'])
-    await press('ArrowRight')
-    expect(focused()).toBe('Light')
-    await press('ArrowLeft')
-    expect(focused()).toBe('System')
-    await press('Home')
-    expect(focused()).toBe('Light')
-    await press('End')
-    expect(focused()).toBe('System')
-    await press('ArrowUp')
-    expect(focused()).toBe('Light')
-    await press('ArrowDown')
-    expect(focused()).toBe('System')
-    expect(changes).toEqual(['system', 'light', 'system', 'light', 'system', 'light', 'system'])
-    expect(tabStops()).toEqual(['System'])
-  })
+  it.each(['default', 'lcd'] as const)(
+    'moves and checks with arrows, Home and End in the %s look',
+    async (variant) => {
+      const changes: Theme[] = []
+      await render(
+        h(Controlled, {
+          'aria-label': 'Theme',
+          changes,
+          initial: 'light',
+          variant,
+          options: [THEMES[0], { ...THEMES[1], disabled: true }, THEMES[2]]
+        })
+      )
+      radio('Light').focus()
+      await press('ArrowRight')
+      expect(focused()).toBe('System')
+      expect(checkedLabels()).toEqual(['System'])
+      await press('ArrowRight')
+      expect(focused()).toBe('Light')
+      await press('ArrowLeft')
+      expect(focused()).toBe('System')
+      await press('Home')
+      expect(focused()).toBe('Light')
+      await press('End')
+      expect(focused()).toBe('System')
+      await press('ArrowUp')
+      expect(focused()).toBe('Light')
+      await press('ArrowDown')
+      expect(focused()).toBe('System')
+      expect(changes).toEqual(['system', 'light', 'system', 'light', 'system', 'light', 'system'])
+      expect(tabStops()).toEqual(['System'])
+    }
+  )
 
   it('in manual activation, only moves focus until Space or a click checks', async () => {
     const changes: Theme[] = []

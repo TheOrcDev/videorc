@@ -3588,23 +3588,23 @@ async fn prepare_session_live_chat(
 ) -> Option<live_chat::LiveChatStartParams> {
     // Cloud chat uses the show id, not a local recording session. Ensure
     // its row before the first provider request, including a resume.
-    let cloud = state
-        .cloud_show
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .status();
-    if cloud
-        .show
-        .as_ref()
-        .is_some_and(|show| show.id == session_id)
-        && let Err(error) = state.database.sync_cloud_show_session(&cloud)
     {
-        state.emit_log(
-            "error",
-            format!("Cloud show chat could not open its Library entry: {error:#}"),
-        );
-        return None;
+        let cloud_guard = state.cloud_show.lock().unwrap_or_else(|p| p.into_inner());
+        let cloud = cloud_guard.status();
+        if cloud
+            .show
+            .as_ref()
+            .is_some_and(|show| show.id == session_id)
+            && let Err(error) = state.database.sync_cloud_show_session(&cloud)
+        {
+            state.emit_log(
+                "error",
+                format!("Cloud show chat could not open its Library entry: {error:#}"),
+            );
+            return None;
+        }
     }
+
     use std::collections::HashSet;
     let enabled: HashSet<&str> = streaming
         .enabled_target_ids
@@ -15769,14 +15769,19 @@ fn cloud_hooks(state: &AppState) -> cloud_show::CloudHooks {
         }),
         emit: std::sync::Arc::new(move |status| {
             // Read the current slot so a late emission cannot reopen an old show.
+            // emit_from drops its lock before invoking this hook. Keep the
+            // current-state read and persistence ordered under the same lock.
             let current = emit_state
                 .cloud_show
                 .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .status();
-            if let Err(error) = emit_state.database.sync_cloud_show_session(&current) {
+                .unwrap_or_else(|p| p.into_inner());
+            if let Err(error) = emit_state
+                .database
+                .sync_cloud_show_session(&current.status())
+            {
                 tracing::warn!("Could not update the cloud show's Library entry: {error:#}");
             }
+            drop(current);
             emit_state.emit_event(cloud_show::CLOUD_STATE_EVENT, status);
         }),
         // Lane 3 F2: the show this desktop holds survives a relaunch, so the
