@@ -6058,6 +6058,7 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "discord.webhook.remove"
         | "discord.webhook.sendTest"
         | "streamReport.email.set"
+        | "streamReport.history.set"
         | "streamReport.email.sendLast"
         | "watchdog.alert.acknowledge"
         | "watchdog.alert.snooze"
@@ -13468,11 +13469,15 @@ async fn handle_text_message_with_role(
         "streamReport.email.get" => {
             ServerResponse::ok(command.id, stream_report_email::current_state(state).await)
         }
-        "streamReport.email.set" => {
+        "streamReport.email.set" | "streamReport.history.set" => {
             match serde_json::from_value::<stream_report_email::StreamReportEmailSetParams>(
                 command.params,
             ) {
-                Ok(params) => match stream_report_email::set_enabled(state, params.enabled).await {
+                Ok(params) => match if command.method == "streamReport.history.set" {
+                    stream_report_email::set_history(state, params.enabled).await
+                } else {
+                    stream_report_email::set_enabled(state, params.enabled).await
+                } {
                     Ok(snapshot) => ServerResponse::ok(command.id, snapshot),
                     Err(error) => ServerResponse::error(
                         command.id,

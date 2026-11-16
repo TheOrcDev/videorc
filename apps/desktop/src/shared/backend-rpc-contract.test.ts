@@ -2973,6 +2973,26 @@ describe('backend RPC contract', () => {
     )
   })
 
+  it('accepts optional stream history and validates its mutation (plan 241)', () => {
+    const old = { signedIn: true, enabled: false, envDisabled: false }
+    expect(validateBackendRpcResult('streamReport.email.get', old)).toEqual(old)
+    for (const history of [true, false]) {
+      const state = { ...old, history }
+      expect(validateBackendRpcResult('streamReport.email.get', state)).toEqual(state)
+      expect(validateBackendRpcResult('streamReport.history.set', state)).toEqual(state)
+      expect(validateBackendRpcParams('streamReport.history.set', { enabled: history })).toEqual({
+        enabled: history
+      })
+    }
+    expect(() =>
+      validateBackendRpcResult('streamReport.email.get', { ...old, history: null })
+    ).toThrow()
+    expect(() => validateBackendRpcParams('streamReport.history.set', {})).toThrow()
+    expect(() =>
+      validateBackendRpcParams('streamReport.history.set', { enabled: true, history: true })
+    ).toThrow()
+  })
+
   it('validates the stream report email switch and its send (plan 237)', () => {
     const signedOut = { signedIn: false, enabled: null, envDisabled: false }
     expect(validateBackendRpcResult('streamReport.email.get', signedOut)).toEqual(signedOut)
