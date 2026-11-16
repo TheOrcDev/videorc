@@ -152,9 +152,13 @@ const htmlPath = resolve(
 // keys) and the scene switch wiring in the provider; the v1 migration loads
 // lazily. Raise gzip to 493,000 and raw to 2,397,000; the entry ceilings
 // hold. Keep new surfaces lazy.
+// 2026-11-16 (owner-approved: "yes change", 494,500 for the scene HUD): the
+// key HUD (plan 231 S10) adds 5,418 raw / 1,292 gzip, all in the index entry
+// (the HUD's window state and its IPC). The HUD page is its own Vite build.
+// Raise gzip to 494,500 and raw to 2,403,000; the entry ceilings hold.
 const budget = {
-  maxTotalRawBytes: Number(process.env.VIDEORC_RENDERER_MAX_EAGER_RAW_BYTES ?? 2_397_000),
-  maxTotalGzipBytes: Number(process.env.VIDEORC_RENDERER_MAX_EAGER_GZIP_BYTES ?? 493_000),
+  maxTotalRawBytes: Number(process.env.VIDEORC_RENDERER_MAX_EAGER_RAW_BYTES ?? 2_403_000),
+  maxTotalGzipBytes: Number(process.env.VIDEORC_RENDERER_MAX_EAGER_GZIP_BYTES ?? 494_500),
   maxEntryRawBytes: Number(process.env.VIDEORC_RENDERER_MAX_ENTRY_RAW_BYTES ?? 1_200_000),
   maxEntryGzipBytes: Number(process.env.VIDEORC_RENDERER_MAX_ENTRY_GZIP_BYTES ?? 235_000)
 }
