@@ -2174,6 +2174,8 @@ impl CloudShowRuntime {
     }
 
     pub(crate) fn clear_show(&mut self, end_reason: Option<String>) {
+        self.pending_feed_go = false;
+        self.claiming_air = false;
         self.show = None;
         self.talk = None;
         self.runner = None;
@@ -4314,7 +4316,7 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
 
     /// Runs only after the local session starts: never wait for a feed before sending it.
     pub async fn finish_resume(&self, bearer: &str) -> Result<()> {
-        let (show_id, device, orientations) = {
+        let (show_id, device, orientations, generation, session_id) = {
             let mut runtime = lock(&self.slot);
             if !runtime.pending_feed_go {
                 runtime.claiming_air = false;
@@ -4336,11 +4338,26 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
                             .collect::<Vec<_>>()
                     })
                     .unwrap_or_default(),
+                runtime.generation,
+                show.session_id.clone(),
             )
+        };
+        let still_feeding = || {
+            let runtime = lock(&self.slot);
+            runtime.generation == generation
+                && runtime.stopped_by.is_none()
+                && runtime.show.as_ref().is_some_and(|show| {
+                    show.record.id == show_id
+                        && show.session_id == session_id
+                        && session_id.is_some()
+                })
         };
         let result = async {
             let feed_deadline = tokio::time::Instant::now() + Duration::from_secs(20);
             loop {
+                if !still_feeding() {
+                    return Err(cloud_refusal("cloud-not-on-air"));
+                }
                 let connected = {
                     let runtime = lock(&self.slot);
                     runtime.runner.as_ref().is_some_and(|state| {
@@ -4363,6 +4380,9 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
             }
             let go_deadline = tokio::time::Instant::now() + Duration::from_secs(20);
             loop {
+                if !still_feeding() {
+                    return Err(cloud_refusal("cloud-not-on-air"));
+                }
                 match tokio::time::timeout_at(
                     go_deadline,
                     self.web.on_air(bearer, &show_id, &device, "feed", "go"),
@@ -4392,7 +4412,7 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
             }
         }
         .await;
-        if result.is_err() {
+        if result.is_err() && still_feeding() {
             // Use the continuation intent for finalization; preserve the show.
             self.stop_for_continuation(&show_id, CloudStoppedBy::HandOff)
                 .await?;
@@ -4720,6 +4740,7 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
     pub async fn detect_current_show(&self, bearer: &str) -> Result<CloudStatus> {
         let cleanup_generation = {
             let mut runtime = lock(&self.slot);
+            runtime.last_discovery = Some(tokio::time::Instant::now());
             if runtime.launch_check_in_flight {
                 return Ok(runtime.status());
             }

@@ -1581,6 +1581,7 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
             let mut runtime = lock(&self.slot);
             runtime.failed = None;
             runtime.fallback = None;
+            runtime.stopped_by = None;
             runtime.show = Some(ActiveShow {
                 record: created.show.clone(),
                 control: created.control.clone(),

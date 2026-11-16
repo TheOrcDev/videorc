@@ -793,13 +793,12 @@ async fn run_backend(device_changes: tokio::sync::watch::Receiver<u64>) -> Resul
             let mut tick = tokio::time::interval(std::time::Duration::from_secs(10));
             loop {
                 tick.tick().await;
-                if matches!(
-                    current_recording_status(&discovery_state).await.state,
-                    RecordingState::Idle
-                ) && let (Some(context), Some(bearer)) = (
-                    cloud_context(&discovery_state),
-                    account::stored_session_token(),
-                ) {
+                if !cloud_test_blocked_by(&current_recording_status(&discovery_state).await)
+                    && let (Some(context), Some(bearer)) = (
+                        cloud_context(&discovery_state),
+                        account::stored_session_token(),
+                    )
+                {
                     let _ = context.check_current_show(&bearer, false).await;
                 }
             }
@@ -11673,10 +11672,7 @@ async fn handle_text_message_with_role(
         // `CloudStatus`.
         "cloud.status" => ServerResponse::ok(command.id, cloud_show_status(state)),
         "cloud.show.check" => {
-            if !matches!(
-                current_recording_status(state).await.state,
-                RecordingState::Idle
-            ) {
+            if cloud_test_blocked_by(&current_recording_status(state).await) {
                 return ServerResponse::ok(command.id, serde_json::json!({"ok":true}));
             }
             if let (Some(context), Some(bearer)) =
