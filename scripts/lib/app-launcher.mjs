@@ -208,6 +208,7 @@ export function smokeAppEnv(env = {}, options = {}) {
     // account a stream report unless the run itself asks to: a value left
     // exported in the shell does not count.
     VIDEORC_STREAM_REPORT_EMAIL: explicitSmokeEnvValue(env, 'VIDEORC_STREAM_REPORT_EMAIL') ?? '0',
+    VIDEORC_LIVE_STATUS: explicitSmokeEnvValue(env, 'VIDEORC_LIVE_STATUS') ?? '0',
     VIDEORC_SMOKE_SKIP_FIRST_RUN: env.VIDEORC_SMOKE_SKIP_FIRST_RUN ?? '1',
     VIDEORC_APP_DATA_DIR: appDataDir,
     VIDEORC_USER_DATA_DIR: userDataDir,
