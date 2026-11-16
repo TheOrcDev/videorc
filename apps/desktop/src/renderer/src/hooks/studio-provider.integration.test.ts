@@ -6435,9 +6435,15 @@ describe('real StudioProvider lifecycle', () => {
     expect(completions()).toEqual([])
     expect(xEnds()).toBe(0)
 
-    // A later show of this computer is its own: its stop completes it.
+    // A later show of this computer is its own: its stop completes it. (The
+    // fake reuses session ids; the new show's status puts this computer on
+    // air, which ends the latch.)
     await pushEvent('cloud.state', { ...resumableCloudStatus(), phase: 'off', show: undefined })
     await goLive()
+    await pushEvent(
+      'cloud.state',
+      managedOnAirCloudStatus({ show: { ...managedOnAirCloudStatus().show!, id: 'sh_next' } })
+    )
     expect(backend.youtubePrepareCount).toBe(2)
     expect(completions()).toEqual([])
     backend.recordingState = 'idle'
@@ -6577,6 +6583,149 @@ describe('real StudioProvider lifecycle', () => {
     await waitForObservation(() => completions().length === 1)
     expect(completions()).toEqual(['youtube-broadcast-2'])
     expect(sent('session.stop')).toBe(1)
+  }, 20_000)
+
+  // Plan 243 R2 B-H1: after a hand-off the phone carries the show, and the
+  // saved destinations a Continue here sends along are reconnect candidates,
+  // never permission to complete. A refused resume completes no YouTube
+  // broadcast, ends no X broadcast and ends no show; the retry continues,
+  // and the continued session's own stop completes nothing either.
+  it('completes nothing when Continue here is refused or the continued session stops (plan 243 R2 B-H1)', async () => {
+    const backend = new StudioBackend()
+    enableYouTubeAndXOauthForTest(backend)
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const testDom = installProviderTestEnvironment(
+      createVideorcApi({
+        acknowledge: async () => true,
+        pending: async () => [],
+        acknowledgeProvider: async () => true,
+        pendingProvider: async () => []
+      })
+    )
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+    let shell: ReturnType<typeof useStudioShell> | undefined
+    function ShellProbe(): null {
+      const value = useStudioShell()
+      useEffect(() => {
+        shell = value
+      }, [value])
+      return null
+    }
+    root = await mountStudioProvider(
+      testDom.container,
+      (value) => {
+        observations.push(value)
+      },
+      createElement(ShellProbe)
+    )
+    await waitForObservation(
+      () =>
+        latest()?.core.wsStatus === 'connected' &&
+        latest()?.core.captureConfig.sources.microphoneId === 'mic:1'
+    )
+    const pushEvent = async (event: string, payload: unknown): Promise<void> => {
+      await act(async () => {
+        backend.pushEvent(event, payload)
+        await Promise.resolve()
+      })
+    }
+    const sent = (method: string): number =>
+      backend.sentCommands.filter((command) => command.method === method).length
+    const completions = (): number =>
+      backend.sentCommands.filter(
+        (command) =>
+          command.method === 'streamTargets.youtube.transition' &&
+          (command.params as { status?: string }).status === 'complete'
+      ).length
+    const settle = async (): Promise<void> => {
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 50))
+      })
+    }
+
+    await openYouTubeAndXGoLiveConfirmation(latest)
+    await act(async () => {
+      await latest()!.core.confirmGoLive()
+    })
+    await waitForObservation(() => latest()?.recording.recording.state === 'recording')
+    await pushEvent('recording.status', {
+      state: 'recording',
+      sessionId: 'session-1',
+      startedAt: now,
+      streamUrl: 'rtmps://localhost:1936/live/***',
+      message: 'Running both session.'
+    })
+    backend.cloudStatus = managedOnAirCloudStatus()
+    await pushEvent('cloud.state', backend.cloudStatus)
+    await waitForObservation(() => latest()?.cloud.cloudStatus?.onAir?.thisDevice === true)
+    await act(async () => {
+      await latest()!.core.requestStopSession('button')
+    })
+    await waitForObservation(() => shell?.stopConfirmation?.origin === 'button')
+    await act(async () => shell!.handOffStopSession())
+    await waitForObservation(() => latest()?.recording.recording.state === 'idle')
+
+    // The phone continues the show; this computer shows Continue here.
+    backend.cloudStatus = managedOnAirCloudStatus({
+      phase: 'live',
+      sessionId: undefined,
+      show: { id: 'sh_managed', nodeId: 'livekit', resumable: true, kind: 'solo' },
+      onAir: {
+        name: 'iPhone',
+        kind: 'phone',
+        source: 'camera',
+        waiting: false,
+        thisDevice: false,
+        since: now
+      }
+    })
+    await pushEvent('cloud.state', backend.cloudStatus)
+    await waitForObservation(() => latest()?.cloud.cloudStatus?.onAir?.thisDevice === false)
+    await settle()
+    expect(completions()).toBe(0)
+
+    // Continue here is refused before any session exists.
+    const release = backend.deferFailure(
+      'cloud.show.resume',
+      Object.assign(new Error('Videorc Cloud could not prepare this computer.'), {
+        code: 'cloud-source-not-ready'
+      })
+    )
+    let refused!: Promise<boolean>
+    await act(async () => {
+      refused = latest()!.cloud.resumeCloudShow()
+      await Promise.resolve()
+    })
+    release()
+    expect(await refused).toBe(false)
+    await settle()
+    expect(sent('cloud.show.resume')).toBe(1)
+    expect(completions()).toBe(0)
+    expect(sent('streamTargets.x.end')).toBe(0)
+    expect(sent('cloud.show.end')).toBe(0)
+
+    // The retry continues the show here; its stop completes nothing either.
+    let continued!: Promise<boolean>
+    await act(async () => {
+      continued = latest()!.cloud.resumeCloudShow()
+    })
+    expect(await continued).toBe(true)
+    await waitForObservation(
+      () => latest()?.recording.recording.sessionId === 'cloud-resume-session'
+    )
+    await pushEvent('recording.status', {
+      state: 'idle',
+      sessionId: 'cloud-resume-session',
+      message: 'Saved.'
+    })
+    await waitForObservation(() => latest()?.recording.recording.state === 'idle')
+    await settle()
+    expect(completions()).toBe(0)
+    expect(sent('streamTargets.x.end')).toBe(0)
+    expect(sent('cloud.show.end')).toBe(0)
   }, 20_000)
 
   // Plan 243 D7: a talk show taken over (or handed off) goes on elsewhere, so
