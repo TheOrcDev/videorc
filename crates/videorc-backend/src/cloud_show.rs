@@ -4705,6 +4705,19 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
             )
             .await?;
         }
+        {
+            let mut runtime = lock(&self.slot);
+            if runtime
+                .show
+                .as_ref()
+                .is_none_or(|show| show.record.id != show_id)
+            {
+                return Err(cloud_refusal("cloud-not-on-air"));
+            }
+            // The isolated Stop lane can run while the POST is pending.
+            runtime.stopped_by = Some(CloudStoppedBy::HandOff);
+        }
+        self.hooks.emit_from(&self.slot);
         // A failed POST must still leave viewers on the hold card.
         let posted = match bearer {
             Some(bearer) => self
@@ -4774,6 +4787,8 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
             let mut runtime = lock(&self.slot);
             runtime.continuation_stop_in_flight = false;
             if stopped.is_err() {
+                // Nothing stopped: a later ordinary Stop keeps its normal intent.
+                runtime.stopped_by = None;
                 runtime.message =
                     Some("This computer could not stop sending. Try Stop again.".into());
             }
@@ -6040,6 +6055,7 @@ mod tests {
         on_air_without_ingest: std::sync::atomic::AtomicBool,
         go_ready: std::sync::atomic::AtomicBool,
         go_errors: StdMutex<VecDeque<CloudApiError>>,
+        hand_off_gate: StdMutex<Option<CurrentReplyGate>>,
         hand_off_calls: AtomicUsize,
         hand_off_fails: std::sync::atomic::AtomicBool,
         hand_off_errors: StdMutex<VecDeque<CloudApiError>>,
@@ -6237,6 +6253,11 @@ mod tests {
             _device: &CloudDevice,
         ) -> std::result::Result<(), CloudApiError> {
             self.hand_off_calls.fetch_add(1, Ordering::SeqCst);
+            let gate = self.hand_off_gate.lock().unwrap().take();
+            if let Some((entered, held)) = gate {
+                let _ = entered.send(());
+                let _ = held.await;
+            }
             if let Some(error) = self.hand_off_errors.lock().unwrap().pop_front() {
                 return Err(error);
             }
@@ -12557,6 +12578,26 @@ mod tests {
             lock(&harness.context.slot).stopped_by,
             Some(CloudStoppedBy::HandOff)
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn r2_a_l4_a_concurrent_stop_during_hand_off_never_ends_the_show() {
+        let harness = harness(true);
+        managed_live_show(&harness).await;
+        let (entered, started) = oneshot::channel();
+        let (release, held) = oneshot::channel();
+        *harness.context.web.hand_off_gate.lock().unwrap() = Some((entered, held));
+        let context = harness.context.clone();
+        let hand_off = tokio::spawn(async move { context.hand_off(Some("bearer".into())).await });
+        started.await.unwrap();
+        harness
+            .context
+            .on_session_stopped("session-1", Some("bearer".into()))
+            .await;
+        assert!(harness.context.web.end_calls.lock().unwrap().is_empty());
+        release.send(()).unwrap();
+        hand_off.await.unwrap().unwrap();
+        assert!(lock(&harness.context.slot).status().show.unwrap().resumable);
     }
     fn hold_unconnected_for_review(harness: &Harness, talk: bool) {
         let created = if talk {
