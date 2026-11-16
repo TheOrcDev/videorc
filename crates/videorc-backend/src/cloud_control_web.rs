@@ -1702,6 +1702,7 @@ fn read_state_answer(answer: std::result::Result<ControlStateAnswer, CloudApiErr
 /// One show's control over videorc.com: its state long-poll and the way to
 /// its intents.
 pub(crate) struct WebControl<W: CloudWebApi> {
+    slot: crate::cloud_show::CloudShowSlot,
     web: Arc<W>,
     bearer: String,
     show_id: String,
@@ -1727,8 +1728,13 @@ impl<W: CloudWebApi> WebControl<W> {
         bearer: &str,
         show_id: &str,
         destinations: Arc<DestinationGeneration>,
+        slot: crate::cloud_show::CloudShowSlot,
     ) -> std::result::Result<(Self, RunnerState), HelloFailure> {
-        let first = with_one_cloud_retry(|| web.control_state(bearer, show_id, None)).await;
+        let first = with_one_cloud_retry(|| {
+            let idle = crate::cloud_show::lock(&slot).poll_as_idle();
+            web.control_state(bearer, show_id, None, idle)
+        })
+        .await;
         let (rev, state) = match read_state_answer(first) {
             WebPoll::State { rev, state } => (rev, *state),
             WebPoll::Ended(_) => return Err(HelloFailure::NoSuchShow),
@@ -1770,6 +1776,7 @@ impl<W: CloudWebApi> WebControl<W> {
         );
         Ok((
             Self {
+                slot,
                 web,
                 bearer: bearer.to_string(),
                 show_id: show_id.to_string(),
@@ -1798,9 +1805,10 @@ impl<W: CloudWebApi> WebControl<W> {
     /// with the same `since`.
     pub(crate) async fn poll(&mut self) -> WebPoll {
         tokio::time::sleep_until(self.next_at).await;
+        let idle = crate::cloud_show::lock(&self.slot).poll_as_idle();
         let answer = self
             .web
-            .control_state(&self.bearer, &self.show_id, self.since)
+            .control_state(&self.bearer, &self.show_id, self.since, idle)
             .await;
         let poll = read_state_answer(answer);
         let now = tokio::time::Instant::now();

@@ -3847,6 +3847,7 @@ impl crate::cloud_show::CloudWebApi for VideorcApiClient {
         bearer: &str,
         show_id: &str,
         since: Option<u64>,
+        idle: bool,
     ) -> std::result::Result<
         crate::cloud_control_web::ControlStateAnswer,
         crate::cloud_show::CloudApiError,
@@ -3855,6 +3856,9 @@ impl crate::cloud_show::CloudWebApi for VideorcApiClient {
         let mut request = self.http.get(self.endpoint(&path)).bearer_auth(bearer);
         if let Some(since) = since {
             request = request.query(&[(crate::cloud_control_web::STATE_SINCE_QUERY, since)]);
+        }
+        if idle {
+            request = request.query(&[("viewer", "idle")]);
         }
         // The web long-polls up to 25 s: wait that out.
         self.cloud_json(request, &path, CLOUD_STATE_POLL_TIMEOUT)

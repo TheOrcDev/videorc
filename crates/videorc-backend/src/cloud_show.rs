@@ -1219,6 +1219,7 @@ pub trait CloudWebApi: Send + Sync + 'static {
         bearer: &str,
         show_id: &str,
         since: Option<u64>,
+        idle: bool,
     ) -> impl Future<Output = std::result::Result<ControlStateAnswer, CloudApiError>> + Send;
     /// `PUT …/destinations`: the socket's `destinations.set`. The body
     /// carries the stream keys and is never logged.
@@ -2182,6 +2183,12 @@ impl CloudShowRuntime {
                 .is_some_and(|air| !air.waiting)
     }
 
+    pub(crate) fn poll_as_idle(&self) -> bool {
+        self.show
+            .as_ref()
+            .is_some_and(|show| show.session_id.is_none() && show.destinations.is_empty())
+    }
+
     pub fn feeding_session(&self) -> Option<String> {
         self.show.as_ref().and_then(|show| show.session_id.clone())
     }
@@ -2674,8 +2681,14 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
             }
             ControlKind::Web => {
                 let destinations = lock(&self.slot).destinations_generation.clone();
-                let (web, first) =
-                    WebControl::open(self.web.clone(), bearer, show_id, destinations).await?;
+                let (web, first) = WebControl::open(
+                    self.web.clone(),
+                    bearer,
+                    show_id,
+                    destinations,
+                    self.slot.clone(),
+                )
+                .await?;
                 Ok((ControlLink::Web(web), first))
             }
             ControlKind::Unknown => Err(HelloFailure::Transport(
@@ -6074,6 +6087,7 @@ mod tests {
         // Plan 234: web control, the managed show this web holds.
         managed: StdMutex<FakeManaged>,
         managed_changed: tokio::sync::Notify,
+        poll_idle: StdMutex<Vec<bool>>,
     }
 
     /// Plan 234: the managed show as the fake web holds it (web control). A
@@ -6417,7 +6431,9 @@ mod tests {
             _bearer: &str,
             _show_id: &str,
             since: Option<u64>,
+            idle: bool,
         ) -> std::result::Result<ControlStateAnswer, CloudApiError> {
+            self.poll_idle.lock().unwrap().push(idle);
             let delay = self.first_state_delay_ms.load(Ordering::SeqCst);
             if since.is_none() && delay > 0 {
                 tokio::time::sleep(Duration::from_millis(delay as u64)).await;
@@ -12350,6 +12366,55 @@ mod tests {
         );
         assert!(harness.context.web.destination_bodies().is_empty());
         assert!(harness.context.web.end_calls.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn r2_a_m7_unfed_keyless_computers_poll_as_idle() {
+        let harness = harness(true);
+        managed_live_show(&harness).await;
+        assert!(
+            harness
+                .context
+                .web
+                .poll_idle
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|idle| !idle)
+        );
+        harness
+            .context
+            .stop_for_continuation("sh_abc", CloudStoppedBy::HandOff)
+            .await
+            .unwrap();
+        harness
+            .context
+            .web
+            .set_state(managed_state("live", live_legs()));
+        tokio::time::sleep(Duration::from_secs(28)).await;
+        assert_eq!(
+            harness.context.web.poll_idle.lock().unwrap().last(),
+            Some(&true)
+        );
+        harness
+            .context
+            .resume_session("resumed", Some("bearer".into()), None)
+            .await
+            .unwrap();
+        harness
+            .context
+            .finish_resume("bearer", "resumed")
+            .await
+            .unwrap();
+        harness
+            .context
+            .web
+            .set_state(managed_state("live", live_legs()));
+        tokio::time::sleep(Duration::from_secs(28)).await;
+        assert_eq!(
+            harness.context.web.poll_idle.lock().unwrap().last(),
+            Some(&false)
+        );
     }
     fn hold_unconnected_for_review(harness: &Harness, talk: bool) {
         let created = if talk {
