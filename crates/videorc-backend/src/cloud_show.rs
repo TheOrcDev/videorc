@@ -12599,7 +12599,7 @@ mod tests {
                 .await;
             assert_eq!(answer.is_ok(), allowed);
             if !allowed {
-                let error = answer.unwrap_err();
+                let error = answer.err().expect("elsewhere is refused");
                 assert_eq!(
                     continuation_error_code(&error),
                     Some("cloud-show-live-elsewhere")
