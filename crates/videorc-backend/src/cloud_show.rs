@@ -1082,7 +1082,14 @@ pub fn classify_cloud_failure(
     }
 }
 
+#[derive(Debug, thiserror::Error)]
+#[error("Your show is live on another device. Use Continue here, or end it first.")]
+struct CloudShowLiveElsewhere;
+
 pub(crate) fn cloud_refusal(code: &str) -> anyhow::Error {
+    if code == "cloud-show-live-elsewhere" {
+        return anyhow::Error::new(CloudShowLiveElsewhere);
+    }
     anyhow::Error::new(CloudApiError::Other {
         status: 409,
         code: code.into(),
@@ -1119,6 +1126,9 @@ pub(crate) fn safe_continuation_error(error: CloudApiError) -> CloudApiError {
 }
 
 pub(crate) fn continuation_error_code(error: &anyhow::Error) -> Option<&'static str> {
+    if error.is::<CloudShowLiveElsewhere>() {
+        return Some("cloud-show-live-elsewhere");
+    }
     let CloudApiError::Other { code, .. } = error.downcast_ref::<CloudApiError>()? else {
         return None;
     };
