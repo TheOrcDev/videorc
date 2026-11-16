@@ -31,9 +31,11 @@ export type RendererWebPermissionRequest = {
 /**
  * Web-platform permissions are an independent authority boundary from preload
  * IPC and the OS camera/microphone status helpers. Keep the browser surface to
- * the two APIs the app actually uses: a visual-only audio meter in the main
- * renderer, and sanitized clipboard writes from the main renderer and the
- * Stream Manager (its Copy and Copy link). Clipboard reads stay denied.
+ * the APIs the app actually uses: a visual-only audio meter in the main
+ * renderer, sanitized clipboard writes from the main renderer and the
+ * Stream Manager (its Copy and Copy link), and, while a talk-show room holds
+ * main's grant, the host's camera and one named screen share. Clipboard reads
+ * stay denied.
  */
 export function rendererWebPermissionAllowed(
   registry: RendererSecurityRegistry,
@@ -56,13 +58,23 @@ export function rendererWebPermissionAllowed(
   }
 
   const mediaTypes = request.mediaTypes
+  const grant = registry.talkShowMediaGrant(request.senderId)
+  // Electron asks for `media` with an empty `mediaTypes` before it calls the
+  // display-media handler for `getDisplayMedia` (display capture is neither
+  // device audio nor device video). Allow it only while the room's grant
+  // names a source main has not handed out yet. The display-media resolver
+  // then answers with exactly that source, once. Without this, every
+  // talk-show screen share failed with NotAllowedError.
+  if (mediaTypes?.length === 0) {
+    return grant?.video === true && grant.screenSourceId !== null
+  }
   if (!mediaTypes?.length) {
     return false
   }
   // Plan 224 C-G4: while a talk-show room is open the host publishes the
   // camera from this renderer, so video is allowed under main's grant and
   // never otherwise.
-  const videoAllowed = registry.talkShowMediaGrant(request.senderId)?.video === true
+  const videoAllowed = grant?.video === true
   return mediaTypes.every(
     (mediaType) => mediaType === 'audio' || (videoAllowed && mediaType === 'video')
   )
