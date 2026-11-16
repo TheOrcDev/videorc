@@ -523,6 +523,12 @@ export interface BackendRpcMethodMap {
       intentId: number
       /** Keep an existing screen for retirement only; never start it. */
       retainScreen?: true
+      /**
+       * Plan 231 D4: the running vertical leg draws the selected screen while
+       * the program draws none, so the commit needs it (starts or switches to
+       * it, and keeps it). Live only: off air there is no leg.
+       */
+      verticalLegScreen?: true
       /** Target the vertical simulcast leg only (refused when none runs). */
       simulcastLeg?: boolean
     },
@@ -2039,8 +2045,9 @@ const liveLayoutTransactionParamsSchema = runtimeSchema<unknown>(
     if (typeof value !== 'object' || value === null || Array.isArray(value)) {
       return layoutTransactionParamsSchema.parse(value, path)
     }
-    const { simulcastLeg, ...transaction } = value as Record<string, unknown>
+    const { simulcastLeg, verticalLegScreen, ...transaction } = value as Record<string, unknown>
     optionalSchema(booleanSchema).parse(simulcastLeg, `${path}.simulcastLeg`)
+    optionalSchema(literalSchema(true)).parse(verticalLegScreen, `${path}.verticalLegScreen`)
     layoutTransactionParamsSchema.parse(transaction, path)
     return value
   }

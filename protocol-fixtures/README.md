@@ -150,5 +150,9 @@ Optional flags are omitted, never null. Both languages read this fixture:
 
 Plan 231 D18's layout request pair: legacy omission and `retainScreen: true`,
 shared by preview/live. It prevents retirement only and never requests startup.
-Rust: `cargo test -p videorc-backend retain_screen`; TypeScript:
+`verticalLeg` is plan 231 D4's live-only `verticalLegScreen: true`: a program
+that draws no screen while the running vertical leg draws the selected one,
+which the commit then needs (started, or switched to, and kept).
+Rust: `cargo test -p videorc-backend retain_screen` and `vertical_leg_screen`;
+TypeScript:
 `pnpm --filter @videorc/desktop exec vitest run src/shared/backend-rpc-contract.test.ts`.

@@ -193,6 +193,8 @@ export function ScenesSection({ look = 'default' }: { look?: StudioLook }): Reac
               )}
               data-scene-drag={scene.id}
               {...reorder.dragProps(scene.id, index)}
+              // ⌥← ⌥→ on the card, or on its reason while it can't go on.
+              onKeyDown={reorder.onMoveKey(scene.id, index)}
             >
               {/* One SceneCard for every scene (plan 174 S3.3, B-20): the
                   selected look, its ring and its check say which one is on. */}
@@ -234,7 +236,6 @@ export function ScenesSection({ look = 'default' }: { look?: StudioLook }): Reac
                     visual={scene.visual}
                   />
                 }
-                onKeyDown={reorder.onMoveKey(scene.id, index)}
                 onSelect={() => dialogs.select(scene)}
               />
             </div>

@@ -322,6 +322,40 @@ describe('the Scene page scene list (plan 210 D6)', () => {
     expect(rowButton('T3 Code').closest('[aria-describedby]')).toBeTruthy()
   })
 
+  // Review #7: a scene that can't go on now still moves with ⌥↑ ⌥↓, from
+  // the focusable reason around its button, and keeps the focus there. Its
+  // ⋯ never moves it.
+  it("moves a row whose app isn't open with ⌥↑ and ⌥↓, from its reason", async () => {
+    await render()
+    const reason = () => rowButton('T3 Code').closest<HTMLElement>('[data-slot="disabled-reason"]')!
+    expect(rowButton('T3 Code').disabled).toBe(true)
+    await act(async () => {
+      reason().focus()
+      reason().dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'ArrowUp', altKey: true, bubbles: true })
+      )
+    })
+    expect(actions().move).toHaveBeenLastCalledWith('t3', 0)
+    ;(document.activeElement as HTMLElement | null)?.blur()
+    mocked.core.savedScenes = [t3(), figma(), display()]
+    await render()
+    expect(document.activeElement).toBe(reason())
+    // The hover and focus reason stays.
+    expect(document.getElementById(reason().getAttribute('aria-describedby')!)?.textContent).toBe(
+      "T3 Code isn't open"
+    )
+    actions().move.mockClear()
+    const menu = container.querySelector<HTMLElement>(
+      '[data-saved-scene="t3"] [aria-label="Actions for T3 Code"]'
+    )!
+    await act(async () =>
+      menu.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'ArrowDown', altKey: true, bubbles: true })
+      )
+    )
+    expect(actions().move).not.toHaveBeenCalled()
+  })
+
   it('puts a scene on stream with a click, as Studio does', async () => {
     await render()
     await act(async () => rowButton('Desk').click())
@@ -591,12 +625,23 @@ describe('a scene’s ⋯ menu', () => {
       await settle()
       await act(async () => button('A specific window')!.click())
       await choose('window:window:8')
-      // The Screen pick of D2: it writes the scene's screen itself.
+      // The Screen pick of D2. The scene shows it from now on, written at
+      // once (review #4: D19's layout must find it, also while live).
       expect(mocked.core.switchSourceDeviceLive).toHaveBeenCalledExactlyOnceWith(
         'capture',
         expect.objectContaining({ windowId: 'window:8', screenId: undefined })
       )
-      expect(actions().edit).not.toHaveBeenCalled()
+      expect(actions().edit).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({
+          id: 'figma',
+          shows: { kind: 'window', windowId: 'window:8', windowName: 'Figma - Notes' }
+        }),
+        undefined
+      )
+      expect(actions().edit.mock.invocationCallOrder[0]).toBeLessThan(
+        (mocked.core.switchSourceDeviceLive as ReturnType<typeof vi.fn>).mock
+          .invocationCallOrder[0]!
+      )
       expect(mocked.core.applySavedSceneResult).not.toHaveBeenCalled()
     })
 
@@ -667,6 +712,27 @@ describe('a scene’s ⋯ menu', () => {
       await menu('Desk', 'Change screen…')
       expect(document.querySelector('[data-testid="change-screen-dialog"]')).not.toBeNull()
     })
+  })
+
+  // Review #2: a scene going on stream can't be deleted under its switch.
+  it('turns Delete off for the scene that is switching, saying why', async () => {
+    mocked.core.savedScenePendingId = 'display'
+    await render()
+    const trigger = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Actions for Desk"]'
+    )!
+    await act(async () => trigger.click())
+    const item = [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].find(
+      (entry) => entry.textContent === 'Delete'
+    )!
+    expect(item.getAttribute('aria-disabled') ?? item.getAttribute('data-disabled')).not.toBeNull()
+    expect(document.body.textContent).toContain(
+      'This scene is going on stream. Try again in a moment.'
+    )
+    await act(async () => trigger.click())
+    // Another scene still deletes.
+    await menu('T3 Code', 'Delete')
+    expect(document.body.textContent).toContain('Delete scene?')
   })
 
   it('Set key… records the scene’s global key', async () => {

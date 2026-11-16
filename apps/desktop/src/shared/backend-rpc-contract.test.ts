@@ -4615,4 +4615,21 @@ describe('Retirement-only screen retention (plan 231 D18)', () => {
         ).toThrow()
     }
   })
+
+  // Plan 231 D4: the vertical leg's screen demand is live only.
+  it('accepts verticalLegScreen true on live only', () => {
+    expect(validateBackendRpcParams('scene.layout.apply_live', fixture.verticalLeg)).toEqual(
+      fixture.verticalLeg
+    )
+    expect(() =>
+      validateBackendRpcParams('scene.layout.apply_preview', fixture.verticalLeg)
+    ).toThrow()
+    for (const verticalLegScreen of [false, null, 'true', 1])
+      expect(() =>
+        validateBackendRpcParams('scene.layout.apply_live', {
+          ...fixture.legacy,
+          verticalLegScreen
+        })
+      ).toThrow()
+  })
 })

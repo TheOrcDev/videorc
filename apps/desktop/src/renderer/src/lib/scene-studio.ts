@@ -121,15 +121,97 @@ export function sceneOnStreamAtLaunch(
 }
 
 /**
- * Whether a scene going on stream leaves the capture as it is (D18): it shows
- * no screen in its current layout, so the running capture keeps running
- * and going back to an app's scene is a swap in place.
+ * The layouts a scene is drawn in on the legs that are on (D4): the program's,
+ * plus its 9:16 layout on the vertical stream while one is armed or live
+ * beside a 16:9 studio (`verticalLeg`).
+ */
+export function sceneLegLayouts(
+  scene: Pick<Scene, 'layouts'>,
+  program: LayoutSettings,
+  verticalLeg: boolean
+): LayoutSettings[] {
+  return verticalLeg && layoutPresetOrientation(program.layoutPreset) === 'horizontal'
+    ? [program, scene.layouts.vertical]
+    : [program]
+}
+
+/**
+ * Whether a scene draws a screen on any leg that is on (D4, D18): then it
+ * needs its own screen, its app's window resolved, and its screen available.
+ */
+export function sceneDrawsScreen(
+  scene: Pick<Scene, 'layouts'>,
+  program: LayoutSettings,
+  verticalLeg: boolean
+): boolean {
+  return sceneLegLayouts(scene, program, verticalLeg).some(layoutShowsScreen)
+}
+
+/**
+ * Whether a scene going on stream leaves the capture as it is (D18): no leg
+ * draws a screen for it, so the running capture keeps running and going back
+ * to an app's scene is a swap in place. A leg that draws one (the vertical
+ * stream's 9:16 layout too) shows the scene's own screen, never the one an
+ * earlier scene left running.
  */
 export function sceneKeepsCapture(
-  scene: Pick<Scene, 'shows'> | undefined,
-  layout: LayoutSettings
+  scene: Pick<Scene, 'layouts'> | undefined,
+  program: LayoutSettings,
+  verticalLeg = false
 ): boolean {
-  return scene !== undefined && !layoutShowsScreen(layout)
+  return scene !== undefined && !sceneDrawsScreen(scene, program, verticalLeg)
+}
+
+/**
+ * Whether the capture now is not the one the scene shows (D18): the running
+ * capture an earlier scene left, kept under a scene that drew no screen. A
+ * leg that starts drawing a screen must take the scene's own instead. A scene
+ * that shows none has no screen of its own: Change screen… decides (D19).
+ */
+export function sceneCaptureIsBorrowed(scene: Pick<Scene, 'shows'>, working: SceneShows): boolean {
+  return scene.shows.kind !== 'none' && !sameShows(scene.shows, working)
+}
+
+/**
+ * The vertical leg would show a capture the scene doesn't own (D18): it draws
+ * the scene's 9:16 screen layout (edited on the Vertical stream panel, or a
+ * vertical stream armed since) while the program draws none, and the capture
+ * is one an earlier scene left running. The scene must go on again with its
+ * own screen before the leg shows it.
+ */
+export function verticalLegBorrowsScreen(
+  scene: Pick<Scene, 'shows' | 'layouts'>,
+  program: LayoutSettings,
+  verticalLeg: boolean,
+  working: SceneShows
+): boolean {
+  return (
+    verticalLeg &&
+    layoutPresetOrientation(program.layoutPreset) === 'horizontal' &&
+    !layoutShowsScreen(program) &&
+    layoutShowsScreen(scene.layouts.vertical) &&
+    sceneCaptureIsBorrowed(scene, working)
+  )
+}
+
+/**
+ * Whether two source selections capture the same thing (D18): a capture kept
+ * running is only ever the one the selection names.
+ */
+export function sameCaptureTarget(
+  a: Pick<VisualSources, 'screenId' | 'windowId' | 'testPattern'>,
+  b: Pick<VisualSources, 'screenId' | 'windowId' | 'testPattern'>
+): boolean {
+  return (
+    (a.windowId ?? null) === (b.windowId ?? null) &&
+    (a.screenId ?? null) === (b.screenId ?? null) &&
+    Boolean(a.testPattern) === Boolean(b.testPattern)
+  )
+}
+
+/** D19: a scene that shows no screen can't take a layout that draws one. */
+export function noScreenLayoutReason(sceneName: string): string {
+  return `“${sceneName}” shows no screen. Choose one with Change screen… first.`
 }
 
 /**
@@ -142,8 +224,8 @@ export function sceneKeepsCapture(
  * - The screen is written when it changed while the scene was on: a Screen
  *   pick in Sources, in Studio, on the phone or by a remote (D2). An app's
  *   front window changing is not a pick.
- * - A scene that shows no screen takes the screen on stream once its layout
- *   draws one, so the scene never says less than the stream shows.
+ * - A capture kept running under a scene that shows no screen (D18) is never
+ *   its screen: Change screen… (D19) or a Screen pick decides that.
  * - Audio never changes this way (D10).
  */
 export function sceneEditAutosave(input: {
@@ -163,9 +245,7 @@ export function sceneEditAutosave(input: {
   const orientation = layoutPresetOrientation(visual.layout.layoutPreset)
   const working = showsFromSources(visual.sources)
   const picked = input.previousShows !== null && !sameShows(input.previousShows, working)
-  const adopts =
-    scene.shows.kind === 'none' && working.kind !== 'none' && layoutShowsScreen(visual.layout)
-  const shows = picked || adopts ? working : scene.shows
+  const shows = picked ? working : scene.shows
   if (
     canonicalJson(scene.layouts[orientation]) === canonicalJson(visual.layout) &&
     canonicalJson(scene.background) === canonicalJson(visual.background) &&

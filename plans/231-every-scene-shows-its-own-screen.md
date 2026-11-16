@@ -1925,3 +1925,152 @@ No owned app or capture process remains from these attempts.
   retirement, idle/live. Check a no-screen 9:16 scene and later look edits.
   Unit mocks do not prove native timing or artifacts. Screen ISO policy is
   untouched; the renderer-budget overage remains the inherited owner call.
+
+### Review fixes (2026-11-16)
+
+The independent review's nine findings (2 high, 6 medium, 1 low), all
+confirmed by reading the code path and fixed. Each has a regression test that
+fails without the fix: the six provider tests named "review #" failed with
+the renderer sources stashed and pass with them; the component, unit,
+contract and plugin tests below are new or changed for the new behaviour.
+
+- **#1 (high), a kept capture under another scene's identity.** Fixed.
+  - `sceneKeepsCapture` and `sceneDrawsScreen` (`lib/scene-studio.ts`) judge
+    every leg that is on: the program, plus the scene's 9:16 layout while a
+    vertical stream is armed or live beside a 16:9 studio
+    (`sceneLegLayouts`). A scene whose vertical leg draws a screen goes on
+    with its own screen.
+  - Backend: a live layout request may carry `verticalLegScreen: true`
+    (contract, `protocol.rs`, fixture `verticalLeg`). The selected screen is
+    then needed as if the program composed it: started or switched to before
+    the commit (warm), and never retired. It is live only; the preview route
+    ignores it and the TS contract refuses it there. Without it a program
+    with no screen could never start the screen its vertical leg draws.
+  - `retainScreen` is sent only when the capture target doesn't change: a
+    capture kept running is never another screen than the selection.
+  - A layout that starts drawing a screen on the scene on stream while the
+    capture is one another scene left (`sceneCaptureIsBorrowed`) puts the
+    scene on again with its own screen in that layout, in one switch
+    (`applySavedSceneResult`'s new `layout` option, saved into the scene once
+    it lands). The vertical leg's case (a 9:16 layout edited, a vertical
+    stream armed since) does the same from an effect, and holds the leg send
+    until then (`verticalLegBorrowsScreen`).
+  - `sceneEditAutosave` no longer adopts the kept capture into a scene that
+    shows none ("takes the screen on stream" is gone).
+  - Tests: provider "a scene whose vertical leg draws its screen goes on with
+    its own screen (review #1)", "a layout that starts drawing a screen shows
+    the scene's own, never a kept one (review #1, #4)"; `scene-studio.test.ts`
+    (legs, borrowed, `sameCaptureTarget`, no adopt); Rust
+    `vertical_leg_screen_demands_the_selected_screen_only`,
+    `vertical_leg_screen_keeps_the_running_selected_screen_through_retirement`,
+    `vertical_leg_screen_wire_contract_accepts_only_true`; contract
+    "accepts verticalLegScreen true on live only".
+- **#2 (high), delete while switching.** Fixed. A scene is "going on stream"
+  from the click until its last transaction settles (`holdSceneGoingOn`, a
+  hold per apply and per transaction through the new `onSettled`), and while
+  it is the backend's latest commit not yet proven on screen.
+  `canDeleteScene` takes `goingOn` and refuses with "This scene is going on
+  stream. Try again in a moment."; the provider checks it before and after
+  D16's switch, and ⋯ → Delete is off for `savedScenePendingId` with that
+  reason. `applyLayoutTransactionState` never publishes a scene the library
+  no longer has: the scene on stream stays (else the first) and goes on
+  again. Tests: provider "refuses to delete a scene while its switch is
+  pending or unproven (review #2)" (a held source, then a committed switch
+  whose preview proof lags); `scene-list.test.ts` "turns Delete off for the
+  scene that is switching, saying why"; `scene-studio.test.ts` "a scene going
+  on stream stays until its switch is over". The existence recheck has no
+  test of its own: the refusals keep it from being reached.
+- **#3 (medium), a remote scene and screen together.** Fixed. The executor
+  resolves the screen first, then makes one switch to the named scene (or the
+  legacy layout's scene) carrying it (`shows`); the scene keeps it once the
+  switch lands. No Screen pick runs afterwards. Tests: provider "a remote
+  sceneId with a screenId puts that scene on with that screen (review #3)"
+  (with lagging preview proof); `remote.test.ts` "a remote sceneId with a
+  screenId switches to that scene with that screen (D2)".
+- **#4 (medium), the Scene page's Layout bypassed D19.** Fixed. The Scene
+  page uses Studio's `layoutAsksForScreen` and Change screen… (`forLayout`,
+  through its own `useSceneDialogs`); Cancel keeps the layout, and its screen
+  layouts stay enabled for a scene that shows none so D19 can ask. Anything
+  else that asks for a screen layout on a scene that shows none (an agent,
+  a smoke's `layout()`, Freeform) is refused: "“Camera only” shows no
+  screen. Choose one with Change screen… first." Change screen… on the
+  scene on stream now writes a display or window into the scene at once,
+  idle and live, so D19's layout finds it. Tests: provider "review #1, #4";
+  `scene-list.test.ts` (Change screen… writes before the switch).
+- **#5 (medium), an interrupted shortcut migration.** Fixed. The migrated
+  library stores `pendingShortcuts` (in the same one `setItem`); every launch
+  that finds it saves those keys into the settings again (the library is
+  never made again), and `settleShortcuts` drops it once settings holding
+  them are stored. Every library write keeps it; a failed settle keeps it
+  for the next launch. Tests: `use-scenes.test.ts` (replay, settle, edits and
+  a failed settle keep it); provider "replays a shortcut migration whose
+  settings were never stored (review #5)".
+- **#6 (medium), a no-screen scene blocked by its closed app.** Fixed. App
+  state (cards, rows, keys), Next/Previous eligibility and the switch's app
+  resolution are gated on screen demand across the legs that are on: a scene
+  no leg draws a screen for never asks for its app's window. Test: provider
+  "never blocks a scene that shows no screen on its closed app (review #6)".
+- **#7 (medium), keyboard reorder of unavailable scenes.** Fixed without
+  touching the registry components: the ⌥ arrow handler sits on the card's
+  and the row's own element and answers keys pressed on the scene's button
+  or, while it's off, on the focusable `DisabledReason` around it (never the
+  ⋯). The moved scene's focus goes back to the reason. The hover tooltip
+  stays. Tests: "moves a card whose app isn't open with ⌥← and ⌥→, from its
+  reason", "moves a row whose app isn't open with ⌥↑ and ⌥↓, from its reason".
+- **#8 (medium), legacy Stream Deck key titles.** Fixed. An old key without a
+  scene names its own layout on two lines ("Screen only", "Camera only"),
+  never the scene on stream (`sceneActionTitle`). Test: "an old Scene key is titled by
+  its own layout until a scene is chosen".
+- **#9 (low), the inspector's words.** Both hints read "Scenes from Videorc,
+  in their order." Test: "the Scene inspector hints say scenes from Videorc".
+
+`docs/ui-copy.md` lists the two new refusals.
+
+**Numbers:** `pnpm typecheck` and `pnpm lint` green (one warning, a
+`useMemo` dependency in main's #1394 talk-show code, not this change);
+Prettier on the touched files, `git diff --check` and `cargo fmt --check
+--all` green. Full desktop run (`--maxWorkers=2 --minWorkers=1`): 709 files,
+8,303 passed, 1 skipped. One earlier full run, with clippy compiling beside
+it, failed once on "starts one clean cut when a recording finalizes with the
+switch on" (a toast timing, nothing to do with scenes); it passed three
+times alone and in the next full run. The provider file alone: 225 passed.
+Stream Deck plugin: 36 tests and its typecheck green. Rust, in one build-slot
+hold (`CARGO_BUILD_JOBS=2`): `cargo test --no-run` 30 min, then
+`live_layout::tests` 75 passed (with `vertical_leg_screen` 3 and
+`retain_screen` 4). `cargo clippy -p videorc-backend --all-targets -D
+warnings` fails only on dead code in `live_status.rs`: main's #1397 adds `mod
+live_status;` with no caller outside its tests, on `8620b5fc2` too; the same
+clippy with `-A dead_code` is green (1 min, the same hold as the binary build).
+
+|                        |       raw |    gzip |
+| ---------------------- | --------: | ------: |
+| Before (`6cccad49e`)   | 2,380,044 | 489,517 |
+| After the review fixes | 2,389,534 | 491,625 |
+| Cap                    | 2,365,000 | 487,000 |
+
++9,490 raw and +2,108 gzip in the first paint. It is the provider's switch,
+retention, delete and migration logic: it runs synchronously on every switch,
+layout edit and render, so none of it can wait on a lazy chunk without
+changing the switch's ordering (a key's walk and a canvas edit in the same
+turn rely on it). The UI parts (#4, #7, #8, #9) are in lazy chunks or the
+plugin. The cap is untouched; the overage is the owner's call, as before.
+
+**Screenshots** (light and dark, the dev app on an isolated profile with the
+backend built from this commit; capture script `FIX/scratch/capture-fix.mjs`,
+not committed) in `/Users/orcdev/projects/plan-231-run/FIX/shots/`:
+`videorc-ui-scene-page-camera-only-{light,dark}` (Camera only on stream, its
+screen layouts enabled on the Scene page) and `videorc-ui-scene-page-d19-`
+(Screen + camera chosen there opens Change screen… with D19's line; Cancel
+kept Camera only). The other fixes have no new look: the ⋯ item turning off
+uses the menu's existing disabled reason.
+
+**What S11 must know**
+
+- Smokes that set a screen layout with `layout()` while a scene that shows
+  no screen is on stream are now refused (D19): choose a screen first.
+- D18's acceptance now includes a dual stream: a scene with Camera only on
+  the program and its screen on the vertical leg must start or switch to its
+  own screen (`verticalLegScreen`), and an edit of its 9:16 layout must put
+  its own screen on, never the kept one.
+- The backend change is small but is a live capture path: S11's
+  `smoke:multistream:vertical` and the recording-studio gates cover it.

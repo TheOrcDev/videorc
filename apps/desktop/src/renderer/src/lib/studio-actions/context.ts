@@ -1,4 +1,5 @@
 import type { SavedSceneApplyResult } from '../scene-window-resolution'
+import type { SceneShows } from '../scenes'
 // The Studio's action context (plan 209 S5): what every action needs from the
 // Studio, built per intent (studio-context.ts) from the latest render's
 // handlers that hooks/use-studio.tsx hands over. A Stream Deck key, the phone
@@ -94,7 +95,9 @@ export interface StudioActionContext {
    * first scene with that layout, or is refused with its reason.
    */
   applyLayoutPreset: (
-    layoutPreset: LayoutPreset
+    layoutPreset: LayoutPreset,
+    /** A remote's screen with it: the scene goes on showing it, and keeps it (D2). */
+    options?: { shows?: SceneShows }
   ) => Promise<boolean | { ok: boolean; message?: string }>
   hasTakeover: (assetId: string) => boolean
   activateTakeover: (assetId: string) => Promise<boolean>
@@ -134,8 +137,15 @@ export interface StudioActionContext {
     name: string
     visual?: { layout: Pick<LayoutSettings, 'layoutPreset' | 'arrangementMode'> }
   }[]
-  /** Applies a saved scene exactly as clicking it in the Studio does. */
-  applySavedSceneResult?: (id: string) => Promise<SavedSceneApplyResult>
+  /**
+   * Applies a scene exactly as clicking it in the Studio does. With `shows`
+   * (a remote's `sceneId` and `screenId` together) the scene goes on showing
+   * that screen, in the same switch, and keeps it (D2).
+   */
+  applySavedSceneResult?: (
+    id: string,
+    options?: { shows?: SceneShows }
+  ) => Promise<SavedSceneApplyResult>
   applySavedScene?: (id: string) => Promise<boolean>
   /** Each built-in layout's name; `layoutPresetLabel` when left out. */
   layoutLabels?: Readonly<Record<string, string>>

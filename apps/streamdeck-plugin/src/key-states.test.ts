@@ -253,3 +253,47 @@ test('Scene actions list scenes in order and preserve legacy settings on the wir
   })
   assert.equal(sceneActionIntent({}), null)
 })
+
+import { readFileSync } from 'node:fs'
+import { sceneActionTitle } from './key-states.js'
+
+// Plan 231 review #8: an old key names the layout it asks for, never the
+// scene on stream; two old keys with different layouts read differently.
+test('an old Scene key is titled by its own layout until a scene is chosen', () => {
+  const state = {
+    savedScenes: [
+      { id: 'figma', name: 'Figma' },
+      { id: 'pause', name: 'Break' }
+    ],
+    activeSavedSceneId: 'figma'
+  }
+  const screenOnly = sceneActionTitle(state, { layoutPreset: 'screen-only' }, true)
+  const cameraOnly = sceneActionTitle(state, { layoutPreset: 'camera-only' }, true)
+  assert.equal(screenOnly, 'Screen\nonly')
+  assert.equal(cameraOnly, 'Camera\nonly')
+  assert.notEqual(screenOnly, cameraOnly)
+  for (const title of [screenOnly, cameraOnly]) assert.doesNotMatch(title, /Figma|ON/)
+  assert.equal(sceneActionTitle(state, { layoutPreset: 'vertical-split' }, true), 'Split')
+  assert.equal(sceneActionTitle(state, { layoutPreset: 'not-a-layout' }, true), 'Scene')
+  assert.equal(sceneActionTitle(state, {}, true), 'Scene')
+  // A chosen scene is its name, ON while on stream; the old layout no longer counts.
+  assert.equal(
+    sceneActionTitle(state, { sceneId: 'figma', layoutPreset: 'camera-only' }, true),
+    'Figma\nON'
+  )
+  assert.equal(sceneActionTitle(state, { sceneId: 'pause' }, true), 'Break')
+  assert.equal(sceneActionTitle(state, { sceneId: 'gone' }, true), 'Scene')
+  assert.equal(sceneActionTitle(state, { layoutPreset: 'screen-only' }, false), 'Videorc\noffline')
+})
+
+// Plan 231 review #9: the Scene inspector says scenes, never "saved scenes" or presets.
+test('the Scene inspector hints say scenes from Videorc', () => {
+  const html = readFileSync(new URL('../ui/property-inspector.html', import.meta.url), 'utf8')
+  for (const action of ['saved-scene', 'scene-apply']) {
+    const block = html.slice(html.indexOf(`'com.videorc.streamdeck.${action}'`))
+    const hint = /hint: '([^']*)'/.exec(block)?.[1] ?? ''
+    assert.match(hint, /^Scenes from Videorc/)
+    assert.doesNotMatch(hint, /saved scene|preset/i)
+  }
+  assert.doesNotMatch(html, /saved scenes|presets come/i)
+})

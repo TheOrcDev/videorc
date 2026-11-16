@@ -1,4 +1,4 @@
-import type { Device, LayoutPreset, LayoutSettings } from './backend'
+import type { Device, GlobalShortcutsConfig, LayoutPreset, LayoutSettings } from './backend'
 import { layoutPresetNeedsScreen, layoutPresetOrientation } from './capture'
 import {
   normalizeSceneApp,
@@ -49,8 +49,18 @@ export type Scene = {
 /**
  * The custom keys stay in `GlobalShortcutsConfig.scenes[id]`; the position
  * keys are S4's `scene-slot-1` … `scene-slot-9`.
+ *
+ * `pendingShortcuts` (D15) is the shortcuts after the layout keys moved to
+ * scene keys, stored with the library the migration made and kept until the
+ * settings that hold them are stored too. A launch cut short between the two
+ * writes replays them: the same keys again, the library never made again.
  */
-export type SceneLibrary = { version: 2; scenes: Scene[]; onStreamId: string }
+export type SceneLibrary = {
+  version: 2
+  scenes: Scene[]
+  onStreamId: string
+  pendingShortcuts?: GlobalShortcutsConfig
+}
 
 export type MainDisplay = Pick<Device, 'id' | 'name' | 'displayUuid'>
 
@@ -245,12 +255,18 @@ export function hydrateScenes(raw: unknown): {
   }
   const error = scenes.length !== entries.length ? "Some invalid scenes couldn't be loaded." : null
   if (scenes.length === 0) return { library: null, readOnly: false, error }
+  const pending = data.pendingShortcuts
   return {
     library: {
       version: 2,
       scenes,
       // A scene is always on stream: a lost id falls to the first scene.
-      onStreamId: scenes.some(({ id }) => id === data.onStreamId) ? data.onStreamId! : scenes[0]!.id
+      onStreamId: scenes.some(({ id }) => id === data.onStreamId)
+        ? data.onStreamId!
+        : scenes[0]!.id,
+      ...(pending && typeof pending === 'object' && !Array.isArray(pending)
+        ? { pendingShortcuts: pending }
+        : {})
     },
     readOnly: false,
     error
@@ -309,22 +325,26 @@ export function firstSceneWithLayout<S extends Pick<Scene, 'layouts'>>(
 
 export const KEEP_ONE_SCENE_REASON = 'Keep at least one scene.'
 export const DELETE_ON_STREAM_REASON = 'Switch to another scene first.'
+export const GOING_ON_STREAM_REASON = 'This scene is going on stream. Try again in a moment.'
 
 /**
- * Whether a scene can be deleted (D16). The last scene never can. Off air,
- * deleting the scene on stream first switches to the scene before it
- * (`switchToId`; the one after, for the first scene). While recording or
- * live, the scene on stream can't be deleted.
+ * Whether a scene can be deleted (D16). The last scene never can, nor can a
+ * scene a switch is putting on stream (`goingOn`), so the stream never lands
+ * on a scene the library no longer has. Off air, deleting the scene on stream
+ * first switches to the scene before it (`switchToId`; the one after, for the
+ * first scene). While recording or live, the scene on stream can't be deleted.
  */
 export function canDeleteScene(input: {
   scenes: readonly Pick<Scene, 'id'>[]
   id: string
   onStreamId: string
   sessionActive: boolean
+  goingOn?: boolean
 }): { allowed: true; switchToId: string | null } | { allowed: false; reason: string | null } {
   const index = input.scenes.findIndex((scene) => scene.id === input.id)
   if (index < 0) return { allowed: false, reason: null }
   if (input.scenes.length <= 1) return { allowed: false, reason: KEEP_ONE_SCENE_REASON }
+  if (input.goingOn) return { allowed: false, reason: GOING_ON_STREAM_REASON }
   if (input.id !== input.onStreamId) return { allowed: true, switchToId: null }
   if (input.sessionActive) return { allowed: false, reason: DELETE_ON_STREAM_REASON }
   return { allowed: true, switchToId: input.scenes[index > 0 ? index - 1 : 1]!.id }

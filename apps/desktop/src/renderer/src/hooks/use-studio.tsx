@@ -75,13 +75,21 @@ import { prepareScenes, scenesStored } from '@/hooks/use-scenes'
 import {
   cameraSources,
   captureSources,
+  noScreenLayoutReason,
+  sameCaptureTarget,
+  savedSceneView,
+  sceneCaptureIsBorrowed,
+  sceneDrawsScreen,
   sceneFromSaved,
   sceneKeepsCapture,
-  sceneOnStreamAtLaunch
+  sceneLegLayouts,
+  sceneOnStreamAtLaunch,
+  verticalLegBorrowsScreen
 } from '@/lib/scene-studio'
 import {
   canDeleteScene,
   firstSceneWithLayout,
+  GOING_ON_STREAM_REASON,
   layoutShowsScreen,
   sceneLayout,
   showsFromSources
@@ -788,6 +796,23 @@ const PLATFORM_CLEANUP_X_END_TIMEOUT_MS = 4000
 const AI_CONSENT_STORAGE_KEY = 'videorc.aiConsent'
 const RECORDING_STOPPED_UNEXPECTEDLY_TOAST_ID = 'recording-stopped-unexpectedly'
 const MICROPHONE_INPUT_LOST_TOAST_ID = 'microphone-input-lost'
+
+/**
+ * Plan 231 D18: the vertical leg would show a capture the scene on stream
+ * doesn't own (`verticalLegBorrowsScreen`), judged on the config as it is.
+ */
+function legBorrowsScreen(
+  scene: StoredScene,
+  config: CaptureConfig,
+  workingApp: SceneApp | undefined
+): boolean {
+  return verticalLegBorrowsScreen(
+    scene,
+    config.layout,
+    simulcastArmed(config),
+    showsFromSources(visualSources({ ...config.sources, app: workingApp }))
+  )
+}
 
 function isPreparedPlatformLifecycleOwner(sessionId: string): boolean {
   return sessionId.startsWith(PREPARED_PLATFORM_LIFECYCLE_OWNER_PREFIX)
@@ -5085,16 +5110,30 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
   useEffect(() => {
     setResolvedAppStates({})
   }, [deviceList.devices])
-  const savedSceneAppStates = useMemo(
-    () =>
-      Object.fromEntries(
-        sceneLibrary.scenes.map((scene) => [
+  // Plan 231 D4, D18: a scene needs its app only while a leg that is on
+  // draws a screen for it (the program, and the vertical stream while one is
+  // armed). Camera only made for Figma never waits for Figma.
+  const appsVerticalLeg = simulcastArmed(captureConfig)
+  const savedSceneAppStates = useMemo(() => {
+    const stored = new Map(sceneLibrary.storedList.map((scene) => [scene.id, scene]))
+    return Object.fromEntries(
+      sceneLibrary.scenes.map((scene) => {
+        const own = stored.get(scene.id)
+        return [
           scene.id,
-          sceneAppState(scene.visual, deviceList.devices, resolvedAppStates[scene.id])
-        ])
-      ),
-    [sceneLibrary.scenes, deviceList.devices, resolvedAppStates]
-  )
+          own && !sceneDrawsScreen(own, scene.visual.layout, appsVerticalLeg)
+            ? undefined
+            : sceneAppState(scene.visual, deviceList.devices, resolvedAppStates[scene.id])
+        ]
+      })
+    )
+  }, [
+    sceneLibrary.scenes,
+    sceneLibrary.storedList,
+    appsVerticalLeg,
+    deviceList.devices,
+    resolvedAppStates
+  ])
   useEffect(() => {
     rememberedAppsRef.current = rememberedSceneApps(rememberedAppsRef.current, sceneLibrary.scenes)
     try {
@@ -5105,6 +5144,7 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
   }, [sceneLibrary.scenes])
   const {
     remove: removeSceneEntry,
+    edit: editStoredScene,
     autosave: autosaveSavedScene,
     refreshDisplay: refreshSavedSceneDisplay,
     stored: storedScene,
@@ -5113,7 +5153,8 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
     setOnStream: setSceneOnStream,
     setShows: setSceneShows,
     nameMainDisplay,
-    migratedShortcuts
+    migratedShortcuts,
+    settleShortcuts: settleSceneShortcuts
   } = sceneLibrary
   // Plan 231 D2: a scene is always on stream. The id moves when a switch
   // commits, and the library keeps it for the next launch.
@@ -5128,7 +5169,9 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
     () => sceneLibrary.storedList.find((scene) => scene.id === activeSavedSceneId) ?? null,
     [sceneLibrary.storedList, activeSavedSceneId]
   )
-  // D15: on the launch that migrated, the layout keys became scene keys.
+  // D15: on the launch that migrated, the layout keys became scene keys. The
+  // library keeps them pending until the settings holding them are stored
+  // (below), so a launch cut short between the two writes saves them again.
   useEffect(() => {
     if (migratedShortcuts)
       setSettings((current) => ({ ...current, globalShortcuts: migratedShortcuts }))
@@ -7607,9 +7650,17 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
     }
   }, [client, reportError, wsStatus])
 
+  // D15: once settings that hold the migrated keys are stored, the scene
+  // library lets its pending migration go. Every later settings state comes
+  // from that one, so a store that failed is done by the next that lands.
+  const shortcutMigrationHeldRef = useRef(false)
   useEffect(() => {
+    if (migratedShortcuts && settings.globalShortcuts === migratedShortcuts)
+      shortcutMigrationHeldRef.current = true
     localStorage.setItem(STORAGE_KEYS.settings, JSON.stringify(settings))
-  }, [settings])
+    if (shortcutMigrationHeldRef.current && settleSceneShortcuts())
+      shortcutMigrationHeldRef.current = false
+  }, [settings, migratedShortcuts, settleSceneShortcuts])
 
   useEffect(() => {
     localStorage.setItem(
@@ -10578,9 +10629,21 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
       if (snapshot.sceneSwitch)
         persistedWorkingRef.current = { sceneId: null, key: '', shows: null }
       // A scene is always on stream (plan 231 D2): a commit that names none keeps it.
-      const savedId = snapshot.savedSceneId ?? activeSavedSceneIdRef.current
+      const named = snapshot.savedSceneId ?? activeSavedSceneIdRef.current
+      // D16: a scene the library no longer has is never named on stream. The
+      // scene on stream stays (the first one, if that went too) and goes on
+      // again, so the stream shows a scene the list has.
+      const gone = named !== null && storedScene(named) === undefined
+      const savedId = gone
+        ? (storedScene(activeSavedSceneIdRef.current)?.id ?? storedScenes()[0]?.id ?? null)
+        : named
       activeSavedSceneIdRef.current = savedId
       setActiveSavedSceneId(savedId)
+      if (gone && savedId) {
+        console.warn(`[scenes] committed scene ${named} is gone; putting ${savedId} back on`)
+        const restore = savedId
+        queueMicrotask(() => void applySavedSceneResultRef.current(restore))
+      }
       skipNextConfigSceneReloadRef.current = true
       setCaptureConfig((current) => {
         // Orientation and canvas are one committed program state. Derive the
@@ -10619,7 +10682,14 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
         return next
       })
     },
-    [applyScene, persistWorkingVisual, setBackgroundRegistry, setWorkingOrigin]
+    [
+      applyScene,
+      persistWorkingVisual,
+      setBackgroundRegistry,
+      setWorkingOrigin,
+      storedScene,
+      storedScenes
+    ]
   )
 
   const readLayoutTransactionBackendTruth = useCallback(async () => {
@@ -10724,8 +10794,28 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
   // vertical stream from here. Any other write of that scene derives the
   // leg already sent, which is never sent twice.
   useEffect(() => {
-    sendSimulcastLeg(captureConfigRef.current, sceneOnStream ?? undefined, true)
+    const config = captureConfigRef.current
+    // A leg that would show a capture the scene doesn't own waits for the
+    // scene to go on again with its own screen (below), which sends it.
+    if (sceneOnStream && legBorrowsScreen(sceneOnStream, config, workingAppRef.current)) return
+    sendSimulcastLeg(config, sceneOnStream ?? undefined, true)
   }, [sceneOnStream, sendSimulcastLeg])
+  // Plan 231 D18: the vertical leg starts drawing a screen for the scene on
+  // stream (its 9:16 layout edited, a vertical stream armed) while the
+  // capture is one an earlier scene left: the scene goes on again with its
+  // own screen. Asked once per scene, screen and 9:16 layout, so a refusal
+  // ("Figma isn't open") is said once.
+  const verticalLegArmed = simulcastArmed(captureConfig)
+  const ownScreenAskedRef = useRef<string | null>(null)
+  useEffect(() => {
+    if (!sceneOnStream || wsStatus !== 'connected' || layoutIntentAwaitingProofRef.current !== null)
+      return
+    if (!legBorrowsScreen(sceneOnStream, captureConfigRef.current, workingAppRef.current)) return
+    const ask = `${sceneOnStream.id}|${JSON.stringify(sceneOnStream.shows)}|${sceneOnStream.layouts.vertical.layoutPreset}`
+    if (ownScreenAskedRef.current === ask) return
+    ownScreenAskedRef.current = ask
+    void applySavedSceneResultRef.current(sceneOnStream.id)
+  }, [sceneOnStream, verticalLegArmed, captureConfig.sources, captureConfig.layout, wsStatus])
 
   const requestLayoutTransaction = useCallback(
     (
@@ -10744,6 +10834,8 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
         sceneSwitch?: boolean
         /** The name the streamer clicked (a saved scene's); a layout's label by default. */
         targetName?: string
+        /** Called once the transaction is over: refused, failed, superseded or landed. */
+        onSettled?: () => void
       }
     ): Promise<boolean> => {
       const crossesOrientation =
@@ -10761,6 +10853,7 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
           .finally(() => {
             replayReconcileHoldRef.current = false
             scheduleReplayReconcileRef.current()
+            options?.onSettled?.()
           })
       }
       const sessionActive = isActiveRecordingState(recordingRef.current.state)
@@ -10768,6 +10861,7 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
         toast.warning('Stop the recording or stream before switching orientation', {
           id: 'scene-orientation-lock'
         })
+        options?.onSettled?.()
         return Promise.resolve(false)
       }
       if (!client || wsStatus !== 'connected') {
@@ -10775,6 +10869,7 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
           id: OFFLINE_TOAST_ID,
           description: "The scene didn't change. Try again in a moment."
         })
+        options?.onSettled?.()
         return Promise.resolve(false)
       }
 
@@ -10889,6 +10984,36 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
             sessionActive || options?.cameraLookOnly
               ? 'scene.layout.apply_live'
               : 'scene.layout.apply_preview'
+          // Plan 231 D4, D18: the screen beyond what the program draws. The
+          // running vertical leg of the scene this commit puts or keeps on
+          // stream may draw the selected screen: then it is needed (started,
+          // or switched to, and kept). Otherwise a program with no screen keeps
+          // an existing capture of that same target, and only that one: a
+          // capture kept running is never another screen than the selection.
+          const programDrawsScreen = layoutShowsScreen(layout)
+          const legScene = storedScene(
+            options && 'savedSceneId' in options
+              ? options.savedSceneId
+              : activeSavedSceneIdRef.current
+          )
+          const selectsScreen =
+            requestedSources.captureOff !== true &&
+            Boolean(requestedSources.screenId || requestedSources.windowId)
+          const verticalLegScreen =
+            method === 'scene.layout.apply_live' &&
+            sessionActive &&
+            !programDrawsScreen &&
+            selectsScreen &&
+            legScene !== undefined &&
+            simulcastArmed({ ...requestedConfig, layout }) &&
+            layoutShowsScreen(legScene.layouts.vertical)
+          const retainScreen =
+            !programDrawsScreen &&
+            !verticalLegScreen &&
+            requestedSources.captureOff !== true &&
+            sameCaptureTarget(requestedSources, requestedConfig.sources) &&
+            (previewScreenStatusRef.current.state === 'live' ||
+              previewScreenStatusRef.current.state === 'starting')
           const requestedTransaction = {
             intentId,
             sources: requestedSources,
@@ -10901,12 +11026,11 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
             protectedOverlayWindowIds,
             // D18: retain only an existing owner. Explicit Screen picker Off
             // clears the sources and must keep the backend's retirement path.
-            ...(!layoutShowsScreen(layout) &&
-            requestedSources.captureOff !== true &&
-            (previewScreenStatusRef.current.state === 'live' ||
-              previewScreenStatusRef.current.state === 'starting')
-              ? { retainScreen: true as const }
-              : {}),
+            ...(verticalLegScreen
+              ? { verticalLegScreen: true as const }
+              : retainScreen
+                ? { retainScreen: true as const }
+                : {}),
             // Scene motion (opt-in): the committed layout glides into place
             // (320ms ease) in preview, stream, and recording alike. Absent =
             // instant cut.
@@ -11116,9 +11240,11 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
             setSavedScenePendingId(null)
             setVisualTransactionPending(false)
           }
+          options?.onSettled?.()
         }
       })().catch((error) => {
         settleCommitReceipt(false)
+        options?.onSettled?.()
         reportError(error, { action: 'switch', object: 'the scene' })
       })
       return commitReceipt
@@ -11139,9 +11265,13 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
   )
   const requestLayoutTransactionRef = useRef(requestLayoutTransaction)
   requestLayoutTransactionRef.current = requestLayoutTransaction
-  const applySavedSceneResultRef = useRef<(id: string) => Promise<SavedSceneApplyResult>>(
-    async () => ({ ok: false })
-  )
+  const applySavedSceneResultRef = useRef<
+    (
+      id: string,
+      repaired?: SceneVisual,
+      options?: SavedSceneApplyOptions
+    ) => Promise<SavedSceneApplyResult>
+  >(async () => ({ ok: false }))
 
   // Library edits request a new working background. Only the committed target
   // drives preview/session parameters; applying a saved snapshot never edits the library.
@@ -11344,30 +11474,58 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
       // (plan 174, C-4), so one click never loses an arrangement.
       const leavesArrangement =
         patch.layoutPreset !== undefined && patch.arrangementMode === undefined
-      if (leavesArrangement) noteLayoutLeavingFreeform(current.layout)
       const arrangementPatch = leavesArrangement
         ? { arrangementMode: 'preset' as const, sourceTransformOverrides: {} }
         : {}
+      const nextLayout: LayoutSettings = keepsOwn
+        ? own
+        : {
+            ...base,
+            ...recalledLayoutFraming(current.layoutFramingMemory, base.layoutPreset, nextPreset),
+            ...arrangementPatch,
+            ...patch,
+            cameraTransformMode: 'preset',
+            cameraTransform: null
+          }
 
-      return requestLayoutTransaction(
-        keepsOwn
-          ? own
-          : {
-              ...base,
-              ...recalledLayoutFraming(current.layoutFramingMemory, base.layoutPreset, nextPreset),
-              ...arrangementPatch,
-              ...patch,
-              cameraTransformMode: 'preset',
-              cameraTransform: null
-            },
-        {
-          videoOverride,
-          captureConfigPatch,
-          ...(options && 'backgroundOverride' in options
-            ? { backgroundOverride: options.backgroundOverride }
-            : {})
+      // Plan 231 D18, D19: a layout that starts drawing a screen shows the
+      // scene's own, never a capture an earlier scene left running under it.
+      // A scene that shows none asks for one first (Studio and the Scene page
+      // open Change screen… before they get here; anything else is refused).
+      // A scene with a screen of its own goes on again with it, in this
+      // layout, in one switch.
+      const scene = storedScene(activeSavedSceneIdRef.current)
+      if (
+        scene &&
+        layoutShowsScreen(nextLayout) &&
+        !sceneDrawsScreen(scene, current.layout, simulcastArmed(current))
+      ) {
+        if (scene.shows.kind === 'none') {
+          toast.warning(noScreenLayoutReason(scene.name), { id: 'scene-layout-no-screen' })
+          return Promise.resolve(false)
         }
-      )
+        const working = showsFromSources(
+          visualSources({ ...current.sources, app: workingAppRef.current })
+        )
+        if (
+          sceneCaptureIsBorrowed(scene, working) &&
+          !(options && 'backgroundOverride' in options)
+        ) {
+          if (leavesArrangement) noteLayoutLeavingFreeform(current.layout)
+          return applySavedSceneResultRef
+            .current(scene.id, undefined, { layout: nextLayout })
+            .then((result) => result.ok)
+        }
+      }
+      if (leavesArrangement) noteLayoutLeavingFreeform(current.layout)
+
+      return requestLayoutTransaction(nextLayout, {
+        videoOverride,
+        captureConfigPatch,
+        ...(options && 'backgroundOverride' in options
+          ? { backgroundOverride: options.backgroundOverride }
+          : {})
+      })
     },
     [requestLayoutTransaction, storedScene]
   )
@@ -11443,9 +11601,34 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
           !sameSceneAudio(entry.audio, workingAudio))
     )
   )
+  // Plan 231 D16: the scenes a switch is putting on stream, from the click
+  // until its last transaction settles. Delete refuses them, so the stream
+  // never lands on a scene the library no longer has.
+  const scenesGoingOnRef = useRef(new Map<string, number>())
+  const holdSceneGoingOn = useCallback((id: string): (() => void) => {
+    const holds = scenesGoingOnRef.current
+    holds.set(id, (holds.get(id) ?? 0) + 1)
+    let held = true
+    return () => {
+      if (!held) return
+      held = false
+      const left = (holds.get(id) ?? 1) - 1
+      if (left > 0) holds.set(id, left)
+      else holds.delete(id)
+    }
+  }, [])
+  /** A switch to it runs, or it committed and the stream waits for its proof. */
+  const sceneIsGoingOn = useCallback(
+    (id: string): boolean =>
+      scenesGoingOnRef.current.has(id) ||
+      (layoutIntentAwaitingProofRef.current !== null &&
+        latestLayoutTransactionCommitRef.current?.savedSceneId === id &&
+        activeSavedSceneIdRef.current !== id),
+    []
+  )
   // Plan 231 D16: the last scene stays. Off air, deleting the scene on stream
   // first switches to the scene before it; while recording or live it can't
-  // be deleted.
+  // be deleted, nor can a scene going on stream.
   const deleteSavedScene = useCallback(
     async (id: string): Promise<boolean> => {
       const sessionActive = isActiveRecordingState(recordingRef.current.state)
@@ -11453,7 +11636,8 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
         scenes: storedScenes(),
         id,
         onStreamId: activeSavedSceneIdRef.current ?? '',
-        sessionActive
+        sessionActive,
+        goingOn: sceneIsGoingOn(id)
       })
       if (!verdict.allowed) {
         if (verdict.reason) toast.warning(verdict.reason, { id: 'scene-delete-refused' })
@@ -11461,6 +11645,12 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
       }
       if (verdict.switchToId && !(await applySavedSceneResultRef.current(verdict.switchToId)).ok)
         return false
+      // The switch to the scene before it may have handed over to another
+      // switch meanwhile: never delete a scene that is now going on.
+      if (sceneIsGoingOn(id)) {
+        toast.warning(GOING_ON_STREAM_REASON, { id: 'scene-delete-refused' })
+        return false
+      }
       if (!removeSceneEntry(id, { sessionActive })) return false
       setSettings((current) => ({
         ...current,
@@ -11468,7 +11658,7 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
       }))
       return true
     },
-    [removeSceneEntry, storedScenes, setSettings]
+    [removeSceneEntry, sceneIsGoingOn, storedScenes, setSettings]
   )
   // A shortcut or remote request is sent even when it repeats the last one:
   // the retry after a failed start or a lost update.
@@ -11498,214 +11688,266 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
       repaired?: SceneVisual,
       options?: SavedSceneApplyOptions
     ): Promise<SavedSceneApplyResult> => {
-      const saved = sceneLibrary.scenes.find((entry) => entry.id === id)
-      if (!saved) return { ok: false }
+      const stored = storedScene(id)
+      if (!stored) return { ok: false }
+      // The scene as it is stored now, with what this switch brings: a
+      // remote's screen, or a layout chosen on it (plan 231). It keeps them
+      // once the switch lands.
+      const orientation = layoutPresetOrientation(
+        (options?.layout ?? captureConfigRef.current.layout).layoutPreset
+      )
+      const target: StoredScene = {
+        ...stored,
+        ...(options?.shows ? { shows: options.shows } : {}),
+        ...(options?.layout
+          ? { layouts: { ...stored.layouts, [orientation]: options.layout } }
+          : {})
+      }
+      const { cameraId, cameraName, cameraOff } = captureConfigRef.current.sources
+      const saved = savedSceneView(target, orientation, { cameraId, cameraName, cameraOff })
       if (options?.origin !== 'follow')
         for (const listener of manualSceneApplyListenersRef.current) listener(id)
       const generation = ++savedSceneResolveGenerationRef.current
-      let layoutIntentBefore = layoutIntentIdRef.current
-      let sceneApply: typeof SavedSceneApply
+      // Plan 231 D16: a scene going on stream can't be deleted under its
+      // switch, from the click until its last transaction settles.
+      const releaseGoingOn = holdSceneGoingOn(id)
       try {
-        sceneApply = savedSceneApplyChunk ?? (await loadSavedSceneApply())
-      } catch (error) {
-        reportError(error, { action: 'switch', object: 'the scene' })
-        return { ok: false }
-      }
-      let visual = normalizeSceneVisual(repaired ?? saved.visual)
-      let current = captureConfigRef.current
-      let microphone: ReturnType<typeof sceneMicrophone> | null = null
-      let live = false
-      let applied = false
-      let lastIntent = layoutIntentBefore
-      // Plan 210 D5: an app scene's window is answered from the held device
-      // list when it can be (no resolver round trip). A refused switch gets
-      // one more try, resolved over the backend, while the pick is still
-      // the latest: the held window may have gone since the list was read,
-      // or a capture restart (the Clips ring, recovery) may have superseded
-      // this switch's own start.
-      for (let attempt = 0; attempt < 2; attempt += 1) {
-        // Plan 213 F1: the scene's display as listed now, found by its UUID first.
-        visual = withSceneDisplay(
-          normalizeSceneVisual(repaired ?? saved.visual),
-          deviceListRef.current.devices
-        )
-        const windowHint = sceneWindowHintsRef.current[id]
-        if (visual.sources.app && !visual.sources.windowId && windowHint)
-          visual = { ...visual, sources: { ...visual.sources, windowId: windowHint } }
+        let layoutIntentBefore = layoutIntentIdRef.current
+        let sceneApply: typeof SavedSceneApply
         try {
-          const resolved = await sceneApply.resolveSceneWindowForApply(
-            visual,
-            deviceListRef.current.devices,
-            (params) => {
-              if (!clientRef.current) throw offlineError()
-              return clientRef.current.requestTyped('sources.resolve_app_window', params)
-            },
-            rememberedAppsRef.current[id],
-            options?.preferWindowId,
-            { forceResolve: attempt > 0 }
-          )
-          if (
-            generation !== savedSceneResolveGenerationRef.current ||
-            layoutIntentBefore !== layoutIntentIdRef.current
-          )
-            return { ok: false, superseded: true }
-          if (resolved.kind === 'blocked') {
-            setResolvedAppStates((current) => ({
-              ...current,
-              [id]: resolved.reason.slice(4) as SceneAppState
-            }))
-            const refusal = sceneApply.sceneWindowRefusal(visual, resolved.reason)
-            if (!refusal.ok) toast.warning(refusal.message, { id: 'scene-app-unavailable' })
-            return refusal
-          }
-          if (resolved.kind === 'ready') {
-            visual = { ...visual, sources: resolved.sources }
-            if (visual.sources.app)
-              setResolvedAppStates((current) => ({ ...current, [id]: 'ready' }))
-          }
+          sceneApply = savedSceneApplyChunk ?? (await loadSavedSceneApply())
         } catch (error) {
           reportError(error, { action: 'switch', object: 'the scene' })
           return { ok: false }
         }
-        current = captureConfigRef.current
-        // Idle, the scene's microphone rides in its sources and the commit makes
-        // it the pick. A recording or livestream switches to it after the
-        // commit, and only the session's confirmation changes the pick.
-        microphone = saved.audio
-          ? sceneMicrophone(saved.audio, deviceListRef.current.devices)
-          : null
-        live = sessionOwnsTransport(recordingRef.current)
-        const coupling = !isActiveRecordingState(recordingRef.current.state)
-          ? verticalOrientationVideoPatch(
-              current.layout.layoutPreset,
-              visual.layout.layoutPreset,
-              current.video,
-              current.verticalRestoreVideo
-            )
-          : null
-        // Plan 231 D18: a scene that shows no screen leaves the capture, and
-        // the app it follows, as they are: going back is a swap in place.
-        // D9: a scene never changes the camera device; only sources chosen
-        // again for it (Resolve scene sources) carry one.
-        const keepsCapture = !repaired && sceneKeepsCapture(storedScene(id), visual.layout)
-        const transaction = requestLayoutTransaction(visual.layout, {
-          sceneApp: keepsCapture ? workingAppRef.current : visual.sources.app,
-          sourcesOverride: withoutSceneApp({
-            ...current.sources,
-            ...(keepsCapture ? null : captureSources(visual.sources)),
-            ...(repaired ? cameraSources(visual.sources) : null),
-            ...(live ? null : microphone)
-          }),
-          backgroundOverride: resolveSavedBackground(visual.background),
-          savedSceneId: id,
-          origin: 'saved',
-          sceneSwitch: true,
-          strictSources: true,
-          targetName: saved.name,
-          ...(coupling
-            ? {
-                videoOverride: coupling.video,
-                captureConfigPatch: {
-                  video: coupling.video,
-                  verticalRestoreVideo: coupling.verticalRestoreVideo
-                }
-              }
-            : {})
-        })
-        // The intent this switch minted, read before anything newer can.
-        const intent = layoutIntentIdRef.current
-        lastIntent = intent
-        applied = await transaction
-        if (applied) break
-        if (
-          !sceneApply.savedSceneApplyRetryAllowed({
-            attempt,
-            generation,
-            latestGeneration: savedSceneResolveGenerationRef.current,
-            intent,
-            latestIntent: layoutIntentIdRef.current
-          }) ||
-          // A source turned off on purpose refuses the same way twice.
-          sceneApply.judgeSceneSources(visual, deviceListRef.current.devices, visual.sources.app)
-            .kind === 'refused'
-        )
-          break
-        layoutIntentBefore = intent
-      }
-      // A newer click took the switch over (issue #1275): not a failure of this scene.
-      if (!applied && layoutIntentIdRef.current !== lastIntent)
-        return { ok: false, superseded: true }
-      if (applied) {
-        sceneWindowHintsRef.current[id] = visual.sources.app ? visual.sources.windowId : undefined
-        if (!repaired) refreshSavedSceneDisplay(id, deviceListRef.current.devices)
-        rememberedAppsRef.current = sceneApply.rememberSceneWindowApp(
-          rememberedAppsRef.current,
-          id,
-          visual.sources,
-          deviceListRef.current.devices,
-          sceneLibrary.scenes
-        )
-        try {
-          localStorage.setItem(SCENE_WINDOW_APPS_KEY, JSON.stringify(rememberedAppsRef.current))
-        } catch {
-          /* Best effort. */
-        }
-      }
-      if (!applied || !saved.audio) return { ok: applied }
-      if (saved.audio.systemAudioEnabled !== captureConfigRef.current.audio.systemAudioEnabled)
-        setSystemAudioEnabled(saved.audio.systemAudioEnabled)
-      if (!microphone) {
-        if (saved.audio.microphoneId)
-          toast.warning(
-            `${saved.audio.microphoneName ?? "The scene's microphone"} isn't available`,
-            {
-              id: 'saved-scene-microphone',
-              description:
-                'The scene kept your current microphone. Connect it, then choose the scene again.'
-            }
+        // Plan 231 D4, D18: whether any leg that is on draws a screen for it. A
+        // scene none draws one for keeps the capture (and the app it follows),
+        // and needs no window of its own app: its app may well be closed.
+        const verticalLeg = simulcastArmed(captureConfigRef.current)
+        const keepsCapture =
+          !repaired && sceneKeepsCapture(target, saved.visual.layout, verticalLeg)
+        let visual = normalizeSceneVisual(repaired ?? saved.visual)
+        let current = captureConfigRef.current
+        let microphone: ReturnType<typeof sceneMicrophone> | null = null
+        let live = false
+        let applied = false
+        let lastIntent = layoutIntentBefore
+        // Plan 210 D5: an app scene's window is answered from the held device
+        // list when it can be (no resolver round trip). A refused switch gets
+        // one more try, resolved over the backend, while the pick is still
+        // the latest: the held window may have gone since the list was read,
+        // or a capture restart (the Clips ring, recovery) may have superseded
+        // this switch's own start.
+        for (let attempt = 0; attempt < 2; attempt += 1) {
+          // Plan 213 F1: the scene's display as listed now, found by its UUID first.
+          visual = withSceneDisplay(
+            normalizeSceneVisual(repaired ?? saved.visual),
+            deviceListRef.current.devices
           )
-        return { ok: applied }
-      }
-      if (
-        live &&
-        sessionOwnsTransport(recordingRef.current) &&
-        microphone.microphoneId !== current.sources.microphoneId
-      ) {
-        // The commit moved the session's sources on, and a read already in
-        // flight may predate it: a switch carrying that would be refused.
-        await sourceSelectionController.refresh()
-        await sourceSelectionController.refresh()
-        const blocked = sourceSelectionController.reason('microphone')
-        if (blocked) {
-          toast.warning(blocked, {
-            id: 'source-switch-blocked',
-            description: 'The scene kept your current microphone.'
+          const windowHint = sceneWindowHintsRef.current[id]
+          if (visual.sources.app && !visual.sources.windowId && windowHint)
+            visual = { ...visual, sources: { ...visual.sources, windowId: windowHint } }
+          // A scene no leg draws a screen for keeps the capture: its app's
+          // window is never asked for, so a closed app doesn't refuse it (D18).
+          if (!keepsCapture) {
+            try {
+              const resolved = await sceneApply.resolveSceneWindowForApply(
+                visual,
+                deviceListRef.current.devices,
+                (params) => {
+                  if (!clientRef.current) throw offlineError()
+                  return clientRef.current.requestTyped('sources.resolve_app_window', params)
+                },
+                rememberedAppsRef.current[id],
+                options?.preferWindowId,
+                { forceResolve: attempt > 0 }
+              )
+              if (
+                generation !== savedSceneResolveGenerationRef.current ||
+                layoutIntentBefore !== layoutIntentIdRef.current
+              )
+                return { ok: false, superseded: true }
+              if (resolved.kind === 'blocked') {
+                setResolvedAppStates((current) => ({
+                  ...current,
+                  [id]: resolved.reason.slice(4) as SceneAppState
+                }))
+                const refusal = sceneApply.sceneWindowRefusal(visual, resolved.reason)
+                if (!refusal.ok) toast.warning(refusal.message, { id: 'scene-app-unavailable' })
+                return refusal
+              }
+              if (resolved.kind === 'ready') {
+                visual = { ...visual, sources: resolved.sources }
+                if (visual.sources.app)
+                  setResolvedAppStates((current) => ({ ...current, [id]: 'ready' }))
+              }
+            } catch (error) {
+              reportError(error, { action: 'switch', object: 'the scene' })
+              return { ok: false }
+            }
+          } else if (
+            generation !== savedSceneResolveGenerationRef.current ||
+            layoutIntentBefore !== layoutIntentIdRef.current
+          )
+            return { ok: false, superseded: true }
+          current = captureConfigRef.current
+          // Idle, the scene's microphone rides in its sources and the commit makes
+          // it the pick. A recording or livestream switches to it after the
+          // commit, and only the session's confirmation changes the pick.
+          microphone = saved.audio
+            ? sceneMicrophone(saved.audio, deviceListRef.current.devices)
+            : null
+          live = sessionOwnsTransport(recordingRef.current)
+          const coupling = !isActiveRecordingState(recordingRef.current.state)
+            ? verticalOrientationVideoPatch(
+                current.layout.layoutPreset,
+                visual.layout.layoutPreset,
+                current.video,
+                current.verticalRestoreVideo
+              )
+            : null
+          // Plan 231 D18: a scene no leg draws a screen for leaves the capture,
+          // and the app it follows, as they are: going back is a swap in place.
+          // D9: a scene never changes the camera device; only sources chosen
+          // again for it (Resolve scene sources) carry one.
+          const releaseTransaction = holdSceneGoingOn(id)
+          const transaction = requestLayoutTransaction(visual.layout, {
+            onSettled: releaseTransaction,
+            sceneApp: keepsCapture ? workingAppRef.current : visual.sources.app,
+            sourcesOverride: withoutSceneApp({
+              ...current.sources,
+              ...(keepsCapture ? null : captureSources(visual.sources)),
+              ...(repaired ? cameraSources(visual.sources) : null),
+              ...(live ? null : microphone)
+            }),
+            backgroundOverride: resolveSavedBackground(visual.background),
+            savedSceneId: id,
+            origin: 'saved',
+            sceneSwitch: true,
+            strictSources: true,
+            targetName: saved.name,
+            ...(coupling
+              ? {
+                  videoOverride: coupling.video,
+                  captureConfigPatch: {
+                    video: coupling.video,
+                    verticalRestoreVideo: coupling.verticalRestoreVideo
+                  }
+                }
+              : {})
           })
+          // The intent this switch minted, read before anything newer can.
+          const intent = layoutIntentIdRef.current
+          lastIntent = intent
+          applied = await transaction
+          if (applied) break
+          if (
+            !sceneApply.savedSceneApplyRetryAllowed({
+              attempt,
+              generation,
+              latestGeneration: savedSceneResolveGenerationRef.current,
+              intent,
+              latestIntent: layoutIntentIdRef.current
+            }) ||
+            // A source turned off on purpose refuses the same way twice.
+            sceneApply.judgeSceneSources(visual, deviceListRef.current.devices, visual.sources.app)
+              .kind === 'refused'
+          )
+            break
+          layoutIntentBefore = intent
+        }
+        // A newer click took the switch over (issue #1275): not a failure of this scene.
+        if (!applied && layoutIntentIdRef.current !== lastIntent)
+          return { ok: false, superseded: true }
+        if (applied) {
+          // What it went on with is the scene's own from now on (D2, D11).
+          if (options?.shows || options?.layout) {
+            const latest = storedScene(id)
+            if (latest)
+              editStoredScene({
+                ...latest,
+                ...(options.shows ? { shows: options.shows } : {}),
+                ...(options.layout
+                  ? { layouts: { ...latest.layouts, [orientation]: options.layout } }
+                  : {}),
+                updatedAt: new Date().toISOString()
+              })
+          }
+          sceneWindowHintsRef.current[id] = visual.sources.app ? visual.sources.windowId : undefined
+          if (!repaired) refreshSavedSceneDisplay(id, deviceListRef.current.devices)
+          rememberedAppsRef.current = sceneApply.rememberSceneWindowApp(
+            rememberedAppsRef.current,
+            id,
+            visual.sources,
+            deviceListRef.current.devices,
+            sceneLibrary.scenes
+          )
+          try {
+            localStorage.setItem(SCENE_WINDOW_APPS_KEY, JSON.stringify(rememberedAppsRef.current))
+          } catch {
+            /* Best effort. */
+          }
+        }
+        if (!applied || !saved.audio) return { ok: applied }
+        if (saved.audio.systemAudioEnabled !== captureConfigRef.current.audio.systemAudioEnabled)
+          setSystemAudioEnabled(saved.audio.systemAudioEnabled)
+        if (!microphone) {
+          if (saved.audio.microphoneId)
+            toast.warning(
+              `${saved.audio.microphoneName ?? "The scene's microphone"} isn't available`,
+              {
+                id: 'saved-scene-microphone',
+                description:
+                  'The scene kept your current microphone. Connect it, then choose the scene again.'
+              }
+            )
           return { ok: applied }
         }
-        // Plan 0027: the session confirms only the device; None is renderer intent.
-        if (microphone.microphoneOff)
-          setCaptureConfig((latest) =>
-            latest.sources.microphoneOff
-              ? latest
-              : { ...latest, sources: { ...latest.sources, microphoneOff: true } }
-          )
-        try {
-          await sourceSelectionController.select(
-            'microphone',
-            microphone.microphoneId ?? null,
-            currentProtectedOverlayWindowIds(),
-            microphone.microphoneName
-          )
-        } catch (error) {
-          reportError(error, { action: 'switch', object: 'the microphone' })
+        if (
+          live &&
+          sessionOwnsTransport(recordingRef.current) &&
+          microphone.microphoneId !== current.sources.microphoneId
+        ) {
+          // The commit moved the session's sources on, and a read already in
+          // flight may predate it: a switch carrying that would be refused.
+          await sourceSelectionController.refresh()
+          await sourceSelectionController.refresh()
+          const blocked = sourceSelectionController.reason('microphone')
+          if (blocked) {
+            toast.warning(blocked, {
+              id: 'source-switch-blocked',
+              description: 'The scene kept your current microphone.'
+            })
+            return { ok: applied }
+          }
+          // Plan 0027: the session confirms only the device; None is renderer intent.
+          if (microphone.microphoneOff)
+            setCaptureConfig((latest) =>
+              latest.sources.microphoneOff
+                ? latest
+                : { ...latest, sources: { ...latest.sources, microphoneOff: true } }
+            )
+          try {
+            await sourceSelectionController.select(
+              'microphone',
+              microphone.microphoneId ?? null,
+              currentProtectedOverlayWindowIds(),
+              microphone.microphoneName
+            )
+          } catch (error) {
+            reportError(error, { action: 'switch', object: 'the microphone' })
+          }
         }
+        return { ok: applied }
+      } finally {
+        releaseGoingOn()
       }
-      return { ok: applied }
     },
     [
       sceneLibrary.scenes,
       storedScene,
+      editStoredScene,
+      holdSceneGoingOn,
       refreshSavedSceneDisplay,
       requestLayoutTransaction,
       setSystemAudioEnabled,
@@ -11717,11 +11959,18 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
 
   // Plan 231 D14: a remote that names a layout switches to the first
   // scene with that layout in the studio's orientation, or is refused.
+  // `options.shows`: a remote's screen with it, which the scene goes on with.
   const switchToSceneWithLayout = useCallback(
-    (layoutPreset: LayoutPreset): Promise<SavedSceneApplyResult> => {
+    (
+      layoutPreset: LayoutPreset,
+      options?: Pick<SavedSceneApplyOptions, 'shows'>
+    ): Promise<SavedSceneApplyResult> => {
       const orientation = layoutPresetOrientation(captureConfigRef.current.layout.layoutPreset)
       const target = firstSceneWithLayout(storedScenes(), orientation, layoutPreset)
-      if (target) return applySavedSceneResult(target.id)
+      if (target)
+        return options?.shows
+          ? applySavedSceneResult(target.id, undefined, { shows: options.shows })
+          : applySavedSceneResult(target.id)
       const label = layoutPresetLabel(layoutPreset, {
         bothOrientations: layoutPresetOrientation(layoutPreset) !== orientation
       })
@@ -19531,11 +19780,25 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
                 sceneShortcutRequestedRef.current ?? `scene:${activeSavedSceneIdRef.current}`,
               direction: sceneAction === 'layout-previous' ? -1 : 1,
               scenes: sceneLibrary.scenes,
+              // Plan 231 D4: judged on every leg that is on, as a switch is.
               unavailableSceneIds: sceneLibrary.scenes
-                .filter(
-                  (scene) =>
-                    sceneSourceProblems(scene.visual, deviceListRef.current.devices).length > 0
-                )
+                .filter((scene) => {
+                  const own = storedScene(scene.id)
+                  const layouts = own
+                    ? sceneLegLayouts(
+                        own,
+                        scene.visual.layout,
+                        simulcastArmed(captureConfigRef.current)
+                      )
+                    : [scene.visual.layout]
+                  return layouts.some(
+                    (layout) =>
+                      sceneSourceProblems(
+                        { ...scene.visual, layout },
+                        deviceListRef.current.devices
+                      ).length > 0
+                  )
+                })
                 .map((scene) => scene.id),
               appStates: savedSceneAppStates
             })

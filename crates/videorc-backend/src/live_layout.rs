@@ -144,6 +144,33 @@ pub struct SceneSourceNeeds {
     pub screen: bool,
 }
 
+/// What a layout transaction asks of the screen beyond what its program
+/// scene composes (plan 231 D18 and D4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct ScreenDemand {
+    /// Retirement only: keep an existing screen capture; never start it.
+    retain: bool,
+    /// The running vertical leg draws the selected screen: it is needed.
+    vertical_leg: bool,
+}
+
+/// The sources a program transaction needs: what its scene composes, plus
+/// the selected screen while the running vertical leg draws it (plan 231
+/// D4). Without a selected screen the leg has nothing to ask for.
+fn transaction_source_needs(
+    scene: &Scene,
+    sources: &SourceSelection,
+    demand: ScreenDemand,
+) -> SceneSourceNeeds {
+    let needs = required_scene_sources(scene);
+    SceneSourceNeeds {
+        screen: needs.screen
+            || (demand.vertical_leg
+                && (sources.screen_id.is_some() || sources.window_id.is_some())),
+        ..needs
+    }
+}
+
 /// Which real sources are currently delivering fresh frames.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct SourceLiveness {
@@ -569,7 +596,10 @@ pub async fn apply_layout_live(
         None,
         "layout switch",
         request.intent_id,
-        request.retain_screen == Some(true),
+        ScreenDemand {
+            retain: request.retain_screen == Some(true),
+            vertical_leg: request.vertical_leg_screen == Some(true),
+        },
     )
     .await
 }
@@ -588,7 +618,11 @@ pub async fn apply_layout_preview(
         None,
         "preview layout switch",
         request.intent_id,
-        request.retain_screen == Some(true),
+        // Off air there is no vertical leg to draw a screen.
+        ScreenDemand {
+            retain: request.retain_screen == Some(true),
+            vertical_leg: false,
+        },
     )
     .await
 }
@@ -672,7 +706,7 @@ pub async fn apply_source_device_switch_live(
         None,
         "source device switch",
         None,
-        false,
+        ScreenDemand::default(),
     )
     .await
 }
@@ -1104,7 +1138,7 @@ async fn apply_scene_transaction(
     target_sources_override: Option<&SourceSelection>,
     action_label: &'static str,
     requested_intent_id: Option<u64>,
-    retain_screen: bool,
+    screen_demand: ScreenDemand,
 ) -> Result<LiveLayoutApplyStatus> {
     if let Some(blocker) = preset_selection_blocker(&params) {
         return Err(blocker.into());
@@ -1112,10 +1146,12 @@ async fn apply_scene_transaction(
 
     let target_sources = target_sources_override.unwrap_or(&params.sources);
     let scene = scene_from_capture_config(params.clone());
-    let needs = required_scene_sources(&scene);
+    // A screen the vertical leg draws is needed like a composed one: it is
+    // started (or switched to) before the commit and kept after it.
+    let needs = transaction_source_needs(&scene, &params.sources, screen_demand);
     // Keep composition/readiness separate: retention may only prevent a stop.
     let retirement_needs = SceneSourceNeeds {
-        screen: needs.screen || retain_screen,
+        screen: needs.screen || screen_demand.retain,
         ..needs
     };
 
@@ -2753,6 +2789,7 @@ mod tests {
                 intent_id: Some(1),
                 simulcast_leg: false,
                 retain_screen: None,
+                vertical_leg_screen: None,
                 config: params.clone(),
             },
         )
@@ -3057,6 +3094,7 @@ mod tests {
                     intent_id: Some(3),
                     simulcast_leg: false,
                     retain_screen: None,
+                    vertical_leg_screen: None,
                     config: config(LayoutPreset::CameraOnly, false, true)
                 }
             )
@@ -3124,6 +3162,7 @@ mod tests {
             intent_id: Some(intent_id),
             simulcast_leg: false,
             retain_screen,
+            vertical_leg_screen: None,
             config,
         };
         if live {
@@ -3209,6 +3248,107 @@ mod tests {
         }
     }
 
+    // Plan 231 D4: a scene that shows Camera only on the program and its
+    // screen on the vertical leg still needs that screen.
+    #[test]
+    fn vertical_leg_screen_demands_the_selected_screen_only() {
+        let params = config(LayoutPreset::CameraOnly, true, true);
+        let scene = scene_from_capture_config(params.clone());
+        assert!(!required_scene_sources(&scene).screen);
+        let leg = ScreenDemand {
+            retain: false,
+            vertical_leg: true,
+        };
+        let needs = transaction_source_needs(&scene, &params.sources, leg);
+        assert!(needs.screen && needs.camera);
+        assert_eq!(
+            transaction_source_needs(&scene, &params.sources, ScreenDemand::default()),
+            required_scene_sources(&scene)
+        );
+        // Retention alone never makes the screen needed.
+        let retain = ScreenDemand {
+            retain: true,
+            vertical_leg: false,
+        };
+        assert!(!transaction_source_needs(&scene, &params.sources, retain).screen);
+        // No selected screen: the leg has nothing to ask for.
+        let mut none = params.sources.clone();
+        none.screen_id = None;
+        none.window_id = None;
+        assert!(!transaction_source_needs(&scene, &none, leg).screen);
+    }
+
+    #[tokio::test]
+    async fn vertical_leg_screen_keeps_the_running_selected_screen_through_retirement() {
+        let (state, params) = retain_screen_fixture(true, true).await;
+        let before = crate::preview_screen::preview_screen_frame_source(&state)
+            .await
+            .unwrap();
+        let applied = apply_layout_live(
+            &state,
+            SceneLayoutApplyParams {
+                intent_id: Some(1),
+                simulcast_leg: false,
+                retain_screen: None,
+                vertical_leg_screen: Some(true),
+                config: params,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(applied.applied);
+        assert_eq!(applied.mode, "hot", "the running selected screen is ready");
+        assert!(
+            !required_scene_sources(&applied.scene).screen,
+            "the program still composes no screen"
+        );
+        assert!(state.layout_intents.lock().await.latest_needs_screen);
+        retire_unused_sources_after_commit(&state, 1, required_scene_sources(&applied.scene)).await;
+        assert_eq!(
+            crate::preview_screen::preview_screen_frame_source(&state)
+                .await
+                .unwrap()
+                .generation(),
+            before.generation()
+        );
+        crate::preview_camera::stop_preview_camera(&state).await;
+    }
+
+    #[test]
+    fn vertical_leg_screen_wire_contract_accepts_only_true() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../protocol-fixtures/scene-layout-retention.json"
+        ))
+        .unwrap();
+        let wire = fixture["verticalLeg"].clone();
+        let request: SceneLayoutApplyParams = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(request.vertical_leg_screen, Some(true));
+        assert_eq!(request.retain_screen, None);
+        let encoded = serde_json::to_value(request).unwrap();
+        assert_eq!(
+            encoded.get("verticalLegScreen"),
+            wire.get("verticalLegScreen")
+        );
+        let legacy: SceneLayoutApplyParams =
+            serde_json::from_value(fixture["legacy"].clone()).unwrap();
+        assert_eq!(legacy.vertical_leg_screen, None);
+        assert!(
+            serde_json::to_value(legacy)
+                .unwrap()
+                .get("verticalLegScreen")
+                .is_none()
+        );
+        for value in [
+            serde_json::json!(false),
+            serde_json::Value::Null,
+            serde_json::json!("true"),
+        ] {
+            let mut wire = fixture["legacy"].clone();
+            wire["verticalLegScreen"] = value;
+            assert!(serde_json::from_value::<SceneLayoutApplyParams>(wire).is_err());
+        }
+    }
+
     #[test]
     fn retain_screen_wire_contract_omits_absence_and_accepts_only_true() {
         let fixture: serde_json::Value = serde_json::from_str(include_str!(
@@ -3279,6 +3419,7 @@ mod tests {
                     intent_id: Some(1),
                     simulcast_leg: false,
                     retain_screen: None,
+                    vertical_leg_screen: None,
                     config: params,
                 },
             )
@@ -3665,6 +3806,7 @@ mod tests {
                 intent_id: Some(1),
                 simulcast_leg: false,
                 retain_screen: None,
+                vertical_leg_screen: None,
                 config: params,
             },
         )
@@ -3945,6 +4087,7 @@ mod tests {
                 intent_id: Some(41),
                 simulcast_leg: false,
                 retain_screen: None,
+                vertical_leg_screen: None,
                 config: vertical,
             },
         )
@@ -3987,6 +4130,7 @@ mod tests {
             intent_id: Some(12),
             simulcast_leg: true,
             retain_screen: None,
+            vertical_leg_screen: None,
             config,
         };
         let program_before = {
@@ -4076,6 +4220,7 @@ mod tests {
                 intent_id: Some(7),
                 simulcast_leg: false,
                 retain_screen: None,
+                vertical_leg_screen: None,
                 config: config(LayoutPreset::VerticalCameraBottom, true, true),
             },
         )
@@ -4742,6 +4887,7 @@ mod tests {
                 intent_id: Some(1),
                 simulcast_leg: false,
                 retain_screen: None,
+                vertical_leg_screen: None,
                 config: config(LayoutPreset::SideBySide, true, false),
             },
         )
@@ -6313,6 +6459,7 @@ mod tests {
                 intent_id: Some(1),
                 simulcast_leg: false,
                 retain_screen: None,
+                vertical_leg_screen: None,
                 config: params.clone(),
             },
         )
@@ -6340,6 +6487,7 @@ mod tests {
                 intent_id: Some(2),
                 simulcast_leg: false,
                 retain_screen: None,
+                vertical_leg_screen: None,
                 config: freeform_arrangement_of(&params, &installed.scene),
             },
         )
@@ -6387,6 +6535,7 @@ mod tests {
                 intent_id: Some(1),
                 simulcast_leg: false,
                 retain_screen: None,
+                vertical_leg_screen: None,
                 config: screen_only.clone(),
             },
         )
@@ -6418,6 +6567,7 @@ mod tests {
                 intent_id: Some(2),
                 simulcast_leg: false,
                 retain_screen: None,
+                vertical_leg_screen: None,
                 config: with_camera,
             },
         )
@@ -6574,6 +6724,7 @@ mod tests {
                 intent_id: Some(1),
                 simulcast_leg: false,
                 retain_screen: None,
+                vertical_leg_screen: None,
                 config: screen_only,
             },
         )
@@ -6595,6 +6746,7 @@ mod tests {
                 intent_id: Some(2),
                 simulcast_leg: false,
                 retain_screen: None,
+                vertical_leg_screen: None,
                 config: with_camera.clone(),
             },
         )
@@ -6629,6 +6781,7 @@ mod tests {
                 intent_id: Some(3),
                 simulcast_leg: false,
                 retain_screen: None,
+                vertical_leg_screen: None,
                 config: with_camera,
             },
         )

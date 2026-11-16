@@ -1,4 +1,5 @@
 import type { SavedSceneApplyResult } from '../scene-window-resolution'
+import type { SceneShows } from '../scenes'
 // The Studio's action context, built from the Studio's handles (plan 209 S5).
 // hooks/use-studio.tsx hands over, per intent, the latest render's handlers,
 // state and refs (`StudioActionSource`); this module turns them into the
@@ -85,7 +86,10 @@ export interface StudioActionSource extends Omit<
   setSystemAudioEnabled: (enabled: boolean) => void
   requestCameraPresetTransaction: (patch: Partial<LayoutSettings>) => Promise<boolean>
   /** Plan 231 D14: the first scene with this layout goes on stream, or a refusal in words. */
-  switchToSceneWithLayout: (layoutPreset: LayoutPreset) => Promise<SavedSceneApplyResult>
+  switchToSceneWithLayout: (
+    layoutPreset: LayoutPreset,
+    options?: { shows?: SceneShows }
+  ) => Promise<SavedSceneApplyResult>
   screens: readonly Pick<StreamScreen, 'id'>[]
   activateScreen: (assetId: string) => Promise<boolean>
   clearActiveScreen: () => Promise<boolean>
@@ -104,7 +108,11 @@ export interface StudioActionSource extends Omit<
   publishCommentHighlightState: (state: CommentHighlightState) => void
   bannerListRef: Ref<readonly Banner[] | null>
   savedScenes: NonNullable<StudioActionContext['savedScenes']>
-  applySavedSceneResult?: (id: string) => Promise<SavedSceneApplyResult>
+  applySavedSceneResult?: (
+    id: string,
+    repaired?: undefined,
+    options?: { shows?: SceneShows }
+  ) => Promise<SavedSceneApplyResult>
   applySavedScene: (id: string) => Promise<boolean>
   captureConfigRef: Ref<CaptureConfig>
   deviceListRef: Ref<DeviceList>
@@ -268,7 +276,13 @@ export function studioActionContext(studio: StudioActionSource): StudioActionCon
     noteRecordClick: (kind) => studio.noteRecordClick(kind),
     sessionLive: sessionIsLive(studio.recordingRef.current),
     savedScenes: studio.savedScenes,
-    applySavedSceneResult: studio.applySavedSceneResult,
+    // Plan 231: a remote's screen rides in the switch to the scene it names.
+    applySavedSceneResult: studio.applySavedSceneResult
+      ? (id, options) =>
+          options?.shows
+            ? studio.applySavedSceneResult!(id, undefined, { shows: options.shows })
+            : studio.applySavedSceneResult!(id)
+      : undefined,
     applySavedScene: (id) => studio.applySavedScene(id),
     // Plan 209 PR B: what the Run the show and Arrange tools add. A deck
     // key never reads them.

@@ -12,6 +12,7 @@ import {
   layoutKeyLit,
   sceneActionIntent,
   sceneActionOptions,
+  sceneActionTitle,
   micKeyLit,
   recordKeyIntent,
   recordKeyLit,
@@ -269,13 +270,10 @@ type SceneSettings = { sceneId?: string; layoutPreset?: string }
 
 @action({ UUID: 'com.videorc.streamdeck.scene-apply' })
 class SceneApply extends VideorcAction<SceneSettings> {
+  // An old key names its own layout until a scene is chosen, never the
+  // scene on stream: each old key asks for a different scene.
   protected renderTitle: TitleRenderer<SceneSettings> = (state, connected, settings) =>
-    sceneKeyTitle(
-      state,
-      settings.sceneId ??
-        (settings.layoutPreset ? (state?.activeSavedSceneId ?? undefined) : undefined),
-      connected
-    )
+    sceneActionTitle(state, settings, connected)
   protected override renderPressed(state: RemoteState | null, settings: SceneSettings): boolean {
     return settings.sceneId
       ? state?.activeSavedSceneId === settings.sceneId

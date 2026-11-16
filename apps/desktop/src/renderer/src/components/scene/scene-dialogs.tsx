@@ -198,8 +198,10 @@ export function useSceneDialogs(): {
         ? { preset: forLayout, sceneId: listed.id, captureId, layoutBefore: layoutOnStream }
         : null
     if (pick.kind === 'display' || pick.kind === 'window') {
-      // The Screen pick of D2: it writes the scene's screen (S2).
-      if (next.name !== stored.name) studio.renameSavedScene(listed.id, next.name)
+      // The Screen pick of D2. The scene shows it from now on, written here
+      // too and not only once a recording confirms the switch: D19's layout
+      // goes on after it, and a scene that shows none would refuse it.
+      if (!sceneLibraryActions.edit(next, windowHint)) return
       setAfterScreen(after(pick.device.id))
       void studio
         .switchSourceDeviceLive(
@@ -235,12 +237,14 @@ export function useSceneDialogs(): {
     })
   }
 
+  // D16: the scene a switch is putting on stream can't go while it switches.
   const deleteVerdict = (scene: SavedScene): ReturnType<typeof canDeleteScene> =>
     canDeleteScene({
       scenes: savedScenes,
       id: scene.id,
       onStreamId: studio.activeSavedSceneId ?? '',
-      sessionActive: studio.isSessionActive
+      sessionActive: studio.isSessionActive,
+      goingOn: studio.savedScenePendingId === scene.id
     })
   /** What deleting says it does: the scene before it goes on stream when it was on (D16). */
   const deleteDescription = (scene: SavedScene): string => {

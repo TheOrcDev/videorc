@@ -189,13 +189,14 @@ function SceneRow({
             className="disabled:text-muted-foreground"
             disabled={disabled}
             onClick={onSelect}
-            onKeyDown={onMoveKey}
           >
             {scene.name}
           </ListRowButton>
         </DisabledReason>
       }
       {...dragProps}
+      // ⌥↑ ⌥↓ on the row's name, or on its reason while it can't go on.
+      onKeyDown={onMoveKey}
     >
       {scene.visual.sources.app?.follows ? <Badge variant="outline">Follows</Badge> : null}
       {keys}

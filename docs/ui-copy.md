@@ -126,9 +126,13 @@ One verb pair on every surface (plan 174 S2.2). The strings live in
     reads "Show the scene's name when a key switches it".
   - The refusals, as warnings: "Keep at least one scene." (the last one),
     "Switch to another scene first." (deleting the scene on stream while
-    recording or live), "No scene uses Side by side" (a remote's old layout
-    request), "Figma isn't open", "“Figma” already shows this.", and "Update
-    Videorc to change your scenes." (a library from a newer Videorc).
+    recording or live), "This scene is going on stream. Try again in a
+    moment." (deleting a scene while a switch puts it on), "No scene uses Side
+    by side" (a remote's old layout request), "“Camera only” shows no screen.
+    Choose one with Change screen… first." (a layout that draws a screen,
+    asked for from outside Studio and the Scene page, which open Change
+    screen… instead), "Figma isn't open", "“Figma” already shows this.", and
+    "Update Videorc to change your scenes." (a library from a newer Videorc).
   - "Follow the app in front" is the switch, in Studio's Scenes section, and
     "Follows" a row's mark ("Stop following" and "Follow the app" in its ⋯
     menu).

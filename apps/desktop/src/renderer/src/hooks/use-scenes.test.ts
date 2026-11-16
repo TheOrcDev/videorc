@@ -106,14 +106,58 @@ it('migrates once, in one setItem, and never writes v1', async () => {
   expect(written.library?.onStreamId).toBe('5d0c8a4e-figma')
   const migrated = first.current.scenes
 
+  // The keys wait in the library until the Studio stored its settings.
+  expect(written.library?.pendingShortcuts).toEqual(first.current.migratedShortcuts)
+
   // The next launch reads v2: no migration, no write, the same scenes.
   await unmount!()
   writes.mockClear()
   const second = await mount()
   expect(writes).not.toHaveBeenCalled()
-  expect(second.current.migratedShortcuts).toBeNull()
   expect(second.current.scenes).toEqual(migrated)
   expect(second.current.onStreamId).toBe('5d0c8a4e-figma')
+  // Review #5: the first launch never settled its keys (its settings write
+  // failed, or it was cut short): this one saves them again, the same keys,
+  // and never makes the library again.
+  expect(second.current.migratedShortcuts).toEqual({
+    scenes: { '9b7e21c3-t3code': 'Control+Alt+T' }
+  })
+  await act(async () => expect(second.current.settleShortcuts()).toBe(true))
+  expect(second.current.migratedShortcuts).toBeNull()
+  expect(writes).toHaveBeenCalledTimes(1)
+  const settled = hydrateScenes(JSON.parse(localStorage.getItem(SCENES_KEY)!)).library!
+  expect(settled.pendingShortcuts).toBeUndefined()
+  expect(settled.scenes).toEqual(migrated)
+
+  // Settled: the launch after migrates nothing and saves no keys.
+  await unmount!()
+  writes.mockClear()
+  const third = await mount()
+  expect(writes).not.toHaveBeenCalled()
+  expect(third.current.migratedShortcuts).toBeNull()
+  expect(third.current.scenes).toEqual(migrated)
+})
+
+// Review #5: every other write keeps the pending keys with the library, and a
+// failed settle keeps them for the next launch.
+it('keeps the pending keys through library edits and a failed settle', async () => {
+  seed('builtin-user-layout-keys')
+  const result = await mount()
+  const pending = result.current.migratedShortcuts
+  expect(pending?.scenes).toBeDefined()
+  const stored = () => hydrateScenes(JSON.parse(localStorage.getItem(SCENES_KEY)!)).library!
+  await act(async () => expect(result.current.rename('default-screen-only', 'Board')).toBe(true))
+  expect(stored().pendingShortcuts).toEqual(pending)
+  storage.setItem.mockImplementationOnce(() => {
+    throw new Error('QuotaExceededError')
+  })
+  await act(async () => expect(result.current.settleShortcuts()).toBe(false))
+  expect(result.current.migratedShortcuts).toEqual(pending)
+  expect(stored().pendingShortcuts).toEqual(pending)
+  expect(toast.error).not.toHaveBeenCalled()
+  await act(async () => expect(result.current.settleShortcuts()).toBe(true))
+  expect(stored().pendingShortcuts).toBeUndefined()
+  expect(stored().scenes.find(({ id }) => id === 'default-screen-only')?.name).toBe('Board')
 })
 
 it('writes the migration once under StrictMode', async () => {

@@ -489,6 +489,57 @@ describe("Studio's Scenes section (plan 231 D8)", () => {
     expect(move).toHaveBeenLastCalledWith('scene-b', 0)
   })
 
+  // Review #7: a card that can't go on now ("Figma isn't open") still moves
+  // with ⌥← ⌥→, from the focusable reason around its button, and keeps the
+  // focus there; its ⋯ never moves it.
+  it("moves a card whose app isn't open with ⌥← and ⌥→, from its reason", async () => {
+    const figma = saved()
+    figma.visual.sources = {
+      windowId: 'gone',
+      app: { bundleId: 'com.figma.Desktop', name: 'Figma', follows: true }
+    }
+    mocked.core.savedScenes = [
+      { ...saved(), id: 'scene-b', name: 'Desk' },
+      { ...figma, id: 'scene-c', name: 'Figma' }
+    ]
+    mocked.core.savedSceneAppStates = { 'scene-c': 'not-running' }
+    const move = (mocked.core.sceneLibraryActions as { move: ReturnType<typeof vi.fn> }).move
+    await render()
+    const button = () =>
+      container.querySelector<HTMLButtonElement>(
+        '[data-saved-scene="scene-c"] [data-slot="scene-card-button"]'
+      )!
+    const reason = () => button().closest<HTMLElement>('[data-slot="disabled-reason"]')!
+    expect(button().disabled).toBe(true)
+    await act(async () => {
+      reason().focus()
+      reason().dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'ArrowLeft', altKey: true, bubbles: true })
+      )
+    })
+    expect(move).toHaveBeenLastCalledWith('scene-c', 0)
+    ;(document.activeElement as HTMLElement | null)?.blur()
+    mocked.core.savedScenes = [
+      { ...figma, id: 'scene-c', name: 'Figma' },
+      { ...saved(), id: 'scene-b', name: 'Desk' }
+    ]
+    await render()
+    expect(document.activeElement).toBe(reason())
+    expect(document.getElementById(reason().getAttribute('aria-describedby')!)?.textContent).toBe(
+      "Figma isn't open"
+    )
+    move.mockClear()
+    const menu = container.querySelector<HTMLElement>(
+      '[data-saved-scene="scene-c"] [aria-label="Actions for Figma"]'
+    )!
+    await act(async () =>
+      menu.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'ArrowRight', altKey: true, bubbles: true })
+      )
+    )
+    expect(move).not.toHaveBeenCalled()
+  })
+
   it('never moves a card in a library this build can’t change', async () => {
     mocked.core.savedScenes = [saved(), { ...saved(), id: 'scene-b', name: 'Desk' }]
     mocked.core.sceneLibraryActions = {

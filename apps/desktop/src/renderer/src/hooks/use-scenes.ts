@@ -20,9 +20,10 @@ type ScenesState = {
   readOnly: boolean
   error: string | null
   /**
-   * The shortcuts after the layout keys moved to scene keys (D15), on the
-   * launch that migrated; null on every other launch. The Studio saves them
-   * with its settings.
+   * The shortcuts after the layout keys moved to scene keys (D15), from the
+   * launch that migrated until the settings holding them are stored
+   * (`settleShortcuts`); null otherwise. The Studio saves them with its
+   * settings, again on a launch the first one never finished.
    */
   migratedShortcuts: GlobalShortcutsConfig | null
   /** The migrated library is not stored yet. */
@@ -71,12 +72,15 @@ export function loadScenes(): ScenesState {
       library: stored.library,
       readOnly: false,
       error: stored.error,
-      migratedShortcuts: null,
+      // D15: a migration whose settings were never stored is replayed.
+      migratedShortcuts: stored.library.pendingShortcuts ?? null,
       unwritten: false
     }
   if (!prepared) throw new Error('The scene library was read before it was prepared.')
   return {
-    library: prepared.library,
+    library: stored.readOnly
+      ? prepared.library
+      : { ...prepared.library, pendingShortcuts: prepared.globalShortcuts },
     readOnly: stored.readOnly,
     error: stored.error,
     migratedShortcuts: stored.readOnly ? null : prepared.globalShortcuts,
@@ -117,9 +121,22 @@ export function useScenes() {
 
   const writeScenes = useCallback(
     (scenes: Scene[], onStreamId = current.current.library.onStreamId): boolean =>
-      write({ version: 2, scenes, onStreamId }),
+      write({ ...current.current.library, version: 2, scenes, onStreamId }),
     [write]
   )
+  /**
+   * D15: the settings now hold the migrated keys and are stored, so the
+   * library stops keeping them. Until this lands, every launch saves them
+   * into the settings again.
+   */
+  const settleShortcuts = useCallback((): boolean => {
+    const { pendingShortcuts, ...library } = current.current.library
+    if (!pendingShortcuts) return true
+    if (!write(library, { quiet: true })) return false
+    current.current = { ...current.current, migratedShortcuts: null }
+    setState(current.current)
+    return true
+  }, [write])
   /**
    * New scenes go at the end, so making one never moves a key in use (D5); a
    * duplicate goes right after its original. Names stay unique: a taken name
@@ -256,6 +273,7 @@ export function useScenes() {
     setOnStream,
     remove,
     nameMainDisplay,
-    replaceAll
+    replaceAll,
+    settleShortcuts
   }
 }

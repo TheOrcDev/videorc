@@ -174,13 +174,26 @@ export function useSceneEntries(needsSources: (scene: SavedScene) => boolean): {
 export type SceneDropEdge = 'before' | 'after'
 
 /**
+ * The element a scene's keys reach: its button, or, while the button is off
+ * ("Figma isn't open"), the focusable reason around it (`DisabledReason`),
+ * which keeps the hover and focus tooltip.
+ */
+function sceneKeyTarget(button: HTMLElement | null): HTMLElement | null {
+  if (!button || !(button as HTMLButtonElement).disabled) return button
+  return button.closest<HTMLElement>('[data-slot="disabled-reason"]')
+}
+
+/**
  * Reorder (D5, D8): drag a scene, or ⌥ and an arrow on a focused one (⌥← ⌥→
  * across Studio's cards, ⌥↑ ⌥↓ down the Scene page's rows; WCAG 2.1.1, never
- * only by dragging). The keys move with the places. A scene moved by its keys
- * keeps the focus: React may move its node, and a moved node loses focus, so
- * it is found again by the scene's id (`data-saved-scene`) inside
- * `containerRef`, at `focusSelector`. A library this build can't change
- * never moves.
+ * only by dragging). The keys move with the places. A scene that can't go on
+ * now moves too: its keys reach it through the focusable reason around its
+ * button, so `onMoveKey` goes on an element around both (the card's or the
+ * row's), and answers only keys pressed on the scene itself, never on its ⋯.
+ * A scene moved by its keys keeps the focus: React may move its node, and a
+ * moved node loses focus, so it is found again by the scene's id
+ * (`data-saved-scene`) inside `containerRef`, at `focusSelector`. A library
+ * this build can't change never moves.
  */
 export function useSceneReorder({
   axis,
@@ -231,7 +244,7 @@ export function useSceneReorder({
     const item = [...(containerRef.current?.querySelectorAll('[data-saved-scene]') ?? [])].find(
       (entry) => entry.getAttribute('data-saved-scene') === id
     )
-    item?.querySelector<HTMLElement>(focusSelector)?.focus()
+    sceneKeyTarget(item?.querySelector<HTMLElement>(focusSelector) ?? null)?.focus()
   }, [savedScenes, focusSelector])
   const [back, forward] =
     axis === 'horizontal'
@@ -270,6 +283,14 @@ export function useSceneReorder({
       if (readOnly) return
       const step = sceneMoveKeyStep(event, axis)
       if (step === null) return
+      // Only the scene's own button, or the reason around it while it's off.
+      const target = event.target as HTMLElement
+      const button = target.matches(focusSelector)
+        ? target
+        : target.matches('[data-slot="disabled-reason"]')
+          ? target.querySelector<HTMLElement>(focusSelector)
+          : null
+      if (!button || sceneKeyTarget(button) !== target) return
       event.preventDefault()
       if (sceneLibraryActions.move(id, index + step)) refocusId.current = id
     }

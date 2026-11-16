@@ -40,6 +40,7 @@ import {
   type StageItemDraft
 } from '@/components/scene/overlay-stage'
 import { HideScreenSection } from '@/components/scene/hide-screen-section'
+import { useSceneDialogs } from '@/components/scene/scene-dialogs'
 import { SceneList } from '@/components/scene/scene-list'
 import { SceneSwitchPending, SceneSwitchStatus } from '@/components/scene/scene-switch-status'
 import { SceneStage, stageLayoutOnlyNote, type StagePhase } from '@/components/scene/scene-stage'
@@ -98,6 +99,7 @@ import { BANNER_SHOWN_LIMIT_REASON, bannerOrderAfterMove } from '@/lib/banners'
 import { bannerSizeAdvice } from '@/lib/banner-size'
 import { rememberFocus } from '@/lib/focus-retention'
 import { freeformEntryPatch, peekLayoutUndo, sourceCroppable } from '@/lib/freeform-memory'
+import { layoutAsksForScreen } from '@/lib/scene-section'
 import { scenePictureSizes, sourcePictureSize } from '@/lib/scene-source-sizes'
 import {
   SCENE_VISIBILITY_LOCK_REASON,
@@ -357,6 +359,7 @@ export function LayoutTab(): ReactElement {
     savedScenePendingId,
     savedScenes,
     activeSavedSceneId,
+    sceneOnStream,
     settings,
     setSettings,
     overlayLayout,
@@ -366,6 +369,7 @@ export function LayoutTab(): ReactElement {
     wsStatus
   } = useStudioCore()
   const editScene = useEditScene()
+  const sceneDialogs = useSceneDialogs()
   // The stage's phase (plan 174, C-5): only a pointer gesture takes the
   // inspector out of play (`inert`); a commit still landing leaves every
   // control enabled and focused, and `runPreciseEdit` drops the input instead.
@@ -792,6 +796,24 @@ export function LayoutTab(): ReactElement {
   // (plan 231 D11), so the section says where they go; there is no Modified
   // state and no Update to press.
   const activeSavedScene = savedScenes.find((entry) => entry.id === activeSavedSceneId)
+  // Plan 231 D19, as Studio's Layout field does it: a layout that draws a
+  // screen, chosen for a scene that shows none, asks which screen first
+  // (Change screen…), and Cancel keeps the layout. The capture a scene before
+  // it left running is never taken as its screen.
+  const asksForScreen = (preset: LayoutPreset): boolean =>
+    sceneOnStream !== null && layoutAsksForScreen(sceneOnStream.shows, preset)
+  const chooseLayout = (layoutPreset: LayoutPreset): void => {
+    if (asksForScreen(layoutPreset)) {
+      if (activeSavedScene)
+        sceneDialogs.open({
+          kind: 'change-screen',
+          scene: activeSavedScene,
+          forLayout: layoutPreset
+        })
+      return
+    }
+    applyCameraPreset({ layoutPreset })
+  }
   const canvasDescription = activeSavedScene
     ? `Changes save to “${activeSavedScene.name}” as you make them.`
     : 'Drag sources and overlays into place.'
@@ -855,8 +877,11 @@ export function LayoutTab(): ReactElement {
                         {!preset.enabled ? <Badge variant="outline">Soon</Badge> : null}
                       </>
                     ),
+                    // A scene that shows no screen asks for one (D19) instead.
                     disabled:
-                      !preset.enabled || (needsCamera && !hasCamera) || (needsScreen && !hasScreen),
+                      !preset.enabled ||
+                      (needsCamera && !hasCamera) ||
+                      (needsScreen && !hasScreen && !asksForScreen(preset.id)),
                     'data-videorc-layout-preset': preset.id,
                     // Every click is an intent: the checked preset is the committed
                     // one, so a click on it supersedes a newer pending switch.
@@ -869,7 +894,7 @@ export function LayoutTab(): ReactElement {
                 value={isFreeform ? null : layout.layoutPreset}
                 // Plan 231 D2: a layout picked here is the layout of the scene
                 // on stream, which keeps it (D11).
-                onValueChange={(layoutPreset) => applyCameraPreset({ layoutPreset })}
+                onValueChange={chooseLayout}
               />
               <Separator className="data-[orientation=vertical]:h-5" orientation="vertical" />
               {/* Freeform is a mode, not a preset: composition becomes the
@@ -1421,6 +1446,7 @@ export function LayoutTab(): ReactElement {
           />
         </FieldSet>
       </div>
+      {sceneDialogs.element}
     </div>
   )
 }

@@ -19,7 +19,7 @@ import { SCENES_KEY, type Scene as StoredScene, type SceneLibrary } from '../lib
 import { editVerticalStreamLayout } from '../components/studio/vertical-stream-layout-control'
 // Loaded up front so the Studio's first-launch migration (its own chunk)
 // resolves inside the mount's `act`, as a stored library does.
-import '../lib/scenes-migration'
+import { defaultScenes } from '../lib/scenes-migration'
 import { act, createElement, useEffect, type ReactNode } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { Window as TestWindow } from 'happy-dom'
@@ -88,6 +88,7 @@ import type {
   DeviceList,
   Device,
   HealthEvent,
+  LayoutPreset,
   LayoutSettings,
   LiveChatMessage,
   LiveChatSnapshot,
@@ -2085,6 +2086,106 @@ function storedSceneNamed(name: string): StoredScene {
 }
 function storedLibrary(): SceneLibrary {
   return JSON.parse(localStorage.getItem(SCENES_KEY)!) as SceneLibrary
+}
+
+// Plan 231 review: two displays and a library seeded before the Studio mounts.
+const FIRST_DISPLAY_ID = 'screen:dxgi:0000000000000001:1'
+const SECOND_DISPLAY = {
+  id: 'screen:dxgi:second',
+  name: 'Display 2',
+  kind: 'screen' as const,
+  status: 'available' as const
+}
+function displayShows(screenId: string, screenName: string): StoredScene['shows'] {
+  return { kind: 'display', screenId, screenName }
+}
+function libraryScene(
+  id: string,
+  name: string,
+  shows: StoredScene['shows'],
+  [horizontal, vertical]: [LayoutPreset, LayoutPreset]
+): StoredScene {
+  return {
+    id,
+    name,
+    createdAt: now,
+    updatedAt: now,
+    shows,
+    layouts: {
+      horizontal: { ...defaultCaptureConfig.layout, layoutPreset: horizontal },
+      vertical: { ...defaultCaptureConfig.layout, layoutPreset: vertical }
+    },
+    background: null
+  }
+}
+function seedSceneLibrary(
+  scenes: StoredScene[],
+  onStreamId: string,
+  extra: Partial<SceneLibrary> = {}
+): void {
+  localStorage.setItem(SCENES_KEY, JSON.stringify({ version: 2, scenes, onStreamId, ...extra }))
+}
+/** The program's layout requests since `from`, or the vertical leg's (`leg`). */
+function layoutApplies(backend: StudioBackend, from: number, leg: boolean) {
+  return backend.sentCommands
+    .slice(from)
+    .filter(
+      (command) =>
+        command.method.startsWith('scene.layout.apply') &&
+        ((command.params as { simulcastLeg?: boolean }).simulcastLeg === true) === leg
+    ) as {
+    method: string
+    params: {
+      layout: LayoutSettings
+      sources: SourceSelection
+      retainScreen?: true
+      verticalLegScreen?: true
+    }
+  }[]
+}
+/** The screen capture runs (D18's existing owner). */
+async function emitScreenStatus(backend: StudioBackend, sourceId: string): Promise<void> {
+  await act(async () =>
+    [...backend.sockets].forEach((socket) =>
+      socket.onmessage?.({
+        data: JSON.stringify({
+          event: 'preview.screen.status',
+          payload: {
+            state: 'live',
+            sourceId,
+            sourceKind: 'screen',
+            targetFps: 30,
+            framesCaptured: 10,
+            droppedFrames: 0,
+            includeCursor: true,
+            excludeCurrentProcessWindows: true,
+            updatedAt: new Date().toISOString()
+          }
+        })
+      })
+    )
+  )
+}
+/** A YouTube Vertical destination beside the 16:9 program (plan 231 D4). */
+async function armVerticalStream(latest: () => StudioCoreContextValue): Promise<void> {
+  const config = latest().captureConfig
+  await act(async () => {
+    latest().setCaptureConfig({
+      ...config,
+      streamEnabled: true,
+      streaming: {
+        ...config.streaming,
+        enabled: true,
+        enabledTargetIds: ['youtube', 'youtube-vertical'],
+        targets: config.streaming.targets.map((target) =>
+          target.id === 'youtube' || target.id === 'youtube-vertical'
+            ? { ...target, enabled: true, streamKey: `key-${target.id}`, streamKeyPresent: true }
+            : target
+        )
+      }
+    })
+  })
+  await waitForObservation(() => latest().captureConfig.streaming.enabled === true)
 }
 
 /**
@@ -8449,6 +8550,447 @@ describe('real StudioProvider lifecycle', () => {
     },
     30_000
   )
+
+  // Plan 231 review #1: the vertical stream is a leg. A scene that shows
+  // Camera only on the program and its own screen on the 9:16 leg goes on
+  // with its own screen, which the backend starts for the leg; the screen an
+  // earlier scene left running never shows under it.
+  it('a scene whose vertical leg draws its screen goes on with its own screen (review #1)', async () => {
+    const backend = new StudioBackend()
+    backend.deviceList.devices.push(SECOND_DISPLAY)
+    backend.recordingState = 'recording'
+    backend.recordingSessionId = 'session-review-1'
+    backend.confirmedSources = {
+      ...backend.confirmedSources,
+      screenId: FIRST_DISPLAY_ID,
+      cameraId: 'camera:1'
+    }
+    backend.reportsActiveSceneRevision = true
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const testDom = installProviderTestEnvironment(
+      createVideorcApi({
+        acknowledge: async () => true,
+        pending: async () => [],
+        acknowledgeProvider: async () => true,
+        pendingProvider: async () => []
+      })
+    )
+    restoreEnvironment = testDom.restore
+    seedSceneLibrary(
+      [
+        libraryScene('desk', 'Desk', displayShows(FIRST_DISPLAY_ID, 'Display 1'), [
+          'screen-camera',
+          'vertical-camera-top'
+        ]),
+        libraryScene('board', 'Board', displayShows(SECOND_DISPLAY.id, 'Display 2'), [
+          'camera-only',
+          'vertical-screen-only'
+        ])
+      ],
+      'desk'
+    )
+    const observations: StudioObservation[] = []
+    const latest = (): StudioCoreContextValue => observations.at(-1)!.core
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(
+      () =>
+        latest().wsStatus === 'connected' &&
+        observations.at(-1)?.recording.recording.state === 'recording' &&
+        latest().captureConfig.sources.screenId === FIRST_DISPLAY_ID &&
+        latest().deviceList.devices.some((device) => device.id === 'camera:1')
+    )
+    expect(latest().activeSavedSceneId).toBe('desk')
+    await armVerticalStream(latest)
+    await emitScreenStatus(backend, FIRST_DISPLAY_ID)
+    const from = backend.sentCommands.length
+    await act(async () => {
+      expect(await latest().applySavedScene('board')).toBe(true)
+    })
+    await waitForObservation(
+      () =>
+        latest().activeSavedSceneId === 'board' &&
+        latest().layoutSwitchPending == null &&
+        layoutApplies(backend, from, true).length > 0
+    )
+    const [program] = layoutApplies(backend, from, false)
+    expect(program!.params.layout.layoutPreset).toBe('camera-only')
+    expect(program!.params.sources.screenId).toBe(SECOND_DISPLAY.id)
+    expect(program!.params.verticalLegScreen).toBe(true)
+    expect(program!.params.retainScreen).toBeUndefined()
+    const leg = layoutApplies(backend, from, true).at(-1)!
+    expect(leg.params.layout.layoutPreset).toBe('vertical-screen-only')
+    expect(leg.params.sources.screenId).toBe(SECOND_DISPLAY.id)
+    expect(latest().captureConfig.sources.screenId).toBe(SECOND_DISPLAY.id)
+    expect(storedSceneNamed('Board').shows).toMatchObject({ screenId: SECOND_DISPLAY.id })
+  }, 20_000)
+
+  // Plan 231 review #1 and #4: a scene that drew no screen and kept the
+  // capture another scene left running takes its own screen back when it
+  // gets a layout that draws one; a scene that shows none is refused, never
+  // given the screen it kept (D19).
+  it('a layout that starts drawing a screen shows the scene’s own, never a kept one (review #1, #4)', async () => {
+    const backend = new StudioBackend()
+    backend.deviceList.devices.push(SECOND_DISPLAY)
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const testDom = installProviderTestEnvironment(
+      createVideorcApi({
+        acknowledge: async () => true,
+        pending: async () => [],
+        acknowledgeProvider: async () => true,
+        pendingProvider: async () => []
+      })
+    )
+    restoreEnvironment = testDom.restore
+    seedSceneLibrary(
+      [
+        libraryScene('desk', 'Desk', displayShows(FIRST_DISPLAY_ID, 'Display 1'), [
+          'screen-camera',
+          'vertical-camera-top'
+        ]),
+        libraryScene('board', 'Board', displayShows(SECOND_DISPLAY.id, 'Display 2'), [
+          'camera-only',
+          'vertical-camera-only'
+        ]),
+        libraryScene('break', 'Break', { kind: 'none' }, ['camera-only', 'vertical-camera-only'])
+      ],
+      'desk'
+    )
+    const observations: StudioObservation[] = []
+    const latest = (): StudioCoreContextValue => observations.at(-1)!.core
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(
+      () => canSaveScene() && latest().captureConfig.sources.screenId === FIRST_DISPLAY_ID
+    )
+    await emitScreenStatus(backend, FIRST_DISPLAY_ID)
+    // Board shows no screen in Camera only: Desk's capture keeps running (D18).
+    let from = backend.sentCommands.length
+    await act(async () => {
+      expect(await latest().applySavedScene('board')).toBe(true)
+    })
+    await waitForObservation(() => latest().activeSavedSceneId === 'board' && canSaveScene())
+    let apply = layoutApplies(backend, from, false).at(-1)!
+    expect(apply.params.sources.screenId).toBe(FIRST_DISPLAY_ID)
+    expect(apply.params.retainScreen).toBe(true)
+    // Screen + camera on Board: Board's own Display 2, never Desk's Display 1.
+    from = backend.sentCommands.length
+    await act(async () => latest().applyCameraPreset({ layoutPreset: 'screen-camera' }))
+    await waitForObservation(
+      () =>
+        canSaveScene() &&
+        latest().activeSavedSceneId === 'board' &&
+        latest().captureConfig.layout.layoutPreset === 'screen-camera'
+    )
+    apply = layoutApplies(backend, from, false).at(-1)!
+    expect(apply.params.layout.layoutPreset).toBe('screen-camera')
+    expect(apply.params.sources.screenId).toBe(SECOND_DISPLAY.id)
+    expect(latest().captureConfig.sources.screenId).toBe(SECOND_DISPLAY.id)
+    expect(storedSceneNamed('Board').shows).toMatchObject({ screenId: SECOND_DISPLAY.id })
+    expect(storedSceneNamed('Board').layouts.horizontal.layoutPreset).toBe('screen-camera')
+    expect(storedSceneNamed('Desk').shows).toMatchObject({ screenId: FIRST_DISPLAY_ID })
+
+    // Break shows no screen: a screen layout asks for one, it never takes the
+    // capture Board left running.
+    await act(async () => {
+      expect(await latest().applySavedScene('break')).toBe(true)
+    })
+    await waitForObservation(() => latest().activeSavedSceneId === 'break' && canSaveScene())
+    from = backend.sentCommands.length
+    toastSpies.warning.mockClear()
+    await act(async () => latest().applyCameraPreset({ layoutPreset: 'screen-only' }))
+    expect(toastSpies.warning).toHaveBeenCalledWith(
+      '“Break” shows no screen. Choose one with Change screen… first.',
+      expect.anything()
+    )
+    expect(layoutApplies(backend, from, false)).toEqual([])
+    expect(latest().captureConfig.layout.layoutPreset).toBe('camera-only')
+    expect(storedSceneNamed('Break').shows).toEqual({ kind: 'none' })
+    expect(storedSceneNamed('Break').layouts.horizontal.layoutPreset).toBe('camera-only')
+  }, 20_000)
+
+  // Plan 231 review #2: a scene going on stream can't be deleted, while its
+  // switch waits for its source and after the backend committed it while the
+  // preview's proof is still on its way. The stream never names a scene the
+  // library doesn't have.
+  it('refuses to delete a scene while its switch is pending or unproven (review #2)', async () => {
+    const backend = new StudioBackend()
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    let showPreview = false
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => [],
+      nativePreview: {
+        getWindowState: () =>
+          showPreview
+            ? previewWindowOpen({ x: 0, y: 0, width: 960, height: 540 })
+            : previewWindowClosed,
+        drainHostCommands: async () => nativePreviewStatus()
+      }
+    })
+    const runtimeInfo = api.getRuntimeInfo
+    api.getRuntimeInfo = async () => ({ ...(await runtimeInfo()), disableAutoPreview: true })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioCoreContextValue => observations.at(-1)!.core
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(() => canSaveScene())
+    const screenOnly = sceneNamed(latest(), 'Screen only')
+    const sideBySide = sceneNamed(latest(), 'Side by side')
+    const goingOn = 'This scene is going on stream. Try again in a moment.'
+
+    // The switch waits for its source.
+    const release = backend.deferResponse('scene.layout.apply_preview', BACKEND_RESPONSE)
+    let switching: Promise<boolean> | undefined
+    await act(async () => {
+      switching = latest().applySavedScene(screenOnly.id)
+    })
+    await waitForObservation(() => latest().savedScenePendingId === screenOnly.id)
+    toastSpies.warning.mockClear()
+    await act(async () => {
+      expect(await latest().deleteSavedScene(screenOnly.id)).toBe(false)
+    })
+    expect(toastSpies.warning).toHaveBeenCalledWith(goingOn, expect.anything())
+    expect(storedLibrary().scenes.some((scene) => scene.id === screenOnly.id)).toBe(true)
+    await act(async () => {
+      release()
+      expect(await switching).toBe(true)
+    })
+    await waitForObservation(() => canSaveScene() && latest().activeSavedSceneId === screenOnly.id)
+
+    // Committed, while the preview's proof lags: still going on stream.
+    showPreview = true
+    api.getNativePreviewSurfaceStatus = async () => nativePreviewStatus()
+    await act(async () => {
+      expect(await latest().applySavedScene(sideBySide.id)).toBe(true)
+    })
+    expect(latest().activeSavedSceneId).toBe(screenOnly.id)
+    toastSpies.warning.mockClear()
+    await act(async () => {
+      expect(await latest().deleteSavedScene(sideBySide.id)).toBe(false)
+    })
+    expect(toastSpies.warning).toHaveBeenCalledWith(goingOn, expect.anything())
+    await waitForObservation(() => canSaveScene() && latest().activeSavedSceneId === sideBySide.id)
+    expect(storedLibrary().scenes.some((scene) => scene.id === sideBySide.id)).toBe(true)
+    expect(storedLibrary().onStreamId).toBe(sideBySide.id)
+    showPreview = false
+    // Settled: the scene that went on before can go now.
+    await act(async () => {
+      expect(await latest().deleteSavedScene(screenOnly.id)).toBe(true)
+    })
+    expect(storedLibrary().scenes.some((scene) => scene.id === screenOnly.id)).toBe(false)
+  }, 20_000)
+
+  // Plan 231 review #3: a remote's scene and screen together are one switch:
+  // the scene it names goes on showing that screen, and the scene that was
+  // on stream while the switch waited for the preview's proof keeps its own.
+  it('a remote sceneId with a screenId puts that scene on with that screen (review #3)', async () => {
+    const backend = new StudioBackend()
+    backend.deviceList.devices.push(SECOND_DISPLAY)
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    let showPreview = false
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => [],
+      nativePreview: {
+        getWindowState: () =>
+          showPreview
+            ? previewWindowOpen({ x: 0, y: 0, width: 960, height: 540 })
+            : previewWindowClosed,
+        drainHostCommands: async () => nativePreviewStatus()
+      }
+    })
+    const runtimeInfo = api.getRuntimeInfo
+    api.getRuntimeInfo = async () => ({ ...(await runtimeInfo()), disableAutoPreview: true })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioCoreContextValue => observations.at(-1)!.core
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(
+      () => canSaveScene() && latest().captureConfig.sources.screenId === FIRST_DISPLAY_ID
+    )
+    const onStream = latest().activeSavedSceneId!
+    const before = storedLibrary().scenes.find((scene) => scene.id === onStream)!.shows
+    const screenOnly = sceneNamed(latest(), 'Screen only')
+    // The preview's proof lags, so the switch's identity lands late.
+    showPreview = true
+    api.getNativePreviewSurfaceStatus = async () => nativePreviewStatus()
+    await act(async () => {
+      for (const socket of backend.sockets)
+        socket.onmessage?.({
+          data: JSON.stringify({
+            event: 'remote.intent',
+            payload: {
+              intentId: 'scene-and-screen',
+              intent: { kind: 'sceneApply', sceneId: screenOnly.id, screenId: SECOND_DISPLAY.id }
+            }
+          })
+        })
+    })
+    const ack = () =>
+      backend.sentCommands.find(
+        (command) =>
+          command.method === 'remote.intent.ack' &&
+          (command.params as { intentId: string }).intentId === 'scene-and-screen'
+      )?.params
+    await waitForObservation(() => ack() !== undefined)
+    expect(ack()).toEqual({ intentId: 'scene-and-screen', ok: true })
+    await waitForObservation(() => canSaveScene() && latest().activeSavedSceneId === screenOnly.id)
+    showPreview = false
+    expect(storedSceneNamed('Screen only').shows).toMatchObject({
+      kind: 'display',
+      screenId: SECOND_DISPLAY.id
+    })
+    expect(storedLibrary().scenes.find((scene) => scene.id === onStream)!.shows).toEqual(before)
+    expect(latest().captureConfig.sources.screenId).toBe(SECOND_DISPLAY.id)
+    // One switch carried the screen: no Screen pick ran after it.
+    expect(backend.sentCommands.some((command) => command.method === 'session.source.switch')).toBe(
+      false
+    )
+  }, 20_000)
+
+  // Plan 231 review #5: the launch that migrated stored the library, then
+  // never stored its settings. The next launch saves the migrated keys from
+  // the library again (the library is not made again), and lets them go once
+  // the settings hold them.
+  it('replays a shortcut migration whose settings were never stored (review #5)', async () => {
+    const backend = new StudioBackend()
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const testDom = installProviderTestEnvironment(
+      createVideorcApi({
+        acknowledge: async () => true,
+        pending: async () => [],
+        acknowledgeProvider: async () => true,
+        pendingProvider: async () => []
+      })
+    )
+    restoreEnvironment = testDom.restore
+    const scenes = defaultScenes(
+      { id: FIRST_DISPLAY_ID, name: 'Display 1', displayUuid: undefined },
+      now
+    ).map((scene) => (scene.id === 'default-side-by-side' ? { ...scene, name: 'Beside' } : scene))
+    const migrated = {
+      scenes: { 'default-screen-only': 'Control+F14', 'default-side-by-side': 'Control+F15' }
+    }
+    seedSceneLibrary(scenes, 'default-screen-camera', { pendingShortcuts: migrated })
+    localStorage.setItem(
+      STORAGE_KEYS.settings,
+      JSON.stringify({
+        animateSceneChanges: true,
+        globalShortcuts: {
+          layouts: { 'screen-only': 'Control+F14', 'side-by-side': 'Control+F15' }
+        }
+      })
+    )
+    const observations: StudioObservation[] = []
+    const latest = (): StudioCoreContextValue => observations.at(-1)!.core
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(() => canSaveScene())
+    await waitForObservation(() => storedLibrary().pendingShortcuts === undefined)
+    expect(latest().settings.globalShortcuts).toEqual(migrated)
+    expect(latest().settings.animateSceneChanges).toBe(true)
+    const settings = JSON.parse(localStorage.getItem(STORAGE_KEYS.settings)!)
+    expect(settings.globalShortcuts).toEqual(migrated)
+    // The library stays the one stored: never made again.
+    expect(storedLibrary().scenes.map((scene) => scene.name)).toEqual(
+      scenes.map((scene) => scene.name)
+    )
+  })
+
+  // Plan 231 review #6: a scene no leg draws a screen for needs no window of
+  // its app. Camera only made for Figma, with Figma closed, is not blocked:
+  // its card, its key and Next scene all reach it.
+  it('never blocks a scene that shows no screen on its closed app (review #6)', async () => {
+    const backend = new StudioBackend()
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    let emit: (name: string, value: unknown) => void = () => {}
+    const testDom = installProviderTestEnvironment(
+      createVideorcApi({
+        acknowledge: async () => true,
+        pending: async () => [],
+        acknowledgeProvider: async () => true,
+        pendingProvider: async () => [],
+        registerEmitter: (next) => {
+          emit = next
+        }
+      })
+    )
+    restoreEnvironment = testDom.restore
+    const figma = {
+      kind: 'app' as const,
+      bundleId: 'com.figma.Desktop',
+      name: 'Figma',
+      follows: true
+    }
+    seedSceneLibrary(
+      [
+        libraryScene('desk', 'Desk', displayShows(FIRST_DISPLAY_ID, 'Display 1'), [
+          'screen-camera',
+          'vertical-camera-top'
+        ]),
+        libraryScene('figma-cam', 'Figma cam', figma, ['camera-only', 'vertical-camera-only']),
+        libraryScene('figma', 'Figma', figma, ['screen-camera', 'vertical-camera-top'])
+      ],
+      'desk'
+    )
+    const observations: StudioObservation[] = []
+    const latest = (): StudioCoreContextValue => observations.at(-1)!.core
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(
+      () => canSaveScene() && latest().captureConfig.sources.screenId === FIRST_DISPLAY_ID
+    )
+    // Figma isn't open: only the scene that draws its window waits for it.
+    expect(latest().savedSceneAppStates['figma-cam']).toBeUndefined()
+    expect(latest().savedSceneAppStates['figma']).toBe('not-running')
+    // Next scene from Desk: Figma cam, not "no other scene".
+    toastSpies.info.mockClear()
+    await act(async () => {
+      emit('onGlobalShortcut', 'layout-next')
+    })
+    await waitForObservation(() => latest().activeSavedSceneId === 'figma-cam' && canSaveScene())
+    expect(toastSpies.info).not.toHaveBeenCalledWith(
+      'No other scene to switch to',
+      expect.anything()
+    )
+    expect(
+      backend.sentCommands.some((command) => command.method === 'sources.resolve_app_window')
+    ).toBe(false)
+    // Its own click as well, and Desk's screen keeps running under it (D18).
+    await act(async () => {
+      expect(await latest().applySavedScene('desk')).toBe(true)
+    })
+    await waitForObservation(() => latest().activeSavedSceneId === 'desk' && canSaveScene())
+    await act(async () => {
+      expect(await latest().applySavedScene('figma-cam')).toBe(true)
+    })
+    await waitForObservation(() => latest().activeSavedSceneId === 'figma-cam' && canSaveScene())
+    expect(latest().captureConfig.sources.screenId).toBe(FIRST_DISPLAY_ID)
+    expect(
+      backend.sentCommands.some((command) => command.method === 'sources.resolve_app_window')
+    ).toBe(false)
+  }, 20_000)
 
   // Plan 231 D15: the launch that makes the scene library moves the layout
   // keys to scene keys and saves them with the settings, once.

@@ -259,3 +259,53 @@ it('a remote screenId uses the Screen picker and propagates its refusal (D2)', a
     expect.objectContaining({ windowId: 'window:2', screenId: undefined, cameraId: 'camera' })
   )
 })
+
+// Review #3: a scene and a screen together are one switch to that scene,
+// carrying the screen. The Screen pick never runs after it, so it can't edit
+// whichever scene was on stream while the switch was landing.
+it('a remote sceneId with a screenId switches to that scene with that screen (D2)', async () => {
+  const applySavedSceneResult = vi.fn(async () => ({ ok: true as const }))
+  const applyLayoutPreset = vi.fn(async () => true)
+  const switchSource = vi.fn(async () => ({ ok: true }))
+  const { context, requests } = studioContext({
+    knownLayoutPresets: ['screen-only'],
+    applySavedSceneResult,
+    applyLayoutPreset,
+    sourcePicker: {
+      sources: { cameraId: 'camera', screenId: 'display:1' },
+      capture: [
+        { id: 'display:2', name: 'Display 2', kind: 'screen', status: 'available' },
+        { id: 'window:2', name: 'Figma', kind: 'window', status: 'available' }
+      ],
+      cameras: [],
+      microphones: []
+    },
+    switchSource
+  })
+  await executeRemoteIntent(
+    { intentId: 'both', intent: { kind: 'sceneApply', sceneId: 'b', screenId: 'display:2' } },
+    context
+  )
+  expect(applySavedSceneResult).toHaveBeenCalledExactlyOnceWith('b', {
+    shows: { kind: 'display', screenId: 'display:2', screenName: 'Display 2' }
+  })
+  expect(requests.at(-1)?.params).toEqual({ intentId: 'both', ok: true })
+  await executeRemoteIntent(
+    {
+      intentId: 'legacy',
+      intent: { kind: 'sceneApply', layoutPreset: 'screen-only', screenId: 'window:2' }
+    },
+    context
+  )
+  expect(applyLayoutPreset).toHaveBeenCalledExactlyOnceWith('screen-only', {
+    shows: { kind: 'window', windowId: 'window:2', windowName: 'Figma' }
+  })
+  expect(switchSource).not.toHaveBeenCalled()
+  // A screen that isn't there switches nothing.
+  await executeRemoteIntent(
+    { intentId: 'gone', intent: { kind: 'sceneApply', sceneId: 'b', screenId: 'display:9' } },
+    context
+  )
+  expect(applySavedSceneResult).toHaveBeenCalledTimes(1)
+  expect(requests.at(-1)?.params).toMatchObject({ intentId: 'gone', ok: false })
+})

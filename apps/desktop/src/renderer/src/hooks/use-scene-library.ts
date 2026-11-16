@@ -124,6 +124,8 @@ export function useSceneLibrary(orientation: SceneOrientation, camera: SceneCame
     (display: Device) => latest.current.nameMainDisplay(display),
     []
   )
+  /** D15: the settings holding the migrated keys are stored; the library lets them go. */
+  const settleShortcuts = useCallback(() => latest.current.settleShortcuts(), [])
   // `storedList` is the stored scenes as this render has them: it changes
   // with every stored edit, where `storedScenes()` reads them as they are now.
   return {
@@ -148,6 +150,7 @@ export function useSceneLibrary(orientation: SceneOrientation, camera: SceneCame
     setOnStream,
     refreshDisplay,
     editAll,
-    nameMainDisplay
+    nameMainDisplay,
+    settleShortcuts
   }
 }

@@ -162,6 +162,43 @@ export function streamManagerScreenKeyTitle(
   return state?.windows?.comments && place?.visible && place.screenId ? 'Away' : 'Closed'
 }
 
+/**
+ * A key saved before scenes (a `layoutPreset` and no scene) still asks for
+ * its layout: Videorc puts on the first scene that uses it (plan 231 D14). So
+ * the key names that layout, as it reads in Videorc, never the scene on
+ * stream. Two lines fit a key.
+ */
+const LEGACY_LAYOUT_KEY_TITLES: Readonly<Record<string, string>> = {
+  'screen-camera': 'Screen +\ncamera',
+  'screen-only': 'Screen\nonly',
+  'camera-only': 'Camera\nonly',
+  'side-by-side': 'Side by\nside',
+  'vertical-camera-top': 'Camera\ntop',
+  'vertical-camera-bottom': 'Camera\nbottom',
+  'vertical-split': 'Split',
+  'vertical-screen-camera': 'Screen +\ncamera',
+  'vertical-screen-only': 'Screen\nonly',
+  'vertical-camera-only': 'Camera\nonly'
+}
+
+/**
+ * The Scene key's title: its scene's name (with ON while on stream) once one
+ * is chosen; before that, an old key's layout, else "Scene".
+ */
+export function sceneActionTitle(
+  state: State,
+  settings: { sceneId?: string; layoutPreset?: string },
+  connected: boolean
+): string {
+  if (!connected) return 'Videorc\noffline'
+  if (settings.sceneId) {
+    const scene = state?.savedScenes?.find((entry) => entry.id === settings.sceneId)
+    if (!scene) return 'Scene'
+    return state?.activeSavedSceneId === scene.id ? `${scene.name}\nON` : scene.name
+  }
+  return (settings.layoutPreset && LEGACY_LAYOUT_KEY_TITLES[settings.layoutPreset]) || 'Scene'
+}
+
 /** Both Scene actions read the ordered scene list. Old keys keep their wire request. */
 export function sceneActionIntent(settings: {
   sceneId?: string

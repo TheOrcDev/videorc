@@ -5,13 +5,19 @@ import { normalizeSceneVisual, type SavedScene, type SceneVisual } from './scene
 import {
   cameraSources,
   captureSources,
+  noScreenLayoutReason,
+  sameCaptureTarget,
+  sceneCaptureIsBorrowed,
   sceneDisplayRefreshed,
+  sceneDrawsScreen,
   sceneEditAutosave,
   sceneFromSaved,
   sceneKeepsCapture,
+  sceneLegLayouts,
   sceneOnStreamAtLaunch,
   sceneWithShows,
-  savedSceneView
+  savedSceneView,
+  verticalLegBorrowsScreen
 } from './scene-studio'
 import { canDeleteScene, firstSceneWithLayout, type Scene } from './scenes'
 import { defaultScenes } from './scenes-migration'
@@ -166,6 +172,71 @@ describe('a scene that shows no screen keeps the capture (D18)', () => {
     ).toBe(true)
     expect(sceneKeepsCapture(undefined, scene.layouts.horizontal)).toBe(false)
   })
+
+  // Review #1: the vertical stream is a leg too. A scene with Camera only on
+  // the program and its screen on the 9:16 leg shows its own screen there.
+  const cameraOnlyThenScreen = (): Scene => {
+    const scene = figma()
+    return {
+      ...scene,
+      layouts: {
+        horizontal: { ...scene.layouts.horizontal, layoutPreset: 'camera-only' },
+        vertical: { ...scene.layouts.vertical, layoutPreset: 'vertical-screen-only' }
+      }
+    }
+  }
+  it('judges every leg that is on: the program, and the vertical stream while armed', () => {
+    const scene = cameraOnlyThenScreen()
+    const program = scene.layouts.horizontal
+    expect(sceneLegLayouts(scene, program, false)).toEqual([program])
+    expect(sceneLegLayouts(scene, program, true)).toEqual([program, scene.layouts.vertical])
+    expect(sceneDrawsScreen(scene, program, false)).toBe(false)
+    expect(sceneDrawsScreen(scene, program, true)).toBe(true)
+    expect(sceneKeepsCapture(scene, program, false)).toBe(true)
+    expect(sceneKeepsCapture(scene, program, true)).toBe(false)
+    // A 9:16 studio's program is the 9:16 layout: there is no second leg.
+    expect(sceneLegLayouts(scene, scene.layouts.vertical, true)).toEqual([scene.layouts.vertical])
+    // A scene no leg draws a screen for keeps the capture with the leg armed.
+    const none = byLayout(defaults(), 'camera-only')
+    expect(sceneKeepsCapture(none, none.layouts.horizontal, true)).toBe(true)
+  })
+
+  it("a capture kept from another scene is never the scene's own (D18)", () => {
+    const scene = figma()
+    const t3 = { kind: 'app' as const, bundleId: 'dev.t3', name: 'T3 Code', follows: true }
+    expect(sceneCaptureIsBorrowed(scene, t3)).toBe(true)
+    expect(
+      sceneCaptureIsBorrowed(scene, { ...scene.shows, follows: false } as Scene['shows'])
+    ).toBe(false)
+    // A scene that shows none has no screen of its own: Change screen… decides.
+    expect(sceneCaptureIsBorrowed(byLayout(defaults(), 'camera-only'), t3)).toBe(false)
+    expect(noScreenLayoutReason('Camera only')).toBe(
+      '“Camera only” shows no screen. Choose one with Change screen… first.'
+    )
+  })
+
+  it('the vertical leg borrows a screen only while the program draws none', () => {
+    const scene = cameraOnlyThenScreen()
+    const t3 = { kind: 'app' as const, bundleId: 'dev.t3', name: 'T3 Code', follows: true }
+    expect(verticalLegBorrowsScreen(scene, scene.layouts.horizontal, true, t3)).toBe(true)
+    expect(verticalLegBorrowsScreen(scene, scene.layouts.horizontal, false, t3)).toBe(false)
+    expect(verticalLegBorrowsScreen(scene, scene.layouts.horizontal, true, scene.shows)).toBe(false)
+    expect(
+      verticalLegBorrowsScreen(
+        scene,
+        { ...scene.layouts.horizontal, layoutPreset: 'screen-camera' },
+        true,
+        t3
+      )
+    ).toBe(false)
+  })
+
+  it('keeps a running capture only for the target it captures', () => {
+    expect(sameCaptureTarget({ screenId: 'screen:1' }, { screenId: 'screen:1' })).toBe(true)
+    expect(sameCaptureTarget({ screenId: 'screen:1' }, { screenId: 'screen:2' })).toBe(false)
+    expect(sameCaptureTarget({ windowId: 'window:1' }, { screenId: 'screen:1' })).toBe(false)
+    expect(sameCaptureTarget({ testPattern: true }, {})).toBe(false)
+  })
 })
 
 describe('edits save into the scene on stream (D11)', () => {
@@ -298,7 +369,9 @@ describe('edits save into the scene on stream (D11)', () => {
     expect(saved.layouts.horizontal.cameraZoom).toBe(140)
   })
 
-  it('takes the screen on stream once its layout draws one', () => {
+  // Review #1, #4: the capture another scene left running never becomes the
+  // screen of a scene that shows none, whatever layout it takes (D19 asks).
+  it('never takes a kept capture as its screen, even under a screen layout', () => {
     const all = scenes()
     const none = byLayout(all, 'camera-only')
     const saved = sceneEditAutosave({
@@ -309,7 +382,7 @@ describe('edits save into the scene on stream (D11)', () => {
       visual: working(none, figmaSources, { layoutPreset: 'screen-camera' }),
       now: LATER
     })!
-    expect(saved.shows).toEqual(all[0]!.shows)
+    expect(saved.shows).toEqual({ kind: 'none' })
   })
 
   it('never writes audio', () => {
@@ -417,5 +490,22 @@ describe('deleting a scene (D16)', () => {
         sessionActive: false
       })
     ).toEqual({ allowed: false, reason: 'Keep at least one scene.' })
+  })
+  // Review #2: a scene going on stream can't be deleted under its switch,
+  // idle or live, on stream or not.
+  it('a scene going on stream stays until its switch is over', () => {
+    for (const sessionActive of [false, true])
+      expect(
+        canDeleteScene({
+          scenes: all,
+          id: all[1]!.id,
+          onStreamId: all[2]!.id,
+          sessionActive,
+          goingOn: true
+        })
+      ).toEqual({
+        allowed: false,
+        reason: 'This scene is going on stream. Try again in a moment.'
+      })
   })
 })
