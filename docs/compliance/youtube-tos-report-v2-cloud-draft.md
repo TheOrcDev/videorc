@@ -54,11 +54,11 @@ The owner can quote any of them.
 
 **What passes through our servers, for a Videorc Cloud show only**
 
-| Data | From → to | Kept |
-| --- | --- | --- |
-| The live video and sound | The user's computer → the media server (RTMPS, TLS) → YouTube's ingest | Not stored. Passes through memory while live. |
-| The YouTube stream key (the ingest URL with its key) | The user's computer → the media server, over the show's control socket (WSS, TLS) | Memory only, for that show. Dropped at show end. |
-| A show record: start, end, which server, why it ended, minutes live and on hold | Our web service (videorc.com) | Kept, to meter cloud hours. Holds no video, sound, chat or keys. |
+| Data                                                                            | From → to                                                                         | Kept                                                             |
+| ------------------------------------------------------------------------------- | --------------------------------------------------------------------------------- | ---------------------------------------------------------------- |
+| The live video and sound                                                        | The user's computer → the media server (RTMPS, TLS) → YouTube's ingest            | Not stored. Passes through memory while live.                    |
+| The YouTube stream key (the ingest URL with its key)                            | The user's computer → the media server, over the show's control socket (WSS, TLS) | Memory only, for that show. Dropped at show end.                 |
+| A show record: start, end, which server, why it ended, minutes live and on hold | Our web service (videorc.com)                                                     | Kept, to meter cloud hours. Holds no video, sound, chat or keys. |
 
 - **The key never reaches videorc.com.** The desktop asks videorc.com to
   create a show and gets back the media server's address; the stream key
@@ -131,6 +131,57 @@ answer must match:
 > cloud. No Videorc server calls the YouTube API, and your chat doesn't pass
 > through Videorc Cloud.
 
+## Also in this update: stream statistics on videorc.com (plans 237, 241)
+
+The same V.1 reply also says, under III.E.4, that "chat messages and session
+statistics kept for the user's own session history stay on the user's
+computer" (`youtube-tos-report-v1-reply.md:63`). Two features change that
+for signed-in users, and this report should say so:
+
+- **The stream report email (plan 237, shipped 2026-11-14).** About a minute
+  after each live stream of 5 minutes or more, the computer sends videorc.com
+  that stream's numbers, YouTube's included: concurrent viewers (peak,
+  average, a 48-bar series), chat counts (messages, chatters), the subscriber
+  change, and YouTube's share of tips, supporters and community counts. Never
+  chat text, viewer names or channel identifiers. videorc.com renders one
+  email to the account's own address. On by default; one-click unsubscribe in
+  every email and a switch in the app.
+- **Stream history (plan 241, shipped 2026-11-16).** While "Save my streams on
+  videorc.com" is on (on by default; a switch in the app and on
+  videorc.com/live), videorc.com keeps that same report so the user can see
+  their last stream and a 90-day history on videorc.com/live. **YouTube's
+  numbers, and every total they were part of, are deleted 30 days after the
+  stream** (III.E.4.b/c: the web cannot re-check the user's authorization, so
+  it does not keep them longer), **and at once when the user disconnects
+  YouTube in the app** (III.D.2.c). The user can delete one saved stream or
+  the whole history on videorc.com/live at any time (III.E.4.g); the page says
+  this does not delete anything YouTube keeps. Combined totals across
+  platforms are labelled "Videorc adds up each platform's own count", next to
+  each platform's own numbers (III.E.4.h).
+- **The live status (plan 241).** While a signed-in user streams, the
+  computer tells videorc.com which platforms are live and which stream
+  problems it sees, so videorc.com/live can show the stream. It carries no
+  viewer counts and no chat. One kind of problem can be YouTube's own: the
+  `liveStreams.list part=status` health line the computer already reads (for
+  example "no audio"). It is deleted when the stream ends, or a day later if
+  the computer never says it ended.
+
+Every YouTube API call is still made from the user's computer. Proposed
+replacement for the V.1 sentence:
+
+> Chat messages stay on the user's computer. Session statistics stay on the
+> user's computer, except that, for a signed-in user, the numbers of each live
+> stream (YouTube's concurrent viewers, chat counts and subscriber change
+> among them, never chat text, viewer names or channel identifiers) are sent
+> to videorc.com to email the user a report and, while the user keeps "Save
+> my streams" on, to show that stream on videorc.com/live. YouTube's numbers
+> are deleted from videorc.com 30 days after the stream, at once when the
+> user disconnects YouTube, or whenever the user deletes them.
+
+The privacy policy already says this (videorc.com/privacy: "Stream report
+email", "Stream history", "Live status", and the YouTube API Services
+section, updated 2026-11-16).
+
 ## Owner checklist before sending
 
 - [ ] The proposed replacement sentence reads right to you, and nothing in
@@ -140,5 +191,7 @@ answer must match:
       reconnect" but keeps local data (V.1 reply, "Owner to know").
 - [ ] Videorc Cloud is still dormant for everyone but you (the cohort,
       `VIDEORC_CLOUD_USERS`, is empty) until this is sent.
+- [ ] The stream statistics section (plans 237 and 241) matches the build
+      you ship and the privacy page.
 - [ ] After sending: the date goes into plan 185 Progress, and plan 222 O2
-      step 3 (the cohort) may start.
+      step 3 (the cohort) may start. Plans 237 and 241 Progress note it too.
