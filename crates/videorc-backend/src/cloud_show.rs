@@ -12675,8 +12675,7 @@ mod tests {
 
     #[test]
     fn r2_a_l5_unknown_air_enums_do_not_break_state_or_status() {
-        let mut runtime = CloudShowRuntime::default();
-        runtime.runner = Some(serde_json::from_value(json!({"onAir":{"deviceId":"BBBBBBBBBBBBBBBBBBBBBB","kind":"future-device","source":"future-source","waiting":false}})).unwrap());
+        let runtime = CloudShowRuntime { runner: Some(serde_json::from_value(json!({"onAir":{"deviceId":"BBBBBBBBBBBBBBBBBBBBBB","kind":"future-device","source":"future-source","waiting":false}})).unwrap()), ..CloudShowRuntime::default() };
         let air = runtime.status().on_air.unwrap();
         assert_eq!(air.kind, CloudDeviceKind::Computer);
         assert_eq!(air.source, CloudAirSource::Feed);
