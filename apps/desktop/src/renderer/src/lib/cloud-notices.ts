@@ -44,6 +44,9 @@ export const CLOUD_STATUS_TOAST = {
 
 /** The provider's status notifications, in their shared toast's priority order. */
 export function toastCloudStatus(previous: CloudStatus | null, next: CloudStatus): void {
+  if (next.endReason === 'ended-elsewhere' && previous?.endReason !== 'ended-elsewhere') {
+    toast.info('The show was ended from videorc.com.', CLOUD_STATUS_TOAST)
+  }
   const fallback = cloudFallbackToast(previous, next)
   if (fallback) toast.warning(fallback, CLOUD_STATUS_TOAST)
   const lost = cloudLostToast(previous, next)
