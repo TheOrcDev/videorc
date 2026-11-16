@@ -2051,6 +2051,9 @@ impl<W: CloudWebApi, C: ControlConnector> ControlLoop<W, C> {
     ) {
         let (asked, generation): (Vec<HandoverDestination>, u64) = {
             let runtime = lock(&self.context.slot);
+            if runtime.stopped_by.is_some() {
+                return;
+            }
             let (Some(show), Some(runner)) = (runtime.show.as_ref(), runtime.runner.as_ref())
             else {
                 return;

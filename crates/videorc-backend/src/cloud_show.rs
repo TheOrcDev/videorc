@@ -1632,7 +1632,13 @@ fn reconnect_candidates(
                 .iter()
                 .filter(|c| c.platform == leg.platform && c.orientation == leg.orientation)
                 .collect();
-            let candidate = if matching.len() == 1 {
+            let same_platform_legs = legs
+                .iter()
+                .filter(|other| {
+                    other.platform == leg.platform && other.orientation == leg.orientation
+                })
+                .count();
+            let candidate = if matching.len() == 1 && same_platform_legs == 1 {
                 matching.first().copied()
             } else {
                 let by_label: Vec<_> = matching
@@ -3158,7 +3164,7 @@ impl<W: CloudWebApi, C: ControlConnector> ControlLoop<W, C> {
                 .as_ref()
                 .map(|runner| runner.legs.clone())
                 .unwrap_or_default();
-            let restart = if self.restart_seen_on_socket {
+            let restart = if self.restart_seen_on_socket || runtime.stopped_by.is_some() {
                 None
             } else {
                 runtime
@@ -3205,8 +3211,9 @@ impl<W: CloudWebApi, C: ControlConnector> ControlLoop<W, C> {
             // A restarted runner draws its default card until it gets the
             // image again; the agent hands it back (`holdImageSet`), and when
             // it could not (it restarted too) this computer sends its own.
-            if ((restarted && state.hold_image_set != Some(true))
-                || state.hold_image_set == Some(false))
+            if runtime.stopped_by.is_none()
+                && ((restarted && state.hold_image_set != Some(true))
+                    || state.hold_image_set == Some(false))
                 && !self.hold_image_sent_on_socket
                 && let Some(png) = runtime
                     .show
@@ -3219,13 +3226,14 @@ impl<W: CloudWebApi, C: ControlConnector> ControlLoop<W, C> {
             // Plan 224: a restarted runner shows the host alone on Solo
             // until it gets the stage again (`stageSet: false`). A stage
             // this desktop never sent is that default already.
-            let stage_lost = runtime.talk.as_ref().is_some_and(|talk| {
-                talk.stage_sent
-                    && state
-                        .room
-                        .as_ref()
-                        .is_some_and(|room| room.connected && !room.stage_set)
-            });
+            let stage_lost = runtime.stopped_by.is_none()
+                && runtime.talk.as_ref().is_some_and(|talk| {
+                    talk.stage_sent
+                        && state
+                            .room
+                            .as_ref()
+                            .is_some_and(|room| room.connected && !room.stage_set)
+                });
             if stage_lost {
                 self.resend_stage = true;
             }
@@ -4185,7 +4193,7 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
                 .on_air
                 .as_ref()
                 .is_some_and(|air| air.source == Some(CloudAirSource::Camera) && !air.waiting);
-            runtime.claiming_air = runtime.pending_feed_go;
+            runtime.claiming_air = true;
             answer.ingest
         } else {
             ingest
@@ -4305,8 +4313,9 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
     /// Runs only after the local session starts: never wait for a feed before sending it.
     pub async fn finish_resume(&self, bearer: &str) -> Result<()> {
         let (show_id, device, orientations) = {
-            let runtime = lock(&self.slot);
+            let mut runtime = lock(&self.slot);
             if !runtime.pending_feed_go {
+                runtime.claiming_air = false;
                 return Ok(());
             }
             let show = runtime

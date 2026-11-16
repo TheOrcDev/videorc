@@ -6083,12 +6083,14 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "watchdog.settings.set"
         | "watchdog.idle.report"
         | "cloud.show.reconnectDestination"
+        | "cloud.show.check"
         | "cloud.room.client.report"
         | "cloud.recordings.download"
         | "cloud.recordings.cancelDownload" => Some(DEFAULT_MUTATION_POLICY),
 
         "session.start"
         | "cloud.show.resume"
+        | "cloud.show.handOff"
         | "session.stop"
         | "recording.stop"
         | "recording.start_test" => Some(SessionLifecycle),
@@ -16061,9 +16063,7 @@ async fn start_session_command(
             };
             match started {
                 Ok(status) => {
-                    if kind == SessionStartKind::CloudResume
-                        && let Some(context) = cloud_context(state)
-                    {
+                    if let Some(context) = cloud_context(state) {
                         if let Some(bearer) = account::stored_session_token()
                             && let Err(error) = context.finish_resume(&bearer).await
                         {
