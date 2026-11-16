@@ -26,16 +26,15 @@ async fn post(client: &reqwest::Client, web: &WebAccess) -> bool {
 }
 
 async fn deliver(database: &Database, client: &reqwest::Client, web: &WebAccess) {
-    if post(client, web).await {
-        // A later Disconnect for another account may already have replaced it.
-        if database
+    // A later Disconnect for another account may already have replaced it.
+    if post(client, web).await
+        && database
             .load_setting::<String>(PENDING)
             .ok()
             .flatten()
             .is_some_and(|email| same_account(&email, &web.email))
-        {
-            let _ = database.delete_setting(PENDING);
-        }
+    {
+        let _ = database.delete_setting(PENDING);
     }
 }
 
