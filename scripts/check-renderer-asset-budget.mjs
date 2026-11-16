@@ -145,8 +145,14 @@ const htmlPath = resolve(
 // contract schemas already load lazily.
 // Raise gzip to 487,000; raw and the entry ceilings hold. Keep new surfaces
 // lazy.
+// 2026-11-16 (owner-approved: merge #1411 with its open budget item): the
+// takeover drop and multi-select from #704 measure 2,365,684 raw / 486,083
+// gzip, 684 raw bytes over. The takeover and banner importers already load
+// lazily; what stays eager is the provider wiring (pending state, the import
+// callbacks). Raise raw to 2,367,000; gzip and the entry ceilings hold. Keep
+// new surfaces lazy.
 const budget = {
-  maxTotalRawBytes: Number(process.env.VIDEORC_RENDERER_MAX_EAGER_RAW_BYTES ?? 2_365_000),
+  maxTotalRawBytes: Number(process.env.VIDEORC_RENDERER_MAX_EAGER_RAW_BYTES ?? 2_367_000),
   maxTotalGzipBytes: Number(process.env.VIDEORC_RENDERER_MAX_EAGER_GZIP_BYTES ?? 487_000),
   maxEntryRawBytes: Number(process.env.VIDEORC_RENDERER_MAX_ENTRY_RAW_BYTES ?? 1_200_000),
   maxEntryGzipBytes: Number(process.env.VIDEORC_RENDERER_MAX_ENTRY_GZIP_BYTES ?? 235_000)
