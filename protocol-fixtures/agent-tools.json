@@ -234,7 +234,7 @@
     {
       "name": "list_scenes",
       "title": "List scenes",
-      "description": "The scenes the streamer can switch to: their saved scenes and Videorc's built-in layouts, each with its id and name, and which one is on the picture now. Pass an id to switch_scene.",
+      "description": "The scenes the streamer can switch to, in order: id, name, position, key, what each shows and which is on stream. Pass a scene id to switch_scene.",
       "inputSchema": {
         "type": "object",
         "properties": {},
@@ -254,15 +254,22 @@
                 "name": {
                   "type": "string"
                 },
-                "kind": {
-                  "type": "string",
-                  "enum": ["saved", "layout"]
+                "position": {
+                  "type": "integer",
+                  "minimum": 1
                 },
-                "active": {
+                "key": {
+                  "type": "string"
+                },
+                "shows": {
+                  "type": "string"
+                },
+                "onStream": {
                   "type": "boolean"
                 }
               },
-              "required": ["id", "name", "kind", "active"]
+              "required": ["id", "name", "position", "key", "shows", "onStream"],
+              "additionalProperties": false
             }
           }
         },
@@ -1108,13 +1115,13 @@
     {
       "name": "switch_scene",
       "title": "Switch scene",
-      "description": "Switch the picture to a saved scene or a built-in layout, like clicking it in the Studio. Use an id from list_scenes. Works while recording or live, and the camera keeps running.",
+      "description": "Switch to a scene from list_scenes, like clicking it in Studio. A legacy layout id switches to the first scene using that layout in the current orientation, or is refused with \"No scene uses {Layout}\". Works while recording or live.",
       "inputSchema": {
         "type": "object",
         "properties": {
           "sceneId": {
             "type": "string",
-            "description": "A scene or layout id from list_scenes.",
+            "description": "A scene id from list_scenes, or a legacy layout id.",
             "minLength": 1,
             "maxLength": 128
           }
@@ -1133,13 +1140,9 @@
               },
               "name": {
                 "type": "string"
-              },
-              "kind": {
-                "type": "string",
-                "enum": ["saved", "layout"]
               }
             },
-            "required": ["id", "name", "kind"]
+            "required": ["id", "name"]
           }
         },
         "required": ["scene"],
@@ -2950,7 +2953,7 @@
     {
       "name": "move_on_scene",
       "title": "Move or resize something on the picture",
-      "description": "Move or resize one item where the Scene canvas's own snaps would put it: a place on the 3×3 grid (full-frame for banners), a size, or an exact rect. A place writes both orientations. The camera at a corner keeps its scene; other source moves switch to freeform. The result has the old rects (pass them back as rects to undo) and what it now covers.",
+      "description": "Move or resize one item where the Scene canvas's own snaps would put it: a place on the 3\u00d73 grid (full-frame for banners), a size, or an exact rect. A place writes both orientations. The camera at a corner keeps its scene; other source moves switch to freeform. The result has the old rects (pass them back as rects to undo) and what it now covers.",
       "inputSchema": {
         "type": "object",
         "properties": {

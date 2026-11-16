@@ -605,7 +605,7 @@ export function CommandPalette({
                   }
                 >
                   <SceneIcon className="size-4" />
-                  {scene.name}
+                  Switch to {scene.name}
                   <Context>Scene</Context>
                 </CommandItem>
               ))}

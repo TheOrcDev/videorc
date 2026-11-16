@@ -2,6 +2,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { SoundboardStore } from '@/lib/soundboard-store'
 import type { StreamTargetSettings } from '../../../shared/backend'
+import { defaultCaptureConfig, defaultSettings } from './capture'
+import { agentTool, validateAgentToolValue } from '../../../shared/agent-tools'
 import { AgentSurfacePublisher, buildAgentSurface, type AgentSurfaceInput } from './agent-surface'
 
 // Plan 209 S6: the Studio's projection for agents is an allowlist (D9): no
@@ -30,7 +32,7 @@ function input(overrides: Partial<AgentSurfaceInput> = {}): AgentSurfaceInput {
     liveStreamBlockedReason: 'Turn on a destination in Destinations.',
     layoutPreset: 'screen-camera',
     layoutPresets: ['screen-camera', 'screen-only'],
-    activeSavedSceneId: null,
+    activeSavedSceneId: 'scene-1',
     savedSceneModified: false,
     savedScenes: [{ id: 'scene-1', name: 'Coding' }],
     microphoneMuted: false,
@@ -115,15 +117,20 @@ describe('buildAgentSurface', () => {
   it('projects the Studio for get_status and the list tools', () => {
     const surface = buildAgentSurface(input(), [{ id: 'airhorn', name: 'Airhorn', playing: true }])
     expect(surface.scene).toEqual({
-      id: 'screen-camera',
-      name: 'Screen + camera',
-      kind: 'layout',
+      id: 'scene-1',
+      name: 'Coding',
+      kind: 'saved',
       modified: false
     })
-    expect(surface.scenes.map((scene) => `${scene.kind}:${scene.id}`)).toEqual([
-      'saved:scene-1',
-      'layout:screen-camera',
-      'layout:screen-only'
+    expect(surface.scenes).toEqual([
+      {
+        id: 'scene-1',
+        name: 'Coding',
+        position: 1,
+        key: 'Ctrl+Alt+Shift+1',
+        shows: 'No screen',
+        onStream: true
+      }
     ])
     expect(surface.microphone).toEqual({ muted: false, name: 'MacBook Pro Microphone' })
     expect(surface.systemAudio).toEqual({ on: true, available: true })
@@ -169,6 +176,55 @@ describe('buildAgentSurface', () => {
     // Plan 209 S15: Clean cut needs the streamer's own Cloud AI consent.
     expect(surface.cloudAiConsent).toBe(false)
     expect(buildAgentSurface(input({ cloudAiConsent: true }), []).cloudAiConsent).toBe(true)
+  })
+
+  it('lists only scenes in order with their keys, screen words and on-stream mark (D14)', () => {
+    const surface = buildAgentSurface(
+      input({
+        activeSavedSceneId: 'pause',
+        globalShortcuts: defaultSettings.globalShortcuts,
+        platform: 'darwin',
+        savedScenes: [
+          {
+            id: 'figma',
+            name: 'Figma',
+            visual: {
+              layout: defaultCaptureConfig.layout,
+              sources: { app: { bundleId: 'com.figma', name: 'Figma', follows: true } },
+              background: null
+            }
+          },
+          {
+            id: 'pause',
+            name: 'Break',
+            visual: {
+              layout: { ...defaultCaptureConfig.layout, layoutPreset: 'camera-only' },
+              sources: { captureOff: true },
+              background: null
+            }
+          }
+        ]
+      }),
+      []
+    )
+    expect(surface.scenes).toEqual([
+      {
+        id: 'figma',
+        name: 'Figma',
+        position: 1,
+        key: '⌃⌥1',
+        shows: 'Figma · front window',
+        onStream: false
+      },
+      { id: 'pause', name: 'Break', position: 2, key: '⌃⌥2', shows: 'No screen', onStream: true }
+    ])
+    expect(
+      validateAgentToolValue(
+        agentTool('list_scenes')!.outputSchema!,
+        { scenes: surface.scenes },
+        'result'
+      )
+    ).toBeNull()
   })
 
   it('names the saved scene when one is active, and says a picture background is a picture', () => {

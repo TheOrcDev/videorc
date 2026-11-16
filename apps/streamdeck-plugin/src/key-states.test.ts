@@ -229,3 +229,27 @@ test('the Stream Manager Screen key says a tap cannot move it on Wayland (plan 2
   assert.match(streamManagerScreenKeyNotice('wayland') ?? '', /Wayland/)
   assert.equal(streamManagerScreenKeyBlock({ ...wayland, screenMoves: 'supported' }), null)
 })
+
+import { sceneActionIntent, sceneActionOptions } from './key-states.js'
+
+test('Scene actions list scenes in order and preserve legacy settings on the wire (D14)', () => {
+  const state = {
+    savedScenes: [
+      { id: 'figma', name: 'Figma' },
+      { id: 'pause', name: 'Break' }
+    ]
+  }
+  assert.deepEqual(sceneActionOptions(state), [
+    { value: 'figma', label: 'Figma' },
+    { value: 'pause', label: 'Break' }
+  ])
+  assert.deepEqual(sceneActionIntent({ sceneId: 'figma', layoutPreset: 'screen-only' }), {
+    kind: 'sceneApply',
+    sceneId: 'figma'
+  })
+  assert.deepEqual(sceneActionIntent({ layoutPreset: 'screen-only' }), {
+    kind: 'sceneApply',
+    layoutPreset: 'screen-only'
+  })
+  assert.equal(sceneActionIntent({}), null)
+})

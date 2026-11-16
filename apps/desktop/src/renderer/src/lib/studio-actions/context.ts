@@ -129,7 +129,11 @@ export interface StudioActionContext {
   /** A livestream runs now (it may also record): what `stop` ends. */
   sessionLive?: boolean
   /** The streamer's saved scenes, by id and name (`switch_scene`). */
-  savedScenes?: readonly { id: string; name: string }[]
+  savedScenes?: readonly {
+    id: string
+    name: string
+    visual?: { layout: Pick<LayoutSettings, 'layoutPreset' | 'arrangementMode'> }
+  }[]
   /** Applies a saved scene exactly as clicking it in the Studio does. */
   applySavedSceneResult?: (id: string) => Promise<SavedSceneApplyResult>
   applySavedScene?: (id: string) => Promise<boolean>

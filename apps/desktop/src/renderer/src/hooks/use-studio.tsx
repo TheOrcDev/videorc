@@ -19389,6 +19389,8 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
     activeSavedSceneId,
     savedSceneModified,
     savedScenes: sceneLibrary.scenes,
+    globalShortcuts: settings.globalShortcuts,
+    platform: runtimeInfo?.platform,
     microphoneMuted: remoteSurfaceMicrophoneMuted,
     sources: captureConfig.sources,
     devices: deviceList.devices,

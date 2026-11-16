@@ -103,7 +103,7 @@ export interface StudioActionSource extends Omit<
   ) => Promise<CommentHighlightState | null>
   publishCommentHighlightState: (state: CommentHighlightState) => void
   bannerListRef: Ref<readonly Banner[] | null>
-  savedScenes: readonly { id: string; name: string }[]
+  savedScenes: NonNullable<StudioActionContext['savedScenes']>
   applySavedSceneResult?: (id: string) => Promise<SavedSceneApplyResult>
   applySavedScene: (id: string) => Promise<boolean>
   captureConfigRef: Ref<CaptureConfig>

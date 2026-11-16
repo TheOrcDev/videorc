@@ -18,7 +18,12 @@
 
 import type { DeviceList, LayoutPreset } from '@/lib/backend'
 import { isStreamTargetStartReady } from '@/lib/capture'
-import { layoutPresetLabel } from '@/lib/layout-labels'
+import { layoutShowsScreen, showsFromSources } from '@/lib/scenes'
+import { showsWords } from '@/lib/scene-section'
+import { sceneShortcutBindings } from '@/lib/scene-shortcuts'
+import { acceleratorLabel } from '@/lib/accelerator'
+import type { GlobalShortcutsConfig } from '@/lib/backend'
+import type { SceneVisual } from '@/lib/scene-presets'
 import { destinationLabel } from '@/lib/platform-copy'
 import { soundboard, type SoundboardStore } from '@/lib/soundboard-store'
 import type {
@@ -54,7 +59,14 @@ export interface AgentSurface {
   recordBlockedReason?: string
   liveBlockedReason?: string
   scene: AgentSurfaceScene & { modified: boolean }
-  scenes: AgentSurfaceScene[]
+  scenes: {
+    id: string
+    name: string
+    position: number
+    key: string
+    shows: string
+    onStream: boolean
+  }[]
   microphone: { muted: boolean; name?: string }
   systemAudio: { on: boolean; available: boolean }
   takeoverId?: string
@@ -85,7 +97,9 @@ export interface AgentSurfaceInput {
   layoutPresets: readonly LayoutPreset[]
   activeSavedSceneId: string | null
   savedSceneModified: boolean
-  savedScenes: readonly { id: string; name: string }[]
+  savedScenes: readonly { id: string; name: string; visual?: SceneVisual }[]
+  globalShortcuts?: GlobalShortcutsConfig
+  platform?: string
   microphoneMuted: boolean
   sources: SourceSelection
   devices: DeviceList['devices']
@@ -143,28 +157,26 @@ export function buildAgentSurface(
   input: AgentSurfaceInput,
   playingSounds: readonly { id: string; name: string; playing: boolean }[]
 ): AgentSurface {
-  const bothOrientations =
-    input.layoutPresets.some((preset) => preset.startsWith('vertical-')) &&
-    input.layoutPresets.some((preset) => !preset.startsWith('vertical-'))
-  const layouts: AgentSurfaceScene[] = input.layoutPresets.map((preset) => ({
-    id: preset,
-    name: layoutPresetLabel(preset, { bothOrientations }),
-    kind: 'layout'
-  }))
-  const saved: AgentSurfaceScene[] = input.savedScenes.map(({ id, name }) => ({
+  const scenes = input.savedScenes.map(({ id, name, visual }, index) => ({
     id,
     name,
-    kind: 'saved'
+    position: index + 1,
+    key: sceneShortcutBindings(id, index + 1, input.globalShortcuts ?? {}, input.platform)
+      .map(({ accelerator }) => acceleratorLabel(accelerator, input.platform))
+      .join(' / '),
+    shows:
+      visual && layoutShowsScreen(visual.layout)
+        ? showsWords(showsFromSources(visual.sources))
+        : 'No screen',
+    onStream: id === input.activeSavedSceneId
   }))
-  const activeSaved = saved.find((scene) => scene.id === input.activeSavedSceneId)
-  const activeLayout = layouts.find((scene) => scene.id === input.layoutPreset) ?? {
-    id: input.layoutPreset,
-    name: layoutPresetLabel(input.layoutPreset, { bothOrientations }),
-    kind: 'layout' as const
+  const active = scenes.find((scene) => scene.onStream)
+  const scene = {
+    id: active?.id ?? input.activeSavedSceneId ?? '',
+    name: active?.name ?? '',
+    kind: 'saved' as const,
+    modified: input.savedSceneModified
   }
-  const scene = activeSaved
-    ? { ...activeSaved, modified: input.savedSceneModified }
-    : { ...activeLayout, modified: false }
   const microphoneName = present(
     input.devices.find((device) => device.id === input.sources.microphoneId)?.name ??
       input.sources.microphoneName
@@ -192,7 +204,7 @@ export function buildAgentSurface(
     ...(recordBlockedReason ? { recordBlockedReason } : {}),
     ...(liveBlockedReason ? { liveBlockedReason } : {}),
     scene,
-    scenes: [...saved, ...layouts],
+    scenes,
     microphone: {
       muted: input.microphoneMuted,
       ...(microphoneName ? { name: microphoneName } : {})

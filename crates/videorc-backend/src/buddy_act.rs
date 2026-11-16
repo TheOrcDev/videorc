@@ -512,7 +512,7 @@ pub async fn studio_snapshot(state: &AppState) -> StudioSnapshot {
     };
 
     let mut names = StudioNames::default();
-    for scene in list("scenes") {
+    for scene in crate::agent_look::scenes_from_surface(surface.as_ref().unwrap_or(&Value::Null)) {
         if let (Some(id), Some(name)) = (text_of(&scene, "id"), text_of(&scene, "name")) {
             names.scenes.push(Named::new(id, name));
         }
@@ -1818,6 +1818,24 @@ mod tests {
         // Buddy is never a registry agent.
         let status = crate::agent_mcp::status(&state);
         assert!(status.agents.iter().all(|agent| agent.id != BUDDY_AGENT_ID));
+    }
+
+    #[tokio::test]
+    async fn planner_reads_list_scenes_without_legacy_layout_entries() {
+        let state = crate::agent_mcp::test_support::test_state();
+        state.agents.lock().surface = Some(json!({
+            "scenes": [
+                {"id": "figma", "name": "Figma", "shows": "Figma · front window"},
+                {"id": "screen-only", "name": "Screen only", "kind": "layout"},
+                {"id": "pause", "name": "Break", "shows": "No screen"}
+            ]
+        }));
+        let _studio = crate::agent_mcp::StudioSocketGuard::attach(&state);
+        let snapshot = studio_snapshot(&state).await;
+        assert_eq!(
+            snapshot.names.planner_names().scenes,
+            vec!["Figma", "Break"]
+        );
     }
 
     #[test]

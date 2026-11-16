@@ -318,7 +318,11 @@ describe('CommandPalette order and verbs (plan 174 A-9, A-13)', () => {
       'Settings',
       'Appearance'
     ])
-    mocked.core.savedScenes = [{ id: 's1', name: 'Talking head' }]
+    mocked.core.savedScenes = [
+      { id: 's1', name: 'Talking head' },
+      { id: 's2', name: 'Figma' },
+      { id: 's3', name: 'Break' }
+    ]
     await render()
     expect(headings()).toEqual([
       'Session',
@@ -331,7 +335,14 @@ describe('CommandPalette order and verbs (plan 174 A-9, A-13)', () => {
       'Appearance'
     ])
     // Plan 231 D14: Add scene… leads, then every scene; never Save scene….
-    expect(groupValues('Scenes')).toEqual(['Add scene…', 'Switch to Talking head'])
+    expect(groupValues('Scenes')).toEqual([
+      'Add scene…',
+      'Switch to Talking head',
+      'Switch to Figma',
+      'Switch to Break'
+    ])
+    for (const name of ['Talking head', 'Figma', 'Break'])
+      expect(item(`Switch to ${name}`).textContent).toContain(`Switch to ${name}`)
     expect(values().some((value) => value.includes('Save scene'))).toBe(false)
   })
 

@@ -137,7 +137,12 @@ beforeEach(async () => {
     micMuted: false,
     systemAudioAvailable: true,
     systemAudioOn: false,
-    layoutPreset: 'screen-only'
+    layoutPreset: 'screen-only',
+    savedScenes: [
+      { id: 'only', name: 'Screen only' },
+      { id: 'split', name: 'Vertical split' }
+    ],
+    activeSavedSceneId: 'only'
   }
   page = new Window({
     url: `http://127.0.0.1:7420/#d=test-device.${'A'.repeat(43)}`,
@@ -406,6 +411,9 @@ describe('shipping phone remote words (plan 174 I-14)', () => {
       (name) => name.textContent
     )
     expect(scenes).toEqual(['Screen only', 'Vertical split'])
+    stateUpdate({ savedScenes: [] })
+    expect(page.document.getElementById('scenes-label')!.hasAttribute('hidden')).toBe(true)
+    expect(page.document.querySelectorAll('#deck-scenes .key')).toHaveLength(0)
     stateUpdate({ streamEnabled: true, sessionState: 'streaming' })
     expect(sessionButton().querySelector('.name')!.textContent).toBe('End livestream')
   })
@@ -603,13 +611,19 @@ describe('shipping phone remote sounds (plan 189 S10)', () => {
   })
 })
 
-it('shows saved scenes above layouts and sends their ids, marking confirmed state', () => {
+it('lists every scene in order without layout cards, marking confirmed state', () => {
   stateUpdate({
-    savedScenes: [{ id: 'figma', name: 'Figma <script>' }],
+    savedScenes: [
+      { id: 'figma', name: 'Figma <script>' },
+      { id: 'pause', name: 'Break' }
+    ],
     activeSavedSceneId: 'figma'
   })
   const keys = [...page.document.querySelectorAll<HTMLButtonElement>('#deck-scenes .key')]
-  expect(keys[0].querySelector('.name')!.textContent).toBe('Figma <script>')
+  expect(keys.map((key) => key.querySelector('.name')!.textContent)).toEqual([
+    'Figma <script>',
+    'Break'
+  ])
   expect(keys[0].getAttribute('aria-pressed')).toBe('true')
   expect(keys[1].getAttribute('aria-pressed')).toBe('false')
   keys[0].click()

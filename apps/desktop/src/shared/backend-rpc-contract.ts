@@ -1642,6 +1642,9 @@ const agentIntentAckParamsSchema = objectSchema(
   },
   { allowUnknown: false }
 ) as RuntimeSchema<AgentIntentAckParams>
+// Scene list entries: id/name, 1-based position, display key, screen words
+// (shows) and onStream. The publisher and list_scenes catalog allowlist those
+// fields; the bounded projection also carries the other Studio tool families.
 const agentSurfacePublishParamsSchema = objectSchema(
   { surface: boundedBackendParamValueSchema },
   { allowUnknown: false }

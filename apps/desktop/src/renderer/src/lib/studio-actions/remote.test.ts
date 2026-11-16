@@ -205,3 +205,57 @@ it('applies a saved scene and acknowledges its typed refusal', async () => {
   )
   expect(requests.at(-1)?.params).toEqual({ intentId: 'yes', ok: true })
 })
+
+it('acks the legacy layout refusal using its display name (D14)', async () => {
+  const { context, requests } = studioContext({
+    knownLayoutPresets: ['side-by-side'],
+    applyLayoutPreset: vi.fn(async () => ({ ok: false, message: 'No scene uses Side by side' }))
+  })
+  await executeRemoteIntent(
+    { intentId: 'legacy', intent: { kind: 'sceneApply', layoutPreset: 'side-by-side' } },
+    context
+  )
+  expect(requests.at(-1)?.params).toEqual({
+    intentId: 'legacy',
+    ok: false,
+    message: 'No scene uses Side by side'
+  })
+})
+
+it('a remote screenId uses the Screen picker and propagates its refusal (D2)', async () => {
+  const switchSource = vi.fn(async () => ({ ok: false, message: 'Wait for the screen.' }))
+  const { context, requests } = studioContext({
+    sourcePicker: {
+      sources: { cameraId: 'camera', windowId: 'old' },
+      capture: [{ id: 'display', name: 'Display 2', kind: 'screen', status: 'available' }],
+      cameras: [],
+      microphones: []
+    },
+    switchSource
+  })
+  await executeRemoteIntent(
+    { intentId: 'screen', intent: { kind: 'sceneApply', screenId: 'display' } },
+    context
+  )
+  expect(switchSource).toHaveBeenCalledWith(
+    'capture',
+    expect.objectContaining({ screenId: 'display', windowId: undefined, cameraId: 'camera' })
+  )
+  expect(requests.at(-1)?.params).toEqual({
+    intentId: 'screen',
+    ok: false,
+    message: 'Wait for the screen.'
+  })
+  context.sourcePicker = {
+    ...context.sourcePicker!,
+    capture: [{ id: 'window:2', name: 'Figma', kind: 'window', status: 'available' }]
+  }
+  await executeRemoteIntent(
+    { intentId: 'window', intent: { kind: 'sceneApply', screenId: 'window:2' } },
+    context
+  )
+  expect(switchSource).toHaveBeenLastCalledWith(
+    'capture',
+    expect.objectContaining({ windowId: 'window:2', screenId: undefined, cameraId: 'camera' })
+  )
+})

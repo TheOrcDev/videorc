@@ -25,7 +25,7 @@ import {
   setCaptions,
   setSources
 } from './run-the-show'
-import { sceneApply, takeoverHide, takeoverShow } from './scene'
+import { takeoverHide, takeoverShow } from './scene'
 import { getSceneLayout, moveOnScene, setSceneItem } from './scene-layout'
 import { recordStart, recordStop } from './session'
 import { soundPlay, soundStop } from './sounds'
@@ -79,37 +79,44 @@ const stop: AgentToolExecutor = async (context) => {
 const switchScene: AgentToolExecutor = async (context, args) => {
   const sceneId = text(args, 'sceneId')
   if (!sceneId) return { ok: false, message: AGENT_TOOL_COPY.sceneMissing }
-  const saved = context.savedScenes?.find((scene) => scene.id === sceneId)
-  if (saved && context.applySavedScene) {
-    const outcome = context.applySavedSceneResult
-      ? await context.applySavedSceneResult(saved.id)
-      : { ok: await context.applySavedScene(saved.id) }
-    return outcome.ok
-      ? {
-          ok: true,
-          message: `Switched to ${saved.name}.`,
-          result: { scene: { id: saved.id, name: saved.name, kind: 'saved' } }
-        }
-      : {
-          ok: false,
-          message: ('message' in outcome && outcome.message) || AGENT_TOOL_COPY.sceneFailed,
-          ...('reason' in outcome && outcome.reason ? { result: { reason: outcome.reason } } : {})
-        }
-  }
-  const outcome = await sceneApply(context, { layoutPreset: sceneId })
-  if (!outcome.ok) return outcome
   const presets = context.knownLayoutPresets
-  const bothOrientations =
-    presets.some((preset) => preset.startsWith('vertical-')) &&
-    presets.some((preset) => !preset.startsWith('vertical-'))
-  const name =
+  const label =
     context.layoutLabels?.[sceneId] ??
-    layoutPresetLabel(sceneId as LayoutPreset, { bothOrientations })
-  return {
-    ok: true,
-    message: `Switched to ${name}.`,
-    result: { scene: { id: sceneId, name, kind: 'layout' } }
-  }
+    layoutPresetLabel(sceneId as LayoutPreset, {
+      bothOrientations:
+        presets.some((preset) => preset.startsWith('vertical-')) &&
+        presets.some((preset) => !preset.startsWith('vertical-'))
+    })
+  const saved =
+    context.savedScenes?.find((scene) => scene.id === sceneId) ??
+    (presets.includes(sceneId as LayoutPreset)
+      ? context.savedScenes?.find(
+          (scene) =>
+            scene.visual?.layout.layoutPreset === sceneId &&
+            scene.visual.layout.arrangementMode !== 'freeform'
+        )
+      : undefined)
+  if (!saved)
+    return {
+      ok: false,
+      message: presets.includes(sceneId as LayoutPreset)
+        ? `No scene uses ${label}`
+        : AGENT_TOOL_COPY.sceneMissing
+    }
+  const outcome = context.applySavedSceneResult
+    ? await context.applySavedSceneResult(saved.id)
+    : { ok: (await context.applySavedScene?.(saved.id)) === true }
+  return outcome.ok
+    ? {
+        ok: true,
+        message: `Switched to ${saved.name}.`,
+        result: { scene: { id: saved.id, name: saved.name } }
+      }
+    : {
+        ok: false,
+        message: ('message' in outcome && outcome.message) || AGENT_TOOL_COPY.sceneFailed,
+        ...('reason' in outcome && outcome.reason ? { result: { reason: outcome.reason } } : {})
+      }
 }
 
 const setTakeover: AgentToolExecutor = async (context, args) => {

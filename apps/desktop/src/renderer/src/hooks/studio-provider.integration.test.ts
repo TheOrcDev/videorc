@@ -10675,6 +10675,88 @@ describe('real StudioProvider lifecycle', () => {
     expect(openSystemPermissions).toHaveBeenCalledWith('camera')
   })
 
+  it('a remote screenId edits the scene on stream and legacy layouts switch or refuse (plan 231 S9)', async () => {
+    const backend = new StudioBackend()
+    const secondScreen = {
+      id: 'screen:dxgi:second',
+      name: 'Display 2',
+      kind: 'screen' as const,
+      status: 'available' as const
+    }
+    backend.deviceList.devices.push(secondScreen)
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const testDom = installProviderTestEnvironment(
+      createVideorcApi({
+        acknowledge: async () => true,
+        pending: async () => [],
+        acknowledgeProvider: async () => true,
+        pendingProvider: async () => []
+      })
+    )
+    restoreEnvironment = testDom.restore
+    let current: StudioObservation | undefined
+    root = await mountStudioProvider(testDom.container, (value) => {
+      current = value
+    })
+    await waitForObservation(
+      () => canSaveScene() && current!.core.captureConfig.sources.screenId != null
+    )
+    const onStreamId = current!.core.activeSavedSceneId
+    const send = async (intentId: string, intent: Record<string, unknown>) => {
+      await act(async () => {
+        for (const socket of backend.sockets)
+          socket.onmessage?.({
+            data: JSON.stringify({
+              event: 'remote.intent',
+              payload: { intentId, intent: { kind: 'sceneApply', ...intent } }
+            })
+          })
+      })
+      const ack = () =>
+        backend.sentCommands.find(
+          (command) =>
+            command.method === 'remote.intent.ack' &&
+            (command.params as { intentId: string }).intentId === intentId
+        )?.params
+      await waitForObservation(() => ack() !== undefined)
+      return ack()
+    }
+    expect(await send('screen-pick', { screenId: secondScreen.id })).toEqual({
+      intentId: 'screen-pick',
+      ok: true
+    })
+    await waitForObservation(
+      () =>
+        storedSceneNamed('Screen + camera').shows.kind === 'display' &&
+        current!.core.captureConfig.sources.screenId === secondScreen.id
+    )
+    expect(current!.core.activeSavedSceneId).toBe(onStreamId)
+    expect(storedSceneNamed('Screen + camera').shows).toMatchObject({
+      kind: 'display',
+      screenId: secondScreen.id
+    })
+    expect(await send('legacy', { layoutPreset: 'screen-only' })).toEqual({
+      intentId: 'legacy',
+      ok: true
+    })
+    await waitForObservation(
+      () =>
+        current!.core.activeSavedSceneId === storedSceneNamed('Screen only').id && canSaveScene()
+    )
+    // Layout edits keep the scene. With no scene left on Screen only, the
+    // same old Deck key is refused instead of rewriting a scene's layout.
+    await act(async () => current!.core.applyCameraPreset({ layoutPreset: 'screen-camera' }))
+    await waitForObservation(
+      () => canSaveScene() && current!.core.captureConfig.layout.layoutPreset === 'screen-camera'
+    )
+    expect(await send('no-match', { layoutPreset: 'screen-only' })).toEqual({
+      intentId: 'no-match',
+      ok: false,
+      message: 'No scene uses Screen only'
+    })
+  }, 15_000)
+
   it('executes remote intents through the same handlers and acks them', async () => {
     const backend = new StudioBackend()
     TestWebSocket.backend = backend

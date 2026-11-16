@@ -214,10 +214,10 @@ export function useSceneDialogs(): {
       // This is an explicit stop, unlike switching to a no-screen scene (D18).
       const layout = next.layouts[layoutPresetOrientation(layoutOnStream)]
       void studio
-        .switchSourceDeviceLive('capture', {
-          ...captureConfig.sources,
-          ...showsSources(next.shows)
-        })
+        .switchSourceDeviceLive(
+          'capture',
+          buildCaptureSources(captureConfig.sources, deviceList.devices, undefined)
+        )
         .then(() => {
           if (layout.layoutPreset !== layoutOnStream)
             applyCameraPreset({ layoutPreset: layout.layoutPreset })

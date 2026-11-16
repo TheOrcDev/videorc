@@ -161,3 +161,19 @@ export function streamManagerScreenKeyTitle(
   const place = state?.streamManager
   return state?.windows?.comments && place?.visible && place.screenId ? 'Away' : 'Closed'
 }
+
+/** Both Scene actions read the ordered scene list. Old keys keep their wire request. */
+export function sceneActionIntent(settings: {
+  sceneId?: string
+  layoutPreset?: string
+}): Record<string, unknown> | null {
+  return settings.sceneId
+    ? { kind: 'sceneApply', sceneId: settings.sceneId }
+    : settings.layoutPreset
+      ? { kind: 'sceneApply', layoutPreset: settings.layoutPreset }
+      : null
+}
+
+export function sceneActionOptions(state: State): { value: string; label: string }[] {
+  return (state?.savedScenes ?? []).map(({ id, name }) => ({ value: id, label: name }))
+}

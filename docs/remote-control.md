@@ -179,7 +179,7 @@ Intent params (`kind` + fields):
 | `micMute` / `micUnmute` / `micToggle`                    | —                                        | microphone mute                                                                                                                                                                                                                                                                   |
 | `systemAudioOn` / `systemAudioOff` / `systemAudioToggle` | —                                        | system audio on/off (plan 069); refused while the device cannot run                                                                                                                                                                                                               |
 | `buddyLiveOn` / `buddyLiveOff` / `buddyLiveToggle`       | —                                        | turn Sidekick Live on or off, with the same rules as the Stream Manager: on needs Premium and the Cloud AI consent, and a refused ack says why; off has no gate. While Sidekick's settings load, all three are refused ("Loading your Sidekick settings… Try again in a moment.") |
-| `sceneApply`                                             | `sceneId?`, `screenId?`, `layoutPreset?` | switch saved scene by id, or a built-in layout (at least one target required; `sceneId` takes precedence)                                                                                                                                                                         |
+| `sceneApply`                                             | `sceneId?`, `screenId?`, `layoutPreset?` | switch by `sceneId`; legacy `layoutPreset` switches to the first scene using it in the current orientation, else "No scene uses {Layout}"; `screenId` changes the screen of the scene on stream (at least one target required; `sceneId` takes precedence over layout)            |
 | `takeoverShow`                                           | `assetId`                                | show a takeover image (BRB etc.)                                                                                                                                                                                                                                                  |
 | `takeoverHide`                                           | —                                        | hide the takeover                                                                                                                                                                                                                                                                 |
 | `bannerShow`                                             | `bannerId`                               | show that banner (plan 186; explicit, idempotent)                                                                                                                                                                                                                                 |
@@ -530,7 +530,7 @@ limiter, projection leak test, router isolation over a real socket) and
 `scripts/lib/remote-lan-client.test.mjs` in `pnpm test:scripts` (pure-JS HMAC
 vs `node:crypto`, and the client against an independent node-crypto desktop).
 
-### Saved scene names on the phone (plan 210)
+### Scene names on the phone (plans 210 and 231)
 
 `remote.state` includes `savedScenes: { id, name }[]` in library order and
 `activeSavedSceneId: string | null`. Only opaque ids and typed display names
@@ -538,8 +538,12 @@ cross the socket; scene sources, app identities, paths, window titles and
 scene snapshots stay on the desktop. Takeover names are the precedent: typed
 names already reach a paired phone. Names may contain personal text the owner
 chose, so paired phones can now read those scene labels. A paired device can
-apply a saved scene through `sceneApply { sceneId }` (non-empty, at most 128
-characters), with the same orientation and app-availability refusals as Studio.
+apply a scene through `sceneApply { sceneId }` (non-empty, at most 128
+characters), with the same app-availability refusals as Studio. The phone and
+Stream Deck list these scenes only. A legacy `layoutPreset` chooses the first
+scene with that layout in the current orientation, or returns
+"No scene uses {Layout}". A `screenId` changes the scene on stream's screen
+through the same picker path as Sources; it never leaves that scene.
 No new route, method or event is added; `LAN_EVENTS` and the router are unchanged.
 
 ## Hide screen (plan 210 S8a)

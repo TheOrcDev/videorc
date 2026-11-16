@@ -38,7 +38,18 @@ function studioContext(overrides: Partial<StudioActionContext> = {}): StudioActi
     banners: [],
     sounds: [{ id: 'airhorn' }],
     sessionLive: false,
-    savedScenes: [{ id: 'scene-1', name: 'Coding' }],
+    savedScenes: [
+      {
+        id: 'scene-1',
+        name: 'Coding',
+        visual: { layout: { layoutPreset: 'screen-only', arrangementMode: 'preset' } }
+      },
+      {
+        id: 'second',
+        name: 'Second',
+        visual: { layout: { layoutPreset: 'screen-only', arrangementMode: 'preset' } }
+      }
+    ],
     applySavedScene: vi.fn(async () => true),
     layoutLabels: { 'screen-camera': 'Screen + camera', 'screen-only': 'Screen only' },
     ...overrides
@@ -116,7 +127,7 @@ describe('the Studio agent tools (plan 209 S6)', () => {
       {
         ok: true,
         message: 'Switched to Coding.',
-        result: { scene: { id: 'scene-1', name: 'Coding', kind: 'saved' } }
+        result: { scene: { id: 'scene-1', name: 'Coding' } }
       }
     )
     expect(context.applySavedScene).toHaveBeenCalledWith('scene-1')
@@ -124,10 +135,14 @@ describe('the Studio agent tools (plan 209 S6)', () => {
       await executeAgentIntent(call('switch_scene', { sceneId: 'screen-only' }), context)
     ).toEqual({
       ok: true,
-      message: 'Switched to Screen only.',
-      result: { scene: { id: 'screen-only', name: 'Screen only', kind: 'layout' } }
+      message: 'Switched to Coding.',
+      result: { scene: { id: 'scene-1', name: 'Coding' } }
     })
-    expect(context.applyLayoutPreset).toHaveBeenCalledWith('screen-only')
+    expect(context.applySavedScene).toHaveBeenLastCalledWith('scene-1')
+    expect(context.applyLayoutPreset).not.toHaveBeenCalled()
+    expect(
+      await executeAgentIntent(call('switch_scene', { sceneId: 'screen-camera' }), context)
+    ).toEqual({ ok: false, message: 'No scene uses Screen + camera' })
     expect(await executeAgentIntent(call('switch_scene', { sceneId: 'gone' }), context)).toEqual({
       ok: false,
       message: AGENT_TOOL_COPY.sceneMissing

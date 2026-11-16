@@ -1786,3 +1786,142 @@ keeps its test ids (`scene-new`, `scene-edit`, `[data-saved-scene]` rows with
 No script in `scripts/` reads the Scene page's row words, the old event or the
 old description. The design skill and `docs/ui-copy.md` now say remotes,
 agents and ⌘K switch scenes only; S9's code is what makes that true.
+
+### S9. Remotes and agents, and D18's renderer (2026-11-15 to 2026-11-16)
+
+Done. D18's renderer is committed separately as `7a822aa85`; Part B and
+these notes accompany the S9 commit. The completed checks below supersede
+all interrupted runs. No guard was bypassed, and the shared checkout was
+only inspected. No push, PR, merge or rebase.
+
+**D18 (Part A, with the final picker refinement in Part B)**
+
+- No-screen layout commits send S5's `retainScreen: true` only with an
+  existing screen owner (`starting`/`live`) and no explicit `captureOff`.
+  This covers a switch to Camera only, a none-scene or another layout
+  without a screen slot, and later look/background edits. Retention never
+  needs or starts a missing capture.
+- `sceneKeepsCapture` judges the layout, including a scene that owns a
+  screen its current orientation doesn't draw. Source selection and the
+  working app stay intact. Native preview returns early for every
+  no-screen layout; explicit Off still takes its stop path.
+- Change screen… → No screen on the scene on stream now uses the Sources
+  picker's `buildCaptureSources(..., undefined)` and
+  `switchSourceDeviceLive`, then sets Camera only if needed. The idle picker
+  updates its ref before returning so the chained layout sees Off before
+  React flushes. This corrects S7's old explicit-choice retention behavior,
+  as the S9 brief requires, and clears the picker's stand-in wishes too.
+- Provider regressions cover idle/live switches, running/absent owners,
+  no renderer stop/source switch, and explicit No screen omitting retention.
+  The scene-list test covers Change screen… taking the explicit-stop path.
+
+**Remotes and agents (D14)**
+
+- Remote `sceneId` applies a scene. The existing legacy `layoutPreset` path
+  uses `firstSceneWithLayout` and its display-name refusal. `screenId` now
+  uses the Screen picker (display or window), editing the scene on stream
+  with the same source-switch confirmation/refusal. Rust bounds and
+  round-trips screen/layout strings as it already did scene ids.
+- The phone renders only ordered `state.savedScenes`, marked by
+  `activeSavedSceneId`. Layout cards and their name fallback are gone;
+  CSS and key primitives are unchanged. Both Deck Scene actions list scenes.
+  The old action UUID and saved `layoutPreset` still send legacy requests
+  until a scene is chosen; a refusal reaches the existing key alert. Its
+  property inspector now chooses Scene.
+- MCP `list_scenes` returns only `id`, `name`, 1-based `position`, display
+  `key`, screen words `shows`, and `onStream`. Position/custom keys join
+  with a slash; unbound is empty. The lazy publisher builds these field by
+  field: no source object, bundle id, credential, path or image is added.
+  The bounded surface RPC already accepts this shape; its contract now
+  documents the fields.
+- `switch_scene` resolves a scene id first, then a legacy layout against
+  current-orientation scene views, skipping Freeform. It returns the actual
+  matched scene id/name, or `No scene uses {Layout}`. Catalog/schema tests
+  cover inventory and result shapes. Sidekick's planner uses the exact
+  allowlisted inventory function used by `list_scenes`; its regression
+  excludes a stale layout entry alongside two named scenes.
+- ⌘K already had Add scene… from S7 and one item per scene. Visible text
+  now also says `Switch to {name}`; its test lists several scenes in order.
+  No layout-switch items remain. Agents and remote-control docs match.
+
+**Final verification**
+
+Evidence is in `/Users/orcdev/projects/plan-231-run/S9/`. Every completed
+command below has its own log; `final-rust-results.jsonl` and
+`final-js-results.jsonl` record commands, timestamps and exit status as each
+finishes. `final-changed-files.json` lists all 30 Part B files by absolute
+path. The initial Shadscan audit passed at 27 (baseline/floor 27); its final
+pre-commit repeat is in `final-shadscan.json`.
+
+- `pnpm typecheck`, `pnpm lint`: PASS on final source code
+  (`typecheck-complete.log`, `lint-complete.log`). This resume changed
+  documentation only.
+- `pnpm --filter @videorc/desktop test --maxWorkers=2 --minWorkers=1`:
+  PASS, 706 files, 8,256 passed / 1 skipped, 308.77 s
+  (`final-desktop.log`). No quota-toast or cloud-resume flake occurred.
+- `pnpm --filter @videorc/streamdeck-plugin test`: PASS, 34 tests,
+  including admitted legacy requests waiting for mapped success or renderer
+  refusal (`final-plugin.log`). Plugin `typecheck`: PASS.
+- Rust: all commands passed in ONE foreground build-slot hold, with
+  `VIDEORC_SMOKE_BUILD_SLOT_WAIT_MS=7200000 CARGO_BUILD_JOBS=2`:
+  `cargo test -p videorc-backend --bin videorc-backend --no-run` (21m17s),
+  then `remote_control::tests` (17 passed), `agent_look::tests` (12),
+  `agent_tools::tests` (15), `buddy_act::tests` (23),
+  `cargo clippy -p videorc-backend --all-targets -- -D warnings` (2m54s),
+  and `cargo fmt --check --all`. Total targeted tests: 67 passed.
+  Logs: `final-rust-slot.log`, `final-rust-{compile,remote-control,agent-look,agent-tools,buddy-act,clippy,fmt}.log`.
+- `pnpm build`: PASS (`final-build.log`). `pnpm check:renderer-assets`:
+  inherited S2 FAIL; cap unchanged (`final-renderer-budget.log`).
+  S8: 2,378,551 raw / 489,148 gzip; final S9: 2,379,208 raw / 489,317 gzip
+  (+657 / +169). Cap: 2,365,000 / 487,000. Remote/inventory logic remains
+  lazy; D18's request builder and ref synchronization are eager. No cap raise.
+- Focused coverage also passed: 9 files / 170 tests, the added catalog
+  regression (12), provider S9 (1), D18 (2), and scene neighbors (82).
+- Prettier on all touched files and `git diff --check`: PASS. The final
+  commit audit enforces the unchanged Shadscan floor 27.
+
+**Deviations and visual evidence**
+
+No LAN route/event, credential, registry or smoke script changed.
+`CLAUDE.md` is absent in this worktree; the briefs, plan and AGENTS.md apply.
+Earlier long runs were interrupted by T3 restarts or held by the live guard;
+those results are not counted as passes above. The final Rust hold completed
+without interruption. The earlier `pnpm clean:worktrees --apply` kept all
+67 worktrees (none eligible); this resume had 77 GiB free.
+
+Light/dark capture attempts could not produce PNGs: the initial standard
+runner waited on the Cargo target lock; retries reused the unchanged native
+addon through the same isolated launcher and capture runner, preserving
+host guards, but timed out on memory pressure before an app launched.
+The final attempt is checkpointed in `final-capture-result.json` and
+`final-capture.log`. Both-theme visual acceptance remains owed in S11.
+No owned app or capture process remains from these attempts.
+
+**S11 handoff** (heavy smokes deliberately deferred by the brief)
+
+- `smoke:remote-control`, `scripts/smoke-remote-control-app.mjs`: lines
+  205–232 should assert the matched scene id as well as layout for a legacy
+  request; debounce stays. Lines 528–537 currently await
+  `activeSavedSceneId === null` after a layout edit: that same scene stays
+  on. Keep the exact `savedScenes` `id,name` allowlist at 518–524. Add a
+  screenId pick editing that scene and a layout refusal after its last
+  matching scene changes layout. Scene-id ACK/state checks at 538–555 stay.
+  Discovery, credentials and intent allowlists are unchanged.
+- `smoke:agent-mcp`, `scripts/smoke-agent-mcp-app.mjs`: lines 636–640 must
+  use `onStream`, not `active`, and named scene ids, not `kind: layout`.
+  Check inventory `id,name,position,key,shows,onStream`. Lines 690–693 must
+  expect the actual matched scene id for legacy `screen-only`; compute it
+  from the prepared library rather than hard-coding the layout id (a fresh
+  unchanged profile normally maps to `default-screen-only`). Test a listed
+  id and no matching layout too. The return at 1262 and legacy request at
+  1310 must use the new inventory. `get_status.scene` retains compatibility
+  `kind: saved`/`modified`; `switch_scene.scene` is id/name only. Tool names
+  and allowlists are unchanged.
+- Run deferred `smoke:remote-lan` for phone inventory, `smoke:buddy-act` and
+  unchanged `smoke:buddy-commands` for planner vocabulary, plus S11's
+  recording/preview gates and both-theme captures.
+- D18 acceptance must prove the retained capture generation, Camera only →
+  app swap in place, no missing-owner start, and explicit No screen
+  retirement, idle/live. Check a no-screen 9:16 scene and later look edits.
+  Unit mocks do not prove native timing or artifacts. Screen ISO policy is
+  untouched; the renderer-budget overage remains the inherited owner call.

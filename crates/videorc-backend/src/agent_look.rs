@@ -478,35 +478,33 @@ pub async fn get_picture(state: &AppState, _agent: &AgentIdentity, _args: Value)
 // list_scenes, list_sources
 // ---------------------------------------------------------------------------
 
-pub async fn list_scenes(state: &AppState, _agent: &AgentIdentity, _args: Value) -> ToolOutcome {
-    let Some(surface) = studio_surface(state) else {
-        return ToolOutcome::refused(STUDIO_CLOSED);
-    };
-    let active = surface
-        .get("scene")
-        .and_then(|scene| text_of(scene, "id"))
-        .map(str::to_string);
-    let scenes: Vec<Value> = list(Some(&surface), "scenes")
+/// The same allowlisted list powers MCP and Sidekick's scene vocabulary.
+/// A stale renderer's built-in layout entries never become scenes.
+pub(crate) fn scenes_from_surface(surface: &Value) -> Vec<Value> {
+    list(Some(surface), "scenes")
         .iter()
-        .filter_map(|scene| {
+        .filter(|scene| text_of(scene, "kind") != Some("layout"))
+        .enumerate()
+        .filter_map(|(index, scene)| {
             let id = text_of(scene, "id")?;
             Some(json!({
                 "id": id,
                 "name": text_of(scene, "name").unwrap_or(id),
-                "kind": if text_of(scene, "kind") == Some("saved") { "saved" } else { "layout" },
-                "active": active.as_deref() == Some(id),
+                "position": index + 1,
+                "key": text_of(scene, "key").unwrap_or(""),
+                "shows": text_of(scene, "shows").unwrap_or("No screen"),
+                "onStream": surface.get("scene").and_then(|active| text_of(active, "id")) == Some(id),
             }))
         })
-        .collect();
-    let saved = scenes
-        .iter()
-        .filter(|scene| scene["kind"] == "saved")
-        .count();
-    let text = format!(
-        "{} scenes: {saved} saved and {} built-in layouts.",
-        scenes.len(),
-        scenes.len() - saved
-    );
+        .collect()
+}
+
+pub async fn list_scenes(state: &AppState, _agent: &AgentIdentity, _args: Value) -> ToolOutcome {
+    let Some(surface) = studio_surface(state) else {
+        return ToolOutcome::refused(STUDIO_CLOSED);
+    };
+    let scenes = scenes_from_surface(&surface);
+    let text = format!("{} scenes.", scenes.len());
     ToolOutcome::ok(text, Some(json!({ "scenes": scenes })))
 }
 
@@ -1235,8 +1233,8 @@ mod tests {
             "recordBlockedReason": "Choose a screen or a camera first.",
             "scene": { "id": "screen-camera", "name": "Screen + camera", "kind": "layout", "modified": false },
             "scenes": [
-                { "id": "screen-camera", "name": "Screen + camera", "kind": "layout" },
-                { "id": "scene-1", "name": "Coding", "kind": "saved" }
+                { "id": "screen-camera", "name": "Screen + camera", "position": 1, "key": "⌃⌥1", "shows": "Display 1", "onStream": true },
+                { "id": "scene-1", "name": "Coding", "position": 2, "key": "⌃⌥2", "shows": "Figma · front window", "onStream": false }
             ],
             "microphone": { "muted": true, "name": "MacBook Pro Microphone" },
             "systemAudio": { "on": false, "available": true },
@@ -1474,11 +1472,11 @@ mod tests {
         assert_eq!(
             structured(&scenes)["scenes"],
             json!([
-                { "id": "screen-camera", "name": "Screen + camera", "kind": "layout", "active": true },
-                { "id": "scene-1", "name": "Coding", "kind": "saved", "active": false }
+                { "id": "screen-camera", "name": "Screen + camera", "position": 1, "key": "⌃⌥1", "shows": "Display 1", "onStream": true },
+                { "id": "scene-1", "name": "Coding", "position": 2, "key": "⌃⌥2", "shows": "Figma · front window", "onStream": false }
             ])
         );
-        assert_eq!(scenes.text, "2 scenes: 1 saved and 1 built-in layouts.");
+        assert_eq!(scenes.text, "2 scenes.");
         let sources = list_sources(&state, &agent, json!({})).await;
         let sources = structured(&sources);
         assert_eq!(

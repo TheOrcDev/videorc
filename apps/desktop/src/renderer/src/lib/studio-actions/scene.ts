@@ -1,11 +1,38 @@
 // The picture: a scene by its id, or by a layout it uses (plan 231 D14), and
 // a takeover screen.
 
+import { buildCaptureSources } from '@/lib/capture'
 import type { LayoutPreset } from '@/lib/backend'
 import type { StudioActionExecutor } from './context'
 import { REMOTE_INTENT_COPY } from './copy'
 
 export const sceneApply: StudioActionExecutor = async (context, fields) => {
+  if (fields.sceneId !== undefined || fields.layoutPreset !== undefined) {
+    const outcome = await switchScene(context, fields)
+    if (!outcome.ok) return outcome
+  } else if (fields.screenId === undefined) {
+    return { ok: false, message: REMOTE_INTENT_COPY.sceneMissing }
+  }
+  if (fields.screenId !== undefined) {
+    const screen = context.sourcePicker?.capture.find(
+      (device) =>
+        device.id === fields.screenId && (device.kind === 'screen' || device.kind === 'window')
+    )
+    if (!screen || !context.sourcePicker || !context.switchSource)
+      return { ok: false, message: REMOTE_INTENT_COPY.screenMissing }
+    return context.switchSource(
+      'capture',
+      buildCaptureSources(
+        context.sourcePicker.sources,
+        [...context.sourcePicker.capture],
+        screen.id
+      )
+    )
+  }
+  return { ok: true }
+}
+
+const switchScene: StudioActionExecutor = async (context, fields) => {
   if (typeof fields.sceneId === 'string') {
     if (!fields.sceneId.trim() || fields.sceneId.length > 128 || !context.applySavedSceneResult)
       return { ok: false, message: REMOTE_INTENT_COPY.sceneMissing }

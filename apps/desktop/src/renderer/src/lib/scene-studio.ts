@@ -122,7 +122,7 @@ export function sceneOnStreamAtLaunch(
 
 /**
  * Whether a scene going on stream leaves the capture as it is (D18): it shows
- * no screen and its layout draws none, so the running capture keeps running
+ * no screen in its current layout, so the running capture keeps running
  * and going back to an app's scene is a swap in place.
  */
 export function sceneKeepsCapture(

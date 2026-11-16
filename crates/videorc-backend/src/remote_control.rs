@@ -238,6 +238,16 @@ impl RemoteIntent {
                             .to_string(),
                     );
                 }
+                for (field, value) in [("screenId", screen_id), ("layoutPreset", layout_preset)] {
+                    if value
+                        .as_ref()
+                        .is_some_and(|id| id.trim().is_empty() || id.chars().count() > 128)
+                    {
+                        return Err(format!(
+                            "sceneApply {field} must be non-empty and at most 128 characters."
+                        ));
+                    }
+                }
                 if screen_id.is_none() && layout_preset.is_none() && scene_id.is_none() {
                     return Err("sceneApply needs a sceneId, screenId or layoutPreset.".to_string());
                 }
@@ -710,6 +720,23 @@ mod tests {
                 serde_json::to_value(&intent).unwrap(),
                 serde_json::json!({"kind": "sceneApply", "sceneId": id})
             );
+        }
+    }
+
+    #[test]
+    fn screen_and_legacy_layout_targets_are_bounded_and_relayed_unchanged() {
+        for field in ["screenId", "layoutPreset"] {
+            for value in ["", " ", &"x".repeat(129)] {
+                let mut body = serde_json::json!({"kind": "sceneApply"});
+                body[field] = serde_json::json!(value);
+                let intent: RemoteIntent = serde_json::from_value(body).unwrap();
+                assert!(intent.validate().is_err());
+            }
+            let mut body = serde_json::json!({"kind": "sceneApply"});
+            body[field] = serde_json::json!("screen-only");
+            let intent: RemoteIntent = serde_json::from_value(body.clone()).unwrap();
+            assert!(intent.validate().is_ok());
+            assert_eq!(serde_json::to_value(intent).unwrap(), body);
         }
     }
 
