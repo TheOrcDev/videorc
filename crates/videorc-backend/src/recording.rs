@@ -40929,15 +40929,31 @@ mod tests {
     async fn r2_a_l3_old_cloud_marker_does_not_hide_a_new_direct_stream_failure() {
         let state = test_state();
         let session_id = "direct-after-hand-off";
+        let params = base_params(true, true);
+        state
+            .database
+            .create_session(&NewSession {
+                id: session_id.into(),
+                title: "Direct after hand-off".into(),
+                started_at: Utc::now().to_rfc3339(),
+                mode: "record-stream".into(),
+                output_path: None,
+                container: None,
+                stream_preset: None,
+                sources: params.sources,
+                layout: params.layout,
+                output: params.output,
+            })
+            .expect("the direct session has a health-event owner");
         let mut events = state.events.subscribe();
         *state.recording.lock().await = Some(test_active_recording_stub(session_id));
         crate::cloud_show::lock(&state.cloud_show).stopped_by =
             Some(crate::cloud_show::CloudStoppedBy::HandOff);
         publish_stream_output_failure_now(&state, session_id, "direct feed disconnected");
-        assert!(
-            events.try_recv().is_ok(),
-            "the new direct session still reports its failure"
-        );
+        let reported = std::iter::from_fn(|| events.try_recv().ok()).any(|event| {
+            event.event == "health.event" && event.payload["code"] == STREAM_OUTPUT_FAILED_CODE
+        });
+        assert!(reported, "the new direct session still reports its failure");
     }
 
     #[tokio::test(start_paused = true)]
