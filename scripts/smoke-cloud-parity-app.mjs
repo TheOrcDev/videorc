@@ -50,6 +50,7 @@ if (
     'privacy',
     'soundboard',
     'avatar',
+    'scenes',
     'lifecycle',
     'services',
     'replay-ring',
@@ -80,6 +81,7 @@ const { output } = await run({
   privacy: selected.case === 'privacy',
   soundboard: selected.case === 'soundboard',
   avatar: selected.case === 'avatar',
+  scenes: selected.case === 'scenes',
   replayRing: selected.case === 'replay-ring',
   views: selected.case === 'views',
   graphics: selected.case === 'graphics'

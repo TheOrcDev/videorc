@@ -511,6 +511,17 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
     [call, hostShape]
   )
 
+  const clearRoomScene = useCallback(async () => {
+    const roomClient = clientRef.current
+    if (!roomClient?.sceneContent) return
+    const commit = await roomClient.commitScene(null)
+    if (commit.state === 'failed' || commit.state === 'waiting')
+      onError(
+        new Error(commit.reason ?? 'The program has not confirmed the room layout.'),
+        'clear the scene'
+      )
+  }, [onError])
+
   const previewReplaced = roomOpen || previewReplacedOverride
   const value = useMemo<TalkShowContextValue>(
     () => ({
@@ -561,6 +572,9 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
       setLayout: async (layout) => {
         if (!stage) return
         await setStage({ ...stage, layout })
+        // Plan 249 S12: choosing a room layout puts the room's own layouts
+        // back on the program; a scene stays only until the host does this.
+        await clearRoomScene()
       },
       setSpotlight: async (identity) => {
         if (!stage) return
@@ -569,6 +583,7 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
           layout: identity ? 'spotlight' : stage.layout,
           spotlight: identity ?? undefined
         })
+        if (identity) await clearRoomScene()
       },
       listDisplaySources: async () => (await window.videorc?.getTalkShowDisplaySources?.()) ?? [],
       startScreenShare: async (sourceId) => {
@@ -652,6 +667,7 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
     }),
     [
       call,
+      clearRoomScene,
       clipsStepAside,
       setGraphicsEnabled,
       setAvatarEnabled,

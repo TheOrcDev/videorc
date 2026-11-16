@@ -1,4 +1,5 @@
 import { parseAvatarCapability, type AvatarCapability } from '../../../shared/cloud-avatar'
+import { parseSceneCapability, type SceneCapability } from '../../../shared/cloud-scene'
 /** Plan 249 S3. An exact role, not arbitrary screen/system audio. */
 export const ROOM_MEDIA_VERSION = 2 as const
 export const AUX_TRACK_NAME = 'videorc:v2:host-aux:stereo'
@@ -19,6 +20,8 @@ export type ConsumerCapability = {
   identity: string
   participantSid: string
   graphics?: AvatarCapability
+  /** Plan 249 S12: the egress lane draws scenes; `applied` is its rendered revision. */
+  scene?: SceneCapability
   auxiliary?: { trackSid: string; rms: number; observedAt: number }
 }
 export type CapabilityReceipt = ConsumerCapability & { at: number }
@@ -53,6 +56,8 @@ export function parseConsumerCapability(value: unknown): ConsumerCapability | nu
   const graphics = v.graphics === undefined ? null : parseAvatarCapability(v.graphics)
   if (v.graphics !== undefined && (!graphics || !graphicsLaneAllowed(v.identity, graphics)))
     return null
+  const scene = v.scene === undefined ? null : parseSceneCapability(v.scene)
+  if (v.scene !== undefined && (!scene || !v.identity.startsWith('EG_'))) return null
   let auxiliary: ConsumerCapability['auxiliary']
   if (v.auxiliary !== undefined) {
     if (!v.auxiliary || typeof v.auxiliary !== 'object') return null
@@ -76,6 +81,7 @@ export function parseConsumerCapability(value: unknown): ConsumerCapability | nu
     identity: v.identity,
     participantSid: v.participantSid,
     ...(graphics ? { graphics } : {}),
+    ...(scene ? { scene } : {}),
     ...(auxiliary ? { auxiliary } : {})
   }
 }
