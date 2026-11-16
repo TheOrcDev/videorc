@@ -2314,6 +2314,9 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
                     .await
                     .map_err(anyhow::Error::msg)??;
             }
+            if lock(&self.slot).air_names_another_device() {
+                self.claim_talk_host(&bearer, &show_id, deadline).await?;
+            }
             return Ok(lock(&self.slot).status());
         }
         if let Err(message) = (self.hooks.camera)(CameraHandover::Lend).await {

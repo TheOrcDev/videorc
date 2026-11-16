@@ -1774,6 +1774,8 @@ pub struct CloudShowRuntime {
     continuation_stop_in_flight: bool,
     pub(crate) pending_feed_go: bool,
     pub(crate) claiming_air: bool,
+    // The foreign talk claim already given its duplicate-join grace window.
+    talk_claim_seen: Option<(String, String)>,
     last_discovery: Option<tokio::time::Instant>,
     pub(crate) show: Option<ActiveShow>,
     pub(crate) runner: Option<RunnerState>,
@@ -2146,6 +2148,20 @@ impl CloudShowRuntime {
     }
 
     /// The local session feeding the show, when there is one.
+    pub(crate) fn held_connected_talk(&self) -> bool {
+        self.talk
+            .as_ref()
+            .is_some_and(|talk| talk.client == crate::cloud_talk::CloudRoomClientState::Connected)
+    }
+
+    pub(crate) fn air_names_another_device(&self) -> bool {
+        self.runner
+            .as_ref()
+            .and_then(|runner| runner.on_air.as_ref())
+            .and_then(|air| air.device_id.as_deref())
+            .is_some_and(|id| id != self.device.id)
+    }
+
     pub fn feeding_session(&self) -> Option<String> {
         self.show.as_ref().and_then(|show| show.session_id.clone())
     }
@@ -2179,6 +2195,7 @@ impl CloudShowRuntime {
     }
 
     fn bump_generation(&mut self) -> u64 {
+        self.talk_claim_seen = None;
         self.destinations_generation.invalidate();
         self.generation += 1;
         self.control_tx = None;
@@ -3167,7 +3184,7 @@ impl<W: CloudWebApi, C: ControlConnector> ControlLoop<W, C> {
         state: RunnerState,
         fresh: impl FnOnce() -> bool,
     ) -> bool {
-        let (session, legs, taken_over) = {
+        let (session, legs, taken_over, reclaim_host) = {
             let mut runtime = lock(&self.context.slot);
             if !fresh() {
                 return false;
@@ -3274,6 +3291,37 @@ impl<W: CloudWebApi, C: ControlConnector> ControlLoop<W, C> {
             if stage_lost {
                 self.resend_stage = true;
             }
+            let reclaim_host = if runtime.stopped_by.is_none()
+                && runtime.held_connected_talk()
+                && runtime
+                    .show
+                    .as_ref()
+                    .is_some_and(|show| show.control.transport_kind() == ControlKind::Web)
+            {
+                state
+                    .on_air
+                    .as_ref()
+                    .filter(|air| !air.waiting)
+                    .and_then(|air| {
+                        air.device_id
+                            .as_ref()
+                            .filter(|id| *id != &runtime.device.id)
+                            .map(|id| (id.clone(), air.since.clone()))
+                    })
+            } else {
+                None
+            };
+            let reclaim_host = match reclaim_host {
+                Some(claim) if runtime.talk_claim_seen.as_ref() != Some(&claim) => {
+                    runtime.talk_claim_seen = Some(claim.clone());
+                    Some(claim)
+                }
+                Some(_) => None,
+                None => {
+                    runtime.talk_claim_seen = None;
+                    None
+                }
+            };
             runtime.set_runner(state);
             runtime.talk_layout_from_runner();
             runtime.talk_live_from_runner();
@@ -3286,6 +3334,7 @@ impl<W: CloudWebApi, C: ControlConnector> ControlLoop<W, C> {
                 },
                 legs,
                 taken_over,
+                reclaim_host,
             )
         };
         if let Some(session_id) = session
@@ -3294,6 +3343,36 @@ impl<W: CloudWebApi, C: ControlConnector> ControlLoop<W, C> {
             (self.context.hooks.legs)(&session_id, legs);
         }
         self.context.hooks.emit_from(&self.context.slot);
+        if let Some(claim) = reclaim_host {
+            let context = self.context.clone();
+            let bearer = self.bearer.clone();
+            let show_id = self.show_id.clone();
+            let generation = self.generation;
+            tokio::spawn(async move {
+                // The renderer waits up to three seconds for duplicate identity.
+                // Only a host still connected after that window may reclaim.
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                let reclaim = {
+                    let runtime = lock(&context.slot);
+                    runtime.generation == generation
+                        && runtime.stopped_by.is_none()
+                        && runtime.held_connected_talk()
+                        && runtime.air_names_another_device()
+                        && runtime.talk_claim_seen.as_ref() == Some(&claim)
+                };
+                if reclaim {
+                    let _ = context
+                        .claim_talk_host(
+                            &bearer,
+                            &show_id,
+                            tokio::time::Instant::now()
+                                + crate::cloud_control_web::CONTROL_INTENT_BUDGET,
+                        )
+                        .await;
+                    context.hooks.emit_from(&context.slot);
+                }
+            });
+        }
         if taken_over {
             let context = self.context.clone();
             let show_id = self.show_id.clone();
@@ -4537,7 +4616,7 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
 
     /// Plan 243 D7: stop this computer while leaving every cloud leg open.
     pub async fn hand_off(&self, bearer: Option<String>) -> Result<()> {
-        let (show_id, device) = {
+        let (show_id, device, reclaim_host) = {
             let runtime = lock(&self.slot);
             let show = runtime
                 .show
@@ -4549,16 +4628,29 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
             if show.session_id.is_none() && runtime.talk.is_none() {
                 return Err(cloud_refusal("cloud-not-on-air"));
             }
-            if runtime
-                .runner
-                .as_ref()
-                .and_then(|r| r.on_air.as_ref())
-                .is_some_and(|air| air.device_id.as_deref() != Some(&runtime.device.id))
+            let reclaim_host = runtime.held_connected_talk() && runtime.air_names_another_device();
+            if !reclaim_host
+                && runtime
+                    .runner
+                    .as_ref()
+                    .and_then(|r| r.on_air.as_ref())
+                    .is_some_and(|air| air.device_id.as_deref() != Some(&runtime.device.id))
             {
                 return Err(cloud_refusal("cloud-not-on-air"));
             }
-            (show.record.id.clone(), runtime.device.clone())
+            (show.record.id.clone(), runtime.device.clone(), reclaim_host)
         };
+        if reclaim_host {
+            let token = bearer
+                .as_deref()
+                .ok_or_else(|| anyhow::Error::new(CloudApiError::Unauthorized))?;
+            self.claim_talk_host(
+                token,
+                &show_id,
+                tokio::time::Instant::now() + crate::cloud_control_web::CONTROL_INTENT_BUDGET,
+            )
+            .await?;
+        }
         // A failed POST must still leave viewers on the hold card.
         let posted = match bearer {
             Some(bearer) => self
@@ -12018,6 +12110,55 @@ mod tests {
             );
             assert!(harness.context.web.on_air_calls.lock().unwrap().is_empty());
             assert!(lock(&harness.context.slot).talk.is_none());
+            assert!(harness.context.web.end_calls.lock().unwrap().is_empty());
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn r2_a_m4_connected_host_reclaims_after_an_unjoined_phone_claim() {
+        use crate::cloud_talk::{CloudRoomClientState, RoomClientReportParams};
+        for action in ["hand-off", "resume", "automatic"] {
+            let harness = harness(true);
+            managed_room(&harness).await;
+            harness.context.report_client(RoomClientReportParams {
+                state: CloudRoomClientState::Connected,
+                detail: None,
+            });
+            let mut state = managed_talk_state(json!([]), true, 1);
+            state["onAir"] = json!({"deviceId":"BBBBBBBBBBBBBBBBBBBBBB","kind":"phone","source":"host","waiting":false});
+            harness.context.web.set_state(state);
+            wait_until(|| {
+                lock(&harness.context.slot)
+                    .status()
+                    .on_air
+                    .is_some_and(|air| !air.this_device)
+            })
+            .await;
+            match action {
+                "hand-off" => {
+                    harness
+                        .context
+                        .hand_off(Some("bearer".into()))
+                        .await
+                        .unwrap();
+                }
+                "resume" => {
+                    harness
+                        .context
+                        .resume_room(Some("bearer".into()))
+                        .await
+                        .unwrap();
+                }
+                _ => {
+                    tokio::time::sleep(Duration::from_secs(6)).await;
+                }
+            }
+            assert_eq!(
+                harness.context.web.on_air_calls.lock().unwrap().as_slice(),
+                &[("host".into(), "go".into())]
+            );
+            tokio::time::sleep(Duration::from_secs(10)).await;
+            assert_eq!(harness.context.web.on_air_calls.lock().unwrap().len(), 1);
             assert!(harness.context.web.end_calls.lock().unwrap().is_empty());
         }
     }
