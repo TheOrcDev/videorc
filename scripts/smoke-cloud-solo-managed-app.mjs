@@ -260,6 +260,13 @@ async function run(pass) {
         enabled ? 'recording' : 'streaming',
         "the continuing session must follow this profile's record setting"
       )
+      if (enabled) {
+        const frames = h.feedFrames.length
+        await waitFor(
+          () => h.feedFrames.length >= frames + 45,
+          'continuing recording contains decoded frames'
+        )
+      }
       return recording
     }
     const savedRecording = async (recording) => {
