@@ -4517,7 +4517,7 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
 
     /// Runs only after the local session starts: never wait for a feed before sending it.
     pub async fn finish_resume(&self, bearer: &str, started_session: &str) -> Result<()> {
-        let (show_id, device, orientations, generation, session_id) = {
+        let (show_id, device, generation, session_id) = {
             let mut runtime = lock(&self.slot);
             // Only the successful start that bound this prepare may finish it.
             // Local recordings and direct starts do not own a resume claim.
@@ -4537,15 +4537,6 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
             (
                 show.record.id.clone(),
                 runtime.device.clone(),
-                show.ingest
-                    .as_ref()
-                    .map(|entries| {
-                        entries
-                            .iter()
-                            .map(|i| orientation_id(i.orientation))
-                            .collect::<Vec<_>>()
-                    })
-                    .unwrap_or_default(),
                 runtime.generation,
                 show.session_id.clone(),
             )
@@ -4567,35 +4558,13 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
                 })
         };
         let result = async {
-            let feed_deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+            let go_deadline = tokio::time::Instant::now() + Duration::from_secs(40);
             loop {
                 if !still_feeding() {
                     return Err(cloud_refusal("cloud-not-on-air"));
                 }
-                let connected = {
-                    let runtime = lock(&self.slot);
-                    runtime.runner.as_ref().is_some_and(|state| {
-                        !orientations.is_empty()
-                            && orientations.iter().all(|orientation| {
-                                state
-                                    .feeds
-                                    .iter()
-                                    .any(|feed| &feed.orientation == orientation && feed.connected)
-                            })
-                    })
-                };
-                if connected {
-                    break;
-                }
-                if tokio::time::Instant::now() >= feed_deadline {
+                if tokio::time::Instant::now() >= go_deadline {
                     return Err(cloud_refusal("cloud-source-not-ready"));
-                }
-                tokio::time::sleep(Duration::from_millis(100)).await;
-            }
-            let go_deadline = tokio::time::Instant::now() + Duration::from_secs(20);
-            loop {
-                if !still_feeding() {
-                    return Err(cloud_refusal("cloud-not-on-air"));
                 }
                 match tokio::time::timeout_at(
                     go_deadline,
@@ -4613,12 +4582,15 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
                         }
                         return Ok(());
                     }
-                    Ok(Err(CloudApiError::Other { code, .. }))
-                        if code == "cloud-source-not-ready"
-                            && tokio::time::Instant::now() + Duration::from_secs(1)
-                                < go_deadline =>
+                    Ok(Err(CloudApiError::Other { status, code, .. }))
+                        if (status == 503
+                            || (status == 409 && code == "cloud-source-not-ready"))
+                            && tokio::time::Instant::now() < go_deadline =>
                     {
-                        tokio::time::sleep(Duration::from_secs(1)).await
+                        tokio::time::sleep_until(
+                            (tokio::time::Instant::now() + Duration::from_secs(1)).min(go_deadline),
+                        )
+                        .await
                     }
                     Ok(Err(error)) => return Err(anyhow::Error::new(error)),
                     Err(_) => return Err(cloud_refusal("cloud-source-not-ready")),
@@ -6059,6 +6031,8 @@ mod tests {
         create_kinds: StdMutex<Vec<String>>,
         on_air_calls: StdMutex<Vec<(String, String)>>,
         on_air_without_ingest: std::sync::atomic::AtomicBool,
+        go_ready: std::sync::atomic::AtomicBool,
+        go_errors: StdMutex<VecDeque<CloudApiError>>,
         hand_off_calls: AtomicUsize,
         hand_off_fails: std::sync::atomic::AtomicBool,
         hand_off_errors: StdMutex<VecDeque<CloudApiError>>,
@@ -6220,8 +6194,14 @@ mod tests {
                 .push((source.into(), step.into()));
             let mut state = self.managed.lock().unwrap().state.clone();
             let browser = state["onAir"]["source"] == "camera";
+            if source == "feed" && step == "go" {
+                if let Some(error) = self.go_errors.lock().unwrap().pop_front() {
+                    return Err(error);
+                }
+            }
             if step == "go"
                 && source == "feed"
+                && !self.go_ready.load(Ordering::SeqCst)
                 && !state["feeds"]
                     .as_array()
                     .is_some_and(|feeds| feeds.iter().all(|f| f["connected"] == true))
@@ -12416,6 +12396,84 @@ mod tests {
             Some(&false)
         );
     }
+
+    #[tokio::test(start_paused = true)]
+    async fn r2_a_l1_go_uses_the_full_budget_without_a_feed_webhook() {
+        let harness = harness(true);
+        managed_live_show(&harness).await;
+        {
+            let mut runtime = lock(&harness.context.slot);
+            runtime.pending_feed_go = true;
+            runtime.claiming_air = true;
+        }
+        harness.context.web.go_ready.store(true, Ordering::SeqCst);
+        harness
+            .context
+            .web
+            .go_errors
+            .lock()
+            .unwrap()
+            .extend((0..39).map(|i| {
+                web_error(
+                    if i % 2 == 0 { 503 } else { 409 },
+                    if i % 2 == 0 {
+                        "cloud-media-unavailable"
+                    } else {
+                        "cloud-source-not-ready"
+                    },
+                )
+            }));
+        let mut state = managed_state("live", live_legs());
+        state["feeds"][0]["connected"] = json!(false);
+        harness.context.web.set_state(state);
+        let started = tokio::time::Instant::now();
+        harness
+            .context
+            .finish_resume("bearer", "session-1")
+            .await
+            .unwrap();
+        assert!(started.elapsed() >= Duration::from_secs(39));
+        assert!(started.elapsed() < Duration::from_secs(40));
+        assert_eq!(
+            harness
+                .context
+                .web
+                .on_air_calls
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(_, step)| step == "go")
+                .count(),
+            40
+        );
+        assert!(harness.context.web.end_calls.lock().unwrap().is_empty());
+    }
+    #[tokio::test(start_paused = true)]
+    async fn r2_a_l1_an_unready_feed_gets_the_entire_forty_second_budget() {
+        let harness = harness(true);
+        managed_live_show(&harness).await;
+        {
+            let mut runtime = lock(&harness.context.slot);
+            runtime.pending_feed_go = true;
+            runtime.claiming_air = true;
+        }
+        let mut state = managed_state("live", live_legs());
+        state["feeds"][0]["connected"] = json!(false);
+        harness.context.web.set_state(state);
+        let started = tokio::time::Instant::now();
+        let error = harness
+            .context
+            .finish_resume("bearer", "session-1")
+            .await
+            .unwrap_err();
+        assert_eq!(
+            continuation_error_code(&error),
+            Some("cloud-source-not-ready")
+        );
+        assert_eq!(started.elapsed(), Duration::from_secs(40));
+        assert_eq!(harness.context.web.on_air_calls.lock().unwrap().len(), 40);
+    }
+
     fn hold_unconnected_for_review(harness: &Harness, talk: bool) {
         let created = if talk {
             created_managed_talk()
@@ -12629,7 +12687,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn cloud_continue_prepares_then_goes_only_after_the_camera_feed_connects() {
+    async fn cloud_continue_prepares_then_retries_go_until_the_web_accepts_the_feed() {
         for camera in [false, true] {
             let harness = harness(true);
             managed_live_show(&harness).await;
@@ -12666,7 +12724,7 @@ mod tests {
                 let go =
                     tokio::spawn(async move { context.finish_resume("bearer", "session-2").await });
                 tokio::time::sleep(Duration::from_secs(1)).await;
-                assert_eq!(harness.context.web.on_air_calls.lock().unwrap().len(), 1);
+                assert!(harness.context.web.on_air_calls.lock().unwrap().len() >= 2);
                 let mut state = harness.context.web.managed.lock().unwrap().state.clone();
                 state["feeds"][0]["connected"] = json!(true);
                 harness.context.web.set_state(state);
