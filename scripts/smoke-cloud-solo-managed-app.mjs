@@ -249,6 +249,33 @@ async function run(pass) {
     // Plan 243 C6: these are product actions, including the renderer's
     // broadcast owner. A bare backend start would make the complete check vacuous.
     const continuationAt = Date.now()
+    let continuedRecording
+    const followsProfile = async () => {
+      const enabled = await h.eval(
+        'return window.__videorcSmokeScenePresets.streamingState().captureConfig.recordEnabled'
+      )
+      const recording = await h.rpc('recording.status')
+      assert.equal(
+        recording.state,
+        enabled ? 'recording' : 'streaming',
+        "the continuing session must follow this profile's record setting"
+      )
+      return recording
+    }
+    const savedRecording = async (recording) => {
+      if (recording.state !== 'recording') return
+      const saved = await waitFor(
+        async () => {
+          const page = await h.rpc('sessions.list', { limit: 100 })
+          return page.items.find(
+            (item) => item.id === recording.sessionId && item.mp4Path && item.status === 'completed'
+          )
+        },
+        'continuing recording finalized in Library',
+        90000
+      )
+      playable(h, saved.mp4Path)
+    }
     await step(
       'hand off through the dialog preserves YouTube and saves the recording',
       async () => {
@@ -304,7 +331,7 @@ async function run(pass) {
       }
     )
     await step(
-      'Continue here on the same computer keeps ingress and streams without a new recording',
+      'Continue here on the same computer keeps ingress and follows its record setting',
       async () => {
         const before = structuredClone(h.web.shows.get(h.showId).ingest)
         const at = Date.now()
@@ -314,12 +341,7 @@ async function run(pass) {
           'same computer continued',
           45000
         )
-        const recording = await h.rpc('recording.status')
-        assert.equal(
-          recording.state,
-          'streaming',
-          'Resume must stream without starting another local recording'
-        )
+        continuedRecording = await followsProfile()
         assert.deepEqual(h.web.shows.get(h.showId).ingest, before)
         assert.ok(
           h.calls('onAir', at).some((c) => c.body.source === 'feed' && c.body.step === 'prepare')
@@ -358,6 +380,7 @@ async function run(pass) {
         )
         assert.ok(terminal && terminal.atMs - at <= 3000, 'taken-over stop exceeded three seconds')
         h.assertStopOrder(at, 'taken-over')
+        await savedRecording(continuedRecording)
         h.assertNoPlatformEnd(at)
         assert.ok(
           await h.eval(
@@ -403,7 +426,7 @@ async function run(pass) {
           'camera to feed needs go'
         )
         await h.assertRetiredIngress(oldIngress)
-        assert.equal((await h.rpc('recording.status')).state, 'streaming')
+        const bRecording = await followsProfile()
         assert.equal(h.calls('destinations', at).length, 0, 'Resume must retain platform legs')
         h.web.hooks.failLeg(h.showId, liveLeg.id)
         const reconnectAt = Date.now()
@@ -421,6 +444,7 @@ async function run(pass) {
         // different platform stream under this show's existing leg.
         await h.handOffUi()
         await h.status((s) => s.stoppedBy === 'hand-off' && s.show?.resumable, 'B hand-off')
+        await savedRecording(bRecording)
         await h.replaceSavedKey(h.targets.find((t) => t.label === liveLeg.label).id)
         await h.continueUi()
         await h.status(
