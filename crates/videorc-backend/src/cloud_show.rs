@@ -2558,7 +2558,7 @@ pub(crate) enum ControlLink<T: ControlTransport, W: CloudWebApi> {
     /// The node's control socket, past `hello` and `welcome` (plan 184).
     Node(T),
     /// Web control, past its first state poll (plan 234).
-    Web(WebControl<W>),
+    Web(Box<WebControl<W>>),
 }
 
 impl<T: ControlTransport, W: CloudWebApi> ControlLink<T, W> {
@@ -2747,7 +2747,7 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
                     self.slot.clone(),
                 )
                 .await?;
-                Ok((ControlLink::Web(web), first))
+                Ok((ControlLink::Web(Box::new(web)), first))
             }
             ControlKind::Unknown => Err(HelloFailure::Transport(
                 "Videorc Cloud named a control transport this version of Videorc does not know"
@@ -3032,7 +3032,7 @@ impl<W: CloudWebApi, C: ControlConnector> ControlLoop<W, C> {
     ) {
         let exit = match transport {
             ControlLink::Node(socket) => self.run_node(socket, &mut rx).await,
-            ControlLink::Web(web) => self.run_web(web, &mut rx).await,
+            ControlLink::Web(web) => self.run_web(*web, &mut rx).await,
         };
         self.finish(exit).await;
     }
