@@ -12363,7 +12363,7 @@ mod tests {
         let harness = harness(true);
         hold_unconnected_for_review(&harness, false);
         lock(&harness.context.slot).runner = Some(serde_json::from_value(json!({"onAir":{"deviceId":"BBBBBBBBBBBBBBBBBBBBBB","name":"Private phone","kind":"phone","source":"camera","waiting":false}})).unwrap());
-        let error = harness
+        let Err(error) = harness
             .context
             .prepare_session(
                 "new-live",
@@ -12373,8 +12373,9 @@ mod tests {
                 None,
             )
             .await
-            .err()
-            .expect("Go Live must refuse without returning a handover");
+        else {
+            panic!("Go Live must refuse without returning a handover");
+        };
         assert_eq!(
             continuation_error_code(&error),
             Some("cloud-show-live-elsewhere")
@@ -12432,12 +12433,13 @@ mod tests {
                 .is_some_and(|air| !air.this_device)
         })
         .await;
-        let error = harness
+        let Err(error) = harness
             .context
             .talk_go_live(Some("bearer".into()), destinations(), Vec::new())
             .await
-            .err()
-            .expect("Go Live must refuse elsewhere");
+        else {
+            panic!("Go Live must refuse elsewhere");
+        };
         assert_eq!(
             continuation_error_code(&error),
             Some("cloud-show-live-elsewhere")
