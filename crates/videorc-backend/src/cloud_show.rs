@@ -3446,8 +3446,10 @@ impl<W: CloudWebApi, C: ControlConnector> ControlLoop<W, C> {
                         .claim_talk_host(
                             &bearer,
                             &show_id,
-                            tokio::time::Instant::now()
-                                + crate::cloud_control_web::CONTROL_INTENT_BUDGET,
+                            Some(
+                                tokio::time::Instant::now()
+                                    + crate::cloud_control_web::CONTROL_INTENT_BUDGET,
+                            ),
                         )
                         .await;
                     context.hooks.emit_from(&context.slot);
@@ -4750,7 +4752,7 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
             self.claim_talk_host(
                 token,
                 &show_id,
-                tokio::time::Instant::now() + crate::cloud_control_web::CONTROL_INTENT_BUDGET,
+                Some(tokio::time::Instant::now() + crate::cloud_control_web::CONTROL_INTENT_BUDGET),
             )
             .await?;
         }
