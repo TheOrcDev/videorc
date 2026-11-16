@@ -5574,6 +5574,16 @@ export interface CloudOnAir {
   since: string
 }
 
+/**
+ * Plan 243 R2 A-M5: `cloud.show.handOff`'s answer. This computer stopped
+ * either way; `confirmed: false` means videorc.com was not told (the show
+ * holds until a device continues).
+ */
+export interface CloudHandOffAnswer {
+  ok: true
+  confirmed: boolean
+}
+
 /** Plan 243 D7: why this computer stopped feeding without ending the show. */
 export type CloudStoppedBy = 'hand-off' | 'taken-over'
 

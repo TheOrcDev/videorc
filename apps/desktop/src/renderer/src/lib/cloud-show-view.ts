@@ -41,14 +41,17 @@ export function cloudResumeNotice(
   status: CloudStatus | null,
   sessionActive: boolean
 ): CloudResumeNotice | null {
-  if (!status?.show?.resumable || sessionActive) return null
+  const onAir = status?.onAir
+  const elsewhere = Boolean(onAir && !onAir.thisDevice && !onAir.waiting)
+  // R2 A-M6: a show held while another device is on air always leads with
+  // Continue here (Go Live is refused for it), resumable or not.
+  if (!status?.show || !(status.show.resumable || elsewhere) || sessionActive) return null
   if (status.phase === 'off' || status.phase === 'ending' || status.phase === 'failed') {
     return null
   }
   const talk = status.show.kind === 'talk'
   const guests = talk ? 'Your guests are still on.' : null
-  const onAir = status.onAir
-  if (onAir && !onAir.thisDevice && !onAir.waiting) {
+  if (onAir && elsewhere) {
     // D2: a computer taking over from a computer's feed breaks before it makes.
     const brief =
       !talk && onAir.source === 'feed'

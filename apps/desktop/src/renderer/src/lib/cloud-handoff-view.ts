@@ -1,3 +1,5 @@
+import { Fragment, createElement, type ReactElement } from 'react'
+
 import type { CloudOnAir, CloudStatus } from './backend'
 import { endLivestreamBody, type SessionStopOrigin } from './session-stop'
 
@@ -27,6 +29,13 @@ export const HAND_OFF_LABEL = 'Continue on another device'
 /** What the hand-off does for viewers, named by the answer that does it. */
 export const HAND_OFF_CONSEQUENCE =
   'viewers see Be right back until you continue on your phone or another computer.'
+
+/**
+ * R2 A-M5: the one neutral line when this computer stopped for a hand-off
+ * but videorc.com could not be told. It is still a hand-off.
+ */
+export const HAND_OFF_UNCONFIRMED =
+  "Videorc Cloud didn't confirm the hand-off. Viewers see Be right back until a device continues."
 
 /** Where a phone picks the show up (the web's `/live/continue`, D5). */
 export const CONTINUE_ON_PHONE = 'On your phone, open videorc.com/live/continue.'
@@ -80,7 +89,13 @@ export function onAirDeviceName(onAir: CloudOnAir | undefined): string {
   }
 }
 
-/** The neutral toast when another device continued the show (C5). */
-export function cloudTakenOverToast(onAir: CloudOnAir | undefined): string {
-  return `Your show continues on ${onAirDeviceName(onAir)}.`
+/**
+ * The neutral toast's title when another device continued the show (C5), as
+ * React text (R2 B-M2). A device name is the streamer's own text, and braces,
+ * tags and entities are valid in one: as a string it would meet the toast's
+ * raw-provider-text guard, which hides the sentence and logs the name. React
+ * renders it escaped, exactly, and nothing logs it.
+ */
+export function cloudTakenOverTitle(onAir: CloudOnAir | undefined): ReactElement {
+  return createElement(Fragment, null, 'Your show continues on ', onAirDeviceName(onAir), '.')
 }

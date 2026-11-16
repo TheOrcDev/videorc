@@ -11601,6 +11601,7 @@ function connectBackendEventSocket(connection: BackendConnection): void {
   const htmlOverlayTargetsRequestId = `main-html-overlay-targets-${Date.now()}`
   const overlayLayoutRequestId = `main-overlay-layout-${Date.now()}`
   const sceneRequestId = `main-scene-${Date.now()}`
+  const cloudStatusRequestId = `main-cloud-status-${Date.now()}`
   let previewSurfaceStatusRequestGeneration: number | null = null
   backendEventSocket = socket
   socket.onopen = () => {
@@ -11624,6 +11625,9 @@ function connectBackendEventSocket(connection: BackendConnection): void {
       }
       // Plan 232 (S11: every platform): the HTML overlays main renders.
       includedEvents.push('htmlOverlays.targets')
+      // Plan 243 R2 B-M1: a live talk show has no local session; the quit
+      // question reads its room from the cloud status.
+      includedEvents.push('cloud.state')
       if (mainPresentPumpEnabled) {
         includedEvents.push('preview.frameReady', 'compositor.status')
       }
@@ -11652,6 +11656,7 @@ function connectBackendEventSocket(connection: BackendConnection): void {
             socket.send(
               JSON.stringify({ id: recordingStatusRequestId, method: 'recording.status' })
             )
+            socket.send(JSON.stringify({ id: cloudStatusRequestId, method: 'cloud.status' }))
             socket.send(JSON.stringify({ id: bannersListRequestId, method: 'banners.list' }))
             socket.send(
               JSON.stringify({
@@ -11740,6 +11745,10 @@ function connectBackendEventSocket(connection: BackendConnection): void {
             )
           }
         }
+        // Plan 243 R2 B-M1: an older backend has no cloud; the guard stays off.
+        if (parsed.id === cloudStatusRequestId && parsed.ok === true) {
+          liveExitGuard.observeCloudStatus(parsed.payload)
+        }
         if (parsed.id === sceneRequestId) {
           // Never fatal: the background is a drawing, not capture state.
           if (parsed.ok === true) {
@@ -11757,6 +11766,10 @@ function connectBackendEventSocket(connection: BackendConnection): void {
 
       if (parsed.event === 'recording.status') {
         updateMainCaptureState(parseMainRecordingStatusEvent(parsed.payload))
+        return
+      }
+      if (parsed.event === 'cloud.state') {
+        liveExitGuard.observeCloudStatus(parsed.payload)
         return
       }
       if (parsed.event === 'banners.changed') {

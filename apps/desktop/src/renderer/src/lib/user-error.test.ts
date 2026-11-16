@@ -74,7 +74,13 @@ describe('userErrorMessage', () => {
         'error'
       ],
       ['cloud-not-on-air', 'Your show is live from another device now.', 'warning'],
-      ['cloud-nothing-to-resume', "Your show isn't live anymore.", 'warning']
+      ['cloud-nothing-to-resume', "Your show isn't live anymore.", 'warning'],
+      // R2 A-M6: Go Live on a computer that holds a show another device is on.
+      [
+        'cloud-show-live-elsewhere',
+        'Your show is live on another device. Use Continue here, or end it first.',
+        'warning'
+      ]
     ]
     for (const [code, description, tone] of cases) {
       expect(userErrorMessage(backendError(code, 'raw web text'), resume)).toMatchObject({

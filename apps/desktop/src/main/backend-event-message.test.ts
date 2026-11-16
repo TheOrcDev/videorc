@@ -114,6 +114,14 @@ describe('the Videorc Camera status on the main socket (plan 214 B3)', () => {
     expect(() => parseMainVirtualCameraChangedEvent(null)).toThrow('virtualCamera.changed')
   })
 
+  // Plan 243 R2 B-M1: the exit guard reads the room from cloud.state; a
+  // status this main cannot validate never retires the capture socket.
+  it('never retires the socket over a cloud status: the event is isolated', () => {
+    expect(MAIN_ISOLATED_BACKEND_EVENTS.has('cloud.state')).toBe(true)
+    const odd = { event: 'cloud.state', payload: { phase: 'paused', room: { live: 'yes' } } }
+    expect(parseMainBackendWireMessage(JSON.stringify(odd))).toEqual(odd)
+  })
+
   it('never retires the socket over a bad camera status: the event is isolated', () => {
     expect(MAIN_ISOLATED_BACKEND_EVENTS.has('virtualCamera.changed')).toBe(true)
     const parsed = parseMainBackendWireMessage(

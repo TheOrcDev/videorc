@@ -4275,10 +4275,20 @@ describe('Stream watchdog wire contract (plan 223)', () => {
     ]) {
       expect(() => validateBackendEventPayload('cloud.state', bad)).toThrow()
     }
-    for (const method of ['cloud.show.handOff', 'cloud.show.check'] as const) {
-      expect(validateBackendRpcParams(method, undefined)).toBeUndefined()
-      expect(validateBackendRpcResult(method, { ok: true })).toEqual({ ok: true })
-      expect(() => validateBackendRpcResult(method, { ok: false })).toThrow()
+    expect(validateBackendRpcParams('cloud.show.check', undefined)).toBeUndefined()
+    expect(validateBackendRpcResult('cloud.show.check', { ok: true })).toEqual({ ok: true })
+    expect(() => validateBackendRpcResult('cloud.show.check', { ok: false })).toThrow()
+    // R2 A-M5: the hand-off says whether videorc.com confirmed it; the stop
+    // happened either way.
+    expect(validateBackendRpcParams('cloud.show.handOff', undefined)).toBeUndefined()
+    for (const confirmed of [true, false]) {
+      expect(validateBackendRpcResult('cloud.show.handOff', { ok: true, confirmed })).toEqual({
+        ok: true,
+        confirmed
+      })
+    }
+    for (const bad of [{ ok: true }, { ok: false, confirmed: true }, { ok: true, confirmed: 1 }]) {
+      expect(() => validateBackendRpcResult('cloud.show.handOff', bad)).toThrow()
     }
   })
 
