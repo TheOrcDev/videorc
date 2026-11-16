@@ -2644,6 +2644,11 @@ pub(crate) fn test_active_recording_stub(session_id: &str) -> ActiveRecording {
 #[derive(Debug)]
 struct WindowsD3d11SessionMonitorTask {
     stop: Arc<AtomicBool>,
+    /// Wakes the monitor from its tick sleep when Stop asks it to stop
+    /// (#1330). Stop publishes `stopping` only after this join; waiting out
+    /// the 250 ms tick let the session's `idle` go out first, and the Studio
+    /// then never left `stopping`, so Clips never re-armed.
+    wake: Arc<Notify>,
     task: Option<tokio::task::JoinHandle<()>>,
     /// Last generation-valid snapshot retained independently of
     /// `ActiveRecording.windows_d3d11_media`. Recovery temporarily takes that
@@ -2663,6 +2668,8 @@ impl WindowsD3d11SessionMonitorTask {
     ) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let task_stop = Arc::clone(&stop);
+        let wake = Arc::new(Notify::new());
+        let task_wake = Arc::clone(&wake);
         let initial_snapshot = monitor
             .diagnostics_snapshot()
             .ok()
@@ -2676,10 +2683,12 @@ impl WindowsD3d11SessionMonitorTask {
             mode,
             monitor,
             task_stop,
+            task_wake,
             task_last_snapshot,
         ));
         Self {
             stop,
+            wake,
             task: Some(task),
             last_snapshot,
         }
@@ -2694,6 +2703,9 @@ impl WindowsD3d11SessionMonitorTask {
 
     fn request_stop(&self) {
         self.stop.store(true, Ordering::Release);
+        // A stored permit when the monitor is not asleep yet: its next tick
+        // sleep returns at once.
+        self.wake.notify_one();
     }
 
     fn last_snapshot(&self) -> Option<WindowsD3d11SessionDiagnosticsSnapshot> {
@@ -4327,6 +4339,14 @@ async fn start_session_with_timeline(
     // Plan 181 S7: Record or Go Live while a buffer-only session runs hands
     // over here, so no caller meets "A capture session is already running"
     // because of the buffer. The new session carries its own ring.
+    // #1330: the Clips session's D3D11 media thread stays up through the
+    // hand-over, so a D3D11 Record reuses it instead of retiring it and
+    // starting another. Dropped when this start returns: by then the new
+    // session's pump holds the thread, or nothing needs it any more.
+    #[cfg(target_os = "windows")]
+    let _windows_d3d11_media_hold = (!replay_only)
+        .then(|| crate::state::hold_windows_d3d11_media(&state.windows_d3d11_media))
+        .flatten();
     if !replay_only {
         // A request that will be refused anyway must not stop the clip buffer
         // first: the ring that re-arms after the refusal starts empty
@@ -4334,7 +4354,12 @@ async fn start_session_with_timeline(
         if replay_hand_over_pending(&state).await {
             refuse_invalid_request(&state, &params)?;
         }
-        hand_over_replay_only_session(&state, params.sources.microphone_id.as_deref()).await?;
+        hand_over_replay_only_session(
+            &state,
+            params.sources.microphone_id.as_deref(),
+            Some(&mut *timeline),
+        )
+        .await?;
     }
     // Once armed at the Starting edge this guard owns the admission itself, so
     // every uncommitted return publishes the exact-session terminal replacement
@@ -5504,6 +5529,7 @@ async fn start_session_with_timeline(
                     ),
                     None => (None, live_sources),
                 };
+                timeline.mark(RecordingStartPhase::D3d11PumpStart);
                 match WindowsD3d11SessionPump::start(
                     &state.windows_d3d11_media,
                     plan.clone(),
@@ -5512,6 +5538,9 @@ async fn start_session_with_timeline(
                     live_sources,
                 ) {
                     Ok(pump) => {
+                        for (phase, at) in pump.startup_trace() {
+                            timeline.mark_at(*phase, *at);
+                        }
                         match validate_windows_d3d11_startup_evidence(
                             media_mode,
                             &plan,
@@ -21497,7 +21526,17 @@ async fn recover_windows_d3d11_session(
     })
 }
 
+/// The D3D11 monitor's tick, cut short when Stop wakes it (#1330).
 #[cfg(target_os = "windows")]
+async fn windows_d3d11_monitor_tick(wake: &Notify) {
+    tokio::select! {
+        () = sleep(Duration::from_millis(250)) => {}
+        () = wake.notified() => {}
+    }
+}
+
+#[cfg(target_os = "windows")]
+#[allow(clippy::too_many_arguments)]
 async fn run_windows_d3d11_session_monitor(
     state: AppState,
     session_id: String,
@@ -21505,6 +21544,7 @@ async fn run_windows_d3d11_session_monitor(
     mode: WindowsD3d11MediaMode,
     monitor: WindowsD3d11SessionMonitor,
     stop: Arc<AtomicBool>,
+    wake: Arc<Notify>,
     last_snapshot: Arc<StdMutex<Option<WindowsD3d11SessionDiagnosticsSnapshot>>>,
 ) {
     let mut monitor = Some(monitor);
@@ -21589,7 +21629,7 @@ async fn run_windows_d3d11_session_monitor(
                         }
                     }
                 }
-                sleep(Duration::from_millis(250)).await;
+                windows_d3d11_monitor_tick(&wake).await;
                 continue;
             }
         };
@@ -21925,7 +21965,7 @@ async fn run_windows_d3d11_session_monitor(
             }
             break;
         }
-        sleep(Duration::from_millis(250)).await;
+        windows_d3d11_monitor_tick(&wake).await;
     }
     if let Some(monitor) = monitor.as_ref() {
         let _ = monitor.destroy_preview();
@@ -22307,6 +22347,9 @@ impl Drop for MicrophoneHandoverWindow {
 async fn hand_over_replay_only_session(
     state: &AppState,
     carry_microphone: Option<&str>,
+    // The Record start's timeline, which gets `clips-stopped` and
+    // `clips-released` when a hand-over happens (#1330).
+    mut timeline: Option<&mut RecordingStartTimeline>,
 ) -> Result<()> {
     // The ring re-arms right after every Stop (redesign R2), so the next
     // press can land while that buffer-only start is still between admission
@@ -22365,6 +22408,9 @@ async fn hand_over_replay_only_session(
     let status = stop_recording_with_intent(state.clone(), SessionStopParams::default())
         .await
         .context("Could not stop the replay buffer before starting the session")?;
+    if let Some(timeline) = timeline.as_deref_mut() {
+        timeline.mark(RecordingStartPhase::ClipsStopped);
+    }
     if !matches!(status.state, RecordingState::Idle | RecordingState::Failed) {
         bail!("The clip buffer is still stopping. Try again in a moment.");
     }
@@ -22375,6 +22421,9 @@ async fn hand_over_replay_only_session(
         let audio_settled =
             !crate::session_audio::cleanup_pending(standby_microphone_owners(state));
         if slot_free && audio_settled {
+            if let Some(timeline) = timeline.as_deref_mut() {
+                timeline.mark(RecordingStartPhase::ClipsReleased);
+            }
             return Ok(());
         }
         if Instant::now() >= deadline {
@@ -22415,7 +22464,7 @@ pub(crate) async fn admit_interruption_over_replay_buffer(
 ) -> std::result::Result<crate::capture_interruption::InterruptionLeaseGrant, String> {
     let mut attempt = 1;
     loop {
-        hand_over_replay_only_session(state, None)
+        hand_over_replay_only_session(state, None, None)
             .await
             .map_err(|error| format!("{error:#}"))?;
         match state
@@ -35024,6 +35073,31 @@ mod tests {
     /// CI runners without a hardware adapter may still fail with
     /// `no-hardware-dxgi-adapter`; any other error leaves the identity
     /// uncacheable and is a bug.
+    /// #1330: Stop publishes `stopping` only after the D3D11 monitor joins.
+    /// Waiting out its 250 ms tick let the session's `idle` go out first, so
+    /// the Studio sat in `stopping` and never re-armed Clips. A stop request
+    /// before or during the tick ends it at once.
+    #[cfg(target_os = "windows")]
+    #[tokio::test]
+    async fn a_stop_request_cuts_the_d3d11_monitor_tick_short() {
+        let wake = Arc::new(Notify::new());
+        // Requested before the monitor sleeps: the stored permit ends it.
+        wake.notify_one();
+        let started = Instant::now();
+        windows_d3d11_monitor_tick(&wake).await;
+        assert!(started.elapsed() < std::time::Duration::from_millis(100));
+
+        // Requested while it sleeps.
+        let waker = Arc::clone(&wake);
+        tokio::spawn(async move {
+            sleep(Duration::from_millis(20)).await;
+            waker.notify_one();
+        });
+        let started = Instant::now();
+        windows_d3d11_monitor_tick(&wake).await;
+        assert!(started.elapsed() < std::time::Duration::from_millis(150));
+    }
+
     #[cfg(target_os = "windows")]
     #[test]
     fn windows_graphics_adapter_driver_identity_query_is_supported_and_stable() {
@@ -38167,7 +38241,7 @@ mod tests {
             finisher.capture_interruption.capture_finished();
         });
         let waited_from = Instant::now();
-        hand_over_replay_only_session(&state, None)
+        hand_over_replay_only_session(&state, None, None)
             .await
             .expect("the hand-over waits for the terminal edge");
         assert!(waited_from.elapsed() >= Duration::from_millis(150));
@@ -38176,7 +38250,7 @@ mod tests {
 
         // Nothing finishing and nothing starting: no wait at all.
         let waited_from = Instant::now();
-        hand_over_replay_only_session(&state, None)
+        hand_over_replay_only_session(&state, None, None)
             .await
             .expect("idle hand-over");
         assert!(waited_from.elapsed() < Duration::from_millis(100));

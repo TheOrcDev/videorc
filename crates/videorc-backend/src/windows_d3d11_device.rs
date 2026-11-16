@@ -1349,6 +1349,16 @@ pub(crate) struct WindowsD3d11RoleLease {
     pub(crate) role: WindowsD3d11MediaRole,
 }
 
+/// Keeps a running media thread alive with no role on it (#1330). A Record
+/// that hands over from the Clips session holds the thread across the gap,
+/// so it reuses the Clips session's thread instead of retiring it and
+/// starting a new one (about 180 ms on a GTX 1650 SUPER).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct WindowsD3d11MediaHold {
+    pub(crate) generation: u64,
+    hold_id: u64,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WindowsD3d11CoordinatorAcquireAction {
     StartMediaThread,
@@ -1389,6 +1399,7 @@ pub(crate) struct WindowsD3d11MediaCoordinatorState {
     phase: WindowsD3d11CoordinatorPhase,
     next_role_lease_id: u64,
     role_leases: BTreeMap<u64, WindowsD3d11MediaRole>,
+    holds: BTreeSet<u64>,
 }
 
 impl WindowsD3d11MediaCoordinatorState {
@@ -1404,7 +1415,77 @@ impl WindowsD3d11MediaCoordinatorState {
             phase: WindowsD3d11CoordinatorPhase::Idle,
             next_role_lease_id: 1,
             role_leases: BTreeMap::new(),
+            holds: BTreeSet::new(),
         })
+    }
+
+    fn next_lease_id(&mut self) -> Result<u64, WindowsD3d11Error> {
+        let lease_id = self.next_role_lease_id;
+        self.next_role_lease_id = self.next_role_lease_id.checked_add(1).ok_or_else(|| {
+            WindowsD3d11Error::new(
+                WindowsD3d11ErrorCode::InvalidLease,
+                "role lease identifier space was exhausted",
+            )
+        })?;
+        Ok(lease_id)
+    }
+
+    /// Holds the running media thread (#1330). `None` when no thread runs:
+    /// there is nothing to keep, and the next acquire starts one as before.
+    pub(crate) fn hold(&mut self) -> Result<Option<WindowsD3d11MediaHold>, WindowsD3d11Error> {
+        if !matches!(self.phase, WindowsD3d11CoordinatorPhase::Running { .. }) {
+            return Ok(None);
+        }
+        let hold_id = self.next_lease_id()?;
+        self.holds.insert(hold_id);
+        Ok(Some(WindowsD3d11MediaHold {
+            generation: self.generation,
+            hold_id,
+        }))
+    }
+
+    /// Ends a hold. The thread retires here when nothing else uses it. A hold
+    /// from a generation that already retired (device loss, shutdown, or a
+    /// replaced thread) is a no-op.
+    pub(crate) fn release_hold(
+        &mut self,
+        hold: WindowsD3d11MediaHold,
+    ) -> Result<WindowsD3d11CoordinatorReleaseAction, WindowsD3d11Error> {
+        if self.validate_running_generation(hold.generation).is_err()
+            || !self.holds.remove(&hold.hold_id)
+        {
+            return Ok(WindowsD3d11CoordinatorReleaseAction::KeepMediaThread);
+        }
+        self.release_if_unused()
+    }
+
+    /// True while only holds keep the thread: no role uses it.
+    pub(crate) fn only_held(&self) -> bool {
+        matches!(self.phase, WindowsD3d11CoordinatorPhase::Running { .. })
+            && self.role_leases.is_empty()
+            && !self.holds.is_empty()
+    }
+
+    /// Retires a thread that only holds keep, so the next acquire starts a
+    /// fresh one: the held thread cannot serve that acquire (#1330).
+    pub(crate) fn retire_held(
+        &mut self,
+    ) -> Result<Option<WindowsD3d11CoordinatorReleaseAction>, WindowsD3d11Error> {
+        if !self.only_held() {
+            return Ok(None);
+        }
+        self.holds.clear();
+        self.begin_closing(WindowsD3d11CoordinatorRetireReason::LastRoleReleased)
+            .map(Some)
+    }
+
+    fn release_if_unused(
+        &mut self,
+    ) -> Result<WindowsD3d11CoordinatorReleaseAction, WindowsD3d11Error> {
+        if !self.role_leases.is_empty() || !self.holds.is_empty() {
+            return Ok(WindowsD3d11CoordinatorReleaseAction::KeepMediaThread);
+        }
+        self.begin_closing(WindowsD3d11CoordinatorRetireReason::LastRoleReleased)
     }
 
     pub(crate) fn acquire(
@@ -1440,13 +1521,7 @@ impl WindowsD3d11MediaCoordinatorState {
                 ));
             }
         };
-        let lease_id = self.next_role_lease_id;
-        self.next_role_lease_id = self.next_role_lease_id.checked_add(1).ok_or_else(|| {
-            WindowsD3d11Error::new(
-                WindowsD3d11ErrorCode::InvalidLease,
-                "role lease identifier space was exhausted",
-            )
-        })?;
+        let lease_id = self.next_lease_id()?;
         self.role_leases.insert(lease_id, role);
         Ok((
             WindowsD3d11RoleLease {
@@ -1479,10 +1554,7 @@ impl WindowsD3d11MediaCoordinatorState {
                 ));
             }
         }
-        if !self.role_leases.is_empty() {
-            return Ok(WindowsD3d11CoordinatorReleaseAction::KeepMediaThread);
-        }
-        self.begin_closing(WindowsD3d11CoordinatorRetireReason::LastRoleReleased)
+        self.release_if_unused()
     }
 
     pub(crate) fn retire_for_device_loss(
@@ -1564,6 +1636,7 @@ impl WindowsD3d11MediaCoordinatorState {
         &mut self,
         reason: WindowsD3d11CoordinatorRetireReason,
     ) -> Result<WindowsD3d11CoordinatorReleaseAction, WindowsD3d11Error> {
+        self.holds.clear();
         let retired_generation = self.generation;
         let next_generation = retired_generation.checked_add(1).ok_or_else(|| {
             WindowsD3d11Error::new(
@@ -3933,6 +4006,17 @@ mod runtime {
 
         pub(crate) fn release_sender(&self) -> WindowsD3d11TextureLeaseReleaseSender {
             self.release_sender.clone()
+        }
+
+        /// Whether any role still has an encoder on this thread. A thread
+        /// kept across a hand-over (#1330) is reused only when its previous
+        /// session shut every encoder down.
+        pub(crate) fn owns_encoders(&self) -> bool {
+            !self
+                .encoders
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .is_empty()
         }
 
         fn ticketed_texture(
@@ -6513,6 +6597,131 @@ mod tests {
             .acquire(first_adapter, WindowsD3d11MediaRole::Record)
             .unwrap();
         assert_eq!(replacement.generation, 5);
+        assert_eq!(
+            action,
+            WindowsD3d11CoordinatorAcquireAction::StartMediaThread
+        );
+    }
+
+    #[test]
+    fn a_hold_keeps_the_media_thread_across_a_session_hand_over() {
+        // #1330: Clips releases its role while a Record start holds the
+        // thread, and the Record's acquire reuses the same generation.
+        let adapter = DxgiAdapterLuid::from_u64(3);
+        let mut coordinator = WindowsD3d11MediaCoordinatorState::new(6).unwrap();
+        assert_eq!(coordinator.hold().unwrap(), None, "no thread runs yet");
+        let (clips, _) = coordinator
+            .acquire(adapter, WindowsD3d11MediaRole::Record)
+            .unwrap();
+        let hold = coordinator.hold().unwrap().expect("a running thread");
+        assert!(!coordinator.only_held());
+        assert_eq!(
+            coordinator.release(clips).unwrap(),
+            WindowsD3d11CoordinatorReleaseAction::KeepMediaThread
+        );
+        assert!(coordinator.only_held());
+        let (record, action) = coordinator
+            .acquire(adapter, WindowsD3d11MediaRole::Record)
+            .unwrap();
+        assert_eq!(
+            action,
+            WindowsD3d11CoordinatorAcquireAction::ReuseMediaThread
+        );
+        assert_eq!(record.generation, 6);
+        assert_eq!(
+            coordinator.release_hold(hold).unwrap(),
+            WindowsD3d11CoordinatorReleaseAction::KeepMediaThread,
+            "the Record's role keeps the thread"
+        );
+        assert_eq!(
+            coordinator.release(record).unwrap(),
+            WindowsD3d11CoordinatorReleaseAction::DrainAndJoin {
+                retired_generation: 6,
+                next_generation: 7
+            }
+        );
+    }
+
+    #[test]
+    fn the_last_hold_retires_an_unused_thread_and_stale_holds_are_no_ops() {
+        let adapter = DxgiAdapterLuid::from_u64(3);
+        let mut coordinator = WindowsD3d11MediaCoordinatorState::new(6).unwrap();
+        let (clips, _) = coordinator
+            .acquire(adapter, WindowsD3d11MediaRole::Record)
+            .unwrap();
+        let hold = coordinator.hold().unwrap().unwrap();
+        coordinator.release(clips).unwrap();
+        // A Record that took the CPU path never acquires: the hold's end
+        // retires the thread, as the Clips release would have.
+        assert_eq!(
+            coordinator.release_hold(hold).unwrap(),
+            WindowsD3d11CoordinatorReleaseAction::DrainAndJoin {
+                retired_generation: 6,
+                next_generation: 7
+            }
+        );
+        assert_eq!(
+            coordinator.release_hold(hold).unwrap(),
+            WindowsD3d11CoordinatorReleaseAction::KeepMediaThread
+        );
+        coordinator.finish_shutdown(6).unwrap();
+
+        // Device loss under a hold retires the thread; the hold's later end
+        // never touches the replacement generation.
+        let (lease, _) = coordinator
+            .acquire(adapter, WindowsD3d11MediaRole::Record)
+            .unwrap();
+        let hold = coordinator.hold().unwrap().unwrap();
+        coordinator.retire_for_device_loss(7).unwrap();
+        coordinator.finish_shutdown(7).unwrap();
+        let (replacement, action) = coordinator
+            .acquire(adapter, WindowsD3d11MediaRole::Record)
+            .unwrap();
+        assert_eq!(
+            action,
+            WindowsD3d11CoordinatorAcquireAction::StartMediaThread
+        );
+        assert_eq!(
+            coordinator.release_hold(hold).unwrap(),
+            WindowsD3d11CoordinatorReleaseAction::KeepMediaThread
+        );
+        assert!(coordinator.release(lease).is_err());
+        assert_eq!(replacement.generation, 8);
+        assert_eq!(
+            coordinator.active_role_count(WindowsD3d11MediaRole::Record),
+            1
+        );
+    }
+
+    #[test]
+    fn retire_held_closes_only_a_thread_that_holds_alone_keep() {
+        let adapter = DxgiAdapterLuid::from_u64(3);
+        let mut coordinator = WindowsD3d11MediaCoordinatorState::new(6).unwrap();
+        let (clips, _) = coordinator
+            .acquire(adapter, WindowsD3d11MediaRole::Record)
+            .unwrap();
+        let hold = coordinator.hold().unwrap().unwrap();
+        assert_eq!(
+            coordinator.retire_held().unwrap(),
+            None,
+            "a role still uses it"
+        );
+        coordinator.release(clips).unwrap();
+        assert_eq!(
+            coordinator.retire_held().unwrap(),
+            Some(WindowsD3d11CoordinatorReleaseAction::DrainAndJoin {
+                retired_generation: 6,
+                next_generation: 7
+            })
+        );
+        coordinator.finish_shutdown(6).unwrap();
+        assert_eq!(
+            coordinator.release_hold(hold).unwrap(),
+            WindowsD3d11CoordinatorReleaseAction::KeepMediaThread
+        );
+        let (_, action) = coordinator
+            .acquire(adapter, WindowsD3d11MediaRole::Record)
+            .unwrap();
         assert_eq!(
             action,
             WindowsD3d11CoordinatorAcquireAction::StartMediaThread
