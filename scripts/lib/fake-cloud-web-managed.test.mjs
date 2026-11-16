@@ -527,6 +527,26 @@ test('lost checks media: room kept, no room ends, active egress kept, two silent
   }
 })
 test('long poll wakes after a material change while already waiting; calm, trouble and guest waits differ', async (t) => {
+  // Keep the wakeup deadline distinct from the scaled calm timer. Under a
+  // concurrent Rust build, HTTP scheduling can exceed the old 250 ms bound.
+  {
+    const { web, create } = await fixture(t, { waitScale: 1 })
+    const id = await create('talk')
+    web.hooks.patch(id, (s) => {
+      s.phase = w.phases[1]
+    })
+    const rev = web.snapshot(id).rev
+    const pending = fetch(`${web.httpOrigin}${managedPath('state', id)}?since=${rev}`, {
+      headers: { authorization: `Bearer ${web.sessionToken}` },
+      signal: AbortSignal.timeout(5000)
+    }).then((r) => r.json())
+    while (!web.calls.some((c) => c.route === 'state' && c.status === null)) await sleep(1)
+    web.hooks.pageJoin(id)
+    assert.ok(
+      (await pending).rev > rev,
+      'material change wakes the poll before its 25 s calm deadline'
+    )
+  }
   const guest = `g_${randomBytes(11).toString('hex')}`
   const { web, call, create } = await fixture(t)
   const id = await create('talk')
@@ -537,13 +557,6 @@ test('long poll wakes after a material change while already waiting; calm, troub
   web.hooks.patch(id, (s) => {
     s.phase = w.phases[1]
   })
-  const calm = Date.now()
-  const rev = web.snapshot(id).rev
-  const pending = poll(rev)
-  while (!web.calls.some((c) => c.route === 'state' && c.status === null)) await sleep(1)
-  web.hooks.pageJoin(id)
-  assert.ok((await pending).rev > rev)
-  assert.ok(Date.now() - calm < 250)
   const start = Date.now()
   await poll(web.snapshot(id).rev)
   assert.ok(Date.now() - start >= 230, 'calm waits scaled 25 s')
