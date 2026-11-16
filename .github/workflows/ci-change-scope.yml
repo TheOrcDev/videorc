@@ -58,6 +58,9 @@ jobs:
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           fetch-depth: 0
+          # Plan 242 S18: full history for the diff, blobs on demand. The diff
+          # needs only trees; package.json is fetched when a diff touches it.
+          filter: blob:none
           persist-credentials: false
 
       - name: Set up Node
