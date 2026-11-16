@@ -41,6 +41,7 @@ import {
   takeoverMoveTarget
 } from '@/lib/takeover-order'
 import { shortcutAriaKeys } from '@/lib/platform'
+import { managedScreenAssetUrl } from '@/lib/screen-asset-url'
 import { cn } from '@/lib/utils'
 
 /**
@@ -506,15 +507,6 @@ function ScreenTile({
       </form>
     </MediaCard>
   )
-}
-
-// Raw file:// subresource loads are blocked by the renderer origin, so every
-// card errored and read "Missing" while the upload sat safely in app storage.
-// The managed videorc-asset://screen host serves the Screens dir by basename.
-function managedScreenAssetUrl(path: string): string {
-  const normalized = path.replace(/\\/g, '/')
-  const basename = normalized.slice(normalized.lastIndexOf('/') + 1)
-  return `videorc-asset://screen/${encodeURIComponent(basename)}`
 }
 
 function ImportingTile({ name }: { name: string }): ReactElement {
