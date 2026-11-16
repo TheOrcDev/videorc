@@ -30178,10 +30178,11 @@ pub(crate) fn publish_stream_output_failure_if_active(
 }
 
 fn publish_stream_output_failure_now(state: &AppState, session_id: &str, stream_error: &str) {
-    if crate::cloud_show::lock(&state.cloud_show)
-        .stopped_by
-        .is_some()
-    {
+    let stopped_cloud_session = {
+        let runtime = crate::cloud_show::lock(&state.cloud_show);
+        runtime.stopped_by.is_some() && runtime.feeding_session().as_deref() == Some(session_id)
+    };
+    if stopped_cloud_session {
         return;
     }
     let Ok(recording) = state.recording.try_lock() else {
@@ -40925,13 +40926,47 @@ mod tests {
         );
     }
     #[tokio::test(start_paused = true)]
+    async fn r2_a_l3_old_cloud_marker_does_not_hide_a_new_direct_stream_failure() {
+        let state = test_state();
+        let session_id = "direct-after-hand-off";
+        let mut events = state.events.subscribe();
+        *state.recording.lock().await = Some(test_active_recording_stub(session_id));
+        crate::cloud_show::lock(&state.cloud_show).stopped_by =
+            Some(crate::cloud_show::CloudStoppedBy::HandOff);
+        publish_stream_output_failure_now(&state, session_id, "direct feed disconnected");
+        assert!(
+            events.try_recv().is_ok(),
+            "the new direct session still reports its failure"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn cloud_taken_over_suppresses_a_late_stream_output_failure() {
         let state = test_state();
         let session_id = "taken-over-stream-output";
         let mut events = state.events.subscribe();
         *state.recording.lock().await = Some(test_active_recording_stub(session_id));
-        crate::cloud_show::lock(&state.cloud_show).stopped_by =
-            Some(crate::cloud_show::CloudStoppedBy::TakenOver);
+        {
+            let mut runtime = crate::cloud_show::lock(&state.cloud_show);
+            runtime.stopped_by = Some(crate::cloud_show::CloudStoppedBy::TakenOver);
+            runtime.show = Some(crate::cloud_show::ActiveShow {
+                record: serde_json::from_value(
+                    serde_json::json!({"id":"sh_takeover","kind":"solo"}),
+                )
+                .unwrap(),
+                control: crate::cloud_show::ShowControl {
+                    kind: Some("web".into()),
+                    url: String::new(),
+                    token: String::new(),
+                },
+                ingest: None,
+                session_id: Some(session_id.into()),
+                destinations: Vec::new(),
+                handed_over: true,
+                hold_image_png_base64: None,
+                resuming: false,
+            });
+        }
         publish_stream_output_failure_now(&state, session_id, "feed disconnected");
         assert!(events.try_recv().is_err());
     }

@@ -1211,7 +1211,9 @@ state. A still-connected held host reclaims `host/go` once after a five-second
 unjoined-claim window (beyond the renderer's three-second duplicate window).
 Explicit held-room Resume and hand-off also reclaim first when another device
 is named. No continuation stop sends `/end`; takeover sends no `/hand-off`.
-Destination recovery is invalidated. Only user-facing old-feed failure notices
+Destination recovery is invalidated. Failure suppression applies to the stopped
+cloud session; a durable marker never hides a later direct session's failure.
+Only user-facing old-feed failure notices
 wait three seconds off the stderr loop; leg state, progress and the feed-down
 clock update immediately. A takeover or recovered leg suppresses stale notices.
 
