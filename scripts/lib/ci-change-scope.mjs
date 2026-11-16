@@ -207,6 +207,9 @@ export function scopeToActionOutputs(scope) {
     linux_heavy: String(scope.linuxHeavy === true),
     macos_rust: String(scope.macosRust === true),
     js: String(scope.js === true),
-    windows_incident_tooling: String(scope.windowsIncidentTooling === true)
+    windows_incident_tooling: String(scope.windowsIncidentTooling === true),
+    // Plan 242 S14: the app sentinel runs wherever the macOS Rust job runs,
+    // unless a scope says otherwise.
+    macos_sentinel: String((scope.macosSentinel ?? scope.macosRust) === true)
   }
 }

@@ -118,7 +118,8 @@ describe('ci-change-scope', () => {
       linux_heavy: 'false',
       macos_rust: 'false',
       js: 'true',
-      windows_incident_tooling: 'false'
+      windows_incident_tooling: 'false',
+      macos_sentinel: 'false'
     })
     assert.deepEqual(scopeToActionOutputs(HEAVY_CODE_SCOPE), {
       kind: 'code',
@@ -126,7 +127,8 @@ describe('ci-change-scope', () => {
       linux_heavy: 'true',
       macos_rust: 'true',
       js: 'true',
-      windows_incident_tooling: 'false'
+      windows_incident_tooling: 'false',
+      macos_sentinel: 'true'
     })
   })
 

@@ -119,14 +119,7 @@ jobs:
         timeout-minutes: 15
         run: cargo test -p videorc-backend
 
-      - name: Build backend for process/memory sentinel
-        # The sentinel launches the dev app through `cargo run`. Build the
-        # exact binary first so its 120-second readiness budget measures app
-        # startup rather than a cold Rust binary link on the macOS runner.
-        timeout-minutes: 15
-        run: cargo build -p videorc-backend --bin videorc-backend
-
-      - name: Install dependencies for process/memory sentinel
+      - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
       - name: Videorc Camera extension build and Swift tests
@@ -136,6 +129,64 @@ jobs:
         # unit tests. No profile, no signing identity, no activation.
         timeout-minutes: 15
         run: pnpm test:camera-extension
+
+  sentinel:
+    # Plan 242 S14: the one CI check that boots the app runs beside the Rust
+    # tests instead of after them, and runs for app-only pull requests too.
+    name: macOS app sentinel
+    needs: scope
+    if: ${{ needs.scope.result == 'success' && needs.scope.outputs.macos_sentinel == 'true' }}
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: CI-only fast backend build profile
+        # The same profile as the rust job, so the cache it saved matches.
+        run: |
+          mkdir -p "$HOME/.cargo"
+          cat >> "$HOME/.cargo/config.toml" <<'TOML'
+          [profile.dev]
+          debug = "line-tables-only"
+          [profile.dev.package.videorc-backend]
+          opt-level = 0
+          TOML
+          cat "$HOME/.cargo/config.toml"
+          echo "RUST_MIN_STACK=8388608" >> "$GITHUB_ENV"
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          # rust-cache keys a job's cache by its job id; `rust` restores the
+          # dependencies the rust job saved. Only the rust job saves.
+          shared-key: rust
+          save-if: false
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.0.9
+          run_install: false
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24.6.0'
+          cache: pnpm
+
+      - name: Build backend for process/memory sentinel
+        # The sentinel launches the dev app through `cargo run`. Build the
+        # exact binary first so its 120-second readiness budget measures app
+        # startup rather than a cold Rust binary link on the macOS runner.
+        timeout-minutes: 15
+        run: cargo build -p videorc-backend --bin videorc-backend
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
 
       - name: Short no-device process/memory sentinel
         run: pnpm smoke:process-memory:sentinel

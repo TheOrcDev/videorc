@@ -26,6 +26,9 @@ on:
       windows_incident_tooling:
         description: Whether a pull request changes the Windows incident diagnostics tooling
         value: ${{ jobs.scope.outputs.windows_incident_tooling }}
+      macos_sentinel:
+        description: Whether the macOS app sentinel (boots the dev app) must run
+        value: ${{ jobs.scope.outputs.macos_sentinel }}
 
 jobs:
   scope:
@@ -39,6 +42,7 @@ jobs:
       macos_rust: ${{ steps.classify.outputs.macos_rust }}
       js: ${{ steps.classify.outputs.js }}
       windows_incident_tooling: ${{ steps.classify.outputs.windows_incident_tooling }}
+      macos_sentinel: ${{ steps.classify.outputs.macos_sentinel }}
     steps:
       - name: Check out repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
