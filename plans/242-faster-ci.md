@@ -849,4 +849,39 @@ full. CI numbers come from the PR's own runs (below).
   Windows paths with spaces, skipped the typecheck on deletion-only pushes,
   and could check other contents than the pushed ones. It now refuses those
   pushes with the reason.
-- **S21** After the PR's runs.
+- **S21** Job timeouts lowered to the measured times plus headroom (Rust
+  jobs keep room for a cold cache): JS 15 -> 5 min, Windows JS 45 -> 10,
+  Windows desktop shards 30 -> 10, Windows Rust 120 -> 80, installer 45 -> 35,
+  Linux 75 -> 60, macOS sentinel 30 -> 20.
+
+### After (PR #1406, first run, all 22 checks green)
+
+A code PR's result, the Windows workflow's wall time: **55.3 min** (before:
+p50 94.8, p95 121.2). `ci.yml` 22.9 min (40.8), `linux.yml` 11.5 min (11.4).
+This PR touches every workflow, so it ran every job, including incident
+diagnostics (46.8 min) that an ordinary PR now skips; and its Windows Rust
+cache started cold, because the new shared key is saved only by main.
+
+| Job | Before p50 | After |
+| --- | ---: | ---: |
+| Windows Rust gates (Windows JS gates and shards split out) | 101.8 min | 54.5 (cold cache) |
+| macOS Rust | 39.1 | 22.0 |
+| Windows installer | 22.5 | 22.2 |
+| Linux gates | 8.2 | 11.2 |
+| JS gates, slowest of the parallel jobs | 6.2 | 1.9 |
+| Windows desktop tests | 8.8 (inside the gates) | 3.2–4.5 per shard, in parallel |
+| macOS app sentinel | inside macOS Rust | 5.7, in parallel |
+
+Inside the Windows Rust gates: test compile 43 -> 9.4 min (CI-only profile,
+cold cache); the ownership loop 38 -> 25 min (one launch per pass runs all
+453 selected tests in about 58 s, and at opt-level 0 they run slower);
+the full suite x3 8.7 -> 13 min (opt-level 0). Runner time for an ordinary
+code PR: about 252 -> 140 min.
+
+### D9, for the owner: fewer stability passes on pull requests
+
+The Windows ownership loop and preview loop run 25 passes. Main pushes must
+keep 25, because release reuse takes main's results. Pull requests could run
+5 (a workflow input, as `rust` is), cutting about 20 min off a code PR's
+wait. A rare race would then more often show up on main after the merge than
+on the PR. Not built: it changes how hard a PR stress-tests.
