@@ -12,7 +12,9 @@ const plan = readParityJson('plan')
 validateParityRegistry(plan, readParityJson('inventory'))
 const selected = parseParityArgs(process.argv.slice(2), plan)
 if (
-  !['baseline', 'controls', 'privacy', 'soundboard', 'avatar', 'lifecycle'].includes(selected.case)
+  !['baseline', 'controls', 'privacy', 'soundboard', 'avatar', 'lifecycle', 'services'].includes(
+    selected.case
+  )
 ) {
   throw new Error(
     `${selected.id} case '${selected.case}' is not implemented. Deferred acceptance is not a pass.`
@@ -27,7 +29,9 @@ const { runBaseline } = await import('./lib/cloud-parity-baseline.mjs')
 const run =
   selected.case === 'lifecycle'
     ? (await import('./lib/cloud-parity-lifecycle.mjs')).runLifecycle
-    : runBaseline
+    : selected.case === 'services'
+      ? (await import('./lib/cloud-parity-services.mjs')).runServices
+      : runBaseline
 const { output } = await run({
   desktopRoot: fileURLToPath(new URL('../', import.meta.url)),
   webRoot,
