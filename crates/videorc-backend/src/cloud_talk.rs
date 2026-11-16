@@ -1650,6 +1650,9 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
     pub(crate) async fn forget_talk_show(&self) {
         let held = lock(&self.slot).talk.take().is_some();
         if held {
+            // Release the renderer's host tracks before the native preview
+            // takes the camera back (also used by hand-off, without Close).
+            self.hooks.emit_from(&self.slot);
             if let Err(message) = (self.hooks.camera)(CameraHandover::Return).await {
                 tracing::warn!("The talk show could not return the camera: {message}");
             }
