@@ -20,7 +20,9 @@ if (selected.case === 'library') {
   process.exit(0)
 }
 if (
-  !['baseline', 'controls', 'privacy', 'soundboard', 'avatar', 'lifecycle'].includes(selected.case)
+  !['baseline', 'controls', 'privacy', 'soundboard', 'avatar', 'lifecycle', 'replay-ring'].includes(
+    selected.case
+  )
 ) {
   throw new Error(
     `${selected.id} case '${selected.case}' is not implemented. Deferred acceptance is not a pass.`
@@ -42,7 +44,8 @@ const { output } = await run({
   controls: selected.case === 'controls',
   privacy: selected.case === 'privacy',
   soundboard: selected.case === 'soundboard',
-  avatar: selected.case === 'avatar'
+  avatar: selected.case === 'avatar',
+  replayRing: selected.case === 'replay-ring'
 })
 console.log(
   `Local real-page ${selected.case} passed: ${output}. Managed/device acceptance remains not-run.`

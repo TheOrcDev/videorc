@@ -171,7 +171,8 @@
       },
       "crossRepoNeeds": "Paired linked consumer/producer PRs; coordinator commissions web checkout; consumers land/deploy before producers enable capability.",
       "releaseGate": "blocked-until-required-acceptance",
-      "owner": "S6z:P60l3:G7m82"
+      "owner": "S6z:P60l3:G7m82",
+      "parallelCommission": "Owner fixes monitor animation/status in isolated worktrees; no takeover by S21a."
     },
     {
       "id": "S6",
@@ -192,12 +193,13 @@
       "deferredReason": "User defers smoke, heavy, real-page, device and managed acceptance until all merges on main. No release qualification.",
       "relatedPrUrls": [],
       "intendedBase": {
-        "desktop": "feat/249-s5-cloud-parity",
-        "web": "feat/249-s5-cloud-parity"
+        "desktop": "feat/249-s16-cloud-parity",
+        "web": "feat/249-s16-cloud-parity"
       },
       "crossRepoNeeds": "Paired linked consumer/producer PRs; coordinator commissions web checkout; consumers land/deploy before producers enable capability.",
       "releaseGate": "blocked-until-required-acceptance",
-      "owner": "S6z:P60l3:G9zgb"
+      "owner": "S6z:P60l3:G9zgb",
+      "parallelCommission": "Owner restacks onto S16 and completes missing guest graphics; S9/S10 wait for this prerequisite."
     },
     {
       "id": "S7a",
@@ -206,10 +208,10 @@
       "case": "microphone-bridge",
       "repositories": ["desktop"],
       "issueUrl": null,
-      "prUrl": null,
+      "prUrl": "https://github.com/TheOrcDev/videorc/pull/1444",
       "webIssueUrl": null,
       "webPrUrl": null,
-      "implementation": "in-progress-isolated",
+      "implementation": "implemented-review-open",
       "acceptance": "not-run",
       "intendedBranch": "feat/249-s7a-cloud-parity",
       "intendedPrTitle": "Plan 249 S7a: Qualify the PCM bridge",
@@ -218,12 +220,14 @@
       "deferredReason": "User defers smoke, heavy, real-page, device and managed acceptance until all merges on main. No release qualification.",
       "relatedPrUrls": [],
       "intendedBase": {
-        "desktop": "feat/249-s6-cloud-parity"
+        "desktop": "feat/249-s3-cloud-parity"
       },
       "crossRepoNeeds": "Desktop change; use compatible web fixtures read-only and recheck source/capabilities before execution.",
       "releaseGate": "blocked-until-required-acceptance",
       "parallelCommission": "Coordinator started isolated S2-based work on 2026-11-16; reconcile S3 and declared prerequisites before dependent PR publication. Slice-local handoff owned by the corresponding thread.",
-      "owner": "S6z:P60l3:G67rq"
+      "owner": "S6z:P60l3:G67rq",
+      "commit": "58c3ab5cd9a80d8122fbfe5555371bb8b9fd6189",
+      "baseCommit": "a93168fc46b8edc1b1fc6947562ea54e4c7b2be0"
     },
     {
       "id": "S7b",
@@ -297,7 +301,8 @@
         "web": "feat/249-s8-cloud-parity"
       },
       "crossRepoNeeds": "Paired linked consumer/producer PRs; coordinator commissions web checkout; consumers land/deploy before producers enable capability.",
-      "releaseGate": "blocked-until-required-acceptance"
+      "releaseGate": "blocked-until-required-acceptance",
+      "parallelCommission": "Await S6 guest graphics and its S16 restack before commissioning dependent work."
     },
     {
       "id": "S10",
@@ -322,7 +327,8 @@
         "web": "feat/249-s9-cloud-parity"
       },
       "crossRepoNeeds": "Paired linked consumer/producer PRs; coordinator commissions web checkout; consumers land/deploy before producers enable capability.",
-      "releaseGate": "blocked-until-required-acceptance"
+      "releaseGate": "blocked-until-required-acceptance",
+      "parallelCommission": "Await S6 guest graphics and its S16 restack before commissioning dependent work."
     },
     {
       "id": "S11",
@@ -549,7 +555,8 @@
       },
       "crossRepoNeeds": "Desktop change; use compatible web fixtures read-only and recheck source/capabilities before execution.",
       "releaseGate": "blocked-until-required-acceptance",
-      "owner": "S6z:P60l3:G1q9i"
+      "owner": "S6z:P60l3:G1q9i",
+      "parallelCommission": "Owner closes pending-command durability against S16 canonical intervals; no recording/ring ownership change."
     },
     {
       "id": "S19",
@@ -582,10 +589,10 @@
       "case": "library",
       "repositories": ["desktop", "web"],
       "issueUrl": null,
-      "prUrl": null,
+      "prUrl": "https://github.com/TheOrcDev/videorc/pull/1443",
       "webIssueUrl": null,
-      "webPrUrl": null,
-      "implementation": "implemented-ready-for-coordinator",
+      "webPrUrl": "https://github.com/TheOrcDev/videorc-web/pull/129",
+      "implementation": "implemented-review-open",
       "acceptance": "not-run",
       "intendedBranch": "feat/249-s20-cloud-parity",
       "intendedPrTitle": "Plan 249 S20: Link recording takes and Library workflows",
@@ -601,19 +608,21 @@
       "releaseGate": "blocked-until-required-acceptance",
       "owner": "S6z:P60l3:G55dg",
       "baseCommit": "5b340c09c50b8500c312a00634bdf122fc04855c",
-      "webBaseCommit": "78586c998d0ae15f5e7f82d81863edeac753b6ae"
+      "webBaseCommit": "78586c998d0ae15f5e7f82d81863edeac753b6ae",
+      "commit": "d3f6a6dcb92c6fa17c166806a64ed1536d44416c",
+      "webCommit": "3c72571af05ab374dca752a4616278d85043e26a"
     },
     {
       "id": "S21a",
       "title": "Qualify the program segment ring",
       "dependsOn": ["S20"],
       "case": "replay-ring",
-      "repositories": ["web"],
+      "repositories": ["desktop", "web"],
       "issueUrl": null,
       "prUrl": null,
       "webIssueUrl": null,
       "webPrUrl": null,
-      "implementation": "not-started",
+      "implementation": "implemented-ready-for-coordinator",
       "acceptance": "not-run",
       "intendedBranch": "feat/249-s21a-cloud-parity",
       "intendedPrTitle": "Plan 249 S21a: Qualify the program segment ring",
@@ -622,10 +631,15 @@
       "deferredReason": "User defers smoke, heavy, real-page, device and managed acceptance until all merges on main. No release qualification.",
       "relatedPrUrls": [],
       "intendedBase": {
+        "desktop": "feat/249-s20-cloud-parity",
         "web": "feat/249-s20-cloud-parity"
       },
-      "crossRepoNeeds": "Web-only qualification; paired desktop consumers wait on this slice.",
-      "releaseGate": "blocked-until-required-acceptance"
+      "crossRepoNeeds": "Web bounded local-HLS ring, owner-session status/read boundary and manifest; desktop maintained actual-program acquisition/reconstruction/analyzer plus central ledger. Managed provider adapter unavailable, cost/clock unmeasured, production disabled. Paired fixture revisions required; no S20 migration or S16 identity changes.",
+      "releaseGate": "blocked-until-required-acceptance",
+      "owner": "S6z:P60l3:G55dg",
+      "baseCommit": "d3f6a6dcb92c6fa17c166806a64ed1536d44416c",
+      "webBaseCommit": "3c72571af05ab374dca752a4616278d85043e26a",
+      "qualification": "not-run; managed adapter unavailable; production disabled"
     },
     {
       "id": "S21b",
