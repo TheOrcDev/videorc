@@ -52,6 +52,7 @@ vi.mock('@/lib/talk-show-room', async () => {
       room.snapshots.push(onSnapshot)
       room.onAir.push(onAir)
     }
+    async updateMicrophone(): Promise<void> {}
     async sendStage(): Promise<void> {}
     async connect(): Promise<void> {
       room.connected += 1
@@ -110,6 +111,7 @@ const openRoom = {
 function deps(onError: TalkShowRoomControllerDeps['onError']): TalkShowRoomControllerDeps {
   return {
     client: {
+      request: vi.fn(async () => ({})),
       requestTyped: vi.fn(async () => ({})),
       on: vi.fn(() => () => {})
     } as unknown as BackendClient,

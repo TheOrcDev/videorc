@@ -226,9 +226,19 @@ export function SourcesAudioMixer(): ReactElement {
     // Retro LCD (plan 197) draws every level here on the LCD screen.
     <StudioLookContext.Provider value={settings.retroLcdStudio === true ? 'lcd' : 'default'}>
       <PanelSection
-        description="What your recording and stream hear, after gain. Nothing is processed automatically."
+        description={
+          microphone.processingDetail
+            ? 'Room microphone level after processing, before transport.'
+            : 'What your recording and stream hear, after gain. Nothing is processed automatically.'
+        }
         title="Audio"
       >
+        {microphone.processingDetail ? (
+          <Alert>
+            <AlertTitle>Room microphone</AlertTitle>
+            <AlertDescription>{microphone.processingDetail}</AlertDescription>
+          </Alert>
+        ) : null}
         {/* No MixerTitle: the section's own heading names it, and a second one
           would announce it twice. */}
         <Mixer aria-labelledby={undefined} className="gap-0" maxDb={0} minDb={-60}>

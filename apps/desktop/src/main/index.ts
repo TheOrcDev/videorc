@@ -11881,6 +11881,7 @@ function connectBackendEventSocket(connection: BackendConnection): void {
 
 const MAIN_BACKEND_ADMIN_METHODS = new Set([
   'room.pcm.test.inspect',
+  'room.microphone.inspect',
   'resource.capability.register_thumbnail',
   // Plan 232: how an HTML overlay's page stands; only main hosts them.
   'htmlOverlays.host.report',
@@ -18094,6 +18095,13 @@ app.whenReady().then(async () => {
     bridge: RoomPcmBridge
     detach: () => void
   } | null = null
+  let nativeMicOwner: {
+    senderId: number
+    generation: number
+    bridge: RoomPcmBridge
+    detach: () => void
+  } | null = null
+  let nativeMicLastGeneration = 0
   let pcmLastGeneration = 0
   secureIpcHandle('room-pcm:inspect', async () => {
     if (app.isPackaged || process.env.VIDEORC_ROOM_PCM_TEST !== '1')
@@ -18109,7 +18117,7 @@ app.whenReady().then(async () => {
     if (app.isPackaged || process.env.VIDEORC_ROOM_PCM_TEST !== '1')
       throw new Error('PCM test bridge is disabled.')
     if (command.action === 'open') {
-      if (pcmOwner || command.generation <= pcmLastGeneration)
+      if (pcmOwner || nativeMicOwner || command.generation <= pcmLastGeneration)
         throw new Error('PCM owner already active or stale.')
       pcmLastGeneration = command.generation
       const contents = event.sender
@@ -18146,6 +18154,76 @@ app.whenReady().then(async () => {
       if (command.action === 'close') {
         owner.detach()
         if (pcmOwner === owner) pcmOwner = null
+      }
+    }
+  })
+
+  secureIpcHandle('room-microphone:inspect', async () => {
+    if (app.isPackaged || process.env.VIDEORC_ROOM_NATIVE_MIC !== '1')
+      throw new Error('Native room microphone is disabled.')
+    const native = await requestBackendAdmin<{ nativeSources: number }>(
+      'room.microphone.inspect',
+      {},
+      2000
+    )
+    return { ...native, ...RoomPcmBridge.resources() }
+  })
+  secureIpcHandle('room-microphone:pcm', async (event, command) => {
+    if (app.isPackaged || process.env.VIDEORC_ROOM_NATIVE_MIC !== '1')
+      throw new Error('Native room microphone is disabled and unqualified.')
+    if (command.action === 'open') {
+      if (pcmOwner || nativeMicOwner || command.generation <= nativeMicLastGeneration)
+        throw new Error('Microphone owner already active or stale.')
+      nativeMicLastGeneration = command.generation
+      const contents = event.sender
+      const bridge = new RoomPcmBridge(
+        () => waitForBackendAdminConnection(2000),
+        () => !app.isPackaged && process.env.VIDEORC_ROOM_NATIVE_MIC === '1',
+        undefined,
+        'room.microphone.pcm'
+      )
+      const cleanup = (): void => {
+        bridge.close()
+        detach()
+        if (nativeMicOwner?.bridge === bridge) nativeMicOwner = null
+      }
+      const detach = (): void => {
+        contents.removeListener('destroyed', cleanup)
+        contents.removeListener('render-process-gone', cleanup)
+        contents.removeListener('did-start-navigation', cleanup)
+      }
+      contents.once('destroyed', cleanup)
+      contents.once('render-process-gone', cleanup)
+      contents.once('did-start-navigation', cleanup)
+      nativeMicOwner = { senderId: contents.id, generation: command.generation, bridge, detach }
+    }
+    if (
+      !nativeMicOwner &&
+      command.action === 'close' &&
+      command.generation === nativeMicLastGeneration
+    ) {
+      const observed = await requestBackendAdmin<{ nativeSources: number }>(
+        'room.microphone.inspect',
+        { waitForClose: true },
+        6500
+      )
+      if (observed.nativeSources === 0 && RoomPcmBridge.resources().sockets === 0) return null
+      throw new Error('Microphone close remains unacknowledged.')
+    }
+    const owner = nativeMicOwner
+    if (!owner || owner.senderId !== event.sender.id || owner.generation !== command.generation)
+      throw new Error('Microphone owner or generation mismatch.')
+    try {
+      return await owner.bridge.request(command)
+    } catch (error) {
+      owner.bridge.close()
+      owner.detach()
+      if (nativeMicOwner === owner) nativeMicOwner = null
+      throw error
+    } finally {
+      if (command.action === 'close') {
+        owner.detach()
+        if (nativeMicOwner === owner) nativeMicOwner = null
       }
     }
   })

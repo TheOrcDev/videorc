@@ -1,3 +1,9 @@
+import {
+  roomNativeMicrophoneEnabled,
+  setRoomNativeMicrophoneEnabled,
+  roomMicrophoneState,
+  roomMicrophoneResources
+} from '../lib/room-microphone-state'
 import { roomPcmTestResources, setRoomPcmTestEnabled } from '../lib/room-pcm-test-state'
 import { cloudTerminalOwner } from '@/lib/cloud-provider-lifecycle'
 import { roomHoldsTheCamera } from '@/lib/replay-buffer-reconcile'
@@ -5293,10 +5299,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const sourceDeviceSwitchPending = sourceSelectionState.pending
   const sourceSwitchReason = useCallback(
     (kind: LiveSourceDeviceSwitchPending): string | null => {
-      if (roomHoldsTheCamera(cloudStatusRef.current?.room) && kind !== 'camera')
-        return kind === 'microphone'
-          ? 'Close the room to change its microphone.'
-          : 'Use the room screen-share control.'
+      if (roomHoldsTheCamera(cloudStatusRef.current?.room) && kind === 'capture')
+        return 'Use the room screen-share control.'
       // Only a live socket can be mid-bootstrap. With no backend there is no
       // session to fence, and the next recording.status reconciles the pick.
       if (sourceStatusUnknownRef.current && (wsStatus === 'connecting' || wsStatus === 'connected'))
@@ -11889,10 +11893,20 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         const controls = roomControlsRef.current
         if (!controls || controls.snapshot.identity !== `host:${cloudStatusRef.current?.show?.id}`)
           throw new Error('The room is not connected.')
-        if (sourceKind !== 'camera')
-          throw new Error(
-            'Use the room screen-share control; close the room to change its microphone.'
+        if (sourceKind === 'microphone') {
+          const microphone = deviceListRef.current.devices.find(
+            (d) => d.kind === 'microphone' && d.id === sources.microphoneId
           )
+          if (sources.microphoneId && !microphone)
+            throw new Error('The selected microphone is unavailable.')
+          await controls.setMicrophoneSelection(microphone?.id ?? null, microphone?.name ?? null)
+          setCaptureConfig((current) => ({
+            ...current,
+            sources: mergeSourceKind(current.sources, sources, 'microphone')
+          }))
+          return
+        }
+        if (sourceKind !== 'camera') throw new Error('Use the room screen-share control.')
         const camera = deviceListRef.current.devices.find(
           (d) => d.kind === 'camera' && d.id === sources.cameraId
         )
@@ -17303,6 +17317,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       controlsRef: roomControlsRef,
       onMediaSnapshot: onRoomMediaSnapshot,
       microphoneMuted: captureConfig.audio.microphoneMuted,
+      microphoneAudio: captureConfig.audio,
       cameraOff: captureConfig.sources.cameraOff === true,
       cameraSettings: talkShowCameraSettings,
       avatar: talkShowAvatar,
@@ -17323,7 +17338,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       deviceList.devices,
       smokeTalkShowRoomOpen,
       onRoomMediaSnapshot,
-      captureConfig.audio.microphoneMuted,
+      captureConfig.audio,
       captureConfig.sources.cameraOff,
       talkShowCameraId,
       talkShowCameraSettings,
@@ -20102,15 +20117,39 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         const fixtures: Device[] = [
           { id: 'parity-camera', name: 'Parity camera', kind: 'camera', status: 'available' },
           {
-            id: 'parity-microphone',
+            id: roomNativeMicrophoneEnabled()
+              ? 'microphone:coreaudio:4294967295'
+              : 'parity-microphone',
             name: 'Parity microphone',
             kind: 'microphone',
             status: 'available'
           }
         ]
+        if (roomNativeMicrophoneEnabled())
+          fixtures.push({
+            id: 'microphone:coreaudio:4294967294',
+            name: 'Alternate parity microphone',
+            kind: 'microphone',
+            status: 'available'
+          })
         setDeviceList({ devices: fixtures, warnings: [] })
         return fixtures
       },
+      roomNativeMicrophone: (enabled?: boolean) => {
+        if (enabled !== undefined) setRoomNativeMicrophoneEnabled(enabled)
+        return {
+          ...roomMicrophoneState.getSnapshot(),
+          owners: [...roomMicrophoneResources(), ...roomPcmTestResources().owners]
+        }
+      },
+      roomMicrophoneDisconnect: (mode?: 'disconnect' | 'starve' | 'resume') =>
+        roomControlsRef.current?.disconnectMicrophoneFixture(mode),
+      roomMicrophoneSelect: (id: string | null, name: string | null) =>
+        switchSourceDeviceLive('microphone', {
+          ...captureConfigRef.current.sources,
+          microphoneId: id ?? undefined,
+          microphoneName: name ?? undefined
+        }),
       roomPcmTest: (enabled?: boolean) => {
         if (enabled !== undefined) setRoomPcmTestEnabled(enabled)
         return roomPcmTestResources()

@@ -1,3 +1,4 @@
+import * as microphoneSource from './room-microphone-source'
 // @vitest-environment happy-dom
 import type { RoomOptions } from 'livekit-client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -878,5 +879,141 @@ describe('S7a opt-in microphone producer', () => {
     expect(close).toHaveBeenCalledOnce()
     expect(latestRoom().localParticipant.publishTrack).not.toHaveBeenCalled()
     vi.unstubAllGlobals()
+  })
+})
+
+describe('processed microphone room ownership', () => {
+  const choice = {
+    mode: 'browser-aec' as const,
+    deviceId: 'one',
+    name: 'One',
+    gainDb: 0,
+    muted: false,
+    noise: 'off' as const,
+    offsetMs: 0
+  }
+  it('retires the old producer before switch and None releases publication', async () => {
+    const order: string[] = []
+    const sources: { close: ReturnType<typeof vi.fn>; update: ReturnType<typeof vi.fn> }[] = []
+    const factory = vi
+      .spyOn(microphoneSource, 'createRoomMicrophoneSource')
+      .mockImplementation(async (selected) => {
+        order.push('open:' + selected.deviceId)
+        const source = {
+          track: { kind: 'audio', stop: vi.fn() } as unknown as MediaStreamTrack,
+          close: vi.fn(async () => {
+            order.push('close:' + selected.deviceId)
+          }),
+          update: vi.fn(),
+          published: vi.fn(),
+          disconnectFixture: vi.fn(async () => {})
+        }
+        sources.push(source)
+        return source
+      })
+    const { room } = client(undefined, undefined, {
+      cameraName: null,
+      microphoneName: 'One',
+      microphoneChoice: choice
+    })
+    await room.connect()
+    await room.updateMicrophone({ ...choice, gainDb: 6, noise: 'rnnoise' })
+    expect(sources[0].update).toHaveBeenCalled()
+    expect(factory).toHaveBeenCalledTimes(1)
+    await room.setMicrophoneSelection('two', 'Two')
+    expect(order).toEqual(['open:one', 'close:one', 'open:two'])
+    await room.setMicrophoneSelection(null, null)
+    expect(room.snapshot.local.microphone).toBeNull()
+    expect(factory).toHaveBeenCalledTimes(2)
+    expect(latestRoom().localParticipant.unpublishTrack).toHaveBeenCalledTimes(2)
+    await room.disconnect()
+    factory.mockRestore()
+  })
+  it('failed producer cleanup fences replacement while room teardown still disconnects', async () => {
+    const factory = vi.spyOn(microphoneSource, 'createRoomMicrophoneSource').mockResolvedValue({
+      track: { kind: 'audio', stop: vi.fn() } as unknown as MediaStreamTrack,
+      close: vi.fn(async () => {
+        throw new Error('Native close unconfirmed')
+      }),
+      update: vi.fn(),
+      published: vi.fn(),
+      disconnectFixture: vi.fn(async () => {})
+    })
+    const { room } = client(undefined, undefined, {
+      cameraName: null,
+      microphoneName: 'One',
+      microphoneChoice: choice
+    })
+    await room.connect()
+    await expect(room.setMicrophoneSelection('two', 'Two')).rejects.toThrow(
+      'cleanup is unconfirmed'
+    )
+    expect(factory).toHaveBeenCalledTimes(1)
+    const disconnect = vi.spyOn(latestRoom(), 'disconnect')
+    await room.disconnect()
+    expect(disconnect).toHaveBeenCalled()
+    factory.mockRestore()
+  })
+  it.each([2, 4])(
+    'SDK ownership loss %s disarms immediately and rejects stale reconnect callbacks',
+    async (reason) => {
+      const close = vi.fn(async () => {})
+      const factory = vi.spyOn(microphoneSource, 'createRoomMicrophoneSource').mockResolvedValue({
+        track: { kind: 'audio', stop: vi.fn() } as unknown as MediaStreamTrack,
+        close,
+        update: vi.fn(),
+        published: vi.fn(),
+        disconnectFixture: vi.fn(async () => {})
+      })
+      const { room, requestToken } = client(undefined, undefined, {
+        cameraName: null,
+        microphoneName: 'One',
+        microphoneChoice: choice
+      })
+      await room.connect()
+      const oldRoom = latestRoom()
+      oldRoom.emit('Disconnected', reason)
+      expect(close).toHaveBeenCalledOnce()
+      await expect(room.setMicrophoneSelection('two', 'Two')).rejects.toThrow('not connected')
+      oldRoom.emit('Reconnecting')
+      oldRoom.emit('Reconnected')
+      await vi.advanceTimersByTimeAsync(60000)
+      expect(factory).toHaveBeenCalledTimes(1)
+      expect(requestToken).toHaveBeenCalledTimes(1)
+      expect(oldRoom.localParticipant.unpublishTrack).toHaveBeenCalled()
+      await room.disconnect()
+      factory.mockRestore()
+    }
+  )
+  it('loss does not reopen on a gain update; explicit selection and reconnect create fresh owners', async () => {
+    let fail!: (reason: string) => void
+    const factory = vi
+      .spyOn(microphoneSource, 'createRoomMicrophoneSource')
+      .mockImplementation(async (_choice, _show, _signal, _resolve, onFailure) => {
+        fail = onFailure
+        return {
+          track: { kind: 'audio', stop: vi.fn() } as unknown as MediaStreamTrack,
+          close: vi.fn(async () => {}),
+          update: vi.fn(),
+          published: vi.fn(),
+          disconnectFixture: vi.fn(async () => {})
+        }
+      })
+    const { room } = client(undefined, undefined, {
+      cameraName: null,
+      microphoneName: 'One',
+      microphoneChoice: choice
+    })
+    await room.connect()
+    fail('Device lost')
+    await room.updateMicrophone({ ...choice, gainDb: 3 })
+    expect(factory).toHaveBeenCalledTimes(1)
+    await room.setMicrophoneSelection('one', 'One')
+    expect(factory).toHaveBeenCalledTimes(2)
+    latestRoom().emit('Reconnecting')
+    latestRoom().emit('Reconnected')
+    await vi.waitFor(() => expect(factory).toHaveBeenCalledTimes(3))
+    await room.disconnect()
+    factory.mockRestore()
   })
 })

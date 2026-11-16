@@ -25,6 +25,7 @@ const fixture = vi.hoisted(() => ({
 }))
 
 vi.mock('@/hooks/use-studio', () => ({
+  useStudioCloud: () => ({ cloudStatus: null }),
   useStudioCore: () => ({
     captureConfig: {
       ...defaultCaptureConfig,
