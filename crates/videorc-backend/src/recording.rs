@@ -12589,6 +12589,9 @@ async fn monitor_session(
     // (`publish_stream_output_failure_if_active`); this is the fallback for a
     // failure that only became known during teardown.
     if let Some(stream_error) = stream_bridge_terminal_failure.as_deref()
+        && crate::cloud_show::lock(&state.cloud_show)
+            .stopped_by
+            .is_none()
         && announce_stream_output_failure_once(&session_id)
     {
         let _ = emit_health_event(
@@ -30127,6 +30130,33 @@ pub(crate) fn publish_stream_output_failure_if_active(
     session_id: &str,
     stream_error: &str,
 ) {
+    let managed = crate::cloud_show::lock(&state.cloud_show)
+        .show
+        .as_ref()
+        .is_some_and(|show| {
+            show.session_id.as_deref() == Some(session_id)
+                && show.control.transport_kind() == crate::cloud_show::ControlKind::Web
+        });
+    if managed {
+        let state = state.clone();
+        let session_id = session_id.to_string();
+        let stream_error = stream_error.to_string();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(3)).await;
+            publish_stream_output_failure_now(&state, &session_id, &stream_error);
+        });
+    } else {
+        publish_stream_output_failure_now(state, session_id, stream_error);
+    }
+}
+
+fn publish_stream_output_failure_now(state: &AppState, session_id: &str, stream_error: &str) {
+    if crate::cloud_show::lock(&state.cloud_show)
+        .stopped_by
+        .is_some()
+    {
+        return;
+    }
     let Ok(recording) = state.recording.try_lock() else {
         return;
     };
@@ -40799,6 +40829,18 @@ mod tests {
         assert!(twitch.message.is_some());
         // A skipped target never leaks a URL.
         assert!(twitch.redacted_url.is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cloud_taken_over_suppresses_a_late_stream_output_failure() {
+        let state = test_state();
+        let session_id = "taken-over-stream-output";
+        let mut events = state.events.subscribe();
+        *state.recording.lock().await = Some(test_active_recording_stub(session_id));
+        crate::cloud_show::lock(&state.cloud_show).stopped_by =
+            Some(crate::cloud_show::CloudStoppedBy::TakenOver);
+        publish_stream_output_failure_now(&state, session_id, "feed disconnected");
+        assert!(events.try_recv().is_err());
     }
 
     #[test]
