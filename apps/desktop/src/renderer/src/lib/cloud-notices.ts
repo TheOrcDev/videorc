@@ -17,7 +17,7 @@ import {
 } from './cloud-toasts'
 import { HAND_OFF_UNCONFIRMED, cloudTakenOverTitle } from './cloud-handoff-view'
 import { requestCloudSectionFocus } from './cloud-section-focus'
-import { toast } from './toast'
+import { TOAST_WITH_DESCRIPTION_MS, toast } from './toast'
 import { offlineError, toastUserError } from './user-error'
 import { openWorkspaceTab } from './workspace-navigation'
 
@@ -27,22 +27,37 @@ import { openWorkspaceTab } from './workspace-navigation'
 // focus request lives in `cloud-section-focus.ts`, which the Livestream
 // section imports without this module's app-wide imports.
 
+/**
+ * Every cloud toast shares one id, so a newer one replaces the older, and
+ * sonner merges a replacement into the toast it replaces. A one-line status
+ * toast must therefore clear what an earlier cloud toast carried (a
+ * description, an action, an endless duration), or it shows under the new
+ * title (plan 243 C6: the take-over toast kept "Set it up in Destinations").
+ */
+export const CLOUD_STATUS_TOAST = {
+  id: CLOUD_TOAST_ID,
+  description: undefined,
+  action: undefined,
+  cancel: undefined,
+  duration: TOAST_WITH_DESCRIPTION_MS
+} as const
+
 /** The provider's status notifications, in their shared toast's priority order. */
 export function toastCloudStatus(previous: CloudStatus | null, next: CloudStatus): void {
   const fallback = cloudFallbackToast(previous, next)
-  if (fallback) toast.warning(fallback, { id: CLOUD_TOAST_ID })
+  if (fallback) toast.warning(fallback, CLOUD_STATUS_TOAST)
   const lost = cloudLostToast(previous, next)
-  if (lost) toast.warning(lost, { id: CLOUD_TOAST_ID })
+  if (lost) toast.warning(lost, CLOUD_STATUS_TOAST)
   const restarted = cloudRestartToast(previous, next)
-  if (restarted) toast.warning(restarted, { id: CLOUD_TOAST_ID })
+  if (restarted) toast.warning(restarted, CLOUD_STATUS_TOAST)
   const cap = cloudShowCapToast(previous, next)
-  if (cap) toast.warning(cap, { id: CLOUD_TOAST_ID })
+  if (cap) toast.warning(cap, CLOUD_STATUS_TOAST)
   // Plan 222 U5: past the month's hours is news, never a cut (D18).
   if (next.allowancePast) toastCloudAllowancePast(previous, next)
   // Plan 243 C5: another device continued the show and this computer
   // stopped. Neutral news: the Studio's notice offers Continue here.
   if (next.stoppedBy === 'taken-over' && previous?.stoppedBy !== 'taken-over') {
-    toast.info(cloudTakenOverTitle(next.onAir), { id: CLOUD_TOAST_ID })
+    toast.info(cloudTakenOverTitle(next.onAir), CLOUD_STATUS_TOAST)
   }
 }
 

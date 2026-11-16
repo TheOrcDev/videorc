@@ -81,6 +81,23 @@ describe('the taken-over toast (plan 243 R2 B-M2)', () => {
     }
   )
 
+  it('replaces an earlier cloud toast whole: no leftover description, action or endless duration (plan 243 C6)', () => {
+    toastCloudStatus(base, takenOver('Smoke phone'))
+    const [, options] = sonner.info.mock.calls[0]!
+    // sonner merges a replacement into the toast with the same id.
+    const earlier = {
+      id: 'videorc-cloud',
+      description: 'Your stream stays on air if this computer drops. Set it up in Destinations.',
+      action: { label: 'Open Destinations', onClick: () => {} },
+      duration: Infinity
+    }
+    const shown = { ...earlier, ...options }
+    expect(shown.id).toBe('videorc-cloud')
+    expect(shown.description).toBeUndefined()
+    expect(shown.action).toBeUndefined()
+    expect(Number.isFinite(shown.duration)).toBe(true)
+  })
+
   it('toasts once per take-over, and names the kind without a name', () => {
     const { name: _name, ...nameless } = takenOver('x').onAir!
     toastCloudStatus(base, { ...takenOver('x'), onAir: nameless })
