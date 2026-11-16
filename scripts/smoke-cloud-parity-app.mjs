@@ -53,7 +53,8 @@ if (
     'lifecycle',
     'services',
     'replay-ring',
-    'views'
+    'views',
+    'alpha-spike'
   ].includes(selected.case)
 ) {
   throw new Error(
@@ -67,11 +68,13 @@ if (!webRoot)
   )
 const { runBaseline } = await import('./lib/cloud-parity-baseline.mjs')
 const run =
-  selected.case === 'lifecycle'
-    ? (await import('./lib/cloud-parity-lifecycle.mjs')).runLifecycle
-    : selected.case === 'services'
-      ? (await import('./lib/cloud-parity-services.mjs')).runServices
-      : runBaseline
+  selected.case === 'alpha-spike'
+    ? (await import('./lib/cloud-parity-alpha.mjs')).runAlphaSpike
+    : selected.case === 'lifecycle'
+      ? (await import('./lib/cloud-parity-lifecycle.mjs')).runLifecycle
+      : selected.case === 'services'
+        ? (await import('./lib/cloud-parity-services.mjs')).runServices
+        : runBaseline
 const { output } = await run({
   desktopRoot: fileURLToPath(new URL('../', import.meta.url)),
   webRoot,
