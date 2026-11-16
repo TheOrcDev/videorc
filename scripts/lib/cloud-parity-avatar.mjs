@@ -78,7 +78,8 @@ export async function exerciseAvatar({
     { name: 'program', page: program },
     { name: 'avatar-recording', page: recording }
   ]
-  const drawn = async (page, kind) => page.locator(`img[data-avatar-layer="${kind}"]`).count()
+  // Plan 249 S5: an animation-capable page draws the avatar as an atlas canvas.
+  const drawn = async (page, kind) => page.locator(`[data-avatar-layer="${kind}"]`).count()
   const check = async (label, { avatar = true, bubble = true } = {}) => {
     for (const consumer of consumers) {
       await waitFor(

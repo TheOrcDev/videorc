@@ -287,6 +287,7 @@ import {
   SOUNDBOARD_VOLUME_DB_MIN
 } from './backend'
 import { isBannerFileName } from './banner-assets'
+import { parseCohostPetAnimatorEvent, type CohostPetAnimatorEvent } from './buddy-animator-public'
 import {
   CHAT_COMMAND_DESCRIPTION_MAX_CHARS,
   CHAT_COMMAND_MAX_COUNT,
@@ -948,6 +949,8 @@ export interface BackendEventMap {
   'cohost.pet.identity.read': BuddyPetIdentityReadEvent
   'cohost.pet.sheet.generated': BuddyPetSheetGeneratedEvent
   'cohost.pet.build.progress': BuddyPetBuildProgressEvent
+  /** Plan 249 S5: public animator inputs for a cloud output's animator twin. */
+  'cohost.pet.animator': CohostPetAnimatorEvent
   // --- end Buddy pets (plan 168, Phase F) ---
   'captions.status': import('./backend').CaptionsStatus
   'session.marker.voice.status': {
@@ -7484,6 +7487,14 @@ const runtimeEventSchemas = {
   'cohost.pet.identity.read': buddyPetIdentityReadEventSchema,
   'cohost.pet.sheet.generated': buddyPetSheetGeneratedEventSchema,
   'cohost.pet.build.progress': buddyPetBuildProgressEventSchema,
+  'cohost.pet.animator': runtimeSchema<CohostPetAnimatorEvent>(
+    'a public avatar animator event',
+    (value, path) => {
+      const parsed = parseCohostPetAnimatorEvent(value)
+      if (!parsed) throw new RuntimeSchemaError(path, 'a public avatar animator event')
+      return parsed
+    }
+  ),
   // --- end Buddy pets (plan 168, Phase F) ---
   'captions.status': captionsStatusSchema,
   'session.marker.voice.status': objectSchema(
