@@ -12,6 +12,10 @@ import {
 } from './lib/reuse-release-ci-gates.mjs'
 
 const MAX_ANCESTORS = 20
+// Only a diff of these kinds can separate a release commit from the commit
+// whose gates it reuses (plan 242 D2). A js-test diff is not one: the Windows
+// Rust job's ownership loop runs Node test files.
+const SAME_SOURCE_KINDS = Object.freeze(['version-release', 'docs-record', 'docs'])
 
 async function githubApi(path, token, fetchImpl) {
   const response = await fetchImpl(`https://api.github.com${path}`, {
@@ -38,10 +42,10 @@ function firstParentHistory(sha, cwd) {
 }
 
 /**
- * [releaseSha, ...ancestors] whose diff to the release commit CI would skip
- * this gate family for. Walks first-parent history and stops at the first
- * ancestor whose diff the gate would run on. Any git failure means exact-commit
- * reuse only.
+ * [releaseSha, ...ancestors] whose diff to the release commit is version,
+ * changelog or docs only, and that CI would skip this gate family for. Walks
+ * first-parent history and stops at the first ancestor that fails either.
+ * Any git failure means exact-commit reuse only.
  */
 export function sameSourceShas({
   sha,
@@ -70,7 +74,7 @@ export function sameSourceShas({
     } catch {
       break
     }
-    if (scope?.[flag] !== false) break
+    if (!SAME_SOURCE_KINDS.includes(scope?.kind) || scope?.[flag] !== false) break
     shas.push(ancestor)
   }
   return shas

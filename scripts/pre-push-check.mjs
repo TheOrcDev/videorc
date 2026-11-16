@@ -22,8 +22,16 @@ function fail(message) {
   process.exit(1)
 }
 
-if (!existsSync(join(root, 'node_modules/.bin/oxlint'))) {
-  fail('dependencies are missing (no node_modules/.bin/oxlint). Run `pnpm install`.')
+// Every tool runs as `node <script>` without a shell, so a Node or repo path
+// with spaces (C:\Program Files\nodejs) needs no quoting on Windows.
+const desktop = join(root, 'apps/desktop')
+const tools = {
+  prettier: join(root, 'node_modules/prettier/bin/prettier.cjs'),
+  oxlint: join(root, 'node_modules/oxlint/bin/oxlint'),
+  tsc: join(desktop, 'node_modules/typescript-native/bin/tsc')
+}
+for (const [name, path] of Object.entries(tools)) {
+  if (!existsSync(path)) fail(`dependencies are missing (no ${name}). Run \`pnpm install\`.`)
 }
 
 let fallbackBase = ''
@@ -34,16 +42,40 @@ try {
 }
 
 const ranges = pushRanges(readFileSync(0, 'utf8'), fallbackBase)
+// The checks read this checkout's files, so they must be the pushed ones: the
+// pushed branch is checked out here, and the files it touches are committed.
+const headSha = git(['rev-parse', 'HEAD'])
+for (const { ref, head } of ranges) {
+  if (head !== headSha) {
+    fail(
+      `${ref} is at ${head.slice(0, 9)} but this checkout is at ${headSha.slice(0, 9)}; push it from its own checkout so the hook checks what you push.`
+    )
+  }
+}
 const changed = new Set()
 for (const { base, head } of ranges) {
   try {
-    const out = git(['diff', '--name-only', '--diff-filter=ACMR', '-z', `${base}...${head}`])
+    const out = git(['diff', '--name-only', '-z', `${base}...${head}`])
     for (const file of out.split('\0').filter(Boolean)) changed.add(file)
   } catch {
     fail(`could not diff ${base.slice(0, 9)}...${head.slice(0, 9)}; fetch and retry.`)
   }
 }
-// A file deleted later in the same push is gone from the work tree.
+if (changed.size) {
+  const dirty = execFileSync('git', ['status', '--porcelain', '-z', '--', ...changed], {
+    cwd: root,
+    encoding: 'utf8'
+  })
+    .split('\0')
+    .filter(Boolean)
+  if (dirty.length) {
+    fail(
+      `uncommitted changes in files this push touches (${dirty.length}); commit or stash them so the hook checks what you push.`
+    )
+  }
+}
+// Deleted files stay in `changed` (they decide the typecheck) but have no
+// contents to format or lint.
 const present = [...changed].filter((file) => existsSync(join(root, file)))
 
 const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'))
@@ -51,12 +83,12 @@ const formatScope = new Set()
 for (const pattern of formatCheckGlobs(pkg.scripts['format:check'])) {
   for (const file of globSync(pattern, { cwd: root })) formatScope.add(file)
 }
-const plan = prePushPlan(present, formatScope)
+const plan = prePushPlan([...changed], present, formatScope)
 
 // The checks run side by side; a check's output prints only when it fails.
 function run(label, command, args, cwd = root) {
   return new Promise((resolve) => {
-    const child = spawn(command, args, { cwd, shell: process.platform === 'win32' })
+    const child = spawn(command, args, { cwd, shell: false })
     let output = ''
     child.stdout.on('data', (chunk) => (output += chunk))
     child.stderr.on('data', (chunk) => (output += chunk))
@@ -65,17 +97,16 @@ function run(label, command, args, cwd = root) {
   })
 }
 
-const bin = (name) => join(root, 'node_modules/.bin', name)
-const desktop = join(root, 'apps/desktop')
-const tsc = join(desktop, 'node_modules/typescript-native/bin/tsc')
-const checks = [run('em dashes', process.execPath, [join(root, 'scripts/check-em-dashes.mjs')])]
-if (plan.format.length) checks.push(run('format', bin('prettier'), ['--check', ...plan.format]))
-if (plan.lint.length) checks.push(run('lint', bin('oxlint'), plan.lint))
+const node = process.execPath
+const checks = [run('em dashes', node, [join(root, 'scripts/check-em-dashes.mjs')])]
+if (plan.format.length)
+  checks.push(run('format', node, [tools.prettier, '--check', ...plan.format]))
+if (plan.lint.length) checks.push(run('lint', node, [tools.oxlint, ...plan.lint]))
 if (plan.typecheck) {
   // `pnpm typecheck`, without pnpm's startup.
   for (const project of ['tsconfig.node.json', 'tsconfig.web.json']) {
     checks.push(
-      run(`typecheck (${project})`, process.execPath, [tsc, '--noEmit', '-p', project], desktop)
+      run(`typecheck (${project})`, node, [tools.tsc, '--noEmit', '-p', project], desktop)
     )
   }
 }

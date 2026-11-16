@@ -124,12 +124,15 @@ jobs:
             return @($names | Where-Object { $name = $_; @($filters | Where-Object { $name.Contains($_) }).Count -gt 0 })
           }
           $all = Get-ListedTests @()
+          $ignored = Get-ListedTests @('--ignored')
+          # Each filter must still select a test that runs, as the old
+          # one-filter-per-launch loop required.
           foreach ($filter in $filters) {
-            if (@($all | Where-Object { $_.Contains($filter) }).Count -eq 0) {
-              throw "Source ownership filter selects no test: $filter"
+            $runnable = @($all | Where-Object { $_.Contains($filter) }).Count - @($ignored | Where-Object { $_.Contains($filter) }).Count
+            if ($runnable -lt 1) {
+              throw "Source ownership filter selects no runnable test: $filter"
             }
           }
-          $ignored = Get-ListedTests @('--ignored')
           $expected = (Select-Filtered $all).Count - (Select-Filtered $ignored).Count
           if ($expected -lt 1) {
             throw 'Source ownership filters select no runnable test'

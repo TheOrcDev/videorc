@@ -181,7 +181,8 @@ describe('release CI path-filter wiring', () => {
     // that proves each filter still selects a test.
     assert.doesNotMatch(rust, /foreach \(\$filter in @\(/)
     assert.match(rust, /cargo test -p videorc-backend -- @filters/)
-    assert.match(rust, /Source ownership filter selects no test/)
+    assert.match(rust, /Source ownership filter selects no runnable test/)
+    assert.match(rust, /\$runnable = @\(\$all \| Where-Object \{ \$_\.Contains\(\$filter\) \}\)\.Count - @\(\$ignored/)
     assert.match(rust, /\$passed -ne \$expected/)
     assert.match(rust, /foreach \(\$pass in 1\.\.25\)/)
     // S6: the CI-only profile macOS and Linux CI use, and one cache key that

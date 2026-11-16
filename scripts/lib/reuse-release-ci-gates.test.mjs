@@ -382,11 +382,25 @@ describe('reuse-release-ci-gates', () => {
         assert.equal(env.GITHUB_EVENT_NAME, 'push')
         assert.equal(env.CI_HEAD_SHA, sha)
         // The diff from thirdSha already holds code, so the walk stops there.
-        return { windowsHeavy: env.CI_BASE_SHA !== otherSha }
+        return env.CI_BASE_SHA === otherSha
+          ? { kind: 'version-release', windowsHeavy: false }
+          : { kind: 'code', windowsHeavy: true }
       }
     })
     assert.deepEqual(shas, [sha, otherSha])
     assert.deepEqual(seen, [otherSha, thirdSha])
+  })
+
+  it('never walks past a test-only diff, which the Windows Rust job runs (review 1)', () => {
+    // A js-test diff skips windows_heavy, but the ownership loop in the
+    // Windows Rust job runs scripts/lib/*.test.mjs files.
+    const shas = sameSourceShas({
+      sha,
+      lookup: 'windows-rust',
+      history: () => [sha, otherSha],
+      classify: () => ({ kind: 'js-test', windowsHeavy: false })
+    })
+    assert.deepEqual(shas, [sha])
   })
 
   it('falls back to the exact commit when git or the lookup is unknown', () => {
