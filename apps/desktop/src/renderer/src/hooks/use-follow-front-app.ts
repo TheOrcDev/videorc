@@ -37,6 +37,7 @@ export type FollowSceneApply = (
 export type FollowFrontAppHost = {
   /** macOS only (D12): elsewhere nothing subscribes. */
   enabled: boolean
+  cloudScreenPublication?: boolean
   scenes: readonly SavedScene[]
   /** The active saved scene, the program's. */
   activeSceneId: string | null
@@ -118,6 +119,7 @@ export function useFollowFrontApp(host: FollowFrontAppHost): void {
           void current.hideScreen('password-manager').catch(() => undefined)
           return
         case 'show':
+          if (current.cloudScreenPublication) return
           // A hide the streamer asked for is never undone by the follower.
           if (current.screenPrivacy.hidden && current.screenPrivacy.reason === 'password-manager') {
             console.debug('[follow-front-app] showing the screen again')
@@ -135,7 +137,10 @@ export function useFollowFrontApp(host: FollowFrontAppHost): void {
         followEnabled: getFollowSettings().followFrontApp,
         ...passwordManagerFollowContext(getPrivacySettings()),
         videorcBundleIds: selfBundleIdsRef.current,
-        screenSource: programScreenSource(current.scenes, current.activeSceneId, current.sources),
+        explicitShowRequired: current.cloudScreenPublication,
+        screenSource: current.cloudScreenPublication
+          ? 'display'
+          : programScreenSource(current.scenes, current.activeSceneId, current.sources),
         sessionState: current.sessionState,
         orientation: current.orientation,
         currentSceneId: current.activeSceneId,
@@ -180,6 +185,7 @@ export function useFollowFrontApp(host: FollowFrontAppHost): void {
       lastUsedAtRef.current[sceneId] = Date.now()
       dispatch({ type: 'manual-switch' })
     })
+    recheckRef.current = () => dispatch({ type: 'settings-changed' })
     const onSettings = (): void => dispatch({ type: 'settings-changed' })
     const offFollow = subscribeFollowSettings(onSettings)
     const offPrivacy = subscribePrivacySettings(onSettings)
@@ -193,9 +199,14 @@ export function useFollowFrontApp(host: FollowFrontAppHost): void {
       offFollow()
       offPrivacy()
       hideChangedRef.current = null
+      recheckRef.current = null
     }
   }, [enabled, api])
 
+  const recheckRef = useRef<(() => void) | null>(null)
+  useEffect(() => {
+    recheckRef.current?.()
+  }, [host.cloudScreenPublication])
   const hideChangedRef = useRef<
     ((hidden: boolean, reason: ScreenPrivacy['reason']) => void) | null
   >(null)

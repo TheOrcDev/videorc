@@ -37,6 +37,7 @@ import {
 import {
   SCREEN_HIDDEN_LABEL,
   screenHideAccelerator,
+  roomPrivacyLabel,
   screenPrivacyActionLabel,
   screenPrivacyDisabledReason
 } from '@/lib/screen-privacy-view'
@@ -335,8 +336,15 @@ function ScreenPrivacyLine({ control }: { control: ScreenPrivacyControl }): Reac
       className="flex min-h-8 items-center gap-2 pr-1 pb-2 pl-9.5"
       data-hidden={hidden || undefined}
       data-slot="screen-privacy"
+      title={control.observationDetail}
     >
-      {hidden ? <StatusBadge icon={HiddenIcon} tone="warn" value={SCREEN_HIDDEN_LABEL} /> : null}
+      {hidden || control.statusLabel ? (
+        <StatusBadge
+          icon={HiddenIcon}
+          tone="warn"
+          value={control.statusLabel ?? SCREEN_HIDDEN_LABEL}
+        />
+      ) : null}
       <div className="ml-auto flex shrink-0 items-center gap-2">
         {/* The key teaches itself while there is room; while hidden the chip
             takes that room, and the tooltip keeps the key. */}
@@ -406,6 +414,8 @@ export interface GreenScreenControl {
 
 /** What both looks' Hide screen controls show and do (the row and the Retro LCD's). */
 export interface ScreenPrivacyControl {
+  statusLabel?: string
+  observationDetail?: string
   hidden: boolean
   /** The bound key, absent when the streamer cleared it. */
   accelerator?: string
@@ -440,6 +450,7 @@ export function useStudioSources() {
     runtimeInfo,
     settings,
     screenPrivacy: privacy,
+    roomScreenPrivacy,
     hideScreen,
     showScreen,
     applyLayoutPatch
@@ -470,12 +481,19 @@ export function useStudioSources() {
   // Plan 210 S8b: the one Studio action, by the state it shows. A failure
   // says so; a refused hide is the hook's warning, and success is silent.
   const screenPrivacy: ScreenPrivacyControl = {
-    hidden: privacy.hidden,
+    statusLabel: roomPrivacyLabel(roomScreenPrivacy?.status),
+    observationDetail: roomScreenPrivacy?.hidden
+      ? `Source blocked: ${roomScreenPrivacy.sourceBlockedAt ?? 'unavailable'}. Applied frost observations: ${Object.keys(roomScreenPrivacy.observations).join(', ') || 'none'}. Other receivers remain unconfirmed.`
+      : undefined,
+    hidden: privacy.hidden || roomScreenPrivacy?.hidden === true,
     accelerator: screenHideAccelerator(settings.globalShortcuts?.screenHideToggle),
     platform: runtimeInfo?.platform,
-    disabledReason: screenPrivacyDisabledReason(privacy, wsStatus === 'connected'),
+    disabledReason: screenPrivacyDisabledReason(
+      { ...privacy, hidden: privacy.hidden || roomScreenPrivacy?.hidden === true },
+      wsStatus === 'connected'
+    ),
     toggle: () => {
-      const hidden = privacy.hidden
+      const hidden = privacy.hidden || roomScreenPrivacy?.hidden === true
       void (hidden ? showScreen() : hideScreen()).catch((error: unknown) =>
         toastUserError(
           error,

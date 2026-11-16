@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 1,
+  "topic": "videorc.screen-privacy.v1",
+  "ackTopic": "videorc.screen-privacy.ack.v1",
+  "publication": {
+    "epoch": "0123456789abcdef0123456789abcdef",
+    "generation": 3,
+    "hidden": true
+  },
+  "trackName": "vrc-privacy:0123456789abcdef0123456789abcdef:3:1",
+  "sourceBlocked": {
+    "epoch": "0123456789abcdef0123456789abcdef",
+    "generation": 3,
+    "hidden": true,
+    "sourceBlockedAt": 10000
+  },
+  "guestObservation": {
+    "epoch": "0123456789abcdef0123456789abcdef",
+    "generation": 3,
+    "hidden": true,
+    "appliedAt": 10200,
+    "receiver": "g_1111111111111111111111",
+    "receiverSession": "PA_fixtureGuest"
+  },
+  "programObservation": {
+    "epoch": "0123456789abcdef0123456789abcdef",
+    "generation": 3,
+    "hidden": true,
+    "appliedAt": 10300,
+    "receiver": "program:wide"
+  },
+  "confirmationTimeoutMs": 5000,
+  "localOldFrameDrainBudgetMs": 500,
+  "liveAcceptance": "not-run"
+}

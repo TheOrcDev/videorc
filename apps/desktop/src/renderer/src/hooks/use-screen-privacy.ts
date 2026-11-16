@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { BackendClient } from '@/backendClient'
 import type { ScreenPrivacy } from '@/lib/backend'
 import { toast } from '@/lib/toast'
+import { roomScreenPrivacy } from '@/lib/room-screen-privacy'
 import {
   screenPrivacyAction,
   SCREEN_HIDE_UNAVAILABLE,
@@ -24,12 +25,16 @@ export function useScreenPrivacy(
       void client
         .request<ScreenPrivacy>('screen.privacy.get')
         .then((value) => {
-          if (active && expected === revision.current) setPrivacy(value)
+          if (active && expected === revision.current) {
+            roomScreenPrivacy.apply(value)
+            setPrivacy(value)
+          }
         })
         .catch((error) => console.warn('[screen-privacy] refresh failed', error))
     }
     const off = client.on('screen.privacy.changed', (value) => {
       ++revision.current
+      roomScreenPrivacy.apply(value)
       setPrivacy(value)
       read()
     })
@@ -45,13 +50,20 @@ export function useScreenPrivacy(
       caller: PrivacyCaller = 'you',
       reason: 'you' | 'password-manager' = 'you'
     ) => {
+      const intent =
+        mode === 'hide' || (mode === 'toggle' && !roomScreenPrivacy.hidden)
+          ? roomScreenPrivacy.hide()
+          : roomScreenPrivacy.showIntent()
       if (!client) return { ok: false, message: 'Videorc is reconnecting. Try again in a moment.' }
       const turn = tail.current
         .catch(() => undefined)
         .then(async () => {
           const expected = ++revision.current
           const result = await screenPrivacyAction(client, mode, caller, reason)
-          if (result.privacy && expected === revision.current) setPrivacy(result.privacy)
+          if (result.privacy) {
+            roomScreenPrivacy.apply(result.privacy, intent, mode === 'show' || mode === 'toggle')
+            if (expected === revision.current) setPrivacy(result.privacy)
+          }
           if (result.message === SCREEN_HIDE_UNAVAILABLE)
             toast.warning(SCREEN_HIDE_UNAVAILABLE, { id: 'screen-hide-unavailable' })
           return result

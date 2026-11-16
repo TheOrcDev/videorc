@@ -1765,6 +1765,7 @@ export type StudioContextValue = {
    * start that cannot run says why and resolves false; one that only opened
    * the dialog resolves false too.
    */
+  roomScreenPrivacy?: TalkShowRoomSnapshot['screenPrivacy']
   screenPrivacy: import('@/lib/backend').ScreenPrivacy
   hideScreen: ReturnType<typeof useScreenPrivacy>['hideScreen']
   showScreen: ReturnType<typeof useScreenPrivacy>['showScreen']
@@ -5539,7 +5540,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       previous.identity === snapshot.identity &&
       previous.local.micMuted === snapshot.local.micMuted &&
       previous.local.cameraOff === snapshot.local.cameraOff &&
-      previous.local.microphone === snapshot.local.microphone
+      previous.local.microphone === snapshot.local.microphone &&
+      JSON.stringify(previous.screenPrivacy) === JSON.stringify(snapshot.screenPrivacy)
         ? previous
         : snapshot
     )
@@ -11748,6 +11750,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   }, [followFrontAppWanted, FollowFrontApp])
   const followFrontAppHost: FollowFrontAppHost = {
     enabled: followFrontAppEnabled,
+    cloudScreenPublication: roomHoldsTheCamera(cloudStatus?.room),
     scenes: sceneLibrary.scenes,
     activeSceneId: activeSavedSceneId,
     sources: captureConfig.sources,
@@ -20043,6 +20046,12 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         setDeviceList({ devices: fixtures, warnings: [] })
         return fixtures
       },
+      roomPrivacyPixels: () => roomControlsRef.current?.screenPrivacyPixels() ?? null,
+      roomPrivacy: () => roomControlsRef.current?.snapshot.screenPrivacy ?? null,
+      roomScreenShare: () => roomControlsRef.current?.startScreenShare(),
+      roomScreenStop: () => roomControlsRef.current?.stopScreenShare(),
+      screenPrivacyCommand: privacy.runScreenPrivacy,
+      roomScreenTrack: () => roomControlsRef.current?.snapshot.local.screen ?? null,
       outputFacts: () =>
         outputSessionFacts(
           recordingRef.current,
@@ -20094,6 +20103,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const value = useMemo<StudioCoreContextValue>(
     () => ({
       ...privacy,
+      roomScreenPrivacy: roomMedia?.screenPrivacy,
       connection,
       wsStatus,
       health,
@@ -20349,6 +20359,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     }),
     [
       privacy,
+      roomMedia,
       connection,
       wsStatus,
       health,

@@ -1,3 +1,12 @@
+import {
+  createPrivateScreen,
+  roomScreenPrivacy,
+  privacyTrackName,
+  privacyObservationMatches,
+  PRIVACY_ACK_TOPIC,
+  PRIVACY_TOPIC,
+  type ScreenPrivacyPublication
+} from './room-screen-privacy'
 // The host in the room (plan 224 C-G4, D6): `livekit-client` publishes the
 // Sources camera and microphone and, on request, a screen picked through
 // main's `desktopCapturer`; it subscribes to everyone in the room (the stage
@@ -107,6 +116,11 @@ export type TalkShowRoomSnapshot = {
   people: TalkShowPerson[]
   local: TalkShowLocalMedia
   monitor: TalkShowMonitor
+  screenPrivacy?: ScreenPrivacyPublication & {
+    sourceBlockedAt: number | null
+    status: 'visible' | 'hiding' | 'observed' | 'unconfirmed' | 'paused'
+    observations: Record<string, number>
+  }
 }
 
 export const IDLE_TALK_SHOW_ROOM: TalkShowRoomSnapshot = {
@@ -220,6 +234,14 @@ export class TalkShowRoomClient {
   #microphone: LocalAudioTrack | null = null
   #screen: LocalVideoTrack | null = null
   #screenGeneration = 0
+  #screenRaw: MediaStreamTrack | null = null
+  #privateScreen: ReturnType<typeof createPrivateScreen> | null = null
+  #privacyOff: (() => void) | null = null
+  #privacyTimer: ReturnType<typeof setTimeout> | null = null
+  #privacy: TalkShowRoomSnapshot['screenPrivacy']
+  #privacyEpoch = crypto.randomUUID().replaceAll('-', '')
+  #privacyGeneration = 0
+  #screenWork: Promise<void> = Promise.resolve()
   #speaking = new Set<string>()
   /** Remote voices playing through the audio host; never the runner's return (H1). */
   readonly #audio: RemoteAudioAttachments<HTMLMediaElement>
@@ -230,6 +252,17 @@ export class TalkShowRoomClient {
 
   constructor(deps: TalkShowRoomDeps) {
     this.#deps = deps
+    this.#privacyOff = roomScreenPrivacy.subscribe(() => {
+      if (!this.#screenRaw) return
+      // Close the publication before any async work, including an in-flight publish.
+      try {
+        this.#privateScreen?.block()
+      } catch {
+        this.#privacyFailed()
+      }
+      this.#screen?.stop()
+      void this.#refreshPrivateScreen()
+    })
     this.#cameraName = deps.cameraName
     this.#micMuted = deps.initiallyMuted === true || !deps.microphoneName
     this.#cameraOff = deps.initiallyCameraOff === true || !deps.cameraName
@@ -268,6 +301,9 @@ export class TalkShowRoomClient {
   /** Leave: the local tracks stop first (D13 for guests; the same here). */
   async disconnect(): Promise<void> {
     this.#closed = true
+    this.#privacyOff?.()
+    this.#privacyOff = null
+    if (this.#privacyTimer) clearTimeout(this.#privacyTimer)
     for (const pending of this.#overlays.values()) pending.abort()
     this.#overlays.clear()
     this.#screenGeneration += 1
@@ -366,9 +402,10 @@ export class TalkShowRoomClient {
   async startScreenShare(): Promise<void> {
     const room = this.#room
     if (!room || !this.#owns(room)) throw new Error('The room is not open.')
-    await this.stopScreenShare()
+    const stopping = this.stopScreenShare()
     const generation = this.#screenGeneration
-    if (!this.#owns(room)) return
+    await stopping
+    if (!this.#owns(room) || generation !== this.#screenGeneration) return
     const stream = await navigator.mediaDevices.getDisplayMedia({
       video: { width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 30 } },
       audio: false
@@ -379,32 +416,129 @@ export class TalkShowRoomClient {
     }
     const [mediaTrack] = stream.getVideoTracks()
     if (!mediaTrack) throw new Error('No screen was shared.')
-    mediaTrack.contentHint = 'detail'
-    const track = new LocalVideoTrack(mediaTrack, undefined, true)
+    this.#screenRaw = mediaTrack
+    this.#privacyEpoch = crypto.randomUUID().replaceAll('-', '')
     mediaTrack.addEventListener('ended', () => {
-      if (this.#screen === track) void this.stopScreenShare()
+      if (this.#screenRaw === mediaTrack) void this.stopScreenShare()
     })
-    this.#screen = track
-    await room.localParticipant.publishTrack(track, {
-      source: Track.Source.ScreenShare,
-      videoCodec: 'vp8',
-      simulcast: false,
-      videoEncoding: { maxBitrate: 4_000_000, maxFramerate: 30 }
-    })
+    await this.#refreshPrivateScreen()
+  }
+
+  #refreshPrivateScreen(): Promise<void> {
+    const raw = this.#screenRaw
+    const room = this.#room
+    const generation = ++this.#privacyGeneration
+    const expected: ScreenPrivacyPublication = {
+      epoch: this.#privacyEpoch,
+      generation,
+      hidden: roomScreenPrivacy.hidden
+    }
+    const old = this.#screen
+    this.#screen = null
+    old?.stop()
+    this.#privateScreen?.close()
+    this.#privateScreen = null
+    this.#privacy = {
+      ...expected,
+      sourceBlockedAt: expected.hidden ? Date.now() : null,
+      status: expected.hidden ? 'hiding' : 'visible',
+      observations: {}
+    }
+    if (this.#privacyTimer) clearTimeout(this.#privacyTimer)
+    if (expected.hidden)
+      this.#privacyTimer = setTimeout(() => {
+        if (this.#privacy?.generation !== generation) return
+        this.#privacy.status = Object.keys(this.#privacy.observations).length
+          ? 'observed'
+          : 'unconfirmed'
+        this.#publish()
+      }, 5000)
+    // Tell receivers to discard cached pictures; this is not an applied acknowledgement.
+    if (room)
+      void room.localParticipant
+        .publishData(new TextEncoder().encode(JSON.stringify(expected)), {
+          reliable: true,
+          topic: PRIVACY_TOPIC
+        })
+        .catch(() => {})
     this.#publish()
+    const current = () =>
+      !!raw &&
+      raw === this.#screenRaw &&
+      !!room &&
+      this.#owns(room) &&
+      generation === this.#privacyGeneration
+    const next = this.#screenWork
+      .catch(() => {})
+      .then(async () => {
+        if (old && room) await room.localParticipant.unpublishTrack(old, true).catch(() => {})
+        if (!current() || !raw || !room) return
+        try {
+          const guarded = createPrivateScreen(raw, roomScreenPrivacy, () => {
+            if (!current()) return
+            this.#privacyFailed()
+          })
+          if (!current()) {
+            guarded.close()
+            return
+          }
+          this.#privateScreen = guarded
+          guarded.track.contentHint = 'detail'
+          const track = new LocalVideoTrack(guarded.track, undefined, true)
+          this.#screen = track
+          await room.localParticipant.publishTrack(track, {
+            name: privacyTrackName(expected),
+            source: Track.Source.ScreenShare,
+            videoCodec: 'vp8',
+            simulcast: false,
+            videoEncoding: { maxBitrate: 4_000_000, maxFramerate: 30 }
+          })
+          if (!current()) {
+            track.stop()
+            await room.localParticipant.unpublishTrack(track, true).catch(() => {})
+          }
+        } catch {
+          if (current()) this.#privacyFailed()
+        }
+        this.#publish()
+      })
+    this.#screenWork = next
+    return next
+  }
+
+  #privacyFailed(): void {
+    this.#screenRaw?.stop()
+    this.#screenRaw = null
+    this.#privateScreen?.close()
+    this.#privateScreen = null
+    const track = this.#screen
+    this.#screen = null
+    track?.stop()
+    if (track) void this.#room?.localParticipant.unpublishTrack(track, true).catch(() => {})
+    if (this.#privacyTimer) clearTimeout(this.#privacyTimer)
+    if (this.#privacy) this.#privacy.status = 'paused'
+    this.#problem =
+      'Screen share paused: privacy processing is unavailable. Choose the screen again to retry.'
+    this.#publish()
+  }
+
+  screenPrivacyPixels(): number[] | null {
+    return this.#privateScreen?.pixels() ?? null
   }
 
   async stopScreenShare(): Promise<void> {
     this.#screenGeneration += 1
+    ++this.#privacyGeneration
+    this.#screenRaw?.stop()
+    this.#screenRaw = null
+    this.#privateScreen?.close()
+    this.#privateScreen = null
+    if (this.#privacyTimer) clearTimeout(this.#privacyTimer)
+    this.#privacy = undefined
     const track = this.#screen
     this.#screen = null
-    if (!track) return
-    track.stop()
-    try {
-      await this.#room?.localParticipant.unpublishTrack(track, true)
-    } catch {
-      track.stop()
-    }
+    track?.stop()
+    if (track) await this.#room?.localParticipant.unpublishTrack(track, true).catch(() => {})
     this.#publish()
   }
 
@@ -444,6 +578,33 @@ export class TalkShowRoomClient {
 
   #bind(room: Room): void {
     room
+      .on(RoomEvent.DataReceived, (payload, participant, _kind, topic) => {
+        // Only server-relayed observations. A participant cannot impersonate this API.
+        if (
+          participant ||
+          topic !== PRIVACY_ACK_TOPIC ||
+          !this.#owns(room) ||
+          !this.#privacy?.hidden ||
+          payload.length > 2048
+        )
+          return
+        try {
+          const value: unknown = JSON.parse(new TextDecoder().decode(payload))
+          if (!privacyObservationMatches(value, this.#privacy)) return
+          if (
+            !/^program:(wide|tall)(:recording)?$/.test(value.receiver) &&
+            (!room.remoteParticipants.has(value.receiver) ||
+              !value.receiverSession ||
+              room.remoteParticipants.get(value.receiver)?.sid !== value.receiverSession)
+          )
+            return
+          this.#privacy.observations[value.receiver] = value.appliedAt
+          this.#privacy.status = 'observed'
+          this.#publish()
+        } catch {
+          /* Malformed or legacy observations stay unconfirmed. */
+        }
+      })
       .on(RoomEvent.ParticipantConnected, (participant: RemoteParticipant) => {
         this.#applySubscriptions()
         // A guest who just joined needs the stage (data is not replayed).
@@ -452,7 +613,17 @@ export class TalkShowRoomClient {
         }
         this.#publish()
       })
-      .on(RoomEvent.ParticipantDisconnected, () => this.#publish())
+      .on(RoomEvent.ParticipantDisconnected, (participant) => {
+        if (this.#privacy) {
+          delete this.#privacy.observations[participant.identity]
+          if (isRecorderIdentity(participant.identity)) {
+            for (const key of Object.keys(this.#privacy.observations))
+              if (key.startsWith('program:')) delete this.#privacy.observations[key]
+          }
+          if (this.#privacy.hidden) this.#privacy.status = 'unconfirmed'
+        }
+        this.#publish()
+      })
       .on(RoomEvent.TrackPublished, () => {
         this.#applySubscriptions()
         this.#publish()
@@ -489,7 +660,13 @@ export class TalkShowRoomClient {
         this.#speaking = new Set(speakers.map((speaker) => speaker.identity))
         this.#publish()
       })
-      .on(RoomEvent.Reconnecting, () => this.#setState('reconnecting', 'Reconnecting to the room.'))
+      .on(RoomEvent.Reconnecting, () => {
+        if (this.#privacy) {
+          this.#privacy.observations = {}
+          this.#privacy.status = 'unconfirmed'
+        }
+        this.#setState('reconnecting', 'Reconnecting to the room.')
+      })
       .on(RoomEvent.Reconnected, () => {
         this.#setState('connected', null)
         void this.sendStage(this.#lastStage)
@@ -653,6 +830,13 @@ export class TalkShowRoomClient {
 
   async #stopLocal(): Promise<void> {
     const room = this.#room
+    ++this.#screenGeneration
+    ++this.#privacyGeneration
+    this.#screenRaw?.stop()
+    this.#screenRaw = null
+    this.#privateScreen?.close()
+    this.#privateScreen = null
+    this.#privacy = undefined
     const tracks = [this.#camera, this.#microphone, this.#screen].filter(
       (track): track is LocalVideoTrack | LocalAudioTrack => track !== null
     )
@@ -812,6 +996,9 @@ export class TalkShowRoomClient {
     this.#snapshot = {
       ...this.#snapshot,
       people,
+      screenPrivacy: this.#privacy
+        ? { ...this.#privacy, observations: { ...this.#privacy.observations } }
+        : undefined,
       local: {
         camera: this.#camera?.mediaStreamTrack ?? null,
         microphone: this.#microphone?.mediaStreamTrack ?? null,

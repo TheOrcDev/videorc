@@ -597,7 +597,7 @@ function RetroScreenPrivacyRow({ control }: { control: ScreenPrivacyControl }): 
   const row = (
     <LcdPanelPressRow
       disabled={disabledReason !== null}
-      label="Hide screen"
+      label={control.statusLabel ?? 'Hide screen'}
       pressed={hidden}
       onPressedChange={toggle}
     />

@@ -5651,6 +5651,9 @@ pub enum ScreenPrivacyReason {
 #[serde(rename_all = "camelCase")]
 pub struct ScreenPrivacy {
     pub hidden: bool,
+    /// Process-local transition generation; hide and show have distinct values.
+    #[serde(default)]
+    pub generation: u64,
     /// RFC 3339, the moment of the hide; present only while hidden.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub since: Option<String>,

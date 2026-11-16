@@ -4715,6 +4715,8 @@ export type ScreenPrivacyReason = 'you' | 'password-manager'
  * Absent fields are omitted by the backend, never `null`.
  */
 export interface ScreenPrivacy {
+  /** Native process transition generation; absent on older backends. */
+  generation?: number
   hidden: boolean
   /** RFC 3339, the moment of the hide; present only while hidden. */
   since?: string
