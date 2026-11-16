@@ -8,13 +8,15 @@ import { Switch } from '@/components/ui/switch'
 import { useStudioDiagnostics } from '@/hooks/use-studio'
 import type { StreamReportEmailState, StreamReportSendResult } from '@/lib/backend'
 import { toastUserError } from '@/lib/user-error'
-import { beginVideorcSignIn } from '@/lib/videorc-web-links'
+import { beginVideorcSignIn, openVideorcWebLink, VIDEORC_WEB_LINKS } from '@/lib/videorc-web-links'
 
 // Livestream → After the stream (plan 237 D7): one switch, "Email me a report
 // after each stream", and "Send the last one". The choice lives on the
 // videorc.com account, so the email's unsubscribe link and this switch are
 // the same setting. The backend sends the report a minute after a live stream
 // of 5 minutes or more ends (crates/videorc-backend/src/stream_report_email.rs).
+// Plan 241 D7 adds "Save my streams on videorc.com": the same report, kept on
+// videorc.com/live for 90 days. Its own switch, on the same account.
 
 export const STREAM_REPORT_SECTION_DESCRIPTION =
   'A minute after a live stream ends, Videorc emails you how many people watched at the peak and on average, and how many chatted, platform by platform. Numbers only: never chat messages or viewer names. Streams of 5 minutes or more.'
@@ -28,6 +30,17 @@ export function streamReportEmailDescription(state: StreamReportEmailState | nul
   if (!state.signedIn) return "To your Videorc account's email."
   if (state.enabled === null) return "Couldn't reach videorc.com."
   return state.email ? `To ${state.email}.` : "To your Videorc account's email."
+}
+
+export const STREAM_HISTORY_DESCRIPTION =
+  "Keeps each stream's report on videorc.com/live for 90 days (YouTube's numbers for 30). Never chat messages or viewer names."
+
+/** The history row's description: what it keeps, or why it can't say. */
+export function streamHistoryDescription(state: StreamReportEmailState | null): string {
+  if (!state || !state.signedIn) return STREAM_HISTORY_DESCRIPTION
+  if (state.envDisabled) return 'Turned off when Videorc started. Reopen Videorc to change it.'
+  if (state.history === undefined) return "Couldn't reach videorc.com."
+  return STREAM_HISTORY_DESCRIPTION
 }
 
 export type StreamReportSendView = 'idle' | 'sending' | StreamReportSendResult
@@ -60,6 +73,7 @@ export function StreamReportEmailSectionView({
   state,
   send,
   onEnabledChange,
+  onHistoryChange,
   onRetry,
   onSendLast
 }: {
@@ -67,6 +81,8 @@ export function StreamReportEmailSectionView({
   state: StreamReportEmailState | null
   send: StreamReportSendView
   onEnabledChange: (enabled: boolean) => void
+  /** "Save my streams on videorc.com" (plan 241 D7). */
+  onHistoryChange: (enabled: boolean) => void
   /** Reads the account's choice again after videorc.com didn't answer. */
   onRetry: () => void
   onSendLast: () => void
@@ -103,6 +119,33 @@ export function StreamReportEmailSectionView({
               onCheckedChange={onEnabledChange}
             />
           )}
+        </SettingsRow>
+        <SettingsRow
+          data-testid="stream-history"
+          description={streamHistoryDescription(state)}
+          label="Save my streams on videorc.com"
+        >
+          <Switch
+            checked={state?.history === true}
+            // Unknown until videorc.com answers: a switch would show "off".
+            disabled={!usable || state?.history === undefined}
+            id="stream-history"
+            onCheckedChange={onHistoryChange}
+          />
+        </SettingsRow>
+        <SettingsRow
+          data-testid="stream-history-open"
+          description="Your last stream and your history, on the web."
+          label="Your streams"
+        >
+          <Button
+            size="xs"
+            type="button"
+            variant="outline"
+            onClick={() => openVideorcWebLink(VIDEORC_WEB_LINKS.live)}
+          >
+            Open
+          </Button>
         </SettingsRow>
         <SettingsRow
           data-testid="stream-report-send-last"
@@ -187,6 +230,26 @@ export function StreamReportEmailSection(): ReactElement {
     [accept, client, refresh]
   )
 
+  const onHistoryChange = useCallback(
+    (enabled: boolean) => {
+      if (!client) return
+      const request = ++latest.current
+      setState((current) => current && { ...current, history: enabled })
+      client
+        .requestTyped('streamReport.history.set', { enabled })
+        .then((next) => {
+          if (request === latest.current) accept(next)
+        })
+        .catch((error: unknown) => {
+          if (request !== latest.current) return
+          toastUserError(error, { action: 'save', object: 'the saved streams setting' })
+          setState(confirmed.current)
+          refresh()
+        })
+    },
+    [accept, client, refresh]
+  )
+
   const onSendLast = useCallback(() => {
     if (!client) return
     const generation = ++sendGeneration.current
@@ -209,6 +272,7 @@ export function StreamReportEmailSection(): ReactElement {
       send={send}
       state={state}
       onEnabledChange={onEnabledChange}
+      onHistoryChange={onHistoryChange}
       onRetry={refresh}
       onSendLast={onSendLast}
     />

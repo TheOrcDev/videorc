@@ -31,7 +31,8 @@ const room = vi.hoisted(() => {
     connect: vi.fn<() => Promise<void>>(),
     disconnect: vi.fn<() => Promise<void>>(),
     reports: [] as ((state: 'connected') => void)[],
-    snapshots: [] as ((snapshot: TalkShowRoomSnapshot) => void)[]
+    snapshots: [] as ((snapshot: TalkShowRoomSnapshot) => void)[],
+    onAir: [] as ((() => unknown) | undefined)[]
   }
 })
 vi.mock('@/lib/talk-show-room', async () => {
@@ -39,14 +40,17 @@ vi.mock('@/lib/talk-show-room', async () => {
   class TalkShowRoomClient {
     constructor({
       report,
-      onSnapshot
+      onSnapshot,
+      onAir
     }: {
       report: (state: 'connected') => void
       onSnapshot: (snapshot: TalkShowRoomSnapshot) => void
+      onAir?: () => unknown
     }) {
       room.constructed += 1
       room.reports.push(report)
       room.snapshots.push(onSnapshot)
+      room.onAir.push(onAir)
     }
     async sendStage(): Promise<void> {}
     async connect(): Promise<void> {
@@ -279,6 +283,32 @@ describe('the host room join', () => {
     await settle()
     expect(room.connected).toBe(1)
     expect(room.disconnected).toBe(0)
+  })
+
+  // Plan 243 C5: the client reads who is on air when its host seat drops,
+  // from the latest status, without a rejoin for the status change.
+  it('hands the room client the device on air from the latest status', async () => {
+    const value = deps(vi.fn())
+    act(() => root.render(createElement(Host, { value })))
+    await settle()
+    const onAir = room.onAir.at(-1)
+    expect(onAir?.()).toBeUndefined()
+    const iPhone = {
+      name: 'iPhone',
+      kind: 'phone',
+      source: 'host',
+      waiting: false,
+      thisDevice: false,
+      since: '2026-11-16T20:01:02.000Z'
+    } as const
+    act(() =>
+      root.render(
+        createElement(Host, { value: { ...value, cloudStatus: { ...openRoom, onAir: iPhone } } })
+      )
+    )
+    await settle()
+    expect(onAir?.()).toEqual(iPhone)
+    expect(room.connected).toBe(1)
   })
 
   it('waits for the old disconnect before granting a reopened room', async () => {

@@ -110,6 +110,13 @@ const KNOWN_CODES: Readonly<Record<string, string>> = {
   // Plan 224: Open the room's refusals (`RoomOpenRefusal`).
   'cloud-room-session-active': 'Stop the recording or the livestream, then open the room.',
   'cloud-show-live': 'A show is live through Videorc Cloud. End it first.',
+  // Plan 243: continuing a show on another device (the web's refusals, D8).
+  'cloud-handoff-update':
+    'Update Videorc on the other computer first, or end the stream and go live again.',
+  'cloud-handoff-unsupported': "This show can't continue on another device.",
+  'cloud-source-not-ready': "Videorc Cloud didn't get this computer's video in time. Try again.",
+  'cloud-not-on-air': 'Your show is live from another device now.',
+  'cloud-nothing-to-resume': "Your show isn't live anymore.",
   // A scene whose layout needs a source that is set to None or Off. Trying
   // again cannot help, so the copy says what to pick instead.
   'layout-screen-not-selected':
@@ -129,6 +136,10 @@ const WARNING_CODES = new Set([
   'cloud-test-running',
   'cloud-room-session-active',
   'cloud-show-live',
+  'cloud-handoff-update',
+  'cloud-handoff-unsupported',
+  'cloud-not-on-air',
+  'cloud-nothing-to-resume',
   'clean-cut-mutation-blocked',
   'noise-cleanup-mutation-blocked'
 ])

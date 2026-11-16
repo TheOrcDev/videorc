@@ -12,6 +12,12 @@ export type { AppExitKind }
  * is not the person's (a smoke harness, a shutdown signal, the recovery
  * dialog's own Quit) is allowed up front and never waits.
  *
+ * Plan 243 C5: on a managed cloud show the question also offers "Quit and
+ * keep it live". The renderer hands the show off first (`cloud.show.handOff`,
+ * which stops this computer's session without ending the show) and answers
+ * through the same `app:exit` only once the hand-off succeeded, so a quit
+ * never ends a show the person chose to keep live.
+ *
  * Pure: no Electron, so the decisions are tested as data.
  */
 export class LiveExitGuard {

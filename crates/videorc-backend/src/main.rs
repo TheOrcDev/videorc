@@ -783,6 +783,10 @@ async fn run_backend(device_changes: tokio::sync::watch::Receiver<u64>) -> Resul
         let entitlement_state = state.clone();
         tokio::spawn(async move {
             refresh_account_entitlements(&entitlement_state).await;
+            let history_state = entitlement_state.clone();
+            tokio::spawn(async move {
+                stream_report_email::history::retry_at_launch(&history_state).await;
+            });
             // Plan 184 C5: a show a crash left live shows the Resume banner.
             cloud_show_detect_at_launch(&entitlement_state).await;
         });
@@ -13825,6 +13829,8 @@ async fn handle_text_message_with_role(
                             if let Some(token_ref) = token_ref {
                                 match secrets::get_secret(token_ref) {
                                     Ok(token) => {
+                                        let history_web =
+                                            stream_report_email::web_access(state).await;
                                         if let Err(error) = oauth::revoke_youtube_token(
                                             &token,
                                             &oauth::provider_http_client(),
@@ -13839,6 +13845,10 @@ async fn handle_text_message_with_role(
                                                 ),
                                             );
                                         }
+                                        stream_report_email::history::youtube_revoked(
+                                            state,
+                                            history_web,
+                                        );
                                     }
                                     Err(error) => {
                                         return ServerResponse::error(
