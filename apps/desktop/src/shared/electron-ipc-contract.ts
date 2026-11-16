@@ -139,6 +139,7 @@ export const electronInvokeApiMethods = {
   'app:exit': 'exitApp',
   'screens:pick-images': 'pickScreenImages',
   'screens:authorize-dropped-images': 'authorizeDroppedScreenImages',
+  'screens:release-images': 'releaseScreenImages',
   'banners:pick-image': 'pickBannerImage',
   'banners:pick-html': 'pickBannerHtml',
   'sounds:pick-files': 'pickSoundFiles',
@@ -2117,6 +2118,10 @@ const specificRuntimeInvokeContracts = {
   'backgrounds:asset-exists': invokeContract(tupleSchema([boundedIdentifier])),
   'screens:authorize-dropped-images': invokeContract(
     tupleSchema([arraySchema(pathSchema, { maxLength: SCREEN_IMAGE_BATCH_MAX })])
+  ),
+  'screens:release-images': invokeContract(
+    tupleSchema([arraySchema(boundedIdentifier, { maxLength: SCREEN_IMAGE_BATCH_MAX })]),
+    undefinedSchema
   ),
   'buddy-assets:remove': invokeContract(
     tupleSchema([stringSchema({ minLength: 1, maxLength: 128 })]),

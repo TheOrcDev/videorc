@@ -25,7 +25,8 @@ function harness() {
     onPending: vi.fn(),
     onImported: vi.fn(),
     onPickError: vi.fn(),
-    onImportError: vi.fn()
+    onImportErrors: vi.fn(),
+    onUnused: vi.fn()
   }
   return { importer: createTakeoverImporter(), selection, imported, options }
 }
@@ -83,8 +84,32 @@ describe('takeover import lifecycle', () => {
       onPending: (selections: readonly string[]) => pending.push(selections)
     })
     expect(options.onImported.mock.calls).toEqual([['screen-a'], ['screen-c']])
-    expect(options.onImportError).toHaveBeenCalledExactlyOnceWith(failure, 'b')
+    expect(options.onImportErrors).toHaveBeenCalledExactlyOnceWith(
+      [{ error: failure, selection: 'b' }],
+      3
+    )
     expect(pending).toEqual([['a', 'b', 'c'], ['b', 'c'], ['c'], [], []])
+    expect(options.onUnused).not.toHaveBeenCalled()
+  })
+  it('reports every failed image of a batch once, after the last one', async () => {
+    const { importer, options } = harness()
+    const errors = { a: new Error('corrupt a'), c: new Error('corrupt c') }
+    await importer.run({
+      ...options,
+      pick: async () => ['a', 'b', 'c'],
+      importImage: async (selection: string) => {
+        if (selection === 'a' || selection === 'c') throw errors[selection]
+        return `screen-${selection}`
+      }
+    })
+    expect(options.onImportErrors).toHaveBeenCalledExactlyOnceWith(
+      [
+        { error: errors.a, selection: 'a' },
+        { error: errors.c, selection: 'c' }
+      ],
+      3
+    )
+    expect(options.onImported).toHaveBeenCalledExactlyOnceWith('screen-b')
   })
   it('a retired connection cannot submit a picker result', async () => {
     const { importer, selection, options } = harness()
@@ -93,6 +118,7 @@ describe('takeover import lifecycle', () => {
     selection.resolve(['image'])
     await run
     expect(options.importImage).not.toHaveBeenCalled()
+    expect(options.onUnused).toHaveBeenCalledExactlyOnceWith(['image'])
   })
   it('a reset during a batch stops the images not yet imported', async () => {
     const { importer, selection, imported, options } = harness()
@@ -104,6 +130,8 @@ describe('takeover import lifecycle', () => {
     await run
     expect(options.importImage).toHaveBeenCalledExactlyOnceWith('a')
     expect(options.onImported).not.toHaveBeenCalled()
+    // 'a' reached the backend; only 'b' was never used.
+    expect(options.onUnused).toHaveBeenCalledExactlyOnceWith(['b'])
   })
   it.each(['success', 'failure'] as const)(
     'late %s cannot change state or clear a newer import',
@@ -123,7 +151,7 @@ describe('takeover import lifecycle', () => {
       expect(options.onPhase).not.toHaveBeenCalled()
       expect(options.onPending).not.toHaveBeenCalled()
       expect(options.onImported).not.toHaveBeenCalled()
-      expect(options.onImportError).not.toHaveBeenCalled()
+      expect(options.onImportErrors).not.toHaveBeenCalled()
       await importer.run(next.options)
       expect(next.options.pick).toHaveBeenCalledTimes(1)
       next.selection.resolve([])
