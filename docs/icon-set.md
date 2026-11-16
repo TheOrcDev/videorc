@@ -7,7 +7,7 @@ the set can be swapped for a licensed one.
 
 Every renderer module imports from `apps/desktop/src/renderer/src/components/icons.tsx`.
 Nothing imports an icon package directly — `no-restricted-imports` makes that
-an ESLint error outside the registry itself.
+a lint error (oxlint) outside the registry itself.
 
 The registry names icons by **meaning**, not by shape: call sites ask for
 `SourcesIcon`, `AlertIcon`, `RecordIcon`. Two consequences:

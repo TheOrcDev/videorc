@@ -259,7 +259,7 @@ describe('GlobalShortcutsRegistrar conflicts', () => {
       const [title, options] = vi.mocked(toast.warning).mock.calls[0] ?? []
       expect(title).toBe("Global shortcuts don't work here")
       expect(options?.description).toBe(unavailable)
-      expect((options?.action as { label: string }).label).toBe('Open Shortcuts')
+      expect((options!.action as { label: string }).label).toBe('Open Shortcuts')
       expect(toast.error).not.toHaveBeenCalled()
     } finally {
       vi.unstubAllGlobals()

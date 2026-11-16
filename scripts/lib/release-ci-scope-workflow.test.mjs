@@ -138,7 +138,7 @@ describe('release CI path-filter wiring', () => {
       'Node logic tests',
       'Format',
       'TypeScript',
-      'ESLint',
+      'Lint',
       'JavaScript advisory audit'
     ]) {
       assert.ok(js.includes(`- name: ${step}\n`), `JS job keeps ${step}`)

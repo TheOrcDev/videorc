@@ -251,7 +251,7 @@ jobs:
       - name: TypeScript
         run: pnpm typecheck
 
-      - name: ESLint
+      - name: Lint
         run: pnpm lint
 
       - name: JavaScript advisory audit

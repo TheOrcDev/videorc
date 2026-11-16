@@ -55,7 +55,7 @@ export const RELEASE_CI_GATE_SPECS = Object.freeze({
         'Node logic tests',
         'Format',
         'TypeScript',
-        'ESLint'
+        'Lint'
       ]),
       ...shardJobs((shard) => `gates / Windows desktop tests (${shard}/3)`, 3),
       gateJob('gates / Windows release source gates', [
