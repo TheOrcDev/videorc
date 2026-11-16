@@ -1736,6 +1736,33 @@ pub(crate) struct FailedShow {
     direct_fallback: bool,
 }
 
+/// Clears an abandoned prepare, including cancellation of the resume future.
+struct ResumeClaimGuard {
+    slot: CloudShowSlot,
+    show_id: String,
+    session_id: String,
+    keep: bool,
+}
+
+impl Drop for ResumeClaimGuard {
+    fn drop(&mut self) {
+        if self.keep {
+            return;
+        }
+        let mut runtime = lock(&self.slot);
+        if runtime.show.as_ref().is_some_and(|show| {
+            show.record.id == self.show_id
+                && show
+                    .session_id
+                    .as_deref()
+                    .is_none_or(|id| id == self.session_id)
+        }) {
+            runtime.pending_feed_go = false;
+            runtime.claiming_air = false;
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct CloudShowRuntime {
     pub(crate) device: CloudDevice,
@@ -4191,6 +4218,12 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
                 "This version of Videorc can't resume this Videorc Cloud show. Update Videorc, or end the show from videorc.com/live."
             );
         }
+        let mut claim = ResumeClaimGuard {
+            slot: self.slot.clone(),
+            show_id: show_id.into(),
+            session_id: session_id.into(),
+            keep: false,
+        };
         let ingest = if control.transport_kind() == ControlKind::Web {
             let device = lock(&self.slot).device.clone();
             let answer = self
@@ -4301,6 +4334,7 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
                 send_hold_image(&tx, hold_image_png_base64).await
             }
         }
+        claim.keep = true;
         Ok(ResumeOutcome::Resumed(PrepareOutcome::Cloud(
             SessionHandover {
                 show_id: show_id.to_string(),
@@ -4329,9 +4363,16 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
     }
 
     /// Runs only after the local session starts: never wait for a feed before sending it.
-    pub async fn finish_resume(&self, bearer: &str) -> Result<()> {
+    pub async fn finish_resume(&self, bearer: &str, started_session: &str) -> Result<()> {
         let (show_id, device, orientations, generation, session_id) = {
             let mut runtime = lock(&self.slot);
+            // Only the successful start that bound this prepare may finish it.
+            // Local recordings and direct starts do not own a resume claim.
+            if !runtime.claiming_air
+                || runtime.feeding_session().as_deref() != Some(started_session)
+            {
+                return Ok(());
+            }
             if !runtime.pending_feed_go {
                 runtime.claiming_air = false;
                 return Ok(());
@@ -4355,6 +4396,12 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
                 runtime.generation,
                 show.session_id.clone(),
             )
+        };
+        let _claim = ResumeClaimGuard {
+            slot: self.slot.clone(),
+            show_id: show_id.clone(),
+            session_id: started_session.into(),
+            keep: false,
         };
         let still_feeding = || {
             let runtime = lock(&self.slot);
@@ -11946,6 +11993,102 @@ mod tests {
         assert_eq!(web.destination_bodies().len(), 2);
     }
 
+    fn hold_unconnected_for_review(harness: &Harness, talk: bool) {
+        let created = if talk {
+            created_managed_talk()
+        } else {
+            created_managed()
+        };
+        lock(&harness.context.slot).show = Some(ActiveShow {
+            record: created.show,
+            control: created.control,
+            ingest: Some(created.ingest),
+            session_id: None,
+            destinations: Vec::new(),
+            handed_over: false,
+            hold_image_png_base64: None,
+            resuming: false,
+        });
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn r2_a_m1_failed_prepare_hello_does_not_poison_a_local_start() {
+        for error in [
+            CloudApiError::Unauthorized,
+            web_error(503, "cloud-media-unavailable"),
+        ] {
+            let harness = harness(true);
+            hold_unconnected_for_review(&harness, false);
+            let mut state = managed_state("live", live_legs());
+            state["onAir"] = json!({"deviceId":"BBBBBBBBBBBBBBBBBBBBBB","source":"camera","kind":"phone","waiting":false});
+            harness.context.web.set_state(state);
+            harness.context.web.fail_polls([error.clone(), error]);
+            assert!(
+                harness
+                    .context
+                    .resume_session("resume", Some("bearer".into()), None)
+                    .await
+                    .is_err()
+            );
+            assert!(!lock(&harness.context.slot).pending_feed_go);
+            assert!(!lock(&harness.context.slot).claiming_air);
+            // The post-start hook for an unrelated, successful local recording.
+            assert!(
+                harness
+                    .context
+                    .finish_resume("bearer", "local-recording")
+                    .await
+                    .is_ok()
+            );
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn r2_a_m1_an_unrelated_start_cannot_finish_another_sessions_claim() {
+        let harness = harness(true);
+        hold_unconnected_for_review(&harness, false);
+        {
+            let mut runtime = lock(&harness.context.slot);
+            runtime.show.as_mut().unwrap().session_id = Some("resume".into());
+            runtime.pending_feed_go = true;
+            runtime.claiming_air = true;
+        }
+        harness
+            .context
+            .finish_resume("bearer", "local-recording")
+            .await
+            .unwrap();
+        assert!(lock(&harness.context.slot).pending_feed_go);
+        assert!(harness.context.web.on_air_calls.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn r2_a_m1_cancelled_hello_releases_the_prepare_claim() {
+        let harness = harness(true);
+        hold_unconnected_for_review(&harness, false);
+        harness
+            .context
+            .web
+            .set_state(managed_state("live", live_legs()));
+        harness
+            .context
+            .web
+            .first_state_delay_ms
+            .store(60_000, Ordering::SeqCst);
+        assert!(
+            tokio::time::timeout(
+                Duration::from_secs(1),
+                harness
+                    .context
+                    .resume_session("resume", Some("bearer".into()), None)
+            )
+            .await
+            .is_err()
+        );
+        assert!(!lock(&harness.context.slot).claiming_air);
+        assert!(!lock(&harness.context.slot).pending_feed_go);
+    }
+
     #[tokio::test(start_paused = true)]
     async fn cloud_hand_off_keeps_the_show_even_when_the_post_fails() {
         for fail in [false, true] {
@@ -12097,7 +12240,8 @@ mod tests {
             );
             if camera {
                 let context = harness.context.clone();
-                let go = tokio::spawn(async move { context.finish_resume("bearer").await });
+                let go =
+                    tokio::spawn(async move { context.finish_resume("bearer", "session-2").await });
                 tokio::time::sleep(Duration::from_secs(1)).await;
                 assert_eq!(harness.context.web.on_air_calls.lock().unwrap().len(), 1);
                 let mut state = harness.context.web.managed.lock().unwrap().state.clone();
@@ -12117,7 +12261,11 @@ mod tests {
                     "go"
                 );
             } else {
-                harness.context.finish_resume("bearer").await.unwrap();
+                harness
+                    .context
+                    .finish_resume("bearer", "session-2")
+                    .await
+                    .unwrap();
                 assert_eq!(harness.context.web.on_air_calls.lock().unwrap().len(), 1);
             }
             assert!(harness.context.web.end_calls.lock().unwrap().is_empty());
@@ -12133,7 +12281,7 @@ mod tests {
         let mut state = managed_state("starting", live_legs());
         state["onAir"] = json!({"deviceId":"BBBBBBBBBBBBBBBBBBBBBB","name":"iPhone","kind":"phone","source":"camera","waiting":false,"since":"now"});
         harness.context.web.set_state(state);
-        let result = harness.context.finish_resume("bearer").await;
+        let result = harness.context.finish_resume("bearer", "session-1").await;
         assert_eq!(
             continuation_error_code(&result.unwrap_err()),
             Some("cloud-source-not-ready")

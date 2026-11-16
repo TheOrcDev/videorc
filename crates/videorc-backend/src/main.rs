@@ -16084,7 +16084,8 @@ async fn start_session_command(
                 Ok(status) => {
                     if let Some(context) = cloud_context(state)
                         && let Some(bearer) = account::stored_session_token()
-                        && let Err(error) = context.finish_resume(&bearer).await
+                        && let Some(session_id) = status.session_id.as_deref()
+                        && let Err(error) = context.finish_resume(&bearer, session_id).await
                     {
                         return ServerResponse::error(
                             command.id,
