@@ -1703,7 +1703,17 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
         }
         self.hooks.emit_from(&self.slot);
         let status = self.end_current_show(bearer).await;
-        self.forget_talk_show().await;
+        match &status {
+            Ok(confirmed) if !matches!(confirmed.phase, crate::cloud_show::CloudPhase::Ending) => {
+                self.forget_talk_show().await
+            }
+            _ => {
+                if let Some(talk) = lock(&self.slot).talk.as_mut() {
+                    talk.phase = CloudRoomPhase::Open;
+                }
+                self.hooks.emit_from(&self.slot);
+            }
+        }
         status
     }
 
