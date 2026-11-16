@@ -6580,7 +6580,8 @@ describe('real StudioProvider lifecycle', () => {
   }, 20_000)
 
   // Plan 243 D7: a talk show taken over (or handed off) goes on elsewhere, so
-  // End livestream on this computer ends none of its legs.
+  // End livestream on this computer ends none of its legs, until Continue
+  // here puts this computer back on air.
   it('ends no talk show legs once the show is taken over (plan 243 D7)', async () => {
     const backend = new StudioBackend()
     const talk: CloudStatus = {
@@ -6662,6 +6663,22 @@ describe('real StudioProvider lifecycle', () => {
     const methods = backend.commands.map((command) => command.method)
     expect(methods).not.toContain('cloud.show.legs.end')
     expect(methods).not.toContain('streamTargets.youtube.transition')
+
+    // Continue here (the room's resume) puts this computer back on air: End
+    // livestream ends the legs again.
+    await act(async () => {
+      backend.pushEvent('cloud.state', talk)
+      await Promise.resolve()
+    })
+    await waitForObservation(() => latest().cloud.cloudStatus?.onAir?.thisDevice === true)
+    await act(async () => {
+      await latest().core.requestStopSession('button')
+    })
+    await waitForObservation(() => shell?.stopConfirmation?.origin === 'button')
+    await act(async () => shell!.confirmStopSession())
+    await waitForObservation(() =>
+      backend.commands.some((command) => command.method === 'cloud.show.legs.end')
+    )
   }, 20_000)
 
   // Plan 243 D10: focus asks videorc.com for a show live from another

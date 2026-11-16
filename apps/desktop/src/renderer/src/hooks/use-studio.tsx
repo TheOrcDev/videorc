@@ -5498,10 +5498,13 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     (next: CloudStatus): void => {
       const previous = cloudStatusRef.current
       cloudStatusRef.current = next
-      // Plan 243 D7: sent before the session stops, so its stop completes nothing.
+      // Plan 243 D7: sent before the session stops, so its stop completes
+      // nothing; this computer back on air (Continue here) ends the latch.
+      const here = (status: CloudStatus | null) =>
+        status?.onAir?.thisDevice && !status.onAir.waiting
       if (next.stoppedBy && !previous?.stoppedBy) {
         latchHandOff([next.sessionId, recordingRef.current.sessionId, next.show?.id])
-      }
+      } else if (here(next) && !here(previous)) handedOffRef.current = new Set()
       setCloudStatus(next)
       void loadCloudNotices().then((n) => n.toastCloudStatus(previous, next))
     },
