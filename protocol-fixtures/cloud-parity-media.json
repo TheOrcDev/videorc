@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "sampleRate": 48000,
+  "durationSeconds": 4,
+  "captureSeconds": 3,
+  "tonePeak": 0.125,
+  "tones": { "host": 440, "soundboard": 1000, "system": 660, "guest1": 880, "guest2": 1320 },
+  "colors": {
+    "host": [200, 40, 40],
+    "guest1": [40, 80, 200],
+    "guest2": [200, 180, 40],
+    "card": [220, 40, 180],
+    "takeover": [40, 200, 200],
+    "avatar": [0, 200, 90]
+  },
+  "video": { "width": 320, "height": 180, "fps": 30 },
+  "analysis": {
+    "colorTolerance": 45,
+    "minimumColorFraction": 0.005,
+    "audibleDbfs": -45,
+    "absentDbfs": -60
+  }
+}
