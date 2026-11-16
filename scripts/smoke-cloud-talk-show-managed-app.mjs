@@ -567,12 +567,11 @@ try {
       await noTemps()
       assert.equal(h.calls('recordingPlaylist', first.at).filter((c) => c.status === 503).length, 1)
       const secondPath = await success(await start())
-      assert.ok(secondPath.includes(' (2)'))
-      assert.notEqual(firstPath, secondPath)
+      assert.equal(firstPath, secondPath, 'repeated import must reuse the same local file')
       const barrier = h.web.hooks.pause('segment')
       let slow
       try {
-        slow = await start()
+        slow = await start(h.web.hooks.addRecording({ showId: h.showId }).id)
         await waitFor(() => barrier.hits, 'segment held')
         // The temporary check looks where the job works: its folder is there now.
         assert.equal(downloadTemps(h).length, 1, 'a held download has its private folder')
@@ -588,7 +587,7 @@ try {
       await success(slow)
       await noTemps()
       h.web.hooks.failNext('segment', 3, 503)
-      const failed = await terminal(await start())
+      const failed = await terminal(await start(h.web.hooks.addRecording({ showId: h.showId }).id))
       assert.equal(failed.payload.state ?? failed.payload.phase, 'failed')
       await noTemps()
       assert.equal(
@@ -626,7 +625,7 @@ try {
       await noTemps()
       const cancelBarrier = h.web.hooks.pause('segment')
       try {
-        const job = await start()
+        const job = await start(h.web.hooks.addRecording({ showId: h.showId }).id)
         await waitFor(() => cancelBarrier.hits, 'cancel download held')
         await h.rpc(DOWNLOAD.cancel, { jobId: job.id }, 5000)
         const cancelled = await terminal(job)
@@ -700,14 +699,14 @@ try {
       )
       const offered = await buttons(take.id)
       assert.ok(
-        offered.includes('Download'),
+        offered.includes('Download to Library'),
         `the take's row offers ${JSON.stringify(offered)}: ${await rowText(take.id)}`
       )
 
       // Download: progress while the segment is held, then Saved and Show in Finder.
       const held = h.web.hooks.pause('segment')
       try {
-        assert.ok(await click(rowSelector(take.id), 'Download'))
+        assert.ok(await click(rowSelector(take.id), 'Download to Library'))
         await rowSays(take.id, /Downloading/, 'row shows Downloading')
         assert.ok(
           await h.eval(
@@ -719,15 +718,15 @@ try {
       } finally {
         held.release()
       }
-      await rowSays(take.id, /Saved/, 'row shows Saved', 60000)
-      assert.ok((await buttons(take.id)).some((b) => /^Show in /.test(b)))
+      await rowSays(take.id, /Open in Library/, 'registered local take', 60000)
+      assert.ok(doneEvent(take.id, 'done').payload.localSessionId)
       playable(h, doneEvent(take.id, 'done').payload.path)
 
       // A failed download says so and offers Try again.
       const broken = h.web.hooks.addRecording({ showId: h.showId })
       await listed(broken.id)
       h.web.hooks.failNext('segment', 3, 503)
-      assert.ok(await click(rowSelector(broken.id), 'Download'))
+      assert.ok(await click(rowSelector(broken.id), 'Download to Library'))
       await rowSays(broken.id, /Couldn.t download/, 'row shows the failure', 60000)
       assert.ok((await buttons(broken.id)).includes('Try again'))
       await noDownloadTemps(h)
@@ -737,13 +736,13 @@ try {
       await listed(spare.id)
       const hold = h.web.hooks.pause('segment')
       try {
-        assert.ok(await click(rowSelector(spare.id), 'Download'))
+        assert.ok(await click(rowSelector(spare.id), 'Download to Library'))
         await rowSays(spare.id, /Downloading/, 'spare row downloading')
         assert.ok(await click(rowSelector(spare.id), 'Cancel'))
         await waitFor(
           async () =>
             !/Downloading/.test((await rowText(spare.id)) ?? '') &&
-            (await buttons(spare.id)).includes('Download'),
+            (await buttons(spare.id)).includes('Download to Library'),
           'Cancel takes the row back to Download'
         )
         await waitFor(() => doneEvent(spare.id, 'cancelled'), 'cancelled event')
@@ -757,7 +756,7 @@ try {
       await listed(node.id)
       const labels = await buttons(node.id)
       assert.ok(labels.includes('Open videorc.com'))
-      assert.equal(labels.includes('Download'), false)
+      assert.equal(labels.includes('Download to Library'), false)
       // The click itself is not made here: window.videorc is frozen by the
       // context bridge, so its opener cannot be watched, and a click would
       // open a real browser on this Mac. library-cloud-recordings.test.ts

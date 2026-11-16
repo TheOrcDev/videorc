@@ -12190,7 +12190,22 @@ async fn handle_text_message_with_role(
                 .cloud_recordings(account::stored_session_token())
                 .await
             {
-                Ok(recordings) => {
+                Ok(mut recordings) => {
+                    for recording in &mut recordings {
+                        recording.local_session_id = None;
+                        if let Err(error) = state.database.remember_cloud_recording(recording) {
+                            return ServerResponse::error(
+                                command.id,
+                                "cloud-recordings-failed",
+                                error.to_string(),
+                            );
+                        }
+                        recording.local_session_id = state
+                            .database
+                            .cloud_recording_session(&recording.id)
+                            .ok()
+                            .flatten();
+                    }
                     ServerResponse::ok(command.id, serde_json::json!({ "recordings": recordings }))
                 }
                 Err(error) => ServerResponse::error(
@@ -12248,6 +12263,7 @@ async fn handle_text_message_with_role(
                     ffmpeg_path,
                     folder,
                     emit,
+                    state.database.clone(),
                 ) {
                     Ok(download) => ServerResponse::ok(command.id, download),
                     Err(error) => ServerResponse::error(
@@ -12261,7 +12277,17 @@ async fn handle_text_message_with_role(
         }
         "cloud.recordings.downloads" => {
             let jobs = cloud_show::lock(&state.cloud_show).downloads.clone();
-            ServerResponse::ok(command.id, jobs.snapshot())
+            let mut events = jobs.snapshot();
+            for event in &mut events {
+                if event.state == cloud_control_web::DownloadState::Done {
+                    event.local_session_id = state
+                        .database
+                        .cloud_recording_session(&event.recording_id)
+                        .ok()
+                        .flatten();
+                }
+            }
+            ServerResponse::ok(command.id, events)
         }
         "cloud.recordings.cancelDownload" => {
             match serde_json::from_value::<cloud_control_web::CancelRecordingDownloadParams>(

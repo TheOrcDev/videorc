@@ -1,3 +1,5 @@
+import { openWorkspaceTab } from '@/lib/workspace-navigation'
+import { cloudRecordingAvailability, cloudTakeLabel } from '@/lib/cloud-recordings-view'
 import {
   useCallback,
   useEffect,
@@ -261,12 +263,32 @@ function CloudRecordingRow({
       data-recording-id={recording.id}
       data-testid="library-cloud-recording"
       icon={<VideoFileIcon />}
-      title="Talk show"
+      title={cloudTakeLabel(recording)}
     >
       <span className="text-meta text-muted-foreground tabular-nums">
         {durationMsLabel(recording.seconds * 1000)}
       </span>
-      {downloadsOnThisComputer(recording) ? (
+      {recording.localSessionId || (download?.state === 'done' && download.localSessionId) ? (
+        <Button
+          size="xs"
+          variant="outline"
+          onClick={() =>
+            openWorkspaceTab(
+              'library',
+              recording.localSessionId ??
+                (download?.state === 'done' ? download.localSessionId : undefined)
+            )
+          }
+        >
+          Open in Library
+        </Button>
+      ) : cloudRecordingAvailability(recording) !== 'available' ? (
+        <span className="text-meta text-muted-foreground">
+          {cloudRecordingAvailability(recording) === 'expired'
+            ? 'Cloud copy expired'
+            : 'Cloud file missing'}
+        </span>
+      ) : downloadsOnThisComputer(recording) ? (
         <DownloadControls
           disabled={disabled}
           download={download}
@@ -348,7 +370,7 @@ function DownloadControls({
       ) : null}
       <Button disabled={disabled} size="xs" variant="outline" onClick={onDownload}>
         <DownloadIcon data-icon="inline-start" />
-        {failed ? 'Try again' : 'Download'}
+        {failed ? 'Try again' : 'Download to Library'}
       </Button>
     </>
   )
