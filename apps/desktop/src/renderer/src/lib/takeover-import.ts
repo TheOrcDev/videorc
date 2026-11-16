@@ -1,9 +1,15 @@
 import { ipcErrorMessage } from '@/lib/ipc-error-message'
-import { UserFacingError } from '@/lib/user-error'
+import { UserFacingError, type UserErrorContext } from '@/lib/user-error'
 
 import { isScreenImageRefusal } from '../../../shared/screen-image-files'
 
+// Lazy: the Studio provider loads this on the first takeover import (the
+// eager renderer budget has no room for a batch importer), so the provider
+// imports only its types. Banners keep their own one-image importer.
+
 export type TakeoverImportPhase = 'idle' | 'choosing' | 'importing'
+
+export type TakeoverImporter = ReturnType<typeof createTakeoverImporter>
 
 /** One picker/batch at a time, with late completions fenced across reconnects. */
 export function createTakeoverImporter() {
@@ -71,4 +77,67 @@ export type TakeoverImportFailure<Selection> = { error: unknown; selection: Sele
 export function screenImportAuthorizationError(error: unknown): unknown {
   const message = ipcErrorMessage(error)
   return isScreenImageRefusal(message) ? new UserFacingError(message) : error
+}
+
+type TakeoverSelection = { capabilityId: string; displayName: string }
+
+/**
+ * The Studio's takeover batch: main's refusals reach the toast as written,
+ * a batch raises one toast however many images fail (a lone failure names
+ * its file, several say how many of the batch failed), and a batch that
+ * stops early hands its unused capabilities back to main.
+ */
+export function runTakeoverBatch<Selection extends TakeoverSelection, Screen>(
+  importer: TakeoverImporter,
+  options: {
+    authorize: () => Promise<readonly Selection[]>
+    importImage: (selection: Selection) => Promise<Screen>
+    isCurrent: () => boolean
+    onPhase: (phase: TakeoverImportPhase) => void
+    onPending: (selections: readonly Selection[]) => void
+    onImported: (screen: Screen) => void
+    report: (error: unknown, context: UserErrorContext) => void
+    release: (capabilityIds: string[]) => Promise<void> | undefined
+  }
+): Promise<void> {
+  return importer.run<Selection, Screen>({
+    pick: options.authorize,
+    importImage: options.importImage,
+    isCurrent: options.isCurrent,
+    onPhase: options.onPhase,
+    onPending: options.onPending,
+    onImported: options.onImported,
+    onPickError: (error) =>
+      options.report(screenImportAuthorizationError(error), {
+        action: 'import',
+        object: 'the images'
+      }),
+    onImportErrors: (failures, total) => {
+      const [first] = failures
+      if (!first) return
+      options.report(first.error, {
+        action: 'import',
+        object:
+          failures.length === 1
+            ? first.selection.displayName
+            : `${failures.length} of ${total} images`
+      })
+    },
+    onUnused: (selections) => {
+      void options
+        .release(selections.map((selection) => selection.capabilityId))
+        ?.catch((error: unknown) =>
+          console.warn('[takeovers] could not hand back unused images', error)
+        )
+    }
+  })
+}
+
+/** Said when the connection drops with images of a batch still to import. */
+export function takeoverConnectionDropError(stopped: number): UserFacingError {
+  return new UserFacingError(
+    stopped === 1
+      ? 'The connection dropped before the last image was imported. Add it again if it is missing.'
+      : `The connection dropped before the last ${stopped} images were imported. Add any missing ones again.`
+  )
 }

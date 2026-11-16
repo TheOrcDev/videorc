@@ -3,8 +3,9 @@ import type { TakeoverImportPhase } from '@/lib/takeover-import'
 // Assets → Banners → Import image… (plan 186 S5). The picker and the import
 // follow the takeover lifecycle (plan 182): one at a time, quiet on a cancel,
 // and a late answer from a retired connection changes nothing. Takeovers now
-// import a batch; a banner is still one image per pick. Eager (the Studio
-// provider owns it), so the words and rules live in `lib/banners.ts`.
+// import a batch; a banner is still one image per pick. Lazy: the Studio
+// provider loads it on the first banner import and imports only its types,
+// and the words and rules live in `lib/banners.ts`.
 
 export type BannerImportPhase = TakeoverImportPhase
 
