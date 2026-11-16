@@ -153,6 +153,14 @@ pub(crate) struct LiveTracker {
 }
 
 impl LiveTracker {
+    /// The same live-session decision used by the ended-report observer.
+    pub(crate) fn active_live(&self) -> Option<(&str, DateTime<Utc>)> {
+        self.active
+            .as_ref()
+            .filter(|session| session.live)
+            .map(|session| (session.session_id.as_str(), session.started_at))
+    }
+
     pub(crate) fn observe(&mut self, event: &ServerEvent, now: DateTime<Utc>) -> Option<EndedLive> {
         match event.event.as_str() {
             "recording.status" => {
@@ -349,7 +357,7 @@ pub(crate) fn retry_delay(attempts: u32) -> Duration {
         .min(RETRY_MAX)
 }
 
-fn env_disables(value: Option<&str>) -> bool {
+pub(crate) fn env_disables(value: Option<&str>) -> bool {
     value.is_some_and(|value| {
         matches!(
             value.trim().to_ascii_lowercase().as_str(),
@@ -549,7 +557,7 @@ pub(crate) struct WebAccess {
     pub email: String,
 }
 
-async fn web_access(state: &AppState) -> Option<WebAccess> {
+pub(crate) async fn web_access(state: &AppState) -> Option<WebAccess> {
     // The address and the token are one identity: read both under the account
     // transition lock, as an account refresh does (account.rs), so a sign-in
     // between the two reads can't pair one account's address with another's
