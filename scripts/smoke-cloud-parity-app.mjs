@@ -11,7 +11,9 @@ import {
 const plan = readParityJson('plan')
 validateParityRegistry(plan, readParityJson('inventory'))
 const selected = parseParityArgs(process.argv.slice(2), plan)
-if (!['baseline', 'controls', 'privacy', 'soundboard', 'avatar'].includes(selected.case)) {
+if (
+  !['baseline', 'controls', 'privacy', 'soundboard', 'avatar', 'lifecycle'].includes(selected.case)
+) {
   throw new Error(
     `${selected.id} case '${selected.case}' is not implemented. Deferred acceptance is not a pass.`
   )
@@ -22,7 +24,11 @@ if (!webRoot)
     'Set VIDEORC_PARITY_WEB_ROOT to an installed, clean web fixture checkout. Never use a deployed URL.'
   )
 const { runBaseline } = await import('./lib/cloud-parity-baseline.mjs')
-const { output } = await runBaseline({
+const run =
+  selected.case === 'lifecycle'
+    ? (await import('./lib/cloud-parity-lifecycle.mjs')).runLifecycle
+    : runBaseline
+const { output } = await run({
   desktopRoot: fileURLToPath(new URL('../', import.meta.url)),
   webRoot,
   controls: selected.case === 'controls',

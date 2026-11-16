@@ -112,7 +112,10 @@ pub fn project<'a>(native: &'a RecordingStatus, cloud: &'a CloudStatus) -> Outpu
             native.session_id.as_deref()
         },
         publisher_epoch: None,
-        live_interval_id: None,
+        live_interval_id: cloud
+            .live_interval
+            .as_ref()
+            .map(|interval| interval.id.as_str()),
         recording_take_id: None,
         clock: OutputClock {
             origin: if cloud_owner {

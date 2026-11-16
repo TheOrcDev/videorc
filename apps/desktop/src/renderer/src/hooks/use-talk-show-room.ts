@@ -448,7 +448,14 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
           )
         await (clipsStepAside ? clipsStepAside(open) : open())
       },
-      closeRoom: async () => call('cloud.room.close', undefined, 'close the room'),
+      closeRoom: async () => {
+        if (
+          cloudStatusRef.current?.room?.live &&
+          (!mediaDepsRef.current.stopOutput || !(await mediaDepsRef.current.stopOutput('live')))
+        )
+          throw new Error('The livestream must finish stopping before closing the room.')
+        await call('cloud.room.close', undefined, 'close the room')
+      },
       resumeRoom: async () => call('cloud.room.resume', undefined, 'resume the show'),
       rotateInvite: async () => call('cloud.room.invite.rotate', undefined, 'make a new link'),
       setDoor: async (open) => call('cloud.room.door.set', { open }, 'change the door'),

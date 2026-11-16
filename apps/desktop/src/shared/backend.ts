@@ -5615,7 +5615,26 @@ export interface CloudSettingsView {
  * The whole cloud state: the `cloud.state` event and every `cloud.*` answer.
  * Secret-free by construction (no url, token or key reaches it).
  */
+export interface CloudLiveInterval {
+  id: string
+  requestedAt: string
+  liveSince?: string
+  endRequestedAt?: string
+  endedAt?: string
+}
+export interface CloudProviderSettlement {
+  destinationId: string
+  provider: 'youtube' | 'x'
+  state: 'armed' | 'pending' | 'completed'
+  attempts: number
+  terminalReason?: string
+  reason?: string
+  order?: 'before-stop' | 'after-stop' | 'stop-unconfirmed'
+  outputStopped?: boolean
+}
 export interface CloudStatus {
+  liveInterval?: CloudLiveInterval
+  providerLifecycle?: CloudProviderSettlement[]
   phase: CloudPhase
   /** The account's `cloud` block says on. */
   entitled: boolean

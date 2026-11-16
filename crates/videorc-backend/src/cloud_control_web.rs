@@ -230,6 +230,8 @@ pub(crate) fn legs_end_destinations(destinations: &[HandoverDestination]) -> Val
 #[serde(rename_all = "camelCase")]
 pub struct ControlRevAnswer {
     #[serde(default)]
+    pub ending: bool,
+    #[serde(default)]
     pub rev: Option<u64>,
 }
 
@@ -1679,7 +1681,7 @@ fn raise_floor(floor: &AtomicU64, answer: &ControlRevAnswer) -> Option<Value> {
     if let Some(rev) = answer.rev {
         floor.fetch_max(rev, Ordering::SeqCst);
     }
-    None
+    answer.ending.then(|| json!({ "ending": true }))
 }
 
 // --- The state poll -----------------------------------------------------------------
@@ -2267,6 +2269,17 @@ impl<W: CloudWebApi, C: ControlConnector> ControlLoop<W, C> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn ending_acknowledgement_survives_the_web_control_adapter() {
+        let answer: super::ControlRevAnswer =
+            serde_json::from_value(serde_json::json!({"ok": true, "ending": true})).unwrap();
+        let floor = std::sync::atomic::AtomicU64::new(4);
+        assert_eq!(
+            super::raise_floor(&floor, &answer),
+            Some(serde_json::json!({"ending": true}))
+        );
+        assert_eq!(floor.load(std::sync::atomic::Ordering::SeqCst), 4);
+    }
     #[test]
     fn download_error_respects_the_renderer_utf16_limit() {
         let supplementary = super::download_error_for_wire(&"😀".repeat(4096));

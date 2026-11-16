@@ -3677,7 +3677,16 @@ impl crate::cloud_show::CloudWebApi for VideorcApiClient {
             CLOUD_REQUEST_TIMEOUT,
         )
         .await
-        .map(|_| ())
+        .and_then(|answer| {
+            if answer.get("ending").and_then(serde_json::Value::as_bool) == Some(true) {
+                Err(crate::cloud_show::CloudApiError::Other {
+                    status: 409,
+                    code: "cloud-show-ending".to_string(),
+                })
+            } else {
+                Ok(())
+            }
+        })
     }
 
     async fn allowance(
