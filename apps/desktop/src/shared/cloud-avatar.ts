@@ -8,10 +8,12 @@ export type AvatarOutput = 'stream' | 'recording'
 export type AvatarOrientation = 'h' | 'v'
 export type AvatarRect = { x: number; y: number; w: number; h: number }
 export type AvatarApplied = { publisherSid: string; revision: number }
+export type StaticCapability = { version: 1; applied?: AvatarApplied }
 export type AvatarCapability = {
   version: 1
   output: AvatarOutput
   orientation: AvatarOrientation
+  static?: StaticCapability
   applied?: AvatarApplied
   /** Plan 249 S5: this consumer draws atlas layers and the motion topic. Absent: static only. */
   animation?: 1
@@ -44,6 +46,21 @@ const positive = (v: unknown): v is number =>
   typeof v === 'number' && Number.isSafeInteger(v) && v > 0
 const object = (v: unknown): v is Record<string, unknown> =>
   !!v && typeof v === 'object' && !Array.isArray(v)
+export function parseStaticCapability(v: unknown): StaticCapability | null {
+  if (!object(v) || v.version !== 1) return null
+  if (v.applied === undefined) return { version: 1 }
+  if (
+    !object(v.applied) ||
+    typeof v.applied.publisherSid !== 'string' ||
+    !/^PA_[A-Za-z0-9]{1,64}$/.test(v.applied.publisherSid) ||
+    !positive(v.applied.revision)
+  )
+    return null
+  return {
+    version: 1,
+    applied: { publisherSid: v.applied.publisherSid, revision: v.applied.revision }
+  }
+}
 export function parseAvatarCapability(value: unknown): AvatarCapability | null {
   if (
     !object(value) ||
@@ -53,6 +70,9 @@ export function parseAvatarCapability(value: unknown): AvatarCapability | null {
   )
     return null
   if (value.animation !== undefined && value.animation !== 1) return null
+  const staticCapability =
+    value.static === undefined ? undefined : parseStaticCapability(value.static)
+  if (value.static !== undefined && !staticCapability) return null
   let applied: AvatarApplied | undefined
   if (value.applied !== undefined) {
     if (
@@ -67,6 +87,7 @@ export function parseAvatarCapability(value: unknown): AvatarCapability | null {
     version: 1,
     output: value.output as AvatarOutput,
     orientation: value.orientation as AvatarOrientation,
+    ...(staticCapability ? { static: staticCapability } : {}),
     ...(applied ? { applied } : {}),
     ...(value.animation === 1 ? { animation: 1 as const } : {})
   }

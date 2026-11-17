@@ -1320,6 +1320,10 @@ pub async fn banner_prepare_canvases(state: &AppState) -> Vec<(u32, u32)> {
     state.compositor.lock().await.banner_canvases()
 }
 
+pub(crate) async fn static_graphics_banners(state: &AppState) -> Arc<BannerSet> {
+    Arc::clone(&state.compositor.lock().await.banners)
+}
+
 #[cfg(test)]
 pub(crate) async fn banner_set_for_test(state: &AppState) -> Arc<BannerSet> {
     Arc::clone(&state.compositor.lock().await.banners)

@@ -3820,10 +3820,13 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           }
           return commentHighlightIntentRef.current === intent ? cleared : null
         }
-        const streamVideo = streamOutputVideoSettings(
-          captureConfig.video,
-          captureConfig.streamEnabled ? captureConfig.streaming : undefined
-        )
+        const streamVideo =
+          cloudStatusRef.current?.room?.phase === 'open'
+            ? { width: 1920, height: 1080 }
+            : streamOutputVideoSettings(
+                captureConfig.video,
+                captureConfig.streamEnabled ? captureConfig.streaming : undefined
+              )
         const avatarSource = options?.milestone?.avatarUrl ?? message.authorAvatarUrl
         const [avatarUrl, canvases] = await Promise.all([
           avatarSource ? window.videorc?.cacheChatAvatar?.(avatarSource).catch(() => null) : null,
@@ -7661,8 +7664,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // twice a second); it clears when chat empties, both switches go off or the
   // livestream ends. Nothing loads until the box is first switched on.
   const chatOverlayLayout = overlayLayout.chat
+  const graphicsOutputFacts = outputSessionFacts(recording, cloudStatus, wsStatus === 'connected')
   const chatOverlayOn =
-    recordingLive && (chatOverlayLayout.showOnStream || chatOverlayLayout.showInRecording)
+    graphicsOutputFacts.freshness === 'fresh' &&
+    (graphicsOutputFacts.live || graphicsOutputFacts.recording) &&
+    (chatOverlayLayout.showOnStream || chatOverlayLayout.showInRecording)
   const chatOverlayDriverRef = useRef<{
     client: BackendClient
     driver: Promise<ChatOverlayDriver | null>
@@ -20153,6 +20159,36 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       roomPcmTest: (enabled?: boolean) => {
         if (enabled !== undefined) setRoomPcmTestEnabled(enabled)
         return roomPcmTestResources()
+      },
+      roomHighlight: async (milestone = false) => {
+        const message = liveChatSnapshotRef.current.messages.find(
+          (m) => m.eventType === 'message' && !m.isDeleted
+        )
+        if (!message) throw new Error('No eligible fixture message')
+        const state = await applyCommentHighlight(
+          message,
+          message.sessionId,
+          ++commentHighlightIntentRef.current,
+          {
+            alwaysSet: true,
+            ...(milestone
+              ? {
+                  milestone: {
+                    messageId: message.id,
+                    name: message.authorName,
+                    platform: message.platform,
+                    label: '10th stream'
+                  }
+                }
+              : {})
+          }
+        )
+        if (state) publishCommentHighlightState(state)
+        return state
+      },
+      roomGraphics: (enabled?: boolean) => {
+        if (enabled !== undefined) roomControlsRef.current?.setGraphicsEnabled(enabled)
+        return roomControlsRef.current?.snapshot.graphics ?? null
       },
       roomAvatar: (enabled?: boolean) => {
         if (enabled !== undefined) roomControlsRef.current?.setAvatarEnabled(enabled)

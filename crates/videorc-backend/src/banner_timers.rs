@@ -185,7 +185,8 @@ pub(crate) async fn run_banner_timers(state: AppState) {
                 Vec::new()
             }
         };
-        let session_active = state.recording.lock().await.is_some();
+        let native_active = state.recording.lock().await.is_some();
+        let session_active = native_active || crate::cloud_graphics::room_active(&state);
         let now = Instant::now();
         book.observe(&banners, now, session_active);
         let actions = book.due(now);

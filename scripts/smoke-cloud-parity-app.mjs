@@ -75,7 +75,8 @@ if (
     'services',
     'replay-ring',
     'avatar-animation',
-    'views'
+    'views',
+    'graphics'
   ].includes(selected.case)
 ) {
   throw new Error(
@@ -103,7 +104,8 @@ const { output } = await run({
   avatar: selected.case === 'avatar',
   replayRing: selected.case === 'replay-ring',
   avatarAnimation: selected.case === 'avatar-animation',
-  views: selected.case === 'views'
+  views: selected.case === 'views',
+  graphics: selected.case === 'graphics'
 })
 console.log(
   `Local real-page ${selected.case} passed: ${output}. Managed/device acceptance remains not-run.`

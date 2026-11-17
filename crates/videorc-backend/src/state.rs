@@ -1200,6 +1200,7 @@ pub struct AppState {
     /// The chat box (plan 215 G): the last few chat messages, painted by the
     /// renderer and pushed through `chat.overlay.set`, like the highlight.
     pub chat_overlay: crate::captions::CaptionOverlaySlot,
+    pub chat_overlay_generation: Arc<StdMutex<u64>>,
     /// The chat box rasterized for the vertical simulcast leg's portrait
     /// canvas. Installed and cleared together with `chat_overlay`.
     pub simulcast_chat_overlay: crate::captions::CaptionOverlaySlot,
@@ -1498,6 +1499,7 @@ impl AppState {
             highlight_overlay: crate::captions::new_caption_overlay_slot(),
             simulcast_highlight_overlay: crate::captions::new_caption_overlay_slot(),
             chat_overlay: crate::captions::new_caption_overlay_slot(),
+            chat_overlay_generation: Arc::new(StdMutex::new(0)),
             simulcast_chat_overlay: crate::captions::new_caption_overlay_slot(),
             buddy_overlay: crate::captions::new_caption_overlay_slots(),
             buddy_overlay_state: crate::buddy_overlay::new_buddy_overlay_state_slot(

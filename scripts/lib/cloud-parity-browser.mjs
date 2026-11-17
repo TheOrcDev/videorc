@@ -157,7 +157,13 @@ export async function startParityPages(webRoot, guests, media = null, fixtureAss
         assert.equal(req.headers.authorization, 'Bearer vcp1.dGVzdA.dGVzdA')
         if (beacon.joined && beacon.capability) {
           const identity =
-            beacon.rec && media.graphicsLanes ? 'EG_parity_avatar_recording' : 'EG_parity_baseline'
+            media.graphicsLanes?.EG_parity_graphics_v && beacon.o === 'v'
+              ? beacon.rec
+                ? 'EG_parity_graphics_vrec'
+                : 'EG_parity_graphics_v'
+              : beacon.rec && media.graphicsLanes
+                ? 'EG_parity_avatar_recording'
+                : 'EG_parity_baseline'
           await relayCapability(
             beacon.capability,
             identity,

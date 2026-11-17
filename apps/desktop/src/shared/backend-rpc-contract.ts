@@ -1,3 +1,4 @@
+import { parseGraphicsSource, type GraphicsSource } from './cloud-graphics'
 import type {
   CloudProgram,
   WatchdogAlert,
@@ -596,6 +597,11 @@ export interface BackendRpcMethodMap {
   'cloud.room.door.set': BackendRpcDefinition<{ open: boolean }, CloudStatus>
   /** A fresh 10-minute host token; renderer role only, never logged. */
   'cloud.room.token.refresh': BackendRpcDefinition<undefined, CloudRoomTokenAnswer>
+  /** Renderer-only bounded raster source for the explicitly enabled public output. */
+  'cloud.graphics.snapshot': BackendRpcDefinition<
+    { showId: string; known?: string },
+    GraphicsSource
+  >
   /** Renderer-only observation of an applied public avatar output. */
   'buddy.cloud.report': BackendRpcDefinition<
     { showId: string; stream: boolean; recording: boolean },
@@ -7049,6 +7055,20 @@ const runtimeContracts = {
   'cloud.room.invite.rotate': { params: undefinedSchema, result: cloudStatusSchema },
   'cloud.room.door.set': { params: cloudOpenFlagSchema, result: cloudStatusSchema },
   'cloud.room.token.refresh': { params: undefinedSchema, result: cloudRoomTokenAnswerSchema },
+  'cloud.graphics.snapshot': {
+    params: objectSchema(
+      {
+        showId: stringSchema({ minLength: 1, maxLength: 128 }),
+        known: optionalSchema(stringSchema({ maxLength: 64 }))
+      },
+      { allowUnknown: false }
+    ),
+    result: runtimeSchema('a bounded public graphics snapshot', (value, path) => {
+      const result = parseGraphicsSource(value)
+      if (!result) throw new RuntimeSchemaError(path, 'a public graphics snapshot')
+      return result
+    })
+  },
   'buddy.cloud.report': {
     params: objectSchema(
       {

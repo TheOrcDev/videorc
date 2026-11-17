@@ -4,6 +4,11 @@ import {
   type RoomMicrophoneChoice,
   type RoomMicrophoneSource
 } from './room-microphone-source'
+import {
+  RoomGraphicsPublisher,
+  type GraphicsContent,
+  type RoomGraphicsStatus
+} from './room-graphics-publisher'
 import { RoomAuxPublisher } from './room-aux-publisher'
 import { createRoomPcmTestSource, type RoomPcmSource } from './room-pcm-source'
 import {
@@ -140,6 +145,7 @@ export type TalkShowRoomSnapshot = {
   people: TalkShowPerson[]
   local: TalkShowLocalMedia
   monitor: TalkShowMonitor
+  graphics?: RoomGraphicsStatus
   avatar?: RoomAvatarStatus
   screenPrivacy?: ScreenPrivacyPublication & {
     sourceBlockedAt: number | null
@@ -295,6 +301,9 @@ export class TalkShowRoomClient {
   readonly #audio: RemoteAudioAttachments<HTMLMediaElement>
   #snapshot: TalkShowRoomSnapshot = IDLE_TALK_SHOW_ROOM
   #problem: string | null = null
+  #graphics: RoomGraphicsPublisher | null = null
+  #graphicsContent: GraphicsContent | null = null
+  #graphicsEnabled = false
   #avatar: RoomAvatarPublisher | null = null
   #avatarContent: AvatarContent | null = null
   #avatarEnabled = false
@@ -380,8 +389,11 @@ export class TalkShowRoomClient {
     this.#closed = true
     this.#aux?.close()
     this.#aux = null
+    this.#graphics?.close()
+    this.#graphics = null
     this.#avatar?.close()
     this.#avatar = null
+    this.#graphicsContent = null
     this.#avatarContent = null
     this.#stopMotion()
     this.#motionSeed = null
@@ -725,6 +737,19 @@ export class TalkShowRoomClient {
     this.#publish()
   }
 
+  setGraphics(content: GraphicsContent | null): void {
+    this.#graphicsContent = content
+    this.#graphics?.set(this.#graphicsEnabled ? content : null)
+  }
+  failGraphics(): void {
+    this.#graphicsContent = null
+    if (this.#graphicsEnabled) this.#graphics?.fail()
+  }
+  setGraphicsEnabled(enabled: boolean): void {
+    this.#graphicsEnabled = enabled
+    this.#graphics?.set(enabled ? this.#graphicsContent : null)
+  }
+
   setAvatar(content: AvatarContent | null): void {
     this.#avatarContent = content
     this.#avatar?.set(this.#avatarEnabled ? content : null)
@@ -933,6 +958,16 @@ export class TalkShowRoomClient {
   }
 
   #bind(room: Room): void {
+    this.#graphics?.close()
+    this.#graphics = new RoomGraphicsPublisher(room, (graphics) => {
+      if (!this.#owns(room)) return
+      this.#snapshot = {
+        ...this.#snapshot,
+        graphics: { ...graphics, enabled: this.#graphicsEnabled }
+      }
+      this.#publish()
+    })
+    this.#graphics.set(this.#graphicsEnabled ? this.#graphicsContent : null)
     this.#avatar?.close()
     this.#avatarStatus = null
     this.#avatar = new RoomAvatarPublisher(room, (avatar) => {
@@ -1408,6 +1443,8 @@ export class TalkShowRoomClient {
   async #reconnect(): Promise<void> {
     if (this.#closed) return
     const stale = this.#room
+    this.#graphics?.close()
+    this.#graphics = null
     this.#avatar?.close()
     this.#avatar = null
     this.#stopMotion()
