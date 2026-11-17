@@ -108,7 +108,7 @@ pub fn stable_operation(parts: &[&str]) -> String {
     uuid::Uuid::from_bytes(bytes).to_string()
 }
 pub async fn request(
-    state: &AppState,
+    _state: &AppState,
     show: &str,
     method: &str,
     id: Option<&str>,

@@ -562,7 +562,13 @@ fn publish(db: &Database, j: &mut Job, token: &str, stop: &watch::Receiver<bool>
     Ok(())
 }
 
-pub async fn control(token: String, show: String, method: &str, params: &Value) -> Result<Value> {
+pub async fn control(
+    state: &crate::state::AppState,
+    token: String,
+    show: String,
+    method: &str,
+    params: &Value,
+) -> Result<Value> {
     let api = VideorcApiClient::new()?;
     let before = api
         .clips_json(&token, &show, "GET", None, None, None)
