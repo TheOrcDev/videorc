@@ -45,6 +45,7 @@ mod clean_cut;
 mod clip_marks;
 mod cloud_archive;
 mod cloud_control_web;
+mod cloud_controller;
 mod cloud_graphics;
 mod cloud_services;
 mod cloud_show;
@@ -832,6 +833,10 @@ async fn run_backend(device_changes: tokio::sync::watch::Receiver<u64>) -> Resul
     // its one-time, resumable backfill.
     community_service::spawn_startup_jobs(&state);
     watchdog::spawn_talk_show_watch(&state);
+    // Plan 249 S24 x S15: once this process loses a show it controlled,
+    // captions listening for it retires (consent and intents revoked before
+    // the provider task is joined). The synchronous gate is in cloud_host.
+    spawn_cloud_ownership_watch(&state);
     match (oauth_listener, oauth_callback_port) {
         (Some(oauth_listener), Some(oauth_port)) => {
             let oauth_app = Router::new()
@@ -5851,6 +5856,9 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "cohost.library.saveToLibrary"
         | "cloud.graphics.snapshot"
         | "buddy.cloud.report"
+        | "cloud.presentation.accepted"
+        | "cloud.controller.desired"
+        | "cloud.presentation.restore"
         | "buddy.overlay.set"
         | "buddy.overlay.clear"
         | "cohost.pet.import"
@@ -12209,6 +12217,13 @@ async fn handle_text_message_with_role(
                 {
                     Ok(status) => {
                         spawn_active_takeover_push(state);
+                        // Plan 249 S24: the computer that opens the room
+                        // controls it (a plain claim never takes a show).
+                        // Awaited: once the show has a controller, a command
+                        // without this process's epoch would be refused.
+                        if let Some(show) = status.show.as_ref() {
+                            note_claim(claim_cloud_controller(state, &show.id, false).await);
+                        }
                         ServerResponse::ok(command.id, status)
                     }
                     Err(error) => ServerResponse::error(
@@ -12236,23 +12251,33 @@ async fn handle_text_message_with_role(
             None => cloud_unavailable(command.id),
         },
         "cloud.room.resume" => match cloud_context(state) {
-            Some(context) => match context.resume_room(account::stored_session_token()).await {
-                Ok(status) => {
-                    spawn_active_takeover_push(state);
-                    // Plan 249 S18: chat, viewers and audience follow the show
-                    // to this owner, once, with its history. After a relaunch
-                    // the runner's legs can land just after this answer.
-                    if reattach_cloud_show_services(state).await == Some("not-live") {
-                        spawn_late_cloud_show_reattach(state);
-                    }
-                    ServerResponse::ok(command.id, status)
+            Some(context) => {
+                // Plan 249 S24: Resume is the explicit "continue here". Take
+                // the show's controller first, so everything the resume
+                // sends carries this computer's new epoch.
+                if let Some(show_id) = cloud_show_status(state).show.map(|show| show.id)
+                    && let Some(reason) = claim_cloud_controller(state, &show_id, true).await
+                {
+                    tracing::info!("[cloud] controller not taken on resume: {reason}");
                 }
-                Err(error) => ServerResponse::error(
-                    command.id,
-                    cloud_talk_error_code(&error, "cloud-room-resume-failed"),
-                    format!("{error:#}"),
-                ),
-            },
+                match context.resume_room(account::stored_session_token()).await {
+                    Ok(status) => {
+                        spawn_active_takeover_push(state);
+                        // Plan 249 S18: chat, viewers and audience follow the show
+                        // to this owner, once, with its history. After a relaunch
+                        // the runner's legs can land just after this answer.
+                        if reattach_cloud_show_services(state).await == Some("not-live") {
+                            spawn_late_cloud_show_reattach(state);
+                        }
+                        ServerResponse::ok(command.id, status)
+                    }
+                    Err(error) => ServerResponse::error(
+                        command.id,
+                        cloud_talk_error_code(&error, "cloud-room-resume-failed"),
+                        format!("{error:#}"),
+                    ),
+                }
+            }
             None => cloud_unavailable(command.id),
         },
         "cloud.room.invite.rotate" => match cloud_context(state) {
@@ -12298,6 +12323,37 @@ async fn handle_text_message_with_role(
             },
             None => cloud_unavailable(command.id),
         },
+        // --- Plan 249 S24: the controller's kept presentation ---
+        "cloud.presentation.accepted"
+        | "cloud.controller.desired"
+        | "cloud.presentation.restore" => {
+            if role != BackendRole::Renderer {
+                return ServerResponse::error(
+                    command.id,
+                    "forbidden",
+                    "Only the room renderer reports the show's presentation.",
+                );
+            }
+            let Some(show_id) = command
+                .params
+                .get("showId")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+            else {
+                return ServerResponse::error(command.id, "invalid-params", "Name the show.");
+            };
+            match command.method.as_str() {
+                "cloud.presentation.accepted" => {
+                    let queued = spawn_keep_cloud_presentation(state, show_id, command.params);
+                    ServerResponse::ok(command.id, json!({ "queued": queued }))
+                }
+                "cloud.controller.desired" => {
+                    let queued = spawn_cloud_controller_desired(state, show_id, command.params);
+                    ServerResponse::ok(command.id, json!({ "queued": queued }))
+                }
+                _ => ServerResponse::ok(command.id, cloud_presentation_restore(&show_id).await),
+            }
+        }
         "cloud.room.client.report" => {
             match serde_json::from_value::<cloud_talk::RoomClientReportParams>(command.params) {
                 Ok(params) => match cloud_context(state) {
@@ -12432,6 +12488,13 @@ async fn handle_text_message_with_role(
                                 // service identity, so a resume or relaunch
                                 // reattaches the same readers.
                                 remember_cloud_show_services(state, &status, &params.streaming);
+                                // Plan 249 S24: Go Live keeps (or claims) the
+                                // controller of the show it puts on air.
+                                if let Some(show) = status.show.as_ref() {
+                                    note_claim(
+                                        claim_cloud_controller(state, &show.id, false).await,
+                                    );
+                                }
                                 // The chat attaches to the show the way it
                                 // attaches to a session: its id is the
                                 // session the renderer's cards name.
@@ -16467,7 +16530,335 @@ fn spawn_late_cloud_show_reattach(state: &AppState) {
 fn forget_cloud_show_services_if_confirmed(state: &AppState, status: &cloud_show::CloudStatus) {
     if !matches!(status.phase, cloud_show::CloudPhase::Ending) {
         forget_cloud_show_services(state, "");
+        // Plan 249 S24: the show is over here; its controller epoch goes too.
+        cloud_controller::forget("");
     }
+}
+
+/// Plan 249 S24: claims this computer as the show's controller. `resume` is
+/// the streamer's explicit "continue here", which may take the show over from
+/// another device (or this computer's earlier process); a plain claim never
+/// does. On a grant it reads back what the show kept and keeps the lease.
+/// `None` when held; otherwise why not. An older web without the route runs
+/// unfenced, as before S24.
+async fn claim_cloud_controller(
+    state: &AppState,
+    show_id: &str,
+    resume: bool,
+) -> Option<&'static str> {
+    use cloud_controller::{ClaimStep, ControllerIntent};
+    let Some(bearer) = account::stored_session_token() else {
+        return Some("signed-out");
+    };
+    let Ok(web) = videorc_api::VideorcApiClient::new() else {
+        return Some("no-client");
+    };
+    let device = cloud_show::load_device(&state.database);
+    let mut intent = match cloud_controller::held_for(show_id) {
+        Some(held) => ControllerIntent::Renew(held.epoch),
+        None => ControllerIntent::Claim,
+    };
+    // Three decisions (claim, takeover, a lost race), and up to ten 1 s
+    // waits while the old controller's last command finishes on the web.
+    let (mut decisions, mut waits) = (0, 0);
+    while decisions < 3 && waits <= 10 {
+        let body = cloud_controller::intent_body(&device.id, intent);
+        let (status, answer) = match web.cloud_controller(&bearer, show_id, &body).await {
+            Ok(answer) => (200, answer),
+            Err((error, answer)) => (cloud_controller::status_of(&error), answer),
+        };
+        let code = answer
+            .pointer("/error/code")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let controller = answer
+            .get("controller")
+            .cloned()
+            .and_then(|value| serde_json::from_value(value).ok());
+        match cloud_controller::next_claim_step(resume, intent, status, &code, controller) {
+            ClaimStep::Granted(granted) => {
+                let epoch = granted.controller_epoch;
+                let fresh =
+                    cloud_controller::held_for(show_id).map(|held| held.epoch) != Some(epoch);
+                cloud_controller::hold(
+                    show_id,
+                    &device.id,
+                    cloud_controller::facts_of(&granted, None),
+                );
+                if fresh {
+                    // Only the current controller may read it back, so this
+                    // runs with the new epoch held.
+                    if let Ok(restore) = web.cloud_presentation_get(&bearer, show_id).await {
+                        let facts = cloud_controller::facts_of(&granted, Some(&restore));
+                        cloud_controller::set_restore(show_id, epoch, restore, facts);
+                    }
+                    spawn_cloud_controller_renewal(state, show_id.to_string(), epoch);
+                }
+                return None;
+            }
+            ClaimStep::Next(next) => {
+                intent = next;
+                decisions += 1;
+            }
+            ClaimStep::Wait(same) => {
+                intent = same;
+                waits += 1;
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            }
+            ClaimStep::Stop(reason) => return Some(reason),
+        }
+    }
+    Some("raced")
+}
+
+/// Follows `cloud_controller::ownership()`: when a show this process held is
+/// lost (taken over, or forgotten after holding it), the services bound to
+/// it stop. Captions are the one consumer today (S15).
+fn spawn_cloud_ownership_watch(state: &AppState) {
+    let state = state.clone();
+    let mut watch = cloud_controller::ownership();
+    tokio::spawn(async move {
+        let mut held: Option<String> = None;
+        loop {
+            let now = watch.borrow_and_update().clone();
+            let retired = match (&held, &now) {
+                (Some(show), cloud_controller::Ownership::Held { show_id, .. })
+                    if show != show_id =>
+                {
+                    Some(show.clone())
+                }
+                (Some(show), cloud_controller::Ownership::Lost { show_id, .. })
+                    if show == show_id =>
+                {
+                    Some(show.clone())
+                }
+                (Some(show), cloud_controller::Ownership::None) => Some(show.clone()),
+                _ => None,
+            };
+            if let Some(show) = retired {
+                captions::cloud_host::ownership_lost(&state, &show).await;
+            }
+            held = match now {
+                cloud_controller::Ownership::Held { show_id, .. } => Some(show_id),
+                _ => None,
+            };
+            if watch.changed().await.is_err() {
+                return;
+            }
+        }
+    });
+}
+
+/// Logs why a plain claim did not take the controller (an older web, a show
+/// another computer controls, an ending show). Never fails the command: the
+/// web's fence is what refuses this process's requests if it must.
+fn note_claim(refused: Option<&'static str>) {
+    if let Some(reason) = refused {
+        tracing::info!("[cloud] controller not claimed: {reason}");
+    }
+}
+
+/// Renews the 45 s lease while this process holds `epoch` for `show_id`. A
+/// refusal means another device took the show over (or it ended): this
+/// process keeps its old epoch, which the web refuses from then on, so it
+/// can never change or end what the successor runs.
+fn spawn_cloud_controller_renewal(state: &AppState, show_id: String, epoch: u64) {
+    let state = state.clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(cloud_controller::RENEW_EVERY).await;
+            let Some(held) =
+                cloud_controller::held_for(&show_id).filter(|held| held.epoch == epoch)
+            else {
+                return;
+            };
+            let Some(bearer) = account::stored_session_token() else {
+                continue;
+            };
+            let Ok(web) = videorc_api::VideorcApiClient::new() else {
+                continue;
+            };
+            let body = cloud_controller::intent_body(
+                &held.device_id,
+                cloud_controller::ControllerIntent::Renew(epoch),
+            );
+            if let Err((error, answer)) = web.cloud_controller(&bearer, &show_id, &body).await
+                && cloud_controller::status_of(&error) == 409
+            {
+                let code = answer
+                    .pointer("/error/code")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("refused");
+                // Another device controls the show: every service that
+                // follows `cloud_controller::ownership()` stops here.
+                if code == "cloud-controller-stale" || code == "cloud-controller-held" {
+                    cloud_controller::mark_lost(epoch, "taken-over");
+                }
+                state.emit_log(
+                    "warn",
+                    format!("Cloud controller lease not renewed ({code}); another device may control the show."),
+                );
+                return;
+            }
+        }
+    });
+}
+
+/// `cloud.presentation.accepted`: an output view a program page applied,
+/// already filtered to that output, kept by the web for the next controller.
+/// Only while this process controls the show; pixels go once per show.
+fn spawn_keep_cloud_presentation(
+    state: &AppState,
+    show_id: String,
+    view: serde_json::Value,
+) -> bool {
+    // Taken here, in the order the acknowledgements arrive, before the
+    // writes run concurrently.
+    let Some((held, sequence)) = cloud_controller::next_sequence(&show_id) else {
+        return false;
+    };
+    let state = state.clone();
+    tokio::spawn(async move {
+        let Some(bearer) = account::stored_session_token() else {
+            return;
+        };
+        let Ok(web) = videorc_api::VideorcApiClient::new() else {
+            return;
+        };
+        let Some((body, carried)) =
+            cloud_controller::ingest_body(held.epoch, sequence, &view, &held.sent_hashes)
+        else {
+            return;
+        };
+        let outcome = match web.cloud_presentation_put(&bearer, &show_id, &body).await {
+            // The web no longer has a picture it had: send them all once.
+            Err((error, answer))
+                if cloud_controller::status_of(&error) == 422
+                    && answer.get("missing").is_some() =>
+            {
+                let Some((full, carried)) = cloud_controller::ingest_body(
+                    held.epoch,
+                    sequence,
+                    &view,
+                    &std::collections::HashSet::new(),
+                ) else {
+                    return;
+                };
+                web.cloud_presentation_put(&bearer, &show_id, &full)
+                    .await
+                    .map(|answer| (answer, carried))
+            }
+            other => other.map(|answer| (answer, carried)),
+        };
+        match outcome {
+            Ok((_, carried)) => cloud_controller::note_sent_hashes(&show_id, held.epoch, &carried),
+            // The status only: never the body, which names pictures.
+            Err((error, _)) => state.emit_log(
+                "warn",
+                format!(
+                    "Cloud presentation not kept (HTTP {}).",
+                    cloud_controller::status_of(&error)
+                ),
+            ),
+        }
+    });
+    true
+}
+
+/// `cloud.controller.desired`: the controller's output flags and what it
+/// switched on, so a successor knows what to ask its streamer to switch on.
+fn spawn_cloud_controller_desired(
+    state: &AppState,
+    show_id: String,
+    params: serde_json::Value,
+) -> bool {
+    if cloud_controller::held_for(&show_id).is_none() {
+        return false;
+    }
+    let mut body = params;
+    if let Some(object) = body.as_object_mut() {
+        object.remove("showId");
+    }
+    let state = state.clone();
+    tokio::spawn(async move {
+        let Some(bearer) = account::stored_session_token() else {
+            return;
+        };
+        let Ok(web) = videorc_api::VideorcApiClient::new() else {
+            return;
+        };
+        if let Err((error, _)) = web.cloud_controller_desired(&bearer, &show_id, &body).await {
+            state.emit_log(
+                "warn",
+                format!(
+                    "Cloud controller facts not saved (HTTP {}).",
+                    cloud_controller::status_of(&error)
+                ),
+            );
+        }
+    });
+    true
+}
+
+/// `cloud.presentation.restore`: what the show kept, as the renderer re-sends
+/// it under this controller's own envelope (pixels fetched once each). Never
+/// marked applied; only the program pages' new receipts can say that.
+async fn cloud_presentation_restore(show_id: &str) -> serde_json::Value {
+    let Some(held) = cloud_controller::held_for(show_id) else {
+        return json!({ "views": [] });
+    };
+    let Some(mut restore) = held.restore.clone() else {
+        return json!({ "controllerEpoch": held.epoch, "views": [] });
+    };
+    let (Some(bearer), Ok(web)) = (
+        account::stored_session_token(),
+        videorc_api::VideorcApiClient::new(),
+    ) else {
+        return json!({ "controllerEpoch": held.epoch, "views": [] });
+    };
+    let mut pngs: std::collections::HashMap<String, Option<String>> =
+        std::collections::HashMap::new();
+    if let Some(views) = restore
+        .get_mut("views")
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        for view in views.iter_mut() {
+            let Some(layers) = view
+                .get_mut("layers")
+                .and_then(serde_json::Value::as_array_mut)
+            else {
+                continue;
+            };
+            for layer in layers.iter_mut() {
+                let Some(hash) = layer
+                    .pointer("/asset/hash")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string)
+                else {
+                    continue;
+                };
+                if !pngs.contains_key(&hash) {
+                    let png = web
+                        .cloud_presentation_asset(&bearer, show_id, &hash)
+                        .await
+                        .ok();
+                    pngs.insert(hash.clone(), png);
+                }
+                if let (Some(Some(png)), Some(asset)) = (
+                    pngs.get(&hash),
+                    layer
+                        .get_mut("asset")
+                        .and_then(serde_json::Value::as_object_mut),
+                ) {
+                    asset.insert("png".to_string(), json!(png));
+                }
+            }
+            // A layer whose pixels did not come back is not re-sent.
+            layers.retain(|layer| layer.pointer("/asset/png").is_some());
+        }
+    }
+    restore
 }
 
 /// Plan 249 S18: after a resume, attach the show's chat, viewer and audience
@@ -16984,13 +17375,18 @@ async fn start_session_command(
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .resumable_show_id();
-        if resumable.is_none() {
+        let Some(show_id) = resumable else {
             return ServerResponse::error(
                 command.id,
                 "cloud-nothing-to-resume",
                 "There is no Videorc Cloud show to resume.",
             );
-        }
+        };
+        // Plan 249 S24: the solo Resume banner is the explicit "continue
+        // here" too. Take the show's controller first, so everything the
+        // resume sends carries this computer's new epoch; an ending show
+        // refuses the takeover and the resume answers it as before.
+        note_claim(claim_cloud_controller(state, &show_id, true).await);
     }
     let mut params_value = command.params;
     if let Err(error) = resolve_start_session_resources(state, &mut params_value, role) {
@@ -17024,6 +17420,14 @@ async fn start_session_command(
             };
             match started {
                 Ok(status) => {
+                    // Plan 249 S24: a solo cloud show this start created is
+                    // controlled from here (a plain claim; Resume took it
+                    // above). A node show or an older web: no controller.
+                    if kind == SessionStartKind::GoLive
+                        && let Some(show) = cloud_show_status(state).show
+                    {
+                        note_claim(claim_cloud_controller(state, &show.id, false).await);
+                    }
                     if let Some(context) = cloud_context(state)
                         && let Some(bearer) = account::stored_session_token()
                         && let Some(session_id) = status.session_id.as_deref()

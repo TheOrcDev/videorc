@@ -80,7 +80,8 @@ if (
     'avatar-animation',
     'views',
     'graphics',
-    'alpha-spike'
+    'alpha-spike',
+    'handoff'
   ].includes(selected.case)
 ) {
   throw new Error(
@@ -92,6 +93,20 @@ if (!webRoot)
   throw new Error(
     'Set VIDEORC_PARITY_WEB_ROOT to an installed, clean web fixture checkout. Never use a deployed URL.'
   )
+if (selected.case === 'handoff') {
+  // Plan 249 S24: the focused race/retention/D9 tests first (web and Rust).
+  const { HANDOFF_RUST_FILTERS, HANDOFF_WEB_TESTS } = await import('./lib/cloud-parity-handoff.mjs')
+  const { execFileSync } = await import('node:child_process')
+  execFileSync(process.execPath, ['--import', 'tsx', '--test', ...HANDOFF_WEB_TESTS], {
+    cwd: webRoot,
+    stdio: 'inherit'
+  })
+  for (const filter of HANDOFF_RUST_FILTERS)
+    execFileSync('cargo', ['test', '-p', 'videorc-backend', filter], {
+      cwd: fileURLToPath(new URL('../', import.meta.url)),
+      stdio: 'inherit'
+    })
+}
 const { runBaseline } = await import('./lib/cloud-parity-baseline.mjs')
 const run =
   selected.case === 'alpha-spike'
@@ -114,7 +129,8 @@ const { output } = await run({
   replayRing: ['replay-ring', 'archive'].includes(selected.case),
   avatarAnimation: selected.case === 'avatar-animation',
   views: selected.case === 'views',
-  graphics: selected.case === 'graphics'
+  graphics: selected.case === 'graphics',
+  handoff: selected.case === 'handoff'
 })
 console.log(
   `Local real-page ${selected.case} passed: ${output}. Managed/device acceptance remains not-run.`

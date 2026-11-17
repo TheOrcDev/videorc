@@ -5683,6 +5683,72 @@ export interface CloudStatus {
    * for a hand-off or a take-over, so no broadcast is completed for it.
    */
   stoppedBy?: CloudStoppedBy
+  /**
+   * Plan 249 S24: this computer as the show's controller (absent unless it
+   * holds the show's controller epoch). After a takeover, `needsEnable`
+   * names what the previous controller had on, which starts off here.
+   */
+  controller?: CloudControllerFacts
+}
+
+/** Plan 249 S24: what a controller grant tells this computer. */
+export type CloudControllerFacts = {
+  controllerEpoch: number
+  /** `this-device` (a relaunch) or `another-device`; absent on a first claim. */
+  takenOverFrom?: 'this-device' | 'another-device'
+  /** What the previous controller had switched on: switched on here explicitly. */
+  needsEnable: Array<'sounds' | 'system' | 'html' | 'camera' | 'microphone' | 'screen'>
+  /** Kept output views read back (never applied until the pages answer again). */
+  restoredViews: number
+  /** Live desktop sources the kept presentation cleared (the chat box). */
+  cleared: string[]
+  /** Another device took the show over: this computer controls nothing. */
+  lost?: boolean
+}
+
+/** Plan 249 S24: one output view a program page applied, to be kept. */
+export type CloudPresentationAccepted = {
+  showId: string
+  topic: 'avatar' | 'static'
+  output: 'stream' | 'recording'
+  orientation: 'h' | 'v'
+  publisherSid: string
+  revision: number
+  layers: unknown[]
+}
+
+/** Plan 249 S24: a view the show kept, with its pixels, for re-sending. */
+export type CloudPresentationRestore = {
+  controllerEpoch?: number
+  views: Array<{
+    topic: 'avatar' | 'static'
+    output: 'stream' | 'recording'
+    orientation: 'h' | 'v'
+    acceptedEpoch?: number
+    acceptedAt?: string
+    applied?: false
+    layers: Array<{
+      id?: string
+      kind: string
+      rect: { x: number; y: number; w: number; h: number }
+      opacity?: number
+      asset: { hash: string; width: number; height: number; png?: string }
+      /** Plan 249 S5: the atlas meta an avatar layer was applied with. */
+      atlas?: unknown
+    }>
+    cleared?: Array<{ id: string; kind: string; reason: string }>
+  }>
+  /** The controller's output flags per family (`avatar: {stream, recording}`). */
+  outputs?: { avatar?: { stream?: boolean; recording?: boolean } } & Record<string, unknown>
+  /**
+   * The supported host-loss policy: the program cleared what it showed after
+   * its transport lease; what was kept returns only through this controller.
+   */
+  continuity?: {
+    mode: 'successor-restore'
+    programDuringHostLoss: 'cleared-after-transport-lease'
+    transportLeaseMs: { avatar: number }
+  }
 }
 
 // --- Talk shows (plan 224) ---------------------------------------------------
