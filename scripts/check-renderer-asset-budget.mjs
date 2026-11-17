@@ -157,9 +157,15 @@ const htmlPath = resolve(
 // bytes are slice wiring (S12 +2,661 gzip, S15 +308, S7b +124, S9 +186).
 // Raise raw to 2,405,000 and gzip to 495,000; the entry ceilings hold. Keep
 // new surfaces lazy.
+// 2026-11-17 (owner-approved: raise to 2,420,000 / 499,000): the last Plan
+// 249 slices measure, cumulatively on main at 2,404,876 / 494,970: S17
+// (#1460, H/V room outputs and their quality) 2,414,789 / 497,771, then S19
+// (#1463, show markers) 2,417,078 / 498,241, then S8 (#1465, system audio
+// routing) 2,419,971 / 498,975. Raise raw to 2,420,000 and gzip to 499,000;
+// the entry ceilings hold. Keep new surfaces lazy.
 const budget = {
-  maxTotalRawBytes: Number(process.env.VIDEORC_RENDERER_MAX_EAGER_RAW_BYTES ?? 2_405_000),
-  maxTotalGzipBytes: Number(process.env.VIDEORC_RENDERER_MAX_EAGER_GZIP_BYTES ?? 495_000),
+  maxTotalRawBytes: Number(process.env.VIDEORC_RENDERER_MAX_EAGER_RAW_BYTES ?? 2_420_000),
+  maxTotalGzipBytes: Number(process.env.VIDEORC_RENDERER_MAX_EAGER_GZIP_BYTES ?? 499_000),
   maxEntryRawBytes: Number(process.env.VIDEORC_RENDERER_MAX_ENTRY_RAW_BYTES ?? 1_200_000),
   maxEntryGzipBytes: Number(process.env.VIDEORC_RENDERER_MAX_ENTRY_GZIP_BYTES ?? 235_000)
 }
