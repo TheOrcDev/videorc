@@ -373,7 +373,7 @@
       "prUrl": null,
       "webIssueUrl": null,
       "webPrUrl": null,
-      "implementation": "in-progress-isolated",
+      "implementation": "source-checkpoint-review-open",
       "acceptance": "not-run",
       "intendedBranch": "feat/249-s11-cloud-parity",
       "intendedPrTitle": "Plan 249 S11: Publish sandboxed HTML banners",

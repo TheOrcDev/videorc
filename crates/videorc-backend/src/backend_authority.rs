@@ -184,6 +184,8 @@ fn renderer_only_method(method: &str) -> bool {
             | "cloud.presentation.accepted"
             | "cloud.controller.desired"
             | "cloud.presentation.restore"
+            // Plan 249 S11: only the room renderer asks for room HTML layers.
+            | "cloud.htmlLayers.want"
     )
 }
 

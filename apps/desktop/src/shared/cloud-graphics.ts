@@ -29,6 +29,23 @@ export type GraphicsContent = {
     outputRects?: { stream: AvatarRect; recording: AvatarRect }
   })[]
   unsupported: string[]
+  /**
+   * Plan 249 S11: HTML banners' placement on the room canvases (no pixels:
+   * the HTML layer sheet carries them, default-off). At most four a lane.
+   */
+  html?: { h: HtmlBannerPlacement[]; v: HtmlBannerPlacement[] }
+}
+/** Plan 249 S11: one HTML banner on a room canvas. */
+export type HtmlBannerPlacement = {
+  /** `banner:<bannerId>`, the sheet layer id. */
+  id: string
+  /** The banner's own id: its frames are read by this. */
+  bannerId: string
+  rect: AvatarRect
+  opacity: number
+  fade: { at: number; from: number; to: number } | null
+  stream: boolean
+  recording: boolean
 }
 export type GraphicsSnapshot = {
   version: 1
@@ -332,5 +349,59 @@ export function parseGraphicsSource(value: unknown): GraphicsSource | null {
       recording: (input[i] as Record<string, unknown>).recording === true
     }))
   }
+  if (raw.html !== undefined) {
+    const html = parseHtmlBannerPlacements(raw.html)
+    if (!html) return null
+    content.html = html
+  }
   return { signature: value.signature, content }
+}
+
+const unitNumber = (v: unknown): v is number =>
+  typeof v === 'number' && Number.isFinite(v) && v >= 0 && v <= 1
+/** Plan 249 S11: at most four HTML banners a lane, each a bounded rect. */
+export function parseHtmlBannerPlacements(
+  value: unknown
+): { h: HtmlBannerPlacement[]; v: HtmlBannerPlacement[] } | null {
+  if (!object(value)) return null
+  const out: { h: HtmlBannerPlacement[]; v: HtmlBannerPlacement[] } = { h: [], v: [] }
+  for (const orientation of ['h', 'v'] as const) {
+    const lane = value[orientation]
+    if (!Array.isArray(lane) || lane.length > 4) return null
+    for (const l of lane as unknown[]) {
+      if (
+        !object(l) ||
+        typeof l.bannerId !== 'string' ||
+        !/^[A-Za-z0-9_-]{1,64}$/.test(l.bannerId) ||
+        l.id !== `banner:${l.bannerId}` ||
+        !avatarRect(l.rect) ||
+        !unitNumber(l.opacity) ||
+        typeof l.stream !== 'boolean' ||
+        typeof l.recording !== 'boolean'
+      )
+        return null
+      const f = l.fade
+      if (
+        f !== null &&
+        (!object(f) ||
+          typeof f.at !== 'number' ||
+          !Number.isSafeInteger(f.at) ||
+          !unitNumber(f.from) ||
+          !unitNumber(f.to))
+      )
+        return null
+      const { x, y, w, h } = l.rect as AvatarRect
+      out[orientation].push({
+        id: l.id,
+        bannerId: l.bannerId,
+        rect: { x, y, w, h },
+        opacity: l.opacity,
+        fade:
+          f === null ? null : { at: f.at as number, from: f.from as number, to: f.to as number },
+        stream: l.stream,
+        recording: l.recording
+      })
+    }
+  }
+  return out
 }

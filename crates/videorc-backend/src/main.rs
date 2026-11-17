@@ -5876,6 +5876,7 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "cohost.library.delete"
         | "cohost.library.saveToLibrary"
         | "cloud.graphics.snapshot"
+        | "cloud.htmlLayers.want"
         | "buddy.cloud.report"
         | "cloud.presentation.accepted"
         | "cloud.controller.desired"
@@ -11632,6 +11633,30 @@ async fn handle_text_message_with_role(
                     Err(error) => ServerResponse::error(
                         command.id,
                         "cloud-graphics-unavailable",
+                        error.to_string(),
+                    ),
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        // Plan 249 S11: the room renderer asks for HTML targets on the room's
+        // canvases while a program page may draw its sheet (default-off).
+        "cloud.htmlLayers.want" => {
+            if role != BackendRole::Renderer {
+                return ServerResponse::error(
+                    command.id,
+                    "forbidden",
+                    "Only the room renderer asks for room HTML layers.",
+                );
+            }
+            match serde_json::from_value::<cloud_graphics::HtmlLayersWantParams>(command.params) {
+                Ok(params) => match cloud_graphics::html_layers_want(state, params) {
+                    Ok(value) => ServerResponse::ok(command.id, value),
+                    Err(error) => ServerResponse::error(
+                        command.id,
+                        "cloud-html-layers-unavailable",
                         error.to_string(),
                     ),
                 },
