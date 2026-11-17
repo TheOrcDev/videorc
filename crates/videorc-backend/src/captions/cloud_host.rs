@@ -117,7 +117,7 @@ pub async fn sync(state: &AppState, input: Sync) -> Result<Status> {
     let available = input.published && !input.muted && show_owned(state, &input.show_id);
     let changed;
     {
-        let mut c = state.captions.lock().await;
+        let c = state.captions.lock().await;
         if let Some(o) = c.room_owner.as_ref() {
             anyhow::ensure!(
                 input.generation >= o.generation
@@ -133,10 +133,10 @@ pub async fn sync(state: &AppState, input: Sync) -> Result<Status> {
             if let Some(o) = c.room_owner.as_ref() {
                 o.revoke();
             }
-            if c.room_owner.is_some() {
-                if let Some(stop) = c.stop.as_ref() {
-                    stop.store(true, Ordering::Release);
-                }
+            if c.room_owner.is_some()
+                && let Some(stop) = c.stop.as_ref()
+            {
+                stop.store(true, Ordering::Release);
             }
         }
     }

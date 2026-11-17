@@ -7220,31 +7220,28 @@ async fn handle_realtime_event(
                         presented,
                     },
                 );
-                if let Some(owner) = session.room_owner.as_ref() {
-                    if let Some(record) = coordinator
+                if let Some(owner) = session.room_owner.as_ref()
+                    && let Some(record) = coordinator
                         .chunks
                         .iter()
                         .find(|r| r.seq == item.seq && r.capture_epoch == item.capture_epoch)
-                    {
-                        if session
-                            .state
-                            .database
-                            .save_host_transcript(
-                                &owner.show_id,
-                                &owner.source_id,
-                                &session.session_client_id,
-                                record,
-                                &owner.clock,
-                            )
-                            .is_err()
-                        {
-                            session.state.emit_log(
-                                "warn",
-                                "The latest host transcript could not be saved on this computer."
-                                    .to_string(),
-                            );
-                        }
-                    }
+                    && session
+                        .state
+                        .database
+                        .save_host_transcript(
+                            &owner.show_id,
+                            &owner.source_id,
+                            &session.session_client_id,
+                            record,
+                            &owner.clock,
+                        )
+                        .is_err()
+                {
+                    session.state.emit_log(
+                        "warn",
+                        "The latest host transcript could not be saved on this computer."
+                            .to_string(),
+                    );
                 }
                 if presented {
                     session.state.emit_event("captions.update", update.clone());
@@ -7797,31 +7794,27 @@ async fn commit_chunk_transcript(
                 presented,
             },
         );
-        if let Some(owner) = session.room_owner.as_ref() {
-            if let Some(record) = coordinator
+        if let Some(owner) = session.room_owner.as_ref()
+            && let Some(record) = coordinator
                 .chunks
                 .iter()
                 .find(|r| r.seq == chunk.seq && r.capture_epoch == chunk.capture_epoch)
-            {
-                if session
-                    .state
-                    .database
-                    .save_host_transcript(
-                        &owner.show_id,
-                        &owner.source_id,
-                        &session.session_client_id,
-                        record,
-                        &owner.clock,
-                    )
-                    .is_err()
-                {
-                    session.state.emit_log(
-                        "warn",
-                        "The latest host transcript could not be saved on this computer."
-                            .to_string(),
-                    );
-                }
-            }
+            && session
+                .state
+                .database
+                .save_host_transcript(
+                    &owner.show_id,
+                    &owner.source_id,
+                    &session.session_client_id,
+                    record,
+                    &owner.clock,
+                )
+                .is_err()
+        {
+            session.state.emit_log(
+                "warn",
+                "The latest host transcript could not be saved on this computer.".to_string(),
+            );
         }
         if presented {
             session.state.emit_event("captions.update", update.clone());
