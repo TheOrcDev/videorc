@@ -456,10 +456,10 @@
       "case": "camera",
       "repositories": ["desktop"],
       "issueUrl": null,
-      "prUrl": null,
+      "prUrl": "https://github.com/TheOrcDev/videorc/pull/1464",
       "webIssueUrl": null,
-      "webPrUrl": null,
-      "implementation": "in-progress-isolated",
+      "webPrUrl": "https://github.com/TheOrcDev/videorc-web/pull/145",
+      "implementation": "source-checkpoint-review-open",
       "acceptance": "not-run",
       "intendedBranch": "feat/249-s13b-cloud-parity",
       "intendedPrTitle": "Plan 249 S13b: Roll out processed camera contributions",
@@ -472,7 +472,11 @@
       },
       "crossRepoNeeds": "Desktop change; use compatible web fixtures read-only and recheck source/capabilities before execution.",
       "releaseGate": "blocked-until-required-acceptance",
-      "owner": "S6z:P60l3:G7e0v"
+      "owner": "S6z:P60l3:G7e0v",
+      "commit": "701177bd65247bccded7ea8052b940e247ce7309",
+      "webCommit": "816f0696be6efed2e77da9867486e3c32cec2d72",
+      "prStatus": "open",
+      "webPrStatus": "open"
     },
     {
       "id": "S14",
@@ -628,12 +632,12 @@
       "case": "markers",
       "repositories": ["desktop", "web"],
       "issueUrl": null,
-      "prUrl": null,
+      "prUrl": "https://github.com/TheOrcDev/videorc/pull/1463",
       "webIssueUrl": null,
-      "webPrUrl": null,
-      "implementation": "source-uncommitted",
+      "webPrUrl": "https://github.com/TheOrcDev/videorc-web/pull/144",
+      "implementation": "source-checkpoint-review-open",
       "acceptance": "not-run",
-      "intendedBranch": "feat/249-s19-cloud-parity",
+      "intendedBranch": "integrate/249-s19-s24-reconcile",
       "intendedPrTitle": "Plan 249 S19: Store markers on the show timeline",
       "touches": "`B/session_markers.rs`, `B/clip_marks.rs`, `B/moments.rs`,\n`B/storage.rs`, room timeline and marker/agent actions.",
       "gates": "D, B, N, C, RC.",
@@ -648,7 +652,11 @@
       "owner": "S6z:P60l3:G55dg",
       "baseCommit": "7c2e0ed519417a4132c6670a982907d4b80b1ddd",
       "webBaseCommit": "db7ce88e5de3e2f878ccf0be3d57c1aaeb08cebb",
-      "workingBranch": "integrate/249-s19-s24-reconcile"
+      "workingBranch": "integrate/249-s19-s24-reconcile",
+      "commit": "28d21f8c5b9f37d978c3632d498da37b648dc348",
+      "webCommit": "830ecd860352c0234789f20cbce5ce410f38cbce",
+      "prStatus": "open",
+      "webPrStatus": "open"
     },
     {
       "id": "S20",
@@ -732,7 +740,7 @@
       "prUrl": null,
       "webIssueUrl": null,
       "webPrUrl": null,
-      "implementation": "not-started",
+      "implementation": "source-checkpoint-review-open",
       "acceptance": "not-run",
       "intendedBranch": "feat/249-s21b-cloud-parity",
       "intendedPrTitle": "Plan 249 S21b: Deliver program replay Clips",
@@ -741,11 +749,14 @@
       "deferredReason": "User defers smoke, heavy, real-page, device and managed acceptance until all merges on main. No release qualification.",
       "relatedPrUrls": [],
       "intendedBase": {
-        "desktop": "feat/249-s20-cloud-parity",
-        "web": "feat/249-s21a-cloud-parity"
+        "desktop": "integrate/249-s19-s24-reconcile",
+        "web": "integrate/249-s19-s24-reconcile"
       },
-      "crossRepoNeeds": "Paired linked consumer/producer PRs; coordinator commissions web checkout; consumers land/deploy before producers enable capability.",
-      "releaseGate": "blocked-until-required-acceptance"
+      "crossRepoNeeds": "Paired gated owner extraction route and local download/trim/Library worker. S19 markers + S21a source + S24 controller; server-owned measured clock proof is absent in production. D8 and managed availability/cost/artifact acceptance remain deferred; local fixture clock is explicitly simulated. No native camera replay session, implicit Record or production enablement.",
+      "releaseGate": "blocked-until-required-acceptance",
+      "owner": "S6z:P60l3:G55dg",
+      "baseCommit": "28d21f8c5b9f37d978c3632d498da37b648dc348",
+      "webBaseCommit": "830ecd860352c0234789f20cbce5ce410f38cbce"
     },
     {
       "id": "S21c",
@@ -1059,11 +1070,11 @@
     ]
   },
   "ledgerOwner": "S6z:P60l3:G55dg",
-  "ledgerCheckpoint": "S19 reconciled onto published S24. 18 merged source checkpoints, 4 open-PR slices S13a/S17/S22/S24, 10 unpublished; runtime qualification not-run.",
+  "ledgerCheckpoint": "S21b source checkpoint on published S19. 18 merged source checkpoints, 6 open-PR slices S13a/S13b/S17/S19/S22/S24, 8 unpublished; runtime qualification not-run.",
   "sourceCheckpointCounts": {
     "merged": 18,
-    "openPr": 4,
-    "unpublished": 10,
+    "openPr": 6,
+    "unpublished": 8,
     "total": 32,
     "runtimeQualified": 0
   },
@@ -1082,6 +1093,13 @@
       "prUrl": "https://github.com/TheOrcDev/videorc/pull/1457",
       "status": "open",
       "partOfPlan249SliceCount": false
+    },
+    {
+      "id": "studio-audio-bug",
+      "owner": "S6z:P60l3:G2heq",
+      "status": "in-progress",
+      "partOfPlan249SliceCount": false,
+      "name": "Urgent local Studio mic/audio-button fix; not talk-show"
     }
   ]
 }

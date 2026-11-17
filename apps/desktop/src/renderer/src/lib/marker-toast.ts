@@ -18,11 +18,20 @@ export async function showMarkerToast(
   ).catch(() => null)
   if (lookup?.status !== 'found') return
   const marker = lookup.marker
+  const clip =
+    'showId' in marker && marker.kind === 'clip'
+      ? await client
+          .requestTyped('cloud.clips.jobs')
+          .then((jobs) => jobs.find((j) => j.showId === marker.showId && j.markerId === marker.id))
+          .catch(() => undefined)
+      : undefined
   toast.success(`Marker saved · ${marker.label ?? 'Untitled marker'}`, {
     id: marker.id,
     description:
       'showId' in marker
-        ? `${markerTime(marker.atSeconds)} on show timeline; no media to extract.`
+        ? clip
+          ? `${markerTime(marker.atSeconds)} on show timeline · Clip ${clip.state}. ${clip.reason}`
+          : `${markerTime(marker.atSeconds)} on show timeline; no media to extract.`
         : markerTime(marker.atSeconds),
     // Undo is a convenience, not a step the streamer must take: it times out
     // like any toast with a description instead of staying (plan 174 S2.4).

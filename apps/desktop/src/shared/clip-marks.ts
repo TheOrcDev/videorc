@@ -53,6 +53,24 @@ export function clipMarkedToast(
   event: ClipMarkedEvent,
   { streaming = true }: { streaming?: boolean } = {}
 ): ClipMarkedToast {
+  if (event.reason === 'cloud-clip-saved')
+    return {
+      kind: 'success',
+      title: 'Program clip saved',
+      description: 'The verified local file is in Library.'
+    }
+  if (event.reason === 'cloud-clip-interrupted')
+    return {
+      kind: 'warning',
+      title: 'Marker saved; clip interrupted',
+      description: 'Retry or discard staging files from Clips on the Output page.'
+    }
+  if (event.reason === 'cloud-clip-queued')
+    return {
+      kind: 'success',
+      title: 'Marker saved; clip queued',
+      description: 'Download and validation are in progress. Check Clips on the Output page.'
+    }
   if (event.reason === 'cloud-marker-no-media')
     return {
       kind: 'success',

@@ -2184,11 +2184,11 @@
         },
         "roomStream": {
           "status": "partial",
-          "note": "S19 writes owner-authenticated server-show timeline markers from UI/remote/agent and S15 consented host voice. S24 fences writes and retires voice on loss. Interval/take/provider associations are separate; extraction/media mapping and rolling Clips remain unavailable without measured clocks. No runtime qualification."
+          "note": "S19 durable show markers; S21b gated bounded program-window route, verified local AV trim and Library registration implemented. Server show-to-media evidence is required; association alone never extracts media. Managed ring/D8/cost/clock and real artifact acceptance remain not-run."
         },
         "roomRecording": {
           "status": "partial",
-          "note": "S19 writes owner-authenticated server-show timeline markers from UI/remote/agent and S15 consented host voice. S24 fences writes and retires voice on loss. Interval/take/provider associations are separate; extraction/media mapping and rolling Clips remain unavailable without measured clocks. No runtime qualification."
+          "note": "S19 durable show markers; S21b gated bounded program-window route, verified local AV trim and Library registration implemented. Server show-to-media evidence is required; association alone never extracts media. Managed ring/D8/cost/clock and real artifact acceptance remain not-run."
         },
         "hostMonitor": {
           "status": "partial",

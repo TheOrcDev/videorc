@@ -44,6 +44,9 @@ async function loadRing(webRoot) {
 }
 
 export async function exerciseReplayRing({ h, program, webRoot, output, report, sound }) {
+  const clips = report.case === 'clips'
+  const retentionMs = clips ? 40000 : 8000,
+    segmentLimit = clips ? 20 : 4
   const { ProgramRing, LocalHlsAdapter, RING_LIMITS, handleProgramRing } = await loadRing(webRoot)
   const generation = randomUUID(),
     root = join(output, 'replay-ring'),
@@ -69,9 +72,9 @@ export async function exerciseReplayRing({ h, program, webRoot, output, report, 
     Date.now(),
     {
       ...RING_LIMITS,
-      maxDurationMs: 8000,
-      maxSegments: 4,
-      maxBytes: 16 * 1024 * 1024
+      maxDurationMs: retentionMs,
+      maxSegments: segmentLimit,
+      maxBytes: clips ? 64 * 1024 * 1024 : 16 * 1024 * 1024
     }
   )
   const adapter = await LocalHlsAdapter.open(root, generation, ring)
@@ -179,7 +182,7 @@ export async function exerciseReplayRing({ h, program, webRoot, output, report, 
       '-hls_time',
       '2',
       '-hls_list_size',
-      '6',
+      clips ? '22' : '6',
       '-hls_delete_threshold',
       '1',
       '-hls_flags',
@@ -209,10 +212,13 @@ export async function exerciseReplayRing({ h, program, webRoot, output, report, 
       resolve(code)
     })
   )
-  const deadline = setTimeout(() => {
-    processError = new Error('Ring acquisition deadline')
-    encoder.kill('SIGKILL')
-  }, 45000)
+  const deadline = setTimeout(
+    () => {
+      processError = new Error('Ring acquisition deadline')
+      encoder.kill('SIGKILL')
+    },
+    clips ? 90000 : 45000
+  )
   try {
     await h.rpc('sounds.settings', { monitor: false, volumeDb: 0 })
     await h.eval('return window.__videorcSmokeScenePresets.roomSounds(true)')
@@ -311,7 +317,7 @@ export async function exerciseReplayRing({ h, program, webRoot, output, report, 
       recorder.start(250)
     })
     recorderStarted = true
-    const endAt = Date.now() + 18000
+    const endAt = Date.now() + (clips ? 44000 : 18000)
     while (Date.now() < endAt) {
       if (processError) throw processError
       const capture = await program.evaluate(() => ({
@@ -335,9 +341,9 @@ export async function exerciseReplayRing({ h, program, webRoot, output, report, 
           firstId ??= manifest.segments[0]?.id
         }
         assert.ok(manifest.metering.retainedBytes <= manifest.limits.maxBytes)
-        assert.ok(manifest.segments.length <= 4)
+        assert.ok(manifest.segments.length <= segmentLimit)
         if (manifest.segments.length)
-          assert.ok(manifest.segments.at(-1).endMs - manifest.segments[0].startMs <= 8000)
+          assert.ok(manifest.segments.at(-1).endMs - manifest.segments[0].startMs <= retentionMs)
         const sourceBytes = readdirSync(directory).reduce(
           (sum, file) => sum + statSync(join(directory, file)).size,
           0
@@ -386,7 +392,7 @@ export async function exerciseReplayRing({ h, program, webRoot, output, report, 
       )
     }
     observations.packetClock = assertRingPacketClock(window.segments, probes)
-    nowOffset = 9000
+    nowOffset = retentionMs + 1000
     assert.equal((await get(`&segment=${window.segments[0].id}`)).status, 410)
     nowOffset = 0
     writeFileSync(

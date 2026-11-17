@@ -8524,6 +8524,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       }),
       // A clean cut that finished out of view (plan 119 S15): its copy joins
       // the Library, and the ready toast says so once per cut-list revision.
+      nextClient.on('cloud.clip.job', (job) => {
+        if (job.state === 'complete' && job.localSessionId) void refreshSessions(nextClient)
+      }),
       nextClient.on('cloud.recordings.download', (event) => {
         if (event.state === 'done' && event.localSessionId) void refreshSessions(nextClient)
       }),

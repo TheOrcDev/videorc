@@ -169,6 +169,7 @@ export async function startFakeCloudWebManaged({
     httpsOrigin,
     archiveHandler = null,
     isoHandler = null,
+    clipsHandler = null,
     recordingRowDelayMs = 0
   const controllers = new Set()
   const allowance = cloudAllowanceBlock({ nowMs: Date.now() })
@@ -552,6 +553,24 @@ export async function startFakeCloudWebManaged({
       if (invalidJson || !body || Array.isArray(body) || typeof body !== 'object')
         return fail(wire.errors.common.find((e) => e.status === 400).code)
       // S21c maintained loopback acquisition only; never installed in production.
+      if (clipsHandler && /^\/api\/cloud\/shows\/[^/]+\/clips$/.test(path)) {
+        const response = await clipsHandler(
+          new Request(url, {
+            method: req.method,
+            headers: req.headers['videorc-controller-epoch']
+              ? { 'videorc-controller-epoch': req.headers['videorc-controller-epoch'] }
+              : {},
+            ...(['GET', 'HEAD'].includes(req.method) ? {} : { body: raw })
+          })
+        )
+        return send(
+          response.status,
+          response.headers.get('content-type')?.includes('video/')
+            ? Buffer.from(await response.arrayBuffer())
+            : await response.json(),
+          response.headers.get('content-type')
+        )
+      }
       if (archiveHandler && /^\/api\/cloud\/shows\/[^/]+\/archive$/.test(path)) {
         const answer = await archiveHandler({ method: req.method, url, body })
         return send(answer.status ?? 200, answer.body, answer.contentType)
@@ -1608,6 +1627,9 @@ export async function startFakeCloudWebManaged({
           remainingSeconds: s.show.holdMaxSeconds
         }
       changed(s)
+    },
+    clips(handler) {
+      clipsHandler = handler
     },
     archive(handler) {
       archiveHandler = handler

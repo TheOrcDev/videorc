@@ -393,7 +393,11 @@ export function studioActionContext(studio: StudioActionSource): StudioActionCon
               ok: true,
               ...(event.reason === 'cloud-marker-no-media'
                 ? { message: 'Marker saved on the show timeline; no media to extract.' }
-                : {})
+                : event.reason?.startsWith('cloud-clip-')
+                  ? {
+                      message: clipMarkedToast(event).title
+                    }
+                  : {})
             }
           : { ok: false, message: clipMarkedToast(event).title }
       } catch (error) {

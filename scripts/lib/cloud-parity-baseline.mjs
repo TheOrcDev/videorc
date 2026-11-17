@@ -74,6 +74,7 @@ export async function runBaseline({
   avatar = false,
   scenes = false,
   archive = false,
+  clips = false,
   replayRing = false,
   avatarAnimation = false,
   views = false,
@@ -90,37 +91,39 @@ export async function runBaseline({
     template: 'v1'
   })
   const routingConfig = audioRouting ? audioRoutingConfig() : null
-  report.case = audioRouting
-    ? 'audio-routing'
-    : markers
-      ? 'markers'
-      : handoff
-        ? 'handoff'
-        : outputs
-          ? 'outputs'
-          : captions
-            ? 'captions'
-            : archive
-              ? 'archive'
-              : graphics
-                ? 'graphics'
-                : scenes
-                  ? 'scenes'
-                  : replayRing
-                    ? 'replay-ring'
-                    : avatarAnimation
-                      ? 'avatar-animation'
-                      : views
-                        ? 'views'
-                        : avatar
-                          ? 'avatar'
-                          : soundboard
-                            ? 'soundboard'
-                            : privacy
-                              ? 'privacy'
-                              : controls
-                                ? 'controls'
-                                : 'baseline'
+  report.case = clips
+    ? 'clips'
+    : audioRouting
+      ? 'audio-routing'
+      : markers
+        ? 'markers'
+        : handoff
+          ? 'handoff'
+          : outputs
+            ? 'outputs'
+            : captions
+              ? 'captions'
+              : archive
+                ? 'archive'
+                : graphics
+                  ? 'graphics'
+                  : scenes
+                    ? 'scenes'
+                    : replayRing
+                      ? 'replay-ring'
+                      : avatarAnimation
+                        ? 'avatar-animation'
+                        : views
+                          ? 'views'
+                          : avatar
+                            ? 'avatar'
+                            : soundboard
+                              ? 'soundboard'
+                              : privacy
+                                ? 'privacy'
+                                : controls
+                                  ? 'controls'
+                                  : 'baseline'
   // A dirty web consumer makes its revision misleading. Require a dedicated,
   // installed checkout; inspect it read-only and never change the active one.
   const webDirty = execFileSync('git', ['status', '--porcelain', '--untracked-files=no'], {
@@ -628,6 +631,16 @@ export async function runBaseline({
         await (await import('./cloud-parity-handoff.mjs')).exerciseHandoff({ h, report, clients })
       assert.equal(h.web.snapshot(h.showId).state.legs.length, 0)
       h.assertNoDirect()
+      if (clips) {
+        const { exerciseProgramClips } = await import('./cloud-parity-clips.mjs')
+        await exerciseProgramClips({
+          h,
+          artifact: report.replayRing.artifacts[0].file,
+          webRoot,
+          output,
+          report
+        })
+      }
       if (archive) {
         const { exerciseLocalArchive } = await import('./cloud-parity-archive.mjs')
         await exerciseLocalArchive({
