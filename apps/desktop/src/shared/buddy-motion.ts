@@ -185,7 +185,7 @@ export const ease = Object.freeze({
   }
 })
 
-type Ease =
+export type Ease =
   | { kind: 'cubic' }
   | { kind: 'quartic' }
   | { kind: 'sine' }
@@ -332,6 +332,26 @@ export function cssMatrix(t: MotionTransform): [number, number, number, number, 
 const clamp = (value: number, limit: number): number => Math.max(-limit, Math.min(limit, value))
 
 /**
+ * Everything `BuddyMotion` carries between calls, as plain JSON (plan 249
+ * S5): a cloud consumer restores it from a keyframe and continues exactly
+ * where the producer was. The config is not part of it; the animator sets
+ * that every step.
+ */
+export interface BuddyMotionState {
+  state: number[]
+  velocity: number[]
+  springRunning: boolean
+  envelope: {
+    start: number
+    total: number
+    segments: { duration: number; ease: Ease; from: number[]; to: number[]; yoyo: boolean }[]
+  } | null
+  idle: boolean
+  breathGain: number
+  lastNow: number | null
+}
+
+/**
  * The motion model: feed it impulses and reactions, advance it with the
  * frame clock (seconds), read the transform.
  */
@@ -360,6 +380,61 @@ export class BuddyMotion {
    */
   setConfig(config: Partial<MotionConfig>): void {
     this.current = { ...this.current, ...config }
+  }
+
+  /** A deep copy of the motion in flight (plan 249 S5 keyframes). */
+  saveState(): BuddyMotionState {
+    return {
+      state: [...this.state],
+      velocity: [...this.velocity],
+      springRunning: this.springRunning,
+      envelope: this.envelope
+        ? {
+            start: this.envelope.start,
+            total: this.envelope.total,
+            segments: this.envelope.segments.map((segment) => ({
+              duration: segment.duration,
+              ease: { ...segment.ease },
+              from: [...segment.from],
+              to: [...segment.to],
+              yoyo: segment.yoyo
+            }))
+          }
+        : null,
+      idle: this.idleFlag,
+      breathGain: this.breathGain,
+      lastNow: this.lastNow
+    }
+  }
+
+  /** Continue from `saveState()`'s copy; the caller validated its shape. */
+  loadState(saved: BuddyMotionState): void {
+    const channels = (values: number[]): Channels => [
+      values[0] ?? 0,
+      values[1] ?? 0,
+      values[2] ?? 0,
+      values[3] ?? 0,
+      values[4] ?? 0
+    ]
+    this.state = channels(saved.state)
+    this.velocity = channels(saved.velocity)
+    this.springRunning = saved.springRunning
+    this.envelope = saved.envelope
+      ? {
+          start: saved.envelope.start,
+          total: saved.envelope.total,
+          segments: saved.envelope.segments.map((segment) => ({
+            duration: segment.duration,
+            ease: { ...segment.ease },
+            from: channels(segment.from),
+            to: channels(segment.to),
+            yoyo: segment.yoyo
+          }))
+        }
+      : null
+    this.idleFlag = saved.idle
+    this.breathGain = saved.breathGain
+    this.lastNow = saved.lastNow
   }
 
   /** page-pet's `stop()`: everything to rest, at once. */

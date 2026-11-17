@@ -1,3 +1,6 @@
+import { roomNativeMicrophoneEnabled } from '@/lib/room-microphone-state'
+import { closeVisualMicrophoneStreams } from '@/lib/mic-visual-ownership'
+import type { RoomMicrophoneChoice } from '@/lib/room-microphone-source'
 import { roomPcmTestEnabled } from '../lib/room-pcm-test-state'
 import type { CohostPersona, BuddyOverlaySnapshot, OverlayItemLayout } from '@/lib/backend'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
@@ -18,6 +21,8 @@ import {
 } from '@/lib/talk-show-context'
 import type { TalkShowCameraSettings } from '@/lib/talk-show-camera-effects'
 import type { TalkShowRoomClient, TalkShowRoomSnapshot } from '@/lib/talk-show-room'
+import { cloudAvatarAtlasReason } from '@/lib/cloud-avatar-refusal'
+import type { AvatarMotionSource } from '../../../shared/cloud-avatar-view'
 
 // The host's room, from the Studio's side (plan 224 C-G4). The backend owns
 // the show and the room's facts (`cloud.state`); this hook owns the renderer's
@@ -50,6 +55,11 @@ export type TalkShowRoomControllerDeps = {
   stopOutput?: (output: 'recording' | 'live') => Promise<boolean>
   controlsRef?: { current: TalkShowRoomClient | null }
   onMediaSnapshot?: (snapshot: TalkShowRoomSnapshot) => void
+  microphoneAudio?: {
+    microphoneGainDb: number
+    microphoneNoiseSuppression?: 'off' | 'rnnoise'
+    microphoneSyncOffsetMs: number
+  }
   microphoneMuted?: boolean
   cameraOff?: boolean
   avatar?: {
@@ -167,6 +177,32 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
       null,
     [devices, microphoneId]
   )
+  const microphoneChoice = useMemo<RoomMicrophoneChoice>(
+    () => ({
+      mode:
+        import.meta.env.DEV &&
+        (roomNativeMicrophoneEnabled() ||
+          new URLSearchParams(globalThis.location?.search ?? '').get('roomNativeMic') === '1')
+          ? 'native-headphones'
+          : 'browser-aec',
+      deviceId: microphoneId,
+      name: microphoneName,
+      gainDb: deps.microphoneAudio?.microphoneGainDb ?? 0,
+      muted: deps.microphoneMuted === true,
+      noise: deps.microphoneAudio?.microphoneNoiseSuppression ?? 'off',
+      offsetMs: deps.microphoneAudio?.microphoneSyncOffsetMs ?? 0
+    }),
+    [microphoneId, microphoneName, deps.microphoneAudio, deps.microphoneMuted]
+  )
+  const microphoneChoiceRef = useRef(microphoneChoice)
+  microphoneChoiceRef.current = microphoneChoice
+  useEffect(() => {
+    const owner = clientRef.current
+    if (!owner || snapshot.state !== 'connected' || roomPcmTestEnabled()) return
+    void owner
+      .updateMicrophone(microphoneChoice)
+      .catch((error) => onError(error, 'update the room microphone'))
+  }, [microphoneChoice, snapshot.state, onError])
   const cameraNameRef = useRef(cameraName)
   const microphoneNameRef = useRef(microphoneName)
   cameraNameRef.current = cameraName
@@ -221,6 +257,9 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
         )
         await grant
         if (cancelled) return
+        closeVisualMicrophoneStreams()
+        await client.request('audio.mic.disarm')
+        if (cancelled) return
         const { TalkShowRoomClient } = await loadRoomClient()
         if (cancelled) return
         const host = document.createElement('div')
@@ -250,6 +289,7 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
           initiallyCameraOff: mediaDepsRef.current.cameraOff,
           cameraSettings: () => cameraSettingsRef.current,
           microphoneName: microphoneNameRef.current,
+          microphoneChoice: microphoneChoiceRef.current,
           audioHost: () => host,
           onAir: () => onAirRef.current
         })
@@ -374,7 +414,56 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
           })
         }
       }
-      if (!cancelled) current.setAvatar(content)
+      // Plan 249 S5: an Alive pack also travels as an atlas for consumers that
+      // animate it; a failure keeps the static content above, never blocks it.
+      let seed: Parameters<typeof current.setAvatarMotion>[0] = null
+      let refused: string | null = null
+      const persona = avatar.persona!
+      if ((content.stream || content.recording) && persona.avatar.kind === 'alive') {
+        const packId = persona.avatar.packId
+        try {
+          const atlasModule = await import('@/lib/cloud-avatar-atlas')
+          const atlas = await atlasModule.cachedCloudAvatarAtlas(
+            { id: persona.id, packId },
+            async () => {
+              const { loadBuddyPreviewPack, disposeBuddyPreviewPack } =
+                await import('@/lib/buddy-pet-preview-pack')
+              const { avatarHash } = await import('../../../shared/cloud-avatar')
+              const pack = await loadBuddyPreviewPack({
+                personaId: persona.id,
+                packId,
+                pixelSize: atlasModule.ATLAS_MAX_CELL_PX
+              })
+              try {
+                return await atlasModule.buildCloudAvatarAtlas(pack, {
+                  canvas: atlasModule.browserAtlasCanvas,
+                  hash: avatarHash
+                })
+              } finally {
+                disposeBuddyPreviewPack(pack)
+              }
+            }
+          )
+          if (cancelled) return
+          const built = atlasModule.animatedAvatarContent({
+            atlas,
+            staticLayers: { h: content.h, v: content.v },
+            layout: { h: avatar.layout.horizontal, v: avatar.layout.vertical },
+            settings: persona.motion,
+            avatarState: avatar.snapshot?.state ?? 'idle'
+          })
+          content.animated = built.animated
+          seed = built.seed
+        } catch (error) {
+          // The streamer reads why under the Program preview; the detail stays here.
+          console.warn('[talk-show] avatar stays still on cloud outputs', error)
+          refused = cloudAvatarAtlasReason(error)
+        }
+      }
+      if (!cancelled) {
+        current.setAvatar(content)
+        current.setAvatarMotion(seed, refused)
+      }
     })().catch((error: unknown) => {
       if (!cancelled) {
         current.failAvatar()
@@ -411,6 +500,15 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
         .catch(() => {})
     }
   }, [client, roomOpen, showId, snapshot.state, snapshot.avatar?.observed, deps.avatar])
+
+  // Plan 249 S5: the backend's public animator inputs drive the room's
+  // motion stream. No text or prompt is in them (`buddy_animator::public_event`).
+  useEffect(() => {
+    if (!client || !roomOpen) return
+    return client.on('cohost.pet.animator', (payload) => {
+      clientRef.current?.avatarMotionEvent(payload)
+    })
+  }, [client, roomOpen])
 
   // The guest page reads the stage from the host's data topic (D11).
   useEffect(() => {
@@ -461,6 +559,19 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
   const setAvatarEnabled = useCallback(async (enabled: boolean) => {
     clientRef.current?.setAvatarEnabled(enabled)
   }, [])
+  const avatarMotionProbe = useCallback(() => clientRef.current?.avatarMotionProbe() ?? null, [])
+  // Plan 249 S5: one stable source for the Program preview, whichever client is current.
+  const avatarMotionSource = useMemo<AvatarMotionSource>(
+    () => ({
+      advance: () => clientRef.current?.avatarMotionSource.advance(),
+      draw: (orientation, atlasHash) =>
+        clientRef.current?.avatarMotionSource.draw(orientation, atlasHash) ?? null,
+      get sim() {
+        return clientRef.current?.avatarMotionSource.sim ?? null
+      }
+    }),
+    []
+  )
 
   const setAvatarGuests = useCallback(async (enabled: boolean) => {
     clientRef.current?.setAvatarGuests(enabled)
@@ -612,6 +723,8 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
       },
       setGraphicsEnabled,
       setAvatarEnabled,
+      avatarMotionProbe,
+      avatarMotionSource,
       setAvatarGuests,
       setMonitor: async (enabled) => {
         // Plan 234 D6: a managed show has no return to subscribe to or to
@@ -671,6 +784,8 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
       clipsStepAside,
       setGraphicsEnabled,
       setAvatarEnabled,
+      avatarMotionProbe,
+      avatarMotionSource,
       setAvatarGuests,
       hostIdentity,
       onError,

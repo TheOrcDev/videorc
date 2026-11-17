@@ -4,6 +4,7 @@ import {
   assertGraphicsArtifacts
 } from './cloud-parity-graphics.mjs'
 import { prepareAvatar, exerciseAvatar, assertAvatarVideo } from './cloud-parity-avatar.mjs'
+import { exerciseAvatarAnimation } from './cloud-parity-avatar-animation.mjs'
 import { prepareScenes, exerciseScenes, assertScenesVideo } from './cloud-parity-scenes.mjs'
 import { exerciseSoundboard } from './cloud-parity-soundboard.mjs'
 import { exercisePrivacy } from './cloud-parity-privacy.mjs'
@@ -67,9 +68,12 @@ export async function runBaseline({
   avatar = false,
   scenes = false,
   replayRing = false,
+  avatarAnimation = false,
   views = false,
   graphics = false
 }) {
+  // Plan 249 S5: the animation case runs on the avatar case's real pages.
+  avatar = avatar || avatarAnimation
   const report = baselineReport({
     desktop: revision(desktopRoot),
     web: revision(webRoot),
@@ -81,17 +85,19 @@ export async function runBaseline({
       ? 'scenes'
       : replayRing
         ? 'replay-ring'
-        : views
-          ? 'views'
-          : avatar
-            ? 'avatar'
-            : soundboard
-              ? 'soundboard'
-              : privacy
-                ? 'privacy'
-                : controls
-                  ? 'controls'
-                  : 'baseline'
+        : avatarAnimation
+          ? 'avatar-animation'
+          : views
+            ? 'views'
+            : avatar
+              ? 'avatar'
+              : soundboard
+                ? 'soundboard'
+                : privacy
+                  ? 'privacy'
+                  : controls
+                    ? 'controls'
+                    : 'baseline'
   // A dirty web consumer makes its revision misleading. Require a dedicated,
   // installed checkout; inspect it read-only and never change the active one.
   const webDirty = execFileSync('git', ['status', '--porcelain', '--untracked-files=no'], {
@@ -467,7 +473,15 @@ export async function runBaseline({
     })
     await h.rpc('cohost.utterance.say', { text: 'Parity fixture bubble' })
     await captureAudio('avatar', clients)
-    if (avatar)
+    if (avatarAnimation)
+      await exerciseAvatarAnimation({
+        h,
+        report,
+        clients,
+        newPage,
+        programUrl: `${pages.origin}${pages.wire.PROGRAM_PAGE_PATH}?${search}`
+      })
+    else if (avatar)
       await exerciseAvatar({
         h,
         report,
