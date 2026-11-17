@@ -14083,12 +14083,6 @@ fn source_pixel_len(source: &RgbaSource<'_>) -> usize {
     source.width as usize * source.height as usize * 4
 }
 
-/// One source pixel, called once per destination pixel by every CPU blit.
-/// Forced inline: LLVM's own choice flips with the size of this module, and
-/// when it chose a call (0.14.0, after unrelated code landed here) the camera
-/// blits paid a call per pixel and the backend went from ~170 % to ~250 % CPU
-/// recording 720p30 on a slow laptop (retest 153).
-#[inline(always)]
 /// Plan 249 S13b: the camera role a room publishes, from one camera frame.
 ///
 /// The compositor stays the single owner of camera-source processing: with
@@ -14210,6 +14204,12 @@ pub(crate) fn camera_role_rgba(
     Some(out)
 }
 
+/// One source pixel, called once per destination pixel by every CPU blit.
+/// Forced inline: LLVM's own choice flips with the size of this module, and
+/// when it chose a call (0.14.0, after unrelated code landed here) the camera
+/// blits paid a call per pixel and the backend went from ~170 % to ~250 % CPU
+/// recording 720p30 on a slow laptop (retest 153).
+#[inline(always)]
 fn read_source_rgba(source: &RgbaSource<'_>, x: u32, y: u32) -> (u8, u8, u8, u8) {
     let index = (y as usize * source.width as usize + x as usize) * 4;
     match source.format {
