@@ -4,6 +4,7 @@ import type { RoomOptions } from 'livekit-client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import * as privacyModule from './room-screen-privacy'
+import { setRoomFrameEncodeObserver } from './room-frame-test-state'
 import vectors from '../../../shared/chroma-key-vectors.json'
 import type { TalkShowCameraSettings } from './talk-show-camera-effects'
 import type { CloudOnAir, CloudRoomClientState, CloudRoomTokenAnswer } from '@/lib/backend'
@@ -25,6 +26,10 @@ import {
 
 const pcm = vi.hoisted(() => ({ create: vi.fn() }))
 vi.mock('./room-pcm-source', () => ({ createRoomPcmTestSource: pcm.create }))
+const frames = vi.hoisted(() => ({ create: vi.fn() }))
+vi.mock('./room-frame-source', () => ({ createRoomFrameTestSource: frames.create }))
+const encode = vi.hoisted(() => ({ attach: vi.fn() }))
+vi.mock('./room-frame-encode-observer', () => ({ attachEncodeObserver: encode.attach }))
 
 const lk = vi.hoisted(() => {
   type Handler = (...args: unknown[]) => void
@@ -1188,5 +1193,158 @@ describe('processed microphone room ownership', () => {
     await vi.waitFor(() => expect(factory).toHaveBeenCalledTimes(3))
     await room.disconnect()
     factory.mockRestore()
+  })
+})
+
+describe('native camera-role frame test source (S13a)', () => {
+  const frameSource = (generation: number) => ({
+    track: { kind: 'video', stop: vi.fn() } as unknown as MediaStreamTrack,
+    generation,
+    opened: { generation, surfaceEpoch: 1, originUs: null, incarnation: null },
+    close: vi.fn(async () => {}),
+    resetSurface: vi.fn(async () => {})
+  })
+  it('is the only camera producer, skips browser key effects and reopens a new generation', async () => {
+    const signals: AbortSignal[] = []
+    const sources: ReturnType<typeof frameSource>[] = []
+    vi.stubGlobal('window', { videorc: { roomFrameTest: vi.fn() } })
+    frames.create.mockImplementation(async (_api, signal: AbortSignal) => {
+      signals.push(signal)
+      const source = frameSource(sources.length + 1)
+      sources.push(source)
+      return source
+    })
+    const { room } = client(undefined, undefined, {
+      cameraName: null,
+      microphoneName: null,
+      frameTestSource: true
+    })
+    // The SFU's own answer: participant SID, permissions and the track SID.
+    const push = lk.FakeRoom.rooms.push.bind(lk.FakeRoom.rooms)
+    const made = vi.spyOn(lk.FakeRoom.rooms, 'push').mockImplementation((made) => {
+      Object.assign(made, { name: 'sh_talk' })
+      Object.assign(made.localParticipant, {
+        sid: 'PA_host',
+        permissions: { canPublish: true, canPublishSources: [1, 2] }
+      })
+      // The SFU answers publish with the track's SID (the fake's default is void).
+      made.localParticipant.publishTrack.mockImplementation((async () => ({
+        trackSid: 'TR_camera'
+      })) as never)
+      return push(made)
+    })
+    await room.connect()
+    made.mockRestore()
+    const transport = latestRoom()
+    expect(lk.video).not.toHaveBeenCalled()
+    expect(room.snapshot.local.cameraFrame?.authority).toMatchObject({
+      publisherSid: 'PA_host',
+      trackSid: 'TR_camera',
+      generation: 1,
+      hostIdentity: 'host:sh_talk',
+      canPublishSources: ['camera', 'microphone']
+    })
+    expect(room.snapshot.local.cameraFrame?.descriptor).toMatchObject({
+      alphaMode: 'packed',
+      logicalWidth: 640,
+      geometryApplied: 'none'
+    })
+    expect(transport.localParticipant.publishTrack).toHaveBeenCalledWith(
+      expect.objectContaining({ mediaStreamTrack: sources[0].track }),
+      expect.objectContaining({
+        source: 'camera',
+        simulcast: false,
+        name: 'videorc:camera-frame:v1;frameLayout=rgb-left-alpha-right:g8;generation=1'
+      })
+    )
+    await room.updateCameraSettings(undefined)
+    expect(room.snapshot.local.cameraOff).toBe(false)
+    transport.emit('Reconnecting')
+    expect(signals[0].aborted).toBe(true)
+    expect(sources[0].close).toHaveBeenCalled()
+    transport.emit('Reconnected')
+    await vi.waitFor(() => expect(sources).toHaveLength(2))
+    expect(transport.localParticipant.unpublishTrack).toHaveBeenCalledTimes(1)
+    await room.setCameraOff(true)
+    expect(sources[1].close).toHaveBeenCalled()
+    expect(room.snapshot.local.cameraOff).toBe(true)
+    expect(room.snapshot.local.cameraFrame).toBeUndefined()
+    await room.disconnect()
+    expect(sources).toHaveLength(2)
+    vi.unstubAllGlobals()
+  })
+  it('attaches the encode observer only with the DEV flag and a sink; camera off detaches it', async () => {
+    vi.stubGlobal('window', { videorc: { roomFrameTest: vi.fn() } })
+    let made = 0
+    frames.create.mockImplementation(async () => frameSource(++made))
+    const detach = vi.fn(async () => {})
+    encode.attach.mockReset().mockImplementation(() => ({ status: 'observing', detach }))
+    const onFrameDiagnostic = vi.fn()
+    const deps = { cameraName: null, microphoneName: null, frameTestSource: true }
+    const unflagged = client(undefined, undefined, { ...deps, onFrameDiagnostic }).room
+    await unflagged.connect()
+    await vi.dynamicImportSettled()
+    expect(encode.attach).not.toHaveBeenCalled()
+    await unflagged.disconnect()
+    setRoomFrameEncodeObserver(true)
+    try {
+      const sinkless = client(undefined, undefined, deps).room
+      await sinkless.connect()
+      await vi.dynamicImportSettled()
+      expect(encode.attach).not.toHaveBeenCalled()
+      await sinkless.disconnect()
+
+      const { room } = client(undefined, undefined, { ...deps, onFrameDiagnostic })
+      await room.connect()
+      await vi.waitFor(() => expect(encode.attach).toHaveBeenCalledTimes(1))
+      // The observer is fenced to the published source's generation.
+      expect(encode.attach).toHaveBeenCalledWith(undefined, 3, onFrameDiagnostic)
+      await room.setCameraOff(true)
+      expect(detach).toHaveBeenCalledOnce()
+      await room.disconnect()
+      expect(detach).toHaveBeenCalledOnce()
+    } finally {
+      setRoomFrameEncodeObserver(false)
+      vi.unstubAllGlobals()
+    }
+  })
+  it('closes a source that resolves after the room closes without publishing', async () => {
+    vi.stubGlobal('window', { videorc: { roomFrameTest: vi.fn() } })
+    let release!: (source: ReturnType<typeof frameSource>) => void
+    frames.create.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          release = resolve
+        })
+    )
+    const { room } = client(undefined, undefined, {
+      cameraName: null,
+      microphoneName: null,
+      frameTestSource: true
+    })
+    const joining = room.connect()
+    await vi.waitFor(() => expect(release).toBeTypeOf('function'))
+    await room.disconnect()
+    const late = frameSource(9)
+    release(late)
+    await joining
+    expect(late.close).toHaveBeenCalledOnce()
+    expect(latestRoom().localParticipant.publishTrack).not.toHaveBeenCalled()
+    vi.unstubAllGlobals()
+  })
+  it('a failed source reports a problem and never falls back to a browser camera', async () => {
+    vi.stubGlobal('window', { videorc: { roomFrameTest: vi.fn() } })
+    frames.create.mockRejectedValue(new Error('Camera bridge unsupported'))
+    const { room } = client(undefined, undefined, {
+      cameraName: 'Camera',
+      microphoneName: null,
+      frameTestSource: true
+    })
+    await room.connect()
+    expect(lk.video).not.toHaveBeenCalled()
+    expect(room.snapshot.local.cameraOff).toBe(true)
+    expect(latestRoom().localParticipant.publishTrack).not.toHaveBeenCalled()
+    await room.disconnect()
+    vi.unstubAllGlobals()
   })
 })

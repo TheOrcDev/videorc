@@ -90,7 +90,7 @@ export function sceneCaseMatrix() {
   return cases
 }
 
-function savedScene(id, layout, extra = {}) {
+export function savedScene(id, layout, extra = {}) {
   const now = '2026-11-16T00:00:00.000Z'
   return {
     id,
@@ -106,7 +106,7 @@ function savedScene(id, layout, extra = {}) {
   }
 }
 /** The layout fields a saved scene stores; the app normalizes the rest. */
-function layoutOf(patch) {
+export function layoutOf(patch) {
   return {
     layoutPreset: 'screen-camera',
     cameraTransformMode: 'preset',

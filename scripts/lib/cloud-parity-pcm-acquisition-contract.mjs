@@ -156,8 +156,28 @@ function compose(interval, anchors) {
   return low && high ? { lowUs: low.lowUs, highUs: high.highUs } : null
 }
 
+const safe = (value) => Number.isSafeInteger(value) && value >= 0
+/** S13a common native clock on a `native-frame` observation. Missing stays null
+ * (never 0); a present origin needs a positive incarnation and a safe
+ * `originUs + observedAtUs`. One capture never mixes origins or incarnations. */
+function nativeOrigin(event) {
+  const originUs = event.originUs ?? null,
+    incarnation = event.incarnation ?? null
+  if (incarnation !== null && (!safe(incarnation) || incarnation === 0))
+    throw new Error('Invalid native clock incarnation')
+  if (originUs === null) return null
+  if (!safe(originUs) || incarnation === null)
+    throw new Error('Native clock origin without a valid incarnation')
+  if (!safe(event.observedAtUs) || !safe(originUs + event.observedAtUs))
+    throw new Error('Native clock origin exceeds the safe integer range')
+  return { originUs, incarnation, timeline: event.timeline ?? null }
+}
+
 /** Derive observations from actual message brackets and decoded second IDs.
- * Nothing here fills missing clocks/video/encoder timings with guessed values. */
+ * Nothing here fills missing clocks/video/encoder timings with guessed values.
+ * Each sample's `nativeUs` = origin + its native timeline position; it is
+ * null (with an explicit `commonClockOrigin` unavailable entry) when the native
+ * frames carried no origin. Pair with video only for an equal `incarnation`. */
 export function derivePcmClocks(records) {
   const rendererClock = [],
     programClock = [],
@@ -167,7 +187,10 @@ export function derivePcmClocks(records) {
   const sourceMarkers = new Map(),
     programMarkers = new Map()
   let generation = null,
-    dropped = 0
+    dropped = 0,
+    origin = null
+  const origins = new Set(),
+    incarnations = new Set()
   for (const r of records) {
     if (r.kind === 'renderer' || r.kind === 'program') {
       const value = r.reply
@@ -182,6 +205,14 @@ export function derivePcmClocks(records) {
             generation ??= d.generation
             if (generation !== d.generation)
               throw new Error('Clock capture contains multiple source generations')
+            const observed = nativeOrigin(d)
+            origins.add(observed?.originUs ?? null)
+            incarnations.add(observed?.incarnation ?? null)
+            if (incarnations.size > 1)
+              throw new Error('Clock capture contains multiple native clock incarnations')
+            if (origins.size > 1)
+              throw new Error('Clock capture contains multiple native clock origins')
+            origin = observed
             nativeClock.push(
               clockBracket(d.pullRequestedAtMs * 1000, d.pullReceivedAtMs * 1000, d.observedAtUs)
             )
@@ -222,6 +253,12 @@ export function derivePcmClocks(records) {
     prepare(anchors)
   const samples = [],
     unavailable = []
+  if (!origin)
+    unavailable.push({
+      measurement: 'commonClockOrigin',
+      reason:
+        'Native PCM frames carried no common clock origin; audio cannot be paired with video. Absent is unavailable, never zero.'
+    })
   for (const [second, program] of programMarkers) {
     const source = sourceMarkers.get(second)
     const capture = compose(mapClock(second * 1e6, nativeClock), rendererClock)
@@ -233,9 +270,15 @@ export function derivePcmClocks(records) {
       continue
     }
     const detectionUs = program.uncertaintyFrames / 0.048
+    // Marker `second` sits at native timeline position second * 1e6 (firstSampleUs
+    // domain). `capture` exists only between native anchors whose origin sums were
+    // checked safe above, so this sum is bounded by one of them.
+    const nativeUs = origin ? origin.originUs + second * 1e6 : null
     samples.push({
       second,
       generation,
+      nativeUs,
+      incarnation: origin?.incarnation ?? null,
       capture,
       worklet,
       program: { lowUs: decoded.lowUs - detectionUs, highUs: decoded.highUs + detectionUs }
@@ -245,6 +288,7 @@ export function derivePcmClocks(records) {
     model:
       'measured round-trip brackets; piecewise linear interpolation within 2 seconds; worklet quantum and marker detection uncertainty included',
     generation,
+    origin,
     samples,
     unavailable,
     dropped,
