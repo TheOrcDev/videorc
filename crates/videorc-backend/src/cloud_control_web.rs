@@ -1482,6 +1482,7 @@ impl<W: CloudWebApi, C: ControlConnector> crate::cloud_show::CloudShowContext<W,
         let Some(recording) = recordings.iter().find(|item| item.id == recording_id) else {
             bail!("That recording is not in your account any more.");
         };
+        let _file_claim = crate::cloud_archive::claim_take_file(recording_id)?;
         database.remember_cloud_recording(recording)?;
         if let Some(path) = database.recover_cloud_recording_file(recording)? {
             return Ok(path);

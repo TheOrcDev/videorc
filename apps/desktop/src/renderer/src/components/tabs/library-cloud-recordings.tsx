@@ -1,3 +1,4 @@
+import { LibraryCloudArchive } from './library-cloud-archive'
 import { openWorkspaceTab } from '@/lib/workspace-navigation'
 import { cloudRecordingAvailability, cloudTakeLabel } from '@/lib/cloud-recordings-view'
 import {
@@ -182,6 +183,7 @@ export function LibraryCloudRecordings(): ReactElement {
       description="Talk shows Videorc Cloud recorded. Each one is deleted on the date shown."
       title="Cloud recordings"
     >
+      {signedIn && <LibraryCloudArchive />}
       {!signedIn ? (
         <LockAlert
           action={lockAlertAction({ kind: 'sign-in' })}

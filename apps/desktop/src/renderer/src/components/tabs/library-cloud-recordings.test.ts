@@ -20,7 +20,8 @@ const mocked = vi.hoisted(() => ({
 }))
 vi.mock('@/hooks/use-studio', () => ({
   useStudioCore: () => mocked.core,
-  useStudioDiagnostics: () => ({ client: mocked.client })
+  useStudioDiagnostics: () => ({ client: mocked.client }),
+  useStudioCloud: () => ({ cloudStatus: null })
 }))
 
 const toasts = vi.hoisted(() => ({ success: vi.fn(), error: vi.fn(), warning: vi.fn() }))

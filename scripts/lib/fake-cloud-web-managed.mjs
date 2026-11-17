@@ -143,6 +143,7 @@ export async function startFakeCloudWebManaged({
   let controlKind = wire.control.kinds[0],
     closed = false,
     httpsOrigin,
+    archiveHandler = null,
     recordingRowDelayMs = 0
   const controllers = new Set()
   const allowance = cloudAllowanceBlock({ nowMs: Date.now() })
@@ -442,6 +443,11 @@ export async function startFakeCloudWebManaged({
         return fail(wire.errors.common.find((e) => e.status === 401).code)
       if (invalidJson || !body || Array.isArray(body) || typeof body !== 'object')
         return fail(wire.errors.common.find((e) => e.status === 400).code)
+      // S21c maintained loopback acquisition only; never installed in production.
+      if (archiveHandler && /^\/api\/cloud\/shows\/[^/]+\/archive$/.test(path)) {
+        const answer = await archiveHandler({ method: req.method, url, body })
+        return send(answer.status ?? 200, answer.body, answer.contentType)
+      }
       if (path === '/api/auth/get-session')
         return send(200, { user: { name: 'Smoke', email: 'smoke@example.invalid', image: null } })
       if (path === '/api/ai/capabilities' || path === '/api/cloud/allowance') {
@@ -1155,6 +1161,9 @@ export async function startFakeCloudWebManaged({
           remainingSeconds: s.show.holdMaxSeconds
         }
       changed(s)
+    },
+    archive(handler) {
+      archiveHandler = handler
     },
     addRecording(fields = {}) {
       const id = `rec_${randomBytes(12).toString('hex')}`

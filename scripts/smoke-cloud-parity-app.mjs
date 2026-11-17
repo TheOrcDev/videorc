@@ -75,6 +75,7 @@ if (
     'scenes',
     'lifecycle',
     'services',
+    'archive',
     'replay-ring',
     'avatar-animation',
     'views',
@@ -109,7 +110,8 @@ const { output } = await run({
   soundboard: selected.case === 'soundboard',
   avatar: selected.case === 'avatar',
   scenes: selected.case === 'scenes',
-  replayRing: selected.case === 'replay-ring',
+  archive: selected.case === 'archive',
+  replayRing: ['replay-ring', 'archive'].includes(selected.case),
   avatarAnimation: selected.case === 'avatar-animation',
   views: selected.case === 'views',
   graphics: selected.case === 'graphics'
