@@ -26,6 +26,10 @@ export async function startParityPages(webRoot, guests, media = null, fixtureAss
     platform: 'browser',
     jsx: 'automatic',
     alias: { '@': webRoot },
+    // Production React, as the deployed page ships. esbuild's default here is
+    // development React, whose per-render dev work (performance-track prop
+    // diffs) kept each guest busy ~30 s before it asked to join on a loaded Mac.
+    define: { 'process.env.NODE_ENV': '"production"' },
     logLevel: 'silent'
   })
   const { startServer } = await import(
