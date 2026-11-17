@@ -108,6 +108,7 @@ pub enum Ownership {
 
 impl Ownership {
     /// True only while this process holds `show_id`.
+    #[cfg(test)]
     pub fn controls(&self, show_id: &str) -> bool {
         matches!(self, Ownership::Held { show_id: held, .. } if held == show_id)
     }
