@@ -226,6 +226,8 @@ const CAPITALIZED_NAMES = new Set([
   'Livestream',
   'Destinations',
   'Captions',
+  // The Output section that keeps the last seconds (replay-buffer.ts CLIPS_LABEL).
+  'Clips',
   'Output',
   'Library',
   'Settings',
