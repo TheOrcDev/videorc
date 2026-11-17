@@ -77,7 +77,9 @@ export function useScenePresets() {
         createdAt: previous?.createdAt ?? now,
         updatedAt: now,
         visual: normalizeSceneVisual(visual),
-        ...(sceneAudio ? { audio: sceneAudio } : {})
+        ...(sceneAudio ? { audio: sceneAudio } : {}),
+        // Plan 249 S12: an edit or rename keeps the scene's room guest roles.
+        ...(previous?.cloud ? { cloud: previous.cloud } : {})
       }
       return write(
         previous

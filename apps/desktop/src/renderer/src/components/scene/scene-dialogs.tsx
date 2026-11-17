@@ -19,6 +19,7 @@ import {
 } from '@/components/ui/dialog'
 import { Field, FieldDescription, FieldGroup, FieldLabel } from '@/components/ui/field'
 import { Input } from '@/components/ui/input'
+import { SegmentedControl } from '@/components/ui/segmented-control'
 import { useStudioCore } from '@/hooks/use-studio'
 import type { Device } from '@/lib/backend'
 import { globalShortcutRegistration } from '@/lib/global-shortcuts'
@@ -31,6 +32,13 @@ import {
   sceneWithFollow,
   suggestedSceneName
 } from '@/lib/scene-list'
+import {
+  SCENE_GUEST_PLACEMENTS,
+  SCENE_GUEST_PLACEMENT_LABELS,
+  sceneGuestPlacement,
+  sceneWithGuestRoles,
+  type SceneGuestPlacement
+} from '@/lib/scene-guest-roles'
 import {
   normalizeSceneAudio,
   normalizeSceneVisual,
@@ -47,6 +55,7 @@ export type SceneDialogRequest =
   | { kind: 'save' }
   | { kind: 'rename'; scene: SavedScene }
   | { kind: 'key'; scene: SavedScene }
+  | { kind: 'guests'; scene: SavedScene }
   | { kind: 'delete'; scene: SavedScene }
   | { kind: 'repair'; scene: SavedScene; error?: string }
 
@@ -200,6 +209,15 @@ export function useSceneDialogs(): {
             sceneWithAudio(scene, sceneLibraryActions.workingAudio, now())
           )
       },
+      // Plan 249 S12 (D7): where a talk show's guests go while this scene is
+      // on the room program.
+      {
+        id: 'guests',
+        label: 'Guests in the room…',
+        group: 'keeps',
+        ...writes,
+        onSelect: () => setRequest({ kind: 'guests', scene })
+      },
       ...(app
         ? [
             {
@@ -268,6 +286,16 @@ export function useSceneDialogs(): {
       {request?.kind === 'key' ? (
         <SceneKeyDialog key={request.scene.id} scene={request.scene} onClose={close} />
       ) : null}
+      {request?.kind === 'guests' ? (
+        <SceneGuestsDialog
+          key={request.scene.id}
+          scene={request.scene}
+          onClose={close}
+          onSave={(placement) =>
+            sceneLibraryActions.replace(sceneWithGuestRoles(request.scene, placement, now()))
+          }
+        />
+      ) : null}
       {request?.kind === 'repair' ? (
         <SceneRepairDialog
           key={request.scene.id}
@@ -307,6 +335,81 @@ export function useSceneDialogs(): {
   )
 
   return { open: setRequest, select, needsSources, menuItems, busy, element }
+}
+
+/**
+ * Guests in the room… (plan 249 S12, D7): where a talk show's guests go
+ * while this scene is on the room program. Saved with the scene; its own
+ * layout is unchanged, and no guest is ever taken off the stage.
+ */
+function SceneGuestsDialog({
+  scene,
+  onSave,
+  onClose
+}: {
+  scene: SavedScene
+  onSave: (placement: SceneGuestPlacement) => boolean
+  onClose: () => void
+}): ReactElement {
+  const [placement, setPlacement] = useState<SceneGuestPlacement>(() => sceneGuestPlacement(scene))
+  const [error, setError] = useState<string | null>(null)
+  return (
+    <Dialog
+      open
+      onOpenChange={(open) => {
+        if (!open) onClose()
+      }}
+    >
+      <DialogContent size="sm">
+        <DialogHeader>
+          <DialogTitle>Guests in the room</DialogTitle>
+          <DialogDescription>
+            Where guests go while “{scene.name}” is on a talk show’s program. The scene keeps its
+            own layout.
+          </DialogDescription>
+        </DialogHeader>
+        <Field data-invalid={Boolean(error)}>
+          <FieldLabel id="scene-guests-label">Guests</FieldLabel>
+          <SegmentedControl
+            aria-labelledby="scene-guests-label"
+            className="w-fit"
+            id="scene-guests"
+            options={SCENE_GUEST_PLACEMENTS.map((value) => ({
+              value,
+              label: SCENE_GUEST_PLACEMENT_LABELS[value]
+            }))}
+            size="sm"
+            value={placement}
+            onValueChange={(value) => {
+              setPlacement(value)
+              setError(null)
+            }}
+          />
+          <FieldDescription>
+            {error ??
+              (placement === 'over'
+                ? 'The scene fills the frame; guests sit in small boxes along its bottom edge.'
+                : placement === 'below'
+                  ? 'The scene sits above; guests share a band along the bottom.'
+                  : 'The scene sits to one side; guests share the rest of the frame.')}
+          </FieldDescription>
+        </Field>
+        <DialogFooter>
+          <Button variant="ghost" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button
+            onClick={() => {
+              if (onSave(placement)) onClose()
+              else setError("Couldn't save. Check your free space, then try again.")
+            }}
+          >
+            Save
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
 }
 
 /** Save scene… and Rename…: one name, unique, 1 to 80 characters. */

@@ -393,7 +393,7 @@ export async function startFakeCaptionService({
      * Resolves with the number of clients reached, after the final was
      * written.
      */
-    emitRealtimeFinal: async (text) => {
+    emitRealtimeFinal: async (text, { partialText = '' } = {}) => {
       const scriptedItemId = `scripted-item-${++scriptedItemSeq}`
       let reached = 0
       for (const client of realtime.clients) {
@@ -403,7 +403,7 @@ export async function startFakeCaptionService({
           JSON.stringify({
             type: 'transcript-partial',
             id: scriptedItemId,
-            text: '',
+            text: partialText,
             startSecond: audioStartMs / 1000
           })
         )

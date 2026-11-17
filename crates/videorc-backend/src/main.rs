@@ -45,6 +45,7 @@ mod clean_cut;
 mod clip_marks;
 mod cloud_archive;
 mod cloud_control_web;
+mod cloud_graphics;
 mod cloud_services;
 mod cloud_show;
 mod cloud_talk;
@@ -81,6 +82,7 @@ mod output_session;
 mod preview_debug_sample;
 mod provider_output;
 mod room_audio_bridge;
+mod room_microphone;
 // Plan 168 Phase F: the pet builder (S-F1 to S-F3) and the creator's RPCs (S-F4).
 mod buddy_pet_build;
 mod buddy_pet_create;
@@ -5809,6 +5811,9 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "resource.capability.register_thumbnail"
         | "account.auth.begin_intent"
         | "account.sign_out"
+        | "cloud.speech.overlay"
+        | "cloud.speech.sync"
+        | "cloud.speech.audio"
         | "captions.start"
         | "captions.stop"
         | "captions.style.set"
@@ -5844,6 +5849,7 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "cohost.library.update"
         | "cohost.library.delete"
         | "cohost.library.saveToLibrary"
+        | "cloud.graphics.snapshot"
         | "buddy.cloud.report"
         | "buddy.overlay.set"
         | "buddy.overlay.clear"
@@ -6152,6 +6158,7 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "scheduledStreams.candidates"
         | "account.get"
         | "entitlements.get"
+        | "cloud.speech.transcript"
         | "captions.status.get"
         | "captions.test.snapshot"
         | "comments.highlight.status"
@@ -6194,6 +6201,7 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "preview.screen.status"
         | "audio.meter.probeNative"
         | "scene.get"
+        | "cloud.scene.resolve"
         | "stream.output.topology.probe"
         | "performance.check.get"
         | "encoder.preference.get"
@@ -8523,6 +8531,86 @@ struct PreviewFrameReleaseParams {
 // These controls are connection-owned, like the event filter. Never dispatch
 // them as detached work: disconnect must release the retained surface even if
 // the client disappears after acquiring it and before sending its release.
+async fn handle_room_microphone_control(
+    state: &AppState,
+    role: BackendRole,
+    bridge: &mut room_microphone::Bridge,
+    text: &str,
+) -> Option<ServerResponse> {
+    #[derive(Deserialize)]
+    struct Envelope<'a> {
+        id: &'a str,
+        method: &'a str,
+    }
+    if !text.contains("room.microphone.") {
+        return None;
+    }
+    let envelope = serde_json::from_str::<Envelope<'_>>(text).ok()?;
+    if !matches!(
+        envelope.method,
+        "room.microphone.pcm" | "room.microphone.inspect"
+    ) {
+        return None;
+    }
+    if role != BackendRole::Admin
+        || !cfg!(debug_assertions)
+        || !state.smoke_rpc_enabled
+        || std::env::var("VIDEORC_ROOM_NATIVE_MIC").as_deref() != Ok("1")
+    {
+        return Some(ServerResponse::error(
+            envelope.id,
+            "microphone-disabled",
+            "Native room microphone is disabled and unqualified.",
+        ));
+    }
+    if text.len() > 2048 {
+        return Some(ServerResponse::error(
+            envelope.id,
+            "invalid-params",
+            "Microphone command exceeds bound.",
+        ));
+    }
+    let command = serde_json::from_str::<ClientCommand>(text).ok()?;
+    if command.method == "room.microphone.inspect" {
+        let wait_for_close = command.params == serde_json::json!({ "waitForClose": true });
+        if !rpc_params_are_empty(&command.params) && !wait_for_close {
+            return Some(ServerResponse::error(
+                command.id,
+                "invalid-params",
+                "Invalid microphone inspection parameters",
+            ));
+        }
+        // Main uses this only after a failed source RPC closed the owner socket.
+        // Wait for actual producer completion, never acknowledge a transient
+        // nonzero owner as closed or permanently fail a normal EOF teardown.
+        if wait_for_close
+            && !tokio::task::spawn_blocking(session_audio::room_microphone_cleanup_ready)
+                .await
+                .unwrap_or(false)
+        {
+            return Some(ServerResponse::error(
+                command.id,
+                "microphone-cleanup-pending",
+                "Microphone owner has not released capture",
+            ));
+        }
+        return Some(ServerResponse::ok(
+            command.id,
+            serde_json::json!({ "nativeSources": session_audio::room_microphone_producers() }),
+        ));
+    }
+    let result = match serde_json::from_value::<room_microphone::Command>(command.params) {
+        Ok(params) => bridge.command(state, params).await,
+        Err(_) => Err(anyhow::anyhow!("Invalid microphone command")),
+    };
+    Some(match result {
+        Ok(frame) => {
+            ServerResponse::ok(command.id, serde_json::to_value(frame).unwrap_or_default())
+        }
+        Err(error) => ServerResponse::error(command.id, "microphone-refused", &error.to_string()),
+    })
+}
+
 fn handle_room_pcm_control(
     role: BackendRole,
     enabled: bool,
@@ -8831,6 +8919,7 @@ async fn websocket_session_with_handler_role_and_redaction(
     };
     let mut preview_frame_lease = None;
     let mut room_audio_bridge = room_audio_bridge::Bridge::default();
+    let mut room_microphone = room_microphone::Bridge::default();
 
     loop {
         let incoming = tokio::select! {
@@ -8929,6 +9018,27 @@ async fn websocket_session_with_handler_role_and_redaction(
                     &mut studio_socket_guard,
                     text.as_str(),
                 ) {
+                    if !queue_websocket_response(
+                        &outgoing_tx,
+                        &reliable_metrics,
+                        &slow_pressure,
+                        response,
+                    )
+                    .await
+                    {
+                        break;
+                    }
+                    continue;
+                }
+
+                if let Some(response) = handle_room_microphone_control(
+                    &state,
+                    role,
+                    &mut room_microphone,
+                    text.as_str(),
+                )
+                .await
+                {
                     if !queue_websocket_response(
                         &outgoing_tx,
                         &reliable_metrics,
@@ -10371,6 +10481,44 @@ async fn handle_text_message_with_role(
                 ServerResponse::ok(command.id, entitlements::current_entitlements())
             }
         }
+        "cloud.speech.transcript" => match serde_json::from_value(command.params.clone()) {
+            Ok(input) => match captions::cloud_host::transcript(state, input).await {
+                Ok(value) => ServerResponse::ok(command.id, value),
+                Err(error) => {
+                    ServerResponse::error(command.id, "cloud-speech-refused", error.to_string())
+                }
+            },
+            Err(error) => ServerResponse::error(command.id, "invalid-params", error.to_string()),
+        },
+        "cloud.speech.overlay" => match serde_json::from_value(command.params.clone()) {
+            Ok(input) => match captions::cloud_host::install_overlay(state, input).await {
+                Ok(value) => ServerResponse::ok(command.id, value),
+                Err(error) => ServerResponse::error(
+                    command.id,
+                    "cloud-speech-overlay-refused",
+                    error.to_string(),
+                ),
+            },
+            Err(error) => ServerResponse::error(command.id, "invalid-params", error.to_string()),
+        },
+        "cloud.speech.sync" => match serde_json::from_value(command.params.clone()) {
+            Ok(input) => match captions::cloud_host::sync(state, input).await {
+                Ok(value) => ServerResponse::ok(command.id, value),
+                Err(error) => {
+                    ServerResponse::error(command.id, "cloud-speech-refused", error.to_string())
+                }
+            },
+            Err(error) => ServerResponse::error(command.id, "invalid-params", error.to_string()),
+        },
+        "cloud.speech.audio" => match serde_json::from_value(command.params.clone()) {
+            Ok(input) => match captions::cloud_host::audio(state, input).await {
+                Ok(value) => ServerResponse::ok(command.id, value),
+                Err(error) => {
+                    ServerResponse::error(command.id, "cloud-speech-refused", error.to_string())
+                }
+            },
+            Err(error) => ServerResponse::error(command.id, "invalid-params", error.to_string()),
+        },
         "captions.start" => {
             let language = command
                 .params
@@ -10438,6 +10586,13 @@ async fn handle_text_message_with_role(
             ),
         },
         "captions.overlay.set" => {
+            if cloud_graphics::managed_room(state) {
+                return ServerResponse::error(
+                    command.id,
+                    "cloud-speech-owner-required",
+                    "Room caption pixels require the current host speech session.",
+                );
+            }
             match serde_json::from_value::<captions::SetCaptionOverlayParams>(command.params) {
                 Ok(params) => {
                     match captions::install_caption_overlays(&state.caption_overlay, params) {
@@ -10941,6 +11096,28 @@ async fn handle_text_message_with_role(
         }
         // --- Buddy overlay (plan 164 Phase C) ---
         "cohost.buddy.status" => ServerResponse::ok(command.id, buddy_overlay::status(state).await),
+        "cloud.graphics.snapshot" => {
+            if role != BackendRole::Renderer {
+                return ServerResponse::error(
+                    command.id,
+                    "forbidden",
+                    "Only the room renderer reads public graphics.",
+                );
+            }
+            match serde_json::from_value::<cloud_graphics::SnapshotParams>(command.params) {
+                Ok(params) => match cloud_graphics::snapshot(state, params).await {
+                    Ok(value) => ServerResponse::ok(command.id, value),
+                    Err(error) => ServerResponse::error(
+                        command.id,
+                        "cloud-graphics-unavailable",
+                        error.to_string(),
+                    ),
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
         "buddy.cloud.report" => {
             if role != BackendRole::Renderer {
                 return ServerResponse::error(
@@ -12709,7 +12886,22 @@ async fn handle_text_message_with_role(
             }
         }
         "audio.mic.disarm" => {
-            ServerResponse::ok(command.id, warm_microphone::disarm_warm_microphone(state))
+            let status = warm_microphone::disarm_warm_microphone(state);
+            if cloud_talk_show_room_show_id(state).is_some() {
+                let settled = state.warm_microphone.wait_for_open().await;
+                let released =
+                    tokio::task::spawn_blocking(session_audio::room_microphone_cleanup_ready)
+                        .await
+                        .unwrap_or(false);
+                if !settled || !released {
+                    return ServerResponse::error(
+                        command.id,
+                        "microphone-cleanup-pending",
+                        "The previous microphone owner has not released capture.",
+                    );
+                }
+            }
+            ServerResponse::ok(command.id, status)
         }
         "audio.meter.probeNative" => {
             match serde_json::from_value::<protocol::AudioMeterProbeParams>(command.params) {
@@ -12825,6 +13017,24 @@ async fn handle_text_message_with_role(
         "scene.get" => {
             let scene = state.scene.lock().await.clone();
             ServerResponse::ok(command.id, scene)
+        }
+        // Plan 249 S12: the native engine's answer for a scene, never
+        // committed. The room program draws it; capture, the compositor and
+        // the camera lend are untouched, so a room never waits on them.
+        "cloud.scene.resolve" => {
+            if role != BackendRole::Renderer {
+                return ServerResponse::error(
+                    command.id,
+                    "forbidden",
+                    "Only the room renderer resolves scenes for the room.",
+                );
+            }
+            match serde_json::from_value::<protocol::SceneConfigParams>(command.params) {
+                Ok(params) => ServerResponse::ok(command.id, scene_from_capture_config(params)),
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
         }
         "scene.load_from_capture_config" => {
             match serde_json::from_value::<protocol::SceneConfigParams>(command.params) {
@@ -19679,6 +19889,23 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn host_speech_mutations_refuse_non_renderer_sources_before_parsing() {
+        let state = test_state();
+        for method in [
+            "cloud.speech.sync",
+            "cloud.speech.audio",
+            "cloud.speech.overlay",
+        ] {
+            let request = json!({"id":"speech", "method":method,"params":{}}).to_string();
+            for role in [BackendRole::Admin, BackendRole::Agent, BackendRole::Remote] {
+                let response = handle_text_message_with_role(&state, &request, role).await;
+                assert!(!response.ok, "{method}");
+                assert_eq!(response.error.unwrap().code, "forbidden-method");
+            }
+        }
+    }
+
     /// Plan 214 A4: the switch through the renderer socket, the platform
     /// report through the admin socket only, with the event and the exact
     /// wire shapes (absent fields omitted, never null).
@@ -25934,7 +26161,7 @@ mod tests {
                 handle_preview_frame_lease_control(&state, role, &mut None, &request.to_string())
                     .await
                     .unwrap();
-            assert_eq!(response.error.unwrap().code, "forbidden");
+            assert_eq!(response.error.unwrap().code, "forbidden-method");
             assert!(response.payload.is_none());
         }
         let mut held = None;

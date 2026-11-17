@@ -1,0 +1,41 @@
+{
+  "branch": "integrate/249-s9-s6-reconcile",
+  "base": "f27307cd97400b6933ac2324de3c6baffab5dfaf",
+  "prBase": "feat/249-s6-cloud-parity",
+  "s6Reconciled": true,
+  "productionQualified": false,
+  "sha256": {
+    "apps/desktop/src/renderer/src/components/studio/show-stage.tsx": "eb758536929fa6627627a5740d168f917a7003d9925940c108ff443d74b10ed8",
+    "apps/desktop/src/renderer/src/hooks/use-studio.tsx": "c214e6866aacf6173b25e0d5cb2be8e7e9a8f327285a2132921c6839a58e3462",
+    "apps/desktop/src/renderer/src/hooks/use-talk-show-room-join.test.ts": "64d908054673f272ecd29c242a8f5e64fbb7abe488b7e1b700b05773e235e8a0",
+    "apps/desktop/src/renderer/src/hooks/use-talk-show-room.ts": "6b556d502356c0d314d3be6acc610a19c01fa24378e34b25a73dee49836946f5",
+    "apps/desktop/src/renderer/src/lib/room-graphics-publisher.test.ts": "da5bf7c6b5263b0df4947c623227230575f5d2f190cffde71a6a2935d0ff28a4",
+    "apps/desktop/src/renderer/src/lib/room-graphics-publisher.ts": "7d4afb8329576082ac8985d3e39aa4acc470fc45c0ddf887c0dfc813d48913bc",
+    "apps/desktop/src/renderer/src/lib/talk-show-context.ts": "20495710681244cfa4188ac744d272a1cf6ce2e28fa5c23b2633445730060f45",
+    "apps/desktop/src/renderer/src/lib/talk-show-room.ts": "fdcb46165f587690ce989e35dce0e030171403c63b6f6c9b3b993989c20967b3",
+    "apps/desktop/src/shared/backend-rpc-contract.ts": "430862c4ae2a0217498d4f352fc7d0270fcbf3ad6eb16681a8c8d8bf7cd9d287",
+    "apps/desktop/src/shared/cloud-avatar.ts": "cc0d4ceb9d5645715e66d5d1d1123f1be46c6b91c9222a50e90ad7a27d32430f",
+    "apps/desktop/src/shared/cloud-graphics-view.ts": "5dd2433c0b3dfe89b116e623a88029a95b037ed26dab46ef1460068caa6fca9d",
+    "apps/desktop/src/shared/cloud-graphics.test.ts": "cfd7583474bca08486fdec075c7671782556d5b288626f4c9bcb91bd94cb5092",
+    "apps/desktop/src/shared/cloud-graphics.ts": "e61994906c15a28d5e46698c6d2bd444789fd0b6ebca07fe97a69ddc1b91f1a4",
+    "crates/videorc-backend/src/banner_timers.rs": "1acee0f80acc3845b513cedd8311f6a84ba4187160054e79be89821bd10b195a",
+    "crates/videorc-backend/src/chat_overlay.rs": "babbd20b9d1afee8a23247ac2be794ea7da0e80f85210824f9c08d105b323e95",
+    "crates/videorc-backend/src/cloud_graphics.rs": "e0bf97ab86ba0502d21cac11097820d24b2b17cac58b75c33bd7252f8b049fb8",
+    "crates/videorc-backend/src/comment_highlight.rs": "c8637ceca5d0087ecc2abe4c44012d255ef8a9b7072b99d031e4e731a7d72f60",
+    "crates/videorc-backend/src/compositor.rs": "8c345789519625cf6e5094b03123f1d660d78a9684aeff2faf2e61e5a96c1503",
+    "crates/videorc-backend/src/main.rs": "881f91964640c92e0c4a1d99a3aa7d9a07fd88fcab8ba3cb6e085eb976deb25b",
+    "crates/videorc-backend/src/state.rs": "3cbe22274b0727726e1afb06f35f1ecf9cbffd90df776d58fccf4ef0ef792f19",
+    "docs/cloud/249-s9-contract.md": "aa384622d43774108dfb12bfb037a11092e3e7479aa3f89a93f18b894a28b959",
+    "protocol-fixtures/cloud-parity-graphics.json": "6ff29d74e15666a421a57f963a1087c73fd3426a949c94f2745f0eed7e15c7fa",
+    "scripts/lib/cloud-parity-baseline.mjs": "5d5e8f4b878e837d142db7eae5d78795b0baf5f68cbeed83961ecb371732ba6b",
+    "scripts/lib/cloud-parity-browser.mjs": "8e9ebabb34118084f19ada8e45265767aec1fbd62de2866e56cde686633befb8",
+    "scripts/lib/cloud-parity-graphics-contract.mjs": "da14cd5bd83394692dd48d6576814504afb07997501e96a6125529bee445baf3",
+    "scripts/lib/cloud-parity-graphics-contract.test.mjs": "47bf468afca6313740e9825a736da5e37d5a0958419a005aecf5afdfe93902a1",
+    "scripts/lib/cloud-parity-graphics.mjs": "0613afe38b8badcfa79ab713f51c8a1c99fe139aacae94ca9f0319f9694aa390",
+    "scripts/smoke-cloud-parity-app.mjs": "eecc1dfd25c3e9f7c17d47a57d460d7dcf516abc98c4b994b05e45763ad26f73"
+  },
+  "unhashedDocumentation": [
+    "docs/cloud/249-s9-handoff.md",
+    "docs/cloud/249-s9-manifest.json"
+  ]
+}

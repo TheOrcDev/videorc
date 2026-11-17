@@ -65,6 +65,31 @@ export type SavedScene = {
   visual: SceneVisual
   /** Absent on a scene saved before scenes kept audio: applying it leaves audio as it is. */
   audio?: SceneAudio
+  /**
+   * Plan 249 S12: the room's guest roles for this scene, a versioned
+   * extension beside the native fields (which it never changes). Absent: the
+   * stable default guest layout. Kept as saved here; the room adapter
+   * (lazy, `cloud-scene.ts` `parseCloudSceneExtension`) reads the versions it
+   * knows and uses the default for anything else, so no version is lost.
+   */
+  cloud?: SavedSceneCloud
+}
+/** A bounded, versioned extension, kept as saved. */
+export type SavedSceneCloud = { version: number } & Record<string, unknown>
+const SAVED_SCENE_CLOUD_MAX_CHARS = 4096
+/** Keep a bounded versioned object; drop only what is not one. */
+export function normalizeSavedSceneCloud(raw: unknown): SavedSceneCloud | undefined {
+  if (raw === undefined || !raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined
+  const version = (raw as { version?: unknown }).version
+  if (!Number.isSafeInteger(version) || (version as number) < 1) return undefined
+  try {
+    const text = JSON.stringify(raw)
+    return text.length <= SAVED_SCENE_CLOUD_MAX_CHARS
+      ? (JSON.parse(text) as SavedSceneCloud)
+      : undefined
+  } catch {
+    return undefined
+  }
 }
 export type ScenePresetLibrary = { version: 1; scenes: SavedScene[] }
 export type WorkingScene = {
@@ -366,13 +391,15 @@ export function hydrateSceneLibrary(raw: unknown): {
       )
         continue
       const audio = normalizeSceneAudio(entry.audio)
+      const cloud = normalizeSavedSceneCloud(entry.cloud)
       scenes.push({
         id: entry.id,
         name: entry.name.trim(),
         createdAt: entry.createdAt,
         updatedAt: entry.updatedAt,
         visual: normalizeSceneVisual(entry.visual),
-        ...(audio ? { audio } : {})
+        ...(audio ? { audio } : {}),
+        ...(cloud ? { cloud } : {})
       })
     } catch {
       /* Reject only the malformed entry. */

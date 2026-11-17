@@ -1063,6 +1063,32 @@ impl SlotInner {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
+    /// Plan 249 S5: tell the renderer what the pet just learned, as the
+    /// public projection the cloud program's animator twin replays
+    /// ([`crate::buddy_animator::public_event`]). Only a room with the
+    /// avatar on a cloud output forwards it; nothing private is in it.
+    fn publish_animator(
+        &self,
+        persona: &CohostPersona,
+        avatar_state: Option<CohostAvatarState>,
+        event: Option<&crate::buddy_animator::BuddyAnimatorEvent>,
+    ) {
+        let Some(events) = self.events.as_ref() else {
+            return;
+        };
+        if avatar_state.is_none() && event.is_none() {
+            return;
+        }
+        let _ = events.send(crate::protocol::ServerEvent::new(
+            BUDDY_ANIMATOR_EVENT,
+            PublicAnimatorEvent {
+                avatar_state: avatar_state.map(CohostAvatarState::as_str),
+                event: event
+                    .map(|event| crate::buddy_animator::public_event(event, &persona.reactions)),
+            },
+        ));
+    }
+
     /// Log like `AppState::emit_log`: tracing plus the `log` event.
     fn log(&self, level: &str, message: String) {
         match level {
@@ -1081,6 +1107,21 @@ impl SlotInner {
             ));
         }
     }
+}
+
+/// Plan 249 S5: the renderer event carrying [`PublicAnimatorEvent`].
+pub const BUDDY_ANIMATOR_EVENT: &str = "cohost.pet.animator";
+
+/// One animator input as the cloud program may see it: plan 164's state
+/// and/or the public projection of the event that changed it. Absent parts
+/// are omitted, never `null` (the strict renderer contract).
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PublicAnimatorEvent {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub avatar_state: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub event: Option<serde_json::Value>,
 }
 
 /// The Buddy's pet atlases and draws (one per process, on `AppState`).
@@ -1136,12 +1177,11 @@ impl BuddySpriteSlot {
     pub fn set_persona(&self, persona: &CohostPersona) {
         let mut state = self.inner.lock();
         state.persona = persona.clone();
-        state.source.notify(
-            Instant::now(),
-            crate::buddy_animator::BuddyAnimatorEvent::Settings(
-                crate::buddy_animator::BuddyAnimatorSettings::from_persona(persona),
-            ),
+        let event = crate::buddy_animator::BuddyAnimatorEvent::Settings(
+            crate::buddy_animator::BuddyAnimatorSettings::from_persona(persona),
         );
+        self.inner.publish_animator(persona, None, Some(&event));
+        state.source.notify(Instant::now(), event);
         self.bump_epoch(&mut state);
     }
 
@@ -1185,7 +1225,10 @@ impl BuddySpriteSlot {
 
     /// Hand the source an event (plan 168 S-C3); it applies at the next frame.
     pub fn notify(&self, event: crate::buddy_animator::BuddyAnimatorEvent) {
-        self.inner.lock().source.notify(Instant::now(), event);
+        let mut state = self.inner.lock();
+        self.inner
+            .publish_animator(&state.persona, None, Some(&event));
+        state.source.notify(Instant::now(), event);
     }
 
     /// Plan 164's state changed (`cohost.buddy.state`), with the event that
@@ -1197,6 +1240,8 @@ impl BuddySpriteSlot {
     ) {
         let mut state = self.inner.lock();
         state.avatar_state = avatar_state;
+        self.inner
+            .publish_animator(&state.persona, Some(avatar_state), event.as_ref());
         if let Some(event) = event {
             state.source.notify(Instant::now(), event);
         }

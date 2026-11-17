@@ -1,3 +1,4 @@
+import * as microphoneSource from './room-microphone-source'
 // @vitest-environment happy-dom
 import type { RoomOptions } from 'livekit-client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -11,6 +12,7 @@ import {
   TAKEN_OVER_GRACE_MS,
   TalkShowRoomClient,
   onAirElsewhere,
+  stageMessage,
   talkShowRoomOptions,
   type TalkShowRoomDeps
 } from '@/lib/talk-show-room'
@@ -255,6 +257,117 @@ describe('the host in the room (C-G4)', () => {
     await vi.advanceTimersByTimeAsync(30 * 60 * 1000)
     expect(requestToken).toHaveBeenCalledTimes(1)
     expect(vi.getTimerCount()).toBe(0)
+    await room.disconnect()
+  })
+
+  // Plan 249 S5: what the room client animates the avatar from.
+  const motionSeed = () => {
+    const rect = { x: 0.8, y: 0.7, w: 0.15, h: 0.25 }
+    return {
+      settings: { intensity: 0.45, sleepAfterSeconds: 180, breathing: true },
+      inputs: {
+        avatarState: 'idle' as const,
+        rects: { h: rect, v: rect },
+        cards: { h: null, v: null },
+        atlasHash: 'a'.repeat(64),
+        pack: {
+          neutral: 'look-22',
+          pivot: [0.5, 0.9] as const,
+          headTop: 0.2,
+          talk: [],
+          cells: [{ id: 'look-22', kind: 'gaze' as const, gaze: [0, 0] as const }]
+        }
+      }
+    }
+  }
+
+  it('runs the avatar motion timer only while an animated avatar is set (plan 249 S5)', async () => {
+    const { room } = client()
+    await room.connect()
+    const timers = vi.getTimerCount()
+    room.setAvatarMotion(motionSeed())
+    expect(vi.getTimerCount()).toBe(timers + 1)
+    // Events before any consumer are harmless; nothing is sent without targets.
+    room.avatarMotionEvent({
+      avatarState: 'talk',
+      event: { kind: 'utterance', mood: 'talk', chars: 4, bubbleSeconds: 1 }
+    })
+    await vi.advanceTimersByTimeAsync(500)
+    room.setAvatarMotion(null)
+    expect(vi.getTimerCount()).toBe(timers)
+    await room.disconnect()
+  })
+
+  it('looks only at the card each output accepted, until its clear or its time runs out (plan 249 S5)', async () => {
+    const { room } = client()
+    await room.connect()
+    Object.assign(latestRoom().localParticipant, { sid: 'PA_host' })
+    room.setAvatarMotion(motionSeed())
+    await vi.advanceTimersByTimeAsync(200)
+    expect(room.avatarMotionProbe()?.cards).toEqual({ h: false, v: false })
+    const card = {
+      op: 'set' as const,
+      showId: 'sh_talk',
+      slot: 'card' as const,
+      orientation: 'h' as const,
+      rect: { x: 0.05, y: 0.7, w: 0.3, h: 0.12 },
+      ttlSeconds: 5,
+      mimeType: 'image/png',
+      imageId: 'card-1'
+    }
+    const image = async () => ({ bytes: new Uint8Array(32), mimeType: 'image/png' })
+    await room.sendOverlay(card, image)
+    // The vertical output never got one (its image was gone): no input there.
+    const warning = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    await room.sendOverlay({ ...card, orientation: 'v' }, async () => null)
+    warning.mockRestore()
+    await vi.advanceTimersByTimeAsync(200)
+    expect(room.avatarMotionProbe()?.cards).toEqual({ h: true, v: false })
+    expect(room.avatarMotionProbe()).toBeTruthy()
+    // Its time-to-live ends the look without a clear.
+    await vi.advanceTimersByTimeAsync(5000)
+    expect(room.avatarMotionProbe()?.cards).toEqual({ h: false, v: false })
+    await room.sendOverlay({ ...card, ttlSeconds: undefined }, image)
+    await vi.advanceTimersByTimeAsync(200)
+    expect(room.avatarMotionProbe()?.cards.h).toBe(true)
+    await room.sendOverlay(
+      { op: 'clear', showId: 'sh_talk', slot: 'card', orientation: 'h' },
+      image
+    )
+    await vi.advanceTimersByTimeAsync(200)
+    expect(room.avatarMotionProbe()?.cards.h).toBe(false)
+    room.setAvatarMotion(null)
+    await room.disconnect()
+  })
+
+  it('says under the Program preview why the avatar shows still (plan 249 S5)', async () => {
+    const { room } = client()
+    await room.connect()
+    room.setAvatarMotion(null, 'The avatar shows still on cloud outputs: it is too detailed.')
+    expect(room.snapshot.avatar?.animation).toEqual({
+      state: 'still',
+      reason: 'The avatar shows still on cloud outputs: it is too detailed.'
+    })
+    room.setAvatarMotion(motionSeed())
+    expect(room.snapshot.avatar?.animation).toEqual({ state: 'animated', reason: null })
+    room.setAvatarMotion(null)
+    expect(room.snapshot.avatar?.animation).toBeUndefined()
+    await room.disconnect()
+  })
+
+  it('draws the Program preview from its own simulation, and nothing for another atlas (plan 249 S5)', async () => {
+    const { room } = client()
+    await room.connect()
+    expect(room.avatarMotionSource.sim).toBeNull()
+    expect(room.avatarMotionSource.draw('h', 'a'.repeat(64))).toBeNull()
+    Object.assign(latestRoom().localParticipant, { sid: 'PA_host' })
+    room.setAvatarMotion(motionSeed())
+    await vi.advanceTimersByTimeAsync(500)
+    room.avatarMotionSource.advance()
+    expect(room.avatarMotionSource.sim?.tick).toBeGreaterThan(0)
+    expect(room.avatarMotionSource.draw('h', 'a'.repeat(64))?.cell).toBe('look-22')
+    expect(room.avatarMotionSource.draw('h', 'b'.repeat(64))).toBeNull()
+    room.setAvatarMotion(null)
     await room.disconnect()
   })
 
@@ -878,5 +991,202 @@ describe('S7a opt-in microphone producer', () => {
     expect(close).toHaveBeenCalledOnce()
     expect(latestRoom().localParticipant.publishTrack).not.toHaveBeenCalled()
     vi.unstubAllGlobals()
+  })
+})
+
+// Plan 249 S6 (D4): guests learn which screen the program shows, so they see
+// and hear that one screen. Always present, so a guest can tell a current
+// desktop (null: none) from an older one (absent).
+describe('the stage message (plan 249 S6)', () => {
+  const read = (bytes: Uint8Array) => JSON.parse(new TextDecoder().decode(bytes)) as unknown
+  it('names the selected screen only when it is on stage', () => {
+    expect(read(stageMessage(['host:s', 'g_a'], 'g_a'))).toEqual({
+      v: 1,
+      onStage: ['host:s', 'g_a'],
+      screen: 'g_a'
+    })
+    expect(read(stageMessage(['host:s'], 'g_a'))).toEqual({
+      v: 1,
+      onStage: ['host:s'],
+      screen: null
+    })
+    expect(read(stageMessage(['host:s']))).toEqual({ v: 1, onStage: ['host:s'], screen: null })
+  })
+})
+
+describe('processed microphone room ownership', () => {
+  const choice = {
+    mode: 'browser-aec' as const,
+    deviceId: 'one',
+    name: 'One',
+    gainDb: 0,
+    muted: false,
+    noise: 'off' as const,
+    offsetMs: 0
+  }
+  it('attaches speech to the published processed host track and revokes it on mute and loss', async () => {
+    const track = { kind: 'audio', stop: vi.fn() } as unknown as MediaStreamTrack
+    const source = {
+      track,
+      close: vi.fn(async () => {}),
+      update: vi.fn(),
+      published: vi.fn(),
+      disconnectFixture: vi.fn(async () => {})
+    }
+    const factory = vi
+      .spyOn(microphoneSource, 'createRoomMicrophoneSource')
+      .mockResolvedValue(source)
+    const tap = { close: vi.fn(async () => {}), setMuted: vi.fn(async () => {}) }
+    let current!: () => boolean
+    const attachHostSpeech = vi.fn((published, show, muted, owns) => {
+      expect(latestRoom().localParticipant.publishTrack).toHaveBeenCalledOnce()
+      expect(published).toBe(track)
+      expect(show).toBe('sh_talk')
+      expect(muted).toBe(false)
+      current = owns
+      return tap
+    })
+    const { room } = client(undefined, undefined, {
+      cameraName: null,
+      microphoneName: 'One',
+      microphoneChoice: choice,
+      attachHostSpeech
+    })
+    await room.connect()
+    expect(attachHostSpeech).toHaveBeenCalledOnce()
+    expect(current()).toBe(true)
+    await room.setMicrophoneMuted(true)
+    expect(tap.setMuted).toHaveBeenLastCalledWith(true)
+    await room.setMicrophoneMuted(false)
+    expect(tap.setMuted).toHaveBeenLastCalledWith(false)
+    latestRoom().emit('Disconnected', 2)
+    expect(current()).toBe(false)
+    expect(tap.close).toHaveBeenCalledOnce()
+    await room.disconnect()
+    factory.mockRestore()
+  })
+  it('retires the old producer before switch and None releases publication', async () => {
+    const order: string[] = []
+    const sources: { close: ReturnType<typeof vi.fn>; update: ReturnType<typeof vi.fn> }[] = []
+    const factory = vi
+      .spyOn(microphoneSource, 'createRoomMicrophoneSource')
+      .mockImplementation(async (selected) => {
+        order.push('open:' + selected.deviceId)
+        const source = {
+          track: { kind: 'audio', stop: vi.fn() } as unknown as MediaStreamTrack,
+          close: vi.fn(async () => {
+            order.push('close:' + selected.deviceId)
+          }),
+          update: vi.fn(),
+          published: vi.fn(),
+          disconnectFixture: vi.fn(async () => {})
+        }
+        sources.push(source)
+        return source
+      })
+    const { room } = client(undefined, undefined, {
+      cameraName: null,
+      microphoneName: 'One',
+      microphoneChoice: choice
+    })
+    await room.connect()
+    await room.updateMicrophone({ ...choice, gainDb: 6, noise: 'rnnoise' })
+    expect(sources[0].update).toHaveBeenCalled()
+    expect(factory).toHaveBeenCalledTimes(1)
+    await room.setMicrophoneSelection('two', 'Two')
+    expect(order).toEqual(['open:one', 'close:one', 'open:two'])
+    await room.setMicrophoneSelection(null, null)
+    expect(room.snapshot.local.microphone).toBeNull()
+    expect(factory).toHaveBeenCalledTimes(2)
+    expect(latestRoom().localParticipant.unpublishTrack).toHaveBeenCalledTimes(2)
+    await room.disconnect()
+    factory.mockRestore()
+  })
+  it('failed producer cleanup fences replacement while room teardown still disconnects', async () => {
+    const factory = vi.spyOn(microphoneSource, 'createRoomMicrophoneSource').mockResolvedValue({
+      track: { kind: 'audio', stop: vi.fn() } as unknown as MediaStreamTrack,
+      close: vi.fn(async () => {
+        throw new Error('Native close unconfirmed')
+      }),
+      update: vi.fn(),
+      published: vi.fn(),
+      disconnectFixture: vi.fn(async () => {})
+    })
+    const { room } = client(undefined, undefined, {
+      cameraName: null,
+      microphoneName: 'One',
+      microphoneChoice: choice
+    })
+    await room.connect()
+    await expect(room.setMicrophoneSelection('two', 'Two')).rejects.toThrow(
+      'cleanup is unconfirmed'
+    )
+    expect(factory).toHaveBeenCalledTimes(1)
+    const disconnect = vi.spyOn(latestRoom(), 'disconnect')
+    await room.disconnect()
+    expect(disconnect).toHaveBeenCalled()
+    factory.mockRestore()
+  })
+  it.each([2, 4])(
+    'SDK ownership loss %s disarms immediately and rejects stale reconnect callbacks',
+    async (reason) => {
+      const close = vi.fn(async () => {})
+      const factory = vi.spyOn(microphoneSource, 'createRoomMicrophoneSource').mockResolvedValue({
+        track: { kind: 'audio', stop: vi.fn() } as unknown as MediaStreamTrack,
+        close,
+        update: vi.fn(),
+        published: vi.fn(),
+        disconnectFixture: vi.fn(async () => {})
+      })
+      const { room, requestToken } = client(undefined, undefined, {
+        cameraName: null,
+        microphoneName: 'One',
+        microphoneChoice: choice
+      })
+      await room.connect()
+      const oldRoom = latestRoom()
+      oldRoom.emit('Disconnected', reason)
+      expect(close).toHaveBeenCalledOnce()
+      await expect(room.setMicrophoneSelection('two', 'Two')).rejects.toThrow('not connected')
+      oldRoom.emit('Reconnecting')
+      oldRoom.emit('Reconnected')
+      await vi.advanceTimersByTimeAsync(60000)
+      expect(factory).toHaveBeenCalledTimes(1)
+      expect(requestToken).toHaveBeenCalledTimes(1)
+      expect(oldRoom.localParticipant.unpublishTrack).toHaveBeenCalled()
+      await room.disconnect()
+      factory.mockRestore()
+    }
+  )
+  it('loss does not reopen on a gain update; explicit selection and reconnect create fresh owners', async () => {
+    let fail!: (reason: string) => void
+    const factory = vi
+      .spyOn(microphoneSource, 'createRoomMicrophoneSource')
+      .mockImplementation(async (_choice, _show, _signal, _resolve, onFailure) => {
+        fail = onFailure
+        return {
+          track: { kind: 'audio', stop: vi.fn() } as unknown as MediaStreamTrack,
+          close: vi.fn(async () => {}),
+          update: vi.fn(),
+          published: vi.fn(),
+          disconnectFixture: vi.fn(async () => {})
+        }
+      })
+    const { room } = client(undefined, undefined, {
+      cameraName: null,
+      microphoneName: 'One',
+      microphoneChoice: choice
+    })
+    await room.connect()
+    fail('Device lost')
+    await room.updateMicrophone({ ...choice, gainDb: 3 })
+    expect(factory).toHaveBeenCalledTimes(1)
+    await room.setMicrophoneSelection('one', 'One')
+    expect(factory).toHaveBeenCalledTimes(2)
+    latestRoom().emit('Reconnecting')
+    latestRoom().emit('Reconnected')
+    await vi.waitFor(() => expect(factory).toHaveBeenCalledTimes(3))
+    await room.disconnect()
+    factory.mockRestore()
   })
 })

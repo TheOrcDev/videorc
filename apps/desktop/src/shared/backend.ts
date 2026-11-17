@@ -1,3 +1,4 @@
+import type { RoomMicrophoneApi } from './room-microphone'
 import type { RoomPcmCommand, RoomPcmFrame, RoomPcmResources } from './room-pcm'
 import type { ChatDelivery, ChatDeliveryBoundary } from './chat-delivery'
 import type { LiveDashboardState } from './live-dashboard'
@@ -5844,6 +5845,13 @@ export interface CloudStage {
 export interface CloudRoomShown {
   onStage: string[]
   screen?: string
+  /** Plan 249 S6: the layout the page drew. Absent: a runner or an older page.
+   * A plain string on the wire; read it through `shownLayout`. */
+  layout?: string
+  /** Plan 249 S6: the key of the stage the page applied (cloud-presentation-views.ts). */
+  stageKey?: string
+  /** Plan 249 S6: when that report arrived, ISO 8601. Present with `stageKey`. */
+  at?: string
 }
 
 /** `CloudStatus.room`: what the Guests tab, the Show stage and the strip draw. */
@@ -6417,6 +6425,8 @@ export type AppExitKind = 'quit' | 'close'
 
 export interface VideorcApi {
   getRoomPcmTestResources: () => Promise<RoomPcmResources>
+  getRoomNativeMicrophoneResources: () => Promise<RoomPcmResources>
+  roomMicrophonePcm: RoomMicrophoneApi
   roomPcmTest: (command: RoomPcmCommand) => Promise<RoomPcmFrame | null>
   /**
    * What this window sits on (plan 208): the solid base (the default) or the

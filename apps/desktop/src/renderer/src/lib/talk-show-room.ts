@@ -1,10 +1,39 @@
+import type { HostSpeechTap } from './room-speech-source'
+import {
+  createRoomMicrophoneSource,
+  microphoneRequiresReplacement,
+  type RoomMicrophoneChoice,
+  type RoomMicrophoneSource
+} from './room-microphone-source'
+import {
+  RoomGraphicsPublisher,
+  type GraphicsContent,
+  type RoomGraphicsStatus
+} from './room-graphics-publisher'
 import { RoomAuxPublisher } from './room-aux-publisher'
 import { createRoomPcmTestSource, type RoomPcmSource } from './room-pcm-source'
 import {
   RoomAvatarPublisher,
   type AvatarContent,
+  type RoomAvatarAnimation,
   type RoomAvatarStatus
 } from './room-avatar-publisher'
+import { RoomAvatarMotion, ROOM_AVATAR_MOTION_FLUSH_MS } from './room-avatar-motion'
+import {
+  AVATAR_MOTION_TOPIC,
+  type MotionInputs,
+  type MotionOrientation,
+  type MotionRect
+} from '../../../shared/cloud-avatar-motion'
+import type { AvatarMotionSource } from '../../../shared/cloud-avatar-view'
+import type { AnimatorSettings } from '../../../shared/buddy-animator'
+import type { CohostPetAnimatorEvent } from '../../../shared/buddy-animator-public'
+import {
+  RoomScenePublisher,
+  type RoomSceneCommit,
+  type RoomSceneStatus,
+  type SceneContent
+} from './room-scene-publisher'
 import {
   createPrivateScreen,
   roomScreenPrivacy,
@@ -123,7 +152,10 @@ export type TalkShowRoomSnapshot = {
   people: TalkShowPerson[]
   local: TalkShowLocalMedia
   monitor: TalkShowMonitor
+  graphics?: RoomGraphicsStatus
   avatar?: RoomAvatarStatus
+  /** Plan 249 S12: the scene the program draws, and each output's rendered revision. */
+  scene?: RoomSceneStatus
   screenPrivacy?: ScreenPrivacyPublication & {
     sourceBlockedAt: number | null
     status: 'visible' | 'hiding' | 'observed' | 'unconfirmed' | 'paused'
@@ -148,6 +180,12 @@ export const IDLE_TALK_SHOW_ROOM: TalkShowRoomSnapshot = {
 }
 
 export type TalkShowRoomDeps = {
+  attachHostSpeech?: (
+    track: MediaStreamTrack,
+    showId: string,
+    muted: boolean,
+    current: () => boolean
+  ) => HostSpeechTap
   /** S7a explicit dev fixture; not inferred from media-v2 or exposed as production mode. */
   pcmTestSource?: boolean
   onPcmDiagnostic?: (value: unknown) => void
@@ -161,6 +199,7 @@ export type TalkShowRoomDeps = {
   initiallyCameraOff?: boolean
   cameraSettings?: () => TalkShowCameraSettings | undefined
   microphoneName: string | null
+  microphoneChoice?: RoomMicrophoneChoice
   /** Where remote audio plays (a hidden container the hook owns). */
   audioHost: () => HTMLElement | null
   /**
@@ -184,8 +223,16 @@ export function talkShowRoomOptions(): RoomOptions {
 }
 
 /** The guest page's `StageMessage` (`guest-wire.ts`): the identities on stage. */
-export function stageMessage(onStage: readonly string[]): Uint8Array<ArrayBuffer> {
-  return new TextEncoder().encode(JSON.stringify({ v: 1, onStage: [...onStage] }))
+/** Plan 249 S6 (D4): the screen the program shows rides along, so a guest
+ * sees the same shared screen. Always present (null: none), so a guest can
+ * tell a current desktop from an older one; only a screen on the stage is
+ * named. An older guest page reads `onStage` and ignores the rest. */
+export function stageMessage(
+  onStage: readonly string[],
+  screen: string | null = null
+): Uint8Array<ArrayBuffer> {
+  const named = screen && onStage.includes(screen) ? screen : null
+  return new TextEncoder().encode(JSON.stringify({ v: 1, onStage: [...onStage], screen: named }))
 }
 
 function qualityOf(quality: ConnectionQuality): CloudRoomQuality {
@@ -233,7 +280,9 @@ export class TalkShowRoomClient {
   #reconnectTimer: number | null = null
   #reconnectAttempt = 0
   #closed = false
+  #localOwnershipLost = false
   #lastStage: string[] = []
+  #lastScreen: string | null = null
   #monitorEnabled = false
   #micMuted = false
   #cameraOff = false
@@ -247,6 +296,11 @@ export class TalkShowRoomClient {
   #pcmSource: RoomPcmSource | null = null
   #pcmAbort: AbortController | null = null
   #pcmRetiring: Promise<unknown> = Promise.resolve()
+  #processedMicrophone: RoomMicrophoneSource | null = null
+  #microphoneChoice: RoomMicrophoneChoice | undefined
+  #microphoneOpening: Promise<void> = Promise.resolve()
+  #microphoneCleanupFailed = false
+  #speech: HostSpeechTap | null = null
   #microphoneGeneration = 0
   #screen: LocalVideoTrack | null = null
   #screenGeneration = 0
@@ -263,9 +317,37 @@ export class TalkShowRoomClient {
   readonly #audio: RemoteAudioAttachments<HTMLMediaElement>
   #snapshot: TalkShowRoomSnapshot = IDLE_TALK_SHOW_ROOM
   #problem: string | null = null
+  #graphics: RoomGraphicsPublisher | null = null
+  #graphicsContent: GraphicsContent | null = null
+  #graphicsEnabled = false
   #avatar: RoomAvatarPublisher | null = null
   #avatarContent: AvatarContent | null = null
   #avatarEnabled = false
+  /** Plan 249 S5: the avatar's motion stream, per bound room. */
+  #motion: RoomAvatarMotion | null = null
+  #motionTimer: ReturnType<typeof setInterval> | null = null
+  /** What a new producer starts from (a re-bind keeps state, not history). */
+  #motionSeed: { settings: AnimatorSettings; inputs: MotionInputs } | null = null
+  /** Why the worn avatar shows still on cloud outputs (its atlas was refused). */
+  #motionRefused: string | null = null
+  /**
+   * The highlight card each output accepted (the relay took its bytes), per
+   * orientation, until its clear or its time-to-live. The avatar looks at
+   * these only: a card an output never got is no input (`null`).
+   */
+  #cards: Record<MotionOrientation, { rect: MotionRect; until: number | null } | null> = {
+    h: null,
+    v: null
+  }
+  #cardsSent = ''
+  /** The publisher's last status, merged with the animation facts above. */
+  #avatarStatus: RoomAvatarStatus | null = null
+  #animationKey = ''
+  /** Plan 249 S6 (D4): the host shows the stream's public layers to guests. Off per room. */
+  #avatarGuests = false
+  #scene: RoomScenePublisher | null = null
+  /** The scene the program should draw; re-sent after a reconnect. */
+  #sceneContent: SceneContent | null = null
   /** Overlays go one at a time, in the order they were handed over. */
   #overlays = new Map<string, AbortController>()
 
@@ -282,6 +364,7 @@ export class TalkShowRoomClient {
       this.#screen?.stop()
       void this.#refreshPrivateScreen()
     })
+    this.#microphoneChoice = deps.microphoneChoice
     this.#cameraName = deps.cameraName
     this.#micMuted = deps.initiallyMuted === true || !deps.microphoneName
     this.#cameraOff = deps.initiallyCameraOff === true || !deps.cameraName
@@ -316,7 +399,7 @@ export class TalkShowRoomClient {
     if (!this.#owns(room)) return
     this.#setState('connected', null, token.identity)
     this.#applySubscriptions()
-    await this.sendStage(this.#lastStage)
+    await this.sendStage(this.#lastStage, this.#lastScreen)
     this.#publish()
   }
 
@@ -325,9 +408,19 @@ export class TalkShowRoomClient {
     this.#closed = true
     this.#aux?.close()
     this.#aux = null
+    this.#graphics?.close()
+    this.#graphics = null
     this.#avatar?.close()
     this.#avatar = null
+    this.#graphicsContent = null
     this.#avatarContent = null
+    this.#stopMotion()
+    this.#motionSeed = null
+    this.#motionRefused = null
+    this.#cards = { h: null, v: null }
+    this.#scene?.close()
+    this.#scene = null
+    this.#sceneContent = null
     this.#privacyOff?.()
     this.#privacyOff = null
     if (this.#privacyTimer) clearTimeout(this.#privacyTimer)
@@ -348,12 +441,13 @@ export class TalkShowRoomClient {
 
   /** The stage, to the guest page's topic (D11): on every change and on
    * every join (data messages are not replayed). */
-  async sendStage(onStage: readonly string[]): Promise<void> {
+  async sendStage(onStage: readonly string[], screen: string | null = null): Promise<void> {
     this.#lastStage = [...onStage]
+    this.#lastScreen = screen
     const room = this.#room
     if (!room || room.state !== ConnectionState.Connected) return
     try {
-      await room.localParticipant.publishData(stageMessage(onStage), {
+      await room.localParticipant.publishData(stageMessage(onStage, screen), {
         reliable: true,
         topic: STAGE_TOPIC
       })
@@ -378,6 +472,54 @@ export class TalkShowRoomClient {
     return next
   }
 
+  async disconnectMicrophoneFixture(mode?: 'disconnect' | 'starve' | 'resume'): Promise<void> {
+    if (!import.meta.env.DEV || !this.#processedMicrophone)
+      throw new Error('No microphone fixture is active.')
+    await this.#processedMicrophone.disconnectFixture(mode)
+  }
+
+  setMicrophoneSelection(deviceId: string | null, name: string | null): Promise<void> {
+    const current = this.#microphoneChoice ?? {
+      mode: 'browser-aec' as const,
+      deviceId: null,
+      name: null,
+      gainDb: 0,
+      muted: this.#micMuted,
+      noise: 'off' as const,
+      offsetMs: 0
+    }
+    return this.updateMicrophone({ ...current, deviceId, name }, true)
+  }
+
+  updateMicrophone(choice: RoomMicrophoneChoice, retry = false): Promise<void> {
+    if (this.#deps.pcmTestSource) return Promise.resolve()
+    return this.#control(async (room) => {
+      const previous = this.#microphoneChoice
+      this.#microphoneChoice = choice
+      this.#deps.microphoneName = choice.name
+      this.#micMuted = choice.muted || !choice.deviceId
+      if (
+        !previous ||
+        microphoneRequiresReplacement(previous, choice) ||
+        (retry && !this.#microphone)
+      ) {
+        this.#retirePcm(room)
+        await this.#pcmRetiring
+        await this.#microphoneOpening
+        if (!this.#owns(room)) return
+        if (choice.deviceId && choice.name) await this.#publishMicrophone(room)
+      } else {
+        if (choice.muted) await this.#speech?.setMuted(true)
+        this.#processedMicrophone?.update(choice)
+        if (choice.muted) await this.#microphone?.mute()
+        else {
+          await this.#microphone?.unmute()
+          await this.#speech?.setMuted(false)
+        }
+      }
+    })
+  }
+
   setMicrophoneMuted(muted: boolean): Promise<void> {
     return this.setMicrophoneMode(muted ? 'mute' : 'unmute')
   }
@@ -385,13 +527,19 @@ export class TalkShowRoomClient {
   setMicrophoneMode(mode: 'mute' | 'unmute' | 'toggle'): Promise<void> {
     return this.#control(async (room) => {
       const muted = mode === 'toggle' ? !this.#micMuted : mode === 'mute'
+      if (muted) await this.#speech?.setMuted(true)
       const track = this.#microphone
       if (!track) throw new Error('No microphone is published in the room.')
+      if (this.#microphoneChoice) {
+        this.#microphoneChoice = { ...this.#microphoneChoice, muted }
+        this.#processedMicrophone?.update(this.#microphoneChoice)
+      }
       if (muted) await track.mute()
       else await track.unmute()
       if (!this.#owns(room) || track !== this.#microphone)
         throw new Error('The microphone changed.')
       this.#micMuted = muted
+      if (!muted) await this.#speech?.setMuted(false)
     })
   }
 
@@ -576,22 +724,36 @@ export class TalkShowRoomClient {
     image: (imageId: string, signal?: AbortSignal) => Promise<OverlayImage | null>
   ): Promise<void> {
     const room = this.#room
+    // Plan 249 S5: a card coming down stops the avatar's look at once.
+    if (event.slot === 'card' && event.op === 'clear') this.#acceptCard(event.orientation, null)
     if (this.#closed || !room || room.state !== ConnectionState.Connected) return
     const key = `${event.showId}:${event.slot}:${event.orientation}`
     this.#overlays.get(key)?.abort()
     const controller = new AbortController()
     this.#overlays.set(key, controller)
+    let sent = false
     try {
       const result = await sendOverlay(event, {
         publisher: room.localParticipant,
         image,
         signal: controller.signal
       })
-      if (result !== 'sent')
-        console.warn('[talk-show] overlay dropped', event.slot, event.orientation)
+      sent = result === 'sent'
+      if (!sent) console.warn('[talk-show] overlay dropped', event.slot, event.orientation)
     } catch {
       console.warn('[talk-show] overlay dropped', event.slot, event.orientation)
     } finally {
+      // The output got this card (or did not): where the avatar may look.
+      if (event.slot === 'card' && event.op === 'set' && this.#overlays.get(key) === controller)
+        this.#acceptCard(
+          event.orientation,
+          sent
+            ? {
+                rect: { ...event.rect },
+                until: event.ttlSeconds ? Date.now() + event.ttlSeconds * 1000 : null
+              }
+            : null
+        )
       if (this.#overlays.get(key) === controller) this.#overlays.delete(key)
     }
   }
@@ -601,6 +763,19 @@ export class TalkShowRoomClient {
     this.#monitorEnabled = enabled
     this.#applySubscriptions()
     this.#publish()
+  }
+
+  setGraphics(content: GraphicsContent | null): void {
+    this.#graphicsContent = content
+    this.#graphics?.set(this.#graphicsEnabled ? content : null)
+  }
+  failGraphics(): void {
+    this.#graphicsContent = null
+    if (this.#graphicsEnabled) this.#graphics?.fail()
+  }
+  setGraphicsEnabled(enabled: boolean): void {
+    this.#graphicsEnabled = enabled
+    this.#graphics?.set(enabled ? this.#graphicsContent : null)
   }
 
   setAvatar(content: AvatarContent | null): void {
@@ -618,14 +793,258 @@ export class TalkShowRoomClient {
     this.#avatar?.set(enabled ? this.#avatarContent : null)
   }
 
-  #bind(room: Room): void {
-    this.#avatar?.close()
-    this.#avatar = new RoomAvatarPublisher(room, (avatar) => {
+  /**
+   * Plan 249 S5: animate the avatar for consumers that can. A new seed on a
+   * running stream is a persona switch: the same clock continues. `null`
+   * stops it; with `refused` the avatar shows still and the room says why.
+   */
+  setAvatarMotion(
+    seed: { settings: AnimatorSettings; inputs: MotionInputs } | null,
+    refused: string | null = null
+  ): void {
+    const previous = this.#motionSeed
+    this.#motionSeed = seed
+      ? {
+          ...seed,
+          inputs: {
+            ...seed.inputs,
+            avatarState: previous?.inputs.avatarState ?? seed.inputs.avatarState,
+            cards: this.#currentCards()
+          }
+        }
+      : null
+    this.#motionRefused = seed ? null : refused
+    this.#publishAvatar()
+    if (!seed) {
+      this.#stopMotion()
+      return
+    }
+    if (this.#motion) {
+      this.#motion.layout(seed.inputs.rects)
+      if (previous?.inputs.atlasHash !== seed.inputs.atlasHash)
+        this.#motion.pack(seed.inputs.atlasHash, seed.inputs.pack)
+      if (JSON.stringify(previous?.settings) !== JSON.stringify(seed.settings))
+        this.#motion.backend({ event: { kind: 'settings', settings: seed.settings } })
+    } else if (this.#room && !this.#motionTimer) {
+      this.#startMotion(this.#room)
+    }
+  }
+
+  /**
+   * Plan 249 S5 acceptance: the producer's own simulation, the local
+   * reference program pages are compared with at the same tick. Public
+   * cell ids only.
+   */
+  avatarMotionProbe(): {
+    epoch: string
+    tick: number
+    cells: Record<MotionOrientation, string | null>
+    /** Which outputs have an accepted card the avatar may look at. */
+    cards: Record<MotionOrientation, boolean>
+  } | null {
+    const motion = this.#motion
+    if (!motion) return null
+    const sim = motion.sim
+    return {
+      epoch: motion.epoch,
+      tick: sim.tick,
+      cells: { h: sim.draw('h')?.cell ?? null, v: sim.draw('v')?.cell ?? null },
+      cards: { h: sim.inputs.cards.h !== null, v: sim.inputs.cards.v !== null }
+    }
+  }
+
+  /**
+   * Plan 249 S5: the producer's own simulation for the desktop's Program
+   * preview (`createAvatarView`), the poses the outputs replay a moment
+   * later. Draws nothing while no stream runs or for another atlas.
+   */
+  readonly avatarMotionSource: AvatarMotionSource = (() => {
+    const motion = () => this.#motion
+    return {
+      advance: () => motion()?.advance(),
+      draw: (orientation: MotionOrientation, atlasHash: string) => {
+        const sim = motion()?.sim
+        return sim && sim.inputs.atlasHash === atlasHash ? sim.draw(orientation) : null
+      },
+      get sim() {
+        return motion()?.sim ?? null
+      }
+    }
+  })()
+
+  /** `cohost.pet.animator`: the backend's public projection, nothing else. */
+  avatarMotionEvent(payload: CohostPetAnimatorEvent): void {
+    const seed = this.#motionSeed
+    if (!seed) return
+    if (payload.avatarState) seed.inputs.avatarState = payload.avatarState
+    if (payload.event?.kind === 'settings') seed.settings = payload.event.settings
+    this.#motion?.backend(payload)
+  }
+
+  #acceptCard(
+    orientation: MotionOrientation,
+    card: { rect: MotionRect; until: number | null } | null
+  ): void {
+    this.#cards = { ...this.#cards, [orientation]: card }
+    this.#pushCards()
+  }
+
+  /** Accepted cards still up; a card past its time-to-live is gone from its output. */
+  #currentCards(): Record<MotionOrientation, MotionRect | null> {
+    const now = Date.now()
+    const live = (card: { rect: MotionRect; until: number | null } | null) =>
+      card && (card.until === null || card.until > now) ? { ...card.rect } : null
+    return { h: live(this.#cards.h), v: live(this.#cards.v) }
+  }
+
+  #pushCards(): void {
+    const cards = this.#currentCards()
+    const key = JSON.stringify(cards)
+    if (this.#motionSeed) this.#motionSeed.inputs.cards = cards
+    if (!this.#motion || key === this.#cardsSent) return
+    this.#cardsSent = key
+    this.#motion.cards(cards)
+  }
+
+  /** What the Program preview says about animation (absent for a still avatar). */
+  #animation(): RoomAvatarAnimation | undefined {
+    if (this.#motionRefused) return { state: 'still', reason: this.#motionRefused }
+    if (!this.#motionSeed) return undefined
+    const failed = this.#motion?.status().failed ?? null
+    const still = this.#avatar?.motionCoverage().still ?? 0
+    return {
+      state: 'animated',
+      reason:
+        failed ?? (still ? 'Some outputs show the avatar still. Reload them to animate it.' : null)
+    }
+  }
+
+  #publishAvatar(): void {
+    const avatar = this.#avatarStatus
+    if (!avatar || !this.#room || !this.#owns(this.#room)) return
+    const animation = this.#animation()
+    this.#animationKey = JSON.stringify(animation ?? null)
+    this.#snapshot = {
+      ...this.#snapshot,
+      avatar: { ...avatar, enabled: this.#avatarEnabled, ...(animation ? { animation } : {}) }
+    }
+    this.#publish()
+  }
+
+  /**
+   * The producer needs the host SID, which exists only once connected, and a
+   * full reconnect can change it (consumers fence on it): create lazily,
+   * recreate on a new SID. Each tick also refreshes the authorized targets.
+   */
+  #startMotion(room: Room): void {
+    this.#stopMotion()
+    let sid = ''
+    this.#motionTimer = setInterval(() => {
+      const seed = this.#motionSeed
+      if (!seed || !this.#owns(room)) return
+      const current = room.localParticipant.sid
+      if (!current) return
+      if (!this.#motion || sid !== current) {
+        this.#motion?.close()
+        sid = current
+        seed.inputs.cards = this.#currentCards()
+        this.#cardsSent = JSON.stringify(seed.inputs.cards)
+        this.#motion = new RoomAvatarMotion(
+          {
+            show: room.name,
+            publisherSid: current,
+            now: Date.now,
+            send: (bytes, identities) =>
+              room.localParticipant.publishData(bytes, {
+                reliable: true,
+                topic: AVATAR_MOTION_TOPIC,
+                destinationIdentities: identities
+              })
+          },
+          seed.settings,
+          seed.inputs
+        )
+      }
+      this.#pushCards()
+      this.#motion.setConsumers(this.#avatar?.motionTargets() ?? [])
+      void this.#motion.flush()
+      // A delivery problem or an older output shows under the Program preview.
+      if (JSON.stringify(this.#animation() ?? null) !== this.#animationKey) this.#publishAvatar()
+    }, ROOM_AVATAR_MOTION_FLUSH_MS)
+  }
+
+  #stopMotion(): void {
+    if (this.#motionTimer) clearInterval(this.#motionTimer)
+    this.#motionTimer = null
+    this.#motion?.close()
+    this.#motion = null
+  }
+
+  setAvatarGuests(enabled: boolean): void {
+    this.#avatarGuests = enabled
+    this.#avatar?.guests(enabled)
+  }
+
+  /**
+   * Plan 249 S12: what the program draws, committed atomically per lane.
+   * Answers with each egress lane's rendered revision, `preview` before any
+   * egress runs, or why it is not confirmed.
+   */
+  commitScene(content: SceneContent | null): Promise<RoomSceneCommit> {
+    this.#sceneContent = content
+    if (!this.#scene || this.#closed)
+      return Promise.resolve({
+        state: 'failed',
+        reason: 'The room is not connected.',
+        observed: {}
+      })
+    return this.#scene.commit(content)
+  }
+
+  get sceneContent(): SceneContent | null {
+    return this.#sceneContent
+  }
+
+  #bindScene(room: Room): void {
+    this.#scene?.close()
+    this.#scene = new RoomScenePublisher(room, (scene) => {
       if (!this.#owns(room)) return
-      this.#snapshot = { ...this.#snapshot, avatar: { ...avatar, enabled: this.#avatarEnabled } }
+      this.#snapshot = { ...this.#snapshot, scene }
       this.#publish()
     })
+    // A new connection is a new publisher SID: the program drops the old
+    // owner's scene and takes this one, as a cut (no replayed motion).
+    if (this.#sceneContent)
+      void this.#scene.commit({
+        ...this.#sceneContent,
+        transition: { kind: 'cut', durationMs: 0 }
+      })
+  }
+
+  #bind(room: Room): void {
+    this.#graphics?.close()
+    this.#graphics = new RoomGraphicsPublisher(room, (graphics) => {
+      if (!this.#owns(room)) return
+      this.#snapshot = {
+        ...this.#snapshot,
+        graphics: { ...graphics, enabled: this.#graphicsEnabled }
+      }
+      this.#publish()
+    })
+    this.#graphics.set(this.#graphicsEnabled ? this.#graphicsContent : null)
+    this.#avatar?.close()
+    this.#avatarStatus = null
+    this.#avatar = new RoomAvatarPublisher(room, (avatar) => {
+      if (!this.#owns(room)) return
+      this.#avatarStatus = avatar
+      this.#publishAvatar()
+    })
     this.#avatar.set(this.#avatarEnabled ? this.#avatarContent : null)
+    // No timer without an animated avatar (an idle room keeps no intervals).
+    if (this.#motionSeed) this.#startMotion(room)
+    else this.#stopMotion()
+    this.#avatar.guests(this.#avatarGuests)
+    this.#bindScene(room)
     room
       .on(RoomEvent.DataReceived, (payload, participant, _kind, topic) => {
         // Only server-relayed observations. A participant cannot impersonate this API.
@@ -658,7 +1077,7 @@ export class TalkShowRoomClient {
         this.#applySubscriptions()
         // A guest who just joined needs the stage (data is not replayed).
         if (!isRunnerIdentity(participant.identity) && !isRecorderIdentity(participant.identity)) {
-          void this.sendStage(this.#lastStage)
+          void this.sendStage(this.#lastStage, this.#lastScreen)
         }
         this.#publish()
       })
@@ -710,7 +1129,9 @@ export class TalkShowRoomClient {
         this.#publish()
       })
       .on(RoomEvent.Reconnecting, () => {
-        if (this.#deps.pcmTestSource && this.#owns(room)) this.#retirePcm(room)
+        if (!this.#owns(room)) return
+        if ((this.#deps.pcmTestSource || this.#microphoneChoice) && this.#owns(room))
+          this.#retirePcm(room)
         if (this.#privacy) {
           this.#privacy.observations = {}
           this.#privacy.status = 'unconfirmed'
@@ -718,9 +1139,10 @@ export class TalkShowRoomClient {
         this.#setState('reconnecting', 'Reconnecting to the room.')
       })
       .on(RoomEvent.Reconnected, () => {
-        if (this.#deps.pcmTestSource) {
+        if (!this.#owns(room)) return
+        if (this.#deps.pcmTestSource || this.#microphoneChoice) {
           const generation = this.#microphoneGeneration
-          void this.#pcmRetiring.then(async () => {
+          void Promise.all([this.#pcmRetiring, this.#microphoneOpening]).then(async () => {
             if (!this.#owns(room) || generation !== this.#microphoneGeneration) return
             try {
               await this.#publishMicrophone(room)
@@ -731,10 +1153,19 @@ export class TalkShowRoomClient {
           })
         }
         this.#setState('connected', null)
-        void this.sendStage(this.#lastStage)
+        void this.sendStage(this.#lastStage, this.#lastScreen)
       })
       .on(RoomEvent.Disconnected, (reason?: DisconnectReason) => {
         if (!this.#owns(room) || reason === DisconnectReason.CLIENT_INITIATED) return
+        if (
+          reason === DisconnectReason.DUPLICATE_IDENTITY ||
+          reason === DisconnectReason.PARTICIPANT_REMOVED ||
+          reason === DisconnectReason.ROOM_DELETED
+        )
+          this.#localOwnershipLost = true
+        // Native capture is independent of the SDK's track disposal. Retire it
+        // now, before a takeover grace period or reconnect backoff can wait.
+        if (this.#deps.pcmTestSource || this.#microphoneChoice) this.#retirePcm(room)
         this.#scheduleReconnect(reason)
       })
   }
@@ -753,7 +1184,7 @@ export class TalkShowRoomClient {
   }
 
   #owns(room: Room): boolean {
-    return !this.#closed && this.#room === room
+    return !this.#closed && !this.#localOwnershipLost && this.#room === room
   }
 
   async updateCameraSettings(settings: TalkShowCameraSettings | undefined): Promise<void> {
@@ -862,7 +1293,19 @@ export class TalkShowRoomClient {
     if (this.#problem) this.#deps.report('connected', this.#problem)
   }
 
-  async #publishMicrophone(room: Room): Promise<void> {
+  #publishMicrophone(room: Room): Promise<void> {
+    const opening = this.#microphoneOpening.then(() =>
+      this.#owns(room) ? this.#openMicrophone(room) : undefined
+    )
+    this.#microphoneOpening = opening.catch(() => {})
+    return opening
+  }
+
+  async #openMicrophone(room: Room): Promise<void> {
+    if (this.#microphoneCleanupFailed)
+      throw new Error(
+        'Microphone cleanup is unconfirmed. Close the room before opening another owner.'
+      )
     if (!this.#deps.microphoneName && !this.#deps.pcmTestSource) return
     const generation = ++this.#microphoneGeneration
     const current = (): boolean => this.#owns(room) && this.#microphoneGeneration === generation
@@ -892,6 +1335,31 @@ export class TalkShowRoomClient {
         }
         this.#pcmSource = source
         microphone = new LocalAudioTrack(source.track)
+      } else if (this.#microphoneChoice) {
+        if (!this.#microphoneChoice.deviceId || !this.#microphoneChoice.name) return
+        const controller = new AbortController()
+        this.#pcmAbort = controller
+        const source = await createRoomMicrophoneSource(
+          this.#microphoneChoice,
+          room.localParticipant.identity.replace(/^host:/, ''),
+          controller.signal,
+          microphoneDeviceIdFor,
+          (reason) => {
+            if (!current()) return
+            this.#retirePcm(room)
+            this.#micMuted = true
+            this.#problem = reason
+            this.#publish()
+            this.#deps.report('connected', reason)
+          },
+          this.#deps.onPcmDiagnostic
+        )
+        if (!current()) {
+          await source.close()
+          return
+        }
+        this.#processedMicrophone = source
+        microphone = new LocalAudioTrack(source.track)
       } else {
         const deviceId = await microphoneDeviceIdFor(this.#deps.microphoneName!)
         if (!current()) return
@@ -899,7 +1367,8 @@ export class TalkShowRoomClient {
         microphone = await createLocalAudioTrack({
           deviceId: { exact: deviceId },
           echoCancellation: true,
-          noiseSuppression: true
+          noiseSuppression: false,
+          autoGainControl: false
         })
       }
       if (!current()) {
@@ -915,6 +1384,20 @@ export class TalkShowRoomClient {
       await room.localParticipant.publishTrack(microphone, {
         source: Track.Source.Microphone
       })
+      if (current()) {
+        this.#processedMicrophone?.published()
+        if (
+          room.localParticipant.identity.startsWith('host:') &&
+          (this.#processedMicrophone || this.#pcmSource)
+        )
+          this.#speech =
+            this.#deps.attachHostSpeech?.(
+              microphone.mediaStreamTrack,
+              room.localParticipant.identity.replace(/^host:/, ''),
+              this.#micMuted,
+              current
+            ) ?? null
+      }
       if (!current()) {
         microphone.stop()
         await room.localParticipant.unpublishTrack(microphone, true).catch(() => {})
@@ -925,6 +1408,8 @@ export class TalkShowRoomClient {
       this.#pcmAbort?.abort()
       this.#pcmSource?.close()
       this.#pcmSource = null
+      await this.#processedMicrophone?.close()
+      this.#processedMicrophone = null
       this.#microphone?.stop()
       this.#microphone = null
       this.#micMuted = true
@@ -934,24 +1419,37 @@ export class TalkShowRoomClient {
 
   #retirePcm(room: Room): void {
     ++this.#microphoneGeneration
+    const speechClosing = this.#speech?.close()
+    this.#speech = null
     this.#pcmAbort?.abort()
     this.#pcmAbort = null
+    const processed = this.#processedMicrophone?.close()
+    this.#processedMicrophone = null
     const closing = this.#pcmSource?.close()
     this.#pcmSource = null
     const track = this.#microphone
     this.#microphone = null
     track?.stop()
-    this.#pcmRetiring = Promise.all([this.#pcmRetiring, closing])
-      .then(async () => {
+    this.#pcmRetiring = Promise.allSettled([this.#pcmRetiring, closing, processed, speechClosing])
+      .then(async (settled) => {
+        if (processed && settled.some((result) => result.status === 'rejected'))
+          this.#microphoneCleanupFailed = true
         if (track) await room.localParticipant.unpublishTrack(track, true)
       })
-      .catch(() => {})
+      .catch(() => {
+        if (processed) this.#microphoneCleanupFailed = true
+      })
   }
 
   async #stopLocal(): Promise<void> {
     ++this.#microphoneGeneration
+    const speechClosing = this.#speech?.close()
+    this.#speech = null
     this.#pcmAbort?.abort()
     this.#pcmAbort = null
+    await speechClosing
+    const closingProcessed = this.#processedMicrophone?.close()
+    this.#processedMicrophone = null
     const closingPcm = this.#pcmSource?.close()
     this.#pcmSource = null
     const room = this.#room
@@ -972,7 +1470,8 @@ export class TalkShowRoomClient {
     this.#screen = null
     // Stop capture synchronously, before waiting for any network unpublish.
     for (const track of tracks) track.stop()
-    await Promise.all([closingPcm, this.#pcmRetiring])
+    const settled = await Promise.allSettled([closingPcm, closingProcessed, this.#pcmRetiring])
+    if (settled.some((result) => result.status === 'rejected')) this.#microphoneCleanupFailed = true
     for (const track of tracks) {
       try {
         if (room) await room.localParticipant.unpublishTrack(track, true)
@@ -1027,8 +1526,13 @@ export class TalkShowRoomClient {
   async #reconnect(): Promise<void> {
     if (this.#closed) return
     const stale = this.#room
+    this.#graphics?.close()
+    this.#graphics = null
     this.#avatar?.close()
     this.#avatar = null
+    this.#stopMotion()
+    this.#scene?.close()
+    this.#scene = null
     this.#room = null
     if (stale) await stale.disconnect().catch(() => {})
     await this.#stopLocal()
@@ -1054,7 +1558,7 @@ export class TalkShowRoomClient {
       this.#setState('connected', null, token.identity)
       if (!this.#owns(room)) return
       this.#applySubscriptions()
-      await this.sendStage(this.#lastStage)
+      await this.sendStage(this.#lastStage, this.#lastScreen)
       this.#publish()
     } catch (error) {
       console.warn('[talk-show] reconnect failed', messageOf(error))

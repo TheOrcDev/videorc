@@ -1,3 +1,4 @@
+import type { RoomMicrophoneCommand } from '../shared/room-microphone'
 import { parseRoomPcmFrame, type RoomPcmCommand, type RoomPcmFrame } from '../shared/room-pcm'
 
 type Connection = { host: string; port: number; token: string }
@@ -26,12 +27,13 @@ export class RoomPcmBridge {
   constructor(
     private readonly connection: () => Promise<Connection>,
     private readonly enabled: () => boolean,
-    private readonly socketFactory: (url: string) => WebSocket = (url) => new WebSocket(url)
+    private readonly socketFactory: (url: string) => WebSocket = (url) => new WebSocket(url),
+    private readonly method: 'room.pcm.test' | 'room.microphone.pcm' = 'room.pcm.test'
   ) {}
 
-  async request(command: RoomPcmCommand): Promise<RoomPcmFrame | null> {
+  async request(command: RoomPcmCommand | RoomMicrophoneCommand): Promise<RoomPcmFrame | null> {
     if (!this.enabled() || this.#closed) throw new Error('PCM test bridge is disabled.')
-    if (command.action === 'close') {
+    if (command.action === 'close' && this.method === 'room.pcm.test') {
       if (command.generation !== this.#generation) throw new Error('Stale PCM generation.')
       this.close()
       return null
@@ -103,10 +105,14 @@ export class RoomPcmBridge {
     const result = await new Promise<unknown>((resolve, reject) => {
       const id = `pcm-${++this.#serial}`
       this.#pending = { id, resolve, reject }
-      this.#timer = setTimeout(() => this.close(), 2000)
-      socket.send(JSON.stringify({ id, method: 'room.pcm.test', params: command }))
+      this.#timer = setTimeout(
+        () => this.close(),
+        this.method === 'room.microphone.pcm' && command.action !== 'pull' ? 15000 : 2000
+      )
+      socket.send(JSON.stringify({ id, method: this.method, params: command }))
     })
     if (this.#closed) throw new Error('PCM bridge closed during pull.')
+    if (command.action === 'close') this.close()
     return result === null ? null : parseRoomPcmFrame(result, this.#generation)
   }
 

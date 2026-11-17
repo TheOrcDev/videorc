@@ -1,6 +1,14 @@
+import {
+  roomNativeMicrophoneEnabled,
+  setRoomNativeMicrophoneEnabled,
+  roomMicrophoneState,
+  roomMicrophoneResources
+} from '../lib/room-microphone-state'
 import { roomPcmTestResources, setRoomPcmTestEnabled } from '../lib/room-pcm-test-state'
 import { cloudTerminalOwner } from '@/lib/cloud-provider-lifecycle'
 import { roomHoldsTheCamera } from '@/lib/replay-buffer-reconcile'
+import type { RoomSceneResult, RoomSceneTarget } from '@/lib/cloud-scene-adapter'
+import { createRoomSceneEditSync } from '@/lib/room-scene-resender'
 import { outputSessionFacts } from '../../../shared/output-session'
 import type { TalkShowRoomClient, TalkShowRoomSnapshot } from '@/lib/talk-show-room'
 import {
@@ -738,6 +746,8 @@ import {
 export type { GoLivePartialSetup, GoLiveSetupFailure } from '@/lib/go-live-flow'
 
 type CaptionOverlayWork = {
+  room?: { sessionClientId: string; expiresAt: number; stream: boolean; recording: boolean }
+
   client: BackendClient
   epoch: number
   key: string
@@ -3814,10 +3824,13 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           }
           return commentHighlightIntentRef.current === intent ? cleared : null
         }
-        const streamVideo = streamOutputVideoSettings(
-          captureConfig.video,
-          captureConfig.streamEnabled ? captureConfig.streaming : undefined
-        )
+        const streamVideo =
+          cloudStatusRef.current?.room?.phase === 'open'
+            ? { width: 1920, height: 1080 }
+            : streamOutputVideoSettings(
+                captureConfig.video,
+                captureConfig.streamEnabled ? captureConfig.streaming : undefined
+              )
         const avatarSource = options?.milestone?.avatarUrl ?? message.authorAvatarUrl
         const [avatarUrl, canvases] = await Promise.all([
           avatarSource ? window.videorc?.cacheChatAvatar?.(avatarSource).catch(() => null) : null,
@@ -5293,10 +5306,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const sourceDeviceSwitchPending = sourceSelectionState.pending
   const sourceSwitchReason = useCallback(
     (kind: LiveSourceDeviceSwitchPending): string | null => {
-      if (roomHoldsTheCamera(cloudStatusRef.current?.room) && kind !== 'camera')
-        return kind === 'microphone'
-          ? 'Close the room to change its microphone.'
-          : 'Use the room screen-share control.'
+      if (roomHoldsTheCamera(cloudStatusRef.current?.room) && kind === 'capture')
+        return 'Use the room screen-share control.'
       // Only a live socket can be mid-bootstrap. With no backend there is no
       // session to fence, and the next recording.status reconciles the pick.
       if (sourceStatusUnknownRef.current && (wsStatus === 'connecting' || wsStatus === 'connected'))
@@ -5537,6 +5548,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // here is news: the Destinations page and the Stream health stat show the rest.
   const stopOutputRef = useRef<((output: 'recording' | 'live') => Promise<boolean>) | null>(null)
   const roomControlsRef = useRef<TalkShowRoomClient | null>(null)
+  /** Plan 249 S12: asks for the room scene to be sent again after a confirmed edit. */
+  const requestRoomSceneResendRef = useRef<() => void>(() => {})
   const [roomMedia, setRoomMedia] = useState<TalkShowRoomSnapshot | undefined>()
   const onRoomMediaSnapshot = useCallback((snapshot: TalkShowRoomSnapshot) => {
     setRoomMedia((previous) =>
@@ -7657,8 +7670,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // twice a second); it clears when chat empties, both switches go off or the
   // livestream ends. Nothing loads until the box is first switched on.
   const chatOverlayLayout = overlayLayout.chat
+  const graphicsOutputFacts = outputSessionFacts(recording, cloudStatus, wsStatus === 'connected')
   const chatOverlayOn =
-    recordingLive && (chatOverlayLayout.showOnStream || chatOverlayLayout.showInRecording)
+    graphicsOutputFacts.freshness === 'fresh' &&
+    (graphicsOutputFacts.live || graphicsOutputFacts.recording) &&
+    (chatOverlayLayout.showOnStream || chatOverlayLayout.showInRecording)
   const chatOverlayDriverRef = useRef<{
     client: BackendClient
     driver: Promise<ChatOverlayDriver | null>
@@ -9875,6 +9891,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           workingBackgroundRef.current,
           activeSavedSceneIdRef.current
         )
+        // Plan 249 S12: a Freeform drag, nudge or reset reaches the room scene.
+        captureConfigRef.current = { ...captureConfigRef.current, layout }
+        requestRoomSceneResendRef.current()
         return
       }
 
@@ -9893,12 +9912,15 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         }
       }
       patchLayout(transformPatch)
+      const layout = { ...captureConfigRef.current.layout, ...transformPatch }
       persistWorkingVisual(
-        { ...captureConfigRef.current.layout, ...transformPatch },
+        layout,
         captureConfigRef.current.sources,
         workingBackgroundRef.current,
         activeSavedSceneIdRef.current
       )
+      captureConfigRef.current = { ...captureConfigRef.current, layout }
+      requestRoomSceneResendRef.current()
     },
     [patchLayout, persistWorkingVisual]
   )
@@ -10450,6 +10472,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           workingBackgroundRef.current,
           activeSavedSceneIdRef.current
         )
+        // Plan 249 S12: Show and Hide reach the room scene.
+        requestRoomSceneResendRef.current()
       } catch (error) {
         if (
           clientRef.current === client &&
@@ -11288,14 +11312,256 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     return committed
   }, [requestLayoutTransaction])
 
+  /** The layout a preset choice commits; the room route resolves the same one. */
+  const presetTransactionLayout = useCallback(
+    (current: CaptureConfig, patch: Partial<LayoutSettings>): LayoutSettings => {
+      const nextPreset = patch.layoutPreset ?? current.layout.layoutPreset
+      // Choosing a preset scene EXITS freeform (unless the patch says
+      // otherwise): the preset's fixed arrangement is what the user asked
+      // for, and stale overrides must not leak into a later freeform entry.
+      const leavesArrangement =
+        patch.layoutPreset !== undefined && patch.arrangementMode === undefined
+      return {
+        ...current.layout,
+        ...(patch.layoutPreset !== undefined && workingOriginRef.current === 'saved'
+          ? current.layoutFramingMemory.layouts[nextPreset]
+          : recalledLayoutFraming(
+              current.layoutFramingMemory,
+              current.layout.layoutPreset,
+              nextPreset
+            )),
+        ...(leavesArrangement
+          ? { arrangementMode: 'preset' as const, sourceTransformOverrides: {} }
+          : {}),
+        ...patch,
+        cameraTransformMode: 'preset',
+        cameraTransform: null
+      }
+    },
+    []
+  )
+  const talkShowRoomPhaseForScenes = cloudStatus?.room?.phase ?? 'closed'
+  // Plan 249 S12: while a room holds the camera, scene commands (click,
+  // hotkey, remote, agent, Follow) go to the room program. Per room and off
+  // by default (production qualification is not run); the room's own
+  // layouts stay until the host turns scenes on.
+  const roomScenesEnabledRef = useRef(false)
+  /** The guest roles of the scene on the room program, for a re-send after an edit. */
+  const roomSceneExtensionRef = useRef<unknown>(undefined)
+  const roomScenesShowRef = useRef<string | null>(null)
+  const roomScenesOn = useCallback((): boolean => {
+    const show = cloudStatusRef.current?.show?.id ?? null
+    if (roomScenesShowRef.current !== show) {
+      roomScenesShowRef.current = show
+      roomScenesEnabledRef.current = false
+    }
+    return roomScenesEnabledRef.current
+  }, [])
+  const setRoomScenesEnabled = useCallback((enabled: boolean) => {
+    roomScenesShowRef.current = cloudStatusRef.current?.show?.id ?? null
+    roomScenesEnabledRef.current = enabled
+  }, [])
+  /** One send through the scene adapter, with the room as it is now. */
+  const sendSceneToRoom = useCallback(
+    async (
+      target: Omit<RoomSceneTarget, 'video'>,
+      animate: boolean,
+      current?: () => boolean
+    ): Promise<RoomSceneResult> => {
+      const { applySceneToRoom } = await import('@/lib/cloud-scene-adapter')
+      return applySceneToRoom(
+        { ...target, video: captureConfigRef.current.video },
+        {
+          resolve: (params) => {
+            if (!clientRef.current) throw offlineError()
+            return clientRef.current.requestTyped('cloud.scene.resolve', params)
+          },
+          room: () => {
+            const controls = roomControlsRef.current
+            const status = cloudStatusRef.current
+            if (!controls || !status?.room || !status.show) return null
+            const snapshot = controls.snapshot
+            return {
+              identity:
+                snapshot.state === 'connected' && snapshot.identity === `host:${status.show.id}`
+                  ? snapshot.identity
+                  : null,
+              cameraPublished: Boolean(snapshot.local.camera) && !snapshot.local.cameraOff,
+              cameraOff: snapshot.local.cameraOff,
+              screenPublished: Boolean(snapshot.local.screen),
+              stage: status.room.stage,
+              commitScene: (content) => controls.commitScene(content)
+            }
+          },
+          setStage: async (stage) => {
+            if (!clientRef.current) throw offlineError()
+            commitCloudStatus(
+              await clientRef.current.requestTyped('cloud.stage.set', {
+                ...stage,
+                hostShape:
+                  stage.hostShape ??
+                  (captureConfigRef.current.layout.cameraShape === 'circle' ? 'circle' : 'rounded')
+              })
+            )
+          },
+          animate,
+          ...(current ? { current } : {})
+        }
+      )
+    },
+    [commitCloudStatus]
+  )
+  /**
+   * The native working scene follows the scene put on the room program: an
+   * idle commit (no capture start, no camera wait) and the same working-state
+   * update a native switch makes. So the Scene editor's drags, nudges, resets
+   * and Show/Hide act on the scene viewers see, and the Preview shows it
+   * when the room closes.
+   */
+  const alignNativeToRoomScene = useCallback(
+    async (target: Omit<RoomSceneTarget, 'video'>, savedSceneId: string | null) => {
+      const client = clientRef.current
+      if (!client) return
+      const current = captureConfigRef.current
+      const coupling = verticalOrientationVideoPatch(
+        current.layout.layoutPreset,
+        target.layout.layoutPreset,
+        current.video,
+        current.verticalRestoreVideo
+      )
+      const sources = withoutSceneApp(target.sources)
+      try {
+        const status = await client.request<SceneCommitStatus>('scene.load_from_capture_config', {
+          sources,
+          layout: target.layout,
+          video: coupling?.video ?? current.video,
+          ...(target.background ? { background: target.background } : {})
+        })
+        applyCommittedScene(status)
+        applyLayoutTransactionState({
+          sceneRevision: status.sceneRevision,
+          scene: status.scene,
+          layout: target.layout,
+          compositorStatus: status.compositorStatus,
+          origin: savedSceneId ? 'saved' : 'builtin',
+          sources,
+          savedSceneId,
+          sceneSwitch: true,
+          ...(coupling
+            ? {
+                captureConfigPatch: {
+                  video: coupling.video,
+                  verticalRestoreVideo: coupling.verticalRestoreVideo
+                }
+              }
+            : {})
+        })
+      } catch (error) {
+        reportError(error, { action: 'switch', object: 'the scene' })
+      }
+    },
+    [applyCommittedScene, applyLayoutTransactionState, reportError]
+  )
+  /** A scene is on this room's program and scenes are on: edits go to the room. */
+  const roomSceneLive = useCallback(
+    (): boolean =>
+      roomHoldsTheCamera(cloudStatusRef.current?.room) &&
+      roomScenesOn() &&
+      Boolean(roomControlsRef.current?.sceneContent),
+    [roomScenesOn]
+  )
+  // Plan 249 S12: confirmed edits (drag, nudge, reset, Show/Hide, a look
+  // change, new guest roles) reach the room scene, coalesced and fenced.
+  const roomSceneEditSyncRef = useRef<{ request(): void; cancel(): void } | null>(null)
+  const roomSceneEditDepsRef = useRef({ live: roomSceneLive, send: sendSceneToRoom })
+  roomSceneEditDepsRef.current = { live: roomSceneLive, send: sendSceneToRoom }
+  roomSceneEditSyncRef.current ??= createRoomSceneEditSync({
+    live: () => roomSceneEditDepsRef.current.live(),
+    room: () => roomControlsRef.current,
+    target: () => ({
+      layout: captureConfigRef.current.layout,
+      sources: captureConfigRef.current.sources,
+      background: workingBackgroundRef.current ?? null,
+      extension: roomSceneExtensionRef.current
+    }),
+    // An edit lands at once, as a native drag does.
+    send: (target, current) => roomSceneEditDepsRef.current.send(target, false, current),
+    failed: (result) =>
+      result.ok || result.commit?.state === 'superseded' || result.commit?.state === 'waiting'
+        ? null
+        : (result.message ?? "The scene change couldn't be sent to the room."),
+    warn: (message) => toast.warning(message, { id: 'room-scene' }),
+    now: () => performance.now()
+  })
+  requestRoomSceneResendRef.current = () => roomSceneEditSyncRef.current?.request()
+  const applySceneInRoom = useCallback(
+    async (
+      target: Omit<RoomSceneTarget, 'video'>,
+      retry: () => void,
+      savedSceneId: string | null = null
+    ): Promise<{ ok: boolean; message?: string }> => {
+      if (!roomScenesOn()) {
+        const message = 'Scenes are off in this room. The room layouts stay on the program.'
+        toast.warning(message, {
+          id: 'room-scenes',
+          action: {
+            label: 'Use scenes',
+            onClick: () => {
+              setRoomScenesEnabled(true)
+              retry()
+            }
+          }
+        })
+        return { ok: false, message }
+      }
+      // A scene chosen now outranks any edit still waiting to be sent.
+      roomSceneEditSyncRef.current?.cancel()
+      roomSceneExtensionRef.current = target.extension
+      const result = await sendSceneToRoom(target, settingsRef.current.animateSceneChanges === true)
+      if (result.message)
+        (result.ok ? toast.message : toast.warning)(result.message, { id: 'room-scene' })
+      const state = result.commit?.state
+      if (state && state !== 'failed' && state !== 'superseded')
+        await alignNativeToRoomScene(target, savedSceneId)
+      return { ok: result.ok, ...(result.message ? { message: result.message } : {}) }
+    },
+    [alignNativeToRoomScene, roomScenesOn, sendSceneToRoom, setRoomScenesEnabled]
+  )
+  useEffect(() => {
+    // A room closing or another show drops whatever edit was waiting.
+    if (talkShowRoomPhaseForScenes === 'closed') roomSceneEditSyncRef.current?.cancel()
+  }, [talkShowRoomPhaseForScenes, cloudStatus?.show?.id])
+  useEffect(() => {
+    // New guest roles for the saved scene on the room program (⋯ → Guests in
+    // the room…) reach the room like any other edit.
+    const active = sceneLibrary.scenes.find((entry) => entry.id === activeSavedSceneId)
+    if (!active || !roomSceneLive()) return
+    if (
+      JSON.stringify(active.cloud ?? null) === JSON.stringify(roomSceneExtensionRef.current ?? null)
+    )
+      return
+    roomSceneExtensionRef.current = active.cloud
+    requestRoomSceneResendRef.current()
+  }, [activeSavedSceneId, roomSceneLive, sceneLibrary.scenes])
+
   const requestCameraPresetTransaction = useCallback(
     (
       patch: Partial<LayoutSettings>,
       options?: { backgroundOverride?: Scene['background'] | null; keepScene?: boolean }
-    ) => {
+    ): Promise<boolean> => {
       if (roomHoldsTheCamera(cloudStatusRef.current?.room) && patch.layoutPreset !== undefined) {
-        toast.warning('Use the Show stage layouts while the room is open.')
-        return Promise.resolve(false)
+        const current = captureConfigRef.current
+        return applySceneInRoom(
+          {
+            layout: presetTransactionLayout(current, patch),
+            sources: current.sources,
+            background:
+              options?.backgroundOverride === undefined
+                ? (workingBackgroundRef.current ?? null)
+                : options.backgroundOverride
+          },
+          () => void requestCameraPresetTransactionRef.current(patch, options)
+        ).then((result) => result.ok)
       }
       const current = captureConfigRef.current
       const nextPreset = patch.layoutPreset ?? current.layout.layoutPreset
@@ -11344,39 +11610,29 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       const leavesArrangement =
         patch.layoutPreset !== undefined && patch.arrangementMode === undefined
       if (leavesArrangement) noteLayoutLeavingFreeform(current.layout)
-      const arrangementPatch = leavesArrangement
-        ? { arrangementMode: 'preset' as const, sourceTransformOverrides: {} }
-        : {}
 
-      return requestLayoutTransaction(
-        {
-          ...current.layout,
-          ...(patch.layoutPreset !== undefined && workingOriginRef.current === 'saved'
-            ? current.layoutFramingMemory.layouts[nextPreset]
-            : recalledLayoutFraming(
-                current.layoutFramingMemory,
-                current.layout.layoutPreset,
-                nextPreset
-              )),
-          ...arrangementPatch,
-          ...patch,
-          cameraTransformMode: 'preset',
-          cameraTransform: null
-        },
-        {
-          videoOverride,
-          captureConfigPatch,
-          ...(patch.layoutPreset !== undefined && !options?.keepScene
-            ? { savedSceneId: null, origin: 'builtin' as const }
-            : {}),
-          ...(options && 'backgroundOverride' in options
-            ? { backgroundOverride: options.backgroundOverride }
-            : {})
-        }
-      )
+      // Plan 249 S12: a look edit (shape, corner, size, mirror, framing)
+      // made while a scene is on the room program goes to the room too, once
+      // the native commit landed, coalesced with other edits.
+      const resendRoomScene = (committed: boolean): boolean => {
+        if (committed) requestRoomSceneResendRef.current()
+        return committed
+      }
+      return requestLayoutTransaction(presetTransactionLayout(current, patch), {
+        videoOverride,
+        captureConfigPatch,
+        ...(patch.layoutPreset !== undefined && !options?.keepScene
+          ? { savedSceneId: null, origin: 'builtin' as const }
+          : {}),
+        ...(options && 'backgroundOverride' in options
+          ? { backgroundOverride: options.backgroundOverride }
+          : {})
+      }).then(resendRoomScene)
     },
-    [requestLayoutTransaction]
+    [applySceneInRoom, presetTransactionLayout, requestLayoutTransaction]
   )
+  const requestCameraPresetTransactionRef = useRef(requestCameraPresetTransaction)
+  requestCameraPresetTransactionRef.current = requestCameraPresetTransaction
 
   const applyBackgroundSlot = useCallback(
     (slotId: string | null): void => {
@@ -11532,11 +11788,27 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       repaired?: SceneVisual,
       options?: SavedSceneApplyOptions
     ): Promise<SavedSceneApplyResult> => {
-      if (roomHoldsTheCamera(cloudStatusRef.current?.room))
-        return {
-          ok: false,
-          message: 'Saved scenes are not applied to the room yet. Use the Show stage layouts.'
-        }
+      if (roomHoldsTheCamera(cloudStatusRef.current?.room)) {
+        // Plan 249 S12: the room program takes the scene; native capture,
+        // Follow's window resolution and the scene's microphone stay as they
+        // are (the room publishes its own camera, screen and microphone).
+        const saved = sceneLibrary.scenes.find((entry) => entry.id === id)
+        if (!saved) return { ok: false }
+        if (options?.origin !== 'follow')
+          for (const listener of manualSceneApplyListenersRef.current) listener(id)
+        const visual = normalizeSceneVisual(repaired ?? saved.visual)
+        const result = await applySceneInRoom(
+          {
+            layout: visual.layout,
+            sources: { ...captureConfigRef.current.sources, ...visual.sources },
+            background: resolveSavedBackground(visual.background),
+            extension: saved.cloud
+          },
+          () => void applySavedSceneResultRef.current(id, repaired, options),
+          id
+        )
+        return result.ok ? { ok: true } : { ok: false, message: result.message }
+      }
       const saved = sceneLibrary.scenes.find((entry) => entry.id === id)
       if (!saved) return { ok: false }
       if (options?.origin !== 'follow')
@@ -11738,9 +12010,12 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       requestLayoutTransaction,
       setSystemAudioEnabled,
       sourceSelectionController,
-      reportError
+      reportError,
+      applySceneInRoom
     ]
   )
+  const applySavedSceneResultRef = useRef(applySavedSceneResult)
+  applySavedSceneResultRef.current = applySavedSceneResult
 
   const applySavedScene = useCallback(
     async (id: string, repaired?: SceneVisual): Promise<boolean> =>
@@ -11889,10 +12164,20 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         const controls = roomControlsRef.current
         if (!controls || controls.snapshot.identity !== `host:${cloudStatusRef.current?.show?.id}`)
           throw new Error('The room is not connected.')
-        if (sourceKind !== 'camera')
-          throw new Error(
-            'Use the room screen-share control; close the room to change its microphone.'
+        if (sourceKind === 'microphone') {
+          const microphone = deviceListRef.current.devices.find(
+            (d) => d.kind === 'microphone' && d.id === sources.microphoneId
           )
+          if (sources.microphoneId && !microphone)
+            throw new Error('The selected microphone is unavailable.')
+          await controls.setMicrophoneSelection(microphone?.id ?? null, microphone?.name ?? null)
+          setCaptureConfig((current) => ({
+            ...current,
+            sources: mergeSourceKind(current.sources, sources, 'microphone')
+          }))
+          return
+        }
+        if (sourceKind !== 'camera') throw new Error('Use the room screen-share control.')
         const camera = deviceListRef.current.devices.find(
           (d) => d.kind === 'camera' && d.id === sources.cameraId
         )
@@ -14106,11 +14391,16 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const captionsStopAttemptedRef = useRef(false)
   const captionsAttemptClientRef = useRef<BackendClient | null>(null)
   const captionsAttemptScopeRef = useRef('')
-  const captionsCaptureActive = ['recording', 'streaming'].includes(recording.state)
+  const captionsCaptureActive =
+    talkShowRoomOpen || ['recording', 'streaming'].includes(recording.state)
   const captionsAttemptScope = [
     captureConfig.captions.enabled ? 'enabled' : 'disabled',
     suppressCaptionsForSession ? 'suppressed' : 'normal',
-    captionsCaptureActive ? `capture:${recording.sessionId ?? 'unknown'}` : 'idle',
+    talkShowRoomOpen
+      ? `room:${cloudStatus?.show?.id ?? 'unknown'}`
+      : captionsCaptureActive
+        ? `capture:${recording.sessionId ?? 'unknown'}`
+        : 'idle',
     captureConfig.captions.language,
     wsStatus
   ].join(':')
@@ -14135,6 +14425,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     })
     if (action === 'start') {
       if (
+        !talkShowRoomOpen &&
         captionRuntimeStartBlocked({
           captureActive: captionsCaptureActive,
           outputReadiness: captionOutputReadiness
@@ -14175,6 +14466,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     }
   }, [
     captionsAttemptScope,
+    talkShowRoomOpen,
     captionsCaptureActive,
     captionsCommandPending,
     captionOutputReadiness,
@@ -14235,6 +14527,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // Burn-in driver: a serial latest-wins scheduler replaces the old boolean
   // busy gate, which could permanently drop a final/style update that arrived
   // during rasterization. One render may run and only the newest waits behind it.
+  const captionCueExpiryRef = useRef(new WeakMap<CaptionsUpdate, number>())
   const captionOverlayPushedKey = useRef<string | null>(null)
   const captionOverlayEpochRef = useRef(0)
   const captionOverlayWorkActiveRef = useRef(false)
@@ -14261,13 +14554,15 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         maxBarWidthPx: output.rect ? Math.floor(output.rect.w * output.canvasWidth) : undefined
       })
       if (!pngBase64 || work.epoch !== captionOverlayEpochRef.current) return
-      await work.client.request('captions.overlay.set', {
+      const frame = {
         pngBase64,
         position: work.position,
         ...(output.rect ? { rect: output.rect } : {}),
         target: output.target,
         styleRevision: work.styleRevision
-      })
+      }
+      if (work.room) await work.client.requestTyped('cloud.speech.overlay', { ...work.room, frame })
+      else await work.client.request('captions.overlay.set', frame)
       pushed = true
     }
     if (pushed && work.epoch === captionOverlayEpochRef.current) {
@@ -14320,7 +14615,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // captionLines.at(-1) from the previous video at each session start).
   const captionSessionWasActiveRef = useRef(false)
   useEffect(() => {
-    if (isSessionActive && !captionSessionWasActiveRef.current) {
+    if (captionsCaptureActive && !captionSessionWasActiveRef.current) {
       const lines = captionLinesRef.current
       captionSessionFloorRef.current = captionSessionFloor(lines) ?? captionSessionFloorRef.current
       captionOverlayEpochRef.current += 1
@@ -14332,8 +14627,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         setCaptionLines([])
       }
     }
-    captionSessionWasActiveRef.current = isSessionActive
-  }, [isSessionActive])
+    captionSessionWasActiveRef.current = captionsCaptureActive
+  }, [captionsCaptureActive])
 
   useEffect(() => {
     if (!client) {
@@ -14342,7 +14637,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     const sessionConfig = captureConfigForIntent(
       captureConfig,
       remoteOutputIntent({
-        sessionActive: isSessionActive,
+        sessionActive: captionsCaptureActive,
         startIntent: activeStartIntent,
         status: recording,
         config: captureConfig,
@@ -14350,19 +14645,40 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       })
     )
     const latest = captionLines.at(-1)
+    if (latest && !captionCueExpiryRef.current.has(latest))
+      captionCueExpiryRef.current.set(
+        latest,
+        Date.now() +
+          (latest.kind === 'partial' ? 6000 : Math.min(10000, captionDwellMs(latest.text)))
+      )
     const streamVideo = auxiliaryStreamOutputVideoSettings(
       sessionConfig.video,
       sessionConfig.streamEnabled ? sessionConfig.streaming : undefined
     )
-    const outputs = captionOverlayTargetPlan({
-      burnTarget: captureConfig.captions.burnTarget,
-      recordEnabled: sessionConfig.recordEnabled,
-      streamEnabled: sessionConfig.streamEnabled,
-      recordingVideo: sessionConfig.video,
-      streamVideo,
-      verticalLeg: simulcastLegLiveRequest(sessionConfig)?.video,
-      captionsLayout: overlayLayout.captions
-    })
+    const outputs = talkShowRoomOpen
+      ? [
+          {
+            target: 'primary' as const,
+            canvasWidth: 1920,
+            canvasHeight: 1080,
+            rect: overlayLayout.captions.horizontal
+          },
+          {
+            target: 'auxiliary' as const,
+            canvasWidth: 1080,
+            canvasHeight: 1920,
+            rect: overlayLayout.captions.vertical
+          }
+        ]
+      : captionOverlayTargetPlan({
+          burnTarget: captureConfig.captions.burnTarget,
+          recordEnabled: sessionConfig.recordEnabled,
+          streamEnabled: sessionConfig.streamEnabled,
+          recordingVideo: sessionConfig.video,
+          streamVideo,
+          verticalLeg: simulcastLegLiveRequest(sessionConfig)?.video,
+          captionsLayout: overlayLayout.captions
+        })
     const candidateKey = latest
       ? outputs
           .map(
@@ -14379,12 +14695,12 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           )
           .join('|')
       : undefined
-    const burnIn = outputs.length > 0
+    const burnIn = outputs.length > 0 && captureConfig.captions.burnTarget !== 'off'
     const captionsRunning = captionsStatusIsActive(captionsStatus)
     const decision = decideOverlayPush({
       burnIn,
       captionsRunning,
-      sessionActive: isSessionActive,
+      sessionActive: captionsCaptureActive,
       latest,
       floor: captionSessionFloorRef.current,
       pushedKey: captionOverlayPushedKey.current,
@@ -14393,7 +14709,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     })
     if (
       decision.action === 'clear' ||
-      ((!burnIn || !captionsRunning || !isSessionActive) && captionOverlayWorkActiveRef.current)
+      ((!burnIn || !captionsRunning || !captionsCaptureActive) &&
+        captionOverlayWorkActiveRef.current)
     ) {
       captionOverlayEpochRef.current += 1
       captionOverlaySchedulerRef.current?.clearPending()
@@ -14414,6 +14731,20 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       client,
       epoch: captionOverlayEpochRef.current,
       key: decision.key,
+      ...(talkShowRoomOpen
+        ? {
+            room: {
+              sessionClientId: latest.sessionClientId,
+              expiresAt: captionCueExpiryRef.current.get(latest)!,
+              stream:
+                captureConfig.captions.burnTarget === 'stream' ||
+                captureConfig.captions.burnTarget === 'both',
+              recording:
+                captureConfig.captions.burnTarget === 'recording' ||
+                captureConfig.captions.burnTarget === 'both'
+            }
+          }
+        : {}),
       text: latest.text,
       outputs: outputs.map((output) => ({
         target: output.target,
@@ -14430,9 +14761,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     client,
+    talkShowRoomOpen,
     captionLines,
     captionsStatus,
-    isSessionActive,
+    captionsCaptureActive,
     activeStartIntent,
     recording.state,
     recording.streamUrl,
@@ -14452,14 +14784,17 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     if (
       !client ||
       !latestCaption ||
-      !isSessionActive ||
+      !captionsCaptureActive ||
       captureConfig.captions.burnTarget === 'off'
     ) {
       return
     }
     const identity = captionLineIdentity(latestCaption)
     captionOverlayExpiredLineRef.current = null
-    const dwellMs = latestCaption.kind === 'partial' ? 6000 : captionDwellMs(latestCaption.text)
+    const dwellMs = Math.max(
+      0,
+      (captionCueExpiryRef.current.get(latestCaption) ?? Date.now()) - Date.now()
+    )
     const timer = window.setTimeout(() => {
       const current = captionLinesRef.current.at(-1)
       if (!current || captionLineIdentity(current) !== identity) return
@@ -14475,7 +14810,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         .catch(() => {})
     }, dwellMs)
     return () => window.clearTimeout(timer)
-  }, [client, captureConfig.captions, isSessionActive, latestCaption])
+  }, [client, captureConfig.captions, captionsCaptureActive, latestCaption])
 
   const renameScreen = useCallback(
     async (screenId: string, name: string) => {
@@ -17303,6 +17638,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       controlsRef: roomControlsRef,
       onMediaSnapshot: onRoomMediaSnapshot,
       microphoneMuted: captureConfig.audio.microphoneMuted,
+      microphoneAudio: captureConfig.audio,
       cameraOff: captureConfig.sources.cameraOff === true,
       cameraSettings: talkShowCameraSettings,
       avatar: talkShowAvatar,
@@ -17323,7 +17659,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       deviceList.devices,
       smokeTalkShowRoomOpen,
       onRoomMediaSnapshot,
-      captureConfig.audio.microphoneMuted,
+      captureConfig.audio,
       captureConfig.sources.cameraOff,
       talkShowCameraId,
       talkShowCameraSettings,
@@ -20102,23 +20438,112 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         const fixtures: Device[] = [
           { id: 'parity-camera', name: 'Parity camera', kind: 'camera', status: 'available' },
           {
-            id: 'parity-microphone',
+            id: roomNativeMicrophoneEnabled()
+              ? 'microphone:coreaudio:4294967295'
+              : 'parity-microphone',
             name: 'Parity microphone',
             kind: 'microphone',
             status: 'available'
           }
         ]
+        if (roomNativeMicrophoneEnabled())
+          fixtures.push({
+            id: 'microphone:coreaudio:4294967294',
+            name: 'Alternate parity microphone',
+            kind: 'microphone',
+            status: 'available'
+          })
         setDeviceList({ devices: fixtures, warnings: [] })
         return fixtures
       },
+      roomNativeMicrophone: (enabled?: boolean) => {
+        if (enabled !== undefined) setRoomNativeMicrophoneEnabled(enabled)
+        return {
+          ...roomMicrophoneState.getSnapshot(),
+          owners: [...roomMicrophoneResources(), ...roomPcmTestResources().owners]
+        }
+      },
+      roomMicrophoneDisconnect: (mode?: 'disconnect' | 'starve' | 'resume') =>
+        roomControlsRef.current?.disconnectMicrophoneFixture(mode),
+      roomMicrophoneSelect: (id: string | null, name: string | null) =>
+        switchSourceDeviceLive('microphone', {
+          ...captureConfigRef.current.sources,
+          microphoneId: id ?? undefined,
+          microphoneName: name ?? undefined
+        }),
       roomPcmTest: (enabled?: boolean) => {
         if (enabled !== undefined) setRoomPcmTestEnabled(enabled)
         return roomPcmTestResources()
+      },
+      roomHighlight: async (milestone = false) => {
+        const message = liveChatSnapshotRef.current.messages.find(
+          (m) => m.eventType === 'message' && !m.isDeleted
+        )
+        if (!message) throw new Error('No eligible fixture message')
+        const state = await applyCommentHighlight(
+          message,
+          message.sessionId,
+          ++commentHighlightIntentRef.current,
+          {
+            alwaysSet: true,
+            ...(milestone
+              ? {
+                  milestone: {
+                    messageId: message.id,
+                    name: message.authorName,
+                    platform: message.platform,
+                    label: '10th stream'
+                  }
+                }
+              : {})
+          }
+        )
+        if (state) publishCommentHighlightState(state)
+        return state
+      },
+      roomGraphics: (enabled?: boolean) => {
+        if (enabled !== undefined) roomControlsRef.current?.setGraphicsEnabled(enabled)
+        return roomControlsRef.current?.snapshot.graphics ?? null
       },
       roomAvatar: (enabled?: boolean) => {
         if (enabled !== undefined) roomControlsRef.current?.setAvatarEnabled(enabled)
         return roomControlsRef.current?.snapshot.avatar ?? null
       },
+      roomAvatarMotion: () => roomControlsRef.current?.avatarMotionProbe?.() ?? null,
+      roomAvatarGuests: (enabled?: boolean) => {
+        if (enabled !== undefined) roomControlsRef.current?.setAvatarGuests(enabled)
+        return roomControlsRef.current?.snapshot.avatar?.guests ?? null
+      },
+      // Plan 249 S12 acquisition: the per-room opt-in, the scene status, and
+      // a preset by the same route as the gallery and hotkeys.
+      roomScenes: (enabled?: boolean) => {
+        if (enabled !== undefined) setRoomScenesEnabled(enabled)
+        return { enabled: roomScenesOn(), status: roomControlsRef.current?.snapshot.scene ?? null }
+      },
+      roomScenePreset: (layoutPreset: LayoutPreset) =>
+        requestCameraPresetTransactionRef.current({ layoutPreset }),
+      roomSceneContent: () => roomControlsRef.current?.sceneContent ?? null,
+      // A whole saved scene (freeform boxes, guest roles) into the library,
+      // then applied by id like a click; clear returns the room layouts.
+      roomSceneSave: (scene: SavedScene) => value.sceneLibraryActions.insert([scene]),
+      roomSceneClear: () => roomControlsRef.current?.commitScene(null),
+      // The Scene editor's own actions (a Freeform drag, Show/Hide) and the
+      // ⋯ → Guests in the room… save, while a scene is on the room program.
+      roomSceneDrag: (sourceId: string, patch: SceneTransformPatch) =>
+        value.setSceneSourceTransform(sourceId, patch),
+      roomSceneVisible: (sourceId: string, visible: boolean) =>
+        value.setSceneSourceVisible(sourceId, visible),
+      roomSceneGuests: async (sceneId: string, placement: 'beside' | 'below' | 'over') => {
+        const { sceneWithGuestRoles } = await import('@/lib/scene-guest-roles')
+        const saved = value.savedScenes.find((entry) => entry.id === sceneId)
+        return saved
+          ? value.sceneLibraryActions.replace(
+              sceneWithGuestRoles(saved, placement, new Date().toISOString())
+            )
+          : false
+      },
+      roomSceneAnimate: (on: boolean) =>
+        setSettings((current) => ({ ...current, animateSceneChanges: on })),
       roomSounds: (enabled?: boolean) => {
         if (enabled !== undefined) soundboard.setRoomAuxEnabled(enabled)
         return soundboard.getSnapshot().roomAux ?? null

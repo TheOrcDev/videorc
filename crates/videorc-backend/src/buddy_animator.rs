@@ -208,6 +208,75 @@ pub fn trigger_reaction_chain(
     chain
 }
 
+/// Plan 249 S5: the public projection of an animator event, for the cloud
+/// program's twin of this animator (`cohost.pet.animator`, mirrored by
+/// `apps/desktop/src/shared/buddy-animator.ts`). Moods, lengths, times and
+/// the reaction chain already resolved from the trigger and the persona:
+/// never the bubble's words, a prompt or the persona's reaction table.
+pub fn public_event(
+    event: &BuddyAnimatorEvent,
+    reactions: &BTreeMap<BuddyTrigger, String>,
+) -> serde_json::Value {
+    use serde_json::json;
+    let seconds = |value: f64, max: f64| {
+        if value.is_finite() {
+            value.clamp(0.0, max)
+        } else {
+            0.0
+        }
+    };
+    let chain = |ids: Vec<String>| {
+        ids.into_iter()
+            .filter(|id| crate::buddy_pet::reaction_id_ok(id))
+            .take(PUBLIC_REACTION_CHAIN_MAX)
+            .collect::<Vec<_>>()
+    };
+    match event {
+        BuddyAnimatorEvent::UtteranceStart {
+            state,
+            chars,
+            bubble_seconds,
+        } => json!({
+            "kind": "utterance",
+            "mood": CohostAvatarState::from(*state).as_str(),
+            "chars": (*chars).min(PUBLIC_UTTERANCE_CHARS_MAX),
+            "bubbleSeconds": seconds(*bubble_seconds, 120.0),
+        }),
+        BuddyAnimatorEvent::UtteranceEnd => json!({ "kind": "utterance-end" }),
+        BuddyAnimatorEvent::ThinkStart => json!({ "kind": "think" }),
+        BuddyAnimatorEvent::ThinkSettle => json!({ "kind": "think-settle" }),
+        BuddyAnimatorEvent::Trigger { trigger, reaction } => json!({
+            "kind": "reaction",
+            "chain": chain(trigger_reaction_chain(*trigger, reaction.as_deref(), reactions)),
+            "activity": *trigger != BuddyTrigger::DestinationFailed,
+        }),
+        BuddyAnimatorEvent::React { reaction } => json!({
+            "kind": "reaction",
+            "chain": chain(vec![reaction.clone()]),
+            "activity": true,
+        }),
+        BuddyAnimatorEvent::HighlightLive { ttl_seconds } => json!({
+            "kind": "highlight",
+            "ttlSeconds": seconds(*ttl_seconds, 600.0),
+        }),
+        BuddyAnimatorEvent::HighlightIdle => json!({ "kind": "highlight-idle" }),
+        BuddyAnimatorEvent::ChatSeen => json!({ "kind": "chat" }),
+        BuddyAnimatorEvent::Settings(settings) => json!({
+            "kind": "settings",
+            "settings": {
+                "intensity": seconds(settings.motion.intensity, 1.0),
+                "sleepAfterSeconds": settings.motion.sleep_after_seconds.min(1800),
+                "breathing": settings.motion.breathing,
+            },
+        }),
+    }
+}
+
+/// The longest public reaction chain (the cloud parser's bound).
+pub const PUBLIC_REACTION_CHAIN_MAX: usize = 8;
+/// An utterance's length is only a talk duration; past this it changes nothing.
+pub const PUBLIC_UTTERANCE_CHARS_MAX: usize = 4000;
+
 // --- The random source -----------------------------------------------------------------
 
 /// SplitMix64: small, seedable, good enough for glance and blink timing.

@@ -34,14 +34,27 @@ describe('S4 public presentation contract', () => {
     expect(
       parseAvatarCapability({ version: 1, output: 'stream', orientation: 'h', private: 'PRIVATE' })
     ).toEqual({ version: 1, output: 'stream', orientation: 'h' })
+    // Plan 249 S6 (D4): a guest only on the guest lane (stream, landscape).
     expect(
       parseConsumerCapability({
         v: 2,
         identity: 'g_test',
         participantSid: 'PA_guest',
         graphics: { version: 1, output: 'stream', orientation: 'h' }
-      })
-    ).toBeNull()
+      })?.graphics
+    ).toEqual({ version: 1, output: 'stream', orientation: 'h' })
+    for (const lane of [
+      { output: 'recording', orientation: 'h' },
+      { output: 'stream', orientation: 'v' }
+    ])
+      expect(
+        parseConsumerCapability({
+          v: 2,
+          identity: 'g_test',
+          participantSid: 'PA_guest',
+          graphics: { version: 1, ...lane }
+        })
+      ).toBeNull()
   })
   it('rejects wrong owner/show/output, unknown versions, unbounded assets and malformed timestamps', () => {
     for (const patch of [

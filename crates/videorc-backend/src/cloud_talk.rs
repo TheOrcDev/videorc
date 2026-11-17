@@ -255,6 +255,13 @@ pub struct RunnerRoomState {
 
 /// `state.room.shown` and `CloudRoomStatus.shown` (review M2): the people
 /// the program's layout drew, in stage order, and whose screen it showed.
+///
+/// Plan 249 S6, all optional and absent from a runner or an older program
+/// page: `layout` drawn, `stage_key` of the stage the page applied, and `at`,
+/// when its report arrived. The renderer compares the key with the stage it
+/// sent; the backend passes them through and never claims an applied stage.
+/// Plain strings, so a layout a newer page adds can never fail the status
+/// (the renderer drops what it does not know).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct CloudRoomShown {
@@ -262,6 +269,12 @@ pub struct CloudRoomShown {
     pub on_stage: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub screen: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layout: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stage_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]

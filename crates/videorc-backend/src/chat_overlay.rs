@@ -90,6 +90,14 @@ pub async fn set_chat_overlay(
     if params.png_base64.trim().is_empty() {
         return Err(ChatOverlayError::InvalidParams);
     }
+    let generation = {
+        let mut generation = state
+            .chat_overlay_generation
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        *generation = generation.wrapping_add(1);
+        *generation
+    };
     let png_base64 = params.png_base64;
     let vertical_png_base64 = params
         .vertical_png_base64
@@ -110,6 +118,13 @@ pub async fn set_chat_overlay(
         ChatOverlayError::InvalidImage(format!("overlay preparation task stopped: {error}"))
     })?
     .map_err(|error| ChatOverlayError::InvalidImage(error.to_string()))?;
+    let current = state
+        .chat_overlay_generation
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    if *current != generation {
+        return Err(ChatOverlayError::InvalidParams);
+    }
     Ok(install_prepared_chat_overlay(
         state,
         prepared,
@@ -143,6 +158,7 @@ fn install_prepared_chat_overlay(
             false
         }
     };
+    state.emit_event("cloud.graphics.changed", serde_json::json!({"kind":"chat"}));
     ChatOverlayInfo {
         active: true,
         width: info.width,
@@ -155,8 +171,17 @@ fn install_prepared_chat_overlay(
 /// `chat.overlay.clear`, and the session boundaries (`recording.rs`): both
 /// slots empty. Idempotent.
 pub fn clear_chat_overlay(state: &AppState) -> ChatOverlayInfo {
+    let mut generation = state
+        .chat_overlay_generation
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    *generation = generation.wrapping_add(1);
     let info = crate::captions::clear_caption_overlay(&state.chat_overlay);
     crate::captions::clear_caption_overlay(&state.simulcast_chat_overlay);
+    state.emit_event(
+        "cloud.graphics.changed",
+        serde_json::json!({"kind":"chat", "clear":true}),
+    );
     ChatOverlayInfo {
         active: false,
         width: 0,
@@ -191,6 +216,18 @@ pub struct ChatOverlayCanvases {
 /// lands on the next repaint. Leg sizes never change mid-session, so the
 /// renderer reads this once per livestream.
 pub async fn chat_overlay_canvases(state: &AppState) -> ChatOverlayCanvases {
+    if crate::cloud_talk_show_room_show_id(state).is_some() {
+        return ChatOverlayCanvases {
+            horizontal: Some(CommentHighlightCanvas {
+                width: 1920,
+                height: 1080,
+            }),
+            vertical: Some(CommentHighlightCanvas {
+                width: 1080,
+                height: 1920,
+            }),
+        };
+    }
     let recording = state.recording.lock().await;
     let canvas = |size: Option<(u32, u32)>| {
         size.map(|(width, height)| CommentHighlightCanvas { width, height })

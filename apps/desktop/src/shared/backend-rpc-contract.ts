@@ -1,3 +1,4 @@
+import { parseGraphicsSource, type GraphicsSource } from './cloud-graphics'
 import type {
   CloudArchiveView,
   CloudArchiveStart,
@@ -289,6 +290,7 @@ import {
   SOUNDBOARD_VOLUME_DB_MIN
 } from './backend'
 import { isBannerFileName } from './banner-assets'
+import { parseCohostPetAnimatorEvent, type CohostPetAnimatorEvent } from './buddy-animator-public'
 import {
   CHAT_COMMAND_DESCRIPTION_MAX_CHARS,
   CHAT_COMMAND_MAX_COUNT,
@@ -518,6 +520,8 @@ export interface BackendRpcMethodMap {
   'session.stop': BackendRpcDefinition<SessionStopParams | undefined, RecordingStatus>
   'scene.get': BackendRpcDefinition<undefined, Scene>
   'scene.load_from_capture_config': BackendRpcDefinition<SceneConfigParams, SceneCommitStatus>
+  /** Plan 249 S12, renderer only: the native engine's scene for a room, never committed. */
+  'cloud.scene.resolve': BackendRpcDefinition<SceneConfigParams, Scene>
   'scene.layout.apply_preview': BackendRpcDefinition<
     SceneConfigParams & { intentId: number },
     LayoutTransactionResult
@@ -597,6 +601,11 @@ export interface BackendRpcMethodMap {
   'cloud.room.door.set': BackendRpcDefinition<{ open: boolean }, CloudStatus>
   /** A fresh 10-minute host token; renderer role only, never logged. */
   'cloud.room.token.refresh': BackendRpcDefinition<undefined, CloudRoomTokenAnswer>
+  /** Renderer-only bounded raster source for the explicitly enabled public output. */
+  'cloud.graphics.snapshot': BackendRpcDefinition<
+    { showId: string; known?: string },
+    GraphicsSource
+  >
   /** Renderer-only observation of an applied public avatar output. */
   'buddy.cloud.report': BackendRpcDefinition<
     { showId: string; stream: boolean; recording: boolean },
@@ -863,6 +872,22 @@ export interface BackendRpcMethodMap {
     { sessionId: string },
     ModerationOperation[]
   >
+  'cloud.speech.overlay': BackendRpcDefinition<
+    import('./cloud-speech').CloudSpeechOverlay,
+    import('./cloud-speech').CloudSpeechOverlayResult
+  >
+  'cloud.speech.transcript': BackendRpcDefinition<
+    { showId: string },
+    import('./cloud-speech').HostTranscriptCue[]
+  >
+  'cloud.speech.sync': BackendRpcDefinition<
+    import('./cloud-speech').CloudSpeechSync,
+    import('./cloud-speech').CloudSpeechStatus
+  >
+  'cloud.speech.audio': BackendRpcDefinition<
+    import('./cloud-speech').CloudSpeechPcm,
+    import('./cloud-speech').CloudSpeechStatus
+  >
   'captions.status.get': BackendRpcDefinition<undefined, import('./backend').CaptionsStatus>
   'session.marker.voice.configure': BackendRpcDefinition<
     { sessionId: string; consent: boolean },
@@ -961,6 +986,8 @@ export interface BackendEventMap {
   'cohost.pet.identity.read': BuddyPetIdentityReadEvent
   'cohost.pet.sheet.generated': BuddyPetSheetGeneratedEvent
   'cohost.pet.build.progress': BuddyPetBuildProgressEvent
+  /** Plan 249 S5: public animator inputs for a cloud output's animator twin. */
+  'cohost.pet.animator': CohostPetAnimatorEvent
   // --- end Buddy pets (plan 168, Phase F) ---
   'captions.status': import('./backend').CaptionsStatus
   'session.marker.voice.status': {
@@ -2326,7 +2353,7 @@ const mainOwnedPreviewBoundsSchema = objectSchema(
 const mainOwnedPreviewSurfaceBoundsParamsSchema = objectSchema(
   {
     bounds: mainOwnedPreviewBoundsSchema,
-    generation: numberSchema({ integer: true, min: 0, max: Number.MAX_SAFE_INTEGER })
+    generation: numberSchema({ integer: true, min: 1, max: Number.MAX_SAFE_INTEGER })
   },
   { allowUnknown: false }
 ) as RuntimeSchema<MainOwnedPreviewSurfaceBoundsParams>
@@ -4973,7 +5000,26 @@ const clipMarkedEventSchema = objectSchema(
 // Caption outage presentation uses the existing degraded state and the shared
 // service-unavailable reason. Keep every wire field explicit: main rejects
 // unknown keys on registered events, including during an outage.
-export const captionsStatusSchema = objectSchema(
+const cloudSpeechStatusSchema = objectSchema(
+  {
+    uploadAllowed: booleanSchema,
+    sourceId: nullableSchema(stringSchema({ maxLength: 160 })),
+    reason: stringSchema({ maxLength: 128 }),
+    productionQualified: literalSchema(false)
+  },
+  { allowUnknown: false }
+)
+const cloudSpeechOverlayTargetSchema = objectSchema(
+  {
+    active: booleanSchema,
+    width: nonNegativeInteger,
+    height: nonNegativeInteger,
+    revision: nonNegativeInteger,
+    styleRevision: nonNegativeInteger
+  },
+  { allowUnknown: false }
+)
+const captionsStatusSchema = objectSchema(
   {
     state: enumSchema([
       'idle',
@@ -6222,7 +6268,12 @@ const cloudRoomStatusSchema = objectSchema(
       objectSchema(
         {
           onStage: arraySchema(boundedString, { maxLength: 8 }),
-          screen: optionalSchema(boundedString)
+          screen: optionalSchema(boundedString),
+          // Plain bounded strings: a value a newer page adds never fails the
+          // status; the renderer drops what it does not know (plan 249 S6).
+          layout: optionalSchema(boundedString),
+          stageKey: optionalSchema(boundedString),
+          at: optionalSchema(boundedString)
         },
         { allowUnknown: false }
       )
@@ -6890,6 +6941,7 @@ const runtimeContracts = {
     params: sceneConfigSchema,
     result: sceneCommitStatusSchema
   },
+  'cloud.scene.resolve': { params: sceneConfigSchema, result: sceneSchema },
   'scene.layout.apply_preview': {
     params: layoutTransactionParamsSchema,
     result: layoutTransactionResultSchema
@@ -7087,6 +7139,20 @@ const runtimeContracts = {
   'cloud.room.invite.rotate': { params: undefinedSchema, result: cloudStatusSchema },
   'cloud.room.door.set': { params: cloudOpenFlagSchema, result: cloudStatusSchema },
   'cloud.room.token.refresh': { params: undefinedSchema, result: cloudRoomTokenAnswerSchema },
+  'cloud.graphics.snapshot': {
+    params: objectSchema(
+      {
+        showId: stringSchema({ minLength: 1, maxLength: 128 }),
+        known: optionalSchema(stringSchema({ maxLength: 64 }))
+      },
+      { allowUnknown: false }
+    ),
+    result: runtimeSchema('a bounded public graphics snapshot', (value, path) => {
+      const result = parseGraphicsSource(value)
+      if (!result) throw new RuntimeSchemaError(path, 'a public graphics snapshot')
+      return result
+    })
+  },
   'buddy.cloud.report': {
     params: objectSchema(
       {
@@ -7376,6 +7442,98 @@ const runtimeContracts = {
     params: objectSchema({ sessionId: boundedString }, { allowUnknown: false }),
     result: arraySchema(moderationOperationSchema, { maxLength: 200 })
   },
+  'cloud.speech.overlay': {
+    params: objectSchema(
+      {
+        sessionClientId: stringSchema({ minLength: 1, maxLength: 160 }),
+        expiresAt: numberSchema({ integer: true, min: 1, max: Number.MAX_SAFE_INTEGER }),
+        stream: booleanSchema,
+        recording: booleanSchema,
+        frame: objectSchema(
+          {
+            pngBase64: stringSchema({ minLength: 4, maxLength: 1024 * 1024 }),
+            position: enumSchema(['top', 'bottom']),
+            rect: optionalSchema(overlayRectSchema),
+            target: enumSchema(['primary', 'auxiliary']),
+            styleRevision: nonNegativeInteger
+          },
+          { allowUnknown: false }
+        )
+      },
+      { allowUnknown: false }
+    ),
+    result: objectSchema(
+      {
+        active: booleanSchema,
+        primary: cloudSpeechOverlayTargetSchema,
+        auxiliary: cloudSpeechOverlayTargetSchema
+      },
+      { allowUnknown: false }
+    )
+  },
+  'cloud.speech.transcript': {
+    params: objectSchema(
+      { showId: stringSchema({ minLength: 1, maxLength: 160 }) },
+      { allowUnknown: false }
+    ),
+    result: arraySchema(
+      objectSchema(
+        {
+          sourceId: boundedString,
+          speechSessionId: boundedString,
+          seq: nonNegativeInteger,
+          offsetSeconds: numberSchema({ min: 0 }),
+          durationSeconds: numberSchema({ min: 0 }),
+          text: boundedString,
+          clockBasis: literalSchema('processed-host-source'),
+          clock: objectSchema(
+            {
+              basis: literalSchema('show-created-at-wall-estimate'),
+              showCreatedAt: nullableSchema(boundedString),
+              sourceObservedAt: boundedString,
+              showOffsetSeconds: nullableSchema(numberSchema({ min: 0 })),
+              uncertaintyMs: literalSchema(null)
+            },
+            { allowUnknown: false }
+          )
+        },
+        { allowUnknown: false }
+      ),
+      { maxLength: 1000 }
+    )
+  },
+  'cloud.speech.sync': {
+    params: objectSchema(
+      {
+        showId: stringSchema({ minLength: 1, maxLength: 160 }),
+        sourceId: stringSchema({ minLength: 1, maxLength: 160 }),
+        generation: numberSchema({ integer: true, min: 1, max: Number.MAX_SAFE_INTEGER }),
+        published: booleanSchema,
+        muted: booleanSchema
+      },
+      { allowUnknown: false }
+    ),
+    result: cloudSpeechStatusSchema
+  },
+  'cloud.speech.audio': {
+    params: objectSchema(
+      {
+        sourceId: stringSchema({ minLength: 1, maxLength: 160 }),
+        sequence: numberSchema({ integer: true, min: 1, max: Number.MAX_SAFE_INTEGER }),
+        sampleRate: numberSchema({ integer: true, min: 16000, max: 48000 }),
+        samples: runtimeSchema('bounded nonempty host PCM', (value, path) => {
+          const samples = arraySchema(numberSchema({ min: -1, max: 1 }), { maxLength: 4800 }).parse(
+            value,
+            path
+          )
+          if (!samples.length) throw new RuntimeSchemaError(path, 'nonempty host PCM')
+          return samples
+        })
+      },
+      { allowUnknown: false }
+    ),
+    result: cloudSpeechStatusSchema
+  },
   'captions.status.get': { params: undefinedSchema, result: captionsStatusSchema },
   'session.marker.voice.configure': {
     params: objectSchema(
@@ -7556,6 +7714,14 @@ const runtimeEventSchemas = {
   'cohost.pet.identity.read': buddyPetIdentityReadEventSchema,
   'cohost.pet.sheet.generated': buddyPetSheetGeneratedEventSchema,
   'cohost.pet.build.progress': buddyPetBuildProgressEventSchema,
+  'cohost.pet.animator': runtimeSchema<CohostPetAnimatorEvent>(
+    'a public avatar animator event',
+    (value, path) => {
+      const parsed = parseCohostPetAnimatorEvent(value)
+      if (!parsed) throw new RuntimeSchemaError(path, 'a public avatar animator event')
+      return parsed
+    }
+  ),
   // --- end Buddy pets (plan 168, Phase F) ---
   'captions.status': captionsStatusSchema,
   'session.marker.voice.status': objectSchema(

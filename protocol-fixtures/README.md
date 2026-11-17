@@ -34,6 +34,22 @@ Rust model; both models must reproduce it within `tolerance` (1e-4):
 - Rust: `cargo test -p videorc-backend buddy_motion`
 - TypeScript: `pnpm --filter @videorc/desktop test -- buddy-motion.test.ts`
 
+## `buddy-animator-events.json`
+
+The avatar's cloud animation (plan 249 S5): a seeded scripted show (reactions,
+the card on both outputs, talk, think, laugh, a full queue, a motion-only hop,
+a persona switch, sleep and the surprised wake, an expired reaction) as
+stamped public events, and the cell and transform on both 1080p outputs every
+15 ticks of the 60 Hz show clock. It is generated FROM the TypeScript cloud
+driver (`apps/desktop/src/shared/cloud-avatar-motion.ts`), whose animator
+(`buddy-animator.ts`) replays the Rust animator's pinned scripted session cell
+by cell. The web program keeps a byte copy in `tests/fixtures/`:
+
+- Regenerate after a deliberate rule change, then run Prettier on it:
+  `WRITE_BUDDY_ANIMATOR_VECTORS=1 pnpm --filter @videorc/desktop test -- cloud-avatar-motion.test.ts`
+- TypeScript: `pnpm --filter @videorc/desktop test -- buddy-animator.test.ts cloud-avatar-motion.test.ts`
+- Web: `node --import tsx --test tests/cloud-avatar-motion.test.ts`
+
 ## `buddy-official-catalog.json`
 
 Videorc's official avatars (plan 170, D10 and D11), edited by hand. The

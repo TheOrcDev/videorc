@@ -1655,3 +1655,63 @@ mod wiring {
         assert_eq!(on_stream(&state, 2.7, None).0, NEUTRAL);
     }
 }
+
+// --- Plan 249 S5: the public projection ----------------------------------------------------
+
+#[test]
+fn the_public_projection_carries_moods_lengths_and_resolved_chains_only() {
+    let mut overrides = BTreeMap::new();
+    overrides.insert(BuddyTrigger::Follow, "kiss".to_string());
+    let utterance = public_event(
+        &BuddyAnimatorEvent::UtteranceStart {
+            state: CohostUtteranceState::Laugh,
+            chars: 30,
+            bubble_seconds: 2.5,
+        },
+        &overrides,
+    );
+    assert_eq!(
+        utterance,
+        serde_json::json!({ "kind": "utterance", "mood": "laugh", "chars": 30, "bubbleSeconds": 2.5 })
+    );
+    assert_eq!(
+        public_event(&follow(), &overrides),
+        serde_json::json!({ "kind": "reaction", "chain": ["kiss", "wave", "proud"], "activity": true })
+    );
+    assert_eq!(
+        public_event(
+            &BuddyAnimatorEvent::Trigger {
+                trigger: BuddyTrigger::DestinationFailed,
+                reaction: None,
+            },
+            &overrides,
+        ),
+        serde_json::json!({ "kind": "reaction", "chain": [], "activity": false })
+    );
+    // A malformed id never reaches the room; nothing unbounded does either.
+    assert_eq!(
+        public_event(
+            &BuddyAnimatorEvent::React {
+                reaction: "Not An Id".to_string(),
+            },
+            &overrides,
+        ),
+        serde_json::json!({ "kind": "reaction", "chain": [], "activity": true })
+    );
+    assert_eq!(
+        public_event(
+            &BuddyAnimatorEvent::HighlightLive {
+                ttl_seconds: f64::INFINITY,
+            },
+            &overrides,
+        ),
+        serde_json::json!({ "kind": "highlight", "ttlSeconds": 0.0 })
+    );
+    assert_eq!(
+        public_event(&BuddyAnimatorEvent::Settings(defaults()), &overrides),
+        serde_json::json!({
+            "kind": "settings",
+            "settings": { "intensity": 0.45, "sleepAfterSeconds": 180, "breathing": true },
+        })
+    );
+}
