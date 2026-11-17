@@ -63,6 +63,7 @@ export async function runBaseline({
   desktopRoot,
   webRoot,
   captions = false,
+  outputs = false,
   controls = false,
   privacy = false,
   soundboard = false,
@@ -85,27 +86,31 @@ export async function runBaseline({
   })
   report.case = handoff
     ? 'handoff'
-    : archive
-      ? 'archive'
-      : graphics
-        ? 'graphics'
-        : scenes
-          ? 'scenes'
-          : replayRing
-            ? 'replay-ring'
-            : avatarAnimation
-              ? 'avatar-animation'
-              : views
-                ? 'views'
-                : avatar
-                  ? 'avatar'
-                  : soundboard
-                    ? 'soundboard'
-                    : privacy
-                      ? 'privacy'
-                      : controls
-                        ? 'controls'
-                        : 'baseline'
+    : outputs
+      ? 'outputs'
+      : captions
+        ? 'captions'
+        : archive
+          ? 'archive'
+          : graphics
+            ? 'graphics'
+            : scenes
+              ? 'scenes'
+              : replayRing
+                ? 'replay-ring'
+                : avatarAnimation
+                  ? 'avatar-animation'
+                  : views
+                    ? 'views'
+                    : avatar
+                      ? 'avatar'
+                      : soundboard
+                        ? 'soundboard'
+                        : privacy
+                          ? 'privacy'
+                          : controls
+                            ? 'controls'
+                            : 'baseline'
   // A dirty web consumer makes its revision misleading. Require a dedicated,
   // installed checkout; inspect it read-only and never change the active one.
   const webDirty = execFileSync('git', ['status', '--porcelain', '--untracked-files=no'], {
@@ -123,7 +128,11 @@ export async function runBaseline({
   report.revisions.programBundleSha256 = createHash('sha256')
     .update(readFileSync(join(webRoot, 'public/cloud/program/v1/stage.js')))
     .digest('hex')
-  const h = await managedHarness('talk', 1, { speech: captions })
+  const h = await managedHarness('talk', 1, {
+    speech: captions || outputs,
+    localEgress: outputs,
+    maximumLogEntries: 4096
+  })
   const output = join(h.root, 'parity')
   mkdirSync(output)
   let pages, browser, failure
@@ -185,8 +194,23 @@ export async function runBaseline({
     await h.destinations(controls ? 1 : 0)
     await h.launch()
     const cameraId = await prepareParityRoom(h, controls)
+    if (outputs) {
+      // S17: an unmeasured profile is refused by the real app and fake web
+      // before any room exists, with its reason; nothing opens.
+      await assert.rejects(
+        h.rpc('cloud.room.open', {
+          outputs: [{ ...OUTPUT, width: 3840, height: 2160, videoKbps: 20000 }],
+          title: 'Plan 249 outputs 4K',
+          platforms: []
+        }),
+        /4K hasn't been measured/
+      )
+      assert.equal((await h.rpc('cloud.status')).room?.phase ?? 'closed', 'closed')
+    }
     const opened = await h.rpc('cloud.room.open', {
-      outputs: [OUTPUT],
+      outputs: outputs
+        ? [OUTPUT, { ...OUTPUT, orientation: 'vertical', width: 720, height: 1280 }]
+        : [OUTPUT],
       title: 'Plan 249 baseline',
       platforms: []
     })
@@ -206,15 +230,15 @@ export async function runBaseline({
     pages = await startParityPages(
       webRoot,
       guests,
-      soundboard || avatar || scenes || replayRing || captions || views || graphics
+      outputs || soundboard || avatar || scenes || replayRing || captions || views || graphics
         ? {
-            ...(avatar || scenes || graphics
+            ...(outputs || captions || avatar || scenes || graphics
               ? {
                   graphicsLanes: {
                     EG_parity_baseline: { output: 'stream', orientation: 'h' },
                     EG_parity_avatar_recording: { output: 'recording', orientation: 'h' },
                     // S12 scenes reuse S9's vertical stream lane identity.
-                    ...(graphics || scenes
+                    ...(outputs || graphics || scenes
                       ? {
                           EG_parity_graphics_v: { output: 'stream', orientation: 'v' },
                           ...(graphics
@@ -316,7 +340,7 @@ export async function runBaseline({
       layout: 'side-by-side',
       onStage: [`host:${h.showId}`, ...[...guests.values()].map((g) => g.identity)]
     })
-    if (graphics) await prepareGraphics({ h, report, output })
+    if (graphics || outputs) await prepareGraphics({ h, report, output })
     // S6 views also needs the real avatar producer for guest graphics (D4).
     if (avatar || views) await prepareAvatar({ h, report })
     if (scenes) await prepareScenes({ h, report })
@@ -350,7 +374,18 @@ export async function runBaseline({
         `${name} actual return attached`
       )
     }
-    if (captions) {
+    if (outputs) {
+      const { exerciseOutputs } = await import('./cloud-parity-outputs.mjs')
+      report.outputs = await exerciseOutputs({
+        h,
+        report,
+        webRoot,
+        output,
+        programUrl: `${pages.origin}${pages.wire.PROGRAM_PAGE_PATH}?${search}`
+      })
+      report.status = 'passed'
+      writeReport()
+    } else if (captions) {
       const { exerciseCaptions } = await import('./cloud-parity-captions.mjs')
       report.captions = await exerciseCaptions({
         h,

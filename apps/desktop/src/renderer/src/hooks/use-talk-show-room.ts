@@ -850,12 +850,17 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
       previewReplaced,
       hostIdentity,
       openRoom: async (params) => {
+        // Plan 249 S17: the outputs are decided (and an unmeasured profile
+        // refused) before anything is created; a refusal toasts like any.
+        let requested: typeof params.outputs
+        try {
+          requested = params.outputs ?? outputs()
+        } catch (error) {
+          onError(error, 'open the room')
+          throw error
+        }
         const open = (): Promise<void> =>
-          call(
-            'cloud.room.open',
-            { ...params, outputs: params.outputs ?? outputs() },
-            'open the room'
-          )
+          call('cloud.room.open', { ...params, outputs: requested }, 'open the room')
         await (clipsStepAside ? clipsStepAside(open) : open())
       },
       closeRoom: async () => {

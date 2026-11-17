@@ -1,5 +1,6 @@
 import type { RoomCameraFixtureAction, RoomCameraResources } from './room-camera'
 import type { RoomFrameCommand, RoomFrameReply, RoomFrameResources } from './room-frame'
+import type { ManagedOutputProfile } from './cloud-output-profile'
 import type { RoomMicrophoneApi } from './room-microphone'
 import type { RoomPcmCommand, RoomPcmFrame, RoomPcmResources } from './room-pcm'
 import type { ChatDelivery, ChatDeliveryBoundary } from './chat-delivery'
@@ -5553,6 +5554,7 @@ export interface CloudFallback {
 }
 
 export interface CloudShowSummary {
+  outputProfile?: ManagedOutputProfile
   id: string
   nodeId: string
   createdAt?: string

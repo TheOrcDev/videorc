@@ -1,0 +1,213 @@
+{
+  "schemaVersion": 2,
+  "slice": "S17",
+  "branch": "feat/249-s17-cloud-parity",
+  "note": "Publication content: one S17 commit per repo on its parent. SHA-256 of each file as published; the manifest excludes itself; node_modules is never part of it. The worktree keeps the S12+S15 index and the S17 delta on it; worktreeSha256 appears where the worktree copy differs from the published bytes: main also changed those files (the published bytes are the file on main plus the S17 change), and scripts/lib/cloud-parity-baseline.mjs is the one hand-resolved conflict. alternateParent gives the same commit on PR #1457 with the files whose bytes differ there.",
+  "repos": {
+    "desktop": {
+      "parent": "4ff7156818f425112ef3575ff102cfdfdea853d7",
+      "parentRef": "origin/main",
+      "worktreeHead": "4d22beb4c01dac22a4cbcd1ac2c7f618892b126a",
+      "worktreeIndexTree": "0ff8f6084cf25524a9fa938eca08c0d4a40ceca7",
+      "files": [
+        {
+          "path": "apps/desktop/src/renderer/src/components/guests/guests-tab.test.ts",
+          "status": "modified",
+          "sha256": "81454aeee844c97e6c8f3c90db113800fa50bb2249b32542bb53da20c24a9431"
+        },
+        {
+          "path": "apps/desktop/src/renderer/src/components/guests/guests-tab.tsx",
+          "status": "modified",
+          "sha256": "b10a4e0377ee2566507c08f281b8f31d742b86ca76be813d989adde95c8ba796"
+        },
+        {
+          "path": "apps/desktop/src/renderer/src/components/studio/show-stage.tsx",
+          "status": "modified",
+          "sha256": "f782b5c504258bd09e5238c3c371a92c6f83ed84daeff100451ea9a1c60defb2",
+          "worktreeSha256": "bc06be2d983e150f43e08799e5eb0ce9eb8a1de02afbf9f1c58166251b46b59a"
+        },
+        {
+          "path": "apps/desktop/src/renderer/src/hooks/use-studio.tsx",
+          "status": "modified",
+          "sha256": "60d54c96eb587bddf19291d1ba98177fa2459f7aab042836077f0d7cd2d06543",
+          "worktreeSha256": "0311c8c05fb3de966a91d191227b6be0c33b9a8bb5e5d6fc99596ad6ff7e4806"
+        },
+        {
+          "path": "apps/desktop/src/renderer/src/hooks/use-talk-show-room.ts",
+          "status": "modified",
+          "sha256": "0edfdd2492c72bd81afed922ab64ff99f8c7831b0480038ad28b837379c89c69",
+          "worktreeSha256": "5e6249052c930f809a258006ee1eb737aed54b8f267c892708b03aca9d7be8f5"
+        },
+        {
+          "path": "apps/desktop/src/renderer/src/lib/talk-show-outputs.test.ts",
+          "status": "added",
+          "sha256": "989352f1652cc57f684f5b6f01517a6e2ac62669f3f09563220e45e697913852"
+        },
+        {
+          "path": "apps/desktop/src/renderer/src/lib/talk-show-outputs.ts",
+          "status": "added",
+          "sha256": "efeac709f5e7c34e54d1317693c01cb2a47c2b2b95215412d115b3a80a3af1f9"
+        },
+        {
+          "path": "apps/desktop/src/shared/backend-rpc-contract.ts",
+          "status": "modified",
+          "sha256": "19fdd3c83b0b8390cfbe00adb8dee51f550265c2f0606031f3e782b53b91951a",
+          "worktreeSha256": "d457c59abea97436579508a4dacb053f24781c6fc75346a31e7389302fbace8e"
+        },
+        {
+          "path": "apps/desktop/src/shared/backend.ts",
+          "status": "modified",
+          "sha256": "a7f8d24452db99c7b5c873621330e835531e6e4c45af5761b674e4049ecfd9dd",
+          "worktreeSha256": "dbae7657bdca9da4934aba5fc649d44219f5a7721bd102fd32903a01ce0d4203"
+        },
+        {
+          "path": "apps/desktop/src/shared/cloud-output-profile.test.ts",
+          "status": "added",
+          "sha256": "3d3d449dcdd83eaecc2023a86b722ac42fe79f07da74ce6283c6da93f6000012"
+        },
+        {
+          "path": "apps/desktop/src/shared/cloud-output-profile.ts",
+          "status": "added",
+          "sha256": "476dcad9a6757b6eff9d6cdb6509a3bfa24fc94042cd91cb70ea744252404bb0"
+        },
+        {
+          "path": "crates/videorc-backend/src/cloud_show.rs",
+          "status": "modified",
+          "sha256": "78caefbc54bc95e8bd4be29f877408af594ab30cb6b77a8c5bf8c579d3f4efec"
+        },
+        {
+          "path": "crates/videorc-backend/src/cloud_talk.rs",
+          "status": "modified",
+          "sha256": "93900deaec5b5b9ade61272c89451df3b4361475bed27cd95236fef3203c00e7"
+        },
+        {
+          "path": "docs/cloud/249-s17-handoff.md",
+          "status": "added",
+          "sha256": "e3af6aa37b3fc7fc72c14c51ee42a0090dd624e723d66eb33e01735499b30352"
+        },
+        {
+          "path": "docs/cloud/managed-media-wire.md",
+          "status": "modified",
+          "sha256": "fdb2d09f910e32b6c871af8508c9ab8861798d2b08cb3cba40c82de381eabe1f"
+        },
+        {
+          "path": "protocol-fixtures/cloud-managed-wire.json",
+          "status": "modified",
+          "sha256": "0c8eb5cc54a1bd4f21f0cbfab8539eab86bebe38d786988780bde41c160120fa"
+        },
+        {
+          "path": "protocol-fixtures/cloud-parity-outputs.json",
+          "status": "added",
+          "sha256": "b1ebea5074728aaff2377f39d4f41594be5b9f9b2804600e0f8ac4f32badb32c"
+        },
+        {
+          "path": "scripts/lib/cloud-managed-smoke.mjs",
+          "status": "modified",
+          "sha256": "5fdb0665042037868e67168174dcafb5b5529823cb5511e3c0cca0e0a6a8a505"
+        },
+        {
+          "path": "scripts/lib/cloud-parity-baseline.mjs",
+          "status": "modified",
+          "sha256": "34b0456aa35a058276180e09f20d4bd93c174ed73fb1459922e84b3c371880d4",
+          "worktreeSha256": "aaaacb59e8b5660efaa8ba098bf4721277e049e27fe88b267a92ba2ed4e6b591"
+        },
+        {
+          "path": "scripts/lib/cloud-parity-outputs-contract.mjs",
+          "status": "added",
+          "sha256": "59ee1388bbc918093027246082afb5df5b5b0a9ca87b467f13a184e7e8171ffd"
+        },
+        {
+          "path": "scripts/lib/cloud-parity-outputs-contract.test.mjs",
+          "status": "added",
+          "sha256": "88285ac2747166cb6fcc3769f1467ca0b52ce5e93a803388562f5c7d8515d70b"
+        },
+        {
+          "path": "scripts/lib/cloud-parity-outputs.mjs",
+          "status": "added",
+          "sha256": "eafb3f2013b108758c88406c4a74f6bb4b1685e1ac133298ef7d852b4dd3b9a5"
+        },
+        {
+          "path": "scripts/lib/fake-cloud-web-managed.mjs",
+          "status": "modified",
+          "sha256": "e211b86d731e01bdfa0861ff8847449ee439420bf893b4d419469572da19a37a",
+          "worktreeSha256": "e213d64aada46cce5bddef5ae2ac0621f07abaa6c50c1f312fa19372ca9b3bbb"
+        },
+        {
+          "path": "scripts/smoke-cloud-parity-app.mjs",
+          "status": "modified",
+          "sha256": "98b9f7e2c9729106d848b9ed25ae6414b708033889b7b088a7648ded8ac7161b",
+          "worktreeSha256": "c751d7d022973194fd0af9265fd5f1292f1c003bf630a1a905ef43eed69e0ab5"
+        }
+      ],
+      "alternateParent": {
+        "parent": "1f372525d402f5e58118df36f052e50f0816ccf6",
+        "ref": "PR #1457 head (fix/main-after-249-merge-batch)",
+        "samePaths": true,
+        "filesThatDiffer": [
+          {
+            "path": "crates/videorc-backend/src/cloud_show.rs",
+            "sha256": "6d06427445622315e8396bba41b548183dbf7a2143ed3772fe6a10cac72dd465"
+          },
+          {
+            "path": "crates/videorc-backend/src/cloud_talk.rs",
+            "sha256": "42077ec1a89be078d34774e328983a3d020466c14c5b915a1b1f753bbc6aa5f3"
+          }
+        ]
+      }
+    },
+    "web": {
+      "parent": "ab811051b29345ee13ae7686c4534892de6fe077",
+      "parentRef": "origin/main",
+      "worktreeHead": "125d35686329de32c50df992bb3c9f0f1662ea95",
+      "worktreeIndexTree": "a7d1ed83b6300594fba9d4a70abcd7dbf940a387",
+      "files": [
+        {
+          "path": "docs/cloud/249-s17-handoff.md",
+          "status": "added",
+          "sha256": "e3af6aa37b3fc7fc72c14c51ee42a0090dd624e723d66eb33e01735499b30352"
+        },
+        {
+          "path": "lib/cloud/media/livekit-api.ts",
+          "status": "modified",
+          "sha256": "e7e5a9a53d9f8e1076edf5dfa2cbbe130605ba588e4f5f97b47f602f2f98e224",
+          "worktreeSha256": "2ee6f573628ea954cddd2f5d1fcf9a26961992bf23845c8fc75d4c79f6aa0b98"
+        },
+        {
+          "path": "lib/cloud/media/output-profile.ts",
+          "status": "added",
+          "sha256": "505e6e8f33e03cfc5fa639464a8919a8c15749be3b3a1ed10de18e13a014b11c"
+        },
+        {
+          "path": "lib/cloud/shows-route.ts",
+          "status": "modified",
+          "sha256": "c8ea991eca5af960deb982b18a18c0dec83816060474cc0b4f6ee719f2fa6b8a"
+        },
+        {
+          "path": "lib/cloud/shows.ts",
+          "status": "modified",
+          "sha256": "1f8b455288459b3a194eedd4420f6d31156736ce68b9e4d6b88c6f9df7630f80"
+        },
+        {
+          "path": "tests/cloud-managed-wire-pin.test.ts",
+          "status": "modified",
+          "sha256": "57431e7537bd5f384daef417a516d2a2b7fcb1bb96eee249a991c64e2cb5a491"
+        },
+        {
+          "path": "tests/cloud-output-profile.test.ts",
+          "status": "added",
+          "sha256": "113f8c6baf57c52e51f59d3a08c06d5c102ec9a1e7312cdb2b6706f5c6ae9c8c"
+        },
+        {
+          "path": "tests/fixtures/cloud-managed-wire.json",
+          "status": "modified",
+          "sha256": "73fbb31963db1ade6be792430b6c0db3d62b847cc367fefbcb5a12d86a32706e"
+        },
+        {
+          "path": "tests/fixtures/cloud-parity-outputs.json",
+          "status": "added",
+          "sha256": "b1ebea5074728aaff2377f39d4f41594be5b9f9b2804600e0f8ac4f32badb32c"
+        }
+      ]
+    }
+  }
+}

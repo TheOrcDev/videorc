@@ -114,7 +114,12 @@ export function managedPublishAllowed(shows, { action, path }) {
 export async function managedHarness(
   kind,
   pass = 1,
-  { maximumLogEntries = Infinity, youtube: withYouTube = false, speech: withSpeech = false } = {}
+  {
+    maximumLogEntries = Infinity,
+    youtube: withYouTube = false,
+    speech: withSpeech = false,
+    localEgress = false
+  } = {}
 ) {
   const root = mkdtempSync(
     join(process.env.VIDEORC_SMOKE_OUTPUT_DIR ?? tmpdir(), `videorc-managed-${kind}-${pass}-`)
@@ -216,6 +221,8 @@ export async function managedHarness(
     rtsp: await freePort(),
     api: await freePort(),
     proxy: await freePort(),
+    redis: localEgress ? await freePort() : null,
+    egressHealth: localEgress ? await freePort() : null,
     livekit: await freePort(),
     livekitHost: await freePort(),
     rtc: await freePort()
@@ -1013,12 +1020,28 @@ export async function managedHarness(
 
   try {
     if (kind === 'talk') {
+      if (localEgress) {
+        assert.ok(
+          process.env.VIDEORC_SMOKE_EGRESS_PATH && process.env.VIDEORC_SMOKE_REDIS_PATH,
+          'Local outputs acquisition requires installed egress and Redis binaries; no managed fallback'
+        )
+        startChild('redis', process.env.VIDEORC_SMOKE_REDIS_PATH, [
+          '--bind',
+          '127.0.0.1',
+          '--port',
+          String(ports.redis),
+          '--save',
+          '',
+          '--appendonly',
+          'no'
+        ])
+      }
       startChild('livekit', process.env.VIDEORC_SMOKE_LIVEKIT_PATH ?? 'livekit-server', [
         '--dev',
         '--bind',
         '127.0.0.1',
         '--config-body',
-        `port: ${ports.livekit}\nkeys:\n  ${livekit.apiKey}: ${livekit.apiSecret}\nrtc:\n  tcp_port: ${ports.rtc}\n  use_external_ip: false\nroom:\n  auto_create: true\n  empty_timeout: 600`
+        `port: ${ports.livekit}\nkeys:\n  ${livekit.apiKey}: ${livekit.apiSecret}\nrtc:\n  tcp_port: ${ports.rtc}\n  use_external_ip: false\nroom:\n  auto_create: true\n  empty_timeout: 600${localEgress ? `\nredis:\n  address: 127.0.0.1:${ports.redis}` : ''}`
       ])
       await waitFor(async () => {
         try {
@@ -1027,6 +1050,33 @@ export async function managedHarness(
           return false
         }
       }, 'local LiveKit ready')
+      if (localEgress) {
+        const configFile = join(root, 'local-egress.yaml')
+        writeFileSync(
+          configFile,
+          `api_key: ${livekit.apiKey}\napi_secret: ${livekit.apiSecret}\nws_url: ${livekit.url}\ninsecure: true\nredis:\n  address: 127.0.0.1:${ports.redis}\nhealth_port: ${ports.egressHealth}\n`,
+          { mode: 0o600 }
+        )
+        cleanups.push(async () => {
+          rmSync(configFile, { force: true })
+        })
+        startChild('egress', process.env.VIDEORC_SMOKE_EGRESS_PATH, ['--config', configFile])
+        await waitFor(
+          async () => {
+            try {
+              return (
+                await fetch(`http://127.0.0.1:${ports.egressHealth}/`, {
+                  signal: AbortSignal.timeout(1000)
+                })
+              ).ok
+            } catch {
+              return false
+            }
+          },
+          'Owned local egress worker health',
+          30000
+        )
+      }
       await h.forwardHostRoom()
       const y4m = join(mediaDir, 'host.y4m'),
         wav = join(mediaDir, 'host.wav'),

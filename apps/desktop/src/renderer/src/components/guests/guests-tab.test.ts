@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { TooltipProvider } from '@/components/ui/tooltip'
 import type { CloudStatus } from '@/lib/backend'
+import { defaultCaptureConfig } from '@/lib/capture'
 import { HOST, ada, grace, openRoom, talkStatus } from '@/lib/guests-room-fixtures'
 import { NO_TALK_SHOW, type TalkShowContextValue } from '@/lib/talk-show-context'
 
@@ -30,6 +31,12 @@ const studio = vi.hoisted(() => ({
     wsStatus: 'connected'
   }
 }))
+
+// Plan 249 S17: the tab now says what the room will send, from the canvas.
+Object.assign(studio.core.captureConfig, {
+  video: defaultCaptureConfig.video,
+  recordEnabled: false
+})
 
 vi.mock('@/hooks/use-studio', () => ({
   useStudioCloud: () => studio.cloud,
