@@ -1867,6 +1867,7 @@ impl VideorcApiClient {
     }
 
     /// Archive requests remain on the pinned account API; redirects cannot forward a bearer.
+    #[allow(clippy::too_many_arguments)]
     async fn archive_bytes(
         &self,
         token: &str,
