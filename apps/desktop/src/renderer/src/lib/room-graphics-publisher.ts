@@ -42,12 +42,43 @@ export type RoomGraphicsStatus = {
   >
   productionQualified: false
 }
+/**
+ * Plan 249 S24: one output view a program page applied, exactly as it was
+ * sent to that page, for the cloud to keep for the next controller (or to
+ * forget, when it is empty). Banners only survive there (D9).
+ */
+export type AcceptedGraphicsView = {
+  output: 'stream' | 'recording'
+  orientation: 'h' | 'v'
+  publisherSid: string
+  revision: number
+  layers: GraphicsLayer[]
+}
 /** Independently enabled by the existing graphics output switches. Never broadcasts
  * pixels to guests, or infers graphic support from S3's auxiliary version. */
 export class RoomGraphicsPublisher {
   #content: GraphicsContent | null = null
   #receipts = new Map<string, CapabilityReceipt>()
-  #sent = new Map<string, { key: string; revision: number; at: number }>()
+  /** Per peer: the exact sanitized envelope it was sent (S24 keeps it as sent). */
+  #sent = new Map<
+    string,
+    {
+      key: string
+      revision: number
+      at: number
+      layers: GraphicsLayer[]
+      output: 'stream' | 'recording'
+      orientation: 'h' | 'v'
+      publisherSid: string
+      expiresAt: number
+    }
+  >()
+  /**
+   * Plan 249 S24: the highest revision reported as accepted per output view
+   * (`output/orientation/publisherSid`). Pages sharing a view get different
+   * revisions; a late acknowledgement of an older one never replaces it.
+   */
+  #accepted = new Map<string, number>()
   #revision = 0
   #generation = 0
   #busy = false
@@ -58,7 +89,9 @@ export class RoomGraphicsPublisher {
   #lastStatus = ''
   constructor(
     private room: Room,
-    private changed: (status: RoomGraphicsStatus) => void
+    private changed: (status: RoomGraphicsStatus) => void,
+    /** Plan 249 S24: called once per view a program page applied, clears too. */
+    private accepted?: (view: AcceptedGraphicsView) => void
   ) {
     room.on(RoomEvent.DataReceived, this.#receive)
     room.on(RoomEvent.Reconnecting, this.#lost)
@@ -185,6 +218,10 @@ export class RoomGraphicsPublisher {
         receipt.graphics.orientation
       ).some((l) => l.kind === 'caption')
       if (!needsCaptions || receipt.graphics.static.captions === 1) capable++
+      // Before the visibility check: an applied empty view (Hide, an output
+      // switched off, nothing retained) must reach the cloud too, or a
+      // takeover would bring back banners that were taken off.
+      this.#noteAccepted(peer.identity, receipt.graphics)
       const visible = graphicsLayers(
         this.#content,
         receipt.graphics.output,
@@ -239,6 +276,48 @@ export class RoomGraphicsPublisher {
       this.#lastStatus = key
       this.changed(status)
     }
+  }
+  /**
+   * Plan 249 S24: report a view once its page applied exactly what it was
+   * sent: the current receipt's lane, this session, the sent revision and an
+   * envelope still valid. Only the applied acknowledgement counts, never an
+   * upload or the local preview; set/lost/close clear `#sent` first.
+   */
+  #noteAccepted(
+    identity: string,
+    graphics: {
+      output: 'stream' | 'recording'
+      orientation: 'h' | 'v'
+      static?: { applied?: { publisherSid: string; revision: number } }
+    }
+  ): void {
+    const ack = graphics.static?.applied
+    const localSid = this.room.localParticipant.sid
+    if (!this.accepted || !ack || ack.publisherSid !== localSid) return
+    const sent = this.#sent.get(identity)
+    if (
+      !sent ||
+      sent.revision !== ack.revision ||
+      sent.publisherSid !== localSid ||
+      sent.output !== graphics.output ||
+      sent.orientation !== graphics.orientation ||
+      sent.expiresAt <= Date.now()
+    )
+      return
+    const view = `${sent.output}/${sent.orientation}/${sent.publisherSid}`
+    if ((this.#accepted.get(view) ?? 0) >= sent.revision) return
+    this.#accepted.set(view, sent.revision)
+    if (this.#accepted.size > 64) {
+      const oldest = this.#accepted.keys().next().value
+      if (oldest !== undefined) this.#accepted.delete(oldest)
+    }
+    this.accepted({
+      output: sent.output,
+      orientation: sent.orientation,
+      publisherSid: sent.publisherSid,
+      revision: sent.revision,
+      layers: sent.layers
+    })
   }
   #refresh = (): void => {
     if (this.#closed) return
@@ -339,7 +418,16 @@ export class RoomGraphicsPublisher {
         peer.sid !== this.room.remoteParticipants.get(peer.identity)?.sid
       )
         return
-      this.#sent.set(peer.identity, { key, revision: snapshot.revision, at: Date.now() })
+      this.#sent.set(peer.identity, {
+        key,
+        revision: snapshot.revision,
+        at: Date.now(),
+        layers: snapshot.layers,
+        output: snapshot.output,
+        orientation: snapshot.orientation,
+        publisherSid: snapshot.publisherSid,
+        expiresAt: snapshot.expiresAt
+      })
       this.#error = this.#content?.unsupported.length ? this.#content.unsupported.join(' ') : null
     }
   }

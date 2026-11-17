@@ -1,7 +1,11 @@
 import { EventEmitter } from 'node:events'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ConnectionState, RoomEvent, type Room } from 'livekit-client'
-import { RoomAvatarPublisher, type RoomAvatarStatus } from './room-avatar-publisher'
+import {
+  RoomAvatarPublisher,
+  type AcceptedAvatarView,
+  type RoomAvatarStatus
+} from './room-avatar-publisher'
 import { CAPABILITY_TOPIC } from './room-media-v2'
 import fixture from '../../../../../..//protocol-fixtures/cloud-parity-avatar.json'
 import type { AvatarLayer } from '../../../shared/cloud-avatar'
@@ -23,7 +27,12 @@ function harness() {
     ])
   })
   const statuses: RoomAvatarStatus[] = []
-  const publisher = new RoomAvatarPublisher(room as unknown as Room, (s) => statuses.push(s))
+  const accepted: AcceptedAvatarView[] = []
+  const publisher = new RoomAvatarPublisher(
+    room as unknown as Room,
+    (s) => statuses.push(s),
+    (view) => accepted.push(view)
+  )
   const receive = (graphics: unknown, participant?: unknown) =>
     room.emit(
       RoomEvent.DataReceived,
@@ -50,7 +59,7 @@ function harness() {
       undefined,
       CAPABILITY_TOPIC
     )
-  return { room, publisher, statuses, receive, receiveFrom }
+  return { room, publisher, statuses, receive, receiveFrom, accepted }
 }
 afterEach(() => vi.useRealTimers())
 describe('room avatar publisher', () => {
@@ -112,6 +121,117 @@ describe('room avatar publisher', () => {
     expect(h.statuses.at(-1)?.observed).toEqual({}) // a clear is not a visible avatar / AI-spend permission
     h.room.emit(RoomEvent.Reconnecting)
     expect(h.statuses.at(-1)?.observed).toEqual({})
+    h.publisher.close()
+  })
+  it('reports each applied view once, exactly as that output got it (plan 249 S24)', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(1000)
+    const h = harness()
+    const bodies: Uint8Array[] = []
+    h.room.localParticipant.streamBytes.mockImplementation(async () => ({
+      write: vi.fn(async (bytes: Uint8Array) => {
+        bodies.push(bytes)
+      }),
+      close: vi.fn(async () => {})
+    }))
+    h.publisher.set({
+      h: fixture.snapshot.layers as AvatarLayer[],
+      v: [],
+      stream: true,
+      recording: false
+    })
+    h.receive({ version: 1, output: 'stream', orientation: 'h' })
+    await vi.advanceTimersByTimeAsync(1000)
+    const body = JSON.parse(new TextDecoder().decode(bodies[0]))
+    // Received but not applied: nothing is kept yet.
+    expect(h.accepted).toEqual([])
+    const applied = {
+      version: 1,
+      output: 'stream',
+      orientation: 'h',
+      applied: { publisherSid: 'PA_host', revision: body.revision }
+    }
+    h.receive(applied)
+    h.receive(applied)
+    await vi.advanceTimersByTimeAsync(100)
+    expect(h.accepted).toEqual([
+      {
+        output: 'stream',
+        orientation: 'h',
+        publisherSid: 'PA_host',
+        revision: body.revision,
+        layers: body.layers
+      }
+    ])
+    // A receipt naming another publisher (an old host session) is never kept.
+    h.receive({ ...applied, applied: { publisherSid: 'PA_old', revision: body.revision } })
+    await vi.advanceTimersByTimeAsync(100)
+    expect(h.accepted).toHaveLength(1)
+    h.publisher.close()
+  })
+  it('a clear a page applied reaches the cloud too, and an older ack never replaces a newer view (plan 249 S24)', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(1000)
+    const h = harness()
+    const bodies: { revision: number; layers: AvatarLayer[]; expiresAt: number }[] = []
+    h.room.localParticipant.streamBytes.mockImplementation(async () => {
+      const chunks: Uint8Array[] = []
+      return {
+        write: vi.fn(async (bytes: Uint8Array) => {
+          chunks.push(bytes)
+        }),
+        close: vi.fn(async () => {
+          const text = chunks.map((c) => new TextDecoder().decode(c)).join('')
+          if (text) bodies.push(JSON.parse(text))
+        })
+      }
+    })
+    const lane = { version: 1, output: 'stream', orientation: 'h' }
+    const ack = (revision: number) =>
+      h.receive({ ...lane, applied: { publisherSid: 'PA_host', revision } })
+    const layers = fixture.snapshot.layers as AvatarLayer[]
+    h.publisher.set({ h: layers, v: [], stream: true, recording: true })
+    h.receive(lane)
+    await vi.advanceTimersByTimeAsync(1000)
+    const shown = bodies.at(-1)!
+    ack(shown.revision)
+    await vi.advanceTimersByTimeAsync(100)
+    expect(h.accepted.map((v) => v.layers.length)).toEqual([shown.layers.length])
+    // Record only: the stream lane is sent an empty view; once applied, the
+    // cloud forgets the stream's avatar instead of keeping it for a takeover.
+    h.publisher.set({ h: layers, v: [], stream: false, recording: true })
+    await vi.advanceTimersByTimeAsync(1000)
+    const recordOnly = bodies.at(-1)!
+    expect(recordOnly.layers).toEqual([])
+    ack(recordOnly.revision)
+    await vi.advanceTimersByTimeAsync(100)
+    expect(h.accepted.at(-1)).toMatchObject({
+      output: 'stream',
+      revision: recordOnly.revision,
+      layers: []
+    })
+    // A late ack of the older, visible revision changes nothing.
+    ack(shown.revision)
+    await vi.advanceTimersByTimeAsync(100)
+    expect(h.accepted).toHaveLength(2)
+    // Hide while an upload may still be pending: the clear is reported too.
+    h.publisher.set({ h: layers, v: [], stream: true, recording: true })
+    await vi.advanceTimersByTimeAsync(1000)
+    h.publisher.set(null)
+    await vi.advanceTimersByTimeAsync(1000)
+    const hidden = bodies.at(-1)!
+    expect(hidden.layers).toEqual([])
+    ack(hidden.revision)
+    await vi.advanceTimersByTimeAsync(100)
+    expect(h.accepted.at(-1)).toMatchObject({ revision: hidden.revision, layers: [] })
+    // An ack after the sent envelope expired is never kept.
+    const count = h.accepted.length
+    h.publisher.set({ h: layers, v: [], stream: true, recording: true })
+    await vi.advanceTimersByTimeAsync(1000)
+    const late = bodies.at(-1)!
+    vi.setSystemTime(late.expiresAt + 1)
+    ack(late.revision)
+    expect(h.accepted).toHaveLength(count)
     h.publisher.close()
   })
   it('plan 249 S6: guests get the stream landscape layers only after the host opts in, then one clear', async () => {

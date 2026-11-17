@@ -7,6 +7,7 @@ import {
 } from './room-microphone-source'
 import {
   RoomGraphicsPublisher,
+  type AcceptedGraphicsView,
   type GraphicsContent,
   type RoomGraphicsStatus
 } from './room-graphics-publisher'
@@ -26,6 +27,7 @@ import {
 } from '../../../shared/room-frame'
 import {
   RoomAvatarPublisher,
+  type AcceptedAvatarView,
   type AvatarContent,
   type RoomAvatarAnimation,
   type RoomAvatarStatus
@@ -228,7 +230,20 @@ export type TalkShowRoomDeps = {
    * second host connection that drops this one reads as taken over.
    */
   onAir?: () => CloudOnAir | undefined
+  /** Plan 249 S24: an avatar output view a program page applied, to be kept. */
+  onAvatarAccepted?: (view: AcceptedAvatarView) => void
+  /** Plan 249 S24: a static output view a program page applied, to be kept. */
+  onGraphicsAccepted?: (view: AcceptedGraphicsView) => void
+  /**
+   * Plan 249 S24: true after this computer took the show over, until the
+   * streamer turns the camera and microphone on. A Sources pick never opens
+   * capture meanwhile; turning things off stays allowed.
+   */
+  sourcesHeld?: () => boolean
 }
+
+const SOURCES_HELD =
+  'This computer took the show over. Turn the camera and microphone on in the notice first.'
 
 export function talkShowRoomOptions(): RoomOptions {
   return {
@@ -511,6 +526,8 @@ export class TalkShowRoomClient {
   }
 
   setMicrophoneSelection(deviceId: string | null, name: string | null): Promise<void> {
+    if (deviceId && name && this.#deps.sourcesHeld?.())
+      return Promise.reject(new Error(SOURCES_HELD))
     const current = this.#microphoneChoice ?? {
       mode: 'browser-aec' as const,
       deviceId: null,
@@ -580,6 +597,7 @@ export class TalkShowRoomClient {
   }
 
   setCameraSelection(name: string | null, off: boolean): Promise<void> {
+    if (!off && name && this.#deps.sourcesHeld?.()) return Promise.reject(new Error(SOURCES_HELD))
     return this.#control(async (room) => {
       // Release capture, not just its publication, for None/off.
       this.#cameraEffects?.close()
@@ -1063,22 +1081,36 @@ export class TalkShowRoomClient {
 
   #bind(room: Room): void {
     this.#graphics?.close()
-    this.#graphics = new RoomGraphicsPublisher(room, (graphics) => {
-      if (!this.#owns(room)) return
-      this.#snapshot = {
-        ...this.#snapshot,
-        graphics: { ...graphics, enabled: this.#graphicsEnabled }
+    this.#graphics = new RoomGraphicsPublisher(
+      room,
+      (graphics) => {
+        if (!this.#owns(room)) return
+        this.#snapshot = {
+          ...this.#snapshot,
+          graphics: { ...graphics, enabled: this.#graphicsEnabled }
+        }
+        this.#publish()
+      },
+      // Plan 249 S24: a static view a program page applied, for the cloud.
+      (view) => {
+        if (this.#owns(room)) this.#deps.onGraphicsAccepted?.(view)
       }
-      this.#publish()
-    })
+    )
     this.#graphics.set(this.#graphicsEnabled ? this.#graphicsContent : null)
     this.#avatar?.close()
     this.#avatarStatus = null
-    this.#avatar = new RoomAvatarPublisher(room, (avatar) => {
-      if (!this.#owns(room)) return
-      this.#avatarStatus = avatar
-      this.#publishAvatar()
-    })
+    this.#avatar = new RoomAvatarPublisher(
+      room,
+      (avatar) => {
+        if (!this.#owns(room)) return
+        this.#avatarStatus = avatar
+        this.#publishAvatar()
+      },
+      // Plan 249 S24: a view a program page applied, for the cloud to keep.
+      (view) => {
+        if (this.#owns(room)) this.#deps.onAvatarAccepted?.(view)
+      }
+    )
     this.#avatar.set(this.#avatarEnabled ? this.#avatarContent : null)
     // No timer without an animated avatar (an idle room keeps no intervals).
     if (this.#motionSeed) this.#startMotion(room)
