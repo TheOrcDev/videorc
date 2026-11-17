@@ -3,6 +3,8 @@ import {
   exerciseGraphics,
   assertGraphicsArtifacts
 } from './cloud-parity-graphics.mjs'
+import { exerciseAudioRouting, installRoutingGuestScreen } from './cloud-parity-audio-routing.mjs'
+import { audioRoutingConfig, SCREEN_TONE_HZ } from './cloud-parity-audio-routing-contract.mjs'
 import { prepareAvatar, exerciseAvatar, assertAvatarVideo } from './cloud-parity-avatar.mjs'
 import { exerciseAvatarAnimation } from './cloud-parity-avatar-animation.mjs'
 import { prepareScenes, exerciseScenes, assertScenesVideo } from './cloud-parity-scenes.mjs'
@@ -35,6 +37,7 @@ import {
   toneWav,
   cameraY4m,
   audioMeasurements,
+  toneDbfs,
   colorFraction
 } from './cloud-parity-media.mjs'
 import {
@@ -75,7 +78,8 @@ export async function runBaseline({
   avatarAnimation = false,
   views = false,
   graphics = false,
-  handoff = false
+  handoff = false,
+  audioRouting = false
 }) {
   // Plan 249 S5: the animation case runs on the avatar case's real pages.
   // Plan 249 S24: so does the handoff case, after the avatar phase.
@@ -85,35 +89,38 @@ export async function runBaseline({
     web: revision(webRoot),
     template: 'v1'
   })
-  report.case = markers
-    ? 'markers'
-    : handoff
-      ? 'handoff'
-      : outputs
-        ? 'outputs'
-        : captions
-          ? 'captions'
-          : archive
-            ? 'archive'
-            : graphics
-              ? 'graphics'
-              : scenes
-                ? 'scenes'
-                : replayRing
-                  ? 'replay-ring'
-                  : avatarAnimation
-                    ? 'avatar-animation'
-                    : views
-                      ? 'views'
-                      : avatar
-                        ? 'avatar'
-                        : soundboard
-                          ? 'soundboard'
-                          : privacy
-                            ? 'privacy'
-                            : controls
-                              ? 'controls'
-                              : 'baseline'
+  const routingConfig = audioRouting ? audioRoutingConfig() : null
+  report.case = audioRouting
+    ? 'audio-routing'
+    : markers
+      ? 'markers'
+      : handoff
+        ? 'handoff'
+        : outputs
+          ? 'outputs'
+          : captions
+            ? 'captions'
+            : archive
+              ? 'archive'
+              : graphics
+                ? 'graphics'
+                : scenes
+                  ? 'scenes'
+                  : replayRing
+                    ? 'replay-ring'
+                    : avatarAnimation
+                      ? 'avatar-animation'
+                      : views
+                        ? 'views'
+                        : avatar
+                          ? 'avatar'
+                          : soundboard
+                            ? 'soundboard'
+                            : privacy
+                              ? 'privacy'
+                              : controls
+                                ? 'controls'
+                                : 'baseline'
   // A dirty web consumer makes its revision misleading. Require a dedicated,
   // installed checkout; inspect it read-only and never change the active one.
   const webDirty = execFileSync('git', ['status', '--porcelain', '--untracked-files=no'], {
@@ -159,7 +166,7 @@ export async function runBaseline({
             await recordPageAudio(
               page,
               name === 'program' ? 'program' : 'guest',
-              MEDIA.captureSeconds
+              routingConfig?.seconds ?? MEDIA.captureSeconds
             ),
             'base64'
           )
@@ -180,12 +187,20 @@ export async function runBaseline({
         ])
         const samples = new Float32Array(raw.length / 4)
         for (let i = 0; i < samples.length; i++) samples[i] = raw.readFloatLE(i * 4)
-        const tones = audioMeasurements(samples)
+        const tones = {
+          ...audioMeasurements(samples),
+          ...(audioRouting ? { screen: toneDbfs(samples, SCREEN_TONE_HZ) } : {})
+        }
         // Preserve the whole artifact and full-window measurements. Controls
         // allow at most one second for WebRTC/fade settlement, then require
         // continuous silence/restoration in the remaining decoded window.
         assert.ok(samples.length >= MEDIA.sampleRate * 2, 'Audio capture is too short')
-        const settledTones = audioMeasurements(samples.subarray(MEDIA.sampleRate))
+        const settledTones = {
+          ...audioMeasurements(samples.subarray(MEDIA.sampleRate)),
+          ...(audioRouting
+            ? { screen: toneDbfs(samples.subarray(MEDIA.sampleRate), SCREEN_TONE_HZ) }
+            : {})
+        }
         recordArtifact(report, h.root, file, 'decoded-output-audio')
         return { name, tones, settledTones, settledAfterMs: 1000 }
       })
@@ -199,6 +214,7 @@ export async function runBaseline({
     writeFileSync(h.env.VIDEORC_SMOKE_FAKE_MEDIA_VIDEO, cameraY4m(MEDIA.colors.host))
     writeFileSync(h.env.VIDEORC_SMOKE_FAKE_MEDIA_AUDIO, toneWav(MEDIA.tones.host))
     await h.destinations(controls || markers ? 1 : 0)
+    if (audioRouting) h.env.VIDEORC_ROOM_NATIVE_SYSTEM = '1'
     await h.launch()
     const cameraId = await prepareParityRoom(h, controls)
     if (outputs) {
@@ -230,14 +246,27 @@ export async function runBaseline({
         const identity = `g_${String(i + 1).repeat(22)}`
         return [
           name,
-          { identity, url: h.livekit.url, token: h.web.tokenFor(h.showId, identity, 'guest') }
+          {
+            identity,
+            screenShareAllowed: audioRouting && name === 'guest1',
+            url: h.livekit.url,
+            token: h.web.tokenFor(h.showId, identity, 'guest', audioRouting && name === 'guest1')
+          }
         ]
       })
     )
     pages = await startParityPages(
       webRoot,
       guests,
-      outputs || soundboard || avatar || scenes || replayRing || captions || views || graphics
+      outputs ||
+        soundboard ||
+        avatar ||
+        scenes ||
+        replayRing ||
+        captions ||
+        views ||
+        graphics ||
+        audioRouting
         ? {
             ...(outputs || captions || avatar || scenes || graphics
               ? {
@@ -300,6 +329,7 @@ export async function runBaseline({
       headless: true,
       args: [
         '--autoplay-policy=no-user-gesture-required',
+        ...(audioRouting ? ['--mute-audio'] : []),
         '--use-fake-ui-for-media-stream',
         ...(replayRing
           ? [
@@ -339,6 +369,11 @@ export async function runBaseline({
         peak: MEDIA.tonePeak,
         slug: name
       })
+      if (audioRouting && name === 'guest1')
+        await page.addInitScript(installRoutingGuestScreen, {
+          hz: SCREEN_TONE_HZ,
+          peak: MEDIA.tonePeak
+        })
       await page.goto(`${pages.origin}/guest/${name}`)
       clients.push({ name, page })
     }
@@ -505,6 +540,17 @@ export async function runBaseline({
         const { exerciseReplayRing } = await import('./cloud-parity-replay-ring.mjs')
         await exerciseReplayRing({ h, program, webRoot, output, report, sound })
       }
+      if (audioRouting)
+        await exerciseAudioRouting({
+          h,
+          clients,
+          captureAudio,
+          report,
+          sound,
+          guests,
+          output,
+          config: routingConfig
+        })
       if (soundboard) await exerciseSoundboard({ h, clients, captureAudio, report, sound, guests })
       if (views) await exerciseViews({ h, clients, captureAudio, report, sound, guests, output })
       await h.rpc('sounds.play', { id: sound.id })

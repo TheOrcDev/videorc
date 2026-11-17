@@ -1,6 +1,7 @@
 import type { RoomCameraFixtureAction, RoomCameraResources } from './room-camera'
 import type { RoomFrameCommand, RoomFrameReply, RoomFrameResources } from './room-frame'
 import type { ManagedOutputProfile } from './cloud-output-profile'
+import type { RoomSystemAudioCommand, RoomSystemAudioFrame } from './room-system-audio'
 import type { RoomMicrophoneApi } from './room-microphone'
 import type { RoomPcmCommand, RoomPcmFrame, RoomPcmResources } from './room-pcm'
 import type { ChatDelivery, ChatDeliveryBoundary } from './chat-delivery'
@@ -6498,6 +6499,8 @@ export type AppExitKind = 'quit' | 'close'
 export interface VideorcApi {
   getRoomPcmTestResources: () => Promise<RoomPcmResources>
   getRoomNativeMicrophoneResources: () => Promise<RoomPcmResources>
+  roomSystemAudioPcm: (command: RoomSystemAudioCommand) => Promise<RoomSystemAudioFrame | null>
+  getRoomSystemAudioResources: () => Promise<import('./room-pcm').RoomPcmResources>
   roomMicrophonePcm: RoomMicrophoneApi
   roomPcmTest: (command: RoomPcmCommand) => Promise<RoomPcmFrame | null>
   getRoomFrameTestResources: () => Promise<RoomFrameResources>

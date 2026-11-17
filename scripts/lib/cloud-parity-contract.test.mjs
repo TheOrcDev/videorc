@@ -94,6 +94,14 @@ test('parity roles mirror production host/guest grants; recorders cannot publish
   assert.equal(guest.canPublishData, false)
   assert.equal(guest.canUpdateOwnMetadata, false)
   assert.deepEqual(guest.canPublishSources, ['camera', 'microphone'])
+  const screenGuest = managedParityGrant({ role: 'guest', room: 'fixture', screenShare: true })
+  assert.deepEqual(screenGuest.canPublishSources, [
+    'camera',
+    'microphone',
+    'screen_share',
+    'screen_share_audio'
+  ])
+  assert.equal(screenGuest.canPublishData, false)
   const recorder = managedParityGrant({ role: 'recorder', room: 'fixture' })
   assert.equal(recorder.canPublish, false)
   assert.equal(recorder.canPublishData, false)

@@ -1,3 +1,5 @@
+import { roomAudioRouting } from './room-audio-routing'
+import { AUDIO_ROUTING_TOPIC } from '../../../shared/program-audio-routing'
 import { ConnectionState, LocalAudioTrack, RoomEvent, Track, type Room } from 'livekit-client'
 import {
   AUX_TRACK_NAME,
@@ -37,6 +39,10 @@ export class RoomAuxPublisher {
   #closed = false
   #error: string | null = null
   #off: () => void
+  #routingOff: () => void
+  #routingSequence = 0
+  #routingBusy = false
+  #routingLastSent = 0
   #timer: ReturnType<typeof setInterval> | null = null
   get enabled(): boolean {
     return soundboard.getSnapshot().roomAux?.enabled === true
@@ -45,6 +51,7 @@ export class RoomAuxPublisher {
     private room: Room,
     enabled = false
   ) {
+    roomAudioRouting.disarmSystem()
     soundboard.setRoomAux({
       enabled,
       state: 'off',
@@ -55,6 +62,7 @@ export class RoomAuxPublisher {
       productionQualified: false
     })
     this.#off = soundboard.subscribe(() => this.refresh())
+    this.#routingOff = roomAudioRouting.subscribe(this.refresh)
     room.on(RoomEvent.DataReceived, this.#receive)
     room.on(RoomEvent.ParticipantConnected, this.refresh)
     room.on(RoomEvent.ParticipantDisconnected, this.refresh)
@@ -89,6 +97,7 @@ export class RoomAuxPublisher {
     }
   }
   #lost = (): void => {
+    roomAudioRouting.disarmSystem()
     this.#receipts.clear()
     this.#stop()
     this.refresh()
@@ -98,6 +107,20 @@ export class RoomAuxPublisher {
     const base = [...this.room.localParticipant.trackPublications.values()]
       .filter((p) => p.trackName !== AUX_TRACK_NAME)
       .map((p) => p.trackSid)
+    const legacySilenced = (identity: string): boolean =>
+      identity.startsWith('EG_') &&
+      roomAudioRouting.getSnapshot().takeover &&
+      (!capabilityCurrent(
+        this.#receipts.get(identity),
+        this.room.remoteParticipants.get(identity)?.sid ?? '',
+        now
+      ) ||
+        this.#receipts.get(identity)?.audioRouting !== 1)
+    const speechSids = new Set(
+      [...this.room.localParticipant.trackPublications.values()]
+        .filter((p) => p.kind === Track.Kind.Audio)
+        .map((p) => p.trackSid)
+    )
     // SID scope prevents a replacement/old page inheriting another session's consent.
     this.room.localParticipant.setTrackSubscriptionPermissions(
       false,
@@ -105,8 +128,10 @@ export class RoomAuxPublisher {
         participantSid: p.sid,
         allowAll: false,
         allowedTrackSids: [
-          ...base,
-          ...(this.#sid && capabilityCurrent(this.#receipts.get(p.identity), p.sid, now)
+          ...base.filter((sid) => !legacySilenced(p.identity) || !speechSids.has(sid)),
+          ...(this.#sid &&
+          !legacySilenced(p.identity) &&
+          capabilityCurrent(this.#receipts.get(p.identity), p.sid, now)
             ? [this.#sid]
             : [])
         ]
@@ -119,22 +144,32 @@ export class RoomAuxPublisher {
     this.#track = null
     this.#sid = null
     track?.stop()
-    this.#sink?.close()
+    const sink = this.#sink
+    // Close synchronously fences capture before pending connect/grant work.
+    const closing = sink?.close()
+    if (closing) this.#retiring = Promise.all([this.#retiring, closing]).then(() => {})
     this.#sink = null
     if (track)
       this.#retiring = this.#retiring.then(() =>
         this.room.localParticipant.unpublishTrack(track, true).catch(() => {})
       )
+    void this.#retiring.catch(() => {})
   }
   refresh = (): void => {
     if (this.#closed) return
     const snapshot = soundboard.getSnapshot()
-    const enabled = snapshot.roomAux?.enabled === true
-    if (enabled && this.#timer === null) this.#timer = setInterval(this.refresh, 1000)
+    const enabled =
+      snapshot.roomAux?.enabled === true || roomAudioRouting.getSnapshot().system.enabled
+    // The 1 s pulse runs only while something needs it: a source to publish,
+    // or a routing-capable program page whose 3 s lease must be renewed.
+    const pulse = enabled || this.#routingTargets(Date.now()).length > 0
+    if (pulse && this.#timer === null) this.#timer = setInterval(this.refresh, 1000)
+    if (!pulse && this.#timer !== null) {
+      clearInterval(this.#timer)
+      this.#timer = null
+    }
     if (!enabled) {
       this.#error = null
-      if (this.#timer !== null) clearInterval(this.#timer)
-      this.#timer = null
     }
     const consumers = [...this.room.remoteParticipants.values()]
     // A legacy runner is intentionally incompatible, too.
@@ -149,6 +184,7 @@ export class RoomAuxPublisher {
       )
     if (reason && (this.#track || this.#sink || this.#busy)) this.#stop()
     this.#permissions()
+    this.#sendRouting()
     if (!reason && !this.#track && !this.#busy) {
       this.#busy = true
       const epoch = ++this.#epoch
@@ -172,7 +208,7 @@ export class RoomAuxPublisher {
         observed[p.identity] = a.observedAt
     }
     const status: RoomAuxStatus = {
-      enabled,
+      enabled: snapshot.roomAux?.enabled === true,
       state: !enabled ? 'off' : reason ? 'blocked' : this.#sid ? 'published' : 'queued',
       reason: reason ?? this.#sink?.problem() ?? null,
       queuedVoices: this.#sink?.queued() ?? [],
@@ -182,11 +218,49 @@ export class RoomAuxPublisher {
     }
     soundboard.setRoomAux(status)
   }
+  /** Program pages that negotiated deliberate routing and are current now. */
+  #routingTargets(now: number): string[] {
+    return [...this.room.remoteParticipants.values()]
+      .filter(
+        (p) =>
+          p.identity.startsWith('EG_') &&
+          capabilityCurrent(this.#receipts.get(p.identity), p.sid, now) &&
+          this.#receipts.get(p.identity)?.audioRouting === 1
+      )
+      .map((p) => p.identity)
+  }
+  #sendRouting(): void {
+    if (this.#routingBusy || this.room.state !== ConnectionState.Connected) return
+    const now = Date.now()
+    if (now - this.#routingLastSent < 250) return
+    const targets = this.#routingTargets(now)
+    if (!targets.length) return
+    this.#routingLastSent = now
+    this.#routingBusy = true
+    const packet = {
+      v: 1,
+      show: this.room.name,
+      publisherSid: this.room.localParticipant.sid,
+      sequence: ++this.#routingSequence,
+      sentAt: now,
+      ...roomAudioRouting.getSnapshot().program
+    }
+    void this.room.localParticipant
+      .publishData(new TextEncoder().encode(JSON.stringify(packet)), {
+        reliable: true,
+        topic: AUDIO_ROUTING_TOPIC,
+        destinationIdentities: targets
+      })
+      .catch(() => {})
+      .finally(() => {
+        this.#routingBusy = false
+      })
+  }
   async #start(epoch: number): Promise<void> {
     try {
       await this.#retiring
       if (this.#closed || epoch !== this.#epoch) return
-      const sink = createRoomAuxSink(soundboard.getSnapshot())
+      const sink = createRoomAuxSink(soundboard.getSnapshot(), this.room.name)
       this.#sink = sink
       const track = new LocalAudioTrack(sink.track, undefined, true)
       this.#track = track
@@ -216,7 +290,10 @@ export class RoomAuxPublisher {
   close(): void {
     this.#closed = true
     this.#off()
+    this.#routingOff()
+    roomAudioRouting.disarmSystem()
     if (this.#timer !== null) clearInterval(this.#timer)
+    this.#timer = null
     this.room.off(RoomEvent.DataReceived, this.#receive)
     this.room.off(RoomEvent.ParticipantConnected, this.refresh)
     this.room.off(RoomEvent.ParticipantDisconnected, this.refresh)

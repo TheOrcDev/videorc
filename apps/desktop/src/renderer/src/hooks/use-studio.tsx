@@ -1,4 +1,6 @@
 import { talkShowOutputPlan, talkShowOutputStartProblem } from '@/lib/talk-show-outputs'
+import { roomSystemResources, takeRoomSystemObservations } from '@/lib/room-system-audio-state'
+import { roomAudioRouting } from '@/lib/room-audio-routing'
 import {
   resetRoomFrameSurfaces,
   roomFrameEncodeObserverEnabled,
@@ -4738,6 +4740,15 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // can still restore only the microphone mute introduced by the takeover.
   const takeoverMuteOwnershipRef = useRef(loadScreenTakeoverMuteOwnership())
   const commitActiveScreen = useCallback((screen: StreamScreen | null): void => {
+    roomAudioRouting.takeover(screen !== null)
+    if (cloudStatusRef.current?.room?.phase === 'open') {
+      takeoverMuteOwnershipRef.current = null
+      persistScreenTakeoverMuteOwnership(null)
+      // D3: program gain owns takeover silence. Conversation and operator mute
+      // are independent; clearing a takeover never writes microphone settings.
+      setActiveScreen(screen)
+      return
+    }
     const transition = screenTakeoverMicrophoneTransition({
       active: screen !== null,
       microphoneMuted: captureConfigRef.current.audio.microphoneMuted,
@@ -20644,6 +20655,18 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       },
       roomSceneAnimate: (on: boolean) =>
         setSettings((current) => ({ ...current, animateSceneChanges: on })),
+      roomAudioRouting: (patch?: {
+        system?: Parameters<typeof roomAudioRouting.system>[0]
+        program?: Parameters<typeof roomAudioRouting.program>[0]
+      }) => {
+        if (patch?.system) roomAudioRouting.system(patch.system)
+        if (patch?.program) roomAudioRouting.program(patch.program)
+        return {
+          ...roomAudioRouting.getSnapshot(),
+          resources: roomSystemResources(),
+          observations: takeRoomSystemObservations()
+        }
+      },
       roomSounds: (enabled?: boolean) => {
         if (enabled !== undefined) soundboard.setRoomAuxEnabled(enabled)
         return soundboard.getSnapshot().roomAux ?? null

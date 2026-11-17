@@ -92,6 +92,7 @@ mod room_clock;
 mod room_frame_bridge;
 // Plan 249 S13b: the processed camera role's native producer.
 mod room_camera_source;
+mod room_system_audio;
 // Plan 168 Phase F: the pet builder (S-F1 to S-F3) and the creator's RPCs (S-F4).
 mod buddy_pet_build;
 mod buddy_pet_create;
@@ -8647,6 +8648,83 @@ async fn handle_room_microphone_control(
     })
 }
 
+async fn handle_room_system_control(
+    state: &AppState,
+    role: BackendRole,
+    bridge: &mut room_system_audio::Bridge,
+    text: &str,
+) -> Option<ServerResponse> {
+    #[derive(Deserialize)]
+    struct Envelope<'a> {
+        id: &'a str,
+        method: &'a str,
+    }
+    if !text.contains("room.system.") {
+        return None;
+    }
+    let envelope = serde_json::from_str::<Envelope<'_>>(text).ok()?;
+    if !matches!(envelope.method, "room.system.pcm" | "room.system.inspect") {
+        return None;
+    }
+    if role != BackendRole::Admin
+        || !cfg!(debug_assertions)
+        || !state.smoke_rpc_enabled
+        || std::env::var("VIDEORC_ROOM_NATIVE_SYSTEM").as_deref() != Ok("1")
+    {
+        return Some(ServerResponse::error(
+            envelope.id,
+            "system audio-disabled",
+            "Native room system audio is disabled and unqualified.",
+        ));
+    }
+    if text.len() > 2048 {
+        return Some(ServerResponse::error(
+            envelope.id,
+            "invalid-params",
+            "System audio command exceeds bound.",
+        ));
+    }
+    let command = serde_json::from_str::<ClientCommand>(text).ok()?;
+    if command.method == "room.system.inspect" {
+        let wait_for_close = command.params == serde_json::json!({ "waitForClose": true });
+        if !rpc_params_are_empty(&command.params) && !wait_for_close {
+            return Some(ServerResponse::error(
+                command.id,
+                "invalid-params",
+                "Invalid system audio inspection parameters",
+            ));
+        }
+        // Main uses this only after a failed source RPC closed the owner socket.
+        // Wait for actual producer completion, never acknowledge a transient
+        // nonzero owner as closed or permanently fail a normal EOF teardown.
+        if wait_for_close
+            && !tokio::task::spawn_blocking(room_system_audio::cleanup_ready)
+                .await
+                .unwrap_or(false)
+        {
+            return Some(ServerResponse::error(
+                command.id,
+                "system audio-cleanup-pending",
+                "System audio owner has not released capture",
+            ));
+        }
+        return Some(ServerResponse::ok(
+            command.id,
+            serde_json::json!({ "nativeSources": room_system_audio::sources() }),
+        ));
+    }
+    let result = match serde_json::from_value::<room_system_audio::Command>(command.params) {
+        Ok(params) => bridge.command(state, params).await,
+        Err(_) => Err(anyhow::anyhow!("Invalid system audio command")),
+    };
+    Some(match result {
+        Ok(frame) => {
+            ServerResponse::ok(command.id, serde_json::to_value(frame).unwrap_or_default())
+        }
+        Err(error) => ServerResponse::error(command.id, "system-audio-refused", error.to_string()),
+    })
+}
+
 fn handle_room_pcm_control(
     role: BackendRole,
     enabled: bool,
@@ -9221,6 +9299,7 @@ async fn websocket_session_with_handler_role_and_redaction(
     let mut room_frame_bridge = room_frame_bridge::Bridge::default();
     let mut room_camera_bridge = room_frame_bridge::Bridge::default();
     let mut room_camera_producer = room_camera_source::Producer::default();
+    let mut room_system_audio = room_system_audio::Bridge::default();
 
     loop {
         let incoming = tokio::select! {
@@ -9339,6 +9418,23 @@ async fn websocket_session_with_handler_role_and_redaction(
                     text.as_str(),
                 )
                 .await
+                {
+                    if !queue_websocket_response(
+                        &outgoing_tx,
+                        &reliable_metrics,
+                        &slow_pressure,
+                        response,
+                    )
+                    .await
+                    {
+                        break;
+                    }
+                    continue;
+                }
+
+                if let Some(response) =
+                    handle_room_system_control(&state, role, &mut room_system_audio, text.as_str())
+                        .await
                 {
                     if !queue_websocket_response(
                         &outgoing_tx,

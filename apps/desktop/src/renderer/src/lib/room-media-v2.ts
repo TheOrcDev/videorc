@@ -13,12 +13,14 @@ export const ROOM_MEDIA_MANIFEST = {
     channels: 2,
     speechProcessing: false
   },
+  audioRouting: { version: 1, takeover: 'speech-only', legacy: 'all-program-silence' },
   productionQualified: false
 } as const
 export type ConsumerCapability = {
   v: 2
   identity: string
   participantSid: string
+  audioRouting?: 1
   graphics?: AvatarCapability
   /** Plan 249 S12: the egress lane draws scenes; `applied` is its rendered revision. */
   scene?: SceneCapability
@@ -53,6 +55,8 @@ export function parseConsumerCapability(value: unknown): ConsumerCapability | nu
     !/^PA_[A-Za-z0-9]{1,64}$/.test(v.participantSid)
   )
     return null
+  if (v.audioRouting !== undefined && (v.audioRouting !== 1 || !v.identity.startsWith('EG_')))
+    return null
   const graphics = v.graphics === undefined ? null : parseAvatarCapability(v.graphics)
   if (v.graphics !== undefined && (!graphics || !graphicsLaneAllowed(v.identity, graphics)))
     return null
@@ -80,6 +84,7 @@ export function parseConsumerCapability(value: unknown): ConsumerCapability | nu
     v: 2,
     identity: v.identity,
     participantSid: v.participantSid,
+    ...(v.audioRouting === 1 ? { audioRouting: 1 as const } : {}),
     ...(graphics ? { graphics } : {}),
     ...(scene ? { scene } : {}),
     ...(auxiliary ? { auxiliary } : {})
