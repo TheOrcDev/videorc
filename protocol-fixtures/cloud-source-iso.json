@@ -1,0 +1,318 @@
+{
+  "description": "Plan 249 S22 ISO manifest v1. Byte-identical in desktop protocol-fixtures/cloud-source-iso.json and web tests/fixtures/cloud-source-iso.json. Every invalid case applies one JSON-pointer replacement to `valid` and must be refused by every parser. v1 never trusts a host camera layout: it stays unknown until a verified descriptor exists.",
+  "valid": {
+    "v": 1,
+    "kind": "videorc.cloud-iso",
+    "showId": "sh_aaaaaaaaaaaaaaaaaaaaaa",
+    "takeId": "tk_AbCdEf123456",
+    "orientation": "h",
+    "liveIntervalIds": ["li_one"],
+    "clock": {
+      "origin": "program-take-start",
+      "originAtMs": 1800000000000,
+      "basis": "provider-egress-start",
+      "uncertainty": "unmeasured"
+    },
+    "consent": {
+      "hostAtMs": 1799999995000,
+      "guests": {
+        "g_ann": 1799999996000
+      }
+    },
+    "reservation": {
+      "maxActiveEntries": 8,
+      "maxMinutes": 60,
+      "ceilingMicros": 480000,
+      "estimateMicros": 480000,
+      "deadlineAtMs": 1800003600000
+    },
+    "meter": {
+      "egressMs": 218700,
+      "costMicros": 5000
+    },
+    "createdAtMs": 1799999997000,
+    "expiresAtMs": 1800604800000,
+    "stoppedAtMs": 1800000060400,
+    "stopReason": "take-ended",
+    "entries": [
+      {
+        "id": "host/host-camera/g1",
+        "role": "host-camera",
+        "subject": "host",
+        "generation": 1,
+        "trackSid": "TR_hostcam1",
+        "kind": "video",
+        "mimeType": "video/VP8",
+        "state": "complete",
+        "egressId": "EG_hostcam1",
+        "objectPrefix": "iso/host-camera/host-g1",
+        "objectKey": "talk/user_owner/sh_aaaaaaaaaaaaaaaaaaaaaa/h/tk_AbCdEf123456/iso/host-camera/host-g1.webm",
+        "requestedAtMs": 1800000000200,
+        "startedAtMs": 1800000000400,
+        "endedAtMs": 1800000060400,
+        "offsetMs": 400,
+        "durationMs": 60000,
+        "bytes": 900000,
+        "overlap": false,
+        "frameLayout": {
+          "basis": "unavailable",
+          "layout": "unknown",
+          "declared": "opaque"
+        },
+        "endReason": "take-ended",
+        "failure": null
+      },
+      {
+        "id": "host/host-microphone/g1",
+        "role": "host-microphone",
+        "subject": "host",
+        "generation": 1,
+        "trackSid": "TR_hostmic1",
+        "kind": "audio",
+        "mimeType": "audio/opus",
+        "state": "complete",
+        "egressId": "EG_hostmic1",
+        "objectPrefix": "iso/host-microphone/host-g1",
+        "objectKey": "talk/user_owner/sh_aaaaaaaaaaaaaaaaaaaaaa/h/tk_AbCdEf123456/iso/host-microphone/host-g1.ogg",
+        "requestedAtMs": 1800000000150,
+        "startedAtMs": 1800000000350,
+        "endedAtMs": 1800000020350,
+        "offsetMs": 350,
+        "durationMs": 20000,
+        "bytes": 120000,
+        "overlap": false,
+        "frameLayout": null,
+        "endReason": "unpublished",
+        "failure": null
+      },
+      {
+        "id": "host/host-microphone/g2",
+        "role": "host-microphone",
+        "subject": "host",
+        "generation": 2,
+        "trackSid": "TR_hostmic2",
+        "kind": "audio",
+        "mimeType": "audio/opus",
+        "state": "complete",
+        "egressId": "EG_hostmic2",
+        "objectPrefix": "iso/host-microphone/host-g2",
+        "objectKey": "talk/user_owner/sh_aaaaaaaaaaaaaaaaaaaaaa/h/tk_AbCdEf123456/iso/host-microphone/host-g2.ogg",
+        "requestedAtMs": 1800000020700,
+        "startedAtMs": 1800000020900,
+        "endedAtMs": 1800000060400,
+        "offsetMs": 20900,
+        "durationMs": 39500,
+        "bytes": 230000,
+        "overlap": false,
+        "frameLayout": null,
+        "endReason": "take-ended",
+        "failure": null
+      },
+      {
+        "id": "host/host-aux/g1",
+        "role": "host-aux",
+        "subject": "host",
+        "generation": 1,
+        "trackSid": "TR_hostaux1",
+        "kind": "audio",
+        "mimeType": "audio/opus",
+        "state": "complete",
+        "egressId": "EG_hostaux1",
+        "objectPrefix": "iso/host-aux/host-g1",
+        "objectKey": "talk/user_owner/sh_aaaaaaaaaaaaaaaaaaaaaa/h/tk_AbCdEf123456/iso/host-aux/host-g1.ogg",
+        "requestedAtMs": 1800000000300,
+        "startedAtMs": 1800000000500,
+        "endedAtMs": 1800000060400,
+        "offsetMs": 500,
+        "durationMs": 59900,
+        "bytes": 310000,
+        "overlap": false,
+        "frameLayout": null,
+        "endReason": "take-ended",
+        "failure": null
+      },
+      {
+        "id": "g_ann/guest-camera/g1",
+        "role": "guest-camera",
+        "subject": "g_ann",
+        "generation": 1,
+        "trackSid": "TR_anncam1",
+        "kind": "video",
+        "mimeType": "video/VP8",
+        "state": "partial",
+        "egressId": "EG_anncam1",
+        "objectPrefix": "iso/guest-camera/g_ann-g1",
+        "objectKey": "talk/user_owner/sh_aaaaaaaaaaaaaaaaaaaaaa/h/tk_AbCdEf123456/iso/guest-camera/g_ann-g1.webm",
+        "requestedAtMs": 1800000000500,
+        "startedAtMs": 1800000000700,
+        "endedAtMs": 1800000040000,
+        "offsetMs": 700,
+        "durationMs": 39300,
+        "bytes": 500000,
+        "overlap": false,
+        "frameLayout": {
+          "basis": "role-opaque",
+          "layout": "opaque",
+          "declared": null
+        },
+        "endReason": null,
+        "failure": "limit-reached"
+      },
+      {
+        "id": "g_ann/guest-microphone/g1",
+        "role": "guest-microphone",
+        "subject": "g_ann",
+        "generation": 1,
+        "trackSid": "TR_annmic1",
+        "kind": "audio",
+        "mimeType": "audio/opus",
+        "state": "failed",
+        "egressId": null,
+        "objectPrefix": "iso/guest-microphone/g_ann-g1",
+        "objectKey": null,
+        "requestedAtMs": 1800000000000,
+        "startedAtMs": null,
+        "endedAtMs": 1800000000600,
+        "offsetMs": null,
+        "durationMs": null,
+        "bytes": null,
+        "overlap": false,
+        "frameLayout": null,
+        "endReason": null,
+        "failure": "start-failed"
+      }
+    ],
+    "refused": [
+      {
+        "trackSid": "TR_hostscreenaudio",
+        "reason": "unnamed-host-screen-audio"
+      },
+      {
+        "trackSid": "TR_bobcam1",
+        "reason": "guest-consent-missing"
+      }
+    ],
+    "productionQualified": false
+  },
+  "invalid": [
+    {
+      "case": "aux-relabelled-as-mic",
+      "pointer": "/entries/3/role",
+      "value": "host-microphone"
+    },
+    {
+      "case": "guest-role-on-host-subject",
+      "pointer": "/entries/4/subject",
+      "value": "host"
+    },
+    {
+      "case": "duplicate-track-sid",
+      "pointer": "/entries/2/trackSid",
+      "value": "TR_hostmic1"
+    },
+    {
+      "case": "wrong-object-prefix",
+      "pointer": "/entries/0/objectPrefix",
+      "value": "iso/host-screen/host-g1"
+    },
+    {
+      "case": "object-key-outside-take",
+      "pointer": "/entries/0/objectKey",
+      "value": "talk/user_owner/other/h/tk_Zzzzzzzzzzzz/iso/host-camera/host-g1.webm"
+    },
+    {
+      "case": "traversal-object-key",
+      "pointer": "/entries/0/objectKey",
+      "value": "talk/user_owner/sh_aaaaaaaaaaaaaaaaaaaaaa/h/tk_AbCdEf123456/iso/host-camera/host-g1/../../x.webm"
+    },
+    {
+      "case": "offset-not-from-origin",
+      "pointer": "/entries/0/offsetMs",
+      "value": 401
+    },
+    {
+      "case": "complete-without-output",
+      "pointer": "/entries/0/objectKey",
+      "value": null
+    },
+    {
+      "case": "failed-without-cause",
+      "pointer": "/entries/5/failure",
+      "value": null
+    },
+    {
+      "case": "guest-without-consent",
+      "pointer": "/consent/guests",
+      "value": {}
+    },
+    {
+      "case": "generation-over-bound",
+      "pointer": "/entries/0/generation",
+      "value": 7
+    },
+    {
+      "case": "production-qualified-claim",
+      "pointer": "/productionQualified",
+      "value": true
+    },
+    {
+      "case": "unmeasured-clock-claimed-measured",
+      "pointer": "/clock/uncertainty",
+      "value": "measured"
+    },
+    {
+      "case": "unknown-field",
+      "pointer": "/extra",
+      "value": 1
+    },
+    {
+      "case": "estimate-over-ceiling",
+      "pointer": "/reservation/estimateMicros",
+      "value": 480001
+    },
+    {
+      "case": "kind-mismatch",
+      "pointer": "/entries/1/kind",
+      "value": "video"
+    },
+    {
+      "case": "mime-kind-mismatch",
+      "pointer": "/entries/1/mimeType",
+      "value": "video/VP8"
+    },
+    {
+      "case": "host-camera-layout-trusted-without-descriptor",
+      "pointer": "/entries/0/frameLayout/layout",
+      "value": "opaque"
+    },
+    {
+      "case": "host-camera-trusted-basis-in-v1",
+      "pointer": "/entries/0/frameLayout/basis",
+      "value": "trusted-descriptor"
+    },
+    {
+      "case": "layout-on-audio-role",
+      "pointer": "/entries/1/frameLayout",
+      "value": {
+        "basis": "role-opaque",
+        "layout": "opaque",
+        "declared": null
+      }
+    },
+    {
+      "case": "guest-camera-declared-packed",
+      "pointer": "/entries/4/frameLayout/declared",
+      "value": "rgb-left-alpha-right:g8"
+    },
+    {
+      "case": "unknown-declared-layout",
+      "pointer": "/entries/0/frameLayout/declared",
+      "value": "rgb-left-alpha-right:g4"
+    },
+    {
+      "case": "video-without-layout",
+      "pointer": "/entries/4/frameLayout",
+      "value": null
+    }
+  ]
+}

@@ -1,7 +1,9 @@
 import { LibraryCloudArchive } from './library-cloud-archive'
+import { LibraryCloudIsoTake, useCloudIsoLibrary } from './library-cloud-iso'
 import { openWorkspaceTab } from '@/lib/workspace-navigation'
 import { cloudRecordingAvailability, cloudTakeLabel } from '@/lib/cloud-recordings-view'
 import {
+  Fragment,
   useCallback,
   useEffect,
   useRef,
@@ -93,6 +95,13 @@ export function LibraryCloudRecordings(): ReactElement {
     })
   }
   const mountedRef = useRef(true)
+  // Plan 249 S22: each take's separate files, under its row.
+  const iso = useCloudIsoLibrary({
+    client,
+    recordings,
+    enabled: signedIn && online,
+    outputDirectoryHandle: settings.outputDirectoryHandle
+  })
 
   useEffect(() => {
     mountedRef.current = true
@@ -222,18 +231,31 @@ export function LibraryCloudRecordings(): ReactElement {
       ) : (
         <div className="max-h-56 overflow-y-auto">
           <GroupedList aria-label="Cloud recordings">
-            {recordings.map((recording) => (
-              <CloudRecordingRow
-                key={recording.id}
-                disabled={!online}
-                download={downloads.get(recording.id) ?? null}
-                recording={recording}
-                onCancel={(jobId) => {
-                  if (client) void cancelCloudDownload(client, jobId)
-                }}
-                onDownload={() => void download(recording.id)}
-              />
-            ))}
+            {recordings.map((recording) => {
+              const isoTake = iso.takes.get(recording.id)
+              return (
+                <Fragment key={recording.id}>
+                  <CloudRecordingRow
+                    disabled={!online}
+                    download={downloads.get(recording.id) ?? null}
+                    recording={recording}
+                    onCancel={(jobId) => {
+                      if (client) void cancelCloudDownload(client, jobId)
+                    }}
+                    onDownload={() => void download(recording.id)}
+                  />
+                  {isoTake ? (
+                    <LibraryCloudIsoTake
+                      disabled={!online}
+                      imports={iso.imports}
+                      take={isoTake}
+                      onCancel={(jobId) => void iso.cancelImport(jobId)}
+                      onImport={() => void iso.importTake(isoTake)}
+                    />
+                  ) : null}
+                </Fragment>
+              )
+            })}
           </GroupedList>
         </div>
       )}

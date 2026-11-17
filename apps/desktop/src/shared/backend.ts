@@ -10003,3 +10003,101 @@ export interface CloudArchiveStart {
   outputDirectory?: string
   ffmpegPath?: string
 }
+
+// --- Plan 249 S22: opt-in cloud ISO ("Separate files") -----------------------
+// docs/cloud/249-s22-contract.md §5. The web's JSON passes through the
+// backend; a take's manifest stays `unknown` on the wire and the renderer
+// reads it only through `parseIsoManifest` (shared/cloud-source-iso.ts), so
+// the strict parser loads with the Guests tab and the Library, never eagerly.
+
+/** The web's `managedIsoAvailability()`: what still stands in the way. */
+export interface CloudIsoAvailability {
+  enabled: boolean
+  productionQualified: boolean
+  provider?: {
+    adapter: string
+    sdkSupport: string
+    /** Published figures (`microsPerTrackEgressMinute`, …), never a bill. */
+    facts: Record<string, string | number | boolean>
+  }
+  /** Each unmet prerequisite and its state ("not-run", "missing", …). */
+  unmet?: Record<string, string>
+}
+export interface CloudIsoRequest {
+  atMs: number
+  consentVersion: 'iso-consent-v1'
+  maxActiveEntries: number
+  maxMinutes: number
+  costCeilingMicros: number
+  /** The plan's recording retention; separate files never outlive it. */
+  retentionDays: number
+}
+export interface CloudIsoTake {
+  /** `IsoManifestV1`, validated by the backend; parse again before use. */
+  manifest: unknown
+  /** The S20 / S21c id of the take's mixed program recording. */
+  programRecordingId: string
+}
+export interface CloudIsoStatus {
+  /** The host's consent and limits; null while separate files are off. */
+  request: CloudIsoRequest | null
+  /** Guests who agreed, by room identity (`g_…`). */
+  guestConsent: Array<{ identity: string; atMs: number }>
+  /** Why the last take could not start separate files (an admission code). */
+  lastRefusal: { reason: string; atMs: number; takeId: string | null } | null
+  takes: CloudIsoTake[]
+}
+/** `cloud.iso.status`, `cloud.iso.enable` and `cloud.iso.disable`. */
+export interface CloudIsoAnswer {
+  availability: CloudIsoAvailability
+  iso: CloudIsoStatus | null
+}
+export interface CloudIsoEnableParams {
+  showId: string
+  /** Sent only from the confirmation the host checked. */
+  consent: true
+  maxActiveEntries: number
+  maxMinutes: number
+  costCeilingMicros: number
+}
+export interface CloudIsoImportParams {
+  showId: string
+  takeId: string
+  /** Output's folder as the capability main issued, like `cloud.recordings.download`. */
+  outputDirectoryCapability?: string
+  /** A raw folder: the admin role only (the smokes); refused from the renderer. */
+  outputDirectory?: string
+  ffmpegPath?: string
+}
+export type CloudIsoImportState = 'pending' | 'downloading' | 'complete' | 'failed' | 'expired'
+/** The backend's `IsoDownloadRecord` (camelCase). */
+export interface CloudIsoDownloadRecord {
+  entryId: string
+  objectKey: string
+  expectedBytes: number | null
+  state: CloudIsoImportState
+  attempts: number
+  localFileName: string
+  bytes: number | null
+  error: string | null
+}
+/** `cloud.iso.imports`: one per take this computer imported from. */
+export interface CloudIsoImportJournal {
+  showId: string
+  takeId: string
+  programRecordingId: string
+  records: CloudIsoDownloadRecord[]
+}
+/** The `cloud.iso.import` event: one file of an import job. */
+export interface CloudIsoImportEvent {
+  jobId: string
+  showId: string
+  takeId: string
+  /** Null for a job-level failure that names no file. */
+  entryId: string | null
+  state: CloudIsoImportState
+  bytes?: number | null
+  error?: string | null
+  /** The Library recording a complete file was registered as. */
+  localSessionId?: string | null
+}
