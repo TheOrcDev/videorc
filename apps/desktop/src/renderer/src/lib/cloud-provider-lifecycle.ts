@@ -26,11 +26,11 @@ export async function waitForCloudProviderOutput(options: {
     interval ??= state.liveInterval?.id
     const leg = state.legs?.find((candidate) => candidate.targetId === options.targetId)
     if (leg?.state === 'failed' || leg?.state === 'stopped')
-      throw new Error('The cloud destination failed before provider activation.')
+      throw new Error('The cloud destination failed before it went live.')
     if (state.connected && leg?.state === 'live') return state
     if (attempt < 7) await options.sleep(2000)
   }
-  throw new Error('The cloud destination is not ready. Provider activation remains pending.')
+  throw new Error('The cloud destination is not live yet. Going live is still pending.')
 }
 
 /** Disappearance/disconnect alone is not a terminal event. Handoff is never one. */

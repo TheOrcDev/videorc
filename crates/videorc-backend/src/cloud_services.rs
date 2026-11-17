@@ -550,6 +550,7 @@ pub fn plan_terminal(armed: &ArmedServices, facts: &TerminalFacts<'_>) -> Termin
 }
 
 /// `canonical_live_interval`'s id.
+#[cfg(test)]
 pub fn canonical_live_interval_id(status: &CloudStatus) -> Option<String> {
     canonical_live_interval(status).map(|interval| interval.id)
 }

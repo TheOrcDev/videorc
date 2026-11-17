@@ -8607,7 +8607,7 @@ async fn handle_room_microphone_control(
         Ok(frame) => {
             ServerResponse::ok(command.id, serde_json::to_value(frame).unwrap_or_default())
         }
-        Err(error) => ServerResponse::error(command.id, "microphone-refused", &error.to_string()),
+        Err(error) => ServerResponse::error(command.id, "microphone-refused", error.to_string()),
     })
 }
 
@@ -11133,7 +11133,7 @@ async fn handle_text_message_with_role(
                         .lock()
                         .unwrap_or_else(|poison| poison.into_inner())
                         .report_room_avatar(&params.show_id, params.stream, params.recording);
-                    ServerResponse::ok(command.id, json!({ "accepted": accepted }))
+                    ServerResponse::ok(command.id, serde_json::json!({ "accepted": accepted }))
                 }
                 Err(error) => {
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
@@ -16754,16 +16754,6 @@ fn cloud_context(state: &AppState) -> Option<AppCloudShowContext> {
         web: std::sync::Arc::new(web),
         connector: std::sync::Arc::new(cloud_show::WsConnector),
     })
-}
-
-/// Plan 224 C-G7: the talk show on air, when cards and takeovers go to the
-/// runner instead of the compositor.
-pub(crate) fn cloud_talk_show_live_show_id(state: &AppState) -> Option<String> {
-    state
-        .cloud_show
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .talk_show_live_show_id()
 }
 
 /// Plan 224: the show id while this desktop's room is open, on air or not.
