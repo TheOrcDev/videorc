@@ -49,6 +49,10 @@ pub struct Thresholds {
     pub av_drift: Duration,
     pub brb_long: Duration,
     pub still_there: Duration,
+    /// Plan 249 S26: a running output's page silent this long.
+    pub program_unreported: Duration,
+    /// Plan 249 S26: a host contribution missing this long.
+    pub contribution_missing: Duration,
 }
 
 impl Thresholds {
@@ -65,6 +69,10 @@ impl Thresholds {
             av_drift: Duration::from_secs(10),
             brb_long: Duration::from_secs(10 * 60),
             still_there: Duration::from_secs(10 * 60),
+            // The web calls a page stale after 25 s without a beacon; a poll
+            // answers within its wait. 30 s of "not reporting" is past both.
+            program_unreported: Duration::from_secs(30),
+            contribution_missing: Duration::from_secs(20),
         }
     }
 
@@ -96,6 +104,14 @@ impl Thresholds {
         read(WatchdogCheck::AvDrift, &mut self.av_drift);
         read(WatchdogCheck::BrbLong, &mut self.brb_long);
         read(WatchdogCheck::StillThere, &mut self.still_there);
+        read(
+            WatchdogCheck::ProgramUnreported,
+            &mut self.program_unreported,
+        );
+        read(
+            WatchdogCheck::ContributionMissing,
+            &mut self.contribution_missing,
+        );
         self
     }
 }
@@ -195,6 +211,54 @@ pub struct CloudSignal {
     pub feed_low_since: Option<Instant>,
 }
 
+/// Plan 249 S26: one running program output and whether its page reports.
+/// The runtime keeps `since` (when it stopped reporting); the key is the
+/// alert's scope. An output that stopped running is not listed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProgramOutputSignal {
+    /// `stream-horizontal`, `recording-vertical`.
+    pub key: String,
+    /// "horizontal stream page", for the card.
+    pub label: String,
+    pub reporting: bool,
+    /// The page never reported (else its reports stopped).
+    pub never: bool,
+    pub since: Instant,
+}
+
+/// Plan 249 S26: what a host contribution lacks, from the room's facts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ContributionKind {
+    /// The room is live and the host is not in it.
+    HostNotInRoom,
+    /// The host is in the room with no microphone track.
+    MicrophoneUnpublished,
+    /// The host publishes a camera on stage, but the program draws no frame of it.
+    CameraNoFrames,
+}
+
+impl ContributionKind {
+    /// The alert's scope, and the renderer's row id.
+    pub fn scope(self) -> &'static str {
+        match self {
+            ContributionKind::HostNotInRoom => "host-room",
+            ContributionKind::MicrophoneUnpublished => "host-microphone",
+            ContributionKind::CameraNoFrames => "host-camera",
+        }
+    }
+}
+
+/// One host contribution the room expects now, and whether it is missing.
+/// A contribution the room does not expect (a camera switched off, the
+/// host off stage) is not listed: its card leaves quietly, never "is back".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ContributionSignal {
+    pub kind: ContributionKind,
+    pub missing: bool,
+    /// When it went missing (the runtime's clock); meaningless when present.
+    pub since: Instant,
+}
+
 /// A chat decision from `chat_signals` (B1, B2): the class, how many
 /// distinct people, and their lines for the card.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -228,6 +292,14 @@ pub struct Signals<'a> {
     pub cloud: Option<CloudSignal>,
     pub system_idle: Option<Duration>,
     pub chat: &'a [ChatDecision],
+    /// Plan 249 S26: no microphone level reaches the watchdog (a cloud room
+    /// meters its microphone in the renderer only). `no-voice` and
+    /// `still-there` read the voice as Unknown, never as minutes of silence.
+    pub mic_unmeasured: bool,
+    /// Plan 249 S26: the running program outputs, reporting or not.
+    pub outputs: &'a [ProgramOutputSignal],
+    /// Plan 249 S26: the host contributions the room expects now.
+    pub contributions: &'a [ContributionSignal],
 }
 
 /// The checks' own clocks between ticks.
@@ -388,7 +460,13 @@ impl Checks {
 
         // --- no-voice ---
         let voice_key = alert_key(WatchdogCheck::NoVoice, None);
-        let no_voice_guarded = signals.mic_muted || takeover.is_some() || music || mic_muted_open;
+        // Plan 249 S26: with no microphone measurement the voice is Unknown,
+        // and Unknown is never "No voice for 5 minutes".
+        let no_voice_guarded = signals.mic_muted
+            || takeover.is_some()
+            || music
+            || mic_muted_open
+            || signals.mic_unmeasured;
         if signals.audio.voice() {
             self.last_voice = Some(now);
             self.voice_since.get_or_insert(now);
@@ -522,6 +600,10 @@ impl Checks {
 
         // --- destination-down (one per destination; every one down folds) ---
         self.tick_destinations(signals, thresholds, settings, state, clock, &mut out);
+
+        // --- program-unreported and contribution-missing (plan 249 S26) ---
+        tick_unreported(signals, thresholds, settings, state, clock, &mut out);
+        tick_contributions(signals, thresholds, settings, state, clock, &mut out);
 
         // --- platform-health ---
         let mut health_keys = Vec::new();
@@ -681,6 +763,7 @@ impl Checks {
         };
         if settings.enabled(WatchdogCheck::StillThere)
             && takeover.is_none()
+            && !signals.mic_unmeasured
             && idle_long
             && quiet_long
         {
@@ -936,6 +1019,152 @@ impl Checks {
 
     fn reset_clocks(&mut self) {
         *self = Self::default();
+    }
+}
+
+/// Plan 249 S26: one card per running output whose page does not report.
+/// The card names the output; what its viewers see and hear is Unknown,
+/// never called silent or black. It clears ("reporting again") when the
+/// page reports, and leaves quietly when the output stops.
+fn tick_unreported(
+    signals: &Signals<'_>,
+    thresholds: &Thresholds,
+    settings: &WatchdogSettings,
+    state: &mut WatchdogState,
+    clock: Clock,
+    out: &mut Vec<Transition>,
+) {
+    let check = WatchdogCheck::ProgramUnreported;
+    if !settings.enabled(check) {
+        out.extend(state.withdraw_prefix(check.id()));
+        return;
+    }
+    let now = clock.now;
+    let mut running = Vec::new();
+    for output in signals.outputs {
+        let key = alert_key(check, Some(&output.key));
+        running.push(key.clone());
+        if output.reporting {
+            // Its page reports again: a recovery.
+            out.extend(state.clear(&key));
+            continue;
+        }
+        let held = now.saturating_duration_since(output.since);
+        if held < thresholds.program_unreported {
+            continue;
+        }
+        let detail = if output.never {
+            format!(
+                "No report from it for {}. What its viewers see and hear is unknown, not silent.",
+                format_clock(held)
+            )
+        } else {
+            format!(
+                "Its last report was {} ago. What its viewers see and hear is unknown, not silent.",
+                format_clock(held)
+            )
+        };
+        let spec = AlertSpec::new(
+            AlertSeverity::Warning,
+            format!("The cloud {} isn't reporting", output.label),
+            detail,
+        )
+        .source(AlertSource::Cloud)
+        .target(Some(output.key.clone()))
+        .fix(AlertFix::new(FixKind::OpenHealth, "Open Health"));
+        out.extend(state.open(check, &key, spec, clock));
+    }
+    // An output that stopped running takes its card with it, quietly:
+    // nothing said its page recovered.
+    let stopped: Vec<String> = state
+        .alerts()
+        .iter()
+        .filter(|alert| alert.check == check)
+        .map(|alert| alert_key(check, alert.target_id.as_deref()))
+        .filter(|key| !running.contains(key))
+        .collect();
+    for key in stopped {
+        out.extend(state.withdraw(&key));
+    }
+}
+
+/// Plan 249 S26: one card per missing host contribution. A takeover
+/// explains a missing microphone (it is deliberate), so that card leaves
+/// quietly under it; a deliberate mute is `mic-muted`'s, never this one's.
+fn tick_contributions(
+    signals: &Signals<'_>,
+    thresholds: &Thresholds,
+    settings: &WatchdogSettings,
+    state: &mut WatchdogState,
+    clock: Clock,
+    out: &mut Vec<Transition>,
+) {
+    let check = WatchdogCheck::ContributionMissing;
+    if !settings.enabled(check) {
+        out.extend(state.withdraw_prefix(check.id()));
+        return;
+    }
+    let now = clock.now;
+    let mut expected = Vec::new();
+    for signal in signals.contributions {
+        let scope = signal.kind.scope();
+        let key = alert_key(check, Some(scope));
+        expected.push(key.clone());
+        if !signal.missing {
+            // It reaches the room (or the program) again: a recovery.
+            out.extend(state.clear(&key));
+            continue;
+        }
+        if signal.kind == ContributionKind::MicrophoneUnpublished && signals.takeover.is_some() {
+            out.extend(state.withdraw(&key));
+            continue;
+        }
+        let held = now.saturating_duration_since(signal.since);
+        if held < thresholds.contribution_missing {
+            continue;
+        }
+        let spec = match signal.kind {
+            ContributionKind::HostNotInRoom => AlertSpec::new(
+                AlertSeverity::Critical,
+                "You're not in the room",
+                format!(
+                    "The show is live and this computer has been out of the room for {}. Guests and viewers see the away card.",
+                    format_clock(held)
+                ),
+            )
+            .fix(AlertFix::new(FixKind::OpenHealth, "Open Health")),
+            ContributionKind::MicrophoneUnpublished => AlertSpec::new(
+                AlertSeverity::Critical,
+                "Your microphone isn't reaching the room",
+                format!(
+                    "The room has had no microphone from you for {}. Viewers hear no voice from you.",
+                    format_clock(held)
+                ),
+            )
+            .fix(AlertFix::new(FixKind::OpenAudio, "Open Audio")),
+            ContributionKind::CameraNoFrames => AlertSpec::new(
+                AlertSeverity::Warning,
+                "Your camera isn't reaching the program",
+                format!(
+                    "Your camera is on, but the program has drawn no frame of it for {}. Viewers see the away card.",
+                    format_clock(held)
+                ),
+            )
+            .fix(AlertFix::new(FixKind::OpenHealth, "Open Health")),
+        }
+        .source(AlertSource::Cloud)
+        .target(Some(scope.to_string()));
+        out.extend(state.open(check, &key, spec, clock));
+    }
+    let unexpected: Vec<String> = state
+        .alerts()
+        .iter()
+        .filter(|alert| alert.check == check)
+        .map(|alert| alert_key(check, alert.target_id.as_deref()))
+        .filter(|key| !expected.contains(key))
+        .collect();
+    for key in unexpected {
+        out.extend(state.withdraw(&key));
     }
 }
 
@@ -2012,5 +2241,246 @@ mod tests {
             mic_silent_spec(false, "x").title,
             "Your microphone is silent in the recording"
         );
+    }
+
+    // --- Plan 249 S26: health that represents the program ---
+
+    #[test]
+    fn an_unmeasured_microphone_is_unknown_never_five_minutes_without_voice() {
+        let mut checks = Checks::new();
+        let mut state = WatchdogState::new();
+        let start = clock();
+        // A cloud room: no microphone level reaches the watchdog at all.
+        let mut signals = live();
+        signals.audio = AudioWindow::default();
+        signals.mic_unmeasured = true;
+        signals.system_idle = Some(Duration::from_secs(20 * 60));
+        let out = run(&mut checks, &mut state, start, 11 * 60, &signals);
+        assert!(
+            !opened(&out).iter().any(|(check, _)| matches!(
+                check,
+                WatchdogCheck::NoVoice | WatchdogCheck::StillThere
+            )),
+            "Unknown is not silence: {out:?}"
+        );
+        // The same window with a measured, quiet microphone still alarms.
+        let mut checks = Checks::new();
+        let mut state = WatchdogState::new();
+        let mut measured = live();
+        measured.audio.microphone_rms_db = Some(-90.0);
+        let out = run(&mut checks, &mut state, start, 5 * 60 + 1, &measured);
+        assert!(opened(&out).contains(&(WatchdogCheck::NoVoice, AlertSeverity::Warning)));
+    }
+
+    #[test]
+    fn a_takeover_mute_is_never_a_dead_audio_alarm() {
+        let mut checks = Checks::new();
+        let mut state = WatchdogState::new();
+        let start = clock();
+        let mut signals = live();
+        signals.mic_muted = true;
+        signals.audio.master_rms_db = Some(-90.0);
+        signals.audio.microphone_rms_db = Some(-120.0);
+        signals.takeover = Some(TakeoverSignal {
+            since: start.now,
+            activated_at: None,
+            luma: Some(120),
+        });
+        let contributions = [ContributionSignal {
+            kind: ContributionKind::MicrophoneUnpublished,
+            missing: true,
+            since: start.now,
+        }];
+        signals.contributions = &contributions;
+        let out = run(&mut checks, &mut state, start, 6 * 60, &signals);
+        let critical: Vec<_> = opened(&out)
+            .into_iter()
+            .filter(|(_, severity)| *severity == AlertSeverity::Critical)
+            .collect();
+        assert!(
+            critical.is_empty(),
+            "a deliberate takeover is not dead audio: {out:?}"
+        );
+        assert!(!state.is_open("contribution-missing:host-microphone"));
+        assert!(!state.is_open("no-voice"));
+        assert!(!state.is_open("mic-muted"));
+    }
+
+    #[test]
+    fn a_page_that_stops_reporting_names_its_output_and_recovers() {
+        let mut checks = Checks::new();
+        let mut state = WatchdogState::new();
+        let start = clock();
+        let stale = [
+            ProgramOutputSignal {
+                key: "stream-horizontal".into(),
+                label: "horizontal stream page".into(),
+                reporting: true,
+                never: false,
+                since: start.now,
+            },
+            ProgramOutputSignal {
+                key: "recording-vertical".into(),
+                label: "vertical recording page".into(),
+                reporting: false,
+                never: false,
+                since: start.now,
+            },
+        ];
+        let signals = Signals {
+            outputs: &stale,
+            ..live()
+        };
+        let out = run(&mut checks, &mut state, start, 30, &signals);
+        assert!(
+            opened(&out).is_empty(),
+            "under 30 s is a late beacon: {out:?}"
+        );
+        let out = run(
+            &mut checks,
+            &mut state,
+            start.plus(Duration::from_secs(30)),
+            1,
+            &signals,
+        );
+        assert_eq!(
+            opened(&out),
+            vec![(WatchdogCheck::ProgramUnreported, AlertSeverity::Warning)]
+        );
+        let alert = state
+            .open_alert("program-unreported:recording-vertical")
+            .unwrap();
+        assert_eq!(
+            alert.title,
+            "The cloud vertical recording page isn't reporting"
+        );
+        assert!(
+            alert.detail.contains("unknown, not silent"),
+            "{}",
+            alert.detail
+        );
+        assert_eq!(alert.source, AlertSource::Cloud);
+        assert!(!state.is_open("program-unreported:stream-horizontal"));
+
+        // It reports again: a recovery, said once.
+        let back = [ProgramOutputSignal {
+            reporting: true,
+            ..stale[1].clone()
+        }];
+        let signals = Signals {
+            outputs: &back,
+            ..live()
+        };
+        let out = run(
+            &mut checks,
+            &mut state,
+            start.plus(Duration::from_secs(31)),
+            1,
+            &signals,
+        );
+        assert_eq!(cleared(&out), vec![WatchdogCheck::ProgramUnreported]);
+
+        // Quiet again, then the output stops: the card leaves quietly.
+        let quiet = [stale[1].clone()];
+        let signals = Signals {
+            outputs: &quiet,
+            ..live()
+        };
+        run(
+            &mut checks,
+            &mut state,
+            start.plus(Duration::from_secs(40)),
+            1,
+            &signals,
+        );
+        assert!(state.is_open("program-unreported:recording-vertical"));
+        let out = run(
+            &mut checks,
+            &mut state,
+            start.plus(Duration::from_secs(41)),
+            1,
+            &live(),
+        );
+        assert_eq!(
+            withdrawn(&out),
+            vec![(
+                WatchdogCheck::ProgramUnreported,
+                Some("recording-vertical".to_string())
+            )]
+        );
+        assert!(cleared(&out).is_empty());
+    }
+
+    #[test]
+    fn a_missing_contribution_names_its_layer_and_a_camera_switched_off_leaves_quietly() {
+        let mut checks = Checks::new();
+        let mut state = WatchdogState::new();
+        let start = clock();
+        let missing = [
+            ContributionSignal {
+                kind: ContributionKind::MicrophoneUnpublished,
+                missing: true,
+                since: start.now,
+            },
+            ContributionSignal {
+                kind: ContributionKind::CameraNoFrames,
+                missing: true,
+                since: start.now,
+            },
+        ];
+        let signals = Signals {
+            contributions: &missing,
+            ..live()
+        };
+        let out = run(&mut checks, &mut state, start, 21, &signals);
+        let mut kinds = opened(&out);
+        kinds.sort();
+        assert_eq!(
+            kinds,
+            vec![
+                (WatchdogCheck::ContributionMissing, AlertSeverity::Critical),
+                (WatchdogCheck::ContributionMissing, AlertSeverity::Warning),
+            ]
+        );
+        assert_eq!(
+            state
+                .open_alert("contribution-missing:host-microphone")
+                .unwrap()
+                .title,
+            "Your microphone isn't reaching the room"
+        );
+        assert_eq!(
+            state
+                .open_alert("contribution-missing:host-camera")
+                .unwrap()
+                .title,
+            "Your camera isn't reaching the program"
+        );
+        // The microphone is published again (a recovery); the camera is
+        // switched off (the streamer's choice: no "is back").
+        let next = [ContributionSignal {
+            missing: false,
+            ..missing[0]
+        }];
+        let signals = Signals {
+            contributions: &next,
+            ..live()
+        };
+        let out = run(
+            &mut checks,
+            &mut state,
+            start.plus(Duration::from_secs(21)),
+            1,
+            &signals,
+        );
+        assert_eq!(cleared(&out), vec![WatchdogCheck::ContributionMissing]);
+        assert_eq!(
+            withdrawn(&out),
+            vec![(
+                WatchdogCheck::ContributionMissing,
+                Some("host-camera".to_string())
+            )]
+        );
+        assert!(state.alerts().is_empty());
     }
 }

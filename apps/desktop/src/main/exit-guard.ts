@@ -1,5 +1,6 @@
 import type { AppExitKind } from '../shared/backend'
 import { livestreamOnAirFromPayload } from '../shared/capture-state'
+import { cloudRoomActivityFromCloudStatus } from '../shared/cloud-room-activity'
 
 export type { AppExitKind }
 
@@ -75,17 +76,6 @@ export class LiveExitGuard {
  * no wait. Read field by field: main never trusts more of the status.
  */
 export function talkHostOnAirFromCloudStatus(payload: unknown): boolean {
-  if (!payload || typeof payload !== 'object') return false
-  const status = payload as {
-    room?: { phase?: unknown; live?: unknown } | null
-    onAir?: { thisDevice?: unknown; waiting?: unknown } | null
-    stoppedBy?: unknown
-  }
-  const onAir = status.onAir
-  return (
-    status.room?.phase === 'open' &&
-    status.room.live === true &&
-    status.stoppedBy === undefined &&
-    (onAir === undefined || (onAir?.thisDevice === true && onAir.waiting !== true))
-  )
+  // Plan 249 S26: one reading of the room's activity for every guard.
+  return cloudRoomActivityFromCloudStatus(payload) === 'live'
 }

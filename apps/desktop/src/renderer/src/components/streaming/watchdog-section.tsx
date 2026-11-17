@@ -79,6 +79,16 @@ export const WATCHDOG_CHECK_ROWS: readonly { id: string; label: string; descript
     id: 'still-there',
     label: 'Still there?',
     description: 'No voice and no input for 10 minutes. A quiet reminder.'
+  },
+  {
+    id: 'program-unreported',
+    label: 'Cloud program not reporting',
+    description: 'A cloud room output stops reporting what viewers see and hear.'
+  },
+  {
+    id: 'contribution-missing',
+    label: 'Not reaching the room',
+    description: 'Your microphone or camera stops reaching a cloud room.'
   }
 ]
 

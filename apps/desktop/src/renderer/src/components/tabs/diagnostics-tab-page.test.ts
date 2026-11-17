@@ -15,7 +15,8 @@ const mocked = vi.hoisted(() => ({
   devices: [] as unknown[],
   camera: {} as Record<string, unknown>,
   sources: {} as Record<string, unknown>,
-  handleSystemPermission: vi.fn(async () => undefined)
+  handleSystemPermission: vi.fn(async () => undefined),
+  cloudStatus: null as Record<string, unknown> | null
 }))
 
 vi.mock('@/hooks/use-studio', () => ({
@@ -36,6 +37,7 @@ vi.mock('@/hooks/use-studio', () => ({
     supportBundleExportPending: false
   }),
   useStudioAudio: () => ({ audioMeter: null }),
+  useStudioCloud: () => ({ cloudStatus: mocked.cloudStatus }),
   useStudioRecording: () => ({ recording: { state: 'idle' } }),
   useStudioPreview: () => ({
     previewLiveStatus: { state: 'live' },
@@ -124,6 +126,7 @@ beforeEach(() => {
   mocked.camera = { state: 'source-missing', droppedFrames: 0 }
   mocked.sources = {}
   mocked.handleSystemPermission.mockClear()
+  mocked.cloudStatus = null
   videorcCamera.controls = { status: null, connected: true, platform: 'darwin' }
   for (const fn of Object.values(videorcCamera.toast)) fn.mockClear()
 })
@@ -355,5 +358,60 @@ describe('Health: Videorc Camera (plan 214 E3)', () => {
       await act(async () => button('Technical details')?.click())
       expect(group()).toBeUndefined()
     }
+  })
+})
+
+// Plan 249 S26: while a cloud room is open, Health names each layer.
+describe('Health: cloud room (plan 249 S26)', () => {
+  const host = {
+    identity: 'host:sh_0123456789abcdefghijkl',
+    name: 'Host',
+    role: 'host',
+    onStage: true,
+    video: true,
+    audio: false,
+    muted: false,
+    screen: false,
+    quality: 'good',
+    sinceMs: 1000,
+    away: false
+  }
+  const rows = (): Record<string, string> =>
+    Object.fromEntries(
+      [...container.querySelectorAll<HTMLElement>('[data-health-row]')].map((row) => [
+        row.dataset.healthRow!,
+        row.querySelector('[data-slot="status-badge"]')?.textContent ?? ''
+      ])
+    )
+
+  it('is absent without an open room', async () => {
+    await render()
+    expect(container.querySelector('[data-testid="cloud-program-health"]')).toBeNull()
+  })
+
+  it('tells a missing microphone from a page that stopped reporting and a running output', async () => {
+    mocked.cloudStatus = {
+      room: { phase: 'open', participants: [host] },
+      outputHealth: [
+        {
+          output: 'stream',
+          orientation: 'horizontal',
+          egress: 'active',
+          page: 'stale',
+          pageAgeSeconds: 40,
+          joined: false,
+          audio: 'unknown'
+        }
+      ]
+    }
+    await render()
+    const section = container.querySelector('[data-testid="cloud-program-health"]')
+    expect(section?.textContent).toContain("isn't the encoded stream")
+    expect(rows()).toEqual({
+      'host-microphone': 'Missing',
+      'host-camera': 'On program',
+      'page:stream-horizontal': 'Not reporting',
+      'egress:stream-horizontal': 'Running'
+    })
   })
 })

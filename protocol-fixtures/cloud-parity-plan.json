@@ -910,20 +910,23 @@
       "case": "health",
       "repositories": ["desktop", "web"],
       "issueUrl": null,
-      "prUrl": null,
+      "prUrl": "https://github.com/TheOrcDev/videorc/pull/1471",
       "webIssueUrl": null,
-      "webPrUrl": null,
-      "implementation": "not-started",
+      "webPrUrl": "https://github.com/TheOrcDev/videorc-web/pull/151",
+      "implementation": "source-implemented-review-open",
       "acceptance": "not-run",
       "intendedBranch": "feat/249-s26-cloud-parity",
       "intendedPrTitle": "Plan 249 S26: Make health and diagnostics represent the program",
       "touches": "`B/watchdog/`, `B/live_status.rs`, web program beacon/status modules,\nrenderer diagnostics, `M/exit-guard.ts`, update/restart/sleep admission.",
       "gates": "D, B, N, W, WB, C, RC; REL for app lifecycle admission changes.",
       "deferredReason": "User defers smoke, heavy, real-page, device and managed acceptance until all merges on main. No release qualification.",
-      "relatedPrUrls": [],
+      "relatedPrUrls": [
+        "https://github.com/TheOrcDev/videorc/pull/1460",
+        "https://github.com/TheOrcDev/videorc/pull/1461"
+      ],
       "intendedBase": {
-        "desktop": "feat/249-s25-cloud-parity",
-        "web": "feat/249-s25-cloud-parity"
+        "desktop": "main + S17 #1460 + S24 #1461",
+        "web": "main"
       },
       "crossRepoNeeds": "Paired linked consumer/producer PRs; coordinator commissions web checkout; consumers land/deploy before producers enable capability.",
       "releaseGate": "blocked-until-required-acceptance"

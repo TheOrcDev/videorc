@@ -1436,6 +1436,19 @@ async fn acquire_interruption_lease_handler(
             .into_response();
     }
 
+    // Plan 249 S26: a cloud room this computer has on air or recording is
+    // live activity too: an update install or a permission restart would cut
+    // its camera, microphone and program contributions.
+    if let Some(message) = cloud_show_status(&state).room_activity() {
+        return (
+            StatusCode::CONFLICT,
+            Json(InterruptionLeaseErrorResponse {
+                code: "capture-not-idle",
+                message: message.to_string(),
+            }),
+        )
+            .into_response();
+    }
     // Background MP4 exports are part of "capture not idle" for the updater /
     // restart gate: the terminal recording status is published before they run.
     if state.recording_finalization.has_active_jobs() {

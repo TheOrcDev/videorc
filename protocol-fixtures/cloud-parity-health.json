@@ -1,0 +1,617 @@
+{
+  "version": 1,
+  "case": "health",
+  "note": "Plan 249 S26. Shared by the desktop (protocol-fixtures/cloud-parity-health.json) and the web (tests/fixtures/cloud-parity-health.json), byte for byte. outputs: the web's per-output health (lib/cloud/media/output-health.ts). layers: the desktop's program health rows (apps/desktop/src/shared/cloud-program-health.ts).",
+  "staleSeconds": 25,
+  "outputs": [
+    {
+      "name": "a reporting stream page with a meter: measured, counters aged",
+      "now": "2026-11-17T12:00:10.000Z",
+      "input": {
+        "egress": "active",
+        "orientation": "horizontal",
+        "output": "stream",
+        "page": {
+          "at": "2026-11-17T12:00:07.000Z",
+          "boot": "AAAAAAAAAAAA",
+          "joined": true,
+          "phase": "live",
+          "seq": 9,
+          "program": {
+            "audioRmsDb": -71.2,
+            "audioSilentSeconds": 22,
+            "blackSeconds": 0
+          },
+          "shown": {
+            "away": [],
+            "onStage": [],
+            "stage": "k1"
+          }
+        }
+      },
+      "expected": {
+        "audio": "measured",
+        "egress": "active",
+        "joined": true,
+        "orientation": "horizontal",
+        "output": "stream",
+        "page": "reporting",
+        "pageAgeSeconds": 3,
+        "program": {
+          "audioRmsDb": -71.2,
+          "audioSilentSeconds": 25,
+          "blackSeconds": 0
+        },
+        "stageKey": "k1"
+      }
+    },
+    {
+      "name": "a reporting page without a meter: audio is unmeasured, never silent",
+      "now": "2026-11-17T12:00:10.000Z",
+      "input": {
+        "egress": "active",
+        "orientation": "vertical",
+        "output": "stream",
+        "page": {
+          "at": "2026-11-17T12:00:09.000Z",
+          "boot": "AAAAAAAAAAAA",
+          "joined": true,
+          "phase": "live",
+          "seq": 3,
+          "program": {
+            "blackSeconds": 0
+          }
+        }
+      },
+      "expected": {
+        "audio": "unmeasured",
+        "egress": "active",
+        "joined": true,
+        "orientation": "vertical",
+        "output": "stream",
+        "page": "reporting",
+        "pageAgeSeconds": 1,
+        "program": {
+          "blackSeconds": 0
+        }
+      }
+    },
+    {
+      "name": "a stale page: its numbers are nobody's, audio unknown, faults kept",
+      "now": "2026-11-17T12:01:00.000Z",
+      "input": {
+        "egress": "active",
+        "orientation": "horizontal",
+        "output": "recording",
+        "page": {
+          "at": "2026-11-17T12:00:30.000Z",
+          "boot": "AAAAAAAAAAAA",
+          "faults": {
+            "drop": 2
+          },
+          "joined": true,
+          "phase": "live",
+          "seq": 30,
+          "program": {
+            "audioRmsDb": -20,
+            "audioSilentSeconds": 0
+          },
+          "shown": {
+            "away": [],
+            "onStage": [],
+            "stage": "k2"
+          }
+        }
+      },
+      "expected": {
+        "audio": "unknown",
+        "egress": "active",
+        "faults": {
+          "drop": 2
+        },
+        "joined": false,
+        "orientation": "horizontal",
+        "output": "recording",
+        "page": "stale",
+        "pageAgeSeconds": 30
+      }
+    },
+    {
+      "name": "an egress whose page never reported: missing",
+      "now": "2026-11-17T12:00:10.000Z",
+      "input": {
+        "egress": "starting",
+        "orientation": "horizontal",
+        "output": "stream",
+        "page": null
+      },
+      "expected": {
+        "audio": "unknown",
+        "egress": "starting",
+        "joined": false,
+        "orientation": "horizontal",
+        "output": "stream",
+        "page": "missing"
+      }
+    }
+  ],
+  "layers": [
+    {
+      "name": "healthy: every layer good, the profile named",
+      "input": {
+        "room": {
+          "participants": [
+            {
+              "identity": "host:sh_0123456789abcdefghijkl",
+              "name": "Host",
+              "role": "host",
+              "onStage": true,
+              "video": true,
+              "audio": true,
+              "muted": false,
+              "screen": false,
+              "quality": "good",
+              "sinceMs": 60000,
+              "away": false
+            }
+          ]
+        },
+        "outputHealth": [
+          {
+            "output": "stream",
+            "orientation": "horizontal",
+            "egress": "active",
+            "page": "reporting",
+            "pageAgeSeconds": 2,
+            "joined": true,
+            "audio": "measured",
+            "program": {
+              "audioRmsDb": -22.5,
+              "audioSilentSeconds": 0,
+              "blackSeconds": 0
+            }
+          }
+        ],
+        "show": {
+          "outputProfile": {
+            "version": 1,
+            "requested": [
+              {
+                "orientation": "horizontal",
+                "width": 1920,
+                "height": 1080,
+                "fps": 30,
+                "videoKbps": 6000
+              }
+            ],
+            "effective": [
+              {
+                "orientation": "horizontal",
+                "width": 1920,
+                "height": 1080,
+                "fps": 60,
+                "videoKbps": 6000,
+                "audioKbps": 160,
+                "pictureFps": 30,
+                "differences": []
+              }
+            ],
+            "qualification": "phase0-1080p30-picture",
+            "higherProfilesQualified": false,
+            "pricePerHour": null,
+            "maxProgramEgresses": 4
+          }
+        },
+        "microphone": {
+          "state": "published",
+          "levelFresh": true
+        }
+      },
+      "expected": [
+        ["host-microphone", "Published", "good"],
+        ["host-camera", "On program", "good"],
+        ["page:stream-horizontal", "Reporting", "good"],
+        ["egress:stream-horizontal", "Running", "good"]
+      ],
+      "detailIncludes": {
+        "egress:stream-horizontal": "1920×1080, 30 fps picture, 6 Mbps",
+        "page:stream-horizontal": "not the encoded stream"
+      }
+    },
+    {
+      "name": "mic loss names the contribution, not the output",
+      "input": {
+        "room": {
+          "participants": [
+            {
+              "identity": "host:sh_0123456789abcdefghijkl",
+              "name": "Host",
+              "role": "host",
+              "onStage": true,
+              "video": true,
+              "audio": false,
+              "muted": false,
+              "screen": false,
+              "quality": "good",
+              "sinceMs": 60000,
+              "away": false
+            }
+          ]
+        },
+        "outputHealth": [
+          {
+            "output": "stream",
+            "orientation": "horizontal",
+            "egress": "active",
+            "page": "reporting",
+            "pageAgeSeconds": 2,
+            "joined": true,
+            "audio": "measured",
+            "program": {
+              "audioRmsDb": -100,
+              "audioSilentSeconds": 25,
+              "blackSeconds": 0
+            }
+          }
+        ],
+        "microphone": {
+          "state": "lost",
+          "levelFresh": false
+        }
+      },
+      "expected": [
+        ["host-microphone", "Missing", "error"],
+        ["host-camera", "On program", "good"],
+        ["page:stream-horizontal", "Silent", "error"],
+        ["egress:stream-horizontal", "Running", "good"]
+      ],
+      "detailIncludes": {
+        "host-microphone": "device was lost"
+      }
+    },
+    {
+      "name": "a stale beacon is Unknown, never silent or black",
+      "input": {
+        "room": {
+          "participants": [
+            {
+              "identity": "host:sh_0123456789abcdefghijkl",
+              "name": "Host",
+              "role": "host",
+              "onStage": true,
+              "video": true,
+              "audio": true,
+              "muted": false,
+              "screen": false,
+              "quality": "good",
+              "sinceMs": 60000,
+              "away": false
+            }
+          ]
+        },
+        "outputHealth": [
+          {
+            "output": "stream",
+            "orientation": "horizontal",
+            "egress": "active",
+            "page": "stale",
+            "pageAgeSeconds": 40,
+            "joined": false,
+            "audio": "unknown"
+          }
+        ]
+      },
+      "expected": [
+        ["host-microphone", "Published", "good"],
+        ["host-camera", "On program", "good"],
+        ["page:stream-horizontal", "Not reporting", "error"],
+        ["egress:stream-horizontal", "Running", "good"]
+      ],
+      "detailIncludes": {
+        "page:stream-horizontal": "unknown",
+        "host-microphone": "silence reads as Unknown"
+      }
+    },
+    {
+      "name": "dropped and failed layers are counted on the page",
+      "input": {
+        "room": {
+          "participants": [
+            {
+              "identity": "host:sh_0123456789abcdefghijkl",
+              "name": "Host",
+              "role": "host",
+              "onStage": true,
+              "video": true,
+              "audio": true,
+              "muted": false,
+              "screen": false,
+              "quality": "good",
+              "sinceMs": 60000,
+              "away": false
+            }
+          ]
+        },
+        "outputHealth": [
+          {
+            "output": "stream",
+            "orientation": "horizontal",
+            "egress": "active",
+            "page": "reporting",
+            "pageAgeSeconds": 2,
+            "joined": true,
+            "audio": "measured",
+            "program": {
+              "audioRmsDb": -22.5,
+              "audioSilentSeconds": 0,
+              "blackSeconds": 0
+            },
+            "faults": {
+              "asset": 1,
+              "drop": 3
+            }
+          }
+        ]
+      },
+      "expected": [
+        ["host-microphone", "Published", "good"],
+        ["host-camera", "On program", "good"],
+        ["page:stream-horizontal", "Reporting", "warn"],
+        ["egress:stream-horizontal", "Running", "good"]
+      ],
+      "detailIncludes": {
+        "page:stream-horizontal": "1 layer failed to draw, 3 dropped at a limit"
+      }
+    },
+    {
+      "name": "black and frozen frames name the output",
+      "input": {
+        "room": {
+          "participants": [
+            {
+              "identity": "host:sh_0123456789abcdefghijkl",
+              "name": "Host",
+              "role": "host",
+              "onStage": true,
+              "video": true,
+              "audio": true,
+              "muted": false,
+              "screen": false,
+              "quality": "good",
+              "sinceMs": 60000,
+              "away": false
+            }
+          ]
+        },
+        "outputHealth": [
+          {
+            "output": "stream",
+            "orientation": "horizontal",
+            "egress": "active",
+            "page": "reporting",
+            "pageAgeSeconds": 2,
+            "joined": true,
+            "audio": "measured",
+            "program": {
+              "audioRmsDb": -20,
+              "audioSilentSeconds": 0,
+              "blackSeconds": 12
+            }
+          },
+          {
+            "output": "recording",
+            "orientation": "vertical",
+            "egress": "active",
+            "page": "reporting",
+            "pageAgeSeconds": 2,
+            "joined": true,
+            "audio": "unmeasured",
+            "program": {
+              "blackSeconds": 0,
+              "frozenSeconds": 5
+            }
+          }
+        ]
+      },
+      "expected": [
+        ["host-microphone", "Published", "good"],
+        ["host-camera", "On program", "good"],
+        ["page:stream-horizontal", "Black", "error"],
+        ["egress:stream-horizontal", "Running", "good"],
+        ["page:recording-vertical", "Frozen", "error"],
+        ["egress:recording-vertical", "Running", "good"]
+      ],
+      "detailIncludes": {
+        "page:recording-vertical": "no sound meter"
+      }
+    },
+    {
+      "name": "a page without a meter never claims silence",
+      "input": {
+        "room": {
+          "participants": [
+            {
+              "identity": "host:sh_0123456789abcdefghijkl",
+              "name": "Host",
+              "role": "host",
+              "onStage": true,
+              "video": true,
+              "audio": true,
+              "muted": false,
+              "screen": false,
+              "quality": "good",
+              "sinceMs": 60000,
+              "away": false
+            }
+          ]
+        },
+        "outputHealth": [
+          {
+            "output": "stream",
+            "orientation": "horizontal",
+            "egress": "active",
+            "page": "reporting",
+            "pageAgeSeconds": 2,
+            "joined": true,
+            "audio": "unmeasured",
+            "program": {
+              "blackSeconds": 0
+            }
+          }
+        ]
+      },
+      "expected": [
+        ["host-microphone", "Published", "good"],
+        ["host-camera", "On program", "good"],
+        ["page:stream-horizontal", "Reporting", "warn"],
+        ["egress:stream-horizontal", "Running", "good"]
+      ]
+    },
+    {
+      "name": "reconnect: out of the room, then a camera with no frames",
+      "input": {
+        "room": {
+          "participants": [
+            {
+              "identity": "g_0123456789abcdefghijkl",
+              "name": "Ana",
+              "role": "guest",
+              "onStage": true,
+              "video": true,
+              "audio": true,
+              "muted": false,
+              "screen": false,
+              "quality": "good",
+              "sinceMs": 30000,
+              "away": false
+            }
+          ]
+        },
+        "outputHealth": [
+          {
+            "output": "stream",
+            "orientation": "horizontal",
+            "egress": "active",
+            "page": "reporting",
+            "pageAgeSeconds": 2,
+            "joined": true,
+            "audio": "measured",
+            "program": {
+              "audioRmsDb": -22.5,
+              "audioSilentSeconds": 0,
+              "blackSeconds": 0
+            }
+          }
+        ]
+      },
+      "expected": [
+        ["host-room", "Not in room", "error"],
+        ["page:stream-horizontal", "Reporting", "good"],
+        ["egress:stream-horizontal", "Running", "good"]
+      ]
+    },
+    {
+      "name": "a guest's missing frames and a camera switched off",
+      "input": {
+        "room": {
+          "participants": [
+            {
+              "identity": "host:sh_0123456789abcdefghijkl",
+              "name": "Host",
+              "role": "host",
+              "onStage": true,
+              "video": false,
+              "audio": true,
+              "muted": false,
+              "screen": false,
+              "quality": "good",
+              "sinceMs": 60000,
+              "away": false
+            },
+            {
+              "identity": "g_0123456789abcdefghijkl",
+              "name": "Ana",
+              "role": "guest",
+              "onStage": true,
+              "video": true,
+              "audio": true,
+              "muted": false,
+              "screen": false,
+              "quality": "good",
+              "sinceMs": 30000,
+              "away": true
+            }
+          ]
+        },
+        "outputHealth": []
+      },
+      "expected": [
+        ["host-microphone", "Published", "good"],
+        ["host-camera", "Off", "neutral"],
+        ["guest:g_0123456789abcdefghijkl", "No frames", "warn"]
+      ]
+    },
+    {
+      "name": "nobody listed yet: Unknown",
+      "input": {
+        "room": {
+          "participants": []
+        },
+        "outputHealth": [
+          {
+            "output": "stream",
+            "orientation": "horizontal",
+            "egress": "starting",
+            "page": "missing",
+            "joined": false,
+            "audio": "unknown"
+          }
+        ]
+      },
+      "expected": [
+        ["host-microphone", "Unknown", "neutral"],
+        ["page:stream-horizontal", "Waiting", "neutral"],
+        ["egress:stream-horizontal", "Starting", "neutral"]
+      ]
+    },
+    {
+      "name": "an output the cloud stopped",
+      "input": {
+        "room": {
+          "participants": [
+            {
+              "identity": "host:sh_0123456789abcdefghijkl",
+              "name": "Host",
+              "role": "host",
+              "onStage": false,
+              "video": true,
+              "audio": true,
+              "muted": false,
+              "screen": false,
+              "quality": "good",
+              "sinceMs": 60000,
+              "away": false
+            }
+          ]
+        },
+        "outputHealth": [
+          {
+            "output": "stream",
+            "orientation": "horizontal",
+            "egress": "failed",
+            "page": "stale",
+            "pageAgeSeconds": 60,
+            "joined": false,
+            "audio": "unknown"
+          }
+        ]
+      },
+      "expected": [
+        ["host-microphone", "Published", "good"],
+        ["host-camera", "Off stage", "neutral"],
+        ["page:stream-horizontal", "Not reporting", "error"],
+        ["egress:stream-horizontal", "Failed", "error"]
+      ]
+    }
+  ]
+}

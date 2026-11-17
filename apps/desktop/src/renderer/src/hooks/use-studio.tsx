@@ -20,6 +20,7 @@ import { roomHoldsTheCamera } from '@/lib/replay-buffer-reconcile'
 import type { RoomSceneResult, RoomSceneTarget } from '@/lib/cloud-scene-adapter'
 import { createRoomSceneEditSync } from '@/lib/room-scene-resender'
 import { outputSessionFacts } from '../../../shared/output-session'
+import { cloudRoomActivityFromCloudStatus } from '../../../shared/cloud-room-activity'
 import type { TalkShowRoomClient, TalkShowRoomSnapshot } from '@/lib/talk-show-room'
 import {
   cameraIsAvailable,
@@ -5817,7 +5818,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   )
   // The notification's click, a fix from the Stream Manager and the idle
   // time for still-there (plan 223 A6, A7), mounted from the lazy chunk.
-  const watchdogLive = sessionIsLive(recording)
+  // Plan 249 S26: a cloud room on air is live too: it has no local session,
+  // and its alerts notify like any livestream's.
+  const watchdogLive =
+    sessionIsLive(recording) || cloudRoomActivityFromCloudStatus(cloudStatus) === 'live'
   watchdogLiveRef.current = watchdogLive
   useEffect(() => {
     let dispose: (() => void) | null = null

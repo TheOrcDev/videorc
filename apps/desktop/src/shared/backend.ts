@@ -5690,6 +5690,8 @@ export interface CloudStatus {
   allowancePast?: { seconds: number }
   /** Plan 223 C3: the runner's program measurements while the show is live or holding. */
   program?: CloudProgram
+  /** Plan 249 S26: each program output's health (managed shows), layer by layer. */
+  outputHealth?: CloudOutputHealth[]
   /** Plan 222 U1: "Videorc Cloud is on" is due for this account; absent once seen. */
   announce?: boolean
   /** Plan 224: the room this computer holds, while it holds one. */
@@ -6051,6 +6053,31 @@ export interface CloudProgram {
   avSkewMs?: number
 }
 
+/**
+ * Plan 249 S26: one program output's health, as the web builds it
+ * (`lib/cloud/media/output-health.ts`). Open strings: a value this app does
+ * not know reads as Unknown. `audio` is what the page plays, never proof of
+ * the encoded audio the egress sends.
+ */
+export interface CloudOutputHealth {
+  /** `stream` or `recording`. */
+  output: string
+  /** `horizontal` or `vertical`. */
+  orientation: string
+  /** The egress's status, or `none`. */
+  egress: string
+  alsoRecords?: boolean
+  /** `reporting`, `stale` or `missing`. */
+  page: string
+  pageAgeSeconds?: number
+  joined: boolean
+  /** `measured`, `unmeasured` or `unknown`. */
+  audio: string
+  program?: CloudProgram
+  stageKey?: string
+  faults?: { asset?: number; drop?: number }
+}
+
 // --- The stream watchdog (plan 223) ---
 
 export type WatchdogCheck =
@@ -6067,6 +6094,8 @@ export type WatchdogCheck =
   | 'chat-says'
   | 'brb-long'
   | 'still-there'
+  | 'program-unreported'
+  | 'contribution-missing'
 
 export type WatchdogAlertSeverity = 'critical' | 'warning' | 'notice'
 export type WatchdogAlertState = 'open' | 'acknowledged' | 'snoozed'
