@@ -132,6 +132,7 @@ export async function startFakeCloudWebManaged({
 } = {}) {
   // Option wrapper: legacy callers keep the original node fake verbatim.
   if (!managed) return startFakeCloudWeb({ sessionToken, ...nodeOptions })
+  let markerHandler = null
   const upgrades = []
   const shows = new Map(),
     calls = [],
@@ -462,6 +463,20 @@ export async function startFakeCloudWebManaged({
       if (archiveHandler && /^\/api\/cloud\/shows\/[^/]+\/archive$/.test(path)) {
         const answer = await archiveHandler({ method: req.method, url, body })
         return send(answer.status ?? 200, answer.body, answer.contentType)
+      }
+      if (/^\/api\/cloud\/shows\/[^/]+\/markers$/.test(path)) {
+        const showId = path.split('/')[4],
+          s = shows.get(showId)
+        if (!s || !markerHandler) return send(404, { error: { code: 'not-found' } })
+        const request = new Request(url, {
+          headers: req.headers['videorc-controller-epoch']
+            ? { 'videorc-controller-epoch': req.headers['videorc-controller-epoch'] }
+            : {},
+          method: req.method,
+          ...(['GET', 'HEAD'].includes(req.method) ? {} : { body: raw })
+        })
+        const response = await markerHandler(request, s)
+        return send(response.status, await response.json())
       }
       if (path === '/api/auth/get-session')
         return send(200, { user: { name: 'Smoke', email: 'smoke@example.invalid', image: null } })
@@ -1126,6 +1141,12 @@ export async function startFakeCloudWebManaged({
           s.state.legs = s.state.legs.filter((l) => l.id !== d.id).concat(leg)
         }
         if (refused.length !== ds.length) {
+          if (!s.state.liveInterval || s.state.liveInterval.endedAt)
+            s.state.liveInterval = {
+              id: `fixture-interval-${randomBytes(12).toString('hex')}`,
+              requestedAt: instant(),
+              liveSince: instant()
+            }
           s.state.destinationsSet = true
           delete s.egressLostAt
         }
@@ -1144,6 +1165,7 @@ export async function startFakeCloudWebManaged({
               body.destinations.some((d) => typeof d.id !== 'string' || typeof d.url !== 'string')))
         )
           return fail(wire.errors.common.find((e) => e.status === 400).code)
+        if (s.state.liveInterval) s.state.liveInterval.endedAt = instant()
         s.state.legs = []
         s.state.destinationsSet = true
         // No egress runs after End livestream, so none can be lost.
@@ -1205,6 +1227,11 @@ export async function startFakeCloudWebManaged({
           return fail(wire.errors.recording.find((e) => e.code.endsWith('-solo')).code)
         if (typeof body.on !== 'boolean')
           return fail(wire.errors.common.find((e) => e.status === 400).code)
+        if (body.on && !s.state.recording.active)
+          s.markerTake = {
+            id: `tk_${randomBytes(12).toString('hex')}`,
+            provider: `EG_fixture_${randomBytes(8).toString('hex')}`
+          }
         const was = s.state.recording.active,
           takeSince = s.state.recording.since
         s.state.recording = {
@@ -1263,6 +1290,9 @@ export async function startFakeCloudWebManaged({
     controllerLog: () => copy(controllerLog),
     controllerRefusals: () => copy(controllerRefusals),
     presentationLog: () => copy(presentationLog),
+    markerHandler(handler) {
+      markerHandler = handler
+    },
     refuseDestination(id, code) {
       if (code !== null && !wire.destinationRefusals.codes.includes(code))
         throw new Error('Unknown refusal')

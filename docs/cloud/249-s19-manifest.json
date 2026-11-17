@@ -1,0 +1,174 @@
+{
+  "slice": "S19",
+  "worktree": "/Users/orcdev/projects/videorc-wt-249-s19-integration",
+  "branch": "integrate/249-s19-s24-reconcile",
+  "base": "7c2e0ed519417a4132c6670a982907d4b80b1ddd",
+  "intendedPrBase": "publish/249-s24-on-main",
+  "index": "empty",
+  "mergeState": "none",
+  "runtimeAcceptance": "not-run",
+  "productionQualified": false,
+  "shadscanBaseline": 27,
+  "shadscanFloor": 27,
+  "finalAuditExternal": "/tmp/249-s19-desktop-shadscan-final.json",
+  "excluded": ["node_modules", "apps/desktop/node_modules"],
+  "files": [
+    {
+      "path": "apps/desktop/src/renderer/comments/main.tsx",
+      "sha256": "a7c73554f15c2cbdbf986334de1281e75d309c1f3e8838a36dc0e3c1617dd9fa"
+    },
+    {
+      "path": "apps/desktop/src/renderer/src/components/cloud-markers-dialog.tsx",
+      "sha256": "549a888c6f787002c3b1573dcca34075e34cdc8b3d3e81405e5ce9517f04ec51"
+    },
+    {
+      "path": "apps/desktop/src/renderer/src/components/stream-manager/chat-pane.tsx",
+      "sha256": "10b5567505486ac12a1816cb82df3674b57375d7465f8b85c7517e43dc09695f"
+    },
+    {
+      "path": "apps/desktop/src/renderer/src/components/stream-manager/stream-manager.tsx",
+      "sha256": "a12eb8be54800196fc1a899f62bf96fdb23f9368bcce9cd0a04a8b2aecd4390f"
+    },
+    {
+      "path": "apps/desktop/src/renderer/src/components/tabs/library-cloud-recordings.tsx",
+      "sha256": "24c55a09d71ff3027ce80b6141e285e227a22b23bb226382db00e4757a85717c"
+    },
+    {
+      "path": "apps/desktop/src/renderer/src/hooks/use-studio.tsx",
+      "sha256": "d03fcab7fca221e98216e8261e1687cb5010273f3d954500d044501bf3ff0c95"
+    },
+    {
+      "path": "apps/desktop/src/renderer/src/lib/marker-command.test.ts",
+      "sha256": "ef1e4a4b3306bd4bee82d1d191cc4591da628f7e6c80eb3de53f7366477ee3df"
+    },
+    {
+      "path": "apps/desktop/src/renderer/src/lib/marker-command.ts",
+      "sha256": "a889be1cef962d6e2aa79eb1cb05cd53256a2ba1e2a62a0503d10d38e5af7a10"
+    },
+    {
+      "path": "apps/desktop/src/renderer/src/lib/marker-toast.ts",
+      "sha256": "60cbadfc78985d17af5590897c7eb18edec04d7b73d7a349d0de6c0d6e66bf08"
+    },
+    {
+      "path": "apps/desktop/src/renderer/src/lib/studio-actions/clips.ts",
+      "sha256": "05ce536fcd79eb8fe3a910cd63145036e704d50083e516e2599c4048b81a3abc"
+    },
+    {
+      "path": "apps/desktop/src/renderer/src/lib/studio-actions/context.ts",
+      "sha256": "82048c1154e7eec7d66515df3ee09fe71665d75249f85a9d410d04732f18f3df"
+    },
+    {
+      "path": "apps/desktop/src/renderer/src/lib/studio-actions/remote.ts",
+      "sha256": "bf338b90132951adf0acf61175c75870fe91f38c7fcc6db91392f72b8aa76321"
+    },
+    {
+      "path": "apps/desktop/src/renderer/src/lib/studio-actions/studio-context.ts",
+      "sha256": "a3d57bfb767cefdf3536956cc7dc48dd5bc803f98ba7de2065c6360e695d70c0"
+    },
+    {
+      "path": "apps/desktop/src/shared/backend-rpc-contract.ts",
+      "sha256": "d1774e756e6e847938d7abc342a6ba5cee9f6d888e575e7c779150e1a594ccc4"
+    },
+    {
+      "path": "apps/desktop/src/shared/backend.ts",
+      "sha256": "23f1ebc5837921926747923043dfca01cad24cf9563fc9ed08a572220f2d2c18"
+    },
+    {
+      "path": "apps/desktop/src/shared/clip-marks.ts",
+      "sha256": "66786e33208504e3a7b6bebe5a2a1f304e872f0bb71ab1c27014803981429604"
+    },
+    {
+      "path": "apps/desktop/src/shared/cloud-markers.test.ts",
+      "sha256": "a456da9e17d8decedda2f151d28895072f6ccddd9b48d7ec73e7da08a9fc91d0"
+    },
+    {
+      "path": "apps/desktop/src/shared/cloud-markers.ts",
+      "sha256": "6577ed1c44150f555bdc4d1fa696a4ab18831c27fe25eff62e64170f4f3c2c52"
+    },
+    {
+      "path": "apps/desktop/src/shared/session-markers.ts",
+      "sha256": "91500a0f88d4c7ebd43a5eab7ce293d55aa295a1e7c6c6414fc8909db8dcfb92"
+    },
+    {
+      "path": "crates/videorc-backend/src/agent_call.rs",
+      "sha256": "7b96b2eb48c68d2facb60438419373847c23efa9aacbcfe05ebb64e3eecdc3a3"
+    },
+    {
+      "path": "crates/videorc-backend/src/agent_look.rs",
+      "sha256": "473b6fa6e0de31da67a7b2ff052c5923c68d6ffa1fe173ebd15748e0fd1e6c6d"
+    },
+    {
+      "path": "crates/videorc-backend/src/captions.rs",
+      "sha256": "f280f50e5a024e8d5a5ddd18587a1094d257ef99c282be8b4cbb7e6fbfe42db9"
+    },
+    {
+      "path": "crates/videorc-backend/src/captions/cloud_host.rs",
+      "sha256": "090965680b5579922b023093855e82e419a18b3635a00e1f63010ab74b15029a"
+    },
+    {
+      "path": "crates/videorc-backend/src/cloud_markers.rs",
+      "sha256": "63d27fb8b9c698491f5ffb6f7e413ebec06bc01704892f199df06e21bba21d2c"
+    },
+    {
+      "path": "crates/videorc-backend/src/main.rs",
+      "sha256": "0d75c27f231460471ba47389e4718e48a6e940ff63315842096967a87b84cccc"
+    },
+    {
+      "path": "crates/videorc-backend/src/videorc_api.rs",
+      "sha256": "9d80c0df0864c2880a812fa5e9ba9d0751ec0e94e1f220579003035802f32eaf"
+    },
+    {
+      "path": "docs/cloud/249-execution-ledger.md",
+      "sha256": "f2f0159d22869a863b71f00127920e8cd24021ead610b4cab9cce4f7d9c44592"
+    },
+    {
+      "path": "docs/cloud/249-s19-contract.md",
+      "sha256": "097268c86b8c7bea20bbb1c960be2d12ac7f096a499a970b78ea396806e22ce3"
+    },
+    {
+      "path": "docs/cloud/249-s19-handoff.md",
+      "sha256": "65e7c657f5e2aecda6356b287df63215af07518cc733710f63f3a7ce02953574"
+    },
+    {
+      "path": "docs/cloud/249-s19-manifest.json",
+      "sha256": null
+    },
+    {
+      "path": "protocol-fixtures/agent-tools.json",
+      "sha256": "954bec0f8b782a6e26c80e0d5bc499473a4a0419ebfac15352bcb7c351d66c20"
+    },
+    {
+      "path": "protocol-fixtures/cloud-parity-inventory.json",
+      "sha256": "ead7a0f6fdd7601357c3d5052d52775daea9b33bebadd2869d07207fdaab7ef0"
+    },
+    {
+      "path": "protocol-fixtures/cloud-parity-plan.json",
+      "sha256": "9044286fca0f4944506a551538f7caabb8c899a7e7e2770ffcc052234ffcda16"
+    },
+    {
+      "path": "scripts/lib/cloud-parity-baseline.mjs",
+      "sha256": "e3763ed36fee07b5a81014702cc2183553d5af1164b7475df9d1f90703fc008a"
+    },
+    {
+      "path": "scripts/lib/cloud-parity-markers-contract.mjs",
+      "sha256": "3ddb1d71c8e5c3bc27f5fa075b2e3de4e148b5f17aced0b67c9c37e0d20c54f3"
+    },
+    {
+      "path": "scripts/lib/cloud-parity-markers-contract.test.mjs",
+      "sha256": "64409982d72b0fd794520355c00601bb587df7aebbcfb7615a780bae9e0b92c5"
+    },
+    {
+      "path": "scripts/lib/cloud-parity-markers.mjs",
+      "sha256": "f6b3efe91b214df5566e13bd62a38d7e15b90f1f15e8dc6c287b87a5fe319ff4"
+    },
+    {
+      "path": "scripts/lib/fake-cloud-web-managed.mjs",
+      "sha256": "a72f27948e85719852aa6336b6db5954e4c1e614beb7ab5e6bd0243d9918a28c"
+    },
+    {
+      "path": "scripts/smoke-cloud-parity-app.mjs",
+      "sha256": "31f5e1c354bb633bbbabdfd44970f533df7e0175edbe056bffc7f285fd18fa4f"
+    }
+  ],
+  "selfHashNote": "Manifest excludes its own hash. External frozen manifest includes it after formatting."
+}

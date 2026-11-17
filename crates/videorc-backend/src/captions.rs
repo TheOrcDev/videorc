@@ -3731,10 +3731,7 @@ pub(crate) async fn pause_marker_voice_for_service_flags(state: &AppState) {
         coordinator.marker_epoch = coordinator.marker_epoch.saturating_add(1);
         coordinator.marker_listening = Some(listening.clone());
         if let Some(session_id) = coordinator.marker_session_id.as_ref() {
-            state.emit_event(
-                "session.marker.voice.status",
-                serde_json::json!({"sessionId":session_id,"listening":listening}),
-            );
+            emit_marker_voice_status(&state, session_id, &listening);
         }
     }
     if crate::cohost::cohost_status(state)
@@ -3746,6 +3743,23 @@ pub(crate) async fn pause_marker_voice_for_service_flags(state: &AppState) {
     }
 }
 
+fn emit_marker_voice_status(
+    state: &AppState,
+    scope: &str,
+    listening: &crate::cohost::CohostListening,
+) {
+    if scope.starts_with("sh_") {
+        state.emit_event(
+            "cloud.marker.voice.status",
+            serde_json::json!({"showId":scope,"listening":listening}),
+        );
+    } else {
+        state.emit_event(
+            "session.marker.voice.status",
+            serde_json::json!({"sessionId":scope,"listening":listening}),
+        );
+    }
+}
 /// Capture-owned voice scope: never starts live chat or its scheduler.
 /// Uses the existing shared provider, account gates and renderer-held AI consent.
 pub(crate) async fn configure_marker_voice(
@@ -3757,14 +3771,22 @@ pub(crate) async fn configure_marker_voice(
     let _delivery = state.live_chat_persistence.begin_delivery().await;
     {
         let recording = state.recording.lock().await;
-        if !recording
-            .as_ref()
-            .is_some_and(|r| r.session_id == session_id && !r.stop_requested)
+        if !crate::cloud_markers::owns_show(state, session_id)
+            && !recording
+                .as_ref()
+                .is_some_and(|r| r.session_id == session_id && !r.stop_requested)
         {
             bail!("The capture session has ended.")
         }
     }
     let settings = crate::cohost::get_cohost_settings(state).await;
+    let lost = state
+        .captions
+        .lock()
+        .await
+        .marker_listening
+        .as_ref()
+        .is_some_and(|l| l.reason_code.as_deref() == Some("room-ownership-lost"));
     let blocked = if !consent {
         Some(CohostListening::blocked(
             "consent-required",
@@ -3772,6 +3794,11 @@ pub(crate) async fn configure_marker_voice(
         ))
     } else if !settings.enabled || !settings.listen {
         Some(CohostListening::off())
+    } else if lost {
+        Some(CohostListening::blocked(
+            "room-ownership-lost",
+            "Turn listening off and on again after continuing this show here.",
+        ))
     } else if !crate::cohost::premium_entitled() {
         Some(CohostListening::blocked(
             "premium-required",
@@ -3819,10 +3846,7 @@ pub(crate) async fn configure_marker_voice(
     };
     let mut coordinator = state.captions.lock().await;
     coordinator.marker_listening = Some(listening.clone());
-    state.emit_event(
-        "session.marker.voice.status",
-        serde_json::json!({"sessionId":session_id,"listening":listening}),
-    );
+    emit_marker_voice_status(&state, session_id, &listening);
     Ok(listening)
 }
 
@@ -3832,7 +3856,14 @@ fn marker_audio_owned(
     coordinator: &CaptionsCoordinator,
     target: Option<&crate::clip_marks::MarkTarget>,
 ) -> bool {
-    admission.owns_marker(coordinator, target.map(|target| target.session_id.as_str()))
+    admission.owns_marker(
+        coordinator,
+        session
+            .room_owner
+            .as_ref()
+            .map(|o| o.show_id.as_str())
+            .or_else(|| target.map(|target| target.session_id.as_str())),
+    ) && session.source_valid()
         && !session.stop.load(Ordering::Acquire)
         && crate::cohost::premium_entitled()
         && crate::account::stored_session_token().is_some()
@@ -3842,6 +3873,7 @@ fn publish_marker_outcome(
     session: &CaptionSession,
     target: Option<&crate::clip_marks::MarkTarget>,
     outcome: crate::marker_voice::UtteranceOutcome,
+    marker_epoch: Option<u64>,
 ) -> bool {
     if let Some(message) = outcome.refusal {
         // Plan 209 S18: a refused voice marker is Buddy's refused add_marker.
@@ -3851,7 +3883,18 @@ fn publish_marker_outcome(
             serde_json::json!({"message":message}),
         );
     }
-    if let Some(target) = target {
+    if session.room_owner.is_some() {
+        for marker in outcome.markers {
+            publish_room_mark(
+                session,
+                "marker",
+                marker.label,
+                marker.at_seconds,
+                None,
+                marker_epoch,
+            );
+        }
+    } else if let Some(target) = target {
         for marker in outcome.markers {
             let label = marker.label.clone();
             match crate::session_markers::commit_voice(
@@ -3886,6 +3929,130 @@ fn publish_marker_outcome(
         }
     }
     outcome.consumed
+}
+fn publish_room_mark(
+    session: &CaptionSession,
+    kind: &str,
+    label: Option<String>,
+    offset: f64,
+    seconds: Option<u32>,
+    marker_epoch: Option<u64>,
+) {
+    let Some(owner) = session.room_owner.clone() else {
+        return;
+    };
+    if !session.source_valid() || session.stop.load(Ordering::Acquire) {
+        return;
+    }
+    let state = session.state.clone();
+    let stop = session.stop.clone();
+    let kind = kind.to_string();
+    let speech_session_id = session.session_client_id.clone();
+    let operation = crate::cloud_markers::stable_operation(&[
+        &owner.show_id,
+        &owner.source_id,
+        &speech_session_id,
+        &kind,
+        &offset.to_bits().to_string(),
+    ]);
+    tokio::spawn(async move {
+        // The same immutable host generation fences queue admission and in-flight HTTP.
+        if !owner.valid(&state)
+            || stop.load(Ordering::Acquire)
+            || !room_marker_granted(&state, &owner.show_id, marker_epoch).await
+        {
+            return;
+        }
+        let request = crate::cloud_markers::create(
+            &state,
+            crate::cloud_markers::Create {
+                show_id: owner.show_id.clone(),
+                operation_id: operation,
+                label,
+                kind,
+                lookback_seconds: seconds,
+            },
+            "voice",
+            Some(crate::cloud_markers::SourcePosition {
+                source_id: owner.source_id.clone(),
+                speech_session_id,
+                offset_seconds: offset,
+                uncertainty_ms: None,
+            }),
+        );
+        tokio::pin!(request);
+        let mut tick = tokio::time::interval(std::time::Duration::from_millis(25));
+        loop {
+            tokio::select! {
+                result=&mut request=>{if let Err(e)=result {state.emit_event("session.marker.voice.refused",serde_json::json!({"message":e.to_string()}));}return;},
+                _=tick.tick()=>if !owner.valid(&state)||stop.load(Ordering::Acquire)||!room_marker_granted(&state,&owner.show_id,marker_epoch).await{return;}
+            }
+        }
+    });
+}
+async fn room_marker_granted(state: &AppState, show: &str, epoch: Option<u64>) -> bool {
+    let coordinator = state.captions.lock().await;
+    epoch == Some(coordinator.marker_epoch)
+        && coordinator.marker_session_id.as_deref() == Some(show)
+        && coordinator.marker_started_at.is_some()
+        && crate::cloud_markers::owns_show(state, show)
+        && crate::service_flags::buddy_voice_commands_enabled(state)
+}
+#[derive(Default)]
+struct RoomClipWords {
+    epoch: Option<u64>,
+    tail: Vec<crate::clip_marks::TimedWord>,
+    last: Option<f64>,
+}
+fn note_room_clip(
+    session: &CaptionSession,
+    text: &str,
+    segments: &[CaptionSegment],
+    offset: f64,
+    admission: AdmittedBuddyAudio,
+    coordinator: &CaptionsCoordinator,
+) {
+    if session.room_owner.is_none() || !marker_audio_owned(session, admission, coordinator, None) {
+        *session
+            .room_clip_words
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = RoomClipWords::default();
+        return;
+    }
+    let words = crate::clip_marks::timed_words(text, segments, offset);
+    let mut detector = session
+        .room_clip_words
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if detector.epoch != admission.marker_epoch {
+        *detector = RoomClipWords {
+            epoch: admission.marker_epoch,
+            ..Default::default()
+        };
+    }
+    detector
+        .tail
+        .retain(|word| word.at_seconds <= offset + 0.001 && offset - word.at_seconds <= 6.0);
+    let found = crate::clip_marks::find_clip_phrase(&detector.tail, &words);
+    detector.tail.extend(words);
+    let keep = detector.tail.len().saturating_sub(3);
+    detector.tail.drain(..keep);
+    if let Some(found) = found {
+        if detector.last.is_some_and(|last| {
+            found.at_seconds - last < crate::clip_marks::CLIP_MARK_DEDUPE_SECONDS
+        }) {
+            return;
+        }
+        detector.last = Some(found.at_seconds);
+        publish_room_mark(
+            session,
+            "clip",
+            Some(found.phrase),
+            found.at_seconds,
+            Some(found.seconds),
+            admission.marker_epoch,
+        );
+    }
 }
 fn note_chunk_marker(
     session: &CaptionSession,
@@ -3932,7 +4099,12 @@ fn note_chunk_marker(
         text,
         segments,
     );
-    publish_marker_outcome(session, session.mark_target.as_ref(), outcome)
+    publish_marker_outcome(
+        session,
+        session.mark_target.as_ref(),
+        outcome,
+        chunk.admission.marker_epoch,
+    )
 }
 
 /// Two independent owners travel with input audio. A Listen setting change
@@ -4056,10 +4228,7 @@ fn spawn_listening_publish(
                 && coordinator.marker_started_at.is_some()
             {
                 if let Some(session_id) = coordinator.marker_session_id.as_ref() {
-                    state.emit_event(
-                        "session.marker.voice.status",
-                        serde_json::json!({"sessionId":session_id,"listening":listening}),
-                    );
+                    emit_marker_voice_status(&state, session_id, &listening);
                 }
                 coordinator.marker_listening = Some(listening.clone());
             }
@@ -4426,6 +4595,7 @@ fn spawn_transcription_task(
         present,
         mark_target: start.mark_target,
         marker_utterance: std::sync::Mutex::new(Default::default()),
+        room_clip_words: std::sync::Mutex::new(Default::default()),
         marker_buffer_epoch: std::sync::Mutex::new(None),
     })));
     coordinator.stop = Some(stop);
@@ -5146,6 +5316,7 @@ struct CaptionSession {
     /// recording slot was retired.
     mark_target: Option<crate::clip_marks::MarkTarget>,
     marker_utterance: std::sync::Mutex<crate::marker_voice::UtteranceBuffer>,
+    room_clip_words: std::sync::Mutex<RoomClipWords>,
     marker_buffer_epoch: std::sync::Mutex<Option<u64>>,
 }
 
@@ -5230,10 +5401,7 @@ impl CaptionSession {
             coordinator.listen_ready = listening.state == crate::cohost::CohostListeningState::On;
             if coordinator.marker_started_at.is_some() {
                 if let Some(session_id) = coordinator.marker_session_id.as_ref() {
-                    self.state.emit_event(
-                        "session.marker.voice.status",
-                        serde_json::json!({"sessionId":session_id,"listening":listening}),
-                    );
+                    emit_marker_voice_status(&self.state, session_id, &listening);
                 }
                 coordinator.marker_listening = Some(listening.clone());
             }
@@ -7272,11 +7440,24 @@ async fn handle_realtime_event(
                             _ => {}
                         }
                     }
-                    publish_marker_outcome(session, item.mark_target.as_ref(), outcome);
+                    publish_marker_outcome(
+                        session,
+                        item.mark_target.as_ref(),
+                        outcome,
+                        item.admission.marker_epoch,
+                    );
                 }
                 if !item.clip_processed {
                     items.get_mut(&item_id).unwrap().clip_processed = true;
                     if !marker_consumed {
+                        note_room_clip(
+                            session,
+                            &transcript,
+                            &[],
+                            offset,
+                            item.admission,
+                            &coordinator,
+                        );
                         crate::clip_marks::note_transcript_final(
                             &session.state,
                             &transcript,
@@ -7824,6 +8005,14 @@ async fn commit_chunk_transcript(
         let marker_consumed = first_final
             && note_chunk_marker(session, chunk, text, &response.segments, &coordinator);
         if first_final && !marker_consumed {
+            note_room_clip(
+                session,
+                text,
+                &response.segments,
+                chunk.offset_seconds,
+                chunk.admission,
+                &coordinator,
+            );
             crate::clip_marks::note_transcript_final(
                 &session.state,
                 text,
@@ -8011,7 +8200,12 @@ async fn run_chunked_caption_session(
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .finish_at_capture_end();
-                publish_marker_outcome(session, session.mark_target.as_ref(), outcome);
+                publish_marker_outcome(
+                    session,
+                    session.mark_target.as_ref(),
+                    outcome,
+                    admission.marker_epoch,
+                );
             }
             break;
         }
@@ -12279,6 +12473,7 @@ mod tests {
             present: Arc::new(AtomicBool::new(present)),
             mark_target: None,
             marker_utterance: std::sync::Mutex::new(Default::default()),
+            room_clip_words: std::sync::Mutex::new(Default::default()),
             marker_buffer_epoch: std::sync::Mutex::new(None),
         }
     }

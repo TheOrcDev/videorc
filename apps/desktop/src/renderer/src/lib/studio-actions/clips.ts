@@ -11,8 +11,15 @@ export const clipMark: StudioActionExecutor = async (context, fields) => {
   if (seconds !== undefined && !isClipLength(seconds)) {
     return { ok: false, message: INVALID_CLIP_LENGTH_MESSAGE }
   }
-  if (!context.sessionActive && !context.replayOn) {
+  if (
+    !context.sessionActive &&
+    !context.replayOn &&
+    !(context.outputFacts?.owner === 'cloud-room' && context.outputFacts.roomOpen)
+  ) {
     return { ok: false, message: REMOTE_INTENT_COPY.clipsOff }
   }
-  return context.markClip(seconds)
+  return context.markClip(
+    seconds,
+    typeof fields.requestId === 'string' ? fields.requestId : undefined
+  )
 }

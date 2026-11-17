@@ -1,3 +1,9 @@
+import {
+  cloudMarkerCreateSchema,
+  cloudMarkerParamsSchema,
+  cloudMarkerSchema,
+  cloudMarkerLookupSchema
+} from './cloud-markers'
 import { parseGraphicsSource, type GraphicsSource } from './cloud-graphics'
 import { parseManagedOutputProfile } from './cloud-output-profile'
 import type {
@@ -909,6 +915,28 @@ export interface BackendRpcMethodMap {
     { sessionId: string },
     ModerationOperation[]
   >
+  'cloud.marker.create': BackendRpcDefinition<
+    import('./cloud-markers').CloudMarkerCreate,
+    import('./cloud-markers').CloudMarker
+  >
+  'cloud.markers.list': BackendRpcDefinition<
+    { showId: string },
+    { markers: import('./cloud-markers').CloudMarker[]; revision: number }
+  >
+  'cloud.marker.get': BackendRpcDefinition<
+    { showId: string; markerId: string },
+    | { status: 'found'; marker: import('./cloud-markers').CloudMarker }
+    | { status: 'deleted' }
+    | { status: 'absent' }
+  >
+  'cloud.marker.delete': BackendRpcDefinition<
+    { showId: string; markerId: string },
+    { deleted: true }
+  >
+  'cloud.marker.voice.configure': BackendRpcDefinition<
+    { showId: string; consent: boolean },
+    import('./backend').CohostListening
+  >
   'cloud.speech.overlay': BackendRpcDefinition<
     import('./cloud-speech').CloudSpeechOverlay,
     import('./cloud-speech').CloudSpeechOverlayResult
@@ -936,7 +964,11 @@ export interface BackendRpcMethodMap {
   'session.marker.rename': BackendRpcDefinition<RenameMarkerParams, SessionMarker>
   'session.marker.delete': BackendRpcDefinition<MarkerParams, MarkerChanged>
   // Plan 199: an optional `{ seconds?: 30 | 60 }`; none is today's 30 s.
-  'clip.mark': BackendRpcDefinition<ClipMarkParams | undefined, ClipMarkedEvent>
+  'clip.mark': BackendRpcDefinition<
+    | (ClipMarkParams & { operationId?: string; requestId?: string; source?: 'manual' | 'remote' })
+    | undefined,
+    ClipMarkedEvent
+  >
   'clip.marks.list': BackendRpcDefinition<{ sessionId: string }, ClipMark[]>
   // --- Replay buffer (plan 181) ---
   'replay.status': BackendRpcDefinition<undefined, import('./backend').ReplayStateEvent>
@@ -1028,6 +1060,8 @@ export interface BackendEventMap {
   /** Plan 249 S5: public animator inputs for a cloud output's animator twin. */
   'cohost.pet.animator': CohostPetAnimatorEvent
   // --- end Buddy pets (plan 168, Phase F) ---
+  'cloud.marker.voice.status': { showId: string; listening: import('./backend').CohostListening }
+  'cloud.marker.created': import('./cloud-markers').CloudMarker
   'captions.status': import('./backend').CaptionsStatus
   'session.marker.voice.status': {
     sessionId: string
@@ -5028,7 +5062,7 @@ const audioLevelsEventSchema = objectSchema(
   { allowUnknown: false }
 ) as RuntimeSchema<AudioLevelsEvent>
 
-const clipMarkedEventSchema = objectSchema(
+const nativeClipMarkedEventSchema = objectSchema(
   {
     sessionId: boundedString,
     atSeconds: numberSchema({ min: 0, max: 1_000_000_000 }),
@@ -5039,6 +5073,20 @@ const clipMarkedEventSchema = objectSchema(
   { allowUnknown: false }
 ) as RuntimeSchema<ClipMarkedEvent>
 
+const clipMarkedEventSchema = unionSchema([
+  nativeClipMarkedEventSchema,
+  objectSchema(
+    {
+      showId: boundedString,
+      markerId: boundedString,
+      atSeconds: numberSchema({ min: 0, max: 1e9 }),
+      source: clipMarkSourceSchema,
+      saved: literalSchema(true),
+      reason: literalSchema('cloud-marker-no-media')
+    },
+    { allowUnknown: false }
+  )
+])
 // Caption outage presentation uses the existing degraded state and the shared
 // service-unavailable reason. Keep every wire field explicit: main rejects
 // unknown keys on registered events, including during an outage.
@@ -7722,6 +7770,29 @@ const runtimeContracts = {
     params: objectSchema({ sessionId: boundedString }, { allowUnknown: false }),
     result: arraySchema(moderationOperationSchema, { maxLength: 200 })
   },
+  'cloud.marker.create': { params: cloudMarkerCreateSchema, result: cloudMarkerSchema },
+  'cloud.markers.list': {
+    params: objectSchema({ showId: boundedString }, { allowUnknown: false }),
+    result: objectSchema(
+      {
+        markers: arraySchema(cloudMarkerSchema, { maxLength: 2000 }),
+        revision: nonNegativeInteger
+      },
+      { allowUnknown: false }
+    )
+  },
+  'cloud.marker.get': { params: cloudMarkerParamsSchema, result: cloudMarkerLookupSchema },
+  'cloud.marker.delete': {
+    params: cloudMarkerParamsSchema,
+    result: objectSchema({ deleted: literalSchema(true) }, { allowUnknown: false })
+  },
+  'cloud.marker.voice.configure': {
+    params: objectSchema(
+      { showId: boundedString, consent: booleanSchema },
+      { allowUnknown: false }
+    ),
+    result: cohostListeningSchema
+  },
   'cloud.speech.overlay': {
     params: objectSchema(
       {
@@ -7827,7 +7898,22 @@ const runtimeContracts = {
   'session.marker.get': { params: markerParamsSchema, result: markerLookupSchema },
   'session.marker.rename': { params: renameMarkerParamsSchema, result: sessionMarkerSchema },
   'session.marker.delete': { params: markerParamsSchema, result: markerChangedSchema },
-  'clip.mark': { params: clipLengthParamsSchema, result: clipMarkedEventSchema },
+  'clip.mark': {
+    params: optionalSchema(
+      nullableSchema(
+        objectSchema(
+          {
+            seconds: optionalSchema(unionSchema([literalSchema(30), literalSchema(60)])),
+            operationId: optionalSchema(stringSchema({ minLength: 36, maxLength: 36 })),
+            requestId: optionalSchema(stringSchema({ minLength: 1, maxLength: 160 })),
+            source: optionalSchema(enumSchema(['manual', 'remote']))
+          },
+          { allowUnknown: false }
+        )
+      )
+    ),
+    result: clipMarkedEventSchema
+  },
   'clip.marks.list': {
     params: objectSchema({ sessionId: boundedString }, { allowUnknown: false }),
     result: arraySchema(clipMarkSchema, { maxLength: 10_000 })
@@ -8004,6 +8090,11 @@ const runtimeEventSchemas = {
     }
   ),
   // --- end Buddy pets (plan 168, Phase F) ---
+  'cloud.marker.voice.status': objectSchema(
+    { showId: stringSchema(), listening: cohostListeningSchema },
+    { allowUnknown: false }
+  ),
+  'cloud.marker.created': cloudMarkerSchema,
   'captions.status': captionsStatusSchema,
   'session.marker.voice.status': objectSchema(
     { sessionId: boundedString, listening: cohostListeningSchema },

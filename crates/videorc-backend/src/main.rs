@@ -47,6 +47,7 @@ mod cloud_archive;
 mod cloud_control_web;
 mod cloud_controller;
 mod cloud_graphics;
+mod cloud_markers;
 mod cloud_services;
 mod cloud_show;
 // Plan 249 S22: cloud ISO manifests and the import journal's pure rules.
@@ -5831,6 +5832,9 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "resource.capability.register_thumbnail"
         | "account.auth.begin_intent"
         | "account.sign_out"
+        | "cloud.marker.create"
+        | "cloud.marker.delete"
+        | "cloud.marker.voice.configure"
         | "cloud.speech.overlay"
         | "cloud.speech.sync"
         | "cloud.speech.audio"
@@ -6187,6 +6191,8 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "scheduledStreams.candidates"
         | "account.get"
         | "entitlements.get"
+        | "cloud.markers.list"
+        | "cloud.marker.get"
         | "cloud.speech.transcript"
         | "captions.status.get"
         | "captions.test.snapshot"
@@ -10835,6 +10841,69 @@ async fn handle_text_message_with_role(
                 )
                 .await;
                 ServerResponse::ok(command.id, entitlements::current_entitlements())
+            }
+        }
+        "cloud.marker.create" => {
+            match serde_json::from_value::<cloud_markers::Create>(command.params) {
+                Ok(input) => match cloud_markers::create(state, input, "manual", None).await {
+                    Ok(v) => ServerResponse::ok(command.id, v),
+                    Err(e) => {
+                        ServerResponse::error(command.id, "cloud-marker-refused", e.to_string())
+                    }
+                },
+                Err(e) => ServerResponse::error(command.id, "invalid-params", e.to_string()),
+            }
+        }
+        "cloud.markers.list" | "cloud.marker.get" | "cloud.marker.delete" => {
+            let input = match serde_json::from_value::<cloud_markers::Read>(command.params) {
+                Ok(input) => input,
+                Err(e) => {
+                    return ServerResponse::error(command.id, "invalid-params", e.to_string());
+                }
+            };
+            if (command.method == "cloud.markers.list") != input.marker_id.is_none() {
+                return ServerResponse::error(
+                    command.id,
+                    "invalid-params",
+                    "A lookup or delete needs one marker identity.",
+                );
+            }
+            let show = &input.show_id;
+            let marker = input.marker_id.as_deref();
+            let method = if command.method == "cloud.marker.delete" {
+                "DELETE"
+            } else {
+                "GET"
+            };
+            match cloud_markers::request(state, show, method, marker, None).await {
+                Ok(v) => ServerResponse::ok(command.id, v),
+                Err(e) => ServerResponse::error(command.id, "cloud-marker-refused", e.to_string()),
+            }
+        }
+        "cloud.marker.voice.configure" => {
+            let show = command
+                .params
+                .get("showId")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            let consent = command
+                .params
+                .get("consent")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            if !cloud_markers::owns_show(state, show) {
+                ServerResponse::error(
+                    command.id,
+                    "cloud-marker-refused",
+                    "This computer does not own the show.",
+                )
+            } else {
+                match captions::configure_marker_voice(state, show, consent).await {
+                    Ok(v) => ServerResponse::ok(command.id, v),
+                    Err(e) => {
+                        ServerResponse::error(command.id, "cloud-marker-refused", e.to_string())
+                    }
+                }
             }
         }
         "cloud.speech.transcript" => match serde_json::from_value(command.params.clone()) {
@@ -16582,6 +16651,24 @@ async fn handle_text_message_with_role(
         // Plan 199: both take an optional `{ seconds?: 30 | 60 }`. Older
         // callers send no params (or null): that is `{}`, today's 30 s.
         "clip.mark" => {
+            if cloud_markers::current_show(state).is_some() {
+                return match cloud_markers::dispatch_clip(
+                    state,
+                    command.params,
+                    &command.id.to_string(),
+                )
+                .await
+                {
+                    Ok(mark) => {
+                        let event = cloud_markers::clip_event(&mark);
+                        state.emit_event("clip.marked", event.clone());
+                        ServerResponse::ok(command.id, event)
+                    }
+                    Err(e) => {
+                        ServerResponse::error(command.id, "cloud-marker-refused", e.to_string())
+                    }
+                };
+            }
             match serde_json::from_value::<protocol::ClipMarkParams>(if command.params.is_null() {
                 serde_json::json!({})
             } else {

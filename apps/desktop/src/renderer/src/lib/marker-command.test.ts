@@ -59,7 +59,7 @@ describe('marker outcome recovery', () => {
     const context = { sessionId: 'capture-b', available: true }
     expect(markerRetryAvailable('capture-a', context)).toBe(false)
     const next = markerCreateParams(params, context, 'Topic')
-    expect(next.sessionId).toBe('capture-b')
+    expect('sessionId' in next && next.sessionId).toBe('capture-b')
     expect(next.operationId).not.toBe(params.operationId)
     expect(next.label).toBe('Topic')
     expect(markerCreateParams(next, context, 'Topic')).toBe(next)

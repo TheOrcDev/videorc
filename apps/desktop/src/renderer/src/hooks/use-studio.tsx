@@ -3663,6 +3663,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       setLastVoiceMarker(marker)
       void import('../lib/marker-toast').then((module) => module.showMarkerToast(client, marker))
     })
+    const offCloudMarkerCreated = client?.on('cloud.marker.created', (marker) => {
+      if (marker.source !== 'voice') return
+      setLastVoiceMarker(marker)
+      void import('../lib/marker-toast').then((module) => module.showMarkerToast(client, marker))
+    })
     const offMarkerChanged = client?.on('session.marker.changed', (changed) => {
       setLastVoiceMarker((previous) =>
         previous?.id === changed.markerId && changed.revision >= previous.revision
@@ -3688,6 +3693,12 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             if (!outcome.ok) throw new Error(outcome.message)
             return { hidden: command.action === 'screenHide' }
           }
+          case 'cloudCreate':
+            return client.requestTyped('cloud.marker.create', command.params)
+          case 'cloudGet':
+            return client.requestTyped('cloud.marker.get', command.params)
+          case 'cloudDelete':
+            return client.requestTyped('cloud.marker.delete', command.params)
           case 'create':
             return client.requestTyped('session.marker.create', command.params)
           case 'get':
@@ -3712,12 +3723,20 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     const offClipMark = window.videorc?.onClipMarkRequest?.((command: ClipMarkCommand) => {
       void (async () => {
         if (!client) throw offlineError()
-        if (!isActiveRecordingState(recordingRef.current.state)) {
+        if (
+          !isActiveRecordingState(recordingRef.current.state) &&
+          cloudStatusRef.current?.room?.phase !== 'open'
+        ) {
           throw new Error("No session is running, so there's nothing to mark.")
         }
         // Plan 199: main checked the length (30, 60 or none).
         const { seconds } = command
-        return client.request<ClipMarkedEvent>('clip.mark', seconds && { seconds })
+        return client.request<ClipMarkedEvent>(
+          'clip.mark',
+          cloudStatusRef.current?.room?.phase === 'open'
+            ? { seconds: seconds ?? 30, requestId: command.requestId }
+            : seconds && { seconds }
+        )
       })()
         .then(async (event) => {
           await window.videorc?.pushClipMarkResult?.({
@@ -3759,18 +3778,26 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       offBanner?.()
       offMarker?.()
       offMarkerCreated?.()
+      offCloudMarkerCreated?.()
       offMarkerRefused?.()
       offMarkerChanged?.()
     }
   }, [client])
   const [lastVoiceMarker, setLastVoiceMarker] = useState<
-    import('@/lib/backend').SessionMarker | null
+    import('../../../shared/cloud-markers').TimelineMarker | null
   >(null)
   const [markerVoice, setMarkerVoice] = useState<{
     sessionId: string
     listening: import('@/lib/backend').CohostListening
   } | null>(null)
   useEffect(() => client?.on('session.marker.voice.status', setMarkerVoice), [client])
+  useEffect(
+    () =>
+      client?.on('cloud.marker.voice.status', ({ showId, listening }) =>
+        setMarkerVoice({ sessionId: showId, listening })
+      ),
+    [client]
+  )
   // Backend-authoritative comment highlight. The renderer owns only the
   // temporary rasterization phase; `On stream` comes from the backend state.
   const [commentHighlightState, setCommentHighlightState] = useState<CommentHighlightState>({
@@ -4873,15 +4900,21 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const markerContextForWindow = useMemo<MarkerContext>(() => {
     // A buffer-only session (plan 181) has no Library row to hold a marker,
     // so the voice marker waits for a recording or a livestream.
+    const cloudShowId =
+      cloudStatus?.room?.phase === 'open' && cloudStatus.onAir?.thisDevice !== false
+        ? cloudStatus.show?.id
+        : undefined
     const available = Boolean(
-      client &&
-      recording.sessionId &&
-      (recording.state === 'recording' || recording.state === 'streaming') &&
-      recording.replayOnly !== true
+      cloudShowId ||
+      (client &&
+        recording.sessionId &&
+        (recording.state === 'recording' || recording.state === 'streaming') &&
+        recording.replayOnly !== true)
     )
     // The Clip action (R4): the last seconds whenever the ring holds frames,
     // a mark while a session runs; the window shows the button on either.
-    const clipAvailable = replayState.state === 'on' || isActiveRecordingState(recording.state)
+    const clipAvailable =
+      Boolean(cloudShowId) || replayState.state === 'on' || isActiveRecordingState(recording.state)
     const clipShortcut = settings.globalShortcuts?.clipMark
     const longClipShortcut = settings.globalShortcuts?.clipMarkLong
     const clipOff = clipAvailable
@@ -4895,11 +4928,12 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             : ('idle' as const)
     return {
       sessionId: recording.sessionId,
+      ...(cloudShowId ? { cloudShowId } : {}),
       available,
       reason: available ? undefined : 'Start a recording or livestream to make a marker.',
       lastMarker: lastVoiceMarker ?? undefined,
       voice:
-        markerVoice && markerVoice.sessionId === recording.sessionId
+        markerVoice && markerVoice.sessionId === (cloudShowId ?? recording.sessionId)
           ? markerVoice.listening
           : undefined,
       clip: {
@@ -4924,6 +4958,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     }
   }, [
     captureConfig.replayBuffer.enabled,
+    cloudStatus,
     client,
     recording.sessionId,
     recording.state,
@@ -5822,17 +5857,17 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     if (
       !client ||
       wsStatus !== 'connected' ||
-      !recording.sessionId ||
-      !['recording', 'streaming'].includes(recording.state)
+      (!(cloudStatus?.room?.phase === 'open' && cloudStatus.onAir?.thisDevice !== false) &&
+        (!recording.sessionId || !['recording', 'streaming'].includes(recording.state)))
     )
       return
     let cancelled = false
-    const sessionId = recording.sessionId
-    void client
-      .requestTyped('session.marker.voice.configure', {
-        sessionId,
-        consent: aiConsent
-      })
+    const showId = cloudStatus?.room?.phase === 'open' ? cloudStatus.show?.id : undefined
+    const sessionId = showId ?? recording.sessionId!
+    const configured = showId
+      ? client.requestTyped('cloud.marker.voice.configure', { showId, consent: aiConsent })
+      : client.requestTyped('session.marker.voice.configure', { sessionId, consent: aiConsent })
+    void configured
       .then((listening) => {
         if (!cancelled) setMarkerVoice({ sessionId, listening })
       })
@@ -5859,7 +5894,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     cohostEnabled,
     cohostListen,
     cohostGate.allowed,
-    cohostState?.status
+    cohostState?.status,
+    cloudStatus?.room?.phase,
+    cloudStatus?.show?.id,
+    cloudStatus?.onAir?.thisDevice
   ])
   // The Buddy on stream (plan 164 S-C2, plan 168 S-B1). The backend owns the
   // state and the bubble and draws the pet itself from its atlas; this
@@ -11594,7 +11632,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       // vertical card is disabled and the backend refuses the switch).
       let videoOverride: VideoSettings | undefined
       let captureConfigPatch: Pick<CaptureConfig, 'video' | 'verticalRestoreVideo'> | undefined
-      if (!isActiveRecordingState(recordingRef.current.state)) {
+      if (
+        !isActiveRecordingState(recordingRef.current.state) &&
+        cloudStatusRef.current?.room?.phase !== 'open'
+      ) {
         const coupling = verticalOrientationVideoPatch(
           current.layout.layoutPreset,
           nextPreset,
@@ -18110,12 +18151,18 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
               : null
           if (pendingSettlement) {
             await pendingSettlement.promise
-            if (!isActiveRecordingState(recordingRef.current.state)) {
+            if (
+              !isActiveRecordingState(recordingRef.current.state) &&
+              cloudStatusRef.current?.room?.phase !== 'open'
+            ) {
               clearLiveChatForTerminalSession(sessionId)
               return true
             }
           }
-          if (!isActiveRecordingState(recordingRef.current.state)) {
+          if (
+            !isActiveRecordingState(recordingRef.current.state) &&
+            cloudStatusRef.current?.room?.phase !== 'open'
+          ) {
             clearLiveChatForTerminalSession(sessionId)
             return true
           }
@@ -18547,7 +18594,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         return null
       }
       const ring = replayStateRef.current
-      if (ring.state !== 'on' && !isActiveRecordingState(recordingRef.current.state)) {
+      if (
+        cloudStatusRef.current?.room?.phase !== 'open' &&
+        ring.state !== 'on' &&
+        !isActiveRecordingState(recordingRef.current.state)
+      ) {
         void import('@/lib/replay-buffer').then((replay) =>
           replay.showNothingToClip({
             state: ring.state,
@@ -18558,7 +18609,12 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         return null
       }
       try {
-        return await client.request<ClipMarkedEvent>('clip.mark', seconds && { seconds })
+        return await client.request<ClipMarkedEvent>(
+          'clip.mark',
+          cloudStatusRef.current?.room?.phase === 'open'
+            ? { seconds: seconds ?? 30, operationId: crypto.randomUUID() }
+            : seconds && { seconds }
+        )
       } catch (error) {
         reportError(error, { action: 'save', object: 'the clip' })
         return null
@@ -20403,6 +20459,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     if (!import.meta.env.DEV) return
     const smokeWindow = window as Window & { __videorcSmokeScenePresets?: unknown }
     smokeWindow.__videorcSmokeScenePresets = {
+      markerConsent: (consent: boolean) => value.setAiConsent(consent),
       state: () => ({
         canSave: value.canSaveScene,
         scenes: value.savedScenes,

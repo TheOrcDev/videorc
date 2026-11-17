@@ -334,7 +334,7 @@
     {
       "id": "A8",
       "feature": "Sidekick listening, voice actions, voice markers: `B/captions.rs:4431`",
-      "sourceState": "missing",
+      "sourceState": "partial",
       "requiredResult": "S15/S19: host-only consented listening, tool confirmations and markers",
       "slices": ["S15", "S19"],
       "cases": ["captions", "markers"],
@@ -348,16 +348,16 @@
           "note": "Native media feeds solo ingress; managed profile/direct-fallback, recording refusal, destination identity and service exceptions remain. Source route only."
         },
         "roomStream": {
-          "status": "missing",
-          "note": "**Missing.** `no-capture`; chat-based Sidekick is separate"
+          "status": "partial",
+          "note": "S19 writes owner-authenticated server-show timeline markers from UI/remote/agent and S15 consented host voice. S24 fences writes and retires voice on loss. Interval/take/provider associations are separate; extraction/media mapping and rolling Clips remain unavailable without measured clocks. No runtime qualification."
         },
         "roomRecording": {
-          "status": "missing",
-          "note": "**Missing.** `no-capture`; chat-based Sidekick is separate Separate recording egress and visibility require independent acceptance."
+          "status": "partial",
+          "note": "S19 writes owner-authenticated server-show timeline markers from UI/remote/agent and S15 consented host voice. S24 fences writes and retires voice on loss. Interval/take/provider associations are separate; extraction/media mapping and rolling Clips remain unavailable without measured clocks. No runtime qualification."
         },
         "hostMonitor": {
-          "status": "missing",
-          "note": "S15/S19: host-only consented listening, tool confirmations and markers The room does not attach the native source/tap."
+          "status": "partial",
+          "note": "S19 writes owner-authenticated server-show timeline markers from UI/remote/agent and S15 consented host voice. S24 fences writes and retires voice on loss. Interval/take/provider associations are separate; extraction/media mapping and rolling Clips remain unavailable without measured clocks. No runtime qualification."
         },
         "guestReturn": {
           "status": "missing",
@@ -365,11 +365,11 @@
         },
         "handoff": {
           "status": "partial",
-          "note": "S15/S19: host-only consented listening, tool confirmations and markers S24 must declare continuation: browser camera/mic can change owner, static assets need persistence, desktop-only dynamic sources freeze/clear. No measured handoff acceptance."
+          "note": "S19 writes owner-authenticated server-show timeline markers from UI/remote/agent and S15 consented host voice. S24 fences writes and retires voice on loss. Interval/take/provider associations are separate; extraction/media mapping and rolling Clips remain unavailable without measured clocks. No runtime qualification."
         }
       },
       "evidence": {
-        "source": "reviewed-at-pinned-revisions",
+        "source": "S15/S19 source checkpoint; focused fixtures only; runtime not-run",
         "localLiveKit": "not-run",
         "managed": "not-run",
         "macos": "not-run",
@@ -2169,7 +2169,7 @@
     {
       "id": "O8",
       "feature": "Manual/voice markers, Clip marks, chat moments, rolling Clips",
-      "sourceState": "missing",
+      "sourceState": "partial",
       "requiredResult": "S19/S21: show clock marks and bounded program replay capture",
       "slices": ["S19", "S21a", "S21b", "S21c"],
       "cases": ["markers", "replay-ring", "clips", "archive"],
@@ -2183,16 +2183,16 @@
           "note": "Native media feeds solo ingress; managed profile/direct-fallback, recording refusal, destination identity and service exceptions remain. Source route only."
         },
         "roomStream": {
-          "status": "missing",
-          "note": "**Missing/partial.** Manual marker refuses (`B/session_markers.rs:450`), mark needs recording (`B/clip_marks.rs:499`), ring off in room (`R/hooks/use-studio.tsx:17141`); chat peaks can remain"
+          "status": "partial",
+          "note": "S19 writes owner-authenticated server-show timeline markers from UI/remote/agent and S15 consented host voice. S24 fences writes and retires voice on loss. Interval/take/provider associations are separate; extraction/media mapping and rolling Clips remain unavailable without measured clocks. No runtime qualification."
         },
         "roomRecording": {
-          "status": "missing",
-          "note": "**Missing/partial.** Manual marker refuses (`B/session_markers.rs:450`), mark needs recording (`B/clip_marks.rs:499`), ring off in room (`R/hooks/use-studio.tsx:17141`); chat peaks can remain Separate recording egress and visibility require independent acceptance."
+          "status": "partial",
+          "note": "S19 writes owner-authenticated server-show timeline markers from UI/remote/agent and S15 consented host voice. S24 fences writes and retires voice on loss. Interval/take/provider associations are separate; extraction/media mapping and rolling Clips remain unavailable without measured clocks. No runtime qualification."
         },
         "hostMonitor": {
-          "status": "missing",
-          "note": "S19/S21: show clock marks and bounded program replay capture Operator/service state must be confirmed independently of local recording state."
+          "status": "partial",
+          "note": "S19 writes owner-authenticated server-show timeline markers from UI/remote/agent and S15 consented host voice. S24 fences writes and retires voice on loss. Interval/take/provider associations are separate; extraction/media mapping and rolling Clips remain unavailable without measured clocks. No runtime qualification."
         },
         "guestReturn": {
           "status": "not-applicable",
@@ -2200,11 +2200,11 @@
         },
         "handoff": {
           "status": "partial",
-          "note": "S19/S21: show clock marks and bounded program replay capture S24 must declare continuation: browser camera/mic can change owner, static assets need persistence, desktop-only dynamic sources freeze/clear. No measured handoff acceptance."
+          "note": "S19 writes owner-authenticated server-show timeline markers from UI/remote/agent and S15 consented host voice. S24 fences writes and retires voice on loss. Interval/take/provider associations are separate; extraction/media mapping and rolling Clips remain unavailable without measured clocks. No runtime qualification."
         }
       },
       "evidence": {
-        "source": "reviewed-at-pinned-revisions",
+        "source": "S15/S19 source checkpoint; focused fixtures only; runtime not-run",
         "localLiveKit": "not-run",
         "managed": "not-run",
         "macos": "not-run",

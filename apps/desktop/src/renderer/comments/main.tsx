@@ -1,3 +1,4 @@
+import type { TimelineMarkerCreate } from '../../shared/cloud-markers'
 import React, { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from 'react'
 import ReactDOM from 'react-dom/client'
 import { toast } from '@/lib/toast'
@@ -61,7 +62,7 @@ import {
   markerRetryAvailable,
   MarkerRemovedError
 } from '@/lib/marker-command'
-import type { CreateMarkerParams, MarkerContext } from '../../shared/session-markers'
+import type { MarkerContext } from '../../shared/session-markers'
 import { clipMarkSavedClip, clipMarkedToast, type ClipMarkedToast } from '../../shared/clip-marks'
 import { clipSavingToast, type ClipLength } from '../../shared/clip-lengths'
 import type { EntitlementUiGate } from '@/lib/entitlement-ui'
@@ -151,7 +152,7 @@ function CommentsWindowApp(): ReactElement {
       clipMarkSavedClip(event) ? clipSavingToast(event, asked) : clipMarkedToast(event)
     )
   }
-  const markerRetry = useRef<CreateMarkerParams | null>(null)
+  const markerRetry = useRef<TimelineMarkerCreate | null>(null)
   const [markerRetrySessionId, setMarkerRetrySessionId] = useState<string | null>(null)
   useEffect(() => {
     let disposed = false
@@ -1105,7 +1106,7 @@ function CommentsWindowApp(): ReactElement {
             if (!api) throw new Error('Stream Manager is disconnected.')
             const params = markerCreateParams(markerRetry.current, markerContext, label)
             markerRetry.current = params
-            setMarkerRetrySessionId(params.sessionId)
+            setMarkerRetrySessionId('showId' in params ? params.showId : params.sessionId)
             try {
               const marker = await createCommentsMarker(api, params)
               markerRetry.current = null
@@ -1121,6 +1122,14 @@ function CommentsWindowApp(): ReactElement {
           }}
           onUndoMarker={async (marker) => {
             if (!window.videorc) throw new Error('Stream Manager is disconnected.')
+            if ('showId' in marker) {
+              await window.videorc.markerFromCommentsWindow({
+                requestId: crypto.randomUUID(),
+                action: 'cloudDelete',
+                params: { showId: marker.showId, markerId: marker.id }
+              })
+              return
+            }
             await window.videorc.markerFromCommentsWindow({
               requestId: crypto.randomUUID(),
               action: 'delete',

@@ -1,5 +1,6 @@
 import { LibraryCloudArchive } from './library-cloud-archive'
 import { LibraryCloudIsoTake, useCloudIsoLibrary } from './library-cloud-iso'
+import { CloudMarkersButton } from '@/components/cloud-markers-dialog'
 import { openWorkspaceTab } from '@/lib/workspace-navigation'
 import { cloudRecordingAvailability, cloudTakeLabel } from '@/lib/cloud-recordings-view'
 import {
@@ -28,7 +29,7 @@ import { Button } from '@/components/ui/button'
 import { Empty, EmptyDescription, EmptyTitle } from '@/components/ui/empty'
 import { Progress } from '@/components/ui/progress'
 import { Spinner } from '@/components/ui/spinner'
-import { useStudioCore, useStudioDiagnostics } from '@/hooks/use-studio'
+import { useStudioCore, useStudioDiagnostics, useStudioCloud } from '@/hooks/use-studio'
 import type { CloudRecordingItem } from '@/lib/backend'
 import {
   attachCloudDownloads,
@@ -73,6 +74,7 @@ type LoadState = { kind: 'idle' } | { kind: 'loading' } | { kind: 'error'; text:
 
 export function LibraryCloudRecordings(): ReactElement {
   const { account, settings, wsStatus } = useStudioCore()
+  const { cloudStatus } = useStudioCloud()
   const { client } = useStudioDiagnostics()
   const signedIn = account?.status === 'signed-in'
   const online = wsStatus === 'connected'
@@ -193,6 +195,9 @@ export function LibraryCloudRecordings(): ReactElement {
       title="Cloud recordings"
     >
       {signedIn && <LibraryCloudArchive />}
+      {signedIn && cloudStatus?.show?.id && (
+        <CloudMarkersButton showId={cloudStatus.show.id} disabled={!online} />
+      )}
       {!signedIn ? (
         <LockAlert
           action={lockAlertAction({ kind: 'sign-in' })}
@@ -292,6 +297,7 @@ function CloudRecordingRow({
       <span className="text-meta text-muted-foreground tabular-nums">
         {durationMsLabel(recording.seconds * 1000)}
       </span>
+      <CloudMarkersButton showId={recording.showId} disabled={disabled} />
       {recording.localSessionId || (download?.state === 'done' && download.localSessionId) ? (
         <Button
           size="xs"

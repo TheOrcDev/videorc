@@ -53,6 +53,12 @@ export function clipMarkedToast(
   event: ClipMarkedEvent,
   { streaming = true }: { streaming?: boolean } = {}
 ): ClipMarkedToast {
+  if (event.reason === 'cloud-marker-no-media')
+    return {
+      kind: 'success',
+      title: 'Marker saved',
+      description: 'Saved on the show timeline; no media to extract.'
+    }
   if (event.saved) {
     return {
       kind: 'success',

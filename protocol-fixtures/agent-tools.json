@@ -1015,7 +1015,7 @@
     {
       "name": "save_clip",
       "title": "Save a clip",
-      "description": "Save the last 30 or 60 seconds as a clip in the Library, like the Clip button, and mark the spot while recording or live. Works whenever Clips is on. Refused with the reason when Clips is off and nothing runs.",
+      "description": "Save the last 30 or 60 seconds as a clip in the Library, like the Clip button, and mark the spot while recording or live. Works whenever Clips is on. Refused with the reason when Clips is off and nothing runs. In a cloud room this saves a show marker; media extraction requires a measured recording clock.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -1023,28 +1023,75 @@
             "type": "integer",
             "description": "30 or 60. Default 30.",
             "enum": [30, 60]
+          },
+          "operationId": {
+            "type": "string",
+            "minLength": 36,
+            "maxLength": 36,
+            "description": "Optional canonical UUID retained across retries of a cloud show mark."
           }
         },
         "additionalProperties": false
       },
       "outputSchema": {
-        "type": "object",
-        "properties": {
-          "clip": {
-            "type": "boolean"
+        "anyOf": [
+          {
+            "type": "object",
+            "properties": {
+              "clip": {
+                "type": "boolean"
+              },
+              "marked": {
+                "type": "boolean"
+              },
+              "seconds": {
+                "type": "integer"
+              },
+              "atSeconds": {
+                "type": "number"
+              }
+            },
+            "required": ["clip", "marked", "seconds"],
+            "additionalProperties": false
           },
-          "marked": {
-            "type": "boolean"
-          },
-          "seconds": {
-            "type": "integer"
-          },
-          "atSeconds": {
-            "type": "number"
+          {
+            "type": "object",
+            "properties": {
+              "markerId": {
+                "type": "string"
+              },
+              "showId": {
+                "type": "string"
+              },
+              "atSeconds": {
+                "type": "number"
+              },
+              "mediaAvailable": {
+                "type": "boolean",
+                "enum": [false]
+              },
+              "clip": {
+                "type": "boolean"
+              },
+              "marked": {
+                "type": "boolean"
+              },
+              "seconds": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "markerId",
+              "showId",
+              "atSeconds",
+              "mediaAvailable",
+              "clip",
+              "marked",
+              "seconds"
+            ],
+            "additionalProperties": false
           }
-        },
-        "required": ["clip", "marked", "seconds"],
-        "additionalProperties": false
+        ]
       },
       "annotations": {
         "readOnlyHint": false,
@@ -1061,7 +1108,7 @@
     {
       "name": "add_marker",
       "title": "Add a marker",
-      "description": "Mark a named point in the recording or livestream that is running now, like pressing the Marker button. The marker shows on that take's timeline in the Library. Refused while nothing is recording or live.",
+      "description": "Mark a named point in the recording or livestream that is running now, like pressing the Marker button. The marker shows on that take's timeline in the Library. Refused while nothing is recording or live. In a cloud room this saves a show marker; media extraction requires a measured recording clock.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -1070,28 +1117,58 @@
             "description": "What the marker is for, up to 120 characters. Optional.",
             "minLength": 1,
             "maxLength": 120
+          },
+          "operationId": {
+            "type": "string",
+            "minLength": 36,
+            "maxLength": 36,
+            "description": "Optional canonical UUID retained across retries of a cloud show mark."
           }
         },
         "additionalProperties": false
       },
       "outputSchema": {
-        "type": "object",
-        "properties": {
-          "markerId": {
-            "type": "string"
+        "anyOf": [
+          {
+            "type": "object",
+            "properties": {
+              "markerId": {
+                "type": "string"
+              },
+              "sessionId": {
+                "type": "string"
+              },
+              "atSeconds": {
+                "type": "number"
+              },
+              "title": {
+                "type": "string"
+              }
+            },
+            "required": ["markerId", "sessionId", "atSeconds"],
+            "additionalProperties": false
           },
-          "sessionId": {
-            "type": "string"
-          },
-          "atSeconds": {
-            "type": "number"
-          },
-          "title": {
-            "type": "string"
+          {
+            "type": "object",
+            "properties": {
+              "markerId": {
+                "type": "string"
+              },
+              "showId": {
+                "type": "string"
+              },
+              "atSeconds": {
+                "type": "number"
+              },
+              "mediaAvailable": {
+                "type": "boolean",
+                "enum": [false]
+              }
+            },
+            "required": ["markerId", "showId", "atSeconds", "mediaAvailable"],
+            "additionalProperties": false
           }
-        },
-        "required": ["markerId", "sessionId", "atSeconds"],
-        "additionalProperties": false
+        ]
       },
       "annotations": {
         "readOnlyHint": false,
@@ -2950,7 +3027,7 @@
     {
       "name": "move_on_scene",
       "title": "Move or resize something on the picture",
-      "description": "Move or resize one item where the Scene canvas's own snaps would put it: a place on the 3×3 grid (full-frame for banners), a size, or an exact rect. A place writes both orientations. The camera at a corner keeps its scene; other source moves switch to freeform. The result has the old rects (pass them back as rects to undo) and what it now covers.",
+      "description": "Move or resize one item where the Scene canvas's own snaps would put it: a place on the 3\u00d73 grid (full-frame for banners), a size, or an exact rect. A place writes both orientations. The camera at a corner keeps its scene; other source moves switch to freeform. The result has the old rects (pass them back as rects to undo) and what it now covers.",
       "inputSchema": {
         "type": "object",
         "properties": {

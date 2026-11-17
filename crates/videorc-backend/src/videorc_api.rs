@@ -2122,6 +2122,33 @@ impl VideorcApiClient {
             .with_context(|| format!("Could not read Videorc API response for {path}."))
     }
 
+    pub(crate) async fn show_marker_request(
+        &self,
+        bearer: &str,
+        show: &str,
+        method: &str,
+        id: Option<&str>,
+        body: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value> {
+        let path = format!("/api/cloud/shows/{show}/markers");
+        let mut request = self
+            .http
+            .request(
+                reqwest::Method::from_bytes(method.as_bytes())?,
+                self.endpoint(&path),
+            )
+            .bearer_auth(bearer);
+        if let Some(id) = id {
+            request = request.query(&[("id", id)]);
+        }
+        if let Some(body) = body {
+            request = request.json(&body);
+        }
+        self.cloud_json(request, &path, CLOUD_REQUEST_TIMEOUT)
+            .await
+            .map_err(Into::into)
+    }
+
     // --- Videorc Cloud (plan 184, Wire shape: Desktop -> web) -----------------
     // Bearer, `private, no-store`, the `{ error: { code, message } }` envelope.
     // A 409 body carries the live show and a 429 body its `resetAt`; both are
