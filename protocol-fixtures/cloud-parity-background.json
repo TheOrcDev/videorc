@@ -1,0 +1,509 @@
+{
+  "_about": "Plan 249 S14 scene background vectors. Generated from apps/desktop/src/shared/cloud-background.ts; mirrored byte for byte in videorc-web tests/fixtures/cloud-parity-background.json.",
+  "page": {
+    "show": "sh_x",
+    "publisherSid": "PA_host1"
+  },
+  "zoom": [
+    {
+      "scale": 100,
+      "offsetX": 0,
+      "offsetY": 0,
+      "expected": {
+        "l": 0,
+        "t": 0,
+        "r": 0,
+        "b": 0
+      }
+    },
+    {
+      "scale": 150,
+      "offsetX": 0,
+      "offsetY": 0,
+      "expected": {
+        "l": 0.16666666666666669,
+        "t": 0.16666666666666669,
+        "r": 0.16666666666666669,
+        "b": 0.16666666666666669
+      }
+    },
+    {
+      "scale": 200,
+      "offsetX": 100,
+      "offsetY": -100,
+      "expected": {
+        "l": 0.5,
+        "t": 0,
+        "r": 0,
+        "b": 0.5
+      }
+    },
+    {
+      "scale": 150,
+      "offsetX": 40,
+      "offsetY": -20,
+      "expected": {
+        "l": 0.23333333333333336,
+        "t": 0.13333333333333336,
+        "r": 0.1,
+        "b": 0.2
+      }
+    },
+    {
+      "scale": 90,
+      "offsetX": 500,
+      "offsetY": 0,
+      "expected": {
+        "l": 0,
+        "t": 0,
+        "r": 0,
+        "b": 0
+      }
+    },
+    {
+      "scale": 250,
+      "offsetX": -300,
+      "offsetY": 300,
+      "expected": {
+        "l": 0,
+        "t": 0.5,
+        "r": 0.5,
+        "b": 0
+      }
+    }
+  ],
+  "fit": [
+    {
+      "fit": "fit",
+      "expected": "contain"
+    },
+    {
+      "fit": "fill",
+      "expected": "cover"
+    },
+    {
+      "fit": "stretch",
+      "expected": "cover"
+    }
+  ],
+  "dim": [
+    {
+      "dimPercent": 0,
+      "expected": 0
+    },
+    {
+      "dimPercent": 30,
+      "expected": 0.3
+    },
+    {
+      "dimPercent": 80,
+      "expected": 0.8
+    },
+    {
+      "dimPercent": 120,
+      "expected": 0.8
+    },
+    {
+      "dimPercent": -5,
+      "expected": 0
+    }
+  ],
+  "phase": [
+    {
+      "clock": {
+        "anchorAt": 1763000000000,
+        "anchorPhase": 2.5,
+        "rate": 0.25
+      },
+      "now": 1762999995000,
+      "expected": 2.5
+    },
+    {
+      "clock": {
+        "anchorAt": 1763000000000,
+        "anchorPhase": 2.5,
+        "rate": 0.25
+      },
+      "now": 1763000000000,
+      "expected": 2.5
+    },
+    {
+      "clock": {
+        "anchorAt": 1763000000000,
+        "anchorPhase": 2.5,
+        "rate": 0.25
+      },
+      "now": 1763000004000,
+      "expected": 3.5
+    }
+  ],
+  "nextClock": [
+    {
+      "name": "first",
+      "previous": null,
+      "next": {
+        "id": "silk",
+        "rate": 0.5,
+        "posterPhase": 3
+      },
+      "now": 1000,
+      "expected": {
+        "anchorAt": 1000,
+        "anchorPhase": 3,
+        "rate": 0.5
+      }
+    },
+    {
+      "name": "same rate keeps the anchor",
+      "previous": {
+        "id": "silk",
+        "clock": {
+          "anchorAt": 1000,
+          "anchorPhase": 3,
+          "rate": 0.5
+        }
+      },
+      "next": {
+        "id": "silk",
+        "rate": 0.5,
+        "posterPhase": 3
+      },
+      "now": 5000,
+      "expected": {
+        "anchorAt": 1000,
+        "anchorPhase": 3,
+        "rate": 0.5
+      }
+    },
+    {
+      "name": "calm re-bases without a jump",
+      "previous": {
+        "id": "silk",
+        "clock": {
+          "anchorAt": 1000,
+          "anchorPhase": 3,
+          "rate": 0.5
+        }
+      },
+      "next": {
+        "id": "silk",
+        "rate": 0.25,
+        "posterPhase": 3
+      },
+      "now": 5000,
+      "expected": {
+        "anchorAt": 5000,
+        "anchorPhase": 5,
+        "rate": 0.25
+      }
+    },
+    {
+      "name": "another background starts at its poster",
+      "previous": {
+        "id": "silk",
+        "clock": {
+          "anchorAt": 1000,
+          "anchorPhase": 3,
+          "rate": 0.5
+        }
+      },
+      "next": {
+        "id": "beams",
+        "rate": 1,
+        "posterPhase": 7
+      },
+      "now": 5000,
+      "expected": {
+        "anchorAt": 5000,
+        "anchorPhase": 7,
+        "rate": 1
+      }
+    }
+  ],
+  "valid": [
+    {
+      "background": {
+        "kind": "picture",
+        "hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "mime": "image/webp",
+        "width": 2560,
+        "height": 1440,
+        "fit": "cover",
+        "crop": {
+          "l": 0.23333333333333336,
+          "t": 0.13333333333333336,
+          "r": 0.1,
+          "b": 0.2
+        }
+      },
+      "key": "b0cfe68e"
+    },
+    {
+      "background": {
+        "kind": "live",
+        "id": "plasma-wave",
+        "look": "ember",
+        "dim": 0.3,
+        "clock": {
+          "anchorAt": 1763000000000,
+          "anchorPhase": 2.5,
+          "rate": 0.25
+        }
+      },
+      "key": "2f9e9dc0"
+    }
+  ],
+  "invalid": [
+    {
+      "kind": "picture",
+      "hash": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "mime": "image/webp",
+      "width": 2560,
+      "height": 1440,
+      "fit": "cover",
+      "crop": {
+        "l": 0.23333333333333336,
+        "t": 0.13333333333333336,
+        "r": 0.1,
+        "b": 0.2
+      }
+    },
+    {
+      "kind": "picture",
+      "hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "mime": "image/gif",
+      "width": 2560,
+      "height": 1440,
+      "fit": "cover",
+      "crop": {
+        "l": 0.23333333333333336,
+        "t": 0.13333333333333336,
+        "r": 0.1,
+        "b": 0.2
+      }
+    },
+    {
+      "kind": "picture",
+      "hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "mime": "image/webp",
+      "width": 4000,
+      "height": 1440,
+      "fit": "cover",
+      "crop": {
+        "l": 0.23333333333333336,
+        "t": 0.13333333333333336,
+        "r": 0.1,
+        "b": 0.2
+      }
+    },
+    {
+      "kind": "picture",
+      "hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "mime": "image/webp",
+      "width": 2560,
+      "height": 1440,
+      "fit": "stretch",
+      "crop": {
+        "l": 0.23333333333333336,
+        "t": 0.13333333333333336,
+        "r": 0.1,
+        "b": 0.2
+      }
+    },
+    {
+      "kind": "picture",
+      "hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "mime": "image/webp",
+      "width": 2560,
+      "height": 1440,
+      "fit": "cover",
+      "crop": {
+        "l": 0.6,
+        "t": 0,
+        "r": 0.6,
+        "b": 0
+      }
+    },
+    {
+      "kind": "live",
+      "id": "lava",
+      "look": "ember",
+      "dim": 0.3,
+      "clock": {
+        "anchorAt": 1763000000000,
+        "anchorPhase": 2.5,
+        "rate": 0.25
+      }
+    },
+    {
+      "kind": "live",
+      "id": "plasma-wave",
+      "look": "ember",
+      "dim": 0.9,
+      "clock": {
+        "anchorAt": 1763000000000,
+        "anchorPhase": 2.5,
+        "rate": 0.25
+      }
+    },
+    {
+      "kind": "live",
+      "id": "plasma-wave",
+      "look": "Ember!",
+      "dim": 0.3,
+      "clock": {
+        "anchorAt": 1763000000000,
+        "anchorPhase": 2.5,
+        "rate": 0.25
+      }
+    },
+    {
+      "kind": "live",
+      "id": "plasma-wave",
+      "look": "ember",
+      "dim": 0.3,
+      "clock": {
+        "anchorAt": 1763000000000,
+        "anchorPhase": 2.5,
+        "rate": -1
+      }
+    },
+    {
+      "kind": "color",
+      "rgb": [1, 2, 3]
+    }
+  ],
+  "capability": {
+    "valid": [
+      {
+        "version": 1,
+        "live": 1
+      },
+      {
+        "version": 1,
+        "live": 1,
+        "drawn": {
+          "key": "2f9e9dc0",
+          "rendering": "shader"
+        }
+      },
+      {
+        "version": 1,
+        "live": 0,
+        "drawn": {
+          "key": "none",
+          "rendering": "none"
+        }
+      },
+      {
+        "version": 1,
+        "live": 1,
+        "drawn": {
+          "key": "2f9e9dc0",
+          "rendering": "still",
+          "reason": "no-webgl2"
+        }
+      }
+    ],
+    "invalid": [
+      {
+        "version": 2,
+        "live": 1
+      },
+      {
+        "version": 1,
+        "live": true
+      },
+      {
+        "version": 1,
+        "live": 1,
+        "drawn": {
+          "key": "xyz",
+          "rendering": "shader"
+        }
+      },
+      {
+        "version": 1,
+        "live": 1,
+        "drawn": {
+          "key": "none",
+          "rendering": "video"
+        }
+      },
+      {
+        "version": 1,
+        "live": 1,
+        "drawn": {
+          "key": "none",
+          "rendering": "still",
+          "reason": "tired"
+        }
+      }
+    ]
+  },
+  "sceneKey": {
+    "scene": {
+      "id": "0badf00d",
+      "items": [
+        {
+          "role": "screen",
+          "rect": {
+            "x": 0.1,
+            "y": 0.1,
+            "w": 0.8,
+            "h": 0.8
+          },
+          "crop": {
+            "l": 0,
+            "t": 0,
+            "r": 0,
+            "b": 0
+          },
+          "fit": "contain",
+          "mirror": false,
+          "mask": {
+            "shape": "rectangle"
+          },
+          "z": 0
+        }
+      ],
+      "guests": {
+        "host": {
+          "x": 0,
+          "y": 0.125,
+          "w": 0.75,
+          "h": 0.75
+        },
+        "region": {
+          "x": 0.75,
+          "y": 0,
+          "w": 0.25,
+          "h": 1
+        },
+        "slots": []
+      }
+    },
+    "withoutBackground": "fb4a5217",
+    "withPicture": "f92488a6",
+    "withLive": "c4ac6b0c"
+  },
+  "asset": {
+    "header": {
+      "version": 1,
+      "show": "sh_x",
+      "publisherSid": "PA_host1",
+      "hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "mime": "image/png",
+      "width": 2,
+      "height": 1,
+      "size": 3
+    },
+    "imageHex": "010203",
+    "messageHex": "000000b07b2276657273696f6e223a312c2273686f77223a2273685f78222c227075626c6973686572536964223a2250415f686f737431222c2268617368223a2262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262222c226d696d65223a22696d6167652f706e67222c227769647468223a322c22686569676874223a312c2273697a65223a337d010203"
+  },
+  "runner": {
+    "renderJsonSha256": "ec8fdf638b1f8b23b493c07514a6c38c5a14a8e203ed3032c470f7580f6cbb15",
+    "webglJsSha256": "006ad8f6bd594a09343e379f53428b167f3555a6ccefce5aba700c174a016386",
+    "clockJsSha256": "f68c435247fbb0609862c58b8a156753e940d2c23dc30b941ea80515af03a574"
+  }
+}

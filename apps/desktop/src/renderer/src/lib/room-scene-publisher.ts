@@ -18,6 +18,35 @@ import {
   type SceneOutput,
   type SceneSnapshot
 } from '../../../shared/cloud-scene'
+import {
+  BACKGROUND_ASSET_TOPIC,
+  backgroundKey,
+  encodeBackgroundAsset,
+  type BackgroundDrawn,
+  type BackgroundMime
+} from '../../../shared/cloud-background'
+
+/**
+ * Plan 249 S14: a scene background's picture, ready to send. Immutable: its
+ * SHA-256 names it, and each consumer gets it once per connection.
+ */
+export type PreparedBackgroundAsset = {
+  hash: string
+  mime: BackgroundMime
+  width: number
+  height: number
+  bytes: Uint8Array
+}
+/** What the program pages drew for the scene's background (S14). */
+export type RoomBackgroundStatus = {
+  /** `backgroundKey` of what the scene asks for, per lane. */
+  wanted: { h: string; v: string }
+  /** Each capable lane's last drawn background. */
+  drawn: Record<string, BackgroundDrawn>
+  /** Egress pages that cannot draw scene backgrounds (older pages). */
+  unsupported: number
+  productionQualified: false
+}
 
 /**
  * Plan 249 S12. What the room's program draws for each orientation lane.
@@ -45,6 +74,8 @@ export type RoomSceneStatus = {
   /** What each lane is asked to draw: the Program preview draws the same. */
   content: SceneContent | null
   observed: Record<string, RoomSceneObservation>
+  /** Plan 249 S14: present while the scene names a background. */
+  background?: RoomBackgroundStatus
   productionQualified: false
 }
 /** What `commit` answers: the rendered revisions, or why there are none. */
@@ -77,6 +108,9 @@ export class RoomScenePublisher {
   #error: string | null = null
   #lastStatus = ''
   #waiters = new Set<() => void>()
+  #assets: readonly PreparedBackgroundAsset[] = []
+  /** Picture hashes each consumer has, keyed by its participant SID. */
+  #assetsSent = new Map<string, { sid: string; hashes: Set<string> }>()
   constructor(
     private room: Room,
     private changed: (status: RoomSceneStatus) => void,
@@ -90,6 +124,10 @@ export class RoomScenePublisher {
   }
   get content(): SceneContent | null {
     return this.#content
+  }
+  /** Plan 249 S14: the pictures the next commit's backgrounds name. */
+  setAssets(assets: readonly PreparedBackgroundAsset[]): void {
+    this.#assets = assets
   }
   /**
    * Replace what every lane draws. Resolves with each egress lane's rendered
@@ -169,6 +207,7 @@ export class RoomScenePublisher {
   #lost = (): void => {
     this.#receipts.clear()
     this.#sent.clear()
+    this.#assetsSent.clear()
     this.#report()
   }
   #wanted(lane: { output: SceneOutput; orientation: SceneOrientation }): CloudScene | null {
@@ -197,6 +236,23 @@ export class RoomScenePublisher {
           output: receipt.scene.output,
           orientation: receipt.scene.orientation
         }
+    }
+    const backgroundWanted = {
+      h: backgroundKey(this.#content?.h?.background),
+      v: backgroundKey(this.#content?.v?.background)
+    }
+    let background: RoomBackgroundStatus | undefined
+    if (backgroundWanted.h !== 'none' || backgroundWanted.v !== 'none') {
+      const drawn: Record<string, BackgroundDrawn> = {}
+      let unsupported = 0
+      for (const peer of peers) {
+        const receipt = this.#receipts.get(peer.identity)
+        if (!capabilityCurrent(receipt, peer.sid, this.now()) || !receipt?.scene) continue
+        const page = receipt.scene.background
+        if (!page) unsupported++
+        else if (page.drawn) drawn[peer.identity] = page.drawn
+      }
+      background = { wanted: backgroundWanted, drawn, unsupported, productionQualified: false }
     }
     const enabled = !!this.#content
     const committed = this.#generation > 0
@@ -237,6 +293,7 @@ export class RoomScenePublisher {
       sceneId: { h: this.#content?.h?.id ?? null, v: this.#content?.v?.id ?? null },
       content: this.#content,
       observed,
+      ...(background ? { background } : {}),
       productionQualified: false
     }
   }
@@ -256,6 +313,7 @@ export class RoomScenePublisher {
       if (!this.room.remoteParticipants.has(identity)) {
         this.#receipts.delete(identity)
         this.#sent.delete(identity)
+        this.#assetsSent.delete(identity)
       }
     this.#report()
     if (this.room.state !== ConnectionState.Connected) return
@@ -319,6 +377,9 @@ export class RoomScenePublisher {
       const old = this.#sent.get(peer.identity)
       if (old?.key === key && old.generation === generation && this.now() - old.at < RESEND_MS)
         continue
+      // S14: the picture goes before the scene that names it, once per consumer.
+      await this.#sendAsset(peer, this.#wanted(lane)?.background, generation)
+      if (this.#closed || generation !== this.#generation) return
       const snapshot = this.snapshotFor(lane)
       if (!parseSceneSnapshot(snapshot, { ...snapshot, now: this.now() }))
         throw new Error('Invalid scene snapshot')
@@ -350,6 +411,48 @@ export class RoomScenePublisher {
       this.#error = null
     }
   }
+  async #sendAsset(
+    peer: { identity: string; sid: string },
+    background: CloudScene['background'],
+    generation: number
+  ): Promise<void> {
+    if (background?.kind !== 'picture') return
+    const asset = this.#assets.find((one) => one.hash === background.hash)
+    if (!asset) throw new Error('The background picture is not ready.')
+    let sent = this.#assetsSent.get(peer.identity)
+    if (sent?.sid !== peer.sid) {
+      sent = { sid: peer.sid, hashes: new Set() }
+      this.#assetsSent.set(peer.identity, sent)
+    }
+    if (sent.hashes.has(asset.hash)) return
+    const message = encodeBackgroundAsset(
+      {
+        version: 1,
+        show: this.room.name,
+        publisherSid: this.room.localParticipant.sid,
+        hash: asset.hash,
+        mime: asset.mime,
+        width: asset.width,
+        height: asset.height,
+        size: asset.bytes.length
+      },
+      asset.bytes
+    )
+    const writer = await withTimeout(
+      this.room.localParticipant.streamBytes({
+        topic: BACKGROUND_ASSET_TOPIC,
+        mimeType: 'application/octet-stream',
+        totalSize: message.length,
+        destinationIdentities: [peer.identity]
+      }),
+      15_000
+    )
+    await withTimeout(writer.write(message), 15_000)
+    await withTimeout(writer.close(), 15_000)
+    if (this.#closed || generation !== this.#generation) return
+    if (peer.sid === this.room.remoteParticipants.get(peer.identity)?.sid)
+      sent.hashes.add(asset.hash)
+  }
   close(): void {
     this.#closed = true
     this.#generation++
@@ -360,8 +463,10 @@ export class RoomScenePublisher {
     this.room.off(RoomEvent.ParticipantDisconnected, this.#refresh)
     this.room.off(RoomEvent.ParticipantConnected, this.#refresh)
     this.#content = null
+    this.#assets = []
     this.#receipts.clear()
     this.#sent.clear()
+    this.#assetsSent.clear()
     for (const wake of [...this.#waiters]) wake()
   }
 }

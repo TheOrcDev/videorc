@@ -73,6 +73,7 @@ export async function runBaseline({
   soundboard = false,
   avatar = false,
   scenes = false,
+  sources = false,
   archive = false,
   clips = false,
   replayRing = false,
@@ -85,45 +86,50 @@ export async function runBaseline({
   // Plan 249 S5: the animation case runs on the avatar case's real pages.
   // Plan 249 S24: so does the handoff case, after the avatar phase.
   avatar = avatar || avatarAnimation || handoff
+  // Plan 249 S14: the sources case runs on the scenes case's real pages.
+  const sourcesCase = sources
+  scenes = scenes || sources
   const report = baselineReport({
     desktop: revision(desktopRoot),
     web: revision(webRoot),
     template: 'v1'
   })
   const routingConfig = audioRouting ? audioRoutingConfig() : null
-  report.case = clips
-    ? 'clips'
-    : audioRouting
-      ? 'audio-routing'
-      : markers
-        ? 'markers'
-        : handoff
-          ? 'handoff'
-          : outputs
-            ? 'outputs'
-            : captions
-              ? 'captions'
-              : archive
-                ? 'archive'
-                : graphics
-                  ? 'graphics'
-                  : scenes
-                    ? 'scenes'
-                    : replayRing
-                      ? 'replay-ring'
-                      : avatarAnimation
-                        ? 'avatar-animation'
-                        : views
-                          ? 'views'
-                          : avatar
-                            ? 'avatar'
-                            : soundboard
-                              ? 'soundboard'
-                              : privacy
-                                ? 'privacy'
-                                : controls
-                                  ? 'controls'
-                                  : 'baseline'
+  report.case = sourcesCase
+    ? 'sources'
+    : clips
+      ? 'clips'
+      : audioRouting
+        ? 'audio-routing'
+        : markers
+          ? 'markers'
+          : handoff
+            ? 'handoff'
+            : outputs
+              ? 'outputs'
+              : captions
+                ? 'captions'
+                : archive
+                  ? 'archive'
+                  : graphics
+                    ? 'graphics'
+                    : scenes
+                      ? 'scenes'
+                      : replayRing
+                        ? 'replay-ring'
+                        : avatarAnimation
+                          ? 'avatar-animation'
+                          : views
+                            ? 'views'
+                            : avatar
+                              ? 'avatar'
+                              : soundboard
+                                ? 'soundboard'
+                                : privacy
+                                  ? 'privacy'
+                                  : controls
+                                    ? 'controls'
+                                    : 'baseline'
   // A dirty web consumer makes its revision misleading. Require a dedicated,
   // installed checkout; inspect it read-only and never change the active one.
   const webDirty = execFileSync('git', ['status', '--porcelain', '--untracked-files=no'], {
@@ -616,7 +622,17 @@ export async function runBaseline({
           programUrl: `${pages.origin}${pages.wire.PROGRAM_PAGE_PATH}?${search}`,
           output
         })
-      if (scenes)
+      if (sourcesCase) {
+        const { exerciseSources } = await import('./cloud-parity-sources.mjs')
+        await exerciseSources({
+          h,
+          report,
+          clients,
+          newPage,
+          programUrl: `${pages.origin}${pages.wire.PROGRAM_PAGE_PATH}?${search}`,
+          output
+        })
+      } else if (scenes)
         await exerciseScenes({
           h,
           report,
@@ -693,7 +709,7 @@ export async function runBaseline({
       report.videoMeasurements = { colorPeaks, frameHits, sampledFps: 5 }
       if (avatar) assertAvatarVideo(report)
       if (graphics) assertGraphicsArtifacts(report)
-      if (scenes) assertScenesVideo(report)
+      if (scenes && !sourcesCase) assertScenesVideo(report)
       const seen = (key) => frameHits.program[key] >= 5
       observations.push(
         {

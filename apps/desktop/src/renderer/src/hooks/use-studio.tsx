@@ -11421,6 +11421,12 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     roomScenesShowRef.current = cloudStatusRef.current?.show?.id ?? null
     roomScenesEnabledRef.current = enabled
   }, [])
+  /** Plan 249 S14: the capturer source a scene last asked the room to share (smoke evidence). */
+  const roomScreenWantedRef = useRef<string | null>(null)
+  /** Plan 249 S14: one background preparer per Studio (its live clock continues). */
+  const roomBackgroundsRef = useRef<Promise<
+    Awaited<ReturnType<typeof import('@/lib/room-background').createAppRoomBackgrounds>>
+  > | null>(null)
   /** One send through the scene adapter, with the room as it is now. */
   const sendSceneToRoom = useCallback(
     async (
@@ -11449,9 +11455,35 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
               cameraPublished: Boolean(snapshot.local.camera) && !snapshot.local.cameraOff,
               cameraOff: snapshot.local.cameraOff,
               screenPublished: Boolean(snapshot.local.screen),
+              screenSourceId: controls.screenSourceId,
               stage: status.room.stage,
-              commitScene: (content) => controls.commitScene(content)
+              commitScene: (content, assets) => controls.commitScene(content, assets)
             }
+          },
+          // Plan 249 S14: the scene's own screen or window, through main's
+          // one-shot source grant and the room's privacy-gated capture.
+          shareScreen: async (want) => {
+            const controls = roomControlsRef.current
+            if (!controls) throw new Error('The room is not open.')
+            roomScreenWantedRef.current = want.capturerId
+            const granted = await window.videorc?.setTalkShowMediaGrant?.({
+              video: true,
+              screenSourceId: want.capturerId
+            })
+            if (!granted) throw new Error('the room did not accept the source.')
+            await controls.replaceScreenSource(want.capturerId)
+            if (controls.screenSourceId !== want.capturerId)
+              throw new Error('another share replaced it.')
+          },
+          background: async (background) => {
+            roomBackgroundsRef.current ??= import('@/lib/room-background').then((module) =>
+              module.createAppRoomBackgrounds()
+            )
+            const backgrounds = await roomBackgroundsRef.current.catch((error: unknown) => {
+              roomBackgroundsRef.current = null
+              throw error
+            })
+            return backgrounds.prepare(background)
           },
           setStage: async (stage) => {
             if (!clientRef.current) throw offlineError()
@@ -11859,7 +11891,37 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         if (!saved) return { ok: false }
         if (options?.origin !== 'follow')
           for (const listener of manualSceneApplyListenersRef.current) listener(id)
-        const visual = normalizeSceneVisual(repaired ?? saved.visual)
+        // Plan 249 S14: the scene's own display (by UUID) and, for an app
+        // scene or a Follow window swap, the app's window, resolved as
+        // natively, so the room shares what the scene names.
+        let visual = withSceneDisplay(
+          normalizeSceneVisual(repaired ?? saved.visual),
+          deviceListRef.current.devices
+        )
+        if (visual.sources.app || options?.preferWindowId) {
+          try {
+            const sceneApply = savedSceneApplyChunk ?? (await loadSavedSceneApply())
+            const resolved = await sceneApply.resolveSceneWindowForApply(
+              visual,
+              deviceListRef.current.devices,
+              (params) => {
+                if (!clientRef.current) throw offlineError()
+                return clientRef.current.requestTyped('sources.resolve_app_window', params)
+              },
+              rememberedAppsRef.current[id],
+              options?.preferWindowId
+            )
+            if (resolved.kind === 'blocked') {
+              const refusal = sceneApply.sceneWindowRefusal(visual, resolved.reason)
+              if (!refusal.ok) toast.warning(refusal.message, { id: 'scene-app-unavailable' })
+              return refusal
+            }
+            if (resolved.kind === 'ready') visual = { ...visual, sources: resolved.sources }
+          } catch (error) {
+            reportError(error, { action: 'switch', object: 'the scene' })
+            return { ok: false }
+          }
+        }
         const result = await applySceneInRoom(
           {
             layout: visual.layout,
@@ -20637,6 +20699,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       roomScenePreset: (layoutPreset: LayoutPreset) =>
         requestCameraPresetTransactionRef.current({ layoutPreset }),
       roomSceneContent: () => roomControlsRef.current?.sceneContent ?? null,
+      // Plan 249 S14: the capturer source the room shares, and a Follow switch.
+      roomScreenSource: () => roomControlsRef.current?.screenSourceId ?? null,
+      roomScreenWanted: () => roomScreenWantedRef.current,
+      roomFollowApply: (id: string, preferWindowId?: string) =>
+        applySavedSceneResultRef.current(id, undefined, { preferWindowId, origin: 'follow' }),
       // A whole saved scene (freeform boxes, guest roles) into the library,
       // then applied by id like a click; clear returns the room layouts.
       roomSceneSave: (scene: SavedScene) => value.sceneLibraryActions.insert([scene]),

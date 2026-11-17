@@ -31,7 +31,7 @@ async function shared(desktopRoot) {
 }
 
 /** The host's room screen: four pure corner markers on a dark field. */
-async function shareFixtureScreen(h) {
+export async function shareFixtureScreen(h) {
   const { width, height, marker, ground, corners } = SCREEN_FIXTURE
   await h.eval(`
     navigator.mediaDevices.getDisplayMedia = async () => {
@@ -88,7 +88,7 @@ function previewMatches(expected, preview, canvas = SCENE_CANVAS.h) {
   })
 }
 
-const observeTiles = (page) =>
+export const observeTiles = (page) =>
   page.evaluate(() =>
     [...document.querySelectorAll('.scenes .scene.current .tile')].map((tile) => {
       const px = (v) => Math.round(Number.parseFloat(v || '0'))
@@ -118,7 +118,7 @@ const observeTiles = (page) =>
   )
 
 /** One decoded full-page frame at canvas size, for pixel reads. */
-function canvasFrame(h, path, canvas) {
+export function canvasFrame(h, path, canvas) {
   const raw = runMedia(h.ffmpeg, [
     '-v',
     'error',

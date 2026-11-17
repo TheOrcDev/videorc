@@ -949,7 +949,7 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
         if (!roomClient) throw new Error('The room is not open.')
         try {
           await window.videorc?.setTalkShowMediaGrant?.({ video: true, screenSourceId: sourceId })
-          await roomClient.startScreenShare()
+          await roomClient.startScreenShare(sourceId)
           if (stage && hostIdentity) {
             await setStage({ ...stage, layout: 'screen-people', screen: hostIdentity })
           }
