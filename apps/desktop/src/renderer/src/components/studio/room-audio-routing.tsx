@@ -22,7 +22,7 @@ export function RoomAudioRoutingControls(): ReactElement {
         >
           {value.system.enabled ? 'Stop sharing system audio' : 'Share system audio for this room'}
         </Button>
-        <FieldLabel htmlFor="room-system-gain">System gain · {value.system.gainDb} dB</FieldLabel>
+        <FieldLabel>System gain · {value.system.gainDb} dB</FieldLabel>
         <Slider
           id="room-system-gain"
           aria-label="System gain"
@@ -42,9 +42,7 @@ export function RoomAudioRoutingControls(): ReactElement {
         </Button>
       </Field>
       <Field>
-        <FieldLabel htmlFor="program-speech-gain">
-          Program speech · {Math.round(value.program.speechGain * 100)}%
-        </FieldLabel>
+        <FieldLabel>Program speech · {Math.round(value.program.speechGain * 100)}%</FieldLabel>
         <Slider
           id="program-speech-gain"
           aria-label="Program speech gain"
@@ -64,7 +62,7 @@ export function RoomAudioRoutingControls(): ReactElement {
         </Button>
       </Field>
       <Field>
-        <FieldLabel htmlFor="program-aux-gain">
+        <FieldLabel>
           Program music and sounds · {Math.round(value.program.auxiliaryGain * 100)}%
         </FieldLabel>
         <Slider
