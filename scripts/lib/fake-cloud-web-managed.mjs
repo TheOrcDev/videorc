@@ -24,7 +24,7 @@ export const managedWire = JSON.parse(
   readFileSync(new URL('../../protocol-fixtures/cloud-managed-wire.json', import.meta.url))
 )
 /** Explicit parity roles: existing callers retain their legacy fixture grant. */
-export function managedParityGrant({ role, room }) {
+export function managedParityGrant({ role, room, screenShare = false }) {
   if (role === 'recorder')
     return {
       room,
@@ -36,7 +36,7 @@ export function managedParityGrant({ role, room }) {
       recorder: true
     }
   if (!['host', 'guest'].includes(role)) throw new Error('Unknown parity role')
-  return roomGrantFor({ role, room, screenShare: false, microphone: true })
+  return roomGrantFor({ role, room, screenShare, microphone: true })
 }
 const continuationRoutes = {
   onAir: { method: 'POST', path: '/api/cloud/shows/:id/on-air' },
@@ -221,7 +221,13 @@ export async function startFakeCloudWebManaged({
         Math.floor((now - Date.parse(s.state.recording.since)) / 1000)
       )
   }
-  const tokenFor = (s, identity = `host:${s.show.id}`, cameraDevice, parityRole) => {
+  const tokenFor = (
+    s,
+    identity = `host:${s.show.id}`,
+    cameraDevice,
+    parityRole,
+    screenShare = false
+  ) => {
     if (!livekit) throw new Error('A local LiveKit room is required')
     const token = mintLiveKitToken({
       apiKey: livekit.apiKey,
@@ -238,7 +244,7 @@ export async function startFakeCloudWebManaged({
             canPublishData: false
           }
         : parityRole
-          ? managedParityGrant({ role: parityRole, room: s.show.id })
+          ? managedParityGrant({ role: parityRole, room: s.show.id, screenShare })
           : roomGrantFor({ role: 'host', room: s.show.id }),
       ttlSeconds: 600
     })
@@ -1476,8 +1482,8 @@ export async function startFakeCloudWebManaged({
     recordings,
     tokens,
     roomRpc,
-    tokenFor: (id, identity, parityRole) =>
-      tokenFor(shows.get(id), identity, undefined, parityRole),
+    tokenFor: (id, identity, parityRole, screenShare = false) =>
+      tokenFor(shows.get(id), identity, undefined, parityRole, screenShare),
     snapshot: (id) => ({ rev: shows.get(id).rev, state: copy(shows.get(id).state) }),
     async close() {
       closed = true

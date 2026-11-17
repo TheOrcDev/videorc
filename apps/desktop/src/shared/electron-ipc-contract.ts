@@ -1,5 +1,6 @@
 import { parseRoomCameraResources } from './room-camera'
 import { parseRoomFrameCommand, parseRoomFrameReply, parseRoomFrameResources } from './room-frame'
+import { parseRoomSystemAudioCommand, parseRoomSystemAudioFrame } from './room-system-audio'
 import { parseRoomMicrophoneCommand } from './room-microphone'
 import { parseRoomPcmCommand, parseRoomPcmFrame, parseRoomPcmResources } from './room-pcm'
 import type { FrontAppChanged } from './front-app'
@@ -136,6 +137,8 @@ export const electronInvokeApiMethods = {
   'backend:get-logs': 'getBackendLogs',
   'room-pcm:test': 'roomPcmTest',
   'room-microphone:pcm': 'roomMicrophonePcm',
+  'room-system:pcm': 'roomSystemAudioPcm',
+  'room-system:inspect': 'getRoomSystemAudioResources',
   'room-microphone:inspect': 'getRoomNativeMicrophoneResources',
   'room-pcm:inspect': 'getRoomPcmTestResources',
   'room-frame:test': 'roomFrameTest',
@@ -2083,6 +2086,14 @@ const specificRuntimeInvokeContracts = {
   'room-pcm:inspect': invokeContract(
     noArgs,
     runtimeSchema('PCM resources', (value) => parseRoomPcmResources(value))
+  ),
+  'room-system:pcm': invokeContract(
+    tupleSchema([runtimeSchema('System command', parseRoomSystemAudioCommand)]),
+    nullableSchema(runtimeSchema('System frame', (value) => parseRoomSystemAudioFrame(value)))
+  ),
+  'room-system:inspect': invokeContract(
+    noArgs,
+    runtimeSchema('System resources', parseRoomPcmResources)
   ),
   'room-microphone:inspect': invokeContract(
     noArgs,

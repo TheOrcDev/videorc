@@ -19,6 +19,8 @@ export const IPC_INVOKE_ROLES = {
   'backend:get-logs': MAIN_ONLY,
   'room-pcm:test': MAIN_ONLY,
   'room-microphone:pcm': MAIN_ONLY,
+  'room-system:pcm': MAIN_ONLY,
+  'room-system:inspect': MAIN_ONLY,
   'room-microphone:inspect': MAIN_ONLY,
   'room-pcm:inspect': MAIN_ONLY,
   'room-frame:test': MAIN_ONLY,

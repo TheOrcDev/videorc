@@ -205,3 +205,35 @@ it('refuses an open reply whose clock origin is unsafe or lacks its incarnation'
     bridge.close()
   }
 })
+
+it('Scopes system cleanup observations separately from a still-live microphone bridge', async () => {
+  let resolve!: (value: { host: string; port: number; token: string }) => void
+  const bridge = new RoomPcmBridge(
+    () =>
+      new Promise((r) => {
+        resolve = r
+      }),
+    () => true,
+    undefined,
+    'room.system.pcm'
+  )
+  const opening = bridge.request({
+    action: 'open',
+    generation: 42,
+    showId: 'show',
+    role: 'host-system-audio',
+    sampleRate: 48000,
+    channels: 2,
+    frames: 480
+  })
+  expect(RoomPcmBridge.resources('room.system.pcm').ipcRequests).toBe(1)
+  expect(RoomPcmBridge.resources('room.microphone.pcm').ipcRequests).toBe(0)
+  bridge.close()
+  resolve({ host: '127.0.0.1', port: 1, token: 'fixture' })
+  await expect(opening).rejects.toThrow('closed')
+  expect(RoomPcmBridge.resources('room.system.pcm')).toEqual({
+    sockets: 0,
+    ipcRequests: 0,
+    timers: 0
+  })
+})

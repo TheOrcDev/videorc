@@ -67,7 +67,7 @@ export function parseRoomPcmCommand(value: unknown): RoomPcmCommand {
 }
 /** Nullable origin + incarnation; origin requires a positive incarnation and,
  * when given, `originUs + observedAtUs` must stay a safe integer. */
-function validPcmClock(v: RoomPcmClock, observedAtUs = 0): boolean {
+export function validPcmClock(v: RoomPcmClock, observedAtUs = 0): boolean {
   if (v.incarnation !== null && (!pcmInteger(v.incarnation) || v.incarnation === 0)) return false
   if (v.originUs === null) return true
   return (

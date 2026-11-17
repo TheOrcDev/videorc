@@ -1,0 +1,376 @@
+{
+  "schemaVersion": 1,
+  "slice": "S8",
+  "branch": "feat/249-s8-integration",
+  "note": "S8 is the unstaged and untracked delta over the staged prerequisites. Publication: one S8 commit per repo on a main whose tree equals prerequisiteTree (after the listed PRs merge). SHA-256 of each published file; the manifest excludes itself; node_modules is never part of it. Tree hashes are reported out of band because the manifest is inside the tree.",
+  "frozenCheckpoint": {
+    "owner": "G67rq",
+    "desktop": {
+      "worktree": "/Users/orcdev/projects/videorc-wt-249-s8",
+      "base": "68c623f07754e755af0def3d9ed24383059bd36f",
+      "manifestSha256": "b254035b6fddc862ad7fe1750ad9e2adb2816df21fec7508d6eb057115551c83"
+    },
+    "web": {
+      "worktree": "/Users/orcdev/projects/videorcweb-wt-249-s8",
+      "base": "59fb8ba6c3cd9559523c5d320bad2065f3cdce1d",
+      "manifestSha256": "23b201b884aac81cd2c01fe4a3a88b5915c6b435f32884975c20ad782a12d115"
+    },
+    "untouched": true
+  },
+  "repos": {
+    "desktop": {
+      "worktreeHead": "4ff7156818f425112ef3575ff102cfdfdea853d7",
+      "prerequisites": [
+        {
+          "pr": 1457,
+          "commit": "1f372525d402f5e58118df36f052e50f0816ccf6",
+          "what": "repair after the Plan 249 merge batch"
+        },
+        {
+          "pr": 1461,
+          "commit": "7c2e0ed519417a4132c6670a982907d4b80b1ddd",
+          "what": "S24"
+        },
+        {
+          "pr": 1459,
+          "commit": "3e42ca9af06fbff8f646b58823b6c29405e92e43",
+          "what": "S13a"
+        }
+      ],
+      "prerequisiteTree": "72f3cde109b00cf5d8a99deb6f26ea27ff5b47b6",
+      "files": [
+        {
+          "path": "apps/desktop/src/main/index.ts",
+          "status": "modified",
+          "sha256": "acae23f92e2480bd670423e1fcd2a14532db4b0a8290d82629a0282f6fd289f0"
+        },
+        {
+          "path": "apps/desktop/src/main/room-pcm-bridge.test.ts",
+          "status": "modified",
+          "sha256": "c4fe717dce28b3aac19a9d9d01a5ef535efce3712544e57fde552036e6d5b50c"
+        },
+        {
+          "path": "apps/desktop/src/main/room-pcm-bridge.ts",
+          "status": "modified",
+          "sha256": "248870f426ba4087e8efc254fddbdc7ec998a3c3af858e84c283e87562c07908"
+        },
+        {
+          "path": "apps/desktop/src/preload/index.ts",
+          "status": "modified",
+          "sha256": "0bbe55e26e8cdcb84f3d406278de3581d39120955570971f3f8172512bc270be"
+        },
+        {
+          "path": "apps/desktop/src/renderer/src/components/studio/room-audio-routing.tsx",
+          "status": "added",
+          "sha256": "d45262b43ef29a421aa435ba2027bfd1f982e56454615fc42d1b3059fce3034b"
+        },
+        {
+          "path": "apps/desktop/src/renderer/src/components/studio/room-sounds.tsx",
+          "status": "modified",
+          "sha256": "28100985c0d75ecbe3480fad2d748676dce3f35ab04c42fbba816e42a198d6ff"
+        },
+        {
+          "path": "apps/desktop/src/renderer/src/hooks/use-studio.tsx",
+          "status": "modified",
+          "sha256": "8f33b2a826611eb599c9f875545bc301ad1a0d2656447dde6276348c5343829d"
+        },
+        {
+          "path": "apps/desktop/src/renderer/src/hooks/use-talk-show-room.ts",
+          "status": "modified",
+          "sha256": "0b5edc1e3a83ece68098af40875f4bd52022adfd2a35b2cce6d20204218c7a4f"
+        },
+        {
+          "path": "apps/desktop/src/renderer/src/lib/room-audio-routing.test.ts",
+          "status": "added",
+          "sha256": "92f87246f0b80aef13ad41bdec2417c1dbcd0e7d99c0d63ea9b0f48770a04429"
+        },
+        {
+          "path": "apps/desktop/src/renderer/src/lib/room-audio-routing.ts",
+          "status": "added",
+          "sha256": "391a5db1df94c1738d9928182cd4cc938498ceecbf2011ec541c14adf5e53f5c"
+        },
+        {
+          "path": "apps/desktop/src/renderer/src/lib/room-aux-publisher.test.ts",
+          "status": "modified",
+          "sha256": "e2013ce3eedb005ce2b677d840bdb5ca6dac0a1559ce6c46bfbfe7ad1faae72e"
+        },
+        {
+          "path": "apps/desktop/src/renderer/src/lib/room-aux-publisher.ts",
+          "status": "modified",
+          "sha256": "22ef5709f6d836dbf9ff1aad105f5a29863587fd3e63d23d41c48829fa0141e4"
+        },
+        {
+          "path": "apps/desktop/src/renderer/src/lib/room-aux-sink.test.ts",
+          "status": "modified",
+          "sha256": "0a0704d0222b4aaab5f4a4db44bb67086729bbb48f63841143c972c79e59504b"
+        },
+        {
+          "path": "apps/desktop/src/renderer/src/lib/room-aux-sink.ts",
+          "status": "modified",
+          "sha256": "d41f652c826ded539b26b7fd8f9835f7f1a7157a7da6cc070ad62dbee4b3264f"
+        },
+        {
+          "path": "apps/desktop/src/renderer/src/lib/room-media-v2.ts",
+          "status": "modified",
+          "sha256": "394fcc937419578564c2eab1d076f3ae07e8dc7a8d1d3f6181992720dfa98d04"
+        },
+        {
+          "path": "apps/desktop/src/renderer/src/lib/room-system-audio-buffer.ts",
+          "status": "added",
+          "sha256": "64fa28f9f72c0ec0bb0b38f9fdcec29b51884c00c25575d9148c511e2072e318"
+        },
+        {
+          "path": "apps/desktop/src/renderer/src/lib/room-system-audio-source.test.ts",
+          "status": "added",
+          "sha256": "aa89eb7b3c24a42161d694769761ff3557a656312ae33582b7de7efe502d4bd2"
+        },
+        {
+          "path": "apps/desktop/src/renderer/src/lib/room-system-audio-source.ts",
+          "status": "added",
+          "sha256": "910df28b192656967816b174f28ef53b81e1ba1126acf1990323a1432e27bc02"
+        },
+        {
+          "path": "apps/desktop/src/renderer/src/lib/room-system-audio-state.ts",
+          "status": "added",
+          "sha256": "2f203e5de2c86621a1cde36408a9e29166e390977a843f77cfbd33b223caaf81"
+        },
+        {
+          "path": "apps/desktop/src/renderer/src/lib/room-system-audio-worklet.ts",
+          "status": "added",
+          "sha256": "b9709c46cac1ae8966ccda14137b4aac1f9985b3b9c4048b2d6a8143920c2c58"
+        },
+        {
+          "path": "apps/desktop/src/shared/backend.ts",
+          "status": "modified",
+          "sha256": "3e383fd427fe691f48ab5990541029694ec2aa2f9b10666c155d3df75abe85d2"
+        },
+        {
+          "path": "apps/desktop/src/shared/electron-ipc-contract.test.ts",
+          "status": "modified",
+          "sha256": "8851ab238002dfd507ea3eef7f1a933817166239a498ea9dde3bc8eb59b2fe32"
+        },
+        {
+          "path": "apps/desktop/src/shared/electron-ipc-contract.ts",
+          "status": "modified",
+          "sha256": "afba8e83d448fa438bc7c952d6b4d44991ba2a28304d07d7cd8fb26375345d14"
+        },
+        {
+          "path": "apps/desktop/src/shared/program-audio-routing.ts",
+          "status": "added",
+          "sha256": "0f8998093fe4579baf3b6cba77c983bd8bc1fe12c3b21e5a1ec2e5096b57542a"
+        },
+        {
+          "path": "apps/desktop/src/shared/renderer-security-policy.ts",
+          "status": "modified",
+          "sha256": "588146415382bb2619485af1f3c21f0fbec03c6c9556213306bd2579b1075b8b"
+        },
+        {
+          "path": "apps/desktop/src/shared/room-pcm.ts",
+          "status": "modified",
+          "sha256": "8e6bac7024bb3955282570acbbd45b167e95d1cf868531c34dd46add3b4c561e"
+        },
+        {
+          "path": "apps/desktop/src/shared/room-system-audio.test.ts",
+          "status": "added",
+          "sha256": "99d23dfa2dbc163e5e3c60dde305685c1bccb9401818734ac6b6fdb01c869558"
+        },
+        {
+          "path": "apps/desktop/src/shared/room-system-audio.ts",
+          "status": "added",
+          "sha256": "2cc33dfbe9f1aba22e919a15a0706559ac190b9e205f65d93f322c00e6aec399"
+        },
+        {
+          "path": "crates/videorc-backend/src/main.rs",
+          "status": "modified",
+          "sha256": "d444d2f4725f67e198ae74027003b2f722a60c31b0d83c4e6d9ed642af69c637"
+        },
+        {
+          "path": "crates/videorc-backend/src/room_system_audio.rs",
+          "status": "added",
+          "sha256": "2251bcff879eb0fd1100d4744c984397708752b420a57a1c39d78f4ffc7c3d46"
+        },
+        {
+          "path": "docs/cloud/249-s8-audio-routing-handoff.md",
+          "status": "added",
+          "sha256": "6ba197704eae2de0854e15b929d9aa879574380cff36ab7439eee446bf05d5ac"
+        },
+        {
+          "path": "protocol-fixtures/cloud-parity-media-v2.json",
+          "status": "modified",
+          "sha256": "42ff32bf3aacd608395dd62be513ba9a1b5c7fc3595a3e7d9c442b35a8e82bbb"
+        },
+        {
+          "path": "protocol-fixtures/room-system-audio.json",
+          "status": "added",
+          "sha256": "65c5a185ab93a1a98761553e8a259cb6cadb4d1d7c316b0d404f3265c099d579"
+        },
+        {
+          "path": "scripts/lib/cloud-parity-audio-routing-contract.mjs",
+          "status": "added",
+          "sha256": "f3c6a63a08e5e3f43f9d8577085e93ef836e70e9017d46b11ea13cb8bad2f9ef"
+        },
+        {
+          "path": "scripts/lib/cloud-parity-audio-routing-contract.test.mjs",
+          "status": "added",
+          "sha256": "d257cfa4938b545d83b7dd27cb5e89093c43b066ce25773cb1306efe34ce6fc4"
+        },
+        {
+          "path": "scripts/lib/cloud-parity-audio-routing.mjs",
+          "status": "added",
+          "sha256": "34fd4ec87b5b0eb9250f0bf3240258228cea4765cd4235011dfab3c613b88d50"
+        },
+        {
+          "path": "scripts/lib/cloud-parity-baseline.mjs",
+          "status": "modified",
+          "sha256": "ad4589f229d34df6676021dd4690ea860e2827db81bef71d7d4d8e6a8e62ab67"
+        },
+        {
+          "path": "scripts/lib/cloud-parity-browser.mjs",
+          "status": "modified",
+          "sha256": "5cf32b7f7f79aec293d3510d6ef3415eec298857bcf3c6689a0665328c2dc44f"
+        },
+        {
+          "path": "scripts/lib/cloud-parity-contract.test.mjs",
+          "status": "modified",
+          "sha256": "5f186e3db2864f9ab7e94b3344fb04bc333a5575d20840988773e2082e599566"
+        },
+        {
+          "path": "scripts/lib/fake-cloud-web-managed.mjs",
+          "status": "modified",
+          "sha256": "c7cbcfadc63ae2d495bd6d170838d96c9746a5cd178cad523ec68177754c8eff"
+        },
+        {
+          "path": "scripts/smoke-cloud-parity-app.mjs",
+          "status": "modified",
+          "sha256": "f6088153aaaa2104364e7834beb573d274836f356c019de16c48ac7fb8abd12d"
+        }
+      ],
+      "alternateTrees": {
+        "afterS17": {
+          "base": "prerequisiteTree + S17 #1460 (49437135c87a1f09272c8e98e2ab394795d86199 over 1f372525d), its baseline and backend.ts unions resolved",
+          "baseTree": "eb15cfdd3cf3c68c260c875e94a13c4d0c6a2e0e",
+          "samePaths": true,
+          "filesThatDiffer": [
+            {
+              "path": "apps/desktop/src/renderer/src/hooks/use-studio.tsx",
+              "sha256": "cce1078ba990bc9c94d0e1bd5a69aebfb91c1b26448a08cc7f3383a8cdfc546f"
+            },
+            {
+              "path": "apps/desktop/src/renderer/src/hooks/use-talk-show-room.ts",
+              "sha256": "8fd5a8280ca6773f76c333319759e30bf1098aa9ed2a77fb8b7a930540e6cf06"
+            },
+            {
+              "path": "apps/desktop/src/shared/backend.ts",
+              "sha256": "18cec628ee2caf29d6f67d4f84ea7b92cf23c9e0805a16e74529cc24467a24be"
+            },
+            {
+              "path": "scripts/lib/cloud-parity-baseline.mjs",
+              "sha256": "80b2cfba379dcd9752267a5812d2499ca91ce6e6bce17fbb9750474814cf144e"
+            },
+            {
+              "path": "scripts/lib/fake-cloud-web-managed.mjs",
+              "sha256": "15eab2c412ac9e0f324ad58fa778617001b997692c81c3a1c4da5d3b5a6ee88a"
+            },
+            {
+              "path": "scripts/smoke-cloud-parity-app.mjs",
+              "sha256": "dda022136a4b43370ccaafcfd745ed7a7d1ac332d7148651c4ec03dbec81cec2"
+            }
+          ]
+        }
+      }
+    },
+    "web": {
+      "worktreeHead": "ab811051b29345ee13ae7686c4534892de6fe077",
+      "prerequisites": [
+        {
+          "pr": 142,
+          "commit": "db7ce88e5de3e2f878ccf0be3d57c1aaeb08cebb",
+          "what": "S24"
+        },
+        {
+          "pr": 140,
+          "commit": "952ce7b554791551d4d58198726354afa90785ed",
+          "what": "S13a"
+        }
+      ],
+      "prerequisiteTree": "c5df48291b302e9e6d5a1d42988ced15088cbb05",
+      "files": [
+        {
+          "path": "docs/cloud/249-s8-audio-routing-handoff.md",
+          "status": "added",
+          "sha256": "6ba197704eae2de0854e15b929d9aa879574380cff36ab7439eee446bf05d5ac"
+        },
+        {
+          "path": "lib/cloud/program/audio-routing.ts",
+          "status": "added",
+          "sha256": "2ee6ee399b9aadce750caa852f5388e469309c8f1d4ec0ce91d1d35d37d708c4"
+        },
+        {
+          "path": "lib/cloud/program/room-media-v2.ts",
+          "status": "modified",
+          "sha256": "aa14c79d7338cbc0a58b5f74e5b56594a52106e8f10032f1dcd9ef6f11241bd7"
+        },
+        {
+          "path": "lib/cloud/program/source.ts",
+          "status": "modified",
+          "sha256": "3d3d5cec2522b952dc5bf677673fb89b8d2689483bf26230f40a91a5be0e4e04"
+        },
+        {
+          "path": "lib/cloud/program/stage-audio.ts",
+          "status": "modified",
+          "sha256": "ec74a1c60dfe97c250209dd0f88ff30b2bca280805faa60ba5d17c9058eacc3b"
+        },
+        {
+          "path": "lib/cloud/program/stage.ts",
+          "status": "modified",
+          "sha256": "8f6493c26f7cc2f10163acc617c91e03da19faee9156c0507a6d0e5e3ed9f1a8"
+        },
+        {
+          "path": "lib/cloud/program/tools/emit.ts",
+          "status": "modified",
+          "sha256": "05477aaec75a03083dac5d863d06f31d9cc1f5ce4bd061a9a91a5a0b87d91e20"
+        },
+        {
+          "path": "lib/cloud/room-media-relay.ts",
+          "status": "modified",
+          "sha256": "115c74bb18e44979cda7cc48f8ab48f606df0d2e7a6cd4087cf3e226ed987ecd"
+        },
+        {
+          "path": "public/cloud/program/v1/audio-routing.js",
+          "status": "added",
+          "sha256": "2545b09b301a2e02caa94bee3e6a8df74a89aeea623fba2eca94f4c1907dc233"
+        },
+        {
+          "path": "public/cloud/program/v1/room-media-v2.js",
+          "status": "modified",
+          "sha256": "24b4a30b4b9ce5e4f721107479fa7c450ec27a726a5a3fccba30ea815ee3092c"
+        },
+        {
+          "path": "public/cloud/program/v1/source.js",
+          "status": "modified",
+          "sha256": "106359ace853be09aaece2e0fc059e5de9a804c3a63152efa6803e22d8cc6145"
+        },
+        {
+          "path": "public/cloud/program/v1/stage-audio.js",
+          "status": "modified",
+          "sha256": "59e35ba4df481520e9bc4fd3add0dcc149fb7b6764401738a0a21fe7d36664e3"
+        },
+        {
+          "path": "public/cloud/program/v1/stage.js",
+          "status": "modified",
+          "sha256": "992b54d07e2fb302e94d43453da88ae1d65e04430d9346c06c36f75c3ccf4b8f"
+        },
+        {
+          "path": "tests/cloud-program-audio-routing.test.ts",
+          "status": "added",
+          "sha256": "bd01cbac8d91652f1142e9a32b17c7cb189542d20d046e6344d9dc630fbdc746"
+        },
+        {
+          "path": "tests/fixtures/cloud-parity-media-v2.json",
+          "status": "modified",
+          "sha256": "42ff32bf3aacd608395dd62be513ba9a1b5c7fc3595a3e7d9c442b35a8e82bbb"
+        }
+      ]
+    }
+  }
+}

@@ -1,3 +1,8 @@
+import {
+  parseRoomSystemAudioFrame,
+  type RoomSystemAudioCommand,
+  type RoomSystemAudioFrame
+} from '../shared/room-system-audio'
 import type { RoomMicrophoneCommand } from '../shared/room-microphone'
 import {
   parseRoomPcmFrame,
@@ -10,8 +15,12 @@ type Connection = { host: string; port: number; token: string }
 /** One socket, one request credit, no event forwarding and no credentials in preload. */
 export class RoomPcmBridge {
   static #owners = new Set<RoomPcmBridge>()
-  static resources(): { sockets: number; ipcRequests: number; timers: number } {
-    const owners = [...this.#owners]
+  static resources(method?: 'room.pcm.test' | 'room.microphone.pcm' | 'room.system.pcm'): {
+    sockets: number
+    ipcRequests: number
+    timers: number
+  } {
+    const owners = [...this.#owners].filter((owner) => !method || owner.method === method)
     return {
       sockets: owners.filter((o) => o.#socket !== null && o.#socket.readyState !== 3).length,
       ipcRequests: owners.filter((o) => o.#pending !== null || o.#connecting).length,
@@ -33,10 +42,17 @@ export class RoomPcmBridge {
     private readonly connection: () => Promise<Connection>,
     private readonly enabled: () => boolean,
     private readonly socketFactory: (url: string) => WebSocket = (url) => new WebSocket(url),
-    private readonly method: 'room.pcm.test' | 'room.microphone.pcm' = 'room.pcm.test'
+    private readonly method:
+      | 'room.pcm.test'
+      | 'room.microphone.pcm'
+      | 'room.system.pcm' = 'room.pcm.test'
   ) {}
 
-  async request(command: RoomPcmCommand | RoomMicrophoneCommand): Promise<RoomPcmFrame | null> {
+  async request(command: RoomSystemAudioCommand): Promise<RoomSystemAudioFrame | null>
+  async request(command: RoomPcmCommand | RoomMicrophoneCommand): Promise<RoomPcmFrame | null>
+  async request(
+    command: RoomPcmCommand | RoomMicrophoneCommand | RoomSystemAudioCommand
+  ): Promise<RoomPcmFrame | RoomSystemAudioFrame | null> {
     if (!this.enabled() || this.#closed) throw new Error('PCM test bridge is disabled.')
     if (command.action === 'close' && this.method === 'room.pcm.test') {
       if (command.generation !== this.#generation) throw new Error('Stale PCM generation.')
@@ -112,19 +128,24 @@ export class RoomPcmBridge {
       this.#pending = { id, resolve, reject }
       this.#timer = setTimeout(
         () => this.close(),
-        this.method === 'room.microphone.pcm' && command.action !== 'pull' ? 15000 : 2000
+        this.method !== 'room.pcm.test' && command.action !== 'pull' ? 15000 : 2000
       )
       socket.send(JSON.stringify({ id, method: this.method, params: command }))
     })
     if (this.#closed) throw new Error('PCM bridge closed during pull.')
     if (command.action === 'close') this.close()
     // Plan 249 S13a: open answers with the generation's clock origin, not a frame.
-    // It is validated here; renderers read the same origin on every frame.
+    // It is validated here (S8 system audio answers the same open shape); renderers
+    // read the same origin on every frame.
     if (command.action === 'open') {
       parseRoomPcmOpened(result, this.#generation)
       return null
     }
-    return result === null ? null : parseRoomPcmFrame(result, this.#generation)
+    return result === null
+      ? null
+      : this.method === 'room.system.pcm'
+        ? parseRoomSystemAudioFrame(result, this.#generation)
+        : parseRoomPcmFrame(result, this.#generation)
   }
 
   close(): void {

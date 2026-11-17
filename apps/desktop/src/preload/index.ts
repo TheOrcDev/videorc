@@ -39,6 +39,8 @@ function subscribe<TChannel extends ElectronEventChannel>(
 const api: VideorcApi = {
   getRoomPcmTestResources: () => invoke('room-pcm:inspect'),
   getRoomNativeMicrophoneResources: () => invoke('room-microphone:inspect'),
+  roomSystemAudioPcm: (command) => invoke('room-system:pcm', command),
+  getRoomSystemAudioResources: () => invoke('room-system:inspect'),
   roomMicrophonePcm: (command) => invoke('room-microphone:pcm', command),
   roomPcmTest: (command) => invoke('room-pcm:test', command),
   getRoomFrameTestResources: () => invoke('room-frame:inspect'),

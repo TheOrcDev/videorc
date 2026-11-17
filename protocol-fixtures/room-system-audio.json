@@ -1,0 +1,20 @@
+{
+  "open": {
+    "action": "open",
+    "generation": 1,
+    "showId": "show",
+    "role": "host-system-audio",
+    "sampleRate": 48000,
+    "channels": 2,
+    "frames": 480
+  },
+  "queueFrames": 1920,
+  "ownAppExcluded": true,
+  "productionQualified": false,
+  "clockQualification": "unavailable",
+  "clock": {
+    "timeline": "capture",
+    "fields": ["originUs", "incarnation"],
+    "absent": null
+  }
+}

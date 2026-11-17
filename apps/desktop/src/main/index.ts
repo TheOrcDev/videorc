@@ -18104,6 +18104,13 @@ app.whenReady().then(async () => {
     bridge: RoomPcmBridge
     detach: () => void
   } | null = null
+  let nativeSystemOwner: {
+    senderId: number
+    generation: number
+    bridge: RoomPcmBridge
+    detach: () => void
+  } | null = null
+  let nativeSystemLastGeneration = 0
   let nativeMicLastGeneration = 0
   let pcmLastGeneration = 0
   secureIpcHandle('room-pcm:inspect', async () => {
@@ -18169,7 +18176,7 @@ app.whenReady().then(async () => {
       {},
       2000
     )
-    return { ...native, ...RoomPcmBridge.resources() }
+    return { ...native, ...RoomPcmBridge.resources('room.microphone.pcm') }
   })
   secureIpcHandle('room-microphone:pcm', async (event, command) => {
     if (app.isPackaged || process.env.VIDEORC_ROOM_NATIVE_MIC !== '1')
@@ -18210,7 +18217,11 @@ app.whenReady().then(async () => {
         { waitForClose: true },
         6500
       )
-      if (observed.nativeSources === 0 && RoomPcmBridge.resources().sockets === 0) return null
+      if (
+        observed.nativeSources === 0 &&
+        RoomPcmBridge.resources('room.microphone.pcm').sockets === 0
+      )
+        return null
       throw new Error('Microphone close remains unacknowledged.')
     }
     const owner = nativeMicOwner
@@ -18381,6 +18392,76 @@ app.whenReady().then(async () => {
     const owner = cameraOwner
     if (!owner || owner.senderId !== event.sender.id) throw new Error('No processed camera owner.')
     return await owner.bridge.fixture(action)
+  })
+
+  secureIpcHandle('room-system:inspect', async () => {
+    if (app.isPackaged || process.env.VIDEORC_ROOM_NATIVE_SYSTEM !== '1')
+      throw new Error('Native room system audio is disabled.')
+    const native = await requestBackendAdmin<{ nativeSources: number }>(
+      'room.system.inspect',
+      {},
+      2000
+    )
+    return { ...native, ...RoomPcmBridge.resources('room.system.pcm') }
+  })
+  secureIpcHandle('room-system:pcm', async (event, command) => {
+    if (app.isPackaged || process.env.VIDEORC_ROOM_NATIVE_SYSTEM !== '1')
+      throw new Error('Native room system audio is disabled and unqualified.')
+    if (command.action === 'open') {
+      if (nativeSystemOwner || command.generation <= nativeSystemLastGeneration)
+        throw new Error('System audio owner already active or stale.')
+      nativeSystemLastGeneration = command.generation
+      const contents = event.sender
+      const bridge = new RoomPcmBridge(
+        () => waitForBackendAdminConnection(2000),
+        () => !app.isPackaged && process.env.VIDEORC_ROOM_NATIVE_SYSTEM === '1',
+        undefined,
+        'room.system.pcm'
+      )
+      const cleanup = (): void => {
+        bridge.close()
+        detach()
+        if (nativeSystemOwner?.bridge === bridge) nativeSystemOwner = null
+      }
+      const detach = (): void => {
+        contents.removeListener('destroyed', cleanup)
+        contents.removeListener('render-process-gone', cleanup)
+        contents.removeListener('did-start-navigation', cleanup)
+      }
+      contents.once('destroyed', cleanup)
+      contents.once('render-process-gone', cleanup)
+      contents.once('did-start-navigation', cleanup)
+      nativeSystemOwner = { senderId: contents.id, generation: command.generation, bridge, detach }
+    }
+    if (
+      !nativeSystemOwner &&
+      command.action === 'close' &&
+      command.generation === nativeSystemLastGeneration
+    ) {
+      const observed = await requestBackendAdmin<{ nativeSources: number }>(
+        'room.system.inspect',
+        { waitForClose: true },
+        6500
+      )
+      if (observed.nativeSources === 0) return null
+      throw new Error('System audio close remains unacknowledged.')
+    }
+    const owner = nativeSystemOwner
+    if (!owner || owner.senderId !== event.sender.id || owner.generation !== command.generation)
+      throw new Error('System audio owner or generation mismatch.')
+    try {
+      return await owner.bridge.request(command)
+    } catch (error) {
+      owner.bridge.close()
+      owner.detach()
+      if (nativeSystemOwner === owner) nativeSystemOwner = null
+      throw error
+    } finally {
+      if (command.action === 'close') {
+        owner.detach()
+        if (nativeSystemOwner === owner) nativeSystemOwner = null
+      }
+    }
   })
 
   secureIpcHandle('account:begin-sign-in', async (_event, authorizeUrl: string) => {

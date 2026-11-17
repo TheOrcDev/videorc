@@ -6,9 +6,14 @@ import { roomFrameTestEnabled } from '../lib/room-frame-test-state'
 import { roomPcmTestEnabled } from '../lib/room-pcm-test-state'
 import type { CohostPersona, BuddyOverlaySnapshot, OverlayItemLayout } from '@/lib/backend'
 import { toast } from '@/lib/toast'
+import {
+  roomAudioRouting,
+  systemControllerEnabled,
+  systemControllerStep
+} from '@/lib/room-audio-routing'
 import { withRestoredBanners } from '@/lib/cloud-restored-banners'
 import type { GraphicsContent } from '../../../shared/cloud-graphics'
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 
 import type { BackendClient } from '@/backendClient'
 import type {
@@ -700,12 +705,24 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
   const avatarStream = deps.avatar?.layout.showOnStream === true
   const avatarRecording = deps.avatar?.layout.showInRecording === true
   const controllerEpoch = controller?.controllerEpoch ?? 0
+  // Plan 249 S8: system audio follows this controller epoch. A takeover, any
+  // later epoch and a loss turn system capture off (it closes through the
+  // aux sink's serialized teardown); only the streamer turns it on again.
+  const routing = useSyncExternalStore(roomAudioRouting.subscribe, roomAudioRouting.getSnapshot)
+  const systemOn = systemControllerEnabled(routing, roomOpen)
+  const systemEpochRef = useRef(0)
+  const stoppedBy = cloudStatus?.stoppedBy
+  useEffect(() => {
+    const step = systemControllerStep(systemEpochRef.current, controller, stoppedBy)
+    systemEpochRef.current = step.epoch
+    if (step.disarm) roomAudioRouting.disarmSystem()
+  }, [controller, stoppedBy])
   useEffect(() => {
     if (!client || !roomOpen || !showId || controllerEpoch === 0) return
     void client
       .requestTyped('cloud.controller.desired', {
         showId,
-        enabled: { camera: cameraOn, microphone: microphoneOn },
+        enabled: { camera: cameraOn, microphone: microphoneOn, system: systemOn },
         outputs: { avatar: { stream: avatarStream, recording: avatarRecording } }
       })
       .catch(() => {})
@@ -716,6 +733,7 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
     controllerEpoch,
     cameraOn,
     microphoneOn,
+    systemOn,
     avatarStream,
     avatarRecording
   ])

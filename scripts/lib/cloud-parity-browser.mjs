@@ -139,7 +139,7 @@ export async function startParityPages(webRoot, guests, media = null, fixtureAss
           ? {
               state: 'let-in',
               guestId: guest.identity,
-              screenShareAllowed: false,
+              screenShareAllowed: guest.screenShareAllowed === true,
               muted: false,
               room: { url: guest.url, token: guest.token }
             }

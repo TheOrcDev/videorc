@@ -167,6 +167,31 @@ describe('media v2 compatibility', () => {
     expect(soundboard.getSnapshot().roomAux?.state).toBe('blocked')
     publisher.close()
   })
+  it('S8: runs its 1 s pulse only for an enabled source or a routing-capable program lease', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(now)
+    const room = fakeRoom()
+    const program = { identity: 'EG_program', sid: 'PA_program' }
+    room.remoteParticipants.set(program.identity, program)
+    const publishData = vi.fn(async () => {})
+    Object.assign(room.localParticipant, { sid: 'PA_host', publishData })
+    const publisher = new RoomAuxPublisher(room as unknown as Room)
+    // Nothing on and no program page that negotiated routing: no timer.
+    expect(vi.getTimerCount()).toBe(0)
+    receipt(room, {
+      ...capable,
+      identity: program.identity,
+      participantSid: program.sid,
+      audioRouting: 1
+    })
+    expect(vi.getTimerCount()).toBe(1)
+    expect(publishData).toHaveBeenCalled()
+    room.remoteParticipants.delete(program.identity)
+    room.emit(RoomEvent.ParticipantDisconnected)
+    expect(vi.getTimerCount()).toBe(0)
+    publisher.close()
+    expect(vi.getTimerCount()).toBe(0)
+  })
   it('cancels a pending publish and retires it before any replacement can start', async () => {
     vi.useFakeTimers()
     vi.setSystemTime(now)
