@@ -40,6 +40,13 @@ import { Empty } from '@/components/ui/empty'
 import { SegmentedControl } from '@/components/ui/segmented-control'
 import { Spinner } from '@/components/ui/spinner'
 import { useStudioCloud, useStudioCore } from '@/hooks/use-studio'
+import {
+  roomProgramCamera,
+  useRoomProgramCamera,
+  useRoomProgramCameraAvailable,
+  useRoomProgramCameraProducer
+} from '@/hooks/use-room-program-camera'
+import { useVirtualCamera } from '@/hooks/use-virtual-camera'
 import type {
   CloudHostShape,
   CloudRoomParticipant,
@@ -91,6 +98,7 @@ import { cn } from '@/lib/utils'
 import { programScenePreview, scenePreviewPicture, sceneStatusLine } from '@/lib/room-scene-preview'
 import { VIEW_SOURCE, tileFit } from '../../../../shared/cloud-presentation-views'
 import type { SceneTile } from '../../../../shared/cloud-scene'
+import { roomProgramCameraLine } from '../../../../shared/room-program-camera'
 
 // The Show stage (plan 224 C-G3, D7, D8): while the room is open it replaces
 // the Studio's Preview. The renderer draws the room's tracks with the
@@ -702,6 +710,28 @@ function ProgramMonitor({ talkShow }: { talkShow: TalkShowContextValue }): React
   const now = usePreviewClock(view.source === 'stage' && live)
   const preview = view.source === 'stage' ? managedProgramPreview(cloudStatus, now) : null
   const previewCopy = preview ? PROGRAM_PREVIEW_COPY[preview.state] : null
+  // Plan 249 S23 (D10): this Program preview on Videorc Camera, opt-in per
+  // room. Never a node show's return: that is the encoded stream.
+  const picture = useRef<HTMLDivElement>(null)
+  const virtualCamera = useVirtualCamera()
+  const programCameraOffered =
+    useRoomProgramCameraAvailable() &&
+    view.source === 'stage' &&
+    talkShow.hostIdentity !== null &&
+    virtualCamera.status?.platformStep !== 'unsupported'
+  const programCamera = useRoomProgramCamera()
+  const programCameraOn =
+    programCameraOffered && programCamera.on && programCamera.hostIdentity === talkShow.hostIdentity
+  useRoomProgramCameraProducer(picture, programCameraOn ? programCamera.generation : null)
+  const programCameraStatus =
+    programCamera.error ??
+    roomProgramCameraLine({
+      on: programCameraOn,
+      source: virtualCamera.status?.source ?? null,
+      cameraOn: virtualCamera.status?.on === true,
+      cameraAvailable: virtualCamera.status?.available !== false
+    }) ??
+    'Videorc Camera · Not sending this room'
 
   useEffect(() => {
     const element = audioRef.current
@@ -773,7 +803,11 @@ function ProgramMonitor({ talkShow }: { talkShow: TalkShowContextValue }): React
           </Button>
         ) : null}
       </div>
-      <div className="relative aspect-video w-full overflow-hidden rounded-row bg-video-ground [container-type:inline-size]">
+      <div
+        className="relative aspect-video w-full overflow-hidden rounded-row bg-video-ground [container-type:inline-size]"
+        data-testid="show-stage-program-picture"
+        ref={picture}
+      >
         {view.source === 'return' ? (
           <>
             <TrackVideo className="object-contain" track={video} />
@@ -853,6 +887,27 @@ function ProgramMonitor({ talkShow }: { talkShow: TalkShowContextValue }): React
             onClick={() => void talkShow.setAvatarGuests(!talkShow.room.avatar?.guests?.enabled)}
           >
             {talkShow.room.avatar.guests?.enabled ? 'Hide from guests' : 'Show to guests'}
+          </Button>
+        </div>
+      ) : null}
+      {programCameraOffered ? (
+        <div
+          className="flex min-h-6 items-center justify-between gap-2"
+          data-program-camera={
+            programCameraOn ? (virtualCamera.status?.source ?? 'starting') : 'off'
+          }
+          data-testid="show-stage-program-camera"
+        >
+          <span className="truncate text-label text-subtle">{programCameraStatus}</span>
+          <Button
+            size="xs"
+            variant="ghost"
+            aria-pressed={programCameraOn}
+            onClick={() =>
+              void roomProgramCamera.setOn(!programCameraOn, talkShow.hostIdentity).catch(() => {})
+            }
+          >
+            {programCameraOn ? 'Stop sending' : 'Send to Videorc Camera'}
           </Button>
         </div>
       ) : null}

@@ -94,6 +94,7 @@ mod room_clock;
 mod room_frame_bridge;
 // Plan 249 S13b: the processed camera role's native producer.
 mod room_camera_source;
+mod room_program_camera;
 mod room_system_audio;
 // Plan 168 Phase F: the pet builder (S-F1 to S-F3) and the creator's RPCs (S-F4).
 mod buddy_pet_build;
@@ -729,6 +730,16 @@ async fn run_backend(device_changes: tokio::sync::watch::Receiver<u64>) -> Resul
         .route(
             "/html-overlays/frames",
             post(html_overlay::frames_upload_handler),
+        )
+        // Plan 249 S23: the room's Program preview for Videorc Camera (admin
+        // token only; a debug backend with VIDEORC_ROOM_PROGRAM_CAMERA=1).
+        .route(
+            "/room-program-camera/frames",
+            post(room_program_camera::frames_upload_handler),
+        )
+        .route(
+            "/room-program-camera/inspect",
+            get(room_program_camera::inspect_handler),
         )
         .route("/ws", get(ws_handler))
         .with_state(state.clone())

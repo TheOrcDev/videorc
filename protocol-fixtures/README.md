@@ -115,6 +115,18 @@ compares them with the JSON field for field.
 - Rust: `cargo test -p videorc-backend virtual_camera_fixture`
 - TypeScript: `pnpm --filter @videorc/desktop test -- backend-rpc-contract.test.ts`
 
+## `room-program-camera.json`
+
+Plan 249 S23: the room's Program preview as Videorc Camera's picture. The
+40-byte `VRPC` frame header main writes before each 1280x720 RGBA frame (one
+exact vector and the headers the parser must refuse), the I420 values the
+backend's conversion must produce (the CPU compositor's BT.709 video-range
+helpers), the status `source` names, and the device labels that are Videorc
+Camera (never the room's camera).
+
+- Rust: `cargo test -p videorc-backend room_program_camera`
+- TypeScript: `pnpm --filter @videorc/desktop test -- room-program-camera.test.ts`
+
 ## `community.json`
 
 Know your viewers across platforms (plan 225, A6): a chat row with and

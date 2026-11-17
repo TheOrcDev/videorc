@@ -23,7 +23,7 @@
     "available": true,
     "state": "needs-approval",
     "platformStep": "needs-approval",
-    "message": "Allow Videorc Camera in System Settings → General → Login Items & Extensions → Camera Extensions."
+    "message": "Allow Videorc Camera in System Settings \u2192 General \u2192 Login Items & Extensions \u2192 Camera Extensions."
   },
   "needsSetup": {
     "on": false,
@@ -49,6 +49,22 @@
     "on": true,
     "available": true,
     "state": "streaming"
+  },
+  "streamingRoomProgram": {
+    "on": true,
+    "available": true,
+    "state": "streaming",
+    "viewers": 1,
+    "platformStep": "ready",
+    "source": "room-program-preview"
+  },
+  "readyRoomProgramPaused": {
+    "on": true,
+    "available": true,
+    "state": "ready",
+    "viewers": 0,
+    "platformStep": "ready",
+    "source": "room-program-paused"
   },
   "setParams": {
     "on": true
@@ -81,6 +97,18 @@
       "on": false,
       "state": "off"
     },
-    {}
+    {},
+    {
+      "on": true,
+      "available": true,
+      "state": "streaming",
+      "source": "encoded-return"
+    },
+    {
+      "on": true,
+      "available": true,
+      "state": "streaming",
+      "source": null
+    }
   ]
 }

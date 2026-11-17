@@ -28,6 +28,12 @@ export const IPC_INVOKE_ROLES = {
   'room-camera:processed': MAIN_ONLY,
   'room-camera:inspect': MAIN_ONLY,
   'room-camera:fixture': MAIN_ONLY,
+  // Plan 249 S23: the Studio renderer's Program preview only.
+  'room-program-camera:available': MAIN_ONLY,
+  'room-program-camera:open': MAIN_ONLY,
+  'room-program-camera:frame': MAIN_ONLY,
+  'room-program-camera:close': MAIN_ONLY,
+  'room-program-camera:inspect': MAIN_ONLY,
   'account:begin-sign-in': MAIN_ONLY,
   'account:refresh': MAIN_ONLY,
   'account:sign-out': MAIN_ONLY,

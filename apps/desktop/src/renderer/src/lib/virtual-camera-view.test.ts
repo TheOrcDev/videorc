@@ -155,6 +155,13 @@ describe('Videorc Camera: every state on macOS (plan 214 E1)', () => {
     expect(view(fixtures.streamingUnknownViewers as VirtualCameraStatus).line?.text).toBe(
       'Ready · choose Videorc Camera in the other app'
     )
+    // Plan 249 S23: a room's Program preview owns the camera, live or paused.
+    expect(view(fixtures.streamingRoomProgram as VirtualCameraStatus).line?.text).toBe(
+      "In use by 1 app · Showing the room's Program preview"
+    )
+    expect(view(fixtures.readyRoomProgramPaused as VirtualCameraStatus).line?.text).toBe(
+      'Room program paused · choose Videorc Camera in the other app'
+    )
   })
 
   it('stopped while on: the reason, and the switch still turns it off', () => {

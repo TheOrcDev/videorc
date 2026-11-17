@@ -106,8 +106,10 @@ describe('Electron IPC contract', () => {
     // 193: plan 249 S13a adds the main-only camera-role frame fixture and its inspection.
     // S13b adds the main-only processed camera, its inspection and fixture events;
     // S8 adds main-only system PCM and its observed resource inspection.
-    expect(Object.keys(electronInvokeApiMethods)).toHaveLength(193)
-    expect(new Set(Object.values(electronInvokeApiMethods)).size).toBe(193)
+    // 198: plan 249 S23 adds the main-only room program camera (available,
+    // open, frame, close and inspection).
+    expect(Object.keys(electronInvokeApiMethods)).toHaveLength(198)
+    expect(new Set(Object.values(electronInvokeApiMethods)).size).toBe(198)
     expectTypeOf<ElectronInvokeArgs<'resource:trash-session-deletion'>>().toEqualTypeOf<
       Parameters<VideorcApi['trashSessionDeletion']>
     >()

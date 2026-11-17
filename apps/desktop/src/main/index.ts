@@ -1,4 +1,9 @@
 import { RoomFrameBridge } from './room-frame-bridge'
+import { RoomProgramCameraUplink, fetchRoomProgramInspect } from './room-program-camera'
+import {
+  ROOM_PROGRAM_CAMERA_ENV,
+  ROOM_PROGRAM_CAMERA_PRODUCTION_ENABLED
+} from '../shared/room-program-camera'
 import { RoomPcmBridge } from './room-pcm-bridge'
 import { createAppIconHandler } from './app-icons'
 import { createFrontAppMonitor, frontAppSenderIsMain, type FrontAppBinding } from './front-app'
@@ -18462,6 +18467,83 @@ app.whenReady().then(async () => {
         if (nativeSystemOwner === owner) nativeSystemOwner = null
       }
     }
+  })
+  // Plan 249 S23 (D10): the room's Program preview as Videorc Camera. Off in
+  // production; an unpackaged run with VIDEORC_ROOM_PROGRAM_CAMERA=1 (and a
+  // debug backend reading the same variable) offers it. One main-frame owner
+  // and one upload per room generation; the upload owns the camera, so
+  // navigation, a crash or destruction ends it and the camera returns to its
+  // Studio source. Generations only grow: a reconnect opens a new one.
+  const roomProgramCameraEnabled = (): boolean =>
+    ROOM_PROGRAM_CAMERA_PRODUCTION_ENABLED ||
+    (!app.isPackaged && process.env[ROOM_PROGRAM_CAMERA_ENV] === '1')
+  let programCameraOwner: {
+    senderId: number
+    uplink: RoomProgramCameraUplink
+    detach: () => void
+  } | null = null
+  let programCameraLastGeneration = 0
+  const closeProgramCamera = (generation?: number): void => {
+    const owner = programCameraOwner
+    if (!owner || (generation !== undefined && owner.uplink.generation !== generation)) return
+    programCameraOwner = null
+    owner.detach()
+    owner.uplink.close()
+  }
+  secureIpcHandle('room-program-camera:available', () => roomProgramCameraEnabled())
+  secureIpcHandle('room-program-camera:open', (event, generation: number) => {
+    if (!roomProgramCameraEnabled()) throw new Error('Room program camera is disabled.')
+    if (programCameraOwner || generation <= programCameraLastGeneration)
+      throw new Error('Room program camera owner already active or stale.')
+    const connection = backendAdminConnection
+    if (!connection) throw new Error('The backend is not connected.')
+    programCameraLastGeneration = generation
+    const contents = event.sender
+    const cleanup = (): void => closeProgramCamera(generation)
+    const detach = (): void => {
+      contents.removeListener('destroyed', cleanup)
+      contents.removeListener('render-process-gone', cleanup)
+      contents.removeListener('did-start-navigation', cleanup)
+    }
+    const uplink = new RoomProgramCameraUplink(
+      generation,
+      { host: connection.host, port: connection.port, token: connection.token },
+      undefined,
+      () => {
+        // The backend ended the upload (refused, restarted): the renderer
+        // sees `closed` on its next frame and opens a new generation.
+        logBackend('warn', `Room program camera upload ${generation} ended.`)
+        if (programCameraOwner?.uplink.generation === generation) {
+          programCameraOwner = null
+          detach()
+        }
+      }
+    )
+    contents.once('destroyed', cleanup)
+    contents.once('render-process-gone', cleanup)
+    contents.once('did-start-navigation', cleanup)
+    programCameraOwner = { senderId: contents.id, uplink, detach }
+    return null
+  })
+  secureIpcHandle('room-program-camera:frame', (event, frame) => {
+    const owner = programCameraOwner
+    if (!owner || owner.senderId !== event.sender.id) return 'closed'
+    return owner.uplink.send(frame)
+  })
+  secureIpcHandle('room-program-camera:close', (event, generation: number) => {
+    if (programCameraOwner?.senderId === event.sender.id) closeProgramCamera(generation)
+    return null
+  })
+  secureIpcHandle('room-program-camera:inspect', async () => {
+    if (!roomProgramCameraEnabled()) throw new Error('Room program camera is disabled.')
+    const connection = backendAdminConnection
+    if (!connection) throw new Error('The backend is not connected.')
+    const native = (await fetchRoomProgramInspect({
+      host: connection.host,
+      port: connection.port,
+      token: connection.token
+    })) as Record<string, unknown>
+    return { ...native, uplink: programCameraOwner?.uplink.stats() ?? null }
   })
 
   secureIpcHandle('account:begin-sign-in', async (_event, authorizeUrl: string) => {

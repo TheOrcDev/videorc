@@ -15,6 +15,11 @@
 //! - `virtualCamera.status`, `virtualCamera.set` and
 //!   `virtualCamera.platform.report` (what main reports about the extension
 //!   or the Windows setup step).
+//!
+//! Plan 249 S23: while a room's Program preview upload owns the camera
+//! (`room_program_camera.rs`), the picker reads that feed instead of the
+//! compositor, the camera does not arm the preview run, and the status says
+//! `source: room-program-preview` (or `room-program-paused`).
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
@@ -24,7 +29,8 @@ use crate::compositor::{
     CompositorArmParams, CompositorArmRefusal, CompositorFrameConsumer, CompositorLeaseKind,
     arm_compositor_for_capture, release_compositor_capture_lease,
 };
-use crate::protocol::{VirtualCameraPlatformStep, VirtualCameraStatus};
+use crate::protocol::{VirtualCameraPlatformStep, VirtualCameraState, VirtualCameraStatus};
+use crate::room_program_camera::{RoomProgramFeed, RoomProgramPick, RoomProgramSource};
 use crate::state::AppState;
 use crate::virtual_camera::{
     OutputEngine, OutputShared, StatusInputs, VIRTUAL_CAMERA_FPS, VIRTUAL_CAMERA_HEIGHT,
@@ -73,6 +79,8 @@ pub struct VirtualCameraService {
     /// the factory at construction (a hidden refusal is static).
     hidden: Option<VirtualCameraUnavailable>,
     canvas: (u32, u32),
+    /// Plan 249 S23: the room's Program preview, when an upload owns it.
+    room_program: Arc<RoomProgramFeed>,
 }
 
 impl std::fmt::Debug for VirtualCameraService {
@@ -109,7 +117,17 @@ impl VirtualCameraService {
             sink_factory,
             hidden,
             canvas,
+            room_program: Arc::new(RoomProgramFeed::default()),
         }
+    }
+
+    /// Plan 249 S23: the room program feed the upload route claims.
+    pub fn room_program(&self) -> &Arc<RoomProgramFeed> {
+        &self.room_program
+    }
+
+    fn with_source(&self, status: VirtualCameraStatus) -> VirtualCameraStatus {
+        with_room_program_source(status, self.room_program.source(std::time::Instant::now()))
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, ServiceState> {
@@ -143,14 +161,19 @@ impl VirtualCameraService {
 
     /// The status as of now, without publishing it.
     pub fn status(&self) -> VirtualCameraStatus {
-        let state = self.lock();
-        derive_status(&self.status_inputs(&state))
+        let status = {
+            let state = self.lock();
+            derive_status(&self.status_inputs(&state))
+        };
+        self.with_source(status)
     }
 
     /// Whether the camera wants the preview run right now: on, a sink
-    /// connected, and a viewer holding the camera (D13).
+    /// connected, and a viewer holding the camera (D13). Never while a room's
+    /// Program preview owns the camera (S23): it reads no compositor frame.
     fn refresh_wants_lease(&self, state: &ServiceState) -> bool {
         let wants = state.on
+            && !self.room_program.owned()
             && state.output.as_ref().is_some_and(|output| {
                 let shared = output.shared();
                 shared.health().connected && shared.demanded()
@@ -178,12 +201,31 @@ pub fn lease_wanted(state: &AppState) -> Option<(u32, u32)> {
         .then_some(service.canvas)
 }
 
+/// Plan 249 S23: name the room program source on a running camera only
+/// (on, available, starting or connected); a stopped or failed camera has no
+/// source to name.
+pub fn with_room_program_source(
+    mut status: VirtualCameraStatus,
+    source: Option<RoomProgramSource>,
+) -> VirtualCameraStatus {
+    let running = status.on
+        && status.available
+        && matches!(
+            status.state,
+            VirtualCameraState::Installing
+                | VirtualCameraState::Ready
+                | VirtualCameraState::Streaming
+        );
+    status.source = if running { source } else { None };
+    status
+}
+
 /// Publish the status when it changed since the last publish.
 fn publish_if_changed(state: &AppState) -> VirtualCameraStatus {
     let service = &state.virtual_camera;
     let (status, changed) = {
         let mut inner = service.lock();
-        let status = derive_status(&service.status_inputs(&inner));
+        let status = service.with_source(derive_status(&service.status_inputs(&inner)));
         let changed = inner.last_published.as_ref() != Some(&status);
         if changed {
             inner.last_published = Some(status.clone());
@@ -246,7 +288,16 @@ async fn set_on_without_saving(state: &AppState, on: bool) -> VirtualCameraStatu
                 Ok(sink) => {
                     inner.sink_unavailable = None;
                     let compositor = state.compositor.clone();
+                    let room_program = service.room_program.clone();
                     let picker = Box::new(move || {
+                        // S23: a room's Program preview upload owns the camera;
+                        // a pause is a black still, never the Studio program.
+                        match room_program.pick(std::time::Instant::now()) {
+                            RoomProgramPick::Live(store) | RoomProgramPick::Paused(store) => {
+                                return Some(store);
+                            }
+                            RoomProgramPick::Studio => {}
+                        }
                         compositor.try_lock().ok().map(|compositor| {
                             crate::compositor::preview_frame_lease::presented_frame_store(
                                 &compositor,
@@ -847,6 +898,73 @@ mod tests {
         assert!(compositor_capture_lease_run_id(&state).await.is_none());
         assert!(!lease_wanted(&state).is_some());
         stop_compositor(&state).await;
+    }
+
+    /// Plan 249 S23: a room program upload owns the camera: its frames reach
+    /// the sink, the camera arms no preview run, a pause is black, and the
+    /// end of the upload hands the camera back to the Studio source.
+    #[tokio::test]
+    async fn a_room_program_upload_owns_the_camera_until_it_ends() {
+        use crate::room_program_camera::{FRAME_HEIGHT, FRAME_WIDTH, FrameHeader, STALE_AFTER};
+        let (service, sink) = fake_service(Some(1));
+        let state = test_state_with(service);
+        set_on(&state, true).await.unwrap();
+        wait_until_demanded(&state).await;
+        let feed = state.virtual_camera.room_program().clone();
+        let claim = feed.claim(1).expect("the upload claims the camera");
+        assert_eq!(
+            reconcile_lease(&state).await,
+            LeaseReconcile::Unchanged,
+            "no preview run while the room program owns the camera"
+        );
+        assert!(lease_wanted(&state).is_none());
+        let frame = FrameHeader {
+            width: FRAME_WIDTH,
+            height: FRAME_HEIGHT,
+            generation: 1,
+            sequence: 1,
+            drawn_at_us: 0,
+        };
+        let i420 = vec![100u8; (FRAME_WIDTH * FRAME_HEIGHT * 3 / 2) as usize];
+        assert!(feed.accept(&frame, i420, std::time::Instant::now()));
+        let wait_for_luma = |luma: u8| {
+            let sink = sink.clone();
+            async move {
+                let deadline = std::time::Instant::now() + Duration::from_secs(5);
+                loop {
+                    let seen = sink
+                        .lock()
+                        .unwrap()
+                        .pushes
+                        .iter()
+                        .any(|push| push.centre_luma == Some(luma));
+                    if seen {
+                        return;
+                    }
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "the sink never showed luma {luma}"
+                    );
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            }
+        };
+        wait_for_luma(100).await;
+        assert_eq!(
+            state.virtual_camera.status().source,
+            Some(RoomProgramSource::RoomProgramPreview)
+        );
+        // Frames stop: a black still, and the status says paused.
+        tokio::time::sleep(STALE_AFTER + Duration::from_millis(100)).await;
+        wait_for_luma(16).await;
+        assert_eq!(
+            state.virtual_camera.status().source,
+            Some(RoomProgramSource::RoomProgramPaused)
+        );
+        drop(claim);
+        assert_eq!(state.virtual_camera.status().source, None);
+        let off = set_on(&state, false).await.unwrap();
+        assert_eq!(off.source, None, "an off camera names no source");
     }
 
     #[tokio::test]

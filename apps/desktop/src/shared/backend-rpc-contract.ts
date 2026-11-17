@@ -4514,7 +4514,9 @@ const virtualCameraStatusSchema = objectSchema(
     state: virtualCameraStateSchema,
     viewers: optionalSchema(numberSchema({ integer: true, min: 0 })),
     platformStep: optionalSchema(virtualCameraPlatformStepSchema),
-    message: optionalSchema(stringSchema({ minLength: 1, maxLength: 1024 }))
+    message: optionalSchema(stringSchema({ minLength: 1, maxLength: 1024 })),
+    // Plan 249 S23: only while a room's Program preview owns the camera.
+    source: optionalSchema(enumSchema(['room-program-preview', 'room-program-paused']))
   },
   { allowUnknown: false }
 ) as RuntimeSchema<VirtualCameraStatus>
