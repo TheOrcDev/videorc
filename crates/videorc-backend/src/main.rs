@@ -49,6 +49,8 @@ mod cloud_controller;
 mod cloud_graphics;
 mod cloud_services;
 mod cloud_show;
+// Plan 249 S22: cloud ISO manifests and the import journal's pure rules.
+mod cloud_source_iso;
 mod cloud_talk;
 mod cohost;
 mod cohost_ack;
