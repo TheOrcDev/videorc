@@ -5,6 +5,9 @@ import type { RoomMicrophoneChoice } from '@/lib/room-microphone-source'
 import { roomFrameTestEnabled } from '../lib/room-frame-test-state'
 import { roomPcmTestEnabled } from '../lib/room-pcm-test-state'
 import type { CohostPersona, BuddyOverlaySnapshot, OverlayItemLayout } from '@/lib/backend'
+import { toast } from '@/lib/toast'
+import { withRestoredBanners } from '@/lib/cloud-restored-banners'
+import type { GraphicsContent } from '../../../shared/cloud-graphics'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import type { BackendClient } from '@/backendClient'
@@ -155,6 +158,17 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
   const controlsRef = deps.controlsRef
   const [snapshot, setSnapshot] = useState<TalkShowRoomSnapshot>(IDLE_SNAPSHOT)
   const clientRef = useRef<TalkShowRoomClient | null>(null)
+  /** Plan 249 S24: the kept avatar per output view, so it is sent on change only. */
+  const keptAvatarRef = useRef(new Map<string, string>())
+  /** Plan 249 S24: the kept banners per output view, likewise. */
+  const keptGraphicsRef = useRef(new Map<string, string>())
+  /**
+   * Plan 249 S24: the banners the show kept, restored after a takeover. They
+   * fill an orientation where this computer shows no banner of its own,
+   * until its banner list changes.
+   */
+  const restoredGraphicsRef = useRef<GraphicsContent | null>(null)
+  const graphicsInvalidateRef = useRef<(() => void) | null>(null)
   const leavingRef = useRef<Promise<void>>(Promise.resolve())
   const audioHostRef = useRef<HTMLElement | null>(null)
   // A completed leave only hands capture back while the Studio is mounted.
@@ -179,6 +193,35 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
       null,
     [devices, microphoneId]
   )
+  // Plan 249 S24 (D9): after this computer took the show over, nothing that
+  // captures here starts by itself. A muted microphone still opens capture,
+  // so the device names are withheld from the room client until the
+  // streamer turns them on; then S7b's live selection opens them (no rejoin).
+  const controller = cloudStatus?.controller
+  const holdEpoch = controller?.takenOverFrom ? controller.controllerEpoch : 0
+  const [enabledEpoch, setEnabledEpoch] = useState(0)
+  const devicesHeld = holdEpoch > 0 && enabledEpoch !== holdEpoch
+  const devicesHeldRef = useRef(devicesHeld)
+  devicesHeldRef.current = devicesHeld
+  useEffect(() => {
+    if (!devicesHeld || !roomOpen) return
+    const needs = controller?.needsEnable ?? []
+    toast.info('You control this show here now', {
+      id: 'cloud-controller-continuation',
+      description:
+        needs.length > 0
+          ? `Camera and microphone stay off here until you turn them on. Also off: ${
+              needs.filter((need) => need !== 'camera' && need !== 'microphone').join(', ') ||
+              'nothing else'
+            }.`
+          : 'Camera and microphone stay off here until you turn them on.',
+      duration: Infinity,
+      action: { label: 'Turn on', onClick: () => setEnabledEpoch(holdEpoch) }
+    })
+    return () => {
+      toast.dismiss('cloud-controller-continuation')
+    }
+  }, [devicesHeld, roomOpen, holdEpoch, controller?.needsEnable])
   const microphoneChoice = useMemo<RoomMicrophoneChoice>(
     () => ({
       mode:
@@ -187,14 +230,15 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
           new URLSearchParams(globalThis.location?.search ?? '').get('roomNativeMic') === '1')
           ? 'native-headphones'
           : 'browser-aec',
-      deviceId: microphoneId,
-      name: microphoneName,
+      // Plan 249 S24: withheld after a takeover until the streamer turns it on.
+      deviceId: devicesHeld ? null : microphoneId,
+      name: devicesHeld ? null : microphoneName,
       gainDb: deps.microphoneAudio?.microphoneGainDb ?? 0,
       muted: deps.microphoneMuted === true,
       noise: deps.microphoneAudio?.microphoneNoiseSuppression ?? 'off',
       offsetMs: deps.microphoneAudio?.microphoneSyncOffsetMs ?? 0
     }),
-    [microphoneId, microphoneName, deps.microphoneAudio, deps.microphoneMuted]
+    [microphoneId, microphoneName, devicesHeld, deps.microphoneAudio, deps.microphoneMuted]
   )
   const microphoneChoiceRef = useRef(microphoneChoice)
   microphoneChoiceRef.current = microphoneChoice
@@ -269,6 +313,9 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
         host.style.display = 'none'
         document.body.appendChild(host)
         audioHostRef.current = host
+        // A new epoch keeps nothing yet: send every applied view again.
+        keptAvatarRef.current.clear()
+        keptGraphicsRef.current.clear()
         const roomClient = new TalkShowRoomClient({
           attachHostSpeech: (...args) => attachHostSpeech(client, ...args),
           // S7a harness opt-in; main also requires VIDEORC_ROOM_PCM_TEST=1 and
@@ -295,14 +342,56 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
               mediaDepsRef.current.onMediaSnapshot?.(next)
             }
           },
-          cameraName: cameraNameRef.current,
+          cameraName: devicesHeldRef.current ? null : cameraNameRef.current,
           initiallyMuted: mediaDepsRef.current.microphoneMuted,
           initiallyCameraOff: mediaDepsRef.current.cameraOff,
           cameraSettings: () => cameraSettingsRef.current,
-          microphoneName: microphoneNameRef.current,
+          microphoneName: devicesHeldRef.current ? null : microphoneNameRef.current,
           microphoneChoice: microphoneChoiceRef.current,
+          sourcesHeld: () => devicesHeldRef.current,
           audioHost: () => host,
-          onAir: () => onAirRef.current
+          onAir: () => onAirRef.current,
+          // Plan 249 S24: a view a program page applied is kept by the cloud
+          // for the next controller; only its avatar layer survives (D9), so
+          // a refresh or a bubble alone sends nothing.
+          // Plan 249 S24 with S9: the same for the static view. Only banners
+          // at rest survive; chat, captions and cards are cleared or dropped.
+          onGraphicsAccepted: (view) => {
+            if (!showId) return
+            const kept = JSON.stringify([
+              view.layers
+                .filter((layer) => layer.kind === 'banner' && layer.expiresAt === null)
+                .map((layer) => [
+                  layer.id,
+                  layer.asset.hash,
+                  layer.rect,
+                  layer.opacity * (layer.fade ? layer.fade.to : 1)
+                ]),
+              view.layers
+                .filter((layer) => layer.kind === 'chat' || layer.kind === 'caption')
+                .map((layer) => layer.kind)
+            ])
+            const key = `${view.output}/${view.orientation}`
+            if (keptGraphicsRef.current.get(key) === kept) return
+            keptGraphicsRef.current.set(key, kept)
+            void client
+              .requestTyped('cloud.presentation.accepted', { showId, topic: 'static', ...view })
+              .catch(() => keptGraphicsRef.current.delete(key))
+          },
+          onAvatarAccepted: (view) => {
+            if (!showId) return
+            const kept = JSON.stringify(
+              view.layers
+                .filter((layer) => layer.kind === 'avatar' && layer.expiresAt === null)
+                .map((layer) => [layer.asset.hash, layer.rect])
+            )
+            const key = `${view.output}/${view.orientation}`
+            if (keptAvatarRef.current.get(key) === kept) return
+            keptAvatarRef.current.set(key, kept)
+            void client
+              .requestTyped('cloud.presentation.accepted', { showId, topic: 'avatar', ...view })
+              .catch(() => keptAvatarRef.current.delete(key))
+          }
         })
         current = roomClient
         clientRef.current = roomClient
@@ -334,7 +423,9 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
           if (!disposedRef.current && !roomOpenRef.current) onCameraReturnedRef.current()
         })
     }
-  }, [client, roomOpen, showId, controlsRef])
+    // An epoch change (a takeover) rejoins even for the same show; the
+    // explicit enable does not.
+  }, [client, roomOpen, showId, controlsRef, holdEpoch])
 
   useEffect(() => {
     const current = clientRef.current
@@ -357,7 +448,8 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
         .then((result) => {
           if (closed || token !== generation) return
           known = result.signature
-          if (result.content) current.setGraphics(result.content)
+          if (result.content)
+            current.setGraphics(withRestoredBanners(result.content, restoredGraphicsRef.current))
         })
         .catch(() => {
           if (!closed && token === generation) {
@@ -378,12 +470,18 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
       known = undefined
       refresh()
     }
+    // This computer's own banner list changed: from now on it alone rules.
+    const bannersChanged = () => {
+      restoredGraphicsRef.current = null
+      invalidate()
+    }
     const off = [
       'banners.changed',
       'comments.highlight.status',
       'cloud.graphics.changed',
       'overlays.layout.changed'
-    ].map((event) => client.on(event, invalidate))
+    ].map((event) => client.on(event, event === 'banners.changed' ? bannersChanged : invalidate))
+    graphicsInvalidateRef.current = invalidate
     refresh()
     const timer = setInterval(refresh, 500)
     return () => {
@@ -391,6 +489,7 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
       generation++
       clearInterval(timer)
       off.forEach((fn) => fn())
+      if (graphicsInvalidateRef.current === invalidate) graphicsInvalidateRef.current = null
       current.setGraphics(null)
     }
   }, [client, roomOpen, showId, snapshot.state])
@@ -520,6 +619,92 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
       clientRef.current?.avatarMotionEvent(payload)
     })
   }, [client, roomOpen])
+
+  // Plan 249 S24 (D9): after a takeover, the avatar the show kept is sent
+  // again under this controller's own envelope (once per epoch). A local
+  // avatar change replaces it as usual; a bubble is never part of it.
+  const restoredEpochRef = useRef(0)
+  const restoredViews = controller?.restoredViews ?? 0
+  useEffect(() => {
+    const current = clientRef.current
+    if (
+      !client ||
+      !current ||
+      !roomOpen ||
+      !showId ||
+      holdEpoch === 0 ||
+      restoredViews === 0 ||
+      snapshot.state !== 'connected' ||
+      restoredEpochRef.current === holdEpoch
+    )
+      return
+    restoredEpochRef.current = holdEpoch
+    void (async () => {
+      const restore = await client.requestTyped('cloud.presentation.restore', { showId })
+      const { restoredAvatarContent, restoredGraphicsContent } =
+        await import('@/lib/cloud-presentation-restore')
+      // S9: kept banners return once the streamer turns graphics on (the
+      // toggle starts off), where this computer shows none of its own.
+      restoredGraphicsRef.current = restoredGraphicsContent(restore)
+      graphicsInvalidateRef.current?.()
+      const content = restoredAvatarContent(restore)
+      if (!content || clientRef.current !== current) return
+      current.setAvatar(content)
+      current.setAvatarEnabled(true)
+    })().catch(() => {
+      restoredEpochRef.current = 0
+    })
+  }, [client, roomOpen, showId, holdEpoch, restoredViews, snapshot.state])
+
+  // Plan 249 S24: the streamer's explicit "Turn on" after a takeover opens
+  // the camera through S7b's live selection; the microphone follows from
+  // `microphoneChoice` above. Once per epoch, only on a connected room.
+  const enabledAppliedRef = useRef(0)
+  useEffect(() => {
+    const current = clientRef.current
+    if (
+      devicesHeld ||
+      holdEpoch === 0 ||
+      !current ||
+      snapshot.state !== 'connected' ||
+      enabledAppliedRef.current === holdEpoch
+    )
+      return
+    enabledAppliedRef.current = holdEpoch
+    const name = cameraNameRef.current
+    void current
+      .setCameraSelection(name, mediaDepsRef.current.cameraOff === true || !name)
+      .catch((error) => onError(error, 'turn the room camera on'))
+  }, [devicesHeld, holdEpoch, snapshot.state, onError])
+
+  // Plan 249 S24: what this controller has on, and the avatar's output flags,
+  // so a computer that takes the show over knows what to ask its streamer to
+  // turn on. Sent on change; the backend drops it unless this is the controller.
+  const cameraOn = roomOpen && !devicesHeld && cameraName !== null && deps.cameraOff !== true
+  const microphoneOn =
+    roomOpen && !devicesHeld && microphoneName !== null && deps.microphoneMuted !== true
+  const avatarStream = deps.avatar?.layout.showOnStream === true
+  const avatarRecording = deps.avatar?.layout.showInRecording === true
+  const controllerEpoch = controller?.controllerEpoch ?? 0
+  useEffect(() => {
+    if (!client || !roomOpen || !showId || controllerEpoch === 0) return
+    void client
+      .requestTyped('cloud.controller.desired', {
+        showId,
+        enabled: { camera: cameraOn, microphone: microphoneOn },
+        outputs: { avatar: { stream: avatarStream, recording: avatarRecording } }
+      })
+      .catch(() => {})
+  }, [
+    client,
+    roomOpen,
+    showId,
+    controllerEpoch,
+    cameraOn,
+    microphoneOn,
+    avatarStream,
+    avatarRecording
+  ])
 
   // The guest page reads the stage from the host's data topic (D11).
   useEffect(() => {

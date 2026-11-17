@@ -2,6 +2,8 @@ import { EventEmitter } from 'node:events'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ConnectionState, RoomEvent, type Room } from 'livekit-client'
 import {
+  type AcceptedGraphicsView,
+  type GraphicsContent,
   graphicsLayers,
   RoomGraphicsPublisher,
   type RoomGraphicsStatus
@@ -27,7 +29,12 @@ function harness() {
     ])
   })
   const statuses: RoomGraphicsStatus[] = []
-  const publisher = new RoomGraphicsPublisher(room as unknown as Room, (s) => statuses.push(s))
+  const accepted: AcceptedGraphicsView[] = []
+  const publisher = new RoomGraphicsPublisher(
+    room as unknown as Room,
+    (s) => statuses.push(s),
+    (view) => accepted.push(view)
+  )
   const receive = (graphics: unknown, participant?: unknown) =>
     room.emit(
       RoomEvent.DataReceived,
@@ -44,7 +51,7 @@ function harness() {
       undefined,
       CAPABILITY_TOPIC
     )
-  return { room, publisher, statuses, receive }
+  return { room, publisher, statuses, receive, accepted }
 }
 afterEach(() => vi.useRealTimers())
 describe('room static graphics publisher', () => {
@@ -216,4 +223,140 @@ it('selects output-specific caption placement and strips captions for old consum
   expect(graphicsLayers(content, 'stream', 'h', true)[0].rect.y).toBe(0.6)
   expect(graphicsLayers(content, 'recording', 'h', true)[0].rect.y).toBe(0.8)
   expect(graphicsLayers(content, 'stream', 'h', true)[0]).not.toHaveProperty('outputRects')
+})
+
+describe('kept static views for the next controller (plan 249 S24)', () => {
+  type Body = { revision: number; layers: GraphicsLayer[]; expiresAt: number }
+  function capture(h: ReturnType<typeof harness>) {
+    const bodies: Body[] = []
+    let gate: Promise<void> | null = null
+    let release = () => {}
+    h.room.localParticipant.streamBytes.mockImplementation(async () => {
+      const chunks: Uint8Array[] = []
+      const held = gate
+      return {
+        write: vi.fn(async (bytes: Uint8Array) => {
+          if (held) await held
+          chunks.push(bytes)
+        }),
+        close: vi.fn(async () => {
+          const text = chunks.map((c) => new TextDecoder().decode(c)).join('')
+          if (text) bodies.push(JSON.parse(text))
+        })
+      }
+    })
+    return {
+      bodies,
+      holdUploads() {
+        gate = new Promise<void>((resolve) => (release = resolve))
+      },
+      releaseUploads() {
+        gate = null
+        release()
+      }
+    }
+  }
+  const lane = { version: 1, output: 'stream', orientation: 'h' }
+  const content = (stream: boolean, recording: boolean, kinds?: string[]): GraphicsContent => ({
+    h: fixture.snapshot.layers
+      .filter((l) => !kinds || kinds.includes(l.kind))
+      .map((l) => ({ ...l, stream, recording })) as GraphicsContent['h'],
+    v: [],
+    unsupported: []
+  })
+  it('reports applied views as sent, clears too, and never an older one', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(1000)
+    const h = harness()
+    const c = capture(h)
+    const ack = (revision: number) =>
+      h.receive({ ...lane, static: { version: 1, applied: { publisherSid: 'PA_host', revision } } })
+    h.publisher.set(content(true, true))
+    h.receive({ ...lane, static: { version: 1 } })
+    await vi.advanceTimersByTimeAsync(1000)
+    const shown = c.bodies.at(-1)!
+    // Sent but not applied: nothing yet; the upload alone never counts.
+    expect(h.accepted).toEqual([])
+    ack(shown.revision)
+    await vi.advanceTimersByTimeAsync(100)
+    expect(h.accepted).toEqual([
+      {
+        output: 'stream',
+        orientation: 'h',
+        publisherSid: 'PA_host',
+        revision: shown.revision,
+        layers: shown.layers
+      }
+    ])
+    // Record only: the stream lane gets an empty view, and its applied clear
+    // is reported although nothing is visible there.
+    h.publisher.set(content(false, true))
+    await vi.advanceTimersByTimeAsync(1000)
+    const recordOnly = c.bodies.at(-1)!
+    expect(recordOnly.layers).toEqual([])
+    ack(recordOnly.revision)
+    await vi.advanceTimersByTimeAsync(100)
+    expect(h.accepted.at(-1)).toMatchObject({ revision: recordOnly.revision, layers: [] })
+    // A late ack of the older, visible revision changes nothing.
+    ack(shown.revision)
+    await vi.advanceTimersByTimeAsync(100)
+    expect(h.accepted).toHaveLength(2)
+    // No banner left (chat only): reported, so the kept banner is replaced.
+    h.publisher.set(content(true, true, ['chat']))
+    await vi.advanceTimersByTimeAsync(1000)
+    const chatOnly = c.bodies.at(-1)!
+    expect(chatOnly.layers.map((l) => l.kind)).toEqual(['chat'])
+    ack(chatOnly.revision)
+    await vi.advanceTimersByTimeAsync(100)
+    expect(h.accepted.at(-1)?.layers.map((l) => l.kind)).toEqual(['chat'])
+    h.publisher.close()
+  })
+  it('Hide while an upload is pending: the clear is applied and reported', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(1000)
+    const h = harness()
+    const c = capture(h)
+    h.receive({ ...lane, static: { version: 1 } })
+    c.holdUploads()
+    h.publisher.set(content(true, true))
+    await vi.advanceTimersByTimeAsync(100)
+    // The banner upload is still writing; Hide goes on its own.
+    c.releaseUploads()
+    h.publisher.set(null)
+    await vi.advanceTimersByTimeAsync(1000)
+    const hidden = c.bodies.find((body) => body.layers.length === 0)
+    expect(hidden).toBeDefined()
+    h.receive({
+      ...lane,
+      static: { version: 1, applied: { publisherSid: 'PA_host', revision: hidden!.revision } }
+    })
+    await vi.advanceTimersByTimeAsync(100)
+    expect(h.accepted.at(-1)).toMatchObject({ revision: hidden!.revision, layers: [] })
+    // Nothing from the superseded upload is ever reported as kept.
+    expect(h.accepted.every((view) => view.layers.length === 0)).toBe(true)
+    h.publisher.close()
+  })
+  it('an ack after the sent envelope expired, or for another session, is never kept', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(1000)
+    const h = harness()
+    const c = capture(h)
+    h.publisher.set(content(true, true))
+    h.receive({ ...lane, static: { version: 1 } })
+    await vi.advanceTimersByTimeAsync(1000)
+    const sent = c.bodies.at(-1)!
+    h.receive({
+      ...lane,
+      static: { version: 1, applied: { publisherSid: 'PA_other', revision: sent.revision } }
+    })
+    await vi.advanceTimersByTimeAsync(100)
+    expect(h.accepted).toEqual([])
+    vi.setSystemTime(sent.expiresAt + 1)
+    h.receive({
+      ...lane,
+      static: { version: 1, applied: { publisherSid: 'PA_host', revision: sent.revision } }
+    })
+    expect(h.accepted).toEqual([])
+    h.publisher.close()
+  })
 })

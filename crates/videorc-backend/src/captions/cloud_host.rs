@@ -59,6 +59,10 @@ fn show_owned(state: &AppState, show: &str) -> bool {
             .as_ref()
             .is_some_and(|r| matches!(r.phase, crate::cloud_talk::CloudRoomPhase::Open))
         && status.on_air.as_ref().is_none_or(|air| air.this_device)
+        // Plan 249 S24: synchronous controller gate. A loss is refused at once,
+        // before the watcher below runs `ownership_lost`; a show never held
+        // here keeps the checks above; a loss after holding stays latched.
+        && crate::cloud_controller::ownership_allows(show)
         && !matches!(
             status.phase,
             crate::cloud_show::CloudPhase::Ending

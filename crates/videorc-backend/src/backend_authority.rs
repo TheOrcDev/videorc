@@ -179,6 +179,11 @@ fn renderer_only_method(method: &str) -> bool {
             | "cloud.room.token.refresh"
             | "cloud.show.handOff"
             | "cloud.show.check"
+            // Plan 249 S24: the room renderer's accepted presentation, its
+            // desired facts and the kept presentation read back.
+            | "cloud.presentation.accepted"
+            | "cloud.controller.desired"
+            | "cloud.presentation.restore"
     )
 }
 

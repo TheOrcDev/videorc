@@ -1,7 +1,11 @@
 import { EventEmitter } from 'node:events'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ConnectionState, RoomEvent, type Room } from 'livekit-client'
-import { RoomAvatarPublisher, type RoomAvatarStatus } from './room-avatar-publisher'
+import {
+  RoomAvatarPublisher,
+  type AcceptedAvatarView,
+  type RoomAvatarStatus
+} from './room-avatar-publisher'
 import { CAPABILITY_TOPIC } from './room-media-v2'
 import fixture from '../../../../../..//protocol-fixtures/cloud-parity-avatar.json'
 import type { AvatarLayer } from '../../../shared/cloud-avatar'
@@ -35,8 +39,11 @@ function harness() {
     ])
   })
   const statuses: RoomAvatarStatus[] = []
-  const publisher = new RoomAvatarPublisher(room as unknown as Room, (status) =>
-    statuses.push(status)
+  const accepted: AcceptedAvatarView[] = []
+  const publisher = new RoomAvatarPublisher(
+    room as unknown as Room,
+    (status) => statuses.push(status),
+    (view) => accepted.push(view)
   )
   const receive = (identity: string, sid: string, graphics: unknown) =>
     room.emit(
@@ -48,7 +55,7 @@ function harness() {
       undefined,
       CAPABILITY_TOPIC
     )
-  return { room, publisher, receive, bodies, statuses }
+  return { room, publisher, receive, bodies, statuses, accepted }
 }
 afterEach(() => vi.useRealTimers())
 
@@ -85,6 +92,47 @@ describe('room avatar publisher, animated variant', () => {
     expect(h.publisher.motionTargets()).toEqual([])
     h.publisher.set(null)
     expect(h.publisher.motionTargets()).toEqual([])
+    h.publisher.close()
+  })
+  it('keeps for each page the variant that page applied (plan 249 S24)', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(1000)
+    const h = harness()
+    const still = fixture.snapshot.layers as AvatarLayer[]
+    const animated = { h: [still[0]!], v: [] }
+    h.publisher.set({ h: still, v: [], stream: true, recording: false, animated })
+    h.receive('EG_old', 'PA_old', { version: 1, output: 'stream', orientation: 'h' })
+    h.receive('EG_new', 'PA_new', { version: 1, output: 'stream', orientation: 'h', animation: 1 })
+    await vi.advanceTimersByTimeAsync(1000)
+    const old = h.bodies.get('EG_old')?.at(-1) as { revision: number; layers: AvatarLayer[] }
+    const fresh = h.bodies.get('EG_new')?.at(-1) as { revision: number; layers: AvatarLayer[] }
+    const applied = (revision: number) => ({ publisherSid: 'PA_host', revision })
+    const ack = (identity: string, sid: string, revision: number, animation?: 1) =>
+      h.receive(identity, sid, {
+        version: 1,
+        output: 'stream',
+        orientation: 'h',
+        ...(animation ? { animation } : {}),
+        applied: applied(revision)
+      })
+    // Both pages show one view (stream, h): each kept as that page got it,
+    // in revision order; a late ack of the older one replaces nothing.
+    const [first, second] =
+      old.revision < fresh.revision
+        ? ([
+            ['EG_old', 'PA_old', old, undefined],
+            ['EG_new', 'PA_new', fresh, 1]
+          ] as const)
+        : ([
+            ['EG_new', 'PA_new', fresh, 1],
+            ['EG_old', 'PA_old', old, undefined]
+          ] as const)
+    ack(first[0], first[1], first[2].revision, first[3])
+    ack(second[0], second[1], second[2].revision, second[3])
+    ack(first[0], first[1], first[2].revision, first[3])
+    await vi.advanceTimersByTimeAsync(100)
+    expect(h.accepted.map((view) => view.layers)).toEqual([first[2].layers, second[2].layers])
+    expect(h.accepted.map((view) => view.revision)).toEqual([first[2].revision, second[2].revision])
     h.publisher.close()
   })
 })

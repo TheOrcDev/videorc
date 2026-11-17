@@ -134,6 +134,10 @@ export async function startFakeCloudWebManaged({
     recordings = [],
     tokens = []
   const refusals = new Map()
+  // Plan 249 S24: controller grants, stale refusals and kept views.
+  const controllerLog = [],
+    controllerRefusals = [],
+    presentationLog = []
   const failures = new Map(),
     delays = new Map(),
     barriers = new Map(),
@@ -615,6 +619,213 @@ export async function startFakeCloudWebManaged({
         path.startsWith(`${managedPath('create')}/${s.show.id}/`)
       )
       if (!s) return fail(wire.errors.common.find((e) => e.status === 404).code)
+      // Plan 249 S24: the show's controller (an epoch that only grows; one
+      // takeover is one compare-and-set) and the presentation it kept, with
+      // the web's rules (lib/cloud/media/controller.ts, presentation.ts).
+      const epochHeader = req.headers['videorc-controller-epoch']
+      const controllerStale = () =>
+        send(409, {
+          controllerEpoch: s.controller?.epoch ?? null,
+          error: { code: 'cloud-controller-stale', message: 'cloud-controller-stale' }
+        })
+      // Once a show has a controller, only its current epoch commands it: a
+      // missing header is refused too (never authority). The web Live page's
+      // own End (`videorc-control: account-end`) outranks any controller.
+      const accountEnd = route === 'end' && req.headers['videorc-control'] === 'account-end'
+      if (
+        ['destinations', 'legsEnd', 'holdImage', 'stage', 'recording', 'end'].includes(route) &&
+        s.controller &&
+        !(epochHeader === undefined && accountEnd) &&
+        String(s.controller.epoch) !== epochHeader
+      ) {
+        const code =
+          epochHeader === undefined ? 'cloud-controller-required' : 'cloud-controller-stale'
+        controllerRefusals.push({
+          atMs: Date.now(),
+          route,
+          code,
+          epoch: epochHeader === undefined ? null : Number(epochHeader)
+        })
+        return send(409, {
+          controllerEpoch: s.controller.epoch,
+          error: { code, message: code }
+        })
+      }
+      const showBase = `${managedPath('create')}/${s.show.id}`
+      if (path === `${showBase}/controller`) {
+        if (s.show.endedAt)
+          return send(409, { error: { code: 'cloud-show-ended', message: 'cloud-show-ended' } })
+        const now = Date.now()
+        const c = s.controller
+        if (req.method === 'PUT') {
+          if (!c || String(c.epoch) !== epochHeader) return controllerStale()
+          Object.assign(c.enabled, body.enabled ?? {})
+          for (const [family, flags] of Object.entries(body.outputs ?? {}))
+            c.outputs[family] = { ...(c.outputs[family] ?? {}), ...flags }
+          return send(200, { ok: true, outputs: c.outputs })
+        }
+        const deviceId = body.device?.id
+        if (!/^[A-Za-z0-9]{22}$/.test(deviceId ?? ''))
+          return fail(wire.errors.common.find((e) => e.status === 400).code)
+        const answer = (r) => ({
+          controllerEpoch: r.epoch,
+          thisDevice: r.deviceId === deviceId,
+          leaseUntil: new Date(r.leaseUntil).toISOString(),
+          leaseLive: r.leaseUntil > now,
+          takenOverFrom:
+            r.previousDeviceId == null
+              ? null
+              : r.previousDeviceId === deviceId
+                ? 'this-device'
+                : 'another-device',
+          needsEnable: r.deviceId === deviceId ? r.previousEnabled : [],
+          outputs: r.outputs
+        })
+        const refuse = (code) =>
+          send(409, { error: { code, message: code }, controller: c ? answer(c) : null })
+        const take = () => {
+          s.controller = {
+            epoch: (c?.epoch ?? 0) + 1,
+            deviceId,
+            leaseUntil: now + 45_000,
+            previousDeviceId: c?.deviceId ?? null,
+            previousEnabled: c
+              ? ['sounds', 'system', 'html', 'camera', 'microphone', 'screen'].filter(
+                  (k) => c.enabled[k]
+                )
+              : [],
+            enabled: {},
+            outputs: c?.outputs ?? {}
+          }
+          controllerLog.push({ atMs: now, epoch: s.controller.epoch, deviceId })
+          return send(200, { ok: true, controller: answer(s.controller) })
+        }
+        if (!c)
+          return ['claim', 'takeover'].includes(body.intent)
+            ? take()
+            : refuse('cloud-controller-stale')
+        if (body.intent === 'claim')
+          return c.leaseUntil > now ? refuse('cloud-controller-held') : take()
+        if (body.intent === 'takeover')
+          return body.epoch === c.epoch ? take() : refuse('cloud-controller-stale')
+        if (['renew', 'release'].includes(body.intent)) {
+          if (body.epoch !== c.epoch || deviceId !== c.deviceId)
+            return refuse('cloud-controller-stale')
+          c.leaseUntil = body.intent === 'renew' ? now + 45_000 : now
+          return send(200, { ok: true, controller: answer(c) })
+        }
+        return fail(wire.errors.common.find((e) => e.status === 400).code)
+      }
+      if (path === `${showBase}/presentation`) {
+        s.presentation ??= new Map()
+        s.presentationAssets ??= new Map()
+        if (req.method === 'GET') {
+          if (!s.controller || String(s.controller.epoch) !== epochHeader) return controllerStale()
+          const asset = url.searchParams.get('asset')
+          if (asset) {
+            const png = s.presentationAssets.get(asset)
+            return png
+              ? send(200, Buffer.from(png, 'base64'), 'image/png')
+              : send(404, { error: { code: 'presentation-asset-not-found', message: 'missing' } })
+          }
+          return send(200, {
+            controllerEpoch: s.controller.epoch,
+            continuity: {
+              mode: 'successor-restore',
+              programDuringHostLoss: 'cleared-after-transport-lease',
+              transportLeaseMs: { avatar: 30_000 }
+            },
+            views: [...s.presentation.values()].map((v) => ({
+              topic: v.topic,
+              output: v.output,
+              orientation: v.orientation,
+              acceptedEpoch: v.epoch,
+              acceptedAt: v.acceptedAt,
+              applied: false,
+              layers: v.kept,
+              cleared: v.cleared
+            })),
+            outputs: s.controller.outputs
+          })
+        }
+        if (!s.controller || body.controllerEpoch !== s.controller.epoch) return controllerStale()
+        const kept = []
+        const cleared = []
+        const missing = []
+        let dropped = 0
+        for (const layer of body.layers ?? []) {
+          // The web's D9 (lib/cloud/media/presentation.ts): live desktop
+          // sources are cleared (S9 chat, S15 caption), one-shots dropped.
+          if (layer.kind === 'chat' || layer.kind === 'caption') {
+            cleared.push({
+              id: layer.id ?? layer.kind,
+              kind: layer.kind,
+              reason: 'desktop-live-source'
+            })
+            continue
+          }
+          if (layer.expiresAt != null || ['bubble', 'highlight'].includes(layer.kind)) {
+            dropped++
+            continue
+          }
+          // S9 draws opacity × fade; a hide keeps nothing.
+          const opacity = (layer.opacity ?? 1) * (layer.fade ? layer.fade.to : 1)
+          if (layer.kind === 'banner' && opacity <= 0) {
+            dropped++
+            continue
+          }
+          const { hash, width, height, png } = layer.asset ?? {}
+          if (png) s.presentationAssets.set(hash, png)
+          else if (!s.presentationAssets.has(hash)) missing.push(hash)
+          kept.push({
+            id: layer.id ?? `${layer.kind}-${kept.length}`,
+            kind: layer.kind,
+            rect: layer.rect,
+            opacity: layer.kind === 'banner' ? opacity : 1,
+            asset: { hash, width, height },
+            // S5: the atlas an animation page applied, never motion.
+            ...(layer.kind === 'avatar' && layer.atlas ? { atlas: layer.atlas } : {})
+          })
+        }
+        if (missing.length)
+          return send(422, {
+            error: { code: 'presentation-asset-missing', message: 'missing' },
+            missing
+          })
+        const view = {
+          topic: body.topic,
+          output: body.output,
+          orientation: body.orientation,
+          epoch: body.controllerEpoch,
+          publisherSid: body.publisherSid,
+          revision: body.revision,
+          sequence: Number.isSafeInteger(body.sequence) ? body.sequence : null,
+          acceptedAt: instant(),
+          kept,
+          cleared
+        }
+        // The web's order: epoch, then the controller's acceptance sequence
+        // (a late or older-session write never replaces a newer view).
+        const viewKey = `${body.topic}/${body.output}/${body.orientation}`
+        const prior = s.presentation.get(viewKey)
+        if (
+          prior &&
+          prior.epoch === view.epoch &&
+          (prior.sequence !== null && view.sequence !== null
+            ? view.sequence <= prior.sequence
+            : prior.publisherSid === view.publisherSid && view.revision <= prior.revision)
+        )
+          return send(200, { ok: true, stored: false })
+        s.presentation.set(viewKey, view)
+        presentationLog.push({ atMs: Date.now(), ...view, kept: kept.length })
+        return send(200, {
+          ok: true,
+          stored: true,
+          kept: kept.length,
+          cleared: cleared.length,
+          dropped
+        })
+      }
       if (route === 'end') {
         endShow(s)
         if (s.show.kind === 'talk') await roomRpc('DeleteRoom', { room: s.show.id }).catch(() => {})
@@ -1018,6 +1229,18 @@ export async function startFakeCloudWebManaged({
     httpsOrigin = `https://localhost:${https.address().port}`
   }
   const hooks = {
+    /** Plan 249 S24: the show's controller, as the fake web holds it. */
+    controller(showId) {
+      const c = shows.get(showId)?.controller
+      return c ? copy(c) : null
+    },
+    /** Plan 249 S24: kept output views (without pixels) and logs. */
+    presentation(showId) {
+      return [...(shows.get(showId)?.presentation?.values() ?? [])].map(copy)
+    },
+    controllerLog: () => copy(controllerLog),
+    controllerRefusals: () => copy(controllerRefusals),
+    presentationLog: () => copy(presentationLog),
     refuseDestination(id, code) {
       if (code !== null && !wire.destinationRefusals.codes.includes(code))
         throw new Error('Unknown refusal')

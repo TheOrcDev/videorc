@@ -35,7 +35,8 @@ import { connectBackend, request } from '../smoke-recording-session.mjs'
 import {
   startFakeCloudWebManaged,
   managedWire as wire,
-  maskManagedUrls
+  maskManagedUrls,
+  managedPath
 } from './fake-cloud-web-managed.mjs'
 
 // Kept together: the download fix lane can change this single contract binding.
@@ -613,6 +614,56 @@ export async function managedHarness(
         }
       )
       return { status: response.status, body: await response.json() }
+    },
+    /**
+     * Plan 249 S24: a managed request carrying `epoch` as its controller epoch,
+     * the way a computer that lost the show would still send it.
+     */
+    async controllerRequest(name, body, epoch, id = activeShow) {
+      const response = await fetch(`${web.httpOrigin}${managedPath(name, id)}`, {
+        method: wire.routes[name].method,
+        headers: {
+          authorization: `Bearer ${sessionToken}`,
+          'content-type': 'application/json',
+          // `null`: a desktop from before S24, which sends no epoch at all.
+          ...(epoch === null ? {} : { 'videorc-controller-epoch': String(epoch) })
+        },
+        body: JSON.stringify(body)
+      })
+      return { status: response.status, body: await response.json() }
+    },
+    /**
+     * Plan 249 S24: the exact processes this harness owns, from the backend's
+     * own ready marker (its pid and its parent's). Never a name match.
+     */
+    ownedHostPids() {
+      const marker = app?.connections?.['backend-ready']
+      return { backend: marker?.pid, parent: marker?.parentPid }
+    },
+    /**
+     * Plan 249 S24: kills the exact owned backend (the show's host) with
+     * SIGKILL, waits until that PID is gone, then stops the launcher this
+     * harness started. Answers the PID it killed.
+     */
+    async killOwnedHost() {
+      const { backend: pid, parent } = h.ownedHostPids()
+      assert.ok(Number.isSafeInteger(pid) && pid > 1, 'the backend marker names its own PID')
+      backend?.close()
+      try {
+        process.kill(pid, 'SIGKILL')
+      } catch (e) {
+        if (e.code !== 'ESRCH') throw e
+      }
+      await waitFor(() => {
+        try {
+          process.kill(pid, 0)
+          return false
+        } catch (e) {
+          return e.code === 'ESRCH'
+        }
+      }, `owned backend ${pid} exits`)
+      await h.kill()
+      return { pid, parent }
     },
     async freshComputer() {
       await h.kill()

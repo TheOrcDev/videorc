@@ -72,36 +72,40 @@ export async function runBaseline({
   replayRing = false,
   avatarAnimation = false,
   views = false,
-  graphics = false
+  graphics = false,
+  handoff = false
 }) {
   // Plan 249 S5: the animation case runs on the avatar case's real pages.
-  avatar = avatar || avatarAnimation
+  // Plan 249 S24: so does the handoff case, after the avatar phase.
+  avatar = avatar || avatarAnimation || handoff
   const report = baselineReport({
     desktop: revision(desktopRoot),
     web: revision(webRoot),
     template: 'v1'
   })
-  report.case = archive
-    ? 'archive'
-    : graphics
-      ? 'graphics'
-      : scenes
-        ? 'scenes'
-        : replayRing
-          ? 'replay-ring'
-          : avatarAnimation
-            ? 'avatar-animation'
-            : views
-              ? 'views'
-              : avatar
-                ? 'avatar'
-                : soundboard
-                  ? 'soundboard'
-                  : privacy
-                    ? 'privacy'
-                    : controls
-                      ? 'controls'
-                      : 'baseline'
+  report.case = handoff
+    ? 'handoff'
+    : archive
+      ? 'archive'
+      : graphics
+        ? 'graphics'
+        : scenes
+          ? 'scenes'
+          : replayRing
+            ? 'replay-ring'
+            : avatarAnimation
+              ? 'avatar-animation'
+              : views
+                ? 'views'
+                : avatar
+                  ? 'avatar'
+                  : soundboard
+                    ? 'soundboard'
+                    : privacy
+                      ? 'privacy'
+                      : controls
+                        ? 'controls'
+                        : 'baseline'
   // A dirty web consumer makes its revision misleading. Require a dedicated,
   // installed checkout; inspect it read-only and never change the active one.
   const webDirty = execFileSync('git', ['status', '--porcelain', '--untracked-files=no'], {
@@ -527,6 +531,8 @@ export async function runBaseline({
           desktopRoot,
           guestIds: [...guests.values()].map((g) => g.identity)
         })
+      if (handoff)
+        await (await import('./cloud-parity-handoff.mjs')).exerciseHandoff({ h, report, clients })
       assert.equal(h.web.snapshot(h.showId).state.legs.length, 0)
       h.assertNoDirect()
       if (archive) {
