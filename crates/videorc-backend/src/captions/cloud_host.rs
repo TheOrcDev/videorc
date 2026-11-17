@@ -222,7 +222,7 @@ pub async fn sync(state: &AppState, input: Sync) -> Result<Status> {
             resume_listen_for_capture(state).await;
         }
     }
-    let task_alive = coordinator_task_alive(&state.captions.lock().await);
+    let task_alive = coordinator_task_alive(&*state.captions.lock().await);
     Ok(Status {
         upload_allowed: available && wanted && task_alive,
         source_id: Some(input.source_id),
