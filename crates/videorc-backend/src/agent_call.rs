@@ -467,7 +467,7 @@ async fn add_marker(state: &AppState, _agent: &AgentIdentity, args: Value) -> To
         .await
         {
             Ok(mark) => ToolOutcome::ok(
-                "Marker saved on the show timeline; no media to extract.".into(),
+                "Marker saved on the show timeline; no media to extract.",
                 Some(crate::cloud_markers::agent_projection(&mark, false)),
             ),
             Err(e) => ToolOutcome::failed(e.to_string()),

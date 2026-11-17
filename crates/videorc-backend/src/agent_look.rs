@@ -1310,7 +1310,7 @@ pub async fn save_clip(state: &AppState, _agent: &AgentIdentity, args: Value) ->
         .await
         {
             Ok(mark) => ToolOutcome::ok(
-                "Clip marker saved on the show timeline; no media to extract.".into(),
+                "Clip marker saved on the show timeline; no media to extract.",
                 Some(crate::cloud_markers::agent_projection(&mark, true)),
             ),
             Err(e) => ToolOutcome::failed(e.to_string()),

@@ -10884,12 +10884,12 @@ async fn handle_text_message_with_role(
             let show = command
                 .params
                 .get("showId")
-                .and_then(Value::as_str)
+                .and_then(serde_json::Value::as_str)
                 .unwrap_or("");
             let consent = command
                 .params
                 .get("consent")
-                .and_then(Value::as_bool)
+                .and_then(serde_json::Value::as_bool)
                 .unwrap_or(false);
             if !cloud_markers::owns_show(state, show) {
                 ServerResponse::error(
