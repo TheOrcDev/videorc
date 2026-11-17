@@ -344,6 +344,7 @@ describe('a saved scene’s ⋯ menu', () => {
       'Change app…',
       'Duplicate',
       'Save audio to scene',
+      'Guests in the room…',
       'Stop following',
       'Delete'
     ])
@@ -376,6 +377,39 @@ describe('a saved scene’s ⋯ menu', () => {
     await menu('Figma', 'Save audio to scene')
     expect(actions().replace).toHaveBeenLastCalledWith(
       expect.objectContaining({ id: 'figma', audio: workingAudio })
+    )
+  })
+
+  // Plan 249 S12 (D7): a talk show's guest roles, chosen and saved per scene.
+  it('saves where guests go in the room, keeping the scene itself', async () => {
+    await render()
+    await menu('Figma', 'Guests in the room…')
+    expect(document.body.textContent).toContain('Guests in the room')
+    const over = [...document.querySelectorAll<HTMLElement>('[role="radio"]')].find(
+      (option) => option.textContent === 'Over the scene'
+    )!
+    expect(
+      [...document.querySelectorAll('[role="radio"]')].map((option) => [
+        option.textContent,
+        option.getAttribute('aria-checked')
+      ])
+    ).toEqual([
+      ['Beside', 'true'],
+      ['Below', 'false'],
+      ['Over the scene', 'false']
+    ])
+    await act(async () => over.click())
+    await act(async () => button('Save')!.click())
+    expect(actions().replace).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        id: 'figma',
+        visual: figma().visual,
+        cloud: expect.objectContaining({
+          version: 1,
+          placement: 'over',
+          guests: expect.objectContaining({ slots: expect.any(Array) })
+        })
+      })
     )
   })
 

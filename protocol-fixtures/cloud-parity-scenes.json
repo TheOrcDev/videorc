@@ -1,0 +1,3136 @@
+{
+  "schemaVersion": 1,
+  "description": "Plan 249 S12: cloud scene vectors. Desktop shared/cloud-scene.ts and web lib/cloud/program/cloud-scene.ts must reproduce every case exactly; the web copy is tests/fixtures/cloud-parity-scenes.json, byte for byte.",
+  "page": {
+    "show": "sh_0123456789012345678901",
+    "publisherSid": "PA_host1",
+    "output": "stream",
+    "orientation": "h",
+    "now": 1800000000000
+  },
+  "plan": [
+    {
+      "name": "screen + camera, host only, landscape",
+      "scene": {
+        "items": [
+          {
+            "role": "screen",
+            "rect": {
+              "x": 0,
+              "y": 0,
+              "w": 1,
+              "h": 1
+            },
+            "crop": {
+              "l": 0,
+              "t": 0,
+              "r": 0,
+              "b": 0
+            },
+            "fit": "contain",
+            "mirror": false,
+            "mask": {
+              "shape": "rectangle"
+            },
+            "z": 0
+          },
+          {
+            "role": "host-camera",
+            "rect": {
+              "x": 0.74,
+              "y": 0.7,
+              "w": 0.22,
+              "h": 0.2475
+            },
+            "crop": {
+              "l": 0.1,
+              "t": 0.1,
+              "r": 0.1,
+              "b": 0.1
+            },
+            "fit": "cover",
+            "mirror": true,
+            "mask": {
+              "shape": "circle"
+            },
+            "z": 1
+          }
+        ],
+        "guests": {
+          "host": {
+            "x": 0,
+            "y": 0.125,
+            "w": 0.75,
+            "h": 0.75
+          },
+          "region": {
+            "x": 0.75,
+            "y": 0,
+            "w": 0.25,
+            "h": 1
+          },
+          "slots": []
+        }
+      },
+      "canvas": {
+        "width": 1920,
+        "height": 1080
+      },
+      "roster": {
+        "host": "host:sh_x",
+        "guests": [],
+        "screen": "host:sh_x",
+        "hostOnStage": true
+      },
+      "expected": [
+        {
+          "identity": "host:sh_x",
+          "kind": "screen",
+          "role": "screen",
+          "rect": {
+            "x": 0,
+            "y": 0,
+            "w": 1920,
+            "h": 1080
+          },
+          "crop": {
+            "l": 0,
+            "t": 0,
+            "r": 0,
+            "b": 0
+          },
+          "fit": "contain",
+          "mirror": false,
+          "mask": {
+            "shape": "rectangle"
+          },
+          "z": 0
+        },
+        {
+          "identity": "host:sh_x",
+          "kind": "person",
+          "role": "host-camera",
+          "rect": {
+            "x": 1421,
+            "y": 756,
+            "w": 422,
+            "h": 267
+          },
+          "crop": {
+            "l": 0.1,
+            "t": 0.1,
+            "r": 0.1,
+            "b": 0.1
+          },
+          "fit": "cover",
+          "mirror": true,
+          "mask": {
+            "shape": "circle"
+          },
+          "z": 1
+        }
+      ]
+    },
+    {
+      "name": "screen + camera, two guests use the default column",
+      "scene": {
+        "items": [
+          {
+            "role": "screen",
+            "rect": {
+              "x": 0,
+              "y": 0,
+              "w": 1,
+              "h": 1
+            },
+            "crop": {
+              "l": 0,
+              "t": 0,
+              "r": 0,
+              "b": 0
+            },
+            "fit": "contain",
+            "mirror": false,
+            "mask": {
+              "shape": "rectangle"
+            },
+            "z": 0
+          },
+          {
+            "role": "host-camera",
+            "rect": {
+              "x": 0.74,
+              "y": 0.7,
+              "w": 0.22,
+              "h": 0.2475
+            },
+            "crop": {
+              "l": 0.1,
+              "t": 0.1,
+              "r": 0.1,
+              "b": 0.1
+            },
+            "fit": "cover",
+            "mirror": true,
+            "mask": {
+              "shape": "circle"
+            },
+            "z": 1
+          }
+        ],
+        "guests": {
+          "host": {
+            "x": 0,
+            "y": 0.125,
+            "w": 0.75,
+            "h": 0.75
+          },
+          "region": {
+            "x": 0.75,
+            "y": 0,
+            "w": 0.25,
+            "h": 1
+          },
+          "slots": []
+        }
+      },
+      "canvas": {
+        "width": 1920,
+        "height": 1080
+      },
+      "roster": {
+        "host": "host:sh_x",
+        "guests": ["g_1111111111111111111111", "g_2222222222222222222222"],
+        "screen": "host:sh_x",
+        "hostOnStage": true
+      },
+      "expected": [
+        {
+          "identity": "host:sh_x",
+          "kind": "screen",
+          "role": "screen",
+          "rect": {
+            "x": 0,
+            "y": 135,
+            "w": 1440,
+            "h": 810
+          },
+          "crop": {
+            "l": 0,
+            "t": 0,
+            "r": 0,
+            "b": 0
+          },
+          "fit": "contain",
+          "mirror": false,
+          "mask": {
+            "shape": "rectangle"
+          },
+          "z": 0
+        },
+        {
+          "identity": "host:sh_x",
+          "kind": "person",
+          "role": "host-camera",
+          "rect": {
+            "x": 1066,
+            "y": 702,
+            "w": 317,
+            "h": 200
+          },
+          "crop": {
+            "l": 0.1,
+            "t": 0.1,
+            "r": 0.1,
+            "b": 0.1
+          },
+          "fit": "cover",
+          "mirror": true,
+          "mask": {
+            "shape": "circle"
+          },
+          "z": 1
+        },
+        {
+          "identity": "g_1111111111111111111111",
+          "kind": "person",
+          "role": "guest:0",
+          "rect": {
+            "x": 1464,
+            "y": 286,
+            "w": 432,
+            "h": 242
+          },
+          "crop": {
+            "l": 0,
+            "t": 0,
+            "r": 0,
+            "b": 0
+          },
+          "fit": "cover",
+          "mirror": false,
+          "mask": {
+            "shape": "rounded",
+            "radiusPx": 20
+          },
+          "z": 32
+        },
+        {
+          "identity": "g_2222222222222222222222",
+          "kind": "person",
+          "role": "guest:1",
+          "rect": {
+            "x": 1464,
+            "y": 552,
+            "w": 432,
+            "h": 242
+          },
+          "crop": {
+            "l": 0,
+            "t": 0,
+            "r": 0,
+            "b": 0
+          },
+          "fit": "cover",
+          "mirror": false,
+          "mask": {
+            "shape": "rounded",
+            "radiusPx": 20
+          },
+          "z": 33
+        }
+      ]
+    },
+    {
+      "name": "screen + camera, six guests never dropped",
+      "scene": {
+        "items": [
+          {
+            "role": "screen",
+            "rect": {
+              "x": 0,
+              "y": 0,
+              "w": 1,
+              "h": 1
+            },
+            "crop": {
+              "l": 0,
+              "t": 0,
+              "r": 0,
+              "b": 0
+            },
+            "fit": "contain",
+            "mirror": false,
+            "mask": {
+              "shape": "rectangle"
+            },
+            "z": 0
+          },
+          {
+            "role": "host-camera",
+            "rect": {
+              "x": 0.74,
+              "y": 0.7,
+              "w": 0.22,
+              "h": 0.2475
+            },
+            "crop": {
+              "l": 0.1,
+              "t": 0.1,
+              "r": 0.1,
+              "b": 0.1
+            },
+            "fit": "cover",
+            "mirror": true,
+            "mask": {
+              "shape": "circle"
+            },
+            "z": 1
+          }
+        ],
+        "guests": {
+          "host": {
+            "x": 0,
+            "y": 0.125,
+            "w": 0.75,
+            "h": 0.75
+          },
+          "region": {
+            "x": 0.75,
+            "y": 0,
+            "w": 0.25,
+            "h": 1
+          },
+          "slots": []
+        }
+      },
+      "canvas": {
+        "width": 1920,
+        "height": 1080
+      },
+      "roster": {
+        "host": "host:sh_x",
+        "guests": [
+          "g_1111111111111111111111",
+          "g_2222222222222222222222",
+          "g_3333333333333333333333",
+          "g_4444444444444444444444",
+          "g_5555555555555555555555",
+          "g_6666666666666666666666"
+        ],
+        "screen": "host:sh_x",
+        "hostOnStage": true
+      },
+      "expected": [
+        {
+          "identity": "host:sh_x",
+          "kind": "screen",
+          "role": "screen",
+          "rect": {
+            "x": 0,
+            "y": 135,
+            "w": 1440,
+            "h": 810
+          },
+          "crop": {
+            "l": 0,
+            "t": 0,
+            "r": 0,
+            "b": 0
+          },
+          "fit": "contain",
+          "mirror": false,
+          "mask": {
+            "shape": "rectangle"
+          },
+          "z": 0
+        },
+        {
+          "identity": "host:sh_x",
+          "kind": "person",
+          "role": "host-camera",
+          "rect": {
+            "x": 1066,
+            "y": 702,
+            "w": 317,
+            "h": 200
+          },
+          "crop": {
+            "l": 0.1,
+            "t": 0.1,
+            "r": 0.1,
+            "b": 0.1
+          },
+          "fit": "cover",
+          "mirror": true,
+          "mask": {
+            "shape": "circle"
+          },
+          "z": 1
+        },
+        {
+          "identity": "g_1111111111111111111111",
+          "kind": "person",
+          "role": "guest:0",
+          "rect": {
+            "x": 1545,
+            "y": 24,
+            "w": 270,
+            "h": 152
+          },
+          "crop": {
+            "l": 0,
+            "t": 0,
+            "r": 0,
+            "b": 0
+          },
+          "fit": "cover",
+          "mirror": false,
+          "mask": {
+            "shape": "rounded",
+            "radiusPx": 20
+          },
+          "z": 32
+        },
+        {
+          "identity": "g_2222222222222222222222",
+          "kind": "person",
+          "role": "guest:1",
+          "rect": {
+            "x": 1545,
+            "y": 200,
+            "w": 270,
+            "h": 152
+          },
+          "crop": {
+            "l": 0,
+            "t": 0,
+            "r": 0,
+            "b": 0
+          },
+          "fit": "cover",
+          "mirror": false,
+          "mask": {
+            "shape": "rounded",
+            "radiusPx": 20
+          },
+          "z": 33
+        },
+        {
+          "identity": "g_3333333333333333333333",
+          "kind": "person",
+          "role": "guest:2",
+          "rect": {
+            "x": 1545,
+            "y": 376,
+            "w": 270,
+            "h": 152
+          },
+          "crop": {
+            "l": 0,
+            "t": 0,
+            "r": 0,
+            "b": 0
+          },
+          "fit": "cover",
+          "mirror": false,
+          "mask": {
+            "shape": "rounded",
+            "radiusPx": 20
+          },
+          "z": 34
+        },
+        {
+          "identity": "g_4444444444444444444444",
+          "kind": "person",
+          "role": "guest:3",
+          "rect": {
+            "x": 1545,
+            "y": 552,
+            "w": 270,
+            "h": 152
+          },
+          "crop": {
+            "l": 0,
+            "t": 0,
+            "r": 0,
+            "b": 0
+          },
+          "fit": "cover",
+          "mirror": false,
+          "mask": {
+            "shape": "rounded",
+            "radiusPx": 20
+          },
+          "z": 35
+        },
+        {
+          "identity": "g_5555555555555555555555",
+          "kind": "person",
+          "role": "guest:4",
+          "rect": {
+            "x": 1545,
+            "y": 728,
+            "w": 270,
+            "h": 152
+          },
+          "crop": {
+            "l": 0,
+            "t": 0,
+            "r": 0,
+            "b": 0
+          },
+          "fit": "cover",
+          "mirror": false,
+          "mask": {
+            "shape": "rounded",
+            "radiusPx": 20
+          },
+          "z": 36
+        },
+        {
+          "identity": "g_6666666666666666666666",
+          "kind": "person",
+          "role": "guest:5",
+          "rect": {
+            "x": 1545,
+            "y": 904,
+            "w": 270,
+            "h": 152
+          },
+          "crop": {
+            "l": 0,
+            "t": 0,
+            "r": 0,
+            "b": 0
+          },
+          "fit": "cover",
+          "mirror": false,
+          "mask": {
+            "shape": "rounded",
+            "radiusPx": 20
+          },
+          "z": 37
+        }
+      ]
+    },
+    {
+      "name": "side by side, one guest",
+      "scene": {
+        "items": [
+          {
+            "role": "screen",
+            "rect": {
+              "x": 0,
+              "y": 0,
+              "w": 0.6,
+              "h": 1
+            },
+            "crop": {
+              "l": 0,
+              "t": 0,
+              "r": 0,
+              "b": 0
+            },
+            "fit": "cover",
+            "mirror": false,
+            "mask": {
+              "shape": "rectangle"
+            },
+            "z": 0
+          },
+          {
+            "role": "host-camera",
+            "rect": {
+              "x": 0.6,
+              "y": 0,
+              "w": 0.4,
+              "h": 1
+            },
+            "crop": {
+              "l": 0,
+              "t": 0,
+              "r": 0,
+              "b": 0
+            },
+            "fit": "cover",
+            "mirror": false,
+            "mask": {
+              "shape": "rectangle"
+            },
+            "z": 1
+          }
+        ],
+        "guests": {
+          "host": {
+            "x": 0,
+            "y": 0.125,
+            "w": 0.75,
+            "h": 0.75
+          },
+          "region": {
+            "x": 0.75,
+            "y": 0,
+            "w": 0.25,
+            "h": 1
+          },
+          "slots": []
+        }
+      },
+      "canvas": {
+        "width": 1920,
+        "height": 1080
+      },
+      "roster": {
+        "host": "host:sh_x",
+        "guests": ["g_1111111111111111111111"],
+        "screen": "host:sh_x",
+        "hostOnStage": true
+      },
+      "expected": [
+        {
+          "identity": "host:sh_x",
+          "kind": "screen",
+          "role": "screen",
+          "rect": {
+            "x": 0,
+            "y": 135,
+            "w": 864,
+            "h": 810
+          },
+          "crop": {
+            "l": 0,
+            "t": 0,
+            "r": 0,
+            "b": 0
+          },
+          "fit": "cover",
+          "mirror": false,
+          "mask": {
+            "shape": "rectangle"
+          },
+          "z": 0
+        },
+        {
+          "identity": "host:sh_x",
+          "kind": "person",
+          "role": "host-camera",
+          "rect": {
+            "x": 864,
+            "y": 135,
+            "w": 576,
+            "h": 810
+          },
+          "crop": {
+            "l": 0,
+            "t": 0,
+            "r": 0,
+            "b": 0
+          },
+          "fit": "cover",
+          "mirror": false,
+          "mask": {
+            "shape": "rectangle"
+          },
+          "z": 1
+        },
+        {
+          "identity": "g_1111111111111111111111",
+          "kind": "person",
+          "role": "guest:0",
+          "rect": {
+            "x": 1464,
+            "y": 419,
+            "w": 432,
+            "h": 242
+          },
+          "crop": {
+            "l": 0,
+            "t": 0,
+            "r": 0,
+            "b": 0
+          },
+          "fit": "cover",
+          "mirror": false,
+          "mask": {
+            "shape": "rounded",
+            "radiusPx": 20
+          },
+          "z": 32
+        }
+      ]
+    },
+    {
+      "name": "camera only rounded, no screen up",
+      "scene": {
+        "items": [
+          {
+            "role": "host-camera",
+            "rect": {
+              "x": 0.74,
+              "y": 0.7,
+              "w": 0.22,
+              "h": 0.2475
+            },
+            "crop": {
+              "l": 0,
+              "t": 0,
+              "r": 0,
+              "b": 0
+            },
+            "fit": "cover",
+            "mirror": false,
+            "mask": {
+              "shape": "rounded",
+              "radius": 0.18
+            },
+            "z": 1
+          }
+        ],
+        "guests": {
+          "host": {
+            "x": 0,
+            "y": 0.125,
+            "w": 0.75,
+            "h": 0.75
+          },
+          "region": {
+            "x": 0.75,
+            "y": 0,
+            "w": 0.25,
+            "h": 1
+          },
+          "slots": []
+        }
+      },
+      "canvas": {
+        "width": 1920,
+        "height": 1080
+      },
+      "roster": {
+        "host": "host:sh_x",
+        "guests": [],
+        "screen": null,
+        "hostOnStage": true
+      },
+      "expected": [
+        {
+          "identity": "host:sh_x",
+          "kind": "person",
+          "role": "host-camera",
+          "rect": {
+            "x": 1421,
+            "y": 756,
+            "w": 422,
+            "h": 267
+          },
+          "crop": {
+            "l": 0,
+            "t": 0,
+            "r": 0,
+            "b": 0
+          },
+          "fit": "cover",
+          "mirror": false,
+          "mask": {
+            "shape": "rounded",
+            "radiusPx": 48
+          },
+          "z": 1
+        }
+      ]
+    },
+    {
+      "name": "host backstage keeps the screen and guests",
+      "scene": {
+        "items": [
+          {
+            "role": "screen",
+            "rect": {
+              "x": 0,
+              "y": 0,
+              "w": 1,
+              "h": 1
+            },
+            "crop": {
+              "l": 0,
+              "t": 0,
+              "r": 0,
+              "b": 0
+            },
+            "fit": "contain",
+            "mirror": false,
+            "mask": {
+              "shape": "rectangle"
+            },
+            "z": 0
+          },
+          {
+            "role": "host-camera",
+            "rect": {
+              "x": 0.74,
+              "y": 0.7,
+              "w": 0.22,
+              "h": 0.2475
+            },
+            "crop": {
+              "l": 0.1,
+              "t": 0.1,
+              "r": 0.1,
+              "b": 0.1
+            },
+            "fit": "cover",
+            "mirror": true,
+            "mask": {
+              "shape": "circle"
+            },
+            "z": 1
+          }
+        ],
+        "guests": {
+          "host": {
+            "x": 0,
+            "y": 0.125,
+            "w": 0.75,
+            "h": 0.75
+          },
+          "region": {
+            "x": 0.75,
+            "y": 0,
+            "w": 0.25,
+            "h": 1
+          },
+          "slots": []
+        }
+      },
+      "canvas": {
+        "width": 1920,
+        "height": 1080
+      },
+      "roster": {
+        "host": "host:sh_x",
+        "guests": ["g_1111111111111111111111", "g_2222222222222222222222"],
+        "screen": "host:sh_x",
+        "hostOnStage": false
+      },
+      "expected": [
+        {
+          "identity": "host:sh_x",
+          "kind": "screen",
+          "role": "screen",
+          "rect": {
+            "x": 0,
+            "y": 135,
+            "w": 1440,
+            "h": 810
+          },
+          "crop": {
+            "l": 0,
+            "t": 0,
+            "r": 0,
+            "b": 0
+          },
+          "fit": "contain",
+          "mirror": false,
+          "mask": {
+            "shape": "rectangle"
+          },
+          "z": 0
+        },
+        {
+          "identity": "g_1111111111111111111111",
+          "kind": "person",
+          "role": "guest:0",
+          "rect": {
+            "x": 1464,
+            "y": 286,
+            "w": 432,
+            "h": 242
+          },
+          "crop": {
+            "l": 0,
+            "t": 0,
+            "r": 0,
+            "b": 0
+          },
+          "fit": "cover",
+          "mirror": false,
+          "mask": {
+            "shape": "rounded",
+            "radiusPx": 20
+          },
+          "z": 32
+        },
+        {
+          "identity": "g_2222222222222222222222",
+          "kind": "person",
+          "role": "guest:1",
+          "rect": {
+            "x": 1464,
+            "y": 552,
+            "w": 432,
+            "h": 242
+          },
+          "crop": {
+            "l": 0,
+            "t": 0,
+            "r": 0,
+            "b": 0
+          },
+          "fit": "cover",
+          "mirror": false,
+          "mask": {
+            "shape": "rounded",
+            "radiusPx": 20
+          },
+          "z": 33
+        }
+      ]
+    },
+    {
+      "name": "guest screen fills the scene screen box",
+      "scene": {
+        "items": [
+          {
+            "role": "screen",
+            "rect": {
+              "x": 0,
+              "y": 0,
+              "w": 1,
+              "h": 1
+            },
+            "crop": {
+              "l": 0,
+              "t": 0,
+              "r": 0,
+              "b": 0
+            },
+            "fit": "contain",
+            "mirror": false,
+            "mask": {
+              "shape": "rectangle"
+            },
+            "z": 0
+          },
+          {
+            "role": "host-camera",
+            "rect": {
+              "x": 0.74,
+              "y": 0.7,
+              "w": 0.22,
+              "h": 0.2475
+            },
+            "crop": {
+              "l": 0.1,
+              "t": 0.1,
+              "r": 0.1,
+              "b": 0.1
+            },
+            "fit": "cover",
+            "mirror": true,
+            "mask": {
+              "shape": "circle"
+            },
+            "z": 1
+          }
+        ],
+        "guests": {
+          "host": {
+            "x": 0,
+            "y": 0.125,
+            "w": 0.75,
+            "h": 0.75
+          },
+          "region": {
+            "x": 0.75,
+            "y": 0,
+            "w": 0.25,
+            "h": 1
+          },
+          "slots": []
+        }
+      },
+      "canvas": {
+        "width": 1920,
+        "height": 1080
+      },
+      "roster": {
+        "host": "host:sh_x",
+        "guests": ["g_1111111111111111111111"],
+        "screen": "g_1111111111111111111111",
+        "hostOnStage": true
+      },
+      "expected": [
+        {
+          "identity": "g_1111111111111111111111",
+          "kind": "screen",
+          "role": "screen",
+          "rect": {
+            "x": 0,
+            "y": 135,
+            "w": 1440,
+            "h": 810
+          },
+          "crop": {
+            "l": 0,
+            "t": 0,
+            "r": 0,
+            "b": 0
+          },
+          "fit": "contain",
+          "mirror": false,
+          "mask": {
+            "shape": "rectangle"
+          },
+          "z": 0
+        },
+        {
+          "identity": "host:sh_x",
+          "kind": "person",
+          "role": "host-camera",
+          "rect": {
+            "x": 1066,
+            "y": 702,
+            "w": 317,
+            "h": 200
+          },
+          "crop": {
+            "l": 0.1,
+            "t": 0.1,
+            "r": 0.1,
+            "b": 0.1
+          },
+          "fit": "cover",
+          "mirror": true,
+          "mask": {
+            "shape": "circle"
+          },
+          "z": 1
+        },
+        {
+          "identity": "g_1111111111111111111111",
+          "kind": "person",
+          "role": "guest:0",
+          "rect": {
+            "x": 1464,
+            "y": 419,
+            "w": 432,
+            "h": 242
+          },
+          "crop": {
+            "l": 0,
+            "t": 0,
+            "r": 0,
+            "b": 0
+          },
+          "fit": "cover",
+          "mirror": false,
+          "mask": {
+            "shape": "rounded",
+            "radiusPx": 20
+          },
+          "z": 32
+        }
+      ]
+    },
+    {
+      "name": "vertical camera top, three guests in the band",
+      "scene": {
+        "items": [
+          {
+            "role": "screen",
+            "rect": {
+              "x": 0,
+              "y": 0.4,
+              "w": 1,
+              "h": 0.6
+            },
+            "crop": {
+              "l": 0,
+              "t": 0,
+              "r": 0,
+              "b": 0
+            },
+            "fit": "cover",
+            "mirror": false,
+            "mask": {
+              "shape": "rectangle"
+            },
+            "z": 0
+          },
+          {
+            "role": "host-camera",
+            "rect": {
+              "x": 0,
+              "y": 0,
+              "w": 1,
+              "h": 0.4
+            },
+            "crop": {
+              "l": 0,
+              "t": 0,
+              "r": 0,
+              "b": 0
+            },
+            "fit": "cover",
+            "mirror": false,
+            "mask": {
+              "shape": "rectangle"
+            },
+            "z": 1
+          }
+        ],
+        "guests": {
+          "host": {
+            "x": 0.15,
+            "y": 0,
+            "w": 0.7,
+            "h": 0.7
+          },
+          "region": {
+            "x": 0,
+            "y": 0.7,
+            "w": 1,
+            "h": 0.3
+          },
+          "slots": []
+        }
+      },
+      "canvas": {
+        "width": 1080,
+        "height": 1920
+      },
+      "roster": {
+        "host": "host:sh_x",
+        "guests": [
+          "g_1111111111111111111111",
+          "g_2222222222222222222222",
+          "g_3333333333333333333333"
+        ],
+        "screen": "host:sh_x",
+        "hostOnStage": true
+      },
+      "expected": [
+        {
+          "identity": "host:sh_x",
+          "kind": "screen",
+          "role": "screen",
+          "rect": {
+            "x": 162,
+            "y": 538,
+            "w": 756,
+            "h": 806
+          },
+          "crop": {
+            "l": 0,
+            "t": 0,
+            "r": 0,
+            "b": 0
+          },
+          "fit": "cover",
+          "mirror": false,
+          "mask": {
+            "shape": "rectangle"
+          },
+          "z": 0
+        },
+        {
+          "identity": "host:sh_x",
+          "kind": "person",
+          "role": "host-camera",
+          "rect": {
+            "x": 162,
+            "y": 0,
+            "w": 756,
+            "h": 538
+          },
+          "crop": {
+            "l": 0,
+            "t": 0,
+            "r": 0,
+            "b": 0
+          },
+          "fit": "cover",
+          "mirror": false,
+          "mask": {
+            "shape": "rectangle"
+          },
+          "z": 1
+        },
+        {
+          "identity": "g_1111111111111111111111",
+          "kind": "person",
+          "role": "guest:0",
+          "rect": {
+            "x": 80,
+            "y": 1368,
+            "w": 448,
+            "h": 252
+          },
+          "crop": {
+            "l": 0,
+            "t": 0,
+            "r": 0,
+            "b": 0
+          },
+          "fit": "cover",
+          "mirror": false,
+          "mask": {
+            "shape": "rounded",
+            "radiusPx": 20
+          },
+          "z": 32
+        },
+        {
+          "identity": "g_2222222222222222222222",
+          "kind": "person",
+          "role": "guest:1",
+          "rect": {
+            "x": 552,
+            "y": 1368,
+            "w": 448,
+            "h": 252
+          },
+          "crop": {
+            "l": 0,
+            "t": 0,
+            "r": 0,
+            "b": 0
+          },
+          "fit": "cover",
+          "mirror": false,
+          "mask": {
+            "shape": "rounded",
+            "radiusPx": 20
+          },
+          "z": 33
+        },
+        {
+          "identity": "g_3333333333333333333333",
+          "kind": "person",
+          "role": "guest:2",
+          "rect": {
+            "x": 316,
+            "y": 1644,
+            "w": 448,
+            "h": 252
+          },
+          "crop": {
+            "l": 0,
+            "t": 0,
+            "r": 0,
+            "b": 0
+          },
+          "fit": "cover",
+          "mirror": false,
+          "mask": {
+            "shape": "rounded",
+            "radiusPx": 20
+          },
+          "z": 34
+        }
+      ]
+    },
+    {
+      "name": "explicit slot then region overflow",
+      "scene": {
+        "items": [
+          {
+            "role": "screen",
+            "rect": {
+              "x": 0,
+              "y": 0,
+              "w": 1,
+              "h": 1
+            },
+            "crop": {
+              "l": 0,
+              "t": 0,
+              "r": 0,
+              "b": 0
+            },
+            "fit": "contain",
+            "mirror": false,
+            "mask": {
+              "shape": "rectangle"
+            },
+            "z": 0
+          },
+          {
+            "role": "host-camera",
+            "rect": {
+              "x": 0.74,
+              "y": 0.7,
+              "w": 0.22,
+              "h": 0.2475
+            },
+            "crop": {
+              "l": 0.1,
+              "t": 0.1,
+              "r": 0.1,
+              "b": 0.1
+            },
+            "fit": "cover",
+            "mirror": true,
+            "mask": {
+              "shape": "circle"
+            },
+            "z": 1
+          }
+        ],
+        "guests": {
+          "host": {
+            "x": 0,
+            "y": 0,
+            "w": 0.7,
+            "h": 0.7
+          },
+          "region": {
+            "x": 0.7,
+            "y": 0,
+            "w": 0.3,
+            "h": 1
+          },
+          "slots": [
+            {
+              "x": 0.05,
+              "y": 0.75,
+              "w": 0.2,
+              "h": 0.2
+            }
+          ]
+        }
+      },
+      "canvas": {
+        "width": 1920,
+        "height": 1080
+      },
+      "roster": {
+        "host": "host:sh_x",
+        "guests": [
+          "g_1111111111111111111111",
+          "g_2222222222222222222222",
+          "g_3333333333333333333333"
+        ],
+        "screen": "host:sh_x",
+        "hostOnStage": true
+      },
+      "expected": [
+        {
+          "identity": "host:sh_x",
+          "kind": "screen",
+          "role": "screen",
+          "rect": {
+            "x": 0,
+            "y": 0,
+            "w": 1344,
+            "h": 756
+          },
+          "crop": {
+            "l": 0,
+            "t": 0,
+            "r": 0,
+            "b": 0
+          },
+          "fit": "contain",
+          "mirror": false,
+          "mask": {
+            "shape": "rectangle"
+          },
+          "z": 0
+        },
+        {
+          "identity": "host:sh_x",
+          "kind": "person",
+          "role": "host-camera",
+          "rect": {
+            "x": 995,
+            "y": 529,
+            "w": 296,
+            "h": 187
+          },
+          "crop": {
+            "l": 0.1,
+            "t": 0.1,
+            "r": 0.1,
+            "b": 0.1
+          },
+          "fit": "cover",
+          "mirror": true,
+          "mask": {
+            "shape": "circle"
+          },
+          "z": 1
+        },
+        {
+          "identity": "g_1111111111111111111111",
+          "kind": "person",
+          "role": "guest:0",
+          "rect": {
+            "x": 96,
+            "y": 810,
+            "w": 384,
+            "h": 216
+          },
+          "crop": {
+            "l": 0,
+            "t": 0,
+            "r": 0,
+            "b": 0
+          },
+          "fit": "cover",
+          "mirror": false,
+          "mask": {
+            "shape": "rounded",
+            "radiusPx": 20
+          },
+          "z": 32
+        },
+        {
+          "identity": "g_2222222222222222222222",
+          "kind": "person",
+          "role": "guest:1",
+          "rect": {
+            "x": 1368,
+            "y": 232,
+            "w": 528,
+            "h": 296
+          },
+          "crop": {
+            "l": 0,
+            "t": 0,
+            "r": 0,
+            "b": 0
+          },
+          "fit": "cover",
+          "mirror": false,
+          "mask": {
+            "shape": "rounded",
+            "radiusPx": 20
+          },
+          "z": 33
+        },
+        {
+          "identity": "g_3333333333333333333333",
+          "kind": "person",
+          "role": "guest:2",
+          "rect": {
+            "x": 1368,
+            "y": 552,
+            "w": 528,
+            "h": 296
+          },
+          "crop": {
+            "l": 0,
+            "t": 0,
+            "r": 0,
+            "b": 0
+          },
+          "fit": "cover",
+          "mirror": false,
+          "mask": {
+            "shape": "rounded",
+            "radiusPx": 20
+          },
+          "z": 34
+        }
+      ]
+    },
+    {
+      "name": "screen scene with no screen up draws the camera only",
+      "scene": {
+        "items": [
+          {
+            "role": "screen",
+            "rect": {
+              "x": 0,
+              "y": 0,
+              "w": 1,
+              "h": 1
+            },
+            "crop": {
+              "l": 0,
+              "t": 0,
+              "r": 0,
+              "b": 0
+            },
+            "fit": "contain",
+            "mirror": false,
+            "mask": {
+              "shape": "rectangle"
+            },
+            "z": 0
+          },
+          {
+            "role": "host-camera",
+            "rect": {
+              "x": 0.74,
+              "y": 0.7,
+              "w": 0.22,
+              "h": 0.2475
+            },
+            "crop": {
+              "l": 0.1,
+              "t": 0.1,
+              "r": 0.1,
+              "b": 0.1
+            },
+            "fit": "cover",
+            "mirror": true,
+            "mask": {
+              "shape": "circle"
+            },
+            "z": 1
+          }
+        ],
+        "guests": {
+          "host": {
+            "x": 0,
+            "y": 0.125,
+            "w": 0.75,
+            "h": 0.75
+          },
+          "region": {
+            "x": 0.75,
+            "y": 0,
+            "w": 0.25,
+            "h": 1
+          },
+          "slots": []
+        }
+      },
+      "canvas": {
+        "width": 1920,
+        "height": 1080
+      },
+      "roster": {
+        "host": "host:sh_x",
+        "guests": [],
+        "screen": null,
+        "hostOnStage": true
+      },
+      "expected": [
+        {
+          "identity": "host:sh_x",
+          "kind": "person",
+          "role": "host-camera",
+          "rect": {
+            "x": 1421,
+            "y": 756,
+            "w": 422,
+            "h": 267
+          },
+          "crop": {
+            "l": 0.1,
+            "t": 0.1,
+            "r": 0.1,
+            "b": 0.1
+          },
+          "fit": "cover",
+          "mirror": true,
+          "mask": {
+            "shape": "circle"
+          },
+          "z": 1
+        }
+      ]
+    }
+  ],
+  "picture": [
+    {
+      "name": "MacBook display contained in a 16:9 frame",
+      "frame": {
+        "x": 0,
+        "y": 0,
+        "w": 1920,
+        "h": 1080
+      },
+      "source": {
+        "w": 3024,
+        "h": 1964
+      },
+      "crop": {
+        "l": 0,
+        "t": 0,
+        "r": 0,
+        "b": 0
+      },
+      "fit": "contain",
+      "expected": {
+        "clip": {
+          "x": 129,
+          "y": 0,
+          "w": 1663,
+          "h": 1080
+        },
+        "full": {
+          "x": 129,
+          "y": 0,
+          "w": 1663,
+          "h": 1080
+        }
+      }
+    },
+    {
+      "name": "the same display covering the frame",
+      "frame": {
+        "x": 0,
+        "y": 0,
+        "w": 1920,
+        "h": 1080
+      },
+      "source": {
+        "w": 3024,
+        "h": 1964
+      },
+      "crop": {
+        "l": 0,
+        "t": 0,
+        "r": 0,
+        "b": 0
+      },
+      "fit": "cover",
+      "expected": {
+        "clip": {
+          "x": 0,
+          "y": 0,
+          "w": 1920,
+          "h": 1080
+        },
+        "full": {
+          "x": 0,
+          "y": -83,
+          "w": 1920,
+          "h": 1247
+        }
+      }
+    },
+    {
+      "name": "a zoomed camera crop covers a square bubble",
+      "frame": {
+        "x": 1400,
+        "y": 700,
+        "w": 400,
+        "h": 400
+      },
+      "source": {
+        "w": 1280,
+        "h": 720
+      },
+      "crop": {
+        "l": 0.125,
+        "t": 0.125,
+        "r": 0.125,
+        "b": 0.125
+      },
+      "fit": "cover",
+      "expected": {
+        "clip": {
+          "x": 1400,
+          "y": 700,
+          "w": 400,
+          "h": 400
+        },
+        "full": {
+          "x": 1126,
+          "y": 633,
+          "w": 948,
+          "h": 533
+        }
+      }
+    },
+    {
+      "name": "a left screen crop keeps the picture centred",
+      "frame": {
+        "x": 100,
+        "y": 50,
+        "w": 1200,
+        "h": 900
+      },
+      "source": {
+        "w": 2228,
+        "h": 1440
+      },
+      "crop": {
+        "l": 0.25,
+        "t": 0,
+        "r": 0,
+        "b": 0
+      },
+      "fit": "contain",
+      "expected": {
+        "clip": {
+          "x": 178,
+          "y": 50,
+          "w": 1044,
+          "h": 900
+        },
+        "full": {
+          "x": -170,
+          "y": 50,
+          "w": 1393,
+          "h": 900
+        }
+      }
+    },
+    {
+      "name": "a panned camera fits a tall band",
+      "frame": {
+        "x": 0,
+        "y": 0,
+        "w": 1080,
+        "h": 768
+      },
+      "source": {
+        "w": 1280,
+        "h": 720
+      },
+      "crop": {
+        "l": 0.2,
+        "t": 0,
+        "r": 0.05,
+        "b": 0
+      },
+      "fit": "cover",
+      "expected": {
+        "clip": {
+          "x": 0,
+          "y": 0,
+          "w": 1080,
+          "h": 768
+        },
+        "full": {
+          "x": -288,
+          "y": -21,
+          "w": 1440,
+          "h": 810
+        }
+      }
+    }
+  ],
+  "ease": [
+    [0, 0],
+    [0.1, 0.004000000000000001],
+    [0.25, 0.0625],
+    [0.5, 0.5],
+    [0.75, 0.9375],
+    [0.9, 0.996],
+    [1, 1]
+  ],
+  "motion": [
+    {
+      "name": "camera glides from a band to the bubble at the midpoint",
+      "from": {
+        "rect": {
+          "x": 0,
+          "y": 0,
+          "w": 960,
+          "h": 540
+        },
+        "crop": {
+          "l": 0,
+          "t": 0,
+          "r": 0,
+          "b": 0
+        }
+      },
+      "to": {
+        "rect": {
+          "x": 1400,
+          "y": 700,
+          "w": 400,
+          "h": 400
+        },
+        "crop": {
+          "l": 0.2,
+          "t": 0,
+          "r": 0.2,
+          "b": 0
+        }
+      },
+      "progress": 0.5,
+      "expected": {
+        "rect": {
+          "x": 700,
+          "y": 350,
+          "w": 680,
+          "h": 470
+        },
+        "crop": {
+          "l": 0.1,
+          "t": 0,
+          "r": 0.1,
+          "b": 0
+        }
+      }
+    },
+    {
+      "name": "a quarter of the way is eased, not linear",
+      "from": {
+        "rect": {
+          "x": 0,
+          "y": 0,
+          "w": 960,
+          "h": 540
+        },
+        "crop": {
+          "l": 0,
+          "t": 0,
+          "r": 0,
+          "b": 0
+        }
+      },
+      "to": {
+        "rect": {
+          "x": 1400,
+          "y": 700,
+          "w": 400,
+          "h": 400
+        },
+        "crop": {
+          "l": 0.2,
+          "t": 0,
+          "r": 0.2,
+          "b": 0
+        }
+      },
+      "progress": 0.25,
+      "expected": {
+        "rect": {
+          "x": 87.5,
+          "y": 43.75,
+          "w": 925,
+          "h": 531.25
+        },
+        "crop": {
+          "l": 0.0125,
+          "t": 0,
+          "r": 0.0125,
+          "b": 0
+        }
+      }
+    },
+    {
+      "name": "a new box grows in from 92%",
+      "from": null,
+      "to": {
+        "rect": {
+          "x": 1400,
+          "y": 700,
+          "w": 400,
+          "h": 400
+        },
+        "crop": {
+          "l": 0.2,
+          "t": 0,
+          "r": 0.2,
+          "b": 0
+        }
+      },
+      "progress": 0,
+      "expected": {
+        "rect": {
+          "x": 1416,
+          "y": 716,
+          "w": 368,
+          "h": 368
+        },
+        "crop": {
+          "l": 0.2,
+          "t": 0,
+          "r": 0.2,
+          "b": 0
+        }
+      }
+    },
+    {
+      "name": "a new box at the midpoint",
+      "from": null,
+      "to": {
+        "rect": {
+          "x": 1400,
+          "y": 700,
+          "w": 400,
+          "h": 400
+        },
+        "crop": {
+          "l": 0.2,
+          "t": 0,
+          "r": 0.2,
+          "b": 0
+        }
+      },
+      "progress": 0.5,
+      "expected": {
+        "rect": {
+          "x": 1408,
+          "y": 708,
+          "w": 384,
+          "h": 384
+        },
+        "crop": {
+          "l": 0.2,
+          "t": 0,
+          "r": 0.2,
+          "b": 0
+        }
+      }
+    },
+    {
+      "name": "done is the target exactly",
+      "from": {
+        "rect": {
+          "x": 0,
+          "y": 0,
+          "w": 960,
+          "h": 540
+        },
+        "crop": {
+          "l": 0,
+          "t": 0,
+          "r": 0,
+          "b": 0
+        }
+      },
+      "to": {
+        "rect": {
+          "x": 1400,
+          "y": 700,
+          "w": 400,
+          "h": 400
+        },
+        "crop": {
+          "l": 0.2,
+          "t": 0,
+          "r": 0.2,
+          "b": 0
+        }
+      },
+      "progress": 1,
+      "expected": {
+        "rect": {
+          "x": 1400,
+          "y": 700,
+          "w": 400,
+          "h": 400
+        },
+        "crop": {
+          "l": 0.2,
+          "t": 0,
+          "r": 0.2,
+          "b": 0
+        }
+      }
+    }
+  ],
+  "snapshots": [
+    {
+      "name": "a motion scene for the signed lane",
+      "snapshot": {
+        "version": 1,
+        "show": "sh_0123456789012345678901",
+        "publisherSid": "PA_host1",
+        "revision": 7,
+        "output": "stream",
+        "orientation": "h",
+        "expiresAt": 1800000020000,
+        "scene": {
+          "id": "fd0c5087",
+          "items": [
+            {
+              "role": "screen",
+              "rect": {
+                "x": 0,
+                "y": 0,
+                "w": 1,
+                "h": 1
+              },
+              "crop": {
+                "l": 0,
+                "t": 0,
+                "r": 0,
+                "b": 0
+              },
+              "fit": "contain",
+              "mirror": false,
+              "mask": {
+                "shape": "rectangle"
+              },
+              "z": 0
+            },
+            {
+              "role": "host-camera",
+              "rect": {
+                "x": 0.74,
+                "y": 0.7,
+                "w": 0.22,
+                "h": 0.2475
+              },
+              "crop": {
+                "l": 0.1,
+                "t": 0.1,
+                "r": 0.1,
+                "b": 0.1
+              },
+              "fit": "cover",
+              "mirror": true,
+              "mask": {
+                "shape": "circle"
+              },
+              "z": 1
+            }
+          ],
+          "guests": {
+            "host": {
+              "x": 0,
+              "y": 0.125,
+              "w": 0.75,
+              "h": 0.75
+            },
+            "region": {
+              "x": 0.75,
+              "y": 0,
+              "w": 0.25,
+              "h": 1
+            },
+            "slots": []
+          }
+        },
+        "transition": {
+          "kind": "motion",
+          "durationMs": 320,
+          "applyAt": 1799999999900
+        }
+      },
+      "valid": true
+    },
+    {
+      "name": "a clear is a null scene",
+      "snapshot": {
+        "version": 1,
+        "show": "sh_0123456789012345678901",
+        "publisherSid": "PA_host1",
+        "revision": 7,
+        "output": "stream",
+        "orientation": "h",
+        "expiresAt": 1800000020000,
+        "scene": null,
+        "transition": {
+          "kind": "cut",
+          "durationMs": 0,
+          "applyAt": 1800000000000
+        }
+      },
+      "valid": true
+    },
+    {
+      "name": "another host session",
+      "snapshot": {
+        "version": 1,
+        "show": "sh_0123456789012345678901",
+        "publisherSid": "PA_other",
+        "revision": 7,
+        "output": "stream",
+        "orientation": "h",
+        "expiresAt": 1800000020000,
+        "scene": {
+          "id": "fd0c5087",
+          "items": [
+            {
+              "role": "screen",
+              "rect": {
+                "x": 0,
+                "y": 0,
+                "w": 1,
+                "h": 1
+              },
+              "crop": {
+                "l": 0,
+                "t": 0,
+                "r": 0,
+                "b": 0
+              },
+              "fit": "contain",
+              "mirror": false,
+              "mask": {
+                "shape": "rectangle"
+              },
+              "z": 0
+            },
+            {
+              "role": "host-camera",
+              "rect": {
+                "x": 0.74,
+                "y": 0.7,
+                "w": 0.22,
+                "h": 0.2475
+              },
+              "crop": {
+                "l": 0.1,
+                "t": 0.1,
+                "r": 0.1,
+                "b": 0.1
+              },
+              "fit": "cover",
+              "mirror": true,
+              "mask": {
+                "shape": "circle"
+              },
+              "z": 1
+            }
+          ],
+          "guests": {
+            "host": {
+              "x": 0,
+              "y": 0.125,
+              "w": 0.75,
+              "h": 0.75
+            },
+            "region": {
+              "x": 0.75,
+              "y": 0,
+              "w": 0.25,
+              "h": 1
+            },
+            "slots": []
+          }
+        },
+        "transition": {
+          "kind": "motion",
+          "durationMs": 320,
+          "applyAt": 1799999999900
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "another lane",
+      "snapshot": {
+        "version": 1,
+        "show": "sh_0123456789012345678901",
+        "publisherSid": "PA_host1",
+        "revision": 7,
+        "output": "recording",
+        "orientation": "h",
+        "expiresAt": 1800000020000,
+        "scene": {
+          "id": "fd0c5087",
+          "items": [
+            {
+              "role": "screen",
+              "rect": {
+                "x": 0,
+                "y": 0,
+                "w": 1,
+                "h": 1
+              },
+              "crop": {
+                "l": 0,
+                "t": 0,
+                "r": 0,
+                "b": 0
+              },
+              "fit": "contain",
+              "mirror": false,
+              "mask": {
+                "shape": "rectangle"
+              },
+              "z": 0
+            },
+            {
+              "role": "host-camera",
+              "rect": {
+                "x": 0.74,
+                "y": 0.7,
+                "w": 0.22,
+                "h": 0.2475
+              },
+              "crop": {
+                "l": 0.1,
+                "t": 0.1,
+                "r": 0.1,
+                "b": 0.1
+              },
+              "fit": "cover",
+              "mirror": true,
+              "mask": {
+                "shape": "circle"
+              },
+              "z": 1
+            }
+          ],
+          "guests": {
+            "host": {
+              "x": 0,
+              "y": 0.125,
+              "w": 0.75,
+              "h": 0.75
+            },
+            "region": {
+              "x": 0.75,
+              "y": 0,
+              "w": 0.25,
+              "h": 1
+            },
+            "slots": []
+          }
+        },
+        "transition": {
+          "kind": "motion",
+          "durationMs": 320,
+          "applyAt": 1799999999900
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "a lease past 30 s",
+      "snapshot": {
+        "version": 1,
+        "show": "sh_0123456789012345678901",
+        "publisherSid": "PA_host1",
+        "revision": 7,
+        "output": "stream",
+        "orientation": "h",
+        "expiresAt": 1800000031000,
+        "scene": {
+          "id": "fd0c5087",
+          "items": [
+            {
+              "role": "screen",
+              "rect": {
+                "x": 0,
+                "y": 0,
+                "w": 1,
+                "h": 1
+              },
+              "crop": {
+                "l": 0,
+                "t": 0,
+                "r": 0,
+                "b": 0
+              },
+              "fit": "contain",
+              "mirror": false,
+              "mask": {
+                "shape": "rectangle"
+              },
+              "z": 0
+            },
+            {
+              "role": "host-camera",
+              "rect": {
+                "x": 0.74,
+                "y": 0.7,
+                "w": 0.22,
+                "h": 0.2475
+              },
+              "crop": {
+                "l": 0.1,
+                "t": 0.1,
+                "r": 0.1,
+                "b": 0.1
+              },
+              "fit": "cover",
+              "mirror": true,
+              "mask": {
+                "shape": "circle"
+              },
+              "z": 1
+            }
+          ],
+          "guests": {
+            "host": {
+              "x": 0,
+              "y": 0.125,
+              "w": 0.75,
+              "h": 0.75
+            },
+            "region": {
+              "x": 0.75,
+              "y": 0,
+              "w": 0.25,
+              "h": 1
+            },
+            "slots": []
+          }
+        },
+        "transition": {
+          "kind": "motion",
+          "durationMs": 320,
+          "applyAt": 1799999999900
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "a cut with a duration",
+      "snapshot": {
+        "version": 1,
+        "show": "sh_0123456789012345678901",
+        "publisherSid": "PA_host1",
+        "revision": 7,
+        "output": "stream",
+        "orientation": "h",
+        "expiresAt": 1800000020000,
+        "scene": {
+          "id": "fd0c5087",
+          "items": [
+            {
+              "role": "screen",
+              "rect": {
+                "x": 0,
+                "y": 0,
+                "w": 1,
+                "h": 1
+              },
+              "crop": {
+                "l": 0,
+                "t": 0,
+                "r": 0,
+                "b": 0
+              },
+              "fit": "contain",
+              "mirror": false,
+              "mask": {
+                "shape": "rectangle"
+              },
+              "z": 0
+            },
+            {
+              "role": "host-camera",
+              "rect": {
+                "x": 0.74,
+                "y": 0.7,
+                "w": 0.22,
+                "h": 0.2475
+              },
+              "crop": {
+                "l": 0.1,
+                "t": 0.1,
+                "r": 0.1,
+                "b": 0.1
+              },
+              "fit": "cover",
+              "mirror": true,
+              "mask": {
+                "shape": "circle"
+              },
+              "z": 1
+            }
+          ],
+          "guests": {
+            "host": {
+              "x": 0,
+              "y": 0.125,
+              "w": 0.75,
+              "h": 0.75
+            },
+            "region": {
+              "x": 0.75,
+              "y": 0,
+              "w": 0.25,
+              "h": 1
+            },
+            "slots": []
+          }
+        },
+        "transition": {
+          "kind": "cut",
+          "durationMs": 320,
+          "applyAt": 1800000000000
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "a transition over 2 s",
+      "snapshot": {
+        "version": 1,
+        "show": "sh_0123456789012345678901",
+        "publisherSid": "PA_host1",
+        "revision": 7,
+        "output": "stream",
+        "orientation": "h",
+        "expiresAt": 1800000020000,
+        "scene": {
+          "id": "fd0c5087",
+          "items": [
+            {
+              "role": "screen",
+              "rect": {
+                "x": 0,
+                "y": 0,
+                "w": 1,
+                "h": 1
+              },
+              "crop": {
+                "l": 0,
+                "t": 0,
+                "r": 0,
+                "b": 0
+              },
+              "fit": "contain",
+              "mirror": false,
+              "mask": {
+                "shape": "rectangle"
+              },
+              "z": 0
+            },
+            {
+              "role": "host-camera",
+              "rect": {
+                "x": 0.74,
+                "y": 0.7,
+                "w": 0.22,
+                "h": 0.2475
+              },
+              "crop": {
+                "l": 0.1,
+                "t": 0.1,
+                "r": 0.1,
+                "b": 0.1
+              },
+              "fit": "cover",
+              "mirror": true,
+              "mask": {
+                "shape": "circle"
+              },
+              "z": 1
+            }
+          ],
+          "guests": {
+            "host": {
+              "x": 0,
+              "y": 0.125,
+              "w": 0.75,
+              "h": 0.75
+            },
+            "region": {
+              "x": 0.75,
+              "y": 0,
+              "w": 0.25,
+              "h": 1
+            },
+            "slots": []
+          }
+        },
+        "transition": {
+          "kind": "motion",
+          "durationMs": 2500,
+          "applyAt": 1800000000000
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "three items",
+      "snapshot": {
+        "version": 1,
+        "show": "sh_0123456789012345678901",
+        "publisherSid": "PA_host1",
+        "revision": 7,
+        "output": "stream",
+        "orientation": "h",
+        "expiresAt": 1800000020000,
+        "scene": {
+          "id": "fd0c5087",
+          "items": [
+            {
+              "role": "screen",
+              "rect": {
+                "x": 0,
+                "y": 0,
+                "w": 1,
+                "h": 1
+              },
+              "crop": {
+                "l": 0,
+                "t": 0,
+                "r": 0,
+                "b": 0
+              },
+              "fit": "contain",
+              "mirror": false,
+              "mask": {
+                "shape": "rectangle"
+              },
+              "z": 0
+            },
+            {
+              "role": "host-camera",
+              "rect": {
+                "x": 0.74,
+                "y": 0.7,
+                "w": 0.22,
+                "h": 0.2475
+              },
+              "crop": {
+                "l": 0.1,
+                "t": 0.1,
+                "r": 0.1,
+                "b": 0.1
+              },
+              "fit": "cover",
+              "mirror": true,
+              "mask": {
+                "shape": "circle"
+              },
+              "z": 1
+            },
+            {
+              "role": "host-camera",
+              "rect": {
+                "x": 0.6,
+                "y": 0,
+                "w": 0.4,
+                "h": 1
+              },
+              "crop": {
+                "l": 0,
+                "t": 0,
+                "r": 0,
+                "b": 0
+              },
+              "fit": "cover",
+              "mirror": false,
+              "mask": {
+                "shape": "rectangle"
+              },
+              "z": 1
+            }
+          ],
+          "guests": {
+            "host": {
+              "x": 0,
+              "y": 0.125,
+              "w": 0.75,
+              "h": 0.75
+            },
+            "region": {
+              "x": 0.75,
+              "y": 0,
+              "w": 0.25,
+              "h": 1
+            },
+            "slots": []
+          }
+        },
+        "transition": {
+          "kind": "motion",
+          "durationMs": 320,
+          "applyAt": 1799999999900
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "two cameras",
+      "snapshot": {
+        "version": 1,
+        "show": "sh_0123456789012345678901",
+        "publisherSid": "PA_host1",
+        "revision": 7,
+        "output": "stream",
+        "orientation": "h",
+        "expiresAt": 1800000020000,
+        "scene": {
+          "id": "fd0c5087",
+          "items": [
+            {
+              "role": "host-camera",
+              "rect": {
+                "x": 0.74,
+                "y": 0.7,
+                "w": 0.22,
+                "h": 0.2475
+              },
+              "crop": {
+                "l": 0.1,
+                "t": 0.1,
+                "r": 0.1,
+                "b": 0.1
+              },
+              "fit": "cover",
+              "mirror": true,
+              "mask": {
+                "shape": "circle"
+              },
+              "z": 1
+            },
+            {
+              "role": "host-camera",
+              "rect": {
+                "x": 0.6,
+                "y": 0,
+                "w": 0.4,
+                "h": 1
+              },
+              "crop": {
+                "l": 0,
+                "t": 0,
+                "r": 0,
+                "b": 0
+              },
+              "fit": "cover",
+              "mirror": false,
+              "mask": {
+                "shape": "rectangle"
+              },
+              "z": 1
+            }
+          ],
+          "guests": {
+            "host": {
+              "x": 0,
+              "y": 0.125,
+              "w": 0.75,
+              "h": 0.75
+            },
+            "region": {
+              "x": 0.75,
+              "y": 0,
+              "w": 0.25,
+              "h": 1
+            },
+            "slots": []
+          }
+        },
+        "transition": {
+          "kind": "motion",
+          "durationMs": 320,
+          "applyAt": 1799999999900
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "a crop that keeps nothing",
+      "snapshot": {
+        "version": 1,
+        "show": "sh_0123456789012345678901",
+        "publisherSid": "PA_host1",
+        "revision": 7,
+        "output": "stream",
+        "orientation": "h",
+        "expiresAt": 1800000020000,
+        "scene": {
+          "id": "fd0c5087",
+          "items": [
+            {
+              "role": "host-camera",
+              "rect": {
+                "x": 0.74,
+                "y": 0.7,
+                "w": 0.22,
+                "h": 0.2475
+              },
+              "crop": {
+                "l": 0.5,
+                "t": 0,
+                "r": 0.5,
+                "b": 0
+              },
+              "fit": "cover",
+              "mirror": true,
+              "mask": {
+                "shape": "circle"
+              },
+              "z": 1
+            }
+          ],
+          "guests": {
+            "host": {
+              "x": 0,
+              "y": 0.125,
+              "w": 0.75,
+              "h": 0.75
+            },
+            "region": {
+              "x": 0.75,
+              "y": 0,
+              "w": 0.25,
+              "h": 1
+            },
+            "slots": []
+          }
+        },
+        "transition": {
+          "kind": "motion",
+          "durationMs": 320,
+          "applyAt": 1799999999900
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "a radius over half",
+      "snapshot": {
+        "version": 1,
+        "show": "sh_0123456789012345678901",
+        "publisherSid": "PA_host1",
+        "revision": 7,
+        "output": "stream",
+        "orientation": "h",
+        "expiresAt": 1800000020000,
+        "scene": {
+          "id": "fd0c5087",
+          "items": [
+            {
+              "role": "host-camera",
+              "rect": {
+                "x": 0.74,
+                "y": 0.7,
+                "w": 0.22,
+                "h": 0.2475
+              },
+              "crop": {
+                "l": 0,
+                "t": 0,
+                "r": 0,
+                "b": 0
+              },
+              "fit": "cover",
+              "mirror": false,
+              "mask": {
+                "shape": "rounded",
+                "radius": 0.6
+              },
+              "z": 1
+            }
+          ],
+          "guests": {
+            "host": {
+              "x": 0,
+              "y": 0.125,
+              "w": 0.75,
+              "h": 0.75
+            },
+            "region": {
+              "x": 0.75,
+              "y": 0,
+              "w": 0.25,
+              "h": 1
+            },
+            "slots": []
+          }
+        },
+        "transition": {
+          "kind": "motion",
+          "durationMs": 320,
+          "applyAt": 1799999999900
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "seven guest slots",
+      "snapshot": {
+        "version": 1,
+        "show": "sh_0123456789012345678901",
+        "publisherSid": "PA_host1",
+        "revision": 7,
+        "output": "stream",
+        "orientation": "h",
+        "expiresAt": 1800000020000,
+        "scene": {
+          "id": "fd0c5087",
+          "items": [
+            {
+              "role": "screen",
+              "rect": {
+                "x": 0,
+                "y": 0,
+                "w": 1,
+                "h": 1
+              },
+              "crop": {
+                "l": 0,
+                "t": 0,
+                "r": 0,
+                "b": 0
+              },
+              "fit": "contain",
+              "mirror": false,
+              "mask": {
+                "shape": "rectangle"
+              },
+              "z": 0
+            },
+            {
+              "role": "host-camera",
+              "rect": {
+                "x": 0.74,
+                "y": 0.7,
+                "w": 0.22,
+                "h": 0.2475
+              },
+              "crop": {
+                "l": 0.1,
+                "t": 0.1,
+                "r": 0.1,
+                "b": 0.1
+              },
+              "fit": "cover",
+              "mirror": true,
+              "mask": {
+                "shape": "circle"
+              },
+              "z": 1
+            }
+          ],
+          "guests": {
+            "host": {
+              "x": 0,
+              "y": 0,
+              "w": 0.7,
+              "h": 0.7
+            },
+            "region": {
+              "x": 0.7,
+              "y": 0,
+              "w": 0.3,
+              "h": 1
+            },
+            "slots": [
+              {
+                "x": 0.05,
+                "y": 0.75,
+                "w": 0.2,
+                "h": 0.2
+              },
+              {
+                "x": 0.05,
+                "y": 0.75,
+                "w": 0.2,
+                "h": 0.2
+              },
+              {
+                "x": 0.05,
+                "y": 0.75,
+                "w": 0.2,
+                "h": 0.2
+              },
+              {
+                "x": 0.05,
+                "y": 0.75,
+                "w": 0.2,
+                "h": 0.2
+              },
+              {
+                "x": 0.05,
+                "y": 0.75,
+                "w": 0.2,
+                "h": 0.2
+              },
+              {
+                "x": 0.05,
+                "y": 0.75,
+                "w": 0.2,
+                "h": 0.2
+              },
+              {
+                "x": 0.05,
+                "y": 0.75,
+                "w": 0.2,
+                "h": 0.2
+              }
+            ]
+          }
+        },
+        "transition": {
+          "kind": "motion",
+          "durationMs": 320,
+          "applyAt": 1799999999900
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "a guest region off the canvas",
+      "snapshot": {
+        "version": 1,
+        "show": "sh_0123456789012345678901",
+        "publisherSid": "PA_host1",
+        "revision": 7,
+        "output": "stream",
+        "orientation": "h",
+        "expiresAt": 1800000020000,
+        "scene": {
+          "id": "fd0c5087",
+          "items": [
+            {
+              "role": "screen",
+              "rect": {
+                "x": 0,
+                "y": 0,
+                "w": 1,
+                "h": 1
+              },
+              "crop": {
+                "l": 0,
+                "t": 0,
+                "r": 0,
+                "b": 0
+              },
+              "fit": "contain",
+              "mirror": false,
+              "mask": {
+                "shape": "rectangle"
+              },
+              "z": 0
+            },
+            {
+              "role": "host-camera",
+              "rect": {
+                "x": 0.74,
+                "y": 0.7,
+                "w": 0.22,
+                "h": 0.2475
+              },
+              "crop": {
+                "l": 0.1,
+                "t": 0.1,
+                "r": 0.1,
+                "b": 0.1
+              },
+              "fit": "cover",
+              "mirror": true,
+              "mask": {
+                "shape": "circle"
+              },
+              "z": 1
+            }
+          ],
+          "guests": {
+            "host": {
+              "x": 0,
+              "y": 0,
+              "w": 0.7,
+              "h": 0.7
+            },
+            "region": {
+              "x": 0.8,
+              "y": 0,
+              "w": 0.3,
+              "h": 1
+            },
+            "slots": [
+              {
+                "x": 0.05,
+                "y": 0.75,
+                "w": 0.2,
+                "h": 0.2
+              }
+            ]
+          }
+        },
+        "transition": {
+          "kind": "motion",
+          "durationMs": 320,
+          "applyAt": 1799999999900
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "a user scene name as id",
+      "snapshot": {
+        "version": 1,
+        "show": "sh_0123456789012345678901",
+        "publisherSid": "PA_host1",
+        "revision": 7,
+        "output": "stream",
+        "orientation": "h",
+        "expiresAt": 1800000020000,
+        "scene": {
+          "id": "My podcast",
+          "items": [
+            {
+              "role": "screen",
+              "rect": {
+                "x": 0,
+                "y": 0,
+                "w": 1,
+                "h": 1
+              },
+              "crop": {
+                "l": 0,
+                "t": 0,
+                "r": 0,
+                "b": 0
+              },
+              "fit": "contain",
+              "mirror": false,
+              "mask": {
+                "shape": "rectangle"
+              },
+              "z": 0
+            },
+            {
+              "role": "host-camera",
+              "rect": {
+                "x": 0.74,
+                "y": 0.7,
+                "w": 0.22,
+                "h": 0.2475
+              },
+              "crop": {
+                "l": 0.1,
+                "t": 0.1,
+                "r": 0.1,
+                "b": 0.1
+              },
+              "fit": "cover",
+              "mirror": true,
+              "mask": {
+                "shape": "circle"
+              },
+              "z": 1
+            }
+          ],
+          "guests": {
+            "host": {
+              "x": 0,
+              "y": 0.125,
+              "w": 0.75,
+              "h": 0.75
+            },
+            "region": {
+              "x": 0.75,
+              "y": 0,
+              "w": 0.25,
+              "h": 1
+            },
+            "slots": []
+          }
+        },
+        "transition": {
+          "kind": "motion",
+          "durationMs": 320,
+          "applyAt": 1799999999900
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "freeform box partly off the canvas",
+      "snapshot": {
+        "version": 1,
+        "show": "sh_0123456789012345678901",
+        "publisherSid": "PA_host1",
+        "revision": 7,
+        "output": "stream",
+        "orientation": "h",
+        "expiresAt": 1800000020000,
+        "scene": {
+          "id": "fd0c5087",
+          "items": [
+            {
+              "role": "host-camera",
+              "rect": {
+                "x": -0.2,
+                "y": 0.8,
+                "w": 0.4,
+                "h": 0.4
+              },
+              "crop": {
+                "l": 0.1,
+                "t": 0.1,
+                "r": 0.1,
+                "b": 0.1
+              },
+              "fit": "cover",
+              "mirror": true,
+              "mask": {
+                "shape": "circle"
+              },
+              "z": 1
+            }
+          ],
+          "guests": {
+            "host": {
+              "x": 0,
+              "y": 0.125,
+              "w": 0.75,
+              "h": 0.75
+            },
+            "region": {
+              "x": 0.75,
+              "y": 0,
+              "w": 0.25,
+              "h": 1
+            },
+            "slots": []
+          }
+        },
+        "transition": {
+          "kind": "motion",
+          "durationMs": 320,
+          "applyAt": 1799999999900
+        }
+      },
+      "valid": true
+    }
+  ]
+}

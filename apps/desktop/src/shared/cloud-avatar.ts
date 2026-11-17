@@ -1,5 +1,6 @@
 /** Plan 249 S4. Public pixels only. Mirrored verbatim in the program client.
  * This extends S3 capabilities; it is not a second negotiation protocol. */
+import { parseAvatarAtlasMeta, type AvatarAtlasMeta } from './cloud-avatar-atlas-meta'
 export const AVATAR_TOPIC = 'videorc.presentation.avatar.v1'
 export const AVATAR_MAX_BYTES = 512 * 1024
 export const AVATAR_LEASE_MS = 30_000
@@ -14,6 +15,8 @@ export type AvatarCapability = {
   orientation: AvatarOrientation
   static?: StaticCapability
   applied?: AvatarApplied
+  /** Plan 249 S5: this consumer draws atlas layers and the motion topic. Absent: static only. */
+  animation?: 1
 }
 export type AvatarLayer = {
   kind: 'avatar' | 'bubble'
@@ -21,6 +24,12 @@ export type AvatarLayer = {
   /** Immutable PNG content, no URL, local path, persona or private text. */
   asset: { hash: string; png: string; width: number; height: number }
   expiresAt: number | null
+  /**
+   * Plan 249 S5, `avatar` only and only for an `animation: 1` consumer: the
+   * PNG is the pack's atlas and `rect` the Buddy's square box; the motion
+   * topic picks the cell and transform. S4's static limits still apply.
+   */
+  atlas?: AvatarAtlasMeta
 }
 export type AvatarSnapshot = {
   version: 1
@@ -63,6 +72,7 @@ export function parseAvatarCapability(value: unknown): AvatarCapability | null {
     !['h', 'v'].includes(String(value.orientation))
   )
     return null
+  if (value.animation !== undefined && value.animation !== 1) return null
   const staticCapability =
     value.static === undefined ? undefined : parseStaticCapability(value.static)
   if (value.static !== undefined && !staticCapability) return null
@@ -81,7 +91,8 @@ export function parseAvatarCapability(value: unknown): AvatarCapability | null {
     output: value.output as AvatarOutput,
     orientation: value.orientation as AvatarOrientation,
     ...(staticCapability ? { static: staticCapability } : {}),
-    ...(applied ? { applied } : {})
+    ...(applied ? { applied } : {}),
+    ...(value.animation === 1 ? { animation: 1 as const } : {})
   }
 }
 export function avatarRect(value: unknown): value is AvatarRect {
@@ -200,11 +211,17 @@ export function parseAvatarSnapshot(
       return null
     const { x, y, w, h } = layer.rect
     const { png, hash, width, height } = layer.asset
+    let atlas: AvatarAtlasMeta | null = null
+    if (layer.atlas !== undefined) {
+      atlas = layer.kind === 'avatar' ? parseAvatarAtlasMeta(layer.atlas, { width, height }) : null
+      if (!atlas) return null
+    }
     layers.push({
       kind: layer.kind as AvatarLayer['kind'],
       rect: { x, y, w, h },
       asset: { png, hash, width, height },
-      expiresAt: layer.expiresAt as number | null
+      expiresAt: layer.expiresAt as number | null,
+      ...(atlas ? { atlas } : {})
     })
   }
   layers.sort((a, b) => Number(a.kind === 'bubble') - Number(b.kind === 'bubble'))

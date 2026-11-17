@@ -6193,6 +6193,7 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "preview.screen.status"
         | "audio.meter.probeNative"
         | "scene.get"
+        | "cloud.scene.resolve"
         | "stream.output.topology.probe"
         | "performance.check.get"
         | "encoder.preference.get"
@@ -12898,6 +12899,24 @@ async fn handle_text_message_with_role(
         "scene.get" => {
             let scene = state.scene.lock().await.clone();
             ServerResponse::ok(command.id, scene)
+        }
+        // Plan 249 S12: the native engine's answer for a scene, never
+        // committed. The room program draws it; capture, the compositor and
+        // the camera lend are untouched, so a room never waits on them.
+        "cloud.scene.resolve" => {
+            if role != BackendRole::Renderer {
+                return ServerResponse::error(
+                    command.id,
+                    "forbidden",
+                    "Only the room renderer resolves scenes for the room.",
+                );
+            }
+            match serde_json::from_value::<protocol::SceneConfigParams>(command.params) {
+                Ok(params) => ServerResponse::ok(command.id, scene_from_capture_config(params)),
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
         }
         "scene.load_from_capture_config" => {
             match serde_json::from_value::<protocol::SceneConfigParams>(command.params) {

@@ -1,7 +1,7 @@
 import { createGraphicsView } from '../../../../shared/cloud-graphics-view'
 import type { GraphicsSnapshot } from '../../../../shared/cloud-graphics'
 import type { ReactNode } from 'react'
-import { createAvatarView } from '../../../../shared/cloud-avatar-view'
+import { createAvatarView, type AvatarMotionSource } from '../../../../shared/cloud-avatar-view'
 import type { AvatarSnapshot } from '../../../../shared/cloud-avatar'
 import { useEffect, useRef, useState, type ReactElement } from 'react'
 
@@ -86,7 +86,9 @@ import {
   type StageTile
 } from '@/lib/talk-show-layout'
 import { cn } from '@/lib/utils'
+import { programScenePreview, scenePreviewPicture, sceneStatusLine } from '@/lib/room-scene-preview'
 import { VIEW_SOURCE, tileFit } from '../../../../shared/cloud-presentation-views'
+import type { SceneTile } from '../../../../shared/cloud-scene'
 
 // The Show stage (plan 224 C-G3, D7, D8): while the room is open it replaces
 // the Studio's Preview. The renderer draws the room's tracks with the
@@ -314,10 +316,13 @@ function StageTileView({
 /** A `MediaStreamTrack` in a muted `<video>`; nothing while there is none. */
 function TrackVideo({
   track,
-  className
+  className,
+  onSize
 }: {
   track: MediaStreamTrack | null
   className?: string
+  /** The picture's decoded size, as it becomes known or changes. */
+  onSize?: (size: { w: number; h: number }) => void
 }): ReactElement | null {
   const ref = useRef<HTMLVideoElement>(null)
   useEffect(() => {
@@ -329,6 +334,20 @@ function TrackVideo({
       video.srcObject = null
     }
   }, [track])
+  useEffect(() => {
+    const video = ref.current
+    if (!video || !onSize) return
+    const report = (): void => {
+      if (video.videoWidth > 2 && video.videoHeight > 2)
+        onSize({ w: video.videoWidth, h: video.videoHeight })
+    }
+    video.addEventListener('loadedmetadata', report)
+    video.addEventListener('resize', report)
+    return () => {
+      video.removeEventListener('loadedmetadata', report)
+      video.removeEventListener('resize', report)
+    }
+  }, [onSize, track])
   if (!track) return null
   return <video autoPlay className={cn('size-full', className)} muted playsInline ref={ref} />
 }
@@ -540,13 +559,34 @@ function ProgramGraphics({
   )
 }
 
-function ProgramAvatar({ snapshot }: { snapshot: AvatarSnapshot | null }): ReactElement {
+function ProgramAvatar({
+  snapshot,
+  motion
+}: {
+  snapshot: AvatarSnapshot | null
+  motion?: AvatarMotionSource
+}): ReactElement {
   const root = useRef<HTMLDivElement>(null)
   const view = useRef<ReturnType<typeof createAvatarView> | null>(null)
   const [failure, setFailure] = useState(false)
+  // Plan 249 S5: an atlas layer moves with the poses the outputs replay (the
+  // producer's own simulation); without one it rests on its neutral cell.
+  const motionRef = useRef(motion)
+  useEffect(() => {
+    motionRef.current = motion
+  }, [motion])
   useEffect(() => {
     if (!root.current) return
-    const current = createAvatarView(root.current)
+    const current = createAvatarView(root.current, Date.now, {
+      orientation: 'h',
+      receiver: {
+        advance: () => motionRef.current?.advance(),
+        draw: (orientation, atlasHash) => motionRef.current?.draw(orientation, atlasHash) ?? null,
+        get sim() {
+          return motionRef.current?.sim ?? null
+        }
+      }
+    })
     view.current = current
     const timer = setInterval(() => current.step(), 50)
     return () => {
@@ -696,7 +736,10 @@ function ProgramMonitor({ talkShow }: { talkShow: TalkShowContextValue }): React
         )}
         {view.source === 'stage' ? (
           <ProgramGraphics snapshot={talkShow.room.graphics?.preview ?? null}>
-            <ProgramAvatar snapshot={talkShow.room.avatar?.preview ?? null} />
+            <ProgramAvatar
+              motion={talkShow.avatarMotionSource}
+              snapshot={talkShow.room.avatar?.preview ?? null}
+            />
           </ProgramGraphics>
         ) : null}
       </div>
@@ -708,6 +751,22 @@ function ProgramMonitor({ talkShow }: { talkShow: TalkShowContextValue }): React
               : talkShow.room.avatar?.enabled
                 ? 'Avatar preview · Output unconfirmed'
                 : 'Room avatar off · Enable for this room')}
+        </span>
+      ) : null}
+      {view.source === 'stage' &&
+      talkShow.room.avatar?.enabled &&
+      talkShow.room.avatar.animation?.reason ? (
+        <span
+          className="text-meta text-muted-foreground"
+          data-avatar-animation={talkShow.room.avatar.animation.state}
+          data-testid="show-stage-avatar-animation"
+        >
+          {talkShow.room.avatar.animation.reason}
+        </span>
+      ) : null}
+      {view.source === 'stage' && sceneStatusLine(talkShow.room.scene) ? (
+        <span className="text-label text-subtle" data-testid="show-stage-scene-status">
+          {sceneStatusLine(talkShow.room.scene)}
         </span>
       ) : null}
       {view.source === 'stage' && talkShow.room.avatar?.enabled ? (
@@ -750,6 +809,22 @@ function ProgramMonitor({ talkShow }: { talkShow: TalkShowContextValue }): React
 function ProgramStage({ talkShow }: { talkShow: TalkShowContextValue }): ReactElement {
   const { cloudStatus } = useStudioCloud()
   const room = cloudStatus?.room
+  // Plan 249 S12: while the host's scene is on the program, the preview
+  // draws it with the program page's own scene geometry.
+  const scene = programScenePreview(talkShow.room.scene, room, talkShow.hostIdentity)
+  if (scene)
+    return (
+      <>
+        {scene.tiles.map((tile) => (
+          <SceneTileView
+            key={`${tile.kind}:${tile.identity}`}
+            participant={room?.participants?.find((entry) => entry.identity === tile.identity)}
+            talkShow={talkShow}
+            tile={tile}
+          />
+        ))}
+      </>
+    )
   const plan = planStage(STAGE_CANVAS, managedProgramStageInput(room))
   return (
     <>
@@ -764,6 +839,67 @@ function ProgramStage({ talkShow }: { talkShow: TalkShowContextValue }): ReactEl
         />
       ))}
     </>
+  )
+}
+
+/**
+ * A scene tile in the Program preview: its box, mask and draw order, and its
+ * picture cropped, fitted and mirrored as the program page draws it
+ * (`scenePreviewPicture`). The picture only, without words, as the monitor.
+ */
+function SceneTileView({
+  tile,
+  participant,
+  talkShow
+}: {
+  tile: SceneTile
+  participant: CloudRoomParticipant | undefined
+  talkShow: TalkShowContextValue
+}): ReactElement {
+  const [source, setSource] = useState<{ w: number; h: number } | null>(null)
+  const { track, cameraOff, name } = tileTrack(
+    { identity: tile.identity, kind: tile.kind, rect: tile.rect, cornerRadius: 0 },
+    talkShow
+  )
+  const picture = scenePreviewPicture(tile, source)
+  const look = cameraOffLook(tile.rect.w, tile.rect.h)
+  const { mask } = tile
+  return (
+    <div
+      className="absolute overflow-hidden bg-inset"
+      data-scene-role={tile.role}
+      data-stage-identity={tile.identity}
+      data-stage-kind={tile.kind}
+      data-stage-shape={mask.shape}
+      data-testid="show-stage-tile"
+      style={{
+        ...stageRectPercent(STAGE_CANVAS, tile.rect),
+        zIndex: tile.z,
+        ...(mask.shape === 'circle'
+          ? { borderRadius: 0, clipPath: HOST_CIRCLE_CLIP }
+          : { borderRadius: mask.shape === 'rounded' ? cqw(mask.radiusPx) : 0 })
+      }}
+    >
+      <div
+        className="absolute overflow-hidden"
+        data-testid="show-stage-scene-clip"
+        style={{ ...picture.clip, ...(tile.mirror ? { transform: 'scaleX(-1)' } : {}) }}
+      >
+        <div className="absolute" style={picture.full}>
+          <TrackVideo className="object-fill" onSize={setSource} track={track} />
+        </div>
+      </div>
+      {cameraOff ? (
+        <CameraOffAvatar
+          circle={cqw(look.diameter)}
+          letter={cqw(look.fontPx)}
+          name={name === 'You' ? (participant?.name ?? name) : name || (participant?.name ?? '')}
+        />
+      ) : null}
+      {showsAway(participant?.away, cameraOff) && tile.kind === 'person' ? (
+        <span className="absolute inset-0 bg-video-ground/60" />
+      ) : null}
+    </div>
   )
 }
 

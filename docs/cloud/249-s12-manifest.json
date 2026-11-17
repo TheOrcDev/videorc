@@ -1,0 +1,265 @@
+{
+  "schemaVersion": 1,
+  "slice": "S12",
+  "branch": "feat/249-s12-cloud-parity",
+  "note": "Every intentional path versus its base, with SHA-256 of the working-tree file. The manifest itself is excluded (it cannot hash itself); node_modules symlinks are never part of the change.",
+  "repos": {
+    "desktop": {
+      "base": "894810e69650ea71812d78efd6f0771216144836",
+      "basePr": "https://github.com/TheOrcDev/videorc/pull/1454",
+      "files": [
+        {
+          "path": "apps/desktop/src/renderer/src/components/scene/scene-dialogs.tsx",
+          "status": "modified",
+          "sha256": "2bc2ecb543ff0d6c19dbce0c6883f18e1975efdfb0fab41786af5aa1ac348e9d"
+        },
+        {
+          "path": "apps/desktop/src/renderer/src/components/scene/scene-list.test.ts",
+          "status": "modified",
+          "sha256": "68cd8c64872de0e5d084ad37387cb7e7012bf3e9e7e72a2eda8d521ef59543b9"
+        },
+        {
+          "path": "apps/desktop/src/renderer/src/components/studio/show-stage.test.ts",
+          "status": "modified",
+          "sha256": "cb8d2fa4e8fe7340c68ba1ab0e9d360a709bbbd5cc50e26ebf638637d2d88630"
+        },
+        {
+          "path": "apps/desktop/src/renderer/src/components/studio/show-stage.tsx",
+          "status": "modified",
+          "sha256": "855a44004e89b91f70f172667ad26a5a5213047533817756d30b6d477ffe071e"
+        },
+        {
+          "path": "apps/desktop/src/renderer/src/hooks/use-scene-presets.ts",
+          "status": "modified",
+          "sha256": "b7d6713c9f1010c34e3ac712021fe5defa526c55767865a85053f4c91d8f51a4"
+        },
+        {
+          "path": "apps/desktop/src/renderer/src/hooks/use-studio.tsx",
+          "status": "modified",
+          "sha256": "81e6183d70d60907c53e6aad662e45af4cdc8b2c34de5e26e76badbb11c484dd"
+        },
+        {
+          "path": "apps/desktop/src/renderer/src/hooks/use-talk-show-room.ts",
+          "status": "modified",
+          "sha256": "ea83da371144f5c293d4e3b199a0926bba73326d01bf6c42dc8588d058b2b3fc"
+        },
+        {
+          "path": "apps/desktop/src/renderer/src/lib/cloud-scene-adapter.ts",
+          "status": "added",
+          "sha256": "6c63b21053757d118bfd0d79473a8574d11d8be5dcf70938b26e5584a1544016"
+        },
+        {
+          "path": "apps/desktop/src/renderer/src/lib/cloud-scene-native.ts",
+          "status": "added",
+          "sha256": "05543e3000eb0600af8127113ec43fd5ce699c23858f967d3b02a2741772c6bc"
+        },
+        {
+          "path": "apps/desktop/src/renderer/src/lib/cloud-scene-room.test.ts",
+          "status": "added",
+          "sha256": "8ade23bf2a4e2ffd3ae0af1cb7ed9a4a0c1085345eab53394c151e088ed63f04"
+        },
+        {
+          "path": "apps/desktop/src/renderer/src/lib/room-media-v2.ts",
+          "status": "modified",
+          "sha256": "0d71eef06ff60b92eec52a381db693c218fc88a2d6ff9584258bc6d788be69e0"
+        },
+        {
+          "path": "apps/desktop/src/renderer/src/lib/room-scene-preview.test.ts",
+          "status": "added",
+          "sha256": "54c02f570c4f811af51534e9f7165f7212f7a0dba10e35bbb6898b95bf12c308"
+        },
+        {
+          "path": "apps/desktop/src/renderer/src/lib/room-scene-preview.ts",
+          "status": "added",
+          "sha256": "9026b0dcf34810579e89c3c698c7a4914629f48f03b8cb8152727acfa081f73c"
+        },
+        {
+          "path": "apps/desktop/src/renderer/src/lib/room-scene-publisher.ts",
+          "status": "added",
+          "sha256": "e8d6e01d356eeacb0f051585423acfbc26b7b627d42bc6bfc4e1cb40431661c4"
+        },
+        {
+          "path": "apps/desktop/src/renderer/src/lib/room-scene-resender.test.ts",
+          "status": "added",
+          "sha256": "478b9c83eeb17bf3dc9faf28da47fdda3d84659bfcc3ef3f0709fee3bb2ee5c7"
+        },
+        {
+          "path": "apps/desktop/src/renderer/src/lib/room-scene-resender.ts",
+          "status": "added",
+          "sha256": "011ca05f21cc392feeaddd0fd65b2972207859d36d9a5bddac3bb5cce0808395"
+        },
+        {
+          "path": "apps/desktop/src/renderer/src/lib/scene-guest-roles.test.ts",
+          "status": "added",
+          "sha256": "91579edf303a250f46e34ffa366dd6f3160c90d47289ae4cea2839d7e5a80918"
+        },
+        {
+          "path": "apps/desktop/src/renderer/src/lib/scene-guest-roles.ts",
+          "status": "added",
+          "sha256": "2ec0795cd3174948b30f6c411d826674dd5c348c4a2627b416173270c5a9c99f"
+        },
+        {
+          "path": "apps/desktop/src/renderer/src/lib/scene-presets.ts",
+          "status": "modified",
+          "sha256": "0a9f455019faabb34e25b17692b647b56dbb7ba69ede2d49617965e3e075cd7f"
+        },
+        {
+          "path": "apps/desktop/src/renderer/src/lib/talk-show-room.ts",
+          "status": "modified",
+          "sha256": "a1f952a72fff101a4420e68e5b44c4441123b4dcbec42b7f191789a369ac0805"
+        },
+        {
+          "path": "apps/desktop/src/shared/backend-rpc-contract.ts",
+          "status": "modified",
+          "sha256": "7929dc6922ec5df843a6ef51b25e197b3ae257e4999de4319277d3a7a4116b8e"
+        },
+        {
+          "path": "apps/desktop/src/shared/cloud-scene.test.ts",
+          "status": "added",
+          "sha256": "593568bd81698f64de2479d8b2c6231f1cab541fd20732a5b1f23ef0a7035190"
+        },
+        {
+          "path": "apps/desktop/src/shared/cloud-scene.ts",
+          "status": "added",
+          "sha256": "3c443c3d83ccf0617ec7847bf0e9c386f5a541b4c2c1ff3a07251653c4c69cbe"
+        },
+        {
+          "path": "crates/videorc-backend/src/main.rs",
+          "status": "modified",
+          "sha256": "11d8909c46a6550afb0c4913ac660d38b85298d6686434d06619665ab9e3160b"
+        },
+        {
+          "path": "docs/cloud/249-s12-handoff.md",
+          "status": "added",
+          "sha256": "0c0e0affffa32064b647a59d2276a5d64c5ae0e5689effc14ea47ab495ffd844"
+        },
+        {
+          "path": "protocol-fixtures/cloud-parity-scenes.json",
+          "status": "added",
+          "sha256": "428ef67c1b3053eaac6c852cbbed5744c4811186cc9cc9f30bf8f3bf30e8e5d9"
+        },
+        {
+          "path": "scripts/lib/cloud-parity-baseline.mjs",
+          "status": "modified",
+          "sha256": "7728d3982762a42967f495c9f02ab30e6d710d58ca0ed5abe71d58468eafc36b"
+        },
+        {
+          "path": "scripts/lib/cloud-parity-scenes-contract.mjs",
+          "status": "added",
+          "sha256": "e90a4114f33e4cf22e20ecb7c84393230c445b86397008c574d7e78e594435fa"
+        },
+        {
+          "path": "scripts/lib/cloud-parity-scenes-contract.test.mjs",
+          "status": "added",
+          "sha256": "d3885c9ebad4e173fd91ef90c6de921db49fab633488e6397bf5bd99aef82481"
+        },
+        {
+          "path": "scripts/lib/cloud-parity-scenes.mjs",
+          "status": "added",
+          "sha256": "07daf59adfec2c470ed7024403dc9f206508e71484ffd2fa5a1fcdc10aa8da77"
+        },
+        {
+          "path": "scripts/smoke-cloud-parity-app.mjs",
+          "status": "modified",
+          "sha256": "1a3acd93815888401d87c99090edfb20a25887a40197fc3e3c970df1ac225402"
+        }
+      ]
+    },
+    "web": {
+      "base": "c419182892fda1aec058df86710cc425458b0f16",
+      "basePr": "https://github.com/TheOrcDev/videorc-web/pull/136",
+      "files": [
+        {
+          "path": "docs/cloud/249-s12-handoff.md",
+          "status": "added",
+          "sha256": "0c0e0affffa32064b647a59d2276a5d64c5ae0e5689effc14ea47ab495ffd844"
+        },
+        {
+          "path": "lib/cloud/program/cloud-scene.ts",
+          "status": "added",
+          "sha256": "e8a647784893f9fdc6c17d58f3c22c78166b3ea9cb3021559eb9eb1b21fdd325"
+        },
+        {
+          "path": "lib/cloud/program/room-media-v2.ts",
+          "status": "modified",
+          "sha256": "04bd00eb2c749fc239b1ebbe83e8f2837f584be85299616228ec283c76241ab5"
+        },
+        {
+          "path": "lib/cloud/program/source.ts",
+          "status": "modified",
+          "sha256": "969debbc088b6cfb4b25f7a8915cc8cb066a04143c750c33492ffd7cd457dbd9"
+        },
+        {
+          "path": "lib/cloud/program/stage-layout.ts",
+          "status": "modified",
+          "sha256": "d779d91a69224f7c25207904dc332ac829056699048c535cca7c489056572909"
+        },
+        {
+          "path": "lib/cloud/program/stage-view.ts",
+          "status": "modified",
+          "sha256": "b13f26b71de5efa040ced80dc82da0f2e1162fefebbb0881363d62359d70b390"
+        },
+        {
+          "path": "lib/cloud/program/stage.ts",
+          "status": "modified",
+          "sha256": "728b8839ebf10876ba5c773081dec1eb5fb0141d9fcc8c80b2bb45a3f9b31502"
+        },
+        {
+          "path": "lib/cloud/program/tools/emit.ts",
+          "status": "modified",
+          "sha256": "eace6741dba9825e14a29e0e312a43e328d167d21df92c531fc89323bfa85894"
+        },
+        {
+          "path": "lib/cloud/room-media-relay.ts",
+          "status": "modified",
+          "sha256": "eb57d3892f0573a880e101d706c41ec0f74330a3b08db1705f814cd40a585d53"
+        },
+        {
+          "path": "public/cloud/program/v1/cloud-scene.js",
+          "status": "added",
+          "sha256": "2a712e88f1e0e83870a685145dce678b667113e50474d89b71db83d4fc795f24"
+        },
+        {
+          "path": "public/cloud/program/v1/room-media-v2.js",
+          "status": "modified",
+          "sha256": "078a7e44f5db004cf27d4802a9c20b71d85ca6e4bfc40a6846a3a3625b34cfb2"
+        },
+        {
+          "path": "public/cloud/program/v1/source.js",
+          "status": "modified",
+          "sha256": "9217a7cd660e2bbd81349bc7bd5e249e9a448610f5c6911ea5649983fc7992f1"
+        },
+        {
+          "path": "public/cloud/program/v1/stage-layout.js",
+          "status": "modified",
+          "sha256": "2dbfb5b3d9bc703ca44ae280af8f879d6d4e6574727e6e6ef1b1e6ac8e14f0f8"
+        },
+        {
+          "path": "public/cloud/program/v1/stage-view.js",
+          "status": "modified",
+          "sha256": "ce0cecfc644c0509ae54c97db4c0b69b0e90d7015955a1dc856ab7802ca4b938"
+        },
+        {
+          "path": "public/cloud/program/v1/stage.js",
+          "status": "modified",
+          "sha256": "c295b4b44384807fa17311ca54b4fc2e1ef8c2c0ed971b2b045dadd40d641726"
+        },
+        {
+          "path": "tests/cloud-program-source.test.ts",
+          "status": "modified",
+          "sha256": "9dc7cf75a479ec083d364b04eecb51b96d053bce7429eb8b8be947b5fc8b0ce5"
+        },
+        {
+          "path": "tests/cloud-scene.test.ts",
+          "status": "added",
+          "sha256": "aea10423f19c8ef94c50e07ec39af352b09c8d8275325aa51164638b3927508e"
+        },
+        {
+          "path": "tests/fixtures/cloud-parity-scenes.json",
+          "status": "added",
+          "sha256": "428ef67c1b3053eaac6c852cbbed5744c4811186cc9cc9f30bf8f3bf30e8e5d9"
+        }
+      ]
+    }
+  }
+}

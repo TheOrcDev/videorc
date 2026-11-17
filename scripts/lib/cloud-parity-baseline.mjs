@@ -4,6 +4,8 @@ import {
   assertGraphicsArtifacts
 } from './cloud-parity-graphics.mjs'
 import { prepareAvatar, exerciseAvatar, assertAvatarVideo } from './cloud-parity-avatar.mjs'
+import { exerciseAvatarAnimation } from './cloud-parity-avatar-animation.mjs'
+import { prepareScenes, exerciseScenes, assertScenesVideo } from './cloud-parity-scenes.mjs'
 import { exerciseSoundboard } from './cloud-parity-soundboard.mjs'
 import { exercisePrivacy } from './cloud-parity-privacy.mjs'
 import { exerciseViews } from './cloud-parity-views.mjs'
@@ -65,10 +67,14 @@ export async function runBaseline({
   privacy = false,
   soundboard = false,
   avatar = false,
+  scenes = false,
   replayRing = false,
+  avatarAnimation = false,
   views = false,
   graphics = false
 }) {
+  // Plan 249 S5: the animation case runs on the avatar case's real pages.
+  avatar = avatar || avatarAnimation
   const report = baselineReport({
     desktop: revision(desktopRoot),
     web: revision(webRoot),
@@ -76,19 +82,23 @@ export async function runBaseline({
   })
   report.case = graphics
     ? 'graphics'
-    : replayRing
-      ? 'replay-ring'
-      : views
-        ? 'views'
-        : avatar
-          ? 'avatar'
-          : soundboard
-            ? 'soundboard'
-            : privacy
-              ? 'privacy'
-              : controls
-                ? 'controls'
-                : 'baseline'
+    : scenes
+      ? 'scenes'
+      : replayRing
+        ? 'replay-ring'
+        : avatarAnimation
+          ? 'avatar-animation'
+          : views
+            ? 'views'
+            : avatar
+              ? 'avatar'
+              : soundboard
+                ? 'soundboard'
+                : privacy
+                  ? 'privacy'
+                  : controls
+                    ? 'controls'
+                    : 'baseline'
   // A dirty web consumer makes its revision misleading. Require a dedicated,
   // installed checkout; inspect it read-only and never change the active one.
   const webDirty = execFileSync('git', ['status', '--porcelain', '--untracked-files=no'], {
@@ -189,17 +199,20 @@ export async function runBaseline({
     pages = await startParityPages(
       webRoot,
       guests,
-      soundboard || avatar || replayRing || captions || views || graphics
+      soundboard || avatar || scenes || replayRing || captions || views || graphics
         ? {
-            ...(avatar || graphics
+            ...(avatar || scenes || graphics
               ? {
                   graphicsLanes: {
                     EG_parity_baseline: { output: 'stream', orientation: 'h' },
                     EG_parity_avatar_recording: { output: 'recording', orientation: 'h' },
-                    ...(graphics
+                    // S12 scenes reuse S9's vertical stream lane identity.
+                    ...(graphics || scenes
                       ? {
                           EG_parity_graphics_v: { output: 'stream', orientation: 'v' },
-                          EG_parity_graphics_vrec: { output: 'recording', orientation: 'v' }
+                          ...(graphics
+                            ? { EG_parity_graphics_vrec: { output: 'recording', orientation: 'v' } }
+                            : {})
                         }
                       : {})
                   }
@@ -299,6 +312,7 @@ export async function runBaseline({
     if (graphics) await prepareGraphics({ h, report, output })
     // S6 views also needs the real avatar producer for guest graphics (D4).
     if (avatar || views) await prepareAvatar({ h, report })
+    if (scenes) await prepareScenes({ h, report })
     const program = await newPage('program')
     await program.addInitScript(installProgramAudioTap)
     const search = new URLSearchParams({
@@ -472,7 +486,15 @@ export async function runBaseline({
       })
       await h.rpc('cohost.utterance.say', { text: 'Parity fixture bubble' })
       await captureAudio('avatar', clients)
-      if (avatar)
+      if (avatarAnimation)
+        await exerciseAvatarAnimation({
+          h,
+          report,
+          clients,
+          newPage,
+          programUrl: `${pages.origin}${pages.wire.PROGRAM_PAGE_PATH}?${search}`
+        })
+      else if (avatar)
         await exerciseAvatar({
           h,
           report,
@@ -490,6 +512,17 @@ export async function runBaseline({
           newPage,
           programUrl: `${pages.origin}${pages.wire.PROGRAM_PAGE_PATH}?${search}`,
           output
+        })
+      if (scenes)
+        await exerciseScenes({
+          h,
+          report,
+          clients,
+          newPage,
+          programUrl: `${pages.origin}${pages.wire.PROGRAM_PAGE_PATH}?${search}`,
+          output,
+          desktopRoot,
+          guestIds: [...guests.values()].map((g) => g.identity)
         })
       assert.equal(h.web.snapshot(h.showId).state.legs.length, 0)
       h.assertNoDirect()
@@ -536,6 +569,7 @@ export async function runBaseline({
       report.videoMeasurements = { colorPeaks, frameHits, sampledFps: 5 }
       if (avatar) assertAvatarVideo(report)
       if (graphics) assertGraphicsArtifacts(report)
+      if (scenes) assertScenesVideo(report)
       const seen = (key) => frameHits.program[key] >= 5
       observations.push(
         {

@@ -72,11 +72,14 @@ if (
     'privacy',
     'soundboard',
     'avatar',
+    'scenes',
     'lifecycle',
     'services',
     'replay-ring',
+    'avatar-animation',
     'views',
-    'graphics'
+    'graphics',
+    'alpha-spike'
   ].includes(selected.case)
 ) {
   throw new Error(
@@ -90,11 +93,13 @@ if (!webRoot)
   )
 const { runBaseline } = await import('./lib/cloud-parity-baseline.mjs')
 const run =
-  selected.case === 'lifecycle'
-    ? (await import('./lib/cloud-parity-lifecycle.mjs')).runLifecycle
-    : selected.case === 'services'
-      ? (await import('./lib/cloud-parity-services.mjs')).runServices
-      : runBaseline
+  selected.case === 'alpha-spike'
+    ? (await import('./lib/cloud-parity-alpha.mjs')).runAlphaSpike
+    : selected.case === 'lifecycle'
+      ? (await import('./lib/cloud-parity-lifecycle.mjs')).runLifecycle
+      : selected.case === 'services'
+        ? (await import('./lib/cloud-parity-services.mjs')).runServices
+        : runBaseline
 const { output } = await run({
   desktopRoot: fileURLToPath(new URL('../', import.meta.url)),
   webRoot,
@@ -103,7 +108,9 @@ const { output } = await run({
   privacy: selected.case === 'privacy',
   soundboard: selected.case === 'soundboard',
   avatar: selected.case === 'avatar',
+  scenes: selected.case === 'scenes',
   replayRing: selected.case === 'replay-ring',
+  avatarAnimation: selected.case === 'avatar-animation',
   views: selected.case === 'views',
   graphics: selected.case === 'graphics'
 })

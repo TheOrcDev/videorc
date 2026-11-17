@@ -22,6 +22,8 @@ import {
 } from '@/lib/talk-show-context'
 import type { TalkShowCameraSettings } from '@/lib/talk-show-camera-effects'
 import type { TalkShowRoomClient, TalkShowRoomSnapshot } from '@/lib/talk-show-room'
+import { cloudAvatarAtlasReason } from '@/lib/cloud-avatar-refusal'
+import type { AvatarMotionSource } from '../../../shared/cloud-avatar-view'
 
 // The host's room, from the Studio's side (plan 224 C-G4). The backend owns
 // the show and the room's facts (`cloud.state`); this hook owns the renderer's
@@ -181,7 +183,7 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
       mode:
         import.meta.env.DEV &&
         (roomNativeMicrophoneEnabled() ||
-          new URLSearchParams(window.location.search).get('roomNativeMic') === '1')
+          new URLSearchParams(globalThis.location?.search ?? '').get('roomNativeMic') === '1')
           ? 'native-headphones'
           : 'browser-aec',
       deviceId: microphoneId,
@@ -414,7 +416,56 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
           })
         }
       }
-      if (!cancelled) current.setAvatar(content)
+      // Plan 249 S5: an Alive pack also travels as an atlas for consumers that
+      // animate it; a failure keeps the static content above, never blocks it.
+      let seed: Parameters<typeof current.setAvatarMotion>[0] = null
+      let refused: string | null = null
+      const persona = avatar.persona!
+      if ((content.stream || content.recording) && persona.avatar.kind === 'alive') {
+        const packId = persona.avatar.packId
+        try {
+          const atlasModule = await import('@/lib/cloud-avatar-atlas')
+          const atlas = await atlasModule.cachedCloudAvatarAtlas(
+            { id: persona.id, packId },
+            async () => {
+              const { loadBuddyPreviewPack, disposeBuddyPreviewPack } =
+                await import('@/lib/buddy-pet-preview-pack')
+              const { avatarHash } = await import('../../../shared/cloud-avatar')
+              const pack = await loadBuddyPreviewPack({
+                personaId: persona.id,
+                packId,
+                pixelSize: atlasModule.ATLAS_MAX_CELL_PX
+              })
+              try {
+                return await atlasModule.buildCloudAvatarAtlas(pack, {
+                  canvas: atlasModule.browserAtlasCanvas,
+                  hash: avatarHash
+                })
+              } finally {
+                disposeBuddyPreviewPack(pack)
+              }
+            }
+          )
+          if (cancelled) return
+          const built = atlasModule.animatedAvatarContent({
+            atlas,
+            staticLayers: { h: content.h, v: content.v },
+            layout: { h: avatar.layout.horizontal, v: avatar.layout.vertical },
+            settings: persona.motion,
+            avatarState: avatar.snapshot?.state ?? 'idle'
+          })
+          content.animated = built.animated
+          seed = built.seed
+        } catch (error) {
+          // The streamer reads why under the Program preview; the detail stays here.
+          console.warn('[talk-show] avatar stays still on cloud outputs', error)
+          refused = cloudAvatarAtlasReason(error)
+        }
+      }
+      if (!cancelled) {
+        current.setAvatar(content)
+        current.setAvatarMotion(seed, refused)
+      }
     })().catch((error: unknown) => {
       if (!cancelled) {
         current.failAvatar()
@@ -451,6 +502,15 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
         .catch(() => {})
     }
   }, [client, roomOpen, showId, snapshot.state, snapshot.avatar?.observed, deps.avatar])
+
+  // Plan 249 S5: the backend's public animator inputs drive the room's
+  // motion stream. No text or prompt is in them (`buddy_animator::public_event`).
+  useEffect(() => {
+    if (!client || !roomOpen) return
+    return client.on('cohost.pet.animator', (payload) => {
+      clientRef.current?.avatarMotionEvent(payload)
+    })
+  }, [client, roomOpen])
 
   // The guest page reads the stage from the host's data topic (D11).
   useEffect(() => {
@@ -501,6 +561,19 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
   const setAvatarEnabled = useCallback(async (enabled: boolean) => {
     clientRef.current?.setAvatarEnabled(enabled)
   }, [])
+  const avatarMotionProbe = useCallback(() => clientRef.current?.avatarMotionProbe() ?? null, [])
+  // Plan 249 S5: one stable source for the Program preview, whichever client is current.
+  const avatarMotionSource = useMemo<AvatarMotionSource>(
+    () => ({
+      advance: () => clientRef.current?.avatarMotionSource.advance(),
+      draw: (orientation, atlasHash) =>
+        clientRef.current?.avatarMotionSource.draw(orientation, atlasHash) ?? null,
+      get sim() {
+        return clientRef.current?.avatarMotionSource.sim ?? null
+      }
+    }),
+    []
+  )
 
   const setAvatarGuests = useCallback(async (enabled: boolean) => {
     clientRef.current?.setAvatarGuests(enabled)
@@ -550,6 +623,17 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
     },
     [call, hostShape]
   )
+
+  const clearRoomScene = useCallback(async () => {
+    const roomClient = clientRef.current
+    if (!roomClient?.sceneContent) return
+    const commit = await roomClient.commitScene(null)
+    if (commit.state === 'failed' || commit.state === 'waiting')
+      onError(
+        new Error(commit.reason ?? 'The program has not confirmed the room layout.'),
+        'clear the scene'
+      )
+  }, [onError])
 
   const previewReplaced = roomOpen || previewReplacedOverride
   const value = useMemo<TalkShowContextValue>(
@@ -601,6 +685,9 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
       setLayout: async (layout) => {
         if (!stage) return
         await setStage({ ...stage, layout })
+        // Plan 249 S12: choosing a room layout puts the room's own layouts
+        // back on the program; a scene stays only until the host does this.
+        await clearRoomScene()
       },
       setSpotlight: async (identity) => {
         if (!stage) return
@@ -609,6 +696,7 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
           layout: identity ? 'spotlight' : stage.layout,
           spotlight: identity ?? undefined
         })
+        if (identity) await clearRoomScene()
       },
       listDisplaySources: async () => (await window.videorc?.getTalkShowDisplaySources?.()) ?? [],
       startScreenShare: async (sourceId) => {
@@ -637,6 +725,8 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
       },
       setGraphicsEnabled,
       setAvatarEnabled,
+      avatarMotionProbe,
+      avatarMotionSource,
       setAvatarGuests,
       setMonitor: async (enabled) => {
         // Plan 234 D6: a managed show has no return to subscribe to or to
@@ -692,9 +782,12 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
     }),
     [
       call,
+      clearRoomScene,
       clipsStepAside,
       setGraphicsEnabled,
       setAvatarEnabled,
+      avatarMotionProbe,
+      avatarMotionSource,
       setAvatarGuests,
       hostIdentity,
       onError,

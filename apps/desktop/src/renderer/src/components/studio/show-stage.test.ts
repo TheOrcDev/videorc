@@ -476,6 +476,102 @@ describe('room view and program preview (plan 249 S6)', () => {
     )
   })
 
+  // Plan 249 S12: the host's scene on the program, drawn in the preview with
+  // the shared scene plan; the room view and S6's stage badge are unchanged.
+  it('draws the room scene in the Program preview with the shared scene geometry', async () => {
+    vi.useFakeTimers({ now: Date.parse('2026-11-16T12:00:30Z'), toFake: ['Date'] })
+    const { stageKey } = await import('../../../../shared/cloud-presentation-views')
+    const { planSceneTiles } = await import('../../../../shared/cloud-scene')
+    const fixture = (
+      await import('../../../../../../../protocol-fixtures/cloud-parity-scenes.json')
+    ).default
+    const scene = fixture.snapshots[0].snapshot.scene as Parameters<typeof planSceneTiles>[0] & {
+      id: string
+    }
+    const person = (identity: string) => ({
+      identity,
+      name: identity,
+      role: identity === HOST ? ('host' as const) : ('guest' as const),
+      onStage: true,
+      video: true,
+      audio: true,
+      muted: false,
+      screen: identity === HOST,
+      quality: 'good' as const,
+      sinceMs: 1000,
+      away: false
+    })
+    const stage = { layout: 'side-by-side' as const, onStage: [HOST, 'g_ada'], screen: HOST }
+    const roomStatus = openRoom({
+      live: true,
+      guests: [ada],
+      participants: [person(HOST), person('g_ada')],
+      stage,
+      shown: {
+        onStage: stage.onStage,
+        screen: HOST,
+        layout: stage.layout,
+        stageKey: stageKey(stage),
+        at: '2026-11-16T12:00:25Z'
+      }
+    })
+    const sceneStatus = {
+      enabled: true,
+      state: 'applied' as const,
+      reason: null,
+      generation: 2,
+      sceneId: { h: scene.id, v: null },
+      content: { h: scene, v: null, transition: { kind: 'cut' as const, durationMs: 0 } },
+      observed: {},
+      productionQualified: false as const
+    }
+    await mount(
+      talkStatus({ show: managedShow, room: roomStatus }),
+      talkShow({ room: { ...NO_TALK_SHOW.room, scene: sceneStatus } })
+    )
+    const tiles = [
+      ...(monitor()?.querySelectorAll<HTMLElement>('[data-testid="show-stage-tile"]') ?? [])
+    ]
+    const plan = planSceneTiles(
+      scene,
+      { width: 1920, height: 1080 },
+      { host: HOST, guests: ['g_ada'], hostOnStage: true, screen: HOST }
+    )
+    expect(tiles.map((tile) => tile.dataset.sceneRole)).toEqual(plan.map((tile) => tile.role))
+    tiles.forEach((tile, index) => {
+      const { rect, mask, z } = plan[index]
+      expect(tile.style.left).toBe(`${(rect.x / 1920) * 100}%`)
+      expect(tile.style.top).toBe(`${(rect.y / 1080) * 100}%`)
+      expect(tile.style.width).toBe(`${(rect.w / 1920) * 100}%`)
+      expect(tile.dataset.stageShape).toBe(mask.shape)
+      expect(tile.style.zIndex).toBe(String(z))
+    })
+    // The fixture's camera is a mirrored circle: mirrored after the crop, clipped round.
+    const camera = tiles.find((tile) => tile.dataset.sceneRole === 'host-camera')!
+    expect(camera.style.clipPath).toContain('circle')
+    expect(
+      camera.querySelector<HTMLElement>('[data-testid="show-stage-scene-clip"]')?.style.transform
+    ).toBe('scaleX(-1)')
+    // S6's stage confirmation is untouched; the scene has its own line.
+    expect(monitor()?.dataset.programStage).toBe('applied')
+    expect(state()?.textContent).toBe('Confirmed')
+    expect(
+      monitor()?.querySelector('[data-testid="show-stage-scene-status"]')?.textContent
+    ).toMatch(/Scene drawn by each output/)
+    // The room view still draws the room's own layout, never the scene.
+    const well = container.querySelector<HTMLElement>('[data-testid="show-stage-well"]')
+    expect(well?.querySelector('[data-scene-role]')).toBeNull()
+    expect(well?.dataset.viewSource).toBe('room-tracks')
+
+    // Scenes off: the preview is the room layout again, with no scene line.
+    await mount(
+      talkStatus({ show: managedShow, room: roomStatus }),
+      talkShow({ room: { ...NO_TALK_SHOW.room, scene: { ...sceneStatus, enabled: false } } })
+    )
+    expect(monitor()?.querySelector('[data-scene-role]')).toBeNull()
+    expect(monitor()?.querySelector('[data-testid="show-stage-scene-status"]')).toBeNull()
+  })
+
   it('confirms the stage only when a fresh report names the stage sent', async () => {
     vi.useFakeTimers({ now: Date.parse('2026-11-16T12:00:30Z'), toFake: ['Date'] })
     const { stageKey } = await import('../../../../shared/cloud-presentation-views')
@@ -629,5 +725,45 @@ describe('the backstage strip (C-G3)', () => {
     expect(show.setLayout).toHaveBeenCalledWith('spotlight')
     expect(chip('Screen + people').disabled).toBe(true)
     expect(container.textContent).toContain('Share a screen first for Screen + people.')
+  })
+})
+
+// Plan 249 S5: the Program preview says why the avatar does not animate
+// everywhere, in words under the picture, never in the console only.
+describe('the avatar animation line under the Program preview (plan 249 S5)', () => {
+  const managedShow = { id: 'sh_talk', nodeId: 'livekit', resumable: false, kind: 'talk' as const }
+  const line = () =>
+    container.querySelector<HTMLElement>('[data-testid="show-stage-avatar-animation"]')
+  const avatar = (animation?: { state: 'animated' | 'still'; reason: string | null }) =>
+    talkShow({
+      room: {
+        ...NO_TALK_SHOW.room,
+        state: 'connected',
+        avatar: {
+          enabled: true,
+          state: 'applied',
+          reason: null,
+          revision: 3,
+          preview: null,
+          observed: {},
+          guests: { enabled: false, capable: 0, applied: 0 },
+          productionQualified: false,
+          ...(animation ? { animation } : {})
+        }
+      }
+    })
+
+  it('shows a refused atlas, a still output or a motion problem, and nothing when all is well', async () => {
+    const status = talkStatus({ show: managedShow, room: openRoom({ live: true }) })
+    const reason = 'The avatar shows still on cloud outputs: it is too detailed to animate there.'
+    await mount(status, avatar({ state: 'still', reason }))
+    expect(line()?.textContent).toBe(reason)
+    expect(line()?.dataset.avatarAnimation).toBe('still')
+
+    await mount(status, avatar({ state: 'animated', reason: null }))
+    expect(line()).toBeNull()
+    // A still avatar (no Alive pack) has nothing to explain.
+    await mount(status, avatar())
+    expect(line()).toBeNull()
   })
 })
