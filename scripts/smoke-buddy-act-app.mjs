@@ -393,7 +393,7 @@ try {
       })
       // The rect moves before Buddy's answer comes back, and the composer
       // refuses the next /buddy until it does: wait for it, as steps 1-2 do.
-      await composerSays('Moved Sidekick to the top left.', 'what Sidekick did')
+      await composerSays('Moved Avatar to the top left.', 'what Sidekick did')
       results.push(`3 move_on_scene: Buddy at ${JSON.stringify(rect)}`)
       log('step 3: /buddy moved Buddy to the top left')
     }
