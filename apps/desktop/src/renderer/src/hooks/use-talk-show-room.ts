@@ -180,7 +180,7 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
       mode:
         import.meta.env.DEV &&
         (roomNativeMicrophoneEnabled() ||
-          new URLSearchParams(window.location.search).get('roomNativeMic') === '1')
+          new URLSearchParams(globalThis.location?.search ?? '').get('roomNativeMic') === '1')
           ? 'native-headphones'
           : 'browser-aec',
       deviceId: microphoneId,
