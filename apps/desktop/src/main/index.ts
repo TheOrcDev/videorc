@@ -1,3 +1,4 @@
+import { RoomFrameBridge } from './room-frame-bridge'
 import { RoomPcmBridge } from './room-pcm-bridge'
 import { createAppIconHandler } from './app-icons'
 import { createFrontAppMonitor, frontAppSenderIsMain, type FrontAppBinding } from './front-app'
@@ -11881,6 +11882,7 @@ function connectBackendEventSocket(connection: BackendConnection): void {
 
 const MAIN_BACKEND_ADMIN_METHODS = new Set([
   'room.pcm.test.inspect',
+  'room.frame.test.inspect',
   'room.microphone.inspect',
   'resource.capability.register_thumbnail',
   // Plan 232: how an HTML overlay's page stands; only main hosts them.
@@ -18224,6 +18226,72 @@ app.whenReady().then(async () => {
       if (command.action === 'close') {
         owner.detach()
         if (nativeMicOwner === owner) nativeMicOwner = null
+      }
+    }
+  })
+
+  // Plan 249 S13a: one main-frame owner of the native camera-role frame fixture.
+  // Unpackaged main + VIDEORC_ROOM_FRAME_TEST=1 + a debug backend with smoke RPC.
+  // Navigation/crash/destruction closes the native socket, which drops the
+  // connection-owned source and every lease it holds.
+  const frameTestEnabled = (): boolean =>
+    !app.isPackaged && process.env.VIDEORC_ROOM_FRAME_TEST === '1'
+  let frameOwner: {
+    senderId: number
+    generation: number
+    bridge: RoomFrameBridge
+    detach: () => void
+  } | null = null
+  let frameLastGeneration = 0
+  secureIpcHandle('room-frame:inspect', async () => {
+    if (!frameTestEnabled()) throw new Error('Frame test bridge is disabled.')
+    const native = await requestBackendAdmin<{ nativeSources: number; nativeLeases: number }>(
+      'room.frame.test.inspect',
+      {},
+      2000
+    )
+    return { ...native, ...RoomFrameBridge.resources() }
+  })
+  secureIpcHandle('room-frame:test', async (event, command) => {
+    if (!frameTestEnabled()) throw new Error('Frame test bridge is disabled.')
+    if (command.action === 'open') {
+      if (frameOwner || command.generation <= frameLastGeneration)
+        throw new Error('Frame owner already active or stale.')
+      frameLastGeneration = command.generation
+      const contents = event.sender
+      const bridge = new RoomFrameBridge(
+        () => waitForBackendAdminConnection(2000),
+        frameTestEnabled
+      )
+      const cleanup = (): void => {
+        bridge.close()
+        detach()
+        if (frameOwner?.bridge === bridge) frameOwner = null
+      }
+      const detach = (): void => {
+        contents.removeListener('destroyed', cleanup)
+        contents.removeListener('render-process-gone', cleanup)
+        contents.removeListener('did-start-navigation', cleanup)
+      }
+      contents.once('destroyed', cleanup)
+      contents.once('render-process-gone', cleanup)
+      contents.once('did-start-navigation', cleanup)
+      frameOwner = { senderId: contents.id, generation: command.generation, bridge, detach }
+    }
+    const owner = frameOwner
+    if (!owner || owner.senderId !== event.sender.id || owner.generation !== command.generation)
+      throw new Error('Frame owner or generation mismatch.')
+    try {
+      return await owner.bridge.request(command)
+    } catch (error) {
+      owner.bridge.close()
+      owner.detach()
+      if (frameOwner === owner) frameOwner = null
+      throw error
+    } finally {
+      if (command.action === 'close') {
+        owner.detach()
+        if (frameOwner === owner) frameOwner = null
       }
     }
   })

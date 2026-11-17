@@ -1,3 +1,4 @@
+import type { RoomFrameCommand, RoomFrameReply, RoomFrameResources } from './room-frame'
 import type { RoomMicrophoneApi } from './room-microphone'
 import type { RoomPcmCommand, RoomPcmFrame, RoomPcmResources } from './room-pcm'
 import type { ChatDelivery, ChatDeliveryBoundary } from './chat-delivery'
@@ -6428,6 +6429,8 @@ export interface VideorcApi {
   getRoomNativeMicrophoneResources: () => Promise<RoomPcmResources>
   roomMicrophonePcm: RoomMicrophoneApi
   roomPcmTest: (command: RoomPcmCommand) => Promise<RoomPcmFrame | null>
+  getRoomFrameTestResources: () => Promise<RoomFrameResources>
+  roomFrameTest: (command: RoomFrameCommand) => Promise<RoomFrameReply>
   /**
    * What this window sits on (plan 208): the solid base (the default) or the
    * OS glass. Main decides it per window and the preload reads it from

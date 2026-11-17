@@ -56,6 +56,53 @@ if (selected.case === 'microphone-bridge') {
   }
   process.exit(process.exitCode ?? 0)
 }
+if (selected.case === 'camera-bridge') {
+  const { cameraBridgeConfig, analyzeCameraBridgeEvidence } =
+    await import('./lib/cloud-parity-camera-bridge-contract.mjs')
+  const config = cameraBridgeConfig(process.env)
+  if (config.mode === 'analyze-recording') {
+    // Offline: a finalized recording the operator already holds. A managed
+    // egress recording needs VIDEORC_MANAGED_RECORDING_AUTHORIZED=1; nothing
+    // here downloads or contacts a service.
+    const { analyzeCompositedRecording, readGeometryFile } =
+      await import('./lib/cloud-parity-camera-bridge-recording.mjs')
+    const geometry = readGeometryFile(process.env.VIDEORC_CAMERA_BRIDGE_GEOMETRY)
+    const result = await analyzeCompositedRecording({
+      file: process.env.VIDEORC_CAMERA_BRIDGE_RECORDING,
+      geometry,
+      scale: Number(process.env.VIDEORC_CAMERA_BRIDGE_RECORDING_SCALE ?? 1),
+      ground: geometry.ground,
+      ffmpeg: process.env.VIDEORC_SMOKE_FFMPEG_PATH ?? 'ffmpeg',
+      ffprobe: process.env.VIDEORC_SMOKE_FFPROBE_PATH ?? 'ffprobe',
+      managed: process.env.VIDEORC_CAMERA_BRIDGE_MANAGED === '1',
+      authorized: process.env.VIDEORC_MANAGED_RECORDING_AUTHORIZED === '1'
+    })
+    console.log(JSON.stringify({ ...result, productionQualified: false }, null, 2))
+    process.exit(result.status === 'passed' ? 0 : 1)
+  }
+  let evidenceFile = process.env.VIDEORC_CAMERA_BRIDGE_EVIDENCE
+  if (config.mode !== 'analyze') {
+    const { acquireCameraBridgeEvidence } =
+      await import('./lib/cloud-parity-camera-bridge-acquire.mjs')
+    const acquired = await acquireCameraBridgeEvidence({
+      desktopRoot: fileURLToPath(new URL('../', import.meta.url)),
+      webRoot: process.env.VIDEORC_PARITY_WEB_ROOT,
+      config
+    })
+    evidenceFile = acquired.evidenceFile
+    console.log(`Camera bridge artifacts acquired (not qualified): ${evidenceFile}`)
+  }
+  if (config.mode !== 'acquire') {
+    if (!evidenceFile)
+      throw new Error('VIDEORC_CAMERA_BRIDGE_EVIDENCE names the evidence to analyze')
+    const { writeFileSync } = await import('node:fs')
+    const result = await analyzeCameraBridgeEvidence(evidenceFile, config.baselineEvidence)
+    writeFileSync(`${evidenceFile}.qualification.json`, JSON.stringify(result, null, 2) + '\n')
+    console.log(JSON.stringify(result, null, 2))
+    if (result.status !== 'passed') process.exitCode = 1
+  }
+  process.exit(process.exitCode ?? 0)
+}
 if (selected.case === 'library') {
   const { runLibrary } = await import('./lib/cloud-parity-library.mjs')
   const { output } = await runLibrary()

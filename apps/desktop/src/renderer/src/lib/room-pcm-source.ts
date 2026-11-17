@@ -4,19 +4,24 @@ import workletUrl from './room-pcm-worklet?worker&url'
 import {
   roomPcmCommand,
   parseRoomPcmFrame,
+  pcmNativeCaptureUs,
   type RoomPcmCommand,
   type RoomPcmFrame
 } from '../../../shared/room-pcm'
 
 export type RoomPcmApi = (command: RoomPcmCommand) => Promise<RoomPcmFrame | null>
 export type RoomPcmSource = { track: MediaStreamTrack; close: () => Promise<void> }
+/** What `originUs + firstSampleUs` names: the S7a synthetic fixture timeline, or
+ * the S7b PROCESSED microphone timeline (resampled, offset, RNNoise lookahead). */
+export type RoomPcmTimeline = 'synthetic' | 'processed'
 let lastGeneration = 0
 /** Explicit test factory only. Normal joins continue using the browser mic/AEC. */
 export async function createRoomPcmTestSource(
   api: RoomPcmApi,
   signal: AbortSignal,
   observe?: (value: unknown) => void,
-  onFailure?: (reason: string) => void
+  onFailure?: (reason: string) => void,
+  timeline: RoomPcmTimeline = 'synthetic'
 ): Promise<RoomPcmSource> {
   if (signal.aborted) throw new Error('PCM source cancelled.')
   const generation = (lastGeneration = Math.max(Date.now(), lastGeneration + 1))
@@ -131,6 +136,11 @@ export async function createRoomPcmTestSource(
             firstSample: frame.firstSample,
             firstSampleUs: frame.firstSampleUs,
             observedAtUs: frame.observedAtUs,
+            // Common native clock (S13a): pair with video only for equal incarnations.
+            originUs: frame.originUs,
+            incarnation: frame.incarnation,
+            nativeCaptureUs: pcmNativeCaptureUs(frame),
+            timeline,
             droppedFrames: frame.droppedFrames,
             pullRequestedAtMs,
             pullReceivedAtMs: performance.now(),

@@ -119,3 +119,41 @@ it('allows only one native pull and fails closed on invalid native metadata', as
   expect(failed).toHaveBeenCalledOnce()
   expect(track.stop).toHaveBeenCalledOnce()
 })
+
+it('projects the common native clock on every native-frame observation', async () => {
+  let generation = 0
+  const api = vi.fn(async (command: RoomPcmCommand) => {
+    generation = command.generation
+    if (command.action !== 'pull') return null
+    return {
+      generation,
+      sequence: 3,
+      firstSample: 1440,
+      firstSampleUs: 30_000,
+      observedAtUs: 41_000,
+      originUs: 2_000_000,
+      incarnation: 77,
+      sampleRate: 48000,
+      channels: 1,
+      frames: 480,
+      droppedFrames: 0,
+      samples: Array(480).fill(0)
+    } as RoomPcmFrame
+  })
+  const observed: Record<string, unknown>[] = []
+  const source = await createRoomPcmTestSource(
+    api,
+    new AbortController().signal,
+    (value) => observed.push(value as Record<string, unknown>),
+    undefined,
+    'processed'
+  )
+  await node.port.onmessage?.({ data: { pull: true, generation } })
+  expect(observed.find((value) => value.phase === 'native-frame')).toMatchObject({
+    originUs: 2_000_000,
+    incarnation: 77,
+    nativeCaptureUs: 2_030_000,
+    timeline: 'processed'
+  })
+  await source.close()
+})

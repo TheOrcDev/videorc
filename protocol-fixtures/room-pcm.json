@@ -6,6 +6,11 @@
   "frames": 480,
   "queueFrames": 1920,
   "productionQualified": false,
+  "clock": {
+    "timeline": "synthetic",
+    "fields": ["originUs", "incarnation"],
+    "absent": null
+  },
   "marker": {
     "syncHz": 3500,
     "zeroHz": 1500,

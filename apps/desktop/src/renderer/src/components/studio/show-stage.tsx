@@ -60,7 +60,8 @@ import {
 import { openLivestreamView } from '@/lib/livestream-tabs'
 import { managedScreenAssetUrl } from '@/lib/screen-asset-url'
 import type { TalkShowContextValue } from '@/lib/talk-show-context'
-import type { TalkShowPerson } from '@/lib/talk-show-room'
+import type { CameraFrameMedia } from '@/lib/camera-frame-media'
+import type { TalkShowLocalMedia, TalkShowPerson } from '@/lib/talk-show-room'
 import { setAgentRoomProgram } from '@/lib/agent-room-program'
 import {
   PROGRAM_PREVIEW_COPY,
@@ -220,13 +221,23 @@ function StageWell({ talkShow }: { talkShow: TalkShowContextValue }): ReactEleme
 function tileTrack(
   tile: StageTile,
   talkShow: TalkShowContextValue
-): { track: MediaStreamTrack | null; cameraOff: boolean; name: string } {
+): {
+  track: MediaStreamTrack | null
+  cameraOff: boolean
+  name: string
+  cameraFrame?: TalkShowLocalMedia['cameraFrame']
+} {
   const host = tile.identity === talkShow.hostIdentity
   if (host) {
     const local = talkShow.room.local
     return tile.kind === 'screen'
       ? { track: local.screen, cameraOff: false, name: 'Your screen' }
-      : { ...cameraPicture(local.camera, local.cameraOff), name: 'You' }
+      : {
+          ...cameraPicture(local.camera, local.cameraOff),
+          name: 'You',
+          // Plan 249 S13a: the host's own packed test camera, drawn unpacked.
+          ...(local.cameraFrame ? { cameraFrame: local.cameraFrame } : {})
+        }
   }
   const person: TalkShowPerson | undefined = talkShow.room.people.find(
     (entry) => entry.identity === tile.identity
@@ -256,7 +267,7 @@ function StageTileView({
   /** In the Program monitor: the picture and its geometry, without words. */
   monitor?: boolean
 }): ReactElement {
-  const { track, cameraOff, name } = tileTrack(tile, talkShow)
+  const { track, cameraOff, name, cameraFrame } = tileTrack(tile, talkShow)
   const label = monitor ? '' : name || participant?.name || ''
   const look = cameraOffLook(tile.rect.w, tile.rect.h)
   const circle = hostCircle(tile, talkShow.hostIdentity, hostShape)
@@ -276,6 +287,7 @@ function StageTileView({
         }}
       >
         <TrackVideo
+          cameraFrame={cameraFrame}
           className={tileFit(tile.kind) === 'contain' ? 'object-contain' : 'object-cover'}
           track={track}
         />
@@ -317,11 +329,13 @@ function StageTileView({
 function TrackVideo({
   track,
   className,
+  cameraFrame,
   onSize
 }: {
   track: MediaStreamTrack | null
   className?: string
-  /** The picture's decoded size, as it becomes known or changes. */
+  /** Packed camera-role source; geometry uses its logical dimensions. */
+  cameraFrame?: TalkShowLocalMedia['cameraFrame'] | undefined
   onSize?: (size: { w: number; h: number }) => void
 }): ReactElement | null {
   const ref = useRef<HTMLVideoElement>(null)
@@ -334,20 +348,60 @@ function TrackVideo({
       video.srcObject = null
     }
   }, [track])
+  const authority = cameraFrame?.authority
   useEffect(() => {
     const video = ref.current
-    if (!video || !onSize) return
+    if (!video || !authority) return
+    let media: CameraFrameMedia | null = null
+    let cancelled = false
+    // A packed track is never shown raw, even when the adapter is refused.
+    video.style.opacity = '0'
+    // Loaded only for the DEV experiment: S10's GPU helper stays out of the eager bundle.
+    void import('@/lib/camera-frame-media')
+      .then(({ createCameraFrameMedia }) => {
+        if (cancelled) return
+        media = createCameraFrameMedia({
+          page: video.ownerDocument,
+          video,
+          // The monitor's own publication: the SIDs the SFU returned on publish.
+          publication: () => ({
+            identity: authority.hostIdentity,
+            participantSid: authority.publisherSid,
+            trackSid: authority.trackSid,
+            source: 'camera'
+          }),
+          authority: () => authority,
+          experiment: true
+        })
+        media.canvas.className = cn('absolute inset-0 size-full', className)
+        video.after(media.canvas)
+        const logical = media.logicalSize()
+        if (logical) onSize?.(logical)
+      })
+      .catch(() => {
+        // Never fall back to drawing the packed picture.
+      })
+    return () => {
+      cancelled = true
+      media?.close('unmounted')
+      video.style.opacity = ''
+    }
+  }, [authority, className, onSize, track])
+  useEffect(() => {
+    const video = ref.current
+    if (!video || !onSize || authority) return
     const report = (): void => {
       if (video.videoWidth > 2 && video.videoHeight > 2)
         onSize({ w: video.videoWidth, h: video.videoHeight })
     }
+    report()
     video.addEventListener('loadedmetadata', report)
     video.addEventListener('resize', report)
     return () => {
       video.removeEventListener('loadedmetadata', report)
       video.removeEventListener('resize', report)
     }
-  }, [onSize, track])
+  }, [authority, onSize, track])
   if (!track) return null
   return <video autoPlay className={cn('size-full', className)} muted playsInline ref={ref} />
 }
@@ -857,7 +911,7 @@ function SceneTileView({
   talkShow: TalkShowContextValue
 }): ReactElement {
   const [source, setSource] = useState<{ w: number; h: number } | null>(null)
-  const { track, cameraOff, name } = tileTrack(
+  const { track, cameraOff, name, cameraFrame } = tileTrack(
     { identity: tile.identity, kind: tile.kind, rect: tile.rect, cornerRadius: 0 },
     talkShow
   )
@@ -886,7 +940,12 @@ function SceneTileView({
         style={{ ...picture.clip, ...(tile.mirror ? { transform: 'scaleX(-1)' } : {}) }}
       >
         <div className="absolute" style={picture.full}>
-          <TrackVideo className="object-fill" onSize={setSource} track={track} />
+          <TrackVideo
+            cameraFrame={cameraFrame}
+            className="object-fill"
+            onSize={setSource}
+            track={track}
+          />
         </div>
       </div>
       {cameraOff ? (

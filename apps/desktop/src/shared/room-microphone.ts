@@ -17,6 +17,11 @@ export type RoomMicrophoneCommand = {
   showId: string
   settings?: RoomMicrophoneSettings
 }
+/** Frames reuse the PCM wire, including the S13a `originUs`/`incarnation` clock.
+ * Here `originUs + firstSampleUs` is the PROCESSED timeline position (SourceClock
+ * resampling, the intentional `offsetMs` delay, RNNoise lookahead), not raw
+ * capture time; `offsetMs` stays separate settings metadata. */
+export const ROOM_MICROPHONE_TIMELINE = 'processed' as const
 export type RoomMicrophoneApi = (command: RoomMicrophoneCommand) => Promise<RoomPcmFrame | null>
 function exactMicrophoneId(id: string): boolean {
   const core = /^microphone:coreaudio:(\+?\d+)$/.exec(id)

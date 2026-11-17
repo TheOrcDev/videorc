@@ -83,6 +83,9 @@ mod preview_debug_sample;
 mod provider_output;
 mod room_audio_bridge;
 mod room_microphone;
+// Plan 249 S13a: one native monotonic anchor for room media bridges.
+mod room_clock;
+mod room_frame_bridge;
 // Plan 168 Phase F: the pet builder (S-F1 to S-F3) and the creator's RPCs (S-F4).
 mod buddy_pet_build;
 mod buddy_pet_create;
@@ -387,6 +390,8 @@ const BACKEND_PROCESS_OWNERSHIP_ENV: &str = "VIDEORC_BACKEND_OWNERSHIP_TOKEN";
 const BACKEND_PROCESS_OWNERSHIP_PREFIX: &str = "OWNERSHIP ";
 
 fn main() -> Result<()> {
+    // Before any room audio/video generation epoch can be captured.
+    room_clock::init();
     if windows_mf_probe::run_cli(&std::env::args().skip(1).collect::<Vec<_>>())? {
         return Ok(());
     }
@@ -8670,6 +8675,97 @@ fn handle_room_pcm_control(
     })
 }
 
+enum RoomFrameReply {
+    Text(ServerResponse),
+    Binary(Vec<u8>),
+}
+
+// Plan 249 S13a. Connection-owned like the PCM fixture: disconnect drops the
+// source and every lease it holds. Frames go out as one binary message whose
+// header echoes the request serial; refusals and idle pulls stay JSON.
+fn handle_room_frame_control(
+    role: BackendRole,
+    enabled: bool,
+    bridge: &mut room_frame_bridge::Bridge,
+    text: &str,
+) -> Option<RoomFrameReply> {
+    if !text.contains("room.frame.test") {
+        return None;
+    }
+    #[derive(Deserialize)]
+    struct Envelope<'a> {
+        id: &'a str,
+        method: &'a str,
+    }
+    let envelope = serde_json::from_str::<Envelope<'_>>(text).ok()?;
+    if !matches!(
+        envelope.method,
+        "room.frame.test" | "room.frame.test.inspect"
+    ) {
+        return None;
+    }
+    let refuse = |id: &str, code: &str, message: &str| {
+        Some(RoomFrameReply::Text(ServerResponse::error(
+            id, code, message,
+        )))
+    };
+    if role != BackendRole::Admin || !cfg!(debug_assertions) || !enabled {
+        return refuse(
+            envelope.id,
+            "frame-disabled",
+            "Frame test source is unavailable.",
+        );
+    }
+    if text.len() > 512 {
+        return refuse(
+            envelope.id,
+            "invalid-params",
+            "Frame command exceeds its bound.",
+        );
+    }
+    let command = serde_json::from_str::<ClientCommand>(text).ok()?;
+    if command.method == "room.frame.test.inspect" {
+        if !rpc_params_are_empty(&command.params) {
+            return refuse(
+                &command.id,
+                "invalid-params",
+                "Frame inspection takes no parameters.",
+            );
+        }
+        return Some(RoomFrameReply::Text(ServerResponse::ok(
+            command.id,
+            serde_json::json!({
+                "nativeSources": room_frame_bridge::active_sources(),
+                "nativeLeases": room_frame_bridge::active_leases(),
+            }),
+        )));
+    }
+    let result = serde_json::from_value::<room_frame_bridge::Command>(command.params)
+        .map_err(|_| "Invalid frame command")
+        .and_then(|params| bridge.command(params, std::time::Instant::now()));
+    Some(match result {
+        Ok(room_frame_bridge::Reply::Frame(bytes)) => RoomFrameReply::Binary(bytes),
+        Ok(room_frame_bridge::Reply::Opened(opened)) => RoomFrameReply::Text(ServerResponse::ok(
+            command.id,
+            serde_json::to_value(opened).unwrap_or_default(),
+        )),
+        Ok(room_frame_bridge::Reply::Reset(reset)) => RoomFrameReply::Text(ServerResponse::ok(
+            command.id,
+            serde_json::to_value(reset).unwrap_or_default(),
+        )),
+        Ok(room_frame_bridge::Reply::Idle(idle)) => RoomFrameReply::Text(ServerResponse::ok(
+            command.id,
+            serde_json::to_value(idle).unwrap_or_default(),
+        )),
+        Ok(room_frame_bridge::Reply::Closed) => {
+            RoomFrameReply::Text(ServerResponse::ok(command.id, serde_json::Value::Null))
+        }
+        Err(error) => {
+            RoomFrameReply::Text(ServerResponse::error(command.id, "frame-rejected", error))
+        }
+    })
+}
+
 async fn handle_preview_frame_lease_control(
     state: &AppState,
     role: BackendRole,
@@ -8920,6 +9016,7 @@ async fn websocket_session_with_handler_role_and_redaction(
     let mut preview_frame_lease = None;
     let mut room_audio_bridge = room_audio_bridge::Bridge::default();
     let mut room_microphone = room_microphone::Bridge::default();
+    let mut room_frame_bridge = room_frame_bridge::Bridge::default();
 
     loop {
         let incoming = tokio::select! {
@@ -9063,6 +9160,35 @@ async fn websocket_session_with_handler_role_and_redaction(
                         &reliable_metrics,
                         &slow_pressure,
                         response,
+                    )
+                    .await
+                    {
+                        break;
+                    }
+                    continue;
+                }
+
+                if let Some(reply) = handle_room_frame_control(
+                    role,
+                    state.smoke_rpc_enabled,
+                    &mut room_frame_bridge,
+                    text.as_str(),
+                ) {
+                    let message = match reply {
+                        RoomFrameReply::Binary(bytes) => Some(Message::Binary(bytes.into())),
+                        RoomFrameReply::Text(response) => match serde_json::to_string(&response) {
+                            Ok(text) => Some(Message::Text(text.into())),
+                            Err(_) => None,
+                        },
+                    };
+                    let Some(message) = message else {
+                        break;
+                    };
+                    if !send_tracked_reliable_websocket_item(
+                        &outgoing_tx,
+                        &reliable_metrics,
+                        message,
+                        &slow_pressure,
                     )
                     .await
                     {
@@ -28153,6 +28279,89 @@ mod agent_role_tests {
                 "{method} has no execution policy"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod room_frame_admission_tests {
+    use super::*;
+    fn ok(reply: Option<RoomFrameReply>) -> Option<bool> {
+        match reply.unwrap() {
+            RoomFrameReply::Text(response) => {
+                serde_json::to_value(response).unwrap()["ok"].as_bool()
+            }
+            RoomFrameReply::Binary(_) => None,
+        }
+    }
+    #[test]
+    fn frame_test_requires_admin_debug_opt_in_and_bounded_contract() {
+        let open = r#"{"id":"f","method":"room.frame.test","params":{"action":"open","generation":1,"role":"host-camera-test","width":640,"height":360,"fps":30,"packing":"rgb-left-alpha-right","serial":1}}"#;
+        let inspect = r#"{"id":"f","method":"room.frame.test.inspect","params":{}}"#;
+        for role in [
+            BackendRole::Renderer,
+            BackendRole::Remote,
+            BackendRole::Agent,
+        ] {
+            let mut bridge = room_frame_bridge::Bridge::default();
+            assert_eq!(
+                ok(handle_room_frame_control(role, true, &mut bridge, open)),
+                Some(false)
+            );
+            assert_eq!(
+                ok(handle_room_frame_control(role, true, &mut bridge, inspect)),
+                Some(false)
+            );
+        }
+        let mut bridge = room_frame_bridge::Bridge::default();
+        assert_eq!(
+            ok(handle_room_frame_control(
+                BackendRole::Admin,
+                false,
+                &mut bridge,
+                open
+            )),
+            Some(false)
+        );
+        assert_eq!(
+            ok(handle_room_frame_control(
+                BackendRole::Admin,
+                true,
+                &mut bridge,
+                open
+            )),
+            Some(cfg!(debug_assertions))
+        );
+        let pull = open.replace("\"open\"", "\"pull\"");
+        let first =
+            handle_room_frame_control(BackendRole::Admin, true, &mut bridge, &pull).unwrap();
+        if cfg!(debug_assertions) {
+            assert!(
+                matches!(first, RoomFrameReply::Binary(ref bytes) if bytes.len() == room_frame_bridge::HEADER_BYTES + 1288 * 360 * 4)
+            );
+        }
+        let oversized = open.replace(
+            "\"serial\":1",
+            &format!("\"serial\":1,\"pad\":\"{}\"", "x".repeat(600)),
+        );
+        assert_eq!(
+            ok(handle_room_frame_control(
+                BackendRole::Admin,
+                true,
+                &mut room_frame_bridge::Bridge::default(),
+                &oversized
+            )),
+            Some(false)
+        );
+        let bad = open.replace("640", "1920");
+        assert_eq!(
+            ok(handle_room_frame_control(
+                BackendRole::Admin,
+                true,
+                &mut room_frame_bridge::Bridge::default(),
+                &bad
+            )),
+            Some(false)
+        );
     }
 }
 

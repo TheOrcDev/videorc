@@ -3,6 +3,7 @@ import { createLocalAudioTrack, type LocalAudioTrack } from 'livekit-client'
 import { createRoomPcmTestSource, type RoomPcmSource } from './room-pcm-source'
 import {
   parseRoomMicrophoneSettings,
+  ROOM_MICROPHONE_TIMELINE,
   type RoomMicrophoneSettings,
   type RoomMicrophoneCommand
 } from '../../../shared/room-microphone'
@@ -227,7 +228,8 @@ async function openRoomMicrophoneSource(
         },
         signal,
         observe,
-        fail
+        fail,
+        ROOM_MICROPHONE_TIMELINE
       )
       if (closed || signal.aborted) await native.close()
       current()
