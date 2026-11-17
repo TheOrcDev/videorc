@@ -26,6 +26,46 @@ pub fn managed_room(state: &AppState) -> bool {
         })
 }
 
+/// Plan 249 S11: the fixed room output canvases (S9's), horizontal then
+/// vertical. HTML layer sheets are drawn against these.
+pub const ROOM_CANVASES: [(u32, u32); 2] = [(1920, 1080), (1080, 1920)];
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct HtmlLayersWantParams {
+    pub show_id: String,
+    pub want: bool,
+}
+
+/// Plan 249 S11 (`cloud.htmlLayers.want`): the room renderer asks for HTML
+/// overlay targets on the room's canvases while a program page can draw its
+/// sheet. Only for the room this process is in; never starts a capture run,
+/// session or recording. A lease, renewed by the renderer, bounds it.
+pub fn html_layers_want(state: &AppState, params: HtmlLayersWantParams) -> Result<Value> {
+    let current = crate::cloud_show::lock(&state.cloud_show).talk_show_room_show_id();
+    if current.as_deref() != Some(params.show_id.as_str()) {
+        state.html_overlays.set_room_want(None);
+        bail!("That show's room is not open here")
+    }
+    state
+        .html_overlays
+        .set_room_want(params.want.then_some(params.show_id));
+    Ok(json!({ "want": params.want }))
+}
+
+/// The room canvases HTML targets add now: none unless the renderer's want
+/// holds for the room this process is in, and that room is active.
+pub fn html_room_canvases(state: &AppState) -> Vec<(u32, u32)> {
+    let Some(wanted) = state.html_overlays.room_want() else {
+        return Vec::new();
+    };
+    let current = crate::cloud_show::lock(&state.cloud_show).talk_show_room_show_id();
+    if current.as_deref() != Some(wanted.as_str()) || !room_active(state) {
+        return Vec::new();
+    }
+    ROOM_CANVASES.to_vec()
+}
+
 pub fn room_active(state: &AppState) -> bool {
     let runtime = crate::cloud_show::lock(&state.cloud_show);
     runtime.talk_show_room_show_id().is_some()
@@ -159,6 +199,10 @@ pub async fn snapshot(state: &AppState, params: SnapshotParams) -> Result<Value>
     }
     let content = tokio::task::spawn_blocking(move || -> Result<Value> {
         let mut lanes = [Vec::<Value>::new(), Vec::new()];
+        // Plan 249 S11: HTML banners' placement on the room canvases. Pixels
+        // never travel here: the sheet carries them, and only when a page
+        // may draw it (default-off; see docs/cloud/249-s11-contract.md).
+        let mut html_lanes = [Vec::<Value>::new(), Vec::new()];
         let mut unsupported = Vec::<String>::new();
         for layer in &banners.layers {
             if layer.fade.hides() && layer.fade.is_settled_at(now) {
@@ -172,6 +216,38 @@ pub async fn snapshot(state: &AppState, params: SnapshotParams) -> Result<Value>
                 unsupported.push(
                     "HTML graphics require the separately qualified dynamic transport.".into(),
                 );
+                if banner.kind == crate::protocol::BannerKind::Html {
+                    let fade_at = at
+                        - now
+                            .saturating_duration_since(layer.fade.started_at)
+                            .as_millis()
+                            .min(i64::MAX as u128) as i64;
+                    for (index, canvas) in ROOM_CANVASES.into_iter().enumerate() {
+                        let placement = if index == 0 {
+                            banner.horizontal
+                        } else {
+                            banner.vertical
+                        };
+                        let (x, y, w, h) = crate::banners::banner_draw_rect(
+                            banner.width,
+                            banner.height,
+                            canvas.0 as usize,
+                            canvas.1 as usize,
+                            placement,
+                        );
+                        if html_lanes[index].len() < 4 && w > 0 && h > 0 {
+                            html_lanes[index].push(json!({
+                                "id": format!("banner:{}", banner.id),
+                                "bannerId": banner.id,
+                                "rect": rect(x, y, w, h, canvas),
+                                "opacity": banner.opacity.clamp(0.0, 1.0),
+                                "fade": {"at": fade_at.max(1), "from": layer.fade.from, "to": layer.fade.to},
+                                "stream": banner.show_on_stream,
+                                "recording": banner.show_in_recording,
+                            }));
+                        }
+                    }
+                }
                 continue;
             }
             let image = crate::banner_prepare::decode_banner_file(&layer.image_path)
@@ -301,7 +377,10 @@ pub async fn snapshot(state: &AppState, params: SnapshotParams) -> Result<Value>
         }
         unsupported.sort();
         unsupported.dedup();
-        Ok(json!({"h": lanes[0], "v": lanes[1], "unsupported": unsupported}))
+        Ok(json!({
+            "h": lanes[0], "v": lanes[1], "unsupported": unsupported,
+            "html": {"h": html_lanes[0], "v": html_lanes[1]},
+        }))
     })
     .await??;
     if crate::captions::cloud_host::presentation(state).await != expected_caption {

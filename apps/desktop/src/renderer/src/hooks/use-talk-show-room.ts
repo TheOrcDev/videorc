@@ -1,3 +1,4 @@
+import { htmlLayerFrameUrl } from '../lib/room-html-layer-publisher'
 import { attachHostSpeech } from '@/lib/room-speech-source'
 import { roomNativeMicrophoneEnabled } from '@/lib/room-microphone-state'
 import { closeVisualMicrophoneStreams } from '@/lib/mic-visual-ownership'
@@ -370,6 +371,19 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
           sourcesHeld: () => devicesHeldRef.current,
           audioHost: () => host,
           onAir: () => onAirRef.current,
+          // Plan 249 S11: HTML banners reach only the egress pages the web
+          // lets draw the sheet (default-off), and only while this computer
+          // controls the show with its devices turned on (S24).
+          htmlLayers: {
+            frameUrl: (bannerId, after) => htmlLayerFrameUrl(client.connection, bannerId, after),
+            want: async (want) => {
+              if (showId) await client.requestTyped('cloud.htmlLayers.want', { showId, want })
+            },
+            controllerEpoch: () =>
+              devicesHeldRef.current || cloudStatusRef.current?.controller?.lost
+                ? null
+                : (cloudStatusRef.current?.controller?.controllerEpoch ?? 0)
+          },
           // Plan 249 S24: a view a program page applied is kept by the cloud
           // for the next controller; only its avatar layer survives (D9), so
           // a refresh or a bubble alone sends nothing.

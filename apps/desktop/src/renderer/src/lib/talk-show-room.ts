@@ -11,6 +11,11 @@ import {
   type GraphicsContent,
   type RoomGraphicsStatus
 } from './room-graphics-publisher'
+import {
+  RoomHtmlLayerPublisher,
+  type RoomHtmlLayerDeps,
+  type RoomHtmlLayerStatus
+} from './room-html-layer-publisher'
 import { RoomAuxPublisher } from './room-aux-publisher'
 import { createRoomPcmTestSource, type RoomPcmSource } from './room-pcm-source'
 import { createRoomFrameTestSource, type RoomFrameSource } from './room-frame-source'
@@ -248,6 +253,13 @@ export type TalkShowRoomDeps = {
    * capture meanwhile; turning things off stays allowed.
    */
   sourcesHeld?: () => boolean
+  /**
+   * Plan 249 S11: HTML banners as packed sheets for the egress pages the web
+   * lets draw them (default-off: in production none ever asks).
+   */
+  htmlLayers?: Pick<RoomHtmlLayerDeps, 'frameUrl' | 'want' | 'controllerEpoch'> & {
+    changed?: (status: RoomHtmlLayerStatus) => void
+  }
 }
 
 const SOURCES_HELD =
@@ -372,6 +384,8 @@ export class TalkShowRoomClient {
   #snapshot: TalkShowRoomSnapshot = IDLE_TALK_SHOW_ROOM
   #problem: string | null = null
   #graphics: RoomGraphicsPublisher | null = null
+  /** Plan 249 S11: the HTML layer sheet publisher, with the graphics one. */
+  #htmlLayers: RoomHtmlLayerPublisher | null = null
   #graphicsContent: GraphicsContent | null = null
   #graphicsEnabled = false
   #avatar: RoomAvatarPublisher | null = null
@@ -466,6 +480,8 @@ export class TalkShowRoomClient {
     this.#aux = null
     this.#graphics?.close()
     this.#graphics = null
+    void this.#htmlLayers?.close()
+    this.#htmlLayers = null
     this.#avatar?.close()
     this.#avatar = null
     this.#graphicsContent = null
@@ -835,14 +851,17 @@ export class TalkShowRoomClient {
   setGraphics(content: GraphicsContent | null): void {
     this.#graphicsContent = content
     this.#graphics?.set(this.#graphicsEnabled ? content : null)
+    this.#htmlLayers?.setPlacements(this.#graphicsEnabled ? (content?.html ?? null) : null)
   }
   failGraphics(): void {
     this.#graphicsContent = null
     if (this.#graphicsEnabled) this.#graphics?.fail()
+    this.#htmlLayers?.setPlacements(null)
   }
   setGraphicsEnabled(enabled: boolean): void {
     this.#graphicsEnabled = enabled
     this.#graphics?.set(enabled ? this.#graphicsContent : null)
+    this.#htmlLayers?.setPlacements(enabled ? (this.#graphicsContent?.html ?? null) : null)
   }
 
   setAvatar(content: AvatarContent | null): void {
@@ -1106,6 +1125,23 @@ export class TalkShowRoomClient {
       }
     )
     this.#graphics.set(this.#graphicsEnabled ? this.#graphicsContent : null)
+    // Plan 249 S11: bound to this room; any ownership loss closes it.
+    void this.#htmlLayers?.close()
+    this.#htmlLayers = null
+    const html = this.#deps.htmlLayers
+    if (html) {
+      this.#htmlLayers = new RoomHtmlLayerPublisher(room, {
+        frameUrl: html.frameUrl,
+        want: html.want,
+        controllerEpoch: () => (this.#owns(room) ? html.controllerEpoch() : null),
+        changed: (status) => {
+          if (this.#owns(room)) html.changed?.(status)
+        }
+      })
+      this.#htmlLayers.setPlacements(
+        this.#graphicsEnabled ? (this.#graphicsContent?.html ?? null) : null
+      )
+    }
     this.#avatar?.close()
     this.#avatarStatus = null
     this.#avatar = new RoomAvatarPublisher(
@@ -1834,6 +1870,8 @@ export class TalkShowRoomClient {
     const stale = this.#room
     this.#graphics?.close()
     this.#graphics = null
+    void this.#htmlLayers?.close()
+    this.#htmlLayers = null
     this.#avatar?.close()
     this.#avatar = null
     this.#stopMotion()

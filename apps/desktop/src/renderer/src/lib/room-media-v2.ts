@@ -1,10 +1,19 @@
 import { parseAvatarCapability, type AvatarCapability } from '../../../shared/cloud-avatar'
 import { parseSceneCapability, type SceneCapability } from '../../../shared/cloud-scene'
+import {
+  parseHtmlLayerCapability,
+  type HtmlLayerCapability
+} from '../../../shared/cloud-html-layer'
 /** Plan 249 S3. An exact role, not arbitrary screen/system audio. */
 export const ROOM_MEDIA_VERSION = 2 as const
 export const AUX_TRACK_NAME = 'videorc:v2:host-aux:stereo'
 export const CAPABILITY_TOPIC = 'videorc.media-capability.v2'
 export const CAPABILITY_TTL_MS = 25_000
+/**
+ * A relayed receipt's byte bound. Plan 249 S11 raised it from 1024: a receipt
+ * carrying graphics, scene, auxiliary and html fields can pass 1 KiB.
+ */
+export const CAPABILITY_RECEIPT_MAX_BYTES = 2048
 export const ROOM_MEDIA_MANIFEST = {
   version: ROOM_MEDIA_VERSION,
   auxiliary: {
@@ -24,6 +33,8 @@ export type ConsumerCapability = {
   graphics?: AvatarCapability
   /** Plan 249 S12: the egress lane draws scenes; `applied` is its rendered revision. */
   scene?: SceneCapability
+  /** Plan 249 S11: relayed only for a lane whose page token holds the (default-off) claim. */
+  html?: HtmlLayerCapability
   auxiliary?: { trackSid: string; rms: number; observedAt: number }
 }
 export type CapabilityReceipt = ConsumerCapability & { at: number }
@@ -62,6 +73,8 @@ export function parseConsumerCapability(value: unknown): ConsumerCapability | nu
     return null
   const scene = v.scene === undefined ? null : parseSceneCapability(v.scene)
   if (v.scene !== undefined && (!scene || !v.identity.startsWith('EG_'))) return null
+  const html = v.html === undefined ? null : parseHtmlLayerCapability(v.html)
+  if (v.html !== undefined && (!html || !v.identity.startsWith('EG_'))) return null
   let auxiliary: ConsumerCapability['auxiliary']
   if (v.auxiliary !== undefined) {
     if (!v.auxiliary || typeof v.auxiliary !== 'object') return null
@@ -87,6 +100,7 @@ export function parseConsumerCapability(value: unknown): ConsumerCapability | nu
     ...(v.audioRouting === 1 ? { audioRouting: 1 as const } : {}),
     ...(graphics ? { graphics } : {}),
     ...(scene ? { scene } : {}),
+    ...(html ? { html } : {}),
     ...(auxiliary ? { auxiliary } : {})
   }
 }

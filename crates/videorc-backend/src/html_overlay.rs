@@ -681,6 +681,9 @@ struct ServiceInner {
     /// The proof surface's BMP of each banner's latest frame (S11), keyed by
     /// the frame's revision so it is encoded once.
     preview_bmps: Mutex<HashMap<String, (u64, axum::body::Bytes)>>,
+    /// Plan 249 S11: the talk-show room whose canvases the targets add, and
+    /// until when (the renderer renews it while a program page asks).
+    room_want: Mutex<Option<(String, std::time::Instant)>>,
     wake: tokio::sync::Notify,
     frames_received: AtomicU64,
     frames_dropped: AtomicU64,
@@ -827,6 +830,31 @@ impl HtmlOverlayService {
     /// changed).
     pub(crate) fn wake(&self) {
         self.inner.wake.notify_one();
+    }
+
+    /// Plan 249 S11: the room `show_id` wants HTML targets for its canvases
+    /// for `HTML_LAYER_ROOM_WANT_LEASE` from now; `None` stops at once.
+    pub(crate) fn set_room_want(&self, show_id: Option<String>) {
+        *locked(&self.inner.room_want) = show_id.map(|show_id| {
+            (
+                show_id,
+                std::time::Instant::now() + HTML_LAYER_ROOM_WANT_LEASE,
+            )
+        });
+        self.wake();
+    }
+
+    /// The room that wants HTML targets now, while its lease holds.
+    pub(crate) fn room_want(&self) -> Option<String> {
+        let mut want = locked(&self.inner.room_want);
+        match want.as_ref() {
+            Some((_, until)) if *until <= std::time::Instant::now() => {
+                *want = None;
+                None
+            }
+            Some((show_id, _)) => Some(show_id.clone()),
+            None => None,
+        }
     }
 
     pub(crate) fn stats(&self) -> HtmlOverlayStats {
@@ -1158,6 +1186,10 @@ fn save_overlay_picture(state: &AppState, banner_id: String, bitmap: Arc<BannerB
 /// proof page (`preview-surface-banners.ts`), where an image banner is its
 /// stored image; an HTML banner's layer polls this instead, so the Preview
 /// moves as the recording and the stream do. Registered in `main.rs`.
+/// Plan 249 S11: how long one `cloud.htmlLayers.want` keeps the room's
+/// canvases as targets without a renewal (the renderer renews every 10 s).
+pub(crate) const HTML_LAYER_ROOM_WANT_LEASE: Duration = Duration::from_secs(30);
+
 pub(crate) const HTML_OVERLAY_PREVIEW_ROUTE: &str = "/preview/html-overlay/latest.bmp";
 
 /// The headers the proof page reads across origins (the cursor, the size,

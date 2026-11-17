@@ -1,0 +1,278 @@
+{
+  "version": 1,
+  "page": {
+    "show": "sh_rrrrrrrrrrrrrrrrrrrrrr",
+    "output": "stream",
+    "orientation": "h",
+    "now": 1800000000
+  },
+  "valid": {
+    "version": 1,
+    "role": "videorc:html-layer:v1",
+    "show": "sh_rrrrrrrrrrrrrrrrrrrrrr",
+    "publisherSid": "PA_host1",
+    "trackSid": "TR_sheet1",
+    "generation": 2,
+    "controllerEpoch": 3,
+    "revision": 5,
+    "output": "stream",
+    "orientation": "h",
+    "width": 640,
+    "height": 360,
+    "fps": 15,
+    "packing": "rgb-left-alpha-right",
+    "expiresAt": 1800020000,
+    "layers": [
+      {
+        "id": "banner:0f6c2d1e-badge",
+        "rect": {
+          "x": 0.05,
+          "y": 0.7,
+          "w": 0.4,
+          "h": 0.2
+        }
+      },
+      {
+        "id": "banner:ticker",
+        "rect": {
+          "x": 0,
+          "y": 0.9,
+          "w": 1,
+          "h": 0.1
+        }
+      }
+    ]
+  },
+  "invalid": [
+    {
+      "name": "wrong version",
+      "set": {
+        "version": 2
+      }
+    },
+    {
+      "name": "wrong role",
+      "set": {
+        "role": "videorc:experimental:packed-alpha:v1"
+      }
+    },
+    {
+      "name": "other show",
+      "set": {
+        "show": "sh_other"
+      }
+    },
+    {
+      "name": "other output lane",
+      "set": {
+        "output": "recording"
+      }
+    },
+    {
+      "name": "other orientation",
+      "set": {
+        "orientation": "v"
+      }
+    },
+    {
+      "name": "publisher sid shape",
+      "set": {
+        "publisherSid": "host:sh_rrrrrrrrrrrrrrrrrrrrrr"
+      }
+    },
+    {
+      "name": "track sid shape",
+      "set": {
+        "trackSid": "TR_"
+      }
+    },
+    {
+      "name": "generation zero",
+      "set": {
+        "generation": 0
+      }
+    },
+    {
+      "name": "negative epoch",
+      "set": {
+        "controllerEpoch": -1
+      }
+    },
+    {
+      "name": "fractional epoch",
+      "set": {
+        "controllerEpoch": 1.5
+      }
+    },
+    {
+      "name": "revision zero",
+      "set": {
+        "revision": 0
+      }
+    },
+    {
+      "name": "fps above limit",
+      "set": {
+        "fps": 30
+      }
+    },
+    {
+      "name": "sheet not the orientation's",
+      "set": {
+        "width": 360,
+        "height": 640
+      }
+    },
+    {
+      "name": "packing",
+      "set": {
+        "packing": "rgb-top-alpha-bottom"
+      }
+    },
+    {
+      "name": "expired lease",
+      "set": {
+        "expiresAt": 1800000000
+      }
+    },
+    {
+      "name": "lease too long",
+      "set": {
+        "expiresAt": 1800030001
+      }
+    },
+    {
+      "name": "five layers",
+      "set": {
+        "layers": [
+          {
+            "id": "banner:l0",
+            "rect": {
+              "x": 0,
+              "y": 0,
+              "w": 0.1,
+              "h": 0.1
+            }
+          },
+          {
+            "id": "banner:l1",
+            "rect": {
+              "x": 0,
+              "y": 0,
+              "w": 0.1,
+              "h": 0.1
+            }
+          },
+          {
+            "id": "banner:l2",
+            "rect": {
+              "x": 0,
+              "y": 0,
+              "w": 0.1,
+              "h": 0.1
+            }
+          },
+          {
+            "id": "banner:l3",
+            "rect": {
+              "x": 0,
+              "y": 0,
+              "w": 0.1,
+              "h": 0.1
+            }
+          },
+          {
+            "id": "banner:l4",
+            "rect": {
+              "x": 0,
+              "y": 0,
+              "w": 0.1,
+              "h": 0.1
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "duplicate layer id",
+      "set": {
+        "layers": [
+          {
+            "id": "banner:a",
+            "rect": {
+              "x": 0,
+              "y": 0,
+              "w": 0.1,
+              "h": 0.1
+            }
+          },
+          {
+            "id": "banner:a",
+            "rect": {
+              "x": 0.2,
+              "y": 0,
+              "w": 0.1,
+              "h": 0.1
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "layer id shape",
+      "set": {
+        "layers": [
+          {
+            "id": "../x",
+            "rect": {
+              "x": 0,
+              "y": 0,
+              "w": 0.1,
+              "h": 0.1
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "rect outside the stage",
+      "set": {
+        "layers": [
+          {
+            "id": "banner:a",
+            "rect": {
+              "x": 0.8,
+              "y": 0,
+              "w": 0.3,
+              "h": 0.1
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "empty rect",
+      "set": {
+        "layers": [
+          {
+            "id": "banner:a",
+            "rect": {
+              "x": 0,
+              "y": 0,
+              "w": 0,
+              "h": 0.1
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "missing layers",
+      "delete": ["layers"]
+    },
+    {
+      "name": "missing expiry",
+      "delete": ["expiresAt"]
+    }
+  ]
+}

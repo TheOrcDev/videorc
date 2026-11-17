@@ -1,12 +1,14 @@
 import { roomAudioRouting } from './room-audio-routing'
 import { AUDIO_ROUTING_TOPIC } from '../../../shared/program-audio-routing'
+import { isHtmlLayerTrackName } from '../../../shared/cloud-html-layer'
 import { ConnectionState, LocalAudioTrack, RoomEvent, Track, type Room } from 'livekit-client'
 import {
   AUX_TRACK_NAME,
   CAPABILITY_TOPIC,
   capabilityCurrent,
   parseConsumerCapability,
-  type CapabilityReceipt
+  type CapabilityReceipt,
+  CAPABILITY_RECEIPT_MAX_BYTES
 } from './room-media-v2'
 import { createRoomAuxSink } from './room-aux-sink'
 import { soundboard, type RoomAuxStatus } from './soundboard-store'
@@ -74,7 +76,8 @@ export class RoomAuxPublisher {
     this.refresh()
   }
   #receive = (bytes: Uint8Array, participant?: unknown, _kind?: unknown, topic?: string): void => {
-    if (participant || topic !== CAPABILITY_TOPIC || bytes.length > 1024) return
+    if (participant || topic !== CAPABILITY_TOPIC || bytes.length > CAPABILITY_RECEIPT_MAX_BYTES)
+      return
     try {
       const value = JSON.parse(new TextDecoder().decode(bytes))
       const capability = parseConsumerCapability(value)
@@ -104,8 +107,9 @@ export class RoomAuxPublisher {
   }
   #permissions(): void {
     const now = Date.now()
-    const base = [...this.room.localParticipant.trackPublications.values()]
-      .filter((p) => p.trackName !== AUX_TRACK_NAME)
+    const local = [...this.room.localParticipant.trackPublications.values()]
+    const base = local
+      .filter((p) => p.trackName !== AUX_TRACK_NAME && !isHtmlLayerTrackName(p.trackName))
       .map((p) => p.trackSid)
     const legacySilenced = (identity: string): boolean =>
       identity.startsWith('EG_') &&
@@ -121,6 +125,8 @@ export class RoomAuxPublisher {
         .filter((p) => p.kind === Track.Kind.Audio)
         .map((p) => p.trackSid)
     )
+    // Plan 249 S11: an HTML layer sheet is for egress (program) pages only.
+    const sheets = local.filter((p) => isHtmlLayerTrackName(p.trackName)).map((p) => p.trackSid)
     // SID scope prevents a replacement/old page inheriting another session's consent.
     this.room.localParticipant.setTrackSubscriptionPermissions(
       false,
@@ -129,6 +135,7 @@ export class RoomAuxPublisher {
         allowAll: false,
         allowedTrackSids: [
           ...base.filter((sid) => !legacySilenced(p.identity) || !speechSids.has(sid)),
+          ...(p.identity.startsWith('EG_') ? sheets : []),
           ...(this.#sid &&
           !legacySilenced(p.identity) &&
           capabilityCurrent(this.#receipts.get(p.identity), p.sid, now)

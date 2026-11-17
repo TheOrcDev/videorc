@@ -3,7 +3,8 @@ import {
   CAPABILITY_TOPIC,
   capabilityCurrent,
   parseConsumerCapability,
-  type CapabilityReceipt
+  type CapabilityReceipt,
+  CAPABILITY_RECEIPT_MAX_BYTES
 } from './room-media-v2'
 import {
   AVATAR_TOPIC,
@@ -179,7 +180,8 @@ export class RoomAvatarPublisher {
     }
   }
   #receive = (bytes: Uint8Array, participant?: unknown, _kind?: unknown, topic?: string): void => {
-    if (participant || topic !== CAPABILITY_TOPIC || bytes.length > 1024) return
+    if (participant || topic !== CAPABILITY_TOPIC || bytes.length > CAPABILITY_RECEIPT_MAX_BYTES)
+      return
     try {
       const raw = JSON.parse(new TextDecoder().decode(bytes))
       const parsed = parseConsumerCapability(raw)

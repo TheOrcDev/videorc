@@ -1283,7 +1283,16 @@ pub async fn install_banner_set(state: &AppState) -> anyhow::Result<()> {
 /// Plan 232: what the HTML overlay targets follow: every HTML banner in the
 /// set (and whether it is fading out), the run's canvases and its rate.
 pub async fn html_overlay_view(state: &AppState) -> crate::html_overlay::HtmlOverlayView {
+    // Plan 249 S11: the talk-show room's canvases while its renderer asks,
+    // without a capture run (read before the compositor lock).
+    let room = crate::cloud_graphics::html_room_canvases(state);
     let compositor = state.compositor.lock().await;
+    let mut canvases = compositor.banner_canvases();
+    for canvas in room {
+        if !canvases.contains(&canvas) {
+            canvases.push(canvas);
+        }
+    }
     crate::html_overlay::HtmlOverlayView {
         layers: compositor
             .banners
@@ -1292,7 +1301,7 @@ pub async fn html_overlay_view(state: &AppState) -> crate::html_overlay::HtmlOve
             .filter(|layer| layer.banner.kind == crate::protocol::BannerKind::Html)
             .map(|layer| (layer.banner.clone(), layer.fade.hides()))
             .collect(),
-        canvases: compositor.banner_canvases(),
+        canvases,
         fps: compositor.status.target_fps,
     }
 }

@@ -621,6 +621,15 @@ export interface BackendRpcMethodMap {
     { showId: string; known?: string },
     GraphicsSource
   >
+  /**
+   * Plan 249 S11: the room renderer asks for HTML overlay targets on the
+   * room's canvases (a 30 s lease it renews) while a program page may draw
+   * the HTML layer sheet. Never starts a capture run or recording.
+   */
+  'cloud.htmlLayers.want': BackendRpcDefinition<
+    { showId: string; want: boolean },
+    { want: boolean }
+  >
   /** Renderer-only observation of an applied public avatar output. */
   'buddy.cloud.report': BackendRpcDefinition<
     { showId: string; stream: boolean; recording: boolean },
@@ -7426,6 +7435,13 @@ const runtimeContracts = {
       if (!result) throw new RuntimeSchemaError(path, 'a public graphics snapshot')
       return result
     })
+  },
+  'cloud.htmlLayers.want': {
+    params: objectSchema(
+      { showId: stringSchema({ minLength: 1, maxLength: 128 }), want: booleanSchema },
+      { allowUnknown: false }
+    ),
+    result: objectSchema({ want: booleanSchema }, { allowUnknown: false })
   },
   'buddy.cloud.report': {
     params: objectSchema(
