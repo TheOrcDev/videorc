@@ -746,6 +746,8 @@ import {
 export type { GoLivePartialSetup, GoLiveSetupFailure } from '@/lib/go-live-flow'
 
 type CaptionOverlayWork = {
+  room?: { sessionClientId: string; expiresAt: number; stream: boolean; recording: boolean }
+
   client: BackendClient
   epoch: number
   key: string
@@ -14389,11 +14391,16 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const captionsStopAttemptedRef = useRef(false)
   const captionsAttemptClientRef = useRef<BackendClient | null>(null)
   const captionsAttemptScopeRef = useRef('')
-  const captionsCaptureActive = ['recording', 'streaming'].includes(recording.state)
+  const captionsCaptureActive =
+    talkShowRoomOpen || ['recording', 'streaming'].includes(recording.state)
   const captionsAttemptScope = [
     captureConfig.captions.enabled ? 'enabled' : 'disabled',
     suppressCaptionsForSession ? 'suppressed' : 'normal',
-    captionsCaptureActive ? `capture:${recording.sessionId ?? 'unknown'}` : 'idle',
+    talkShowRoomOpen
+      ? `room:${cloudStatus?.show?.id ?? 'unknown'}`
+      : captionsCaptureActive
+        ? `capture:${recording.sessionId ?? 'unknown'}`
+        : 'idle',
     captureConfig.captions.language,
     wsStatus
   ].join(':')
@@ -14418,6 +14425,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     })
     if (action === 'start') {
       if (
+        !talkShowRoomOpen &&
         captionRuntimeStartBlocked({
           captureActive: captionsCaptureActive,
           outputReadiness: captionOutputReadiness
@@ -14458,6 +14466,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     }
   }, [
     captionsAttemptScope,
+    talkShowRoomOpen,
     captionsCaptureActive,
     captionsCommandPending,
     captionOutputReadiness,
@@ -14518,6 +14527,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // Burn-in driver: a serial latest-wins scheduler replaces the old boolean
   // busy gate, which could permanently drop a final/style update that arrived
   // during rasterization. One render may run and only the newest waits behind it.
+  const captionCueExpiryRef = useRef(new WeakMap<CaptionsUpdate, number>())
   const captionOverlayPushedKey = useRef<string | null>(null)
   const captionOverlayEpochRef = useRef(0)
   const captionOverlayWorkActiveRef = useRef(false)
@@ -14544,13 +14554,15 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         maxBarWidthPx: output.rect ? Math.floor(output.rect.w * output.canvasWidth) : undefined
       })
       if (!pngBase64 || work.epoch !== captionOverlayEpochRef.current) return
-      await work.client.request('captions.overlay.set', {
+      const frame = {
         pngBase64,
         position: work.position,
         ...(output.rect ? { rect: output.rect } : {}),
         target: output.target,
         styleRevision: work.styleRevision
-      })
+      }
+      if (work.room) await work.client.requestTyped('cloud.speech.overlay', { ...work.room, frame })
+      else await work.client.request('captions.overlay.set', frame)
       pushed = true
     }
     if (pushed && work.epoch === captionOverlayEpochRef.current) {
@@ -14603,7 +14615,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // captionLines.at(-1) from the previous video at each session start).
   const captionSessionWasActiveRef = useRef(false)
   useEffect(() => {
-    if (isSessionActive && !captionSessionWasActiveRef.current) {
+    if (captionsCaptureActive && !captionSessionWasActiveRef.current) {
       const lines = captionLinesRef.current
       captionSessionFloorRef.current = captionSessionFloor(lines) ?? captionSessionFloorRef.current
       captionOverlayEpochRef.current += 1
@@ -14615,8 +14627,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         setCaptionLines([])
       }
     }
-    captionSessionWasActiveRef.current = isSessionActive
-  }, [isSessionActive])
+    captionSessionWasActiveRef.current = captionsCaptureActive
+  }, [captionsCaptureActive])
 
   useEffect(() => {
     if (!client) {
@@ -14625,7 +14637,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     const sessionConfig = captureConfigForIntent(
       captureConfig,
       remoteOutputIntent({
-        sessionActive: isSessionActive,
+        sessionActive: captionsCaptureActive,
         startIntent: activeStartIntent,
         status: recording,
         config: captureConfig,
@@ -14633,19 +14645,40 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       })
     )
     const latest = captionLines.at(-1)
+    if (latest && !captionCueExpiryRef.current.has(latest))
+      captionCueExpiryRef.current.set(
+        latest,
+        Date.now() +
+          (latest.kind === 'partial' ? 6000 : Math.min(10000, captionDwellMs(latest.text)))
+      )
     const streamVideo = auxiliaryStreamOutputVideoSettings(
       sessionConfig.video,
       sessionConfig.streamEnabled ? sessionConfig.streaming : undefined
     )
-    const outputs = captionOverlayTargetPlan({
-      burnTarget: captureConfig.captions.burnTarget,
-      recordEnabled: sessionConfig.recordEnabled,
-      streamEnabled: sessionConfig.streamEnabled,
-      recordingVideo: sessionConfig.video,
-      streamVideo,
-      verticalLeg: simulcastLegLiveRequest(sessionConfig)?.video,
-      captionsLayout: overlayLayout.captions
-    })
+    const outputs = talkShowRoomOpen
+      ? [
+          {
+            target: 'primary' as const,
+            canvasWidth: 1920,
+            canvasHeight: 1080,
+            rect: overlayLayout.captions.horizontal
+          },
+          {
+            target: 'auxiliary' as const,
+            canvasWidth: 1080,
+            canvasHeight: 1920,
+            rect: overlayLayout.captions.vertical
+          }
+        ]
+      : captionOverlayTargetPlan({
+          burnTarget: captureConfig.captions.burnTarget,
+          recordEnabled: sessionConfig.recordEnabled,
+          streamEnabled: sessionConfig.streamEnabled,
+          recordingVideo: sessionConfig.video,
+          streamVideo,
+          verticalLeg: simulcastLegLiveRequest(sessionConfig)?.video,
+          captionsLayout: overlayLayout.captions
+        })
     const candidateKey = latest
       ? outputs
           .map(
@@ -14662,12 +14695,12 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           )
           .join('|')
       : undefined
-    const burnIn = outputs.length > 0
+    const burnIn = outputs.length > 0 && captureConfig.captions.burnTarget !== 'off'
     const captionsRunning = captionsStatusIsActive(captionsStatus)
     const decision = decideOverlayPush({
       burnIn,
       captionsRunning,
-      sessionActive: isSessionActive,
+      sessionActive: captionsCaptureActive,
       latest,
       floor: captionSessionFloorRef.current,
       pushedKey: captionOverlayPushedKey.current,
@@ -14676,7 +14709,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     })
     if (
       decision.action === 'clear' ||
-      ((!burnIn || !captionsRunning || !isSessionActive) && captionOverlayWorkActiveRef.current)
+      ((!burnIn || !captionsRunning || !captionsCaptureActive) &&
+        captionOverlayWorkActiveRef.current)
     ) {
       captionOverlayEpochRef.current += 1
       captionOverlaySchedulerRef.current?.clearPending()
@@ -14697,6 +14731,20 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       client,
       epoch: captionOverlayEpochRef.current,
       key: decision.key,
+      ...(talkShowRoomOpen
+        ? {
+            room: {
+              sessionClientId: latest.sessionClientId,
+              expiresAt: captionCueExpiryRef.current.get(latest)!,
+              stream:
+                captureConfig.captions.burnTarget === 'stream' ||
+                captureConfig.captions.burnTarget === 'both',
+              recording:
+                captureConfig.captions.burnTarget === 'recording' ||
+                captureConfig.captions.burnTarget === 'both'
+            }
+          }
+        : {}),
       text: latest.text,
       outputs: outputs.map((output) => ({
         target: output.target,
@@ -14713,9 +14761,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     client,
+    talkShowRoomOpen,
     captionLines,
     captionsStatus,
-    isSessionActive,
+    captionsCaptureActive,
     activeStartIntent,
     recording.state,
     recording.streamUrl,
@@ -14735,14 +14784,17 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     if (
       !client ||
       !latestCaption ||
-      !isSessionActive ||
+      !captionsCaptureActive ||
       captureConfig.captions.burnTarget === 'off'
     ) {
       return
     }
     const identity = captionLineIdentity(latestCaption)
     captionOverlayExpiredLineRef.current = null
-    const dwellMs = latestCaption.kind === 'partial' ? 6000 : captionDwellMs(latestCaption.text)
+    const dwellMs = Math.max(
+      0,
+      (captionCueExpiryRef.current.get(latestCaption) ?? Date.now()) - Date.now()
+    )
     const timer = window.setTimeout(() => {
       const current = captionLinesRef.current.at(-1)
       if (!current || captionLineIdentity(current) !== identity) return
@@ -14758,7 +14810,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         .catch(() => {})
     }, dwellMs)
     return () => window.clearTimeout(timer)
-  }, [client, captureConfig.captions, isSessionActive, latestCaption])
+  }, [client, captureConfig.captions, captionsCaptureActive, latestCaption])
 
   const renameScreen = useCallback(
     async (screenId: string, name: string) => {

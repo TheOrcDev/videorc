@@ -859,6 +859,22 @@ export interface BackendRpcMethodMap {
     { sessionId: string },
     ModerationOperation[]
   >
+  'cloud.speech.overlay': BackendRpcDefinition<
+    import('./cloud-speech').CloudSpeechOverlay,
+    import('./cloud-speech').CloudSpeechOverlayResult
+  >
+  'cloud.speech.transcript': BackendRpcDefinition<
+    { showId: string },
+    import('./cloud-speech').HostTranscriptCue[]
+  >
+  'cloud.speech.sync': BackendRpcDefinition<
+    import('./cloud-speech').CloudSpeechSync,
+    import('./cloud-speech').CloudSpeechStatus
+  >
+  'cloud.speech.audio': BackendRpcDefinition<
+    import('./cloud-speech').CloudSpeechPcm,
+    import('./cloud-speech').CloudSpeechStatus
+  >
   'captions.status.get': BackendRpcDefinition<undefined, import('./backend').CaptionsStatus>
   'session.marker.voice.configure': BackendRpcDefinition<
     { sessionId: string; consent: boolean },
@@ -2324,7 +2340,7 @@ const mainOwnedPreviewBoundsSchema = objectSchema(
 const mainOwnedPreviewSurfaceBoundsParamsSchema = objectSchema(
   {
     bounds: mainOwnedPreviewBoundsSchema,
-    generation: numberSchema({ integer: true, min: 0, max: Number.MAX_SAFE_INTEGER })
+    generation: numberSchema({ integer: true, min: 1, max: Number.MAX_SAFE_INTEGER })
   },
   { allowUnknown: false }
 ) as RuntimeSchema<MainOwnedPreviewSurfaceBoundsParams>
@@ -4971,7 +4987,26 @@ const clipMarkedEventSchema = objectSchema(
 // Caption outage presentation uses the existing degraded state and the shared
 // service-unavailable reason. Keep every wire field explicit: main rejects
 // unknown keys on registered events, including during an outage.
-export const captionsStatusSchema = objectSchema(
+const cloudSpeechStatusSchema = objectSchema(
+  {
+    uploadAllowed: booleanSchema,
+    sourceId: nullableSchema(stringSchema({ maxLength: 160 })),
+    reason: stringSchema({ maxLength: 128 }),
+    productionQualified: literalSchema(false)
+  },
+  { allowUnknown: false }
+)
+const cloudSpeechOverlayTargetSchema = objectSchema(
+  {
+    active: booleanSchema,
+    width: nonNegativeInteger,
+    height: nonNegativeInteger,
+    revision: nonNegativeInteger,
+    styleRevision: nonNegativeInteger
+  },
+  { allowUnknown: false }
+)
+const captionsStatusSchema = objectSchema(
   {
     state: enumSchema([
       'idle',
@@ -7334,6 +7369,98 @@ const runtimeContracts = {
   'liveChat.moderationOperations.list': {
     params: objectSchema({ sessionId: boundedString }, { allowUnknown: false }),
     result: arraySchema(moderationOperationSchema, { maxLength: 200 })
+  },
+  'cloud.speech.overlay': {
+    params: objectSchema(
+      {
+        sessionClientId: stringSchema({ minLength: 1, maxLength: 160 }),
+        expiresAt: numberSchema({ integer: true, min: 1, max: Number.MAX_SAFE_INTEGER }),
+        stream: booleanSchema,
+        recording: booleanSchema,
+        frame: objectSchema(
+          {
+            pngBase64: stringSchema({ minLength: 4, maxLength: 1024 * 1024 }),
+            position: enumSchema(['top', 'bottom']),
+            rect: optionalSchema(overlayRectSchema),
+            target: enumSchema(['primary', 'auxiliary']),
+            styleRevision: nonNegativeInteger
+          },
+          { allowUnknown: false }
+        )
+      },
+      { allowUnknown: false }
+    ),
+    result: objectSchema(
+      {
+        active: booleanSchema,
+        primary: cloudSpeechOverlayTargetSchema,
+        auxiliary: cloudSpeechOverlayTargetSchema
+      },
+      { allowUnknown: false }
+    )
+  },
+  'cloud.speech.transcript': {
+    params: objectSchema(
+      { showId: stringSchema({ minLength: 1, maxLength: 160 }) },
+      { allowUnknown: false }
+    ),
+    result: arraySchema(
+      objectSchema(
+        {
+          sourceId: boundedString,
+          speechSessionId: boundedString,
+          seq: nonNegativeInteger,
+          offsetSeconds: numberSchema({ min: 0 }),
+          durationSeconds: numberSchema({ min: 0 }),
+          text: boundedString,
+          clockBasis: literalSchema('processed-host-source'),
+          clock: objectSchema(
+            {
+              basis: literalSchema('show-created-at-wall-estimate'),
+              showCreatedAt: nullableSchema(boundedString),
+              sourceObservedAt: boundedString,
+              showOffsetSeconds: nullableSchema(numberSchema({ min: 0 })),
+              uncertaintyMs: literalSchema(null)
+            },
+            { allowUnknown: false }
+          )
+        },
+        { allowUnknown: false }
+      ),
+      { maxLength: 1000 }
+    )
+  },
+  'cloud.speech.sync': {
+    params: objectSchema(
+      {
+        showId: stringSchema({ minLength: 1, maxLength: 160 }),
+        sourceId: stringSchema({ minLength: 1, maxLength: 160 }),
+        generation: numberSchema({ integer: true, min: 1, max: Number.MAX_SAFE_INTEGER }),
+        published: booleanSchema,
+        muted: booleanSchema
+      },
+      { allowUnknown: false }
+    ),
+    result: cloudSpeechStatusSchema
+  },
+  'cloud.speech.audio': {
+    params: objectSchema(
+      {
+        sourceId: stringSchema({ minLength: 1, maxLength: 160 }),
+        sequence: numberSchema({ integer: true, min: 1, max: Number.MAX_SAFE_INTEGER }),
+        sampleRate: numberSchema({ integer: true, min: 16000, max: 48000 }),
+        samples: runtimeSchema('bounded nonempty host PCM', (value, path) => {
+          const samples = arraySchema(numberSchema({ min: -1, max: 1 }), { maxLength: 4800 }).parse(
+            value,
+            path
+          )
+          if (!samples.length) throw new RuntimeSchemaError(path, 'nonempty host PCM')
+          return samples
+        })
+      },
+      { allowUnknown: false }
+    ),
+    result: cloudSpeechStatusSchema
   },
   'captions.status.get': { params: undefinedSchema, result: captionsStatusSchema },
   'session.marker.voice.configure': {

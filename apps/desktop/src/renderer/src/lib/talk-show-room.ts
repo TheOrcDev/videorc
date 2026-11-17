@@ -1,3 +1,4 @@
+import type { HostSpeechTap } from './room-speech-source'
 import {
   createRoomMicrophoneSource,
   microphoneRequiresReplacement,
@@ -179,6 +180,12 @@ export const IDLE_TALK_SHOW_ROOM: TalkShowRoomSnapshot = {
 }
 
 export type TalkShowRoomDeps = {
+  attachHostSpeech?: (
+    track: MediaStreamTrack,
+    showId: string,
+    muted: boolean,
+    current: () => boolean
+  ) => HostSpeechTap
   /** S7a explicit dev fixture; not inferred from media-v2 or exposed as production mode. */
   pcmTestSource?: boolean
   onPcmDiagnostic?: (value: unknown) => void
@@ -293,6 +300,7 @@ export class TalkShowRoomClient {
   #microphoneChoice: RoomMicrophoneChoice | undefined
   #microphoneOpening: Promise<void> = Promise.resolve()
   #microphoneCleanupFailed = false
+  #speech: HostSpeechTap | null = null
   #microphoneGeneration = 0
   #screen: LocalVideoTrack | null = null
   #screenGeneration = 0
@@ -501,9 +509,13 @@ export class TalkShowRoomClient {
         if (!this.#owns(room)) return
         if (choice.deviceId && choice.name) await this.#publishMicrophone(room)
       } else {
+        if (choice.muted) await this.#speech?.setMuted(true)
         this.#processedMicrophone?.update(choice)
         if (choice.muted) await this.#microphone?.mute()
-        else await this.#microphone?.unmute()
+        else {
+          await this.#microphone?.unmute()
+          await this.#speech?.setMuted(false)
+        }
       }
     })
   }
@@ -515,6 +527,7 @@ export class TalkShowRoomClient {
   setMicrophoneMode(mode: 'mute' | 'unmute' | 'toggle'): Promise<void> {
     return this.#control(async (room) => {
       const muted = mode === 'toggle' ? !this.#micMuted : mode === 'mute'
+      if (muted) await this.#speech?.setMuted(true)
       const track = this.#microphone
       if (!track) throw new Error('No microphone is published in the room.')
       if (this.#microphoneChoice) {
@@ -526,6 +539,7 @@ export class TalkShowRoomClient {
       if (!this.#owns(room) || track !== this.#microphone)
         throw new Error('The microphone changed.')
       this.#micMuted = muted
+      if (!muted) await this.#speech?.setMuted(false)
     })
   }
 
@@ -1370,7 +1384,20 @@ export class TalkShowRoomClient {
       await room.localParticipant.publishTrack(microphone, {
         source: Track.Source.Microphone
       })
-      if (current()) this.#processedMicrophone?.published()
+      if (current()) {
+        this.#processedMicrophone?.published()
+        if (
+          room.localParticipant.identity.startsWith('host:') &&
+          (this.#processedMicrophone || this.#pcmSource)
+        )
+          this.#speech =
+            this.#deps.attachHostSpeech?.(
+              microphone.mediaStreamTrack,
+              room.localParticipant.identity.replace(/^host:/, ''),
+              this.#micMuted,
+              current
+            ) ?? null
+      }
       if (!current()) {
         microphone.stop()
         await room.localParticipant.unpublishTrack(microphone, true).catch(() => {})
@@ -1392,6 +1419,8 @@ export class TalkShowRoomClient {
 
   #retirePcm(room: Room): void {
     ++this.#microphoneGeneration
+    const speechClosing = this.#speech?.close()
+    this.#speech = null
     this.#pcmAbort?.abort()
     this.#pcmAbort = null
     const processed = this.#processedMicrophone?.close()
@@ -1401,7 +1430,7 @@ export class TalkShowRoomClient {
     const track = this.#microphone
     this.#microphone = null
     track?.stop()
-    this.#pcmRetiring = Promise.allSettled([this.#pcmRetiring, closing, processed])
+    this.#pcmRetiring = Promise.allSettled([this.#pcmRetiring, closing, processed, speechClosing])
       .then(async (settled) => {
         if (processed && settled.some((result) => result.status === 'rejected'))
           this.#microphoneCleanupFailed = true
@@ -1414,8 +1443,11 @@ export class TalkShowRoomClient {
 
   async #stopLocal(): Promise<void> {
     ++this.#microphoneGeneration
+    const speechClosing = this.#speech?.close()
+    this.#speech = null
     this.#pcmAbort?.abort()
     this.#pcmAbort = null
+    await speechClosing
     const closingProcessed = this.#processedMicrophone?.close()
     this.#processedMicrophone = null
     const closingPcm = this.#pcmSource?.close()

@@ -66,6 +66,7 @@ if (selected.case === 'library') {
 }
 if (
   ![
+    'captions',
     'baseline',
     'controls',
     'privacy',
@@ -102,6 +103,7 @@ const run =
 const { output } = await run({
   desktopRoot: fileURLToPath(new URL('../', import.meta.url)),
   webRoot,
+  captions: selected.case === 'captions',
   controls: selected.case === 'controls',
   privacy: selected.case === 'privacy',
   soundboard: selected.case === 'soundboard',

@@ -62,6 +62,7 @@ const recordArtifact = (report, root, file, kind) => {
 export async function runBaseline({
   desktopRoot,
   webRoot,
+  captions = false,
   controls = false,
   privacy = false,
   soundboard = false,
@@ -115,7 +116,7 @@ export async function runBaseline({
   report.revisions.programBundleSha256 = createHash('sha256')
     .update(readFileSync(join(webRoot, 'public/cloud/program/v1/stage.js')))
     .digest('hex')
-  const h = await managedHarness('talk')
+  const h = await managedHarness('talk', 1, { speech: captions })
   const output = join(h.root, 'parity')
   mkdirSync(output)
   let pages, browser, failure
@@ -198,7 +199,7 @@ export async function runBaseline({
     pages = await startParityPages(
       webRoot,
       guests,
-      soundboard || avatar || scenes || replayRing || views || graphics
+      soundboard || avatar || scenes || replayRing || captions || views || graphics
         ? {
             ...(avatar || scenes || graphics
               ? {
@@ -342,242 +343,257 @@ export async function runBaseline({
         `${name} actual return attached`
       )
     }
-    const base = await captureAudio('camera-mic', clients)
-    const publications = await h.web.roomRpc('ListParticipants', { room: h.showId })
-    report.sources = {
-      observation: 'LiveKit publications, not an applied-output acknowledgement',
-      participants: (publications.participants ?? []).map((person) => ({
-        identity: person.identity,
-        tracks: (person.tracks ?? []).map(({ sid, type, source, muted }) => ({
-          sid,
-          type,
-          source,
-          muted
-        }))
-      })),
-      requestedOutput: OUTPUT,
-      platformDestinations: [],
-      nativeRecording: (await h.rpc('recording.status')).state,
-      programSurface: 'local-real-page-browser-capture',
-      encodedManagedOutput: 'not-run'
-    }
-    const programTones = base.find((c) => c.name === 'program').tones
-    observations.push({
-      name: 'programMicrophone',
-      passed: ['host', 'guest1', 'guest2'].every((name) => audible(programTones[name])),
-      tones: programTones
-    })
-    for (const name of ['guest1', 'guest2']) {
-      const tones = base.find((c) => c.name === name).tones,
-        other = name === 'guest1' ? 'guest2' : 'guest1'
+    if (captions) {
+      const { exerciseCaptions } = await import('./cloud-parity-captions.mjs')
+      report.captions = await exerciseCaptions({
+        h,
+        clients,
+        newPage,
+        programUrl: `${pages.origin}${pages.wire.PROGRAM_PAGE_PATH}?${search}`,
+        output
+      })
+      report.status = 'passed'
+      writeReport()
+    } else {
+      const base = await captureAudio('camera-mic', clients)
+      const publications = await h.web.roomRpc('ListParticipants', { room: h.showId })
+      report.sources = {
+        observation: 'LiveKit publications, not an applied-output acknowledgement',
+        participants: (publications.participants ?? []).map((person) => ({
+          identity: person.identity,
+          tracks: (person.tracks ?? []).map(({ sid, type, source, muted }) => ({
+            sid,
+            type,
+            source,
+            muted
+          }))
+        })),
+        requestedOutput: OUTPUT,
+        platformDestinations: [],
+        nativeRecording: (await h.rpc('recording.status')).state,
+        programSurface: 'local-real-page-browser-capture',
+        encodedManagedOutput: 'not-run'
+      }
+      const programTones = base.find((c) => c.name === 'program').tones
       observations.push({
-        name: `${name}Return`,
-        passed:
-          audible(tones.host) && audible(tones[other]) && tones[name] < MEDIA.analysis.absentDbfs,
-        tones
+        name: 'programMicrophone',
+        passed: ['host', 'guest1', 'guest2'].every((name) => audible(programTones[name])),
+        tones: programTones
       })
-    }
-    const overlay = async (slot, color) => {
-      const png = runMedia(h.ffmpeg, [
-        '-v',
-        'error',
-        '-f',
-        'lavfi',
-        '-i',
-        `color=0x${color.map((v) => v.toString(16).padStart(2, '0')).join('')}:s=64x64`,
-        '-frames:v',
-        '1',
-        '-f',
-        'image2pipe',
-        '-c:v',
-        'png',
-        'pipe:1'
-      ])
-      await h.rpc('cloud.overlay.set', {
-        slot,
-        orientation: 'h',
-        pngBase64: png.toString('base64'),
-        rect: slot === 'card' ? { x: 0.1, y: 0.1, w: 0.3, h: 0.3 } : { x: 0, y: 0, w: 1, h: 1 }
-      })
-      // Media window, not a readiness handshake: analysis below requires the
-      // marker in decoded recording frames, independently of this RPC reply.
-      const captured = await captureAudio(slot, clients)
-      if (controls && slot === 'takeover') {
-        const program = captured.find((c) => c.name === 'program')
-        for (const voice of ['host', 'guest1', 'guest2'])
-          assert.ok(
-            program.settledTones[voice] < MEDIA.analysis.absentDbfs,
-            `Takeover must silence ${voice} in program; web PR #118 is required`
-          )
-        report.takeoverPolicy = 'all-program-silence'
+      for (const name of ['guest1', 'guest2']) {
+        const tones = base.find((c) => c.name === name).tones,
+          other = name === 'guest1' ? 'guest2' : 'guest1'
+        observations.push({
+          name: `${name}Return`,
+          passed:
+            audible(tones.host) && audible(tones[other]) && tones[name] < MEDIA.analysis.absentDbfs,
+          tones
+        })
       }
-      await h.rpc('cloud.overlay.clear', { slot, orientation: 'h' })
-    }
-    if (!graphics) await overlay('card', MEDIA.colors.card)
-    await overlay('takeover', MEDIA.colors.takeover)
-    if (controls) await exerciseControls({ h, clients, captureAudio, report, cameraId })
-    if (privacy)
-      await exercisePrivacy({
-        h,
-        clients,
-        pages,
-        report,
-        output,
-        newPage,
-        programUrl: `${pages.origin}${pages.wire.PROGRAM_PAGE_PATH}?${search}`
-      })
-
-    const soundPath = join(output, 'soundboard.wav')
-    writeFileSync(soundPath, toneWav(MEDIA.tones.soundboard, 8))
-    const auth = await h.command('authorize-smoke-resource', {
-      kind: 'input-file',
-      path: soundPath
-    })
-    const sound = await h.rpc('sounds.import', { sourceCapability: auth.capabilityId })
-    if (replayRing) {
-      const { exerciseReplayRing } = await import('./cloud-parity-replay-ring.mjs')
-      await exerciseReplayRing({ h, program, webRoot, output, report, sound })
-    }
-    if (soundboard) await exerciseSoundboard({ h, clients, captureAudio, report, sound, guests })
-    if (views) await exerciseViews({ h, clients, captureAudio, report, sound, guests, output })
-    await h.rpc('sounds.play', { id: sound.id })
-    const soundCaptures = await captureAudio('soundboard', clients)
-    observations.push({
-      name: 'soundboard',
-      observed: soundCaptures.every((c) => c.tones.soundboard < MEDIA.analysis.absentDbfs)
-        ? 'absent'
-        : 'present',
-      captures: soundCaptures
-    })
-    await h.rpc('sounds.stop')
-
-    // Existing fixture pack and manual Say exercise the real avatar producer;
-    // no AI provider or guest transcription is involved.
-    const settings = await h.rpc('cohost.settings.get'),
-      packId = randomUUID()
-    writeBuddyPetFixturePack(
-      join(h.env.VIDEORC_USER_DATA_DIR, 'buddy-assets', settings.persona.id, 'pets', packId)
-    )
-    await h.command('backend-debug-rpc', {
-      method: 'cohost.pet.import',
-      params: { folderToken: `${settings.persona.id}/pets/${packId}` },
-      timeoutMs: 15000
-    })
-    await h.rpc('cohost.settings.set', {
-      persona: { ...settings.persona, avatar: { kind: 'alive', packId } }
-    })
-    const layout = await h.rpc('overlays.layout.get')
-    await h.rpc('overlays.layout.set', {
-      ...layout,
-      buddy: { ...layout.buddy, showOnStream: true, showInRecording: true }
-    })
-    await h.rpc('cohost.utterance.say', { text: 'Parity fixture bubble' })
-    await captureAudio('avatar', clients)
-    if (avatarAnimation)
-      await exerciseAvatarAnimation({
-        h,
-        report,
-        clients,
-        newPage,
-        programUrl: `${pages.origin}${pages.wire.PROGRAM_PAGE_PATH}?${search}`
-      })
-    else if (avatar)
-      await exerciseAvatar({
-        h,
-        report,
-        clients,
-        newPage,
-        programUrl: `${pages.origin}${pages.wire.PROGRAM_PAGE_PATH}?${search}`,
-        captureAudio,
-        output
-      })
-    if (graphics)
-      await exerciseGraphics({
-        h,
-        report,
-        clients,
-        newPage,
-        programUrl: `${pages.origin}${pages.wire.PROGRAM_PAGE_PATH}?${search}`,
-        output
-      })
-    if (scenes)
-      await exerciseScenes({
-        h,
-        report,
-        clients,
-        newPage,
-        programUrl: `${pages.origin}${pages.wire.PROGRAM_PAGE_PATH}?${search}`,
-        output,
-        desktopRoot,
-        guestIds: [...guests.values()].map((g) => g.identity)
-      })
-    assert.equal(h.web.snapshot(h.showId).state.legs.length, 0)
-    h.assertNoDirect()
-    await h.rpc('cloud.room.close')
-    for (const context of contexts) await context.close()
-    contexts.length = 0
-    const colors = { ...MEDIA.colors, ...(graphics ? { graphics: [0, 255, 255] } : {}) }
-    const colorPeaks = {},
-      frameHits = {}
-    for (const { name, video } of videos) {
-      const file = await video.path()
-      const raw = runMedia(h.ffmpeg, [
-        '-v',
-        'error',
-        '-i',
-        file,
-        '-vf',
-        'fps=5,scale=160:90',
-        '-pix_fmt',
-        'rgb24',
-        '-f',
-        'rawvideo',
-        'pipe:1'
-      ])
-      const frameBytes = 160 * 90 * 3
-      assert.ok(
-        raw.length >= frameBytes * 5 && raw.length % frameBytes === 0,
-        `${name}: incomplete video artifact`
-      )
-      const peaks = Object.fromEntries(Object.keys(colors).map((key) => [key, 0]))
-      const hits = Object.fromEntries(Object.keys(colors).map((key) => [key, 0]))
-      for (let at = 0; at < raw.length; at += frameBytes) {
-        const frame = raw.subarray(at, at + frameBytes)
-        for (const [key, color] of Object.entries(colors)) {
-          const fraction = colorFraction(frame, color)
-          peaks[key] = Math.max(peaks[key], fraction)
-          if (fraction > MEDIA.analysis.minimumColorFraction) hits[key]++
+      const overlay = async (slot, color) => {
+        const png = runMedia(h.ffmpeg, [
+          '-v',
+          'error',
+          '-f',
+          'lavfi',
+          '-i',
+          `color=0x${color.map((v) => v.toString(16).padStart(2, '0')).join('')}:s=64x64`,
+          '-frames:v',
+          '1',
+          '-f',
+          'image2pipe',
+          '-c:v',
+          'png',
+          'pipe:1'
+        ])
+        await h.rpc('cloud.overlay.set', {
+          slot,
+          orientation: 'h',
+          pngBase64: png.toString('base64'),
+          rect: slot === 'card' ? { x: 0.1, y: 0.1, w: 0.3, h: 0.3 } : { x: 0, y: 0, w: 1, h: 1 }
+        })
+        // Media window, not a readiness handshake: analysis below requires the
+        // marker in decoded recording frames, independently of this RPC reply.
+        const captured = await captureAudio(slot, clients)
+        if (controls && slot === 'takeover') {
+          const program = captured.find((c) => c.name === 'program')
+          for (const voice of ['host', 'guest1', 'guest2'])
+            assert.ok(
+              program.settledTones[voice] < MEDIA.analysis.absentDbfs,
+              `Takeover must silence ${voice} in program; web PR #118 is required`
+            )
+          report.takeoverPolicy = 'all-program-silence'
         }
+        await h.rpc('cloud.overlay.clear', { slot, orientation: 'h' })
       }
-      recordArtifact(report, h.root, file, `${name}-browser-video`)
-      colorPeaks[name] = peaks
-      frameHits[name] = hits
+      if (!graphics) await overlay('card', MEDIA.colors.card)
+      await overlay('takeover', MEDIA.colors.takeover)
+      if (controls) await exerciseControls({ h, clients, captureAudio, report, cameraId })
+      if (privacy)
+        await exercisePrivacy({
+          h,
+          clients,
+          pages,
+          report,
+          output,
+          newPage,
+          programUrl: `${pages.origin}${pages.wire.PROGRAM_PAGE_PATH}?${search}`
+        })
+
+      const soundPath = join(output, 'soundboard.wav')
+      writeFileSync(soundPath, toneWav(MEDIA.tones.soundboard, 8))
+      const auth = await h.command('authorize-smoke-resource', {
+        kind: 'input-file',
+        path: soundPath
+      })
+      const sound = await h.rpc('sounds.import', { sourceCapability: auth.capabilityId })
+      if (replayRing) {
+        const { exerciseReplayRing } = await import('./cloud-parity-replay-ring.mjs')
+        await exerciseReplayRing({ h, program, webRoot, output, report, sound })
+      }
+      if (soundboard) await exerciseSoundboard({ h, clients, captureAudio, report, sound, guests })
+      if (views) await exerciseViews({ h, clients, captureAudio, report, sound, guests, output })
+      await h.rpc('sounds.play', { id: sound.id })
+      const soundCaptures = await captureAudio('soundboard', clients)
+      observations.push({
+        name: 'soundboard',
+        observed: soundCaptures.every((c) => c.tones.soundboard < MEDIA.analysis.absentDbfs)
+          ? 'absent'
+          : 'present',
+        captures: soundCaptures
+      })
+      await h.rpc('sounds.stop')
+
+      // Existing fixture pack and manual Say exercise the real avatar producer;
+      // no AI provider or guest transcription is involved.
+      const settings = await h.rpc('cohost.settings.get'),
+        packId = randomUUID()
+      writeBuddyPetFixturePack(
+        join(h.env.VIDEORC_USER_DATA_DIR, 'buddy-assets', settings.persona.id, 'pets', packId)
+      )
+      await h.command('backend-debug-rpc', {
+        method: 'cohost.pet.import',
+        params: { folderToken: `${settings.persona.id}/pets/${packId}` },
+        timeoutMs: 15000
+      })
+      await h.rpc('cohost.settings.set', {
+        persona: { ...settings.persona, avatar: { kind: 'alive', packId } }
+      })
+      const layout = await h.rpc('overlays.layout.get')
+      await h.rpc('overlays.layout.set', {
+        ...layout,
+        buddy: { ...layout.buddy, showOnStream: true, showInRecording: true }
+      })
+      await h.rpc('cohost.utterance.say', { text: 'Parity fixture bubble' })
+      await captureAudio('avatar', clients)
+      if (avatarAnimation)
+        await exerciseAvatarAnimation({
+          h,
+          report,
+          clients,
+          newPage,
+          programUrl: `${pages.origin}${pages.wire.PROGRAM_PAGE_PATH}?${search}`
+        })
+      else if (avatar)
+        await exerciseAvatar({
+          h,
+          report,
+          clients,
+          newPage,
+          programUrl: `${pages.origin}${pages.wire.PROGRAM_PAGE_PATH}?${search}`,
+          captureAudio,
+          output
+        })
+      if (graphics)
+        await exerciseGraphics({
+          h,
+          report,
+          clients,
+          newPage,
+          programUrl: `${pages.origin}${pages.wire.PROGRAM_PAGE_PATH}?${search}`,
+          output
+        })
+      if (scenes)
+        await exerciseScenes({
+          h,
+          report,
+          clients,
+          newPage,
+          programUrl: `${pages.origin}${pages.wire.PROGRAM_PAGE_PATH}?${search}`,
+          output,
+          desktopRoot,
+          guestIds: [...guests.values()].map((g) => g.identity)
+        })
+      assert.equal(h.web.snapshot(h.showId).state.legs.length, 0)
+      h.assertNoDirect()
+      await h.rpc('cloud.room.close')
+      for (const context of contexts) await context.close()
+      contexts.length = 0
+      const colors = { ...MEDIA.colors, ...(graphics ? { graphics: [0, 255, 255] } : {}) }
+      const colorPeaks = {},
+        frameHits = {}
+      for (const { name, video } of videos) {
+        const file = await video.path()
+        const raw = runMedia(h.ffmpeg, [
+          '-v',
+          'error',
+          '-i',
+          file,
+          '-vf',
+          'fps=5,scale=160:90',
+          '-pix_fmt',
+          'rgb24',
+          '-f',
+          'rawvideo',
+          'pipe:1'
+        ])
+        const frameBytes = 160 * 90 * 3
+        assert.ok(
+          raw.length >= frameBytes * 5 && raw.length % frameBytes === 0,
+          `${name}: incomplete video artifact`
+        )
+        const peaks = Object.fromEntries(Object.keys(colors).map((key) => [key, 0]))
+        const hits = Object.fromEntries(Object.keys(colors).map((key) => [key, 0]))
+        for (let at = 0; at < raw.length; at += frameBytes) {
+          const frame = raw.subarray(at, at + frameBytes)
+          for (const [key, color] of Object.entries(colors)) {
+            const fraction = colorFraction(frame, color)
+            peaks[key] = Math.max(peaks[key], fraction)
+            if (fraction > MEDIA.analysis.minimumColorFraction) hits[key]++
+          }
+        }
+        recordArtifact(report, h.root, file, `${name}-browser-video`)
+        colorPeaks[name] = peaks
+        frameHits[name] = hits
+      }
+      report.videoMeasurements = { colorPeaks, frameHits, sampledFps: 5 }
+      if (avatar) assertAvatarVideo(report)
+      if (graphics) assertGraphicsArtifacts(report)
+      if (scenes) assertScenesVideo(report)
+      const seen = (key) => frameHits.program[key] >= 5
+      observations.push(
+        {
+          name: 'programCamera',
+          passed: ['host', 'guest1', 'guest2'].every(seen),
+          fractions: colorPeaks.program
+        },
+        {
+          name: 'programCard',
+          passed: graphics
+            ? report.graphics.cases.includes('chat-emoji-and-milestone')
+            : seen('card')
+        },
+        { name: 'programTakeover', passed: seen('takeover') },
+        {
+          name: 'avatar',
+          observed: seen('avatar') ? 'present' : 'absent',
+          fraction: colorPeaks.program.avatar
+        }
+      )
+      finishBaseline(report, [...report.observations, ...observations])
+      writeReport()
+      assert.equal(report.status, 'passed', report.blockers.join('; '))
     }
-    report.videoMeasurements = { colorPeaks, frameHits, sampledFps: 5 }
-    if (avatar) assertAvatarVideo(report)
-    if (graphics) assertGraphicsArtifacts(report)
-    if (scenes) assertScenesVideo(report)
-    const seen = (key) => frameHits.program[key] >= 5
-    observations.push(
-      {
-        name: 'programCamera',
-        passed: ['host', 'guest1', 'guest2'].every(seen),
-        fractions: colorPeaks.program
-      },
-      {
-        name: 'programCard',
-        passed: graphics ? report.graphics.cases.includes('chat-emoji-and-milestone') : seen('card')
-      },
-      { name: 'programTakeover', passed: seen('takeover') },
-      {
-        name: 'avatar',
-        observed: seen('avatar') ? 'present' : 'absent',
-        fraction: colorPeaks.program.avatar
-      }
-    )
-    finishBaseline(report, [...report.observations, ...observations])
-    writeReport()
-    assert.equal(report.status, 'passed', report.blockers.join('; '))
   } catch (error) {
     report.status = 'failed'
     // Do not serialize page URLs/errors (which may contain ephemeral JWTs).

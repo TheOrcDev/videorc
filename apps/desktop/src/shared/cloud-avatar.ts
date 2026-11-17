@@ -8,7 +8,7 @@ export type AvatarOutput = 'stream' | 'recording'
 export type AvatarOrientation = 'h' | 'v'
 export type AvatarRect = { x: number; y: number; w: number; h: number }
 export type AvatarApplied = { publisherSid: string; revision: number }
-export type StaticCapability = { version: 1; applied?: AvatarApplied }
+export type StaticCapability = { version: 1; captions?: 1; applied?: AvatarApplied }
 export type AvatarCapability = {
   version: 1
   output: AvatarOutput
@@ -48,7 +48,9 @@ const object = (v: unknown): v is Record<string, unknown> =>
   !!v && typeof v === 'object' && !Array.isArray(v)
 export function parseStaticCapability(v: unknown): StaticCapability | null {
   if (!object(v) || v.version !== 1) return null
-  if (v.applied === undefined) return { version: 1 }
+  if (v.captions !== undefined && v.captions !== 1) return null
+  const extension = v.captions === 1 ? { captions: 1 as const } : {}
+  if (v.applied === undefined) return { version: 1, ...extension }
   if (
     !object(v.applied) ||
     typeof v.applied.publisherSid !== 'string' ||
@@ -58,6 +60,7 @@ export function parseStaticCapability(v: unknown): StaticCapability | null {
     return null
   return {
     version: 1,
+    ...extension,
     applied: { publisherSid: v.applied.publisherSid, revision: v.applied.revision }
   }
 }

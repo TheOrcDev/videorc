@@ -6,7 +6,7 @@ import {
 } from './cloud-graphics'
 /** Slots share the native order: banner/chat below avatar, highlight above it. */
 export function createGraphicsView(
-  slots: { banner: HTMLElement; chat: HTMLElement; highlight: HTMLElement },
+  slots: { banner: HTMLElement; caption: HTMLElement; chat: HTMLElement; highlight: HTMLElement },
   now: () => number = Date.now
 ) {
   type Asset = { image: HTMLImageElement; url: string }
@@ -27,6 +27,13 @@ export function createGraphicsView(
     now,
     clear,
     discard,
+    retain(ids) {
+      shown = shown.filter((s) => {
+        if (ids.has(s.layer.id)) return true
+        discard(s.asset)
+        return false
+      })
+    },
     async prepare(layer) {
       const bytes = graphicsPng(layer.asset)
       if (!bytes) throw Error('Invalid graphic')

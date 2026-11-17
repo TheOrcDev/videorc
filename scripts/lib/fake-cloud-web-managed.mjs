@@ -1,6 +1,6 @@
 import { createHash, randomBytes } from 'node:crypto'
 import { readFileSync } from 'node:fs'
-import { createServer } from 'node:http'
+import { createServer, request as httpRequest } from 'node:http'
 import { createServer as createHttpsServer } from 'node:https'
 import { setTimeout as sleep } from 'node:timers/promises'
 import {
@@ -116,6 +116,7 @@ export async function startFakeCloudWebManaged({
   segmentBytes = Buffer.alloc(0),
   refreshRoom,
   probeMedia,
+  captionServiceOrigin,
   rotateIngest,
   maxShows = 1,
   managed = true,
@@ -307,7 +308,47 @@ export async function startFakeCloudWebManaged({
       changed(s)
     }
   }
+  if (captionServiceOrigin) {
+    const origin = new URL(captionServiceOrigin)
+    if (
+      origin.protocol !== 'http:' ||
+      origin.hostname !== '127.0.0.1' ||
+      origin.username ||
+      origin.password
+    )
+      throw new Error('Caption fixture must be credential-free loopback HTTP')
+  }
   const handler = async (req, res) => {
+    // Dedicated fixture forwarding before body journaling: PCM and transcripts
+    // never enter the managed request log. The backend still uses real API/WS clients.
+    if (
+      captionServiceOrigin &&
+      req.method === 'POST' &&
+      [
+        '/api/ai/captions/realtime-token',
+        '/api/ai/captions/chunks',
+        '/api/ai/captions/usage',
+        '/api/ai/cohost/command'
+      ].includes(req.url)
+    ) {
+      const forwarded = httpRequest(
+        new URL(req.url, captionServiceOrigin),
+        { method: 'POST', headers: req.headers },
+        (response) => {
+          res.writeHead(response.statusCode ?? 502, response.headers)
+          response.pipe(res)
+        }
+      )
+      forwarded.setTimeout(10000, () => forwarded.destroy())
+      forwarded.on('error', () => {
+        if (!res.headersSent) res.writeHead(502)
+        res.end()
+      })
+      res.on('close', () => forwarded.destroy())
+      req.pipe(forwarded)
+      return
+    }
+
     const url = new URL(req.url, 'http://localhost'),
       path = url.pathname
     const controller = new AbortController()

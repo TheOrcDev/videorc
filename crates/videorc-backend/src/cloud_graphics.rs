@@ -96,6 +96,9 @@ pub async fn snapshot(state: &AppState, params: SnapshotParams) -> Result<Value>
         }
         runtime.generation
     };
+    let caption_presentation = crate::captions::cloud_host::presentation(state).await;
+    let caption_slots = crate::captions::current_caption_overlays(&state.caption_overlay);
+    let captions = [caption_slots.primary, caption_slots.auxiliary];
     let banners = crate::compositor::static_graphics_banners(state).await;
     let layout = crate::overlay_layout::load_overlay_layout(&state.database);
     let chat = [
@@ -142,7 +145,15 @@ pub async fn snapshot(state: &AppState, params: SnapshotParams) -> Result<Value>
             .map(|c| c.as_ref().map(|c| c.revision))
             .collect::<Vec<_>>()
     );
+    let key = format!(
+        "{key}:{caption_presentation:?}:{:?}",
+        captions
+            .iter()
+            .map(|c| c.as_ref().map(|c| c.revision))
+            .collect::<Vec<_>>()
+    );
     let signature = format!("{:x}", Sha256::digest(key.as_bytes()));
+    let expected_caption = caption_presentation.clone();
     if params.known.as_deref() == Some(&signature) {
         return Ok(json!({"signature":signature,"content":null}));
     }
@@ -195,6 +206,59 @@ pub async fn snapshot(state: &AppState, params: SnapshotParams) -> Result<Value>
             }
         }
         for (index, canvas) in [(1920, 1080), (1080, 1920)].into_iter().enumerate() {
+            if let (Some(caption), Some(presentation)) = (&captions[index], &caption_presentation) {
+                let placement = if index == 0 {
+                    layout.captions.horizontal
+                } else {
+                    layout.captions.vertical
+                };
+                let mut layer = overlay(
+                    caption,
+                    "caption",
+                    canvas,
+                    placement,
+                    presentation.stream && layout.captions.show_on_stream,
+                    presentation.recording && layout.captions.show_in_recording,
+                    Some(presentation.expires_at),
+                )?;
+                let mut output_rects = serde_json::Map::new();
+                for (output, visible) in [
+                    ("stream", layout.highlight.show_on_stream),
+                    ("recording", layout.highlight.show_in_recording),
+                ] {
+                    let card = if visible && expires.is_some() {
+                        cards[index].as_ref()
+                    } else {
+                        None
+                    };
+                    let inset = crate::compositor::caption_overlay_safe_inset(
+                        Some(caption),
+                        card,
+                        canvas.0,
+                        canvas.1,
+                    );
+                    let (_, x, y, w) = crate::overlay_layout::overlay_blit_layout(
+                        caption.width as usize,
+                        caption.height as usize,
+                        canvas.0 as usize,
+                        canvas.1 as usize,
+                        placement,
+                        inset,
+                    );
+                    output_rects.insert(
+                        output.into(),
+                        rect(
+                            x,
+                            y,
+                            w,
+                            (caption.height as usize).min(canvas.1 as usize - y),
+                            canvas,
+                        ),
+                    );
+                }
+                layer["outputRects"] = Value::Object(output_rects);
+                lanes[index].push(layer);
+            }
             if let Some(chat) = &chat[index]
                 && (layout.chat.show_on_stream || layout.chat.show_in_recording)
             {
@@ -231,7 +295,7 @@ pub async fn snapshot(state: &AppState, params: SnapshotParams) -> Result<Value>
                     expires,
                 )?);
             }
-            if lanes[index].len() > 6 {
+            if lanes[index].len() > 7 {
                 bail!("Static layer budget exceeded");
             }
         }
@@ -240,6 +304,9 @@ pub async fn snapshot(state: &AppState, params: SnapshotParams) -> Result<Value>
         Ok(json!({"h": lanes[0], "v": lanes[1], "unsupported": unsupported}))
     })
     .await??;
+    if crate::captions::cloud_host::presentation(state).await != expected_caption {
+        bail!("Caption source changed during graphic preparation")
+    }
     let runtime = crate::cloud_show::lock(&state.cloud_show);
     if runtime.generation != generation
         || runtime.talk_show_room_show_id().as_deref() != Some(&params.show_id)

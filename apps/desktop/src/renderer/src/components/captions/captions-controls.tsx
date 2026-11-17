@@ -36,7 +36,7 @@ import {
 import { SegmentedControl, type SegmentedControlOption } from '@/components/ui/segmented-control'
 import { Switch } from '@/components/ui/switch'
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
-import { useStudioCaptions, useStudioCore } from '@/hooks/use-studio'
+import { useStudioCaptions, useStudioCore, useStudioCloud } from '@/hooks/use-studio'
 import type { CaptionStyleId } from '@/lib/backend'
 import {
   CAPTION_STYLE_IDS,
@@ -125,6 +125,9 @@ export function CaptionsControls(): ReactElement {
     toggleCaptionsWindow
   } = useStudioCore()
   const { captionLines } = useStudioCaptions()
+  const { cloudStatus } = useStudioCloud()
+  const roomOpen = cloudStatus?.room?.phase === 'open'
+  const speechSourceActive = isSessionActive || roomOpen
   const captions = captureConfig.captions
   const gate = cloudAiUploadGate(entitlements)
   // Locked means disabled, with one reason (S1.5): the lock leads and every
@@ -132,7 +135,7 @@ export function CaptionsControls(): ReactElement {
   // turn them off.
   const locked = !gate.allowed
   const runtimeActive = captionsStatusIsActive(captionsStatus)
-  const statusOptions = { enabled: captions.enabled, sessionActive: isSessionActive }
+  const statusOptions = { enabled: captions.enabled, sessionActive: speechSourceActive }
   const allowance = captionsAllowanceLabel(captionsStatus.remainingSeconds)
   // Captions hear the Sources microphone; "Off" when none is chosen.
   const microphoneName = captureConfig.sources.microphoneId
@@ -142,17 +145,21 @@ export function CaptionsControls(): ReactElement {
   const finalAnnouncement = latestFinalCaptionText(captionLines)
   // A vertical destination shares the recording's picture with the
   // horizontal stream, so livestream captions land in the recording too.
-  const verticalLegArmed = simulcastArmed(captureConfig)
+  const verticalLegArmed = !roomOpen && simulcastArmed(captureConfig)
   // The rule a livestream would break today, said here before Go Live does
   // (plan 174 S3.4, D-9).
   // Linux can't caption at all yet: one reason, and nothing to turn on.
-  const platformUnavailable = captionsPlatformUnavailableReason(runtimeInfo?.platform)
+  const platformUnavailable = roomOpen
+    ? null
+    : captionsPlatformUnavailableReason(runtimeInfo?.platform)
   const livestreamBlocker =
-    captions.enabled && !platformUnavailable ? livestreamCaptionsBlockerFor(captureConfig) : null
+    captions.enabled && !platformUnavailable && !roomOpen
+      ? livestreamCaptionsBlockerFor(captureConfig)
+      : null
   const canEnable = (gate.allowed && !platformUnavailable) || captions.enabled
   const showRetry =
     captions.enabled &&
-    isSessionActive &&
+    speechSourceActive &&
     (captionsStatus.state === 'blocked' || captionsStatus.state === 'error')
 
   const patchCaptions = (
@@ -210,7 +217,7 @@ export function CaptionsControls(): ReactElement {
                     label={captionsStatusLabel(captionsStatus, statusOptions)}
                     tone={captionsStatusTone(captionsStatus, statusOptions)}
                   />
-                  <span>{captionsStatusDetail(captionsStatus, isSessionActive)}</span>
+                  <span>{captionsStatusDetail(captionsStatus, speechSourceActive)}</span>
                 </span>
               ) : (
                 CAPTIONS_OFF_HINT
@@ -238,6 +245,16 @@ export function CaptionsControls(): ReactElement {
             </div>
           </SettingsRow>
         </FieldGroup>
+        {roomOpen && (
+          <Alert>
+            <AlertTitle>Host microphone only</AlertTitle>
+            <AlertDescription>
+              Captions and Sidekick hear your published microphone. Muting it stops speech uploads.
+              Guests and soundboard audio are excluded. Cloud caption timing and program delivery
+              have not been qualified.
+            </AlertDescription>
+          </Alert>
+        )}
         {platformUnavailable ? (
           <Alert data-testid="captions-platform-unavailable" variant="warning">
             <AlertTitle>{CAPTIONS_LINUX_TITLE}</AlertTitle>
@@ -342,11 +359,13 @@ export function CaptionsControls(): ReactElement {
           <FieldContent>
             <FieldLabel htmlFor="caption-language">Spoken language</FieldLabel>
             <FieldDescription>
-              {isSessionActive ? SESSION_LOCK_REASON : 'Auto-detect works for most conversations.'}
+              {speechSourceActive
+                ? SESSION_LOCK_REASON
+                : 'Auto-detect works for most conversations.'}
             </FieldDescription>
           </FieldContent>
           <Select
-            disabled={locked || isSessionActive}
+            disabled={locked || speechSourceActive}
             items={LANGUAGES.map((language) => ({ value: language.id, label: language.label }))}
             value={captions.language}
             onValueChange={(language) => {

@@ -4,8 +4,8 @@ export const GRAPHICS_TOPIC = 'videorc.presentation.static.v1'
 export const GRAPHICS_MAX_BYTES = 6 * 1024 * 1024
 export const GRAPHICS_LEASE_MS = 30_000
 export const GRAPHICS_ASSET_BYTES = 1024 * 1024
-export const GRAPHICS_MAX_LAYERS = 6 // four banners, curated chat, highlight
-export type GraphicsKind = 'banner' | 'chat' | 'highlight'
+export const GRAPHICS_MAX_LAYERS = 7 // four banners, caption, curated chat, highlight
+export type GraphicsKind = 'banner' | 'caption' | 'chat' | 'highlight'
 export type GraphicsAsset = { png: string; hash: string; width: number; height: number }
 export type GraphicsLayer = {
   id: string
@@ -18,8 +18,16 @@ export type GraphicsLayer = {
   expiresAt: number | null
 }
 export type GraphicsContent = {
-  h: (GraphicsLayer & { stream: boolean; recording: boolean })[]
-  v: (GraphicsLayer & { stream: boolean; recording: boolean })[]
+  h: (GraphicsLayer & {
+    stream: boolean
+    recording: boolean
+    outputRects?: { stream: AvatarRect; recording: AvatarRect }
+  })[]
+  v: (GraphicsLayer & {
+    stream: boolean
+    recording: boolean
+    outputRects?: { stream: AvatarRect; recording: AvatarRect }
+  })[]
   unsupported: string[]
 }
 export type GraphicsSnapshot = {
@@ -116,7 +124,7 @@ export function parseGraphicsSnapshot(
       typeof l.id !== 'string' ||
       !/^[A-Za-z0-9:_-]{1,100}$/.test(l.id) ||
       layers.some((x) => x.id === l.id) ||
-      !['banner', 'chat', 'highlight'].includes(String(l.kind)) ||
+      !['banner', 'caption', 'chat', 'highlight'].includes(String(l.kind)) ||
       !avatarRect(l.rect) ||
       !unit(l.opacity) ||
       !object(l.asset) ||
@@ -140,7 +148,7 @@ export function parseGraphicsSnapshot(
         l.kind !== 'banner')
     )
       return null
-    if (l.kind === 'highlight' && l.expiresAt === null) return null
+    if ((l.kind === 'highlight' || l.kind === 'caption') && l.expiresAt === null) return null
     if (l.kind !== 'banner' && layers.some((x) => x.kind === l.kind)) return null
     const { x, y, w, h } = l.rect
     layers.push({
@@ -193,6 +201,7 @@ export class GraphicsReceiver<T> {
       discard(asset: T): void
       commit(s: GraphicsSnapshot, assets: T[]): Promise<void>
       clear(): void
+      retain?(ids: ReadonlySet<string>): void
     }
   ) {}
   owner(owner: string | null): void {
@@ -215,6 +224,8 @@ export class GraphicsReceiver<T> {
   }
   async accept(s: GraphicsSnapshot): Promise<boolean> {
     if (s.publisherSid !== this.#owner || s.revision <= this.#revision) return false
+    this.applied = undefined
+    this.deps.retain?.(new Set(s.layers.map((l) => l.id)))
     this.#revision = s.revision
     const gen = ++this.#generation
     this.#pending?.resolve(false)
@@ -281,7 +292,15 @@ export function parseGraphicsSource(value: unknown): GraphicsSource | null {
     const input = raw[orientation] as unknown[]
     if (
       input.some(
-        (l) => !object(l) || typeof l.stream !== 'boolean' || typeof l.recording !== 'boolean'
+        (l) =>
+          !object(l) ||
+          typeof l.stream !== 'boolean' ||
+          typeof l.recording !== 'boolean' ||
+          (l.outputRects !== undefined &&
+            (l.kind !== 'caption' ||
+              !object(l.outputRects) ||
+              !avatarRect(l.outputRects.stream) ||
+              !avatarRect(l.outputRects.recording)))
       )
     )
       return null
@@ -299,6 +318,16 @@ export function parseGraphicsSource(value: unknown): GraphicsSource | null {
     if (!snapshot) return null
     content[orientation] = snapshot.layers.map((l, i) => ({
       ...l,
+      ...((input[i] as Record<string, unknown>).outputRects
+        ? {
+            outputRects: (() => {
+              const r = (input[i] as { outputRects: { stream: AvatarRect; recording: AvatarRect } })
+                .outputRects
+              const clean = ({ x, y, w, h }: AvatarRect) => ({ x, y, w, h })
+              return { stream: clean(r.stream), recording: clean(r.recording) }
+            })()
+          }
+        : {}),
       stream: (input[i] as Record<string, unknown>).stream === true,
       recording: (input[i] as Record<string, unknown>).recording === true
     }))

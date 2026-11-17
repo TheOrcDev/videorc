@@ -20,7 +20,8 @@ const mocked = vi.hoisted(() => ({
 }))
 vi.mock('@/hooks/use-studio', () => ({
   useStudioCore: () => mocked.core,
-  useStudioCaptions: () => ({ captionLines: [] })
+  useStudioCaptions: () => ({ captionLines: [] }),
+  useStudioCloud: () => ({ cloudStatus: null })
 }))
 vi.mock('@/lib/entitlement-ui', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/lib/entitlement-ui')>()),

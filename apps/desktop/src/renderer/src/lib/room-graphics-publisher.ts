@@ -20,11 +20,15 @@ export type { GraphicsContent } from '../../../shared/cloud-graphics'
 export function graphicsLayers(
   content: GraphicsContent | null,
   output: 'stream' | 'recording',
-  orientation: 'h' | 'v'
+  orientation: 'h' | 'v',
+  captions = true
 ): GraphicsLayer[] {
   return (content?.[orientation] ?? [])
-    .filter((l) => l[output])
-    .map(({ stream: _s, recording: _r, ...layer }) => layer)
+    .filter((l) => l[output] && (l.kind !== 'caption' || captions))
+    .map(({ stream: _s, recording: _r, outputRects, ...layer }) => ({
+      ...layer,
+      rect: outputRects?.[output] ?? layer.rect
+    }))
 }
 export type RoomGraphicsStatus = {
   enabled: boolean
@@ -62,6 +66,13 @@ export class RoomGraphicsPublisher {
     room.on(RoomEvent.ParticipantDisconnected, this.#refresh)
   }
   set(content: GraphicsContent | null): void {
+    const captionRemoved = (['h', 'v'] as const).some((orientation) =>
+      (['stream', 'recording'] as const).some(
+        (output) =>
+          graphicsLayers(this.#content, output, orientation).some((l) => l.kind === 'caption') &&
+          !graphicsLayers(content, output, orientation).some((l) => l.kind === 'caption')
+      )
+    )
     this.#content = content
     clearInterval(this.#timer)
     this.#timer = content ? setInterval(this.#refresh, 1000) : undefined
@@ -72,7 +83,7 @@ export class RoomGraphicsPublisher {
     // Hide is a tiny independent snapshot; it never waits behind an asset
     // writer. The older upload is fenced before its next chunk/trailer.
     if (
-      (!content || (!content.h.length && !content.v.length)) &&
+      (captionRemoved || !content || (!content.h.length && !content.v.length)) &&
       this.#busy &&
       this.room.state === ConnectionState.Connected
     ) {
@@ -168,7 +179,12 @@ export class RoomGraphicsPublisher {
     for (const peer of peers) {
       const receipt = this.#receipts.get(peer.identity)
       if (!capabilityCurrent(receipt, peer.sid, Date.now()) || !receipt?.graphics?.static) continue
-      capable++
+      const needsCaptions = graphicsLayers(
+        this.#content,
+        receipt.graphics.output,
+        receipt.graphics.orientation
+      ).some((l) => l.kind === 'caption')
+      if (!needsCaptions || receipt.graphics.static.captions === 1) capable++
       const visible = graphicsLayers(
         this.#content,
         receipt.graphics.output,
@@ -258,7 +274,12 @@ export class RoomGraphicsPublisher {
         continue
       const { output, orientation } = receipt.graphics
       const content = this.#content
-      const layers = graphicsLayers(content, output, orientation)
+      const layers = graphicsLayers(
+        content,
+        output,
+        orientation,
+        receipt.graphics.static.captions === 1
+      )
       const key = JSON.stringify([
         peer.sid,
         this.room.localParticipant.sid,

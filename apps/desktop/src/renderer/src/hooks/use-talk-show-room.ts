@@ -1,3 +1,4 @@
+import { attachHostSpeech } from '@/lib/room-speech-source'
 import { roomNativeMicrophoneEnabled } from '@/lib/room-microphone-state'
 import { closeVisualMicrophoneStreams } from '@/lib/mic-visual-ownership'
 import type { RoomMicrophoneChoice } from '@/lib/room-microphone-source'
@@ -268,6 +269,7 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
         document.body.appendChild(host)
         audioHostRef.current = host
         const roomClient = new TalkShowRoomClient({
+          attachHostSpeech: (...args) => attachHostSpeech(client, ...args),
           // S7a harness opt-in; main also requires VIDEORC_ROOM_PCM_TEST=1 and
           // the native source requires a debug build with smoke RPC enabled.
           pcmTestSource:

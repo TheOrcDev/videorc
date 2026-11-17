@@ -7,6 +7,8 @@
 //! Transcripts broadcast to renderer clients and accumulate as chunk records
 //! for the SRT + burned copy.
 
+pub mod cloud_host;
+
 use std::ffi::OsString;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -106,6 +108,7 @@ fn caption_contract_idle_session_enabled() -> bool {
 // try_send that drops the frame rather than ever stalling the audio thread.
 // ---------------------------------------------------------------------------
 
+static ROOM_TAP: AtomicBool = AtomicBool::new(false);
 static TAP_ACTIVE: AtomicBool = AtomicBool::new(false);
 static TAP_FRAMES_SEEN: AtomicU64 = AtomicU64::new(0);
 static TAP_FRAMES_DROPPED: AtomicU64 = AtomicU64::new(0);
@@ -140,6 +143,9 @@ static CAPTION_CONTROL: Mutex<()> = Mutex::const_new(());
 static CAPTION_SIGN_OUT_SERIAL: Mutex<()> = Mutex::const_new(());
 
 pub fn offer_caption_frame(frame: &AudioFrame) {
+    if ROOM_TAP.load(Ordering::Acquire) {
+        return;
+    }
     offer_caption_frame_to_tap(
         frame,
         &TAP_ACTIVE,
@@ -362,6 +368,7 @@ fn install_tap() -> mpsc::Receiver<AudioFrame> {
 }
 
 fn remove_tap() {
+    ROOM_TAP.store(false, Ordering::Release);
     TAP_ACTIVE.store(false, Ordering::Relaxed);
     *TAP.lock().expect("caption tap lock") = None;
 }
@@ -887,6 +894,9 @@ fn advance_caption_capture_epoch_and_purge(coordinator: &mut CaptionsCoordinator
 /// epoch advances so no failed-session text can be attributed to a later run.
 pub async fn discard_failed_caption_capture(state: &AppState) -> usize {
     let mut coordinator = state.captions.lock().await;
+    if coordinator.room_chunks {
+        return 0;
+    }
     advance_caption_capture_epoch_and_purge(&mut coordinator)
 }
 
@@ -933,6 +943,13 @@ pub async fn take_finalized_caption_artifact_for_capture(
     state: &AppState,
 ) -> FinalizedCaptionArtifact {
     let mut coordinator = state.captions.lock().await;
+    if coordinator.room_chunks {
+        return FinalizedCaptionArtifact {
+            chunks: Vec::new(),
+            style: coordinator.style,
+            artifact_generation: coordinator.artifact_generation,
+        };
+    }
     take_finalized_caption_artifact(&mut coordinator)
 }
 
@@ -3112,6 +3129,10 @@ pub struct CaptionContractTestCue {
 
 #[derive(Default)]
 pub struct CaptionsCoordinator {
+    room_owner: Option<Arc<cloud_host::Owner>>,
+    room_presentation: Option<cloud_host::Presentation>,
+    // Source-clock room cues must never be drained into a native recording artifact.
+    room_chunks: bool,
     task: Option<tokio::task::JoinHandle<()>>,
     /// Same immutable owner as CaptionSession, kept only to associate a
     /// taken task's provider join evidence with its recording matcher.
@@ -3252,6 +3273,10 @@ pub async fn set_caption_session_style(
     output_height: u32,
 ) {
     let mut coordinator = state.captions.lock().await;
+    if crate::cloud_graphics::managed_room(state) {
+        return;
+    }
+    coordinator.room_chunks = false;
     let discarded = advance_caption_capture_epoch_and_purge(&mut coordinator);
     if discarded > 0 {
         tracing::info!("Discarded {discarded} stale caption cue(s) at the new capture boundary.");
@@ -3274,7 +3299,7 @@ fn advance_caption_start_intent(coordinator: &mut CaptionsCoordinator) -> u64 {
 /// Reserves one capture-owned caption auto-start generation. Explicit caption
 /// or privacy commands take the same control lane and invalidate this token.
 pub async fn reserve_caption_session_start(state: &AppState) -> Option<u64> {
-    if state.process_shutdown_requested() {
+    if state.process_shutdown_requested() || crate::cloud_graphics::managed_room(state) {
         return None;
     }
     let _control = CAPTION_CONTROL.lock().await;
@@ -4095,6 +4120,9 @@ pub async fn start_captions_for_session(
     start_intent_generation: u64,
     language: Option<String>,
 ) -> Result<Option<CaptionsStatus>> {
+    if crate::cloud_graphics::managed_room(state) {
+        return Ok(None);
+    }
     start_captions_with_bearer_for_session(
         state,
         Some((session_id, start_intent_generation)),
@@ -4203,6 +4231,21 @@ async fn start_captions_with_bearer_for_session(
         caption_capture_facts(state.recording.lock().await.as_ref())
     };
 
+    let room_owner = state.captions.lock().await.room_owner.clone();
+    let room_available = room_owner.as_ref().is_some_and(|o| o.valid(state));
+    let room_owns_input = crate::cloud_graphics::managed_room(state);
+    let capture_active = host_input_eligible(room_owns_input, room_available, capture_active);
+    let real_input_eligible =
+        host_input_eligible(room_owns_input, room_available, real_input_eligible);
+    // A room source has no native recording timeline/marker owner.
+    let mark_target = if room_owns_input { None } else { mark_target };
+    let capture_elapsed_seconds = if room_owns_input {
+        room_owner
+            .as_ref()
+            .map(|o| o.origin.elapsed().as_secs_f64())
+    } else {
+        capture_elapsed_seconds
+    };
     let mut coordinator = state.captions.lock().await;
     coordinator.desired_enabled = true;
     coordinator.language = language.clone();
@@ -4299,6 +4342,18 @@ async fn finish_caption_task_for_retry(
 
 /// What the caption start seams read off the capture slot: whether its
 /// microphone can feed the tap, and where a voice clip mark for it lands.
+fn host_input_eligible(
+    room_owns_input: bool,
+    room_available: bool,
+    native_available: bool,
+) -> bool {
+    if room_owns_input {
+        room_available
+    } else {
+        native_available
+    }
+}
+
 fn caption_capture_facts(
     active: Option<&crate::recording::ActiveRecording>,
 ) -> (bool, Option<crate::clip_marks::MarkTarget>) {
@@ -4341,6 +4396,8 @@ fn spawn_transcription_task(
     let sequence = coordinator.sequence.clone();
     let stop = Arc::new(AtomicBool::new(false));
     let present = Arc::new(AtomicBool::new(start.present));
+    let room_owner = coordinator.room_owner.clone().filter(|o| o.valid(state));
+    ROOM_TAP.store(room_owner.is_some(), Ordering::Release);
     let receiver = install_tap();
     let mut status = CaptionsStatus::active(
         CaptionsState::Starting,
@@ -4356,6 +4413,7 @@ fn spawn_transcription_task(
     let task_state = state.clone();
     let task_stop = stop.clone();
     coordinator.task = Some(tokio::spawn(run_caption_session(CaptionSession {
+        room_owner,
         bearer: start.bearer,
         client: start.client,
         language: start.language,
@@ -4434,6 +4492,21 @@ async fn start_listen_with_bearer_for_epoch(
     let (real_input_eligible, mark_target) =
         caption_capture_facts(state.recording.lock().await.as_ref());
 
+    let room_owner = state.captions.lock().await.room_owner.clone();
+    let room_available = room_owner.as_ref().is_some_and(|o| o.valid(state));
+    let room_owns_input = crate::cloud_graphics::managed_room(state);
+    let capture_active = host_input_eligible(room_owns_input, room_available, capture_active);
+    let real_input_eligible =
+        host_input_eligible(room_owns_input, room_available, real_input_eligible);
+    // A room source has no native recording timeline/marker owner.
+    let mark_target = if room_owns_input { None } else { mark_target };
+    let capture_elapsed_seconds = if room_owns_input {
+        room_owner
+            .as_ref()
+            .map(|o| o.origin.elapsed().as_secs_f64())
+    } else {
+        capture_elapsed_seconds
+    };
     let mut coordinator = state.captions.lock().await;
     if !coordinator.listen_wanted {
         coordinator.listen_started_at = Some(std::time::Instant::now());
@@ -4710,6 +4783,7 @@ pub async fn stop_captions_for_sign_out(
     // credentials do: nothing heard under this account can ride the next
     // tick under another, and Buddy stops claiming it listens.
     crate::cohost::purge_speech_for_sign_out(state).await;
+    let host_transcript_cleared = state.database.clear_host_transcript().is_ok();
     // Any SRT writer which crossed the old generation must finish publication
     // or remove its identity-bound staging/output before credentials can be
     // cleared. This wait owns no general caption-control/coordinator lock.
@@ -4744,7 +4818,8 @@ pub async fn stop_captions_for_sign_out(
     let burns_stopped = burn_cleanup.complete;
     let durable_cleanup_complete = cleanup_registered_caption_private_artifacts(state).await;
     let privacy_io_safe = !state.captions.lock().await.privacy_teardown_failed;
-    let cleanup_complete = runtime_stopped
+    let cleanup_complete = host_transcript_cleared
+        && runtime_stopped
         && publication_drained
         && frame_io_drained
         && pending_removed
@@ -4844,6 +4919,16 @@ pub async fn shutdown_caption_artifacts(state: &AppState) {
 /// artifact generation drains canonical cues.
 pub async fn finish_captions_for_capture(state: &AppState, session_id: &str) -> CaptionsStatus {
     let _control = CAPTION_CONTROL.lock().await;
+    {
+        let c = state.captions.lock().await;
+        if c.room_chunks {
+            // Native encoder finalization does not retire the published room mic.
+            if let Ok(mut detector) = state.clip_marks.lock() {
+                detector.retire_recording(session_id);
+            }
+            return c.status.clone().unwrap_or_else(CaptionsStatus::idle);
+        }
+    }
     {
         let mut coordinator = state.captions.lock().await;
         advance_caption_start_intent(&mut coordinator);
@@ -5043,6 +5128,7 @@ fn normalize_caption_language(language: Option<String>) -> Option<String> {
 }
 
 struct CaptionSession {
+    room_owner: Option<Arc<cloud_host::Owner>>,
     bearer: String,
     client: VideorcApiClient,
     language: Option<String>,
@@ -5063,7 +5149,17 @@ struct CaptionSession {
     marker_buffer_epoch: std::sync::Mutex<Option<u64>>,
 }
 
+fn speech_source_valid(owner: Option<&Arc<cloud_host::Owner>>, state: &AppState) -> bool {
+    owner.map_or_else(
+        || !crate::cloud_graphics::managed_room(state),
+        |owner| owner.valid(state),
+    )
+}
+
 impl CaptionSession {
+    fn source_valid(&self) -> bool {
+        speech_source_valid(self.room_owner.as_ref(), &self.state)
+    }
     fn presenting(&self) -> bool {
         self.present.load(Ordering::Acquire)
     }
@@ -5772,7 +5868,26 @@ fn pcm_has_speech_energy(samples: &[i16]) -> bool {
 /// and fall back to chunked transcription whenever streaming is unavailable.
 /// The caption session always works; streaming makes it well under a second
 /// behind speech instead of 3-5 s.
-async fn run_caption_session(mut session: CaptionSession) {
+async fn run_caption_session(session: CaptionSession) {
+    let owner = session.room_owner.clone();
+    let state = session.state.clone();
+    let stop = session.stop.clone();
+    let running = run_caption_session_inner(session);
+    tokio::pin!(running);
+    let mut tick = tokio::time::interval(std::time::Duration::from_millis(50));
+    loop {
+        tokio::select! {
+            _ = &mut running => return,
+            _ = tick.tick() => if !speech_source_valid(owner.as_ref(), &state) {
+                stop.store(true, Ordering::Release);
+                remove_tap();
+                return; // Dropping the provider future cancels queued/in-flight uploads.
+            }
+        }
+    }
+}
+
+async fn run_caption_session_inner(mut session: CaptionSession) {
     let sequence = session.sequence.clone();
     let mut timeline = CaptionTimeline::new(session.capture_elapsed_seconds);
     let mut audio_heartbeat = CaptionAudioHeartbeat::new(std::time::Instant::now());
@@ -6365,6 +6480,9 @@ async fn run_streaming_caption_sockets(
                     };
                     let mut send_failed = false;
                     for audio in wire.chunks(STREAMING_AUDIO_FRAME_MAX_BYTES) {
+                        if session.stop.load(Ordering::Acquire)
+                            || !session.source_valid()
+                        { return RealtimeOutcome::Ended; }
                         if ws.send(Message::Binary(audio.to_vec().into())).await.is_err() {
                             send_failed = true;
                             break;
@@ -6722,7 +6840,11 @@ async fn caption_session_expects_audio(session: &CaptionSession) -> bool {
     if caption_contract_idle_session_enabled() {
         return true;
     }
-    session.state.recording.lock().await.is_some()
+    session
+        .room_owner
+        .as_ref()
+        .is_some_and(|o| o.valid(&session.state))
+        || session.state.recording.lock().await.is_some()
 }
 
 fn caption_disconnect_failure(audio_expected: bool) -> Option<CaptionAudioPathFailure> {
@@ -7002,6 +7124,7 @@ async fn handle_realtime_event(
             if coordinator.privacy_teardown_in_progress
                 || coordinator.privacy_teardown_failed
                 || session.stop.load(Ordering::Acquire)
+                || !session.source_valid()
             {
                 return;
             }
@@ -7032,6 +7155,7 @@ async fn handle_realtime_event(
             if coordinator.privacy_teardown_in_progress
                 || coordinator.privacy_teardown_failed
                 || session.stop.load(Ordering::Acquire)
+                || !session.source_valid()
                 || item.capture_epoch != coordinator.capture_epoch
                 || !session.presenting()
             {
@@ -7074,6 +7198,7 @@ async fn handle_realtime_event(
                 if coordinator.privacy_teardown_in_progress
                     || coordinator.privacy_teardown_failed
                     || session.stop.load(Ordering::Acquire)
+                    || !session.source_valid()
                 {
                     return;
                 }
@@ -7095,6 +7220,29 @@ async fn handle_realtime_event(
                         presented,
                     },
                 );
+                if let Some(owner) = session.room_owner.as_ref()
+                    && let Some(record) = coordinator
+                        .chunks
+                        .iter()
+                        .find(|r| r.seq == item.seq && r.capture_epoch == item.capture_epoch)
+                    && session
+                        .state
+                        .database
+                        .save_host_transcript(
+                            &owner.show_id,
+                            &owner.source_id,
+                            &session.session_client_id,
+                            record,
+                            &owner.clock,
+                        )
+                        .is_err()
+                {
+                    session.state.emit_log(
+                        "warn",
+                        "The latest host transcript could not be saved on this computer."
+                            .to_string(),
+                    );
+                }
                 if presented {
                     session.state.emit_event("captions.update", update.clone());
                 }
@@ -7567,8 +7715,21 @@ fn begin_caption_chunk_upload(
     let language = session.language.clone();
     // Captions win while they present: one upload, one charge (plan 068 D5).
     let purpose = session.chunk_purpose();
+    let owner = session.room_owner.clone();
+    let state = session.state.clone();
+    let stop = session.stop.clone();
     let wav = encode_wav_16k_mono(&chunk.samples);
     Box::pin(async move {
+        if stop.load(Ordering::Acquire) || !speech_source_valid(owner.as_ref(), &state) {
+            return (
+                chunk,
+                purpose,
+                Err(CaptionChunkFailure::Terminal {
+                    code: "host-speech-retired".into(),
+                    message: "Host speech source was retired.".into(),
+                }),
+            );
+        }
         let result = client
             .transcribe_caption_chunk(
                 &bearer,
@@ -7614,6 +7775,7 @@ async fn commit_chunk_transcript(
         if coordinator.privacy_teardown_in_progress
             || coordinator.privacy_teardown_failed
             || session.stop.load(Ordering::Acquire)
+            || !session.source_valid()
         {
             return;
         }
@@ -7632,6 +7794,28 @@ async fn commit_chunk_transcript(
                 presented,
             },
         );
+        if let Some(owner) = session.room_owner.as_ref()
+            && let Some(record) = coordinator
+                .chunks
+                .iter()
+                .find(|r| r.seq == chunk.seq && r.capture_epoch == chunk.capture_epoch)
+            && session
+                .state
+                .database
+                .save_host_transcript(
+                    &owner.show_id,
+                    &owner.source_id,
+                    &session.session_client_id,
+                    record,
+                    &owner.clock,
+                )
+                .is_err()
+        {
+            session.state.emit_log(
+                "warn",
+                "The latest host transcript could not be saved on this computer.".to_string(),
+            );
+        }
         if presented {
             session.state.emit_event("captions.update", update.clone());
         }
@@ -7799,6 +7983,9 @@ async fn run_chunked_caption_session(
                     || chunk.admission.listen_epoch != session.admitted_listen_epoch().await)
             {
                 continue;
+            }
+            if !session.source_valid() {
+                return false;
             }
             in_flight = Some(begin_caption_chunk_upload(session, chunk));
         }
@@ -12079,6 +12266,7 @@ mod tests {
     fn test_caption_session(state: &AppState, present: bool) -> CaptionSession {
         let (_sender, receiver) = mpsc::channel(1);
         CaptionSession {
+            room_owner: None,
             bearer: "test-bearer".to_string(),
             client: VideorcApiClient::new().expect("test api client"),
             language: None,
@@ -12855,6 +13043,49 @@ mod tests {
             model: "test".to_string(),
             segments: Vec::new(),
         }
+    }
+
+    #[tokio::test]
+    async fn native_artifact_finalization_never_drains_room_source_cues() {
+        let state = test_caption_app_state();
+        {
+            let mut c = state.captions.lock().await;
+            c.room_chunks = true;
+            c.capture_epoch = 41;
+            c.chunks.push(CaptionChunkRecord {
+                seq: 1,
+                offset_seconds: 4.0,
+                duration_seconds: 1.0,
+                text: "Private host room cue".into(),
+                segments: Vec::new(),
+                capture_epoch: 41,
+                provider_item_id: Some("host-cue".into()),
+                presented: true,
+            });
+        }
+        assert_eq!(discard_failed_caption_capture(&state).await, 0);
+        assert!(
+            take_finalized_caption_artifact_for_capture(&state)
+                .await
+                .chunks
+                .is_empty()
+        );
+        let c = state.captions.lock().await;
+        assert_eq!(c.capture_epoch, 41);
+        assert_eq!(c.chunks.len(), 1);
+        assert_eq!(c.chunks[0].text, "Private host room cue");
+    }
+
+    #[tokio::test]
+    async fn queued_host_chunk_observes_revocation_before_gateway_call() {
+        let state = test_caption_app_state();
+        let session = test_caption_session(&state, true);
+        let queued = begin_caption_chunk_upload(&session, stamped_chunk(1, 0.0));
+        session.stop.store(true, Ordering::Release);
+        let (_, _, result) = queued.await;
+        assert!(
+            matches!(result, Err(CaptionChunkFailure::Terminal { code, .. }) if code == "host-speech-retired")
+        );
     }
 
     fn stamped_chunk(seq: u64, offset_seconds: f64) -> BufferedCaptionChunk {

@@ -171,6 +171,9 @@ fn renderer_only_method(method: &str) -> bool {
         "agent.intent.listen"
             | "agent.intent.ack"
             | "agent.surface.publish"
+            | "cloud.speech.sync"
+            | "cloud.speech.audio"
+            | "cloud.speech.overlay"
             // Plan 224: the one answer that carries a LiveKit token goes to
             // the renderer that joins the room, never to a remote or main.
             | "cloud.room.token.refresh"

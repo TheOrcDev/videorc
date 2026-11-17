@@ -113,7 +113,7 @@ export function managedPublishAllowed(shows, { action, path }) {
 export async function managedHarness(
   kind,
   pass = 1,
-  { maximumLogEntries = Infinity, youtube: withYouTube = false } = {}
+  { maximumLogEntries = Infinity, youtube: withYouTube = false, speech: withSpeech = false } = {}
 ) {
   const root = mkdtempSync(
     join(process.env.VIDEORC_SMOKE_OUTPUT_DIR ?? tmpdir(), `videorc-managed-${kind}-${pass}-`)
@@ -220,7 +220,8 @@ export async function managedHarness(
     rtc: await freePort()
   }
   let closing
-  let web,
+  let speech,
+    web,
     app,
     backend,
     smoke,
@@ -298,6 +299,9 @@ export async function managedHarness(
   seedProfile()
   const h = {
     root,
+    get speech() {
+      return speech
+    },
     get appData() {
       return appData
     },
@@ -914,6 +918,7 @@ export async function managedHarness(
           hostTap?.close(),
           web?.close(),
           youtube?.close(),
+          speech?.close(),
           ...children.map((child) => stopProcess(child)),
           ...[...sockets].map((socket) => {
             socket.destroy()
@@ -1090,7 +1095,19 @@ export async function managedHarness(
       env.VIDEORC_YOUTUBE_CLIENT_ID = 'managed-smoke-client'
       env.VIDEORC_YOUTUBE_CLIENT_SECRET = 'managed-smoke-client-secret'
     }
+    if (withSpeech) {
+      const { startFakeCaptionService } = await import('./fake-caption-service.mjs')
+      speech = await startFakeCaptionService({
+        smokeSessionToken: sessionToken,
+        smokeRealtimeToken: randomBytes(32).toString('base64url'),
+        provisionalFinalText: 'HOST PARTIAL',
+        finalText: 'HOST CAPTION FINAL',
+        chunkText: 'HOST CAPTION FINAL',
+        itemId: 'host-cue'
+      })
+    }
     web = await startFakeCloudWebManaged({
+      captionServiceOrigin: speech?.httpOrigin,
       sessionToken,
       // Main reports app.getVersion() to the backend, whatever the shell says.
       buildVersion: JSON.parse(
