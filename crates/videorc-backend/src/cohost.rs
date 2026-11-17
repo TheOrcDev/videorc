@@ -24363,6 +24363,36 @@ mod tests {
         ));
     }
 
+    /// Plan 249 S5: each Buddy state change also streams the avatar animator's
+    /// public projection (`cohost.pet.animator`); this receiver steps over it.
+    struct WithoutAnimator(tokio::sync::broadcast::Receiver<crate::protocol::ServerEvent>);
+
+    impl WithoutAnimator {
+        async fn recv(
+            &mut self,
+        ) -> Result<crate::protocol::ServerEvent, tokio::sync::broadcast::error::RecvError>
+        {
+            loop {
+                let event = self.0.recv().await?;
+                if event.event != crate::buddy_sprite::BUDDY_ANIMATOR_EVENT {
+                    return Ok(event);
+                }
+            }
+        }
+
+        fn try_recv(
+            &mut self,
+        ) -> Result<crate::protocol::ServerEvent, tokio::sync::broadcast::error::TryRecvError>
+        {
+            loop {
+                let event = self.0.try_recv()?;
+                if event.event != crate::buddy_sprite::BUDDY_ANIMATOR_EVENT {
+                    return Ok(event);
+                }
+            }
+        }
+    }
+
     /// Plan 164 D7: the Say box with the chat mode off and the Buddy on an
     /// output is one bubble-only utterance, never a send; with both output
     /// switches off the utterance is recorded and nothing is shown; a named
@@ -24370,7 +24400,7 @@ mod tests {
     #[tokio::test]
     async fn say_with_the_mode_off_and_the_overlay_on_is_a_bubble_never_a_send() {
         let state = test_state();
-        let mut rx = state.events.subscribe();
+        let mut rx = WithoutAnimator(state.events.subscribe());
         let mut layout = crate::overlay_layout::load_overlay_layout(&state.database);
         layout.buddy.show_on_stream = true;
         crate::overlay_layout::save_overlay_layout(&state.database, &layout).unwrap();

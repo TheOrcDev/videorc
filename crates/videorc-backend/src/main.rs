@@ -26151,7 +26151,7 @@ mod tests {
                 handle_preview_frame_lease_control(&state, role, &mut None, &request.to_string())
                     .await
                     .unwrap();
-            assert_eq!(response.error.unwrap().code, "forbidden-method");
+            assert_eq!(response.error.unwrap().code, "forbidden");
             assert!(response.payload.is_none());
         }
         let mut held = None;
