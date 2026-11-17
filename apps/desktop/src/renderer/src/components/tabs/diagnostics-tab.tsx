@@ -2,6 +2,7 @@ import { ChevronDownIcon, CloseIcon, HeartbeatIcon, WarningIcon } from '@/compon
 import { useEffect, useId, useMemo, useState, type ReactElement, type ReactNode } from 'react'
 
 import { ConfirmDialog } from '@/components/confirm-dialog'
+import { CloudProgramHealth } from '@/components/tabs/cloud-program-health'
 import { GroupedList, ListRow } from '@/components/list-row'
 import { PanelSection } from '@/components/panel-section'
 import { StatusBadge } from '@/components/status-badge'
@@ -237,6 +238,9 @@ export function DiagnosticsTab(): ReactElement {
         ) : null}
         <CheckList checks={checks} />
       </PanelSection>
+
+      {/* Plan 249 S26: while a cloud room is open, its layers. */}
+      <CloudProgramHealth />
 
       <PanelSection
         action={<SupportBundleButton />}

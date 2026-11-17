@@ -657,6 +657,10 @@ pub struct CloudStatus {
     /// or holding; absent otherwise and from an older runner.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub program: Option<CloudProgram>,
+    /// Plan 249 S26: each program output's health (managed shows). Absent
+    /// when empty, and from an older web.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub output_health: Vec<CloudOutputHealth>,
     /// Plan 222 U1: `true` once, while this account is entitled and has not
     /// seen "Videorc Cloud is on" on this computer; absent otherwise. The
     /// renderer shows the notice outside a session and answers with
@@ -669,6 +673,38 @@ pub struct CloudStatus {
     /// Plan 224 D10: the cloud recording, on a talk show.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recording: Option<CloudRecordingStatus>,
+}
+
+impl CloudStatus {
+    /// Plan 249 S26: what this computer's cloud room has on air or recording
+    /// now, as the app's lifecycle guards read it (Electron main's
+    /// `live-activity.ts` reads the same fields the same way). None unless
+    /// the room is open, no hand-off or takeover was reported, and `onAir`,
+    /// when present, names this computer with no wait.
+    pub fn room_activity(&self) -> Option<&'static str> {
+        let room = self.room.as_ref()?;
+        if room.phase != crate::cloud_talk::CloudRoomPhase::Open || self.stopped_by.is_some() {
+            return None;
+        }
+        if self
+            .on_air
+            .as_ref()
+            .is_some_and(|on_air| !on_air.this_device || on_air.waiting)
+        {
+            return None;
+        }
+        if room.live {
+            Some("Your cloud room is live.")
+        } else if self
+            .recording
+            .as_ref()
+            .is_some_and(|recording| recording.active)
+        {
+            Some("Your cloud room is recording.")
+        } else {
+            None
+        }
+    }
 }
 
 /// `cloud.show.reconnectDestination { targetId }` (plan 223 C3).
@@ -1568,6 +1604,10 @@ pub struct RunnerState {
     /// Absent on `starting`, `ending` and `ended`, and from an older runner.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub program: Option<CloudProgram>,
+    /// Plan 249 S26: each program output's health, layer by layer, from the
+    /// web (`lib/cloud/media/output-health.ts`). Empty from an older web.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub output_health: Vec<CloudOutputHealth>,
     /// Plan 224: the room, on a talk show only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub room: Option<RunnerRoomState>,
@@ -1603,6 +1643,60 @@ pub struct CloudProgram {
 // The frame and the status derive `Eq` for their change detection; a
 // parsed JSON number is never NaN, so the marker holds.
 impl Eq for CloudProgram {}
+
+/// Plan 249 S26: one program output's health, as the web builds it
+/// (`lib/cloud/media/output-health.ts`, the wire contract's section 3).
+/// Open strings: a web one release ahead never breaks the parse, and a
+/// value this desktop does not know is read as Unknown, never as healthy.
+/// Counts and states only: no address, token, frame, asset or name.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudOutputHealth {
+    /// `stream` or `recording`.
+    #[serde(default)]
+    pub output: String,
+    /// `horizontal` or `vertical`.
+    #[serde(default)]
+    pub orientation: String,
+    /// The egress's status (`starting`, `active`, `ending`, …, or `none`).
+    #[serde(default)]
+    pub egress: String,
+    /// The streaming egress also writes the take.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub also_records: Option<bool>,
+    /// `reporting`, `stale` or `missing`.
+    #[serde(default)]
+    pub page: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page_age_seconds: Option<u64>,
+    #[serde(default)]
+    pub joined: bool,
+    /// `measured`, `unmeasured` (the page reports without a meter) or
+    /// `unknown` (the page does not report). The page measures what it
+    /// plays, never the encoded audio.
+    #[serde(default)]
+    pub audio: String,
+    /// The page's counters, only while it reports.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub program: Option<CloudProgram>,
+    /// The stage the page last said it applied, only while it reports.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stage_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub faults: Option<CloudOutputFaults>,
+}
+
+/// Plan 249 S26: the page's fault counts since its load.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudOutputFaults {
+    /// Graphic, avatar or scene snapshots that failed to draw.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub asset: Option<u64>,
+    /// Streams the page refused unread at a size, rate or concurrency bound.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub drop: Option<u64>,
+}
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -2224,6 +2318,10 @@ impl CloudShowRuntime {
                 })
                 .map(|seconds| CloudAllowancePast { seconds }),
             program: runner.and_then(|runner| runner.program),
+            // At most one stream and one recording egress per orientation.
+            output_health: runner
+                .map(|runner| runner.output_health.iter().take(4).cloned().collect())
+                .unwrap_or_default(),
             announce: (self.announce_due && self.entitlement.entitled()).then_some(true),
             room: self
                 .talk
@@ -6167,6 +6265,37 @@ mod tests {
     use super::*;
     use std::collections::VecDeque;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Plan 249 S26: the lifecycle guards read the room as live activity:
+    /// on air, or recording while off air, unless another device holds it.
+    #[test]
+    fn a_cloud_room_on_air_or_recording_is_live_activity_for_the_guards() {
+        let mut status = CloudShowRuntime::default().status();
+        assert_eq!(status.room_activity(), None);
+        let room = |live: bool| -> crate::cloud_talk::CloudRoomStatus {
+            serde_json::from_value(json!({
+                "phase": "open", "doorOpen": false, "declinedCount": 0,
+                "stage": {"layout": "solo", "onStage": []}, "hostAway": false,
+                "connected": true, "client": "connected", "returnEnabled": false,
+                "stageSet": true, "live": live
+            }))
+            .unwrap()
+        };
+        status.room = Some(room(true));
+        assert_eq!(status.room_activity(), Some("Your cloud room is live."));
+        status.room = Some(room(false));
+        assert_eq!(status.room_activity(), None);
+        status.recording = Some(
+            serde_json::from_value(json!({ "active": true, "seconds": 3, "bytes": 0 })).unwrap(),
+        );
+        assert_eq!(
+            status.room_activity(),
+            Some("Your cloud room is recording.")
+        );
+        // Handed off or taken over: this computer holds nothing any more.
+        status.stopped_by = Some(CloudStoppedBy::TakenOver);
+        assert_eq!(status.room_activity(), None);
+    }
 
     const YOUTUBE_KEY: &str = "ytkey-SECRET-0f3a9b";
     const TWITCH_KEY: &str = "live_12345_SECRETtwitch";

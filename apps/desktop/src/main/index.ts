@@ -527,6 +527,11 @@ import {
 import { installContextMenu } from './context-menu'
 import { installAppMenu } from './app-menu'
 import { LiveExitGuard, type AppExitKind } from './exit-guard'
+import {
+  cloudRoomActivityFromCloudStatus,
+  guardCaptureState,
+  type CloudRoomActivity
+} from './live-activity'
 import { DisplaySleepGuard } from './display-sleep-guard'
 import {
   appMenuReleaseNotesUrl,
@@ -1164,6 +1169,13 @@ const displaySleepGuard = new DisplaySleepGuard(
 )
 let deferredPermissionRestartState: DeferredPermissionRestartState =
   idleDeferredPermissionRestartState
+// Plan 249 S26: this computer's cloud room on air or recording is live
+// activity for the display-sleep, update, relaunch and backend-restart
+// guards too (live-activity.ts). A room has no local session to say so.
+let cloudRoomActivity: CloudRoomActivity = null
+function guardedCaptureState(): MainCaptureState {
+  return guardCaptureState(mainCaptureState, cloudRoomActivity)
+}
 let smokePreviewMotionServer: HttpServer | null = null
 let smokePreviewCompositorFrameId = 0
 let nativePreviewSurfaceScene: PreviewSurfaceSceneState | null = null
@@ -11553,7 +11565,8 @@ function disconnectBackendEventSocket(): void {
   clearBackendWindowsD3d11PresenterAuthority('Backend preview event connection stopped.')
   mainCaptureState = captureStateAfterTransportLoss()
   liveExitGuard.transportLost()
-  displaySleepGuard.update(mainCaptureState)
+  cloudRoomActivity = null
+  displaySleepGuard.update(guardedCaptureState())
   clearNativePreviewMainPumpWork()
   void setNativePreviewMainPumpActive(false)
   if (socket) {
@@ -11590,7 +11603,8 @@ function retireBackendEventSocket(
   clearBackendWindowsD3d11PresenterAuthority(`Backend preview event connection retired: ${reason}`)
   mainCaptureState = captureStateAfterTransportLoss()
   liveExitGuard.transportLost()
-  displaySleepGuard.update(mainCaptureState)
+  cloudRoomActivity = null
+  displaySleepGuard.update(guardedCaptureState())
   nativePreviewMainPumpDisconnectCount += 1
   nativePreviewMainPumpLastDisconnectReason = reason
   clearNativePreviewMainPumpWork()
@@ -11767,6 +11781,7 @@ function connectBackendEventSocket(connection: BackendConnection): void {
         // Plan 243 R2 B-M1: an older backend has no cloud; the guard stays off.
         if (parsed.id === cloudStatusRequestId && parsed.ok === true) {
           liveExitGuard.observeCloudStatus(parsed.payload)
+          observeCloudRoomActivity(parsed.payload)
         }
         if (parsed.id === sceneRequestId) {
           // Never fatal: the background is a drawing, not capture state.
@@ -11789,6 +11804,7 @@ function connectBackendEventSocket(connection: BackendConnection): void {
       }
       if (parsed.event === 'cloud.state') {
         liveExitGuard.observeCloudStatus(parsed.payload)
+        observeCloudRoomActivity(parsed.payload)
         return
       }
       if (parsed.event === 'banners.changed') {
@@ -12012,7 +12028,7 @@ async function requestBackendAdmin<T>(
 }
 
 const accountRefreshBroker = new AccountRefreshBroker(
-  () => captureStateBlocksInterruption(mainCaptureState, backendConnection !== null),
+  () => captureStateBlocksInterruption(guardedCaptureState(), backendConnection !== null),
   () => requestBackendAdmin<VideorcAccountSnapshot>('account.refresh', {}, 10_000)
 )
 
@@ -12394,7 +12410,7 @@ async function recheckPermissionGrants(): Promise<PermissionRecheckResult> {
 // and Electron starts the new instance once this one exits.
 async function relaunchForPermission(): Promise<RelaunchForPermissionResult> {
   return relaunchForPermissionWithInterruptionLease(
-    () => captureStateBlocksInterruption(mainCaptureState, backendConnection !== null),
+    () => captureStateBlocksInterruption(guardedCaptureState(), backendConnection !== null),
     () => backendAdminConnection !== null,
     () => acquireCurrentBackendInterruption('Reopening Videorc after a permission grant.'),
     () => {
@@ -16331,8 +16347,22 @@ function updateMainCaptureState(payload: RecordingStatus): void {
   const nextState = captureStateAfterStatusPayload(payload)
   mainCaptureState = nextState
   liveExitGuard.observeRecordingStatus(payload)
-  displaySleepGuard.update(nextState)
-  const decision = flushPermissionRestart(deferredPermissionRestartState, nextState)
+  applyGuardedCaptureState()
+}
+
+/** Plan 249 S26: a `cloud.state` payload (or the `cloud.status` answer). */
+function observeCloudRoomActivity(payload: unknown): void {
+  const next = cloudRoomActivityFromCloudStatus(payload)
+  if (next === cloudRoomActivity) return
+  cloudRoomActivity = next
+  applyGuardedCaptureState()
+}
+
+/** The display-sleep guard and a deferred permission restart follow the guarded state. */
+function applyGuardedCaptureState(): void {
+  const guarded = guardedCaptureState()
+  displaySleepGuard.update(guarded)
+  const decision = flushPermissionRestart(deferredPermissionRestartState, guarded)
   deferredPermissionRestartState = decision.state
   if (decision.runReason) {
     void runPermissionBackendRestart(decision.runReason).catch((error) => {
@@ -16344,7 +16374,7 @@ function updateMainCaptureState(payload: RecordingStatus): void {
 async function requestPermissionBackendRestart(reason: string): Promise<MediaAccessRestartResult> {
   const decision = requestPermissionRestart(
     deferredPermissionRestartState,
-    mainCaptureState,
+    guardedCaptureState(),
     reason
   )
   deferredPermissionRestartState = decision.state
@@ -18086,7 +18116,7 @@ app.whenReady().then(async () => {
   })
   registerUpdaterIpc(
     () => mainWindow,
-    () => captureStateBlocksInterruption(mainCaptureState, backendConnection !== null),
+    () => captureStateBlocksInterruption(guardedCaptureState(), backendConnection !== null),
     acquireCurrentBackendInterruption
   )
   registerDisplayChangeReconcile()

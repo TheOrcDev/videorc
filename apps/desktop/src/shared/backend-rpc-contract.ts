@@ -23,6 +23,7 @@ import type {
   CloudIsoImportJournal,
   CloudIsoImportParams,
   CloudProgram,
+  CloudOutputHealth,
   WatchdogAlert,
   WatchdogAlertDevicesView,
   WatchdogAlertsView,
@@ -6226,6 +6227,34 @@ const cloudProgramSchema = objectSchema(
   { allowUnknown: false }
 ) as RuntimeSchema<CloudProgram>
 
+// Plan 249 S26: open strings, as Rust keeps them: a web one release ahead
+// never breaks `cloud.state`; the renderer reads an unknown value as Unknown.
+const cloudOutputHealthWord = stringSchema({ minLength: 1, maxLength: 32 })
+const cloudOutputHealthSchema = objectSchema(
+  {
+    output: cloudOutputHealthWord,
+    orientation: cloudOutputHealthWord,
+    egress: cloudOutputHealthWord,
+    alsoRecords: optionalSchema(booleanSchema),
+    page: cloudOutputHealthWord,
+    pageAgeSeconds: optionalSchema(nonNegativeInteger),
+    joined: booleanSchema,
+    audio: cloudOutputHealthWord,
+    program: optionalSchema(cloudProgramSchema),
+    stageKey: optionalSchema(stringSchema({ minLength: 1, maxLength: 128 })),
+    faults: optionalSchema(
+      objectSchema(
+        {
+          asset: optionalSchema(nonNegativeInteger),
+          drop: optionalSchema(nonNegativeInteger)
+        },
+        { allowUnknown: false }
+      )
+    )
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<CloudOutputHealth>
+
 // --- The stream watchdog (plan 223) ---
 const WATCHDOG_CHECKS = [
   'mic-muted',
@@ -6240,7 +6269,9 @@ const WATCHDOG_CHECKS = [
   'av-drift',
   'chat-says',
   'brb-long',
-  'still-there'
+  'still-there',
+  'program-unreported',
+  'contribution-missing'
 ] as const
 const watchdogAlertSchema = objectSchema(
   {
@@ -6623,6 +6654,8 @@ const cloudStatusSchema = objectSchema(
     ),
     // Plan 223 C3: the runner's program block, every field optional.
     program: optionalSchema(cloudProgramSchema),
+    // Plan 249 S26: each program output's health, layer by layer.
+    outputHealth: optionalSchema(arraySchema(cloudOutputHealthSchema, { maxLength: 4 })),
     // Plan 222 U1: "Videorc Cloud is on" is due for this account (true or absent).
     announce: optionalSchema(booleanSchema),
     // Plan 224: the room and the cloud recording, on a talk show.

@@ -207,7 +207,8 @@ if (
     'graphics',
     'alpha-spike',
     'handoff',
-    'reporting'
+    'reporting',
+    'health'
   ].includes(selected.case)
 ) {
   throw new Error(
@@ -232,6 +233,29 @@ if (selected.case === 'handoff') {
       cwd: fileURLToPath(new URL('../', import.meta.url)),
       stdio: 'inherit'
     })
+}
+if (selected.case === 'health') {
+  // Plan 249 S26: the focused rules first (web, desktop and Rust), then the
+  // scenarios on real pages with the dev build's short watchdog thresholds.
+  const { HEALTH_DESKTOP_TESTS, HEALTH_RUST_FILTERS, HEALTH_THRESHOLD_ENV, HEALTH_WEB_TESTS } =
+    await import('./lib/cloud-parity-health-contract.mjs')
+  const { execFileSync } = await import('node:child_process')
+  const desktopRoot = fileURLToPath(new URL('../', import.meta.url))
+  execFileSync(process.execPath, ['--import', 'tsx', '--test', ...HEALTH_WEB_TESTS], {
+    cwd: webRoot,
+    stdio: 'inherit'
+  })
+  execFileSync(
+    process.execPath,
+    ['node_modules/vitest/vitest.mjs', 'run', ...HEALTH_DESKTOP_TESTS],
+    { cwd: fileURLToPath(new URL('../apps/desktop/', import.meta.url)), stdio: 'inherit' }
+  )
+  for (const filter of HEALTH_RUST_FILTERS)
+    execFileSync('cargo', ['test', '-p', 'videorc-backend', filter], {
+      cwd: desktopRoot,
+      stdio: 'inherit'
+    })
+  for (const [name, value] of Object.entries(HEALTH_THRESHOLD_ENV)) process.env[name] ??= value
 }
 const { runBaseline } = await import('./lib/cloud-parity-baseline.mjs')
 const run =
@@ -263,7 +287,8 @@ const { output } = await run({
   avatarAnimation: selected.case === 'avatar-animation',
   views: selected.case === 'views',
   graphics: selected.case === 'graphics',
-  handoff: selected.case === 'handoff'
+  handoff: selected.case === 'handoff',
+  health: selected.case === 'health'
 })
 console.log(
   `Local real-page ${selected.case} passed: ${output}. Managed/device acceptance remains not-run.`

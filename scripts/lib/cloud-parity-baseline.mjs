@@ -81,7 +81,8 @@ export async function runBaseline({
   views = false,
   graphics = false,
   handoff = false,
-  audioRouting = false
+  audioRouting = false,
+  health = false
 }) {
   // Plan 249 S5: the animation case runs on the avatar case's real pages.
   // Plan 249 S24: so does the handoff case, after the avatar phase.
@@ -95,41 +96,43 @@ export async function runBaseline({
     template: 'v1'
   })
   const routingConfig = audioRouting ? audioRoutingConfig() : null
-  report.case = sourcesCase
-    ? 'sources'
-    : clips
-      ? 'clips'
-      : audioRouting
-        ? 'audio-routing'
-        : markers
-          ? 'markers'
-          : handoff
-            ? 'handoff'
-            : outputs
-              ? 'outputs'
-              : captions
-                ? 'captions'
-                : archive
-                  ? 'archive'
-                  : graphics
-                    ? 'graphics'
-                    : scenes
-                      ? 'scenes'
-                      : replayRing
-                        ? 'replay-ring'
-                        : avatarAnimation
-                          ? 'avatar-animation'
-                          : views
-                            ? 'views'
-                            : avatar
-                              ? 'avatar'
-                              : soundboard
-                                ? 'soundboard'
-                                : privacy
-                                  ? 'privacy'
-                                  : controls
-                                    ? 'controls'
-                                    : 'baseline'
+  report.case = health
+    ? 'health'
+    : sourcesCase
+      ? 'sources'
+      : clips
+        ? 'clips'
+        : audioRouting
+          ? 'audio-routing'
+          : markers
+            ? 'markers'
+            : handoff
+              ? 'handoff'
+              : outputs
+                ? 'outputs'
+                : captions
+                  ? 'captions'
+                  : archive
+                    ? 'archive'
+                    : graphics
+                      ? 'graphics'
+                      : scenes
+                        ? 'scenes'
+                        : replayRing
+                          ? 'replay-ring'
+                          : avatarAnimation
+                            ? 'avatar-animation'
+                            : views
+                              ? 'views'
+                              : avatar
+                                ? 'avatar'
+                                : soundboard
+                                  ? 'soundboard'
+                                  : privacy
+                                    ? 'privacy'
+                                    : controls
+                                      ? 'controls'
+                                      : 'baseline'
   // A dirty web consumer makes its revision misleading. Require a dedicated,
   // installed checkout; inspect it read-only and never change the active one.
   const webDirty = execFileSync('git', ['status', '--porcelain', '--untracked-files=no'], {
@@ -645,6 +648,8 @@ export async function runBaseline({
         })
       if (handoff)
         await (await import('./cloud-parity-handoff.mjs')).exerciseHandoff({ h, report, clients })
+      // Plan 249 S26: the health scenarios, on the open room with its pages.
+      if (health) await (await import('./cloud-parity-health.mjs')).exerciseHealth({ h, report })
       assert.equal(h.web.snapshot(h.showId).state.legs.length, 0)
       h.assertNoDirect()
       if (clips) {

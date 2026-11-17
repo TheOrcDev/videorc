@@ -913,7 +913,7 @@
       "prUrl": null,
       "webIssueUrl": null,
       "webPrUrl": null,
-      "implementation": "not-started",
+      "implementation": "source-implemented-review-open",
       "acceptance": "not-run",
       "intendedBranch": "feat/249-s26-cloud-parity",
       "intendedPrTitle": "Plan 249 S26: Make health and diagnostics represent the program",
@@ -922,8 +922,8 @@
       "deferredReason": "User defers smoke, heavy, real-page, device and managed acceptance until all merges on main. No release qualification.",
       "relatedPrUrls": [],
       "intendedBase": {
-        "desktop": "feat/249-s25-cloud-parity",
-        "web": "feat/249-s25-cloud-parity"
+        "desktop": "main + S17 #1460 + S24 #1461",
+        "web": "main"
       },
       "crossRepoNeeds": "Paired linked consumer/producer PRs; coordinator commissions web checkout; consumers land/deploy before producers enable capability.",
       "releaseGate": "blocked-until-required-acceptance"

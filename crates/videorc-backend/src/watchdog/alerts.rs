@@ -31,10 +31,16 @@ pub enum WatchdogCheck {
     ChatSays,
     BrbLong,
     StillThere,
+    /// Plan 249 S26: a cloud program page stopped reporting while its egress
+    /// runs: what that output's viewers see and hear is Unknown.
+    ProgramUnreported,
+    /// Plan 249 S26: a host contribution the room or the program lacks (no
+    /// microphone track, a camera whose frames never reach the program).
+    ContributionMissing,
 }
 
 impl WatchdogCheck {
-    pub const ALL: [WatchdogCheck; 13] = [
+    pub const ALL: [WatchdogCheck; 15] = [
         WatchdogCheck::MicMuted,
         WatchdogCheck::MicSilent,
         WatchdogCheck::NoVoice,
@@ -48,6 +54,8 @@ impl WatchdogCheck {
         WatchdogCheck::ChatSays,
         WatchdogCheck::BrbLong,
         WatchdogCheck::StillThere,
+        WatchdogCheck::ProgramUnreported,
+        WatchdogCheck::ContributionMissing,
     ];
 
     /// The kebab-case id on the wire, in health codes and in the settings.
@@ -66,6 +74,8 @@ impl WatchdogCheck {
             WatchdogCheck::ChatSays => "chat-says",
             WatchdogCheck::BrbLong => "brb-long",
             WatchdogCheck::StillThere => "still-there",
+            WatchdogCheck::ProgramUnreported => "program-unreported",
+            WatchdogCheck::ContributionMissing => "contribution-missing",
         }
     }
 
@@ -635,6 +645,12 @@ pub fn cleared_toast(alert: &WatchdogAlert) -> String {
         WatchdogCheck::ChatSays => "Chat has gone quiet about it".to_string(),
         WatchdogCheck::BrbLong => "Takeover ended".to_string(),
         WatchdogCheck::StillThere => "Welcome back".to_string(),
+        WatchdogCheck::ProgramUnreported => "The cloud program is reporting again".to_string(),
+        WatchdogCheck::ContributionMissing => match alert.target_id.as_deref() {
+            Some("host-microphone") => "Your microphone reaches the room again".to_string(),
+            Some("host-camera") => "Your camera reaches the program again".to_string(),
+            _ => "You're back in the room".to_string(),
+        },
     }
 }
 

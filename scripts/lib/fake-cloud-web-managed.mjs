@@ -360,6 +360,12 @@ export async function startFakeCloudWebManaged({
         sinceMs: 0
       }))
     participants.sort((a, b) => Number(b.role === 'host') - Number(a.role === 'host'))
+    // Plan 249 S26: a health scenario's view of the room (mic loss, a host
+    // out of the room) holds over LiveKit's own list until it is cleared.
+    if (s.participantsOverride) {
+      const overridden = s.participantsOverride(copy(participants))
+      participants.splice(0, participants.length, ...overridden)
+    }
     const hostAway = !participants.some((p) => p.role === 'host')
     if (hostAway !== s.state.room.hostAway) {
       s.state.room.hostAway = hostAway
@@ -1454,6 +1460,17 @@ export async function startFakeCloudWebManaged({
     httpsOrigin = `https://localhost:${https.address().port}`
   }
   const hooks = {
+    /** Plan 249 S26: transform LiveKit's participant list (null: stop). */
+    participants(id, transform) {
+      const s = shows.get(id)
+      if (!s) throw new Error('Unknown show')
+      s.participantsOverride = transform
+      if (transform && s.state.room) {
+        s.state.room.participants = transform(copy(s.state.room.participants ?? []))
+        s.state.room.hostAway = !s.state.room.participants.some((p) => p.role === 'host')
+      }
+      changed(s)
+    },
     /** Plan 249 S24: the show's controller, as the fake web holds it. */
     controller(showId) {
       const c = shows.get(showId)?.controller

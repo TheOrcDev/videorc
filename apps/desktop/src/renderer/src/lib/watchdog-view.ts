@@ -154,6 +154,14 @@ export function watchdogClearedToast(alert: WatchdogAlert): string {
       return 'Takeover ended'
     case 'still-there':
       return 'Welcome back'
+    case 'program-unreported':
+      return 'The cloud program is reporting again'
+    case 'contribution-missing':
+      return alert.targetId === 'host-microphone'
+        ? 'Your microphone reaches the room again'
+        : alert.targetId === 'host-camera'
+          ? 'Your camera reaches the program again'
+          : "You're back in the room"
   }
 }
 

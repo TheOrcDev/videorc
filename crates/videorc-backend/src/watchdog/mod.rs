@@ -40,8 +40,9 @@ pub use alerts::{
     AlertSeverity, SnoozeScope, Transition, WatchdogAlert, WatchdogCheck, WatchdogState,
 };
 pub use checks::{
-    AudioWindow, ChatDecision, CloudSignal, DestinationPhase, DestinationSignal,
-    PlatformHealthKind, PlatformHealthSignal, Signals, TakeoverSignal, Thresholds,
+    AudioWindow, ChatDecision, CloudSignal, ContributionKind, ContributionSignal, DestinationPhase,
+    DestinationSignal, PlatformHealthKind, PlatformHealthSignal, ProgramOutputSignal, Signals,
+    TakeoverSignal, Thresholds,
 };
 pub use settings::{WatchdogSettings, WatchdogSettingsPatch};
 
@@ -106,6 +107,34 @@ pub struct SessionFacts {
     pub cloud_show: bool,
     pub cloud: Option<CloudSignal>,
     pub takeover: Option<CachedTakeover>,
+    /// Plan 249 S26: no microphone level reaches the watchdog for this
+    /// session (a cloud room): the voice is Unknown, never silent.
+    pub mic_unmeasured: bool,
+    /// Plan 249 S26: the running program outputs, as the cloud state says.
+    pub outputs: Vec<ProgramOutputFact>,
+    /// Plan 249 S26: the host contributions the room expects now.
+    pub contributions: Vec<ContributionFact>,
+}
+
+/// Plan 249 S26: one running program output and whether its page reports.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProgramOutputFact {
+    /// `stream-horizontal`, `recording-vertical`: the alert's scope.
+    pub key: String,
+    /// "horizontal stream page", for the card.
+    pub label: String,
+    pub reporting: bool,
+    /// The page never reported.
+    pub never: bool,
+    /// How long ago its page last reported, as the web counts it.
+    pub silent_for: Option<Duration>,
+}
+
+/// Plan 249 S26: one host contribution the room expects, and whether it is missing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ContributionFact {
+    pub kind: ContributionKind,
+    pub missing: bool,
 }
 
 /// The active takeover as the Screens transition last applied it: the
@@ -135,6 +164,10 @@ struct SessionWatch {
     black_since: Option<Instant>,
     last_luma_at: Option<Instant>,
     destination_since: BTreeMap<String, (DestinationPhase, Instant)>,
+    /// Plan 249 S26: since when each running output's page has not reported.
+    output_since: BTreeMap<String, Instant>,
+    /// Plan 249 S26: since when each expected contribution has been missing.
+    contribution_since: BTreeMap<ContributionKind, Instant>,
     /// The platforms' words, with when each last arrived (L6).
     platform_health: BTreeMap<String, (PlatformHealthSignal, Instant)>,
     chat: chat_signals::ChatWindow,
@@ -168,6 +201,8 @@ impl SessionWatch {
             black_since: None,
             last_luma_at: None,
             destination_since: BTreeMap::new(),
+            output_since: BTreeMap::new(),
+            contribution_since: BTreeMap::new(),
             platform_health: BTreeMap::new(),
             chat: chat_signals::ChatWindow::new(),
             takeover: None,
@@ -651,12 +686,20 @@ fn tick_talk_show(
     let Some(session_id) = current else {
         return;
     };
-    let program = status.program.unwrap_or_default();
+    let program = talk_program(status).unwrap_or_default();
+    let host = status.room.as_ref().and_then(|room| {
+        room.participants
+            .iter()
+            .find(|person| person.role == crate::cloud_talk::CloudRoomRole::Host)
+    });
     tick(
         state,
         &session_id,
         SessionFacts {
             live: true,
+            // Plan 249 S26: the room's word for the host's microphone. A
+            // muted track is the streamer's mute (`mic-muted` owns it).
+            mic_muted: host.is_some_and(|host| host.audio && host.muted),
             targets: status.legs.clone(),
             cloud_show: true,
             cloud: Some(CloudSignal {
@@ -668,9 +711,96 @@ fn tick_talk_show(
                 feed_low_since: None,
             }),
             takeover: takeover_snapshot(state),
-            ..Default::default()
+            // The room's microphone is metered in the renderer only: the
+            // watchdog has no level, so the voice is Unknown here.
+            mic_unmeasured: true,
+            outputs: program_output_facts(&status.output_health),
+            contributions: contribution_facts(status.room.as_ref()),
         },
     );
+}
+
+/// Plan 249 S26: the program counters a talk show's checks read: the
+/// primary page's, or else the first output whose page reports (a show
+/// whose primary page went quiet still has eyes on another output). None
+/// when no page reports: Unknown, never zero.
+fn talk_program(
+    status: &crate::cloud_show::CloudStatus,
+) -> Option<crate::cloud_show::CloudProgram> {
+    status.program.or_else(|| {
+        status
+            .output_health
+            .iter()
+            .filter(|entry| entry.page == "reporting")
+            .find_map(|entry| entry.program)
+    })
+}
+
+/// Plan 249 S26: the running outputs (an active egress) and whether each
+/// page reports. A starting egress is not listed: its page is still on its
+/// way. Values this desktop does not know are skipped, never guessed.
+pub(crate) fn program_output_facts(
+    health: &[crate::cloud_show::CloudOutputHealth],
+) -> Vec<ProgramOutputFact> {
+    health
+        .iter()
+        .filter(|entry| entry.egress == "active")
+        .filter(|entry| matches!(entry.output.as_str(), "stream" | "recording"))
+        .filter(|entry| matches!(entry.orientation.as_str(), "horizontal" | "vertical"))
+        .filter(|entry| matches!(entry.page.as_str(), "reporting" | "stale" | "missing"))
+        .map(|entry| ProgramOutputFact {
+            key: format!("{}-{}", entry.output, entry.orientation),
+            label: format!("{} {} page", entry.orientation, entry.output),
+            reporting: entry.page == "reporting",
+            never: entry.page == "missing",
+            silent_for: (entry.page == "stale")
+                .then_some(entry.page_age_seconds)
+                .flatten()
+                .map(Duration::from_secs),
+        })
+        .collect()
+}
+
+/// Plan 249 S26: what the room expects of the host now. Nothing while the
+/// room lists nobody (an older web, or before its first answer): Unknown,
+/// never "you're not in the room". The camera is expected only while it
+/// is on and on stage: a camera switched off is the streamer's choice.
+pub(crate) fn contribution_facts(
+    room: Option<&crate::cloud_talk::CloudRoomStatus>,
+) -> Vec<ContributionFact> {
+    let Some(room) = room else {
+        return Vec::new();
+    };
+    if room.participants.is_empty() {
+        return Vec::new();
+    }
+    let host = room
+        .participants
+        .iter()
+        .find(|person| person.role == crate::cloud_talk::CloudRoomRole::Host);
+    let Some(host) = host else {
+        return vec![ContributionFact {
+            kind: ContributionKind::HostNotInRoom,
+            missing: true,
+        }];
+    };
+    let mut facts = vec![
+        ContributionFact {
+            kind: ContributionKind::HostNotInRoom,
+            missing: false,
+        },
+        ContributionFact {
+            kind: ContributionKind::MicrophoneUnpublished,
+            missing: !host.audio,
+        },
+    ];
+    if host.on_stage && host.video {
+        facts.push(ContributionFact {
+            kind: ContributionKind::CameraNoFrames,
+            missing: host.away,
+        });
+    }
+    facts
 }
 
 /// Once a second, with the session's facts gathered by the caller.
@@ -757,6 +887,55 @@ pub fn tick(state: &AppState, session_id: &str, facts: SessionFacts) {
         }
         watch.destination_since.retain(|id, _| seen.contains(id));
 
+        // Plan 249 S26: the program outputs and the host's contributions,
+        // each with the clock of its trouble.
+        let mut outputs = Vec::new();
+        for fact in &facts.outputs {
+            let since = if fact.reporting {
+                watch.output_since.remove(&fact.key);
+                now
+            } else {
+                let kept = *watch.output_since.entry(fact.key.clone()).or_insert(now);
+                // The web's own count of the silence, when it has one.
+                fact.silent_for
+                    .and_then(|silent| now.checked_sub(silent))
+                    .map_or(kept, |since| since.min(kept))
+            };
+            outputs.push(ProgramOutputSignal {
+                key: fact.key.clone(),
+                label: fact.label.clone(),
+                reporting: fact.reporting,
+                never: fact.never,
+                since,
+            });
+        }
+        watch.output_since.retain(|key, _| {
+            facts
+                .outputs
+                .iter()
+                .any(|fact| &fact.key == key && !fact.reporting)
+        });
+        let mut contributions = Vec::new();
+        for fact in &facts.contributions {
+            let since = if fact.missing {
+                *watch.contribution_since.entry(fact.kind).or_insert(now)
+            } else {
+                watch.contribution_since.remove(&fact.kind);
+                now
+            };
+            contributions.push(ContributionSignal {
+                kind: fact.kind,
+                missing: fact.missing,
+                since,
+            });
+        }
+        watch.contribution_since.retain(|kind, _| {
+            facts
+                .contributions
+                .iter()
+                .any(|fact| fact.kind == *kind && fact.missing)
+        });
+
         // L6: a platform's word that stopped arriving no longer holds its
         // card; the card leaves quietly (nothing said it was fine).
         let mut transitions = Vec::new();
@@ -814,6 +993,9 @@ pub fn tick(state: &AppState, session_id: &str, facts: SessionFacts) {
             cloud: facts.cloud,
             system_idle,
             chat: &chat,
+            mic_unmeasured: facts.mic_unmeasured,
+            outputs: &outputs,
+            contributions: &contributions,
         };
         transitions.extend(watch.checks.tick(
             &signals,
@@ -2013,5 +2195,110 @@ mod tests {
 
         session_ended(&state, "take");
         assert!(!watching(&state, "take"));
+    }
+
+    /// Plan 249 S26: the vectors' web half lives in
+    /// `protocol-fixtures/cloud-parity-health.json`; this is how the
+    /// desktop reads the answer. Unknown values are skipped, never guessed.
+    #[test]
+    fn running_outputs_and_their_pages_become_facts() {
+        let health: Vec<crate::cloud_show::CloudOutputHealth> = serde_json::from_value(json!([
+            { "output": "stream", "orientation": "horizontal", "egress": "active",
+              "page": "reporting", "pageAgeSeconds": 2, "joined": true, "audio": "measured",
+              "program": { "audioRmsDb": -20.0, "audioSilentSeconds": 0 } },
+            { "output": "recording", "orientation": "vertical", "egress": "active",
+              "page": "stale", "pageAgeSeconds": 40, "joined": false, "audio": "unknown",
+              "faults": { "drop": 2 } },
+            { "output": "stream", "orientation": "vertical", "egress": "starting",
+              "page": "missing", "joined": false, "audio": "unknown" },
+            { "output": "future", "orientation": "horizontal", "egress": "active",
+              "page": "reporting", "joined": true, "audio": "measured" }
+        ]))
+        .unwrap();
+        let facts = program_output_facts(&health);
+        assert_eq!(
+            facts,
+            vec![
+                ProgramOutputFact {
+                    key: "stream-horizontal".into(),
+                    label: "horizontal stream page".into(),
+                    reporting: true,
+                    never: false,
+                    silent_for: None,
+                },
+                ProgramOutputFact {
+                    key: "recording-vertical".into(),
+                    label: "vertical recording page".into(),
+                    reporting: false,
+                    never: false,
+                    silent_for: Some(Duration::from_secs(40)),
+                },
+            ]
+        );
+        // The wire keeps no null and round-trips.
+        let text = serde_json::to_string(&health[1]).unwrap();
+        assert!(!text.contains("null"), "{text}");
+    }
+
+    #[test]
+    fn the_room_says_which_host_contribution_is_missing() {
+        let room = |participants: serde_json::Value| -> crate::cloud_talk::CloudRoomStatus {
+            serde_json::from_value(json!({
+                "phase": "open", "doorOpen": false, "declinedCount": 0,
+                "stage": {"layout": "solo", "onStage": []}, "hostAway": false,
+                "connected": true, "client": "connected", "returnEnabled": false,
+                "stageSet": true, "live": true, "participants": participants
+            }))
+            .unwrap()
+        };
+        let host = |audio: bool, video: bool, away: bool| {
+            json!({ "identity": "host:sh_x", "name": "Host", "role": "host", "onStage": true,
+                "video": video, "audio": audio, "muted": false, "screen": false,
+                "quality": "good", "sinceMs": 1000, "away": away })
+        };
+        // Nobody listed: Unknown, never "you're not in the room".
+        assert!(contribution_facts(Some(&room(json!([])))).is_empty());
+        assert!(contribution_facts(None).is_empty());
+        let guest = json!({ "identity": "g_0123456789abcdefghijkl", "name": "Guest",
+            "role": "guest", "onStage": true, "video": true, "audio": true, "muted": false,
+            "screen": false, "quality": "good", "sinceMs": 1000, "away": false });
+        assert_eq!(
+            contribution_facts(Some(&room(json!([guest])))),
+            vec![ContributionFact {
+                kind: ContributionKind::HostNotInRoom,
+                missing: true
+            }]
+        );
+        assert_eq!(
+            contribution_facts(Some(&room(json!([host(false, true, true)])))),
+            vec![
+                ContributionFact {
+                    kind: ContributionKind::HostNotInRoom,
+                    missing: false
+                },
+                ContributionFact {
+                    kind: ContributionKind::MicrophoneUnpublished,
+                    missing: true
+                },
+                ContributionFact {
+                    kind: ContributionKind::CameraNoFrames,
+                    missing: true
+                },
+            ]
+        );
+        // A camera switched off is not expected: it is not listed at all.
+        assert_eq!(
+            contribution_facts(Some(&room(json!([host(true, false, false)])))),
+            vec![
+                ContributionFact {
+                    kind: ContributionKind::HostNotInRoom,
+                    missing: false
+                },
+                ContributionFact {
+                    kind: ContributionKind::MicrophoneUnpublished,
+                    missing: false
+                },
+            ]
+        );
     }
 }
