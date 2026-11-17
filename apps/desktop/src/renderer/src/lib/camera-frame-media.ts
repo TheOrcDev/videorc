@@ -49,7 +49,7 @@ export function createCameraFrameMedia(options: {
   }
   if (!valid()) throw new Error('Camera frame publication is not authorized.')
   if (typeof options.video.requestVideoFrameCallback !== 'function')
-    throw new Error('Camera frames require decoded-frame callbacks.')
+    throw new Error('Camera frames need a browser that reports each decoded frame.')
   const canvas = options.page.createElement('canvas')
   canvas.dataset.cameraFrame = 'rgb-left-alpha-right:g8'
   const gpu = (options.gpu ?? createAlphaGpu)(canvas, w, h, 'unpack')

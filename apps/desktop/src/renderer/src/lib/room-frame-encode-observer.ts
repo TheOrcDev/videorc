@@ -240,7 +240,7 @@ export function attachEncodeObserver(
     return unavailable(
       generation,
       observe,
-      `RTCRtpSender.transform = new RTCRtpScriptTransform(...) failed: ${messageOf(error)}`
+      `RTCRtpSender.transform = new RTCRtpScriptTransform() failed: ${messageOf(error)}`
     )
   }
   emit({ phase: 'encode-observer', api: ENCODE_OBSERVER_API, status: 'attached' })
