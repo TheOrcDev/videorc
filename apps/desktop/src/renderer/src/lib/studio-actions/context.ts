@@ -111,7 +111,7 @@ export interface StudioActionContext {
    * ring holds frames, and a mark while recording. The backend stamps the
    * capture clock; `ok: false` carries why nothing was kept. Plan 199:
    * `seconds` is 30 or 60; absent is today's 30 s. */
-  markClip: (seconds?: ClipLength) => Promise<StudioActionOutcome>
+  markClip: (seconds?: ClipLength, requestId?: string) => Promise<StudioActionOutcome>
   /** Plan 181: the ring holds frames right now. */
   replayOn: boolean
   /** Plan 186 S7: the banner list the remotes are shown. `bannerShow` and

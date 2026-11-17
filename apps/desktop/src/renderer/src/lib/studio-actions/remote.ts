@@ -91,7 +91,10 @@ export async function executeRemoteIntent(
       ? REMOTE_INTENT_EXECUTORS[intent.kind]
       : undefined
     if (!executor) return void (await ack(false, REMOTE_INTENT_COPY.unsupported))
-    const outcome = await executor(context, intent)
+    const outcome = await executor(
+      context,
+      intent.kind === 'clipMark' ? { ...intent, requestId: intentId } : intent
+    )
     await ack(outcome.ok, outcome.message)
   } catch (error) {
     // The raw error is for the console, never the phone (docs/ui-copy.md).

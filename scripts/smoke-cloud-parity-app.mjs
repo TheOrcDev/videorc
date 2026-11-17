@@ -160,6 +160,7 @@ if (
   ![
     'captions',
     'outputs',
+    'markers',
     'baseline',
     'controls',
     'privacy',
@@ -214,6 +215,7 @@ const { output } = await run({
   webRoot,
   captions: selected.case === 'captions',
   outputs: selected.case === 'outputs',
+  markers: selected.case === 'markers',
   controls: selected.case === 'controls',
   privacy: selected.case === 'privacy',
   soundboard: selected.case === 'soundboard',

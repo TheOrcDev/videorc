@@ -64,6 +64,7 @@ export async function runBaseline({
   webRoot,
   captions = false,
   outputs = false,
+  markers = false,
   controls = false,
   privacy = false,
   soundboard = false,
@@ -84,33 +85,35 @@ export async function runBaseline({
     web: revision(webRoot),
     template: 'v1'
   })
-  report.case = handoff
-    ? 'handoff'
-    : outputs
-      ? 'outputs'
-      : captions
-        ? 'captions'
-        : archive
-          ? 'archive'
-          : graphics
-            ? 'graphics'
-            : scenes
-              ? 'scenes'
-              : replayRing
-                ? 'replay-ring'
-                : avatarAnimation
-                  ? 'avatar-animation'
-                  : views
-                    ? 'views'
-                    : avatar
-                      ? 'avatar'
-                      : soundboard
-                        ? 'soundboard'
-                        : privacy
-                          ? 'privacy'
-                          : controls
-                            ? 'controls'
-                            : 'baseline'
+  report.case = markers
+    ? 'markers'
+    : handoff
+      ? 'handoff'
+      : outputs
+        ? 'outputs'
+        : captions
+          ? 'captions'
+          : archive
+            ? 'archive'
+            : graphics
+              ? 'graphics'
+              : scenes
+                ? 'scenes'
+                : replayRing
+                  ? 'replay-ring'
+                  : avatarAnimation
+                    ? 'avatar-animation'
+                    : views
+                      ? 'views'
+                      : avatar
+                        ? 'avatar'
+                        : soundboard
+                          ? 'soundboard'
+                          : privacy
+                            ? 'privacy'
+                            : controls
+                              ? 'controls'
+                              : 'baseline'
   // A dirty web consumer makes its revision misleading. Require a dedicated,
   // installed checkout; inspect it read-only and never change the active one.
   const webDirty = execFileSync('git', ['status', '--porcelain', '--untracked-files=no'], {
@@ -129,10 +132,14 @@ export async function runBaseline({
     .update(readFileSync(join(webRoot, 'public/cloud/program/v1/stage.js')))
     .digest('hex')
   const h = await managedHarness('talk', 1, {
-    speech: captions || outputs,
+    speech: captions || outputs || markers,
     localEgress: outputs,
     maximumLogEntries: 4096
   })
+  if (markers) {
+    const { installMarkers } = await import('./cloud-parity-markers.mjs')
+    await installMarkers(h, webRoot)
+  }
   const output = join(h.root, 'parity')
   mkdirSync(output)
   let pages, browser, failure
@@ -191,7 +198,7 @@ export async function runBaseline({
     // Replace only the harness-owned device files before Electron opens them.
     writeFileSync(h.env.VIDEORC_SMOKE_FAKE_MEDIA_VIDEO, cameraY4m(MEDIA.colors.host))
     writeFileSync(h.env.VIDEORC_SMOKE_FAKE_MEDIA_AUDIO, toneWav(MEDIA.tones.host))
-    await h.destinations(controls ? 1 : 0)
+    await h.destinations(controls || markers ? 1 : 0)
     await h.launch()
     const cameraId = await prepareParityRoom(h, controls)
     if (outputs) {
@@ -383,6 +390,11 @@ export async function runBaseline({
         output,
         programUrl: `${pages.origin}${pages.wire.PROGRAM_PAGE_PATH}?${search}`
       })
+      report.status = 'passed'
+      writeReport()
+    } else if (markers) {
+      const { exerciseMarkers } = await import('./cloud-parity-markers.mjs')
+      report.markers = await exerciseMarkers({ h, output })
       report.status = 'passed'
       writeReport()
     } else if (captions) {

@@ -1,3 +1,4 @@
+import type { TimelineMarker } from '../../../../shared/cloud-markers'
 import {
   chatDeliveryActivityMatches,
   chatDeliveryProgress,
@@ -319,8 +320,8 @@ export interface StreamManagerProps {
   onClear?: () => void
   /** Mark the current moment for a clip (plan 068 D6); shown only on air. */
   markerContext?: import('@/lib/backend').MarkerContext | null
-  onMarker?: (label?: string) => Promise<import('@/lib/backend').SessionMarker>
-  onUndoMarker?: (marker: import('@/lib/backend').SessionMarker) => Promise<void>
+  onMarker?: (label?: string) => Promise<TimelineMarker>
+  onUndoMarker?: (marker: TimelineMarker) => Promise<void>
   /** The Clip buttons (plan 199: 30 s or the minute). */
   onMarkClip?: (seconds: ClipLength) => void
   /** `/clip` in the composer (plan 181 R4): the same action, answered with its words. */

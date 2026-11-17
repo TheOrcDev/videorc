@@ -375,12 +375,26 @@ export function studioActionContext(studio: StudioActionSource): StudioActionCon
         )
       }
     },
-    markClip: async (seconds) => {
+    markClip: async (seconds, requestId) => {
       try {
-        const event = await client.request<ClipMarkedEvent>('clip.mark', seconds && { seconds })
+        const event = await client.request<ClipMarkedEvent>(
+          'clip.mark',
+          studio.outputFacts?.owner === 'cloud-room'
+            ? {
+                seconds: seconds ?? 30,
+                source: 'remote',
+                requestId: requestId ?? crypto.randomUUID()
+              }
+            : seconds && { seconds }
+        )
         // Plan 181 R4: a saved clip is a success for a deck key, mark or not.
         return clipMarkKeptSomething(event)
-          ? { ok: true }
+          ? {
+              ok: true,
+              ...(event.reason === 'cloud-marker-no-media'
+                ? { message: 'Marker saved on the show timeline; no media to extract.' }
+                : {})
+            }
           : { ok: false, message: clipMarkedToast(event).title }
       } catch (error) {
         return {

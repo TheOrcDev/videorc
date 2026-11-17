@@ -4229,7 +4229,9 @@ export interface ClipMark {
 /** `clip.marked` event and the `clip.mark` reply. `saved: false` carries a
  * reason code (`recording-off`): the moment was heard but nothing was kept. */
 export interface ClipMarkedEvent {
-  sessionId: string
+  sessionId?: string
+  showId?: string
+  markerId?: string
   atSeconds: number
   source: ClipMarkSource
   saved: boolean

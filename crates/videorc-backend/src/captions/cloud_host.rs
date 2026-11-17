@@ -435,6 +435,16 @@ pub async fn presentation(state: &AppState) -> Option<Presentation> {
 pub async fn ownership_lost(state: &AppState, show_id: &str) {
     {
         let mut c = state.captions.lock().await;
+        if c.marker_session_id.as_deref() == Some(show_id) {
+            c.marker_started_at = None;
+            c.marker_epoch = c.marker_epoch.saturating_add(1);
+            let listening = crate::cohost::CohostListening::blocked(
+                "room-ownership-lost",
+                "Another computer controls this show. Enable listening again after continuing here.",
+            );
+            c.marker_listening = Some(listening.clone());
+            super::emit_marker_voice_status(state, show_id, &listening);
+        }
         if !c.room_owner.as_ref().is_some_and(|o| o.show_id == show_id) {
             return;
         }

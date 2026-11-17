@@ -1298,6 +1298,24 @@ pub async fn save_clip(state: &AppState, _agent: &AgentIdentity, args: Value) ->
         .get("seconds")
         .and_then(Value::as_u64)
         .map(|seconds| seconds as u32);
+    if crate::cloud_markers::current_show(state).is_some() {
+        return match crate::cloud_markers::mark_clip(
+            state,
+            seconds,
+            args.get("operationId")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            "agent",
+        )
+        .await
+        {
+            Ok(mark) => ToolOutcome::ok(
+                "Clip marker saved on the show timeline; no media to extract.",
+                Some(crate::cloud_markers::agent_projection(&mark, true)),
+            ),
+            Err(e) => ToolOutcome::failed(e.to_string()),
+        };
+    }
     match crate::clip_marks::mark_manual(state, seconds).await {
         Ok(event) => {
             let clip = event.reason.as_deref() == Some(crate::clip_marks::CLIP_SAVED_REASON);
