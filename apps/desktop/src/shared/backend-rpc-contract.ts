@@ -6212,7 +6212,12 @@ const cloudRoomStatusSchema = objectSchema(
       objectSchema(
         {
           onStage: arraySchema(boundedString, { maxLength: 8 }),
-          screen: optionalSchema(boundedString)
+          screen: optionalSchema(boundedString),
+          // Plain bounded strings: a value a newer page adds never fails the
+          // status; the renderer drops what it does not know (plan 249 S6).
+          layout: optionalSchema(boundedString),
+          stageKey: optionalSchema(boundedString),
+          at: optionalSchema(boundedString)
         },
         { allowUnknown: false }
       )

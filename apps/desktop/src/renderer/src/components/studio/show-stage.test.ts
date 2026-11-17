@@ -345,6 +345,12 @@ describe('the Program monitor on a managed show (plan 234 D6)', () => {
     expect(
       monitor()?.querySelector('[data-testid="show-stage-avatar-status"]')?.textContent
     ).toContain('Room avatar off')
+    // Plan 249 S6: an older page names no stage, so the preview says so.
+    // (The badge's tooltip sentence stays in the DOM as its description.)
+    expect(monitor()?.textContent).toMatch(/^Program previewUnconfirmed/)
+    expect(monitor()?.textContent).not.toMatch(/No picture yet|Waiting|You/)
+    expect(monitor()?.dataset.programStage).toBe('unconfirmed')
+    expect(monitor()?.dataset.viewSource).toBe('program-page-report')
     expect(speaker()).toBeNull()
   })
 
@@ -386,6 +392,132 @@ describe('the Program monitor on a managed show (plan 234 D6)', () => {
     expect(
       monitor()?.querySelector('[data-testid="show-stage-avatar-status"]')?.textContent
     ).toContain('Room avatar off')
+    expect(monitor()?.textContent).toMatch(/^Program previewUnconfirmed/)
+  })
+})
+
+// Plan 249 S6: every surface says what it shows. The Show stage is the
+// room; the managed monitor is a preview of the stage the program page
+// reports drawing, and says whether that is the stage this desktop sent.
+describe('room view and program preview (plan 249 S6)', () => {
+  const managedShow = { id: 'sh_talk', nodeId: 'livekit', resumable: false, kind: 'talk' as const }
+  const monitor = () => container.querySelector<HTMLElement>('[data-testid="show-stage-program"]')
+  const state = () =>
+    monitor()?.querySelector<HTMLElement>('[data-testid="show-stage-program-state"]') ?? null
+
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it('offers guests the avatar only once it is on, and says how many confirmed', async () => {
+    const avatar = (
+      enabled: boolean,
+      guests: { enabled: boolean; capable: number; applied: number }
+    ) => ({
+      enabled,
+      state: 'preview' as const,
+      reason: null,
+      revision: 1,
+      preview: null,
+      observed: {},
+      guests,
+      productionQualified: false as const
+    })
+    const row = () =>
+      monitor()?.querySelector<HTMLElement>('[data-testid="show-stage-guest-graphics"]') ?? null
+    await mount(
+      talkStatus({ show: managedShow, room: openRoom({ live: true }) }),
+      talkShow({
+        room: {
+          ...NO_TALK_SHOW.room,
+          avatar: avatar(false, { enabled: false, capable: 0, applied: 0 })
+        }
+      })
+    )
+    expect(row()).toBeNull()
+
+    const setAvatarGuests = vi.fn(async () => {})
+    await mount(
+      talkStatus({ show: managedShow, room: openRoom({ live: true }) }),
+      talkShow({
+        setAvatarGuests,
+        room: {
+          ...NO_TALK_SHOW.room,
+          avatar: avatar(true, { enabled: false, capable: 2, applied: 0 })
+        }
+      })
+    )
+    expect(row()?.textContent).toContain("Guests don't see the avatar")
+    const button = row()?.querySelector('button')
+    expect(button?.getAttribute('aria-pressed')).toBe('false')
+    await act(async () => button?.click())
+    expect(setAvatarGuests).toHaveBeenCalledWith(true)
+
+    await mount(
+      talkStatus({ show: managedShow, room: openRoom({ live: true }) }),
+      talkShow({
+        room: {
+          ...NO_TALK_SHOW.room,
+          avatar: avatar(true, { enabled: true, capable: 3, applied: 2 })
+        }
+      })
+    )
+    expect(row()?.textContent).toContain('Shown to guests · 2 of 3 confirmed')
+    expect(row()?.querySelector('button')?.textContent).toBe('Hide from guests')
+  })
+
+  it('labels the stage as the room, never the program', async () => {
+    await mount(talkStatus({ show: managedShow, room: openRoom({ live: true }) }), talkShow())
+    const well = container.querySelector<HTMLElement>('[data-testid="show-stage-well"]')
+    expect(well?.dataset.viewSource).toBe('room-tracks')
+    expect(well?.getAttribute('aria-label')).toBe('Room view')
+    expect(container.querySelector('[data-testid="show-stage-room-label"]')?.textContent).toBe(
+      'Room'
+    )
+  })
+
+  it('confirms the stage only when a fresh report names the stage sent', async () => {
+    vi.useFakeTimers({ now: Date.parse('2026-11-16T12:00:30Z'), toFake: ['Date'] })
+    const { stageKey } = await import('../../../../shared/cloud-presentation-views')
+    const base = openRoom({ live: true })
+    const sentKey = stageKey(base.stage)
+    const report = (key: string, at = '2026-11-16T12:00:25Z') =>
+      openRoom({
+        live: true,
+        shown: { onStage: base.stage.onStage, layout: base.stage.layout, stageKey: key, at }
+      })
+    await mount(talkStatus({ show: managedShow, room: report(sentKey) }), talkShow())
+    expect(monitor()?.dataset.programStage).toBe('applied')
+    expect(state()?.textContent).toBe('Confirmed')
+
+    await mount(talkStatus({ show: managedShow, room: report('00000000') }), talkShow())
+    expect(monitor()?.dataset.programStage).toBe('updating')
+    expect(state()?.textContent).toBe('Updating')
+
+    await mount(
+      talkStatus({ show: managedShow, room: report(sentKey, '2026-11-16T11:59:00Z') }),
+      talkShow()
+    )
+    expect(monitor()?.dataset.programStage).toBe('stale')
+    expect(state()?.textContent).toBe('Out of date')
+    // Never a claim about the encoded stream.
+    expect(monitor()?.textContent).not.toMatch(/on air|live now|viewers see this/i)
+  })
+
+  it('hands agents the reported program by role, never identities, and clears it', async () => {
+    vi.useFakeTimers({ now: Date.parse('2026-11-16T12:00:30Z'), toFake: ['Date'] })
+    const { agentRoomProgram } = await import('@/lib/agent-room-program')
+    const room = openRoom({ live: true, shown: { onStage: [HOST] } })
+    await mount(talkStatus({ show: managedShow, room }), talkShow())
+    const program = agentRoomProgram()
+    expect(program?.source).toBe('program-page-report')
+    expect(program?.encodedOutput).toBe(false)
+    expect(program?.stage).toBe('unconfirmed')
+    expect(JSON.stringify(program)).not.toContain(HOST)
+    expect(program?.tiles.every((tile) => tile.role === 'host' || tile.role === 'guest')).toBe(true)
+    // The stage goes (the room closes): agents lose the projection with it.
+    await act(async () => root.render(createElement('div')))
+    expect(agentRoomProgram()).toBeUndefined()
   })
 })
 
@@ -518,6 +650,7 @@ describe('the avatar animation line under the Program preview (plan 249 S5)', ()
           revision: 3,
           preview: null,
           observed: {},
+          guests: { enabled: false, capable: 0, applied: 0 },
           productionQualified: false,
           ...(animation ? { animation } : {})
         }

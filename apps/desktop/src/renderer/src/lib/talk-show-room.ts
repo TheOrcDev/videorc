@@ -195,8 +195,16 @@ export function talkShowRoomOptions(): RoomOptions {
 }
 
 /** The guest page's `StageMessage` (`guest-wire.ts`): the identities on stage. */
-export function stageMessage(onStage: readonly string[]): Uint8Array<ArrayBuffer> {
-  return new TextEncoder().encode(JSON.stringify({ v: 1, onStage: [...onStage] }))
+/** Plan 249 S6 (D4): the screen the program shows rides along, so a guest
+ * sees the same shared screen. Always present (null: none), so a guest can
+ * tell a current desktop from an older one; only a screen on the stage is
+ * named. An older guest page reads `onStage` and ignores the rest. */
+export function stageMessage(
+  onStage: readonly string[],
+  screen: string | null = null
+): Uint8Array<ArrayBuffer> {
+  const named = screen && onStage.includes(screen) ? screen : null
+  return new TextEncoder().encode(JSON.stringify({ v: 1, onStage: [...onStage], screen: named }))
 }
 
 function qualityOf(quality: ConnectionQuality): CloudRoomQuality {
@@ -245,6 +253,7 @@ export class TalkShowRoomClient {
   #reconnectAttempt = 0
   #closed = false
   #lastStage: string[] = []
+  #lastScreen: string | null = null
   #monitorEnabled = false
   #micMuted = false
   #cameraOff = false
@@ -297,6 +306,8 @@ export class TalkShowRoomClient {
   /** The publisher's last status, merged with the animation facts above. */
   #avatarStatus: RoomAvatarStatus | null = null
   #animationKey = ''
+  /** Plan 249 S6 (D4): the host shows the stream's public layers to guests. Off per room. */
+  #avatarGuests = false
   /** Overlays go one at a time, in the order they were handed over. */
   #overlays = new Map<string, AbortController>()
 
@@ -347,7 +358,7 @@ export class TalkShowRoomClient {
     if (!this.#owns(room)) return
     this.#setState('connected', null, token.identity)
     this.#applySubscriptions()
-    await this.sendStage(this.#lastStage)
+    await this.sendStage(this.#lastStage, this.#lastScreen)
     this.#publish()
   }
 
@@ -383,12 +394,13 @@ export class TalkShowRoomClient {
 
   /** The stage, to the guest page's topic (D11): on every change and on
    * every join (data messages are not replayed). */
-  async sendStage(onStage: readonly string[]): Promise<void> {
+  async sendStage(onStage: readonly string[], screen: string | null = null): Promise<void> {
     this.#lastStage = [...onStage]
+    this.#lastScreen = screen
     const room = this.#room
     if (!room || room.state !== ConnectionState.Connected) return
     try {
-      await room.localParticipant.publishData(stageMessage(onStage), {
+      await room.localParticipant.publishData(stageMessage(onStage, screen), {
         reliable: true,
         topic: STAGE_TOPIC
       })
@@ -854,6 +866,11 @@ export class TalkShowRoomClient {
     this.#motion = null
   }
 
+  setAvatarGuests(enabled: boolean): void {
+    this.#avatarGuests = enabled
+    this.#avatar?.guests(enabled)
+  }
+
   #bind(room: Room): void {
     this.#avatar?.close()
     this.#avatarStatus = null
@@ -866,6 +883,7 @@ export class TalkShowRoomClient {
     // No timer without an animated avatar (an idle room keeps no intervals).
     if (this.#motionSeed) this.#startMotion(room)
     else this.#stopMotion()
+    this.#avatar.guests(this.#avatarGuests)
     room
       .on(RoomEvent.DataReceived, (payload, participant, _kind, topic) => {
         // Only server-relayed observations. A participant cannot impersonate this API.
@@ -898,7 +916,7 @@ export class TalkShowRoomClient {
         this.#applySubscriptions()
         // A guest who just joined needs the stage (data is not replayed).
         if (!isRunnerIdentity(participant.identity) && !isRecorderIdentity(participant.identity)) {
-          void this.sendStage(this.#lastStage)
+          void this.sendStage(this.#lastStage, this.#lastScreen)
         }
         this.#publish()
       })
@@ -971,7 +989,7 @@ export class TalkShowRoomClient {
           })
         }
         this.#setState('connected', null)
-        void this.sendStage(this.#lastStage)
+        void this.sendStage(this.#lastStage, this.#lastScreen)
       })
       .on(RoomEvent.Disconnected, (reason?: DisconnectReason) => {
         if (!this.#owns(room) || reason === DisconnectReason.CLIENT_INITIATED) return
@@ -1295,7 +1313,7 @@ export class TalkShowRoomClient {
       this.#setState('connected', null, token.identity)
       if (!this.#owns(room)) return
       this.#applySubscriptions()
-      await this.sendStage(this.#lastStage)
+      await this.sendStage(this.#lastStage, this.#lastScreen)
       this.#publish()
     } catch (error) {
       console.warn('[talk-show] reconnect failed', messageOf(error))

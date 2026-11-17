@@ -494,11 +494,46 @@ fn cached_picture(state: &AppState, frame: PictureFrame) -> Option<ToolOutcome> 
     (cached.frame == frame).then(|| picture_outcome(cached))
 }
 
+/// Plan 249 S6: a cloud room has no local program frame to show. What an
+/// agent gets is the Studio's projection of the stage the program page
+/// reports drawing, by allowlist, labelled with its source. Never a claim
+/// about the encoded stream or recording.
+fn room_program_outcome(surface: Option<&Value>) -> ToolOutcome {
+    let Some(program) = surface
+        .and_then(|surface| surface.get("roomProgram"))
+        .filter(|program| program.is_object())
+    else {
+        return ToolOutcome::refused(
+            "The room owns the picture. No program projection is available until the Studio shows the room.",
+        );
+    };
+    let stage = text_of(program, "stage").unwrap_or("unconfirmed");
+    let mut projected = pick(
+        program,
+        &[
+            "source",
+            "stage",
+            "ageSeconds",
+            "layout",
+            "screenShared",
+            "tiles",
+        ],
+    );
+    projected.insert("encodedOutput".into(), json!(false));
+    let text = format!(
+        "Cloud room: no picture is taken here. This is the stage the program page reports \
+         drawing ({stage}), redrawn with the shared geometry. It is not the encoded stream \
+         or recording."
+    );
+    ToolOutcome::ok(
+        text,
+        Some(json!({ "projection": Value::Object(projected) })),
+    )
+}
+
 pub async fn get_picture(state: &AppState, _agent: &AgentIdentity, _args: Value) -> ToolOutcome {
     if crate::cloud_talk_show_open(state) {
-        return ToolOutcome::refused(
-            "The room owns the picture. Cloud program snapshots are not available yet.",
-        );
+        return room_program_outcome(studio_surface(state).as_ref());
     }
     if let Some(sequence) = crate::compositor::latest_program_sequence(state).await
         && let Some(cached) = cached_picture(state, PictureFrame::Program(sequence))
@@ -1293,6 +1328,59 @@ pub async fn save_clip(state: &AppState, _agent: &AgentIdentity, args: Value) ->
             ToolOutcome::refused(crate::replay_buffer::INVALID_CLIP_LENGTH_MESSAGE)
         }
         Err(error) => ToolOutcome::failed(error.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod room_program_tests {
+    use super::*;
+
+    #[test]
+    fn a_room_without_a_projection_is_refused_and_never_claims_output() {
+        let refused = room_program_outcome(None);
+        assert_eq!(
+            refused,
+            ToolOutcome::refused(
+                "The room owns the picture. No program projection is available until the Studio shows the room.",
+            )
+        );
+    }
+
+    #[test]
+    fn a_room_projection_is_allowlisted_and_labelled_not_encoded() {
+        let surface = json!({
+            "roomProgram": {
+                "source": "program-page-report",
+                "encodedOutput": true,
+                "stage": "applied",
+                "ageSeconds": 3,
+                "layout": "side-by-side",
+                "screenShared": false,
+                "tiles": [{ "kind": "person", "role": "host", "rect": { "x": 0.0, "y": 0.0, "w": 0.5, "h": 0.5 } }],
+                "identity": "host:sh_secret"
+            }
+        });
+        let outcome = room_program_outcome(Some(&surface));
+        let expected = json!({
+            "projection": {
+                "source": "program-page-report",
+                "encodedOutput": false,
+                "stage": "applied",
+                "ageSeconds": 3,
+                "layout": "side-by-side",
+                "screenShared": false,
+                "tiles": [{ "kind": "person", "role": "host", "rect": { "x": 0.0, "y": 0.0, "w": 0.5, "h": 0.5 } }]
+            }
+        });
+        assert_eq!(
+            outcome,
+            ToolOutcome::ok(
+                "Cloud room: no picture is taken here. This is the stage the program page reports \
+                 drawing (applied), redrawn with the shared geometry. It is not the encoded stream \
+                 or recording.",
+                Some(expected),
+            )
+        );
     }
 }
 

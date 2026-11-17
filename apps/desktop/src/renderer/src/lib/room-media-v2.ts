@@ -22,6 +22,23 @@ export type ConsumerCapability = {
   auxiliary?: { trackSid: string; rms: number; observedAt: number }
 }
 export type CapabilityReceipt = ConsumerCapability & { at: number }
+/**
+ * Plan 249 S6 (D4): the one graphics lane a guest page may advertise. Guests
+ * see what the stream shows in landscape, never a recording-only layer.
+ */
+export const GUEST_GRAPHICS_LANE = { output: 'stream', orientation: 'h' } as const
+/** An egress takes its token's lane; a guest only the guest lane. */
+export function graphicsLaneAllowed(
+  identity: string,
+  graphics: Pick<AvatarCapability, 'output' | 'orientation'>
+): boolean {
+  if (identity.startsWith('EG_')) return true
+  return (
+    identity.startsWith('g_') &&
+    graphics.output === GUEST_GRAPHICS_LANE.output &&
+    graphics.orientation === GUEST_GRAPHICS_LANE.orientation
+  )
+}
 export function parseConsumerCapability(value: unknown): ConsumerCapability | null {
   if (!value || typeof value !== 'object') return null
   const v = value as Record<string, unknown>
@@ -34,7 +51,8 @@ export function parseConsumerCapability(value: unknown): ConsumerCapability | nu
   )
     return null
   const graphics = v.graphics === undefined ? null : parseAvatarCapability(v.graphics)
-  if (v.graphics !== undefined && (!graphics || !v.identity.startsWith('EG_'))) return null
+  if (v.graphics !== undefined && (!graphics || !graphicsLaneAllowed(v.identity, graphics)))
+    return null
   let auxiliary: ConsumerCapability['auxiliary']
   if (v.auxiliary !== undefined) {
     if (!v.auxiliary || typeof v.auxiliary !== 'object') return null
