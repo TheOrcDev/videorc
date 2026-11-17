@@ -1,5 +1,10 @@
 import type { RoomMicrophoneCommand } from '../shared/room-microphone'
-import { parseRoomPcmFrame, type RoomPcmCommand, type RoomPcmFrame } from '../shared/room-pcm'
+import {
+  parseRoomPcmFrame,
+  parseRoomPcmOpened,
+  type RoomPcmCommand,
+  type RoomPcmFrame
+} from '../shared/room-pcm'
 
 type Connection = { host: string; port: number; token: string }
 /** One socket, one request credit, no event forwarding and no credentials in preload. */
@@ -113,6 +118,12 @@ export class RoomPcmBridge {
     })
     if (this.#closed) throw new Error('PCM bridge closed during pull.')
     if (command.action === 'close') this.close()
+    // Plan 249 S13a: open answers with the generation's clock origin, not a frame.
+    // It is validated here; renderers read the same origin on every frame.
+    if (command.action === 'open') {
+      parseRoomPcmOpened(result, this.#generation)
+      return null
+    }
     return result === null ? null : parseRoomPcmFrame(result, this.#generation)
   }
 

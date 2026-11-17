@@ -172,7 +172,128 @@ test('derives native/worklet/program intervals only from matching measured marke
     for (const e of r.reply.events) delete e.marker
   const missing = derivePcmClocks(records)
   assert.equal(missing.samples.length, 0)
-  assert.equal(missing.unavailable.length, 1)
+  assert.equal(missing.unavailable.filter((u) => u.second === 1).length, 1)
+})
+
+/** One marker at second 1 with three native-frame observations carrying `clock`. */
+function clockRecords(clockAt = () => ({})) {
+  const records = []
+  for (const t of [0, 1000, 2000]) {
+    const bracket = { beforeUs: 1e9 + t * 1000, afterUs: 1e9 + t * 1000 + 2000 }
+    records.push({
+      kind: 'renderer',
+      ...bracket,
+      reply: {
+        performanceMs: t,
+        dropped: 0,
+        events: [
+          {
+            phase: 'native-frame',
+            generation: 7,
+            pullRequestedAtMs: t,
+            pullReceivedAtMs: t + 1,
+            observedAtUs: t * 1000,
+            ...clockAt(t)
+          },
+          {
+            phase: 'worklet',
+            clock: { requestedAtMs: t + 20, frame: t * 48 },
+            receivedAtMs: t + 21,
+            ...(t === 1000 ? { marker: { second: 1, workletFrame: 48000 } } : {})
+          }
+        ]
+      }
+    })
+    records.push({
+      kind: 'program',
+      ...bracket,
+      reply: {
+        performanceMs: t,
+        dropped: 0,
+        events: [
+          {
+            clock: { requestedAtMs: t + 100, frame: t * 48 },
+            receivedAtMs: t + 101,
+            events: t === 1000 ? [{ second: 1, audioFrame: 48000, uncertaintyFrames: 480 }] : []
+          }
+        ]
+      }
+    })
+  }
+  return records
+}
+
+test('a null native origin stays unavailable and is never manufactured as zero', () => {
+  for (const clock of [
+    {},
+    { originUs: null, incarnation: null },
+    { originUs: null, incarnation: 3 }
+  ]) {
+    const result = derivePcmClocks(clockRecords(() => clock))
+    assert.equal(result.origin, null)
+    assert.equal(result.samples.length, 1)
+    assert.equal(result.samples[0].nativeUs, null)
+    assert.equal(result.samples[0].incarnation, null)
+    assert.deepEqual(
+      result.unavailable.filter((u) => u.measurement === 'commonClockOrigin').length,
+      1
+    )
+  }
+})
+
+test('a present native origin maps each sample to origin + native position', () => {
+  const result = derivePcmClocks(
+    clockRecords(() => ({ originUs: 5_000_000, incarnation: 42, timeline: 'synthetic' }))
+  )
+  assert.deepEqual(result.origin, { originUs: 5_000_000, incarnation: 42, timeline: 'synthetic' })
+  assert.equal(result.samples[0].nativeUs, 6_000_000)
+  assert.equal(result.samples[0].incarnation, 42)
+  assert.equal(result.unavailable.length, 0)
+})
+
+test('mixed incarnations, moving origins and invalid origins within one capture are refused', () => {
+  assert.throws(
+    () =>
+      derivePcmClocks(
+        clockRecords((t) => ({ originUs: 5_000_000, incarnation: t === 2000 ? 43 : 42 }))
+      ),
+    /multiple native clock incarnations/
+  )
+  assert.throws(
+    () => derivePcmClocks(clockRecords((t) => ({ originUs: 5_000_000 + t, incarnation: 42 }))),
+    /multiple native clock origins/
+  )
+  assert.throws(
+    () =>
+      derivePcmClocks(
+        clockRecords((t) => (t === 2000 ? { originUs: 5_000_000, incarnation: 42 } : {}))
+      ),
+    /multiple native clock incarnations/
+  )
+  for (const clock of [
+    { originUs: 5, incarnation: null },
+    { originUs: 5, incarnation: 0 },
+    { originUs: -1, incarnation: 42 },
+    { originUs: 1.5, incarnation: 42 }
+  ])
+    assert.throws(() => derivePcmClocks(clockRecords(() => clock)))
+})
+
+test('an origin whose sum with native time is unsafe is refused, never wrapped', () => {
+  // The last observation is at 2 s: origin + observedAtUs crosses MAX_SAFE_INTEGER.
+  assert.throws(
+    () =>
+      derivePcmClocks(
+        clockRecords(() => ({ originUs: Number.MAX_SAFE_INTEGER - 1_500_000, incarnation: 42 }))
+      ),
+    /safe integer range/
+  )
+  // A sum that lands exactly on MAX_SAFE_INTEGER is still exact and accepted.
+  const result = derivePcmClocks(
+    clockRecords(() => ({ originUs: Number.MAX_SAFE_INTEGER - 2_000_000, incarnation: 42 }))
+  )
+  assert.equal(result.samples.length, 1)
+  assert.equal(result.samples[0].nativeUs, Number.MAX_SAFE_INTEGER - 1_000_000)
 })
 
 test('publication readiness uses actual microphone SID and protobuf default mute semantics', () => {

@@ -2194,6 +2194,17 @@ impl VideorcApiClient {
     ) -> std::result::Result<reqwest::Response, (crate::cloud_show::CloudApiError, serde_json::Value)>
     {
         use crate::cloud_show::{CloudApiError, ShowRecord, classify_cloud_failure};
+        // Plan 249 S24: every request about the show this process controls
+        // carries its controller epoch, so the web refuses it once another
+        // device took the show over (never ending the successor's).
+        let fenced = crate::cloud_controller::fence_header_for(path);
+        let request = match fenced {
+            Some(epoch) => request.header(
+                crate::cloud_controller::CONTROLLER_EPOCH_HEADER,
+                epoch.to_string(),
+            ),
+            None => request,
+        };
         let response = request.timeout(timeout).send().await.map_err(|error| {
             (
                 CloudApiError::Transport(format!("{path}: {error}")),
@@ -2206,6 +2217,13 @@ impl VideorcApiClient {
         }
         let text = response.text().await.unwrap_or_default();
         let (code, message) = parse_error_envelope(&text);
+        // A fenced request refused as stale: another device controls the show.
+        if let Some(epoch) = fenced
+            && status.as_u16() == 409
+            && code == "cloud-controller-stale"
+        {
+            crate::cloud_controller::mark_lost(epoch, "stale-command");
+        }
         let body: serde_json::Value =
             serde_json::from_str(&text).unwrap_or(serde_json::Value::Null);
         let live_show = body
@@ -3789,6 +3807,7 @@ impl crate::cloud_show::CloudWebApi for VideorcApiClient {
                 Err(crate::cloud_show::CloudApiError::Other {
                     status: 409,
                     code: "cloud-show-ending".to_string(),
+                    message: String::new(),
                 })
             } else {
                 Ok(())
@@ -4245,6 +4264,111 @@ struct VerifyUser {
 #[derive(Deserialize)]
 struct GetSessionResponse {
     user: VerifyUser,
+}
+
+/// Plan 249 S24: the controller and kept-presentation routes. Each answers
+/// its body beside its error, so a 409 still names the current controller.
+impl VideorcApiClient {
+    pub(crate) async fn cloud_controller(
+        &self,
+        bearer: &str,
+        show_id: &str,
+        body: &serde_json::Value,
+    ) -> std::result::Result<serde_json::Value, (crate::cloud_show::CloudApiError, serde_json::Value)>
+    {
+        let path = format!("/api/cloud/shows/{show_id}/controller");
+        self.cloud_json_or_body(
+            self.http
+                .post(self.endpoint(&path))
+                .bearer_auth(bearer)
+                .json(body),
+            &path,
+            CLOUD_REQUEST_TIMEOUT,
+        )
+        .await
+    }
+
+    pub(crate) async fn cloud_controller_desired(
+        &self,
+        bearer: &str,
+        show_id: &str,
+        body: &serde_json::Value,
+    ) -> std::result::Result<serde_json::Value, (crate::cloud_show::CloudApiError, serde_json::Value)>
+    {
+        let path = format!("/api/cloud/shows/{show_id}/controller");
+        self.cloud_json_or_body(
+            self.http
+                .put(self.endpoint(&path))
+                .bearer_auth(bearer)
+                .json(body),
+            &path,
+            CLOUD_REQUEST_TIMEOUT,
+        )
+        .await
+    }
+
+    pub(crate) async fn cloud_presentation_put(
+        &self,
+        bearer: &str,
+        show_id: &str,
+        body: &serde_json::Value,
+    ) -> std::result::Result<serde_json::Value, (crate::cloud_show::CloudApiError, serde_json::Value)>
+    {
+        let path = format!("/api/cloud/shows/{show_id}/presentation");
+        self.cloud_json_or_body(
+            self.http
+                .put(self.endpoint(&path))
+                .bearer_auth(bearer)
+                .json(body),
+            &path,
+            CLOUD_REQUEST_TIMEOUT,
+        )
+        .await
+    }
+
+    pub(crate) async fn cloud_presentation_get(
+        &self,
+        bearer: &str,
+        show_id: &str,
+    ) -> std::result::Result<serde_json::Value, crate::cloud_show::CloudApiError> {
+        let path = format!("/api/cloud/shows/{show_id}/presentation");
+        self.cloud_json(
+            self.http.get(self.endpoint(&path)).bearer_auth(bearer),
+            &path,
+            CLOUD_REQUEST_TIMEOUT,
+        )
+        .await
+    }
+
+    /// One kept PNG, as standard base64 (the renderer's asset shape).
+    pub(crate) async fn cloud_presentation_asset(
+        &self,
+        bearer: &str,
+        show_id: &str,
+        hash: &str,
+    ) -> std::result::Result<String, crate::cloud_show::CloudApiError> {
+        use base64::Engine as _;
+        let path = format!("/api/cloud/shows/{show_id}/presentation?asset={hash}");
+        let response = self
+            .cloud_send(
+                self.http.get(self.endpoint(&path)).bearer_auth(bearer),
+                &path,
+                CLOUD_REQUEST_TIMEOUT,
+            )
+            .await
+            .map_err(|(error, _)| error)?;
+        let status = response.status().as_u16();
+        let bytes =
+            response
+                .bytes()
+                .await
+                .map_err(|error| crate::cloud_show::CloudApiError::Other {
+                    status,
+                    code: "malformed-response".to_string(),
+                    message: format!("Could not read {path}: {error}"),
+                })?;
+        Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
+    }
 }
 
 #[cfg(test)]

@@ -24,6 +24,7 @@ describe('session modes (plan 174, E-1)', () => {
       'record',
       'stream',
       'cloud-stream',
+      'cloud-recording',
       'record+stream',
       'imported'
     ])

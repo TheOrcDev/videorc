@@ -593,6 +593,10 @@ pub struct CloudProviderSettlement {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct CloudStatus {
+    /// Plan 249 S24: this computer as the show's controller (absent unless
+    /// it holds an epoch for the show): what a takeover asks it to switch on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub controller: Option<crate::cloud_controller::ControllerFacts>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub live_interval: Option<CloudLiveInterval>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -2087,6 +2091,10 @@ impl CloudShowRuntime {
     pub fn status(&self) -> CloudStatus {
         let runner = self.runner.as_ref();
         CloudStatus {
+            controller: self
+                .show
+                .as_ref()
+                .and_then(|show| crate::cloud_controller::facts_for(&show.record.id)),
             live_interval: runner.and_then(|r| r.live_interval.clone()),
             provider_lifecycle: runner
                 .map(|r| r.provider_lifecycle.clone())
@@ -15870,6 +15878,7 @@ mod tests {
                     cancelled: cancelled.clone(),
                     progress: Arc::new(|_, _| {}),
                 },
+                crate::storage::Database::open_in_memory_for_tests(),
             )
         };
         let error = download("rec_node", Some("bearer")).await.unwrap_err();

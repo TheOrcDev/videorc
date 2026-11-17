@@ -54,6 +54,14 @@ export type RoomAvatarStatus = {
   productionQualified: false
   animation?: RoomAvatarAnimation
 }
+/** Plan 249 S24: one output view a program page applied, exactly as sent to it. */
+export type AcceptedAvatarView = {
+  output: 'stream' | 'recording'
+  orientation: 'h' | 'v'
+  publisherSid: string
+  revision: number
+  layers: AvatarLayer[]
+}
 /** Independently enabled by the existing avatar output switches. Never infers
  * graphic support from S3's auxiliary version. Guests get pixels only after the
  * host opts in (`guests`), only on the guest lane, and only what the stream
@@ -61,7 +69,26 @@ export type RoomAvatarStatus = {
 export class RoomAvatarPublisher {
   #content: AvatarContent | null = null
   #receipts = new Map<string, CapabilityReceipt>()
-  #sent = new Map<string, { key: string; revision: number; at: number }>()
+  /** Per peer: the exact sanitized envelope it was sent (S24 keeps it as sent). */
+  #sent = new Map<
+    string,
+    {
+      key: string
+      revision: number
+      at: number
+      layers: AvatarLayer[]
+      output: 'stream' | 'recording'
+      orientation: 'h' | 'v'
+      publisherSid: string
+      expiresAt: number
+    }
+  >()
+  /**
+   * Plan 249 S24: the highest revision reported as accepted per output view
+   * (`output/orientation/publisherSid`). Several program pages may share a
+   * view; a late acknowledgement of an older revision never replaces it.
+   */
+  #accepted = new Map<string, number>()
   #revision = 0
   #generation = 0
   #busy = false
@@ -75,7 +102,9 @@ export class RoomAvatarPublisher {
   #guestShown = new Set<string>()
   constructor(
     private room: Room,
-    private changed: (status: RoomAvatarStatus) => void
+    private changed: (status: RoomAvatarStatus) => void,
+    /** Plan 249 S24: called once per view a program page applied. */
+    private accepted?: (view: AcceptedAvatarView) => void
   ) {
     room.on(RoomEvent.DataReceived, this.#receive)
     room.on(RoomEvent.Reconnecting, this.#lost)
@@ -196,6 +225,7 @@ export class RoomAvatarPublisher {
       const visible =
         !!this.#content?.[receipt.graphics.output] &&
         this.#content[receipt.graphics.orientation].some((layer) => layer.kind === 'avatar')
+      this.#noteAccepted(peer.identity, receipt.graphics)
       if (!visible) continue
       wanted++
       const ack = receipt.graphics.applied
@@ -265,6 +295,50 @@ export class RoomAvatarPublisher {
       this.#lastStatus = key
       this.changed(status)
     }
+  }
+  /**
+   * Plan 249 S24: a page applied exactly what was sent to it, a clear too
+   * (an empty view, Hide, an output switched off): report that view once,
+   * with the envelope it got, for the cloud to keep or to forget. Runs
+   * before any visibility check, so a clear always reaches the cloud. Only
+   * the applied acknowledgement counts, never an upload or the preview.
+   */
+  #noteAccepted(
+    identity: string,
+    graphics: {
+      output: 'stream' | 'recording'
+      orientation: 'h' | 'v'
+      applied?: { publisherSid: string; revision: number }
+    }
+  ): void {
+    const ack = graphics.applied
+    const localSid = this.room.localParticipant.sid
+    if (!this.accepted || !ack || ack.publisherSid !== localSid) return
+    // What this page got: S5 sends the atlas variant only to animation pages.
+    const sent = this.#sent.get(identity)
+    if (
+      !sent ||
+      sent.revision !== ack.revision ||
+      sent.publisherSid !== localSid ||
+      sent.output !== graphics.output ||
+      sent.orientation !== graphics.orientation ||
+      sent.expiresAt <= Date.now()
+    )
+      return
+    const view = `${sent.output}/${sent.orientation}/${sent.publisherSid}`
+    if ((this.#accepted.get(view) ?? 0) >= sent.revision) return
+    this.#accepted.set(view, sent.revision)
+    if (this.#accepted.size > 64) {
+      const oldest = this.#accepted.keys().next().value
+      if (oldest !== undefined) this.#accepted.delete(oldest)
+    }
+    this.accepted({
+      output: sent.output,
+      orientation: sent.orientation,
+      publisherSid: sent.publisherSid,
+      revision: sent.revision,
+      layers: sent.layers
+    })
   }
   #refresh = (): void => {
     if (this.#closed) return
@@ -371,7 +445,16 @@ export class RoomAvatarPublisher {
         peer.sid !== this.room.remoteParticipants.get(peer.identity)?.sid
       )
         return
-      this.#sent.set(peer.identity, { key, revision: snapshot.revision, at: Date.now() })
+      this.#sent.set(peer.identity, {
+        key,
+        revision: snapshot.revision,
+        at: Date.now(),
+        layers: snapshot.layers,
+        output: snapshot.output,
+        orientation: snapshot.orientation,
+        publisherSid: snapshot.publisherSid,
+        expiresAt: snapshot.expiresAt
+      })
       if (role === 'guest') {
         if (snapshot.layers.length) this.#guestShown.add(peer.identity)
         else this.#guestShown.delete(peer.identity)

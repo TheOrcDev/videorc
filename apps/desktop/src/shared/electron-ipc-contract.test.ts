@@ -103,8 +103,9 @@ describe('Electron IPC contract', () => {
     // dropped on Takeovers) and screens:release-images (a stopped batch hands
     // back its unused capabilities), and makes the takeover picker multi-select.
     // 184: plan 249 S7a adds the bounded main-only PCM transport and resource inspection.
-    expect(Object.keys(electronInvokeApiMethods)).toHaveLength(186)
-    expect(new Set(Object.values(electronInvokeApiMethods)).size).toBe(186)
+    // 188: plan 249 S13a adds the main-only camera-role frame fixture and its inspection.
+    expect(Object.keys(electronInvokeApiMethods)).toHaveLength(188)
+    expect(new Set(Object.values(electronInvokeApiMethods)).size).toBe(188)
     expectTypeOf<ElectronInvokeArgs<'resource:trash-session-deletion'>>().toEqualTypeOf<
       Parameters<VideorcApi['trashSessionDeletion']>
     >()
@@ -2036,4 +2037,50 @@ it('requires complete observed PCM counters and rejects inspection payloads', ()
       timers: 1
     })
   ).toEqual({ nativeSources: 1, sockets: 1, ipcRequests: 1, timers: 1 })
+})
+
+it('admits only bounded frame-fixture commands and complete frame counters', () => {
+  const command = {
+    action: 'pull',
+    generation: 2,
+    role: 'host-camera-test',
+    width: 640,
+    height: 360,
+    fps: 30,
+    packing: 'rgb-left-alpha-right',
+    serial: 4,
+    release: { sequence: 1, surfaceEpoch: 1 }
+  }
+  expect(validateElectronInvokeArgs('room-frame:test', [command])).toEqual([command])
+  for (const bad of [
+    { ...command, width: 1920 },
+    { ...command, role: 'host-camera' },
+    { ...command, action: 'open' },
+    { ...command, extra: true },
+    { ...command, generation: 0 },
+    { ...command, release: { sequence: -1, surfaceEpoch: 1 } }
+  ])
+    expect(() => validateElectronInvokeArgs('room-frame:test', [bad])).toThrow()
+  expect(() =>
+    validateElectronInvokeResult('room-frame:inspect', {
+      nativeSources: 0,
+      sockets: 0,
+      ipcRequests: 0,
+      timers: 0
+    })
+  ).toThrow()
+  expect(() =>
+    validateElectronInvokeResult('room-frame:test', {
+      header: { width: 1288, height: 360 },
+      pixels: new Uint8Array(4)
+    })
+  ).toThrow()
+  expect(
+    validateElectronInvokeResult('room-frame:test', {
+      frame: null,
+      reason: 'not-due',
+      staleReleases: 0,
+      leaseStalls: 0
+    })
+  ).toMatchObject({ reason: 'not-due' })
 })

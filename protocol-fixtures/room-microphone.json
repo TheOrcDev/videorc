@@ -17,6 +17,11 @@
   "nativeProductionQualified": false,
   "nativeSpeakerAec": false,
   "clockQualification": "unavailable",
+  "clock": {
+    "timeline": "processed",
+    "fields": ["originUs", "incarnation"],
+    "absent": null
+  },
   "rejectedDeviceIds": [
     "default",
     "microphone:coreaudio:0",

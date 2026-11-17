@@ -1,4 +1,11 @@
 import {
+  resetRoomFrameSurfaces,
+  roomFrameEncodeObserverEnabled,
+  roomFrameTestResources,
+  setRoomFrameEncodeObserver,
+  setRoomFrameTestEnabled
+} from '../lib/room-frame-test-state'
+import {
   roomNativeMicrophoneEnabled,
   setRoomNativeMicrophoneEnabled,
   roomMicrophoneState,
@@ -20475,6 +20482,25 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         if (enabled !== undefined) setRoomPcmTestEnabled(enabled)
         return roomPcmTestResources()
       },
+      roomFrameTest: (enabled?: boolean) => {
+        if (enabled !== undefined) setRoomFrameTestEnabled(enabled)
+        return roomFrameTestResources()
+      },
+      roomFrameEncodeObserver: (enabled?: boolean) => {
+        if (enabled !== undefined) setRoomFrameEncodeObserver(enabled)
+        return roomFrameEncodeObserverEnabled()
+      },
+      roomFrameResetSurface: () => resetRoomFrameSurfaces(),
+      roomFrameReplace: async () => {
+        const controls = roomControlsRef.current
+        if (!controls) return false
+        await controls.setCameraOff(true)
+        await controls.setCameraOff(false)
+        return true
+      },
+      roomCameraSenderStats: () => roomControlsRef.current?.cameraSenderStats() ?? null,
+      // S13a harness: the authority bound from the SFU's publish answer.
+      roomFrameAuthority: () => roomControlsRef.current?.snapshot.local.cameraFrame ?? null,
       roomHighlight: async (milestone = false) => {
         const message = liveChatSnapshotRef.current.messages.find(
           (m) => m.eventType === 'message' && !m.isDeleted

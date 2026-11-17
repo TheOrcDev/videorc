@@ -1,4 +1,11 @@
 //! Opt-in capture-only room speech. Never creates a recording or camera session.
+//!
+//! Clock (Plan 249 S13a): the open reply and every frame carry `originUs` and
+//! `incarnation` (null when unavailable, never zero) from the tap's generation
+//! epoch (`RoomMicrophoneTap.epoch`). `firstSampleUs` and `observedAtUs` stay
+//! relative to that epoch. `originUs + firstSampleUs` is the PROCESSED
+//! timeline position (resampled, offset-delayed, RNNoise lookahead), not raw
+//! capture time; the configured offset stays separate in `offsetMs`.
 use crate::audio::AudioProcessingSettings;
 use crate::protocol::MicrophoneNoiseSuppression;
 use crate::session_audio::room_tap::RoomMicrophoneTap;
@@ -104,7 +111,23 @@ pub(crate) struct Frame {
     channels: u32,
     frames: u32,
     dropped_frames: u64,
+    // Never skipped: absent serializes as null, never as 0 or a missing key.
+    origin_us: Option<u64>,
+    incarnation: Option<u64>,
     samples: Vec<f32>,
+}
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct Opened {
+    generation: u64,
+    origin_us: Option<u64>,
+    incarnation: Option<u64>,
+}
+#[derive(Serialize)]
+#[serde(untagged)]
+pub(crate) enum Reply {
+    Opened(Opened),
+    Frame(Frame),
 }
 #[derive(Default)]
 pub(crate) struct Bridge {
@@ -119,7 +142,7 @@ impl Bridge {
         &mut self,
         state: &AppState,
         command: Command,
-    ) -> anyhow::Result<Option<Frame>> {
+    ) -> anyhow::Result<Option<Reply>> {
         anyhow::ensure!(command.valid(), "Invalid room microphone contract");
         if command.action == "close" {
             anyhow::ensure!(
@@ -198,16 +221,18 @@ impl Bridge {
                     == Some(command.show_id.as_str()),
                 "Room closed during microphone acquisition"
             );
-            self.tap = Some(RoomMicrophoneTap::new(
-                source,
-                settings.processing(),
-                settings.offset_ms,
-            )?);
+            let tap = RoomMicrophoneTap::new(source, settings.processing(), settings.offset_ms)?;
+            let (origin_us, incarnation) = tap.clock_origin();
+            self.tap = Some(tap);
             self.settings = command.settings;
             self.generation = command.generation;
             self.show_id = command.show_id;
             self.claim = Some(claim);
-            return Ok(None);
+            return Ok(Some(Reply::Opened(Opened {
+                generation: command.generation,
+                origin_us,
+                incarnation,
+            })));
         }
         anyhow::ensure!(
             self.generation == command.generation && self.show_id == command.show_id,
@@ -249,17 +274,24 @@ impl Bridge {
             self.settings = Some(next);
             return Ok(None);
         }
-        Ok(tap.pull(Instant::now())?.map(|chunk| Frame {
-            generation: self.generation,
-            sequence: chunk.sequence,
-            first_sample: chunk.sequence * 480,
-            first_sample_us: chunk.sequence * 10000,
-            observed_at_us: chunk.observed_at_us,
-            sample_rate: 48000,
-            channels: 1,
-            frames: 480,
-            dropped_frames: chunk.dropped_frames,
-            samples: chunk.samples,
+        // The tap refuses a pull whose origin + observedAtUs exceeds 2^53 - 1.
+        let chunk = tap.pull(Instant::now())?;
+        let (origin_us, incarnation) = tap.clock_origin();
+        Ok(chunk.map(|chunk| {
+            Reply::Frame(Frame {
+                generation: self.generation,
+                sequence: chunk.sequence,
+                first_sample: chunk.sequence * 480,
+                first_sample_us: chunk.sequence * 10000,
+                observed_at_us: chunk.observed_at_us,
+                sample_rate: 48000,
+                channels: 1,
+                frames: 480,
+                dropped_frames: chunk.dropped_frames,
+                origin_us,
+                incarnation,
+                samples: chunk.samples,
+            })
         }))
     }
 }
@@ -306,6 +338,49 @@ mod tests {
         }
         assert_eq!(fixture["queueFrames"], 1920);
         assert_eq!(fixture["nativeProductionQualified"], false);
+        assert_eq!(fixture["clockQualification"], "unavailable");
+        assert_eq!(fixture["clock"]["timeline"], "processed");
+        assert!(fixture["clock"]["absent"].is_null());
+    }
+    #[test]
+    fn open_reply_and_frames_carry_nullable_origin_fields() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../protocol-fixtures/room-microphone.json"
+        ))
+        .unwrap();
+        let absent = serde_json::to_value(Reply::Opened(Opened {
+            generation: 2,
+            origin_us: None,
+            incarnation: None,
+        }))
+        .unwrap();
+        assert_eq!(
+            absent,
+            serde_json::json!({ "generation": 2, "originUs": null, "incarnation": null })
+        );
+        let frame = serde_json::to_value(Reply::Frame(Frame {
+            generation: 2,
+            sequence: 3,
+            first_sample: 1440,
+            first_sample_us: 30_000,
+            observed_at_us: 70_000,
+            sample_rate: 48000,
+            channels: 1,
+            frames: 480,
+            dropped_frames: 0,
+            origin_us: Some(1_000_000),
+            incarnation: Some(9),
+            samples: vec![0.0; 480],
+        }))
+        .unwrap();
+        for field in fixture["clock"]["fields"].as_array().unwrap() {
+            let field = field.as_str().unwrap();
+            assert!(absent.as_object().unwrap().contains_key(field));
+            assert!(frame.as_object().unwrap().contains_key(field));
+        }
+        assert_eq!(frame["originUs"], 1_000_000);
+        assert_eq!(frame["incarnation"], 9);
+        assert_eq!(frame["firstSampleUs"], 30_000);
     }
     #[test]
     fn rejects_unknown_devices_lengths_and_controls_before_capture() {

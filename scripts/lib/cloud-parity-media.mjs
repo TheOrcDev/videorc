@@ -30,8 +30,11 @@ export function toneWav(hz, seconds = MEDIA.durationSeconds) {
 }
 
 /** Solid camera identity plus moving white clock marker. Chromium loops this Y4M. */
-export function cameraY4m(rgb) {
-  const { width: w, height: h, fps } = MEDIA.video
+export function cameraY4m(rgb, video = MEDIA.video) {
+  const { width: w, height: h, fps } = video
+  assert.ok(Number.isInteger(w) && w > 32 && w <= 1920 && w % 2 === 0)
+  assert.ok(Number.isInteger(h) && h >= 24 && h <= 1080 && h % 2 === 0)
+  assert.ok(Number.isInteger(fps) && fps > 0 && fps <= 60)
   const clamp = (v) => Math.max(16, Math.min(240, Math.round(v)))
   const [r, g, b] = rgb
   const y = clamp(16 + 0.257 * r + 0.504 * g + 0.098 * b)

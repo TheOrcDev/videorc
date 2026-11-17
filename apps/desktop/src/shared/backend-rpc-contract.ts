@@ -124,6 +124,9 @@ import type {
   CloudSettingsPatch,
   CloudHandOffAnswer,
   CloudStatus,
+  CloudControllerFacts,
+  CloudPresentationAccepted,
+  CloudPresentationRestore,
   CloudTestParams,
   CloudGuestActParams,
   CloudGuestDecideParams,
@@ -611,6 +614,27 @@ export interface BackendRpcMethodMap {
     { showId: string; stream: boolean; recording: boolean },
     { accepted: boolean }
   >
+  /** Plan 249 S24: an output view a program page applied, kept for the next controller. */
+  'cloud.presentation.accepted': BackendRpcDefinition<
+    CloudPresentationAccepted,
+    { queued: boolean }
+  >
+  /** Plan 249 S24: this controller's output flags and what it switched on. */
+  'cloud.controller.desired': BackendRpcDefinition<
+    {
+      showId: string
+      enabled?: Partial<Record<CloudControllerFacts['needsEnable'][number], boolean>>
+      outputs?: Partial<
+        Record<
+          'avatar' | 'banners' | 'chat' | 'highlight',
+          { stream?: boolean; recording?: boolean }
+        >
+      >
+    },
+    { queued: boolean }
+  >
+  /** Plan 249 S24: what the show kept, read back after this computer took it. */
+  'cloud.presentation.restore': BackendRpcDefinition<{ showId: string }, CloudPresentationRestore>
   /** The renderer's own room connection, for the status copy. */
   'cloud.room.client.report': BackendRpcDefinition<CloudRoomClientReportParams, CloudStatus>
   'cloud.guest.decide': BackendRpcDefinition<CloudGuestDecideParams, CloudStatus>
@@ -1034,6 +1058,9 @@ const boundedBackendParamValueSchema = boundedJsonValueSchema({
 })
 const boundedBackendParamsSchema = optionalSchema(boundedBackendParamValueSchema)
 const MAX_BACKEND_WIRE_MESSAGE_CHARS = 16_000_000
+// Plan 249 S24: a kept or accepted presentation carries base64 PNGs of up to
+// 1 MiB each (the static stack's own limit), within the wire's total.
+const presentationValueSchema = boundedJsonValueSchema({ maxStringLength: 1_100_000 })
 const nonNegativeInteger = numberSchema({
   integer: true,
   min: 0,
@@ -6308,6 +6335,19 @@ const cloudRoomTokenAnswerSchema = objectSchema(
 
 const okTrueSchema = objectSchema({ ok: literalSchema(true) }, { allowUnknown: false })
 // Plan 243: the device on air, without its id (the backend computes `thisDevice`).
+const CONTROLLER_ENABLES = ['sounds', 'system', 'html', 'camera', 'microphone', 'screen'] as const
+const cloudControllerFactsSchema = objectSchema(
+  {
+    controllerEpoch: nonNegativeInteger,
+    takenOverFrom: optionalSchema(enumSchema(['this-device', 'another-device'])),
+    needsEnable: arraySchema(enumSchema([...CONTROLLER_ENABLES]), { maxLength: 6 }),
+    restoredViews: nonNegativeInteger,
+    cleared: arraySchema(stringSchema({ maxLength: 32 }), { maxLength: 8 }),
+    lost: optionalSchema(booleanSchema)
+  },
+  { allowUnknown: false }
+)
+
 const cloudOnAirSchema = objectSchema(
   {
     name: optionalSchema(stringSchema({ minLength: 1, maxLength: 128 })),
@@ -6469,7 +6509,9 @@ const cloudStatusSchema = objectSchema(
     recording: optionalSchema(cloudRecordingStatusSchema),
     // Plan 243: who is on air, and why a stop of this computer was no end (D7).
     onAir: optionalSchema(cloudOnAirSchema),
-    stoppedBy: optionalSchema(enumSchema(['hand-off', 'taken-over']))
+    stoppedBy: optionalSchema(enumSchema(['hand-off', 'taken-over'])),
+    // Plan 249 S24: this computer as the show's controller.
+    controller: optionalSchema(cloudControllerFactsSchema)
   },
   { allowUnknown: false }
 ) as RuntimeSchema<CloudStatus>
@@ -7163,6 +7205,39 @@ const runtimeContracts = {
       { allowUnknown: false }
     ),
     result: objectSchema({ accepted: booleanSchema }, { allowUnknown: false })
+  },
+  'cloud.presentation.accepted': {
+    params: objectSchema(
+      {
+        showId: stringSchema({ minLength: 1, maxLength: 128 }),
+        topic: enumSchema(['avatar', 'static']),
+        output: enumSchema(['stream', 'recording']),
+        orientation: enumSchema(['h', 'v']),
+        publisherSid: stringSchema({ minLength: 4, maxLength: 80 }),
+        revision: nonNegativeInteger,
+        layers: arraySchema(presentationValueSchema, { maxLength: 8 })
+      },
+      { allowUnknown: false }
+    ) as RuntimeSchema<CloudPresentationAccepted>,
+    result: objectSchema({ queued: booleanSchema }, { allowUnknown: false })
+  },
+  'cloud.controller.desired': {
+    params: objectSchema(
+      {
+        showId: stringSchema({ minLength: 1, maxLength: 128 }),
+        enabled: optionalSchema(boundedBackendPayloadSchema),
+        outputs: optionalSchema(boundedBackendPayloadSchema)
+      },
+      { allowUnknown: false }
+    ) as RuntimeSchema<BackendRpcParams<'cloud.controller.desired'>>,
+    result: objectSchema({ queued: booleanSchema }, { allowUnknown: false })
+  },
+  'cloud.presentation.restore': {
+    params: objectSchema(
+      { showId: stringSchema({ minLength: 1, maxLength: 128 }) },
+      { allowUnknown: false }
+    ),
+    result: presentationValueSchema as RuntimeSchema<CloudPresentationRestore>
   },
   'cloud.room.client.report': {
     params: cloudRoomClientReportParamsSchema,
