@@ -51,6 +51,7 @@ import type { CohostPetAnimatorEvent } from '../../../shared/buddy-animator-publ
 import {
   RoomScenePublisher,
   type RoomSceneCommit,
+  type PreparedBackgroundAsset,
   type RoomSceneStatus,
   type SceneContent
 } from './room-scene-publisher'
@@ -161,6 +162,12 @@ export type TalkShowLocalMedia = {
    * participant/track SIDs from the publish result. Absent otherwise.
    */
   cameraFrame?: { authority: CameraFrameAuthority; descriptor: CameraRoleFrameDescriptor }
+  /**
+   * Plan 249 S14: the capturer source the room shares (`screen:<id>:0` or
+   * `window:<id>:0`), null when none or unknown. A scene or Follow switch
+   * compares against it.
+   */
+  screenSourceId?: string | null
 }
 
 export type TalkShowMonitor = {
@@ -371,6 +378,8 @@ export class TalkShowRoomClient {
   #screen: LocalVideoTrack | null = null
   #screenGeneration = 0
   #screenRaw: MediaStreamTrack | null = null
+  /** Plan 249 S14: which capturer source `#screenRaw` captures. */
+  #screenSourceId: string | null = null
   #privateScreen: ReturnType<typeof createPrivateScreen> | null = null
   #privacyOff: (() => void) | null = null
   #privacyTimer: ReturnType<typeof setTimeout> | null = null
@@ -416,6 +425,8 @@ export class TalkShowRoomClient {
   #scene: RoomScenePublisher | null = null
   /** The scene the program should draw; re-sent after a reconnect. */
   #sceneContent: SceneContent | null = null
+  /** Plan 249 S14: the background pictures the scene names, re-sent after a reconnect. */
+  #sceneAssets: readonly PreparedBackgroundAsset[] = []
   /** Overlays go one at a time, in the order they were handed over. */
   #overlays = new Map<string, AbortController>()
 
@@ -493,6 +504,7 @@ export class TalkShowRoomClient {
     this.#scene?.close()
     this.#scene = null
     this.#sceneContent = null
+    this.#sceneAssets = []
     this.#privacyOff?.()
     this.#privacyOff = null
     if (this.#privacyTimer) clearTimeout(this.#privacyTimer)
@@ -657,7 +669,7 @@ export class TalkShowRoomClient {
   /** The screen picked through main (`setTalkShowMediaGrant` named the
    * source); `getDisplayMedia` answers with it once. Published at 1080p30
    * with `detail` so shared text stays crisp (S0b). */
-  async startScreenShare(): Promise<void> {
+  async startScreenShare(sourceId?: string): Promise<void> {
     const room = this.#room
     if (!room || !this.#owns(room)) throw new Error('The room is not open.')
     const stopping = this.stopScreenShare()
@@ -675,11 +687,51 @@ export class TalkShowRoomClient {
     const [mediaTrack] = stream.getVideoTracks()
     if (!mediaTrack) throw new Error('No screen was shared.')
     this.#screenRaw = mediaTrack
+    this.#screenSourceId = sourceId ?? null
     this.#privacyEpoch = crypto.randomUUID().replaceAll('-', '')
     mediaTrack.addEventListener('ended', () => {
       if (this.#screenRaw === mediaTrack) void this.stopScreenShare()
     })
     await this.#refreshPrivateScreen()
+  }
+
+  /**
+   * Plan 249 S14: share another screen or window (a scene or Follow switch),
+   * transactionally. The new capture opens BEFORE the old one stops, so a
+   * refused or vanished source leaves the current share as it was and the
+   * caller refuses the switch. The new capture goes through the same S2
+   * privacy gate as any share: a hidden screen stays hidden (a new epoch and
+   * publication, frosted), and nothing raw is published in between. The
+   * caller has named `sourceId` to main (`setTalkShowMediaGrant`) first.
+   */
+  async replaceScreenSource(sourceId: string): Promise<void> {
+    const room = this.#room
+    if (!room || !this.#owns(room)) throw new Error('The room is not open.')
+    if (this.#screenRaw && this.#screenSourceId === sourceId) return
+    const generation = ++this.#screenGeneration
+    const stream = await navigator.mediaDevices.getDisplayMedia({
+      video: { width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 30 } },
+      audio: false
+    })
+    const [mediaTrack] = stream.getVideoTracks()
+    if (!this.#owns(room) || generation !== this.#screenGeneration || !mediaTrack) {
+      stream.getTracks().forEach((track) => track.stop())
+      if (!mediaTrack) throw new Error('No screen was shared.')
+      return
+    }
+    const old = this.#screenRaw
+    this.#screenRaw = mediaTrack
+    this.#screenSourceId = sourceId
+    this.#privacyEpoch = crypto.randomUUID().replaceAll('-', '')
+    old?.stop()
+    mediaTrack.addEventListener('ended', () => {
+      if (this.#screenRaw === mediaTrack) void this.stopScreenShare()
+    })
+    await this.#refreshPrivateScreen()
+  }
+
+  get screenSourceId(): string | null {
+    return this.#screenRaw ? this.#screenSourceId : null
   }
 
   #refreshPrivateScreen(): Promise<void> {
@@ -767,6 +819,7 @@ export class TalkShowRoomClient {
   #privacyFailed(): void {
     this.#screenRaw?.stop()
     this.#screenRaw = null
+    this.#screenSourceId = null
     this.#privateScreen?.close()
     this.#privateScreen = null
     const track = this.#screen
@@ -789,6 +842,7 @@ export class TalkShowRoomClient {
     ++this.#privacyGeneration
     this.#screenRaw?.stop()
     this.#screenRaw = null
+    this.#screenSourceId = null
     this.#privateScreen?.close()
     this.#privateScreen = null
     if (this.#privacyTimer) clearTimeout(this.#privacyTimer)
@@ -1076,8 +1130,13 @@ export class TalkShowRoomClient {
    * Answers with each egress lane's rendered revision, `preview` before any
    * egress runs, or why it is not confirmed.
    */
-  commitScene(content: SceneContent | null): Promise<RoomSceneCommit> {
+  commitScene(
+    content: SceneContent | null,
+    assets: readonly PreparedBackgroundAsset[] = []
+  ): Promise<RoomSceneCommit> {
     this.#sceneContent = content
+    this.#sceneAssets = content ? assets : []
+    this.#scene?.setAssets(this.#sceneAssets)
     if (!this.#scene || this.#closed)
       return Promise.resolve({
         state: 'failed',
@@ -1100,6 +1159,7 @@ export class TalkShowRoomClient {
     })
     // A new connection is a new publisher SID: the program drops the old
     // owner's scene and takes this one, as a cut (no replayed motion).
+    this.#scene.setAssets(this.#sceneAssets)
     if (this.#sceneContent)
       void this.#scene.commit({
         ...this.#sceneContent,
@@ -1797,6 +1857,7 @@ export class TalkShowRoomClient {
     ++this.#privacyGeneration
     this.#screenRaw?.stop()
     this.#screenRaw = null
+    this.#screenSourceId = null
     this.#privateScreen?.close()
     this.#privateScreen = null
     this.#privacy = undefined
@@ -1985,7 +2046,8 @@ export class TalkShowRoomClient {
         micMuted: this.#microphone?.isMuted ?? this.#micMuted,
         cameraOff: this.#cameraOff,
         problem: this.#problem,
-        ...(this.#cameraFrame && this.#frameSource ? { cameraFrame: this.#cameraFrame } : {})
+        ...(this.#cameraFrame && this.#frameSource ? { cameraFrame: this.#cameraFrame } : {}),
+        ...(this.#screenRaw && this.#screenSourceId ? { screenSourceId: this.#screenSourceId } : {})
       },
       monitor: { enabled: this.#monitorEnabled, video: monitorVideo, audio: monitorAudio }
     }

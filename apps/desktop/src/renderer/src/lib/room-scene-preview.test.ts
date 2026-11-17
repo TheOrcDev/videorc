@@ -3,6 +3,7 @@ import type { CloudRoomStatus } from './backend'
 import type { RoomSceneStatus } from './room-scene-publisher'
 import {
   SCENE_PREVIEW_CANVAS,
+  backgroundNote,
   programScenePreview,
   scenePreviewPicture,
   sceneStatusLine
@@ -106,5 +107,53 @@ describe('S12 scene in the Program preview', () => {
       'Scene delivery failed.'
     )
     expect(sceneStatusLine(status({ enabled: false }))).toBeNull()
+  })
+})
+
+describe('S14 background note', () => {
+  const status = (background: RoomSceneStatus['background']): RoomSceneStatus => ({
+    enabled: true,
+    state: 'applied',
+    reason: null,
+    generation: 1,
+    sceneId: { h: 'aaaaaaaa', v: null },
+    content: null,
+    observed: {},
+    ...(background ? { background } : {}),
+    productionQualified: false
+  })
+  it('says nothing when every output drew the background', () => {
+    expect(
+      sceneStatusLine(
+        status({
+          wanted: { h: '0badf00d', v: 'none' },
+          drawn: { EG_a: { key: '0badf00d', rendering: 'shader' } },
+          unsupported: 0,
+          productionQualified: false
+        })
+      )
+    ).toBe('Scene drawn by each output · Preview reconstruction')
+  })
+  it('never reports a still poster as moving, and names older pages', () => {
+    expect(
+      backgroundNote(
+        status({
+          wanted: { h: '0badf00d', v: 'none' },
+          drawn: { EG_a: { key: '0badf00d', rendering: 'still', reason: 'no-webgl2' } },
+          unsupported: 0,
+          productionQualified: false
+        })
+      )
+    ).toBe('Background shows still: the output cannot animate it')
+    expect(
+      backgroundNote(
+        status({
+          wanted: { h: '0badf00d', v: 'none' },
+          drawn: {},
+          unsupported: 1,
+          productionQualified: false
+        })
+      )
+    ).toMatch(/reload older program pages/)
   })
 })

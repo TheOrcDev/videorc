@@ -9,7 +9,17 @@ import type {
 } from '@/lib/backend'
 import { layoutPresetOrientation } from '@/lib/capture'
 import { cloudSceneFromNative } from '@/lib/cloud-scene-native'
-import type { RoomSceneCommit, SceneContent } from '@/lib/room-scene-publisher'
+import type {
+  PreparedBackgroundAsset,
+  RoomSceneCommit,
+  SceneContent
+} from '@/lib/room-scene-publisher'
+import {
+  roomScreenNeedsSwitch,
+  roomScreenWant,
+  type RoomScreenWant
+} from '@/lib/room-screen-source'
+import type { SceneBackground } from '../../../shared/cloud-background'
 import { SCENE_MOTION_MS, type SceneOrientation } from '../../../shared/cloud-scene'
 
 /**
@@ -45,8 +55,13 @@ export type RoomSceneRoom = {
   cameraOff: boolean
   /** The host's room screen is publishing. */
   screenPublished: boolean
+  /** S14: the capturer source the room shares, null when none or unknown. */
+  screenSourceId?: string | null
   stage: CloudStage
-  commitScene(content: SceneContent | null): Promise<RoomSceneCommit>
+  commitScene(
+    content: SceneContent | null,
+    assets?: readonly PreparedBackgroundAsset[]
+  ): Promise<RoomSceneCommit>
 }
 
 export type RoomSceneDeps = {
@@ -65,6 +80,17 @@ export type RoomSceneDeps = {
    */
   current?: () => boolean
   sleep?: (ms: number) => Promise<void>
+  /**
+   * Plan 249 S14: share the scene's own screen or window in the room before
+   * the scene changes (main is told the source, then the room swaps its
+   * privacy-gated capture). Throws when the source cannot be shared; the old
+   * share then stays and the scene is not committed.
+   */
+  shareScreen?(want: Extract<RoomScreenWant, { kind: 'source' }>): Promise<void>
+  /** Plan 249 S14: the scene's background as the program draws it. */
+  background?(
+    background: EffectiveSceneBackground
+  ): Promise<{ background: SceneBackground; asset?: PreparedBackgroundAsset }>
 }
 
 export type RoomSceneResult = {
@@ -72,6 +98,10 @@ export type RoomSceneResult = {
   message?: string
   commit?: RoomSceneCommit
   orientation?: SceneOrientation
+  /** S14: what happened to the room's screen share. */
+  screen?: 'kept' | 'switched' | 'unsupported'
+  /** S14: the background sent with the scene, or why none was. */
+  background?: 'none' | 'sent' | 'failed'
 }
 
 export function roomSceneMessage(commit: RoomSceneCommit): string | undefined {
@@ -118,6 +148,63 @@ export async function applySceneToRoom(
     orientation,
     extension: target.extension
   })
+  // S14: the scene's own screen or window goes on the room share first, so
+  // the screen box shows what the scene names (Follow, an app scene, a
+  // display). Transactional: a source that cannot be shared refuses the
+  // scene and leaves the current share as it was.
+  let screen: RoomSceneResult['screen'] = 'kept'
+  let screenNote: string | undefined
+  if (translation.needs.screen && deps.shareScreen) {
+    const want = roomScreenWant(target.sources)
+    const before = deps.room()
+    if (want.kind === 'unsupported') {
+      screen = 'unsupported'
+      screenNote = want.reason
+    } else if (
+      want.kind === 'source' &&
+      roomScreenNeedsSwitch(want, before?.screenSourceId ?? null)
+    ) {
+      if (!before?.identity) return { ok: false, message: 'The room is not connected.' }
+      try {
+        await deps.shareScreen(want)
+      } catch (error) {
+        return {
+          ok: false,
+          screen: 'kept',
+          message: `The scene's ${want.sourceKind === 'window' ? 'window' : 'screen'} couldn't be shared in the room: ${error instanceof Error ? error.message : String(error)}`
+        }
+      }
+      if (deps.current && !deps.current())
+        return {
+          ok: false,
+          screen: 'switched',
+          commit: {
+            state: 'superseded',
+            reason: 'A newer change replaced this one.',
+            observed: {}
+          },
+          orientation
+        }
+      screen = 'switched'
+    }
+  }
+  // S14: the background, behind every source. A background that cannot be
+  // prepared is said, never replaced by a guess; the scene still changes.
+  let background: RoomSceneResult['background'] = 'none'
+  let backgroundNote: string | undefined
+  let assets: PreparedBackgroundAsset[] = []
+  let scene = translation.scene
+  if (target.background && deps.background) {
+    try {
+      const prepared = await deps.background(target.background)
+      scene = { ...scene, background: prepared.background }
+      assets = prepared.asset ? [prepared.asset] : []
+      background = 'sent'
+    } catch (error) {
+      background = 'failed'
+      backgroundNote = `The background couldn't be sent to the room: ${error instanceof Error ? error.message : String(error)}`
+    }
+  }
   // Atomic: the sources the scene shows are in the room before it changes.
   const deadline = Date.now() + (deps.readyWaitMs ?? 2000)
   let room = deps.room()
@@ -157,15 +244,26 @@ export async function applySceneToRoom(
       commit: { state: 'superseded', reason: 'A newer change replaced this one.', observed: {} },
       orientation
     }
-  const commit = await room.commitScene({
-    h: orientation === 'h' ? translation.scene : null,
-    v: orientation === 'v' ? translation.scene : null,
-    transition: deps.animate
-      ? { kind: 'motion', durationMs: SCENE_MOTION_MS }
-      : { kind: 'cut', durationMs: 0 }
-  })
+  const commit = await room.commitScene(
+    {
+      h: orientation === 'h' ? scene : null,
+      v: orientation === 'v' ? scene : null,
+      transition: deps.animate
+        ? { kind: 'motion', durationMs: SCENE_MOTION_MS }
+        : { kind: 'cut', durationMs: 0 }
+    },
+    assets
+  )
   const ok = commit.state === 'applied' || commit.state === 'preview'
-  return { ok, message: roomSceneMessage(commit), commit, orientation }
+  const message = [roomSceneMessage(commit), backgroundNote, screenNote].filter(Boolean).join(' ')
+  return {
+    ok,
+    ...(message ? { message } : {}),
+    commit,
+    orientation,
+    screen,
+    background
+  }
 }
 
 /** A Show stage layout replaces the scene: the room's own layouts return. */

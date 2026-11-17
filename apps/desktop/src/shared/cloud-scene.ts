@@ -19,7 +19,12 @@
  * Extends S3's consumer capability as an optional `scene` field; it is not a
  * second negotiation. Applied revisions are per egress lane and are page
  * render observations, never encoded-output proof.
+ *
+ * Plan 249 S14: a scene may carry its native background (`cloud-background.ts`).
+ * Older pages ignore the field; a page that draws it says so in
+ * `SceneCapability.background`.
  */
+
 export const SCENE_TOPIC = 'videorc.presentation.scene.v1'
 export const SCENE_MAX_BYTES = 16 * 1024
 export const SCENE_LEASE_MS = 30_000
@@ -68,6 +73,8 @@ export type CloudScene = {
   id: string
   items: SceneItem[]
   guests: SceneGuests
+  /** S14: drawn behind every item; absent = the page's plain ground. */
+  background?: SceneBackground
 }
 export type SceneTransition = {
   kind: 'cut' | 'motion'
@@ -81,6 +88,8 @@ export type SceneCapability = {
   output: SceneOutput
   orientation: SceneOrientation
   applied?: SceneApplied
+  /** S14: the page draws scene backgrounds, and what it drew last. */
+  background?: BackgroundCapability
 }
 export type SceneSnapshot = {
   version: 1
@@ -106,6 +115,188 @@ const sid = (v: unknown): v is string => typeof v === 'string' && /^PA_[A-Za-z0-
 const positive = (v: unknown): v is number =>
   typeof v === 'number' && Number.isSafeInteger(v) && v > 0
 const finite = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v)
+
+/**
+ * Plan 249 S14: the scene background (see `cloud-background.ts` for the
+ * asset transport, clock and native rules). Here so that this module keeps
+ * no relative imports: Node's type stripping loads it as is.
+ */
+/** Longest side of a sent picture; zoom crops up to 2x, so above the canvas. */
+export const BACKGROUND_ASSET_MAX_SIDE = 2560
+export const BACKGROUND_DIM_MAX = 0.8
+/** The ten live backgrounds (`looks::ALL_LIVE_BACKGROUNDS`, wire ids). */
+export const LIVE_BACKGROUND_IDS = [
+  'silk',
+  'side-rays',
+  'plasma-wave',
+  'liquid-chrome',
+  'line-waves',
+  'beams',
+  'color-bends',
+  'dither',
+  'ferrofluid',
+  'ghost-fibers'
+] as const
+
+export type LiveBackgroundWireId = (typeof LIVE_BACKGROUND_IDS)[number]
+export type BackgroundMime = 'image/webp' | 'image/jpeg' | 'image/png'
+export type BackgroundCrop = { l: number; t: number; r: number; b: number }
+export type PictureBackground = {
+  kind: 'picture'
+  /** SHA-256 of the encoded bytes, 64 lowercase hex. */
+  hash: string
+  mime: BackgroundMime
+  width: number
+  height: number
+  fit: 'contain' | 'cover'
+  crop: BackgroundCrop
+}
+export type LiveBackground = {
+  kind: 'live'
+  id: LiveBackgroundWireId
+  look: string
+  /** Shader Dim, 0..0.8. */
+  dim: number
+  /**
+   * The shared phase clock: phase = anchorPhase + rate * seconds since
+   * anchorAt (wall ms). `rate` already includes the motion factor (Calm =
+   * half). One anchor for every lane, so H/V and stream/recording agree.
+   */
+  clock: { anchorAt: number; anchorPhase: number; rate: number }
+}
+export type SceneBackground = PictureBackground | LiveBackground
+
+/** How a page drew the background it was given. */
+export type BackgroundRendering = 'picture' | 'shader' | 'half' | 'still' | 'none'
+export type BackgroundStillReason =
+  | 'no-webgl2'
+  | 'shader-compile-failed'
+  | 'context-lost'
+  | 'gpu-budget'
+  | 'unknown-look'
+  | 'asset-missing'
+  | 'asset-invalid'
+export const BACKGROUND_STILL_REASONS: readonly BackgroundStillReason[] = [
+  'no-webgl2',
+  'shader-compile-failed',
+  'context-lost',
+  'gpu-budget',
+  'unknown-look',
+  'asset-missing',
+  'asset-invalid'
+]
+export type BackgroundDrawn = {
+  /** `backgroundKey` of what was drawn ('none' for no background). */
+  key: string
+  rendering: BackgroundRendering
+  reason?: BackgroundStillReason
+}
+/** `SceneCapability.background`: the page draws scene backgrounds. */
+export type BackgroundCapability = {
+  version: 1
+  /** The page carries the live shader runner (it may still fail: see `drawn`). */
+  live: 0 | 1
+  drawn?: BackgroundDrawn
+}
+
+const dimension = (v: unknown): v is number =>
+  typeof v === 'number' && Number.isSafeInteger(v) && v >= 1 && v <= BACKGROUND_ASSET_MAX_SIDE
+
+export const isBackgroundHash = (v: unknown): v is string =>
+  typeof v === 'string' && /^[0-9a-f]{64}$/.test(v)
+export const isBackgroundMime = (v: unknown): v is BackgroundMime =>
+  v === 'image/webp' || v === 'image/jpeg' || v === 'image/png'
+export const isLiveBackgroundId = (v: unknown): v is LiveBackgroundWireId =>
+  typeof v === 'string' && (LIVE_BACKGROUND_IDS as readonly string[]).includes(v)
+
+function backgroundCrop(value: unknown): BackgroundCrop | null {
+  if (!object(value)) return null
+  const { l, t, r, b } = value
+  if (![l, t, r, b].every((n) => finite(n) && n >= 0 && n <= 0.95)) return null
+  if (Number(l) + Number(r) >= 0.96 || Number(t) + Number(b) >= 0.96) return null
+  return { l: l as number, t: t as number, r: r as number, b: b as number }
+}
+
+/** A scene's background, or null when it is not one this contract knows. */
+export function parseSceneBackground(value: unknown): SceneBackground | null {
+  if (!object(value)) return null
+  if (value.kind === 'picture') {
+    const c = backgroundCrop(value.crop)
+    if (
+      !isBackgroundHash(value.hash) ||
+      !isBackgroundMime(value.mime) ||
+      !dimension(value.width) ||
+      !dimension(value.height) ||
+      (value.fit !== 'contain' && value.fit !== 'cover') ||
+      !c
+    )
+      return null
+    return {
+      kind: 'picture',
+      hash: value.hash,
+      mime: value.mime,
+      width: value.width,
+      height: value.height,
+      fit: value.fit,
+      crop: c
+    }
+  }
+  if (value.kind === 'live') {
+    const clock = value.clock
+    if (
+      !isLiveBackgroundId(value.id) ||
+      typeof value.look !== 'string' ||
+      !/^[a-z0-9-]{1,32}$/.test(value.look) ||
+      !finite(value.dim) ||
+      value.dim < 0 ||
+      value.dim > BACKGROUND_DIM_MAX ||
+      !object(clock) ||
+      !Number.isSafeInteger(clock.anchorAt) ||
+      Number(clock.anchorAt) <= 0 ||
+      !finite(clock.anchorPhase) ||
+      Math.abs(clock.anchorPhase) > 1e7 ||
+      !finite(clock.rate) ||
+      clock.rate < 0 ||
+      clock.rate > 100
+    )
+      return null
+    return {
+      kind: 'live',
+      id: value.id,
+      look: value.look,
+      dim: value.dim,
+      clock: {
+        anchorAt: clock.anchorAt as number,
+        anchorPhase: clock.anchorPhase,
+        rate: clock.rate
+      }
+    }
+  }
+  return null
+}
+
+export function parseBackgroundCapability(value: unknown): BackgroundCapability | null {
+  if (!object(value) || value.version !== 1 || (value.live !== 0 && value.live !== 1)) return null
+  let drawn: BackgroundDrawn | undefined
+  if (value.drawn !== undefined) {
+    const d = value.drawn
+    if (
+      !object(d) ||
+      typeof d.key !== 'string' ||
+      !/^(none|[0-9a-f]{8})$/.test(d.key) ||
+      !['picture', 'shader', 'half', 'still', 'none'].includes(d.rendering as string) ||
+      (d.reason !== undefined &&
+        !BACKGROUND_STILL_REASONS.includes(d.reason as BackgroundStillReason))
+    )
+      return null
+    drawn = {
+      key: d.key,
+      rendering: d.rendering as BackgroundRendering,
+      ...(d.reason !== undefined ? { reason: d.reason as BackgroundStillReason } : {})
+    }
+  }
+  return { version: 1, live: value.live, ...(drawn ? { drawn } : {}) }
+}
 
 /** Mirrors Rust `scene_geometry` bounds (plan 215 E3): position -3..4, size up to 4. */
 export function sceneRect(value: unknown): value is SceneRect {
@@ -183,6 +374,12 @@ export function parseCloudScene(value: unknown): CloudScene | null {
     return null
   const guests = parseSceneGuests(value.guests)
   if (!guests) return null
+  let background: SceneBackground | undefined
+  if (value.background !== undefined) {
+    const parsed = parseSceneBackground(value.background)
+    if (!parsed) return null
+    background = parsed
+  }
   const items: SceneItem[] = []
   for (const item of value.items) {
     if (
@@ -212,7 +409,7 @@ export function parseCloudScene(value: unknown): CloudScene | null {
       z: item.z as number
     })
   }
-  return { id: value.id, items, guests }
+  return { id: value.id, items, guests, ...(background ? { background } : {}) }
 }
 export function parseSceneCapability(value: unknown): SceneCapability | null {
   if (
@@ -232,11 +429,18 @@ export function parseSceneCapability(value: unknown): SceneCapability | null {
       return null
     applied = { publisherSid: value.applied.publisherSid, revision: value.applied.revision }
   }
+  let background: BackgroundCapability | undefined
+  if (value.background !== undefined) {
+    const parsed = parseBackgroundCapability(value.background)
+    if (!parsed) return null
+    background = parsed
+  }
   return {
     version: 1,
     output: value.output,
     orientation: value.orientation,
-    ...(applied ? { applied } : {})
+    ...(applied ? { applied } : {}),
+    ...(background ? { background } : {})
   }
 }
 export function parseSceneSnapshot(
@@ -308,9 +512,16 @@ export function sceneKey(text: string): string {
   return hash.toString(16).padStart(8, '0')
 }
 /** The content of a scene, without its id: equal content is one picture. */
-export function sceneContentKey(scene: Pick<CloudScene, 'items' | 'guests'> | null): string {
+export function sceneContentKey(
+  scene: Pick<CloudScene, 'items' | 'guests' | 'background'> | null
+): string {
   if (!scene) return 'none'
-  return sceneKey(JSON.stringify([scene.items, scene.guests]))
+  // A scene without a background keeps its S12 key.
+  return sceneKey(
+    JSON.stringify(
+      scene.background ? [scene.items, scene.guests, scene.background] : [scene.items, scene.guests]
+    )
+  )
 }
 
 /**

@@ -916,6 +916,60 @@ describe('S2 screen publication boundary', () => {
     await room.disconnect()
     expect(raw.stop).toHaveBeenCalled()
   })
+  it('S14: a scene switch captures the new source first and keeps Hide across the swap', async () => {
+    const { raw, adapter } = fixture()
+    const next = { stop: vi.fn(), addEventListener: vi.fn() } as unknown as MediaStreamTrack
+    const captures = [raw, next]
+    vi.stubGlobal('navigator', {
+      mediaDevices: {
+        getDisplayMedia: async () => {
+          const track = captures.shift()!
+          return { getVideoTracks: () => [track], getTracks: () => [track] }
+        }
+      }
+    })
+    const { room } = client(undefined, undefined, { cameraName: null, microphoneName: null })
+    await room.connect()
+    await room.startScreenShare('screen:1:0')
+    expect(room.screenSourceId).toBe('screen:1:0')
+    expect(room.snapshot.local.screenSourceId).toBe('screen:1:0')
+    privacyModule.roomScreenPrivacy.hide()
+    await room.replaceScreenSource('window:42:0')
+    expect(raw.stop).toHaveBeenCalled()
+    expect(room.screenSourceId).toBe('window:42:0')
+    expect(adapter).toHaveBeenLastCalledWith(
+      next,
+      privacyModule.roomScreenPrivacy,
+      expect.any(Function)
+    )
+    expect(room.snapshot.screenPrivacy?.hidden).toBe(true)
+    // Asking for the source already shared captures nothing.
+    await room.replaceScreenSource('window:42:0')
+    expect(captures).toHaveLength(0)
+    await room.disconnect()
+    expect(room.screenSourceId).toBeNull()
+  })
+  it('S14: a source that cannot be captured leaves the current share as it was', async () => {
+    const { raw } = fixture()
+    let refuse = false
+    vi.stubGlobal('navigator', {
+      mediaDevices: {
+        getDisplayMedia: async () => {
+          if (refuse) throw new Error('NotAllowedError')
+          return { getVideoTracks: () => [raw], getTracks: () => [raw] }
+        }
+      }
+    })
+    const { room } = client(undefined, undefined, { cameraName: null, microphoneName: null })
+    await room.connect()
+    await room.startScreenShare('screen:1:0')
+    refuse = true
+    await expect(room.replaceScreenSource('window:42:0')).rejects.toThrow('NotAllowedError')
+    expect(raw.stop).not.toHaveBeenCalled()
+    expect(room.screenSourceId).toBe('screen:1:0')
+    expect(room.snapshot.local.screen).not.toBeNull()
+    await room.disconnect()
+  })
   it('canvas failure stops and unpublishes without publishing raw as a fallback', async () => {
     const { raw, adapter } = fixture()
     adapter.mockImplementation(() => {
