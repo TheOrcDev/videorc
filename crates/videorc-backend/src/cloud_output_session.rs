@@ -348,6 +348,7 @@ mod tests {
             expires_at: None,
             resumable: false,
             kind: Some(kind.to_string()),
+            output_profile: None,
         });
         status.live_interval = interval.map(|(id, live, ended)| CloudLiveInterval {
             id: id.to_string(),

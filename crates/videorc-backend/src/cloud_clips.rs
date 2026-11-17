@@ -562,7 +562,13 @@ fn publish(db: &Database, j: &mut Job, token: &str, stop: &watch::Receiver<bool>
     Ok(())
 }
 
-pub async fn control(token: String, show: String, method: &str, params: &Value) -> Result<Value> {
+pub async fn control(
+    state: &crate::state::AppState,
+    token: String,
+    show: String,
+    method: &str,
+    params: &Value,
+) -> Result<Value> {
     let api = VideorcApiClient::new()?;
     let before = api
         .clips_json(&token, &show, "GET", None, None, None)
@@ -570,16 +576,15 @@ pub async fn control(token: String, show: String, method: &str, params: &Value) 
     if method == "cloud.clips.status" {
         if before.get("enabled").and_then(Value::as_bool) == Some(true)
             && crate::cloud_markers::owns_show(state, &show)
+            && let Some(generation) = before.get("generation").and_then(Value::as_str)
         {
-            if let Some(generation) = before.get("generation").and_then(Value::as_str) {
-                pump(
-                    state.clone(),
-                    api.clone(),
-                    token.clone(),
-                    show.clone(),
-                    generation.into(),
-                );
-            }
+            pump(
+                state.clone(),
+                api.clone(),
+                token.clone(),
+                show.clone(),
+                generation.into(),
+            );
         }
         return Ok(status(&before));
     }
@@ -663,13 +668,12 @@ fn pump(
             if let Err(error) = api
                 .clips_json(&token, &show, "PUT", Some(&generation), None, None)
                 .await
-            {
-                if !matches!(
+                && !matches!(
                     error.to_string().as_str(),
                     "active-segment-egress-required" | "replay-source-not-bound"
-                ) {
-                    break;
-                }
+                )
+            {
+                break;
             }
             tokio::time::sleep(Duration::from_secs(2)).await;
         }
@@ -685,17 +689,16 @@ fn status(value: &Value) -> Value {
 pub async fn maybe_save(state: &crate::state::AppState, mark: &Value) -> Option<Value> {
     let show = mark.get("showId")?.as_str()?;
     let marker = mark.get("id")?.as_str()?;
-    if let Ok(jobs) = state.database.cloud_clips() {
-        if let Some(job) = jobs
+    if let Ok(jobs) = state.database.cloud_clips()
+        && let Some(job) = jobs
             .iter()
             .find(|j| j.plan.show_id == show && j.plan.marker_id == marker)
-        {
-            return if job.state == "cancelled" {
-                None
-            } else {
-                Some(job.view())
-            };
-        }
+    {
+        return if job.state == "cancelled" {
+            None
+        } else {
+            Some(job.view())
+        };
     }
     let token = crate::account::stored_session_token()?;
     let api = VideorcApiClient::new().ok()?;
@@ -726,6 +729,19 @@ pub async fn maybe_save(state: &crate::state::AppState, mark: &Value) -> Option<
     )
     .await
     .ok()
+}
+
+pub fn output_folder(db: &Database, show: &str, configured: Option<&str>) -> Result<PathBuf> {
+    if configured.is_some() {
+        return crate::recording::resolve_output_directory(configured);
+    }
+    let saved = db.load_setting::<Value>("cloud.clips.output")?;
+    let selected = saved
+        .as_ref()
+        .filter(|v| v.get("showId").and_then(Value::as_str) == Some(show))
+        .and_then(|v| v.get("path"))
+        .and_then(Value::as_str);
+    crate::recording::resolve_output_directory(selected)
 }
 
 #[cfg(test)]
@@ -816,17 +832,4 @@ mod tests {
         assert!(jobs[0].local_session_id.is_none());
         assert_eq!(jobs[0].plan.take_id, "tk_fixture");
     }
-}
-
-pub fn output_folder(db: &Database, show: &str, configured: Option<&str>) -> Result<PathBuf> {
-    if configured.is_some() {
-        return crate::recording::resolve_output_directory(configured);
-    }
-    let saved = db.load_setting::<Value>("cloud.clips.output")?;
-    let selected = saved
-        .as_ref()
-        .filter(|v| v.get("showId").and_then(Value::as_str) == Some(show))
-        .and_then(|v| v.get("path"))
-        .and_then(Value::as_str);
-    crate::recording::resolve_output_directory(selected)
 }
