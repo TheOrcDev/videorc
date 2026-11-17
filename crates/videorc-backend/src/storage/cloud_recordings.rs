@@ -71,10 +71,9 @@ impl Database {
         let pending: Vec<String> = {
             let conn = self.lock()?;
             let mut query = conn.prepare("SELECT metadata_json FROM cloud_recording_library WHERE staging_path IS NOT NULL LIMIT 128")?;
-            let rows = query
+            query
                 .query_map([], |r| r.get(0))?
-                .collect::<rusqlite::Result<_>>()?;
-            rows
+                .collect::<rusqlite::Result<_>>()?
         };
         for metadata in pending {
             let item: CloudRecordingItem = serde_json::from_str(&metadata)?;

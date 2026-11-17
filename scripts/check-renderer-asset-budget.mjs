@@ -151,9 +151,15 @@ const htmlPath = resolve(
 // lazily; what stays eager is the provider wiring (pending state, the import
 // callbacks). Raise raw to 2,367,000; gzip and the entry ceilings hold. Keep
 // new surfaces lazy.
+// 2026-11-17 (owner-approved: "Raise to fit"): the Plan 249 merge batch
+// (desktop #1448-#1456, fixed by #1457) measures 2,404,872 raw / 494,943
+// gzip. Main was already 2,389,552 / 491,658 before it; the batch's eager
+// bytes are slice wiring (S12 +2,661 gzip, S15 +308, S7b +124, S9 +186).
+// Raise raw to 2,405,000 and gzip to 495,000; the entry ceilings hold. Keep
+// new surfaces lazy.
 const budget = {
-  maxTotalRawBytes: Number(process.env.VIDEORC_RENDERER_MAX_EAGER_RAW_BYTES ?? 2_367_000),
-  maxTotalGzipBytes: Number(process.env.VIDEORC_RENDERER_MAX_EAGER_GZIP_BYTES ?? 487_000),
+  maxTotalRawBytes: Number(process.env.VIDEORC_RENDERER_MAX_EAGER_RAW_BYTES ?? 2_405_000),
+  maxTotalGzipBytes: Number(process.env.VIDEORC_RENDERER_MAX_EAGER_GZIP_BYTES ?? 495_000),
   maxEntryRawBytes: Number(process.env.VIDEORC_RENDERER_MAX_ENTRY_RAW_BYTES ?? 1_200_000),
   maxEntryGzipBytes: Number(process.env.VIDEORC_RENDERER_MAX_ENTRY_GZIP_BYTES ?? 235_000)
 }

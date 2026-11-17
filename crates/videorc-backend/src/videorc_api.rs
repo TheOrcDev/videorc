@@ -3789,6 +3789,7 @@ impl crate::cloud_show::CloudWebApi for VideorcApiClient {
                 Err(crate::cloud_show::CloudApiError::Other {
                     status: 409,
                     code: "cloud-show-ending".to_string(),
+                    message: String::new(),
                 })
             } else {
                 Ok(())

@@ -15870,6 +15870,7 @@ mod tests {
                     cancelled: cancelled.clone(),
                     progress: Arc::new(|_, _| {}),
                 },
+                crate::storage::Database::open_in_memory_for_tests(),
             )
         };
         let error = download("rec_node", Some("bearer")).await.unwrap_err();

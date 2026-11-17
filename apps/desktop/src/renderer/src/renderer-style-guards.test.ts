@@ -44,6 +44,8 @@ const COLOUR_LITERAL_ALLOWLIST = new Set([
   'src/lib/chroma-key-reference.ts',
   'src/lib/talk-show-camera-effects.ts',
   'src/components/tabs/layout-tab.tsx',
+  // The privacy frost drawn over a shared screen is published video, not chrome.
+  'src/lib/room-screen-privacy.ts',
   // Plan 249 S10: the packed-alpha spike draws synthetic test video, not chrome.
   'src/lib/cloud-alpha-fixture.ts',
   'src/lib/room-alpha-experiment.ts',
