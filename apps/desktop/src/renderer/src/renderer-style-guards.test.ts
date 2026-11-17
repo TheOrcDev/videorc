@@ -44,6 +44,9 @@ const COLOUR_LITERAL_ALLOWLIST = new Set([
   'src/lib/chroma-key-reference.ts',
   'src/lib/talk-show-camera-effects.ts',
   'src/components/tabs/layout-tab.tsx',
+  // Plan 249 S10: the packed-alpha spike draws synthetic test video, not chrome.
+  'src/lib/cloud-alpha-fixture.ts',
+  'src/lib/room-alpha-experiment.ts',
   // A QR code must stay black on white for scanners.
   'src/components/phone-remote-section.tsx',
   'src/components/streaming/watchdog-section.tsx',
