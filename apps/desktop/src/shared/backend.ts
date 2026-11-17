@@ -1,3 +1,4 @@
+import type { RoomMicrophoneApi } from './room-microphone'
 import type { RoomPcmCommand, RoomPcmFrame, RoomPcmResources } from './room-pcm'
 import type { ChatDelivery, ChatDeliveryBoundary } from './chat-delivery'
 import type { LiveDashboardState } from './live-dashboard'
@@ -6424,6 +6425,8 @@ export type AppExitKind = 'quit' | 'close'
 
 export interface VideorcApi {
   getRoomPcmTestResources: () => Promise<RoomPcmResources>
+  getRoomNativeMicrophoneResources: () => Promise<RoomPcmResources>
+  roomMicrophonePcm: RoomMicrophoneApi
   roomPcmTest: (command: RoomPcmCommand) => Promise<RoomPcmFrame | null>
   /**
    * What this window sits on (plan 208): the solid base (the default) or the

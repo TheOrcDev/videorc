@@ -1,3 +1,6 @@
+import { roomNativeMicrophoneEnabled } from '@/lib/room-microphone-state'
+import { closeVisualMicrophoneStreams } from '@/lib/mic-visual-ownership'
+import type { RoomMicrophoneChoice } from '@/lib/room-microphone-source'
 import { roomPcmTestEnabled } from '../lib/room-pcm-test-state'
 import type { CohostPersona, BuddyOverlaySnapshot, OverlayItemLayout } from '@/lib/backend'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
@@ -52,6 +55,11 @@ export type TalkShowRoomControllerDeps = {
   stopOutput?: (output: 'recording' | 'live') => Promise<boolean>
   controlsRef?: { current: TalkShowRoomClient | null }
   onMediaSnapshot?: (snapshot: TalkShowRoomSnapshot) => void
+  microphoneAudio?: {
+    microphoneGainDb: number
+    microphoneNoiseSuppression?: 'off' | 'rnnoise'
+    microphoneSyncOffsetMs: number
+  }
   microphoneMuted?: boolean
   cameraOff?: boolean
   avatar?: {
@@ -169,6 +177,32 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
       null,
     [devices, microphoneId]
   )
+  const microphoneChoice = useMemo<RoomMicrophoneChoice>(
+    () => ({
+      mode:
+        import.meta.env.DEV &&
+        (roomNativeMicrophoneEnabled() ||
+          new URLSearchParams(globalThis.location?.search ?? '').get('roomNativeMic') === '1')
+          ? 'native-headphones'
+          : 'browser-aec',
+      deviceId: microphoneId,
+      name: microphoneName,
+      gainDb: deps.microphoneAudio?.microphoneGainDb ?? 0,
+      muted: deps.microphoneMuted === true,
+      noise: deps.microphoneAudio?.microphoneNoiseSuppression ?? 'off',
+      offsetMs: deps.microphoneAudio?.microphoneSyncOffsetMs ?? 0
+    }),
+    [microphoneId, microphoneName, deps.microphoneAudio, deps.microphoneMuted]
+  )
+  const microphoneChoiceRef = useRef(microphoneChoice)
+  microphoneChoiceRef.current = microphoneChoice
+  useEffect(() => {
+    const owner = clientRef.current
+    if (!owner || snapshot.state !== 'connected' || roomPcmTestEnabled()) return
+    void owner
+      .updateMicrophone(microphoneChoice)
+      .catch((error) => onError(error, 'update the room microphone'))
+  }, [microphoneChoice, snapshot.state, onError])
   const cameraNameRef = useRef(cameraName)
   const microphoneNameRef = useRef(microphoneName)
   cameraNameRef.current = cameraName
@@ -223,6 +257,9 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
         )
         await grant
         if (cancelled) return
+        closeVisualMicrophoneStreams()
+        await client.request('audio.mic.disarm')
+        if (cancelled) return
         const { TalkShowRoomClient } = await loadRoomClient()
         if (cancelled) return
         const host = document.createElement('div')
@@ -252,6 +289,7 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
           initiallyCameraOff: mediaDepsRef.current.cameraOff,
           cameraSettings: () => cameraSettingsRef.current,
           microphoneName: microphoneNameRef.current,
+          microphoneChoice: microphoneChoiceRef.current,
           audioHost: () => host,
           onAir: () => onAirRef.current
         })

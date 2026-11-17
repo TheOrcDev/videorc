@@ -80,6 +80,7 @@ mod output_session;
 mod preview_debug_sample;
 mod provider_output;
 mod room_audio_bridge;
+mod room_microphone;
 // Plan 168 Phase F: the pet builder (S-F1 to S-F3) and the creator's RPCs (S-F4).
 mod buddy_pet_build;
 mod buddy_pet_create;
@@ -8515,6 +8516,86 @@ struct PreviewFrameReleaseParams {
 // These controls are connection-owned, like the event filter. Never dispatch
 // them as detached work: disconnect must release the retained surface even if
 // the client disappears after acquiring it and before sending its release.
+async fn handle_room_microphone_control(
+    state: &AppState,
+    role: BackendRole,
+    bridge: &mut room_microphone::Bridge,
+    text: &str,
+) -> Option<ServerResponse> {
+    #[derive(Deserialize)]
+    struct Envelope<'a> {
+        id: &'a str,
+        method: &'a str,
+    }
+    if !text.contains("room.microphone.") {
+        return None;
+    }
+    let envelope = serde_json::from_str::<Envelope<'_>>(text).ok()?;
+    if !matches!(
+        envelope.method,
+        "room.microphone.pcm" | "room.microphone.inspect"
+    ) {
+        return None;
+    }
+    if role != BackendRole::Admin
+        || !cfg!(debug_assertions)
+        || !state.smoke_rpc_enabled
+        || std::env::var("VIDEORC_ROOM_NATIVE_MIC").as_deref() != Ok("1")
+    {
+        return Some(ServerResponse::error(
+            envelope.id,
+            "microphone-disabled",
+            "Native room microphone is disabled and unqualified.",
+        ));
+    }
+    if text.len() > 2048 {
+        return Some(ServerResponse::error(
+            envelope.id,
+            "invalid-params",
+            "Microphone command exceeds bound.",
+        ));
+    }
+    let command = serde_json::from_str::<ClientCommand>(text).ok()?;
+    if command.method == "room.microphone.inspect" {
+        let wait_for_close = command.params == serde_json::json!({ "waitForClose": true });
+        if !rpc_params_are_empty(&command.params) && !wait_for_close {
+            return Some(ServerResponse::error(
+                command.id,
+                "invalid-params",
+                "Invalid microphone inspection parameters",
+            ));
+        }
+        // Main uses this only after a failed source RPC closed the owner socket.
+        // Wait for actual producer completion, never acknowledge a transient
+        // nonzero owner as closed or permanently fail a normal EOF teardown.
+        if wait_for_close
+            && !tokio::task::spawn_blocking(session_audio::room_microphone_cleanup_ready)
+                .await
+                .unwrap_or(false)
+        {
+            return Some(ServerResponse::error(
+                command.id,
+                "microphone-cleanup-pending",
+                "Microphone owner has not released capture",
+            ));
+        }
+        return Some(ServerResponse::ok(
+            command.id,
+            serde_json::json!({ "nativeSources": session_audio::room_microphone_producers() }),
+        ));
+    }
+    let result = match serde_json::from_value::<room_microphone::Command>(command.params) {
+        Ok(params) => bridge.command(state, params).await,
+        Err(_) => Err(anyhow::anyhow!("Invalid microphone command")),
+    };
+    Some(match result {
+        Ok(frame) => {
+            ServerResponse::ok(command.id, serde_json::to_value(frame).unwrap_or_default())
+        }
+        Err(error) => ServerResponse::error(command.id, "microphone-refused", &error.to_string()),
+    })
+}
+
 fn handle_room_pcm_control(
     role: BackendRole,
     enabled: bool,
@@ -8823,6 +8904,7 @@ async fn websocket_session_with_handler_role_and_redaction(
     };
     let mut preview_frame_lease = None;
     let mut room_audio_bridge = room_audio_bridge::Bridge::default();
+    let mut room_microphone = room_microphone::Bridge::default();
 
     loop {
         let incoming = tokio::select! {
@@ -8921,6 +9003,27 @@ async fn websocket_session_with_handler_role_and_redaction(
                     &mut studio_socket_guard,
                     text.as_str(),
                 ) {
+                    if !queue_websocket_response(
+                        &outgoing_tx,
+                        &reliable_metrics,
+                        &slow_pressure,
+                        response,
+                    )
+                    .await
+                    {
+                        break;
+                    }
+                    continue;
+                }
+
+                if let Some(response) = handle_room_microphone_control(
+                    &state,
+                    role,
+                    &mut room_microphone,
+                    text.as_str(),
+                )
+                .await
+                {
                     if !queue_websocket_response(
                         &outgoing_tx,
                         &reliable_metrics,
@@ -12591,7 +12694,22 @@ async fn handle_text_message_with_role(
             }
         }
         "audio.mic.disarm" => {
-            ServerResponse::ok(command.id, warm_microphone::disarm_warm_microphone(state))
+            let status = warm_microphone::disarm_warm_microphone(state);
+            if cloud_talk_show_room_show_id(state).is_some() {
+                let settled = state.warm_microphone.wait_for_open().await;
+                let released =
+                    tokio::task::spawn_blocking(session_audio::room_microphone_cleanup_ready)
+                        .await
+                        .unwrap_or(false);
+                if !settled || !released {
+                    return ServerResponse::error(
+                        command.id,
+                        "microphone-cleanup-pending",
+                        "The previous microphone owner has not released capture.",
+                    );
+                }
+            }
+            ServerResponse::ok(command.id, status)
         }
         "audio.meter.probeNative" => {
             match serde_json::from_value::<protocol::AudioMeterProbeParams>(command.params) {

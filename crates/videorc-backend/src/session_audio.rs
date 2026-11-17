@@ -5,6 +5,8 @@ use std::collections::VecDeque;
 
 use crate::audio::{AudioFrame, NATIVE_AUDIO_CHANNELS, NATIVE_AUDIO_SAMPLE_RATE};
 
+pub(crate) mod room_tap;
+
 pub const CHUNK_FRAMES: usize = 480;
 /// How far ahead of the cursor captured audio may wait, sized in TIME rather
 /// than packets so a 128-frame CoreAudio callback (Shure MV7+) gets the same
@@ -423,6 +425,16 @@ static OWNED_WRITERS: AtomicU64 = AtomicU64::new(0);
 pub fn cleanup_pending(standby_owners: u64) -> bool {
     OWNED_WRITERS.load(Ordering::Acquire) != 0
         || OWNED_PRODUCERS.load(Ordering::Acquire) > standby_owners
+}
+
+/// Capture-only room admission waits for actual owned producers to exit.
+pub(crate) fn room_microphone_producers() -> u64 {
+    OWNED_PRODUCERS.load(Ordering::Acquire)
+}
+
+pub(crate) fn room_microphone_cleanup_ready() -> bool {
+    wait_for_producer_cleanup(&OWNED_PRODUCERS, Instant::now() + Duration::from_secs(5))
+        && OWNED_WRITERS.load(Ordering::Acquire) == 0
 }
 
 const PRODUCER_LIMIT: u64 = 2;

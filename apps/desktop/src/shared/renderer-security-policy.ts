@@ -18,6 +18,8 @@ export const IPC_INVOKE_ROLES = {
   'backend:get-connection': MAIN_ONLY,
   'backend:get-logs': MAIN_ONLY,
   'room-pcm:test': MAIN_ONLY,
+  'room-microphone:pcm': MAIN_ONLY,
+  'room-microphone:inspect': MAIN_ONLY,
   'room-pcm:inspect': MAIN_ONLY,
   'account:begin-sign-in': MAIN_ONLY,
   'account:refresh': MAIN_ONLY,
