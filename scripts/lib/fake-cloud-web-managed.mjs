@@ -148,6 +148,7 @@ export async function startFakeCloudWebManaged({
     closed = false,
     httpsOrigin,
     archiveHandler = null,
+    isoHandler = null,
     recordingRowDelayMs = 0
   const controllers = new Set()
   const allowance = cloudAllowanceBlock({ nowMs: Date.now() })
@@ -445,6 +446,12 @@ export async function startFakeCloudWebManaged({
       if (route === 'segment') return send(200, segmentBytes, 'video/mp2t')
       if (req.headers.authorization !== `Bearer ${sessionToken}`)
         return fail(wire.errors.common.find((e) => e.status === 401).code)
+      // Plan 249 S22 maintained loopback acquisition only; never installed in
+      // production. The handler judges the raw body itself (the real route does).
+      if (isoHandler && /^\/api\/cloud\/shows\/[^/]+\/iso(\/file)?$/.test(path)) {
+        const answer = await isoHandler({ method: req.method, url, raw })
+        return send(answer.status ?? 200, answer.body, answer.contentType)
+      }
       if (invalidJson || !body || Array.isArray(body) || typeof body !== 'object')
         return fail(wire.errors.common.find((e) => e.status === 400).code)
       // S21c maintained loopback acquisition only; never installed in production.
@@ -1387,6 +1394,10 @@ export async function startFakeCloudWebManaged({
     },
     archive(handler) {
       archiveHandler = handler
+    },
+    /** Plan 249 S22: `/api/cloud/shows/:id/iso` and `/api/cloud/shows/:id/iso/file`, or null. */
+    iso(handler) {
+      isoHandler = handler
     },
     addRecording(fields = {}) {
       const id = `rec_${randomBytes(12).toString('hex')}`

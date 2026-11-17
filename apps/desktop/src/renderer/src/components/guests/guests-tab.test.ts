@@ -33,7 +33,9 @@ const studio = vi.hoisted(() => ({
 
 vi.mock('@/hooks/use-studio', () => ({
   useStudioCloud: () => studio.cloud,
-  useStudioCore: () => studio.core
+  useStudioCore: () => studio.core,
+  // Plan 249 S22: the Separate files section asks the backend through it.
+  useStudioDiagnostics: () => ({ client: null })
 }))
 
 function talkShow(overrides: Partial<TalkShowContextValue> = {}): TalkShowContextValue {

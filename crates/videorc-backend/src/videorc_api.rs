@@ -2186,7 +2186,7 @@ impl VideorcApiClient {
 
     /// One cloud request: the response of a 2xx, or the failure classified
     /// from the `{ error: { code, message } }` envelope, with its body.
-    async fn cloud_send(
+    pub(crate) async fn cloud_send(
         &self,
         request: reqwest::RequestBuilder,
         path: &str,

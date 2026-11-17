@@ -3,6 +3,7 @@ import { useState, type ReactElement } from 'react'
 import { ConfirmDialog } from '@/components/confirm-dialog'
 import { useGuestModeration } from '@/components/guests/guest-moderation'
 import { CloseRoomButton } from '@/components/guests/close-room-button'
+import { CloudIsoSection } from '@/components/guests/cloud-iso-section'
 import { KebabMenu } from '@/components/kebab-menu'
 import { GroupedList, ListRow } from '@/components/list-row'
 import { LockAlert, OfflineAlert, SessionLockAlert } from '@/components/lock-alert'
@@ -175,6 +176,9 @@ export default function GuestsTab(): ReactElement {
           requests={requests}
         />
       </PanelSection>
+
+      {/* Plan 249 S22: opt-in separate files per person and source. */}
+      <CloudIsoSection />
     </PageStack>
   )
 }

@@ -561,6 +561,11 @@ async fn run_backend(device_changes: tokio::sync::watch::Receiver<u64>) -> Resul
     let (events, _) = broadcast::channel(256);
     let database = Database::open_default()?;
     database.recover_scheduled_operations_after_restart()?;
+    // Plan 249 S22: a cloud ISO transfer the previous run left running is
+    // retried, and only staging files its journal created are removed.
+    if let Err(error) = database.recover_cloud_iso_imports() {
+        tracing::warn!("Cloud ISO import recovery deferred: {error:#}");
+    }
     #[cfg(debug_assertions)]
     if scheduled_streams_service::smoke_api_base()?.is_some() {
         database.upsert_platform_account(UpsertPlatformAccount {
@@ -989,6 +994,7 @@ async fn cleanup_process_owners_after_finalization(state: AppState) {
     crate::agent_mcp::shutdown(&state);
     let cloud_downloads = cloud_show::lock(&state.cloud_show).downloads.clone();
     cloud_downloads.shutdown().await;
+    cloud_control_web::shutdown_cloud_iso_imports().await;
     captions::shutdown_caption_runtime(&state).await;
     state.noise_cleanup.interrupt_all_for_shutdown();
     state.clean_cut.interrupt_all_for_shutdown();
@@ -6097,6 +6103,10 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "cloud.archive.start"
         | "cloud.archive.resume"
         | "cloud.recordings.list"
+        // Plan 249 S22: the show's ISO request, through videorc.com.
+        | "cloud.iso.status"
+        | "cloud.iso.enable"
+        | "cloud.iso.disable"
         | "repair.restore_file"
         | "preview.snapshot" => Some(Mutation {
             max_execution_age: WEBSOCKET_PROVIDER_MUTATION_MAX_EXECUTION_AGE,
@@ -6145,7 +6155,9 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "cloud.archive.stop"
         | "cloud.archive.cancel"
         | "cloud.archive.discard"
-        | "cloud.recordings.cancelDownload" => Some(DEFAULT_MUTATION_POLICY),
+        | "cloud.recordings.cancelDownload"
+        | "cloud.iso.import"
+        | "cloud.iso.cancelImport" => Some(DEFAULT_MUTATION_POLICY),
 
         "session.start"
         | "cloud.show.resume"
@@ -6208,6 +6220,7 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "cloud.status"
         | "cloud.archive.status"
         | "cloud.recordings.downloads"
+        | "cloud.iso.imports"
         | "compositor.status"
         | "preview.debug.sample"
         | "preview.camera.status"
@@ -12880,6 +12893,93 @@ async fn handle_text_message_with_role(
                 Err(error) => {
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
+            }
+        }
+        // Plan 249 S22 (docs/cloud/249-s22-contract.md section 5): opt-in
+        // cloud ISO. Every manifest the web answers is validated again in
+        // Rust; an import saves into Output's folder as a cloud recording
+        // download does and registers one Library row per ISO file.
+        "cloud.iso.status" | "cloud.iso.enable" | "cloud.iso.disable" => {
+            let web = cloud_control_web::CloudIsoHttp::configured();
+            let bearer = account::stored_session_token();
+            let result = match command.method.as_str() {
+                "cloud.iso.status" => {
+                    cloud_control_web::cloud_iso_status(&web, bearer, command.params).await
+                }
+                "cloud.iso.enable" => {
+                    cloud_control_web::cloud_iso_enable(&web, bearer, command.params).await
+                }
+                _ => cloud_control_web::cloud_iso_disable(&web, bearer, command.params).await,
+            };
+            match result {
+                Ok(answer) => ServerResponse::ok(command.id, answer),
+                Err(error) => ServerResponse::error(command.id, error.code, error.message),
+            }
+        }
+        "cloud.iso.import" => {
+            // Output's folder arrives as the capability main issued, exactly
+            // as for `cloud.recordings.download`; a raw renderer folder is
+            // refused, the admin role may pass one.
+            let mut params_value = command.params;
+            if let Err(error) = resolve_cloud_download_resource(state, &mut params_value, role) {
+                return ServerResponse::error(
+                    command.id,
+                    "resource-capability-rejected",
+                    error.to_string(),
+                );
+            }
+            let params = match cloud_control_web::iso_params::<cloud_control_web::IsoImportParams>(
+                params_value,
+            ) {
+                Ok(params) => params,
+                Err(error) => {
+                    return ServerResponse::error(command.id, error.code, error.message);
+                }
+            };
+            let folder =
+                match recording::resolve_output_directory(params.output_directory.as_deref()) {
+                    Ok(folder) => folder,
+                    Err(error) => {
+                        return ServerResponse::error(
+                            command.id,
+                            cloud_control_web::CODE_ISO_IMPORT_FAILED,
+                            format!("{error:#}"),
+                        );
+                    }
+                };
+            let event_state = state.clone();
+            let emit: cloud_control_web::IsoImportEventHook = std::sync::Arc::new(move |event| {
+                event_state.emit_event("cloud.iso.import", event);
+            });
+            match cloud_control_web::start_cloud_iso_import(
+                std::sync::Arc::new(cloud_control_web::CloudIsoHttp::configured()),
+                state.database.clone(),
+                account::stored_session_token(),
+                &params,
+                folder,
+                emit,
+            ) {
+                Ok(started) => ServerResponse::ok(command.id, started),
+                Err(error) => ServerResponse::error(command.id, error.code, error.message),
+            }
+        }
+        "cloud.iso.imports" => match state.database.cloud_iso_imports() {
+            Ok(rows) => ServerResponse::ok(command.id, cloud_control_web::iso_import_views(rows)),
+            Err(error) => ServerResponse::error(
+                command.id,
+                cloud_control_web::CODE_ISO_IMPORT_FAILED,
+                format!("{error:#}"),
+            ),
+        },
+        "cloud.iso.cancelImport" => {
+            match cloud_control_web::iso_params::<cloud_control_web::CancelIsoImportParams>(
+                command.params,
+            ) {
+                Ok(params) => {
+                    cloud_control_web::cancel_cloud_iso_import(&params.job_id);
+                    ServerResponse::ok(command.id, serde_json::json!({ "ok": true }))
+                }
+                Err(error) => ServerResponse::error(command.id, error.code, error.message),
             }
         }
         #[cfg(debug_assertions)]
@@ -20381,6 +20481,7 @@ mod tests {
             "recording.status",
             "capture.recovery.status",
             "cloud.recordings.downloads",
+            "cloud.iso.imports",
             CAPTURE_RECOVERY_SMOKE_CAMERA_CADENCE_EVIDENCE_METHOD,
             CAPTURE_RECOVERY_SMOKE_SCREEN_CADENCE_EVIDENCE_METHOD,
         ] {
@@ -20860,6 +20961,9 @@ mod tests {
             "cohost.act",
             "cloud.recordings.download",
             "cloud.recordings.cancelDownload",
+            // Plan 249 S22: an ISO import answers its job id at once.
+            "cloud.iso.import",
+            "cloud.iso.cancelImport",
         ] {
             let command = json!({ "id": method, "method": method, "params": {} }).to_string();
             assert_eq!(

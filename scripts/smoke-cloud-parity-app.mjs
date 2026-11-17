@@ -11,6 +11,26 @@ import {
 const plan = readParityJson('plan')
 validateParityRegistry(plan, readParityJson('inventory'))
 const selected = parseParityArgs(process.argv.slice(2), plan)
+if (selected.case === 'iso') {
+  // Plan 249 S22: real desktop + GuestRoom guests + program page + the real
+  // durable web ISO runtime over local LiveKit; never paid egress.
+  const { isoAcquisitionConfig } = await import('./lib/cloud-parity-iso-contract.mjs')
+  const { acquireIsoEvidence, analyzeIsoEvidenceFile } = await import('./lib/cloud-parity-iso.mjs')
+  const config = isoAcquisitionConfig(process.env)
+  let file = process.env.VIDEORC_ISO_EVIDENCE
+  if (config.mode !== 'analyze')
+    ({ evidenceFile: file } = await acquireIsoEvidence({
+      desktopRoot: fileURLToPath(new URL('../', import.meta.url)),
+      webRoot: process.env.VIDEORC_PARITY_WEB_ROOT,
+      config
+    }))
+  if (config.mode !== 'acquire') {
+    const result = await analyzeIsoEvidenceFile(file, config)
+    console.log(JSON.stringify(result, null, 2))
+    if (result.status !== 'passed') process.exitCode = 1
+  } else console.log(`ISO artifacts acquired (not qualified): ${file}`)
+  process.exit(process.exitCode ?? 0)
+}
 if (selected.case === 'microphone') {
   const { microphoneAcquisitionConfig } = await import('./lib/cloud-parity-microphone-contract.mjs')
   const { acquireMicrophone, analyzeMicrophone } = await import('./lib/cloud-parity-microphone.mjs')

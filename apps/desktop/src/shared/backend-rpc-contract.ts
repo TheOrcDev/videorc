@@ -2,6 +2,11 @@ import { parseGraphicsSource, type GraphicsSource } from './cloud-graphics'
 import type {
   CloudArchiveView,
   CloudArchiveStart,
+  CloudIsoAnswer,
+  CloudIsoEnableParams,
+  CloudIsoImportEvent,
+  CloudIsoImportJournal,
+  CloudIsoImportParams,
   CloudProgram,
   WatchdogAlert,
   WatchdogAlertDevicesView,
@@ -656,6 +661,13 @@ export interface BackendRpcMethodMap {
   'cloud.archive.stop': BackendRpcDefinition<{ id: string }, { ok: true }>
   'cloud.archive.cancel': BackendRpcDefinition<{ id: string }, { ok: true }>
   'cloud.archive.discard': BackendRpcDefinition<{ id: string }, { ok: true }>
+  /** Plan 249 S22: opt-in separate files (ISO) per person and source. */
+  'cloud.iso.status': BackendRpcDefinition<{ showId: string }, CloudIsoAnswer>
+  'cloud.iso.enable': BackendRpcDefinition<CloudIsoEnableParams, CloudIsoAnswer>
+  'cloud.iso.disable': BackendRpcDefinition<{ showId: string }, CloudIsoAnswer>
+  'cloud.iso.import': BackendRpcDefinition<CloudIsoImportParams, { jobId: string }>
+  'cloud.iso.imports': BackendRpcDefinition<Record<string, never>, CloudIsoImportJournal[]>
+  'cloud.iso.cancelImport': BackendRpcDefinition<{ jobId: string }, { ok: true }>
 
   /** Plan 234 T3: a managed recording (segments) as an MP4 on this computer. */
   'cloud.recordings.download': BackendRpcDefinition<
@@ -972,6 +984,8 @@ export interface BackendEventMap {
   /** Plan 234 T3: an overlay for the host's renderer to send to the room. */
   'cloud.room.overlay': CloudRoomOverlayEvent
   'cloud.recordings.download': CloudRecordingDownloadEvent
+  /** Plan 249 S22: one file of a separate-files import job. */
+  'cloud.iso.import': CloudIsoImportEvent
   /** Plan 223: the full alert list on every change. */
   'watchdog.alerts': WatchdogAlertsView
   'cohost.report.saved': CohostReportSavedEvent
@@ -6717,6 +6731,167 @@ const cloudRecordingDownloadEventSchema = objectSchema(
   { allowUnknown: false }
 ) as RuntimeSchema<CloudRecordingDownloadEvent>
 
+// Plan 249 S22: separate files (ISO). docs/cloud/249-s22-contract.md §5. The
+// manifest is bounded JSON here (the backend re-validates it, and the renderer
+// parses it with `parseIsoManifest` where it is read), so the strict parser
+// stays out of the eager bundle. Everything else is closed.
+const cloudIsoShowParamsSchema = objectSchema(
+  { showId: stringSchema({ minLength: 1, maxLength: 64 }) },
+  { allowUnknown: false }
+)
+const cloudIsoAvailabilitySchema = objectSchema(
+  {
+    enabled: booleanSchema,
+    productionQualified: booleanSchema,
+    provider: optionalSchema(
+      objectSchema(
+        {
+          adapter: stringSchema({ maxLength: 128 }),
+          sdkSupport: stringSchema({ maxLength: 128 }),
+          facts: recordSchema(
+            unionSchema([
+              stringSchema({ maxLength: 512 }),
+              numberSchema({ min: 0 }),
+              booleanSchema
+            ]),
+            { maxKeys: 32 }
+          )
+        },
+        { allowUnknown: false }
+      )
+    ),
+    unmet: optionalSchema(recordSchema(stringSchema({ maxLength: 128 }), { maxKeys: 32 }))
+  },
+  { allowUnknown: false }
+)
+const cloudIsoAnswerSchema = objectSchema(
+  {
+    availability: cloudIsoAvailabilitySchema,
+    iso: nullableSchema(
+      objectSchema(
+        {
+          request: nullableSchema(
+            objectSchema(
+              {
+                atMs: positiveSafeInteger,
+                consentVersion: literalSchema('iso-consent-v1'),
+                maxActiveEntries: positiveSafeInteger,
+                maxMinutes: positiveSafeInteger,
+                costCeilingMicros: nonNegativeInteger,
+                retentionDays: positiveSafeInteger
+              },
+              { allowUnknown: false }
+            )
+          ),
+          lastRefusal: nullableSchema(
+            objectSchema(
+              {
+                reason: stringSchema({ minLength: 1, maxLength: 40 }),
+                atMs: positiveSafeInteger,
+                takeId: nullableSchema(stringSchema({ minLength: 1, maxLength: 32 }))
+              },
+              { allowUnknown: false }
+            )
+          ),
+          guestConsent: arraySchema(
+            objectSchema(
+              {
+                identity: stringSchema({ minLength: 1, maxLength: 160 }),
+                atMs: positiveSafeInteger
+              },
+              { allowUnknown: false }
+            ),
+            { maxLength: 16 }
+          ),
+          takes: arraySchema(
+            objectSchema(
+              {
+                manifest: boundedJsonValueSchema({
+                  maxDepth: 8,
+                  maxNodes: 4_000,
+                  maxStringLength: 1_024
+                }),
+                programRecordingId: stringSchema({ minLength: 1, maxLength: 128 })
+              },
+              { allowUnknown: false }
+            ),
+            { maxLength: 8 }
+          )
+        },
+        { allowUnknown: false }
+      )
+    )
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<CloudIsoAnswer>
+const cloudIsoEnableParamsSchema = objectSchema(
+  {
+    showId: stringSchema({ minLength: 1, maxLength: 64 }),
+    consent: literalSchema(true),
+    // The web's ISO_LIMITS: 12 files at once, 180 minutes, a $5 ceiling.
+    maxActiveEntries: numberSchema({ integer: true, min: 1, max: 12 }),
+    maxMinutes: numberSchema({ integer: true, min: 1, max: 180 }),
+    costCeilingMicros: numberSchema({ integer: true, min: 0, max: 5_000_000 })
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<CloudIsoEnableParams>
+const cloudIsoImportParamsSchema = objectSchema(
+  {
+    showId: stringSchema({ minLength: 1, maxLength: 64 }),
+    takeId: stringSchema({ minLength: 1, maxLength: 64 }),
+    outputDirectoryCapability: optionalSchema(boundedString),
+    outputDirectory: optionalSchema(boundedPath),
+    ffmpegPath: optionalSchema(boundedPath)
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<CloudIsoImportParams>
+const cloudIsoImportStateSchema = enumSchema([
+  'pending',
+  'downloading',
+  'complete',
+  'failed',
+  'expired'
+])
+const cloudIsoEntryIdSchema = stringSchema({ minLength: 1, maxLength: 256 })
+const cloudIsoImportJournalSchema = objectSchema(
+  {
+    showId: stringSchema({ minLength: 1, maxLength: 64 }),
+    takeId: stringSchema({ minLength: 1, maxLength: 64 }),
+    programRecordingId: stringSchema({ minLength: 1, maxLength: 128 }),
+    records: arraySchema(
+      objectSchema(
+        {
+          entryId: cloudIsoEntryIdSchema,
+          objectKey: stringSchema({ minLength: 1, maxLength: 512 }),
+          expectedBytes: nullableSchema(nonNegativeInteger),
+          state: cloudIsoImportStateSchema,
+          attempts: nonNegativeInteger,
+          localFileName: stringSchema({ minLength: 1, maxLength: 1_024 }),
+          bytes: nullableSchema(nonNegativeInteger),
+          error: nullableSchema(stringSchema({ maxLength: 4_096 }))
+        },
+        { allowUnknown: false }
+      ),
+      { maxLength: 48 }
+    )
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<CloudIsoImportJournal>
+const cloudIsoImportEventSchema = objectSchema(
+  {
+    jobId: stringSchema({ minLength: 1, maxLength: 128 }),
+    showId: stringSchema({ minLength: 1, maxLength: 64 }),
+    takeId: stringSchema({ minLength: 1, maxLength: 64 }),
+    entryId: nullableSchema(cloudIsoEntryIdSchema),
+    state: cloudIsoImportStateSchema,
+    // A Rust `Option` may arrive as null or be skipped: both are read.
+    bytes: optionalSchema(nullableSchema(nonNegativeInteger)),
+    error: optionalSchema(nullableSchema(stringSchema({ maxLength: 4_096 }))),
+    localSessionId: optionalSchema(nullableSchema(stringSchema({ maxLength: 256 })))
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<CloudIsoImportEvent>
+
 const runtimeContracts = {
   'session.sources.get': {
     params: objectSchema({ sessionId: boundedString }, { allowUnknown: false }),
@@ -7274,6 +7449,27 @@ const runtimeContracts = {
     params: cloudArchiveIdSchema,
     result: objectSchema({ ok: literalSchema(true) }, { allowUnknown: false })
   },
+  'cloud.iso.status': { params: cloudIsoShowParamsSchema, result: cloudIsoAnswerSchema },
+  'cloud.iso.enable': { params: cloudIsoEnableParamsSchema, result: cloudIsoAnswerSchema },
+  'cloud.iso.disable': { params: cloudIsoShowParamsSchema, result: cloudIsoAnswerSchema },
+  'cloud.iso.import': {
+    params: cloudIsoImportParamsSchema,
+    result: objectSchema(
+      { jobId: stringSchema({ minLength: 1, maxLength: 128 }) },
+      { allowUnknown: false }
+    )
+  },
+  'cloud.iso.imports': {
+    params: objectSchema({}, { allowUnknown: false }),
+    result: arraySchema(cloudIsoImportJournalSchema, { maxLength: 64 })
+  },
+  'cloud.iso.cancelImport': {
+    params: objectSchema(
+      { jobId: stringSchema({ minLength: 1, maxLength: 128 }) },
+      { allowUnknown: false }
+    ),
+    result: okTrueSchema
+  },
 
   'cloud.recordings.download': {
     params: cloudRecordingDownloadParamsSchema,
@@ -7756,6 +7952,7 @@ const runtimeEventSchemas = {
   'cloud.room.requests': cloudRoomRequestSchema,
   'cloud.room.overlay': cloudRoomOverlayEventSchema,
   'cloud.recordings.download': cloudRecordingDownloadEventSchema,
+  'cloud.iso.import': cloudIsoImportEventSchema,
   'watchdog.alerts': watchdogAlertsViewSchema,
   'cohost.report.saved': cohostReportSavedEventSchema,
   'cohost.community.changed': communitySummarySchema,
