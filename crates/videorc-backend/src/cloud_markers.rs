@@ -176,10 +176,10 @@ pub async fn create(
         body["sourcePosition"] = serde_json::to_value(p)?;
     }
     let mut mark = request(state, &input.show_id, "POST", None, Some(body)).await?;
-    if input.kind == "clip" {
-        if let Some(job) = crate::cloud_clips::maybe_save(state, &mark).await {
-            mark["clipJob"] = job;
-        }
+    if input.kind == "clip"
+        && let Some(job) = crate::cloud_clips::maybe_save(state, &mark).await
+    {
+        mark["clipJob"] = job;
     }
     state.emit_event("cloud.marker.created", mark.clone());
     Ok(mark)
