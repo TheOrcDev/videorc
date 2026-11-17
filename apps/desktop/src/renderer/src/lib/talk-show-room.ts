@@ -12,6 +12,18 @@ import {
 } from './room-graphics-publisher'
 import { RoomAuxPublisher } from './room-aux-publisher'
 import { createRoomPcmTestSource, type RoomPcmSource } from './room-pcm-source'
+import { createRoomFrameTestSource, type RoomFrameSource } from './room-frame-source'
+import type { EncodeObserver } from './room-frame-encode-observer'
+import { roomFrameEncodeObserverEnabled } from './room-frame-test-state'
+import {
+  CAMERA_FRAME_CONTRACT,
+  ROOM_FRAME,
+  bindCameraFramePublication,
+  cameraFrameTrackName,
+  publishSourceNames,
+  type CameraFrameAuthority,
+  type CameraRoleFrameDescriptor
+} from '../../../shared/room-frame'
 import {
   RoomAvatarPublisher,
   type AvatarContent,
@@ -136,6 +148,11 @@ export type TalkShowLocalMedia = {
   cameraOff: boolean
   /** Why the camera or the mic did not open, one sentence; null when both did. */
   problem: string | null
+  /**
+   * Plan 249 S13a: the camera-frame test publication, bound to the SFU's own
+   * participant/track SIDs from the publish result. Absent otherwise.
+   */
+  cameraFrame?: { authority: CameraFrameAuthority; descriptor: CameraRoleFrameDescriptor }
 }
 
 export type TalkShowMonitor = {
@@ -189,6 +206,10 @@ export type TalkShowRoomDeps = {
   /** S7a explicit dev fixture; not inferred from media-v2 or exposed as production mode. */
   pcmTestSource?: boolean
   onPcmDiagnostic?: (value: unknown) => void
+  /** S13a explicit dev fixture: the native camera-role frame bridge is the ONLY
+   * camera producer; no browser camera, no browser key/effects (no double key). */
+  frameTestSource?: boolean
+  onFrameDiagnostic?: (value: unknown) => void
   requestToken: () => Promise<CloudRoomTokenAnswer>
   /** `cloud.room.client.report`: the backend's status copy. */
   report: (state: CloudRoomClientState, detail?: string) => void
@@ -296,6 +317,16 @@ export class TalkShowRoomClient {
   #pcmSource: RoomPcmSource | null = null
   #pcmAbort: AbortController | null = null
   #pcmRetiring: Promise<unknown> = Promise.resolve()
+  #frameSource: RoomFrameSource | null = null
+  /** S13a harness only: the one encoded-output observer of the bridge camera. */
+  #encodeObserver: EncodeObserver | null = null
+  #frameAbort: AbortController | null = null
+  #frameGeneration = 0
+  #frameRetiring: Promise<unknown> = Promise.resolve()
+  #cameraFrame: { authority: CameraFrameAuthority; descriptor: CameraRoleFrameDescriptor } | null =
+    null
+  /** One camera-frame epoch per room connection: a new room is a new epoch. */
+  #cameraFrameEpochs = new WeakMap<Room, string>()
   #processedMicrophone: RoomMicrophoneSource | null = null
   #microphoneChoice: RoomMicrophoneChoice | undefined
   #microphoneOpening: Promise<void> = Promise.resolve()
@@ -367,7 +398,8 @@ export class TalkShowRoomClient {
     this.#microphoneChoice = deps.microphoneChoice
     this.#cameraName = deps.cameraName
     this.#micMuted = deps.initiallyMuted === true || !deps.microphoneName
-    this.#cameraOff = deps.initiallyCameraOff === true || !deps.cameraName
+    this.#cameraOff =
+      deps.initiallyCameraOff === true || (!deps.cameraName && !deps.frameTestSource)
     this.#audio = new RemoteAudioAttachments<HTMLMediaElement>(() => deps.audioHost())
   }
 
@@ -552,6 +584,13 @@ export class TalkShowRoomClient {
       // Release capture, not just its publication, for None/off.
       this.#cameraEffects?.close()
       this.#cameraEffects = null
+      ++this.#frameGeneration
+      this.#cameraFrame = null
+      this.#frameAbort?.abort()
+      this.#frameAbort = null
+      const closingObserver = this.#detachEncodeObserver()
+      const closingFrame = this.#frameSource?.close()
+      this.#frameSource = null
       const old = this.#camera
       this.#camera = null
       this.#cameraOff = true
@@ -559,9 +598,10 @@ export class TalkShowRoomClient {
         old.stop()
         await room.localParticipant.unpublishTrack(old, true)
       }
+      await Promise.all([closingObserver, closingFrame, this.#frameRetiring])
       this.#cameraName = name
       this.#publish()
-      if (!off && name) {
+      if (!off && (name || this.#deps.frameTestSource)) {
         await this.#publishCamera(room)
         this.#cameraOff = false
       } else if (!off) {
@@ -1132,6 +1172,8 @@ export class TalkShowRoomClient {
         if (!this.#owns(room)) return
         if ((this.#deps.pcmTestSource || this.#microphoneChoice) && this.#owns(room))
           this.#retirePcm(room)
+        // A reconnect retires the frame producer; Reconnected opens a new generation.
+        if (this.#deps.frameTestSource && this.#frameSource) this.#retireFrame(room)
         if (this.#privacy) {
           this.#privacy.observations = {}
           this.#privacy.status = 'unconfirmed'
@@ -1140,6 +1182,18 @@ export class TalkShowRoomClient {
       })
       .on(RoomEvent.Reconnected, () => {
         if (!this.#owns(room)) return
+        if (this.#deps.frameTestSource && !this.#cameraOff && !this.#camera) {
+          const generation = this.#frameGeneration
+          void this.#frameRetiring.then(async () => {
+            if (!this.#owns(room) || generation !== this.#frameGeneration || this.#camera) return
+            try {
+              await this.#publishFrameCamera(room)
+            } catch (error) {
+              this.#problem = `The camera bridge test source didn't reopen: ${messageOf(error)}`
+            }
+            if (this.#owns(room)) this.#publish()
+          })
+        }
         if (this.#deps.pcmTestSource || this.#microphoneChoice) {
           const generation = this.#microphoneGeneration
           void Promise.all([this.#pcmRetiring, this.#microphoneOpening]).then(async () => {
@@ -1214,6 +1268,7 @@ export class TalkShowRoomClient {
   }
 
   async #publishCamera(room: Room): Promise<void> {
+    if (this.#deps.frameTestSource) return this.#publishFrameCamera(room)
     let openedCamera: LocalVideoTrack | null = null
     let openedEffects: TalkShowCameraEffects | null = null
     try {
@@ -1266,12 +1321,176 @@ export class TalkShowRoomClient {
     }
   }
 
+  async #publishFrameCamera(room: Room): Promise<void> {
+    if (!import.meta.env.DEV || !room.localParticipant.identity.startsWith('host:'))
+      throw new Error('Camera frame test source requires a development host room.')
+    const generation = ++this.#frameGeneration
+    const current = (): boolean => this.#owns(room) && generation === this.#frameGeneration
+    const controller = new AbortController()
+    this.#frameAbort = controller
+    let source: RoomFrameSource | null = null
+    let camera: LocalVideoTrack | null = null
+    try {
+      source = await createRoomFrameTestSource(
+        window.videorc.roomFrameTest,
+        controller.signal,
+        this.#deps.onFrameDiagnostic,
+        (reason) => {
+          if (!current()) return
+          this.#retireFrame(room)
+          this.#cameraOff = true
+          this.#problem = reason
+          this.#publish()
+          this.#deps.report('connected', reason)
+        }
+      )
+      if (!current() || controller.signal.aborted) {
+        await source.close()
+        return
+      }
+      this.#frameSource = source
+      camera = new LocalVideoTrack(source.track, undefined, true)
+      this.#camera = camera
+      this.#cameraEffectError = false
+      const published = await room.localParticipant.publishTrack(camera, {
+        // The native fixture always packs; a layout never changes in band.
+        name: cameraFrameTrackName('rgb-left-alpha-right:g8', source.generation),
+        source: Track.Source.Camera,
+        videoCodec: 'vp8',
+        simulcast: false,
+        videoEncoding: { maxBitrate: 4_000_000, maxFramerate: ROOM_FRAME.fps }
+      })
+      if (!current()) {
+        camera.stop()
+        await room.localParticipant.unpublishTrack(camera, true).catch(() => {})
+        return
+      }
+      this.#bindCameraFrame(room, source.generation, published?.trackSid)
+      this.#attachEncodeObserver(camera, source.generation, current)
+    } catch (error) {
+      if (current()) {
+        controller.abort()
+        void this.#detachEncodeObserver()
+        const closing = source?.close()
+        if (this.#frameSource === source) this.#frameSource = null
+        camera?.stop()
+        if (this.#camera === camera) this.#camera = null
+        this.#cameraFrame = null
+        await closing
+        this.#cameraOff = true
+        this.#publish()
+      } else await source?.close()
+      throw error
+    }
+  }
+
+  /**
+   * S13a harness only: the published camera sender's outbound-rtp counters,
+   * for the bridge and for the matched browser-camera baseline alike.
+   * Aggregate counters: they never identify which frame was encoded when.
+   */
+  async cameraSenderStats(): Promise<Record<string, unknown>[] | null> {
+    const camera = this.#camera
+    if (!camera?.getRTCStatsReport) return null
+    const report = await camera.getRTCStatsReport().catch(() => undefined)
+    if (!report) return null
+    const keys = [
+      'timestamp',
+      'framesEncoded',
+      'framesSent',
+      'keyFramesEncoded',
+      'totalEncodeTime',
+      'frameWidth',
+      'frameHeight',
+      'framesPerSecond',
+      'qualityLimitationReason',
+      'bytesSent'
+    ]
+    const out: Record<string, unknown>[] = []
+    report.forEach((entry: Record<string, unknown>) => {
+      if (entry.type === 'outbound-rtp' && entry.kind === 'video')
+        out.push(Object.fromEntries(keys.map((key) => [key, entry[key] ?? null])))
+    })
+    return out
+  }
+
+  /** Authority from the SFU's answer to this publish, never from a track name. */
+  #bindCameraFrame(room: Room, generation: number, trackSid: string | undefined): void {
+    let epoch = this.#cameraFrameEpochs.get(room)
+    if (!epoch) {
+      epoch = crypto.randomUUID()
+      this.#cameraFrameEpochs.set(room, epoch)
+    }
+    const permissions = room.localParticipant.permissions
+    const sources = publishSourceNames(permissions?.canPublishSources)
+    const authority: CameraFrameAuthority = {
+      contract: CAMERA_FRAME_CONTRACT,
+      show: room.name,
+      hostIdentity: room.localParticipant.identity,
+      publisherSid: room.localParticipant.sid,
+      trackSid: trackSid ?? '',
+      epoch,
+      generation,
+      source: 'camera',
+      // An empty list with publish permission means every source (LiveKit).
+      canPublishSources: sources.length === 0 && permissions?.canPublish ? ['camera'] : sources
+    }
+    const bound = bindCameraFramePublication(authority, generation, 'packed', { experiment: true })
+    this.#cameraFrame = bound ? { authority, descriptor: bound.descriptor } : null
+    if (!bound) this.#problem = 'The camera bridge publication could not be bound to the room.'
+    this.#publish()
+  }
+
+  /** S13a harness only: DEV flag plus a diagnostic sink, after a successful publish. */
+  #attachEncodeObserver(camera: LocalVideoTrack, generation: number, current: () => boolean): void {
+    const observe = this.#deps.onFrameDiagnostic
+    if (!observe || !roomFrameEncodeObserverEnabled()) return
+    // Loaded on demand so the observer and its worker stay out of the eager bundle.
+    void import('./room-frame-encode-observer')
+      .then(({ attachEncodeObserver }) => {
+        if (!current() || this.#camera !== camera || this.#encodeObserver) return
+        this.#encodeObserver = attachEncodeObserver(camera.sender, generation, observe)
+      })
+      .catch((error) =>
+        observe({
+          phase: 'encode-observer',
+          generation,
+          status: 'unavailable',
+          reason: messageOf(error)
+        })
+      )
+  }
+
+  #detachEncodeObserver(): Promise<void> | undefined {
+    const observer = this.#encodeObserver
+    this.#encodeObserver = null
+    return observer?.detach()
+  }
+
+  #retireFrame(room: Room): void {
+    this.#cameraFrame = null
+    ++this.#frameGeneration
+    this.#frameAbort?.abort()
+    this.#frameAbort = null
+    const closingObserver = this.#detachEncodeObserver()
+    const closing = this.#frameSource?.close()
+    this.#frameSource = null
+    const track = this.#camera
+    this.#camera = null
+    track?.stop()
+    this.#frameRetiring = Promise.all([this.#frameRetiring, closing, closingObserver])
+      .then(async () => {
+        if (track) await room.localParticipant.unpublishTrack(track, true)
+      })
+      .catch(() => {})
+  }
+
   async #publishLocal(): Promise<void> {
     const room = this.#room
     if (!room) return
     if (!this.#owns(room)) return
     const problems: string[] = []
-    if (this.#cameraName && !this.#cameraOff) {
+    if ((this.#cameraName || this.#deps.frameTestSource) && !this.#cameraOff) {
       try {
         await this.#publishCamera(room)
       } catch (error) {
@@ -1452,6 +1671,13 @@ export class TalkShowRoomClient {
     this.#processedMicrophone = null
     const closingPcm = this.#pcmSource?.close()
     this.#pcmSource = null
+    ++this.#frameGeneration
+    this.#cameraFrame = null
+    this.#frameAbort?.abort()
+    this.#frameAbort = null
+    const closingObserver = this.#detachEncodeObserver()
+    const closingFrame = this.#frameSource?.close()
+    this.#frameSource = null
     const room = this.#room
     ++this.#screenGeneration
     ++this.#privacyGeneration
@@ -1472,6 +1698,8 @@ export class TalkShowRoomClient {
     for (const track of tracks) track.stop()
     const settled = await Promise.allSettled([closingPcm, closingProcessed, this.#pcmRetiring])
     if (settled.some((result) => result.status === 'rejected')) this.#microphoneCleanupFailed = true
+    // Frame close failures stay visible in the source's resource registry.
+    await Promise.allSettled([closingObserver, closingFrame, this.#frameRetiring])
     for (const track of tracks) {
       try {
         if (room) await room.localParticipant.unpublishTrack(track, true)
@@ -1640,7 +1868,8 @@ export class TalkShowRoomClient {
         screen: this.#screen?.mediaStreamTrack ?? null,
         micMuted: this.#microphone?.isMuted ?? this.#micMuted,
         cameraOff: this.#cameraOff,
-        problem: this.#problem
+        problem: this.#problem,
+        ...(this.#cameraFrame && this.#frameSource ? { cameraFrame: this.#cameraFrame } : {})
       },
       monitor: { enabled: this.#monitorEnabled, video: monitorVideo, audio: monitorAudio }
     }

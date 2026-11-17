@@ -1,6 +1,16 @@
 //! Capture-only consumer of the existing device owner, clock, fold, RNNoise and
 //! limiter. No encoder, FIFO, recording/camera session or system/monitor input.
+//!
+//! Clock (Plan 249 S13a): `epoch` is the generation epoch. Chunk positions and
+//! `observed_at_us` are relative to it. `origin_us` is that SAME epoch measured
+//! from the process anchor in `crate::room_clock` (absent, never zero, when
+//! unavailable), captured once at construction. `origin + position` is the
+//! PROCESSED timeline position (SourceClock resampling, the optional
+//! intentional offset, RNNoise lookahead), not raw device capture time; the
+//! offset stays separate in `delay_frames` and is never folded into the origin.
 use super::*;
+
+const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 
 pub(crate) struct RoomMicrophoneTap {
     producer: Option<ManagedProducer>,
@@ -11,6 +21,8 @@ pub(crate) struct RoomMicrophoneTap {
     fold: VoiceFold,
     limiter: PeakLimiter,
     epoch: Instant,
+    origin_us: Option<u64>,
+    incarnation: Option<u64>,
     last_capture: Instant,
     settings: AudioProcessingSettings,
     delay_frames: u64,
@@ -52,6 +64,8 @@ impl RoomMicrophoneTap {
             fold: VoiceFold::default(),
             limiter: PeakLimiter::default(),
             epoch,
+            origin_us: crate::room_clock::origin_us(epoch),
+            incarnation: crate::room_clock::incarnation(),
             last_capture: epoch,
             settings,
             delay_frames: u64::from(offset_ms) * 48,
@@ -65,8 +79,20 @@ impl RoomMicrophoneTap {
         self.settings = settings;
     }
 
+    /// `(originUs, incarnation)` of this generation's epoch; fixed for its life.
+    pub(crate) fn clock_origin(&self) -> (Option<u64>, Option<u64>) {
+        (self.origin_us, self.incarnation)
+    }
+
     pub(crate) fn pull(&mut self, now: Instant) -> anyhow::Result<Option<RoomMicrophoneChunk>> {
         let elapsed_us = now.saturating_duration_since(self.epoch).as_micros() as u64;
+        // JS readers add origin + observed; refuse before draining or allocating.
+        anyhow::ensure!(
+            self.origin_us.is_none_or(|origin| origin
+                .checked_add(elapsed_us)
+                .is_some_and(|sum| sum <= MAX_SAFE_INTEGER)),
+            "Microphone clock exceeds its bound"
+        );
         // Reserve 30 ms for capture arrival and the existing two-hop denoiser.
         let due = elapsed_us.saturating_sub(30_000) / 10_000;
         let next = self.timeline.cursor / 480;
@@ -247,6 +273,8 @@ mod tests {
                 fold: VoiceFold::default(),
                 limiter: PeakLimiter::default(),
                 epoch,
+                origin_us: crate::room_clock::origin_us(epoch),
+                incarnation: crate::room_clock::incarnation(),
                 last_capture: epoch,
                 settings: AudioProcessingSettings::default(),
                 delay_frames: u64::from(offset_ms) * 48,
@@ -293,6 +321,23 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(muted.samples.iter().all(|v| *v == 0.0));
+    }
+    #[test]
+    fn origin_is_fixed_per_epoch_and_bounds_the_observed_sum() {
+        crate::room_clock::init();
+        let (mut tap, tx) = fixture(0);
+        assert_eq!(tap.origin_us, crate::room_clock::origin_us(tap.epoch));
+        assert!(tap.origin_us.is_some() && tap.incarnation.is_some());
+        tx.send(frame(tap.epoch, 0, 0.1)).unwrap();
+        let before = tap.clock_origin();
+        tap.pull(tap.epoch + Duration::from_millis(40))
+            .unwrap()
+            .unwrap();
+        assert_eq!(tap.clock_origin(), before, "one origin per generation");
+        tap.origin_us = Some(MAX_SAFE_INTEGER - 45_000);
+        assert!(tap.pull(tap.epoch + Duration::from_millis(50)).is_err());
+        tap.origin_us = None;
+        assert!(tap.pull(tap.epoch + Duration::from_millis(50)).is_ok());
     }
     #[test]
     fn bounded_offset_overrun_and_disconnected_source() {

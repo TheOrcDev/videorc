@@ -94,7 +94,13 @@ it('has one pull credit and rejects pending pulls when the owner closes', async 
   fake.onopen?.()
   await Promise.resolve()
   expect(sent[0].method).toBe('events.setIncluded')
-  fake.onmessage?.({ data: JSON.stringify({ id: sent[1].id, ok: true, payload: null }) })
+  fake.onmessage?.({
+    data: JSON.stringify({
+      id: sent[1].id,
+      ok: true,
+      payload: { generation: 1, originUs: 1200, incarnation: 77 }
+    })
+  })
   await opening
   expect(RoomPcmBridge.resources().sockets).toBe(1)
   const pull = bridge.request(roomPcmCommand('pull', 1))
@@ -144,7 +150,13 @@ it('native close waits for the authenticated backend acknowledgement before rele
   fake.onopen?.()
   await Promise.resolve()
   expect(sent[1].method).toBe('room.microphone.pcm')
-  fake.onmessage?.({ data: JSON.stringify({ id: sent[1].id, ok: true, payload: null }) })
+  fake.onmessage?.({
+    data: JSON.stringify({
+      id: sent[1].id,
+      ok: true,
+      payload: { generation: 10, originUs: null, incarnation: null }
+    })
+  })
   await opening
   let closed = false
   const closing = bridge.request({ ...base, action: 'close' }).then(() => {
@@ -158,4 +170,38 @@ it('native close waits for the authenticated backend acknowledgement before rele
   await closing
   expect(fake.readyState).toBe(3)
   expect(RoomPcmBridge.resources()).toEqual({ sockets: 0, ipcRequests: 0, timers: 0 })
+})
+
+it('refuses an open reply whose clock origin is unsafe or lacks its incarnation', async () => {
+  for (const payload of [
+    null,
+    { generation: 1, originUs: 5, incarnation: null },
+    { generation: 2, originUs: null, incarnation: null }
+  ]) {
+    const sent: { id: string; method: string }[] = []
+    const fake = {
+      onopen: null as null | (() => void),
+      onmessage: null as null | ((event: { data: string }) => void),
+      onerror: null,
+      onclose: null as null | (() => void),
+      readyState: 1,
+      send: (data: string) => sent.push(JSON.parse(data)),
+      close: () => {
+        fake.readyState = 3
+        fake.onclose?.()
+      }
+    }
+    const bridge = new RoomPcmBridge(
+      async () => ({ host: '127.0.0.1', port: 1, token: 'fixture' }),
+      () => true,
+      () => fake as unknown as WebSocket
+    )
+    const opening = bridge.request(roomPcmCommand('open', 1))
+    await Promise.resolve()
+    fake.onopen?.()
+    await Promise.resolve()
+    fake.onmessage?.({ data: JSON.stringify({ id: sent[1]!.id, ok: true, payload }) })
+    await expect(opening).rejects.toThrow()
+    bridge.close()
+  }
 })

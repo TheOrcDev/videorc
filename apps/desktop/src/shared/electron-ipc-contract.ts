@@ -1,3 +1,4 @@
+import { parseRoomFrameCommand, parseRoomFrameReply, parseRoomFrameResources } from './room-frame'
 import { parseRoomMicrophoneCommand } from './room-microphone'
 import { parseRoomPcmCommand, parseRoomPcmFrame, parseRoomPcmResources } from './room-pcm'
 import type { FrontAppChanged } from './front-app'
@@ -136,6 +137,8 @@ export const electronInvokeApiMethods = {
   'room-microphone:pcm': 'roomMicrophonePcm',
   'room-microphone:inspect': 'getRoomNativeMicrophoneResources',
   'room-pcm:inspect': 'getRoomPcmTestResources',
+  'room-frame:test': 'roomFrameTest',
+  'room-frame:inspect': 'getRoomFrameTestResources',
   'app:get-runtime-info': 'getRuntimeInfo',
   'app:front-window-watch': 'setFrontWindowWatch',
   'app:self-bundle-ids': 'getSelfBundleIds',
@@ -2084,6 +2087,15 @@ const specificRuntimeInvokeContracts = {
   'room-microphone:pcm': invokeContract(
     tupleSchema([runtimeSchema('Microphone command', parseRoomMicrophoneCommand)]),
     nullableSchema(runtimeSchema('PCM frame', (value) => parseRoomPcmFrame(value)))
+  ),
+  // Plan 249 S13a: dev-only native camera-role frame fixture.
+  'room-frame:inspect': invokeContract(
+    noArgs,
+    runtimeSchema('Frame resources', (value) => parseRoomFrameResources(value))
+  ),
+  'room-frame:test': invokeContract(
+    tupleSchema([runtimeSchema('Frame command', (value) => parseRoomFrameCommand(value))]),
+    runtimeSchema('Frame reply', (value) => parseRoomFrameReply(value))
   ),
   'room-pcm:test': invokeContract(
     tupleSchema([runtimeSchema('PCM command', (value) => parseRoomPcmCommand(value))]),

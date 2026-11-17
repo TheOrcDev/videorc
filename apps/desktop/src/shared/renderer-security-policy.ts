@@ -21,6 +21,8 @@ export const IPC_INVOKE_ROLES = {
   'room-microphone:pcm': MAIN_ONLY,
   'room-microphone:inspect': MAIN_ONLY,
   'room-pcm:inspect': MAIN_ONLY,
+  'room-frame:test': MAIN_ONLY,
+  'room-frame:inspect': MAIN_ONLY,
   'account:begin-sign-in': MAIN_ONLY,
   'account:refresh': MAIN_ONLY,
   'account:sign-out': MAIN_ONLY,

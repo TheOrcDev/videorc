@@ -2,6 +2,7 @@ import { attachHostSpeech } from '@/lib/room-speech-source'
 import { roomNativeMicrophoneEnabled } from '@/lib/room-microphone-state'
 import { closeVisualMicrophoneStreams } from '@/lib/mic-visual-ownership'
 import type { RoomMicrophoneChoice } from '@/lib/room-microphone-source'
+import { roomFrameTestEnabled } from '../lib/room-frame-test-state'
 import { roomPcmTestEnabled } from '../lib/room-pcm-test-state'
 import type { CohostPersona, BuddyOverlaySnapshot, OverlayItemLayout } from '@/lib/backend'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
@@ -278,6 +279,14 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
               new URLSearchParams(window.location.search).get('roomPcmTest') === '1'),
           onPcmDiagnostic: (detail) =>
             window.dispatchEvent(new CustomEvent('videorc:pcm-test-diagnostic', { detail })),
+          // S13a harness opt-in; main also requires VIDEORC_ROOM_FRAME_TEST=1 and
+          // the native source requires a debug build with smoke RPC enabled.
+          frameTestSource:
+            import.meta.env.DEV &&
+            (roomFrameTestEnabled() ||
+              new URLSearchParams(window.location.search).get('roomFrameTest') === '1'),
+          onFrameDiagnostic: (detail) =>
+            window.dispatchEvent(new CustomEvent('videorc:frame-test-diagnostic', { detail })),
           requestToken: () => client.requestTyped('cloud.room.token.refresh'),
           report,
           onSnapshot: (next) => {
