@@ -1,3 +1,4 @@
+import { parseRoomCameraResources } from './room-camera'
 import { parseRoomFrameCommand, parseRoomFrameReply, parseRoomFrameResources } from './room-frame'
 import { parseRoomMicrophoneCommand } from './room-microphone'
 import { parseRoomPcmCommand, parseRoomPcmFrame, parseRoomPcmResources } from './room-pcm'
@@ -139,6 +140,9 @@ export const electronInvokeApiMethods = {
   'room-pcm:inspect': 'getRoomPcmTestResources',
   'room-frame:test': 'roomFrameTest',
   'room-frame:inspect': 'getRoomFrameTestResources',
+  'room-camera:processed': 'roomProcessedCamera',
+  'room-camera:inspect': 'getRoomProcessedCameraResources',
+  'room-camera:fixture': 'roomProcessedCameraFixture',
   'app:get-runtime-info': 'getRuntimeInfo',
   'app:front-window-watch': 'setFrontWindowWatch',
   'app:self-bundle-ids': 'getSelfBundleIds',
@@ -2092,6 +2096,19 @@ const specificRuntimeInvokeContracts = {
   'room-frame:inspect': invokeContract(
     noArgs,
     runtimeSchema('Frame resources', (value) => parseRoomFrameResources(value))
+  ),
+  // Plan 249 S13b: dev-only processed camera (native owner, real processing).
+  'room-camera:processed': invokeContract(
+    tupleSchema([runtimeSchema('Camera command', (value) => parseRoomFrameCommand(value))]),
+    runtimeSchema('Camera reply', (value) => parseRoomFrameReply(value))
+  ),
+  'room-camera:inspect': invokeContract(
+    noArgs,
+    runtimeSchema('Camera resources', (value) => parseRoomCameraResources(value))
+  ),
+  'room-camera:fixture': invokeContract(
+    tupleSchema([enumSchema(['fixture-switch', 'fixture-unplug'])]),
+    runtimeSchema('Camera fixture reply', (value) => value)
   ),
   'room-frame:test': invokeContract(
     tupleSchema([runtimeSchema('Frame command', (value) => parseRoomFrameCommand(value))]),

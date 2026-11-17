@@ -1348,3 +1348,89 @@ describe('native camera-role frame test source (S13a)', () => {
     vi.unstubAllGlobals()
   })
 })
+
+describe('processed camera contribution (S13b)', () => {
+  const frameSource = (generation: number) => ({
+    track: { kind: 'video', stop: vi.fn() } as unknown as MediaStreamTrack,
+    generation,
+    opened: { generation, surfaceEpoch: 1, originUs: null, incarnation: null },
+    close: vi.fn(async () => {}),
+    resetSurface: vi.fn(async () => {})
+  })
+  const resources = (logical: { width: number; height: number } | null) => ({
+    nativeSources: 0,
+    nativeLeases: 0,
+    sockets: 0,
+    ipcRequests: 0,
+    timers: 0,
+    logicalWidth: logical?.width ?? null,
+    logicalHeight: logical?.height ?? null,
+    keptForRoom: true,
+    lentToBrowserRoom: false,
+    fixture: true
+  })
+  it('publishes the native processed camera at its logical size and never a browser camera', async () => {
+    const roomProcessedCamera = vi.fn()
+    vi.stubGlobal('window', {
+      videorc: {
+        roomProcessedCamera,
+        roomFrameTest: vi.fn(),
+        getRoomProcessedCameraResources: vi.fn(async () => resources({ width: 554, height: 414 }))
+      }
+    })
+    frames.create.mockImplementation(async () => frameSource(1))
+    const push = lk.FakeRoom.rooms.push.bind(lk.FakeRoom.rooms)
+    const made = vi.spyOn(lk.FakeRoom.rooms, 'push').mockImplementation((made) => {
+      Object.assign(made, { name: 'sh_talk' })
+      Object.assign(made.localParticipant, {
+        sid: 'PA_host',
+        permissions: { canPublish: true, canPublishSources: [1, 2] }
+      })
+      made.localParticipant.publishTrack.mockImplementation((async () => ({
+        trackSid: 'TR_camera'
+      })) as never)
+      return push(made)
+    })
+    const { room } = client(undefined, undefined, {
+      cameraName: 'Camera',
+      microphoneName: null,
+      processedCamera: true
+    })
+    await room.connect()
+    made.mockRestore()
+    expect(lk.video).not.toHaveBeenCalled()
+    const call = frames.create.mock.calls[0]!
+    expect(call[0]).toBe(roomProcessedCamera)
+    expect(call[5]).toEqual({ width: 554, height: 414, fps: 30 })
+    expect(room.snapshot.local.cameraFrame?.descriptor).toMatchObject({
+      logicalWidth: 554,
+      logicalHeight: 414,
+      alphaMode: 'packed',
+      geometryApplied: 'none'
+    })
+    await room.disconnect()
+    vi.unstubAllGlobals()
+  })
+
+  it('a camera giving no native frame pauses with a problem, never a browser fallback', async () => {
+    vi.stubGlobal('window', {
+      videorc: {
+        roomProcessedCamera: vi.fn(),
+        getRoomProcessedCameraResources: vi.fn(async () => resources(null))
+      }
+    })
+    frames.create.mockClear()
+    const { room } = client(undefined, undefined, {
+      cameraName: 'Camera',
+      microphoneName: null,
+      processedCamera: true
+    })
+    await room.connect()
+    expect(frames.create).not.toHaveBeenCalled()
+    expect(lk.video).not.toHaveBeenCalled()
+    expect(room.snapshot.local.cameraOff).toBe(true)
+    expect(room.snapshot.local.problem).toContain('camera')
+    await room.disconnect()
+    vi.unstubAllGlobals()
+  })
+})

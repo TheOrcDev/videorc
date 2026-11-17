@@ -14,6 +14,7 @@ function frameReply(command: RoomFrameCommand, sequence: number, surfaceEpoch = 
     header: {
       serial: command.serial,
       packed: true,
+      ptsObserved: false,
       width: ROOM_FRAME.packedWidth,
       height: ROOM_FRAME.height,
       surfaceEpoch,
@@ -214,5 +215,52 @@ describe('room frame test source', () => {
     )
     expect(second.generation).toBeGreaterThan(first.generation)
     await second.close()
+  })
+})
+
+describe('processed camera source (S13b)', () => {
+  const size = { width: 554, height: 414, fps: 30 }
+  it('opens and pulls the processed role at its logical size', async () => {
+    const h = harness(() => ({
+      frame: null,
+      reason: 'not-due',
+      staleReleases: 0,
+      leaseStalls: 0
+    }))
+    const source = await createRoomFrameTestSource(
+      h.api,
+      new AbortController().signal,
+      undefined,
+      undefined,
+      h.runtime,
+      size
+    )
+    await h.step(1)
+    expect(h.commands[0]).toMatchObject({ action: 'open', role: 'host-camera', width: 554 })
+    expect(h.commands[1]).toMatchObject({ action: 'pull', role: 'host-camera', height: 414 })
+    await source.close()
+  })
+
+  it('pauses when the camera stays unavailable instead of holding a frame', async () => {
+    const h = harness(() => ({
+      frame: null,
+      reason: 'camera-unavailable',
+      staleReleases: 0,
+      leaseStalls: 0
+    }))
+    let clock = 0
+    const failures: string[] = []
+    const source = await createRoomFrameTestSource(
+      h.api,
+      new AbortController().signal,
+      undefined,
+      (reason) => failures.push(reason),
+      { ...h.runtime, now: () => (clock += 600) },
+      size
+    )
+    await h.step(6)
+    expect(failures[0]).toContain('paused')
+    expect(h.generator().written).toHaveLength(0)
+    await source.close()
   })
 })

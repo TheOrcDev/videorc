@@ -11883,6 +11883,7 @@ function connectBackendEventSocket(connection: BackendConnection): void {
 const MAIN_BACKEND_ADMIN_METHODS = new Set([
   'room.pcm.test.inspect',
   'room.frame.test.inspect',
+  'room.camera.processed.inspect',
   'room.microphone.inspect',
   'resource.capability.register_thumbnail',
   // Plan 232: how an HTML overlay's page stands; only main hosts them.
@@ -18255,7 +18256,7 @@ app.whenReady().then(async () => {
   secureIpcHandle('room-frame:test', async (event, command) => {
     if (!frameTestEnabled()) throw new Error('Frame test bridge is disabled.')
     if (command.action === 'open') {
-      if (frameOwner || command.generation <= frameLastGeneration)
+      if (frameOwner || cameraOwner || command.generation <= frameLastGeneration)
         throw new Error('Frame owner already active or stale.')
       frameLastGeneration = command.generation
       const contents = event.sender
@@ -18294,6 +18295,92 @@ app.whenReady().then(async () => {
         if (frameOwner === owner) frameOwner = null
       }
     }
+  })
+
+  // Plan 249 S13b: one main-frame owner of the processed camera (the native
+  // camera's processed frames). Unpackaged main + VIDEORC_ROOM_PROCESSED_CAMERA=1
+  // + a debug backend with smoke RPC; the backend reads the same variable and
+  // then keeps the camera instead of lending it, so there is one owner.
+  // Navigation/crash/destruction closes the native socket, which drops the
+  // connection-owned source and every lease it holds.
+  const processedCameraEnabled = (): boolean =>
+    !app.isPackaged && process.env.VIDEORC_ROOM_PROCESSED_CAMERA === '1'
+  let cameraOwner: {
+    senderId: number
+    generation: number
+    bridge: RoomFrameBridge
+    detach: () => void
+  } | null = null
+  let cameraLastGeneration = 0
+  secureIpcHandle('room-camera:inspect', async () => {
+    if (!processedCameraEnabled()) throw new Error('Processed camera is disabled.')
+    const native = await requestBackendAdmin<{
+      nativeSources: number
+      nativeLeases: number
+      logicalWidth: number | null
+      logicalHeight: number | null
+      layoutSource: 'scene' | 'default'
+      keyOn: boolean
+      nativeMirror: boolean
+      look: { brightness: number; contrast: number; saturation: number }
+      keptForRoom: boolean
+      lentToBrowserRoom: boolean
+      fixture: boolean
+    }>('room.camera.processed.inspect', {}, 2000)
+    return { ...native, ...RoomFrameBridge.resources() }
+  })
+  secureIpcHandle('room-camera:processed', async (event, command) => {
+    if (!processedCameraEnabled()) throw new Error('Processed camera is disabled.')
+    if (command.action === 'open') {
+      // One camera publisher: never beside the S13a fixture.
+      if (cameraOwner || frameOwner || command.generation <= cameraLastGeneration)
+        throw new Error('Camera owner already active or stale.')
+      cameraLastGeneration = command.generation
+      const contents = event.sender
+      const bridge = new RoomFrameBridge(
+        () => waitForBackendAdminConnection(2000),
+        processedCameraEnabled,
+        undefined,
+        'room.camera.processed'
+      )
+      const cleanup = (): void => {
+        bridge.close()
+        detach()
+        if (cameraOwner?.bridge === bridge) cameraOwner = null
+      }
+      const detach = (): void => {
+        contents.removeListener('destroyed', cleanup)
+        contents.removeListener('render-process-gone', cleanup)
+        contents.removeListener('did-start-navigation', cleanup)
+      }
+      contents.once('destroyed', cleanup)
+      contents.once('render-process-gone', cleanup)
+      contents.once('did-start-navigation', cleanup)
+      cameraOwner = { senderId: contents.id, generation: command.generation, bridge, detach }
+    }
+    const owner = cameraOwner
+    if (!owner || owner.senderId !== event.sender.id || owner.generation !== command.generation)
+      throw new Error('Camera owner or generation mismatch.')
+    try {
+      return await owner.bridge.request(command)
+    } catch (error) {
+      owner.bridge.close()
+      owner.detach()
+      if (cameraOwner === owner) cameraOwner = null
+      throw error
+    } finally {
+      if (command.action === 'close') {
+        owner.detach()
+        if (cameraOwner === owner) cameraOwner = null
+      }
+    }
+  })
+
+  secureIpcHandle('room-camera:fixture', async (event, action) => {
+    if (!processedCameraEnabled()) throw new Error('Processed camera is disabled.')
+    const owner = cameraOwner
+    if (!owner || owner.senderId !== event.sender.id) throw new Error('No processed camera owner.')
+    return await owner.bridge.fixture(action)
   })
 
   secureIpcHandle('account:begin-sign-in', async (_event, authorizeUrl: string) => {

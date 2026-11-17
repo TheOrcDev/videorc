@@ -8,7 +8,8 @@ import {
   type RoomFrameCommand,
   type RoomFrameOpened,
   type RoomFrameRelease,
-  type RoomFrameReply
+  type RoomFrameReply,
+  type RoomFrameSize
 } from '../../../shared/room-frame'
 
 /**
@@ -61,6 +62,8 @@ export type RoomFrameRuntime = {
 }
 
 const MAX_CONSECUTIVE_FAILURES = 3
+/** Plan 249 S13b: how long the processed camera may give no frame before it pauses. */
+export const CAMERA_UNAVAILABLE_PAUSE_MS = 2000
 let lastGeneration = 0
 
 function runtimeOf(runtime: RoomFrameRuntime) {
@@ -83,7 +86,12 @@ export async function createRoomFrameTestSource(
   signal: AbortSignal,
   observe?: (value: unknown) => void,
   onFailure?: (reason: string) => void,
-  runtime: RoomFrameRuntime = {}
+  runtime: RoomFrameRuntime = {},
+  /**
+   * Plan 249 S13b: the processed camera role at this logical size (the native
+   * camera's own processed frames). Absent: the S13a synthetic fixture.
+   */
+  processed?: RoomFrameSize
 ): Promise<RoomFrameSource> {
   if (signal.aborted) throw new Error('Frame source cancelled.')
   const rt = runtimeOf(runtime)
@@ -105,8 +113,14 @@ export async function createRoomFrameTestSource(
     release?: RoomFrameRelease
   ): Promise<RoomFrameReply> => {
     if (inFlight) return Promise.reject(new Error('Frame request already outstanding.'))
-    const current = api(roomFrameCommand(action, generation, nextSerial(), release))
-      .then((reply) => parseRoomFrameReply(reply, generation))
+    const current = api(roomFrameCommand(action, generation, nextSerial(), release, processed))
+      .then((reply) =>
+        parseRoomFrameReply(
+          reply,
+          generation,
+          processed ? { width: processed.width, height: processed.height } : undefined
+        )
+      )
       .finally(() => {
         if (inFlight === current) inFlight = null
         releaseIfClosed()
@@ -127,7 +141,15 @@ export async function createRoomFrameTestSource(
   let surfaceEpoch = 0
   let failures = 0
   let resetting: Promise<void> | null = null
-  const counters = { written: 0, idle: 0, stalled: 0, resets: 0, encodeFailures: 0 }
+  const counters = {
+    written: 0,
+    idle: 0,
+    stalled: 0,
+    unavailable: 0,
+    resets: 0,
+    encodeFailures: 0
+  }
+  let unavailableSince: number | null = null
 
   const readResources = (): Record<string, unknown> => ({
     generators: generator && generator.readyState !== 'ended' ? 1 : 0,
@@ -230,11 +252,21 @@ export async function createRoomFrameTestSource(
     if (!isRoomFrame(reply)) {
       if (reply && 'reason' in reply) {
         if (reply.reason === 'lease-stalled') counters.stalled++
-        else counters.idle++
+        else if (reply.reason === 'camera-unavailable') {
+          counters.unavailable++
+          // A camera that stays away (unplugged, stopped) pauses publication:
+          // the last frame is never held as if live, and nothing raw replaces it.
+          unavailableSince ??= pullReceivedAtMs
+          if (pullReceivedAtMs - unavailableSince >= CAMERA_UNAVAILABLE_PAUSE_MS) {
+            fail('The camera stopped giving frames; the camera is paused.')
+            return
+          }
+        } else counters.idle++
       }
       timer = rt.schedule(() => void tick(), 5)
       return
     }
+    unavailableSince = null
     const { header, pixels } = reply
     if (header.surfaceEpoch !== surfaceEpoch) {
       // A frame from an older surface epoch is never encoded.
@@ -248,7 +280,7 @@ export async function createRoomFrameTestSource(
         codedWidth: header.width,
         codedHeight: header.height,
         timestamp: header.ptsUs,
-        duration: Math.round(1_000_000 / ROOM_FRAME.fps)
+        duration: Math.round(1_000_000 / (processed?.fps ?? ROOM_FRAME.fps))
       })
       framesOpen++
       await writer!.write(frame)

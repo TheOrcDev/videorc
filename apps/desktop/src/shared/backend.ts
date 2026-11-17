@@ -1,3 +1,4 @@
+import type { RoomCameraFixtureAction, RoomCameraResources } from './room-camera'
 import type { RoomFrameCommand, RoomFrameReply, RoomFrameResources } from './room-frame'
 import type { RoomMicrophoneApi } from './room-microphone'
 import type { RoomPcmCommand, RoomPcmFrame, RoomPcmResources } from './room-pcm'
@@ -6497,6 +6498,9 @@ export interface VideorcApi {
   roomPcmTest: (command: RoomPcmCommand) => Promise<RoomPcmFrame | null>
   getRoomFrameTestResources: () => Promise<RoomFrameResources>
   roomFrameTest: (command: RoomFrameCommand) => Promise<RoomFrameReply>
+  getRoomProcessedCameraResources: () => Promise<RoomCameraResources>
+  roomProcessedCamera: (command: RoomFrameCommand) => Promise<RoomFrameReply>
+  roomProcessedCameraFixture: (action: RoomCameraFixtureAction) => Promise<unknown>
   /**
    * What this window sits on (plan 208): the solid base (the default) or the
    * OS glass. Main decides it per window and the preload reads it from
