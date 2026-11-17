@@ -458,6 +458,16 @@ async function runPass({
     stopApp = launch.stop
     const ws = await connectBackend(launch.connections['backend-ready'], timeoutMs)
     const smoke = launch.connections['preview-motion-ready']
+    // An app that goes away mid-pass (a Dock or menu Quit, a crash) closes
+    // this socket. Say so once and stop the pass; the next pass relaunches.
+    let backendClosed = null
+    ws.addEventListener(
+      'close',
+      (event) => {
+        backendClosed = { at: new Date().toISOString(), code: event?.code ?? null }
+      },
+      { once: true }
+    )
 
     if (streamTarget) {
       listener = spawnLocalRtmpListener(streamTarget)
@@ -469,8 +479,25 @@ async function runPass({
       }
     }
 
-    for (const combo of combos) {
+    for (const [comboIndex, combo] of combos.entries()) {
       const label = `${combo.label}${passLabel ? `:${passLabel}` : ''}`
+      if (backendClosed) {
+        const skipped = combos
+          .slice(comboIndex)
+          .map((rest) => `${rest.label}${passLabel ? `:${passLabel}` : ''}`)
+        const reason =
+          `not run: the backend connection closed at ${backendClosed.at} (code ${backendClosed.code}); ` +
+          'the app quit or the backend exited mid-pass'
+        console.error(
+          `Recording matrix pass ${passLabel || 'default'} stopped: ${reason}. ` +
+            `A Dock or menu Quit shows in \`log show --predicate 'eventMessage CONTAINS "Handling Quit AppleEvent"'\`; ` +
+            `the app's backend.log is in ${userDataDir}/logs. Not run: ${skipped.join(', ')}`
+        )
+        for (const skippedLabel of skipped) {
+          passResults.push({ combo: skippedLabel, failures: [reason] })
+        }
+        break
+      }
       try {
         // Plan 181 (redesign R2): the renderer keeps a buffer-only ring on
         // by default and re-arms it right after every Stop. This harness

@@ -19697,6 +19697,12 @@ previewLifecycleEvidence.bindBeforeQuit(app, {
       askRendererBeforeExit('quit')
       return
     }
+    if (!appIsQuitting) {
+      // A Quit from the menu, ⌘Q or the Dock arrives as an Apple Event with
+      // no signal line; without this, the backend's clean exit reads as a
+      // crash nobody restarted.
+      logBackend('info', 'App quit requested; shutting the backend down.')
+    }
     appIsQuitting = true
     accountSignInTransactions?.dispose()
     providerOAuthCallbacks?.dispose()
