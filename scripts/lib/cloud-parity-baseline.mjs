@@ -1,6 +1,9 @@
 import { prepareAvatar, exerciseAvatar, assertAvatarVideo } from './cloud-parity-avatar.mjs'
+import { exerciseAvatarAnimation } from './cloud-parity-avatar-animation.mjs'
 import { exerciseSoundboard } from './cloud-parity-soundboard.mjs'
 import { exercisePrivacy } from './cloud-parity-privacy.mjs'
+import { exerciseViews } from './cloud-parity-views.mjs'
+import { roomShownFromBeacon } from './cloud-parity-views-contract.mjs'
 import {
   prepareParityRoom,
   assertInitialRoomControls,
@@ -57,8 +60,12 @@ export async function runBaseline({
   privacy = false,
   soundboard = false,
   avatar = false,
-  replayRing = false
+  replayRing = false,
+  avatarAnimation = false,
+  views = false
 }) {
+  // Plan 249 S5: the animation case runs on the avatar case's real pages.
+  avatar = avatar || avatarAnimation
   const report = baselineReport({
     desktop: revision(desktopRoot),
     web: revision(webRoot),
@@ -66,15 +73,19 @@ export async function runBaseline({
   })
   report.case = replayRing
     ? 'replay-ring'
-    : avatar
-      ? 'avatar'
-      : soundboard
-        ? 'soundboard'
-        : privacy
-          ? 'privacy'
-          : controls
-            ? 'controls'
-            : 'baseline'
+    : avatarAnimation
+      ? 'avatar-animation'
+      : views
+        ? 'views'
+        : avatar
+          ? 'avatar'
+          : soundboard
+            ? 'soundboard'
+            : privacy
+              ? 'privacy'
+              : controls
+                ? 'controls'
+                : 'baseline'
   // A dirty web consumer makes its revision misleading. Require a dedicated,
   // installed checkout; inspect it read-only and never change the active one.
   const webDirty = execFileSync('git', ['status', '--porcelain', '--untracked-files=no'], {
@@ -175,7 +186,7 @@ export async function runBaseline({
     pages = await startParityPages(
       webRoot,
       guests,
-      soundboard || avatar || replayRing
+      soundboard || avatar || replayRing || views
         ? {
             ...(avatar
               ? {
@@ -184,8 +195,19 @@ export async function runBaseline({
                     EG_parity_avatar_recording: { output: 'recording', orientation: 'h' }
                   }
                 }
-              : {}),
+              : views
+                ? { graphicsLanes: { EG_parity_baseline: { output: 'stream', orientation: 'h' } } }
+                : {}),
             show: h.showId,
+            ...(views
+              ? {
+                  shown: async (shown) =>
+                    h.web.hooks.shown(
+                      h.showId,
+                      roomShownFromBeacon(shown, new Date().toISOString())
+                    )
+                }
+              : {}),
             relay: {
               participantSession: async (show, identity) =>
                 (await h.web.roomRpc('GetParticipant', { room: show, identity })).sid,
@@ -265,7 +287,8 @@ export async function runBaseline({
       layout: 'side-by-side',
       onStage: [`host:${h.showId}`, ...[...guests.values()].map((g) => g.identity)]
     })
-    if (avatar) await prepareAvatar({ h, report })
+    // S6 views also needs the real avatar producer for guest graphics (D4).
+    if (avatar || views) await prepareAvatar({ h, report })
     const program = await newPage('program')
     await program.addInitScript(installProgramAudioTap)
     const search = new URLSearchParams({
@@ -393,6 +416,7 @@ export async function runBaseline({
       await exerciseReplayRing({ h, program, webRoot, output, report, sound })
     }
     if (soundboard) await exerciseSoundboard({ h, clients, captureAudio, report, sound, guests })
+    if (views) await exerciseViews({ h, clients, captureAudio, report, sound, guests, output })
     await h.rpc('sounds.play', { id: sound.id })
     const soundCaptures = await captureAudio('soundboard', clients)
     observations.push({
@@ -426,7 +450,15 @@ export async function runBaseline({
     })
     await h.rpc('cohost.utterance.say', { text: 'Parity fixture bubble' })
     await captureAudio('avatar', clients)
-    if (avatar)
+    if (avatarAnimation)
+      await exerciseAvatarAnimation({
+        h,
+        report,
+        clients,
+        newPage,
+        programUrl: `${pages.origin}${pages.wire.PROGRAM_PAGE_PATH}?${search}`
+      })
+    else if (avatar)
       await exerciseAvatar({
         h,
         report,

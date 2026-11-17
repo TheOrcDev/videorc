@@ -1,0 +1,151 @@
+{
+  "version": 1,
+  "fit": [
+    {
+      "name": "screen-16x10-in-16x9",
+      "source": {
+        "w": 1920,
+        "h": 1200
+      },
+      "tile": {
+        "w": 1920,
+        "h": 1080
+      },
+      "fit": "contain",
+      "box": {
+        "h": 1080,
+        "w": 1728,
+        "x": 96,
+        "y": 0
+      }
+    },
+    {
+      "name": "screen-portrait-window-in-16x9",
+      "source": {
+        "w": 900,
+        "h": 1600
+      },
+      "tile": {
+        "w": 1600,
+        "h": 900
+      },
+      "fit": "contain",
+      "box": {
+        "h": 900,
+        "w": 506.25,
+        "x": 546.875,
+        "y": 0
+      }
+    },
+    {
+      "name": "screen-ultrawide-in-16x9",
+      "source": {
+        "w": 3440,
+        "h": 1440
+      },
+      "tile": {
+        "w": 1280,
+        "h": 720
+      },
+      "fit": "contain",
+      "box": {
+        "h": 535.8139534883721,
+        "w": 1280,
+        "x": 0,
+        "y": 92.09302325581393
+      }
+    },
+    {
+      "name": "camera-4x3-covers-16x9",
+      "source": {
+        "w": 640,
+        "h": 480
+      },
+      "tile": {
+        "w": 1280,
+        "h": 720
+      },
+      "fit": "cover",
+      "box": {
+        "h": 360,
+        "w": 640,
+        "x": 0,
+        "y": 60
+      }
+    },
+    {
+      "name": "camera-portrait-covers-16x9",
+      "source": {
+        "w": 720,
+        "h": 1280
+      },
+      "tile": {
+        "w": 1280,
+        "h": 720
+      },
+      "fit": "cover",
+      "box": {
+        "h": 405,
+        "w": 720,
+        "x": 0,
+        "y": 437.5
+      }
+    },
+    {
+      "name": "empty-source",
+      "source": {
+        "w": 0,
+        "h": 0
+      },
+      "tile": {
+        "w": 1280,
+        "h": 720
+      },
+      "fit": "contain",
+      "box": null
+    }
+  ],
+  "stages": [
+    {
+      "name": "solo-host",
+      "stage": {
+        "layout": "solo",
+        "onStage": ["host:show_1"]
+      },
+      "canonical": "v1|solo|rounded|host:show_1||",
+      "key": "d53e6853"
+    },
+    {
+      "name": "screen-people-guest-screen",
+      "stage": {
+        "layout": "screen-people",
+        "onStage": ["host:show_1", "g_0123456789abcdefghijkl"],
+        "screen": "g_0123456789abcdefghijkl",
+        "hostShape": "circle"
+      },
+      "canonical": "v1|screen-people|circle|host:show_1,g_0123456789abcdefghijkl||g_0123456789abcdefghijkl",
+      "key": "93902cef"
+    },
+    {
+      "name": "screen-off-stage-dropped",
+      "stage": {
+        "layout": "screen-people",
+        "onStage": ["host:show_1"],
+        "screen": "g_0123456789abcdefghijkl"
+      },
+      "canonical": "v1|screen-people|rounded|host:show_1||",
+      "key": "ec04bb04"
+    },
+    {
+      "name": "duplicate-and-default-shape",
+      "stage": {
+        "layout": "spotlight",
+        "onStage": ["host:show_1", "host:show_1", "g_0123456789abcdefghijkl"],
+        "spotlight": "g_0123456789abcdefghijkl",
+        "hostShape": "rounded"
+      },
+      "canonical": "v1|spotlight|rounded|host:show_1,g_0123456789abcdefghijkl|g_0123456789abcdefghijkl|",
+      "key": "957c6852"
+    }
+  ]
+}

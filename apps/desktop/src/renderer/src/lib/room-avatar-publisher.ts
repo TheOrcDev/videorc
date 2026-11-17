@@ -19,6 +19,20 @@ export type AvatarContent = {
   v: AvatarLayer[]
   stream: boolean
   recording: boolean
+  /**
+   * Plan 249 S5: the same picture with the avatar as an atlas layer, sent
+   * only to consumers advertising `graphics.animation: 1`; every other
+   * consumer keeps the static layers above.
+   */
+  animated?: { h: AvatarLayer[]; v: AvatarLayer[] }
+}
+/**
+ * Plan 249 S5: whether the worn avatar animates on cloud outputs, with the
+ * streamer's reason when it does not everywhere. Absent for a still avatar.
+ */
+export type RoomAvatarAnimation = {
+  state: 'animated' | 'still'
+  reason: string | null
 }
 export type RoomAvatarStatus = {
   enabled: boolean
@@ -30,10 +44,20 @@ export type RoomAvatarStatus = {
     string,
     { revision: number; output: 'stream' | 'recording'; orientation: 'h' | 'v' }
   >
+  /**
+   * Plan 249 S6 (D4): the host's per-room opt-in to show the stream's public
+   * layers to guest pages, how many guest pages can draw them now, and how
+   * many confirmed the latest revision they were sent. Guests never decide
+   * the egress `state`.
+   */
+  guests: { enabled: boolean; capable: number; applied: number }
   productionQualified: false
+  animation?: RoomAvatarAnimation
 }
-/** Independently enabled by the existing avatar output switches. Never broadcasts
- * pixels to guests, or infers graphic support from S3's auxiliary version. */
+/** Independently enabled by the existing avatar output switches. Never infers
+ * graphic support from S3's auxiliary version. Guests get pixels only after the
+ * host opts in (`guests`), only on the guest lane, and only what the stream
+ * shows in landscape. */
 export class RoomAvatarPublisher {
   #content: AvatarContent | null = null
   #receipts = new Map<string, CapabilityReceipt>()
@@ -46,6 +70,9 @@ export class RoomAvatarPublisher {
   #timer: ReturnType<typeof setInterval> | undefined
   #error: string | null = null
   #lastStatus = ''
+  #guests = false
+  /** Guest pages that were sent layers, so they are sent one clear. */
+  #guestShown = new Set<string>()
   constructor(
     private room: Room,
     private changed: (status: RoomAvatarStatus) => void
@@ -75,6 +102,12 @@ export class RoomAvatarPublisher {
     }
     this.#refresh()
   }
+  /** The host's guest opt-in. Off sends each guest that saw layers a clear. */
+  guests(enabled: boolean): void {
+    if (this.#guests === enabled) return
+    this.#guests = enabled
+    this.#refresh()
+  }
   fail(): void {
     this.set(null)
     this.#error = 'Avatar assets unavailable. Nothing was published.'
@@ -88,7 +121,8 @@ export class RoomAvatarPublisher {
         ? this.#snapshot(
             content.stream ? 'stream' : 'recording',
             'h',
-            content.stream || content.recording ? content.h : []
+            // Plan 249 S5: the Program preview draws what an animating output draws.
+            content.stream || content.recording ? (content.animated?.h ?? content.h) : []
           )
         : null
   }
@@ -122,7 +156,7 @@ export class RoomAvatarPublisher {
       const parsed = parseConsumerCapability(raw)
       if (
         !parsed ||
-        !parsed.identity.startsWith('EG_') ||
+        !consumerRole(parsed.identity) ||
         !parsed.graphics ||
         !Number.isSafeInteger(raw.at) ||
         !capabilityCurrent(
@@ -173,6 +207,25 @@ export class RoomAvatarPublisher {
           orientation: receipt.graphics.orientation
         }
     }
+    const guests: RoomAvatarStatus['guests'] = { enabled: this.#guests, capable: 0, applied: 0 }
+    for (const peer of this.room.remoteParticipants.values()) {
+      const receipt = this.#receipts.get(peer.identity)
+      if (
+        !peer.identity.startsWith('g_') ||
+        !capabilityCurrent(receipt, peer.sid, Date.now()) ||
+        !receipt?.graphics
+      )
+        continue
+      guests.capable++
+      const ack = receipt.graphics.applied
+      const sent = this.#sent.get(peer.identity)
+      if (
+        this.#guestShown.has(peer.identity) &&
+        ack?.publisherSid === this.room.localParticipant.sid &&
+        ack.revision === sent?.revision
+      )
+        guests.applied++
+    }
     const enabled = !!this.#content && (this.#content.stream || this.#content.recording)
     const connected = this.room.state === ConnectionState.Connected
     const state: RoomAvatarStatus['state'] = this.#error
@@ -204,6 +257,7 @@ export class RoomAvatarPublisher {
       revision: this.#revision,
       preview: this.#preview,
       observed,
+      guests,
       productionQualified: false
     }
     const key = JSON.stringify(status)
@@ -219,6 +273,8 @@ export class RoomAvatarPublisher {
         this.#receipts.delete(identity)
         this.#sent.delete(identity)
       }
+    for (const identity of this.#guestShown)
+      if (!this.room.remoteParticipants.has(identity)) this.#guestShown.delete(identity)
     this.#report()
     if (this.#busy || this.room.state !== ConnectionState.Connected) return
     this.#busy = true
@@ -238,15 +294,24 @@ export class RoomAvatarPublisher {
     for (const peer of this.room.remoteParticipants.values()) {
       if (this.#closed || generation !== this.#generation) return
       const receipt = this.#receipts.get(peer.identity)
-      if (
-        !peer.identity.startsWith('EG_') ||
-        !capabilityCurrent(receipt, peer.sid, Date.now()) ||
-        !receipt?.graphics
-      )
-        continue
+      const role = consumerRole(peer.identity)
+      if (!role || !capabilityCurrent(receipt, peer.sid, Date.now()) || !receipt?.graphics) continue
       const { output, orientation } = receipt.graphics
       const content = this.#content
-      const layers = content?.[output] ? content[orientation] : []
+      const variant =
+        receipt.graphics.animation === 1 && content?.animated ? content.animated : content
+      // A guest sees the stream's landscape layers, and only while the host
+      // shows them to guests; a recording-only avatar never reaches a guest.
+      // Guests get no motion stream (egress only), so they draw the still set.
+      const layers =
+        role === 'guest'
+          ? this.#guests && content?.stream
+            ? content.h
+            : []
+          : content?.[output] && variant
+            ? variant[orientation]
+            : []
+      if (role === 'guest' && !layers.length && !this.#guestShown.has(peer.identity)) continue
       const key = JSON.stringify([
         peer.sid,
         this.room.localParticipant.sid,
@@ -307,8 +372,41 @@ export class RoomAvatarPublisher {
       )
         return
       this.#sent.set(peer.identity, { key, revision: snapshot.revision, at: Date.now() })
+      if (role === 'guest') {
+        if (snapshot.layers.length) this.#guestShown.add(peer.identity)
+        else this.#guestShown.delete(peer.identity)
+      }
       this.#error = null
     }
+  }
+  /**
+   * Plan 249 S5: the EG consumers the motion topic may go to now: a current
+   * receipt that advertises animation, for an output this content shows,
+   * with an atlas variant to draw. Nobody else is sent motion.
+   */
+  motionTargets(): string[] {
+    return this.motionCoverage().animated
+  }
+  /** Plan 249 S5: who animates the atlas, and how many outputs that show the
+   * avatar can only draw it still (a page from before animation). */
+  motionCoverage(): { animated: string[]; still: number } {
+    const content = this.#content
+    const coverage: { animated: string[]; still: number } = { animated: [], still: 0 }
+    if (this.#closed || !content?.animated || this.room.state !== ConnectionState.Connected)
+      return coverage
+    for (const peer of this.room.remoteParticipants.values()) {
+      const receipt = this.#receipts.get(peer.identity)
+      if (
+        !peer.identity.startsWith('EG_') ||
+        !capabilityCurrent(receipt, peer.sid, Date.now()) ||
+        !receipt?.graphics ||
+        !content[receipt.graphics.output]
+      )
+        continue
+      if (receipt.graphics.animation === 1) coverage.animated.push(peer.identity)
+      else coverage.still += 1
+    }
+    return coverage
   }
   close(): void {
     this.#closed = true
@@ -322,5 +420,11 @@ export class RoomAvatarPublisher {
     this.#preview = null
     this.#receipts.clear()
     this.#sent.clear()
+    this.#guestShown.clear()
   }
+}
+
+/** Who may receive graphics: a program egress, or a guest page (S6, D4). */
+function consumerRole(identity: string): 'egress' | 'guest' | null {
+  return identity.startsWith('EG_') ? 'egress' : identity.startsWith('g_') ? 'guest' : null
 }

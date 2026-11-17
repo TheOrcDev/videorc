@@ -21,6 +21,8 @@ import { isStreamTargetStartReady } from '@/lib/capture'
 import { layoutPresetLabel } from '@/lib/layout-labels'
 import { destinationLabel } from '@/lib/platform-copy'
 import { soundboard, type SoundboardStore } from '@/lib/soundboard-store'
+import { agentRoomProgram, subscribeAgentRoomProgram } from '@/lib/agent-room-program'
+import type { AgentRoomProgram } from '@/lib/talk-show-managed'
 import type {
   CaptionsStatus,
   CohostSettings,
@@ -58,6 +60,10 @@ export interface AgentSurface {
     cameraOff: boolean | null
     microphoneAvailable: boolean
   }
+  /** Plan 249 S6: the cloud room's program as the program page reports it,
+   * redrawn with the shared geometry. Roles, never identities or names. Not
+   * encoded output (`encodedOutput: false`). */
+  roomProgram?: AgentRoomProgram
   recordBlockedReason?: string
   liveBlockedReason?: string
   scene: AgentSurfaceScene & { modified: boolean }
@@ -150,7 +156,8 @@ function destinationProjection(
 /** The allowlisted projection. Pure, so the leak rules are tested in node. */
 export function buildAgentSurface(
   input: AgentSurfaceInput,
-  playingSounds: readonly { id: string; name: string; playing: boolean }[]
+  playingSounds: readonly { id: string; name: string; playing: boolean }[],
+  roomProgram?: AgentRoomProgram
 ): AgentSurface {
   const bothOrientations =
     input.layoutPresets.some((preset) => preset.startsWith('vertical-')) &&
@@ -206,6 +213,24 @@ export function buildAgentSurface(
             microphoneMuted: input.roomMedia.microphoneMuted,
             cameraOff: input.roomMedia.cameraOff,
             microphoneAvailable: input.roomMedia.microphoneAvailable
+          }
+        }
+      : {}),
+    // Field by field: what an agent may know about the room's picture.
+    ...(input.roomMedia && roomProgram
+      ? {
+          roomProgram: {
+            source: roomProgram.source,
+            encodedOutput: false as const,
+            stage: roomProgram.stage,
+            ageSeconds: roomProgram.ageSeconds,
+            layout: roomProgram.layout,
+            screenShared: roomProgram.screenShared,
+            tiles: roomProgram.tiles.map(({ kind, role, rect }) => ({
+              kind,
+              role,
+              rect: { x: rect.x, y: rect.y, w: rect.w, h: rect.h }
+            }))
           }
         }
       : {}),
@@ -273,6 +298,7 @@ export class AgentSurfacePublisher {
   /** Counts publishes as they are sent; only the newest records its body. */
   private publishSeq = 0
   private offSounds: (() => void) | null = null
+  private offRoomProgram: (() => void) | null = null
 
   constructor(private readonly sounds: SoundboardStore = soundboard) {}
 
@@ -282,6 +308,9 @@ export class AgentSurfacePublisher {
     this.offSounds?.()
     // A sound starting or stopping changes the projection, not the Studio's inputs.
     this.offSounds = this.sounds.subscribe(() => this.schedule(PUBLISH_DEBOUNCE_MS))
+    // The room's program changes with the page's reports, not the Studio's inputs.
+    this.offRoomProgram?.()
+    this.offRoomProgram = subscribeAgentRoomProgram(() => this.schedule(PUBLISH_DEBOUNCE_MS))
   }
 
   /** The socket is live: the backend's slate is blank, so republish. */
@@ -312,6 +341,8 @@ export class AgentSurfacePublisher {
   detach(): void {
     this.offSounds?.()
     this.offSounds = null
+    this.offRoomProgram?.()
+    this.offRoomProgram = null
     this.client = null
     this.connected = false
     this.lastPublishedBody = null
@@ -347,7 +378,7 @@ export class AgentSurfacePublisher {
   private async flush(): Promise<void> {
     const { client, latest } = this
     if (!client || !this.connected || !this.enabled || !latest) return
-    const surface = buildAgentSurface(latest, soundsFrom(this.sounds))
+    const surface = buildAgentSurface(latest, soundsFrom(this.sounds), agentRoomProgram())
     const body = JSON.stringify(surface)
     if (body === this.lastPublishedBody) return
     const publish = ++this.publishSeq
