@@ -28,6 +28,12 @@ import type { AvatarMotionSource } from '../../../shared/cloud-avatar-view'
 import type { AnimatorSettings } from '../../../shared/buddy-animator'
 import type { CohostPetAnimatorEvent } from '../../../shared/buddy-animator-public'
 import {
+  RoomScenePublisher,
+  type RoomSceneCommit,
+  type RoomSceneStatus,
+  type SceneContent
+} from './room-scene-publisher'
+import {
   createPrivateScreen,
   roomScreenPrivacy,
   privacyTrackName,
@@ -147,6 +153,8 @@ export type TalkShowRoomSnapshot = {
   monitor: TalkShowMonitor
   graphics?: RoomGraphicsStatus
   avatar?: RoomAvatarStatus
+  /** Plan 249 S12: the scene the program draws, and each output's rendered revision. */
+  scene?: RoomSceneStatus
   screenPrivacy?: ScreenPrivacyPublication & {
     sourceBlockedAt: number | null
     status: 'visible' | 'hiding' | 'observed' | 'unconfirmed' | 'paused'
@@ -329,6 +337,9 @@ export class TalkShowRoomClient {
   #animationKey = ''
   /** Plan 249 S6 (D4): the host shows the stream's public layers to guests. Off per room. */
   #avatarGuests = false
+  #scene: RoomScenePublisher | null = null
+  /** The scene the program should draw; re-sent after a reconnect. */
+  #sceneContent: SceneContent | null = null
   /** Overlays go one at a time, in the order they were handed over. */
   #overlays = new Map<string, AbortController>()
 
@@ -399,6 +410,9 @@ export class TalkShowRoomClient {
     this.#motionSeed = null
     this.#motionRefused = null
     this.#cards = { h: null, v: null }
+    this.#scene?.close()
+    this.#scene = null
+    this.#sceneContent = null
     this.#privacyOff?.()
     this.#privacyOff = null
     if (this.#privacyTimer) clearTimeout(this.#privacyTimer)
@@ -957,6 +971,42 @@ export class TalkShowRoomClient {
     this.#avatar?.guests(enabled)
   }
 
+  /**
+   * Plan 249 S12: what the program draws, committed atomically per lane.
+   * Answers with each egress lane's rendered revision, `preview` before any
+   * egress runs, or why it is not confirmed.
+   */
+  commitScene(content: SceneContent | null): Promise<RoomSceneCommit> {
+    this.#sceneContent = content
+    if (!this.#scene || this.#closed)
+      return Promise.resolve({
+        state: 'failed',
+        reason: 'The room is not connected.',
+        observed: {}
+      })
+    return this.#scene.commit(content)
+  }
+
+  get sceneContent(): SceneContent | null {
+    return this.#sceneContent
+  }
+
+  #bindScene(room: Room): void {
+    this.#scene?.close()
+    this.#scene = new RoomScenePublisher(room, (scene) => {
+      if (!this.#owns(room)) return
+      this.#snapshot = { ...this.#snapshot, scene }
+      this.#publish()
+    })
+    // A new connection is a new publisher SID: the program drops the old
+    // owner's scene and takes this one, as a cut (no replayed motion).
+    if (this.#sceneContent)
+      void this.#scene.commit({
+        ...this.#sceneContent,
+        transition: { kind: 'cut', durationMs: 0 }
+      })
+  }
+
   #bind(room: Room): void {
     this.#graphics?.close()
     this.#graphics = new RoomGraphicsPublisher(room, (graphics) => {
@@ -980,6 +1030,7 @@ export class TalkShowRoomClient {
     if (this.#motionSeed) this.#startMotion(room)
     else this.#stopMotion()
     this.#avatar.guests(this.#avatarGuests)
+    this.#bindScene(room)
     room
       .on(RoomEvent.DataReceived, (payload, participant, _kind, topic) => {
         // Only server-relayed observations. A participant cannot impersonate this API.
@@ -1448,6 +1499,8 @@ export class TalkShowRoomClient {
     this.#avatar?.close()
     this.#avatar = null
     this.#stopMotion()
+    this.#scene?.close()
+    this.#scene = null
     this.#room = null
     if (stale) await stale.disconnect().catch(() => {})
     await this.#stopLocal()

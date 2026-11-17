@@ -518,6 +518,8 @@ export interface BackendRpcMethodMap {
   'session.stop': BackendRpcDefinition<SessionStopParams | undefined, RecordingStatus>
   'scene.get': BackendRpcDefinition<undefined, Scene>
   'scene.load_from_capture_config': BackendRpcDefinition<SceneConfigParams, SceneCommitStatus>
+  /** Plan 249 S12, renderer only: the native engine's scene for a room, never committed. */
+  'cloud.scene.resolve': BackendRpcDefinition<SceneConfigParams, Scene>
   'scene.layout.apply_preview': BackendRpcDefinition<
     SceneConfigParams & { intentId: number },
     LayoutTransactionResult
@@ -6858,6 +6860,7 @@ const runtimeContracts = {
     params: sceneConfigSchema,
     result: sceneCommitStatusSchema
   },
+  'cloud.scene.resolve': { params: sceneConfigSchema, result: sceneSchema },
   'scene.layout.apply_preview': {
     params: layoutTransactionParamsSchema,
     result: layoutTransactionResultSchema

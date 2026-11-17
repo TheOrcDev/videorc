@@ -7,6 +7,8 @@ import {
 import { roomPcmTestResources, setRoomPcmTestEnabled } from '../lib/room-pcm-test-state'
 import { cloudTerminalOwner } from '@/lib/cloud-provider-lifecycle'
 import { roomHoldsTheCamera } from '@/lib/replay-buffer-reconcile'
+import type { RoomSceneResult, RoomSceneTarget } from '@/lib/cloud-scene-adapter'
+import { createRoomSceneEditSync } from '@/lib/room-scene-resender'
 import { outputSessionFacts } from '../../../shared/output-session'
 import type { TalkShowRoomClient, TalkShowRoomSnapshot } from '@/lib/talk-show-room'
 import {
@@ -5544,6 +5546,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // here is news: the Destinations page and the Stream health stat show the rest.
   const stopOutputRef = useRef<((output: 'recording' | 'live') => Promise<boolean>) | null>(null)
   const roomControlsRef = useRef<TalkShowRoomClient | null>(null)
+  /** Plan 249 S12: asks for the room scene to be sent again after a confirmed edit. */
+  const requestRoomSceneResendRef = useRef<() => void>(() => {})
   const [roomMedia, setRoomMedia] = useState<TalkShowRoomSnapshot | undefined>()
   const onRoomMediaSnapshot = useCallback((snapshot: TalkShowRoomSnapshot) => {
     setRoomMedia((previous) =>
@@ -9885,6 +9889,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           workingBackgroundRef.current,
           activeSavedSceneIdRef.current
         )
+        // Plan 249 S12: a Freeform drag, nudge or reset reaches the room scene.
+        captureConfigRef.current = { ...captureConfigRef.current, layout }
+        requestRoomSceneResendRef.current()
         return
       }
 
@@ -9903,12 +9910,15 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         }
       }
       patchLayout(transformPatch)
+      const layout = { ...captureConfigRef.current.layout, ...transformPatch }
       persistWorkingVisual(
-        { ...captureConfigRef.current.layout, ...transformPatch },
+        layout,
         captureConfigRef.current.sources,
         workingBackgroundRef.current,
         activeSavedSceneIdRef.current
       )
+      captureConfigRef.current = { ...captureConfigRef.current, layout }
+      requestRoomSceneResendRef.current()
     },
     [patchLayout, persistWorkingVisual]
   )
@@ -10460,6 +10470,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           workingBackgroundRef.current,
           activeSavedSceneIdRef.current
         )
+        // Plan 249 S12: Show and Hide reach the room scene.
+        requestRoomSceneResendRef.current()
       } catch (error) {
         if (
           clientRef.current === client &&
@@ -11298,14 +11310,256 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     return committed
   }, [requestLayoutTransaction])
 
+  /** The layout a preset choice commits; the room route resolves the same one. */
+  const presetTransactionLayout = useCallback(
+    (current: CaptureConfig, patch: Partial<LayoutSettings>): LayoutSettings => {
+      const nextPreset = patch.layoutPreset ?? current.layout.layoutPreset
+      // Choosing a preset scene EXITS freeform (unless the patch says
+      // otherwise): the preset's fixed arrangement is what the user asked
+      // for, and stale overrides must not leak into a later freeform entry.
+      const leavesArrangement =
+        patch.layoutPreset !== undefined && patch.arrangementMode === undefined
+      return {
+        ...current.layout,
+        ...(patch.layoutPreset !== undefined && workingOriginRef.current === 'saved'
+          ? current.layoutFramingMemory.layouts[nextPreset]
+          : recalledLayoutFraming(
+              current.layoutFramingMemory,
+              current.layout.layoutPreset,
+              nextPreset
+            )),
+        ...(leavesArrangement
+          ? { arrangementMode: 'preset' as const, sourceTransformOverrides: {} }
+          : {}),
+        ...patch,
+        cameraTransformMode: 'preset',
+        cameraTransform: null
+      }
+    },
+    []
+  )
+  const talkShowRoomPhaseForScenes = cloudStatus?.room?.phase ?? 'closed'
+  // Plan 249 S12: while a room holds the camera, scene commands (click,
+  // hotkey, remote, agent, Follow) go to the room program. Per room and off
+  // by default (production qualification is not run); the room's own
+  // layouts stay until the host turns scenes on.
+  const roomScenesEnabledRef = useRef(false)
+  /** The guest roles of the scene on the room program, for a re-send after an edit. */
+  const roomSceneExtensionRef = useRef<unknown>(undefined)
+  const roomScenesShowRef = useRef<string | null>(null)
+  const roomScenesOn = useCallback((): boolean => {
+    const show = cloudStatusRef.current?.show?.id ?? null
+    if (roomScenesShowRef.current !== show) {
+      roomScenesShowRef.current = show
+      roomScenesEnabledRef.current = false
+    }
+    return roomScenesEnabledRef.current
+  }, [])
+  const setRoomScenesEnabled = useCallback((enabled: boolean) => {
+    roomScenesShowRef.current = cloudStatusRef.current?.show?.id ?? null
+    roomScenesEnabledRef.current = enabled
+  }, [])
+  /** One send through the scene adapter, with the room as it is now. */
+  const sendSceneToRoom = useCallback(
+    async (
+      target: Omit<RoomSceneTarget, 'video'>,
+      animate: boolean,
+      current?: () => boolean
+    ): Promise<RoomSceneResult> => {
+      const { applySceneToRoom } = await import('@/lib/cloud-scene-adapter')
+      return applySceneToRoom(
+        { ...target, video: captureConfigRef.current.video },
+        {
+          resolve: (params) => {
+            if (!clientRef.current) throw offlineError()
+            return clientRef.current.requestTyped('cloud.scene.resolve', params)
+          },
+          room: () => {
+            const controls = roomControlsRef.current
+            const status = cloudStatusRef.current
+            if (!controls || !status?.room || !status.show) return null
+            const snapshot = controls.snapshot
+            return {
+              identity:
+                snapshot.state === 'connected' && snapshot.identity === `host:${status.show.id}`
+                  ? snapshot.identity
+                  : null,
+              cameraPublished: Boolean(snapshot.local.camera) && !snapshot.local.cameraOff,
+              cameraOff: snapshot.local.cameraOff,
+              screenPublished: Boolean(snapshot.local.screen),
+              stage: status.room.stage,
+              commitScene: (content) => controls.commitScene(content)
+            }
+          },
+          setStage: async (stage) => {
+            if (!clientRef.current) throw offlineError()
+            commitCloudStatus(
+              await clientRef.current.requestTyped('cloud.stage.set', {
+                ...stage,
+                hostShape:
+                  stage.hostShape ??
+                  (captureConfigRef.current.layout.cameraShape === 'circle' ? 'circle' : 'rounded')
+              })
+            )
+          },
+          animate,
+          ...(current ? { current } : {})
+        }
+      )
+    },
+    [commitCloudStatus]
+  )
+  /**
+   * The native working scene follows the scene put on the room program: an
+   * idle commit (no capture start, no camera wait) and the same working-state
+   * update a native switch makes. So the Scene editor's drags, nudges, resets
+   * and Show/Hide act on the scene viewers see, and the Preview shows it
+   * when the room closes.
+   */
+  const alignNativeToRoomScene = useCallback(
+    async (target: Omit<RoomSceneTarget, 'video'>, savedSceneId: string | null) => {
+      const client = clientRef.current
+      if (!client) return
+      const current = captureConfigRef.current
+      const coupling = verticalOrientationVideoPatch(
+        current.layout.layoutPreset,
+        target.layout.layoutPreset,
+        current.video,
+        current.verticalRestoreVideo
+      )
+      const sources = withoutSceneApp(target.sources)
+      try {
+        const status = await client.request<SceneCommitStatus>('scene.load_from_capture_config', {
+          sources,
+          layout: target.layout,
+          video: coupling?.video ?? current.video,
+          ...(target.background ? { background: target.background } : {})
+        })
+        applyCommittedScene(status)
+        applyLayoutTransactionState({
+          sceneRevision: status.sceneRevision,
+          scene: status.scene,
+          layout: target.layout,
+          compositorStatus: status.compositorStatus,
+          origin: savedSceneId ? 'saved' : 'builtin',
+          sources,
+          savedSceneId,
+          sceneSwitch: true,
+          ...(coupling
+            ? {
+                captureConfigPatch: {
+                  video: coupling.video,
+                  verticalRestoreVideo: coupling.verticalRestoreVideo
+                }
+              }
+            : {})
+        })
+      } catch (error) {
+        reportError(error, { action: 'switch', object: 'the scene' })
+      }
+    },
+    [applyCommittedScene, applyLayoutTransactionState, reportError]
+  )
+  /** A scene is on this room's program and scenes are on: edits go to the room. */
+  const roomSceneLive = useCallback(
+    (): boolean =>
+      roomHoldsTheCamera(cloudStatusRef.current?.room) &&
+      roomScenesOn() &&
+      Boolean(roomControlsRef.current?.sceneContent),
+    [roomScenesOn]
+  )
+  // Plan 249 S12: confirmed edits (drag, nudge, reset, Show/Hide, a look
+  // change, new guest roles) reach the room scene, coalesced and fenced.
+  const roomSceneEditSyncRef = useRef<{ request(): void; cancel(): void } | null>(null)
+  const roomSceneEditDepsRef = useRef({ live: roomSceneLive, send: sendSceneToRoom })
+  roomSceneEditDepsRef.current = { live: roomSceneLive, send: sendSceneToRoom }
+  roomSceneEditSyncRef.current ??= createRoomSceneEditSync({
+    live: () => roomSceneEditDepsRef.current.live(),
+    room: () => roomControlsRef.current,
+    target: () => ({
+      layout: captureConfigRef.current.layout,
+      sources: captureConfigRef.current.sources,
+      background: workingBackgroundRef.current ?? null,
+      extension: roomSceneExtensionRef.current
+    }),
+    // An edit lands at once, as a native drag does.
+    send: (target, current) => roomSceneEditDepsRef.current.send(target, false, current),
+    failed: (result) =>
+      result.ok || result.commit?.state === 'superseded' || result.commit?.state === 'waiting'
+        ? null
+        : (result.message ?? "The scene change couldn't be sent to the room."),
+    warn: (message) => toast.warning(message, { id: 'room-scene' }),
+    now: () => performance.now()
+  })
+  requestRoomSceneResendRef.current = () => roomSceneEditSyncRef.current?.request()
+  const applySceneInRoom = useCallback(
+    async (
+      target: Omit<RoomSceneTarget, 'video'>,
+      retry: () => void,
+      savedSceneId: string | null = null
+    ): Promise<{ ok: boolean; message?: string }> => {
+      if (!roomScenesOn()) {
+        const message = 'Scenes are off in this room. The room layouts stay on the program.'
+        toast.warning(message, {
+          id: 'room-scenes',
+          action: {
+            label: 'Use scenes',
+            onClick: () => {
+              setRoomScenesEnabled(true)
+              retry()
+            }
+          }
+        })
+        return { ok: false, message }
+      }
+      // A scene chosen now outranks any edit still waiting to be sent.
+      roomSceneEditSyncRef.current?.cancel()
+      roomSceneExtensionRef.current = target.extension
+      const result = await sendSceneToRoom(target, settingsRef.current.animateSceneChanges === true)
+      if (result.message)
+        (result.ok ? toast.message : toast.warning)(result.message, { id: 'room-scene' })
+      const state = result.commit?.state
+      if (state && state !== 'failed' && state !== 'superseded')
+        await alignNativeToRoomScene(target, savedSceneId)
+      return { ok: result.ok, ...(result.message ? { message: result.message } : {}) }
+    },
+    [alignNativeToRoomScene, roomScenesOn, sendSceneToRoom, setRoomScenesEnabled]
+  )
+  useEffect(() => {
+    // A room closing or another show drops whatever edit was waiting.
+    if (talkShowRoomPhaseForScenes === 'closed') roomSceneEditSyncRef.current?.cancel()
+  }, [talkShowRoomPhaseForScenes, cloudStatus?.show?.id])
+  useEffect(() => {
+    // New guest roles for the saved scene on the room program (⋯ → Guests in
+    // the room…) reach the room like any other edit.
+    const active = sceneLibrary.scenes.find((entry) => entry.id === activeSavedSceneId)
+    if (!active || !roomSceneLive()) return
+    if (
+      JSON.stringify(active.cloud ?? null) === JSON.stringify(roomSceneExtensionRef.current ?? null)
+    )
+      return
+    roomSceneExtensionRef.current = active.cloud
+    requestRoomSceneResendRef.current()
+  }, [activeSavedSceneId, roomSceneLive, sceneLibrary.scenes])
+
   const requestCameraPresetTransaction = useCallback(
     (
       patch: Partial<LayoutSettings>,
       options?: { backgroundOverride?: Scene['background'] | null; keepScene?: boolean }
-    ) => {
+    ): Promise<boolean> => {
       if (roomHoldsTheCamera(cloudStatusRef.current?.room) && patch.layoutPreset !== undefined) {
-        toast.warning('Use the Show stage layouts while the room is open.')
-        return Promise.resolve(false)
+        const current = captureConfigRef.current
+        return applySceneInRoom(
+          {
+            layout: presetTransactionLayout(current, patch),
+            sources: current.sources,
+            background:
+              options?.backgroundOverride === undefined
+                ? (workingBackgroundRef.current ?? null)
+                : options.backgroundOverride
+          },
+          () => void requestCameraPresetTransactionRef.current(patch, options)
+        ).then((result) => result.ok)
       }
       const current = captureConfigRef.current
       const nextPreset = patch.layoutPreset ?? current.layout.layoutPreset
@@ -11354,39 +11608,29 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       const leavesArrangement =
         patch.layoutPreset !== undefined && patch.arrangementMode === undefined
       if (leavesArrangement) noteLayoutLeavingFreeform(current.layout)
-      const arrangementPatch = leavesArrangement
-        ? { arrangementMode: 'preset' as const, sourceTransformOverrides: {} }
-        : {}
 
-      return requestLayoutTransaction(
-        {
-          ...current.layout,
-          ...(patch.layoutPreset !== undefined && workingOriginRef.current === 'saved'
-            ? current.layoutFramingMemory.layouts[nextPreset]
-            : recalledLayoutFraming(
-                current.layoutFramingMemory,
-                current.layout.layoutPreset,
-                nextPreset
-              )),
-          ...arrangementPatch,
-          ...patch,
-          cameraTransformMode: 'preset',
-          cameraTransform: null
-        },
-        {
-          videoOverride,
-          captureConfigPatch,
-          ...(patch.layoutPreset !== undefined && !options?.keepScene
-            ? { savedSceneId: null, origin: 'builtin' as const }
-            : {}),
-          ...(options && 'backgroundOverride' in options
-            ? { backgroundOverride: options.backgroundOverride }
-            : {})
-        }
-      )
+      // Plan 249 S12: a look edit (shape, corner, size, mirror, framing)
+      // made while a scene is on the room program goes to the room too, once
+      // the native commit landed, coalesced with other edits.
+      const resendRoomScene = (committed: boolean): boolean => {
+        if (committed) requestRoomSceneResendRef.current()
+        return committed
+      }
+      return requestLayoutTransaction(presetTransactionLayout(current, patch), {
+        videoOverride,
+        captureConfigPatch,
+        ...(patch.layoutPreset !== undefined && !options?.keepScene
+          ? { savedSceneId: null, origin: 'builtin' as const }
+          : {}),
+        ...(options && 'backgroundOverride' in options
+          ? { backgroundOverride: options.backgroundOverride }
+          : {})
+      }).then(resendRoomScene)
     },
-    [requestLayoutTransaction]
+    [applySceneInRoom, presetTransactionLayout, requestLayoutTransaction]
   )
+  const requestCameraPresetTransactionRef = useRef(requestCameraPresetTransaction)
+  requestCameraPresetTransactionRef.current = requestCameraPresetTransaction
 
   const applyBackgroundSlot = useCallback(
     (slotId: string | null): void => {
@@ -11542,11 +11786,27 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       repaired?: SceneVisual,
       options?: SavedSceneApplyOptions
     ): Promise<SavedSceneApplyResult> => {
-      if (roomHoldsTheCamera(cloudStatusRef.current?.room))
-        return {
-          ok: false,
-          message: 'Saved scenes are not applied to the room yet. Use the Show stage layouts.'
-        }
+      if (roomHoldsTheCamera(cloudStatusRef.current?.room)) {
+        // Plan 249 S12: the room program takes the scene; native capture,
+        // Follow's window resolution and the scene's microphone stay as they
+        // are (the room publishes its own camera, screen and microphone).
+        const saved = sceneLibrary.scenes.find((entry) => entry.id === id)
+        if (!saved) return { ok: false }
+        if (options?.origin !== 'follow')
+          for (const listener of manualSceneApplyListenersRef.current) listener(id)
+        const visual = normalizeSceneVisual(repaired ?? saved.visual)
+        const result = await applySceneInRoom(
+          {
+            layout: visual.layout,
+            sources: { ...captureConfigRef.current.sources, ...visual.sources },
+            background: resolveSavedBackground(visual.background),
+            extension: saved.cloud
+          },
+          () => void applySavedSceneResultRef.current(id, repaired, options),
+          id
+        )
+        return result.ok ? { ok: true } : { ok: false, message: result.message }
+      }
       const saved = sceneLibrary.scenes.find((entry) => entry.id === id)
       if (!saved) return { ok: false }
       if (options?.origin !== 'follow')
@@ -11748,9 +12008,12 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       requestLayoutTransaction,
       setSystemAudioEnabled,
       sourceSelectionController,
-      reportError
+      reportError,
+      applySceneInRoom
     ]
   )
+  const applySavedSceneResultRef = useRef(applySavedSceneResult)
+  applySavedSceneResultRef.current = applySavedSceneResult
 
   const applySavedScene = useCallback(
     async (id: string, repaired?: SceneVisual): Promise<boolean> =>
@@ -20199,6 +20462,36 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         if (enabled !== undefined) roomControlsRef.current?.setAvatarGuests(enabled)
         return roomControlsRef.current?.snapshot.avatar?.guests ?? null
       },
+      // Plan 249 S12 acquisition: the per-room opt-in, the scene status, and
+      // a preset by the same route as the gallery and hotkeys.
+      roomScenes: (enabled?: boolean) => {
+        if (enabled !== undefined) setRoomScenesEnabled(enabled)
+        return { enabled: roomScenesOn(), status: roomControlsRef.current?.snapshot.scene ?? null }
+      },
+      roomScenePreset: (layoutPreset: LayoutPreset) =>
+        requestCameraPresetTransactionRef.current({ layoutPreset }),
+      roomSceneContent: () => roomControlsRef.current?.sceneContent ?? null,
+      // A whole saved scene (freeform boxes, guest roles) into the library,
+      // then applied by id like a click; clear returns the room layouts.
+      roomSceneSave: (scene: SavedScene) => value.sceneLibraryActions.insert([scene]),
+      roomSceneClear: () => roomControlsRef.current?.commitScene(null),
+      // The Scene editor's own actions (a Freeform drag, Show/Hide) and the
+      // ⋯ → Guests in the room… save, while a scene is on the room program.
+      roomSceneDrag: (sourceId: string, patch: SceneTransformPatch) =>
+        value.setSceneSourceTransform(sourceId, patch),
+      roomSceneVisible: (sourceId: string, visible: boolean) =>
+        value.setSceneSourceVisible(sourceId, visible),
+      roomSceneGuests: async (sceneId: string, placement: 'beside' | 'below' | 'over') => {
+        const { sceneWithGuestRoles } = await import('@/lib/scene-guest-roles')
+        const saved = value.savedScenes.find((entry) => entry.id === sceneId)
+        return saved
+          ? value.sceneLibraryActions.replace(
+              sceneWithGuestRoles(saved, placement, new Date().toISOString())
+            )
+          : false
+      },
+      roomSceneAnimate: (on: boolean) =>
+        setSettings((current) => ({ ...current, animateSceneChanges: on })),
       roomSounds: (enabled?: boolean) => {
         if (enabled !== undefined) soundboard.setRoomAuxEnabled(enabled)
         return soundboard.getSnapshot().roomAux ?? null
