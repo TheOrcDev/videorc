@@ -53,6 +53,7 @@ if (
     'lifecycle',
     'services',
     'replay-ring',
+    'avatar-animation',
     'views'
   ].includes(selected.case)
 ) {
@@ -80,6 +81,7 @@ const { output } = await run({
   soundboard: selected.case === 'soundboard',
   avatar: selected.case === 'avatar',
   replayRing: selected.case === 'replay-ring',
+  avatarAnimation: selected.case === 'avatar-animation',
   views: selected.case === 'views'
 })
 console.log(

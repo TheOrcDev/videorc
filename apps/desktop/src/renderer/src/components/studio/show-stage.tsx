@@ -1,4 +1,4 @@
-import { createAvatarView } from '../../../../shared/cloud-avatar-view'
+import { createAvatarView, type AvatarMotionSource } from '../../../../shared/cloud-avatar-view'
 import type { AvatarSnapshot } from '../../../../shared/cloud-avatar'
 import { useEffect, useRef, useState, type ReactElement } from 'react'
 
@@ -479,13 +479,34 @@ function ScreenShareButton({
  * program page reports it. The speaker is not shown: there is no return to
  * listen to, and a control that plays nothing would lie.
  */
-function ProgramAvatar({ snapshot }: { snapshot: AvatarSnapshot | null }): ReactElement {
+function ProgramAvatar({
+  snapshot,
+  motion
+}: {
+  snapshot: AvatarSnapshot | null
+  motion?: AvatarMotionSource
+}): ReactElement {
   const root = useRef<HTMLDivElement>(null)
   const view = useRef<ReturnType<typeof createAvatarView> | null>(null)
   const [failure, setFailure] = useState(false)
+  // Plan 249 S5: an atlas layer moves with the poses the outputs replay (the
+  // producer's own simulation); without one it rests on its neutral cell.
+  const motionRef = useRef(motion)
+  useEffect(() => {
+    motionRef.current = motion
+  }, [motion])
   useEffect(() => {
     if (!root.current) return
-    const current = createAvatarView(root.current)
+    const current = createAvatarView(root.current, Date.now, {
+      orientation: 'h',
+      receiver: {
+        advance: () => motionRef.current?.advance(),
+        draw: (orientation, atlasHash) => motionRef.current?.draw(orientation, atlasHash) ?? null,
+        get sim() {
+          return motionRef.current?.sim ?? null
+        }
+      }
+    })
     view.current = current
     const timer = setInterval(() => current.step(), 50)
     return () => {
@@ -624,7 +645,10 @@ function ProgramMonitor({ talkShow }: { talkShow: TalkShowContextValue }): React
           </span>
         )}
         {view.source === 'stage' ? (
-          <ProgramAvatar snapshot={talkShow.room.avatar?.preview ?? null} />
+          <ProgramAvatar
+            motion={talkShow.avatarMotionSource}
+            snapshot={talkShow.room.avatar?.preview ?? null}
+          />
         ) : null}
       </div>
       {view.source === 'stage' ? (
@@ -635,6 +659,17 @@ function ProgramMonitor({ talkShow }: { talkShow: TalkShowContextValue }): React
               : talkShow.room.avatar?.enabled
                 ? 'Avatar preview · Output unconfirmed'
                 : 'Room avatar off · Enable for this room')}
+        </span>
+      ) : null}
+      {view.source === 'stage' &&
+      talkShow.room.avatar?.enabled &&
+      talkShow.room.avatar.animation?.reason ? (
+        <span
+          className="text-meta text-muted-foreground"
+          data-avatar-animation={talkShow.room.avatar.animation.state}
+          data-testid="show-stage-avatar-animation"
+        >
+          {talkShow.room.avatar.animation.reason}
         </span>
       ) : null}
       {view.source === 'stage' && talkShow.room.avatar?.enabled ? (
