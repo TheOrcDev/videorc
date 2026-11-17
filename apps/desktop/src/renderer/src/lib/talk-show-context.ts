@@ -8,6 +8,7 @@ import type {
   TalkShowDisplaySource
 } from '@/lib/backend'
 import type { TalkShowRoomSnapshot } from '@/lib/talk-show-room'
+import type { AvatarMotionSource } from '../../../shared/cloud-avatar-view'
 
 // The talk show's context value (plan 224 C-G4), without the controller.
 // The Studio provider is in the eager bundle, so it holds only this idle
@@ -62,6 +63,15 @@ export interface TalkShowContextValue {
   startScreenShare: (sourceId: string) => Promise<void>
   stopScreenShare: () => Promise<void>
   setAvatarEnabled: (enabled: boolean) => Promise<void>
+  /** Plan 249 S5 acceptance: the desktop's avatar motion reference, or null. */
+  avatarMotionProbe?: () => {
+    epoch: string
+    tick: number
+    cells: Record<'h' | 'v', string | null>
+    cards: Record<'h' | 'v', boolean>
+  } | null
+  /** Plan 249 S5: the avatar's poses for the Program preview (the producer's simulation). */
+  avatarMotionSource?: AvatarMotionSource
   setMonitor: (enabled: boolean) => Promise<void>
   setMicrophoneMuted: (muted: boolean) => Promise<void>
   setCameraOff: (off: boolean) => Promise<void>
