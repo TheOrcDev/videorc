@@ -12471,11 +12471,11 @@ async fn handle_text_message_with_role(
             match command.method.as_str() {
                 "cloud.presentation.accepted" => {
                     let queued = spawn_keep_cloud_presentation(state, show_id, command.params);
-                    ServerResponse::ok(command.id, json!({ "queued": queued }))
+                    ServerResponse::ok(command.id, serde_json::json!({ "queued": queued }))
                 }
                 "cloud.controller.desired" => {
                     let queued = spawn_cloud_controller_desired(state, show_id, command.params);
-                    ServerResponse::ok(command.id, json!({ "queued": queued }))
+                    ServerResponse::ok(command.id, serde_json::json!({ "queued": queued }))
                 }
                 _ => ServerResponse::ok(command.id, cloud_presentation_restore(&show_id).await),
             }
@@ -16932,16 +16932,16 @@ fn spawn_cloud_controller_desired(
 /// marked applied; only the program pages' new receipts can say that.
 async fn cloud_presentation_restore(show_id: &str) -> serde_json::Value {
     let Some(held) = cloud_controller::held_for(show_id) else {
-        return json!({ "views": [] });
+        return serde_json::json!({ "views": [] });
     };
     let Some(mut restore) = held.restore.clone() else {
-        return json!({ "controllerEpoch": held.epoch, "views": [] });
+        return serde_json::json!({ "controllerEpoch": held.epoch, "views": [] });
     };
     let (Some(bearer), Ok(web)) = (
         account::stored_session_token(),
         videorc_api::VideorcApiClient::new(),
     ) else {
-        return json!({ "controllerEpoch": held.epoch, "views": [] });
+        return serde_json::json!({ "controllerEpoch": held.epoch, "views": [] });
     };
     let mut pngs: std::collections::HashMap<String, Option<String>> =
         std::collections::HashMap::new();
@@ -16977,7 +16977,7 @@ async fn cloud_presentation_restore(show_id: &str) -> serde_json::Value {
                         .get_mut("asset")
                         .and_then(serde_json::Value::as_object_mut),
                 ) {
-                    asset.insert("png".to_string(), json!(png));
+                    asset.insert("png".to_string(), serde_json::json!(png));
                 }
             }
             // A layer whose pixels did not come back is not re-sent.

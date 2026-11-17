@@ -436,6 +436,7 @@ pub(crate) fn facts_of(
             .collect(),
         restored_views: views.map_or(0, |views| u32::try_from(views.len()).unwrap_or(u32::MAX)),
         cleared,
+        lost: false,
     }
 }
 
