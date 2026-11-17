@@ -46,6 +46,7 @@ import {
   type MotionRect
 } from '../../../shared/cloud-avatar-motion'
 import type { AvatarMotionSource } from '../../../shared/cloud-avatar-view'
+import { pickRoomCameraDevice } from '../../../shared/room-program-camera'
 import type { AnimatorSettings } from '../../../shared/buddy-animator'
 import type { CohostPetAnimatorEvent } from '../../../shared/buddy-animator-public'
 import {
@@ -311,16 +312,18 @@ function qualityOf(quality: ConnectionQuality): CloudRoomQuality {
   }
 }
 
-/** A Chromium device id for the Sources camera, by its plain name. */
+/**
+ * A Chromium device id for the Sources camera, by its plain name. Never
+ * Videorc Camera (plan 249 S23): with the room program on it, the room would
+ * film itself.
+ */
 export async function cameraDeviceIdFor(cameraName: string | null): Promise<string | undefined> {
   if (!cameraName) return undefined
   const devices = await navigator.mediaDevices.enumerateDevices().catch(() => [])
   const inputs = devices
     .filter((device) => device.kind === 'videoinput')
     .map((device) => ({ deviceId: device.deviceId, label: device.label }))
-  return inputs.find(
-    (input) => input.label.trim().toLowerCase() === cameraName.trim().toLowerCase()
-  )?.deviceId
+  return pickRoomCameraDevice(inputs, cameraName)
 }
 
 export async function microphoneDeviceIdFor(

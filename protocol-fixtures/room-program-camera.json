@@ -1,0 +1,142 @@
+{
+  "_comment": "Plan 249 S23: room program frames for Videorc Camera. Checked by room-program-camera.test.ts and room_program_camera.rs. I420 vectors use the CPU compositor's BT.709 video-range helpers (crates/videorc-backend/src/color.rs).",
+  "width": 1280,
+  "height": 720,
+  "fps": 30,
+  "headerBytes": 40,
+  "frameBytes": 3686400,
+  "staleMs": 1000,
+  "source": "room-program-preview",
+  "pausedSource": "room-program-paused",
+  "viewSource": "program-page-report",
+  "encodedOutput": false,
+  "header": {
+    "hex": "565250430101000000050000d002000007000000000000002a0000000000000040222018240a0600",
+    "fields": {
+      "generation": 7,
+      "sequence": 42,
+      "drawnAtUs": 1700000000123456,
+      "width": 1280,
+      "height": 720
+    }
+  },
+  "refusedHeaders": [
+    {
+      "why": "wrong magic",
+      "hex": "56484f460101000000050000d002000007000000000000002a0000000000000040222018240a0600"
+    },
+    {
+      "why": "wrong version",
+      "hex": "565250430201000000050000d002000007000000000000002a0000000000000040222018240a0600"
+    },
+    {
+      "why": "wrong flags",
+      "hex": "565250430100000000050000d002000007000000000000002a0000000000000040222018240a0600"
+    },
+    {
+      "why": "reserved u16 set",
+      "hex": "565250430101010000050000d002000007000000000000002a0000000000000040222018240a0600"
+    },
+    {
+      "why": "reserved u32 set",
+      "hex": "565250430101000000050000d002000007000000010000002a0000000000000040222018240a0600"
+    },
+    {
+      "why": "wrong width",
+      "hex": "565250430101000080070000d002000007000000000000002a0000000000000040222018240a0600"
+    },
+    {
+      "why": "wrong height",
+      "hex": "5652504301010000000500003804000007000000000000002a0000000000000040222018240a0600"
+    },
+    {
+      "why": "generation zero",
+      "hex": "565250430101000000050000d002000000000000000000002a0000000000000040222018240a0600"
+    },
+    {
+      "why": "sequence zero",
+      "hex": "565250430101000000050000d00200000700000000000000000000000000000040222018240a0600"
+    },
+    {
+      "why": "sequence beyond a safe integer",
+      "hex": "565250430101000000050000d00200000700000000000000000000000000200040222018240a0600"
+    }
+  ],
+  "i420": [
+    {
+      "name": "black",
+      "rgb": [0, 0, 0],
+      "y": 16,
+      "u": 128,
+      "v": 128
+    },
+    {
+      "name": "white",
+      "rgb": [255, 255, 255],
+      "y": 235,
+      "u": 128,
+      "v": 128
+    },
+    {
+      "name": "grey",
+      "rgb": [128, 128, 128],
+      "y": 126,
+      "u": 128,
+      "v": 128
+    },
+    {
+      "name": "red",
+      "rgb": [255, 0, 0],
+      "y": 63,
+      "u": 102,
+      "v": 240
+    },
+    {
+      "name": "green",
+      "rgb": [0, 255, 0],
+      "y": 173,
+      "u": 42,
+      "v": 26
+    },
+    {
+      "name": "blue",
+      "rgb": [0, 0, 255],
+      "y": 32,
+      "u": 240,
+      "v": 118
+    },
+    {
+      "name": "ground",
+      "rgb": [13, 13, 15],
+      "y": 27,
+      "u": 129,
+      "v": 128
+    }
+  ],
+  "labels": [
+    {
+      "label": "Videorc Camera",
+      "videorc": true
+    },
+    {
+      "label": "  Videorc Camera  ",
+      "videorc": true
+    },
+    {
+      "label": "Videorc Camera (Windows Virtual Camera)",
+      "videorc": true
+    },
+    {
+      "label": "FaceTime HD Camera",
+      "videorc": false
+    },
+    {
+      "label": "OBS Virtual Camera",
+      "videorc": false
+    },
+    {
+      "label": "Camera (Videorc Camera)",
+      "videorc": false
+    }
+  ]
+}

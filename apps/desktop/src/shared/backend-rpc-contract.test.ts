@@ -4100,6 +4100,8 @@ describe('Videorc Camera wire contract (plan 214 A4)', () => {
     ready: unknown
     streaming: unknown
     streamingUnknownViewers: unknown
+    streamingRoomProgram: unknown
+    readyRoomProgramPaused: unknown
     setParams: unknown
     platformReportParams: unknown
     platformReportParamsBare: unknown
@@ -4115,7 +4117,9 @@ describe('Videorc Camera wire contract (plan 214 A4)', () => {
       fixture.needsSetup,
       fixture.ready,
       fixture.streaming,
-      fixture.streamingUnknownViewers
+      fixture.streamingUnknownViewers,
+      fixture.streamingRoomProgram,
+      fixture.readyRoomProgramPaused
     ]) {
       expect(validateBackendRpcResult('virtualCamera.status', state)).toEqual(state)
       expect(validateBackendRpcResult('virtualCamera.set', state)).toEqual(state)

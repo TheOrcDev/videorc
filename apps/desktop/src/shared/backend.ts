@@ -1,4 +1,9 @@
 import type { RoomCameraFixtureAction, RoomCameraResources } from './room-camera'
+import type {
+  RoomProgramCameraFrame,
+  RoomProgramCameraResources,
+  RoomProgramCameraSendOutcome
+} from './room-program-camera'
 import type { RoomFrameCommand, RoomFrameReply, RoomFrameResources } from './room-frame'
 import type { ManagedOutputProfile } from './cloud-output-profile'
 import type { RoomSystemAudioCommand, RoomSystemAudioFrame } from './room-system-audio'
@@ -4784,7 +4789,15 @@ export interface VirtualCameraStatus {
   platformStep?: VirtualCameraPlatformStep
   /** Plain copy for the status line, present when there is something to say. */
   message?: string
+  /**
+   * Plan 249 S23: present only while a room's Program preview owns the camera
+   * (a reconstruction, never the encoded stream); absent means the Studio program.
+   */
+  source?: VirtualCameraSource
 }
+
+/** Plan 249 S23: what Videorc Camera shows while a room's Program preview owns it. */
+export type VirtualCameraSource = 'room-program-preview' | 'room-program-paused'
 
 /** `camera.lowLight.get` (issue #1066). */
 export interface CameraLowLightParams {
@@ -6508,6 +6521,17 @@ export interface VideorcApi {
   getRoomProcessedCameraResources: () => Promise<RoomCameraResources>
   roomProcessedCamera: (command: RoomFrameCommand) => Promise<RoomFrameReply>
   roomProcessedCameraFixture: (action: RoomCameraFixtureAction) => Promise<unknown>
+  /** Plan 249 S23: whether this run offers the room program as Videorc Camera (dev-gated). */
+  roomProgramCameraAvailable: () => Promise<boolean>
+  /** Plan 249 S23: open the upload for one room generation; Videorc Camera follows it. */
+  openRoomProgramCamera: (generation: number) => Promise<null>
+  /** Plan 249 S23: one 1280x720 RGBA frame; `busy`/`offline` frames are dropped. */
+  sendRoomProgramCameraFrame: (
+    frame: RoomProgramCameraFrame
+  ) => Promise<RoomProgramCameraSendOutcome>
+  /** Plan 249 S23: end the upload; Videorc Camera returns to its Studio source. */
+  closeRoomProgramCamera: (generation: number) => Promise<null>
+  getRoomProgramCameraResources: () => Promise<RoomProgramCameraResources>
   /**
    * What this window sits on (plan 208): the solid base (the default) or the
    * OS glass. Main decides it per window and the preload reads it from

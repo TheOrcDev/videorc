@@ -1,4 +1,9 @@
 import { parseRoomCameraResources } from './room-camera'
+import {
+  ROOM_PROGRAM_CAMERA_SEND_OUTCOMES,
+  parseRoomProgramCameraFrame,
+  parseRoomProgramCameraResources
+} from './room-program-camera'
 import { parseRoomFrameCommand, parseRoomFrameReply, parseRoomFrameResources } from './room-frame'
 import { parseRoomSystemAudioCommand, parseRoomSystemAudioFrame } from './room-system-audio'
 import { parseRoomMicrophoneCommand } from './room-microphone'
@@ -146,6 +151,11 @@ export const electronInvokeApiMethods = {
   'room-camera:processed': 'roomProcessedCamera',
   'room-camera:inspect': 'getRoomProcessedCameraResources',
   'room-camera:fixture': 'roomProcessedCameraFixture',
+  'room-program-camera:available': 'roomProgramCameraAvailable',
+  'room-program-camera:open': 'openRoomProgramCamera',
+  'room-program-camera:frame': 'sendRoomProgramCameraFrame',
+  'room-program-camera:close': 'closeRoomProgramCamera',
+  'room-program-camera:inspect': 'getRoomProgramCameraResources',
   'app:get-runtime-info': 'getRuntimeInfo',
   'app:front-window-watch': 'setFrontWindowWatch',
   'app:self-bundle-ids': 'getSelfBundleIds',
@@ -2120,6 +2130,24 @@ const specificRuntimeInvokeContracts = {
   'room-camera:fixture': invokeContract(
     tupleSchema([enumSchema(['fixture-switch', 'fixture-unplug'])]),
     runtimeSchema('Camera fixture reply', (value) => value)
+  ),
+  // Plan 249 S23: the room's Program preview as Videorc Camera (dev-gated, off).
+  'room-program-camera:available': invokeContract(noArgs, booleanSchema),
+  'room-program-camera:open': invokeContract(
+    tupleSchema([numberSchema({ integer: true, min: 1, max: 0xffff_ffff })])
+  ),
+  'room-program-camera:frame': invokeContract(
+    tupleSchema([
+      runtimeSchema('Room program frame', (value) => parseRoomProgramCameraFrame(value))
+    ]),
+    enumSchema(ROOM_PROGRAM_CAMERA_SEND_OUTCOMES)
+  ),
+  'room-program-camera:close': invokeContract(
+    tupleSchema([numberSchema({ integer: true, min: 1, max: 0xffff_ffff })])
+  ),
+  'room-program-camera:inspect': invokeContract(
+    noArgs,
+    runtimeSchema('Room program resources', (value) => parseRoomProgramCameraResources(value))
   ),
   'room-frame:test': invokeContract(
     tupleSchema([runtimeSchema('Frame command', (value) => parseRoomFrameCommand(value))]),
