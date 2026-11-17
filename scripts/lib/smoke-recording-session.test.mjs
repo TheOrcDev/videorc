@@ -204,6 +204,22 @@ describe('request', () => {
     assert.equal(ws.listenerCount(), 0)
   })
 
+  it('fails at once on a socket that already closed, instead of sending into it', async () => {
+    // A send on a closed WebSocket is dropped without an error, so a harness
+    // that kept asking an app that had quit (a Dock Quit mid-matrix) waited
+    // out every request's full timeout.
+    const ws = fakeSocket({ 'replay.status': { state: 'on' } })
+    ws.close()
+    const startedAt = Date.now()
+    await assert.rejects(
+      request(ws, 180_000, 'replay.status', {}),
+      /Backend connection is closed; replay\.status was not sent/
+    )
+    assert.ok(Date.now() - startedAt < 1000)
+    assert.deepEqual(ws.requestedMethods, [])
+    assert.equal(ws.listenerCount(), 0)
+  })
+
   it('removes its listeners once answered', async () => {
     const ws = fakeSocket({ 'scene.get': { sources: [] } })
     assert.deepEqual(await request(ws, 1000, 'scene.get', {}), { sources: [] })
@@ -216,6 +232,7 @@ function fakeSocket(responses) {
   const closeListeners = new Set()
   return {
     requestedMethods: [],
+    readyState: 1,
     addEventListener(type, listener) {
       if (type === 'message') listeners.add(listener)
       if (type === 'close') closeListeners.add(listener)
@@ -225,6 +242,7 @@ function fakeSocket(responses) {
       if (type === 'close') closeListeners.delete(listener)
     },
     close() {
+      this.readyState = 3
       for (const listener of [...closeListeners]) listener({})
     },
     listenerCount() {
