@@ -1,3 +1,4 @@
+import { talkShowOutputPlan, talkShowOutputStartProblem } from '@/lib/talk-show-outputs'
 import {
   resetRoomFrameSurfaces,
   roomFrameEncodeObserverEnabled,
@@ -15490,7 +15491,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       // the local scene's sources never block a start; the runner's own
       // recording problem does (the wire notes' `recording.problem`).
       if (talkShowRoomOpen) {
-        return talkShowStartBlockedReason(cloudStatus, intent)
+        return (
+          talkShowOutputStartProblem(captureConfig, cloudStatus, intent) ??
+          talkShowStartBlockedReason(cloudStatus, intent)
+        )
       }
       const config = captureConfigForIntent(captureConfig, intent)
       const turnedOff = sceneSourcesTurnedOff(
@@ -16555,6 +16559,15 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
               })
             }
           }
+          if (talkShowRoomOpenRef.current) {
+            const outputProblem = talkShowOutputStartProblem(
+              captureConfigRef.current,
+              cloudStatusRef.current,
+              intent,
+              streamingForStart ?? undefined
+            )
+            if (outputProblem) throw new Error(outputProblem)
+          }
           setStreamHealth(null)
           setStreamTargets([])
           setStartRequestPending(true)
@@ -17334,6 +17347,15 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       setLastError(null)
       setGoLivePartialSetup(null)
       setSuppressCaptionsForSession(false)
+      if (talkShowRoomOpenRef.current) {
+        const outputProblem = talkShowOutputStartProblem(
+          captureConfigRef.current,
+          cloudStatusRef.current,
+          intent,
+          streaming
+        )
+        if (outputProblem) return { kind: 'refused', reason: outputProblem }
+      }
       // Settle the output check before anything is prepared on a platform.
       const topology = await settleStreamOutputTopology(streaming)
       if (topology.reason) {
@@ -17576,19 +17598,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // through the same path the Studio starts it with, once the backend
   // returned it (D6).
   const talkShowOutputs = useCallback((): CloudTestOutput[] => {
-    const video = streamOutputVideoSettings(
-      captureConfigRef.current.video,
-      captureConfigRef.current.streamEnabled ? captureConfigRef.current.streaming : undefined
-    )
-    return [
-      {
-        orientation: 'horizontal',
-        width: video.width,
-        height: video.height,
-        fps: video.fps,
-        videoKbps: video.bitrateKbps
-      }
-    ]
+    const plan = talkShowOutputPlan(captureConfigRef.current)
+    if (plan.problem) throw new Error(plan.problem)
+    return plan.outputs
   }, [])
   const talkShowHostShape = useCallback(
     (): 'rounded' | 'circle' =>

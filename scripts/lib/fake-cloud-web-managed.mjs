@@ -4,6 +4,10 @@ import { createServer, request as httpRequest } from 'node:http'
 import { createServer as createHttpsServer } from 'node:https'
 import { setTimeout as sleep } from 'node:timers/promises'
 import {
+  fakeManagedOutputProblem,
+  fakeManagedOutputProfile
+} from './cloud-parity-outputs-contract.mjs'
+import {
   capabilitiesWithCloud,
   cloudAllowanceBlock,
   mintLiveKitToken,
@@ -498,6 +502,14 @@ export async function startFakeCloudWebManaged({
           )
         )
           return fail(wire.errors.common.find((e) => e.status === 400).code)
+        // Plan 249 S17: the managed talk admission, as the web refuses it.
+        if (body.kind === 'talk') {
+          const problem = fakeManagedOutputProblem(body.outputs)
+          if (problem)
+            return send(managedError('cloud-output-unqualified').status, {
+              error: { code: 'cloud-output-unqualified', message: problem }
+            })
+        }
         if (
           body.kind !== 'talk' &&
           body.outputs.some(
@@ -528,6 +540,9 @@ export async function startFakeCloudWebManaged({
           cameraPublishers: new Set(),
           refs: new Map(),
           show: {
+            ...(body.kind === 'talk'
+              ? { outputProfile: fakeManagedOutputProfile(body.outputs) }
+              : {}),
             id,
             kind: body.kind,
             status: 'ready',

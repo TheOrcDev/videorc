@@ -55,6 +55,7 @@
     ],
     "create": [
       { "status": 403, "code": "cloud-not-entitled" },
+      { "status": 400, "code": "cloud-output-unqualified" },
       { "status": 422, "code": "cloud-quality" },
       { "status": 503, "code": "cloud-full" },
       { "status": 503, "code": "cloud-node-unreachable" },

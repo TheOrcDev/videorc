@@ -1,4 +1,5 @@
 import { parseGraphicsSource, type GraphicsSource } from './cloud-graphics'
+import { parseManagedOutputProfile } from './cloud-output-profile'
 import type {
   CloudArchiveView,
   CloudArchiveStart,
@@ -6397,7 +6398,15 @@ const cloudStatusSchema = objectSchema(
           createdAt: optionalSchema(timestamp),
           expiresAt: optionalSchema(timestamp),
           resumable: booleanSchema,
-          kind: optionalSchema(enumSchema(['solo', 'talk', 'test']))
+          kind: optionalSchema(enumSchema(['solo', 'talk', 'test'])),
+          // Plan 249 S17: what each cloud output really sends.
+          outputProfile: optionalSchema(
+            runtimeSchema('a managed output profile', (value, path) => {
+              const profile = parseManagedOutputProfile(value)
+              if (!profile) throw new RuntimeSchemaError(path, 'a managed output profile')
+              return profile
+            })
+          )
         },
         { allowUnknown: false }
       )

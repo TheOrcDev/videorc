@@ -1397,6 +1397,56 @@ async fn within_room_budget<T>(
 // Only local preparation gets this bound; node create/socket timing is unchanged.
 const ROOM_PREPARE_BUDGET: Duration = Duration::from_secs(1);
 
+/// Plan 249 S17: refuse what a cloud room can't send before the camera is
+/// lent or anything is created (mirrors `shared/cloud-output-profile.ts`
+/// `managedOutputProblem`; the web refuses the same). Above 1080p nothing is
+/// measured, so it is refused, never sent as 1080p under that claim. A 60 fps
+/// or higher-bitrate request is admitted and disclosed in the profile.
+fn validate_room_outputs(outputs: &[crate::cloud_show::CloudTestOutput]) -> Result<()> {
+    use crate::streaming::StreamOutputOrientation;
+    if outputs.is_empty()
+        || outputs.len() > 2
+        || (outputs.len() == 2 && outputs[0].orientation == outputs[1].orientation)
+    {
+        bail!("Choose one output per orientation before opening the room.");
+    }
+    for output in outputs {
+        let (width, height) = match output.orientation {
+            StreamOutputOrientation::Horizontal => (1920_u32, 1080_u32),
+            StreamOutputOrientation::Vertical => (1080_u32, 1920_u32),
+        };
+        if output.width == 0 || output.height == 0 || output.fps == 0 || output.video_kbps == 0 {
+            bail!("Cloud room outputs need a size, a frame rate and a bitrate.");
+        }
+        if u64::from(output.width) * u64::from(height)
+            != u64::from(output.height) * u64::from(width)
+        {
+            match output.orientation {
+                StreamOutputOrientation::Horizontal => {
+                    bail!("A horizontal cloud output must be 16:9.")
+                }
+                StreamOutputOrientation::Vertical => bail!("A vertical cloud output must be 9:16."),
+            }
+        }
+        if output.width > width || output.height > height {
+            let label = if output.width.max(output.height) <= 2560 {
+                "1440p"
+            } else if output.width.max(output.height) <= 3840 {
+                "4K"
+            } else {
+                "This size"
+            };
+            bail!(
+                "Cloud talk shows send 1080p. {label} hasn't been measured on cloud outputs yet, so it can't be used. Choose 1080p or lower for the room, or stream directly."
+            );
+        }
+        if output.fps > 60 {
+            bail!("Cloud talk shows send at most 60 fps.");
+        }
+    }
+    Ok(())
+}
+
 impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
     fn return_room_camera_in_background(&self) -> tokio::task::JoinHandle<()> {
         let camera = self.hooks.camera.clone();
@@ -1533,6 +1583,7 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
                 return Err(RoomOpenRefusal::SessionActive.into());
             }
         }
+        validate_room_outputs(&params.outputs)?;
         // These local steps precede provider selection. If they stall, no
         // create starts; returning the camera cannot extend the RPC deadline.
         match tokio::time::timeout_at(started + ROOM_PREPARE_BUDGET, async {
@@ -2780,6 +2831,73 @@ fn avatar_observation_visible(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn room_output(
+        orientation: crate::streaming::StreamOutputOrientation,
+        width: u32,
+        height: u32,
+        fps: u32,
+        video_kbps: u32,
+    ) -> crate::cloud_show::CloudTestOutput {
+        crate::cloud_show::CloudTestOutput {
+            orientation,
+            width,
+            height,
+            fps,
+            video_kbps,
+        }
+    }
+
+    #[test]
+    fn room_outputs_refuse_unmeasured_sizes_and_admit_disclosed_ones() {
+        use crate::streaming::StreamOutputOrientation::{Horizontal, Vertical};
+        // 1080p30 and 720p, 60 fps and 8 Mbps are admitted: the profile
+        // discloses the 30 fps picture and the 6 Mbps it really sends.
+        assert!(validate_room_outputs(&[room_output(Horizontal, 1920, 1080, 30, 6000)]).is_ok());
+        assert!(validate_room_outputs(&[room_output(Horizontal, 1280, 720, 60, 8000)]).is_ok());
+        assert!(
+            validate_room_outputs(&[
+                room_output(Horizontal, 1920, 1080, 30, 6000),
+                room_output(Vertical, 1080, 1920, 30, 6000),
+            ])
+            .is_ok()
+        );
+        // Above 1080p is refused with its name, never sent as 1080p.
+        let four_k = validate_room_outputs(&[room_output(Horizontal, 3840, 2160, 30, 20000)])
+            .unwrap_err()
+            .to_string();
+        assert!(four_k.contains("4K"), "{four_k}");
+        let qhd = validate_room_outputs(&[room_output(Horizontal, 2560, 1440, 60, 9000)])
+            .unwrap_err()
+            .to_string();
+        assert!(qhd.contains("1440p"), "{qhd}");
+        assert!(validate_room_outputs(&[room_output(Horizontal, 1920, 1080, 120, 6000)]).is_err());
+        assert!(validate_room_outputs(&[room_output(Vertical, 1920, 1080, 30, 6000)]).is_err());
+        assert!(validate_room_outputs(&[]).is_err());
+        assert!(
+            validate_room_outputs(&[
+                room_output(Horizontal, 1920, 1080, 30, 6000),
+                room_output(Horizontal, 1280, 720, 30, 3000),
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn a_managed_output_profile_passes_through_whole() {
+        let wire = serde_json::json!({
+            "version": 1,
+            "requested": [{ "orientation": "horizontal", "width": 1920, "height": 1080, "fps": 60, "videoKbps": 8000, "audioKbps": 160 }],
+            "effective": [{ "orientation": "horizontal", "width": 1920, "height": 1080, "fps": 60, "pictureFps": 30, "videoKbps": 6000, "audioKbps": 160, "differences": ["fps", "bitrate"] }],
+            "qualification": "phase0-1080p30-picture",
+            "higherProfilesQualified": false,
+            "pricePerHour": null,
+            "maxProgramEgresses": 2
+        });
+        let profile: crate::cloud_show::ManagedOutputProfile =
+            serde_json::from_value(wire.clone()).expect("profile");
+        assert_eq!(serde_json::to_value(&profile).expect("json"), wire);
+    }
 
     #[test]
     fn avatar_spend_needs_fresh_enabled_applied_running_output() {

@@ -1,3 +1,4 @@
+import { managedProfileDescription } from '../../../../shared/cloud-output-profile'
 import { createGraphicsView } from '../../../../shared/cloud-graphics-view'
 import type { GraphicsSnapshot } from '../../../../shared/cloud-graphics'
 import type { ReactNode } from 'react'
@@ -147,6 +148,12 @@ export default function ShowStage(): ReactElement {
     >
       <StageWell talkShow={talkShow} />
       <StageControls talkShow={talkShow} />
+      {/* Plan 249 S17: what each cloud output really sends, as the room reported it. */}
+      {cloudStatus?.show?.outputProfile ? (
+        <p className="text-label text-muted-foreground" data-testid="show-stage-output-profile">
+          {managedProfileDescription(cloudStatus.show.outputProfile)}
+        </p>
+      ) : null}
       {talkShow.room.local.problem ? (
         <Alert variant="warning">
           <AlertTitle>{talkShow.room.local.problem}</AlertTitle>

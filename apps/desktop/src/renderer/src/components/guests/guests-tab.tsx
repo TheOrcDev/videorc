@@ -1,3 +1,5 @@
+import { talkShowOutputPlan } from '@/lib/talk-show-outputs'
+import { managedProfileDescription } from '../../../../shared/cloud-output-profile'
 import { useState, type ReactElement } from 'react'
 
 import { ConfirmDialog } from '@/components/confirm-dialog'
@@ -68,7 +70,8 @@ export default function GuestsTab(): ReactElement {
   // A recording or a livestream on this computer holds the camera: a room
   // opens between sessions. An open room's own show never locks the tab.
   const sessionLocked = isSessionActive && phase === 'closed'
-  const disabled = offline || locked || sessionLocked
+  const outputPlan = talkShowOutputPlan(captureConfig)
+  const disabled = offline || locked || sessionLocked || (!roomOpen && !!outputPlan.problem)
   const limits = roomLimits(cloudStatus)
   const limitsLine = roomLimitsLine(limits)
   const people = roomPeople(room, talkShow.hostIdentity)
@@ -113,6 +116,15 @@ export default function GuestsTab(): ReactElement {
           />
         ) : sessionLocked ? (
           <SessionLockAlert reason={ROOM_WAITS_FOR_SESSION} />
+        ) : null}
+        {/* Plan 249 S17: before the room opens, what it will send (or why it
+            can't open); once open, what the room reported it sends. */}
+        {!roomOpen || cloudStatus?.show?.outputProfile ? (
+          <FieldDescription data-testid="cloud-output-profile">
+            {roomOpen
+              ? managedProfileDescription(cloudStatus?.show?.outputProfile)
+              : outputPlan.description}
+          </FieldDescription>
         ) : null}
         <FieldGroup variant="grouped">
           <SettingsRow

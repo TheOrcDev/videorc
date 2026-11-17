@@ -505,6 +505,8 @@ pub struct CloudFallback {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct CloudShowSummary {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_profile: Option<ManagedOutputProfile>,
     pub id: String,
     pub node_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -770,6 +772,51 @@ pub struct CloudTestStatus {
 
 // --- Wire: desktop -> web ------------------------------------------------------
 
+/// Plan 249 S17: what each managed output really sends, as the web reports
+/// it (`lib/cloud/media/output-profile.ts`). Passed to the renderer as
+/// given; never a measurement of an encoded file, never a price.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ManagedOutputProfile {
+    pub version: u32,
+    pub requested: Vec<ManagedRequestedOutput>,
+    pub effective: Vec<ManagedEffectiveOutput>,
+    pub qualification: String,
+    pub higher_profiles_qualified: bool,
+    /// Always null: no price is published for a show.
+    pub price_per_hour: Option<u32>,
+    pub max_program_egresses: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ManagedRequestedOutput {
+    pub orientation: StreamOutputOrientation,
+    pub width: u32,
+    pub height: u32,
+    pub fps: u32,
+    pub video_kbps: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_kbps: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ManagedEffectiveOutput {
+    pub orientation: StreamOutputOrientation,
+    pub width: u32,
+    pub height: u32,
+    /// The encoded stream's rate.
+    pub fps: u32,
+    /// The picture's qualified cadence inside it.
+    pub picture_fps: u32,
+    pub video_kbps: u32,
+    pub audio_kbps: u32,
+    /// What differs from the request: `resolution`, `fps`, `bitrate`.
+    #[serde(default)]
+    pub differences: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ShowOutputSpec {
@@ -823,6 +870,8 @@ fn client_info_with_version(version: String) -> ClientInfo {
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ShowRecord {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_profile: Option<ManagedOutputProfile>,
     pub id: String,
     #[serde(default)]
     pub status: String,
@@ -2127,6 +2176,7 @@ impl CloudShowRuntime {
             },
             allowance: self.entitlement.cloud.clone(),
             show: self.show.as_ref().map(|show| CloudShowSummary {
+                output_profile: show.record.output_profile.clone(),
                 id: show.record.id.clone(),
                 node_id: show.record.node_id.clone(),
                 created_at: show.record.created_at.clone(),
@@ -6152,6 +6202,7 @@ mod tests {
     fn created() -> CreateShowResponse {
         CreateShowResponse {
             show: ShowRecord {
+                output_profile: None,
                 id: "sh_abc".to_string(),
                 status: "ready".to_string(),
                 kind: "solo".to_string(),
@@ -9359,6 +9410,7 @@ mod tests {
             .push_back(Ok(CurrentShowResponse {
                 on_air: None,
                 show: Some(ShowRecord {
+                    output_profile: None,
                     status: "live".to_string(),
                     ..created.show.clone()
                 }),
@@ -9392,6 +9444,7 @@ mod tests {
             .push_back(Ok(CurrentShowResponse {
                 on_air: None,
                 show: Some(ShowRecord {
+                    output_profile: None,
                     status: "live".to_string(),
                     ..created.show.clone()
                 }),
@@ -9447,6 +9500,7 @@ mod tests {
         let harness = harness(true);
         let created = created();
         let stale = ShowRecord {
+            output_profile: None,
             id: "sh_old".to_string(),
             status: "live".to_string(),
             ..created.show.clone()
@@ -9905,6 +9959,7 @@ mod tests {
         CurrentShowResponse {
             on_air: None,
             show: Some(ShowRecord {
+                output_profile: None,
                 status: "hold".to_string(),
                 ..created.show.clone()
             }),
@@ -10327,6 +10382,7 @@ mod tests {
     fn lost_answer(status: &str, end_reason: Option<&str>) -> LostShowResponse {
         LostShowResponse {
             show: ShowRecord {
+                output_profile: None,
                 status: status.to_string(),
                 end_reason: end_reason.map(str::to_string),
                 ..created().show
@@ -11268,6 +11324,7 @@ mod tests {
     async fn a_test_show_left_open_on_the_web_is_ended_before_a_go_live_or_a_new_test() {
         // A crashed desktop's test still holds the account's one open show.
         let stale = ShowRecord {
+            output_profile: None,
             id: "sh_test".to_string(),
             status: "live".to_string(),
             kind: "test".to_string(),
@@ -11347,6 +11404,7 @@ mod tests {
         let busy = harness(true);
         *busy.context.web.create.lock().unwrap() =
             Some(Err(CloudApiError::ShowLive(Some(Box::new(ShowRecord {
+                output_profile: None,
                 status: "live".to_string(),
                 ..created().show
             })))));
@@ -11715,6 +11773,7 @@ mod tests {
             .push_back(Ok(CurrentShowResponse {
                 on_air: None,
                 show: Some(ShowRecord {
+                    output_profile: None,
                     status: "live".to_string(),
                     ..created().show
                 }),
@@ -11754,6 +11813,7 @@ mod tests {
             .push_back(Ok(CurrentShowResponse {
                 on_air: None,
                 show: Some(ShowRecord {
+                    output_profile: None,
                     status: "ended".to_string(),
                     ..created().show
                 }),
@@ -12000,6 +12060,7 @@ mod tests {
         let runtime_with = |kind: &str| CloudShowRuntime {
             show: Some(ActiveShow {
                 record: ShowRecord {
+                    output_profile: None,
                     kind: kind.to_string(),
                     ..created().show
                 },
@@ -12062,6 +12123,7 @@ mod tests {
         CurrentShowResponse {
             on_air: None,
             show: Some(ShowRecord {
+                output_profile: None,
                 status: status.to_string(),
                 ..created.show
             }),
@@ -15638,6 +15700,7 @@ mod tests {
             CurrentShowResponse {
                 on_air: None,
                 show: Some(ShowRecord {
+                    output_profile: None,
                     status: "live".to_string(),
                     ..created.show
                 }),
