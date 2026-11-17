@@ -884,9 +884,18 @@ pub fn load_interval_report(
     let mut views = Vec::new();
     let mut authors: Vec<(String, u64)> = Vec::new();
     for session_id in &sources {
-        samples.extend(crate::viewer_stats::session_viewer_history(
-            database, session_id,
-        )?);
+        // A feeding session can predate the interval (a resume, a leg live
+        // before the show): only samples inside the interval count.
+        samples.extend(
+            crate::viewer_stats::session_viewer_history(database, session_id)?
+                .into_iter()
+                .filter(|sample| {
+                    DateTime::parse_from_rfc3339(&sample.at).is_ok_and(|at| {
+                        let at = at.with_timezone(&Utc);
+                        at >= source.started_at && at <= source.ended_at
+                    })
+                }),
+        );
         views.extend(crate::viewer_stats::session_view_counts(
             database, session_id,
         )?);
