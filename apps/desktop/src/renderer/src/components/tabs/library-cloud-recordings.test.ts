@@ -345,5 +345,8 @@ it('opens the registered local take and does not offer an expired cloud download
   })
   window.removeEventListener('videorc:navigate-workspace', navigate)
   expect(expired.textContent).toContain('Cloud copy expired')
-  expect(expired.querySelector('button')).toBeNull()
+  // Plan 249 S19: the show's markers stay readable; nothing downloads or opens.
+  expect([...expired.querySelectorAll('button')].map((b) => b.textContent)).toEqual([
+    'Show markers'
+  ])
 })
