@@ -30,6 +30,13 @@ pub(crate) struct LiveStatus {
     destinations: Vec<Destination>,
     alerts: Vec<Alert>,
     app: App,
+    /// Plan 249 S25: the cloud show this beat speaks for, and this
+    /// computer's controller epoch for it (S24), so the web combines the
+    /// show's real legs with the context of its current controller only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    show_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    controller_epoch: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -95,6 +102,8 @@ pub(crate) struct Snapshot<'a> {
     pub cloud: bool,
     pub targets: &'a [StreamTargetRuntime],
     pub alerts: &'a [WatchdogAlert],
+    pub show_id: Option<&'a str>,
+    pub controller_epoch: Option<u64>,
 }
 
 pub(crate) fn build(
@@ -188,6 +197,8 @@ pub(crate) fn build(
         cloud: snapshot.cloud,
         destinations,
         alerts,
+        show_id: snapshot.show_id.map(str::to_string),
+        controller_epoch: snapshot.controller_epoch,
         app: App {
             version: snapshot.app_version.into(),
             os: match std::env::consts::OS {
@@ -226,6 +237,49 @@ struct Latest {
     alerts: WatchdogAlertsView,
     cloud_session: Option<String>,
     cloud_bound: bool,
+    /// Plan 249 S25: the show the cloud state names, and its open live
+    /// interval when it is a talk show this computer controls.
+    cloud_show: Option<String>,
+    room: Option<RoomBeat>,
+}
+
+/// A talk show live on the cloud: no local session, its legs are the
+/// cloud's, its time is the server's interval.
+#[derive(Debug, Clone)]
+struct RoomBeat {
+    show_id: String,
+    interval_id: String,
+    live_since: DateTime<Utc>,
+    legs: Vec<StreamTargetRuntime>,
+    recording: bool,
+}
+
+fn room_beat(status: &crate::cloud_show::CloudStatus) -> Option<RoomBeat> {
+    let show = status.show.as_ref()?;
+    if show.kind.as_deref() != Some("talk") || !crate::cloud_controller::ownership_allows(&show.id)
+    {
+        return None;
+    }
+    let interval = status.live_interval.as_ref()?;
+    if interval.ended_at.is_some() || interval.id.trim().is_empty() {
+        return None;
+    }
+    let live_since = DateTime::parse_from_rfc3339(interval.live_since.as_deref()?)
+        .ok()?
+        .with_timezone(&Utc);
+    Some(RoomBeat {
+        show_id: show.id.clone(),
+        interval_id: interval.id.clone(),
+        live_since,
+        legs: status.legs.clone(),
+        recording: status.recording.as_ref().is_some_and(|r| r.active),
+    })
+}
+
+fn held_epoch(show_id: Option<&str>) -> Option<u64> {
+    show_id
+        .and_then(crate::cloud_controller::held_for)
+        .map(|held| held.epoch)
 }
 
 impl Latest {
@@ -264,6 +318,21 @@ impl Latest {
                     .and_then(|v| v.as_str())
                     .map(str::to_owned);
                 self.cloud_bound = event.payload.get("show").is_some_and(|v| !v.is_null());
+                self.cloud_show = event
+                    .payload
+                    .get("show")
+                    .and_then(|show| show.get("id"))
+                    .and_then(|v| v.as_str())
+                    .map(str::to_owned);
+                let room = crate::cloud_show::CloudStatus::deserialize(&event.payload)
+                    .ok()
+                    .and_then(|status| room_beat(&status));
+                if room.as_ref().map(|r| &r.interval_id)
+                    != self.room.as_ref().map(|r| &r.interval_id)
+                {
+                    self.clocks = StateClocks::default();
+                }
+                self.room = room;
             }
             _ => {}
         }
@@ -275,7 +344,9 @@ impl Latest {
         clocks: &mut StateClocks,
         now: DateTime<Utc>,
     ) -> Option<LiveStatus> {
-        let (id, started_at) = self.tracker.active_live()?;
+        let Some((id, started_at)) = self.tracker.active_live() else {
+            return self.project_room(title, clocks, now);
+        };
         let targets = self
             .targets
             .as_ref()
@@ -300,6 +371,48 @@ impl Latest {
                 cloud: self.cloud_bound && self.cloud_session.as_deref() == Some(id),
                 targets,
                 alerts,
+                show_id: self
+                    .cloud_show
+                    .as_deref()
+                    .filter(|_| self.cloud_bound && self.cloud_session.as_deref() == Some(id)),
+                controller_epoch: held_epoch(
+                    self.cloud_show
+                        .as_deref()
+                        .filter(|_| self.cloud_bound && self.cloud_session.as_deref() == Some(id)),
+                ),
+            },
+            clocks,
+            0,
+            now,
+        ))
+    }
+
+    /// Plan 249 S25: a talk show live on the cloud beats from its interval,
+    /// with the cloud's legs, while this computer controls it.
+    fn project_room(
+        &self,
+        title: &str,
+        clocks: &mut StateClocks,
+        now: DateTime<Utc>,
+    ) -> Option<LiveStatus> {
+        let room = self.room.as_ref()?;
+        let alerts = if self.alerts.session_id.as_deref() == Some(room.show_id.as_str()) {
+            &self.alerts.alerts[..]
+        } else {
+            &[]
+        };
+        Some(build(
+            &Snapshot {
+                session_id: &room.interval_id,
+                started_at: room.live_since,
+                title,
+                app_version: &crate::performance_check::desktop_app_version(),
+                recording: room.recording,
+                cloud: true,
+                targets: &room.legs,
+                alerts,
+                show_id: Some(&room.show_id),
+                controller_epoch: held_epoch(Some(&room.show_id)),
             },
             clocks,
             0,
@@ -551,6 +664,71 @@ mod sender_tests {
             .project("Title", &mut StateClocks::default(), Utc::now())
             .unwrap()
     }
+    /// Plan 249 S25: a talk show has no local session; it beats from its
+    /// live interval with the cloud's legs, and stops when the server ends it.
+    #[test]
+    fn a_talk_show_beats_from_its_live_interval_and_names_its_show() {
+        let mut status = crate::cloud_show::CloudShowRuntime::default().status();
+        status.show = Some(
+            serde_json::from_value(
+                json!({"id": "sh_s25_room", "nodeId": "managed", "resumable": false, "kind": "talk"}),
+            )
+            .unwrap(),
+        );
+        status.live_interval = Some(crate::cloud_show::CloudLiveInterval {
+            id: "iv-s25-room".into(),
+            requested_at: "2026-11-16T18:00:00Z".into(),
+            live_since: Some("2026-11-16T18:00:30Z".into()),
+            end_requested_at: None,
+            ended_at: None,
+        });
+        status.legs = vec![StreamTargetRuntime {
+            target_id: "yt".into(),
+            platform: crate::streaming::StreamPlatform::Youtube,
+            label: "Main channel".into(),
+            state: StreamTargetState::Live,
+            message: None,
+            redacted_url: None,
+            uplink_overflows: None,
+            uplink_overflow_at: None,
+        }];
+        let mut latest = Latest::default();
+        latest.observe(
+            &event("cloud.state", serde_json::to_value(&status).unwrap()),
+            Utc::now(),
+        );
+        let beat = latest
+            .project("Room", &mut StateClocks::default(), Utc::now())
+            .expect("a live talk show beats");
+        assert_eq!(beat.session_id, "iv-s25-room");
+        assert_eq!(beat.started_at, "2026-11-16T18:00:30Z");
+        assert!(beat.cloud);
+        assert_eq!(beat.show_id.as_deref(), Some("sh_s25_room"));
+        assert_eq!(beat.destinations.len(), 1);
+        // The server ended the interval: no beat (the sender deletes it).
+        status.live_interval.as_mut().unwrap().ended_at = Some("2026-11-16T18:30:00Z".into());
+        latest.observe(
+            &event("cloud.state", serde_json::to_value(&status).unwrap()),
+            Utc::now(),
+        );
+        assert!(
+            latest
+                .project("Room", &mut StateClocks::default(), Utc::now())
+                .is_none()
+        );
+        // A solo show is beaten by its local session, as before.
+        status.show.as_mut().unwrap().kind = Some("solo".into());
+        status.live_interval.as_mut().unwrap().ended_at = None;
+        latest.observe(
+            &event("cloud.state", serde_json::to_value(&status).unwrap()),
+            Utc::now(),
+        );
+        assert!(
+            latest
+                .project("Room", &mut StateClocks::default(), Utc::now())
+                .is_none()
+        );
+    }
     #[tokio::test]
     async fn start_change_heartbeat_and_end_delete() {
         let (access, web, task) = fake().await;
@@ -778,6 +956,8 @@ mod tests {
                 cloud: false,
                 targets,
                 alerts,
+                show_id: None,
+                controller_epoch: None,
             },
             &mut StateClocks::default(),
             1,
@@ -840,6 +1020,8 @@ mod tests {
             cloud: false,
             targets: &targets,
             alerts: &[],
+            show_id: None,
+            controller_epoch: None,
         };
         let first = build(&snapshot, &mut clocks, 1, at());
         let later = build(

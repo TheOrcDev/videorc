@@ -398,6 +398,7 @@ fn same_account(a: &str, b: &str) -> bool {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct QueuedReport {
+    /// The local session, or for a cloud interval its show.
     pub session_id: String,
     pub report_id: String,
     pub platforms: Vec<StreamPlatform>,
@@ -405,6 +406,15 @@ pub(crate) struct QueuedReport {
     pub due_at: DateTime<Utc>,
     pub ended_at: DateTime<Utc>,
     pub attempts: u32,
+    /// Plan 249 S25: the cloud live interval this report covers.
+    pub interval: Option<IntervalWindow>,
+}
+
+/// Plan 249 S25: one cloud live interval, as the server timed it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct IntervalWindow {
+    pub interval_id: String,
+    pub started_at: DateTime<Utc>,
 }
 
 fn parse_utc(value: &str) -> Option<DateTime<Utc>> {
@@ -446,7 +456,130 @@ pub(crate) fn enqueue(
     Ok(added == 1)
 }
 
+/// Plan 249 S25: queues the report of one ended cloud live interval. Its id
+/// is derived from show and interval, so a report another computer already
+/// sent for it is answered `already-sent`. Returns whether a row was added.
+pub(crate) fn enqueue_interval(
+    database: &Database,
+    session: &crate::cloud_output_session::OutputSession,
+    ended_at: DateTime<Utc>,
+    account_email: &str,
+    now: DateTime<Utc>,
+) -> anyhow::Result<bool> {
+    let conn = database.lock()?;
+    let due_at = now + TimeDelta::from_std(SETTLE).unwrap_or(TimeDelta::seconds(60));
+    let added = conn.execute(
+        "INSERT INTO cloud_interval_report_emails (
+            show_id, interval_id, report_id, platforms_json, account_email, status, due_at,
+            started_at, ended_at, attempts, updated_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0, ?10)
+         ON CONFLICT(show_id, interval_id) DO NOTHING",
+        params![
+            session.show_id,
+            session.interval_id,
+            crate::cloud_output_session::report_id(session),
+            serde_json::to_string(&session.platforms)?,
+            account_email.trim(),
+            STATUS_QUEUED,
+            stamp(due_at),
+            stamp(session.live_since),
+            stamp(ended_at),
+            stamp(now),
+        ],
+    )?;
+    Ok(added == 1)
+}
+
+/// Plan 249 S25: a local session fed this solo interval (idempotent).
+pub(crate) fn note_interval_session(
+    database: &Database,
+    show_id: &str,
+    interval_id: &str,
+    session_id: &str,
+) -> anyhow::Result<()> {
+    let conn = database.lock()?;
+    conn.execute(
+        "INSERT OR IGNORE INTO cloud_interval_sessions (interval_id, show_id, session_id)
+         VALUES (?1, ?2, ?3)",
+        params![interval_id, show_id, session_id],
+    )?;
+    Ok(())
+}
+
+fn interval_sessions(database: &Database, interval_id: &str) -> anyhow::Result<Vec<String>> {
+    let conn = database.lock()?;
+    let mut statement = conn.prepare(
+        "SELECT session_id FROM cloud_interval_sessions WHERE interval_id = ?1 ORDER BY rowid",
+    )?;
+    let rows = statement.query_map(params![interval_id], |row| row.get::<_, String>(0))?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
 pub(crate) fn queued_reports(database: &Database) -> anyhow::Result<Vec<QueuedReport>> {
+    let mut reports = queued_session_reports(database)?;
+    reports.extend(queued_interval_reports(database)?);
+    reports.sort_by_key(|report| report.due_at);
+    Ok(reports)
+}
+
+fn queued_interval_reports(database: &Database) -> anyhow::Result<Vec<QueuedReport>> {
+    let conn = database.lock()?;
+    let mut statement = conn.prepare(
+        "SELECT show_id, interval_id, report_id, platforms_json, account_email, due_at,
+                started_at, ended_at, attempts
+         FROM cloud_interval_report_emails WHERE status = ?1 ORDER BY due_at ASC",
+    )?;
+    let rows = statement.query_map(params![STATUS_QUEUED], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+            row.get::<_, String>(4)?,
+            row.get::<_, String>(5)?,
+            row.get::<_, String>(6)?,
+            row.get::<_, String>(7)?,
+            row.get::<_, i64>(8)?,
+        ))
+    })?;
+    let mut reports = Vec::new();
+    for row in rows {
+        let (
+            show_id,
+            interval_id,
+            report_id,
+            platforms,
+            account_email,
+            due_at,
+            started_at,
+            ended_at,
+            attempts,
+        ) = row?;
+        let (Some(due_at), Some(started_at), Some(ended_at)) = (
+            parse_utc(&due_at),
+            parse_utc(&started_at),
+            parse_utc(&ended_at),
+        ) else {
+            continue;
+        };
+        reports.push(QueuedReport {
+            session_id: show_id,
+            report_id,
+            platforms: serde_json::from_str(&platforms).unwrap_or_default(),
+            account_email,
+            due_at,
+            ended_at,
+            attempts: u32::try_from(attempts).unwrap_or(0),
+            interval: Some(IntervalWindow {
+                interval_id,
+                started_at,
+            }),
+        });
+    }
+    Ok(reports)
+}
+
+fn queued_session_reports(database: &Database) -> anyhow::Result<Vec<QueuedReport>> {
     let conn = database.lock()?;
     let mut statement = conn.prepare(
         "SELECT session_id, report_id, platforms_json, account_email, due_at, ended_at, attempts
@@ -477,6 +610,7 @@ pub(crate) fn queued_reports(database: &Database) -> anyhow::Result<Vec<QueuedRe
             due_at,
             ended_at,
             attempts: u32::try_from(attempts).unwrap_or(0),
+            interval: None,
         });
     }
     Ok(reports)
@@ -484,31 +618,56 @@ pub(crate) fn queued_reports(database: &Database) -> anyhow::Result<Vec<QueuedRe
 
 fn set_status(
     database: &Database,
-    session_id: &str,
+    report: &QueuedReport,
     status: &str,
     now: DateTime<Utc>,
 ) -> anyhow::Result<()> {
     let conn = database.lock()?;
-    conn.execute(
-        "UPDATE stream_report_emails SET status = ?2, updated_at = ?3 WHERE session_id = ?1",
-        params![session_id, status, stamp(now)],
-    )?;
+    match &report.interval {
+        Some(window) => conn.execute(
+            "UPDATE cloud_interval_report_emails SET status = ?3, updated_at = ?4
+             WHERE show_id = ?1 AND interval_id = ?2",
+            params![report.session_id, window.interval_id, status, stamp(now)],
+        )?,
+        None => conn.execute(
+            "UPDATE stream_report_emails SET status = ?2, updated_at = ?3 WHERE session_id = ?1",
+            params![report.session_id, status, stamp(now)],
+        )?,
+    };
     Ok(())
 }
 
 fn reschedule(
     database: &Database,
-    session_id: &str,
+    report: &QueuedReport,
     attempts: u32,
     due_at: DateTime<Utc>,
     now: DateTime<Utc>,
 ) -> anyhow::Result<()> {
     let conn = database.lock()?;
-    conn.execute(
-        "UPDATE stream_report_emails SET attempts = ?2, due_at = ?3, updated_at = ?4
-         WHERE session_id = ?1",
-        params![session_id, i64::from(attempts), stamp(due_at), stamp(now)],
-    )?;
+    match &report.interval {
+        Some(window) => conn.execute(
+            "UPDATE cloud_interval_report_emails SET attempts = ?3, due_at = ?4, updated_at = ?5
+             WHERE show_id = ?1 AND interval_id = ?2",
+            params![
+                report.session_id,
+                window.interval_id,
+                i64::from(attempts),
+                stamp(due_at),
+                stamp(now)
+            ],
+        )?,
+        None => conn.execute(
+            "UPDATE stream_report_emails SET attempts = ?2, due_at = ?3, updated_at = ?4
+             WHERE session_id = ?1",
+            params![
+                report.session_id,
+                i64::from(attempts),
+                stamp(due_at),
+                stamp(now)
+            ],
+        )?,
+    };
     Ok(())
 }
 
@@ -523,7 +682,7 @@ pub(crate) fn drop_other_accounts(
     for report in queued_reports(database)? {
         let keep = current_email.is_some_and(|email| same_account(email, &report.account_email));
         if !keep {
-            set_status(database, &report.session_id, STATUS_DROPPED, now)?;
+            set_status(database, &report, STATUS_DROPPED, now)?;
             dropped += 1;
         }
     }
@@ -725,12 +884,30 @@ pub(crate) async fn deliver(
         }
         PreferenceAnswer::Retry => return retry_or_fail(),
     }
-    let built = crate::stream_report::load_report(
-        &state.database,
-        &report.session_id,
-        report.report_id.clone(),
-        report.platforms.clone(),
-    );
+    let built = match &report.interval {
+        Some(window) => {
+            interval_sessions(&state.database, &window.interval_id).and_then(|sessions| {
+                crate::stream_report::load_interval_report(
+                    &state.database,
+                    &crate::stream_report::IntervalReportSource {
+                        show_id: report.session_id.clone(),
+                        interval_id: window.interval_id.clone(),
+                        sessions,
+                        started_at: window.started_at,
+                        ended_at: report.ended_at,
+                    },
+                    report.report_id.clone(),
+                    report.platforms.clone(),
+                )
+            })
+        }
+        None => crate::stream_report::load_report(
+            &state.database,
+            &report.session_id,
+            report.report_id.clone(),
+            report.platforms.clone(),
+        ),
+    };
     let built = match built {
         Ok(Some(built)) => built,
         Ok(None) => return Delivery::Dropped,
@@ -761,14 +938,14 @@ pub(crate) async fn deliver(
 /// Records what became of one report.
 fn settle(database: &Database, report: &QueuedReport, delivery: Delivery, now: DateTime<Utc>) {
     let result = match delivery {
-        Delivery::Sent => set_status(database, &report.session_id, STATUS_SENT, now),
-        Delivery::Disabled => set_status(database, &report.session_id, STATUS_DISABLED, now),
-        Delivery::Dropped => set_status(database, &report.session_id, STATUS_DROPPED, now),
-        Delivery::Expired => set_status(database, &report.session_id, STATUS_EXPIRED, now),
-        Delivery::Failed => set_status(database, &report.session_id, STATUS_FAILED, now),
+        Delivery::Sent => set_status(database, report, STATUS_SENT, now),
+        Delivery::Disabled => set_status(database, report, STATUS_DISABLED, now),
+        Delivery::Dropped => set_status(database, report, STATUS_DROPPED, now),
+        Delivery::Expired => set_status(database, report, STATUS_EXPIRED, now),
+        Delivery::Failed => set_status(database, report, STATUS_FAILED, now),
         Delivery::Retry(due_at) => reschedule(
             database,
-            &report.session_id,
+            report,
             report.attempts.saturating_add(1),
             due_at,
             now,
@@ -831,6 +1008,7 @@ pub(crate) fn spawn(state: &AppState) {
 
 async fn run_observer(state: AppState, mut events: broadcast::Receiver<ServerEvent>) {
     let mut tracker = LiveTracker::default();
+    let mut intervals = crate::cloud_output_session::OutputSessionTracker::default();
     loop {
         let event = match events.recv().await {
             Ok(event) => event,
@@ -852,10 +1030,19 @@ async fn run_observer(state: AppState, mut events: broadcast::Receiver<ServerEve
             }
             continue;
         }
+        if event.event == crate::cloud_show::CLOUD_STATE_EVENT {
+            observe_cloud_interval(&state, &mut intervals, &event).await;
+            continue;
+        }
         let Some(ended) = tracker.observe(&event, Utc::now()) else {
             continue;
         };
         if !worth_a_report(&ended) {
+            continue;
+        }
+        // Plan 249 S25: a local session that fed a cloud live interval is
+        // reported once, by the interval, however often it was resumed.
+        if crate::cloud_output_session::local_session_bound(&ended.session_id) {
             continue;
         }
         // Signed out: nobody to email.
@@ -863,6 +1050,50 @@ async fn run_observer(state: AppState, mut events: broadcast::Receiver<ServerEve
             continue;
         };
         match enqueue(&state.database, &ended, &email, Utc::now()) {
+            Ok(true) => state.stream_report.wake.notify_one(),
+            Ok(false) => {}
+            Err(error) => tracing::warn!("Stream report: could not queue the report: {error:#}"),
+        }
+    }
+}
+
+/// Plan 249 S25: a cloud live interval this computer may act for queues
+/// its one report when the server ends it.
+async fn observe_cloud_interval(
+    state: &AppState,
+    intervals: &mut crate::cloud_output_session::OutputSessionTracker,
+    event: &ServerEvent,
+) {
+    use crate::cloud_output_session::OutputEvent;
+    let Ok(status) = crate::cloud_show::CloudStatus::deserialize(&event.payload) else {
+        return;
+    };
+    let now = Utc::now();
+    // Every local session that fed the open interval (each solo resume is
+    // a new one), so its report reads all of their rows.
+    if let Some(local) = status.session_id.as_deref()
+        && let Some(interval) = crate::cloud_services::canonical_live_interval(&status)
+        && !interval.ended
+        && let Some(show) = status.show.as_ref()
+        && crate::cloud_controller::ownership_allows(&show.id)
+        && let Err(error) = note_interval_session(&state.database, &show.id, &interval.id, local)
+    {
+        tracing::warn!("Stream report: could not note the interval's session: {error:#}");
+    }
+    for output in intervals.observe(&status, now, crate::cloud_controller::ownership_allows) {
+        let OutputEvent::Ended {
+            session, ended_at, ..
+        } = &output
+        else {
+            continue;
+        };
+        if output.seconds_live().unwrap_or(0) < MIN_STREAM_SECONDS {
+            continue;
+        }
+        let Some(email) = signed_in_email(state).await else {
+            continue;
+        };
+        match enqueue_interval(&state.database, session, *ended_at, &email, now) {
             Ok(true) => state.stream_report.wake.notify_one(),
             Ok(false) => {}
             Err(error) => tracing::warn!("Stream report: could not queue the report: {error:#}"),
@@ -1425,6 +1656,120 @@ mod tests {
         )
         .unwrap();
         queued_reports(&state.database).unwrap().remove(0)
+    }
+
+    /// Plan 249 S25: a solo show resumed once is one interval and one
+    /// report, timed by the server and reading both feeding sessions.
+    #[tokio::test]
+    async fn a_cloud_interval_is_one_report_across_a_resume_with_a_derived_id() {
+        use crate::cloud_output_session::{OutputSession, report_id};
+        let state = test_state();
+        for id in ["local-1", "local-2"] {
+            seed_live_session(
+                &state.database,
+                id,
+                "2026-11-14T17:58:00Z",
+                "2026-11-14T18:30:00Z",
+            );
+        }
+        for (id, at_viewers, count) in [
+            ("local-1", "2026-11-14T18:05:00Z", 10),
+            ("local-2", "2026-11-14T18:40:00Z", 25),
+            // Before the first leg went live: never counted.
+            ("local-1", "2026-11-14T17:59:00Z", 99),
+        ] {
+            state
+                .database
+                .add_session_log(
+                    id,
+                    crate::protocol::HealthLevel::Info,
+                    crate::viewer_stats::VIEWER_SAMPLE_LOG_CODE,
+                    &format!(
+                        r#"{{"sessionId":"{id}","platforms":[{{"platform":"youtube","count":{count}}}],"total":{count},"at":"{at_viewers}"}}"#
+                    ),
+                    None,
+                )
+                .unwrap();
+        }
+        let session = OutputSession {
+            show_id: "sh_solo".to_string(),
+            interval_id: "iv_1".to_string(),
+            kind: Some("solo".to_string()),
+            live_since: at(0),
+            platforms: vec![StreamPlatform::Youtube],
+            local_session_id: Some("local-2".to_string()),
+        };
+        for local in ["local-1", "local-2", "local-2"] {
+            note_interval_session(&state.database, "sh_solo", "iv_1", local).unwrap();
+        }
+        assert!(
+            enqueue_interval(
+                &state.database,
+                &session,
+                at(3_000),
+                "ada@example.com",
+                at(3_000)
+            )
+            .unwrap()
+        );
+        // Seen again (a relaunch, a poll): nothing more is queued.
+        assert!(
+            !enqueue_interval(
+                &state.database,
+                &session,
+                at(3_000),
+                "ada@example.com",
+                at(3_010)
+            )
+            .unwrap()
+        );
+        // A resumed local session ending is not a report of its own.
+        crate::cloud_output_session::note_status(&{
+            let mut status = crate::cloud_show::CloudShowRuntime::default().status();
+            status.show = Some(
+                serde_json::from_value(json!({"id": "sh_solo", "nodeId": "managed", "resumable": false, "kind": "solo"}))
+                    .unwrap(),
+            );
+            status.live_interval = Some(crate::cloud_show::CloudLiveInterval {
+                id: "iv_1".to_string(),
+                requested_at: "2026-11-14T18:00:00Z".to_string(),
+                live_since: Some("2026-11-14T18:00:00Z".to_string()),
+                end_requested_at: None,
+                ended_at: None,
+            });
+            status.session_id = Some("local-2".to_string());
+            status
+        });
+        assert!(crate::cloud_output_session::local_session_bound("local-2"));
+        let queued = queued_reports(&state.database).unwrap();
+        assert_eq!(queued.len(), 1);
+        let report = queued[0].clone();
+        assert_eq!(report.report_id, report_id(&session));
+        let (base, web) = fake_web(
+            (200, json!({ "enabled": true, "email": "ada@example.com" })),
+            (200, json!({ "status": "sent" })),
+        )
+        .await;
+        let client = http_client().unwrap();
+        let delivery = deliver(
+            &state,
+            &client,
+            Some(&access(&base, "ada@example.com")),
+            &report,
+            at(3_100),
+        )
+        .await;
+        assert_eq!(delivery, Delivery::Sent);
+        let received = web.received.lock().unwrap().clone();
+        let body = &received[1].1;
+        assert_eq!(body["reportId"], report_id(&session));
+        assert_eq!(body["startedAt"], "2026-11-14T18:00:00Z");
+        assert_eq!(body["endedAt"], "2026-11-14T18:50:00Z");
+        // Both feeding sessions, nothing before the interval went live.
+        assert_eq!(body["viewers"]["peak"], 25);
+        assert_eq!(body["platforms"], json!(["youtube"]));
+        settle(&state.database, &report, delivery, at(3_100));
+        assert!(queued_reports(&state.database).unwrap().is_empty());
     }
 
     fn access(base_url: &str, email: &str) -> WebAccess {

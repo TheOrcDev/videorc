@@ -176,7 +176,8 @@ if (
     'views',
     'graphics',
     'alpha-spike',
-    'handoff'
+    'handoff',
+    'reporting'
   ].includes(selected.case)
 ) {
   throw new Error(
@@ -210,7 +211,9 @@ const run =
       ? (await import('./lib/cloud-parity-lifecycle.mjs')).runLifecycle
       : selected.case === 'services'
         ? (await import('./lib/cloud-parity-services.mjs')).runServices
-        : runBaseline
+        : selected.case === 'reporting'
+          ? (await import('./lib/cloud-parity-reporting.mjs')).runReporting
+          : runBaseline
 const { output } = await run({
   desktopRoot: fileURLToPath(new URL('../', import.meta.url)),
   webRoot,
