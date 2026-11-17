@@ -837,6 +837,111 @@ pub fn load_report(
     })))
 }
 
+/// Plan 249 S25: what one cloud live interval's report reads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IntervalReportSource {
+    pub show_id: String,
+    pub interval_id: String,
+    /// Local sessions that fed this interval (solo cloud); empty for a room,
+    /// whose rows are kept under the show id.
+    pub sessions: Vec<String>,
+    /// The server's interval: first leg live, and its end.
+    pub started_at: DateTime<Utc>,
+    pub ended_at: DateTime<Utc>,
+}
+
+fn show_interval_count(database: &Database, show_id: &str) -> anyhow::Result<i64> {
+    let conn = database.lock()?;
+    Ok(conn.query_row(
+        "SELECT COUNT(*) FROM cloud_live_intervals WHERE show_id = ?1 AND live_since IS NOT NULL",
+        params![show_id],
+        |row| row.get(0),
+    )?)
+}
+
+/// Builds the report of one cloud live interval: its time is the server's
+/// interval (an open room off air is never counted), its viewer and view
+/// reads are the ones inside it. Counts kept for a whole session (chat,
+/// audience, community) are used only when they describe this interval
+/// alone: one feeding session, or a room show with this one interval.
+/// `None` when the interval never lasted.
+pub fn load_interval_report(
+    database: &Database,
+    source: &IntervalReportSource,
+    report_id: String,
+    platforms: Vec<StreamPlatform>,
+) -> anyhow::Result<Option<StreamReport>> {
+    if source.ended_at <= source.started_at {
+        return Ok(None);
+    }
+    let room = source.sessions.is_empty();
+    let sources: Vec<String> = if room {
+        vec![source.show_id.clone()]
+    } else {
+        source.sessions.clone()
+    };
+    let mut samples = Vec::new();
+    let mut views = Vec::new();
+    let mut authors: Vec<(String, u64)> = Vec::new();
+    for session_id in &sources {
+        samples.extend(crate::viewer_stats::session_viewer_history(
+            database, session_id,
+        )?);
+        views.extend(crate::viewer_stats::session_view_counts(
+            database, session_id,
+        )?);
+        // One chatter in two feeding sessions is still one chatter.
+        for (key, count) in session_chat_authors(database, session_id)? {
+            match authors.iter_mut().find(|(known, _)| *known == key) {
+                Some((_, total)) => *total = total.saturating_add(count),
+                None => authors.push((key, count)),
+            }
+        }
+    }
+    let whole = if room {
+        show_interval_count(database, &source.show_id)? <= 1
+    } else {
+        sources.len() == 1
+    };
+    if room && !whole {
+        authors.clear();
+    }
+    let single = whole.then(|| sources[0].as_str());
+    let title = sources
+        .iter()
+        .find_map(|id| session_facts(database, id).ok().flatten())
+        .map(|facts| facts.title);
+    let (totals, audience, community, people) = match single {
+        Some(id) => (
+            database.session_chat_totals(id)?,
+            crate::audience::session_audience(database, id)?,
+            database
+                .get_cohost_report(id)?
+                .and_then(|report| report.community),
+            session_people(database, id),
+        ),
+        None => (None, None, None, None),
+    };
+    Ok(Some(build_report(ReportInput {
+        report_id,
+        started_at: source.started_at,
+        ended_at: source.ended_at,
+        utc_offset_minutes: local_utc_offset_minutes(source.started_at),
+        title,
+        platforms,
+        samples,
+        authors,
+        people,
+        totals,
+        audience,
+        community,
+        // "Since your last stream" compares local sessions; an interval is
+        // not one, so it says nothing rather than compare unlike things.
+        previous: None,
+        views,
+    })))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

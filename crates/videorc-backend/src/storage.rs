@@ -8955,6 +8955,33 @@ impl Database {
             );
             CREATE INDEX IF NOT EXISTS idx_stream_report_emails_status_due
                 ON stream_report_emails(status, due_at);
+            -- Plan 249 S25: one report per cloud live interval, keyed by
+            -- show and interval (a show can go live again; a solo resume is
+            -- a new local session in the same interval). Holds no numbers.
+            CREATE TABLE IF NOT EXISTS cloud_interval_report_emails (
+                show_id TEXT NOT NULL,
+                interval_id TEXT NOT NULL,
+                report_id TEXT NOT NULL,
+                platforms_json TEXT NOT NULL,
+                account_email TEXT NOT NULL,
+                status TEXT NOT NULL,
+                due_at TEXT NOT NULL,
+                started_at TEXT NOT NULL,
+                ended_at TEXT NOT NULL,
+                attempts INTEGER NOT NULL DEFAULT 0,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (show_id, interval_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_cloud_interval_report_emails_status_due
+                ON cloud_interval_report_emails(status, due_at);
+            -- The local sessions that fed a solo cloud interval, whose rows
+            -- its report reads.
+            CREATE TABLE IF NOT EXISTS cloud_interval_sessions (
+                interval_id TEXT NOT NULL,
+                show_id TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                PRIMARY KEY (interval_id, session_id)
+            );
             ",
         )?;
         // Named timeline markers share ownership and deletion with clip marks.

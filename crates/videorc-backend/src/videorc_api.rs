@@ -4293,6 +4293,37 @@ struct GetSessionResponse {
     user: VerifyUser,
 }
 
+/// Plan 249 S25: one effect of one live interval (a Discord announcement)
+/// happens once, whichever computer controls the show: the web keeps the
+/// first claim. The controller fence (S24) refuses a computer that lost the
+/// show, so it never claims for its successor.
+impl VideorcApiClient {
+    pub(crate) async fn cloud_interval_effect(
+        &self,
+        bearer: &str,
+        show_id: &str,
+        interval_id: &str,
+        effect: &str,
+    ) -> std::result::Result<bool, crate::cloud_show::CloudApiError> {
+        #[derive(Deserialize)]
+        struct Claimed {
+            claimed: bool,
+        }
+        let path = format!("/api/cloud/shows/{show_id}/effects");
+        let answer: Claimed = self
+            .cloud_json(
+                self.http
+                    .post(self.endpoint(&path))
+                    .bearer_auth(bearer)
+                    .json(&serde_json::json!({ "intervalId": interval_id, "effect": effect })),
+                &path,
+                CLOUD_REQUEST_TIMEOUT,
+            )
+            .await?;
+        Ok(answer.claimed)
+    }
+}
+
 /// Plan 249 S24: the controller and kept-presentation routes. Each answers
 /// its body beside its error, so a 409 still names the current controller.
 impl VideorcApiClient {

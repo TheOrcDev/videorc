@@ -876,7 +876,7 @@
       "prUrl": null,
       "webIssueUrl": null,
       "webPrUrl": null,
-      "implementation": "in-progress-isolated",
+      "implementation": "source-checkpoint-review-open",
       "acceptance": "not-run",
       "intendedBranch": "feat/249-s25-cloud-parity",
       "intendedPrTitle": "Plan 249 S25: Count and report cloud activity correctly",

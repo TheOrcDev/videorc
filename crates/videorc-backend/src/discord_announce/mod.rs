@@ -411,6 +411,15 @@ enum HookFact {
         session_id: Option<String>,
         share_url: String,
     },
+    /// Plan 249 S25: a talk show's live interval went live on the cloud.
+    /// Its key stands in for a session id: one announcement per interval.
+    CloudIntervalLive {
+        key: String,
+        show_id: String,
+        interval_id: String,
+        started_at: DateTime<Utc>,
+        targets: Vec<StreamTargetSettings>,
+    },
 }
 
 #[derive(Debug, Default)]
@@ -1103,6 +1112,7 @@ async fn run_announcer(
     let mut sessions: Vec<Active> = Vec::new();
     let mut early_targets: Option<StreamTargetsSnapshot> = None;
     let mut ended_ids: Vec<String> = Vec::new();
+    let mut intervals = crate::cloud_output_session::OutputSessionTracker::default();
     // At most one request per webhook at a time; webhooks run side by side.
     let mut requests: JoinSet<RequestResult> = JoinSet::new();
     let mut in_flight: HashMap<tokio::task::Id, InFlight> = HashMap::new();
@@ -1143,6 +1153,9 @@ async fn run_announcer(
         tokio::select! {
             received = events.recv() => match received {
                 Ok(event) if state.performance_check.suppresses_event(&event.event) => {}
+                Ok(event) if event.event == crate::cloud_show::CLOUD_STATE_EVENT => {
+                    observe_cloud_state(&state, &event, &mut intervals, &mut sessions, &mut ended_ids);
+                }
                 Ok(event) => observe_event(&state, &event, &mut sessions, &mut early_targets, &mut ended_ids),
                 Err(broadcast::error::RecvError::Lagged(_)) => {}
                 Err(broadcast::error::RecvError::Closed) => return,
@@ -1330,7 +1343,155 @@ async fn observe_fact(
                 active.machine.observe_x_published(&share_url, now);
             }
         }
+        HookFact::CloudIntervalLive {
+            key,
+            show_id,
+            interval_id,
+            started_at,
+            targets,
+        } => {
+            if ended_ids.contains(&key)
+                || sessions
+                    .iter()
+                    .any(|active| active.machine.session_id() == key)
+            {
+                return;
+            }
+            // Announcing is opt-in and needs a webhook: ask nothing of the
+            // web for an account that posts nothing.
+            let settings = load_settings(state);
+            if !settings.enabled || saved_webhooks(&settings).is_empty() {
+                return;
+            }
+            if !claim_interval_announcement(&show_id, &interval_id).await {
+                return;
+            }
+            let actives = begin_session(state, &key, started_at, &targets).await;
+            sessions.extend(actives);
+            retain_newest_sessions(sessions, MAX_SESSIONS);
+        }
     }
+}
+
+/// Plan 249 S25: the web keeps the first claim of an interval's
+/// announcement, so a resume, a relaunch or another computer taking the
+/// show over never posts it twice. Unknown (offline, an older web): no post,
+/// rather than a possible second one.
+async fn claim_interval_announcement(show_id: &str, interval_id: &str) -> bool {
+    let Some(bearer) = crate::account::stored_session_token() else {
+        return false;
+    };
+    let Ok(web) = crate::videorc_api::VideorcApiClient::new() else {
+        return false;
+    };
+    match web
+        .cloud_interval_effect(&bearer, show_id, interval_id, "discord-announce")
+        .await
+    {
+        Ok(claimed) => {
+            if !claimed {
+                tracing::info!("[discord] interval {interval_id} was already announced.");
+            }
+            claimed
+        }
+        Err(error) => {
+            tracing::info!("[discord] could not claim the announcement of {interval_id}: {error}");
+            false
+        }
+    }
+}
+
+/// Plan 249 S25: a talk show is announced per live interval from the cloud
+/// state, not from a local session (a room has none). The destinations are
+/// the ones its Go Live attached (S18's saved identity, keys left behind);
+/// legs confirm from the cloud's own legs; the server's `endedAt` ends it.
+/// A solo show keeps its local session announcement.
+fn observe_cloud_state(
+    state: &AppState,
+    event: &ServerEvent,
+    intervals: &mut crate::cloud_output_session::OutputSessionTracker,
+    sessions: &mut [Active],
+    ended_ids: &mut Vec<String>,
+) {
+    use crate::cloud_output_session::{OutputEvent, interval_key};
+    let Ok(status) = crate::cloud_show::CloudStatus::deserialize(&event.payload) else {
+        return;
+    };
+    let now = Utc::now();
+    let room = |kind: Option<&str>| kind == Some("talk");
+    for output in intervals.observe(&status, now, crate::cloud_controller::ownership_allows) {
+        let session = output.session();
+        if !room(session.kind.as_deref()) {
+            continue;
+        }
+        let key = session.key();
+        match &output {
+            OutputEvent::Live(session) => {
+                let Some(targets) = interval_targets(state, &session.show_id) else {
+                    tracing::info!(
+                        "[discord] no saved destinations for show {}; nothing to announce.",
+                        session.show_id
+                    );
+                    continue;
+                };
+                send_fact(
+                    state,
+                    HookFact::CloudIntervalLive {
+                        key,
+                        show_id: session.show_id.clone(),
+                        interval_id: session.interval_id.clone(),
+                        started_at: session.live_since,
+                        targets,
+                    },
+                );
+            }
+            OutputEvent::Ended { ended_at, .. } => {
+                ended_ids.push(key.clone());
+                if ended_ids.len() > 8 {
+                    ended_ids.remove(0);
+                }
+                for active in sessions.iter_mut().filter(|active| {
+                    active.machine.ended_at().is_none() && active.machine.session_id() == key
+                }) {
+                    active.machine.end(*ended_at);
+                    active.stopped.store(true, Ordering::Release);
+                    mark_ended(state, &active.context.webhook_id, &key, *ended_at);
+                }
+            }
+        }
+    }
+    // The cloud's legs confirm the interval's destinations, as a local
+    // session's `stream.targets` do.
+    if let (Some(show), Some(interval)) = (status.show.as_ref(), status.live_interval.as_ref())
+        && room(show.kind.as_deref())
+    {
+        let snapshot = StreamTargetsSnapshot {
+            session_id: interval_key(&show.id, &interval.id),
+            targets: status.legs.clone(),
+        };
+        for active in sessions
+            .iter_mut()
+            .filter(|active| active.machine.session_id() == snapshot.session_id)
+        {
+            active.machine.observe_targets(&snapshot, now);
+        }
+    }
+}
+
+/// The destinations the show's Go Live attached on this computer (S18),
+/// keyless.
+fn interval_targets(state: &AppState, show_id: &str) -> Option<Vec<StreamTargetSettings>> {
+    let identity = state
+        .database
+        .load_setting::<Option<crate::cloud_services::CloudServiceIdentity>>(
+            crate::cloud_services::CLOUD_SHOW_SERVICES_KEY,
+        )
+        .ok()
+        .flatten()
+        .flatten()
+        .filter(|identity| identity.show_id == show_id)?;
+    let targets = identity.streaming_settings(&identity.destinations).targets;
+    (!targets.is_empty()).then_some(targets)
 }
 
 /// Keeps the `keep` newest sessions (every webhook's machine for each), in

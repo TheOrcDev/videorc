@@ -48,6 +48,7 @@ mod cloud_control_web;
 mod cloud_controller;
 mod cloud_graphics;
 mod cloud_markers;
+mod cloud_output_session;
 mod cloud_services;
 mod cloud_show;
 // Plan 249 S22: cloud ISO manifests and the import journal's pure rules.
@@ -17672,6 +17673,9 @@ fn cloud_hooks(state: &AppState) -> cloud_show::CloudHooks {
             }
             drop(current);
             schedule_cloud_show_services_release(&emit_state, &status);
+            // Plan 249 S25: a local session feeding a live interval is
+            // reported by the interval, before any observer sees its end.
+            cloud_output_session::note_status(&status);
             emit_state.emit_event(cloud_show::CLOUD_STATE_EVENT, status);
         }),
         // Lane 3 F2: the show this desktop holds survives a relaunch, so the

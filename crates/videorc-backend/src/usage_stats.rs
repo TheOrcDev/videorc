@@ -131,6 +131,10 @@ pub(crate) struct SessionFact {
     pub destinations_count: u32,
     pub platforms: Vec<String>,
     pub duration_seconds: Option<u64>,
+    /// Plan 249 S25: a cloud live interval's start or stop carries an id
+    /// derived from show and interval, so the web keeps one of each however
+    /// many times, and from however many computers, it is sent.
+    pub event_id: Option<String>,
 }
 
 #[derive(Debug)]
@@ -282,6 +286,9 @@ impl SessionTracker {
                 };
                 let mut facts = Vec::new();
                 facts.extend(start_fact(&mut session, sharing));
+                if crate::cloud_output_session::local_session_bound(&session.session_id) {
+                    session.shared = false;
+                }
                 if session.shared && sharing {
                     let duration_seconds = status
                         .duration_ms
@@ -297,6 +304,7 @@ impl SessionTracker {
                         destinations_count: session.destinations_count,
                         platforms: session.platforms.clone(),
                         duration_seconds: Some(duration_seconds),
+                        event_id: None,
                     });
                 }
                 facts
@@ -345,6 +353,11 @@ fn start_fact(session: &mut TrackedSession, sharing: bool) -> Option<SessionFact
         return None;
     }
     session.start_sent = true;
+    // Plan 249 S25: a local session feeding a cloud live interval is counted
+    // by the interval (a solo resume is not a second stream).
+    if crate::cloud_output_session::local_session_bound(&session.session_id) {
+        session.shared = false;
+    }
     session.targets_deadline = None;
     if session.mode == SessionMode::Live && session.destinations_count == 0 {
         session.destinations_count = 1;
@@ -355,6 +368,7 @@ fn start_fact(session: &mut TrackedSession, sharing: bool) -> Option<SessionFact
         destinations_count: session.destinations_count,
         platforms: session.platforms.clone(),
         duration_seconds: None,
+        event_id: None,
     })
 }
 
@@ -534,6 +548,7 @@ async fn run_observer(
     facts: mpsc::Sender<SessionFact>,
 ) {
     let mut tracker = SessionTracker::default();
+    let mut intervals = crate::cloud_output_session::OutputSessionTracker::default();
     loop {
         let deadline = tracker.next_deadline().map(|deadline| {
             let wait = (deadline - Utc::now()).to_std().unwrap_or_default();
@@ -544,6 +559,16 @@ async fn run_observer(
                 // A benchmark session (Health → performance check) is hidden
                 // from every client; it is not a session the user started.
                 Ok(event) if state.performance_check.suppresses_event(&event.event) => Vec::new(),
+                Ok(event) if event.event == crate::cloud_show::CLOUD_STATE_EVENT => {
+                    match crate::cloud_show::CloudStatus::deserialize(&event.payload) {
+                        Ok(status) => intervals
+                            .observe(&status, Utc::now(), crate::cloud_controller::ownership_allows)
+                            .iter()
+                            .filter_map(|output| interval_facts(output, state.usage_stats.sharing()))
+                            .collect(),
+                        Err(_) => Vec::new(),
+                    }
+                }
                 Ok(event) => tracker.observe(&event, Utc::now(), state.usage_stats.sharing()),
                 Err(broadcast::error::RecvError::Lagged(_)) => Vec::new(),
                 Err(broadcast::error::RecvError::Closed) => return,
@@ -559,6 +584,46 @@ async fn run_observer(
             }
         }
     }
+}
+
+/// Plan 249 S25: a cloud live interval's start and stop, with the ids the
+/// web dedupes on. Duration is the server's interval (off-air room time is
+/// never counted); platforms are the interval's real legs.
+pub(crate) fn interval_facts(
+    event: &crate::cloud_output_session::OutputEvent,
+    sharing: bool,
+) -> Option<SessionFact> {
+    use crate::cloud_output_session::{OutputEvent, derived_id};
+    if !sharing {
+        return None;
+    }
+    let session = event.session();
+    let platforms: Vec<String> = session
+        .platforms
+        .iter()
+        .map(|platform| stream_platform_id(*platform).to_string())
+        .collect();
+    let destinations_count = u32::try_from(platforms.len()).unwrap_or(u32::MAX).max(1);
+    let (kind, purpose, duration_seconds) = match event {
+        OutputEvent::Live(_) => (StreamEventKind::StreamStart, "usage-start", None),
+        OutputEvent::Ended { .. } => (
+            StreamEventKind::StreamStop,
+            "usage-stop",
+            Some(
+                u64::try_from(event.seconds_live().unwrap_or(0))
+                    .unwrap_or(0)
+                    .min(MAX_DURATION_SECONDS),
+            ),
+        ),
+    };
+    Some(SessionFact {
+        event: kind,
+        mode: SessionMode::Live,
+        destinations_count,
+        platforms,
+        duration_seconds,
+        event_id: Some(derived_id(purpose, &session.show_id, &session.interval_id)),
+    })
 }
 
 async fn sleep_until_deadline(deadline: Option<tokio::time::Instant>) {
@@ -606,7 +671,9 @@ async fn run_sender(state: AppState, install_id: String, mut facts: mpsc::Receiv
 
 fn payload_for(install_id: &str, fact: SessionFact) -> StreamEventPayload {
     StreamEventPayload {
-        event_id: uuid::Uuid::new_v4().to_string(),
+        event_id: fact
+            .event_id
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
         install_id: install_id.to_string(),
         event: fact.event,
         mode: fact.mode,
@@ -813,6 +880,7 @@ mod tests {
                 destinations_count: 0,
                 platforms: Vec::new(),
                 duration_seconds: None,
+                event_id: None,
             }]
         );
         let stopped = tracker.observe(
@@ -851,6 +919,7 @@ mod tests {
                 destinations_count: 3,
                 platforms: vec!["twitch".to_string(), "youtube".to_string()],
                 duration_seconds: None,
+                event_id: None,
             }]
         );
         // Later per-target state changes re-emit the snapshot: no second start.
@@ -995,6 +1064,7 @@ mod tests {
             destinations_count: 2,
             platforms: vec!["twitch".to_string(), "youtube".to_string()],
             duration_seconds: Some(42),
+            event_id: None,
         };
         let payload = payload_for("6f1c2a3b-4d5e-4f60-8a71-92b3c4d5e6f7", fact.clone());
         let value = serde_json::to_value(&payload).unwrap();
@@ -1032,6 +1102,7 @@ mod tests {
                     destinations_count: 0,
                     platforms: Vec::new(),
                     duration_seconds: None,
+                    event_id: None,
                 }
             )
             .event_id,
@@ -1111,6 +1182,7 @@ mod tests {
                     destinations_count: 0,
                     platforms: Vec::new(),
                     duration_seconds: None,
+                    event_id: None,
                 },
             ),
             queued_at: at(seconds),
@@ -1172,5 +1244,51 @@ mod tests {
             .unwrap(),
             json!({ "enabled": true, "envDisabled": false })
         );
+    }
+    #[test]
+    fn a_cloud_interval_is_one_start_and_one_stop_with_derived_ids() {
+        use crate::cloud_output_session::{EndBasis, OutputEvent, OutputSession, derived_id};
+        let live_since = DateTime::parse_from_rfc3339("2026-11-17T18:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let session = OutputSession {
+            show_id: "sh_1".to_string(),
+            interval_id: "iv_1".to_string(),
+            kind: Some("talk".to_string()),
+            live_since,
+            platforms: vec![
+                crate::streaming::StreamPlatform::Youtube,
+                crate::streaming::StreamPlatform::Twitch,
+            ],
+            local_session_id: None,
+        };
+        let start = interval_facts(&OutputEvent::Live(session.clone()), true).unwrap();
+        assert_eq!(start.event, StreamEventKind::StreamStart);
+        assert_eq!(start.platforms, vec!["youtube", "twitch"]);
+        assert_eq!(start.destinations_count, 2);
+        assert_eq!(
+            start.event_id.as_deref(),
+            Some(derived_id("usage-start", "sh_1", "iv_1").as_str())
+        );
+        let ended = OutputEvent::Ended {
+            session: session.clone(),
+            ended_at: live_since + chrono::TimeDelta::seconds(900),
+            basis: EndBasis::Confirmed,
+        };
+        let stop = interval_facts(&ended, true).unwrap();
+        assert_eq!(stop.event, StreamEventKind::StreamStop);
+        assert_eq!(stop.duration_seconds, Some(900));
+        assert_ne!(stop.event_id, start.event_id);
+        // The same interval from another computer: the same ids.
+        assert_eq!(
+            interval_facts(&ended, true).unwrap().event_id,
+            stop.event_id
+        );
+        assert_eq!(
+            payload_for("install", stop.clone()).event_id,
+            stop.event_id.unwrap()
+        );
+        // Sharing off: nothing at all.
+        assert!(interval_facts(&OutputEvent::Live(session), false).is_none());
     }
 }

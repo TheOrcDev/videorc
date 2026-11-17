@@ -1,4 +1,4 @@
-import { createHash, randomBytes } from 'node:crypto'
+import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { createServer, request as httpRequest } from 'node:http'
 import { createServer as createHttpsServer } from 'node:https'
@@ -143,6 +143,21 @@ export async function startFakeCloudWebManaged({
   const controllerLog = [],
     controllerRefusals = [],
     presentationLog = []
+  // Plan 249 S25: what the desktop's observers sent, kept as the web keeps it
+  // (one report per id, one usage event per id, one claim per interval and
+  // effect), and the loopback Discord sink's posts and edits.
+  const reporting = {
+    preference: { enabled: true, history: true },
+    reports: new Map(),
+    reportPosts: [],
+    events: new Map(),
+    eventPosts: [],
+    beats: [],
+    effects: new Map(),
+    effectPosts: [],
+    discord: []
+  }
+  let discordMessage = 9000
   const failures = new Map(),
     delays = new Map(),
     barriers = new Map(),
@@ -160,18 +175,53 @@ export async function startFakeCloudWebManaged({
   const changed = (s) => {
     s.rev += 1
   }
+  // Plan 249 S25: the web's live interval rule (lib/cloud/media/
+  // output-interval.ts): a stream intent opens with an accepted leg, goes live
+  // with the first live leg, and ends only when its output is confirmed
+  // stopped (End livestream, End). An ended interval stays known to the show.
+  const observeInterval = (s) => {
+    const legs = s.state.legs ?? []
+    const accepted = legs.some(
+      (leg) => s.refs.has(leg.id) && ['connecting', 'reconnecting', 'live'].includes(leg.state)
+    )
+    let interval = s.state.liveInterval
+    if ((!interval || interval.endedAt) && accepted && !s.state.legsEnded) {
+      if (interval) s.state.pastIntervals = [...(s.state.pastIntervals ?? []), interval].slice(-20)
+      interval = { id: randomUUID(), requestedAt: instant() }
+    }
+    if (
+      interval &&
+      !interval.endedAt &&
+      !interval.liveSince &&
+      legs.some((leg) => s.refs.has(leg.id) && leg.state === 'live')
+    )
+      interval = { ...interval, liveSince: instant() }
+    if (!interval || interval === s.state.liveInterval) return false
+    s.state.liveInterval = interval
+    return true
+  }
+  const endInterval = (s) => {
+    const interval = s.state.liveInterval
+    if (interval && !interval.endedAt) {
+      const at = instant()
+      s.state.liveInterval = { ...interval, endRequestedAt: at, endedAt: at }
+    }
+  }
   const endShow = (s, reason = wire.endReasons[0]) => {
     if (s.show.endedAt) return
     if (!wire.endReasons.includes(reason)) throw new Error('Unknown managed end reason')
     s.show.status = 'ended'
     s.show.endedAt = instant()
     s.show.endReason = reason
+    endInterval(s)
     s.state = {
       phase: wire.phases.at(-1),
       endReason: reason,
       liveSeconds: s.state.liveSeconds,
       feeds: [],
-      legs: []
+      legs: [],
+      ...(s.state.liveInterval ? { liveInterval: s.state.liveInterval } : {}),
+      ...(s.state.pastIntervals ? { pastIntervals: s.state.pastIntervals } : {})
     }
     s.refs.clear()
     delete s.feedDeviceId
@@ -455,6 +505,42 @@ export async function startFakeCloudWebManaged({
         return send(next.status ?? 200, next.body, next.contentType)
       }
       if (route === 'segment') return send(200, segmentBytes, 'video/mp2t')
+      // Plan 249 S25: a loopback Discord webhook sink (the desktop's
+      // VIDEORC_DISCORD_API_BASE_URL in dev builds). Nothing reaches Discord.
+      const webhook = /^\/api\/v10\/webhooks\/(\d+)\/([^/]+)(?:\/messages\/(\d+))?$/.exec(path)
+      if (webhook) {
+        const [, webhookId, , messageId] = webhook
+        const payload = invalidJson
+          ? (() => {
+              const part = /name="payload_json"\r?\n(?:[^\r\n]*\r?\n)*?\r?\n([\s\S]*?)\r?\n--/.exec(
+                raw.toString('utf8')
+              )
+              try {
+                return part ? JSON.parse(part[1]) : null
+              } catch {
+                return null
+              }
+            })()
+          : body
+        if (req.method === 'GET')
+          return send(200, { id: webhookId, name: 'Parity', channel_id: '100', guild_id: '200' })
+        if (req.method === 'POST' && !messageId) {
+          const id = String((discordMessage += 1))
+          reporting.discord.push({
+            kind: 'post',
+            webhookId,
+            messageId: id,
+            atMs: Date.now(),
+            payload
+          })
+          return send(200, { id, channel_id: '100', guild_id: '200' })
+        }
+        if (req.method === 'PATCH' && messageId) {
+          reporting.discord.push({ kind: 'edit', webhookId, messageId, atMs: Date.now(), payload })
+          return send(200, { id: messageId, channel_id: '100', guild_id: '200' })
+        }
+        return send(405, { message: 'method' })
+      }
       if (req.headers.authorization !== `Bearer ${sessionToken}`)
         return fail(wire.errors.common.find((e) => e.status === 401).code)
       // Plan 249 S22 maintained loopback acquisition only; never installed in
@@ -469,6 +555,31 @@ export async function startFakeCloudWebManaged({
       if (archiveHandler && /^\/api\/cloud\/shows\/[^/]+\/archive$/.test(path)) {
         const answer = await archiveHandler({ method: req.method, url, body })
         return send(answer.status ?? 200, answer.body, answer.contentType)
+      }
+      // Plan 249 S25: the observers' endpoints, with the web's dedupe.
+      if (path === '/api/account/stream-report-email') {
+        if (req.method === 'PUT') {
+          if (typeof body.enabled === 'boolean') reporting.preference.enabled = body.enabled
+          if (typeof body.history === 'boolean') reporting.preference.history = body.history
+        }
+        return send(200, { ...reporting.preference, email: 'smoke@example.invalid' })
+      }
+      if (path === '/api/desktop/stream-report' && req.method === 'POST') {
+        reporting.reportPosts.push({ atMs: Date.now(), reportId: body.reportId })
+        const { enabled, history } = reporting.preference
+        if (!enabled && !history) return send(200, { status: 'disabled' })
+        if (reporting.reports.has(body.reportId)) return send(200, { status: 'already-sent' })
+        reporting.reports.set(body.reportId, copy(body))
+        return send(200, { status: 'sent' })
+      }
+      if (path === '/api/desktop/stream-events' && req.method === 'POST') {
+        reporting.eventPosts.push({ atMs: Date.now(), eventId: body.eventId })
+        if (!reporting.events.has(body.eventId)) reporting.events.set(body.eventId, copy(body))
+        return send(202, { ok: true })
+      }
+      if (path === '/api/desktop/live-status') {
+        reporting.beats.push({ atMs: Date.now(), method: req.method, body: copy(body) })
+        return send(200, { ok: true })
       }
       if (/^\/api\/cloud\/shows\/[^/]+\/markers$/.test(path)) {
         const showId = path.split('/')[4],
@@ -695,6 +806,37 @@ export async function startFakeCloudWebManaged({
         })
       }
       const showBase = `${managedPath('create')}/${s.show.id}`
+      // Plan 249 S25: one effect per live interval, claimed by the current
+      // controller only (the S24 fence), for an interval of this show that
+      // went live (lib/cloud/interval-effects-route.ts).
+      if (path === `${showBase}/effects` && req.method === 'POST') {
+        reporting.effectPosts.push({
+          atMs: Date.now(),
+          body: copy(body),
+          epoch: epochHeader ?? null
+        })
+        if (s.controller && String(s.controller.epoch) !== epochHeader) {
+          const code =
+            epochHeader === undefined ? 'cloud-controller-required' : 'cloud-controller-stale'
+          return send(409, { controllerEpoch: s.controller.epoch, error: { code, message: code } })
+        }
+        if (
+          body.effect !== 'discord-announce' ||
+          !/^[A-Za-z0-9_-]{1,64}$/.test(body.intervalId ?? '')
+        )
+          return fail(wire.errors.common.find((e) => e.status === 400).code)
+        const interval = [s.state.liveInterval, ...(s.state.pastIntervals ?? [])].find(
+          (known) => known?.id === body.intervalId
+        )
+        if (!interval)
+          return send(404, { error: { code: 'cloud-interval-not-found', message: 'missing' } })
+        if (!interval.liveSince)
+          return send(409, { error: { code: 'cloud-interval-not-live', message: 'not live' } })
+        const key = `${s.show.id}/${body.intervalId}/${body.effect}`
+        const claimed = !reporting.effects.has(key)
+        if (claimed) reporting.effects.set(key, { epoch: epochHeader ?? null, atMs: Date.now() })
+        return send(200, { claimed, effect: body.effect, intervalId: body.intervalId })
+      }
       if (path === `${showBase}/controller`) {
         if (s.show.endedAt)
           return send(409, { error: { code: 'cloud-show-ended', message: 'cloud-show-ended' } })
@@ -911,6 +1053,7 @@ export async function startFakeCloudWebManaged({
         if (url.searchParams.has('since') && !/^\d+$/.test(url.searchParams.get('since')))
           return fail(wire.errors.common.find((e) => e.status === 400).code)
         await refresh(s)
+        if (observeInterval(s)) changed(s)
         const trouble =
           s.state.phase === wire.phases[0] ||
           s.state.hold?.active ||
@@ -1147,12 +1290,19 @@ export async function startFakeCloudWebManaged({
           s.state.legs = s.state.legs.filter((l) => l.id !== d.id).concat(leg)
         }
         if (refused.length !== ds.length) {
-          if (!s.state.liveInterval || s.state.liveInterval.endedAt)
+          if (!s.state.liveInterval || s.state.liveInterval.endedAt) {
+            // Plan 249 S25: an ended interval stays known to the show.
+            if (s.state.liveInterval)
+              s.state.pastIntervals = [
+                ...(s.state.pastIntervals ?? []),
+                s.state.liveInterval
+              ].slice(-20)
             s.state.liveInterval = {
               id: `fixture-interval-${randomBytes(12).toString('hex')}`,
               requestedAt: instant(),
               liveSince: instant()
             }
+          }
           s.state.destinationsSet = true
           delete s.egressLostAt
         }
@@ -1171,9 +1321,10 @@ export async function startFakeCloudWebManaged({
               body.destinations.some((d) => typeof d.id !== 'string' || typeof d.url !== 'string')))
         )
           return fail(wire.errors.common.find((e) => e.status === 400).code)
-        if (s.state.liveInterval) s.state.liveInterval.endedAt = instant()
         s.state.legs = []
         s.state.destinationsSet = true
+        // Plan 249 S25: End livestream confirms this interval's output stopped.
+        endInterval(s)
         // No egress runs after End livestream, so none can be lost.
         delete s.egressLostAt
         changed(s)
@@ -1295,6 +1446,21 @@ export async function startFakeCloudWebManaged({
     },
     controllerLog: () => copy(controllerLog),
     controllerRefusals: () => copy(controllerRefusals),
+    /** Plan 249 S25: what the observers sent, as the web kept it. */
+    reporting: () => ({
+      preference: copy(reporting.preference),
+      reports: [...reporting.reports.values()].map(copy),
+      reportPosts: copy(reporting.reportPosts),
+      events: [...reporting.events.values()].map(copy),
+      eventPosts: copy(reporting.eventPosts),
+      beats: copy(reporting.beats),
+      effects: [...reporting.effects.entries()].map(([key, value]) => ({ key, ...value })),
+      effectPosts: copy(reporting.effectPosts),
+      discord: copy(reporting.discord)
+    }),
+    setReportPreference(preference) {
+      Object.assign(reporting.preference, preference)
+    },
     presentationLog: () => copy(presentationLog),
     markerHandler(handler) {
       markerHandler = handler
