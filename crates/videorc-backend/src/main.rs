@@ -44,6 +44,7 @@ mod chat_overlay;
 mod clean_cut;
 mod clip_marks;
 mod cloud_archive;
+mod cloud_clips;
 mod cloud_control_web;
 mod cloud_controller;
 mod cloud_graphics;
@@ -5834,6 +5835,11 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "resource.capability.register_thumbnail"
         | "account.auth.begin_intent"
         | "account.sign_out"
+        | "cloud.clips.enable"
+        | "cloud.clips.disable"
+        | "cloud.clips.save"
+        | "cloud.clips.cancel"
+        | "cloud.clips.discard"
         | "cloud.marker.create"
         | "cloud.marker.delete"
         | "cloud.marker.voice.configure"
@@ -6194,6 +6200,8 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "scheduledStreams.candidates"
         | "account.get"
         | "entitlements.get"
+        | "cloud.clips.status"
+        | "cloud.clips.jobs"
         | "cloud.markers.list"
         | "cloud.marker.get"
         | "cloud.speech.transcript"
@@ -13066,6 +13074,90 @@ async fn handle_text_message_with_role(
         }
         // Plan 234 T3 (wire section 13.2): the account's cloud recordings,
         // and a managed one (segments) made into an MP4 on this computer.
+        "cloud.clips.status"
+        | "cloud.clips.enable"
+        | "cloud.clips.disable"
+        | "cloud.clips.save"
+        | "cloud.clips.jobs"
+        | "cloud.clips.cancel"
+        | "cloud.clips.discard" => {
+            let result: Result<serde_json::Value> = async {
+                let mut params = command.params.clone();
+                let method = command.method.as_str();
+                if method == "cloud.clips.jobs" {
+                    return Ok(serde_json::json!(
+                        state
+                            .database
+                            .cloud_clips()?
+                            .iter()
+                            .map(|j| j.view())
+                            .collect::<Vec<_>>()
+                    ));
+                }
+                let id = params.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                if method == "cloud.clips.cancel" {
+                    cloud_clips::cancel(id)?;
+                    return Ok(serde_json::json!({"ok":true}));
+                }
+                if method == "cloud.clips.discard" {
+                    cloud_clips::discard(&state.database, id)?;
+                    return Ok(serde_json::json!({"ok":true}));
+                }
+                if method == "cloud.clips.enable" {
+                    resolve_cloud_download_resource(state, &mut params, role)?;
+                }
+                let token =
+                    account::stored_session_token().context("Sign in to use cloud Clips.")?;
+                if method == "cloud.clips.save" {
+                    resolve_cloud_download_resource(state, &mut params, role)?;
+                    let show = params
+                        .get("showId")
+                        .and_then(|v| v.as_str())
+                        .context("Choose a show.")?;
+                    let marker = params
+                        .get("markerId")
+                        .and_then(|v| v.as_str())
+                        .context("Choose a clip marker.")?;
+                    let generation = params
+                        .get("generation")
+                        .and_then(|v| v.as_str())
+                        .context("Choose the current buffer generation.")?;
+                    let folder = cloud_clips::output_folder(
+                        &state.database,
+                        show,
+                        params.get("outputDirectory").and_then(|v| v.as_str()),
+                    )?;
+                    let ffmpeg = resolve_trusted_ffmpeg_path(
+                        params.get("ffmpegPath").and_then(|v| v.as_str()),
+                        role,
+                        state.smoke_rpc_enabled,
+                    );
+                    return cloud_clips::save(
+                        state.clone(),
+                        videorc_api::VideorcApiClient::new()?,
+                        token,
+                        cloud_clips::Save {
+                            show: show.into(),
+                            marker: marker.into(),
+                            generation: generation.into(),
+                            folder,
+                            ffmpeg,
+                        },
+                    )
+                    .await;
+                }
+                let show = params
+                    .get("showId")
+                    .and_then(|v| v.as_str())
+                    .context("Choose a show.")?;
+                cloud_clips::control(state, token, show.into(), method, &params).await
+            }
+            .await;
+            match result {
+                Ok(value) => ServerResponse::ok(command.id, value),
+                Err(e) => ServerResponse::error(command.id, "cloud-clip-refused", e.to_string()),
+            }
+        }
         "cloud.archive.availability" => {
             let show = command
                 .params

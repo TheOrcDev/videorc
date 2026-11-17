@@ -3018,3 +3018,10 @@ mod pure_tests {
         assert_eq!(split_video_filter_for_replay("[0:v]null[out]"), None);
     }
 }
+
+/// S21b cloud capability adapter. The server owns program-ring availability;
+/// native replay state/session IDs never stand in for a room's buffered media.
+pub(crate) fn cloud_capability(value: &serde_json::Value) -> serde_json::Value {
+    use serde_json::{Value, json};
+    json!({"available":value.get("available").and_then(Value::as_bool).unwrap_or(false),"enabled":value.get("enabled").and_then(Value::as_bool).unwrap_or(false),"generation":value.get("generation").cloned().unwrap_or(Value::Null),"state":value.get("state").and_then(Value::as_str).unwrap_or("off"),"reason":value.get("reason").and_then(Value::as_str).unwrap_or("Clips unavailable.")})
+}

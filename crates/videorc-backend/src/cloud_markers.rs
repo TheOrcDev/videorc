@@ -131,10 +131,6 @@ pub async fn request(
     let result = crate::videorc_api::VideorcApiClient::new()?
         .show_marker_request(&bearer, show, method, id, body)
         .await?;
-    // This is a receipt, not proof of extraction or media availability.
-    if method == "POST" {
-        state.emit_event("cloud.marker.created", result.clone());
-    }
     Ok(result)
 }
 pub async fn create(
@@ -179,10 +175,17 @@ pub async fn create(
         );
         body["sourcePosition"] = serde_json::to_value(p)?;
     }
-    request(state, &input.show_id, "POST", None, Some(body)).await
+    let mut mark = request(state, &input.show_id, "POST", None, Some(body)).await?;
+    if input.kind == "clip" {
+        if let Some(job) = crate::cloud_clips::maybe_save(state, &mark).await {
+            mark["clipJob"] = job;
+        }
+    }
+    state.emit_event("cloud.marker.created", mark.clone());
+    Ok(mark)
 }
 pub fn clip_event(mark: &Value) -> Value {
-    json!({"showId":mark["showId"],"markerId":mark["id"],"atSeconds":mark["atSeconds"],"source":if mark["source"]=="voice" {"voice"}else{"manual"},"saved":true,"reason":"cloud-marker-no-media"})
+    json!({"showId":mark["showId"],"markerId":mark["id"],"atSeconds":mark["atSeconds"],"source":if mark["source"]=="voice" {"voice"}else{"manual"},"saved":true,"reason":match mark.pointer("/clipJob/state").and_then(Value::as_str) {Some("complete")=>"cloud-clip-saved",Some("interrupted")=>"cloud-clip-interrupted",Some("downloading"|"trimming"|"publishing")=>"cloud-clip-queued",_=>"cloud-marker-no-media"}})
 }
 pub async fn mark_clip(
     state: &AppState,
@@ -233,6 +236,15 @@ pub fn agent_projection(mark: &Value, clip: bool) -> Value {
         v["clip"] = json!(false);
         v["marked"] = json!(true);
         v["seconds"] = mark["lookbackSeconds"].clone();
+    }
+    if let Some(job) = mark.get("clipJob") {
+        v["clipJobId"] = job["id"].clone();
+        v["clipState"] = job["state"].clone();
+        if job["state"] == "complete" {
+            v["mediaAvailable"] = json!(true);
+            v["clip"] = json!(true);
+            v["localSessionId"] = job["localSessionId"].clone();
+        }
     }
     v
 }

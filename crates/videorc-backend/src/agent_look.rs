@@ -1310,7 +1310,17 @@ pub async fn save_clip(state: &AppState, _agent: &AgentIdentity, args: Value) ->
         .await
         {
             Ok(mark) => ToolOutcome::ok(
-                "Clip marker saved on the show timeline; no media to extract.",
+                match mark
+                    .pointer("/clipJob/state")
+                    .and_then(serde_json::Value::as_str)
+                {
+                    Some("complete") => "Program clip is in Library.",
+                    Some("interrupted") => "Marker saved. Clip interrupted; retry from Clips.",
+                    Some(_) => {
+                        "Marker saved; program clip queued. Download and validation are not yet complete."
+                    }
+                    None => "Clip marker saved on the show timeline; no media to extract.",
+                },
                 Some(crate::cloud_markers::agent_projection(&mark, true)),
             ),
             Err(e) => ToolOutcome::failed(e.to_string()),

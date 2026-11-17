@@ -1,4 +1,12 @@
 import {
+  cloudClipsStatusSchema,
+  cloudClipJobSchema,
+  cloudClipJobsSchema,
+  cloudClipsEnableSchema,
+  type CloudClipsStatus,
+  type CloudClipJob
+} from './cloud-clips'
+import {
   cloudMarkerCreateSchema,
   cloudMarkerParamsSchema,
   cloudMarkerSchema,
@@ -667,6 +675,36 @@ export interface BackendRpcMethodMap {
   'cloud.recording.stop': BackendRpcDefinition<undefined, CloudStatus>
   /** Plan 234 T3: the account's cloud recordings, without URLs. */
   'cloud.recordings.list': BackendRpcDefinition<undefined, CloudRecordingsList>
+  'cloud.clips.status': BackendRpcDefinition<{ showId: string }, CloudClipsStatus>
+  'cloud.clips.enable': BackendRpcDefinition<
+    {
+      showId: string
+      consent: true
+      orientation: 'h' | 'v'
+      requestId: string
+      outputDirectoryCapability?: string
+      outputDirectory?: string
+    },
+    CloudClipsStatus
+  >
+  'cloud.clips.disable': BackendRpcDefinition<
+    { showId: string; generation: string },
+    CloudClipsStatus
+  >
+  'cloud.clips.save': BackendRpcDefinition<
+    {
+      showId: string
+      generation: string
+      markerId: string
+      outputDirectoryCapability?: string
+      outputDirectory?: string
+      ffmpegPath?: string
+    },
+    CloudClipJob
+  >
+  'cloud.clips.jobs': BackendRpcDefinition<undefined, CloudClipJob[]>
+  'cloud.clips.cancel': BackendRpcDefinition<{ id: string }, { ok: true }>
+  'cloud.clips.discard': BackendRpcDefinition<{ id: string }, { ok: true }>
   'cloud.archive.availability': BackendRpcDefinition<
     { showId: string },
     { available: boolean; reason: string }
@@ -1025,6 +1063,7 @@ export interface BackendEventMap {
   'cloud.room.requests': CloudRoomRequest
   /** Plan 234 T3: an overlay for the host's renderer to send to the room. */
   'cloud.room.overlay': CloudRoomOverlayEvent
+  'cloud.clip.job': CloudClipJob
   'cloud.recordings.download': CloudRecordingDownloadEvent
   /** Plan 249 S22: one file of a separate-files import job. */
   'cloud.iso.import': CloudIsoImportEvent
@@ -7497,6 +7536,35 @@ const runtimeContracts = {
   'cloud.recording.start': { params: undefinedSchema, result: cloudStatusSchema },
   'cloud.recording.stop': { params: undefinedSchema, result: cloudStatusSchema },
   'cloud.recordings.list': { params: undefinedSchema, result: cloudRecordingsListSchema },
+  'cloud.clips.status': {
+    params: objectSchema({ showId: boundedString }, { allowUnknown: false }),
+    result: cloudClipsStatusSchema
+  },
+  'cloud.clips.enable': { params: cloudClipsEnableSchema, result: cloudClipsStatusSchema },
+  'cloud.clips.disable': {
+    params: objectSchema(
+      { showId: boundedString, generation: boundedString },
+      { allowUnknown: false }
+    ),
+    result: cloudClipsStatusSchema
+  },
+  'cloud.clips.save': {
+    params: objectSchema(
+      {
+        showId: boundedString,
+        generation: boundedString,
+        markerId: boundedString,
+        outputDirectoryCapability: optionalSchema(boundedString),
+        outputDirectory: optionalSchema(boundedString),
+        ffmpegPath: optionalSchema(boundedString)
+      },
+      { allowUnknown: false }
+    ),
+    result: cloudClipJobSchema
+  },
+  'cloud.clips.jobs': { params: undefinedSchema, result: cloudClipJobsSchema },
+  'cloud.clips.cancel': { params: cloudArchiveIdSchema, result: okTrueSchema },
+  'cloud.clips.discard': { params: cloudArchiveIdSchema, result: okTrueSchema },
   'cloud.archive.availability': {
     params: objectSchema({ showId: boundedString }, { allowUnknown: false }),
     result: objectSchema(
@@ -8062,6 +8130,7 @@ const runtimeEventSchemas = {
   'cloud.state': cloudStatusSchema,
   'cloud.room.requests': cloudRoomRequestSchema,
   'cloud.room.overlay': cloudRoomOverlayEventSchema,
+  'cloud.clip.job': cloudClipJobSchema,
   'cloud.recordings.download': cloudRecordingDownloadEventSchema,
   'cloud.iso.import': cloudIsoImportEventSchema,
   'watchdog.alerts': watchdogAlertsViewSchema,

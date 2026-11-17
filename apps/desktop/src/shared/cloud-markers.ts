@@ -1,3 +1,4 @@
+import { cloudClipJobSchema, type CloudClipJob } from './cloud-clips'
 import {
   arraySchema,
   enumSchema,
@@ -21,6 +22,7 @@ export type CloudMarkerCreate = {
   lookbackSeconds?: 30 | 60
 }
 export type CloudMarker = {
+  clipJob?: CloudClipJob
   id: string
   showId: string
   atSeconds: number
@@ -74,6 +76,7 @@ export const cloudMarkerCreateSchema = objectSchema(
 export const cloudMarkerParamsSchema = objectSchema({ showId: id, markerId: id }, strict)
 export const cloudMarkerSchema = objectSchema(
   {
+    clipJob: optionalSchema(cloudClipJobSchema),
     id,
     showId: id,
     atSeconds: seconds,

@@ -1866,6 +1866,111 @@ impl VideorcApiClient {
         })
     }
 
+    pub(crate) async fn clips_bytes(
+        &self,
+        token: &str,
+        show: &str,
+        method: &str,
+        query: &[(&str, String)],
+        body: Option<serde_json::Value>,
+        limit: usize,
+    ) -> Result<Vec<u8>> {
+        anyhow::ensure!(
+            show.starts_with("sh_")
+                && show.len() <= 160
+                && show.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_'),
+            "invalid-clip-show"
+        );
+        let path = format!("/api/cloud/shows/{show}/clips");
+        let mut url = reqwest::Url::parse(&self.endpoint(&path))?;
+        for (key, value) in query {
+            url.query_pairs_mut().append_pair(key, value);
+        }
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()?;
+        let mut req = client
+            .request(reqwest::Method::from_bytes(method.as_bytes())?, url)
+            .bearer_auth(token);
+        if let Some(body) = body {
+            req = req.json(&body);
+        }
+        let mut response = self
+            .cloud_send(req, &path, std::time::Duration::from_secs(12))
+            .await
+            .map_err(|(_, body)| {
+                let code = body
+                    .get("error")
+                    .and_then(|e| {
+                        e.as_str()
+                            .or_else(|| e.get("code").and_then(|v| v.as_str()))
+                    })
+                    .unwrap_or("clips-unavailable");
+                anyhow::anyhow!(
+                    "{}",
+                    if code.len() <= 80 && code.bytes().all(|b| b.is_ascii_lowercase() || b == b'-')
+                    {
+                        code
+                    } else {
+                        "clips-unavailable"
+                    }
+                )
+            })?;
+        let mut data = Vec::new();
+        while let Some(c) = response.chunk().await? {
+            anyhow::ensure!(data.len() + c.len() <= limit, "clip-response-too-large");
+            data.extend_from_slice(&c);
+        }
+        Ok(data)
+    }
+    pub(crate) async fn clips_json(
+        &self,
+        token: &str,
+        show: &str,
+        method: &str,
+        generation: Option<&str>,
+        marker: Option<&str>,
+        body: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value> {
+        let mut q = vec![];
+        if let Some(g) = generation {
+            q.push(("generation", g.into()));
+        }
+        if let Some(m) = marker {
+            q.push(("marker", m.into()));
+        }
+        Ok(serde_json::from_slice(
+            &self
+                .clips_bytes(token, show, method, &q, body, 65536)
+                .await?,
+        )?)
+    }
+    pub(crate) async fn clips_segment(
+        &self,
+        token: &str,
+        plan: &crate::cloud_clips::Plan,
+        segment: &crate::cloud_clips::Segment,
+    ) -> Result<Vec<u8>> {
+        anyhow::ensure!(
+            segment.bytes > 0 && segment.bytes <= 8 * 1024 * 1024,
+            "clip-invalid-size"
+        );
+        self.clips_bytes(
+            token,
+            &plan.show_id,
+            "GET",
+            &[
+                ("generation", plan.generation.clone()),
+                ("marker", plan.marker_id.clone()),
+                ("clip", plan.id.clone()),
+                ("segment", segment.sequence.to_string()),
+            ],
+            None,
+            segment.bytes as usize,
+        )
+        .await
+    }
+
     /// Archive requests remain on the pinned account API; redirects cannot forward a bearer.
     #[allow(clippy::too_many_arguments)]
     async fn archive_bytes(

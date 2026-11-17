@@ -1,0 +1,154 @@
+{
+  "slice": "S21b",
+  "worktree": "/Users/orcdev/projects/videorc-wt-249-s21b",
+  "branch": "feat/249-s21b-cloud-parity",
+  "base": "28d21f8c5b9f37d978c3632d498da37b648dc348",
+  "intendedPrBase": "integrate/249-s19-s24-reconcile",
+  "index": "matches-HEAD-unstaged",
+  "mergeState": "none",
+  "runtimeAcceptance": "not-run",
+  "productionQualified": false,
+  "shadscanBaseline": 27,
+  "shadscanFloor": 27,
+  "finalAuditExternal": "/tmp/249-s21b-desktop-shadscan-final.json",
+  "excluded": ["node_modules", "apps/desktop/node_modules"],
+  "selfHashExcluded": "docs/cloud/249-s21b-manifest.json",
+  "files": [
+    {
+      "path": "apps/desktop/src/renderer/src/components/cloud-markers-dialog.tsx",
+      "sha256": "aa2964ce12a1aec2ab00027da34e87e343625710d75dafdc0a10f711b15f9d7e"
+    },
+    {
+      "path": "apps/desktop/src/renderer/src/components/tabs/cloud-clips-section.test.ts",
+      "sha256": "375474364484a8f0addb527ff89de9abd4eb7b5c5b7a7787ff90e93efe8e4c88"
+    },
+    {
+      "path": "apps/desktop/src/renderer/src/components/tabs/cloud-clips-section.tsx",
+      "sha256": "8b4ececef46d881796f84d93eab6d7533f99909429eb2aed4ed05d56ad5bd5fc"
+    },
+    {
+      "path": "apps/desktop/src/renderer/src/components/tabs/recording-tab.tsx",
+      "sha256": "8e37efdbb755f6b307bdf685ab7f786b072d31f8fc0c396820a0ad8ccd09ba03"
+    },
+    {
+      "path": "apps/desktop/src/renderer/src/hooks/use-studio.tsx",
+      "sha256": "9b6d60e4b653c732620b87599551b4a2948c6232743dacf7180d9eb42b06ea50"
+    },
+    {
+      "path": "apps/desktop/src/renderer/src/lib/marker-toast.ts",
+      "sha256": "e16b4bb7dd90073f01c23836d88f8e6e7e8d8aec574ee435d0dc3a75812cc8f8"
+    },
+    {
+      "path": "apps/desktop/src/renderer/src/lib/studio-actions/studio-context.ts",
+      "sha256": "1fa6cd19bbd35250abe9ee9b15da8ebf83b70b3d39f2e1c8b38dff6194d51017"
+    },
+    {
+      "path": "apps/desktop/src/shared/backend-rpc-contract.ts",
+      "sha256": "baa24241764eea5999709465b06edab3f077b192dc6625b6b72bb25eb1f28f6b"
+    },
+    {
+      "path": "apps/desktop/src/shared/clip-marks.ts",
+      "sha256": "1facbd3d8ba010b1c0bc43d3d53b50f0d771d9d8be8ef93251f2c417cee6d459"
+    },
+    {
+      "path": "apps/desktop/src/shared/cloud-clips.test.ts",
+      "sha256": "55aa0d411b11b5231a3e1f3d7c82333b64750c5cef82fd72d89e1fcbbc2c27ff"
+    },
+    {
+      "path": "apps/desktop/src/shared/cloud-clips.ts",
+      "sha256": "0fb3d0eef4105af6edda94ea0cccf47ac33b023de325541a087ad9afafb4760b"
+    },
+    {
+      "path": "apps/desktop/src/shared/cloud-markers.ts",
+      "sha256": "596afd54a62302289deeffc6c9a0037dad01815c55b49fa9d4472cca6c81978d"
+    },
+    {
+      "path": "crates/videorc-backend/src/agent_look.rs",
+      "sha256": "dc1231a32212c135cf9773a538a6328dfa6f25b5baaa8c09ba1b1a6113a704e6"
+    },
+    {
+      "path": "crates/videorc-backend/src/cloud_clips.rs",
+      "sha256": "a3d9887cff69827abed3f7b72d58a4361558e15eb3bf177b754bdc3b72cc7b70"
+    },
+    {
+      "path": "crates/videorc-backend/src/cloud_markers.rs",
+      "sha256": "c77b84e59cfa30028a30abcef28637da41d4556b1ad988063a9e15a83b4dfc90"
+    },
+    {
+      "path": "crates/videorc-backend/src/main.rs",
+      "sha256": "b154ac40f9570830cb2c95c96ef612e84340b038619f4b9aa730521bdb2453dc"
+    },
+    {
+      "path": "crates/videorc-backend/src/replay_buffer.rs",
+      "sha256": "c578f888e7c0815156802bb5e78ad7948113790a4b25af0a413be802ded5d97b"
+    },
+    {
+      "path": "crates/videorc-backend/src/storage.rs",
+      "sha256": "109f78bd0c482e7074b1a11afcfbe1cd8a5cceafe68ea3baff8b2674ff2e8d73"
+    },
+    {
+      "path": "crates/videorc-backend/src/storage/cloud_clips.rs",
+      "sha256": "eaf4d05b7b377afa13af9241d58736b3e41d4df045eb7cdfb51b60b366bb308b"
+    },
+    {
+      "path": "crates/videorc-backend/src/storage/cloud_clips.sql",
+      "sha256": "4f79b85b2985c71cf304889296d80031353fe11c8b207f582fa5baaf2b5b2888"
+    },
+    {
+      "path": "crates/videorc-backend/src/videorc_api.rs",
+      "sha256": "b3c7d9874965ba2a7c615c0fb84e2ccd2564dc087dbb9bcafe12c6bfd48ebac0"
+    },
+    {
+      "path": "docs/cloud/249-execution-ledger.md",
+      "sha256": "2ebdec03f0377a0342719ffa283a8972f2881f893c70fbb88a32af0173a4be8e"
+    },
+    {
+      "path": "docs/cloud/249-s21b-contract.md",
+      "sha256": "571f73d5bd2b3828b77baf34cbe6f0e7eae3a7928bc7fa4b70ba00e4a2529c1d"
+    },
+    {
+      "path": "docs/cloud/249-s21b-handoff.md",
+      "sha256": "367f12f222c2ee2896245125bf9285abe156c77dc6be727c75eb0bb8cebb9545"
+    },
+    {
+      "path": "protocol-fixtures/cloud-parity-inventory.json",
+      "sha256": "5c01075b145a05117a4253effa0884def89b6003511774a2badfeb5599f5acae"
+    },
+    {
+      "path": "protocol-fixtures/cloud-parity-plan.json",
+      "sha256": "360cd57c84d0b1b7c3a8a33cab4fba7a33765b2770c8f06426cd682a332ba58c"
+    },
+    {
+      "path": "scripts/lib/cloud-parity-baseline.mjs",
+      "sha256": "9506bda8e9811086e963570374617dabe4df8abcb53f059fb714d52d2c34e325"
+    },
+    {
+      "path": "scripts/lib/cloud-parity-clips-contract.mjs",
+      "sha256": "a67d556a48e912de36810fd0f6f665c5aff8e73bee432229518d39cd12dfa54c"
+    },
+    {
+      "path": "scripts/lib/cloud-parity-clips-contract.test.mjs",
+      "sha256": "f8721f9e840a89445a75804a27821ea3fe9042e7ea90ccbc9827f312d153a6ca"
+    },
+    {
+      "path": "scripts/lib/cloud-parity-clips-source.test.mjs",
+      "sha256": "b57bb5433a489b58010582bcbd46211c5889eb0443b4cd6af7c765050aa967e9"
+    },
+    {
+      "path": "scripts/lib/cloud-parity-clips.mjs",
+      "sha256": "2f2e2d5057f30c43bb481c4a0b9cac8db42a7c3256c9153394ccf511e22785ea"
+    },
+    {
+      "path": "scripts/lib/cloud-parity-replay-ring.mjs",
+      "sha256": "e1da47ff17226aafeb85bff8c8069cc2c8574fd0344e4f0129cf9320d0db6867"
+    },
+    {
+      "path": "scripts/lib/fake-cloud-web-managed.mjs",
+      "sha256": "d67bf2a5fdecfa1d07bb405bfcb43a361dd537e1d358e6a2a2cfd32c1d2c5847"
+    },
+    {
+      "path": "scripts/smoke-cloud-parity-app.mjs",
+      "sha256": "16847606be61f1660b2a454aaa89a8c755612302b6d6fb27e405e7ec2cf4411d"
+    }
+  ]
+}

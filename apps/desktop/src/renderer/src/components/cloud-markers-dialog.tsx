@@ -12,6 +12,7 @@ import {
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import { GroupedList, ListRow } from '@/components/list-row'
 import { markerTime } from '../../../shared/session-markers'
+import type { CloudClipsStatus } from '../../../shared/cloud-clips'
 import type { CloudMarker } from '../../../shared/cloud-markers'
 /** Show marks are shared metadata; this view never creates a Library session or an extraction range. */
 export function CloudMarkersButton({
@@ -39,6 +40,7 @@ function CloudMarkersDialog({
   onClose: () => void
 }): ReactElement {
   const { client } = useStudioDiagnostics()
+  const [clips, setClips] = useState<CloudClipsStatus | null>(null)
   const [marks, setMarks] = useState<CloudMarker[] | null>(null),
     [failure, setFailure] = useState<string | null>(null),
     [refresh, setRefresh] = useState(0),
@@ -50,6 +52,14 @@ function CloudMarkersDialog({
       setFailure('Reconnect to load show markers.')
       return
     }
+    void client
+      .requestTyped('cloud.clips.status', { showId })
+      .then((value) => {
+        if (active) setClips(value)
+      })
+      .catch(() => {
+        if (active) setClips(null)
+      })
     void client
       .requestTyped('cloud.markers.list', { showId })
       .then((page) => {
@@ -125,6 +135,33 @@ function CloudMarkersDialog({
                       : 'No recording associated'
                   }
                 >
+                  {m.kind === 'clip' && (
+                    <Button
+                      size="xs"
+                      variant="outline"
+                      disabled={pending || !clips?.enabled || !clips.generation}
+                      onClick={() => {
+                        if (!client || !clips?.generation) return
+                        setPending(true)
+                        setFailure(null)
+                        void client
+                          .requestTyped('cloud.clips.save', {
+                            showId,
+                            markerId: m.id,
+                            generation: clips.generation
+                          })
+                          .then(() => setRefresh((v) => v + 1))
+                          .catch(() =>
+                            setFailure(
+                              'No clip was saved. The marked window may have expired or its media clock is unconfirmed.'
+                            )
+                          )
+                          .finally(() => setPending(false))
+                      }}
+                    >
+                      Save clip
+                    </Button>
+                  )}
                   <Button
                     size="xs"
                     variant="ghost"
