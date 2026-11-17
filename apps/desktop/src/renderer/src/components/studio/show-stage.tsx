@@ -1,4 +1,7 @@
-import { createAvatarView } from '../../../../shared/cloud-avatar-view'
+import { createGraphicsView } from '../../../../shared/cloud-graphics-view'
+import type { GraphicsSnapshot } from '../../../../shared/cloud-graphics'
+import type { ReactNode } from 'react'
+import { createAvatarView, type AvatarMotionSource } from '../../../../shared/cloud-avatar-view'
 import type { AvatarSnapshot } from '../../../../shared/cloud-avatar'
 import { useEffect, useRef, useState, type ReactElement } from 'react'
 
@@ -479,13 +482,89 @@ function ScreenShareButton({
  * program page reports it. The speaker is not shown: there is no return to
  * listen to, and a control that plays nothing would lie.
  */
-function ProgramAvatar({ snapshot }: { snapshot: AvatarSnapshot | null }): ReactElement {
+function ProgramGraphics({
+  snapshot,
+  children
+}: {
+  snapshot: GraphicsSnapshot | null
+  children: ReactNode
+}): ReactElement {
+  const banner = useRef<HTMLDivElement>(null),
+    chat = useRef<HTMLDivElement>(null),
+    highlight = useRef<HTMLDivElement>(null)
+  const view = useRef<ReturnType<typeof createGraphicsView> | null>(null)
+  const [failed, setFailed] = useState(false)
+  useEffect(() => {
+    if (!banner.current || !chat.current || !highlight.current) return
+    const current = createGraphicsView({
+      banner: banner.current,
+      chat: chat.current,
+      highlight: highlight.current
+    })
+    view.current = current
+    const timer = setInterval(() => current.step(), 16)
+    return () => {
+      clearInterval(timer)
+      current.close()
+      view.current = null
+    }
+  }, [])
+  useEffect(() => {
+    const current = view.current
+    current?.receiver.owner(snapshot?.publisherSid ?? null)
+    if (!current || !snapshot) return
+    let cancelled = false
+    setFailed(false)
+    void current.receiver.accept(snapshot).catch(() => {
+      if (!cancelled) setFailed(true)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [snapshot])
+  return (
+    <>
+      <div ref={banner} data-testid="show-stage-banners" />
+      <div ref={chat} />
+      {children}
+      <div ref={highlight} />
+      {failed ? (
+        <span className="absolute inset-x-0 bottom-0 text-xs text-video-ground-muted">
+          Graphics preview failed
+        </span>
+      ) : null}
+    </>
+  )
+}
+
+function ProgramAvatar({
+  snapshot,
+  motion
+}: {
+  snapshot: AvatarSnapshot | null
+  motion?: AvatarMotionSource
+}): ReactElement {
   const root = useRef<HTMLDivElement>(null)
   const view = useRef<ReturnType<typeof createAvatarView> | null>(null)
   const [failure, setFailure] = useState(false)
+  // Plan 249 S5: an atlas layer moves with the poses the outputs replay (the
+  // producer's own simulation); without one it rests on its neutral cell.
+  const motionRef = useRef(motion)
+  useEffect(() => {
+    motionRef.current = motion
+  }, [motion])
   useEffect(() => {
     if (!root.current) return
-    const current = createAvatarView(root.current)
+    const current = createAvatarView(root.current, Date.now, {
+      orientation: 'h',
+      receiver: {
+        advance: () => motionRef.current?.advance(),
+        draw: (orientation, atlasHash) => motionRef.current?.draw(orientation, atlasHash) ?? null,
+        get sim() {
+          return motionRef.current?.sim ?? null
+        }
+      }
+    })
     view.current = current
     const timer = setInterval(() => current.step(), 50)
     return () => {
@@ -577,6 +656,16 @@ function ProgramMonitor({ talkShow }: { talkShow: TalkShowContextValue }): React
             {talkShow.room.avatar?.enabled ? 'Hide avatar' : 'Enable avatar'}
           </Button>
         ) : null}
+        {view.source === 'stage' ? (
+          <Button
+            size="xs"
+            variant="ghost"
+            aria-pressed={talkShow.room.graphics?.enabled === true}
+            onClick={() => void talkShow.setGraphicsEnabled(!talkShow.room.graphics?.enabled)}
+          >
+            {talkShow.room.graphics?.enabled ? 'Hide graphics' : 'Enable graphics'}
+          </Button>
+        ) : null}
         {takeover ? (
           <span className="truncate text-label text-subtle" data-testid="show-stage-program-muted">
             Takeover
@@ -624,7 +713,12 @@ function ProgramMonitor({ talkShow }: { talkShow: TalkShowContextValue }): React
           </span>
         )}
         {view.source === 'stage' ? (
-          <ProgramAvatar snapshot={talkShow.room.avatar?.preview ?? null} />
+          <ProgramGraphics snapshot={talkShow.room.graphics?.preview ?? null}>
+            <ProgramAvatar
+              motion={talkShow.avatarMotionSource}
+              snapshot={talkShow.room.avatar?.preview ?? null}
+            />
+          </ProgramGraphics>
         ) : null}
       </div>
       {view.source === 'stage' ? (
@@ -635,6 +729,17 @@ function ProgramMonitor({ talkShow }: { talkShow: TalkShowContextValue }): React
               : talkShow.room.avatar?.enabled
                 ? 'Avatar preview · Output unconfirmed'
                 : 'Room avatar off · Enable for this room')}
+        </span>
+      ) : null}
+      {view.source === 'stage' &&
+      talkShow.room.avatar?.enabled &&
+      talkShow.room.avatar.animation?.reason ? (
+        <span
+          className="text-meta text-muted-foreground"
+          data-avatar-animation={talkShow.room.avatar.animation.state}
+          data-testid="show-stage-avatar-animation"
+        >
+          {talkShow.room.avatar.animation.reason}
         </span>
       ) : null}
       {view.source === 'stage' && talkShow.room.avatar?.enabled ? (
@@ -657,6 +762,16 @@ function ProgramMonitor({ talkShow }: { talkShow: TalkShowContextValue }): React
             {talkShow.room.avatar.guests?.enabled ? 'Hide from guests' : 'Show to guests'}
           </Button>
         </div>
+      ) : null}
+      {view.source === 'stage' ? (
+        <span className="text-label text-subtle" data-testid="show-stage-graphics-status">
+          {talkShow.room.graphics?.reason ??
+            (talkShow.room.graphics?.state === 'applied'
+              ? 'Graphics applied by each output · Preview reconstruction'
+              : talkShow.room.graphics?.enabled
+                ? 'Graphics preview · Output unconfirmed'
+                : 'Room graphics off · Enable for this room')}
+        </span>
       ) : null}
       {view.source === 'return' ? <audio muted={!listening} ref={audioRef} /> : null}
     </div>

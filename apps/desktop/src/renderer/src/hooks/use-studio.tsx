@@ -1,3 +1,9 @@
+import {
+  roomNativeMicrophoneEnabled,
+  setRoomNativeMicrophoneEnabled,
+  roomMicrophoneState,
+  roomMicrophoneResources
+} from '../lib/room-microphone-state'
 import { roomPcmTestResources, setRoomPcmTestEnabled } from '../lib/room-pcm-test-state'
 import { cloudTerminalOwner } from '@/lib/cloud-provider-lifecycle'
 import { roomHoldsTheCamera } from '@/lib/replay-buffer-reconcile'
@@ -3814,10 +3820,13 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           }
           return commentHighlightIntentRef.current === intent ? cleared : null
         }
-        const streamVideo = streamOutputVideoSettings(
-          captureConfig.video,
-          captureConfig.streamEnabled ? captureConfig.streaming : undefined
-        )
+        const streamVideo =
+          cloudStatusRef.current?.room?.phase === 'open'
+            ? { width: 1920, height: 1080 }
+            : streamOutputVideoSettings(
+                captureConfig.video,
+                captureConfig.streamEnabled ? captureConfig.streaming : undefined
+              )
         const avatarSource = options?.milestone?.avatarUrl ?? message.authorAvatarUrl
         const [avatarUrl, canvases] = await Promise.all([
           avatarSource ? window.videorc?.cacheChatAvatar?.(avatarSource).catch(() => null) : null,
@@ -5293,10 +5302,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const sourceDeviceSwitchPending = sourceSelectionState.pending
   const sourceSwitchReason = useCallback(
     (kind: LiveSourceDeviceSwitchPending): string | null => {
-      if (roomHoldsTheCamera(cloudStatusRef.current?.room) && kind !== 'camera')
-        return kind === 'microphone'
-          ? 'Close the room to change its microphone.'
-          : 'Use the room screen-share control.'
+      if (roomHoldsTheCamera(cloudStatusRef.current?.room) && kind === 'capture')
+        return 'Use the room screen-share control.'
       // Only a live socket can be mid-bootstrap. With no backend there is no
       // session to fence, and the next recording.status reconciles the pick.
       if (sourceStatusUnknownRef.current && (wsStatus === 'connecting' || wsStatus === 'connected'))
@@ -7657,8 +7664,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // twice a second); it clears when chat empties, both switches go off or the
   // livestream ends. Nothing loads until the box is first switched on.
   const chatOverlayLayout = overlayLayout.chat
+  const graphicsOutputFacts = outputSessionFacts(recording, cloudStatus, wsStatus === 'connected')
   const chatOverlayOn =
-    recordingLive && (chatOverlayLayout.showOnStream || chatOverlayLayout.showInRecording)
+    graphicsOutputFacts.freshness === 'fresh' &&
+    (graphicsOutputFacts.live || graphicsOutputFacts.recording) &&
+    (chatOverlayLayout.showOnStream || chatOverlayLayout.showInRecording)
   const chatOverlayDriverRef = useRef<{
     client: BackendClient
     driver: Promise<ChatOverlayDriver | null>
@@ -11889,10 +11899,20 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         const controls = roomControlsRef.current
         if (!controls || controls.snapshot.identity !== `host:${cloudStatusRef.current?.show?.id}`)
           throw new Error('The room is not connected.')
-        if (sourceKind !== 'camera')
-          throw new Error(
-            'Use the room screen-share control; close the room to change its microphone.'
+        if (sourceKind === 'microphone') {
+          const microphone = deviceListRef.current.devices.find(
+            (d) => d.kind === 'microphone' && d.id === sources.microphoneId
           )
+          if (sources.microphoneId && !microphone)
+            throw new Error('The selected microphone is unavailable.')
+          await controls.setMicrophoneSelection(microphone?.id ?? null, microphone?.name ?? null)
+          setCaptureConfig((current) => ({
+            ...current,
+            sources: mergeSourceKind(current.sources, sources, 'microphone')
+          }))
+          return
+        }
+        if (sourceKind !== 'camera') throw new Error('Use the room screen-share control.')
         const camera = deviceListRef.current.devices.find(
           (d) => d.kind === 'camera' && d.id === sources.cameraId
         )
@@ -17303,6 +17323,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       controlsRef: roomControlsRef,
       onMediaSnapshot: onRoomMediaSnapshot,
       microphoneMuted: captureConfig.audio.microphoneMuted,
+      microphoneAudio: captureConfig.audio,
       cameraOff: captureConfig.sources.cameraOff === true,
       cameraSettings: talkShowCameraSettings,
       avatar: talkShowAvatar,
@@ -17323,7 +17344,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       deviceList.devices,
       smokeTalkShowRoomOpen,
       onRoomMediaSnapshot,
-      captureConfig.audio.microphoneMuted,
+      captureConfig.audio,
       captureConfig.sources.cameraOff,
       talkShowCameraId,
       talkShowCameraSettings,
@@ -20102,23 +20123,78 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         const fixtures: Device[] = [
           { id: 'parity-camera', name: 'Parity camera', kind: 'camera', status: 'available' },
           {
-            id: 'parity-microphone',
+            id: roomNativeMicrophoneEnabled()
+              ? 'microphone:coreaudio:4294967295'
+              : 'parity-microphone',
             name: 'Parity microphone',
             kind: 'microphone',
             status: 'available'
           }
         ]
+        if (roomNativeMicrophoneEnabled())
+          fixtures.push({
+            id: 'microphone:coreaudio:4294967294',
+            name: 'Alternate parity microphone',
+            kind: 'microphone',
+            status: 'available'
+          })
         setDeviceList({ devices: fixtures, warnings: [] })
         return fixtures
       },
+      roomNativeMicrophone: (enabled?: boolean) => {
+        if (enabled !== undefined) setRoomNativeMicrophoneEnabled(enabled)
+        return {
+          ...roomMicrophoneState.getSnapshot(),
+          owners: [...roomMicrophoneResources(), ...roomPcmTestResources().owners]
+        }
+      },
+      roomMicrophoneDisconnect: (mode?: 'disconnect' | 'starve' | 'resume') =>
+        roomControlsRef.current?.disconnectMicrophoneFixture(mode),
+      roomMicrophoneSelect: (id: string | null, name: string | null) =>
+        switchSourceDeviceLive('microphone', {
+          ...captureConfigRef.current.sources,
+          microphoneId: id ?? undefined,
+          microphoneName: name ?? undefined
+        }),
       roomPcmTest: (enabled?: boolean) => {
         if (enabled !== undefined) setRoomPcmTestEnabled(enabled)
         return roomPcmTestResources()
+      },
+      roomHighlight: async (milestone = false) => {
+        const message = liveChatSnapshotRef.current.messages.find(
+          (m) => m.eventType === 'message' && !m.isDeleted
+        )
+        if (!message) throw new Error('No eligible fixture message')
+        const state = await applyCommentHighlight(
+          message,
+          message.sessionId,
+          ++commentHighlightIntentRef.current,
+          {
+            alwaysSet: true,
+            ...(milestone
+              ? {
+                  milestone: {
+                    messageId: message.id,
+                    name: message.authorName,
+                    platform: message.platform,
+                    label: '10th stream'
+                  }
+                }
+              : {})
+          }
+        )
+        if (state) publishCommentHighlightState(state)
+        return state
+      },
+      roomGraphics: (enabled?: boolean) => {
+        if (enabled !== undefined) roomControlsRef.current?.setGraphicsEnabled(enabled)
+        return roomControlsRef.current?.snapshot.graphics ?? null
       },
       roomAvatar: (enabled?: boolean) => {
         if (enabled !== undefined) roomControlsRef.current?.setAvatarEnabled(enabled)
         return roomControlsRef.current?.snapshot.avatar ?? null
       },
+      roomAvatarMotion: () => roomControlsRef.current?.avatarMotionProbe?.() ?? null,
       roomAvatarGuests: (enabled?: boolean) => {
         if (enabled !== undefined) roomControlsRef.current?.setAvatarGuests(enabled)
         return roomControlsRef.current?.snapshot.avatar?.guests ?? null

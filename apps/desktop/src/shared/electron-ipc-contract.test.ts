@@ -103,8 +103,8 @@ describe('Electron IPC contract', () => {
     // dropped on Takeovers) and screens:release-images (a stopped batch hands
     // back its unused capabilities), and makes the takeover picker multi-select.
     // 184: plan 249 S7a adds the bounded main-only PCM transport and resource inspection.
-    expect(Object.keys(electronInvokeApiMethods)).toHaveLength(184)
-    expect(new Set(Object.values(electronInvokeApiMethods)).size).toBe(184)
+    expect(Object.keys(electronInvokeApiMethods)).toHaveLength(186)
+    expect(new Set(Object.values(electronInvokeApiMethods)).size).toBe(186)
     expectTypeOf<ElectronInvokeArgs<'resource:trash-session-deletion'>>().toEqualTypeOf<
       Parameters<VideorcApi['trashSessionDeletion']>
     >()
