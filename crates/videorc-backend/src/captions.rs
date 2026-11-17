@@ -3731,7 +3731,7 @@ pub(crate) async fn pause_marker_voice_for_service_flags(state: &AppState) {
         coordinator.marker_epoch = coordinator.marker_epoch.saturating_add(1);
         coordinator.marker_listening = Some(listening.clone());
         if let Some(session_id) = coordinator.marker_session_id.as_ref() {
-            emit_marker_voice_status(&state, session_id, &listening);
+            emit_marker_voice_status(state, session_id, &listening);
         }
     }
     if crate::cohost::cohost_status(state)
@@ -3846,7 +3846,7 @@ pub(crate) async fn configure_marker_voice(
     };
     let mut coordinator = state.captions.lock().await;
     coordinator.marker_listening = Some(listening.clone());
-    emit_marker_voice_status(&state, session_id, &listening);
+    emit_marker_voice_status(state, session_id, &listening);
     Ok(listening)
 }
 
