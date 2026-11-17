@@ -104,8 +104,9 @@ describe('Electron IPC contract', () => {
     // back its unused capabilities), and makes the takeover picker multi-select.
     // 184: plan 249 S7a adds the bounded main-only PCM transport and resource inspection.
     // 188: plan 249 S13a adds the main-only camera-role frame fixture and its inspection.
-    expect(Object.keys(electronInvokeApiMethods)).toHaveLength(188)
-    expect(new Set(Object.values(electronInvokeApiMethods)).size).toBe(188)
+    // 191: plan 249 S13b adds the main-only processed camera, its inspection and fixture events.
+    expect(Object.keys(electronInvokeApiMethods)).toHaveLength(191)
+    expect(new Set(Object.values(electronInvokeApiMethods)).size).toBe(191)
     expectTypeOf<ElectronInvokeArgs<'resource:trash-session-deletion'>>().toEqualTypeOf<
       Parameters<VideorcApi['trashSessionDeletion']>
     >()
@@ -2054,7 +2055,9 @@ it('admits only bounded frame-fixture commands and complete frame counters', () 
   expect(validateElectronInvokeArgs('room-frame:test', [command])).toEqual([command])
   for (const bad of [
     { ...command, width: 1920 },
-    { ...command, role: 'host-camera' },
+    { ...command, role: 'host-camera', width: 641 },
+    { ...command, role: 'host-camera', width: 640, height: 640 },
+    { ...command, role: 'other' },
     { ...command, action: 'open' },
     { ...command, extra: true },
     { ...command, generation: 0 },
@@ -2083,4 +2086,44 @@ it('admits only bounded frame-fixture commands and complete frame counters', () 
       leaseStalls: 0
     })
   ).toMatchObject({ reason: 'not-due' })
+})
+
+it('admits the processed camera only at an S10-valid logical size and gates its fixture events', () => {
+  const command = {
+    action: 'open',
+    generation: 3,
+    role: 'host-camera',
+    width: 554,
+    height: 414,
+    fps: 30,
+    packing: 'rgb-left-alpha-right',
+    serial: 1
+  }
+  expect(validateElectronInvokeArgs('room-camera:processed', [command])).toEqual([command])
+  for (const bad of [
+    { ...command, width: 556, height: 416 },
+    { ...command, fps: 60 },
+    { ...command, role: 'host-camera-test' }
+  ])
+    expect(() => validateElectronInvokeArgs('room-camera:processed', [bad])).toThrow()
+  expect(validateElectronInvokeArgs('room-camera:fixture', ['fixture-switch'])).toEqual([
+    'fixture-switch'
+  ])
+  expect(() => validateElectronInvokeArgs('room-camera:fixture', ['fixture-delete'])).toThrow()
+  const resources = {
+    nativeSources: 1,
+    nativeLeases: 0,
+    sockets: 1,
+    ipcRequests: 0,
+    timers: 0,
+    logicalWidth: 554,
+    logicalHeight: 414,
+    keptForRoom: true,
+    lentToBrowserRoom: false,
+    fixture: true
+  }
+  expect(validateElectronInvokeResult('room-camera:inspect', resources)).toEqual(resources)
+  expect(() =>
+    validateElectronInvokeResult('room-camera:inspect', { ...resources, logicalHeight: null })
+  ).toThrow()
 })

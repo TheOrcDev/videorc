@@ -101,13 +101,19 @@ export type CameraRoleFrameDescriptor = {
   keyApplied: 'native-once' | 'none'
   geometryApplied: 'none'
 }
-export function cameraRoleDescriptor(alphaMode: CameraRoleAlphaMode): CameraRoleFrameDescriptor {
+export function cameraRoleDescriptor(
+  alphaMode: CameraRoleAlphaMode,
+  logical: { width: number; height: number } = {
+    width: ROOM_FRAME.width,
+    height: ROOM_FRAME.height
+  }
+): CameraRoleFrameDescriptor {
   return {
     role: ROOM_FRAME.cameraRole,
     alphaMode,
     packing: alphaMode === 'packed' ? ROOM_FRAME.packing : null,
-    logicalWidth: ROOM_FRAME.width,
-    logicalHeight: ROOM_FRAME.height,
+    logicalWidth: logical.width,
+    logicalHeight: logical.height,
     straightAlpha: true,
     keyApplied: alphaMode === 'packed' ? 'native-once' : 'none',
     geometryApplied: 'none'
@@ -171,9 +177,9 @@ export function bindCameraFramePublication(
   authority: CameraFrameAuthority,
   nativeGeneration: number,
   alphaMode: CameraRoleAlphaMode,
-  options: { experiment?: boolean } = {}
+  options: { experiment?: boolean; logical?: { width: number; height: number } } = {}
 ): CameraFramePublication | null {
-  const descriptor = cameraRoleDescriptor(alphaMode)
+  const descriptor = cameraRoleDescriptor(alphaMode, options.logical)
   if (
     authority.contract !== CAMERA_FRAME_CONTRACT ||
     authority.source !== 'camera' ||
@@ -280,15 +286,25 @@ export function roomFrameCapability(platform: string): RoomFramePlatformCapabili
   }
 }
 
+/** Header flags. Plan 249 S13b: processed camera frames set `ptsObserved`:
+ * `ptsUs` is native observation time (an upper bound on capture time). */
+export const ROOM_FRAME_FLAGS = { packed: 1, ptsObserved: 2 } as const
+/** Plan 249 S13b: the processed camera role (native owner, real processing). */
+export const ROOM_CAMERA_ROLE = 'host-camera'
+export type RoomFrameRole = typeof ROOM_FRAME.role | typeof ROOM_CAMERA_ROLE
+/** Logical (unpacked) size and frame rate of one processed generation. */
+export type RoomFrameSize = { width: number; height: number; fps: number }
+export const packedWidthFor = (logicalWidth: number): number => logicalWidth * 2 + ROOM_FRAME.gutter
+
 export type RoomFrameAction = 'open' | 'pull' | 'reset' | 'close'
 export type RoomFrameRelease = { sequence: number; surfaceEpoch: number }
 export type RoomFrameCommand = {
   action: RoomFrameAction
   generation: number
-  role: typeof ROOM_FRAME.role
-  width: 640
-  height: 360
-  fps: 30
+  role: RoomFrameRole
+  width: number
+  height: number
+  fps: number
   packing: typeof ROOM_FRAME.packing
   serial: number
   release?: RoomFrameRelease | null
@@ -302,13 +318,15 @@ export type RoomFrameOpened = {
 export type RoomFrameReset = { generation: number; surfaceEpoch: number; revokedLeases: number }
 export type RoomFrameIdle = {
   frame: null
-  reason: 'not-due' | 'lease-stalled'
+  reason: 'not-due' | 'lease-stalled' | 'camera-unavailable'
   staleReleases: number
   leaseStalls: number
 }
 export type RoomFrameHeader = {
   serial: number
   packed: boolean
+  /** `ptsUs` is native observation time, not capture time (processed role). */
+  ptsObserved: boolean
   width: number
   height: number
   surfaceEpoch: number
@@ -333,15 +351,16 @@ export function roomFrameCommand(
   action: RoomFrameAction,
   generation: number,
   serial: number,
-  release?: RoomFrameRelease
+  release?: RoomFrameRelease,
+  processed?: RoomFrameSize
 ): RoomFrameCommand {
   return {
     action,
     generation,
-    role: ROOM_FRAME.role,
-    width: ROOM_FRAME.width,
-    height: ROOM_FRAME.height,
-    fps: ROOM_FRAME.fps,
+    role: processed ? ROOM_CAMERA_ROLE : ROOM_FRAME.role,
+    width: processed?.width ?? ROOM_FRAME.width,
+    height: processed?.height ?? ROOM_FRAME.height,
+    fps: processed?.fps ?? ROOM_FRAME.fps,
     packing: ROOM_FRAME.packing,
     serial,
     ...(release ? { release } : {})
@@ -358,10 +377,13 @@ export function parseRoomFrameCommand(value: unknown): RoomFrameCommand {
     !['open', 'pull', 'reset', 'close'].includes(v.action) ||
     !frameInteger(v.generation) ||
     v.generation === 0 ||
-    v.role !== ROOM_FRAME.role ||
-    v.width !== ROOM_FRAME.width ||
-    v.height !== ROOM_FRAME.height ||
-    v.fps !== ROOM_FRAME.fps ||
+    !(v.role === ROOM_FRAME.role
+      ? v.width === ROOM_FRAME.width && v.height === ROOM_FRAME.height && v.fps === ROOM_FRAME.fps
+      : v.role === ROOM_CAMERA_ROLE &&
+        cameraAlphaDimensions(v.width, v.height) &&
+        Number.isInteger(v.fps) &&
+        v.fps >= 1 &&
+        v.fps <= 30) ||
     v.packing !== ROOM_FRAME.packing ||
     !u32(v.serial) ||
     keys.length > 9 ||
@@ -403,9 +425,20 @@ function readU64(view: DataView, at: number): number | null {
  */
 export function parseRoomFrameHeader(
   bytes: Uint8Array,
-  expected?: { generation?: number; serial?: number }
+  expected?: {
+    generation?: number
+    serial?: number
+    /** The processed role's logical size; absent = the synthetic 640x360. */
+    processed?: { width: number; height: number }
+  }
 ): RoomFrameHeader {
-  if (!(bytes instanceof Uint8Array) || bytes.byteLength !== ROOM_FRAME_MESSAGE_BYTES)
+  const logical = expected?.processed ?? { width: ROOM_FRAME.width, height: ROOM_FRAME.height }
+  const packedWidth = packedWidthFor(logical.width)
+  if (
+    !(bytes instanceof Uint8Array) ||
+    !cameraAlphaDimensions(logical.width, logical.height) ||
+    bytes.byteLength !== ROOM_FRAME.headerBytes + packedWidth * logical.height * 4
+  )
     throw new Error('Invalid frame length.')
   const view = new DataView(bytes.buffer, bytes.byteOffset, ROOM_FRAME.headerBytes)
   if (
@@ -417,7 +450,8 @@ export function parseRoomFrameHeader(
   const rawOrigin = view.getBigUint64(64, true)
   const header: RoomFrameHeader = {
     serial: view.getUint32(8, true),
-    packed: (flags & 1) === 1,
+    packed: (flags & ROOM_FRAME_FLAGS.packed) !== 0,
+    ptsObserved: (flags & ROOM_FRAME_FLAGS.ptsObserved) !== 0,
     width: view.getUint32(12, true),
     height: view.getUint32(16, true),
     surfaceEpoch: view.getUint32(20, true),
@@ -431,11 +465,15 @@ export function parseRoomFrameHeader(
     droppedFrames: readU64(view, 80) ?? -1,
     leaseStalls: readU64(view, 88) ?? -1
   }
+  const processed = expected?.processed !== undefined
   if (
-    flags !== 1 ||
+    flags !==
+      (processed
+        ? ROOM_FRAME_FLAGS.packed | ROOM_FRAME_FLAGS.ptsObserved
+        : ROOM_FRAME_FLAGS.packed) ||
     view.getUint32(28, true) !== 0 ||
-    header.width !== ROOM_FRAME.packedWidth ||
-    header.height !== ROOM_FRAME.height ||
+    header.width !== packedWidth ||
+    header.height !== logical.height ||
     header.surfaceEpoch === 0 ||
     header.leaseSlot >= ROOM_FRAME.leaseSlots ||
     ![
@@ -447,7 +485,7 @@ export function parseRoomFrameHeader(
       header.leaseStalls
     ].every(frameInteger) ||
     header.generation === 0 ||
-    header.ptsUs !== framePtsUs(header.sequence) ||
+    (!processed && header.ptsUs !== framePtsUs(header.sequence)) ||
     header.observedAtUs < header.ptsUs ||
     (header.originUs !== null &&
       (!frameInteger(header.originUs) ||
@@ -460,24 +498,55 @@ export function parseRoomFrameHeader(
   return header
 }
 
-export function parseRoomFrameReply(value: unknown, generation?: number): RoomFrameReply {
+/** The logical size a packed header carries, or null when it is not valid. */
+export function logicalSizeOfPacked(
+  packedWidth: unknown,
+  height: unknown
+): { width: number; height: number } | null {
+  if (!frameInteger(packedWidth) || !frameInteger(height)) return null
+  const width = (packedWidth - ROOM_FRAME.gutter) / 2
+  return Number.isInteger(width) && cameraAlphaDimensions(width, height) ? { width, height } : null
+}
+
+export function parseRoomFrameReply(
+  value: unknown,
+  generation?: number,
+  processed?: { width: number; height: number }
+): RoomFrameReply {
   if (value === null) return null
   if (!value || typeof value !== 'object') throw new Error('Invalid frame reply.')
   const v = value as Record<string, unknown>
   if ('header' in v && 'pixels' in v) {
     const pixels = v.pixels
-    if (!(pixels instanceof Uint8Array) || pixels.byteLength !== ROOM_FRAME_PAYLOAD_BYTES)
-      throw new Error('Invalid frame pixels.')
     const h = v.header as RoomFrameHeader
+    const logical = h && typeof h === 'object' ? logicalSizeOfPacked(h.width, h.height) : null
+    // The synthetic role is exactly 640x360 with nominal pts; a processed frame
+    // flags observation-time pts and has any S10-valid logical size.
+    const synthetic =
+      !!h &&
+      h.ptsObserved === false &&
+      h.width === ROOM_FRAME.packedWidth &&
+      h.height === ROOM_FRAME.height
     if (
-      !h ||
-      typeof h !== 'object' ||
-      h.width !== ROOM_FRAME.packedWidth ||
-      h.height !== ROOM_FRAME.height ||
+      !logical ||
+      !(pixels instanceof Uint8Array) ||
+      pixels.byteLength !== h.width * h.height * 4 ||
+      (processed &&
+        (logical.width !== processed.width ||
+          logical.height !== processed.height ||
+          h.ptsObserved !== true))
+    )
+      throw new Error('Invalid frame pixels.')
+    if (
+      typeof h.packed !== 'boolean' ||
+      typeof h.ptsObserved !== 'boolean' ||
+      !h.packed ||
+      (!synthetic && h.ptsObserved !== true) ||
       !frameInteger(h.generation) ||
       (generation !== undefined && h.generation !== generation) ||
       !frameInteger(h.sequence) ||
-      h.ptsUs !== framePtsUs(h.sequence) ||
+      (synthetic && h.ptsUs !== framePtsUs(h.sequence)) ||
+      !frameInteger(h.ptsUs) ||
       !frameInteger(h.observedAtUs) ||
       h.observedAtUs < h.ptsUs ||
       !u32(h.surfaceEpoch) ||
@@ -506,7 +575,7 @@ export function parseRoomFrameReply(value: unknown, generation?: number): RoomFr
   if ('reason' in v) {
     if (
       v.frame !== null ||
-      !['not-due', 'lease-stalled'].includes(v.reason as string) ||
+      !['not-due', 'lease-stalled', 'camera-unavailable'].includes(v.reason as string) ||
       !frameInteger(v.staleReleases) ||
       !frameInteger(v.leaseStalls)
     )

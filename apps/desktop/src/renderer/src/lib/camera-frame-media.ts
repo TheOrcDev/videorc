@@ -34,13 +34,15 @@ export function createCameraFrameMedia(options: {
   publication: () => CameraFramePublicationFacts | null
   authority: () => CameraFrameAuthority | null
   experiment: boolean
+  /** The publication's logical (unpacked) size; S13b processed cameras vary. */
+  logical?: { width: number; height: number }
   onClose?: (reason: string) => void
   gpu?: typeof createAlphaGpu
 }): CameraFrameMedia {
   if (!CAMERA_PACKED_ALPHA_ENABLED && !options.experiment)
     throw new Error('Packed camera frames are disabled.')
-  const w = ROOM_FRAME.width
-  const h = ROOM_FRAME.height
+  const w = options.logical?.width ?? ROOM_FRAME.width
+  const h = options.logical?.height ?? ROOM_FRAME.height
   if (!alphaDimensions(w, h)) throw new Error('Camera frame size refused.')
   const expected = packedSize(w, h)
   const valid = (): boolean => {

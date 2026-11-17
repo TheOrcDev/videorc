@@ -123,6 +123,31 @@ if (selected.case === 'camera-bridge') {
   }
   process.exit(process.exitCode ?? 0)
 }
+if (selected.case === 'camera') {
+  // S13b: local LiveKit with the debug fixture camera. Never qualifies production.
+  const { cameraCaseConfig } = await import('./lib/cloud-parity-camera-contract.mjs')
+  const { acquireCameraCase, analyzeCameraCase } = await import('./lib/cloud-parity-camera.mjs')
+  const config = cameraCaseConfig(process.env)
+  let evidenceFile = process.env.VIDEORC_CAMERA_EVIDENCE
+  if (config.mode !== 'analyze') {
+    const acquired = await acquireCameraCase({
+      desktopRoot: fileURLToPath(new URL('../', import.meta.url)),
+      webRoot: process.env.VIDEORC_PARITY_WEB_ROOT,
+      config
+    })
+    evidenceFile = acquired.evidenceFile
+    console.log(`Processed camera artifacts acquired (not qualified): ${evidenceFile}`)
+  }
+  if (config.mode !== 'acquire') {
+    if (!evidenceFile) throw new Error('VIDEORC_CAMERA_EVIDENCE names the evidence to analyze')
+    const { writeFileSync } = await import('node:fs')
+    const result = await analyzeCameraCase(evidenceFile)
+    writeFileSync(`${evidenceFile}.qualification.json`, JSON.stringify(result, null, 2) + '\n')
+    console.log(JSON.stringify(result, null, 2))
+    if (result.status !== 'passed') process.exitCode = 1
+  }
+  process.exit(process.exitCode ?? 0)
+}
 if (selected.case === 'library') {
   const { runLibrary } = await import('./lib/cloud-parity-library.mjs')
   const { output } = await runLibrary()

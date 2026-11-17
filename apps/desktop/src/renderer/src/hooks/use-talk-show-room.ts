@@ -298,8 +298,21 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
       try {
         await leavingRef.current
         if (cancelled) return
+        // Plan 249 S13b: with the processed camera on (main + backend gated, DEV
+        // renderer), the native camera stays the one owner: no browser camera grant.
+        const processedCamera =
+          import.meta.env.DEV &&
+          ((await window.videorc?.getRoomProcessedCameraResources?.().then(
+            () => true,
+            () => false
+          )) ??
+            false)
+        if (cancelled) return
         grant = Promise.resolve(
-          window.videorc?.setTalkShowMediaGrant?.({ video: true, screenSourceId: null })
+          window.videorc?.setTalkShowMediaGrant?.({
+            video: !processedCamera,
+            screenSourceId: null
+          })
         )
         await grant
         if (cancelled) return
@@ -332,6 +345,7 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
             import.meta.env.DEV &&
             (roomFrameTestEnabled() ||
               new URLSearchParams(window.location.search).get('roomFrameTest') === '1'),
+          processedCamera,
           onFrameDiagnostic: (detail) =>
             window.dispatchEvent(new CustomEvent('videorc:frame-test-diagnostic', { detail })),
           requestToken: () => client.requestTyped('cloud.room.token.refresh'),

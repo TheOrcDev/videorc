@@ -349,6 +349,8 @@ function TrackVideo({
     }
   }, [track])
   const authority = cameraFrame?.authority
+  const logicalWidth = cameraFrame?.descriptor.logicalWidth
+  const logicalHeight = cameraFrame?.descriptor.logicalHeight
   useEffect(() => {
     const video = ref.current
     if (!video || !authority) return
@@ -371,7 +373,10 @@ function TrackVideo({
             source: 'camera'
           }),
           authority: () => authority,
-          experiment: true
+          experiment: true,
+          ...(logicalWidth && logicalHeight
+            ? { logical: { width: logicalWidth, height: logicalHeight } }
+            : {})
         })
         media.canvas.className = cn('absolute inset-0 size-full', className)
         video.after(media.canvas)
@@ -386,7 +391,7 @@ function TrackVideo({
       media?.close('unmounted')
       video.style.opacity = ''
     }
-  }, [authority, className, onSize, track])
+  }, [authority, className, logicalHeight, logicalWidth, onSize, track])
   useEffect(() => {
     const video = ref.current
     if (!video || !onSize || authority) return

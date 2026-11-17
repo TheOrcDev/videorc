@@ -89,6 +89,8 @@ mod room_microphone;
 // Plan 249 S13a: one native monotonic anchor for room media bridges.
 mod room_clock;
 mod room_frame_bridge;
+// Plan 249 S13b: the processed camera role's native producer.
+mod room_camera_source;
 // Plan 168 Phase F: the pet builder (S-F1 to S-F3) and the creator's RPCs (S-F4).
 mod buddy_pet_build;
 mod buddy_pet_create;
@@ -8789,6 +8791,177 @@ fn handle_room_frame_control(
     })
 }
 
+// Plan 249 S13b: the processed camera role. Connection-owned like the frame
+// fixture; processing runs off the event loop (`spawn_blocking`).
+async fn handle_room_camera_control(
+    state: &AppState,
+    role: BackendRole,
+    bridge: &mut room_frame_bridge::Bridge,
+    producer: &mut room_camera_source::Producer,
+    text: &str,
+) -> Option<RoomFrameReply> {
+    if !text.contains("room.camera.processed") {
+        return None;
+    }
+    #[derive(Deserialize)]
+    struct Envelope<'a> {
+        id: &'a str,
+        method: &'a str,
+    }
+    let envelope = serde_json::from_str::<Envelope<'_>>(text).ok()?;
+    if !matches!(
+        envelope.method,
+        "room.camera.processed" | "room.camera.processed.inspect"
+    ) {
+        return None;
+    }
+    let refuse = |id: &str, code: &str, message: &str| {
+        Some(RoomFrameReply::Text(ServerResponse::error(
+            id, code, message,
+        )))
+    };
+    if role != BackendRole::Admin || !room_camera_source::enabled(state.smoke_rpc_enabled) {
+        return refuse(
+            envelope.id,
+            "camera-disabled",
+            "Processed camera is unavailable.",
+        );
+    }
+    if text.len() > 512 {
+        return refuse(
+            envelope.id,
+            "invalid-params",
+            "Camera command exceeds its bound.",
+        );
+    }
+    let command = serde_json::from_str::<ClientCommand>(text).ok()?;
+    if command.method == "room.camera.processed.inspect" {
+        if !rpc_params_are_empty(&command.params) {
+            return refuse(
+                &command.id,
+                "invalid-params",
+                "Inspection takes no parameters.",
+            );
+        }
+        // The size a new generation must open at (null while no camera frame).
+        let logical = room_camera_source::current_logical(state).await.ok();
+        // The layout the producer processes with (evidence, not a setting).
+        let scene_layout = state.compositor.lock().await.status.scene_layout.clone();
+        let layout_source = if scene_layout.is_some() {
+            "scene"
+        } else {
+            "default"
+        };
+        let layout = scene_layout.unwrap_or_else(protocol::default_layout_settings);
+        return Some(RoomFrameReply::Text(ServerResponse::ok(
+            command.id,
+            serde_json::json!({
+                "nativeSources": room_frame_bridge::active_sources(),
+                "nativeLeases": room_frame_bridge::active_leases(),
+                "logicalWidth": logical.map(|(width, _)| width),
+                "logicalHeight": logical.map(|(_, height)| height),
+                "keptForRoom": room_camera_source::kept_for_room(),
+                "layoutSource": layout_source,
+                "keyOn": layout.camera_chroma_key_enabled,
+                "nativeMirror": layout.camera_mirror,
+                "look": layout.camera_look,
+                "lentToBrowserRoom": preview_camera::camera_lent_to_talk_show(state).await,
+                "fixture": room_camera_source::fixture_size().is_some(),
+            }),
+        )));
+    }
+    // Debug fixture "device" events for acceptance: switch and unplug.
+    match command.params.get("action").and_then(|a| a.as_str()) {
+        Some("fixture-switch") => {
+            return Some(match producer.fixture_switch() {
+                Ok(generation) => RoomFrameReply::Text(ServerResponse::ok(
+                    command.id,
+                    serde_json::json!({ "cameraGeneration": generation }),
+                )),
+                Err(error) => RoomFrameReply::Text(ServerResponse::error(
+                    command.id,
+                    "camera-rejected",
+                    error,
+                )),
+            });
+        }
+        Some("fixture-unplug") => {
+            return Some(match producer.fixture_unplug() {
+                Ok(()) => {
+                    RoomFrameReply::Text(ServerResponse::ok(command.id, serde_json::Value::Null))
+                }
+                Err(error) => RoomFrameReply::Text(ServerResponse::error(
+                    command.id,
+                    "camera-rejected",
+                    error,
+                )),
+            });
+        }
+        _ => {}
+    }
+    let Ok(params) = serde_json::from_value::<room_frame_bridge::Command>(command.params) else {
+        return refuse(&command.id, "camera-rejected", "Invalid camera command");
+    };
+    if !params.is_processed() {
+        return refuse(
+            &command.id,
+            "camera-rejected",
+            "Not the processed camera role",
+        );
+    }
+    let frame = match params.action.as_str() {
+        "open" => {
+            // One owner: refuse while the browser room holds the camera, and
+            // open only at the size the camera gives now.
+            if preview_camera::camera_lent_to_talk_show(state).await {
+                return refuse(
+                    &command.id,
+                    "camera-rejected",
+                    "The camera is lent to the browser room",
+                );
+            }
+            match room_camera_source::current_logical(state).await {
+                Ok(logical) if logical == params.logical() => None,
+                Ok(_) => {
+                    return refuse(
+                        &command.id,
+                        "camera-rejected",
+                        "Requested size is not the camera's logical size",
+                    );
+                }
+                Err(error) => return refuse(&command.id, "camera-rejected", error),
+            }
+        }
+        "pull" => match producer.latest(state, params.logical()).await {
+            Ok(frame) => frame,
+            Err(error) => return refuse(&command.id, "camera-rejected", error),
+        },
+        _ => None,
+    };
+    let result = bridge.command_with(params, std::time::Instant::now(), frame);
+    Some(match result {
+        Ok(room_frame_bridge::Reply::Frame(bytes)) => RoomFrameReply::Binary(bytes),
+        Ok(room_frame_bridge::Reply::Opened(opened)) => RoomFrameReply::Text(ServerResponse::ok(
+            command.id,
+            serde_json::to_value(opened).unwrap_or_default(),
+        )),
+        Ok(room_frame_bridge::Reply::Reset(reset)) => RoomFrameReply::Text(ServerResponse::ok(
+            command.id,
+            serde_json::to_value(reset).unwrap_or_default(),
+        )),
+        Ok(room_frame_bridge::Reply::Idle(idle)) => RoomFrameReply::Text(ServerResponse::ok(
+            command.id,
+            serde_json::to_value(idle).unwrap_or_default(),
+        )),
+        Ok(room_frame_bridge::Reply::Closed) => {
+            RoomFrameReply::Text(ServerResponse::ok(command.id, serde_json::Value::Null))
+        }
+        Err(error) => {
+            RoomFrameReply::Text(ServerResponse::error(command.id, "camera-rejected", error))
+        }
+    })
+}
+
 async fn handle_preview_frame_lease_control(
     state: &AppState,
     role: BackendRole,
@@ -9040,6 +9213,8 @@ async fn websocket_session_with_handler_role_and_redaction(
     let mut room_audio_bridge = room_audio_bridge::Bridge::default();
     let mut room_microphone = room_microphone::Bridge::default();
     let mut room_frame_bridge = room_frame_bridge::Bridge::default();
+    let mut room_camera_bridge = room_frame_bridge::Bridge::default();
+    let mut room_camera_producer = room_camera_source::Producer::default();
 
     loop {
         let incoming = tokio::select! {
@@ -9197,6 +9372,38 @@ async fn websocket_session_with_handler_role_and_redaction(
                     &mut room_frame_bridge,
                     text.as_str(),
                 ) {
+                    let message = match reply {
+                        RoomFrameReply::Binary(bytes) => Some(Message::Binary(bytes.into())),
+                        RoomFrameReply::Text(response) => match serde_json::to_string(&response) {
+                            Ok(text) => Some(Message::Text(text.into())),
+                            Err(_) => None,
+                        },
+                    };
+                    let Some(message) = message else {
+                        break;
+                    };
+                    if !send_tracked_reliable_websocket_item(
+                        &outgoing_tx,
+                        &reliable_metrics,
+                        message,
+                        &slow_pressure,
+                    )
+                    .await
+                    {
+                        break;
+                    }
+                    continue;
+                }
+
+                if let Some(reply) = handle_room_camera_control(
+                    &state,
+                    role,
+                    &mut room_camera_bridge,
+                    &mut room_camera_producer,
+                    text.as_str(),
+                )
+                .await
+                {
                     let message = match reply {
                         RoomFrameReply::Binary(bytes) => Some(Message::Binary(bytes.into())),
                         RoomFrameReply::Text(response) => match serde_json::to_string(&response) {
@@ -17315,6 +17522,17 @@ fn cloud_hooks(state: &AppState) -> cloud_show::CloudHooks {
                 match handover {
                     cloud_talk::CameraHandover::Lend => {
                         let hold = state.ffmpeg_work.begin_live_hold();
+                        // Plan 249 S13b: with the processed camera on, the native
+                        // camera stays the one owner and the room publishes its
+                        // processed frames; nothing is lent to the browser.
+                        if room_camera_source::enabled(state.smoke_rpc_enabled) {
+                            room_camera_source::set_kept_for_room(true);
+                            *state
+                                .cloud_live_hold
+                                .lock()
+                                .unwrap_or_else(|p| p.into_inner()) = Some(hold);
+                            return Ok(());
+                        }
                         preview_camera::lend_camera_to_talk_show(&state).await?;
                         *state
                             .cloud_live_hold
@@ -17341,6 +17559,7 @@ fn cloud_hooks(state: &AppState) -> cloud_show::CloudHooks {
                             .lock()
                             .unwrap_or_else(|p| p.into_inner())
                             .take();
+                        room_camera_source::set_kept_for_room(false);
                         preview_camera::return_camera_from_talk_show(&state).await;
                         Ok(())
                     }
@@ -28789,6 +29008,71 @@ mod agent_role_tests {
                 "{method} has no execution policy"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod room_camera_admission_tests {
+    use super::*;
+    fn ok(reply: Option<RoomFrameReply>) -> Option<bool> {
+        match reply.unwrap() {
+            RoomFrameReply::Text(response) => {
+                serde_json::to_value(response).unwrap()["ok"].as_bool()
+            }
+            RoomFrameReply::Binary(_) => None,
+        }
+    }
+    fn state(smoke: bool) -> AppState {
+        let (events, _) = broadcast::channel(16);
+        let mut state = AppState::new(
+            "test-token".to_string(),
+            1234,
+            events,
+            Database::open_in_memory_for_tests(),
+        );
+        state.smoke_rpc_enabled = smoke;
+        state
+    }
+
+    #[tokio::test]
+    async fn processed_camera_requires_admin_debug_smoke_and_env_opt_in() {
+        let open = r#"{"id":"c","method":"room.camera.processed","params":{"action":"open","generation":1,"role":"host-camera","width":640,"height":360,"fps":30,"packing":"rgb-left-alpha-right","serial":1}}"#;
+        let inspect = r#"{"id":"c","method":"room.camera.processed.inspect","params":{}}"#;
+        let state = state(true);
+        for role in [
+            BackendRole::Renderer,
+            BackendRole::Remote,
+            BackendRole::Agent,
+            BackendRole::Admin,
+        ] {
+            let mut bridge = room_frame_bridge::Bridge::default();
+            let mut producer = room_camera_source::Producer::default();
+            // Without VIDEORC_ROOM_PROCESSED_CAMERA=1 nobody gets the camera.
+            for text in [open, inspect] {
+                assert_eq!(
+                    ok(
+                        handle_room_camera_control(&state, role, &mut bridge, &mut producer, text)
+                            .await
+                    ),
+                    Some(false)
+                );
+            }
+        }
+        // Unrelated traffic is not intercepted.
+        let mut bridge = room_frame_bridge::Bridge::default();
+        let mut producer = room_camera_source::Producer::default();
+        assert!(
+            handle_room_camera_control(
+                &state,
+                BackendRole::Admin,
+                &mut bridge,
+                &mut producer,
+                r#"{"id":"x","method":"health.ping","params":{}}"#
+            )
+            .await
+            .is_none()
+        );
+        assert!(!room_camera_source::enabled(false));
     }
 }
 

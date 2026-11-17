@@ -23,7 +23,8 @@ import {
   cameraFrameTrackName,
   publishSourceNames,
   type CameraFrameAuthority,
-  type CameraRoleFrameDescriptor
+  type CameraRoleFrameDescriptor,
+  type RoomFrameSize
 } from '../../../shared/room-frame'
 import {
   RoomAvatarPublisher,
@@ -211,6 +212,13 @@ export type TalkShowRoomDeps = {
   /** S13a explicit dev fixture: the native camera-role frame bridge is the ONLY
    * camera producer; no browser camera, no browser key/effects (no double key). */
   frameTestSource?: boolean
+  /**
+   * Plan 249 S13b: the native camera owner publishes its processed frames
+   * (key, despill, look applied once natively). Set only when main reports
+   * the processed camera enabled; the backend then keeps the camera, so the
+   * browser never opens it. Unqualified and development-only.
+   */
+  processedCamera?: boolean
   onFrameDiagnostic?: (value: unknown) => void
   requestToken: () => Promise<CloudRoomTokenAnswer>
   /** `cloud.room.client.report`: the backend's status copy. */
@@ -414,7 +422,8 @@ export class TalkShowRoomClient {
     this.#cameraName = deps.cameraName
     this.#micMuted = deps.initiallyMuted === true || !deps.microphoneName
     this.#cameraOff =
-      deps.initiallyCameraOff === true || (!deps.cameraName && !deps.frameTestSource)
+      deps.initiallyCameraOff === true ||
+      (!deps.cameraName && !deps.frameTestSource && !deps.processedCamera)
     this.#audio = new RemoteAudioAttachments<HTMLMediaElement>(() => deps.audioHost())
   }
 
@@ -619,7 +628,7 @@ export class TalkShowRoomClient {
       await Promise.all([closingObserver, closingFrame, this.#frameRetiring])
       this.#cameraName = name
       this.#publish()
-      if (!off && (name || this.#deps.frameTestSource)) {
+      if (!off && (name || this.#nativeCamera())) {
         await this.#publishCamera(room)
         this.#cameraOff = false
       } else if (!off) {
@@ -1205,7 +1214,7 @@ export class TalkShowRoomClient {
         if ((this.#deps.pcmTestSource || this.#microphoneChoice) && this.#owns(room))
           this.#retirePcm(room)
         // A reconnect retires the frame producer; Reconnected opens a new generation.
-        if (this.#deps.frameTestSource && this.#frameSource) this.#retireFrame(room)
+        if (this.#nativeCamera() && this.#frameSource) this.#retireFrame(room)
         if (this.#privacy) {
           this.#privacy.observations = {}
           this.#privacy.status = 'unconfirmed'
@@ -1214,7 +1223,7 @@ export class TalkShowRoomClient {
       })
       .on(RoomEvent.Reconnected, () => {
         if (!this.#owns(room)) return
-        if (this.#deps.frameTestSource && !this.#cameraOff && !this.#camera) {
+        if (this.#nativeCamera() && !this.#cameraOff && !this.#camera) {
           const generation = this.#frameGeneration
           void this.#frameRetiring.then(async () => {
             if (!this.#owns(room) || generation !== this.#frameGeneration || this.#camera) return
@@ -1300,7 +1309,7 @@ export class TalkShowRoomClient {
   }
 
   async #publishCamera(room: Room): Promise<void> {
-    if (this.#deps.frameTestSource) return this.#publishFrameCamera(room)
+    if (this.#nativeCamera()) return this.#publishFrameCamera(room)
     let openedCamera: LocalVideoTrack | null = null
     let openedEffects: TalkShowCameraEffects | null = null
     try {
@@ -1353,9 +1362,30 @@ export class TalkShowRoomClient {
     }
   }
 
+  /** The camera comes from the native side: the S13a fixture or the S13b processed camera. */
+  #nativeCamera(): boolean {
+    return !!this.#deps.frameTestSource || !!this.#deps.processedCamera
+  }
+
   async #publishFrameCamera(room: Room): Promise<void> {
     if (!import.meta.env.DEV || !room.localParticipant.identity.startsWith('host:'))
       throw new Error('Camera frame test source requires a development host room.')
+    // S13b: open at the native camera's current logical size; no size, no camera.
+    let processed: RoomFrameSize | undefined
+    if (this.#deps.processedCamera) {
+      const resources = await window.videorc.getRoomProcessedCameraResources().catch(() => null)
+      if (!resources || resources.logicalWidth === null || resources.logicalHeight === null) {
+        // Truthful state: no native frame means the camera is off, not "on".
+        this.#cameraOff = true
+        this.#publish()
+        throw new Error('The camera is not giving frames natively.')
+      }
+      processed = {
+        width: resources.logicalWidth,
+        height: resources.logicalHeight,
+        fps: ROOM_FRAME.fps
+      }
+    }
     const generation = ++this.#frameGeneration
     const current = (): boolean => this.#owns(room) && generation === this.#frameGeneration
     const controller = new AbortController()
@@ -1364,17 +1394,20 @@ export class TalkShowRoomClient {
     let camera: LocalVideoTrack | null = null
     try {
       source = await createRoomFrameTestSource(
-        window.videorc.roomFrameTest,
+        processed ? window.videorc.roomProcessedCamera : window.videorc.roomFrameTest,
         controller.signal,
         this.#deps.onFrameDiagnostic,
         (reason) => {
+          // Pause safely: retire the publication; never fall back to a raw camera.
           if (!current()) return
           this.#retireFrame(room)
           this.#cameraOff = true
           this.#problem = reason
           this.#publish()
           this.#deps.report('connected', reason)
-        }
+        },
+        {},
+        processed
       )
       if (!current() || controller.signal.aborted) {
         await source.close()
@@ -1397,7 +1430,12 @@ export class TalkShowRoomClient {
         await room.localParticipant.unpublishTrack(camera, true).catch(() => {})
         return
       }
-      this.#bindCameraFrame(room, source.generation, published?.trackSid)
+      this.#bindCameraFrame(
+        room,
+        source.generation,
+        published?.trackSid,
+        processed ? { width: processed.width, height: processed.height } : undefined
+      )
       this.#attachEncodeObserver(camera, source.generation, current)
     } catch (error) {
       if (current()) {
@@ -1447,7 +1485,12 @@ export class TalkShowRoomClient {
   }
 
   /** Authority from the SFU's answer to this publish, never from a track name. */
-  #bindCameraFrame(room: Room, generation: number, trackSid: string | undefined): void {
+  #bindCameraFrame(
+    room: Room,
+    generation: number,
+    trackSid: string | undefined,
+    logical?: { width: number; height: number }
+  ): void {
     let epoch = this.#cameraFrameEpochs.get(room)
     if (!epoch) {
       epoch = crypto.randomUUID()
@@ -1467,7 +1510,10 @@ export class TalkShowRoomClient {
       // An empty list with publish permission means every source (LiveKit).
       canPublishSources: sources.length === 0 && permissions?.canPublish ? ['camera'] : sources
     }
-    const bound = bindCameraFramePublication(authority, generation, 'packed', { experiment: true })
+    const bound = bindCameraFramePublication(authority, generation, 'packed', {
+      experiment: true,
+      ...(logical ? { logical } : {})
+    })
     this.#cameraFrame = bound ? { authority, descriptor: bound.descriptor } : null
     if (!bound) this.#problem = 'The camera bridge publication could not be bound to the room.'
     this.#publish()
@@ -1522,7 +1568,7 @@ export class TalkShowRoomClient {
     if (!room) return
     if (!this.#owns(room)) return
     const problems: string[] = []
-    if ((this.#cameraName || this.#deps.frameTestSource) && !this.#cameraOff) {
+    if ((this.#cameraName || this.#nativeCamera()) && !this.#cameraOff) {
       try {
         await this.#publishCamera(room)
       } catch (error) {

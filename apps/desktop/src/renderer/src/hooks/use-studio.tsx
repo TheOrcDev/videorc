@@ -20491,6 +20491,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         return roomFrameEncodeObserverEnabled()
       },
       roomFrameResetSurface: () => resetRoomFrameSurfaces(),
+      // S13b harness: the room camera off/on through the same control the UI uses.
+      roomCameraOff: async (off: boolean) => {
+        await roomControlsRef.current?.setCameraOff(off)
+        return roomControlsRef.current?.snapshot.local.cameraOff ?? null
+      },
       roomFrameReplace: async () => {
         const controls = roomControlsRef.current
         if (!controls) return false

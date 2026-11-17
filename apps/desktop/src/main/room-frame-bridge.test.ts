@@ -195,3 +195,88 @@ describe('frame main transport ownership', () => {
     ).toBe(false)
   })
 })
+
+describe('processed camera transport (S13b)', () => {
+  const size = { width: 554, height: 414, fps: 30 }
+  function processedFrame(serial: number): ArrayBuffer {
+    const bytes = ROOM_FRAME.headerBytes + (size.width * 2 + 8) * size.height * 4
+    const buffer = new ArrayBuffer(bytes)
+    const view = new DataView(buffer)
+    view.setUint32(0, ROOM_FRAME.magic, true)
+    view.setUint16(4, 1, true)
+    view.setUint16(6, 3, true)
+    view.setUint32(8, serial, true)
+    view.setUint32(12, size.width * 2 + 8, true)
+    view.setUint32(16, size.height, true)
+    view.setUint32(20, 1, true)
+    view.setBigUint64(32, 7n, true)
+    view.setBigUint64(40, 1n, true)
+    view.setBigUint64(48, 1_000n, true)
+    view.setBigUint64(56, 2_000n, true)
+    view.setBigUint64(64, 0xffff_ffff_ffff_ffffn, true)
+    return buffer
+  }
+  async function openedProcessed(): Promise<RoomFrameBridge> {
+    const bridge = new RoomFrameBridge(
+      connection,
+      () => true,
+      () => new FakeSocket() as unknown as WebSocket,
+      'room.camera.processed'
+    )
+    FakeSocket.last = undefined
+    const pending = bridge.request(roomFrameCommand('open', 7, 1, undefined, size))
+    await vi.waitFor(() => expect(FakeSocket.last?.sent.length).toBe(2))
+    expect(FakeSocket.last!.sent[1]).toMatchObject({ method: 'room.camera.processed' })
+    FakeSocket.last!.reply(
+      JSON.stringify({
+        id: 'frame-1',
+        ok: true,
+        payload: { generation: 7, surfaceEpoch: 1, originUs: null, incarnation: null }
+      })
+    )
+    await pending
+    return bridge
+  }
+
+  it('accepts a frame only at the generation size with observation-time pts', async () => {
+    const bridge = await openedProcessed()
+    const pull = bridge.request(roomFrameCommand('pull', 7, 2, undefined, size))
+    FakeSocket.last!.reply(processedFrame(2))
+    const frame = await pull
+    expect(frame && 'header' in frame && frame.header.ptsObserved).toBe(true)
+    // A synthetic-size frame on the processed bridge is a protocol violation.
+    const wrong = bridge.request(roomFrameCommand('pull', 7, 3, undefined, size))
+    FakeSocket.last!.reply(encodeFrame({ serial: 3 }))
+    await expect(wrong).rejects.toThrow('closed')
+  })
+
+  it('never mixes roles, sizes or fixture events with the synthetic bridge', async () => {
+    const synthetic = new RoomFrameBridge(
+      connection,
+      () => true,
+      () => new FakeSocket() as never
+    )
+    await expect(
+      synthetic.request(roomFrameCommand('open', 1, 1, undefined, size))
+    ).rejects.toThrow('role')
+    await expect(synthetic.fixture('fixture-switch')).rejects.toThrow('No processed camera')
+    const bridge = await openedProcessed()
+    await expect(
+      bridge.request(roomFrameCommand('pull', 7, 2, undefined, { ...size, width: 640 }))
+    ).rejects.toThrow('size changed')
+    const event = bridge.fixture('fixture-switch')
+    expect(FakeSocket.last!.sent.at(-1)).toMatchObject({
+      method: 'room.camera.processed',
+      params: { action: 'fixture-switch' }
+    })
+    FakeSocket.last!.reply(
+      JSON.stringify({
+        id: FakeSocket.last!.sent.at(-1)!.id,
+        ok: true,
+        payload: { cameraGeneration: 2 }
+      })
+    )
+    await expect(event).resolves.toEqual({ cameraGeneration: 2 })
+    bridge.close()
+  })
+})
