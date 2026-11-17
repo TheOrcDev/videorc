@@ -11,6 +11,27 @@ import {
 const plan = readParityJson('plan')
 validateParityRegistry(plan, readParityJson('inventory'))
 const selected = parseParityArgs(process.argv.slice(2), plan)
+if (selected.case === 'microphone') {
+  const { microphoneAcquisitionConfig } = await import('./lib/cloud-parity-microphone-contract.mjs')
+  const { acquireMicrophone, analyzeMicrophone } = await import('./lib/cloud-parity-microphone.mjs')
+  const config = microphoneAcquisitionConfig(process.env)
+  let file = process.env.VIDEORC_PCM_EVIDENCE
+  if (config.mode !== 'analyze')
+    file = await acquireMicrophone({
+      desktopRoot: fileURLToPath(new URL('../', import.meta.url)),
+      webRoot: process.env.VIDEORC_PARITY_WEB_ROOT,
+      config
+    })
+  console.log(`Microphone evidence (unqualified): ${file}`)
+  if (config.mode !== 'acquire') {
+    const result = await analyzeMicrophone(file)
+    const { writeFileSync } = await import('node:fs')
+    writeFileSync(`${file}.qualification.json`, JSON.stringify(result, null, 2) + '\n')
+    console.log(JSON.stringify(result, null, 2))
+    if (result.status !== 'passed') process.exitCode = 1
+  }
+  process.exit(process.exitCode ?? 0)
+}
 if (selected.case === 'microphone-bridge') {
   const { pcmAcquisitionConfig } = await import('./lib/cloud-parity-pcm-acquisition-contract.mjs')
   const config = pcmAcquisitionConfig(process.env)
@@ -53,6 +74,7 @@ if (
     'lifecycle',
     'services',
     'replay-ring',
+    'avatar-animation',
     'views',
     'graphics'
   ].includes(selected.case)
@@ -81,6 +103,7 @@ const { output } = await run({
   soundboard: selected.case === 'soundboard',
   avatar: selected.case === 'avatar',
   replayRing: selected.case === 'replay-ring',
+  avatarAnimation: selected.case === 'avatar-animation',
   views: selected.case === 'views',
   graphics: selected.case === 'graphics'
 })

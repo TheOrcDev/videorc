@@ -106,3 +106,56 @@ it('has one pull credit and rejects pending pulls when the owner closes', async 
   expect(RoomPcmBridge.resources()).toEqual({ sockets: 0, ipcRequests: 0, timers: 0 })
   await expect(bridge.request(roomPcmCommand('pull', 1))).rejects.toThrow('disabled')
 })
+
+it('native close waits for the authenticated backend acknowledgement before releasing its socket', async () => {
+  const sent: { id: string; method: string; params: { action: string } }[] = []
+  const fake = {
+    onopen: null as null | (() => void),
+    onmessage: null as null | ((event: { data: string }) => void),
+    onerror: null,
+    onclose: null as null | (() => void),
+    readyState: 1,
+    send: (data: string) => sent.push(JSON.parse(data)),
+    close: () => {
+      fake.readyState = 3
+      fake.onclose?.()
+    }
+  }
+  const bridge = new RoomPcmBridge(
+    async () => ({ host: '127.0.0.1', port: 1, token: 'fixture' }),
+    () => true,
+    () => fake as unknown as WebSocket,
+    'room.microphone.pcm'
+  )
+  const base = {
+    generation: 10,
+    role: 'host-microphone' as const,
+    showId: 'show',
+    sampleRate: 48000 as const,
+    channels: 1 as const,
+    frames: 480 as const
+  }
+  const opening = bridge.request({
+    ...base,
+    action: 'open',
+    settings: { deviceId: 'exact', gainDb: 0, muted: false, noise: 'off', offsetMs: 0 }
+  })
+  await Promise.resolve()
+  fake.onopen?.()
+  await Promise.resolve()
+  expect(sent[1].method).toBe('room.microphone.pcm')
+  fake.onmessage?.({ data: JSON.stringify({ id: sent[1].id, ok: true, payload: null }) })
+  await opening
+  let closed = false
+  const closing = bridge.request({ ...base, action: 'close' }).then(() => {
+    closed = true
+  })
+  await Promise.resolve()
+  expect(sent.at(-1)?.params.action).toBe('close')
+  expect(closed).toBe(false)
+  expect(fake.readyState).toBe(1)
+  fake.onmessage?.({ data: JSON.stringify({ id: sent.at(-1)?.id, ok: true, payload: null }) })
+  await closing
+  expect(fake.readyState).toBe(3)
+  expect(RoomPcmBridge.resources()).toEqual({ sockets: 0, ipcRequests: 0, timers: 0 })
+})

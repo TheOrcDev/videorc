@@ -288,6 +288,13 @@ pub async fn arm_warm_microphone(
     state: &AppState,
     params: WarmMicrophoneArmParams,
 ) -> WarmMicrophoneStatus {
+    if crate::room_microphone::claimed()
+        || crate::cloud_show::lock(&state.cloud_show)
+            .talk_show_room_show_id()
+            .is_some()
+    {
+        return refused("room-microphone-owned", None);
+    }
     let Some(device_id) = params
         .microphone_id
         .as_deref()
@@ -320,10 +327,9 @@ pub async fn arm_warm_microphone(
     {
         return state.warm_microphone.status();
     }
-    let Some(opening) = state
-        .warm_microphone
-        .begin_open_if(|| state.capture_interruption.capture_admission_is_idle())
-    else {
+    let Some(opening) = state.warm_microphone.begin_open_if(|| {
+        state.capture_interruption.capture_admission_is_idle() && !crate::room_microphone::claimed()
+    }) else {
         return refused(
             if state.capture_interruption.capture_admission_is_idle() {
                 "opening"
@@ -349,7 +355,7 @@ pub async fn arm_warm_microphone(
     }
     // The renderer may have started a session while the device was opening.
     let work = state.ffmpeg_work.snapshot();
-    if work.capture_active || work.capture_waiting > 0 {
+    if work.capture_active || work.capture_waiting > 0 || crate::room_microphone::claimed() {
         drop(source);
         return refused("session-active", None);
     }

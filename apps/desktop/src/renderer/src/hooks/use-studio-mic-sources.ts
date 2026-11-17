@@ -1,6 +1,7 @@
+import { roomMicrophoneState, roomMicrophoneMeter } from '@/lib/room-microphone-state'
 import { useMemo, useRef, useSyncExternalStore } from 'react'
 
-import { useStudioCore, useStudioDiagnostics } from '@/hooks/use-studio'
+import { useStudioCore, useStudioDiagnostics, useStudioCloud } from '@/hooks/use-studio'
 import {
   useStudioMicVisualDemand,
   useStudioMicVisualLifecycle,
@@ -82,6 +83,7 @@ export function useBackendMicrophoneSilent(): boolean {
 }
 
 export type MicrophoneMeter = Readonly<{
+  processingDetail?: string
   meter: MeterInput
   monitorState: MicMonitorState
   /**
@@ -108,6 +110,12 @@ export type MicrophoneMeter = Readonly<{
  */
 export function useMicrophoneMeter(): MicrophoneMeter {
   const { captureConfig, selectedMicrophone, isSessionActive, audioBusActive } = useStudioCore()
+  const roomOpen = useStudioCloud().cloudStatus?.room?.phase === 'open'
+  const roomMic = useSyncExternalStore(
+    roomMicrophoneState.subscribe,
+    roomMicrophoneState.getSnapshot,
+    roomMicrophoneState.getSnapshot
+  )
   const { diagnosticStats } = useStudioDiagnostics()
   const muted = captureConfig.audio.microphoneMuted
   const micVisual = useStudioMicVisualLifecycle()
@@ -116,7 +124,7 @@ export function useMicrophoneMeter(): MicrophoneMeter {
   // The visible meter owns fallback demand even before the analyser is active.
   // Backend levels own painting while live, so this retain ends when they
   // return; a running bus never paints from the analyser, so it asks for none.
-  useStudioMicVisualDemand(!backendLevelsLive && !audioBusActive)
+  useStudioMicVisualDemand(!roomOpen && !backendLevelsLive && !audioBusActive)
   const analyserSource = useStudioMicMeterSource({
     gainDb: captureConfig.audio.microphoneGainDb,
     muted
@@ -135,6 +143,25 @@ export function useMicrophoneMeter(): MicrophoneMeter {
   })
   const signalLive =
     !muted && (backendLevelsLive || (micVisual.active && !audioBusActive) || liveLevel !== null)
+  if (roomOpen) {
+    const available =
+      roomMic.state === 'published' &&
+      roomMic.observedAt !== null &&
+      performance.now() - roomMic.observedAt < 500
+    return {
+      meter: available
+        ? { kind: 'source', source: roomMicrophoneMeter }
+        : { kind: 'value', peakDb: NaN },
+      monitorState: muted ? 'muted' : available ? 'live' : 'idle',
+      unavailableReason: undefined,
+      sessionLevelUnavailable: Boolean(selectedMicrophone) && !muted && !available,
+      processingDetail:
+        roomMic.reason ??
+        (roomMic.mode === 'native-headphones'
+          ? 'Native headphones test mode. Clock sync and speaker AEC are unqualified.'
+          : 'Browser echo cancellation. Native RNNoise and sync offset are not applied in this mode.')
+    }
+  }
   return {
     meter,
     monitorState: audioMixerMonitorState({

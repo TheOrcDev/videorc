@@ -6,11 +6,12 @@ planning-only banner in local planning commit `712010475` on
 defaults, preserving opt-in, consent, bounded costs and safe rollout.
 
 The coordinator commissions one dependency-ready slice per report and owns
-issue creation/linking, commits and PRs. No merges, deployments, paid egress,
+issue creation/linking, commits and PRs. The coordinator merged the earlier PRs
+under explicit user authority. This followup agent performs no merges, deployments, paid egress,
 credential expansion or enabling unqualified production media capabilities.
 No agent-created commit, push, issue or PR was made in S0.
 
-## Source and forge reconciliation
+## Initial S0 source and forge reconciliation
 
 - Desktop fetched `origin/main`: `c0d6ca8b8c25628b1932bd7ff21312e390b6839b`.
 - Web fetched `origin/main`: `8f90dd74944cf08b9ca202e977a2ebf46ee6b16d`.
@@ -45,70 +46,73 @@ All acceptance lanes are `not-run`; all new production-parity flags are false.
 Citation prefixes retain the plan roots: B = backend `src`, R = desktop
 renderer `src`, M = Electron main, S = desktop shared, W = web root.
 
-Use the serialized per-repository stack bases below; this supplies every
-prerequisite without merging. If the coordinator chooses parallel branches,
+Historical stack bases below describe the published sequence. The earlier PRs
+are now merged; the S21a followup starts from fetched current main. If the coordinator chooses parallel branches,
 reconcile all prerequisite tips explicitly and update the ledger. Paired
 desktop/web PRs must link each other and their prerequisite PRs. A qualified
 consumer contract must exist before a producer can be enabled.
 
-| Slice / case              | Dependencies                           | Repo         | Intended base(s)                                                         | Issue / PR                                                                                                                                                         |
-| ------------------------- | -------------------------------------- | ------------ | ------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| S0 / `baseline`           | None                                   | desktop      | desktop: `main`                                                          | No issue / [#1437](https://github.com/TheOrcDev/videorc/pull/1437)                                                                                                 |
-| S1 / `controls`           | S0                                     | desktop      | desktop: `feat/249-s0-cloud-parity-baseline`                             | No issue / [#1438](https://github.com/TheOrcDev/videorc/pull/1438); web [#118](https://github.com/TheOrcDev/videorc-web/pull/118)                                  |
-| S2 / `privacy`            | S0, S1                                 | desktop, web | desktop: `feat/249-s1-cloud-parity`; web: `main`                         | No issue / desktop [#1439](https://github.com/TheOrcDev/videorc/pull/1439), web [#125](https://github.com/TheOrcDev/videorc-web/pull/125); live acceptance not run |
-| S3 / `soundboard`         | S0, S1                                 | desktop, web | desktop: `feat/249-s2-cloud-parity`; web: `feat/249-s2-cloud-parity`     | Desktop #1440 / web #126; live acceptance not run                                                                                                                  |
-| S4 / `avatar`             | S3                                     | desktop, web | desktop: `feat/249-s3-cloud-parity`; web: `feat/249-s3-cloud-parity`     | Desktop #1441 / web #127; live acceptance not run                                                                                                                  |
-| S5 / `avatar-animation`   | S4                                     | desktop, web | desktop: `feat/249-s4-cloud-parity`; web: `feat/249-s4-cloud-parity`     | Unassigned / not created                                                                                                                                           |
-| S6 / `views`              | S3, S4                                 | desktop, web | Both: `feat/249-s16-cloud-parity`                                        | Owner restacks onto S16 and completes guest graphics                                                                                                               |
-| S7a / `microphone-bridge` | S1, S3                                 | desktop      | `feat/249-s3-cloud-parity`                                               | Desktop [#1444](https://github.com/TheOrcDev/videorc/pull/1444); acceptance not run                                                                                |
-| S7b / `microphone`        | S7a                                    | desktop      | desktop: `feat/249-s7a-cloud-parity`                                     | Unassigned / not created                                                                                                                                           |
-| S8 / `audio-routing`      | S2, S3, S7a, S7b                       | desktop, web | desktop: `feat/249-s7b-cloud-parity`; web: `feat/249-s6-cloud-parity`    | Unassigned / not created                                                                                                                                           |
-| S9 / `graphics`           | S4, S6                                 | desktop, web | desktop: `feat/249-s8-cloud-parity`; web: `feat/249-s8-cloud-parity`     | Unassigned / not created                                                                                                                                           |
-| S10 / `alpha-spike`       | S6                                     | desktop, web | desktop: `feat/249-s9-cloud-parity`; web: `feat/249-s9-cloud-parity`     | Unassigned / not created                                                                                                                                           |
-| S11 / `html`              | S9, S10                                | desktop, web | desktop: `feat/249-s10-cloud-parity`; web: `feat/249-s10-cloud-parity`   | Unassigned / not created                                                                                                                                           |
-| S12 / `scenes`            | S2, S6, S9                             | desktop, web | desktop: `feat/249-s11-cloud-parity`; web: `feat/249-s11-cloud-parity`   | Unassigned / not created                                                                                                                                           |
-| S13a / `camera-bridge`    | S1, S10, S12                           | desktop, web | desktop: `feat/249-s12-cloud-parity`; web: `feat/249-s12-cloud-parity`   | Unassigned / not created                                                                                                                                           |
-| S13b / `camera`           | S13a                                   | desktop      | desktop: `feat/249-s13a-cloud-parity`                                    | Unassigned / not created                                                                                                                                           |
-| S14 / `sources`           | S2, S12, S13a, S13b                    | desktop, web | desktop: `feat/249-s13b-cloud-parity`; web: `feat/249-s13a-cloud-parity` | Unassigned / not created                                                                                                                                           |
-| S15 / `captions`          | S7a, S7b, S9                           | desktop      | desktop: `feat/249-s14-cloud-parity`                                     | Unassigned / not created                                                                                                                                           |
-| S16 / `lifecycle`         | S1                                     | desktop, web | Desktop and web: `feat/249-s4-cloud-parity`                              | Desktop #1442 / web #128; live acceptance not run                                                                                                                  |
-| S17 / `outputs`           | S9, S12, S16                           | desktop, web | desktop: `feat/249-s16-cloud-parity`; web: `feat/249-s16-cloud-parity`   | Unassigned / not created                                                                                                                                           |
-| S18 / `services`          | S1, S16                                | desktop      | desktop: `feat/249-s17-cloud-parity`                                     | Unassigned / not created                                                                                                                                           |
-| S19 / `markers`           | S1, S15                                | desktop      | desktop: `feat/249-s18-cloud-parity`                                     | Unassigned / not created                                                                                                                                           |
-| S20 / `library`           | S1, S16                                | desktop, web | Both: `feat/249-s16-cloud-parity`                                        | Desktop [#1443](https://github.com/TheOrcDev/videorc/pull/1443), web [#129](https://github.com/TheOrcDev/videorc-web/pull/129); acceptance not run                 |
-| S21a / `replay-ring`      | S20                                    | desktop, web | Both: `feat/249-s20-cloud-parity`                                        | No dedicated issue; paired diffs ready for coordinator; acceptance not run                                                                                         |
-| S21b / `clips`            | S19, S21a                              | desktop, web | desktop: `feat/249-s20-cloud-parity`; web: `feat/249-s21a-cloud-parity`  | Unassigned / not created                                                                                                                                           |
-| S21c / `archive`          | S20, S21a                              | desktop      | desktop: `feat/249-s21b-cloud-parity`                                    | Unassigned / not created                                                                                                                                           |
-| S22 / `iso`               | S7a, S7b, S20                          | desktop, web | desktop: `feat/249-s21c-cloud-parity`; web: `feat/249-s21b-cloud-parity` | Unassigned / not created                                                                                                                                           |
-| S23 / `virtual-camera`    | S6, S13a, S13b                         | desktop      | desktop: `feat/249-s22-cloud-parity`                                     | Unassigned / not created                                                                                                                                           |
-| S24 / `handoff`           | S5, S9, S16, S18, S20                  | desktop, web | desktop: `feat/249-s23-cloud-parity`; web: `feat/249-s22-cloud-parity`   | Unassigned / not created                                                                                                                                           |
-| S25 / `reporting`         | S18, S20, S24                          | desktop, web | desktop: `feat/249-s24-cloud-parity`; web: `feat/249-s24-cloud-parity`   | Unassigned / not created                                                                                                                                           |
-| S26 / `health`            | S6, S7a, S7b, S17, S24                 | desktop, web | desktop: `feat/249-s25-cloud-parity`; web: `feat/249-s25-cloud-parity`   | Unassigned / not created                                                                                                                                           |
-| S27 / `all`               | All enabled slices (full list in JSON) | desktop, web | desktop: `feat/249-s26-cloud-parity`; web: `feat/249-s26-cloud-parity`   | Unassigned / not created                                                                                                                                           |
+| Slice / case              | Dependencies                           | Repo         | Intended base(s)                                                         | Issue / PR                                                                                                                                                                                                             |
+| ------------------------- | -------------------------------------- | ------------ | ------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| S0 / `baseline`           | None                                   | desktop      | desktop: `main`                                                          | No issue / [#1437](https://github.com/TheOrcDev/videorc/pull/1437); earlier PR(s) merged                                                                                                                               |
+| S1 / `controls`           | S0                                     | desktop      | desktop: `feat/249-s0-cloud-parity-baseline`                             | No issue / [#1438](https://github.com/TheOrcDev/videorc/pull/1438); web [#118](https://github.com/TheOrcDev/videorc-web/pull/118); #1438 merged; #118 independent, status not rechecked                                |
+| S2 / `privacy`            | S0, S1                                 | desktop, web | desktop: `feat/249-s1-cloud-parity`; web: `main`                         | No issue / desktop [#1439](https://github.com/TheOrcDev/videorc/pull/1439), web [#125](https://github.com/TheOrcDev/videorc-web/pull/125); live acceptance not run; earlier PR(s) merged                               |
+| S3 / `soundboard`         | S0, S1                                 | desktop, web | desktop: `feat/249-s2-cloud-parity`; web: `feat/249-s2-cloud-parity`     | Desktop #1440 / web #126; live acceptance not run; earlier PR(s) merged                                                                                                                                                |
+| S4 / `avatar`             | S3                                     | desktop, web | desktop: `feat/249-s3-cloud-parity`; web: `feat/249-s3-cloud-parity`     | Desktop #1441 / web #127; live acceptance not run; earlier PR(s) merged                                                                                                                                                |
+| S5 / `avatar-animation`   | S4                                     | desktop, web | desktop: `feat/249-s4-cloud-parity`; web: `feat/249-s4-cloud-parity`     | Prepared; owner `S6z:P60l3:G7m82`; PR not assigned                                                                                                                                                                     |
+| S6 / `views`              | S3, S4                                 | desktop, web | Both: `feat/249-s16-cloud-parity`                                        | Waiting approval; owner `S6z:P60l3:G9zgb`; PR not assigned                                                                                                                                                             |
+| S7a / `microphone-bridge` | S1, S3                                 | desktop      | `feat/249-s3-cloud-parity`                                               | Desktop [#1444](https://github.com/TheOrcDev/videorc/pull/1444); acceptance not run; earlier PR(s) merged                                                                                                              |
+| S7b / `microphone`        | S7a                                    | desktop      | desktop: `feat/249-s7a-cloud-parity`                                     | Active; owner `S6z:P60l3:G67rq`; PR not assigned                                                                                                                                                                       |
+| S8 / `audio-routing`      | S2, S3, S7a, S7b                       | desktop, web | desktop: `feat/249-s7b-cloud-parity`; web: `feat/249-s6-cloud-parity`    | Unassigned / not created                                                                                                                                                                                               |
+| S9 / `graphics`           | S4, S6                                 | desktop, web | desktop: `feat/249-s8-cloud-parity`; web: `feat/249-s8-cloud-parity`     | Waiting S6; owner `S6z:P60l3:G6oxv`; PR not assigned                                                                                                                                                                   |
+| S10 / `alpha-spike`       | S6                                     | desktop, web | desktop: `feat/249-s9-cloud-parity`; web: `feat/249-s9-cloud-parity`     | Waiting S6; owner `S6z:P60l3:G6ltc`; PR not assigned                                                                                                                                                                   |
+| S11 / `html`              | S9, S10                                | desktop, web | desktop: `feat/249-s10-cloud-parity`; web: `feat/249-s10-cloud-parity`   | Unassigned / not created                                                                                                                                                                                               |
+| S12 / `scenes`            | S2, S6, S9                             | desktop, web | desktop: `feat/249-s11-cloud-parity`; web: `feat/249-s11-cloud-parity`   | Active; owner `S6z:P60l3:G98zv`; PR not assigned                                                                                                                                                                       |
+| S13a / `camera-bridge`    | S1, S10, S12                           | desktop, web | desktop: `feat/249-s12-cloud-parity`; web: `feat/249-s12-cloud-parity`   | Active; owner `S6z:P60l3:G7e0v`; PR not assigned                                                                                                                                                                       |
+| S13b / `camera`           | S13a                                   | desktop      | desktop: `feat/249-s13a-cloud-parity`                                    | Unassigned / not created                                                                                                                                                                                               |
+| S14 / `sources`           | S2, S12, S13a, S13b                    | desktop, web | desktop: `feat/249-s13b-cloud-parity`; web: `feat/249-s13a-cloud-parity` | Unassigned / not created                                                                                                                                                                                               |
+| S15 / `captions`          | S7a, S7b, S9                           | desktop      | desktop: `feat/249-s14-cloud-parity`                                     | Unassigned / not created                                                                                                                                                                                               |
+| S16 / `lifecycle`         | S1                                     | desktop, web | Desktop and web: `feat/249-s4-cloud-parity`                              | Desktop #1442 / web #128; live acceptance not run; earlier PR(s) merged                                                                                                                                                |
+| S17 / `outputs`           | S9, S12, S16                           | desktop, web | desktop: `feat/249-s16-cloud-parity`; web: `feat/249-s16-cloud-parity`   | Unassigned / not created                                                                                                                                                                                               |
+| S18 / `services`          | S1, S16                                | desktop      | Coordinator integration                                                  | Desktop [#1447](https://github.com/TheOrcDev/videorc/pull/1447); acceptance not run; earlier PR(s) merged                                                                                                              |
+| S19 / `markers`           | S1, S15                                | desktop      | desktop: `feat/249-s18-cloud-parity`                                     | Unassigned / not created                                                                                                                                                                                               |
+| S20 / `library`           | S1, S16                                | desktop, web | Both: `feat/249-s16-cloud-parity`                                        | Desktop [#1443](https://github.com/TheOrcDev/videorc/pull/1443), web [#129](https://github.com/TheOrcDev/videorc-web/pull/129); acceptance not run; earlier PR(s) merged                                               |
+| S21a / `replay-ring`      | S20                                    | desktop, web | Both followups: `main`                                                   | Groundwork desktop [#1446](https://github.com/TheOrcDev/videorc/pull/1446), web [#130](https://github.com/TheOrcDev/videorc-web/pull/130); provider source followup prepared; acceptance not run; earlier PR(s) merged |
+| S21b / `clips`            | S19, S21a                              | desktop, web | desktop: `feat/249-s20-cloud-parity`; web: `feat/249-s21a-cloud-parity`  | Unassigned / not created                                                                                                                                                                                               |
+| S21c / `archive`          | S20, S21a                              | desktop      | desktop: `feat/249-s21b-cloud-parity`                                    | Unassigned / not created                                                                                                                                                                                               |
+| S22 / `iso`               | S7a, S7b, S20                          | desktop, web | desktop: `feat/249-s21c-cloud-parity`; web: `feat/249-s21b-cloud-parity` | Active; owner `S6z:P60l3:G1wkh`; PR not assigned                                                                                                                                                                       |
+| S23 / `virtual-camera`    | S6, S13a, S13b                         | desktop      | desktop: `feat/249-s22-cloud-parity`                                     | Unassigned / not created                                                                                                                                                                                               |
+| S24 / `handoff`           | S5, S9, S16, S18, S20                  | desktop, web | desktop: `feat/249-s23-cloud-parity`; web: `feat/249-s22-cloud-parity`   | Active; owner `S6z:P60l3:G1q9i`; PR not assigned                                                                                                                                                                       |
+| S25 / `reporting`         | S18, S20, S24                          | desktop, web | desktop: `feat/249-s24-cloud-parity`; web: `feat/249-s24-cloud-parity`   | Unassigned / not created                                                                                                                                                                                               |
+| S26 / `health`            | S6, S7a, S7b, S17, S24                 | desktop, web | desktop: `feat/249-s25-cloud-parity`; web: `feat/249-s25-cloud-parity`   | Unassigned / not created                                                                                                                                                                                               |
+| S27 / `all`               | All enabled slices (full list in JSON) | desktop, web | desktop: `feat/249-s26-cloud-parity`; web: `feat/249-s26-cloud-parity`   | Unassigned / not created                                                                                                                                                                                               |
 
-S0 is committed/pushed by the coordinator at `570d72926` and open as
+S0 is committed/pushed by the coordinator at `570d72926` and merged as
 [PR #1437](https://github.com/TheOrcDev/videorc/pull/1437), implemented with
-**live acceptance not run**. S1 is committed/pushed at `0f9790f86` and open as
+**live acceptance not run**. S1 is committed/pushed at `0f9790f86` and merged as
 [PR #1438](https://github.com/TheOrcDev/videorc/pull/1438), with live acceptance
-**not run**. S2 is published as desktop [#1439](https://github.com/TheOrcDev/videorc/pull/1439)
+**not run**. S2 is merged as desktop [#1439](https://github.com/TheOrcDev/videorc/pull/1439)
 (`27a8380b4`) and web [#125](https://github.com/TheOrcDev/videorc-web/pull/125)
-(`03b31e8e`), with live acceptance **not run**. S3 is published as desktop [#1440](https://github.com/TheOrcDev/videorc/pull/1440)
+(`03b31e8e`), with live acceptance **not run**. S3 is merged as desktop [#1440](https://github.com/TheOrcDev/videorc/pull/1440)
 (`a93168fc4`) and web [#126](https://github.com/TheOrcDev/videorc-web/pull/126)
 (`a68454e0`); live acceptance remains **not run**.
 
-Parallel ownership (isolated branches; coordinator reconciles dependencies):
+Parallel ownership (current coordinator assignments; isolated trees):
 
-- S4 avatar: `S6z:P60l3:G6oxv`.
-- S5 avatar animation: `S6z:P60l3:G7m82`.
-- S6 views: `S6z:P60l3:G9zgb`.
-- S7a bounded PCM: `S6z:P60l3:G67rq`.
-- S16 provider lifecycle: `S6z:P60l3:G6ltc`.
-- S18 chat/Sidekick: `S6z:P60l3:G1q9i` (shares canonical S16 interval dependency).
-- S20 recording/Library (published), S21a ring and central ledger: `S6z:P60l3:G55dg`.
+- S7b: `S6z:P60l3:G67rq` — active.
+- S5: `S6z:P60l3:G7m82` — prepared.
+- S6: `S6z:P60l3:G9zgb` — waiting approval.
+- S9: `S6z:P60l3:G6oxv` — waiting S6.
+- S10: `S6z:P60l3:G6ltc` — waiting S6.
+- S24: `S6z:P60l3:G1q9i` — active.
+- S12: `S6z:P60l3:G98zv` — active.
+- S13a: `S6z:P60l3:G7e0v` — active.
+- S22: `S6z:P60l3:G1wkh` — active.
+- S21a source followup and central ledger: `S6z:P60l3:G55dg` — ready for coordinator.
 
-S4 is published as desktop [#1441](https://github.com/TheOrcDev/videorc/pull/1441)
+S4 is merged as desktop [#1441](https://github.com/TheOrcDev/videorc/pull/1441)
 (`6a142e936`) and web [#127](https://github.com/TheOrcDev/videorc-web/pull/127)
-(`9f708259`). S16 is published on S4 as desktop
+(`9f708259`). S16 was stacked on S4 and is merged as desktop
 [#1442](https://github.com/TheOrcDev/videorc/pull/1442) (`5b340c09c`) and web
 [#128](https://github.com/TheOrcDev/videorc-web/pull/128) (`78586c99`). Their live
 acceptance remains **not run**.
@@ -125,7 +129,8 @@ All 32 slices remain commissioned; this is a checkpoint, not plan completion.
 
 ## Deferred gates and release blocks
 
-User explicitly forbids smoke and heavy tests until all merges on main. This
+User continues to forbid smoke and heavy tests for this followup despite the
+earlier merges. This
 overrides plan/repo requirements to execute those gates in each slice. Each
 slice still implements its maintained acceptance case and focused tests, and
 records deferred gates. Never change `not-run` to passed/qualified on that basis.
@@ -341,7 +346,7 @@ user instruction; the Rust adapter tests are maintained but unexecuted.
 - Maintained `library` acceptance uses isolated app/HTTPS fixtures and full artifact analyzer; **not run**. Rust compilation, actual migrations, crash/media/device/live provider validation, full suites and build gates are deferred per user.
 - All production parity qualification flags remain false. S16 source integration is complete with focused fixture evidence; runtime/live acceptance remains not run.
 
-## S21a paired checkpoint
+## Historical S21a groundwork checkpoint
 
 - S20 published desktop [#1443](https://github.com/TheOrcDev/videorc/pull/1443)
   at `d3f6a6dcb92c6fa17c166806a64ed1536d44416c` and web
@@ -353,7 +358,7 @@ user instruction; the Rust adapter tests are maintained but unexecuted.
   `/Users/orcdev/projects/videorcweb-wt-249-s21a`, both branch
   `feat/249-s21a-cloud-parity`, based on those exact S20 tips. PR bases are
   `feat/249-s20-cloud-parity`. Shared checkouts and published branches preserved.
-- No dedicated S21a issue/PR found in either repository; null mappings remain
+- At groundwork preparation, no dedicated S21a issue/PR was found; null mappings remained
   deliberate. No forge objects, commits or pushes created by this agent.
 - Implemented bounded ring, strict local growing-HLS acquisition, typed canonical
   identity projection and owner-session boundary. No migration/provider code or
@@ -362,11 +367,46 @@ user instruction; the Rust adapter tests are maintained but unexecuted.
   before-finalization ingestion, authorized window reconstruction, decoded
   pixels/tones/keyframes/packet clocks and strict existing artifact analyzer.
   This is runnable source, **not-run acceptance**, not measured capability.
-- Managed adapter remains explicitly unimplemented/unavailable. Egress/recording
-  prerequisites, clock uncertainty and provider cost remain unmeasured; production
-  disabled with no environment override, implicit recording start or paid call.
+- Groundwork had no managed provider adapter. The followup below supersedes that
+  source limitation; managed availability/cost/clock qualification remains unmeasured.
 - Parallel ownership: S6 restacks onto S16 and completes guest graphics; S5 fixes
   monitor animation/status; S9/S10 wait S6; S18 closes pending-command durability.
   Independent YouTube emotes thread `G4z27` and its checkout were not touched.
 - Full limits/contracts, paths, PR bodies and deferred commands:
   `docs/cloud/249-s21a-handoff.md` in each repo. All 32 slices remain commissioned.
+
+## S21a managed-provider source followup
+
+- All earlier desktop #1437–1447 and web #125–130 PRs are merged, per coordinator.
+  Desktop #1445 is the separate YouTube-emote task, not a Plan 249 slice.
+  This includes S18/S7a integration resolutions. Acceptance remains **not run**.
+- Fetched current desktop main `dda61b03ef52a97bd74a6796a2a0032d480878e5`
+  and web main `59fb8ba6c3cd9559523c5d320bad2065f3cdce1d`.
+  Fresh paired branch `feat/249-s21a-managed-replay` starts directly at these
+  commits; no merge/rebase/cherry-pick is pending and indexes match HEAD.
+- Desktop worktree: `/Users/orcdev/projects/videorc-wt-249-s21a-managed-replay`.
+  Web worktree: `/Users/orcdev/projects/videorcweb-wt-249-s21a-managed-replay`.
+  Original S21a trees/branches remain untouched. Frozen diffs/files are backed up
+  at `/Users/orcdev/projects/videorc-249-handoffs/s21a-before-main-20261116`.
+  Followup restored byte-for-byte before documentation reconciliation; runtime
+  code needed no conflict resolution. New paired PRs target **main**; no agent
+  commit/push/PR. Exact parents, paths and PR text are in the paired handoff.
+- S22 owner `S6z:P60l3:G1wkh` confirmed no edits to our recording/schema/SDK seams.
+  ISO uses `iso/` below the canonical S20 take prefix; replay does not. Replay
+  adds no egress and reserves no separate concurrency slot; its `replayUsage`
+  does not replace ISO's independent cost reservation. No peer worktree edited.
+- Source integration now implements LiveKit `SegmentedFileOutput.livePlaylistName`,
+  requested only for replay-armed, independently started recording. Existing
+  program page, output claims, take, writer credential and egress are reused.
+  No automatic Record, extra egress, grant or finalized-take polling.
+- Server-owned persistent metadata stores bounded segment references and durable
+  cost/byte/request reservations in the existing media row. Show leases, CAS,
+  generation fencing, read-time expiry and the reaper enforce isolation and cleanup.
+  No binary cache or source recording deletion: recording retention is unchanged.
+- S3 reader uses existing server credential injection and child-branch isolation;
+  no credential configuration was read by this agent. Mocked SDK/storage tests
+  exercise the path. Runtime configuration remains disabled/unqualified with
+  null measured pricing. Missing provider/PDT/continuity evidence is not invented.
+- Maintained actual-program acquisition/analyzer remains intact and **not run**.
+  Focused evidence, exact paths, SDK constraints, PR text and pending acceptance
+  are in the revised paired `docs/cloud/249-s21a-handoff.md`.
