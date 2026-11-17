@@ -386,7 +386,7 @@ mod tests {
         c.frames = 481;
         assert!(!c.valid());
         let mut value = fixture["open"].clone();
-        value["captureSpeakers"] = true;
+        value["captureSpeakers"] = serde_json::Value::Bool(true);
         assert!(serde_json::from_value::<Command>(value).is_err());
     }
     #[test]
