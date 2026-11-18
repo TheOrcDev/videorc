@@ -25,6 +25,11 @@ vi.mock('@/hooks/use-studio', () => ({
   useStudioCore: () => studio.core
 }))
 
+const navigation = vi.hoisted(() => ({ open: (_view: string): void => {} }))
+vi.mock('@/lib/livestream-tabs', () => ({
+  openLivestreamView: (view: string) => navigation.open(view)
+}))
+
 function talkShow(overrides: Partial<TalkShowContextValue> = {}): TalkShowContextValue {
   return {
     ...NO_TALK_SHOW,
@@ -342,9 +347,10 @@ describe('the Program monitor on a managed show (plan 234 D6)', () => {
     })
     // The picture only: no name plate and no placeholder words in the small frame.
     expect(monitor()?.textContent).toContain('Program preview')
+    // The room's opt-ins are summed up in one line that opens Guests → Room.
     expect(
-      monitor()?.querySelector('[data-testid="show-stage-avatar-status"]')?.textContent
-    ).toContain('Room avatar off')
+      monitor()?.querySelector('[data-testid="show-stage-program-opt-ins"]')?.textContent
+    ).toBe('Avatar off · Graphics off')
     // Plan 249 S6: an older page names no stage, so the preview says so.
     // (The badge's tooltip sentence stays in the DOM as its description.)
     expect(monitor()?.textContent).toMatch(/^Program previewUnconfirmed/)
@@ -374,6 +380,11 @@ describe('the Program monitor on a managed show (plan 234 D6)', () => {
     await mount(talkStatus({ show: managedShow, room: shownRoom }), talkShow())
     expect(takeover()?.getAttribute('src')).toBe('videorc-asset://screen/brb%201.png')
     expect(monitor()?.textContent).toContain('Takeover')
+    // The pills sit over the picture, never inside what Videorc Camera rasterizes.
+    const picture = monitor()?.querySelector('[data-testid="show-stage-program-picture"]')
+    expect(picture?.querySelector('[data-testid="show-stage-program-muted"]')).toBeNull()
+    expect(picture?.querySelector('[data-testid="show-stage-program-state"]')).toBeNull()
+    expect(monitor()?.querySelector('[data-testid="show-stage-program-muted"]')).not.toBeNull()
 
     // Not running yet: the monitor keeps its empty line, nothing is drawn.
     await mount(talkStatus({ show: managedShow, room: openRoom() }), talkShow())
@@ -389,9 +400,10 @@ describe('the Program monitor on a managed show (plan 234 D6)', () => {
     await mount(talkStatus({ show: managedShow, room: shownRoom }), talkShow())
     expect(takeover()).toBeNull()
     expect(monitor()?.textContent).toContain('Program preview')
+    // The room's opt-ins are summed up in one line that opens Guests → Room.
     expect(
-      monitor()?.querySelector('[data-testid="show-stage-avatar-status"]')?.textContent
-    ).toContain('Room avatar off')
+      monitor()?.querySelector('[data-testid="show-stage-program-opt-ins"]')?.textContent
+    ).toBe('Avatar off · Graphics off')
     expect(monitor()?.textContent).toMatch(/^Program previewUnconfirmed/)
   })
 })
@@ -409,61 +421,40 @@ describe('room view and program preview (plan 249 S6)', () => {
     vi.useRealTimers()
   })
 
-  it('offers guests the avatar only once it is on, and says how many confirmed', async () => {
-    const avatar = (
-      enabled: boolean,
-      guests: { enabled: boolean; capable: number; applied: number }
-    ) => ({
-      enabled,
-      state: 'preview' as const,
-      reason: null,
-      revision: 1,
-      preview: null,
-      observed: {},
-      guests,
-      productionQualified: false as const
-    })
-    const row = () =>
-      monitor()?.querySelector<HTMLElement>('[data-testid="show-stage-guest-graphics"]') ?? null
+  // The owner, 2026-11-18 (0.31.1): the room's opt-ins live in Guests → Room;
+  // the Program preview only sums them up and takes the host there.
+  it('keeps the room toggles off the Program preview and links to Guests → Room', async () => {
+    const opened: string[] = []
+    navigation.open = (view) => opened.push(view)
     await mount(
       talkStatus({ show: managedShow, room: openRoom({ live: true }) }),
       talkShow({
         room: {
           ...NO_TALK_SHOW.room,
-          avatar: avatar(false, { enabled: false, capable: 0, applied: 0 })
+          avatar: {
+            enabled: true,
+            state: 'preview',
+            reason: null,
+            revision: 1,
+            preview: null,
+            observed: {},
+            guests: { enabled: false, capable: 2, applied: 0 },
+            productionQualified: false
+          }
         }
       })
     )
-    expect(row()).toBeNull()
-
-    const setAvatarGuests = vi.fn(async () => {})
-    await mount(
-      talkStatus({ show: managedShow, room: openRoom({ live: true }) }),
-      talkShow({
-        setAvatarGuests,
-        room: {
-          ...NO_TALK_SHOW.room,
-          avatar: avatar(true, { enabled: false, capable: 2, applied: 0 })
-        }
-      })
+    const buttons = [...(monitor()?.querySelectorAll('button') ?? [])].map(
+      (button) => button.textContent
     )
-    expect(row()?.textContent).toContain("Guests don't see the avatar")
-    const button = row()?.querySelector('button')
-    expect(button?.getAttribute('aria-pressed')).toBe('false')
-    await act(async () => button?.click())
-    expect(setAvatarGuests).toHaveBeenCalledWith(true)
-
-    await mount(
-      talkStatus({ show: managedShow, room: openRoom({ live: true }) }),
-      talkShow({
-        room: {
-          ...NO_TALK_SHOW.room,
-          avatar: avatar(true, { enabled: true, capable: 3, applied: 2 })
-        }
-      })
+    expect(buttons.join(' ')).not.toMatch(/Enable|Hide|Show to guests|Send to Videorc Camera/)
+    expect(monitor()?.querySelector('[data-testid="show-stage-guest-graphics"]')).toBeNull()
+    const line = monitor()?.querySelector<HTMLButtonElement>(
+      '[data-testid="show-stage-program-opt-ins"]'
     )
-    expect(row()?.textContent).toContain('Shown to guests · 2 of 3 confirmed')
-    expect(row()?.querySelector('button')?.textContent).toBe('Hide from guests')
+    expect(line?.textContent).toBe('Avatar on · Graphics off')
+    await act(async () => line?.click())
+    expect(opened).toEqual(['guests'])
   })
 
   it('labels the stage as the room, never the program', async () => {

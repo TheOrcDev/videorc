@@ -210,3 +210,130 @@ describe('Guests tab actions', () => {
     expect(document.body.textContent).toContain('Everyone keeps their place.')
   })
 })
+
+// The owner, 2026-11-18 (0.31.1): the room's avatar and graphics are switches
+// beside the Door, their one home; the Show stage only links here.
+describe('Guests → Room: on the program (plan 249 S4/S9)', () => {
+  let root: Root
+  let container: HTMLDivElement
+  const managedShow = { id: 'sh_talk', nodeId: 'livekit', resumable: false, kind: 'talk' as const }
+  const avatar = (
+    enabled: boolean,
+    guests: { enabled: boolean; capable: number; applied: number },
+    state: 'preview' | 'applied' = 'preview'
+  ) => ({
+    enabled,
+    state,
+    reason: null,
+    revision: 1,
+    preview: null,
+    observed: {},
+    guests,
+    productionQualified: false as const
+  })
+
+  beforeEach(() => {
+    vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
+    container = document.createElement('div')
+    document.body.append(container)
+    root = createRoot(container)
+  })
+
+  afterEach(async () => {
+    await act(async () => root.unmount())
+    container.remove()
+    vi.unstubAllGlobals()
+  })
+
+  async function mount(status: CloudStatus, show: TalkShowContextValue): Promise<void> {
+    studio.cloud.cloudStatus = status
+    studio.cloud.talkShow = show
+    await act(async () =>
+      root.render(createElement(TooltipProvider, null, createElement(GuestsTab)))
+    )
+  }
+  const row = (id: string) => container.querySelector<HTMLElement>(`[data-testid="${id}"]`)
+  const toggle = (id: string) => row(id)?.querySelector<HTMLElement>('[role="switch"]') ?? null
+
+  it('is only for a managed show', async () => {
+    await mount(talkStatus({ room: openRoom() }), talkShow())
+    expect(row('guests-program')).toBeNull()
+  })
+
+  it('turns the avatar and the graphics on for this room, off until then', async () => {
+    const setAvatarEnabled = vi.fn(async () => {})
+    const setGraphicsEnabled = vi.fn(async () => {})
+    await mount(
+      talkStatus({ show: managedShow, room: openRoom({ live: true }) }),
+      talkShow({ setAvatarEnabled, setGraphicsEnabled })
+    )
+    expect(row('guests-program')?.textContent).toContain('On the program')
+    expect(row('guests-program-avatar')?.textContent).toContain('Not on the stream.')
+    expect(row('guests-program-graphics')?.textContent).toContain(
+      'Banners, timers and the chat box. Not on the stream.'
+    )
+    expect(toggle('guests-program-avatar')?.getAttribute('aria-checked')).toBe('false')
+    // Guests see the avatar only once it is on.
+    expect(row('guests-program-avatar-guests')).toBeNull()
+    await act(async () => toggle('guests-program-avatar')?.click())
+    await act(async () => toggle('guests-program-graphics')?.click())
+    expect(setAvatarEnabled).toHaveBeenCalledWith(true)
+    expect(setGraphicsEnabled).toHaveBeenCalledWith(true)
+  })
+
+  it('offers guests the avatar once it is on, and says how many confirmed', async () => {
+    const setAvatarGuests = vi.fn(async () => {})
+    const status = talkStatus({ show: managedShow, room: openRoom({ live: true }) })
+    await mount(
+      status,
+      talkShow({
+        setAvatarGuests,
+        room: {
+          ...NO_TALK_SHOW.room,
+          avatar: avatar(true, { enabled: false, capable: 2, applied: 0 })
+        }
+      })
+    )
+    expect(row('guests-program-avatar')?.textContent).toContain(
+      'On. Waiting for the stream to confirm.'
+    )
+    expect(row('guests-program-avatar-guests')?.textContent).toContain(
+      "Guests don't see the avatar"
+    )
+    await act(async () => toggle('guests-program-avatar-guests')?.click())
+    expect(setAvatarGuests).toHaveBeenCalledWith(true)
+
+    await mount(
+      status,
+      talkShow({
+        room: {
+          ...NO_TALK_SHOW.room,
+          avatar: avatar(true, { enabled: true, capable: 3, applied: 2 }, 'applied')
+        }
+      })
+    )
+    // No output confirmed in the fixture: no output is named.
+    expect(row('guests-program-avatar')?.textContent).toContain('On the program.')
+    expect(row('guests-program-avatar-guests')?.textContent).toContain(
+      'Shown to guests · 2 of 3 confirmed'
+    )
+    expect(toggle('guests-program-avatar-guests')?.getAttribute('aria-checked')).toBe('true')
+  })
+
+  it('says why when the stream refused the avatar', async () => {
+    await mount(
+      talkStatus({ show: managedShow, room: openRoom({ live: true }) }),
+      talkShow({
+        room: {
+          ...NO_TALK_SHOW.room,
+          avatar: {
+            ...avatar(true, { enabled: false, capable: 0, applied: 0 }),
+            state: 'failed',
+            reason: 'The stream refused the avatar.'
+          }
+        }
+      })
+    )
+    expect(row('guests-program-avatar')?.textContent).toContain('The stream refused the avatar.')
+  })
+})

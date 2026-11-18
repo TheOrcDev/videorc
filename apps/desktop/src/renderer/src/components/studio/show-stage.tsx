@@ -9,6 +9,7 @@ import { useEffect, useRef, useState, type ReactElement } from 'react'
 import { useGuestModeration } from '@/components/guests/guest-moderation'
 import { CloseRoomButton } from '@/components/guests/close-room-button'
 import {
+  ChevronRightIcon,
   DisplayIcon,
   SpeakerOffIcon,
   SpeakerOnIcon,
@@ -24,7 +25,6 @@ import { CameraOffAvatar } from '@/components/studio/camera-off-avatar'
 import { PREVIEW_REPLACED_BY_SHOW_STAGE } from '@/components/preview-stage'
 import { StatusDot } from '@/components/status-dot'
 import { Alert, AlertAction, AlertTitle } from '@/components/ui/alert'
-import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import {
   Dialog,
@@ -74,7 +74,6 @@ import { setAgentRoomProgram } from '@/lib/agent-room-program'
 import {
   PROGRAM_PREVIEW_COPY,
   agentRoomProgram,
-  guestGraphicsLine,
   managedProgramPreview,
   managedProgramStageInput,
   programMonitorView
@@ -99,6 +98,7 @@ import { programScenePreview, scenePreviewPicture, sceneStatusLine } from '@/lib
 import { VIEW_SOURCE, tileFit } from '../../../../shared/cloud-presentation-views'
 import type { SceneTile } from '../../../../shared/cloud-scene'
 import { roomProgramCameraLine } from '../../../../shared/room-program-camera'
+import { roomProgramSummary } from '@/lib/room-program-opt-ins'
 
 // The Show stage (plan 224 C-G3, D7, D8): while the room is open it replaces
 // the Studio's Preview. The renderer draws the room's tracks with the
@@ -437,7 +437,7 @@ function StageControls({ talkShow }: { talkShow: TalkShowContextValue }): ReactE
   // Narrow, the Program monitor goes under the controls instead of beside
   // them, so the four layout chips keep their row.
   return (
-    <div className="flex min-w-0 flex-col gap-3 @min-[36rem]/show-stage:flex-row @min-[36rem]/show-stage:items-start">
+    <div className="flex min-w-0 flex-col gap-3 @min-[40rem]/show-stage:flex-row @min-[40rem]/show-stage:items-start">
       <div className="flex min-w-0 flex-1 flex-col gap-2">
         <SegmentedControl<CloudStageLayout>
           aria-label="Layout"
@@ -743,9 +743,25 @@ function ProgramMonitor({ talkShow }: { talkShow: TalkShowContextValue }): React
     }
   }, [audio])
 
+  // The room's opt-ins live in Guests → Room (one home); this column shows
+  // the program and links there. Videorc Camera stays here: it sends only
+  // while this preview is on screen.
+  const programMenu: KebabMenuItem[] = programCameraOffered
+    ? [
+        {
+          id: 'program-camera',
+          label: programCameraOn ? 'Stop sending to Videorc Camera' : 'Send to Videorc Camera',
+          onSelect: () =>
+            void roomProgramCamera.setOn(!programCameraOn, talkShow.hostIdentity).catch(() => {})
+        }
+      ]
+    : []
+  const avatar = talkShow.room.avatar
+  const graphics = talkShow.room.graphics
+
   return (
     <div
-      className="flex w-1/2 min-w-36 flex-col gap-1.5 self-end @min-[36rem]/show-stage:w-1/4"
+      className="flex w-1/2 min-w-36 flex-col gap-1.5 self-end @min-[40rem]/show-stage:w-1/3"
       data-program-source={view.source}
       data-program-stage={preview?.state}
       data-testid="show-stage-program"
@@ -753,40 +769,18 @@ function ProgramMonitor({ talkShow }: { talkShow: TalkShowContextValue }): React
         view.source === 'return' ? VIEW_SOURCE['runner-return'] : VIEW_SOURCE['program-preview']
       }
     >
-      <div className="flex min-h-6 items-center justify-between gap-2">
-        <span className="text-label text-subtle">
+      <div className="flex min-h-6 min-w-0 items-center gap-2">
+        <span className="min-w-0 flex-1 truncate text-label text-subtle">
           {view.source === 'return' ? 'Program' : 'Program preview'}
         </span>
-        {previewCopy?.badge ? (
-          <InfoTooltip content={previewCopy.detail}>
-            <Badge data-testid="show-stage-program-state" variant="outline">
-              {previewCopy.badge}
-            </Badge>
-          </InfoTooltip>
-        ) : null}
-        {view.source === 'stage' ? (
-          <Button
-            size="xs"
-            variant="ghost"
-            aria-pressed={talkShow.room.avatar?.enabled === true}
-            onClick={() => void talkShow.setAvatarEnabled(!talkShow.room.avatar?.enabled)}
+        {programMenu.length > 0 ? (
+          <span
+            data-program-camera={
+              programCameraOn ? (virtualCamera.status?.source ?? 'starting') : 'off'
+            }
+            data-testid="show-stage-program-camera"
           >
-            {talkShow.room.avatar?.enabled ? 'Hide avatar' : 'Enable avatar'}
-          </Button>
-        ) : null}
-        {view.source === 'stage' ? (
-          <Button
-            size="xs"
-            variant="ghost"
-            aria-pressed={talkShow.room.graphics?.enabled === true}
-            onClick={() => void talkShow.setGraphicsEnabled(!talkShow.room.graphics?.enabled)}
-          >
-            {talkShow.room.graphics?.enabled ? 'Hide graphics' : 'Enable graphics'}
-          </Button>
-        ) : null}
-        {takeover ? (
-          <span className="truncate text-label text-subtle" data-testid="show-stage-program-muted">
-            Takeover
+            <KebabMenu items={programMenu} label="More for the Program" />
           </span>
         ) : null}
         {view.source === 'return' ? (
@@ -804,64 +798,96 @@ function ProgramMonitor({ talkShow }: { talkShow: TalkShowContextValue }): React
         ) : null}
       </div>
       <div
-        className="relative aspect-video w-full overflow-hidden rounded-row bg-video-ground [container-type:inline-size]"
-        data-testid="show-stage-program-picture"
-        ref={picture}
+        className={cn(
+          'relative aspect-video w-full overflow-hidden rounded-row',
+          // Empty, the frame is the Preview's inset well: on the dark ground
+          // a video-ground box would vanish and leave its words floating.
+          programPictured(view, video) ? null : 'bg-inset'
+        )}
       >
-        {view.source === 'return' ? (
-          <>
-            <TrackVideo className="object-contain" track={video} />
-            {!video ? (
-              <span className="absolute inset-0 flex items-center justify-center p-2 text-center text-xs text-video-ground-muted">
-                {live ? 'Waiting for the program…' : PROGRAM_MONITOR_EMPTY}
+        {/* What Videorc Camera rasterizes: the picture only, in its own
+            stacking context, so the pills below stay off the camera and
+            above every scene tile. */}
+        <div
+          className={cn(
+            'absolute inset-0 isolate overflow-hidden [container-type:inline-size]',
+            // The camera's ground, as before: the picture's own video ground.
+            programPictured(view, video) && 'bg-video-ground'
+          )}
+          data-testid="show-stage-program-picture"
+          ref={picture}
+        >
+          {view.source === 'return' ? (
+            <>
+              <TrackVideo className="object-contain" track={video} />
+              {!video ? (
+                <span className="absolute inset-0 flex items-center justify-center p-2 text-center text-xs text-muted-foreground">
+                  {live ? 'Waiting for the program…' : PROGRAM_MONITOR_EMPTY}
+                </span>
+              ) : null}
+            </>
+          ) : view.state === 'shown' ? (
+            <>
+              <ProgramStage talkShow={talkShow} />
+              {takeover ? (
+                <img
+                  alt=""
+                  className="absolute inset-0 size-full bg-video-ground object-contain"
+                  data-testid="show-stage-program-takeover"
+                  src={managedScreenAssetUrl(takeover.imagePath)}
+                />
+              ) : null}
+            </>
+          ) : (
+            <span className="absolute inset-0 flex items-center justify-center p-2 text-center text-xs text-muted-foreground">
+              {view.state === 'waiting' ? 'Waiting for the program…' : PROGRAM_MONITOR_EMPTY}
+            </span>
+          )}
+          {view.source === 'stage' ? (
+            <ProgramGraphics snapshot={graphics?.preview ?? null}>
+              <ProgramAvatar
+                motion={talkShow.avatarMotionSource}
+                snapshot={avatar?.preview ?? null}
+              />
+            </ProgramGraphics>
+          ) : null}
+        </div>
+        {/* The program's state on the picture's corner, as the stage's Room pill. */}
+        {previewCopy?.badge || takeover ? (
+          <span className="absolute top-1.5 right-1.5 flex gap-1">
+            {takeover ? (
+              <span className={PROGRAM_PILL} data-testid="show-stage-program-muted">
+                Takeover
               </span>
             ) : null}
-          </>
-        ) : view.state === 'shown' ? (
-          <>
-            <ProgramStage talkShow={talkShow} />
-            {takeover ? (
-              <img
-                alt=""
-                className="absolute inset-0 size-full bg-video-ground object-contain"
-                data-testid="show-stage-program-takeover"
-                src={managedScreenAssetUrl(takeover.imagePath)}
-              />
+            {previewCopy?.badge ? (
+              <InfoTooltip content={previewCopy.detail}>
+                <span className={PROGRAM_PILL} data-testid="show-stage-program-state">
+                  {previewCopy.badge}
+                </span>
+              </InfoTooltip>
             ) : null}
-          </>
-        ) : (
-          <span className="absolute inset-0 flex items-center justify-center p-2 text-center text-xs text-video-ground-muted">
-            {view.state === 'waiting' ? 'Waiting for the program…' : PROGRAM_MONITOR_EMPTY}
           </span>
-        )}
-        {view.source === 'stage' ? (
-          <ProgramGraphics snapshot={talkShow.room.graphics?.preview ?? null}>
-            <ProgramAvatar
-              motion={talkShow.avatarMotionSource}
-              snapshot={talkShow.room.avatar?.preview ?? null}
-            />
-          </ProgramGraphics>
         ) : null}
       </div>
-      {view.source === 'stage' ? (
-        <span className="text-label text-subtle" data-testid="show-stage-avatar-status">
-          {talkShow.room.avatar?.reason ??
-            (talkShow.room.avatar?.state === 'applied'
-              ? 'Avatar applied by each output · Preview reconstruction'
-              : talkShow.room.avatar?.enabled
-                ? 'Avatar preview · Output unconfirmed'
-                : 'Room avatar off · Enable for this room')}
+      {/* News stays in words: a refusal, a delivery problem, the scene. */}
+      {view.source === 'stage' && avatar?.reason ? (
+        <span className="text-label text-subtle" data-testid="show-stage-avatar-reason">
+          {avatar.reason}
         </span>
       ) : null}
-      {view.source === 'stage' &&
-      talkShow.room.avatar?.enabled &&
-      talkShow.room.avatar.animation?.reason ? (
+      {view.source === 'stage' && avatar?.enabled && avatar.animation?.reason ? (
         <span
           className="text-meta text-muted-foreground"
-          data-avatar-animation={talkShow.room.avatar.animation.state}
+          data-avatar-animation={avatar.animation.state}
           data-testid="show-stage-avatar-animation"
         >
-          {talkShow.room.avatar.animation.reason}
+          {avatar.animation.reason}
+        </span>
+      ) : null}
+      {view.source === 'stage' && graphics?.reason ? (
+        <span className="text-label text-subtle" data-testid="show-stage-graphics-reason">
+          {graphics.reason}
         </span>
       ) : null}
       {view.source === 'stage' && sceneStatusLine(talkShow.room.scene) ? (
@@ -869,61 +895,43 @@ function ProgramMonitor({ talkShow }: { talkShow: TalkShowContextValue }): React
           {sceneStatusLine(talkShow.room.scene)}
         </span>
       ) : null}
-      {view.source === 'stage' && talkShow.room.avatar?.enabled ? (
-        <div
-          className="flex min-h-6 items-center justify-between gap-2"
-          data-testid="show-stage-guest-graphics"
+      {programCameraOn || programCamera.error ? (
+        <span
+          className="truncate text-label text-subtle"
+          data-testid="show-stage-program-camera-status"
         >
-          <span className="truncate text-label text-subtle">
-            {guestGraphicsLine(
-              talkShow.room.avatar.guests,
-              talkShow.room.avatar.preview?.output ?? null
-            )}
-          </span>
-          <Button
-            size="xs"
-            variant="ghost"
-            aria-pressed={talkShow.room.avatar.guests?.enabled === true}
-            onClick={() => void talkShow.setAvatarGuests(!talkShow.room.avatar?.guests?.enabled)}
-          >
-            {talkShow.room.avatar.guests?.enabled ? 'Hide from guests' : 'Show to guests'}
-          </Button>
-        </div>
-      ) : null}
-      {programCameraOffered ? (
-        <div
-          className="flex min-h-6 items-center justify-between gap-2"
-          data-program-camera={
-            programCameraOn ? (virtualCamera.status?.source ?? 'starting') : 'off'
-          }
-          data-testid="show-stage-program-camera"
-        >
-          <span className="truncate text-label text-subtle">{programCameraStatus}</span>
-          <Button
-            size="xs"
-            variant="ghost"
-            aria-pressed={programCameraOn}
-            onClick={() =>
-              void roomProgramCamera.setOn(!programCameraOn, talkShow.hostIdentity).catch(() => {})
-            }
-          >
-            {programCameraOn ? 'Stop sending' : 'Send to Videorc Camera'}
-          </Button>
-        </div>
+          {programCameraStatus}
+        </span>
       ) : null}
       {view.source === 'stage' ? (
-        <span className="text-label text-subtle" data-testid="show-stage-graphics-status">
-          {talkShow.room.graphics?.reason ??
-            (talkShow.room.graphics?.state === 'applied'
-              ? 'Graphics applied by each output · Preview reconstruction'
-              : talkShow.room.graphics?.enabled
-                ? 'Graphics preview · Output unconfirmed'
-                : 'Room graphics off · Enable for this room')}
-        </span>
+        // The opt-ins' one home is Guests → Room; this line takes the host there.
+        <Button
+          className="h-auto min-w-0 justify-start self-start px-0 text-subtle"
+          data-testid="show-stage-program-opt-ins"
+          size="xs"
+          type="button"
+          variant="link"
+          onClick={() => openLivestreamView('guests')}
+        >
+          <span className="truncate">{roomProgramSummary(avatar, graphics)}</span>
+          <ChevronRightIcon data-icon="inline-end" />
+        </Button>
       ) : null}
       {view.source === 'return' ? <audio muted={!listening} ref={audioRef} /> : null}
     </div>
   )
+}
+
+/** The program's corner pill: the stage's Room pill, a size down. */
+const PROGRAM_PILL =
+  'inline-flex items-center rounded-full bg-video-ground/80 px-2 py-0.5 text-xs text-video-ground-foreground'
+
+/** Whether the Program frame holds a picture (else it is the empty inset well). */
+function programPictured(
+  view: ReturnType<typeof programMonitorView>,
+  video: MediaStreamTrack | null
+): boolean {
+  return view.source === 'return' ? video !== null : view.state === 'shown'
 }
 
 /** The Show stage inside the Program monitor: the same tiles, drawn small. */
