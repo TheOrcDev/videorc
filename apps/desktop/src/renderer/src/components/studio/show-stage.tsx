@@ -799,48 +799,59 @@ function ProgramMonitor({ talkShow }: { talkShow: TalkShowContextValue }): React
       </div>
       <div
         className={cn(
-          'relative aspect-video w-full overflow-hidden rounded-row [container-type:inline-size]',
+          'relative aspect-video w-full overflow-hidden rounded-row',
           // Empty, the frame is the Preview's inset well: on the dark ground
           // a video-ground box would vanish and leave its words floating.
-          programPictured(view, video) ? 'bg-video-ground' : 'bg-inset'
+          programPictured(view, video) ? null : 'bg-inset'
         )}
-        data-testid="show-stage-program-picture"
-        ref={picture}
       >
-        {view.source === 'return' ? (
-          <>
-            <TrackVideo className="object-contain" track={video} />
-            {!video ? (
-              <span className="absolute inset-0 flex items-center justify-center p-2 text-center text-xs text-muted-foreground">
-                {live ? 'Waiting for the program…' : PROGRAM_MONITOR_EMPTY}
-              </span>
-            ) : null}
-          </>
-        ) : view.state === 'shown' ? (
-          <>
-            <ProgramStage talkShow={talkShow} />
-            {takeover ? (
-              <img
-                alt=""
-                className="absolute inset-0 size-full bg-video-ground object-contain"
-                data-testid="show-stage-program-takeover"
-                src={managedScreenAssetUrl(takeover.imagePath)}
+        {/* What Videorc Camera rasterizes: the picture only, in its own
+            stacking context, so the pills below stay off the camera and
+            above every scene tile. */}
+        <div
+          className={cn(
+            'absolute inset-0 isolate overflow-hidden [container-type:inline-size]',
+            // The camera's ground, as before: the picture's own video ground.
+            programPictured(view, video) && 'bg-video-ground'
+          )}
+          data-testid="show-stage-program-picture"
+          ref={picture}
+        >
+          {view.source === 'return' ? (
+            <>
+              <TrackVideo className="object-contain" track={video} />
+              {!video ? (
+                <span className="absolute inset-0 flex items-center justify-center p-2 text-center text-xs text-muted-foreground">
+                  {live ? 'Waiting for the program…' : PROGRAM_MONITOR_EMPTY}
+                </span>
+              ) : null}
+            </>
+          ) : view.state === 'shown' ? (
+            <>
+              <ProgramStage talkShow={talkShow} />
+              {takeover ? (
+                <img
+                  alt=""
+                  className="absolute inset-0 size-full bg-video-ground object-contain"
+                  data-testid="show-stage-program-takeover"
+                  src={managedScreenAssetUrl(takeover.imagePath)}
+                />
+              ) : null}
+            </>
+          ) : (
+            <span className="absolute inset-0 flex items-center justify-center p-2 text-center text-xs text-muted-foreground">
+              {view.state === 'waiting' ? 'Waiting for the program…' : PROGRAM_MONITOR_EMPTY}
+            </span>
+          )}
+          {view.source === 'stage' ? (
+            <ProgramGraphics snapshot={graphics?.preview ?? null}>
+              <ProgramAvatar
+                motion={talkShow.avatarMotionSource}
+                snapshot={avatar?.preview ?? null}
               />
-            ) : null}
-          </>
-        ) : (
-          <span className="absolute inset-0 flex items-center justify-center p-2 text-center text-xs text-muted-foreground">
-            {view.state === 'waiting' ? 'Waiting for the program…' : PROGRAM_MONITOR_EMPTY}
-          </span>
-        )}
-        {view.source === 'stage' ? (
-          <ProgramGraphics snapshot={graphics?.preview ?? null}>
-            <ProgramAvatar
-              motion={talkShow.avatarMotionSource}
-              snapshot={avatar?.preview ?? null}
-            />
-          </ProgramGraphics>
-        ) : null}
+            </ProgramGraphics>
+          ) : null}
+        </div>
         {/* The program's state on the picture's corner, as the stage's Room pill. */}
         {previewCopy?.badge || takeover ? (
           <span className="absolute top-1.5 right-1.5 flex gap-1">

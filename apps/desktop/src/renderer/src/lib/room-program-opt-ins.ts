@@ -13,12 +13,23 @@ export interface RoomProgramOptIn {
   enabled: boolean
   state?: string | null
   reason?: string | null
+  /** Each output page's acknowledgement: which output applied it. */
+  observed?: Record<string, { output: 'stream' | 'recording' }>
+}
+
+/** Where an applied opt-in is: only the outputs that confirmed it. */
+function appliedLine(optIn: RoomProgramOptIn): string {
+  const outputs = new Set(Object.values(optIn.observed ?? {}).map((entry) => entry.output))
+  if (outputs.has('stream') && outputs.has('recording')) return 'On the stream and the recording.'
+  if (outputs.has('recording')) return 'On the recording.'
+  if (outputs.has('stream')) return 'On the stream.'
+  return 'On the program.'
 }
 
 /** What one opt-in does to the stream now: its refusal reason when it has one. */
 function optInStatus(optIn: RoomProgramOptIn | null | undefined): string {
   if (optIn?.reason) return optIn.reason
-  if (optIn?.state === 'applied') return 'On the stream and the recording.'
+  if (optIn?.state === 'applied') return appliedLine(optIn)
   if (optIn?.enabled) return 'On. Waiting for the stream to confirm.'
   return 'Not on the stream.'
 }

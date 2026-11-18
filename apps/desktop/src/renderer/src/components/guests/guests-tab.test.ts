@@ -312,7 +312,8 @@ describe('Guests → Room: on the program (plan 249 S4/S9)', () => {
         }
       })
     )
-    expect(row('guests-program-avatar')?.textContent).toContain('On the stream and the recording.')
+    // No output confirmed in the fixture: no output is named.
+    expect(row('guests-program-avatar')?.textContent).toContain('On the program.')
     expect(row('guests-program-avatar-guests')?.textContent).toContain(
       'Shown to guests · 2 of 3 confirmed'
     )

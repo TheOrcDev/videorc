@@ -380,6 +380,11 @@ describe('the Program monitor on a managed show (plan 234 D6)', () => {
     await mount(talkStatus({ show: managedShow, room: shownRoom }), talkShow())
     expect(takeover()?.getAttribute('src')).toBe('videorc-asset://screen/brb%201.png')
     expect(monitor()?.textContent).toContain('Takeover')
+    // The pills sit over the picture, never inside what Videorc Camera rasterizes.
+    const picture = monitor()?.querySelector('[data-testid="show-stage-program-picture"]')
+    expect(picture?.querySelector('[data-testid="show-stage-program-muted"]')).toBeNull()
+    expect(picture?.querySelector('[data-testid="show-stage-program-state"]')).toBeNull()
+    expect(monitor()?.querySelector('[data-testid="show-stage-program-muted"]')).not.toBeNull()
 
     // Not running yet: the monitor keeps its empty line, nothing is drawn.
     await mount(talkStatus({ show: managedShow, room: openRoom() }), talkShow())
