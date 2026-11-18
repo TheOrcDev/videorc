@@ -68,6 +68,8 @@ import {
   normalizeTranscriptWords,
   prerollMs,
   rebaseDraft,
+  rebaseDraftAfterSave,
+  rebaseHistoryAfterSave,
   addDraftManual,
   draftManualRemovals,
   EMPTY_CLEAN_CUT_HISTORY,
@@ -211,6 +213,9 @@ export function CleanCutReview({
   // E-14: undo and redo over the draft, the words selected in the
   // transcript, and the transcript following the playhead.
   const [history, setHistory] = useState<CleanCutHistory>(EMPTY_CLEAN_CUT_HISTORY)
+  // QA F16: what the review shows now, read when a save answers.
+  const editingRef = useRef({ draft, history, draftJob })
+  editingRef.current = { draft, history, draftJob }
   const [selectedWords, setSelectedWords] = useState<readonly number[]>(NO_WORDS)
   const [follow, setFollow] = useState(true)
   const followedRowRef = useRef<number | null>(null)
@@ -513,9 +518,11 @@ export function CleanCutReview({
     setSaving(true)
     setNotice(null)
     const jobIdToSave = data.job.id
+    const submitted = draft
+    const historyAtSave = history
     try {
       const detail = await client.updateEdl(
-        updateEdlPayload(jobIdToSave, data.job.edlRevision, draft)
+        updateEdlPayload(jobIdToSave, data.job.edlRevision, submitted)
       )
       setLoad((current) =>
         current.kind === 'ready'
@@ -525,8 +532,19 @@ export function CleanCutReview({
             }
           : current
       )
-      setDraft(EMPTY_CLEAN_CUT_DRAFT)
-      setHistory(EMPTY_CLEAN_CUT_HISTORY)
+      // QA F16: the review stays editable while saving, so an edit made since
+      // the save was sent stays unsaved, with its undo, on the saved list.
+      const now = editingRef.current
+      if (now.draftJob === jobIdToSave) {
+        if (now.draft === submitted || !detail.edl) {
+          setDraft(EMPTY_CLEAN_CUT_DRAFT)
+          setHistory(EMPTY_CLEAN_CUT_HISTORY)
+        } else {
+          const step = { submitted, before: data.edl.removals, after: detail.edl.removals }
+          setDraft(rebaseDraftAfterSave(now.draft, step))
+          setHistory(rebaseHistoryAfterSave(now.history, historyAtSave, step))
+        }
+      }
       try {
         const rendered = await client.render(jobIdToSave)
         setLoad((current) =>

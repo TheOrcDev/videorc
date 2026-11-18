@@ -408,6 +408,71 @@ describe('Clean cut review (plan 119 S14)', () => {
     })
   })
 
+  // QA F16: the save answers with only what it sent; later edits stay unsaved.
+  function pendingSave(): {
+    updateEdl: ReturnType<typeof vi.fn>
+    finish: (removals: CleanCutRemoval[]) => Promise<void>
+  } {
+    let resolve: (value: unknown) => void = () => undefined
+    const updateEdl = vi.fn(() => new Promise((done) => (resolve = done)))
+    return {
+      updateEdl,
+      finish: async (removals) => {
+        await act(async () => resolve({ job: job({ edlRevision: 4 }), edl: edl(removals) }))
+        await settle()
+      }
+    }
+  }
+  const r2Saved = (): CleanCutRemoval[] =>
+    REMOVALS.map((entry) => (entry.id === 'r2' ? { ...entry, enabled: false } : entry))
+
+  it('keeps an edit made while Save is pending, unsaved and undoable (QA F16)', async () => {
+    const save = pendingSave()
+    const finished = vi.fn(async () => job({ state: 'completed', edlRevision: 4 }))
+    await render(client({ updateEdl: save.updateEdl, render: finished }))
+    await act(async () => cut('r2').click())
+    await act(async () => button('Save changes').click())
+    expect(save.updateEdl).toHaveBeenCalledOnce()
+    await act(async () => cut('r3').click())
+    expect(footer()).toBe('2 unsaved changes')
+
+    await save.finish(r2Saved())
+    expect(cut('r2').getAttribute('data-cut')).toBe('off')
+    expect(cut('r3').getAttribute('data-cut')).toBe('off')
+    expect(footer()).toBe('1 unsaved change')
+    expect(cleanCutDraftChanges('job-1')).toBe(1)
+
+    // The edit made during the save undoes; the saved one does not.
+    await key('z', { metaKey: true })
+    expect(cut('r3').getAttribute('data-cut')).toBe('on')
+    expect(cut('r2').getAttribute('data-cut')).toBe('off')
+    expect(footer()).not.toContain('unsaved')
+    await key('z', { metaKey: true, shiftKey: true })
+    expect(cut('r3').getAttribute('data-cut')).toBe('off')
+
+    save.updateEdl.mockResolvedValueOnce({ job: job({ edlRevision: 5 }), edl: edl() })
+    await act(async () => button('Save changes').click())
+    await settle()
+    expect(save.updateEdl).toHaveBeenLastCalledWith({
+      jobId: 'job-1',
+      revision: 4,
+      removals: [{ id: 'r3', enabled: false }]
+    })
+  })
+
+  it('keeps a cut taken back while Save is pending as an unsaved change (QA F16)', async () => {
+    const save = pendingSave()
+    await render(client({ updateEdl: save.updateEdl }))
+    await act(async () => cut('r2').click())
+    await act(async () => button('Save changes').click())
+    await act(async () => cut('r2').click())
+    expect(cut('r2').getAttribute('data-cut')).toBe('on')
+
+    await save.finish(r2Saved())
+    expect(cut('r2').getAttribute('data-cut')).toBe('on')
+    expect(footer()).toBe('1 unsaved change')
+  })
+
   it('waits for a cut in progress before saving', async () => {
     await render(
       client({
