@@ -314,7 +314,7 @@ export function SessionPanel({ live = false, ...notices }: SessionPanelProps): R
             session fact, knowable without the Stream Manager; a recording
             has no chat for it to read. */}
         {live ? <CohostSessionRow /> : null}
-        {/* Plan 224 D16: the room's one row, which opens Destinations → Guests. */}
+        {/* Plan 224 D16: the room's one row, which opens the Guests page. */}
         <GuestsSessionSlot />
         {/* Plan 209 D12: which agents are connected, with Stop. */}
         <AgentsSessionRow />

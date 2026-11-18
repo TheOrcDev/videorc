@@ -13,7 +13,9 @@ import { useTrafficLightGutter } from '@/components/window-frame'
 import { useModifierHeld } from '@/hooks/use-modifier-held'
 import { useReducedMotion } from '@/hooks/use-reduced-motion'
 import { useSessionElapsedMs } from '@/hooks/use-session-elapsed'
+import { useStudioCloud } from '@/hooks/use-studio'
 import { useUpdater } from '@/hooks/use-updater'
+import { guestsVisible } from '@/lib/livestream-tabs'
 import { shortcutAriaKeys } from '@/lib/platform'
 import { shortcutAccelerator } from '@/lib/shortcuts'
 import { shortcutChipProps } from '@/lib/shortcut-overlay'
@@ -247,6 +249,14 @@ function SidebarUpdateChip({
   )
 }
 
+/**
+ * The Guests row shows only with talk shows (plan 224 D16), the same rule as
+ * ⌘K. Its own component, so only it follows the cloud's status.
+ */
+function GuestsRow({ children }: { children: ReactElement }): ReactElement | null {
+  return guestsVisible(useStudioCloud().cloudStatus) ? children : null
+}
+
 export function Sidebar({
   active,
   activeStudioPanel,
@@ -382,7 +392,9 @@ export function Sidebar({
             {zone.label ? (
               <SectionLabel className="px-2.5 pb-1 leading-none">{zone.label}</SectionLabel>
             ) : null}
-            {zone.pages.map((tab) => pageRow(tab))}
+            {zone.pages.map((tab) =>
+              tab === 'guests' ? <GuestsRow key={tab}>{pageRow(tab)}</GuestsRow> : pageRow(tab)
+            )}
           </div>
         ))}
 

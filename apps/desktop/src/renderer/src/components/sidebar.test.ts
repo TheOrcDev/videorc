@@ -3,7 +3,7 @@ import { join } from 'node:path'
 import { runInNewContext } from 'node:vm'
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { Sidebar } from '@/components/sidebar'
 import { TooltipProvider } from '@/components/ui/tooltip'
@@ -19,6 +19,13 @@ vi.mock('@/hooks/use-updater', () => ({
     check: () => undefined,
     install: () => undefined
   })
+}))
+
+// 0.31.1: the Guests row follows the cloud's talk-show allowance.
+const cloud = vi.hoisted(() => ({ cloudStatus: null as unknown }))
+vi.mock('@/hooks/use-studio', async (importOriginal) => ({
+  ...(await importOriginal<object>()),
+  useStudioCloud: () => ({ cloudStatus: cloud.cloudStatus })
 }))
 
 const noop = (): void => undefined
@@ -222,5 +229,33 @@ describe('sidebar update chip (plan 174 A-25)', () => {
     expect(live).toMatch(/glass-dot tone-neutral/)
     expect(live).not.toMatch(/glass-dot tone-success/)
     updater.status = { phase: 'idle' }
+  })
+})
+
+// 0.31.1: Guests is its own page under Livestream, between Destinations and
+// Sidekick, shown only with talk shows (the rule ⌘K follows too). It has no
+// digit, so every other row keeps its key.
+describe('the Guests row', () => {
+  const triggers = (html: string): string[] =>
+    [...html.matchAll(/data-videorc-tab-trigger="([a-z]+)"/g)].map((match) => match[1])
+
+  afterEach(() => {
+    cloud.cloudStatus = null
+  })
+
+  it('shows between Destinations and Sidekick only with talk shows', () => {
+    expect(triggers(renderSidebar())).not.toContain('guests')
+    cloud.cloudStatus = { allowance: { enabled: true, talkShows: true } }
+    const rows = triggers(renderSidebar())
+    expect(rows.slice(rows.indexOf('streaming'), rows.indexOf('streaming') + 3)).toEqual([
+      'streaming',
+      'guests',
+      'ai'
+    ])
+  })
+
+  it('stays while a room is open, even without the allowance', () => {
+    cloud.cloudStatus = { room: { phase: 'open' } }
+    expect(triggers(renderSidebar())).toContain('guests')
   })
 })

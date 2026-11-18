@@ -2,13 +2,15 @@ import { AlertIcon, SaveIcon, TextIcon } from '@/components/icons'
 import { lazy, Suspense, useCallback, useEffect, useMemo, useState, type ReactElement } from 'react'
 import { PageTabs } from '@/components/page-tabs'
 import { TabsContent } from '@/components/ui/tabs'
-import { guestsVisible, livestreamViews, type LivestreamViewId } from '@/lib/livestream-tabs'
+import { LIVESTREAM_VIEWS, type LivestreamViewId } from '@/lib/livestream-tabs'
 import { LIVESTREAM_SETUP_GRID, PAGE_LEAD_COLUMN } from '@/lib/page-layout'
+// The Guests page (0.31.1) loads through this chunk, so the shell adds no
+// page chunk of its own for it (the renderer's eager budget).
+const GuestsTab = lazy(() => import('@/components/guests/guests-tab'))
 const ScheduledStreams = lazy(() =>
   import('@/components/scheduled-streams').then((m) => ({ default: m.ScheduledStreams }))
 )
 // Plan 224 C-G2: the Guests tab loads with its first open.
-const GuestsTab = lazy(() => import('@/components/guests/guests-tab'))
 // Plan 226: Chat commands loads on its own, after the page.
 const ChatCommandsSection = lazy(() =>
   import('@/components/streaming/chat-commands-section').then((m) => ({
@@ -59,7 +61,7 @@ import {
 } from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
 import { Textarea } from '@/components/ui/textarea'
-import { useStudioCloud, useStudioCore } from '@/hooks/use-studio'
+import { useStudioCore } from '@/hooks/use-studio'
 import type {
   PlatformAccount,
   PlatformAccountValidation,
@@ -95,22 +97,28 @@ export function StreamingTab({
   view,
   onViewChange,
   destinationToOpen = null,
-  onDestinationOpened
+  onDestinationOpened,
+  guests = false
 }: {
+  /** The Guests page instead of Destinations: the talk show's room (plan 224 D16). */
+  guests?: boolean
   view: LivestreamViewId
   onViewChange: (view: LivestreamViewId) => void
   /** A destination to open once Setup shows (plan 213 J1: "Use Sign in"). */
   destinationToOpen?: string | null
   onDestinationOpened?: () => void
 }): ReactElement {
-  const { cloudStatus } = useStudioCloud()
-  const showGuests = guestsVisible(cloudStatus)
-  const visibleView = view === 'guests' && !showGuests ? 'setup' : view
+  if (guests)
+    return (
+      <Suspense fallback={<p role="status">Loading guests…</p>}>
+        <GuestsTab />
+      </Suspense>
+    )
   return (
     <PageTabs
       label="Destinations view"
-      tabs={livestreamViews(cloudStatus)}
-      value={visibleView}
+      tabs={LIVESTREAM_VIEWS}
+      value={view}
       onValueChange={onViewChange}
     >
       <TabsContent value="setup">
@@ -124,13 +132,6 @@ export function StreamingTab({
           <ScheduledStreams />
         </Suspense>
       </TabsContent>
-      {showGuests ? (
-        <TabsContent value="guests">
-          <Suspense fallback={<p role="status">Loading guests…</p>}>
-            <GuestsTab />
-          </Suspense>
-        </TabsContent>
-      ) : null}
     </PageTabs>
   )
 }

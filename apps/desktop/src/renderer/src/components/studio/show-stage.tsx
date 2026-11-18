@@ -65,7 +65,7 @@ import {
   shownLayout,
   type RoomPerson
 } from '@/lib/guests-view'
-import { openLivestreamView } from '@/lib/livestream-tabs'
+import { openWorkspaceTab } from '@/lib/workspace-navigation'
 import { managedScreenAssetUrl } from '@/lib/screen-asset-url'
 import type { TalkShowContextValue } from '@/lib/talk-show-context'
 import type { CameraFrameMedia } from '@/lib/camera-frame-media'
@@ -911,7 +911,7 @@ function ProgramMonitor({ talkShow }: { talkShow: TalkShowContextValue }): React
           size="xs"
           type="button"
           variant="link"
-          onClick={() => openLivestreamView('guests')}
+          onClick={() => openWorkspaceTab('guests')}
         >
           <span className="truncate">{roomProgramSummary(avatar, graphics)}</span>
           <ChevronRightIcon data-icon="inline-end" />
@@ -1088,7 +1088,7 @@ function JoinRequests({
           size="xs"
           type="button"
           variant="ghost"
-          onClick={() => openLivestreamView('guests')}
+          onClick={() => openWorkspaceTab('guests')}
         >
           {more === 1 ? '1 more wants to join' : `${more} more want to join`}
         </Button>

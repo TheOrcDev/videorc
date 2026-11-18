@@ -1,7 +1,6 @@
 import { useStudioCloud } from '@/hooks/use-studio'
 import { DEFAULT_SCREEN_HIDE_SHORTCUT } from '../../../shared/global-shortcuts'
 import {
-  AccountIcon,
   AdjustIcon,
   BuddyPageIcon,
   CaptionsIcon,
@@ -98,6 +97,8 @@ export const PAGE_KEYWORDS: Readonly<Record<WorkspaceTab, readonly string[]>> = 
   // what people call it; "sidekick" finds it by the name it had.
   avatar: ['character', 'mascot', 'pet', 'alive', 'bubble', 'greetings', 'sidekick'],
   ai: ['assistant', 'ai', 'chat', 'moderation', 'voice', 'reports', 'clean cut'],
+  // Plan 224 D16: the talk show's room and its invite link.
+  guests: ['guest', 'invite', 'room', 'talk show', 'co-host', 'link'],
   sources: ['camera', 'microphone', 'screen', 'window', 'devices', 'audio', 'mixer'],
   layouts: [
     'layout',
@@ -415,6 +416,8 @@ export function CommandPalette({
             sidebar (plan 174 D9): ⌘K finds it by what people look for there. */}
         <CommandGroup heading="Pages">
           {PAGES.map((page) => {
+            // Guests shows only with talk shows, as its sidebar row does.
+            if (page.id === 'guests' && !guestsVisible(cloudStatus)) return null
             const digit = shortcutDigitFor(page.id)
             const PageIcon = page.icon
             return (
@@ -464,18 +467,6 @@ export function CommandPalette({
             Upcoming events
             <Context>Destinations</Context>
           </CommandItem>
-          {/* Plan 224 D16: the talk show's room and its invite link. */}
-          {guestsVisible(cloudStatus) ? (
-            <CommandItem
-              value="Open Guests"
-              keywords={['guest', 'invite', 'room', 'talk show', 'co-host', 'link']}
-              onSelect={() => run(() => openLivestreamView('guests'))}
-            >
-              <AccountIcon className="size-4" />
-              Guests
-              <Context>Destinations</Context>
-            </CommandItem>
-          ) : null}
         </CommandGroup>
 
         <CommandSeparator />
