@@ -5,8 +5,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { TooltipProvider } from '@/components/ui/tooltip'
 import type { Sound } from '@/lib/backend'
+import { soundboard } from '@/lib/soundboard-store'
 import { SOUND_COUNT_LIMIT_REASON } from '@/lib/sounds'
 
+import { SOUNDS_RETRY_MS } from './sounds-load-state'
 import { SoundsSection } from './sounds-section'
 
 // Plan 189 S7: Assets → Sounds imports, renames, orders and removes the
@@ -190,5 +192,77 @@ describe('Assets → Sounds (plan 189 S7)', () => {
     expect(
       row('airhorn').querySelector<HTMLButtonElement>('[aria-label="Play Airhorn"]')!.disabled
     ).toBe(true)
+  })
+
+  describe('a failed first read (QA F7)', () => {
+    const emptyBoard = { sounds: [], volumeDb: 0, monitor: true, startersSeeded: true }
+    const loading = (): Element | null => container.querySelector('[data-videorc-sounds-loading]')
+    const failed = (): Element | null => container.querySelector('[data-videorc-sounds-failed]')
+    const wait = (ms: number): Promise<void> =>
+      act(async () => {
+        await vi.advanceTimersByTimeAsync(ms)
+      })
+
+    afterEach(() => {
+      vi.useRealTimers()
+      vi.restoreAllMocks()
+    })
+
+    it('reads again on a short ladder, then offers Retry, which reads at once', async () => {
+      vi.useFakeTimers()
+      vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+      const request = vi.fn().mockRejectedValue(new Error('request timed out'))
+      const client = { request } as unknown as Parameters<typeof soundboard.connect>[0]
+      soundboard.connect(client)
+      try {
+        setBoard({ sounds: [], loaded: false })
+        await render()
+        expect(request).toHaveBeenCalledTimes(1)
+        expect(loading()?.textContent).toBe('Loading sounds…')
+        await wait(SOUNDS_RETRY_MS[0])
+        await wait(SOUNDS_RETRY_MS[1])
+        expect(request).toHaveBeenCalledTimes(3)
+        expect(loading()).not.toBeNull()
+        await wait(SOUNDS_RETRY_MS[2])
+        expect(request).toHaveBeenCalledTimes(4)
+        expect(loading()).toBeNull()
+        expect(failed()?.textContent).toContain("Couldn't load sounds")
+        await wait(120_000)
+        expect(request).toHaveBeenCalledTimes(4)
+
+        request.mockResolvedValue(emptyBoard)
+        await act(async () => button('Retry').click())
+        await wait(0)
+        expect(request).toHaveBeenCalledTimes(5)
+        expect(soundboard.getSnapshot().board).toEqual(emptyBoard)
+      } finally {
+        soundboard.disconnect(client)
+      }
+    })
+
+    it('never lets a late read overwrite a newer board', async () => {
+      vi.useFakeTimers()
+      vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+      let answer: (board: typeof emptyBoard) => void = () => undefined
+      const request = vi
+        .fn()
+        .mockRejectedValueOnce(new Error('request timed out'))
+        .mockImplementation(() => new Promise((done) => (answer = done)))
+      const client = { request } as unknown as Parameters<typeof soundboard.connect>[0]
+      soundboard.connect(client)
+      try {
+        setBoard({ sounds: [], loaded: false })
+        await render()
+        await wait(SOUNDS_RETRY_MS[0])
+        expect(request).toHaveBeenCalledTimes(2)
+        const newer = { ...emptyBoard, volumeDb: -6 }
+        soundboard.acceptBoard(newer)
+        answer(emptyBoard)
+        await wait(0)
+        expect(soundboard.getSnapshot().board).toEqual(newer)
+      } finally {
+        soundboard.disconnect(client)
+      }
+    })
   })
 })
