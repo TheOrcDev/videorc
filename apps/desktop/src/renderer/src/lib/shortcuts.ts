@@ -36,6 +36,13 @@ const SHORTCUT_LIST = [
   { id: 'nav-settings', accelerators: ['CmdOrCtrl+,'], label: 'Settings', group: 'Navigation' },
   // ⌘K is "Search" everywhere it is named (plan 174 A-13, docs/ui-copy.md).
   { id: 'search', accelerators: ['CmdOrCtrl+K'], label: 'Search', group: 'Navigation' },
+  // The list behind the bell (plan 250, D10), from anywhere in the window.
+  {
+    id: 'notifications',
+    accelerators: ['CmdOrCtrl+Shift+B'],
+    label: 'Notifications',
+    group: 'Navigation'
+  },
   // The reference for every key on this list (plan 174 S3.21, A-12).
   {
     id: 'shortcuts-page',

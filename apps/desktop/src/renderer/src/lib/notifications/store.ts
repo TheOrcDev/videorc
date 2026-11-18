@@ -40,6 +40,8 @@ export interface NotificationStoreOptions {
   /** "Quiet while recording or live" (Settings, General). Absent means on. */
   quiet?: () => boolean
   onCount?: (count: NotificationCount) => void
+  /** A new entry, or one that got worse: what a screen reader is told. */
+  onAnnounce?: (entry: NotificationEntry) => void
 }
 
 interface Held {
@@ -136,7 +138,11 @@ export function createNotificationStore(options: NotificationStoreOptions = {}):
   }
 
   function popUp(item: Held, kind: NotificationKind, change: NotificationChange, fineForMs = 0) {
-    if (!door || item.hidden !== null) return
+    if (item.hidden !== null) return
+    // Only a first appearance and a change for the worse speak: the clock in
+    // an open entry's detail moves every second.
+    if (change !== 'updated' && change !== 'flapped') options.onAnnounce?.(item.entry)
+    if (!door) return
     const at = now()
     const durationMs = popUpDecision({
       change,

@@ -7,6 +7,7 @@ import { AppErrorBoundary } from '@/components/app-error-boundary'
 import { Pane, PaneBody, Toolbar } from '@/components/pane'
 import { PageErrorBoundary } from '@/components/page-error-boundary'
 import { PageLoading } from '@/components/page-loading'
+import { MainNotificationBell } from '@/components/notifications/main-notification-bell'
 import { Sidebar } from '@/components/sidebar'
 import { StatusBar, StatusBarHint } from '@/components/status-bar'
 import { StatusBarSessionState } from '@/components/status-bar-session'
@@ -38,6 +39,7 @@ import {
   type CleanCutTabRequest
 } from '@/lib/clean-cut-events'
 import { isModalOpen } from '@/lib/modal-open'
+import { notificationsOpen, toggleNotifications } from '@/lib/notification-count'
 import { pageChunk, useRenderPageWhenLoaded, type PageLoad } from '@/lib/page-chunk'
 import { PAGE_CONTAINER } from '@/lib/page-layout'
 import { navigationShortcutTab, shellShortcutAction } from '@/lib/shell-shortcuts'
@@ -447,6 +449,7 @@ function AppShellContent(): ReactElement {
         platform: runtimeInfo?.platform,
         modalOpen: setupOpenRef.current || isModalOpen(document),
         searchOpen: commandOpenRef.current,
+        notificationsOpen: notificationsOpen(),
         notesWindowEnabled: Boolean(runtimeInfo?.notesWindowEnabled),
         commentsWindowEnabled: Boolean(runtimeInfo?.commentsWindowEnabled)
       })
@@ -460,6 +463,7 @@ function AppShellContent(): ReactElement {
       else if (action === 'show-stream-manager') void openCommentsWindow()
       else if (action === 'toggle-stream-manager') void toggleCommentsWindow()
       else if (action === 'toggle-captions') void toggleCaptionsWindow()
+      else if (action === 'toggle-notifications') toggleNotifications()
       else openSettings('shortcuts')
     }
     document.addEventListener('keydown', onKeyDown)
@@ -739,6 +743,8 @@ function AppShellContent(): ReactElement {
                   }
                 />
               ) : null}
+              {/* The bell (plan 250, D1): the bar's last control. */}
+              <MainNotificationBell platform={runtimeInfo?.platform} />
             </StatusBar>
           </main>
         </div>

@@ -2948,6 +2948,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // Plan 223: the watchdog's alerts, drawn here and in the Stream Manager.
   const [watchdogAlerts, setWatchdogAlerts] = useState<WatchdogAlert[]>([])
   const watchdogAlertsRef = useRef<WatchdogAlert[]>([])
+  const watchdogActRef = useRef<(action: WatchdogAction) => void>(() => {})
   // Ids that left without a recovery (M2), gathered from every event until
   // the surface drains them with the next list.
   const watchdogWithdrawnRef = useRef<string[]>([])
@@ -5804,6 +5805,23 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     void import('@/lib/watchdog-surface').then((surface) =>
       surface.onWatchdogAlertsChanged(previous, watchdogAlerts, watchdogDeps(), { withdrawn })
     )
+    // Plan 250: each open alert is an entry behind the bell, on its subject.
+    void Promise.all([
+      import('@/lib/notifications'),
+      import('@/lib/notifications/sources/watchdog')
+    ]).then(([{ notifications }, source]) =>
+      source.syncWatchdogAlerts(
+        notifications,
+        previous,
+        watchdogAlerts,
+        {
+          fix: (alert, fix) => watchdogActRef.current({ kind: 'fix', alert, fix }),
+          acknowledge: (alert) => watchdogActRef.current({ kind: 'acknowledge', alert }),
+          snooze: (alert, scope) => watchdogActRef.current({ kind: 'snooze', alert, scope })
+        },
+        { withdrawn }
+      )
+    )
   }, [watchdogAlerts, watchdogDeps])
   const watchdogAct = useCallback(
     (action: WatchdogAction) => {
@@ -5817,6 +5835,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     },
     [client, watchdogDeps]
   )
+  watchdogActRef.current = watchdogAct
   // The notification's click, a fix from the Stream Manager and the idle
   // time for still-there (plan 223 A6, A7), mounted from the lazy chunk.
   // Plan 249 S26: a cloud room on air is live too: it has no local session,
