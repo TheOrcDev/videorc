@@ -1,7 +1,7 @@
 'use client'
 
 import { ScrollArea as ScrollAreaPrimitive } from '@base-ui/react/scroll-area'
-import { createContext, useContext } from 'react'
+import { createContext, useContext, type Ref } from 'react'
 
 import { cn } from '@/lib/utils'
 
@@ -28,6 +28,7 @@ const SCROLLBAR_VISIBILITY: Record<ScrollAreaType, string> = {
 function ScrollArea({
   className,
   viewportClassName,
+  viewportRef,
   children,
   type = 'scroll',
   ...props
@@ -39,6 +40,11 @@ function ScrollArea({
    * goes here, since the root's height follows its content.
    */
   viewportClassName?: string
+  /**
+   * The viewport element, the one that scrolls (a virtualizer's scroll
+   * element). `ref` lands on the root, which never scrolls.
+   */
+  viewportRef?: Ref<HTMLDivElement>
 }) {
   return (
     <ScrollAreaTypeContext value={type}>
@@ -54,6 +60,7 @@ function ScrollArea({
             viewportClassName
           )}
           data-slot="scroll-area-viewport"
+          ref={viewportRef}
         >
           {children}
         </ScrollAreaPrimitive.Viewport>
