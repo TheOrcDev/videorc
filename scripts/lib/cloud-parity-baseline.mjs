@@ -5,7 +5,12 @@ import {
 } from './cloud-parity-graphics.mjs'
 import { exerciseAudioRouting, installRoutingGuestScreen } from './cloud-parity-audio-routing.mjs'
 import { audioRoutingConfig, SCREEN_TONE_HZ } from './cloud-parity-audio-routing-contract.mjs'
-import { prepareAvatar, exerciseAvatar, assertAvatarVideo } from './cloud-parity-avatar.mjs'
+import {
+  prepareAvatar,
+  exerciseAvatar,
+  assertAvatarVideo,
+  wearAvatarFixture
+} from './cloud-parity-avatar.mjs'
 import { exerciseAvatarAnimation } from './cloud-parity-avatar-animation.mjs'
 import { prepareScenes, exerciseScenes, assertScenesVideo } from './cloud-parity-scenes.mjs'
 import { exerciseSoundboard } from './cloud-parity-soundboard.mjs'
@@ -228,6 +233,7 @@ export async function runBaseline({
     await h.destinations(controls || markers ? 1 : 0)
     if (audioRouting) h.env.VIDEORC_ROOM_NATIVE_SYSTEM = '1'
     await h.launch()
+    if (avatar || views) await wearAvatarFixture(h)
     const cameraId = await prepareParityRoom(h, controls)
     if (outputs) {
       // S17: an unmeasured profile is refused by the real app and fake web

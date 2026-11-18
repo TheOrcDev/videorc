@@ -13,7 +13,13 @@ const say = (h) =>
   h.rpc('cohost.utterance.say', {
     text: 'Parity public bubble. This long fixture remains visible while both real output pages paint the intended character and its public words. No private Sidekick state is sent.'
   })
-export async function prepareAvatar({ h, report }) {
+/**
+ * Wear the fixture pack, then relaunch: the Studio reads the persona at
+ * connect (a direct `cohost.settings.set` never reaches it, unlike the Setup
+ * page), so without the relaunch every output draws the default character.
+ * Call before the room opens.
+ */
+export async function wearAvatarFixture(h) {
   const settings = await h.rpc('cohost.settings.get'),
     packId = randomUUID()
   writeBuddyPetFixturePack(
@@ -27,6 +33,11 @@ export async function prepareAvatar({ h, report }) {
   await h.rpc('cohost.settings.set', {
     persona: { ...settings.persona, avatar: { kind: 'alive', packId } }
   })
+  await h.kill()
+  await h.launch()
+  assert.equal((await h.rpc('cohost.settings.get')).persona.avatar?.packId, packId)
+}
+export async function prepareAvatar({ h, report }) {
   const layout = await h.rpc('overlays.layout.get')
   await h.rpc('overlays.layout.set', {
     ...layout,
