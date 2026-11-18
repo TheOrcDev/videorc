@@ -364,6 +364,7 @@ interface HighRiskContractFixtures {
     // Plan 243 C1: another device on air, and a show waiting after a hand-off.
     statusOnAirElsewhere: CloudStatus
     statusWaiting: CloudStatus
+    statusLiveInterval: CloudStatus
   }
 }
 
@@ -619,6 +620,46 @@ describe('shared high-risk protocol fixture', () => {
       validateBackendEventPayload('cloud.state', {
         ...statusOnAirElsewhere,
         onAir: { ...statusOnAirElsewhere.onAir, deviceId: 'Ab3' }
+      })
+    ).toThrow()
+  })
+
+  // Plan 249 S16: a show that went live carries the server's live interval
+  // and the provider settlement facts. The schema refused both, so every
+  // status of a live show was dropped and a relaunched Studio never rejoined
+  // its room. Rust round-trips the same JSON (cloud_show.rs).
+  it('keeps a live show status with its interval and settlements (plan 249 S16)', () => {
+    const { statusLiveInterval } = fixtures.cloud
+    expect(statusLiveInterval.liveInterval?.id).toBeTruthy()
+    expect(statusLiveInterval.providerLifecycle?.length).toBe(2)
+    expect(jsonShape(validateBackendEventPayload('cloud.state', statusLiveInterval))).toEqual(
+      statusLiveInterval
+    )
+    expect(jsonShape(validateBackendRpcResult('cloud.status', statusLiveInterval))).toEqual(
+      statusLiveInterval
+    )
+    expect(jsonShape(validateBackendRpcResult('cloud.room.resume', statusLiveInterval))).toEqual(
+      statusLiveInterval
+    )
+    // A settlement value from a newer runner still parses (open strings, as in
+    // the backend); an unknown field or a null where the wire omits does not.
+    const newer = {
+      ...statusLiveInterval,
+      providerLifecycle: [
+        { destinationId: 'kick', provider: 'kick', state: 'settling', attempts: 1 }
+      ]
+    }
+    expect(jsonShape(validateBackendEventPayload('cloud.state', newer))).toEqual(newer)
+    expect(() =>
+      validateBackendEventPayload('cloud.state', {
+        ...statusLiveInterval,
+        liveInterval: { ...statusLiveInterval.liveInterval, token: 'x' }
+      })
+    ).toThrow()
+    expect(() =>
+      validateBackendEventPayload('cloud.state', {
+        ...statusLiveInterval,
+        liveInterval: { ...statusLiveInterval.liveInterval, endedAt: null }
       })
     ).toThrow()
   })

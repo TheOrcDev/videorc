@@ -8323,6 +8323,7 @@ mod tests {
             "/cloud/statusTalk",
             "/cloud/statusOnAirElsewhere",
             "/cloud/statusWaiting",
+            "/cloud/statusLiveInterval",
         ] {
             let wire = high_risk_fixture(pointer);
             let status: CloudStatus = serde_json::from_value(wire.clone()).unwrap();
