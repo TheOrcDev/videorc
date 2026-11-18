@@ -518,6 +518,28 @@ fn upsert_caption_record(chunks: &mut Vec<CaptionChunkRecord>, record: CaptionCh
     }
 }
 
+/// Room (talk-show) captions are never drained into a native recording
+/// artifact; the durable copy is `cloud_host_transcript`. The in-memory list
+/// only has to cover repeat completions of one utterance, so a room session
+/// keeps a short recent window instead of one record per utterance for the
+/// whole show (leak L4).
+const ROOM_CHUNK_RETAIN: usize = 64;
+
+/// Upsert one record; a room session then drops the oldest records past the
+/// recent window. Recording sessions keep every record for the artifact.
+fn upsert_caption_record_for_session(
+    chunks: &mut Vec<CaptionChunkRecord>,
+    record: CaptionChunkRecord,
+    room_session: bool,
+) -> bool {
+    let inserted = upsert_caption_record(chunks, record);
+    if room_session && chunks.len() > ROOM_CHUNK_RETAIN {
+        let excess = chunks.len() - ROOM_CHUNK_RETAIN;
+        chunks.drain(..excess);
+    }
+    inserted
+}
+
 /// A frame timestamp lower than the last one means the capture pipeline
 /// restarted (new session): reset the chunk anchor.
 pub fn caption_anchor_should_reset(last_timestamp: Option<u64>, current: u64) -> bool {
@@ -7375,7 +7397,7 @@ async fn handle_realtime_event(
                 // the caption boundary that cleared the bar.
                 let current_capture = item.capture_epoch == coordinator.capture_epoch;
                 let presented = session.presenting() && current_capture;
-                let inserted = upsert_caption_record(
+                let inserted = upsert_caption_record_for_session(
                     &mut coordinator.chunks,
                     CaptionChunkRecord {
                         seq: item.seq,
@@ -7387,6 +7409,7 @@ async fn handle_realtime_event(
                         provider_item_id: Some(item_id.clone()),
                         presented,
                     },
+                    session.room_owner.is_some(),
                 );
                 if let Some(owner) = session.room_owner.as_ref()
                     && let Some(record) = coordinator
@@ -7962,7 +7985,7 @@ async fn commit_chunk_transcript(
         }
         let current_epoch = coordinator.capture_epoch;
         let presented = session.presenting() && chunk.capture_epoch == current_epoch;
-        let first_final = upsert_caption_record(
+        let first_final = upsert_caption_record_for_session(
             &mut coordinator.chunks,
             CaptionChunkRecord {
                 seq: chunk.seq,
@@ -7974,6 +7997,7 @@ async fn commit_chunk_transcript(
                 provider_item_id: None,
                 presented,
             },
+            session.room_owner.is_some(),
         );
         if let Some(owner) = session.room_owner.as_ref()
             && let Some(record) = coordinator
@@ -9966,6 +9990,55 @@ mod tests {
         };
         assert!(upsert_caption_record(&mut chunks, next_epoch));
         assert_eq!(chunks.len(), 2);
+    }
+
+    fn room_leak_record(seq: u64) -> CaptionChunkRecord {
+        CaptionChunkRecord {
+            seq,
+            offset_seconds: seq as f64,
+            duration_seconds: 1.0,
+            text: format!("utterance {seq}"),
+            segments: Vec::new(),
+            capture_epoch: 9,
+            provider_item_id: Some(format!("item-{seq}")),
+            presented: true,
+        }
+    }
+
+    #[test]
+    fn room_session_keeps_only_a_recent_window_of_caption_records() {
+        let mut chunks = Vec::new();
+        for seq in 0..5_000 {
+            assert!(upsert_caption_record_for_session(
+                &mut chunks,
+                room_leak_record(seq),
+                true
+            ));
+        }
+        assert_eq!(chunks.len(), ROOM_CHUNK_RETAIN);
+        assert_eq!(chunks.last().map(|c| c.seq), Some(4_999));
+        assert_eq!(
+            chunks.first().map(|c| c.seq),
+            Some(5_000 - ROOM_CHUNK_RETAIN as u64)
+        );
+        // A repeat completion of the newest utterance still upserts in place.
+        let mut revised = room_leak_record(4_999);
+        revised.text = "utterance 4999 revised".into();
+        assert!(!upsert_caption_record_for_session(
+            &mut chunks,
+            revised,
+            true
+        ));
+        assert_eq!(chunks.len(), ROOM_CHUNK_RETAIN);
+    }
+
+    #[test]
+    fn recording_session_keeps_every_caption_record_for_the_artifact() {
+        let mut chunks = Vec::new();
+        for seq in 0..(ROOM_CHUNK_RETAIN as u64 * 3) {
+            upsert_caption_record_for_session(&mut chunks, room_leak_record(seq), false);
+        }
+        assert_eq!(chunks.len(), ROOM_CHUNK_RETAIN * 3);
     }
 
     #[test]
