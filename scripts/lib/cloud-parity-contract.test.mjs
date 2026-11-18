@@ -77,6 +77,8 @@ test('a repaired gap cannot make a baseline fail; required paths still need arti
       'guest1Return',
       'guest2Return'
     ].map((name) => ({ name, passed: true }))
+    // QA T10: a capture of the same name, recorded first, never hides the verdict.
+    measured.unshift({ name: 'soundboard', captures: [] }, { name: 'avatar', captures: [] })
     measured.push({ name: 'soundboard', observed }, { name: 'avatar', observed })
     assert.equal(finishBaseline(report, measured).status, 'passed')
     assert.equal(report.managedAcceptance, 'not-run')

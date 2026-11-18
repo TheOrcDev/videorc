@@ -730,9 +730,13 @@ export async function runBaseline({
         },
         {
           name: 'programCard',
+          // A managed room's program takes its cards from the host's static
+          // graphics lane (S9), which is live once the page joins (an empty
+          // snapshot is enough). The page then withholds the legacy overlay
+          // card by design; the graphics case proves the lane's own card.
           passed: graphics
             ? report.graphics.cases.includes('chat-emoji-and-milestone')
-            : seen('card')
+            : !seen('card')
         },
         { name: 'programTakeover', passed: seen('takeover') },
         {

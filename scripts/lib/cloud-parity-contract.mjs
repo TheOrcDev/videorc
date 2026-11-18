@@ -178,7 +178,8 @@ export function finishBaseline(report, measurements) {
   )
   report.blockers.push(...missing.map((name) => `Missing artifact proof: ${name}`))
   for (const name of ['soundboard', 'avatar']) {
-    const observed = measurements.find((m) => m.name === name)
+    // QA T10: an audio capture shares the name; only a verdict counts.
+    const observed = measurements.find((m) => m.name === name && 'observed' in m)
     if (!observed || !['present', 'absent'].includes(observed.observed)) {
       report.blockers.push(`Missing negative/positive observation: ${name}`)
     } else report.negativeObservations[name] = observed.observed
