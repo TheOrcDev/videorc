@@ -15,7 +15,9 @@ test('actual trim argument helper compiles independently and decodes both lanes 
   const folder = mkdtempSync(join(tmpdir(), 'videorc-clip-helper-'))
   try {
     const path = join(folder, 'helper.rs'),
-      binary = join(folder, 'helper')
+      // Windows only runs a file with no extension by adding .com/.exe, so a
+      // bare `helper` is ENOENT there (rustc writes exactly the -o name).
+      binary = join(folder, process.platform === 'win32' ? 'helper.exe' : 'helper')
     writeFileSync(
       path,
       `use std::{path::Path,ffi::OsString};\n${source.slice(start, end)}\nfn main(){let a=trim_args(Path::new("index.m3u8"),Path::new("clip.part"),1250.0,30000.0);let a:Vec<_>=a.iter().map(|s|s.to_str().unwrap()).collect();assert!(!a.contains(&"copy"));assert!(!a.contains(&"-ss"));assert!(a.contains(&"[0:v:0]trim=start=1.250000:duration=30.000000,setpts=PTS-STARTPTS[v];[0:a:0]atrim=start=1.250000:duration=30.000000,asetpts=PTS-STARTPTS[a]"));assert!(a.windows(2).any(|w|w==["-protocol_whitelist","file"]));assert!(a.windows(2).any(|w|w==["-fs","134217728"]));}`
