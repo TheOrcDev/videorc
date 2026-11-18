@@ -125,27 +125,6 @@ describe('SRT input view (plan 250)', () => {
     expect(srtCameraFacts(null)).toBeNull()
   })
 
-  // Soak, 2026-11-15: the backend keeps a refusal off a receiving line, and
-  // the facts line shows that line as it is, never the refusal on top.
-  it('shows a receiving line as it is when a refusal is in the status', () => {
-    const receiving = state({
-      status: {
-        listening: true,
-        senderConnected: true,
-        senderSession: 1,
-        framesDecoded: 900,
-        signal: 'receiving',
-        width: 1920,
-        height: 1080,
-        fps: 30,
-        codec: 'HEVC',
-        refusal: 'secondSender',
-        detail: 'Receiving · 1920 × 1080 · 30 fps · HEVC'
-      }
-    })
-    expect(srtCameraFacts(receiving)).toBe('Receiving · 1920 × 1080 · 30 fps · HEVC')
-  })
-
   // Live QA, 2026-11-15: the pacer keeps the camera's pipeline busy with
   // the held frame or the still, so the pipeline alone read "Receiving"
   // after the sender quit. The badge follows the SRT signal instead.

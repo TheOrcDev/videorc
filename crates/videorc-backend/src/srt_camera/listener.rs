@@ -252,10 +252,18 @@ pub struct ListenError {
 }
 
 impl ListenError {
-    /// The port could not be opened, or the listener stopped.
+    /// A `ListenerTrouble::Port` error: socket, options, bind or listen.
     pub fn port(message: String) -> Self {
         Self {
             trouble: ListenerTrouble::Port,
+            message,
+        }
+    }
+
+    /// A `ListenerTrouble::Stopped` error: the listener was up.
+    pub fn stopped(message: String) -> Self {
+        Self {
+            trouble: ListenerTrouble::Stopped,
             message,
         }
     }
@@ -363,12 +371,12 @@ pub fn run(
             }
             // SAFETY: plain libsrt query on our socket.
             if unsafe { (api.getsockstate)(listener.socket) } != libsrt::SRTS_LISTENING {
-                return Err(ListenError::port(
+                return Err(ListenError::stopped(
                     "The SRT listener closed by itself.".to_string(),
                 ));
             }
             if let Some((caller, peer)) =
-                accept_one(api, listener.socket).map_err(ListenError::port)?
+                accept_one(api, listener.socket).map_err(ListenError::stopped)?
             {
                 let acceptance = context
                     .gate
@@ -573,11 +581,7 @@ mod tests {
     #[test]
     fn srt_listener_refuses_a_second_sender_as_busy() {
         // libsrt 1.5.7 access_control.h: SRT_REJX_OVERLOAD is 1402.
-        assert_eq!(libsrt::SRT_REJX_OVERLOAD, 1402);
-        assert_eq!(
-            reject_reason(Admission::Refuse),
-            Some(libsrt::SRT_REJX_OVERLOAD)
-        );
+        assert_eq!(reject_reason(Admission::Refuse), Some(1402));
         assert_eq!(reject_reason(Admission::Admit), None);
     }
 
@@ -782,6 +786,22 @@ mod tests {
         assert_eq!(error.trouble, ListenerTrouble::NoPassphrase);
     }
 
+    /// libsrt for the real-listener tests, or None to skip them. With
+    /// `VIDEORC_REQUIRE_LIBSRT` set (macOS CI installs libsrt), a missing
+    /// library fails the test instead of skipping it unseen.
+    fn real_libsrt() -> Option<&'static Api> {
+        match libsrt::api() {
+            Ok(api) => Some(api),
+            Err(error) if std::env::var_os("VIDEORC_REQUIRE_LIBSRT").is_some() => {
+                panic!("VIDEORC_REQUIRE_LIBSRT is set, but libsrt did not load: {error}")
+            }
+            Err(_) => {
+                eprintln!("libsrt is missing on this machine; the real listener is not checked");
+                None
+            }
+        }
+    }
+
     fn test_config(port: u16) -> ListenConfig {
         ListenConfig {
             enabled: true,
@@ -796,8 +816,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn srt_listener_judges_every_caller_in_its_callback() {
-        let Ok(api) = libsrt::api() else {
-            eprintln!("libsrt is missing on this machine; the real listener is not checked");
+        let Some(api) = real_libsrt() else {
             return;
         };
         let _one_at_a_time = REAL_LIBSRT.lock().unwrap_or_else(PoisonError::into_inner);
@@ -829,8 +848,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn srt_listener_refuses_another_address_with_1402_and_lets_a_redial_in() {
-        let Ok(api) = libsrt::api() else {
-            eprintln!("libsrt is missing on this machine; the real listener is not checked");
+        let Some(api) = real_libsrt() else {
             return;
         };
         let Some(other) = second_local_address() else {
@@ -887,7 +905,6 @@ mod tests {
             Err(1402),
             "another address is told the camera is busy"
         );
-        assert_eq!(libsrt::SRT_REJX_OVERLOAD, 1402);
         assert!(
             redial.is_ok(),
             "a redial from the sender's own address gets in at once"
@@ -900,8 +917,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn srt_listener_a_wrong_passphrase_redial_leaves_the_live_sender() {
-        let Ok(api) = libsrt::api() else {
-            eprintln!("libsrt is missing on this machine; the real listener is not checked");
+        let Some(api) = real_libsrt() else {
             return;
         };
         let _one_at_a_time = REAL_LIBSRT.lock().unwrap_or_else(PoisonError::into_inner);
@@ -987,8 +1003,7 @@ mod tests {
     /// Needs libsrt (staged or Homebrew); without it there is nothing to check.
     #[test]
     fn srt_listener_frees_its_callback_context_after_closing() {
-        if libsrt::api().is_err() {
-            eprintln!("libsrt is missing on this machine; the listener's teardown is not checked");
+        if real_libsrt().is_none() {
             return;
         }
         let _one_at_a_time = REAL_LIBSRT.lock().unwrap_or_else(PoisonError::into_inner);

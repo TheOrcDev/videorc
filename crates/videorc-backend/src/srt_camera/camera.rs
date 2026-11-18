@@ -802,6 +802,22 @@ mod tests {
     }
 
     #[test]
+    fn srt_receiver_counts_a_decode_error() {
+        let (mut receiver, shared, now) = accepted_receiver();
+        receiver.decoder.fail_call = Some(1);
+        receiver.handle(
+            ListenerEvent::Data(stream(
+                0x1b,
+                &[(0, h264_key()), (1, h264_delta()), (2, vec![1])],
+            )),
+            &shared,
+            now,
+        );
+        assert_eq!(receiver.decoder.decoded, vec![true]);
+        assert_eq!(shared.lock().unwrap().tracker.decode_failures(), 1);
+    }
+
+    #[test]
     fn srt_receiver_rebuilds_a_decoder_that_accepts_units_but_never_gives_a_frame() {
         let (mut receiver, shared, start) = accepted_receiver();
         receiver.decoder.silent = true;
@@ -1027,7 +1043,7 @@ mod tests {
                 .tracker
                 .status(Instant::now(), false)
                 .detail,
-            "The passphrase didn't load. Turn the SRT input off and on to try again."
+            "The passphrase didn't load. Turn SRT input off and on in Settings → General to try again."
         );
     }
 
@@ -1082,7 +1098,17 @@ mod tests {
         let mut receiver = Receiver::new(FakeDecoder::default());
         let now = Instant::now();
         receiver.handle(ListenerEvent::SenderAccepted(7), &shared, now);
+        assert!(
+            shared
+                .lock()
+                .unwrap()
+                .tracker
+                .status(now, true)
+                .sender_connected
+        );
         receiver.handle(ListenerEvent::SenderLeft, &shared, now);
+        let status = shared.lock().unwrap().tracker.status(now, true);
+        assert!(!status.sender_connected, "the sender is gone");
         assert_eq!(
             shared.lock().unwrap().tracker.picture(now),
             Picture::Waiting

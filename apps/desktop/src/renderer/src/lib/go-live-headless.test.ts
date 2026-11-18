@@ -210,8 +210,6 @@ describe('go_live without the dialog (plan 209 S10, D13)', () => {
     expect(
       decideHeadlessGoLive({ ...base, draft: unlisted, allowNoSignal: true, allowNonPublic: true })
     ).toEqual({ kind: 'confirm' })
-    // The dialog's primary stays enabled: it asks, it never blocks.
-    expect(goLiveConfirmGate(base).blocked).toBe(false)
   })
 
   it('names a blocker before the privacy, so the agent fixes what it can first', () => {

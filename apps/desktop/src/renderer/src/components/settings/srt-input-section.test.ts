@@ -61,10 +61,10 @@ describe('SrtInputSection (plan 250)', () => {
     }
   })
 
-  it('locks the switch while Videorc is reconnecting', () => {
-    const markup = render(state({ enabled: true }), false)
-    expect(markup).toMatch(
+  it('locks the switch while Videorc is reconnecting, and only then', () => {
+    const locked =
       /data-testid="srt-input-switch"[^>]*disabled=""|disabled=""[^>]*data-testid="srt-input-switch"/
-    )
+    expect(render(state({ enabled: true }), false)).toMatch(locked)
+    expect(render(state({ enabled: true }), true)).not.toMatch(locked)
   })
 })

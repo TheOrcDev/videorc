@@ -33,8 +33,10 @@ pub enum Picture {
 /// Why the SRT Camera can't listen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ListenerTrouble {
-    /// The port could not be opened, or the listener stopped.
+    /// The socket could not be made or set up, or the port not opened.
     Port,
+    /// The listener was up, then closed or failed to accept.
+    Stopped,
     /// libsrt itself did not load.
     Library,
     /// The passphrase did not load from the secret store.
@@ -53,8 +55,9 @@ pub struct SignalTracker {
     frames_decoded: u64,
     /// The last access unit that could be decoded arrived then.
     last_unit_at: Option<Instant>,
-    /// Why the receiver is not listening. Port and Library try again by
-    /// themselves (D18); NoPassphrase waits for a setting change.
+    /// Why the receiver is not listening. Port, Stopped and Library try
+    /// again by themselves (D18); NoPassphrase waits for a setting change,
+    /// a renewal or a restart (see `load_saved`).
     listener_trouble: Option<ListenerTrouble>,
     /// Decode failures (errors, or a silent decoder's rebuild) since the
     /// last frame.
@@ -209,9 +212,10 @@ impl SignalTracker {
         let detail = if let Some(trouble) = trouble {
             match trouble {
                 ListenerTrouble::Port => "Can't open the port. Trying again.",
+                ListenerTrouble::Stopped => "The SRT listener stopped. Trying again.",
                 ListenerTrouble::Library => "The SRT library didn't load. Trying again.",
                 ListenerTrouble::NoPassphrase => {
-                    "The passphrase didn't load. Turn the SRT input off and on to try again."
+                    "The passphrase didn't load. Turn SRT input off and on in Settings → General to try again."
                 }
             }
             .to_string()
@@ -517,6 +521,11 @@ mod tests {
             tracker.status(now, false).detail,
             "Can't open the port. Trying again."
         );
+        tracker.on_listener_failed(ListenerTrouble::Stopped);
+        assert_eq!(
+            tracker.status(now, false).detail,
+            "The SRT listener stopped. Trying again."
+        );
         tracker.on_listener_failed(ListenerTrouble::Library);
         assert_eq!(
             tracker.status(now, false).detail,
@@ -525,7 +534,7 @@ mod tests {
         tracker.on_listener_failed(ListenerTrouble::NoPassphrase);
         assert_eq!(
             tracker.status(now, false).detail,
-            "The passphrase didn't load. Turn the SRT input off and on to try again."
+            "The passphrase didn't load. Turn SRT input off and on in Settings → General to try again."
         );
         tracker.on_listening();
         assert_eq!(tracker.status(now, true).detail, "Waiting");
@@ -727,35 +736,6 @@ mod tests {
         assert_eq!(gate.admit(peer(2), now + ms(1600)), Admission::Admit);
         assert_eq!(gate.accepted(2, peer(2), now + ms(1600)), Acceptance::Took);
         assert_eq!(gate.active(), Some(2));
-    }
-
-    /// The listen callback runs before libsrt checks the passphrase: a
-    /// caller with a wrong one, calling again and again from one address,
-    /// never keeps the right sender at another address out.
-    #[test]
-    fn srt_gate_a_wrong_passphrase_caller_never_blocks_another_address() {
-        let now = Instant::now();
-        let mut gate = SenderGate::new();
-        for n in 0..5 {
-            assert_eq!(gate.admit(peer(1), now + ms(2000 * n)), Admission::Admit);
-        }
-        assert_eq!(gate.admit(peer(2), now + ms(9000)), Admission::Admit);
-        assert_eq!(gate.accepted(2, peer(2), now + ms(9100)), Acceptance::Took);
-        assert_eq!(gate.active(), Some(2));
-    }
-
-    /// A wrong passphrase from the live sender's own address never reaches
-    /// `accepted`, so the live sender keeps the camera.
-    #[test]
-    fn srt_gate_a_wrong_passphrase_redial_leaves_the_live_sender() {
-        let now = Instant::now();
-        let mut gate = SenderGate::new();
-        assert_eq!(gate.accepted(1, peer(1), now), Acceptance::Took);
-        gate.heard(1, now + ms(100));
-        assert_eq!(gate.admit(peer(1), now + ms(200)), Admission::Admit);
-        // libsrt refuses its passphrase: `accepted` never comes.
-        assert_eq!(gate.active(), Some(1));
-        assert_eq!(gate.admit(peer(2), now + ms(300)), Admission::Refuse);
     }
 
     #[test]

@@ -26,7 +26,6 @@ import { useCopyText } from '@/lib/copy-text'
 import {
   SRT_CONNECTION_OPTIONS,
   SRT_INPUT_LIP_SYNC_NOTE,
-  SRT_PASSPHRASE_MISSING,
   parseSrtPort,
   srtInputHidden
 } from '@/lib/srt-input-view'
@@ -207,7 +206,8 @@ function PassphraseField({
         <FieldDescription>Every sender needs it. Senders without it are refused.</FieldDescription>
       </FieldContent>
       <div className="flex min-w-0 flex-wrap items-center gap-2">
-        {/* The secret store gave none at launch: there is nothing to copy. */}
+        {/* The secret store gave none at launch: nothing to copy. The camera's
+            state line above says what to do. */}
         {passphrase ? (
           <code
             className="rounded-chip bg-inset text-foreground max-w-full min-w-0 truncate px-1.5 py-0.5 font-mono text-xs select-text"
@@ -216,9 +216,7 @@ function PassphraseField({
             {passphrase}
           </code>
         ) : (
-          <FieldError data-testid="srt-input-passphrase-missing">
-            {SRT_PASSPHRASE_MISSING}
-          </FieldError>
+          <FieldError data-testid="srt-input-passphrase-missing">Not loaded</FieldError>
         )}
         <span className="flex items-center gap-2">
           <Button

@@ -54,7 +54,8 @@ stops or sets up a sender.
   dialling as a pairing check never hides a stream that is coming in.
 - When something blocks the camera, the state says what: "Can't open the
   port. Trying again.", "The SRT library didn't load. Trying again.", "The
-  passphrase didn't load. Turn the SRT input off and on to try again.",
+  passphrase didn't load. Turn SRT input off and on in Settings → General
+  to try again.", "The SRT listener stopped. Trying again.",
   "Receiving, but no picture yet" and "Receiving, but the picture doesn't
   decode".
 - Go Live asks first when the SRT Camera is in the scene with no signal.
@@ -65,15 +66,16 @@ stops or sets up a sender.
 Videorc is the SRT listener. Any caller that follows these rules works:
 
 - **Mode:** SRT 1.3 or newer (the v5 handshake; an older caller is
-  refused with reject reason `SRT_REJ_VERSION` (8)), live mode, MPEG-TS carrying H.264 or HEVC. The passphrase is
-  required; a caller without one, or with the wrong one, is refused by SRT
-  itself with reject reason `SRT_REJ_BADSECRET` (10), or `SRT_REJ_UNSECURE`
-  (11) without one.
+  refused with reject reason `SRT_REJ_VERSION` (8)), live mode, MPEG-TS
+  carrying H.264 or HEVC. The passphrase is required; a caller without one,
+  or with the wrong one, is refused by SRT itself with reject reason
+  `SRT_REJ_BADSECRET` (10), or `SRT_REJ_UNSECURE` (11) without one.
 - **Busy:** while the sender at another address is live (it connected or
-  sent data in the last 2 s), a caller is refused with reject reason `SRT_REJX_OVERLOAD`
-  (1402). When two callers connect at once, the first one through wins and
-  Videorc closes the other. A refused caller can retry: the camera frees
-  2 s after its sender goes quiet, or at once when that sender closes.
+  sent data in the last 2 s), a caller is refused with reject reason
+  `SRT_REJX_OVERLOAD` (1402). When two callers connect at once, the first
+  one through wins and Videorc closes the other. A refused caller can retry:
+  the camera frees 2 s after its sender goes quiet, or at once when that
+  sender closes.
 - **Redial:** after a drop, call again from the same address. A call with
   the right passphrase replaces the old connection at once, even if Videorc
   has not yet seen the old one die. A call with the wrong passphrase changes

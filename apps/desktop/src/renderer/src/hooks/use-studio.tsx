@@ -17061,8 +17061,10 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
       // Its destinations are the runner's, so no account is checked and no
       // broadcast is activated here.
       rpc: SessionStartRpc = 'session.start',
-      // An agent's Go Live checks the exact composition once more right
-      // before `session.start` (plan 250 D15).
+      // A start gate (an agent's, the dialog's or a Retry's) checks the exact
+      // composition once more right before the RPC (plan 250 D15). A cloud
+      // resume picks up a show that is already live: no Go Live to ask in,
+      // so it ignores the gate.
       startGate?: GoLiveStartGate
     ) => {
       const suppressCaptions = suppressCaptionsOverride ?? suppressCaptionsForSession
@@ -17334,9 +17336,10 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
             : null
           // No await between here and the RPC: what the gate reads is what
           // goes live.
-          const refusal = startGate?.check(nextSessionParams) ?? null
-          if (startGate && refusal !== null) {
-            startGate.refusal = refusal
+          const gate = resumingCloudShow ? undefined : startGate
+          const refusal = gate?.check(nextSessionParams) ?? null
+          if (gate && refusal !== null) {
+            gate.refusal = refusal
             throw new GoLiveStartRefused(refusal)
           }
           liveAudioProcessingStartSnapshotRef.current = null
@@ -17505,13 +17508,11 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
           // persistent toast + Session-panel line, Retry re-runs this exact start.
           // A start gate's refusal is the caller's answer instead. Retry is
           // the streamer's own start, with the dialog's check, not an agent's.
-          // A cloud resume picks up a show that is already live: no Go Live
-          // to ask in, so no check.
           if (!(error instanceof GoLiveStartRefused)) {
             reportSessionStartFailure(
               error,
               () => {
-                const gate = resumingCloudShow ? undefined : dialogSrtStartGate(false)
+                const gate = dialogSrtStartGate(false)
                 void runStartSessionRef
                   .current?.(
                     streamingOverride,
@@ -17521,9 +17522,7 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
                     rpc,
                     gate
                   )
-                  .then(() => {
-                    if (gate) askAgainAfterSrtRefusal(gate)
-                  })
+                  .then(() => askAgainAfterSrtRefusal(gate))
               },
               resumingCloudShow ? 'resume' : streamingOverride ? 'live' : 'record'
             )

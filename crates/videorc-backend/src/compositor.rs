@@ -17918,6 +17918,56 @@ mod tests {
         assert!(frame.export_handle.has_metal_iosurface_target());
     }
 
+    /// Plan 250: the frame path records whether the tick drew a camera, so
+    /// the next tick may follow the SRT Camera only then.
+    #[tokio::test]
+    async fn a_published_frame_records_whether_it_drew_a_camera() {
+        let state = test_state();
+        state.compositor.lock().await.run_id = Some("draws-camera-test".into());
+        let mut live_sources = CompositorLiveSources::default();
+        let mut cache = CompositorRenderCache::refresh_initial(&state).await;
+        let mut publish = |cache: &mut CompositorRenderCache, sequence: u64| {
+            publish_compositor_frame(
+                &state,
+                "draws-camera-test",
+                sequence,
+                8,
+                4,
+                &mut live_sources,
+                cache,
+                None,
+                CompositorFrameConsumer::NativePreview,
+                None,
+                None,
+                None,
+                None,
+                None,
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                ChatOverlayLegs::OFF,
+                LiveBackgroundLeg::unmeasured(&mut None),
+                ProgramLeg::off(&mut None),
+            );
+            live_sources.draws_camera
+        };
+        state.compositor.lock().await.scene = Some(test_scene_snapshot(
+            LayoutPreset::CameraOnly,
+            None,
+            Some("camera-device"),
+        ));
+        assert!(publish(&mut cache, 1), "a camera scene draws the camera");
+        state.compositor.lock().await.scene = Some(test_scene_snapshot(
+            LayoutPreset::ScreenOnly,
+            Some("screen-1"),
+            None,
+        ));
+        assert!(!publish(&mut cache, 2), "a screen-only scene does not");
+    }
+
     #[tokio::test]
     async fn no_gpu_native_preview_metadata_frame_counts_as_published() {
         // With no GPU (every Linux run, Windows without D3D11) the idle preview

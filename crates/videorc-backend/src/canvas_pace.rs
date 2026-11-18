@@ -317,6 +317,17 @@ mod tests {
         offsets: &[f64],
         camera_stops: f64,
     ) -> Run {
+        run_with(camera_fps, canvas_fps, offsets, camera_stops, true).await
+    }
+
+    /// `camera_shown`: this compositor draws the camera, so it may follow it.
+    async fn run_with(
+        camera_fps: f64,
+        canvas_fps: f64,
+        offsets: &[f64],
+        camera_stops: f64,
+        camera_shown: bool,
+    ) -> Run {
         let interval = Duration::from_secs_f64(1.0 / canvas_fps);
         let (sender, mut frames) = watch::channel(None);
         let shown: Arc<Mutex<Vec<Instant>>> = Arc::default();
@@ -350,7 +361,7 @@ mod tests {
             ages: Vec::new(),
         };
         while Instant::now() < start + Duration::from_secs(3) {
-            pace.next_tick(&mut ticker, &mut frames, interval, true)
+            pace.next_tick(&mut ticker, &mut frames, interval, camera_shown)
                 .await;
             result.ticks += 1;
             let now = Instant::now();
@@ -403,6 +414,17 @@ mod tests {
             let ticks = run_until(fps, 30.0, &[0.0], 1.5).await.ticks;
             assert_canvas_rate(ticks, 30.0, &format!("{fps} fps camera that stops"));
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn canvas_pace_never_follows_a_camera_this_compositor_does_not_draw() {
+        let run = run_with(29.97, 30.0, &[0.0], f64::INFINITY, false).await;
+        assert_canvas_rate(run.ticks, 30.0, "a camera not shown");
+        let age = median(run.ages);
+        assert!(
+            age > Duration::from_millis(5),
+            "the timer alone ticks, so frames wait (median {age:?})"
+        );
     }
 
     #[tokio::test(start_paused = true)]

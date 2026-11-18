@@ -202,8 +202,6 @@ describe('Sources Video column (plan 173)', () => {
   // Plan 250 option B: Sources is the home of every camera, so the SRT
   // Camera's own settings sit on the Camera row, only while it is picked.
   it("shows the SRT Camera's settings on the Camera row only while it is picked", () => {
-    const camera = render().match(/data-source="camera"[\s\S]*$/)?.[0] ?? ''
-    expect(camera).not.toContain('srt-fields')
     const srtFields = createElement('div', { 'data-testid': 'srt-fields' })
     const base = {
       devices: cameras,

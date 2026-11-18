@@ -27,6 +27,9 @@ const state = (patch: Partial<SrtInputState> = {}): SrtInputState => ({
   ...patch
 })
 
+const copyButton = (markup: string): string | undefined =>
+  markup.match(/<button[^>]*>(?:(?!<\/button>).)*Copy<\/button>/)?.[0]
+
 const render = (value: SrtInputState | null, connected = true): string => {
   const controls: SrtInputControls = {
     state: value,
@@ -51,9 +54,9 @@ describe('SRT Camera fields on the Camera row (plan 250, option B)', () => {
     const markup = render(state({ connection: 'cable', port: 9100 }))
     expect(markup).toContain('value="9100"')
     expect(markup).toContain('Abcdefghijklmnopqrstuvwxyz012345')
-    expect(markup).toContain('Copy')
+    expect(copyButton(markup)).not.toMatch(/^<button[^>]*\sdisabled=""/)
     expect(markup).toContain('New passphrase')
-    expect(markup).toContain('Connection')
+    expect(markup).toContain('Cable or Ethernet · 0 ms')
     expect(markup).toContain(
       'This camera arrives late. Set the microphone sync offset in the audio mixer to match.'
     )
@@ -73,17 +76,17 @@ describe('SRT Camera fields on the Camera row (plan 250, option B)', () => {
 
   it('say why when the passphrase did not load, with nothing to copy', () => {
     const markup = render(state({ passphrase: '' }))
-    expect(markup).toContain('Turn the SRT input off and on to try again.')
+    const missing = markup.slice(markup.indexOf('data-testid="srt-input-passphrase-missing"'))
+    expect(missing).toMatch(/^[^]*?>Not loaded<\/div>/)
     expect(markup).not.toContain('data-testid="srt-input-passphrase"')
-    const copy = markup.match(/<button[^>]*>(?:(?!<\/button>).)*Copy<\/button>/)?.[0]
-    expect(copy).toContain('disabled')
+    expect(copyButton(markup)).toMatch(/^<button[^>]*\sdisabled=""/)
     expect(markup).toContain('New passphrase')
   })
 
-  it('lock while Videorc is reconnecting', () => {
-    const markup = render(state(), false)
-    expect(markup).toMatch(
+  it('lock while Videorc is reconnecting, and only then', () => {
+    const locked =
       /data-testid="srt-input-port"[^>]*disabled=""|disabled=""[^>]*data-testid="srt-input-port"/
-    )
+    expect(render(state(), false)).toMatch(locked)
+    expect(render(state(), true)).not.toMatch(locked)
   })
 })

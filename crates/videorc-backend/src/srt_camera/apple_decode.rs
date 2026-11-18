@@ -119,17 +119,28 @@ unsafe extern "C-unwind" fn on_decoded(
     // session is invalidated; `image` is a CVPixelBuffer VideoToolbox lends
     // us, retained here before the callback returns.
     let outputs = unsafe { &*(refcon as *const Outputs) };
-    let output = match NonNull::new(image) {
-        _ if status != 0 => Output::Failed(status),
-        None => Output::Dropped,
-        Some(image) => Output::Frame(pts.value, unsafe {
-            CFRetained::retain(image.cast::<CVPixelBuffer>())
-        }),
-    };
+    let output = callback_output(status, NonNull::new(image), pts.value, |image| unsafe {
+        CFRetained::retain(image.cast::<CVPixelBuffer>())
+    });
     outputs
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .push(output);
+}
+
+/// What one decode callback means: any non-zero status is a failure, even
+/// with an image; no image is a dropped frame.
+fn callback_output<I, F>(
+    status: i32,
+    image: Option<I>,
+    pts: i64,
+    keep: impl FnOnce(I) -> F,
+) -> Output<F> {
+    match image {
+        _ if status != 0 => Output::Failed(status),
+        None => Output::Dropped,
+        Some(image) => Output::Frame(pts, keep(image)),
+    }
 }
 
 fn format_description(
@@ -476,13 +487,27 @@ mod tests {
         // decode_frame accepted the submission; the callback says it failed
         // (kVTVideoDecoderBadDataErr, then kVTInvalidSessionErr after a
         // sleep). Either must come back as an error, never as no frame.
-        for status in [-12909, -12903] {
-            let outputs = vec![Output::Frame(1, 'a'), Output::Failed(status)];
+        let outputs = vec![Output::Frame(1, 'a'), Output::Failed(-12909)];
+        assert_eq!(
+            decode_outcome(outputs),
+            Err("VideoToolbox could not decode a frame (-12909)".to_string())
+        );
+    }
+
+    #[test]
+    fn srt_decoder_callback_status_wins_over_its_image() {
+        let keep = |image: char| image;
+        for status in [-12909, -12903, 1] {
             assert_eq!(
-                decode_outcome(outputs),
-                Err(format!("VideoToolbox could not decode a frame ({status})"))
+                callback_output(status, Some('a'), 3, keep),
+                Output::Failed(status)
             );
         }
+        assert_eq!(callback_output(0, None::<char>, 3, keep), Output::Dropped);
+        assert_eq!(
+            callback_output(0, Some('a'), 3, keep),
+            Output::Frame(3, 'a')
+        );
     }
 
     #[test]

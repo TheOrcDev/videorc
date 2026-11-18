@@ -421,10 +421,7 @@ mod tests {
         assert!(!ended.sender_connected);
         assert_eq!(ended.width, None);
         assert_eq!(ended.fps, None);
-        assert_eq!(
-            ended.detail,
-            signal::SignalTracker::new().status(now, false).detail
-        );
+        assert_eq!(ended.detail, "Waiting");
         assert_eq!(ended.sender_session, holding.sender_session);
         assert_eq!(ended.frames_decoded, holding.frames_decoded);
     }

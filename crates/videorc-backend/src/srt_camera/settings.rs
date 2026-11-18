@@ -231,7 +231,7 @@ pub mod tests {
     #[test]
     fn srt_passphrase_is_32_url_safe_characters_and_varies() {
         let first = generate_passphrase();
-        assert_eq!(first.len(), PASSPHRASE_LEN);
+        assert_eq!(first.len(), 32, "D4: 32 characters");
         assert!(passphrase_is_valid(&first));
         assert_ne!(first, generate_passphrase());
     }

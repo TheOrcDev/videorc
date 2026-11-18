@@ -6846,8 +6846,8 @@ describe('real StudioProvider lifecycle', () => {
   })
 
   // Plan 250 D15 asks before a Go Live, and a resume is none: the show is
-  // already live. A Retry of a failed resume resumes again, with the SRT
-  // Camera's signal gone, and never turns into an ordinary Go Live.
+  // already live. A Retry of a failed resume resumes again, with no SRT
+  // Camera signal, and never turns into an ordinary Go Live.
   it('retries a failed cloud resume as a resume, whatever the SRT Camera signal', async () => {
     const backend = new StudioBackend()
     backend.cloudStatus = resumableCloudStatus()
@@ -6913,6 +6913,13 @@ describe('real StudioProvider lifecycle', () => {
     })
     await waitForObservation(() => latest()?.core.wsStatus === 'connected')
     await waitForObservation(() => latest().cloud.cloudStatus?.show?.resumable === true)
+    // The SRT state must be in before the Retry, or no gate could refuse.
+    await waitForObservation(() =>
+      backend.commands.some((command) => command.method === 'srtInput.get')
+    )
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 50))
+    })
     const resumes = () =>
       backend.commands.filter((command) => command.method === 'cloud.show.resume').length
     await act(async () => {
@@ -17424,6 +17431,7 @@ describe('real StudioProvider lifecycle', () => {
     await act(async () => {
       latest()!.core.cancelGoLiveConfirmation()
     })
+    await setSrt(srt('waiting'))
     backend.response = answer
     backend.sessionStartError = 'The encoder rejected this start.'
     await act(async () => {

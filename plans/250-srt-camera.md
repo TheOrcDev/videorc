@@ -618,7 +618,8 @@ test -p videorc-backend`, typecheck, format, `test:scripts` and
     can't keep it on.
   - The listener refuses to start without a passphrase. A passphrase the
     secret store did not give at launch reads "The passphrase didn't load.
-    Turn the SRT input off and on to try again." (no timed retry: a read can
+    Turn SRT input off and on in Settings → General to try again." (no
+    timed retry: a read can
     show a Keychain prompt). A libsrt that fails to load is tried again,
     and the detail line says "The SRT library didn't load. Trying again."
   - A decoder that fails three times in a row without a frame (an error,
@@ -637,8 +638,10 @@ test -p videorc-backend`, typecheck, format, `test:scripts` and
     failed start is the streamer's own: it gets the dialog's check, not an
     agent's. A cloud resume picks up a show that is already live, so its
     Retry has no check and never opens Go Live (plan 184 C5b).
-  - With no passphrase loaded, Sources says so in place of the passphrase,
-    and Copy is off.
+  - With no passphrase loaded, the passphrase field says "Not loaded" and
+    Copy is off; the camera's state line above it says what to do.
+  - A listener that was up and then closed or failed to accept reads "The
+    SRT listener stopped. Trying again.", not "Can't open the port".
   - The UI reads the SRT input's state again until it lands, so Go Live
     never misses the ask because one read failed.
   - The frame tap is in development builds only.
