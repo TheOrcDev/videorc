@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { BackgroundAssetsProvider } from '@/hooks/use-background-assets'
 import type { ObsDiscovery, ObsSetup } from '@/lib/backend'
-import { STORAGE_KEYS } from '@/lib/capture'
+import { type CaptureConfig, defaultCaptureConfig, STORAGE_KEYS } from '@/lib/capture'
 import { OBS_PROFILE_UNREADABLE, ObsImportDialog } from './obs-import-dialog'
 
 // Plan 174 (C-7, C-29): the OBS import says what will happen and then does
@@ -193,5 +193,99 @@ describe('Import from OBS', () => {
     }
     expect(text()).toContain("Couldn't look for OBS Studio. offline")
     expect(button('Import setup')!.disabled).toBe(true)
+  })
+
+  // QA F11 + F12: the platform key the report promises arrives through the
+  // real Apply, and only the destination the import names changes.
+  const KEY = 'fixture-obs-key-not-real'
+  const platformSetup = (service: string, server: string): ObsSetup => ({
+    ...SETUP,
+    service: { type: 'rtmp_common', service, server, hasKey: true }
+  })
+  const appliedConfig = (start: CaptureConfig): CaptureConfig => {
+    const setCaptureConfig = mocked.core.setCaptureConfig as ReturnType<typeof vi.fn>
+    expect(setCaptureConfig).toHaveBeenCalledTimes(1)
+    const update = setCaptureConfig.mock.calls[0]![0] as (current: CaptureConfig) => CaptureConfig
+    return update(start)
+  }
+  const withTargets = (
+    patch: Record<string, Partial<CaptureConfig['streaming']['targets'][number]>>
+  ): CaptureConfig => {
+    const config = structuredClone(defaultCaptureConfig)
+    config.streaming.targets = config.streaming.targets.map((target) =>
+      patch[target.id] ? { ...target, ...patch[target.id] } : target
+    )
+    return config
+  }
+
+  for (const [id, service, server] of [
+    ['youtube', 'YouTube - RTMPS', 'rtmps://a.rtmps.youtube.com:443/live2'],
+    ['facebook', 'Facebook Live', 'rtmps://live-api-s.facebook.com:443/rtmp/'],
+    ['kick', 'Kick', 'rtmps://fa723fc1b171.global-contribute.live-video.net/app']
+  ] as const) {
+    it(`imports the ${id} stream key the report promises, replacing the old one`, async () => {
+      const obsReadStreamKey = vi.fn(async () => KEY)
+      const log = vi.spyOn(console, 'log')
+      await render({
+        obsDiscover: vi.fn(async () => DISCOVERY),
+        obsRead: vi.fn(async () => platformSetup(service, server)),
+        obsReadStreamKey
+      })
+      expect(text()).toContain('Imports the server and the stream key into')
+
+      await act(async () => button('Import setup')!.click())
+
+      expect(obsReadStreamKey).toHaveBeenCalledExactlyOnceWith('Untitled')
+      const before = withTargets({
+        [id]: { enabled: false, streamKeySecretRef: 'old-secret-ref', streamKeyPresent: true }
+      })
+      const next = appliedConfig(before)
+      const target = next.streaming.targets.find((entry) => entry.id === id)!
+      expect(target).toMatchObject({
+        enabled: true,
+        serverUrl: server,
+        authMode: 'manual-rtmp',
+        streamKey: KEY,
+        streamKeyPresent: true,
+        streamKeySecretRef: undefined
+      })
+      expect(next.streaming.enabledTargetIds).toContain(id)
+      // The key never reaches a toast or the console.
+      expect(JSON.stringify(mocked.toast.success.mock.calls)).not.toContain(KEY)
+      expect(JSON.stringify(log.mock.calls)).not.toContain(KEY)
+      log.mockRestore()
+    })
+  }
+
+  it('leaves a separately set up YouTube Vertical alone on a YouTube import', async () => {
+    await render({
+      obsDiscover: vi.fn(async () => DISCOVERY),
+      obsRead: vi.fn(async () =>
+        platformSetup('YouTube - RTMPS', 'rtmps://horizontal.fixture.invalid/live2')
+      ),
+      obsReadStreamKey: vi.fn(async () => KEY)
+    })
+    await act(async () => button('Import setup')!.click())
+
+    const before = withTargets({
+      'youtube-vertical': {
+        enabled: false,
+        serverUrl: 'rtmps://vertical.fixture.invalid/live2',
+        authMode: 'manual-rtmp',
+        streamKeySecretRef: 'vertical-secret-ref',
+        streamKeyPresent: true
+      }
+    })
+    const vertical = before.streaming.targets.find((entry) => entry.id === 'youtube-vertical')
+    const next = appliedConfig(before)
+    expect(next.streaming.targets.find((entry) => entry.id === 'youtube-vertical')).toEqual(
+      vertical
+    )
+    expect(next.streaming.enabledTargetIds).not.toContain('youtube-vertical')
+    expect(next.streaming.targets.find((entry) => entry.id === 'youtube')).toMatchObject({
+      enabled: true,
+      serverUrl: 'rtmps://horizontal.fixture.invalid/live2',
+      streamKey: KEY
+    })
   })
 })

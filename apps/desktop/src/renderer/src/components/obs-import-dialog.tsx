@@ -195,9 +195,11 @@ export function ObsImportDialog({
     try {
       // The key is fetched exactly once, at apply, and rides the same
       // legacy-typed-key path the streaming secret migration converts to a
-      // backend secret ref. Never logged, never toasted.
+      // backend secret ref. Never logged, never toasted. A platform plan
+      // (YouTube, Facebook, Kick) promises its key too (QA F11).
       const rawKey =
-        plan.stream?.kind === 'rtmp-custom' && plan.stream.hasKey
+        (plan.stream?.kind === 'rtmp-custom' || plan.stream?.kind === 'rtmp-platform') &&
+        plan.stream.hasKey
           ? ((await window.videorc?.obsReadStreamKey?.(profile)) ?? null)
           : null
       if (!readAuthority.current.accepts(ticket)) {
