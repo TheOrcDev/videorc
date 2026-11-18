@@ -75,6 +75,59 @@ describe('Notes save and pin feedback', () => {
     expect(byTestId('notes-save-state').textContent).toBe('Saved')
   })
 
+  it('never saves over notes it could not read, and Retry loads them (QA F9)', async () => {
+    let flush: (() => void) | undefined
+    const getNotesDocument = vi
+      .fn<() => Promise<unknown>>()
+      .mockRejectedValueOnce(new Error('EIO'))
+      .mockResolvedValue({ text: 'Existing notes', fontScale: 'lg', updatedAt: '' })
+    const saveNotesDocument = vi
+      .fn<(patch: unknown) => Promise<void>>()
+      .mockResolvedValue(undefined)
+    await mount({
+      getNotesDocument,
+      saveNotesDocument,
+      onNotesFlushRequest: (callback: () => void) => {
+        flush = callback
+        return () => undefined
+      }
+    })
+    const failure = byTestId('notes-load-failure')
+    expect(failure.getAttribute('role')).toBe('status')
+    expect(failure.textContent).toContain("Couldn't open your notes. Nothing was changed.")
+    expect(textarea().readOnly).toBe(true)
+    // Never "Saved" for notes that are not here.
+    expect(container.querySelector('[data-testid="notes-save-state"]')).toBeNull()
+
+    // Blur, a text-size pick and the close flush must not save the blank text.
+    await blurNotes()
+    await act(async () =>
+      container.querySelector<HTMLButtonElement>('[aria-label="Small text"]')!.click()
+    )
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 200))
+    })
+    await act(async () => flush!())
+    expect(saveNotesDocument.mock.calls).toEqual([[{}]])
+
+    await act(async () => button('Retry')!.click())
+    expect(failure.textContent).toBe('')
+    expect(textarea().value).toBe('Existing notes')
+    expect(textarea().readOnly).toBe(false)
+    expect(byTestId('notes-save-state').textContent).toBe('Saved')
+
+    await act(async () => flush!())
+    expect(saveNotesDocument).toHaveBeenLastCalledWith({ text: 'Existing notes', fontScale: 'lg' })
+  })
+
+  it('says Not saved when main reports a failed write (QA F9)', async () => {
+    const saveNotesDocument = vi.fn<() => Promise<void>>().mockRejectedValue(new Error('ENOSPC'))
+    await mount({ saveNotesDocument })
+    await blurNotes()
+    expect(byTestId('notes-save-state').textContent).toBe('Not saved')
+    expect(byTestId('notes-save-failure').textContent).toContain("Couldn't save your notes.")
+  })
+
   it('says beside the pin when keep-on-top fails, and clears it on the next try', async () => {
     const setNotesWindowAlwaysOnTop = vi
       .fn<(pinned: boolean) => Promise<unknown>>()

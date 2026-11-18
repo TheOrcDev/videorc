@@ -35,6 +35,13 @@ export const NOTES_SAVE_LABELS: Record<NotesSaveState, string> = {
   failed: 'Not saved'
 }
 
+/**
+ * Whether the saved notes are here. Until they are, nothing is saved: a
+ * failed read is not empty notes, and saving it would write a blank document
+ * over them (QA F9).
+ */
+export type NotesLoadState = 'loading' | 'loaded' | 'failed'
+
 /** Why Keep on top didn't take, said beside the pin. */
 export type NotesPinError = 'failed' | 'unavailable'
 
@@ -82,19 +89,22 @@ export function NotesWindow({
   const [captureProtected, setCaptureProtected] = useState<boolean | null>(null)
   const [saveState, setSaveState] = useState<NotesSaveState>('saved')
   const [pinError, setPinError] = useState<NotesPinError | null>(null)
-  const [loaded, setLoaded] = useState(false)
+  const [loadState, setLoadState] = useState<NotesLoadState>('loading')
+  const loadStateRef = useRef(loadState)
   const textRef = useRef(text)
   const fontScaleRef = useRef(fontScale)
   const saveTimerRef = useRef<number | null>(null)
   const textareaRef = useRef<HTMLTextAreaElement | null>(null)
   textRef.current = text
   fontScaleRef.current = fontScale
+  loadStateRef.current = loadState
 
   const save = useCallback(async (): Promise<void> => {
     if (saveTimerRef.current !== null) {
       window.clearTimeout(saveTimerRef.current)
       saveTimerRef.current = null
     }
+    if (loadStateRef.current !== 'loaded') return
     setSaveState('saving')
     try {
       await window.videorc?.saveNotesDocument?.({
@@ -108,6 +118,7 @@ export function NotesWindow({
   }, [])
 
   const queueSave = (): void => {
+    if (loadStateRef.current !== 'loaded') return
     setSaveState('saving')
     if (saveTimerRef.current !== null) {
       window.clearTimeout(saveTimerRef.current)
@@ -115,8 +126,31 @@ export function NotesWindow({
     saveTimerRef.current = window.setTimeout(() => void save(), SAVE_DELAY_MS)
   }
 
+  const loadCancelledRef = useRef(false)
+  const load = useCallback((): void => {
+    const getDocument = window.videorc?.getNotesDocument
+    if (!getDocument) return
+    loadStateRef.current = 'loading'
+    setLoadState('loading')
+    void getDocument()
+      .then((document) => {
+        if (loadCancelledRef.current) return
+        setText(document?.text ?? '')
+        setFontScale(isFontScale(document?.fontScale) ? document.fontScale : 'md')
+        loadStateRef.current = 'loaded'
+        setLoadState('loaded')
+        textareaRef.current?.focus()
+      })
+      .catch(() => {
+        if (loadCancelledRef.current) return
+        loadStateRef.current = 'failed'
+        setLoadState('failed')
+      })
+  }, [])
+
   useEffect(() => {
     let cancelled = false
+    loadCancelledRef.current = false
     const applyState = (state: NotesWindowState | null | undefined): void => {
       if (cancelled || !state) return
       if (typeof state.alwaysOnTop === 'boolean') {
@@ -126,33 +160,28 @@ export function NotesWindow({
         setCaptureProtected(state.protected)
       }
     }
-    void window.videorc
-      ?.getNotesDocument?.()
-      .then((document) => {
-        if (cancelled || !document) return
-        setText(document.text ?? '')
-        setFontScale(isFontScale(document.fontScale) ? document.fontScale : 'md')
-      })
-      .catch(() => {})
-      .finally(() => {
-        if (!cancelled) {
-          setLoaded(true)
-          textareaRef.current?.focus()
-        }
-      })
+    load()
     void window.videorc
       ?.getNotesWindowState?.()
       .then(applyState)
       .catch(() => {})
     const offState = window.videorc?.onNotesWindowState?.(applyState)
-    // Main asks for a last save before the window closes.
-    const offFlush = window.videorc?.onNotesFlushRequest?.(() => void save())
+    // Main asks for a last save before the window closes. Notes that never
+    // loaded answer with an empty save, which changes nothing on disk.
+    const offFlush = window.videorc?.onNotesFlushRequest?.(() => {
+      if (loadStateRef.current === 'loaded') {
+        void save()
+      } else {
+        void window.videorc?.saveNotesDocument?.({}).catch(() => {})
+      }
+    })
     return () => {
       cancelled = true
+      loadCancelledRef.current = true
       offState?.()
       offFlush?.()
     }
-  }, [save])
+  }, [load, save])
 
   const togglePin = (): void => {
     const setPinned = window.videorc?.setNotesWindowAlwaysOnTop
@@ -199,7 +228,7 @@ export function NotesWindow({
         )}
         maxLength={maxLength}
         placeholder="Notes for this recording…"
-        readOnly={!loaded}
+        readOnly={loadState !== 'loaded'}
         spellCheck={false}
         value={text}
         onBlur={() => void save()}
@@ -228,6 +257,32 @@ export function NotesWindow({
           </Alert>
         </div>
       ) : null}
+      {/* Notes that couldn't be read stay untouched on disk; Retry reads
+          them again. Nothing is saved until they load. */}
+      <div className="shrink-0" data-testid="notes-load-failure" role="status">
+        {loadState === 'failed' ? (
+          <div
+            className={cn(
+              'flex items-center gap-2 border-t border-border py-1 pr-1.5 pl-3 text-xs text-foreground',
+              marker
+            )}
+          >
+            <ErrorIcon aria-hidden className="size-3.5 shrink-0 text-destructive" weight="fill" />
+            <span className="min-w-0 flex-1">
+              Couldn&apos;t open your notes. Nothing was changed.
+            </span>
+            <Button
+              className="[-webkit-app-region:no-drag]"
+              size="xs"
+              type="button"
+              variant="outline"
+              onClick={load}
+            >
+              Retry
+            </Button>
+          </div>
+        ) : null}
+      </div>
       {/* A save that failed, said once (role="status") with its fix. The
           wrapper stays mounted so the line is announced when it appears. */}
       <div className="shrink-0" data-testid="notes-save-failure" role="status">
@@ -261,9 +316,11 @@ export function NotesWindow({
         )}
       >
         <span className="shrink-0">{plural(words, 'word')}</span>
-        <span className="shrink-0" data-testid="notes-save-state">
-          {NOTES_SAVE_LABELS[saveState]}
-        </span>
+        {loadState !== 'failed' ? (
+          <span className="shrink-0" data-testid="notes-save-state">
+            {NOTES_SAVE_LABELS[saveState]}
+          </span>
+        ) : null}
         {captureProtected ? (
           <span className="min-w-0 truncate" data-testid="notes-capture-hidden">
             Hidden from recordings and streams
