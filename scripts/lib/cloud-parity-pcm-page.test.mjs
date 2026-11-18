@@ -8,12 +8,12 @@ test('renderer collector keeps bounded raw events and reports drops without manu
   globalThis.window = window
   try {
     installPcmRendererCollector()
-    for (let i = 0; i < 4100; i++)
+    for (let i = 0; i < 32772; i++)
       window.dispatchEvent(
         new CustomEvent('videorc:pcm-test-diagnostic', { detail: { sequence: i } })
       )
     const result = window.__parityPcmRenderer.drain()
-    assert.equal(result.events.length, 4096)
+    assert.equal(result.events.length, 32768)
     assert.equal(result.dropped, 4)
     assert.equal(result.events[0].sequence, 4)
     window.__parityPcmRenderer.close()

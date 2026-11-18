@@ -1,7 +1,10 @@
 /** Browser bodies serialized by the acquisition driver, not imported by product. */
 export function installPcmRendererCollector() {
+  // Hundreds of diagnostics a second; the drivers drain between steps, but a
+  // setup step (a browser context, a program page) can take a minute on a
+  // loaded host. Overflow is still a failure; it must not be a load artefact.
   const events = [],
-    limit = 4096
+    limit = 32768
   let dropped = 0
   const listener = ({ detail }) => {
     if (events.length >= limit) {
