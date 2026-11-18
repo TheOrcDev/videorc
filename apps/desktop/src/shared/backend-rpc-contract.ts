@@ -6504,8 +6504,44 @@ const cloudOnAirSchema = objectSchema(
   { allowUnknown: false }
 )
 
+// Plan 249 S16: the server-owned live interval and the provider settlement
+// facts. The backend has sent both since S16; without them here the strict
+// schema refused every `cloud.status` and `cloud.state` of a show that had
+// gone live, so a relaunched Studio never saw its room open (no rejoin, no
+// room token). The settlement values stay open strings, as in the backend
+// (`CloudProviderSettlement`): a runner one release ahead must not blank the
+// whole status.
+const cloudLiveIntervalSchema = objectSchema(
+  {
+    id: boundedString,
+    requestedAt: timestamp,
+    liveSince: optionalSchema(timestamp),
+    endRequestedAt: optionalSchema(timestamp),
+    endedAt: optionalSchema(timestamp)
+  },
+  { allowUnknown: false }
+)
+const cloudSettlementWord = stringSchema({ minLength: 1, maxLength: 64 })
+const cloudProviderSettlementSchema = objectSchema(
+  {
+    destinationId: boundedString,
+    provider: cloudSettlementWord,
+    state: cloudSettlementWord,
+    attempts: nonNegativeInteger,
+    terminalReason: optionalSchema(stringSchema({ maxLength: 512 })),
+    reason: optionalSchema(stringSchema({ maxLength: 512 })),
+    order: optionalSchema(cloudSettlementWord),
+    outputStopped: optionalSchema(booleanSchema)
+  },
+  { allowUnknown: false }
+)
+
 const cloudStatusSchema = objectSchema(
   {
+    liveInterval: optionalSchema(cloudLiveIntervalSchema),
+    providerLifecycle: optionalSchema(
+      arraySchema(cloudProviderSettlementSchema, { maxLength: 32 })
+    ),
     phase: enumSchema(['off', 'connecting', 'live', 'hold', 'resuming', 'ending', 'failed']),
     entitled: booleanSchema,
     plan: optionalSchema(enumSchema(['premium', 'max'])),
