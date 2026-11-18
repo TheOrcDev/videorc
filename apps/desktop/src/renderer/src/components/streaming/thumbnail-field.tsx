@@ -46,7 +46,10 @@ export function ThumbnailField({
     void window.videorc
       .importScheduledThumbnail()
       .then((image) => {
-        if (image) onChange(image.id)
+        if (!image) return
+        // The same bytes keep the same id: try a missing preview again.
+        setBrokenId(null)
+        onChange(image.id)
       })
       .catch((reason: unknown) => {
         const message = reason instanceof Error ? reason.message : String(reason)
