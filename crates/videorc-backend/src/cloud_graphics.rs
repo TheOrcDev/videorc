@@ -6,6 +6,10 @@ use base64::Engine as _;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use std::collections::VecDeque;
+use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 const ASSET_BASE64_MAX: usize = 1024 * 1024;
@@ -128,6 +132,159 @@ fn overlay(
     )
 }
 
+/// PERF-02: at most this many finished banner assets stay cached: four banners
+/// on the two room canvases.
+const BANNER_RASTER_CACHE_MAX: usize = 8;
+
+/// One finished banner asset's identity: the stored file (path and revision,
+/// the identity the native prepared bitmaps use) at one output size. Placement,
+/// opacity, fades, expiry and the snapshot signature are not part of it: they
+/// are rebuilt fresh on every response.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BannerRasterKey {
+    path: Arc<Path>,
+    revision: crate::banner_prepare::BannerFileRevision,
+    width: u32,
+    height: u32,
+}
+
+#[derive(Default)]
+struct BannerRasterEntries {
+    /// The room (show id, room generation) the entries were built for.
+    room: Option<(String, u64)>,
+    /// Least recently used first.
+    entries: VecDeque<(BannerRasterKey, Arc<Value>)>,
+}
+
+#[derive(Default)]
+struct BannerRasterCacheInner {
+    entries: Mutex<BannerRasterEntries>,
+    decodes: AtomicU64,
+    encodes: AtomicU64,
+}
+
+/// PERF-02: the lossless PNG assets of image banners, reused across full
+/// `cloud.graphics.snapshot` responses. A chat, caption, highlight or layout
+/// change forces a full response; without this every visible banner was
+/// decoded from disk, resized twice and PNG/SHA-256/base64 encoded again even
+/// though its pixels had not changed. Bounded, separated per room generation,
+/// and errors are never cached.
+#[derive(Clone, Default)]
+pub struct BannerRasterCache(Arc<BannerRasterCacheInner>);
+
+impl BannerRasterCache {
+    fn lock(&self) -> std::sync::MutexGuard<'_, BannerRasterEntries> {
+        self.0
+            .entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// The room a build is for. A different room or generation starts empty.
+    fn enter_room(&self, show_id: &str, generation: u64) {
+        let mut cache = self.lock();
+        let room = (show_id.to_string(), generation);
+        if cache.room.as_ref() != Some(&room) {
+            cache.entries.clear();
+            cache.room = Some(room);
+        }
+    }
+
+    fn get(&self, key: &BannerRasterKey) -> Option<Arc<Value>> {
+        let mut cache = self.lock();
+        let index = cache.entries.iter().position(|(k, _)| k == key)?;
+        let entry = cache.entries.remove(index)?;
+        let asset = Arc::clone(&entry.1);
+        cache.entries.push_back(entry);
+        Some(asset)
+    }
+
+    fn insert(&self, room: &(String, u64), key: BannerRasterKey, asset: Arc<Value>) {
+        let mut cache = self.lock();
+        if cache.room.as_ref() != Some(room) {
+            return;
+        }
+        cache.entries.retain(|(k, _)| *k != key);
+        cache.entries.push_back((key, asset));
+        while cache.entries.len() > BANNER_RASTER_CACHE_MAX {
+            cache.entries.pop_front();
+        }
+    }
+
+    /// After a successful full build: drop assets of files (or revisions) no
+    /// longer in the banner set, so a removed or replaced banner frees them.
+    fn retain_files(&self, files: &[(Arc<Path>, crate::banner_prepare::BannerFileRevision)]) {
+        self.lock().entries.retain(|(key, _)| {
+            files
+                .iter()
+                .any(|(path, revision)| *path == key.path && *revision == key.revision)
+        });
+    }
+
+    /// The banner's asset at each size (one per room canvas). The file is
+    /// decoded at most once, and only when a size misses.
+    fn banner_assets<const N: usize>(
+        &self,
+        room: &(String, u64),
+        path: &Arc<Path>,
+        revision: Option<crate::banner_prepare::BannerFileRevision>,
+        sizes: [(u32, u32); N],
+    ) -> Result<[Arc<Value>; N]> {
+        let mut decoded: Option<image::RgbaImage> = None;
+        let mut assets: Vec<Arc<Value>> = Vec::with_capacity(N);
+        for (index, (width, height)) in sizes.into_iter().enumerate() {
+            if let Some(same) = sizes[..index].iter().position(|s| *s == (width, height)) {
+                assets.push(Arc::clone(&assets[same]));
+                continue;
+            }
+            let key = revision.map(|revision| BannerRasterKey {
+                path: Arc::clone(path),
+                revision,
+                width,
+                height,
+            });
+            if let Some(hit) = key.as_ref().and_then(|key| self.get(key)) {
+                assets.push(hit);
+                continue;
+            }
+            let source = match decoded.as_ref() {
+                Some(source) => source,
+                None => {
+                    self.0.decodes.fetch_add(1, Ordering::Relaxed);
+                    decoded.insert(
+                        crate::banner_prepare::decode_banner_file(path)
+                            .map_err(anyhow::Error::msg)?,
+                    )
+                }
+            };
+            self.0.encodes.fetch_add(1, Ordering::Relaxed);
+            let asset = Arc::new(png(crate::banners::resize_straight_alpha(
+                source, width, height,
+            ))?);
+            if let Some(key) = key {
+                self.insert(room, key, Arc::clone(&asset));
+            }
+            assets.push(asset);
+        }
+        Ok(assets
+            .try_into()
+            .unwrap_or_else(|_| unreachable!("one asset per size")))
+    }
+
+    #[cfg(test)]
+    fn counts(&self) -> (u64, u64) {
+        (
+            self.0.decodes.load(Ordering::Relaxed),
+            self.0.encodes.load(Ordering::Relaxed),
+        )
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.lock().entries.len()
+    }
+}
+
 pub async fn snapshot(state: &AppState, params: SnapshotParams) -> Result<Value> {
     let generation = {
         let runtime = crate::cloud_show::lock(&state.cloud_show);
@@ -197,6 +354,9 @@ pub async fn snapshot(state: &AppState, params: SnapshotParams) -> Result<Value>
     if params.known.as_deref() == Some(&signature) {
         return Ok(json!({"signature":signature,"content":null}));
     }
+    let rasters = state.cloud_graphics_rasters.clone();
+    let room = (params.show_id.clone(), generation);
+    rasters.enter_room(&room.0, room.1);
     let content = tokio::task::spawn_blocking(move || -> Result<Value> {
         let mut lanes = [Vec::<Value>::new(), Vec::new()];
         // Plan 249 S11: HTML banners' placement on the room canvases. Pixels
@@ -250,22 +410,28 @@ pub async fn snapshot(state: &AppState, params: SnapshotParams) -> Result<Value>
                 }
                 continue;
             }
-            let image = crate::banner_prepare::decode_banner_file(&layer.image_path)
-                .map_err(anyhow::Error::msg)?;
-            for (index, canvas) in [(1920, 1080), (1080, 1920)].into_iter().enumerate() {
-                let placement = if index == 0 {
+            let draws = ROOM_CANVASES.map(|canvas| {
+                let placement = if canvas == ROOM_CANVASES[0] {
                     banner.horizontal
                 } else {
                     banner.vertical
                 };
-                let (x, y, w, h) = crate::banners::banner_draw_rect(
+                crate::banners::banner_draw_rect(
                     banner.width,
                     banner.height,
                     canvas.0 as usize,
                     canvas.1 as usize,
                     placement,
-                );
-                let image = crate::banners::resize_straight_alpha(&image, w as u32, h as u32);
+                )
+            });
+            let assets = rasters.banner_assets(
+                &room,
+                &layer.image_path,
+                layer.file_revision,
+                draws.map(|(_, _, w, h)| (w as u32, h as u32)),
+            )?;
+            for (index, canvas) in ROOM_CANVASES.into_iter().enumerate() {
+                let (x, y, w, h) = draws[index];
                 let fade_at = at
                     - now
                         .saturating_duration_since(layer.fade.started_at)
@@ -273,7 +439,7 @@ pub async fn snapshot(state: &AppState, params: SnapshotParams) -> Result<Value>
                         .min(i64::MAX as u128) as i64;
                 lanes[index].push(json!({
                     "id": format!("banner:{}", banner.id), "kind": "banner",
-                    "rect": rect(x, y, w, h, canvas), "asset": png(image)?,
+                    "rect": rect(x, y, w, h, canvas), "asset": (*assets[index]).clone(),
                     "opacity": banner.opacity.clamp(0.0, 1.0),
                     "fade": {"at": fade_at.max(1), "from": layer.fade.from, "to": layer.fade.to},
                     "expiresAt": if layer.fade.hides() { Some(fade_at + 200) } else { None },
@@ -375,6 +541,13 @@ pub async fn snapshot(state: &AppState, params: SnapshotParams) -> Result<Value>
                 bail!("Static layer budget exceeded");
             }
         }
+        rasters.retain_files(
+            &banners
+                .layers
+                .iter()
+                .filter_map(|layer| Some((Arc::clone(&layer.image_path), layer.file_revision?)))
+                .collect::<Vec<_>>(),
+        );
         unsupported.sort();
         unsupported.dedup();
         Ok(json!({
@@ -411,6 +584,231 @@ mod tests {
         assert_eq!(asset["hash"], format!("{:x}", Sha256::digest(bytes)));
         assert!(png(image::RgbaImage::new(1921, 1)).is_err());
     }
+
+    /// A photo-like banner with straight alpha (so the premultiplied resize
+    /// path runs), stored as PNG in a fresh temp file.
+    fn banner_file(width: u32, height: u32, seed: u32) -> Arc<Path> {
+        let dir =
+            std::env::temp_dir().join(format!("videorc-cloud-raster-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("banner.png");
+        write_banner(&path, width, height, seed);
+        Arc::from(path.as_path())
+    }
+
+    fn write_banner(path: &Path, width: u32, height: u32, seed: u32) {
+        let image = image::RgbaImage::from_fn(width, height, |x, y| {
+            let n = x.wrapping_mul(2_654_435_761) ^ y.wrapping_mul(40_503) ^ seed;
+            image::Rgba([
+                (x * 255 / width.max(1)) as u8,
+                (y * 255 / height.max(1)) as u8,
+                (n >> 13) as u8,
+                if x < 8 { 0 } else { 128 + (n % 128) as u8 },
+            ])
+        });
+        image
+            .save_with_format(path, image::ImageFormat::Png)
+            .unwrap();
+    }
+
+    fn revision(path: &Path) -> Option<crate::banner_prepare::BannerFileRevision> {
+        crate::banner_prepare::banner_file_revision(path)
+    }
+
+    /// The asset exactly as the snapshot built it before PERF-02.
+    fn uncached(path: &Path, size: (u32, u32)) -> Value {
+        let source = crate::banner_prepare::decode_banner_file(path).unwrap();
+        png(crate::banners::resize_straight_alpha(
+            &source, size.0, size.1,
+        ))
+        .unwrap()
+    }
+
+    fn room(generation: u64) -> (String, u64) {
+        ("show-1".to_string(), generation)
+    }
+
+    const SIZES: [(u32, u32); 2] = [(480, 120), (432, 108)];
+
+    #[test]
+    fn unchanged_banner_decodes_once_across_sixty_full_builds() {
+        let path = banner_file(640, 160, 1);
+        let cache = BannerRasterCache::default();
+        let room = room(1);
+        cache.enter_room(&room.0, room.1);
+        let first = cache
+            .banner_assets(&room, &path, revision(&path), SIZES)
+            .unwrap();
+        for _ in 0..60 {
+            cache.enter_room(&room.0, room.1);
+            let again = cache
+                .banner_assets(&room, &path, revision(&path), SIZES)
+                .unwrap();
+            assert_eq!(again, first);
+        }
+        assert_eq!(cache.counts(), (1, 2), "one decode, one encode per size");
+        for (index, size) in SIZES.into_iter().enumerate() {
+            assert_eq!(*first[index], uncached(&path, size), "byte-identical asset");
+        }
+    }
+
+    #[test]
+    fn a_new_file_revision_size_or_room_rebuilds_and_never_serves_stale_pixels() {
+        let path = banner_file(640, 160, 1);
+        let cache = BannerRasterCache::default();
+        let one = room(1);
+        cache.enter_room(&one.0, one.1);
+        let before = cache
+            .banner_assets(&one, &path, revision(&path), SIZES)
+            .unwrap();
+
+        // The file is overwritten: new revision, new pixels.
+        write_banner(&path, 700, 175, 2);
+        let after = cache
+            .banner_assets(&one, &path, revision(&path), SIZES)
+            .unwrap();
+        assert_eq!(cache.counts(), (2, 4));
+        assert_ne!(after[0]["hash"], before[0]["hash"]);
+        assert_eq!(*after[0], uncached(&path, SIZES[0]));
+
+        // Only the vertical size changes: one decode, one encode.
+        let resized = [SIZES[0], (300, 75)];
+        let moved = cache
+            .banner_assets(&one, &path, revision(&path), resized)
+            .unwrap();
+        assert_eq!(cache.counts(), (3, 5));
+        assert_eq!(moved[0], after[0]);
+        assert_eq!(*moved[1], uncached(&path, (300, 75)));
+
+        // A new room generation starts empty.
+        let two = room(2);
+        cache.enter_room(&two.0, two.1);
+        assert_eq!(cache.len(), 0);
+        cache
+            .banner_assets(&two, &path, revision(&path), SIZES)
+            .unwrap();
+        assert_eq!(cache.counts(), (4, 7));
+        // A build still running for the old room never fills the new one.
+        cache.insert(
+            &one,
+            BannerRasterKey {
+                path: Arc::clone(&path),
+                revision: revision(&path).unwrap(),
+                width: 1,
+                height: 1,
+            },
+            Arc::new(json!({})),
+        );
+        assert_eq!(cache.len(), 2);
+    }
+
+    #[test]
+    fn unknown_revisions_and_failures_are_never_cached() {
+        let path = banner_file(64, 16, 1);
+        let cache = BannerRasterCache::default();
+        let room = room(1);
+        cache.enter_room(&room.0, room.1);
+        for _ in 0..3 {
+            cache.banner_assets(&room, &path, None, SIZES).unwrap();
+        }
+        assert_eq!(cache.counts(), (3, 6));
+        assert_eq!(cache.len(), 0);
+
+        let broken: Arc<Path> = Arc::from(path.with_file_name("broken.png").as_path());
+        std::fs::write(&broken, b"not an image").unwrap();
+        for _ in 0..2 {
+            assert!(
+                cache
+                    .banner_assets(&room, &broken, revision(&broken), SIZES)
+                    .is_err()
+            );
+        }
+        assert_eq!(cache.counts(), (5, 6));
+        assert_eq!(cache.len(), 0);
+    }
+
+    #[test]
+    fn the_cache_is_bounded_and_drops_departed_banners() {
+        let path = banner_file(64, 16, 1);
+        let other = banner_file(64, 16, 2);
+        let cache = BannerRasterCache::default();
+        let room = room(1);
+        cache.enter_room(&room.0, room.1);
+        for width in 1..=12 {
+            cache
+                .banner_assets(&room, &path, revision(&path), [(width * 4, width)])
+                .unwrap();
+        }
+        assert_eq!(cache.len(), BANNER_RASTER_CACHE_MAX);
+        cache
+            .banner_assets(&room, &other, revision(&other), SIZES)
+            .unwrap();
+        cache.retain_files(&[(Arc::clone(&other), revision(&other).unwrap())]);
+        assert_eq!(cache.len(), 2);
+        // Identical sizes on both canvases encode once.
+        let (_, encodes) = cache.counts();
+        let same = cache
+            .banner_assets(&room, &path, revision(&path), [(50, 50), (50, 50)])
+            .unwrap();
+        assert_eq!(same[0], same[1]);
+        assert_eq!(cache.counts().1, encodes + 1);
+    }
+
+    /// PERF-02 measurement (run with `-- --ignored --nocapture`): 61 full
+    /// snapshot builds of one 1600x400 banner, as before (decode + resize + PNG
+    /// every time) and with the cache. Same process, same file, same sizes.
+    #[test]
+    #[ignore = "timing measurement"]
+    fn measure_banner_raster_work_per_minute_of_full_builds() {
+        let path = banner_file(1600, 400, 7);
+        let sizes = ROOM_CANVASES.map(|canvas| {
+            let (_, _, w, h) = crate::banners::banner_draw_rect(
+                1600,
+                400,
+                canvas.0 as usize,
+                canvas.1 as usize,
+                crate::overlay_layout::OverlayRect {
+                    x: 0.05,
+                    y: 0.75,
+                    w: 0.9,
+                    h: 0.2,
+                },
+            );
+            (w as u32, h as u32)
+        });
+        let room = room(1);
+        let mut rows = Vec::new();
+        for round in 0..3 {
+            let started = Instant::now();
+            for _ in 0..61 {
+                let fresh = BannerRasterCache::default();
+                fresh.enter_room(&room.0, room.1);
+                fresh
+                    .banner_assets(&room, &path, revision(&path), sizes)
+                    .unwrap();
+            }
+            let before = started.elapsed();
+            let cache = BannerRasterCache::default();
+            cache.enter_room(&room.0, room.1);
+            let started = Instant::now();
+            for _ in 0..61 {
+                let assets = cache
+                    .banner_assets(&room, &path, revision(&path), sizes)
+                    .unwrap();
+                // What the snapshot does with each hit: clone it into the lane.
+                std::hint::black_box(assets.map(|a| (*a).clone()));
+            }
+            let after = started.elapsed();
+            rows.push(format!(
+                "round {round}: sizes {sizes:?}; before {:.1} ms (61 decodes, 122 encodes); after {:.1} ms {:?} (decodes, encodes)",
+                before.as_secs_f64() * 1000.0,
+                after.as_secs_f64() * 1000.0,
+                cache.counts()
+            ));
+        }
+        println!("PERF-02 {}", rows.join("\nPERF-02 "));
+    }
+
     #[test]
     fn public_rect_is_the_native_pixel_geometry_normalized_once() {
         assert_eq!(
