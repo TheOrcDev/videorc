@@ -12,6 +12,8 @@ import {
   TAKEN_OVER_DETAIL,
   TAKEN_OVER_GRACE_MS,
   TalkShowRoomClient,
+  cameraDeviceIdFor,
+  microphoneDeviceIdFor,
   onAirElsewhere,
   stageMessage,
   talkShowRoomOptions,
@@ -822,6 +824,43 @@ it('refuses publication if initial mute fails, and uses exact device constraints
   expect(room.snapshot.local.microphone).toBeNull()
   expect(room.snapshot.local.problem).toContain('mute refused')
   await room.disconnect()
+})
+
+it("opens the Sources camera and microphone by Chromium's decorated macOS labels (0.31.1)", async () => {
+  // enumerateDevices on the owner's Mac (Electron 39): Chromium appends the
+  // USB `(vid:pid)` and the transport, while Sources names the plain device.
+  // 0.31.0 compared raw labels, so a real camera and mic never opened.
+  vi.stubGlobal('navigator', {
+    mediaDevices: {
+      enumerateDevices: async () => [
+        {
+          kind: 'audioinput',
+          deviceId: 'default',
+          label: 'Default - MacBook Pro Microphone (Built-in)'
+        },
+        { kind: 'audioinput', deviceId: 'mv7', label: 'Shure MV7+ (14ed:1019)' },
+        { kind: 'audioinput', deviceId: 'zv-audio', label: 'ZV-E10M2 (054c:0ee8)' },
+        { kind: 'audioinput', deviceId: 'mbp-mic', label: 'MacBook Pro Microphone (Built-in)' },
+        { kind: 'videoinput', deviceId: 'zv', label: 'ZV-E10M2 (054c:0ee8)' },
+        { kind: 'videoinput', deviceId: 'mbp-cam', label: 'MacBook Pro Camera (0000:0001)' },
+        { kind: 'videoinput', deviceId: 'vc', label: 'Videorc Camera' }
+      ]
+    }
+  })
+  const { room } = client(undefined, undefined, {
+    cameraName: 'ZV-E10M2',
+    microphoneName: 'Shure MV7+'
+  })
+  await room.connect()
+  expect(lk.video).toHaveBeenCalledWith(expect.objectContaining({ deviceId: { exact: 'zv' } }))
+  expect(lk.audio).toHaveBeenCalledWith(expect.objectContaining({ deviceId: { exact: 'mv7' } }))
+  expect(room.snapshot.local.problem).toBeNull()
+  await room.disconnect()
+
+  await expect(microphoneDeviceIdFor('MacBook Pro Microphone')).resolves.toBe('mbp-mic')
+  await expect(cameraDeviceIdFor('MacBook Pro Camera')).resolves.toBe('mbp-cam')
+  await expect(cameraDeviceIdFor('Videorc Camera')).resolves.toBeUndefined()
+  await expect(microphoneDeviceIdFor('Shure MV7')).resolves.toBeUndefined()
 })
 
 describe('S2 screen publication boundary', () => {
