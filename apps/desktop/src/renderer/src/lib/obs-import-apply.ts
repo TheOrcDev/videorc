@@ -52,11 +52,14 @@ export function mergeObsImportIntoConfig(
 
   if (plan.stream?.kind === 'rtmp-custom' || plan.stream?.kind === 'rtmp-platform') {
     const { serverUrl } = plan.stream
-    const platform = plan.stream.kind === 'rtmp-custom' ? 'custom' : plan.stream.platform
+    // The destination whose id is the platform: YouTube Vertical shares the
+    // youtube platform but is its own card, and an OBS profile never names it
+    // (QA F12). The built-in ids equal their platforms (`custom` included).
+    const targetId = plan.stream.kind === 'rtmp-custom' ? 'custom' : plan.stream.platform
     next.streaming = {
       ...config.streaming,
       targets: config.streaming.targets.map((target) =>
-        target.platform === platform
+        target.id === targetId
           ? {
               ...target,
               enabled: true,
@@ -69,7 +72,7 @@ export function mergeObsImportIntoConfig(
             }
           : target
       ),
-      enabledTargetIds: Array.from(new Set([...config.streaming.enabledTargetIds, platform]))
+      enabledTargetIds: Array.from(new Set([...config.streaming.enabledTargetIds, targetId]))
     }
   }
 
