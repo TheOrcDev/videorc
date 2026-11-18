@@ -51,6 +51,8 @@ function message(overrides: Partial<LiveChatMessage> = {}): LiveChatMessage {
 
 async function render(row: LiveChatMessage): Promise<void> {
   await act(async () => root.render(createElement(CommentRow, { message: row })))
+  // The renderer loads its bounded image cache on the first image request.
+  await act(() => vi.dynamicImportSettled())
 }
 
 const badge = (): HTMLImageElement | null =>

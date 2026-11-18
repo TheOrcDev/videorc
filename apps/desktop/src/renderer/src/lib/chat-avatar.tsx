@@ -1,6 +1,9 @@
 import { useEffect, useState, type ReactElement } from 'react'
 
 import { cn } from '@/lib/utils'
+import type { CachedImageKind } from './chat-image-cache'
+
+export type { CachedImageKind } from './chat-image-cache'
 
 // Chat avatar display (Comments window upgrade S1). Avatars resolve through
 // main's allowlisted cache (videorc-asset://avatar/...) — never a hot-linked
@@ -24,36 +27,6 @@ export function monogramInitials(name: string): string {
   return initials || '?'
 }
 
-/** Which of main's two cache kinds resolves a URL: avatars and emotes share
- * one allowlist and cap; Twitch GIFs (plan 155) have their own. */
-export type CachedImageKind = 'avatar' | 'gif'
-
-// One in-flight/settled promise per remote URL for the whole renderer: a busy
-// chat repeats the same authors constantly.
-const avatarUrlCache = new Map<string, Promise<string | null>>()
-
-function resolveAvatar(remoteUrl: string, kind: CachedImageKind): Promise<string | null> {
-  const key = `${kind}:${remoteUrl}`
-  const cached = avatarUrlCache.get(key)
-  if (cached) {
-    return cached
-  }
-  const resolved = (async () => {
-    try {
-      const api = window.videorc
-      const local =
-        kind === 'gif'
-          ? await api?.cacheChatGif?.(remoteUrl)
-          : await api?.cacheChatAvatar?.(remoteUrl)
-      return local ?? null
-    } catch {
-      return null
-    }
-  })()
-  avatarUrlCache.set(key, resolved)
-  return resolved
-}
-
 export function useCachedAvatar(
   remoteUrl: string | undefined | null,
   kind: CachedImageKind = 'avatar'
@@ -65,11 +38,14 @@ export function useCachedAvatar(
       return
     }
     let cancelled = false
-    void resolveAvatar(remoteUrl, kind).then((resolved) => {
-      if (!cancelled) {
-        setLocalUrl(resolved)
-      }
-    })
+    void import('./chat-image-cache')
+      .then(({ resolveAvatar }) => resolveAvatar(remoteUrl, kind))
+      .catch(() => null)
+      .then((resolved) => {
+        if (!cancelled) {
+          setLocalUrl(resolved)
+        }
+      })
     return () => {
       cancelled = true
     }
