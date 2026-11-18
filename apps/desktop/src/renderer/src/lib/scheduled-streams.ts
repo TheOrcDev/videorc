@@ -1,5 +1,6 @@
 import { patchPreparedStreamTarget, type CaptureConfig } from '@/lib/capture'
 import type { BackendClient } from '@/backendClient'
+import { resolveLocalTimeMs } from '@/lib/schedule-time'
 import type {
   ScheduledStreamCapabilities,
   ScheduledStreamEvent,
@@ -109,11 +110,11 @@ export function scheduledPrivacyLabel(event: ScheduledStreamEvent): string | nul
 /**
  * When the stream airs, in its own time zone ("Tue, Jan 1, 2035, 12:00 PM CET").
  * An X broadcast shows its planned end as a range ("12:00 – 1:30 PM CET"). The
- * planned end is a wall time in the start's zone, so the difference of the two
- * wall times is the length (off by an hour only across a DST change).
+ * planned end is a wall time in the start's zone, resolved on its own the way
+ * the backend does, so a DST change between start and end shows the real end.
  */
 export function scheduledWhenLabel(event: ScheduledStreamEvent, locale?: string): string {
-  const { timeZone, plannedEndLocal, localStart } = event.requested
+  const { timeZone, plannedEndLocal, localStart, offsetChoice } = event.requested
   const start = new Date(event.startUtc)
   if (Number.isNaN(start.getTime())) return localStart.replace('T', ' ')
   const format = new Intl.DateTimeFormat(locale, {
@@ -126,12 +127,12 @@ export function scheduledWhenLabel(event: ScheduledStreamEvent, locale?: string)
     timeZone,
     timeZoneName: 'short'
   })
-  const length =
+  const endMs =
     event.provider === 'x' && plannedEndLocal
-      ? Date.parse(`${plannedEndLocal}Z`) - Date.parse(`${localStart}Z`)
-      : Number.NaN
-  return length > 0
-    ? format.formatRange(start, new Date(start.getTime() + length))
+      ? resolveLocalTimeMs(plannedEndLocal, timeZone, offsetChoice)
+      : null
+  return endMs !== null && endMs > start.getTime()
+    ? format.formatRange(start, new Date(endMs))
     : format.format(start)
 }
 
