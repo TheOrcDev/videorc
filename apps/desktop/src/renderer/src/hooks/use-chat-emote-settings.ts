@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 
-import { BackendClient } from '@/backendClient'
+import { useStudioDiagnostics } from '@/hooks/use-studio'
 import type { ChatEmotesSettings, ChatEmotesSettingsPatch, TwitchGifMode } from '@/lib/backend'
 
 export interface ChatEmoteSettingsState {
@@ -13,53 +13,56 @@ export interface ChatEmoteSettingsState {
   setTwitchGifs: (mode: TwitchGifMode) => void
 }
 
+const RECONNECTING = 'Videorc is reconnecting. Try again in a moment.'
+
 /**
  * Settings → General → "Show 7TV emotes in chat" (plan 089) and "GIFs in
- * Twitch chat" (plan 155): one backend row, one client. It opens its own
- * backend client while the panel is mounted, as Upcoming does, so the
- * controls add nothing to the main window's startup bundle. `liveChat.emotes`
- * keeps the status line current while Settings is open, for example when a
- * stream that just went live finishes loading its emotes.
+ * Twitch chat" (plan 155): one backend row. It uses the app's shared backend
+ * client, which the Studio provider replaces on every reconnect, so a save
+ * after the engine recovered goes to the live connection and the row reads
+ * the setting again on it. `liveChat.emotes` keeps the status line current
+ * while Settings is open, for example when a stream that just went live
+ * finishes loading its emotes.
  */
 export function useChatEmoteSettings(): ChatEmoteSettingsState {
-  const client = useRef<BackendClient | null>(null)
+  const { client } = useStudioDiagnostics()
   const [settings, setSettings] = useState<ChatEmotesSettings | null>(null)
   const [error, setError] = useState<string | null>(null)
+  // The newest client and value, for a save to use rather than a closed one.
+  const clientRef = useRef(client)
+  const settingsRef = useRef(settings)
+  clientRef.current = client
+  settingsRef.current = settings
 
   useEffect(() => {
+    if (!client) return undefined
     let disposed = false
-    let active: BackendClient | null = null
-    void window.videorc
-      .getBackendConnection()
-      .then(async (connection) => {
-        if (!connection) throw new Error('No connection to Videorc yet.')
+    const off = client.on('liveChat.emotes', (next) => {
+      if (!disposed) setSettings(next)
+    })
+    client
+      .request<ChatEmotesSettings>('liveChat.emotes.get')
+      .then((current) => {
         if (disposed) return
-        active = new BackendClient(connection)
-        await active.connect()
-        if (disposed) {
-          active.close()
-          return
-        }
-        client.current = active
-        active.on('liveChat.emotes', (next) => {
-          if (!disposed) setSettings(next)
-        })
-        const current = await active.request<ChatEmotesSettings>('liveChat.emotes.get')
-        if (!disposed) setSettings(current)
+        setSettings(current)
+        setError(null)
       })
       .catch(() => {
         if (!disposed) setError("Couldn't read the chat settings. Reopen Settings to try again.")
       })
     return () => {
       disposed = true
-      active?.close()
-      client.current = null
+      off()
     }
-  }, [])
+  }, [client])
 
   const patch = useCallback((change: ChatEmotesSettingsPatch) => {
-    const active = client.current
-    if (!active) return
+    const active = clientRef.current
+    if (!active) {
+      setError(RECONNECTING)
+      return
+    }
+    const before = settingsRef.current
     setError(null)
     setSettings((current) => current && { ...current, ...change })
     active
@@ -67,14 +70,31 @@ export function useChatEmoteSettings(): ChatEmoteSettingsState {
       .then(setSettings)
       .catch(() => {
         setError("Couldn't save the chat settings. Try again.")
-        void active
+        // Show what is stored. When it cannot be read either, show what was
+        // there before the flip, never the choice that did not save.
+        const reconcile = clientRef.current ?? active
+        reconcile
           .request<ChatEmotesSettings>('liveChat.emotes.get')
           .then(setSettings)
-          .catch(() => undefined)
+          .catch(() =>
+            setSettings((current) =>
+              current && before ? { ...current, ...pick(before, change) } : current
+            )
+          )
       })
   }, [])
   const setSevenTv = useCallback((on: boolean) => patch({ sevenTv: on }), [patch])
   const setTwitchGifs = useCallback((mode: TwitchGifMode) => patch({ twitchGifs: mode }), [patch])
 
   return { settings, error, setSevenTv, setTwitchGifs }
+}
+
+/** `settings`' values for the keys `change` set. */
+function pick(
+  settings: ChatEmotesSettings,
+  change: ChatEmotesSettingsPatch
+): ChatEmotesSettingsPatch {
+  const before: Record<string, unknown> = {}
+  for (const key of Object.keys(change) as (keyof ChatEmotesSettings)[]) before[key] = settings[key]
+  return before as ChatEmotesSettingsPatch
 }

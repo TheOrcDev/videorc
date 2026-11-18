@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
-import { BackendClient, BackendRequestError } from '@/backendClient'
+import { BackendRequestError } from '@/backendClient'
+import { useStudioDiagnostics } from '@/hooks/use-studio'
 import type {
   DiscordAnnounceSnapshot,
   DiscordAnnounceUpdateParams,
@@ -27,39 +28,32 @@ export interface DiscordAnnounceState {
 
 /**
  * Destinations → Setup → Discord (plan 187). The settings live in the backend
- * (it posts at Go Live), so the section opens its own backend client while
- * it is mounted, as the privacy and chat rows do. `discord.announce.changed`
+ * (it posts at Go Live), so the section uses the app's shared backend
+ * client, which the Studio provider replaces on every reconnect (as the privacy
+ * and chat rows do). `discord.announce.changed`
  * keeps it current, for example when a post fails mid-stream.
  */
 export function useDiscordAnnounce(targets: readonly DiscordLinkTarget[]): DiscordAnnounceState {
-  const client = useRef<BackendClient | null>(null)
-  const [connected, setConnected] = useState(false)
+  const { client } = useStudioDiagnostics()
   const [snapshot, setSnapshot] = useState<DiscordAnnounceSnapshot | null>(null)
   const [preview, setPreview] = useState<DiscordLinksPreview | null>(null)
   const [error, setError] = useState<string | null>(null)
+  // The newest client, for an action to use rather than a closed one.
+  const clientRef = useRef(client)
+  clientRef.current = client
 
   useEffect(() => {
+    if (!client) return undefined
     let disposed = false
-    let active: BackendClient | null = null
-    void window.videorc
-      .getBackendConnection()
-      .then(async (connection) => {
-        if (!connection) throw new Error('No connection to Videorc yet.')
-        if (disposed) return
-        active = new BackendClient(connection)
-        await active.connect()
-        if (disposed) {
-          active.close()
-          return
-        }
-        client.current = active
-        active.on('discord.announce.changed', (next) => {
-          if (!disposed) setSnapshot(next)
-        })
-        const current = await active.requestTyped('discord.announce.get')
+    const off = client.on('discord.announce.changed', (next) => {
+      if (!disposed) setSnapshot(next)
+    })
+    client
+      .requestTyped('discord.announce.get')
+      .then((current) => {
         if (disposed) return
         setSnapshot(current)
-        setConnected(true)
+        setError(null)
       })
       .catch(() => {
         if (!disposed)
@@ -67,10 +61,9 @@ export function useDiscordAnnounce(targets: readonly DiscordLinkTarget[]): Disco
       })
     return () => {
       disposed = true
-      active?.close()
-      client.current = null
+      off()
     }
-  }, [])
+  }, [client])
 
   // The preview follows the destinations and the choices that shape it.
   const targetsKey = JSON.stringify(targets)
@@ -85,10 +78,9 @@ export function useDiscordAnnounce(targets: readonly DiscordLinkTarget[]): Disco
     : null
   const stableTargets = useMemo(() => JSON.parse(targetsKey) as DiscordLinkTarget[], [targetsKey])
   useEffect(() => {
-    const active = client.current
-    if (!connected || !active || previewKey === null) return
+    if (!client || previewKey === null) return undefined
     let stale = false
-    void active
+    void client
       .requestTyped('discord.links.preview', { targets: stableTargets })
       .then((next) => {
         if (!stale) setPreview(next)
@@ -97,10 +89,10 @@ export function useDiscordAnnounce(targets: readonly DiscordLinkTarget[]): Disco
     return () => {
       stale = true
     }
-  }, [connected, previewKey, stableTargets])
+  }, [client, previewKey, stableTargets])
 
   const update = useCallback(async (patch: DiscordAnnounceUpdateParams) => {
-    const active = client.current
+    const active = clientRef.current
     if (!active) return 'Videorc is reconnecting. Try again in a moment.'
     try {
       setSnapshot(await active.requestTyped('discord.announce.update', patch))
@@ -114,7 +106,7 @@ export function useDiscordAnnounce(targets: readonly DiscordLinkTarget[]): Disco
   }, [])
 
   const saveWebhook = useCallback(async (url: string) => {
-    const active = client.current
+    const active = clientRef.current
     if (!active) return 'Videorc is reconnecting. Try again in a moment.'
     try {
       setSnapshot(await active.requestTyped('discord.webhook.save', { url }))
@@ -125,7 +117,7 @@ export function useDiscordAnnounce(targets: readonly DiscordLinkTarget[]): Disco
   }, [])
 
   const removeWebhook = useCallback(async (webhookId: string) => {
-    const active = client.current
+    const active = clientRef.current
     if (!active) return
     try {
       setSnapshot(await active.requestTyped('discord.webhook.remove', { webhookId }))
@@ -136,7 +128,7 @@ export function useDiscordAnnounce(targets: readonly DiscordLinkTarget[]): Disco
 
   const sendTest = useCallback(
     async (webhookId: string) => {
-      const active = client.current
+      const active = clientRef.current
       if (!active) return { error: 'Videorc is reconnecting. Try again in a moment.' }
       try {
         const result: DiscordTestResult = await active.requestTyped('discord.webhook.sendTest', {

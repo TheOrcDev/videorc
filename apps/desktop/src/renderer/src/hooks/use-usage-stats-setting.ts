@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 
-import { BackendClient } from '@/backendClient'
+import { useStudioDiagnostics } from '@/hooks/use-studio'
 import type { UsageStatsState } from '@/lib/backend'
 
 export interface UsageStatsSettingState {
@@ -11,51 +11,54 @@ export interface UsageStatsSettingState {
   setEnabled: (on: boolean) => void
 }
 
+const RECONNECTING = 'Videorc is reconnecting. Try again in a moment.'
+
 /**
  * Settings → General → Privacy → "Share anonymous usage stats". The switch
- * lives in the backend (it gates what the backend sends), so the row opens
- * its own backend client while the panel is mounted, as the chat rows do.
- * Off takes effect before `usageStats.set` answers.
+ * lives in the backend (it gates what the backend sends), so the row uses the
+ * app's shared backend client, which the Studio provider replaces on every
+ * reconnect: a save after the engine recovered goes to the live connection,
+ * and the row reads the setting again on it. Off takes effect before
+ * `usageStats.set` answers.
  */
 export function useUsageStatsSetting(): UsageStatsSettingState {
-  const client = useRef<BackendClient | null>(null)
+  const { client } = useStudioDiagnostics()
   const [state, setState] = useState<UsageStatsState | null>(null)
   const [error, setError] = useState<string | null>(null)
+  // The newest client and value, for a save to use rather than a closed one.
+  const clientRef = useRef(client)
+  const stateRef = useRef(state)
+  clientRef.current = client
+  stateRef.current = state
 
   useEffect(() => {
+    if (!client) return undefined
     let disposed = false
-    let active: BackendClient | null = null
-    void window.videorc
-      .getBackendConnection()
-      .then(async (connection) => {
-        if (!connection) throw new Error('No connection to Videorc yet.')
+    client
+      .request<UsageStatsState>('usageStats.get')
+      .then((current) => {
         if (disposed) return
-        active = new BackendClient(connection)
-        await active.connect()
-        if (disposed) {
-          active.close()
-          return
-        }
-        client.current = active
-        const current = await active.request<UsageStatsState>('usageStats.get')
-        if (!disposed) setState(current)
+        setState(current)
+        setError(null)
       })
       .catch(() => {
         if (!disposed) setError("Couldn't read the privacy settings. Reopen Settings to try again.")
       })
     return () => {
       disposed = true
-      active?.close()
-      client.current = null
     }
-  }, [])
+  }, [client])
 
   // Only the latest flip may write state: an older answer (or its rollback)
   // must not undo a newer optimistic choice.
   const latestRequest = useRef(0)
   const setEnabled = useCallback((enabled: boolean) => {
-    const active = client.current
-    if (!active) return
+    const active = clientRef.current
+    if (!active) {
+      setError(RECONNECTING)
+      return
+    }
+    const before = stateRef.current
     const request = ++latestRequest.current
     const isLatest = (): boolean => request === latestRequest.current
     setError(null)
@@ -68,12 +71,18 @@ export function useUsageStatsSetting(): UsageStatsSettingState {
       .catch(() => {
         if (!isLatest()) return
         setError("Couldn't save the privacy settings. Try again.")
-        void active
+        // Show what is stored. When it cannot be read either, show what was
+        // there before the flip: the switch must not claim a choice that did
+        // not save.
+        const reconcile = clientRef.current ?? active
+        reconcile
           .request<UsageStatsState>('usageStats.get')
           .then((next) => {
             if (isLatest()) setState(next)
           })
-          .catch(() => undefined)
+          .catch(() => {
+            if (isLatest() && before) setState(before)
+          })
       })
   }, [])
 
