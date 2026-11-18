@@ -1,34 +1,49 @@
 import {
-  AccountIcon,
-  HealthIcon,
-  SettingsIcon,
-  SignInIcon,
-  SignOutIcon,
-  SparkleIcon
-} from '@/components/icons'
-import { useEffect, useState, type ReactElement } from 'react'
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type KeyboardEvent,
+  type PointerEvent as ReactPointerEvent,
+  type ReactElement
+} from 'react'
 
-import { StatusDot, type StatusDotTone } from '@/components/status-dot'
-import { Badge } from '@/components/ui/badge'
-import { AvatarCircle } from '@/lib/chat-avatar'
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuLabel,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger
-} from '@/components/ui/dropdown-menu'
+import { type StatusDotTone } from '@/components/status-dot'
 import { useVideorcAccount } from '@/hooks/use-account'
-import {
-  accountDisplayName,
-  entitlementTierLabel,
-  isSignOutDisabled,
-  isSignedIn
-} from '@/lib/account'
+import { entitlementTierLabel, isSignOutDisabled } from '@/lib/account'
 import type { EntitlementPlan, EntitlementTier } from '@/lib/backend'
-import { VIDEORC_WEB_LINKS, openVideorcWebLink } from '@/lib/videorc-web-links'
-import { WORKSPACE_NAVIGATE_EVENT } from '@/lib/workspace-navigation'
+import { toast } from '@/lib/toast'
+
+import type { AccountMenuBodyProps, AccountMenuInitialFocus } from './account-menu-body'
+import { ACCOUNT_MENU_TRIGGER_CLASS, AccountMenuTriggerContent } from './account-menu-trigger'
+
+type AccountMenuBodyComponent = (props: AccountMenuBodyProps) => ReactElement
+
+// PERF-03: the menu implementation (Base UI menu + the product dropdown) is
+// a separate chunk, fetched when the user shows intent (hover, focus, press) or
+// asks to open it. It is never a mounted `lazy()` child: that would fetch the
+// chunk at startup and only hide the cost from the budget.
+let loadedBody: AccountMenuBodyComponent | null = null
+let bodyLoad: Promise<AccountMenuBodyComponent> | null = null
+
+export function loadAccountMenuBody(): Promise<AccountMenuBodyComponent> {
+  if (loadedBody) {
+    return Promise.resolve(loadedBody)
+  }
+  bodyLoad ??= import('./account-menu-body').then(
+    (module) => {
+      loadedBody = module.AccountMenuBody
+      return loadedBody
+    },
+    (error: unknown) => {
+      // A failed fetch must not stay cached: the next intent retries it.
+      bodyLoad = null
+      throw error
+    }
+  )
+  return bodyLoad
+}
 
 // The Videorc product-account control that replaces the bottom-left "connected"
 // status dot. Signed-out shows "Sign in" and links out to the web. Backend
@@ -36,6 +51,9 @@ import { WORKSPACE_NAVIGATE_EVENT } from '@/lib/workspace-navigation'
 // the menu's Health row; the trigger carries no dot, so its name stays the
 // words it shows (A-21). No platform accounts appear here, and no username is
 // fabricated.
+//
+// Until the first open this renders only a button that looks and announces
+// like the menu trigger. The first open swaps in the lazy menu already open.
 export function AccountMenu({
   plan = null,
   tier,
@@ -61,130 +79,152 @@ export function AccountMenu({
   onOpenSettings: () => void
 }): ReactElement {
   const { account, signIn, openAccount, signOut } = useVideorcAccount()
-  const signedIn = isSignedIn(account)
-  const displayName = accountDisplayName(account)
-  const tierLabel = entitlementTierLabel(tier, plan)
-  const signOutLocked = isSignOutDisabled(account, live)
-  const [open, setOpen] = useState(false)
+  const [Body, setBody] = useState<AccountMenuBodyComponent | null>(() => loadedBody)
+  const [openRequested, setOpenRequested] = useState(false)
+  // A mouse over the button swaps the real trigger in (closed) as soon as the
+  // chunk is warm, so the press that follows is the Base UI trigger's own and
+  // opens exactly as it did when the menu was eager.
+  const [hovered, setHovered] = useState(false)
+  // Never swap the node under a mouse press that is already in flight: the
+  // release would land on the new button and the click would reach neither.
+  const [pressing, setPressing] = useState(false)
+  const mounted = useRef(true)
+  const triggerRef = useRef<HTMLButtonElement | null>(null)
+  const initialFocus = useRef<AccountMenuInitialFocus>(null)
+  const staticHadFocus = useRef(false)
 
-  // FX5: workspace navigation arrives via main-process IPC (⌘1–9) or the
-  // custom navigate event — neither is a DOM interaction the menu can see, so
-  // the uncontrolled menu floated over the next tab. Close on any navigation
-  // signal, and on Escape regardless of where focus sits.
   useEffect(() => {
-    if (!open) {
-      return
+    mounted.current = true
+    return () => {
+      mounted.current = false
     }
-    const close = (): void => setOpen(false)
-    const onKeyDown = (event: KeyboardEvent): void => {
-      if (event.key === 'Escape') {
-        close()
+  }, [])
+
+  // Warm the chunk on intent. A failure here is silent: the open request
+  // below retries and reports it.
+  const warm = useCallback((): void => {
+    void loadAccountMenuBody().then(
+      (body) => {
+        if (mounted.current) {
+          setBody(() => body)
+        }
+      },
+      () => undefined
+    )
+  }, [])
+
+  const requestOpen = useCallback((focus: AccountMenuInitialFocus): void => {
+    initialFocus.current = focus
+    setOpenRequested(true)
+    loadAccountMenuBody().then(
+      (body) => {
+        if (mounted.current) {
+          setBody(() => body)
+        }
+      },
+      (error: unknown) => {
+        console.error('Videorc account menu failed to load', error)
+        if (mounted.current) {
+          setOpenRequested(false)
+          toast.error("Couldn't open the account menu", { description: 'Try again.' })
+        }
+      }
+    )
+  }, [])
+
+  // React 19 runs a ref's cleanup as the node leaves, while it still holds
+  // focus: that is when to learn whether the swap takes the user's place.
+  const trackFocusOnDetach = useCallback((node: HTMLButtonElement | null): (() => void) | void => {
+    if (node) {
+      return () => {
+        staticHadFocus.current = document.activeElement === node
       }
     }
-    window.addEventListener('keydown', onKeyDown, true)
-    window.addEventListener(WORKSPACE_NAVIGATE_EVENT, close)
-    const offShortcut = window.videorc?.onShortcutNavigate?.(close)
-    return () => {
-      window.removeEventListener('keydown', onKeyDown, true)
-      window.removeEventListener(WORKSPACE_NAVIGATE_EVENT, close)
-      offShortcut?.()
+  }, [])
+
+  const swapped = Body !== null && (openRequested || (hovered && !pressing))
+  // Swapping the button for the real trigger replaces the DOM node: a keyboard
+  // user whose focus sat on it keeps their place. An open menu takes focus
+  // itself, so only a swap that leaves the menu closed restores it.
+  useLayoutEffect(() => {
+    if (swapped && staticHadFocus.current && !openRequested) {
+      triggerRef.current?.focus()
     }
-  }, [open])
+    staticHadFocus.current = false
+  }, [swapped, openRequested])
+
+  if (Body && swapped) {
+    return (
+      <Body
+        account={account}
+        tierLabel={entitlementTierLabel(tier, plan)}
+        needsSignIn={needsSignIn}
+        statusTone={statusTone}
+        statusLabel={statusLabel}
+        statusPulse={statusPulse}
+        signOutLocked={isSignOutDisabled(account, live)}
+        initiallyOpen={openRequested}
+        initialFocus={initialFocus.current}
+        triggerRef={triggerRef}
+        onSignIn={signIn}
+        onOpenAccount={openAccount}
+        onSignOut={signOut}
+        onOpenHealth={onOpenHealth}
+        onOpenSettings={onOpenSettings}
+      />
+    )
+  }
+
+  const onKeyDown = (event: KeyboardEvent<HTMLButtonElement>): void => {
+    // The menu trigger also opens on the arrow keys.
+    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      event.preventDefault()
+      requestOpen(event.key === 'ArrowUp' ? 'last' : 'first')
+    }
+  }
+
+  const onPointerDown = (event: ReactPointerEvent<HTMLButtonElement>): void => {
+    warm()
+    if (event.pointerType !== 'mouse') {
+      return
+    }
+    setPressing(true)
+    const release = (): void => {
+      window.removeEventListener('pointerup', release, true)
+      window.removeEventListener('pointercancel', release, true)
+      // After the click that follows the release has been dispatched.
+      setTimeout(() => setPressing(false), 0)
+    }
+    window.addEventListener('pointerup', release, true)
+    window.addEventListener('pointercancel', release, true)
+  }
+
+  const onPointerEnter = (event: ReactPointerEvent<HTMLButtonElement>): void => {
+    warm()
+    if (event.pointerType === 'mouse') {
+      setHovered(true)
+    }
+  }
 
   return (
-    <DropdownMenu open={open} onOpenChange={setOpen}>
-      {/* Named by what it shows, "Sign in" or the account's name (plan 174
-          S0.5, A-21): an aria-label hid the words a voice user would say, and
-          the trigger already announces its menu. */}
-      <DropdownMenuTrigger
-        render={
-          <button
-            type="button"
-            className="flex h-7 min-w-0 items-center gap-1.5 rounded-row px-1.5 text-sm transition-colors hover:bg-sidebar-accent/60"
-          />
-        }
-      >
-        {/* The web account's avatar (uploaded on videorc.com or the Google
-              photo) through main's allowlisted cache; a signed-in account
-              without one gets initials — a face beats a generic glyph. 20 px,
-              so the initials keep the 11 px floor (A-21). */}
-        {account.status === 'signed-in' ? (
-          <AvatarCircle avatarUrl={account.avatarUrl} className="size-5" name={displayName} />
-        ) : (
-          <AccountIcon className="size-4 shrink-0 text-muted-foreground" weight="regular" />
-        )}
-        <span className="truncate text-xs font-medium">{displayName}</span>
-        {/* Plan 215 A5 (D7): a dot while chat or Buddy waits on the sign-in.
-            Bare, so the trigger's name stays the words it shows; the Go Live
-            check, the toast and the chat row carry the sentence. */}
-        {needsSignIn ? (
-          <span data-slot="account-needs-sign-in">
-            <StatusDot tone="warn" />
-          </span>
-        ) : null}
-      </DropdownMenuTrigger>
-      <DropdownMenuContent align="start" side="top" className="w-56">
-        <DropdownMenuLabel className="flex items-center justify-between gap-2 py-1.5">
-          <span className="flex min-w-0 items-center gap-2">
-            {account.status === 'signed-in' ? (
-              <AvatarCircle avatarUrl={account.avatarUrl} name={displayName} />
-            ) : null}
-            <span className="truncate text-sm font-medium text-foreground">
-              {signedIn ? displayName : 'Not signed in'}
-            </span>
-          </span>
-          <Badge variant="outline">{tierLabel}</Badge>
-        </DropdownMenuLabel>
-
-        <DropdownMenuSeparator />
-
-        {signedIn ? (
-          <DropdownMenuItem onClick={openAccount}>
-            <AccountIcon />
-            Account
-          </DropdownMenuItem>
-        ) : (
-          <DropdownMenuItem onClick={signIn}>
-            <SignInIcon />
-            Sign in
-          </DropdownMenuItem>
-        )}
-        <DropdownMenuItem onClick={() => openVideorcWebLink(VIDEORC_WEB_LINKS.premium)}>
-          <SparkleIcon />
-          View Premium
-        </DropdownMenuItem>
-
-        <DropdownMenuSeparator />
-
-        <DropdownMenuItem onClick={onOpenHealth}>
-          <HealthIcon />
-          Health
-          <span className="ml-auto">
-            <StatusDot tone={statusTone} label={statusLabel} pulse={statusPulse} />
-          </span>
-        </DropdownMenuItem>
-        <DropdownMenuItem onClick={onOpenSettings}>
-          <SettingsIcon />
-          Settings
-        </DropdownMenuItem>
-
-        {signedIn ? (
-          <>
-            <DropdownMenuSeparator />
-            <DropdownMenuItem disabled={signOutLocked} variant="destructive" onClick={signOut}>
-              <SignOutIcon />
-              Sign out
-            </DropdownMenuItem>
-            {/* Locked means disabled, with one reason (A-21): a menu skips a
-                disabled item, so the reason is text under it, not a tooltip. */}
-            {signOutLocked ? (
-              <DropdownMenuLabel>
-                Sign out is locked while you're recording or live.
-              </DropdownMenuLabel>
-            ) : null}
-          </>
-        ) : null}
-      </DropdownMenuContent>
-    </DropdownMenu>
+    // Named by what it shows, "Sign in" or the account's name (plan 174
+    // S0.5, A-21): an aria-label hid the words a voice user would say, and
+    // the trigger already announces its menu.
+    <button
+      type="button"
+      data-slot="dropdown-menu-trigger"
+      className={ACCOUNT_MENU_TRIGGER_CLASS}
+      aria-haspopup="menu"
+      aria-expanded={false}
+      aria-busy={openRequested || undefined}
+      ref={trackFocusOnDetach}
+      onPointerEnter={onPointerEnter}
+      onFocus={warm}
+      onPointerDown={onPointerDown}
+      onClick={(event) => requestOpen(event.detail === 0 ? 'first' : null)}
+      onKeyDown={onKeyDown}
+    >
+      <AccountMenuTriggerContent account={account} needsSignIn={needsSignIn} />
+    </button>
   )
 }
