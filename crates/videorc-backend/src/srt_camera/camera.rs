@@ -955,7 +955,7 @@ mod tests {
                 });
             }
             if calls == 2 {
-                return Err("port busy for a moment".to_string().into());
+                return Err(ListenError::port("port busy for a moment".to_string()));
             }
             on_event(ListenerEvent::Listening);
             stop.store(true, Ordering::Release);

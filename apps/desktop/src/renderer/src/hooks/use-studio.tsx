@@ -17024,8 +17024,9 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
     | null
   >(null)
   // Plan 250 D15: the streamer's own start (the dialog's, or a Retry)
-  // checks the SRT Camera once more, as the hold can run out after the
-  // dialog asked. Without "Go live anyway" for no signal, the start refuses,
+  // checks the SRT Camera right before `session.start`: the hold can run
+  // out after the dialog asked, and a Retry can come long after. A Retry
+  // never carries "Go live anyway". Without it, no signal refuses the start,
   // and Go Live opens again to ask.
   const dialogSrtStartGate = useCallback(
     (goLiveAnyway: boolean): GoLiveStartGate => ({
@@ -17504,11 +17505,13 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
           // persistent toast + Session-panel line, Retry re-runs this exact start.
           // A start gate's refusal is the caller's answer instead. Retry is
           // the streamer's own start, with the dialog's check, not an agent's.
+          // A cloud resume picks up a show that is already live: no Go Live
+          // to ask in, so no check.
           if (!(error instanceof GoLiveStartRefused)) {
             reportSessionStartFailure(
               error,
               () => {
-                const gate = dialogSrtStartGate(false)
+                const gate = resumingCloudShow ? undefined : dialogSrtStartGate(false)
                 void runStartSessionRef
                   .current?.(
                     streamingOverride,
@@ -17518,7 +17521,9 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
                     rpc,
                     gate
                   )
-                  .then(() => askAgainAfterSrtRefusal(gate))
+                  .then(() => {
+                    if (gate) askAgainAfterSrtRefusal(gate)
+                  })
               },
               resumingCloudShow ? 'resume' : streamingOverride ? 'live' : 'record'
             )

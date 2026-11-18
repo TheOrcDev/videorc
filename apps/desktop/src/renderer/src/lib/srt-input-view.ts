@@ -183,6 +183,10 @@ export function goLiveSrtAskFacts(
   })
 }
 
+/** The backend's detail line for the same case, word for word. */
+export const SRT_PASSPHRASE_MISSING =
+  "The passphrase didn't load. Turn the SRT input off and on to try again."
+
 /** D15: the Go Live ask's words. */
 export const SRT_NO_SIGNAL_CONFIRM = {
   title: 'Go live anyway?',

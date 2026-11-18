@@ -470,6 +470,7 @@ class StudioBackend {
   screenClearFailure: 'request-outcome-unknown-before-commit' | null = null
   sessionStartResponseDelayMs = 0
   sessionStartError: string | null = null
+  resumeFailuresRemaining = 0
   emitRecordingStatusBeforeStartResponse = false
   authoritativeRecordingStatusBeforeStartResponse: 'stopping' | 'idle' | 'failed' | null = null
   terminalRecordingStatusOnMethod: string | null = null
@@ -1659,6 +1660,10 @@ class StudioBackend {
       case 'cloud.show.resume':
         if (!this.cloudStatus?.show?.resumable) {
           throw new Error('There is no Videorc Cloud show to resume.')
+        }
+        if (this.resumeFailuresRemaining > 0) {
+          this.resumeFailuresRemaining -= 1
+          throw new Error('The cloud runner did not answer.')
         }
         this.recordingState = 'recording'
         this.confirmedSources = { ...(params.sources as SourceSelection) }
@@ -6838,6 +6843,91 @@ describe('real StudioProvider lifecycle', () => {
     )
     expect(latest().recording.recording.state).toBe('recording')
     expect(toastSpies.error).not.toHaveBeenCalled()
+  })
+
+  // Plan 250 D15 asks before a Go Live, and a resume is none: the show is
+  // already live. A Retry of a failed resume resumes again, with the SRT
+  // Camera's signal gone, and never turns into an ordinary Go Live.
+  it('retries a failed cloud resume as a resume, whatever the SRT Camera signal', async () => {
+    const backend = new StudioBackend()
+    backend.cloudStatus = resumableCloudStatus()
+    backend.resumeFailuresRemaining = 1
+    backend.srtInput = {
+      supported: true,
+      enabled: true,
+      port: 45678,
+      connection: 'wifi',
+      latencyMs: 120,
+      passphrase: 'a'.repeat(32),
+      cameraId: 'camera:srt-input',
+      cameraName: 'SRT Camera (port 45678)',
+      status: {
+        listening: true,
+        senderConnected: false,
+        senderSession: 1,
+        framesDecoded: 0,
+        signal: 'waiting',
+        detail: 'Waiting'
+      }
+    }
+    backend.deviceList = {
+      ...backend.deviceList,
+      devices: [
+        ...backend.deviceList.devices,
+        {
+          id: 'camera:srt-input',
+          name: 'SRT Camera (port 45678)',
+          kind: 'camera',
+          status: 'available'
+        }
+      ]
+    }
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const testDom = installProviderTestEnvironment(
+      createVideorcApi({
+        acknowledge: async () => true,
+        pending: async () => [],
+        acknowledgeProvider: async () => true,
+        pendingProvider: async () => []
+      })
+    )
+    restoreEnvironment = testDom.restore
+    const config = youtubeOauthStreamCaptureConfig()
+    localStorage.setItem(
+      STORAGE_KEYS.captureConfig,
+      JSON.stringify({
+        ...config,
+        sources: {
+          ...config.sources,
+          cameraId: 'camera:srt-input',
+          cameraName: 'SRT Camera (port 45678)'
+        },
+        layout: { ...config.layout, layoutPreset: 'screen-camera' }
+      })
+    )
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation => observations.at(-1)!
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(() => latest()?.core.wsStatus === 'connected')
+    await waitForObservation(() => latest().cloud.cloudStatus?.show?.resumable === true)
+    const resumes = () =>
+      backend.commands.filter((command) => command.method === 'cloud.show.resume').length
+    await act(async () => {
+      await latest().cloud.resumeCloudShow()
+    })
+    expect(resumes()).toBe(1)
+    await act(async () => {
+      latest().core.retrySessionStart()
+    })
+    await waitForObservation(() => resumes() === 2)
+    await waitForObservation(
+      () => latest().recording.recording.sessionId === 'cloud-resume-session'
+    )
+    expect(latest().core.goLiveConfirmationOpen).toBe(false)
+    expect(backend.commands.map((command) => command.method)).not.toContain('session.start')
   })
 
   // Plan 174 S3.1 (D2): main holds a quit or a main-window close while on air
@@ -17329,7 +17419,37 @@ describe('real StudioProvider lifecycle', () => {
     })
     await waitForObservation(() => latest()?.core.goLiveConfirmationOpen === true)
     expect(starts()).toHaveLength(2)
-  })
+
+    // A recording never asks (D15): its Retry records, with no signal.
+    await act(async () => {
+      latest()!.core.cancelGoLiveConfirmation()
+    })
+    backend.response = answer
+    backend.sessionStartError = 'The encoder rejected this start.'
+    await act(async () => {
+      latest()!.core.setCaptureConfig({
+        ...srtCameraConfig(),
+        streamEnabled: false,
+        recordEnabled: true
+      })
+    })
+    await waitForObservation(() => latest()?.core.startBlockedReason === null)
+    await act(async () => {
+      await latest()!.core.startSession()
+    })
+    expect(starts()).toHaveLength(3)
+    backend.sessionStartError = null
+    await act(async () => {
+      latest()!.core.retrySessionStart()
+    })
+    await waitForObservation(() => starts().length === 4)
+    await waitForObservation(() => latest()?.recording.recording.state === 'recording')
+    expect(latest()?.core.goLiveConfirmationOpen).toBe(false)
+    await act(async () => {
+      await latest()!.core.stopSession()
+    })
+    await waitForObservation(() => latest()?.recording.recording.state === 'idle')
+  }, 20_000)
 
   it('retains cancelled partial-setup cleanup and retries it before preparing again', async () => {
     const backend = new StudioBackend()

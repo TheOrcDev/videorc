@@ -71,6 +71,15 @@ describe('SRT Camera fields on the Camera row (plan 250, option B)', () => {
     expect(field.slice(label, value)).toContain('flex-wrap')
   })
 
+  it('say why when the passphrase did not load, with nothing to copy', () => {
+    const markup = render(state({ passphrase: '' }))
+    expect(markup).toContain('Turn the SRT input off and on to try again.')
+    expect(markup).not.toContain('data-testid="srt-input-passphrase"')
+    const copy = markup.match(/<button[^>]*>(?:(?!<\/button>).)*Copy<\/button>/)?.[0]
+    expect(copy).toContain('disabled')
+    expect(markup).toContain('New passphrase')
+  })
+
   it('lock while Videorc is reconnecting', () => {
     const markup = render(state(), false)
     expect(markup).toMatch(

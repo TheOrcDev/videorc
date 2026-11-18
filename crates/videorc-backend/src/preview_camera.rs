@@ -5562,7 +5562,8 @@ mod srt {
             });
             let zero_copy = should_skip_camera_capture_cpu_copy(true);
             let mut still: Option<((String, bool), Vec<u8>)> = None;
-            // Frames in a row whose pixels could not be read: one warning each run.
+            // Frames in a row whose pixels could not be read: one warning per
+            // streak, as a readable frame resets it.
             let mut unreadable = 0_u32;
             crate::srt_camera::camera::pace_loop(
                 shared,
@@ -5611,10 +5612,12 @@ mod srt {
                     let Some((_, bgra)) = still.as_ref() else {
                         return;
                     };
+                    // Copied before the lock: the compositor reads frames under it.
+                    let bytes = bgra.clone();
                     camera
                         .lock()
                         .unwrap_or_else(|poisoned| poisoned.into_inner())
-                        .publish_srt_frame(STILL_WIDTH, STILL_HEIGHT, bgra.clone(), None);
+                        .publish_srt_frame(STILL_WIDTH, STILL_HEIGHT, bytes, None);
                 },
             );
             let _ = receiver.join();

@@ -251,8 +251,9 @@ pub struct ListenError {
     pub message: String,
 }
 
-impl From<String> for ListenError {
-    fn from(message: String) -> Self {
+impl ListenError {
+    /// The port could not be opened, or the listener stopped.
+    pub fn port(message: String) -> Self {
         Self {
             trouble: ListenerTrouble::Port,
             message,
@@ -290,13 +291,16 @@ pub fn run(
     // SAFETY: plain libsrt call.
     let raw = unsafe { (api.create_socket)() };
     if raw == libsrt::SRT_INVALID_SOCK {
-        return Err(format!("Can't open an SRT socket: {}", api.last_error().1).into());
+        return Err(ListenError::port(format!(
+            "Can't open an SRT socket: {}",
+            api.last_error().1
+        )));
     }
     let listener = OpenSocket { api, socket: raw };
     for option in listener_options(config) {
-        set_option(api, listener.socket, &option)?;
+        set_option(api, listener.socket, &option).map_err(ListenError::port)?;
     }
-    bind_all_interfaces(api, listener.socket, config.port)?;
+    bind_all_interfaces(api, listener.socket, config.port).map_err(ListenError::port)?;
     let context: &CallbackContext = &context;
     // The callback goes on before `srt_listen`: libsrt refuses it on a socket
     // that already listens (`CUDT::installAcceptHook`, MN_ISCONNECTED), and
@@ -310,21 +314,19 @@ pub fn run(
         )
     };
     if installed == libsrt::SRT_ERROR {
-        return Err(format!(
+        return Err(ListenError::port(format!(
             "Can't judge callers on port {}: {}",
             config.port,
             api.last_error().1
-        )
-        .into());
+        )));
     }
     // SAFETY: plain libsrt call on our socket.
     if unsafe { (api.listen)(listener.socket, 4) } == libsrt::SRT_ERROR {
-        return Err(format!(
+        return Err(ListenError::port(format!(
             "Can't listen on port {}: {}",
             config.port,
             api.last_error().1
-        )
-        .into());
+        )));
     }
     on_event(ListenerEvent::Listening);
 
@@ -361,9 +363,13 @@ pub fn run(
             }
             // SAFETY: plain libsrt query on our socket.
             if unsafe { (api.getsockstate)(listener.socket) } != libsrt::SRTS_LISTENING {
-                return Err("The SRT listener closed by itself.".to_string().into());
+                return Err(ListenError::port(
+                    "The SRT listener closed by itself.".to_string(),
+                ));
             }
-            if let Some((caller, peer)) = accept_one(api, listener.socket)? {
+            if let Some((caller, peer)) =
+                accept_one(api, listener.socket).map_err(ListenError::port)?
+            {
                 let acceptance = context
                     .gate
                     .lock()

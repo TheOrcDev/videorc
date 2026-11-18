@@ -1,7 +1,7 @@
 //! The SRT Camera's stills (plan 250 D7, D12): a dark frame with centred
 //! text, wrapped into a 9:16 column in the middle.
 //! A portrait canvas, a vertical leg or a square box crops a camera to its
-//! middle, and the column survives every such crop.
+//! middle; with no camera pan or zoom, that crop keeps the column whole.
 //! The text is drawn with a font the system already has, so Videorc ships
 //! no font file. With none found the still has no text; the camera's detail
 //! line still says what it waits for.

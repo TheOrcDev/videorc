@@ -65,7 +65,7 @@ stops or sets up a sender.
 Videorc is the SRT listener. Any caller that follows these rules works:
 
 - **Mode:** SRT 1.3 or newer (the v5 handshake; an older caller is
-  refused), live mode, MPEG-TS carrying H.264 or HEVC. The passphrase is
+  refused with reject reason `SRT_REJ_VERSION` (8)), live mode, MPEG-TS carrying H.264 or HEVC. The passphrase is
   required; a caller without one, or with the wrong one, is refused by SRT
   itself with reject reason `SRT_REJ_BADSECRET` (10), or `SRT_REJ_UNSECURE`
   (11) without one.

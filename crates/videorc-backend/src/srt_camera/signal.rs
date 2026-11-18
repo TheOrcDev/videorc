@@ -37,8 +37,7 @@ pub enum ListenerTrouble {
     Port,
     /// libsrt itself did not load.
     Library,
-    /// The passphrase did not load from the secret store. Only a setting
-    /// change or a restart reads it again, so the line says so.
+    /// The passphrase did not load from the secret store.
     NoPassphrase,
 }
 
@@ -54,9 +53,11 @@ pub struct SignalTracker {
     frames_decoded: u64,
     /// The last access unit that could be decoded arrived then.
     last_unit_at: Option<Instant>,
-    /// Why the receiver is not listening; it tries again (D18).
+    /// Why the receiver is not listening. Port and Library try again by
+    /// themselves (D18); NoPassphrase waits for a setting change.
     listener_trouble: Option<ListenerTrouble>,
-    /// Decode calls that failed since the last frame.
+    /// Decode failures (errors, or a silent decoder's rebuild) since the
+    /// last frame.
     decode_failures: u32,
 }
 
@@ -111,7 +112,8 @@ impl SignalTracker {
         self.decode_failures
     }
 
-    /// The decoder refused a unit; it is rebuilt at the next key frame.
+    /// A unit failed to decode, or the decoder stayed silent for the hold;
+    /// it is rebuilt at the next key frame.
     pub fn on_decode_failed(&mut self) {
         self.decode_failures = self.decode_failures.saturating_add(1);
     }

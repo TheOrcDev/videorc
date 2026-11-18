@@ -160,8 +160,8 @@ pub fn candidate_paths(bundled: Option<&str>, debug_build: bool) -> Vec<String> 
     paths
 }
 
-/// Every load error starts with this, so the log names the library.
-pub const LOAD_FAILED: &str = "The SRT library didn't load";
+/// How every load error begins, in the log and the listener error.
+const LOAD_FAILED: &str = "The SRT library didn't load";
 
 static API: OnceLock<Api> = OnceLock::new();
 static LOADING: std::sync::Mutex<()> = std::sync::Mutex::new(());

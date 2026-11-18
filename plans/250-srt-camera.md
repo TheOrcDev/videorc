@@ -621,19 +621,24 @@ test -p videorc-backend`, typecheck, format, `test:scripts` and
     Turn the SRT input off and on to try again." (no timed retry: a read can
     show a Keychain prompt). A libsrt that fails to load is tried again,
     and the detail line says "The SRT library didn't load. Trying again."
-  - A decoder that fails three times in a row without a frame reads
-    "Receiving, but the picture doesn't decode".
+  - A decoder that fails three times in a row without a frame (an error,
+    or a silent stretch that rebuilds it) reads "Receiving, but the picture
+    doesn't decode".
   - A panic in the receiver starts it again after 1 s instead of leaving
     a dead port behind the still.
-  - The still wraps its text into a 9:16 column in the middle, so a
-    portrait canvas, a vertical leg or a square box never crops it. It is
+  - The still wraps its text into a 9:16 column in the middle, so the
+    centred crop of a portrait canvas, a vertical leg or a square box keeps
+    it whole (a camera pan or zoom can still cut it). It is
     flipped when the scene mirrors the camera (read from the compositor's
     scene commit), so it reads the right way.
   - The Go Live dialog's start checks the SRT Camera once more, after
     platform setup. Without "Go live anyway" for no signal, the start
     refuses, cleans up, and Go Live opens again to ask. A Retry of a
     failed start is the streamer's own: it gets the dialog's check, not an
-    agent's.
+    agent's. A cloud resume picks up a show that is already live, so its
+    Retry has no check and never opens Go Live (plan 184 C5b).
+  - With no passphrase loaded, Sources says so in place of the passphrase,
+    and Copy is off.
   - The UI reads the SRT input's state again until it lands, so Go Live
     never misses the ask because one read failed.
   - The frame tap is in development builds only.
