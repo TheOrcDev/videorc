@@ -8808,6 +8808,14 @@ impl Mp4FinalizationFault {
     }
 }
 
+/// Import keeps a file's name and accepts `.MKV` in any case (QA F3), so the
+/// MP4 export matches the extension without case too.
+fn has_mkv_extension(path: &Path) -> bool {
+    path.extension()
+        .and_then(|value| value.to_str())
+        .is_some_and(|value| value.eq_ignore_ascii_case("mkv"))
+}
+
 pub async fn remux_session(state: AppState, params: RemuxSessionParams) -> Result<String> {
     let take = load_mp4_export_take(&state, &params.session_id);
     remux_session_with_exporter(
@@ -8837,7 +8845,7 @@ where
         .map(PathBuf::from)
         .context("Session does not have an MKV output path")?;
 
-    if input.extension().and_then(|value| value.to_str()) != Some("mkv") {
+    if !has_mkv_extension(&input) {
         bail!("Only MKV session outputs can be remuxed to MP4");
     }
 
@@ -14778,7 +14786,7 @@ where
     let output_identity = output_ownership
         .as_ref()
         .map(|ownership| ownership.content_identity.clone());
-    if input.extension().and_then(|value| value.to_str()) != Some("mkv") {
+    if !has_mkv_extension(input) {
         return Ok(None);
     }
 
@@ -38595,6 +38603,42 @@ mod tests {
                 .to_string_lossy()
                 .starts_with(".videorc-export-")
         }));
+        drop(state);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    // QA F3: import accepts `.MKV` in any case and keeps the name; Export MP4
+    // must not refuse it for the extension's case.
+    #[tokio::test]
+    async fn export_mp4_accepts_an_uppercase_mkv_extension() {
+        let session_id = format!("session-uppercase-mkv-{}", Uuid::new_v4());
+        let directory =
+            std::env::temp_dir().join(format!("videorc-uppercase-mkv-export-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let state = test_state_with_file_database(&directory);
+        let mkv = directory.join("Imported.MKV");
+        std::fs::write(&mkv, b"imported matroska").unwrap();
+        create_test_recording_row(&state, &session_id, &mkv);
+
+        let published = remux_session_with_exporter(
+            state.clone(),
+            RemuxSessionParams {
+                session_id: session_id.clone(),
+                ffmpeg_path: None,
+            },
+            Mp4FinalizationFault::None,
+            |_ffmpeg_path, _input, output| async move {
+                std::fs::write(output, b"exported mp4")?;
+                Ok(())
+            },
+        )
+        .await
+        .expect("an uppercase .MKV exports");
+
+        let expected = directory.join("Imported.mp4");
+        assert_eq!(published, expected.display().to_string());
+        assert_eq!(std::fs::read(&expected).unwrap(), b"exported mp4");
+        assert!(mkv.exists(), "Export MP4 keeps the original");
         drop(state);
         std::fs::remove_dir_all(directory).unwrap();
     }
