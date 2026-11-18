@@ -105,6 +105,13 @@ export async function runReporting({ desktopRoot, webRoot }) {
   try {
     writeReport()
     h.env.VIDEORC_DISCORD_API_BASE_URL = h.web.httpOrigin
+    // The smoke launcher turns the stream report, usage stats and live status
+    // off unless a run asks for them (app-launcher.mjs). This case measures
+    // exactly those, so it asks; all three post to VIDEORC_API_BASE_URL, the
+    // loopback fake web (packaged builds never honor that override).
+    h.env.VIDEORC_STREAM_REPORT_EMAIL = '1'
+    h.env.VIDEORC_USAGE_STATS = '1'
+    h.env.VIDEORC_LIVE_STATUS = '1'
     await h.destinations(1)
     await h.launch()
     await h.addYouTube()
