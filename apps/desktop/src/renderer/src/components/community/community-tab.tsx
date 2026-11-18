@@ -420,7 +420,7 @@ function PeopleSection({
         ) : (
           <div className="overflow-hidden rounded-row border border-border bg-inset">
             <ScrollArea
-              ref={viewportRef}
+              viewportRef={viewportRef}
               aria-label="People"
               className="h-96"
               data-testid="community-people-list"
