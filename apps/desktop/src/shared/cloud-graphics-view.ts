@@ -34,6 +34,11 @@ export function createGraphicsView(
         return false
       })
     },
+    renew(snapshot) {
+      // PERF-06: same pixels and placement; only the expiries move.
+      for (const layer of snapshot.layers)
+        for (const s of shown) if (s.layer.id === layer.id) s.layer = layer
+    },
     async prepare(layer) {
       const bytes = graphicsPng(layer.asset)
       if (!bytes) throw Error('Invalid graphic')

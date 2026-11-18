@@ -31,7 +31,7 @@ export function createAvatarView(
   motion?: AvatarViewMotion
 ) {
   type Prepared = { image: HTMLImageElement; url: string }
-  let shown: { asset: Prepared; until: number | null }[] = []
+  let shown: { asset: Prepared; kind: AvatarLayer['kind']; until: number | null }[] = []
   /** The atlas layer on screen, painted every `step()`. */
   let animated: {
     canvas: HTMLCanvasElement
@@ -108,6 +108,11 @@ export function createAvatarView(
       }
       return { image, url }
     },
+    renew(snapshot: AvatarSnapshot) {
+      // PERF-06: same pixels and placement; only the expiries move.
+      for (const layer of snapshot.layers)
+        for (const s of shown) if (s.kind === layer.kind) s.until = layer.expiresAt
+    },
     async commit(snapshot: AvatarSnapshot, assets: Prepared[]) {
       clear()
       snapshot.layers.forEach((layer, i) => {
@@ -134,7 +139,7 @@ export function createAvatarView(
           })
           canvas.dataset.avatarLayer = layer.kind
           root.append(canvas)
-          shown.push({ asset, until: layer.expiresAt })
+          shown.push({ asset, kind: layer.kind, until: layer.expiresAt })
           animated = {
             canvas,
             context,
@@ -158,7 +163,7 @@ export function createAvatarView(
         })
         asset.image.dataset.avatarLayer = layer.kind
         root.append(asset.image)
-        shown.push({ asset, until: layer.expiresAt })
+        shown.push({ asset, kind: layer.kind, until: layer.expiresAt })
       })
       // Two frame callbacks cross a paint boundary. A DOM insertion alone is
       // not an applied-output observation; a stopped page must not acknowledge.

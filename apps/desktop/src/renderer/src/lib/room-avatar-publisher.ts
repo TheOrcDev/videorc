@@ -8,6 +8,7 @@ import {
   type CapabilityReceipt,
   CAPABILITY_RECEIPT_MAX_BYTES
 } from './room-media-v2'
+import { SentAssets, withReferences } from './room-asset-references'
 import {
   AVATAR_TOPIC,
   AVATAR_LEASE_MS,
@@ -92,6 +93,8 @@ export class RoomAvatarPublisher {
    * view; a late acknowledgement of an older revision never replaces it.
    */
   #accepted = new Map<string, number>()
+  /** PERF-06: which pictures each program page provably holds (survives `set`). */
+  #assets = new SentAssets()
   #revision = 0
   #generation = 0
   #busy = false
@@ -211,6 +214,7 @@ export class RoomAvatarPublisher {
     this.#generation++
     this.#receipts.clear()
     this.#sent.clear()
+    this.#assets.clear()
     this.#preview = null
     this.#report()
   }
@@ -350,6 +354,7 @@ export class RoomAvatarPublisher {
       if (!consumerSid(this.room, identity, receipt, Date.now())) {
         this.#receipts.delete(identity)
         this.#sent.delete(identity)
+        this.#assets.forget(identity)
       }
     for (const identity of this.#guestShown)
       if (!this.room.remoteParticipants.has(identity)) this.#guestShown.delete(identity)
@@ -402,7 +407,12 @@ export class RoomAvatarPublisher {
       const snapshot = this.#snapshot(output, orientation, layers)
       if (!parseAvatarSnapshot(snapshot, { ...snapshot, now: Date.now() }))
         throw new Error('Invalid avatar snapshot')
-      const bytes = new TextEncoder().encode(JSON.stringify(snapshot))
+      const held = this.#assets.held(
+        peer.identity,
+        { refs: receipt.graphics.refs === 1, applied: receipt.graphics.applied, sid: peer.sid },
+        this.room.localParticipant.sid
+      )
+      const bytes = new TextEncoder().encode(JSON.stringify(withReferences(snapshot, held)))
       if (bytes.length > AVATAR_MAX_BYTES) throw new Error('Avatar snapshot too large')
       const timeout = AbortSignal.timeout(8000)
       const bounded = <T>(job: Promise<T>): Promise<T> =>
@@ -443,6 +453,9 @@ export class RoomAvatarPublisher {
         return
       }
       await bounded(writer.close())
+      // Written whole: the page may commit it even if we were fenced since.
+      if (peer.sid === this.#session(peer.identity))
+        this.#assets.record(peer.identity, peer.sid, snapshot.publisherSid, snapshot)
       if (
         this.#closed ||
         generation !== this.#generation ||
@@ -500,6 +513,7 @@ export class RoomAvatarPublisher {
     if (participant) {
       this.#receipts.delete(participant.identity)
       this.#sent.delete(participant.identity)
+      this.#assets.forget(participant.identity)
     }
     this.#refresh()
   }
@@ -518,6 +532,7 @@ export class RoomAvatarPublisher {
     this.#preview = null
     this.#receipts.clear()
     this.#sent.clear()
+    this.#assets.clear()
     this.#guestShown.clear()
   }
 }
