@@ -235,7 +235,7 @@ export async function runAlphaSpike({
     manifest.versions.serverSdk = JSON.parse(
       await readFile(join(webRoot, 'node_modules/livekit-server-sdk/package.json'), 'utf8')
     ).version
-    const { AccessToken, RoomServiceClient } = server.webRequire('livekit-server-sdk')
+    const { AccessToken, RoomServiceClient, TrackSource } = server.webRequire('livekit-server-sdk')
     const { chromium } = createRequire(join(desktopRoot, 'package.json'))('playwright-core')
     const signalPort = await freePort(),
       tcpPort = await freePort(),
@@ -280,7 +280,14 @@ export async function runAlphaSpike({
     const browserCdp = await browser.newBrowserCDPSession()
     const token = async (show, identity, role) => {
       const t = new AccessToken(key, secret, { identity, ttl: 7200 })
-      t.addGrant(managedParityGrant({ role, room: show }))
+      const grant = { ...managedParityGrant({ role, room: show }) }
+      // The shared grant names sources as the JWT does ('camera'); the SDK
+      // takes TrackSource values and writes the names itself.
+      if (grant.canPublishSources)
+        grant.canPublishSources = grant.canPublishSources.map(
+          (source) => TrackSource[source.toUpperCase()]
+        )
+      t.addGrant(grant)
       return t.toJwt()
     }
     const artifact = async (file, kind, lane, caseName) => {
@@ -586,7 +593,9 @@ export async function runAlphaSpike({
           const contextClosures = await Promise.allSettled(contexts.map((c) => c.close()))
           try {
             for (const r of receivers) {
-              const file = await r.p.video().path()
+              // A remote (launchServer) browser has no local video path.
+              const file = join(caseDir, `${r.lane}-browser.webm`)
+              await r.p.video().saveAs(file)
               await artifact(file, 'browser-video', r.lane, name)
             }
           } finally {

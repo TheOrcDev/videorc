@@ -548,7 +548,9 @@ export async function managedHarness(
         'the Clips ring off and the backend idle'
       )
       for (const target of h.targets ?? []) {
-        if (target.streamKeySecretRef) continue
+        // An OAuth target (addYouTube) has no manual key: the app takes it
+        // from the prepared broadcast. A relaunch must not try to store one.
+        if (target.streamKeySecretRef || target.authMode === 'oauth') continue
         const saved = await h.rpc('streamTargets.manualKey.store', {
           targetId: target.id,
           streamKey: targetKeys.get(target.id)
