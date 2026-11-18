@@ -52,8 +52,23 @@ export const OUTPUT = Object.freeze({
   fps: 30,
   videoKbps: 4000
 })
+/**
+ * `VIDEORC_CLOUD_SMOKE_WAIT_SCALE` (1..10, default 1) stretches every readiness
+ * window of the cloud smokes for a loaded host, so a slow guest join reads as
+ * slow rather than as a product red. The harness only waits longer; no
+ * assertion changes.
+ */
+export function cloudSmokeWaitScale(env = process.env) {
+  const raw = env.VIDEORC_CLOUD_SMOKE_WAIT_SCALE
+  if (raw === undefined || raw === '') return 1
+  const scale = Number(raw)
+  if (!Number.isFinite(scale) || scale < 1 || scale > 10)
+    throw new Error('VIDEORC_CLOUD_SMOKE_WAIT_SCALE must be a number from 1 to 10')
+  return scale
+}
+const waitScale = cloudSmokeWaitScale()
 export const waitFor = async (fn, label, ms = 30000) => {
-  const deadline = Date.now() + ms
+  const deadline = Date.now() + ms * waitScale
   do {
     const value = await fn()
     if (value) return value

@@ -13,7 +13,7 @@ import { join, relative } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { managedParityGrant } from './fake-cloud-web-managed.mjs'
 import { installAlphaIceProxy, startAlphaTcpProxy } from './cloud-alpha-network.mjs'
-import { analyzeAlphaAcquisition } from './cloud-alpha-analysis.mjs'
+import { alphaFailureDetail, analyzeAlphaAcquisition } from './cloud-alpha-analysis.mjs'
 
 const sha = (bytes) => createHash('sha256').update(bytes).digest('hex')
 const wait = async (fn, label, timeout = 20000) => {
@@ -173,6 +173,9 @@ export async function runAlphaSpike({
     sfu,
     browserServer,
     browser,
+    // The local SFU's generated secret, withheld from any failure detail.
+    sfuSecret,
+    analysis,
     aborted = false
   const abort = () => {
     aborted = true
@@ -242,6 +245,7 @@ export async function runAlphaSpike({
       udpPort = await freePort()
     const key = 'alpha-local-fixture',
       secret = randomBytes(32).toString('hex')
+    sfuSecret = secret
     const config = join(output, 'sfu-local.yaml')
     // This config contains a newly generated local-only secret. Delete after child shutdown; never put it in evidence.
     await writeFile(
@@ -611,7 +615,7 @@ export async function runAlphaSpike({
       }
     manifest.status = 'acquired'
     await save()
-    const analysis = await analyzeAlphaAcquisition(output)
+    analysis = await analyzeAlphaAcquisition(output)
     await writeFile(join(output, 'analysis.json'), JSON.stringify(analysis, null, 2) + '\n')
     assert.equal(
       analysis.localGate,
@@ -619,11 +623,15 @@ export async function runAlphaSpike({
       'Alpha budget failed or evidence incomplete; production stays disabled'
     )
     return { output, report: analysis }
-  } catch {
+  } catch (error) {
+    // Say why: the redacted cause, and the gate's own failure names when the
+    // analysis ran. Never a token, URL or the local SFU secret.
+    const detail = alphaFailureDetail(error, analysis, [sfuSecret])
     manifest.status = 'failed'
     manifest.failure = 'Acquisition incomplete or budget failed; no transport approval'
+    manifest.failureDetail = detail
     await save()
-    throw new Error(`Alpha acquisition did not qualify; evidence: ${manifestPath}`)
+    throw new Error(`Alpha acquisition did not qualify (${detail}); evidence: ${manifestPath}`)
   } finally {
     process.off('SIGINT', abort)
     process.off('SIGTERM', abort)

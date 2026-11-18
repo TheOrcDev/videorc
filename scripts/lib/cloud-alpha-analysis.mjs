@@ -408,3 +408,23 @@ export async function analyzeAlphaAcquisition(root) {
     decisions
   }
 }
+
+/**
+ * Why an acquisition did not qualify, safe for evidence and the console: the
+ * gate's own failure names when the analysis ran, else the error's message
+ * with addresses, tokens and the named secrets withheld.
+ */
+export function alphaFailureDetail(error, analysis, secrets = []) {
+  if (analysis?.localGate === 'failed' && analysis.failures?.length)
+    return `local gate failed: ${analysis.failures.slice(0, 12).join(', ')}${
+      analysis.failures.length > 12 ? `, +${analysis.failures.length - 12} more` : ''
+    }`
+  let message = String(error?.message ?? error)
+  for (const secret of secrets)
+    if (secret) message = message.replaceAll(secret, '(credential withheld)')
+  return message
+    .replace(/\b(?:https?|wss?):\/\/[^\s"'<>]+/g, '(address withheld)')
+    .replace(/eyJ[\w-]+\.[\w-]+\.[\w-]+/g, '(token withheld)')
+    .split('\n')[0]
+    .slice(0, 500)
+}
