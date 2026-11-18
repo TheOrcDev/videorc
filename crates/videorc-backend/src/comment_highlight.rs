@@ -1289,10 +1289,11 @@ pub(crate) mod tests {
     /// Plan 224 C-G7 (review L9, the overlay forks): in a talk show on air
     /// the card goes to the runner's `card` slot, horizontal then vertical,
     /// with its rect (the default when none) and the ten-second life; the
-    /// compositor never draws it; only the show's own chat may be shown; a
-    /// clear takes it off both of the runner's outputs.
+    /// native card slots hold it as the room program's static graphics
+    /// source (plan 249 S9); only the show's own chat may be shown; a clear
+    /// takes it off both of the runner's outputs and out of both slots.
     #[tokio::test]
-    async fn a_talk_show_on_air_sends_the_card_to_the_runner_and_never_composes_it() {
+    async fn a_talk_show_on_air_sends_the_card_to_the_runner_and_holds_it_for_the_program() {
         let state = test_state();
         let mut runner =
             crate::cloud_talk::open_talk_show_for_tests(&state.cloud_show, "session-1", true);
@@ -1335,12 +1336,16 @@ pub(crate) mod tests {
             serde_json::json!({ "x": 0.04, "y": 0.6, "w": 0.44, "h": 0.36 }),
             "no vertical rect: the default card place"
         );
+        // Plan 249 S9: the native card slots hold the card while a room is
+        // open; they are the source of the targeted static graphics snapshot
+        // (`cloud_graphics::snapshot`). The desktop still streams nothing.
         assert!(
-            crate::captions::current_caption_overlay(&state.highlight_overlay).is_none(),
-            "the desktop composes nothing for a talk show's stream"
+            crate::captions::current_caption_overlay(&state.highlight_overlay).is_some(),
+            "the card is held natively as the room program's graphics source"
         );
         assert!(
-            crate::captions::current_caption_overlay(&state.simulcast_highlight_overlay).is_none()
+            crate::captions::current_caption_overlay(&state.simulcast_highlight_overlay).is_some(),
+            "the vertical card is held for the vertical program"
         );
 
         let mut other = params();
@@ -1361,6 +1366,10 @@ pub(crate) mod tests {
             assert_eq!(frame["slot"], "card");
             assert_eq!(frame["orientation"], orientation);
         }
+        assert!(crate::captions::current_caption_overlay(&state.highlight_overlay).is_none());
+        assert!(
+            crate::captions::current_caption_overlay(&state.simulcast_highlight_overlay).is_none()
+        );
     }
 
     /// A card live on a stream session through the real `set` path (the

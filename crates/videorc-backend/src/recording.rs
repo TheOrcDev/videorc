@@ -27716,7 +27716,7 @@ async fn prepare_cloud_stream_targets(
                     // The runner already holds the platforms: end the show
                     // rather than leave it holding for nobody.
                     let _ = context
-                        .end_current_show(crate::account::stored_session_token())
+                        .end_current_show_remembering(crate::account::stored_session_token())
                         .await;
                     Err(error)
                 }

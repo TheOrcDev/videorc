@@ -557,6 +557,17 @@ pub struct CloudRestart {
     pub destinations_resent: bool,
 }
 
+/// What an end nobody confirmed leaves behind (plan 249 S16).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UnconfirmedEnd {
+    /// An explicit End: the show stays reserved in Ending until a retried
+    /// End is confirmed; never a false completed state.
+    KeepEnding,
+    /// A Stop: the show leaves this runtime but stays remembered, so the
+    /// launch check and the next Go Live ask the web before anything else.
+    Remember,
+}
+
 /// Server-owned streaming interval; absent on legacy runners.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -5145,7 +5156,10 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
             return;
         }
         if feeding {
-            let _ = self.end_current_show(bearer).await;
+            // A Stop has no Retry End to show its error to: an end nobody
+            // confirmed is settled by the launch check and the next Go Live,
+            // which ask the web first (plan 222 review M1, D6).
+            let _ = self.end_current_show_remembering(bearer).await;
             return;
         }
         // A failed cloud leg of this session (show gone) is settled by the stop.
@@ -5161,6 +5175,26 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
     /// (plan 222 review M1): the runner may still hold the platforms, so the
     /// next launch or Go Live asks the web about it before any direct leg.
     pub async fn end_current_show(&self, bearer: Option<String>) -> Result<CloudStatus> {
+        self.end_current_show_unconfirmed(bearer, UnconfirmedEnd::KeepEnding)
+            .await
+    }
+
+    /// End the show for a Stop or a failed hand-over, where no Retry End
+    /// reaches the streamer: unconfirmed, the show leaves this runtime but
+    /// stays remembered for the launch check and the next Go Live.
+    pub(crate) async fn end_current_show_remembering(
+        &self,
+        bearer: Option<String>,
+    ) -> Result<CloudStatus> {
+        self.end_current_show_unconfirmed(bearer, UnconfirmedEnd::Remember)
+            .await
+    }
+
+    async fn end_current_show_unconfirmed(
+        &self,
+        bearer: Option<String>,
+        unconfirmed: UnconfirmedEnd,
+    ) -> Result<CloudStatus> {
         let deadline =
             tokio::time::Instant::now() + crate::cloud_control_web::CONTROL_INTENT_BUDGET;
         let (show_id, tx, on_web_control) = {
@@ -5220,7 +5254,7 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
                 ),
             }
         }
-        if !confirmed {
+        if !confirmed && unconfirmed == UnconfirmedEnd::KeepEnding {
             {
                 let mut runtime = lock(&self.slot);
                 runtime.ending = true;
@@ -5241,6 +5275,13 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
         let status = {
             let mut runtime = lock(&self.slot);
             runtime.clear_show(Some("ended-by-host".to_string()));
+            if !confirmed {
+                tracing::warn!(
+                    show = %show_id,
+                    "Videorc Cloud show end not confirmed by the runner or the web; the show stays remembered"
+                );
+                runtime.keep_remembering(&show_id);
+            }
             runtime.status()
         };
         self.hooks.emit_from(&self.slot);
