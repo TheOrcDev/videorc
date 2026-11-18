@@ -166,11 +166,17 @@ export function isVideorcCameraLabel(label: string): boolean {
   return label.trim().startsWith(VIDEORC_CAMERA_NAME)
 }
 
+/** Chromium's model suffix on a camera label: " (054c:0ee8)" (macOS, Linux). */
+const CHROMIUM_CAMERA_MODEL_SUFFIX = / \([0-9a-f]{4}:[0-9a-f]{4}\)$/i
+
 /**
- * The room camera for a Sources camera name, by its exact label, and never
- * Videorc Camera: it would carry the room program back into the room. The
- * room opens only an exact named device, so `undefined` means no camera
- * ("The selected camera is unavailable"), never Chromium's default.
+ * The room camera for a Sources camera name, and never Videorc Camera: it
+ * would carry the room program back into the room. Sources names the plain
+ * device ("ZV-E10M2") while Chromium labels it "ZV-E10M2 (054c:0ee8)", so an
+ * exact label wins, then the one label that is the name plus that suffix. The
+ * room opens only a named device, so `undefined` (no match, or two cameras
+ * with the same name) means no camera ("The selected camera is unavailable"),
+ * never Chromium's default.
  */
 export function pickRoomCameraDevice(
   inputs: readonly { deviceId: string; label: string }[],
@@ -178,9 +184,14 @@ export function pickRoomCameraDevice(
 ): string | undefined {
   if (!cameraName || isVideorcCameraLabel(cameraName)) return undefined
   const wanted = cameraName.trim().toLowerCase()
-  return inputs.find(
-    (input) => !isVideorcCameraLabel(input.label) && input.label.trim().toLowerCase() === wanted
-  )?.deviceId
+  const cameras = inputs.filter((input) => !isVideorcCameraLabel(input.label))
+  const exact = cameras.find((input) => input.label.trim().toLowerCase() === wanted)
+  if (exact) return exact.deviceId
+  const named = cameras.filter(
+    (input) =>
+      input.label.trim().replace(CHROMIUM_CAMERA_MODEL_SUFFIX, '').trim().toLowerCase() === wanted
+  )
+  return named.length === 1 ? named[0].deviceId : undefined
 }
 
 // --- Copy ----------------------------------------------------------------------

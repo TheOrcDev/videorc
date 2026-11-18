@@ -47,6 +47,7 @@ import {
 } from '../../../shared/cloud-avatar-motion'
 import type { AvatarMotionSource } from '../../../shared/cloud-avatar-view'
 import { pickRoomCameraDevice } from '../../../shared/room-program-camera'
+import { matchStrictAudioInput } from './mic-device-label'
 import type { AnimatorSettings } from '../../../shared/buddy-animator'
 import type { CohostPetAnimatorEvent } from '../../../shared/buddy-animator-public'
 import {
@@ -334,9 +335,10 @@ export async function microphoneDeviceIdFor(
   const inputs = devices
     .filter((device) => device.kind === 'audioinput')
     .map((device) => ({ deviceId: device.deviceId, label: device.label }))
-  return inputs.find(
-    (input) => input.label.trim().toLowerCase() === microphoneName.trim().toLowerCase()
-  )?.deviceId
+  // Chromium decorates the label ("Shure MV7+ (14ed:1019)", "… (Built-in)");
+  // the plan 080 matcher strips that and never picks the OS default entry.
+  const match = matchStrictAudioInput(microphoneName, inputs)
+  return 'deviceId' in match ? match.deviceId : undefined
 }
 
 export class TalkShowRoomClient {

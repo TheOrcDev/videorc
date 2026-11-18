@@ -136,6 +136,16 @@ describe('room program camera contract (plan 249 S23)', () => {
     ).toBeUndefined()
     expect(pickRoomCameraDevice([videorc, facetime], null)).toBeUndefined()
     expect(pickRoomCameraDevice([videorc, facetime], 'Gone')).toBeUndefined()
+
+    // 0.31.1: Chromium appends the USB model, Sources names the plain device.
+    const sony = { deviceId: 'zv', label: 'ZV-E10M2 (054c:0ee8)' }
+    expect(pickRoomCameraDevice([videorc, sony], 'ZV-E10M2')).toBe('zv')
+    expect(pickRoomCameraDevice([videorc, sony], 'ZV-E10')).toBeUndefined()
+    // An exact label wins over a decorated one; two decorated twins are refused.
+    const plain = { deviceId: 'plain', label: 'ZV-E10M2' }
+    expect(pickRoomCameraDevice([sony, plain], 'ZV-E10M2')).toBe('plain')
+    const twin = { deviceId: 'zv2', label: 'ZV-E10M2 (054c:0ee8)' }
+    expect(pickRoomCameraDevice([sony, twin], 'ZV-E10M2')).toBeUndefined()
   })
 
   it('says what the camera shows, never claiming the encoded stream', () => {
