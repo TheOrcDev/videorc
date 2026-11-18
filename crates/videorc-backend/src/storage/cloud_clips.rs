@@ -30,6 +30,18 @@ impl Database {
             .map(|s| serde_json::from_str(s).map_err(Into::into))
             .collect()
     }
+    /// Every clip journal, newest first: what admission prunes from (L2).
+    pub(crate) fn all_cloud_clips(&self) -> Result<Vec<Job>> {
+        let c = self.lock()?;
+        let mut q =
+            c.prepare("SELECT journal_json FROM cloud_program_clips ORDER BY rowid DESC")?;
+        let rows = q
+            .query_map([], |r| r.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows.iter()
+            .map(|s| serde_json::from_str(s).map_err(Into::into))
+            .collect()
+    }
     pub(crate) fn delete_cloud_clip(&self, id: &str) -> Result<()> {
         self.lock()?
             .execute("DELETE FROM cloud_program_clips WHERE id=?1", [id])?;

@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useStudioCloud, useStudioCore, useStudioDiagnostics } from '@/hooks/use-studio'
 import type { CloudArchiveView } from '@/lib/backend'
+import { BackendRequestError } from '@/backendClient'
 import { PanelSection } from '@/components/panel-section'
 import { Button } from '@/components/ui/button'
 import { Alert, AlertDescription } from '@/components/ui/alert'
@@ -71,8 +72,13 @@ export function LibraryCloudArchive() {
     try {
       await run()
       if (client) setJobs(await client.requestTyped('cloud.archive.status'))
-    } catch {
-      setError('The archive action could not finish. Check its status before retrying.')
+    } catch (failure) {
+      // L3: a full list says what to do; other refusals keep the generic line.
+      setError(
+        failure instanceof BackendRequestError && failure.code === 'archive-full'
+          ? failure.message
+          : 'The archive action could not finish. Check its status before retrying.'
+      )
     } finally {
       setBusy(false)
     }

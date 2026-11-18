@@ -19,6 +19,18 @@ use tokio::sync::watch;
 
 pub const MAX_BYTES: u64 = 256 * 1024 * 1024;
 pub const MAX_SEGMENTS: usize = 512;
+/// Finished archives (complete, cancelled) kept for the list (L3). Each keeps
+/// only its owner file in an otherwise empty hidden folder.
+const KEEP_FINISHED: usize = 8;
+/// partial/corrupt archives that keep their staging, ≤ `MAX_BYTES` each (L3).
+/// Neither can be resumed; Discard was their only way out.
+const KEEP_RETAINED: usize = 2;
+/// Interrupted archives waiting for Resume or Discard (L3).
+const MAX_RESUMABLE: usize = 4;
+/// The refusal when `MAX_RESUMABLE` archives wait, and its words.
+pub const RESUME_OR_DISCARD: &str = "archive-resume-or-discard";
+pub const RESUME_OR_DISCARD_WORDS: &str =
+    "Resume or discard the unfinished archives below before starting another.";
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Segment {
@@ -312,6 +324,44 @@ pub fn full_coverage(j: &Journal) -> bool {
         })
 }
 
+/// L3: room for one new archive. Archives used to be capped at 16 for the
+/// app's lifetime, and every partial one kept up to 256 MiB in a hidden folder
+/// until the user discarded it. Now the oldest finished and partial/corrupt
+/// archives are discarded (the same owned-file removal as Discard), a row
+/// whose folder is gone leaves (nothing of it is on disk), and only archives
+/// that can still be resumed count against the cap. Never touches a running one.
+fn admit(db: &Database) -> Result<()> {
+    let running: Vec<String> = workers().lock().unwrap().keys().cloned().collect();
+    let (mut finished, mut retained, mut resumable) = (0, 0, 0);
+    for j in db.all_cloud_archives()? {
+        if running.contains(&j.id) {
+            continue;
+        }
+        if !j.root.exists() {
+            db.delete_cloud_archive(&j.id)?;
+            continue;
+        }
+        let over = match j.state.as_str() {
+            "complete" | "cancelled" => {
+                finished += 1;
+                finished > KEEP_FINISHED
+            }
+            "partial" | "corrupt" => {
+                retained += 1;
+                retained > KEEP_RETAINED
+            }
+            _ => {
+                resumable += 1;
+                false
+            }
+        };
+        if over && let Err(error) = discard(db, &j.id) {
+            tracing::warn!("old cloud archive {} was not discarded: {error}", j.id);
+        }
+    }
+    ensure!(resumable < MAX_RESUMABLE, RESUME_OR_DISCARD);
+    Ok(())
+}
 pub async fn start(
     db: Database,
     api: VideorcApiClient,
@@ -325,7 +375,7 @@ pub async fn start(
         workers().lock().unwrap().is_empty(),
         "archive-already-running"
     );
-    ensure!(db.cloud_archives()?.len() < 16, "archive-journal-full");
+    admit(&db)?;
     let id = uuid::Uuid::new_v4().to_string();
     let availability: serde_json::Value =
         api.archive_json(&token, &show, None, "GET", None).await?;
@@ -864,5 +914,129 @@ mod tests {
         assert!(claim_take_file("archive-test-take").is_err());
         drop(a);
         assert!(claim_take_file("archive-test-take").is_ok());
+    }
+
+    fn archive_rows(db: &Database) -> i64 {
+        db.lock()
+            .unwrap()
+            .query_row("SELECT count(*) FROM cloud_program_archives", [], |r| {
+                r.get(0)
+            })
+            .unwrap()
+    }
+
+    /// Hidden archive folders under `folder` and the bytes inside them.
+    fn staging_on_disk(folder: &std::path::Path) -> (usize, u64) {
+        let (mut folders, mut bytes) = (0, 0);
+        for entry in std::fs::read_dir(folder).unwrap() {
+            let entry = entry.unwrap();
+            if !entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".videorc-archive-")
+            {
+                continue;
+            }
+            folders += 1;
+            for file in std::fs::read_dir(entry.path()).unwrap() {
+                bytes += file.unwrap().metadata().unwrap().len();
+            }
+        }
+        (folders, bytes)
+    }
+
+    /// L3: after 16 archives in the app's lifetime every start was refused
+    /// (`archive-journal-full`), and each partial archive kept its staging
+    /// files in a hidden folder until the user discarded it. Twenty cycles of
+    /// a partial archive with real staging files, each followed by a start:
+    /// no start may be refused for the journal, and rows, hidden folders and
+    /// staging bytes must stay bounded.
+    #[tokio::test]
+    async fn twenty_partial_archives_never_fill_the_journal_or_the_disk() {
+        let temp = crate::test_temp_dir::TestTempDir::new("archive-twenty");
+        let folder = temp.join("output");
+        std::fs::create_dir(&folder).unwrap();
+        let db = Database::open_in_memory_for_tests();
+        let address =
+            crate::cloud_clips::test_api::serve(std::sync::Arc::new(|_: &reqwest::Url| {
+                (200, br#"{"available":false}"#.to_vec())
+            }))
+            .await;
+        let api = VideorcApiClient::for_base_url(format!("http://{address}"));
+        let staging = vec![7u8; 1024 * 1024];
+        for n in 1..=20 {
+            let mut j = journal();
+            j.id = uuid::Uuid::new_v4().to_string();
+            j.show_id = "sh_fixture".into();
+            j.folder = folder.clone();
+            j.root = folder.join(format!(".videorc-archive-{}", j.id));
+            std::fs::create_dir(&j.root).unwrap();
+            let mut owner = j.create(&db, "owner").unwrap();
+            owner.write_all(j.id.as_bytes()).unwrap();
+            for name in ["seg-0.ts", "archive.part"] {
+                j.create(&db, name).unwrap().write_all(&staging).unwrap();
+            }
+            j.segments.push(segment(0));
+            j.state = "partial".into();
+            j.save(&db).unwrap();
+            let refused = start(
+                db.clone(),
+                api.clone(),
+                "token".into(),
+                "sh_fixture".into(),
+                "h".into(),
+                folder.clone(),
+                "ffmpeg".into(),
+            )
+            .await
+            .err()
+            .map(|e| e.to_string())
+            .unwrap_or_default();
+            let (folders, bytes) = staging_on_disk(&folder);
+            eprintln!(
+                "archive {n}: start said {refused:?}; rows {}, hidden folders {folders}, {:.1} MiB staged",
+                archive_rows(&db),
+                bytes as f64 / 1048576.0
+            );
+            assert_ne!(refused, "archive-journal-full", "archive {n}");
+            assert_eq!(refused, "managed-replay-unqualified", "archive {n}");
+        }
+        let (folders, bytes) = staging_on_disk(&folder);
+        assert!(archive_rows(&db) <= 3, "rows {}", archive_rows(&db));
+        assert!(folders <= 3, "hidden folders {folders}");
+        assert!(bytes <= 3 * 2 * 1024 * 1024 + 4096, "staged bytes {bytes}");
+    }
+
+    /// L3: archives that can still be resumed are the user's: never discarded,
+    /// capped, and the refusal says what to do.
+    #[tokio::test]
+    async fn resumable_archives_are_kept_and_capped_in_words() {
+        let temp = crate::test_temp_dir::TestTempDir::new("archive-resumable");
+        let folder = temp.join("output");
+        std::fs::create_dir(&folder).unwrap();
+        let db = Database::open_in_memory_for_tests();
+        for n in 0..MAX_RESUMABLE {
+            let mut j = journal();
+            j.id = format!("resumable-{n}");
+            j.folder = folder.clone();
+            j.root = folder.join(format!(".videorc-archive-{}", j.id));
+            std::fs::create_dir(&j.root).unwrap();
+            j.create(&db, "owner")
+                .unwrap()
+                .write_all(j.id.as_bytes())
+                .unwrap();
+            j.state = "interrupted".into();
+            j.save(&db).unwrap();
+        }
+        let mut gone = journal();
+        gone.id = "folder-deleted".into();
+        gone.root = folder.join(".videorc-archive-folder-deleted");
+        gone.state = "interrupted".into();
+        gone.save(&db).unwrap();
+        assert_eq!(admit(&db).unwrap_err().to_string(), RESUME_OR_DISCARD);
+        assert!(db.cloud_archive("folder-deleted").unwrap().is_none());
+        assert_eq!(archive_rows(&db), MAX_RESUMABLE as i64);
+        discard(&db, "resumable-0").unwrap();
+        admit(&db).expect("room after a discard");
     }
 }
