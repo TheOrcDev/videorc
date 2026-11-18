@@ -5,6 +5,8 @@ edition = "2024"
 license = "AGPL-3.0-only"
 
 [dependencies]
+# Plan 250: the SRT Camera's stills draw text with a system font (none shipped).
+ab_glyph = "0.2.32"
 anyhow = "1.0"
 # Plan 190: optional here only for the `live-background-gl-check` feature; the
 # Linux target table below always enables them.
@@ -76,7 +78,7 @@ objc2-io-surface = { version = "0.3.2", default-features = false, features = ["I
 objc2-metal = { version = "0.3.2", default-features = false, features = ["std", "MTLDevice", "MTLCommandQueue", "MTLCommandBuffer", "MTLCommandEncoder", "MTLBlitCommandEncoder", "MTLRenderCommandEncoder", "MTLRenderPass", "MTLRenderPipeline", "MTLComputeCommandEncoder", "MTLComputePipeline", "MTLAllocation", "MTLLibrary", "MTLTexture", "MTLPixelFormat", "MTLResource", "MTLTypes", "MTLBuffer", "MTLVertexDescriptor", "MTLArgument", "MTLDepthStencil", "MTLSampler", "MTLDrawable", "objc2-io-surface", "objc2-core-foundation"] }
 objc2-quartz-core = { version = "0.3.2", default-features = false, features = ["std", "objc2-core-foundation", "objc2-metal", "CALayer", "CAMetalLayer", "CATransaction"] }
 objc2-screen-capture-kit = { version = "0.3.2", default-features = false, features = ["SCShareableContent", "SCStream", "block2", "dispatch2", "libc", "objc2-core-foundation", "objc2-core-graphics", "objc2-core-media"] }
-objc2-video-toolbox = { version = "0.3.2", default-features = false, features = ["std", "VTCompressionProperties", "VTCompressionSession", "VTErrors", "VTSession", "block2", "objc2", "objc2-core-media", "objc2-core-video"] }
+objc2-video-toolbox = { version = "0.3.2", default-features = false, features = ["std", "VTCompressionProperties", "VTCompressionSession", "VTDecompressionProperties", "VTDecompressionSession", "VTErrors", "VTSession", "block2", "objc2", "objc2-core-media", "objc2-core-video"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # L4 portal screen capture (Plan 0006): org.freedesktop.portal.ScreenCast over

@@ -11130,6 +11130,12 @@ function resolvePackagedFfmpegBinDir(): string | null {
   return existsSync(binary) ? binDir : null
 }
 
+function resolvePackagedLibsrtPath(): string | null {
+  if (!app.isPackaged || process.platform !== 'darwin') return null
+  const library = join(process.resourcesPath, 'libsrt', 'lib', 'libsrt.dylib')
+  return existsSync(library) ? library : null
+}
+
 // Single-backend policy: reap only children a previous Videorc launch recorded.
 // Never scan command lines; substring process matching can kill cargo builds,
 // editors, or unrelated processes.
@@ -11451,6 +11457,9 @@ function startBackendWithRegistryLock(): void {
       VIDEORC_BUNDLED_FFMPEG_PATH: ffmpegBinDir
         ? join(ffmpegBinDir, process.platform === 'win32' ? 'ffmpeg.exe' : 'ffmpeg')
         : '',
+      // Plan 250: the SRT Camera's library, shipped beside FFmpeg. A dev
+      // backend finds the staged or Homebrew copy itself.
+      VIDEORC_BUNDLED_LIBSRT_PATH: resolvePackagedLibsrtPath() ?? '',
       VIDEORC_MANAGED_BACKGROUND_ROOTS: managedBackgroundRoots().join(delimiter),
       VIDEORC_MANAGED_THUMBNAIL_ROOT: join(app.getPath('userData'), 'scheduled-thumbnails'),
       // Metrics journal and per-session FFmpeg logs land beside backend.log

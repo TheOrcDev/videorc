@@ -110,6 +110,10 @@ async fn list_macos_devices(ffmpeg_path: &str) -> DeviceList {
     let native_camera_rows_present = !native_cameras.devices.is_empty();
     warnings.extend(native_cameras.warnings);
     devices.extend(native_cameras.devices);
+    // Plan 250 D3: the SRT Camera, while its setting is on.
+    devices.extend(crate::srt_camera::camera_device(
+        &crate::srt_camera::current_state(),
+    ));
 
     let probed = probe_avfoundation_devices_uncached(ffmpeg_path).await;
     if let Ok(av_devices) = probed.as_ref() {

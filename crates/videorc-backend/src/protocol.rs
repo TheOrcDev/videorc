@@ -5809,6 +5809,95 @@ pub struct VirtualCameraPlatformReportParams {
     pub message: Option<String>,
 }
 
+/// Plan 250 D11: how the sender reaches this computer. It sets the SRT
+/// receive latency; there is no free number.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SrtInputConnection {
+    Cable,
+    #[default]
+    Wifi,
+    Internet,
+}
+
+/// What the SRT Camera shows (plan 250 D7, D8, D12).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SrtCameraSignal {
+    /// No frame yet, or the hold ran out: the waiting still.
+    Waiting,
+    /// Frames arrive.
+    Receiving,
+    /// Frames stopped less than 2 s ago: the last frame holds.
+    Holding,
+    /// The stream's video is in a codec Videorc can't show: the codec still.
+    UnsupportedCodec,
+}
+
+/// Why the last sender was turned away (plan 250 D14, D17).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SrtSenderRefusal {
+    WrongPassphrase,
+    SecondSender,
+}
+
+/// The SRT Camera's live state. `detail` is the camera's detail line (D17).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SrtCameraStatus {
+    /// The port is open: a scene in use holds the camera (D16).
+    pub listening: bool,
+    pub signal: SrtCameraSignal,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub height: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fps: Option<f64>,
+    /// "HEVC", "H.264", or the name of a codec Videorc can't show.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codec: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refusal: Option<SrtSenderRefusal>,
+    /// A sender is connected, sending or not (a pairing check sends nothing).
+    pub sender_connected: bool,
+    /// Counts the senders accepted since the camera started; names the
+    /// current or last one.
+    pub sender_session: u32,
+    /// Frames decoded from that sender. Changes alone are not announced.
+    pub frames_decoded: u64,
+    pub detail: String,
+}
+
+/// `srtInput.get`, `srtInput.set`, `srtInput.renewPassphrase` and the
+/// `srtInput.changed` event (plan 250 D3, D4, D11).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SrtInputState {
+    /// False off macOS in this plan (D9): the setting is absent there.
+    pub supported: bool,
+    pub enabled: bool,
+    pub port: u16,
+    pub connection: SrtInputConnection,
+    pub latency_ms: u32,
+    pub passphrase: String,
+    pub camera_id: String,
+    pub camera_name: String,
+    pub status: SrtCameraStatus,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SrtInputSetParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connection: Option<SrtInputConnection>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RenameScreenParams {

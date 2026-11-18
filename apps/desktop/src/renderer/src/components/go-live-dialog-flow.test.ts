@@ -4,9 +4,11 @@ import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { TooltipProvider } from '@/components/ui/tooltip'
+import { SrtInputContext, type SrtInputControls } from '@/hooks/use-srt-input'
 import type {
   GoLiveDestinationPreflight,
   GoLivePreflight,
+  SrtInputState,
   StreamMetadataDraft,
   StreamTargetSettings
 } from '@/lib/backend'
@@ -14,6 +16,8 @@ import { defaultCaptureConfig, type CaptureConfig } from '@/lib/capture'
 import type { GoLiveCaptionsReadiness } from '@/lib/captions-preflight'
 import type { GoLivePhase } from '@/lib/go-live-dialog-view'
 import { DEFAULT_OVERLAY_LAYOUT } from '@/lib/overlay-layout'
+import { streamingWithoutTargets } from '@/lib/go-live-exclusions'
+import { SRT_CAMERA_ID } from '@/lib/srt-input-view'
 
 import { GO_LIVE_EXCLUDED_NOTE, GoLiveConfirmationDialog } from './go-live-dialog'
 
@@ -22,6 +26,7 @@ import { GO_LIVE_EXCLUDED_NOTE, GoLiveConfirmationDialog } from './go-live-dialo
 // without …" leaves a destination out of this livestream only.
 
 const mocked = vi.hoisted(() => ({
+  srt: null as unknown,
   captureConfig: undefined as unknown,
   banners: [] as unknown[],
   sharedVideo: null as unknown,
@@ -107,6 +112,7 @@ beforeEach(() => {
   document.body.append(container)
   root = createRoot(container)
   mocked.captureConfig = twitchOn()
+  mocked.srt = null
   mocked.banners = []
   mocked.sharedVideo = null
   mocked.topology = { state: 'idle' }
@@ -120,6 +126,8 @@ afterEach(() => {
 })
 
 type DialogProps = Parameters<typeof GoLiveConfirmationDialog>[0]
+
+let lastProps: DialogProps | null = null
 
 function render(props: Partial<DialogProps> = {}): DialogProps {
   const full: DialogProps = {
@@ -141,10 +149,62 @@ function render(props: Partial<DialogProps> = {}): DialogProps {
     onRecheck: vi.fn(),
     ...props
   }
+  lastProps = full
+  const srt = mocked.srt as SrtInputState | null
+  const controls: SrtInputControls = {
+    state: srt,
+    stateRef: { current: srt },
+    connected: true,
+    set: async () => ({ ok: true }),
+    renewPassphrase: async () => ({ ok: true })
+  }
   act(() =>
-    root.render(createElement(TooltipProvider, null, createElement(GoLiveConfirmationDialog, full)))
+    root.render(
+      createElement(
+        SrtInputContext.Provider,
+        { value: controls },
+        createElement(TooltipProvider, null, createElement(GoLiveConfirmationDialog, full))
+      )
+    )
   )
   return full
+}
+
+/** The same open dialog, with the SRT Camera's signal now `signal`. */
+function setSrt(
+  signal: SrtInputState['status']['signal'],
+  patch: Partial<SrtInputState> = {},
+  status: Partial<SrtInputState['status']> = {}
+): void {
+  mocked.srt = srtState(signal, patch, status)
+  render(lastProps ?? {})
+}
+
+function srtState(
+  signal: SrtInputState['status']['signal'],
+  patch: Partial<SrtInputState> = {},
+  status: Partial<SrtInputState['status']> = {}
+): SrtInputState {
+  return {
+    supported: true,
+    enabled: true,
+    port: 45678,
+    connection: 'wifi',
+    latencyMs: 120,
+    passphrase: 'a'.repeat(32),
+    cameraId: SRT_CAMERA_ID,
+    cameraName: 'SRT Camera (port 45678)',
+    status: {
+      listening: true,
+      senderConnected: signal !== 'waiting',
+      senderSession: 1,
+      framesDecoded: 10,
+      signal,
+      detail: 'x',
+      ...status
+    },
+    ...patch
+  }
 }
 
 const dialog = (): HTMLElement => document.querySelector<HTMLElement>('[role=dialog]')!
@@ -589,5 +649,440 @@ describe('Go Live privacy step', () => {
       'The scheduled event on YouTube is Unlisted. Only people with the link can watch.'
     )
     expect(stepButton('cancel').textContent).toBe('Go back')
+  })
+})
+
+// Plan 250 D15: every way the dialog goes on (the primary,
+// ⌘↵, the privacy step, "Go live anyway", "Go live on {ready}") asks what is
+// still unanswered in this attempt, with the SRT Camera's signal as it is
+// now. An answer counts until the dialog closes.
+describe('Go Live SRT Camera ask', () => {
+  const withSrtCamera = (config: CaptureConfig): CaptureConfig => ({
+    ...config,
+    sources: { ...config.sources, cameraId: SRT_CAMERA_ID },
+    layout: { ...config.layout, layoutPreset: 'screen-camera' }
+  })
+  const youtubeAndTwitch = (): CaptureConfig =>
+    withSrtCamera(
+      withTargets((target) =>
+        target.id === 'youtube' || target.platform === 'twitch'
+          ? { ...target, enabled: true }
+          : target
+      )
+    )
+  const youtubeReady: GoLivePreflight = {
+    valid: true,
+    issues: [],
+    destinations: [
+      destination({ targetId: 'youtube', platform: 'youtube', label: 'YouTube' }),
+      destination()
+    ]
+  }
+  const partialSetup = () => ({
+    streaming: (mocked.captureConfig as CaptureConfig).streaming,
+    failures: [],
+    readyLabels: ['Twitch']
+  })
+  // An ask that is up; one being answered closes with an animation.
+  const srtAsk = (): HTMLElement | null =>
+    document.querySelector<HTMLElement>('[data-testid=go-live-srt-no-signal-dialog][data-open]')
+  const answer = (testId: string): void => {
+    act(() => document.querySelector<HTMLButtonElement>(`[data-testid=${testId}-confirm]`)!.click())
+  }
+  const goBack = (testId: string): void => {
+    act(() => document.querySelector<HTMLButtonElement>(`[data-testid=${testId}-cancel]`)!.click())
+  }
+  const readyButton = (): HTMLButtonElement =>
+    dialog().querySelector<HTMLButtonElement>('[data-testid=go-live-continue-partial]')!
+
+  beforeEach(() => {
+    mocked.captureConfig = withSrtCamera(twitchOn())
+  })
+
+  it('asks for the SRT Camera when its signal goes while the privacy step is up', () => {
+    mocked.captureConfig = youtubeAndTwitch()
+    mocked.srt = srtState('receiving')
+    const props = render({
+      preflight: youtubeReady,
+      draft: { ...draft('Friday build'), defaultPrivacy: 'unlisted' }
+    })
+    act(() => primary().click())
+    expect(document.querySelector('[data-testid=go-live-privacy-dialog]')).not.toBeNull()
+    setSrt('waiting')
+    answer('go-live-privacy')
+    expect(props.onConfirm).not.toHaveBeenCalled()
+    expect(srtAsk()?.textContent).toContain('The SRT Camera has no signal.')
+    answer('go-live-srt-no-signal')
+    expect(props.onConfirm).toHaveBeenCalledTimes(1)
+    expect(props.onConfirm).toHaveBeenCalledWith(true)
+  })
+
+  it('tells the start no "Go live anyway" was given while the camera has a signal', () => {
+    mocked.srt = srtState('receiving')
+    const props = render()
+    act(() => primary().click())
+    expect(props.onConfirm).toHaveBeenCalledWith(false)
+  })
+
+  it('waits for "Go live anyway" on the way to the ready destinations, button and ⌘↵', () => {
+    mocked.srt = srtState('waiting')
+    const props = render({ partialSetup: partialSetup() })
+    act(() => readyButton().click())
+    expect(props.onContinuePartial).not.toHaveBeenCalled()
+    expect(srtAsk()).not.toBeNull()
+    goBack('go-live-srt-no-signal')
+    pressCommandEnter()
+    expect(props.onContinuePartial).not.toHaveBeenCalled()
+    expect(srtAsk()).not.toBeNull()
+    answer('go-live-srt-no-signal')
+    expect(props.onContinuePartial).toHaveBeenCalledTimes(1)
+    expect(props.onContinuePartial).toHaveBeenCalledWith(true)
+    expect(props.onConfirm).not.toHaveBeenCalled()
+  })
+
+  it('takes an answer on the way in as the answer on the way to the ready destinations', async () => {
+    mocked.srt = srtState('waiting')
+    const props = render()
+    act(() => primary().click())
+    answer('go-live-srt-no-signal')
+    expect(props.onConfirm).toHaveBeenCalledTimes(1)
+    // Platform setup left some destinations behind; the dialog is still open.
+    render({ ...props, partialSetup: partialSetup() })
+    act(() => readyButton().click())
+    expect(props.onContinuePartial).toHaveBeenCalledTimes(1)
+    // The answered ask has gone (its close animates), and none came back.
+    await vi.waitFor(() => expect(srtAsk()).toBeNull())
+  })
+
+  it('forgets the answers when the dialog closes', () => {
+    mocked.srt = srtState('waiting')
+    const props = render()
+    act(() => primary().click())
+    answer('go-live-srt-no-signal')
+    render({ ...props, open: false })
+    render({ ...props, open: true, partialSetup: partialSetup() })
+    act(() => readyButton().click())
+    expect(props.onContinuePartial).not.toHaveBeenCalled()
+    expect(srtAsk()).not.toBeNull()
+  })
+
+  it('asks nothing more while the SRT Camera has a signal', () => {
+    mocked.srt = srtState('receiving')
+    const props = render()
+    act(() => primary().click())
+    expect(props.onConfirm).toHaveBeenCalledTimes(1)
+    render({ ...props, partialSetup: partialSetup() })
+    pressCommandEnter()
+    expect(props.onContinuePartial).toHaveBeenCalledTimes(1)
+    expect(srtAsk()).toBeNull()
+  })
+
+  // The SRT Camera's ask wraps the one place the dialog
+  // goes on, so it comes after the privacy step (unchanged since 0.24.0)
+  // and never lets the start run before its answer.
+  it('asks the privacy step, then the SRT Camera, before going live', () => {
+    mocked.captureConfig = youtubeAndTwitch()
+    mocked.srt = srtState('waiting')
+    const unlisted = { ...draft('Friday build'), defaultPrivacy: 'unlisted' as const }
+    const props = render({ preflight: youtubeReady, draft: unlisted })
+    act(() => primary().click())
+    expect(document.querySelector('[data-testid=go-live-privacy-dialog]')).not.toBeNull()
+    expect(srtAsk()).toBeNull()
+    answer('go-live-privacy')
+    expect(props.onConfirm).not.toHaveBeenCalled()
+    expect(srtAsk()).not.toBeNull()
+    answer('go-live-srt-no-signal')
+    expect(props.onConfirm).toHaveBeenCalledTimes(1)
+  })
+
+  it('asks at the way on when the signal goes after the privacy answer', () => {
+    mocked.captureConfig = youtubeAndTwitch()
+    mocked.srt = srtState('receiving')
+    const unlisted = { ...draft('Friday build'), defaultPrivacy: 'unlisted' as const }
+    const props = render({ preflight: youtubeReady, draft: unlisted })
+    act(() => primary().click())
+    answer('go-live-privacy')
+    expect(props.onConfirm).toHaveBeenCalledTimes(1)
+    // Platform setup left some behind, and the signal went meanwhile.
+    render({ ...props, partialSetup: partialSetup() })
+    setSrt('waiting')
+    act(() => readyButton().click())
+    expect(props.onContinuePartial).not.toHaveBeenCalled()
+    expect(srtAsk()).not.toBeNull()
+    answer('go-live-srt-no-signal')
+    expect(props.onContinuePartial).toHaveBeenCalledTimes(1)
+  })
+
+  it('asks once for the same facts, and again for new ones', () => {
+    mocked.srt = srtState('waiting')
+    const props = render()
+    act(() => primary().click())
+    answer('go-live-srt-no-signal')
+    expect(props.onConfirm).toHaveBeenCalledTimes(1)
+    // The signal comes back and goes again: the same facts, no new ask.
+    setSrt('receiving')
+    setSrt('waiting')
+    act(() => primary().click())
+    expect(srtAsk()).toBeNull()
+    expect(props.onConfirm).toHaveBeenCalledTimes(2)
+    // A codec Videorc can't show is another fact: asked.
+    setSrt('unsupportedCodec')
+    act(() => primary().click())
+    expect(props.onConfirm).toHaveBeenCalledTimes(2)
+    expect(srtAsk()).not.toBeNull()
+  })
+
+  // An answer covers the signal, the streamed legs
+  // and the port senders dial. A refusal comes and goes on its own (10 s,
+  // or the next sender in), so it neither asks again nor clears an answer;
+  // the ask shows it as context. Counters and the rate change nothing.
+  it('asks again after a port change, never for a refusal or the frame rate', () => {
+    mocked.srt = srtState(
+      'waiting',
+      {},
+      { refusal: 'wrongPassphrase', detail: 'Sender refused: wrong passphrase' }
+    )
+    const props = render()
+    act(() => primary().click())
+    expect(srtAsk()?.textContent).toContain('Sender refused: wrong passphrase')
+    answer('go-live-srt-no-signal')
+    expect(props.onConfirm).toHaveBeenCalledTimes(1)
+
+    // The refusal clears, the rate and counters move: no new ask.
+    setSrt('waiting', {}, { fps: 30, framesDecoded: 99, detail: 'Waiting for SRT stream' })
+    act(() => primary().click())
+    expect(srtAsk()).toBeNull()
+    expect(props.onConfirm).toHaveBeenCalledTimes(2)
+
+    setSrt('waiting', { port: 45679 })
+    act(() => primary().click())
+    expect(props.onConfirm).toHaveBeenCalledTimes(2)
+    expect(srtAsk()).not.toBeNull()
+    expect(srtAsk()?.textContent).not.toContain('refused')
+    answer('go-live-srt-no-signal')
+    expect(props.onConfirm).toHaveBeenCalledTimes(3)
+
+    // A refusal appearing on the same port: no new ask.
+    setSrt('waiting', { port: 45679 }, { refusal: 'secondSender' })
+    act(() => primary().click())
+    expect(srtAsk()).toBeNull()
+    expect(props.onConfirm).toHaveBeenCalledTimes(4)
+  })
+
+  // ⌘↵ on the main path goes through the ask too, and
+  // does nothing while the ask is up, even once the signal is back.
+  it('asks on ⌘↵ with no signal and goes live only on "Go live anyway"', () => {
+    mocked.srt = srtState('waiting')
+    const props = render()
+    pressCommandEnter()
+    expect(props.onConfirm).not.toHaveBeenCalled()
+    expect(props.onContinuePartial).not.toHaveBeenCalled()
+    expect(srtAsk()).not.toBeNull()
+    answer('go-live-srt-no-signal')
+    expect(props.onConfirm).toHaveBeenCalledTimes(1)
+  })
+
+  // ⌘↵ never acts while the SRT ask is up, whatever
+  // changes under it. Here a partial setup arrives whose ready destinations
+  // don't show the camera: unguarded, ⌘↵ would go on to them.
+  it('ignores ⌘↵ while the SRT ask is up', () => {
+    const config = withSrtCamera(
+      withTargets((target) =>
+        target.platform === 'twitch' || target.id === 'tiktok'
+          ? { ...target, enabled: true }
+          : target
+      )
+    )
+    mocked.captureConfig = {
+      ...config,
+      layout: { ...config.layout, layoutPreset: 'screen-only' },
+      simulcastFollowsProgram: false,
+      lastVerticalPreset: 'vertical-camera-bottom'
+    }
+    mocked.srt = srtState('waiting')
+    const props = render()
+    act(() => primary().click())
+    expect(srtAsk()).not.toBeNull()
+    render({
+      ...props,
+      partialSetup: {
+        streaming: streamingWithoutTargets(config.streaming, ['tiktok']),
+        failures: [],
+        readyLabels: ['Twitch']
+      }
+    })
+    expect(srtAsk()).not.toBeNull()
+    pressCommandEnter(srtAsk()!)
+    pressCommandEnter()
+    expect(props.onConfirm).not.toHaveBeenCalled()
+    expect(props.onContinuePartial).not.toHaveBeenCalled()
+  })
+
+  // A signal back while the ask is up closes it, back to
+  // the dialog; nothing starts until Go live is pressed again.
+  it('closes the ask when the signal comes back, and starts nothing on its own', () => {
+    for (const signal of ['receiving', 'holding'] as const) {
+      mocked.srt = srtState('waiting')
+      const props = render({ onConfirm: vi.fn() })
+      act(() => primary().click())
+      expect(srtAsk()).not.toBeNull()
+      setSrt(signal)
+      expect(srtAsk()).toBeNull()
+      expect(props.onConfirm).not.toHaveBeenCalled()
+      act(() => primary().click())
+      expect(srtAsk()).toBeNull()
+      expect(props.onConfirm).toHaveBeenCalledTimes(1)
+    }
+  })
+
+  // The way to the ready destinations asks about what they
+  // stream. Only the vertical destination showed the SRT Camera, and it
+  // failed its setup: the screen-only rest needs no SRT ask.
+  it('asks on the way to the ready destinations only about what they stream', () => {
+    const config = withSrtCamera(
+      withTargets((target) =>
+        target.platform === 'twitch' || target.id === 'tiktok'
+          ? { ...target, enabled: true }
+          : target
+      )
+    )
+    mocked.captureConfig = {
+      ...config,
+      layout: { ...config.layout, layoutPreset: 'screen-only' },
+      simulcastFollowsProgram: false,
+      lastVerticalPreset: 'vertical-camera-bottom'
+    }
+    mocked.srt = srtState('waiting')
+    const props = render({
+      partialSetup: {
+        streaming: streamingWithoutTargets(config.streaming, ['tiktok']),
+        failures: [],
+        readyLabels: ['Twitch']
+      }
+    })
+    act(() => readyButton().click())
+    expect(srtAsk()).toBeNull()
+    expect(props.onContinuePartial).toHaveBeenCalledTimes(1)
+  })
+})
+
+// #1316 as 0.24.0 has it, which the SRT input leaves alone: every press of Go live asks again, a privacy that changed
+// while the dialog stayed open is asked for as it is now, and "Go live on
+// {ready}" goes on to the prepared broadcasts without the step.
+describe('Go Live privacy step on each attempt', () => {
+  const youtubeOn = (): CaptureConfig =>
+    withTargets((target) =>
+      target.id === 'youtube' || target.platform === 'twitch'
+        ? { ...target, enabled: true }
+        : target
+    )
+  const youtubeReady: GoLivePreflight = {
+    valid: true,
+    issues: [],
+    destinations: [
+      destination({ targetId: 'youtube', platform: 'youtube', label: 'YouTube' }),
+      destination()
+    ]
+  }
+  // A step that is up; one being answered closes with an animation.
+  const step = (): HTMLElement | null =>
+    document.querySelector<HTMLElement>('[data-testid=go-live-privacy-dialog][data-open]')
+  const confirmStep = (): void => {
+    act(() =>
+      document.querySelector<HTMLButtonElement>('[data-testid=go-live-privacy-confirm]')!.click()
+    )
+  }
+
+  it('asks again when the confirm kept the dialog open, and for a privacy that changed', () => {
+    mocked.captureConfig = youtubeOn()
+    const withPrivacy = (privacy: StreamMetadataDraft['defaultPrivacy']): StreamMetadataDraft => ({
+      ...draft('Friday build'),
+      defaultPrivacy: privacy
+    })
+    const props = render({ preflight: youtubeReady, draft: withPrivacy('unlisted') })
+    act(() => primary().click())
+    expect(step()?.textContent).toContain('YouTube is Unlisted.')
+    confirmStep()
+    expect(props.onConfirm).toHaveBeenCalledTimes(1)
+
+    // The confirm kept the dialog open (the check found the event changed):
+    // Go live asks again, for the privacy it is now.
+    render({ ...props, draft: withPrivacy('private') })
+    act(() => primary().click())
+    expect(props.onConfirm).toHaveBeenCalledTimes(1)
+    expect(step()?.textContent).toContain('YouTube is Private.')
+    confirmStep()
+    expect(props.onConfirm).toHaveBeenCalledTimes(2)
+
+    // The same privacy again: still a fresh attempt, still asked.
+    act(() => primary().click())
+    expect(props.onConfirm).toHaveBeenCalledTimes(2)
+    expect(step()?.textContent).toContain('YouTube is Private.')
+  })
+
+  // Two Unlisted YouTube destinations confirmed,
+  // one fails setup. 0.24.0 goes on to the one left without asking again.
+  it('goes on to the ready subset of a confirmed privacy without asking again', () => {
+    mocked.captureConfig = withTargets((target) =>
+      target.id === 'youtube' || target.id === 'youtube-vertical'
+        ? { ...target, enabled: true }
+        : target
+    )
+    const twoYouTube: GoLivePreflight = {
+      valid: true,
+      issues: [],
+      destinations: [
+        destination({ targetId: 'youtube', platform: 'youtube', label: 'YouTube' }),
+        destination({
+          targetId: 'youtube-vertical',
+          platform: 'youtube',
+          label: 'YouTube Vertical'
+        })
+      ]
+    }
+    const unlisted = { ...draft('Friday build'), defaultPrivacy: 'unlisted' as const }
+    const props = render({ preflight: twoYouTube, draft: unlisted })
+    act(() => primary().click())
+    expect(step()?.textContent).toContain('Unlisted')
+    confirmStep()
+    expect(props.onConfirm).toHaveBeenCalledTimes(1)
+    const streaming = (mocked.captureConfig as CaptureConfig).streaming
+    render({
+      ...props,
+      partialSetup: {
+        streaming: streamingWithoutTargets(streaming, ['youtube-vertical']),
+        failures: [],
+        readyLabels: ['YouTube']
+      }
+    })
+    act(() =>
+      dialog().querySelector<HTMLButtonElement>('[data-testid=go-live-continue-partial]')!.click()
+    )
+    expect(props.onContinuePartial).toHaveBeenCalledTimes(1)
+  })
+
+  // Privacy edited after the setup prepared the
+  // broadcast. 0.24.0 goes on to the prepared broadcast without asking.
+  it('goes on to the prepared broadcast after Privacy is edited, without asking', () => {
+    mocked.captureConfig = youtubeOn()
+    const unlisted = { ...draft('Friday build'), defaultPrivacy: 'unlisted' as const }
+    const props = render({ preflight: youtubeReady, draft: unlisted })
+    act(() => primary().click())
+    confirmStep()
+    expect(props.onConfirm).toHaveBeenCalledTimes(1)
+    render({
+      ...props,
+      draft: { ...unlisted, defaultPrivacy: 'private' },
+      partialSetup: {
+        streaming: (mocked.captureConfig as CaptureConfig).streaming,
+        failures: [],
+        readyLabels: ['YouTube']
+      }
+    })
+    act(() =>
+      dialog().querySelector<HTMLButtonElement>('[data-testid=go-live-continue-partial]')!.click()
+    )
+    expect(props.onContinuePartial).toHaveBeenCalledTimes(1)
+    expect(step()).toBeNull()
   })
 })

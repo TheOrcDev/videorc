@@ -17,6 +17,7 @@ import { ObsImportDialog } from '@/components/obs-import-dialog'
 import { PageStack } from '@/components/page'
 import { PanelSection } from '@/components/panel-section'
 import { ChatEmoteSettingsFields } from '@/components/settings/seventv-emotes-field'
+import { SrtInputSection } from '@/components/settings/srt-input-section'
 import { PrivacySettingsSection } from '@/components/settings/usage-stats-field'
 import { StatusBadge } from '@/components/status-badge'
 import { Button } from '@/components/ui/button'
@@ -213,6 +214,9 @@ export function GeneralSettings(): ReactElement {
           </FieldGroup>
           <ObsImportDialog open={obsImportOpen} onOpenChange={setObsImportOpen} />
         </PanelSection>
+
+        {/* Plan 250: a stream from another app or device as a camera (Beta, macOS). */}
+        <SrtInputSection />
 
         <PrivacySettingsSection />
 

@@ -21,8 +21,10 @@ import {
   DialogTitle
 } from '@/components/ui/dialog'
 import { ShortcutKeys } from '@/components/ui/shortcut-keys'
+import { useSrtInput } from '@/hooks/use-srt-input'
 import { useStudioBanners, useStudioCore } from '@/hooks/use-studio'
 import { simulcastArmed } from '@/lib/capture'
+import { SRT_NO_SIGNAL_CONFIRM, goLiveSrtAskFacts } from '@/lib/srt-input-view'
 import type {
   CommentsReadState,
   CommentsWriteState,
@@ -83,6 +85,9 @@ export type GoLiveResolution = 'exclude' | 'include' | 'manual-rtmp'
 // first focus is the title (or the primary); the pending primary names the
 // phase. The dialog rides the studio state machine (no second one) through
 // the props GoLiveDialogHost threads in.
+/** Where the dialog goes on: the confirm, or "Go live on {ready}". */
+type GoOnPath = 'confirm' | 'partial'
+
 export function GoLiveConfirmationDialog({
   open,
   pending,
@@ -118,8 +123,10 @@ export function GoLiveConfirmationDialog({
   platform?: string
   onPatchDraft: ReturnType<typeof useStudioCore>['patchStreamMetadataDraft']
   onCancel: () => void
-  onConfirm: () => void
-  onContinuePartial: () => void
+  /** `goLiveAnyway`: the streamer chose "Go live anyway" for the SRT
+   * Camera's current no-signal facts. */
+  onConfirm: (goLiveAnyway: boolean) => void
+  onContinuePartial: (goLiveAnyway: boolean) => void
   onContinueWithoutCaptions: () => void
   onResolveBlocker: (targetId: string, resolution: GoLiveResolution) => void
   /** Signs the platform in again (opens the browser). */
@@ -146,12 +153,19 @@ export function GoLiveConfirmationDialog({
   // The privacy step is up: a YouTube destination goes live Unlisted or
   // Private, and the streamer has pressed Go live once.
   const [privacyConfirmOpen, setPrivacyConfirmOpen] = useState(false)
+  // Plan 250 D15: the SRT Camera's ask is up for this path, and the facts
+  // ("Go live anyway") the streamer accepted while the dialog is open.
+  const [srtAskPath, setSrtAskPath] = useState<GoOnPath | null>(null)
+  const [srtAccepted, setSrtAccepted] = useState<readonly string[]>([])
+  const srtInput = useSrtInput()
   const [wasOpen, setWasOpen] = useState(open)
   if (open !== wasOpen) {
     setWasOpen(open)
     if (!open) {
       setReconnected([])
       setPrivacyConfirmOpen(false)
+      setSrtAskPath(null)
+      setSrtAccepted([])
     }
   }
 
@@ -234,7 +248,39 @@ export function GoLiveConfirmationDialog({
   const confirm = (): void => {
     if (!canConfirm) return
     if (privacyCopy) setPrivacyConfirmOpen(true)
-    else onConfirm()
+    else goOn('confirm')
+  }
+  // Plan 250 D15: the one place the dialog goes on, after
+  // every other step. The SRT Camera's ask wraps it: when the destinations
+  // this path streams show the camera without a signal, and "Go live
+  // anyway" was not accepted for these same facts while the dialog is open.
+  // With the SRT input off or a signal, it goes on at once.
+  const srtFacts = (path: GoOnPath): string | null =>
+    goLiveSrtAskFacts(
+      srtInput.state,
+      path === 'partial' && partialSetup
+        ? { ...sentCapture, streaming: partialSetup.streaming }
+        : sentCapture
+    )
+  const goOn = (path: GoOnPath, accepted: readonly string[] = srtAccepted): void => {
+    const facts = srtFacts(path)
+    if (facts !== null && !accepted.includes(facts)) {
+      setSrtAskPath(path)
+      return
+    }
+    setSrtAskPath(null)
+    if (path === 'partial') onContinuePartial(facts !== null)
+    else onConfirm(facts !== null)
+  }
+  // The signal came back while the ask was up. Back to the
+  // dialog without going live; the next Go live goes straight through.
+  if (srtAskPath !== null && srtFacts(srtAskPath) === null) setSrtAskPath(null)
+  const goLiveAnyway = (): void => {
+    if (!srtAskPath) return
+    const facts = srtFacts(srtAskPath)
+    const accepted = facts === null ? srtAccepted : [...srtAccepted, facts]
+    setSrtAccepted(accepted)
+    goOn(srtAskPath, accepted)
   }
 
   // ⌘↵ is the primary, wherever focus is in the dialog (B-14). While the
@@ -242,11 +288,11 @@ export function GoLiveConfirmationDialog({
   // focused "Change privacy" takes a plain Enter.
   const onKeyDown = (event: KeyboardEvent<HTMLDivElement>): void => {
     if (event.key !== 'Enter' || !isCommandKey(event, platform)) return
-    if (privacyConfirmOpen) return
+    if (privacyConfirmOpen || srtAskPath) return
     event.preventDefault()
     if (event.repeat) return
     if (partialSetup) {
-      if (canContinuePartial) onContinuePartial()
+      if (canContinuePartial) goOn('partial')
     } else {
       confirm()
     }
@@ -513,7 +559,7 @@ export function GoLiveConfirmationDialog({
               data-testid="go-live-continue-partial"
               disabled={!canContinuePartial}
               variant="go-live"
-              onClick={onContinuePartial}
+              onClick={() => goOn('partial')}
             >
               <LivestreamIcon data-icon="inline-start" weight="fill" />
               {pending
@@ -569,10 +615,26 @@ export function GoLiveConfirmationDialog({
             onCancel={() => setPrivacyConfirmOpen(false)}
             onConfirm={() => {
               setPrivacyConfirmOpen(false)
-              onConfirm()
+              goOn('confirm')
             }}
           />
         ) : null}
+        <ConfirmDialog
+          cancelLabel={SRT_NO_SIGNAL_CONFIRM.cancelLabel}
+          confirmLabel={SRT_NO_SIGNAL_CONFIRM.confirmLabel}
+          confirmVariant="default"
+          description={SRT_NO_SIGNAL_CONFIRM.description}
+          open={srtAskPath !== null && (srtAskPath === 'partial' ? canContinuePartial : canConfirm)}
+          testId="go-live-srt-no-signal"
+          title={SRT_NO_SIGNAL_CONFIRM.title}
+          onCancel={() => setSrtAskPath(null)}
+          onConfirm={goLiveAnyway}
+        >
+          {/* A sender refused just now says why (D17's line), as context. */}
+          {srtInput.state?.status.refusal ? (
+            <p className="text-meta text-muted-foreground">{srtInput.state.status.detail}</p>
+          ) : null}
+        </ConfirmDialog>
       </DialogContent>
     </Dialog>
   )

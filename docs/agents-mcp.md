@@ -216,9 +216,13 @@ only you can fix, such as signing in, a missing stream key or Premium, is
 always refused. A YouTube destination that would go live Unlisted or
 Private is refused too ("YouTube is Unlisted. Only people with the link can
 watch."), the way the dialog asks you once more before it goes live that
-way; the agent passes `allowNonPublic` only when you asked for it. While an
-agent's Go Live runs, the Go Live button and the dialog wait for it. It records too only
-when Output's recording is on, as the dialog does.
+way; the agent passes `allowNonPublic` only when you asked for it. When the
+camera going live is the SRT Camera and it has no signal, the call is
+refused before that ("The SRT Camera has no signal."), the way the dialog
+asks "Go live anyway?" first; the agent passes `allowNoSignal` only when you
+asked for it. Recording never asks. While an agent's Go Live runs, the Go
+Live button and the dialog wait for it. It records too only when Output's
+recording is on, as the dialog does.
 
 ### Arranging the picture
 

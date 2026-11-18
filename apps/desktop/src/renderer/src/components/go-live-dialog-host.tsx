@@ -52,8 +52,8 @@ export function GoLiveDialogHost(): ReactElement {
       partialSetup={goLivePartialSetup}
       throughCloud={goesThroughCloud(cloudStatus)}
       onCancel={cancelGoLiveConfirmation}
-      onConfirm={() => void confirmGoLive()}
-      onContinuePartial={() => void continueGoLiveWithReadyDestinations()}
+      onConfirm={(goLiveAnyway) => void confirmGoLive(goLiveAnyway)}
+      onContinuePartial={(goLiveAnyway) => void continueGoLiveWithReadyDestinations(goLiveAnyway)}
       onContinueWithoutCaptions={continueGoLiveWithoutCaptions}
       onPatchDraft={patchStreamMetadataDraft}
       onRecheck={() => void recheckGoLive()}

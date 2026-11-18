@@ -41,6 +41,8 @@ import type {
   CameraLowLightSetParams,
   CameraLowLightState,
   VirtualCameraStatus,
+  SrtInputSetParams,
+  SrtInputState,
   SourceSwitchParams,
   BackendHealth,
   ScheduledStreamEvent,
@@ -843,6 +845,13 @@ export interface BackendRpcMethodMap {
     VirtualCameraStatus
   >
   // --- end Videorc Camera (plan 214 A4) ---
+  // --- SRT Camera (plan 250) ---
+  'srtInput.get': BackendRpcDefinition<undefined, SrtInputState>
+  /** Saves the switch, port or Connection; the camera rebinds while it runs. */
+  'srtInput.set': BackendRpcDefinition<SrtInputSetParams, SrtInputState>
+  /** A new passphrase (D4): every sender must be given it again. */
+  'srtInput.renewPassphrase': BackendRpcDefinition<undefined, SrtInputState>
+  // --- end SRT Camera (plan 250) ---
   // --- Camera low-light compensation (issue #1066) ---
   'camera.lowLight.get': BackendRpcDefinition<CameraLowLightParams, CameraLowLightState>
   /** Saved per camera and written to the device now; open or not. */
@@ -1102,6 +1111,8 @@ export interface BackendEventMap {
   'screen.privacy.changed': ScreenPrivacy
   // --- Videorc Camera (plan 214 A4): the status, on every change ---
   'virtualCamera.changed': VirtualCameraStatus
+  // --- SRT Camera (plan 250): the setting and the camera's status, on every change ---
+  'srtInput.changed': SrtInputState
   'sounds.playback': SoundsPlayback
   // --- Buddy look (plan 169 D9) ---
   'cohost.avatar.progress': CohostAvatarProgressEvent
@@ -4553,6 +4564,47 @@ const virtualCameraSetParamsSchema = objectSchema(
   { on: booleanSchema },
   { allowUnknown: false }
 ) as RuntimeSchema<VirtualCameraSetParams>
+// Plan 250: the SRT input setting and its camera's status.
+const srtInputConnectionSchema = enumSchema(['cable', 'wifi', 'internet'])
+const srtInputPortSchema = numberSchema({ integer: true, min: 1024, max: 65535 })
+const srtCameraStatusSchema = objectSchema(
+  {
+    listening: booleanSchema,
+    signal: enumSchema(['waiting', 'receiving', 'holding', 'unsupportedCodec']),
+    width: optionalSchema(numberSchema({ integer: true, min: 1 })),
+    height: optionalSchema(numberSchema({ integer: true, min: 1 })),
+    fps: optionalSchema(numberSchema({ min: 0 })),
+    codec: optionalSchema(stringSchema({ minLength: 1, maxLength: 64 })),
+    refusal: optionalSchema(enumSchema(['wrongPassphrase', 'secondSender'])),
+    senderConnected: booleanSchema,
+    senderSession: numberSchema({ integer: true, min: 0 }),
+    framesDecoded: numberSchema({ integer: true, min: 0 }),
+    detail: stringSchema({ maxLength: 256 })
+  },
+  { allowUnknown: false }
+)
+const srtInputStateSchema = objectSchema(
+  {
+    supported: booleanSchema,
+    enabled: booleanSchema,
+    port: srtInputPortSchema,
+    connection: srtInputConnectionSchema,
+    latencyMs: numberSchema({ integer: true, min: 0 }),
+    passphrase: stringSchema({ maxLength: 79 }),
+    cameraId: stringSchema({ minLength: 1, maxLength: 64 }),
+    cameraName: stringSchema({ minLength: 1, maxLength: 64 }),
+    status: srtCameraStatusSchema
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<SrtInputState>
+const srtInputSetParamsSchema = objectSchema(
+  {
+    enabled: optionalSchema(booleanSchema),
+    port: optionalSchema(srtInputPortSchema),
+    connection: optionalSchema(srtInputConnectionSchema)
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<SrtInputSetParams>
 const cameraLowLightCameraIdSchema = stringSchema({ minLength: 1, maxLength: 1024 })
 const cameraLowLightParamsSchema = objectSchema(
   { cameraId: cameraLowLightCameraIdSchema },
@@ -7873,6 +7925,9 @@ const runtimeContracts = {
   // --- Videorc Camera (plan 214 A4) ---
   'virtualCamera.status': { params: undefinedSchema, result: virtualCameraStatusSchema },
   'virtualCamera.set': { params: virtualCameraSetParamsSchema, result: virtualCameraStatusSchema },
+  'srtInput.get': { params: undefinedSchema, result: srtInputStateSchema },
+  'srtInput.set': { params: srtInputSetParamsSchema, result: srtInputStateSchema },
+  'srtInput.renewPassphrase': { params: undefinedSchema, result: srtInputStateSchema },
   'virtualCamera.platform.report': {
     params: virtualCameraPlatformReportParamsSchema,
     result: virtualCameraStatusSchema
@@ -8299,6 +8354,7 @@ const runtimeEventSchemas = {
   'chatCommands.replyFailed': chatCommandReplyFailedSchema,
   'screen.privacy.changed': screenPrivacySchema,
   'virtualCamera.changed': virtualCameraStatusSchema,
+  'srtInput.changed': srtInputStateSchema,
   'remote.state': runtimeSchema<BackendEventMap['remote.state']>('remote state', (value, path) => {
     objectSchema({ screenHidden: booleanSchema }, { allowUnknown: true }).parse(value, path)
     return value as BackendEventMap['remote.state']

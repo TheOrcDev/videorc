@@ -245,6 +245,7 @@ import type { RemoteSurfacePublisher, RemoteSurfaceValues } from '@/lib/remote-s
 import { useScreenPrivacy } from './use-screen-privacy'
 import { useMarkerContextPublisher } from './use-marker-context-publisher'
 import type { MarkerContext } from '../../../shared/session-markers'
+import { SrtInputContext, useSrtInputController } from './use-srt-input'
 import { VirtualCameraContext, useVirtualCameraController } from './use-virtual-camera'
 import type { FollowFrontAppHost, FollowSceneApply } from './use-follow-front-app'
 import type { AgentIntent, AgentIntentOutcome, StudioActionSource } from '@/lib/studio-actions'
@@ -253,6 +254,8 @@ import type {
   GoLivePreflightRun,
   HeadlessGoLiveConfirmation
 } from '@/lib/go-live-headless'
+import { GoLiveStartRefused, type GoLiveStartGate } from '@/lib/go-live-start-gate'
+import { SRT_NO_SIGNAL_CONFIRM, srtCameraHasNoSignal } from '@/lib/srt-input-view'
 import { previewSurfaceBoundsChanged } from '../../../shared/native-preview-bounds'
 import {
   commentsRefreshRevisionIsCurrent,
@@ -1780,8 +1783,10 @@ export type StudioContextValue = {
   authorizeXLive: () => Promise<void>
   saveStreamMetadataDraft: () => Promise<void>
   cancelGoLiveConfirmation: () => void
-  confirmGoLive: () => Promise<void>
-  continueGoLiveWithReadyDestinations: () => Promise<void>
+  /** `goLiveAnyway`: the streamer chose "Go live anyway" for an SRT Camera
+   * with no signal (plan 250 D15). */
+  confirmGoLive: (goLiveAnyway?: boolean) => Promise<void>
+  continueGoLiveWithReadyDestinations: (goLiveAnyway?: boolean) => Promise<void>
   /** Why the last Record / Go Live was refused; null once the user starts
    * again or dismisses it. Rendered next to the Record control (B0). */
   sessionStartFailure: SessionStartFailure | null
@@ -4367,6 +4372,8 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
   const [runtimeInfo, setRuntimeInfo] = useState<RuntimeInfo | null>(null)
   // Plan 214 E: Videorc Camera's status, switch and actions, in its own context.
   const virtualCamera = useVirtualCameraController(client, wsStatus, runtimeInfo)
+  // Plan 250: the SRT input setting and its camera's status.
+  const srtInput = useSrtInputController(client, wsStatus)
   // Linux can't caption at all (no native microphone path): every session
   // skips captions there, as if "Continue without captions" were chosen.
   const captionsPlatformUnavailable = captionsPlatformUnavailableReason(runtimeInfo?.platform)
@@ -17011,10 +17018,34 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
         preparedOutput?: GoLiveOutput.GoLiveSessionOutput | null,
         intent?: SessionStartIntent,
         suppressCaptions?: boolean,
-        rpc?: SessionStartRpc
+        rpc?: SessionStartRpc,
+        startGate?: GoLiveStartGate
       ) => Promise<boolean>)
     | null
   >(null)
+  // Plan 250 D15: the streamer's own start (the dialog's, or a Retry)
+  // checks the SRT Camera once more, as the hold can run out after the
+  // dialog asked. Without "Go live anyway" for no signal, the start refuses,
+  // and Go Live opens again to ask.
+  const dialogSrtStartGate = useCallback(
+    (goLiveAnyway: boolean): GoLiveStartGate => ({
+      refusal: null,
+      check: (params) =>
+        !goLiveAnyway && srtCameraHasNoSignal(srtInput.stateRef.current, params)
+          ? SRT_NO_SIGNAL_CONFIRM.description
+          : null
+    }),
+    [srtInput.stateRef]
+  )
+  const askAgainAfterSrtRefusal = useCallback((gate: GoLiveStartGate): void => {
+    if (gate.refusal === null) return
+    toast.warning('The SRT Camera has no signal', {
+      description: 'Go Live opens again to ask before it starts.'
+    })
+    void openGoLiveConfirmationRef.current?.(
+      livestreamIntent(captureConfigRef.current.recordEnabled)
+    )
+  }, [])
   const runStartSession = useCallback(
     (
       streamingOverride?: StreamingSettings,
@@ -17028,7 +17059,10 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
       // Plan 184 C5b: a cloud resume is the same start bound to the live show.
       // Its destinations are the runner's, so no account is checked and no
       // broadcast is activated here.
-      rpc: SessionStartRpc = 'session.start'
+      rpc: SessionStartRpc = 'session.start',
+      // An agent's Go Live checks the exact composition once more right
+      // before `session.start` (plan 250 D15).
+      startGate?: GoLiveStartGate
     ) => {
       const suppressCaptions = suppressCaptionsOverride ?? suppressCaptionsForSession
       // R2 B-H1: a resume's saved destinations are reconnect candidates, never
@@ -17297,6 +17331,13 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
                 }
               }
             : null
+          // No await between here and the RPC: what the gate reads is what
+          // goes live.
+          const refusal = startGate?.check(nextSessionParams) ?? null
+          if (startGate && refusal !== null) {
+            startGate.refusal = refusal
+            throw new GoLiveStartRefused(refusal)
+          }
           liveAudioProcessingStartSnapshotRef.current = null
           liveAudioProcessingStartRequestInFlightRef.current = true
           sessionStartAuthoritativeStatusesRef.current.clear()
@@ -17461,19 +17502,27 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
           // Every start rejection — the compositor startup barrier, topology
           // probe, platform activation, the RPC itself — is unmissable: keyed
           // persistent toast + Session-panel line, Retry re-runs this exact start.
-          reportSessionStartFailure(
-            error,
-            () => {
-              void runStartSessionRef.current?.(
-                streamingOverride,
-                preparedOutput,
-                intent,
-                suppressCaptionsOverride,
-                rpc
-              )
-            },
-            resumingCloudShow ? 'resume' : streamingOverride ? 'live' : 'record'
-          )
+          // A start gate's refusal is the caller's answer instead. Retry is
+          // the streamer's own start, with the dialog's check, not an agent's.
+          if (!(error instanceof GoLiveStartRefused)) {
+            reportSessionStartFailure(
+              error,
+              () => {
+                const gate = dialogSrtStartGate(false)
+                void runStartSessionRef
+                  .current?.(
+                    streamingOverride,
+                    preparedOutput,
+                    intent,
+                    suppressCaptionsOverride,
+                    rpc,
+                    gate
+                  )
+                  .then(() => askAgainAfterSrtRefusal(gate))
+              },
+              resumingCloudShow ? 'resume' : streamingOverride ? 'live' : 'record'
+            )
+          }
           if (recordingRef.current.state === 'starting' && !recordingRef.current.sessionId) {
             applyRecordingStatus({ state: 'idle', message: 'Ready to start a capture session.' })
           }
@@ -17509,10 +17558,12 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
       setDeviceList,
       activatePreparedXBroadcasts,
       applyRecordingStatus,
+      askAgainAfterSrtRefusal,
       captureConfig,
       claimPlatformLifecycleOwner,
       clearLiveChatForTerminalSession,
       client,
+      dialogSrtStartGate,
       isSessionActive,
       noteSessionStartAttempt,
       refreshSessions,
@@ -18298,7 +18349,10 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
   // destinations left out, the draft, the preflight, captions), and reads
   // the outcome instead of the dialog's toasts, upsell and partial card.
   const runGoLiveConfirmation = useCallback(
-    (headless?: HeadlessGoLiveConfirmation): Promise<GoLiveConfirmOutcome> => {
+    (
+      headless?: HeadlessGoLiveConfirmation,
+      dialogStartGate?: GoLiveStartGate
+    ): Promise<GoLiveConfirmOutcome> => {
       const pendingConfirmation = confirmGoLiveInFlightPromiseRef.current
       if (pendingConfirmation) {
         return pendingConfirmation
@@ -18420,7 +18474,9 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
             setupDecision.streaming,
             sessionOutput,
             livestreamIntent(captureConfigRef.current.recordEnabled),
-            headless?.suppressCaptions
+            headless?.suppressCaptions,
+            undefined,
+            headless ? headless.startGate : dialogStartGate
           )
           return { kind: 'started', started, streaming: setupDecision.streaming }
         } catch (error) {
@@ -18466,19 +18522,28 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
       streamMetadataDraft
     ]
   )
-  const confirmGoLive = useCallback(async (): Promise<void> => {
-    await runGoLiveConfirmation()
-  }, [runGoLiveConfirmation])
+  const confirmGoLive = useCallback(
+    async (goLiveAnyway = false): Promise<void> => {
+      const gate = dialogSrtStartGate(goLiveAnyway)
+      await runGoLiveConfirmation(undefined, gate)
+      askAgainAfterSrtRefusal(gate)
+    },
+    [askAgainAfterSrtRefusal, dialogSrtStartGate, runGoLiveConfirmation]
+  )
   confirmGoLiveRef.current = confirmGoLive
 
   // "Go live on {ready}" (B-18). A Go Live without the dialog passes the
   // setup its confirm returned (plan 209 S10, `allowPartial`); the dialog
   // reads the one it shows. Resolves whether the livestream started.
   const startOnReadyDestinations = useCallback(
-    async (headless?: {
-      setup: GoLivePartialSetup
-      suppressCaptions: boolean
-    }): Promise<boolean> => {
+    async (
+      headless?: {
+        setup: GoLivePartialSetup
+        suppressCaptions: boolean
+        startGate?: GoLiveStartGate
+      },
+      dialogStartGate?: GoLiveStartGate
+    ): Promise<boolean> => {
       // A Go Live without the dialog decided on captions before its confirm.
       if (!talkShowRoomOpenRef.current && !headless && goLiveCaptionsReadiness.blocksStart) {
         toast.warning("Live captions aren't ready", {
@@ -18504,7 +18569,9 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
           decision.streaming,
           preparedGoLiveOutputRef.current,
           livestreamIntent(captureConfigRef.current.recordEnabled),
-          headless?.suppressCaptions
+          headless?.suppressCaptions,
+          undefined,
+          headless ? headless.startGate : dialogStartGate
         )
       } catch (error) {
         reportError(error)
@@ -18522,9 +18589,14 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
       startRequestPending
     ]
   )
-  const continueGoLiveWithReadyDestinations = useCallback(async (): Promise<void> => {
-    await startOnReadyDestinations()
-  }, [startOnReadyDestinations])
+  const continueGoLiveWithReadyDestinations = useCallback(
+    async (goLiveAnyway = false): Promise<void> => {
+      const gate = dialogSrtStartGate(goLiveAnyway)
+      await startOnReadyDestinations(undefined, gate)
+      askAgainAfterSrtRefusal(gate)
+    },
+    [askAgainAfterSrtRefusal, dialogSrtStartGate, startOnReadyDestinations]
+  )
 
   const stopSession = useCallback(
     (output?: 'recording' | 'live'): Promise<boolean> => {
@@ -20339,6 +20411,9 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
       runGoLiveConfirmation,
       settlePreparedPlatformLifecycle,
       startOnReadyDestinations,
+      // Plan 250 D15: the dialog's "Go live anyway?" for an SRT Camera with
+      // no signal.
+      srtInputRef: srtInput.stateRef,
       captureConfigRef,
       deviceListRef,
       sourceSwitchReason,
@@ -21816,22 +21891,24 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
     <StudioShellContext.Provider value={shellValue}>
       <StudioBannersContext.Provider value={bannersValue}>
         <VirtualCameraContext.Provider value={virtualCamera}>
-          <StudioContextProviders
-            audio={audioValue}
-            captions={captionsValue}
-            chat={chatValue}
-            cloud={cloudValue}
-            core={value}
-            talkShowDeps={talkShowDeps}
-            diagnostics={diagnosticsValue}
-            preview={previewValue}
-            recording={recordingValue}
-            recordingState={recordingStateValue}
-            replay={replayBufferControls}
-          >
-            {children}
-            {FollowFrontApp ? <FollowFrontApp {...followFrontAppHost} /> : null}
-          </StudioContextProviders>
+          <SrtInputContext.Provider value={srtInput}>
+            <StudioContextProviders
+              audio={audioValue}
+              captions={captionsValue}
+              chat={chatValue}
+              cloud={cloudValue}
+              core={value}
+              talkShowDeps={talkShowDeps}
+              diagnostics={diagnosticsValue}
+              preview={previewValue}
+              recording={recordingValue}
+              recordingState={recordingStateValue}
+              replay={replayBufferControls}
+            >
+              {children}
+              {FollowFrontApp ? <FollowFrontApp {...followFrontAppHost} /> : null}
+            </StudioContextProviders>
+          </SrtInputContext.Provider>
         </VirtualCameraContext.Provider>
       </StudioBannersContext.Provider>
     </StudioShellContext.Provider>

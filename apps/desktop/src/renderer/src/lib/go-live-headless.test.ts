@@ -4,6 +4,8 @@ import type {
   AiCapabilities,
   GoLiveDestinationPreflight,
   GoLivePreflight,
+  SrtInputState,
+  StartSessionParams,
   StreamMetadataDraft,
   StreamTargetSettings,
   StreamingSettings
@@ -25,6 +27,8 @@ import {
   type GoLiveConfirmOutcome,
   type HeadlessGoLiveStudio
 } from './go-live-headless'
+import type { GoLiveStartGate } from './go-live-start-gate'
+import { ALLOW_NO_SIGNAL_HINT, SRT_CAMERA_ID, SRT_NO_SIGNAL_CONFIRM } from './srt-input-view'
 import { START_BLOCKED_COPY } from './start-blocked-copy'
 
 // Plan 209 S10 (D13): `go_live` without the dialog decides on the dialog's
@@ -171,6 +175,43 @@ describe('go_live without the dialog (plan 209 S10, D13)', () => {
         sentStreaming: streamingWithoutTargets(twoOn, ['youtube-1'])
       })
     ).toEqual({ kind: 'confirm' })
+  })
+
+  // Plan 250 D15: the dialog asks "Go live anyway?" when the SRT Camera has
+  // no signal, before the privacy step; an agent is refused unless the call
+  // accepts it.
+  it('refuses an SRT Camera with no signal unless allowNoSignal, before the privacy', () => {
+    const base = {
+      preflight: { valid: true, destinations: [destination('youtube-1')], issues: [] },
+      draft,
+      sentStreaming: streaming(target('youtube-1', 'youtube')),
+      captionsReadiness: ready,
+      entitlementGate: allowed,
+      allowPartial: false,
+      srtNoSignal: true
+    }
+    const noSignal = {
+      kind: 'refuse',
+      message: `${SRT_NO_SIGNAL_CONFIRM.description} ${ALLOW_NO_SIGNAL_HINT}`
+    }
+    expect(decideHeadlessGoLive(base)).toEqual(noSignal)
+    expect(noSignal.message).toBe(
+      'The SRT Camera has no signal. Pass allowNoSignal: true to go live anyway.'
+    )
+    expect(decideHeadlessGoLive({ ...base, allowNoSignal: true })).toEqual({ kind: 'confirm' })
+    expect(decideHeadlessGoLive({ ...base, srtNoSignal: false })).toEqual({ kind: 'confirm' })
+    // Both asks: the SRT Camera's first, as the dialog orders them.
+    const unlisted = { ...draft, defaultPrivacy: 'unlisted' as const }
+    expect(decideHeadlessGoLive({ ...base, draft: unlisted })).toEqual(noSignal)
+    expect(decideHeadlessGoLive({ ...base, draft: unlisted, allowNoSignal: true })).toEqual({
+      kind: 'refuse',
+      message: `YouTube is Unlisted. Only people with the link can watch. ${ALLOW_NON_PUBLIC_HINT}`
+    })
+    expect(
+      decideHeadlessGoLive({ ...base, draft: unlisted, allowNoSignal: true, allowNonPublic: true })
+    ).toEqual({ kind: 'confirm' })
+    // The dialog's primary stays enabled: it asks, it never blocks.
+    expect(goLiveConfirmGate(base).blocked).toBe(false)
   })
 
   it('names a blocker before the privacy, so the agent fixes what it can first', () => {
@@ -455,9 +496,102 @@ describe('goLiveWithoutDialog (plan 209 S10, D13)', () => {
       ),
       settlePreparedPlatformLifecycle: vi.fn(async () => undefined),
       startOnReadyDestinations: vi.fn(async () => true),
+      srtInputRef: { current: null },
       ...overrides
     }
   }
+
+  function srtInput(signal: SrtInputState['status']['signal']): SrtInputState {
+    return {
+      supported: true,
+      enabled: true,
+      port: 45678,
+      connection: 'wifi',
+      latencyMs: 120,
+      passphrase: 'a'.repeat(32),
+      cameraId: SRT_CAMERA_ID,
+      cameraName: 'SRT Camera (port 45678)',
+      status: {
+        listening: true,
+        senderConnected: signal === 'receiving',
+        senderSession: 1,
+        framesDecoded: signal === 'receiving' ? 50 : 0,
+        signal,
+        detail: 'x'
+      }
+    }
+  }
+
+  it('never confirms with an SRT Camera that has no signal without allowNoSignal', async () => {
+    const srtCamera = {
+      ...defaultCaptureConfig,
+      streaming: twoOn,
+      sources: { ...defaultCaptureConfig.sources, cameraId: SRT_CAMERA_ID }
+    }
+    const fake = studio({ config: srtCamera, srtInputRef: { current: srtInput('waiting') } })
+    expect(await goLiveWithoutDialog({}, fake)).toEqual({
+      ok: false,
+      message: 'The SRT Camera has no signal. Pass allowNoSignal: true to go live anyway.'
+    })
+    expect(fake.runGoLiveConfirmation).not.toHaveBeenCalled()
+    expect(fake.openGoLiveConfirmationInFlightRef.current).toBeNull()
+
+    expect(await goLiveWithoutDialog({ allowNoSignal: true }, fake)).toMatchObject({ ok: true })
+    expect(fake.runGoLiveConfirmation).toHaveBeenCalledTimes(1)
+  })
+
+  // The 2 s hold can run out while the preflight runs; the
+  // gate reads the SRT Camera as it is when it decides, never as it was
+  // when the call came in.
+  it('reads the SRT Camera when it decides, after the preflight', async () => {
+    const srtCamera = {
+      ...defaultCaptureConfig,
+      streaming: twoOn,
+      sources: { ...defaultCaptureConfig.sources, cameraId: SRT_CAMERA_ID }
+    }
+    const preflight: GoLivePreflight = {
+      valid: true,
+      destinations: [destination('youtube-1'), destination('twitch-1')],
+      issues: []
+    }
+    const srtInputRef = { current: srtInput('holding') }
+    const fake = studio({
+      config: srtCamera,
+      srtInputRef,
+      runGoLivePreflight: vi.fn(async () => {
+        srtInputRef.current = srtInput('waiting')
+        return { kind: 'ready' as const, preflight, draft, capabilities: null }
+      })
+    })
+    expect(await goLiveWithoutDialog({}, fake)).toEqual({
+      ok: false,
+      message: 'The SRT Camera has no signal. Pass allowNoSignal: true to go live anyway.'
+    })
+    expect(fake.runGoLiveConfirmation).not.toHaveBeenCalled()
+  })
+
+  it('goes live without asking when the SRT Camera has a signal or is not the camera', async () => {
+    const srtCamera = {
+      ...defaultCaptureConfig,
+      streaming: twoOn,
+      sources: { ...defaultCaptureConfig.sources, cameraId: SRT_CAMERA_ID }
+    }
+    const withSignal = studio({
+      config: srtCamera,
+      srtInputRef: { current: srtInput('receiving') }
+    })
+    expect(await goLiveWithoutDialog({}, withSignal)).toMatchObject({ ok: true })
+    const holding = studio({ config: srtCamera, srtInputRef: { current: srtInput('holding') } })
+    expect(await goLiveWithoutDialog({}, holding)).toMatchObject({ ok: true })
+    const otherCamera = studio({
+      config: {
+        ...srtCamera,
+        sources: { ...srtCamera.sources, cameraId: 'camera:avfoundation-native:00' }
+      },
+      srtInputRef: { current: srtInput('waiting') }
+    })
+    expect(await goLiveWithoutDialog({}, otherCamera)).toMatchObject({ ok: true })
+  })
 
   it('refuses before the preflight when the Studio cannot go live now', async () => {
     const cases: [Partial<HeadlessGoLiveStudio>, string][] = [
@@ -751,9 +885,129 @@ describe('goLiveWithoutDialog (plan 209 S10, D13)', () => {
       )
     })
     expect((await goLiveWithoutDialog({ allowPartial: true }, partial)).ok).toBe(true)
-    expect(partial.startOnReadyDestinations).toHaveBeenCalledWith({
-      setup,
-      suppressCaptions: false
+    expect(partial.startOnReadyDestinations).toHaveBeenCalledWith(
+      expect.objectContaining({ setup, suppressCaptions: false })
+    )
+  })
+
+  // The confirm and the start await metadata, output and
+  // account checks before `session.start`. The hold can run out during any
+  // of them, so the start checks the SRT Camera once more, against the
+  // composition it sends, on both ways to start.
+  describe('the SRT Camera at the start itself', () => {
+    const srtCamera = {
+      ...defaultCaptureConfig,
+      streaming: twoOn,
+      sources: { ...defaultCaptureConfig.sources, cameraId: SRT_CAMERA_ID }
+    }
+    const sent = {
+      sources: srtCamera.sources,
+      layout: srtCamera.layout,
+      streaming: twoOn
+    } as StartSessionParams
+    const refusal = 'The SRT Camera has no signal. Pass allowNoSignal: true to go live anyway.'
+
+    /** What the Studio's start does at `session.start`: the gate, then the RPC. */
+    function startsUnlessRefused(
+      srtInputRef: { current: SrtInputState | null },
+      gate: GoLiveStartGate | undefined
+    ): boolean {
+      srtInputRef.current = srtInput('waiting')
+      const said = gate?.check(sent) ?? null
+      if (gate && said !== null) gate.refusal = said
+      return said === null
+    }
+
+    it('refuses when the hold runs out after the confirm checks', async () => {
+      for (const allowNoSignal of [false, true]) {
+        const srtInputRef = { current: srtInput('holding') }
+        const fake = studio({
+          config: srtCamera,
+          srtInputRef,
+          runGoLiveConfirmation: vi.fn(
+            async (headless): Promise<GoLiveConfirmOutcome> => ({
+              kind: 'started',
+              started: startsUnlessRefused(srtInputRef, headless.startGate),
+              streaming: twoOn
+            })
+          )
+        })
+        const outcome = await goLiveWithoutDialog({ allowNoSignal }, fake)
+        expect(outcome).toEqual(
+          allowNoSignal ? expect.objectContaining({ ok: true }) : { ok: false, message: refusal }
+        )
+      }
     })
+
+    it('refuses on the way to the ready destinations too', async () => {
+      const setup = {
+        streaming: twoOn,
+        failures: [
+          {
+            targetId: 'twitch-1',
+            platform: 'twitch' as const,
+            label: 'Twitch',
+            message: 'Offline.'
+          }
+        ],
+        readyLabels: ['YouTube']
+      }
+      const srtInputRef = { current: srtInput('holding') }
+      const fake = studio({
+        config: srtCamera,
+        srtInputRef,
+        runGoLiveConfirmation: vi.fn(
+          async (): Promise<GoLiveConfirmOutcome> => ({ kind: 'partial', setup })
+        ),
+        startOnReadyDestinations: vi.fn(async ({ startGate }) =>
+          startsUnlessRefused(srtInputRef, startGate)
+        )
+      })
+      expect(await goLiveWithoutDialog({ allowPartial: true }, fake)).toEqual({
+        ok: false,
+        message: refusal
+      })
+    })
+  })
+
+  // The destinations this call leaves out are out of the
+  // check too. Leaving every vertical destination out drops the vertical
+  // leg, so its camera is no reason to refuse.
+  it('reads only the destinations this call goes live on', async () => {
+    const withVertical = streaming(
+      target('twitch-1', 'twitch'),
+      target('tiktok-1', 'tiktok' as StreamTargetSettings['platform'], {
+        outputOrientation: 'vertical'
+      })
+    )
+    const config = {
+      ...defaultCaptureConfig,
+      streaming: withVertical,
+      sources: { ...defaultCaptureConfig.sources, cameraId: SRT_CAMERA_ID },
+      layout: { ...defaultCaptureConfig.layout, layoutPreset: 'screen-only' as const },
+      simulcastFollowsProgram: false,
+      lastVerticalPreset: 'vertical-camera-bottom' as const
+    }
+    const fake = studio({ config, srtInputRef: { current: srtInput('waiting') } })
+    expect(await goLiveWithoutDialog({ destinations: ['twitch-1'] }, fake)).toMatchObject({
+      ok: true
+    })
+    expect(await goLiveWithoutDialog({}, fake)).toEqual({
+      ok: false,
+      message: 'The SRT Camera has no signal. Pass allowNoSignal: true to go live anyway.'
+    })
+  })
+
+  // D15 asks for a scene that uses the SRT Camera, never
+  // for one that only keeps it picked (screen-only composites no camera).
+  it('goes live with a screen-only scene that keeps the SRT Camera picked', async () => {
+    const screenOnly = {
+      ...defaultCaptureConfig,
+      streaming: twoOn,
+      sources: { ...defaultCaptureConfig.sources, cameraId: SRT_CAMERA_ID },
+      layout: { ...defaultCaptureConfig.layout, layoutPreset: 'screen-only' as const }
+    }
+    const fake = studio({ config: screenOnly, srtInputRef: { current: srtInput('waiting') } })
+    expect(await goLiveWithoutDialog({}, fake)).toMatchObject({ ok: true })
   })
 })

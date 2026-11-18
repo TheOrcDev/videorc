@@ -117,6 +117,11 @@ jobs:
         timeout-minutes: 45
         run: cargo test -p videorc-backend --no-run
 
+      - name: Install libsrt for the SRT Camera tests
+        # Development builds load Homebrew's libsrt; without it the real
+        # listener tests only print that they were skipped.
+        run: brew install srt
+
       - name: Test
         # ffmpeg-spawning tests are #[ignore]d, so the default run needs no
         # ffmpeg binary and no capture devices.

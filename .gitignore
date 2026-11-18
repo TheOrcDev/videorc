@@ -11,6 +11,9 @@ vendor/ffmpeg/current/
 vendor/ffmpeg/macos-*/
 vendor/ffmpeg/windows-x64/
 vendor/ffmpeg/linux-x64/
+vendor/libsrt/_build/
+vendor/libsrt/_src/
+vendor/libsrt/current/
 docs/acceptance/artifacts/
 
 .DS_Store

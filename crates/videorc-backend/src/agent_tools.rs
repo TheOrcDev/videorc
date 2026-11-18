@@ -1017,6 +1017,27 @@ mod tests {
         assert!(catalog.tool("go_live").unwrap().annotations.open_world_hint);
     }
 
+    /// Plan 250 D15: `go_live` takes the dialog's "Go live anyway?" answer
+    /// for an SRT Camera with no signal, beside `allowNonPublic`.
+    #[test]
+    fn go_live_takes_allow_no_signal_beside_allow_non_public() {
+        let catalog = catalog();
+        let go_live = catalog.tool("go_live").unwrap();
+        let properties = go_live.input_schema["properties"].as_object().unwrap();
+        assert!(properties.contains_key("allowNonPublic"));
+        assert_eq!(properties["allowNoSignal"]["type"], "boolean");
+        assert!(go_live.description.contains("allowNoSignal"));
+        assert!(
+            go_live
+                .validate_arguments(&serde_json::json!({ "allowNoSignal": true }))
+                .is_ok()
+        );
+        assert_eq!(
+            go_live.validate_arguments(&serde_json::json!({ "allowNoSignal": "yes" })),
+            Err("arguments.allowNoSignal must be true or false.".to_string())
+        );
+    }
+
     #[test]
     fn the_chat_buddy_prepare_and_library_tools_keep_d11_d15_and_d16() {
         let catalog = catalog();

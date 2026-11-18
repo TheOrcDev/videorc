@@ -4,6 +4,7 @@ import type {
   EntitlementsSnapshot,
   GoLivePreflight,
   RecordingStatus,
+  SrtInputState,
   StreamMetadataDraft,
   StreamPlatform,
   StreamingSettings
@@ -26,6 +27,12 @@ import {
 import { destinationLabel, platformLabel } from './platform-copy'
 import { sessionStartFailureMessage } from './session-start-failure'
 import { livestreamIntent, type SessionStartIntent } from './session-start-intent'
+import type { GoLiveStartGate } from './go-live-start-gate'
+import {
+  goLiveSrtNoSignal,
+  headlessSrtNoSignalRefusal,
+  srtCameraHasNoSignal
+} from './srt-input-view'
 import { connectionBlockedReason, START_BLOCKED_COPY } from './start-blocked-copy'
 
 // Going live without the dialog (plan 209 S10, D13). An agent's `go_live`
@@ -39,7 +46,8 @@ import { connectionBlockedReason, START_BLOCKED_COPY } from './start-blocked-cop
 // in, a missing key, Premium) is always a refusal: agents never connect
 // accounts. A YouTube destination going live Unlisted or Private is refused
 // too unless the call says `allowNonPublic`, as the dialog asks the streamer
-// once more (owner report, 2026-11-12). Loaded with the first agent Go Live,
+// once more (owner report, 2026-11-12), and so is an SRT Camera with no
+// signal unless the call says `allowNoSignal` (plan 250 D15). Loaded with the first agent Go Live,
 // never in the eager bundle: the Studio hands `goLiveWithoutDialog` its
 // handlers and latest state.
 
@@ -57,6 +65,9 @@ export interface HeadlessGoLiveRequest {
   /** Go live when a YouTube destination is Unlisted or Private (the
    * dialog's privacy step); without it, that is a refusal. */
   allowNonPublic?: boolean
+  /** Go live while the SRT Camera has no signal (the dialog's "Go live
+   * anyway?", plan 250 D15); without it, that is a refusal. */
+  allowNoSignal?: boolean
   /** Stop agents, Off or Remove cancelled the call (plan 209 review fix 1):
    * checked right before it confirms and before it starts. */
   cancelled?: () => boolean
@@ -157,6 +168,8 @@ export type HeadlessGoLiveDecision =
  * dialog's "Go live without captions" folds it in. A YouTube destination
  * that is Unlisted or Private confirms only with `allowNonPublic`, the
  * dialog's privacy step; otherwise the agent reads the step's own sentence.
+ * Before it, an SRT Camera with no signal confirms only with
+ * `allowNoSignal`, the dialog's first ask (plan 250 D15).
  */
 export function decideHeadlessGoLive(input: {
   preflight: GoLivePreflight
@@ -166,9 +179,14 @@ export function decideHeadlessGoLive(input: {
   entitlementGate: EntitlementUiGate
   allowPartial: boolean
   allowNonPublic?: boolean
+  srtNoSignal?: boolean
+  allowNoSignal?: boolean
 }): HeadlessGoLiveDecision {
   const gate = goLiveConfirmGate(input)
   if (!gate.blocked) {
+    if (input.srtNoSignal === true && input.allowNoSignal !== true) {
+      return { kind: 'refuse', message: headlessSrtNoSignalRefusal() }
+    }
     if (gate.nonPublicYouTube.length && input.allowNonPublic !== true) {
       return { kind: 'refuse', message: headlessNonPublicRefusal(gate.nonPublicYouTube) }
     }
@@ -285,6 +303,8 @@ export type HeadlessGoLiveConfirmation = {
   suppressCaptions: boolean
   /** Checked after platform setup, right before the start (review fix 1). */
   cancelled?: () => boolean
+  /** Checked on the exact `session.start` parameters. */
+  startGate?: GoLiveStartGate
 }
 
 /** Where the Go Live dialog's confirm ended (plan 209 S10). */
@@ -341,7 +361,11 @@ export interface HeadlessGoLiveStudio {
   startOnReadyDestinations: (headless: {
     setup: GoLivePartialSetup
     suppressCaptions: boolean
+    startGate?: GoLiveStartGate
   }) => Promise<boolean>
+  /** The SRT input as it is now (plan 250 D15), read when the gate decides,
+   * after the preflight: the 2 s hold can run out while it runs. */
+  srtInputRef: { readonly current: SrtInputState | null }
 }
 
 /**
@@ -469,7 +493,13 @@ async function goLiveOwningTheTransport(
       captionsReadiness,
       entitlementGate,
       allowPartial: partial,
-      allowNonPublic: request.allowNonPublic === true
+      allowNonPublic: request.allowNonPublic === true,
+      // This attempt's destinations only.
+      srtNoSignal: goLiveSrtNoSignal(studio.srtInputRef.current, {
+        ...config,
+        streaming: streamingWithoutTargets(config.streaming, excludedTargetIds)
+      }),
+      allowNoSignal: request.allowNoSignal === true
     })
   let decision = decide(allowPartial)
   if (decision.kind === 'exclude') {
@@ -489,13 +519,28 @@ async function goLiveOwningTheTransport(
   if (cancelled()) return { ok: false, message: copy.cancelled }
   if (studio.dialogOpenRef.current) return { ok: false, message: copy.dialogOpen }
   if (suppressCaptions) suppressCaptionsForSession()
+  // The confirm and the start await more checks before `session.start`;
+  // the SRT Camera's hold can run out during any of them.
+  // The start asks once more, on the composition it sends.
+  const startGate: GoLiveStartGate = {
+    refusal: null,
+    check: (params) =>
+      request.allowNoSignal !== true && srtCameraHasNoSignal(studio.srtInputRef.current, params)
+        ? headlessSrtNoSignalRefusal()
+        : null
+  }
+  const notStarted = (): HeadlessGoLiveOutcome => ({
+    ok: false,
+    message: startGate.refusal ?? copy.didNotStart
+  })
   const outcome = await studio.runGoLiveConfirmation({
     excludedTargetIds,
     draft: run.draft,
     preflight,
     captionsReadiness,
     suppressCaptions,
-    cancelled
+    cancelled,
+    startGate
   })
   const live = (streaming: StreamingSettings): HeadlessGoLiveOutcome => ({
     ok: true,
@@ -535,11 +580,15 @@ async function goLiveOwningTheTransport(
         void studio.settlePreparedPlatformLifecycle(outcome.setup.streaming)
         return { ok: false, message: next.kind === 'refuse' ? next.message : copy.cancelled }
       }
-      return (await studio.startOnReadyDestinations({ setup: outcome.setup, suppressCaptions }))
+      return (await studio.startOnReadyDestinations({
+        setup: outcome.setup,
+        suppressCaptions,
+        startGate
+      }))
         ? live(outcome.setup.streaming)
-        : { ok: false, message: copy.didNotStart }
+        : notStarted()
     }
     case 'started':
-      return outcome.started ? live(outcome.streaming) : { ok: false, message: copy.didNotStart }
+      return outcome.started ? live(outcome.streaming) : notStarted()
   }
 }

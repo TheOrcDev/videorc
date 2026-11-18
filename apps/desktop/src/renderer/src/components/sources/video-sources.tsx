@@ -5,11 +5,13 @@ import { GroupedList } from '@/components/list-row'
 import { DevicePicker } from '@/components/device-picker'
 import { PanelSection } from '@/components/panel-section'
 import { SourceFacts, SourceItem } from '@/components/sources/source-item'
+import { SrtCameraFields } from '@/components/sources/srt-camera-fields'
 import { SourceSwitchStatus } from '@/components/studio/source-switch-status'
 import { Alert, AlertTitle } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import { Switch } from '@/components/ui/switch'
 import { useCameraLowLight } from '@/hooks/use-camera-low-light'
+import { useSrtInput } from '@/hooks/use-srt-input'
 import { useStudioCore, useStudioDiagnostics, useStudioPreview } from '@/hooks/use-studio'
 import type { Device, DeviceList, SourceSelection } from '@/lib/backend'
 import { cameraFormatShortfall, cameraFormatShortfallMessage } from '@/lib/camera-format-shortfall'
@@ -22,6 +24,7 @@ import {
 import { openScenes } from '@/lib/scene-add-request'
 import { layoutShowsScreen } from '@/lib/scenes'
 import { cameraFacts, screenFacts } from '@/lib/source-facts'
+import { isSrtCameraId, srtCameraFacts, srtCameraSourceStatus } from '@/lib/srt-input-view'
 import { screenShareLostStatus } from '@/lib/screen-share-recovery'
 import { selectedDeviceStatus, videoSourceStatus, type SourceStatus } from '@/lib/source-status'
 import { systemAccessRows } from '@/lib/system-access'
@@ -91,6 +94,9 @@ export interface VideoSourcesViewProps {
      * it (a Windows camera with the control); null hides the switch.
      */
     lowLight?: { checked: boolean; disabled: boolean; onChange: (on: boolean) => void } | null
+    /** Plan 250: the SRT Camera's own settings; the row shows them only
+     * while the SRT Camera is the picked camera. */
+    srtFields?: ReactNode
   }
   /** Development builds only: the deterministic synthetic screen. */
   synthetic: { checked: boolean; disabled: boolean; onChange: (on: boolean) => void } | null
@@ -229,6 +235,7 @@ export function VideoSourcesView({
               />
             </div>
           ) : null}
+          {isSrtCameraId(camera.value) ? camera.srtFields : null}
         </SourceItem>
       </GroupedList>
     </PanelSection>
@@ -316,12 +323,18 @@ export function VideoSources(): ReactElement {
   const selectedCaptureId =
     sources.screenId ?? sources.windowId ?? sources.wantedWindowId ?? sources.wantedScreenId
 
-  const { screenLocked, cameraPermissionRequired } = videoPermissionState({
-    systemAccessContext,
-    deviceList,
-    platform: runtimeInfo?.platform,
-    mediaAccess
-  })
+  const { screenLocked, cameraPermissionRequired: anyCameraPermissionRequired } =
+    videoPermissionState({
+      systemAccessContext,
+      deviceList,
+      platform: runtimeInfo?.platform,
+      mediaAccess
+    })
+  // Plan 250: the SRT Camera is a network stream; it needs no camera grant,
+  // and its facts line is its status (D17).
+  const srtInput = useSrtInput()
+  const srtCameraSelected = isSrtCameraId(selectedCameraId)
+  const cameraPermissionRequired = anyCameraPermissionRequired && !srtCameraSelected
 
   const shortfall = sources.cameraId ? cameraFormatShortfall(diagnosticStats) : null
   const {
@@ -350,6 +363,23 @@ export function VideoSources(): ReactElement {
     void switchSourceDeviceLive('camera', buildCameraSources(sources, cameras, cameraId))
   }
 
+  // Plan 250: the SRT Camera's pacer keeps its pipeline busy, so its badge
+  // follows the SRT signal instead (live QA, 2026-11-15).
+  const cameraPipelineStatus = videoSourceStatus({
+    kind: 'camera',
+    selected: Boolean(selectedCameraId),
+    switching: sourceDeviceSwitchPending === 'camera',
+    device: cameraPermissionRequired
+      ? 'permission-required'
+      : selectedDeviceStatus(deviceList.devices, selectedCameraId),
+    preview: previewCameraStatus,
+    // The camera in use: a stand-in is the one that may send nothing.
+    name: sources.cameraName,
+    standIn: cameraStandIn,
+    lowFrameRate: previewCameraLowFrameRate,
+    lowLightCompensation: lowLight?.compensation
+  })
+
   return (
     <VideoSourcesView
       camera={{
@@ -357,23 +387,16 @@ export function VideoSources(): ReactElement {
         value: selectedCameraId,
         selectedName: sources.cameraName ?? sources.wantedCameraName,
         disabled: Boolean(sourceSwitchReason('camera') || layoutSwitchPending),
-        status: videoSourceStatus({
-          kind: 'camera',
-          selected: Boolean(selectedCameraId),
-          switching: sourceDeviceSwitchPending === 'camera',
-          device: cameraPermissionRequired
-            ? 'permission-required'
-            : selectedDeviceStatus(deviceList.devices, selectedCameraId),
-          preview: previewCameraStatus,
-          // The camera in use: a stand-in is the one that may send nothing.
-          name: sources.cameraName,
-          standIn: cameraStandIn,
-          lowFrameRate: previewCameraLowFrameRate,
-          lowLightCompensation: lowLight?.compensation
-        }),
+        status: srtCameraSelected
+          ? srtCameraSourceStatus(srtInput.state, cameraPipelineStatus)
+          : cameraPipelineStatus,
         // Facts describe the selected source only (the synthetic screen and a
         // camera turned Off leave the picker saying None or Off).
-        facts: sources.cameraId ? cameraFacts(previewCameraStatus) : null,
+        facts: srtCameraSelected
+          ? srtCameraFacts(srtInput.state)
+          : sources.cameraId
+            ? cameraFacts(previewCameraStatus)
+            : null,
         shortfall: shortfall ? cameraFormatShortfallMessage(shortfall) : null,
         switchStatus: <SourceSwitchStatus kind="camera" />,
         onChange: switchCamera,
@@ -383,7 +406,8 @@ export function VideoSources(): ReactElement {
               disabled: wsStatus !== 'connected' || cameraLowLightPending,
               onChange: (on) => void setCameraLowLight(on)
             }
-          : null
+          : null,
+        srtFields: <SrtCameraFields />
       }}
       discoveryPending={wsStatus !== 'connected'}
       screen={{

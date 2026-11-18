@@ -15983,6 +15983,15 @@ async fn await_recording_camera_cadence_ready(
     // evidence; wiping it here (the pre-instant-record behaviour) forced every
     // Record click to wait for the 250 ms diagnostics ticker to refill it.
     let mut started_at = Instant::now();
+    // Plan 250 D7: the SRT Camera is never restarted for its cadence; a
+    // restart would close the port under a sender.
+    let camera_restart = camera_restart.filter(|params| {
+        !params
+            .sources
+            .camera_id
+            .as_deref()
+            .is_some_and(crate::srt_camera::is_srt_camera_id)
+    });
     let mut restarted = false;
 
     loop {

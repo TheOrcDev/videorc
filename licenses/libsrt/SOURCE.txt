@@ -1,0 +1,12 @@
+libsrt (Secure Reliable Transport), Haivision Systems Inc.
+
+Repository: https://github.com/Haivision/srt
+Release: v1.5.7
+Source archive: https://github.com/Haivision/srt/archive/refs/tags/v1.5.7.tar.gz
+Source SHA-256: 017cd1e437ef2073a4dd10ddf7b55e86bc3d6ebac0393d13bd22f6a57055d32b
+Licence: Mozilla Public License 2.0 (LICENSE.txt)
+
+The source files are not modified. scripts/build-libsrt-macos.sh builds a
+dylib from this archive with encryption through OpenSSL 3 (Apache-2.0,
+linked statically) and stages it, with this licence, at vendor/libsrt/current.
+The macOS app ships it in Contents/Resources/libsrt.
