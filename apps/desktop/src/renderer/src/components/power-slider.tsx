@@ -1,6 +1,6 @@
 'use client'
 
-import { useId, useState } from 'react'
+import { useId, useRef, useState } from 'react'
 import type { CSSProperties, ReactElement } from 'react'
 
 import { ResetIcon } from '@/components/icons'
@@ -115,12 +115,19 @@ function PowerSlider({
   const range: SliderRange = { max, min, step }
   const commit = onCommit ?? onChange
   const [draft, setDraft] = useState<string | null>(null)
+  // Escape blurs the field, and that blur must not commit (QA F23).
+  const cancelledRef = useRef(false)
 
   const display = formatValue(value, { bipolar, decimals, step, suffix })
   const canReset =
     defaultValue !== undefined && clampToRange(value, range) !== clampToRange(defaultValue, range)
 
   const emit = (next: number, withCommit: boolean): void => {
+    // Nothing changes a disabled slider: not a double-click, a typed number
+    // or a reset (QA F24).
+    if (disabled) {
+      return
+    }
     const clamped = clampToRange(next, range)
     onChange(clamped)
     if (withCommit) {
@@ -136,7 +143,8 @@ function PowerSlider({
 
   const numericText = draft ?? String(value)
   const commitNumeric = (): void => {
-    if (draft === null) {
+    if (draft === null || cancelledRef.current) {
+      cancelledRef.current = false
       return
     }
     const parsed = parseNumericInput(draft, range)
@@ -182,6 +190,7 @@ function PowerSlider({
                   event.preventDefault()
                   commitNumeric()
                 } else if (event.key === 'Escape') {
+                  cancelledRef.current = true
                   setDraft(null)
                   event.currentTarget.blur()
                 }
