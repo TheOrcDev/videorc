@@ -277,6 +277,7 @@ import {
   previewSurfaceStatusBackground
 } from './preview-surface-live-background'
 import { livePosterManifest } from '../shared/live-background-catalog'
+import { rehydrateManagedBackgrounds } from './managed-background-registry'
 import { BANNER_ASSET_HOST, BANNERS_FOLDER } from '../shared/banner-assets'
 import { SOUND_ASSET_HOST, SOUNDS_FOLDER, isSoundFileName } from '../shared/sound-assets'
 import type {
@@ -17833,22 +17834,16 @@ async function ensureManagedBackgroundRegistered(assetId: string): Promise<boole
 }
 
 async function rehydrateManagedBackgroundAssets(): Promise<void> {
-  const ids = new Set(
-    [...bundledBackgroundAssetsInternal(), ...livePosterAssetsInternal()].map((asset) => asset.id)
-  )
-  const root = join(app.getPath('userData'), 'background-assets')
-  try {
-    for (const entry of readdirSync(root)) {
-      const dot = entry.lastIndexOf('.')
-      const id = dot > 0 ? entry.slice(0, dot) : ''
-      if (/^[A-Za-z0-9_-]{1,128}$/.test(id) && isSupportedBackgroundFile(entry)) {
-        ids.add(id)
-      }
-    }
-  } catch {
-    // A fresh profile has no imported background directory yet.
-  }
-  await Promise.all([...ids].map((id) => ensureManagedBackgroundRegistered(id)))
+  await rehydrateManagedBackgrounds({
+    bundled: bundledBackgroundAssetsInternal(),
+    posters: livePosterAssetsInternal(),
+    importedRoot: join(app.getPath('userData'), 'background-assets'),
+    readDirectory: (root) => readdirSync(root),
+    resolveRegularFile: resolveRegularFileInsideRoot,
+    isSupportedFile: isSupportedBackgroundFile,
+    register: ({ assetId, path }) =>
+      requestBackendAdmin('resource.capability.register_background', { assetId, path })
+  })
 }
 
 async function openOAuthUrl(authUrl: string): Promise<void> {
