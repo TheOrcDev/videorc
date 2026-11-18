@@ -63,6 +63,31 @@ export function localTimeOffsets(localStart: string, timeZone: string): number[]
   }
 }
 
+/**
+ * The UTC instant (ms) a `datetime-local` value is in the zone, the way the
+ * backend resolves it: `null` when the time does not exist (the clocks jump
+ * over it) or happens twice and no earlier/later `choice` was made.
+ */
+export function resolveLocalTimeMs(
+  localTime: string,
+  timeZone: string,
+  choice?: 'earlier' | 'later' | null
+): number | null {
+  const wall = Date.parse(`${localTime}Z`)
+  const offsets = localTimeOffsets(localTime, timeZone)
+  if (Number.isNaN(wall) || offsets.length === 0) return null
+  // The larger offset is the earlier instant.
+  const offset =
+    offsets.length === 1
+      ? offsets[0]
+      : choice === 'later'
+        ? offsets[1]
+        : choice === 'earlier'
+          ? offsets[0]
+          : null
+  return offset === null ? null : wall - offset * 60_000
+}
+
 /** "GMT+2", "GMT-5:30", "GMT". */
 export function formatGmtOffset(minutes: number): string {
   if (minutes === 0) return 'GMT'

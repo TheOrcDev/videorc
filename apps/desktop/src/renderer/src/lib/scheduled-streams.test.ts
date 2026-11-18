@@ -335,6 +335,77 @@ describe('Upcoming, split by platform', () => {
     })
     expect(scheduledWhenLabel(overnight, 'en-GB')).toMatch(/12:00.*–.*2 Jan 2035, 01:00/)
   })
+
+  // The end is a wall time resolved on its own, so a DST change between start and
+  // end must not shift it (it used to add the wall-clock difference to the start).
+  const madridRange = (startUtc: string, endUtc: string): string =>
+    new Intl.DateTimeFormat('en-GB', {
+      weekday: 'short',
+      month: 'short',
+      day: 'numeric',
+      year: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+      timeZone: 'Europe/Madrid',
+      timeZoneName: 'short'
+    }).formatRange(new Date(startUtc), new Date(endUtc))
+
+  it.each([
+    [
+      'spring forward',
+      '2027-03-28T00:30:00Z',
+      '2027-03-28T01:30',
+      '2027-03-28T03:30',
+      '2027-03-28T01:30:00Z'
+    ],
+    [
+      'fall back',
+      '2027-10-30T23:30:00Z',
+      '2027-10-31T01:30',
+      '2027-10-31T03:30',
+      '2027-10-31T02:30:00Z'
+    ],
+    [
+      'an ordinary day',
+      '2027-03-27T00:30:00Z',
+      '2027-03-27T01:30',
+      '2027-03-27T03:30',
+      '2027-03-27T02:30:00Z'
+    ]
+  ])(
+    'shows the saved planned end across %s',
+    (_name, startUtc, localStart, plannedEndLocal, endUtc) => {
+      const x = scheduledEvent({
+        provider: 'x',
+        startUtc,
+        requested: { ...scheduledEvent().requested, localStart, plannedEndLocal }
+      })
+      expect(scheduledWhenLabel(x, 'en-GB')).toBe(madridRange(startUtc, endUtc))
+    }
+  )
+
+  it('uses the chosen offset for a planned end in the repeated hour', () => {
+    const base = scheduledEvent().requested
+    const event = (offsetChoice: 'earlier' | 'later' | null): ScheduledStreamEvent =>
+      scheduledEvent({
+        provider: 'x',
+        startUtc: '2027-10-30T23:30:00Z',
+        requested: {
+          ...base,
+          localStart: '2027-10-31T01:30',
+          plannedEndLocal: '2027-10-31T02:30',
+          offsetChoice
+        }
+      })
+    expect(scheduledWhenLabel(event('earlier'), 'en-GB')).toBe(
+      madridRange('2027-10-30T23:30:00Z', '2027-10-31T00:30:00Z')
+    )
+    expect(scheduledWhenLabel(event('later'), 'en-GB')).toBe(
+      madridRange('2027-10-30T23:30:00Z', '2027-10-31T01:30:00Z')
+    )
+    // No choice made: the end cannot be resolved, so only the start shows.
+    expect(scheduledWhenLabel(event(null), 'en-GB')).not.toContain('–')
+  })
 })
 
 describe('saved X broadcasts after a session', () => {
