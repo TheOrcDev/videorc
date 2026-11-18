@@ -279,4 +279,38 @@ describe('processed camera transport (S13b)', () => {
     await expect(event).resolves.toEqual({ cameraGeneration: 2 })
     bridge.close()
   })
+
+  it('takes turns between a frame pull and a fixture event instead of refusing', async () => {
+    const bridge = await openedProcessed()
+    const socket = FakeSocket.last!
+    // The renderer pulls back to back: a fixture event arrives mid-pull.
+    const pull = bridge.request(roomFrameCommand('pull', 7, 2, undefined, size))
+    const event = bridge.fixture('fixture-switch')
+    await Promise.resolve()
+    expect(socket.sent.at(-1)).toMatchObject({ params: { action: 'pull' } })
+    socket.reply(processedFrame(2))
+    await expect(pull).resolves.toMatchObject({ header: { serial: 2 } })
+    await vi.waitFor(() =>
+      expect(socket.sent.at(-1)).toMatchObject({ params: { action: 'fixture-switch' } })
+    )
+    // The next pull waits for the fixture's reply rather than closing the bridge.
+    const next = bridge.request(roomFrameCommand('pull', 7, 3, undefined, size))
+    socket.reply(
+      JSON.stringify({ id: socket.sent.at(-1)!.id, ok: true, payload: { cameraGeneration: 2 } })
+    )
+    await expect(event).resolves.toEqual({ cameraGeneration: 2 })
+    await vi.waitFor(() => expect(socket.sent.at(-1)).toMatchObject({ params: { action: 'pull' } }))
+    socket.reply(processedFrame(3))
+    await expect(next).resolves.toMatchObject({ header: { serial: 3 } })
+    bridge.close()
+  })
+
+  it('wakes a waiting fixture event with a refusal when the bridge closes', async () => {
+    const bridge = await openedProcessed()
+    const pull = bridge.request(roomFrameCommand('pull', 7, 2, undefined, size))
+    const event = bridge.fixture('fixture-unplug')
+    bridge.close()
+    await expect(pull).rejects.toThrow('closed')
+    await expect(event).rejects.toThrow('No processed camera')
+  })
 })

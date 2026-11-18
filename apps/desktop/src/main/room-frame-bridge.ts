@@ -54,6 +54,10 @@ export class RoomFrameBridge {
 
   async request(command: RoomFrameCommand): Promise<RoomFrameReply> {
     if (!this.enabled() || this.#closed) throw new Error('Frame test bridge is disabled.')
+    // A debug fixture event holds the credit for one short reply; the next
+    // frame waits for it rather than tearing the bridge down.
+    while (this.#pending?.serial === -2) await this.#idle()
+    if (!this.enabled() || this.#closed) throw new Error('Frame test bridge is disabled.')
     if (this.#pending) throw new Error('Frame request already outstanding.')
     // The method fixes the role: the fixture never carries the camera and back.
     if ((command.role === ROOM_CAMERA_ROLE) !== (this.method === 'room.camera.processed'))
@@ -97,7 +101,13 @@ export class RoomFrameBridge {
   async fixture(action: 'fixture-switch' | 'fixture-unplug'): Promise<unknown> {
     if (!this.enabled() || this.#closed || !this.#processed || !this.#socket)
       throw new Error('No processed camera to drive.')
-    if (this.#pending) throw new Error('Frame request already outstanding.')
+    // The renderer pulls frames back to back, so a fixture event almost
+    // always arrives with one outstanding: take the credit after it.
+    while (this.#pending) {
+      if (this.#pending.serial < 0) throw new Error('Frame bridge is busy; try the fixture again.')
+      await this.#idle()
+      if (this.#closed || !this.#socket) throw new Error('No processed camera to drive.')
+    }
     const socket = this.#socket
     return new Promise<unknown>((resolve, reject) => {
       const serial = (this.#fixtureSerial = (this.#fixtureSerial % 1000) + 1)
@@ -133,6 +143,7 @@ export class RoomFrameBridge {
         clearTimeout(this.#timer)
         this.#timer = undefined
         this.#pending = null
+        this.#wakeIdle()
         socket.send(
           JSON.stringify({
             id: 'frame-events',
@@ -149,6 +160,19 @@ export class RoomFrameBridge {
     this.#pending = null
     clearTimeout(this.#timer)
     this.#timer = undefined
+    this.#wakeIdle()
+  }
+
+  #idleWaiters: (() => void)[] = []
+  /** Resolves when the outstanding request settles or the bridge closes. */
+  #idle(): Promise<void> {
+    return new Promise((resolve) => this.#idleWaiters.push(resolve))
+  }
+  #wakeIdle(): void {
+    const waiters = this.#idleWaiters
+    this.#idleWaiters = []
+    // After the settling reply has resolved its own caller.
+    for (const wake of waiters) queueMicrotask(wake)
   }
 
   #message(data: unknown): void {
@@ -223,6 +247,7 @@ export class RoomFrameBridge {
     const pending = this.#pending
     this.#pending = null
     pending?.reject(new Error('Frame bridge closed.'))
+    this.#wakeIdle()
     const socket = this.#socket
     if (socket) {
       socket.onopen = socket.onmessage = socket.onerror = null
