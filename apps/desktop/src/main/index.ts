@@ -656,6 +656,11 @@ import {
   sanitizedChildProcessEnvironment,
   scrubReleaseAuthorityEnvironment
 } from './release-authority-env'
+import {
+  createNotesPersistence,
+  isNotesFontScale,
+  type NotesWindowPrefs
+} from './notes-persistence'
 import { rendererSecurityRegistry, secureIpcHandle, sendElectronEvent } from './secure-ipc'
 import { setTalkShowDisplaySourceResolver } from './web-contents-security'
 
@@ -808,7 +813,6 @@ import type {
   ModerationOperation,
   NativePreviewHostCommand,
   NotesDocument,
-  NotesFontScale,
   NotesWindowState,
   OAuthCallbackEnvelope,
   ObsSetup,
@@ -3476,52 +3480,35 @@ function restorePreviewWindowOnLaunch(): void {
 }
 
 // --- Detached Notes window ----------------------------------------------------
-type NotesWindowPrefs = {
-  frame?: Electron.Rectangle
-  alwaysOnTop?: boolean
-  alwaysOnTopPreferenceVersion?: number
-  open?: boolean
-  text?: string
-  fontScale?: NotesFontScale
-}
-
 function notesWindowPrefsPath(): string {
   return join(app.getPath('userData'), 'notes-window.json')
 }
 
+// QA F9: reads and writes throw instead of looking like an empty file or a
+// save, so the Notes window can say so and never saves over notes it could
+// not read (notes-persistence.ts).
+const notesPersistence = createNotesPersistence({
+  path: notesWindowPrefsPath,
+  writesEnabled: () => notesWindowFeatureEnabled && !process.env.VIDEORC_SMOKE_OUTPUT_DIR,
+  warn: (message, error) => safeConsole.warn(message, ...(error === undefined ? [] : [error]))
+})
+
+/** Window frame and open state; an unreadable file reads as no prefs. */
 function loadNotesWindowPrefs(): NotesWindowPrefs {
-  try {
-    return JSON.parse(readFileSync(notesWindowPrefsPath(), 'utf8')) as NotesWindowPrefs
-  } catch {
-    return {}
-  }
+  return notesPersistence.readPrefsForWindow()
 }
 
+/** Window prefs (frame, open, keep on top): a failed write must not break capture. */
 function saveNotesWindowPrefs(patch: NotesWindowPrefs): void {
-  if (!notesWindowFeatureEnabled || process.env.VIDEORC_SMOKE_OUTPUT_DIR) {
-    return
-  }
   try {
-    writeFileSync(notesWindowPrefsPath(), JSON.stringify({ ...loadNotesWindowPrefs(), ...patch }))
-  } catch {
-    // Local notes are a convenience; a failed preference write must not break capture.
-  }
-}
-
-function defaultNotesDocument(prefs = loadNotesWindowPrefs()): NotesDocument {
-  return {
-    text: typeof prefs.text === 'string' ? prefs.text : '',
-    fontScale: isNotesFontScale(prefs.fontScale) ? prefs.fontScale : 'md',
-    updatedAt: new Date().toISOString()
+    notesPersistence.writePrefs(patch)
+  } catch (error) {
+    safeConsole.warn('Notes window prefs were not saved:', error)
   }
 }
 
 function notesWindowAlwaysOnTopPreference(prefs: NotesWindowPrefs): boolean {
   return prefs.alwaysOnTopPreferenceVersion === 2 && prefs.alwaysOnTop === true
-}
-
-function isNotesFontScale(value: unknown): value is NotesFontScale {
-  return value === 'sm' || value === 'md' || value === 'lg'
 }
 
 function notesWindowIsOpen(): boolean {
@@ -3613,13 +3600,9 @@ function emitNotesDocument(document: NotesDocument): void {
 }
 
 function saveNotesDocument(patch: Partial<NotesDocument>): NotesDocument {
-  const current = defaultNotesDocument()
-  const next: NotesDocument = {
-    text: typeof patch.text === 'string' ? patch.text : current.text,
-    fontScale: isNotesFontScale(patch.fontScale) ? patch.fontScale : current.fontScale,
-    updatedAt: new Date().toISOString()
-  }
-  saveNotesWindowPrefs({ text: next.text, fontScale: next.fontScale })
+  // Throws on a failed read or write, so the caller hears it; only a document
+  // that is on disk is announced.
+  const next = notesPersistence.saveDocument(patch)
   emitNotesDocument(next)
   return next
 }
@@ -3798,7 +3781,12 @@ async function openNotesWindow(): Promise<NotesWindowState> {
   window.show()
   window.focus()
   emitNotesWindowState()
-  emitNotesDocument(defaultNotesDocument())
+  try {
+    emitNotesDocument(notesPersistence.loadDocument())
+  } catch (error) {
+    // The window asks for its document itself and says when it can't load.
+    safeConsole.warn('Notes document could not be read:', error)
+  }
   return notesWindowState()
 }
 
@@ -18851,13 +18839,23 @@ app.whenReady().then(async () => {
   secureIpcHandle('notes-window:set-always-on-top', (_event, alwaysOnTop: boolean) =>
     setNotesWindowAlwaysOnTop(Boolean(alwaysOnTop))
   )
-  secureIpcHandle('notes-window:get-document', () => defaultNotesDocument())
+  // A failed read or write rejects the call (QA F9): the window shows it
+  // instead of Saved, and never takes a failed read for empty notes.
+  secureIpcHandle('notes-window:get-document', () => notesPersistence.loadDocument())
   secureIpcHandle('notes-window:save-document', (event, patch: Partial<NotesDocument>) => {
-    const document = saveNotesDocument(patch ?? {})
-    if (notesWindow && event.sender.id === notesWindow.webContents.id && notesWindowClosing) {
-      finishNotesWindowClose(notesWindow)
+    const closingWindow =
+      notesWindow && event.sender.id === notesWindow.webContents.id && notesWindowClosing
+        ? notesWindow
+        : null
+    try {
+      return saveNotesDocument(patch ?? {})
+    } finally {
+      // The window answered the close flush; a failed save closes it now
+      // rather than after the 1.5 s timeout, as it always would have.
+      if (closingWindow) {
+        finishNotesWindowClose(closingWindow)
+      }
     }
-    return document
   })
   secureIpcHandle('comments-window:open', () => openCommentsWindow())
   secureIpcHandle('comments-window:close', () => closeCommentsWindow())

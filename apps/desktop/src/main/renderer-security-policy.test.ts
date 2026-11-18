@@ -800,7 +800,8 @@ describe('renderer security policy', () => {
     // The Notes renderer (plan 050 S4) bounds the text and answers the flush.
     const notesWindow = source('../renderer/src/components/notes-window.tsx')
     expect(notesWindow).toContain('maxLength = MAX_NOTES_TEXT_LENGTH')
-    expect(notesWindow).toContain('onNotesFlushRequest?.(() => void save())')
+    expect(notesWindow).toContain('onNotesFlushRequest?.(() => {')
+    expect(notesWindow).toContain('void save()')
     expect(preload).toContain("subscribe('notes-window:flush-request'")
     expect(apiPolicy).toContain("'onNotesFlushRequest'")
   })
