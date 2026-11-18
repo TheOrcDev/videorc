@@ -88,3 +88,33 @@ export function executeProofSurfaceScript<Result = unknown>(
     surface.webContents.executeJavaScript(code, userGesture)
   )
 }
+
+/**
+ * Runs proof-surface work nobody awaits (a debounce timer, a window event).
+ * The surface being destroyed under it is a normal end of that work, not a
+ * failure: preview close, reopen and surface replacement all destroy the
+ * surface with calls in flight. That cancellation goes to `onSurfaceGone` as
+ * a diagnostic; every other error goes to `onError`, so a real failure stays
+ * visible and the promise never ends as an unhandled rejection.
+ */
+export function runDetachedProofSurfaceWork(
+  work: () => Promise<unknown>,
+  handlers: {
+    onError: (error: unknown) => void
+    onSurfaceGone?: (error: ProofSurfaceGoneError) => void
+  }
+): void {
+  let pending: Promise<unknown>
+  try {
+    pending = work()
+  } catch (error) {
+    pending = Promise.reject(error)
+  }
+  pending.catch((error: unknown) => {
+    if (error instanceof ProofSurfaceGoneError) {
+      handlers.onSurfaceGone?.(error)
+      return
+    }
+    handlers.onError(error)
+  })
+}
