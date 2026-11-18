@@ -124,3 +124,41 @@ export function capabilityCurrent(
     now - receipt.at < CAPABILITY_TTL_MS
   )
 }
+type ConsumerRoom = { remoteParticipants: ReadonlyMap<string, { identity: string; sid: string }> }
+/**
+ * The session a host publisher may serve under `identity`, or ''. LiveKit
+ * leaves `hidden` grants (program and recorder egress pages) out of
+ * `remoteParticipants`, so a hidden `EG_` page is known by its fresh
+ * server-relayed receipt: the web relays one only after RoomService confirms
+ * that identity's current SID. A visible session always wins; a guest is
+ * served only while visible.
+ */
+export function consumerSid(
+  room: ConsumerRoom,
+  identity: string,
+  receipt: CapabilityReceipt | undefined,
+  now: number
+): string {
+  const visible = room.remoteParticipants.get(identity)
+  if (visible) return visible.sid
+  return identity.startsWith('EG_') &&
+    receipt &&
+    capabilityCurrent(receipt, receipt.participantSid, now)
+    ? receipt.participantSid
+    : ''
+}
+/** Every visible participant, then each hidden `EG_` page with a fresh receipt. */
+export function roomConsumers(
+  room: ConsumerRoom,
+  receipts: ReadonlyMap<string, CapabilityReceipt>,
+  now: number
+): { identity: string; sid: string }[] {
+  const consumers = [...room.remoteParticipants.values()].map(({ identity, sid }) => ({
+    identity,
+    sid
+  }))
+  for (const [identity, receipt] of receipts)
+    if (!room.remoteParticipants.has(identity) && consumerSid(room, identity, receipt, now))
+      consumers.push({ identity, sid: receipt.participantSid })
+  return consumers
+}

@@ -63,6 +63,57 @@ function harness() {
 }
 afterEach(() => vi.useRealTimers())
 describe('room avatar publisher', () => {
+  it('serves a hidden program egress known only by its server-relayed receipt, never a hidden guest (QA F2)', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(1000)
+    const h = harness()
+    // LiveKit leaves `hidden: true` recorder grants out of remoteParticipants.
+    h.room.remoteParticipants.delete('EG_program')
+    const bodies: Uint8Array[] = []
+    h.room.localParticipant.streamBytes.mockImplementation(async () => ({
+      write: vi.fn(async (bytes: Uint8Array) => {
+        bodies.push(bytes)
+      }),
+      close: vi.fn(async () => {})
+    }))
+    h.publisher.guests(true)
+    h.publisher.set({
+      h: fixture.snapshot.layers as AvatarLayer[],
+      v: [],
+      stream: true,
+      recording: false
+    })
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(h.statuses.at(-1)?.state).toBe('preview')
+    // A participant cannot claim a hidden lane, and a guest must be visible.
+    h.receive({ version: 1, output: 'stream', orientation: 'h' }, { identity: 'g_guest' })
+    h.receiveFrom('g_hidden', 'PA_hidden', { version: 1, output: 'stream', orientation: 'h' })
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(h.room.localParticipant.streamBytes).not.toHaveBeenCalled()
+    h.receive({ version: 1, output: 'stream', orientation: 'h' })
+    await vi.advanceTimersByTimeAsync(1000)
+    const targets = h.room.localParticipant.streamBytes.mock.calls.map(
+      (call) => (call as unknown as [{ destinationIdentities: string[] }])[0].destinationIdentities
+    )
+    expect(targets.flat()).toEqual(['EG_program'])
+    const body = JSON.parse(new TextDecoder().decode(bodies[0]))
+    expect(body.layers.some((l: AvatarLayer) => l.kind === 'avatar')).toBe(true)
+    expect(h.statuses.at(-1)?.state).toBe('waiting')
+    h.receive({
+      version: 1,
+      output: 'stream',
+      orientation: 'h',
+      applied: { publisherSid: 'PA_host', revision: body.revision }
+    })
+    await vi.advanceTimersByTimeAsync(100)
+    expect(h.statuses.at(-1)?.state).toBe('applied')
+    expect(Object.keys(h.statuses.at(-1)?.observed ?? {})).toEqual(['EG_program'])
+    expect(h.publisher.motionCoverage()).toEqual({ animated: [], still: 0 })
+    // With no renewed receipt the hidden page is gone after the receipt TTL.
+    await vi.advanceTimersByTimeAsync(26_000)
+    expect(h.statuses.at(-1)?.state).toBe('preview')
+    h.publisher.close()
+  })
   it('off has no timer; media v2 alone and participant-originated receipts never authorize graphics', async () => {
     vi.useFakeTimers()
     vi.setSystemTime(1000)

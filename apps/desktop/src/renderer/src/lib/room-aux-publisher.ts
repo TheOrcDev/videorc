@@ -6,7 +6,9 @@ import {
   AUX_TRACK_NAME,
   CAPABILITY_TOPIC,
   capabilityCurrent,
+  consumerSid,
   parseConsumerCapability,
+  roomConsumers,
   type CapabilityReceipt,
   CAPABILITY_RECEIPT_MAX_BYTES
 } from './room-media-v2'
@@ -67,7 +69,7 @@ export class RoomAuxPublisher {
     this.#routingOff = roomAudioRouting.subscribe(this.refresh)
     room.on(RoomEvent.DataReceived, this.#receive)
     room.on(RoomEvent.ParticipantConnected, this.refresh)
-    room.on(RoomEvent.ParticipantDisconnected, this.refresh)
+    room.on(RoomEvent.ParticipantDisconnected, this.#left)
     room.on(RoomEvent.LocalTrackPublished, this.refresh)
     room.on(RoomEvent.LocalTrackUnpublished, this.refresh)
     room.on(RoomEvent.Reconnecting, this.#lost)
@@ -88,7 +90,8 @@ export class RoomAuxPublisher {
         !Number.isFinite(value.at) ||
         value.at > now + 1000 ||
         now - value.at >= 25_000 ||
-        this.room.remoteParticipants.get(capability.identity)?.sid !== capability.participantSid
+        consumerSid(this.room, capability.identity, { ...capability, at: value.at }, now) !==
+          capability.participantSid
       )
         return
       const old = this.#receipts.get(capability.identity)
@@ -98,6 +101,11 @@ export class RoomAuxPublisher {
     } catch {
       /* No confirmation from malformed or participant-originated data. */
     }
+  }
+  /** A visible page that left is gone, not hidden until its receipt expires. */
+  #left = (participant?: { identity: string }): void => {
+    if (participant) this.#receipts.delete(participant.identity)
+    this.refresh()
   }
   #lost = (): void => {
     roomAudioRouting.disarmSystem()
@@ -116,7 +124,7 @@ export class RoomAuxPublisher {
       roomAudioRouting.getSnapshot().takeover &&
       (!capabilityCurrent(
         this.#receipts.get(identity),
-        this.room.remoteParticipants.get(identity)?.sid ?? '',
+        consumerSid(this.room, identity, this.#receipts.get(identity), now),
         now
       ) ||
         this.#receipts.get(identity)?.audioRouting !== 1)
@@ -130,7 +138,7 @@ export class RoomAuxPublisher {
     // SID scope prevents a replacement/old page inheriting another session's consent.
     this.room.localParticipant.setTrackSubscriptionPermissions(
       false,
-      [...this.room.remoteParticipants.values()].map((p) => ({
+      roomConsumers(this.room, this.#receipts, now).map((p) => ({
         participantSid: p.sid,
         allowAll: false,
         allowedTrackSids: [
@@ -178,7 +186,7 @@ export class RoomAuxPublisher {
     if (!enabled) {
       this.#error = null
     }
-    const consumers = [...this.room.remoteParticipants.values()]
+    const consumers = roomConsumers(this.room, this.#receipts, Date.now())
     // A legacy runner is intentionally incompatible, too.
     const reason =
       this.#error ??
@@ -227,7 +235,7 @@ export class RoomAuxPublisher {
   }
   /** Program pages that negotiated deliberate routing and are current now. */
   #routingTargets(now: number): string[] {
-    return [...this.room.remoteParticipants.values()]
+    return roomConsumers(this.room, this.#receipts, now)
       .filter(
         (p) =>
           p.identity.startsWith('EG_') &&
@@ -303,7 +311,7 @@ export class RoomAuxPublisher {
     this.#timer = null
     this.room.off(RoomEvent.DataReceived, this.#receive)
     this.room.off(RoomEvent.ParticipantConnected, this.refresh)
-    this.room.off(RoomEvent.ParticipantDisconnected, this.refresh)
+    this.room.off(RoomEvent.ParticipantDisconnected, this.#left)
     this.room.off(RoomEvent.LocalTrackPublished, this.refresh)
     this.room.off(RoomEvent.LocalTrackUnpublished, this.refresh)
     this.room.off(RoomEvent.Reconnecting, this.#lost)

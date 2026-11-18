@@ -342,6 +342,31 @@ describe('S12 room scene publisher', () => {
     void second
     h.publisher.close()
   })
+  it('a hidden program egress known only by its relayed receipt gets the scene and confirms it (QA F2)', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(1_800_000_000_000)
+    const h = roomHarness()
+    // LiveKit leaves `hidden: true` recorder grants out of remoteParticipants.
+    h.room.remoteParticipants.delete('EG_program')
+    const lane = { version: 1, output: 'stream', orientation: 'h' }
+    h.receipt('EG_program', 'PA_program', lane, { identity: 'g_guest' })
+    expect((await h.publisher.commit(content())).state).toBe('preview')
+    h.receipt('EG_program', 'PA_program', lane)
+    const commit = h.publisher.commit(content())
+    await vi.advanceTimersByTimeAsync(300)
+    const targets = h.room.localParticipant.streamBytes.mock.calls.map(
+      (call) => (call as unknown as [{ destinationIdentities: string[] }])[0].destinationIdentities
+    )
+    expect(targets.flat()).toEqual(['EG_program'])
+    const sent = h.bodies.at(-1)!
+    h.receipt('EG_program', 'PA_program', {
+      ...lane,
+      applied: { publisherSid: 'PA_host1', revision: sent.revision }
+    })
+    await vi.advanceTimersByTimeAsync(300)
+    expect((await commit).state).toBe('applied')
+    h.publisher.close()
+  })
   it('rejects a cut with a duration', async () => {
     const h = roomHarness()
     expect(

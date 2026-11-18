@@ -187,10 +187,42 @@ describe('media v2 compatibility', () => {
     expect(vi.getTimerCount()).toBe(1)
     expect(publishData).toHaveBeenCalled()
     room.remoteParticipants.delete(program.identity)
-    room.emit(RoomEvent.ParticipantDisconnected)
+    room.emit(RoomEvent.ParticipantDisconnected, program)
     expect(vi.getTimerCount()).toBe(0)
     publisher.close()
     expect(vi.getTimerCount()).toBe(0)
+  })
+  it('QA F2: a hidden program egress is a consumer by its relayed receipt; a hidden guest never is', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(now)
+    const room = fakeRoom()
+    const publishData = vi.fn(async () => {})
+    Object.assign(room.localParticipant, { sid: 'PA_host', publishData })
+    const publisher = new RoomAuxPublisher(room as unknown as Room)
+    soundboard.setRoomAuxEnabled(true)
+    receipt(room)
+    // A guest LiveKit does not show is never served.
+    receipt(room, { ...capable, identity: 'g_hidden', participantSid: 'PA_hidden' })
+    receipt(room, {
+      ...capable,
+      identity: 'EG_program',
+      participantSid: 'PA_program',
+      audioRouting: 1
+    })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(publishData).toHaveBeenCalled()
+    expect(soundboard.getSnapshot().roomAux?.state).toBe('published')
+    expect(room.localParticipant.setTrackSubscriptionPermissions).toHaveBeenLastCalledWith(false, [
+      { participantSid: 'PA_one', allowAll: false, allowedTrackSids: ['TR_mic', 'TR_aux'] },
+      { participantSid: 'PA_program', allowAll: false, allowedTrackSids: ['TR_mic', 'TR_aux'] }
+    ])
+    // Its lease ends with the receipt TTL.
+    vi.setSystemTime(now + 25_000)
+    receipt(room, { ...capable, at: now + 25_000 })
+    expect(room.localParticipant.setTrackSubscriptionPermissions).toHaveBeenLastCalledWith(false, [
+      { participantSid: 'PA_one', allowAll: false, allowedTrackSids: ['TR_mic', 'TR_aux'] }
+    ])
+    publisher.close()
   })
   it('cancels a pending publish and retires it before any replacement can start', async () => {
     vi.useFakeTimers()

@@ -189,6 +189,21 @@ describe('Plan 249 S11 room HTML layer publisher (gated)', () => {
     expect(h.wants.at(-1)).toBe(false)
   })
 
+  it('a hidden program egress gets its sheet from the relayed receipt alone (QA F2)', async () => {
+    const h = harness()
+    // LiveKit leaves `hidden: true` recorder grants out of remoteParticipants.
+    h.room.remoteParticipants.delete('EG_stream')
+    h.publisher.setPlacements({ h: [placement('a')], v: [] })
+    h.receipt('EG_stream', { version: 1, output: 'stream', orientation: 'h' }, { identity: 'x' })
+    await settle()
+    expect(h.published).toHaveLength(0)
+    h.receipt('EG_stream', { version: 1, output: 'stream', orientation: 'h' })
+    await settle()
+    expect(h.published).toHaveLength(1)
+    expect(h.sent.at(-1)?.identity).toBe('EG_stream')
+    await h.publisher.close()
+  })
+
   it('lanes with the same layers share a sheet; more than two sheets refuse the extra lanes', async () => {
     const h = harness()
     h.publisher.setPlacements({

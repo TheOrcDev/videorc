@@ -55,6 +55,52 @@ function harness() {
 }
 afterEach(() => vi.useRealTimers())
 describe('room static graphics publisher', () => {
+  it('serves a hidden program egress known only by its server-relayed receipt (QA F2)', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(1000)
+    const h = harness()
+    // LiveKit leaves `hidden: true` recorder grants out of remoteParticipants.
+    h.room.remoteParticipants.delete('EG_program')
+    const bodies: Uint8Array[] = []
+    h.room.localParticipant.streamBytes.mockImplementation(async () => ({
+      write: vi.fn(async (bytes: Uint8Array) => {
+        bodies.push(bytes)
+      }),
+      close: vi.fn(async () => {})
+    }))
+    h.publisher.set({
+      h: fixture.snapshot.layers.map((l) => ({
+        ...l,
+        stream: true,
+        recording: false
+      })) as (GraphicsLayer & { stream: boolean; recording: boolean })[],
+      v: [],
+      unsupported: []
+    })
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(h.statuses.at(-1)?.state).toBe('preview')
+    const lane = { version: 1, output: 'stream', orientation: 'h', static: { version: 1 } }
+    h.receive(lane, { identity: 'g_guest' })
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(h.room.localParticipant.streamBytes).not.toHaveBeenCalled()
+    h.receive(lane)
+    await vi.advanceTimersByTimeAsync(1000)
+    const call = h.room.localParticipant.streamBytes.mock.calls[0] as unknown as [
+      { destinationIdentities: string[] }
+    ]
+    expect(call[0].destinationIdentities).toEqual(['EG_program'])
+    const body = JSON.parse(new TextDecoder().decode(bodies[0]))
+    expect(body.layers.length).toBeGreaterThan(0)
+    h.receive({
+      ...lane,
+      static: { version: 1, applied: { publisherSid: 'PA_host', revision: body.revision } }
+    })
+    await vi.advanceTimersByTimeAsync(100)
+    expect(h.statuses.at(-1)?.state).toBe('applied')
+    await vi.advanceTimersByTimeAsync(26_000)
+    expect(h.statuses.at(-1)?.state).toBe('preview')
+    h.publisher.close()
+  })
   it('off has no timer; media v2 alone and participant-originated receipts never authorize graphics', async () => {
     vi.useFakeTimers()
     vi.setSystemTime(1000)

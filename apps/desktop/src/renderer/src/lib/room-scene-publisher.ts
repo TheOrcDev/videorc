@@ -2,7 +2,9 @@ import { ConnectionState, RoomEvent, type Room } from 'livekit-client'
 import {
   CAPABILITY_TOPIC,
   capabilityCurrent,
+  consumerSid,
   parseConsumerCapability,
+  roomConsumers,
   type CapabilityReceipt,
   CAPABILITY_RECEIPT_MAX_BYTES
 } from './room-media-v2'
@@ -119,7 +121,7 @@ export class RoomScenePublisher {
     room.on(RoomEvent.DataReceived, this.#receive)
     room.on(RoomEvent.Reconnecting, this.#lost)
     room.on(RoomEvent.Disconnected, this.#lost)
-    room.on(RoomEvent.ParticipantDisconnected, this.#refresh)
+    room.on(RoomEvent.ParticipantDisconnected, this.#left)
     room.on(RoomEvent.ParticipantConnected, this.#refresh)
   }
   get content(): SceneContent | null {
@@ -160,7 +162,9 @@ export class RoomScenePublisher {
           // A confirmed clear is applied; with no output running it is a preview.
           state:
             status.state === 'off'
-              ? [...this.room.remoteParticipants.keys()].some((id) => id.startsWith('EG_'))
+              ? roomConsumers(this.room, this.#receipts, this.now()).some((p) =>
+                  p.identity.startsWith('EG_')
+                )
                 ? 'applied'
                 : 'preview'
               : status.state,
@@ -191,7 +195,7 @@ export class RoomScenePublisher {
         !Number.isSafeInteger(raw.at) ||
         !capabilityCurrent(
           { ...parsed, at: raw.at },
-          this.room.remoteParticipants.get(parsed.identity)?.sid ?? '',
+          consumerSid(this.room, parsed.identity, { ...parsed, at: raw.at }, this.now()),
           this.now()
         )
       )
@@ -216,7 +220,7 @@ export class RoomScenePublisher {
   }
   #status(): RoomSceneStatus {
     const observed: RoomSceneStatus['observed'] = {}
-    const peers = [...this.room.remoteParticipants.values()].filter((p) =>
+    const peers = roomConsumers(this.room, this.#receipts, this.now()).filter((p) =>
       p.identity.startsWith('EG_')
     )
     let capable = 0
@@ -309,8 +313,8 @@ export class RoomScenePublisher {
   }
   #refresh = (): void => {
     if (this.#closed) return
-    for (const identity of this.#receipts.keys())
-      if (!this.room.remoteParticipants.has(identity)) {
+    for (const [identity, receipt] of this.#receipts)
+      if (!consumerSid(this.room, identity, receipt, this.now())) {
         this.#receipts.delete(identity)
         this.#sent.delete(identity)
         this.#assetsSent.delete(identity)
@@ -357,7 +361,7 @@ export class RoomScenePublisher {
     }
   }
   async #send(generation: number): Promise<void> {
-    for (const peer of this.room.remoteParticipants.values()) {
+    for (const peer of roomConsumers(this.room, this.#receipts, this.now())) {
       if (this.#closed || generation !== this.#generation) return
       const receipt = this.#receipts.get(peer.identity)
       if (
@@ -399,7 +403,7 @@ export class RoomScenePublisher {
       if (
         this.#closed ||
         generation !== this.#generation ||
-        peer.sid !== this.room.remoteParticipants.get(peer.identity)?.sid
+        peer.sid !== this.#session(peer.identity)
       )
         return
       this.#sent.set(peer.identity, {
@@ -450,8 +454,19 @@ export class RoomScenePublisher {
     await withTimeout(writer.write(message), 15_000)
     await withTimeout(writer.close(), 15_000)
     if (this.#closed || generation !== this.#generation) return
-    if (peer.sid === this.room.remoteParticipants.get(peer.identity)?.sid)
-      sent.hashes.add(asset.hash)
+    if (peer.sid === this.#session(peer.identity)) sent.hashes.add(asset.hash)
+  }
+  /** A visible page that left is gone, not hidden until its receipt expires. */
+  #left = (participant?: { identity: string }): void => {
+    if (participant) {
+      this.#receipts.delete(participant.identity)
+      this.#sent.delete(participant.identity)
+      this.#assetsSent.delete(participant.identity)
+    }
+    this.#refresh()
+  }
+  #session(identity: string): string {
+    return consumerSid(this.room, identity, this.#receipts.get(identity), this.now())
   }
   close(): void {
     this.#closed = true
@@ -460,7 +475,7 @@ export class RoomScenePublisher {
     this.room.off(RoomEvent.DataReceived, this.#receive)
     this.room.off(RoomEvent.Reconnecting, this.#lost)
     this.room.off(RoomEvent.Disconnected, this.#lost)
-    this.room.off(RoomEvent.ParticipantDisconnected, this.#refresh)
+    this.room.off(RoomEvent.ParticipantDisconnected, this.#left)
     this.room.off(RoomEvent.ParticipantConnected, this.#refresh)
     this.#content = null
     this.#assets = []
