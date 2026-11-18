@@ -19,6 +19,7 @@ import {
   CAPABILITY_RECEIPT_MAX_BYTES,
   CAPABILITY_TOPIC,
   capabilityCurrent,
+  consumerSid,
   parseConsumerCapability,
   type CapabilityReceipt
 } from './room-media-v2'
@@ -192,7 +193,7 @@ export class RoomHtmlLayerPublisher {
     room.on(RoomEvent.DataReceived, this.#receive)
     room.on(RoomEvent.Reconnecting, this.#lost)
     room.on(RoomEvent.Disconnected, this.#lost)
-    room.on(RoomEvent.ParticipantDisconnected, this.#reconcileSoon)
+    room.on(RoomEvent.ParticipantDisconnected, this.#left)
     this.#tick = setInterval(this.#draw, 1000 / HTML_LAYER_LIMITS.fps)
     this.#renew = setInterval(this.#reconcileSoon, HTML_LAYER_LIMITS.renewMs)
   }
@@ -221,7 +222,7 @@ export class RoomHtmlLayerPublisher {
     this.room.off(RoomEvent.DataReceived, this.#receive)
     this.room.off(RoomEvent.Reconnecting, this.#lost)
     this.room.off(RoomEvent.Disconnected, this.#lost)
-    this.room.off(RoomEvent.ParticipantDisconnected, this.#reconcileSoon)
+    this.room.off(RoomEvent.ParticipantDisconnected, this.#left)
     this.#receipts.clear()
     await this.#closeSheets()
     this.#dropFrames()
@@ -240,7 +241,7 @@ export class RoomHtmlLayerPublisher {
         !Number.isSafeInteger(raw.at) ||
         !capabilityCurrent(
           { ...parsed, at: raw.at },
-          this.room.remoteParticipants.get(parsed.identity)?.sid ?? '',
+          consumerSid(this.room, parsed.identity, { ...parsed, at: raw.at }, this.#now()),
           this.#now()
         )
       )
@@ -259,6 +260,12 @@ export class RoomHtmlLayerPublisher {
     void this.#reconcile()
   }
 
+  /** A visible page that left is gone, not hidden until its receipt expires. */
+  #left = (participant?: { identity: string }): void => {
+    if (participant) this.#receipts.delete(participant.identity)
+    void this.#reconcile()
+  }
+
   #reconcileSoon = (): void => {
     void this.#reconcile()
   }
@@ -268,7 +275,7 @@ export class RoomHtmlLayerPublisher {
     const now = this.#now()
     const lanes: Lane[] = []
     for (const [identity, receipt] of this.#receipts) {
-      const sid = this.room.remoteParticipants.get(identity)?.sid ?? ''
+      const sid = consumerSid(this.room, identity, receipt, now)
       if (!receipt.html || !capabilityCurrent(receipt, sid, now)) {
         this.#receipts.delete(identity)
         continue

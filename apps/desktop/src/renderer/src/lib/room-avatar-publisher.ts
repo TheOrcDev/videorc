@@ -2,7 +2,9 @@ import { ConnectionState, RoomEvent, type Room } from 'livekit-client'
 import {
   CAPABILITY_TOPIC,
   capabilityCurrent,
+  consumerSid,
   parseConsumerCapability,
+  roomConsumers,
   type CapabilityReceipt,
   CAPABILITY_RECEIPT_MAX_BYTES
 } from './room-media-v2'
@@ -110,7 +112,7 @@ export class RoomAvatarPublisher {
     room.on(RoomEvent.DataReceived, this.#receive)
     room.on(RoomEvent.Reconnecting, this.#lost)
     room.on(RoomEvent.Disconnected, this.#lost)
-    room.on(RoomEvent.ParticipantDisconnected, this.#refresh)
+    room.on(RoomEvent.ParticipantDisconnected, this.#left)
   }
   set(content: AvatarContent | null): void {
     this.#content = content
@@ -192,7 +194,7 @@ export class RoomAvatarPublisher {
         !Number.isSafeInteger(raw.at) ||
         !capabilityCurrent(
           { ...parsed, at: raw.at },
-          this.room.remoteParticipants.get(parsed.identity)?.sid ?? '',
+          consumerSid(this.room, parsed.identity, { ...parsed, at: raw.at }, Date.now()),
           Date.now()
         )
       )
@@ -215,7 +217,7 @@ export class RoomAvatarPublisher {
   #report(): void {
     if (this.#closed) return
     const observed: RoomAvatarStatus['observed'] = {}
-    const peers = [...this.room.remoteParticipants.values()].filter((p) =>
+    const peers = roomConsumers(this.room, this.#receipts, Date.now()).filter((p) =>
       p.identity.startsWith('EG_')
     )
     let capable = 0
@@ -344,8 +346,8 @@ export class RoomAvatarPublisher {
   }
   #refresh = (): void => {
     if (this.#closed) return
-    for (const identity of this.#receipts.keys())
-      if (!this.room.remoteParticipants.has(identity)) {
+    for (const [identity, receipt] of this.#receipts)
+      if (!consumerSid(this.room, identity, receipt, Date.now())) {
         this.#receipts.delete(identity)
         this.#sent.delete(identity)
       }
@@ -367,7 +369,7 @@ export class RoomAvatarPublisher {
   }
   async #send(generation: number): Promise<void> {
     if (!this.#preview || this.#preview.expiresAt - Date.now() < 15_000) this.#makePreview()
-    for (const peer of this.room.remoteParticipants.values()) {
+    for (const peer of roomConsumers(this.room, this.#receipts, Date.now())) {
       if (this.#closed || generation !== this.#generation) return
       const receipt = this.#receipts.get(peer.identity)
       const role = consumerRole(peer.identity)
@@ -429,7 +431,7 @@ export class RoomAvatarPublisher {
         if (
           this.#closed ||
           generation !== this.#generation ||
-          peer.sid !== this.room.remoteParticipants.get(peer.identity)?.sid
+          peer.sid !== this.#session(peer.identity)
         ) {
           await bounded(writer.close())
           return
@@ -444,7 +446,7 @@ export class RoomAvatarPublisher {
       if (
         this.#closed ||
         generation !== this.#generation ||
-        peer.sid !== this.room.remoteParticipants.get(peer.identity)?.sid
+        peer.sid !== this.#session(peer.identity)
       )
         return
       this.#sent.set(peer.identity, {
@@ -479,7 +481,7 @@ export class RoomAvatarPublisher {
     const coverage: { animated: string[]; still: number } = { animated: [], still: 0 }
     if (this.#closed || !content?.animated || this.room.state !== ConnectionState.Connected)
       return coverage
-    for (const peer of this.room.remoteParticipants.values()) {
+    for (const peer of roomConsumers(this.room, this.#receipts, Date.now())) {
       const receipt = this.#receipts.get(peer.identity)
       if (
         !peer.identity.startsWith('EG_') ||
@@ -493,6 +495,17 @@ export class RoomAvatarPublisher {
     }
     return coverage
   }
+  /** A visible page that left is gone, not hidden until its receipt expires. */
+  #left = (participant?: { identity: string }): void => {
+    if (participant) {
+      this.#receipts.delete(participant.identity)
+      this.#sent.delete(participant.identity)
+    }
+    this.#refresh()
+  }
+  #session(identity: string): string {
+    return consumerSid(this.room, identity, this.#receipts.get(identity), Date.now())
+  }
   close(): void {
     this.#closed = true
     this.#generation++
@@ -500,7 +513,7 @@ export class RoomAvatarPublisher {
     this.room.off(RoomEvent.DataReceived, this.#receive)
     this.room.off(RoomEvent.Reconnecting, this.#lost)
     this.room.off(RoomEvent.Disconnected, this.#lost)
-    this.room.off(RoomEvent.ParticipantDisconnected, this.#refresh)
+    this.room.off(RoomEvent.ParticipantDisconnected, this.#left)
     this.#content = null
     this.#preview = null
     this.#receipts.clear()
