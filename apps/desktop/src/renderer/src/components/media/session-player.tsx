@@ -120,20 +120,25 @@ export function SessionPlayer({
   const pendingSeekRef = useRef<number | null>(null)
   const autoRetriedRef = useRef(false)
   const frameHandleRef = useRef<number | null>(null)
+  // QA F18: where a re-grant of the same recording picks up again.
+  const recoverRef = useRef<{ sessionId: string; atMs: number; playing: boolean } | null>(null)
 
   // Grant lifecycle: request on mount, renew a minute before expiry, drop on
   // unmount. A renewal normally keeps the URL; a replaced file yields a new
-  // one, and the position and play state carry over the reload.
+  // one, and the position and play state carry over the reload, as they do
+  // over a re-grant after a media error or a retry.
   useEffect(() => {
     let cancelled = false
     let timer: ReturnType<typeof setTimeout> | null = null
+    const recover = recoverRef.current?.sessionId === sessionId ? recoverRef.current : null
+    recoverRef.current = null
     grantedUrlRef.current = null
-    resumeRef.current = null
+    resumeRef.current = recover
     pendingSeekRef.current = null
     setGrant({ kind: 'loading' })
     setMediaError(null)
     setPlaying(false)
-    setPositionMs(0)
+    setPositionMs(recover?.atMs ?? 0)
     setDurationMs(0)
     setScrubMs(null)
     const requestGrant = window.videorc?.grantSessionMedia
@@ -344,13 +349,19 @@ export function SessionPlayer({
     onTimeUpdate?.(ms)
   }
 
+  /** Ask for the recording again, picking up where it was. */
+  const regrant = (): void => {
+    recoverRef.current = { sessionId, atMs: readPosition(), playing }
+    setGrantAttempt((attempt) => attempt + 1)
+  }
+
   const handleError = (): void => {
     const code = videoRef.current?.error?.code ?? null
     // An expired grant or a replaced file answers 404/409, which the element
     // reports as a network or source error: one silent re-grant fixes both.
     if (!autoRetriedRef.current && (code === 2 || code === 4)) {
       autoRetriedRef.current = true
-      setGrantAttempt((attempt) => attempt + 1)
+      regrant()
       return
     }
     setMediaError(mediaErrorCopy(code))
@@ -358,7 +369,7 @@ export function SessionPlayer({
 
   const retry = (): void => {
     autoRetriedRef.current = false
-    setGrantAttempt((attempt) => attempt + 1)
+    regrant()
   }
 
   return (
