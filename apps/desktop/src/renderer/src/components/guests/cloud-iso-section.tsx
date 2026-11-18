@@ -27,7 +27,7 @@ import {
   isoTakeNotes
 } from '@/lib/cloud-iso-view'
 
-// Plan 249 S22: Destinations → Guests → Separate files. Off unless the host
+// Plan 249 S22: Guests → Separate files. Off unless the host
 // turns it on, and turning it on takes the confirmation below with its
 // checkbox: only that confirmation sends `consent: true`. While separate
 // cloud files aren't production-qualified, the switch stays on screen,

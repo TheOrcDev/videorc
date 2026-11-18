@@ -1,4 +1,4 @@
-import { guestsVisible, livestreamViews } from './livestream-tabs'
+import { guestsVisible } from './livestream-tabs'
 import { describe, expect, it } from 'vitest'
 
 import type { CloudStatus, CloudTestResult } from './backend'
@@ -518,7 +518,6 @@ it('hides cloud and Guests entry points until their launch capabilities arrive',
       const off = status({ allowance, entitled })
       expect(cloudSectionState(off)).toBeNull()
       expect(guestsVisible(off)).toBe(false)
-      expect(livestreamViews(off).map((tab) => tab.id)).toEqual(['setup', 'upcoming'])
     }
   }
   expect(guestsVisible(status())).toBe(false)

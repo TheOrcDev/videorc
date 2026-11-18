@@ -26,8 +26,8 @@ vi.mock('@/hooks/use-studio', () => ({
 }))
 
 const navigation = vi.hoisted(() => ({ open: (_view: string): void => {} }))
-vi.mock('@/lib/livestream-tabs', () => ({
-  openLivestreamView: (view: string) => navigation.open(view)
+vi.mock('@/lib/workspace-navigation', () => ({
+  openWorkspaceTab: (tab: string) => navigation.open(tab)
 }))
 
 function talkShow(overrides: Partial<TalkShowContextValue> = {}): TalkShowContextValue {

@@ -336,21 +336,12 @@ export async function exerciseViews({ h, clients, captureAudio, report, sound, g
       h: pct(avatarRect.height)
     }
   )
-  // The guests' line lives with the switch in Destinations → Guests → Room
-  // (0.31.1); the Studio comes back after, for the Program preview.
+  // The guests' line lives with the switch on the Guests page (0.31.1); the
+  // Studio comes back after, for the Program preview.
   assert.equal(
     await h.eval(`
-      await openTab('streaming');
-      const deadline = Date.now() + 15000;
-      let line = null;
-      while (Date.now() < deadline) {
-        const tab = [...document.querySelectorAll('[role="tablist"][aria-label="Destinations view"] [role="tab"]')]
-          .find((el) => el.textContent.trim() === 'Guests');
-        if (tab && !tab.hasAttribute('data-active')) tab.click();
-        line = document.querySelector('[data-testid="guests-program-avatar-guests"] [data-slot="field-description"]')?.textContent ?? null;
-        if (line) break;
-        await sleep(50);
-      }
+      await openTab('guests', '[data-testid="guests-program-avatar-guests"]');
+      const line = document.querySelector('[data-testid="guests-program-avatar-guests"] [data-slot="field-description"]')?.textContent ?? null;
       await openTab('studio', '[data-testid="show-stage-program"]');
       return line;`),
     'Guests see the avatar'

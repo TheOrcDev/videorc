@@ -49,7 +49,7 @@ describe('openWorkspaceTab', () => {
     expect(readWorkspaceNavigation(sent[0])).toEqual({ tab })
   })
 
-  it('covers all twelve pages, Destinations as `live` (Avatar since plan 239)', () => {
+  it('covers all thirteen pages, Destinations as `live` (Avatar since plan 239, Guests 0.31.1)', () => {
     expect([...EVERY_PAGE].sort()).toEqual(
       [
         'ai',
@@ -57,6 +57,7 @@ describe('openWorkspaceTab', () => {
         'avatar',
         'captions',
         'diagnostics',
+        'guests',
         'layouts',
         'library',
         'live',
