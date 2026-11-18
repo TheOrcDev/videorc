@@ -170,6 +170,12 @@ const htmlPath = resolve(
 // 2,423,683 / 499,767, then S23 (#1472, room program camera) 2,423,728 /
 // 499,795, then S26 (#1471, program health) 2,424,257 / 499,909. Raise raw to
 // 2,425,000 and gzip to 500,000; the entry ceilings hold. Keep new surfaces lazy.
+// 2026-11-18 (PERF-01): the renderer is now minified (esbuild, keepNames, linked
+// source maps; electron-vite's renderer default was `minify: false`, which every
+// note above measured). Main at 661db494 measured 2,424,415 raw / 499,979 gzip,
+// entry 1,100,155 / 233,081; minified it measures 1,112,296 raw / 354,508 gzip,
+// entry 537,756 / 164,647. Ceilings unchanged in that PR: re-baselining them to
+// the minified build is the owner's call.
 const budget = {
   maxTotalRawBytes: Number(process.env.VIDEORC_RENDERER_MAX_EAGER_RAW_BYTES ?? 2_425_000),
   maxTotalGzipBytes: Number(process.env.VIDEORC_RENDERER_MAX_EAGER_GZIP_BYTES ?? 500_000),

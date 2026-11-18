@@ -77,8 +77,24 @@ export default defineConfig({
       }
     },
     plugins: [developmentRendererCspPlugin, react(), tailwindcss()],
+    // Only the production minify pass reads this: Vite turns keepNames off in
+    // its TS transform, so dev is unchanged. Mangled functions keep their
+    // `.name`, which V8 uses for stack frames, so `error.stack`, React's
+    // component stack ("Copy details") and render-crash logs keep real names.
+    esbuild: {
+      keepNames: true
+    },
     build: {
+      // electron-vite defaults the renderer to `minify: false`. Main and
+      // preload stay unminified (their own defaults).
+      minify: 'esbuild',
+      // A `.js.map` beside each chunk for DevTools and for resolving a pasted
+      // stack: mappings and names only. The source is the release tag.
+      sourcemap: true,
       rollupOptions: {
+        output: {
+          sourcemapExcludeSources: true
+        },
         input: {
           index: resolve('src/renderer/index.html'),
           comments: resolve('src/renderer/comments.html'),
