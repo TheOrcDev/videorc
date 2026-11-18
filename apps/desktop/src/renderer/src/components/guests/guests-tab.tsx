@@ -11,12 +11,19 @@ import { GroupedList, ListRow } from '@/components/list-row'
 import { LockAlert, OfflineAlert, SessionLockAlert } from '@/components/lock-alert'
 import { PageStack } from '@/components/page'
 import { PanelSection } from '@/components/panel-section'
+import { SectionLabel } from '@/components/section-label'
 import { StatusDot } from '@/components/status-dot'
 import { Alert, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { DisabledReason } from '@/components/ui/disabled-reason'
-import { FieldDescription, FieldGroup, SettingsRow } from '@/components/ui/field'
+import {
+  FieldDescription,
+  FieldGroup,
+  FieldLegend,
+  FieldSet,
+  SettingsRow
+} from '@/components/ui/field'
 import { Input } from '@/components/ui/input'
 import { Spinner } from '@/components/ui/spinner'
 import { Switch } from '@/components/ui/switch'
@@ -47,6 +54,8 @@ import {
   type RoomPerson
 } from '@/lib/guests-view'
 import { VIDEORC_PREMIUM_URL } from '@/lib/videorc-web-links'
+import { roomAvatarDescription, roomGraphicsDescription } from '@/lib/room-program-opt-ins'
+import { guestGraphicsLine, isManagedShow } from '@/lib/talk-show-managed'
 import type { CloudRoomRequest } from '@/lib/backend'
 
 /**
@@ -77,6 +86,9 @@ export default function GuestsTab(): ReactElement {
   const people = roomPeople(room, talkShow.hostIdentity)
   const requests = room?.requests ?? []
   const full = roomOpen && roomIsFull(people, limits)
+  // Plan 249 S4/S9: a managed show's program takes the room's avatar and
+  // graphics once the streamer turns them on here (their one home).
+  const programOptIns = isManagedShow(cloudStatus)
 
   const openRoom = async (): Promise<void> => {
     setOpening(true)
@@ -166,6 +178,12 @@ export default function GuestsTab(): ReactElement {
             </DisabledReason>
           </SettingsRow>
         </FieldGroup>
+        {programOptIns ? (
+          <RoomProgramOptIns
+            disabledReason={disabled ? null : !roomOpen ? OPEN_THE_ROOM_FIRST : null}
+            disabled={disabled || !roomOpen}
+          />
+        ) : null}
         {room?.message ? (
           <Alert variant="warning">
             <AlertTitle>{room.message}</AlertTitle>
@@ -192,6 +210,73 @@ export default function GuestsTab(): ReactElement {
       {/* Plan 249 S22: opt-in separate files per person and source. */}
       <CloudIsoSection />
     </PageStack>
+  )
+}
+
+/**
+ * Plan 249 S4/S9: the room's avatar and graphics on the program, each off
+ * until turned on for this room. Guests see the avatar only once it is on.
+ */
+function RoomProgramOptIns({
+  disabled,
+  disabledReason
+}: {
+  disabled: boolean
+  disabledReason: string | null
+}): ReactElement {
+  const { talkShow } = useStudioCloud()
+  const { avatar, graphics } = talkShow.room
+  const avatarOn = avatar?.enabled === true
+  return (
+    <FieldSet className="min-w-0 gap-0" data-testid="guests-program">
+      <FieldLegend className="mb-1.5 px-1" variant="label">
+        <SectionLabel>On the program</SectionLabel>
+      </FieldLegend>
+      <FieldGroup variant="grouped">
+        <SettingsRow
+          data-testid="guests-program-avatar"
+          description={roomAvatarDescription(avatar)}
+          label="Avatar"
+        >
+          <DisabledReason reason={disabledReason}>
+            <Switch
+              aria-label="Avatar on the program"
+              checked={avatarOn}
+              disabled={disabled}
+              onCheckedChange={(on) => void talkShow.setAvatarEnabled(on).catch(() => {})}
+            />
+          </DisabledReason>
+        </SettingsRow>
+        {avatarOn ? (
+          <SettingsRow
+            data-testid="guests-program-avatar-guests"
+            description={guestGraphicsLine(avatar?.guests, avatar?.preview?.output ?? null)}
+            label="Show the avatar to guests"
+          >
+            <Switch
+              aria-label="Show the avatar to guests"
+              checked={avatar?.guests?.enabled === true}
+              disabled={disabled}
+              onCheckedChange={(on) => void talkShow.setAvatarGuests(on).catch(() => {})}
+            />
+          </SettingsRow>
+        ) : null}
+        <SettingsRow
+          data-testid="guests-program-graphics"
+          description={roomGraphicsDescription(graphics)}
+          label="Graphics"
+        >
+          <DisabledReason reason={disabledReason}>
+            <Switch
+              aria-label="Graphics on the program"
+              checked={graphics?.enabled === true}
+              disabled={disabled}
+              onCheckedChange={(on) => void talkShow.setGraphicsEnabled(on).catch(() => {})}
+            />
+          </DisabledReason>
+        </SettingsRow>
+      </FieldGroup>
+    </FieldSet>
   )
 }
 

@@ -206,8 +206,22 @@ export async function acquireVirtualCameraCase({
 
     const inspect = () => h.eval('return await window.videorc.getRoomProgramCameraResources()')
     const status = () => h.rpc('virtualCamera.status')
+    // The opt-in is an item in the Program preview's ⋯ menu (0.31.1).
     const click = () =>
-      h.eval(`document.querySelector(${JSON.stringify(BUTTON)}).click(); return true`)
+      h.eval(`
+        document.querySelector(${JSON.stringify(BUTTON)}).click();
+        const deadline = Date.now() + 5000;
+        for (;;) {
+          const item = [...document.querySelectorAll('[role="menuitem"]')].find((el) =>
+            /Videorc Camera/.test(el.textContent)
+          );
+          if (item) {
+            item.click();
+            return true;
+          }
+          if (Date.now() > deadline) throw new Error('The Program menu has no Videorc Camera item');
+          await sleep(50);
+        }`)
     const setMonitorShown = (shown) =>
       h.eval(
         `document.querySelector(${JSON.stringify(MONITOR)}).style.display = ${JSON.stringify(shown ? '' : 'none')}; return true`
