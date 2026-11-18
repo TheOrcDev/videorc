@@ -1,0 +1,26 @@
+diff --git a/dist/index.js b/dist/index.js
+index bd21e898f431298b70e941833c78819a1eb53a36..6bd5a9edda3e7d9ff6d6acbeb2fd34c58077b53c 100644
+--- a/dist/index.js
++++ b/dist/index.js
+@@ -120,7 +120,7 @@ const useIsDocumentHidden = ()=>{
+             setIsDocumentHidden(document.hidden);
+         };
+         document.addEventListener('visibilitychange', callback);
+-        return ()=>window.removeEventListener('visibilitychange', callback);
++        return ()=>document.removeEventListener('visibilitychange', callback);
+     }, []);
+     return isDocumentHidden;
+ };
+diff --git a/dist/index.mjs b/dist/index.mjs
+index d0c7a5a1fa1ed8b19c27bea968bb404f2437a07e..9c0aa6658016fcb6bce9d3bfc8a6a28f37896750 100644
+--- a/dist/index.mjs
++++ b/dist/index.mjs
+@@ -113,7 +113,7 @@ const useIsDocumentHidden = ()=>{
+             setIsDocumentHidden(document.hidden);
+         };
+         document.addEventListener('visibilitychange', callback);
+-        return ()=>window.removeEventListener('visibilitychange', callback);
++        return ()=>document.removeEventListener('visibilitychange', callback);
+     }, []);
+     return isDocumentHidden;
+ };

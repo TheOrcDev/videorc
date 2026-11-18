@@ -6,6 +6,10 @@ overrides:
   js-yaml: 4.3.2
 patchedDependencies:
   app-builder-lib@26.8.1: patches/app-builder-lib@26.8.1.patch
+  # Leak L1: sonner 2.0.7 removes its visibilitychange listener from window
+  # instead of document. Fixed upstream in 2.0.8, which pushes the eager
+  # renderer bundle over its ceiling, so keep 2.0.7 + this one-line patch.
+  sonner@2.0.7: patches/sonner@2.0.7.patch
 allowBuilds:
   electron: true
   electron-winstaller: true
