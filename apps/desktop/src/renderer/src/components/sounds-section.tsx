@@ -36,6 +36,7 @@ import {
   SelectTrigger,
   SelectValue
 } from '@/components/ui/select'
+import { SoundsLoadState } from '@/components/sounds-load-state'
 import { Spinner } from '@/components/ui/spinner'
 import { useSoundboard, useStarterSounds } from '@/hooks/use-soundboard'
 import { formatDb } from '@/lib/audio/decibels'
@@ -135,9 +136,7 @@ export function SoundsSection(): ReactElement {
           // Never "No sounds yet" before the board is known (J2-8). Offline,
           // the alert above already says why.
           offline ? null : (
-            <Empty className="py-12" data-videorc-sounds-loading="">
-              <EmptyTitle>Loading sounds…</EmptyTitle>
-            </Empty>
+            <SoundsLoadState className="py-12" offline={false} />
           )
         ) : (
           <Empty className="py-12" data-videorc-sounds-empty="">
