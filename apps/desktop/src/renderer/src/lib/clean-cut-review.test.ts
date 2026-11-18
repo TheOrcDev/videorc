@@ -27,6 +27,9 @@ import {
   normalizeTranscriptWords,
   prerollMs,
   rebaseDraft,
+  rebaseDraftAfterSave,
+  rebaseHistoryAfterSave,
+  removeManualRemovals,
   removalRowIndex,
   removalTone,
   setRemovalsEnabled,
@@ -189,6 +192,55 @@ describe('the draft', () => {
     const rebased = rebaseDraft(draft, newer)
     expect([...rebased.toggles]).toEqual([['r4', true]])
     expect([...rebased.removeManual]).toEqual(['m1'])
+  })
+
+  describe('a save answered while the review kept editing (QA F16)', () => {
+    const offR2 = setRemovalsEnabled(EMPTY_CLEAN_CUT_DRAFT, SAVED, ['r2'], false)
+    const savedR2 = SAVED.map((entry) => (entry.id === 'r2' ? { ...entry, enabled: false } : entry))
+
+    it('drops what the save carried and keeps what came after', () => {
+      const step = { submitted: offR2, before: SAVED, after: savedR2 }
+      expect(draftChangeCount(rebaseDraftAfterSave(offR2, step))).toBe(0)
+      const later = setRemovalsEnabled(offR2, SAVED, ['r3'], false)
+      expect([...rebaseDraftAfterSave(later, step).toggles]).toEqual([['r3', false]])
+      // Taken back while saving: the saved cut is kept again as a change.
+      const back = setRemovalsEnabled(offR2, SAVED, ['r2'], true)
+      expect([...rebaseDraftAfterSave(back, step).toggles]).toEqual([['r2', true]])
+    })
+
+    it('reconciles new cuts and deleted manual cuts the save made', () => {
+      const withManual = [...SAVED, removal('m1', 'manual', 6_000, 6_200)]
+      const added = addDraftManual(EMPTY_CLEAN_CUT_DRAFT, { startMs: 7_010, endMs: 7_490 })
+      const submitted = removeManualRemovals(added, ['m1'])
+      // The backend snaps the new cut to frames and names it.
+      const after = [...SAVED, removal('m2', 'manual', 7_000, 7_500)]
+      const step = { submitted, before: withManual, after }
+      expect(draftChangeCount(rebaseDraftAfterSave(submitted, step))).toBe(0)
+
+      // A later new cut stays a draft cut.
+      const another = addDraftManual(submitted, { startMs: 100, endMs: 200 })
+      expect(rebaseDraftAfterSave(another, step).addManual).toEqual([
+        { key: 'draft:2', startMs: 100, endMs: 200 }
+      ])
+      // The new cut taken back, and m1 kept after all: both are changes again.
+      const undone = { ...EMPTY_CLEAN_CUT_DRAFT, nextKey: 2 }
+      const rebased = rebaseDraftAfterSave(undone, step)
+      expect([...rebased.removeManual]).toEqual(['m2'])
+      expect(rebased.addManual).toEqual([{ key: 'draft:2', startMs: 6_000, endMs: 6_200 }])
+      expect(rebased.nextKey).toBe(3)
+    })
+
+    it('keeps only the undo steps taken since the save, carried over', () => {
+      const atSave = recordCleanCutEdit(EMPTY_CLEAN_CUT_HISTORY, EMPTY_CLEAN_CUT_DRAFT)
+      const later = setRemovalsEnabled(offR2, SAVED, ['r3'], false)
+      const history = recordCleanCutEdit(atSave, offR2)
+      const step = { submitted: offR2, before: SAVED, after: savedR2 }
+      const carried = rebaseHistoryAfterSave(history, atSave, step)
+      expect(carried.past).toHaveLength(1)
+      expect(draftChangeCount(carried.past[0]!)).toBe(0)
+      const undone = undoCleanCutEdit(carried, rebaseDraftAfterSave(later, step))
+      expect(undone && draftChangeCount(undone.draft)).toBe(0)
+    })
   })
 })
 
