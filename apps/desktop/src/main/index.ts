@@ -477,7 +477,11 @@ import {
   proofSurfaceHostNote,
   type ProofSurfaceHost
 } from './in-window-proof-surface'
-import { executeProofSurfaceScript, settleWithProofSurface } from './proof-surface-call'
+import {
+  executeProofSurfaceScript,
+  runDetachedProofSurfaceWork,
+  settleWithProofSurface
+} from './proof-surface-call'
 import {
   PROOF_SURFACE_CONTENT_RUNTIME_SCRIPT,
   proofSurfaceContentFromConsoleLine,
@@ -5744,8 +5748,10 @@ async function openPreviewWindow(): Promise<PreviewWindowState> {
       if (nativePreviewSurfaceWindow && !nativePreviewSurfaceWindow.isDestroyed()) {
         nativePreviewSurfaceWindow.destroy()
       }
-      void setNativePreviewSurfaceFramePollingSuppressed(
-        nativePreviewLifecycleFramePollingSuppressed(false)
+      runDetachedNativePreviewProofWork('close-suppress-polling', () =>
+        setNativePreviewSurfaceFramePollingSuppressed(
+          nativePreviewLifecycleFramePollingSuppressed(false)
+        )
       )
       void runNativePreviewSurfaceMutation(
         () => applyNativePreviewHostCommands([{ kind: 'destroy' }]),
@@ -5774,8 +5780,10 @@ async function openPreviewWindow(): Promise<PreviewWindowState> {
     setDockedPreviewChromeClass(window, true)
     engageDockedPreviewPlacement(window)
   }
-  void setNativePreviewSurfaceFramePollingSuppressed(
-    nativePreviewLifecycleFramePollingSuppressed(true)
+  runDetachedNativePreviewProofWork('open-resume-polling', () =>
+    setNativePreviewSurfaceFramePollingSuppressed(
+      nativePreviewLifecycleFramePollingSuppressed(true)
+    )
   )
   pushPreviewWindowPlacement()
   emitPreviewWindowState()
@@ -9619,8 +9627,23 @@ function scheduleNativePreviewProofPollingProfileResync(): void {
   }
   nativePreviewProofPollingResyncTimer = setTimeout(() => {
     nativePreviewProofPollingResyncTimer = null
-    void syncNativePreviewProofPollingProfile()
+    runDetachedNativePreviewProofWork(
+      'polling-profile-resync',
+      syncNativePreviewProofPollingProfile
+    )
   }, 150)
+}
+
+// QA F1: preview close, reopen and surface replacement destroy the proof
+// surface while un-awaited work still waits on a script there. That
+// ProofSurfaceGoneError is the expected end of the work; anything else is a
+// real failure and is logged.
+function runDetachedNativePreviewProofWork(label: string, work: () => Promise<unknown>): void {
+  runDetachedProofSurfaceWork(work, {
+    onError: (error) => {
+      safeConsole.warn(`Native preview proof-surface ${label} failed:`, error)
+    }
+  })
 }
 
 async function syncNativePreviewProofPollingProfile(): Promise<void> {
