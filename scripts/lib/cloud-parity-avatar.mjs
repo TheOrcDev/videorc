@@ -92,13 +92,20 @@ export async function exerciseAvatar({
   // Plan 249 S5: an animation-capable page draws the avatar as an atlas canvas.
   const drawn = async (page, kind) => page.locator(`[data-avatar-layer="${kind}"]`).count()
   const check = async (label, { avatar = true, bubble = true } = {}) => {
+    // A bubble lives 10 s; a page joining a loaded Mac can take longer, so
+    // the line is said again while a bubble is still awaited.
+    let said = Date.now()
     for (const consumer of consumers) {
-      await waitFor(
-        async () =>
+      await waitFor(async () => {
+        const ok =
           Boolean(await drawn(consumer.page, 'avatar')) === avatar &&
-          Boolean(await drawn(consumer.page, 'bubble')) === bubble,
-        `${label}: ${consumer.name} layer state`
-      )
+          Boolean(await drawn(consumer.page, 'bubble')) === bubble
+        if (!ok && bubble && Date.now() - said > 8000) {
+          said = Date.now()
+          await say(h)
+        }
+        return ok
+      }, `${label}: ${consumer.name} layer state`)
       // Decode a finished full-page image artifact, not a file-size or ack check.
       const path = join(output, `avatar-${label}-${consumer.name}.png`)
       await consumer.page.screenshot({ path })

@@ -533,9 +533,14 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
     const current = clientRef.current
     if (!current || !roomOpen || !deps.avatar) return
     let cancelled = false
-    current.setAvatar(null) // invalidates any pending older raster/upload
     const avatar = deps.avatar
-    if (!avatar?.persona) return
+    // A hide or a lost persona clears at once. Otherwise every output keeps
+    // the last picture until the new one is drawn: clearing first blanked the
+    // avatar on all outputs whenever the Sidekick started or stopped talking.
+    // A stale render is dropped (`cancelled`); `set` fences an older upload.
+    if (!avatar.persona || !(avatar.layout.showOnStream || avatar.layout.showInRecording))
+      current.setAvatar(null)
+    if (!avatar.persona) return
     void (async () => {
       const { renderCloudAvatar } = await import('@/lib/buddy-overlay')
       const content = {
