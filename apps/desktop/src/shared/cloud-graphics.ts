@@ -1,5 +1,11 @@
 /** S9 static presentation. Pixels only; S3/S4 remain the capability authority. */
-import { avatarHash, avatarRect, type AvatarApplied, type AvatarRect } from './cloud-avatar'
+import {
+  avatarHash,
+  avatarRect,
+  withHeldPng,
+  type AvatarApplied,
+  type AvatarRect
+} from './cloud-avatar'
 export const GRAPHICS_TOPIC = 'videorc.presentation.static.v1'
 export const GRAPHICS_MAX_BYTES = 6 * 1024 * 1024
 export const GRAPHICS_LEASE_MS = 30_000
@@ -115,7 +121,14 @@ export function graphicsOpacity(layer: GraphicsLayer, now: number): number {
 }
 export function parseGraphicsSnapshot(
   value: unknown,
-  page: Pick<GraphicsSnapshot, 'show' | 'publisherSid' | 'output' | 'orientation'> & { now: number }
+  page: Pick<GraphicsSnapshot, 'show' | 'publisherSid' | 'output' | 'orientation'> & {
+    now: number
+    /**
+     * PERF-06: the asset this page holds for a hash, for an asset sent as a
+     * reference (no `png`). Absent, or no asset held: such a snapshot is refused.
+     */
+    resolve?: (hash: string) => GraphicsAsset | undefined
+  }
 ): GraphicsSnapshot | null {
   if (
     !object(value) ||
@@ -135,7 +148,8 @@ export function parseGraphicsSnapshot(
     return null
   const layers: GraphicsLayer[] = []
   let bytes = 0
-  for (const l of value.layers) {
+  for (const input of value.layers) {
+    const l = withHeldPng(input, page.resolve)
     if (
       !object(l) ||
       typeof l.id !== 'string' ||
@@ -197,12 +211,48 @@ export function parseGraphicsSnapshot(
     layers
   }
 }
+/**
+ * PERF-06: whether `next` only renews `current`'s lease: the same layers, in
+ * order, with the same placement, opacity, fade and the very same pixels (hash
+ * and base64), differing at most in `expiresAt`.
+ */
+function graphicsRenewal(current: GraphicsLayer[], next: GraphicsLayer[]): boolean {
+  return (
+    current.length === next.length &&
+    current.every((a, i) => {
+      const b = next[i]!
+      return (
+        a.id === b.id &&
+        a.kind === b.kind &&
+        a.rect.x === b.rect.x &&
+        a.rect.y === b.rect.y &&
+        a.rect.w === b.rect.w &&
+        a.rect.h === b.rect.h &&
+        a.opacity === b.opacity &&
+        a.fade?.at === b.fade?.at &&
+        a.fade?.from === b.fade?.from &&
+        a.fade?.to === b.fade?.to &&
+        a.asset.hash === b.asset.hash &&
+        a.asset.width === b.asset.width &&
+        a.asset.height === b.asset.height &&
+        a.asset.png === b.asset.png
+      )
+    })
+  )
+}
 /** Latest snapshot wins, with a bounded decode batch and independent clear. */
 export class GraphicsReceiver<T> {
   #owner: string | null = null
   #revision = 0
   #generation = 0
   #busy = false
+  /** PERF-06: the snapshot `applied` names (null exactly when it is undefined). */
+  #current: GraphicsSnapshot | null = null
+  /**
+   * PERF-06: the last snapshot committed, whose pictures a reference may name.
+   * Unlike `#current` it survives a newer apply in flight; only a clear drops it.
+   */
+  #held: GraphicsSnapshot | null = null
   #pending: {
     snapshot: GraphicsSnapshot
     generation: number
@@ -219,8 +269,18 @@ export class GraphicsReceiver<T> {
       commit(s: GraphicsSnapshot, assets: T[]): Promise<void>
       clear(): void
       retain?(ids: ReadonlySet<string>): void
+      /**
+       * PERF-06: a lease renewal of what is on screen (same pixels, same
+       * placement): update layer expiries in place. Absent: renewals take
+       * the full prepare/commit path.
+       */
+      renew?(s: GraphicsSnapshot): void
     }
   ) {}
+  /** PERF-06: the asset this page holds for a hash (the applied snapshot's), for references. */
+  asset(hash: string): GraphicsAsset | undefined {
+    return this.#held?.layers.find((l) => l.asset.hash === hash)?.asset
+  }
   owner(owner: string | null): void {
     if (owner !== this.#owner) {
       this.#owner = owner
@@ -233,6 +293,8 @@ export class GraphicsReceiver<T> {
     this.#pending?.resolve(false)
     this.#pending = null
     this.applied = undefined
+    this.#current = null
+    this.#held = null
     this.#expires = 0
     this.deps.clear()
   }
@@ -241,7 +303,29 @@ export class GraphicsReceiver<T> {
   }
   async accept(s: GraphicsSnapshot): Promise<boolean> {
     if (s.publisherSid !== this.#owner || s.revision <= this.#revision) return false
+    // PERF-06: a renewal of what is on screen (nothing expired yet) only moves
+    // the lease: no hash, decode or DOM rebuild.
+    const current = this.#current
+    const now = this.deps.now()
+    if (
+      this.deps.renew &&
+      current &&
+      !this.#busy &&
+      s.layers.length &&
+      s.expiresAt > now &&
+      current.layers.every((l) => l.expiresAt === null || l.expiresAt > now) &&
+      graphicsRenewal(current.layers, s.layers)
+    ) {
+      this.#revision = s.revision
+      this.#generation++
+      this.#expires = s.expiresAt
+      this.deps.renew(s)
+      this.#current = this.#held = s
+      this.applied = { publisherSid: s.publisherSid, revision: s.revision }
+      return true
+    }
     this.applied = undefined
+    this.#current = null
     this.deps.retain?.(new Set(s.layers.map((l) => l.id)))
     this.#revision = s.revision
     const gen = ++this.#generation
@@ -265,10 +349,13 @@ export class GraphicsReceiver<T> {
       }
       if (gen !== this.#generation || s.expiresAt <= this.deps.now()) return false
       this.applied = undefined
+      this.#current = null
       this.#expires = s.expiresAt
       await this.deps.commit(s, assets.splice(0))
+      if (gen === this.#generation) this.#held = s
       if (gen !== this.#generation || s.expiresAt <= this.deps.now()) return false
       this.applied = { publisherSid: s.publisherSid, revision: s.revision }
+      this.#current = this.#held = s
       return true
     } catch (error) {
       if (gen === this.#generation) this.clear()
