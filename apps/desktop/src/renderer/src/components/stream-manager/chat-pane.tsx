@@ -955,8 +955,10 @@ export function Composer({
   // re-sends only where it failed after a partial send.
   const [lastSend, setLastSend] = useState<{ text: string; options?: ChatSendOptions } | null>(null)
   const retry = pending || !lastSend ? null : chatSendRetryPlan(operation, failures)
+  // Keyed on the send (QA F22): a second message that fails the same way is
+  // a new failure and gets its words back too.
   const failureKey = retry
-    ? failures.map((failure) => `${failure.destinationId}:${failure.reason}`).join('|')
+    ? `${operation?.id ?? ''}#${failures.map((failure) => `${failure.destinationId}:${failure.reason}`).join('|')}`
     : null
   const restoreDraft = retry?.restoreDraft ?? false
   const handledFailureRef = useRef<string | null>(null)
