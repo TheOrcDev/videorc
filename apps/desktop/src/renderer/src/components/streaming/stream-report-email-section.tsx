@@ -249,6 +249,12 @@ export function StreamReportEmailSection(): ReactElement {
     const off = client.on('account.changed', () => {
       sendGeneration.current += 1
       setSend('idle')
+      // Another account's choices are not this one's: forget them, so a
+      // failed read says so instead of showing the old account's switches.
+      confirmed.current = null
+      setState(null)
+      setLoadFailed(false)
+      retries.current = 0
       refresh()
     })
     return () => {
