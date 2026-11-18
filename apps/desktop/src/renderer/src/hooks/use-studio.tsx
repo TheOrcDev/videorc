@@ -160,6 +160,7 @@ import {
   type ReactNode,
   type SetStateAction
 } from 'react'
+import { loadNotifications } from '@/lib/notify'
 import { notifyOnce } from '@/lib/notify-once'
 import { streamTargetNotices } from '@/lib/stream-target-notices'
 import {
@@ -182,6 +183,7 @@ import {
   revealInFileManagerLabel,
   trashName
 } from '@/lib/platform'
+import { quietWhileLiveOn } from '@/lib/quiet-while-live'
 import {
   nextPortalShareGrant,
   replayStartWaitsForGrant,
@@ -4638,6 +4640,16 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
 
   const settingsRef = useRef(settings)
   settingsRef.current = settings
+  // Plan 250: the notification store asks these two when something might pop
+  // up. The store is a lazy chunk; nothing is published before this lands.
+  useEffect(() => {
+    void loadNotifications().then(({ notifications }) =>
+      notifications.configure({
+        live: () => sessionOwnsTransport(recordingRef.current),
+        quiet: () => quietWhileLiveOn(settingsRef.current)
+      })
+    )
+  }, [])
   // Stable handle for callbacks that only need to READ the config (labels,
   // lookups) without re-creating themselves on every config change.
   const lastRecordingStateRef = useRef<RecordingStatus['state'] | null>(null)
@@ -5803,7 +5815,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     const withdrawn = watchdogWithdrawnRef.current.splice(0)
     if (previous.length === 0 && watchdogAlerts.length === 0) return
     void import('@/lib/watchdog-surface').then((surface) =>
-      surface.onWatchdogAlertsChanged(previous, watchdogAlerts, watchdogDeps(), { withdrawn })
+      surface.onWatchdogAlertsChanged(previous, watchdogAlerts, watchdogDeps())
     )
     // Plan 250: each open alert is an entry behind the bell, on its subject.
     void Promise.all([

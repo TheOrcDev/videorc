@@ -244,6 +244,11 @@ const base = guarded((...args) => sonner(...args))
 export const toast = Object.assign(base, {
   success: guarded((...args) => sonner.success(...args)),
   error: guarded((...args) => sonner.error(...args), true, true),
+  /**
+   * An error's red icon without its Copy (plan 250): the pop-up of an urgent
+   * notification, whose words stay in the entry behind the bell.
+   */
+  problem: guarded((...args) => sonner.error(...args)),
   warning: guarded((...args) => sonner.warning(...args)),
   info: guarded((...args) => sonner.info(...args)),
   message: guarded((...args) => sonner.message(...args)),

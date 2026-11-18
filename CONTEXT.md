@@ -378,6 +378,18 @@ _Avoid_: diagnostics, logs (as the thing to send)
 Bringing a local file into Videorc: an image, a recording, an OBS setup.
 _Avoid_: Upload (for a local file), Add file
 
+**Notifications**:
+The list behind the bell at the right end of the status bar (plan 250):
+what Videorc noticed on its own, one entry per subject, each with its way
+out and a Clear. "A notification" is one entry. The operating system's own
+banner stays a "system notification".
+_Avoid_: alerts, inbox, activity (Activity is the Stream Manager's feed)
+
+**Quiet while recording or live**:
+The rule, and its switch in Settings → General → Notifications, that only an
+urgent notification pops up while a recording or a livestream runs.
+_Avoid_: Do not disturb, DND, focus mode
+
 ### Agents
 
 **Agents**:

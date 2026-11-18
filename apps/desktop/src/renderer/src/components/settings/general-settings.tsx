@@ -36,6 +36,11 @@ import {
 } from '@/lib/first-run'
 import { gpuFallbackAge, gpuRenderingLabel } from '@/lib/gpu-fallback-view'
 import { platformCopy } from '@/lib/platform-copy'
+import {
+  QUIET_WHILE_LIVE_DESCRIPTION,
+  QUIET_WHILE_LIVE_LABEL,
+  quietWhileLiveOn
+} from '@/lib/quiet-while-live'
 import { studioChatOn } from '@/lib/studio-chat'
 import { openFirstRunSetup, openWorkspaceTab } from '@/lib/workspace-navigation'
 
@@ -160,6 +165,25 @@ export function GeneralSettings(): ReactElement {
               </SettingsRow>
             ) : null}
           </ChatEmoteSettingsFields>
+        </PanelSection>
+
+        {/* Notifications (plan 250, D4): the quiet rule's one home. The
+            list behind the bell says what it is doing and links here. */}
+        <PanelSection
+          description="What Videorc notices on its own waits behind the bell in the status bar."
+          title="Notifications"
+        >
+          <FieldGroup variant="grouped">
+            <SettingsRow description={QUIET_WHILE_LIVE_DESCRIPTION} label={QUIET_WHILE_LIVE_LABEL}>
+              <Switch
+                checked={quietWhileLiveOn(settings)}
+                id="quiet-while-live"
+                onCheckedChange={(checked) =>
+                  setSettings((current) => ({ ...current, quietWhileLive: checked }))
+                }
+              />
+            </SettingsRow>
+          </FieldGroup>
         </PanelSection>
 
         <SetupSection platform={runtimeInfo?.platform} />

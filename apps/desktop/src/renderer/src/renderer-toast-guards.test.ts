@@ -16,7 +16,8 @@ const RENDERER_ROOT = join(__dirname, '..')
 /** Names an error usually goes by in a `catch` or a rejection handler. */
 const ERROR_NAME = /^(?:e|err|error|cause|reason|rejection|\w+Error)$/
 
-const TOAST_CALLEE = /^(?:toast(?:\.(?:error|warning|success|info|message|loading))?|notifyOnce)$/
+const TOAST_CALLEE =
+  /^(?:toast(?:\.(?:error|warning|success|info|message|loading|problem))?|notifyOnce)$/
 
 function rendererSources(): string[] {
   const files: string[] = []
@@ -113,5 +114,132 @@ describe('renderer toast guards (plan 174 S2.4)', SOURCE_SCAN_TIMEOUT, () => {
       'sample.ts:3',
       'sample.ts:4'
     ])
+  })
+})
+
+// Plan 250: what Videorc notices on its own is an entry behind the bell, and
+// only `lib/notifications/pop-up.ts` turns an entry into a toast. A toast is
+// the answer to something the streamer just did, or one urgent problem, and
+// it is never pinned: a toast that times out leaves its entry behind.
+
+/** Files whose only job is unprompted news: they publish, and never toast. */
+const UNPROMPTED_ONLY = /^src\/lib\/notifications\/sources\//
+
+/**
+ * The toasts that may still stay until closed, each for a reason a list
+ * cannot serve.
+ */
+const PINNED_TOASTS_THAT_STAY = new Set([
+  // "Remove this message?": a question with a 20 s deadline (D11).
+  'src/lib/chat-moderation-relay.ts',
+  // "Couldn't start": the answer to Record or Go Live, with its way out.
+  'src/lib/session-start-failure.ts',
+  // "Finish connecting in your browser": a step the streamer is in the middle of.
+  'src/lib/studio-connection-toasts.ts'
+])
+
+/**
+ * Unprompted toasts that are still pinned because their slice has not moved
+ * them yet (S5 to S7). This list only shrinks; S10 deletes it.
+ */
+const PINNED_TOASTS_STILL_TO_MOVE = new Set([
+  'src/hooks/use-studio.tsx',
+  'src/hooks/use-talk-show-room.ts',
+  'src/hooks/use-virtual-camera.ts',
+  'src/lib/finalization-toast.ts',
+  'src/lib/session-runtime-recovery.ts',
+  'src/lib/studio-health.ts'
+])
+
+/** Each `duration: Infinity` (or `Number.POSITIVE_INFINITY`) in `source`, as `path:line`. */
+function pinnedDurations(path: string, source: string): string[] {
+  const file = ts.createSourceFile(
+    path,
+    source,
+    ts.ScriptTarget.Latest,
+    true,
+    path.endsWith('.tsx') ? ts.ScriptKind.TSX : ts.ScriptKind.TS
+  )
+  const found: string[] = []
+  const visit = (node: ts.Node): void => {
+    if (
+      ts.isPropertyAssignment(node) &&
+      node.name.getText(file) === 'duration' &&
+      /^(?:Infinity|Number\.POSITIVE_INFINITY)$/.test(node.initializer.getText(file))
+    ) {
+      const { line } = file.getLineAndCharacterOfPosition(node.getStart(file))
+      found.push(`${path}:${line + 1}`)
+    }
+    ts.forEachChild(node, visit)
+  }
+  visit(file)
+  return found
+}
+
+/** Each toast call in `source`, as `path:line`. */
+function toastCalls(path: string, source: string): string[] {
+  const file = ts.createSourceFile(path, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS)
+  const found: string[] = []
+  const visit = (node: ts.Node): void => {
+    if (ts.isCallExpression(node) && TOAST_CALLEE.test(node.expression.getText(file))) {
+      const { line } = file.getLineAndCharacterOfPosition(node.getStart(file))
+      found.push(`${path}:${line + 1}`)
+    }
+    ts.forEachChild(node, visit)
+  }
+  visit(file)
+  return found
+}
+
+describe('notifications never toast around the store (plan 250)', SOURCE_SCAN_TIMEOUT, () => {
+  const sources = (): { path: string; source: string }[] =>
+    rendererSources().map((path) => ({
+      path: relative(RENDERER_ROOT, path).split(sep).join('/'),
+      source: readFileSync(path, 'utf8')
+    }))
+
+  it('the modules that only carry unprompted news call no toast', () => {
+    const offenders = sources()
+      .filter(({ path }) => UNPROMPTED_ONLY.test(path))
+      .flatMap(({ path, source }) => [
+        ...toastCalls(path, source),
+        ...(/from '@\/lib\/toast'/.test(source) ? [`${path}: imports the toast door`] : [])
+      ])
+    expect(offenders).toEqual([])
+  })
+
+  it('no toast is pinned outside the named list', () => {
+    const offenders = sources()
+      .filter(
+        ({ path }) => !PINNED_TOASTS_THAT_STAY.has(path) && !PINNED_TOASTS_STILL_TO_MOVE.has(path)
+      )
+      .flatMap(({ path, source }) => pinnedDurations(path, source))
+    expect(offenders).toEqual([])
+  })
+
+  it('every file on the two lists still pins a toast: a list entry is never stale', () => {
+    const pinned = new Set(
+      sources()
+        .filter(({ source, path }) => pinnedDurations(path, source).length > 0)
+        .map(({ path }) => path)
+    )
+    for (const path of [...PINNED_TOASTS_THAT_STAY, ...PINNED_TOASTS_STILL_TO_MOVE]) {
+      expect(pinned.has(path), path).toBe(true)
+    }
+  })
+
+  it('catches a pinned toast however the number is written, and a planted toast', () => {
+    const source = [
+      "toast.warning('Your stream is frozen', { duration: Infinity })",
+      "toast('Saved', { duration: Number.POSITIVE_INFINITY, id: 'x' })",
+      "toast.success('Saved', { duration: 8_000 })",
+      'const limit = Number.POSITIVE_INFINITY'
+    ].join('\n')
+    expect(pinnedDurations('sample.ts', source)).toEqual(['sample.ts:1', 'sample.ts:2'])
+    expect(
+      toastCalls('src/lib/notifications/sources/health.ts', "toast.warning('Planted')")
+    ).toEqual(['src/lib/notifications/sources/health.ts:1'])
+    expect(UNPROMPTED_ONLY.test('src/lib/notifications/sources/health.ts')).toBe(true)
+    expect(UNPROMPTED_ONLY.test('src/lib/notifications/pop-up.ts')).toBe(false)
   })
 })
