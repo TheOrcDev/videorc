@@ -601,6 +601,53 @@ const defaultHighlightImageCacher: HighlightImageCacher = (remoteUrl) =>
 const defaultHighlightImageDecoder = (bytes: Uint8Array): Promise<HighlightBitmap> =>
   createImageBitmap(new Blob([bytes as BlobPart]))
 
+/** Own only per-render decodes, never the renderer-wide brand marks. A
+ * deadline can finish the card before decode resolves, so late results must
+ * be closed here as well as the images used by the completed card pair. */
+async function withDecodedHighlightImages<T>(
+  imageDeps: HighlightCardImageDeps,
+  render: (deps: RemoteImageDeps) => Promise<T>
+): Promise<T> {
+  const images = new Set<HighlightBitmap>()
+  let disposed = false
+  const decode = imageDeps.decode ?? defaultHighlightImageDecoder
+  const close = (image: HighlightBitmap): void => {
+    if ('close' in image && typeof image.close === 'function') image.close()
+  }
+  try {
+    return await render({
+      readImage: imageDeps.readImage ?? defaultHighlightImageReader,
+      cacheImage: imageDeps.cacheImage ?? defaultHighlightImageCacher,
+      deadlineMs: imageDeps.deadlineMs ?? COMMENTS_HIGHLIGHT_TIMING_CONTRACT.avatarFetchMs,
+      decode: async (bytes) => {
+        const image = await decode(bytes)
+        if (disposed) close(image)
+        else images.add(image)
+        return image
+      }
+    })
+  } finally {
+    disposed = true
+    for (const image of images) close(image)
+    images.clear()
+  }
+}
+
+/** Both outputs borrow the decoded images. A failed output must not release
+ * them while the other is still drawing or encoding. */
+async function renderHighlightCardPair(
+  horizontal: Promise<string | null>,
+  vertical: Promise<string | null> | null
+): Promise<{ pngBase64: string; verticalPngBase64?: string } | null> {
+  const results = await Promise.allSettled([horizontal, vertical])
+  const [pngBase64, verticalPngBase64] = results.map((result) => {
+    if (result.status === 'rejected') throw result.reason
+    return result.value
+  })
+  if (!pngBase64) return null
+  return verticalPngBase64 ? { pngBase64, verticalPngBase64 } : { pngBase64 }
+}
+
 class HighlightImageDeadlineError extends Error {
   constructor(deadlineMs: number) {
     super(`not decoded within ${deadlineMs} ms`)
@@ -703,76 +750,67 @@ export async function renderCommentHighlightCards(
   vertical?: HighlightCanvas,
   imageDeps: HighlightCardImageDeps = {}
 ): Promise<{ pngBase64: string; verticalPngBase64?: string } | null> {
-  const deps = {
-    readImage: imageDeps.readImage ?? defaultHighlightImageReader,
-    cacheImage: imageDeps.cacheImage ?? defaultHighlightImageCacher,
-    decode: imageDeps.decode ?? defaultHighlightImageDecoder,
-    deadlineMs: imageDeps.deadlineMs ?? COMMENTS_HIGHLIGHT_TIMING_CONTRACT.avatarFetchMs
-  }
-  const warn = imageDeps.warn ?? ((line: string) => console.warn(line))
-  const loadBrandMark = imageDeps.loadBrandMark ?? loadBrandMarkImage
-  const [platformMark, verifiedMark] = await Promise.all([
-    message.platform === 'youtube'
-      ? (imageDeps.loadYoutubeMark ?? loadYoutubeMarkImage)().catch(() => null)
-      : message.platform === 'x'
-        ? loadBrandMark(X_LOGO_WHITE_DATA_URL).catch(() => null)
+  return withDecodedHighlightImages(imageDeps, async (deps) => {
+    const warn = imageDeps.warn ?? ((line: string) => console.warn(line))
+    const loadBrandMark = imageDeps.loadBrandMark ?? loadBrandMarkImage
+    const [platformMark, verifiedMark] = await Promise.all([
+      message.platform === 'youtube'
+        ? (imageDeps.loadYoutubeMark ?? loadYoutubeMarkImage)().catch(() => null)
+        : message.platform === 'x'
+          ? loadBrandMark(X_LOGO_WHITE_DATA_URL).catch(() => null)
+          : null,
+      // Plan 167: X's own check, only for the verified type X sent.
+      message.authorVerified
+        ? loadBrandMark(X_VERIFIED_DATA_URL[message.authorVerified]).catch(() => null)
+        : null
+    ])
+    const text = commentHighlightCardText(message)
+    const fragments = commentHighlightCardFragments(message)
+    const tokens = highlightTokens(text, fragments)
+    const emoteNames = new Map<string, string>()
+    for (const token of tokens) {
+      if (token.kind === 'emote') emoteNames.set(token.url, token.name)
+    }
+    const emotes = new Map<string, HighlightBitmap>()
+    const emoteFailures: string[] = []
+    const [avatar] = await Promise.all([
+      avatarUrl
+        ? decodeHighlightImage(avatarUrl, deps).catch((error: unknown) => {
+            warn(
+              `Highlight card: ${message.platform} avatar for ${message.authorName} fell back to the monogram (${describeImageFailure(error)}).`
+            )
+            return null
+          })
         : null,
-    // Plan 167: X's own check, only for the verified type X sent.
-    message.authorVerified
-      ? loadBrandMark(X_VERIFIED_DATA_URL[message.authorVerified]).catch(() => null)
-      : null
-  ])
-  const text = commentHighlightCardText(message)
-  const fragments = commentHighlightCardFragments(message)
-  const tokens = highlightTokens(text, fragments)
-  const emoteNames = new Map<string, string>()
-  for (const token of tokens) {
-    if (token.kind === 'emote') emoteNames.set(token.url, token.name)
-  }
-  const emotes = new Map<string, HighlightBitmap>()
-  const emoteFailures: string[] = []
-  const [avatar] = await Promise.all([
-    avatarUrl
-      ? decodeHighlightImage(avatarUrl, deps).catch((error: unknown) => {
-          warn(
-            `Highlight card: ${message.platform} avatar for ${message.authorName} fell back to the monogram (${describeImageFailure(error)}).`
-          )
-          return null
-        })
-      : null,
-    ...highlightEmoteUrls(tokens).map(async (url) => {
-      try {
-        emotes.set(url, await decodeHighlightEmote(url, deps))
-      } catch (error) {
-        emoteFailures.push(`${emoteNames.get(url) ?? 'overlay'}: ${describeImageFailure(error)}`)
-      }
-    })
-  ])
-  if (emoteFailures.length > 0) {
-    warn(
-      `Highlight card: ${plural(emoteFailures.length, 'emote')} show as text (${emoteFailures.join('; ')}).`
-    )
-  }
-  const render = (canvas: HighlightCanvas): Promise<string | null> =>
-    renderCommentHighlightPng({
-      authorName: message.authorName,
-      text,
-      fragments,
-      avatar,
-      emotes,
-      canvasWidth: canvas.width,
-      canvasHeight: canvas.height,
-      maxCardWidthPx: canvas.rect ? Math.floor(canvas.rect.w * canvas.width) : undefined,
-      platform: message.platform,
-      platformMark,
-      verifiedMark
-    })
-  const [pngBase64, verticalPngBase64] = await Promise.all([
-    render(stream),
-    vertical ? render(vertical) : null
-  ])
-  if (!pngBase64) return null
-  return verticalPngBase64 ? { pngBase64, verticalPngBase64 } : { pngBase64 }
+      ...highlightEmoteUrls(tokens).map(async (url) => {
+        try {
+          emotes.set(url, await decodeHighlightEmote(url, deps))
+        } catch (error) {
+          emoteFailures.push(`${emoteNames.get(url) ?? 'overlay'}: ${describeImageFailure(error)}`)
+        }
+      })
+    ])
+    if (emoteFailures.length > 0) {
+      warn(
+        `Highlight card: ${plural(emoteFailures.length, 'emote')} show as text (${emoteFailures.join('; ')}).`
+      )
+    }
+    const render = (canvas: HighlightCanvas): Promise<string | null> =>
+      renderCommentHighlightPng({
+        authorName: message.authorName,
+        text,
+        fragments,
+        avatar,
+        emotes,
+        canvasWidth: canvas.width,
+        canvasHeight: canvas.height,
+        maxCardWidthPx: canvas.rect ? Math.floor(canvas.rect.w * canvas.width) : undefined,
+        platform: message.platform,
+        platformMark,
+        verifiedMark
+      })
+    return renderHighlightCardPair(render(stream), vertical ? render(vertical) : null)
+  })
 }
 
 /**
@@ -790,47 +828,38 @@ export async function renderMilestoneCards(
   vertical?: HighlightCanvas,
   imageDeps: HighlightCardImageDeps = {}
 ): Promise<{ pngBase64: string; verticalPngBase64?: string } | null> {
-  const deps = {
-    readImage: imageDeps.readImage ?? defaultHighlightImageReader,
-    cacheImage: imageDeps.cacheImage ?? defaultHighlightImageCacher,
-    decode: imageDeps.decode ?? defaultHighlightImageDecoder,
-    deadlineMs: imageDeps.deadlineMs ?? COMMENTS_HIGHLIGHT_TIMING_CONTRACT.avatarFetchMs
-  }
-  const warn = imageDeps.warn ?? ((line: string) => console.warn(line))
-  const loadBrandMark = imageDeps.loadBrandMark ?? loadBrandMarkImage
-  const [platformMark, avatar] = await Promise.all([
-    milestone.platform === 'youtube'
-      ? (imageDeps.loadYoutubeMark ?? loadYoutubeMarkImage)().catch(() => null)
-      : milestone.platform === 'x'
-        ? loadBrandMark(X_LOGO_WHITE_DATA_URL).catch(() => null)
-        : null,
-    avatarUrl
-      ? decodeHighlightImage(avatarUrl, deps).catch((error: unknown) => {
-          warn(
-            `Milestone card: ${milestone.platform} avatar for ${milestone.name} fell back to the monogram (${describeImageFailure(error)}).`
-          )
-          return null
-        })
-      : null
-  ])
-  const render = (canvas: HighlightCanvas): Promise<string | null> =>
-    renderMilestoneCardPng({
-      name: milestone.name,
-      label: milestone.label,
-      personaName,
-      avatar,
-      canvasWidth: canvas.width,
-      canvasHeight: canvas.height,
-      maxCardWidthPx: canvas.rect ? Math.floor(canvas.rect.w * canvas.width) : undefined,
-      platform: milestone.platform,
-      platformMark
-    })
-  const [pngBase64, verticalPngBase64] = await Promise.all([
-    render(stream),
-    vertical ? render(vertical) : null
-  ])
-  if (!pngBase64) return null
-  return verticalPngBase64 ? { pngBase64, verticalPngBase64 } : { pngBase64 }
+  return withDecodedHighlightImages(imageDeps, async (deps) => {
+    const warn = imageDeps.warn ?? ((line: string) => console.warn(line))
+    const loadBrandMark = imageDeps.loadBrandMark ?? loadBrandMarkImage
+    const [platformMark, avatar] = await Promise.all([
+      milestone.platform === 'youtube'
+        ? (imageDeps.loadYoutubeMark ?? loadYoutubeMarkImage)().catch(() => null)
+        : milestone.platform === 'x'
+          ? loadBrandMark(X_LOGO_WHITE_DATA_URL).catch(() => null)
+          : null,
+      avatarUrl
+        ? decodeHighlightImage(avatarUrl, deps).catch((error: unknown) => {
+            warn(
+              `Milestone card: ${milestone.platform} avatar for ${milestone.name} fell back to the monogram (${describeImageFailure(error)}).`
+            )
+            return null
+          })
+        : null
+    ])
+    const render = (canvas: HighlightCanvas): Promise<string | null> =>
+      renderMilestoneCardPng({
+        name: milestone.name,
+        label: milestone.label,
+        personaName,
+        avatar,
+        canvasWidth: canvas.width,
+        canvasHeight: canvas.height,
+        maxCardWidthPx: canvas.rect ? Math.floor(canvas.rect.w * canvas.width) : undefined,
+        platform: milestone.platform,
+        platformMark
+      })
+    return renderHighlightCardPair(render(stream), vertical ? render(vertical) : null)
+  })
 }
 
 /** The milestone card's PNG for one canvas (plan 225 B6): the comment
@@ -1303,92 +1332,86 @@ export async function renderChatOverlayCards(
   vertical?: ChatOverlayCanvas,
   imageDeps: HighlightCardImageDeps = {}
 ): Promise<{ pngBase64: string; verticalPngBase64?: string } | null> {
-  const deps = {
-    readImage: imageDeps.readImage ?? defaultHighlightImageReader,
-    cacheImage: imageDeps.cacheImage ?? defaultHighlightImageCacher,
-    decode: imageDeps.decode ?? defaultHighlightImageDecoder,
-    deadlineMs: imageDeps.deadlineMs ?? COMMENTS_HIGHLIGHT_TIMING_CONTRACT.avatarFetchMs
-  }
-  const warn = imageDeps.warn ?? ((line: string) => console.warn(line))
-  const loadBrandMark = imageDeps.loadBrandMark ?? loadBrandMarkImage
-  const platforms = new Set(messages.map((message) => message.platform))
-  const [youtube, x] = await Promise.all([
-    platforms.has('youtube')
-      ? (imageDeps.loadYoutubeMark ?? loadYoutubeMarkImage)().catch(() => null)
-      : null,
-    platforms.has('x') ? loadBrandMark(X_LOGO_WHITE_DATA_URL).catch(() => null) : null
-  ])
-  const marks: ChatOverlayMarks = { youtube, x }
-  const { monogramInitials } = await import('@/lib/chat-avatar')
-  const rows: ChatOverlayRowInput[] = messages.map((message) => {
-    const badge = commentHighlightPlatformBadge(message.platform)
-    const icon = marks[message.platform] ? 'mark' : badge && 'color' in badge ? 'badge' : 'none'
-    return {
-      id: message.id,
-      // Without an icon the name says the platform: "YouTube · name".
-      authorName:
-        icon === 'none'
-          ? commentHighlightIdentity(message.authorName, message.platform)
-          : message.authorName,
-      platform: message.platform,
-      text: message.messageText,
-      fragments: message.fragments,
-      icon,
-      ...(message.authorAvatarUrl ? { avatarUrl: message.authorAvatarUrl } : {}),
-      initials: monogramInitials(message.authorName.trim() || 'Viewer')
-    }
-  })
-  const tokens = rows.flatMap((row) => highlightTokens(row.text, row.fragments))
-  const emoteNames = new Map<string, string>()
-  for (const token of tokens) {
-    if (token.kind === 'emote') emoteNames.set(token.url, token.name)
-  }
-  const emotes = new Map<string, HighlightBitmap>()
-  const emoteFailures: string[] = []
-  // A regular's picture is decoded once per box, however many rows they have.
-  const avatarAuthors = new Map<string, string>()
-  for (const message of messages) {
-    if (message.authorAvatarUrl) avatarAuthors.set(message.authorAvatarUrl, message.authorName)
-  }
-  const avatars = new Map<string, HighlightBitmap>()
-  const avatarFailures: string[] = []
-  await Promise.all([
-    ...highlightEmoteUrls(tokens).map(async (url) => {
-      try {
-        emotes.set(url, await decodeHighlightEmote(url, deps))
-      } catch (error) {
-        emoteFailures.push(`${emoteNames.get(url) ?? 'overlay'}: ${describeImageFailure(error)}`)
-      }
-    }),
-    ...[...avatarAuthors].map(async ([url, author]) => {
-      try {
-        avatars.set(url, await decodeRemoteImage(url, deps))
-      } catch (error) {
-        if (chatOverlayAvatarWarned.has(url)) return
-        if (chatOverlayAvatarWarned.size >= CHAT_OVERLAY_AVATAR_WARNED_MAX) {
-          chatOverlayAvatarWarned.clear()
-        }
-        chatOverlayAvatarWarned.add(url)
-        avatarFailures.push(`${author}: ${describeImageFailure(error)}`)
+  return withDecodedHighlightImages(imageDeps, async (deps) => {
+    const warn = imageDeps.warn ?? ((line: string) => console.warn(line))
+    const loadBrandMark = imageDeps.loadBrandMark ?? loadBrandMarkImage
+    const platforms = new Set(messages.map((message) => message.platform))
+    const [youtube, x] = await Promise.all([
+      platforms.has('youtube')
+        ? (imageDeps.loadYoutubeMark ?? loadYoutubeMarkImage)().catch(() => null)
+        : null,
+      platforms.has('x') ? loadBrandMark(X_LOGO_WHITE_DATA_URL).catch(() => null) : null
+    ])
+    const marks: ChatOverlayMarks = { youtube, x }
+    const { monogramInitials } = await import('@/lib/chat-avatar')
+    const rows: ChatOverlayRowInput[] = messages.map((message) => {
+      const badge = commentHighlightPlatformBadge(message.platform)
+      const icon = marks[message.platform] ? 'mark' : badge && 'color' in badge ? 'badge' : 'none'
+      return {
+        id: message.id,
+        // Without an icon the name says the platform: "YouTube · name".
+        authorName:
+          icon === 'none'
+            ? commentHighlightIdentity(message.authorName, message.platform)
+            : message.authorName,
+        platform: message.platform,
+        text: message.messageText,
+        fragments: message.fragments,
+        icon,
+        ...(message.authorAvatarUrl ? { avatarUrl: message.authorAvatarUrl } : {}),
+        initials: monogramInitials(message.authorName.trim() || 'Viewer')
       }
     })
-  ])
-  if (emoteFailures.length > 0) {
-    warn(
-      `Chat on stream: ${plural(emoteFailures.length, 'emote')} show as text (${emoteFailures.join('; ')}).`
+    const tokens = rows.flatMap((row) => highlightTokens(row.text, row.fragments))
+    const emoteNames = new Map<string, string>()
+    for (const token of tokens) {
+      if (token.kind === 'emote') emoteNames.set(token.url, token.name)
+    }
+    const emotes = new Map<string, HighlightBitmap>()
+    const emoteFailures: string[] = []
+    // A regular's picture is decoded once per box, however many rows they have.
+    const avatarAuthors = new Map<string, string>()
+    for (const message of messages) {
+      if (message.authorAvatarUrl) avatarAuthors.set(message.authorAvatarUrl, message.authorName)
+    }
+    const avatars = new Map<string, HighlightBitmap>()
+    const avatarFailures: string[] = []
+    await Promise.all([
+      ...highlightEmoteUrls(tokens).map(async (url) => {
+        try {
+          emotes.set(url, await decodeHighlightEmote(url, deps))
+        } catch (error) {
+          emoteFailures.push(`${emoteNames.get(url) ?? 'overlay'}: ${describeImageFailure(error)}`)
+        }
+      }),
+      ...[...avatarAuthors].map(async ([url, author]) => {
+        try {
+          avatars.set(url, await decodeRemoteImage(url, deps))
+        } catch (error) {
+          if (chatOverlayAvatarWarned.has(url)) return
+          if (chatOverlayAvatarWarned.size >= CHAT_OVERLAY_AVATAR_WARNED_MAX) {
+            chatOverlayAvatarWarned.clear()
+          }
+          chatOverlayAvatarWarned.add(url)
+          avatarFailures.push(`${author}: ${describeImageFailure(error)}`)
+        }
+      })
+    ])
+    if (emoteFailures.length > 0) {
+      warn(
+        `Chat on stream: ${plural(emoteFailures.length, 'emote')} show as text (${emoteFailures.join('; ')}).`
+      )
+    }
+    if (avatarFailures.length > 0) {
+      warn(
+        `Chat on stream: ${plural(avatarFailures.length, 'avatar')} fell back to initials (${avatarFailures.join('; ')}).`
+      )
+    }
+    return renderHighlightCardPair(
+      renderChatOverlayPng(rows, stream, emotes, marks, avatars),
+      vertical ? renderChatOverlayPng(rows, vertical, emotes, marks, avatars) : null
     )
-  }
-  if (avatarFailures.length > 0) {
-    warn(
-      `Chat on stream: ${plural(avatarFailures.length, 'avatar')} fell back to initials (${avatarFailures.join('; ')}).`
-    )
-  }
-  const [pngBase64, verticalPngBase64] = await Promise.all([
-    renderChatOverlayPng(rows, stream, emotes, marks, avatars),
-    vertical ? renderChatOverlayPng(rows, vertical, emotes, marks, avatars) : null
-  ])
-  if (!pngBase64) return null
-  return verticalPngBase64 ? { pngBase64, verticalPngBase64 } : { pngBase64 }
+  })
 }
 
 async function renderChatOverlayPng(

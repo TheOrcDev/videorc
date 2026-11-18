@@ -3,6 +3,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { LiveChatMessage } from '@/lib/backend'
 import {
   renderChatOverlayCards,
+  renderMilestoneCards,
+  type HighlightCardImageDeps,
   renderCommentHighlightCards,
   type HighlightBitmap
 } from './caption-overlay'
@@ -526,5 +528,181 @@ describe('renderChatOverlayCards avatars', () => {
     // The next repaint tries again but does not repeat the line.
     await renderChatOverlayCards([row('2', 'Orc Dev', remote)], stream, undefined, deps)
     expect(warn).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('card decoded-image ownership', () => {
+  beforeEach(() => {
+    calls.length = 0
+    vi.stubGlobal('OffscreenCanvas', FakeOffscreenCanvas)
+  })
+  afterEach(() => {
+    vi.restoreAllMocks()
+    vi.unstubAllGlobals()
+    vi.useRealTimers()
+  })
+
+  const stream = { width: 1920, height: 1080, rect: DEFAULT_OVERLAY_LAYOUT.chat.horizontal }
+  const vertical = { width: 1080, height: 1920, rect: DEFAULT_OVERLAY_LAYOUT.chat.vertical }
+  const withEmote: LiveChatMessage = {
+    ...message,
+    authorAvatarUrl: 'https://example.com/avatar.png',
+    messageText: 'Kappa',
+    fragments: [{ type: 'emote', text: 'Kappa', imageUrl: 'https://example.com/emote.png' }]
+  }
+  const renderers = [
+    {
+      name: 'highlight',
+      images: 2,
+      render: (deps: HighlightCardImageDeps) =>
+        renderCommentHighlightCards(withEmote, avatarUrl, stream, vertical, deps)
+    },
+    {
+      name: 'milestone',
+      images: 1,
+      render: (deps: HighlightCardImageDeps) =>
+        renderMilestoneCards(
+          { messageId: 'm1', name: 'Orc Dev', label: '10th stream', platform: 'twitch' },
+          avatarUrl,
+          'Sidekick',
+          stream,
+          vertical,
+          deps
+        )
+    },
+    {
+      name: 'chat',
+      images: 2,
+      render: (deps: HighlightCardImageDeps) =>
+        renderChatOverlayCards([withEmote, withEmote], stream, vertical, deps)
+    }
+  ]
+  function decodedImages() {
+    const images: Array<HighlightBitmap & { close: ReturnType<typeof vi.fn> }> = []
+    const deps: HighlightCardImageDeps = {
+      cacheImage: async () => avatarUrl,
+      readImage: async () => new Uint8Array([1]),
+      decode: async () => {
+        const image = { width: 64, height: 64, close: vi.fn() } as unknown as HighlightBitmap & {
+          close: ReturnType<typeof vi.fn>
+        }
+        images.push(image)
+        return image
+      },
+      warn: vi.fn()
+    }
+    return { images, deps }
+  }
+
+  it.each(renderers)(
+    '$name closes each image once, after both cards finish',
+    async ({ render, images: count }) => {
+      const { images, deps } = decodedImages()
+      const encoding: Array<() => void> = []
+      vi.spyOn(FakeOffscreenCanvas.prototype, 'convertToBlob').mockImplementation(
+        () => new Promise((resolve) => encoding.push(() => resolve(new Blob(['png']))))
+      )
+      const pending = render(deps)
+      await vi.waitFor(() => expect(encoding).toHaveLength(2))
+      expect(images).toHaveLength(count)
+      expect(images.every((image) => image.close.mock.calls.length === 0)).toBe(true)
+      encoding[0]!()
+      encoding[1]!()
+      expect(await pending).not.toBeNull()
+      for (const image of images) expect(image.close).toHaveBeenCalledTimes(1)
+    }
+  )
+
+  it.each(renderers)(
+    '$name releases images when painting fails',
+    async ({ render, images: count }) => {
+      const { images, deps } = decodedImages()
+      vi.spyOn(FakeOffscreenCanvas.prototype, 'getContext').mockImplementation(() => {
+        throw new Error('context failed')
+      })
+      await expect(render(deps)).rejects.toThrow('context failed')
+      expect(images).toHaveLength(count)
+      for (const image of images) expect(image.close).toHaveBeenCalledTimes(1)
+    }
+  )
+
+  it.each(renderers)('$name releases images when no context is available', async ({ render }) => {
+    const { images, deps } = decodedImages()
+    vi.spyOn(FakeOffscreenCanvas.prototype, 'getContext').mockReturnValue(null!)
+    expect(await render(deps)).toBeNull()
+    for (const image of images) expect(image.close).toHaveBeenCalledTimes(1)
+  })
+
+  it.each(renderers)(
+    '$name releases late decodes after the deadline fallback',
+    async ({ render, images: count }) => {
+      vi.useFakeTimers()
+      const { images, deps } = decodedImages()
+      const decode = deps.decode!
+      const finish: Array<() => void> = []
+      deps.decode = (bytes) =>
+        new Promise((resolve) =>
+          finish.push(() => {
+            void decode(bytes).then(resolve)
+          })
+        )
+      const pending = render({ ...deps, deadlineMs: 5 })
+      await vi.waitFor(() => expect(finish).toHaveLength(count))
+      await vi.advanceTimersByTimeAsync(5)
+      expect(await pending).not.toBeNull()
+      for (const resolve of finish) resolve()
+      await vi.waitFor(() => {
+        expect(images).toHaveLength(count)
+        for (const image of images) expect(image.close).toHaveBeenCalledTimes(1)
+      })
+    }
+  )
+
+  it.each(renderers)(
+    '$name waits for the other card before cleanup if one encode rejects',
+    async ({ render }) => {
+      const { images, deps } = decodedImages()
+      const encoding: Array<{ resolve: (blob: Blob) => void; reject: (error: Error) => void }> = []
+      vi.spyOn(FakeOffscreenCanvas.prototype, 'convertToBlob').mockImplementation(
+        () => new Promise((resolve, reject) => encoding.push({ resolve, reject }))
+      )
+      const pending = render(deps)
+      let settled = false
+      void pending.then(
+        () => {
+          settled = true
+        },
+        () => {
+          settled = true
+        }
+      )
+      const rejected = expect(pending).rejects.toThrow('encode failed')
+      await vi.waitFor(() => expect(encoding).toHaveLength(2))
+      encoding[0]!.reject(new Error('encode failed'))
+      await new Promise<void>((resolve) => setImmediate(resolve))
+      expect(settled).toBe(false)
+      expect(images.every((image) => image.close.mock.calls.length === 0)).toBe(true)
+      encoding[1]!.resolve(new Blob(['png']))
+      await rejected
+      for (const image of images) expect(image.close).toHaveBeenCalledTimes(1)
+    }
+  )
+
+  it('does not close shared platform marks', async () => {
+    const { images, deps } = decodedImages()
+    const close = vi.fn()
+    const mark = { width: 64, height: 64, close } as unknown as HighlightBitmap
+    await renderCommentHighlightCards(
+      { ...message, platform: 'youtube' },
+      avatarUrl,
+      stream,
+      vertical,
+      {
+        ...deps,
+        loadYoutubeMark: async () => mark
+      }
+    )
+    expect(close).not.toHaveBeenCalled()
+    expect(images[0]!.close).toHaveBeenCalledTimes(1)
   })
 })
