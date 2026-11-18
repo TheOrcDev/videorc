@@ -35,18 +35,22 @@
      char *video_pin_name;
 --- a/libavdevice/dshow_pin.c
 +++ b/libavdevice/dshow_pin.c
-@@ -23,6 +23,10 @@
+@@ -23,6 +23,14 @@
  #include "dshow_capture.h"
- 
+
  #include <stddef.h>
 +#include <mmreg.h>
 +
 +static const GUID videorc_pcm = {1, 0, 0x10, {0x80, 0, 0, 0xaa, 0, 0x38, 0x9b, 0x71}};
 +static const GUID videorc_float = {3, 0, 0x10, {0x80, 0, 0, 0xaa, 0, 0x38, 0x9b, 0x71}};
++static uint64_t videorc_filetime(FILETIME time)
++{
++    return ((uint64_t)time.dwHighDateTime << 32) | time.dwLowDateTime;
++}
  #define imemoffset offsetof(DShowPin, imemvtbl)
- 
+
  DECLARE_QUERYINTERFACE(pin, DShowPin,
-@@ -304,8 +308,9 @@
+@@ -304,8 +312,10 @@
      IReferenceClock *clock = pin->filter->clock;
      int64_t dummy;
      struct dshow_ctx *ctx;
@@ -55,19 +59,27 @@
 +    HRESULT hr, clock_hr;
 +    VideorcAudioClock capture_clock = {0};
 +    FILETIME wall_before, wall_after;
- 
++    int bracket_reads;
+
      dshowdebug("ff_dshow_meminputpin_Receive(%p)\n", this);
- 
-@@ -317,13 +322,17 @@
+
+@@ -317,13 +327,24 @@
      ctx = s->priv_data;
- 
+
      hr = IMediaSample_GetTime(sample, &sampletime, &dummy);
 -    IReferenceClock_GetTime(clock, &graphtime);
-+    if (ctx->videorc_audio_clock && devtype == AudioDevice)
-+        GetSystemTimePreciseAsFileTime(&wall_before);
-+    clock_hr = IReferenceClock_GetTime(clock, &graphtime);
-+    if (ctx->videorc_audio_clock && devtype == AudioDevice)
-+        GetSystemTimePreciseAsFileTime(&wall_after);
++    /* Bracket the graph read with the wall clock. A preemption between the
++     * three reads widens the bracket past 1 ms (1.07 ms on a loaded laptop),
++     * so read again, up to four times, rather than refuse the packet. */
++    bracket_reads = ctx->videorc_audio_clock && devtype == AudioDevice ? 4 : 0;
++    do {
++        if (bracket_reads)
++            GetSystemTimePreciseAsFileTime(&wall_before);
++        clock_hr = IReferenceClock_GetTime(clock, &graphtime);
++        if (bracket_reads)
++            GetSystemTimePreciseAsFileTime(&wall_after);
++    } while (--bracket_reads > 0 &&
++             videorc_filetime(wall_after) - videorc_filetime(wall_before) > 10000);
      if (devtype == VideoDevice && !ctx->use_video_device_timestamps) {
          /* PTS from video devices is unreliable. */
          chosentime = graphtime;
@@ -78,7 +90,7 @@
              chosentime = graphtime;
              use_sample_time = 0;
              av_log(s, AV_LOG_DEBUG,
-@@ -339,19 +348,84 @@
+@@ -339,19 +360,87 @@
          } else
              chosentime = sampletime;
      }
@@ -133,12 +145,15 @@
 +        capture_clock.wall_before_100ns = before >= 116444736000000000ULL ? before - 116444736000000000ULL : 0;
 +        capture_clock.wall_after_100ns = after >= 116444736000000000ULL ? after - 116444736000000000ULL : 0;
 +        capture_clock.bytes = buf_size;
-+        /* Name the first failed check: the backend reports it with the stop. */
++        /* Name the first failed check: the backend reports it with the stop.
++         * Delivery delay and packet length allow 1 s, as the backend does
++         * (plan 195 S2): its 100 ms age check drops a stale packet, so a
++         * starved capture thread costs that audio, not the microphone. */
 +        if (!((hr == S_OK || hr == VFW_S_NO_STOP_TIME) && (clock_hr == S_OK || clock_hr == S_FALSE) && pointer_hr == S_OK && buf))
 +            capture_clock.invalid = "status";
 +        else if (!use_sample_time || chosentime != sampletime || sampletime < 0)
 +            capture_clock.invalid = "sample-time";
-+        else if (graphtime < sampletime || graphtime - sampletime > 1000000)
++        else if (graphtime < sampletime || graphtime - sampletime > 10000000)
 +            capture_clock.invalid = "delivery-delay";
 +        else if (before < 116444736000000000ULL || after < before || after - before > 10000)
 +            capture_clock.invalid = "wall-bracket";
@@ -155,7 +170,7 @@
 +            capture_clock.channels = wave->nChannels;
 +            capture_clock.bits = wave->wBitsPerSample;
 +            capture_clock.format = format;
-+            if ((int64_t)capture_clock.frames * 10 > capture_clock.rate)
++            if (capture_clock.frames > capture_clock.rate)
 +                capture_clock.invalid = "packet-length";
 +        }
 +        capture_clock.valid = !capture_clock.invalid;
