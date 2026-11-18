@@ -1,6 +1,11 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { decideAlphaBudget, memoryTrend, percentile } from './cloud-alpha-analysis.mjs'
+import {
+  alphaFailureDetail,
+  decideAlphaBudget,
+  memoryTrend,
+  percentile
+} from './cloud-alpha-analysis.mjs'
 
 // Rule vectors only. These are not acquisition evidence and cannot approve transport.
 const vector = () => ({
@@ -70,4 +75,24 @@ test('memory trend and quantiles require real finite series', () => {
   assert.ok(memoryTrend([100, 110, 120, 140]).growth > 0.1)
   assert.equal(percentile([1, NaN], 0.95), null)
   assert.equal(percentile([4, 1, 3, 2], 0.5), 2)
+})
+
+test('a failed acquisition says why, without addresses, tokens or the SFU secret', () => {
+  assert.equal(
+    alphaFailureDetail(new Error('x'), {
+      localGate: 'failed',
+      failures: [
+        'alpha-clean:stream-h:insufficient-samples',
+        'alpha-clean:stream-h:short-acquisition'
+      ]
+    }),
+    'local gate failed: alpha-clean:stream-h:insufficient-samples, alpha-clean:stream-h:short-acquisition'
+  )
+  const detail = alphaFailureDetail(
+    new Error('join ws://127.0.0.1:7880/rtc?access_token=eyJa.eyJb.sig failed with s3cr3t\nstack'),
+    undefined,
+    ['s3cr3t']
+  )
+  assert.equal(detail, 'join (address withheld) failed with (credential withheld)')
+  assert.match(alphaFailureDetail(new Error('eyJh.eyJp.c2ln'), null), /\(token withheld\)/)
 })
