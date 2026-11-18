@@ -494,6 +494,8 @@ class StudioBackend {
   sessionDetailFailuresRemaining = 0
   sessionSummaries: SessionSummary[] = []
   sessionListNextCursor: string | undefined
+  /** Serve `sessions.list` by cursor + limit from `sessionSummaries`. */
+  sessionListPaged = false
   sessionHealthEvents: HealthEvent[] = []
   sessionLogs: SessionLogEntry[] = []
   overlayLayout: OverlayLayout = DEFAULT_OVERLAY_LAYOUT
@@ -1474,8 +1476,22 @@ class StudioBackend {
           streamKeyHint: '••••test',
           previousStreamKeyPresent: false
         }
-      case 'sessions.list':
-        return { items: this.sessionSummaries, nextCursor: this.sessionListNextCursor }
+      case 'sessions.list': {
+        if (!this.sessionListPaged) {
+          return { items: this.sessionSummaries, nextCursor: this.sessionListNextCursor }
+        }
+        const start = params.cursor ? Number(params.cursor) : 0
+        const end = start + Math.min(200, Number(params.limit ?? 50))
+        return {
+          items: this.sessionSummaries.slice(start, end),
+          nextCursor: end < this.sessionSummaries.length ? String(end) : undefined
+        }
+      }
+      case 'sessions.rename':
+        this.sessionSummaries = this.sessionSummaries.map((session) =>
+          session.id === params.sessionId ? { ...session, title: String(params.title) } : session
+        )
+        return null
       case 'sessions.healthEvents.list':
         if (this.sessionDetailFailuresRemaining > 0) {
           this.sessionDetailFailuresRemaining -= 1
@@ -10574,6 +10590,51 @@ describe('real StudioProvider lifecycle', () => {
     expect(latest()?.core.sessions.map((session) => session.id)).toEqual(['session-4', 'session-3'])
     expect(latest()?.core.sessionsNextCursor).toBe('cursor-fresh')
     expect(latest()?.core.sessionsLoadingMore).toBe(false)
+  })
+
+  it('keeps every loaded Library page when an older recording is renamed (QA F5)', async () => {
+    const backend = new StudioBackend()
+    backend.sessionListPaged = true
+    backend.sessionSummaries = Array.from({ length: 220 }, (_, index) =>
+      sessionSummary({ id: `session-${index}`, title: `Session ${index}` })
+    )
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const testDom = installProviderTestEnvironment(
+      createVideorcApi({
+        acknowledge: async () => true,
+        pending: async () => [],
+        acknowledgeProvider: async () => true,
+        pendingProvider: async () => []
+      })
+    )
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = () => observations.at(-1)
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(
+      () => latest()?.core.wsStatus === 'connected' && latest()?.core.sessions.length === 50
+    )
+    // Load more to 200 rows (the most one page refetch holds): a rename on page 4.
+    for (let loaded = 100; loaded <= 200; loaded += 50) {
+      await act(async () => {
+        await latest()!.core.loadMoreSessions()
+      })
+      await waitForObservation(() => latest()?.core.sessions.length === loaded)
+    }
+
+    await act(async () => {
+      await latest()!.core.renameSession('session-199', 'Renamed older recording')
+    })
+
+    const sessions = latest()!.core.sessions
+    expect(sessions).toHaveLength(200)
+    expect(sessions.find((session) => session.id === 'session-199')?.title).toBe(
+      'Renamed older recording'
+    )
+    expect(latest()?.core.sessionsNextCursor).toBe('200')
   })
 
   it('does not let a stale focus refresh replace a newer Library first page', async () => {

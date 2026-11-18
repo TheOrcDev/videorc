@@ -7240,10 +7240,12 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       setSessionsLoadingMore(false)
       try {
         await resumePendingSessionDeletions(activeClient)
-        const [nextPage, nextTotals] = await Promise.all([
-          activeClient.requestTyped('sessions.list', { limit: SESSION_LIST_PAGE_LIMIT }),
-          activeClient.request<SessionStorageTotals>('sessions.storage')
-        ])
+        // Refetch every row already loaded (Load more; one page holds at most
+        // 200), so a rename or delete on page 2+ keeps the user's place (QA F5).
+        const page = await activeClient.requestTyped('sessions.list', {
+          limit: Math.min(200, Math.max(SESSION_LIST_PAGE_LIMIT, sessionsRef.current.length))
+        })
+        const nextTotals = await activeClient.request<SessionStorageTotals>('sessions.storage')
         if (
           clientRef.current !== activeClient ||
           !refreshRequests.isCurrent('first-page', requestToken)
@@ -7254,10 +7256,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         // the old cursor. Advancing again at commit prevents it from appending
         // that stale page after the new first page becomes authoritative.
         sessionListGenerationRef.current += 1
-        setSessions(
-          finalizationJournalRef.current.reconcile(nextPage.items, finalizationCheckpoint)
-        )
-        setSessionsNextCursor(nextPage.nextCursor ?? null)
+        setSessions(finalizationJournalRef.current.reconcile(page.items, finalizationCheckpoint))
+        setSessionsNextCursor(page.nextCursor ?? null)
         setSessionStorageTotals(nextTotals)
       } finally {
         refreshRequests.finish('first-page', requestToken)
