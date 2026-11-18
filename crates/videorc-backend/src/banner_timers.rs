@@ -12,8 +12,9 @@
 //! wakes on every banner change and at the next deadline, and executes the
 //! due actions through the same store and compositor install as the RPCs.
 //! A fresh process starts a fresh book, so a repeat never resumes before the
-//! next session; a banner still showing after a relaunch counts its "Hide
-//! after" from the launch.
+//! next session; the replay-only Clips ring is not a session here (QA F8),
+//! and every new session restarts the repeat clock; a banner still showing
+//! after a relaunch counts its "Hide after" from the launch.
 
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
@@ -62,7 +63,28 @@ impl Entry {
 #[derive(Debug, Default)]
 pub(crate) struct BannerTimerBook {
     entries: HashMap<String, Entry>,
-    session_active: bool,
+    /// The session the repeats count for (see `banner_session_key`); a new
+    /// key is a session boundary even when two sessions meet between polls.
+    session: Option<String>,
+}
+
+/// QA F8: the session "Show every" counts for, keyed so a new session is a
+/// boundary. Only a recording or livestream the user started counts: the
+/// replay-only Clips ring buffers while the Studio is idle (Ready), so it
+/// never runs a repeat (`docs/banners.md`: "only while recording or live").
+/// `native` is the active session's id and whether it is replay-only;
+/// `cloud_room` is a live or recording talk-show room.
+pub(crate) fn banner_session_key(native: Option<(&str, bool)>, cloud_room: bool) -> Option<String> {
+    let native = native
+        .filter(|(_, replay_only)| !replay_only)
+        .map(|(id, _)| id);
+    match (native, cloud_room) {
+        (None, false) => None,
+        (native, cloud_room) => Some(format!(
+            "native:{};cloud:{cloud_room}",
+            native.unwrap_or("")
+        )),
+    }
 }
 
 fn seconds(value: Option<u32>) -> Option<Duration> {
@@ -83,9 +105,10 @@ impl BannerTimerBook {
     /// runs; a manual Hide restarts the period, the timer's own Hide keeps
     /// it; a session's start schedules every repeat one period out and its
     /// end stops them; a changed period reschedules.
-    pub(crate) fn observe(&mut self, banners: &[Banner], now: Instant, session_active: bool) {
-        let session_started = session_active && !self.session_active;
-        self.session_active = session_active;
+    pub(crate) fn observe(&mut self, banners: &[Banner], now: Instant, session: Option<&str>) {
+        let session_active = session.is_some();
+        let session_started = session_active && self.session.as_deref() != session;
+        self.session = session.map(str::to_owned);
         let present: HashSet<&str> = banners.iter().map(|banner| banner.id.as_str()).collect();
         self.entries.retain(|id, _| present.contains(id.as_str()));
         for banner in banners {
@@ -185,9 +208,20 @@ pub(crate) async fn run_banner_timers(state: AppState) {
                 Vec::new()
             }
         };
-        let session_active = state.recording.lock().await.is_some();
+        let native = state
+            .recording
+            .lock()
+            .await
+            .as_ref()
+            .map(|active| (active.session_id.clone(), active.replay_only));
+        let session = banner_session_key(
+            native
+                .as_ref()
+                .map(|(id, replay_only)| (id.as_str(), *replay_only)),
+            crate::cloud_graphics::room_active(&state),
+        );
         let now = Instant::now();
-        book.observe(&banners, now, session_active);
+        book.observe(&banners, now, session.as_deref());
         let actions = book.due(now);
         if !actions.is_empty() {
             execute(&state, actions).await;
@@ -267,6 +301,8 @@ mod tests {
         }
     }
 
+    const LIVE: Option<&str> = Some("native:rec-1;cloud:false");
+    const IDLE: Option<&str> = None;
     const SECOND: Duration = Duration::from_secs(1);
     const MINUTE: Duration = Duration::from_secs(60);
 
@@ -274,7 +310,7 @@ mod tests {
     fn hide_after_counts_from_the_show_and_a_manual_hide_cancels_it() {
         let start = Instant::now();
         let mut book = BannerTimerBook::default();
-        book.observe(&[banner("a", false, Some(30), None)], start, false);
+        book.observe(&[banner("a", false, Some(30), None)], start, IDLE);
         assert!(
             book.due(start + MINUTE).is_empty(),
             "hidden: nothing to hide"
@@ -283,7 +319,7 @@ mod tests {
 
         // Shown at +10 s: due at +40 s, not before.
         let shown_at = start + 10 * SECOND;
-        book.observe(&[banner("a", true, Some(30), None)], shown_at, false);
+        book.observe(&[banner("a", true, Some(30), None)], shown_at, IDLE);
         assert_eq!(book.next_deadline(), Some(shown_at + 30 * SECOND));
         assert!(book.due(shown_at + 29 * SECOND).is_empty());
         assert_eq!(
@@ -295,7 +331,7 @@ mod tests {
         book.observe(
             &[banner("a", false, Some(30), None)],
             shown_at + 5 * SECOND,
-            false,
+            IDLE,
         );
         assert!(book.due(shown_at + MINUTE).is_empty());
         assert_eq!(book.next_deadline(), None);
@@ -305,28 +341,28 @@ mod tests {
     fn showing_again_restarts_the_countdown_and_a_new_setting_applies_at_once() {
         let start = Instant::now();
         let mut book = BannerTimerBook::default();
-        book.observe(&[banner("a", true, Some(30), None)], start, false);
+        book.observe(&[banner("a", true, Some(30), None)], start, IDLE);
         book.observe(
             &[banner("a", false, Some(30), None)],
             start + 20 * SECOND,
-            false,
+            IDLE,
         );
         let again = start + 25 * SECOND;
-        book.observe(&[banner("a", true, Some(30), None)], again, false);
+        book.observe(&[banner("a", true, Some(30), None)], again, IDLE);
         assert!(
             book.due(start + 40 * SECOND).is_empty(),
             "counted from the new show"
         );
         assert_eq!(book.next_deadline(), Some(again + 30 * SECOND));
         // Turning "Hide after" down to 10 s while showing: due from the show.
-        book.observe(&[banner("a", true, Some(10), None)], again + SECOND, false);
+        book.observe(&[banner("a", true, Some(10), None)], again + SECOND, IDLE);
         assert_eq!(
             book.due(again + 10 * SECOND),
             vec![BannerTimerAction::Hide("a".into())]
         );
         // Off (0): never hides.
         let mut book = BannerTimerBook::default();
-        book.observe(&[banner("b", true, Some(0), None)], start, false);
+        book.observe(&[banner("b", true, Some(0), None)], start, IDLE);
         assert!(book.due(start + 60 * MINUTE).is_empty());
     }
 
@@ -335,7 +371,7 @@ mod tests {
         let start = Instant::now();
         let mut book = BannerTimerBook::default();
         let idle = [banner("s", false, Some(30), Some(15))];
-        book.observe(&idle, start, false);
+        book.observe(&idle, start, IDLE);
         assert!(
             book.due(start + 60 * MINUTE).is_empty(),
             "idle: never shows"
@@ -343,7 +379,7 @@ mod tests {
         assert!(book.any_repeat());
 
         let session = start + MINUTE;
-        book.observe(&idle, session, true);
+        book.observe(&idle, session, LIVE);
         assert!(book.due(session + 14 * MINUTE).is_empty());
         assert_eq!(
             book.due(session + 15 * MINUTE),
@@ -352,13 +388,13 @@ mod tests {
         // The store shows it; 30 s later the timer hides it; the next show
         // is one period after the last show ("every 15 min", show to show).
         let shown_at = session + 15 * MINUTE;
-        book.observe(&[banner("s", true, Some(30), Some(15))], shown_at, true);
+        book.observe(&[banner("s", true, Some(30), Some(15))], shown_at, LIVE);
         assert_eq!(
             book.due(shown_at + 30 * SECOND),
             vec![BannerTimerAction::Hide("s".into())]
         );
         let hidden_at = shown_at + 30 * SECOND;
-        book.observe(&[banner("s", false, Some(30), Some(15))], hidden_at, true);
+        book.observe(&[banner("s", false, Some(30), Some(15))], hidden_at, LIVE);
         assert_eq!(book.next_deadline(), Some(shown_at + 15 * MINUTE));
         assert!(book.due(shown_at + 14 * MINUTE).is_empty());
         assert_eq!(
@@ -368,8 +404,8 @@ mod tests {
 
         // The session ends: no more shows.
         let mut book = BannerTimerBook::default();
-        book.observe(&idle, start, true);
-        book.observe(&idle, start + MINUTE, false);
+        book.observe(&idle, start, LIVE);
+        book.observe(&idle, start + MINUTE, IDLE);
         assert!(book.due(start + 60 * MINUTE).is_empty());
         assert_eq!(book.next_deadline(), None);
     }
@@ -379,15 +415,15 @@ mod tests {
         let start = Instant::now();
         let mut book = BannerTimerBook::default();
         let hidden = [banner("s", false, None, Some(10))];
-        book.observe(&hidden, start, true);
+        book.observe(&hidden, start, LIVE);
         // A manual Show at +4 min and a Hide at +6 min: the next timed show
         // is a full period after the Hide, not at +10 min.
         book.observe(
             &[banner("s", true, None, Some(10))],
             start + 4 * MINUTE,
-            true,
+            LIVE,
         );
-        book.observe(&hidden, start + 6 * MINUTE, true);
+        book.observe(&hidden, start + 6 * MINUTE, LIVE);
         assert!(book.due(start + 10 * MINUTE).is_empty());
         assert_eq!(
             book.due(start + 16 * MINUTE),
@@ -395,7 +431,7 @@ mod tests {
         );
         // The Show was refused (the list still says hidden): the next try is
         // one period later, never on every tick.
-        book.observe(&hidden, start + 16 * MINUTE, true);
+        book.observe(&hidden, start + 16 * MINUTE, LIVE);
         assert!(book.due(start + 17 * MINUTE).is_empty());
         assert_eq!(
             book.due(start + 26 * MINUTE),
@@ -403,7 +439,7 @@ mod tests {
         );
         // Already showing at its period: nothing to show, the period rolls.
         let mut book = BannerTimerBook::default();
-        book.observe(&[banner("t", true, None, Some(5))], start, true);
+        book.observe(&[banner("t", true, None, Some(5))], start, LIVE);
         assert!(book.due(start + 5 * MINUTE).is_empty());
         assert_eq!(book.next_deadline(), Some(start + 10 * MINUTE));
     }
@@ -413,11 +449,11 @@ mod tests {
         let start = Instant::now();
         let mut book = BannerTimerBook::default();
         let showing = [banner("a", true, Some(10), None)];
-        book.observe(&showing, start, false);
+        book.observe(&showing, start, IDLE);
         let due_at = start + 10 * SECOND;
         assert_eq!(book.due(due_at), vec![BannerTimerAction::Hide("a".into())]);
         // The store refused it: still showing. No spin, one retry later.
-        book.observe(&showing, due_at, false);
+        book.observe(&showing, due_at, IDLE);
         assert!(book.due(due_at + SECOND).is_empty());
         assert_eq!(book.next_deadline(), Some(due_at + HIDE_RETRY));
         assert_eq!(
@@ -430,10 +466,76 @@ mod tests {
     fn a_deleted_banner_leaves_the_book() {
         let start = Instant::now();
         let mut book = BannerTimerBook::default();
-        book.observe(&[banner("a", true, Some(30), Some(5))], start, true);
-        book.observe(&[], start + SECOND, true);
+        book.observe(&[banner("a", true, Some(30), Some(5))], start, LIVE);
+        book.observe(&[], start + SECOND, LIVE);
         assert!(book.due(start + 60 * MINUTE).is_empty());
         assert!(!book.any_repeat());
         assert_eq!(book.next_deadline(), None);
+    }
+
+    /// QA F8: Clips buffering while the Studio is idle never runs "Show
+    /// every"; Record starts the clock, Stop ends it, re-armed Clips stays
+    /// idle, and the next Record starts a fresh period.
+    #[test]
+    fn clips_buffering_is_idle_and_each_recording_restarts_the_repeat() {
+        let clips_a = banner_session_key(Some(("replay-a", true)), false);
+        let record = banner_session_key(Some(("rec-1", false)), false);
+        let clips_b = banner_session_key(Some(("replay-b", true)), false);
+        let record_2 = banner_session_key(Some(("rec-2", false)), false);
+        assert_eq!(clips_a, None, "the Clips ring alone is idle");
+        assert_eq!(clips_b, None);
+        assert!(record.is_some() && record_2.is_some() && record != record_2);
+        assert!(banner_session_key(Some(("replay-a", true)), true).is_some());
+        assert_eq!(banner_session_key(None, false), None);
+
+        let start = Instant::now();
+        let mut book = BannerTimerBook::default();
+        let hidden = [banner("s", false, None, Some(5))];
+        // Clips on, Studio Ready: 20 min of polls, never a Show.
+        for minute in 0..=20 {
+            let now = start + minute * MINUTE;
+            book.observe(&hidden, now, clips_a.as_deref());
+            assert!(
+                book.due(now).is_empty(),
+                "idle Clips showed at +{minute} min"
+            );
+        }
+        assert_eq!(book.next_deadline(), None);
+
+        // Record at +20 min: the first Show is one period after Record.
+        let recorded = start + 20 * MINUTE;
+        book.observe(&hidden, recorded, record.as_deref());
+        assert!(book.due(recorded + 4 * MINUTE).is_empty());
+        assert_eq!(
+            book.due(recorded + 5 * MINUTE),
+            vec![BannerTimerAction::Show("s".into())]
+        );
+
+        // Stop at +27 min, Clips re-arms: no more Shows.
+        let stopped = start + 27 * MINUTE;
+        book.observe(&hidden, stopped, clips_b.as_deref());
+        assert_eq!(book.next_deadline(), None);
+        assert!(book.due(stopped + 30 * MINUTE).is_empty());
+
+        // Record again at +60 min: a fresh period from that Record.
+        let again = start + 60 * MINUTE;
+        book.observe(&hidden, again, record_2.as_deref());
+        assert_eq!(book.next_deadline(), Some(again + 5 * MINUTE));
+    }
+
+    /// A Stop and the next Record landing between two polls are still a
+    /// boundary: the new session's period starts at its own start.
+    #[test]
+    fn a_new_session_between_polls_restarts_the_repeat() {
+        let start = Instant::now();
+        let mut book = BannerTimerBook::default();
+        let hidden = [banner("s", false, None, Some(5))];
+        let first = banner_session_key(Some(("rec-1", false)), false);
+        let second = banner_session_key(Some(("rec-2", false)), false);
+        book.observe(&hidden, start, first.as_deref());
+        let next = start + 4 * MINUTE;
+        book.observe(&hidden, next, second.as_deref());
+        assert!(book.due(start + 5 * MINUTE).is_empty());
+        assert_eq!(book.next_deadline(), Some(next + 5 * MINUTE));
     }
 }

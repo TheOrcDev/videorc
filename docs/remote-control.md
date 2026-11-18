@@ -556,3 +556,15 @@ the Studio's privacy state. Only that boolean crosses the LAN: no reason,
 timestamp or screen contents. The phone is the streamer's own paired
 device. Hiding is the safe direction; showing is a deliberate key press.
 No route, credential or LAN event is added.
+
+### Plan 249 room output observations
+
+`remote.state.outputSession` is additive: `owner` (`native` or `cloud-room`),
+`freshness` (`fresh` or `stale`), `roomOpen`, `microphoneConfirmed` and nullable
+`cameraOff`. The legacy `micMuted` is the last confirmed value when a room loses
+its connection; clients must read `microphoneConfirmed: false` as unknown, not
+as proof of current silence. Record and stream flags reflect the corresponding
+cloud output. Record Stop and Stream Stop end only that output in rooms.
+
+Leak argument: this extension contains fixed enums, booleans and null only. It
+adds no identifiers, paths, destinations, tokens, URLs, events or LAN routes.

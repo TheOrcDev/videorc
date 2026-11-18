@@ -171,9 +171,21 @@ fn renderer_only_method(method: &str) -> bool {
         "agent.intent.listen"
             | "agent.intent.ack"
             | "agent.surface.publish"
+            | "cloud.speech.sync"
+            | "cloud.speech.audio"
+            | "cloud.speech.overlay"
             // Plan 224: the one answer that carries a LiveKit token goes to
             // the renderer that joins the room, never to a remote or main.
             | "cloud.room.token.refresh"
+            | "cloud.show.handOff"
+            | "cloud.show.check"
+            // Plan 249 S24: the room renderer's accepted presentation, its
+            // desired facts and the kept presentation read back.
+            | "cloud.presentation.accepted"
+            | "cloud.controller.desired"
+            | "cloud.presentation.restore"
+            // Plan 249 S11: only the room renderer asks for room HTML layers.
+            | "cloud.htmlLayers.want"
     )
 }
 
@@ -306,6 +318,21 @@ fn scrub_ffmpeg_paths_recursive(value: &mut serde_json::Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cloud_continuation_mutations_are_renderer_only() {
+        for method in ["cloud.show.handOff", "cloud.show.check"] {
+            assert_eq!(
+                authorize_backend_method(BackendRole::Renderer, method, false),
+                Ok(())
+            );
+            assert_eq!(
+                authorize_backend_method(BackendRole::Admin, method, false),
+                Err(MethodAdmissionError::RendererOnly)
+            );
+            assert!(authorize_backend_method(BackendRole::Remote, method, false).is_err());
+        }
+    }
 
     #[test]
     fn app_window_resolution_is_local_studio_authority() {

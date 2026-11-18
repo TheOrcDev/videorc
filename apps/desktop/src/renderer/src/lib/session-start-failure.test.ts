@@ -68,6 +68,19 @@ const BARRIER_MESSAGE =
   'Recording startup blocked before encoding: latest compositor frame gap 700ms exceeds startup cadence budget 200ms (recent gaps 700/690/710 ms; 4 fresh frame(s) in 2500ms); cadence budget 200ms.'
 
 describe('sessionStartFailureMessage', () => {
+  // Plan 243 R2 A-M6: a known refusal says its own copy, never the backend's
+  // words (a device name could ride them into the toast guard's log).
+  it("says a known refusal's copy instead of the backend's words", () => {
+    const refused = Object.assign(new Error('Your show is live from Alice {work}.'), {
+      code: 'cloud-show-live-elsewhere'
+    })
+    expect(sessionStartFailureMessage(refused)).toBe(
+      'Your show is live on another device. Use Continue here, or end it first.'
+    )
+    const unknown = Object.assign(new Error(BARRIER_MESSAGE), { code: 'something-new' })
+    expect(sessionStartFailureMessage(unknown)).toBe(BARRIER_MESSAGE)
+  })
+
   it('keeps the backend reason verbatim', () => {
     expect(sessionStartFailureMessage(new Error(BARRIER_MESSAGE))).toBe(BARRIER_MESSAGE)
   })

@@ -8,6 +8,7 @@ use tokio::sync::Notify;
 #[serde(rename_all = "kebab-case")]
 pub enum MaintenanceDeferral {
     CaptureActive,
+    HostOverloaded,
     FinalizingActive,
     MaintenanceRunning,
 }
@@ -15,6 +16,7 @@ pub enum MaintenanceDeferral {
 impl MaintenanceDeferral {
     pub fn message(self) -> &'static str {
         match self {
+            MaintenanceDeferral::HostOverloaded => "Deferred while this computer is overloaded.",
             MaintenanceDeferral::CaptureActive => {
                 "Deferred while recording or streaming is active."
             }
@@ -30,6 +32,7 @@ impl MaintenanceDeferral {
 struct FfmpegWorkState {
     capture_waiting: usize,
     capture_active: bool,
+    live_holds: usize,
     /// Buffer-only sessions' captures (plan 181): the ring runs by default
     /// whenever Videorc is open, muxing a copy of the hardware encode, so it
     /// never defers, cancels or waits for maintenance; shutdown still joins
@@ -154,11 +157,34 @@ impl FfmpegWorkCoordinator {
         }
     }
 
+    /// A cloud room protects capture even though it has no local encoder.
+    pub fn begin_live_hold(self: &Arc<Self>) -> LiveHold {
+        let mut state = self.state.lock().expect("ffmpeg work state poisoned");
+        state.live_holds += 1;
+        if state.maintenance_running && !state.maintenance_cancel_requested {
+            state.maintenance_cancel_generation =
+                state.maintenance_cancel_generation.saturating_add(1);
+            state.maintenance_cancel_requested = true;
+        }
+        drop(state);
+        self.notify.notify_waiters();
+        LiveHold {
+            coordinator: self.clone(),
+        }
+    }
+
     pub fn try_begin_maintenance(
         self: &Arc<Self>,
     ) -> Result<MaintenancePermit, MaintenanceDeferral> {
+        self.try_begin_maintenance_with_pressure(maintenance_pressure())
+    }
+
+    fn try_begin_maintenance_with_pressure(
+        self: &Arc<Self>,
+        pressure: Option<crate::host_pressure::HostPressureSample>,
+    ) -> Result<MaintenancePermit, MaintenanceDeferral> {
         let mut state = self.state.lock().expect("ffmpeg work state poisoned");
-        if state.capture_active {
+        if state.capture_active || state.live_holds > 0 {
             return Err(MaintenanceDeferral::CaptureActive);
         }
         if state.capture_waiting > 0 {
@@ -174,6 +200,11 @@ impl FfmpegWorkCoordinator {
             || state.recording_file_mutation_active
         {
             return Err(MaintenanceDeferral::MaintenanceRunning);
+        }
+        if pressure
+            .is_some_and(|sample| sample.load_average > f64::from(sample.logical_cores.max(1)))
+        {
+            return Err(MaintenanceDeferral::HostOverloaded);
         }
         Ok(self.begin_maintenance_locked(&mut state))
     }
@@ -197,6 +228,12 @@ impl FfmpegWorkCoordinator {
             after_wait_registered();
             match self.try_begin_maintenance() {
                 Ok(permit) => return permit,
+                Err(MaintenanceDeferral::HostOverloaded) => {
+                    tokio::select! {
+                        _ = notified => {},
+                        _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => {},
+                    }
+                }
                 Err(_) => notified.await,
             }
         }
@@ -226,6 +263,7 @@ impl FfmpegWorkCoordinator {
             let acquired = {
                 let mut state = self.state.lock().expect("ffmpeg work state poisoned");
                 if !state.capture_active
+                    && state.live_holds == 0
                     && state.capture_waiting == 0
                     && !state.finalizing_active
                     && state.export_active == 0
@@ -359,6 +397,7 @@ impl FfmpegWorkCoordinator {
         FfmpegWorkSnapshot {
             capture_waiting: state.capture_waiting,
             capture_active: state.capture_active,
+            live_show_active: state.live_holds > 0,
             light_capture_active: state.light_captures > 0,
             finalizing_active: state.finalizing_active,
             export_active: state.export_active,
@@ -540,6 +579,7 @@ impl Drop for RecordingFileMutationWaiter {
 pub struct FfmpegWorkSnapshot {
     pub capture_waiting: usize,
     pub capture_active: bool,
+    pub live_show_active: bool,
     /// A buffer-only session's capture (plan 181): never a deferral.
     pub light_capture_active: bool,
     pub finalizing_active: bool,
@@ -550,7 +590,7 @@ pub struct FfmpegWorkSnapshot {
 
 impl FfmpegWorkSnapshot {
     pub fn current_deferral(&self) -> Option<MaintenanceDeferral> {
-        if self.capture_active || self.capture_waiting > 0 {
+        if self.capture_active || self.live_show_active || self.capture_waiting > 0 {
             Some(MaintenanceDeferral::CaptureActive)
         } else if self.finalizing_active || self.export_active > 0 {
             Some(MaintenanceDeferral::FinalizingActive)
@@ -1168,5 +1208,75 @@ mod tests {
         drop(maintenance);
 
         assert!(coordinator.try_begin_maintenance().is_ok());
+    }
+}
+
+/// Ownership, not a flag: failed opens and every camera-return path drop it.
+#[derive(Debug)]
+pub struct LiveHold {
+    coordinator: Arc<FfmpegWorkCoordinator>,
+}
+impl Drop for LiveHold {
+    fn drop(&mut self) {
+        let mut state = self
+            .coordinator
+            .state
+            .lock()
+            .expect("ffmpeg work state poisoned");
+        state.live_holds = state.live_holds.saturating_sub(1);
+        drop(state);
+        self.coordinator.notify.notify_waiters();
+    }
+}
+
+fn maintenance_pressure() -> Option<crate::host_pressure::HostPressureSample> {
+    // Unit tests inject pressure; the machine running them must not decide
+    // whether their deterministic permit acquisition succeeds.
+    #[cfg(test)]
+    {
+        None
+    }
+    #[cfg(not(test))]
+    {
+        crate::host_pressure::sample_host_pressure()
+    }
+}
+
+#[cfg(test)]
+mod live_hold_tests {
+    use super::*;
+    #[test]
+    fn live_hold_cancels_and_defers_maintenance_until_released() {
+        let work = Arc::new(FfmpegWorkCoordinator::new());
+        let maintenance = work.try_begin_maintenance().unwrap();
+        let cancel = maintenance.cancel_token();
+        let hold = work.begin_live_hold();
+        assert!(cancel.is_cancelled());
+        drop(maintenance);
+        assert!(matches!(
+            work.try_begin_maintenance(),
+            Err(MaintenanceDeferral::CaptureActive)
+        ));
+        drop(hold);
+        assert!(work.try_begin_maintenance().is_ok());
+    }
+    #[test]
+    fn maintenance_waits_for_load_to_drop_below_core_count() {
+        let work = Arc::new(FfmpegWorkCoordinator::new());
+        let pressure = |load_average| {
+            Some(crate::host_pressure::HostPressureSample {
+                load_average,
+                logical_cores: 4,
+                swap_used_mb: None,
+            })
+        };
+        assert!(matches!(
+            work.try_begin_maintenance_with_pressure(pressure(5.0)),
+            Err(MaintenanceDeferral::HostOverloaded)
+        ));
+        assert!(
+            work.try_begin_maintenance_with_pressure(pressure(4.0))
+                .is_ok()
+        );
     }
 }

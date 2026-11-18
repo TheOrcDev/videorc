@@ -31,7 +31,8 @@ const room = vi.hoisted(() => {
     connect: vi.fn<() => Promise<void>>(),
     disconnect: vi.fn<() => Promise<void>>(),
     reports: [] as ((state: 'connected') => void)[],
-    snapshots: [] as ((snapshot: TalkShowRoomSnapshot) => void)[]
+    snapshots: [] as ((snapshot: TalkShowRoomSnapshot) => void)[],
+    onAir: [] as ((() => unknown) | undefined)[]
   }
 })
 vi.mock('@/lib/talk-show-room', async () => {
@@ -39,15 +40,21 @@ vi.mock('@/lib/talk-show-room', async () => {
   class TalkShowRoomClient {
     constructor({
       report,
-      onSnapshot
+      onSnapshot,
+      onAir
     }: {
       report: (state: 'connected') => void
       onSnapshot: (snapshot: TalkShowRoomSnapshot) => void
+      onAir?: () => unknown
     }) {
       room.constructed += 1
       room.reports.push(report)
       room.snapshots.push(onSnapshot)
+      room.onAir.push(onAir)
     }
+    async updateMicrophone(): Promise<void> {}
+    setGraphics(): void {}
+    failGraphics(): void {}
     async sendStage(): Promise<void> {}
     async connect(): Promise<void> {
       room.connected += 1
@@ -106,6 +113,7 @@ const openRoom = {
 function deps(onError: TalkShowRoomControllerDeps['onError']): TalkShowRoomControllerDeps {
   return {
     client: {
+      request: vi.fn(async () => ({})),
       requestTyped: vi.fn(async () => ({})),
       on: vi.fn(() => () => {})
     } as unknown as BackendClient,
@@ -281,6 +289,32 @@ describe('the host room join', () => {
     expect(room.disconnected).toBe(0)
   })
 
+  // Plan 243 C5: the client reads who is on air when its host seat drops,
+  // from the latest status, without a rejoin for the status change.
+  it('hands the room client the device on air from the latest status', async () => {
+    const value = deps(vi.fn())
+    act(() => root.render(createElement(Host, { value })))
+    await settle()
+    const onAir = room.onAir.at(-1)
+    expect(onAir?.()).toBeUndefined()
+    const iPhone = {
+      name: 'iPhone',
+      kind: 'phone',
+      source: 'host',
+      waiting: false,
+      thisDevice: false,
+      since: '2026-11-16T20:01:02.000Z'
+    } as const
+    act(() =>
+      root.render(
+        createElement(Host, { value: { ...value, cloudStatus: { ...openRoom, onAir: iPhone } } })
+      )
+    )
+    await settle()
+    expect(onAir?.()).toEqual(iPhone)
+    expect(room.connected).toBe(1)
+  })
+
   it('waits for the old disconnect before granting a reopened room', async () => {
     let leave!: () => void
     room.disconnect.mockImplementationOnce(
@@ -372,4 +406,28 @@ describe('guestActionWords', () => {
     expect(guestActionWords('allow-screen-share')).toBe('let the guest share their screen')
     expect(guestActionWords('disallow-screen-share')).toBe("stop the guest's screen share")
   })
+})
+
+it('exports only the current lazy owner and fences stale media callbacks on close', async () => {
+  const controlsRef: NonNullable<TalkShowRoomControllerDeps['controlsRef']> = { current: null }
+  const onMediaSnapshot = vi.fn()
+  const value = {
+    ...deps(vi.fn()),
+    controlsRef,
+    onMediaSnapshot,
+    microphoneMuted: true,
+    cameraOff: true
+  }
+  act(() => root.render(createElement(Host, { value })))
+  await settle()
+  expect(controlsRef.current).not.toBeNull()
+  const publish = room.snapshots.at(-1)!
+  act(() => publish({ ...IDLE_TALK_SHOW_SNAPSHOT, state: 'connected', identity: 'host:sh_talk' }))
+  expect(onMediaSnapshot).toHaveBeenLastCalledWith(expect.objectContaining({ state: 'connected' }))
+  act(() => root.render(createElement(Host, { value: { ...value, cloudStatus: null } })))
+  await settle()
+  expect(controlsRef.current).toBeNull()
+  const calls = onMediaSnapshot.mock.calls.length
+  act(() => publish({ ...IDLE_TALK_SHOW_SNAPSHOT, state: 'connected' }))
+  expect(onMediaSnapshot).toHaveBeenCalledTimes(calls)
 })

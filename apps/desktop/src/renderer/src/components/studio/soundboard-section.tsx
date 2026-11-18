@@ -1,7 +1,9 @@
+import { RoomSounds } from './room-sounds'
 import { useEffect, useEffectEvent, type ReactElement } from 'react'
 
 import { PanelSection } from '@/components/panel-section'
 import { SoundPadBoard } from '@/components/sound-pad-board'
+import { SoundsLoadState } from '@/components/sounds-load-state'
 import { StopAllSoundsButton } from '@/components/stop-all-sounds-button'
 import { Button } from '@/components/ui/button'
 import { Empty, EmptyContent, EmptyTitle } from '@/components/ui/empty'
@@ -45,6 +47,7 @@ export function SoundboardSection(): ReactElement {
       description={soundboardDescription(sessionActive, board.monitor, board.sessionWithoutSounds)}
       title="Soundboard"
     >
+      <RoomSounds />
       {board.sounds.length > 0 ? (
         <>
           <SoundPadBoard
@@ -63,9 +66,11 @@ export function SoundboardSection(): ReactElement {
         </>
       ) : !board.loaded ? (
         // Never "No sounds yet" before the board is known (J2-8).
-        <Empty className="py-6" data-videorc-sounds-loading="">
-          <EmptyTitle>{disconnectedReason ?? 'Loading sounds…'}</EmptyTitle>
-        </Empty>
+        <SoundsLoadState
+          className="py-6"
+          label={disconnectedReason ?? undefined}
+          offline={disconnectedReason !== null}
+        />
       ) : (
         <Empty className="py-6" data-videorc-sounds-empty="">
           <EmptyTitle>No sounds yet.</EmptyTitle>

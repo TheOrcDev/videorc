@@ -1,5 +1,6 @@
 import {
   type AppIcon,
+  AccountIcon,
   AssetsIcon,
   AvatarPageIcon,
   BuddyPageIcon,
@@ -37,6 +38,7 @@ export type WorkspaceTab =
   | StudioPanel
   | 'library'
   | 'avatar'
+  | 'guests'
   | 'ai'
   | 'diagnostics'
   | 'settings'
@@ -59,10 +61,13 @@ export type StudioPanelMeta = {
 // Sidekick (plan 119) keeps the id `ai`, the id deep links, smokes and the
 // `data-videorc-tab-trigger` value already use. Its row wears a plain glyph,
 // `BuddyPageIcon` (plan 235 D7). The avatar, the character on the stream,
-// has its own page in Setup since plan 239, with its own glyph.
+// has its own page in Setup since plan 239, with its own glyph. Guests, the
+// talk show's room (plan 224 D16), is its own page since 0.31.1. (No comments
+// inside these arrays: the eager build ships them.)
 export const WORKSPACE_TABS: WorkspaceTabMeta[] = [
   { id: 'studio', label: 'Studio', icon: StudioIcon },
   { id: 'avatar', label: AVATAR_TAB_LABEL, icon: AvatarPageIcon },
+  { id: 'guests', label: 'Guests', icon: AccountIcon },
   { id: 'ai', label: BUDDY_TAB_LABEL, icon: BuddyPageIcon },
   { id: 'library', label: 'Library', icon: LibraryIcon },
   { id: 'settings', label: 'Settings', icon: SettingsIcon },
@@ -94,7 +99,8 @@ export type SidebarZone = {
 // The sidebar, top to bottom (plan 174 D8, plan 235 D6): Studio leads alone as
 // the chrome slab, then the two labelled groups, Setup and Livestream, then
 // Library. The avatar is part of the picture, so it sits in Setup (plan 239,
-// owner 2026-11-15); Sidekick stays under Livestream. The 'system' rows sit
+// owner 2026-11-15); Sidekick stays under Livestream, with Guests beside
+// Destinations (0.31.1; shown only with talk shows). The 'system' rows sit
 // in a bottom block above the account row. Health has no row at all: the
 // status bar's state is its door (D9).
 export const SIDEBAR_ZONES: readonly SidebarZone[] = [
@@ -104,14 +110,15 @@ export const SIDEBAR_ZONES: readonly SidebarZone[] = [
     label: 'Setup',
     pages: ['sources', 'layouts', 'assets', 'captions', 'avatar', 'recording']
   },
-  { id: 'livestream', label: 'Livestream', pages: ['live', 'ai'] },
+  { id: 'livestream', label: 'Livestream', pages: ['live', 'guests', 'ai'] },
   { id: 'library', pages: ['library'] },
   { id: 'system', pages: ['settings'] }
 ]
 
 // Page shortcuts run down the sidebar (plan 235 D8): ⌘1–⌘9, then ⌘0 for the
 // tenth page, Library (plan 239 D6). Settings keeps the platform-standard ⌘,.
-// Health intentionally has NO digit — it stays reachable via ⌘K (and the
+// Guests has none either (0.31.1): it shows only with talk shows, and the
+// digits keep their rows. Health intentionally has NO digit — it stays reachable via ⌘K (and the
 // account menu). The main process emits the raw key ('0'–'9' or ',') and
 // AppShell maps whatever is listed here.
 export const WORKSPACE_SHORTCUTS: { digit: string; tab: WorkspaceTab }[] = [

@@ -17,6 +17,11 @@ import {
  * feeding it (a crash, a relaunch, an update). Resume is Go Live, which the
  * backend binds to that show; End livestream ends it on every platform,
  * after the same question every in-app stop asks.
+ *
+ * Plan 243 C5: the same notice says when the show waits for a device after a
+ * hand-off (with where a phone continues) or is live from another device,
+ * and its first action reads Continue here: the same resume, which takes
+ * the show back to this computer.
  */
 export function CloudResumeNotice({
   blockedReason,
@@ -33,12 +38,18 @@ export function CloudResumeNotice({
   const { endCloudShow } = useStudioCloud()
   const [confirming, setConfirming] = useState(false)
   const [ending, setEnding] = useState(false)
+  const continues = notice.action === 'continue'
   return (
     <div className="border-b border-border p-gutter">
-      <Alert data-testid="cloud-resume-notice" variant="warning">
+      <Alert data-testid="cloud-resume-notice" variant={notice.tone}>
         <AlertTitle>{notice.title}</AlertTitle>
         <AlertDescription className="min-w-0">
-          <p>{notice.detail}</p>
+          {notice.detail ? <p>{notice.detail}</p> : null}
+          {notice.pointer ? (
+            <p className="select-text" data-testid="cloud-continue-pointer">
+              {notice.pointer}
+            </p>
+          ) : null}
           <div className="flex flex-wrap gap-1 pt-2">
             <DisabledReason reason={pending ? null : blockedReason}>
               <Button
@@ -48,7 +59,13 @@ export function CloudResumeNotice({
                 type="button"
                 onClick={onResume}
               >
-                {pending ? 'Resuming…' : 'Resume'}
+                {continues
+                  ? pending
+                    ? 'Continuing…'
+                    : 'Continue here'
+                  : pending
+                    ? 'Resuming…'
+                    : 'Resume'}
               </Button>
             </DisabledReason>
             <Button

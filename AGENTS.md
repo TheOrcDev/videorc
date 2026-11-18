@@ -27,9 +27,10 @@ around it.
 
 Use the smallest gate that proves the change, then run the broader gate before handing off risky work.
 
-- TypeScript typecheck: `pnpm typecheck`
-- TypeScript lint: `pnpm lint`
+- TypeScript typecheck: `pnpm typecheck` (TypeScript 7; TypeScript 5.9 stays installed for the tests that use its compiler API)
+- TypeScript lint: `pnpm lint` (oxlint, `.oxlintrc.json`; a rule turned off carries its reason there)
 - TypeScript format check: `pnpm format:check`
+- Pre-push hook: `pnpm install` points git at `.githooks/`, whose `pre-push` runs format, lint and typecheck on what the push changes (plan 242 S20). Fix what it reports; `--no-verify` is for an emergency, never to get past a red check.
 - JS production advisory audit: `pnpm audit:js`
 - Node logic tests: `pnpm test:scripts`
 - UI registry drift (files synced from `@videorc`, `apps/desktop/ui-registry.json`; needs the network): `pnpm ui:check`

@@ -260,6 +260,16 @@ describe('Hide screen for a password manager (plan 210 S10, D11)', () => {
     sources: { screenId: 'screen:screencapturekit:1' }
   })
 
+  it('blocks a room publication without a native display and never auto-shows it', async () => {
+    const host = { ...fake.host, cloudScreenPublication: true }
+    await render(host)
+    await switchTo(ONE_PASSWORD, 'window:screencapturekit:70')
+    expect(fake.hideScreen).toHaveBeenCalledExactlyOnceWith('password-manager')
+    await render({ ...host, screenPrivacy: { hidden: true, reason: 'password-manager' } })
+    await switchTo('com.apple.Safari', 'window:screencapturekit:50')
+    expect(fake.showScreen).not.toHaveBeenCalled()
+  })
+
   it('hides a display scene while a password manager is in front, then shows it again', async () => {
     const host = onDisplay()
     await render(host)

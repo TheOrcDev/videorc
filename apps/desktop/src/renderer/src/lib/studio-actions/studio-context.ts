@@ -72,6 +72,8 @@ export interface StudioActionSource extends Omit<
     caller: import('./privacy').PrivacyCaller
   ) => Promise<import('./context').StudioActionOutcome>
   client: BackendClient
+  outputFacts?: import('../../../../shared/output-session').OutputSessionFacts
+  stopOutput?: (output: 'recording' | 'live') => Promise<boolean>
   recordingRef: Ref<RecordingStatus>
   replayStateRef: Ref<ReplayStateEvent>
   recordBlockedReason: string | null
@@ -193,7 +195,12 @@ export function studioActionContext(studio: StudioActionSource): StudioActionCon
   return {
     client,
     runScreenPrivacy: studio.runScreenPrivacy,
-    sessionActive: sessionOwnsTransport(studio.recordingRef.current),
+    outputFacts: studio.outputFacts,
+    stopOutput: studio.stopOutput,
+    sessionActive:
+      studio.outputFacts?.owner === 'cloud-room'
+        ? studio.outputFacts.recording || studio.outputFacts.live
+        : sessionOwnsTransport(studio.recordingRef.current),
     replayOn: studio.replayStateRef.current.state === 'on',
     recordBlockedReason: studio.recordBlockedReason,
     liveStreamBlockedReason: studio.liveStreamBlockedReason,
@@ -264,7 +271,10 @@ export function studioActionContext(studio: StudioActionSource): StudioActionCon
     banners: studio.bannerListRef.current ?? NO_BANNERS,
     // Plan 209 S6: what agent tools read beside a deck key's fields.
     noteRecordClick: (kind) => studio.noteRecordClick(kind),
-    sessionLive: sessionIsLive(studio.recordingRef.current),
+    sessionLive:
+      studio.outputFacts?.owner === 'cloud-room'
+        ? studio.outputFacts.live
+        : sessionIsLive(studio.recordingRef.current),
     savedScenes: studio.savedScenes,
     applySavedSceneResult: studio.applySavedSceneResult,
     applySavedScene: (id) => studio.applySavedScene(id),
@@ -365,12 +375,30 @@ export function studioActionContext(studio: StudioActionSource): StudioActionCon
         )
       }
     },
-    markClip: async (seconds) => {
+    markClip: async (seconds, requestId) => {
       try {
-        const event = await client.request<ClipMarkedEvent>('clip.mark', seconds && { seconds })
+        const event = await client.request<ClipMarkedEvent>(
+          'clip.mark',
+          studio.outputFacts?.owner === 'cloud-room'
+            ? {
+                seconds: seconds ?? 30,
+                source: 'remote',
+                requestId: requestId ?? crypto.randomUUID()
+              }
+            : seconds && { seconds }
+        )
         // Plan 181 R4: a saved clip is a success for a deck key, mark or not.
         return clipMarkKeptSomething(event)
-          ? { ok: true }
+          ? {
+              ok: true,
+              ...(event.reason === 'cloud-marker-no-media'
+                ? { message: 'Marker saved on the show timeline; no media to extract.' }
+                : event.reason?.startsWith('cloud-clip-')
+                  ? {
+                      message: clipMarkedToast(event).title
+                    }
+                  : {})
+            }
           : { ok: false, message: clipMarkedToast(event).title }
       } catch (error) {
         return {

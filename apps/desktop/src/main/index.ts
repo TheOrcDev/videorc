@@ -1,3 +1,10 @@
+import { RoomFrameBridge } from './room-frame-bridge'
+import { RoomProgramCameraUplink, fetchRoomProgramInspect } from './room-program-camera'
+import {
+  ROOM_PROGRAM_CAMERA_ENV,
+  ROOM_PROGRAM_CAMERA_PRODUCTION_ENABLED
+} from '../shared/room-program-camera'
+import { RoomPcmBridge } from './room-pcm-bridge'
 import { createAppIconHandler } from './app-icons'
 import { createFrontAppMonitor, frontAppSenderIsMain, type FrontAppBinding } from './front-app'
 import {
@@ -270,6 +277,7 @@ import {
   previewSurfaceStatusBackground
 } from './preview-surface-live-background'
 import { livePosterManifest } from '../shared/live-background-catalog'
+import { rehydrateManagedBackgrounds } from './managed-background-registry'
 import { BANNER_ASSET_HOST, BANNERS_FOLDER } from '../shared/banner-assets'
 import { SOUND_ASSET_HOST, SOUNDS_FOLDER, isSoundFileName } from '../shared/sound-assets'
 import type {
@@ -470,7 +478,11 @@ import {
   proofSurfaceHostNote,
   type ProofSurfaceHost
 } from './in-window-proof-surface'
-import { executeProofSurfaceScript, settleWithProofSurface } from './proof-surface-call'
+import {
+  executeProofSurfaceScript,
+  runDetachedProofSurfaceWork,
+  settleWithProofSurface
+} from './proof-surface-call'
 import {
   PROOF_SURFACE_CONTENT_RUNTIME_SCRIPT,
   proofSurfaceContentFromConsoleLine,
@@ -520,6 +532,11 @@ import {
 import { installContextMenu } from './context-menu'
 import { installAppMenu } from './app-menu'
 import { LiveExitGuard, type AppExitKind } from './exit-guard'
+import {
+  cloudRoomActivityFromCloudStatus,
+  guardCaptureState,
+  type CloudRoomActivity
+} from './live-activity'
 import { DisplaySleepGuard } from './display-sleep-guard'
 import {
   appMenuReleaseNotesUrl,
@@ -644,6 +661,11 @@ import {
   sanitizedChildProcessEnvironment,
   scrubReleaseAuthorityEnvironment
 } from './release-authority-env'
+import {
+  createNotesPersistence,
+  isNotesFontScale,
+  type NotesWindowPrefs
+} from './notes-persistence'
 import { rendererSecurityRegistry, secureIpcHandle, sendElectronEvent } from './secure-ipc'
 import { setTalkShowDisplaySourceResolver } from './web-contents-security'
 
@@ -745,6 +767,18 @@ import {
   managedBackgroundFileName,
   type BackgroundImportResult
 } from '../shared/background-import'
+import {
+  SCREEN_IMAGE_BATCH_MAX,
+  screenImageCapabilityTtlMs,
+  SCREEN_IMAGE_EXTENSIONS,
+  SCREEN_IMAGE_REFUSALS
+} from '../shared/screen-image-files'
+import {
+  assertDroppedScreenImagePaths,
+  issueAllOrNone,
+  missingAsNotAFile,
+  ScreenImageCapabilityLedger
+} from './screen-image-drop'
 import type {
   AccountCallbackEnvelope,
   BackendConnection,
@@ -784,7 +818,6 @@ import type {
   ModerationOperation,
   NativePreviewHostCommand,
   NotesDocument,
-  NotesFontScale,
   NotesWindowState,
   OAuthCallbackEnvelope,
   ObsSetup,
@@ -1145,6 +1178,13 @@ const displaySleepGuard = new DisplaySleepGuard(
 )
 let deferredPermissionRestartState: DeferredPermissionRestartState =
   idleDeferredPermissionRestartState
+// Plan 249 S26: this computer's cloud room on air or recording is live
+// activity for the display-sleep, update, relaunch and backend-restart
+// guards too (live-activity.ts). A room has no local session to say so.
+let cloudRoomActivity: CloudRoomActivity = null
+function guardedCaptureState(): MainCaptureState {
+  return guardCaptureState(mainCaptureState, cloudRoomActivity)
+}
 let smokePreviewMotionServer: HttpServer | null = null
 let smokePreviewCompositorFrameId = 0
 let nativePreviewSurfaceScene: PreviewSurfaceSceneState | null = null
@@ -3445,52 +3485,35 @@ function restorePreviewWindowOnLaunch(): void {
 }
 
 // --- Detached Notes window ----------------------------------------------------
-type NotesWindowPrefs = {
-  frame?: Electron.Rectangle
-  alwaysOnTop?: boolean
-  alwaysOnTopPreferenceVersion?: number
-  open?: boolean
-  text?: string
-  fontScale?: NotesFontScale
-}
-
 function notesWindowPrefsPath(): string {
   return join(app.getPath('userData'), 'notes-window.json')
 }
 
+// QA F9: reads and writes throw instead of looking like an empty file or a
+// save, so the Notes window can say so and never saves over notes it could
+// not read (notes-persistence.ts).
+const notesPersistence = createNotesPersistence({
+  path: notesWindowPrefsPath,
+  writesEnabled: () => notesWindowFeatureEnabled && !process.env.VIDEORC_SMOKE_OUTPUT_DIR,
+  warn: (message, error) => safeConsole.warn(message, ...(error === undefined ? [] : [error]))
+})
+
+/** Window frame and open state; an unreadable file reads as no prefs. */
 function loadNotesWindowPrefs(): NotesWindowPrefs {
-  try {
-    return JSON.parse(readFileSync(notesWindowPrefsPath(), 'utf8')) as NotesWindowPrefs
-  } catch {
-    return {}
-  }
+  return notesPersistence.readPrefsForWindow()
 }
 
+/** Window prefs (frame, open, keep on top): a failed write must not break capture. */
 function saveNotesWindowPrefs(patch: NotesWindowPrefs): void {
-  if (!notesWindowFeatureEnabled || process.env.VIDEORC_SMOKE_OUTPUT_DIR) {
-    return
-  }
   try {
-    writeFileSync(notesWindowPrefsPath(), JSON.stringify({ ...loadNotesWindowPrefs(), ...patch }))
-  } catch {
-    // Local notes are a convenience; a failed preference write must not break capture.
-  }
-}
-
-function defaultNotesDocument(prefs = loadNotesWindowPrefs()): NotesDocument {
-  return {
-    text: typeof prefs.text === 'string' ? prefs.text : '',
-    fontScale: isNotesFontScale(prefs.fontScale) ? prefs.fontScale : 'md',
-    updatedAt: new Date().toISOString()
+    notesPersistence.writePrefs(patch)
+  } catch (error) {
+    safeConsole.warn('Notes window prefs were not saved:', error)
   }
 }
 
 function notesWindowAlwaysOnTopPreference(prefs: NotesWindowPrefs): boolean {
   return prefs.alwaysOnTopPreferenceVersion === 2 && prefs.alwaysOnTop === true
-}
-
-function isNotesFontScale(value: unknown): value is NotesFontScale {
-  return value === 'sm' || value === 'md' || value === 'lg'
 }
 
 function notesWindowIsOpen(): boolean {
@@ -3582,13 +3605,9 @@ function emitNotesDocument(document: NotesDocument): void {
 }
 
 function saveNotesDocument(patch: Partial<NotesDocument>): NotesDocument {
-  const current = defaultNotesDocument()
-  const next: NotesDocument = {
-    text: typeof patch.text === 'string' ? patch.text : current.text,
-    fontScale: isNotesFontScale(patch.fontScale) ? patch.fontScale : current.fontScale,
-    updatedAt: new Date().toISOString()
-  }
-  saveNotesWindowPrefs({ text: next.text, fontScale: next.fontScale })
+  // Throws on a failed read or write, so the caller hears it; only a document
+  // that is on disk is announced.
+  const next = notesPersistence.saveDocument(patch)
   emitNotesDocument(next)
   return next
 }
@@ -3767,7 +3786,12 @@ async function openNotesWindow(): Promise<NotesWindowState> {
   window.show()
   window.focus()
   emitNotesWindowState()
-  emitNotesDocument(defaultNotesDocument())
+  try {
+    emitNotesDocument(notesPersistence.loadDocument())
+  } catch (error) {
+    // The window asks for its document itself and says when it can't load.
+    safeConsole.warn('Notes document could not be read:', error)
+  }
   return notesWindowState()
 }
 
@@ -5725,8 +5749,10 @@ async function openPreviewWindow(): Promise<PreviewWindowState> {
       if (nativePreviewSurfaceWindow && !nativePreviewSurfaceWindow.isDestroyed()) {
         nativePreviewSurfaceWindow.destroy()
       }
-      void setNativePreviewSurfaceFramePollingSuppressed(
-        nativePreviewLifecycleFramePollingSuppressed(false)
+      runDetachedNativePreviewProofWork('close-suppress-polling', () =>
+        setNativePreviewSurfaceFramePollingSuppressed(
+          nativePreviewLifecycleFramePollingSuppressed(false)
+        )
       )
       void runNativePreviewSurfaceMutation(
         () => applyNativePreviewHostCommands([{ kind: 'destroy' }]),
@@ -5755,8 +5781,10 @@ async function openPreviewWindow(): Promise<PreviewWindowState> {
     setDockedPreviewChromeClass(window, true)
     engageDockedPreviewPlacement(window)
   }
-  void setNativePreviewSurfaceFramePollingSuppressed(
-    nativePreviewLifecycleFramePollingSuppressed(true)
+  runDetachedNativePreviewProofWork('open-resume-polling', () =>
+    setNativePreviewSurfaceFramePollingSuppressed(
+      nativePreviewLifecycleFramePollingSuppressed(true)
+    )
   )
   pushPreviewWindowPlacement()
   emitPreviewWindowState()
@@ -9600,8 +9628,23 @@ function scheduleNativePreviewProofPollingProfileResync(): void {
   }
   nativePreviewProofPollingResyncTimer = setTimeout(() => {
     nativePreviewProofPollingResyncTimer = null
-    void syncNativePreviewProofPollingProfile()
+    runDetachedNativePreviewProofWork(
+      'polling-profile-resync',
+      syncNativePreviewProofPollingProfile
+    )
   }, 150)
+}
+
+// QA F1: preview close, reopen and surface replacement destroy the proof
+// surface while un-awaited work still waits on a script there. That
+// ProofSurfaceGoneError is the expected end of the work; anything else is a
+// real failure and is logged.
+function runDetachedNativePreviewProofWork(label: string, work: () => Promise<unknown>): void {
+  runDetachedProofSurfaceWork(work, {
+    onError: (error) => {
+      safeConsole.warn(`Native preview proof-surface ${label} failed:`, error)
+    }
+  })
 }
 
 async function syncNativePreviewProofPollingProfile(): Promise<void> {
@@ -11534,7 +11577,8 @@ function disconnectBackendEventSocket(): void {
   clearBackendWindowsD3d11PresenterAuthority('Backend preview event connection stopped.')
   mainCaptureState = captureStateAfterTransportLoss()
   liveExitGuard.transportLost()
-  displaySleepGuard.update(mainCaptureState)
+  cloudRoomActivity = null
+  displaySleepGuard.update(guardedCaptureState())
   clearNativePreviewMainPumpWork()
   void setNativePreviewMainPumpActive(false)
   if (socket) {
@@ -11571,7 +11615,8 @@ function retireBackendEventSocket(
   clearBackendWindowsD3d11PresenterAuthority(`Backend preview event connection retired: ${reason}`)
   mainCaptureState = captureStateAfterTransportLoss()
   liveExitGuard.transportLost()
-  displaySleepGuard.update(mainCaptureState)
+  cloudRoomActivity = null
+  displaySleepGuard.update(guardedCaptureState())
   nativePreviewMainPumpDisconnectCount += 1
   nativePreviewMainPumpLastDisconnectReason = reason
   clearNativePreviewMainPumpWork()
@@ -11601,6 +11646,7 @@ function connectBackendEventSocket(connection: BackendConnection): void {
   const htmlOverlayTargetsRequestId = `main-html-overlay-targets-${Date.now()}`
   const overlayLayoutRequestId = `main-overlay-layout-${Date.now()}`
   const sceneRequestId = `main-scene-${Date.now()}`
+  const cloudStatusRequestId = `main-cloud-status-${Date.now()}`
   let previewSurfaceStatusRequestGeneration: number | null = null
   backendEventSocket = socket
   socket.onopen = () => {
@@ -11624,6 +11670,9 @@ function connectBackendEventSocket(connection: BackendConnection): void {
       }
       // Plan 232 (S11: every platform): the HTML overlays main renders.
       includedEvents.push('htmlOverlays.targets')
+      // Plan 243 R2 B-M1: a live talk show has no local session; the quit
+      // question reads its room from the cloud status.
+      includedEvents.push('cloud.state')
       if (mainPresentPumpEnabled) {
         includedEvents.push('preview.frameReady', 'compositor.status')
       }
@@ -11652,6 +11701,7 @@ function connectBackendEventSocket(connection: BackendConnection): void {
             socket.send(
               JSON.stringify({ id: recordingStatusRequestId, method: 'recording.status' })
             )
+            socket.send(JSON.stringify({ id: cloudStatusRequestId, method: 'cloud.status' }))
             socket.send(JSON.stringify({ id: bannersListRequestId, method: 'banners.list' }))
             socket.send(
               JSON.stringify({
@@ -11740,6 +11790,11 @@ function connectBackendEventSocket(connection: BackendConnection): void {
             )
           }
         }
+        // Plan 243 R2 B-M1: an older backend has no cloud; the guard stays off.
+        if (parsed.id === cloudStatusRequestId && parsed.ok === true) {
+          liveExitGuard.observeCloudStatus(parsed.payload)
+          observeCloudRoomActivity(parsed.payload)
+        }
         if (parsed.id === sceneRequestId) {
           // Never fatal: the background is a drawing, not capture state.
           if (parsed.ok === true) {
@@ -11757,6 +11812,11 @@ function connectBackendEventSocket(connection: BackendConnection): void {
 
       if (parsed.event === 'recording.status') {
         updateMainCaptureState(parseMainRecordingStatusEvent(parsed.payload))
+        return
+      }
+      if (parsed.event === 'cloud.state') {
+        liveExitGuard.observeCloudStatus(parsed.payload)
+        observeCloudRoomActivity(parsed.payload)
         return
       }
       if (parsed.event === 'banners.changed') {
@@ -11854,6 +11914,10 @@ function connectBackendEventSocket(connection: BackendConnection): void {
 }
 
 const MAIN_BACKEND_ADMIN_METHODS = new Set([
+  'room.pcm.test.inspect',
+  'room.frame.test.inspect',
+  'room.camera.processed.inspect',
+  'room.microphone.inspect',
   'resource.capability.register_thumbnail',
   // Plan 232: how an HTML overlay's page stands; only main hosts them.
   'htmlOverlays.host.report',
@@ -11976,7 +12040,7 @@ async function requestBackendAdmin<T>(
 }
 
 const accountRefreshBroker = new AccountRefreshBroker(
-  () => captureStateBlocksInterruption(mainCaptureState, backendConnection !== null),
+  () => captureStateBlocksInterruption(guardedCaptureState(), backendConnection !== null),
   () => requestBackendAdmin<VideorcAccountSnapshot>('account.refresh', {}, 10_000)
 )
 
@@ -12358,7 +12422,7 @@ async function recheckPermissionGrants(): Promise<PermissionRecheckResult> {
 // and Electron starts the new instance once this one exits.
 async function relaunchForPermission(): Promise<RelaunchForPermissionResult> {
   return relaunchForPermissionWithInterruptionLease(
-    () => captureStateBlocksInterruption(mainCaptureState, backendConnection !== null),
+    () => captureStateBlocksInterruption(guardedCaptureState(), backendConnection !== null),
     () => backendAdminConnection !== null,
     () => acquireCurrentBackendInterruption('Reopening Videorc after a permission grant.'),
     () => {
@@ -16295,8 +16359,22 @@ function updateMainCaptureState(payload: RecordingStatus): void {
   const nextState = captureStateAfterStatusPayload(payload)
   mainCaptureState = nextState
   liveExitGuard.observeRecordingStatus(payload)
-  displaySleepGuard.update(nextState)
-  const decision = flushPermissionRestart(deferredPermissionRestartState, nextState)
+  applyGuardedCaptureState()
+}
+
+/** Plan 249 S26: a `cloud.state` payload (or the `cloud.status` answer). */
+function observeCloudRoomActivity(payload: unknown): void {
+  const next = cloudRoomActivityFromCloudStatus(payload)
+  if (next === cloudRoomActivity) return
+  cloudRoomActivity = next
+  applyGuardedCaptureState()
+}
+
+/** The display-sleep guard and a deferred permission restart follow the guarded state. */
+function applyGuardedCaptureState(): void {
+  const guarded = guardedCaptureState()
+  displaySleepGuard.update(guarded)
+  const decision = flushPermissionRestart(deferredPermissionRestartState, guarded)
   deferredPermissionRestartState = decision.state
   if (decision.runReason) {
     void runPermissionBackendRestart(decision.runReason).catch((error) => {
@@ -16308,7 +16386,7 @@ function updateMainCaptureState(payload: RecordingStatus): void {
 async function requestPermissionBackendRestart(reason: string): Promise<MediaAccessRestartResult> {
   const decision = requestPermissionRestart(
     deferredPermissionRestartState,
-    mainCaptureState,
+    guardedCaptureState(),
     reason
   )
   deferredPermissionRestartState = decision.state
@@ -16565,32 +16643,76 @@ async function trashSessionDeletion(operationId: unknown): Promise<{
 // A single-use picker result, only installed by the authenticated dev smoke server.
 let smokeScreenImageSelection: ResourceSelection | null | undefined
 
-async function pickScreenImage(): Promise<ResourceSelection | null> {
+async function pickScreenImages(): Promise<ResourceSelection[]> {
   if (!app.isPackaged && smokeCommandServerEnabled && smokeScreenImageSelection !== undefined) {
     const selection = smokeScreenImageSelection
     smokeScreenImageSelection = undefined
-    return selection
+    return selection ? [selection] : []
   }
   const options: Electron.OpenDialogOptions = {
-    title: 'Choose Screen image',
-    properties: ['openFile'],
-    filters: [
-      {
-        name: 'Images',
-        extensions: ['png', 'jpg', 'jpeg', 'webp']
-      }
-    ]
+    title: 'Choose takeover images',
+    properties: ['openFile', 'multiSelections'],
+    filters: [{ name: 'Images', extensions: [...SCREEN_IMAGE_EXTENSIONS] }]
   }
   const result = mainWindow
     ? await dialog.showOpenDialog(mainWindow, options)
     : await dialog.showOpenDialog(options)
 
   if (result.canceled) {
-    return null
+    return []
   }
+  if (result.filePaths.length > SCREEN_IMAGE_BATCH_MAX) {
+    throw new Error(SCREEN_IMAGE_REFUSALS.tooMany)
+  }
+  return authorizeScreenImagePaths(result.filePaths)
+}
 
-  const path = result.filePaths[0]
-  return path ? issueResourceCapability(path, 'input-file') : null
+async function authorizeDroppedScreenImages(paths: string[]): Promise<ResourceSelection[]> {
+  await assertDroppedScreenImagePaths(
+    paths,
+    async (path) => (await fsPromises.stat(path).catch(missingAsNotAFile))?.isFile() ?? false
+  )
+  return authorizeScreenImagePaths(paths)
+}
+
+const screenImageCapabilities = new ScreenImageCapabilityLedger()
+
+async function authorizeScreenImagePaths(paths: string[]): Promise<ResourceSelection[]> {
+  const ttlMs = screenImageCapabilityTtlMs(paths.length)
+  const selections = await issueAllOrNone(
+    paths,
+    (path) => issueResourceCapability(path, 'input-file', { ttlMs }),
+    revokeResourceCapability
+  )
+  for (const { capabilityId } of selections) screenImageCapabilities.remember(capabilityId)
+  return selections
+}
+
+// A takeover batch that stopped early hands back the capabilities it never
+// used, so they end now rather than at their TTL. Best effort: an id main
+// did not issue for a takeover is ignored, and a failed revoke still ends at
+// the TTL.
+async function releaseScreenImages(capabilityIds: string[]): Promise<void> {
+  const revoked = await Promise.allSettled(
+    screenImageCapabilities
+      .take(capabilityIds)
+      .map((capabilityId) => revokeResourceCapability({ capabilityId }))
+  )
+  for (const result of revoked) {
+    if (result.status === 'rejected') {
+      logBackend(
+        'warn',
+        `A takeover capability could not be revoked: ${errorMessageText(result.reason)}`
+      )
+    }
+  }
+}
+
+async function revokeResourceCapability({
+  capabilityId
+}: Pick<ResourceSelection, 'capabilityId'>): Promise<void> {
+  mainResourceCapabilities.revoke(capabilityId)
+  await requestBackendAdmin('resource.capability.revoke', { capabilityId })
 }
 
 // Assets → Banners → Import image… (plan 186): the same single-use input-file
@@ -17377,11 +17499,13 @@ function registerManagedAssetProtocol(): void {
       if (!resolved) {
         return new Response('Not found', { status: 404 })
       }
-      if (url.host === 'buddy' || url.host === SOUND_ASSET_HOST) {
+      if (url.host === 'buddy' || url.host === SOUND_ASSET_HOST || url.host === 'background') {
         // Buddy pictures (persona looks, drafts, the library cache) are read
         // back on a canvas by the living preview, and the soundboard's
         // monitor fetches and decodes its sounds (plan 189), so both allow
-        // CORS reads. Only files inside their managed roots reach this branch.
+        // CORS reads. Talk-show green screen uploads managed backgrounds to
+        // WebGL, which also requires CORS. Only files inside their managed
+        // roots reach this branch; session-media grants are handled above.
         return withCorsReadHeader(net.fetch(pathToFileURL(resolved).toString()))
       }
       return net.fetch(pathToFileURL(resolved).toString())
@@ -17710,22 +17834,16 @@ async function ensureManagedBackgroundRegistered(assetId: string): Promise<boole
 }
 
 async function rehydrateManagedBackgroundAssets(): Promise<void> {
-  const ids = new Set(
-    [...bundledBackgroundAssetsInternal(), ...livePosterAssetsInternal()].map((asset) => asset.id)
-  )
-  const root = join(app.getPath('userData'), 'background-assets')
-  try {
-    for (const entry of readdirSync(root)) {
-      const dot = entry.lastIndexOf('.')
-      const id = dot > 0 ? entry.slice(0, dot) : ''
-      if (/^[A-Za-z0-9_-]{1,128}$/.test(id) && isSupportedBackgroundFile(entry)) {
-        ids.add(id)
-      }
-    }
-  } catch {
-    // A fresh profile has no imported background directory yet.
-  }
-  await Promise.all([...ids].map((id) => ensureManagedBackgroundRegistered(id)))
+  await rehydrateManagedBackgrounds({
+    bundled: bundledBackgroundAssetsInternal(),
+    posters: livePosterAssetsInternal(),
+    importedRoot: join(app.getPath('userData'), 'background-assets'),
+    readDirectory: (root) => readdirSync(root),
+    resolveRegularFile: resolveRegularFileInsideRoot,
+    isSupportedFile: isSupportedBackgroundFile,
+    register: ({ assetId, path }) =>
+      requestBackendAdmin('resource.capability.register_background', { assetId, path })
+  })
 }
 
 async function openOAuthUrl(authUrl: string): Promise<void> {
@@ -17847,7 +17965,9 @@ function showMainWindowPage(key: AppMenuPageKey): void {
 // Plan 174 S3.1 (D2): the app leaving while on air. Main holds the quit or
 // the close and asks the renderer to put up the End livestream question; the
 // renderer ends the livestream on a yes and answers through app:exit. Only a
-// renderer that can show the question is asked (exit-guard.ts).
+// renderer that can show the question is asked (exit-guard.ts). Plan 243 C5:
+// on a managed cloud show, "Quit and keep it live" answers through the same
+// app:exit once the show is handed off, with this computer's session stopped.
 function mainRendererCanAnswer(): boolean {
   return Boolean(
     mainWindow &&
@@ -18002,7 +18122,7 @@ app.whenReady().then(async () => {
   })
   registerUpdaterIpc(
     () => mainWindow,
-    () => captureStateBlocksInterruption(mainCaptureState, backendConnection !== null),
+    () => captureStateBlocksInterruption(guardedCaptureState(), backendConnection !== null),
     acquireCurrentBackendInterruption
   )
   registerDisplayChangeReconcile()
@@ -18011,6 +18131,457 @@ app.whenReady().then(async () => {
     return backendConnection
   })
   secureIpcHandle('backend:get-logs', () => backendLogs)
+  // One main-frame owner. Navigation/crash/destruction closes the native socket,
+  // which drops the connection-local generator without a detached worker.
+  let pcmOwner: {
+    senderId: number
+    generation: number
+    bridge: RoomPcmBridge
+    detach: () => void
+  } | null = null
+  let nativeMicOwner: {
+    senderId: number
+    generation: number
+    bridge: RoomPcmBridge
+    detach: () => void
+  } | null = null
+  let nativeSystemOwner: {
+    senderId: number
+    generation: number
+    bridge: RoomPcmBridge
+    detach: () => void
+  } | null = null
+  let nativeSystemLastGeneration = 0
+  let nativeMicLastGeneration = 0
+  let pcmLastGeneration = 0
+  secureIpcHandle('room-pcm:inspect', async () => {
+    if (app.isPackaged || process.env.VIDEORC_ROOM_PCM_TEST !== '1')
+      throw new Error('PCM test bridge is disabled.')
+    const native = await requestBackendAdmin<{ nativeSources: number }>(
+      'room.pcm.test.inspect',
+      {},
+      2000
+    )
+    return { ...native, ...RoomPcmBridge.resources() }
+  })
+  secureIpcHandle('room-pcm:test', async (event, command) => {
+    if (app.isPackaged || process.env.VIDEORC_ROOM_PCM_TEST !== '1')
+      throw new Error('PCM test bridge is disabled.')
+    if (command.action === 'open') {
+      if (pcmOwner || nativeMicOwner || command.generation <= pcmLastGeneration)
+        throw new Error('PCM owner already active or stale.')
+      pcmLastGeneration = command.generation
+      const contents = event.sender
+      const bridge = new RoomPcmBridge(
+        () => waitForBackendAdminConnection(2000),
+        () => !app.isPackaged && process.env.VIDEORC_ROOM_PCM_TEST === '1'
+      )
+      const cleanup = (): void => {
+        bridge.close()
+        detach()
+        if (pcmOwner?.bridge === bridge) pcmOwner = null
+      }
+      const detach = (): void => {
+        contents.removeListener('destroyed', cleanup)
+        contents.removeListener('render-process-gone', cleanup)
+        contents.removeListener('did-start-navigation', cleanup)
+      }
+      contents.once('destroyed', cleanup)
+      contents.once('render-process-gone', cleanup)
+      contents.once('did-start-navigation', cleanup)
+      pcmOwner = { senderId: contents.id, generation: command.generation, bridge, detach }
+    }
+    const owner = pcmOwner
+    if (!owner || owner.senderId !== event.sender.id || owner.generation !== command.generation)
+      throw new Error('PCM owner or generation mismatch.')
+    try {
+      return await owner.bridge.request(command)
+    } catch (error) {
+      owner.bridge.close()
+      owner.detach()
+      if (pcmOwner === owner) pcmOwner = null
+      throw error
+    } finally {
+      if (command.action === 'close') {
+        owner.detach()
+        if (pcmOwner === owner) pcmOwner = null
+      }
+    }
+  })
+
+  secureIpcHandle('room-microphone:inspect', async () => {
+    if (app.isPackaged || process.env.VIDEORC_ROOM_NATIVE_MIC !== '1')
+      throw new Error('Native room microphone is disabled.')
+    const native = await requestBackendAdmin<{ nativeSources: number }>(
+      'room.microphone.inspect',
+      {},
+      2000
+    )
+    return { ...native, ...RoomPcmBridge.resources('room.microphone.pcm') }
+  })
+  secureIpcHandle('room-microphone:pcm', async (event, command) => {
+    if (app.isPackaged || process.env.VIDEORC_ROOM_NATIVE_MIC !== '1')
+      throw new Error('Native room microphone is disabled and unqualified.')
+    if (command.action === 'open') {
+      if (pcmOwner || nativeMicOwner || command.generation <= nativeMicLastGeneration)
+        throw new Error('Microphone owner already active or stale.')
+      nativeMicLastGeneration = command.generation
+      const contents = event.sender
+      const bridge = new RoomPcmBridge(
+        () => waitForBackendAdminConnection(2000),
+        () => !app.isPackaged && process.env.VIDEORC_ROOM_NATIVE_MIC === '1',
+        undefined,
+        'room.microphone.pcm'
+      )
+      const cleanup = (): void => {
+        bridge.close()
+        detach()
+        if (nativeMicOwner?.bridge === bridge) nativeMicOwner = null
+      }
+      const detach = (): void => {
+        contents.removeListener('destroyed', cleanup)
+        contents.removeListener('render-process-gone', cleanup)
+        contents.removeListener('did-start-navigation', cleanup)
+      }
+      contents.once('destroyed', cleanup)
+      contents.once('render-process-gone', cleanup)
+      contents.once('did-start-navigation', cleanup)
+      nativeMicOwner = { senderId: contents.id, generation: command.generation, bridge, detach }
+    }
+    if (
+      !nativeMicOwner &&
+      command.action === 'close' &&
+      command.generation === nativeMicLastGeneration
+    ) {
+      const observed = await requestBackendAdmin<{ nativeSources: number }>(
+        'room.microphone.inspect',
+        { waitForClose: true },
+        6500
+      )
+      if (
+        observed.nativeSources === 0 &&
+        RoomPcmBridge.resources('room.microphone.pcm').sockets === 0
+      )
+        return null
+      throw new Error('Microphone close remains unacknowledged.')
+    }
+    const owner = nativeMicOwner
+    if (!owner || owner.senderId !== event.sender.id || owner.generation !== command.generation)
+      throw new Error('Microphone owner or generation mismatch.')
+    try {
+      return await owner.bridge.request(command)
+    } catch (error) {
+      owner.bridge.close()
+      owner.detach()
+      if (nativeMicOwner === owner) nativeMicOwner = null
+      throw error
+    } finally {
+      if (command.action === 'close') {
+        owner.detach()
+        if (nativeMicOwner === owner) nativeMicOwner = null
+      }
+    }
+  })
+
+  // Plan 249 S13a: one main-frame owner of the native camera-role frame fixture.
+  // Unpackaged main + VIDEORC_ROOM_FRAME_TEST=1 + a debug backend with smoke RPC.
+  // Navigation/crash/destruction closes the native socket, which drops the
+  // connection-owned source and every lease it holds.
+  const frameTestEnabled = (): boolean =>
+    !app.isPackaged && process.env.VIDEORC_ROOM_FRAME_TEST === '1'
+  let frameOwner: {
+    senderId: number
+    generation: number
+    bridge: RoomFrameBridge
+    detach: () => void
+  } | null = null
+  let frameLastGeneration = 0
+  secureIpcHandle('room-frame:inspect', async () => {
+    if (!frameTestEnabled()) throw new Error('Frame test bridge is disabled.')
+    const native = await requestBackendAdmin<{ nativeSources: number; nativeLeases: number }>(
+      'room.frame.test.inspect',
+      {},
+      2000
+    )
+    return { ...native, ...RoomFrameBridge.resources() }
+  })
+  secureIpcHandle('room-frame:test', async (event, command) => {
+    if (!frameTestEnabled()) throw new Error('Frame test bridge is disabled.')
+    if (command.action === 'open') {
+      if (frameOwner || cameraOwner || command.generation <= frameLastGeneration)
+        throw new Error('Frame owner already active or stale.')
+      frameLastGeneration = command.generation
+      const contents = event.sender
+      const bridge = new RoomFrameBridge(
+        () => waitForBackendAdminConnection(2000),
+        frameTestEnabled
+      )
+      const cleanup = (): void => {
+        bridge.close()
+        detach()
+        if (frameOwner?.bridge === bridge) frameOwner = null
+      }
+      const detach = (): void => {
+        contents.removeListener('destroyed', cleanup)
+        contents.removeListener('render-process-gone', cleanup)
+        contents.removeListener('did-start-navigation', cleanup)
+      }
+      contents.once('destroyed', cleanup)
+      contents.once('render-process-gone', cleanup)
+      contents.once('did-start-navigation', cleanup)
+      frameOwner = { senderId: contents.id, generation: command.generation, bridge, detach }
+    }
+    const owner = frameOwner
+    if (!owner || owner.senderId !== event.sender.id || owner.generation !== command.generation)
+      throw new Error('Frame owner or generation mismatch.')
+    try {
+      return await owner.bridge.request(command)
+    } catch (error) {
+      owner.bridge.close()
+      owner.detach()
+      if (frameOwner === owner) frameOwner = null
+      throw error
+    } finally {
+      if (command.action === 'close') {
+        owner.detach()
+        if (frameOwner === owner) frameOwner = null
+      }
+    }
+  })
+
+  // Plan 249 S13b: one main-frame owner of the processed camera (the native
+  // camera's processed frames). Unpackaged main + VIDEORC_ROOM_PROCESSED_CAMERA=1
+  // + a debug backend with smoke RPC; the backend reads the same variable and
+  // then keeps the camera instead of lending it, so there is one owner.
+  // Navigation/crash/destruction closes the native socket, which drops the
+  // connection-owned source and every lease it holds.
+  const processedCameraEnabled = (): boolean =>
+    !app.isPackaged && process.env.VIDEORC_ROOM_PROCESSED_CAMERA === '1'
+  let cameraOwner: {
+    senderId: number
+    generation: number
+    bridge: RoomFrameBridge
+    detach: () => void
+  } | null = null
+  let cameraLastGeneration = 0
+  secureIpcHandle('room-camera:inspect', async () => {
+    if (!processedCameraEnabled()) throw new Error('Processed camera is disabled.')
+    const native = await requestBackendAdmin<{
+      nativeSources: number
+      nativeLeases: number
+      logicalWidth: number | null
+      logicalHeight: number | null
+      layoutSource: 'scene' | 'default'
+      keyOn: boolean
+      nativeMirror: boolean
+      look: { brightness: number; contrast: number; saturation: number }
+      keptForRoom: boolean
+      lentToBrowserRoom: boolean
+      fixture: boolean
+    }>('room.camera.processed.inspect', {}, 2000)
+    return { ...native, ...RoomFrameBridge.resources() }
+  })
+  secureIpcHandle('room-camera:processed', async (event, command) => {
+    if (!processedCameraEnabled()) throw new Error('Processed camera is disabled.')
+    if (command.action === 'open') {
+      // One camera publisher: never beside the S13a fixture.
+      if (cameraOwner || frameOwner || command.generation <= cameraLastGeneration)
+        throw new Error('Camera owner already active or stale.')
+      cameraLastGeneration = command.generation
+      const contents = event.sender
+      const bridge = new RoomFrameBridge(
+        () => waitForBackendAdminConnection(2000),
+        processedCameraEnabled,
+        undefined,
+        'room.camera.processed'
+      )
+      const cleanup = (): void => {
+        bridge.close()
+        detach()
+        if (cameraOwner?.bridge === bridge) cameraOwner = null
+      }
+      const detach = (): void => {
+        contents.removeListener('destroyed', cleanup)
+        contents.removeListener('render-process-gone', cleanup)
+        contents.removeListener('did-start-navigation', cleanup)
+      }
+      contents.once('destroyed', cleanup)
+      contents.once('render-process-gone', cleanup)
+      contents.once('did-start-navigation', cleanup)
+      cameraOwner = { senderId: contents.id, generation: command.generation, bridge, detach }
+    }
+    const owner = cameraOwner
+    if (!owner || owner.senderId !== event.sender.id || owner.generation !== command.generation)
+      throw new Error('Camera owner or generation mismatch.')
+    try {
+      return await owner.bridge.request(command)
+    } catch (error) {
+      owner.bridge.close()
+      owner.detach()
+      if (cameraOwner === owner) cameraOwner = null
+      throw error
+    } finally {
+      if (command.action === 'close') {
+        owner.detach()
+        if (cameraOwner === owner) cameraOwner = null
+      }
+    }
+  })
+
+  secureIpcHandle('room-camera:fixture', async (event, action) => {
+    if (!processedCameraEnabled()) throw new Error('Processed camera is disabled.')
+    const owner = cameraOwner
+    if (!owner || owner.senderId !== event.sender.id) throw new Error('No processed camera owner.')
+    return await owner.bridge.fixture(action)
+  })
+
+  secureIpcHandle('room-system:inspect', async () => {
+    if (app.isPackaged || process.env.VIDEORC_ROOM_NATIVE_SYSTEM !== '1')
+      throw new Error('Native room system audio is disabled.')
+    const native = await requestBackendAdmin<{ nativeSources: number }>(
+      'room.system.inspect',
+      {},
+      2000
+    )
+    return { ...native, ...RoomPcmBridge.resources('room.system.pcm') }
+  })
+  secureIpcHandle('room-system:pcm', async (event, command) => {
+    if (app.isPackaged || process.env.VIDEORC_ROOM_NATIVE_SYSTEM !== '1')
+      throw new Error('Native room system audio is disabled and unqualified.')
+    if (command.action === 'open') {
+      if (nativeSystemOwner || command.generation <= nativeSystemLastGeneration)
+        throw new Error('System audio owner already active or stale.')
+      nativeSystemLastGeneration = command.generation
+      const contents = event.sender
+      const bridge = new RoomPcmBridge(
+        () => waitForBackendAdminConnection(2000),
+        () => !app.isPackaged && process.env.VIDEORC_ROOM_NATIVE_SYSTEM === '1',
+        undefined,
+        'room.system.pcm'
+      )
+      const cleanup = (): void => {
+        bridge.close()
+        detach()
+        if (nativeSystemOwner?.bridge === bridge) nativeSystemOwner = null
+      }
+      const detach = (): void => {
+        contents.removeListener('destroyed', cleanup)
+        contents.removeListener('render-process-gone', cleanup)
+        contents.removeListener('did-start-navigation', cleanup)
+      }
+      contents.once('destroyed', cleanup)
+      contents.once('render-process-gone', cleanup)
+      contents.once('did-start-navigation', cleanup)
+      nativeSystemOwner = { senderId: contents.id, generation: command.generation, bridge, detach }
+    }
+    if (
+      !nativeSystemOwner &&
+      command.action === 'close' &&
+      command.generation === nativeSystemLastGeneration
+    ) {
+      const observed = await requestBackendAdmin<{ nativeSources: number }>(
+        'room.system.inspect',
+        { waitForClose: true },
+        6500
+      )
+      if (observed.nativeSources === 0) return null
+      throw new Error('System audio close remains unacknowledged.')
+    }
+    const owner = nativeSystemOwner
+    if (!owner || owner.senderId !== event.sender.id || owner.generation !== command.generation)
+      throw new Error('System audio owner or generation mismatch.')
+    try {
+      return await owner.bridge.request(command)
+    } catch (error) {
+      owner.bridge.close()
+      owner.detach()
+      if (nativeSystemOwner === owner) nativeSystemOwner = null
+      throw error
+    } finally {
+      if (command.action === 'close') {
+        owner.detach()
+        if (nativeSystemOwner === owner) nativeSystemOwner = null
+      }
+    }
+  })
+  // Plan 249 S23 (D10): the room's Program preview as Videorc Camera. Off in
+  // production; an unpackaged run with VIDEORC_ROOM_PROGRAM_CAMERA=1 (and a
+  // debug backend reading the same variable) offers it. One main-frame owner
+  // and one upload per room generation; the upload owns the camera, so
+  // navigation, a crash or destruction ends it and the camera returns to its
+  // Studio source. Generations only grow: a reconnect opens a new one.
+  const roomProgramCameraEnabled = (): boolean =>
+    ROOM_PROGRAM_CAMERA_PRODUCTION_ENABLED ||
+    (!app.isPackaged && process.env[ROOM_PROGRAM_CAMERA_ENV] === '1')
+  let programCameraOwner: {
+    senderId: number
+    uplink: RoomProgramCameraUplink
+    detach: () => void
+  } | null = null
+  let programCameraLastGeneration = 0
+  const closeProgramCamera = (generation?: number): void => {
+    const owner = programCameraOwner
+    if (!owner || (generation !== undefined && owner.uplink.generation !== generation)) return
+    programCameraOwner = null
+    owner.detach()
+    owner.uplink.close()
+  }
+  secureIpcHandle('room-program-camera:available', () => roomProgramCameraEnabled())
+  secureIpcHandle('room-program-camera:open', (event, generation: number) => {
+    if (!roomProgramCameraEnabled()) throw new Error('Room program camera is disabled.')
+    if (programCameraOwner || generation <= programCameraLastGeneration)
+      throw new Error('Room program camera owner already active or stale.')
+    const connection = backendAdminConnection
+    if (!connection) throw new Error('The backend is not connected.')
+    programCameraLastGeneration = generation
+    const contents = event.sender
+    const cleanup = (): void => closeProgramCamera(generation)
+    const detach = (): void => {
+      contents.removeListener('destroyed', cleanup)
+      contents.removeListener('render-process-gone', cleanup)
+      contents.removeListener('did-start-navigation', cleanup)
+    }
+    const uplink = new RoomProgramCameraUplink(
+      generation,
+      { host: connection.host, port: connection.port, token: connection.token },
+      undefined,
+      () => {
+        // The backend ended the upload (refused, restarted): the renderer
+        // sees `closed` on its next frame and opens a new generation.
+        logBackend('warn', `Room program camera upload ${generation} ended.`)
+        if (programCameraOwner?.uplink.generation === generation) {
+          programCameraOwner = null
+          detach()
+        }
+      }
+    )
+    contents.once('destroyed', cleanup)
+    contents.once('render-process-gone', cleanup)
+    contents.once('did-start-navigation', cleanup)
+    programCameraOwner = { senderId: contents.id, uplink, detach }
+    return null
+  })
+  secureIpcHandle('room-program-camera:frame', (event, frame) => {
+    const owner = programCameraOwner
+    if (!owner || owner.senderId !== event.sender.id) return 'closed'
+    return owner.uplink.send(frame)
+  })
+  secureIpcHandle('room-program-camera:close', (event, generation: number) => {
+    if (programCameraOwner?.senderId === event.sender.id) closeProgramCamera(generation)
+    return null
+  })
+  secureIpcHandle('room-program-camera:inspect', async () => {
+    if (!roomProgramCameraEnabled()) throw new Error('Room program camera is disabled.')
+    const connection = backendAdminConnection
+    if (!connection) throw new Error('The backend is not connected.')
+    const native = (await fetchRoomProgramInspect({
+      host: connection.host,
+      port: connection.port,
+      token: connection.token
+    })) as Record<string, unknown>
+    return { ...native, uplink: programCameraOwner?.uplink.stats() ?? null }
+  })
+
   secureIpcHandle('account:begin-sign-in', async (_event, authorizeUrl: string) => {
     if (typeof authorizeUrl !== 'string') {
       throw new Error('Desktop account authorization URL is required.')
@@ -18131,7 +18702,13 @@ app.whenReady().then(async () => {
   secureIpcHandle('resource:trash-session-deletion', (_event, operationId: unknown) =>
     trashSessionDeletion(operationId)
   )
-  secureIpcHandle('screens:pick-image', () => pickScreenImage())
+  secureIpcHandle('screens:pick-images', () => pickScreenImages())
+  secureIpcHandle('screens:authorize-dropped-images', (_event, paths: string[]) =>
+    authorizeDroppedScreenImages(paths)
+  )
+  secureIpcHandle('screens:release-images', (_event, capabilityIds: string[]) =>
+    releaseScreenImages(capabilityIds)
+  )
   secureIpcHandle('banners:pick-image', () => pickBannerImage())
   secureIpcHandle('banners:pick-html', () => pickBannerHtml())
   secureIpcHandle('sounds:pick-files', () => pickSoundFiles())
@@ -18280,13 +18857,23 @@ app.whenReady().then(async () => {
   secureIpcHandle('notes-window:set-always-on-top', (_event, alwaysOnTop: boolean) =>
     setNotesWindowAlwaysOnTop(Boolean(alwaysOnTop))
   )
-  secureIpcHandle('notes-window:get-document', () => defaultNotesDocument())
+  // A failed read or write rejects the call (QA F9): the window shows it
+  // instead of Saved, and never takes a failed read for empty notes.
+  secureIpcHandle('notes-window:get-document', () => notesPersistence.loadDocument())
   secureIpcHandle('notes-window:save-document', (event, patch: Partial<NotesDocument>) => {
-    const document = saveNotesDocument(patch ?? {})
-    if (notesWindow && event.sender.id === notesWindow.webContents.id && notesWindowClosing) {
-      finishNotesWindowClose(notesWindow)
+    const closingWindow =
+      notesWindow && event.sender.id === notesWindow.webContents.id && notesWindowClosing
+        ? notesWindow
+        : null
+    try {
+      return saveNotesDocument(patch ?? {})
+    } finally {
+      // The window answered the close flush; a failed save closes it now
+      // rather than after the 1.5 s timeout, as it always would have.
+      if (closingWindow) {
+        finishNotesWindowClose(closingWindow)
+      }
     }
-    return document
   })
   secureIpcHandle('comments-window:open', () => openCommentsWindow())
   secureIpcHandle('comments-window:close', () => closeCommentsWindow())
@@ -19318,6 +19905,12 @@ previewLifecycleEvidence.bindBeforeQuit(app, {
       event.preventDefault()
       askRendererBeforeExit('quit')
       return
+    }
+    if (!appIsQuitting) {
+      // A Quit from the menu, ⌘Q or the Dock arrives as an Apple Event with
+      // no signal line; without this, the backend's clean exit reads as a
+      // crash nobody restarted.
+      logBackend('info', 'App quit requested; shutting the backend down.')
     }
     appIsQuitting = true
     accountSignInTransactions?.dispose()

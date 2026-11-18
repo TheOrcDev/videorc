@@ -272,6 +272,7 @@ export const SoundPad = ({
   onClick,
   onKeyDown,
   onKeyUp,
+  onBlur,
   children,
   ...props
 }: SoundPadProps) => {
@@ -294,6 +295,33 @@ export const SoundPad = ({
       onStop?.()
     }
   }
+
+  // A While held sound started by this pad's own Space or Enter. Its keyup can
+  // land elsewhere (focus moved, the window lost the keys, the pad went away),
+  // so those end the hold too, and only a hold this press started.
+  const keyHeldRef = useRef(false)
+  const releaseKey = () => {
+    if (!keyHeldRef.current) {
+      return
+    }
+    keyHeldRef.current = false
+    release()
+  }
+  const releaseKeyFromEffect = useEffectEvent(releaseKey)
+  useEffect(() => {
+    const onWindowBlur = () => releaseKeyFromEffect()
+    window.addEventListener('blur', onWindowBlur)
+    return () => {
+      window.removeEventListener('blur', onWindowBlur)
+      releaseKeyFromEffect()
+    }
+  }, [])
+  useEffect(() => {
+    // A disabled button gets no keyup, and may get no blur either.
+    if (inactive) {
+      releaseKeyFromEffect()
+    }
+  }, [inactive])
 
   // The grid calls these from its own key listeners, so they read the
   // latest props without re-registering on every render.
@@ -341,14 +369,19 @@ export const SoundPad = ({
           onKeyDown?.(event)
           if (holding && (event.key === ' ' || event.key === 'Enter') && !event.repeat) {
             event.preventDefault()
+            keyHeldRef.current = true
             press()
           }
         }}
         onKeyUp={(event) => {
           onKeyUp?.(event)
           if (holding && (event.key === ' ' || event.key === 'Enter')) {
-            release()
+            releaseKey()
           }
+        }}
+        onBlur={(event) => {
+          onBlur?.(event)
+          releaseKey()
         }}
         onPointerDown={(event: PointerEvent<HTMLButtonElement>) => {
           onPointerDown?.(event)

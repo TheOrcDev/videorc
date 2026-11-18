@@ -6,6 +6,7 @@ import type { StreamReportEmailState } from '@/lib/backend'
 
 import {
   STREAM_HISTORY_DESCRIPTION,
+  STREAM_REPORT_LOAD_FAILED,
   STREAM_REPORT_SIGNED_OUT_REASON,
   streamHistoryDescription,
   StreamReportEmailSectionView,
@@ -15,11 +16,13 @@ import {
 
 const render = (
   state: StreamReportEmailState | null,
-  send: StreamReportSendView = 'idle'
+  send: StreamReportSendView = 'idle',
+  loadFailed = false
 ): string =>
   renderToStaticMarkup(
     createElement(StreamReportEmailSectionView, {
       state,
+      loadFailed,
       send,
       onEnabledChange: () => undefined,
       onHistoryChange: () => undefined,
@@ -57,6 +60,16 @@ describe('Livestream → After the stream (plan 237)', () => {
     expect(markup).toContain('Email me a report after each stream')
     expect(markup).toMatch(SWITCH_DISABLED)
     expect(markup).not.toContain('data-testid="stream-report-email-lock"')
+    expect(markup).not.toContain('Try again')
+  })
+
+  it('says a failed first read failed and offers Try again (QA F13)', () => {
+    const markup = render(null, 'idle', true)
+    const email = row(markup, 'stream-report-email')
+    expect(email).toContain(html(STREAM_REPORT_LOAD_FAILED))
+    expect(email).toContain('Try again')
+    expect(row(markup, 'stream-history')).toMatch(SWITCH_DISABLED)
+    expect(markup).toMatch(SEND_DISABLED)
   })
 
   it('says where the email goes and what it never carries', () => {

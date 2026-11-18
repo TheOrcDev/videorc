@@ -1,4 +1,4 @@
-import { contextBridge, ipcRenderer } from 'electron'
+import { contextBridge, ipcRenderer, webUtils } from 'electron'
 
 import type { VideorcApi } from '../shared/backend'
 import {
@@ -14,6 +14,7 @@ import {
 import { rendererRoleFromArguments } from '../shared/renderer-security-policy'
 import { windowGroundFromArguments } from '../shared/window-ground'
 import { apiForRendererRole } from './api-policy'
+import { droppedFilePaths } from './dropped-file-paths'
 
 async function invoke<TChannel extends ElectronInvokeChannel>(
   channel: TChannel,
@@ -36,6 +37,22 @@ function subscribe<TChannel extends ElectronEventChannel>(
 }
 
 const api: VideorcApi = {
+  getRoomPcmTestResources: () => invoke('room-pcm:inspect'),
+  getRoomNativeMicrophoneResources: () => invoke('room-microphone:inspect'),
+  roomSystemAudioPcm: (command) => invoke('room-system:pcm', command),
+  getRoomSystemAudioResources: () => invoke('room-system:inspect'),
+  roomMicrophonePcm: (command) => invoke('room-microphone:pcm', command),
+  roomPcmTest: (command) => invoke('room-pcm:test', command),
+  getRoomFrameTestResources: () => invoke('room-frame:inspect'),
+  roomFrameTest: (command) => invoke('room-frame:test', command),
+  getRoomProcessedCameraResources: () => invoke('room-camera:inspect'),
+  roomProcessedCamera: (command) => invoke('room-camera:processed', command),
+  roomProcessedCameraFixture: (action) => invoke('room-camera:fixture', action),
+  roomProgramCameraAvailable: () => invoke('room-program-camera:available'),
+  openRoomProgramCamera: (generation) => invoke('room-program-camera:open', generation),
+  sendRoomProgramCameraFrame: (frame) => invoke('room-program-camera:frame', frame),
+  closeRoomProgramCamera: (generation) => invoke('room-program-camera:close', generation),
+  getRoomProgramCameraResources: () => invoke('room-program-camera:inspect'),
   onFrontAppChanged: (callback) => subscribe('app:front-changed', callback),
   setFrontWindowWatch: (enabled) => invoke('app:front-window-watch', { enabled }),
   getSelfBundleIds: () => invoke('app:self-bundle-ids'),
@@ -53,7 +70,13 @@ const api: VideorcApi = {
   getRuntimeInfo: () => invoke('app:get-runtime-info'),
   retryHardwareAcceleration: () => invoke('app:retry-hardware-acceleration'),
   exitApp: (kind) => invoke('app:exit', kind),
-  pickScreenImage: () => invoke('screens:pick-image'),
+  pickScreenImages: () => invoke('screens:pick-images'),
+  authorizeDroppedScreenImages: async (files) =>
+    invoke(
+      'screens:authorize-dropped-images',
+      droppedFilePaths(files, (file) => webUtils.getPathForFile(file))
+    ),
+  releaseScreenImages: (capabilityIds) => invoke('screens:release-images', capabilityIds),
   pickBannerImage: () => invoke('banners:pick-image'),
   pickCommunityExportDirectory: () => invoke('community:pick-export-directory'),
   pickCommunityImportFile: () => invoke('community:pick-import-file'),

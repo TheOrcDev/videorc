@@ -32,6 +32,7 @@ import {
   type ElectronInvokeMappingInvariant,
   type ElectronInvokeResult
 } from './electron-ipc-contract'
+import { SCREEN_IMAGE_BATCH_MAX } from './screen-image-files'
 
 describe('Electron IPC contract', () => {
   it('maps every renderer-facing invoke channel to a real async API method', () => {
@@ -98,8 +99,17 @@ describe('Electron IPC contract', () => {
     // The merged API includes community, Stream Manager screen actions and HTML banners.
     // 180: plan 234 adds resource:reveal-cloud-download (the Library's Show
     // in Finder for a downloaded cloud recording, by its job id).
-    expect(Object.keys(electronInvokeApiMethods)).toHaveLength(180)
-    expect(new Set(Object.values(electronInvokeApiMethods)).size).toBe(180)
+    // 182: plan 244 (#704) adds screens:authorize-dropped-images (images
+    // dropped on Takeovers) and screens:release-images (a stopped batch hands
+    // back its unused capabilities), and makes the takeover picker multi-select.
+    // 184: plan 249 S7a adds the bounded main-only PCM transport and resource inspection.
+    // 193: plan 249 S13a adds the main-only camera-role frame fixture and its inspection.
+    // S13b adds the main-only processed camera, its inspection and fixture events;
+    // S8 adds main-only system PCM and its observed resource inspection.
+    // 198: plan 249 S23 adds the main-only room program camera (available,
+    // open, frame, close and inspection).
+    expect(Object.keys(electronInvokeApiMethods)).toHaveLength(198)
+    expect(new Set(Object.values(electronInvokeApiMethods)).size).toBe(198)
     expectTypeOf<ElectronInvokeArgs<'resource:trash-session-deletion'>>().toEqualTypeOf<
       Parameters<VideorcApi['trashSessionDeletion']>
     >()
@@ -369,6 +379,34 @@ describe('Electron IPC contract', () => {
     expect(() =>
       validateElectronInvokeArgs('resource:trash-session-deletion', ['x'.repeat(1025)])
     ).toThrow('at most 1024')
+  })
+
+  it('carries dropped takeover images as a bounded list of paths', () => {
+    expectTypeOf<ElectronInvokeArgs<'screens:authorize-dropped-images'>>().toEqualTypeOf<
+      [paths: string[]]
+    >()
+    const paths = ['/Users/me/a.png', '/Users/me/b.webp']
+    expect(validateElectronInvokeArgs('screens:authorize-dropped-images', [paths])).toEqual([paths])
+    expect(() => validateElectronInvokeArgs('screens:authorize-dropped-images', [['']])).toThrow()
+    expect(() =>
+      validateElectronInvokeArgs('screens:authorize-dropped-images', [
+        Array.from({ length: SCREEN_IMAGE_BATCH_MAX + 1 }, (_, index) => `/tmp/${index}.png`)
+      ])
+    ).toThrow(`at most ${SCREEN_IMAGE_BATCH_MAX} items`)
+  })
+
+  it('hands back a stopped batch as a bounded list of capability ids', () => {
+    expectTypeOf<ElectronInvokeArgs<'screens:release-images'>>().toEqualTypeOf<
+      [capabilityIds: string[]]
+    >()
+    const ids = ['resource:a', 'resource:b']
+    expect(validateElectronInvokeArgs('screens:release-images', [ids])).toEqual([ids])
+    expect(() => validateElectronInvokeArgs('screens:release-images', [['']])).toThrow()
+    expect(() =>
+      validateElectronInvokeArgs('screens:release-images', [
+        Array.from({ length: SCREEN_IMAGE_BATCH_MAX + 1 }, (_, index) => `resource:${index}`)
+      ])
+    ).toThrow(`at most ${SCREEN_IMAGE_BATCH_MAX} items`)
   })
 
   it('validates the docked-preview slot report at runtime, including the slot enum', () => {
@@ -1979,4 +2017,116 @@ describe('the person card relay (plan 225 C2)', () => {
       validateElectronInvokeArgs('comments-window:community', [{ ...ok, extra: 1 }])
     ).toThrow()
   })
+})
+
+it('requires complete observed PCM counters and rejects inspection payloads', () => {
+  expect(validateElectronInvokeArgs('room-pcm:inspect', [])).toEqual([])
+  expect(() => validateElectronInvokeArgs('room-pcm:inspect', [{ origin: 'guest' }])).toThrow()
+  expect(() =>
+    validateElectronInvokeResult('room-pcm:inspect', { sockets: 0, ipcRequests: 0, timers: 0 })
+  ).toThrow()
+  expect(() =>
+    validateElectronInvokeResult('room-pcm:inspect', {
+      nativeSources: NaN,
+      sockets: 0,
+      ipcRequests: 0,
+      timers: 0
+    })
+  ).toThrow()
+  expect(
+    validateElectronInvokeResult('room-pcm:inspect', {
+      nativeSources: 1,
+      sockets: 1,
+      ipcRequests: 1,
+      timers: 1
+    })
+  ).toEqual({ nativeSources: 1, sockets: 1, ipcRequests: 1, timers: 1 })
+})
+
+it('admits only bounded frame-fixture commands and complete frame counters', () => {
+  const command = {
+    action: 'pull',
+    generation: 2,
+    role: 'host-camera-test',
+    width: 640,
+    height: 360,
+    fps: 30,
+    packing: 'rgb-left-alpha-right',
+    serial: 4,
+    release: { sequence: 1, surfaceEpoch: 1 }
+  }
+  expect(validateElectronInvokeArgs('room-frame:test', [command])).toEqual([command])
+  for (const bad of [
+    { ...command, width: 1920 },
+    { ...command, role: 'host-camera', width: 641 },
+    { ...command, role: 'host-camera', width: 640, height: 640 },
+    { ...command, role: 'other' },
+    { ...command, action: 'open' },
+    { ...command, extra: true },
+    { ...command, generation: 0 },
+    { ...command, release: { sequence: -1, surfaceEpoch: 1 } }
+  ])
+    expect(() => validateElectronInvokeArgs('room-frame:test', [bad])).toThrow()
+  expect(() =>
+    validateElectronInvokeResult('room-frame:inspect', {
+      nativeSources: 0,
+      sockets: 0,
+      ipcRequests: 0,
+      timers: 0
+    })
+  ).toThrow()
+  expect(() =>
+    validateElectronInvokeResult('room-frame:test', {
+      header: { width: 1288, height: 360 },
+      pixels: new Uint8Array(4)
+    })
+  ).toThrow()
+  expect(
+    validateElectronInvokeResult('room-frame:test', {
+      frame: null,
+      reason: 'not-due',
+      staleReleases: 0,
+      leaseStalls: 0
+    })
+  ).toMatchObject({ reason: 'not-due' })
+})
+
+it('admits the processed camera only at an S10-valid logical size and gates its fixture events', () => {
+  const command = {
+    action: 'open',
+    generation: 3,
+    role: 'host-camera',
+    width: 554,
+    height: 414,
+    fps: 30,
+    packing: 'rgb-left-alpha-right',
+    serial: 1
+  }
+  expect(validateElectronInvokeArgs('room-camera:processed', [command])).toEqual([command])
+  for (const bad of [
+    { ...command, width: 556, height: 416 },
+    { ...command, fps: 60 },
+    { ...command, role: 'host-camera-test' }
+  ])
+    expect(() => validateElectronInvokeArgs('room-camera:processed', [bad])).toThrow()
+  expect(validateElectronInvokeArgs('room-camera:fixture', ['fixture-switch'])).toEqual([
+    'fixture-switch'
+  ])
+  expect(() => validateElectronInvokeArgs('room-camera:fixture', ['fixture-delete'])).toThrow()
+  const resources = {
+    nativeSources: 1,
+    nativeLeases: 0,
+    sockets: 1,
+    ipcRequests: 0,
+    timers: 0,
+    logicalWidth: 554,
+    logicalHeight: 414,
+    keptForRoom: true,
+    lentToBrowserRoom: false,
+    fixture: true
+  }
+  expect(validateElectronInvokeResult('room-camera:inspect', resources)).toEqual(resources)
+  expect(() =>
+    validateElectronInvokeResult('room-camera:inspect', { ...resources, logicalHeight: null })
+  ).toThrow()
 })

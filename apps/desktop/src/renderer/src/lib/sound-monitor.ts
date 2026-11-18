@@ -86,6 +86,7 @@ export function monitorStartOffsetSeconds(
 }
 
 export interface SoundMonitor {
+  queued?: () => readonly string[]
   update: (snapshot: SoundboardSnapshot) => void
   dispose: () => void
 }
@@ -102,6 +103,10 @@ export interface SoundMonitorDeps {
    * console line). Defaults to a warning toast.
    */
   onUnplayable?: (sound: Sound) => void
+  destination?: (context: AudioContext) => AudioNode
+  hears?: (voice: SoundVoice, snapshot: SoundboardSnapshot) => boolean
+  closeContext?: boolean
+  suspendIdle?: boolean
 }
 
 /** The warning when the monitor can't play a sound here. */
@@ -143,7 +148,8 @@ export function createSoundMonitor(deps: SoundMonitorDeps = browserDeps): SoundM
   // Insertion order is recency: a hit moves its entry to the end.
   const buffers = new Map<string, { key: string; bytes: number; buffer: Promise<AudioBuffer> }>()
   const playing = new Map<string, PlayingVoice>()
-  const loading = new Set<string>()
+  const loading = new Map<string, symbol>()
+  const completed = new Set<string>()
   const warned = new Set<string>()
 
   const audio = (): AudioContext => {
@@ -163,7 +169,7 @@ export function createSoundMonitor(deps: SoundMonitorDeps = browserDeps): SoundM
   }
   const watchIdle = (): void => {
     cancelIdle()
-    if (playing.size || loading.size || !context) return
+    if (deps.suspendIdle === false || playing.size || loading.size || !context) return
     idleTimer = deps.setTimer(() => {
       idleTimer = null
       if (!playing.size && !loading.size) void context?.suspend().catch(() => undefined)
@@ -219,13 +225,21 @@ export function createSoundMonitor(deps: SoundMonitorDeps = browserDeps): SoundM
   }
 
   const startVoice = (voice: SoundVoice, sound: Sound): void => {
-    loading.add(voice.voiceId)
+    const ticket = Symbol(voice.voiceId)
+    loading.set(voice.voiceId, ticket)
     cancelIdle()
     bufferFor(sound).then(
       (buffer) => {
         // Stopped, or the monitor went away, while it decoded.
-        if (disposed || !loading.delete(voice.voiceId)) return watchIdle()
-        const now = soundFor(voice.soundId) ?? sound
+        if (disposed || loading.get(voice.voiceId) !== ticket) return watchIdle()
+        loading.delete(voice.voiceId)
+        const now = soundFor(voice.soundId)
+        if (!now || bufferKey(now) !== bufferKey(sound)) return watchIdle()
+        const offset = monitorStartOffsetSeconds(voice, deps.now(), buffer.duration)
+        if (!voice.loop && offset >= buffer.duration) {
+          completed.add(voice.voiceId)
+          return watchIdle()
+        }
         const ctx = audio()
         const source = ctx.createBufferSource()
         source.buffer = buffer
@@ -234,12 +248,15 @@ export function createSoundMonitor(deps: SoundMonitorDeps = browserDeps): SoundM
         const value = gainFor(now)
         gain.gain.value = value
         source.connect(gain)
-        gain.connect(ctx.destination)
+        gain.connect(deps.destination?.(ctx) ?? ctx.destination)
         const entry: PlayingVoice = { soundId: voice.soundId, source, gain, gainValue: value }
         source.onended = () => {
           source.disconnect()
           gain.disconnect()
-          if (playing.get(voice.voiceId) === entry) playing.delete(voice.voiceId)
+          if (playing.get(voice.voiceId) === entry) {
+            playing.delete(voice.voiceId)
+            if (!voice.loop) completed.add(voice.voiceId)
+          }
           watchIdle()
         }
         playing.set(voice.voiceId, entry)
@@ -249,7 +266,8 @@ export function createSoundMonitor(deps: SoundMonitorDeps = browserDeps): SoundM
         // A load the monitor stopped waiting for (the voice ended, the
         // monitor went away) failing is nobody's news: only an active one
         // warns, and a later one for the same sound still can.
-        const active = loading.delete(voice.voiceId) && !disposed
+        const active = loading.get(voice.voiceId) === ticket && !disposed
+        if (active) loading.delete(voice.voiceId)
         const key = bufferKey(sound)
         if (active && !warned.has(key)) {
           warned.add(key)
@@ -262,6 +280,7 @@ export function createSoundMonitor(deps: SoundMonitorDeps = browserDeps): SoundM
   }
 
   return {
+    queued: () => [...loading.keys()],
     update(snapshot) {
       if (disposed) return
       latest = snapshot
@@ -271,11 +290,20 @@ export function createSoundMonitor(deps: SoundMonitorDeps = browserDeps): SoundM
         if (!sound || bufferKey(sound) !== entry.key) buffers.delete(soundId)
       }
       const plan = monitorPlan(
-        new Set([...playing.keys(), ...loading]),
-        snapshot.voices,
-        snapshot.board?.monitor ?? true,
+        new Set([...playing.keys(), ...loading.keys()]),
+        snapshot.voices.filter(
+          (voice) =>
+            !completed.has(voice.voiceId) &&
+            (deps.hears
+              ? deps.hears(voice, snapshot)
+              : !snapshot.roomAux || (snapshot.board?.monitor ?? true))
+        ),
+        deps.hears ? true : (snapshot.board?.monitor ?? true),
         (soundId) => sounds.has(soundId)
       )
+      // Bound history without immediately forgetting a one-shot when a stale
+      // playback snapshot briefly omits it. Voice IDs are backend-owned.
+      while (completed.size > 4096) completed.delete(completed.values().next().value!)
       for (const voiceId of plan.stop) stopVoice(voiceId)
       for (const voice of plan.start) startVoice(voice, sounds.get(voice.soundId)!)
       for (const voice of playing.values()) {
@@ -289,11 +317,11 @@ export function createSoundMonitor(deps: SoundMonitorDeps = browserDeps): SoundM
     },
     dispose() {
       if (disposed) return
-      for (const voiceId of [...playing.keys(), ...loading]) stopVoice(voiceId)
+      for (const voiceId of [...playing.keys(), ...loading.keys()]) stopVoice(voiceId)
       disposed = true
       cancelIdle()
       buffers.clear()
-      void context?.close().catch(() => undefined)
+      if (deps.closeContext !== false) void context?.close().catch(() => undefined)
       context = null
     }
   }

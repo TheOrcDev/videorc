@@ -382,6 +382,89 @@ try {
     }
   )
   await step(
+    'phone host go leaves the desktop seated until DUPLICATE_IDENTITY, then Continue here takes it back',
+    async () => {
+      // The preceding Program check deliberately removed this guest. Restore
+      // both publishers before testing that moving the host preserves them.
+      await listener.joinPeer(guests[0], true, { tone: 659, color: '#c02020' })
+      await h.status(
+        (s) => guests.every((id) => s.room?.participants.some((p) => p.identity === id)),
+        'both guests present before host continuation'
+      )
+      await h.rpc('cloud.show.goLive', { streaming: h.streaming() })
+      await h.status((s) => s.room?.client === 'connected', 'desktop host before continuation')
+      const before = structuredClone(h.web.snapshot(h.showId).state.room.stage)
+      const phone = h.newDevice()
+      const at = Date.now()
+      const go = await h.webRequest('on-air', { device: phone, source: 'host', step: 'go' })
+      assert.equal(go.status, 200)
+      assert.ok(go.body.room?.identity === host)
+      // Announcing host/go is not a successful host join. In particular a
+      // failed phone join must not remove the desktop's camera and guests.
+      await holdFor(
+        async () => {
+          const status = await h.rpc('cloud.status')
+          return status.room?.client === 'connected' && !status.stoppedBy
+        },
+        'onAir alone removed the desktop host',
+        4000
+      )
+      h.assertNoPlatformEnd(at)
+      const joinedAt = Date.now()
+      await listener.joinHost(go.body.room)
+      await h.status(
+        (s) => s.stoppedBy === 'taken-over' && s.show?.resumable && !s.room,
+        'confirmed duplicate host releases desktop seat',
+        10000
+      )
+      assert.ok(
+        h.events.some(
+          (e) =>
+            e.atMs >= joinedAt && e.event === 'cloud.state' && e.payload.stoppedBy === 'taken-over'
+        ),
+        'takeover requires the real second host join'
+      )
+      // The backend socket and the renderer's lazy notice module settle
+      // independently. Require the exact toast after the renderer commits it.
+      await waitFor(
+        () =>
+          h.eval(
+            `return document.body.textContent.includes('Your show continues on Smoke phone.')`
+          ),
+        'host takeover toast',
+        3000
+      )
+      await h.captureUi('taken-over', '[data-sonner-toast]', 'Your show continues on Smoke phone.')
+      await holdFor(
+        () => {
+          const room = h.web.snapshot(h.showId).state.room
+          return (
+            guests.every((id) => room.participants.some((p) => p.identity === id)) &&
+            !h.web.shows.get(h.showId).show.endedAt
+          )
+        },
+        'guests or room ended during host move',
+        3000
+      )
+      assert.deepEqual(h.web.snapshot(h.showId).state.room.stage, before)
+      await h.continueUi()
+      await h.status(
+        (s) => s.room?.client === 'connected' && s.onAir?.thisDevice,
+        'desktop continues as host',
+        60000
+      )
+      await waitFor(
+        () => listener.hostWasReplaced(),
+        'browser host displaced by desktop duplicate identity'
+      )
+      assert.deepEqual(h.web.snapshot(h.showId).state.room.stage, before)
+      assert.ok(h.calls('onAir', at).some((c) => c.body.source === 'host' && c.body.step === 'go'))
+      h.assertNoPlatformEnd(at)
+      await listener.leave(host)
+      h.scanLeaks()
+    }
+  )
+  await step(
     'relaunch Resume sends no stage and no destinations; 401 then sign-in regains room controls',
     async () => {
       // stageSet stays true once a PUT stage succeeded, so the desktop never
@@ -484,12 +567,11 @@ try {
       await noTemps()
       assert.equal(h.calls('recordingPlaylist', first.at).filter((c) => c.status === 503).length, 1)
       const secondPath = await success(await start())
-      assert.ok(secondPath.includes(' (2)'))
-      assert.notEqual(firstPath, secondPath)
+      assert.equal(firstPath, secondPath, 'repeated import must reuse the same local file')
       const barrier = h.web.hooks.pause('segment')
       let slow
       try {
-        slow = await start()
+        slow = await start(h.web.hooks.addRecording({ showId: h.showId }).id)
         await waitFor(() => barrier.hits, 'segment held')
         // The temporary check looks where the job works: its folder is there now.
         assert.equal(downloadTemps(h).length, 1, 'a held download has its private folder')
@@ -505,7 +587,7 @@ try {
       await success(slow)
       await noTemps()
       h.web.hooks.failNext('segment', 3, 503)
-      const failed = await terminal(await start())
+      const failed = await terminal(await start(h.web.hooks.addRecording({ showId: h.showId }).id))
       assert.equal(failed.payload.state ?? failed.payload.phase, 'failed')
       await noTemps()
       assert.equal(
@@ -543,7 +625,7 @@ try {
       await noTemps()
       const cancelBarrier = h.web.hooks.pause('segment')
       try {
-        const job = await start()
+        const job = await start(h.web.hooks.addRecording({ showId: h.showId }).id)
         await waitFor(() => cancelBarrier.hits, 'cancel download held')
         await h.rpc(DOWNLOAD.cancel, { jobId: job.id }, 5000)
         const cancelled = await terminal(job)
@@ -617,14 +699,14 @@ try {
       )
       const offered = await buttons(take.id)
       assert.ok(
-        offered.includes('Download'),
+        offered.includes('Download to Library'),
         `the take's row offers ${JSON.stringify(offered)}: ${await rowText(take.id)}`
       )
 
       // Download: progress while the segment is held, then Saved and Show in Finder.
       const held = h.web.hooks.pause('segment')
       try {
-        assert.ok(await click(rowSelector(take.id), 'Download'))
+        assert.ok(await click(rowSelector(take.id), 'Download to Library'))
         await rowSays(take.id, /Downloading/, 'row shows Downloading')
         assert.ok(
           await h.eval(
@@ -636,15 +718,15 @@ try {
       } finally {
         held.release()
       }
-      await rowSays(take.id, /Saved/, 'row shows Saved', 60000)
-      assert.ok((await buttons(take.id)).some((b) => /^Show in /.test(b)))
+      await rowSays(take.id, /Open in Library/, 'registered local take', 60000)
+      assert.ok(doneEvent(take.id, 'done').payload.localSessionId)
       playable(h, doneEvent(take.id, 'done').payload.path)
 
       // A failed download says so and offers Try again.
       const broken = h.web.hooks.addRecording({ showId: h.showId })
       await listed(broken.id)
       h.web.hooks.failNext('segment', 3, 503)
-      assert.ok(await click(rowSelector(broken.id), 'Download'))
+      assert.ok(await click(rowSelector(broken.id), 'Download to Library'))
       await rowSays(broken.id, /Couldn.t download/, 'row shows the failure', 60000)
       assert.ok((await buttons(broken.id)).includes('Try again'))
       await noDownloadTemps(h)
@@ -654,13 +736,13 @@ try {
       await listed(spare.id)
       const hold = h.web.hooks.pause('segment')
       try {
-        assert.ok(await click(rowSelector(spare.id), 'Download'))
+        assert.ok(await click(rowSelector(spare.id), 'Download to Library'))
         await rowSays(spare.id, /Downloading/, 'spare row downloading')
         assert.ok(await click(rowSelector(spare.id), 'Cancel'))
         await waitFor(
           async () =>
             !/Downloading/.test((await rowText(spare.id)) ?? '') &&
-            (await buttons(spare.id)).includes('Download'),
+            (await buttons(spare.id)).includes('Download to Library'),
           'Cancel takes the row back to Download'
         )
         await waitFor(() => doneEvent(spare.id, 'cancelled'), 'cancelled event')
@@ -674,7 +756,7 @@ try {
       await listed(node.id)
       const labels = await buttons(node.id)
       assert.ok(labels.includes('Open videorc.com'))
-      assert.equal(labels.includes('Download'), false)
+      assert.equal(labels.includes('Download to Library'), false)
       // The click itself is not made here: window.videorc is frozen by the
       // context bridge, so its opener cannot be watched, and a click would
       // open a real browser on this Mac. library-cloud-recordings.test.ts

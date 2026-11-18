@@ -4,6 +4,7 @@ import type { CleanCutJob, SessionSummary } from '@/lib/backend'
 import {
   CLEAN_CUT_HOLD_REASON,
   activeCleanCutJobsBySource,
+  canExportMp4,
   filterLibrarySessions,
   isLiveSession,
   libraryCleanCutChip,
@@ -98,6 +99,35 @@ describe('sessionFormatLabel', () => {
     expect(sessionFormatLabel(session({ container: 'mkv' as never }))).toBe('MKV')
     expect(sessionFormatLabel(session({ container: 'tee' as never }))).toBe('MKV + stream')
     expect(sessionFormatLabel(session({}))).toBeNull()
+  })
+
+  // QA F4: an imported QuickTime file keeps its bytes and lands in the
+  // playable slot; the File column must not call it MP4.
+  it('names an imported QuickTime file MOV, in any case', () => {
+    const imported = (name: string) =>
+      session({ mode: 'imported', mp4Path: `/Movies/${name}`, container: null as never })
+    expect(sessionFormatLabel(imported('clip.mov'))).toBe('MOV')
+    expect(sessionFormatLabel(imported('clip.MOV'))).toBe('MOV')
+    expect(sessionFormatLabel(imported('clip.mp4'))).toBe('MP4')
+    expect(sessionFormatLabel(imported('clip.m4v'))).toBe('MP4')
+  })
+})
+
+// QA F3: import accepts `.MKV` in any case and keeps the name, so Export MP4
+// must too (the backend remux matches without case as well).
+describe('canExportMp4', () => {
+  const imported = (name: string) =>
+    session({ mode: 'imported', outputPath: `/Movies/${name}`, container: 'mkv' as never })
+
+  it('offers Export MP4 for an MKV whatever the extension case', () => {
+    expect(canExportMp4(imported('example.mkv'))).toBe(true)
+    expect(canExportMp4(imported('example.MKV'))).toBe(true)
+    expect(canExportMp4(imported('example.Mkv'))).toBe(true)
+  })
+
+  it('still refuses WebM and a row that already has its MP4', () => {
+    expect(canExportMp4(imported('example.webm'))).toBe(false)
+    expect(canExportMp4({ ...imported('example.MKV'), mp4Path: '/Movies/example.mp4' })).toBe(false)
   })
 })
 
@@ -424,4 +454,11 @@ describe('Clean cut in the Library (E-4)', () => {
     expect(reviews.get('stream')).toBe('condensed')
     expect(libraryCleanCutReviews({ jobs: [], sessions }).get('tutorial')).toBe('clean')
   })
+})
+
+it('lists cloud shows as livestreams, with a platform label and no media format', () => {
+  const cloud = session({ mode: 'cloud-stream', streamPreset: 'youtube, twitch' })
+  expect(filterLibrarySessions([cloud], 'streams', '')).toEqual([cloud])
+  expect(filterLibrarySessions([cloud], 'recordings', '')).toEqual([])
+  expect(sessionFormatLabel(cloud)).toBe('Cloud show · youtube, twitch')
 })

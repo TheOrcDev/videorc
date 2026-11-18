@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs'
 import { fileURLToPath, format as formatUrl, pathToFileURL } from 'node:url'
-import type { Session } from 'electron'
+import type { Session, WebContents } from 'electron'
 
 import { describe, expect, it } from 'vitest'
 
@@ -20,7 +20,8 @@ import {
   installRendererSessionPermissions,
   rendererWebPermissionAllowed,
   rendererWindowOpenDisposition,
-  rendererWindowWebPreferences
+  rendererWindowWebPreferences,
+  setTalkShowDisplaySourceResolver
 } from './web-contents-security'
 
 const sourcePath = (relative: string): string => fileURLToPath(new URL(relative, import.meta.url))
@@ -225,15 +226,34 @@ describe('renderer security policy', () => {
       false
     )
     expect(request({ permission: 'display-capture', mediaTypes: undefined })).toBe(false)
+    // Electron asks for `media` with no device types before `getDisplayMedia`
+    // reaches the display-media handler: refused until the room names a source.
+    expect(request({ mediaTypes: [] })).toBe(false)
+    expect(request({ mediaTypes: undefined })).toBe(false)
     // The named screen source is taken once.
     expect(registry.setTalkShowMediaGrant(1, { video: true, screenSourceId: 'screen:1:0' })).toBe(
       true
     )
+    expect(request({ mediaTypes: [] })).toBe(true)
+    // Only for the main renderer's own main frame and trusted document; a
+    // permission check (no media type) stays refused.
+    expect(request({ mediaTypes: undefined })).toBe(false)
+    expect(request({ isMainFrame: false, mediaTypes: [] })).toBe(false)
+    expect(request({ frameUrl: 'https://attacker.example/', mediaTypes: [] })).toBe(false)
+    expect(request({ senderId: 2, frameUrl: trustedCommentsUrl, mediaTypes: [] })).toBe(false)
+    expect(request({ permission: 'display-capture', mediaTypes: [] })).toBe(false)
     expect(registry.takeTalkShowScreenSource(1)).toBe('screen:1:0')
     expect(registry.takeTalkShowScreenSource(1)).toBeNull()
+    expect(request({ mediaTypes: [] })).toBe(false)
     expect(registry.setTalkShowMediaGrant(1, { video: false, screenSourceId: null })).toBe(true)
     expect(request({ mediaTypes: ['video'] })).toBe(false)
     expect(registry.talkShowMediaGrant(1)).toBeNull()
+    // Closing the room drops a source that was named but never taken.
+    expect(registry.setTalkShowMediaGrant(1, { video: true, screenSourceId: 'screen:1:0' })).toBe(
+      true
+    )
+    expect(registry.setTalkShowMediaGrant(1, { video: false, screenSourceId: null })).toBe(true)
+    expect(request({ mediaTypes: [] })).toBe(false)
     for (const permission of [
       'clipboard-read',
       'display-capture',
@@ -306,6 +326,67 @@ describe('renderer security policy', () => {
     )
     expect(permissionInstallIndex).toBeGreaterThanOrEqual(0)
     expect(permissionInstallIndex).toBeLessThan(readySource.indexOf('createWindow()'))
+  })
+
+  it("lets a talk-show screen share through Electron's permission request, once", async () => {
+    // Electron 39 runs `getDisplayMedia` as a `media` permission request with
+    // an empty `mediaTypes` before it calls the display-media handler; a
+    // refusal there ends in NotAllowedError and the handler never runs.
+    type Handlers = {
+      request?: Parameters<Session['setPermissionRequestHandler']>[0]
+      display?: Parameters<Session['setDisplayMediaRequestHandler']>[0]
+    }
+    const handlers: Handlers = {}
+    const registry = new RendererSecurityRegistry()
+    const trustedMainUrl = 'file:///Applications/Videorc/resources/index.html'
+    registry.register(1, 'main')
+    registry.trustDocument(1, trustedMainUrl)
+    installRendererSessionPermissions(
+      {
+        setPermissionCheckHandler() {},
+        setPermissionRequestHandler(handler) {
+          handlers.request = handler
+        },
+        setDisplayMediaRequestHandler(handler) {
+          handlers.display = handler
+        }
+      },
+      registry
+    )
+    const screen = { id: 'screen:1:0', name: 'Screen 1' } as Electron.Video
+    setTalkShowDisplaySourceResolver(async () =>
+      registry.takeTalkShowScreenSource(1) === screen.id ? screen : null
+    )
+    const contents = { id: 1 } as WebContents
+    const displayCapture = {
+      isMainFrame: true,
+      mediaTypes: [],
+      requestingUrl: trustedMainUrl,
+      securityOrigin: 'file:///'
+    } as unknown as Parameters<NonNullable<Handlers['request']>>[3]
+    const permission = (): Promise<boolean> =>
+      new Promise((resolve) => handlers.request?.(contents, 'media', resolve, displayCapture))
+    const display = (): Promise<unknown> =>
+      new Promise((resolve) =>
+        handlers.display?.(
+          { frame: { url: trustedMainUrl } } as Parameters<NonNullable<Handlers['display']>>[0],
+          resolve
+        )
+      )
+
+    try {
+      expect(await permission()).toBe(false)
+      registry.setTalkShowMediaGrant(1, { video: true, screenSourceId: null })
+      expect(await permission()).toBe(false)
+      registry.setTalkShowMediaGrant(1, { video: true, screenSourceId: screen.id })
+      expect(await permission()).toBe(true)
+      expect(await display()).toEqual({ video: screen })
+      // The source is spent: a second getDisplayMedia is refused up front.
+      expect(await permission()).toBe(false)
+      expect(await display()).toEqual({})
+    } finally {
+      setTalkShowDisplaySourceResolver(null)
+    }
   })
 
   it('permits same-document navigation only and denies all window opens', () => {
@@ -719,7 +800,8 @@ describe('renderer security policy', () => {
     // The Notes renderer (plan 050 S4) bounds the text and answers the flush.
     const notesWindow = source('../renderer/src/components/notes-window.tsx')
     expect(notesWindow).toContain('maxLength = MAX_NOTES_TEXT_LENGTH')
-    expect(notesWindow).toContain('onNotesFlushRequest?.(() => void save())')
+    expect(notesWindow).toContain('onNotesFlushRequest?.(() => {')
+    expect(notesWindow).toContain('void save()')
     expect(preload).toContain("subscribe('notes-window:flush-request'")
     expect(apiPolicy).toContain("'onNotesFlushRequest'")
   })

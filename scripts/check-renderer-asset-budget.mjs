@@ -145,9 +145,34 @@ const htmlPath = resolve(
 // contract schemas already load lazily.
 // Raise gzip to 487,000; raw and the entry ceilings hold. Keep new surfaces
 // lazy.
+// 2026-11-16 (owner-approved: merge #1411 with its open budget item): the
+// takeover drop and multi-select from #704 measure 2,365,684 raw / 486,083
+// gzip, 684 raw bytes over. The takeover and banner importers already load
+// lazily; what stays eager is the provider wiring (pending state, the import
+// callbacks). Raise raw to 2,367,000; gzip and the entry ceilings hold. Keep
+// new surfaces lazy.
+// 2026-11-17 (owner-approved: "Raise to fit"): the Plan 249 merge batch
+// (desktop #1448-#1456, fixed by #1457) measures 2,404,872 raw / 494,943
+// gzip. Main was already 2,389,552 / 491,658 before it; the batch's eager
+// bytes are slice wiring (S12 +2,661 gzip, S15 +308, S7b +124, S9 +186).
+// Raise raw to 2,405,000 and gzip to 495,000; the entry ceilings hold. Keep
+// new surfaces lazy.
+// 2026-11-17 (owner-approved: raise to 2,420,000 / 499,000): the last Plan
+// 249 slices measure, cumulatively on main at 2,404,876 / 494,970: S17
+// (#1460, H/V room outputs and their quality) 2,414,789 / 497,771, then S19
+// (#1463, show markers) 2,417,078 / 498,241, then S8 (#1465, system audio
+// routing) 2,419,971 / 498,975. Raise raw to 2,420,000 and gzip to 499,000;
+// the entry ceilings hold. Keep new surfaces lazy.
+// 2026-11-17 (owner-approved: raise to 2,425,000 / 500,000): the next Plan
+// 249 slices measure, cumulatively on main at 2,419,971 / 498,975: S11
+// (#1467, HTML banners) 2,420,009 / 498,984, then S21b (#1468, program Clips)
+// 2,420,800 / 499,174, then S14 (#1470, scene screen and background)
+// 2,423,683 / 499,767, then S23 (#1472, room program camera) 2,423,728 /
+// 499,795, then S26 (#1471, program health) 2,424,257 / 499,909. Raise raw to
+// 2,425,000 and gzip to 500,000; the entry ceilings hold. Keep new surfaces lazy.
 const budget = {
-  maxTotalRawBytes: Number(process.env.VIDEORC_RENDERER_MAX_EAGER_RAW_BYTES ?? 2_365_000),
-  maxTotalGzipBytes: Number(process.env.VIDEORC_RENDERER_MAX_EAGER_GZIP_BYTES ?? 487_000),
+  maxTotalRawBytes: Number(process.env.VIDEORC_RENDERER_MAX_EAGER_RAW_BYTES ?? 2_425_000),
+  maxTotalGzipBytes: Number(process.env.VIDEORC_RENDERER_MAX_EAGER_GZIP_BYTES ?? 500_000),
   maxEntryRawBytes: Number(process.env.VIDEORC_RENDERER_MAX_ENTRY_RAW_BYTES ?? 1_200_000),
   maxEntryGzipBytes: Number(process.env.VIDEORC_RENDERER_MAX_ENTRY_GZIP_BYTES ?? 235_000)
 }

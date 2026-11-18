@@ -1283,7 +1283,16 @@ pub async fn install_banner_set(state: &AppState) -> anyhow::Result<()> {
 /// Plan 232: what the HTML overlay targets follow: every HTML banner in the
 /// set (and whether it is fading out), the run's canvases and its rate.
 pub async fn html_overlay_view(state: &AppState) -> crate::html_overlay::HtmlOverlayView {
+    // Plan 249 S11: the talk-show room's canvases while its renderer asks,
+    // without a capture run (read before the compositor lock).
+    let room = crate::cloud_graphics::html_room_canvases(state);
     let compositor = state.compositor.lock().await;
+    let mut canvases = compositor.banner_canvases();
+    for canvas in room {
+        if !canvases.contains(&canvas) {
+            canvases.push(canvas);
+        }
+    }
     crate::html_overlay::HtmlOverlayView {
         layers: compositor
             .banners
@@ -1292,7 +1301,7 @@ pub async fn html_overlay_view(state: &AppState) -> crate::html_overlay::HtmlOve
             .filter(|layer| layer.banner.kind == crate::protocol::BannerKind::Html)
             .map(|layer| (layer.banner.clone(), layer.fade.hides()))
             .collect(),
-        canvases: compositor.banner_canvases(),
+        canvases,
         fps: compositor.status.target_fps,
     }
 }
@@ -1318,6 +1327,10 @@ pub async fn set_banner_session_shape(state: &AppState, shape: Option<OverlaySes
 /// primary and auxiliary canvases, none without a run.
 pub async fn banner_prepare_canvases(state: &AppState) -> Vec<(u32, u32)> {
     state.compositor.lock().await.banner_canvases()
+}
+
+pub(crate) async fn static_graphics_banners(state: &AppState) -> Arc<BannerSet> {
+    Arc::clone(&state.compositor.lock().await.banners)
 }
 
 #[cfg(test)]
@@ -14077,6 +14090,127 @@ fn source_mask_allows(mask: SceneMask, dest_x: usize, dest_y: usize, fit: &Sourc
 
 fn source_pixel_len(source: &RgbaSource<'_>) -> usize {
     source.width as usize * source.height as usize * 4
+}
+
+/// Plan 249 S13b: the camera role a room publishes, from one camera frame.
+///
+/// The compositor stays the single owner of camera-source processing: with
+/// the key on, the same keyed picture the CPU draw builds (`KeyedLevelPlane`:
+/// plan 229's judged key, Hide edges, speck cleanup, despill, then the camera
+/// look) at the level a `out_width` x `out_height` draw reads; with the key
+/// off, the camera look on the area average. The result is the WHOLE source
+/// (no crop, fit, mirror or mask: the cloud scene renderer owns those),
+/// area-averaged to the logical size, as straight-alpha RGBA. `None` when the
+/// frame has no CPU bytes (a zero-copy capture) or the sizes are unusable.
+pub(crate) fn camera_role_rgba(
+    bytes: &[u8],
+    width: u32,
+    height: u32,
+    bgra: bool,
+    layout: &crate::protocol::LayoutSettings,
+    out_width: u32,
+    out_height: u32,
+) -> Option<Vec<u8>> {
+    if width == 0 || height == 0 || out_width == 0 || out_height == 0 {
+        return None;
+    }
+    if bytes.len() < width as usize * height as usize * 4 {
+        return None;
+    }
+    let source = RgbaSource {
+        bytes,
+        width,
+        height,
+        format: if bgra {
+            SourcePixelFormat::Bgra
+        } else {
+            SourcePixelFormat::Rgba
+        },
+    };
+    let look = layout.camera_look;
+    let mut out = vec![0u8; out_width as usize * out_height as usize * 4];
+    // Premultiplied area average of `(plane_width, plane_height)` texels into
+    // each output pixel; then straight alpha.
+    let average = |plane_width: u32,
+                   plane_height: u32,
+                   texel: &dyn Fn(u32, u32) -> [f32; 4],
+                   out: &mut [u8]| {
+        for oy in 0..out_height {
+            let y0 = (u64::from(oy) * u64::from(plane_height) / u64::from(out_height)) as u32;
+            let y1 = ((u64::from(oy + 1) * u64::from(plane_height)).div_ceil(u64::from(out_height))
+                as u32)
+                .clamp(y0 + 1, plane_height);
+            for ox in 0..out_width {
+                let x0 = (u64::from(ox) * u64::from(plane_width) / u64::from(out_width)) as u32;
+                let x1 = ((u64::from(ox + 1) * u64::from(plane_width))
+                    .div_ceil(u64::from(out_width)) as u32)
+                    .clamp(x0 + 1, plane_width);
+                let mut sum = [0.0f32; 4];
+                for y in y0..y1 {
+                    for x in x0..x1 {
+                        let t = texel(x, y);
+                        for (total, value) in sum.iter_mut().zip(t) {
+                            *total += value;
+                        }
+                    }
+                }
+                let count = ((y1 - y0) * (x1 - x0)) as f32;
+                let alpha = sum[3] / count;
+                let index = (oy as usize * out_width as usize + ox as usize) * 4;
+                if alpha <= 0.0 {
+                    out[index..index + 4].copy_from_slice(&[0, 0, 0, 0]);
+                    continue;
+                }
+                let straight = |premultiplied: f32| {
+                    (premultiplied / count / alpha).round().clamp(0.0, 255.0) as u8
+                };
+                out[index..index + 4].copy_from_slice(&[
+                    straight(sum[0]),
+                    straight(sum[1]),
+                    straight(sum[2]),
+                    (alpha * 255.0).round().clamp(0.0, 255.0) as u8,
+                ]);
+            }
+        }
+    };
+    if let Some(spec) = camera_chroma_key(layout) {
+        let level = chroma_key_reduction_level(
+            f64::from(width),
+            f64::from(height),
+            f64::from(out_width),
+            f64::from(out_height),
+        );
+        let plane = KeyedLevelPlane::build(&source, &spec, look, level);
+        let (plane_width, plane_height) = (plane.width as u32, plane.height as u32);
+        average(
+            plane_width,
+            plane_height,
+            &|x, y| plane.texel(x, y),
+            &mut out,
+        );
+    } else {
+        // No key: every texel is kept (the capture alpha threshold still
+        // applies), and the look runs once on the averaged colour.
+        average(
+            width,
+            height,
+            &|x, y| {
+                let (r, g, b, a) = read_source_rgba(&source, x, y);
+                if a < 16 {
+                    return [0.0; 4];
+                }
+                [f32::from(r), f32::from(g), f32::from(b), 1.0]
+            },
+            &mut out,
+        );
+        if !look.is_neutral() {
+            for pixel in out.as_chunks_mut::<4>().0 {
+                let (r, g, b) = camera_look_rgb(pixel[0], pixel[1], pixel[2], look);
+                *pixel = [r, g, b, pixel[3]];
+            }
+        }
+    }
+    Some(out)
 }
 
 /// One source pixel, called once per destination pixel by every CPU blit.
@@ -29372,5 +29506,94 @@ mod live_background_cpu_tests {
             Some(crate::protocol::LiveBackgroundStillReason::CpuFallback)
         );
         assert_eq!((programs, scratch), (0, 0));
+    }
+}
+
+#[cfg(test)]
+mod camera_role_tests {
+    use super::*;
+
+    fn layout(key: bool) -> crate::protocol::LayoutSettings {
+        let mut layout = crate::protocol::default_layout_settings();
+        layout.camera_chroma_key_enabled = key;
+        layout.camera_chroma_key_color = "#00ff00".to_string();
+        layout
+    }
+    fn solid(rgb: [u8; 3], width: u32, height: u32) -> Vec<u8> {
+        [rgb[0], rgb[1], rgb[2], 255].repeat((width * height) as usize)
+    }
+
+    #[test]
+    fn the_key_clears_green_and_keeps_the_subject_opaque_at_the_logical_size() {
+        let out = camera_role_rgba(
+            &solid([0, 255, 0], 64, 36),
+            64,
+            36,
+            false,
+            &layout(true),
+            32,
+            18,
+        )
+        .unwrap();
+        assert_eq!(out.len(), 32 * 18 * 4);
+        assert!(
+            out.as_chunks::<4>().0.iter().all(|p| p[3] == 0),
+            "key green is transparent"
+        );
+        let out = camera_role_rgba(
+            &solid([200, 150, 120], 64, 36),
+            64,
+            36,
+            false,
+            &layout(true),
+            32,
+            18,
+        )
+        .unwrap();
+        assert!(out.as_chunks::<4>().0.iter().all(|p| p[3] == 255));
+    }
+
+    #[test]
+    fn without_a_key_the_frame_is_opaque_and_the_look_runs_once() {
+        let mut no_key = layout(false);
+        no_key.camera_look = crate::protocol::CameraLook {
+            brightness: 0.1,
+            contrast: 1.0,
+            saturation: 1.0,
+        };
+        let out =
+            camera_role_rgba(&solid([128, 128, 128], 8, 8), 8, 8, true, &no_key, 4, 4).unwrap();
+        let expected = camera_look_rgb(128, 128, 128, no_key.camera_look);
+        assert!(
+            out.as_chunks::<4>()
+                .0
+                .iter()
+                .all(|p| p[3] == 255 && (p[0], p[1], p[2]) == expected)
+        );
+    }
+
+    #[test]
+    fn mirror_and_crop_are_never_baked_into_the_camera_role() {
+        // Left half red, right half blue: the role keeps the source's left on the left.
+        let mut bytes = Vec::new();
+        for _ in 0..4 {
+            for x in 0..8 {
+                bytes.extend_from_slice(if x < 4 {
+                    &[255, 0, 0, 255]
+                } else {
+                    &[0, 0, 255, 255]
+                });
+            }
+        }
+        let mut mirrored = layout(false);
+        mirrored.camera_mirror = true;
+        let out = camera_role_rgba(&bytes, 8, 4, false, &mirrored, 4, 2).unwrap();
+        assert_eq!(&out[..4], &[255, 0, 0, 255]);
+        assert_eq!(&out[12..16], &[0, 0, 255, 255]);
+    }
+
+    #[test]
+    fn zero_copy_frames_without_bytes_are_unavailable() {
+        assert!(camera_role_rgba(&[], 64, 36, true, &layout(true), 32, 18).is_none());
     }
 }

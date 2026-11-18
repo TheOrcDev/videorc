@@ -40,7 +40,7 @@ pub(crate) struct LiveChatPersistenceFailure {
 }
 
 impl LiveChatPersistenceFailure {
-    fn retryable(message: impl Into<String>) -> Self {
+    pub(crate) fn retryable(message: impl Into<String>) -> Self {
         Self {
             kind: LiveChatPersistenceFailureKind::Retryable,
             message: message.into(),
@@ -269,12 +269,6 @@ async fn run_worker(
                             ));
                             break;
                         }
-                        WriteErrorDisposition::RetryFromProvider => {
-                            let _ = request.acknowledged.send(Err(
-                                LiveChatPersistenceFailure::retryable(error.to_string()),
-                            ));
-                            break;
-                        }
                         WriteErrorDisposition::Terminal => {
                             let _ = request.acknowledged.send(Err(
                                 LiveChatPersistenceFailure::terminal(format!(
@@ -302,13 +296,12 @@ async fn run_worker(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WriteErrorDisposition {
     RetryInWorker,
-    RetryFromProvider,
     Terminal,
 }
 
 fn classify_write_error(error: &anyhow::Error) -> WriteErrorDisposition {
     if error.downcast_ref::<MissingLiveChatSession>().is_some() {
-        return WriteErrorDisposition::RetryFromProvider;
+        return WriteErrorDisposition::Terminal;
     }
     let sqlite_error = error
         .chain()
@@ -419,7 +412,7 @@ mod tests {
             .persist_batch(messages.clone())
             .await
             .unwrap_err();
-        assert_eq!(error.kind, LiveChatPersistenceFailureKind::Retryable);
+        assert_eq!(error.kind, LiveChatPersistenceFailureKind::Terminal);
         assert!(
             database
                 .list_live_chat_messages_recent("batch-session", 200)
@@ -451,6 +444,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cloud_show_chat_persists_after_the_library_row_is_opened() {
+        let database = Database::open_in_memory_for_tests();
+        database
+            .sync_cloud_show_session(&Database::cloud_show_status_for_tests())
+            .unwrap();
+        let persistence = LiveChatPersistence::new(database.clone());
+        persistence
+            .persist(message_for_session("sh_cloud_chat", 1))
+            .await
+            .unwrap();
+        assert_eq!(
+            database
+                .list_live_chat_messages_recent("sh_cloud_chat", 10)
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
     async fn missing_session_is_reported_instead_of_acknowledged_as_persisted() {
         let database = Database::open_in_memory_for_tests();
         let persistence = LiveChatPersistence::new(database.clone());
@@ -460,6 +473,7 @@ mod tests {
             .unwrap_err();
 
         assert!(error.to_string().contains("missing session"), "{error}");
+        assert!(error.is_terminal());
         assert_eq!(persistence.transaction_count(), 0);
     }
 

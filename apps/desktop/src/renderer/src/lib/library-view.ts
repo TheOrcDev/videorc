@@ -84,8 +84,12 @@ export function hasBuddyReport(session: Pick<SessionSummary, 'mode'>): boolean {
 /** "tee" is the internal ffmpeg fan-out container for record+stream sessions —
  * show the user what the file actually is instead (F-019). */
 export function sessionFormatLabel(session: SessionSummary): string | null {
+  if (session.mode === 'cloud-stream' || session.mode === 'cloud-room') {
+    return session.streamPreset ? `Cloud show · ${session.streamPreset}` : 'Cloud show'
+  }
   if (session.mp4Path) {
-    return 'MP4'
+    // An imported QuickTime file sits in the playable slot unchanged (F4).
+    return session.mp4Path.toLowerCase().endsWith('.mov') ? 'MOV' : 'MP4'
   }
   if (!session.container) {
     return null
@@ -402,7 +406,9 @@ export const CAPTURE_HOLD_REASON = 'Available when you stop recording or end the
 export function canExportMp4(session: SessionSummary): boolean {
   return (
     Boolean(
-      session.status === 'completed' && session.outputPath?.endsWith('.mkv') && !session.mp4Path
+      session.status === 'completed' &&
+      session.outputPath?.toLowerCase().endsWith('.mkv') &&
+      !session.mp4Path
     ) &&
     !isFinalizingSession(session) &&
     separateFileStopped(session)?.exportable !== false

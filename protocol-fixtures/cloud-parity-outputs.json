@@ -1,0 +1,384 @@
+{
+  "schemaVersion": 1,
+  "description": "Plan 249 S17: managed output admission and effective profiles. Desktop shared/cloud-output-profile.ts, web lib/cloud/media/output-profile.ts and the fake web (scripts/lib/cloud-parity-outputs-contract.mjs) reproduce every case; the web copy is tests/fixtures/cloud-parity-outputs.json, byte for byte.",
+  "admission": [
+    {
+      "name": "1080p30 at 6 Mbps is the measured profile",
+      "outputs": [
+        {
+          "orientation": "horizontal",
+          "width": 1920,
+          "height": 1080,
+          "fps": 30,
+          "videoKbps": 6000
+        }
+      ],
+      "problem": null,
+      "profile": {
+        "version": 1,
+        "requested": [
+          {
+            "orientation": "horizontal",
+            "width": 1920,
+            "height": 1080,
+            "fps": 30,
+            "videoKbps": 6000
+          }
+        ],
+        "effective": [
+          {
+            "orientation": "horizontal",
+            "width": 1920,
+            "height": 1080,
+            "fps": 60,
+            "pictureFps": 30,
+            "videoKbps": 6000,
+            "audioKbps": 160,
+            "differences": []
+          }
+        ],
+        "qualification": "phase0-1080p30-picture",
+        "higherProfilesQualified": false,
+        "pricePerHour": null,
+        "maxProgramEgresses": 2
+      }
+    },
+    {
+      "name": "720p30 is scaled up to the 1080p output",
+      "outputs": [
+        {
+          "orientation": "horizontal",
+          "width": 1280,
+          "height": 720,
+          "fps": 30,
+          "videoKbps": 4500
+        }
+      ],
+      "problem": null,
+      "profile": {
+        "version": 1,
+        "requested": [
+          {
+            "orientation": "horizontal",
+            "width": 1280,
+            "height": 720,
+            "fps": 30,
+            "videoKbps": 4500
+          }
+        ],
+        "effective": [
+          {
+            "orientation": "horizontal",
+            "width": 1920,
+            "height": 1080,
+            "fps": 60,
+            "pictureFps": 30,
+            "videoKbps": 6000,
+            "audioKbps": 160,
+            "differences": ["resolution", "bitrate"]
+          }
+        ],
+        "qualification": "phase0-1080p30-picture",
+        "higherProfilesQualified": false,
+        "pricePerHour": null,
+        "maxProgramEgresses": 2
+      }
+    },
+    {
+      "name": "1080p60 at 8 Mbps is admitted and disclosed",
+      "outputs": [
+        {
+          "orientation": "horizontal",
+          "width": 1920,
+          "height": 1080,
+          "fps": 60,
+          "videoKbps": 8000
+        }
+      ],
+      "problem": null,
+      "profile": {
+        "version": 1,
+        "requested": [
+          {
+            "orientation": "horizontal",
+            "width": 1920,
+            "height": 1080,
+            "fps": 60,
+            "videoKbps": 8000
+          }
+        ],
+        "effective": [
+          {
+            "orientation": "horizontal",
+            "width": 1920,
+            "height": 1080,
+            "fps": 60,
+            "pictureFps": 30,
+            "videoKbps": 6000,
+            "audioKbps": 160,
+            "differences": ["fps", "bitrate"]
+          }
+        ],
+        "qualification": "phase0-1080p30-picture",
+        "higherProfilesQualified": false,
+        "pricePerHour": null,
+        "maxProgramEgresses": 2
+      }
+    },
+    {
+      "name": "horizontal and vertical are two outputs",
+      "outputs": [
+        {
+          "orientation": "horizontal",
+          "width": 1920,
+          "height": 1080,
+          "fps": 30,
+          "videoKbps": 6000
+        },
+        {
+          "orientation": "vertical",
+          "width": 1080,
+          "height": 1920,
+          "fps": 30,
+          "videoKbps": 6000
+        }
+      ],
+      "problem": null,
+      "profile": {
+        "version": 1,
+        "requested": [
+          {
+            "orientation": "horizontal",
+            "width": 1920,
+            "height": 1080,
+            "fps": 30,
+            "videoKbps": 6000
+          },
+          {
+            "orientation": "vertical",
+            "width": 1080,
+            "height": 1920,
+            "fps": 30,
+            "videoKbps": 6000
+          }
+        ],
+        "effective": [
+          {
+            "orientation": "horizontal",
+            "width": 1920,
+            "height": 1080,
+            "fps": 60,
+            "pictureFps": 30,
+            "videoKbps": 6000,
+            "audioKbps": 160,
+            "differences": []
+          },
+          {
+            "orientation": "vertical",
+            "width": 1080,
+            "height": 1920,
+            "fps": 60,
+            "pictureFps": 30,
+            "videoKbps": 6000,
+            "audioKbps": 160,
+            "differences": []
+          }
+        ],
+        "qualification": "phase0-1080p30-picture",
+        "higherProfilesQualified": false,
+        "pricePerHour": null,
+        "maxProgramEgresses": 4
+      }
+    },
+    {
+      "name": "a smaller vertical scales to 1080x1920",
+      "outputs": [
+        {
+          "orientation": "vertical",
+          "width": 720,
+          "height": 1280,
+          "fps": 30,
+          "videoKbps": 3500
+        }
+      ],
+      "problem": null,
+      "profile": {
+        "version": 1,
+        "requested": [
+          {
+            "orientation": "vertical",
+            "width": 720,
+            "height": 1280,
+            "fps": 30,
+            "videoKbps": 3500
+          }
+        ],
+        "effective": [
+          {
+            "orientation": "vertical",
+            "width": 1080,
+            "height": 1920,
+            "fps": 60,
+            "pictureFps": 30,
+            "videoKbps": 6000,
+            "audioKbps": 160,
+            "differences": ["resolution", "bitrate"]
+          }
+        ],
+        "qualification": "phase0-1080p30-picture",
+        "higherProfilesQualified": false,
+        "pricePerHour": null,
+        "maxProgramEgresses": 2
+      }
+    },
+    {
+      "name": "1440p is refused, never sent as 1080p",
+      "outputs": [
+        {
+          "orientation": "horizontal",
+          "width": 2560,
+          "height": 1440,
+          "fps": 60,
+          "videoKbps": 9000
+        }
+      ],
+      "problem": "Cloud talk shows send 1080p. 1440p hasn't been measured on cloud outputs yet, so it can't be used. Choose 1080p or lower for the room, or stream directly.",
+      "profile": null
+    },
+    {
+      "name": "4K is refused, never sent as 1080p",
+      "outputs": [
+        {
+          "orientation": "horizontal",
+          "width": 3840,
+          "height": 2160,
+          "fps": 30,
+          "videoKbps": 20000
+        }
+      ],
+      "problem": "Cloud talk shows send 1080p. 4K hasn't been measured on cloud outputs yet, so it can't be used. Choose 1080p or lower for the room, or stream directly.",
+      "profile": null
+    },
+    {
+      "name": "a 4K vertical is refused",
+      "outputs": [
+        {
+          "orientation": "vertical",
+          "width": 2160,
+          "height": 3840,
+          "fps": 30,
+          "videoKbps": 6000
+        }
+      ],
+      "problem": "Cloud talk shows send 1080p. 4K hasn't been measured on cloud outputs yet, so it can't be used. Choose 1080p or lower for the room, or stream directly.",
+      "profile": null
+    },
+    {
+      "name": "120 fps is refused",
+      "outputs": [
+        {
+          "orientation": "horizontal",
+          "width": 1920,
+          "height": 1080,
+          "fps": 120,
+          "videoKbps": 6000
+        }
+      ],
+      "problem": "Cloud talk shows send at most 60 fps.",
+      "profile": null
+    },
+    {
+      "name": "a vertical output must be 9:16",
+      "outputs": [
+        {
+          "orientation": "vertical",
+          "width": 1920,
+          "height": 1080,
+          "fps": 30,
+          "videoKbps": 6000
+        }
+      ],
+      "problem": "A vertical cloud output must be 9:16.",
+      "profile": null
+    },
+    {
+      "name": "two horizontal outputs are refused",
+      "outputs": [
+        {
+          "orientation": "horizontal",
+          "width": 1920,
+          "height": 1080,
+          "fps": 30,
+          "videoKbps": 6000
+        },
+        {
+          "orientation": "horizontal",
+          "width": 1280,
+          "height": 720,
+          "fps": 30,
+          "videoKbps": 6000
+        }
+      ],
+      "problem": "Choose one output per orientation before opening the room.",
+      "profile": null
+    },
+    {
+      "name": "no output is refused",
+      "outputs": [],
+      "problem": "Choose one output per orientation before opening the room.",
+      "profile": null
+    }
+  ],
+  "destinations": [
+    {
+      "name": "YouTube Vertical into a horizontal-only room",
+      "destination": {
+        "label": "YouTube Vertical",
+        "orientation": "vertical",
+        "url": "rtmp://a.rtmp.youtube.com/live2"
+      },
+      "orientations": ["horizontal"],
+      "problem": "YouTube Vertical is vertical, and this room opened without a vertical output. Close the room and open it again with YouTube Vertical on."
+    },
+    {
+      "name": "TikTok into a room with a vertical output",
+      "destination": {
+        "label": "TikTok",
+        "orientation": "vertical",
+        "url": ""
+      },
+      "orientations": ["horizontal", "vertical"],
+      "problem": null
+    },
+    {
+      "name": "Instagram over RTMPS",
+      "destination": {
+        "label": "Instagram",
+        "orientation": "vertical",
+        "url": "rtmps://live-upload.instagram.com:443/rtmp/"
+      },
+      "orientations": ["vertical"],
+      "problem": null
+    },
+    {
+      "name": "an SRT address is not a cloud destination",
+      "destination": {
+        "label": "Custom",
+        "orientation": "horizontal",
+        "url": "srt://example.com:9000"
+      },
+      "orientations": ["horizontal"],
+      "problem": "Custom needs an rtmp:// or rtmps:// address for cloud output."
+    },
+    {
+      "name": "Twitch into a horizontal room",
+      "destination": {
+        "label": "Twitch",
+        "orientation": "horizontal",
+        "url": "rtmp://live.twitch.tv/app"
+      },
+      "orientations": ["horizontal"],
+      "problem": null
+    }
+  ]
+}

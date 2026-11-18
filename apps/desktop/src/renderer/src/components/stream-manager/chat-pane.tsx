@@ -1,3 +1,4 @@
+import type { TimelineMarker } from '../../../../shared/cloud-markers'
 import type { ChatDelivery, ChatDeliveryMessage } from '../../../../shared/chat-delivery'
 import {
   lazy,
@@ -37,7 +38,7 @@ import {
   type ChatCommandReplyFailed,
   type ChatCommandsSummary
 } from '../../../../shared/chat-commands'
-import type { ClipContext, ClipLength, MarkerContext, SessionMarker } from '@/lib/backend'
+import type { ClipContext, ClipLength, MarkerContext } from '@/lib/backend'
 import { clipLastWords } from '../../../../shared/clip-lengths'
 
 /** What follows "the last" in the composer's clip words: "30 seconds" for
@@ -240,8 +241,8 @@ export function ChatPane({
   sendOperation?: CommentsSendOperation | null
   sendFailures?: ChatSendFailure[]
   markerContext?: MarkerContext | null
-  onMarker?: (label?: string) => Promise<SessionMarker>
-  onUndoMarker?: (marker: SessionMarker) => Promise<void>
+  onMarker?: (label?: string) => Promise<TimelineMarker>
+  onUndoMarker?: (marker: TimelineMarker) => Promise<void>
   /** `/clip` (plan 181 R4): the Clip button's action, answered with its words.
    * Plan 199: `/clip` asks for 30 s, `/clip 60` for the minute. */
   onClip?: (seconds: ClipLength) => Promise<string>
@@ -797,8 +798,8 @@ export function Composer({
   onBuddy
 }: {
   markerContext?: MarkerContext | null
-  onMarker?: (label?: string) => Promise<SessionMarker>
-  onUndoMarker?: (marker: SessionMarker) => Promise<void>
+  onMarker?: (label?: string) => Promise<TimelineMarker>
+  onUndoMarker?: (marker: TimelineMarker) => Promise<void>
   onClip?: (seconds: ClipLength) => Promise<string>
   /**
    * Plan 186 S7: `/banner <name>` shows or hides one of these, `/banner off`
@@ -848,7 +849,7 @@ export function Composer({
   const [localPending, setLocalPending] = useState(false)
   const localPendingRef = useRef(false)
   const [notice, setNotice] = useState<string | null>(null)
-  const [savedMarker, setSavedMarker] = useState<SessionMarker | null>(null)
+  const [savedMarker, setSavedMarker] = useState<TimelineMarker | null>(null)
   const [completionDismissed, setCompletionDismissed] = useState(false)
   const [completionIndex, setCompletionIndex] = useState(0)
   const heardMarkerId = useRef<string | null>(null)
@@ -864,7 +865,9 @@ export function Composer({
     heardMarkerRevision.current = marker.revision
     setSavedMarker(marker)
     setNotice(
-      `Marker saved at ${markerTime(marker.atSeconds)} · ${marker.label ?? 'Untitled marker'}`
+      'showId' in marker
+        ? 'Marker saved on the show timeline; no media to extract.'
+        : `Marker saved at ${markerTime(marker.atSeconds)} · ${marker.label ?? 'Untitled marker'}`
     )
   }, [markerContext?.lastMarker])
 
@@ -952,8 +955,10 @@ export function Composer({
   // re-sends only where it failed after a partial send.
   const [lastSend, setLastSend] = useState<{ text: string; options?: ChatSendOptions } | null>(null)
   const retry = pending || !lastSend ? null : chatSendRetryPlan(operation, failures)
+  // Keyed on the send (QA F22): a second message that fails the same way is
+  // a new failure and gets its words back too.
   const failureKey = retry
-    ? failures.map((failure) => `${failure.destinationId}:${failure.reason}`).join('|')
+    ? `${operation?.id ?? ''}#${failures.map((failure) => `${failure.destinationId}:${failure.reason}`).join('|')}`
     : null
   const restoreDraft = retry?.restoreDraft ?? false
   const handledFailureRef = useRef<string | null>(null)
@@ -1121,7 +1126,9 @@ export function Composer({
         .then((marker) => {
           setSavedMarker(marker)
           setNotice(
-            `Marker saved at ${markerTime(marker.atSeconds)} · ${marker.label ?? 'Untitled marker'}`
+            'showId' in marker
+              ? 'Marker saved on the show timeline; no media to extract.'
+              : `Marker saved at ${markerTime(marker.atSeconds)} · ${marker.label ?? 'Untitled marker'}`
           )
           if (draftRef.current === submitted) setDraft('')
         })

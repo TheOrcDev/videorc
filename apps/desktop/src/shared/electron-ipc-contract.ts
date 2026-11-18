@@ -1,3 +1,13 @@
+import { parseRoomCameraResources } from './room-camera'
+import {
+  ROOM_PROGRAM_CAMERA_SEND_OUTCOMES,
+  parseRoomProgramCameraFrame,
+  parseRoomProgramCameraResources
+} from './room-program-camera'
+import { parseRoomFrameCommand, parseRoomFrameReply, parseRoomFrameResources } from './room-frame'
+import { parseRoomSystemAudioCommand, parseRoomSystemAudioFrame } from './room-system-audio'
+import { parseRoomMicrophoneCommand } from './room-microphone'
+import { parseRoomPcmCommand, parseRoomPcmFrame, parseRoomPcmResources } from './room-pcm'
 import type { FrontAppChanged } from './front-app'
 import { APP_ICONS_MAX_IDS } from './app-icons'
 import {
@@ -95,6 +105,7 @@ import {
   BUDDY_PET_SKIPPED_FILES_MAX
 } from './buddy-assets'
 import { openableChatLink } from './chat-link'
+import { SCREEN_IMAGE_BATCH_MAX } from './screen-image-files'
 import { SCOPE_RECONNECT_PLATFORMS } from './platform-scopes'
 import { MAX_RELAYED_MODERATION_OPERATIONS, MODERATION_PHASES } from './chat-moderation'
 import {
@@ -129,6 +140,22 @@ type InvokeDefinition<TMethod> = TMethod extends (...args: infer TArgs) => Promi
 export const electronInvokeApiMethods = {
   'backend:get-connection': 'getBackendConnection',
   'backend:get-logs': 'getBackendLogs',
+  'room-pcm:test': 'roomPcmTest',
+  'room-microphone:pcm': 'roomMicrophonePcm',
+  'room-system:pcm': 'roomSystemAudioPcm',
+  'room-system:inspect': 'getRoomSystemAudioResources',
+  'room-microphone:inspect': 'getRoomNativeMicrophoneResources',
+  'room-pcm:inspect': 'getRoomPcmTestResources',
+  'room-frame:test': 'roomFrameTest',
+  'room-frame:inspect': 'getRoomFrameTestResources',
+  'room-camera:processed': 'roomProcessedCamera',
+  'room-camera:inspect': 'getRoomProcessedCameraResources',
+  'room-camera:fixture': 'roomProcessedCameraFixture',
+  'room-program-camera:available': 'roomProgramCameraAvailable',
+  'room-program-camera:open': 'openRoomProgramCamera',
+  'room-program-camera:frame': 'sendRoomProgramCameraFrame',
+  'room-program-camera:close': 'closeRoomProgramCamera',
+  'room-program-camera:inspect': 'getRoomProgramCameraResources',
   'app:get-runtime-info': 'getRuntimeInfo',
   'app:front-window-watch': 'setFrontWindowWatch',
   'app:self-bundle-ids': 'getSelfBundleIds',
@@ -136,7 +163,9 @@ export const electronInvokeApiMethods = {
   'app:retry-hardware-acceleration': 'retryHardwareAcceleration',
   'app:set-native-theme': 'setNativeTheme',
   'app:exit': 'exitApp',
-  'screens:pick-image': 'pickScreenImage',
+  'screens:pick-images': 'pickScreenImages',
+  'screens:authorize-dropped-images': 'authorizeDroppedScreenImages',
+  'screens:release-images': 'releaseScreenImages',
   'banners:pick-image': 'pickBannerImage',
   'banners:pick-html': 'pickBannerHtml',
   'sounds:pick-files': 'pickSoundFiles',
@@ -316,10 +345,28 @@ export const electronInvokeApiMethods = {
 } as const satisfies Record<string, keyof VideorcApi>
 
 export type ElectronInvokeChannel = keyof typeof electronInvokeApiMethods
+/**
+ * Channels whose preload method converts its arguments before they cross IPC.
+ * Dropped images reach preload as Files and leave it as their paths, so page
+ * script can never name a path itself.
+ */
+type PreloadConvertedInvokeArgs = {
+  'screens:authorize-dropped-images': [paths: string[]]
+}
+
+type ApiInvokeDefinition<TChannel extends ElectronInvokeChannel> = InvokeDefinition<
+  NonNullable<VideorcApi[(typeof electronInvokeApiMethods)[TChannel]]>
+>
+
 export type ElectronIpcInvokeMap = {
-  [TChannel in ElectronInvokeChannel]: TChannel extends 'app:front-window-watch'
-    ? { args: [options: { enabled: boolean }]; result: void }
-    : InvokeDefinition<NonNullable<VideorcApi[(typeof electronInvokeApiMethods)[TChannel]]>>
+  [TChannel in ElectronInvokeChannel]: TChannel extends keyof PreloadConvertedInvokeArgs
+    ? {
+        args: PreloadConvertedInvokeArgs[TChannel]
+        result: ApiInvokeDefinition<TChannel>['result']
+      }
+    : TChannel extends 'app:front-window-watch'
+      ? { args: [options: { enabled: boolean }]; result: void }
+      : ApiInvokeDefinition<TChannel>
 }
 export type ElectronInvokeArgs<TChannel extends ElectronInvokeChannel> =
   ElectronIpcInvokeMap[TChannel]['args']
@@ -2046,6 +2093,70 @@ const specificRuntimeInvokeContracts = {
     previewSurfaceStatusSchema
   ),
   'preview-surface:destroy': invokeContract(optionalGenerationOnlyArgs, previewSurfaceStatusSchema),
+  'room-pcm:inspect': invokeContract(
+    noArgs,
+    runtimeSchema('PCM resources', (value) => parseRoomPcmResources(value))
+  ),
+  'room-system:pcm': invokeContract(
+    tupleSchema([runtimeSchema('System command', parseRoomSystemAudioCommand)]),
+    nullableSchema(runtimeSchema('System frame', (value) => parseRoomSystemAudioFrame(value)))
+  ),
+  'room-system:inspect': invokeContract(
+    noArgs,
+    runtimeSchema('System resources', parseRoomPcmResources)
+  ),
+  'room-microphone:inspect': invokeContract(
+    noArgs,
+    runtimeSchema('Microphone resources', parseRoomPcmResources)
+  ),
+  'room-microphone:pcm': invokeContract(
+    tupleSchema([runtimeSchema('Microphone command', parseRoomMicrophoneCommand)]),
+    nullableSchema(runtimeSchema('PCM frame', (value) => parseRoomPcmFrame(value)))
+  ),
+  // Plan 249 S13a: dev-only native camera-role frame fixture.
+  'room-frame:inspect': invokeContract(
+    noArgs,
+    runtimeSchema('Frame resources', (value) => parseRoomFrameResources(value))
+  ),
+  // Plan 249 S13b: dev-only processed camera (native owner, real processing).
+  'room-camera:processed': invokeContract(
+    tupleSchema([runtimeSchema('Camera command', (value) => parseRoomFrameCommand(value))]),
+    runtimeSchema('Camera reply', (value) => parseRoomFrameReply(value))
+  ),
+  'room-camera:inspect': invokeContract(
+    noArgs,
+    runtimeSchema('Camera resources', (value) => parseRoomCameraResources(value))
+  ),
+  'room-camera:fixture': invokeContract(
+    tupleSchema([enumSchema(['fixture-switch', 'fixture-unplug'])]),
+    runtimeSchema('Camera fixture reply', (value) => value)
+  ),
+  // Plan 249 S23: the room's Program preview as Videorc Camera (dev-gated, off).
+  'room-program-camera:available': invokeContract(noArgs, booleanSchema),
+  'room-program-camera:open': invokeContract(
+    tupleSchema([numberSchema({ integer: true, min: 1, max: 0xffff_ffff })])
+  ),
+  'room-program-camera:frame': invokeContract(
+    tupleSchema([
+      runtimeSchema('Room program frame', (value) => parseRoomProgramCameraFrame(value))
+    ]),
+    enumSchema(ROOM_PROGRAM_CAMERA_SEND_OUTCOMES)
+  ),
+  'room-program-camera:close': invokeContract(
+    tupleSchema([numberSchema({ integer: true, min: 1, max: 0xffff_ffff })])
+  ),
+  'room-program-camera:inspect': invokeContract(
+    noArgs,
+    runtimeSchema('Room program resources', (value) => parseRoomProgramCameraResources(value))
+  ),
+  'room-frame:test': invokeContract(
+    tupleSchema([runtimeSchema('Frame command', (value) => parseRoomFrameCommand(value))]),
+    runtimeSchema('Frame reply', (value) => parseRoomFrameReply(value))
+  ),
+  'room-pcm:test': invokeContract(
+    tupleSchema([runtimeSchema('PCM command', (value) => parseRoomPcmCommand(value))]),
+    nullableSchema(runtimeSchema('PCM frame', (value) => parseRoomPcmFrame(value)))
+  ),
   'preview-surface:status': invokeContract(noArgs, previewSurfaceStatusSchema),
   'preview-window:set-aspect-ratio': invokeContract(
     tupleSchema([numberSchema({ min: 1, max: 65_536 }), numberSchema({ min: 1, max: 65_536 })])
@@ -2095,6 +2206,13 @@ const specificRuntimeInvokeContracts = {
   'resource:trash-session-deletion': invokeContract(tupleSchema([boundedIdentifier])),
   'system:check-directory': invokeContract(tupleSchema([boundedIdentifier])),
   'backgrounds:asset-exists': invokeContract(tupleSchema([boundedIdentifier])),
+  'screens:authorize-dropped-images': invokeContract(
+    tupleSchema([arraySchema(pathSchema, { maxLength: SCREEN_IMAGE_BATCH_MAX })])
+  ),
+  'screens:release-images': invokeContract(
+    tupleSchema([arraySchema(boundedIdentifier, { maxLength: SCREEN_IMAGE_BATCH_MAX })]),
+    undefinedSchema
+  ),
   'buddy-assets:remove': invokeContract(
     tupleSchema([stringSchema({ minLength: 1, maxLength: 128 })]),
     undefinedSchema
@@ -2215,7 +2333,7 @@ export const boundedPassthroughElectronInvokeChannels = [
   'app:get-runtime-info',
   'app:retry-hardware-acceleration',
   'app:set-native-theme',
-  'screens:pick-image',
+  'screens:pick-images',
   'backgrounds:import-image',
   'scheduled-streams:import-thumbnail',
   'backgrounds:bundled-assets',

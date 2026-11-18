@@ -1187,13 +1187,17 @@ impl CommentsSendOperation {
         for delivery in &mut self.destinations {
             if delivery.phase == DestinationDeliveryPhase::Pending {
                 delivery.phase = DestinationDeliveryPhase::TimedOutUnknown;
-                delivery.reason = Some("interrupted-before-confirmation".to_string());
+                delivery.reason = Some(INTERRUPTED_BEFORE_CONFIRMATION.to_string());
             }
         }
         self.phase = aggregate_send_phase(&self.destinations);
         self.updated_at = now;
     }
 }
+
+/// The reason a send the previous process left `Sending` carries after the
+/// startup reconcile: the provider may or may not have the post.
+pub(crate) const INTERRUPTED_BEFORE_CONFIRMATION: &str = "interrupted-before-confirmation";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderSendReceipt {
@@ -1254,6 +1258,10 @@ pub struct LiveChatCoordinator {
     /// (`FakeChatConfig::echo_sends`), each with its echo task's inbox;
     /// session-scoped like `senders`.
     fake_echo: HashMap<String, tokio::sync::mpsc::UnboundedSender<LiveChatMessage>>,
+    /// Plan 249 S18: this session was attached again after a resume, so a
+    /// provider may redeliver chat older than the bounded transcript; such
+    /// rows are checked against SQLite before they fire anything.
+    resumed: bool,
 }
 
 /// Minimal authoritative answer needed at the comment-card commit edge. Do
@@ -1340,6 +1348,7 @@ impl LiveChatCoordinator {
             seventv_task: None,
             seventv_status: crate::seventv::SevenTvStatus::default(),
             fake_echo: HashMap::new(),
+            resumed: false,
         }
     }
 
@@ -1528,6 +1537,68 @@ impl LiveChatCoordinator {
         self.fake_echo.clear();
         self.chatters_seen.clear();
         self.seventv_indexes = Arc::default();
+        self.resumed = false;
+    }
+
+    /// Plan 249 S18: attach a show's chat again after a resume. The same
+    /// lifecycle bump and connector/sender reset as `start_session`, but the
+    /// show's transcript, its de-duplication set, its first-time chatters and
+    /// the time chat first attached stay: a provider's redelivery on reconnect
+    /// is a duplicate, never a new command reply, greeting or Sidekick turn,
+    /// and chat sent while detached is answered once. `history` (oldest first)
+    /// seeds them when the buffer holds another session or nothing (after a
+    /// relaunch, or a cleared view: de-duplication outranks the cleared view).
+    pub(crate) fn resume_session(
+        &mut self,
+        session_id: String,
+        providers: Vec<LiveChatProviderState>,
+        started_at: chrono::DateTime<chrono::Utc>,
+        history: Vec<LiveChatMessage>,
+    ) {
+        let retained = !self.messages.is_empty()
+            && self
+                .messages
+                .iter()
+                .all(|message| message.session_id == session_id);
+        self.abort_tasks();
+        self.generation = self.generation.wrapping_add(1);
+        self.session_generation = self.session_generation.wrapping_add(1);
+        if !retained {
+            self.messages.clear();
+            self.seen.clear();
+            self.chatters_seen.clear();
+            self.unread_count = 0;
+            self.trimmed_count = 0;
+            self.duplicates_skipped = 0;
+            self.messages_received = 0;
+            let skip = history.len().saturating_sub(self.max_messages);
+            for message in history
+                .into_iter()
+                .skip(skip)
+                .filter(|message| message.session_id == session_id)
+            {
+                if self.seen.insert(message.id.clone()) {
+                    self.messages.push_back(message);
+                }
+            }
+        }
+        for message in &self.messages {
+            if let Some(author_id) = message.author_id.as_deref()
+                && counts_as_chatter(message)
+            {
+                self.chatters_seen
+                    .insert(chatter_key(message.platform, author_id));
+            }
+        }
+        self.reconnect_count = self.reconnect_count.saturating_add(1);
+        self.resumed = true;
+        self.session_id = Some(session_id);
+        self.session_started_at = Some(started_at);
+        self.providers = providers;
+        self.senders.clear();
+        self.reattach.clear();
+        self.fake_echo.clear();
+        self.seventv_indexes = Arc::default();
     }
 
     /// Abort connector tasks and mark every connected provider `ended`. The transcript is
@@ -1547,6 +1618,7 @@ impl LiveChatCoordinator {
         self.reattach.clear();
         self.fake_echo.clear();
         self.seventv_indexes = Arc::default();
+        self.resumed = false;
     }
 
     /// Clear the local message view (buffer + unread) without touching providers, the
@@ -2193,9 +2265,74 @@ pub async fn start_live_chat(state: &AppState, params: LiveChatStartParams) -> L
     .await
 }
 
+/// Plan 249 S18: how a chat session attaches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ChatAttach {
+    /// A new session: fresh transcript, arrivals and Sidekick.
+    Fresh,
+    /// The same show again after a resume: its transcript, de-duplication,
+    /// first-time chatters, arrivals, stream record and a Sidekick already
+    /// running for it all stay; `first_attached_at` keeps the history fence.
+    Resume {
+        first_attached_at: chrono::DateTime<chrono::Utc>,
+    },
+}
+
+/// Plan 249 S18: attach a cloud show's chat again after a resume or a
+/// relaunch. Exactly one reader set: any running connectors are aborted
+/// under the same lifecycle fence before the new ones attach.
+pub(crate) async fn resume_live_chat(
+    state: &AppState,
+    params: LiveChatStartParams,
+    first_attached_at: chrono::DateTime<chrono::Utc>,
+) -> LiveChatSnapshot {
+    let session_id = params.session_id.clone();
+    let snapshot = attach_live_chat(
+        state,
+        params,
+        ChatAttach::Resume { first_attached_at },
+        std::future::ready(()),
+        std::future::ready(()),
+    )
+    .await;
+    // Plan 249 S18: command triggers the previous attach (or process) consumed
+    // but never answered are recovered once the readers are back.
+    let task_state = state.clone();
+    tokio::spawn(async move {
+        crate::chat_commands::recover_pending_replies(
+            &task_state,
+            &session_id,
+            Some(first_attached_at),
+        )
+        .await;
+    });
+    snapshot
+}
+
 async fn start_live_chat_after_install<F, G>(
     state: &AppState,
     params: LiveChatStartParams,
+    after_install: F,
+    before_snapshot_emit: G,
+) -> LiveChatSnapshot
+where
+    F: std::future::Future<Output = ()>,
+    G: std::future::Future<Output = ()>,
+{
+    attach_live_chat(
+        state,
+        params,
+        ChatAttach::Fresh,
+        after_install,
+        before_snapshot_emit,
+    )
+    .await
+}
+
+async fn attach_live_chat<F, G>(
+    state: &AppState,
+    params: LiveChatStartParams,
+    attach: ChatAttach,
     after_install: F,
     before_snapshot_emit: G,
 ) -> LiveChatSnapshot
@@ -2271,31 +2408,78 @@ where
             provider.message = "Waiting for X broadcast context.".to_string();
         }
     }
+    // Plan 249 S18: a resume reads the show's persisted transcript before
+    // taking any fence, in case the buffer no longer holds it.
+    let history = match attach {
+        ChatAttach::Fresh => Vec::new(),
+        ChatAttach::Resume { .. } => {
+            let buffered = {
+                // The same test `resume_session` applies to keep the buffer.
+                let coordinator = state.live_chat.lock().await;
+                !coordinator.messages.is_empty()
+                    && coordinator
+                        .messages
+                        .iter()
+                        .all(|message| message.session_id == params.session_id)
+            };
+            if buffered {
+                Vec::new()
+            } else {
+                let database = state.database.clone();
+                let session_id = params.session_id.clone();
+                tokio::task::spawn_blocking(move || {
+                    database.list_live_chat_messages_recent(&session_id, DEFAULT_MAX_CHAT_MESSAGES)
+                })
+                .await
+                .ok()
+                .and_then(Result::ok)
+                .unwrap_or_default()
+            }
+        }
+    };
     let lifecycle_delivery = state.live_chat_persistence.begin_delivery().await;
     // A new chat session replaces any co-host session; keep that retirement
     // in the same lifecycle transaction as the coordinator replacement so a
     // concurrent start/stop cannot apply an older operation to the new engine.
-    crate::cohost::stop_cohost_for_session_end_under_lifecycle_fence(
-        state,
-        &lifecycle_delivery,
-        crate::captions::ListenStop::Abort,
-    )
-    .await;
+    // A resume keeps a Sidekick already running for this same show.
+    let keep_cohost = matches!(attach, ChatAttach::Resume { .. })
+        && state.cohost.lock().await.is_running_for(&params.session_id);
+    if !keep_cohost {
+        crate::cohost::stop_cohost_for_session_end_under_lifecycle_fence(
+            state,
+            &lifecycle_delivery,
+            crate::captions::ListenStop::Abort,
+        )
+        .await;
+    }
     let session_generation = {
         let mut coordinator = state.live_chat.lock().await;
-        coordinator.start_session(params.session_id.clone(), providers);
+        match attach {
+            ChatAttach::Fresh => coordinator.start_session(params.session_id.clone(), providers),
+            ChatAttach::Resume { first_attached_at } => coordinator.resume_session(
+                params.session_id.clone(),
+                providers,
+                first_attached_at,
+                history,
+            ),
+        }
         coordinator.session_generation()
     };
-    // Plan 225 B1: the stream row and a fresh arrival set.
-    crate::community_service::session_started(
-        state,
-        &params.session_id,
-        params
-            .destinations
-            .iter()
-            .map(|destination| destination.platform)
-            .collect(),
-    );
+    let platforms: Vec<StreamPlatform> = params
+        .destinations
+        .iter()
+        .map(|destination| destination.platform)
+        .collect();
+    match attach {
+        // Plan 225 B1: the stream row and a fresh arrival set.
+        ChatAttach::Fresh => {
+            crate::community_service::session_started(state, &params.session_id, platforms)
+        }
+        // The same stream row; arrivals already greeted stay greeted.
+        ChatAttach::Resume { .. } => {
+            crate::community_service::session_resumed(state, &params.session_id, platforms)
+        }
+    }
     // The coordinator session and every connector/sender handle are one
     // lifecycle transaction. A stop that observes this session must wait for
     // all of its runtime ownership to be attached so stop_session can retire
@@ -3725,6 +3909,58 @@ async fn decorate_seventv_emotes(
     messages
 }
 
+/// Plan 249 S18: in a resumed session, the ids of this delivery that are not
+/// in the bounded transcript but an earlier attach of the same show already
+/// persisted. Empty for an ordinary session (no extra query), and on a read
+/// error, which falls back to the in-memory de-duplication and says so.
+async fn persisted_before_resume(
+    state: &AppState,
+    messages: &[LiveChatMessage],
+) -> HashSet<String> {
+    let (session_id, unseen) = {
+        let coordinator = state.live_chat.lock().await;
+        if !coordinator.resumed {
+            return HashSet::new();
+        }
+        let Some(session_id) = coordinator.session_id.clone() else {
+            return HashSet::new();
+        };
+        let unseen: Vec<String> = messages
+            .iter()
+            .filter(|message| {
+                message.session_id == session_id && !coordinator.seen.contains(&message.id)
+            })
+            .map(|message| message.id.clone())
+            .collect();
+        (session_id, unseen)
+    };
+    if unseen.is_empty() {
+        return HashSet::new();
+    }
+    let database = state.database.clone();
+    match tokio::task::spawn_blocking(move || {
+        database.existing_live_chat_message_ids(&session_id, &unseen)
+    })
+    .await
+    {
+        Ok(Ok(existing)) => existing,
+        Ok(Err(error)) => {
+            state.emit_log(
+                "warn",
+                format!("Resumed chat could not check earlier deliveries: {error:#}"),
+            );
+            HashSet::new()
+        }
+        Err(error) => {
+            state.emit_log(
+                "warn",
+                format!("Resumed chat could not check earlier deliveries: {error}"),
+            );
+            HashSet::new()
+        }
+    }
+}
+
 /// Persist and emit one sequential provider delivery as one atomic transaction. The
 /// delivery guard plus constant-size per-message undo records make a terminal
 /// persistence failure retryable without cloning the full transcript. Transient
@@ -3739,6 +3975,7 @@ pub(crate) async fn try_deliver_messages(
     }
     let messages = mark_first_time_chatters(state, messages).await;
     let messages = decorate_seventv_emotes(state, messages).await;
+    let persisted_before = persisted_before_resume(state, &messages).await;
     let coordinator_inputs = messages.clone();
     let _delivery = state.live_chat_persistence.begin_delivery().await;
     let (
@@ -3747,7 +3984,7 @@ pub(crate) async fn try_deliver_messages(
         session_started_at,
         undos,
         authoritative_messages,
-        new_message_ids,
+        mut new_message_ids,
     ) = {
         // Coordinator ingest can turn an eligible message into a tombstone.
         // Publish that authority under the same short fence used by the final
@@ -3824,11 +4061,34 @@ pub(crate) async fn try_deliver_messages(
     if authoritative_messages.is_empty() {
         return Ok(());
     }
-    let persisted_messages = match state
-        .live_chat_persistence
-        .persist_batch(authoritative_messages.clone())
-        .await
-    {
+    // Plan 249 S18: a row that may fire a command is checkpointed durably
+    // before it is persisted (consumed); a process that dies before its reply
+    // is planned recovers it on resume. A checkpoint that cannot be written
+    // keeps the batch unpersisted and retryable, never silently unrecoverable.
+    let checkpoint = crate::chat_commands::checkpoint_command_triggers(
+        state,
+        &delivery_session_id,
+        session_started_at,
+        &authoritative_messages,
+        &new_message_ids,
+        &persisted_before,
+    )
+    .await
+    .map_err(|error| {
+        LiveChatPersistenceFailure::retryable(format!(
+            "Could not checkpoint chat command triggers: {error:#}"
+        ))
+    });
+    let persisted = match checkpoint {
+        Ok(()) => {
+            state
+                .live_chat_persistence
+                .persist_batch(authoritative_messages.clone())
+                .await
+        }
+        Err(error) => Err(error),
+    };
+    let persisted_messages = match persisted {
         Ok(messages) => messages,
         Err(error) => {
             let _highlight_commit = state.comment_highlight_commit.lock().await;
@@ -3838,12 +4098,17 @@ pub(crate) async fn try_deliver_messages(
             }
             drop(coordinator);
             state.emit_log(
-            "warn",
-            format!(
-                "Could not persist {} live chat message(s); exact-message retry remains eligible: {error}",
-                authoritative_messages.len()
-            ),
-        );
+                "warn",
+                format!(
+                    "Could not persist {} live chat message(s); {}: {error}",
+                    authoritative_messages.len(),
+                    if error.is_terminal() {
+                        "provider stopped"
+                    } else {
+                        "exact-message retry remains eligible"
+                    }
+                ),
+            );
             return Err(error);
         }
     };
@@ -3928,6 +4193,18 @@ pub(crate) async fn try_deliver_messages(
         state.emit_event("liveChat.totals", totals);
     }
     drop(_highlight_commit);
+    // Plan 249 S18: rows an earlier attach of this resumed show already
+    // persisted were delivered then; they fire no command, greeting,
+    // Sidekick turn or community record again.
+    let authoritative_messages: Vec<LiveChatMessage> = if persisted_before.is_empty() {
+        authoritative_messages
+    } else {
+        new_message_ids.retain(|id| !persisted_before.contains(id));
+        authoritative_messages
+            .into_iter()
+            .filter(|message| !persisted_before.contains(&message.id))
+            .collect()
+    };
     crate::cohost::note_messages_under_lifecycle_fence(state, &_delivery, &authoritative_messages)
         .await;
     drop(_delivery);
@@ -5048,6 +5325,98 @@ mod tests {
         let mut none = send_params("11111111-2222-4333-8444-666666666666", "picked", "nowhere");
         none.destination_ids = Some(Vec::new());
         assert!(send_live_chat_message(&state, none).await.is_err());
+    }
+
+    /// Plan 249 S18: a resume keeps the show's transcript, de-duplication,
+    /// first-time chatters and history fence; a provider's redelivery is a
+    /// duplicate (no second command reply, greeting or Sidekick turn), while
+    /// chat sent during the gap is new exactly once.
+    #[test]
+    fn a_resume_keeps_history_dedupe_chatters_and_the_history_fence() {
+        let youtube = StreamPlatform::Youtube;
+        let mut coordinator = LiveChatCoordinator::new(10);
+        coordinator.start_session("show-1".to_string(), vec![provider_row(youtube)]);
+        let first_attached = coordinator.session_started_at.unwrap();
+        coordinator.ingest(fake_message("show-1", youtube, None, 0));
+        coordinator.ingest(fake_message("show-1", youtube, None, 1));
+        coordinator.stop_session();
+        let stopped_generation = coordinator.session_generation();
+        coordinator.resume_session(
+            "show-1".to_string(),
+            vec![provider_row(youtube)],
+            first_attached,
+            Vec::new(),
+        );
+        assert_ne!(coordinator.session_generation(), stopped_generation);
+        assert!(
+            coordinator.resumed,
+            "redeliveries are checked against SQLite"
+        );
+        assert_eq!(coordinator.session_id(), Some("show-1"));
+        assert_eq!(coordinator.session_started_at, Some(first_attached));
+        assert_eq!(coordinator.messages.len(), 2, "transcript kept");
+        assert!(matches!(
+            coordinator.ingest(fake_message("show-1", youtube, None, 1)),
+            IngestOutcome::Duplicate
+        ));
+        assert!(matches!(
+            coordinator.ingest(fake_message("show-1", youtube, None, 2)),
+            IngestOutcome::New(_)
+        ));
+        assert!(matches!(
+            coordinator.ingest(fake_message("show-1", youtube, None, 2)),
+            IngestOutcome::Duplicate
+        ));
+        assert!(
+            coordinator
+                .chatters_seen
+                .contains(&chatter_key(youtube, "fake-author-1")),
+            "an author already seen this show is not first-time again"
+        );
+        assert!(coordinator.senders.is_empty() && coordinator.tasks.is_empty());
+        coordinator.stop_session();
+        assert!(!coordinator.resumed);
+        coordinator.start_session("next".to_string(), vec![provider_row(youtube)]);
+        assert!(
+            !coordinator.resumed,
+            "an ordinary session never pays the check"
+        );
+    }
+
+    #[test]
+    fn a_relaunch_resume_seeds_dedupe_from_persisted_history_only_for_its_show() {
+        let youtube = StreamPlatform::Youtube;
+        let mut coordinator = LiveChatCoordinator::new(2);
+        // A native session's transcript is still in the buffer.
+        coordinator.start_session("native".to_string(), vec![provider_row(youtube)]);
+        coordinator.ingest(fake_message("native", youtube, None, 7));
+        coordinator.stop_session();
+        let history = vec![
+            fake_message("other", youtube, None, 9),
+            fake_message("show-1", youtube, None, 0),
+            fake_message("show-1", youtube, None, 1),
+            fake_message("show-1", youtube, None, 2),
+        ];
+        coordinator.resume_session(
+            "show-1".to_string(),
+            vec![provider_row(youtube)],
+            chrono::Utc::now(),
+            history,
+        );
+        // Bounded to the buffer: the newest rows of this show only.
+        assert_eq!(coordinator.messages.len(), 2);
+        assert!(
+            coordinator
+                .messages
+                .iter()
+                .all(|m| m.session_id == "show-1")
+        );
+        for seq in [1, 2] {
+            assert!(matches!(
+                coordinator.ingest(fake_message("show-1", youtube, None, seq)),
+                IngestOutcome::Duplicate
+            ));
+        }
     }
 
     #[test]

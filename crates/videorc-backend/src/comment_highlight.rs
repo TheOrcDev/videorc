@@ -345,6 +345,14 @@ pub struct CommentHighlightCanvases {
 }
 
 pub async fn comment_highlight_canvases(state: &AppState) -> CommentHighlightCanvases {
+    if crate::cloud_talk_show_room_show_id(state).is_some() {
+        return CommentHighlightCanvases {
+            vertical: Some(CommentHighlightCanvas {
+                width: 1080,
+                height: 1920,
+            }),
+        };
+    }
     let recording = state.recording.lock().await;
     CommentHighlightCanvases {
         vertical: recording
@@ -382,7 +390,7 @@ async fn set_comment_highlight_with_ttl(
     // for the stream; the PNG and its rect go to the runner's `card` slot
     // with the same ten-second life, and the state keeps its shape so the
     // renderer's "On stream" reads as today.
-    if let Some(show_id) = crate::cloud_talk_show_live_show_id(state) {
+    if let Some(show_id) = crate::cloud_talk_show_room_show_id(state) {
         return set_talk_show_highlight(
             state,
             &show_id,
@@ -519,6 +527,8 @@ async fn set_talk_show_highlight(
     ttl: Duration,
 ) -> Result<CommentHighlightState, CommentHighlightError> {
     use crate::cloud_talk::{CloudOverlayOrientation, CloudOverlaySlot};
+    let expected_generation = state.comment_highlight.lock().await.generation;
+    let expected_room_generation = crate::cloud_show::lock(&state.cloud_show).generation;
     if params.session_id != show_id {
         return Err(CommentHighlightError::WrongSession);
     }
@@ -542,44 +552,70 @@ async fn set_talk_show_highlight(
     let Some(context) = crate::cloud_context(state) else {
         return Err(CommentHighlightError::UnsupportedOutput);
     };
+    let png = png_base64.clone();
+    let vertical = vertical_png_base64.clone();
+    let prepared = tokio::task::spawn_blocking(move || {
+        anyhow::Ok(PreparedHighlight {
+            horizontal: crate::captions::prepare_caption_overlay(&png)?,
+            vertical: vertical
+                .as_deref()
+                .map(crate::captions::prepare_caption_overlay)
+                .transpose()?,
+        })
+    })
+    .await
+    .map_err(|error| CommentHighlightError::InvalidImage(error.to_string()))?
+    .map_err(|error| CommentHighlightError::InvalidImage(error.to_string()))?;
     let ttl_seconds = Some(ttl.as_secs().max(1));
-    context
-        .set_overlay(
-            CloudOverlaySlot::Card,
-            CloudOverlayOrientation::H,
-            &png_base64,
-            talk_show_overlay_rect(params.rect),
-            ttl_seconds,
-        )
-        .await
-        .map_err(CommentHighlightError::CloudRefused)?;
-    if let Some(vertical) = vertical_png_base64.as_deref()
-        && let Err(problem) = context
+    // Managed output switches and consent are enforced by S9's targeted
+    // snapshots. Never broadcast a record-only/hidden card on the legacy topic.
+    if !crate::cloud_graphics::managed_room(state) {
+        context
             .set_overlay(
                 CloudOverlaySlot::Card,
-                CloudOverlayOrientation::V,
-                vertical,
-                talk_show_overlay_rect(params.vertical_rect),
+                CloudOverlayOrientation::H,
+                &png_base64,
+                talk_show_overlay_rect(params.rect),
                 ttl_seconds,
             )
             .await
-    {
-        tracing::warn!("The vertical card did not reach Videorc Cloud: {problem}");
+            .map_err(CommentHighlightError::CloudRefused)?;
+        if let Some(vertical) = vertical_png_base64.as_deref()
+            && let Err(problem) = context
+                .set_overlay(
+                    CloudOverlaySlot::Card,
+                    CloudOverlayOrientation::V,
+                    vertical,
+                    talk_show_overlay_rect(params.vertical_rect),
+                    ttl_seconds,
+                )
+                .await
+        {
+            tracing::warn!("The vertical card did not reach Videorc Cloud: {problem}");
+        }
     }
     let _commit = state.comment_highlight_commit.lock().await;
+    let message = state
+        .live_chat
+        .lock()
+        .await
+        .highlight_message_eligibility(&params.session_id, &params.message_id);
+    if !matches!(message, HighlightMessageEligibility::Eligible) {
+        return Err(CommentHighlightError::IneligibleMessage);
+    }
     let mut highlight = state.comment_highlight.lock().await;
-    let generation = next_generation(highlight.generation);
-    let expires_at =
-        Utc::now() + ChronoDuration::from_std(ttl).unwrap_or_else(|_| ChronoDuration::seconds(10));
-    *highlight = CommentHighlightState {
-        session_id: Some(params.session_id),
-        message_id: Some(params.message_id),
-        generation,
-        phase: CommentHighlightPhase::Live,
-        expires_at: Some(expires_at.to_rfc3339()),
-        reason: None,
-    };
-    let snapshot = highlight.clone();
+    if highlight.generation != expected_generation {
+        return Ok(highlight.clone());
+    }
+    let runtime = crate::cloud_show::lock(&state.cloud_show);
+    if runtime.generation != expected_room_generation
+        || runtime.talk_show_room_show_id().as_deref() != Some(show_id)
+    {
+        return Err(CommentHighlightError::WrongSession);
+    }
+    let snapshot = install_validated_highlight(state, &mut highlight, params, prepared, ttl);
+    let generation = snapshot.generation;
+    drop(runtime);
     emit_state(state, &snapshot);
     tracing::info!(
         show = show_id,
@@ -722,7 +758,7 @@ fn clear_highlight_overlays(state: &AppState) {
     crate::captions::clear_caption_overlay(&state.simulcast_highlight_overlay);
     // Plan 224 D9: the runner's card goes too (its TTL would clear it; a
     // click or an expiry clears it now). Off the locks: best effort.
-    if crate::cloud_talk_show_live_show_id(state).is_some()
+    if crate::cloud_talk_show_room_show_id(state).is_some()
         && let Some(context) = crate::cloud_context(state)
     {
         tokio::spawn(async move {
@@ -1253,10 +1289,11 @@ pub(crate) mod tests {
     /// Plan 224 C-G7 (review L9, the overlay forks): in a talk show on air
     /// the card goes to the runner's `card` slot, horizontal then vertical,
     /// with its rect (the default when none) and the ten-second life; the
-    /// compositor never draws it; only the show's own chat may be shown; a
-    /// clear takes it off both of the runner's outputs.
+    /// native card slots hold it as the room program's static graphics
+    /// source (plan 249 S9); only the show's own chat may be shown; a clear
+    /// takes it off both of the runner's outputs and out of both slots.
     #[tokio::test]
-    async fn a_talk_show_on_air_sends_the_card_to_the_runner_and_never_composes_it() {
+    async fn a_talk_show_on_air_sends_the_card_to_the_runner_and_holds_it_for_the_program() {
         let state = test_state();
         let mut runner =
             crate::cloud_talk::open_talk_show_for_tests(&state.cloud_show, "session-1", true);
@@ -1299,12 +1336,16 @@ pub(crate) mod tests {
             serde_json::json!({ "x": 0.04, "y": 0.6, "w": 0.44, "h": 0.36 }),
             "no vertical rect: the default card place"
         );
+        // Plan 249 S9: the native card slots hold the card while a room is
+        // open; they are the source of the targeted static graphics snapshot
+        // (`cloud_graphics::snapshot`). The desktop still streams nothing.
         assert!(
-            crate::captions::current_caption_overlay(&state.highlight_overlay).is_none(),
-            "the desktop composes nothing for a talk show's stream"
+            crate::captions::current_caption_overlay(&state.highlight_overlay).is_some(),
+            "the card is held natively as the room program's graphics source"
         );
         assert!(
-            crate::captions::current_caption_overlay(&state.simulcast_highlight_overlay).is_none()
+            crate::captions::current_caption_overlay(&state.simulcast_highlight_overlay).is_some(),
+            "the vertical card is held for the vertical program"
         );
 
         let mut other = params();
@@ -1325,6 +1366,10 @@ pub(crate) mod tests {
             assert_eq!(frame["slot"], "card");
             assert_eq!(frame["orientation"], orientation);
         }
+        assert!(crate::captions::current_caption_overlay(&state.highlight_overlay).is_none());
+        assert!(
+            crate::captions::current_caption_overlay(&state.simulcast_highlight_overlay).is_none()
+        );
     }
 
     /// A card live on a stream session through the real `set` path (the

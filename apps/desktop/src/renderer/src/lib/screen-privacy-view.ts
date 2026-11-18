@@ -35,3 +35,15 @@ export function screenPrivacyDisabledReason(
   if (privacy.hidden) return null
   return privacy.unavailable ?? null
 }
+
+/** A source response is never proof of the remote decoder. Missing consumers
+ * remain unconfirmed even when another receiver reported applied frost. */
+export function roomPrivacyLabel(
+  status: 'visible' | 'hiding' | 'observed' | 'unconfirmed' | 'paused' | undefined
+): string | undefined {
+  if (status === 'hiding') return 'Hiding · receivers pending'
+  if (status === 'observed') return 'Frost observed · others unconfirmed'
+  if (status === 'unconfirmed') return 'Screen blocked · receivers unconfirmed'
+  if (status === 'paused') return 'Screen share paused · privacy unavailable'
+  return undefined
+}

@@ -7303,7 +7303,7 @@ impl CohostEngine {
         )
     }
 
-    fn is_running_for(&self, session_id: &str) -> bool {
+    pub(crate) fn is_running_for(&self, session_id: &str) -> bool {
         self.session
             .as_ref()
             .is_some_and(|session| session.session_id == session_id)
@@ -8528,7 +8528,8 @@ struct DestinationSkip {
 /// The destinations an automatic send may reach right now (D9): the
 /// utterance's own, or every write-ready one when it names none; minus
 /// YouTube while the plan 094 breaker is open or the budget sheds sends, and
-/// minus any platform whose stream target is `failed` (plan 161). Returns
+/// minus any platform whose stream target is `failed` (plan 161; a room's
+/// cloud legs while the room owns this chat session, plan 249 S18). Returns
 /// the ids and the reasons for what was dropped.
 async fn automatic_send_destinations(
     state: &AppState,
@@ -8551,16 +8552,16 @@ async fn automatic_send_destinations(
     let youtube_blocked = crate::youtube_quota::paused_until(state).is_some()
         || crate::youtube_quota::budget_refuses(state, crate::youtube_quota::BudgetCall::ChatSend)
             .is_some();
-    let failed_platforms: Vec<StreamPlatform> =
-        match crate::recording::current_stream_targets_snapshot(state).await {
-            Ok(snapshot) => snapshot
-                .targets
-                .iter()
-                .filter(|target| target.state == crate::streaming::StreamTargetState::Failed)
-                .map(|target| target.platform)
-                .collect(),
-            Err(_) => Vec::new(),
-        };
+    // Plan 249 S18: a room's chat session is its show, which has no native
+    // capture; its actual destinations are the cloud legs.
+    let native = crate::recording::current_stream_targets_snapshot(state)
+        .await
+        .ok();
+    let failed_platforms: Vec<StreamPlatform> = crate::cloud_services::failed_destination_platforms(
+        session_id,
+        native.as_ref(),
+        &crate::cloud_show_status(state),
+    );
     let mut ids = Vec::new();
     let mut skipped = Vec::new();
     for provider in providers {
@@ -24362,6 +24363,36 @@ mod tests {
         ));
     }
 
+    /// Plan 249 S5: each Buddy state change also streams the avatar animator's
+    /// public projection (`cohost.pet.animator`); this receiver steps over it.
+    struct WithoutAnimator(tokio::sync::broadcast::Receiver<crate::protocol::ServerEvent>);
+
+    impl WithoutAnimator {
+        async fn recv(
+            &mut self,
+        ) -> Result<crate::protocol::ServerEvent, tokio::sync::broadcast::error::RecvError>
+        {
+            loop {
+                let event = self.0.recv().await?;
+                if event.event != crate::buddy_sprite::BUDDY_ANIMATOR_EVENT {
+                    return Ok(event);
+                }
+            }
+        }
+
+        fn try_recv(
+            &mut self,
+        ) -> Result<crate::protocol::ServerEvent, tokio::sync::broadcast::error::TryRecvError>
+        {
+            loop {
+                let event = self.0.try_recv()?;
+                if event.event != crate::buddy_sprite::BUDDY_ANIMATOR_EVENT {
+                    return Ok(event);
+                }
+            }
+        }
+    }
+
     /// Plan 164 D7: the Say box with the chat mode off and the Buddy on an
     /// output is one bubble-only utterance, never a send; with both output
     /// switches off the utterance is recorded and nothing is shown; a named
@@ -24369,7 +24400,7 @@ mod tests {
     #[tokio::test]
     async fn say_with_the_mode_off_and_the_overlay_on_is_a_bubble_never_a_send() {
         let state = test_state();
-        let mut rx = state.events.subscribe();
+        let mut rx = WithoutAnimator(state.events.subscribe());
         let mut layout = crate::overlay_layout::load_overlay_layout(&state.database);
         layout.buddy.show_on_stream = true;
         crate::overlay_layout::save_overlay_layout(&state.database, &layout).unwrap();

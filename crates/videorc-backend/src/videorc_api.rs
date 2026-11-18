@@ -1866,6 +1866,218 @@ impl VideorcApiClient {
         })
     }
 
+    pub(crate) async fn clips_bytes(
+        &self,
+        token: &str,
+        show: &str,
+        method: &str,
+        query: &[(&str, String)],
+        body: Option<serde_json::Value>,
+        limit: usize,
+    ) -> Result<Vec<u8>> {
+        anyhow::ensure!(
+            show.starts_with("sh_")
+                && show.len() <= 160
+                && show.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_'),
+            "invalid-clip-show"
+        );
+        let path = format!("/api/cloud/shows/{show}/clips");
+        let mut url = reqwest::Url::parse(&self.endpoint(&path))?;
+        for (key, value) in query {
+            url.query_pairs_mut().append_pair(key, value);
+        }
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()?;
+        let mut req = client
+            .request(reqwest::Method::from_bytes(method.as_bytes())?, url)
+            .bearer_auth(token);
+        if let Some(body) = body {
+            req = req.json(&body);
+        }
+        let mut response = self
+            .cloud_send(req, &path, std::time::Duration::from_secs(12))
+            .await
+            .map_err(|(_, body)| {
+                let code = body
+                    .get("error")
+                    .and_then(|e| {
+                        e.as_str()
+                            .or_else(|| e.get("code").and_then(|v| v.as_str()))
+                    })
+                    .unwrap_or("clips-unavailable");
+                anyhow::anyhow!(
+                    "{}",
+                    if code.len() <= 80 && code.bytes().all(|b| b.is_ascii_lowercase() || b == b'-')
+                    {
+                        code
+                    } else {
+                        "clips-unavailable"
+                    }
+                )
+            })?;
+        let mut data = Vec::new();
+        while let Some(c) = response.chunk().await? {
+            anyhow::ensure!(data.len() + c.len() <= limit, "clip-response-too-large");
+            data.extend_from_slice(&c);
+        }
+        Ok(data)
+    }
+    pub(crate) async fn clips_json(
+        &self,
+        token: &str,
+        show: &str,
+        method: &str,
+        generation: Option<&str>,
+        marker: Option<&str>,
+        body: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value> {
+        let mut q = vec![];
+        if let Some(g) = generation {
+            q.push(("generation", g.into()));
+        }
+        if let Some(m) = marker {
+            q.push(("marker", m.into()));
+        }
+        Ok(serde_json::from_slice(
+            &self
+                .clips_bytes(token, show, method, &q, body, 65536)
+                .await?,
+        )?)
+    }
+    pub(crate) async fn clips_segment(
+        &self,
+        token: &str,
+        plan: &crate::cloud_clips::Plan,
+        segment: &crate::cloud_clips::Segment,
+    ) -> Result<Vec<u8>> {
+        anyhow::ensure!(
+            segment.bytes > 0 && segment.bytes <= 8 * 1024 * 1024,
+            "clip-invalid-size"
+        );
+        self.clips_bytes(
+            token,
+            &plan.show_id,
+            "GET",
+            &[
+                ("generation", plan.generation.clone()),
+                ("marker", plan.marker_id.clone()),
+                ("clip", plan.id.clone()),
+                ("segment", segment.sequence.to_string()),
+            ],
+            None,
+            segment.bytes as usize,
+        )
+        .await
+    }
+
+    /// Archive requests remain on the pinned account API; redirects cannot forward a bearer.
+    #[allow(clippy::too_many_arguments)]
+    async fn archive_bytes(
+        &self,
+        token: &str,
+        show: &str,
+        generation: Option<&str>,
+        method: &str,
+        body: Option<serde_json::Value>,
+        segment: Option<u64>,
+        limit: usize,
+    ) -> Result<Vec<u8>> {
+        anyhow::ensure!(
+            !show.is_empty()
+                && show.len() <= 80
+                && show
+                    .bytes()
+                    .all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-'),
+            "invalid-archive-show"
+        );
+        let mut url =
+            reqwest::Url::parse(&self.endpoint(&format!("/api/cloud/shows/{show}/archive")))?;
+        if let Some(g) = generation {
+            url.query_pairs_mut().append_pair("generation", g);
+        }
+        if let Some(s) = segment {
+            url.query_pairs_mut().append_pair("segment", &s.to_string());
+        }
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()?;
+        let mut request = client
+            .request(reqwest::Method::from_bytes(method.as_bytes())?, url)
+            .bearer_auth(token)
+            .timeout(std::time::Duration::from_secs(12));
+        if let Some(body) = body {
+            request = request.json(&body);
+        }
+        let mut response = request
+            .send()
+            .await
+            .map_err(|_| anyhow::anyhow!("archive-network-unavailable"))?;
+        let status = response.status();
+        let bound = if status.is_success() { limit } else { 8192 };
+        let mut bytes = Vec::new();
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(|_| anyhow::anyhow!("archive-network-unavailable"))?
+        {
+            anyhow::ensure!(
+                bytes.len() + chunk.len() <= bound,
+                "archive-response-too-large"
+            );
+            bytes.extend_from_slice(&chunk);
+        }
+        if !status.is_success() {
+            let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap_or_default();
+            let code = value
+                .get("error")
+                .and_then(|v| v.as_str())
+                .unwrap_or("archive-request-refused");
+            anyhow::ensure!(
+                code.len() <= 80 && code.bytes().all(|b| b.is_ascii_lowercase() || b == b'-'),
+                "archive-request-refused"
+            );
+            anyhow::bail!("{code}");
+        }
+        Ok(bytes)
+    }
+    pub(crate) async fn archive_json<T: DeserializeOwned>(
+        &self,
+        token: &str,
+        show: &str,
+        generation: Option<&str>,
+        method: &str,
+        body: Option<serde_json::Value>,
+    ) -> Result<T> {
+        let bytes = self
+            .archive_bytes(token, show, generation, method, body, None, 65536)
+            .await?;
+        serde_json::from_slice(&bytes).context("archive-invalid-response")
+    }
+    pub(crate) async fn archive_segment(
+        &self,
+        token: &str,
+        show: &str,
+        generation: &str,
+        sequence: u64,
+        expected: u64,
+    ) -> Result<Vec<u8>> {
+        anyhow::ensure!(
+            expected > 0 && expected <= 8 * 1024 * 1024,
+            "archive-invalid-size"
+        );
+        self.archive_bytes(
+            token,
+            show,
+            Some(generation),
+            "GET",
+            None,
+            Some(sequence),
+            expected as usize,
+        )
+        .await
+    }
+
     fn endpoint(&self, path: &str) -> String {
         format!("{}/{}", self.base_url, path.trim_start_matches('/'))
     }
@@ -2015,6 +2227,33 @@ impl VideorcApiClient {
             .with_context(|| format!("Could not read Videorc API response for {path}."))
     }
 
+    pub(crate) async fn show_marker_request(
+        &self,
+        bearer: &str,
+        show: &str,
+        method: &str,
+        id: Option<&str>,
+        body: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value> {
+        let path = format!("/api/cloud/shows/{show}/markers");
+        let mut request = self
+            .http
+            .request(
+                reqwest::Method::from_bytes(method.as_bytes())?,
+                self.endpoint(&path),
+            )
+            .bearer_auth(bearer);
+        if let Some(id) = id {
+            request = request.query(&[("id", id)]);
+        }
+        if let Some(body) = body {
+            request = request.json(&body);
+        }
+        self.cloud_json(request, &path, CLOUD_REQUEST_TIMEOUT)
+            .await
+            .map_err(Into::into)
+    }
+
     // --- Videorc Cloud (plan 184, Wire shape: Desktop -> web) -----------------
     // Bearer, `private, no-store`, the `{ error: { code, message } }` envelope.
     // A 409 body carries the live show and a 429 body its `resetAt`; both are
@@ -2079,7 +2318,7 @@ impl VideorcApiClient {
 
     /// One cloud request: the response of a 2xx, or the failure classified
     /// from the `{ error: { code, message } }` envelope, with its body.
-    async fn cloud_send(
+    pub(crate) async fn cloud_send(
         &self,
         request: reqwest::RequestBuilder,
         path: &str,
@@ -2087,6 +2326,17 @@ impl VideorcApiClient {
     ) -> std::result::Result<reqwest::Response, (crate::cloud_show::CloudApiError, serde_json::Value)>
     {
         use crate::cloud_show::{CloudApiError, ShowRecord, classify_cloud_failure};
+        // Plan 249 S24: every request about the show this process controls
+        // carries its controller epoch, so the web refuses it once another
+        // device took the show over (never ending the successor's).
+        let fenced = crate::cloud_controller::fence_header_for(path);
+        let request = match fenced {
+            Some(epoch) => request.header(
+                crate::cloud_controller::CONTROLLER_EPOCH_HEADER,
+                epoch.to_string(),
+            ),
+            None => request,
+        };
         let response = request.timeout(timeout).send().await.map_err(|error| {
             (
                 CloudApiError::Transport(format!("{path}: {error}")),
@@ -2099,6 +2349,13 @@ impl VideorcApiClient {
         }
         let text = response.text().await.unwrap_or_default();
         let (code, message) = parse_error_envelope(&text);
+        // A fenced request refused as stale: another device controls the show.
+        if let Some(epoch) = fenced
+            && status.as_u16() == 409
+            && code == "cloud-controller-stale"
+        {
+            crate::cloud_controller::mark_lost(epoch, "stale-command");
+        }
         let body: serde_json::Value =
             serde_json::from_str(&text).unwrap_or(serde_json::Value::Null);
         let live_show = body
@@ -3624,6 +3881,47 @@ impl crate::cloud_show::CloudWebApi for VideorcApiClient {
         .await
     }
 
+    async fn on_air(
+        &self,
+        bearer: &str,
+        show_id: &str,
+        device: &crate::cloud_show::CloudDevice,
+        source: &str,
+        step: &str,
+    ) -> std::result::Result<crate::cloud_show::OnAirAnswer, crate::cloud_show::CloudApiError> {
+        let path = format!("/api/cloud/shows/{show_id}/on-air");
+        self.cloud_json(
+            self.http
+                .post(self.endpoint(&path))
+                .bearer_auth(bearer)
+                .json(&serde_json::json!({"device":device,"source":source,"step":step})),
+            &path,
+            CLOUD_REQUEST_TIMEOUT,
+        )
+        .await
+        .map_err(crate::cloud_show::safe_continuation_error)
+    }
+
+    async fn hand_off(
+        &self,
+        bearer: &str,
+        show_id: &str,
+        device: &crate::cloud_show::CloudDevice,
+    ) -> std::result::Result<(), crate::cloud_show::CloudApiError> {
+        let path = format!("/api/cloud/shows/{show_id}/hand-off");
+        self.cloud_json::<serde_json::Value>(
+            self.http
+                .post(self.endpoint(&path))
+                .bearer_auth(bearer)
+                .json(&serde_json::json!({"device":{"id":device.id}})),
+            &path,
+            CLOUD_REQUEST_TIMEOUT,
+        )
+        .await
+        .map_err(crate::cloud_show::safe_continuation_error)
+        .map(|_| ())
+    }
+
     async fn end_show(
         &self,
         bearer: &str,
@@ -3636,7 +3934,17 @@ impl crate::cloud_show::CloudWebApi for VideorcApiClient {
             CLOUD_REQUEST_TIMEOUT,
         )
         .await
-        .map(|_| ())
+        .and_then(|answer| {
+            if answer.get("ending").and_then(serde_json::Value::as_bool) == Some(true) {
+                Err(crate::cloud_show::CloudApiError::Other {
+                    status: 409,
+                    code: "cloud-show-ending".to_string(),
+                    message: String::new(),
+                })
+            } else {
+                Ok(())
+            }
+        })
     }
 
     async fn allowance(
@@ -3806,6 +4114,7 @@ impl crate::cloud_show::CloudWebApi for VideorcApiClient {
         bearer: &str,
         show_id: &str,
         since: Option<u64>,
+        idle: bool,
     ) -> std::result::Result<
         crate::cloud_control_web::ControlStateAnswer,
         crate::cloud_show::CloudApiError,
@@ -3814,6 +4123,9 @@ impl crate::cloud_show::CloudWebApi for VideorcApiClient {
         let mut request = self.http.get(self.endpoint(&path)).bearer_auth(bearer);
         if let Some(since) = since {
             request = request.query(&[(crate::cloud_control_web::STATE_SINCE_QUERY, since)]);
+        }
+        if idle {
+            request = request.query(&[("viewer", "idle")]);
         }
         // The web long-polls up to 25 s: wait that out.
         self.cloud_json(request, &path, CLOUD_STATE_POLL_TIMEOUT)
@@ -4084,6 +4396,142 @@ struct VerifyUser {
 #[derive(Deserialize)]
 struct GetSessionResponse {
     user: VerifyUser,
+}
+
+/// Plan 249 S25: one effect of one live interval (a Discord announcement)
+/// happens once, whichever computer controls the show: the web keeps the
+/// first claim. The controller fence (S24) refuses a computer that lost the
+/// show, so it never claims for its successor.
+impl VideorcApiClient {
+    pub(crate) async fn cloud_interval_effect(
+        &self,
+        bearer: &str,
+        show_id: &str,
+        interval_id: &str,
+        effect: &str,
+    ) -> std::result::Result<bool, crate::cloud_show::CloudApiError> {
+        #[derive(Deserialize)]
+        struct Claimed {
+            claimed: bool,
+        }
+        let path = format!("/api/cloud/shows/{show_id}/effects");
+        let answer: Claimed = self
+            .cloud_json(
+                self.http
+                    .post(self.endpoint(&path))
+                    .bearer_auth(bearer)
+                    .json(&serde_json::json!({ "intervalId": interval_id, "effect": effect })),
+                &path,
+                CLOUD_REQUEST_TIMEOUT,
+            )
+            .await?;
+        Ok(answer.claimed)
+    }
+}
+
+/// Plan 249 S24: the controller and kept-presentation routes. Each answers
+/// its body beside its error, so a 409 still names the current controller.
+impl VideorcApiClient {
+    pub(crate) async fn cloud_controller(
+        &self,
+        bearer: &str,
+        show_id: &str,
+        body: &serde_json::Value,
+    ) -> std::result::Result<serde_json::Value, (crate::cloud_show::CloudApiError, serde_json::Value)>
+    {
+        let path = format!("/api/cloud/shows/{show_id}/controller");
+        self.cloud_json_or_body(
+            self.http
+                .post(self.endpoint(&path))
+                .bearer_auth(bearer)
+                .json(body),
+            &path,
+            CLOUD_REQUEST_TIMEOUT,
+        )
+        .await
+    }
+
+    pub(crate) async fn cloud_controller_desired(
+        &self,
+        bearer: &str,
+        show_id: &str,
+        body: &serde_json::Value,
+    ) -> std::result::Result<serde_json::Value, (crate::cloud_show::CloudApiError, serde_json::Value)>
+    {
+        let path = format!("/api/cloud/shows/{show_id}/controller");
+        self.cloud_json_or_body(
+            self.http
+                .put(self.endpoint(&path))
+                .bearer_auth(bearer)
+                .json(body),
+            &path,
+            CLOUD_REQUEST_TIMEOUT,
+        )
+        .await
+    }
+
+    pub(crate) async fn cloud_presentation_put(
+        &self,
+        bearer: &str,
+        show_id: &str,
+        body: &serde_json::Value,
+    ) -> std::result::Result<serde_json::Value, (crate::cloud_show::CloudApiError, serde_json::Value)>
+    {
+        let path = format!("/api/cloud/shows/{show_id}/presentation");
+        self.cloud_json_or_body(
+            self.http
+                .put(self.endpoint(&path))
+                .bearer_auth(bearer)
+                .json(body),
+            &path,
+            CLOUD_REQUEST_TIMEOUT,
+        )
+        .await
+    }
+
+    pub(crate) async fn cloud_presentation_get(
+        &self,
+        bearer: &str,
+        show_id: &str,
+    ) -> std::result::Result<serde_json::Value, crate::cloud_show::CloudApiError> {
+        let path = format!("/api/cloud/shows/{show_id}/presentation");
+        self.cloud_json(
+            self.http.get(self.endpoint(&path)).bearer_auth(bearer),
+            &path,
+            CLOUD_REQUEST_TIMEOUT,
+        )
+        .await
+    }
+
+    /// One kept PNG, as standard base64 (the renderer's asset shape).
+    pub(crate) async fn cloud_presentation_asset(
+        &self,
+        bearer: &str,
+        show_id: &str,
+        hash: &str,
+    ) -> std::result::Result<String, crate::cloud_show::CloudApiError> {
+        use base64::Engine as _;
+        let path = format!("/api/cloud/shows/{show_id}/presentation?asset={hash}");
+        let response = self
+            .cloud_send(
+                self.http.get(self.endpoint(&path)).bearer_auth(bearer),
+                &path,
+                CLOUD_REQUEST_TIMEOUT,
+            )
+            .await
+            .map_err(|(error, _)| error)?;
+        let status = response.status().as_u16();
+        let bytes =
+            response
+                .bytes()
+                .await
+                .map_err(|error| crate::cloud_show::CloudApiError::Other {
+                    status,
+                    code: "malformed-response".to_string(),
+                    message: format!("Could not read {path}: {error}"),
+                })?;
+        Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
+    }
 }
 
 #[cfg(test)]

@@ -42,7 +42,10 @@ export const MAIN_ISOLATED_BACKEND_EVENTS: ReadonlySet<string> = new Set([
   'virtualCamera.changed',
   // The proof surface draws the committed scene's background; a bad scene
   // is dropped with a warning, never the socket.
-  'scene.changed'
+  'scene.changed',
+  // Plan 243 R2 B-M1: the exit guard reads a talk show's room from it, field
+  // by field; a status this main cannot validate never retires the socket.
+  'cloud.state'
 ])
 
 /** The privileged main-process socket uses the same bounded wire contract as the renderer. */

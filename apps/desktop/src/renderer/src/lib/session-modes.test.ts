@@ -13,12 +13,21 @@ describe('session modes (plan 174, E-1)', () => {
     expect(sessionModeRecorded(SESSION_MODES.recordAndStream)).toBe(true)
     expect(sessionModeStreamed(SESSION_MODES.recordAndStream)).toBe(true)
 
+    expect(sessionModeRecorded(SESSION_MODES.cloudStream)).toBe(false)
+    expect(sessionModeStreamed(SESSION_MODES.cloudStream)).toBe(true)
     expect(sessionModeRecorded(SESSION_MODES.imported)).toBe(true)
     expect(sessionModeStreamed(SESSION_MODES.imported)).toBe(false)
   })
 
   it('spells the backend values exactly', () => {
-    expect(Object.values(SESSION_MODES)).toEqual(['record', 'stream', 'record+stream', 'imported'])
+    expect(Object.values(SESSION_MODES)).toEqual([
+      'record',
+      'stream',
+      'cloud-stream',
+      'cloud-recording',
+      'record+stream',
+      'imported'
+    ])
   })
 
   it('still reads the older spellings', () => {

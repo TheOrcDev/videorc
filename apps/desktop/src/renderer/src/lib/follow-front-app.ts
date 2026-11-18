@@ -86,6 +86,8 @@ export type FollowFrontAppContext = {
   lastUsedAt: Readonly<Record<string, number>>
   followEnabled?: boolean
   passwordManagerHideEnabled?: boolean
+  /** Browser publications stay hidden until the owner explicitly chooses Show. */
+  explicitShowRequired?: boolean
   videorcBundleIds: readonly string[]
   /** Additions to defaults; [] means defaults. Removals take precedence. */
   passwordManagerBundleIds?: readonly string[]
@@ -169,7 +171,12 @@ export function reduceFollowFrontApp(
     state.hideReason = 'password-manager'
   }
   if (now - state.since < 400) return { state, actions }
-  if (!shouldHide && state.hidden && state.hideReason === 'password-manager') {
+  if (
+    !context.explicitShowRequired &&
+    !shouldHide &&
+    state.hidden &&
+    state.hideReason === 'password-manager'
+  ) {
     actions.push({ type: 'show' })
     state.hidden = false
     state.hideReason = null

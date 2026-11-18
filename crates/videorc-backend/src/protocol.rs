@@ -5651,6 +5651,9 @@ pub enum ScreenPrivacyReason {
 #[serde(rename_all = "camelCase")]
 pub struct ScreenPrivacy {
     pub hidden: bool,
+    /// Process-local transition generation; hide and show have distinct values.
+    #[serde(default)]
+    pub generation: u64,
     /// RFC 3339, the moment of the hide; present only while hidden.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub since: Option<String>,
@@ -5729,6 +5732,10 @@ pub struct VirtualCameraStatus {
     /// Plain copy for the status line, present when there is something to say.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+    /// Plan 249 S23: present only while a room's Program preview owns the
+    /// camera (never the encoded stream); absent means the Studio program.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<crate::room_program_camera::RoomProgramSource>,
 }
 
 impl Default for VirtualCameraStatus {
@@ -5740,6 +5747,7 @@ impl Default for VirtualCameraStatus {
             viewers: None,
             platform_step: None,
             message: None,
+            source: None,
         }
     }
 }

@@ -1,3 +1,4 @@
+import { CloudClipsSection } from './cloud-clips-section'
 import {
   commitOutputField,
   outputFieldLimits,
@@ -99,6 +100,12 @@ const CLIP_SHORTCUT_ACTIONS = [
  * default off and this section says why; the switch still turns it on.
  */
 function ClipsSection(): ReactElement {
+  const { cloudStatus } = useStudioCloud()
+  if (cloudStatus?.room?.phase === 'open' && cloudStatus.show)
+    return <CloudClipsSection key={cloudStatus.show.id} showId={cloudStatus.show.id} />
+  return <NativeClipsSection />
+}
+function NativeClipsSection(): ReactElement {
   const { captureConfig, settings, setSettings, runtimeInfo, recordBlockedReason } = useStudioCore()
   const clips = useStudioReplay()
   const { enabled } = captureConfig.replayBuffer

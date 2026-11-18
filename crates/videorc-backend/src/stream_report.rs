@@ -11,6 +11,9 @@
 //!   distinct people when plan 225's community store linked accounts.
 //! - Followers, support and community counts: the audience snapshot, the
 //!   chat totals and Buddy's report (plan 225 D15).
+//! - Total views: each platform's own cumulative view count (`stream-views`
+//!   logs; today YouTube's `statistics.viewCount`), the latest valid read.
+//!   Views, not people: never added across platforms, never "unique".
 //!
 //! Never a viewer's name, a message or a link. YouTube's numbers are in it
 //! like every other platform's (owner, plan 237 D3, 2026-11-14): they pass
@@ -25,7 +28,7 @@ use crate::audience::{AudienceCapability, AudienceMetric, AudienceSnapshot};
 use crate::protocol::CohostReportCommunity;
 use crate::storage::{Database, SessionChatTotals};
 use crate::streaming::{StreamPlatform, stream_platform_from_id};
-use crate::viewer_stats::ViewerSample;
+use crate::viewer_stats::{PlatformViewCount, ViewerSample, best_view_counts};
 
 /// The wire version of `POST /api/desktop/stream-report`.
 pub const STREAM_REPORT_VERSION: u32 = 1;
@@ -35,6 +38,9 @@ pub const SERIES_BUCKETS: usize = 48;
 pub const TITLE_MAX_CHARS: usize = 140;
 /// Plan 237 D5: a live session shorter than this gets no email.
 pub const MIN_STREAM_SECONDS: i64 = 5 * 60;
+/// The largest count the web contract takes (`MAX_COUNT` in videorc-web's
+/// `lib/stream-report/schema.ts`).
+const REPORT_MAX_COUNT: u64 = 100_000_000;
 /// How many earlier live sessions "since your last stream" looks through for
 /// one with numbers.
 const PREVIOUS_SESSIONS_SCAN: usize = 5;
@@ -69,6 +75,28 @@ pub struct StreamReport {
     pub community: Option<ReportCommunity>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub since_last: Option<ReportSinceLast>,
+    /// Always sent by this version, so the web can tell "no platform gave a
+    /// view count" (`byPlatform: []`) from a report made before views.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub views: Option<ReportViews>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ReportViews {
+    /// Only platforms that gave their own total view count, in
+    /// `StreamPlatform` order. Never summed into one number.
+    pub by_platform: Vec<ReportPlatformViews>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ReportPlatformViews {
+    pub platform: StreamPlatform,
+    /// The platform's own cumulative count of views (not people).
+    pub views: u64,
+    /// When that count was last read, `2026-11-14T19:41:58Z`.
+    pub read_at: String,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -187,6 +215,8 @@ pub struct ReportInput {
     pub audience: Option<AudienceSnapshot>,
     pub community: Option<CohostReportCommunity>,
     pub previous: Option<PreviousStream>,
+    /// `stream-views` reads, any order; the builder keeps the latest in-session read.
+    pub views: Vec<PlatformViewCount>,
 }
 
 /// The last live session's numbers, for "since your last stream" (D8).
@@ -312,6 +342,26 @@ fn series(
     buckets
 }
 
+/// Each platform's best known total view count (see
+/// [`best_view_counts`]). A count past the web contract's bound, or a read
+/// with a bad time, is left out rather than failing the whole report.
+pub fn views_summary(reads: &[PlatformViewCount]) -> ReportViews {
+    ReportViews {
+        by_platform: best_view_counts(reads)
+            .into_iter()
+            .filter(|read| read.views <= REPORT_MAX_COUNT)
+            .filter_map(|read| {
+                Some(ReportPlatformViews {
+                    platform: read.platform,
+                    views: read.views,
+                    read_at: parse_utc(&read.at)?
+                        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                })
+            })
+            .collect(),
+    }
+}
+
 /// Messages and chatters per platform from `session_chat_authors` rows.
 pub fn chat_summary(authors: &[(String, u64)], people: Option<u64>) -> Option<ReportChat> {
     let mut by_platform: Vec<ReportPlatformChat> = Vec::new();
@@ -371,6 +421,17 @@ fn percent_change(current: u64, previous: u64) -> Option<i64> {
 pub fn build_report(input: ReportInput) -> StreamReport {
     let viewers = viewer_summary(&input.samples, input.started_at, input.ended_at);
     let chat = chat_summary(&input.authors, input.people);
+    let view_reads = input
+        .views
+        .iter()
+        .filter(|read| {
+            (input.platforms.is_empty() || input.platforms.contains(&read.platform))
+                && parse_utc(&read.at)
+                    .is_some_and(|at| at >= input.started_at && at <= input.ended_at)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let views = views_summary(&view_reads);
 
     // Where it went live: the destinations, else whatever the data shows.
     let mut platforms = input.platforms.clone();
@@ -388,6 +449,7 @@ pub fn build_report(input: ReportInput) -> StreamReport {
         if let Some(audience) = &input.audience {
             platforms.extend(audience.platforms.iter().map(|entry| entry.platform));
         }
+        platforms.extend(views.by_platform.iter().map(|entry| entry.platform));
     }
     let platforms = sorted_platforms(platforms);
 
@@ -512,6 +574,7 @@ pub fn build_report(input: ReportInput) -> StreamReport {
         support,
         community,
         since_last,
+        views: Some(views),
     }
 }
 
@@ -752,6 +815,7 @@ pub fn load_report(
         .get_cohost_report(session_id)?
         .and_then(|report| report.community);
     let people = session_people(database, session_id);
+    let views = crate::viewer_stats::session_view_counts(database, session_id)?;
     let previous = raw_started_at(database, session_id)
         .and_then(|raw| previous_stream(database, &facts, &raw));
     let ended_at = facts.end();
@@ -769,6 +833,121 @@ pub fn load_report(
         audience,
         community,
         previous,
+        views,
+    })))
+}
+
+/// Plan 249 S25: what one cloud live interval's report reads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IntervalReportSource {
+    pub show_id: String,
+    pub interval_id: String,
+    /// Local sessions that fed this interval (solo cloud); empty for a room,
+    /// whose rows are kept under the show id.
+    pub sessions: Vec<String>,
+    /// The server's interval: first leg live, and its end.
+    pub started_at: DateTime<Utc>,
+    pub ended_at: DateTime<Utc>,
+}
+
+fn show_interval_count(database: &Database, show_id: &str) -> anyhow::Result<i64> {
+    let conn = database.lock()?;
+    Ok(conn.query_row(
+        "SELECT COUNT(*) FROM cloud_live_intervals WHERE show_id = ?1 AND live_since IS NOT NULL",
+        params![show_id],
+        |row| row.get(0),
+    )?)
+}
+
+/// Builds the report of one cloud live interval: its time is the server's
+/// interval (an open room off air is never counted), its viewer and view
+/// reads are the ones inside it. Counts kept for a whole session (chat,
+/// audience, community) are used only when they describe this interval
+/// alone: one feeding session, or a room show with this one interval.
+/// `None` when the interval never lasted.
+pub fn load_interval_report(
+    database: &Database,
+    source: &IntervalReportSource,
+    report_id: String,
+    platforms: Vec<StreamPlatform>,
+) -> anyhow::Result<Option<StreamReport>> {
+    if source.ended_at <= source.started_at {
+        return Ok(None);
+    }
+    let room = source.sessions.is_empty();
+    let sources: Vec<String> = if room {
+        vec![source.show_id.clone()]
+    } else {
+        source.sessions.clone()
+    };
+    let mut samples = Vec::new();
+    let mut views = Vec::new();
+    let mut authors: Vec<(String, u64)> = Vec::new();
+    for session_id in &sources {
+        // A feeding session can predate the interval (a resume, a leg live
+        // before the show): only samples inside the interval count.
+        samples.extend(
+            crate::viewer_stats::session_viewer_history(database, session_id)?
+                .into_iter()
+                .filter(|sample| {
+                    DateTime::parse_from_rfc3339(&sample.at).is_ok_and(|at| {
+                        let at = at.with_timezone(&Utc);
+                        at >= source.started_at && at <= source.ended_at
+                    })
+                }),
+        );
+        views.extend(crate::viewer_stats::session_view_counts(
+            database, session_id,
+        )?);
+        // One chatter in two feeding sessions is still one chatter.
+        for (key, count) in session_chat_authors(database, session_id)? {
+            match authors.iter_mut().find(|(known, _)| *known == key) {
+                Some((_, total)) => *total = total.saturating_add(count),
+                None => authors.push((key, count)),
+            }
+        }
+    }
+    let whole = if room {
+        show_interval_count(database, &source.show_id)? <= 1
+    } else {
+        sources.len() == 1
+    };
+    if room && !whole {
+        authors.clear();
+    }
+    let single = whole.then(|| sources[0].as_str());
+    let title = sources
+        .iter()
+        .find_map(|id| session_facts(database, id).ok().flatten())
+        .map(|facts| facts.title);
+    let (totals, audience, community, people) = match single {
+        Some(id) => (
+            database.session_chat_totals(id)?,
+            crate::audience::session_audience(database, id)?,
+            database
+                .get_cohost_report(id)?
+                .and_then(|report| report.community),
+            session_people(database, id),
+        ),
+        None => (None, None, None, None),
+    };
+    Ok(Some(build_report(ReportInput {
+        report_id,
+        started_at: source.started_at,
+        ended_at: source.ended_at,
+        utc_offset_minutes: local_utc_offset_minutes(source.started_at),
+        title,
+        platforms,
+        samples,
+        authors,
+        people,
+        totals,
+        audience,
+        community,
+        // "Since your last stream" compares local sessions; an interval is
+        // not one, so it says nothing rather than compare unlike things.
+        previous: None,
+        views,
     })))
 }
 
@@ -816,10 +995,44 @@ mod tests {
             audience: None,
             community: None,
             previous: None,
+            views: Vec::new(),
         }
     }
 
     use StreamPlatform::{Kick, Twitch, X, Youtube};
+
+    #[test]
+    fn total_views_select_the_latest_read_inside_the_stream_window() {
+        let mut data = input();
+        data.views = vec![
+            PlatformViewCount {
+                platform: Youtube,
+                views: 1203,
+                at: at(300).to_rfc3339(),
+            },
+            PlatformViewCount {
+                platform: Youtube,
+                views: 1200,
+                at: at(600).to_rfc3339(),
+            },
+            PlatformViewCount {
+                platform: Youtube,
+                views: 9999,
+                at: at(3601).to_rfc3339(),
+            },
+            PlatformViewCount {
+                platform: Kick,
+                views: 500,
+                at: at(600).to_rfc3339(),
+            },
+        ];
+        let report = build_report(data);
+        let rows = report.views.unwrap().by_platform;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].platform, Youtube);
+        assert_eq!(rows[0].views, 1200);
+        assert_eq!(rows[0].read_at, "2026-11-14T18:10:00Z");
+    }
 
     #[test]
     fn no_samples_means_no_viewers_block() {
@@ -1080,9 +1293,29 @@ mod tests {
                 None,
             )
             .unwrap();
-        let report = load_report(&database, "live-1", "r".to_string(), vec![Twitch])
+        database
+            .add_session_log(
+                "live-1",
+                crate::protocol::HealthLevel::Info,
+                crate::viewer_stats::VIEW_COUNT_LOG_CODE,
+                &serde_json::to_string(&PlatformViewCount {
+                    platform: Youtube,
+                    views: 1203,
+                    at: at(300).to_rfc3339(),
+                })
+                .unwrap(),
+                None,
+            )
+            .unwrap();
+        let report = load_report(&database, "live-1", "r".to_string(), vec![Youtube, Twitch])
             .unwrap()
             .unwrap();
+        assert_eq!(report.views.as_ref().unwrap().by_platform[0].views, 1203);
+        let wire = serde_json::to_value(&report).unwrap();
+        assert_eq!(
+            wire["views"]["byPlatform"][0]["readAt"],
+            "2026-11-14T18:05:00Z"
+        );
         assert_eq!(report.viewers.unwrap().peak, 42);
         assert_eq!(report.started_at, "2026-11-14T18:00:00Z");
         assert_eq!(report.ended_at, "2026-11-14T19:00:00Z");

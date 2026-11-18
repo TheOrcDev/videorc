@@ -1241,6 +1241,7 @@ pub struct AppState {
     /// request token — OAuth 1.0a callbacks carry no `state` param).
     pub x_oauth1: Arc<crate::x_oauth1::XOauth1Sessions>,
     pub ffmpeg_work: Arc<FfmpegWorkCoordinator>,
+    pub cloud_live_hold: Arc<StdMutex<Option<crate::ffmpeg_work::LiveHold>>>,
     pub noise_cleanup: Arc<crate::noise_cleanup::NoiseCleanupRegistry>,
     /// Live Clean cut workers by job id (plan 119): cancel and shutdown
     /// interrupt reach the running worker through it.
@@ -1312,6 +1313,7 @@ pub struct AppState {
     /// The chat box (plan 215 G): the last few chat messages, painted by the
     /// renderer and pushed through `chat.overlay.set`, like the highlight.
     pub chat_overlay: crate::captions::CaptionOverlaySlot,
+    pub chat_overlay_generation: Arc<StdMutex<u64>>,
     /// The chat box rasterized for the vertical simulcast leg's portrait
     /// canvas. Installed and cleared together with `chat_overlay`.
     pub simulcast_chat_overlay: crate::captions::CaptionOverlaySlot,
@@ -1549,10 +1551,18 @@ impl AppState {
             audience: Arc::default(),
             youtube_quota: crate::youtube_quota::new_youtube_quota_slot(),
             platform_token_refresh: Arc::default(),
-            cloud_show: crate::cloud_show::new_cloud_show_slot_remembering(
-                crate::cloud_show::load_settings(&database),
-                crate::cloud_show::load_remembered_show(&database),
-            ),
+            cloud_show: {
+                let slot = crate::cloud_show::new_cloud_show_slot_remembering(
+                    crate::cloud_show::load_settings(&database),
+                    crate::cloud_show::load_remembered_show(&database),
+                );
+                {
+                    let mut runtime = crate::cloud_show::lock(&slot);
+                    runtime.device = crate::cloud_show::load_device(&database);
+                    runtime.device_name = Some(Arc::new(tokio::sync::OnceCell::new()));
+                }
+                slot
+            },
             database,
             remote_control: std::sync::Arc::new(StdMutex::new(
                 crate::remote_control::RemoteControlRuntime::load_from_secrets(),
@@ -1572,6 +1582,7 @@ impl AppState {
                 crate::secrets::delete_secret,
             )),
             x_oauth1: Arc::new(crate::x_oauth1::XOauth1Sessions::default()),
+            cloud_live_hold: Arc::new(StdMutex::new(None)),
             ffmpeg_work: Arc::new(FfmpegWorkCoordinator::new()),
             noise_cleanup: Arc::new(crate::noise_cleanup::NoiseCleanupRegistry::default()),
             clean_cut: Arc::new(crate::clean_cut::CleanCutRegistry::default()),
@@ -1601,6 +1612,7 @@ impl AppState {
             highlight_overlay: crate::captions::new_caption_overlay_slot(),
             simulcast_highlight_overlay: crate::captions::new_caption_overlay_slot(),
             chat_overlay: crate::captions::new_caption_overlay_slot(),
+            chat_overlay_generation: Arc::new(StdMutex::new(0)),
             simulcast_chat_overlay: crate::captions::new_caption_overlay_slot(),
             buddy_overlay: crate::captions::new_caption_overlay_slots(),
             buddy_overlay_state: crate::buddy_overlay::new_buddy_overlay_state_slot(

@@ -10,7 +10,7 @@ import {
 
 import { subscribeVisualMicrophoneEpoch, visualMicrophoneEpoch } from '@/lib/mic-visual-ownership'
 import { useDocumentVisible } from '@/hooks/use-document-visible'
-import { useStudioCore } from '@/hooks/use-studio'
+import { useStudioCore, useStudioCloud } from '@/hooks/use-studio'
 import { micVisualAnalyserEnabled, microphoneAccessOpen } from '@/lib/mic-visual-gate'
 import { warmMicrophoneWanted } from '@/lib/warm-microphone-gate'
 import type {
@@ -76,6 +76,7 @@ export function StudioMicVisualProvider({
     armWarmMicrophone,
     disarmWarmMicrophone
   } = useStudioCore()
+  const roomOpen = useStudioCloud().cloudStatus?.room?.phase === 'open'
   const documentVisible = useDocumentVisible()
   const resumeEpoch = useSyncExternalStore(
     subscribeVisualMicrophoneEpoch,
@@ -96,6 +97,7 @@ export function StudioMicVisualProvider({
   // waits for the same exact grant the analyser waits for (granted, or an OS
   // with no grant to give). Record still opens the microphone itself.
   const warmWanted =
+    !roomOpen &&
     microphoneAccessOpen(permissionStatus) &&
     warmMicrophoneWanted({
       keepWarm: settings.keepMicrophoneWarm !== false,
@@ -128,6 +130,7 @@ export function StudioMicVisualProvider({
     strictDevice: true,
     resumeEpoch,
     enabled:
+      !roomOpen &&
       !sourceSelectionState.pending &&
       !sourceSelectionState.checking &&
       micVisualAnalyserEnabled({

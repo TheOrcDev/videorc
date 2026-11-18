@@ -106,12 +106,15 @@ const sourcesPage = pageChunk(
 const streamingPage = pageChunk(
   async () => (await import('@/components/tabs/streaming-tab')).StreamingTab
 )
+// The Guests page rides Destinations' chunk, which loads it: no page chunk
+// of its own in the eager bundle (0.31.1).
 const PAGE_CHUNKS: Record<WorkspaceTab, PageLoad> = {
   studio: studioPage,
   sources: sourcesPage,
   layouts: layoutPage,
   assets: assetsPage,
   live: streamingPage,
+  guests: streamingPage,
   captions: captionsPage,
   recording: recordingPage,
   library: libraryPage,
@@ -218,6 +221,7 @@ function AppShellContent(): ReactElement {
     toggleCaptionsWindow,
     stopConfirmation,
     confirmStopSession,
+    handOffStopSession,
     cancelStopSession,
     setFirstRunSetupOpen
   } = useStudioShell()
@@ -652,8 +656,9 @@ function AppShellContent(): ReactElement {
                       {active === 'sources' ? <SourcesTab /> : null}
                       {active === 'layouts' ? <LayoutTab /> : null}
                       {active === 'assets' ? <AssetsTab /> : null}
-                      {active === 'live' ? (
+                      {active === 'live' || active === 'guests' ? (
                         <StreamingTab
+                          guests={active === 'guests'}
                           destinationToOpen={destinationToOpen}
                           view={livestreamView}
                           onDestinationOpened={clearDestinationToOpen}
@@ -767,6 +772,7 @@ function AppShellContent(): ReactElement {
             confirmation={stopConfirmation}
             onCancel={cancelStopSession}
             onConfirm={confirmStopSession}
+            onHandOff={handOffStopSession}
           />
         ) : null}
       </Suspense>

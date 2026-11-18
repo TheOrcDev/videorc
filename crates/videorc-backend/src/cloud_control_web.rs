@@ -68,6 +68,9 @@ const LEG_RESEND_SPACING: Duration = Duration::from_secs(30);
 /// report's 20 s then, not when a 25 s poll returns.
 const FEED_CLOCK_LOOK: Duration = Duration::from_secs(1);
 const CODE_SHOW_ENDED: &str = "cloud-show-ended";
+/// Sections 2.3 and 2.7 (plan 247): the show's End is under way, and the
+/// routes under its lease answer this until the show is over.
+const CODE_SHOW_ENDING: &str = "cloud-show-ending";
 const CODE_CONTROL_MISMATCH: &str = "cloud-control-mismatch";
 /// Section 2.4: the hold-image route takes a PNG of at most this many
 /// bytes and this many pixels a side. A node takes up to 8 MiB; the desktop
@@ -227,6 +230,8 @@ pub(crate) fn legs_end_destinations(destinations: &[HandoverDestination]) -> Val
 #[serde(rename_all = "camelCase")]
 pub struct ControlRevAnswer {
     #[serde(default)]
+    pub ending: bool,
+    #[serde(default)]
     pub rev: Option<u64>,
 }
 
@@ -351,6 +356,12 @@ where
 /// is left out on purpose: this line reaches logs and error strings.
 fn failure_line(error: &CloudApiError) -> String {
     match error {
+        CloudApiError::Other { code, .. } if code == "cloud-recording-expired" => {
+            "The cloud recording has expired.".to_string()
+        }
+        CloudApiError::Other { code, .. } if code == "cloud-recording-missing" => {
+            "The recording artifact is no longer available.".to_string()
+        }
         CloudApiError::Other { status, code, .. } => {
             format!("videorc.com answered {status} {code}")
         }
@@ -404,6 +415,16 @@ fn legs_end_problem(error: &CloudApiError) -> String {
         }
         _ => failure_line(error),
     }
+}
+
+/// 409 `cloud-show-ending` on `POST …/legs/end` (plan 247 D4): the whole
+/// show is ending, and its legs with it. End livestream has what it asked
+/// for, so this is an answer, not a failure. A 4xx is never tried again.
+fn show_is_ending(error: &CloudApiError) -> bool {
+    matches!(
+        error,
+        CloudApiError::Other { status: 409, code, .. } if code == CODE_SHOW_ENDING
+    )
 }
 
 fn refused_line(refused: &[RefusedDestination]) -> String {
@@ -520,6 +541,16 @@ pub struct CloudRecordingItem {
     pub id: String,
     #[serde(default)]
     pub show_id: String,
+    #[serde(default)]
+    pub take_id: String,
+    #[serde(default)]
+    pub association_known: bool,
+    #[serde(default)]
+    pub live_interval_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub availability: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_session_id: Option<String>,
     /// `h` or `v`.
     #[serde(default)]
     pub orientation: String,
@@ -622,6 +653,8 @@ pub enum DownloadState {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RecordingDownloadEvent {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub local_session_id: Option<String>,
     pub job_id: String,
     pub recording_id: String,
     pub state: DownloadState,
@@ -742,6 +775,7 @@ impl RecordingDownloadJobs {
         let key = recording_id.clone();
         let task_key = key.clone();
         let event = RecordingDownloadEvent {
+            local_session_id: None,
             job_id,
             recording_id,
             state: DownloadState::Running,
@@ -1271,6 +1305,7 @@ async fn download_segments_recording_with_progress<W, R, Fut>(
     recording: &CloudRecordingItem,
     folder: &Path,
     control: DownloadControl,
+    database: Option<&crate::storage::Database>,
     remux: R,
 ) -> Result<PathBuf>
 where
@@ -1305,12 +1340,33 @@ where
         .map_err(|error| anyhow::anyhow!(storage_problem(&error)))?;
     let part = OwnedDownloadFile::part(folder, &recording.file_name(), &job_id)
         .map_err(|error| anyhow::anyhow!(storage_problem(&error)))?;
+    if let Some(database) = database {
+        database.prepare_cloud_recording_partial(recording, part.path())?;
+    }
     let outcome = remux(remux_args(&playlist_path, part.path())).await;
     drop(temporary);
     match outcome {
-        Ok(outcome) if outcome.success => part
-            .finish(folder, &recording.file_name())
-            .map_err(|error| anyhow::anyhow!(storage_problem(&error))),
+        Ok(outcome) if outcome.success => {
+            if let Some(database) = database {
+                std::fs::File::open(part.path())?.sync_all()?;
+                crate::session_ops::sync_session_file_parent(part.path())?;
+                if std::fs::metadata(part.path())?.len() == 0 {
+                    bail!("The recording download stopped. Try again.");
+                }
+                let destination = folder.join(format!("talk-{}.mp4", uuid::Uuid::new_v4()));
+                database.prepare_cloud_recording_file(recording, part.path(), &destination)?;
+                // The durable journal owns this complete file from here, including
+                // a process death between publication and Library registration.
+                let mut part = part;
+                part.0 = None;
+                database
+                    .recover_cloud_recording_file(recording)?
+                    .ok_or_else(|| anyhow::anyhow!("The recording download stopped. Try again."))
+            } else {
+                part.finish(folder, &recording.file_name())
+                    .map_err(|error| anyhow::anyhow!(storage_problem(&error)))
+            }
+        }
         Ok(outcome) => {
             bail!("{}", remux_problem(&outcome.stderr));
         }
@@ -1344,6 +1400,7 @@ where
             cancelled,
             progress: Arc::new(|_, _| {}),
         },
+        None,
         remux,
     )
     .await
@@ -1372,6 +1429,7 @@ impl<W: CloudWebApi, C: ControlConnector> crate::cloud_show::CloudShowContext<W,
         ffmpeg: String,
         folder: PathBuf,
         emit: DownloadEventHook,
+        database: crate::storage::Database,
     ) -> Result<CloudRecordingDownload> {
         if bearer.is_none() {
             bail!("Sign in to download your cloud recordings.");
@@ -1379,9 +1437,26 @@ impl<W: CloudWebApi, C: ControlConnector> crate::cloud_show::CloudShowContext<W,
         let context = self.clone();
         let jobs = lock(&self.slot).downloads.clone();
         let recording_id = recording_id.to_string();
+        let event_database = database.clone();
+        let emit: DownloadEventHook = Arc::new(move |mut event| {
+            if event.state == DownloadState::Done {
+                event.local_session_id = event_database
+                    .cloud_recording_session(&event.recording_id)
+                    .ok()
+                    .flatten();
+            }
+            emit(event);
+        });
         jobs.start(recording_id.clone(), emit, move |control| async move {
             context
-                .perform_cloud_recording_download(bearer, &recording_id, ffmpeg, folder, control)
+                .perform_cloud_recording_download(
+                    bearer,
+                    &recording_id,
+                    ffmpeg,
+                    folder,
+                    control,
+                    database,
+                )
                 .await
         })
     }
@@ -1395,6 +1470,7 @@ impl<W: CloudWebApi, C: ControlConnector> crate::cloud_show::CloudShowContext<W,
         ffmpeg: String,
         folder: PathBuf,
         mut control: DownloadControl,
+        database: crate::storage::Database,
     ) -> Result<PathBuf> {
         let Some(bearer) = bearer else {
             bail!("Sign in to download your cloud recordings.");
@@ -1406,6 +1482,17 @@ impl<W: CloudWebApi, C: ControlConnector> crate::cloud_show::CloudShowContext<W,
         let Some(recording) = recordings.iter().find(|item| item.id == recording_id) else {
             bail!("That recording is not in your account any more.");
         };
+        let _file_claim = crate::cloud_archive::claim_take_file(recording_id)?;
+        database.remember_cloud_recording(recording)?;
+        if let Some(path) = database.recover_cloud_recording_file(recording)? {
+            return Ok(path);
+        }
+        if recording.availability.as_deref() == Some("expired")
+            || chrono::DateTime::parse_from_rfc3339(&recording.expires_at)
+                .is_ok_and(|at| at < chrono::Utc::now())
+        {
+            bail!("The cloud recording has expired.");
+        }
         if !recording.is_segments() {
             bail!("This recording downloads from your account on videorc.com.");
         }
@@ -1416,6 +1503,7 @@ impl<W: CloudWebApi, C: ControlConnector> crate::cloud_show::CloudShowContext<W,
             recording,
             &folder,
             control,
+            Some(&database),
             |args| run_ffmpeg_remux(ffmpeg, args, remux_cancel),
         )
         .await
@@ -1471,12 +1559,19 @@ pub(crate) type WebIntentCall = Arc<dyn Fn(Value) -> IntentAnswer + Send + Sync>
 #[derive(Clone)]
 pub(crate) struct WebIntents {
     call: WebIntentCall,
+    floor: Arc<AtomicU64>,
     /// Never sent on. The show's poll watches the other end and stops when
     /// the slot has let go of every handle.
     _held: mpsc::UnboundedSender<ControlRequest>,
 }
 
 impl WebIntents {
+    pub(crate) fn observe_revision(&self, rev: Option<u64>) {
+        if let Some(rev) = rev {
+            self.floor.fetch_max(rev, Ordering::SeqCst);
+        }
+    }
+
     pub(crate) async fn send(&self, frame: Value) -> AckResult {
         (self.call)(frame).await
     }
@@ -1616,10 +1711,21 @@ async fn send_web_intent_until<W: CloudWebApi>(
         "legs.end" => {
             let _stopping = destinations.stopping().await;
             let body = DestinationsBody::for_legs_end(&frame);
-            with_one_cloud_retry_until(deadline, || web.end_legs(bearer, show_id, &body))
+            match with_one_cloud_retry_until(deadline, || web.end_legs(bearer, show_id, &body))
                 .await
-                .map(|answer| raise_floor(floor, &answer))
-                .map_err(|error| body.scrub(&legs_end_problem(&error)))
+            {
+                Ok(answer) => Ok(raise_floor(floor, &answer)),
+                Err(error) if show_is_ending(&error) => {
+                    tracing::info!(
+                        show = show_id,
+                        "Videorc Cloud is already ending the show; its legs end with it"
+                    );
+                    // Its own ack, so the caller can tell it from an end
+                    // the web carried out for this request.
+                    Ok(Some(json!({ "ending": true })))
+                }
+                Err(error) => Err(body.scrub(&legs_end_problem(&error))),
+            }
         }
         "recording.start" | "recording.stop" => {
             let on = kind == "recording.start";
@@ -1648,7 +1754,7 @@ fn raise_floor(floor: &AtomicU64, answer: &ControlRevAnswer) -> Option<Value> {
     if let Some(rev) = answer.rev {
         floor.fetch_max(rev, Ordering::SeqCst);
     }
-    None
+    answer.ending.then(|| json!({ "ending": true }))
 }
 
 // --- The state poll -----------------------------------------------------------------
@@ -1695,6 +1801,7 @@ fn read_state_answer(answer: std::result::Result<ControlStateAnswer, CloudApiErr
 /// One show's control over videorc.com: its state long-poll and the way to
 /// its intents.
 pub(crate) struct WebControl<W: CloudWebApi> {
+    slot: crate::cloud_show::CloudShowSlot,
     web: Arc<W>,
     bearer: String,
     show_id: String,
@@ -1720,8 +1827,13 @@ impl<W: CloudWebApi> WebControl<W> {
         bearer: &str,
         show_id: &str,
         destinations: Arc<DestinationGeneration>,
+        slot: crate::cloud_show::CloudShowSlot,
     ) -> std::result::Result<(Self, RunnerState), HelloFailure> {
-        let first = with_one_cloud_retry(|| web.control_state(bearer, show_id, None)).await;
+        let first = with_one_cloud_retry(|| {
+            let idle = crate::cloud_show::lock(&slot).poll_as_idle();
+            web.control_state(bearer, show_id, None, idle)
+        })
+        .await;
         let (rev, state) = match read_state_answer(first) {
             WebPoll::State { rev, state } => (rev, *state),
             WebPoll::Ended(_) => return Err(HelloFailure::NoSuchShow),
@@ -1763,6 +1875,7 @@ impl<W: CloudWebApi> WebControl<W> {
         );
         Ok((
             Self {
+                slot,
                 web,
                 bearer: bearer.to_string(),
                 show_id: show_id.to_string(),
@@ -1781,6 +1894,7 @@ impl<W: CloudWebApi> WebControl<W> {
     pub(crate) fn intents(&self, held: mpsc::UnboundedSender<ControlRequest>) -> WebIntents {
         WebIntents {
             call: self.call.clone(),
+            floor: self.floor.clone(),
             _held: held,
         }
     }
@@ -1790,9 +1904,10 @@ impl<W: CloudWebApi> WebControl<W> {
     /// with the same `since`.
     pub(crate) async fn poll(&mut self) -> WebPoll {
         tokio::time::sleep_until(self.next_at).await;
+        let idle = crate::cloud_show::lock(&self.slot).poll_as_idle();
         let answer = self
             .web
-            .control_state(&self.bearer, &self.show_id, self.since)
+            .control_state(&self.bearer, &self.show_id, self.since, idle)
             .await;
         let poll = read_state_answer(answer);
         let now = tokio::time::Instant::now();
@@ -2051,6 +2166,9 @@ impl<W: CloudWebApi, C: ControlConnector> ControlLoop<W, C> {
     ) {
         let (asked, generation): (Vec<HandoverDestination>, u64) = {
             let runtime = lock(&self.context.slot);
+            if runtime.stopped_by.is_some() {
+                return;
+            }
             let (Some(show), Some(runner)) = (runtime.show.as_ref(), runtime.runner.as_ref())
             else {
                 return;
@@ -2222,8 +2340,1297 @@ impl<W: CloudWebApi, C: ControlConnector> ControlLoop<W, C> {
     }
 }
 
+// --- Plan 249 S22: opt-in cloud ISO (docs/cloud/249-s22-contract.md 3, 5) ---
+//
+// The owner's ISO route on videorc.com answers the show's ISO request and one
+// manifest per program take. Every manifest is validated again here with the
+// strict Rust parser before it reaches the renderer or names a file; an
+// invalid one is refused, never passed through. An ISO file arrives through a
+// presigned GET: its URL is a secret, never logged, put in an error or written
+// to disk, and no bearer is sent to storage. A take's files are imported one
+// at a time into Output's folder, each with a hard byte bound into a staging
+// file journalled before its first byte, published without replacing
+// anything, and registered as one Library row per ISO file under the take's
+// file claim (S21c). One file failing never stops the others.
+
+use crate::cloud_source_iso::{
+    IsoDownloadJournal, IsoDownloadRecord, IsoDownloadState, IsoImportItem, IsoManifest,
+    MAX_IMPORT_BYTES, parse_iso_manifest, plan_iso_import,
+};
+
+pub(crate) const ISO_CONSENT_VERSION: &str = "iso-consent-v1";
+pub(crate) const CODE_ISO_NOT_QUALIFIED: &str = "cloud-iso-not-qualified";
+pub(crate) const CODE_ISO_PLAN: &str = "cloud-iso-plan";
+pub(crate) const CODE_ISO_REFUSED: &str = "cloud-iso-refused";
+pub(crate) const CODE_ISO_FAILED: &str = "cloud-iso-failed";
+/// S24 fence: another device holds the show (stale or missing epoch).
+pub(crate) const CODE_ISO_CONTROLLER: &str = "cloud-iso-controller";
+pub(crate) const CODE_ISO_IMPORT_FAILED: &str = "cloud-iso-import-failed";
+pub(crate) const CODE_ISO_INVALID_PARAMS: &str = "invalid-params";
+/// The web's admission bounds (`lib/cloud/iso/admission.ts`): a request
+/// beyond them is refused here before it leaves this computer.
+pub(crate) const ISO_MAX_ACTIVE_ENTRIES: u64 = 12;
+pub(crate) const ISO_MAX_MINUTES: u64 = 180;
+pub(crate) const ISO_MAX_COST_CEILING_MICROS: u64 = 5_000_000;
+/// At most this many program takes carry an ISO manifest (contract 2).
+const ISO_MAX_TAKES: usize = 8;
+const ISO_STATUS_MAX_BYTES: usize = 2 * 1024 * 1024;
+const ISO_GRANT_MAX_BYTES: usize = 16 * 1024;
+const ISO_ERROR_MAX_BYTES: usize = 8 * 1024;
+const ISO_REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
+/// A transfer that delivers nothing for this long has stopped.
+const ISO_CHUNK_TIMEOUT: Duration = Duration::from_secs(60);
+/// A Library write waits this long for another writer of the same take (an
+/// S20 download, an S21c archive) to finish before it fails.
+const ISO_CLAIM_WAIT: Duration = Duration::from_secs(30);
+const ISO_CLAIM_RETRY: Duration = Duration::from_millis(250);
+
+pub(crate) fn iso_path(show_id: &str) -> String {
+    format!("/api/cloud/shows/{show_id}/iso")
+}
+
+pub(crate) fn iso_file_path(show_id: &str) -> String {
+    format!("/api/cloud/shows/{show_id}/iso/file")
+}
+
+/// An ISO failure as the renderer receives it: a code from contract 5 and a
+/// plain sentence. Never a URL, a token or the web's own text.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("{message}")]
+pub struct CloudIsoError {
+    pub code: &'static str,
+    /// For `cloud-iso-refused`, it names the admission refusal code when the
+    /// web gave one in the closed shape.
+    pub message: String,
+}
+
+impl CloudIsoError {
+    fn new(code: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+        }
+    }
+
+    pub(crate) fn failed(message: impl Into<String>) -> Self {
+        Self::new(CODE_ISO_FAILED, message)
+    }
+
+    pub(crate) fn invalid(message: impl Into<String>) -> Self {
+        Self::new(CODE_ISO_INVALID_PARAMS, message)
+    }
+
+    fn import(message: impl Into<String>) -> Self {
+        Self::new(CODE_ISO_IMPORT_FAILED, message)
+    }
+
+    fn unsupported() -> Self {
+        Self::failed("Cloud ISO recording is not available in this build.")
+    }
+}
+
+pub(crate) type IsoResult<T> = std::result::Result<T, CloudIsoError>;
+
+fn iso_code_word(text: &str) -> bool {
+    !text.is_empty()
+        && text.len() <= 40
+        && text.bytes().all(|b| b.is_ascii_lowercase() || b == b'-')
+}
+
+/// A failed ISO route, from its status and `error` (a string, or the
+/// `{ code }` envelope). Only a closed set of codes is read; the web's text
+/// never reaches the renderer.
+pub(crate) fn cloud_iso_error(status: u16, body: &[u8]) -> CloudIsoError {
+    let value: Value = serde_json::from_slice(body).unwrap_or(Value::Null);
+    let code = value
+        .get("error")
+        .and_then(|error| {
+            error
+                .as_str()
+                .or_else(|| error.get("code").and_then(Value::as_str))
+        })
+        .unwrap_or_default();
+    match (status, code) {
+        // `not-qualified` (and the loopback fixture's `iso-disabled`) means
+        // the managed service is not qualified. `iso-unavailable` is a
+        // storage/state outage on the web: a failure, never "not qualified".
+        (_, "not-qualified" | "iso-disabled") => CloudIsoError::new(
+            CODE_ISO_NOT_QUALIFIED,
+            "Cloud ISO recording is not available for this show yet.",
+        ),
+        (_, "iso-plan") => CloudIsoError::new(
+            CODE_ISO_PLAN,
+            "Cloud ISO recording is not part of your plan.",
+        ),
+        (_, "iso-refused") => {
+            let reason = value
+                .get("reason")
+                .and_then(Value::as_str)
+                .filter(|reason| iso_code_word(reason));
+            let message = match reason {
+                Some(reason) => format!("Videorc Cloud refused ISO recording ({reason})."),
+                None => "Videorc Cloud refused ISO recording.".to_string(),
+            };
+            CloudIsoError::new(CODE_ISO_REFUSED, message)
+        }
+        // S24's controller fence refused the command: another device holds
+        // the show. Never retried as if the web had failed.
+        (409, "cloud-controller-stale" | "cloud-controller-required") => CloudIsoError::new(
+            CODE_ISO_CONTROLLER,
+            "Another device controls this show now. Continue here first.",
+        ),
+        (400, _) => CloudIsoError::failed("Videorc Cloud did not accept the ISO request."),
+        (401, _) => CloudIsoError::failed("Sign in again to use cloud ISO recording."),
+        (404, _) => CloudIsoError::failed("That show or ISO file is not in your account."),
+        (409, "iso-file-not-ready") => CloudIsoError::failed("That ISO file is not ready yet."),
+        (_, "iso-unavailable") => CloudIsoError::failed(
+            "Videorc Cloud can't reach its ISO storage right now. Try again in a moment.",
+        ),
+        (410, "show-expired") => CloudIsoError::failed("That show has expired."),
+        (410, _) => CloudIsoError::failed("Videorc Cloud no longer keeps that ISO file."),
+        _ => CloudIsoError::failed(format!(
+            "Videorc Cloud could not answer the ISO request ({status})."
+        )),
+    }
+}
+
+/// `GET …/iso/file?take=&entry=`: one ISO object's presigned GET. The URL is
+/// a secret: `Debug` withholds it.
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IsoFileGrant {
+    pub url: String,
+    #[serde(default)]
+    pub expires_at: Value,
+    pub bytes: u64,
+    /// The web's name for the file. Never used as a path: the local name is
+    /// the journal's, built from the validated manifest.
+    #[serde(default)]
+    pub file_name: String,
+    #[serde(default, deserialize_with = "iso_layout_name")]
+    pub frame_layout: Option<String>,
+    #[serde(default)]
+    pub partial: bool,
+}
+
+impl std::fmt::Debug for IsoFileGrant {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IsoFileGrant")
+            .field("url", &"(address withheld)")
+            .field("expires_at", &self.expires_at)
+            .field("bytes", &self.bytes)
+            .field("file_name", &self.file_name)
+            .field("frame_layout", &self.frame_layout)
+            .field("partial", &self.partial)
+            .finish()
+    }
+}
+
+/// `frameLayout` as a layout name: the string itself, or the manifest
+/// object's `layout`.
+fn iso_layout_name<'de, D>(deserializer: D) -> std::result::Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(match Value::deserialize(deserializer)? {
+        Value::String(layout) => Some(layout),
+        Value::Object(map) => map
+            .get("layout")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        _ => None,
+    })
+}
+
+/// Deliberately carries no request or URL.
+#[derive(Debug)]
+pub enum IsoFetchError {
+    Network,
+    /// Storage refused the presigned GET (expired, missing).
+    Refused,
+    /// More bytes than the grant announced.
+    TooLarge,
+    Storage(std::io::Error),
+}
+
+fn iso_fetch_problem(error: IsoFetchError) -> anyhow::Error {
+    match error {
+        IsoFetchError::Network => {
+            anyhow::anyhow!("The ISO file could not be downloaded. Try again.")
+        }
+        IsoFetchError::Refused => {
+            anyhow::anyhow!("The ISO file's download link was refused. Try again.")
+        }
+        IsoFetchError::TooLarge => {
+            anyhow::anyhow!("The ISO file was larger than Videorc Cloud said.")
+        }
+        IsoFetchError::Storage(error) => anyhow::anyhow!(storage_problem(&error)),
+    }
+}
+
+/// The ISO routes (contract 3) as this computer needs them. A separate
+/// trait from `CloudWebApi` (which lives in `cloud_show.rs`); every method
+/// has a body that refuses, so a fake implements only what it exercises.
+pub(crate) trait CloudIsoWebApi: Send + Sync + 'static {
+    /// `GET …/iso`: `{ availability, iso }`, unvalidated.
+    fn iso_status(
+        &self,
+        _bearer: &str,
+        _show_id: &str,
+    ) -> impl Future<Output = IsoResult<Value>> + Send {
+        std::future::ready(Err(CloudIsoError::unsupported()))
+    }
+    /// `POST …/iso` with `body` (enable, disable, reconcile).
+    fn iso_action(
+        &self,
+        _bearer: &str,
+        _show_id: &str,
+        _body: Value,
+    ) -> impl Future<Output = IsoResult<Value>> + Send {
+        std::future::ready(Err(CloudIsoError::unsupported()))
+    }
+    /// `GET …/iso/file?take=&entry=`.
+    fn iso_file(
+        &self,
+        _bearer: &str,
+        _show_id: &str,
+        _take_id: &str,
+        _entry_id: &str,
+    ) -> impl Future<Output = IsoResult<IsoFileGrant>> + Send {
+        std::future::ready(Err(CloudIsoError::unsupported()))
+    }
+    /// The presigned object into the existing staging file at `path`, at
+    /// most `limit` bytes, through the verified storage client. Returns how
+    /// many bytes it wrote.
+    fn iso_file_bytes(
+        &self,
+        _url: &str,
+        _path: &Path,
+        _limit: u64,
+    ) -> impl Future<Output = std::result::Result<u64, IsoFetchError>> + Send {
+        std::future::ready(Err(IsoFetchError::Network))
+    }
+}
+
+/// The ISO routes over HTTPS to the configured API base URL, with the
+/// desktop's bearer. Redirects are refused so the bearer never leaves it.
+pub(crate) struct CloudIsoHttp {
+    base_url: String,
+}
+
+impl CloudIsoHttp {
+    /// The configured base URL (`videorc_api::api_base_url`): pinned in a
+    /// release build, the dev override in a debug one.
+    pub(crate) fn configured() -> Self {
+        Self {
+            base_url: crate::videorc_api::api_base_url(),
+        }
+    }
+
+    async fn iso_send(
+        &self,
+        bearer: &str,
+        method: reqwest::Method,
+        path: &str,
+        query: &[(&str, &str)],
+        body: Option<&Value>,
+        limit: usize,
+    ) -> IsoResult<Vec<u8>> {
+        let offline = || CloudIsoError::failed("Videorc Cloud could not be reached. Try again.");
+        let client = iso_api_http().map_err(|_| offline())?;
+        let mut url = reqwest::Url::parse(&format!(
+            "{}/{}",
+            self.base_url.trim_end_matches('/'),
+            path.trim_start_matches('/')
+        ))
+        .map_err(|_| offline())?;
+        for (name, value) in query {
+            url.query_pairs_mut().append_pair(name, value);
+        }
+        let mut request = client
+            .request(method, url)
+            .bearer_auth(bearer)
+            .timeout(ISO_REQUEST_TIMEOUT);
+        if let Some(body) = body {
+            request = request.json(body);
+        }
+        // Use the common show sender so S24's held controller epoch and
+        // authority-loss handling also apply to ISO control commands.
+        let api = crate::videorc_api::VideorcApiClient::new().map_err(|_| offline())?;
+        let mut response = api
+            .cloud_send(request, path, ISO_REQUEST_TIMEOUT)
+            .await
+            .map_err(|(error, body)| {
+                use crate::cloud_show::CloudApiError;
+                let status = match error {
+                    CloudApiError::Unauthorized => 401,
+                    CloudApiError::Other { status, .. } => status,
+                    _ => 503,
+                };
+                cloud_iso_error(status, &serde_json::to_vec(&body).unwrap_or_default())
+            })?;
+        let status = response.status();
+        let bound = if status.is_success() {
+            limit
+        } else {
+            ISO_ERROR_MAX_BYTES
+        };
+        let mut bytes = Vec::new();
+        while let Some(chunk) = response.chunk().await.map_err(|_| offline())? {
+            if bytes.len() + chunk.len() > bound {
+                return Err(if status.is_success() {
+                    CloudIsoError::failed("Videorc Cloud's ISO answer was too large.")
+                } else {
+                    cloud_iso_error(status.as_u16(), &[])
+                });
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        if !status.is_success() {
+            return Err(cloud_iso_error(status.as_u16(), &bytes));
+        }
+        Ok(bytes)
+    }
+}
+
+fn iso_json<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> IsoResult<T> {
+    serde_json::from_slice(bytes).map_err(|_| {
+        CloudIsoError::failed("Videorc Cloud answered the ISO request with something unreadable.")
+    })
+}
+
+fn iso_api_http() -> Result<&'static reqwest::Client> {
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    if let Some(client) = CLIENT.get() {
+        return Ok(client);
+    }
+    let client = reqwest::Client::builder()
+        .user_agent(crate::performance_check::desktop_user_agent())
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .context("Could not build the cloud ISO HTTP client.")?;
+    Ok(CLIENT.get_or_init(|| client))
+}
+
+/// Storage reads: HTTPS only (redirects included), certificate and name
+/// verification on, the feed's dev-only extra root as the S20 downloader
+/// has it. Production never reads the override.
+fn iso_storage_http() -> Result<&'static reqwest::Client> {
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    if let Some(client) = CLIENT.get() {
+        return Ok(client);
+    }
+    let mut builder = reqwest::Client::builder()
+        .https_only(true)
+        .connect_timeout(ISO_REQUEST_TIMEOUT);
+    if cfg!(debug_assertions) {
+        let ca_file = std::env::var(crate::recording::CLOUD_FEED_CA_FILE_ENV).ok();
+        if let Some(pem) = crate::recording::cloud_feed_extra_ca_pem(true, ca_file.as_deref())? {
+            for certificate in reqwest::Certificate::from_pem_bundle(&pem)
+                .context("The ISO download test root is not a PEM certificate.")?
+            {
+                builder = builder.add_root_certificate(certificate);
+            }
+        }
+    }
+    let client = builder
+        .build()
+        .context("Could not build the ISO download HTTP client.")?;
+    Ok(CLIENT.get_or_init(|| client))
+}
+
+impl CloudIsoWebApi for CloudIsoHttp {
+    async fn iso_status(&self, bearer: &str, show_id: &str) -> IsoResult<Value> {
+        let bytes = self
+            .iso_send(
+                bearer,
+                reqwest::Method::GET,
+                &iso_path(show_id),
+                &[],
+                None,
+                ISO_STATUS_MAX_BYTES,
+            )
+            .await?;
+        iso_json(&bytes)
+    }
+
+    async fn iso_action(&self, bearer: &str, show_id: &str, body: Value) -> IsoResult<Value> {
+        let bytes = self
+            .iso_send(
+                bearer,
+                reqwest::Method::POST,
+                &iso_path(show_id),
+                &[],
+                Some(&body),
+                ISO_STATUS_MAX_BYTES,
+            )
+            .await?;
+        iso_json(&bytes)
+    }
+
+    async fn iso_file(
+        &self,
+        bearer: &str,
+        show_id: &str,
+        take_id: &str,
+        entry_id: &str,
+    ) -> IsoResult<IsoFileGrant> {
+        let bytes = self
+            .iso_send(
+                bearer,
+                reqwest::Method::GET,
+                &iso_file_path(show_id),
+                &[("take", take_id), ("entry", entry_id)],
+                None,
+                ISO_GRANT_MAX_BYTES,
+            )
+            .await?;
+        iso_json(&bytes)
+    }
+
+    async fn iso_file_bytes(
+        &self,
+        url: &str,
+        path: &Path,
+        limit: u64,
+    ) -> std::result::Result<u64, IsoFetchError> {
+        use tokio::io::AsyncWriteExt as _;
+        let client = iso_storage_http().map_err(|_| IsoFetchError::Network)?;
+        let mut response = tokio::time::timeout(ISO_REQUEST_TIMEOUT, client.get(url).send())
+            .await
+            .map_err(|_| IsoFetchError::Network)?
+            .map_err(|_| IsoFetchError::Network)?;
+        let status = response.status();
+        if matches!(status.as_u16(), 401 | 403 | 404 | 410) {
+            return Err(IsoFetchError::Refused);
+        }
+        if !status.is_success() {
+            return Err(IsoFetchError::Network);
+        }
+        if response
+            .content_length()
+            .is_some_and(|length| length > limit)
+        {
+            return Err(IsoFetchError::TooLarge);
+        }
+        // The staging file exists already (created new, owner-only): it is
+        // opened, never created, here.
+        let mut options = tokio::fs::OpenOptions::new();
+        options.write(true).truncate(true);
+        let mut file = options.open(path).await.map_err(IsoFetchError::Storage)?;
+        let mut total: u64 = 0;
+        while let Some(chunk) = tokio::time::timeout(ISO_CHUNK_TIMEOUT, response.chunk())
+            .await
+            .map_err(|_| IsoFetchError::Network)?
+            .map_err(|_| IsoFetchError::Network)?
+        {
+            total = total.saturating_add(chunk.len() as u64);
+            if total > limit {
+                return Err(IsoFetchError::TooLarge);
+            }
+            file.write_all(&chunk)
+                .await
+                .map_err(IsoFetchError::Storage)?;
+        }
+        file.flush().await.map_err(IsoFetchError::Storage)?;
+        file.sync_all().await.map_err(IsoFetchError::Storage)?;
+        Ok(total)
+    }
+}
+
+fn is_iso_show_id(id: &str) -> bool {
+    id.strip_prefix("sh_").is_some_and(|rest| {
+        (8..=64).contains(&rest.len())
+            && rest
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+    })
+}
+
+/// The S20 / S21c canonical id of a program recording (`rec_…`).
+fn is_iso_program_recording_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 128
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+
+fn is_safe_iso_file_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 200
+        && !name.starts_with('.')
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+}
+
+/// Every take of a status answer, each manifest parsed by the strict parser,
+/// bound to this show, with its program recording. Anything else refuses the
+/// whole answer: an invalid manifest is never passed through.
+pub(crate) fn iso_status_takes(
+    show_id: &str,
+    answer: &Value,
+) -> IsoResult<Vec<(IsoManifest, String)>> {
+    let untrusted = || {
+        CloudIsoError::failed("Videorc Cloud answered with ISO details this computer can't trust.")
+    };
+    let object = answer.as_object().ok_or_else(untrusted)?;
+    if !object.contains_key("availability") {
+        return Err(untrusted());
+    }
+    let iso = object.get("iso").ok_or_else(untrusted)?;
+    if iso.is_null() {
+        return Ok(Vec::new());
+    }
+    let takes = iso
+        .get("takes")
+        .and_then(Value::as_array)
+        .filter(|takes| takes.len() <= ISO_MAX_TAKES)
+        .ok_or_else(untrusted)?;
+    let mut parsed: Vec<(IsoManifest, String)> = Vec::with_capacity(takes.len());
+    for take in takes {
+        let manifest = take
+            .get("manifest")
+            .ok_or_else(untrusted)
+            .and_then(|manifest| parse_iso_manifest(manifest).map_err(|_| untrusted()))?;
+        let program = take
+            .get("programRecordingId")
+            .and_then(Value::as_str)
+            .filter(|id| is_iso_program_recording_id(id))
+            .ok_or_else(untrusted)?;
+        if manifest.show_id != show_id
+            || parsed
+                .iter()
+                .any(|(known, _)| known.take_id == manifest.take_id)
+        {
+            return Err(untrusted());
+        }
+        parsed.push((manifest, program.to_string()));
+    }
+    Ok(parsed)
+}
+
+/// `cloud.iso.status { showId }`, `cloud.iso.disable { showId }`.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct IsoShowParams {
+    pub show_id: String,
+}
+
+/// `cloud.iso.enable`: consent is required and never defaulted.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct IsoEnableParams {
+    pub show_id: String,
+    pub consent: bool,
+    pub max_active_entries: u64,
+    pub max_minutes: u64,
+    pub cost_ceiling_micros: u64,
+}
+
+/// `cloud.iso.import`: the folder is Output's, as `cloud.recordings.download`
+/// passes it (the capability resolved by main first). An ISO file needs no
+/// FFmpeg; `ffmpegPath` is accepted for the shared shape and not used.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct IsoImportParams {
+    pub show_id: String,
+    pub take_id: String,
+    #[serde(default)]
+    pub output_directory: Option<String>,
+    #[serde(default, rename = "ffmpegPath")]
+    _ffmpeg_path: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CancelIsoImportParams {
+    pub job_id: String,
+}
+
+pub(crate) fn iso_params<T: serde::de::DeserializeOwned>(params: Value) -> IsoResult<T> {
+    serde_json::from_value(params).map_err(|error| CloudIsoError::invalid(error.to_string()))
+}
+
+fn iso_bearer(bearer: Option<String>, show_id: &str) -> IsoResult<String> {
+    if !is_iso_show_id(show_id) {
+        return Err(CloudIsoError::invalid("Choose a cloud show."));
+    }
+    bearer.ok_or_else(|| CloudIsoError::failed("Sign in to use cloud ISO recording."))
+}
+
+/// The enable body (contract 3), or why the request is refused here.
+pub(crate) fn iso_enable_body(params: &IsoEnableParams) -> IsoResult<Value> {
+    if !params.consent {
+        return Err(CloudIsoError::invalid(
+            "Cloud ISO recording needs your explicit consent.",
+        ));
+    }
+    let within = |value: u64, max: u64| (1..=max).contains(&value);
+    if !within(params.max_active_entries, ISO_MAX_ACTIVE_ENTRIES)
+        || !within(params.max_minutes, ISO_MAX_MINUTES)
+        || !within(params.cost_ceiling_micros, ISO_MAX_COST_CEILING_MICROS)
+    {
+        return Err(CloudIsoError::invalid(format!(
+            "Cloud ISO limits must be whole numbers from 1: at most {ISO_MAX_ACTIVE_ENTRIES} files at once, {ISO_MAX_MINUTES} minutes and {ISO_MAX_COST_CEILING_MICROS} micro-dollars."
+        )));
+    }
+    Ok(json!({
+        "action": "enable",
+        "consent": true,
+        "consentVersion": ISO_CONSENT_VERSION,
+        "maxActiveEntries": params.max_active_entries,
+        "maxMinutes": params.max_minutes,
+        "costCeilingMicros": params.cost_ceiling_micros,
+    }))
+}
+
+/// `cloud.iso.status`: the web's answer, every manifest validated again.
+pub(crate) async fn cloud_iso_status<W: CloudIsoWebApi>(
+    web: &W,
+    bearer: Option<String>,
+    params: Value,
+) -> IsoResult<Value> {
+    let params: IsoShowParams = iso_params(params)?;
+    let bearer = iso_bearer(bearer, &params.show_id)?;
+    let answer = web.iso_status(&bearer, &params.show_id).await?;
+    iso_status_takes(&params.show_id, &answer)?;
+    Ok(answer)
+}
+
+/// `cloud.iso.enable`.
+pub(crate) async fn cloud_iso_enable<W: CloudIsoWebApi>(
+    web: &W,
+    bearer: Option<String>,
+    params: Value,
+) -> IsoResult<Value> {
+    let params: IsoEnableParams = iso_params(params)?;
+    let body = iso_enable_body(&params)?;
+    let bearer = iso_bearer(bearer, &params.show_id)?;
+    let answer = web.iso_action(&bearer, &params.show_id, body).await?;
+    iso_status_takes(&params.show_id, &answer)?;
+    Ok(answer)
+}
+
+/// `cloud.iso.disable`.
+pub(crate) async fn cloud_iso_disable<W: CloudIsoWebApi>(
+    web: &W,
+    bearer: Option<String>,
+    params: Value,
+) -> IsoResult<Value> {
+    let params: IsoShowParams = iso_params(params)?;
+    let bearer = iso_bearer(bearer, &params.show_id)?;
+    let answer = web
+        .iso_action(&bearer, &params.show_id, json!({ "action": "disable" }))
+        .await?;
+    iso_status_takes(&params.show_id, &answer)?;
+    Ok(answer)
+}
+
+// --- Cloud ISO import: Library rows, journal, jobs ---
+
+/// One take's import journal as storage keeps it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CloudIsoImportRow {
+    pub show_id: String,
+    pub program_recording_id: String,
+    pub journal: IsoDownloadJournal,
+}
+
+/// Everything one ISO file's Library row needs, journalled with the file
+/// before it is published, so recovery registers it with no network.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudIsoRegistration {
+    pub session_id: String,
+    pub show_id: String,
+    pub take_id: String,
+    pub entry_id: String,
+    pub program_recording_id: String,
+    pub title: String,
+    pub started_at: String,
+    pub ended_at: Option<String>,
+    pub duration_ms: Option<i64>,
+    /// `iso:<role>`, the row's take role.
+    pub role: String,
+    pub diagnostics: Value,
+}
+
+/// An ISO entry's Library row and its file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CloudIsoLocalFile {
+    pub session_id: String,
+    pub object_key: String,
+    pub path: PathBuf,
+}
+
+/// `cloud.iso.import`'s immediate answer.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct IsoImportStarted {
+    pub job_id: String,
+}
+
+/// Event `cloud.iso.import` (contract 5). `entryId` is null on the job's
+/// own last event, which says how the whole take ended.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct IsoImportEvent {
+    pub job_id: String,
+    pub show_id: String,
+    pub take_id: String,
+    pub entry_id: Option<String>,
+    pub state: IsoDownloadState,
+    pub bytes: Option<u64>,
+    pub error: Option<String>,
+    pub local_session_id: Option<String>,
+}
+
+pub(crate) type IsoImportEventHook = Arc<dyn Fn(IsoImportEvent) + Send + Sync>;
+
+/// One item of `cloud.iso.imports`.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct IsoImportView {
+    pub show_id: String,
+    pub take_id: String,
+    pub program_recording_id: String,
+    pub records: Vec<IsoDownloadRecord>,
+}
+
+/// `cloud.iso.imports`: a take with no running job never shows a transfer
+/// as still running.
+pub(crate) fn iso_import_views(rows: Vec<CloudIsoImportRow>) -> Vec<IsoImportView> {
+    rows.into_iter()
+        .map(|row| {
+            let mut journal = row.journal;
+            if !iso_import_jobs().running.contains_key(&journal.take_id) {
+                journal.recover_interrupted();
+            }
+            IsoImportView {
+                show_id: row.show_id,
+                take_id: journal.take_id,
+                program_recording_id: row.program_recording_id,
+                records: journal.records,
+            }
+        })
+        .collect()
+}
+
+/// The Library id of one ISO file: `cloud-iso-<takeId>-<subject>-<role>-g<n>`,
+/// held to `[A-Za-z0-9_-]`.
+pub(crate) fn iso_session_id(item: &IsoImportItem) -> String {
+    format!(
+        "cloud-iso-{}-{}-{}-g{}",
+        item.take_id, item.subject, item.role, item.generation
+    )
+    .chars()
+    .map(|c| {
+        if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+            c
+        } else {
+            '-'
+        }
+    })
+    .collect()
+}
+
+fn iso_error_for_wire(error: &str) -> String {
+    download_error_for_wire(&scrub_urls(error))
+}
+
+struct IsoImportContext {
+    job_id: String,
+    show_id: String,
+    take_id: String,
+    bearer: String,
+    folder: PathBuf,
+}
+
+impl IsoImportContext {
+    fn record_event(
+        &self,
+        record: &IsoDownloadRecord,
+        local_session_id: Option<String>,
+    ) -> IsoImportEvent {
+        IsoImportEvent {
+            job_id: self.job_id.clone(),
+            show_id: self.show_id.clone(),
+            take_id: self.take_id.clone(),
+            entry_id: Some(record.entry_id.clone()),
+            state: record.state,
+            bytes: record.bytes,
+            error: record.error.as_deref().map(iso_error_for_wire),
+            local_session_id,
+        }
+    }
+
+    fn job_event(&self, state: IsoDownloadState, error: Option<String>) -> IsoImportEvent {
+        IsoImportEvent {
+            job_id: self.job_id.clone(),
+            show_id: self.show_id.clone(),
+            take_id: self.take_id.clone(),
+            entry_id: None,
+            state,
+            bytes: None,
+            error,
+            local_session_id: None,
+        }
+    }
+}
+
+/// The ISO file's size from its grant, which must agree with the manifest.
+fn iso_grant_bytes(grant: &IsoFileGrant, expected: Option<i64>) -> Result<u64> {
+    let https = reqwest::Url::parse(&grant.url).ok().is_some_and(|url| {
+        url.scheme() == "https"
+            && url.host_str().is_some()
+            && url.username().is_empty()
+            && url.password().is_none()
+    });
+    anyhow::ensure!(
+        https,
+        "Videorc Cloud gave an ISO file address this computer won't use."
+    );
+    anyhow::ensure!(
+        grant.bytes > 0 && grant.bytes <= MAX_IMPORT_BYTES,
+        "The ISO file is empty or larger than Videorc imports."
+    );
+    if let Some(expected) = expected {
+        anyhow::ensure!(
+            u64::try_from(expected).ok() == Some(grant.bytes),
+            "The ISO file's size does not match its manifest."
+        );
+    }
+    Ok(grant.bytes)
+}
+
+/// The Library row of one ISO file. Its start is the take's origin plus the
+/// file's offset. A layout the grant disagrees with becomes `unknown`, never
+/// more trusted; an `unknown` layout is flagged and titled so.
+fn iso_registration(
+    ctx: &IsoImportContext,
+    manifest: &IsoManifest,
+    program_recording_id: &str,
+    item: &IsoImportItem,
+    grant_layout: Option<&str>,
+    grant_partial: bool,
+) -> Result<CloudIsoRegistration> {
+    let start = manifest
+        .clock
+        .origin_at_ms
+        .checked_add(item.offset_ms)
+        .and_then(chrono::DateTime::<chrono::Utc>::from_timestamp_millis)
+        .context("The ISO file's start time is invalid.")?;
+    let duration_ms = item.duration_ms.filter(|ms| *ms <= 13 * 60 * 60 * 1000);
+    let ended_at = duration_ms.map(|ms| {
+        (start + chrono::Duration::milliseconds(ms))
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+    });
+    let frame_layout = match (item.frame_layout.as_deref(), grant_layout) {
+        (Some(layout), Some(granted)) if granted != layout => Some("unknown".to_string()),
+        (layout, _) => layout.map(str::to_string),
+    };
+    let layout_unknown = frame_layout.as_deref() == Some("unknown");
+    let partial = item.partial || grant_partial;
+    let mut title = item.title.clone();
+    if layout_unknown && !title.contains("(layout unknown)") {
+        title.push_str(" (layout unknown)");
+    }
+    if partial && !title.contains("(partial)") {
+        title.push_str(" (partial)");
+    }
+    Ok(CloudIsoRegistration {
+        session_id: iso_session_id(item),
+        show_id: ctx.show_id.clone(),
+        take_id: ctx.take_id.clone(),
+        entry_id: item.entry_id.clone(),
+        program_recording_id: program_recording_id.to_string(),
+        title,
+        started_at: start.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        ended_at,
+        duration_ms,
+        role: format!("iso:{}", item.role),
+        diagnostics: json!({
+            "cloudIso": {
+                "showId": ctx.show_id,
+                "takeId": ctx.take_id,
+                "entryId": item.entry_id,
+                "role": item.role,
+                "subject": item.subject,
+                "generation": item.generation,
+                "offsetMs": item.offset_ms,
+                "frameLayout": frame_layout,
+                "partial": partial,
+                "overlap": item.overlap,
+                "programRecordingId": program_recording_id,
+            },
+            "cloudIsoLayoutUnknown": layout_unknown,
+        }),
+    })
+}
+
+/// S21c's per-take claim, waited for while another writer of the same take
+/// finishes.
+async fn claim_iso_take(
+    program_recording_id: &str,
+    cancelled: &mut watch::Receiver<bool>,
+) -> Result<crate::cloud_archive::TakeFileClaim> {
+    let deadline = tokio::time::Instant::now() + ISO_CLAIM_WAIT;
+    loop {
+        match crate::cloud_archive::claim_take_file(program_recording_id) {
+            Ok(claim) => return Ok(claim),
+            Err(error) if tokio::time::Instant::now() >= deadline => return Err(error),
+            Err(_) => {}
+        }
+        tokio::select! {
+            _ = tokio::time::sleep(ISO_CLAIM_RETRY) => {}
+            _ = crate::cloud_show::wait_canceled(cancelled) => bail!("Import cancelled."),
+        }
+    }
+}
+
+/// One ISO entry into Library: the bytes it holds and its Library row.
+#[allow(clippy::too_many_arguments)]
+async fn import_iso_entry<W: CloudIsoWebApi>(
+    web: &W,
+    database: &crate::storage::Database,
+    ctx: &IsoImportContext,
+    manifest: &IsoManifest,
+    program_recording_id: &str,
+    item: &IsoImportItem,
+    record: &IsoDownloadRecord,
+    cancelled: &mut watch::Receiver<bool>,
+) -> Result<(u64, String)> {
+    // Already in Library (an earlier run, or a publication a crash cut
+    // short): never a second row or file.
+    {
+        let _claim = claim_iso_take(program_recording_id, cancelled).await?;
+        if let Some(local) = database.recover_cloud_iso_file(&ctx.take_id, &record.entry_id)? {
+            anyhow::ensure!(
+                local.object_key == record.object_key,
+                "An earlier copy of this ISO file is in the Library. Remove it there to import the newer one."
+            );
+            let bytes = std::fs::metadata(&local.path)?.len();
+            return Ok((bytes, local.session_id));
+        }
+    }
+    anyhow::ensure!(
+        is_safe_iso_file_name(&record.local_file_name),
+        "The ISO file's name is not safe to use."
+    );
+    let destination = ctx.folder.join(&record.local_file_name);
+    if destination.try_exists()? {
+        bail!(
+            "A file named {} is already in the folder. It was left untouched.",
+            record.local_file_name
+        );
+    }
+    let grant = tokio::select! {
+        grant = web.iso_file(&ctx.bearer, &ctx.show_id, &ctx.take_id, &record.entry_id) => grant?,
+        _ = crate::cloud_show::wait_canceled(cancelled) => bail!("Import cancelled."),
+    };
+    let bytes = iso_grant_bytes(&grant, record.expected_bytes)?;
+    let mut part = OwnedDownloadFile::part(&ctx.folder, &record.local_file_name, &ctx.job_id)
+        .map_err(|error| anyhow::anyhow!(storage_problem(&error)))?;
+    database.prepare_cloud_iso_partial(
+        &ctx.take_id,
+        &record.entry_id,
+        &record.object_key,
+        part.path(),
+    )?;
+    let fetched = tokio::select! {
+        fetched = web.iso_file_bytes(&grant.url, part.path(), bytes) => fetched.map_err(iso_fetch_problem)?,
+        _ = crate::cloud_show::wait_canceled(cancelled) => bail!("Import cancelled."),
+    };
+    anyhow::ensure!(fetched == bytes, "The ISO file stopped early. Try again.");
+    crate::session_ops::sync_session_file_parent(part.path())?;
+    let registration = iso_registration(
+        ctx,
+        manifest,
+        program_recording_id,
+        item,
+        grant.frame_layout.as_deref(),
+        grant.partial,
+    )?;
+    drop(grant);
+    database.prepare_cloud_iso_file(
+        &registration,
+        &record.object_key,
+        part.path(),
+        &destination,
+    )?;
+    // The journal owns the complete file from here, through publication.
+    part.0 = None;
+    let _claim = claim_iso_take(program_recording_id, cancelled).await?;
+    let local = database
+        .recover_cloud_iso_file(&ctx.take_id, &record.entry_id)?
+        .ok_or_else(|| anyhow::anyhow!("The ISO import stopped. Try again."))?;
+    Ok((fetched, local.session_id))
+}
+
+/// One take's import: status, the take's validated manifest, the journal
+/// synced and saved, then every importable file in turn. Saved after every
+/// transition. Answers how the take ended.
+async fn run_cloud_iso_import<W: CloudIsoWebApi>(
+    web: &W,
+    database: &crate::storage::Database,
+    ctx: &IsoImportContext,
+    cancelled: &mut watch::Receiver<bool>,
+    emit: &IsoImportEventHook,
+    now_ms: fn() -> i64,
+) -> Result<IsoDownloadState> {
+    let answer = tokio::select! {
+        answer = web.iso_status(&ctx.bearer, &ctx.show_id) => answer?,
+        _ = crate::cloud_show::wait_canceled(cancelled) => bail!("Import cancelled."),
+    };
+    let takes = iso_status_takes(&ctx.show_id, &answer)?;
+    drop(answer);
+    let Some((manifest, program_recording_id)) = takes
+        .into_iter()
+        .find(|(manifest, _)| manifest.take_id == ctx.take_id)
+    else {
+        bail!("Videorc Cloud has no ISO files for that take.");
+    };
+    let mut journal = match database.cloud_iso_import(&ctx.take_id)? {
+        Some(row) => {
+            anyhow::ensure!(
+                row.show_id == ctx.show_id && row.program_recording_id == program_recording_id,
+                "This take's ISO files belong to another show or recording."
+            );
+            row.journal
+        }
+        None => IsoDownloadJournal::new(&ctx.take_id),
+    };
+    // Only this job imports this take now: a transfer still marked running
+    // died with an earlier run, and is retried, not trusted.
+    journal.recover_interrupted();
+    let now = now_ms();
+    journal.sync(&manifest, now)?;
+    database.save_cloud_iso_import(&ctx.show_id, &program_recording_id, &journal)?;
+    for record in &journal.records {
+        let local = database
+            .cloud_iso_local_file(&ctx.take_id, &record.entry_id)
+            .ok()
+            .flatten()
+            .map(|file| file.session_id);
+        emit(ctx.record_event(record, local));
+    }
+    let plan = plan_iso_import(&manifest, now);
+    tokio::fs::create_dir_all(&ctx.folder)
+        .await
+        .map_err(|error| anyhow::anyhow!(storage_problem(&error)))?;
+    while let Some(record) = journal.begin_next() {
+        database.save_cloud_iso_import(&ctx.show_id, &program_recording_id, &journal)?;
+        emit(ctx.record_event(&record, None));
+        let outcome = match plan.iter().find(|item| item.entry_id == record.entry_id) {
+            Some(item) => {
+                import_iso_entry(
+                    web,
+                    database,
+                    ctx,
+                    &manifest,
+                    &program_recording_id,
+                    item,
+                    &record,
+                    cancelled,
+                )
+                .await
+            }
+            None => Err(anyhow::anyhow!(
+                "Videorc Cloud no longer offers this ISO file."
+            )),
+        };
+        let stop = *cancelled.borrow();
+        let (finish, local) = match outcome {
+            Ok((bytes, session)) => (Ok(bytes), Some(session)),
+            Err(_) if stop => (Err("Import cancelled.".to_string()), None),
+            Err(error) => (Err(iso_error_for_wire(&format!("{error:#}"))), None),
+        };
+        journal.finish(&record.entry_id, finish)?;
+        database.save_cloud_iso_import(&ctx.show_id, &program_recording_id, &journal)?;
+        if let Some(finished) = journal
+            .records
+            .iter()
+            .find(|candidate| candidate.entry_id == record.entry_id)
+        {
+            let local = local.filter(|_| finished.state == IsoDownloadState::Complete);
+            emit(ctx.record_event(finished, local));
+        }
+        if stop {
+            bail!("Import cancelled.");
+        }
+    }
+    let has =
+        |wanted: IsoDownloadState| journal.records.iter().any(|record| record.state == wanted);
+    Ok(
+        if journal
+            .records
+            .iter()
+            .all(|record| record.state == IsoDownloadState::Complete)
+        {
+            IsoDownloadState::Complete
+        } else if has(IsoDownloadState::Failed) {
+            IsoDownloadState::Failed
+        } else if has(IsoDownloadState::Expired) {
+            IsoDownloadState::Expired
+        } else {
+            IsoDownloadState::Pending
+        },
+    )
+}
+
+fn iso_now_ms() -> i64 {
+    chrono::Utc::now().timestamp_millis()
+}
+
+struct RunningIsoImport {
+    job_id: String,
+    cancel: watch::Sender<bool>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+#[derive(Default)]
+struct IsoImportJobs {
+    closing: bool,
+    /// By take id: one import per take at a time.
+    running: HashMap<String, RunningIsoImport>,
+}
+
+fn iso_import_jobs() -> std::sync::MutexGuard<'static, IsoImportJobs> {
+    static JOBS: std::sync::OnceLock<std::sync::Mutex<IsoImportJobs>> = std::sync::OnceLock::new();
+    JOBS.get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// `cloud.iso.import`: admission only on the command lane; the network and
+/// the files run in the job. A take already importing answers its job.
+pub(crate) fn start_cloud_iso_import<W: CloudIsoWebApi>(
+    web: Arc<W>,
+    database: crate::storage::Database,
+    bearer: Option<String>,
+    params: &IsoImportParams,
+    folder: PathBuf,
+    emit: IsoImportEventHook,
+) -> IsoResult<IsoImportStarted> {
+    if !is_iso_show_id(&params.show_id) || !crate::cloud_source_iso::is_take_id(&params.take_id) {
+        return Err(CloudIsoError::invalid(
+            "Choose a cloud show and one of its takes.",
+        ));
+    }
+    let bearer =
+        bearer.ok_or_else(|| CloudIsoError::import("Sign in to import cloud ISO files."))?;
+    let mut jobs = iso_import_jobs();
+    if jobs.closing {
+        return Err(CloudIsoError::import("Videorc is quitting."));
+    }
+    if let Some(job) = jobs.running.get(&params.take_id) {
+        return Ok(IsoImportStarted {
+            job_id: job.job_id.clone(),
+        });
+    }
+    let ctx = IsoImportContext {
+        job_id: uuid::Uuid::new_v4().to_string(),
+        show_id: params.show_id.clone(),
+        take_id: params.take_id.clone(),
+        bearer,
+        folder,
+    };
+    let started = IsoImportStarted {
+        job_id: ctx.job_id.clone(),
+    };
+    let (cancel, mut cancelled) = watch::channel(false);
+    let task = tokio::spawn(async move {
+        use futures_util::FutureExt as _;
+        let outcome = std::panic::AssertUnwindSafe(run_cloud_iso_import(
+            web.as_ref(),
+            &database,
+            &ctx,
+            &mut cancelled,
+            &emit,
+            iso_now_ms,
+        ))
+        .catch_unwind()
+        .await;
+        let terminal = match outcome {
+            Ok(Ok(state)) => ctx.job_event(
+                state,
+                (state != IsoDownloadState::Complete)
+                    .then(|| "Some ISO files could not be imported.".to_string()),
+            ),
+            Ok(Err(error)) => ctx.job_event(
+                IsoDownloadState::Failed,
+                Some(iso_error_for_wire(&format!("{error:#}"))),
+            ),
+            Err(_) => ctx.job_event(
+                IsoDownloadState::Failed,
+                Some("The ISO import stopped. Try again.".to_string()),
+            ),
+        };
+        emit(terminal);
+        let mut jobs = iso_import_jobs();
+        if jobs
+            .running
+            .get(&ctx.take_id)
+            .is_some_and(|job| job.job_id == ctx.job_id)
+        {
+            jobs.running.remove(&ctx.take_id);
+        }
+    });
+    jobs.running.insert(
+        params.take_id.clone(),
+        RunningIsoImport {
+            job_id: started.job_id.clone(),
+            cancel,
+            task,
+        },
+    );
+    Ok(started)
+}
+
+/// `cloud.iso.cancelImport`: the running file stops and is removed; files
+/// already in Library stay.
+pub(crate) fn cancel_cloud_iso_import(job_id: &str) {
+    let jobs = iso_import_jobs();
+    if let Some(job) = jobs.running.values().find(|job| job.job_id == job_id) {
+        let _ = job.cancel.send(true);
+    }
+}
+
+/// Quit: every import is cancelled and joined; a staging file a job could
+/// not remove is removed by the next start's recovery.
+pub(crate) async fn shutdown_cloud_iso_imports() {
+    let jobs = {
+        let mut state = iso_import_jobs();
+        state.closing = true;
+        state
+            .running
+            .drain()
+            .map(|(_, job)| job)
+            .collect::<Vec<_>>()
+    };
+    for job in &jobs {
+        let _ = job.cancel.send(true);
+    }
+    for job in jobs {
+        let _ = job.task.await;
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn ending_acknowledgement_survives_the_web_control_adapter() {
+        let answer: super::ControlRevAnswer =
+            serde_json::from_value(serde_json::json!({"ok": true, "ending": true})).unwrap();
+        let floor = std::sync::atomic::AtomicU64::new(4);
+        assert_eq!(
+            super::raise_floor(&floor, &answer),
+            Some(serde_json::json!({"ending": true}))
+        );
+        assert_eq!(floor.load(std::sync::atomic::Ordering::SeqCst), 4);
+    }
     #[test]
     fn download_error_respects_the_renderer_utf16_limit() {
         let supplementary = super::download_error_for_wire(&"😀".repeat(4096));
@@ -2248,6 +3655,7 @@ mod tests {
         destinations_set_frame(
             "intent-1",
             &[HandoverDestination {
+                broadcast_id: None,
                 id: "youtube-main".to_string(),
                 platform: "youtube".to_string(),
                 label: "YouTube".to_string(),
@@ -2438,11 +3846,35 @@ mod tests {
             other(400, "invalid-request"),
             other(404, "cloud-show-not-found"),
             other(409, CODE_SHOW_ENDED),
+            other(409, CODE_SHOW_ENDING),
             other(422, "cloud-destinations-refused"),
             CloudApiError::Unauthorized,
         ] {
             assert!(!retryable(&never), "{never:?}");
         }
+    }
+
+    /// Plan 247 D4: only the 409 with this code says the show is ending.
+    /// Every other answer to `legs/end` stays a failure in the same words.
+    #[test]
+    fn a_show_that_is_ending_is_an_answer_to_legs_end_and_never_retried() {
+        let ending = other(409, CODE_SHOW_ENDING);
+        assert!(show_is_ending(&ending));
+        assert!(!retryable(&ending));
+        for failure in [
+            other(503, CODE_SHOW_ENDING),
+            other(409, CODE_SHOW_ENDED),
+            other(409, "cloud-legs-end-solo"),
+            other(503, "cloud-media-unavailable"),
+            CloudApiError::Transport("timed out".to_string()),
+            CloudApiError::Unauthorized,
+        ] {
+            assert!(!show_is_ending(&failure), "{failure:?}");
+        }
+        assert_eq!(
+            legs_end_problem(&other(503, "cloud-media-unavailable")),
+            "videorc.com answered 503 cloud-media-unavailable"
+        );
     }
 
     fn png_of(image: &image::RgbaImage) -> Vec<u8> {
@@ -2559,6 +3991,7 @@ mod tests {
         let mut frame = json!({ "t": "intent", "id": "intent-9", "kind": "legs.end" });
         assert_eq!(DestinationsBody::for_legs_end(&frame).as_json(), &json!({}));
         frame["destinations"] = legs_end_destinations(&[HandoverDestination {
+            broadcast_id: None,
             id: "youtube-main".to_string(),
             platform: "youtube".to_string(),
             label: "YouTube".to_string(),
@@ -2743,6 +4176,7 @@ rtmps://h/app/key 'http://x.test/y'";
     fn download_snapshots_evict_oldest_completions_and_preserve_running_retries() {
         let jobs = RecordingDownloadJobs::default();
         let event = |id: usize, state| RecordingDownloadEvent {
+            local_session_id: None,
             job_id: format!("job_{id}"),
             recording_id: format!("rec_{id}"),
             state,
@@ -3087,6 +4521,7 @@ rtmps://h/app/key 'http://x.test/y'";
             ("recording", "cloud-recording-solo"),
             ("recording", "cloud-recording-on-air"),
             ("legsEnd", "cloud-legs-end-solo"),
+            ("legsEnd", CODE_SHOW_ENDING),
         ] {
             assert!(
                 codes(list).contains(&(409, code.to_string())),
@@ -3138,6 +4573,7 @@ rtmps://h/app/key 'http://x.test/y'";
         // model; only a state this list does not hold reads as a warning.
         for state in fixture["legs"]["states"].as_array().unwrap() {
             let leg = crate::cloud_show::RunnerLeg {
+                broadcast_id: None,
                 id: "leg".to_string(),
                 state: state.as_str().unwrap().to_string(),
                 ..Default::default()
@@ -3151,6 +4587,7 @@ rtmps://h/app/key 'http://x.test/y'";
         // The closed leg messages reach the status as they are.
         for (_, message) in fixture["legs"]["messages"].as_object().unwrap() {
             let leg = crate::cloud_show::RunnerLeg {
+                broadcast_id: None,
                 id: "leg".to_string(),
                 state: "failed".to_string(),
                 error: message.as_str().map(str::to_string),
@@ -3163,5 +4600,532 @@ rtmps://h/app/key 'http://x.test/y'";
                 message.as_str()
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod cloud_iso_tests {
+    use super::*;
+    use crate::storage::Database;
+    use std::sync::atomic::AtomicUsize;
+
+    const FIXTURE: &str = include_str!("../../../protocol-fixtures/cloud-source-iso.json");
+    const SHOW: &str = "sh_aaaaaaaaaaaaaaaaaaaaaa";
+    const TAKE: &str = "tk_AbCdEf123456";
+    /// Just after the fixture manifest was created, long before it expires.
+    const NOW_MS: i64 = 1_799_999_997_001;
+
+    fn fixture_now() -> i64 {
+        NOW_MS
+    }
+
+    fn manifest() -> Value {
+        serde_json::from_str::<Value>(FIXTURE).unwrap()["valid"].clone()
+    }
+
+    fn status(program_recording_id: &str) -> Value {
+        json!({
+            "availability": { "enabled": true },
+            "iso": {
+                "request": null,
+                "guestConsent": [],
+                "takes": [{ "manifest": manifest(), "programRecordingId": program_recording_id }],
+            },
+        })
+    }
+
+    fn storage_url(entry_id: &str) -> String {
+        format!(
+            "https://storage.invalid/{}?X-Amz-Signature=secret",
+            entry_id.replace('/', "-")
+        )
+    }
+
+    #[derive(Default)]
+    struct FakeIso {
+        status: Value,
+        actions: std::sync::Mutex<Vec<Value>>,
+        /// Entries whose transfer always fails.
+        failing: Vec<&'static str>,
+        fetches: AtomicUsize,
+    }
+
+    impl CloudIsoWebApi for FakeIso {
+        async fn iso_status(&self, bearer: &str, _show_id: &str) -> IsoResult<Value> {
+            assert_eq!(bearer, "bearer");
+            Ok(self.status.clone())
+        }
+
+        async fn iso_action(&self, _bearer: &str, _show_id: &str, body: Value) -> IsoResult<Value> {
+            self.actions.lock().unwrap().push(body);
+            Ok(self.status.clone())
+        }
+
+        async fn iso_file(
+            &self,
+            _bearer: &str,
+            _show_id: &str,
+            take_id: &str,
+            entry_id: &str,
+        ) -> IsoResult<IsoFileGrant> {
+            assert_eq!(take_id, TAKE);
+            let doc = manifest();
+            let entry = doc["entries"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|entry| entry["id"] == entry_id)
+                .unwrap()
+                .clone();
+            Ok(IsoFileGrant {
+                url: storage_url(entry_id),
+                expires_at: Value::Null,
+                bytes: entry["bytes"].as_u64().unwrap(),
+                file_name: String::new(),
+                frame_layout: entry["frameLayout"]["layout"].as_str().map(str::to_string),
+                partial: entry["state"] == "partial",
+            })
+        }
+
+        async fn iso_file_bytes(
+            &self,
+            url: &str,
+            path: &Path,
+            limit: u64,
+        ) -> std::result::Result<u64, IsoFetchError> {
+            self.fetches.fetch_add(1, Ordering::SeqCst);
+            if self.failing.iter().any(|entry| url == storage_url(entry)) {
+                return Err(IsoFetchError::Network);
+            }
+            std::fs::write(path, vec![7u8; limit as usize]).map_err(IsoFetchError::Storage)?;
+            Ok(limit)
+        }
+    }
+
+    fn context(folder: &Path) -> IsoImportContext {
+        IsoImportContext {
+            job_id: "job-1".into(),
+            show_id: SHOW.into(),
+            take_id: TAKE.into(),
+            bearer: "bearer".into(),
+            folder: folder.to_path_buf(),
+        }
+    }
+
+    type Events = Arc<std::sync::Mutex<Vec<IsoImportEvent>>>;
+
+    fn collector() -> (IsoImportEventHook, Events) {
+        let events: Events = Arc::default();
+        let sink = events.clone();
+        let emit: IsoImportEventHook =
+            Arc::new(move |event: IsoImportEvent| sink.lock().unwrap().push(event));
+        (emit, events)
+    }
+
+    fn folder_names(folder: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(folder)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[tokio::test]
+    async fn an_import_registers_every_file_once_and_one_failure_stops_no_other() {
+        let db = Database::open_in_memory_for_tests();
+        let folder = crate::test_temp_dir::TestTempDir::new("cloud-iso-import");
+        let web = FakeIso {
+            status: status("rec_iso_import"),
+            failing: vec!["host/host-aux/g1"],
+            ..Default::default()
+        };
+        let (emit, events) = collector();
+        let (_held, mut cancelled) = watch::channel(false);
+        let ctx = context(&folder);
+        let state = run_cloud_iso_import(&web, &db, &ctx, &mut cancelled, &emit, fixture_now)
+            .await
+            .unwrap();
+        assert_eq!(state, IsoDownloadState::Failed);
+        let saved = db.cloud_iso_import(TAKE).unwrap().unwrap();
+        assert_eq!(saved.program_recording_id, "rec_iso_import");
+        let aux = saved
+            .journal
+            .records
+            .iter()
+            .find(|record| record.entry_id == "host/host-aux/g1")
+            .unwrap();
+        assert_eq!(aux.state, IsoDownloadState::Failed);
+        assert_eq!(aux.attempts, crate::cloud_source_iso::MAX_DOWNLOAD_ATTEMPTS);
+        assert_eq!(
+            saved
+                .journal
+                .records
+                .iter()
+                .filter(|record| record.state == IsoDownloadState::Complete)
+                .count(),
+            4,
+            "the guest camera after the failing aux still imports"
+        );
+        let sessions = db.list_sessions(20).unwrap();
+        assert_eq!(sessions.len(), 4, "one Library row per ISO file");
+        let camera_id = "cloud-iso-tk_AbCdEf123456-host-host-camera-g1";
+        let camera = sessions.iter().find(|row| row.id == camera_id).unwrap();
+        assert_eq!(camera.mode, "cloud-recording");
+        assert_eq!(camera.title, "Host camera (layout unknown)");
+        assert_eq!(camera.started_at, "2027-01-15T08:00:00.400Z");
+        let guest = sessions
+            .iter()
+            .find(|row| row.id == "cloud-iso-tk_AbCdEf123456-g_ann-guest-camera-g1")
+            .unwrap();
+        assert!(guest.title.contains("(partial)"));
+        let names = folder_names(&folder);
+        assert_eq!(names.len(), 4, "{names:?}");
+        assert!(
+            names.iter().all(|name| !name.starts_with('.')),
+            "no staging file is left: {names:?}"
+        );
+        assert_eq!(
+            web.fetches.load(Ordering::SeqCst),
+            7,
+            "4 files, aux 3 times"
+        );
+        let events = events.lock().unwrap().clone();
+        assert!(events.iter().any(|event| {
+            event.entry_id.as_deref() == Some("host/host-camera/g1")
+                && event.state == IsoDownloadState::Complete
+                && event.local_session_id.as_deref() == Some(camera_id)
+                && event.bytes == Some(900_000)
+        }));
+        assert!(events.iter().all(|event| {
+            event.job_id == "job-1"
+                && event
+                    .error
+                    .as_deref()
+                    .is_none_or(|error| !error.contains("://") && !error.contains("secret"))
+        }));
+
+        // A repeat import adds no row, no file and no transfer.
+        let state = run_cloud_iso_import(&web, &db, &ctx, &mut cancelled, &emit, fixture_now)
+            .await
+            .unwrap();
+        assert_eq!(state, IsoDownloadState::Failed);
+        assert_eq!(db.list_sessions(20).unwrap().len(), 4);
+        assert_eq!(folder_names(&folder), names);
+        assert_eq!(web.fetches.load(Ordering::SeqCst), 7);
+    }
+
+    #[tokio::test]
+    async fn an_existing_file_in_the_folder_is_never_overwritten() {
+        let db = Database::open_in_memory_for_tests();
+        let folder = crate::test_temp_dir::TestTempDir::new("cloud-iso-taken");
+        let taken = folder.join("tk_AbCdEf123456-iso-host-microphone-host-g1.ogg");
+        std::fs::write(&taken, b"the user's own file").unwrap();
+        let web = FakeIso {
+            status: status("rec_iso_taken"),
+            ..Default::default()
+        };
+        let (emit, _events) = collector();
+        let (_held, mut cancelled) = watch::channel(false);
+        let state = run_cloud_iso_import(
+            &web,
+            &db,
+            &context(&folder),
+            &mut cancelled,
+            &emit,
+            fixture_now,
+        )
+        .await
+        .unwrap();
+        assert_eq!(state, IsoDownloadState::Failed);
+        assert_eq!(std::fs::read(&taken).unwrap(), b"the user's own file");
+        assert_eq!(db.list_sessions(20).unwrap().len(), 4);
+        let saved = db.cloud_iso_import(TAKE).unwrap().unwrap();
+        let mic = saved
+            .journal
+            .records
+            .iter()
+            .find(|record| record.entry_id == "host/host-microphone/g1")
+            .unwrap();
+        assert_eq!(mic.state, IsoDownloadState::Failed);
+        assert!(
+            mic.error
+                .as_deref()
+                .unwrap()
+                .contains("already in the folder")
+        );
+        assert_eq!(
+            web.fetches.load(Ordering::SeqCst),
+            4,
+            "a taken name is never downloaded"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_invalid_manifest_is_refused_never_passed_through() {
+        let bearer = || Some("bearer".to_string());
+        let web = FakeIso {
+            status: status("rec_iso_valid"),
+            ..Default::default()
+        };
+        let answer = cloud_iso_status(&web, bearer(), json!({ "showId": SHOW }))
+            .await
+            .unwrap();
+        assert_eq!(answer, web.status);
+        let other_show = cloud_iso_status(
+            &web,
+            bearer(),
+            json!({ "showId": "sh_bbbbbbbbbbbbbbbbbbbbbb" }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(other_show.code, CODE_ISO_FAILED);
+
+        let mut bad = status("rec_iso_invalid");
+        bad["iso"]["takes"][0]["manifest"]["productionQualified"] = json!(true);
+        let web = FakeIso {
+            status: bad,
+            ..Default::default()
+        };
+        let error = cloud_iso_status(&web, bearer(), json!({ "showId": SHOW }))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, CODE_ISO_FAILED);
+        let db = Database::open_in_memory_for_tests();
+        let folder = crate::test_temp_dir::TestTempDir::new("cloud-iso-invalid");
+        let (emit, _events) = collector();
+        let (_held, mut cancelled) = watch::channel(false);
+        assert!(
+            run_cloud_iso_import(
+                &web,
+                &db,
+                &context(&folder),
+                &mut cancelled,
+                &emit,
+                fixture_now
+            )
+            .await
+            .is_err()
+        );
+        assert!(db.cloud_iso_import(TAKE).unwrap().is_none());
+        assert_eq!(web.fetches.load(Ordering::SeqCst), 0);
+
+        let mut unbound = status("../rec");
+        unbound["iso"]["takes"][0]["programRecordingId"] = json!("../rec");
+        assert!(iso_status_takes(SHOW, &unbound).is_err());
+        let none = json!({ "availability": { "enabled": false }, "iso": null });
+        assert!(iso_status_takes(SHOW, &none).unwrap().is_empty());
+        assert!(iso_status_takes(SHOW, &json!({ "iso": null })).is_err());
+        assert_eq!(
+            cloud_iso_status(&web, None, json!({ "showId": SHOW }))
+                .await
+                .unwrap_err()
+                .code,
+            CODE_ISO_FAILED,
+            "signed out"
+        );
+    }
+
+    #[tokio::test]
+    async fn enable_needs_explicit_consent_and_bounded_limits() {
+        let web = FakeIso {
+            status: status("rec_iso_enable"),
+            ..Default::default()
+        };
+        let bearer = || Some("bearer".to_string());
+        let ok = json!({
+            "showId": SHOW,
+            "consent": true,
+            "maxActiveEntries": 6,
+            "maxMinutes": 60,
+            "costCeilingMicros": 480_000,
+        });
+        for (field, value) in [
+            ("consent", json!(false)),
+            ("consent", json!("true")),
+            ("consent", Value::Null),
+            ("maxActiveEntries", json!(0)),
+            ("maxActiveEntries", json!(13)),
+            ("maxMinutes", json!(-1)),
+            ("maxMinutes", json!(1.5)),
+            ("costCeilingMicros", json!(5_000_001)),
+            ("showId", json!("not-a-show")),
+            ("extra", json!(1)),
+        ] {
+            let mut params = ok.clone();
+            params[field] = value;
+            let error = cloud_iso_enable(&web, bearer(), params).await.unwrap_err();
+            assert_eq!(error.code, CODE_ISO_INVALID_PARAMS, "{field}");
+        }
+        let mut missing = ok.clone();
+        missing.as_object_mut().unwrap().remove("consent");
+        assert_eq!(
+            cloud_iso_enable(&web, bearer(), missing)
+                .await
+                .unwrap_err()
+                .code,
+            CODE_ISO_INVALID_PARAMS
+        );
+        assert!(
+            web.actions.lock().unwrap().is_empty(),
+            "a refused request never reaches the web"
+        );
+        cloud_iso_enable(&web, bearer(), ok).await.unwrap();
+        cloud_iso_disable(&web, bearer(), json!({ "showId": SHOW }))
+            .await
+            .unwrap();
+        let actions = web.actions.lock().unwrap().clone();
+        assert_eq!(
+            actions,
+            [
+                json!({
+                    "action": "enable",
+                    "consent": true,
+                    "consentVersion": "iso-consent-v1",
+                    "maxActiveEntries": 6,
+                    "maxMinutes": 60,
+                    "costCeilingMicros": 480_000,
+                }),
+                json!({ "action": "disable" }),
+            ]
+        );
+    }
+
+    #[test]
+    fn web_refusals_become_the_contracts_codes_and_never_echo_its_text() {
+        let code = |status: u16, body: &str| cloud_iso_error(status, body.as_bytes()).code;
+        assert_eq!(
+            code(409, r#"{"error":"not-qualified","enabled":false}"#),
+            CODE_ISO_NOT_QUALIFIED
+        );
+        assert_eq!(
+            code(409, r#"{"error":"iso-disabled"}"#),
+            CODE_ISO_NOT_QUALIFIED
+        );
+        assert_eq!(code(403, r#"{"error":"iso-plan"}"#), CODE_ISO_PLAN);
+        assert_eq!(code(503, r#"{"error":"iso-unavailable"}"#), CODE_ISO_FAILED);
+        assert_eq!(code(400, r#"{"error":"invalid-request"}"#), CODE_ISO_FAILED);
+        assert_eq!(code(401, ""), CODE_ISO_FAILED);
+        assert_eq!(code(500, "<html>"), CODE_ISO_FAILED);
+        // S24 fence refusals name the controller, never a web failure.
+        assert_eq!(
+            code(
+                409,
+                r#"{"controllerEpoch":4,"error":{"code":"cloud-controller-stale","message":"x"}}"#
+            ),
+            CODE_ISO_CONTROLLER
+        );
+        assert_eq!(
+            code(409, r#"{"error":{"code":"cloud-controller-required"}}"#),
+            CODE_ISO_CONTROLLER
+        );
+        let refused = cloud_iso_error(409, br#"{"error":"iso-refused","reason":"cost-ceiling"}"#);
+        assert_eq!(refused.code, CODE_ISO_REFUSED);
+        assert!(refused.message.contains("cost-ceiling"));
+        let odd = cloud_iso_error(
+            409,
+            br#"{"error":"iso-refused","reason":"see https://x.invalid/?t=secret"}"#,
+        );
+        assert!(!odd.message.contains("secret"));
+        let enveloped = cloud_iso_error(
+            502,
+            br#"{"error":{"code":"boom","message":"https://x.invalid/?X-Amz-Signature=s"}}"#,
+        );
+        assert_eq!(enveloped.code, CODE_ISO_FAILED);
+        assert!(!enveloped.message.contains("Signature"));
+    }
+
+    #[test]
+    fn a_grant_must_be_https_bounded_and_agree_with_its_manifest() {
+        let grant = |url: &str, bytes: u64| IsoFileGrant {
+            url: url.into(),
+            expires_at: Value::Null,
+            bytes,
+            file_name: String::new(),
+            frame_layout: None,
+            partial: false,
+        };
+        assert_eq!(
+            iso_grant_bytes(&grant("https://storage.invalid/a?sig=1", 10), Some(10)).unwrap(),
+            10
+        );
+        assert!(iso_grant_bytes(&grant("http://storage.invalid/a", 10), Some(10)).is_err());
+        assert!(iso_grant_bytes(&grant("https://u:p@storage.invalid/a", 10), None).is_err());
+        assert!(iso_grant_bytes(&grant("https://storage.invalid/a", 11), Some(10)).is_err());
+        assert!(iso_grant_bytes(&grant("https://storage.invalid/a", 0), None).is_err());
+        assert!(
+            iso_grant_bytes(
+                &grant("https://storage.invalid/a", MAX_IMPORT_BYTES + 1),
+                None
+            )
+            .is_err()
+        );
+        assert!(
+            !format!("{:?}", grant("https://storage.invalid/a?sig=secret", 1)).contains("secret")
+        );
+        let parsed: IsoFileGrant = serde_json::from_value(json!({
+            "url": "https://storage.invalid/x",
+            "expiresAt": "2027-01-15T08:10:00Z",
+            "bytes": 5,
+            "fileName": "x.webm",
+            "frameLayout": { "basis": "unavailable", "layout": "unknown", "declared": null },
+            "partial": true,
+        }))
+        .unwrap();
+        assert_eq!(parsed.frame_layout.as_deref(), Some("unknown"));
+        assert!(parsed.partial);
+    }
+
+    #[test]
+    fn a_layout_the_grant_disputes_is_unknown_and_flagged() {
+        let manifest = parse_iso_manifest(&manifest()).unwrap();
+        let plan = plan_iso_import(&manifest, NOW_MS);
+        let ctx = context(Path::new("/nonexistent"));
+        let guest = plan
+            .iter()
+            .find(|item| item.role == "guest-camera")
+            .unwrap();
+        let registration =
+            iso_registration(&ctx, &manifest, "rec_layout", guest, Some("unknown"), false).unwrap();
+        assert_eq!(
+            registration.diagnostics["cloudIso"]["frameLayout"],
+            "unknown"
+        );
+        assert_eq!(registration.diagnostics["cloudIsoLayoutUnknown"], true);
+        assert_eq!(registration.diagnostics["cloudIso"]["partial"], true);
+        assert!(registration.title.contains("(layout unknown)"));
+        assert!(registration.title.contains("(partial)"));
+        assert_eq!(registration.role, "iso:guest-camera");
+        assert_eq!(
+            registration.session_id,
+            "cloud-iso-tk_AbCdEf123456-g_ann-guest-camera-g1"
+        );
+        let mic = plan
+            .iter()
+            .find(|item| item.entry_id == "host/host-microphone/g1")
+            .unwrap();
+        let registration =
+            iso_registration(&ctx, &manifest, "rec_layout", mic, None, false).unwrap();
+        assert_eq!(
+            registration.diagnostics["cloudIso"]["frameLayout"],
+            Value::Null
+        );
+        assert_eq!(registration.diagnostics["cloudIsoLayoutUnknown"], false);
+        assert_eq!(
+            registration.diagnostics["cloudIso"]["programRecordingId"],
+            "rec_layout"
+        );
+        assert_eq!(registration.started_at, "2027-01-15T08:00:00.350Z");
+        assert_eq!(
+            registration.ended_at.as_deref(),
+            Some("2027-01-15T08:00:20.350Z")
+        );
+        let mut odd = mic.clone();
+        odd.subject = "g_x/../y".into();
+        assert!(
+            iso_session_id(&odd)
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        );
     }
 }

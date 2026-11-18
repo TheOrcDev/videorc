@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { AvatarPageIcon, BuddyPageIcon } from './icons'
+import { AccountIcon, AvatarPageIcon, BuddyPageIcon } from './icons'
 import {
   SIDEBAR_ZONES,
   STUDIO_PANELS,
@@ -65,10 +65,12 @@ describe('workspace navigation', () => {
       ['0', 'library'],
       [',', 'settings']
     ])
+    // Down the sidebar in order; Guests, shown only with talk shows, has no
+    // digit, so the keys of the rows below it never move (0.31.1).
     const digits = WORKSPACE_SHORTCUTS.filter((entry) => entry.digit !== ',')
-    expect(digits.map((entry) => sidebarOrderFor(entry.tab))).toEqual(
-      digits.map((_, index) => index)
-    )
+    const rows = digits.map((entry) => sidebarOrderFor(entry.tab))
+    expect(rows).toEqual([...rows].sort((a, b) => a - b))
+    expect(sidebarOrderFor('guests')).toBe(sidebarOrderFor('live') + 1)
   })
 
   it('puts Settings on ⌘, and never duplicates a key', () => {
@@ -79,8 +81,8 @@ describe('workspace navigation', () => {
     expect(new Set(keys).size).toBe(keys.length)
   })
 
-  it('gives every reachable page a digit except Health (⌘K-only)', () => {
-    const noDigit: WorkspaceTab[] = ['diagnostics']
+  it('gives every reachable page a digit except Health (⌘K-only) and Guests', () => {
+    const noDigit: WorkspaceTab[] = ['diagnostics', 'guests']
     const reachable: WorkspaceTab[] = [
       ...WORKSPACE_TABS.map((tab) => tab.id),
       ...STUDIO_PANELS.map((panel) => panel.id)
@@ -104,7 +106,7 @@ describe('workspace navigation', () => {
     expect(SIDEBAR_ZONES.map((zone) => [zone.id, zone.label ?? null, zone.pages])).toEqual([
       ['stage', null, ['studio']],
       ['setup', 'Setup', ['sources', 'layouts', 'assets', 'captions', 'avatar', 'recording']],
-      ['livestream', 'Livestream', ['live', 'ai']],
+      ['livestream', 'Livestream', ['live', 'guests', 'ai']],
       ['library', null, ['library']],
       ['system', null, ['settings']]
     ])
@@ -119,6 +121,15 @@ describe('workspace navigation', () => {
     })
     expect(shortcutDigitFor('ai')).toBe('9')
     expect(workspaceTabLabel('ai')).toBe('Sidekick')
+    // 0.31.1: the talk show's room is its own page, beside Destinations.
+    expect(WORKSPACE_TABS.find((tab) => tab.id === 'guests')).toEqual({
+      id: 'guests',
+      label: 'Guests',
+      icon: AccountIcon
+    })
+    expect(isStudioPanel('guests')).toBe(false)
+    expect(shortcutDigitFor('guests')).toBeUndefined()
+    expect(workspaceWindowTitle('guests')).toBe('Guests – Videorc')
     // Plan 239: a full page with a plain glyph of its own, never a Setup panel.
     expect(WORKSPACE_TABS.find((tab) => tab.id === 'avatar')).toEqual({
       id: 'avatar',
@@ -150,6 +161,7 @@ describe('workspace navigation', () => {
       'avatar',
       'recording',
       'live',
+      'guests',
       'ai',
       'library',
       'settings'

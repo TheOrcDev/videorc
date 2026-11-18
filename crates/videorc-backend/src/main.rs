@@ -43,8 +43,17 @@ mod chat_commands;
 mod chat_overlay;
 mod clean_cut;
 mod clip_marks;
+mod cloud_archive;
+mod cloud_clips;
 mod cloud_control_web;
+mod cloud_controller;
+mod cloud_graphics;
+mod cloud_markers;
+mod cloud_output_session;
+mod cloud_services;
 mod cloud_show;
+// Plan 249 S22: cloud ISO manifests and the import journal's pure rules.
+mod cloud_source_iso;
 mod cloud_talk;
 mod cohost;
 mod cohost_ack;
@@ -75,7 +84,18 @@ mod ffmpeg_work;
 mod fifo;
 mod frame_store;
 mod html_overlay;
+mod output_session;
 mod preview_debug_sample;
+mod provider_output;
+mod room_audio_bridge;
+mod room_microphone;
+// Plan 249 S13a: one native monotonic anchor for room media bridges.
+mod room_clock;
+mod room_frame_bridge;
+// Plan 249 S13b: the processed camera role's native producer.
+mod room_camera_source;
+mod room_program_camera;
+mod room_system_audio;
 // Plan 168 Phase F: the pet builder (S-F1 to S-F3) and the creator's RPCs (S-F4).
 mod buddy_pet_build;
 mod buddy_pet_create;
@@ -228,6 +248,7 @@ mod x_live;
 mod x_oauth1;
 mod youtube;
 mod youtube_chat;
+mod youtube_emotes;
 mod youtube_quota;
 
 use std::convert::Infallible;
@@ -379,6 +400,8 @@ const BACKEND_PROCESS_OWNERSHIP_ENV: &str = "VIDEORC_BACKEND_OWNERSHIP_TOKEN";
 const BACKEND_PROCESS_OWNERSHIP_PREFIX: &str = "OWNERSHIP ";
 
 fn main() -> Result<()> {
+    // Before any room audio/video generation epoch can be captured.
+    room_clock::init();
     if windows_mf_probe::run_cli(&std::env::args().skip(1).collect::<Vec<_>>())? {
         return Ok(());
     }
@@ -547,6 +570,11 @@ async fn run_backend(device_changes: tokio::sync::watch::Receiver<u64>) -> Resul
     let (events, _) = broadcast::channel(256);
     let database = Database::open_default()?;
     database.recover_scheduled_operations_after_restart()?;
+    // Plan 249 S22: a cloud ISO transfer the previous run left running is
+    // retried, and only staging files its journal created are removed.
+    if let Err(error) = database.recover_cloud_iso_imports() {
+        tracing::warn!("Cloud ISO import recovery deferred: {error:#}");
+    }
     #[cfg(debug_assertions)]
     if scheduled_streams_service::smoke_api_base()?.is_some() {
         database.upsert_platform_account(UpsertPlatformAccount {
@@ -703,6 +731,16 @@ async fn run_backend(device_changes: tokio::sync::watch::Receiver<u64>) -> Resul
             "/html-overlays/frames",
             post(html_overlay::frames_upload_handler),
         )
+        // Plan 249 S23: the room's Program preview for Videorc Camera (admin
+        // token only; a debug backend with VIDEORC_ROOM_PROGRAM_CAMERA=1).
+        .route(
+            "/room-program-camera/frames",
+            post(room_program_camera::frames_upload_handler),
+        )
+        .route(
+            "/room-program-camera/inspect",
+            get(room_program_camera::inspect_handler),
+        )
         .route("/ws", get(ws_handler))
         .with_state(state.clone())
         .layer(axum::middleware::map_response(default_no_store));
@@ -791,6 +829,23 @@ async fn run_backend(device_changes: tokio::sync::watch::Receiver<u64>) -> Resul
             cloud_show_detect_at_launch(&entitlement_state).await;
         });
     }
+    {
+        let discovery_state = state.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(10));
+            loop {
+                tick.tick().await;
+                if !cloud_test_blocked_by(&current_recording_status(&discovery_state).await)
+                    && let (Some(context), Some(bearer)) = (
+                        cloud_context(&discovery_state),
+                        account::stored_session_token(),
+                    )
+                {
+                    let _ = context.check_current_show(&bearer, false).await;
+                }
+            }
+        });
+    }
     // Plan 094 (S7): remote service flags at startup and every 30 minutes;
     // fails open to compiled defaults.
     tokio::spawn(service_flags::run_service_flags_refresher(state.clone()));
@@ -807,6 +862,10 @@ async fn run_backend(device_changes: tokio::sync::watch::Receiver<u64>) -> Resul
     // its one-time, resumable backfill.
     community_service::spawn_startup_jobs(&state);
     watchdog::spawn_talk_show_watch(&state);
+    // Plan 249 S24 x S15: once this process loses a show it controlled,
+    // captions listening for it retires (consent and intents revoked before
+    // the provider task is joined). The synchronous gate is in cloud_host.
+    spawn_cloud_ownership_watch(&state);
     match (oauth_listener, oauth_callback_port) {
         (Some(oauth_listener), Some(oauth_port)) => {
             let oauth_app = Router::new()
@@ -954,6 +1013,7 @@ async fn cleanup_process_owners_after_finalization(state: AppState) {
     crate::agent_mcp::shutdown(&state);
     let cloud_downloads = cloud_show::lock(&state.cloud_show).downloads.clone();
     cloud_downloads.shutdown().await;
+    cloud_control_web::shutdown_cloud_iso_imports().await;
     captions::shutdown_caption_runtime(&state).await;
     state.noise_cleanup.interrupt_all_for_shutdown();
     state.clean_cut.interrupt_all_for_shutdown();
@@ -1376,6 +1436,19 @@ async fn acquire_interruption_lease_handler(
             .into_response();
     }
 
+    // Plan 249 S26: a cloud room this computer has on air or recording is
+    // live activity too: an update install or a permission restart would cut
+    // its camera, microphone and program contributions.
+    if let Some(message) = cloud_show_status(&state).room_activity() {
+        return (
+            StatusCode::CONFLICT,
+            Json(InterruptionLeaseErrorResponse {
+                code: "capture-not-idle",
+                message: message.to_string(),
+            }),
+        )
+            .into_response();
+    }
     // Background MP4 exports are part of "capture not idle" for the updater /
     // restart gate: the terminal recording status is published before they run.
     if state.recording_finalization.has_active_jobs() {
@@ -3569,6 +3642,25 @@ async fn prepare_session_live_chat(
     session_id: &str,
     streaming: &crate::streaming::StreamingSettings,
 ) -> Option<live_chat::LiveChatStartParams> {
+    // Cloud chat uses the show id, not a local recording session. Ensure
+    // its row before the first provider request, including a resume.
+    {
+        let cloud_guard = state.cloud_show.lock().unwrap_or_else(|p| p.into_inner());
+        let cloud = cloud_guard.status();
+        if cloud
+            .show
+            .as_ref()
+            .is_some_and(|show| show.id == session_id)
+            && let Err(error) = state.database.sync_cloud_show_session(&cloud)
+        {
+            state.emit_log(
+                "error",
+                format!("Cloud show chat could not open its Library entry: {error:#}"),
+            );
+            return None;
+        }
+    }
+
     use std::collections::HashSet;
     let enabled: HashSet<&str> = streaming
         .enabled_target_ids
@@ -5700,8 +5792,12 @@ fn websocket_audio_processing_command_id(text: &str) -> Option<String> {
 }
 
 fn websocket_command_is_session_stop(text: &str) -> bool {
-    serde_json::from_str::<ClientCommand>(text)
-        .is_ok_and(|command| command.method == "session.stop")
+    serde_json::from_str::<ClientCommand>(text).is_ok_and(|command| {
+        matches!(
+            command.method.as_str(),
+            "session.stop" | "cloud.show.handOff"
+        )
+    })
 }
 
 fn websocket_command_is_session_start(text: &str) -> bool {
@@ -5726,6 +5822,7 @@ fn websocket_command_has_session_lifecycle_policy(text: &str) -> bool {
             command.method.as_str(),
             "session.start"
                 | "cloud.show.resume"
+                | "cloud.show.handOff"
                 | "session.stop"
                 | "recording.stop"
                 | "recording.start_test"
@@ -5762,6 +5859,17 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "resource.capability.register_thumbnail"
         | "account.auth.begin_intent"
         | "account.sign_out"
+        | "cloud.clips.enable"
+        | "cloud.clips.disable"
+        | "cloud.clips.save"
+        | "cloud.clips.cancel"
+        | "cloud.clips.discard"
+        | "cloud.marker.create"
+        | "cloud.marker.delete"
+        | "cloud.marker.voice.configure"
+        | "cloud.speech.overlay"
+        | "cloud.speech.sync"
+        | "cloud.speech.audio"
         | "captions.start"
         | "captions.stop"
         | "captions.style.set"
@@ -5797,6 +5905,12 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "cohost.library.update"
         | "cohost.library.delete"
         | "cohost.library.saveToLibrary"
+        | "cloud.graphics.snapshot"
+        | "cloud.htmlLayers.want"
+        | "buddy.cloud.report"
+        | "cloud.presentation.accepted"
+        | "cloud.controller.desired"
+        | "cloud.presentation.restore"
         | "buddy.overlay.set"
         | "buddy.overlay.clear"
         | "cohost.pet.import"
@@ -6026,7 +6140,14 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "cloud.overlay.set"
         | "cloud.overlay.clear"
         // Plan 234 T3: the account's cloud recordings, from videorc.com.
+        | "cloud.archive.availability"
+        | "cloud.archive.start"
+        | "cloud.archive.resume"
         | "cloud.recordings.list"
+        // Plan 249 S22: the show's ISO request, through videorc.com.
+        | "cloud.iso.status"
+        | "cloud.iso.enable"
+        | "cloud.iso.disable"
         | "repair.restore_file"
         | "preview.snapshot" => Some(Mutation {
             max_execution_age: WEBSOCKET_PROVIDER_MUTATION_MAX_EXECUTION_AGE,
@@ -6069,12 +6190,19 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "watchdog.settings.set"
         | "watchdog.idle.report"
         | "cloud.show.reconnectDestination"
+        | "cloud.show.check"
         | "cloud.room.client.report"
         | "cloud.recordings.download"
-        | "cloud.recordings.cancelDownload" => Some(DEFAULT_MUTATION_POLICY),
+        | "cloud.archive.stop"
+        | "cloud.archive.cancel"
+        | "cloud.archive.discard"
+        | "cloud.recordings.cancelDownload"
+        | "cloud.iso.import"
+        | "cloud.iso.cancelImport" => Some(DEFAULT_MUTATION_POLICY),
 
         "session.start"
         | "cloud.show.resume"
+        | "cloud.show.handOff"
         | "session.stop"
         | "recording.stop"
         | "recording.start_test" => Some(SessionLifecycle),
@@ -6096,6 +6224,11 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "scheduledStreams.candidates"
         | "account.get"
         | "entitlements.get"
+        | "cloud.clips.status"
+        | "cloud.clips.jobs"
+        | "cloud.markers.list"
+        | "cloud.marker.get"
+        | "cloud.speech.transcript"
         | "captions.status.get"
         | "captions.test.snapshot"
         | "comments.highlight.status"
@@ -6130,13 +6263,16 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "agents.status"
         | "agents.activity.list"
         | "cloud.status"
+        | "cloud.archive.status"
         | "cloud.recordings.downloads"
+        | "cloud.iso.imports"
         | "compositor.status"
         | "preview.debug.sample"
         | "preview.camera.status"
         | "preview.screen.status"
         | "audio.meter.probeNative"
         | "scene.get"
+        | "cloud.scene.resolve"
         | "stream.output.topology.probe"
         | "performance.check.get"
         | "encoder.preference.get"
@@ -8466,6 +8602,484 @@ struct PreviewFrameReleaseParams {
 // These controls are connection-owned, like the event filter. Never dispatch
 // them as detached work: disconnect must release the retained surface even if
 // the client disappears after acquiring it and before sending its release.
+async fn handle_room_microphone_control(
+    state: &AppState,
+    role: BackendRole,
+    bridge: &mut room_microphone::Bridge,
+    text: &str,
+) -> Option<ServerResponse> {
+    #[derive(Deserialize)]
+    struct Envelope<'a> {
+        id: &'a str,
+        method: &'a str,
+    }
+    if !text.contains("room.microphone.") {
+        return None;
+    }
+    let envelope = serde_json::from_str::<Envelope<'_>>(text).ok()?;
+    if !matches!(
+        envelope.method,
+        "room.microphone.pcm" | "room.microphone.inspect"
+    ) {
+        return None;
+    }
+    if role != BackendRole::Admin
+        || !cfg!(debug_assertions)
+        || !state.smoke_rpc_enabled
+        || std::env::var("VIDEORC_ROOM_NATIVE_MIC").as_deref() != Ok("1")
+    {
+        return Some(ServerResponse::error(
+            envelope.id,
+            "microphone-disabled",
+            "Native room microphone is disabled and unqualified.",
+        ));
+    }
+    if text.len() > 2048 {
+        return Some(ServerResponse::error(
+            envelope.id,
+            "invalid-params",
+            "Microphone command exceeds bound.",
+        ));
+    }
+    let command = serde_json::from_str::<ClientCommand>(text).ok()?;
+    if command.method == "room.microphone.inspect" {
+        let wait_for_close = command.params == serde_json::json!({ "waitForClose": true });
+        if !rpc_params_are_empty(&command.params) && !wait_for_close {
+            return Some(ServerResponse::error(
+                command.id,
+                "invalid-params",
+                "Invalid microphone inspection parameters",
+            ));
+        }
+        // Main uses this only after a failed source RPC closed the owner socket.
+        // Wait for actual producer completion, never acknowledge a transient
+        // nonzero owner as closed or permanently fail a normal EOF teardown.
+        if wait_for_close
+            && !tokio::task::spawn_blocking(session_audio::room_microphone_cleanup_ready)
+                .await
+                .unwrap_or(false)
+        {
+            return Some(ServerResponse::error(
+                command.id,
+                "microphone-cleanup-pending",
+                "Microphone owner has not released capture",
+            ));
+        }
+        return Some(ServerResponse::ok(
+            command.id,
+            serde_json::json!({ "nativeSources": session_audio::room_microphone_producers() }),
+        ));
+    }
+    let result = match serde_json::from_value::<room_microphone::Command>(command.params) {
+        Ok(params) => bridge.command(state, params).await,
+        Err(_) => Err(anyhow::anyhow!("Invalid microphone command")),
+    };
+    Some(match result {
+        Ok(frame) => {
+            ServerResponse::ok(command.id, serde_json::to_value(frame).unwrap_or_default())
+        }
+        Err(error) => ServerResponse::error(command.id, "microphone-refused", error.to_string()),
+    })
+}
+
+async fn handle_room_system_control(
+    state: &AppState,
+    role: BackendRole,
+    bridge: &mut room_system_audio::Bridge,
+    text: &str,
+) -> Option<ServerResponse> {
+    #[derive(Deserialize)]
+    struct Envelope<'a> {
+        id: &'a str,
+        method: &'a str,
+    }
+    if !text.contains("room.system.") {
+        return None;
+    }
+    let envelope = serde_json::from_str::<Envelope<'_>>(text).ok()?;
+    if !matches!(envelope.method, "room.system.pcm" | "room.system.inspect") {
+        return None;
+    }
+    if role != BackendRole::Admin
+        || !cfg!(debug_assertions)
+        || !state.smoke_rpc_enabled
+        || std::env::var("VIDEORC_ROOM_NATIVE_SYSTEM").as_deref() != Ok("1")
+    {
+        return Some(ServerResponse::error(
+            envelope.id,
+            "system audio-disabled",
+            "Native room system audio is disabled and unqualified.",
+        ));
+    }
+    if text.len() > 2048 {
+        return Some(ServerResponse::error(
+            envelope.id,
+            "invalid-params",
+            "System audio command exceeds bound.",
+        ));
+    }
+    let command = serde_json::from_str::<ClientCommand>(text).ok()?;
+    if command.method == "room.system.inspect" {
+        let wait_for_close = command.params == serde_json::json!({ "waitForClose": true });
+        if !rpc_params_are_empty(&command.params) && !wait_for_close {
+            return Some(ServerResponse::error(
+                command.id,
+                "invalid-params",
+                "Invalid system audio inspection parameters",
+            ));
+        }
+        // Main uses this only after a failed source RPC closed the owner socket.
+        // Wait for actual producer completion, never acknowledge a transient
+        // nonzero owner as closed or permanently fail a normal EOF teardown.
+        if wait_for_close
+            && !tokio::task::spawn_blocking(room_system_audio::cleanup_ready)
+                .await
+                .unwrap_or(false)
+        {
+            return Some(ServerResponse::error(
+                command.id,
+                "system audio-cleanup-pending",
+                "System audio owner has not released capture",
+            ));
+        }
+        return Some(ServerResponse::ok(
+            command.id,
+            serde_json::json!({ "nativeSources": room_system_audio::sources() }),
+        ));
+    }
+    let result = match serde_json::from_value::<room_system_audio::Command>(command.params) {
+        Ok(params) => bridge.command(state, params).await,
+        Err(_) => Err(anyhow::anyhow!("Invalid system audio command")),
+    };
+    Some(match result {
+        Ok(frame) => {
+            ServerResponse::ok(command.id, serde_json::to_value(frame).unwrap_or_default())
+        }
+        Err(error) => ServerResponse::error(command.id, "system-audio-refused", error.to_string()),
+    })
+}
+
+fn handle_room_pcm_control(
+    role: BackendRole,
+    enabled: bool,
+    bridge: &mut room_audio_bridge::Bridge,
+    text: &str,
+) -> Option<ServerResponse> {
+    // Only the private main/admin socket reaches this connection-owned source.
+    if !text.contains("room.pcm.test") {
+        return None;
+    }
+    #[derive(Deserialize)]
+    struct Envelope<'a> {
+        id: &'a str,
+        method: &'a str,
+    }
+    // Borrow only the envelope; serde skips params without materializing a Value.
+    let envelope = serde_json::from_str::<Envelope<'_>>(text).ok()?;
+    if !matches!(envelope.method, "room.pcm.test" | "room.pcm.test.inspect") {
+        return None;
+    }
+    if role != BackendRole::Admin || !cfg!(debug_assertions) || !enabled {
+        return Some(ServerResponse::error(
+            envelope.id,
+            "pcm-disabled",
+            "PCM test source is unavailable.",
+        ));
+    }
+    if text.len() > 512 {
+        return Some(ServerResponse::error(
+            envelope.id,
+            "invalid-params",
+            "PCM command exceeds its bound.",
+        ));
+    }
+    let command = serde_json::from_str::<ClientCommand>(text).ok()?;
+    if command.method == "room.pcm.test.inspect" {
+        if !rpc_params_are_empty(&command.params) {
+            return Some(ServerResponse::error(
+                command.id,
+                "invalid-params",
+                "PCM inspection takes no parameters.",
+            ));
+        }
+        return Some(ServerResponse::ok(
+            command.id,
+            serde_json::json!({ "nativeSources": room_audio_bridge::active_sources() }),
+        ));
+    }
+    let result = serde_json::from_value::<room_audio_bridge::Command>(command.params)
+        .map_err(|_| "Invalid PCM command")
+        .and_then(|params| bridge.command(params, std::time::Instant::now()));
+    Some(match result {
+        Ok(frame) => {
+            ServerResponse::ok(command.id, serde_json::to_value(frame).unwrap_or_default())
+        }
+        Err(error) => ServerResponse::error(command.id, "pcm-rejected", error),
+    })
+}
+
+enum RoomFrameReply {
+    Text(ServerResponse),
+    Binary(Vec<u8>),
+}
+
+// Plan 249 S13a. Connection-owned like the PCM fixture: disconnect drops the
+// source and every lease it holds. Frames go out as one binary message whose
+// header echoes the request serial; refusals and idle pulls stay JSON.
+fn handle_room_frame_control(
+    role: BackendRole,
+    enabled: bool,
+    bridge: &mut room_frame_bridge::Bridge,
+    text: &str,
+) -> Option<RoomFrameReply> {
+    if !text.contains("room.frame.test") {
+        return None;
+    }
+    #[derive(Deserialize)]
+    struct Envelope<'a> {
+        id: &'a str,
+        method: &'a str,
+    }
+    let envelope = serde_json::from_str::<Envelope<'_>>(text).ok()?;
+    if !matches!(
+        envelope.method,
+        "room.frame.test" | "room.frame.test.inspect"
+    ) {
+        return None;
+    }
+    let refuse = |id: &str, code: &str, message: &str| {
+        Some(RoomFrameReply::Text(ServerResponse::error(
+            id, code, message,
+        )))
+    };
+    if role != BackendRole::Admin || !cfg!(debug_assertions) || !enabled {
+        return refuse(
+            envelope.id,
+            "frame-disabled",
+            "Frame test source is unavailable.",
+        );
+    }
+    if text.len() > 512 {
+        return refuse(
+            envelope.id,
+            "invalid-params",
+            "Frame command exceeds its bound.",
+        );
+    }
+    let command = serde_json::from_str::<ClientCommand>(text).ok()?;
+    if command.method == "room.frame.test.inspect" {
+        if !rpc_params_are_empty(&command.params) {
+            return refuse(
+                &command.id,
+                "invalid-params",
+                "Frame inspection takes no parameters.",
+            );
+        }
+        return Some(RoomFrameReply::Text(ServerResponse::ok(
+            command.id,
+            serde_json::json!({
+                "nativeSources": room_frame_bridge::active_sources(),
+                "nativeLeases": room_frame_bridge::active_leases(),
+            }),
+        )));
+    }
+    let result = serde_json::from_value::<room_frame_bridge::Command>(command.params)
+        .map_err(|_| "Invalid frame command")
+        .and_then(|params| bridge.command(params, std::time::Instant::now()));
+    Some(match result {
+        Ok(room_frame_bridge::Reply::Frame(bytes)) => RoomFrameReply::Binary(bytes),
+        Ok(room_frame_bridge::Reply::Opened(opened)) => RoomFrameReply::Text(ServerResponse::ok(
+            command.id,
+            serde_json::to_value(opened).unwrap_or_default(),
+        )),
+        Ok(room_frame_bridge::Reply::Reset(reset)) => RoomFrameReply::Text(ServerResponse::ok(
+            command.id,
+            serde_json::to_value(reset).unwrap_or_default(),
+        )),
+        Ok(room_frame_bridge::Reply::Idle(idle)) => RoomFrameReply::Text(ServerResponse::ok(
+            command.id,
+            serde_json::to_value(idle).unwrap_or_default(),
+        )),
+        Ok(room_frame_bridge::Reply::Closed) => {
+            RoomFrameReply::Text(ServerResponse::ok(command.id, serde_json::Value::Null))
+        }
+        Err(error) => {
+            RoomFrameReply::Text(ServerResponse::error(command.id, "frame-rejected", error))
+        }
+    })
+}
+
+// Plan 249 S13b: the processed camera role. Connection-owned like the frame
+// fixture; processing runs off the event loop (`spawn_blocking`).
+async fn handle_room_camera_control(
+    state: &AppState,
+    role: BackendRole,
+    bridge: &mut room_frame_bridge::Bridge,
+    producer: &mut room_camera_source::Producer,
+    text: &str,
+) -> Option<RoomFrameReply> {
+    if !text.contains("room.camera.processed") {
+        return None;
+    }
+    #[derive(Deserialize)]
+    struct Envelope<'a> {
+        id: &'a str,
+        method: &'a str,
+    }
+    let envelope = serde_json::from_str::<Envelope<'_>>(text).ok()?;
+    if !matches!(
+        envelope.method,
+        "room.camera.processed" | "room.camera.processed.inspect"
+    ) {
+        return None;
+    }
+    let refuse = |id: &str, code: &str, message: &str| {
+        Some(RoomFrameReply::Text(ServerResponse::error(
+            id, code, message,
+        )))
+    };
+    if role != BackendRole::Admin || !room_camera_source::enabled(state.smoke_rpc_enabled) {
+        return refuse(
+            envelope.id,
+            "camera-disabled",
+            "Processed camera is unavailable.",
+        );
+    }
+    if text.len() > 512 {
+        return refuse(
+            envelope.id,
+            "invalid-params",
+            "Camera command exceeds its bound.",
+        );
+    }
+    let command = serde_json::from_str::<ClientCommand>(text).ok()?;
+    if command.method == "room.camera.processed.inspect" {
+        if !rpc_params_are_empty(&command.params) {
+            return refuse(
+                &command.id,
+                "invalid-params",
+                "Inspection takes no parameters.",
+            );
+        }
+        // The size a new generation must open at (null while no camera frame).
+        let logical = room_camera_source::current_logical(state).await.ok();
+        // The layout the producer processes with (evidence, not a setting).
+        let scene_layout = state.compositor.lock().await.status.scene_layout.clone();
+        let layout_source = if scene_layout.is_some() {
+            "scene"
+        } else {
+            "default"
+        };
+        let layout = scene_layout.unwrap_or_else(protocol::default_layout_settings);
+        return Some(RoomFrameReply::Text(ServerResponse::ok(
+            command.id,
+            serde_json::json!({
+                "nativeSources": room_frame_bridge::active_sources(),
+                "nativeLeases": room_frame_bridge::active_leases(),
+                "logicalWidth": logical.map(|(width, _)| width),
+                "logicalHeight": logical.map(|(_, height)| height),
+                "keptForRoom": room_camera_source::kept_for_room(),
+                "layoutSource": layout_source,
+                "keyOn": layout.camera_chroma_key_enabled,
+                "nativeMirror": layout.camera_mirror,
+                "look": layout.camera_look,
+                "lentToBrowserRoom": preview_camera::camera_lent_to_talk_show(state).await,
+                "fixture": room_camera_source::fixture_size().is_some(),
+            }),
+        )));
+    }
+    // Debug fixture "device" events for acceptance: switch and unplug.
+    match command.params.get("action").and_then(|a| a.as_str()) {
+        Some("fixture-switch") => {
+            return Some(match producer.fixture_switch() {
+                Ok(generation) => RoomFrameReply::Text(ServerResponse::ok(
+                    command.id,
+                    serde_json::json!({ "cameraGeneration": generation }),
+                )),
+                Err(error) => RoomFrameReply::Text(ServerResponse::error(
+                    command.id,
+                    "camera-rejected",
+                    error,
+                )),
+            });
+        }
+        Some("fixture-unplug") => {
+            return Some(match producer.fixture_unplug() {
+                Ok(()) => {
+                    RoomFrameReply::Text(ServerResponse::ok(command.id, serde_json::Value::Null))
+                }
+                Err(error) => RoomFrameReply::Text(ServerResponse::error(
+                    command.id,
+                    "camera-rejected",
+                    error,
+                )),
+            });
+        }
+        _ => {}
+    }
+    let Ok(params) = serde_json::from_value::<room_frame_bridge::Command>(command.params) else {
+        return refuse(&command.id, "camera-rejected", "Invalid camera command");
+    };
+    if !params.is_processed() {
+        return refuse(
+            &command.id,
+            "camera-rejected",
+            "Not the processed camera role",
+        );
+    }
+    let frame = match params.action.as_str() {
+        "open" => {
+            // One owner: refuse while the browser room holds the camera, and
+            // open only at the size the camera gives now.
+            if preview_camera::camera_lent_to_talk_show(state).await {
+                return refuse(
+                    &command.id,
+                    "camera-rejected",
+                    "The camera is lent to the browser room",
+                );
+            }
+            match room_camera_source::current_logical(state).await {
+                Ok(logical) if logical == params.logical() => None,
+                Ok(_) => {
+                    return refuse(
+                        &command.id,
+                        "camera-rejected",
+                        "Requested size is not the camera's logical size",
+                    );
+                }
+                Err(error) => return refuse(&command.id, "camera-rejected", error),
+            }
+        }
+        "pull" => match producer.latest(state, params.logical()).await {
+            Ok(frame) => frame,
+            Err(error) => return refuse(&command.id, "camera-rejected", error),
+        },
+        _ => None,
+    };
+    let result = bridge.command_with(params, std::time::Instant::now(), frame);
+    Some(match result {
+        Ok(room_frame_bridge::Reply::Frame(bytes)) => RoomFrameReply::Binary(bytes),
+        Ok(room_frame_bridge::Reply::Opened(opened)) => RoomFrameReply::Text(ServerResponse::ok(
+            command.id,
+            serde_json::to_value(opened).unwrap_or_default(),
+        )),
+        Ok(room_frame_bridge::Reply::Reset(reset)) => RoomFrameReply::Text(ServerResponse::ok(
+            command.id,
+            serde_json::to_value(reset).unwrap_or_default(),
+        )),
+        Ok(room_frame_bridge::Reply::Idle(idle)) => RoomFrameReply::Text(ServerResponse::ok(
+            command.id,
+            serde_json::to_value(idle).unwrap_or_default(),
+        )),
+        Ok(room_frame_bridge::Reply::Closed) => {
+            RoomFrameReply::Text(ServerResponse::ok(command.id, serde_json::Value::Null))
+        }
+        Err(error) => {
+            RoomFrameReply::Text(ServerResponse::error(command.id, "camera-rejected", error))
+        }
+    })
+}
+
 async fn handle_preview_frame_lease_control(
     state: &AppState,
     role: BackendRole,
@@ -8714,6 +9328,12 @@ async fn websocket_session_with_handler_role_and_redaction(
         None => (None, None),
     };
     let mut preview_frame_lease = None;
+    let mut room_audio_bridge = room_audio_bridge::Bridge::default();
+    let mut room_microphone = room_microphone::Bridge::default();
+    let mut room_frame_bridge = room_frame_bridge::Bridge::default();
+    let mut room_camera_bridge = room_frame_bridge::Bridge::default();
+    let mut room_camera_producer = room_camera_source::Producer::default();
+    let mut room_system_audio = room_system_audio::Bridge::default();
 
     loop {
         let incoming = tokio::select! {
@@ -8825,6 +9445,124 @@ async fn websocket_session_with_handler_role_and_redaction(
                     continue;
                 }
 
+                if let Some(response) = handle_room_microphone_control(
+                    &state,
+                    role,
+                    &mut room_microphone,
+                    text.as_str(),
+                )
+                .await
+                {
+                    if !queue_websocket_response(
+                        &outgoing_tx,
+                        &reliable_metrics,
+                        &slow_pressure,
+                        response,
+                    )
+                    .await
+                    {
+                        break;
+                    }
+                    continue;
+                }
+
+                if let Some(response) =
+                    handle_room_system_control(&state, role, &mut room_system_audio, text.as_str())
+                        .await
+                {
+                    if !queue_websocket_response(
+                        &outgoing_tx,
+                        &reliable_metrics,
+                        &slow_pressure,
+                        response,
+                    )
+                    .await
+                    {
+                        break;
+                    }
+                    continue;
+                }
+
+                if let Some(response) = handle_room_pcm_control(
+                    role,
+                    state.smoke_rpc_enabled,
+                    &mut room_audio_bridge,
+                    text.as_str(),
+                ) {
+                    if !queue_websocket_response(
+                        &outgoing_tx,
+                        &reliable_metrics,
+                        &slow_pressure,
+                        response,
+                    )
+                    .await
+                    {
+                        break;
+                    }
+                    continue;
+                }
+
+                if let Some(reply) = handle_room_frame_control(
+                    role,
+                    state.smoke_rpc_enabled,
+                    &mut room_frame_bridge,
+                    text.as_str(),
+                ) {
+                    let message = match reply {
+                        RoomFrameReply::Binary(bytes) => Some(Message::Binary(bytes.into())),
+                        RoomFrameReply::Text(response) => match serde_json::to_string(&response) {
+                            Ok(text) => Some(Message::Text(text.into())),
+                            Err(_) => None,
+                        },
+                    };
+                    let Some(message) = message else {
+                        break;
+                    };
+                    if !send_tracked_reliable_websocket_item(
+                        &outgoing_tx,
+                        &reliable_metrics,
+                        message,
+                        &slow_pressure,
+                    )
+                    .await
+                    {
+                        break;
+                    }
+                    continue;
+                }
+
+                if let Some(reply) = handle_room_camera_control(
+                    &state,
+                    role,
+                    &mut room_camera_bridge,
+                    &mut room_camera_producer,
+                    text.as_str(),
+                )
+                .await
+                {
+                    let message = match reply {
+                        RoomFrameReply::Binary(bytes) => Some(Message::Binary(bytes.into())),
+                        RoomFrameReply::Text(response) => match serde_json::to_string(&response) {
+                            Ok(text) => Some(Message::Text(text.into())),
+                            Err(_) => None,
+                        },
+                    };
+                    let Some(message) = message else {
+                        break;
+                    };
+                    if !send_tracked_reliable_websocket_item(
+                        &outgoing_tx,
+                        &reliable_metrics,
+                        message,
+                        &slow_pressure,
+                    )
+                    .await
+                    {
+                        break;
+                    }
+                    continue;
+                }
+
                 if let Some(response) = handle_preview_frame_lease_control(
                     &state,
                     role,
@@ -8896,6 +9634,91 @@ async fn websocket_session_with_handler_role_and_redaction(
     );
 }
 
+/// Plan 224 D9 (C-G7): in a talk show the desktop composes nothing for the
+/// stream; the takeover goes to the room's `takeover` slot, full frame, per
+/// orientation, each output's own render (review L6: the 9:16 output gets a
+/// 9:16 image, never the 16:9 one with the stage around it). The program
+/// covers the stage with it and silences every voice while it is up, as a
+/// solo takeover mutes the microphone.
+///
+/// It goes while the room is open, on air or not: a takeover put up before
+/// Go Live is on the program from its first frame. Best effort: a refusal is
+/// logged, the local preview still shows the screen.
+async fn forward_takeover_to_room(
+    state: &AppState,
+    active_screen: Option<&protocol::StreamScreen>,
+) {
+    if cloud_talk_show_room_show_id(state).is_none() {
+        return;
+    }
+    let Some(context) = cloud_context(state) else {
+        return;
+    };
+    use cloud_talk::{CloudOverlayOrientation, CloudOverlayRect, CloudOverlaySlot};
+    let Some(screen) = active_screen else {
+        for orientation in [CloudOverlayOrientation::H, CloudOverlayOrientation::V] {
+            if let Err(problem) = context
+                .clear_overlay(CloudOverlaySlot::Takeover, orientation)
+                .await
+            {
+                tracing::debug!("The takeover clear did not reach Videorc Cloud: {problem}");
+            }
+        }
+        return;
+    };
+    let image_path = screen.image_path.clone();
+    let overlays = tokio::task::spawn_blocking(move || cloud_talk::takeover_overlays(&image_path))
+        .await
+        .context("The takeover render task stopped")
+        .and_then(|rendered| rendered);
+    match overlays {
+        Ok(overlays) => {
+            for (orientation, png) in overlays {
+                if let Err(problem) = context
+                    .set_overlay(
+                        CloudOverlaySlot::Takeover,
+                        orientation,
+                        &png,
+                        CloudOverlayRect::FULL,
+                        None,
+                    )
+                    .await
+                {
+                    tracing::warn!(
+                        orientation = orientation.as_str(),
+                        "The takeover did not reach Videorc Cloud: {problem}"
+                    );
+                }
+            }
+        }
+        Err(error) => {
+            tracing::warn!("The takeover image could not be sent to Videorc Cloud: {error:#}");
+        }
+    }
+}
+
+/// A room that just opened (or was resumed) takes the takeover that is
+/// already up: the Studio still shows it as on, so the program must too.
+/// Under the transition lock, so a takeover cleared at the same moment is
+/// never put back.
+async fn push_active_takeover_to_room(state: &AppState) {
+    let _transition = state.active_screen_transition.lock().await;
+    match state.database.active_stream_screen() {
+        Ok(Some(screen)) => forward_takeover_to_room(state, Some(&screen)).await,
+        Ok(None) => {}
+        Err(error) => {
+            tracing::warn!("The takeover could not be read for the room: {error:#}");
+        }
+    }
+}
+
+/// Off the command lane: rendering a 4K takeover twice must not hold the
+/// room's open answer.
+fn spawn_active_takeover_push(state: &AppState) {
+    let state = state.clone();
+    tokio::spawn(async move { push_active_takeover_to_room(&state).await });
+}
+
 async fn apply_active_screen_output(
     state: &AppState,
     active_screen: Option<protocol::StreamScreen>,
@@ -8933,65 +9756,7 @@ async fn apply_active_screen_output(
             }
         }
     }
-    // Plan 224 D9 (C-G7): in a talk show on air the desktop composes nothing
-    // for the stream; the takeover goes to the runner's `takeover` slot, full
-    // frame, per orientation, each output's own render (review L6: the 9:16
-    // output gets a 9:16 image, never the 16:9 one with the stage around
-    // it). Best effort: a refusal is logged, the local preview still shows
-    // the screen below.
-    if cloud_talk_show_live_show_id(state).is_some()
-        && let Some(context) = cloud_context(state)
-    {
-        use cloud_talk::{CloudOverlayOrientation, CloudOverlayRect, CloudOverlaySlot};
-        match active_screen.as_ref() {
-            Some(screen) => {
-                let image_path = screen.image_path.clone();
-                let overlays =
-                    tokio::task::spawn_blocking(move || cloud_talk::takeover_overlays(&image_path))
-                        .await
-                        .context("The takeover render task stopped")
-                        .and_then(|rendered| rendered);
-                match overlays {
-                    Ok(overlays) => {
-                        for (orientation, png) in overlays {
-                            if let Err(problem) = context
-                                .set_overlay(
-                                    CloudOverlaySlot::Takeover,
-                                    orientation,
-                                    &png,
-                                    CloudOverlayRect::FULL,
-                                    None,
-                                )
-                                .await
-                            {
-                                tracing::warn!(
-                                    orientation = orientation.as_str(),
-                                    "The takeover did not reach Videorc Cloud: {problem}"
-                                );
-                            }
-                        }
-                    }
-                    Err(error) => {
-                        tracing::warn!(
-                            "The takeover image could not be sent to Videorc Cloud: {error:#}"
-                        );
-                    }
-                }
-            }
-            None => {
-                for orientation in [CloudOverlayOrientation::H, CloudOverlayOrientation::V] {
-                    if let Err(problem) = context
-                        .clear_overlay(CloudOverlaySlot::Takeover, orientation)
-                        .await
-                    {
-                        tracing::debug!(
-                            "The takeover clear did not reach Videorc Cloud: {problem}"
-                        );
-                    }
-                }
-            }
-        }
-    }
+    forward_takeover_to_room(state, active_screen.as_ref()).await;
     // Standby preview uses the same compositor. Publish the takeover there
     // before changing the authoritative persisted pointer.
     let watched = active_screen.clone();
@@ -10208,6 +10973,107 @@ async fn handle_text_message_with_role(
                 ServerResponse::ok(command.id, entitlements::current_entitlements())
             }
         }
+        "cloud.marker.create" => {
+            match serde_json::from_value::<cloud_markers::Create>(command.params) {
+                Ok(input) => match cloud_markers::create(state, input, "manual", None).await {
+                    Ok(v) => ServerResponse::ok(command.id, v),
+                    Err(e) => {
+                        ServerResponse::error(command.id, "cloud-marker-refused", e.to_string())
+                    }
+                },
+                Err(e) => ServerResponse::error(command.id, "invalid-params", e.to_string()),
+            }
+        }
+        "cloud.markers.list" | "cloud.marker.get" | "cloud.marker.delete" => {
+            let input = match serde_json::from_value::<cloud_markers::Read>(command.params) {
+                Ok(input) => input,
+                Err(e) => {
+                    return ServerResponse::error(command.id, "invalid-params", e.to_string());
+                }
+            };
+            if (command.method == "cloud.markers.list") != input.marker_id.is_none() {
+                return ServerResponse::error(
+                    command.id,
+                    "invalid-params",
+                    "A lookup or delete needs one marker identity.",
+                );
+            }
+            let show = &input.show_id;
+            let marker = input.marker_id.as_deref();
+            let method = if command.method == "cloud.marker.delete" {
+                "DELETE"
+            } else {
+                "GET"
+            };
+            match cloud_markers::request(state, show, method, marker, None).await {
+                Ok(v) => ServerResponse::ok(command.id, v),
+                Err(e) => ServerResponse::error(command.id, "cloud-marker-refused", e.to_string()),
+            }
+        }
+        "cloud.marker.voice.configure" => {
+            let show = command
+                .params
+                .get("showId")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("");
+            let consent = command
+                .params
+                .get("consent")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
+            if !cloud_markers::owns_show(state, show) {
+                ServerResponse::error(
+                    command.id,
+                    "cloud-marker-refused",
+                    "This computer does not own the show.",
+                )
+            } else {
+                match captions::configure_marker_voice(state, show, consent).await {
+                    Ok(v) => ServerResponse::ok(command.id, v),
+                    Err(e) => {
+                        ServerResponse::error(command.id, "cloud-marker-refused", e.to_string())
+                    }
+                }
+            }
+        }
+        "cloud.speech.transcript" => match serde_json::from_value(command.params.clone()) {
+            Ok(input) => match captions::cloud_host::transcript(state, input).await {
+                Ok(value) => ServerResponse::ok(command.id, value),
+                Err(error) => {
+                    ServerResponse::error(command.id, "cloud-speech-refused", error.to_string())
+                }
+            },
+            Err(error) => ServerResponse::error(command.id, "invalid-params", error.to_string()),
+        },
+        "cloud.speech.overlay" => match serde_json::from_value(command.params.clone()) {
+            Ok(input) => match captions::cloud_host::install_overlay(state, input).await {
+                Ok(value) => ServerResponse::ok(command.id, value),
+                Err(error) => ServerResponse::error(
+                    command.id,
+                    "cloud-speech-overlay-refused",
+                    error.to_string(),
+                ),
+            },
+            Err(error) => ServerResponse::error(command.id, "invalid-params", error.to_string()),
+        },
+        "cloud.speech.sync" => match serde_json::from_value(command.params.clone()) {
+            Ok(input) => match captions::cloud_host::sync(state, input).await {
+                Ok(value) => ServerResponse::ok(command.id, value),
+                Err(error) => {
+                    ServerResponse::error(command.id, "cloud-speech-refused", error.to_string())
+                }
+            },
+            Err(error) => ServerResponse::error(command.id, "invalid-params", error.to_string()),
+        },
+        "cloud.speech.audio" => match serde_json::from_value(command.params.clone()) {
+            Ok(input) => match captions::cloud_host::audio(state, input).await {
+                Ok(value) => ServerResponse::ok(command.id, value),
+                Err(error) => {
+                    ServerResponse::error(command.id, "cloud-speech-refused", error.to_string())
+                }
+            },
+            Err(error) => ServerResponse::error(command.id, "invalid-params", error.to_string()),
+        },
         "captions.start" => {
             let language = command
                 .params
@@ -10275,6 +11141,13 @@ async fn handle_text_message_with_role(
             ),
         },
         "captions.overlay.set" => {
+            if cloud_graphics::managed_room(state) {
+                return ServerResponse::error(
+                    command.id,
+                    "cloud-speech-owner-required",
+                    "Room caption pixels require the current host speech session.",
+                );
+            }
             match serde_json::from_value::<captions::SetCaptionOverlayParams>(command.params) {
                 Ok(params) => {
                     match captions::install_caption_overlays(&state.caption_overlay, params) {
@@ -10778,6 +11651,74 @@ async fn handle_text_message_with_role(
         }
         // --- Buddy overlay (plan 164 Phase C) ---
         "cohost.buddy.status" => ServerResponse::ok(command.id, buddy_overlay::status(state).await),
+        "cloud.graphics.snapshot" => {
+            if role != BackendRole::Renderer {
+                return ServerResponse::error(
+                    command.id,
+                    "forbidden",
+                    "Only the room renderer reads public graphics.",
+                );
+            }
+            match serde_json::from_value::<cloud_graphics::SnapshotParams>(command.params) {
+                Ok(params) => match cloud_graphics::snapshot(state, params).await {
+                    Ok(value) => ServerResponse::ok(command.id, value),
+                    Err(error) => ServerResponse::error(
+                        command.id,
+                        "cloud-graphics-unavailable",
+                        error.to_string(),
+                    ),
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        // Plan 249 S11: the room renderer asks for HTML targets on the room's
+        // canvases while a program page may draw its sheet (default-off).
+        "cloud.htmlLayers.want" => {
+            if role != BackendRole::Renderer {
+                return ServerResponse::error(
+                    command.id,
+                    "forbidden",
+                    "Only the room renderer asks for room HTML layers.",
+                );
+            }
+            match serde_json::from_value::<cloud_graphics::HtmlLayersWantParams>(command.params) {
+                Ok(params) => match cloud_graphics::html_layers_want(state, params) {
+                    Ok(value) => ServerResponse::ok(command.id, value),
+                    Err(error) => ServerResponse::error(
+                        command.id,
+                        "cloud-html-layers-unavailable",
+                        error.to_string(),
+                    ),
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "buddy.cloud.report" => {
+            if role != BackendRole::Renderer {
+                return ServerResponse::error(
+                    command.id,
+                    "forbidden",
+                    "Only the room renderer reports avatar output.",
+                );
+            }
+            match serde_json::from_value::<buddy_overlay::CloudAvatarReport>(command.params) {
+                Ok(params) => {
+                    let accepted = state
+                        .cloud_show
+                        .lock()
+                        .unwrap_or_else(|poison| poison.into_inner())
+                        .report_room_avatar(&params.show_id, params.stream, params.recording);
+                    ServerResponse::ok(command.id, serde_json::json!({ "accepted": accepted }))
+                }
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
         "buddy.overlay.set" => {
             match serde_json::from_value::<buddy_overlay::SetBuddyOverlayParams>(command.params) {
                 Ok(params) => {
@@ -11651,6 +12592,31 @@ async fn handle_text_message_with_role(
         // every answer and the `cloud.state` event are the same secret-free
         // `CloudStatus`.
         "cloud.status" => ServerResponse::ok(command.id, cloud_show_status(state)),
+        "cloud.show.check" => {
+            if cloud_test_blocked_by(&current_recording_status(state).await) {
+                return ServerResponse::ok(command.id, serde_json::json!({"ok":true}));
+            }
+            if let (Some(context), Some(bearer)) =
+                (cloud_context(state), account::stored_session_token())
+                && let Err(error) = context.check_current_show(&bearer, true).await
+            {
+                return ServerResponse::error(command.id, "cloud-check-failed", error.to_string());
+            }
+            ServerResponse::ok(command.id, serde_json::json!({"ok":true}))
+        }
+        "cloud.show.handOff" => {
+            let Some(context) = cloud_context(state) else {
+                return cloud_unavailable(command.id);
+            };
+            match context.hand_off(account::stored_session_token()).await {
+                Ok(answer) => ServerResponse::ok(command.id, answer),
+                Err(error) => ServerResponse::error(
+                    command.id,
+                    cloud_show::continuation_error_code(&error).unwrap_or("cloud-handoff-failed"),
+                    error.to_string(),
+                ),
+            }
+        }
         "cloud.settings.set" => {
             match serde_json::from_value::<cloud_show::CloudSettingsPatch>(command.params) {
                 Ok(patch) => match cloud_show_set_settings(state, &patch) {
@@ -11727,6 +12693,7 @@ async fn handle_text_message_with_role(
                 match context.close_room(account::stored_session_token()).await {
                     Ok(status) => {
                         live_chat::stop_live_chat(state).await;
+                        forget_cloud_show_services_if_confirmed(state, &status);
                         ServerResponse::ok(command.id, status)
                     }
                     Err(error) => {
@@ -11819,7 +12786,17 @@ async fn handle_text_message_with_role(
                     .open_room(account::stored_session_token(), params, session_active)
                     .await
                 {
-                    Ok(status) => ServerResponse::ok(command.id, status),
+                    Ok(status) => {
+                        spawn_active_takeover_push(state);
+                        // Plan 249 S24: the computer that opens the room
+                        // controls it (a plain claim never takes a show).
+                        // Awaited: once the show has a controller, a command
+                        // without this process's epoch would be refused.
+                        if let Some(show) = status.show.as_ref() {
+                            note_claim(claim_cloud_controller(state, &show.id, false).await);
+                        }
+                        ServerResponse::ok(command.id, status)
+                    }
                     Err(error) => ServerResponse::error(
                         command.id,
                         cloud_talk_error_code(&error, "cloud-room-open-failed"),
@@ -11833,6 +12810,7 @@ async fn handle_text_message_with_role(
             Some(context) => match context.close_room(account::stored_session_token()).await {
                 Ok(status) => {
                     live_chat::stop_live_chat(state).await;
+                    forget_cloud_show_services_if_confirmed(state, &status);
                     ServerResponse::ok(command.id, status)
                 }
                 Err(error) => ServerResponse::error(
@@ -11844,14 +12822,33 @@ async fn handle_text_message_with_role(
             None => cloud_unavailable(command.id),
         },
         "cloud.room.resume" => match cloud_context(state) {
-            Some(context) => match context.resume_room(account::stored_session_token()).await {
-                Ok(status) => ServerResponse::ok(command.id, status),
-                Err(error) => ServerResponse::error(
-                    command.id,
-                    cloud_talk_error_code(&error, "cloud-room-resume-failed"),
-                    format!("{error:#}"),
-                ),
-            },
+            Some(context) => {
+                // Plan 249 S24: Resume is the explicit "continue here". Take
+                // the show's controller first, so everything the resume
+                // sends carries this computer's new epoch.
+                if let Some(show_id) = cloud_show_status(state).show.map(|show| show.id)
+                    && let Some(reason) = claim_cloud_controller(state, &show_id, true).await
+                {
+                    tracing::info!("[cloud] controller not taken on resume: {reason}");
+                }
+                match context.resume_room(account::stored_session_token()).await {
+                    Ok(status) => {
+                        spawn_active_takeover_push(state);
+                        // Plan 249 S18: chat, viewers and audience follow the show
+                        // to this owner, once, with its history. After a relaunch
+                        // the runner's legs can land just after this answer.
+                        if reattach_cloud_show_services(state).await == Some("not-live") {
+                            spawn_late_cloud_show_reattach(state);
+                        }
+                        ServerResponse::ok(command.id, status)
+                    }
+                    Err(error) => ServerResponse::error(
+                        command.id,
+                        cloud_talk_error_code(&error, "cloud-room-resume-failed"),
+                        format!("{error:#}"),
+                    ),
+                }
+            }
             None => cloud_unavailable(command.id),
         },
         "cloud.room.invite.rotate" => match cloud_context(state) {
@@ -11897,6 +12894,37 @@ async fn handle_text_message_with_role(
             },
             None => cloud_unavailable(command.id),
         },
+        // --- Plan 249 S24: the controller's kept presentation ---
+        "cloud.presentation.accepted"
+        | "cloud.controller.desired"
+        | "cloud.presentation.restore" => {
+            if role != BackendRole::Renderer {
+                return ServerResponse::error(
+                    command.id,
+                    "forbidden",
+                    "Only the room renderer reports the show's presentation.",
+                );
+            }
+            let Some(show_id) = command
+                .params
+                .get("showId")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+            else {
+                return ServerResponse::error(command.id, "invalid-params", "Name the show.");
+            };
+            match command.method.as_str() {
+                "cloud.presentation.accepted" => {
+                    let queued = spawn_keep_cloud_presentation(state, show_id, command.params);
+                    ServerResponse::ok(command.id, serde_json::json!({ "queued": queued }))
+                }
+                "cloud.controller.desired" => {
+                    let queued = spawn_cloud_controller_desired(state, show_id, command.params);
+                    ServerResponse::ok(command.id, serde_json::json!({ "queued": queued }))
+                }
+                _ => ServerResponse::ok(command.id, cloud_presentation_restore(&show_id).await),
+            }
+        }
         "cloud.room.client.report" => {
             match serde_json::from_value::<cloud_talk::RoomClientReportParams>(command.params) {
                 Ok(params) => match cloud_context(state) {
@@ -12027,6 +13055,17 @@ async fn handle_text_message_with_role(
                             .await
                         {
                             Ok(status) => {
+                                // Plan 249 S18: the interval's nonsecret
+                                // service identity, so a resume or relaunch
+                                // reattaches the same readers.
+                                remember_cloud_show_services(state, &status, &params.streaming);
+                                // Plan 249 S24: Go Live keeps (or claims) the
+                                // controller of the show it puts on air.
+                                if let Some(show) = status.show.as_ref() {
+                                    note_claim(
+                                        claim_cloud_controller(state, &show.id, false).await,
+                                    );
+                                }
                                 // The chat attaches to the show the way it
                                 // attaches to a session: its id is the
                                 // session the renderer's cards name.
@@ -12045,7 +13084,7 @@ async fn handle_text_message_with_role(
                             }
                             Err(error) => ServerResponse::error(
                                 command.id,
-                                "cloud-go-live-failed",
+                                cloud_talk_error_code(&error, "cloud-go-live-failed"),
                                 format!("{error:#}"),
                             ),
                         }
@@ -12059,12 +13098,221 @@ async fn handle_text_message_with_role(
         }
         // Plan 234 T3 (wire section 13.2): the account's cloud recordings,
         // and a managed one (segments) made into an MP4 on this computer.
+        "cloud.clips.status"
+        | "cloud.clips.enable"
+        | "cloud.clips.disable"
+        | "cloud.clips.save"
+        | "cloud.clips.jobs"
+        | "cloud.clips.cancel"
+        | "cloud.clips.discard" => {
+            let result: Result<serde_json::Value> = async {
+                let mut params = command.params.clone();
+                let method = command.method.as_str();
+                if method == "cloud.clips.jobs" {
+                    return Ok(serde_json::json!(
+                        state
+                            .database
+                            .cloud_clips()?
+                            .iter()
+                            .map(|j| j.view())
+                            .collect::<Vec<_>>()
+                    ));
+                }
+                let id = params.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                if method == "cloud.clips.cancel" {
+                    cloud_clips::cancel(id)?;
+                    return Ok(serde_json::json!({"ok":true}));
+                }
+                if method == "cloud.clips.discard" {
+                    cloud_clips::discard(&state.database, id)?;
+                    return Ok(serde_json::json!({"ok":true}));
+                }
+                if method == "cloud.clips.enable" {
+                    resolve_cloud_download_resource(state, &mut params, role)?;
+                }
+                let token =
+                    account::stored_session_token().context("Sign in to use cloud Clips.")?;
+                if method == "cloud.clips.save" {
+                    resolve_cloud_download_resource(state, &mut params, role)?;
+                    let show = params
+                        .get("showId")
+                        .and_then(|v| v.as_str())
+                        .context("Choose a show.")?;
+                    let marker = params
+                        .get("markerId")
+                        .and_then(|v| v.as_str())
+                        .context("Choose a clip marker.")?;
+                    let generation = params
+                        .get("generation")
+                        .and_then(|v| v.as_str())
+                        .context("Choose the current buffer generation.")?;
+                    let folder = cloud_clips::output_folder(
+                        &state.database,
+                        show,
+                        params.get("outputDirectory").and_then(|v| v.as_str()),
+                    )?;
+                    let ffmpeg = resolve_trusted_ffmpeg_path(
+                        params.get("ffmpegPath").and_then(|v| v.as_str()),
+                        role,
+                        state.smoke_rpc_enabled,
+                    );
+                    return cloud_clips::save(
+                        state.clone(),
+                        videorc_api::VideorcApiClient::new()?,
+                        token,
+                        cloud_clips::Save {
+                            show: show.into(),
+                            marker: marker.into(),
+                            generation: generation.into(),
+                            folder,
+                            ffmpeg,
+                        },
+                    )
+                    .await;
+                }
+                let show = params
+                    .get("showId")
+                    .and_then(|v| v.as_str())
+                    .context("Choose a show.")?;
+                cloud_clips::control(state, token, show.into(), method, &params).await
+            }
+            .await;
+            match result {
+                Ok(value) => ServerResponse::ok(command.id, value),
+                Err(e) => ServerResponse::error(command.id, "cloud-clip-refused", e.to_string()),
+            }
+        }
+        "cloud.archive.availability" => {
+            let show = command
+                .params
+                .get("showId")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let result: Result<serde_json::Value> = async {
+                let token =
+                    account::stored_session_token().context("Sign in to use the local archive.")?;
+                videorc_api::VideorcApiClient::new()?
+                    .archive_json(&token, show, None, "GET", None)
+                    .await
+            }
+            .await;
+            match result {
+                Ok(value) => ServerResponse::ok(
+                    command.id,
+                    serde_json::json!({"available":value.get("available").and_then(|v|v.as_bool()).unwrap_or(false),"reason":value.get("reason").and_then(|v|v.as_str()).unwrap_or("Archive unavailable.")}),
+                ),
+                Err(_) => ServerResponse::ok(
+                    command.id,
+                    serde_json::json!({"available":false,"reason":"Archive availability could not be confirmed. Sign in and open a cloud room."}),
+                ),
+            }
+        }
+        "cloud.archive.status" => {
+            let result = state
+                .database
+                .cloud_archives()
+                .map(|jobs| jobs.iter().map(|j| j.view()).collect::<Vec<_>>());
+            match result {
+                Ok(jobs) => ServerResponse::ok(command.id, jobs),
+                Err(_) => ServerResponse::error(
+                    command.id,
+                    "archive-unavailable",
+                    "Archive journal is unavailable.",
+                ),
+            }
+        }
+        "cloud.archive.start"
+        | "cloud.archive.resume"
+        | "cloud.archive.stop"
+        | "cloud.archive.cancel"
+        | "cloud.archive.discard" => {
+            let method = command.method.as_str();
+            let result: Result<serde_json::Value> = async {
+                let mut params = command.params.clone();
+                if method == "cloud.archive.start" {
+                    resolve_cloud_download_resource(state, &mut params, role)?;
+                    anyhow::ensure!(
+                        params.get("consent").and_then(|v| v.as_bool()) == Some(true),
+                        "Archive requires explicit consent."
+                    );
+                }
+                let id = params.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                if method == "cloud.archive.stop" || method == "cloud.archive.cancel" {
+                    cloud_archive::signal(id, method == "cloud.archive.cancel")?;
+                    return Ok(serde_json::json!({"ok":true}));
+                }
+                if method == "cloud.archive.discard" {
+                    cloud_archive::discard(&state.database, id)?;
+                    return Ok(serde_json::json!({"ok":true}));
+                }
+                let token = account::stored_session_token()
+                    .context("Sign in to archive the cloud program.")?;
+                let api = videorc_api::VideorcApiClient::new()?;
+                let ffmpeg = resolve_trusted_ffmpeg_path(
+                    params.get("ffmpegPath").and_then(|v| v.as_str()),
+                    role,
+                    state.smoke_rpc_enabled,
+                );
+                let view = if method == "cloud.archive.resume" {
+                    cloud_archive::resume(state.database.clone(), api, token, id, ffmpeg)?
+                } else {
+                    let show = params
+                        .get("showId")
+                        .and_then(|v| v.as_str())
+                        .context("Choose an open cloud room.")?;
+                    let orientation = params
+                        .get("orientation")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("h");
+                    anyhow::ensure!(
+                        orientation == "h" || orientation == "v",
+                        "Invalid archive orientation."
+                    );
+                    let folder = recording::resolve_output_directory(
+                        params.get("outputDirectory").and_then(|v| v.as_str()),
+                    )?;
+                    cloud_archive::start(
+                        state.database.clone(),
+                        api,
+                        token,
+                        show.into(),
+                        orientation.into(),
+                        folder,
+                        ffmpeg,
+                    )
+                    .await?
+                };
+                Ok(serde_json::to_value(view)?)
+            }
+            .await;
+            match result {
+                Ok(value) => ServerResponse::ok(command.id, value),
+                Err(error) => {
+                    ServerResponse::error(command.id, "archive-unavailable", error.to_string())
+                }
+            }
+        }
         "cloud.recordings.list" => match cloud_context(state) {
             Some(context) => match context
                 .cloud_recordings(account::stored_session_token())
                 .await
             {
-                Ok(recordings) => {
+                Ok(mut recordings) => {
+                    for recording in &mut recordings {
+                        recording.local_session_id = None;
+                        if let Err(error) = state.database.remember_cloud_recording(recording) {
+                            return ServerResponse::error(
+                                command.id,
+                                "cloud-recordings-failed",
+                                error.to_string(),
+                            );
+                        }
+                        recording.local_session_id = state
+                            .database
+                            .cloud_recording_session(&recording.id)
+                            .ok()
+                            .flatten();
+                    }
                     ServerResponse::ok(command.id, serde_json::json!({ "recordings": recordings }))
                 }
                 Err(error) => ServerResponse::error(
@@ -12122,6 +13370,7 @@ async fn handle_text_message_with_role(
                     ffmpeg_path,
                     folder,
                     emit,
+                    state.database.clone(),
                 ) {
                     Ok(download) => ServerResponse::ok(command.id, download),
                     Err(error) => ServerResponse::error(
@@ -12135,7 +13384,17 @@ async fn handle_text_message_with_role(
         }
         "cloud.recordings.downloads" => {
             let jobs = cloud_show::lock(&state.cloud_show).downloads.clone();
-            ServerResponse::ok(command.id, jobs.snapshot())
+            let mut events = jobs.snapshot();
+            for event in &mut events {
+                if event.state == cloud_control_web::DownloadState::Done {
+                    event.local_session_id = state
+                        .database
+                        .cloud_recording_session(&event.recording_id)
+                        .ok()
+                        .flatten();
+                }
+            }
+            ServerResponse::ok(command.id, events)
         }
         "cloud.recordings.cancelDownload" => {
             match serde_json::from_value::<cloud_control_web::CancelRecordingDownloadParams>(
@@ -12150,6 +13409,93 @@ async fn handle_text_message_with_role(
                 Err(error) => {
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
+            }
+        }
+        // Plan 249 S22 (docs/cloud/249-s22-contract.md section 5): opt-in
+        // cloud ISO. Every manifest the web answers is validated again in
+        // Rust; an import saves into Output's folder as a cloud recording
+        // download does and registers one Library row per ISO file.
+        "cloud.iso.status" | "cloud.iso.enable" | "cloud.iso.disable" => {
+            let web = cloud_control_web::CloudIsoHttp::configured();
+            let bearer = account::stored_session_token();
+            let result = match command.method.as_str() {
+                "cloud.iso.status" => {
+                    cloud_control_web::cloud_iso_status(&web, bearer, command.params).await
+                }
+                "cloud.iso.enable" => {
+                    cloud_control_web::cloud_iso_enable(&web, bearer, command.params).await
+                }
+                _ => cloud_control_web::cloud_iso_disable(&web, bearer, command.params).await,
+            };
+            match result {
+                Ok(answer) => ServerResponse::ok(command.id, answer),
+                Err(error) => ServerResponse::error(command.id, error.code, error.message),
+            }
+        }
+        "cloud.iso.import" => {
+            // Output's folder arrives as the capability main issued, exactly
+            // as for `cloud.recordings.download`; a raw renderer folder is
+            // refused, the admin role may pass one.
+            let mut params_value = command.params;
+            if let Err(error) = resolve_cloud_download_resource(state, &mut params_value, role) {
+                return ServerResponse::error(
+                    command.id,
+                    "resource-capability-rejected",
+                    error.to_string(),
+                );
+            }
+            let params = match cloud_control_web::iso_params::<cloud_control_web::IsoImportParams>(
+                params_value,
+            ) {
+                Ok(params) => params,
+                Err(error) => {
+                    return ServerResponse::error(command.id, error.code, error.message);
+                }
+            };
+            let folder =
+                match recording::resolve_output_directory(params.output_directory.as_deref()) {
+                    Ok(folder) => folder,
+                    Err(error) => {
+                        return ServerResponse::error(
+                            command.id,
+                            cloud_control_web::CODE_ISO_IMPORT_FAILED,
+                            format!("{error:#}"),
+                        );
+                    }
+                };
+            let event_state = state.clone();
+            let emit: cloud_control_web::IsoImportEventHook = std::sync::Arc::new(move |event| {
+                event_state.emit_event("cloud.iso.import", event);
+            });
+            match cloud_control_web::start_cloud_iso_import(
+                std::sync::Arc::new(cloud_control_web::CloudIsoHttp::configured()),
+                state.database.clone(),
+                account::stored_session_token(),
+                &params,
+                folder,
+                emit,
+            ) {
+                Ok(started) => ServerResponse::ok(command.id, started),
+                Err(error) => ServerResponse::error(command.id, error.code, error.message),
+            }
+        }
+        "cloud.iso.imports" => match state.database.cloud_iso_imports() {
+            Ok(rows) => ServerResponse::ok(command.id, cloud_control_web::iso_import_views(rows)),
+            Err(error) => ServerResponse::error(
+                command.id,
+                cloud_control_web::CODE_ISO_IMPORT_FAILED,
+                format!("{error:#}"),
+            ),
+        },
+        "cloud.iso.cancelImport" => {
+            match cloud_control_web::iso_params::<cloud_control_web::CancelIsoImportParams>(
+                command.params,
+            ) {
+                Ok(params) => {
+                    cloud_control_web::cancel_cloud_iso_import(&params.job_id);
+                    ServerResponse::ok(command.id, serde_json::json!({ "ok": true }))
+                }
+                Err(error) => ServerResponse::error(command.id, error.code, error.message),
             }
         }
         #[cfg(debug_assertions)]
@@ -12202,6 +13548,9 @@ async fn handle_text_message_with_role(
             Some(context) => match context.legs_end().await {
                 Ok(status) => {
                     live_chat::stop_live_chat(state).await;
+                    if let Some(show) = status.show.as_ref() {
+                        forget_cloud_show_services(state, &show.id);
+                    }
                     ServerResponse::ok(command.id, status)
                 }
                 Err(error) => {
@@ -12342,7 +13691,22 @@ async fn handle_text_message_with_role(
             }
         }
         "audio.mic.disarm" => {
-            ServerResponse::ok(command.id, warm_microphone::disarm_warm_microphone(state))
+            let status = warm_microphone::disarm_warm_microphone(state);
+            if cloud_talk_show_room_show_id(state).is_some() {
+                let settled = state.warm_microphone.wait_for_open().await;
+                let released =
+                    tokio::task::spawn_blocking(session_audio::room_microphone_cleanup_ready)
+                        .await
+                        .unwrap_or(false);
+                if !settled || !released {
+                    return ServerResponse::error(
+                        command.id,
+                        "microphone-cleanup-pending",
+                        "The previous microphone owner has not released capture.",
+                    );
+                }
+            }
+            ServerResponse::ok(command.id, status)
         }
         "audio.meter.probeNative" => {
             match serde_json::from_value::<protocol::AudioMeterProbeParams>(command.params) {
@@ -12458,6 +13822,24 @@ async fn handle_text_message_with_role(
         "scene.get" => {
             let scene = state.scene.lock().await.clone();
             ServerResponse::ok(command.id, scene)
+        }
+        // Plan 249 S12: the native engine's answer for a scene, never
+        // committed. The room program draws it; capture, the compositor and
+        // the camera lend are untouched, so a room never waits on them.
+        "cloud.scene.resolve" => {
+            if role != BackendRole::Renderer {
+                return ServerResponse::error(
+                    command.id,
+                    "forbidden",
+                    "Only the room renderer resolves scenes for the room.",
+                );
+            }
+            match serde_json::from_value::<protocol::SceneConfigParams>(command.params) {
+                Ok(params) => ServerResponse::ok(command.id, scene_from_capture_config(params)),
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
         }
         "scene.load_from_capture_config" => {
             match serde_json::from_value::<protocol::SceneConfigParams>(command.params) {
@@ -13372,8 +14754,12 @@ async fn handle_text_message_with_role(
         }
         "liveChat.x.start" => {
             match serde_json::from_value::<live_chat::StartXLiveChatParams>(command.params) {
-                Ok(params) => match live_chat::start_x_live_chat(state, params).await {
-                    Ok(snapshot) => ServerResponse::ok(command.id, snapshot),
+                Ok(params) => match live_chat::start_x_live_chat(state, params.clone()).await {
+                    Ok(snapshot) => {
+                        // Plan 249 S18: a room's X broadcast rides with the show.
+                        note_cloud_show_x_broadcast(state, &params);
+                        ServerResponse::ok(command.id, snapshot)
+                    }
                     Err(error) => ServerResponse::error(
                         command.id,
                         "live-chat-x-start-failed",
@@ -15054,8 +16440,8 @@ async fn handle_text_message_with_role(
                         .hide(params.reason, chrono::Utc::now().to_rfc3339());
                     // The gate is hidden before this runs, so a frame landing
                     // in between frosts itself; this covers a static screen.
-                    preview_screen::hold_screen_now(state).await;
                     state.emit_event("screen.privacy.changed", privacy.clone());
+                    preview_screen::hold_screen_now(state).await;
                     ServerResponse::ok(command.id, privacy)
                 }
             }
@@ -15503,6 +16889,24 @@ async fn handle_text_message_with_role(
         // Plan 199: both take an optional `{ seconds?: 30 | 60 }`. Older
         // callers send no params (or null): that is `{}`, today's 30 s.
         "clip.mark" => {
+            if cloud_markers::current_show(state).is_some() {
+                return match cloud_markers::dispatch_clip(
+                    state,
+                    command.params,
+                    &command.id.to_string(),
+                )
+                .await
+                {
+                    Ok(mark) => {
+                        let event = cloud_markers::clip_event(&mark);
+                        state.emit_event("clip.marked", event.clone());
+                        ServerResponse::ok(command.id, event)
+                    }
+                    Err(e) => {
+                        ServerResponse::error(command.id, "cloud-marker-refused", e.to_string())
+                    }
+                };
+            }
             match serde_json::from_value::<protocol::ClipMarkParams>(if command.params.is_null() {
                 serde_json::json!({})
             } else {
@@ -15670,6 +17074,701 @@ fn stored_ai_session_token() -> Result<String> {
 type AppCloudShowContext =
     cloud_show::CloudShowContext<videorc_api::VideorcApiClient, cloud_show::WsConnector>;
 
+async fn stop_talk_show_chat(state: &AppState, show_id: &str) {
+    if live_chat::stop_live_chat_for_session(state, show_id)
+        .await
+        .is_none()
+    {
+        // Chat may have stopped already while Buddy still owns this show.
+        let delivery = state.live_chat_persistence.begin_delivery().await;
+        cohost::stop_cohost_for_session_end_if_matching_before_emit(
+            state,
+            show_id,
+            &delivery,
+            std::future::ready(()),
+        )
+        .await;
+    }
+}
+
+/// Plan 249 S18: remember the nonsecret identity of a room's Go Live (the
+/// destinations' channels and broadcast, never a key or URL) with the show
+/// and S16's canonical interval when the server already reports it.
+fn remember_cloud_show_services(
+    state: &AppState,
+    status: &cloud_show::CloudStatus,
+    streaming: &crate::streaming::StreamingSettings,
+) {
+    let Some(show) = status.show.as_ref() else {
+        return;
+    };
+    let device_id = state
+        .cloud_show
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .device
+        .id
+        .clone();
+    let identity = cloud_services::CloudServiceIdentity::capture(
+        &show.id,
+        cloud_services::canonical_live_interval(status).as_ref(),
+        &device_id,
+        &cloud_show::now_rfc3339(),
+        streaming,
+    );
+    save_cloud_show_services(state, Some(&identity));
+}
+
+fn save_cloud_show_services(
+    state: &AppState,
+    identity: Option<&cloud_services::CloudServiceIdentity>,
+) {
+    if let Err(error) = state
+        .database
+        .save_setting(cloud_services::CLOUD_SHOW_SERVICES_KEY, &identity)
+    {
+        tracing::warn!("Could not save the cloud show's service identity: {error:#}");
+    }
+    cloud_services::arm(identity);
+}
+
+/// Plan 249 S18: `liveChat.x.start` named the X broadcast of one of the
+/// show's destinations; keep it with the show so a resume reattaches X.
+fn note_cloud_show_x_broadcast(state: &AppState, params: &live_chat::StartXLiveChatParams) {
+    let Some(target_id) = params.target_id.as_deref() else {
+        return;
+    };
+    let Some(mut identity) =
+        load_cloud_show_services(state).filter(|identity| identity.show_id == params.session_id)
+    else {
+        return;
+    };
+    if identity.note_broadcast(target_id, &params.broadcast_id) {
+        save_cloud_show_services(state, Some(&identity));
+    }
+}
+
+/// Plan 249 S18: every cloud state change (`cloud.state`) is checked against
+/// the services armed here. A web, phone, quota or runner End of their show
+/// or interval releases them; nothing a successor uses is touched. Cheap
+/// when nothing is armed; one release task at a time.
+fn schedule_cloud_show_services_release(state: &AppState, status: &cloud_show::CloudStatus) {
+    static RELEASING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    // After a launch the saved row is armed once, so an End that happened
+    // while the app was closed still clears its identity.
+    static LOADED: std::sync::Once = std::sync::Once::new();
+    LOADED.call_once(|| {
+        if cloud_services::armed().is_none() {
+            cloud_services::arm(load_cloud_show_services(state).as_ref());
+        }
+    });
+    let Some(armed) = cloud_services::armed() else {
+        return;
+    };
+    let interval = cloud_services::canonical_live_interval(status);
+    let facts =
+        cloud_services_terminal_facts(status, interval.as_ref(), Some(armed.show_id.as_str()));
+    if cloud_services::plan_terminal(&armed, &facts) == cloud_services::TerminalAction::Keep {
+        return;
+    }
+    if RELEASING.swap(true, std::sync::atomic::Ordering::AcqRel) {
+        return;
+    }
+    let state = state.clone();
+    tokio::spawn(async move {
+        release_cloud_show_services(&state).await;
+        RELEASING.store(false, std::sync::atomic::Ordering::Release);
+    });
+}
+
+fn cloud_services_terminal_facts<'a>(
+    status: &'a cloud_show::CloudStatus,
+    interval: Option<&'a cloud_services::LiveIntervalView>,
+    chat_session_id: Option<&'a str>,
+) -> cloud_services::TerminalFacts<'a> {
+    let room = status
+        .room
+        .as_ref()
+        .filter(|room| room.phase != cloud_talk::CloudRoomPhase::Closed);
+    cloud_services::TerminalFacts {
+        show_id: status.show.as_ref().map(|show| show.id.as_str()),
+        show_end_observed: status.end_reason.is_some(),
+        interval,
+        room_reported: room.is_some_and(|room| room.connected),
+        room_live: room.is_some_and(|room| room.live),
+        stopped_for_continuation: status.stopped_by.is_some(),
+        chat_session_id,
+    }
+}
+
+/// Re-decide on the current state with the real chat session, then stop only
+/// the armed show's readers and forget its identity.
+async fn release_cloud_show_services(state: &AppState) {
+    let Some(armed) = cloud_services::armed() else {
+        return;
+    };
+    let chat_session_id = state
+        .live_chat
+        .lock()
+        .await
+        .session_id()
+        .map(str::to_string);
+    let status = cloud_show_status(state);
+    let interval = cloud_services::canonical_live_interval(&status);
+    let facts =
+        cloud_services_terminal_facts(&status, interval.as_ref(), chat_session_id.as_deref());
+    let cloud_services::TerminalAction::Release { show_id, reason } =
+        cloud_services::plan_terminal(&armed, &facts)
+    else {
+        return;
+    };
+    tracing::info!("Cloud show services released: {reason}.");
+    // Session-matched: a successor show's chat is never stopped here.
+    stop_talk_show_chat(state, &show_id).await;
+    // Forget only the identity that was armed, not one a new Go Live wrote
+    // while this ran.
+    if load_cloud_show_services(state)
+        .is_some_and(|identity| cloud_services::ArmedServices::from(&identity) == armed)
+    {
+        save_cloud_show_services(state, None);
+    }
+}
+
+fn load_cloud_show_services(state: &AppState) -> Option<cloud_services::CloudServiceIdentity> {
+    match state
+        .database
+        .load_setting::<Option<cloud_services::CloudServiceIdentity>>(
+            cloud_services::CLOUD_SHOW_SERVICES_KEY,
+        ) {
+        Ok(identity) => identity.flatten(),
+        Err(error) => {
+            // A row from an unknown future shape is ignored, not trusted.
+            tracing::warn!("Could not read the cloud show's service identity: {error:#}");
+            None
+        }
+    }
+}
+
+/// The live interval ended here (End livestream, Close): its identity goes.
+/// An empty `show_id` forgets whatever is held. A takeover keeps it: if this
+/// computer takes the show back within the same interval, it reattaches.
+fn forget_cloud_show_services(state: &AppState, show_id: &str) {
+    if load_cloud_show_services(state)
+        .is_some_and(|identity| show_id.is_empty() || identity.show_id == show_id)
+    {
+        save_cloud_show_services(state, None);
+    }
+}
+
+/// Steps of the bounded wait for a resumed room's first legs (500 ms each).
+const CLOUD_SHOW_REATTACH_WAIT_STEPS: u32 = 20;
+
+/// A resume answered before the runner reported the room's legs: wait a
+/// bounded while for them, then reattach once. Stops early when the room
+/// closes or the reattach decides anything else.
+fn spawn_late_cloud_show_reattach(state: &AppState) {
+    let state = state.clone();
+    tokio::spawn(async move {
+        for _ in 0..CLOUD_SHOW_REATTACH_WAIT_STEPS {
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            let room = cloud_show_status(&state).room;
+            match room {
+                None => return,
+                Some(room) if !room.live => continue,
+                Some(_) => {}
+            }
+            if reattach_cloud_show_services(&state).await != Some("not-live") {
+                return;
+            }
+        }
+    });
+}
+
+/// Close answered: forget the identity only once the End is confirmed. A
+/// pending End (`phase: ending`) keeps it armed, and the confirmation that
+/// follows as cloud state releases it (`schedule_cloud_show_services_release`).
+fn forget_cloud_show_services_if_confirmed(state: &AppState, status: &cloud_show::CloudStatus) {
+    if !matches!(status.phase, cloud_show::CloudPhase::Ending) {
+        forget_cloud_show_services(state, "");
+        // Plan 249 S24: the show is over here; its controller epoch goes too.
+        cloud_controller::forget("");
+    }
+}
+
+/// Plan 249 S24: claims this computer as the show's controller. `resume` is
+/// the streamer's explicit "continue here", which may take the show over from
+/// another device (or this computer's earlier process); a plain claim never
+/// does. On a grant it reads back what the show kept and keeps the lease.
+/// `None` when held; otherwise why not. An older web without the route runs
+/// unfenced, as before S24.
+async fn claim_cloud_controller(
+    state: &AppState,
+    show_id: &str,
+    resume: bool,
+) -> Option<&'static str> {
+    use cloud_controller::{ClaimStep, ControllerIntent};
+    let Some(bearer) = account::stored_session_token() else {
+        return Some("signed-out");
+    };
+    let Ok(web) = videorc_api::VideorcApiClient::new() else {
+        return Some("no-client");
+    };
+    let device = cloud_show::load_device(&state.database);
+    let mut intent = match cloud_controller::held_for(show_id) {
+        Some(held) => ControllerIntent::Renew(held.epoch),
+        None => ControllerIntent::Claim,
+    };
+    // Three decisions (claim, takeover, a lost race), and up to ten 1 s
+    // waits while the old controller's last command finishes on the web.
+    let (mut decisions, mut waits) = (0, 0);
+    while decisions < 3 && waits <= 10 {
+        let body = cloud_controller::intent_body(&device.id, intent);
+        let (status, answer) = match web.cloud_controller(&bearer, show_id, &body).await {
+            Ok(answer) => (200, answer),
+            Err((error, answer)) => (cloud_controller::status_of(&error), answer),
+        };
+        let code = answer
+            .pointer("/error/code")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let controller = answer
+            .get("controller")
+            .cloned()
+            .and_then(|value| serde_json::from_value(value).ok());
+        match cloud_controller::next_claim_step(resume, intent, status, &code, controller) {
+            ClaimStep::Granted(granted) => {
+                let epoch = granted.controller_epoch;
+                let fresh =
+                    cloud_controller::held_for(show_id).map(|held| held.epoch) != Some(epoch);
+                cloud_controller::hold(
+                    show_id,
+                    &device.id,
+                    cloud_controller::facts_of(&granted, None),
+                );
+                if fresh {
+                    // Only the current controller may read it back, so this
+                    // runs with the new epoch held.
+                    if let Ok(restore) = web.cloud_presentation_get(&bearer, show_id).await {
+                        let facts = cloud_controller::facts_of(&granted, Some(&restore));
+                        cloud_controller::set_restore(show_id, epoch, restore, facts);
+                    }
+                    spawn_cloud_controller_renewal(state, show_id.to_string(), epoch);
+                }
+                return None;
+            }
+            ClaimStep::Next(next) => {
+                intent = next;
+                decisions += 1;
+            }
+            ClaimStep::Wait(same) => {
+                intent = same;
+                waits += 1;
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            }
+            ClaimStep::Stop(reason) => return Some(reason),
+        }
+    }
+    Some("raced")
+}
+
+/// Follows `cloud_controller::ownership()`: when a show this process held is
+/// lost (taken over, or forgotten after holding it), the services bound to
+/// it stop. Captions are the one consumer today (S15).
+fn spawn_cloud_ownership_watch(state: &AppState) {
+    let state = state.clone();
+    let mut watch = cloud_controller::ownership();
+    tokio::spawn(async move {
+        let mut held: Option<String> = None;
+        loop {
+            let now = watch.borrow_and_update().clone();
+            let retired = match (&held, &now) {
+                (Some(show), cloud_controller::Ownership::Held { show_id, .. })
+                    if show != show_id =>
+                {
+                    Some(show.clone())
+                }
+                (Some(show), cloud_controller::Ownership::Lost { show_id, .. })
+                    if show == show_id =>
+                {
+                    Some(show.clone())
+                }
+                (Some(show), cloud_controller::Ownership::None) => Some(show.clone()),
+                _ => None,
+            };
+            if let Some(show) = retired {
+                captions::cloud_host::ownership_lost(&state, &show).await;
+            }
+            held = match now {
+                cloud_controller::Ownership::Held { show_id, .. } => Some(show_id),
+                _ => None,
+            };
+            if watch.changed().await.is_err() {
+                return;
+            }
+        }
+    });
+}
+
+/// Logs why a plain claim did not take the controller (an older web, a show
+/// another computer controls, an ending show). Never fails the command: the
+/// web's fence is what refuses this process's requests if it must.
+fn note_claim(refused: Option<&'static str>) {
+    if let Some(reason) = refused {
+        tracing::info!("[cloud] controller not claimed: {reason}");
+    }
+}
+
+/// Renews the 45 s lease while this process holds `epoch` for `show_id`. A
+/// refusal means another device took the show over (or it ended): this
+/// process keeps its old epoch, which the web refuses from then on, so it
+/// can never change or end what the successor runs.
+fn spawn_cloud_controller_renewal(state: &AppState, show_id: String, epoch: u64) {
+    let state = state.clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(cloud_controller::RENEW_EVERY).await;
+            let Some(held) =
+                cloud_controller::held_for(&show_id).filter(|held| held.epoch == epoch)
+            else {
+                return;
+            };
+            let Some(bearer) = account::stored_session_token() else {
+                continue;
+            };
+            let Ok(web) = videorc_api::VideorcApiClient::new() else {
+                continue;
+            };
+            let body = cloud_controller::intent_body(
+                &held.device_id,
+                cloud_controller::ControllerIntent::Renew(epoch),
+            );
+            if let Err((error, answer)) = web.cloud_controller(&bearer, &show_id, &body).await
+                && cloud_controller::status_of(&error) == 409
+            {
+                let code = answer
+                    .pointer("/error/code")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("refused");
+                // Another device controls the show: every service that
+                // follows `cloud_controller::ownership()` stops here.
+                if code == "cloud-controller-stale" || code == "cloud-controller-held" {
+                    cloud_controller::mark_lost(epoch, "taken-over");
+                }
+                state.emit_log(
+                    "warn",
+                    format!("Cloud controller lease not renewed ({code}); another device may control the show."),
+                );
+                return;
+            }
+        }
+    });
+}
+
+/// `cloud.presentation.accepted`: an output view a program page applied,
+/// already filtered to that output, kept by the web for the next controller.
+/// Only while this process controls the show; pixels go once per show.
+fn spawn_keep_cloud_presentation(
+    state: &AppState,
+    show_id: String,
+    view: serde_json::Value,
+) -> bool {
+    // Taken here, in the order the acknowledgements arrive, before the
+    // writes run concurrently.
+    let Some((held, sequence)) = cloud_controller::next_sequence(&show_id) else {
+        return false;
+    };
+    let state = state.clone();
+    tokio::spawn(async move {
+        let Some(bearer) = account::stored_session_token() else {
+            return;
+        };
+        let Ok(web) = videorc_api::VideorcApiClient::new() else {
+            return;
+        };
+        let Some((body, carried)) =
+            cloud_controller::ingest_body(held.epoch, sequence, &view, &held.sent_hashes)
+        else {
+            return;
+        };
+        let outcome = match web.cloud_presentation_put(&bearer, &show_id, &body).await {
+            // The web no longer has a picture it had: send them all once.
+            Err((error, answer))
+                if cloud_controller::status_of(&error) == 422
+                    && answer.get("missing").is_some() =>
+            {
+                let Some((full, carried)) = cloud_controller::ingest_body(
+                    held.epoch,
+                    sequence,
+                    &view,
+                    &std::collections::HashSet::new(),
+                ) else {
+                    return;
+                };
+                web.cloud_presentation_put(&bearer, &show_id, &full)
+                    .await
+                    .map(|answer| (answer, carried))
+            }
+            other => other.map(|answer| (answer, carried)),
+        };
+        match outcome {
+            Ok((_, carried)) => cloud_controller::note_sent_hashes(&show_id, held.epoch, &carried),
+            // The status only: never the body, which names pictures.
+            Err((error, _)) => state.emit_log(
+                "warn",
+                format!(
+                    "Cloud presentation not kept (HTTP {}).",
+                    cloud_controller::status_of(&error)
+                ),
+            ),
+        }
+    });
+    true
+}
+
+/// `cloud.controller.desired`: the controller's output flags and what it
+/// switched on, so a successor knows what to ask its streamer to switch on.
+fn spawn_cloud_controller_desired(
+    state: &AppState,
+    show_id: String,
+    params: serde_json::Value,
+) -> bool {
+    if cloud_controller::held_for(&show_id).is_none() {
+        return false;
+    }
+    let mut body = params;
+    if let Some(object) = body.as_object_mut() {
+        object.remove("showId");
+    }
+    let state = state.clone();
+    tokio::spawn(async move {
+        let Some(bearer) = account::stored_session_token() else {
+            return;
+        };
+        let Ok(web) = videorc_api::VideorcApiClient::new() else {
+            return;
+        };
+        if let Err((error, _)) = web.cloud_controller_desired(&bearer, &show_id, &body).await {
+            state.emit_log(
+                "warn",
+                format!(
+                    "Cloud controller facts not saved (HTTP {}).",
+                    cloud_controller::status_of(&error)
+                ),
+            );
+        }
+    });
+    true
+}
+
+/// `cloud.presentation.restore`: what the show kept, as the renderer re-sends
+/// it under this controller's own envelope (pixels fetched once each). Never
+/// marked applied; only the program pages' new receipts can say that.
+async fn cloud_presentation_restore(show_id: &str) -> serde_json::Value {
+    let Some(held) = cloud_controller::held_for(show_id) else {
+        return serde_json::json!({ "views": [] });
+    };
+    let Some(mut restore) = held.restore.clone() else {
+        return serde_json::json!({ "controllerEpoch": held.epoch, "views": [] });
+    };
+    let (Some(bearer), Ok(web)) = (
+        account::stored_session_token(),
+        videorc_api::VideorcApiClient::new(),
+    ) else {
+        return serde_json::json!({ "controllerEpoch": held.epoch, "views": [] });
+    };
+    let mut pngs: std::collections::HashMap<String, Option<String>> =
+        std::collections::HashMap::new();
+    if let Some(views) = restore
+        .get_mut("views")
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        for view in views.iter_mut() {
+            let Some(layers) = view
+                .get_mut("layers")
+                .and_then(serde_json::Value::as_array_mut)
+            else {
+                continue;
+            };
+            for layer in layers.iter_mut() {
+                let Some(hash) = layer
+                    .pointer("/asset/hash")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string)
+                else {
+                    continue;
+                };
+                if !pngs.contains_key(&hash) {
+                    let png = web
+                        .cloud_presentation_asset(&bearer, show_id, &hash)
+                        .await
+                        .ok();
+                    pngs.insert(hash.clone(), png);
+                }
+                if let (Some(Some(png)), Some(asset)) = (
+                    pngs.get(&hash),
+                    layer
+                        .get_mut("asset")
+                        .and_then(serde_json::Value::as_object_mut),
+                ) {
+                    asset.insert("png".to_string(), serde_json::json!(png));
+                }
+            }
+            // A layer whose pixels did not come back is not re-sent.
+            layers.retain(|layer| layer.pointer("/asset/png").is_some());
+        }
+    }
+    restore
+}
+
+/// Plan 249 S18: after a resume, attach the show's chat, viewer and audience
+/// readers on this owner exactly once, keeping its history, quotas and first
+/// attach time; a leg whose identity or account lives on another computer is
+/// an explicit row, never a guess. Never starts Sidekick (its consent is the
+/// streamer's own Start) and never opens an output. Returns the skip reason
+/// when nothing was attached (`None` once readers were attached or kept).
+async fn reattach_cloud_show_services(state: &AppState) -> Option<&'static str> {
+    let accounts: Vec<cloud_services::LocalAccount> = state
+        .database
+        .list_platform_accounts()
+        .unwrap_or_default()
+        .iter()
+        .map(cloud_services::LocalAccount::from_platform_account)
+        .collect();
+    let snapshot = load_cloud_show_services(state);
+    let chat_session_id = state
+        .live_chat
+        .lock()
+        .await
+        .session_id()
+        .map(str::to_string);
+    let decision = {
+        let runtime = state.cloud_show.lock().unwrap_or_else(|p| p.into_inner());
+        let status = runtime.status();
+        let interval = cloud_services::canonical_live_interval(&status);
+        let facts = cloud_services::ReattachFacts {
+            show_id: status.show.as_ref().map(|show| show.id.as_str()),
+            show_kind: status.show.as_ref().and_then(|show| show.kind.as_deref()),
+            interval: interval.as_ref(),
+            device_id: &runtime.device.id,
+            this_device_owns: runtime.stopped_by.is_none() && !runtime.air_names_another_device(),
+            room_live: status.room.as_ref().is_some_and(|room| room.live),
+            legs: &status.legs,
+            chat_session_id: chat_session_id.as_deref(),
+            accounts: &accounts,
+        };
+        cloud_services::plan_reattach(snapshot.as_ref(), &facts)
+    };
+    let (identity, destinations, unavailable) = match decision {
+        cloud_services::ReattachDecision::Keep => {
+            tracing::info!("Cloud show chat already attached here; kept its readers.");
+            return None;
+        }
+        cloud_services::ReattachDecision::Skip(reason) => {
+            tracing::info!("Cloud show chat not reattached: {reason}.");
+            if reason == "interval-ended" {
+                // Its interval is over: the identity is no longer anyone's.
+                forget_cloud_show_services(state, "");
+            }
+            return Some(reason);
+        }
+        cloud_services::ReattachDecision::Attach {
+            identity,
+            destinations,
+            unavailable,
+        } => (identity, destinations, unavailable),
+    };
+    if snapshot.as_ref() != Some(&identity) {
+        save_cloud_show_services(state, Some(&identity));
+    } else {
+        cloud_services::arm(Some(&identity));
+    }
+    let first_attached_at = chrono::DateTime::parse_from_rfc3339(&identity.attached_at)
+        .map(|at| at.with_timezone(&chrono::Utc))
+        .unwrap_or_else(|_| chrono::Utc::now());
+    let prepared = if destinations.is_empty() {
+        None
+    } else {
+        prepare_session_live_chat(
+            state,
+            &identity.show_id,
+            &identity.streaming_settings(&destinations),
+        )
+        .await
+    };
+    if prepared.is_none() && !destinations.is_empty() {
+        // The show's Library row could not open (logged there): attaching
+        // only the unavailable rows would hide the readable destinations.
+        return Some("chat-preparation-failed");
+    }
+    let mut params = prepared.unwrap_or_else(|| live_chat::LiveChatStartParams {
+        session_id: identity.show_id.clone(),
+        platforms: Vec::new(),
+        destinations: Vec::new(),
+        fake: None,
+        fakes: Vec::new(),
+        youtube: None,
+        twitch: None,
+        x: None,
+        kick: None,
+        audience: Vec::new(),
+        fake_audience: Vec::new(),
+    });
+    for row in &unavailable {
+        params
+            .destinations
+            .push(live_chat::LiveChatDestinationStart {
+                target_id: row.target_id.clone(),
+                platform: row.platform,
+                read: Some(live_chat::CommentsReadState::Unavailable),
+                write: Some(live_chat::CommentsWriteState::Unavailable),
+                preparation_error: None,
+                notice: Some(row.notice()),
+            });
+    }
+    if params.destinations.is_empty() {
+        return Some("no-live-destinations");
+    }
+    live_chat::resume_live_chat(state, params, first_attached_at).await;
+    // X reads chat for the broadcast the renderer attached at Go Live; its
+    // connector takes this computer's X account and Videorc sign-in at
+    // runtime (the existing `liveChat.x.start` path), and parks visibly when
+    // either is missing. Never a provider call from here.
+    for (target_id, broadcast_id) in
+        cloud_services::CloudServiceIdentity::x_broadcasts(&destinations)
+    {
+        if let Err(error) = live_chat::start_x_live_chat(
+            state,
+            live_chat::StartXLiveChatParams {
+                session_id: identity.show_id.clone(),
+                broadcast_id,
+                target_id: Some(target_id),
+            },
+        )
+        .await
+        {
+            tracing::warn!("X comments did not reattach: {error:#}");
+        }
+    }
+    // A takeover or End that landed while the readers attached: only this
+    // show's readers stop, never a successor's.
+    let still_owned = {
+        let runtime = state.cloud_show.lock().unwrap_or_else(|p| p.into_inner());
+        let status = runtime.status();
+        runtime.stopped_by.is_none()
+            && !runtime.air_names_another_device()
+            && status
+                .show
+                .as_ref()
+                .is_some_and(|show| show.id == identity.show_id)
+            && status.room.as_ref().is_some_and(|room| room.live)
+    };
+    if !still_owned {
+        stop_talk_show_chat(state, &identity.show_id).await;
+    }
+    None
+}
+
 fn cloud_hooks(state: &AppState) -> cloud_show::CloudHooks {
     let emit_state = state.clone();
     let legs_state = state.clone();
@@ -15677,8 +17776,47 @@ fn cloud_hooks(state: &AppState) -> cloud_show::CloudHooks {
     let camera_state = state.clone();
     let request_state = state.clone();
     let overlay_state = state.clone();
+    let stop_state = state.clone();
     cloud_show::CloudHooks {
+        stop: std::sync::Arc::new(move || {
+            let state = stop_state.clone();
+            Box::pin(async move {
+                live_chat::stop_live_chat_for_capture_end(&state).await;
+                match stop_recording_with_intent(
+                    state.clone(),
+                    protocol::SessionStopParams::default(),
+                )
+                .await
+                {
+                    Ok(_) => Ok(()),
+                    Err(_) if state.recording.lock().await.is_none() => {
+                        Err(cloud_show::CloudStopFailure::NoActiveSession)
+                    }
+                    Err(_) => Err(cloud_show::CloudStopFailure::Failed(
+                        "This computer could not stop sending. Try Stop again.".into(),
+                    )),
+                }
+            })
+        }),
         emit: std::sync::Arc::new(move |status| {
+            // Read the current slot so a late emission cannot reopen an old show.
+            // emit_from drops its lock before invoking this hook. Keep the
+            // current-state read and persistence ordered under the same lock.
+            let current = emit_state
+                .cloud_show
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            if let Err(error) = emit_state
+                .database
+                .sync_cloud_show_session(&current.status())
+            {
+                tracing::warn!("Could not update the cloud show's Library entry: {error:#}");
+            }
+            drop(current);
+            schedule_cloud_show_services_release(&emit_state, &status);
+            // Plan 249 S25: a local session feeding a live interval is
+            // reported by the interval, before any observer sees its end.
+            cloud_output_session::note_status(&status);
             emit_state.emit_event(cloud_show::CLOUD_STATE_EVENT, status);
         }),
         // Lane 3 F2: the show this desktop holds survives a relaunch, so the
@@ -15711,9 +17849,45 @@ fn cloud_hooks(state: &AppState) -> cloud_show::CloudHooks {
             Box::pin(async move {
                 match handover {
                     cloud_talk::CameraHandover::Lend => {
-                        preview_camera::lend_camera_to_talk_show(&state).await
+                        let hold = state.ffmpeg_work.begin_live_hold();
+                        // Plan 249 S13b: with the processed camera on, the native
+                        // camera stays the one owner and the room publishes its
+                        // processed frames; nothing is lent to the browser.
+                        if room_camera_source::enabled(state.smoke_rpc_enabled) {
+                            room_camera_source::set_kept_for_room(true);
+                            *state
+                                .cloud_live_hold
+                                .lock()
+                                .unwrap_or_else(|p| p.into_inner()) = Some(hold);
+                            return Ok(());
+                        }
+                        preview_camera::lend_camera_to_talk_show(&state).await?;
+                        *state
+                            .cloud_live_hold
+                            .lock()
+                            .unwrap_or_else(|p| p.into_inner()) = Some(hold);
+                        Ok(())
                     }
                     cloud_talk::CameraHandover::Return => {
+                        // The room can end on the website, without an RPC here.
+                        // Retire its exact chat/Sidekick owner before preview
+                        // and Clips restart; never stop a replacement session.
+                        let show_id = state
+                            .cloud_show
+                            .lock()
+                            .unwrap_or_else(|p| p.into_inner())
+                            .status()
+                            .show
+                            .map(|show| show.id);
+                        if let Some(show_id) = show_id {
+                            stop_talk_show_chat(&state, &show_id).await;
+                        }
+                        state
+                            .cloud_live_hold
+                            .lock()
+                            .unwrap_or_else(|p| p.into_inner())
+                            .take();
+                        room_camera_source::set_kept_for_room(false);
                         preview_camera::return_camera_from_talk_show(&state).await;
                         Ok(())
                     }
@@ -15748,14 +17922,13 @@ fn cloud_context(state: &AppState) -> Option<AppCloudShowContext> {
     })
 }
 
-/// Plan 224 C-G7: the talk show on air, when cards and takeovers go to the
-/// runner instead of the compositor.
-pub(crate) fn cloud_talk_show_live_show_id(state: &AppState) -> Option<String> {
+/// Plan 224: the show id while this desktop's room is open, on air or not.
+fn cloud_talk_show_room_show_id(state: &AppState) -> Option<String> {
     state
         .cloud_show
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .talk_show_live_show_id()
+        .talk_show_room_show_id()
 }
 
 /// Plan 224: this desktop holds a talk show's room.
@@ -15785,6 +17958,9 @@ fn cloud_test_blocked_by(recording: &protocol::RecordingStatus) -> bool {
 }
 
 fn cloud_talk_error_code(error: &anyhow::Error, default: &'static str) -> &'static str {
+    if let Some(code) = cloud_show::continuation_error_code(error) {
+        return code;
+    }
     if let Some(refusal) = error.downcast_ref::<cloud_talk::RoomOpenRefusal>() {
         return refusal.code();
     }
@@ -15964,13 +18140,18 @@ async fn start_session_command(
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .resumable_show_id();
-        if resumable.is_none() {
+        let Some(show_id) = resumable else {
             return ServerResponse::error(
                 command.id,
                 "cloud-nothing-to-resume",
                 "There is no Videorc Cloud show to resume.",
             );
-        }
+        };
+        // Plan 249 S24: the solo Resume banner is the explicit "continue
+        // here" too. Take the show's controller first, so everything the
+        // resume sends carries this computer's new epoch; an ending show
+        // refuses the takeover and the resume answers it as before.
+        note_claim(claim_cloud_controller(state, &show_id, true).await);
     }
     let mut params_value = command.params;
     if let Err(error) = resolve_start_session_resources(state, &mut params_value, role) {
@@ -16004,13 +18185,39 @@ async fn start_session_command(
             };
             match started {
                 Ok(status) => {
+                    // Plan 249 S24: a solo cloud show this start created is
+                    // controlled from here (a plain claim; Resume took it
+                    // above). A node show or an older web: no controller.
+                    if kind == SessionStartKind::GoLive
+                        && let Some(show) = cloud_show_status(state).show
+                    {
+                        note_claim(claim_cloud_controller(state, &show.id, false).await);
+                    }
+                    if let Some(context) = cloud_context(state)
+                        && let Some(bearer) = account::stored_session_token()
+                        && let Some(session_id) = status.session_id.as_deref()
+                        && let Err(error) = context.finish_resume(&bearer, session_id).await
+                    {
+                        return ServerResponse::error(
+                            command.id,
+                            cloud_show::continuation_error_code(&error)
+                                .unwrap_or("cloud-source-not-ready"),
+                            error.to_string(),
+                        );
+                    }
                     // Plan 187: a fact for the announcer; never waits.
                     discord_announce::on_session_started(state, &status, streaming.as_ref());
                     if attach_live_chat
                         && let Some(streaming) = streaming.as_ref()
                         && let Some(session_id) = status.session_id.as_deref()
                     {
-                        spawn_session_live_chat(state, session_id, streaming).await;
+                        let mut streaming = streaming.clone();
+                        if kind == SessionStartKind::CloudResume
+                            && let Some(context) = cloud_context(state)
+                        {
+                            context.resume_chat_settings(&mut streaming);
+                        }
+                        spawn_session_live_chat(state, session_id, &streaming).await;
                     }
                     ServerResponse::ok(command.id, status)
                 }
@@ -16032,7 +18239,8 @@ async fn start_session_command(
                     {
                         replay_buffer::SOURCES_NOT_READY_CODE
                     } else {
-                        "session-start-failed"
+                        cloud_show::continuation_error_code(&error)
+                            .unwrap_or("session-start-failed")
                     };
                     ServerResponse::error(command.id, code, error.to_string())
                 }
@@ -18822,6 +21030,7 @@ mod tests {
             "recording.status",
             "capture.recovery.status",
             "cloud.recordings.downloads",
+            "cloud.iso.imports",
             CAPTURE_RECOVERY_SMOKE_CAMERA_CADENCE_EVIDENCE_METHOD,
             CAPTURE_RECOVERY_SMOKE_SCREEN_CADENCE_EVIDENCE_METHOD,
         ] {
@@ -18847,6 +21056,23 @@ mod tests {
                 ),
                 "{method} can change authoritative takeover state and must use mutation execution"
             );
+        }
+    }
+
+    #[tokio::test]
+    async fn host_speech_mutations_refuse_non_renderer_sources_before_parsing() {
+        let state = test_state();
+        for method in [
+            "cloud.speech.sync",
+            "cloud.speech.audio",
+            "cloud.speech.overlay",
+        ] {
+            let request = json!({"id":"speech", "method":method,"params":{}}).to_string();
+            for role in [BackendRole::Admin, BackendRole::Agent, BackendRole::Remote] {
+                let response = handle_text_message_with_role(&state, &request, role).await;
+                assert!(!response.ok, "{method}");
+                assert_eq!(response.error.unwrap().code, "forbidden-method");
+            }
         }
     }
 
@@ -18931,7 +21157,10 @@ mod tests {
         let get = json!({ "id": "get", "method": "screen.privacy.get", "params": {} }).to_string();
         let response = handle_text_message_with_role(&state, &get, BackendRole::Renderer).await;
         assert!(response.ok);
-        assert_eq!(response.payload.unwrap(), json!({ "hidden": false }));
+        assert_eq!(
+            response.payload.unwrap(),
+            json!({ "hidden": false, "generation": 0 })
+        );
 
         let hide = json!({ "id": "hide", "method": "screen.hide", "params": { "reason": "you" } })
             .to_string();
@@ -18965,10 +21194,13 @@ mod tests {
         let show = json!({ "id": "show", "method": "screen.show", "params": {} }).to_string();
         let response = handle_text_message_with_role(&state, &show, BackendRole::Admin).await;
         assert!(response.ok);
-        assert_eq!(response.payload.unwrap(), json!({ "hidden": false }));
+        assert_eq!(
+            response.payload.unwrap(),
+            json!({ "hidden": false, "generation": 2 })
+        );
         let event = events.recv().await.unwrap();
         assert_eq!(event.event, "screen.privacy.changed");
-        assert_eq!(event.payload, json!({ "hidden": false }));
+        assert_eq!(event.payload, json!({ "hidden": false, "generation": 2 }));
         assert!(!state.screen_privacy.view().hidden);
 
         // Never the remote role.
@@ -19003,6 +21235,7 @@ mod tests {
             response.payload.unwrap(),
             json!({
                 "hidden": false,
+                "generation": 0,
                 "unavailable": "Hide screen isn't available on this recording. Stop and record again."
             })
         );
@@ -19277,6 +21510,9 @@ mod tests {
             "cohost.act",
             "cloud.recordings.download",
             "cloud.recordings.cancelDownload",
+            // Plan 249 S22: an ISO import answers its job id at once.
+            "cloud.iso.import",
+            "cloud.iso.cancelImport",
         ] {
             let command = json!({ "id": method, "method": method, "params": {} }).to_string();
             assert_eq!(
@@ -19489,7 +21725,8 @@ mod tests {
             lifecycle_exemptions,
             [
                 // Plan 184 C5: Resume is the same atomic Start, bound to the
-                // live cloud show.
+                // live cloud show. Hand-off finalizes through the same Stop.
+                "cloud.show.handOff",
                 "cloud.show.resume",
                 "recording.start_test",
                 "recording.stop",
@@ -23515,6 +25752,108 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Reads the next `count` intents off a test runner, answering each.
+    async fn talk_intents(
+        runner: &mut tokio::sync::mpsc::UnboundedReceiver<cloud_show::ControlRequest>,
+        count: usize,
+    ) -> Vec<serde_json::Value> {
+        let mut frames = Vec::new();
+        for _ in 0..count {
+            let intent = runner.recv().await.expect("a talk-show intent");
+            frames.push(intent.answer_for_tests(None));
+        }
+        frames
+    }
+
+    /// A takeover put up in an open room before Go Live goes to the room
+    /// too (the owner, 2026-11-16: "takeover assets are not working in
+    /// room"). Gated on air, it never reached the program, and Go Live put
+    /// the stage on air with the Studio still showing the takeover as on.
+    #[tokio::test]
+    async fn a_takeover_in_an_open_room_before_go_live_goes_to_the_room() {
+        let state = test_state();
+        let mut runner = cloud_talk::open_talk_show_for_tests(&state.cloud_show, "sh_talk", false);
+        let dir = crate::test_temp_dir::TestTempDir::new("talk-takeover-before-live");
+        let path = dir.join("intro.png");
+        image::RgbaImage::from_pixel(160, 90, image::Rgba([255, 64, 0, 255]))
+            .save(&path)
+            .unwrap();
+        let screen = protocol::StreamScreen {
+            id: "intro".to_string(),
+            name: "Intro".to_string(),
+            image_path: path.to_string_lossy().into_owned(),
+            thumbnail_path: None,
+            sort_order: 0,
+            status: protocol::StreamScreenStatus::Ready,
+            created_at: "2026-11-16T10:00:00Z".to_string(),
+            updated_at: "2026-11-16T10:00:00Z".to_string(),
+        };
+
+        let (applied, frames) = tokio::join!(
+            apply_active_screen_output(&state, Some(screen)),
+            talk_intents(&mut runner, 2)
+        );
+        applied.unwrap();
+        for (frame, orientation) in frames.iter().zip(["h", "v"]) {
+            assert_eq!(frame["kind"], "overlay.set");
+            assert_eq!(frame["slot"], "takeover");
+            assert_eq!(frame["orientation"], orientation);
+        }
+
+        let (cleared, frames) = tokio::join!(
+            apply_active_screen_output(&state, None),
+            talk_intents(&mut runner, 2)
+        );
+        cleared.unwrap();
+        for (frame, orientation) in frames.iter().zip(["h", "v"]) {
+            assert_eq!(frame["kind"], "overlay.clear");
+            assert_eq!(frame["slot"], "takeover");
+            assert_eq!(frame["orientation"], orientation);
+        }
+    }
+
+    /// A room that opens while a takeover is already up takes it at once,
+    /// so the program matches what the Studio shows; with none up, the room
+    /// gets nothing; with no room, nothing is sent at all.
+    #[tokio::test]
+    async fn a_room_that_opens_takes_the_takeover_already_up() {
+        let state = test_state();
+        // No room yet: nothing to send to, and nothing fails.
+        push_active_takeover_to_room(&state).await;
+
+        let mut runner = cloud_talk::open_talk_show_for_tests(&state.cloud_show, "sh_talk", false);
+        push_active_takeover_to_room(&state).await;
+        assert!(
+            runner.try_recv().is_err(),
+            "no takeover up: the room gets nothing"
+        );
+
+        let dir = crate::test_temp_dir::TestTempDir::new("talk-takeover-at-open");
+        let source = dir.join("brb.png");
+        std::fs::write(&source, b"source").unwrap();
+        let screen = state
+            .database
+            .import_screen_image_with_optimizer(source.to_str().unwrap(), |_, destination| {
+                image::RgbaImage::from_pixel(160, 90, image::Rgba([0, 200, 80, 255]))
+                    .save_with_format(destination, image::ImageFormat::Png)
+                    .map_err(anyhow::Error::from)
+            })
+            .unwrap();
+        state.database.activate_stream_screen(&screen.id).unwrap();
+
+        let ((), frames) = tokio::join!(
+            push_active_takeover_to_room(&state),
+            talk_intents(&mut runner, 2)
+        );
+        for (frame, orientation) in frames.iter().zip(["h", "v"]) {
+            assert_eq!(frame["kind"], "overlay.set");
+            assert_eq!(frame["slot"], "takeover");
+            assert_eq!(frame["orientation"], orientation);
+            assert!(frame.get("ttlSeconds").is_none());
+        }
+        assert!(runner.try_recv().is_err(), "one intent per output");
+    }
+
     /// Plan 215 A5 (D7): the account change goes out as one event the
     /// renderer's strict contract accepts, with the reason; the sign-out the
     /// server made is `session-expired`. Desktop sockets only: it is not a
@@ -26283,6 +28622,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn externally_ended_show_stops_its_chat_without_stopping_a_replacement() {
+        let state = test_state();
+        live_chat::start_live_chat(&state, fake_live_chat_start_params("sh_ended", "target")).await;
+        stop_talk_show_chat(&state, "sh_ended").await;
+        assert!(state.live_chat.lock().await.session_id().is_none());
+        live_chat::start_live_chat(&state, fake_live_chat_start_params("replacement", "target"))
+            .await;
+        stop_talk_show_chat(&state, "sh_ended").await;
+        assert_eq!(
+            state.live_chat.lock().await.session_id(),
+            Some("replacement")
+        );
+        live_chat::stop_live_chat(&state).await;
+    }
+
+    #[tokio::test]
     async fn manual_twitch_stream_starts_status_only_chat_session_without_oauth_account() {
         let state = test_state();
         *state.recording.lock().await = Some(recording::test_active_recording_stub(
@@ -26981,5 +29336,202 @@ mod agent_role_tests {
                 "{method} has no execution policy"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod room_camera_admission_tests {
+    use super::*;
+    fn ok(reply: Option<RoomFrameReply>) -> Option<bool> {
+        match reply.unwrap() {
+            RoomFrameReply::Text(response) => {
+                serde_json::to_value(response).unwrap()["ok"].as_bool()
+            }
+            RoomFrameReply::Binary(_) => None,
+        }
+    }
+    fn state(smoke: bool) -> AppState {
+        let (events, _) = broadcast::channel(16);
+        let mut state = AppState::new(
+            "test-token".to_string(),
+            1234,
+            events,
+            Database::open_in_memory_for_tests(),
+        );
+        state.smoke_rpc_enabled = smoke;
+        state
+    }
+
+    #[tokio::test]
+    async fn processed_camera_requires_admin_debug_smoke_and_env_opt_in() {
+        let open = r#"{"id":"c","method":"room.camera.processed","params":{"action":"open","generation":1,"role":"host-camera","width":640,"height":360,"fps":30,"packing":"rgb-left-alpha-right","serial":1}}"#;
+        let inspect = r#"{"id":"c","method":"room.camera.processed.inspect","params":{}}"#;
+        let state = state(true);
+        for role in [
+            BackendRole::Renderer,
+            BackendRole::Remote,
+            BackendRole::Agent,
+            BackendRole::Admin,
+        ] {
+            let mut bridge = room_frame_bridge::Bridge::default();
+            let mut producer = room_camera_source::Producer::default();
+            // Without VIDEORC_ROOM_PROCESSED_CAMERA=1 nobody gets the camera.
+            for text in [open, inspect] {
+                assert_eq!(
+                    ok(
+                        handle_room_camera_control(&state, role, &mut bridge, &mut producer, text)
+                            .await
+                    ),
+                    Some(false)
+                );
+            }
+        }
+        // Unrelated traffic is not intercepted.
+        let mut bridge = room_frame_bridge::Bridge::default();
+        let mut producer = room_camera_source::Producer::default();
+        assert!(
+            handle_room_camera_control(
+                &state,
+                BackendRole::Admin,
+                &mut bridge,
+                &mut producer,
+                r#"{"id":"x","method":"health.ping","params":{}}"#
+            )
+            .await
+            .is_none()
+        );
+        assert!(!room_camera_source::enabled(false));
+    }
+}
+
+#[cfg(test)]
+mod room_frame_admission_tests {
+    use super::*;
+    fn ok(reply: Option<RoomFrameReply>) -> Option<bool> {
+        match reply.unwrap() {
+            RoomFrameReply::Text(response) => {
+                serde_json::to_value(response).unwrap()["ok"].as_bool()
+            }
+            RoomFrameReply::Binary(_) => None,
+        }
+    }
+    #[test]
+    fn frame_test_requires_admin_debug_opt_in_and_bounded_contract() {
+        let open = r#"{"id":"f","method":"room.frame.test","params":{"action":"open","generation":1,"role":"host-camera-test","width":640,"height":360,"fps":30,"packing":"rgb-left-alpha-right","serial":1}}"#;
+        let inspect = r#"{"id":"f","method":"room.frame.test.inspect","params":{}}"#;
+        for role in [
+            BackendRole::Renderer,
+            BackendRole::Remote,
+            BackendRole::Agent,
+        ] {
+            let mut bridge = room_frame_bridge::Bridge::default();
+            assert_eq!(
+                ok(handle_room_frame_control(role, true, &mut bridge, open)),
+                Some(false)
+            );
+            assert_eq!(
+                ok(handle_room_frame_control(role, true, &mut bridge, inspect)),
+                Some(false)
+            );
+        }
+        let mut bridge = room_frame_bridge::Bridge::default();
+        assert_eq!(
+            ok(handle_room_frame_control(
+                BackendRole::Admin,
+                false,
+                &mut bridge,
+                open
+            )),
+            Some(false)
+        );
+        assert_eq!(
+            ok(handle_room_frame_control(
+                BackendRole::Admin,
+                true,
+                &mut bridge,
+                open
+            )),
+            Some(cfg!(debug_assertions))
+        );
+        let pull = open.replace("\"open\"", "\"pull\"");
+        let first =
+            handle_room_frame_control(BackendRole::Admin, true, &mut bridge, &pull).unwrap();
+        if cfg!(debug_assertions) {
+            assert!(
+                matches!(first, RoomFrameReply::Binary(ref bytes) if bytes.len() == room_frame_bridge::HEADER_BYTES + 1288 * 360 * 4)
+            );
+        }
+        let oversized = open.replace(
+            "\"serial\":1",
+            &format!("\"serial\":1,\"pad\":\"{}\"", "x".repeat(600)),
+        );
+        assert_eq!(
+            ok(handle_room_frame_control(
+                BackendRole::Admin,
+                true,
+                &mut room_frame_bridge::Bridge::default(),
+                &oversized
+            )),
+            Some(false)
+        );
+        let bad = open.replace("640", "1920");
+        assert_eq!(
+            ok(handle_room_frame_control(
+                BackendRole::Admin,
+                true,
+                &mut room_frame_bridge::Bridge::default(),
+                &bad
+            )),
+            Some(false)
+        );
+    }
+}
+
+#[cfg(test)]
+mod room_pcm_admission_tests {
+    use super::*;
+    #[test]
+    fn pcm_test_requires_admin_debug_opt_in_and_bounded_contract() {
+        let command = r#"{"id":"pcm","method":"room.pcm.test","params":{"action":"open","generation":1,"role":"host-microphone-test","sampleRate":48000,"channels":1,"frames":480}}"#;
+        for role in [
+            BackendRole::Renderer,
+            BackendRole::Remote,
+            BackendRole::Agent,
+        ] {
+            let response = handle_room_pcm_control(
+                role,
+                true,
+                &mut room_audio_bridge::Bridge::default(),
+                command,
+            )
+            .unwrap();
+            assert_eq!(serde_json::to_value(response).unwrap()["ok"], false);
+            let inspect = r#"{"id":"pcm","method":"room.pcm.test.inspect","params":{}}"#;
+            let denied = handle_room_pcm_control(
+                role,
+                true,
+                &mut room_audio_bridge::Bridge::default(),
+                inspect,
+            )
+            .unwrap();
+            assert_eq!(serde_json::to_value(denied).unwrap()["ok"], false);
+        }
+        let mut bridge = room_audio_bridge::Bridge::default();
+        let off = handle_room_pcm_control(BackendRole::Admin, false, &mut bridge, command).unwrap();
+        assert_eq!(serde_json::to_value(off).unwrap()["ok"], false);
+        let on = handle_room_pcm_control(BackendRole::Admin, true, &mut bridge, command).unwrap();
+        assert_eq!(
+            serde_json::to_value(on).unwrap()["ok"],
+            cfg!(debug_assertions)
+        );
+        let bad = command.replace("48000", "44100");
+        let result = handle_room_pcm_control(
+            BackendRole::Admin,
+            true,
+            &mut room_audio_bridge::Bridge::default(),
+            &bad,
+        )
+        .unwrap();
+        assert_eq!(serde_json::to_value(result).unwrap()["ok"], false);
     }
 }

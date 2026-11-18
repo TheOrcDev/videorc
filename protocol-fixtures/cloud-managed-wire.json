@@ -55,6 +55,7 @@
     ],
     "create": [
       { "status": 403, "code": "cloud-not-entitled" },
+      { "status": 400, "code": "cloud-output-unqualified" },
       { "status": 422, "code": "cloud-quality" },
       { "status": 503, "code": "cloud-full" },
       { "status": 503, "code": "cloud-node-unreachable" },
@@ -64,7 +65,10 @@
       { "status": 422, "code": "cloud-destinations-refused" },
       { "status": 503, "code": "cloud-full" }
     ],
-    "legsEnd": [{ "status": 409, "code": "cloud-legs-end-solo" }],
+    "legsEnd": [
+      { "status": 409, "code": "cloud-legs-end-solo" },
+      { "status": 409, "code": "cloud-show-ending" }
+    ],
     "holdImage": [
       { "status": 400, "code": "hold-image-invalid" },
       { "status": 409, "code": "cloud-hold-image-talk" },

@@ -5,17 +5,43 @@ import { join } from 'node:path'
 import { describe, it } from 'node:test'
 
 import {
+  RELEASE_CI_GATE_SPECS,
   ReuseReleaseCiError,
   findFirstReusableReleaseCiGate,
+  jobProvesGate,
   parseReleaseRepository,
   parseReleaseSourceSha,
   resolveReleaseCiGateLookup,
   reuseReleaseCiGateOrExplain
 } from './reuse-release-ci-gates.mjs'
-import { main as reuseCli } from '../reuse-release-ci-gates.mjs'
+import { main as reuseCli, sameSourceShas } from '../reuse-release-ci-gates.mjs'
 
 const sha = 'a'.repeat(40)
 const otherSha = 'b'.repeat(40)
+const thirdSha = 'c'.repeat(40)
+
+function greenSteps(specId, gateIndex = 0) {
+  return RELEASE_CI_GATE_SPECS[specId].jobs[gateIndex].requiredSteps.map((name) => ({
+    name,
+    status: 'completed',
+    conclusion: 'success'
+  }))
+}
+
+/** A green job for every gate a spec requires (the first keeps `first`'s fields). */
+function gateJobs(specId, first) {
+  return RELEASE_CI_GATE_SPECS[specId].jobs.map((gate, index) =>
+    index === 0
+      ? first
+      : {
+          id: first.id + index,
+          name: gate.name,
+          status: 'completed',
+          conclusion: 'success',
+          steps: greenSteps(specId, index)
+        }
+  )
+}
 
 function jsSuccessRun(overrides = {}) {
   return {
@@ -37,6 +63,7 @@ function jsSuccessJob(overrides = {}) {
     status: 'completed',
     conclusion: 'success',
     html_url: 'https://github.com/TheOrcDev/videorc/actions/runs/11/job/1100',
+    steps: greenSteps('windows-js-job'),
     ...overrides
   }
 }
@@ -57,10 +84,11 @@ function windowsGatesSuccessRun(overrides = {}) {
 function windowsGatesSuccessJob(overrides = {}) {
   return {
     id: 2200,
-    name: 'gates / Windows release source gates',
+    name: 'gates / Windows release Rust gates',
     status: 'completed',
     conclusion: 'success',
     html_url: 'https://github.com/TheOrcDev/videorc/actions/runs/22/job/2200',
+    steps: greenSteps('windows-rust-gates'),
     ...overrides
   }
 }
@@ -104,9 +132,9 @@ describe('reuse-release-ci-gates', () => {
         },
         '/repos/TheOrcDev/videorc/actions/runs/11/jobs?per_page=100': {
           jobs: [
-            jsSuccessJob(),
+            ...gateJobs('windows-js-job', jsSuccessJob()),
             {
-              id: 1101,
+              id: 1191,
               name: 'Rust (test + clippy + fmt)',
               status: 'completed',
               conclusion: 'cancelled'
@@ -122,13 +150,14 @@ describe('reuse-release-ci-gates', () => {
       runId: 11,
       jobId: 1100,
       jobName: 'JS (format + lint + tests)',
+      jobNames: RELEASE_CI_GATE_SPECS['windows-js-job'].jobs.map((gate) => gate.name),
       workflowPath: '.github/workflows/ci.yml',
       htmlUrl: 'https://github.com/TheOrcDev/videorc/actions/runs/11/job/1100',
       headSha: sha
     })
   })
 
-  it('prefers the Windows source-gate job when that exact-commit job already passed', async () => {
+  it('prefers the Windows JS gate job when that exact-commit job already passed', async () => {
     const result = await findFirstReusableReleaseCiGate({
       lookup: 'windows-js',
       repository: 'TheOrcDev/videorc',
@@ -139,13 +168,65 @@ describe('reuse-release-ci-gates', () => {
             workflow_runs: [windowsGatesSuccessRun()]
           },
         '/repos/TheOrcDev/videorc/actions/runs/22/jobs?per_page=100': {
-          jobs: [windowsGatesSuccessJob()]
+          jobs: [
+            windowsGatesSuccessJob(),
+            ...gateJobs(
+              'windows-js-gates',
+              windowsGatesSuccessJob({
+                id: 2201,
+                name: 'gates / Windows release JS gates',
+                steps: greenSteps('windows-js-gates')
+              })
+            )
+          ]
         }
       })
     })
     assert.equal(result.reused, true)
-    assert.equal(result.specId, 'windows-source-gates')
-    assert.equal(result.jobName, 'gates / Windows release source gates')
+    assert.equal(result.specId, 'windows-js-gates')
+    assert.equal(result.jobName, 'gates / Windows release JS gates')
+  })
+
+  it('refuses JS reuse when one vitest shard did not pass', async () => {
+    const jobs = gateJobs('windows-js-job', jsSuccessJob()).map((job) =>
+      job.name === 'Desktop tests (3/4)' ? { ...job, conclusion: 'failure' } : job
+    )
+    const result = await findFirstReusableReleaseCiGate({
+      specIds: ['windows-js-job'],
+      repository: 'TheOrcDev/videorc',
+      sha,
+      api: apiFrom({
+        [`/repos/TheOrcDev/videorc/actions/workflows/ci.yml/runs?head_sha=${sha}&per_page=20`]: {
+          workflow_runs: [jsSuccessRun()]
+        },
+        '/repos/TheOrcDev/videorc/actions/runs/11/jobs?per_page=100': { jobs }
+      })
+    })
+    assert.equal(result.reused, false)
+  })
+
+  it('never reuses the green aggregator that only reports the two gate jobs', async () => {
+    const aggregator = windowsGatesSuccessJob({
+      id: 2202,
+      name: 'gates / Windows release source gates',
+      steps: [{ name: 'Require every Windows gate job', conclusion: 'success' }]
+    })
+    for (const lookup of ['windows-rust', 'windows-js']) {
+      const result = await findFirstReusableReleaseCiGate({
+        lookup,
+        repository: 'TheOrcDev/videorc',
+        sha,
+        api: apiFrom({
+          [`/repos/TheOrcDev/videorc/actions/workflows/windows.yml/runs?head_sha=${sha}&per_page=20`]:
+            { workflow_runs: [windowsGatesSuccessRun()] },
+          [`/repos/TheOrcDev/videorc/actions/workflows/ci.yml/runs?head_sha=${sha}&per_page=20`]: {
+            workflow_runs: []
+          },
+          '/repos/TheOrcDev/videorc/actions/runs/22/jobs?per_page=100': { jobs: [aggregator] }
+        })
+      })
+      assert.equal(result.reused, false, lookup)
+    }
   })
 
   it('refuses a job from another commit, a pull_request event, or a failed/cancelled job', async () => {
@@ -208,10 +289,148 @@ describe('reuse-release-ci-gates', () => {
     assert.equal(result.reason, 'github-response')
   })
 
-  it('exposes the Windows JS lookup as source-gates then the CI JS job', () => {
+  it('refuses a skip twin that shares the gate name but ran no gate step (0.28.1)', async () => {
+    const twin = windowsGatesSuccessJob({
+      steps: [
+        { name: 'Set up job', conclusion: 'success' },
+        {
+          name: 'Skip heavy Windows source gates for an allow-listed docs or version-only change',
+          conclusion: 'success'
+        },
+        { name: 'Complete job', conclusion: 'success' }
+      ]
+    })
+    const result = await findFirstReusableReleaseCiGate({
+      lookup: 'windows-rust',
+      repository: 'TheOrcDev/videorc',
+      sha,
+      api: apiFrom({
+        [`/repos/TheOrcDev/videorc/actions/workflows/windows.yml/runs?head_sha=${sha}&per_page=20`]:
+          { workflow_runs: [windowsGatesSuccessRun()] },
+        '/repos/TheOrcDev/videorc/actions/runs/22/jobs?per_page=100': { jobs: [twin] }
+      })
+    })
+    assert.equal(result.reused, false)
+  })
+
+  it('refuses a green job that is missing one required step, or ran it red', () => {
+    const gate = RELEASE_CI_GATE_SPECS['windows-rust-gates'].jobs[0]
+    const steps = greenSteps('windows-rust-gates')
+    assert.equal(jobProvesGate(windowsGatesSuccessJob(), gate), true)
+    assert.equal(jobProvesGate(windowsGatesSuccessJob({ steps: steps.slice(1) }), gate), false)
+    assert.equal(
+      jobProvesGate(
+        windowsGatesSuccessJob({
+          steps: steps.map((step, index) =>
+            index === 1 ? { ...step, conclusion: 'skipped' } : step
+          )
+        }),
+        gate
+      ),
+      false
+    )
+  })
+
+  it('reuses a same-source ancestor when the release commit only has a skip twin', async () => {
+    const result = await findFirstReusableReleaseCiGate({
+      lookup: 'windows-rust',
+      repository: 'TheOrcDev/videorc',
+      sha,
+      sourceShas: [sha, otherSha],
+      api: apiFrom({
+        [`/repos/TheOrcDev/videorc/actions/workflows/windows.yml/runs?head_sha=${sha}&per_page=20`]:
+          { workflow_runs: [windowsGatesSuccessRun()] },
+        '/repos/TheOrcDev/videorc/actions/runs/22/jobs?per_page=100': {
+          jobs: [windowsGatesSuccessJob({ steps: [] })]
+        },
+        [`/repos/TheOrcDev/videorc/actions/workflows/windows.yml/runs?head_sha=${otherSha}&per_page=20`]:
+          { workflow_runs: [windowsGatesSuccessRun({ id: 44, head_sha: otherSha })] },
+        '/repos/TheOrcDev/videorc/actions/runs/44/jobs?per_page=100': {
+          jobs: [windowsGatesSuccessJob({ id: 4400 })]
+        }
+      })
+    })
+    assert.equal(result.reused, true)
+    assert.equal(result.reason, 'ancestor-same-source')
+    assert.equal(result.headSha, sha)
+    assert.equal(result.sourceSha, otherSha)
+    assert.equal(result.runId, 44)
+  })
+
+  it('refuses a candidate list that does not start with the release commit', async () => {
+    await assert.rejects(
+      () =>
+        findFirstReusableReleaseCiGate({
+          lookup: 'linux-rust',
+          repository: 'TheOrcDev/videorc',
+          sha,
+          sourceShas: [otherSha],
+          api: async () => assert.fail('must not call GitHub')
+        }),
+      (error) => error instanceof ReuseReleaseCiError && error.code === 'source-sha'
+    )
+  })
+
+  it('walks first-parent history only while CI would skip the gate for the diff', () => {
+    const seen = []
+    const shas = sameSourceShas({
+      sha,
+      lookup: 'windows-rust',
+      history: () => [sha, otherSha, thirdSha, 'd'.repeat(40)],
+      classify: ({ env }) => {
+        seen.push(env.CI_BASE_SHA)
+        assert.equal(env.GITHUB_EVENT_NAME, 'push')
+        assert.equal(env.CI_HEAD_SHA, sha)
+        // The diff from thirdSha already holds code, so the walk stops there.
+        return env.CI_BASE_SHA === otherSha
+          ? { kind: 'version-release', windowsHeavy: false }
+          : { kind: 'code', windowsHeavy: true }
+      }
+    })
+    assert.deepEqual(shas, [sha, otherSha])
+    assert.deepEqual(seen, [otherSha, thirdSha])
+  })
+
+  it('never walks past a test-only diff, which the Windows Rust job runs (review 1)', () => {
+    // A js-test diff skips windows_heavy, but the ownership loop in the
+    // Windows Rust job runs scripts/lib/*.test.mjs files.
+    const shas = sameSourceShas({
+      sha,
+      lookup: 'windows-rust',
+      history: () => [sha, otherSha],
+      classify: () => ({ kind: 'js-test', windowsHeavy: false })
+    })
+    assert.deepEqual(shas, [sha])
+  })
+
+  it('falls back to the exact commit when git or the lookup is unknown', () => {
+    const boom = () => {
+      throw new Error('shallow clone')
+    }
+    assert.deepEqual(sameSourceShas({ sha, lookup: 'windows-rust', history: boom }), [sha])
+    assert.deepEqual(
+      sameSourceShas({ sha, lookup: 'nope', history: () => assert.fail('no walk') }),
+      [sha]
+    )
+    assert.deepEqual(
+      sameSourceShas({
+        sha,
+        lookup: 'linux-rust',
+        history: () => [sha, otherSha],
+        classify: boom
+      }),
+      [sha]
+    )
+  })
+
+  it('exposes the Windows JS lookup as the Windows JS gates then the CI JS job', () => {
     assert.deepEqual(
       resolveReleaseCiGateLookup('windows-js').map((spec) => spec.id),
-      ['windows-source-gates', 'windows-js-job']
+      ['windows-js-gates', 'windows-js-job']
+    )
+    assert.deepEqual(
+      resolveReleaseCiGateLookup('windows-rust').map((spec) => spec.id),
+      ['windows-rust-gates']
     )
   })
 })
@@ -253,6 +472,7 @@ describe('reuse-release-ci-gates CLI', () => {
           GITHUB_OUTPUT: outputFile
         },
         argv: ['node', 'reuse-release-ci-gates.mjs', '--spec', 'linux-rust'],
+        sourceShasFor: ({ sha: release }) => [release],
         fetchImpl: async (url) => {
           assert.match(url, /api\.github\.com/)
           if (url.includes('/actions/workflows/linux.yml/runs')) {
@@ -283,7 +503,8 @@ describe('reuse-release-ci-gates CLI', () => {
                     name: 'Linux gates (FFmpeg policy + Rust compile/test)',
                     status: 'completed',
                     conclusion: 'success',
-                    html_url: 'https://example.test/job/3300'
+                    html_url: 'https://example.test/job/3300',
+                    steps: greenSteps('linux-rust-job')
                   }
                 ]
               })

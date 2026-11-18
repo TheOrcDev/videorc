@@ -16,6 +16,9 @@
 //! X sampler both feed [`ViewerAggregator`], so every emitted sample sums all
 //! platforms with a fresh count instead of one sampler's partial total.
 
+#[path = "stream_view_counts.rs"]
+mod view_counts;
+
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -30,6 +33,10 @@ use crate::streaming::StreamPlatform;
 /// service-flags interval (120 seconds by default).
 pub const VIEWER_SAMPLE_INTERVAL: Duration = Duration::from_secs(60);
 pub const VIEWER_SAMPLE_LOG_CODE: &str = "stream-viewers";
+/// A platform's own cumulative view count, one row per successful read.
+/// Views, not people: the stream report shows it per platform and never adds
+/// platforms together. Today only YouTube gives one (`statistics.viewCount`).
+pub const VIEW_COUNT_LOG_CODE: &str = "stream-views";
 /// A platform's count leaves the total once it is this old, regardless of
 /// that provider's polling cadence. Matches the renderer's stale-chip
 /// threshold (`lib/viewer-count-view.ts`).
@@ -169,9 +176,15 @@ where
     }
 }
 
-/// One YouTube viewer poll behind the shared quota breaker (plan 094): no
-/// request while paused or while backing off a 403; a quota refusal sets the
-/// breaker; the call is counted.
+/// One YouTube poll: the concurrent count and the video's own total view
+/// count, both from the same `videos.list` answer (one quota unit).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct YouTubePoll {
+    count: Option<u64>,
+    views: Option<u64>,
+}
+
+#[cfg(test)]
 async fn poll_youtube_count(
     state: &AppState,
     client: &reqwest::Client,
@@ -179,34 +192,65 @@ async fn poll_youtube_count(
     token: &mut crate::session_token::SessionToken,
     backoff: &mut YouTubeViewerBackoff,
 ) -> Option<u64> {
+    poll_youtube(state, client, config, token, backoff)
+        .await
+        .count
+}
+
+/// One YouTube viewer poll behind the shared quota breaker (plan 094): no
+/// request while paused or while backing off a 403; a quota refusal sets the
+/// breaker; the call is counted.
+async fn poll_youtube(
+    state: &AppState,
+    client: &reqwest::Client,
+    config: &YouTubeViewerConfig,
+    token: &mut crate::session_token::SessionToken,
+    backoff: &mut YouTubeViewerBackoff,
+) -> YouTubePoll {
     if crate::youtube_quota::paused_until(state).is_some() {
-        return None;
+        return YouTubePoll::default();
     }
     // Plan 094 (S6): the daily budget slows viewers at 80% and stops them at 95%.
     if crate::youtube_quota::budget_refuses(state, crate::youtube_quota::BudgetCall::Viewers)
         .is_some()
     {
-        return None;
+        return YouTubePoll::default();
     }
     if backoff.skip_polls > 0 {
         backoff.skip_polls -= 1;
-        return None;
+        return YouTubePoll::default();
     }
-    let outcome = poll_with_renewal_outcome(state, client, token, |access_token| async move {
-        fetch_youtube_count(state, client, config, &access_token).await
+    // The answer that carried the count also carries the view count; a
+    // renewed retry's answer replaces a refused one's (which has none).
+    let views = std::sync::Mutex::new(None::<u64>);
+    let outcome = poll_with_renewal_outcome(state, client, token, |access_token| {
+        let views = &views;
+        async move {
+            let (outcome, read) = fetch_youtube_count(state, client, config, &access_token).await;
+            if let Ok(mut slot) = views.lock() {
+                *slot = read;
+            }
+            outcome
+        }
     })
     .await;
+    let views = views.into_inner().ok().flatten();
     match outcome {
         CountFetch::Forbidden => {
             backoff.forbidden_streak = backoff.forbidden_streak.saturating_add(1);
             backoff.skip_polls = youtube_polls_to_skip(backoff.forbidden_streak);
-            None
+            YouTubePoll::default()
         }
         CountFetch::Count(Some(count)) => {
             backoff.forbidden_streak = 0;
-            Some(count)
+            YouTubePoll {
+                count: Some(count),
+                views,
+            }
         }
-        CountFetch::Count(None) | CountFetch::Offline | CountFetch::Refused => None,
+        CountFetch::Count(None) | CountFetch::Offline | CountFetch::Refused => {
+            YouTubePoll { count: None, views }
+        }
     }
 }
 
@@ -245,6 +289,77 @@ pub fn parse_youtube_concurrent_viewers(body: &Value) -> Option<u64> {
         .as_str()?
         .parse()
         .ok()
+}
+
+/// YouTube `videos.list part=statistics` → `viewCount`: "the number of times
+/// the video has been viewed" (a STRING). Views, not people, and it keeps
+/// growing with the replay. Absent when YouTube leaves it out.
+pub fn parse_youtube_view_count(body: &Value, expected_video: &str) -> Option<u64> {
+    let item = body
+        .get("items")?
+        .as_array()?
+        .iter()
+        .find(|item| item.get("id").and_then(Value::as_str) == Some(expected_video))?;
+    view_counts::parse_count(item.get("statistics")?.get("viewCount")?.as_str()?)
+}
+
+/// One read of a platform's own cumulative view count.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PlatformViewCount {
+    pub platform: StreamPlatform,
+    pub views: u64,
+    /// RFC 3339 time of the read.
+    pub at: String,
+}
+
+/// Latest valid provider observation per platform, never a peak or sum.
+/// Missing/invalid reads preserve known data; a later provider correction
+/// can lower the count. Equal timestamps retain the existing observation.
+pub fn best_view_counts(reads: &[PlatformViewCount]) -> Vec<PlatformViewCount> {
+    let mut best: Vec<(PlatformViewCount, chrono::DateTime<chrono::Utc>)> = Vec::new();
+    for read in reads {
+        let Ok(at) = chrono::DateTime::parse_from_rfc3339(&read.at) else {
+            continue;
+        };
+        let at = at.with_timezone(&chrono::Utc);
+        if read.views > view_counts::MAX_COUNT {
+            continue;
+        }
+        match best
+            .iter_mut()
+            .find(|(entry, _)| entry.platform == read.platform)
+        {
+            Some((entry, entry_at)) => {
+                if view_counts::observe(
+                    Some((entry.views, entry_at.timestamp_millis())),
+                    Some((read.views, at.timestamp_millis())),
+                ) == Some((read.views, at.timestamp_millis()))
+                    && at > *entry_at
+                {
+                    *entry = read.clone();
+                    *entry_at = at;
+                }
+            }
+            None => best.push((read.clone(), at)),
+        }
+    }
+    best.sort_by_key(|(entry, _)| entry.platform as u8);
+    best.into_iter().map(|(entry, _)| entry).collect()
+}
+
+/// A session's observations. The report filters to its live window before
+/// selecting the latest valid count, so a late read cannot hide an earlier one.
+pub fn session_view_counts(
+    database: &crate::storage::Database,
+    session_id: &str,
+) -> anyhow::Result<Vec<PlatformViewCount>> {
+    let reads: Vec<PlatformViewCount> = database
+        .list_session_log_messages(session_id, VIEW_COUNT_LOG_CODE, VIEWER_HISTORY_LIMIT)?
+        .iter()
+        .filter_map(|message| serde_json::from_str::<PlatformViewCount>(message).ok())
+        .collect();
+    Ok(reads)
 }
 
 /// Twitch Helix `Get Streams` → `data[0].viewer_count` (empty data = offline).
@@ -407,17 +522,19 @@ fn youtube_viewer_api_root(base: &str) -> String {
     }
 }
 
+/// The concurrent count and, from the same answer, the total view count.
+/// `videos.list` costs one quota unit whatever parts it asks for.
 async fn fetch_youtube_count(
     state: &AppState,
     client: &reqwest::Client,
     config: &YouTubeViewerConfig,
     access_token: &str,
-) -> CountFetch {
+) -> (CountFetch, Option<u64>) {
     let base = youtube_viewer_api_root(&crate::youtube_quota::youtube_api_base_url(
         config.api_base_url.as_deref(),
     ));
     let url = format!(
-        "{}/videos?part=liveStreamingDetails&id={}",
+        "{}/videos?part=liveStreamingDetails,statistics&id={}",
         base.trim_end_matches('/'),
         config.broadcast_id
     );
@@ -430,14 +547,14 @@ async fn fetch_youtube_count(
     )
     .await
     else {
-        return CountFetch::Count(None);
+        return (CountFetch::Count(None), None);
     };
     if response.status() == reqwest::StatusCode::FORBIDDEN {
         // Quota pauses every YouTube caller; any other 403 is this sampler's
         // own problem (permissions), so only it backs off.
         let body = response.text().await.unwrap_or_default();
         let (reason, domain) = crate::youtube_quota::error_reason_and_domain_from_text(&body);
-        return match crate::youtube_quota::classify_youtube_api_error(
+        let outcome = match crate::youtube_quota::classify_youtube_api_error(
             403,
             reason.as_deref(),
             domain.as_deref(),
@@ -449,12 +566,17 @@ async fn fetch_youtube_count(
             crate::youtube_quota::YouTubeApiErrorClass::RateLimited => CountFetch::Count(None),
             _ => CountFetch::Forbidden,
         };
+        return (outcome, None);
     }
     if let Some(outcome) = count_fetch_for_status(response.status()) {
-        return outcome;
+        return (outcome, None);
     }
     let body: Option<Value> = response.json().await.ok();
-    CountFetch::Count(body.as_ref().and_then(parse_youtube_concurrent_viewers))
+    (
+        CountFetch::Count(body.as_ref().and_then(parse_youtube_concurrent_viewers)),
+        body.as_ref()
+            .and_then(|body| parse_youtube_view_count(body, &config.broadcast_id)),
+    )
 }
 
 async fn fetch_twitch_count(
@@ -653,14 +775,16 @@ pub async fn run_viewer_sampler(
         let mut deadline = ProviderDeadline::new();
         loop {
             deadline.wait(&state, true).await;
-            let count = tokio::time::timeout(
+            let poll = tokio::time::timeout(
                 Duration::from_secs(25),
-                poll_youtube_count(&state, &client, &config, &mut token, &mut backoff),
+                poll_youtube(&state, &client, &config, &mut token, &mut backoff),
             )
             .await
-            .ok()
-            .flatten();
-            record_provider_sample(&state, &session_id, StreamPlatform::Youtube, count);
+            .unwrap_or_default();
+            record_provider_sample(&state, &session_id, StreamPlatform::Youtube, poll.count);
+            if let Some(views) = poll.views {
+                record_provider_views(&state, &session_id, StreamPlatform::Youtube, views);
+            }
         }
     };
     let twitch_work = async {
@@ -794,6 +918,25 @@ fn record_provider_sample(
     }
 }
 
+/// Saves one view-count read with the session. Never an event: the renderer
+/// has no use for it, and the strict event contract stays as it is.
+fn record_provider_views(state: &AppState, session_id: &str, platform: StreamPlatform, views: u64) {
+    let read = PlatformViewCount {
+        platform,
+        views,
+        at: chrono::Utc::now().to_rfc3339(),
+    };
+    if let Ok(json) = serde_json::to_string(&read) {
+        let _ = state.database.add_session_log(
+            session_id,
+            HealthLevel::Info,
+            VIEW_COUNT_LOG_CODE,
+            &json,
+            None,
+        );
+    }
+}
+
 /// A provider owns its own monotonic deadline. No modulo coupling to another
 /// provider, no overlapping work, and changed flags never cause catch-up bursts.
 struct ProviderDeadline {
@@ -848,6 +991,81 @@ fn provider_interval(state: &AppState, youtube: bool) -> Duration {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn total_views_require_the_exact_video_and_are_independent_of_concurrency() {
+        let body = json!({"items":[
+            {"id":"other", "statistics":{"viewCount":"99999"}},
+            {"id":"owned", "statistics":{"viewCount":"1203"}, "liveStreamingDetails":{"concurrentViewers":"9"}}
+        ]});
+        assert_eq!(parse_youtube_view_count(&body, "owned"), Some(1203));
+        assert_eq!(parse_youtube_view_count(&body, "missing"), None);
+        assert_eq!(
+            parse_youtube_view_count(
+                &json!({"items":[{"id":"owned", "liveStreamingDetails":{"concurrentViewers":"9"}}]}),
+                "owned"
+            ),
+            None
+        );
+        assert_eq!(
+            parse_youtube_view_count(
+                &json!({"items":[{"id":"owned", "statistics":{"viewCount":"0"}}]}),
+                "owned"
+            ),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn observation_history_keeps_the_latest_valid_read_not_the_peak_or_sum() {
+        let read = |views, at: &str| PlatformViewCount {
+            platform: StreamPlatform::Youtube,
+            views,
+            at: at.into(),
+        };
+        let latest = read(1200, "2026-11-14T18:02:00Z");
+        let reads = [
+            latest.clone(),
+            read(1203, "2026-11-14T18:01:00Z"),
+            read(9999, "bad"),
+            read(u64::MAX, "2026-11-14T18:03:00Z"),
+        ];
+        assert_eq!(best_view_counts(&reads), vec![latest]);
+    }
+
+    #[tokio::test]
+    async fn provider_views_share_the_existing_quota_accounted_request() {
+        let state = quota_test_state();
+        let (base, hits) = spawn_videos(
+            axum::http::StatusCode::OK,
+            json!({"items":[{"id":"bcast", "statistics":{"viewCount":"1203"}}]}),
+        )
+        .await;
+        let config = YouTubeViewerConfig {
+            access_token: "fixture".into(),
+            broadcast_id: "bcast".into(),
+            api_base_url: Some(base),
+            token_source: Default::default(),
+        };
+        let mut token = crate::session_token::SessionToken::new("fixture", Default::default());
+        let result = poll_youtube(
+            &state,
+            &reqwest::Client::new(),
+            &config,
+            &mut token,
+            &mut YouTubeViewerBackoff::default(),
+        )
+        .await;
+        assert_eq!(
+            result,
+            YouTubePoll {
+                count: None,
+                views: Some(1203)
+            }
+        );
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(crate::youtube_quota::usage_snapshot(&state).total_calls, 1);
+    }
 
     #[test]
     fn twitch_empty_data_is_an_offline_answer_not_a_missing_count() {

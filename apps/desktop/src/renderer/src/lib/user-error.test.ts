@@ -57,6 +57,41 @@ describe('userErrorMessage', () => {
     })
   })
 
+  // Plan 243 C5: the web's and the backend's hand-off refusals carry their
+  // cause; only a feed that never arrived is a failure, the rest are refusals.
+  it('names why continuing on another device was refused (plan 243)', () => {
+    const resume = { action: 'continue', object: 'here' }
+    const cases: [string, string, 'warning' | 'error'][] = [
+      [
+        'cloud-handoff-update',
+        'Update Videorc on the other computer first, or end the stream and go live again.',
+        'warning'
+      ],
+      ['cloud-handoff-unsupported', "This show can't continue on another device.", 'warning'],
+      [
+        'cloud-source-not-ready',
+        "Videorc Cloud didn't get this computer's video in time. Try again.",
+        'error'
+      ],
+      ['cloud-not-on-air', 'Your show is live from another device now.', 'warning'],
+      ['cloud-nothing-to-resume', "Your show isn't live anymore.", 'warning'],
+      // R2 A-M6: Go Live on a computer that holds a show another device is on.
+      [
+        'cloud-show-live-elsewhere',
+        'Your show is live on another device. Use Continue here, or end it first.',
+        'warning'
+      ]
+    ]
+    for (const [code, description, tone] of cases) {
+      expect(userErrorMessage(backendError(code, 'raw web text'), resume)).toMatchObject({
+        kind: 'known',
+        tone,
+        title: "Couldn't continue here",
+        description
+      })
+    }
+  })
+
   it('turns an unknown failure into "Couldn\'t {action} {object}" and the one next step', () => {
     const copy = userErrorMessage(new Error('EACCES: permission denied, open /x.png'), IMPORT)
     expect(copy).toEqual({

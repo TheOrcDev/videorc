@@ -1484,6 +1484,7 @@ pub fn derive_status(inputs: &StatusInputs) -> VirtualCameraStatus {
         viewers: None,
         platform_step,
         message: None,
+        source: None,
     };
     if let Err(unavailable) = &inputs.sink {
         status.available = false;
@@ -2462,6 +2463,35 @@ mod tests {
             serde_json::to_value(&unknown_viewers).unwrap(),
             fixture["streamingUnknownViewers"]
         );
+        // Plan 249 S23: a room's Program preview owns the camera, live or paused.
+        let room_health = Some(SinkHealth {
+            connected: true,
+            error: None,
+        });
+        for (key, viewers, source) in [
+            (
+                "streamingRoomProgram",
+                1,
+                crate::room_program_camera::RoomProgramSource::RoomProgramPreview,
+            ),
+            (
+                "readyRoomProgramPaused",
+                0,
+                crate::room_program_camera::RoomProgramSource::RoomProgramPaused,
+            ),
+        ] {
+            let room = crate::virtual_camera_service::with_room_program_source(
+                derive_status(&StatusInputs {
+                    on: true,
+                    platform: Some((VirtualCameraPlatformStep::Ready, None)),
+                    health: room_health.clone(),
+                    viewers: Some(viewers),
+                    ..inputs()
+                }),
+                Some(source),
+            );
+            assert_eq!(serde_json::to_value(&room).unwrap(), fixture[key]);
+        }
         let set: crate::protocol::VirtualCameraSetParams =
             serde_json::from_value(fixture["setParams"].clone()).unwrap();
         assert!(set.on);

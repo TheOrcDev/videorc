@@ -1,4 +1,12 @@
 import {
+  cloudMarkerCreateSchema,
+  cloudMarkerParamsSchema,
+  cloudMarkerSchema,
+  cloudMarkerLookupSchema,
+  type CloudMarker,
+  type CloudMarkerCreate
+} from './cloud-markers'
+import {
   arraySchema,
   booleanSchema,
   enumSchema,
@@ -65,11 +73,12 @@ export interface MarkerChanged {
   marker?: SessionMarker
 }
 export interface MarkerContext {
+  cloudShowId?: string
   sessionId?: string
   available: boolean
   reason?: string
   retryAvailable?: boolean
-  lastMarker?: SessionMarker
+  lastMarker?: SessionMarker | CloudMarker
   voice?: {
     state: 'off' | 'starting' | 'on' | 'blocked'
     reasonCode?: string
@@ -107,11 +116,21 @@ export interface ClipContext {
 }
 export type MarkerRelayCommand = { requestId: string } & (
   | { action: 'screenHide' | 'screenShow' }
+  | { action: 'cloudCreate'; params: CloudMarkerCreate }
+  | { action: 'cloudGet' | 'cloudDelete'; params: { showId: string; markerId: string } }
   | { action: 'create'; params: CreateMarkerParams }
   | { action: 'get'; params: MarkerParams }
   | { action: 'delete'; params: MarkerParams }
 )
-export type MarkerRelayResult = SessionMarker | MarkerLookup | MarkerChanged | { hidden: boolean }
+export type MarkerRelayResult =
+  | SessionMarker
+  | CloudMarker
+  | { status: 'found'; marker: CloudMarker }
+  | { status: 'deleted' }
+  | { deleted: true }
+  | MarkerLookup
+  | MarkerChanged
+  | { hidden: boolean }
 
 export const MARKER_LABEL_MAX_CHARS = 120
 export function markerLabel(raw: string): string | undefined {
@@ -201,9 +220,10 @@ export const markerContextSchema = nullableSchema(
   objectSchema(
     {
       sessionId: optionalSchema(id),
+      cloudShowId: optionalSchema(id),
       available: booleanSchema,
       retryAvailable: optionalSchema(booleanSchema),
-      lastMarker: optionalSchema(sessionMarkerSchema),
+      lastMarker: optionalSchema(unionSchema([sessionMarkerSchema, cloudMarkerSchema])),
       reason: optionalSchema(stringSchema({ maxLength: 1000 })),
       voice: optionalSchema(
         objectSchema(
@@ -244,6 +264,18 @@ export const markerContextSchema = nullableSchema(
   )
 )
 export const markerRelayCommandSchema = unionSchema([
+  objectSchema(
+    { requestId: id, action: literalSchema('cloudCreate'), params: cloudMarkerCreateSchema },
+    strict
+  ),
+  objectSchema(
+    {
+      requestId: id,
+      action: enumSchema(['cloudGet', 'cloudDelete']),
+      params: cloudMarkerParamsSchema
+    },
+    strict
+  ),
   objectSchema({ requestId: id, action: enumSchema(['screenHide', 'screenShow']) }, strict),
   objectSchema(
     { requestId: id, action: literalSchema('create'), params: createMarkerParamsSchema },
@@ -256,6 +288,9 @@ export const markerRelayCommandSchema = unionSchema([
   )
 ])
 export const markerRelayResultSchema = unionSchema([
+  cloudMarkerSchema,
+  cloudMarkerLookupSchema,
+  objectSchema({ deleted: literalSchema(true) }, strict),
   objectSchema({ hidden: booleanSchema }, strict),
   sessionMarkerSchema,
   markerLookupSchema,

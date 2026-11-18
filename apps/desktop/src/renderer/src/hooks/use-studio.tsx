@@ -1,3 +1,28 @@
+import { talkShowOutputPlan, talkShowOutputStartProblem } from '@/lib/talk-show-outputs'
+import { seedRoomFixtureDevices, withRoomFixtureDevices } from '@/lib/room-fixture-devices'
+import { roomSystemResources, takeRoomSystemObservations } from '@/lib/room-system-audio-state'
+import { roomAudioRouting } from '@/lib/room-audio-routing'
+import {
+  resetRoomFrameSurfaces,
+  roomFrameEncodeObserverEnabled,
+  roomFrameTestResources,
+  setRoomFrameEncodeObserver,
+  setRoomFrameTestEnabled
+} from '../lib/room-frame-test-state'
+import {
+  roomNativeMicrophoneEnabled,
+  setRoomNativeMicrophoneEnabled,
+  roomMicrophoneState,
+  roomMicrophoneResources
+} from '../lib/room-microphone-state'
+import { roomPcmTestResources, setRoomPcmTestEnabled } from '../lib/room-pcm-test-state'
+import { cloudTerminalOwner } from '@/lib/cloud-provider-lifecycle'
+import { roomHoldsTheCamera } from '@/lib/replay-buffer-reconcile'
+import type { RoomSceneResult, RoomSceneTarget } from '@/lib/cloud-scene-adapter'
+import { createRoomSceneEditSync } from '@/lib/room-scene-resender'
+import { outputSessionFacts } from '../../../shared/output-session'
+import { cloudRoomActivityFromCloudStatus } from '../../../shared/cloud-room-activity'
+import type { TalkShowRoomClient, TalkShowRoomSnapshot } from '@/lib/talk-show-room'
 import {
   cameraIsAvailable,
   cameraSelectionDiagnostics,
@@ -22,12 +47,8 @@ import {
   systemAccessRows,
   type SystemAccessContext
 } from '@/lib/system-access'
-import { createTakeoverImporter, type TakeoverImportPhase } from '@/lib/takeover-import'
-import {
-  createBannerImporter,
-  type BannerImportKind,
-  type BannerImportPhase
-} from '@/lib/banner-import'
+import type { TakeoverImporter, TakeoverImportPhase } from '@/lib/takeover-import'
+import type { BannerImporter, BannerImportKind, BannerImportPhase } from '@/lib/banner-import'
 import { markChatDeliveryIncomplete } from '../../../shared/chat-delivery'
 import { WINDOW_NAMES } from '../../../shared/window-names'
 import type { CommentsViewSnapshot } from '../../../shared/backend'
@@ -129,6 +150,7 @@ import {
   useContext,
   useEffect,
   useEffectEvent,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -534,6 +556,7 @@ import type {
   RemoteControlStatus,
   RemoteLanPairing,
   RemoteLanStatus,
+  ResourceSelection,
   RuntimeInfo,
   Scene,
   SceneCommitStatus,
@@ -575,6 +598,7 @@ import type {
   VideoSettings,
   VideorcAccountRefreshResult,
   VideorcAccountSnapshot,
+  VideorcApi,
   WarmMicrophoneStatus,
   XNativeLiveCapability,
   XEndResult,
@@ -734,6 +758,8 @@ import {
 export type { GoLivePartialSetup, GoLiveSetupFailure } from '@/lib/go-live-flow'
 
 type CaptionOverlayWork = {
+  room?: { sessionClientId: string; expiresAt: number; stream: boolean; recording: boolean }
+
   client: BackendClient
   epoch: number
   key: string
@@ -778,6 +804,14 @@ function isPreparedPlatformLifecycleOwner(sessionId: string): boolean {
 
 function loadSessionRuntimeRecovery() {
   return import('@/lib/session-runtime-recovery')
+}
+
+function loadBannerImport() {
+  return import('@/lib/banner-import')
+}
+
+function loadTakeoverImport() {
+  return import('@/lib/takeover-import')
 }
 
 function loadCommandFailurePolicy() {
@@ -1538,6 +1572,7 @@ export type StudioContextValue = {
   stopRequestPending: boolean
   screenImportPending: boolean
   screenImportPhase: TakeoverImportPhase
+  pendingScreenImports: readonly ResourceSelection[]
   streamMetadataSavePending: boolean
   supportBundleExportPending: boolean
   // remote control (Stream Deck et al) — status is pushed by the backend
@@ -1562,6 +1597,7 @@ export type StudioContextValue = {
   settings: SettingsState
   setSettings: Dispatch<SetStateAction<SettingsState>>
   captureConfig: CaptureConfig
+  requestRemoteMicrophoneMute: (mode: 'mute' | 'unmute' | 'toggle') => Promise<boolean>
   setCaptureConfig: Dispatch<SetStateAction<CaptureConfig>>
   patchLayout: (patch: Partial<LayoutSettings>) => void
   applyLayoutPatch: (patch: Partial<LayoutSettings>) => void
@@ -1702,7 +1738,8 @@ export type StudioContextValue = {
   dismissSessionRuntimeNotice: () => void
   /** Re-run the exact start that failed (same streaming override). */
   retrySessionStart: () => void
-  importScreenImage: () => Promise<void>
+  importScreenImages: () => Promise<void>
+  importDroppedScreenImages: (files: File[]) => Promise<void>
   renameScreen: (screenId: string, name: string) => Promise<void>
   deleteScreen: (screenId: string) => Promise<void>
   reorderScreen: (screenId: string, targetIndex: number) => Promise<void>
@@ -1752,6 +1789,7 @@ export type StudioContextValue = {
    * start that cannot run says why and resolves false; one that only opened
    * the dialog resolves false too.
    */
+  roomScreenPrivacy?: TalkShowRoomSnapshot['screenPrivacy']
   screenPrivacy: import('@/lib/backend').ScreenPrivacy
   hideScreen: ReturnType<typeof useScreenPrivacy>['hideScreen']
   showScreen: ReturnType<typeof useScreenPrivacy>['showScreen']
@@ -2094,6 +2132,8 @@ interface StudioShellContextValue {
   /** The End livestream question waiting for an answer, if any (plan 174 S0.1). */
   stopConfirmation: SessionStopConfirmation | null
   confirmStopSession: () => void
+  /** Plan 243: the question's "Continue on another device" answer. */
+  handOffStopSession: () => void
   cancelStopSession: () => void
   /** First-run setup replaces the workspace (plan 203 S5): preview and global keys wait. */
   firstRunSetupOpen: boolean
@@ -2846,7 +2886,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   )
   const setDeviceList = useCallback((nextDevices: DeviceList) => {
     setPermissionEvidenceClient(clientRef.current)
-    commitDeviceList(nextDevices)
+    commitDeviceList(import.meta.env.DEV ? withRoomFixtureDevices(nextDevices) : nextDevices)
   }, [])
   const previewDevicesSignature = useMemo(
     () => previewDeviceRefreshSignature(deviceList.devices),
@@ -2901,6 +2941,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // Open the room in flight (plan 224 D6): the ring stepped aside for it
   // and stays off until the room's own phase holds the camera.
   const roomOpenHoldRef = useRef(false)
+  const [cloudStatus, setCloudStatus] = useState<CloudStatus | null>(null)
+  const cloudStatusRef = useRef<CloudStatus | null>(null)
   const [logs, setLogs] = useState<BackendLogEvent[]>([])
   const [healthEvents, setHealthEvents] = useState<HealthEvent[]>([])
   // Plan 223: the watchdog's alerts, drawn here and in the Stream Manager.
@@ -3625,6 +3667,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       setLastVoiceMarker(marker)
       void import('../lib/marker-toast').then((module) => module.showMarkerToast(client, marker))
     })
+    const offCloudMarkerCreated = client?.on('cloud.marker.created', (marker) => {
+      if (marker.source !== 'voice') return
+      setLastVoiceMarker(marker)
+      void import('../lib/marker-toast').then((module) => module.showMarkerToast(client, marker))
+    })
     const offMarkerChanged = client?.on('session.marker.changed', (changed) => {
       setLastVoiceMarker((previous) =>
         previous?.id === changed.markerId && changed.revision >= previous.revision
@@ -3650,6 +3697,12 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             if (!outcome.ok) throw new Error(outcome.message)
             return { hidden: command.action === 'screenHide' }
           }
+          case 'cloudCreate':
+            return client.requestTyped('cloud.marker.create', command.params)
+          case 'cloudGet':
+            return client.requestTyped('cloud.marker.get', command.params)
+          case 'cloudDelete':
+            return client.requestTyped('cloud.marker.delete', command.params)
           case 'create':
             return client.requestTyped('session.marker.create', command.params)
           case 'get':
@@ -3674,12 +3727,20 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     const offClipMark = window.videorc?.onClipMarkRequest?.((command: ClipMarkCommand) => {
       void (async () => {
         if (!client) throw offlineError()
-        if (!isActiveRecordingState(recordingRef.current.state)) {
+        if (
+          !isActiveRecordingState(recordingRef.current.state) &&
+          cloudStatusRef.current?.room?.phase !== 'open'
+        ) {
           throw new Error("No session is running, so there's nothing to mark.")
         }
         // Plan 199: main checked the length (30, 60 or none).
         const { seconds } = command
-        return client.request<ClipMarkedEvent>('clip.mark', seconds && { seconds })
+        return client.request<ClipMarkedEvent>(
+          'clip.mark',
+          cloudStatusRef.current?.room?.phase === 'open'
+            ? { seconds: seconds ?? 30, requestId: command.requestId }
+            : seconds && { seconds }
+        )
       })()
         .then(async (event) => {
           await window.videorc?.pushClipMarkResult?.({
@@ -3721,18 +3782,26 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       offBanner?.()
       offMarker?.()
       offMarkerCreated?.()
+      offCloudMarkerCreated?.()
       offMarkerRefused?.()
       offMarkerChanged?.()
     }
   }, [client])
   const [lastVoiceMarker, setLastVoiceMarker] = useState<
-    import('@/lib/backend').SessionMarker | null
+    import('../../../shared/cloud-markers').TimelineMarker | null
   >(null)
   const [markerVoice, setMarkerVoice] = useState<{
     sessionId: string
     listening: import('@/lib/backend').CohostListening
   } | null>(null)
   useEffect(() => client?.on('session.marker.voice.status', setMarkerVoice), [client])
+  useEffect(
+    () =>
+      client?.on('cloud.marker.voice.status', ({ showId, listening }) =>
+        setMarkerVoice({ sessionId: showId, listening })
+      ),
+    [client]
+  )
   // Backend-authoritative comment highlight. The renderer owns only the
   // temporary rasterization phase; `On stream` comes from the backend state.
   const [commentHighlightState, setCommentHighlightState] = useState<CommentHighlightState>({
@@ -3794,10 +3863,13 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           }
           return commentHighlightIntentRef.current === intent ? cleared : null
         }
-        const streamVideo = streamOutputVideoSettings(
-          captureConfig.video,
-          captureConfig.streamEnabled ? captureConfig.streaming : undefined
-        )
+        const streamVideo =
+          cloudStatusRef.current?.room?.phase === 'open'
+            ? { width: 1920, height: 1080 }
+            : streamOutputVideoSettings(
+                captureConfig.video,
+                captureConfig.streamEnabled ? captureConfig.streaming : undefined
+              )
         const avatarSource = options?.milestone?.avatarUrl ?? message.authorAvatarUrl
         const [avatarUrl, canvases] = await Promise.all([
           avatarSource ? window.videorc?.cacheChatAvatar?.(avatarSource).catch(() => null) : null,
@@ -4301,7 +4373,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const goLiveCaptionsReadiness = useMemo(
     () =>
       decideGoLiveCaptionsReadiness({
-        persistedEnabled: captureConfig.captions.enabled,
+        persistedEnabled: captureConfig.captions.enabled && cloudStatus?.room?.phase !== 'open',
         suppressForSession: suppressCaptionsForSession,
         capabilities: aiCapabilities,
         outputReadiness: goLiveCaptionOutputReadiness,
@@ -4310,6 +4382,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     [
       aiCapabilities,
       goLiveCaptionOutputReadiness,
+      cloudStatus?.room?.phase,
       captureConfig.captions.enabled,
       suppressCaptionsForSession,
       captionsPlatformUnavailable
@@ -4522,7 +4595,15 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const endLivestreamArmedAtRef = useRef<number | null>(null)
   const [screenImportPhase, setScreenImportPhase] = useState<TakeoverImportPhase>('idle')
   const screenImportPending = screenImportPhase !== 'idle'
-  const screenImporter = useRef(createTakeoverImporter())
+  const [pendingScreenImports, setPendingScreenImports] = useState<readonly ResourceSelection[]>([])
+  // Read by the connection-drop toast: committed state only, so a render
+  // React throws away can't change the count it reports.
+  const pendingScreenImportsRef = useRef(pendingScreenImports)
+  useLayoutEffect(() => {
+    pendingScreenImportsRef.current = pendingScreenImports
+  }, [pendingScreenImports])
+  // Made on the first takeover import, from the lazy takeover-import module.
+  const screenImporter = useRef<TakeoverImporter | null>(null)
   const screenListEventRevision = useRef(0)
   const activeScreenEventRevision = useRef(0)
   const [bannerImportPhase, setBannerImportPhase] = useState<BannerImportPhase>('idle')
@@ -4531,21 +4612,24 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // backend says otherwise, and empty again when the connection goes.
   const [htmlOverlayStatuses, setHtmlOverlayStatuses] =
     useState<readonly HtmlOverlayStatus[]>(NO_HTML_OVERLAY_STATUSES)
-  const bannerImporter = useRef(createBannerImporter())
+  // Made on the first banner import, from the lazy banner-import module.
+  const bannerImporter = useRef<BannerImporter | null>(null)
   // Bumped by every `banners.changed`: the reliable full list wins over a
   // late reply, the way the takeover list does.
   const bannerListEventRevision = useRef(0)
   useEffect(() => {
-    screenImporter.current.reset()
+    screenImporter.current?.reset()
     setScreenImportPhase('idle')
-    bannerImporter.current.reset()
+    bannerImporter.current?.reset()
     setBannerImportPhase('idle')
     if (wsStatus !== 'connected') setHtmlOverlayStatuses(NO_HTML_OVERLAY_STATUSES)
-    const importer = screenImporter.current
-    const bannerImport = bannerImporter.current
+    setPendingScreenImports([])
+    // The holders, not their values: an importer may be made after this effect.
+    const screenImport = screenImporter
+    const bannerImport = bannerImporter
     return () => {
-      importer.reset()
-      bannerImport.reset()
+      screenImport.current?.reset()
+      bannerImport.current?.reset()
     }
   }, [client, wsStatus])
   const [streamMetadataSavePending, setStreamMetadataSavePending] = useState(false)
@@ -4658,6 +4742,15 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // can still restore only the microphone mute introduced by the takeover.
   const takeoverMuteOwnershipRef = useRef(loadScreenTakeoverMuteOwnership())
   const commitActiveScreen = useCallback((screen: StreamScreen | null): void => {
+    roomAudioRouting.takeover(screen !== null)
+    if (cloudStatusRef.current?.room?.phase === 'open') {
+      takeoverMuteOwnershipRef.current = null
+      persistScreenTakeoverMuteOwnership(null)
+      // D3: program gain owns takeover silence. Conversation and operator mute
+      // are independent; clearing a takeover never writes microphone settings.
+      setActiveScreen(screen)
+      return
+    }
     const transition = screenTakeoverMicrophoneTransition({
       active: screen !== null,
       microphoneMuted: captureConfigRef.current.audio.microphoneMuted,
@@ -4820,15 +4913,21 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const markerContextForWindow = useMemo<MarkerContext>(() => {
     // A buffer-only session (plan 181) has no Library row to hold a marker,
     // so the voice marker waits for a recording or a livestream.
+    const cloudShowId =
+      cloudStatus?.room?.phase === 'open' && cloudStatus.onAir?.thisDevice !== false
+        ? cloudStatus.show?.id
+        : undefined
     const available = Boolean(
-      client &&
-      recording.sessionId &&
-      (recording.state === 'recording' || recording.state === 'streaming') &&
-      recording.replayOnly !== true
+      cloudShowId ||
+      (client &&
+        recording.sessionId &&
+        (recording.state === 'recording' || recording.state === 'streaming') &&
+        recording.replayOnly !== true)
     )
     // The Clip action (R4): the last seconds whenever the ring holds frames,
     // a mark while a session runs; the window shows the button on either.
-    const clipAvailable = replayState.state === 'on' || isActiveRecordingState(recording.state)
+    const clipAvailable =
+      Boolean(cloudShowId) || replayState.state === 'on' || isActiveRecordingState(recording.state)
     const clipShortcut = settings.globalShortcuts?.clipMark
     const longClipShortcut = settings.globalShortcuts?.clipMarkLong
     const clipOff = clipAvailable
@@ -4842,11 +4941,12 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             : ('idle' as const)
     return {
       sessionId: recording.sessionId,
+      ...(cloudShowId ? { cloudShowId } : {}),
       available,
       reason: available ? undefined : 'Start a recording or livestream to make a marker.',
       lastMarker: lastVoiceMarker ?? undefined,
       voice:
-        markerVoice && markerVoice.sessionId === recording.sessionId
+        markerVoice && markerVoice.sessionId === (cloudShowId ?? recording.sessionId)
           ? markerVoice.listening
           : undefined,
       clip: {
@@ -4871,6 +4971,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     }
   }, [
     captureConfig.replayBuffer.enabled,
+    cloudStatus,
     client,
     recording.sessionId,
     recording.state,
@@ -4987,6 +5088,20 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       return null
     }
     const owner = platformLifecycleOwnerRef.current
+    platformLifecycleOwnerRef.current = null
+    return owner
+  }, [])
+  // Plan 243 D7: a hand-off or a take-over stops this computer's session and
+  // the show goes on, so no broadcast of it is completed or ended: its owner
+  // is dropped, and the session's and the show's ids (a talk show's owner
+  // keys on the show) stay latched until this computer is on air again
+  // (R2 B-H1: a Continue here that fails keeps the protection).
+  const handedOffRef = useRef<(string | undefined)[]>([])
+  const latchHandOff = useCallback((ids: (string | undefined)[]) => {
+    const owner = platformLifecycleOwnerRef.current
+    handedOffRef.current = ids.filter(Boolean)
+    if (!owner || !handedOffRef.current.includes(owner.sessionId)) return null
+    platformLifecycleRun.current += 1
     platformLifecycleOwnerRef.current = null
     return owner
   }, [])
@@ -5247,6 +5362,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const sourceDeviceSwitchPending = sourceSelectionState.pending
   const sourceSwitchReason = useCallback(
     (kind: LiveSourceDeviceSwitchPending): string | null => {
+      if (roomHoldsTheCamera(cloudStatusRef.current?.room) && kind === 'capture')
+        return 'Use the room screen-share control.'
       // Only a live socket can be mid-bootstrap. With no backend there is no
       // session to fence, and the next recording.status reconciles the pick.
       if (sourceStatusUnknownRef.current && (wsStatus === 'connecting' || wsStatus === 'connected'))
@@ -5283,6 +5400,14 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       runtime.showBackendError(error, status, context)
     )
   }, [])
+
+  useEffect(() => {
+    const stopped = pendingScreenImportsRef.current.length
+    if (stopped === 0) return
+    void loadTakeoverImport().then(({ takeoverConnectionDropError }) =>
+      reportError(takeoverConnectionDropError(stopped), { action: 'import', object: 'the images' })
+    )
+  }, [client, reportError, wsStatus])
 
   const retryCaptureRecovery = useCallback(async (): Promise<void> => {
     const activeClient = clientRef.current
@@ -5477,14 +5602,64 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // runner restart (its platforms reconnect, or they could not), and so
   // does the hour before a show's 12-hour cap (D18). Nothing else
   // here is news: the Destinations page and the Stream health stat show the rest.
-  const [cloudStatus, setCloudStatus] = useState<CloudStatus | null>(null)
-  const cloudStatusRef = useRef<CloudStatus | null>(null)
-  const commitCloudStatus = useCallback((next: CloudStatus): void => {
-    const previous = cloudStatusRef.current
-    cloudStatusRef.current = next
-    setCloudStatus(next)
-    void loadCloudNotices().then((n) => n.toastCloudStatus(previous, next))
+  const stopOutputRef = useRef<((output: 'recording' | 'live') => Promise<boolean>) | null>(null)
+  const roomControlsRef = useRef<TalkShowRoomClient | null>(null)
+  /** Plan 249 S12: asks for the room scene to be sent again after a confirmed edit. */
+  const requestRoomSceneResendRef = useRef<() => void>(() => {})
+  const [roomMedia, setRoomMedia] = useState<TalkShowRoomSnapshot | undefined>()
+  const onRoomMediaSnapshot = useCallback((snapshot: TalkShowRoomSnapshot) => {
+    setRoomMedia((previous) =>
+      previous?.state === snapshot.state &&
+      previous.identity === snapshot.identity &&
+      previous.local.micMuted === snapshot.local.micMuted &&
+      previous.local.cameraOff === snapshot.local.cameraOff &&
+      previous.local.microphone === snapshot.local.microphone &&
+      JSON.stringify(previous.screenPrivacy) === JSON.stringify(snapshot.screenPrivacy)
+        ? previous
+        : snapshot
+    )
+    if (snapshot.state !== 'connected') return
+    setCaptureConfig((current) => {
+      if (
+        current.audio.microphoneMuted === snapshot.local.micMuted &&
+        current.sources.cameraOff === snapshot.local.cameraOff
+      )
+        return current
+      const next = {
+        ...current,
+        audio: { ...current.audio, microphoneMuted: snapshot.local.micMuted },
+        sources: { ...current.sources, cameraOff: snapshot.local.cameraOff }
+      }
+      captureConfigRef.current = next
+      return next
+    })
   }, [])
+  const commitCloudStatus = useCallback(
+    (next: CloudStatus): void => {
+      const previous = cloudStatusRef.current
+      cloudStatusRef.current = next
+      // Plan 243 D7: sent before the session stops, so its stop completes
+      // nothing; this computer back on air (Continue here) ends the latch.
+      const here = (status: CloudStatus | null) =>
+        status?.onAir?.thisDevice && !status.onAir.waiting
+      if (next.stoppedBy && !previous?.stoppedBy) {
+        latchHandOff([next.sessionId, recordingRef.current.sessionId, next.show?.id])
+      } else if (here(next) && !here(previous)) handedOffRef.current = []
+      const terminalOwner = cloudTerminalOwner(previous, next)
+      if (
+        terminalOwner &&
+        !handedOffRef.current.includes(terminalOwner) &&
+        !stopSessionInFlightPromiseRef.current
+      ) {
+        platformLifecycleRun.current += 1
+        const owner = claimPlatformLifecycleOwner(terminalOwner)
+        if (owner) void settleClaimedPlatformLifecycleOwnerRef.current?.(owner).catch(reportError)
+      }
+      setCloudStatus(next)
+      void loadCloudNotices().then((n) => n.toastCloudStatus(previous, next))
+    },
+    [claimPlatformLifecycleOwner, latchHandOff, reportError]
+  )
 
   // --- Live Chat Co-host (Premium cloud AI) --------------------------------
   // The BACKEND owns the engine: the tick scheduler, the open-question set,
@@ -5644,7 +5819,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   )
   // The notification's click, a fix from the Stream Manager and the idle
   // time for still-there (plan 223 A6, A7), mounted from the lazy chunk.
-  const watchdogLive = sessionIsLive(recording)
+  // Plan 249 S26: a cloud room on air is live too: it has no local session,
+  // and its alerts notify like any livestream's.
+  const watchdogLive =
+    sessionIsLive(recording) || cloudRoomActivityFromCloudStatus(cloudStatus) === 'live'
   watchdogLiveRef.current = watchdogLive
   useEffect(() => {
     let dispose: (() => void) | null = null
@@ -5677,6 +5855,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   }, [client, commitCloudStatus])
   const endCloudShow = useCallback(async (): Promise<void> => {
     if (!client) return
+    if (cloudStatusRef.current?.room?.live && !(await stopOutputRef.current?.('live'))) return
     return (await loadCloudNotices()).endCloudShow(client, commitCloudStatus)
   }, [client, commitCloudStatus])
   // The result is never a toast: the Livestream row shows it (C6b). Only a
@@ -5694,17 +5873,17 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     if (
       !client ||
       wsStatus !== 'connected' ||
-      !recording.sessionId ||
-      !['recording', 'streaming'].includes(recording.state)
+      (!(cloudStatus?.room?.phase === 'open' && cloudStatus.onAir?.thisDevice !== false) &&
+        (!recording.sessionId || !['recording', 'streaming'].includes(recording.state)))
     )
       return
     let cancelled = false
-    const sessionId = recording.sessionId
-    void client
-      .requestTyped('session.marker.voice.configure', {
-        sessionId,
-        consent: aiConsent
-      })
+    const showId = cloudStatus?.room?.phase === 'open' ? cloudStatus.show?.id : undefined
+    const sessionId = showId ?? recording.sessionId!
+    const configured = showId
+      ? client.requestTyped('cloud.marker.voice.configure', { showId, consent: aiConsent })
+      : client.requestTyped('session.marker.voice.configure', { sessionId, consent: aiConsent })
+    void configured
       .then((listening) => {
         if (!cancelled) setMarkerVoice({ sessionId, listening })
       })
@@ -5731,7 +5910,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     cohostEnabled,
     cohostListen,
     cohostGate.allowed,
-    cohostState?.status
+    cohostState?.status,
+    cloudStatus?.room?.phase,
+    cloudStatus?.show?.id,
+    cloudStatus?.onAir?.thisDevice
   ])
   // The Buddy on stream (plan 164 S-C2, plan 168 S-B1). The backend owns the
   // state and the bubble and draws the pet itself from its atlas; this
@@ -7059,10 +7241,12 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       setSessionsLoadingMore(false)
       try {
         await resumePendingSessionDeletions(activeClient)
-        const [nextPage, nextTotals] = await Promise.all([
-          activeClient.requestTyped('sessions.list', { limit: SESSION_LIST_PAGE_LIMIT }),
-          activeClient.request<SessionStorageTotals>('sessions.storage')
-        ])
+        // Refetch every row already loaded (Load more; one page holds at most
+        // 200), so a rename or delete on page 2+ keeps the user's place (QA F5).
+        const page = await activeClient.requestTyped('sessions.list', {
+          limit: Math.min(200, Math.max(SESSION_LIST_PAGE_LIMIT, sessionsRef.current.length))
+        })
+        const nextTotals = await activeClient.request<SessionStorageTotals>('sessions.storage')
         if (
           clientRef.current !== activeClient ||
           !refreshRequests.isCurrent('first-page', requestToken)
@@ -7073,10 +7257,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         // the old cursor. Advancing again at commit prevents it from appending
         // that stale page after the new first page becomes authoritative.
         sessionListGenerationRef.current += 1
-        setSessions(
-          finalizationJournalRef.current.reconcile(nextPage.items, finalizationCheckpoint)
-        )
-        setSessionsNextCursor(nextPage.nextCursor ?? null)
+        setSessions(finalizationJournalRef.current.reconcile(page.items, finalizationCheckpoint))
+        setSessionsNextCursor(page.nextCursor ?? null)
         setSessionStorageTotals(nextTotals)
       } finally {
         refreshRequests.finish('first-page', requestToken)
@@ -7550,8 +7732,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // twice a second); it clears when chat empties, both switches go off or the
   // livestream ends. Nothing loads until the box is first switched on.
   const chatOverlayLayout = overlayLayout.chat
+  const graphicsOutputFacts = outputSessionFacts(recording, cloudStatus, wsStatus === 'connected')
   const chatOverlayOn =
-    recordingLive && (chatOverlayLayout.showOnStream || chatOverlayLayout.showInRecording)
+    graphicsOutputFacts.freshness === 'fresh' &&
+    (graphicsOutputFacts.live || graphicsOutputFacts.recording) &&
+    (chatOverlayLayout.showOnStream || chatOverlayLayout.showInRecording)
   const chatOverlayDriverRef = useRef<{
     client: BackendClient
     driver: Promise<ChatOverlayDriver | null>
@@ -8344,6 +8529,12 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       }),
       // A clean cut that finished out of view (plan 119 S15): its copy joins
       // the Library, and the ready toast says so once per cut-list revision.
+      nextClient.on('cloud.clip.job', (job) => {
+        if (job.state === 'complete' && job.localSessionId) void refreshSessions(nextClient)
+      }),
+      nextClient.on('cloud.recordings.download', (event) => {
+        if (event.state === 'done' && event.localSessionId) void refreshSessions(nextClient)
+      }),
       nextClient.on('cleanCut.status', (job) => {
         setCleanCutJobs((current) => upsertCleanCutJob(current, job))
         if (job.state !== 'completed') return
@@ -9765,6 +9956,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           workingBackgroundRef.current,
           activeSavedSceneIdRef.current
         )
+        // Plan 249 S12: a Freeform drag, nudge or reset reaches the room scene.
+        captureConfigRef.current = { ...captureConfigRef.current, layout }
+        requestRoomSceneResendRef.current()
         return
       }
 
@@ -9783,12 +9977,15 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         }
       }
       patchLayout(transformPatch)
+      const layout = { ...captureConfigRef.current.layout, ...transformPatch }
       persistWorkingVisual(
-        { ...captureConfigRef.current.layout, ...transformPatch },
+        layout,
         captureConfigRef.current.sources,
         workingBackgroundRef.current,
         activeSavedSceneIdRef.current
       )
+      captureConfigRef.current = { ...captureConfigRef.current, layout }
+      requestRoomSceneResendRef.current()
     },
     [patchLayout, persistWorkingVisual]
   )
@@ -10002,6 +10199,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       void refreshEntitlementsForClient(client).catch(() => {
         // Preserve the current fail-closed snapshot on transport failure.
       })
+      // Plan 243 D10: and a show live from another device, unless this
+      // computer is live (the chunk asks at most once per 10 s).
+      if (!sessionIsLive(recordingRef.current)) {
+        void loadCloudNotices().then((n) => n.checkCloudShow(client))
+      }
       if (account?.status === 'signed-in') {
         refreshAccountSnapshot()
       }
@@ -10335,6 +10537,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           workingBackgroundRef.current,
           activeSavedSceneIdRef.current
         )
+        // Plan 249 S12: Show and Hide reach the room scene.
+        requestRoomSceneResendRef.current()
       } catch (error) {
         if (
           clientRef.current === client &&
@@ -11173,11 +11377,289 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     return committed
   }, [requestLayoutTransaction])
 
+  /** The layout a preset choice commits; the room route resolves the same one. */
+  const presetTransactionLayout = useCallback(
+    (current: CaptureConfig, patch: Partial<LayoutSettings>): LayoutSettings => {
+      const nextPreset = patch.layoutPreset ?? current.layout.layoutPreset
+      // Choosing a preset scene EXITS freeform (unless the patch says
+      // otherwise): the preset's fixed arrangement is what the user asked
+      // for, and stale overrides must not leak into a later freeform entry.
+      const leavesArrangement =
+        patch.layoutPreset !== undefined && patch.arrangementMode === undefined
+      return {
+        ...current.layout,
+        ...(patch.layoutPreset !== undefined && workingOriginRef.current === 'saved'
+          ? current.layoutFramingMemory.layouts[nextPreset]
+          : recalledLayoutFraming(
+              current.layoutFramingMemory,
+              current.layout.layoutPreset,
+              nextPreset
+            )),
+        ...(leavesArrangement
+          ? { arrangementMode: 'preset' as const, sourceTransformOverrides: {} }
+          : {}),
+        ...patch,
+        cameraTransformMode: 'preset',
+        cameraTransform: null
+      }
+    },
+    []
+  )
+  const talkShowRoomPhaseForScenes = cloudStatus?.room?.phase ?? 'closed'
+  // Plan 249 S12: while a room holds the camera, scene commands (click,
+  // hotkey, remote, agent, Follow) go to the room program. Per room and off
+  // by default (production qualification is not run); the room's own
+  // layouts stay until the host turns scenes on.
+  const roomScenesEnabledRef = useRef(false)
+  /** The guest roles of the scene on the room program, for a re-send after an edit. */
+  const roomSceneExtensionRef = useRef<unknown>(undefined)
+  const roomScenesShowRef = useRef<string | null>(null)
+  const roomScenesOn = useCallback((): boolean => {
+    const show = cloudStatusRef.current?.show?.id ?? null
+    if (roomScenesShowRef.current !== show) {
+      roomScenesShowRef.current = show
+      roomScenesEnabledRef.current = false
+    }
+    return roomScenesEnabledRef.current
+  }, [])
+  const setRoomScenesEnabled = useCallback((enabled: boolean) => {
+    roomScenesShowRef.current = cloudStatusRef.current?.show?.id ?? null
+    roomScenesEnabledRef.current = enabled
+  }, [])
+  /** Plan 249 S14: the capturer source a scene last asked the room to share (smoke evidence). */
+  const roomScreenWantedRef = useRef<string | null>(null)
+  /** Plan 249 S14: one background preparer per Studio (its live clock continues). */
+  const roomBackgroundsRef = useRef<Promise<
+    Awaited<ReturnType<typeof import('@/lib/room-background').createAppRoomBackgrounds>>
+  > | null>(null)
+  /** One send through the scene adapter, with the room as it is now. */
+  const sendSceneToRoom = useCallback(
+    async (
+      target: Omit<RoomSceneTarget, 'video'>,
+      animate: boolean,
+      current?: () => boolean
+    ): Promise<RoomSceneResult> => {
+      const { applySceneToRoom } = await import('@/lib/cloud-scene-adapter')
+      return applySceneToRoom(
+        { ...target, video: captureConfigRef.current.video },
+        {
+          resolve: (params) => {
+            if (!clientRef.current) throw offlineError()
+            return clientRef.current.requestTyped('cloud.scene.resolve', params)
+          },
+          room: () => {
+            const controls = roomControlsRef.current
+            const status = cloudStatusRef.current
+            if (!controls || !status?.room || !status.show) return null
+            const snapshot = controls.snapshot
+            return {
+              identity:
+                snapshot.state === 'connected' && snapshot.identity === `host:${status.show.id}`
+                  ? snapshot.identity
+                  : null,
+              cameraPublished: Boolean(snapshot.local.camera) && !snapshot.local.cameraOff,
+              cameraOff: snapshot.local.cameraOff,
+              screenPublished: Boolean(snapshot.local.screen),
+              screenSourceId: controls.screenSourceId,
+              stage: status.room.stage,
+              commitScene: (content, assets) => controls.commitScene(content, assets)
+            }
+          },
+          // Plan 249 S14: the scene's own screen or window, through main's
+          // one-shot source grant and the room's privacy-gated capture.
+          shareScreen: async (want) => {
+            const controls = roomControlsRef.current
+            if (!controls) throw new Error('The room is not open.')
+            roomScreenWantedRef.current = want.capturerId
+            const granted = await window.videorc?.setTalkShowMediaGrant?.({
+              video: true,
+              screenSourceId: want.capturerId
+            })
+            if (!granted) throw new Error('the room did not accept the source.')
+            await controls.replaceScreenSource(want.capturerId)
+            if (controls.screenSourceId !== want.capturerId)
+              throw new Error('another share replaced it.')
+          },
+          background: async (background) => {
+            roomBackgroundsRef.current ??= import('@/lib/room-background').then((module) =>
+              module.createAppRoomBackgrounds()
+            )
+            const backgrounds = await roomBackgroundsRef.current.catch((error: unknown) => {
+              roomBackgroundsRef.current = null
+              throw error
+            })
+            return backgrounds.prepare(background)
+          },
+          setStage: async (stage) => {
+            if (!clientRef.current) throw offlineError()
+            commitCloudStatus(
+              await clientRef.current.requestTyped('cloud.stage.set', {
+                ...stage,
+                hostShape:
+                  stage.hostShape ??
+                  (captureConfigRef.current.layout.cameraShape === 'circle' ? 'circle' : 'rounded')
+              })
+            )
+          },
+          animate,
+          ...(current ? { current } : {})
+        }
+      )
+    },
+    [commitCloudStatus]
+  )
+  /**
+   * The native working scene follows the scene put on the room program: an
+   * idle commit (no capture start, no camera wait) and the same working-state
+   * update a native switch makes. So the Scene editor's drags, nudges, resets
+   * and Show/Hide act on the scene viewers see, and the Preview shows it
+   * when the room closes.
+   */
+  const alignNativeToRoomScene = useCallback(
+    async (target: Omit<RoomSceneTarget, 'video'>, savedSceneId: string | null) => {
+      const client = clientRef.current
+      if (!client) return
+      const current = captureConfigRef.current
+      const coupling = verticalOrientationVideoPatch(
+        current.layout.layoutPreset,
+        target.layout.layoutPreset,
+        current.video,
+        current.verticalRestoreVideo
+      )
+      const sources = withoutSceneApp(target.sources)
+      try {
+        const status = await client.request<SceneCommitStatus>('scene.load_from_capture_config', {
+          sources,
+          layout: target.layout,
+          video: coupling?.video ?? current.video,
+          ...(target.background ? { background: target.background } : {})
+        })
+        applyCommittedScene(status)
+        applyLayoutTransactionState({
+          sceneRevision: status.sceneRevision,
+          scene: status.scene,
+          layout: target.layout,
+          compositorStatus: status.compositorStatus,
+          origin: savedSceneId ? 'saved' : 'builtin',
+          sources,
+          savedSceneId,
+          sceneSwitch: true,
+          ...(coupling
+            ? {
+                captureConfigPatch: {
+                  video: coupling.video,
+                  verticalRestoreVideo: coupling.verticalRestoreVideo
+                }
+              }
+            : {})
+        })
+      } catch (error) {
+        reportError(error, { action: 'switch', object: 'the scene' })
+      }
+    },
+    [applyCommittedScene, applyLayoutTransactionState, reportError]
+  )
+  /** A scene is on this room's program and scenes are on: edits go to the room. */
+  const roomSceneLive = useCallback(
+    (): boolean =>
+      roomHoldsTheCamera(cloudStatusRef.current?.room) &&
+      roomScenesOn() &&
+      Boolean(roomControlsRef.current?.sceneContent),
+    [roomScenesOn]
+  )
+  // Plan 249 S12: confirmed edits (drag, nudge, reset, Show/Hide, a look
+  // change, new guest roles) reach the room scene, coalesced and fenced.
+  const roomSceneEditSyncRef = useRef<{ request(): void; cancel(): void } | null>(null)
+  const roomSceneEditDepsRef = useRef({ live: roomSceneLive, send: sendSceneToRoom })
+  roomSceneEditDepsRef.current = { live: roomSceneLive, send: sendSceneToRoom }
+  roomSceneEditSyncRef.current ??= createRoomSceneEditSync({
+    live: () => roomSceneEditDepsRef.current.live(),
+    room: () => roomControlsRef.current,
+    target: () => ({
+      layout: captureConfigRef.current.layout,
+      sources: captureConfigRef.current.sources,
+      background: workingBackgroundRef.current ?? null,
+      extension: roomSceneExtensionRef.current
+    }),
+    // An edit lands at once, as a native drag does.
+    send: (target, current) => roomSceneEditDepsRef.current.send(target, false, current),
+    failed: (result) =>
+      result.ok || result.commit?.state === 'superseded' || result.commit?.state === 'waiting'
+        ? null
+        : (result.message ?? "The scene change couldn't be sent to the room."),
+    warn: (message) => toast.warning(message, { id: 'room-scene' }),
+    now: () => performance.now()
+  })
+  requestRoomSceneResendRef.current = () => roomSceneEditSyncRef.current?.request()
+  const applySceneInRoom = useCallback(
+    async (
+      target: Omit<RoomSceneTarget, 'video'>,
+      retry: () => void,
+      savedSceneId: string | null = null
+    ): Promise<{ ok: boolean; message?: string }> => {
+      if (!roomScenesOn()) {
+        const message = 'Scenes are off in this room. The room layouts stay on the program.'
+        toast.warning(message, {
+          id: 'room-scenes',
+          action: {
+            label: 'Use scenes',
+            onClick: () => {
+              setRoomScenesEnabled(true)
+              retry()
+            }
+          }
+        })
+        return { ok: false, message }
+      }
+      // A scene chosen now outranks any edit still waiting to be sent.
+      roomSceneEditSyncRef.current?.cancel()
+      roomSceneExtensionRef.current = target.extension
+      const result = await sendSceneToRoom(target, settingsRef.current.animateSceneChanges === true)
+      if (result.message)
+        (result.ok ? toast.message : toast.warning)(result.message, { id: 'room-scene' })
+      const state = result.commit?.state
+      if (state && state !== 'failed' && state !== 'superseded')
+        await alignNativeToRoomScene(target, savedSceneId)
+      return { ok: result.ok, ...(result.message ? { message: result.message } : {}) }
+    },
+    [alignNativeToRoomScene, roomScenesOn, sendSceneToRoom, setRoomScenesEnabled]
+  )
+  useEffect(() => {
+    // A room closing or another show drops whatever edit was waiting.
+    if (talkShowRoomPhaseForScenes === 'closed') roomSceneEditSyncRef.current?.cancel()
+  }, [talkShowRoomPhaseForScenes, cloudStatus?.show?.id])
+  useEffect(() => {
+    // New guest roles for the saved scene on the room program (⋯ → Guests in
+    // the room…) reach the room like any other edit.
+    const active = sceneLibrary.scenes.find((entry) => entry.id === activeSavedSceneId)
+    if (!active || !roomSceneLive()) return
+    if (
+      JSON.stringify(active.cloud ?? null) === JSON.stringify(roomSceneExtensionRef.current ?? null)
+    )
+      return
+    roomSceneExtensionRef.current = active.cloud
+    requestRoomSceneResendRef.current()
+  }, [activeSavedSceneId, roomSceneLive, sceneLibrary.scenes])
+
   const requestCameraPresetTransaction = useCallback(
     (
       patch: Partial<LayoutSettings>,
       options?: { backgroundOverride?: Scene['background'] | null; keepScene?: boolean }
-    ) => {
+    ): Promise<boolean> => {
+      if (roomHoldsTheCamera(cloudStatusRef.current?.room) && patch.layoutPreset !== undefined) {
+        const current = captureConfigRef.current
+        return applySceneInRoom(
+          {
+            layout: presetTransactionLayout(current, patch),
+            sources: current.sources,
+            background:
+              options?.backgroundOverride === undefined
+                ? (workingBackgroundRef.current ?? null)
+                : options.backgroundOverride
+          },
+          () => void requestCameraPresetTransactionRef.current(patch, options)
+        ).then((result) => result.ok)
+      }
       const current = captureConfigRef.current
       const nextPreset = patch.layoutPreset ?? current.layout.layoutPreset
       if (patch.layoutPreset !== undefined) {
@@ -11201,7 +11683,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       // vertical card is disabled and the backend refuses the switch).
       let videoOverride: VideoSettings | undefined
       let captureConfigPatch: Pick<CaptureConfig, 'video' | 'verticalRestoreVideo'> | undefined
-      if (!isActiveRecordingState(recordingRef.current.state)) {
+      if (
+        !isActiveRecordingState(recordingRef.current.state) &&
+        cloudStatusRef.current?.room?.phase !== 'open'
+      ) {
         const coupling = verticalOrientationVideoPatch(
           current.layout.layoutPreset,
           nextPreset,
@@ -11225,39 +11710,29 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       const leavesArrangement =
         patch.layoutPreset !== undefined && patch.arrangementMode === undefined
       if (leavesArrangement) noteLayoutLeavingFreeform(current.layout)
-      const arrangementPatch = leavesArrangement
-        ? { arrangementMode: 'preset' as const, sourceTransformOverrides: {} }
-        : {}
 
-      return requestLayoutTransaction(
-        {
-          ...current.layout,
-          ...(patch.layoutPreset !== undefined && workingOriginRef.current === 'saved'
-            ? current.layoutFramingMemory.layouts[nextPreset]
-            : recalledLayoutFraming(
-                current.layoutFramingMemory,
-                current.layout.layoutPreset,
-                nextPreset
-              )),
-          ...arrangementPatch,
-          ...patch,
-          cameraTransformMode: 'preset',
-          cameraTransform: null
-        },
-        {
-          videoOverride,
-          captureConfigPatch,
-          ...(patch.layoutPreset !== undefined && !options?.keepScene
-            ? { savedSceneId: null, origin: 'builtin' as const }
-            : {}),
-          ...(options && 'backgroundOverride' in options
-            ? { backgroundOverride: options.backgroundOverride }
-            : {})
-        }
-      )
+      // Plan 249 S12: a look edit (shape, corner, size, mirror, framing)
+      // made while a scene is on the room program goes to the room too, once
+      // the native commit landed, coalesced with other edits.
+      const resendRoomScene = (committed: boolean): boolean => {
+        if (committed) requestRoomSceneResendRef.current()
+        return committed
+      }
+      return requestLayoutTransaction(presetTransactionLayout(current, patch), {
+        videoOverride,
+        captureConfigPatch,
+        ...(patch.layoutPreset !== undefined && !options?.keepScene
+          ? { savedSceneId: null, origin: 'builtin' as const }
+          : {}),
+        ...(options && 'backgroundOverride' in options
+          ? { backgroundOverride: options.backgroundOverride }
+          : {})
+      }).then(resendRoomScene)
     },
-    [requestLayoutTransaction]
+    [applySceneInRoom, presetTransactionLayout, requestLayoutTransaction]
   )
+  const requestCameraPresetTransactionRef = useRef(requestCameraPresetTransaction)
+  requestCameraPresetTransactionRef.current = requestCameraPresetTransaction
 
   const applyBackgroundSlot = useCallback(
     (slotId: string | null): void => {
@@ -11413,6 +11888,57 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       repaired?: SceneVisual,
       options?: SavedSceneApplyOptions
     ): Promise<SavedSceneApplyResult> => {
+      if (roomHoldsTheCamera(cloudStatusRef.current?.room)) {
+        // Plan 249 S12: the room program takes the scene; native capture,
+        // Follow's window resolution and the scene's microphone stay as they
+        // are (the room publishes its own camera, screen and microphone).
+        const saved = sceneLibrary.scenes.find((entry) => entry.id === id)
+        if (!saved) return { ok: false }
+        if (options?.origin !== 'follow')
+          for (const listener of manualSceneApplyListenersRef.current) listener(id)
+        // Plan 249 S14: the scene's own display (by UUID) and, for an app
+        // scene or a Follow window swap, the app's window, resolved as
+        // natively, so the room shares what the scene names.
+        let visual = withSceneDisplay(
+          normalizeSceneVisual(repaired ?? saved.visual),
+          deviceListRef.current.devices
+        )
+        if (visual.sources.app || options?.preferWindowId) {
+          try {
+            const sceneApply = savedSceneApplyChunk ?? (await loadSavedSceneApply())
+            const resolved = await sceneApply.resolveSceneWindowForApply(
+              visual,
+              deviceListRef.current.devices,
+              (params) => {
+                if (!clientRef.current) throw offlineError()
+                return clientRef.current.requestTyped('sources.resolve_app_window', params)
+              },
+              rememberedAppsRef.current[id],
+              options?.preferWindowId
+            )
+            if (resolved.kind === 'blocked') {
+              const refusal = sceneApply.sceneWindowRefusal(visual, resolved.reason)
+              if (!refusal.ok) toast.warning(refusal.message, { id: 'scene-app-unavailable' })
+              return refusal
+            }
+            if (resolved.kind === 'ready') visual = { ...visual, sources: resolved.sources }
+          } catch (error) {
+            reportError(error, { action: 'switch', object: 'the scene' })
+            return { ok: false }
+          }
+        }
+        const result = await applySceneInRoom(
+          {
+            layout: visual.layout,
+            sources: { ...captureConfigRef.current.sources, ...visual.sources },
+            background: resolveSavedBackground(visual.background),
+            extension: saved.cloud
+          },
+          () => void applySavedSceneResultRef.current(id, repaired, options),
+          id
+        )
+        return result.ok ? { ok: true } : { ok: false, message: result.message }
+      }
       const saved = sceneLibrary.scenes.find((entry) => entry.id === id)
       if (!saved) return { ok: false }
       if (options?.origin !== 'follow')
@@ -11614,9 +12140,12 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       requestLayoutTransaction,
       setSystemAudioEnabled,
       sourceSelectionController,
-      reportError
+      reportError,
+      applySceneInRoom
     ]
   )
+  const applySavedSceneResultRef = useRef(applySavedSceneResult)
+  applySavedSceneResultRef.current = applySavedSceneResult
 
   const applySavedScene = useCallback(
     async (id: string, repaired?: SceneVisual): Promise<boolean> =>
@@ -11643,6 +12172,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   }, [followFrontAppWanted, FollowFrontApp])
   const followFrontAppHost: FollowFrontAppHost = {
     enabled: followFrontAppEnabled,
+    cloudScreenPublication: roomHoldsTheCamera(cloudStatus?.room),
     scenes: sceneLibrary.scenes,
     activeSceneId: activeSavedSceneId,
     sources: captureConfig.sources,
@@ -11760,6 +12290,38 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
 
   const switchSourceDeviceLive = useCallback(
     async (sourceKind: LiveSourceDeviceSwitchPending, sources: SourceSelection) => {
+      if (roomHoldsTheCamera(cloudStatusRef.current?.room)) {
+        const controls = roomControlsRef.current
+        if (!controls || controls.snapshot.identity !== `host:${cloudStatusRef.current?.show?.id}`)
+          throw new Error('The room is not connected.')
+        if (sourceKind === 'microphone') {
+          const microphone = deviceListRef.current.devices.find(
+            (d) => d.kind === 'microphone' && d.id === sources.microphoneId
+          )
+          if (sources.microphoneId && !microphone)
+            throw new Error('The selected microphone is unavailable.')
+          await controls.setMicrophoneSelection(microphone?.id ?? null, microphone?.name ?? null)
+          setCaptureConfig((current) => ({
+            ...current,
+            sources: mergeSourceKind(current.sources, sources, 'microphone')
+          }))
+          return
+        }
+        if (sourceKind !== 'camera') throw new Error('Use the room screen-share control.')
+        const camera = deviceListRef.current.devices.find(
+          (d) => d.kind === 'camera' && d.id === sources.cameraId
+        )
+        if (sources.cameraId && !camera) throw new Error('The selected camera is unavailable.')
+        await controls.setCameraSelection(
+          camera?.name ?? null,
+          sources.cameraOff === true || !sources.cameraId
+        )
+        setCaptureConfig((current) => ({
+          ...current,
+          sources: mergeSourceKind(current.sources, sources, 'camera')
+        }))
+        return
+      }
       const blocked = sourceSwitchReason(sourceKind)
       if (blocked) {
         // A refusal is "can't now", never an error (plan 174 S2.4).
@@ -12904,40 +13466,60 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     return () => unsubscribe?.()
   }, [nativePreviewSurfaceEnabled, syncNativePreviewSurfaceCompositor])
 
-  const importScreenImage = useCallback(async () => {
-    if (!client || wsStatus !== 'connected') {
-      toastOffline()
-      return
-    }
-    if (!window.videorc?.pickScreenImage) {
-      console.warn('[takeovers] no image picker in this renderer')
-      return
-    }
+  const importScreenSelections = useCallback(
+    async (authorize: (api: VideorcApi) => Promise<ResourceSelection[]>) => {
+      if (!client || wsStatus !== 'connected') {
+        toastOffline()
+        return
+      }
+      if (!window.videorc) {
+        console.warn('[takeovers] no image import in this renderer')
+        return
+      }
 
-    const revision = screenListEventRevision.current
-    await screenImporter.current.run({
-      pick: () => window.videorc.pickScreenImage(),
-      importImage: (selection) => {
-        setLastError(null)
-        return client.request<StreamScreen>('screens.importImage', {
-          sourceCapability: selection.capabilityId
-        })
-      },
-      isCurrent: () => clientRef.current === client && wsStatusRef.current === 'connected',
-      onPhase: setScreenImportPhase,
-      onImported: (screen) => {
-        // The reliable list event wins over a late reply (including deletion
-        // from another window). Never refresh/reapply the active takeover.
-        if (screenListEventRevision.current !== revision) return
-        setScreens((current) =>
-          [...(current ?? []).filter((item) => item.id !== screen.id), screen].sort(
-            (a, b) => a.sortOrder - b.sortOrder
+      // The reliable list event wins over a late reply (including deletion
+      // from another window). Never refresh/reapply the active takeover.
+      const { createTakeoverImporter, runTakeoverBatch } = await loadTakeoverImport()
+      if (clientRef.current !== client) return
+      let revision = 0
+      await runTakeoverBatch((screenImporter.current ??= createTakeoverImporter()), {
+        authorize: () => {
+          setLastError(null)
+          return authorize(window.videorc)
+        },
+        importImage: (selection) => {
+          revision = screenListEventRevision.current
+          return client.request<StreamScreen>('screens.importImage', {
+            sourceCapability: selection.capabilityId
+          })
+        },
+        isCurrent: () => clientRef.current === client && wsStatusRef.current === 'connected',
+        onPhase: setScreenImportPhase,
+        onPending: setPendingScreenImports,
+        onImported: (screen) => {
+          if (screenListEventRevision.current !== revision) return
+          setScreens((current) =>
+            [...(current ?? []).filter((item) => item.id !== screen.id), screen].sort(
+              (a, b) => a.sortOrder - b.sortOrder
+            )
           )
-        )
-      },
-      onError: (error) => reportError(error, { action: 'import', object: 'the image' })
-    })
-  }, [client, reportError, wsStatus])
+        },
+        report: reportError,
+        release: (capabilityIds) => window.videorc?.releaseScreenImages?.(capabilityIds)
+      })
+    },
+    [client, reportError, wsStatus]
+  )
+
+  const importScreenImages = useCallback(
+    () => importScreenSelections((api) => api.pickScreenImages()),
+    [importScreenSelections]
+  )
+
+  const importDroppedScreenImages = useCallback(
+    (files: File[]) => importScreenSelections((api) => api.authorizeDroppedScreenImages(files)),
+    [importScreenSelections]
+  )
 
   // Banners (plan 186). A refusal ("Four banners are showing. Hide one
   // first.") is a warning with the backend's sentence; anything else is the
@@ -13009,8 +13591,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         console.warn('[banners] no picker for this import in this renderer')
         return
       }
+      const { createBannerImporter } = await loadBannerImport()
+      if (clientRef.current !== client) return
       const revision = bannerListEventRevision.current
-      await bannerImporter.current.run({
+      await (bannerImporter.current ??= createBannerImporter()).run({
         pick: () => pick(),
         importImage: (selection) => {
           setLastError(null)
@@ -13388,7 +13972,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     useMemo((): GoLiveOutput.StreamOutputTopologyRequest | null => {
       // Go Live is an explicit start (plan 174 S3.1): the output check runs
       // whenever a destination is ready, not only in a saved streaming mode.
-      if (!areEnabledStreamTargetsStartReady(captureConfig.streaming)) {
+      if (talkShowRoomOpen || !areEnabledStreamTargetsStartReady(captureConfig.streaming)) {
         return null
       }
       if (rejectedStreamOutputSplitKeys.size > 0 && goLiveOutputChunk) {
@@ -13407,7 +13991,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         ),
         sharedFallbackVideo: null
       }
-    }, [captureConfig, rejectedStreamOutputSplitKeys, suppressCaptionsForSession])
+    }, [captureConfig, rejectedStreamOutputSplitKeys, suppressCaptionsForSession, talkShowRoomOpen])
   const currentStreamOutputTopologyRequest = currentStreamOutputTopology?.params ?? null
   const streamSharedEncodeFallbackVideo = currentStreamOutputTopology?.sharedFallbackVideo ?? null
   const currentStreamOutputTopologyRequestKey = currentStreamOutputTopologyRequest
@@ -13518,6 +14102,15 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       // 209 S10); every other caller reads the session's choice.
       suppressCaptions: boolean = suppressCaptionsForSession
     ): Promise<GoLiveOutput.GoLiveSessionOutput> => {
+      if (talkShowRoomOpenRef.current)
+        return {
+          reason: null,
+          video: captureConfig.video,
+          streaming,
+          sharedFallbackVideo: null,
+          steppedDown: null,
+          belowFloor: null
+        }
       const { settleGoLiveSessionOutput } = await loadGoLiveOutput()
       return settleGoLiveSessionOutput({
         captureConfig,
@@ -13928,11 +14521,16 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const captionsStopAttemptedRef = useRef(false)
   const captionsAttemptClientRef = useRef<BackendClient | null>(null)
   const captionsAttemptScopeRef = useRef('')
-  const captionsCaptureActive = ['recording', 'streaming'].includes(recording.state)
+  const captionsCaptureActive =
+    talkShowRoomOpen || ['recording', 'streaming'].includes(recording.state)
   const captionsAttemptScope = [
     captureConfig.captions.enabled ? 'enabled' : 'disabled',
     suppressCaptionsForSession ? 'suppressed' : 'normal',
-    captionsCaptureActive ? `capture:${recording.sessionId ?? 'unknown'}` : 'idle',
+    talkShowRoomOpen
+      ? `room:${cloudStatus?.show?.id ?? 'unknown'}`
+      : captionsCaptureActive
+        ? `capture:${recording.sessionId ?? 'unknown'}`
+        : 'idle',
     captureConfig.captions.language,
     wsStatus
   ].join(':')
@@ -13957,6 +14555,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     })
     if (action === 'start') {
       if (
+        !talkShowRoomOpen &&
         captionRuntimeStartBlocked({
           captureActive: captionsCaptureActive,
           outputReadiness: captionOutputReadiness
@@ -13997,6 +14596,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     }
   }, [
     captionsAttemptScope,
+    talkShowRoomOpen,
     captionsCaptureActive,
     captionsCommandPending,
     captionOutputReadiness,
@@ -14057,6 +14657,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // Burn-in driver: a serial latest-wins scheduler replaces the old boolean
   // busy gate, which could permanently drop a final/style update that arrived
   // during rasterization. One render may run and only the newest waits behind it.
+  const captionCueExpiryRef = useRef(new WeakMap<CaptionsUpdate, number>())
   const captionOverlayPushedKey = useRef<string | null>(null)
   const captionOverlayEpochRef = useRef(0)
   const captionOverlayWorkActiveRef = useRef(false)
@@ -14083,13 +14684,15 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         maxBarWidthPx: output.rect ? Math.floor(output.rect.w * output.canvasWidth) : undefined
       })
       if (!pngBase64 || work.epoch !== captionOverlayEpochRef.current) return
-      await work.client.request('captions.overlay.set', {
+      const frame = {
         pngBase64,
         position: work.position,
         ...(output.rect ? { rect: output.rect } : {}),
         target: output.target,
         styleRevision: work.styleRevision
-      })
+      }
+      if (work.room) await work.client.requestTyped('cloud.speech.overlay', { ...work.room, frame })
+      else await work.client.request('captions.overlay.set', frame)
       pushed = true
     }
     if (pushed && work.epoch === captionOverlayEpochRef.current) {
@@ -14142,7 +14745,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // captionLines.at(-1) from the previous video at each session start).
   const captionSessionWasActiveRef = useRef(false)
   useEffect(() => {
-    if (isSessionActive && !captionSessionWasActiveRef.current) {
+    if (captionsCaptureActive && !captionSessionWasActiveRef.current) {
       const lines = captionLinesRef.current
       captionSessionFloorRef.current = captionSessionFloor(lines) ?? captionSessionFloorRef.current
       captionOverlayEpochRef.current += 1
@@ -14154,8 +14757,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         setCaptionLines([])
       }
     }
-    captionSessionWasActiveRef.current = isSessionActive
-  }, [isSessionActive])
+    captionSessionWasActiveRef.current = captionsCaptureActive
+  }, [captionsCaptureActive])
 
   useEffect(() => {
     if (!client) {
@@ -14164,7 +14767,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     const sessionConfig = captureConfigForIntent(
       captureConfig,
       remoteOutputIntent({
-        sessionActive: isSessionActive,
+        sessionActive: captionsCaptureActive,
         startIntent: activeStartIntent,
         status: recording,
         config: captureConfig,
@@ -14172,19 +14775,40 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       })
     )
     const latest = captionLines.at(-1)
+    if (latest && !captionCueExpiryRef.current.has(latest))
+      captionCueExpiryRef.current.set(
+        latest,
+        Date.now() +
+          (latest.kind === 'partial' ? 6000 : Math.min(10000, captionDwellMs(latest.text)))
+      )
     const streamVideo = auxiliaryStreamOutputVideoSettings(
       sessionConfig.video,
       sessionConfig.streamEnabled ? sessionConfig.streaming : undefined
     )
-    const outputs = captionOverlayTargetPlan({
-      burnTarget: captureConfig.captions.burnTarget,
-      recordEnabled: sessionConfig.recordEnabled,
-      streamEnabled: sessionConfig.streamEnabled,
-      recordingVideo: sessionConfig.video,
-      streamVideo,
-      verticalLeg: simulcastLegLiveRequest(sessionConfig)?.video,
-      captionsLayout: overlayLayout.captions
-    })
+    const outputs = talkShowRoomOpen
+      ? [
+          {
+            target: 'primary' as const,
+            canvasWidth: 1920,
+            canvasHeight: 1080,
+            rect: overlayLayout.captions.horizontal
+          },
+          {
+            target: 'auxiliary' as const,
+            canvasWidth: 1080,
+            canvasHeight: 1920,
+            rect: overlayLayout.captions.vertical
+          }
+        ]
+      : captionOverlayTargetPlan({
+          burnTarget: captureConfig.captions.burnTarget,
+          recordEnabled: sessionConfig.recordEnabled,
+          streamEnabled: sessionConfig.streamEnabled,
+          recordingVideo: sessionConfig.video,
+          streamVideo,
+          verticalLeg: simulcastLegLiveRequest(sessionConfig)?.video,
+          captionsLayout: overlayLayout.captions
+        })
     const candidateKey = latest
       ? outputs
           .map(
@@ -14201,12 +14825,12 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           )
           .join('|')
       : undefined
-    const burnIn = outputs.length > 0
+    const burnIn = outputs.length > 0 && captureConfig.captions.burnTarget !== 'off'
     const captionsRunning = captionsStatusIsActive(captionsStatus)
     const decision = decideOverlayPush({
       burnIn,
       captionsRunning,
-      sessionActive: isSessionActive,
+      sessionActive: captionsCaptureActive,
       latest,
       floor: captionSessionFloorRef.current,
       pushedKey: captionOverlayPushedKey.current,
@@ -14215,7 +14839,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     })
     if (
       decision.action === 'clear' ||
-      ((!burnIn || !captionsRunning || !isSessionActive) && captionOverlayWorkActiveRef.current)
+      ((!burnIn || !captionsRunning || !captionsCaptureActive) &&
+        captionOverlayWorkActiveRef.current)
     ) {
       captionOverlayEpochRef.current += 1
       captionOverlaySchedulerRef.current?.clearPending()
@@ -14236,6 +14861,20 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       client,
       epoch: captionOverlayEpochRef.current,
       key: decision.key,
+      ...(talkShowRoomOpen
+        ? {
+            room: {
+              sessionClientId: latest.sessionClientId,
+              expiresAt: captionCueExpiryRef.current.get(latest)!,
+              stream:
+                captureConfig.captions.burnTarget === 'stream' ||
+                captureConfig.captions.burnTarget === 'both',
+              recording:
+                captureConfig.captions.burnTarget === 'recording' ||
+                captureConfig.captions.burnTarget === 'both'
+            }
+          }
+        : {}),
       text: latest.text,
       outputs: outputs.map((output) => ({
         target: output.target,
@@ -14252,9 +14891,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     client,
+    talkShowRoomOpen,
     captionLines,
     captionsStatus,
-    isSessionActive,
+    captionsCaptureActive,
     activeStartIntent,
     recording.state,
     recording.streamUrl,
@@ -14274,14 +14914,17 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     if (
       !client ||
       !latestCaption ||
-      !isSessionActive ||
+      !captionsCaptureActive ||
       captureConfig.captions.burnTarget === 'off'
     ) {
       return
     }
     const identity = captionLineIdentity(latestCaption)
     captionOverlayExpiredLineRef.current = null
-    const dwellMs = latestCaption.kind === 'partial' ? 6000 : captionDwellMs(latestCaption.text)
+    const dwellMs = Math.max(
+      0,
+      (captionCueExpiryRef.current.get(latestCaption) ?? Date.now()) - Date.now()
+    )
     const timer = window.setTimeout(() => {
       const current = captionLinesRef.current.at(-1)
       if (!current || captionLineIdentity(current) !== identity) return
@@ -14297,7 +14940,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         .catch(() => {})
     }, dwellMs)
     return () => window.clearTimeout(timer)
-  }, [client, captureConfig.captions, isSessionActive, latestCaption])
+  }, [client, captureConfig.captions, captionsCaptureActive, latestCaption])
 
   const renameScreen = useCallback(
     async (screenId: string, name: string) => {
@@ -14970,7 +15613,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       // the local scene's sources never block a start; the runner's own
       // recording problem does (the wire notes' `recording.problem`).
       if (talkShowRoomOpen) {
-        return talkShowStartBlockedReason(cloudStatus, intent)
+        return (
+          talkShowOutputStartProblem(captureConfig, cloudStatus, intent) ??
+          talkShowStartBlockedReason(cloudStatus, intent)
+        )
       }
       const config = captureConfigForIntent(captureConfig, intent)
       const turnedOff = sceneSourcesTurnedOff(
@@ -15104,6 +15750,16 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             })
           )
 
+          if (talkShowRoomOpenRef.current && sessionId) {
+            const { waitForCloudProviderOutput } = await import('@/lib/cloud-provider-lifecycle')
+            await waitForCloudProviderOutput({
+              showId: sessionId,
+              targetId: target.id,
+              current: () => platformLifecycleRun.current === runId,
+              read: () => client.requestTyped('cloud.status'),
+              sleep: delay
+            })
+          }
           let lastStatus: YouTubeStreamStatusResult | null = null
           for (let attempt = 0; !target.scheduledEventId && attempt < 8; attempt += 1) {
             if (platformLifecycleRun.current !== runId) {
@@ -15261,6 +15917,16 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             })
           )
 
+          if (talkShowRoomOpenRef.current && sessionId) {
+            const { waitForCloudProviderOutput } = await import('@/lib/cloud-provider-lifecycle')
+            await waitForCloudProviderOutput({
+              showId: sessionId,
+              targetId: target.id,
+              current: () => platformLifecycleRun.current === runId,
+              read: () => client.requestTyped('cloud.status'),
+              sleep: delay
+            })
+          }
           // Metadata (title, announce-on-timeline) is derived backend-side
           // from the stream metadata draft — never hardcoded here. A saved
           // broadcast goes live through its own schedule instead of a fresh
@@ -15607,6 +16273,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       if (!client) {
         return { streaming: streamingForCleanup, complete: false }
       }
+      // Plan 243 D7: handed off or taken over, the broadcast goes on elsewhere.
+      if (handedOffRef.current.includes(sessionId)) {
+        return { streaming: streamingForCleanup, complete: true }
+      }
 
       let nextStreaming = streamingForCleanup
       let complete = true
@@ -15678,7 +16348,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           // its own (enableAutoStop); retaining it would block every later
           // Record and Go Live until the reset. Network and 5xx keep the
           // retain-and-retry path.
-          const settled = isSettledYouTubeCompletionError(error)
+          const settled =
+            isSettledYouTubeCompletionError(error) &&
+            (!target.scheduledEventId || !isYouTubeQuotaPausedError(error))
           if (!settled) {
             complete = false
           }
@@ -15927,6 +16599,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       rpc: SessionStartRpc = 'session.start'
     ) => {
       const suppressCaptions = suppressCaptionsOverride ?? suppressCaptionsForSession
+      // R2 B-H1: a resume's saved destinations are reconnect candidates, never
+      // broadcasts this start may complete: no owner, no cleanup, success or not.
       const resumingCloudShow = rpc === 'cloud.show.resume'
       recordLatencyTrackerRef.current.markClick('start', performance.now(), 'session-call')
       const requestSnapshot = {
@@ -15953,7 +16627,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         if (sameRequest) {
           return pendingStart.promise
         }
-        if (streamingOverride) {
+        if (streamingOverride && !resumingCloudShow) {
           return pendingStart.promise
             .catch(() => false)
             .then(() => settlePreparedPlatformLifecycle(streamingOverride))
@@ -16006,6 +16680,15 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
                 description: notice.description
               })
             }
+          }
+          if (talkShowRoomOpenRef.current) {
+            const outputProblem = talkShowOutputStartProblem(
+              captureConfigRef.current,
+              cloudStatusRef.current,
+              intent,
+              streamingForStart ?? undefined
+            )
+            if (outputProblem) throw new Error(outputProblem)
           }
           setStreamHealth(null)
           setStreamTargets([])
@@ -16074,16 +16757,19 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             )
             commitCloudStatus(cloudAfterGoLive)
             const showId = cloudAfterGoLive.show?.id
+            if (!showId) throw new Error('The cloud did not return the owning show.')
+            platformLifecycleOwnerRef.current = { sessionId: showId, streaming: streamingForStart }
             await activatePreparedYouTubeBroadcasts(streamingForStart, lifecycleRunId, showId)
             streamingForStart = await activatePreparedXBroadcasts(
               streamingForStart,
               lifecycleRunId,
               showId
             )
-            platformLifecycleOwnerRef.current = {
-              sessionId: showId ?? 'talk-show',
-              streaming: streamingForStart
-            }
+            if (platformLifecycleRun.current === lifecycleRunId)
+              platformLifecycleOwnerRef.current = {
+                sessionId: showId,
+                streaming: streamingForStart
+              }
             return true
           }
           const optimisticRecording = isActiveRecordingState(recordingRef.current.state)
@@ -16223,6 +16909,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             liveAudioProcessingStartSnapshotRef.current = null
             applyRecordingStatus(status)
             clearLiveChatForTerminalSession(status.sessionId)
+            if (resumingCloudShow) return true
             const pendingSettlement =
               status.sessionId &&
               platformLifecycleSettlementRef.current?.sessionId === status.sessionId
@@ -16256,7 +16943,12 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
               ? { sessionId: status.sessionId, ...startAudioSnapshot }
               : null
           applyRecordingStatus(status)
-          if (startResolution.sessionActive && streamingForStart && status.sessionId) {
+          if (
+            startResolution.sessionActive &&
+            streamingForStart &&
+            status.sessionId &&
+            !resumingCloudShow
+          ) {
             platformLifecycleOwnerRef.current = {
               sessionId: status.sessionId,
               streaming: streamingForStart
@@ -16315,7 +17007,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           }
           return true
         } catch (error) {
-          if (streamingOverride && streamingForStart) {
+          if (streamingOverride && streamingForStart && !resumingCloudShow) {
             const pendingSettlement =
               platformSessionId &&
               platformLifecycleSettlementRef.current?.sessionId === platformSessionId
@@ -16777,6 +17469,15 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       setLastError(null)
       setGoLivePartialSetup(null)
       setSuppressCaptionsForSession(false)
+      if (talkShowRoomOpenRef.current) {
+        const outputProblem = talkShowOutputStartProblem(
+          captureConfigRef.current,
+          cloudStatusRef.current,
+          intent,
+          streaming
+        )
+        if (outputProblem) return { kind: 'refused', reason: outputProblem }
+      }
       // Settle the output check before anything is prepared on a platform.
       const topology = await settleStreamOutputTopology(streaming)
       if (topology.reason) {
@@ -16928,8 +17629,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         if (!client) return false
         try {
           setStartRequestPending(true)
-          commitCloudStatus(await client.requestTyped('cloud.recording.start'))
-          return true
+          const started = await client.requestTyped('cloud.recording.start')
+          commitCloudStatus(started)
+          return started.recording?.active === true
         } catch (error) {
           toastUserError(
             error,
@@ -17018,19 +17720,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // through the same path the Studio starts it with, once the backend
   // returned it (D6).
   const talkShowOutputs = useCallback((): CloudTestOutput[] => {
-    const video = streamOutputVideoSettings(
-      captureConfigRef.current.video,
-      captureConfigRef.current.streamEnabled ? captureConfigRef.current.streaming : undefined
-    )
-    return [
-      {
-        orientation: 'horizontal',
-        width: video.width,
-        height: video.height,
-        fps: video.fps,
-        videoKbps: video.bitrateKbps
-      }
-    ]
+    const plan = talkShowOutputPlan(captureConfigRef.current)
+    if (plan.problem) throw new Error(plan.problem)
+    return plan.outputs
   }, [])
   const talkShowHostShape = useCallback(
     (): 'rounded' | 'circle' =>
@@ -17070,11 +17762,27 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   }, [talkShowRoomPhase])
   const talkShowCameraId = captureConfig.sources.cameraId ?? null
   const talkShowMicrophoneId = captureConfig.sources.microphoneId ?? null
+  const talkShowCameraSettings = useMemo(
+    () => ({ layout: captureConfig.layout, background: activeSceneBackground }),
+    [captureConfig.layout, activeSceneBackground]
+  )
+  const talkShowAvatar = useMemo(
+    () => ({ persona: buddyPersona, snapshot: buddyOverlay, layout: overlayLayout.buddy }),
+    [buddyPersona, buddyOverlay, overlayLayout.buddy]
+  )
   const talkShowDeps = useMemo<TalkShowRoomControllerDeps>(
     () => ({
       client,
       cloudStatus,
       commitCloudStatus,
+      stopOutput: (output) => stopOutputRef.current?.(output) ?? Promise.resolve(false),
+      controlsRef: roomControlsRef,
+      onMediaSnapshot: onRoomMediaSnapshot,
+      microphoneMuted: captureConfig.audio.microphoneMuted,
+      microphoneAudio: captureConfig.audio,
+      cameraOff: captureConfig.sources.cameraOff === true,
+      cameraSettings: talkShowCameraSettings,
+      avatar: talkShowAvatar,
       cameraId: talkShowCameraId,
       microphoneId: talkShowMicrophoneId,
       devices: deviceList.devices,
@@ -17091,7 +17799,12 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       commitCloudStatus,
       deviceList.devices,
       smokeTalkShowRoomOpen,
+      onRoomMediaSnapshot,
+      captureConfig.audio,
+      captureConfig.sources.cameraOff,
       talkShowCameraId,
+      talkShowCameraSettings,
+      talkShowAvatar,
       talkShowCameraReturned,
       talkShowClipsStepAside,
       talkShowError,
@@ -17160,7 +17873,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         return Promise.resolve({ kind: 'ignored' })
       }
       const captionsReadiness = headless?.captionsReadiness ?? goLiveCaptionsReadiness
-      if (captionsReadiness.blocksStart) {
+      if (!talkShowRoomOpenRef.current && captionsReadiness.blocksStart) {
         if (!headless) {
           toast.warning("Live captions aren't ready", {
             description: captionsReadiness.description
@@ -17333,7 +18046,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       suppressCaptions: boolean
     }): Promise<boolean> => {
       // A Go Live without the dialog decided on captions before its confirm.
-      if (!headless && goLiveCaptionsReadiness.blocksStart) {
+      if (!talkShowRoomOpenRef.current && !headless && goLiveCaptionsReadiness.blocksStart) {
         toast.warning("Live captions aren't ready", {
           description: goLiveCaptionsReadiness.description
         })
@@ -17379,157 +18092,205 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     await startOnReadyDestinations()
   }, [startOnReadyDestinations])
 
-  const stopSession = useCallback(() => {
-    const pendingStop = stopSessionInFlightPromiseRef.current
-    if (pendingStop) {
-      return pendingStop
-    }
-    if (!client || stopRequestPending) {
-      return Promise.resolve(false)
-    }
+  const stopSession = useCallback(
+    (output?: 'recording' | 'live'): Promise<boolean> => {
+      const pendingStop = stopSessionInFlightPromiseRef.current
+      if (pendingStop) {
+        return output ? pendingStop.then(() => stopSession(output)) : pendingStop
+      }
+      if (!client) {
+        return Promise.resolve(false)
+      }
 
-    let claimedOwner: PlatformLifecycleOwner | null = null
-    const stopPromise = (async (): Promise<boolean> => {
-      try {
-        setLastError(null)
-        platformLifecycleRun.current += 1
-        setStopRequestPending(true)
-        recordLatencyTrackerRef.current.markClick('stop', performance.now(), 'session-call')
-        const stopRequestedAtMs = takeRecordClickEpochMs('stop')
-        liveAudioProcessingSyncRef.current?.queue.stop()
-        // Plan 224 D17 (C-G6): in a talk show, End livestream completes the
-        // platforms' broadcasts as today and ends the runner's legs; the
-        // room and the cloud recording stay. Stop recording stops the cloud
-        // recording. Neither touches a local session: there is none.
-        const talkSession = talkShowSessionRef.current
-        if (talkSession) {
-          if (talkSession.streamUrl) {
-            const owner = platformLifecycleOwnerRef.current
-            if (owner) {
-              platformLifecycleOwnerRef.current = null
-              await completePreparedPlatformBroadcasts(owner.streaming, owner.sessionId)
+      const cloud = cloudStatusRef.current
+      if (roomHoldsTheCamera(cloud?.room)) {
+        if (output === 'recording' && !cloud?.recording?.active) return Promise.resolve(false)
+        if (output === 'live' && !cloud?.room?.live) return Promise.resolve(false)
+        if (!talkShowSessionRef.current || talkShowSessionRef.current.sessionId !== cloud?.show?.id)
+          return Promise.resolve(false)
+      }
+      let claimedOwner: PlatformLifecycleOwner | null = null
+      const stopPromise = (async (): Promise<boolean> => {
+        try {
+          setLastError(null)
+          if (!(output === 'recording' && roomHoldsTheCamera(cloudStatusRef.current?.room)))
+            platformLifecycleRun.current += 1
+          setStopRequestPending(true)
+          recordLatencyTrackerRef.current.markClick('stop', performance.now(), 'session-call')
+          const stopRequestedAtMs = takeRecordClickEpochMs('stop')
+          liveAudioProcessingSyncRef.current?.queue.stop()
+          // Plan 224 D17 (C-G6): in a talk show, End livestream completes the
+          // platforms' broadcasts as today and ends the runner's legs; the
+          // room and the cloud recording stay. Stop recording stops the cloud
+          // recording. Neither touches a local session: there is none.
+          const talkSession = talkShowSessionRef.current
+          if (talkSession) {
+            // Plan 243 D7: handed off or taken over, the show goes on elsewhere.
+            if (handedOffRef.current.includes(talkSession.sessionId)) return false
+            if (talkSession.streamUrl && output !== 'recording') {
+              // X must end while its feed is live. YouTube completes only
+              // after the cloud confirms its legs stopped (plan 247 D4).
+              const { endTalkShowLivestream, showTalkShowEndFailure } =
+                await import('@/lib/talk-show-end')
+              return endTalkShowLivestream(
+                async () => {
+                  const mutation = platformLifecycleMutationRef.current
+                  if (mutation?.sessionId === talkSession.sessionId) {
+                    const streaming = await mutation.promise
+                    if (platformLifecycleOwnerRef.current?.sessionId === talkSession.sessionId)
+                      platformLifecycleOwnerRef.current.streaming = streaming
+                  }
+                  if (handedOffRef.current.includes(talkSession.sessionId))
+                    throw new Error('The show continues on another device.')
+                  const owner = platformLifecycleOwnerRef.current
+                  if (owner?.sessionId === talkSession.sessionId) {
+                    owner.streaming = await endPreparedXBroadcasts(
+                      owner.streaming,
+                      owner.sessionId,
+                      4000
+                    )
+                  }
+                  const ended = await client.requestTyped('cloud.show.legs.end')
+                  commitCloudStatus(ended)
+                  if (ended.show?.id !== talkSession.sessionId || ended.room?.live !== false)
+                    throw new Error('The cloud livestream has not stopped.')
+                },
+                (error) =>
+                  showTalkShowEndFailure(error, async () => {
+                    commitCloudStatus(await client.requestTyped('cloud.room.close'))
+                    const owner = claimPlatformLifecycleOwner(talkSession.sessionId)
+                    if (owner) await settleClaimedPlatformLifecycleOwner(owner)
+                  }),
+                () => claimPlatformLifecycleOwner(talkSession.sessionId),
+                (owner) =>
+                  settleClaimedPlatformLifecycleOwner(owner, (resolved) =>
+                    completePreparedPlatformBroadcasts(resolved.streaming, resolved.sessionId, {
+                      skipXCleanup: true
+                    })
+                  )
+              )
             }
             try {
-              commitCloudStatus(await client.requestTyped('cloud.show.legs.end'))
-              return true
+              const ended = await client.requestTyped('cloud.recording.stop')
+              commitCloudStatus(ended)
+              return ended.show?.id === talkSession.sessionId && ended.recording?.active === false
             } catch (error) {
               toastUserError(
                 error,
-                { action: 'end', object: 'the livestream' },
+                { action: 'stop', object: 'the cloud recording' },
                 { id: CLOUD_TOAST_ID }
               )
               return false
             }
           }
-          try {
-            commitCloudStatus(await client.requestTyped('cloud.recording.stop'))
-            return true
-          } catch (error) {
-            toastUserError(
-              error,
-              { action: 'stop', object: 'the cloud recording' },
-              { id: CLOUD_TOAST_ID }
-            )
-            return false
+          const pendingStart = sessionStartInFlightRef.current
+          const currentSessionId = recordingRef.current.sessionId
+          const currentOwner = currentSessionId
+            ? platformLifecycleOwnerRef.current?.sessionId === currentSessionId
+            : false
+          if (pendingStart && !currentOwner) {
+            // Before session.start replies there is no exact backend session ID
+            // to claim. Join that bounded start flow; it installs ownership from
+            // the response even though this Stop invalidated provider activation.
+            await pendingStart.promise.catch(() => false)
           }
-        }
-        const pendingStart = sessionStartInFlightRef.current
-        const currentSessionId = recordingRef.current.sessionId
-        const currentOwner = currentSessionId
-          ? platformLifecycleOwnerRef.current?.sessionId === currentSessionId
-          : false
-        if (pendingStart && !currentOwner) {
-          // Before session.start replies there is no exact backend session ID
-          // to claim. Join that bounded start flow; it installs ownership from
-          // the response even though this Stop invalidated provider activation.
-          await pendingStart.promise.catch(() => false)
-        }
-        claimedOwner = claimPlatformLifecycleOwner(recordingRef.current.sessionId)
-        if (claimedOwner) {
-          await settleClaimedPlatformLifecycleOwner(claimedOwner, async (resolvedOwner) => {
-            // Docs order for a real Go Live: wait for a provider mutation,
-            // END X while the feed is still up, THEN stop the encoder.
-            const cleaned = await endPreparedXBroadcasts(
-              resolvedOwner.streaming,
-              resolvedOwner.sessionId,
-              4000
-            )
-            const status = await client.requestTyped('session.stop', {
-              requestedAtMs: stopRequestedAtMs
+          claimedOwner = claimPlatformLifecycleOwner(recordingRef.current.sessionId)
+          if (claimedOwner) {
+            await settleClaimedPlatformLifecycleOwner(claimedOwner, async (resolvedOwner) => {
+              // Docs order for a real Go Live: wait for a provider mutation,
+              // END X while the feed is still up, THEN stop the encoder.
+              const cleaned = await endPreparedXBroadcasts(
+                resolvedOwner.streaming,
+                resolvedOwner.sessionId,
+                4000
+              )
+              const status = await client.requestTyped('session.stop', {
+                requestedAtMs: stopRequestedAtMs
+              })
+              if (
+                sessionStartLifecycleActiveRef.current &&
+                status.sessionId &&
+                (status.state === 'stopping' ||
+                  status.state === 'idle' ||
+                  status.state === 'failed')
+              ) {
+                sessionStartAuthoritativeStatusesRef.current.set(status.sessionId, status)
+              }
+              applyRecordingStatus(status)
+              clearLiveChatForTerminalSession(status.sessionId ?? resolvedOwner.sessionId)
+              return completePreparedPlatformBroadcasts(cleaned, resolvedOwner.sessionId, {
+                skipXCleanup: true
+              })
             })
-            if (
-              sessionStartLifecycleActiveRef.current &&
-              status.sessionId &&
-              (status.state === 'stopping' || status.state === 'idle' || status.state === 'failed')
-            ) {
-              sessionStartAuthoritativeStatusesRef.current.set(status.sessionId, status)
-            }
-            applyRecordingStatus(status)
-            clearLiveChatForTerminalSession(status.sessionId ?? resolvedOwner.sessionId)
-            return completePreparedPlatformBroadcasts(cleaned, resolvedOwner.sessionId, {
-              skipXCleanup: true
-            })
-          })
-          return true
-        }
+            return true
+          }
 
-        const sessionId = recordingRef.current.sessionId
-        const pendingSettlement =
-          sessionId && platformLifecycleSettlementRef.current?.sessionId === sessionId
-            ? platformLifecycleSettlementRef.current
-            : null
-        if (pendingSettlement) {
-          await pendingSettlement.promise
-          if (!isActiveRecordingState(recordingRef.current.state)) {
+          const sessionId = recordingRef.current.sessionId
+          const pendingSettlement =
+            sessionId && platformLifecycleSettlementRef.current?.sessionId === sessionId
+              ? platformLifecycleSettlementRef.current
+              : null
+          if (pendingSettlement) {
+            await pendingSettlement.promise
+            if (
+              !isActiveRecordingState(recordingRef.current.state) &&
+              cloudStatusRef.current?.room?.phase !== 'open'
+            ) {
+              clearLiveChatForTerminalSession(sessionId)
+              return true
+            }
+          }
+          if (
+            !isActiveRecordingState(recordingRef.current.state) &&
+            cloudStatusRef.current?.room?.phase !== 'open'
+          ) {
             clearLiveChatForTerminalSession(sessionId)
             return true
           }
-        }
-        if (!isActiveRecordingState(recordingRef.current.state)) {
-          clearLiveChatForTerminalSession(sessionId)
+          const status = await client.requestTyped('session.stop', {
+            requestedAtMs: stopRequestedAtMs
+          })
+          if (
+            sessionStartLifecycleActiveRef.current &&
+            status.sessionId &&
+            (status.state === 'stopping' || status.state === 'idle' || status.state === 'failed')
+          ) {
+            sessionStartAuthoritativeStatusesRef.current.set(status.sessionId, status)
+          }
+          applyRecordingStatus(status)
+          clearLiveChatForTerminalSession(status.sessionId ?? sessionId)
           return true
+        } catch (error) {
+          reportError(error)
+          return false
+        } finally {
+          setStopRequestPending(false)
         }
-        const status = await client.requestTyped('session.stop', {
-          requestedAtMs: stopRequestedAtMs
-        })
-        if (
-          sessionStartLifecycleActiveRef.current &&
-          status.sessionId &&
-          (status.state === 'stopping' || status.state === 'idle' || status.state === 'failed')
-        ) {
-          sessionStartAuthoritativeStatusesRef.current.set(status.sessionId, status)
+      })()
+      stopSessionInFlightPromiseRef.current = stopPromise
+      const clearStopPromise = () => {
+        if (stopSessionInFlightPromiseRef.current === stopPromise) {
+          stopSessionInFlightPromiseRef.current = null
         }
-        applyRecordingStatus(status)
-        clearLiveChatForTerminalSession(status.sessionId ?? sessionId)
-        return true
-      } catch (error) {
-        reportError(error)
-        return false
-      } finally {
-        setStopRequestPending(false)
       }
-    })()
-    stopSessionInFlightPromiseRef.current = stopPromise
-    const clearStopPromise = () => {
-      if (stopSessionInFlightPromiseRef.current === stopPromise) {
-        stopSessionInFlightPromiseRef.current = null
-      }
-    }
-    void stopPromise.then(clearStopPromise, clearStopPromise)
-    return stopPromise
-  }, [
-    takeRecordClickEpochMs,
-    applyRecordingStatus,
-    commitCloudStatus,
-    claimPlatformLifecycleOwner,
-    clearLiveChatForTerminalSession,
-    client,
-    completePreparedPlatformBroadcasts,
-    endPreparedXBroadcasts,
-    reportError,
-    settleClaimedPlatformLifecycleOwner,
-    stopRequestPending
-  ])
+      void stopPromise.then(clearStopPromise, clearStopPromise)
+      return stopPromise
+    },
+    [
+      takeRecordClickEpochMs,
+      applyRecordingStatus,
+      commitCloudStatus,
+      claimPlatformLifecycleOwner,
+      clearLiveChatForTerminalSession,
+      client,
+      completePreparedPlatformBroadcasts,
+      endPreparedXBroadcasts,
+      reportError,
+      settleClaimedPlatformLifecycleOwner
+    ]
+  )
+
+  stopOutputRef.current = stopSession
 
   // Plan 174 S0.1 (D2): the one door to stopSession for every origin. A
   // recording stops at once. A livestream asks through the End livestream
@@ -17590,11 +18351,29 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       void stopped.then(leave, leave)
     }
   }, [noteRecordClick, stopConfirmation, stopSession])
+  // Plan 243 C5: "Continue on another device" (or "Quit and keep it live").
+  // The backend stops feeding through the hand-off stop and the show waits
+  // for another device, so nothing here completes a broadcast (D7). A refusal
+  // with the session still fed gives its owner back, and the app stays.
+  const handOffStopSession = useCallback(() => {
+    const exit = stopConfirmation ? exitForStopOrigin(stopConfirmation.origin) : null
+    const cloud = cloudStatusRef.current
+    const session = () => talkShowSessionRef.current ?? recordingRef.current
+    const owner = latchHandOff([session().sessionId, cloud?.sessionId, cloud?.show?.id])
+    setStopConfirmation(null)
+    void loadCloudNotices().then((n) =>
+      n.handOffCloudShow(client, exit, () => {
+        if (cloudStatusRef.current?.stoppedBy || !sessionIsLive(session())) return
+        handedOffRef.current = []
+        platformLifecycleOwnerRef.current ??= owner
+      })
+    )
+  }, [client, latchHandOff, stopConfirmation])
   // Main asks before a quit or a main-window close ends a livestream (plan
   // 174 S3.1, D2). Not live: nothing to protect, so the exit goes through at
   // once. Live: the End livestream question, with "Keep streaming" focused.
   const handleExitRequest = useEffectEvent((kind: AppExitKind) => {
-    if (!sessionIsLive(recordingRef.current)) {
+    if (!sessionIsLive(talkShowSessionRef.current ?? recordingRef.current)) {
       void window.videorc?.exitApp?.(kind)
       return
     }
@@ -17896,7 +18675,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         return null
       }
       const ring = replayStateRef.current
-      if (ring.state !== 'on' && !isActiveRecordingState(recordingRef.current.state)) {
+      if (
+        cloudStatusRef.current?.room?.phase !== 'open' &&
+        ring.state !== 'on' &&
+        !isActiveRecordingState(recordingRef.current.state)
+      ) {
         void import('@/lib/replay-buffer').then((replay) =>
           replay.showNothingToClip({
             state: ring.state,
@@ -17907,7 +18690,12 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         return null
       }
       try {
-        return await client.request<ClipMarkedEvent>('clip.mark', seconds && { seconds })
+        return await client.request<ClipMarkedEvent>(
+          'clip.mark',
+          cloudStatusRef.current?.room?.phase === 'open'
+            ? { seconds: seconds ?? 30, operationId: crypto.randomUUID() }
+            : seconds && { seconds }
+        )
       } catch (error) {
         reportError(error, { action: 'save', object: 'the clip' })
         return null
@@ -18982,6 +19770,26 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         )
       }
 
+      if (roomHoldsTheCamera(cloudStatusRef.current?.room)) {
+        const controls = roomControlsRef.current
+        if (
+          !controls ||
+          controls.snapshot.state !== 'connected' ||
+          controls.snapshot.identity !== `host:${cloudStatusRef.current?.show?.id}`
+        )
+          return Promise.resolve(false)
+        return controls
+          .setMicrophoneMode(mode)
+          .then(() => {
+            if (roomControlsRef.current !== controls) return false
+            commitRequestedMute(controls.snapshot.local.micMuted)
+            return true
+          })
+          .catch((error) => {
+            toastUserError(error)
+            return false
+          })
+      }
       if (!sessionActive) {
         const microphoneMuted = mode === 'toggle' ? !currentAudio.microphoneMuted : mode === 'mute'
         commitRequestedMute(microphoneMuted)
@@ -19052,6 +19860,13 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       runScreenPrivacy: privacy.runScreenPrivacy,
       client,
       recordingRef,
+      outputFacts: outputSessionFacts(
+        recordingRef.current,
+        cloudStatusRef.current,
+        wsStatusRef.current === 'connected',
+        roomControlsRef.current?.snapshot
+      ),
+      stopOutput: (output) => stopSession(output),
       replayStateRef,
       recordBlockedReason,
       liveStreamBlockedReason,
@@ -19185,25 +20000,47 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     activeSessionStartAudio && activeSessionStartAudio.sessionId === recording.sessionId
       ? activeSessionStartAudio.microphoneMuted
       : null
-  const remoteSurfaceMicrophoneMuted = isActiveRecordingState(recording.state)
-    ? activeSessionAppliedAudio
-      ? activeSessionAppliedAudio.microphoneMuted
-      : (activeSessionStartMicrophoneMuted ??
-        remoteSurfaceValuesRef.current?.[4] ??
+  const outputFacts = outputSessionFacts(
+    recording,
+    cloudStatus,
+    wsStatus === 'connected',
+    roomMedia
+  )
+  const remoteSurfaceMicrophoneMuted =
+    outputFacts.owner === 'cloud-room'
+      ? (outputFacts.microphoneMuted ??
+        roomMedia?.local.micMuted ??
         captureConfig.audio.microphoneMuted)
-    : captureConfig.audio.microphoneMuted
-  const remoteOutputs = remoteOutputIntent({
-    sessionActive: isSessionActive,
-    startIntent: activeStartIntent,
-    status: recording,
-    config: captureConfig,
-    previous: remoteOutputsRef.current
-  })
+      : isActiveRecordingState(recording.state)
+        ? activeSessionAppliedAudio
+          ? activeSessionAppliedAudio.microphoneMuted
+          : (activeSessionStartMicrophoneMuted ??
+            remoteSurfaceValuesRef.current?.[4] ??
+            captureConfig.audio.microphoneMuted)
+        : captureConfig.audio.microphoneMuted
+  const remoteOutputs =
+    outputFacts.owner === 'cloud-room'
+      ? { record: outputFacts.recording, stream: outputFacts.live }
+      : remoteOutputIntent({
+          sessionActive: isSessionActive,
+          startIntent: activeStartIntent,
+          status: recording,
+          config: captureConfig,
+          previous: remoteOutputsRef.current
+        })
   useEffect(() => {
-    remoteOutputsRef.current = isSessionActive ? remoteOutputs : null
-  }, [isSessionActive, remoteOutputs])
+    remoteOutputsRef.current = isSessionActive
+      ? { record: remoteOutputs.record, stream: remoteOutputs.stream }
+      : null
+  }, [isSessionActive, remoteOutputs.record, remoteOutputs.stream])
   const remoteSurfaceValues: RemoteSurfaceValues = [
-    recording.state,
+    outputFacts.owner === 'cloud-room'
+      ? outputFacts.live
+        ? 'streaming'
+        : outputFacts.recording
+          ? 'recording'
+          : 'idle'
+      : recording.state,
     isSessionActive,
     remoteOutputs.record,
     remoteOutputs.stream,
@@ -19222,7 +20059,17 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     activeSavedSceneId,
     privacy.screenPrivacy.hidden,
     cohostSettings?.enabled === true,
-    commentsWindow
+    commentsWindow,
+    {
+      owner: outputFacts.owner,
+      freshness: outputFacts.freshness,
+      roomOpen: outputFacts.roomOpen,
+      microphoneConfirmed:
+        outputFacts.owner === 'cloud-room'
+          ? outputFacts.microphoneMuted !== null
+          : wsStatus === 'connected',
+      cameraOff: outputFacts.cameraOff
+    }
   ]
   // Latest-value hand-off (same render-body pattern as the ref mirrors
   // above): the publisher dedupes, debounces past the commit, republishes on
@@ -19241,7 +20088,19 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     activeSavedSceneId,
     savedSceneModified,
     savedScenes: sceneLibrary.scenes,
+    roomMedia:
+      outputFacts.owner === 'cloud-room' && outputFacts.showId
+        ? {
+            showId: outputFacts.showId,
+            confirmed: outputFacts.microphoneMuted !== null,
+            microphoneMuted: outputFacts.microphoneMuted,
+            cameraOff: outputFacts.cameraOff,
+            microphoneAvailable: outputFacts.capabilities.microphone
+          }
+        : undefined,
     microphoneMuted: remoteSurfaceMicrophoneMuted,
+    microphoneConfirmed:
+      outputFacts.owner === 'cloud-room' ? outputFacts.microphoneMuted !== null : undefined,
     sources: captureConfig.sources,
     devices: deviceList.devices,
     systemAudioStatus,
@@ -19446,20 +20305,21 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           })
         }, 70)
       },
-      sessionActive: sessionOwnsTransport(recordingRef.current),
+      sessionActive:
+        outputFacts.owner === 'cloud-room'
+          ? outputFacts.recording || outputFacts.live
+          : sessionOwnsTransport(recordingRef.current),
+      recordingActive: outputFacts.owner === 'cloud-room' ? outputFacts.recording : undefined,
+      liveActive: outputFacts.owner === 'cloud-room' ? outputFacts.live : undefined,
+      stopRecording:
+        outputFacts.owner === 'cloud-room' ? () => stopSession('recording') : undefined,
       startRecording,
       startLivestream,
       // A global hotkey may fire with Videorc in the background: while live it
       // arms, and a second press within the window ends the livestream (D2).
       stopSession: () => requestStopSession('global-hotkey'),
       toggleMicrophoneMute: () => {
-        setCaptureConfig((current) => ({
-          ...current,
-          audio: {
-            ...current.audio,
-            microphoneMuted: !current.audio.microphoneMuted
-          }
-        }))
+        void requestRemoteMicrophoneMute('toggle')
       },
       markClip: (seconds) => {
         void markClip(seconds)
@@ -19514,6 +20374,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           ? stopConfirmation
           : null,
       confirmStopSession,
+      handOffStopSession,
       cancelStopSession,
       firstRunSetupOpen,
       setFirstRunSetupOpen
@@ -19529,6 +20390,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       connection,
       entitlements?.plan,
       entitlements?.tier,
+      handOffStopSession,
       notesWindow.open,
       openCommentsWindow,
       openNotesWindow,
@@ -19678,6 +20540,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     if (!import.meta.env.DEV) return
     const smokeWindow = window as Window & { __videorcSmokeScenePresets?: unknown }
     smokeWindow.__videorcSmokeScenePresets = {
+      markerConsent: (consent: boolean) => value.setAiConsent(consent),
       state: () => ({
         canSave: value.canSaveScene,
         scenes: value.savedScenes,
@@ -19725,6 +20588,188 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       apply: value.applySavedScene,
       remove: value.deleteSavedScene,
       retrySourceStatus,
+      // DEV fixture catalog only; these IDs are never native capture devices.
+      roomFixtureDevices: () => {
+        if (roomHoldsTheCamera(cloudStatusRef.current?.room))
+          throw new Error('Seed fixtures before opening the room.')
+        const fixtures: Device[] = [
+          { id: 'parity-camera', name: 'Parity camera', kind: 'camera', status: 'available' },
+          {
+            id: roomNativeMicrophoneEnabled()
+              ? 'microphone:coreaudio:4294967295'
+              : 'parity-microphone',
+            name: 'Parity microphone',
+            kind: 'microphone',
+            status: 'available'
+          }
+        ]
+        if (roomNativeMicrophoneEnabled())
+          fixtures.push({
+            id: 'microphone:coreaudio:4294967294',
+            name: 'Alternate parity microphone',
+            kind: 'microphone',
+            status: 'available'
+          })
+        // Seeded once, kept across every later device list (a camera lend
+        // or display change re-lists devices mid-case).
+        seedRoomFixtureDevices(fixtures)
+        setDeviceList(deviceListRef.current)
+        return fixtures
+      },
+      roomNativeMicrophone: (enabled?: boolean) => {
+        if (enabled !== undefined) setRoomNativeMicrophoneEnabled(enabled)
+        return {
+          ...roomMicrophoneState.getSnapshot(),
+          owners: [...roomMicrophoneResources(), ...roomPcmTestResources().owners]
+        }
+      },
+      roomMicrophoneDisconnect: (mode?: 'disconnect' | 'starve' | 'resume') =>
+        roomControlsRef.current?.disconnectMicrophoneFixture(mode),
+      roomMicrophoneSelect: (id: string | null, name: string | null) =>
+        switchSourceDeviceLive('microphone', {
+          ...captureConfigRef.current.sources,
+          microphoneId: id ?? undefined,
+          microphoneName: name ?? undefined
+        }),
+      roomPcmTest: (enabled?: boolean) => {
+        if (enabled !== undefined) setRoomPcmTestEnabled(enabled)
+        return roomPcmTestResources()
+      },
+      roomFrameTest: (enabled?: boolean) => {
+        if (enabled !== undefined) setRoomFrameTestEnabled(enabled)
+        return roomFrameTestResources()
+      },
+      roomFrameEncodeObserver: (enabled?: boolean) => {
+        if (enabled !== undefined) setRoomFrameEncodeObserver(enabled)
+        return roomFrameEncodeObserverEnabled()
+      },
+      roomFrameResetSurface: () => resetRoomFrameSurfaces(),
+      // S13b harness: the room camera off/on through the same control the UI uses.
+      roomCameraOff: async (off: boolean) => {
+        await roomControlsRef.current?.setCameraOff(off)
+        return roomControlsRef.current?.snapshot.local.cameraOff ?? null
+      },
+      roomFrameReplace: async () => {
+        const controls = roomControlsRef.current
+        if (!controls) return false
+        await controls.setCameraOff(true)
+        await controls.setCameraOff(false)
+        return true
+      },
+      roomCameraSenderStats: () => roomControlsRef.current?.cameraSenderStats() ?? null,
+      // S13a harness: the authority bound from the SFU's publish answer.
+      roomFrameAuthority: () => roomControlsRef.current?.snapshot.local.cameraFrame ?? null,
+      roomHighlight: async (milestone = false) => {
+        const message = liveChatSnapshotRef.current.messages.find(
+          (m) => m.eventType === 'message' && !m.isDeleted
+        )
+        if (!message) throw new Error('No eligible fixture message')
+        const state = await applyCommentHighlight(
+          message,
+          message.sessionId,
+          ++commentHighlightIntentRef.current,
+          {
+            alwaysSet: true,
+            ...(milestone
+              ? {
+                  milestone: {
+                    messageId: message.id,
+                    name: message.authorName,
+                    platform: message.platform,
+                    label: '10th stream'
+                  }
+                }
+              : {})
+          }
+        )
+        if (state) publishCommentHighlightState(state)
+        return state
+      },
+      roomGraphics: (enabled?: boolean) => {
+        if (enabled !== undefined) roomControlsRef.current?.setGraphicsEnabled(enabled)
+        return roomControlsRef.current?.snapshot.graphics ?? null
+      },
+      roomAvatar: (enabled?: boolean) => {
+        if (enabled !== undefined) roomControlsRef.current?.setAvatarEnabled(enabled)
+        return roomControlsRef.current?.snapshot.avatar ?? null
+      },
+      roomAvatarMotion: () => roomControlsRef.current?.avatarMotionProbe?.() ?? null,
+      roomAvatarGuests: (enabled?: boolean) => {
+        if (enabled !== undefined) roomControlsRef.current?.setAvatarGuests(enabled)
+        return roomControlsRef.current?.snapshot.avatar?.guests ?? null
+      },
+      // Plan 249 S12 acquisition: the per-room opt-in, the scene status, and
+      // a preset by the same route as the gallery and hotkeys.
+      roomScenes: (enabled?: boolean) => {
+        if (enabled !== undefined) setRoomScenesEnabled(enabled)
+        return { enabled: roomScenesOn(), status: roomControlsRef.current?.snapshot.scene ?? null }
+      },
+      roomScenePreset: (layoutPreset: LayoutPreset) =>
+        requestCameraPresetTransactionRef.current({ layoutPreset }),
+      roomSceneContent: () => roomControlsRef.current?.sceneContent ?? null,
+      // Plan 249 S14: the capturer source the room shares, and a Follow switch.
+      roomScreenSource: () => roomControlsRef.current?.screenSourceId ?? null,
+      roomScreenWanted: () => roomScreenWantedRef.current,
+      roomFollowApply: (id: string, preferWindowId?: string) =>
+        applySavedSceneResultRef.current(id, undefined, { preferWindowId, origin: 'follow' }),
+      // A whole saved scene (freeform boxes, guest roles) into the library,
+      // then applied by id like a click; clear returns the room layouts.
+      roomSceneSave: (scene: SavedScene) => value.sceneLibraryActions.insert([scene]),
+      roomSceneClear: () => roomControlsRef.current?.commitScene(null),
+      // The Scene editor's own actions (a Freeform drag, Show/Hide) and the
+      // ⋯ → Guests in the room… save, while a scene is on the room program.
+      roomSceneDrag: (sourceId: string, patch: SceneTransformPatch) =>
+        value.setSceneSourceTransform(sourceId, patch),
+      roomSceneVisible: (sourceId: string, visible: boolean) =>
+        value.setSceneSourceVisible(sourceId, visible),
+      roomSceneGuests: async (sceneId: string, placement: 'beside' | 'below' | 'over') => {
+        const { sceneWithGuestRoles } = await import('@/lib/scene-guest-roles')
+        const saved = value.savedScenes.find((entry) => entry.id === sceneId)
+        return saved
+          ? value.sceneLibraryActions.replace(
+              sceneWithGuestRoles(saved, placement, new Date().toISOString())
+            )
+          : false
+      },
+      roomSceneAnimate: (on: boolean) =>
+        setSettings((current) => ({ ...current, animateSceneChanges: on })),
+      roomAudioRouting: (patch?: {
+        system?: Parameters<typeof roomAudioRouting.system>[0]
+        program?: Parameters<typeof roomAudioRouting.program>[0]
+      }) => {
+        if (patch?.system) roomAudioRouting.system(patch.system)
+        if (patch?.program) roomAudioRouting.program(patch.program)
+        return {
+          ...roomAudioRouting.getSnapshot(),
+          resources: roomSystemResources(),
+          observations: takeRoomSystemObservations()
+        }
+      },
+      roomSounds: (enabled?: boolean) => {
+        if (enabled !== undefined) soundboard.setRoomAuxEnabled(enabled)
+        return soundboard.getSnapshot().roomAux ?? null
+      },
+      roomPrivacyPixels: () => roomControlsRef.current?.screenPrivacyPixels() ?? null,
+      roomPrivacy: () => roomControlsRef.current?.snapshot.screenPrivacy ?? null,
+      roomScreenShare: () => roomControlsRef.current?.startScreenShare(),
+      roomScreenStop: () => roomControlsRef.current?.stopScreenShare(),
+      screenPrivacyCommand: privacy.runScreenPrivacy,
+      roomScreenTrack: () => roomControlsRef.current?.snapshot.local.screen ?? null,
+      outputFacts: () =>
+        outputSessionFacts(
+          recordingRef.current,
+          cloudStatusRef.current,
+          wsStatusRef.current === 'connected',
+          roomControlsRef.current?.snapshot
+        ),
+      microphone: value.requestRemoteMicrophoneMute,
+      shortcut: handleGlobalShortcut,
+      camera: (cameraId: string | null) =>
+        switchSourceDeviceLive('camera', {
+          ...captureConfigRef.current.sources,
+          cameraId: cameraId ?? undefined,
+          cameraOff: !cameraId
+        }),
       background: value.applyBackgroundSlot,
       backgroundStyle: value.applyWorkingBackgroundStyle,
       removeBackground: (id: string) =>
@@ -19761,6 +20806,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const value = useMemo<StudioCoreContextValue>(
     () => ({
       ...privacy,
+      roomScreenPrivacy: roomMedia?.screenPrivacy,
       connection,
       wsStatus,
       health,
@@ -19868,6 +20914,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       stopRequestPending,
       screenImportPending,
       screenImportPhase,
+      pendingScreenImports,
       streamMetadataSavePending,
       supportBundleExportPending,
       remoteControl,
@@ -19875,6 +20922,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       setSettings,
       captureConfig,
       setCaptureConfig,
+      requestRemoteMicrophoneMute,
       patchLayout,
       applyLayoutPatch,
       applyCameraLook,
@@ -19916,7 +20964,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       sessionRuntimeNotice,
       dismissSessionRuntimeNotice,
       retrySessionStart,
-      importScreenImage,
+      importScreenImages,
+      importDroppedScreenImages,
       renameScreen,
       deleteScreen,
       reorderScreen,
@@ -20013,6 +21062,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     }),
     [
       privacy,
+      roomMedia,
       connection,
       wsStatus,
       health,
@@ -20120,6 +21170,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       stopRequestPending,
       screenImportPending,
       screenImportPhase,
+      pendingScreenImports,
       streamMetadataSavePending,
       supportBundleExportPending,
       remoteControl,
@@ -20127,6 +21178,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       setSettings,
       captureConfig,
       setCaptureConfig,
+      requestRemoteMicrophoneMute,
       patchLayout,
       applyLayoutPatch,
       applyCameraLook,
@@ -20168,7 +21220,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       sessionRuntimeNotice,
       dismissSessionRuntimeNotice,
       retrySessionStart,
-      importScreenImage,
+      importScreenImages,
+      importDroppedScreenImages,
       renameScreen,
       deleteScreen,
       reorderScreen,

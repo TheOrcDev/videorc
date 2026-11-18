@@ -5,6 +5,8 @@ use std::collections::VecDeque;
 
 use crate::audio::{AudioFrame, NATIVE_AUDIO_CHANNELS, NATIVE_AUDIO_SAMPLE_RATE};
 
+pub(crate) mod room_tap;
+
 pub const CHUNK_FRAMES: usize = 480;
 /// How far ahead of the cursor captured audio may wait, sized in TIME rather
 /// than packets so a 128-frame CoreAudio callback (Shure MV7+) gets the same
@@ -423,6 +425,16 @@ static OWNED_WRITERS: AtomicU64 = AtomicU64::new(0);
 pub fn cleanup_pending(standby_owners: u64) -> bool {
     OWNED_WRITERS.load(Ordering::Acquire) != 0
         || OWNED_PRODUCERS.load(Ordering::Acquire) > standby_owners
+}
+
+/// Capture-only room admission waits for actual owned producers to exit.
+pub(crate) fn room_microphone_producers() -> u64 {
+    OWNED_PRODUCERS.load(Ordering::Acquire)
+}
+
+pub(crate) fn room_microphone_cleanup_ready() -> bool {
+    wait_for_producer_cleanup(&OWNED_PRODUCERS, Instant::now() + Duration::from_secs(5))
+        && OWNED_WRITERS.load(Ordering::Acquire) == 0
 }
 
 const PRODUCER_LIMIT: u64 = 2;
@@ -2996,6 +3008,13 @@ impl TimelineFault {
         }
         self.last_reanchor = Some(now);
         true
+    }
+
+    /// Rebuilding against the same epoch cannot move wall-clock-aligned
+    /// packets inside a stalled reader's cap. Wait for output to catch up;
+    /// never move fresh audio backward or skip the silence owed to the muxer.
+    fn reanchor_after_output_catches_up(&mut self, now: Instant, stall: &OutputStall) -> bool {
+        stall.episode.is_none() && self.reanchor_due(now)
     }
 
     /// The silent gap, once a placement after the fault began ends it.
@@ -5984,7 +6003,7 @@ fn run_bus_owned(
                         generation,
                     );
                 }
-                if microphone_fault.reanchor_due(now) {
+                if microphone_fault.reanchor_after_output_catches_up(now, &stall) {
                     // The next buffer maps from its capture time, as it did
                     // at session start.
                     clock = None;
@@ -11952,6 +11971,70 @@ mod mix_tests {
             96_000,
             "placed again from its capture times"
         );
+    }
+
+    /// Model the FIFO consumption boundary without sleeping: no chunks are
+    /// drained for 30 seconds, while hardware timestamps keep advancing. On
+    /// resume, consume every owed chunk (silence included), then live PCM.
+    #[test]
+    fn thirty_second_reader_stall_recovers_without_repeated_mic_reanchors() {
+        let epoch = Instant::now();
+        let mut timeline = AudioTimeline::new();
+        let mut clock = None;
+        let mut stall = OutputStall::default();
+        let mut fault = TimelineFault::default();
+        let mut last_placed = epoch;
+        let mut reanchors = 0;
+        let mut recovered = false;
+        let mut heard_live = false;
+        let packets = signal_packets(epoch, 0, 48_000 * 33, 480, |_| (0.2, 0.2));
+        for (index, frame) in packets.into_iter().enumerate() {
+            let now = frame.captured_at;
+            let wall_cursor = (index as u64 + 1) * 480;
+            stall.observe(now, wall_cursor.saturating_sub(timeline.cursor()), 0);
+            timeline.discard_before(wall_cursor.saturating_sub(MAX_BUFFERED_FRAMES));
+            let source_clock = clock.get_or_insert_with(|| SourceClock::new(&frame, epoch));
+            let (start, frames) = source_clock.interval(&frame).unwrap();
+            assert_eq!(start, index as u64 * 480, "capture alignment must not move");
+            let outcome = timeline.push_outcome(0, start, resample_frame(frame, frames));
+            if outcome == PushOutcome::Placed {
+                last_placed = now;
+                recovered |= fault.recovered(now).is_some();
+            } else if now.duration_since(last_placed) >= Duration::from_secs(2) {
+                fault.begin(now, last_placed);
+                if fault.reanchor_after_output_catches_up(now, &stall) {
+                    reanchors += 1;
+                    clock = None;
+                }
+            }
+            // The reader runs for one second, pauses for thirty, then drains
+            // its backlog. The cursor advances only by written PCM chunks.
+            if !(100..3100).contains(&index) {
+                while timeline.cursor() < wall_cursor {
+                    let position = timeline.cursor();
+                    let samples = timeline.render_chunk();
+                    if (48_000 * 2..48_000 * 30).contains(&position) {
+                        assert!(samples.iter().all(|sample| *sample == 0.0));
+                    }
+                    if position >= 48_000 * 32 {
+                        heard_live |= samples.iter().any(|sample| *sample > 0.1);
+                    }
+                }
+            } else {
+                assert_eq!(
+                    reanchors, 0,
+                    "a stalled cursor cannot be fixed by reanchoring"
+                );
+            }
+        }
+        assert!(reanchors <= 2);
+        assert!(recovered, "placement must close the timeline fault");
+        assert!(
+            heard_live,
+            "fresh mic PCM must return after the reader resumes"
+        );
+        assert!(fault.since.is_none());
+        assert!(stall.episode.is_none());
     }
 
     /// Mono samples as stereo packets of `packet_frames`, stamped like a

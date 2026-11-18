@@ -13,7 +13,9 @@ import {
 
 describe('livestream views', () => {
   it('lists Setup then Upcoming, and opens on Setup by default', () => {
-    expect(LIVESTREAM_VIEWS.map(({ id }) => id)).toEqual(['setup', 'upcoming', 'guests'])
+    // Guests is its own page since 0.31.1, no longer a Destinations view.
+    expect(LIVESTREAM_VIEWS.map(({ id }) => id)).toEqual(['setup', 'upcoming'])
+    expect(isLivestreamViewId('guests')).toBe(false)
     expect(DEFAULT_LIVESTREAM_VIEW).toBe('setup')
     expect(isLivestreamViewId('upcoming')).toBe(true)
     expect(isLivestreamViewId('streaming')).toBe(false)

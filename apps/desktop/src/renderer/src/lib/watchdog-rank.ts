@@ -67,6 +67,14 @@ export function watchdogChipLabel(
       return 'Be right back'
     case 'still-there':
       return 'Still there?'
+    case 'program-unreported':
+      return 'Program not reporting'
+    case 'contribution-missing':
+      return alert.targetId === 'host-microphone'
+        ? 'Mic not in the room'
+        : alert.targetId === 'host-camera'
+          ? 'Camera not on program'
+          : 'Not in the room'
   }
 }
 

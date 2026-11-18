@@ -1,8 +1,15 @@
+import { managedProfileDescription } from '../../../../shared/cloud-output-profile'
+import { createGraphicsView } from '../../../../shared/cloud-graphics-view'
+import type { GraphicsSnapshot } from '../../../../shared/cloud-graphics'
+import type { ReactNode } from 'react'
+import { createAvatarView, type AvatarMotionSource } from '../../../../shared/cloud-avatar-view'
+import type { AvatarSnapshot } from '../../../../shared/cloud-avatar'
 import { useEffect, useRef, useState, type ReactElement } from 'react'
 
 import { useGuestModeration } from '@/components/guests/guest-moderation'
 import { CloseRoomButton } from '@/components/guests/close-room-button'
 import {
+  ChevronRightIcon,
   DisplayIcon,
   SpeakerOffIcon,
   SpeakerOnIcon,
@@ -14,6 +21,7 @@ import { GroupedList, ListRow } from '@/components/list-row'
 import { MediaCard } from '@/components/media-card'
 import { Gallery } from '@/components/page'
 import { PanelSection } from '@/components/panel-section'
+import { CameraOffAvatar } from '@/components/studio/camera-off-avatar'
 import { PREVIEW_REPLACED_BY_SHOW_STAGE } from '@/components/preview-stage'
 import { StatusDot } from '@/components/status-dot'
 import { Alert, AlertAction, AlertTitle } from '@/components/ui/alert'
@@ -31,8 +39,16 @@ import { InfoTooltip } from '@/components/ui/info-tooltip'
 import { Empty } from '@/components/ui/empty'
 import { SegmentedControl } from '@/components/ui/segmented-control'
 import { Spinner } from '@/components/ui/spinner'
-import { useStudioCloud } from '@/hooks/use-studio'
+import { useStudioCloud, useStudioCore } from '@/hooks/use-studio'
+import {
+  roomProgramCamera,
+  useRoomProgramCamera,
+  useRoomProgramCameraAvailable,
+  useRoomProgramCameraProducer
+} from '@/hooks/use-room-program-camera'
+import { useVirtualCamera } from '@/hooks/use-virtual-camera'
 import type {
+  CloudHostShape,
   CloudRoomParticipant,
   CloudRoomRequest,
   CloudStageLayout,
@@ -49,11 +65,27 @@ import {
   shownLayout,
   type RoomPerson
 } from '@/lib/guests-view'
-import { openLivestreamView } from '@/lib/livestream-tabs'
+import { openWorkspaceTab } from '@/lib/workspace-navigation'
+import { managedScreenAssetUrl } from '@/lib/screen-asset-url'
 import type { TalkShowContextValue } from '@/lib/talk-show-context'
-import type { TalkShowPerson } from '@/lib/talk-show-room'
-import { managedProgramStageInput, programMonitorView } from '@/lib/talk-show-managed'
+import type { CameraFrameMedia } from '@/lib/camera-frame-media'
+import type { TalkShowLocalMedia, TalkShowPerson } from '@/lib/talk-show-room'
+import { setAgentRoomProgram } from '@/lib/agent-room-program'
+import {
+  PROGRAM_PREVIEW_COPY,
+  agentRoomProgram,
+  managedProgramPreview,
+  managedProgramStageInput,
+  programMonitorView
+} from '@/lib/talk-show-managed'
 import { PROGRAM_MONITOR_EMPTY } from '@/lib/talk-show-session'
+import {
+  HOST_CIRCLE_CLIP,
+  cameraOffLook,
+  cameraPicture,
+  hostCircle,
+  showsAway
+} from '@/lib/talk-show-tile'
 import {
   planStage,
   showStageInput,
@@ -62,6 +94,11 @@ import {
   type StageTile
 } from '@/lib/talk-show-layout'
 import { cn } from '@/lib/utils'
+import { programScenePreview, scenePreviewPicture, sceneStatusLine } from '@/lib/room-scene-preview'
+import { VIEW_SOURCE, tileFit } from '../../../../shared/cloud-presentation-views'
+import type { SceneTile } from '../../../../shared/cloud-scene'
+import { roomProgramCameraLine } from '../../../../shared/room-program-camera'
+import { roomProgramSummary } from '@/lib/room-program-opt-ins'
 
 // The Show stage (plan 224 C-G3, D7, D8): while the room is open it replaces
 // the Studio's Preview. The renderer draws the room's tracks with the
@@ -99,6 +136,14 @@ export default function ShowStage(): ReactElement {
     return () => void setMonitorRef.current(false).catch(() => {})
   }, [connected, hasReturn])
 
+  // Plan 249 S6: agents read the program as the page reports it, labelled
+  // with its source; the store dedupes, and the stage going clears it.
+  const now = usePreviewClock(Boolean(room?.live || cloudStatus?.recording?.active))
+  useEffect(() => {
+    setAgentRoomProgram(agentRoomProgram(cloudStatus, talkShow.hostIdentity, STAGE_CANVAS, now))
+  }, [cloudStatus, talkShow.hostIdentity, now])
+  useEffect(() => () => setAgentRoomProgram(undefined), [])
+
   return (
     <PanelSection
       action={<CloseRoomButton testId="show-stage-close-room" />}
@@ -111,6 +156,12 @@ export default function ShowStage(): ReactElement {
     >
       <StageWell talkShow={talkShow} />
       <StageControls talkShow={talkShow} />
+      {/* Plan 249 S17: what each cloud output really sends, as the room reported it. */}
+      {cloudStatus?.show?.outputProfile ? (
+        <p className="text-label text-muted-foreground" data-testid="show-stage-output-profile">
+          {managedProfileDescription(cloudStatus.show.outputProfile)}
+        </p>
+      ) : null}
       {talkShow.room.local.problem ? (
         <Alert variant="warning">
           <AlertTitle>{talkShow.room.local.problem}</AlertTitle>
@@ -134,12 +185,16 @@ function StageWell({ talkShow }: { talkShow: TalkShowContextValue }): ReactEleme
   const joining = state === 'connecting' || state === 'reconnecting'
   return (
     <div
+      aria-label="Room view"
       className="relative w-full overflow-hidden rounded-panel bg-video-ground [container-type:inline-size]"
       data-testid="show-stage-well"
+      // Plan 249 S6: the room's own tracks, at room latency. Never the program.
+      data-view-source={VIEW_SOURCE.room}
       style={{ aspectRatio: `${STAGE_CANVAS.width} / ${STAGE_CANVAS.height}` }}
     >
       {plan.tiles.map((tile) => (
         <StageTileView
+          hostShape={room?.stage.hostShape}
           key={`${tile.kind}:${tile.identity}`}
           participant={room?.participants?.find((entry) => entry.identity === tile.identity)}
           talkShow={talkShow}
@@ -149,6 +204,17 @@ function StageWell({ talkShow }: { talkShow: TalkShowContextValue }): ReactEleme
       {plan.tiles.length === 0 ? (
         <Empty className="absolute inset-0 text-video-ground-muted">Nobody is on stage.</Empty>
       ) : null}
+      <InfoTooltip
+        className="absolute top-3 right-3"
+        content="What you and your guests see in the room now. Viewers see the Program."
+      >
+        <span
+          className="inline-flex items-center rounded-full bg-video-ground/80 px-2.5 py-1 text-xs text-video-ground-foreground"
+          data-testid="show-stage-room-label"
+        >
+          Room
+        </span>
+      </InfoTooltip>
       {joining ? (
         <span
           className="absolute top-3 left-3 inline-flex items-center gap-1.5 rounded-full bg-video-ground/80 px-2.5 py-1 text-xs text-video-ground-foreground"
@@ -162,17 +228,31 @@ function StageWell({ talkShow }: { talkShow: TalkShowContextValue }): ReactEleme
   )
 }
 
-/** The track a tile shows: the host's own media, or a guest's from the room. */
+/**
+ * The track a tile shows: the host's own media, or a guest's from the room.
+ * A camera that is off shows no frame (wire contract 5.5): the tile draws
+ * the camera-off look instead.
+ */
 function tileTrack(
   tile: StageTile,
   talkShow: TalkShowContextValue
-): { track: MediaStreamTrack | null; cameraOff: boolean; name: string } {
+): {
+  track: MediaStreamTrack | null
+  cameraOff: boolean
+  name: string
+  cameraFrame?: TalkShowLocalMedia['cameraFrame']
+} {
   const host = tile.identity === talkShow.hostIdentity
   if (host) {
     const local = talkShow.room.local
     return tile.kind === 'screen'
       ? { track: local.screen, cameraOff: false, name: 'Your screen' }
-      : { track: local.cameraOff ? null : local.camera, cameraOff: local.cameraOff, name: 'You' }
+      : {
+          ...cameraPicture(local.camera, local.cameraOff),
+          name: 'You',
+          // Plan 249 S13a: the host's own packed test camera, drawn unpacked.
+          ...(local.cameraFrame ? { cameraFrame: local.cameraFrame } : {})
+        }
   }
   const person: TalkShowPerson | undefined = talkShow.room.people.find(
     (entry) => entry.identity === tile.identity
@@ -184,79 +264,94 @@ function tileTrack(
       name: `${person?.name ?? ''}'s screen`
     }
   }
-  return {
-    track: person?.cameraOff ? null : (person?.video ?? null),
-    cameraOff: Boolean(person?.cameraOff),
-    name: person?.name ?? ''
-  }
+  return { ...cameraPicture(person?.video, person?.cameraOff), name: person?.name ?? '' }
 }
 
 function StageTileView({
   tile,
   participant,
   talkShow,
+  hostShape,
   monitor = false
 }: {
   tile: StageTile
   participant: CloudRoomParticipant | undefined
   talkShow: TalkShowContextValue
+  /** The stage's `hostShape`, as sent: the host's circle (plan 247 D-2). */
+  hostShape: CloudHostShape | undefined
   /** In the Program monitor: the picture and its geometry, without words. */
   monitor?: boolean
 }): ReactElement {
-  const { track, cameraOff, name } = tileTrack(tile, talkShow)
+  const { track, cameraOff, name, cameraFrame } = tileTrack(tile, talkShow)
   const label = monitor ? '' : name || participant?.name || ''
+  const look = cameraOffLook(tile.rect.w, tile.rect.h)
+  const circle = hostCircle(tile, talkShow.hostIdentity, hostShape)
   return (
-    <div
-      className="absolute overflow-hidden bg-inset"
-      data-stage-identity={tile.identity}
-      data-stage-kind={tile.kind}
-      data-testid="show-stage-tile"
-      style={{ ...stageRectPercent(STAGE_CANVAS, tile.rect), borderRadius: cqw(tile.cornerRadius) }}
-    >
-      <TrackVideo
-        className={tile.kind === 'screen' ? 'object-contain' : 'object-cover'}
-        track={track}
-      />
-      {!track && !monitor ? (
-        <span className="absolute inset-0 flex items-center justify-center text-sm text-video-ground-muted">
-          {cameraOff
-            ? 'Camera off'
-            : tile.kind === 'screen'
-              ? 'Waiting for the screen'
-              : 'No picture yet'}
-        </span>
-      ) : null}
-      {participant?.away && tile.kind === 'person' ? (
-        <span className="absolute inset-0 flex items-center justify-center bg-video-ground/60 text-sm font-medium text-video-ground-foreground">
-          {monitor ? null : 'Back in a moment'}
-        </span>
-      ) : null}
+    <>
+      <div
+        className="absolute overflow-hidden bg-inset"
+        data-stage-identity={tile.identity}
+        data-stage-kind={tile.kind}
+        data-stage-shape={circle ? 'circle' : 'rounded'}
+        data-testid="show-stage-tile"
+        style={{
+          ...stageRectPercent(STAGE_CANVAS, tile.rect),
+          ...(circle
+            ? { borderRadius: 0, clipPath: HOST_CIRCLE_CLIP }
+            : { borderRadius: cqw(tile.cornerRadius) })
+        }}
+      >
+        <TrackVideo
+          cameraFrame={cameraFrame}
+          className={tileFit(tile.kind) === 'contain' ? 'object-contain' : 'object-cover'}
+          track={track}
+        />
+        {cameraOff ? (
+          // The camera-off look, as viewers see it: the circle and the letter.
+          <CameraOffAvatar
+            circle={cqw(look.diameter)}
+            letter={cqw(look.fontPx)}
+            name={name === 'You' ? (participant?.name ?? name) : name || (participant?.name ?? '')}
+          />
+        ) : !track && !monitor ? (
+          <span className="absolute inset-0 flex items-center justify-center text-sm text-video-ground-muted">
+            {tile.kind === 'screen' ? 'Waiting for the screen' : 'No picture yet'}
+          </span>
+        ) : null}
+        {showsAway(participant?.away, cameraOff) && tile.kind === 'person' ? (
+          <span className="absolute inset-0 flex items-center justify-center bg-video-ground/60 text-sm font-medium text-video-ground-foreground">
+            {monitor ? null : 'Back in a moment'}
+          </span>
+        ) : null}
+      </div>
+      {/* Beside the tile, as on the program page, so the host's circle never clips it. */}
       {tile.plate && label ? (
         <span
           className="absolute flex items-end"
-          style={{
-            left: cqw(tile.plate.x - tile.rect.x),
-            bottom: cqw(tile.rect.y + tile.rect.h - (tile.plate.y + tile.plate.h)),
-            width: cqw(tile.plate.w),
-            height: cqw(tile.plate.h)
-          }}
+          data-testid="show-stage-plate"
+          style={stageRectPercent(STAGE_CANVAS, tile.plate)}
         >
           <span className="max-w-full truncate rounded-full bg-video-ground/70 px-[max(8px,0.8cqw)] py-[max(2px,0.3cqw)] text-[max(11px,1.3cqw)] font-medium text-video-ground-foreground">
             {label}
           </span>
         </span>
       ) : null}
-    </div>
+    </>
   )
 }
 
 /** A `MediaStreamTrack` in a muted `<video>`; nothing while there is none. */
 function TrackVideo({
   track,
-  className
+  className,
+  cameraFrame,
+  onSize
 }: {
   track: MediaStreamTrack | null
   className?: string
+  /** Packed camera-role source; geometry uses its logical dimensions. */
+  cameraFrame?: TalkShowLocalMedia['cameraFrame'] | undefined
+  onSize?: (size: { w: number; h: number }) => void
 }): ReactElement | null {
   const ref = useRef<HTMLVideoElement>(null)
   useEffect(() => {
@@ -268,6 +363,65 @@ function TrackVideo({
       video.srcObject = null
     }
   }, [track])
+  const authority = cameraFrame?.authority
+  const logicalWidth = cameraFrame?.descriptor.logicalWidth
+  const logicalHeight = cameraFrame?.descriptor.logicalHeight
+  useEffect(() => {
+    const video = ref.current
+    if (!video || !authority) return
+    let media: CameraFrameMedia | null = null
+    let cancelled = false
+    // A packed track is never shown raw, even when the adapter is refused.
+    video.style.opacity = '0'
+    // Loaded only for the DEV experiment: S10's GPU helper stays out of the eager bundle.
+    void import('@/lib/camera-frame-media')
+      .then(({ createCameraFrameMedia }) => {
+        if (cancelled) return
+        media = createCameraFrameMedia({
+          page: video.ownerDocument,
+          video,
+          // The monitor's own publication: the SIDs the SFU returned on publish.
+          publication: () => ({
+            identity: authority.hostIdentity,
+            participantSid: authority.publisherSid,
+            trackSid: authority.trackSid,
+            source: 'camera'
+          }),
+          authority: () => authority,
+          experiment: true,
+          ...(logicalWidth && logicalHeight
+            ? { logical: { width: logicalWidth, height: logicalHeight } }
+            : {})
+        })
+        media.canvas.className = cn('absolute inset-0 size-full', className)
+        video.after(media.canvas)
+        const logical = media.logicalSize()
+        if (logical) onSize?.(logical)
+      })
+      .catch(() => {
+        // Never fall back to drawing the packed picture.
+      })
+    return () => {
+      cancelled = true
+      media?.close('unmounted')
+      video.style.opacity = ''
+    }
+  }, [authority, className, logicalHeight, logicalWidth, onSize, track])
+  useEffect(() => {
+    const video = ref.current
+    if (!video || !onSize || authority) return
+    const report = (): void => {
+      if (video.videoWidth > 2 && video.videoHeight > 2)
+        onSize({ w: video.videoWidth, h: video.videoHeight })
+    }
+    report()
+    video.addEventListener('loadedmetadata', report)
+    video.addEventListener('resize', report)
+    return () => {
+      video.removeEventListener('loadedmetadata', report)
+      video.removeEventListener('resize', report)
+    }
+  }, [authority, onSize, track])
   if (!track) return null
   return <video autoPlay className={cn('size-full', className)} muted playsInline ref={ref} />
 }
@@ -283,7 +437,7 @@ function StageControls({ talkShow }: { talkShow: TalkShowContextValue }): ReactE
   // Narrow, the Program monitor goes under the controls instead of beside
   // them, so the four layout chips keep their row.
   return (
-    <div className="flex min-w-0 flex-col gap-3 @min-[36rem]/show-stage:flex-row @min-[36rem]/show-stage:items-start">
+    <div className="flex min-w-0 flex-col gap-3 @min-[40rem]/show-stage:flex-row @min-[40rem]/show-stage:items-start">
       <div className="flex min-w-0 flex-1 flex-col gap-2">
         <SegmentedControl<CloudStageLayout>
           aria-label="Layout"
@@ -421,13 +575,163 @@ function ScreenShareButton({
  * program page reports it. The speaker is not shown: there is no return to
  * listen to, and a control that plays nothing would lie.
  */
+function ProgramGraphics({
+  snapshot,
+  children
+}: {
+  snapshot: GraphicsSnapshot | null
+  children: ReactNode
+}): ReactElement {
+  const caption = useRef<HTMLDivElement>(null)
+  const banner = useRef<HTMLDivElement>(null),
+    chat = useRef<HTMLDivElement>(null),
+    highlight = useRef<HTMLDivElement>(null)
+  const view = useRef<ReturnType<typeof createGraphicsView> | null>(null)
+  const [failed, setFailed] = useState(false)
+  useEffect(() => {
+    if (!banner.current || !caption.current || !chat.current || !highlight.current) return
+    const current = createGraphicsView({
+      banner: banner.current,
+      caption: caption.current,
+      chat: chat.current,
+      highlight: highlight.current
+    })
+    view.current = current
+    const timer = setInterval(() => current.step(), 16)
+    return () => {
+      clearInterval(timer)
+      current.close()
+      view.current = null
+    }
+  }, [])
+  useEffect(() => {
+    const current = view.current
+    current?.receiver.owner(snapshot?.publisherSid ?? null)
+    if (!current || !snapshot) return
+    let cancelled = false
+    setFailed(false)
+    void current.receiver.accept(snapshot).catch(() => {
+      if (!cancelled) setFailed(true)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [snapshot])
+  return (
+    <>
+      <div ref={banner} data-testid="show-stage-banners" />
+      <div ref={caption} data-testid="show-stage-captions" />
+      <div ref={chat} />
+      {children}
+      <div ref={highlight} />
+      {failed ? (
+        <span className="absolute inset-x-0 bottom-0 text-xs text-video-ground-muted">
+          Graphics preview failed
+        </span>
+      ) : null}
+    </>
+  )
+}
+
+function ProgramAvatar({
+  snapshot,
+  motion
+}: {
+  snapshot: AvatarSnapshot | null
+  motion?: AvatarMotionSource
+}): ReactElement {
+  const root = useRef<HTMLDivElement>(null)
+  const view = useRef<ReturnType<typeof createAvatarView> | null>(null)
+  const [failure, setFailure] = useState(false)
+  // Plan 249 S5: an atlas layer moves with the poses the outputs replay (the
+  // producer's own simulation); without one it rests on its neutral cell.
+  const motionRef = useRef(motion)
+  useEffect(() => {
+    motionRef.current = motion
+  }, [motion])
+  useEffect(() => {
+    if (!root.current) return
+    const current = createAvatarView(root.current, Date.now, {
+      orientation: 'h',
+      receiver: {
+        advance: () => motionRef.current?.advance(),
+        draw: (orientation, atlasHash) => motionRef.current?.draw(orientation, atlasHash) ?? null,
+        get sim() {
+          return motionRef.current?.sim ?? null
+        }
+      }
+    })
+    view.current = current
+    const timer = setInterval(() => current.step(), 50)
+    return () => {
+      clearInterval(timer)
+      current.close()
+      view.current = null
+    }
+  }, [])
+  useEffect(() => {
+    const current = view.current
+    current?.receiver.owner(snapshot?.publisherSid ?? null)
+    if (!snapshot || !current) return
+    let cancelled = false
+    setFailure(false)
+    void current.receiver.accept(snapshot).catch(() => {
+      if (!cancelled) setFailure(true)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [snapshot])
+  return (
+    <>
+      <div ref={root} data-testid="show-stage-avatar" />
+      {failure ? (
+        <span className="absolute inset-x-0 bottom-0 text-xs text-video-ground-muted">
+          Avatar preview failed
+        </span>
+      ) : null}
+    </>
+  )
+}
+
 function ProgramMonitor({ talkShow }: { talkShow: TalkShowContextValue }): ReactElement {
   const { cloudStatus } = useStudioCloud()
+  const { activeScreen } = useStudioCore()
   const [listening, setListening] = useState(false)
   const audioRef = useRef<HTMLAudioElement>(null)
   const { video, audio } = talkShow.room.monitor
   const live = Boolean(cloudStatus?.room?.live || cloudStatus?.recording?.active)
   const view = programMonitorView(cloudStatus)
+  // The takeover covers the managed program and silences every voice (the
+  // program page's rule), so the monitor draws it over the stage. A node
+  // show's return already carries it.
+  const takeover = view.source === 'stage' && view.state === 'shown' ? activeScreen : null
+  // Plan 249 S6: does the page report drawing the stage this desktop sent?
+  const now = usePreviewClock(view.source === 'stage' && live)
+  const preview = view.source === 'stage' ? managedProgramPreview(cloudStatus, now) : null
+  const previewCopy = preview ? PROGRAM_PREVIEW_COPY[preview.state] : null
+  // Plan 249 S23 (D10): this Program preview on Videorc Camera, opt-in per
+  // room. Never a node show's return: that is the encoded stream.
+  const picture = useRef<HTMLDivElement>(null)
+  const virtualCamera = useVirtualCamera()
+  const programCameraOffered =
+    useRoomProgramCameraAvailable() &&
+    view.source === 'stage' &&
+    talkShow.hostIdentity !== null &&
+    virtualCamera.status?.platformStep !== 'unsupported'
+  const programCamera = useRoomProgramCamera()
+  const programCameraOn =
+    programCameraOffered && programCamera.on && programCamera.hostIdentity === talkShow.hostIdentity
+  useRoomProgramCameraProducer(picture, programCameraOn ? programCamera.generation : null)
+  const programCameraStatus =
+    programCamera.error ??
+    roomProgramCameraLine({
+      on: programCameraOn,
+      source: virtualCamera.status?.source ?? null,
+      cameraOn: virtualCamera.status?.on === true,
+      cameraAvailable: virtualCamera.status?.available !== false
+    }) ??
+    'Videorc Camera · Not sending this room'
 
   useEffect(() => {
     const element = audioRef.current
@@ -439,14 +743,46 @@ function ProgramMonitor({ talkShow }: { talkShow: TalkShowContextValue }): React
     }
   }, [audio])
 
+  // The room's opt-ins live in Guests → Room (one home); this column shows
+  // the program and links there. Videorc Camera stays here: it sends only
+  // while this preview is on screen.
+  const programMenu: KebabMenuItem[] = programCameraOffered
+    ? [
+        {
+          id: 'program-camera',
+          label: programCameraOn ? 'Stop sending to Videorc Camera' : 'Send to Videorc Camera',
+          onSelect: () =>
+            void roomProgramCamera.setOn(!programCameraOn, talkShow.hostIdentity).catch(() => {})
+        }
+      ]
+    : []
+  const avatar = talkShow.room.avatar
+  const graphics = talkShow.room.graphics
+
   return (
     <div
-      className="flex w-1/2 min-w-36 flex-col gap-1.5 self-end @min-[36rem]/show-stage:w-1/4"
+      className="flex w-1/2 min-w-36 flex-col gap-1.5 self-end @min-[40rem]/show-stage:w-1/3"
       data-program-source={view.source}
+      data-program-stage={preview?.state}
       data-testid="show-stage-program"
+      data-view-source={
+        view.source === 'return' ? VIEW_SOURCE['runner-return'] : VIEW_SOURCE['program-preview']
+      }
     >
-      <div className="flex min-h-6 items-center justify-between gap-2">
-        <span className="text-label text-subtle">Program</span>
+      <div className="flex min-h-6 min-w-0 items-center gap-2">
+        <span className="min-w-0 flex-1 truncate text-label text-subtle">
+          {view.source === 'return' ? 'Program' : 'Program preview'}
+        </span>
+        {programMenu.length > 0 ? (
+          <span
+            data-program-camera={
+              programCameraOn ? (virtualCamera.status?.source ?? 'starting') : 'off'
+            }
+            data-testid="show-stage-program-camera"
+          >
+            <KebabMenu items={programMenu} label="More for the Program" />
+          </span>
+        ) : null}
         {view.source === 'return' ? (
           <Button
             aria-label={listening ? 'Mute the program' : 'Listen to the program'}
@@ -461,38 +797,169 @@ function ProgramMonitor({ talkShow }: { talkShow: TalkShowContextValue }): React
           </Button>
         ) : null}
       </div>
-      <div className="relative aspect-video w-full overflow-hidden rounded-row bg-video-ground [container-type:inline-size]">
-        {view.source === 'return' ? (
-          <>
-            <TrackVideo className="object-contain" track={video} />
-            {!video ? (
-              <span className="absolute inset-0 flex items-center justify-center p-2 text-center text-xs text-video-ground-muted">
-                {live ? 'Waiting for the program…' : PROGRAM_MONITOR_EMPTY}
+      <div
+        className={cn(
+          'relative aspect-video w-full overflow-hidden rounded-row',
+          // Empty, the frame is the Preview's inset well: on the dark ground
+          // a video-ground box would vanish and leave its words floating.
+          programPictured(view, video) ? null : 'bg-inset'
+        )}
+      >
+        {/* What Videorc Camera rasterizes: the picture only, in its own
+            stacking context, so the pills below stay off the camera and
+            above every scene tile. */}
+        <div
+          className={cn(
+            'absolute inset-0 isolate overflow-hidden [container-type:inline-size]',
+            // The camera's ground, as before: the picture's own video ground.
+            programPictured(view, video) && 'bg-video-ground'
+          )}
+          data-testid="show-stage-program-picture"
+          ref={picture}
+        >
+          {view.source === 'return' ? (
+            <>
+              <TrackVideo className="object-contain" track={video} />
+              {!video ? (
+                <span className="absolute inset-0 flex items-center justify-center p-2 text-center text-xs text-muted-foreground">
+                  {live ? 'Waiting for the program…' : PROGRAM_MONITOR_EMPTY}
+                </span>
+              ) : null}
+            </>
+          ) : view.state === 'shown' ? (
+            <>
+              <ProgramStage talkShow={talkShow} />
+              {takeover ? (
+                <img
+                  alt=""
+                  className="absolute inset-0 size-full bg-video-ground object-contain"
+                  data-testid="show-stage-program-takeover"
+                  src={managedScreenAssetUrl(takeover.imagePath)}
+                />
+              ) : null}
+            </>
+          ) : (
+            <span className="absolute inset-0 flex items-center justify-center p-2 text-center text-xs text-muted-foreground">
+              {view.state === 'waiting' ? 'Waiting for the program…' : PROGRAM_MONITOR_EMPTY}
+            </span>
+          )}
+          {view.source === 'stage' ? (
+            <ProgramGraphics snapshot={graphics?.preview ?? null}>
+              <ProgramAvatar
+                motion={talkShow.avatarMotionSource}
+                snapshot={avatar?.preview ?? null}
+              />
+            </ProgramGraphics>
+          ) : null}
+        </div>
+        {/* The program's state on the picture's corner, as the stage's Room pill. */}
+        {previewCopy?.badge || takeover ? (
+          <span className="absolute top-1.5 right-1.5 flex gap-1">
+            {takeover ? (
+              <span className={PROGRAM_PILL} data-testid="show-stage-program-muted">
+                Takeover
               </span>
             ) : null}
-          </>
-        ) : view.state === 'shown' ? (
-          <ProgramStage talkShow={talkShow} />
-        ) : (
-          <span className="absolute inset-0 flex items-center justify-center p-2 text-center text-xs text-video-ground-muted">
-            {view.state === 'waiting' ? 'Waiting for the program…' : PROGRAM_MONITOR_EMPTY}
+            {previewCopy?.badge ? (
+              <InfoTooltip content={previewCopy.detail}>
+                <span className={PROGRAM_PILL} data-testid="show-stage-program-state">
+                  {previewCopy.badge}
+                </span>
+              </InfoTooltip>
+            ) : null}
           </span>
-        )}
+        ) : null}
       </div>
+      {/* News stays in words: a refusal, a delivery problem, the scene. */}
+      {view.source === 'stage' && avatar?.reason ? (
+        <span className="text-label text-subtle" data-testid="show-stage-avatar-reason">
+          {avatar.reason}
+        </span>
+      ) : null}
+      {view.source === 'stage' && avatar?.enabled && avatar.animation?.reason ? (
+        <span
+          className="text-meta text-muted-foreground"
+          data-avatar-animation={avatar.animation.state}
+          data-testid="show-stage-avatar-animation"
+        >
+          {avatar.animation.reason}
+        </span>
+      ) : null}
+      {view.source === 'stage' && graphics?.reason ? (
+        <span className="text-label text-subtle" data-testid="show-stage-graphics-reason">
+          {graphics.reason}
+        </span>
+      ) : null}
+      {view.source === 'stage' && sceneStatusLine(talkShow.room.scene) ? (
+        <span className="text-label text-subtle" data-testid="show-stage-scene-status">
+          {sceneStatusLine(talkShow.room.scene)}
+        </span>
+      ) : null}
+      {programCameraOn || programCamera.error ? (
+        <span
+          className="truncate text-label text-subtle"
+          data-testid="show-stage-program-camera-status"
+        >
+          {programCameraStatus}
+        </span>
+      ) : null}
+      {view.source === 'stage' ? (
+        // The opt-ins' one home is Guests → Room; this line takes the host there.
+        <Button
+          className="h-auto min-w-0 justify-start self-start px-0 text-subtle"
+          data-testid="show-stage-program-opt-ins"
+          size="xs"
+          type="button"
+          variant="link"
+          onClick={() => openWorkspaceTab('guests')}
+        >
+          <span className="truncate">{roomProgramSummary(avatar, graphics)}</span>
+          <ChevronRightIcon data-icon="inline-end" />
+        </Button>
+      ) : null}
       {view.source === 'return' ? <audio muted={!listening} ref={audioRef} /> : null}
     </div>
   )
+}
+
+/** The program's corner pill: the stage's Room pill, a size down. */
+const PROGRAM_PILL =
+  'inline-flex items-center rounded-full bg-video-ground/80 px-2 py-0.5 text-xs text-video-ground-foreground'
+
+/** Whether the Program frame holds a picture (else it is the empty inset well). */
+function programPictured(
+  view: ReturnType<typeof programMonitorView>,
+  video: MediaStreamTrack | null
+): boolean {
+  return view.source === 'return' ? video !== null : view.state === 'shown'
 }
 
 /** The Show stage inside the Program monitor: the same tiles, drawn small. */
 function ProgramStage({ talkShow }: { talkShow: TalkShowContextValue }): ReactElement {
   const { cloudStatus } = useStudioCloud()
   const room = cloudStatus?.room
+  // Plan 249 S12: while the host's scene is on the program, the preview
+  // draws it with the program page's own scene geometry.
+  const scene = programScenePreview(talkShow.room.scene, room, talkShow.hostIdentity)
+  if (scene)
+    return (
+      <>
+        {scene.tiles.map((tile) => (
+          <SceneTileView
+            key={`${tile.kind}:${tile.identity}`}
+            participant={room?.participants?.find((entry) => entry.identity === tile.identity)}
+            talkShow={talkShow}
+            tile={tile}
+          />
+        ))}
+      </>
+    )
   const plan = planStage(STAGE_CANVAS, managedProgramStageInput(room))
   return (
     <>
       {plan.tiles.map((tile) => (
         <StageTileView
+          hostShape={room?.stage.hostShape}
           key={`${tile.kind}:${tile.identity}`}
           monitor
           participant={room?.participants?.find((entry) => entry.identity === tile.identity)}
@@ -501,6 +968,72 @@ function ProgramStage({ talkShow }: { talkShow: TalkShowContextValue }): ReactEl
         />
       ))}
     </>
+  )
+}
+
+/**
+ * A scene tile in the Program preview: its box, mask and draw order, and its
+ * picture cropped, fitted and mirrored as the program page draws it
+ * (`scenePreviewPicture`). The picture only, without words, as the monitor.
+ */
+function SceneTileView({
+  tile,
+  participant,
+  talkShow
+}: {
+  tile: SceneTile
+  participant: CloudRoomParticipant | undefined
+  talkShow: TalkShowContextValue
+}): ReactElement {
+  const [source, setSource] = useState<{ w: number; h: number } | null>(null)
+  const { track, cameraOff, name, cameraFrame } = tileTrack(
+    { identity: tile.identity, kind: tile.kind, rect: tile.rect, cornerRadius: 0 },
+    talkShow
+  )
+  const picture = scenePreviewPicture(tile, source)
+  const look = cameraOffLook(tile.rect.w, tile.rect.h)
+  const { mask } = tile
+  return (
+    <div
+      className="absolute overflow-hidden bg-inset"
+      data-scene-role={tile.role}
+      data-stage-identity={tile.identity}
+      data-stage-kind={tile.kind}
+      data-stage-shape={mask.shape}
+      data-testid="show-stage-tile"
+      style={{
+        ...stageRectPercent(STAGE_CANVAS, tile.rect),
+        zIndex: tile.z,
+        ...(mask.shape === 'circle'
+          ? { borderRadius: 0, clipPath: HOST_CIRCLE_CLIP }
+          : { borderRadius: mask.shape === 'rounded' ? cqw(mask.radiusPx) : 0 })
+      }}
+    >
+      <div
+        className="absolute overflow-hidden"
+        data-testid="show-stage-scene-clip"
+        style={{ ...picture.clip, ...(tile.mirror ? { transform: 'scaleX(-1)' } : {}) }}
+      >
+        <div className="absolute" style={picture.full}>
+          <TrackVideo
+            cameraFrame={cameraFrame}
+            className="object-fill"
+            onSize={setSource}
+            track={track}
+          />
+        </div>
+      </div>
+      {cameraOff ? (
+        <CameraOffAvatar
+          circle={cqw(look.diameter)}
+          letter={cqw(look.fontPx)}
+          name={name === 'You' ? (participant?.name ?? name) : name || (participant?.name ?? '')}
+        />
+      ) : null}
+      {showsAway(participant?.away, cameraOff) && tile.kind === 'person' ? (
+        <span className="absolute inset-0 bg-video-ground/60" />
+      ) : null}
+    </div>
   )
 }
 
@@ -555,7 +1088,7 @@ function JoinRequests({
           size="xs"
           type="button"
           variant="ghost"
-          onClick={() => openLivestreamView('guests')}
+          onClick={() => openWorkspaceTab('guests')}
         >
           {more === 1 ? '1 more wants to join' : `${more} more want to join`}
         </Button>
@@ -621,7 +1154,9 @@ function StripRow({
 }): ReactElement {
   const local = talkShow.room.local
   const remote = talkShow.room.people.find((entry) => entry.identity === person.identity)
-  const thumbnail = person.host ? (local.cameraOff ? null : local.camera) : (remote?.video ?? null)
+  const thumbnail = person.host
+    ? cameraPicture(local.camera, local.cameraOff)
+    : cameraPicture(remote?.video, remote?.cameraOff)
   const muted = person.host ? local.micMuted : person.muted || Boolean(remote?.micMuted)
   const speaking = !muted && Boolean(remote?.speaking)
   const quality = qualityStatus(person.quality)
@@ -664,7 +1199,10 @@ function StripRow({
       data-testid="show-stage-strip-row"
       leading={
         <span className="relative flex h-5 w-9 shrink-0 overflow-hidden rounded-chip bg-video-ground">
-          <TrackVideo className="object-cover" track={thumbnail} />
+          <TrackVideo className="object-cover" track={thumbnail.track} />
+          {thumbnail.cameraOff ? (
+            <CameraOffAvatar circle="14px" letter="9px" name={person.name} />
+          ) : null}
         </span>
       }
       statusIcons={
@@ -735,4 +1273,17 @@ function StripRow({
       <KebabMenu disabled={disabled} items={items} label={`More for ${person.name}`} />
     </ListRow>
   )
+}
+
+/** Plan 249 S6: a coarse clock, so a report can go out of date on screen.
+ * Ticks only while something runs; the preview's words change at most every
+ * few seconds. */
+function usePreviewClock(running: boolean): number {
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    if (!running) return
+    const timer = setInterval(() => setNow(Date.now()), 5000)
+    return () => clearInterval(timer)
+  }, [running])
+  return now
 }

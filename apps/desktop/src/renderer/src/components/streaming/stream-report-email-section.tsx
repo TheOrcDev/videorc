@@ -23,9 +23,21 @@ export const STREAM_REPORT_SECTION_DESCRIPTION =
 
 export const STREAM_REPORT_SIGNED_OUT_REASON = "Stream reports go to your Videorc account's email."
 
+/** The first read of the account's choices failed (QA F13). */
+export const STREAM_REPORT_LOAD_FAILED = "Couldn't load these settings."
+
+/**
+ * QA F13: a failed first read retries itself after these waits (ms), then
+ * stops; Try again starts the cycle over.
+ */
+export const STREAM_REPORT_LOAD_RETRY_MS: readonly number[] = [2_000, 5_000, 15_000]
+
 /** The switch row's description: where the email goes, or why it can't. */
-export function streamReportEmailDescription(state: StreamReportEmailState | null): string {
-  if (!state) return "To your Videorc account's email."
+export function streamReportEmailDescription(
+  state: StreamReportEmailState | null,
+  loadFailed = false
+): string {
+  if (!state) return loadFailed ? STREAM_REPORT_LOAD_FAILED : "To your Videorc account's email."
   if (state.envDisabled) return 'Turned off when Videorc started. Reopen Videorc to change it.'
   if (!state.signedIn) return "To your Videorc account's email."
   if (state.enabled === null) return "Couldn't reach videorc.com."
@@ -71,6 +83,7 @@ export function streamReportSendLine(view: StreamReportSendView): string {
 
 export function StreamReportEmailSectionView({
   state,
+  loadFailed = false,
   send,
   onEnabledChange,
   onHistoryChange,
@@ -79,6 +92,8 @@ export function StreamReportEmailSectionView({
 }: {
   /** `null` until the backend answers. */
   state: StreamReportEmailState | null
+  /** The first read failed: no choices to show yet, so the row offers Try again. */
+  loadFailed?: boolean
   send: StreamReportSendView
   onEnabledChange: (enabled: boolean) => void
   /** "Save my streams on videorc.com" (plan 241 D7). */
@@ -91,7 +106,7 @@ export function StreamReportEmailSectionView({
   const usable = state !== null && state.signedIn && !state.envDisabled
   // Signed in, but the choice couldn't be read: a switch would show "off"
   // for an account that may be on, so the row offers another read instead.
-  const unread = usable && state?.enabled === null
+  const unread = (usable && state?.enabled === null) || (state === null && loadFailed)
   return (
     <PanelSection description={STREAM_REPORT_SECTION_DESCRIPTION} title="After the stream">
       {signedOut ? (
@@ -104,7 +119,7 @@ export function StreamReportEmailSectionView({
       <FieldGroup variant="grouped">
         <SettingsRow
           data-testid="stream-report-email"
-          description={streamReportEmailDescription(state)}
+          description={streamReportEmailDescription(state, loadFailed)}
           label="Email me a report after each stream"
         >
           {unread ? (
@@ -170,6 +185,12 @@ export function StreamReportEmailSectionView({
 export function StreamReportEmailSection(): ReactElement {
   const { client } = useStudioDiagnostics()
   const [state, setState] = useState<StreamReportEmailState | null>(null)
+  // The first read failed (QA F13); a later failure keeps the last choices.
+  const [loadFailed, setLoadFailed] = useState(false)
+  // QA F13: the pending automatic retry of a failed first read, and how many ran.
+  const retryTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const retries = useRef(0)
+  const refreshRef = useRef<() => void>(() => undefined)
   const [send, setSend] = useState<StreamReportSendView>('idle')
   // Only the latest answer may land: an older read must not undo a newer flip.
   const latest = useRef(0)
@@ -180,34 +201,70 @@ export function StreamReportEmailSection(): ReactElement {
 
   const accept = useCallback((next: StreamReportEmailState) => {
     confirmed.current = next
+    retries.current = 0
+    setLoadFailed(false)
     setState(next)
+  }, [])
+
+  const cancelRetry = useCallback(() => {
+    if (retryTimer.current !== null) clearTimeout(retryTimer.current)
+    retryTimer.current = null
   }, [])
 
   const refresh = useCallback(() => {
     if (!client) return
+    cancelRetry()
     const request = ++latest.current
     void client
       .requestTyped('streamReport.email.get')
       .then((next) => {
         if (request === latest.current) accept(next)
       })
-      .catch(() => undefined)
-  }, [accept, client])
+      .catch(() => {
+        // A failed re-read keeps the choices already shown; a failed first
+        // read says so and tries again a few times on its own.
+        if (request !== latest.current || confirmed.current !== null) return
+        setLoadFailed(true)
+        const wait = STREAM_REPORT_LOAD_RETRY_MS[retries.current]
+        if (wait === undefined) return
+        retries.current += 1
+        retryTimer.current = setTimeout(() => refreshRef.current(), wait)
+      })
+  }, [accept, cancelRetry, client])
+  useEffect(() => {
+    refreshRef.current = refresh
+  }, [refresh])
+
+  // Try again: a fresh cycle of automatic retries after this read.
+  const retry = useCallback(() => {
+    retries.current = 0
+    refresh()
+  }, [refresh])
 
   useEffect(() => {
     if (!client) return
+    retries.current = 0
     refresh()
     // Signing in or out changes where the report goes.
     const off = client.on('account.changed', () => {
       sendGeneration.current += 1
       setSend('idle')
+      // Another account's choices are not this one's: forget them, so a
+      // failed read says so instead of showing the old account's switches.
+      confirmed.current = null
+      setState(null)
+      setLoadFailed(false)
+      retries.current = 0
       refresh()
     })
     return () => {
       sendGeneration.current += 1
+      // Retire a read still in flight, so it neither lands nor retries.
+      latest.current += 1
+      cancelRetry()
       off()
     }
-  }, [client, refresh])
+  }, [cancelRetry, client, refresh])
 
   const onEnabledChange = useCallback(
     (enabled: boolean) => {
@@ -269,11 +326,12 @@ export function StreamReportEmailSection(): ReactElement {
 
   return (
     <StreamReportEmailSectionView
+      loadFailed={loadFailed}
       send={send}
       state={state}
       onEnabledChange={onEnabledChange}
       onHistoryChange={onHistoryChange}
-      onRetry={refresh}
+      onRetry={retry}
       onSendLast={onSendLast}
     />
   )

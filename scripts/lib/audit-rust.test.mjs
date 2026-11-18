@@ -9,7 +9,11 @@ const ignored = [
   '--ignore',
   'RUSTSEC-2026-0371',
   '--ignore',
-  'RUSTSEC-2026-0372'
+  'RUSTSEC-2026-0372',
+  '--ignore',
+  'RUSTSEC-2026-0543',
+  '--ignore',
+  'RUSTSEC-2026-0555'
 ]
 
 test('Rust audit clones a fresh database through system Git before auditing offline', () => {
@@ -33,9 +37,16 @@ test('Rust audit ignores only the named unmaintained notices, each with its sour
     assert.match(advisory.id, /^RUSTSEC-\d{4}-\d{4}$/)
     assert.ok(advisory.crate, `${advisory.id} names its crate`)
     assert.ok(advisory.via, `${advisory.id} names the dependency that pulls it in`)
+    assert.match(advisory.reviewed, /^\d{4}-\d{2}-\d{2}$/, `${advisory.id} names its review day`)
   }
   assert.deepEqual(
     acceptedUnmaintainedAdvisories.map(({ id }) => id),
-    ['RUSTSEC-2026-0370', 'RUSTSEC-2026-0371', 'RUSTSEC-2026-0372']
+    [
+      'RUSTSEC-2026-0370',
+      'RUSTSEC-2026-0371',
+      'RUSTSEC-2026-0372',
+      'RUSTSEC-2026-0543',
+      'RUSTSEC-2026-0555'
+    ]
   )
 })

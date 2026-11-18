@@ -469,8 +469,42 @@ pub fn confirm_activity_word(status: &crate::protocol::RecordingStatus) -> &'sta
     activity_word(status)
 }
 
+/// Plan 249 S18: the planner's word and its clock start from the output that
+/// actually runs. A room has no native capture, so the native status alone
+/// reads `idle` while the show is live; the room's own facts answer instead
+/// (the S1 projection, never a fabricated session).
+pub fn output_activity<'a>(
+    status: &'a crate::protocol::RecordingStatus,
+    cloud: &'a crate::cloud_show::CloudStatus,
+) -> (&'static str, Option<&'a str>) {
+    let facts = crate::output_session::project(status, cloud);
+    if facts.owner != "cloud-room" {
+        return (activity_word(status), status.started_at.as_deref());
+    }
+    if facts.live {
+        ("live", facts.clock.live_since)
+    } else if facts.recording {
+        ("recording", facts.clock.recording_since)
+    } else {
+        ("idle", None)
+    }
+}
+
+/// `confirm_activity_word` over the actual output: a live room asks before a
+/// spoken stop exactly as a local livestream does.
+pub fn confirm_output_activity(
+    status: &crate::protocol::RecordingStatus,
+    cloud: &crate::cloud_show::CloudStatus,
+) -> &'static str {
+    match output_activity(status, cloud).0 {
+        "idle" => confirm_activity_word(status),
+        word => word,
+    }
+}
+
 pub async fn confirm_activity_now(state: &AppState) -> &'static str {
-    confirm_activity_word(&crate::current_recording_status(state).await)
+    let status = crate::current_recording_status(state).await;
+    confirm_output_activity(&status, &crate::cloud_show_status(state))
 }
 
 fn text_of<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
@@ -547,14 +581,13 @@ pub async fn studio_snapshot(state: &AppState) -> StudioSnapshot {
     }
 
     let status = crate::current_recording_status(state).await;
-    let activity = activity_word(&status);
+    let cloud = crate::cloud_show_status(state);
+    let (activity, started_at) = output_activity(&status, &cloud);
     let mut out = Map::new();
     out.insert("activity".into(), json!(activity));
     if matches!(activity, "recording" | "live")
-        && let Some(started) = status
-            .started_at
-            .as_deref()
-            .and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok())
+        && let Some(started) =
+            started_at.and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok())
     {
         let elapsed = chrono::Utc::now().signed_duration_since(started);
         out.insert("elapsedSeconds".into(), json!(elapsed.num_seconds().max(0)));
@@ -1729,6 +1762,53 @@ mod tests {
             activity_word(&status(RecordingState::Idle, None, false)),
             "idle"
         );
+    }
+
+    /// Plan 249 S18: a live room has no native capture; the planner and the
+    /// spoken-stop check read the room's own facts instead of `idle`.
+    #[test]
+    fn a_live_room_reads_live_for_the_planner_and_the_spoken_stop() {
+        use crate::protocol::RecordingStatus;
+        let idle: RecordingStatus = serde_json::from_value(json!({"state": "idle"})).unwrap();
+        let mut cloud = crate::cloud_show::CloudShowRuntime::default().status();
+        assert_eq!(output_activity(&idle, &cloud), ("idle", None));
+        cloud.show = Some(
+            serde_json::from_value(json!({
+                "id": "show-1", "nodeId": "managed", "resumable": false, "kind": "talk"
+            }))
+            .unwrap(),
+        );
+        cloud.room = Some(
+            serde_json::from_value(json!({
+                "phase": "open", "doorOpen": false, "declinedCount": 0,
+                "stage": {"layout": "solo", "onStage": []}, "hostAway": false,
+                "connected": true, "client": "connected", "returnEnabled": false,
+                "stageSet": true, "live": true, "liveSince": "2026-11-16T10:00:00Z"
+            }))
+            .unwrap(),
+        );
+        assert_eq!(
+            output_activity(&idle, &cloud),
+            ("live", Some("2026-11-16T10:00:00Z"))
+        );
+        assert_eq!(confirm_output_activity(&idle, &cloud), "live");
+        assert!(spoken_confirm("stop", confirm_output_activity(&idle, &cloud)).is_some());
+        // End livestream with the cloud recording still running.
+        cloud.room.as_mut().unwrap().live = false;
+        cloud.recording = Some(
+            serde_json::from_value(json!({
+                "active": true, "since": "2026-11-16T09:00:00Z", "seconds": 0, "bytes": 0
+            }))
+            .unwrap(),
+        );
+        assert_eq!(
+            output_activity(&idle, &cloud),
+            ("recording", Some("2026-11-16T09:00:00Z"))
+        );
+        // An open room, off air and not recording, is not a session.
+        cloud.recording = None;
+        assert_eq!(output_activity(&idle, &cloud), ("idle", None));
+        assert_eq!(confirm_output_activity(&idle, &cloud), "idle");
     }
 
     #[tokio::test]

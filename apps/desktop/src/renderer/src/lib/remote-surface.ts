@@ -19,6 +19,14 @@ export interface RemoteSurfaceState {
   recordEnabled: boolean
   streamEnabled: boolean
   micMuted: boolean
+  /** Booleans from confirmed output owners; no identifiers or private metadata. */
+  outputSession?: {
+    owner: 'native' | 'cloud-room'
+    freshness: 'fresh' | 'stale'
+    roomOpen: boolean
+    microphoneConfirmed: boolean
+    cameraOff: boolean | null
+  }
   layoutPreset: LayoutPreset
   savedScenes?: { id: string; name: string }[]
   activeSavedSceneId?: string | null
@@ -139,7 +147,8 @@ export type RemoteSurfaceValues = readonly [
     | 'hideFromStreamMethod'
     | 'protected'
     | 'windowId'
-  >
+  >,
+  outputSession?: RemoteSurfaceState['outputSession']
 ]
 
 function snapshotFromValues(
@@ -156,6 +165,7 @@ function snapshotFromValues(
       recordEnabled: values[2],
       streamEnabled: values[3],
       micMuted: values[4],
+      ...(values[20] ? { outputSession: values[20] } : {}),
       layoutPreset: values[5],
       activeTakeoverId: values[6],
       windows: { notes: values[7], comments: values[8], preview: values[9] },

@@ -21,6 +21,11 @@ export const MACOS_D3_PUBLICATION_RESERVATION_PROFILE =
 const MACOS_D3_PUBLICATION_RESERVATION_SCHEMA_VERSION = 3
 const MAX_PUBLICATION_RESERVATION_BYTES = 1024 * 1024
 const DEFAULT_REMOTE_BODY_READ_TIMEOUT_MS = 120_000
+// The body read timeout bounds each stalled read. The whole body also gets a
+// size-scaled deadline: a ~215 MB Windows installer read back from the Hetzner
+// mirror took longer than one flat 120 s window (promote run 43850330253),
+// although bytes kept arriving. The SHA-256 and size checks are unchanged.
+const MINIMUM_REMOTE_BODY_BYTES_PER_SECOND = 256 * 1024
 
 const DEFAULT_CONTENT_TYPES = new Map([
   ['.dmg', 'application/x-apple-diskimage'],
@@ -1297,13 +1302,20 @@ async function inspectBoundedResponseBody(
   }
   const hash = createHash('sha256')
   const chunks = retainBytes ? [] : null
-  const deadlineMs = Date.now() + bodyReadTimeoutMs
+  const deadlineMs =
+    Date.now() +
+    bodyReadTimeoutMs +
+    Math.ceil((maximumBytes / MINIMUM_REMOTE_BODY_BYTES_PER_SECOND) * 1000)
   let sizeBytes = 0
   try {
     while (true) {
       const remainingTimeMs = deadlineMs - Date.now()
       if (remainingTimeMs <= 0) throw remoteBodyTimeout(objectKey)
-      const step = await readRemoteBodyStep(iterator, remainingTimeMs, objectKey)
+      const step = await readRemoteBodyStep(
+        iterator,
+        Math.min(remainingTimeMs, bodyReadTimeoutMs),
+        objectKey
+      )
       if (step.done) {
         return {
           bytes: chunks ? Buffer.concat(chunks) : null,

@@ -1,4 +1,10 @@
+import { LibraryCloudArchive } from './library-cloud-archive'
+import { LibraryCloudIsoTake, useCloudIsoLibrary } from './library-cloud-iso'
+import { CloudMarkersButton } from '@/components/cloud-markers-dialog'
+import { openWorkspaceTab } from '@/lib/workspace-navigation'
+import { cloudRecordingAvailability, cloudTakeLabel } from '@/lib/cloud-recordings-view'
 import {
+  Fragment,
   useCallback,
   useEffect,
   useRef,
@@ -23,7 +29,7 @@ import { Button } from '@/components/ui/button'
 import { Empty, EmptyDescription, EmptyTitle } from '@/components/ui/empty'
 import { Progress } from '@/components/ui/progress'
 import { Spinner } from '@/components/ui/spinner'
-import { useStudioCore, useStudioDiagnostics } from '@/hooks/use-studio'
+import { useStudioCore, useStudioDiagnostics, useStudioCloud } from '@/hooks/use-studio'
 import type { CloudRecordingItem } from '@/lib/backend'
 import {
   attachCloudDownloads,
@@ -68,6 +74,7 @@ type LoadState = { kind: 'idle' } | { kind: 'loading' } | { kind: 'error'; text:
 
 export function LibraryCloudRecordings(): ReactElement {
   const { account, settings, wsStatus } = useStudioCore()
+  const { cloudStatus } = useStudioCloud()
   const { client } = useStudioDiagnostics()
   const signedIn = account?.status === 'signed-in'
   const online = wsStatus === 'connected'
@@ -90,6 +97,13 @@ export function LibraryCloudRecordings(): ReactElement {
     })
   }
   const mountedRef = useRef(true)
+  // Plan 249 S22: each take's separate files, under its row.
+  const iso = useCloudIsoLibrary({
+    client,
+    recordings,
+    enabled: signedIn && online,
+    outputDirectoryHandle: settings.outputDirectoryHandle
+  })
 
   useEffect(() => {
     mountedRef.current = true
@@ -180,6 +194,10 @@ export function LibraryCloudRecordings(): ReactElement {
       description="Talk shows Videorc Cloud recorded. Each one is deleted on the date shown."
       title="Cloud recordings"
     >
+      {signedIn && <LibraryCloudArchive />}
+      {signedIn && cloudStatus?.show?.id && (
+        <CloudMarkersButton showId={cloudStatus.show.id} disabled={!online} />
+      )}
       {!signedIn ? (
         <LockAlert
           action={lockAlertAction({ kind: 'sign-in' })}
@@ -218,18 +236,31 @@ export function LibraryCloudRecordings(): ReactElement {
       ) : (
         <div className="max-h-56 overflow-y-auto">
           <GroupedList aria-label="Cloud recordings">
-            {recordings.map((recording) => (
-              <CloudRecordingRow
-                key={recording.id}
-                disabled={!online}
-                download={downloads.get(recording.id) ?? null}
-                recording={recording}
-                onCancel={(jobId) => {
-                  if (client) void cancelCloudDownload(client, jobId)
-                }}
-                onDownload={() => void download(recording.id)}
-              />
-            ))}
+            {recordings.map((recording) => {
+              const isoTake = iso.takes.get(recording.id)
+              return (
+                <Fragment key={recording.id}>
+                  <CloudRecordingRow
+                    disabled={!online}
+                    download={downloads.get(recording.id) ?? null}
+                    recording={recording}
+                    onCancel={(jobId) => {
+                      if (client) void cancelCloudDownload(client, jobId)
+                    }}
+                    onDownload={() => void download(recording.id)}
+                  />
+                  {isoTake ? (
+                    <LibraryCloudIsoTake
+                      disabled={!online}
+                      imports={iso.imports}
+                      take={isoTake}
+                      onCancel={(jobId) => void iso.cancelImport(jobId)}
+                      onImport={() => void iso.importTake(isoTake)}
+                    />
+                  ) : null}
+                </Fragment>
+              )
+            })}
           </GroupedList>
         </div>
       )}
@@ -261,12 +292,33 @@ function CloudRecordingRow({
       data-recording-id={recording.id}
       data-testid="library-cloud-recording"
       icon={<VideoFileIcon />}
-      title="Talk show"
+      title={cloudTakeLabel(recording)}
     >
       <span className="text-meta text-muted-foreground tabular-nums">
         {durationMsLabel(recording.seconds * 1000)}
       </span>
-      {downloadsOnThisComputer(recording) ? (
+      <CloudMarkersButton showId={recording.showId} disabled={disabled} />
+      {recording.localSessionId || (download?.state === 'done' && download.localSessionId) ? (
+        <Button
+          size="xs"
+          variant="outline"
+          onClick={() =>
+            openWorkspaceTab(
+              'library',
+              recording.localSessionId ??
+                (download?.state === 'done' ? download.localSessionId : undefined)
+            )
+          }
+        >
+          Open in Library
+        </Button>
+      ) : cloudRecordingAvailability(recording) !== 'available' ? (
+        <span className="text-meta text-muted-foreground">
+          {cloudRecordingAvailability(recording) === 'expired'
+            ? 'Cloud copy expired'
+            : 'Cloud file missing'}
+        </span>
+      ) : downloadsOnThisComputer(recording) ? (
         <DownloadControls
           disabled={disabled}
           download={download}
@@ -348,7 +400,7 @@ function DownloadControls({
       ) : null}
       <Button disabled={disabled} size="xs" variant="outline" onClick={onDownload}>
         <DownloadIcon data-icon="inline-start" />
-        {failed ? 'Try again' : 'Download'}
+        {failed ? 'Try again' : 'Download to Library'}
       </Button>
     </>
   )

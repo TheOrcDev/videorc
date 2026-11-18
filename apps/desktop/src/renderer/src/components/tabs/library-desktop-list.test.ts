@@ -23,7 +23,9 @@ vi.mock('@/hooks/use-studio', () => ({
   useStudioRecordingState: () => ({ recording: mocked.recording }),
   useStudioRecording: () => ({ recording: mocked.recording }),
   // Plan 234: the lazy Cloud recordings section asks for the backend client.
-  useStudioDiagnostics: () => ({ client: null })
+  useStudioDiagnostics: () => ({ client: null }),
+  // Plan 249 S19: a recording row's Show markers button reads the cloud status.
+  useStudioCloud: () => ({ cloudStatus: null })
 }))
 
 function session(id: string, overrides: Partial<SessionSummary> = {}): SessionSummary {
@@ -374,7 +376,7 @@ describe('Clean cut in the Library (E-4)', () => {
         (item) => item.textContent === 'Review clean cut'
       )!
       await act(async () => review.click())
-      expect((opened.mock.calls[0]?.[0] as CustomEvent).detail).toEqual({
+      expect((opened.mock.calls[0]![0] as CustomEvent).detail).toEqual({
         sessionId: 'bravo',
         mode: 'condensed',
         review: true,

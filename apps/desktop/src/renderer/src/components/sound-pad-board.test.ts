@@ -99,4 +99,88 @@ describe('the sound pads (plan 189)', () => {
     expect(pad('applause').querySelector('kbd')).toBeNull()
     expect(container.querySelector('[role="group"]')?.getAttribute('aria-label')).toBe('Sound pads')
   })
+
+  describe('a While held pad pressed with Space or Enter (QA F15)', () => {
+    const key = (target: Element, type: 'keydown' | 'keyup', name = ' '): void => {
+      target.dispatchEvent(new KeyboardEvent(type, { key: name, bubbles: true, cancelable: true }))
+    }
+    const hold = async (id: string, name = ' '): Promise<void> => {
+      await act(async () => {
+        pad(id).focus()
+        key(pad(id), 'keydown', name)
+      })
+    }
+
+    it.each([' ', 'Enter'])('stops on the keyup (%j)', async (name) => {
+      const onPlay = vi.fn()
+      const onStop = vi.fn()
+      await render([], { onPlay, onStop })
+      await hold('drumroll', name)
+      expect(onPlay.mock.calls).toEqual([['drumroll']])
+      await act(async () => key(pad('drumroll'), 'keyup', name))
+      expect(onStop.mock.calls).toEqual([['drumroll']])
+    })
+
+    it('stops when focus moves away before the keyup, once', async () => {
+      const onStop = vi.fn()
+      await render([], { onPlay: vi.fn(), onStop })
+      await hold('drumroll')
+      await act(async () => pad('drumroll').blur())
+      expect(onStop.mock.calls).toEqual([['drumroll']])
+      await act(async () => key(pad('drumroll'), 'keyup'))
+      expect(onStop).toHaveBeenCalledTimes(1)
+    })
+
+    it('stops when the window loses the keys', async () => {
+      const onStop = vi.fn()
+      await render([], { onPlay: vi.fn(), onStop })
+      await hold('drumroll')
+      await act(async () => {
+        window.dispatchEvent(new Event('blur'))
+      })
+      expect(onStop.mock.calls).toEqual([['drumroll']])
+    })
+
+    it('stops when the pad goes away mid-hold', async () => {
+      const onStop = vi.fn()
+      await render([], { onPlay: vi.fn(), onStop })
+      await hold('drumroll')
+      await act(async () => root.unmount())
+      expect(onStop.mock.calls).toEqual([['drumroll']])
+      root = createRoot(container)
+    })
+
+    it('stops when the pad is disabled mid-hold', async () => {
+      const onStop = vi.fn()
+      await render([], { onPlay: vi.fn(), onStop })
+      await hold('drumroll')
+      await act(async () =>
+        root.render(
+          createElement(SoundPadBoard, {
+            columns: 4,
+            disabledReason: 'Videorc is reconnecting.',
+            sounds,
+            voices: new Map(),
+            onPlay: vi.fn(),
+            onStop
+          })
+        )
+      )
+      expect(onStop.mock.calls).toEqual([['drumroll']])
+    })
+
+    it('sends no Stop for a pad nobody is holding, or for a toggle', async () => {
+      const onStop = vi.fn()
+      await render([], { onPlay: vi.fn(), onStop })
+      await act(async () => {
+        pad('drumroll').focus()
+        pad('drumroll').blur()
+        pad('applause').focus()
+        key(pad('applause'), 'keydown')
+        pad('applause').blur()
+        window.dispatchEvent(new Event('blur'))
+      })
+      expect(onStop).not.toHaveBeenCalled()
+    })
+  })
 })

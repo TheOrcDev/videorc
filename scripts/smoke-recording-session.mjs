@@ -487,8 +487,21 @@ export async function startSessionWhenScreenSettles(
   }
 }
 
+// WebSocket readyState values: a send on CLOSING or CLOSED is dropped silently.
+const WEBSOCKET_CLOSING = 2
+const WEBSOCKET_CLOSED = 3
+
 export function request(ws, timeoutMs, method, params) {
   const id = `smoke-${Date.now()}-${Math.random().toString(16).slice(2)}`
+  // The close event has already fired for a socket the app took down (a quit,
+  // a crash), so no answer and no close can follow: fail now, not at timeoutMs.
+  if (ws.readyState === WEBSOCKET_CLOSING || ws.readyState === WEBSOCKET_CLOSED) {
+    return Promise.reject(
+      new Error(
+        `Backend connection is closed; ${method} was not sent (the app quit or the backend exited).`
+      )
+    )
+  }
   return new Promise((resolveRequest, rejectRequest) => {
     const settle = () => {
       clearTimeout(timer)

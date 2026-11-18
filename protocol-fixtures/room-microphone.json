@@ -1,0 +1,33 @@
+{
+  "role": "host-microphone",
+  "sampleRate": 48000,
+  "channels": 1,
+  "frames": 480,
+  "queueFrames": 1920,
+  "gainDb": {
+    "min": -24,
+    "max": 24
+  },
+  "offsetMs": {
+    "min": 0,
+    "max": 1000
+  },
+  "nativeMode": "native-headphones",
+  "supportedMode": "browser-aec",
+  "nativeProductionQualified": false,
+  "nativeSpeakerAec": false,
+  "clockQualification": "unavailable",
+  "clock": {
+    "timeline": "processed",
+    "fields": ["originUs", "incarnation"],
+    "absent": null
+  },
+  "rejectedDeviceIds": [
+    "default",
+    "microphone:coreaudio:0",
+    "microphone:coreaudio:4294967296",
+    "microphone:linux-pulse:64656661756c74",
+    "microphone:linux-pulse:4044454641554c545f534f5552434540",
+    "microphone:linux-pulse:616c73615f6f75747075742e737065616b6572732e6d6f6e69746f72"
+  ]
+}

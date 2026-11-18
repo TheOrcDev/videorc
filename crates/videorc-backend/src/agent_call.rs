@@ -447,6 +447,32 @@ async fn add_marker(state: &AppState, _agent: &AgentIdentity, args: Value) -> To
         .map(str::trim)
         .filter(|title| !title.is_empty())
         .map(str::to_string);
+    if let Some(show_id) = crate::cloud_markers::current_show(state) {
+        return match crate::cloud_markers::create(
+            state,
+            crate::cloud_markers::Create {
+                show_id,
+                operation_id: args
+                    .get("operationId")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+                    .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+                label: title,
+                kind: "marker".into(),
+                lookback_seconds: None,
+            },
+            "agent",
+            None,
+        )
+        .await
+        {
+            Ok(mark) => ToolOutcome::ok(
+                "Marker saved on the show timeline; no media to extract.",
+                Some(crate::cloud_markers::agent_projection(&mark, false)),
+            ),
+            Err(e) => ToolOutcome::failed(e.to_string()),
+        };
+    }
     // A session that only feeds the Clips ring (plan 181) records nothing a
     // marker could land in.
     let status = crate::current_recording_status(state).await;

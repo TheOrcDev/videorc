@@ -804,4 +804,126 @@ mod tests {
         );
         std::fs::remove_dir_all(&directory).unwrap();
     }
+
+    fn import_test_state(directory: &Path) -> AppState {
+        let (events, _) = tokio::sync::broadcast::channel(16);
+        AppState::new(
+            "test-token".to_string(),
+            1234,
+            events,
+            crate::storage::Database::open_file_for_tests(&directory.join("videorc.sqlite3")),
+        )
+    }
+
+    /// Imports `name` (holding `bytes`) into a fresh output folder and
+    /// returns the stored row. A missing FFmpeg only skips duration + poster.
+    async fn import_fixture(
+        directory: &Path,
+        name: &str,
+        bytes: &[u8],
+        ffmpeg_path: &str,
+    ) -> crate::protocol::SessionSummary {
+        let source_dir = directory.join("source");
+        let output_dir = directory.join("output");
+        std::fs::create_dir_all(&source_dir).unwrap();
+        std::fs::create_dir_all(&output_dir).unwrap();
+        let source = source_dir.join(name);
+        std::fs::write(&source, bytes).unwrap();
+        let state = import_test_state(directory);
+        let id = import_recording(
+            &state,
+            source.to_str().unwrap(),
+            output_dir.to_str().unwrap(),
+            ffmpeg_path,
+        )
+        .await
+        .expect("the import succeeds");
+        state
+            .database
+            .list_sessions(10)
+            .unwrap()
+            .into_iter()
+            .find(|row| row.id == id)
+            .expect("the imported row is listed")
+    }
+
+    // QA F3: an uppercase `.MKV` keeps its name and is stored as an MKV
+    // output, which Export MP4 (recording.rs `has_mkv_extension`) accepts.
+    #[tokio::test]
+    async fn an_uppercase_mkv_import_keeps_its_name_as_an_mkv_output() {
+        let directory =
+            std::env::temp_dir().join(format!("videorc-import-mkv-case-{}", uuid::Uuid::new_v4()));
+        let row = import_fixture(&directory, "Example.MKV", b"mkv bytes", "missing-ffmpeg").await;
+        let output = row.output_path.expect("an MKV import is an output path");
+        assert!(output.ends_with("Example.MKV"), "{output}");
+        assert_eq!(row.container.as_deref(), Some("mkv"));
+        assert_eq!(row.mp4_path, None);
+        std::fs::remove_dir_all(&directory).unwrap();
+    }
+
+    // QA F4: a QuickTime import is copied unchanged into the playable slot;
+    // the Library names it from that path's extension (library-view.ts).
+    #[tokio::test]
+    async fn a_mov_import_keeps_its_quicktime_file_unchanged() {
+        let directory =
+            std::env::temp_dir().join(format!("videorc-import-mov-{}", uuid::Uuid::new_v4()));
+        let row =
+            import_fixture(&directory, "Clip.mov", b"quicktime bytes", "missing-ffmpeg").await;
+        let playable = row
+            .mp4_path
+            .expect("a MOV import sits in the playable slot");
+        assert!(playable.ends_with("Clip.mov"), "{playable}");
+        assert_eq!(std::fs::read(&playable).unwrap(), b"quicktime bytes");
+        assert_eq!(row.output_path, None);
+        std::fs::remove_dir_all(&directory).unwrap();
+    }
+
+    /// A genuine QuickTime file (not a renamed MP4): imported unchanged, still
+    /// QuickTime, and FFmpeg probes its duration. Ignored in default CI, which
+    /// has no FFmpeg; run with --ignored on a host with ffmpeg on PATH.
+    #[tokio::test]
+    #[ignore = "spawns ffmpeg and writes media; run with --ignored"]
+    async fn real_ffmpeg_mov_import_stays_quicktime_and_probes() {
+        let directory =
+            std::env::temp_dir().join(format!("videorc-import-real-mov-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let fixture = directory.join("fixture.mov");
+        let status = std::process::Command::new("ffmpeg")
+            .args([
+                "-y",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=size=64x64:rate=10",
+                "-t",
+                "1",
+                "-c:v",
+                "libx264",
+                "-f",
+                "mov",
+            ])
+            .arg(&fixture)
+            .status()
+            .expect("ffmpeg should be on PATH for this ignored test");
+        assert!(status.success(), "fixture FFmpeg failed");
+        let bytes = std::fs::read(&fixture).unwrap();
+        // QuickTime brand `qt  ` in the ftyp box: this is not an MP4.
+        assert_eq!(&bytes[4..12], b"ftypqt  ");
+
+        let row = import_fixture(&directory, "Genuine.MOV", &bytes, "ffmpeg").await;
+        let playable = row
+            .mp4_path
+            .expect("a MOV import sits in the playable slot");
+        assert!(playable.ends_with("Genuine.MOV"), "{playable}");
+        assert_eq!(std::fs::read(&playable).unwrap(), bytes);
+        assert!(
+            row.duration_ms.is_some_and(|ms| ms > 500),
+            "{:?}",
+            row.duration_ms
+        );
+        std::fs::remove_dir_all(&directory).unwrap();
+    }
 }

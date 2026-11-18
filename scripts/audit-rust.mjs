@@ -7,14 +7,47 @@ import { fileURLToPath } from 'node:url'
 const advisoryDatabaseUrl = 'https://github.com/RustSec/advisory-db.git'
 
 // Informational "unmaintained" notices only, never a vulnerability. Each entry
-// names the dependency that pulls it in, so it can be dropped once that moves.
+// names the dependency that pulls it in and the day it was reviewed, so it can
+// be dropped once that moves.
 export const acceptedUnmaintainedAdvisories = [
   // zvariant, zbus_names and zvariant_derive were folded into zbus 6. They reach
   // us only through ashpd 0.13 (Linux screencast portal), which still depends on
   // zbus 5. Remove these once an ashpd release on zbus 6 is adopted.
-  { id: 'RUSTSEC-2026-0370', crate: 'zvariant', via: 'ashpd 0.13 -> zbus 5' },
-  { id: 'RUSTSEC-2026-0371', crate: 'zbus_names', via: 'ashpd 0.13 -> zbus 5' },
-  { id: 'RUSTSEC-2026-0372', crate: 'zvariant_derive', via: 'ashpd 0.13 -> zbus 5' }
+  {
+    id: 'RUSTSEC-2026-0370',
+    crate: 'zvariant',
+    via: 'ashpd 0.13 -> zbus 5',
+    reviewed: '2026-10-21'
+  },
+  {
+    id: 'RUSTSEC-2026-0371',
+    crate: 'zbus_names',
+    via: 'ashpd 0.13 -> zbus 5',
+    reviewed: '2026-10-21'
+  },
+  {
+    id: 'RUSTSEC-2026-0372',
+    crate: 'zvariant_derive',
+    via: 'ashpd 0.13 -> zbus 5',
+    reviewed: '2026-10-21'
+  },
+  // chrono and chrono-tz are marked unmaintained for every version, with no
+  // patched release (chronotope/chrono#1768); the advisory suggests jiff or
+  // time. chrono is the backend's time type (100+ files) and also comes in
+  // through rmcp and schemars, so moving off it is its own migration, not an
+  // audit fix. Remove these once the backend (and rmcp, schemars) leave chrono.
+  {
+    id: 'RUSTSEC-2026-0543',
+    crate: 'chrono',
+    via: 'videorc-backend, rmcp 3, schemars 1',
+    reviewed: '2026-11-18'
+  },
+  {
+    id: 'RUSTSEC-2026-0555',
+    crate: 'chrono-tz',
+    via: 'videorc-backend (scheduled streams, YouTube quota day)',
+    reviewed: '2026-11-18'
+  }
 ]
 
 export function rustAuditCommands({ databasePath, databaseExists }) {

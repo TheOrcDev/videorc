@@ -1,3 +1,9 @@
+mod cloud_archives;
+mod cloud_clips;
+mod cloud_recordings;
+mod cloud_speech;
+pub(crate) use cloud_speech::HostTranscriptCue;
+mod cloud_source_iso;
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
 use std::fs::File;
@@ -1911,6 +1917,9 @@ impl Database {
             path,
         };
         database.migrate()?;
+        if let Err(error) = database.recover_cloud_recording_library() {
+            tracing::warn!("Cloud Library recovery deferred: {error}");
+        }
         Ok(database)
     }
 
@@ -1980,6 +1989,108 @@ impl Database {
         )?;
         transaction.commit()?;
         Ok(())
+    }
+
+    /// A cloud show owns chat and a Library row, but never a local file.
+    /// Idempotent across Go Live, status polling and resuming the same show.
+    pub(crate) fn sync_cloud_show_session(
+        &self,
+        status: &crate::cloud_show::CloudStatus,
+    ) -> Result<()> {
+        let active = status
+            .show
+            .as_ref()
+            .zip(status.room.as_ref())
+            .filter(|(_, room)| {
+                (room.live || status.recording.as_ref().is_some_and(|r| r.active))
+                    && room.phase == crate::cloud_talk::CloudRoomPhase::Open
+            });
+        let now = Utc::now().to_rfc3339();
+        // S16 owns interval identity; record-only history has no interval.
+        let mut conn = self.lock()?;
+        let tx = conn.transaction()?;
+        if let (Some(show), Some(interval)) = (status.show.as_ref(), status.live_interval.as_ref())
+        {
+            tx.execute("INSERT INTO cloud_live_intervals(id, show_id, requested_at, live_since, end_requested_at, ended_at)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT(id) DO UPDATE SET
+                live_since = COALESCE(cloud_live_intervals.live_since, excluded.live_since),
+                end_requested_at = COALESCE(cloud_live_intervals.end_requested_at, excluded.end_requested_at),
+                ended_at = COALESCE(cloud_live_intervals.ended_at, excluded.ended_at)",
+                params![interval.id, show.id, interval.requested_at, interval.live_since, interval.end_requested_at, interval.ended_at])?;
+        }
+        tx.execute(
+            "UPDATE sessions SET status = 'completed', ended_at = ?1,
+             duration_ms = MAX(0, CAST((julianday(?1) - julianday(started_at)) * 86400000 AS INTEGER))
+             WHERE mode IN ('cloud-stream', 'cloud-room') AND status = 'running' AND (?2 IS NULL OR id <> ?2)",
+            params![now, active.map(|(show, _)| show.id.as_str())],
+        )?;
+        if let Some((show, room)) = active {
+            let sources = SourceSelection {
+                screen_id: None,
+                window_id: None,
+                camera_id: None,
+                microphone_id: None,
+                test_pattern: false,
+            };
+            let output = OutputSettings {
+                record_enabled: status.recording.as_ref().is_some_and(|r| r.active),
+                stream_enabled: room.live,
+                output_directory: None,
+                ffmpeg_path: None,
+                keep_original_mkv: false,
+                separate_source_recordings: None,
+                video: crate::protocol::VideoSettings {
+                    preset: crate::protocol::VideoPreset::StreamSafe1080p30,
+                    width: 1920,
+                    height: 1080,
+                    fps: 30,
+                    bitrate_kbps: 6000,
+                },
+                rtmp: crate::protocol::RtmpSettings {
+                    preset: crate::protocol::RtmpPreset::Custom,
+                    server_url: String::new(),
+                    stream_key: String::new(),
+                },
+            };
+            tx.execute(
+                "INSERT INTO sessions (id, title, started_at, status, mode, stream_preset, sources_json, layout_json, output_json)
+                 VALUES (?1, ?2, ?3, 'running', ?8, ?4, ?5, ?6, ?7)
+                 ON CONFLICT(id) DO UPDATE SET status = 'running', ended_at = NULL, duration_ms = NULL,
+                 title = excluded.title, stream_preset = excluded.stream_preset,
+                 mode = CASE WHEN sessions.mode = 'cloud-stream' THEN 'cloud-stream' ELSE excluded.mode END,
+                 output_json = excluded.output_json
+                 WHERE sessions.mode IN ('cloud-stream', 'cloud-room')",
+                params![show.id, room.title.as_deref().filter(|title| !title.trim().is_empty()).unwrap_or("Talk show"),
+                    room.live_since.as_deref().or_else(|| status.recording.as_ref().and_then(|r| r.since.as_deref())).unwrap_or(&now), room.platforms.join(", "),
+                    serde_json::to_string(&sources)?, serde_json::to_string(&crate::protocol::default_layout_settings())?, session_output_json(&output)?, if room.live { "cloud-stream" } else { "cloud-room" }],
+            )?;
+            tx.execute("INSERT OR IGNORE INTO cloud_session_associations(session_id, show_id) VALUES (?1, ?1)", params![show.id])?;
+            tx.execute("INSERT INTO session_chat_totals (session_id, totals_json) VALUES (?1, ?2) ON CONFLICT(session_id) DO NOTHING",
+                params![show.id, serde_json::to_string(&SessionChatTotals::empty(&show.id))?])?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn cloud_show_status_for_tests() -> crate::cloud_show::CloudStatus {
+        let mut status = crate::cloud_show::CloudShowRuntime::default().status();
+        status.show = Some(
+            serde_json::from_value(serde_json::json!({
+                "id": "sh_cloud_chat", "nodeId": "web", "resumable": false, "kind": "talk"
+            }))
+            .unwrap(),
+        );
+        status.room = Some(
+            serde_json::from_value(serde_json::json!({
+                "phase": "open", "doorOpen": false, "title": "Cloud Q&A", "platforms": ["youtube"],
+                "declinedCount": 0, "stage": { "layout": "solo", "onStage": [] },
+                "hostAway": false, "connected": true, "client": "idle", "returnEnabled": false,
+                "stageSet": false, "live": true, "liveSince": "2026-11-16T12:00:00Z"
+            }))
+            .unwrap(),
+        );
+        status
     }
 
     /// Hides a benchmark session from every Library read (`library_hidden`)
@@ -3045,7 +3156,7 @@ impl Database {
         let output: serde_json::Value = serde_json::from_str(&output_json)?;
         Ok(Some(Mp4ExportTakeRow {
             started_at,
-            captured_by_videorc: mode != "imported" && !derived,
+            captured_by_videorc: mode != "imported" && mode != "cloud-recording" && !derived,
             fps: output
                 .get("video")
                 .and_then(|video| video.get("fps"))
@@ -4527,6 +4638,36 @@ impl Database {
     pub fn list_live_chat_messages(&self, session_id: &str) -> Result<Vec<LiveChatMessage>> {
         let conn = self.lock()?;
         self.live_chat_messages_for_session_locked(&conn, session_id)
+    }
+
+    /// Plan 249 S18: which of these message ids this session already
+    /// persisted. A resumed show's provider redelivery older than the
+    /// in-memory transcript is still a duplicate for commands, greetings and
+    /// Sidekick. Chunked to stay under SQLite's parameter limit.
+    pub fn existing_live_chat_message_ids(
+        &self,
+        session_id: &str,
+        ids: &[String],
+    ) -> Result<HashSet<String>> {
+        let mut existing = HashSet::new();
+        if ids.is_empty() {
+            return Ok(existing);
+        }
+        let conn = self.lock()?;
+        for chunk in ids.chunks(400) {
+            let placeholders = vec!["?"; chunk.len()].join(", ");
+            let sql = format!(
+                "SELECT id FROM live_chat_messages WHERE session_id = ? AND id IN ({placeholders})"
+            );
+            let mut statement = conn.prepare(&sql)?;
+            let parameters = std::iter::once(session_id).chain(chunk.iter().map(String::as_str));
+            let rows =
+                statement.query_map(params_from_iter(parameters), |row| row.get::<_, String>(0))?;
+            for row in rows {
+                existing.insert(row?);
+            }
+        }
+        Ok(existing)
     }
 
     /// Which of these authors already chatted in an earlier session, as
@@ -8815,6 +8956,33 @@ impl Database {
             );
             CREATE INDEX IF NOT EXISTS idx_stream_report_emails_status_due
                 ON stream_report_emails(status, due_at);
+            -- Plan 249 S25: one report per cloud live interval, keyed by
+            -- show and interval (a show can go live again; a solo resume is
+            -- a new local session in the same interval). Holds no numbers.
+            CREATE TABLE IF NOT EXISTS cloud_interval_report_emails (
+                show_id TEXT NOT NULL,
+                interval_id TEXT NOT NULL,
+                report_id TEXT NOT NULL,
+                platforms_json TEXT NOT NULL,
+                account_email TEXT NOT NULL,
+                status TEXT NOT NULL,
+                due_at TEXT NOT NULL,
+                started_at TEXT NOT NULL,
+                ended_at TEXT NOT NULL,
+                attempts INTEGER NOT NULL DEFAULT 0,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (show_id, interval_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_cloud_interval_report_emails_status_due
+                ON cloud_interval_report_emails(status, due_at);
+            -- The local sessions that fed a solo cloud interval, whose rows
+            -- its report reads.
+            CREATE TABLE IF NOT EXISTS cloud_interval_sessions (
+                interval_id TEXT NOT NULL,
+                show_id TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                PRIMARY KEY (interval_id, session_id)
+            );
             ",
         )?;
         // Named timeline markers share ownership and deletion with clip marks.
@@ -8887,6 +9055,11 @@ impl Database {
             "derived_from_session_id",
             "derived_from_session_id TEXT REFERENCES sessions(id) ON DELETE SET NULL",
         )?;
+        conn.execute_batch(include_str!("storage/cloud_recordings.sql"))?;
+        conn.execute_batch(include_str!("storage/cloud_speech.sql"))?;
+        conn.execute_batch(include_str!("storage/cloud_archives.sql"))?;
+        conn.execute_batch(include_str!("storage/cloud_source_iso.sql"))?;
+        conn.execute_batch(include_str!("storage/cloud_clips.sql"))?;
         ensure_column(&conn, "sessions", "source_title", "source_title TEXT")?;
         ensure_column(&conn, "sessions", "processing_kind", "processing_kind TEXT")?;
         // Stream Manager (plan 055): structured event facts, reply context and
@@ -19116,5 +19289,35 @@ mod tests {
         let incomplete = database.incomplete_repair_jobs().unwrap();
         assert_eq!(incomplete.len(), 1);
         assert_eq!(incomplete[0].id, "job-running");
+    }
+}
+
+#[cfg(test)]
+mod cloud_show_session_tests {
+    use super::*;
+
+    #[test]
+    fn cloud_show_row_is_idempotent_and_closes_without_a_local_file() {
+        let db = Database::open_in_memory_for_tests();
+        let mut status = Database::cloud_show_status_for_tests();
+        db.sync_cloud_show_session(&status).unwrap();
+        db.sync_cloud_show_session(&status).unwrap();
+        let rows = db.list_sessions(10).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].title, "Cloud Q&A");
+        assert_eq!(rows[0].mode, "cloud-stream");
+        assert!(rows[0].output_path.is_none());
+        assert!(rows[0].mp4_path.is_none());
+        status.room.as_mut().unwrap().live = false;
+        db.sync_cloud_show_session(&status).unwrap();
+        let rows = db.list_sessions(10).unwrap();
+        assert_eq!(rows[0].status, "completed");
+        assert!(rows[0].ended_at.is_some());
+        assert!(rows[0].duration_ms.is_some_and(|ms| ms >= 0));
+        status.room.as_mut().unwrap().live = true;
+        db.sync_cloud_show_session(&status).unwrap();
+        let reopened = db.list_sessions(10).unwrap();
+        assert_eq!(reopened.len(), 1);
+        assert!(reopened[0].duration_ms.is_none());
     }
 }

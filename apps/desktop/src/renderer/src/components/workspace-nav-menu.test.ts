@@ -59,7 +59,10 @@ describe('the application menu mirrors workspace-nav', () => {
       '0'
     ])
     expect(APP_MENU_PAGE_GROUPS.map((group) => group.map((page) => tabFor(page.key)))).toEqual(
-      SIDEBAR_ZONES.filter((zone) => zone.id !== 'system').map((zone) => [...zone.pages])
+      // The View menu lists the pages with a digit; Guests has none (0.31.1).
+      SIDEBAR_ZONES.filter((zone) => zone.id !== 'system').map((zone) =>
+        zone.pages.filter((tab) => tab !== 'guests')
+      )
     )
   })
 

@@ -4100,6 +4100,8 @@ describe('Videorc Camera wire contract (plan 214 A4)', () => {
     ready: unknown
     streaming: unknown
     streamingUnknownViewers: unknown
+    streamingRoomProgram: unknown
+    readyRoomProgramPaused: unknown
     setParams: unknown
     platformReportParams: unknown
     platformReportParamsBare: unknown
@@ -4115,7 +4117,9 @@ describe('Videorc Camera wire contract (plan 214 A4)', () => {
       fixture.needsSetup,
       fixture.ready,
       fixture.streaming,
-      fixture.streamingUnknownViewers
+      fixture.streamingUnknownViewers,
+      fixture.streamingRoomProgram,
+      fixture.readyRoomProgramPaused
     ]) {
       expect(validateBackendRpcResult('virtualCamera.status', state)).toEqual(state)
       expect(validateBackendRpcResult('virtualCamera.set', state)).toEqual(state)
@@ -4234,6 +4238,62 @@ describe('Stream watchdog wire contract (plan 223)', () => {
     ).toEqual({
       targetId: 'youtube'
     })
+  })
+
+  // Plan 243 C5: the device on air and why a stop was no end, both optional
+  // and strict; the two renderer-only RPCs answer `{ ok: true }`.
+  it('carries the device on air and the hand-off stop on cloud.state (plan 243)', () => {
+    const base = {
+      phase: 'hold',
+      entitled: true,
+      settings: { enabled: true, holdMaxSeconds: 1800, holdMaxChoices: [300, 900, 1800, 3600] },
+      connected: true,
+      directFallbackAvailable: false
+    }
+    const onAir = {
+      name: 'iPhone',
+      kind: 'phone',
+      source: 'camera',
+      waiting: false,
+      thisDevice: false,
+      since: '2026-11-16T20:01:02.000Z'
+    }
+    for (const status of [
+      base,
+      { ...base, onAir },
+      { ...base, onAir: { ...onAir, name: undefined, kind: 'computer', source: 'feed' } },
+      { ...base, onAir: { ...onAir, waiting: true, thisDevice: true }, stoppedBy: 'hand-off' },
+      { ...base, stoppedBy: 'taken-over' }
+    ]) {
+      const parsed = JSON.parse(JSON.stringify(status)) as object
+      expect(validateBackendEventPayload('cloud.state', parsed)).toEqual(parsed)
+    }
+    for (const bad of [
+      { ...base, onAir: null },
+      { ...base, onAir: { ...onAir, deviceId: 'Ab3' } },
+      { ...base, onAir: { ...onAir, kind: 'tablet' } },
+      { ...base, onAir: { ...onAir, source: 'screen' } },
+      { ...base, onAir: { ...onAir, name: '' } },
+      { ...base, stoppedBy: 'ended' },
+      { ...base, stoppedBy: null }
+    ]) {
+      expect(() => validateBackendEventPayload('cloud.state', bad)).toThrow()
+    }
+    expect(validateBackendRpcParams('cloud.show.check', undefined)).toBeUndefined()
+    expect(validateBackendRpcResult('cloud.show.check', { ok: true })).toEqual({ ok: true })
+    expect(() => validateBackendRpcResult('cloud.show.check', { ok: false })).toThrow()
+    // R2 A-M5: the hand-off says whether videorc.com confirmed it; the stop
+    // happened either way.
+    expect(validateBackendRpcParams('cloud.show.handOff', undefined)).toBeUndefined()
+    for (const confirmed of [true, false]) {
+      expect(validateBackendRpcResult('cloud.show.handOff', { ok: true, confirmed })).toEqual({
+        ok: true,
+        confirmed
+      })
+    }
+    for (const bad of [{ ok: true }, { ok: false, confirmed: true }, { ok: true, confirmed: 1 }]) {
+      expect(() => validateBackendRpcResult('cloud.show.handOff', bad)).toThrow()
+    }
   })
 
   it('carries the runner program block on cloud.state, every field optional', () => {
@@ -4532,6 +4592,39 @@ describe('caption service outage contract', () => {
 })
 
 describe('cloud recording download jobs', () => {
+  it('preserves S20 take and local Library identities while refusing credential fields', () => {
+    const row = {
+      id: 'rec_one',
+      showId: 'show',
+      takeId: 'tk_000000000001',
+      associationKnown: true,
+      liveIntervalIds: ['A', 'B'],
+      localSessionId: 'cloud-take-rec_one',
+      availability: 'available',
+      orientation: 'h',
+      startedAt: '2026-11-16T12:00:00Z',
+      expiresAt: '2026-12-16T12:00:00Z',
+      seconds: 12,
+      bytes: 100,
+      format: 'segments'
+    }
+    expect(validateBackendRpcResult('cloud.recordings.list', { recordings: [row] })).toEqual({
+      recordings: [row]
+    })
+    expect(() =>
+      validateBackendRpcResult('cloud.recordings.list', {
+        recordings: [{ ...row, downloadUrl: 'https://secret.invalid' }]
+      })
+    ).toThrow()
+    const done = {
+      jobId: 'job',
+      recordingId: row.id,
+      state: 'done',
+      localSessionId: row.localSessionId
+    }
+    expect(validateBackendEventPayload('cloud.recordings.download', done)).toEqual(done)
+  })
+
   it('validates short start and cancel RPCs and strict progress events', () => {
     expect(validateBackendRpcResult('cloud.recordings.download', { jobId: 'job_one' })).toEqual({
       jobId: 'job_one'

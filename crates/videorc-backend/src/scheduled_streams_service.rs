@@ -1015,23 +1015,15 @@ async fn execute_provider(
             .session_id
             .as_ref()
             .context("Owning session required")?;
-        let active = state.recording.lock().await;
-        if !active
-            .as_ref()
-            .is_some_and(|active| active.session_id == *session && !active.stop_requested)
-        {
-            bail!("Only the active owning session can activate this event.");
-        }
-        drop(active);
-        let targets = crate::recording::current_stream_targets_snapshot(state).await?;
-        if targets.session_id != *session
-            || !targets.targets.iter().any(|target| {
-                target.target_id == preparation.target_id
-                    && target.platform == StreamPlatform::Youtube
-            })
-        {
-            bail!("The active session does not own this YouTube destination.");
-        }
+        let output_owner = scheduled_output_owner(
+            state,
+            session,
+            &preparation.target_id,
+            StreamPlatform::Youtube,
+            false,
+        )
+        .await
+        .context("Only the active owning session can activate this destination.")?;
         if preparation
             .session_id
             .as_ref()
@@ -1058,14 +1050,18 @@ async fn execute_provider(
         if !ingest_active {
             bail!("YouTube ingest is not active yet");
         }
-        if !state
-            .recording
-            .lock()
-            .await
-            .as_ref()
-            .is_some_and(|active| active.session_id == *session && !active.stop_requested)
+        if scheduled_output_owner(
+            state,
+            session,
+            &preparation.target_id,
+            StreamPlatform::Youtube,
+            true,
+        )
+        .await
+        .as_deref()
+            != Some(output_owner.as_str())
         {
-            bail!("The owning session ended before activation.");
+            bail!("The owning output ended or changed before activation.");
         }
         event.preparation.as_mut().unwrap().session_id = Some(session.clone());
         event.preparation.as_mut().unwrap().phase = "activating".into();
@@ -1083,6 +1079,17 @@ async fn execute_provider(
         return Ok(());
     }
     if action == "releasePreparation" || action == "complete" {
+        if let Some(session) = mutation.session_id.as_deref() {
+            let cloud = crate::cloud_show::lock(&state.cloud_show);
+            let status = cloud.status();
+            if status.show.as_ref().is_some_and(|show| show.id == session)
+                && (status.stopped_by.is_some() || cloud.air_names_another_device())
+            {
+                bail!(
+                    "This show continues on another device; the previous owner cannot complete it."
+                );
+            }
+        }
         if !matches!(life, "live" | "scheduled" | "completed") {
             bail!("Reconcile the unknown provider lifecycle before releasing ownership.");
         }
@@ -1667,22 +1674,15 @@ async fn execute_x(
             .session_id
             .as_ref()
             .context("Owning session required")?;
-        let active = state.recording.lock().await;
-        if !active
-            .as_ref()
-            .is_some_and(|active| active.session_id == *session && !active.stop_requested)
-        {
-            bail!("Only the active owning session can activate this broadcast.");
-        }
-        drop(active);
-        let targets = crate::recording::current_stream_targets_snapshot(state).await?;
-        if targets.session_id != *session
-            || !targets.targets.iter().any(|target| {
-                target.target_id == preparation.target_id && target.platform == StreamPlatform::X
-            })
-        {
-            bail!("The active session does not own this X destination.");
-        }
+        let output_owner = scheduled_output_owner(
+            state,
+            session,
+            &preparation.target_id,
+            StreamPlatform::X,
+            false,
+        )
+        .await
+        .context("Only the active owning session can activate this destination.")?;
         if preparation
             .session_id
             .as_ref()
@@ -1708,14 +1708,18 @@ async fn execute_x(
         if !ingest_active {
             bail!("X ingest is not active yet");
         }
-        if !state
-            .recording
-            .lock()
-            .await
-            .as_ref()
-            .is_some_and(|active| active.session_id == *session && !active.stop_requested)
+        if scheduled_output_owner(
+            state,
+            session,
+            &preparation.target_id,
+            StreamPlatform::X,
+            true,
+        )
+        .await
+        .as_deref()
+            != Some(output_owner.as_str())
         {
-            bail!("The owning session ended before activation.");
+            bail!("The owning output ended or changed before activation.");
         }
         event.preparation.as_mut().unwrap().session_id = Some(session.clone());
         event.preparation.as_mut().unwrap().phase = "activating".into();
@@ -1766,6 +1770,17 @@ async fn execute_x(
         return Ok(());
     }
     if action == "releasePreparation" || action == "complete" {
+        if let Some(session) = mutation.session_id.as_deref() {
+            let cloud = crate::cloud_show::lock(&state.cloud_show);
+            let status = cloud.status();
+            if status.show.as_ref().is_some_and(|show| show.id == session)
+                && (status.stopped_by.is_some() || cloud.air_names_another_device())
+            {
+                bail!(
+                    "This show continues on another device; the previous owner cannot complete it."
+                );
+            }
+        }
         if !matches!(life, "live" | "scheduled" | "completed") {
             bail!("Reconcile the unknown provider lifecycle before releasing ownership.");
         }
@@ -3701,4 +3716,44 @@ mod x_tests {
         assert_eq!(fixture.lock().unwrap().sources.len(), 1);
         handle.abort();
     }
+}
+
+/// The token is checked again after the bounded ingest wait: a successor never
+/// inherits an old activation just because the show id stayed the same.
+async fn scheduled_output_owner(
+    state: &AppState,
+    session: &str,
+    target: &str,
+    platform: StreamPlatform,
+    require_live_leg: bool,
+) -> Option<String> {
+    {
+        let cloud = crate::cloud_show::lock(&state.cloud_show);
+        let name = if platform == StreamPlatform::Youtube {
+            "youtube"
+        } else {
+            "x"
+        };
+        if let Some(owner) = cloud.provider_output_owner(session, target, name, require_live_leg) {
+            return Some(owner);
+        }
+    }
+    if !state
+        .recording
+        .lock()
+        .await
+        .as_ref()
+        .is_some_and(|active| active.session_id == session && !active.stop_requested)
+    {
+        return None;
+    }
+    let targets = crate::recording::current_stream_targets_snapshot(state)
+        .await
+        .ok()?;
+    (targets.session_id == session
+        && targets
+            .targets
+            .iter()
+            .any(|candidate| candidate.target_id == target && candidate.platform == platform))
+    .then(|| session.to_owned())
 }

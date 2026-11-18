@@ -2288,8 +2288,30 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn persistence_rejection_retries_the_held_message_without_a_new_read() {
         let server = spawn_mock_server(MockMode::Deliver, Vec::new()).await;
-        let state = test_state();
-        // No session row yet: storage rejects the message as retryable.
+        let mut state = test_state();
+        state
+            .database
+            .ensure_fake_live_chat_session("session-1")
+            .unwrap();
+        // Missing rows are terminal. Exercise actual transient storage pressure.
+        let ready = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let gate = ready.clone();
+        let database = state.database.clone();
+        state.live_chat_persistence =
+            crate::live_chat_persistence::LiveChatPersistence::with_writer(std::sync::Arc::new(
+                move |messages| {
+                    if !gate.load(Ordering::SeqCst) {
+                        return Err(anyhow::Error::new(rusqlite::Error::SqliteFailure(
+                            rusqlite::ffi::Error {
+                                code: rusqlite::ErrorCode::DatabaseBusy,
+                                extended_code: 5,
+                            },
+                            None,
+                        )));
+                    }
+                    database.save_live_chat_messages(messages)
+                },
+            ));
         let session_generation = {
             let mut coordinator = state.live_chat.lock().await;
             coordinator.start_session("session-1".to_string(), vec![x_provider_row()]);
@@ -2305,10 +2327,7 @@ pub(crate) mod tests {
         wait_for_provider_state(&state, LiveChatProviderConnectionState::Waiting).await;
         assert!(current_status(&state).await.messages.is_empty());
         let reads_while_waiting = server.state.read_calls.load(Ordering::SeqCst);
-        state
-            .database
-            .ensure_fake_live_chat_session("session-1")
-            .unwrap();
+        ready.store(true, Ordering::SeqCst);
         let message = wait_for_message(&state, "message-1").await;
         wait_for_provider_state(&state, LiveChatProviderConnectionState::Connected).await;
         connector.abort();

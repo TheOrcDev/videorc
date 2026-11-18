@@ -1,0 +1,2687 @@
+{
+  "schemaVersion": 1,
+  "plan": 249,
+  "features": [
+    {
+      "id": "A1",
+      "feature": "Soundboard pads, keys 1\u20139, press modes, looping, gain, Stop, remote/agent triggers: `B/sound_player.rs:213`, `R/components/studio/soundboard-section.tsx:86`",
+      "sourceState": "partial",
+      "requiredResult": "S3: one audible room/program voice per press, independent monitor gain, stop/reconnect correctness",
+      "slices": ["S3"],
+      "cases": ["soundboard"],
+      "surfaces": {
+        "local": {
+          "status": "supported",
+          "note": "Soundboard pads, keys 1\u20139, press modes, looping, gain, Stop, remote/agent triggers: `B/sound_player.rs:213`, `R/components/studio/soundboard-section.tsx:86`"
+        },
+        "soloCloud": {
+          "status": "supported",
+          "note": "Native media feeds solo ingress; managed profile/direct-fallback, recording refusal, destination identity and service exceptions remain. Source route only."
+        },
+        "roomStream": {
+          "status": "partial",
+          "note": "S3 source path implemented: opt-in media v2 stereo host auxiliary publication, independent monitor, capable current program/guest sessions, exact-role routing and all allowed guest audio SIDs. Live acceptance not run; unqualified production/automatic enablement remains false."
+        },
+        "roomRecording": {
+          "status": "partial",
+          "note": "S3 source path implemented: opt-in media v2 stereo host auxiliary publication, independent monitor, capable current program/guest sessions, exact-role routing and all allowed guest audio SIDs. Live acceptance not run; unqualified production/automatic enablement remains false."
+        },
+        "hostMonitor": {
+          "status": "supported",
+          "note": "Independent speaker sink respects monitor off in rooms. Local playback is not remote audibility evidence."
+        },
+        "guestReturn": {
+          "status": "partial",
+          "note": "S3 source path implemented: opt-in media v2 stereo host auxiliary publication, independent monitor, capable current program/guest sessions, exact-role routing and all allowed guest audio SIDs. Live acceptance not run; unqualified production/automatic enablement remains false."
+        },
+        "handoff": {
+          "status": "partial",
+          "note": "S3: one audible room/program voice per press, independent monitor gain, stop/reconnect correctness S24 must declare continuation: browser camera/mic can change owner, static assets need persistence, desktop-only dynamic sources freeze/clear. No measured handoff acceptance."
+        }
+      },
+      "evidence": {
+        "source": "S3-implemented-focused-tests-live-acceptance-not-run",
+        "localLiveKit": "not-run",
+        "managed": "not-run",
+        "macos": "not-run",
+        "windows": "not-run",
+        "linux": "not-run"
+      },
+      "productionParityEnabled": false
+    },
+    {
+      "id": "A2",
+      "feature": "Microphone voice, gain, mute, stereo fold and limiter: `B/audio.rs:951`, `B/session_audio.rs:4485`",
+      "sourceState": "partial",
+      "requiredResult": "S1/S7: one confirmed mute/gain owner and truthful meters across every control",
+      "slices": ["S1", "S7a", "S7b"],
+      "cases": ["controls", "microphone-bridge", "microphone"],
+      "surfaces": {
+        "local": {
+          "status": "supported",
+          "note": "Microphone voice, gain, mute, stereo fold and limiter: `B/audio.rs:951`, `B/session_audio.rs:4485`"
+        },
+        "soloCloud": {
+          "status": "supported",
+          "note": "Native media feeds solo ingress; managed profile/direct-fallback, recording refusal, destination identity and service exceptions remain. Source route only."
+        },
+        "roomStream": {
+          "status": "partial",
+          "note": "**Partial.** Browser mic works; Studio gain/mute do not control it. Idle mute branch only updates capture config (`R/hooks/use-studio.tsx:19098`); tile uses separate mute (`R/lib/talk-show-room.ts:292`)"
+        },
+        "roomRecording": {
+          "status": "partial",
+          "note": "**Partial.** Browser mic works; Studio gain/mute do not control it. Idle mute branch only updates capture config (`R/hooks/use-studio.tsx:19098`); tile uses separate mute (`R/lib/talk-show-room.ts:292`) Separate recording egress and visibility require independent acceptance."
+        },
+        "hostMonitor": {
+          "status": "partial",
+          "note": "S1/S7: one confirmed mute/gain owner and truthful meters across every control Direct browser conversation exists; native control/processing and program policy are not equivalent."
+        },
+        "guestReturn": {
+          "status": "partial",
+          "note": "S1/S7: one confirmed mute/gain owner and truthful meters across every control Direct browser conversation exists; native control/processing and program policy are not equivalent."
+        },
+        "handoff": {
+          "status": "partial",
+          "note": "S1/S7: one confirmed mute/gain owner and truthful meters across every control S24 must declare continuation: browser camera/mic can change owner, static assets need persistence, desktop-only dynamic sources freeze/clear. No measured handoff acceptance."
+        }
+      },
+      "evidence": {
+        "source": "reviewed-at-pinned-revisions",
+        "localLiveKit": "not-run",
+        "managed": "not-run",
+        "macos": "not-run",
+        "windows": "not-run",
+        "linux": "not-run"
+      },
+      "productionParityEnabled": false
+    },
+    {
+      "id": "A3",
+      "feature": "RNNoise, mic processing and warm-up: `B/session_audio.rs:6291`, `B/warm_microphone.rs:1`",
+      "sourceState": "partial",
+      "requiredResult": "S7: explicit processing mode; native RNNoise path, one device owner, measured speaker echo",
+      "slices": ["S7a", "S7b"],
+      "cases": ["microphone-bridge", "microphone"],
+      "surfaces": {
+        "local": {
+          "status": "supported",
+          "note": "RNNoise, mic processing and warm-up: `B/session_audio.rs:6291`, `B/warm_microphone.rs:1`"
+        },
+        "soloCloud": {
+          "status": "supported",
+          "note": "Native media feeds solo ingress; managed profile/direct-fallback, recording refusal, destination identity and service exceptions remain. Source route only."
+        },
+        "roomStream": {
+          "status": "partial",
+          "note": "**Partial.** Browser NS/AEC substitutes for native settings (`R/lib/talk-show-room.ts:552`); warm native mic can coexist (`R/hooks/use-studio-mic-visual.tsx:98`)"
+        },
+        "roomRecording": {
+          "status": "partial",
+          "note": "**Partial.** Browser NS/AEC substitutes for native settings (`R/lib/talk-show-room.ts:552`); warm native mic can coexist (`R/hooks/use-studio-mic-visual.tsx:98`) Separate recording egress and visibility require independent acceptance."
+        },
+        "hostMonitor": {
+          "status": "partial",
+          "note": "S7: explicit processing mode; native RNNoise path, one device owner, measured speaker echo Direct browser conversation exists; native control/processing and program policy are not equivalent."
+        },
+        "guestReturn": {
+          "status": "partial",
+          "note": "S7: explicit processing mode; native RNNoise path, one device owner, measured speaker echo Direct browser conversation exists; native control/processing and program policy are not equivalent."
+        },
+        "handoff": {
+          "status": "partial",
+          "note": "S7: explicit processing mode; native RNNoise path, one device owner, measured speaker echo S24 must declare continuation: browser camera/mic can change owner, static assets need persistence, desktop-only dynamic sources freeze/clear. No measured handoff acceptance."
+        }
+      },
+      "evidence": {
+        "source": "reviewed-at-pinned-revisions",
+        "localLiveKit": "not-run",
+        "managed": "not-run",
+        "macos": "not-run",
+        "windows": "not-run",
+        "linux": "not-run"
+      },
+      "productionParityEnabled": false
+    },
+    {
+      "id": "A4",
+      "feature": "Mic choice, switch, loss recovery, sync offset: `B/session_audio.rs:4538`, `B/live_source_switch.rs:1`",
+      "sourceState": "partial",
+      "requiredResult": "S7/S13: no silent default-device substitution; replacement/unplug/reconnect tests",
+      "slices": ["S7a", "S7b", "S13a", "S13b"],
+      "cases": ["microphone-bridge", "microphone", "camera-bridge", "camera"],
+      "surfaces": {
+        "local": {
+          "status": "supported",
+          "note": "Mic choice, switch, loss recovery, sync offset: `B/session_audio.rs:4538`, `B/live_source_switch.rs:1`"
+        },
+        "soloCloud": {
+          "status": "supported",
+          "note": "Native media feeds solo ingress; managed profile/direct-fallback, recording refusal, destination identity and service exceptions remain. Source route only."
+        },
+        "roomStream": {
+          "status": "partial",
+          "note": "**Partial.** Join-time device name only (`R/hooks/use-talk-show-room.ts:219`); no parity with native switch/timing"
+        },
+        "roomRecording": {
+          "status": "partial",
+          "note": "**Partial.** Join-time device name only (`R/hooks/use-talk-show-room.ts:219`); no parity with native switch/timing Separate recording egress and visibility require independent acceptance."
+        },
+        "hostMonitor": {
+          "status": "partial",
+          "note": "S7/S13: no silent default-device substitution; replacement/unplug/reconnect tests Direct browser conversation exists; native control/processing and program policy are not equivalent."
+        },
+        "guestReturn": {
+          "status": "partial",
+          "note": "S7/S13: no silent default-device substitution; replacement/unplug/reconnect tests Direct browser conversation exists; native control/processing and program policy are not equivalent."
+        },
+        "handoff": {
+          "status": "partial",
+          "note": "S7/S13: no silent default-device substitution; replacement/unplug/reconnect tests S24 must declare continuation: browser camera/mic can change owner, static assets need persistence, desktop-only dynamic sources freeze/clear. No measured handoff acceptance."
+        }
+      },
+      "evidence": {
+        "source": "reviewed-at-pinned-revisions",
+        "localLiveKit": "not-run",
+        "managed": "not-run",
+        "macos": "not-run",
+        "windows": "not-run",
+        "linux": "not-run"
+      },
+      "productionParityEnabled": false
+    },
+    {
+      "id": "A5",
+      "feature": "System/application sound, gain, own-app exclusion: `B/system_audio_capture.rs:1`, `B/system_audio_capture_windows.rs:1`",
+      "sourceState": "missing",
+      "requiredResult": "S8: native system stem, excluding room/monitor playback, no doubled soundboard",
+      "slices": ["S8"],
+      "cases": ["audio-routing"],
+      "surfaces": {
+        "local": {
+          "status": "supported",
+          "note": "System/application sound, gain, own-app exclusion: `B/system_audio_capture.rs:1`, `B/system_audio_capture_windows.rs:1`"
+        },
+        "soloCloud": {
+          "status": "supported",
+          "note": "Native media feeds solo ingress; managed profile/direct-fallback, recording refusal, destination identity and service exceptions remain. Source route only."
+        },
+        "roomStream": {
+          "status": "missing",
+          "note": "**Missing.** Share requests no audio (`R/lib/talk-show-room.ts:321`)"
+        },
+        "roomRecording": {
+          "status": "missing",
+          "note": "**Missing.** Share requests no audio (`R/lib/talk-show-room.ts:321`) Separate recording egress and visibility require independent acceptance."
+        },
+        "hostMonitor": {
+          "status": "missing",
+          "note": "S8: native system stem, excluding room/monitor playback, no doubled soundboard The room does not attach the native source/tap."
+        },
+        "guestReturn": {
+          "status": "missing",
+          "note": "S8: native system stem, excluding room/monitor playback, no doubled soundboard The pinned guest projection does not supply this program contribution."
+        },
+        "handoff": {
+          "status": "partial",
+          "note": "S8: native system stem, excluding room/monitor playback, no doubled soundboard S24 must declare continuation: browser camera/mic can change owner, static assets need persistence, desktop-only dynamic sources freeze/clear. No measured handoff acceptance."
+        }
+      },
+      "evidence": {
+        "source": "reviewed-at-pinned-revisions",
+        "localLiveKit": "not-run",
+        "managed": "not-run",
+        "macos": "not-run",
+        "windows": "not-run",
+        "linux": "not-run"
+      },
+      "productionParityEnabled": false
+    },
+    {
+      "id": "A6",
+      "feature": "Takeover mutes local mic while music/sounds can continue: `R/lib/screen-takeover-microphone.ts:17`, `B/session_audio.rs:4499`",
+      "sourceState": "partial",
+      "requiredResult": "S1/S8: explicit program speech/aux policy; room conversation remains usable",
+      "slices": ["S1", "S8"],
+      "cases": ["controls", "audio-routing"],
+      "surfaces": {
+        "local": {
+          "status": "supported",
+          "note": "Takeover mutes local mic while music/sounds can continue: `R/lib/screen-takeover-microphone.ts:17`, `B/session_audio.rs:4499`"
+        },
+        "soloCloud": {
+          "status": "supported",
+          "note": "Native media feeds solo ingress; managed profile/direct-fallback, recording refusal, destination identity and service exceptions remain. Source route only."
+        },
+        "roomStream": {
+          "status": "partial",
+          "note": "**Partial / deployed behavior unknown.** Picture works; audited page only calls overlays.show/clear (`W/lib/cloud/program/stage.ts:520`), no silence API in `stage-audio.ts:144`. Desktop says everyone muted (`R/components/studio/show-stage.tsx:479`)"
+        },
+        "roomRecording": {
+          "status": "partial",
+          "note": "**Partial / deployed behavior unknown.** Picture works; audited page only calls overlays.show/clear (`W/lib/cloud/program/stage.ts:520`), no silence API in `stage-audio.ts:144`. Desktop says everyone muted (`R/components/studio/show-stage.tsx:479`) Separate recording egress and visibility require independent acceptance."
+        },
+        "hostMonitor": {
+          "status": "partial",
+          "note": "S1/S8: explicit program speech/aux policy; room conversation remains usable Direct browser conversation exists; native control/processing and program policy are not equivalent."
+        },
+        "guestReturn": {
+          "status": "partial",
+          "note": "S1/S8: explicit program speech/aux policy; room conversation remains usable Direct browser conversation exists; native control/processing and program policy are not equivalent."
+        },
+        "handoff": {
+          "status": "partial",
+          "note": "S1/S8: explicit program speech/aux policy; room conversation remains usable S24 must declare continuation: browser camera/mic can change owner, static assets need persistence, desktop-only dynamic sources freeze/clear. No measured handoff acceptance."
+        }
+      },
+      "evidence": {
+        "source": "reviewed-at-pinned-revisions",
+        "localLiveKit": "not-run",
+        "managed": "not-run",
+        "macos": "not-run",
+        "windows": "not-run",
+        "linux": "not-run"
+      },
+      "productionParityEnabled": false
+    },
+    {
+      "id": "A7",
+      "feature": "Captions, transcript, mic tap: `B/session_audio.rs:6541`, `B/captions.rs:4198`",
+      "sourceState": "missing",
+      "requiredResult": "S15: host captions first, correct clock and stream/record visibility",
+      "slices": ["S15"],
+      "cases": ["captions"],
+      "surfaces": {
+        "local": {
+          "status": "supported",
+          "note": "Captions, transcript, mic tap: `B/session_audio.rs:6541`, `B/captions.rs:4198`"
+        },
+        "soloCloud": {
+          "status": "supported",
+          "note": "Native media feeds solo ingress; managed profile/direct-fallback, recording refusal, destination identity and service exceptions remain. Source route only."
+        },
+        "roomStream": {
+          "status": "missing",
+          "note": "**Missing.** No capture means Ready with no audio; no room speech tap"
+        },
+        "roomRecording": {
+          "status": "missing",
+          "note": "**Missing.** No capture means Ready with no audio; no room speech tap Separate recording egress and visibility require independent acceptance."
+        },
+        "hostMonitor": {
+          "status": "missing",
+          "note": "S15: host captions first, correct clock and stream/record visibility The room does not attach the native source/tap."
+        },
+        "guestReturn": {
+          "status": "missing",
+          "note": "S15: host captions first, correct clock and stream/record visibility The pinned guest projection does not supply this program contribution."
+        },
+        "handoff": {
+          "status": "partial",
+          "note": "S15: host captions first, correct clock and stream/record visibility S24 must declare continuation: browser camera/mic can change owner, static assets need persistence, desktop-only dynamic sources freeze/clear. No measured handoff acceptance."
+        }
+      },
+      "evidence": {
+        "source": "reviewed-at-pinned-revisions",
+        "localLiveKit": "not-run",
+        "managed": "not-run",
+        "macos": "not-run",
+        "windows": "not-run",
+        "linux": "not-run"
+      },
+      "productionParityEnabled": false
+    },
+    {
+      "id": "A8",
+      "feature": "Sidekick listening, voice actions, voice markers: `B/captions.rs:4431`",
+      "sourceState": "partial",
+      "requiredResult": "S15/S19: host-only consented listening, tool confirmations and markers",
+      "slices": ["S15", "S19"],
+      "cases": ["captions", "markers"],
+      "surfaces": {
+        "local": {
+          "status": "supported",
+          "note": "Sidekick listening, voice actions, voice markers: `B/captions.rs:4431`"
+        },
+        "soloCloud": {
+          "status": "supported",
+          "note": "Native media feeds solo ingress; managed profile/direct-fallback, recording refusal, destination identity and service exceptions remain. Source route only."
+        },
+        "roomStream": {
+          "status": "partial",
+          "note": "S19 writes owner-authenticated server-show timeline markers from UI/remote/agent and S15 consented host voice. S24 fences writes and retires voice on loss. Interval/take/provider associations are separate; extraction/media mapping and rolling Clips remain unavailable without measured clocks. No runtime qualification."
+        },
+        "roomRecording": {
+          "status": "partial",
+          "note": "S19 writes owner-authenticated server-show timeline markers from UI/remote/agent and S15 consented host voice. S24 fences writes and retires voice on loss. Interval/take/provider associations are separate; extraction/media mapping and rolling Clips remain unavailable without measured clocks. No runtime qualification."
+        },
+        "hostMonitor": {
+          "status": "partial",
+          "note": "S19 writes owner-authenticated server-show timeline markers from UI/remote/agent and S15 consented host voice. S24 fences writes and retires voice on loss. Interval/take/provider associations are separate; extraction/media mapping and rolling Clips remain unavailable without measured clocks. No runtime qualification."
+        },
+        "guestReturn": {
+          "status": "missing",
+          "note": "S15/S19: host-only consented listening, tool confirmations and markers The pinned guest projection does not supply this program contribution."
+        },
+        "handoff": {
+          "status": "partial",
+          "note": "S19 writes owner-authenticated server-show timeline markers from UI/remote/agent and S15 consented host voice. S24 fences writes and retires voice on loss. Interval/take/provider associations are separate; extraction/media mapping and rolling Clips remain unavailable without measured clocks. No runtime qualification."
+        }
+      },
+      "evidence": {
+        "source": "S15/S19 source checkpoint; focused fixtures only; runtime not-run",
+        "localLiveKit": "not-run",
+        "managed": "not-run",
+        "macos": "not-run",
+        "windows": "not-run",
+        "linux": "not-run"
+      },
+      "productionParityEnabled": false
+    },
+    {
+      "id": "A9",
+      "feature": "Separate music source, media-file audio, avatar TTS",
+      "sourceState": "not-applicable",
+      "requiredResult": "No new TTS/player product. Include loops and long sounds in S3/S8",
+      "slices": ["S3", "S8"],
+      "cases": ["soundboard", "audio-routing"],
+      "surfaces": {
+        "local": {
+          "status": "not-applicable",
+          "note": "Separate music source, media-file audio, avatar TTS"
+        },
+        "soloCloud": {
+          "status": "not-applicable",
+          "note": "Native media feeds solo ingress; managed profile/direct-fallback, recording refusal, destination identity and service exceptions remain. Source route only."
+        },
+        "roomStream": {
+          "status": "not-applicable",
+          "note": "**N/A.** Existing bus ingredients are mic/system/sounds (`B/session_audio.rs:4485`); avatar explicitly has no voice (`docs/avatar.md:6`). Looping soundboard/system audio can carry music"
+        },
+        "roomRecording": {
+          "status": "not-applicable",
+          "note": "**N/A.** Existing bus ingredients are mic/system/sounds (`B/session_audio.rs:4485`); avatar explicitly has no voice (`docs/avatar.md:6`). Looping soundboard/system audio can carry music Separate recording egress and visibility require independent acceptance."
+        },
+        "hostMonitor": {
+          "status": "not-applicable",
+          "note": "Room conversation/reconstructed preview is not encoded program proof; inspect this feature independently."
+        },
+        "guestReturn": {
+          "status": "not-applicable",
+          "note": "Camera/direct conversation currently available; graphics/screens/multiple audio publications require explicit projection and mix-minus verification."
+        },
+        "handoff": {
+          "status": "not-applicable",
+          "note": "Controller loss clears desktop overlays; desktop-only sources cannot survive without their owner. Persistence/lease and source re-enable are S24."
+        }
+      },
+      "evidence": {
+        "source": "reviewed-at-pinned-revisions",
+        "localLiveKit": "not-run",
+        "managed": "not-run",
+        "macos": "not-run",
+        "windows": "not-run",
+        "linux": "not-run"
+      },
+      "productionParityEnabled": false
+    },
+    {
+      "id": "A10",
+      "feature": "HTML banner audio, editor/UI sounds, debug incident tone, post-file noise cleanup",
+      "sourceState": "not-applicable",
+      "requiredResult": "Preserve exclusions; post-file workflow covered in O7",
+      "slices": ["S0"],
+      "cases": ["baseline"],
+      "surfaces": {
+        "local": {
+          "status": "not-applicable",
+          "note": "HTML banner audio, editor/UI sounds, debug incident tone, post-file noise cleanup"
+        },
+        "soloCloud": {
+          "status": "not-applicable",
+          "note": "Native media feeds solo ingress; managed profile/direct-fallback, recording refusal, destination identity and service exceptions remain. Source route only."
+        },
+        "roomStream": {
+          "status": "not-applicable",
+          "note": "**N/A** as ordinary live sources. HTML is deliberately muted (`M/html-overlay-host.ts:246`); incident tone is diagnostics (`B/incident_tone.rs:1`); cleanup operates on files (`B/noise_cleanup.rs:1`)"
+        },
+        "roomRecording": {
+          "status": "not-applicable",
+          "note": "**N/A** as ordinary live sources. HTML is deliberately muted (`M/html-overlay-host.ts:246`); incident tone is diagnostics (`B/incident_tone.rs:1`); cleanup operates on files (`B/noise_cleanup.rs:1`) Separate recording egress and visibility require independent acceptance."
+        },
+        "hostMonitor": {
+          "status": "not-applicable",
+          "note": "Room conversation/reconstructed preview is not encoded program proof; inspect this feature independently."
+        },
+        "guestReturn": {
+          "status": "not-applicable",
+          "note": "Camera/direct conversation currently available; graphics/screens/multiple audio publications require explicit projection and mix-minus verification."
+        },
+        "handoff": {
+          "status": "not-applicable",
+          "note": "Controller loss clears desktop overlays; desktop-only sources cannot survive without their owner. Persistence/lease and source re-enable are S24."
+        }
+      },
+      "evidence": {
+        "source": "reviewed-at-pinned-revisions",
+        "localLiveKit": "not-run",
+        "managed": "not-run",
+        "macos": "not-run",
+        "windows": "not-run",
+        "linux": "not-run"
+      },
+      "productionParityEnabled": false
+    },
+    {
+      "id": "G1",
+      "feature": "Avatar still/Alive packs, idle, blink, sleep, reactions, gaze, motion: `B/buddy_animator.rs:1`, `B/compositor.rs:11539`",
+      "sourceState": "missing",
+      "requiredResult": "S4/S5: whole-program layer, never baked only into host camera",
+      "slices": ["S4", "S5"],
+      "cases": ["avatar", "avatar-animation"],
+      "surfaces": {
+        "local": {
+          "status": "supported",
+          "note": "Avatar still/Alive packs, idle, blink, sleep, reactions, gaze, motion: `B/buddy_animator.rs:1`, `B/compositor.rs:11539`"
+        },
+        "soloCloud": {
+          "status": "supported",
+          "note": "Native media feeds solo ingress; managed profile/direct-fallback, recording refusal, destination identity and service exceptions remain. Source route only."
+        },
+        "roomStream": {
+          "status": "missing",
+          "note": "**Missing.** No avatar slot or room drawing; standalone preview layer exists (`B/preview_buddy_layer.rs:431`)"
+        },
+        "roomRecording": {
+          "status": "missing",
+          "note": "**Missing.** No avatar slot or room drawing; standalone preview layer exists (`B/preview_buddy_layer.rs:431`) Separate recording egress and visibility require independent acceptance."
+        },
+        "hostMonitor": {
+          "status": "missing",
+          "note": "No room presentation layer for this native graphic at the pinned source."
+        },
+        "guestReturn": {
+          "status": "missing",
+          "note": "No room presentation layer for this native graphic at the pinned source."
+        },
+        "handoff": {
+          "status": "partial",
+          "note": "S4/S5: whole-program layer, never baked only into host camera S24 must declare continuation: browser camera/mic can change owner, static assets need persistence, desktop-only dynamic sources freeze/clear. No measured handoff acceptance."
+        }
+      },
+      "evidence": {
+        "source": "reviewed-at-pinned-revisions",
+        "localLiveKit": "not-run",
+        "managed": "not-run",
+        "macos": "not-run",
+        "windows": "not-run",
+        "linux": "not-run"
+      },
+      "productionParityEnabled": false
+    },
+    {
+      "id": "G2",
+      "feature": "Avatar Say bubble, greetings, Sidekick answers/banter: `B/buddy_overlay.rs:454`, `R/lib/buddy-overlay.ts:461`",
+      "sourceState": "missing",
+      "requiredResult": "S4/S5: accepted/applied visibility, TTL, collision layout, no invisible AI spend",
+      "slices": ["S4", "S5"],
+      "cases": ["avatar", "avatar-animation"],
+      "surfaces": {
+        "local": {
+          "status": "supported",
+          "note": "Avatar Say bubble, greetings, Sidekick answers/banter: `B/buddy_overlay.rs:454`, `R/lib/buddy-overlay.ts:461`"
+        },
+        "soloCloud": {
+          "status": "supported",
+          "note": "Native media feeds solo ingress; managed profile/direct-fallback, recording refusal, destination identity and service exceptions remain. Source route only."
+        },
+        "roomStream": {
+          "status": "missing",
+          "note": "**Missing.** Visibility only reads local switches (`B/buddy_overlay.rs:468`), so bubble-only work can be generated without a cloud viewer"
+        },
+        "roomRecording": {
+          "status": "missing",
+          "note": "**Missing.** Visibility only reads local switches (`B/buddy_overlay.rs:468`), so bubble-only work can be generated without a cloud viewer Separate recording egress and visibility require independent acceptance."
+        },
+        "hostMonitor": {
+          "status": "missing",
+          "note": "No room presentation layer for this native graphic at the pinned source."
+        },
+        "guestReturn": {
+          "status": "missing",
+          "note": "No room presentation layer for this native graphic at the pinned source."
+        },
+        "handoff": {
+          "status": "partial",
+          "note": "S4/S5: accepted/applied visibility, TTL, collision layout, no invisible AI spend S24 must declare continuation: browser camera/mic can change owner, static assets need persistence, desktop-only dynamic sources freeze/clear. No measured handoff acceptance."
+        }
+      },
+      "evidence": {
+        "source": "reviewed-at-pinned-revisions",
+        "localLiveKit": "not-run",
+        "managed": "not-run",
+        "macos": "not-run",
+        "windows": "not-run",
+        "linux": "not-run"
+      },
+      "productionParityEnabled": false
+    },
+    {
+      "id": "G3",
+      "feature": "Image banners, lower thirds, opacity, per-output placement/fade: `B/banner_prepare.rs:1`, `B/compositor.rs:11557`",
+      "sourceState": "missing",
+      "requiredResult": "S9: asset-backed layers with local geometry/z-order",
+      "slices": ["S9"],
+      "cases": ["graphics"],
+      "surfaces": {
+        "local": {
+          "status": "supported",
+          "note": "Image banners, lower thirds, opacity, per-output placement/fade: `B/banner_prepare.rs:1`, `B/compositor.rs:11557`"
+        },
+        "soloCloud": {
+          "status": "supported",
+          "note": "Native media feeds solo ingress; managed profile/direct-fallback, recording refusal, destination identity and service exceptions remain. Source route only."
+        },
+        "roomStream": {
+          "status": "missing",
+          "note": "**Missing.** Native compositor layer, not a room slot"
+        },
+        "roomRecording": {
+          "status": "missing",
+          "note": "**Missing.** Native compositor layer, not a room slot Separate recording egress and visibility require independent acceptance."
+        },
+        "hostMonitor": {
+          "status": "missing",
+          "note": "No room presentation layer for this native graphic at the pinned source."
+        },
+        "guestReturn": {
+          "status": "missing",
+          "note": "No room presentation layer for this native graphic at the pinned source."
+        },
+        "handoff": {
+          "status": "partial",
+          "note": "S9: asset-backed layers with local geometry/z-order S24 must declare continuation: browser camera/mic can change owner, static assets need persistence, desktop-only dynamic sources freeze/clear. No measured handoff acceptance."
+        }
+      },
+      "evidence": {
+        "source": "reviewed-at-pinned-revisions",
+        "localLiveKit": "not-run",
+        "managed": "not-run",
+        "macos": "not-run",
+        "windows": "not-run",
+        "linux": "not-run"
+      },
+      "productionParityEnabled": false
+    },
+    {
+      "id": "G4",
+      "feature": "Banner Hide after / Show every: `B/banner_timers.rs:108`",
+      "sourceState": "partial",
+      "requiredResult": "S9: show-clock timers, replay state without replaying expired events",
+      "slices": ["S9"],
+      "cases": ["graphics"],
+      "surfaces": {
+        "local": {
+          "status": "supported",
+          "note": "Banner Hide after / Show every: `B/banner_timers.rs:108`"
+        },
+        "soloCloud": {
+          "status": "supported",
+          "note": "Native media feeds solo ingress; managed profile/direct-fallback, recording refusal, destination identity and service exceptions remain. Source route only."
+        },
+        "roomStream": {
+          "status": "partial",
+          "note": "**Partial internally, missing on output.** Repetition depends on native session (`:188`)"
+        },
+        "roomRecording": {
+          "status": "partial",
+          "note": "**Partial internally, missing on output.** Repetition depends on native session (`:188`) Separate recording egress and visibility require independent acceptance."
+        },
+        "hostMonitor": {
+          "status": "missing",
+          "note": "No room presentation layer for this native graphic at the pinned source."
+        },
+        "guestReturn": {
+          "status": "missing",
+          "note": "No room presentation layer for this native graphic at the pinned source."
+        },
+        "handoff": {
+          "status": "partial",
+          "note": "S9: show-clock timers, replay state without replaying expired events S24 must declare continuation: browser camera/mic can change owner, static assets need persistence, desktop-only dynamic sources freeze/clear. No measured handoff acceptance."
+        }
+      },
+      "evidence": {
+        "source": "reviewed-at-pinned-revisions",
+        "localLiveKit": "not-run",
+        "managed": "not-run",
+        "macos": "not-run",
+        "windows": "not-run",
+        "linux": "not-run"
+      },
+      "productionParityEnabled": false
+    },
+    {
+      "id": "G5",
+      "feature": "Animated HTML tickers/badges/lower thirds: `M/html-overlay-host.ts:211`, `B/html_overlay.rs:880`",
+      "sourceState": "missing",
+      "requiredResult": "S10/S11: sandbox retained, alpha-preserving dynamic layer, bounded transport",
+      "slices": ["S10", "S11"],
+      "cases": ["alpha-spike", "html"],
+      "surfaces": {
+        "local": {
+          "status": "supported",
+          "note": "Animated HTML tickers/badges/lower thirds: `M/html-overlay-host.ts:211`, `B/html_overlay.rs:880`"
+        },
+        "soloCloud": {
+          "status": "supported",
+          "note": "Native media feeds solo ingress; managed profile/direct-fallback, recording refusal, destination identity and service exceptions remain. Source route only."
+        },
+        "roomStream": {
+          "status": "missing",
+          "note": "**Missing.** No compositor canvases means no HTML targets"
+        },
+        "roomRecording": {
+          "status": "missing",
+          "note": "**Missing.** No compositor canvases means no HTML targets Separate recording egress and visibility require independent acceptance."
+        },
+        "hostMonitor": {
+          "status": "missing",
+          "note": "No room presentation layer for this native graphic at the pinned source."
+        },
+        "guestReturn": {
+          "status": "missing",
+          "note": "No room presentation layer for this native graphic at the pinned source."
+        },
+        "handoff": {
+          "status": "partial",
+          "note": "S10/S11: sandbox retained, alpha-preserving dynamic layer, bounded transport S24 must declare continuation: browser camera/mic can change owner, static assets need persistence, desktop-only dynamic sources freeze/clear. No measured handoff acceptance."
+        }
+      },
+      "evidence": {
+        "source": "reviewed-at-pinned-revisions",
+        "localLiveKit": "not-run",
+        "managed": "not-run",
+        "macos": "not-run",
+        "windows": "not-run",
+        "linux": "not-run"
+      },
+      "productionParityEnabled": false
+    },
+    {
+      "id": "G6",
+      "feature": "Chat box, 7TV/text rendering and placement: `R/hooks/use-studio.tsx:7600`, `B/chat_overlay.rs:86`",
+      "sourceState": "missing",
+      "requiredResult": "S9: same curated last-message raster and visibility flags",
+      "slices": ["S9"],
+      "cases": ["graphics"],
+      "surfaces": {
+        "local": {
+          "status": "supported",
+          "note": "Chat box, 7TV/text rendering and placement: `R/hooks/use-studio.tsx:7600`, `B/chat_overlay.rs:86`"
+        },
+        "soloCloud": {
+          "status": "supported",
+          "note": "Native media feeds solo ingress; managed profile/direct-fallback, recording refusal, destination identity and service exceptions remain. Source route only."
+        },
+        "roomStream": {
+          "status": "missing",
+          "note": "**Missing.** Driver checks local recordingLive; no cloud layer"
+        },
+        "roomRecording": {
+          "status": "missing",
+          "note": "**Missing.** Driver checks local recordingLive; no cloud layer Separate recording egress and visibility require independent acceptance."
+        },
+        "hostMonitor": {
+          "status": "missing",
+          "note": "No room presentation layer for this native graphic at the pinned source."
+        },
+        "guestReturn": {
+          "status": "missing",
+          "note": "No room presentation layer for this native graphic at the pinned source."
+        },
+        "handoff": {
+          "status": "partial",
+          "note": "S9: same curated last-message raster and visibility flags S24 must declare continuation: browser camera/mic can change owner, static assets need persistence, desktop-only dynamic sources freeze/clear. No measured handoff acceptance."
+        }
+      },
+      "evidence": {
+        "source": "reviewed-at-pinned-revisions",
+        "localLiveKit": "not-run",
+        "managed": "not-run",
+        "macos": "not-run",
+        "windows": "not-run",
+        "linux": "not-run"
+      },
+      "productionParityEnabled": false
+    },
+    {
+      "id": "G7",
+      "feature": "Highlighted comments and milestone card: `B/comment_highlight.rs:513`",
+      "sourceState": "partial",
+      "requiredResult": "S4/S9/S17: monitor and output geometry, per-orientation cards, expiry",
+      "slices": ["S4", "S9", "S17"],
+      "cases": ["avatar", "graphics", "outputs"],
+      "surfaces": {
+        "local": {
+          "status": "supported",
+          "note": "Highlighted comments and milestone card: `B/comment_highlight.rs:513`"
+        },
+        "soloCloud": {
+          "status": "supported",
+          "note": "Native media feeds solo ingress; managed profile/direct-fallback, recording refusal, destination identity and service exceptions remain. Source route only."
+        },
+        "roomStream": {
+          "status": "partial",
+          "note": "**Partial.** Card reaches cloud on air; canvases still come from local recording (`:347`); room monitor/guests do not render it"
+        },
+        "roomRecording": {
+          "status": "partial",
+          "note": "**Partial.** Card reaches cloud on air; canvases still come from local recording (`:347`); room monitor/guests do not render it Separate recording egress and visibility require independent acceptance."
+        },
+        "hostMonitor": {
+          "status": "missing",
+          "note": "S4/S9/S17: monitor and output geometry, per-orientation cards, expiry Native-only behavior is not a room projection."
+        },
+        "guestReturn": {
+          "status": "missing",
+          "note": "S4/S9/S17: monitor and output geometry, per-orientation cards, expiry The pinned guest projection does not supply this program contribution."
+        },
+        "handoff": {
+          "status": "partial",
+          "note": "S4/S9/S17: monitor and output geometry, per-orientation cards, expiry S24 must declare continuation: browser camera/mic can change owner, static assets need persistence, desktop-only dynamic sources freeze/clear. No measured handoff acceptance."
+        }
+      },
+      "evidence": {
+        "source": "reviewed-at-pinned-revisions",
+        "localLiveKit": "not-run",
+        "managed": "not-run",
+        "macos": "not-run",
+        "windows": "not-run",
+        "linux": "not-run"
+      },
+      "productionParityEnabled": false
+    },
+    {
+      "id": "G8",
+      "feature": "Live caption graphics and stream-only/record-only switches: `B/compositor.rs:11522`",
+      "sourceState": "missing",
+      "requiredResult": "S15: independent live and recording projection",
+      "slices": ["S15"],
+      "cases": ["captions"],
+      "surfaces": {
+        "local": {
+          "status": "supported",
+          "note": "Live caption graphics and stream-only/record-only switches: `B/compositor.rs:11522`"
+        },
+        "soloCloud": {
+          "status": "supported",
+          "note": "Native media feeds solo ingress; managed profile/direct-fallback, recording refusal, destination identity and service exceptions remain. Source route only."
+        },
+        "roomStream": {
+          "status": "missing",
+          "note": "**Missing.** Source and overlay are both absent"
+        },
+        "roomRecording": {
+          "status": "missing",
+          "note": "**Missing.** Source and overlay are both absent Separate recording egress and visibility require independent acceptance."
+        },
+        "hostMonitor": {
+          "status": "missing",
+          "note": "No room presentation layer for this native graphic at the pinned source."
+        },
+        "guestReturn": {
+          "status": "missing",
+          "note": "No room presentation layer for this native graphic at the pinned source."
+        },
+        "handoff": {
+          "status": "partial",
+          "note": "S15: independent live and recording projection S24 must declare continuation: browser camera/mic can change owner, static assets need persistence, desktop-only dynamic sources freeze/clear. No measured handoff acceptance."
+        }
+      },
+      "evidence": {
+        "source": "reviewed-at-pinned-revisions",
+        "localLiveKit": "not-run",
+        "managed": "not-run",
+        "macos": "not-run",
+        "windows": "not-run",
+        "linux": "not-run"
+      },
+      "productionParityEnabled": false
+    },
+    {
+      "id": "G9",
+      "feature": "Starting soon / BRB / custom takeover screens: `B/main.rs:8952`",
+      "sourceState": "partial",
+      "requiredResult": "S1/S9: one ordered presentation model plus A6 audio policy",
+      "slices": ["S1", "S9"],
+      "cases": ["controls", "graphics"],
+      "surfaces": {
+        "local": {
+          "status": "supported",
+          "note": "Starting soon / BRB / custom takeover screens: `B/main.rs:8952`"
+        },
+        "soloCloud": {
+          "status": "supported",
+          "note": "Native media feeds solo ingress; managed profile/direct-fallback, recording refusal, destination identity and service exceptions remain. Source route only."
+        },
+        "roomStream": {
+          "status": "partial",
+          "note": "**Supported picture, partial semantics.** Forwarded before live and replayed; local banners may sit above takeover but room slots differ"
+        },
+        "roomRecording": {
+          "status": "partial",
+          "note": "**Supported picture, partial semantics.** Forwarded before live and replayed; local banners may sit above takeover but room slots differ Separate recording egress and visibility require independent acceptance."
+        },
+        "hostMonitor": {
+          "status": "partial",
+          "note": "Takeover picture is projected; audio policy/ordering differs and is unqualified."
+        },
+        "guestReturn": {
+          "status": "missing",
+          "note": "S1/S9: one ordered presentation model plus A6 audio policy The pinned guest projection does not supply this program contribution."
+        },
+        "handoff": {
+          "status": "partial",
+          "note": "S1/S9: one ordered presentation model plus A6 audio policy S24 must declare continuation: browser camera/mic can change owner, static assets need persistence, desktop-only dynamic sources freeze/clear. No measured handoff acceptance."
+        }
+      },
+      "evidence": {
+        "source": "reviewed-at-pinned-revisions",
+        "localLiveKit": "not-run",
+        "managed": "not-run",
+        "macos": "not-run",
+        "windows": "not-run",
+        "linux": "not-run"
+      },
+      "productionParityEnabled": false
+    },
+    {
+      "id": "G10",
+      "feature": "Solo hold image / continuity card",
+      "sourceState": "partial",
+      "requiredResult": "S24: freeze/expiry/away behavior and takeover explicitly distinguished",
+      "slices": ["S24"],
+      "cases": ["handoff"],
+      "surfaces": {
+        "local": {
+          "status": "supported",
+          "note": "Solo hold image / continuity card"
+        },
+        "soloCloud": {
+          "status": "supported",
+          "note": "Native media feeds solo ingress; managed profile/direct-fallback, recording refusal, destination identity and service exceptions remain. Source route only."
+        },
+        "roomStream": {
+          "status": "partial",
+          "note": "**Partial.** Talk Hold enum exists (`B/cloud_talk.rs:679`), production handoff clears it (`B/cloud_show.rs:4855`); this is not a working talk BRB control"
+        },
+        "roomRecording": {
+          "status": "partial",
+          "note": "**Partial.** Talk Hold enum exists (`B/cloud_talk.rs:679`), production handoff clears it (`B/cloud_show.rs:4855`); this is not a working talk BRB control Separate recording egress and visibility require independent acceptance."
+        },
+        "hostMonitor": {
+          "status": "missing",
+          "note": "S24: freeze/expiry/away behavior and takeover explicitly distinguished Native-only behavior is not a room projection."
+        },
+        "guestReturn": {
+          "status": "missing",
+          "note": "S24: freeze/expiry/away behavior and takeover explicitly distinguished The pinned guest projection does not supply this program contribution."
+        },
+        "handoff": {
+          "status": "partial",
+          "note": "S24: freeze/expiry/away behavior and takeover explicitly distinguished S24 must declare continuation: browser camera/mic can change owner, static assets need persistence, desktop-only dynamic sources freeze/clear. No measured handoff acceptance."
+        }
+      },
+      "evidence": {
+        "source": "reviewed-at-pinned-revisions",
+        "localLiveKit": "not-run",
+        "managed": "not-run",
+        "macos": "not-run",
+        "windows": "not-run",
+        "linux": "not-run"
+      },
+      "productionParityEnabled": false
+    },
+    {
+      "id": "G11",
+      "feature": "Follows/subs/raids greetings, reactions and milestone alerts",
+      "sourceState": "partial",
+      "requiredResult": "S5/S9/S18: existing reactions, dedupe and destination eligibility",
+      "slices": ["S5", "S9", "S18"],
+      "cases": ["avatar-animation", "graphics", "services"],
+      "surfaces": {
+        "local": {
+          "status": "supported",
+          "note": "Follows/subs/raids greetings, reactions and milestone alerts"
+        },
+        "soloCloud": {
+          "status": "supported",
+          "note": "Native media feeds solo ingress; managed profile/direct-fallback, recording refusal, destination identity and service exceptions remain. Source route only."
+        },
+        "roomStream": {
+          "status": "partial",
+          "note": "**Partial.** These use avatar/card paths, not a standalone alert widget (`docs/avatar.md:3`, `B/buddy_animator.rs:36`)"
+        },
+        "roomRecording": {
+          "status": "partial",
+          "note": "**Partial.** These use avatar/card paths, not a standalone alert widget (`docs/avatar.md:3`, `B/buddy_animator.rs:36`) Separate recording egress and visibility require independent acceptance."
+        },
+        "hostMonitor": {
+          "status": "missing",
+          "note": "S5/S9/S18: existing reactions, dedupe and destination eligibility Native-only behavior is not a room projection."
+        },
+        "guestReturn": {
+          "status": "missing",
+          "note": "S5/S9/S18: existing reactions, dedupe and destination eligibility The pinned guest projection does not supply this program contribution."
+        },
+        "handoff": {
+          "status": "partial",
+          "note": "S5/S9/S18: existing reactions, dedupe and destination eligibility S24 must declare continuation: browser camera/mic can change owner, static assets need persistence, desktop-only dynamic sources freeze/clear. No measured handoff acceptance."
+        }
+      },
+      "evidence": {
+        "source": "reviewed-at-pinned-revisions",
+        "localLiveKit": "not-run",
+        "managed": "not-run",
+        "macos": "not-run",
+        "windows": "not-run",
+        "linux": "not-run"
+      },
+      "productionParityEnabled": false
+    },
+    {
+      "id": "G12",
+      "feature": "Polls, dedicated donations widget, viewer-count widget, countdown source",
+      "sourceState": "not-applicable",
+      "requiredResult": "Do not invent a polls subsystem. S0 registry must catch newly shipped features; HTML timer behavior belongs to S11",
+      "slices": ["S0", "S11"],
+      "cases": ["baseline", "html"],
+      "surfaces": {
+        "local": {
+          "status": "not-applicable",
+          "note": "Polls, dedicated donations widget, viewer-count widget, countdown source"
+        },
+        "soloCloud": {
+          "status": "not-applicable",
+          "note": "Native media feeds solo ingress; managed profile/direct-fallback, recording refusal, destination identity and service exceptions remain. Source route only."
+        },
+        "roomStream": {
+          "status": "not-applicable",
+          "note": "**N/A / not found as shipped native layers.** Render stack is enumerated at `B/compositor.rs:11519`; viewer stats are data (`B/viewer_stats.rs:1`). HTML may implement a visual timer"
+        },
+        "roomRecording": {
+          "status": "not-applicable",
+          "note": "**N/A / not found as shipped native layers.** Render stack is enumerated at `B/compositor.rs:11519`; viewer stats are data (`B/viewer_stats.rs:1`). HTML may implement a visual timer Separate recording egress and visibility require independent acceptance."
+        },
+        "hostMonitor": {
+          "status": "not-applicable",
+          "note": "Room conversation/reconstructed preview is not encoded program proof; inspect this feature independently."
+        },
+        "guestReturn": {
+          "status": "not-applicable",
+          "note": "Camera/direct conversation currently available; graphics/screens/multiple audio publications require explicit projection and mix-minus verification."
+        },
+        "handoff": {
+          "status": "not-applicable",
+          "note": "Controller loss clears desktop overlays; desktop-only sources cannot survive without their owner. Persistence/lease and source re-enable are S24."
+        }
+      },
+      "evidence": {
+        "source": "reviewed-at-pinned-revisions",
+        "localLiveKit": "not-run",
+        "managed": "not-run",
+        "macos": "not-run",
+        "windows": "not-run",
+        "linux": "not-run"
+      },
+      "productionParityEnabled": false
+    },
+    {
+      "id": "V1",
+      "feature": "Saved scenes, presets, scene hotkeys and scene switching: `R/hooks/use-studio.tsx:11469`, `:19502`",
+      "sourceState": "missing",
+      "requiredResult": "S12: translate existing scenes to shared presentation; no silent success",
+      "slices": ["S12"],
+      "cases": ["scenes"],
+      "surfaces": {
+        "local": {
+          "status": "supported",
+          "note": "Saved scenes, presets, scene hotkeys and scene switching: `R/hooks/use-studio.tsx:11469`, `:19502`"
+        },
+        "soloCloud": {
+          "status": "supported",
+          "note": "Native media feeds solo ingress; managed profile/direct-fallback, recording refusal, destination identity and service exceptions remain. Source route only."
+        },
+        "roomStream": {
+          "status": "missing",
+          "note": "**Missing parity.** Gallery hidden (`R/components/studio/studio-dashboard-bottom-row.tsx:17`); room uses its own layouts; other commands still target native scenes"
+        },
+        "roomRecording": {
+          "status": "missing",
+          "note": "**Missing parity.** Gallery hidden (`R/components/studio/studio-dashboard-bottom-row.tsx:17`); room uses its own layouts; other commands still target native scenes Separate recording egress and visibility require independent acceptance."
+        },
+        "hostMonitor": {
+          "status": "partial",
+          "note": "S12: translate existing scenes to shared presentation; no silent success Room view reconstructs sources and is not encoded egress evidence."
+        },
+        "guestReturn": {
+          "status": "unknown",
+          "note": "Camera/direct conversation currently available; graphics/screens/multiple audio publications require explicit projection and mix-minus verification."
+        },
+        "handoff": {
+          "status": "partial",
+          "note": "S12: translate existing scenes to shared presentation; no silent success S24 must declare continuation: browser camera/mic can change owner, static assets need persistence, desktop-only dynamic sources freeze/clear. No measured handoff acceptance."
+        }
+      },
+      "evidence": {
+        "source": "reviewed-at-pinned-revisions",
+        "localLiveKit": "not-run",
+        "managed": "not-run",
+        "macos": "not-run",
+        "windows": "not-run",
+        "linux": "not-run"
+      },
+      "productionParityEnabled": false
+    },
+    {
+      "id": "V2",
+      "feature": "Four guest stage layouts, bring on/send backstage/spotlight",
+      "sourceState": "supported",
+      "requiredResult": "Preserve while enabling V1; guest slots are explicit scene roles",
+      "slices": ["S0"],
+      "cases": ["baseline"],
+      "surfaces": {
+        "local": {
+          "status": "not-applicable",
+          "note": "Guest stage layouts are room-specific, not a missing native feature."
+        },
+        "soloCloud": {
+          "status": "not-applicable",
+          "note": "Guest stage layouts are room-specific, not a missing native feature."
+        },
+        "roomStream": {
+          "status": "supported",
+          "note": "**Supported room-specific feature.** `W/lib/cloud/program/stage.ts:316`, `R/components/studio/show-stage.tsx:312`"
+        },
+        "roomRecording": {
+          "status": "supported",
+          "note": "**Supported room-specific feature.** `W/lib/cloud/program/stage.ts:316`, `R/components/studio/show-stage.tsx:312` Separate recording egress and visibility require independent acceptance."
+        },
+        "hostMonitor": {
+          "status": "supported",
+          "note": "Existing room camera/stage projection; shared screen, graphics and exact geometry still require S6 acceptance."
+        },
+        "guestReturn": {
+          "status": "supported",
+          "note": "Existing room camera/stage projection; shared screen, graphics and exact geometry still require S6 acceptance."
+        },
+        "handoff": {
+          "status": "partial",
+          "note": "Preserve while enabling V1; guest slots are explicit scene roles S24 must declare continuation: browser camera/mic can change owner, static assets need persistence, desktop-only dynamic sources freeze/clear. No measured handoff acceptance."
+        }
+      },
+      "evidence": {
+        "source": "reviewed-at-pinned-revisions",
+        "localLiveKit": "not-run",
+        "managed": "not-run",
+        "macos": "not-run",
+        "windows": "not-run",
+        "linux": "not-run"
+      },
+      "productionParityEnabled": false
+    },
+    {
+      "id": "V3",
+      "feature": "Freeform placement, split, crop/fit, zoom, margin, source visibility, transition timing",
+      "sourceState": "missing",
+      "requiredResult": "S12: normalized geometry, same easing, aspect-aware fit, guest role mapping",
+      "slices": ["S12"],
+      "cases": ["scenes"],
+      "surfaces": {
+        "local": {
+          "status": "supported",
+          "note": "Freeform placement, split, crop/fit, zoom, margin, source visibility, transition timing"
+        },
+        "soloCloud": {
+          "status": "supported",
+          "note": "Native media feeds solo ingress; managed profile/direct-fallback, recording refusal, destination identity and service exceptions remain. Source route only."
+        },
+        "roomStream": {
+          "status": "missing",
+          "note": "**Missing/partial.** Fixed room geometry; its transition differs from native (`W/lib/cloud/program/wire.ts:243`)"
+        },
+        "roomRecording": {
+          "status": "missing",
+          "note": "**Missing/partial.** Fixed room geometry; its transition differs from native (`W/lib/cloud/program/wire.ts:243`) Separate recording egress and visibility require independent acceptance."
+        },
+        "hostMonitor": {
+          "status": "partial",
+          "note": "S12: normalized geometry, same easing, aspect-aware fit, guest role mapping Room view reconstructs sources and is not encoded egress evidence."
+        },
+        "guestReturn": {
+          "status": "unknown",
+          "note": "Camera/direct conversation currently available; graphics/screens/multiple audio publications require explicit projection and mix-minus verification."
+        },
+        "handoff": {
+          "status": "partial",
+          "note": "S12: normalized geometry, same easing, aspect-aware fit, guest role mapping S24 must declare continuation: browser camera/mic can change owner, static assets need persistence, desktop-only dynamic sources freeze/clear. No measured handoff acceptance."
+        }
+      },
+      "evidence": {
+        "source": "reviewed-at-pinned-revisions",
+        "localLiveKit": "not-run",
+        "managed": "not-run",
+        "macos": "not-run",
+        "windows": "not-run",
+        "linux": "not-run"
+      },
+      "productionParityEnabled": false
+    },
+    {
+      "id": "V4",
+      "feature": "Camera circle/rounded/rectangle and radius: `B/source_mask.rs:8`",
+      "sourceState": "partial",
+      "requiredResult": "S12: live shape updates, rectangle/radius and per-layout behavior",
+      "slices": ["S12"],
+      "cases": ["scenes"],
+      "surfaces": {
+        "local": {
+          "status": "supported",
+          "note": "Camera circle/rounded/rectangle and radius: `B/source_mask.rs:8`"
+        },
+        "soloCloud": {
+          "status": "supported",
+          "note": "Native media feeds solo ingress; managed profile/direct-fallback, recording refusal, destination identity and service exceptions remain. Source route only."
+        },
+        "roomStream": {
+          "status": "partial",
+          "note": "**Partial.** Room sends circle or rounded (`R/hooks/use-studio.tsx:17128`); only initially fills hostShape (`R/hooks/use-talk-show-room.ts:329`)"
+        },
+        "roomRecording": {
+          "status": "partial",
+          "note": "**Partial.** Room sends circle or rounded (`R/hooks/use-studio.tsx:17128`); only initially fills hostShape (`R/hooks/use-talk-show-room.ts:329`) Separate recording egress and visibility require independent acceptance."
+        },
+        "hostMonitor": {
+          "status": "partial",
+          "note": "S12: live shape updates, rectangle/radius and per-layout behavior Room view reconstructs sources and is not encoded egress evidence."
+        },
+        "guestReturn": {
+          "status": "unknown",
+          "note": "Camera/direct conversation currently available; graphics/screens/multiple audio publications require explicit projection and mix-minus verification."
+        },
+        "handoff": {
+          "status": "partial",
+          "note": "S12: live shape updates, rectangle/radius and per-layout behavior S24 must declare continuation: browser camera/mic can change owner, static assets need persistence, desktop-only dynamic sources freeze/clear. No measured handoff acceptance."
+        }
+      },
+      "evidence": {
+        "source": "reviewed-at-pinned-revisions",
+        "localLiveKit": "not-run",
+        "managed": "not-run",
+        "macos": "not-run",
+        "windows": "not-run",
+        "linux": "not-run"
+      },
+      "productionParityEnabled": false
+    },
+    {
+      "id": "V5",
+      "feature": "Green/blue key, spill and edge cleanup: `B/scene_geometry.rs:574`",
+      "sourceState": "partial",
+      "requiredResult": "S13: common vectors, native-quality effects, no raw-camera failover",
+      "slices": ["S13a", "S13b"],
+      "cases": ["camera-bridge", "camera"],
+      "surfaces": {
+        "local": {
+          "status": "supported",
+          "note": "Green/blue key, spill and edge cleanup: `B/scene_geometry.rs:574`"
+        },
+        "soloCloud": {
+          "status": "supported",
+          "note": "Native media feeds solo ingress; managed profile/direct-fallback, recording refusal, destination identity and service exceptions remain. Source route only."
+        },
+        "roomStream": {
+          "status": "partial",
+          "note": "**Partial.** Browser key exists but reduced path/720p; effect failure mutes camera (`R/lib/talk-show-room.ts:485`)"
+        },
+        "roomRecording": {
+          "status": "partial",
+          "note": "**Partial.** Browser key exists but reduced path/720p; effect failure mutes camera (`R/lib/talk-show-room.ts:485`) Separate recording egress and visibility require independent acceptance."
+        },
+        "hostMonitor": {
+          "status": "partial",
+          "note": "S13: common vectors, native-quality effects, no raw-camera failover Room view reconstructs sources and is not encoded egress evidence."
+        },
+        "guestReturn": {
+          "status": "unknown",
+          "note": "Camera/direct conversation currently available; graphics/screens/multiple audio publications require explicit projection and mix-minus verification."
+        },
+        "handoff": {
+          "status": "partial",
+          "note": "S13: common vectors, native-quality effects, no raw-camera failover S24 must declare continuation: browser camera/mic can change owner, static assets need persistence, desktop-only dynamic sources freeze/clear. No measured handoff acceptance."
+        }
+      },
+      "evidence": {
+        "source": "reviewed-at-pinned-revisions",
+        "localLiveKit": "not-run",
+        "managed": "not-run",
+        "macos": "not-run",
+        "windows": "not-run",
+        "linux": "not-run"
+      },
+      "productionParityEnabled": false
+    },
+    {
+      "id": "V6",
+      "feature": "Background image adjustments and animated live backgrounds",
+      "sourceState": "partial",
+      "requiredResult": "S12/S14: background layer and animation, including key-off scenes",
+      "slices": ["S12", "S14"],
+      "cases": ["scenes", "sources"],
+      "surfaces": {
+        "local": {
+          "status": "supported",
+          "note": "Background image adjustments and animated live backgrounds"
+        },
+        "soloCloud": {
+          "status": "supported",
+          "note": "Native media feeds solo ingress; managed profile/direct-fallback, recording refusal, destination identity and service exceptions remain. Source route only."
+        },
+        "roomStream": {
+          "status": "partial",
+          "note": "**Partial.** Only static opaque poster behind keyed host (`R/lib/talk-show-camera-effects.ts:227`); not whole stage"
+        },
+        "roomRecording": {
+          "status": "partial",
+          "note": "**Partial.** Only static opaque poster behind keyed host (`R/lib/talk-show-camera-effects.ts:227`); not whole stage Separate recording egress and visibility require independent acceptance."
+        },
+        "hostMonitor": {
+          "status": "partial",
+          "note": "S12/S14: background layer and animation, including key-off scenes Room view reconstructs sources and is not encoded egress evidence."
+        },
+        "guestReturn": {
+          "status": "unknown",
+          "note": "Camera/direct conversation currently available; graphics/screens/multiple audio publications require explicit projection and mix-minus verification."
+        },
+        "handoff": {
+          "status": "partial",
+          "note": "S12/S14: background layer and animation, including key-off scenes S24 must declare continuation: browser camera/mic can change owner, static assets need persistence, desktop-only dynamic sources freeze/clear. No measured handoff acceptance."
+        }
+      },
+      "evidence": {
+        "source": "reviewed-at-pinned-revisions",
+        "localLiveKit": "not-run",
+        "managed": "not-run",
+        "macos": "not-run",
+        "windows": "not-run",
+        "linux": "not-run"
+      },
+      "productionParityEnabled": false
+    },
+    {
+      "id": "V7",
+      "feature": "Camera mirror, look, crop, framing, resolution/fps",
+      "sourceState": "missing",
+      "requiredResult": "S13: explicit source transform and profile, with real camera checks",
+      "slices": ["S13a", "S13b"],
+      "cases": ["camera-bridge", "camera"],
+      "surfaces": {
+        "local": {
+          "status": "supported",
+          "note": "Camera mirror, look, crop, framing, resolution/fps"
+        },
+        "soloCloud": {
+          "status": "supported",
+          "note": "Native media feeds solo ingress; managed profile/direct-fallback, recording refusal, destination identity and service exceptions remain. Source route only."
+        },
+        "roomStream": {
+          "status": "missing",
+          "note": "**Missing/partial.** Publisher fixed to 720p (`R/lib/talk-show-room.ts:503`); key settings omit full source transform"
+        },
+        "roomRecording": {
+          "status": "missing",
+          "note": "**Missing/partial.** Publisher fixed to 720p (`R/lib/talk-show-room.ts:503`); key settings omit full source transform Separate recording egress and visibility require independent acceptance."
+        },
+        "hostMonitor": {
+          "status": "partial",
+          "note": "S13: explicit source transform and profile, with real camera checks Room view reconstructs sources and is not encoded egress evidence."
+        },
+        "guestReturn": {
+          "status": "unknown",
+          "note": "Camera/direct conversation currently available; graphics/screens/multiple audio publications require explicit projection and mix-minus verification."
+        },
+        "handoff": {
+          "status": "partial",
+          "note": "S13: explicit source transform and profile, with real camera checks S24 must declare continuation: browser camera/mic can change owner, static assets need persistence, desktop-only dynamic sources freeze/clear. No measured handoff acceptance."
+        }
+      },
+      "evidence": {
+        "source": "reviewed-at-pinned-revisions",
+        "localLiveKit": "not-run",
+        "managed": "not-run",
+        "macos": "not-run",
+        "windows": "not-run",
+        "linux": "not-run"
+      },
+      "productionParityEnabled": false
+    },
+    {
+      "id": "V8",
+      "feature": "Windows low-light device setting: `B/camera_low_light.rs:1`",
+      "sourceState": "unknown",
+      "requiredResult": "S13/S27: measure on Windows; never label unsupported path applied",
+      "slices": ["S13a", "S13b", "S27"],
+      "cases": ["camera-bridge", "camera", "all"],
+      "surfaces": {
+        "local": {
+          "status": "supported",
+          "note": "Windows low-light device setting: `B/camera_low_light.rs:1`"
+        },
+        "soloCloud": {
+          "status": "supported",
+          "note": "Native media feeds solo ingress; managed profile/direct-fallback, recording refusal, destination identity and service exceptions remain. Source route only."
+        },
+        "roomStream": {
+          "status": "unknown",
+          "note": "**Unknown.** Native driver control and browser ownership interaction untested"
+        },
+        "roomRecording": {
+          "status": "unknown",
+          "note": "**Unknown.** Native driver control and browser ownership interaction untested Separate recording egress and visibility require independent acceptance."
+        },
+        "hostMonitor": {
+          "status": "partial",
+          "note": "S13/S27: measure on Windows; never label unsupported path applied Room view reconstructs sources and is not encoded egress evidence."
+        },
+        "guestReturn": {
+          "status": "unknown",
+          "note": "Camera/direct conversation currently available; graphics/screens/multiple audio publications require explicit projection and mix-minus verification."
+        },
+        "handoff": {
+          "status": "partial",
+          "note": "S13/S27: measure on Windows; never label unsupported path applied S24 must declare continuation: browser camera/mic can change owner, static assets need persistence, desktop-only dynamic sources freeze/clear. No measured handoff acceptance."
+        }
+      },
+      "evidence": {
+        "source": "reviewed-at-pinned-revisions",
+        "localLiveKit": "not-run",
+        "managed": "not-run",
+        "macos": "not-run",
+        "windows": "not-run",
+        "linux": "not-run"
+      },
+      "productionParityEnabled": false
+    },
+    {
+      "id": "V9",
+      "feature": "Camera None/off, hide source, hotplug/device switching",
+      "sourceState": "partial",
+      "requiredResult": "S1/S13: None is off, device loss fails visibly, controls agree",
+      "slices": ["S1", "S13a", "S13b"],
+      "cases": ["controls", "camera-bridge", "camera"],
+      "surfaces": {
+        "local": {
+          "status": "supported",
+          "note": "Camera None/off, hide source, hotplug/device switching"
+        },
+        "soloCloud": {
+          "status": "supported",
+          "note": "Native media feeds solo ingress; managed profile/direct-fallback, recording refusal, destination identity and service exceptions remain. Source route only."
+        },
+        "roomStream": {
+          "status": "partial",
+          "note": "**Partial.** Tile camera-off works; device lookup can yield undefined/default (`R/lib/talk-show-room.ts:179`); Sources changes do not republish"
+        },
+        "roomRecording": {
+          "status": "partial",
+          "note": "**Partial.** Tile camera-off works; device lookup can yield undefined/default (`R/lib/talk-show-room.ts:179`); Sources changes do not republish Separate recording egress and visibility require independent acceptance."
+        },
+        "hostMonitor": {
+          "status": "partial",
+          "note": "S1/S13: None is off, device loss fails visibly, controls agree Room view reconstructs sources and is not encoded egress evidence."
+        },
+        "guestReturn": {
+          "status": "unknown",
+          "note": "Camera/direct conversation currently available; graphics/screens/multiple audio publications require explicit projection and mix-minus verification."
+        },
+        "handoff": {
+          "status": "partial",
+          "note": "S1/S13: None is off, device loss fails visibly, controls agree S24 must declare continuation: browser camera/mic can change owner, static assets need persistence, desktop-only dynamic sources freeze/clear. No measured handoff acceptance."
+        }
+      },
+      "evidence": {
+        "source": "reviewed-at-pinned-revisions",
+        "localLiveKit": "not-run",
+        "managed": "not-run",
+        "macos": "not-run",
+        "windows": "not-run",
+        "linux": "not-run"
+      },
+      "productionParityEnabled": false
+    },
+    {
+      "id": "V10",
+      "feature": "Screen/window selection and live source switch",
+      "sourceState": "partial",
+      "requiredResult": "S2/S14: selected source and publish ownership agree",
+      "slices": ["S2", "S14"],
+      "cases": ["privacy", "sources"],
+      "surfaces": {
+        "local": {
+          "status": "supported",
+          "note": "Screen/window selection and live source switch"
+        },
+        "soloCloud": {
+          "status": "supported",
+          "note": "Native media feeds solo ingress; managed profile/direct-fallback, recording refusal, destination identity and service exceptions remain. Source route only."
+        },
+        "roomStream": {
+          "status": "partial",
+          "note": "**Partial.** Independent browser share (`R/lib/talk-show-room.ts:315`), not native Sources selection"
+        },
+        "roomRecording": {
+          "status": "partial",
+          "note": "**Partial.** Independent browser share (`R/lib/talk-show-room.ts:315`), not native Sources selection Separate recording egress and visibility require independent acceptance."
+        },
+        "hostMonitor": {
+          "status": "partial",
+          "note": "S2/S14: selected source and publish ownership agree Room view reconstructs sources and is not encoded egress evidence."
+        },
+        "guestReturn": {
+          "status": "unknown",
+          "note": "Camera/direct conversation currently available; graphics/screens/multiple audio publications require explicit projection and mix-minus verification."
+        },
+        "handoff": {
+          "status": "partial",
+          "note": "S2/S14: selected source and publish ownership agree S24 must declare continuation: browser camera/mic can change owner, static assets need persistence, desktop-only dynamic sources freeze/clear. No measured handoff acceptance."
+        }
+      },
+      "evidence": {
+        "source": "reviewed-at-pinned-revisions",
+        "localLiveKit": "not-run",
+        "managed": "not-run",
+        "macos": "not-run",
+        "windows": "not-run",
+        "linux": "not-run"
+      },
+      "productionParityEnabled": false
+    },
+    {
+      "id": "V11",
+      "feature": "Hide screen and password-manager auto-hide: `B/screen_privacy.rs:1`",
+      "sourceState": "missing",
+      "requiredResult": "S2: prevent unsafe frames before publication, not merely cover final program",
+      "slices": ["S2"],
+      "cases": ["privacy"],
+      "surfaces": {
+        "local": {
+          "status": "supported",
+          "note": "Hide screen and password-manager auto-hide: `B/screen_privacy.rs:1`"
+        },
+        "soloCloud": {
+          "status": "supported",
+          "note": "Native media feeds solo ingress; managed profile/direct-fallback, recording refusal, destination identity and service exceptions remain. Source route only."
+        },
+        "roomStream": {
+          "status": "missing",
+          "note": "**Missing, P0.** Native frost gate does not guard browser capture"
+        },
+        "roomRecording": {
+          "status": "missing",
+          "note": "**Missing, P0.** Native frost gate does not guard browser capture Separate recording egress and visibility require independent acceptance."
+        },
+        "hostMonitor": {
+          "status": "missing",
+          "note": "S2: prevent unsafe frames before publication, not merely cover final program Native-only behavior is not a room projection."
+        },
+        "guestReturn": {
+          "status": "missing",
+          "note": "S2: prevent unsafe frames before publication, not merely cover final program The pinned guest projection does not supply this program contribution."
+        },
+        "handoff": {
+          "status": "partial",
+          "note": "S2: prevent unsafe frames before publication, not merely cover final program S24 must declare continuation: browser camera/mic can change owner, static assets need persistence, desktop-only dynamic sources freeze/clear. No measured handoff acceptance."
+        }
+      },
+      "evidence": {
+        "source": "reviewed-at-pinned-revisions",
+        "localLiveKit": "not-run",
+        "managed": "not-run",
+        "macos": "not-run",
+        "windows": "not-run",
+        "linux": "not-run"
+      },
+      "productionParityEnabled": false,
+      "implementationEvidence": "S2 implements guarded browser screen publication, receiver pixel observations and authorized per-receiver relay. Live/managed/device acceptance not-run; productionParityEnabled remains false."
+    },
+    {
+      "id": "V12",
+      "feature": "Follow app in front and saved per-app scene/source",
+      "sourceState": "missing",
+      "requiredResult": "S14: transactional privacy-safe source replacement; macOS scope retained",
+      "slices": ["S14"],
+      "cases": ["sources"],
+      "surfaces": {
+        "local": {
+          "status": "supported",
+          "note": "Follow app in front and saved per-app scene/source"
+        },
+        "soloCloud": {
+          "status": "supported",
+          "note": "Native media feeds solo ingress; managed profile/direct-fallback, recording refusal, destination identity and service exceptions remain. Source route only."
+        },
+        "roomStream": {
+          "status": "missing",
+          "note": "**Missing.** Follower operates native scenes (`R/hooks/use-follow-front-app.ts:85`), browser share is separate"
+        },
+        "roomRecording": {
+          "status": "missing",
+          "note": "**Missing.** Follower operates native scenes (`R/hooks/use-follow-front-app.ts:85`), browser share is separate Separate recording egress and visibility require independent acceptance."
+        },
+        "hostMonitor": {
+          "status": "missing",
+          "note": "S14: transactional privacy-safe source replacement; macOS scope retained Native-only behavior is not a room projection."
+        },
+        "guestReturn": {
+          "status": "missing",
+          "note": "S14: transactional privacy-safe source replacement; macOS scope retained The pinned guest projection does not supply this program contribution."
+        },
+        "handoff": {
+          "status": "partial",
+          "note": "S14: transactional privacy-safe source replacement; macOS scope retained S24 must declare continuation: browser camera/mic can change owner, static assets need persistence, desktop-only dynamic sources freeze/clear. No measured handoff acceptance."
+        }
+      },
+      "evidence": {
+        "source": "reviewed-at-pinned-revisions",
+        "localLiveKit": "not-run",
+        "managed": "not-run",
+        "macos": "not-run",
+        "windows": "not-run",
+        "linux": "not-run"
+      },
+      "productionParityEnabled": false
+    },
+    {
+      "id": "V13",
+      "feature": "Cursor and protected app-overlay exclusions",
+      "sourceState": "unknown",
+      "requiredResult": "S14/S27: fixture capture proves cursor and private overlay handling",
+      "slices": ["S14", "S27"],
+      "cases": ["sources", "all"],
+      "surfaces": {
+        "local": {
+          "status": "supported",
+          "note": "Cursor and protected app-overlay exclusions"
+        },
+        "soloCloud": {
+          "status": "supported",
+          "note": "Native media feeds solo ingress; managed profile/direct-fallback, recording refusal, destination identity and service exceptions remain. Source route only."
+        },
+        "roomStream": {
+          "status": "unknown",
+          "note": "**Unknown parity.** Native selection supplies exclusions (`R/hooks/use-studio.tsx:12171`); browser capture defaults require device tests"
+        },
+        "roomRecording": {
+          "status": "unknown",
+          "note": "**Unknown parity.** Native selection supplies exclusions (`R/hooks/use-studio.tsx:12171`); browser capture defaults require device tests Separate recording egress and visibility require independent acceptance."
+        },
+        "hostMonitor": {
+          "status": "partial",
+          "note": "S14/S27: fixture capture proves cursor and private overlay handling Room view reconstructs sources and is not encoded egress evidence."
+        },
+        "guestReturn": {
+          "status": "unknown",
+          "note": "Camera/direct conversation currently available; graphics/screens/multiple audio publications require explicit projection and mix-minus verification."
+        },
+        "handoff": {
+          "status": "partial",
+          "note": "S14/S27: fixture capture proves cursor and private overlay handling S24 must declare continuation: browser camera/mic can change owner, static assets need persistence, desktop-only dynamic sources freeze/clear. No measured handoff acceptance."
+        }
+      },
+      "evidence": {
+        "source": "reviewed-at-pinned-revisions",
+        "localLiveKit": "not-run",
+        "managed": "not-run",
+        "macos": "not-run",
+        "windows": "not-run",
+        "linux": "not-run"
+      },
+      "productionParityEnabled": false
+    },
+    {
+      "id": "V14",
+      "feature": "Screen aspect/contain, crisp text",
+      "sourceState": "partial",
+      "requiredResult": "S6/S12: full content visible, same monitor/output fit",
+      "slices": ["S6", "S12"],
+      "cases": ["views", "scenes"],
+      "surfaces": {
+        "local": {
+          "status": "supported",
+          "note": "Screen aspect/contain, crisp text"
+        },
+        "soloCloud": {
+          "status": "supported",
+          "note": "Native media feeds solo ingress; managed profile/direct-fallback, recording refusal, destination identity and service exceptions remain. Source route only."
+        },
+        "roomStream": {
+          "status": "partial",
+          "note": "**Partial.** Program cover-crops but desktop contains (`W/lib/cloud/program/stage-media.ts:134`, `R/components/studio/show-stage.tsx:240`)"
+        },
+        "roomRecording": {
+          "status": "partial",
+          "note": "**Partial.** Program cover-crops but desktop contains (`W/lib/cloud/program/stage-media.ts:134`, `R/components/studio/show-stage.tsx:240`) Separate recording egress and visibility require independent acceptance."
+        },
+        "hostMonitor": {
+          "status": "partial",
+          "note": "S6/S12: full content visible, same monitor/output fit Room view reconstructs sources and is not encoded egress evidence."
+        },
+        "guestReturn": {
+          "status": "unknown",
+          "note": "Camera/direct conversation currently available; graphics/screens/multiple audio publications require explicit projection and mix-minus verification."
+        },
+        "handoff": {
+          "status": "partial",
+          "note": "S6/S12: full content visible, same monitor/output fit S24 must declare continuation: browser camera/mic can change owner, static assets need persistence, desktop-only dynamic sources freeze/clear. No measured handoff acceptance."
+        }
+      },
+      "evidence": {
+        "source": "reviewed-at-pinned-revisions",
+        "localLiveKit": "not-run",
+        "managed": "not-run",
+        "macos": "not-run",
+        "windows": "not-run",
+        "linux": "not-run"
+      },
+      "productionParityEnabled": false
+    },
+    {
+      "id": "V15",
+      "feature": "Vertical and dual output, per-orientation graphics",
+      "sourceState": "missing",
+      "requiredResult": "S17: negotiated H/V, separate geometry/cost and recording flags",
+      "slices": ["S17"],
+      "cases": ["outputs"],
+      "surfaces": {
+        "local": {
+          "status": "supported",
+          "note": "Vertical and dual output, per-orientation graphics"
+        },
+        "soloCloud": {
+          "status": "partial",
+          "note": "Native media feeds solo ingress; managed profile/direct-fallback, recording refusal, destination identity and service exceptions remain. Source route only."
+        },
+        "roomStream": {
+          "status": "missing",
+          "note": "**Missing from room creation.** Horizontal only (`R/hooks/use-studio.tsx:17113`); destination validation rejects V (`W/lib/cloud/media/destinations.ts:171`)"
+        },
+        "roomRecording": {
+          "status": "missing",
+          "note": "**Missing from room creation.** Horizontal only (`R/hooks/use-studio.tsx:17113`); destination validation rejects V (`W/lib/cloud/media/destinations.ts:171`) Separate recording egress and visibility require independent acceptance."
+        },
+        "hostMonitor": {
+          "status": "partial",
+          "note": "S17: negotiated H/V, separate geometry/cost and recording flags Room view reconstructs sources and is not encoded egress evidence."
+        },
+        "guestReturn": {
+          "status": "unknown",
+          "note": "Camera/direct conversation currently available; graphics/screens/multiple audio publications require explicit projection and mix-minus verification."
+        },
+        "handoff": {
+          "status": "partial",
+          "note": "S17: negotiated H/V, separate geometry/cost and recording flags S24 must declare continuation: browser camera/mic can change owner, static assets need persistence, desktop-only dynamic sources freeze/clear. No measured handoff acceptance."
+        }
+      },
+      "evidence": {
+        "source": "reviewed-at-pinned-revisions",
+        "localLiveKit": "not-run",
+        "managed": "not-run",
+        "macos": "not-run",
+        "windows": "not-run",
+        "linux": "not-run"
+      },
+      "productionParityEnabled": false
+    },
+    {
+      "id": "V16",
+      "feature": "Output resolution/fps/bitrate/encoder settings, including local 4K options",
+      "sourceState": "partial",
+      "requiredResult": "S17: expose actual supported profiles; qualify higher profiles before enabling",
+      "slices": ["S17"],
+      "cases": ["outputs"],
+      "surfaces": {
+        "local": {
+          "status": "supported",
+          "note": "Output resolution/fps/bitrate/encoder settings, including local 4K options"
+        },
+        "soloCloud": {
+          "status": "partial",
+          "note": "Native media feeds solo ingress; managed profile/direct-fallback, recording refusal, destination identity and service exceptions remain. Source route only."
+        },
+        "roomStream": {
+          "status": "partial",
+          "note": "**Partial.** Managed egress has fixed profile (`W/lib/cloud/media/livekit-api.ts:419`)"
+        },
+        "roomRecording": {
+          "status": "partial",
+          "note": "**Partial.** Managed egress has fixed profile (`W/lib/cloud/media/livekit-api.ts:419`) Separate recording egress and visibility require independent acceptance."
+        },
+        "hostMonitor": {
+          "status": "partial",
+          "note": "S17: expose actual supported profiles; qualify higher profiles before enabling Room view reconstructs sources and is not encoded egress evidence."
+        },
+        "guestReturn": {
+          "status": "unknown",
+          "note": "Camera/direct conversation currently available; graphics/screens/multiple audio publications require explicit projection and mix-minus verification."
+        },
+        "handoff": {
+          "status": "partial",
+          "note": "S17: expose actual supported profiles; qualify higher profiles before enabling S24 must declare continuation: browser camera/mic can change owner, static assets need persistence, desktop-only dynamic sources freeze/clear. No measured handoff acceptance."
+        }
+      },
+      "evidence": {
+        "source": "reviewed-at-pinned-revisions",
+        "localLiveKit": "not-run",
+        "managed": "not-run",
+        "macos": "not-run",
+        "windows": "not-run",
+        "linux": "not-run"
+      },
+      "productionParityEnabled": false
+    },
+    {
+      "id": "V17",
+      "feature": "Native Preview/detached window, Program check, Videorc Camera",
+      "sourceState": "partial",
+      "requiredResult": "S6/S23: clear surface identity, optional explicit room-program camera output",
+      "slices": ["S6", "S23"],
+      "cases": ["views", "virtual-camera"],
+      "surfaces": {
+        "local": {
+          "status": "supported",
+          "note": "Native Preview/detached window, Program check, Videorc Camera"
+        },
+        "soloCloud": {
+          "status": "partial",
+          "note": "Native media feeds solo ingress; managed profile/direct-fallback, recording refusal, destination identity and service exceptions remain. Source route only."
+        },
+        "roomStream": {
+          "status": "partial",
+          "note": "**Partial.** Room replaces Preview; managed Program is reconstruction; virtual camera waits for a native run (`B/virtual_camera_service.rs:390`)"
+        },
+        "roomRecording": {
+          "status": "partial",
+          "note": "**Partial.** Room replaces Preview; managed Program is reconstruction; virtual camera waits for a native run (`B/virtual_camera_service.rs:390`) Separate recording egress and visibility require independent acceptance."
+        },
+        "hostMonitor": {
+          "status": "partial",
+          "note": "S6/S23: clear surface identity, optional explicit room-program camera output Room view reconstructs sources and is not encoded egress evidence."
+        },
+        "guestReturn": {
+          "status": "unknown",
+          "note": "Camera/direct conversation currently available; graphics/screens/multiple audio publications require explicit projection and mix-minus verification."
+        },
+        "handoff": {
+          "status": "partial",
+          "note": "S6/S23: clear surface identity, optional explicit room-program camera output S24 must declare continuation: browser camera/mic can change owner, static assets need persistence, desktop-only dynamic sources freeze/clear. No measured handoff acceptance."
+        }
+      },
+      "evidence": {
+        "source": "reviewed-at-pinned-revisions",
+        "localLiveKit": "not-run",
+        "managed": "not-run",
+        "macos": "not-run",
+        "windows": "not-run",
+        "linux": "not-run"
+      },
+      "productionParityEnabled": false
+    },
+    {
+      "id": "O1",
+      "feature": "Go Live, multistream destinations, partial success, retries",
+      "sourceState": "partial",
+      "requiredResult": "S16/S17/S24: actual legs, effective profiles, resumable credential-safe retry",
+      "slices": ["S16", "S17", "S24"],
+      "cases": ["lifecycle", "outputs", "handoff"],
+      "surfaces": {
+        "local": {
+          "status": "supported",
+          "note": "Go Live, multistream destinations, partial success, retries"
+        },
+        "soloCloud": {
+          "status": "partial",
+          "note": "Native media feeds solo ingress; managed profile/direct-fallback, recording refusal, destination identity and service exceptions remain. Source route only."
+        },
+        "roomStream": {
+          "status": "partial",
+          "note": "**Supported/partial.** Room-specific handover (`B/main.rs:12111`); managed URL/profile limits differ; reconnect depends on retained destination ownership (`B/cloud_show.rs:5018`)"
+        },
+        "roomRecording": {
+          "status": "partial",
+          "note": "**Supported/partial.** Room-specific handover (`B/main.rs:12111`); managed URL/profile limits differ; reconnect depends on retained destination ownership (`B/cloud_show.rs:5018`) Separate recording egress and visibility require independent acceptance."
+        },
+        "hostMonitor": {
+          "status": "partial",
+          "note": "S16/S17/S24: actual legs, effective profiles, resumable credential-safe retry Operator/service state must be confirmed independently of local recording state."
+        },
+        "guestReturn": {
+          "status": "not-applicable",
+          "note": "This is a host/account service or operator control, not a guest media-return feature. Its effect on viewer media is covered by the linked source/output rows."
+        },
+        "handoff": {
+          "status": "partial",
+          "note": "S16/S17/S24: actual legs, effective profiles, resumable credential-safe retry S24 must declare continuation: browser camera/mic can change owner, static assets need persistence, desktop-only dynamic sources freeze/clear. No measured handoff acceptance."
+        }
+      },
+      "evidence": {
+        "source": "reviewed-at-pinned-revisions",
+        "localLiveKit": "not-run",
+        "managed": "not-run",
+        "macos": "not-run",
+        "windows": "not-run",
+        "linux": "not-run"
+      },
+      "productionParityEnabled": false
+    },
+    {
+      "id": "O2",
+      "feature": "Title, description, thumbnail, tags, category, privacy, normal provider preparation",
+      "sourceState": "supported",
+      "requiredResult": "S16: retain prepare and test cloud ingest readiness instead of local encoder readiness",
+      "slices": ["S16"],
+      "cases": ["lifecycle"],
+      "surfaces": {
+        "local": {
+          "status": "supported",
+          "note": "Title, description, thumbnail, tags, category, privacy, normal provider preparation"
+        },
+        "soloCloud": {
+          "status": "partial",
+          "note": "Native media feeds solo ingress; managed profile/direct-fallback, recording refusal, destination identity and service exceptions remain. Source route only."
+        },
+        "roomStream": {
+          "status": "supported",
+          "note": "**Supported by shared prepare flow** (`R/hooks/use-studio.tsx:16504`, `:17350`); actual provider start timing untested"
+        },
+        "roomRecording": {
+          "status": "supported",
+          "note": "**Supported by shared prepare flow** (`R/hooks/use-studio.tsx:16504`, `:17350`); actual provider start timing untested Separate recording egress and visibility require independent acceptance."
+        },
+        "hostMonitor": {
+          "status": "supported",
+          "note": "S16: retain prepare and test cloud ingest readiness instead of local encoder readiness Operator/service state must be confirmed independently of local recording state."
+        },
+        "guestReturn": {
+          "status": "not-applicable",
+          "note": "This is a host/account service or operator control, not a guest media-return feature. Its effect on viewer media is covered by the linked source/output rows."
+        },
+        "handoff": {
+          "status": "partial",
+          "note": "S16: retain prepare and test cloud ingest readiness instead of local encoder readiness S24 must declare continuation: browser camera/mic can change owner, static assets need persistence, desktop-only dynamic sources freeze/clear. No measured handoff acceptance."
+        }
+      },
+      "evidence": {
+        "source": "reviewed-at-pinned-revisions",
+        "localLiveKit": "not-run",
+        "managed": "not-run",
+        "macos": "not-run",
+        "windows": "not-run",
+        "linux": "not-run"
+      },
+      "productionParityEnabled": false,
+      "implementationEvidence": "S2 implements guarded browser screen publication, receiver pixel observations and authorized per-receiver relay. Live/managed/device acceptance not-run; productionParityEnabled remains false."
+    },
+    {
+      "id": "O3",
+      "feature": "Scheduled YouTube/X activation",
+      "sourceState": "missing",
+      "requiredResult": "S16: output-session ownership and scheduled-provider fixtures",
+      "slices": ["S16"],
+      "cases": ["lifecycle"],
+      "surfaces": {
+        "local": {
+          "status": "supported",
+          "note": "Scheduled YouTube/X activation"
+        },
+        "soloCloud": {
+          "status": "partial",
+          "note": "Native media feeds solo ingress; managed profile/direct-fallback, recording refusal, destination identity and service exceptions remain. Source route only."
+        },
+        "roomStream": {
+          "status": "missing",
+          "note": "**Missing.** Requires matching local session and targets (`B/scheduled_streams_service.rs:1013`, `:1665`). Scheduled YouTube disables BOTH autoStart and autoStop (`B/scheduled_youtube.rs:299`)"
+        },
+        "roomRecording": {
+          "status": "missing",
+          "note": "**Missing.** Requires matching local session and targets (`B/scheduled_streams_service.rs:1013`, `:1665`). Scheduled YouTube disables BOTH autoStart and autoStop (`B/scheduled_youtube.rs:299`) Separate recording egress and visibility require independent acceptance."
+        },
+        "hostMonitor": {
+          "status": "missing",
+          "note": "S16: output-session ownership and scheduled-provider fixtures Operator/service state must be confirmed independently of local recording state."
+        },
+        "guestReturn": {
+          "status": "not-applicable",
+          "note": "This is a host/account service or operator control, not a guest media-return feature. Its effect on viewer media is covered by the linked source/output rows."
+        },
+        "handoff": {
+          "status": "partial",
+          "note": "S16: output-session ownership and scheduled-provider fixtures S24 must declare continuation: browser camera/mic can change owner, static assets need persistence, desktop-only dynamic sources freeze/clear. No measured handoff acceptance."
+        }
+      },
+      "evidence": {
+        "source": "reviewed-at-pinned-revisions",
+        "localLiveKit": "not-run",
+        "managed": "not-run",
+        "macos": "not-run",
+        "windows": "not-run",
+        "linux": "not-run"
+      },
+      "productionParityEnabled": false
+    },
+    {
+      "id": "O4",
+      "feature": "End livestream, close, external end, quota end",
+      "sourceState": "partial",
+      "requiredResult": "S16/S24: idempotent termination, distinguish intentional handoff",
+      "slices": ["S16", "S24"],
+      "cases": ["lifecycle", "handoff"],
+      "surfaces": {
+        "local": {
+          "status": "supported",
+          "note": "End livestream, close, external end, quota end"
+        },
+        "soloCloud": {
+          "status": "partial",
+          "note": "Native media feeds solo ingress; managed profile/direct-fallback, recording refusal, destination identity and service exceptions remain. Source route only."
+        },
+        "roomStream": {
+          "status": "partial",
+          "note": "**Partial.** Explicit End has ordered provider settlement (`R/lib/talk-show-end.ts:13`); normal close/external cloud state does not run local terminal-status settlement (`R/hooks/use-studio.tsx:5526`, `:8467`)"
+        },
+        "roomRecording": {
+          "status": "partial",
+          "note": "**Partial.** Explicit End has ordered provider settlement (`R/lib/talk-show-end.ts:13`); normal close/external cloud state does not run local terminal-status settlement (`R/hooks/use-studio.tsx:5526`, `:8467`) Separate recording egress and visibility require independent acceptance."
+        },
+        "hostMonitor": {
+          "status": "partial",
+          "note": "S16/S24: idempotent termination, distinguish intentional handoff Operator/service state must be confirmed independently of local recording state."
+        },
+        "guestReturn": {
+          "status": "not-applicable",
+          "note": "This is a host/account service or operator control, not a guest media-return feature. Its effect on viewer media is covered by the linked source/output rows."
+        },
+        "handoff": {
+          "status": "partial",
+          "note": "S16/S24: idempotent termination, distinguish intentional handoff S24 must declare continuation: browser camera/mic can change owner, static assets need persistence, desktop-only dynamic sources freeze/clear. No measured handoff acceptance."
+        }
+      },
+      "evidence": {
+        "source": "reviewed-at-pinned-revisions",
+        "localLiveKit": "not-run",
+        "managed": "not-run",
+        "macos": "not-run",
+        "windows": "not-run",
+        "linux": "not-run"
+      },
+      "productionParityEnabled": false
+    },
+    {
+      "id": "O5",
+      "feature": "Cloud program recording, download, local Library association",
+      "sourceState": "partial",
+      "requiredResult": "S20: record-only rows, stable show plus live intervals/takes, import association",
+      "slices": ["S20"],
+      "cases": ["library"],
+      "surfaces": {
+        "local": {
+          "status": "supported",
+          "note": "Cloud program recording, download, local Library association"
+        },
+        "soloCloud": {
+          "status": "partial",
+          "note": "Native media feeds solo ingress; managed profile/direct-fallback, recording refusal, destination identity and service exceptions remain. Source route only."
+        },
+        "roomStream": {
+          "status": "partial",
+          "note": "**Partial.** Separate cloud recording exists (`B/main.rs:12072`), but Library session row requires room.live (`B/storage.rs:1991`)"
+        },
+        "roomRecording": {
+          "status": "partial",
+          "note": "**Partial.** Separate cloud recording exists (`B/main.rs:12072`), but Library session row requires room.live (`B/storage.rs:1991`) Separate recording egress and visibility require independent acceptance."
+        },
+        "hostMonitor": {
+          "status": "partial",
+          "note": "S20: record-only rows, stable show plus live intervals/takes, import association Operator/service state must be confirmed independently of local recording state."
+        },
+        "guestReturn": {
+          "status": "not-applicable",
+          "note": "This is a host/account service or operator control, not a guest media-return feature. Its effect on viewer media is covered by the linked source/output rows."
+        },
+        "handoff": {
+          "status": "partial",
+          "note": "S20: record-only rows, stable show plus live intervals/takes, import association S24 must declare continuation: browser camera/mic can change owner, static assets need persistence, desktop-only dynamic sources freeze/clear. No measured handoff acceptance."
+        }
+      },
+      "evidence": {
+        "source": "reviewed-at-pinned-revisions",
+        "localLiveKit": "not-run",
+        "managed": "not-run",
+        "macos": "not-run",
+        "windows": "not-run",
+        "linux": "not-run"
+      },
+      "productionParityEnabled": false
+    },
+    {
+      "id": "O6",
+      "feature": "Local parallel recording, per-source/participant ISO",
+      "sourceState": "missing",
+      "requiredResult": "S21/S22: program archive and opt-in ISO tracks; do not pretend cloud mixed take is ISO",
+      "slices": ["S21a", "S21b", "S21c", "S22"],
+      "cases": ["replay-ring", "clips", "archive", "iso"],
+      "surfaces": {
+        "local": {
+          "status": "supported",
+          "note": "Local parallel recording, per-source/participant ISO"
+        },
+        "soloCloud": {
+          "status": "partial",
+          "note": "Native media feeds solo ingress; managed profile/direct-fallback, recording refusal, destination identity and service exceptions remain. Source route only."
+        },
+        "roomStream": {
+          "status": "missing",
+          "note": "**Missing room parity.** Local sessions refused (`B/main.rs:16143`); no room ISO path"
+        },
+        "roomRecording": {
+          "status": "missing",
+          "note": "**Missing room parity.** Local sessions refused (`B/main.rs:16143`); no room ISO path Separate recording egress and visibility require independent acceptance."
+        },
+        "hostMonitor": {
+          "status": "missing",
+          "note": "S21/S22: program archive and opt-in ISO tracks; do not pretend cloud mixed take is ISO Operator/service state must be confirmed independently of local recording state."
+        },
+        "guestReturn": {
+          "status": "not-applicable",
+          "note": "This is a host/account service or operator control, not a guest media-return feature. Its effect on viewer media is covered by the linked source/output rows."
+        },
+        "handoff": {
+          "status": "partial",
+          "note": "S21/S22: program archive and opt-in ISO tracks; do not pretend cloud mixed take is ISO S24 must declare continuation: browser camera/mic can change owner, static assets need persistence, desktop-only dynamic sources freeze/clear. No measured handoff acceptance."
+        }
+      },
+      "evidence": {
+        "source": "reviewed-at-pinned-revisions",
+        "localLiveKit": "not-run",
+        "managed": "not-run",
+        "macos": "not-run",
+        "windows": "not-run",
+        "linux": "not-run"
+      },
+      "productionParityEnabled": false
+    },
+    {
+      "id": "O7",
+      "feature": "Playback, export, repair, Clean cut, noise cleanup of finished files",
+      "sourceState": "partial",
+      "requiredResult": "S20: linked local import uses existing operations; do not rewrite editors",
+      "slices": ["S20"],
+      "cases": ["library"],
+      "surfaces": {
+        "local": {
+          "status": "supported",
+          "note": "Playback, export, repair, Clean cut, noise cleanup of finished files"
+        },
+        "soloCloud": {
+          "status": "partial",
+          "note": "Native media feeds solo ingress; managed profile/direct-fallback, recording refusal, destination identity and service exceptions remain. Source route only."
+        },
+        "roomStream": {
+          "status": "partial",
+          "note": "**Partial workflow.** Cloud row is not a local file; downloaded recording must be imported (`R/components/tabs/library-tab.tsx:1596`, `B/main.rs:13369`)"
+        },
+        "roomRecording": {
+          "status": "partial",
+          "note": "**Partial workflow.** Cloud row is not a local file; downloaded recording must be imported (`R/components/tabs/library-tab.tsx:1596`, `B/main.rs:13369`) Separate recording egress and visibility require independent acceptance."
+        },
+        "hostMonitor": {
+          "status": "partial",
+          "note": "S20: linked local import uses existing operations; do not rewrite editors Operator/service state must be confirmed independently of local recording state."
+        },
+        "guestReturn": {
+          "status": "not-applicable",
+          "note": "This is a host/account service or operator control, not a guest media-return feature. Its effect on viewer media is covered by the linked source/output rows."
+        },
+        "handoff": {
+          "status": "partial",
+          "note": "S20: linked local import uses existing operations; do not rewrite editors S24 must declare continuation: browser camera/mic can change owner, static assets need persistence, desktop-only dynamic sources freeze/clear. No measured handoff acceptance."
+        }
+      },
+      "evidence": {
+        "source": "reviewed-at-pinned-revisions",
+        "localLiveKit": "not-run",
+        "managed": "not-run",
+        "macos": "not-run",
+        "windows": "not-run",
+        "linux": "not-run"
+      },
+      "productionParityEnabled": false
+    },
+    {
+      "id": "O8",
+      "feature": "Manual/voice markers, Clip marks, chat moments, rolling Clips",
+      "sourceState": "partial",
+      "requiredResult": "S19/S21: show clock marks and bounded program replay capture",
+      "slices": ["S19", "S21a", "S21b", "S21c"],
+      "cases": ["markers", "replay-ring", "clips", "archive"],
+      "surfaces": {
+        "local": {
+          "status": "supported",
+          "note": "Manual/voice markers, Clip marks, chat moments, rolling Clips"
+        },
+        "soloCloud": {
+          "status": "partial",
+          "note": "Native media feeds solo ingress; managed profile/direct-fallback, recording refusal, destination identity and service exceptions remain. Source route only."
+        },
+        "roomStream": {
+          "status": "partial",
+          "note": "S19 durable show markers; S21b gated bounded program-window route, verified local AV trim and Library registration implemented. Server show-to-media evidence is required; association alone never extracts media. Managed ring/D8/cost/clock and real artifact acceptance remain not-run."
+        },
+        "roomRecording": {
+          "status": "partial",
+          "note": "S19 durable show markers; S21b gated bounded program-window route, verified local AV trim and Library registration implemented. Server show-to-media evidence is required; association alone never extracts media. Managed ring/D8/cost/clock and real artifact acceptance remain not-run."
+        },
+        "hostMonitor": {
+          "status": "partial",
+          "note": "S19 writes owner-authenticated server-show timeline markers from UI/remote/agent and S15 consented host voice. S24 fences writes and retires voice on loss. Interval/take/provider associations are separate; extraction/media mapping and rolling Clips remain unavailable without measured clocks. No runtime qualification."
+        },
+        "guestReturn": {
+          "status": "not-applicable",
+          "note": "This is a host/account service or operator control, not a guest media-return feature. Its effect on viewer media is covered by the linked source/output rows."
+        },
+        "handoff": {
+          "status": "partial",
+          "note": "S19 writes owner-authenticated server-show timeline markers from UI/remote/agent and S15 consented host voice. S24 fences writes and retires voice on loss. Interval/take/provider associations are separate; extraction/media mapping and rolling Clips remain unavailable without measured clocks. No runtime qualification."
+        }
+      },
+      "evidence": {
+        "source": "S15/S19 source checkpoint; focused fixtures only; runtime not-run",
+        "localLiveKit": "not-run",
+        "managed": "not-run",
+        "macos": "not-run",
+        "windows": "not-run",
+        "linux": "not-run"
+      },
+      "productionParityEnabled": false
+    },
+    {
+      "id": "O9",
+      "feature": "Chat reading/sending/moderation/commands, emoji, community and viewer/follower data",
+      "sourceState": "supported",
+      "requiredResult": "S18: retain, avoid duplicate clients; resume reattachment",
+      "slices": ["S18"],
+      "cases": ["services"],
+      "surfaces": {
+        "local": {
+          "status": "supported",
+          "note": "Chat reading/sending/moderation/commands, emoji, community and viewer/follower data"
+        },
+        "soloCloud": {
+          "status": "partial",
+          "note": "Native media feeds solo ingress; managed profile/direct-fallback, recording refusal, destination identity and service exceptions remain. Source route only."
+        },
+        "roomStream": {
+          "status": "supported",
+          "note": "**Supported by code on initial Go Live** (`B/main.rs:12134`, `B/live_chat.rs:2858`, `B/viewer_stats.rs:770`); provider APIs need live check"
+        },
+        "roomRecording": {
+          "status": "supported",
+          "note": "**Supported by code on initial Go Live** (`B/main.rs:12134`, `B/live_chat.rs:2858`, `B/viewer_stats.rs:770`); provider APIs need live check Separate recording egress and visibility require independent acceptance."
+        },
+        "hostMonitor": {
+          "status": "supported",
+          "note": "S18: retain, avoid duplicate clients; resume reattachment Operator/service state must be confirmed independently of local recording state."
+        },
+        "guestReturn": {
+          "status": "not-applicable",
+          "note": "This is a host/account service or operator control, not a guest media-return feature. Its effect on viewer media is covered by the linked source/output rows."
+        },
+        "handoff": {
+          "status": "partial",
+          "note": "S18: retain, avoid duplicate clients; resume reattachment S24 must declare continuation: browser camera/mic can change owner, static assets need persistence, desktop-only dynamic sources freeze/clear. No measured handoff acceptance."
+        }
+      },
+      "evidence": {
+        "source": "reviewed-at-pinned-revisions",
+        "localLiveKit": "not-run",
+        "managed": "not-run",
+        "macos": "not-run",
+        "windows": "not-run",
+        "linux": "not-run"
+      },
+      "productionParityEnabled": false
+    },
+    {
+      "id": "O10",
+      "feature": "Resume chat and Sidekick after reconnect/handoff",
+      "sourceState": "partial",
+      "requiredResult": "S18/S24: restore authorized service ownership and state",
+      "slices": ["S18", "S24"],
+      "cases": ["services", "handoff"],
+      "surfaces": {
+        "local": {
+          "status": "supported",
+          "note": "Resume chat and Sidekick after reconnect/handoff"
+        },
+        "soloCloud": {
+          "status": "partial",
+          "note": "Native media feeds solo ingress; managed profile/direct-fallback, recording refusal, destination identity and service exceptions remain. Source route only."
+        },
+        "roomStream": {
+          "status": "partial",
+          "note": "**Partial.** Transport reconnect differs from `cloud.room.resume`, which only pushes takeover (`B/main.rs:11944`)"
+        },
+        "roomRecording": {
+          "status": "partial",
+          "note": "**Partial.** Transport reconnect differs from `cloud.room.resume`, which only pushes takeover (`B/main.rs:11944`) Separate recording egress and visibility require independent acceptance."
+        },
+        "hostMonitor": {
+          "status": "partial",
+          "note": "S18/S24: restore authorized service ownership and state Operator/service state must be confirmed independently of local recording state."
+        },
+        "guestReturn": {
+          "status": "not-applicable",
+          "note": "This is a host/account service or operator control, not a guest media-return feature. Its effect on viewer media is covered by the linked source/output rows."
+        },
+        "handoff": {
+          "status": "partial",
+          "note": "S18/S24: restore authorized service ownership and state S24 must declare continuation: browser camera/mic can change owner, static assets need persistence, desktop-only dynamic sources freeze/clear. No measured handoff acceptance."
+        }
+      },
+      "evidence": {
+        "source": "reviewed-at-pinned-revisions",
+        "localLiveKit": "not-run",
+        "managed": "not-run",
+        "macos": "not-run",
+        "windows": "not-run",
+        "linux": "not-run"
+      },
+      "productionParityEnabled": false
+    },
+    {
+      "id": "O11",
+      "feature": "Sidekick chat moderation, drafts, typed tools, report",
+      "sourceState": "partial",
+      "requiredResult": "S1/S15/S18: output-session facts, visibility and safety scope; no new AI permission",
+      "slices": ["S1", "S15", "S18"],
+      "cases": ["controls", "captions", "services"],
+      "surfaces": {
+        "local": {
+          "status": "supported",
+          "note": "Sidekick chat moderation, drafts, typed tools, report"
+        },
+        "soloCloud": {
+          "status": "partial",
+          "note": "Native media feeds solo ingress; managed profile/direct-fallback, recording refusal, destination identity and service exceptions remain. Source route only."
+        },
+        "roomStream": {
+          "status": "partial",
+          "note": "**Partial.** Chat engine runs; planner can see Idle (`B/buddy_act.rs:549`), listening absent, destination guard sees native targets"
+        },
+        "roomRecording": {
+          "status": "partial",
+          "note": "**Partial.** Chat engine runs; planner can see Idle (`B/buddy_act.rs:549`), listening absent, destination guard sees native targets Separate recording egress and visibility require independent acceptance."
+        },
+        "hostMonitor": {
+          "status": "partial",
+          "note": "S1/S15/S18: output-session facts, visibility and safety scope; no new AI permission Operator/service state must be confirmed independently of local recording state."
+        },
+        "guestReturn": {
+          "status": "not-applicable",
+          "note": "This is a host/account service or operator control, not a guest media-return feature. Its effect on viewer media is covered by the linked source/output rows."
+        },
+        "handoff": {
+          "status": "partial",
+          "note": "S1/S15/S18: output-session facts, visibility and safety scope; no new AI permission S24 must declare continuation: browser camera/mic can change owner, static assets need persistence, desktop-only dynamic sources freeze/clear. No measured handoff acceptance."
+        }
+      },
+      "evidence": {
+        "source": "reviewed-at-pinned-revisions",
+        "localLiveKit": "not-run",
+        "managed": "not-run",
+        "macos": "not-run",
+        "windows": "not-run",
+        "linux": "not-run"
+      },
+      "productionParityEnabled": false
+    },
+    {
+      "id": "O12",
+      "feature": "/live status, stream report email/web history, usage stats, Discord announce",
+      "sourceState": "partial",
+      "requiredResult": "S18/S25: canonical live intervals, idempotent effects, privacy/opt-in unchanged",
+      "slices": ["S18", "S25"],
+      "cases": ["services", "reporting"],
+      "surfaces": {
+        "local": {
+          "status": "supported",
+          "note": "/live status, stream report email/web history, usage stats, Discord announce"
+        },
+        "soloCloud": {
+          "status": "partial",
+          "note": "Native media feeds solo ingress; managed profile/direct-fallback, recording refusal, destination identity and service exceptions remain. Source route only."
+        },
+        "roomStream": {
+          "status": "partial",
+          "note": "**Partial/missing integrations.** Web can show room status (`W/lib/live-status/view.ts:292`); local beat needs active_live (`B/live_status.rs:278`); report/usage consume local events (`B/stream_report_email.rs:168`, `B/usage_stats.rs:173`); announcement start is local (`B/main.rs:16209`)"
+        },
+        "roomRecording": {
+          "status": "partial",
+          "note": "**Partial/missing integrations.** Web can show room status (`W/lib/live-status/view.ts:292`); local beat needs active_live (`B/live_status.rs:278`); report/usage consume local events (`B/stream_report_email.rs:168`, `B/usage_stats.rs:173`); announcement start is local (`B/main.rs:16209`) Separate recording egress and visibility require independent acceptance."
+        },
+        "hostMonitor": {
+          "status": "partial",
+          "note": "S18/S25: canonical live intervals, idempotent effects, privacy/opt-in unchanged Operator/service state must be confirmed independently of local recording state."
+        },
+        "guestReturn": {
+          "status": "not-applicable",
+          "note": "This is a host/account service or operator control, not a guest media-return feature. Its effect on viewer media is covered by the linked source/output rows."
+        },
+        "handoff": {
+          "status": "partial",
+          "note": "S18/S25: canonical live intervals, idempotent effects, privacy/opt-in unchanged S24 must declare continuation: browser camera/mic can change owner, static assets need persistence, desktop-only dynamic sources freeze/clear. No measured handoff acceptance."
+        }
+      },
+      "evidence": {
+        "source": "reviewed-at-pinned-revisions",
+        "localLiveKit": "not-run",
+        "managed": "not-run",
+        "macos": "not-run",
+        "windows": "not-run",
+        "linux": "not-run"
+      },
+      "productionParityEnabled": false
+    },
+    {
+      "id": "O13",
+      "feature": "Destination/program watchdog, mic-muted/no-voice, bitrate, device health",
+      "sourceState": "partial",
+      "requiredResult": "S7/S26: measured vs unavailable state, freshness, intentional silence, no invented A/V skew",
+      "slices": ["S7a", "S7b", "S26"],
+      "cases": ["microphone-bridge", "microphone", "health"],
+      "surfaces": {
+        "local": {
+          "status": "supported",
+          "note": "Destination/program watchdog, mic-muted/no-voice, bitrate, device health"
+        },
+        "soloCloud": {
+          "status": "partial",
+          "note": "Native media feeds solo ingress; managed profile/direct-fallback, recording refusal, destination identity and service exceptions remain. Source route only."
+        },
+        "roomStream": {
+          "status": "partial",
+          "note": "**Partial.** Room watcher exists (`B/watchdog/mod.rs:616`), but defaults mic facts (`:671`) and lacks real room input levels. Conditional false NoVoice/StillThere risk, not reproduced"
+        },
+        "roomRecording": {
+          "status": "partial",
+          "note": "**Partial.** Room watcher exists (`B/watchdog/mod.rs:616`), but defaults mic facts (`:671`) and lacks real room input levels. Conditional false NoVoice/StillThere risk, not reproduced Separate recording egress and visibility require independent acceptance."
+        },
+        "hostMonitor": {
+          "status": "partial",
+          "note": "S7/S26: measured vs unavailable state, freshness, intentional silence, no invented A/V skew Operator/service state must be confirmed independently of local recording state."
+        },
+        "guestReturn": {
+          "status": "not-applicable",
+          "note": "This is a host/account service or operator control, not a guest media-return feature. Its effect on viewer media is covered by the linked source/output rows."
+        },
+        "handoff": {
+          "status": "partial",
+          "note": "S7/S26: measured vs unavailable state, freshness, intentional silence, no invented A/V skew S24 must declare continuation: browser camera/mic can change owner, static assets need persistence, desktop-only dynamic sources freeze/clear. No measured handoff acceptance."
+        }
+      },
+      "evidence": {
+        "source": "reviewed-at-pinned-revisions",
+        "localLiveKit": "not-run",
+        "managed": "not-run",
+        "macos": "not-run",
+        "windows": "not-run",
+        "linux": "not-run"
+      },
+      "productionParityEnabled": false
+    },
+    {
+      "id": "O14",
+      "feature": "Deck/phone/global shortcuts/agent Start, Stop, toggle, mute, scene/sound controls",
+      "sourceState": "partial",
+      "requiredResult": "S1: all surfaces use same capability/result model; extend allowlists only intentionally",
+      "slices": ["S1"],
+      "cases": ["controls"],
+      "surfaces": {
+        "local": {
+          "status": "supported",
+          "note": "Deck/phone/global shortcuts/agent Start, Stop, toggle, mute, scene/sound controls"
+        },
+        "soloCloud": {
+          "status": "partial",
+          "note": "Native media feeds solo ingress; managed profile/direct-fallback, recording refusal, destination identity and service exceptions remain. Source route only."
+        },
+        "roomStream": {
+          "status": "partial",
+          "note": "**Partial, P0.** Start branches reach room; Stop guard sees raw recordingRef (`R/lib/studio-actions/studio-context.ts:196`, `R/lib/studio-actions/session.ts:16`); mute false success as A2"
+        },
+        "roomRecording": {
+          "status": "partial",
+          "note": "**Partial, P0.** Start branches reach room; Stop guard sees raw recordingRef (`R/lib/studio-actions/studio-context.ts:196`, `R/lib/studio-actions/session.ts:16`); mute false success as A2 Separate recording egress and visibility require independent acceptance."
+        },
+        "hostMonitor": {
+          "status": "partial",
+          "note": "S1: all surfaces use same capability/result model; extend allowlists only intentionally Operator/service state must be confirmed independently of local recording state."
+        },
+        "guestReturn": {
+          "status": "not-applicable",
+          "note": "This is a host/account service or operator control, not a guest media-return feature. Its effect on viewer media is covered by the linked source/output rows."
+        },
+        "handoff": {
+          "status": "partial",
+          "note": "S1: all surfaces use same capability/result model; extend allowlists only intentionally S24 must declare continuation: browser camera/mic can change owner, static assets need persistence, desktop-only dynamic sources freeze/clear. No measured handoff acceptance."
+        }
+      },
+      "evidence": {
+        "source": "reviewed-at-pinned-revisions",
+        "localLiveKit": "not-run",
+        "managed": "not-run",
+        "macos": "not-run",
+        "windows": "not-run",
+        "linux": "not-run"
+      },
+      "productionParityEnabled": false
+    },
+    {
+      "id": "O15",
+      "feature": "Agent get_status/get_picture, live edit locks and confirmations",
+      "sourceState": "partial",
+      "requiredResult": "S1/S6: truthful active output and projected picture; no extra remote credentials",
+      "slices": ["S1", "S6"],
+      "cases": ["controls", "views"],
+      "surfaces": {
+        "local": {
+          "status": "supported",
+          "note": "Agent get_status/get_picture, live edit locks and confirmations"
+        },
+        "soloCloud": {
+          "status": "partial",
+          "note": "Native media feeds solo ingress; managed profile/direct-fallback, recording refusal, destination identity and service exceptions remain. Source route only."
+        },
+        "roomStream": {
+          "status": "partial",
+          "note": "**Partial.** Look reads native session (`B/agent_look.rs:117`), so cannot represent final room program"
+        },
+        "roomRecording": {
+          "status": "partial",
+          "note": "**Partial.** Look reads native session (`B/agent_look.rs:117`), so cannot represent final room program Separate recording egress and visibility require independent acceptance."
+        },
+        "hostMonitor": {
+          "status": "partial",
+          "note": "S1/S6: truthful active output and projected picture; no extra remote credentials Operator/service state must be confirmed independently of local recording state."
+        },
+        "guestReturn": {
+          "status": "not-applicable",
+          "note": "This is a host/account service or operator control, not a guest media-return feature. Its effect on viewer media is covered by the linked source/output rows."
+        },
+        "handoff": {
+          "status": "partial",
+          "note": "S1/S6: truthful active output and projected picture; no extra remote credentials S24 must declare continuation: browser camera/mic can change owner, static assets need persistence, desktop-only dynamic sources freeze/clear. No measured handoff acceptance."
+        }
+      },
+      "evidence": {
+        "source": "reviewed-at-pinned-revisions",
+        "localLiveKit": "not-run",
+        "managed": "not-run",
+        "macos": "not-run",
+        "windows": "not-run",
+        "linux": "not-run"
+      },
+      "productionParityEnabled": false
+    },
+    {
+      "id": "O16",
+      "feature": "Sleep, updates/restarts, maintenance, quit guards",
+      "sourceState": "partial",
+      "requiredResult": "S24/S26: shared activity guard, ownership bounded cleanup",
+      "slices": ["S24", "S26"],
+      "cases": ["handoff", "health"],
+      "surfaces": {
+        "local": {
+          "status": "supported",
+          "note": "Sleep, updates/restarts, maintenance, quit guards"
+        },
+        "soloCloud": {
+          "status": "partial",
+          "note": "Native media feeds solo ingress; managed profile/direct-fallback, recording refusal, destination identity and service exceptions remain. Source route only."
+        },
+        "roomStream": {
+          "status": "partial",
+          "note": "**Partial.** Room camera lend holds maintenance (`B/main.rs:15866`); quit sees cloud (`M/exit-guard.ts:25`); other guards read local state (`M/index.ts:16310`)"
+        },
+        "roomRecording": {
+          "status": "partial",
+          "note": "**Partial.** Room camera lend holds maintenance (`B/main.rs:15866`); quit sees cloud (`M/exit-guard.ts:25`); other guards read local state (`M/index.ts:16310`) Separate recording egress and visibility require independent acceptance."
+        },
+        "hostMonitor": {
+          "status": "partial",
+          "note": "S24/S26: shared activity guard, ownership bounded cleanup Operator/service state must be confirmed independently of local recording state."
+        },
+        "guestReturn": {
+          "status": "not-applicable",
+          "note": "This is a host/account service or operator control, not a guest media-return feature. Its effect on viewer media is covered by the linked source/output rows."
+        },
+        "handoff": {
+          "status": "partial",
+          "note": "S24/S26: shared activity guard, ownership bounded cleanup S24 must declare continuation: browser camera/mic can change owner, static assets need persistence, desktop-only dynamic sources freeze/clear. No measured handoff acceptance."
+        }
+      },
+      "evidence": {
+        "source": "reviewed-at-pinned-revisions",
+        "localLiveKit": "not-run",
+        "managed": "not-run",
+        "macos": "not-run",
+        "windows": "not-run",
+        "linux": "not-run"
+      },
+      "productionParityEnabled": false
+    },
+    {
+      "id": "O17",
+      "feature": "Continue on another device / host loss",
+      "sourceState": "partial",
+      "requiredResult": "S24: cloud keeps accepted assets/state, explicitly report unavailable desktop live sources",
+      "slices": ["S24"],
+      "cases": ["handoff"],
+      "surfaces": {
+        "local": {
+          "status": "supported",
+          "note": "Continue on another device / host loss"
+        },
+        "soloCloud": {
+          "status": "partial",
+          "note": "Native media feeds solo ingress; managed profile/direct-fallback, recording refusal, destination identity and service exceptions remain. Source route only."
+        },
+        "roomStream": {
+          "status": "partial",
+          "note": "**Partial by design.** Handoff clears desktop overlays and forgets room (`B/cloud_show.rs:4855`); phone only contributes camera/mic"
+        },
+        "roomRecording": {
+          "status": "partial",
+          "note": "**Partial by design.** Handoff clears desktop overlays and forgets room (`B/cloud_show.rs:4855`); phone only contributes camera/mic Separate recording egress and visibility require independent acceptance."
+        },
+        "hostMonitor": {
+          "status": "partial",
+          "note": "S24: cloud keeps accepted assets/state, explicitly report unavailable desktop live sources Operator/service state must be confirmed independently of local recording state."
+        },
+        "guestReturn": {
+          "status": "not-applicable",
+          "note": "This is a host/account service or operator control, not a guest media-return feature. Its effect on viewer media is covered by the linked source/output rows."
+        },
+        "handoff": {
+          "status": "partial",
+          "note": "S24: cloud keeps accepted assets/state, explicitly report unavailable desktop live sources S24 must declare continuation: browser camera/mic can change owner, static assets need persistence, desktop-only dynamic sources freeze/clear. No measured handoff acceptance."
+        }
+      },
+      "evidence": {
+        "source": "reviewed-at-pinned-revisions",
+        "localLiveKit": "not-run",
+        "managed": "not-run",
+        "macos": "not-run",
+        "windows": "not-run",
+        "linux": "not-run"
+      },
+      "productionParityEnabled": false
+    },
+    {
+      "id": "O18",
+      "feature": "Plans, hours, recording retention, guest caps, URL policy",
+      "sourceState": "supported",
+      "requiredResult": "S17/S22/S24: preserve metering/limits; cost changes require D8",
+      "slices": ["S17", "S22", "S24"],
+      "cases": ["outputs", "iso", "handoff"],
+      "surfaces": {
+        "local": {
+          "status": "supported",
+          "note": "Plans, hours, recording retention, guest caps, URL policy"
+        },
+        "soloCloud": {
+          "status": "partial",
+          "note": "Native media feeds solo ingress; managed profile/direct-fallback, recording refusal, destination identity and service exceptions remain. Source route only."
+        },
+        "roomStream": {
+          "status": "supported",
+          "note": "**Supported constraints, not parity bugs.** `W/lib/entitlements/plans.ts:38`, `W/lib/cloud/shows-route.ts:293`"
+        },
+        "roomRecording": {
+          "status": "supported",
+          "note": "**Supported constraints, not parity bugs.** `W/lib/entitlements/plans.ts:38`, `W/lib/cloud/shows-route.ts:293` Separate recording egress and visibility require independent acceptance."
+        },
+        "hostMonitor": {
+          "status": "supported",
+          "note": "S17/S22/S24: preserve metering/limits; cost changes require D8 Operator/service state must be confirmed independently of local recording state."
+        },
+        "guestReturn": {
+          "status": "not-applicable",
+          "note": "This is a host/account service or operator control, not a guest media-return feature. Its effect on viewer media is covered by the linked source/output rows."
+        },
+        "handoff": {
+          "status": "partial",
+          "note": "S17/S22/S24: preserve metering/limits; cost changes require D8 S24 must declare continuation: browser camera/mic can change owner, static assets need persistence, desktop-only dynamic sources freeze/clear. No measured handoff acceptance."
+        }
+      },
+      "evidence": {
+        "source": "reviewed-at-pinned-revisions",
+        "localLiveKit": "not-run",
+        "managed": "not-run",
+        "macos": "not-run",
+        "windows": "not-run",
+        "linux": "not-run"
+      },
+      "productionParityEnabled": false
+    }
+  ]
+}

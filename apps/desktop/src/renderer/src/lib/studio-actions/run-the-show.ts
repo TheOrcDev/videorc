@@ -163,6 +163,11 @@ export const setAudio: AgentToolExecutor = async (context, args) => {
   ) {
     return { ok: false, message: RUN_THE_SHOW_COPY.setAudioEmpty }
   }
+  if (
+    context.outputFacts?.owner === 'cloud-room' &&
+    (microphoneGain !== undefined || systemGain !== undefined)
+  )
+    return { ok: false, message: 'These gain controls are not applied to room audio yet.' }
   const said: string[] = []
   const microphoneResult: Record<string, unknown> = {}
   const systemResult: Record<string, unknown> = {}

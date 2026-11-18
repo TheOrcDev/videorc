@@ -3,6 +3,7 @@ import {
   useEffect,
   useId,
   useRef,
+  useState,
   type CSSProperties,
   type ReactElement,
   type ReactNode,
@@ -419,7 +420,8 @@ function Emote({
   stacked?: 'no' | 'base' | 'overlay'
 }): ReactElement | null {
   const localUrl = useCachedAvatar(url)
-  if (!localUrl) {
+  const [failedUrl, setFailedUrl] = useState<string | null>(null)
+  if (!localUrl || failedUrl === localUrl) {
     if (stacked === 'overlay') return null
     return <span className={cn(stacked === 'base' && 'col-start-1 row-start-1')}>{text}</span>
   }
@@ -432,6 +434,7 @@ function Emote({
       )}
       data-slot="comment-emote"
       draggable={false}
+      onError={() => setFailedUrl(localUrl)}
       src={localUrl}
       title={stacked === 'no' ? text : undefined}
     />
@@ -524,8 +527,8 @@ function StillFrame({ alt, src }: { alt: string; src: string }): ReactElement {
 }
 
 /** Text with emotes inline when the platform sent them (Twitch, Kick) or
- * the backend matched them (7TV), zero-width 7TV emotes stacked on the emote
- * before them. A Twitch GIF (plan 155) is its own block after the text it
+ * the backend matched them (YouTube built-ins, 7TV), zero-width 7TV emotes
+ * stacked on the emote before them. A Twitch GIF (plan 155) is its own block after the text it
  * came with. Without an emote or GIF it is `text` as is. */
 function FragmentText({
   text,

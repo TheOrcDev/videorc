@@ -5,6 +5,7 @@ import { describe, expect, it } from 'vitest'
 import {
   ProofSurfaceGoneError,
   executeProofSurfaceScript,
+  runDetachedProofSurfaceWork,
   settleWithProofSurface
 } from './proof-surface-call'
 
@@ -107,5 +108,57 @@ describe('executeProofSurfaceScript', () => {
     )
     hung.destroy()
     await expect(call).rejects.toThrow('Proof surface was destroyed before the call settled.')
+  })
+})
+
+describe('runDetachedProofSurfaceWork', () => {
+  // QA F1: a debounced/void resync awaiting a script on a surface the preview
+  // lifecycle destroys must not end as an unhandled rejection in main.
+  it('ends surface-gone cancellation as a normal outcome, not an unhandled rejection', async () => {
+    const surface = new FakeSurface()
+    const unhandled: unknown[] = []
+    const onUnhandled = (reason: unknown): void => {
+      unhandled.push(reason)
+    }
+    process.on('unhandledRejection', onUnhandled)
+    const errors: unknown[] = []
+    const gone: unknown[] = []
+    try {
+      runDetachedProofSurfaceWork(
+        async () => {
+          await executeProofSurfaceScript(surface, 'window.__videorcSetFramePollingProfile?.({})')
+        },
+        { onError: (error) => errors.push(error), onSurfaceGone: (error) => gone.push(error) }
+      )
+      await Promise.resolve()
+      surface.destroy()
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      await new Promise((resolve) => setImmediate(resolve))
+    } finally {
+      process.off('unhandledRejection', onUnhandled)
+    }
+    expect(unhandled).toEqual([])
+    expect(errors).toEqual([])
+    expect(gone).toHaveLength(1)
+    expect(gone[0]).toBeInstanceOf(ProofSurfaceGoneError)
+  })
+
+  it('reports any other failure through onError, never swallowing it', async () => {
+    const errors: unknown[] = []
+    const gone: unknown[] = []
+    const failure = new Error('script threw')
+    runDetachedProofSurfaceWork(() => Promise.reject(failure), {
+      onError: (error) => errors.push(error),
+      onSurfaceGone: (error) => gone.push(error)
+    })
+    runDetachedProofSurfaceWork(
+      () => {
+        throw failure
+      },
+      { onError: (error) => errors.push(error) }
+    )
+    await new Promise((resolve) => setImmediate(resolve))
+    expect(errors).toEqual([failure, failure])
+    expect(gone).toEqual([])
   })
 })

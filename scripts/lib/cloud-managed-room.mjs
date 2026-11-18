@@ -42,6 +42,7 @@ export async function managedRoomListener(h) {
       const LK = await import('/client.mjs')
       window.LK = LK
       window.received = []
+      window.disconnects = []
       window.peers = new Map()
       window.joinPeer = async ({
         url,
@@ -52,6 +53,9 @@ export async function managedRoomListener(h) {
         color = '#c02020'
       }) => {
         const room = new LK.Room({ adaptiveStream: false, dynacast: false })
+        room.on(LK.RoomEvent.Disconnected, (reason) =>
+          window.disconnects.push({ identity, reason, atMs: Date.now() })
+        )
         for (const topic of topics) {
           room.registerByteStreamHandler(topic, async (reader, sender) => {
             const chunks = await reader.readAll({ signal: AbortSignal.timeout(10000) })
@@ -125,6 +129,25 @@ export async function managedRoomListener(h) {
     return {
       page,
       joinPeer,
+      joinHost: (grants) =>
+        page.evaluate((params) => window.joinPeer(params), {
+          url: grants.url,
+          token: grants.token,
+          identity: grants.identity,
+          publish: true,
+          tone: 880,
+          color: '#20b080'
+        }),
+      hostWasReplaced: () =>
+        page.evaluate(
+          (identity) =>
+            window.disconnects.some(
+              (e) =>
+                e.identity === identity &&
+                e.reason === window.LK.DisconnectReason.DUPLICATE_IDENTITY
+            ),
+          `host:${h.showId}`
+        ),
       records: () =>
         page.evaluate(
           (id) => window.received.filter((record) => record.receiver === id),

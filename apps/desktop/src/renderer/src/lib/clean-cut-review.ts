@@ -386,6 +386,84 @@ export function rebaseDraft(
   return { ...draft, toggles, removeManual }
 }
 
+/** What one Save sent and the lists either side of it (QA F16). */
+export interface CleanCutSaveStep {
+  /** The draft the save sent. */
+  submitted: CleanCutDraft
+  /** The saved list the draft was made on. */
+  before: readonly CleanCutRemoval[]
+  /** The saved list the save returned. */
+  after: readonly CleanCutRemoval[]
+}
+
+/**
+ * A Save answered while the review kept editing (QA F16): `draft` is what
+ * the review shows now, made on `before`. It becomes the changes still to
+ * save on `after`, so an edit the save did not carry stays unsaved instead
+ * of being dropped. Exactly the submitted draft comes back empty.
+ */
+export function rebaseDraftAfterSave(draft: CleanCutDraft, step: CleanCutSaveStep): CleanCutDraft {
+  const { submitted, before, after } = step
+  const afterById = new Map(after.map((removal) => [removal.id, removal]))
+  const wanted = new Map(effectiveRemovals(before, draft).map((entry) => [entry.id, entry.enabled]))
+  const toggles = new Map<string, boolean>()
+  const removeManual = new Set<string>()
+  for (const removal of before) {
+    const now = afterById.get(removal.id)
+    if (!now) continue
+    if (draft.removeManual.has(removal.id)) {
+      if (now.kind === 'manual') removeManual.add(removal.id)
+      continue
+    }
+    const enabled = wanted.get(removal.id)
+    if (enabled !== undefined && enabled !== now.enabled) toggles.set(removal.id, enabled)
+  }
+  // The new cuts the save made leave the draft; one made since stays.
+  const sent = new Set(submitted.addManual.map((manual) => manual.key))
+  const addManual = draft.addManual.filter((manual) => !sent.has(manual.key))
+  // A new cut taken back while the save ran: delete the one the save made.
+  const beforeIds = new Set(before.map((removal) => removal.id))
+  const made = after.filter((removal) => removal.kind === 'manual' && !beforeIds.has(removal.id))
+  for (const manual of submitted.addManual) {
+    if (draft.addManual.some((entry) => entry.key === manual.key)) continue
+    let match: CleanCutRemoval | null = null
+    for (const removal of made) {
+      const overlap = overlapMs(manual, removal)
+      if (overlap > 0 && (!match || overlap > overlapMs(manual, match))) match = removal
+    }
+    if (match) removeManual.add(match.id)
+  }
+  // A cut the save deleted but the review brought back: cut that range again.
+  let { nextKey } = draft
+  for (const id of submitted.removeManual) {
+    const removal = before.find((entry) => entry.id === id)
+    if (!removal || draft.removeManual.has(id) || afterById.has(id) || !wanted.get(id)) continue
+    addManual.push({
+      key: `${DRAFT_MANUAL_PREFIX}${nextKey}`,
+      startMs: removal.startMs,
+      endMs: removal.endMs
+    })
+    nextKey += 1
+  }
+  return { toggles, addManual, removeManual, nextKey }
+}
+
+/**
+ * The undo history after a Save answered while the review kept editing: the
+ * steps from before the save leave it, as a save always clears them; every
+ * step taken since is carried onto the saved list like the draft.
+ */
+export function rebaseHistoryAfterSave(
+  history: CleanCutHistory,
+  atSave: CleanCutHistory,
+  step: CleanCutSaveStep
+): CleanCutHistory {
+  const sinceSave = atSave.past.every((entry, index) => history.past[index] === entry)
+  const past = sinceSave ? history.past.slice(atSave.past.length) : history.past
+  const carry = (entry: CleanCutDraft): CleanCutDraft => rebaseDraftAfterSave(entry, step)
+  return { past: past.map(carry), future: history.future.map(carry) }
+}
+
 // --- Chips and stats --------------------------------------------------------------
 
 export type CleanCutChipState = 'on' | 'off' | 'mixed' | 'empty'

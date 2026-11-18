@@ -99,17 +99,18 @@ describe('executeRemoteIntent', () => {
   })
 
   it('passes the clip length through, and refuses one nobody offers (plan 199)', async () => {
-    // No length is today's 30-second clip: nothing extra is passed.
+    // No length is today's 30-second clip: no length is passed, only the
+    // intent id that names the clip (plan 249 S19).
     const plain = remoteIntentContext({ replayOn: true })
     await executeRemoteIntent({ intentId: 'clip-30', intent: { kind: 'clipMark' } }, plain.context)
-    expect(plain.context.markClip).toHaveBeenCalledWith(undefined)
+    expect(plain.context.markClip).toHaveBeenCalledWith(undefined, 'clip-30')
 
     const long = remoteIntentContext({ replayOn: true })
     await executeRemoteIntent(
       { intentId: 'clip-60', intent: { kind: 'clipMark', seconds: 60 } },
       long.context
     )
-    expect(long.context.markClip).toHaveBeenCalledWith(60)
+    expect(long.context.markClip).toHaveBeenCalledWith(60, 'clip-60')
     expect(long.requests).toEqual([
       { method: 'remote.intent.ack', params: { intentId: 'clip-60', ok: true } }
     ])
@@ -119,14 +120,14 @@ describe('executeRemoteIntent', () => {
       { intentId: 'clip-30n', intent: { kind: 'clipMark', seconds: 30 } },
       short.context
     )
-    expect(short.context.markClip).toHaveBeenCalledWith(30)
+    expect(short.context.markClip).toHaveBeenCalledWith(30, 'clip-30n')
 
     const nulled = remoteIntentContext({ replayOn: true })
     await executeRemoteIntent(
       { intentId: 'clip-null', intent: { kind: 'clipMark', seconds: null } },
       nulled.context
     )
-    expect(nulled.context.markClip).toHaveBeenCalledWith(undefined)
+    expect(nulled.context.markClip).toHaveBeenCalledWith(undefined, 'clip-null')
 
     for (const seconds of [45, '60', 0, 120]) {
       const odd = remoteIntentContext({ replayOn: true })

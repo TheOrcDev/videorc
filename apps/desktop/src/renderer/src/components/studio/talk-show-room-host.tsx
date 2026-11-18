@@ -6,6 +6,7 @@ import {
   type TalkShowContextValue,
   type TalkShowRoomControllerDeps
 } from '@/hooks/use-talk-show-room'
+import { roomProgramCamera } from '@/hooks/use-room-program-camera'
 import type { CloudStatus } from '@/lib/backend'
 import type { TalkShowRoomSnapshot } from '@/lib/talk-show-room'
 
@@ -78,5 +79,13 @@ export default function TalkShowRoomHost({
     onValue(shown)
   }, [onValue, shown])
   useEffect(() => () => onValue(NO_TALK_SHOW), [onValue])
+
+  // Plan 249 S23 (D10): the room program on Videorc Camera belongs to one
+  // room; it ends with that room (Videorc Camera returns to its Studio source).
+  const hostIdentity = shown.hostIdentity
+  useEffect(() => {
+    void roomProgramCamera.retire(hostIdentity).catch(() => {})
+  }, [hostIdentity])
+  useEffect(() => () => void roomProgramCamera.setOn(false, null).catch(() => {}), [])
   return null
 }

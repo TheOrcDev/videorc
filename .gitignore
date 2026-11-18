@@ -31,3 +31,6 @@ apps/desktop/dist/
 # Plan 214: SwiftPM scratch dirs if the camera extension package is opened in Xcode
 apps/desktop/camera-extension/.build/
 apps/desktop/camera-extension/.swiftpm/
+
+# electron-vite writes a timestamped copy of its config while it loads it.
+apps/desktop/electron.vite.config.*.mjs

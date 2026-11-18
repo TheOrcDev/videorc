@@ -1,3 +1,14 @@
+import type { RoomCameraFixtureAction, RoomCameraResources } from './room-camera'
+import type {
+  RoomProgramCameraFrame,
+  RoomProgramCameraResources,
+  RoomProgramCameraSendOutcome
+} from './room-program-camera'
+import type { RoomFrameCommand, RoomFrameReply, RoomFrameResources } from './room-frame'
+import type { ManagedOutputProfile } from './cloud-output-profile'
+import type { RoomSystemAudioCommand, RoomSystemAudioFrame } from './room-system-audio'
+import type { RoomMicrophoneApi } from './room-microphone'
+import type { RoomPcmCommand, RoomPcmFrame, RoomPcmResources } from './room-pcm'
 import type { ChatDelivery, ChatDeliveryBoundary } from './chat-delivery'
 import type { LiveDashboardState } from './live-dashboard'
 import type { GlobalShortcutAction } from './global-shortcuts'
@@ -4224,7 +4235,9 @@ export interface ClipMark {
 /** `clip.marked` event and the `clip.mark` reply. `saved: false` carries a
  * reason code (`recording-off`): the moment was heard but nothing was kept. */
 export interface ClipMarkedEvent {
-  sessionId: string
+  sessionId?: string
+  showId?: string
+  markerId?: string
   atSeconds: number
   source: ClipMarkSource
   saved: boolean
@@ -4715,6 +4728,8 @@ export type ScreenPrivacyReason = 'you' | 'password-manager'
  * Absent fields are omitted by the backend, never `null`.
  */
 export interface ScreenPrivacy {
+  /** Native process transition generation; absent on older backends. */
+  generation?: number
   hidden: boolean
   /** RFC 3339, the moment of the hide; present only while hidden. */
   since?: string
@@ -4774,7 +4789,15 @@ export interface VirtualCameraStatus {
   platformStep?: VirtualCameraPlatformStep
   /** Plain copy for the status line, present when there is something to say. */
   message?: string
+  /**
+   * Plan 249 S23: present only while a room's Program preview owns the camera
+   * (a reconstruction, never the encoded stream); absent means the Studio program.
+   */
+  source?: VirtualCameraSource
 }
+
+/** Plan 249 S23: what Videorc Camera shows while a room's Program preview owns it. */
+export type VirtualCameraSource = 'room-program-preview' | 'room-program-paused'
 
 /** `camera.lowLight.get` (issue #1066). */
 export interface CameraLowLightParams {
@@ -5547,6 +5570,7 @@ export interface CloudFallback {
 }
 
 export interface CloudShowSummary {
+  outputProfile?: ManagedOutputProfile
   id: string
   nodeId: string
   createdAt?: string
@@ -5557,6 +5581,35 @@ export interface CloudShowSummary {
   /** Plan 224: a resumable talk show rejoins the room, never a local session. */
   kind?: 'solo' | 'talk' | 'test'
 }
+
+/**
+ * Plan 243: the one device viewers get, as this computer sees it. Device ids
+ * never reach the renderer; `thisDevice` says whether it is this computer.
+ */
+export interface CloudOnAir {
+  /** The device's own name ("MacBook Pro", "iPhone"); absent from an old desktop. */
+  name?: string
+  kind: 'computer' | 'phone' | 'browser'
+  /** A computer's feed (solo), a browser's camera (solo), or the talk host seat. */
+  source: 'feed' | 'camera' | 'host'
+  /** Nobody is on air after a hand-off, and the hold runs. */
+  waiting: boolean
+  thisDevice: boolean
+  since: string
+}
+
+/**
+ * Plan 243 R2 A-M5: `cloud.show.handOff`'s answer. This computer stopped
+ * either way; `confirmed: false` means videorc.com was not told (the show
+ * holds until a device continues).
+ */
+export interface CloudHandOffAnswer {
+  ok: true
+  confirmed: boolean
+}
+
+/** Plan 243 D7: why this computer stopped feeding without ending the show. */
+export type CloudStoppedBy = 'hand-off' | 'taken-over'
 
 export interface CloudHoldStatus {
   active: boolean
@@ -5584,7 +5637,26 @@ export interface CloudSettingsView {
  * The whole cloud state: the `cloud.state` event and every `cloud.*` answer.
  * Secret-free by construction (no url, token or key reaches it).
  */
+export interface CloudLiveInterval {
+  id: string
+  requestedAt: string
+  liveSince?: string
+  endRequestedAt?: string
+  endedAt?: string
+}
+export interface CloudProviderSettlement {
+  destinationId: string
+  provider: 'youtube' | 'x'
+  state: 'armed' | 'pending' | 'completed'
+  attempts: number
+  terminalReason?: string
+  reason?: string
+  order?: 'before-stop' | 'after-stop' | 'stop-unconfirmed'
+  outputStopped?: boolean
+}
 export interface CloudStatus {
+  liveInterval?: CloudLiveInterval
+  providerLifecycle?: CloudProviderSettlement[]
   phase: CloudPhase
   /** The account's `cloud` block says on. */
   entitled: boolean
@@ -5618,12 +5690,87 @@ export interface CloudStatus {
   allowancePast?: { seconds: number }
   /** Plan 223 C3: the runner's program measurements while the show is live or holding. */
   program?: CloudProgram
+  /** Plan 249 S26: each program output's health (managed shows), layer by layer. */
+  outputHealth?: CloudOutputHealth[]
   /** Plan 222 U1: "Videorc Cloud is on" is due for this account; absent once seen. */
   announce?: boolean
   /** Plan 224: the room this computer holds, while it holds one. */
   room?: CloudRoomStatus
   /** Plan 224 D10: the cloud recording, on a talk show. */
   recording?: CloudRecordingStatus
+  /** Plan 243: the device on air, on a managed show. */
+  onAir?: CloudOnAir
+  /**
+   * Plan 243 D7: set on the status sent before this computer's session stops
+   * for a hand-off or a take-over, so no broadcast is completed for it.
+   */
+  stoppedBy?: CloudStoppedBy
+  /**
+   * Plan 249 S24: this computer as the show's controller (absent unless it
+   * holds the show's controller epoch). After a takeover, `needsEnable`
+   * names what the previous controller had on, which starts off here.
+   */
+  controller?: CloudControllerFacts
+}
+
+/** Plan 249 S24: what a controller grant tells this computer. */
+export type CloudControllerFacts = {
+  controllerEpoch: number
+  /** `this-device` (a relaunch) or `another-device`; absent on a first claim. */
+  takenOverFrom?: 'this-device' | 'another-device'
+  /** What the previous controller had switched on: switched on here explicitly. */
+  needsEnable: Array<'sounds' | 'system' | 'html' | 'camera' | 'microphone' | 'screen'>
+  /** Kept output views read back (never applied until the pages answer again). */
+  restoredViews: number
+  /** Live desktop sources the kept presentation cleared (the chat box). */
+  cleared: string[]
+  /** Another device took the show over: this computer controls nothing. */
+  lost?: boolean
+}
+
+/** Plan 249 S24: one output view a program page applied, to be kept. */
+export type CloudPresentationAccepted = {
+  showId: string
+  topic: 'avatar' | 'static'
+  output: 'stream' | 'recording'
+  orientation: 'h' | 'v'
+  publisherSid: string
+  revision: number
+  layers: unknown[]
+}
+
+/** Plan 249 S24: a view the show kept, with its pixels, for re-sending. */
+export type CloudPresentationRestore = {
+  controllerEpoch?: number
+  views: Array<{
+    topic: 'avatar' | 'static'
+    output: 'stream' | 'recording'
+    orientation: 'h' | 'v'
+    acceptedEpoch?: number
+    acceptedAt?: string
+    applied?: false
+    layers: Array<{
+      id?: string
+      kind: string
+      rect: { x: number; y: number; w: number; h: number }
+      opacity?: number
+      asset: { hash: string; width: number; height: number; png?: string }
+      /** Plan 249 S5: the atlas meta an avatar layer was applied with. */
+      atlas?: unknown
+    }>
+    cleared?: Array<{ id: string; kind: string; reason: string }>
+  }>
+  /** The controller's output flags per family (`avatar: {stream, recording}`). */
+  outputs?: { avatar?: { stream?: boolean; recording?: boolean } } & Record<string, unknown>
+  /**
+   * The supported host-loss policy: the program cleared what it showed after
+   * its transport lease; what was kept returns only through this controller.
+   */
+  continuity?: {
+    mode: 'successor-restore'
+    programDuringHostLoss: 'cleared-after-transport-lease'
+    transportLeaseMs: { avatar: number }
+  }
 }
 
 // --- Talk shows (plan 224) ---------------------------------------------------
@@ -5698,6 +5845,11 @@ export type CloudRoomOverlayEvent =
  * (or no format) is a node recording, downloaded from videorc.com.
  */
 export interface CloudRecordingItem {
+  associationKnown?: boolean
+  takeId?: string
+  liveIntervalIds?: string[]
+  availability?: string
+  localSessionId?: string
   id: string
   showId: string
   orientation: string
@@ -5723,6 +5875,7 @@ export interface CloudRecordingDownload {
   jobId: string
 }
 export interface CloudRecordingDownloadEvent {
+  localSessionId?: string
   jobId: string
   recordingId: string
   state: 'running' | 'done' | 'failed' | 'cancelled'
@@ -5780,6 +5933,13 @@ export interface CloudStage {
 export interface CloudRoomShown {
   onStage: string[]
   screen?: string
+  /** Plan 249 S6: the layout the page drew. Absent: a runner or an older page.
+   * A plain string on the wire; read it through `shownLayout`. */
+  layout?: string
+  /** Plan 249 S6: the key of the stage the page applied (cloud-presentation-views.ts). */
+  stageKey?: string
+  /** Plan 249 S6: when that report arrived, ISO 8601. Present with `stageKey`. */
+  at?: string
 }
 
 /** `CloudStatus.room`: what the Guests tab, the Show stage and the strip draw. */
@@ -5893,6 +6053,31 @@ export interface CloudProgram {
   avSkewMs?: number
 }
 
+/**
+ * Plan 249 S26: one program output's health, as the web builds it
+ * (`lib/cloud/media/output-health.ts`). Open strings: a value this app does
+ * not know reads as Unknown. `audio` is what the page plays, never proof of
+ * the encoded audio the egress sends.
+ */
+export interface CloudOutputHealth {
+  /** `stream` or `recording`. */
+  output: string
+  /** `horizontal` or `vertical`. */
+  orientation: string
+  /** The egress's status, or `none`. */
+  egress: string
+  alsoRecords?: boolean
+  /** `reporting`, `stale` or `missing`. */
+  page: string
+  pageAgeSeconds?: number
+  joined: boolean
+  /** `measured`, `unmeasured` or `unknown`. */
+  audio: string
+  program?: CloudProgram
+  stageKey?: string
+  faults?: { asset?: number; drop?: number }
+}
+
 // --- The stream watchdog (plan 223) ---
 
 export type WatchdogCheck =
@@ -5909,6 +6094,8 @@ export type WatchdogCheck =
   | 'chat-says'
   | 'brb-long'
   | 'still-there'
+  | 'program-unreported'
+  | 'contribution-missing'
 
 export type WatchdogAlertSeverity = 'critical' | 'warning' | 'notice'
 export type WatchdogAlertState = 'open' | 'acknowledged' | 'snoozed'
@@ -6352,6 +6539,28 @@ export type SessionMediaGrantResult =
 export type AppExitKind = 'quit' | 'close'
 
 export interface VideorcApi {
+  getRoomPcmTestResources: () => Promise<RoomPcmResources>
+  getRoomNativeMicrophoneResources: () => Promise<RoomPcmResources>
+  roomSystemAudioPcm: (command: RoomSystemAudioCommand) => Promise<RoomSystemAudioFrame | null>
+  getRoomSystemAudioResources: () => Promise<import('./room-pcm').RoomPcmResources>
+  roomMicrophonePcm: RoomMicrophoneApi
+  roomPcmTest: (command: RoomPcmCommand) => Promise<RoomPcmFrame | null>
+  getRoomFrameTestResources: () => Promise<RoomFrameResources>
+  roomFrameTest: (command: RoomFrameCommand) => Promise<RoomFrameReply>
+  getRoomProcessedCameraResources: () => Promise<RoomCameraResources>
+  roomProcessedCamera: (command: RoomFrameCommand) => Promise<RoomFrameReply>
+  roomProcessedCameraFixture: (action: RoomCameraFixtureAction) => Promise<unknown>
+  /** Plan 249 S23: whether this run offers the room program as Videorc Camera (dev-gated). */
+  roomProgramCameraAvailable: () => Promise<boolean>
+  /** Plan 249 S23: open the upload for one room generation; Videorc Camera follows it. */
+  openRoomProgramCamera: (generation: number) => Promise<null>
+  /** Plan 249 S23: one 1280x720 RGBA frame; `busy`/`offline` frames are dropped. */
+  sendRoomProgramCameraFrame: (
+    frame: RoomProgramCameraFrame
+  ) => Promise<RoomProgramCameraSendOutcome>
+  /** Plan 249 S23: end the upload; Videorc Camera returns to its Studio source. */
+  closeRoomProgramCamera: (generation: number) => Promise<null>
+  getRoomProgramCameraResources: () => Promise<RoomProgramCameraResources>
   /**
    * What this window sits on (plan 208): the solid base (the default) or the
    * OS glass. Main decides it per window and the preload reads it from
@@ -6375,7 +6584,12 @@ export interface VideorcApi {
    * 174 S3.1, D2): main lets this one quit or window close through.
    */
   exitApp: (kind: AppExitKind) => Promise<void>
-  pickScreenImage: () => Promise<ResourceSelection | null>
+  /** Empty when the person cancels the picker. */
+  pickScreenImages: () => Promise<ResourceSelection[]>
+  /** Files dropped from Finder or Explorer: one non-image refuses the whole drop. */
+  authorizeDroppedScreenImages: (files: File[]) => Promise<ResourceSelection[]>
+  /** A takeover batch that stopped early hands back the capabilities it never used. */
+  releaseScreenImages: (capabilityIds: string[]) => Promise<void>
   /** Assets → Banners → Import image… (plan 186): PNG, JPEG or WebP, as an
    * `input-file` capability for `banners.importImage`. */
   pickBannerImage: () => Promise<ResourceSelection | null>
@@ -9825,4 +10039,129 @@ export interface SessionSources {
     allowsNone?: boolean
     reason: string | null
   }>
+}
+
+/** Local copy of cloud program; never independent offline capture. */
+export interface CloudArchiveView {
+  id: string
+  showId: string
+  state:
+    | 'waiting'
+    | 'copying'
+    | 'finalizing'
+    | 'interrupted'
+    | 'partial'
+    | 'corrupt'
+    | 'cancelled'
+    | 'complete'
+  reason: string
+  bytes: number
+  segments: number
+  localSessionId: string | null
+}
+export interface CloudArchiveStart {
+  consent: true
+  showId: string
+  orientation: 'h' | 'v'
+  outputDirectoryCapability?: string
+  outputDirectory?: string
+  ffmpegPath?: string
+}
+
+// --- Plan 249 S22: opt-in cloud ISO ("Separate files") -----------------------
+// docs/cloud/249-s22-contract.md §5. The web's JSON passes through the
+// backend; a take's manifest stays `unknown` on the wire and the renderer
+// reads it only through `parseIsoManifest` (shared/cloud-source-iso.ts), so
+// the strict parser loads with the Guests tab and the Library, never eagerly.
+
+/** The web's `managedIsoAvailability()`: what still stands in the way. */
+export interface CloudIsoAvailability {
+  enabled: boolean
+  productionQualified: boolean
+  provider?: {
+    adapter: string
+    sdkSupport: string
+    /** Published figures (`microsPerTrackEgressMinute`, …), never a bill. */
+    facts: Record<string, string | number | boolean>
+  }
+  /** Each unmet prerequisite and its state ("not-run", "missing", …). */
+  unmet?: Record<string, string>
+}
+export interface CloudIsoRequest {
+  atMs: number
+  consentVersion: 'iso-consent-v1'
+  maxActiveEntries: number
+  maxMinutes: number
+  costCeilingMicros: number
+  /** The plan's recording retention; separate files never outlive it. */
+  retentionDays: number
+}
+export interface CloudIsoTake {
+  /** `IsoManifestV1`, validated by the backend; parse again before use. */
+  manifest: unknown
+  /** The S20 / S21c id of the take's mixed program recording. */
+  programRecordingId: string
+}
+export interface CloudIsoStatus {
+  /** The host's consent and limits; null while separate files are off. */
+  request: CloudIsoRequest | null
+  /** Guests who agreed, by room identity (`g_…`). */
+  guestConsent: Array<{ identity: string; atMs: number }>
+  /** Why the last take could not start separate files (an admission code). */
+  lastRefusal: { reason: string; atMs: number; takeId: string | null } | null
+  takes: CloudIsoTake[]
+}
+/** `cloud.iso.status`, `cloud.iso.enable` and `cloud.iso.disable`. */
+export interface CloudIsoAnswer {
+  availability: CloudIsoAvailability
+  iso: CloudIsoStatus | null
+}
+export interface CloudIsoEnableParams {
+  showId: string
+  /** Sent only from the confirmation the host checked. */
+  consent: true
+  maxActiveEntries: number
+  maxMinutes: number
+  costCeilingMicros: number
+}
+export interface CloudIsoImportParams {
+  showId: string
+  takeId: string
+  /** Output's folder as the capability main issued, like `cloud.recordings.download`. */
+  outputDirectoryCapability?: string
+  /** A raw folder: the admin role only (the smokes); refused from the renderer. */
+  outputDirectory?: string
+  ffmpegPath?: string
+}
+export type CloudIsoImportState = 'pending' | 'downloading' | 'complete' | 'failed' | 'expired'
+/** The backend's `IsoDownloadRecord` (camelCase). */
+export interface CloudIsoDownloadRecord {
+  entryId: string
+  objectKey: string
+  expectedBytes: number | null
+  state: CloudIsoImportState
+  attempts: number
+  localFileName: string
+  bytes: number | null
+  error: string | null
+}
+/** `cloud.iso.imports`: one per take this computer imported from. */
+export interface CloudIsoImportJournal {
+  showId: string
+  takeId: string
+  programRecordingId: string
+  records: CloudIsoDownloadRecord[]
+}
+/** The `cloud.iso.import` event: one file of an import job. */
+export interface CloudIsoImportEvent {
+  jobId: string
+  showId: string
+  takeId: string
+  /** Null for a job-level failure that names no file. */
+  entryId: string | null
+  state: CloudIsoImportState
+  bytes?: number | null
+  error?: string | null
+  /** The Library recording a complete file was registered as. */
+  localSessionId?: string | null
 }

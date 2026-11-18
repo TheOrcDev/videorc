@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 
+import { endTalkShowLivestream } from '@/lib/talk-show-end'
+
 import type { CloudStatus } from '@/lib/backend'
 import {
   TALK_SHOW_STREAM_URL,
@@ -153,4 +155,62 @@ it('allows each cloud output to start while only the other is running', () => {
   expect(
     talkShowStartBlockedReason(status({ live: true }), { record: false, stream: true })
   ).not.toBeNull()
+})
+
+describe('ending a talk show without stranding its broadcasts', () => {
+  it('retains the owner and completes no broadcast when legs.end fails, then retries', async () => {
+    const owner = { sessionId: 'sh_talk' }
+    let current: typeof owner | null = owner
+    const take = vi.fn(() => {
+      const value = current
+      current = null
+      return value
+    })
+    const complete = vi.fn(async () => undefined)
+    const failed = vi.fn()
+    expect(
+      await endTalkShowLivestream(
+        async () => {
+          throw new Error('503')
+        },
+        failed,
+        take,
+        complete
+      )
+    ).toBe(false)
+    expect(current).toBe(owner)
+    expect(take).not.toHaveBeenCalled()
+    expect(complete).not.toHaveBeenCalled()
+    const order: string[] = []
+    expect(
+      await endTalkShowLivestream(
+        async () => {
+          order.push('legs')
+        },
+        failed,
+        take,
+        async (claimed) => {
+          order.push('platforms')
+          expect(claimed).toBe(owner)
+        }
+      )
+    ).toBe(true)
+    expect(order).toEqual(['legs', 'platforms'])
+    expect(current).toBeNull()
+  })
+
+  it('completes broadcasts after the backend acknowledges an already-ending show', async () => {
+    const complete = vi.fn(async () => undefined)
+    const failed = vi.fn()
+    expect(
+      await endTalkShowLivestream(
+        async () => undefined,
+        failed,
+        () => 'owner',
+        complete
+      )
+    ).toBe(true)
+    expect(complete).toHaveBeenCalledWith('owner')
+    expect(failed).not.toHaveBeenCalled()
+  })
 })

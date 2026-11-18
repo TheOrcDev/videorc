@@ -60,6 +60,9 @@ export const VIDEORC_CAMERA_COPY = {
   starting: 'Starting Videorc Camera…',
   ready: 'Ready · choose Videorc Camera in the other app',
   inUse: (apps: number) => `In use by ${plural(apps, 'app')}`,
+  /** Plan 249 S23: a room's Program preview owns the camera (never the encoded stream). */
+  roomProgram: "Showing the room's Program preview",
+  roomProgramPaused: 'Room program paused',
   needsRestart: (deviceNoun: string) =>
     `Restart your ${deviceNoun} to finish installing Videorc Camera.`,
   waitingForPassword: 'Waiting for your password…',
@@ -159,6 +162,12 @@ export function virtualCameraView({
   const say = (text: string, tone: StatusTone = 'neutral', busy = false): void => {
     view.line = { text, tone, busy }
   }
+  const room =
+    status.source === 'room-program-preview'
+      ? VIDEORC_CAMERA_COPY.roomProgram
+      : status.source === 'room-program-paused'
+        ? VIDEORC_CAMERA_COPY.roomProgramPaused
+        : null
 
   if (!status.available) {
     say(
@@ -212,17 +221,20 @@ export function virtualCameraView({
         }
         break
       case 'ready':
-        say(VIDEORC_CAMERA_COPY.ready, 'good')
-        break
-      case 'streaming':
-        // D13: a platform that can't count apps (Linux) reads as ready.
         say(
-          status.viewers && status.viewers > 0
-            ? VIDEORC_CAMERA_COPY.inUse(status.viewers)
-            : VIDEORC_CAMERA_COPY.ready,
+          room ? `${room} · choose Videorc Camera in the other app` : VIDEORC_CAMERA_COPY.ready,
           'good'
         )
         break
+      case 'streaming': {
+        // D13: a platform that can't count apps (Linux) reads as ready.
+        const base =
+          status.viewers && status.viewers > 0
+            ? VIDEORC_CAMERA_COPY.inUse(status.viewers)
+            : VIDEORC_CAMERA_COPY.ready
+        say(room ? `${base} · ${room}` : base, 'good')
+        break
+      }
       case 'unavailable':
         say(
           `${VIDEORC_CAMERA_COPY.stopped} ${status.message ?? VIDEORC_CAMERA_COPY.retrying}`,

@@ -1,5 +1,29 @@
+import {
+  cloudClipsStatusSchema,
+  cloudClipJobSchema,
+  cloudClipJobsSchema,
+  cloudClipsEnableSchema,
+  type CloudClipsStatus,
+  type CloudClipJob
+} from './cloud-clips'
+import {
+  cloudMarkerCreateSchema,
+  cloudMarkerParamsSchema,
+  cloudMarkerSchema,
+  cloudMarkerLookupSchema
+} from './cloud-markers'
+import { parseGraphicsSource, type GraphicsSource } from './cloud-graphics'
+import { parseManagedOutputProfile } from './cloud-output-profile'
 import type {
+  CloudArchiveView,
+  CloudArchiveStart,
+  CloudIsoAnswer,
+  CloudIsoEnableParams,
+  CloudIsoImportEvent,
+  CloudIsoImportJournal,
+  CloudIsoImportParams,
   CloudProgram,
+  CloudOutputHealth,
   WatchdogAlert,
   WatchdogAlertDevicesView,
   WatchdogAlertsView,
@@ -119,7 +143,11 @@ import type {
   SetBuddyOverlayParams,
   ClearBuddyOverlayParams,
   CloudSettingsPatch,
+  CloudHandOffAnswer,
   CloudStatus,
+  CloudControllerFacts,
+  CloudPresentationAccepted,
+  CloudPresentationRestore,
   CloudTestParams,
   CloudGuestActParams,
   CloudGuestDecideParams,
@@ -286,6 +314,7 @@ import {
   SOUNDBOARD_VOLUME_DB_MIN
 } from './backend'
 import { isBannerFileName } from './banner-assets'
+import { parseCohostPetAnimatorEvent, type CohostPetAnimatorEvent } from './buddy-animator-public'
 import {
   CHAT_COMMAND_DESCRIPTION_MAX_CHARS,
   CHAT_COMMAND_MAX_COUNT,
@@ -515,6 +544,8 @@ export interface BackendRpcMethodMap {
   'session.stop': BackendRpcDefinition<SessionStopParams | undefined, RecordingStatus>
   'scene.get': BackendRpcDefinition<undefined, Scene>
   'scene.load_from_capture_config': BackendRpcDefinition<SceneConfigParams, SceneCommitStatus>
+  /** Plan 249 S12, renderer only: the native engine's scene for a room, never committed. */
+  'cloud.scene.resolve': BackendRpcDefinition<SceneConfigParams, Scene>
   'scene.layout.apply_preview': BackendRpcDefinition<
     SceneConfigParams & { intentId: number },
     LayoutTransactionResult
@@ -594,6 +625,46 @@ export interface BackendRpcMethodMap {
   'cloud.room.door.set': BackendRpcDefinition<{ open: boolean }, CloudStatus>
   /** A fresh 10-minute host token; renderer role only, never logged. */
   'cloud.room.token.refresh': BackendRpcDefinition<undefined, CloudRoomTokenAnswer>
+  /** Renderer-only bounded raster source for the explicitly enabled public output. */
+  'cloud.graphics.snapshot': BackendRpcDefinition<
+    { showId: string; known?: string },
+    GraphicsSource
+  >
+  /**
+   * Plan 249 S11: the room renderer asks for HTML overlay targets on the
+   * room's canvases (a 30 s lease it renews) while a program page may draw
+   * the HTML layer sheet. Never starts a capture run or recording.
+   */
+  'cloud.htmlLayers.want': BackendRpcDefinition<
+    { showId: string; want: boolean },
+    { want: boolean }
+  >
+  /** Renderer-only observation of an applied public avatar output. */
+  'buddy.cloud.report': BackendRpcDefinition<
+    { showId: string; stream: boolean; recording: boolean },
+    { accepted: boolean }
+  >
+  /** Plan 249 S24: an output view a program page applied, kept for the next controller. */
+  'cloud.presentation.accepted': BackendRpcDefinition<
+    CloudPresentationAccepted,
+    { queued: boolean }
+  >
+  /** Plan 249 S24: this controller's output flags and what it switched on. */
+  'cloud.controller.desired': BackendRpcDefinition<
+    {
+      showId: string
+      enabled?: Partial<Record<CloudControllerFacts['needsEnable'][number], boolean>>
+      outputs?: Partial<
+        Record<
+          'avatar' | 'banners' | 'chat' | 'highlight',
+          { stream?: boolean; recording?: boolean }
+        >
+      >
+    },
+    { queued: boolean }
+  >
+  /** Plan 249 S24: what the show kept, read back after this computer took it. */
+  'cloud.presentation.restore': BackendRpcDefinition<{ showId: string }, CloudPresentationRestore>
   /** The renderer's own room connection, for the status copy. */
   'cloud.room.client.report': BackendRpcDefinition<CloudRoomClientReportParams, CloudStatus>
   'cloud.guest.decide': BackendRpcDefinition<CloudGuestDecideParams, CloudStatus>
@@ -605,6 +676,54 @@ export interface BackendRpcMethodMap {
   'cloud.recording.stop': BackendRpcDefinition<undefined, CloudStatus>
   /** Plan 234 T3: the account's cloud recordings, without URLs. */
   'cloud.recordings.list': BackendRpcDefinition<undefined, CloudRecordingsList>
+  'cloud.clips.status': BackendRpcDefinition<{ showId: string }, CloudClipsStatus>
+  'cloud.clips.enable': BackendRpcDefinition<
+    {
+      showId: string
+      consent: true
+      orientation: 'h' | 'v'
+      requestId: string
+      outputDirectoryCapability?: string
+      outputDirectory?: string
+    },
+    CloudClipsStatus
+  >
+  'cloud.clips.disable': BackendRpcDefinition<
+    { showId: string; generation: string },
+    CloudClipsStatus
+  >
+  'cloud.clips.save': BackendRpcDefinition<
+    {
+      showId: string
+      generation: string
+      markerId: string
+      outputDirectoryCapability?: string
+      outputDirectory?: string
+      ffmpegPath?: string
+    },
+    CloudClipJob
+  >
+  'cloud.clips.jobs': BackendRpcDefinition<undefined, CloudClipJob[]>
+  'cloud.clips.cancel': BackendRpcDefinition<{ id: string }, { ok: true }>
+  'cloud.clips.discard': BackendRpcDefinition<{ id: string }, { ok: true }>
+  'cloud.archive.availability': BackendRpcDefinition<
+    { showId: string },
+    { available: boolean; reason: string }
+  >
+  'cloud.archive.start': BackendRpcDefinition<CloudArchiveStart, CloudArchiveView>
+  'cloud.archive.resume': BackendRpcDefinition<{ id: string }, CloudArchiveView>
+  'cloud.archive.status': BackendRpcDefinition<undefined, CloudArchiveView[]>
+  'cloud.archive.stop': BackendRpcDefinition<{ id: string }, { ok: true }>
+  'cloud.archive.cancel': BackendRpcDefinition<{ id: string }, { ok: true }>
+  'cloud.archive.discard': BackendRpcDefinition<{ id: string }, { ok: true }>
+  /** Plan 249 S22: opt-in separate files (ISO) per person and source. */
+  'cloud.iso.status': BackendRpcDefinition<{ showId: string }, CloudIsoAnswer>
+  'cloud.iso.enable': BackendRpcDefinition<CloudIsoEnableParams, CloudIsoAnswer>
+  'cloud.iso.disable': BackendRpcDefinition<{ showId: string }, CloudIsoAnswer>
+  'cloud.iso.import': BackendRpcDefinition<CloudIsoImportParams, { jobId: string }>
+  'cloud.iso.imports': BackendRpcDefinition<Record<string, never>, CloudIsoImportJournal[]>
+  'cloud.iso.cancelImport': BackendRpcDefinition<{ jobId: string }, { ok: true }>
+
   /** Plan 234 T3: a managed recording (segments) as an MP4 on this computer. */
   'cloud.recordings.download': BackendRpcDefinition<
     CloudRecordingDownloadParams,
@@ -618,6 +737,14 @@ export interface BackendRpcMethodMap {
   'cloud.show.goLive': BackendRpcDefinition<CloudTalkGoLiveParams, CloudStatus>
   /** End livestream in a talk show (D17): the legs end, the room stays. */
   'cloud.show.legs.end': BackendRpcDefinition<undefined, CloudStatus>
+  /**
+   * Plan 243 C2: stop feeding the show and keep it live for another device
+   * (D7). R2 A-M5: `confirmed` says whether videorc.com was told; the local
+   * stop happened either way. Only a refusal that stopped nothing is an error.
+   */
+  'cloud.show.handOff': BackendRpcDefinition<undefined, CloudHandOffAnswer>
+  /** Plan 243 D10: ask videorc.com for a live show now (at most once per 10 s). */
+  'cloud.show.check': BackendRpcDefinition<undefined, { ok: true }>
   // --- The stream watchdog (plan 223) ---
   'watchdog.alerts.list': BackendRpcDefinition<undefined, WatchdogAlertsView>
   'watchdog.alert.acknowledge': BackendRpcDefinition<{ id: string }, WatchdogAlertsView>
@@ -836,6 +963,44 @@ export interface BackendRpcMethodMap {
     { sessionId: string },
     ModerationOperation[]
   >
+  'cloud.marker.create': BackendRpcDefinition<
+    import('./cloud-markers').CloudMarkerCreate,
+    import('./cloud-markers').CloudMarker
+  >
+  'cloud.markers.list': BackendRpcDefinition<
+    { showId: string },
+    { markers: import('./cloud-markers').CloudMarker[]; revision: number }
+  >
+  'cloud.marker.get': BackendRpcDefinition<
+    { showId: string; markerId: string },
+    | { status: 'found'; marker: import('./cloud-markers').CloudMarker }
+    | { status: 'deleted' }
+    | { status: 'absent' }
+  >
+  'cloud.marker.delete': BackendRpcDefinition<
+    { showId: string; markerId: string },
+    { deleted: true }
+  >
+  'cloud.marker.voice.configure': BackendRpcDefinition<
+    { showId: string; consent: boolean },
+    import('./backend').CohostListening
+  >
+  'cloud.speech.overlay': BackendRpcDefinition<
+    import('./cloud-speech').CloudSpeechOverlay,
+    import('./cloud-speech').CloudSpeechOverlayResult
+  >
+  'cloud.speech.transcript': BackendRpcDefinition<
+    { showId: string },
+    import('./cloud-speech').HostTranscriptCue[]
+  >
+  'cloud.speech.sync': BackendRpcDefinition<
+    import('./cloud-speech').CloudSpeechSync,
+    import('./cloud-speech').CloudSpeechStatus
+  >
+  'cloud.speech.audio': BackendRpcDefinition<
+    import('./cloud-speech').CloudSpeechPcm,
+    import('./cloud-speech').CloudSpeechStatus
+  >
   'captions.status.get': BackendRpcDefinition<undefined, import('./backend').CaptionsStatus>
   'session.marker.voice.configure': BackendRpcDefinition<
     { sessionId: string; consent: boolean },
@@ -847,7 +1012,11 @@ export interface BackendRpcMethodMap {
   'session.marker.rename': BackendRpcDefinition<RenameMarkerParams, SessionMarker>
   'session.marker.delete': BackendRpcDefinition<MarkerParams, MarkerChanged>
   // Plan 199: an optional `{ seconds?: 30 | 60 }`; none is today's 30 s.
-  'clip.mark': BackendRpcDefinition<ClipMarkParams | undefined, ClipMarkedEvent>
+  'clip.mark': BackendRpcDefinition<
+    | (ClipMarkParams & { operationId?: string; requestId?: string; source?: 'manual' | 'remote' })
+    | undefined,
+    ClipMarkedEvent
+  >
   'clip.marks.list': BackendRpcDefinition<{ sessionId: string }, ClipMark[]>
   // --- Replay buffer (plan 181) ---
   'replay.status': BackendRpcDefinition<undefined, import('./backend').ReplayStateEvent>
@@ -895,7 +1064,10 @@ export interface BackendEventMap {
   'cloud.room.requests': CloudRoomRequest
   /** Plan 234 T3: an overlay for the host's renderer to send to the room. */
   'cloud.room.overlay': CloudRoomOverlayEvent
+  'cloud.clip.job': CloudClipJob
   'cloud.recordings.download': CloudRecordingDownloadEvent
+  /** Plan 249 S22: one file of a separate-files import job. */
+  'cloud.iso.import': CloudIsoImportEvent
   /** Plan 223: the full alert list on every change. */
   'watchdog.alerts': WatchdogAlertsView
   'cohost.report.saved': CohostReportSavedEvent
@@ -934,7 +1106,11 @@ export interface BackendEventMap {
   'cohost.pet.identity.read': BuddyPetIdentityReadEvent
   'cohost.pet.sheet.generated': BuddyPetSheetGeneratedEvent
   'cohost.pet.build.progress': BuddyPetBuildProgressEvent
+  /** Plan 249 S5: public animator inputs for a cloud output's animator twin. */
+  'cohost.pet.animator': CohostPetAnimatorEvent
   // --- end Buddy pets (plan 168, Phase F) ---
+  'cloud.marker.voice.status': { showId: string; listening: import('./backend').CohostListening }
+  'cloud.marker.created': import('./cloud-markers').CloudMarker
   'captions.status': import('./backend').CaptionsStatus
   'session.marker.voice.status': {
     sessionId: string
@@ -980,6 +1156,9 @@ const boundedBackendParamValueSchema = boundedJsonValueSchema({
 })
 const boundedBackendParamsSchema = optionalSchema(boundedBackendParamValueSchema)
 const MAX_BACKEND_WIRE_MESSAGE_CHARS = 16_000_000
+// Plan 249 S24: a kept or accepted presentation carries base64 PNGs of up to
+// 1 MiB each (the static stack's own limit), within the wire's total.
+const presentationValueSchema = boundedJsonValueSchema({ maxStringLength: 1_100_000 })
 const nonNegativeInteger = numberSchema({
   integer: true,
   min: 0,
@@ -2299,7 +2478,7 @@ const mainOwnedPreviewBoundsSchema = objectSchema(
 const mainOwnedPreviewSurfaceBoundsParamsSchema = objectSchema(
   {
     bounds: mainOwnedPreviewBoundsSchema,
-    generation: numberSchema({ integer: true, min: 0, max: Number.MAX_SAFE_INTEGER })
+    generation: numberSchema({ integer: true, min: 1, max: Number.MAX_SAFE_INTEGER })
   },
   { allowUnknown: false }
 ) as RuntimeSchema<MainOwnedPreviewSurfaceBoundsParams>
@@ -4296,6 +4475,7 @@ const chatCommandReplyFailedSchema = objectSchema(
 const screenPrivacyReasonSchema = enumSchema(['you', 'password-manager'])
 const screenPrivacySchema = objectSchema(
   {
+    generation: optionalSchema(numberSchema({ integer: true, min: 0 })),
     hidden: booleanSchema,
     since: optionalSchema(timestamp),
     reason: optionalSchema(screenPrivacyReasonSchema),
@@ -4335,7 +4515,9 @@ const virtualCameraStatusSchema = objectSchema(
     state: virtualCameraStateSchema,
     viewers: optionalSchema(numberSchema({ integer: true, min: 0 })),
     platformStep: optionalSchema(virtualCameraPlatformStepSchema),
-    message: optionalSchema(stringSchema({ minLength: 1, maxLength: 1024 }))
+    message: optionalSchema(stringSchema({ minLength: 1, maxLength: 1024 })),
+    // Plan 249 S23: only while a room's Program preview owns the camera.
+    source: optionalSchema(enumSchema(['room-program-preview', 'room-program-paused']))
   },
   { allowUnknown: false }
 ) as RuntimeSchema<VirtualCameraStatus>
@@ -4931,7 +5113,7 @@ const audioLevelsEventSchema = objectSchema(
   { allowUnknown: false }
 ) as RuntimeSchema<AudioLevelsEvent>
 
-const clipMarkedEventSchema = objectSchema(
+const nativeClipMarkedEventSchema = objectSchema(
   {
     sessionId: boundedString,
     atSeconds: numberSchema({ min: 0, max: 1_000_000_000 }),
@@ -4942,10 +5124,43 @@ const clipMarkedEventSchema = objectSchema(
   { allowUnknown: false }
 ) as RuntimeSchema<ClipMarkedEvent>
 
+const clipMarkedEventSchema = unionSchema([
+  nativeClipMarkedEventSchema,
+  objectSchema(
+    {
+      showId: boundedString,
+      markerId: boundedString,
+      atSeconds: numberSchema({ min: 0, max: 1e9 }),
+      source: clipMarkSourceSchema,
+      saved: literalSchema(true),
+      reason: literalSchema('cloud-marker-no-media')
+    },
+    { allowUnknown: false }
+  )
+])
 // Caption outage presentation uses the existing degraded state and the shared
 // service-unavailable reason. Keep every wire field explicit: main rejects
 // unknown keys on registered events, including during an outage.
-export const captionsStatusSchema = objectSchema(
+const cloudSpeechStatusSchema = objectSchema(
+  {
+    uploadAllowed: booleanSchema,
+    sourceId: nullableSchema(stringSchema({ maxLength: 160 })),
+    reason: stringSchema({ maxLength: 128 }),
+    productionQualified: literalSchema(false)
+  },
+  { allowUnknown: false }
+)
+const cloudSpeechOverlayTargetSchema = objectSchema(
+  {
+    active: booleanSchema,
+    width: nonNegativeInteger,
+    height: nonNegativeInteger,
+    revision: nonNegativeInteger,
+    styleRevision: nonNegativeInteger
+  },
+  { allowUnknown: false }
+)
+const captionsStatusSchema = objectSchema(
   {
     state: enumSchema([
       'idle',
@@ -6012,6 +6227,34 @@ const cloudProgramSchema = objectSchema(
   { allowUnknown: false }
 ) as RuntimeSchema<CloudProgram>
 
+// Plan 249 S26: open strings, as Rust keeps them: a web one release ahead
+// never breaks `cloud.state`; the renderer reads an unknown value as Unknown.
+const cloudOutputHealthWord = stringSchema({ minLength: 1, maxLength: 32 })
+const cloudOutputHealthSchema = objectSchema(
+  {
+    output: cloudOutputHealthWord,
+    orientation: cloudOutputHealthWord,
+    egress: cloudOutputHealthWord,
+    alsoRecords: optionalSchema(booleanSchema),
+    page: cloudOutputHealthWord,
+    pageAgeSeconds: optionalSchema(nonNegativeInteger),
+    joined: booleanSchema,
+    audio: cloudOutputHealthWord,
+    program: optionalSchema(cloudProgramSchema),
+    stageKey: optionalSchema(stringSchema({ minLength: 1, maxLength: 128 })),
+    faults: optionalSchema(
+      objectSchema(
+        {
+          asset: optionalSchema(nonNegativeInteger),
+          drop: optionalSchema(nonNegativeInteger)
+        },
+        { allowUnknown: false }
+      )
+    )
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<CloudOutputHealth>
+
 // --- The stream watchdog (plan 223) ---
 const WATCHDOG_CHECKS = [
   'mic-muted',
@@ -6026,7 +6269,9 @@ const WATCHDOG_CHECKS = [
   'av-drift',
   'chat-says',
   'brb-long',
-  'still-there'
+  'still-there',
+  'program-unreported',
+  'contribution-missing'
 ] as const
 const watchdogAlertSchema = objectSchema(
   {
@@ -6194,7 +6439,12 @@ const cloudRoomStatusSchema = objectSchema(
       objectSchema(
         {
           onStage: arraySchema(boundedString, { maxLength: 8 }),
-          screen: optionalSchema(boundedString)
+          screen: optionalSchema(boundedString),
+          // Plain bounded strings: a value a newer page adds never fails the
+          // status; the renderer drops what it does not know (plan 249 S6).
+          layout: optionalSchema(boundedString),
+          stageKey: optionalSchema(boundedString),
+          at: optionalSchema(boundedString)
         },
         { allowUnknown: false }
       )
@@ -6227,8 +6477,71 @@ const cloudRoomTokenAnswerSchema = objectSchema(
   { allowUnknown: false }
 ) as RuntimeSchema<CloudRoomTokenAnswer>
 
+const okTrueSchema = objectSchema({ ok: literalSchema(true) }, { allowUnknown: false })
+// Plan 243: the device on air, without its id (the backend computes `thisDevice`).
+const CONTROLLER_ENABLES = ['sounds', 'system', 'html', 'camera', 'microphone', 'screen'] as const
+const cloudControllerFactsSchema = objectSchema(
+  {
+    controllerEpoch: nonNegativeInteger,
+    takenOverFrom: optionalSchema(enumSchema(['this-device', 'another-device'])),
+    needsEnable: arraySchema(enumSchema([...CONTROLLER_ENABLES]), { maxLength: 6 }),
+    restoredViews: nonNegativeInteger,
+    cleared: arraySchema(stringSchema({ maxLength: 32 }), { maxLength: 8 }),
+    lost: optionalSchema(booleanSchema)
+  },
+  { allowUnknown: false }
+)
+
+const cloudOnAirSchema = objectSchema(
+  {
+    name: optionalSchema(stringSchema({ minLength: 1, maxLength: 128 })),
+    kind: enumSchema(['computer', 'phone', 'browser']),
+    source: enumSchema(['feed', 'camera', 'host']),
+    waiting: booleanSchema,
+    thisDevice: booleanSchema,
+    since: timestamp
+  },
+  { allowUnknown: false }
+)
+
+// Plan 249 S16: the server-owned live interval and the provider settlement
+// facts. The backend has sent both since S16; without them here the strict
+// schema refused every `cloud.status` and `cloud.state` of a show that had
+// gone live, so a relaunched Studio never saw its room open (no rejoin, no
+// room token). The settlement values stay open strings, as in the backend
+// (`CloudProviderSettlement`): a runner one release ahead must not blank the
+// whole status.
+const cloudLiveIntervalSchema = objectSchema(
+  {
+    id: boundedString,
+    requestedAt: timestamp,
+    liveSince: optionalSchema(timestamp),
+    endRequestedAt: optionalSchema(timestamp),
+    endedAt: optionalSchema(timestamp)
+  },
+  { allowUnknown: false }
+)
+const cloudSettlementWord = stringSchema({ minLength: 1, maxLength: 64 })
+const cloudProviderSettlementSchema = objectSchema(
+  {
+    destinationId: boundedString,
+    provider: cloudSettlementWord,
+    state: cloudSettlementWord,
+    attempts: nonNegativeInteger,
+    terminalReason: optionalSchema(stringSchema({ maxLength: 512 })),
+    reason: optionalSchema(stringSchema({ maxLength: 512 })),
+    order: optionalSchema(cloudSettlementWord),
+    outputStopped: optionalSchema(booleanSchema)
+  },
+  { allowUnknown: false }
+)
+
 const cloudStatusSchema = objectSchema(
   {
+    liveInterval: optionalSchema(cloudLiveIntervalSchema),
+    providerLifecycle: optionalSchema(
+      arraySchema(cloudProviderSettlementSchema, { maxLength: 32 })
+    ),
     phase: enumSchema(['off', 'connecting', 'live', 'hold', 'resuming', 'ending', 'failed']),
     entitled: booleanSchema,
     plan: optionalSchema(enumSchema(['premium', 'max'])),
@@ -6250,7 +6563,15 @@ const cloudStatusSchema = objectSchema(
           createdAt: optionalSchema(timestamp),
           expiresAt: optionalSchema(timestamp),
           resumable: booleanSchema,
-          kind: optionalSchema(enumSchema(['solo', 'talk', 'test']))
+          kind: optionalSchema(enumSchema(['solo', 'talk', 'test'])),
+          // Plan 249 S17: what each cloud output really sends.
+          outputProfile: optionalSchema(
+            runtimeSchema('a managed output profile', (value, path) => {
+              const profile = parseManagedOutputProfile(value)
+              if (!profile) throw new RuntimeSchemaError(path, 'a managed output profile')
+              return profile
+            })
+          )
         },
         { allowUnknown: false }
       )
@@ -6369,11 +6690,18 @@ const cloudStatusSchema = objectSchema(
     ),
     // Plan 223 C3: the runner's program block, every field optional.
     program: optionalSchema(cloudProgramSchema),
+    // Plan 249 S26: each program output's health, layer by layer.
+    outputHealth: optionalSchema(arraySchema(cloudOutputHealthSchema, { maxLength: 4 })),
     // Plan 222 U1: "Videorc Cloud is on" is due for this account (true or absent).
     announce: optionalSchema(booleanSchema),
     // Plan 224: the room and the cloud recording, on a talk show.
     room: optionalSchema(cloudRoomStatusSchema),
-    recording: optionalSchema(cloudRecordingStatusSchema)
+    recording: optionalSchema(cloudRecordingStatusSchema),
+    // Plan 243: who is on air, and why a stop of this computer was no end (D7).
+    onAir: optionalSchema(cloudOnAirSchema),
+    stoppedBy: optionalSchema(enumSchema(['hand-off', 'taken-over'])),
+    // Plan 249 S24: this computer as the show's controller.
+    controller: optionalSchema(cloudControllerFactsSchema)
   },
   { allowUnknown: false }
 ) as RuntimeSchema<CloudStatus>
@@ -6496,6 +6824,13 @@ const cloudRoomOverlayEventSchema = unionSchema([
 // Plan 234 T3: cloud recordings. No URL is part of either shape.
 const cloudRecordingItemSchema = objectSchema(
   {
+    associationKnown: optionalSchema(booleanSchema),
+    takeId: optionalSchema(stringSchema({ maxLength: 128 })),
+    liveIntervalIds: optionalSchema(
+      arraySchema(stringSchema({ minLength: 1, maxLength: 128 }), { maxLength: 2000 })
+    ),
+    availability: optionalSchema(stringSchema({ maxLength: 32 })),
+    localSessionId: optionalSchema(stringSchema({ maxLength: 256 })),
     id: stringSchema({ minLength: 1, maxLength: 128 }),
     showId: stringSchema({ maxLength: 64 }),
     orientation: stringSchema({ maxLength: 16 }),
@@ -6507,6 +6842,39 @@ const cloudRecordingItemSchema = objectSchema(
   },
   { allowUnknown: false }
 ) as RuntimeSchema<CloudRecordingItem>
+const cloudArchiveViewSchema = objectSchema(
+  {
+    id: boundedString,
+    showId: boundedString,
+    state: enumSchema([
+      'waiting',
+      'copying',
+      'finalizing',
+      'interrupted',
+      'partial',
+      'corrupt',
+      'cancelled',
+      'complete'
+    ]),
+    reason: boundedString,
+    bytes: nonNegativeInteger,
+    segments: nonNegativeInteger,
+    localSessionId: nullableSchema(boundedString)
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<CloudArchiveView>
+const cloudArchiveStartSchema = objectSchema(
+  {
+    consent: literalSchema(true),
+    showId: boundedString,
+    orientation: enumSchema(['h', 'v']),
+    outputDirectoryCapability: optionalSchema(boundedString),
+    outputDirectory: optionalSchema(boundedPath),
+    ffmpegPath: optionalSchema(boundedPath)
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<CloudArchiveStart>
+const cloudArchiveIdSchema = objectSchema({ id: boundedString }, { allowUnknown: false })
 const cloudRecordingsListSchema = objectSchema(
   { recordings: arraySchema(cloudRecordingItemSchema, { maxLength: 2000 }) },
   { allowUnknown: false }
@@ -6527,6 +6895,7 @@ const cloudRecordingDownloadSchema = objectSchema(
 
 const cloudRecordingDownloadEventSchema = objectSchema(
   {
+    localSessionId: optionalSchema(stringSchema({ maxLength: 256 })),
     jobId: stringSchema({ minLength: 1, maxLength: 128 }),
     recordingId: stringSchema({ minLength: 1, maxLength: 128 }),
     state: enumSchema(['running', 'done', 'failed', 'cancelled']),
@@ -6537,6 +6906,167 @@ const cloudRecordingDownloadEventSchema = objectSchema(
   },
   { allowUnknown: false }
 ) as RuntimeSchema<CloudRecordingDownloadEvent>
+
+// Plan 249 S22: separate files (ISO). docs/cloud/249-s22-contract.md §5. The
+// manifest is bounded JSON here (the backend re-validates it, and the renderer
+// parses it with `parseIsoManifest` where it is read), so the strict parser
+// stays out of the eager bundle. Everything else is closed.
+const cloudIsoShowParamsSchema = objectSchema(
+  { showId: stringSchema({ minLength: 1, maxLength: 64 }) },
+  { allowUnknown: false }
+)
+const cloudIsoAvailabilitySchema = objectSchema(
+  {
+    enabled: booleanSchema,
+    productionQualified: booleanSchema,
+    provider: optionalSchema(
+      objectSchema(
+        {
+          adapter: stringSchema({ maxLength: 128 }),
+          sdkSupport: stringSchema({ maxLength: 128 }),
+          facts: recordSchema(
+            unionSchema([
+              stringSchema({ maxLength: 512 }),
+              numberSchema({ min: 0 }),
+              booleanSchema
+            ]),
+            { maxKeys: 32 }
+          )
+        },
+        { allowUnknown: false }
+      )
+    ),
+    unmet: optionalSchema(recordSchema(stringSchema({ maxLength: 128 }), { maxKeys: 32 }))
+  },
+  { allowUnknown: false }
+)
+const cloudIsoAnswerSchema = objectSchema(
+  {
+    availability: cloudIsoAvailabilitySchema,
+    iso: nullableSchema(
+      objectSchema(
+        {
+          request: nullableSchema(
+            objectSchema(
+              {
+                atMs: positiveSafeInteger,
+                consentVersion: literalSchema('iso-consent-v1'),
+                maxActiveEntries: positiveSafeInteger,
+                maxMinutes: positiveSafeInteger,
+                costCeilingMicros: nonNegativeInteger,
+                retentionDays: positiveSafeInteger
+              },
+              { allowUnknown: false }
+            )
+          ),
+          lastRefusal: nullableSchema(
+            objectSchema(
+              {
+                reason: stringSchema({ minLength: 1, maxLength: 40 }),
+                atMs: positiveSafeInteger,
+                takeId: nullableSchema(stringSchema({ minLength: 1, maxLength: 32 }))
+              },
+              { allowUnknown: false }
+            )
+          ),
+          guestConsent: arraySchema(
+            objectSchema(
+              {
+                identity: stringSchema({ minLength: 1, maxLength: 160 }),
+                atMs: positiveSafeInteger
+              },
+              { allowUnknown: false }
+            ),
+            { maxLength: 16 }
+          ),
+          takes: arraySchema(
+            objectSchema(
+              {
+                manifest: boundedJsonValueSchema({
+                  maxDepth: 8,
+                  maxNodes: 4_000,
+                  maxStringLength: 1_024
+                }),
+                programRecordingId: stringSchema({ minLength: 1, maxLength: 128 })
+              },
+              { allowUnknown: false }
+            ),
+            { maxLength: 8 }
+          )
+        },
+        { allowUnknown: false }
+      )
+    )
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<CloudIsoAnswer>
+const cloudIsoEnableParamsSchema = objectSchema(
+  {
+    showId: stringSchema({ minLength: 1, maxLength: 64 }),
+    consent: literalSchema(true),
+    // The web's ISO_LIMITS: 12 files at once, 180 minutes, a $5 ceiling.
+    maxActiveEntries: numberSchema({ integer: true, min: 1, max: 12 }),
+    maxMinutes: numberSchema({ integer: true, min: 1, max: 180 }),
+    costCeilingMicros: numberSchema({ integer: true, min: 0, max: 5_000_000 })
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<CloudIsoEnableParams>
+const cloudIsoImportParamsSchema = objectSchema(
+  {
+    showId: stringSchema({ minLength: 1, maxLength: 64 }),
+    takeId: stringSchema({ minLength: 1, maxLength: 64 }),
+    outputDirectoryCapability: optionalSchema(boundedString),
+    outputDirectory: optionalSchema(boundedPath),
+    ffmpegPath: optionalSchema(boundedPath)
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<CloudIsoImportParams>
+const cloudIsoImportStateSchema = enumSchema([
+  'pending',
+  'downloading',
+  'complete',
+  'failed',
+  'expired'
+])
+const cloudIsoEntryIdSchema = stringSchema({ minLength: 1, maxLength: 256 })
+const cloudIsoImportJournalSchema = objectSchema(
+  {
+    showId: stringSchema({ minLength: 1, maxLength: 64 }),
+    takeId: stringSchema({ minLength: 1, maxLength: 64 }),
+    programRecordingId: stringSchema({ minLength: 1, maxLength: 128 }),
+    records: arraySchema(
+      objectSchema(
+        {
+          entryId: cloudIsoEntryIdSchema,
+          objectKey: stringSchema({ minLength: 1, maxLength: 512 }),
+          expectedBytes: nullableSchema(nonNegativeInteger),
+          state: cloudIsoImportStateSchema,
+          attempts: nonNegativeInteger,
+          localFileName: stringSchema({ minLength: 1, maxLength: 1_024 }),
+          bytes: nullableSchema(nonNegativeInteger),
+          error: nullableSchema(stringSchema({ maxLength: 4_096 }))
+        },
+        { allowUnknown: false }
+      ),
+      { maxLength: 48 }
+    )
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<CloudIsoImportJournal>
+const cloudIsoImportEventSchema = objectSchema(
+  {
+    jobId: stringSchema({ minLength: 1, maxLength: 128 }),
+    showId: stringSchema({ minLength: 1, maxLength: 64 }),
+    takeId: stringSchema({ minLength: 1, maxLength: 64 }),
+    entryId: nullableSchema(cloudIsoEntryIdSchema),
+    state: cloudIsoImportStateSchema,
+    // A Rust `Option` may arrive as null or be skipped: both are read.
+    bytes: optionalSchema(nullableSchema(nonNegativeInteger)),
+    error: optionalSchema(nullableSchema(stringSchema({ maxLength: 4_096 }))),
+    localSessionId: optionalSchema(nullableSchema(stringSchema({ maxLength: 256 })))
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<CloudIsoImportEvent>
 
 const runtimeContracts = {
   'session.sources.get': {
@@ -6804,6 +7334,7 @@ const runtimeContracts = {
     params: sceneConfigSchema,
     result: sceneCommitStatusSchema
   },
+  'cloud.scene.resolve': { params: sceneConfigSchema, result: sceneSchema },
   'scene.layout.apply_preview': {
     params: layoutTransactionParamsSchema,
     result: layoutTransactionResultSchema
@@ -7001,6 +7532,71 @@ const runtimeContracts = {
   'cloud.room.invite.rotate': { params: undefinedSchema, result: cloudStatusSchema },
   'cloud.room.door.set': { params: cloudOpenFlagSchema, result: cloudStatusSchema },
   'cloud.room.token.refresh': { params: undefinedSchema, result: cloudRoomTokenAnswerSchema },
+  'cloud.graphics.snapshot': {
+    params: objectSchema(
+      {
+        showId: stringSchema({ minLength: 1, maxLength: 128 }),
+        known: optionalSchema(stringSchema({ maxLength: 64 }))
+      },
+      { allowUnknown: false }
+    ),
+    result: runtimeSchema('a bounded public graphics snapshot', (value, path) => {
+      const result = parseGraphicsSource(value)
+      if (!result) throw new RuntimeSchemaError(path, 'a public graphics snapshot')
+      return result
+    })
+  },
+  'cloud.htmlLayers.want': {
+    params: objectSchema(
+      { showId: stringSchema({ minLength: 1, maxLength: 128 }), want: booleanSchema },
+      { allowUnknown: false }
+    ),
+    result: objectSchema({ want: booleanSchema }, { allowUnknown: false })
+  },
+  'buddy.cloud.report': {
+    params: objectSchema(
+      {
+        showId: stringSchema({ minLength: 1, maxLength: 128 }),
+        stream: booleanSchema,
+        recording: booleanSchema
+      },
+      { allowUnknown: false }
+    ),
+    result: objectSchema({ accepted: booleanSchema }, { allowUnknown: false })
+  },
+  'cloud.presentation.accepted': {
+    params: objectSchema(
+      {
+        showId: stringSchema({ minLength: 1, maxLength: 128 }),
+        topic: enumSchema(['avatar', 'static']),
+        output: enumSchema(['stream', 'recording']),
+        orientation: enumSchema(['h', 'v']),
+        publisherSid: stringSchema({ minLength: 4, maxLength: 80 }),
+        revision: nonNegativeInteger,
+        layers: arraySchema(presentationValueSchema, { maxLength: 8 })
+      },
+      { allowUnknown: false }
+    ) as RuntimeSchema<CloudPresentationAccepted>,
+    result: objectSchema({ queued: booleanSchema }, { allowUnknown: false })
+  },
+  'cloud.controller.desired': {
+    params: objectSchema(
+      {
+        showId: stringSchema({ minLength: 1, maxLength: 128 }),
+        enabled: optionalSchema(boundedBackendPayloadSchema),
+        outputs: optionalSchema(boundedBackendPayloadSchema)
+      },
+      { allowUnknown: false }
+    ) as RuntimeSchema<BackendRpcParams<'cloud.controller.desired'>>,
+    result: objectSchema({ queued: booleanSchema }, { allowUnknown: false })
+  },
+  'cloud.presentation.restore': {
+    params: objectSchema(
+      { showId: stringSchema({ minLength: 1, maxLength: 128 }) },
+      { allowUnknown: false }
+    ),
+    result: presentationValueSchema as RuntimeSchema<CloudPresentationRestore>
+  },
   'cloud.room.client.report': {
     params: cloudRoomClientReportParamsSchema,
     result: cloudStatusSchema
@@ -7011,6 +7607,82 @@ const runtimeContracts = {
   'cloud.recording.start': { params: undefinedSchema, result: cloudStatusSchema },
   'cloud.recording.stop': { params: undefinedSchema, result: cloudStatusSchema },
   'cloud.recordings.list': { params: undefinedSchema, result: cloudRecordingsListSchema },
+  'cloud.clips.status': {
+    params: objectSchema({ showId: boundedString }, { allowUnknown: false }),
+    result: cloudClipsStatusSchema
+  },
+  'cloud.clips.enable': { params: cloudClipsEnableSchema, result: cloudClipsStatusSchema },
+  'cloud.clips.disable': {
+    params: objectSchema(
+      { showId: boundedString, generation: boundedString },
+      { allowUnknown: false }
+    ),
+    result: cloudClipsStatusSchema
+  },
+  'cloud.clips.save': {
+    params: objectSchema(
+      {
+        showId: boundedString,
+        generation: boundedString,
+        markerId: boundedString,
+        outputDirectoryCapability: optionalSchema(boundedString),
+        outputDirectory: optionalSchema(boundedString),
+        ffmpegPath: optionalSchema(boundedString)
+      },
+      { allowUnknown: false }
+    ),
+    result: cloudClipJobSchema
+  },
+  'cloud.clips.jobs': { params: undefinedSchema, result: cloudClipJobsSchema },
+  'cloud.clips.cancel': { params: cloudArchiveIdSchema, result: okTrueSchema },
+  'cloud.clips.discard': { params: cloudArchiveIdSchema, result: okTrueSchema },
+  'cloud.archive.availability': {
+    params: objectSchema({ showId: boundedString }, { allowUnknown: false }),
+    result: objectSchema(
+      { available: booleanSchema, reason: boundedString },
+      { allowUnknown: false }
+    )
+  },
+  'cloud.archive.start': { params: cloudArchiveStartSchema, result: cloudArchiveViewSchema },
+  'cloud.archive.resume': { params: cloudArchiveIdSchema, result: cloudArchiveViewSchema },
+  'cloud.archive.status': {
+    params: undefinedSchema,
+    result: arraySchema(cloudArchiveViewSchema, { maxLength: 16 })
+  },
+  'cloud.archive.stop': {
+    params: cloudArchiveIdSchema,
+    result: objectSchema({ ok: literalSchema(true) }, { allowUnknown: false })
+  },
+  'cloud.archive.cancel': {
+    params: cloudArchiveIdSchema,
+    result: objectSchema({ ok: literalSchema(true) }, { allowUnknown: false })
+  },
+  'cloud.archive.discard': {
+    params: cloudArchiveIdSchema,
+    result: objectSchema({ ok: literalSchema(true) }, { allowUnknown: false })
+  },
+  'cloud.iso.status': { params: cloudIsoShowParamsSchema, result: cloudIsoAnswerSchema },
+  'cloud.iso.enable': { params: cloudIsoEnableParamsSchema, result: cloudIsoAnswerSchema },
+  'cloud.iso.disable': { params: cloudIsoShowParamsSchema, result: cloudIsoAnswerSchema },
+  'cloud.iso.import': {
+    params: cloudIsoImportParamsSchema,
+    result: objectSchema(
+      { jobId: stringSchema({ minLength: 1, maxLength: 128 }) },
+      { allowUnknown: false }
+    )
+  },
+  'cloud.iso.imports': {
+    params: objectSchema({}, { allowUnknown: false }),
+    result: arraySchema(cloudIsoImportJournalSchema, { maxLength: 64 })
+  },
+  'cloud.iso.cancelImport': {
+    params: objectSchema(
+      { jobId: stringSchema({ minLength: 1, maxLength: 128 }) },
+      { allowUnknown: false }
+    ),
+    result: okTrueSchema
+  },
+
   'cloud.recordings.download': {
     params: cloudRecordingDownloadParamsSchema,
     result: cloudRecordingDownloadSchema
@@ -7024,11 +7696,19 @@ const runtimeContracts = {
       { jobId: stringSchema({ minLength: 1, maxLength: 128 }) },
       { allowUnknown: false }
     ),
-    result: objectSchema({ ok: literalSchema(true) }, { allowUnknown: false })
+    result: okTrueSchema
   },
   'cloud.return.set': { params: cloudOpenFlagSchema, result: cloudStatusSchema },
   'cloud.show.goLive': { params: cloudTalkGoLiveParamsSchema, result: cloudStatusSchema },
   'cloud.show.legs.end': { params: undefinedSchema, result: cloudStatusSchema },
+  'cloud.show.handOff': {
+    params: undefinedSchema,
+    result: objectSchema(
+      { ok: literalSchema(true), confirmed: booleanSchema },
+      { allowUnknown: false }
+    ) as RuntimeSchema<CloudHandOffAnswer>
+  },
+  'cloud.show.check': { params: undefinedSchema, result: okTrueSchema },
   // --- The stream watchdog (plan 223) ---
   'watchdog.alerts.list': { params: undefinedSchema, result: watchdogAlertsViewSchema },
   'watchdog.alert.acknowledge': {
@@ -7245,6 +7925,121 @@ const runtimeContracts = {
     params: objectSchema({ sessionId: boundedString }, { allowUnknown: false }),
     result: arraySchema(moderationOperationSchema, { maxLength: 200 })
   },
+  'cloud.marker.create': { params: cloudMarkerCreateSchema, result: cloudMarkerSchema },
+  'cloud.markers.list': {
+    params: objectSchema({ showId: boundedString }, { allowUnknown: false }),
+    result: objectSchema(
+      {
+        markers: arraySchema(cloudMarkerSchema, { maxLength: 2000 }),
+        revision: nonNegativeInteger
+      },
+      { allowUnknown: false }
+    )
+  },
+  'cloud.marker.get': { params: cloudMarkerParamsSchema, result: cloudMarkerLookupSchema },
+  'cloud.marker.delete': {
+    params: cloudMarkerParamsSchema,
+    result: objectSchema({ deleted: literalSchema(true) }, { allowUnknown: false })
+  },
+  'cloud.marker.voice.configure': {
+    params: objectSchema(
+      { showId: boundedString, consent: booleanSchema },
+      { allowUnknown: false }
+    ),
+    result: cohostListeningSchema
+  },
+  'cloud.speech.overlay': {
+    params: objectSchema(
+      {
+        sessionClientId: stringSchema({ minLength: 1, maxLength: 160 }),
+        expiresAt: numberSchema({ integer: true, min: 1, max: Number.MAX_SAFE_INTEGER }),
+        stream: booleanSchema,
+        recording: booleanSchema,
+        frame: objectSchema(
+          {
+            pngBase64: stringSchema({ minLength: 4, maxLength: 1024 * 1024 }),
+            position: enumSchema(['top', 'bottom']),
+            rect: optionalSchema(overlayRectSchema),
+            target: enumSchema(['primary', 'auxiliary']),
+            styleRevision: nonNegativeInteger
+          },
+          { allowUnknown: false }
+        )
+      },
+      { allowUnknown: false }
+    ),
+    result: objectSchema(
+      {
+        active: booleanSchema,
+        primary: cloudSpeechOverlayTargetSchema,
+        auxiliary: cloudSpeechOverlayTargetSchema
+      },
+      { allowUnknown: false }
+    )
+  },
+  'cloud.speech.transcript': {
+    params: objectSchema(
+      { showId: stringSchema({ minLength: 1, maxLength: 160 }) },
+      { allowUnknown: false }
+    ),
+    result: arraySchema(
+      objectSchema(
+        {
+          sourceId: boundedString,
+          speechSessionId: boundedString,
+          seq: nonNegativeInteger,
+          offsetSeconds: numberSchema({ min: 0 }),
+          durationSeconds: numberSchema({ min: 0 }),
+          text: boundedString,
+          clockBasis: literalSchema('processed-host-source'),
+          clock: objectSchema(
+            {
+              basis: literalSchema('show-created-at-wall-estimate'),
+              showCreatedAt: nullableSchema(boundedString),
+              sourceObservedAt: boundedString,
+              showOffsetSeconds: nullableSchema(numberSchema({ min: 0 })),
+              uncertaintyMs: literalSchema(null)
+            },
+            { allowUnknown: false }
+          )
+        },
+        { allowUnknown: false }
+      ),
+      { maxLength: 1000 }
+    )
+  },
+  'cloud.speech.sync': {
+    params: objectSchema(
+      {
+        showId: stringSchema({ minLength: 1, maxLength: 160 }),
+        sourceId: stringSchema({ minLength: 1, maxLength: 160 }),
+        generation: numberSchema({ integer: true, min: 1, max: Number.MAX_SAFE_INTEGER }),
+        published: booleanSchema,
+        muted: booleanSchema
+      },
+      { allowUnknown: false }
+    ),
+    result: cloudSpeechStatusSchema
+  },
+  'cloud.speech.audio': {
+    params: objectSchema(
+      {
+        sourceId: stringSchema({ minLength: 1, maxLength: 160 }),
+        sequence: numberSchema({ integer: true, min: 1, max: Number.MAX_SAFE_INTEGER }),
+        sampleRate: numberSchema({ integer: true, min: 16000, max: 48000 }),
+        samples: runtimeSchema('bounded nonempty host PCM', (value, path) => {
+          const samples = arraySchema(numberSchema({ min: -1, max: 1 }), { maxLength: 4800 }).parse(
+            value,
+            path
+          )
+          if (!samples.length) throw new RuntimeSchemaError(path, 'nonempty host PCM')
+          return samples
+        })
+      },
+      { allowUnknown: false }
+    ),
+    result: cloudSpeechStatusSchema
+  },
   'captions.status.get': { params: undefinedSchema, result: captionsStatusSchema },
   'session.marker.voice.configure': {
     params: objectSchema(
@@ -7258,7 +8053,22 @@ const runtimeContracts = {
   'session.marker.get': { params: markerParamsSchema, result: markerLookupSchema },
   'session.marker.rename': { params: renameMarkerParamsSchema, result: sessionMarkerSchema },
   'session.marker.delete': { params: markerParamsSchema, result: markerChangedSchema },
-  'clip.mark': { params: clipLengthParamsSchema, result: clipMarkedEventSchema },
+  'clip.mark': {
+    params: optionalSchema(
+      nullableSchema(
+        objectSchema(
+          {
+            seconds: optionalSchema(unionSchema([literalSchema(30), literalSchema(60)])),
+            operationId: optionalSchema(stringSchema({ minLength: 36, maxLength: 36 })),
+            requestId: optionalSchema(stringSchema({ minLength: 1, maxLength: 160 })),
+            source: optionalSchema(enumSchema(['manual', 'remote']))
+          },
+          { allowUnknown: false }
+        )
+      )
+    ),
+    result: clipMarkedEventSchema
+  },
   'clip.marks.list': {
     params: objectSchema({ sessionId: boundedString }, { allowUnknown: false }),
     result: arraySchema(clipMarkSchema, { maxLength: 10_000 })
@@ -7391,7 +8201,9 @@ const runtimeEventSchemas = {
   'cloud.state': cloudStatusSchema,
   'cloud.room.requests': cloudRoomRequestSchema,
   'cloud.room.overlay': cloudRoomOverlayEventSchema,
+  'cloud.clip.job': cloudClipJobSchema,
   'cloud.recordings.download': cloudRecordingDownloadEventSchema,
+  'cloud.iso.import': cloudIsoImportEventSchema,
   'watchdog.alerts': watchdogAlertsViewSchema,
   'cohost.report.saved': cohostReportSavedEventSchema,
   'cohost.community.changed': communitySummarySchema,
@@ -7425,7 +8237,20 @@ const runtimeEventSchemas = {
   'cohost.pet.identity.read': buddyPetIdentityReadEventSchema,
   'cohost.pet.sheet.generated': buddyPetSheetGeneratedEventSchema,
   'cohost.pet.build.progress': buddyPetBuildProgressEventSchema,
+  'cohost.pet.animator': runtimeSchema<CohostPetAnimatorEvent>(
+    'a public avatar animator event',
+    (value, path) => {
+      const parsed = parseCohostPetAnimatorEvent(value)
+      if (!parsed) throw new RuntimeSchemaError(path, 'a public avatar animator event')
+      return parsed
+    }
+  ),
   // --- end Buddy pets (plan 168, Phase F) ---
+  'cloud.marker.voice.status': objectSchema(
+    { showId: stringSchema(), listening: cohostListeningSchema },
+    { allowUnknown: false }
+  ),
+  'cloud.marker.created': cloudMarkerSchema,
   'captions.status': captionsStatusSchema,
   'session.marker.voice.status': objectSchema(
     { sessionId: boundedString, listening: cohostListeningSchema },

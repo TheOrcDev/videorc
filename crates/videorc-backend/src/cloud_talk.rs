@@ -255,6 +255,13 @@ pub struct RunnerRoomState {
 
 /// `state.room.shown` and `CloudRoomStatus.shown` (review M2): the people
 /// the program's layout drew, in stage order, and whose screen it showed.
+///
+/// Plan 249 S6, all optional and absent from a runner or an older program
+/// page: `layout` drawn, `stage_key` of the stage the page applied, and `at`,
+/// when its report arrived. The renderer compares the key with the stage it
+/// sent; the backend passes them through and never claims an applied stage.
+/// Plain strings, so a layout a newer page adds can never fail the status
+/// (the renderer drops what it does not know).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct CloudRoomShown {
@@ -262,6 +269,12 @@ pub struct CloudRoomShown {
     pub on_stage: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub screen: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layout: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stage_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -396,6 +409,10 @@ pub enum CloudGuestDevice {
     #[default]
     Computer,
 }
+
+/// Plan 243 C5: sent only after DUPLICATE_IDENTITY and onAir confirmation.
+/// Keep in step with the renderer's talk-show-room.ts (never a device name).
+pub(crate) const TAKEN_OVER_DETAIL: &str = "Your show continues on another device.";
 
 /// The renderer's own room connection, as it reports it
 /// (`cloud.room.client.report`): the Studio's copy and the watchdog read it.
@@ -1103,6 +1120,7 @@ pub(crate) struct TalkShowState {
     /// Plan 234 (web control): the overlays that are up, one per slot and
     /// orientation, with their bytes. Empty on a node show.
     pub(crate) overlays: Vec<StoredOverlay>,
+    pub(crate) avatar_applied: Option<(std::time::Instant, bool, bool)>,
 }
 
 impl std::fmt::Debug for TalkShowState {
@@ -1150,6 +1168,7 @@ impl TalkShowState {
             poll_generation: 0,
             seen_requests: HashSet::new(),
             overlays: Vec::new(),
+            avatar_applied: None,
         }
     }
 
@@ -1215,11 +1234,48 @@ impl CloudShowRuntime {
         })
     }
 
-    /// Plan 224 C-G7: the show id while the room is open and on air (its
-    /// destinations were handed over): cards and takeovers go to the runner.
-    pub fn talk_show_live_show_id(&self) -> Option<String> {
+    /// S4: a local preview is never evidence that a cloud output can show a
+    /// generated bubble. Renderer reports expire and are reset on room loss.
+    pub fn room_avatar_visible(&self, stream: bool, recording: bool) -> Option<bool> {
+        self.talk_show_room_show_id()?;
         let talk = self.talk.as_ref()?;
-        if talk.phase != CloudRoomPhase::Open || !talk.live {
+        let visible = talk
+            .avatar_applied
+            .is_some_and(|(at, on_stream, in_recording)| {
+                avatar_observation_visible(
+                    at.elapsed(),
+                    (stream, recording),
+                    (on_stream, in_recording),
+                    (
+                        talk.live,
+                        self.runner
+                            .as_ref()
+                            .and_then(|runner| runner.recording.as_ref())
+                            .is_some_and(|r| r.active),
+                    ),
+                )
+            });
+        Some(visible && talk.client == CloudRoomClientState::Connected)
+    }
+
+    pub fn report_room_avatar(&mut self, show_id: &str, stream: bool, recording: bool) -> bool {
+        if self.talk_show_room_show_id().as_deref() != Some(show_id) {
+            return false;
+        }
+        if let Some(talk) = self.talk.as_mut() {
+            talk.avatar_applied = Some((std::time::Instant::now(), stream, recording));
+        }
+        true
+    }
+
+    /// The show id while the room is open, on air or not. A takeover goes to
+    /// the room from here: put up before Go Live, it is already on the
+    /// program when the first leg starts (a managed program page that joins
+    /// later gets it again through `resend_untimed_overlays`; a node keeps it
+    /// for its runner).
+    pub fn talk_show_room_show_id(&self) -> Option<String> {
+        let talk = self.talk.as_ref()?;
+        if talk.phase != CloudRoomPhase::Open {
             return None;
         }
         self.show.as_ref().map(|show| show.record.id.clone())
@@ -1341,6 +1397,56 @@ async fn within_room_budget<T>(
 // Only local preparation gets this bound; node create/socket timing is unchanged.
 const ROOM_PREPARE_BUDGET: Duration = Duration::from_secs(1);
 
+/// Plan 249 S17: refuse what a cloud room can't send before the camera is
+/// lent or anything is created (mirrors `shared/cloud-output-profile.ts`
+/// `managedOutputProblem`; the web refuses the same). Above 1080p nothing is
+/// measured, so it is refused, never sent as 1080p under that claim. A 60 fps
+/// or higher-bitrate request is admitted and disclosed in the profile.
+fn validate_room_outputs(outputs: &[crate::cloud_show::CloudTestOutput]) -> Result<()> {
+    use crate::streaming::StreamOutputOrientation;
+    if outputs.is_empty()
+        || outputs.len() > 2
+        || (outputs.len() == 2 && outputs[0].orientation == outputs[1].orientation)
+    {
+        bail!("Choose one output per orientation before opening the room.");
+    }
+    for output in outputs {
+        let (width, height) = match output.orientation {
+            StreamOutputOrientation::Horizontal => (1920_u32, 1080_u32),
+            StreamOutputOrientation::Vertical => (1080_u32, 1920_u32),
+        };
+        if output.width == 0 || output.height == 0 || output.fps == 0 || output.video_kbps == 0 {
+            bail!("Cloud room outputs need a size, a frame rate and a bitrate.");
+        }
+        if u64::from(output.width) * u64::from(height)
+            != u64::from(output.height) * u64::from(width)
+        {
+            match output.orientation {
+                StreamOutputOrientation::Horizontal => {
+                    bail!("A horizontal cloud output must be 16:9.")
+                }
+                StreamOutputOrientation::Vertical => bail!("A vertical cloud output must be 9:16."),
+            }
+        }
+        if output.width > width || output.height > height {
+            let label = if output.width.max(output.height) <= 2560 {
+                "1440p"
+            } else if output.width.max(output.height) <= 3840 {
+                "4K"
+            } else {
+                "This size"
+            };
+            bail!(
+                "Cloud talk shows send 1080p. {label} hasn't been measured on cloud outputs yet, so it can't be used. Choose 1080p or lower for the room, or stream directly."
+            );
+        }
+        if output.fps > 60 {
+            bail!("Cloud talk shows send at most 60 fps.");
+        }
+    }
+    Ok(())
+}
+
 impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
     fn return_room_camera_in_background(&self) -> tokio::task::JoinHandle<()> {
         let camera = self.hooks.camera.clone();
@@ -1443,6 +1549,15 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
         params: RoomOpenParams,
         session_active: bool,
     ) -> Result<CloudStatus> {
+        let _opening = lock(&self.slot)
+            .room_open_gate
+            .clone()
+            .try_lock_owned()
+            .map_err(|_| {
+                RoomOpenRefusal::CameraBusy(
+                    "A room is already opening. Try again when it finishes.".into(),
+                )
+            })?;
         let started = tokio::time::Instant::now();
         let Some(bearer) = bearer else {
             return Err(RoomOpenRefusal::SignedOut.into());
@@ -1468,6 +1583,7 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
                 return Err(RoomOpenRefusal::SessionActive.into());
             }
         }
+        validate_room_outputs(&params.outputs)?;
         // These local steps precede provider selection. If they stall, no
         // create starts; returning the camera cannot extend the RPC deadline.
         match tokio::time::timeout_at(started + ROOM_PREPARE_BUDGET, async {
@@ -1491,6 +1607,7 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
         let hold_max_seconds = lock(&self.slot).settings.hold_max_seconds;
         let platforms = params.platforms.clone().unwrap_or_default();
         let request = CreateShowRequest {
+            device: self.request_device().await,
             kind: "talk".to_string(),
             outputs,
             hold_max_seconds,
@@ -1580,6 +1697,7 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
             let mut runtime = lock(&self.slot);
             runtime.failed = None;
             runtime.fallback = None;
+            runtime.stopped_by = None;
             runtime.show = Some(ActiveShow {
                 record: created.show.clone(),
                 control: created.control.clone(),
@@ -1639,7 +1757,17 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
         }
         self.hooks.emit_from(&self.slot);
         let status = self.end_current_show(bearer).await;
-        self.forget_talk_show().await;
+        match &status {
+            Ok(confirmed) if !matches!(confirmed.phase, crate::cloud_show::CloudPhase::Ending) => {
+                self.forget_talk_show().await
+            }
+            _ => {
+                if let Some(talk) = lock(&self.slot).talk.as_mut() {
+                    talk.phase = CloudRoomPhase::Open;
+                }
+                self.hooks.emit_from(&self.slot);
+            }
+        }
         status
     }
 
@@ -1648,6 +1776,9 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
     pub(crate) async fn forget_talk_show(&self) {
         let held = lock(&self.slot).talk.take().is_some();
         if held {
+            // Release the renderer's host tracks before the native preview
+            // takes the camera back (also used by hand-off, without Close).
+            self.hooks.emit_from(&self.slot);
             if let Err(message) = (self.hooks.camera)(CameraHandover::Return).await {
                 tracing::warn!("The talk show could not return the camera: {message}");
             }
@@ -1941,6 +2072,11 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
         destinations: Vec<HandoverDestination>,
         platforms: Vec<String>,
     ) -> Result<CloudStatus> {
+        if lock(&self.slot).live_elsewhere() {
+            return Err(crate::cloud_show::cloud_refusal(
+                "cloud-show-live-elsewhere",
+            ));
+        }
         let deadline = self.room_rpc_deadline();
         let bearer = bearer_or_bail(bearer)?;
         let show_id = self.open_room_show_id()?;
@@ -1995,6 +2131,10 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
     /// silent runner is reported with its reason; nothing else changes.
     pub async fn legs_end(&self) -> Result<CloudStatus> {
         self.open_room_show_id()?;
+        // Stop recovery before sending End, even if its answer is lost.
+        // The retained destination list still travels on a retry; legs.end
+        // does not use the generation admission gate. Re-enabling recovery
+        // on failure could restart a stream whose stop actually succeeded.
         lock(&self.slot).destinations_generation.stop();
         let tx = self.control_tx().map_err(anyhow::Error::msg)?;
         let id = new_intent_id();
@@ -2013,6 +2153,13 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
             }
         }
         match tx.intent(frame, id, ACK_TIMEOUT).await {
+            Ok(Some(answer))
+                if answer.get("ending").and_then(serde_json::Value::as_bool) == Some(true) =>
+            {
+                bail!(
+                    "Videorc Cloud is still stopping the show. Wait for it to finish before completing the broadcast."
+                );
+            }
             Ok(_) => {
                 let mut runtime = lock(&self.slot);
                 if let Some(show) = runtime.show.as_mut() {
@@ -2095,14 +2242,51 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
     /// The renderer's own room connection, for the status (and the watchdog).
     pub fn report_client(&self, params: RoomClientReportParams) -> CloudStatus {
         let connected = params.state == CloudRoomClientState::Connected;
-        {
+        let taken_over = {
             let mut runtime = lock(&self.slot);
+            // host/go is before the new host joins. Only the renderer's
+            // confirmed duplicate-host report may release our own seat.
+            let taken_over = (params.state == CloudRoomClientState::Disconnected
+                && params.detail.as_deref() == Some(TAKEN_OVER_DETAIL)
+                && runtime.talk.is_some()
+                && runtime
+                    .runner
+                    .as_ref()
+                    .and_then(|r| r.on_air.as_ref())
+                    .is_some_and(|air| {
+                        !air.waiting
+                            && air
+                                .device_id
+                                .as_deref()
+                                .is_some_and(|id| id != runtime.device.id)
+                    }))
+            .then(|| runtime.show.as_ref().map(|show| show.record.id.clone()))
+            .flatten();
+            if taken_over.is_some() {
+                runtime.stopped_by = Some(crate::cloud_show::CloudStoppedBy::TakenOver);
+                runtime.destinations_generation.stop();
+                runtime.failed = None;
+            }
             if let Some(talk) = runtime.talk.as_mut() {
                 talk.client = params.state;
-                talk.message = params.detail.filter(|detail| !detail.trim().is_empty());
+                if !connected {
+                    talk.avatar_applied = None;
+                }
+                talk.message = params.detail.filter(|detail| {
+                    !detail.trim().is_empty() && !detail.contains("DUPLICATE_IDENTITY")
+                });
             }
-        }
+            taken_over
+        };
         self.hooks.emit_from(&self.slot);
+        if let Some(show_id) = taken_over {
+            let context = self.clone();
+            tokio::spawn(async move {
+                let _ = context
+                    .stop_for_continuation(&show_id, crate::cloud_show::CloudStoppedBy::TakenOver)
+                    .await;
+            });
+        }
         // Plan 234 (6.3): a renderer whose room connection just came up
         // sent nothing while it was away; what is up goes again.
         if connected {
@@ -2240,6 +2424,15 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
     /// the show resumable, or forgets it when the node or the web says it
     /// is over.
     pub async fn resume_room(&self, bearer: Option<String>) -> Result<CloudStatus> {
+        let _opening = lock(&self.slot)
+            .room_open_gate
+            .clone()
+            .try_lock_owned()
+            .map_err(|_| {
+                RoomOpenRefusal::CameraBusy(
+                    "A room is already opening. Try again when it finishes.".into(),
+                )
+            })?;
         let deadline = self.room_rpc_deadline();
         let bearer = bearer_or_bail(bearer)?;
         let (show_id, held_room, uncontrolled) = {
@@ -2271,6 +2464,9 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
                     .await
                     .map_err(anyhow::Error::msg)??;
             }
+            if lock(&self.slot).air_names_another_device() {
+                self.claim_talk_host(&bearer, &show_id, deadline).await?;
+            }
             return Ok(lock(&self.slot).status());
         }
         if let Err(message) = (self.hooks.camera)(CameraHandover::Lend).await {
@@ -2291,6 +2487,12 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
                     .map_err(anyhow::Error::msg)
                     .and_then(|answer| answer)
         {
+            let _ = (self.hooks.camera)(CameraHandover::Return).await;
+            return Err(error);
+        }
+        // Claim only when all local prerequisites succeeded: a phone may
+        // leave as soon as host/go names this computer.
+        if let Err(error) = self.claim_talk_host(&bearer, &show_id, deadline).await {
             let _ = (self.hooks.camera)(CameraHandover::Return).await;
             return Err(error);
         }
@@ -2315,6 +2517,7 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
             talk.poll_generation = runtime.generation + 1;
             let generation = talk.poll_generation;
             runtime.talk = Some(talk);
+            runtime.stopped_by = None;
             // The stage the program has (H2): the host and whoever the
             // runner still flags on stage, never the host alone over guests.
             runtime.talk_layout_from_runner();
@@ -2331,6 +2534,53 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
         self.spawn_guests_poll(bearer, show_id, generation);
         self.hooks.emit_from(&self.slot);
         Ok(lock(&self.slot).status())
+    }
+
+    pub(crate) async fn claim_talk_host(
+        &self,
+        bearer: &str,
+        show_id: &str,
+        deadline: Option<tokio::time::Instant>,
+    ) -> Result<()> {
+        let (managed, generation) = {
+            let runtime = lock(&self.slot);
+            let show = runtime
+                .show
+                .as_ref()
+                .filter(|show| show.record.id == show_id)
+                .ok_or_else(|| crate::cloud_show::cloud_refusal("cloud-nothing-to-resume"))?;
+            (
+                show.control.transport_kind() == ControlKind::Web,
+                runtime.generation,
+            )
+        };
+        if !managed {
+            return Ok(());
+        }
+        let device = self.device().await;
+        let answer = within_room_budget(
+            deadline,
+            self.web.on_air(bearer, show_id, &device, "host", "go"),
+        )
+        .await
+        .map_err(anyhow::Error::msg)?
+        .map_err(anyhow::Error::new)?;
+        let mut runtime = lock(&self.slot);
+        if runtime.generation != generation
+            || runtime
+                .show
+                .as_ref()
+                .is_none_or(|show| show.record.id != show_id)
+        {
+            return Err(crate::cloud_show::cloud_refusal("cloud-nothing-to-resume"));
+        }
+        if let Some(ControlHandle::Web(tx)) = runtime.control_tx.as_ref() {
+            tx.observe_revision(answer.rev);
+        }
+        if let Some(state) = runtime.runner.as_mut() {
+            state.on_air = answer.on_air;
+        }
+        Ok(())
     }
 
     /// Review M1: the resume's own control socket, the way the solo resume
@@ -2568,9 +2818,133 @@ pub(crate) fn open_talk_show_for_tests(
     rx
 }
 
+fn avatar_observation_visible(
+    age: std::time::Duration,
+    enabled: (bool, bool),
+    applied: (bool, bool),
+    running: (bool, bool),
+) -> bool {
+    age < std::time::Duration::from_secs(15)
+        && ((enabled.0 && applied.0 && running.0) || (enabled.1 && applied.1 && running.1))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn room_output(
+        orientation: crate::streaming::StreamOutputOrientation,
+        width: u32,
+        height: u32,
+        fps: u32,
+        video_kbps: u32,
+    ) -> crate::cloud_show::CloudTestOutput {
+        crate::cloud_show::CloudTestOutput {
+            orientation,
+            width,
+            height,
+            fps,
+            video_kbps,
+        }
+    }
+
+    #[test]
+    fn room_outputs_refuse_unmeasured_sizes_and_admit_disclosed_ones() {
+        use crate::streaming::StreamOutputOrientation::{Horizontal, Vertical};
+        // 1080p30 and 720p, 60 fps and 8 Mbps are admitted: the profile
+        // discloses the 30 fps picture and the 6 Mbps it really sends.
+        assert!(validate_room_outputs(&[room_output(Horizontal, 1920, 1080, 30, 6000)]).is_ok());
+        assert!(validate_room_outputs(&[room_output(Horizontal, 1280, 720, 60, 8000)]).is_ok());
+        assert!(
+            validate_room_outputs(&[
+                room_output(Horizontal, 1920, 1080, 30, 6000),
+                room_output(Vertical, 1080, 1920, 30, 6000),
+            ])
+            .is_ok()
+        );
+        // Above 1080p is refused with its name, never sent as 1080p.
+        let four_k = validate_room_outputs(&[room_output(Horizontal, 3840, 2160, 30, 20000)])
+            .unwrap_err()
+            .to_string();
+        assert!(four_k.contains("4K"), "{four_k}");
+        let qhd = validate_room_outputs(&[room_output(Horizontal, 2560, 1440, 60, 9000)])
+            .unwrap_err()
+            .to_string();
+        assert!(qhd.contains("1440p"), "{qhd}");
+        assert!(validate_room_outputs(&[room_output(Horizontal, 1920, 1080, 120, 6000)]).is_err());
+        assert!(validate_room_outputs(&[room_output(Vertical, 1920, 1080, 30, 6000)]).is_err());
+        assert!(validate_room_outputs(&[]).is_err());
+        assert!(
+            validate_room_outputs(&[
+                room_output(Horizontal, 1920, 1080, 30, 6000),
+                room_output(Horizontal, 1280, 720, 30, 3000),
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn a_managed_output_profile_passes_through_whole() {
+        let wire = serde_json::json!({
+            "version": 1,
+            "requested": [{ "orientation": "horizontal", "width": 1920, "height": 1080, "fps": 60, "videoKbps": 8000, "audioKbps": 160 }],
+            "effective": [{ "orientation": "horizontal", "width": 1920, "height": 1080, "fps": 60, "pictureFps": 30, "videoKbps": 6000, "audioKbps": 160, "differences": ["fps", "bitrate"] }],
+            "qualification": "phase0-1080p30-picture",
+            "higherProfilesQualified": false,
+            "pricePerHour": null,
+            "maxProgramEgresses": 2
+        });
+        let profile: crate::cloud_show::ManagedOutputProfile =
+            serde_json::from_value(wire.clone()).expect("profile");
+        assert_eq!(serde_json::to_value(&profile).expect("json"), wire);
+    }
+
+    #[test]
+    fn avatar_spend_needs_fresh_enabled_applied_running_output() {
+        let fresh = std::time::Duration::from_secs(1);
+        assert!(avatar_observation_visible(
+            fresh,
+            (true, false),
+            (true, false),
+            (true, false)
+        ));
+        assert!(avatar_observation_visible(
+            fresh,
+            (false, true),
+            (false, true),
+            (false, true)
+        ));
+        assert!(!avatar_observation_visible(
+            fresh,
+            (true, true),
+            (true, true),
+            (false, false)
+        ));
+        assert!(!avatar_observation_visible(
+            fresh,
+            (false, false),
+            (true, true),
+            (true, true)
+        ));
+        assert!(!avatar_observation_visible(
+            fresh,
+            (true, true),
+            (false, false),
+            (true, true)
+        ));
+        assert!(!avatar_observation_visible(
+            fresh,
+            (true, false),
+            (false, true),
+            (true, true)
+        ));
+        assert!(!avatar_observation_visible(
+            std::time::Duration::from_secs(15),
+            (true, true),
+            (true, true),
+            (true, true)
+        ));
+    }
 
     fn decode(base64_png: &str) -> image::RgbaImage {
         use base64::Engine as _;

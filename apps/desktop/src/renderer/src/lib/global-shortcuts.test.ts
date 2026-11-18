@@ -259,7 +259,7 @@ describe('GlobalShortcutsRegistrar conflicts', () => {
       const [title, options] = vi.mocked(toast.warning).mock.calls[0] ?? []
       expect(title).toBe("Global shortcuts don't work here")
       expect(options?.description).toBe(unavailable)
-      expect((options?.action as { label: string }).label).toBe('Open Shortcuts')
+      expect((options!.action as { label: string }).label).toBe('Open Shortcuts')
       expect(toast.error).not.toHaveBeenCalled()
     } finally {
       vi.unstubAllGlobals()
@@ -278,4 +278,24 @@ it('dispatches saved-scene keys through the scene handler', () => {
     switchLayout
   })
   expect(switchLayout).toHaveBeenCalledWith('scene:figma')
+})
+
+it('keeps the cloud record and live keys independent', () => {
+  const context = {
+    sessionActive: true,
+    recordingActive: true,
+    liveActive: true,
+    startRecording: vi.fn(async () => true),
+    startLivestream: vi.fn(async () => true),
+    stopSession: vi.fn(async () => true),
+    stopRecording: vi.fn(async () => true),
+    toggleMicrophoneMute: vi.fn()
+  }
+  executeGlobalShortcut('record-toggle', context)
+  expect(context.stopRecording).toHaveBeenCalledOnce()
+  expect(context.stopSession).not.toHaveBeenCalled()
+  executeGlobalShortcut('stream-toggle', context)
+  expect(context.stopSession).toHaveBeenCalledOnce()
+  executeGlobalShortcut('record-toggle', { ...context, recordingActive: false })
+  expect(context.startRecording).toHaveBeenCalledOnce()
 })

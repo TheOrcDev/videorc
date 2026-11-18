@@ -3,6 +3,7 @@ import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 const providerState = vi.hoisted(() => ({
+  roomOpen: false,
   microphoneMuted: false,
   sessionActive: false,
   sourcePending: null as 'microphone' | null,
@@ -15,6 +16,9 @@ const providerState = vi.hoisted(() => ({
 
 vi.mock('@/hooks/use-document-visible', () => ({ useDocumentVisible: () => true }))
 vi.mock('@/hooks/use-studio', () => ({
+  useStudioCloud: () => ({
+    cloudStatus: providerState.roomOpen ? { room: { phase: 'open' } } : null
+  }),
   useStudioCore: () => ({
     captureConfig: {
       audio: { microphoneMuted: providerState.microphoneMuted, microphoneGainDb: 0 }
@@ -58,6 +62,7 @@ describe('StudioMicVisualProvider', () => {
     }
     restoreEnvironment?.()
     restoreEnvironment = undefined
+    providerState.roomOpen = false
     providerState.microphoneMuted = false
     providerState.sessionActive = false
     providerState.sourcePending = null
@@ -91,6 +96,27 @@ describe('StudioMicVisualProvider', () => {
         await Promise.resolve()
       })
     }
+
+    it('a room owner prevents warm and visual capture even with visible demand', async () => {
+      const environment = installBrowserAudioEnvironment()
+      restoreEnvironment = environment.restore
+      providerState.microphoneId = 'microphone:coreaudio:42'
+      providerState.roomOpen = true
+      await renderProvider(environment, true)
+      expect(providerState.armWarmMicrophone).not.toHaveBeenCalled()
+      await act(async () => {
+        root!.render(
+          createElement(StudioMicVisualProvider, {
+            enabled: true,
+            children: createElement(VisualConsumer, {
+              onLifecycle: (active) => expect(active).toBe(false)
+            })
+          })
+        )
+        await Promise.resolve()
+      })
+      expect(environment.getUserMedia).not.toHaveBeenCalled()
+    })
 
     it('arms a CoreAudio microphone while Studio is visible and releases it when it leaves', async () => {
       const environment = installBrowserAudioEnvironment()
@@ -137,6 +163,7 @@ describe('StudioMicVisualProvider', () => {
         () => (providerState.keepMicrophoneWarm = false),
         () => (providerState.microphoneId = 'microphone:avfoundation:0')
       ]) {
+        providerState.roomOpen = false
         providerState.microphoneMuted = false
         providerState.keepMicrophoneWarm = true
         providerState.microphoneId = 'microphone:coreaudio:42'
