@@ -24,7 +24,10 @@ import {
 
 /** The fake Chromium devices have labels unlike the native fixture catalog.
  * Alias labels only in this isolated fake-device process, never production.
- * This deliberately supplies no evidence for physical-device matching. */
+ * This deliberately supplies no evidence for physical-device matching.
+ * The microphone alias goes on a real fake input, never Chromium's synthetic
+ * `default`/`communications` entry: the room's matcher (#1504, plan 080's
+ * `matchStrictAudioInput`) never opens those, as it never does in production. */
 export async function prepareParityRoom(h, controls) {
   return h.eval(`
     const catalog = window.__videorcSmokeScenePresets.roomFixtureDevices();
@@ -35,7 +38,8 @@ export async function prepareParityRoom(h, controls) {
     navigator.mediaDevices.enumerateDevices = async () => {
       const devices = await enumerate();
       const video = devices.find(d => d.kind === 'videoinput');
-      const audio = devices.find(d => d.kind === 'audioinput');
+      const audio = devices.find(d => d.kind === 'audioinput' &&
+        d.deviceId !== 'default' && d.deviceId !== 'communications');
       if (!video || !audio) throw new Error('Chromium fake-media devices are missing');
       return devices.map(d => ({ deviceId: d.deviceId, groupId: d.groupId, kind: d.kind,
         label: d.deviceId === video.deviceId ? camera.name : d.deviceId === audio.deviceId ? microphone.name : d.label
