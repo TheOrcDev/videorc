@@ -525,7 +525,7 @@ export function CleanCutReview({
         updateEdlPayload(jobIdToSave, data.job.edlRevision, submitted)
       )
       setLoad((current) =>
-        current.kind === 'ready'
+        current.kind === 'ready' && current.data.job.id === detail.job.id
           ? {
               kind: 'ready',
               data: { ...current.data, job: detail.job, edl: detail.edl ?? current.data.edl }
@@ -535,15 +535,26 @@ export function CleanCutReview({
       // QA F16: the review stays editable while saving, so an edit made since
       // the save was sent stays unsaved, with its undo, on the saved list.
       const now = editingRef.current
-      if (now.draftJob === jobIdToSave) {
-        if (now.draft === submitted || !detail.edl) {
-          setDraft(EMPTY_CLEAN_CUT_DRAFT)
-          setHistory(EMPTY_CLEAN_CUT_HISTORY)
-        } else {
-          const step = { submitted, before: data.edl.removals, after: detail.edl.removals }
-          setDraft(rebaseDraftAfterSave(now.draft, step))
-          setHistory(rebaseHistoryAfterSave(now.history, historyAtSave, step))
+      const step = detail.edl && {
+        submitted,
+        before: data.edl.removals,
+        after: detail.edl.removals
+      }
+      if (now.draftJob !== jobIdToSave) {
+        // The review moved to the other cut while saving: its draft stays,
+        // and the saved cut's kept draft loses what the save carried.
+        if (step) {
+          writeCleanCutDraft(
+            jobIdToSave,
+            rebaseDraftAfterSave(readCleanCutDraft(jobIdToSave), step)
+          )
         }
+      } else if (!step || now.draft === submitted) {
+        setDraft(EMPTY_CLEAN_CUT_DRAFT)
+        setHistory(EMPTY_CLEAN_CUT_HISTORY)
+      } else {
+        setDraft(rebaseDraftAfterSave(now.draft, step))
+        setHistory(rebaseHistoryAfterSave(now.history, historyAtSave, step))
       }
       try {
         const rendered = await client.render(jobIdToSave)

@@ -473,6 +473,37 @@ describe('Clean cut review (plan 119 S14)', () => {
     expect(footer()).toBe('1 unsaved change')
   })
 
+  it('settles the saved cut when the review moved to the other one while saving (QA F16)', async () => {
+    const save = pendingSave()
+    const condensed = job({ id: 'job-c', mode: 'condensed' })
+    const get = vi.fn(async () => ({
+      sessionId: 'rec-1',
+      jobs: [
+        { job: job(), edl: edl() },
+        { job: condensed, edl: edl([removal('c1', 'condensed', 2 * MIN, 10 * MIN)]) }
+      ]
+    }))
+    await render(client({ updateEdl: save.updateEdl, get, jobs: [job(), condensed] }))
+    await act(async () => cut('r2').click())
+    await act(async () => button('Save changes').click())
+    // Taken back while saving, then over to the Condensed cut.
+    await key('z', { metaKey: true })
+    const condensedOption = [...document.querySelectorAll('[role="radio"]')].find(
+      (option) => option.textContent === 'Condensed'
+    ) as HTMLElement
+    await act(async () => condensedOption.click())
+    await settle()
+    expect(condensedOption.getAttribute('aria-checked')).toBe('true')
+    expect(document.querySelector('[data-removal-id="r2"]')).toBeNull()
+
+    await save.finish(r2Saved())
+    expect(condensedOption.getAttribute('aria-checked')).toBe('true')
+    expect(document.querySelector('[data-removal-id="r2"]')).toBeNull()
+    expect(cleanCutDraftChanges('job-c')).toBe(0)
+    // The Clean cut keeps the take-back: r2 back on, unsaved.
+    expect(cleanCutDraftChanges('job-1')).toBe(1)
+  })
+
   it('waits for a cut in progress before saving', async () => {
     await render(
       client({
