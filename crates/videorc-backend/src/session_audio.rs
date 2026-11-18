@@ -402,6 +402,7 @@ use std::time::{Duration, Instant};
 use crate::audio::{
     AudioCaptureStats, AudioProcessingSettings, AudioProcessingSettingsHandle, FoldPlan,
     NativeAudioInputState, NativeAudioSource, VoiceFold, fold_interleaved_f32,
+    fold_interleaved_f32_into,
 };
 use crate::sound_mix::{SoundVoices, VoiceStart};
 
@@ -4478,12 +4479,61 @@ impl PeakLimiter {
 }
 
 /// One mixed chunk, computed from raw PCM and the current controls.
+#[cfg(test)]
 struct MixedSamples {
     output: Vec<f32>,
     microphone: Vec<f32>,
     system: Vec<f32>,
     clipped: Vec<bool>,
     limiter: PeakLimiter,
+}
+
+/// [`mix_chunk_into`] into fresh buffers, for tests that read one mix.
+#[cfg(test)]
+fn mix_chunk(
+    microphone_raw: &[f32],
+    microphone: AudioProcessingSettings,
+    fold: FoldPlan,
+    system_raw: &[f32],
+    system: AudioProcessingSettings,
+    sounds: Option<&[f32]>,
+    limiter: PeakLimiter,
+) -> MixedSamples {
+    let mut scratch = MixScratch::default();
+    let limiter = mix_chunk_into(
+        &mut scratch,
+        microphone_raw,
+        microphone,
+        fold,
+        system_raw,
+        system,
+        sounds,
+        limiter,
+    );
+    MixedSamples {
+        output: scratch.output,
+        microphone: scratch.microphone,
+        system: scratch.system,
+        clipped: scratch.clipped,
+        limiter,
+    }
+}
+
+/// The buffers of one mix attempt (PERF-04): the bus keeps one and every
+/// attempt replaces all of their contents, so a warmed scratch mixes without
+/// allocating and nothing carries over from an earlier attempt or chunk.
+#[derive(Default)]
+struct MixScratch {
+    /// The folded, gained microphone before the full-scale clamp.
+    unclamped: Vec<f32>,
+    /// The limited sum.
+    output: Vec<f32>,
+    /// The clamped microphone ingredient.
+    microphone: Vec<f32>,
+    /// The gained system contribution.
+    system: Vec<f32>,
+    /// Per sample: the limiter pulled it under the ceiling.
+    clipped: Vec<bool>,
 }
 
 /// The mix (plan 069 decisions 3, 5, 7): the microphone keeps the
@@ -4493,8 +4543,11 @@ struct MixedSamples {
 /// joins only while a sound plays, so the sum is unchanged without one; the
 /// sum passes the limiter. Plan 200 A2: the sum takes the microphone before
 /// the full-scale clamp, so the limiter (not the clamp) holds a hot mic; the
-/// microphone ingredient (taps, meter) stays clamped as before.
-fn mix_chunk(
+/// microphone ingredient (taps, meter) stays clamped as before. The result is
+/// in `scratch`; the limiter after the chunk is returned.
+#[allow(clippy::too_many_arguments)]
+fn mix_chunk_into(
+    scratch: &mut MixScratch,
     microphone_raw: &[f32],
     microphone: AudioProcessingSettings,
     fold: FoldPlan,
@@ -4502,40 +4555,40 @@ fn mix_chunk(
     system: AudioProcessingSettings,
     sounds: Option<&[f32]>,
     mut limiter: PeakLimiter,
-) -> MixedSamples {
-    let microphone_unclamped = fold_interleaved_f32(microphone_raw, 2, microphone, fold, false);
-    let microphone_samples = microphone_unclamped
-        .iter()
-        .map(|sample| sample.clamp(-1.0, 1.0))
-        .collect::<Vec<_>>();
+) -> PeakLimiter {
+    let MixScratch {
+        unclamped,
+        output,
+        microphone: microphone_samples,
+        system: system_samples,
+        clipped,
+    } = scratch;
+    fold_interleaved_f32_into(microphone_raw, 2, microphone, fold, false, unclamped);
+    microphone_samples.clear();
+    microphone_samples.extend(unclamped.iter().map(|sample| sample.clamp(-1.0, 1.0)));
     let system_gain = if system.muted {
         0.0
     } else {
         crate::audio::db_to_gain(system.gain_db)
     };
-    let system_samples = system_raw
-        .iter()
-        .map(|sample| sample * system_gain)
-        .collect::<Vec<_>>();
-    let mut output = microphone_unclamped
-        .iter()
-        .zip(&system_samples)
-        .map(|(microphone, system)| microphone + system)
-        .collect::<Vec<_>>();
+    system_samples.clear();
+    system_samples.extend(system_raw.iter().map(|sample| sample * system_gain));
+    output.clear();
+    output.extend(
+        unclamped
+            .iter()
+            .zip(system_samples.iter())
+            .map(|(microphone, system)| microphone + system),
+    );
     if let Some(sounds) = sounds {
         for (output, sound) in output.iter_mut().zip(sounds) {
             *output += sound;
         }
     }
-    let mut clipped = vec![false; output.len()];
-    limiter.process(&mut output, &mut clipped);
-    MixedSamples {
-        output,
-        microphone: microphone_samples,
-        system: system_samples,
-        clipped,
-        limiter,
-    }
+    clipped.clear();
+    clipped.resize(output.len(), false);
+    limiter.process(output, clipped);
+    limiter
 }
 
 /// Plan 069 decision 8: each source's offset `o_s` (ms, positive delays) is
@@ -5739,6 +5792,10 @@ fn run_bus_owned(
     // and carries its state across them.
     let mut system: Option<SourceSlot> = None;
     let mut limiter = PeakLimiter::default();
+    // PERF-04: the writer's buffers, reused by every chunk (and a mixed
+    // chunk's zero system input while only the soundboard plays).
+    let mut writer = WriterScratch::default();
+    let mut silence = Vec::new();
     // Plan 200 A1: the microphone fold's level detector, across chunks.
     let mut voice_fold = VoiceFold::default();
     // Plan 189: the soundboard's voices. Idle, they render nothing and the
@@ -6504,15 +6561,16 @@ fn run_bus_owned(
             thread::sleep(Duration::from_millis(1));
         };
         let outcome = if mixing {
-            let silence;
             let system_samples = match system_raw.as_ref() {
                 Some(system_raw) => system_raw.samples.as_slice(),
                 None => {
-                    silence = vec![0.0; raw.samples.len()];
+                    silence.clear();
+                    silence.resize(raw.samples.len(), 0.0);
                     silence.as_slice()
                 }
             };
-            write_prepared_mixed_chunk_with_clock(
+            write_prepared_mixed_chunk_into(
+                &mut writer,
                 &mut file,
                 prepared_samples.as_deref().unwrap_or(&raw.samples),
                 settings,
@@ -6529,7 +6587,8 @@ fn run_bus_owned(
             )
             .map(ChunkOutcome::Mixed)
         } else {
-            write_prepared_chunk_with_clock(
+            write_prepared_chunk_into(
+                &mut writer,
                 &mut file,
                 prepared_samples.as_deref().unwrap_or(&raw.samples),
                 settings,
@@ -6557,31 +6616,25 @@ fn run_bus_owned(
         // written chunk while the microphone stays under the ceiling.
         // Plan 092 Phase C: the written chunk is what the recording and the
         // stream get, so it feeds the master meter.
+        // PERF-04: the samples are in `writer`; the microphone moves into the
+        // caption frame below and goes back after the caption tap.
         let mut clipped_samples = 0;
-        let (stale_from, microphone_samples, mixed, master_levels, sounds_levels) = match outcome {
+        let master_levels = ChunkLevels::of(&writer.written);
+        let microphone_samples = std::mem::take(&mut writer.microphone);
+        let (stale_from, mixed, sounds_levels) = match outcome {
             ChunkOutcome::Microphone(write) => {
                 limiter = write.limiter;
                 clipped_samples = write.clipped_samples;
-                let master = ChunkLevels::of(&write.written.samples);
-                (
-                    write.written.stale_from,
-                    write.microphone,
-                    None,
-                    master,
-                    None,
-                )
+                (write.written.stale_from, None, None)
             }
             ChunkOutcome::Mixed(mixed) => {
                 limiter = mixed.limiter;
-                let master = ChunkLevels::of(&mixed.written.samples);
                 // Plan 189: the sounds meter reads the sounds as written;
                 // the taps, captions and the mic meter below never see them.
-                let sounds_levels = mixed.sounds.as_deref().map(ChunkLevels::of);
+                let sounds_levels = mixed.sounds.then(|| ChunkLevels::of(&writer.sounds));
                 (
                     mixed.written.stale_from,
-                    mixed.microphone,
-                    Some((mixed.system, mixed.clipped_samples)),
-                    master,
+                    Some((writer.system.as_slice(), mixed.clipped_samples)),
                     sounds_levels,
                 )
             }
@@ -6596,9 +6649,7 @@ fn run_bus_owned(
         {
             taps.offer_chunk(
                 &microphone_samples,
-                mixed
-                    .as_ref()
-                    .map(|(system_samples, _)| system_samples.as_slice()),
+                mixed.map(|(system_samples, _)| system_samples),
             );
         }
         let microphone_levels = ChunkLevels::of(&microphone_samples);
@@ -6634,10 +6685,7 @@ fn run_bus_owned(
             let mixing_system = system.as_ref().is_some_and(|slot| slot.exit.is_none());
             echo.chunk(
                 &microphone_samples,
-                mixed
-                    .as_ref()
-                    .filter(|_| mixing_system)
-                    .map(|(system, _)| system.as_slice()),
+                mixed.filter(|_| mixing_system).map(|(system, _)| system),
             );
         }
         let frame = AudioFrame {
@@ -6675,6 +6723,7 @@ fn run_bus_owned(
                 }
             }
         }
+        writer.microphone = frame.samples;
         if let (Some((system_samples, _)), Some(slot), Some(system_raw)) =
             (mixed.as_ref(), system.as_mut(), system_raw.as_ref())
         {
@@ -7013,24 +7062,93 @@ enum ChunkOutcome {
     Mixed(MixedWrite),
 }
 
+/// The writer's buffers (PERF-04). The bus owns one for its lifetime and every
+/// chunk reuses it: the samples are in here, the write outcomes carry only the
+/// scalars. Each chunk resets the "as written" buffers to zeros (as fresh
+/// buffers were) and each attempt replaces the per-attempt buffers whole, so
+/// nothing carries over from an earlier chunk. A warmed scratch writes a chunk,
+/// retries included, without allocating.
+#[derive(Default)]
+struct WriterScratch {
+    /// The chunk's PCM as bytes; the write position moves through it.
+    bytes: Vec<u8>,
+    /// One microphone-only attempt: the folded, limited samples.
+    rendered: Vec<f32>,
+    /// One microphone-only attempt: the limiter's per-sample flags.
+    flags: Vec<bool>,
+    /// One mixed attempt.
+    mix: MixScratch,
+    /// The chunk exactly as written, decoded from `bytes` (the master meter).
+    written: Vec<f32>,
+    /// The processed microphone ingredient (fold, gain, mute, clamped at full
+    /// scale; zero where the chunk went stale or drained), the same on both
+    /// paths. The taps, the microphone meter, the echo reference and the
+    /// caption frame read this, so the Microphone file and meter get the same
+    /// signal whether or not anything is mixed (plan 200 A2).
+    microphone: Vec<f32>,
+    /// Mixed path: the gained system contribution as written.
+    system: Vec<f32>,
+    /// Mixed path, plan 189: the soundboard's contribution as written.
+    sounds: Vec<f32>,
+    /// Per sample as written: the limiter pulled it under its ceiling.
+    clipped: Vec<bool>,
+}
+
+impl WriterScratch {
+    /// Starts a chunk of `samples` values: the "as written" buffers become
+    /// zeros, like the fresh buffers each chunk used to allocate. Only the
+    /// mixed path writes (and resets) `system`.
+    fn begin_chunk(&mut self, samples: usize) {
+        self.microphone.clear();
+        self.microphone.resize(samples, 0.0);
+        self.clipped.clear();
+        self.clipped.resize(samples, false);
+        self.sounds.clear();
+    }
+
+    fn clipped_samples(&self) -> u64 {
+        self.clipped.iter().filter(|clipped| **clipped).count() as u64
+    }
+}
+
 struct WrittenChunk {
-    samples: Vec<f32>,
     stale_from: Option<usize>,
     /// The frame from which a silent drain replaced the chunk with zeros.
     /// Intentional stop silence, never stale capture.
     silent_from: Option<usize>,
 }
 
-/// What the microphone-only path wrote, with its limiter.
+impl WrittenChunk {
+    /// The first frame not written as rendered: a stale suffix, or the
+    /// silence of a drain that began mid-chunk.
+    fn zeros_from(&self) -> Option<usize> {
+        match (self.stale_from, self.silent_from) {
+            (Some(stale), Some(silent)) => Some(stale.min(silent)),
+            (stale, silent) => stale.or(silent),
+        }
+    }
+}
+
+/// What the microphone-only path wrote, with its limiter. The samples are in
+/// the [`WriterScratch`]: `written` and `microphone`.
 struct MicrophoneWrite {
     written: WrittenChunk,
-    /// The processed microphone ingredient (fold, gain, mute, clamped at full
-    /// scale; zero where the chunk went stale or drained), exactly as the
-    /// mixed path's `MixedWrite::microphone`. The taps, the microphone meter
-    /// and the echo reference read this, so the Microphone file and meter
-    /// get the same signal whether or not anything is mixed (plan 200 A2).
-    microphone: Vec<f32>,
     /// Samples the limiter had to pull under its ceiling.
+    clipped_samples: u64,
+    limiter: PeakLimiter,
+}
+
+/// A test's view of one microphone-only write: the scratch's samples, owned.
+#[cfg(test)]
+struct OwnedWrittenChunk {
+    samples: Vec<f32>,
+    stale_from: Option<usize>,
+}
+
+#[cfg(test)]
+struct OwnedMicrophoneWrite {
+    written: OwnedWrittenChunk,
+    microphone: Vec<f32>,
     clipped_samples: u64,
     limiter: PeakLimiter,
 }
@@ -7047,10 +7165,50 @@ fn write_chunk_with_clock(
     draining: &AtomicBool,
     now: impl FnMut() -> Instant,
     wait: impl FnMut(),
-) -> io::Result<MicrophoneWrite> {
+) -> io::Result<OwnedMicrophoneWrite> {
     write_prepared_chunk_with_clock(
         file, raw, settings, false, fold, limiter, stop, draining, now, wait,
     )
+}
+
+/// [`write_prepared_chunk_into`] with a fresh scratch, for tests.
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+fn write_prepared_chunk_with_clock(
+    file: &mut impl Write,
+    raw: &[f32],
+    settings: &AudioProcessingSettingsHandle,
+    prepared: bool,
+    fold: FoldPlan,
+    limiter: PeakLimiter,
+    stop: &AtomicBool,
+    draining: &AtomicBool,
+    now: impl FnMut() -> Instant,
+    wait: impl FnMut(),
+) -> io::Result<OwnedMicrophoneWrite> {
+    let mut scratch = WriterScratch::default();
+    let write = write_prepared_chunk_into(
+        &mut scratch,
+        file,
+        raw,
+        settings,
+        prepared,
+        fold,
+        limiter,
+        stop,
+        draining,
+        now,
+        wait,
+    )?;
+    Ok(OwnedMicrophoneWrite {
+        written: OwnedWrittenChunk {
+            samples: scratch.written,
+            stale_from: write.written.stale_from,
+        },
+        microphone: scratch.microphone,
+        clipped_samples: write.clipped_samples,
+        limiter: write.limiter,
+    })
 }
 
 /// Denoised PCM already carries the gain it was captured with; mute still
@@ -7071,8 +7229,10 @@ fn writer_controls(
 /// are exactly the pre-mixer writer's. `fold` is planned once per chunk, so a
 /// re-render under new controls folds the chunk the same way; like the mixed
 /// path, each attempt re-limits from the limiter state at the chunk start.
+/// The written chunk and the microphone ingredient are left in `scratch`.
 #[allow(clippy::too_many_arguments)]
-fn write_prepared_chunk_with_clock(
+fn write_prepared_chunk_into(
+    scratch: &mut WriterScratch,
     file: &mut impl Write,
     raw: &[f32],
     settings: &AudioProcessingSettingsHandle,
@@ -7084,55 +7244,68 @@ fn write_prepared_chunk_with_clock(
     now: impl FnMut() -> Instant,
     wait: impl FnMut(),
 ) -> io::Result<MicrophoneWrite> {
-    let mut clipped = vec![false; raw.len()];
-    let mut microphone = vec![0.0; raw.len()];
+    scratch.begin_chunk(raw.len());
+    let WriterScratch {
+        bytes,
+        rendered,
+        flags,
+        written: decoded,
+        microphone,
+        clipped,
+        ..
+    } = scratch;
     let mut limiter_after = limiter;
     let written = write_rendered_chunk(
         file,
+        bytes,
+        decoded,
         raw.len(),
-        |from| {
+        |from, bytes| {
             // Unclamped: the limiter, not a clamp at full scale, holds it.
-            let mut samples =
-                fold_interleaved_f32(raw, 2, writer_controls(settings, prepared), fold, false);
-            // The ingredient is clamped, as `mix_chunk` clamps it.
-            for (ingredient, sample) in microphone[from..].iter_mut().zip(&samples[from..]) {
+            fold_interleaved_f32_into(
+                raw,
+                2,
+                writer_controls(settings, prepared),
+                fold,
+                false,
+                rendered,
+            );
+            // The ingredient is clamped, as `mix_chunk_into` clamps it.
+            for (ingredient, sample) in microphone[from..].iter_mut().zip(&rendered[from..]) {
                 *ingredient = sample.clamp(-1.0, 1.0);
             }
-            let mut flags = vec![false; samples.len()];
+            flags.clear();
+            flags.resize(rendered.len(), false);
             let mut chunk_limiter = limiter;
-            chunk_limiter.process(&mut samples, &mut flags);
+            chunk_limiter.process(rendered, flags);
             clipped[from..].copy_from_slice(&flags[from..]);
             limiter_after = chunk_limiter;
-            samples
+            encode_pcm_from(rendered, from, bytes);
         },
         stop,
         draining,
         now,
         wait,
     )?;
-    if let Some(from) = match (written.stale_from, written.silent_from) {
-        (Some(stale), Some(silent)) => Some(stale.min(silent)),
-        (stale, silent) => stale.or(silent),
-    } {
-        microphone[from * 2..].fill(0.0);
-        clipped[from * 2..].fill(false);
+    if let Some(from) = written.zeros_from() {
+        scratch.microphone[from * 2..].fill(0.0);
+        scratch.clipped[from * 2..].fill(false);
     }
     Ok(MicrophoneWrite {
         written,
-        microphone,
-        clipped_samples: clipped.iter().filter(|clipped| **clipped).count() as u64,
+        clipped_samples: scratch.clipped_samples(),
         limiter: limiter_after,
     })
 }
 
+/// What the mixed path wrote, with its limiter. The samples are in the
+/// [`WriterScratch`]: `written`, `microphone` (zero where the chunk went
+/// stale), `system` and, while one plays, `sounds`.
 struct MixedWrite {
     written: WrittenChunk,
-    /// The processed microphone as written (zero where the chunk went stale).
-    microphone: Vec<f32>,
-    /// The gained system contribution as written.
-    system: Vec<f32>,
-    /// Plan 189: the soundboard's contribution as written, while one plays.
-    sounds: Option<Vec<f32>>,
+    /// Plan 189: a sound played, and `WriterScratch::sounds` holds it as
+    /// written.
+    sounds: bool,
     clipped_samples: u64,
     limiter: PeakLimiter,
 }
@@ -7140,7 +7313,8 @@ struct MixedWrite {
 /// Retry mixing immutable prepared microphone PCM, with latest downstream mute
 /// and system controls. DSP state never advances from this callback.
 #[allow(clippy::too_many_arguments)]
-fn write_prepared_mixed_chunk_with_clock(
+fn write_prepared_mixed_chunk_into(
+    scratch: &mut WriterScratch,
     file: &mut impl Write,
     microphone_raw: &[f32],
     microphone_settings: &AudioProcessingSettingsHandle,
@@ -7156,15 +7330,27 @@ fn write_prepared_mixed_chunk_with_clock(
     wait: impl FnMut(),
 ) -> io::Result<MixedWrite> {
     let length = microphone_raw.len();
-    let mut microphone = vec![0.0; length];
-    let mut system = vec![0.0; length];
-    let mut clipped = vec![false; length];
+    scratch.begin_chunk(length);
+    scratch.system.clear();
+    scratch.system.resize(length, 0.0);
+    let WriterScratch {
+        bytes,
+        mix,
+        written: decoded,
+        microphone,
+        system,
+        clipped,
+        ..
+    } = scratch;
     let mut limiter_after = limiter;
     let written = write_rendered_chunk(
         file,
+        bytes,
+        decoded,
         length,
-        |from| {
-            let mixed = mix_chunk(
+        |from, bytes| {
+            limiter_after = mix_chunk_into(
+                mix,
                 microphone_raw,
                 writer_controls(microphone_settings, prepared),
                 microphone_fold,
@@ -7173,48 +7359,58 @@ fn write_prepared_mixed_chunk_with_clock(
                 sounds_raw,
                 limiter,
             );
-            microphone[from..].copy_from_slice(&mixed.microphone[from..]);
-            system[from..].copy_from_slice(&mixed.system[from..]);
-            clipped[from..].copy_from_slice(&mixed.clipped[from..]);
-            limiter_after = mixed.limiter;
-            mixed.output
+            microphone[from..].copy_from_slice(&mix.microphone[from..]);
+            system[from..].copy_from_slice(&mix.system[from..]);
+            clipped[from..].copy_from_slice(&mix.clipped[from..]);
+            encode_pcm_from(&mix.output, from, bytes);
         },
         stop,
         draining,
         now,
         wait,
     )?;
-    let mut sounds = sounds_raw.map(<[f32]>::to_vec);
+    if let Some(sounds_raw) = sounds_raw {
+        scratch.sounds.extend_from_slice(sounds_raw);
+    }
     // What was not written as rendered was written as zeros: a stale suffix,
     // or the silence of a drain that began mid-chunk.
-    if let Some(from) = match (written.stale_from, written.silent_from) {
-        (Some(stale), Some(silent)) => Some(stale.min(silent)),
-        (stale, silent) => stale.or(silent),
-    } {
-        microphone[from * 2..].fill(0.0);
-        system[from * 2..].fill(0.0);
-        if let Some(sounds) = sounds.as_mut() {
-            sounds[from * 2..].fill(0.0);
+    if let Some(from) = written.zeros_from() {
+        scratch.microphone[from * 2..].fill(0.0);
+        scratch.system[from * 2..].fill(0.0);
+        if sounds_raw.is_some() {
+            scratch.sounds[from * 2..].fill(0.0);
         }
-        clipped[from * 2..].fill(false);
+        scratch.clipped[from * 2..].fill(false);
     }
     Ok(MixedWrite {
         written,
-        microphone,
-        system,
-        sounds,
-        clipped_samples: clipped.iter().filter(|clipped| **clipped).count() as u64,
+        sounds: sounds_raw.is_some(),
+        clipped_samples: scratch.clipped_samples(),
         limiter: limiter_after,
     })
 }
 
-/// Writes one chunk of `samples` f32 values. `render(from)` produces the
-/// processed chunk from the current controls before each attempt; only the
+/// Encodes `samples` from sample index `from` into `bytes` (4 little-endian
+/// bytes per sample); the bytes before `from` are left as they are.
+fn encode_pcm_from(samples: &[f32], from: usize, bytes: &mut [u8]) {
+    debug_assert!(samples.len() * 4 <= bytes.len());
+    let samples = samples.get(from..).unwrap_or_default();
+    for (pcm, sample) in bytes[from * 4..].chunks_exact_mut(4).zip(samples) {
+        pcm.copy_from_slice(&sample.to_le_bytes());
+    }
+}
+
+/// Writes one chunk of `samples` f32 values through `bytes`, then decodes what
+/// was written into `decoded`. `render(from, bytes)` encodes the processed
+/// chunk from the current controls into `bytes` before each attempt; only the
 /// values from sample index `from` (always a whole stereo frame) are used.
+#[allow(clippy::too_many_arguments)]
 fn write_rendered_chunk(
     file: &mut impl Write,
+    bytes: &mut Vec<u8>,
+    decoded: &mut Vec<f32>,
     samples: usize,
-    mut render: impl FnMut(usize) -> Vec<f32>,
+    mut render: impl FnMut(usize, &mut [u8]),
     stop: &AtomicBool,
     draining: &AtomicBool,
     mut now: impl FnMut() -> Instant,
@@ -7222,7 +7418,8 @@ fn write_rendered_chunk(
 ) -> io::Result<WrittenChunk> {
     let started = now();
     let deadline = started + OUTPUT_WRITE_DEADLINE;
-    let mut bytes = vec![0; samples * 4];
+    bytes.clear();
+    bytes.resize(samples * 4, 0);
     let mut written = 0;
     let mut stale_from = None;
     let mut silent_from = None;
@@ -7252,10 +7449,7 @@ fn write_rendered_chunk(
             bytes[replace_from..].fill(0);
             stale_from.get_or_insert(replace_from / 8);
         } else {
-            let processed = render(replace_from / 4);
-            for (index, sample) in processed.iter().enumerate().skip(replace_from / 4) {
-                bytes[index * 4..index * 4 + 4].copy_from_slice(&sample.to_le_bytes());
-            }
+            render(replace_from / 4, bytes);
         }
         match file.write(&bytes[written..]) {
             Ok(0) => {}
@@ -7270,11 +7464,13 @@ fn write_rendered_chunk(
         }
         wait();
     }
-    Ok(WrittenChunk {
-        samples: bytes
+    decoded.clear();
+    decoded.extend(
+        bytes
             .chunks_exact(4)
-            .map(|sample| f32::from_le_bytes(sample.try_into().expect("complete PCM sample")))
-            .collect(),
+            .map(|sample| f32::from_le_bytes(sample.try_into().expect("complete PCM sample"))),
+    );
+    Ok(WrittenChunk {
         stale_from,
         silent_from,
     })
@@ -14921,5 +15117,384 @@ mod rnnoise_bus_tests {
         assert_eq!(&written.samples[..2], &[0.2; 2]);
         assert!(written.samples[2..].iter().all(|s| *s == 0.0));
         assert_eq!(writer.bytes.len(), 960 * 4);
+    }
+}
+
+/// PERF-04: the writer reuses one [`WriterScratch`] for the bus's lifetime.
+/// A warmed scratch writes chunks, retries included, without allocating, and
+/// a reused scratch writes exactly what a fresh one writes.
+#[cfg(test)]
+mod writer_scratch_tests {
+    use super::*;
+    use std::cell::Cell;
+
+    const SAMPLES: usize = CHUNK_FRAMES * 2;
+
+    /// One chunk's write conditions.
+    #[derive(Clone, Copy, Debug)]
+    struct Scenario {
+        mixed: bool,
+        sounds: bool,
+        prepared: bool,
+        samples: usize,
+        /// The reader first takes only this many bytes (mid-frame).
+        partial: Option<usize>,
+        /// Then refuses this many attempts (WouldBlock) before it reads the
+        /// rest; each refusal advances the clock 1 ms, so 100 or more go
+        /// stale.
+        refusals: usize,
+        /// The microphone mutes on the first refusal.
+        mute_on_refusal: bool,
+        /// A drain begins after this many waits.
+        drain_after: Option<usize>,
+    }
+
+    const BASE: Scenario = Scenario {
+        mixed: false,
+        sounds: false,
+        prepared: false,
+        samples: SAMPLES,
+        refusals: 0,
+        partial: None,
+        mute_on_refusal: false,
+        drain_after: None,
+    };
+
+    /// A FIFO reader under pressure. `bytes` keeps what it read; its capacity
+    /// is reserved up front so reading never allocates.
+    struct PressuredReader<'a> {
+        refusals: usize,
+        partial: Option<usize>,
+        mute: Option<&'a AudioProcessingSettingsHandle>,
+        bytes: Vec<u8>,
+    }
+
+    impl Write for PressuredReader<'_> {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            if let Some(partial) = self.partial.take() {
+                let length = partial.min(bytes.len());
+                self.bytes.extend_from_slice(&bytes[..length]);
+                return Ok(length);
+            }
+            if self.refusals > 0 {
+                self.refusals -= 1;
+                if let Some(handle) = self.mute.take() {
+                    handle.update(AudioProcessingSettings {
+                        muted: true,
+                        ..handle.load()
+                    });
+                }
+                return Err(io::ErrorKind::WouldBlock.into());
+            }
+            self.bytes.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// The raw inputs of chunk `index`: a hot microphone (the limiter
+    /// engages), system audio and a sound.
+    struct Inputs {
+        microphone: Vec<f32>,
+        system: Vec<f32>,
+        sounds: Vec<f32>,
+    }
+
+    fn inputs(index: usize, samples: usize) -> Inputs {
+        let wave = |step: f32, amplitude: f32| -> Vec<f32> {
+            (0..samples)
+                .map(|i| ((i + index * 977) as f32 * step).sin() * amplitude)
+                .collect()
+        };
+        Inputs {
+            microphone: wave(0.037, 1.4),
+            system: wave(0.011, 0.45),
+            sounds: wave(0.053, 0.3),
+        }
+    }
+
+    /// Everything a chunk write hands downstream, as exact bits.
+    #[derive(Debug, PartialEq)]
+    struct Snapshot {
+        read: Vec<u8>,
+        written: Vec<u32>,
+        microphone: Vec<u32>,
+        system: Option<Vec<u32>>,
+        sounds: Option<Vec<u32>>,
+        clipped_samples: u64,
+        limiter_gain: u32,
+        stale_from: Option<usize>,
+        silent_from: Option<usize>,
+    }
+
+    fn bits(samples: &[f32]) -> Vec<u32> {
+        samples.iter().map(|sample| sample.to_bits()).collect()
+    }
+
+    /// Writes one chunk through `scratch`, returning what the reader read and
+    /// the outcome's scalars. Allocates only through `reader.bytes`' reserve.
+    fn write(
+        scratch: &mut WriterScratch,
+        reader: &mut PressuredReader<'_>,
+        scenario: Scenario,
+        inputs: &Inputs,
+        microphone: &AudioProcessingSettingsHandle,
+        system: &AudioProcessingSettingsHandle,
+        limiter: PeakLimiter,
+    ) -> (WrittenChunk, u64, PeakLimiter, bool) {
+        let samples = scenario.samples;
+        let raw = &inputs.microphone[..samples];
+        let fold = FoldPlan::one_shot(raw, 2);
+        let stop = AtomicBool::new(false);
+        let draining = AtomicBool::new(false);
+        let started = Instant::now();
+        let elapsed = Cell::new(0_u64);
+        let waits = Cell::new(0_usize);
+        let now = || started + Duration::from_millis(elapsed.get());
+        let wait = || {
+            elapsed.set(elapsed.get() + 1);
+            waits.set(waits.get() + 1);
+            if scenario.drain_after == Some(waits.get()) {
+                draining.store(true, Ordering::Release);
+            }
+        };
+        if scenario.mixed {
+            let write = write_prepared_mixed_chunk_into(
+                scratch,
+                reader,
+                raw,
+                microphone,
+                scenario.prepared,
+                fold,
+                &inputs.system[..samples],
+                system,
+                scenario.sounds.then(|| &inputs.sounds[..samples]),
+                limiter,
+                &stop,
+                &draining,
+                now,
+                wait,
+            )
+            .unwrap();
+            (
+                write.written,
+                write.clipped_samples,
+                write.limiter,
+                write.sounds,
+            )
+        } else {
+            let write = write_prepared_chunk_into(
+                scratch,
+                reader,
+                raw,
+                microphone,
+                scenario.prepared,
+                fold,
+                limiter,
+                &stop,
+                &draining,
+                now,
+                wait,
+            )
+            .unwrap();
+            (write.written, write.clipped_samples, write.limiter, false)
+        }
+    }
+
+    fn snapshot(
+        scratch: &mut WriterScratch,
+        scenario: Scenario,
+        index: usize,
+        limiter: PeakLimiter,
+    ) -> Snapshot {
+        let inputs = inputs(index, scenario.samples);
+        let microphone = AudioProcessingSettingsHandle::new(AudioProcessingSettings {
+            gain_db: 3.0,
+            ..AudioProcessingSettings::default()
+        });
+        let system = AudioProcessingSettingsHandle::new(AudioProcessingSettings {
+            gain_db: -2.0,
+            ..AudioProcessingSettings::default()
+        });
+        let mut reader = PressuredReader {
+            refusals: scenario.refusals,
+            partial: scenario.partial,
+            mute: scenario.mute_on_refusal.then_some(&microphone),
+            bytes: Vec::new(),
+        };
+        let (written, clipped_samples, limiter, sounds) = write(
+            scratch,
+            &mut reader,
+            scenario,
+            &inputs,
+            &microphone,
+            &system,
+            limiter,
+        );
+        Snapshot {
+            read: reader.bytes,
+            written: bits(&scratch.written),
+            microphone: bits(&scratch.microphone),
+            system: scenario.mixed.then(|| bits(&scratch.system)),
+            sounds: sounds.then(|| bits(&scratch.sounds)),
+            clipped_samples,
+            limiter_gain: limiter.gain.to_bits(),
+            stale_from: written.stale_from,
+            silent_from: written.silent_from,
+        }
+    }
+
+    #[test]
+    fn a_reused_writer_scratch_writes_exactly_what_a_fresh_one_writes() {
+        let scenarios = [
+            Scenario {
+                mixed: true,
+                sounds: true,
+                partial: Some(13),
+                ..BASE
+            },
+            // After a mixed chunk with sounds: the system and sounds buffers
+            // are dirty.
+            BASE,
+            Scenario {
+                mixed: true,
+                refusals: 3,
+                mute_on_refusal: true,
+                ..BASE
+            },
+            Scenario {
+                mixed: true,
+                sounds: true,
+                refusals: 120,
+                partial: Some(1_001),
+                ..BASE
+            },
+            Scenario {
+                partial: Some(2_052),
+                drain_after: Some(2),
+                refusals: 4,
+                ..BASE
+            },
+            Scenario {
+                samples: SAMPLES / 2,
+                mixed: true,
+                ..BASE
+            },
+            Scenario {
+                prepared: true,
+                refusals: 2,
+                partial: Some(5),
+                mute_on_refusal: true,
+                ..BASE
+            },
+            Scenario {
+                mixed: true,
+                sounds: true,
+                prepared: true,
+                refusals: 7,
+                ..BASE
+            },
+            BASE,
+        ];
+        let mut reused = WriterScratch::default();
+        let mut reused_limiter = PeakLimiter::default();
+        let mut fresh_limiter = PeakLimiter::default();
+        let (mut limited, mut stale, mut drained) = (false, false, false);
+        for (index, scenario) in scenarios.into_iter().enumerate() {
+            let fresh = snapshot(
+                &mut WriterScratch::default(),
+                scenario,
+                index,
+                fresh_limiter,
+            );
+            let again = snapshot(&mut reused, scenario, index, reused_limiter);
+            assert_eq!(again, fresh, "chunk {index}: {scenario:?}");
+            assert_eq!(fresh.read.len(), scenario.samples * 4);
+            limited |= fresh.clipped_samples > 0;
+            stale |= fresh.stale_from.is_some_and(|from| from > 0);
+            drained |= fresh.silent_from.is_some_and(|from| from > 0);
+            fresh_limiter.gain = f32::from_bits(fresh.limiter_gain);
+            reused_limiter.gain = f32::from_bits(again.limiter_gain);
+        }
+        // The fixture exercises the limiter, a stale suffix and a drain that
+        // begins mid-chunk.
+        assert!(limited && stale && drained);
+    }
+
+    #[test]
+    fn a_warmed_writer_scratch_writes_chunks_without_allocating() {
+        let scenarios = [
+            BASE,
+            Scenario {
+                mixed: true,
+                ..BASE
+            },
+            Scenario {
+                mixed: true,
+                sounds: true,
+                ..BASE
+            },
+            Scenario {
+                refusals: 10,
+                partial: Some(13),
+                mute_on_refusal: true,
+                ..BASE
+            },
+            Scenario {
+                mixed: true,
+                sounds: true,
+                refusals: 10,
+                partial: Some(13),
+                mute_on_refusal: true,
+                ..BASE
+            },
+            Scenario {
+                mixed: true,
+                refusals: 120,
+                ..BASE
+            },
+        ];
+        let all = inputs(0, SAMPLES);
+        let microphone = AudioProcessingSettingsHandle::new(AudioProcessingSettings::default());
+        let system = AudioProcessingSettingsHandle::new(AudioProcessingSettings::default());
+        let mut scratch = WriterScratch::default();
+        let mut limiter = PeakLimiter::default();
+        let mut reader = PressuredReader {
+            refusals: 0,
+            partial: None,
+            mute: None,
+            bytes: Vec::with_capacity(SAMPLES * 4),
+        };
+        let mut run = |scratch: &mut WriterScratch, limiter: &mut PeakLimiter| {
+            for scenario in scenarios {
+                microphone.update(AudioProcessingSettings::default());
+                reader.refusals = scenario.refusals;
+                reader.partial = scenario.partial;
+                reader.mute = scenario.mute_on_refusal.then_some(&microphone);
+                reader.bytes.clear();
+                let (written, _, after, _) = write(
+                    scratch,
+                    &mut reader,
+                    scenario,
+                    &all,
+                    &microphone,
+                    &system,
+                    *limiter,
+                );
+                assert_eq!(reader.bytes.len(), SAMPLES * 4);
+                assert_eq!(written.stale_from.is_some(), scenario.refusals >= 100);
+                *limiter = after;
+            }
+        };
+        // Warm-up: the first chunks size the buffers.
+        run(&mut scratch, &mut limiter);
+        let ((), allocations) = crate::test_alloc::count_allocations(|| {
+            for _ in 0..20 {
+                run(&mut scratch, &mut limiter);
+            }
+        });
+        assert_eq!(allocations, 0, "a warmed writer allocated");
     }
 }
