@@ -1,4 +1,5 @@
 import { talkShowOutputPlan, talkShowOutputStartProblem } from '@/lib/talk-show-outputs'
+import { seedRoomFixtureDevices, withRoomFixtureDevices } from '@/lib/room-fixture-devices'
 import { roomSystemResources, takeRoomSystemObservations } from '@/lib/room-system-audio-state'
 import { roomAudioRouting } from '@/lib/room-audio-routing'
 import {
@@ -2885,7 +2886,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   )
   const setDeviceList = useCallback((nextDevices: DeviceList) => {
     setPermissionEvidenceClient(clientRef.current)
-    commitDeviceList(nextDevices)
+    commitDeviceList(import.meta.env.DEV ? withRoomFixtureDevices(nextDevices) : nextDevices)
   }, [])
   const previewDevicesSignature = useMemo(
     () => previewDeviceRefreshSignature(deviceList.devices),
@@ -20609,7 +20610,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             kind: 'microphone',
             status: 'available'
           })
-        setDeviceList({ devices: fixtures, warnings: [] })
+        // Seeded once, kept across every later device list (a camera lend
+        // or display change re-lists devices mid-case).
+        seedRoomFixtureDevices(fixtures)
+        setDeviceList(deviceListRef.current)
         return fixtures
       },
       roomNativeMicrophone: (enabled?: boolean) => {
