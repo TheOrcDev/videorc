@@ -20,6 +20,7 @@ import { ShortcutKeys } from '@/components/ui/shortcut-keys'
 import { ShortcutTooltip } from '@/components/ui/shortcut-tooltip'
 import { Switch } from '@/components/ui/switch'
 import { useWorkspaceNav } from '@/components/workspace-nav'
+import { useSectionFocus } from '@/hooks/use-section-focus'
 import { useStudioCore, useStudioReplay } from '@/hooks/use-studio'
 import {
   backendLevelSources,
@@ -71,6 +72,8 @@ const SYSTEM_AUDIO_PERMISSION_REASON = 'System audio needs Screen Recording perm
  * livestream or Clips runs the bus.
  */
 export function AudioSection(): ReactElement {
+  // Plan 250 S4: "Open Audio" on a microphone notification lands here.
+  useSectionFocus('studio-audio')
   const {
     captureConfig,
     setCaptureConfig,
@@ -244,7 +247,7 @@ export function AudioSectionView({
 }): ReactElement {
   return (
     // No "Audio" title (plan 235 D3): the rows name themselves.
-    <PanelSection>
+    <PanelSection data-section-focus="studio-audio">
       {/* One Mixer with Sources' range, so equal heights mean equal loudness.
           No MixerTitle and no heading: its own name says what it is. */}
       <Mixer aria-label="Audio" aria-labelledby={undefined} className="gap-0" maxDb={0} minDb={-60}>

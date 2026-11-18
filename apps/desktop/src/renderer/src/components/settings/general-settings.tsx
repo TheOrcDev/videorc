@@ -25,6 +25,7 @@ import { FieldGroup, SettingsRow } from '@/components/ui/field'
 import { SegmentedControl } from '@/components/ui/segmented-control'
 import { Switch } from '@/components/ui/switch'
 import { workspaceTabLabel } from '@/components/workspace-nav'
+import { useSectionFocus } from '@/hooks/use-section-focus'
 import { useVideorcAccount } from '@/hooks/use-account'
 import { useStudioCore, useStudioRecordingState } from '@/hooks/use-studio'
 import { accountDisplayName, isSignedIn } from '@/lib/account'
@@ -59,6 +60,8 @@ const THEME_OPTIONS = [
  * narrow window.
  */
 export function GeneralSettings(): ReactElement {
+  // Plan 250 S4: the list's "Settings" link lands on the quiet switch.
+  useSectionFocus('settings-notifications')
   const { settings, setSettings, runtimeInfo, scheduleHardwareAccelerationRetry } = useStudioCore()
   const { theme, setTheme } = useTheme()
   const [obsImportOpen, setObsImportOpen] = useState(false)
@@ -170,6 +173,7 @@ export function GeneralSettings(): ReactElement {
         {/* Notifications (plan 250, D4): the quiet rule's one home. The
             list behind the bell says what it is doing and links here. */}
         <PanelSection
+          data-section-focus="settings-notifications"
           description="What Videorc notices on its own waits behind the bell in the status bar."
           title="Notifications"
         >

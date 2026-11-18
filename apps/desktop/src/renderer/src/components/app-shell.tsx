@@ -514,12 +514,21 @@ function AppShellContent(): ReactElement {
       if (navigation.tab === 'settings') openSettings(navigation.settingsTab)
       else if (navigation.tab === 'ai') openBuddy(navigation.buddyTab)
       else if (navigation.tab === 'avatar') openAvatar(navigation.avatarTab)
-      else if (navigation.tab === 'live') openLivestream(navigation.livestreamView)
-      else setActive(navigation.tab)
+      else if (navigation.tab === 'live') {
+        openLivestream(navigation.livestreamView)
+        // Plan 250 S4: a named destination opens its card, through the same
+        // state the Stream Manager's "Use Sign in" sets.
+        if (navigation.destinationId) setDestinationToOpen(navigation.destinationId)
+      }
+      // Plan 250 S4: "Open in Library" lands on its recording. `setActive`
+      // alone dropped the id.
+      else if (navigation.tab === 'library' && navigation.sessionId) {
+        openLibrarySession(navigation.sessionId)
+      } else setActive(navigation.tab)
     }
     window.addEventListener(WORKSPACE_NAVIGATE_EVENT, onWorkspaceNavigate)
     return () => window.removeEventListener(WORKSPACE_NAVIGATE_EVENT, onWorkspaceNavigate)
-  }, [openAvatar, openBuddy, openLivestream, openSettings, setActive])
+  }, [openAvatar, openBuddy, openLibrarySession, openLivestream, openSettings, setActive])
 
   // Plan 170 D18: `videorc://buddy` opens the avatar's page (main focused the
   // window and synced the library); Make it Alive also opens the creator

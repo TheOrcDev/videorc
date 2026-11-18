@@ -7,6 +7,7 @@ import { Button } from '@/components/ui/button'
 import { FieldGroup, SettingsRow } from '@/components/ui/field'
 import { Spinner } from '@/components/ui/spinner'
 import { Switch } from '@/components/ui/switch'
+import { useSectionFocus } from '@/hooks/use-section-focus'
 import { useVirtualCamera } from '@/hooks/use-virtual-camera'
 import type { VirtualCameraAction } from '@/lib/backend'
 import { useCopyText } from '@/lib/copy-text'
@@ -34,6 +35,7 @@ const PENDING_LABEL: Readonly<Record<Exclude<VirtualCameraAction, 'remove'>, str
  * the section isn't there.
  */
 export function VideorcCameraSection(): ReactElement | null {
+  useSectionFocus('output-videorc-camera')
   const camera = useVirtualCamera()
   const view = virtualCameraView(camera)
   const [pending, setPending] = useState<Exclude<VirtualCameraAction, 'remove'> | 'switch' | null>(
@@ -59,6 +61,7 @@ export function VideorcCameraSection(): ReactElement | null {
 
   return (
     <PanelSection
+      data-section-focus="output-videorc-camera"
       description={VIDEORC_CAMERA_SECTION_DESCRIPTION}
       icon={CameraIcon}
       title={VIDEORC_CAMERA_SECTION_TITLE}

@@ -44,6 +44,7 @@ import {
 import { Switch } from '@/components/ui/switch'
 import { ShortcutTooltip } from '@/components/ui/shortcut-tooltip'
 import { useWorkspaceNav } from '@/components/workspace-nav'
+import { useSectionFocus } from '@/hooks/use-section-focus'
 import { AudioConfigProvider } from '@/hooks/use-audio-config'
 import { useSoundboard } from '@/hooks/use-soundboard'
 import { useStudioCore } from '@/hooks/use-studio'
@@ -182,6 +183,9 @@ export function noiseReductionSwitchView(
 
 /** The Sources "Audio" column: the Microphone, System audio, then the soundboard's Sounds. */
 export function SourcesAudioMixer(): ReactElement {
+  // Plan 250 S4: "Open Sources" on an audio notification lands on its row.
+  useSectionFocus('sources-microphone')
+  useSectionFocus('sources-system-audio')
   const {
     deviceList,
     captureConfig,
@@ -433,6 +437,7 @@ export function MicrophoneChannel({
   return (
     <AudioConfigProvider value={{ dimmed: muted || !microphoneSelected }}>
       <SourceItem
+        data-section-focus="sources-microphone"
         control={
           <ShortcutTooltip accelerator={muteShortcut} label="Mute microphone" platform={platform}>
             <MuteToggle
@@ -762,6 +767,7 @@ export function SystemAudioSettings({
             />
           </ShortcutTooltip>
         }
+        data-section-focus="sources-system-audio"
         data-videorc-system-audio-settings=""
         defaultMoreOpen={defaultMoreOpen}
         disabled={view.permissionRequired}

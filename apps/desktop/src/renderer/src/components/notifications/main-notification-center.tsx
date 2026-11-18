@@ -6,7 +6,7 @@ import { Button } from '@/components/ui/button'
 import { useStudioCore } from '@/hooks/use-studio'
 import { notifications } from '@/lib/notifications'
 import { quietFooterLine } from '@/lib/quiet-while-live'
-import { openWorkspaceTab } from '@/lib/workspace-navigation'
+import { openNotificationSettings } from '@/lib/section-doors'
 
 /**
  * The main window's list: the store itself, in the list's own chunk. Its
@@ -29,7 +29,7 @@ export default function MainNotificationCenter({
             variant="link"
             onClick={() => {
               onClose()
-              openWorkspaceTab('settings', 'general')
+              openNotificationSettings()
             }}
           >
             Settings
