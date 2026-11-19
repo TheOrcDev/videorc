@@ -105,8 +105,23 @@ impl MediaFoundationDrain {
     }
 }
 
+/// Whether the D3D11 drain keeps waiting for owed frames before it sends
+/// `COMMAND_DRAIN` (#1527).
+fn d3d11_pre_drain_wait_continues(owed_frames: usize, waited: Duration) -> bool {
+    owed_frames > 0 && waited < D3D11_PRE_DRAIN_OUTPUT_WAIT
+}
+
 const EVENT_TIMEOUT: Duration = Duration::from_secs(3);
 pub const DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
+/// #1527: how long a D3D11 drain first waits for the frames the transform
+/// already accepted. A `COMMAND_DRAIN` sent while the NVIDIA H.264 MFT is
+/// still encoding a frame blocks inside the transform for its own ~5 s
+/// (GTX 1650 SUPER: 2 of 11 such drains, 0 of 49 with nothing owed), and the
+/// Stop or the Clips → Record hand-over waits with it. The owed frame comes
+/// out within 5 ms (18 of 18), so the bound only matters for a stuck encoder.
+const D3D11_PRE_DRAIN_OUTPUT_WAIT: Duration = Duration::from_millis(100);
+/// Drain messages slower than this are logged, so a field log names the stall.
+const D3D11_SLOW_DRAIN_MESSAGES: Duration = Duration::from_millis(500);
 const D3D11_INPUT_SURFACE_COUNT: usize = 4;
 const TRACKED_SAMPLE_CALLBACK_QUEUE_MULTIPLIER: usize = 4;
 const TRACKED_SAMPLE_GENERATION_KEY: GUID = GUID::from_u128(0xc243c261_ba33_46fd_b45f_3b03013c26d1);
@@ -2959,9 +2974,25 @@ impl MediaFoundationD3d11H264Encoder {
             self.drain_release_callbacks(&mut progress);
             return Ok(progress);
         }
+        // #1527: hand back every frame the transform already accepted before
+        // asking it to drain. A COMMAND_DRAIN sent while the NVIDIA MFT is
+        // still encoding a frame can block inside the transform for ~5 s.
+        let mut progress = MediaFoundationD3d11EncoderProgress::default();
+        self.collect_available_events(&mut progress)?;
+        let owed_wait_started_at = Instant::now();
+        while d3d11_pre_drain_wait_continues(
+            self.submitted_pts.len(),
+            owed_wait_started_at.elapsed(),
+        ) {
+            thread::sleep(EVENT_POLL_INTERVAL);
+            self.collect_available_events(&mut progress)?;
+        }
+        let waited_for_owed = owed_wait_started_at.elapsed();
+        let owed_at_drain = self.submitted_pts.len();
         let now_micros = self.now_micros();
         self.ownership
             .begin_drain(now_micros, duration_micros(timeout))?;
+        let drain_messages_started_at = Instant::now();
         unsafe {
             self.transform
                 .ProcessMessage(MFT_MESSAGE_NOTIFY_END_OF_STREAM, 0)
@@ -2986,8 +3017,17 @@ impl MediaFoundationD3d11H264Encoder {
                     )
                 })?;
         }
+        let drain_messages_took = drain_messages_started_at.elapsed();
+        if drain_messages_took >= D3D11_SLOW_DRAIN_MESSAGES {
+            tracing::warn!(
+                encoder = %self.identity,
+                took_ms = drain_messages_took.as_millis() as u64,
+                owed_frames = owed_at_drain,
+                waited_for_owed_ms = waited_for_owed.as_millis() as u64,
+                "The Media Foundation encoder blocked on its drain request (#1527)"
+            );
+        }
 
-        let mut progress = MediaFoundationD3d11EncoderProgress::default();
         loop {
             self.drain_release_callbacks(&mut progress);
             while let Some(event_type) = self.next_event()? {
@@ -4610,6 +4650,28 @@ mod tests {
         // A later renegotiation in steady state is not a start step.
         steps.stamp_once(OutputRenegotiated);
         assert!(steps.take().is_empty());
+    }
+
+    #[test]
+    fn d3d11_drain_waits_for_owed_frames_only_within_its_bound() {
+        // #1527: nothing owed sends the drain at once.
+        assert!(!d3d11_pre_drain_wait_continues(0, Duration::ZERO));
+        // An owed frame is waited for until the bound, never past it.
+        assert!(d3d11_pre_drain_wait_continues(1, Duration::ZERO));
+        assert!(d3d11_pre_drain_wait_continues(
+            2,
+            D3D11_PRE_DRAIN_OUTPUT_WAIT - Duration::from_millis(1)
+        ));
+        assert!(!d3d11_pre_drain_wait_continues(
+            1,
+            D3D11_PRE_DRAIN_OUTPUT_WAIT
+        ));
+        // The wait stays far inside the Stop drain bound it precedes.
+        assert!(
+            D3D11_PRE_DRAIN_OUTPUT_WAIT * 5
+                <= crate::encoder_bridge::MEDIA_FOUNDATION_STOP_DRAIN_TIMEOUT
+        );
+        assert!(D3D11_SLOW_DRAIN_MESSAGES < DRAIN_TIMEOUT);
     }
 
     #[test]
