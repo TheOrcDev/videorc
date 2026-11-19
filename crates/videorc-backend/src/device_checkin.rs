@@ -278,6 +278,10 @@ async fn run(state: AppState, mut events: broadcast::Receiver<ServerEvent>) {
     let Some(client) = http_client() else {
         return;
     };
+    // Pin the launch delay outside the loop: a `select!` sleep created
+    // inside is dropped (and restarted) on every event, and the bus is busy.
+    let launch = tokio::time::sleep(LAUNCH_DELAY);
+    tokio::pin!(launch);
     let mut launch_done = false;
     loop {
         tokio::select! {
@@ -286,9 +290,12 @@ async fn run(state: AppState, mut events: broadcast::Receiver<ServerEvent>) {
                     try_send(&state, &client).await;
                 }
                 Err(broadcast::error::RecvError::Closed) => return,
-                Err(broadcast::error::RecvError::Lagged(_)) | Ok(_) => {}
+                Err(broadcast::error::RecvError::Lagged(_)) => {
+                    try_send(&state, &client).await;
+                }
+                Ok(_) => {}
             },
-            () = tokio::time::sleep(LAUNCH_DELAY), if !launch_done => {
+            () = &mut launch, if !launch_done => {
                 launch_done = true;
                 try_send(&state, &client).await;
             }
@@ -297,11 +304,19 @@ async fn run(state: AppState, mut events: broadcast::Receiver<ServerEvent>) {
 }
 
 async fn try_send(state: &AppState, client: &reqwest::Client) {
-    let Some(token) = crate::account::stored_session_token() else {
-        return;
-    };
-    let Some(account_fp) = signed_in_fingerprint(state).await else {
-        return;
+    // Token and fingerprint are one identity: read both under the account
+    // transition lock (same order as stream_report_email::web_access) so a
+    // sign-in between the two reads cannot pair one account's token with
+    // another's fingerprint. Drop the lock before the HTTP call.
+    let (token, account_fp) = {
+        let _transition = state.account_auth_transition.lock().await;
+        let Some(token) = crate::account::stored_session_token() else {
+            return;
+        };
+        let Some(account_fp) = signed_in_fingerprint(state).await else {
+            return;
+        };
+        (token, account_fp)
     };
     let Some(install_id) = ensure_install_id(state) else {
         return;

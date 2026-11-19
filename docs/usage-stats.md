@@ -33,7 +33,7 @@ Separately, while a Videorc account is signed in, the desktop posts one
 small check-in to `POST /api/desktop/device-checkin` on launch and on
 sign-in, at most once a day per account on this install. It reuses
 `usageStats.installId` and sends `os`, `arch`, optional `osVersion`,
-`appVersion` and `channel` (`alpha` / `beta` / `stable`). It is
+`appVersion` and `channel` (`alpha` / `beta` / `stable` / `other`). It is
 fire-and-forget: it never blocks the UI, never queues offline, and does
 not follow the usage-stats switch (a signed-in user who never records
 still has a platform). The web table, upsert and platform-split SQL live
