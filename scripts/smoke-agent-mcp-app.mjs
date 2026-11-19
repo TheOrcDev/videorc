@@ -911,7 +911,8 @@ try {
     fail(`could not read the Studio's copy: ${JSON.stringify(copy)}`)
   }
   // What the Studio window shows from here on: the Go Live dialog (it must
-  // never open for an agent) and every toast (the D11 notices).
+  // never open for an agent), every toast, and every notification behind the
+  // bell (the D11 notices, since plan 250).
   await evalRenderer(`
     if (!window.__videorcAgentSmoke) {
       const seen = { goLiveDialog: false, toasts: [] }
@@ -921,6 +922,10 @@ try {
           const text = (toast.textContent ?? '').trim()
           if (text && !seen.toasts.includes(text)) seen.toasts.push(text)
         }
+        for (const entry of window.__videorcSmokeNotifications?.().entries ?? []) {
+          const text = String(entry.title ?? '').trim()
+          if (text && !seen.toasts.includes(text)) seen.toasts.push(text)
+        }
       }
       new MutationObserver(scan).observe(document.body, { childList: true, subtree: true, characterData: true })
       scan()
@@ -928,7 +933,17 @@ try {
     }
     return true
   `)
-  const studioSeen = () => evalRenderer('return window.__videorcAgentSmoke')
+  // A notification changes no DOM while the list is closed, so the observer
+  // above would miss it: read the list on every ask too.
+  const studioSeen = () =>
+    evalRenderer(`
+      const seen = window.__videorcAgentSmoke
+      for (const entry of window.__videorcSmokeNotifications?.().entries ?? []) {
+        const text = String(entry.title ?? '').trim()
+        if (seen && text && !seen.toasts.includes(text)) seen.toasts.push(text)
+      }
+      return seen
+    `)
   const waitForNotice = async (sentence) => {
     await waitUntil(`the notice "${sentence}" on agents.activity`, async () => ({
       done: noticeSeen(sentence),

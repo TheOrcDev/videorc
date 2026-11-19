@@ -7,62 +7,16 @@ import type {
   CloudStatus,
   CloudTestOutput
 } from './backend'
-import {
-  CLOUD_TOAST_ID,
-  cloudFallbackToast,
-  cloudLostToast,
-  cloudRestartToast,
-  cloudShowCapToast,
-  formatCloudCountdown
-} from './cloud-toasts'
-import { HAND_OFF_UNCONFIRMED, cloudTakenOverTitle } from './cloud-handoff-view'
-import { requestCloudSectionFocus } from './cloud-section-focus'
-import { TOAST_WITH_DESCRIPTION_MS, toast } from './toast'
+import { CLOUD_TOAST_ID, formatCloudCountdown } from './cloud-toasts'
+import { HAND_OFF_UNCONFIRMED } from './cloud-handoff-view'
+import { toast } from './toast'
 import { offlineError, toastUserError } from './user-error'
-import { openWorkspaceTab } from './workspace-navigation'
 
-// Videorc Cloud's notices and user actions: loaded with the first cloud
-// status or action, so the dispatch for plan 234's managed-show cap and
-// quality fallback stays beside its copy, outside the eager provider. The
-// focus request lives in `cloud-section-focus.ts`, which the Livestream
-// section imports without this module's app-wide imports.
-
-/**
- * Every cloud toast shares one id, so a newer one replaces the older, and
- * sonner merges a replacement into the toast it replaces. A one-line status
- * toast must therefore clear what an earlier cloud toast carried (a
- * description, an action, an endless duration), or it shows under the new
- * title (plan 243 C6: the take-over toast kept "Set it up in Destinations").
- */
-export const CLOUD_STATUS_TOAST = {
-  id: CLOUD_TOAST_ID,
-  description: undefined,
-  action: undefined,
-  cancel: undefined,
-  duration: TOAST_WITH_DESCRIPTION_MS
-} as const
-
-/** The provider's status notifications, in their shared toast's priority order. */
-export function toastCloudStatus(previous: CloudStatus | null, next: CloudStatus): void {
-  if (next.endReason === 'ended-elsewhere' && previous?.endReason !== 'ended-elsewhere') {
-    toast.info('The show was ended from videorc.com.', CLOUD_STATUS_TOAST)
-  }
-  const fallback = cloudFallbackToast(previous, next)
-  if (fallback) toast.warning(fallback, CLOUD_STATUS_TOAST)
-  const lost = cloudLostToast(previous, next)
-  if (lost) toast.warning(lost, CLOUD_STATUS_TOAST)
-  const restarted = cloudRestartToast(previous, next)
-  if (restarted) toast.warning(restarted, CLOUD_STATUS_TOAST)
-  const cap = cloudShowCapToast(previous, next)
-  if (cap) toast.warning(cap, CLOUD_STATUS_TOAST)
-  // Plan 222 U5: past the month's hours is news, never a cut (D18).
-  if (next.allowancePast) toastCloudAllowancePast(previous, next)
-  // Plan 243 C5: another device continued the show and this computer
-  // stopped. Neutral news: the Studio's notice offers Continue here.
-  if (next.stoppedBy === 'taken-over' && previous?.stoppedBy !== 'taken-over') {
-    toast.info(cloudTakenOverTitle(next.onAir), CLOUD_STATUS_TOAST)
-  }
-}
+// Videorc Cloud's user actions and the answers to them: loaded with the
+// first cloud action, outside the eager provider. What the cloud reports on
+// its own (a fallback, a lost show, a restart, the cap, a take-over, the
+// once-per-account announcement) is a notification since plan 250:
+// `notifications/sources/cloud.ts`.
 
 type CommitCloudStatus = (status: CloudStatus) => void
 
@@ -180,34 +134,3 @@ export const CLOUD_ANNOUNCE_TOAST = {
   title: 'Videorc Cloud is on',
   description: 'Your stream stays on air if this computer drops. Set it up in Destinations.'
 } as const
-
-/** U5: the provider hands every status that runs past the hours here. */
-export function toastCloudAllowancePast(previous: CloudStatus | null, next: CloudStatus): void {
-  const past = cloudAllowancePastToast(previous, next)
-  if (past) toast.info(past.title, { id: CLOUD_TOAST_ID, description: past.description })
-}
-
-/**
- * U1: show "Videorc Cloud is on" and tell the backend it showed, so this
- * account never sees it again on this computer. The provider calls it once,
- * outside a session.
- */
-export function announceCloud(client: BackendClient, commit: (status: CloudStatus) => void): void {
-  toast.info(CLOUD_ANNOUNCE_TOAST.title, {
-    id: CLOUD_TOAST_ID,
-    description: CLOUD_ANNOUNCE_TOAST.description,
-    action: {
-      label: 'Open Destinations',
-      onClick: () => {
-        requestCloudSectionFocus()
-        openWorkspaceTab('live', 'setup')
-      }
-    }
-  })
-  void client
-    .requestTyped('cloud.announce.seen')
-    .then(commit)
-    .catch(() => {
-      // Shown once in this run either way; the next launch asks again.
-    })
-}

@@ -504,6 +504,33 @@ export async function managedHarness(
         await setTheme(original)
       }
     },
+    /**
+     * Plan 250: what Videorc noticed on its own is an entry behind the bell,
+     * not a toast. True once an entry with this title is in the list.
+     */
+    async hasNotification(title) {
+      return h.eval(
+        `const read = window.__videorcSmokeNotifications?.(); return Boolean(read?.entries.some((entry) => entry.title === ${JSON.stringify(title)}))`
+      )
+    },
+    /** The list behind the bell, opened for a capture and closed again. */
+    async captureNotifications(name) {
+      const directory = process.env.VIDEORC_SMOKE_SHOTS_DIR
+      // Opening the list marks everything read: only when a capture is wanted.
+      if (!directory || screenshots.has(name)) return
+      const list = '[data-videorc-notification-list]'
+      const bell = '[data-videorc-notification-bell]'
+      await h.eval(
+        `if (!document.querySelector(${JSON.stringify(list)})) document.querySelector(${JSON.stringify(bell)})?.click(); return true`
+      )
+      try {
+        await h.captureUi(name, list)
+      } finally {
+        await h.eval(
+          `if (document.querySelector(${JSON.stringify(list)})) document.querySelector(${JSON.stringify(bell)})?.click(); return true`
+        )
+      }
+    },
     // `account.refresh` is main's (the admin role): the renderer asks main for
     // it over IPC, as the app's own account refresh does. Main defers it while
     // a session captures, so a sign-in is followed, as in the app, by the

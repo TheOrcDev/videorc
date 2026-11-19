@@ -1,4 +1,4 @@
-import { toast } from '@/lib/toast'
+import { resolveNotification } from '@/lib/notify'
 
 import type { Device, DeviceList, DeviceStatus, ReplayBufferState } from '@/lib/backend'
 import type { SystemAudioIssue } from '@/lib/system-audio-session'
@@ -185,15 +185,20 @@ export function systemAudioIssueCopy(issue: SystemAudioIssue, platform?: string)
 
 /** The window event the Studio answers by turning System audio on again. */
 export const SYSTEM_AUDIO_RESUME_EVENT = 'videorc:resume-system-audio'
-/** The toast the echo guard's pause shows (plan 076). */
-export const SYSTEM_AUDIO_ECHO_TOAST_ID = 'system-audio-echo-paused'
+/** The notification the echo guard's pause opens (plans 076 and 250). */
+export const SYSTEM_AUDIO_ECHO_NOTIFICATION = 'system-audio-echo'
 
 /**
  * Plan 076: resume System audio after the echo guard paused it. The Studio
- * owns the switch; a lazy surface asks through a window event.
+ * owns the switch; a lazy surface asks through a window event. The pause's
+ * entry behind the bell resolves with the press: the backend sends no code
+ * for it.
  */
 export function requestSystemAudioResume(): void {
-  toast.dismiss(SYSTEM_AUDIO_ECHO_TOAST_ID)
+  resolveNotification(SYSTEM_AUDIO_ECHO_NOTIFICATION, {
+    title: 'System audio is back on',
+    was: 'It was paused'
+  })
   window.dispatchEvent(new Event(SYSTEM_AUDIO_RESUME_EVENT))
 }
 

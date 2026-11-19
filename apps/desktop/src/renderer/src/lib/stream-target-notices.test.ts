@@ -25,6 +25,51 @@ const before = (state: StreamTargetState): Map<string, StreamTargetState> =>
   new Map([['yt', state]])
 
 describe('streamTargetNotices', () => {
+  it('says a destination that is still down again when the others change', () => {
+    const states = (yt: StreamTargetState, tw: StreamTargetState) =>
+      new Map<string, StreamTargetState>([
+        ['yt', yt],
+        ['tw', tw]
+      ])
+    // Both were down; Twitch is back: YouTube is no longer the urgent one.
+    const eased = streamTargetNotices(states('failed', 'failed'), [
+      target('failed'),
+      other('tw', 'live')
+    ])
+    expect(eased).toEqual([
+      expect.objectContaining({
+        key: 'stream-target:yt',
+        urgent: false,
+        description: 'The other destination keeps streaming.'
+      }),
+      expect.objectContaining({ key: 'stream-target:tw', kind: 'success' })
+    ])
+    // YouTube reconnects while Twitch is live, then Twitch stops: nobody is on air.
+    const worse = streamTargetNotices(states('reconnecting', 'live'), [
+      target('reconnecting'),
+      other('tw', 'stopped')
+    ])
+    expect(worse).toEqual([
+      expect.objectContaining({
+        key: 'stream-target:yt',
+        urgent: true,
+        description: "Viewers see nothing until it's back."
+      })
+    ])
+    // Twitch is gone from the list altogether: nobody else is on air.
+    expect(streamTargetNotices(states('failed', 'live'), [target('failed')])).toEqual([
+      expect.objectContaining({ key: 'stream-target:yt', urgent: true })
+    ])
+    // A destination added live was not on air before: YouTube is eased.
+    expect(
+      streamTargetNotices(new Map([['yt', 'failed']]), [target('failed'), other('tw', 'live')])
+    ).toEqual([expect.objectContaining({ key: 'stream-target:yt', urgent: false })])
+    // Nothing about the others changed: nothing is said again.
+    expect(
+      streamTargetNotices(states('failed', 'live'), [target('failed'), other('tw', 'live')])
+    ).toEqual([])
+  })
+
   it('stays quiet for a destination that goes live at start', () => {
     expect(streamTargetNotices(new Map(), [target('live')])).toEqual([])
   })
@@ -59,7 +104,10 @@ describe('streamTargetNotices', () => {
     ).toEqual([
       {
         key: 'stream-target:yt',
+        targetId: 'yt',
         kind: 'error',
+        // Plan 250: the only destination on air stopped, so it is urgent.
+        urgent: true,
         title: 'Streaming to YouTube stopped',
         description: 'YouTube ended this broadcast'
       }
@@ -139,6 +187,7 @@ describe('streamTargetNotices through Videorc Cloud', () => {
     expect(streamTargetNotices(previous, targets)).toEqual([
       {
         key: 'stream-target:videorc-cloud-horizontal',
+        targetId: 'videorc-cloud-horizontal',
         kind: 'warning',
         title: 'Reconnecting to Videorc Cloud',
         description: 'Viewers see Be right back until this computer reconnects.'

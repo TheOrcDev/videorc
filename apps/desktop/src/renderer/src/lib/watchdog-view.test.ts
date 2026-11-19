@@ -15,10 +15,7 @@ import {
   watchdogHistorySpan,
   watchdogNotificationWords,
   watchdogNotifyCandidates,
-  watchdogQuietedAlerts,
-  watchdogSameWords,
-  watchdogStayedOpenDelayMs,
-  watchdogToastId
+  watchdogStayedOpenDelayMs
 } from '@/lib/watchdog-view'
 import { watchdogCardVariant, watchdogQuietLabel } from '@/components/studio/watchdog-alert-card'
 
@@ -104,29 +101,6 @@ describe('watchdog view (plan 223 A5, A6)', () => {
         alert({ check: 'destination-down', title: "Twitch (main) isn't receiving your stream" })
       )
     ).toBe('Twitch (main) down')
-    // L1: the clock in a detail is not a change of words.
-    expect(
-      watchdogSameWords(
-        'Muted for 0:41. Viewers hear no voice.',
-        'Muted for 0:42. Viewers hear no voice.'
-      )
-    ).toBe(true)
-    expect(
-      watchdogSameWords(
-        'Muted for 1:02:03. Viewers hear no voice.',
-        'Muted for 0:42. Viewers hear no voice.'
-      )
-    ).toBe(true)
-    expect(
-      watchdogSameWords(
-        'Muted for 0:42. Viewers hear no voice.',
-        'Muted for 0:42. Viewers hear no voice. Nothing else is playing.'
-      )
-    ).toBe(false)
-    expect(watchdogToastId(alert({ check: 'mic-muted' }))).toBe('watchdog:mic-muted')
-    expect(watchdogToastId(alert({ check: 'destination-down', targetId: 'yt' }))).toBe(
-      'watchdog:destination-down:yt'
-    )
   })
 
   it('writes the system notification as the plan does', () => {
@@ -201,21 +175,14 @@ describe('watchdog view (plan 223 A5, A6)', () => {
     // The fold: both per-leg ids leave, withdrawn; no "is back".
     const withdrawn = [youtube.id, twitch.id]
     expect(watchdogClearedAlerts([youtube, twitch], [all], withdrawn)).toEqual([])
-    expect(watchdogQuietedAlerts([youtube, twitch], [all], withdrawn).map((a) => a.id)).toEqual(
-      withdrawn
-    )
     // A real recovery of one leg while the other stays down.
     expect(watchdogClearedAlerts([youtube, twitch], [twitch]).map((a) => a.id)).toEqual([
       youtube.id
     ])
-    // "I meant to" keeps the card listed and hidden: the toast goes, quietly.
+    // "I meant to" keeps the card listed and hidden: no recovery is said.
     const muted = alert({ check: 'mic-muted' })
     const meantTo = { ...muted, state: 'snoozed' as const, meantTo: true }
     expect(watchdogClearedAlerts([muted], [meantTo])).toEqual([])
-    expect(watchdogQuietedAlerts([muted], [meantTo]).map((a) => a.id)).toEqual([muted.id])
-    const seen = { ...muted, state: 'acknowledged' as const }
-    expect(watchdogQuietedAlerts([muted], [seen]).map((a) => a.id)).toEqual([muted.id])
-    expect(watchdogQuietedAlerts([seen], [seen])).toEqual([])
     // The session's end withdraws everything.
     expect(watchdogClearedAlerts([muted, all], [], [muted.id, all.id])).toEqual([])
   })

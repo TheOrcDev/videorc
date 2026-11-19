@@ -1,6 +1,12 @@
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import test from 'node:test'
-import { defaultRingVerdict, SOFTWARE_ENCODER_GUARD_PREFIX } from './remote-control-smoke-gates.mjs'
+import {
+  defaultRingVerdict,
+  SOFTWARE_ENCODER_GUARD_PREFIX,
+  STREAM_MANAGER_WAYLAND_REFUSAL,
+  streamManagerScreenKeyPlan
+} from './remote-control-smoke-gates.mjs'
 
 const guardReason = `${SOFTWARE_ENCODER_GUARD_PREFIX} (OpenH264), so keeping the last seconds would run a second encode. Turn it on here if the computer keeps up.`
 
@@ -20,4 +26,49 @@ test('a bare off, a failed start or a ring still starting is not an answer', () 
   assert.equal(defaultRingVerdict({ state: 'error', reason: guardReason }), null)
   assert.equal(defaultRingVerdict({ state: 'starting' }), null)
   assert.equal(defaultRingVerdict(null), null)
+})
+
+test('the Screen key plan follows what describe reports, not the environment', () => {
+  const one = [{ id: '1', name: 'Built-in' }]
+  const two = [...one, { id: '2', name: 'External' }]
+  const plan = (describe) => streamManagerScreenKeyPlan(describe, 'linux')
+  assert.equal(plan({ screenMoves: 'supported', screens: two }), 'move')
+  assert.equal(plan({ screenMoves: 'wayland', screens: two }), 'wayland')
+  assert.equal(
+    plan({
+      screenMoves: 'wayland',
+      screens: [...two, { id: '3', name: 'C' }]
+    }),
+    'wayland'
+  )
+  assert.equal(plan({ screenMoves: 'supported', screens: one }), 'one-screen')
+  assert.equal(plan({ screenMoves: 'wayland', screens: one }), 'one-screen')
+  assert.equal(plan({ screens: two }), null)
+  assert.equal(plan({ screenMoves: 'x11', screens: two }), null)
+  assert.equal(plan(undefined), null)
+})
+
+test('the Wayland plan is taken on Linux only', () => {
+  const two = [
+    { id: '1', name: 'Built-in' },
+    { id: '2', name: 'External' }
+  ]
+  for (const platform of ['darwin', 'win32']) {
+    assert.equal(
+      streamManagerScreenKeyPlan({ screenMoves: 'wayland', screens: two }, platform),
+      null
+    )
+    assert.equal(
+      streamManagerScreenKeyPlan({ screenMoves: 'supported', screens: two }, platform),
+      'move'
+    )
+  }
+})
+
+test('the Wayland refusal is the copy the Studio sends', () => {
+  const copy = readFileSync(
+    new URL('../../apps/desktop/src/renderer/src/lib/studio-actions/copy.ts', import.meta.url),
+    'utf8'
+  )
+  assert.ok(copy.includes(JSON.stringify(STREAM_MANAGER_WAYLAND_REFUSAL)))
 })

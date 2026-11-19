@@ -77,6 +77,12 @@ export type SettingsState = {
    */
   studioChat?: boolean
   /**
+   * Quiet while recording or live (plan 250, D4): only an urgent problem
+   * pops up as a toast; everything else waits behind the bell. Default on:
+   * an absent key is on.
+   */
+  quietWhileLive?: boolean
+  /**
    * OS-global shortcuts (work with the app unfocused — a Stream Deck's
    * native Hotkey action drives these). Electron accelerator syntax.
    */

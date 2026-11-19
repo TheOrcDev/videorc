@@ -30,6 +30,21 @@ describe('shellShortcutAction (plan 174 S3.21, A-2, A-12)', () => {
     expect(shellShortcutAction(press('x'), mac)).toBeNull()
   })
 
+  it('opens Notifications on ⇧⌘B, and closes it from under its own list (plan 250, D10)', () => {
+    const b = press('b', { shiftKey: true })
+    expect(shellShortcutAction(b, mac)).toBe('toggle-notifications')
+    expect(shellShortcutAction(press('b'), mac)).toBeNull()
+    // The list is a popover, so it counts as an open surface: only its own
+    // key acts from under it, and no dialog lets it through.
+    expect(shellShortcutAction(b, { ...mac, modalOpen: true, notificationsOpen: true })).toBe(
+      'toggle-notifications'
+    )
+    expect(shellShortcutAction(b, { ...mac, modalOpen: true })).toBeNull()
+    expect(
+      shellShortcutAction(press('k'), { ...mac, modalOpen: true, notificationsOpen: true })
+    ).toBeNull()
+  })
+
   it('shows Stream Manager on ⌘J and toggles it on ⇧⌘J', () => {
     expect(shellShortcutAction(press('j'), mac)).toBe('show-stream-manager')
     expect(shellShortcutAction(press('j', { shiftKey: true }), mac)).toBe('toggle-stream-manager')

@@ -6,12 +6,7 @@
 
 import type { WatchdogAlert } from '@/lib/backend'
 
-export {
-  topWatchdogAlert,
-  visibleWatchdogAlerts,
-  watchdogChipLabel,
-  watchdogToastId
-} from './watchdog-rank'
+export { topWatchdogAlert, visibleWatchdogAlerts, watchdogChipLabel } from './watchdog-rank'
 
 /**
  * The system notification's words (plan 223, "System notification form"):
@@ -26,16 +21,6 @@ export function watchdogNotificationWords(alert: WatchdogAlert): { title: string
     ? `Muted for ${clock} on the livestream. Click to open the Studio.`
     : `${alert.detail.replace(/\s+$/, '')} Click to open the Studio.`
   return { title, body }
-}
-
-/**
- * Two card texts that differ only in their live clock ("0:41" vs "0:42")
- * are the same words (the backend's `same_words`): the list re-emits them
- * every second, the toast must not (L1).
- */
-export function watchdogSameWords(before: string, after: string): boolean {
-  const strip = (text: string) => text.replace(/[\d:]+/g, '#')
-  return strip(before) === strip(after)
 }
 
 /** Seconds since the alert opened, from its RFC 3339 `since`. */
@@ -89,9 +74,9 @@ export function watchdogStayedOpenDelayMs(
 
 /**
  * Alerts that were listed before and are gone now because their signal
- * recovered: their clearing toasts. An id the backend named as withdrawn
- * (M2: a fold, a replace, the session's end) is not a recovery; see
- * `watchdogQuietedAlerts`.
+ * recovered: their entries behind the bell resolve (plan 250). An id the
+ * backend named as withdrawn (M2: a fold, a replace, the session's end) is
+ * not a recovery.
  */
 export function watchdogClearedAlerts(
   previous: readonly WatchdogAlert[],
@@ -103,29 +88,7 @@ export function watchdogClearedAlerts(
   return previous.filter((alert) => !ids.has(alert.id) && !quiet.has(alert.id))
 }
 
-/**
- * Alerts whose toast should simply go (M2): withdrawn without a recovery,
- * or snoozed (ten minutes, or "I meant to", which keeps the card listed and
- * hidden) or acknowledged since the last list.
- */
-export function watchdogQuietedAlerts(
-  previous: readonly WatchdogAlert[],
-  next: readonly WatchdogAlert[],
-  withdrawn: readonly string[] = []
-): WatchdogAlert[] {
-  const ids = new Set(next.map((alert) => alert.id))
-  const quiet = new Set(withdrawn)
-  const before = new Map(previous.map((alert) => [alert.id, alert]))
-  const gone = previous.filter((alert) => !ids.has(alert.id) && quiet.has(alert.id))
-  const hushed = next.filter((alert) => {
-    if (alert.state === 'open') return false
-    const known = before.get(alert.id)
-    return !known || known.state === 'open'
-  })
-  return [...gone, ...hushed]
-}
-
-/** The success toast when a check clears ("Copy (exact)", the last row). */
+/** The recovery's words when a check clears ("Copy (exact)", the last row). */
 export function watchdogClearedToast(alert: WatchdogAlert): string {
   switch (alert.check) {
     case 'mic-muted':

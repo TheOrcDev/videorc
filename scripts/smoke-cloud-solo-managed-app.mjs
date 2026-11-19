@@ -63,7 +63,12 @@ async function captureUi() {
       (s) => s.stoppedBy === 'taken-over' && s.show?.resumable,
       'capture fixture taken over'
     )
-    await h.captureUi('taken-over', '[data-sonner-toast]', 'Your show continues on Smoke phone.')
+    // Plan 250: the neutral take-over news is an entry behind the bell.
+    await waitFor(
+      () => h.hasNotification('Your show continues on Smoke phone'),
+      'take-over notification'
+    )
+    await h.captureNotifications('taken-over')
     await h.captureUi('live-elsewhere', '[data-testid=cloud-resume-notice]')
     h.assertNoPlatformEnd(at)
     h.scanLeaks()
@@ -450,11 +455,11 @@ async function run(pass) {
         assert.ok(terminal && terminal.atMs - at <= 3000, 'taken-over stop exceeded three seconds')
         h.assertStopOrder(at, 'taken-over')
         h.assertNoPlatformEnd(at)
-        assert.ok(
-          await h.eval(
-            `return document.body.textContent.includes('Your show continues on Smoke phone.')`
-          ),
-          'neutral takeover toast missing'
+        // The renderer's lazy notice module settles after the backend socket.
+        await waitFor(
+          () => h.hasNotification('Your show continues on Smoke phone'),
+          'neutral take-over notification',
+          3000
         )
         await waitFor(
           () =>
@@ -463,7 +468,7 @@ async function run(pass) {
             ),
           'notice names the phone'
         )
-        await h.captureUi('taken-over', '[data-sonner-toast]')
+        await h.captureNotifications('taken-over')
         await h.captureUi('live-elsewhere', '[data-testid=cloud-resume-notice]')
         await savedRecording(continuedRecording)
       }

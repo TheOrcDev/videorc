@@ -108,8 +108,11 @@ describe('Electron IPC contract', () => {
     // S8 adds main-only system PCM and its observed resource inspection.
     // 198: plan 249 S23 adds the main-only room program camera (available,
     // open, frame, close and inspection).
-    expect(Object.keys(electronInvokeApiMethods)).toHaveLength(198)
-    expect(new Set(Object.values(electronInvokeApiMethods)).size).toBe(198)
+    // 202: plan 250 S8 adds the Stream Manager's bell: the notification list
+    // (get, push), the pop-up offered to the Stream Manager, and the relay of
+    // what is pressed there (comments-window:notification-act).
+    expect(Object.keys(electronInvokeApiMethods)).toHaveLength(202)
+    expect(new Set(Object.values(electronInvokeApiMethods)).size).toBe(202)
     expectTypeOf<ElectronInvokeArgs<'resource:trash-session-deletion'>>().toEqualTypeOf<
       Parameters<VideorcApi['trashSessionDeletion']>
     >()

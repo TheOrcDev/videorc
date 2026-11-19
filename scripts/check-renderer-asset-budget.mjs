@@ -176,11 +176,18 @@ const htmlPath = resolve(
 // entry 1,100,155 / 233,081; minified it measures 1,112,296 raw / 354,508 gzip,
 // entry 537,756 / 164,647. Ceilings unchanged in that PR: re-baselining them to
 // the minified build is the owner's call.
+// Re-baselined 2026-11-19 (owner-approved, after #1511 and #1512): main at
+// 1b659ad0 measures 1,033,720 raw / 329,062 gzip, entry 535,152 / 164,562,
+// minified. Every ceiling now keeps the usual ~2.5% challenge margin over that
+// (eager 1,060,000 / 337,000, entry 549,000 / 169,000), which also covers the
+// notification center's expected ~1-1.5 KB eager gzip. The old unminified
+// ceilings (2,425,000 / 500,000, entry 1,200,000 / 235,000) left ~145 KB gzip
+// of slack, so they caught nothing. Keep new surfaces lazy.
 const budget = {
-  maxTotalRawBytes: Number(process.env.VIDEORC_RENDERER_MAX_EAGER_RAW_BYTES ?? 2_425_000),
-  maxTotalGzipBytes: Number(process.env.VIDEORC_RENDERER_MAX_EAGER_GZIP_BYTES ?? 500_000),
-  maxEntryRawBytes: Number(process.env.VIDEORC_RENDERER_MAX_ENTRY_RAW_BYTES ?? 1_200_000),
-  maxEntryGzipBytes: Number(process.env.VIDEORC_RENDERER_MAX_ENTRY_GZIP_BYTES ?? 235_000)
+  maxTotalRawBytes: Number(process.env.VIDEORC_RENDERER_MAX_EAGER_RAW_BYTES ?? 1_060_000),
+  maxTotalGzipBytes: Number(process.env.VIDEORC_RENDERER_MAX_EAGER_GZIP_BYTES ?? 337_000),
+  maxEntryRawBytes: Number(process.env.VIDEORC_RENDERER_MAX_ENTRY_RAW_BYTES ?? 549_000),
+  maxEntryGzipBytes: Number(process.env.VIDEORC_RENDERER_MAX_ENTRY_GZIP_BYTES ?? 169_000)
 }
 
 let measurement = null
