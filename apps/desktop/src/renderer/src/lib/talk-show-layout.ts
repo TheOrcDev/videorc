@@ -1,4 +1,5 @@
-import type { CloudRoomStatus, CloudStageLayout } from '@/lib/backend'
+import type { CloudRoomShown, CloudRoomStatus, CloudStageLayout } from '@/lib/backend'
+import { STAGE_MAX_SCREENS, stageScreens } from '@/lib/stage-screens'
 
 // The talk-show geometry (plan 224 D8), mirrored from the runner's
 // `talk_show_layout.rs` so the Show stage draws the picture the cloud sends.
@@ -34,7 +35,19 @@ export type StageInput = {
   spotlight?: string | null
   /** The identity whose screen is shared, when one is. */
   screen?: string | null
+  /**
+   * Plan 251: the two screens of the two-screens layout, left then right
+   * (top then bottom on a portrait canvas). Read through `stageScreens`.
+   */
+  screens?: readonly string[] | null
 }
+
+/**
+ * What the program draws, after its fallbacks. `two-screens` is never sent:
+ * on the wire it is `screen-people` with two `screens` (plan 251), so an
+ * older desktop, page or runner still draws one screen and the people.
+ */
+export type DrawnStageLayout = CloudStageLayout | 'two-screens'
 
 const even = (value: number): number => Math.floor(value) & ~1
 const shortSide = (canvas: StageCanvas): number => Math.min(canvas.width, canvas.height)
@@ -143,12 +156,76 @@ function gridCols(n: number, portrait: boolean): number {
   return n <= 3 ? 1 : 2
 }
 
-/** The layout the runner actually draws for this input (its fallbacks). */
-export function effectiveStageLayout(input: StageInput): CloudStageLayout {
+/**
+ * The layout the program actually draws for this input (its fallbacks):
+ * `screen-people` with two screens is `two-screens`, with one it is itself,
+ * and with none it is the grid.
+ */
+export function effectiveStageLayout(input: StageInput): DrawnStageLayout {
   const people = input.people.filter((identity) => identity.length > 0)
-  if (input.layout === 'screen-people' && !input.screen) return 'side-by-side'
+  if (input.layout === 'screen-people') {
+    const screens = stageScreens(input).length
+    if (screens === 0) return 'side-by-side'
+    return screens >= STAGE_MAX_SCREENS ? 'two-screens' : 'screen-people'
+  }
   if (input.layout === 'solo' && people.length > 1) return 'side-by-side'
   return input.layout
+}
+
+/** Columns for the people under two screens (plan 251). */
+function underScreensCols(n: number, portrait: boolean): number {
+  if (!portrait) return Math.max(n, 1)
+  if (n <= 2) return Math.max(n, 1)
+  return n <= 4 ? 2 : 3
+}
+
+/**
+ * Plan 251: two screens across the top, everyone on stage in a row under
+ * them. On a portrait canvas the screens stack, each full width, and the
+ * people take a grid under them. Each screen's box is 16:9; the picture is
+ * contained in it, as on `screen-people`.
+ */
+function twoScreensTiles(
+  canvas: StageCanvas,
+  people: readonly string[],
+  screens: readonly string[]
+): StageTile[] {
+  const gutter = stageGutter(canvas)
+  const area = insetArea(canvas)
+  const portrait = canvas.height > canvas.width
+  const cellW = portrait ? area.w : Math.floor((area.w - gutter) / 2)
+  const cellH = Math.floor((cellW * 9) / 16)
+  const first = fit16x9({ x: area.x, y: area.y, w: cellW, h: cellH })
+  const second = portrait
+    ? fit16x9({ x: area.x, y: bottom(first) + gutter, w: cellW, h: cellH })
+    : fit16x9({ x: right(area) - cellW, y: area.y, w: cellW, h: cellH })
+  const tiles: StageTile[] = [first, second].map((rect, index) => ({
+    identity: screens[index] ?? '',
+    kind: 'screen',
+    rect,
+    cornerRadius: stageCornerRadius(canvas)
+  }))
+  const top = bottom(second) + gutter
+  const below: StageRect = {
+    x: area.x,
+    y: top,
+    w: area.w,
+    h: Math.max(0, bottom(area) - top)
+  }
+  const cells = gridCells(below, people.length, underScreensCols(people.length, portrait), gutter)
+  people.forEach((identity, index) => tiles.push(person(canvas, identity, fit16x9(cells[index]))))
+  return tiles
+}
+
+/**
+ * The screens a program page or a runner reports showing: its `screens`
+ * (plan 251) when it sends them, else its one `screen`.
+ */
+export function shownScreens(shown: Pick<CloudRoomShown, 'screen' | 'screens'>): string[] {
+  if (shown.screens && shown.screens.length > 0) {
+    return [...new Set(shown.screens)].slice(0, STAGE_MAX_SCREENS)
+  }
+  return shown.screen ? [shown.screen] : []
 }
 
 /**
@@ -166,7 +243,8 @@ export function showStageInput(room: CloudRoomStatus | undefined): StageInput {
     layout: stage?.layout ?? 'solo',
     people: stage?.onStage ?? [],
     spotlight: stage?.spotlight ?? null,
-    screen: stage?.screen ?? null
+    screen: stage?.screen ?? null,
+    ...(stage?.screens ? { screens: stage.screens } : {})
   }
   const shown = room?.shown
   if (!shown) return input
@@ -176,11 +254,13 @@ export function showStageInput(room: CloudRoomStatus | undefined): StageInput {
       .map((participant) => participant.identity)
   )
   const drawn = new Set(shown.onStage)
-  const screen = shown.screen && input.people.includes(shown.screen) ? shown.screen : null
+  // The screens the program shows, each still on this desktop's stage.
+  const screens = shownScreens(shown).filter((identity) => input.people.includes(identity))
   return {
     ...input,
     people: input.people.filter((identity) => !runnerStage.has(identity) || drawn.has(identity)),
-    screen
+    screen: screens[0] ?? null,
+    screens: screens.length === STAGE_MAX_SCREENS ? screens : undefined
   }
 }
 
@@ -190,7 +270,8 @@ export function showStageInput(room: CloudRoomStatus | undefined): StageInput {
  */
 export function planStage(canvas: StageCanvas, input: StageInput): StagePlan {
   const people = input.people.filter((identity) => identity.length > 0)
-  if (people.length === 0 && !input.screen) return { tiles: [] }
+  const screens = stageScreens(input)
+  if (people.length === 0 && screens.length === 0) return { tiles: [] }
   const gutter = stageGutter(canvas)
   const area = insetArea(canvas)
   const portrait = canvas.height > canvas.width
@@ -207,8 +288,10 @@ export function planStage(canvas: StageCanvas, input: StageInput): StagePlan {
   } else if (layout === 'side-by-side') {
     const cells = gridCells(area, people.length, gridCols(people.length, portrait), gutter)
     people.forEach((identity, index) => tiles.push(person(canvas, identity, fit16x9(cells[index]))))
+  } else if (layout === 'two-screens') {
+    tiles.push(...twoScreensTiles(canvas, people, screens))
   } else if (layout === 'screen-people') {
-    const screenIdentity = input.screen ?? ''
+    const screenIdentity = screens[0] ?? ''
     if (portrait) {
       // The screen on top, full width; people stacked under it.
       const screen = fit16x9({

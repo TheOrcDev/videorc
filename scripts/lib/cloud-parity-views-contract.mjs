@@ -6,18 +6,29 @@
 import assert from 'node:assert/strict'
 import { MEDIA } from './cloud-parity-media.mjs'
 
+/** Plan 251: a stage's two screens, as the page normalizes them. */
+export function stageScreenPair(stage, onStage = stage.onStage) {
+  const pair = stage.screens
+  if (!Array.isArray(pair) || pair.length !== 2) return []
+  const [first, second] = pair
+  if (first === second || first !== stage.screen) return []
+  return onStage.includes(first) && onStage.includes(second) ? [first, second] : []
+}
+
 export function canonicalStage(stage) {
   const onStage = []
   for (const identity of stage.onStage) if (!onStage.includes(identity)) onStage.push(identity)
   const named = (identity) => (identity && onStage.includes(identity) ? identity : '')
   const shape = stage.hostShape === 'circle' ? 'circle' : 'rounded'
+  const pair = stageScreenPair(stage, onStage)
   return [
     'v1',
     stage.layout,
     shape,
     onStage.join(','),
     named(stage.spotlight),
-    named(stage.screen)
+    named(stage.screen),
+    ...(pair.length === 2 ? [pair.join(',')] : [])
   ].join('|')
 }
 
@@ -99,6 +110,9 @@ export function roomShownFromBeacon(shown, at) {
     ...(shown.layout ? { layout: shown.layout } : {}),
     onStage: [...shown.onStage],
     ...(shown.screen ? { screen: shown.screen } : {}),
+    ...(Array.isArray(shown.screens) && shown.screens.length === 2
+      ? { screens: [...shown.screens] }
+      : {}),
     ...(typeof shown.stage === 'string' ? { at, stageKey: shown.stage } : {})
   }
 }
@@ -151,7 +165,13 @@ export function assertAppliedStage(label, { sent, shown, monitorState }) {
   assert.equal(shown.stageKey, stageKey(sent), `${label}: the page applied another stage`)
   assert.equal(
     shown.layout,
-    sent.layout === 'screen-people' && !sent.screen ? 'side-by-side' : sent.layout,
+    sent.layout !== 'screen-people'
+      ? sent.layout
+      : !sent.screen
+        ? 'side-by-side'
+        : stageScreenPair(sent).length === 2
+          ? 'two-screens'
+          : 'screen-people',
     `${label}: drawn layout`
   )
   assert.equal(monitorState, 'applied', `${label}: the Program preview must say applied`)

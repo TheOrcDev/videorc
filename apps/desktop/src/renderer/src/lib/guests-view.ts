@@ -645,7 +645,9 @@ export function layoutReasonsLine(options: readonly LayoutOption[]): string | nu
  */
 export function shownLayout(room: CloudRoomStatus | undefined): CloudStageLayout {
   if (!room) return 'solo'
-  return effectiveStageLayout(showStageInput(room))
+  // Plan 251: two screens are the Screen + people chip's own second look.
+  const drawn = effectiveStageLayout(showStageInput(room))
+  return drawn === 'two-screens' ? 'screen-people' : drawn
 }
 
 // --- Moderation (D5, D14) ------------------------------------------------------

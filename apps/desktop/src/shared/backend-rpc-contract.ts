@@ -6414,6 +6414,8 @@ const cloudStageSchema = objectSchema(
     onStage: arraySchema(boundedString, { maxLength: 8 }),
     spotlight: optionalSchema(boundedString),
     screen: optionalSchema(boundedString),
+    // Plan 251: absent, or the two screens of the two-screens layout.
+    screens: optionalSchema(arraySchema(boundedString, { maxLength: 2 })),
     hostShape: optionalSchema(enumSchema(['rounded', 'circle']))
   },
   { allowUnknown: false }
@@ -6451,6 +6453,8 @@ const cloudRoomStatusSchema = objectSchema(
         {
           onStage: arraySchema(boundedString, { maxLength: 8 }),
           screen: optionalSchema(boundedString),
+          // Plan 251: both screens the page draws.
+          screens: optionalSchema(arraySchema(boundedString, { maxLength: 2 })),
           // Plain bounded strings: a value a newer page adds never fails the
           // status; the renderer drops what it does not know (plan 249 S6).
           layout: optionalSchema(boundedString),

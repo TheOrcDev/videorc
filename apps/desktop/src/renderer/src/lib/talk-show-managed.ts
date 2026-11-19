@@ -1,5 +1,5 @@
 import type { CloudRoomStatus, CloudStageLayout, CloudStatus } from '@/lib/backend'
-import { planStage, type StageCanvas, type StageInput } from '@/lib/talk-show-layout'
+import { planStage, shownScreens, type StageCanvas, type StageInput } from '@/lib/talk-show-layout'
 import {
   VIEW_SOURCE,
   programPreviewStage,
@@ -52,6 +52,9 @@ const LAYOUTS: readonly CloudStageLayout[] = ['solo', 'side-by-side', 'screen-pe
 /** The layout the page reports drawing, when it is one this desktop knows. */
 export function shownLayout(room: CloudRoomStatus | undefined): CloudStageLayout | null {
   const layout = room?.shown?.layout
+  // Plan 251: the page draws `two-screens` for a Screen + people stage that
+  // names two; the plan takes the two from `screens`.
+  if (layout === 'two-screens') return 'screen-people'
   return LAYOUTS.find((known) => known === layout) ?? null
 }
 
@@ -63,12 +66,15 @@ export function managedProgramStageInput(room: CloudRoomStatus | undefined): Sta
   const members = new Set((room?.participants ?? []).map((participant) => participant.identity))
   const people = (room?.shown?.onStage ?? []).filter((identity) => members.has(identity))
   const spotlight = room?.stage.spotlight
-  const screen = room?.shown?.screen
+  const screens = (room?.shown ? shownScreens(room.shown) : []).filter((identity) =>
+    members.has(identity)
+  )
   return {
     layout: shownLayout(room) ?? room?.stage.layout ?? 'solo',
     people,
     spotlight: spotlight && people.includes(spotlight) ? spotlight : null,
-    screen: screen && members.has(screen) ? screen : null
+    screen: screens[0] ?? null,
+    ...(screens.length === 2 ? { screens } : {})
   }
 }
 
