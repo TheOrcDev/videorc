@@ -133,10 +133,14 @@ The 25 s rule: a block older than `LATENCY_TTL_MS` gives no number, and neither 
 
 ## 6. Stage applied (D8, built in S3)
 
-- The web stores `stageSetAt`, its own time, when it accepts a `PUT …/stage`.
-- The page's beacon gains `shown.appliedAgoMs`: how long ago, on the page's monotonic clock, it drew the stage whose key is `shown.stage`.
-- The state answer gains `room.shown.applyMs` = the beacon's receive time − `appliedAgoMs` − `stageSetAt`, when the drawn key is the set stage's. It is not material: it never moves `rev`.
-- An older page sends no `appliedAgoMs`, and then there is no `applyMs`.
+How long the program page took to draw a stage the web accepted. One clock, the web's: the page contributes only an age.
+
+- The web stores `stageSetAt` (its own time when the `PUT …/stage` request arrived) and `stageSetKey` (the stage's content key) in the show's state. They move only when the key changes: a stage sent again unchanged is not drawn again, so its time stays the first one's.
+- The page's beacon gains `shown.appliedAgoMs`: how long before this beacon, on the page's monotonic clock, it first drew the stage whose key is `shown.stage`. A whole number of ms, 0 to 86400000, worked out at the send. It is sent only with `shown.stage`. It is not in the beacon's change key. A value the web cannot use is dropped and never refuses the beacon.
+- The state answer gains `room.shown.applyMs` = the beacon's receive time − `appliedAgoMs` − `stageSetAt`, never below 0, and only while the page's `shown.stage` equals `stageSetKey`. Right after a new stage is accepted there is no `applyMs` until the page says it drew that stage.
+- `applyMs` includes the beacon's own trip from the page to the web (the receive time is taken at the web), so it reads a little high. A later heartbeat of the same draw gives the same figure give or take that trip.
+- It is not material: `materialOf` leaves it out, so it never moves `rev`.
+- An older page sends no `appliedAgoMs`, and then there is no `applyMs`. The desktop's Rust `CloudRoomShown` ignores the field until S7 reads it; the page's age itself never reaches the desktop.
 
 ## 7. Node shows
 

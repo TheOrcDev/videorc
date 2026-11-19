@@ -1642,3 +1642,200 @@ describe('room graphics and the Graphics switch', () => {
     await room.disconnect()
   })
 })
+
+// Plan 253 S4: the host measures. The numbers are the shared fixture's
+// (room-latency-host.test.ts holds every rule); this is the room client's
+// own part: which tracks it samples, that only the server's relay counts,
+// and where the numbers land in the snapshot.
+describe('latency in the room (plan 253 S4)', () => {
+  const ADA = 'g_Ada0000000000000000000'
+  const PAGE = 'EG_wide00000000'
+  const HOST = 'host:sh_talk'
+
+  /** A track whose stats grow by one 10 s window per read. */
+  function statsTrack(
+    kind: 'audio' | 'video',
+    per: Record<string, number>,
+    extra: (step: number) => object[] = () => []
+  ) {
+    let step = 0
+    const reads = { count: 0 }
+    const track = {
+      kind,
+      mediaStreamTrack: { kind } as unknown as MediaStreamTrack,
+      getRTCStatsReport: async () => {
+        step += 1
+        reads.count += 1
+        const entry = Object.fromEntries(
+          Object.entries(per).map(([key, value]) => [key, value * step])
+        )
+        return new Map<string, object>([
+          ['0', { type: 'inbound-rtp', ...entry }],
+          ...extra(step).map((item, index) => [String(index + 1), item] as [string, object])
+        ])
+      }
+    }
+    return { reads, track }
+  }
+  const pair = [
+    { type: 'transport', selectedCandidatePairId: 'CP1' },
+    {
+      type: 'candidate-pair',
+      id: 'CP1',
+      nominated: true,
+      state: 'succeeded',
+      currentRoundTripTime: 0.03
+    }
+  ]
+
+  /** Ada in the room with a microphone and a shared screen; the page beside her. */
+  function people(quality = 'good') {
+    // 60 ms of jitter buffer and 20 ms of playout per sample, at 48 kHz.
+    const mic = statsTrack(
+      'audio',
+      { jitterBufferDelay: 0.06 * 480_000, jitterBufferEmittedCount: 480_000 },
+      (step) => [
+        ...pair,
+        {
+          type: 'media-playout',
+          totalPlayoutDelay: 0.02 * 480_000 * step,
+          totalSamplesCount: 480_000 * step
+        }
+      ]
+    )
+    const screen = statsTrack('video', { totalProcessingDelay: 30, framesDecoded: 300 })
+    latestRoom().remoteParticipants.set(ADA, {
+      identity: ADA,
+      name: 'Ada',
+      sid: 'PA_ada',
+      connectionQuality: quality,
+      trackPublications: new Map([
+        ['TR_mic', { source: 'microphone', isMuted: false, isSubscribed: true, track: mic.track }],
+        [
+          'TR_screen',
+          { source: 'screen_share', isMuted: false, isSubscribed: true, track: screen.track }
+        ]
+      ])
+    })
+    latestRoom().remoteParticipants.set(PAGE, {
+      identity: PAGE,
+      sid: 'PA_page',
+      trackPublications: new Map()
+    })
+    return { mic, screen }
+  }
+  const relay = (
+    identity: string,
+    net: object,
+    participant?: object,
+    topic = 'videorc.latency.v1'
+  ) =>
+    latestRoom().emit(
+      'DataReceived',
+      new TextEncoder().encode(JSON.stringify({ v: 1, identity, at: 1, net })),
+      participant,
+      undefined,
+      topic
+    )
+  const adaBlock = {
+    v: 1,
+    windowMs: 10_000,
+    rttMs: 42,
+    playoutMs: 18,
+    partial: false,
+    from: [{ identity: HOST, audioMs: 61 }]
+  }
+
+  it('joins its own sample with the relayed reports into each person and the program', async () => {
+    const { room } = client(undefined, undefined, { measureLatency: () => true })
+    await room.connect()
+    const { mic, screen } = people()
+    latestRoom().emit('ParticipantConnected', latestRoom().remoteParticipants.get(ADA))
+    expect(room.snapshot.people[0]?.latency).toBeUndefined()
+    // Two samples 10 s apart make the host's first block.
+    await vi.advanceTimersByTimeAsync(20_000)
+    expect(mic.reads.count).toBeGreaterThanOrEqual(2)
+    // A shared screen is not conversation: it is never sampled.
+    expect(screen.reads.count).toBe(0)
+    expect(room.snapshot.local.rttMs).toBe(30)
+    expect(room.snapshot.people[0]?.latency).toBeUndefined()
+    relay(ADA, adaBlock)
+    // You to Ada: 40 + 15 + 5 + 21 + 61 + 18. Ada to you: 40 + 21 + 5 + 15 + 60 + 20.
+    expect(room.snapshot.people[0]?.latency).toEqual({
+      ms: 161,
+      partial: false,
+      toGuestMs: 160,
+      fromGuestMs: 161
+    })
+    // The page's report: a number only once it and the host's camera have one.
+    relay(PAGE, {
+      v: 1,
+      windowMs: 10_000,
+      rttMs: 8,
+      partial: true,
+      from: [{ identity: HOST, audioMs: 45, videoMs: 30 }]
+    })
+    expect(room.snapshot.program).toBeUndefined()
+    await room.disconnect()
+  })
+
+  it('counts only what the server relayed: a participant cannot send a report', async () => {
+    const { room } = client(undefined, undefined, { measureLatency: () => true })
+    await room.connect()
+    people()
+    await vi.advanceTimersByTimeAsync(20_000)
+    relay(ADA, adaBlock, { identity: ADA })
+    relay(ADA, adaBlock, { identity: 'g_forged' })
+    relay(ADA, adaBlock, undefined, 'videorc.latency.v2')
+    expect(room.snapshot.people[0]?.latency).toBeUndefined()
+    relay(ADA, adaBlock)
+    expect(room.snapshot.people[0]?.latency?.ms).toBe(161)
+    // Ada leaves: her number goes with her, and a late report brings none back.
+    const ada = latestRoom().remoteParticipants.get(ADA)
+    latestRoom().remoteParticipants.delete(ADA)
+    latestRoom().emit('ParticipantDisconnected', ada)
+    relay(ADA, adaBlock)
+    expect(room.snapshot.people).toEqual([])
+    await room.disconnect()
+  })
+
+  it('a stale report disappears from the snapshot by itself', async () => {
+    const { room } = client(undefined, undefined, { measureLatency: () => true })
+    await room.connect()
+    people()
+    await vi.advanceTimersByTimeAsync(20_000)
+    relay(ADA, adaBlock)
+    expect(room.snapshot.people[0]?.latency?.ms).toBe(161)
+    await vi.advanceTimersByTimeAsync(24_000)
+    expect(room.snapshot.people[0]?.latency?.ms).toBe(161)
+    await vi.advanceTimersByTimeAsync(2_000)
+    expect(room.snapshot.people[0]?.latency).toBeUndefined()
+    await room.disconnect()
+  })
+
+  it('measures nothing on a node show, and keeps no timer for it (D10)', async () => {
+    const { room } = client()
+    await room.connect()
+    const timers = vi.getTimerCount()
+    const { mic } = people()
+    relay(ADA, adaBlock)
+    await vi.advanceTimersByTimeAsync(30_000)
+    expect(mic.reads.count).toBe(0)
+    expect(room.snapshot.people[0]?.latency).toBeUndefined()
+    expect(room.snapshot.local.rttMs).toBeUndefined()
+    expect(vi.getTimerCount()).toBe(timers)
+    await room.disconnect()
+  })
+
+  it("reads LiveKit's own quality for each person and for the host", async () => {
+    const { room } = client(undefined, undefined, { measureLatency: () => true })
+    await room.connect()
+    people('poor')
+    Object.assign(latestRoom().localParticipant, { connectionQuality: 'excellent' })
+    latestRoom().emit('ConnectionQualityChanged')
+    expect(room.snapshot.people[0]?.quality).toBe('poor')
+    expect(room.snapshot.local.quality).toBe('excellent')
+    await room.disconnect()
+    expect(room.snapshot.local.quality).toBeUndefined()
+  })
+})

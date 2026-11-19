@@ -451,6 +451,9 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
           microphoneChoice: microphoneChoiceRef.current,
           sourcesHeld: () => devicesHeldRef.current,
           audioHost: () => host,
+          // Plan 253 S4 (D10): latency is measured on managed shows only
+          // (`isManagedShow`, whose module this eager hook does not import).
+          measureLatency: () => cloudStatusRef.current?.show?.nodeId === 'livekit',
           onAir: () => onAirRef.current,
           // Plan 249 S11: HTML banners reach only the egress pages the web
           // lets draw the sheet (default-off), and only while this computer

@@ -29,6 +29,7 @@ import {
   layoutReasonsLine,
   selectedLayout,
   newLinkAsksFirst,
+  liveRoomQuality,
   qualityStatus,
   renamedGuestName,
   roomIsFull,
@@ -234,6 +235,65 @@ describe('roomPeople', () => {
     expect(people[1]).toMatchObject({ guestId: 'g_grace', quality: 'poor', muted: true })
     expect(people[2]).toMatchObject({ guestId: 'g_ada', quality: null })
     expect(people.some((person) => person.identity.startsWith('runner:'))).toBe(false)
+  })
+
+  // Plan 253 S4 (D4): the web sends `quality: "good"` for everyone on a
+  // managed show. The dot reads what the host's own room client sees.
+  it("reads the renderer's own LiveKit quality when it is handed one: the dot goes amber on poor", () => {
+    const room = openRoom({
+      guests: [ada, grace],
+      participants: [
+        ...(openRoom().participants ?? []).map((person) => ({
+          ...person,
+          quality: 'good' as const
+        })),
+        guestParticipant(ada, { quality: 'good' }),
+        guestParticipant(grace, { quality: 'good' })
+      ]
+    })
+    // What the web says: everyone is fine.
+    expect(roomPeople(room, HOST).map((person) => qualityStatus(person.quality).tone)).toEqual([
+      'good',
+      'good',
+      'good'
+    ])
+    const live = liveRoomQuality({
+      state: 'connected',
+      people: [
+        { identity: 'g_ada', quality: 'poor' },
+        { identity: 'g_grace', quality: 'lost' }
+      ],
+      local: { quality: 'excellent' }
+    })
+    const people = roomPeople(room, HOST, live)
+    expect(people.map((person) => [person.name, person.quality])).toEqual([
+      ['You', 'excellent'],
+      ['Ada', 'poor'],
+      ['Grace', 'lost']
+    ])
+    expect(qualityStatus(people[1]!.quality)).toEqual({ tone: 'warn', label: 'Weak connection' })
+    expect(qualityStatus(people[2]!.quality)).toEqual({ tone: 'error', label: 'Connection lost' })
+  })
+
+  it("keeps the state's quality for anyone the room client has no reading of", () => {
+    const room = openRoom({
+      guests: [ada, grace],
+      participants: [...(openRoom().participants ?? []), guestParticipant(ada, { quality: 'poor' })]
+    })
+    // Not connected: no reading of anybody.
+    const away = liveRoomQuality({ state: 'reconnecting', people: [], local: {} })
+    expect(roomPeople(room, HOST, away).map((person) => person.quality)).toEqual([
+      'excellent',
+      'poor',
+      null
+    ])
+    // Connected, and it sees neither guest yet: theirs stand, the host's is live.
+    const alone = liveRoomQuality({ state: 'connected', people: [], local: { quality: 'poor' } })
+    expect(roomPeople(room, HOST, alone).map((person) => person.quality)).toEqual([
+      'poor',
+      'poor',
+      null
+    ])
   })
 
   // Live show 2026-11-19: after Unmute the host saw the guest as unmuted
