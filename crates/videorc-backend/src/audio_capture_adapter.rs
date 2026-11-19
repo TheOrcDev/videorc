@@ -607,9 +607,17 @@ impl CaptureClock {
                 // stall). The second adds nothing to the mapping; its PCM
                 // matches the anchor before it, as a burst's PCM already does
                 // (`DSHOW_STALL_ALLOWANCE`). A device clock that really runs
-                // backwards is more than one jitter allowance behind.
-                if !anchor.stamp_jitter.is_zero()
-                    && previous.pts_us - anchor.pts_us <= anchor.stamp_jitter.as_micros() as i64
+                // backwards is more than one jitter allowance behind. Both
+                // clocks must stay within it: an anchor that advances its
+                // stamp while its mapped start falls back further is stale
+                // audio, not a burst.
+                let jitter = anchor.stamp_jitter;
+                if !jitter.is_zero()
+                    && (anchor.pts_us - previous.pts_us).unsigned_abs() <= jitter.as_micros() as u64
+                    && previous
+                        .captured_start
+                        .saturating_duration_since(anchor.captured_start)
+                        <= jitter
                 {
                     return Ok(());
                 }
@@ -2251,6 +2259,24 @@ mod tests {
         assert!(
             clock
                 .push(anchor(2655, 19.0, 380.0, DSHOW_STAMP_JITTER))
+                .unwrap_err()
+                .to_string()
+                .contains("regressed")
+        );
+        // A stamp that advances while its mapped start falls back more than
+        // the allowance describes stale audio: refused, not skipped. Here the
+        // stamp moves 500 ms on and the mapped start 460 ms back.
+        assert!(
+            clock
+                .push(anchor(3170, 19.0 + 460.0, 369.3, DSHOW_STAMP_JITTER))
+                .unwrap_err()
+                .to_string()
+                .contains("regressed")
+        );
+        // The same stamp with its mapped start well behind is refused too.
+        assert!(
+            clock
+                .push(anchor(2670, 19.0, 369.3 - 50.0, DSHOW_STAMP_JITTER))
                 .unwrap_err()
                 .to_string()
                 .contains("regressed")
