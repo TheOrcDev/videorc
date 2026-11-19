@@ -559,7 +559,7 @@ links home.
   and nothing toasts.
 - **The local file**: Output ("Where recordings go", quality). Recordings
   themselves live in Library.
-- **Avatar** (plan 239, owner 2026-11-15): the Avatar page (Setup, ⌘6;
+- **Avatar** (plan 239, owner 2026-11-15): the Avatar page (Livestream, ⌘8;
   tabs Profile and Greetings) creates and sets up the character on the
   stream: My avatars, Name and personality with About you, the Look section
   (Still or Alive, Test, Import moves…, Create), Reactions, Motion and the

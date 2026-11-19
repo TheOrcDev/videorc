@@ -6,8 +6,8 @@ it greets people, reacts to follows, subs and raids, and says what you type
 in the Say box. There is no voice: it talks through its bubble. Viewers see
 it; you set it up.
 
-It lives on the **Avatar** page, in the sidebar's Setup group between
-Captions and Output (⌘6), and in the Avatar block at the foot of the Stream
+It lives on the **Avatar** page, in the sidebar's Livestream group just
+above Sidekick (⌘8), and in the Avatar block at the foot of the Stream
 Manager's Sidekick pane. Sidekick, the helper only you see, has its own page
 and its own doc, [buddy.md](buddy.md). One rule joins them: **Sidekick
 writes, the avatar says.** With Sidekick Live on, Sidekick's lines (Answers,
@@ -37,7 +37,7 @@ its bubble.
 
 | Place                                                           | Job                                                                                                                                                                                                                                                                                                                                                            |
 | --------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Avatar page** (Setup, between Captions and Output, ⌘6)        | Creates and sets up. **Profile**: the status row (the picture, the name, where it shows, "Place on Scene" ⌘3), My avatars, Name and personality with About you, the bubble and Start over, the Look section (Still or Alive, Test, Import moves…, Create), Reactions and Motion. **Greetings**: the lines it says when someone arrives or chat does something. |
+| **Avatar page** (Livestream, above Sidekick, ⌘8)                | Creates and sets up. **Profile**: the status row (the picture, the name, where it shows, "Place on Scene" ⌘3), My avatars, Name and personality with About you, the bubble and Start over, the Look section (Still or Alive, Test, Import moves…, Create), Reactions and Motion. **Greetings**: the lines it says when someone arrives or chat does something. |
 | **Stream Manager** (⇧⌘J, the Avatar block of the Sidekick pane) | Operates live. The living preview, the name and the bubble while one is up; "{name} talks" (Off, Bubble, Suggest) with its chips; the Say box, the reactions and the "{name} on stream" switch.                                                                                                                                                                |
 | **Scene page** (⌘3, the Live Scene canvas)                      | Places. Where your avatar sits on each orientation, and whether it is on the stream and in the recording. The item is called Avatar there. See [overlays.md](overlays.md).                                                                                                                                                                                     |
 

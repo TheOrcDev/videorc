@@ -25,11 +25,11 @@ export const APP_MENU_PAGE_GROUPS: readonly (readonly AppMenuPage[])[] = [
     { key: '3', label: 'Scene' },
     { key: '4', label: 'Assets' },
     { key: '5', label: 'Captions' },
-    { key: '6', label: 'Avatar' },
-    { key: '7', label: 'Output' }
+    { key: '6', label: 'Output' }
   ],
   [
-    { key: '8', label: 'Destinations' },
+    { key: '7', label: 'Destinations' },
+    { key: '8', label: 'Avatar' },
     { key: '9', label: 'Sidekick' }
   ],
   [{ key: '0', label: 'Library' }]

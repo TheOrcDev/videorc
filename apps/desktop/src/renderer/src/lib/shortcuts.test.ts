@@ -23,16 +23,20 @@ describe('SHORTCUTS registry', () => {
     ).toBe(WORKSPACE_SHORTCUTS.length)
   })
 
-  // Plan 235 D6 and D8: the keys run down the sidebar; plan 239 D6: Avatar
-  // takes ⌘6 and Library, the tenth page, ⌘0.
-  it('labels ⌘6 Avatar, ⌘8 Destinations, ⌘9 Sidekick and ⌘0 Library', () => {
-    expect(SHORTCUTS.find((entry) => entry.id === 'nav-avatar')).toMatchObject({
+  // Plan 235 D6 and D8: the keys run down the sidebar; plan 239 D6: Library,
+  // the tenth page, takes ⌘0; Avatar sits in Livestream, above Sidekick.
+  it('labels ⌘6 Output, ⌘7 Destinations, ⌘8 Avatar, ⌘9 Sidekick and ⌘0 Library', () => {
+    expect(SHORTCUTS.find((entry) => entry.id === 'nav-recording')).toMatchObject({
       accelerators: ['CmdOrCtrl+6'],
-      label: 'Avatar'
+      label: 'Output'
     })
     expect(SHORTCUTS.find((entry) => entry.id === 'nav-live')).toMatchObject({
-      accelerators: ['CmdOrCtrl+8'],
+      accelerators: ['CmdOrCtrl+7'],
       label: 'Destinations'
+    })
+    expect(SHORTCUTS.find((entry) => entry.id === 'nav-avatar')).toMatchObject({
+      accelerators: ['CmdOrCtrl+8'],
+      label: 'Avatar'
     })
     expect(SHORTCUTS.find((entry) => entry.id === 'nav-ai')).toMatchObject({
       accelerators: ['CmdOrCtrl+9'],

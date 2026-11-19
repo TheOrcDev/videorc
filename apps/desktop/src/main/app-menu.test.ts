@@ -153,14 +153,14 @@ describe('appMenuTemplate on macOS', () => {
       'Scene CmdOrCtrl+3',
       'Assets CmdOrCtrl+4',
       'Captions CmdOrCtrl+5',
-      'Avatar CmdOrCtrl+6',
-      'Output CmdOrCtrl+7',
-      'Destinations CmdOrCtrl+8',
+      'Output CmdOrCtrl+6',
+      'Destinations CmdOrCtrl+7',
+      'Avatar CmdOrCtrl+8',
       'Sidekick CmdOrCtrl+9',
       'Library CmdOrCtrl+0'
     ])
     click(pages.find((item) => item.label === 'Destinations'))
-    expect(actions.showPage).toHaveBeenCalledWith('8')
+    expect(actions.showPage).toHaveBeenCalledWith('7')
     click(pages.find((item) => item.label === 'Library'))
     expect(actions.showPage).toHaveBeenCalledWith('0')
     expect(view.at(-1)?.role).toBe('togglefullscreen')

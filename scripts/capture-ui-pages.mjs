@@ -77,7 +77,7 @@ const setTheme = async (theme) => {
 }
 // Pages by tab id. The Sidekick page (id `ai`, ⌘9; plan 119) doubles as a
 // probe: it must render Sidekick Live's status (its Overview tab, id `live`),
-// or the run fails at the end. So must the Avatar page (id `avatar`, ⌘6; plan
+// or the run fails at the end. So must the Avatar page (id `avatar`, ⌘8; plan
 // 239) with its status row (its Profile tab). The profile under the output
 // folder outlives a run and each page reopens on the sub-tab used last, so
 // the probe selects its tab itself, with a click: Base UI tabs switch on

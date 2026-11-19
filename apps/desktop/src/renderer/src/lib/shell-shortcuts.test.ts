@@ -80,7 +80,7 @@ describe('shellShortcutAction (plan 174 S3.21, A-2, A-12)', () => {
 describe('navigationShortcutTab', () => {
   it('maps the forwarded keys to pages, Library on 0, and none from under a dialog (plan 239 D6)', () => {
     expect(navigationShortcutTab('1', false)).toBe('studio')
-    expect(navigationShortcutTab('6', false)).toBe('avatar')
+    expect(navigationShortcutTab('8', false)).toBe('avatar')
     expect(navigationShortcutTab('9', false)).toBe('ai')
     expect(navigationShortcutTab('0', false)).toBe('library')
     expect(navigationShortcutTab(',', false)).toBe('settings')
