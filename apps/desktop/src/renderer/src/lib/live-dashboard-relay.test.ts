@@ -218,6 +218,81 @@ describe('talk show room as the session', () => {
     }
   })
 
+  // The header's other stats key on the same session: the show id.
+  it('fills every header stat a live room has, as a native stream does', () => {
+    const relay = createLiveDashboardRelay(
+      () => undefined,
+      () => at
+    )
+    try {
+      relay.chatTotals({ ...totals(show, 6), supporters: 2, bits: 100 })
+      relay.cloud(cloud({ live: true, liveSince: '2026-10-02T23:59:00.000Z' }, { legs: [twitch] }))
+      relay.viewers(sample(show, 5))
+      relay.viewers(sample(show, 8))
+      relay.audience({
+        sessionId: show,
+        updatedAt: at,
+        platforms: [
+          {
+            platform: 'twitch',
+            metric: 'followers',
+            capability: 'available',
+            total: 120,
+            delta: 3,
+            at
+          }
+        ]
+      })
+      relay.alerts({
+        sessionId: show,
+        alerts: [
+          {
+            id: 'a1',
+            check: 'platform-health',
+            severity: 'warning',
+            state: 'open',
+            since: at,
+            title: 'Twitch is not receiving',
+            detail: 'Twitch reports the stream offline.',
+            source: 'platform'
+          } as unknown as import('@/lib/backend').WatchdogAlert
+        ]
+      })
+      const items = statItems({
+        sessionId: show,
+        dashboard: relay.current(),
+        viewerSample: null,
+        messages: [],
+        providers: [
+          {
+            id: 'twitch',
+            platform: 'twitch',
+            state: 'connected'
+          } as unknown as import('@/lib/backend').LiveChatProviderState
+        ],
+        nowMs: Date.parse(at)
+      })
+      const byId = Object.fromEntries(items.map((item) => [item.id, item]))
+      expect(Object.keys(byId)).toEqual([
+        'session',
+        'viewers',
+        'followers',
+        'supporters',
+        'tips',
+        'chat'
+      ])
+      expect(byId.session).toMatchObject({ badge: 'live', value: '1:00', alert: { id: 'a1' } })
+      expect(byId.viewers).toMatchObject({ value: '8', spark: [5, 8] })
+      expect(byId.viewers?.details).toContainEqual({ label: 'Peak', value: '8' })
+      expect(byId.followers).toMatchObject({ value: '120', delta: '+3' })
+      expect(byId.supporters).toMatchObject({ value: '2' })
+      expect(byId.tips).toMatchObject({ value: '100 bits' })
+      expect(byId.chat?.details).toContainEqual({ label: 'Chatters', value: '6' })
+    } finally {
+      relay.dispose()
+    }
+  })
+
   it('takes the runner clock once when there is no hand-over stamp', () => {
     let now = at
     const relay = createLiveDashboardRelay(
