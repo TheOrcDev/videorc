@@ -1,3 +1,5 @@
+import { join } from 'node:path'
+
 import { describe, expect, it, vi } from 'vitest'
 
 import { ON_AIR_MARKER_FILE, OnAirMarker, onAirMarkerPath } from './on-air-marker'
@@ -17,7 +19,8 @@ function fakeIo() {
 
 describe('OnAirMarker', () => {
   it('lives in the app data folder', () => {
-    expect(onAirMarkerPath('/data/Videorc')).toBe(PATH)
+    // The OS's own separators: Windows CI joins with a backslash.
+    expect(onAirMarkerPath('/data/Videorc')).toBe(join('/data/Videorc', 'on-air.json'))
     expect(ON_AIR_MARKER_FILE).toBe('on-air.json')
   })
 

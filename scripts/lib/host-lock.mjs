@@ -2,7 +2,7 @@
 import net from 'node:net'
 import os from 'node:os'
 import { mkdirSync, readFileSync, writeFileSync, unlinkSync } from 'node:fs'
-import { join, resolve } from 'node:path'
+import { join, posix, resolve } from 'node:path'
 import { execFileSync } from 'node:child_process'
 import { setTimeout as delay } from 'node:timers/promises'
 import { AsyncLocalStorage } from 'node:async_hooks'
@@ -285,7 +285,8 @@ export function installedAppOnAirMarkerPath({
 } = {}) {
   if (env.VIDEORC_ON_AIR_MARKER) return env.VIDEORC_ON_AIR_MARKER
   if (platform === 'darwin')
-    return join(home, 'Library', 'Application Support', 'Videorc', 'on-air.json')
+    // A macOS path whatever runs this (tests run on Windows CI too): POSIX joins.
+    return posix.join(home, 'Library', 'Application Support', 'Videorc', 'on-air.json')
   return null
 }
 export function onAirMarkerPid(text, isLive = live) {
