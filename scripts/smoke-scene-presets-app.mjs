@@ -157,7 +157,12 @@ const refreshDevices = () =>
 `)
 try {
   ws = await connectBackend(launched.connections['backend-ready'], timeoutMs)
-  const fresh = await waitFor(() => true, 'renderer scene-preset actions ready')
+  // The Studio renders once the scene library's reader has loaded (its own
+  // chunk), so the actions arrive a moment after the backend connects.
+  const fresh = await waitFor(
+    (current) => Array.isArray(current?.scenes),
+    'renderer scene-preset actions ready'
+  )
   assert.equal(fresh.scenes.length, 4, 'a fresh profile has four default scenes')
   await requestSmokeCommand(smoke, 'enable-synthetic-source', { settleMs: 500 }, { timeoutMs })
   // The fixture belongs to the scene now: the transient synthetic toggle
