@@ -6,7 +6,7 @@ import type { CameraShape, Device, LayoutPreset, MediaAccessSnapshot } from '@/l
 import type { BackgroundAssetRegistry } from '@/lib/background-assets'
 import {
   layoutPresetOrientation,
-  studioModeTogglePreset,
+  ORIENTATION_DEFAULT_PRESET,
   type CaptureConfig,
   type LayoutOrientation
 } from '@/lib/capture'
@@ -16,6 +16,7 @@ import {
   type FirstRunLayoutOption,
   type FirstRunLook
 } from '@/lib/first-run-look'
+import type { Scene } from '@/lib/scenes'
 import type { LiveBackgroundId } from '../../../shared/live-background-ids'
 
 // Plan 207 S4: the state behind "Your look" (S5 draws it). Every setter
@@ -58,6 +59,8 @@ export function firstRunLookFromState(
 
 export type FirstRunLookControllerInput = {
   config: CaptureConfig
+  /** The scene on stream: the orientation toggle lands on its layout there (plan 231 D4). */
+  sceneOnStream: Pick<Scene, 'layouts'> | null
   registry: Pick<BackgroundAssetRegistry, 'activeSlotId' | 'live'>
   hold: FirstRunLook | null
   mediaAccess: MediaAccessSnapshot | null
@@ -91,9 +94,11 @@ export function firstRunLookController(input: FirstRunLookControllerInput): Firs
     held: input.hold !== null,
     setOrientation: (orientation) => {
       if (orientation === look.orientation) return
-      // The gallery's toggle: the scene remembered for that orientation when
-      // the sources can show it, otherwise one that works.
-      const remembered = studioModeTogglePreset(orientation, input.config)
+      // The gallery's toggle: the scene on stream's layout for that
+      // orientation when the sources can show it, otherwise one that works.
+      const remembered =
+        input.sceneOnStream?.layouts[orientation].layoutPreset ??
+        ORIENTATION_DEFAULT_PRESET[orientation]
       input.apply({
         ...look,
         orientation,
@@ -116,20 +121,35 @@ export function firstRunLookController(input: FirstRunLookControllerInput): Firs
 }
 
 export function useFirstRunLook(): FirstRunLookController {
-  const { captureConfig, deviceList, mediaAccess, firstRunLookHold, applyFirstRunLook } =
-    useStudioCore()
+  const {
+    captureConfig,
+    sceneOnStream,
+    deviceList,
+    mediaAccess,
+    firstRunLookHold,
+    applyFirstRunLook
+  } = useStudioCore()
   const { registry } = useBackgroundAssets()
   const controller = useMemo(
     () =>
       firstRunLookController({
         config: captureConfig,
+        sceneOnStream,
         registry,
         hold: firstRunLookHold,
         mediaAccess,
         devices: deviceList.devices,
         apply: applyFirstRunLook
       }),
-    [applyFirstRunLook, captureConfig, deviceList.devices, firstRunLookHold, mediaAccess, registry]
+    [
+      applyFirstRunLook,
+      captureConfig,
+      sceneOnStream,
+      deviceList.devices,
+      firstRunLookHold,
+      mediaAccess,
+      registry
+    ]
   )
   // D7 / D11: the step preselects a layout that works, and the Studio opens
   // on it even when the user only presses Continue.

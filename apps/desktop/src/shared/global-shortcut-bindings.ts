@@ -1,5 +1,5 @@
 import type { GlobalShortcutsConfig } from './backend'
-import { globalShortcutLayout, type GlobalShortcutAction } from './global-shortcuts'
+import { sceneSlotPosition, type GlobalShortcutAction } from './global-shortcuts'
 
 // The Settings side of global shortcuts: which config key each action writes.
 // Kept out of shared/global-shortcuts, which the eager Studio chunk imports,
@@ -16,12 +16,12 @@ const ACTION_CONFIG_KEYS = {
   'layout-next': 'layoutNext',
   'layout-previous': 'layoutPrevious'
 } as const satisfies Record<
-  Exclude<GlobalShortcutAction, `layout:${string}` | `scene:${string}`>,
-  Exclude<keyof GlobalShortcutsConfig, 'layouts' | 'scenes'>
+  Exclude<GlobalShortcutAction, `scene-slot-${number}` | `scene:${string}`>,
+  Exclude<keyof GlobalShortcutsConfig, 'layouts' | 'scenes' | 'sceneSlots'>
 >
 
 /** A single-action key a GlobalShortcutsConfig may carry (besides
- * `layouts` and `scenes`): the IPC schema admits exactly these. */
+ * `layouts`, `scenes` and `sceneSlots`): the IPC schema admits exactly these. */
 export function isGlobalShortcutConfigKey(key: string): boolean {
   return (Object.values(ACTION_CONFIG_KEYS) as string[]).includes(key)
 }
@@ -35,9 +35,9 @@ export function withGlobalShortcut(
   if (action.startsWith('scene:')) {
     return { ...config, scenes: { ...config?.scenes, [action.slice(6)]: accelerator } }
   }
-  const layout = globalShortcutLayout(action)
-  if (layout) {
-    return { ...config, layouts: { ...config?.layouts, [layout]: accelerator } }
+  const position = sceneSlotPosition(action)
+  if (position !== null) {
+    return { ...config, sceneSlots: { ...config?.sceneSlots, [position]: accelerator } }
   }
   return {
     ...config,

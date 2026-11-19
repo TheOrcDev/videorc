@@ -1,6 +1,36 @@
-import { LAYOUT_PRESET_VALUES, type GlobalShortcutsConfig, type LayoutPreset } from './backend'
+import type { GlobalShortcutsConfig } from './backend'
 
 export const DEFAULT_SCREEN_HIDE_SHORTCUT = 'Control+Alt+H'
+
+export const SCENE_SLOT_ACTIONS = [
+  'scene-slot-1',
+  'scene-slot-2',
+  'scene-slot-3',
+  'scene-slot-4',
+  'scene-slot-5',
+  'scene-slot-6',
+  'scene-slot-7',
+  'scene-slot-8',
+  'scene-slot-9'
+] as const
+export type SceneSlotAction = (typeof SCENE_SLOT_ACTIONS)[number]
+export type SceneSlotPosition = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9
+
+export function sceneSlotPosition(action: GlobalShortcutAction): SceneSlotPosition | null {
+  return action.startsWith('scene-slot-') ? (Number(action.slice(11)) as SceneSlotPosition) : null
+}
+
+/** Undefined uses the platform default; an empty string releases the key. */
+export function sceneSlotAccelerator(
+  config: GlobalShortcutsConfig,
+  position: SceneSlotPosition,
+  platform: string | undefined
+): string {
+  return (
+    config.sceneSlots?.[position] ??
+    `Control+Alt+${platform === 'darwin' ? '' : 'Shift+'}${position}`
+  )
+}
 
 export const GLOBAL_SHORTCUT_ACTIONS = [
   'screen-hide-toggle',
@@ -12,7 +42,7 @@ export const GLOBAL_SHORTCUT_ACTIONS = [
   'clip-mark-long',
   'layout-next',
   'layout-previous',
-  ...LAYOUT_PRESET_VALUES.map((id) => `layout:${id}` as const)
+  ...SCENE_SLOT_ACTIONS
 ] as const
 export type GlobalShortcutAction = (typeof GLOBAL_SHORTCUT_ACTIONS)[number] | `scene:${string}`
 export function isGlobalShortcutAction(value: unknown): value is GlobalShortcutAction {
@@ -25,7 +55,8 @@ export function isGlobalShortcutAction(value: unknown): value is GlobalShortcutA
   )
 }
 export function globalShortcutEntries(
-  config: GlobalShortcutsConfig
+  config: GlobalShortcutsConfig,
+  platform?: string
 ): Array<[GlobalShortcutAction, string | undefined]> {
   return [
     ...Object.entries(config.scenes ?? {}).map(([id, key]): [GlobalShortcutAction, string] => [
@@ -41,9 +72,9 @@ export function globalShortcutEntries(
     ['clip-mark-long', config.clipMarkLong],
     ['layout-next', config.layoutNext],
     ['layout-previous', config.layoutPrevious],
-    ...LAYOUT_PRESET_VALUES.map((id): [GlobalShortcutAction, string | undefined] => [
-      `layout:${id}`,
-      config.layouts?.[id]
+    ...SCENE_SLOT_ACTIONS.map((action, index): [GlobalShortcutAction, string] => [
+      action,
+      sceneSlotAccelerator(config, (index + 1) as SceneSlotPosition, platform)
     ])
   ]
 }
@@ -59,24 +90,4 @@ export function withoutSceneShortcut(
   const scenes = { ...config?.scenes }
   delete scenes[id]
   return { ...config, scenes }
-}
-export function globalShortcutLayout(action: GlobalShortcutAction): LayoutPreset | null {
-  return action.startsWith('layout:') ? (action.slice(7) as LayoutPreset) : null
-}
-
-/** Walk canonical order, including when the current layout has become unavailable. */
-export function nextEligibleLayout(
-  current: LayoutPreset,
-  direction: 1 | -1,
-  eligible: readonly LayoutPreset[]
-): LayoutPreset | null {
-  const catalog = LAYOUT_PRESET_VALUES.filter(
-    (id) => id.startsWith('vertical-') === current.startsWith('vertical-')
-  )
-  const index = catalog.indexOf(current as never)
-  for (let step = 1; step < catalog.length; step++) {
-    const candidate = catalog[(index + direction * step + catalog.length) % catalog.length]
-    if (eligible.includes(candidate)) return candidate
-  }
-  return null
 }

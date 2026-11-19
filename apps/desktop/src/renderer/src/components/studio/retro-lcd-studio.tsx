@@ -29,7 +29,6 @@ import { MicLcdMeter } from '@/components/studio/mic-level-meter'
 import type { MicrophoneRowProps, SystemAudioRowProps } from '@/components/studio/audio-section'
 import {
   type GreenScreenControl,
-  type ScreenPrivacyControl,
   useStudioChatDoor,
   useStudioSources
 } from '@/components/studio/quick-settings'
@@ -55,11 +54,10 @@ import { ShortcutKeys } from '@/components/ui/shortcut-keys'
 import { ShortcutTooltip } from '@/components/ui/shortcut-tooltip'
 import { useWorkspaceNav, WorkspaceNavContext } from '@/components/workspace-nav'
 import { useStudioCore } from '@/hooks/use-studio'
-import { buildCameraSources, buildCaptureSources } from '@/lib/capture'
+import { buildCameraSources } from '@/lib/capture'
 import { GREEN_SCREEN_MODES } from '@/lib/green-screen'
 import { GO_LIVE_CHECKING_LABEL, GO_LIVE_LABEL, RECORD_LABEL } from '@/lib/go-live-copy'
 import { MIC_SESSION_LEVEL_UNAVAILABLE_COPY } from '@/lib/mic-meter-input'
-import { screenPrivacyActionLabel } from '@/lib/screen-privacy-view'
 import { shortcutAccelerator } from '@/lib/shortcuts'
 import { captionsStatusLabel, micSignalLabel, systemAudioIssueLabel } from '@/lib/state-labels'
 import { STOP_FINALIZE_OVERRUN_ALERT, streamingSummary } from '@/lib/studio-session-view'
@@ -472,27 +470,23 @@ function RetroSystemAudioRows({
 }
 
 /**
- * Sources on one screen (its title and the way to Sources, Screen and Camera
- * with their live switch status under them; System audio is in Audio since
- * plan 201), then Captions and Chat on a screen of their
- * own: neither is a source (B-15, plan 213 B1).
+ * Sources on one screen (the Camera with its live switch status under it and
+ * the way to Sources; System audio is in Audio since plan 201, and the Screen
+ * lives with the scene that shows it, in the Scenes section since plan 231
+ * D8), then Captions and Chat on a screen of their own: neither is a source
+ * (B-15, plan 213 B1).
  */
 export function RetroQuickSettings(): ReactElement {
   const {
     captureConfig,
     switchSourceDeviceLive,
     sourceSwitchReason,
-    allowCaptureNone,
-    selectedCaptureDevice,
     selectedCamera,
     isSessionActive,
     captionsStatus,
     openStudioPanel,
     discoveryPending,
-    captureDevices,
     cameras,
-    selectedCaptureId,
-    screenPrivacy,
     greenScreen
   } = useStudioSources()
   return (
@@ -501,29 +495,6 @@ export function RetroQuickSettings(): ReactElement {
           at the end of the Camera row (D4), as in the default look. */}
       <PanelSection>
         <LcdPanel aria-label="Sources">
-          {/* F-015: the synthetic diagnostic source replaces the screen. */}
-          <LcdDevicePicker
-            devices={captureDevices}
-            disabled={Boolean(sourceSwitchReason('capture'))}
-            discoveryPending={discoveryPending}
-            groupByKind
-            kind="capture"
-            label="Screen"
-            noneLabel={allowCaptureNone ? 'None' : undefined}
-            selectedDevice={selectedCaptureDevice}
-            selectedName={captureConfig.sources.screenName ?? captureConfig.sources.windowName}
-            selectionLabel={captureConfig.sources.testPattern ? 'Test pattern' : undefined}
-            value={selectedCaptureId}
-            onChange={(captureId) =>
-              void switchSourceDeviceLive(
-                'capture',
-                buildCaptureSources(captureConfig.sources, captureDevices, captureId)
-              )
-            }
-          />
-          <RetroSwitchStatusLine kind="capture" />
-          <RetroScreenPrivacyRow control={screenPrivacy} />
-          <LcdDisplaySeparator />
           {/* Off is a choice that sticks (plan 080 S4). */}
           <LcdDevicePicker
             devices={cameras}
@@ -584,37 +555,6 @@ function RetroChatDoorRow(): ReactElement | null {
       }
       onNavigate={door.open}
     />
-  )
-}
-
-/**
- * Hide screen on the Sources screen (plan 210 S8b): a row that covers
- * something, like a takeover's. Off dim, On lit while the screen is hidden,
- * and its key on hover. Only a hide is ever refused, with its reason.
- */
-function RetroScreenPrivacyRow({ control }: { control: ScreenPrivacyControl }): ReactElement {
-  const { hidden, accelerator, platform, disabledReason, toggle } = control
-  const row = (
-    <LcdPanelPressRow
-      disabled={disabledReason !== null}
-      label={control.statusLabel ?? 'Hide screen'}
-      pressed={hidden}
-      onPressedChange={toggle}
-    />
-  )
-  return disabledReason ? (
-    <DisabledReason className="flex flex-col" reason={disabledReason}>
-      {row}
-    </DisabledReason>
-  ) : (
-    <ShortcutTooltip
-      accelerator={accelerator}
-      className="flex flex-col"
-      label={screenPrivacyActionLabel(hidden)}
-      platform={platform}
-    >
-      {row}
-    </ShortcutTooltip>
   )
 }
 

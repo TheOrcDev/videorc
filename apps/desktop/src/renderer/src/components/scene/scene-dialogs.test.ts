@@ -63,8 +63,12 @@ describe('Set key dialog (Linux L-01)', () => {
       settings: { globalShortcuts: {} },
       setSettings: vi.fn(),
       savedScenes: [scene],
-      sceneLibraryActions: {},
-      deviceList: { devices: [] }
+      sceneLibraryActions: { stored: () => undefined },
+      deviceList: { devices: [] },
+      captureConfig: {
+        layout: { layoutPreset: 'screen-camera' },
+        sources: { screenId: 'screen:1' }
+      }
     }
     await act(async () => root.render(createElement(Harness)))
     await act(async () => openDialog?.({ kind: 'key', scene }))

@@ -15,7 +15,7 @@ import {
 
 interface ConfirmDialogProps {
   open: boolean
-  /** "Verb object?": "Delete saved scene?" */
+  /** "Verb object?": "Delete scene?" */
   title: ReactNode
   /** One sentence naming exactly what is lost. */
   description: ReactNode

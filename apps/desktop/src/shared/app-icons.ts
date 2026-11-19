@@ -1,5 +1,5 @@
 /**
- * App icons for New scene… and the scene list (plan 210 S4/S5). Main reads
+ * App icons for Add scene… and the scene lists (plan 210 S4/S5). Main reads
  * each app's icon from its bundle and caches it per bundle id; the renderer
  * draws a generic glyph for any app it leaves out.
  */

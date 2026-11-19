@@ -4,6 +4,7 @@ import type { Device, MediaAccessSnapshot } from '@/lib/backend'
 import { applyLiveBackground, createDefaultRegistry } from '@/lib/background-assets'
 import { defaultCaptureConfig, type CaptureConfig } from '@/lib/capture'
 import type { FirstRunLook } from '@/lib/first-run-look'
+import type { Scene } from '@/lib/scenes'
 
 import { firstRunLookController, firstRunLookFromState } from './use-first-run-look'
 
@@ -14,6 +15,7 @@ const GRANTED: MediaAccessSnapshot = { camera: 'granted', microphone: 'granted',
 function controller(
   overrides: {
     config?: Partial<CaptureConfig>
+    sceneOnStream?: Pick<Scene, 'layouts'> | null
     hold?: FirstRunLook | null
     devices?: Device[]
     mediaAccess?: MediaAccessSnapshot | null
@@ -27,6 +29,7 @@ function controller(
       sources: { screenId: SCREEN.id, cameraId: CAMERA.id },
       ...overrides.config
     },
+    sceneOnStream: overrides.sceneOnStream ?? null,
     registry: overrides.registry ?? createDefaultRegistry(),
     hold: overrides.hold ?? null,
     mediaAccess: overrides.mediaAccess === undefined ? GRANTED : overrides.mediaAccess,
@@ -86,14 +89,29 @@ describe('firstRunLookController', () => {
     expect(apply).toHaveBeenCalledTimes(1)
   })
 
-  it('setOrientation lands on the scene remembered for that orientation when it works', () => {
-    const { value, apply } = controller({ config: { lastVerticalPreset: 'vertical-split' } })
+  it("setOrientation lands on the scene on stream's layout there when it works (plan 231 D4)", () => {
+    const { value, apply } = controller({
+      // The remembered layout steers nothing now.
+      config: { lastVerticalPreset: 'vertical-camera-bottom' },
+      sceneOnStream: {
+        layouts: {
+          horizontal: defaultCaptureConfig.layout,
+          vertical: { ...defaultCaptureConfig.layout, layoutPreset: 'vertical-split' }
+        }
+      }
+    })
     value.setOrientation('vertical')
     expect(apply).toHaveBeenCalledWith(
       expect.objectContaining({ orientation: 'vertical', layoutPreset: 'vertical-split' })
     )
     value.setOrientation('horizontal')
     expect(apply).toHaveBeenCalledTimes(1)
+    // With no scene known yet, the orientation's default layout.
+    const fresh = controller({ config: { lastVerticalPreset: 'vertical-split' } })
+    fresh.value.setOrientation('vertical')
+    expect(fresh.apply).toHaveBeenCalledWith(
+      expect.objectContaining({ orientation: 'vertical', layoutPreset: 'vertical-camera-top' })
+    )
   })
 
   it('setOrientation without a screen lands on vertical Camera only', () => {

@@ -6312,6 +6312,7 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "devices.list"
         | "sources.resolve_app_window"
         | "sources.app_previews"
+        | "sources.scene_pictures"
         | "diagnostics.stats"
         | "capture.recovery.status"
         | "preview.surface.status"
@@ -12273,6 +12274,37 @@ async fn handle_text_message_with_role(
             Ok(quota) => ServerResponse::ok(command.id, quota),
             Err(error) => ServerResponse::error(command.id, "ai-quota-failed", error.to_string()),
         },
+        "sources.scene_pictures" => {
+            match serde_json::from_value::<screen_capture::ScenePicturesParams>(command.params) {
+                Ok(params) if params.valid() => {
+                    let privacy = state.screen_privacy.clone();
+                    let privacy_start = privacy.view();
+                    match tokio::task::spawn_blocking(move || {
+                        screen_capture::scene_pictures(params, privacy)
+                    })
+                    .await
+                    {
+                        Ok(Ok(result)) => ServerResponse::ok(
+                            command.id,
+                            result.guard_privacy(privacy_start, state.screen_privacy.view()),
+                        ),
+                        Ok(Err(error)) => {
+                            ServerResponse::error(command.id, "scene-pictures-failed", error)
+                        }
+                        Err(error) => ServerResponse::error(
+                            command.id,
+                            "scene-pictures-failed",
+                            error.to_string(),
+                        ),
+                    }
+                }
+                _ => ServerResponse::error(
+                    command.id,
+                    "invalid-params",
+                    "Expected scene targets and an optional maxWidth from 32 to 1920.",
+                ),
+            }
+        }
         "sources.app_previews" => {
             let params = if command.params.is_null() {
                 Ok(screen_capture::AppPreviewsParams::default())

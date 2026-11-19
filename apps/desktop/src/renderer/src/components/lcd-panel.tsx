@@ -98,9 +98,11 @@ export function LcdPanelHeader({
 /** A header's way to the page that owns the section ("Open Sources"): dim words that light on hover. */
 export function LcdPanelAction({
   children,
+  disabled = false,
   onClick
 }: {
   children: ReactNode
+  disabled?: boolean
   onClick: () => void
 }): ReactElement {
   return (
@@ -109,6 +111,7 @@ export function LcdPanelAction({
         LCD_VALUE_BUTTON,
         'text-(--lcd-display-ink-dim) hover:text-(--lcd-display-lit)'
       )}
+      disabled={disabled}
       type="button"
       onClick={onClick}
     >

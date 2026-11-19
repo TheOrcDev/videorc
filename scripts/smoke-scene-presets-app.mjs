@@ -113,13 +113,9 @@ const assertCameraOff = (current, description) => {
 }
 const chooseCameraOff = async () => {
   await evaluate(`
-    const current = window.__videorcSmokeScenePresets.state();
-    const stored = JSON.parse(localStorage.getItem('videorc.captureConfig') ?? '{}');
-    window.__videorcSmokeScenePresets.configure({sources: {
-      ...stored.sources, ...current.visual.sources,
-      cameraId: undefined, cameraName: undefined, cameraOff: true
-    }});
-    return true;
+    const id = window.__videorcSmokeScenePresets.state().activeId;
+    await window.__videorcSmokeScenePresets.pickCameraOff();
+    return await window.__videorcSmokeScenePresets.apply(id);
   `)
   return waitFor(
     (current) =>
@@ -161,8 +157,25 @@ const refreshDevices = () =>
 `)
 try {
   ws = await connectBackend(launched.connections['backend-ready'], timeoutMs)
-  await waitFor(() => true, 'renderer scene-preset actions ready')
+  // The Studio renders once the scene library's reader has loaded (its own
+  // chunk), so the actions arrive a moment after the backend connects.
+  const fresh = await waitFor(
+    (current) => Array.isArray(current?.scenes),
+    'renderer scene-preset actions ready'
+  )
+  assert.equal(fresh.scenes.length, 4, 'a fresh profile has four default scenes')
   await requestSmokeCommand(smoke, 'enable-synthetic-source', { settleMs: 500 }, { timeoutMs })
+  // The fixture belongs to the scene now: the transient synthetic toggle
+  // leaves a display id behind, which a saved scene correctly restores.
+  assert.equal(
+    await evaluate(`
+    const library = JSON.parse(localStorage.getItem('videorc.scenes.v2'));
+    const scene = library.scenes.find((entry) => entry.id === library.onStreamId);
+    scene.shows = {kind: 'test-pattern'};
+    return await window.__videorcSmokeScenePresets.edit(scene);
+  `),
+    true
+  )
   await requestSmokeCommand(smoke, 'select-camera-device', { settleMs: 500 }, { timeoutMs })
   await evaluate(
     `window.__videorcSmokeScenePresets.configure({video: {preset: 'custom', width: 640, height: 360, fps: 30, bitrateKbps: 2000}}); window.__videorcSmokeScenePresets.layout({layoutPreset: 'screen-only', cameraZoom: 125}); return true`
@@ -187,16 +200,15 @@ try {
       Boolean(current.visual.sources.cameraId),
     'Camera On before saving B'
   )
-  // Plan 210 D3: a framing or background edit made while Smoke A is on
-  // saves into A. Choosing a layout from Layouts leaves A first, the way a
-  // user starts a new look, so B's look is its own and A keeps the one it
-  // was saved with. The camera pick above never leaves or rewrites A.
+  let second = await saveScene('Smoke B')
+  // Plan 231 D11: edits stay in B; a layout no longer leaves a scene.
+  // D9 keeps the shared camera; D11 saves framing and background edits in B.
   await evaluate(
     `window.__videorcSmokeScenePresets.layout({layoutPreset: 'screen-only', cameraZoom: 175}); return true`
   )
   await waitFor(
     (current) =>
-      current.canSave && current.activeId === null && current.visual.layout.cameraZoom === 175,
+      current.canSave && current.activeId === second.id && current.visual.layout.cameraZoom === 175,
     'second framing'
   )
   // Apply the background after the layout settles to exercise independent user edits.
@@ -205,11 +217,11 @@ try {
     (current) => current.canSave && current.visual.background?.assetId === 'builtin-bg-02',
     'second background'
   )
-  let second = await saveScene('Smoke B')
+  second = await saveScene('Smoke B', second.id)
   assert.equal(second.visual.sources.cameraOff, false)
   assert.deepEqual(
     (await state()).scenes.find((scene) => scene.id === first.id)?.visual,
-    first.visual,
+    { ...first.visual, sources: second.visual.sources },
     "B's edits left Smoke A as it was saved"
   )
   assert.equal(
@@ -218,9 +230,14 @@ try {
     ),
     true
   )
-  await waitFor((current) => current.canSave && current.activeId === first.id, 'saved Off after On')
+  await waitFor(
+    (current) => current.canSave && current.activeId === first.id,
+    'scene A keeps the shared Camera On'
+  )
   await refreshDevices()
-  assertCameraOff(await state(), 'saved A after device refresh')
+  const sharedOn = await state()
+  assert.equal(sharedOn.visual.sources.cameraOff, false, 'D9 keeps the selected camera on')
+  assert.equal(sharedOn.visual.sources.cameraId, second.visual.sources.cameraId)
   assert.equal(
     await evaluate(
       `return await window.__videorcSmokeScenePresets.apply(${JSON.stringify(second.id)})`
@@ -229,11 +246,13 @@ try {
   )
   const restoredOn = await waitFor(
     (current) => current.canSave && current.activeId === second.id,
-    'saved On after Off'
+    'scene B keeps the shared Camera On'
   )
   assert.equal(restoredOn.visual.sources.cameraOff, false)
   assert.equal(restoredOn.visual.sources.cameraId, second.visual.sources.cameraId)
   assert.equal(restoredOn.modified, false)
+  // D9: Camera Off applies to every scene, including A.
+  first.visual.sources = { ...(await chooseCameraOff()).visual.sources }
   // Update B with explicit Off so both encoded backgrounds also exercise Off
   // through the live apply and final stop, without changing audio ownership.
   assertCameraOff(await chooseCameraOff(), 'before updating B')
@@ -314,6 +333,10 @@ try {
     'renderer restart checkpoint'
   )
   const beforeRecording = await state()
+  writeFileSync(
+    join(outputDirectory, 'before-recording.json'),
+    JSON.stringify(beforeRecording, null, 2)
+  )
   assertCameraOff(beforeRecording, 'working checkpoint after renderer restart')
   assert.equal(beforeRecording.backgroundSlots.find((slot) => slot.id === 'bg-03').assetId, null)
   const directory = await requestSmokeCommand(
@@ -464,15 +487,11 @@ try {
     'hidden camera framing saved into the scene'
   )
   const hiddenCopy = await saveScene('Hidden camera copy')
-  // Plan 210 D3: leave the copy first (a layout leaves a saved scene), so
-  // showing the camera saves into no scene and both stay hidden for the
-  // live apply below.
-  await evaluate(
-    `window.__videorcSmokeScenePresets.layout({layoutPreset: 'camera-only'}); return true`
-  )
+  // D11: make a separate scene before showing the camera, keeping both hidden copies.
+  const shownControl = await saveScene('Shown camera control')
   await waitFor(
-    (current) => current.canSave && current.activeId === null && !current.pendingLayout,
-    'left the hidden copy'
+    (current) => current.canSave && current.activeId === shownControl.id && !current.pendingLayout,
+    'a separate scene for the visibility edit'
   )
   const shown = await setCameraVisible(true)
   assert.equal(shown.modified, false)

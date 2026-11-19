@@ -87,44 +87,51 @@ menu (Claude Desktop's "+"):
 - **Stream recap** sums up your last recording or livestream: its files,
   markers, chat and viewers, with a title and description for posting it.
 
+`list_scenes` returns `id`, `name`, 1-based `position`, display `key`,
+`shows` (screen words) and `onStream` for each scene. `switch_scene` returns
+the scene's `id` and `name`. A legacy layout id still switches to the first
+scene using that layout in the studio's current orientation; with no match,
+it is refused with "No scene uses {Layout}". Sidekick reads this same scene
+inventory.
+
 ### What an agent can do
 
 Ask in plain words: "What's on my stream right now?", "Switch to the camera
 scene, put up the BRB takeover and play the airhorn", "Record, add a marker
 called intro done, then stop", "Give me the file of my last recording".
 
-| Tool                | What it does                                                                  |
-| ------------------- | ----------------------------------------------------------------------------- |
-| `get_status`        | Idle, recording or live; destinations and their health; scene, audio, banners |
-| `get_picture`       | The program picture as a JPEG, at most 1280 pixels wide (idle too)            |
-| `list_scenes`       | Your saved scenes and the built-in layouts, and which one is on               |
-| `list_sources`      | Screens, windows, cameras and microphones, and which ones the scene uses      |
-| `list_assets`       | Banners, takeovers, soundboard sounds and live backgrounds                    |
-| `read_chat`         | Recent chat from every platform; it can wait up to 25 s for the next message  |
-| `list_destinations` | Your platforms: on or off, ready or why not, title and category               |
-| `list_recordings`   | The Library: takes, livestreams and clips, with their file paths              |
-| `get_recording`     | One take's files, markers, chat totals, peak viewers and Sidekick's reports   |
-| `start_recording`   | Record, exactly like the Record button                                        |
-| `stop`              | Stop the recording or end the livestream, at once                             |
-| `save_clip`         | Save the last 30 or 60 seconds, like the Clip button                          |
-| `add_marker`        | A named marker on the running recording or livestream                         |
-| `switch_scene`      | A saved scene or a built-in layout                                            |
-| `set_audio`         | Microphone: mute, gain, which one; System audio: on or off, gain              |
-| `set_banner`        | Show or hide a banner                                                         |
-| `set_takeover`      | Show a takeover (BRB, Starting soon) or take it down                          |
-| `play_sound`        | Press a soundboard sound                                                      |
-| `stop_sounds`       | Stop one sound or all of them                                                 |
-| `set_highlight`     | Put a chat message on stream, or take it down                                 |
-| `open_window`       | Bring the Stream Manager, Notes or Preview to the front                       |
-| `notify`            | Show you a short notice in Videorc, signed with the agent's name              |
-| `go_live`           | Go live without the Go Live dialog, through the dialog's own checks           |
-| `set_sources`       | Choose the screen, window or camera, like the Sources pickers                 |
-| `set_captions`      | Live captions on or off                                                       |
-| `set_background`    | Put a live background on, or take the background off                          |
-| `edit_banner`       | Import an image on this computer as a banner, or rename one                   |
-| `get_scene_layout`  | Everything on the picture and where it sits, per orientation                  |
-| `move_on_scene`     | Move or resize an item to where the Scene canvas's snaps would put it         |
-| `set_scene_item`    | Show or hide the camera or screen, its shape, and the overlays' output switch |
+| Tool                | What it does                                                                       |
+| ------------------- | ---------------------------------------------------------------------------------- |
+| `get_status`        | Idle, recording or live; destinations and their health; scene, audio, banners      |
+| `get_picture`       | The program picture as a JPEG, at most 1280 pixels wide (idle too)                 |
+| `list_scenes`       | Your scenes in order, their keys and what they show, with the one on stream marked |
+| `list_sources`      | Screens, windows, cameras and microphones, and which ones the scene uses           |
+| `list_assets`       | Banners, takeovers, soundboard sounds and live backgrounds                         |
+| `read_chat`         | Recent chat from every platform; it can wait up to 25 s for the next message       |
+| `list_destinations` | Your platforms: on or off, ready or why not, title and category                    |
+| `list_recordings`   | The Library: takes, livestreams and clips, with their file paths                   |
+| `get_recording`     | One take's files, markers, chat totals, peak viewers and Sidekick's reports        |
+| `start_recording`   | Record, exactly like the Record button                                             |
+| `stop`              | Stop the recording or end the livestream, at once                                  |
+| `save_clip`         | Save the last 30 or 60 seconds, like the Clip button                               |
+| `add_marker`        | A named marker on the running recording or livestream                              |
+| `switch_scene`      | Switch to a scene by its id from list_scenes                                       |
+| `set_audio`         | Microphone: mute, gain, which one; System audio: on or off, gain                   |
+| `set_banner`        | Show or hide a banner                                                              |
+| `set_takeover`      | Show a takeover (BRB, Starting soon) or take it down                               |
+| `play_sound`        | Press a soundboard sound                                                           |
+| `stop_sounds`       | Stop one sound or all of them                                                      |
+| `set_highlight`     | Put a chat message on stream, or take it down                                      |
+| `open_window`       | Bring the Stream Manager, Notes or Preview to the front                            |
+| `notify`            | Show you a short notice in Videorc, signed with the agent's name                   |
+| `go_live`           | Go live without the Go Live dialog, through the dialog's own checks                |
+| `set_sources`       | Choose the screen, window or camera, like the Sources pickers                      |
+| `set_captions`      | Live captions on or off                                                            |
+| `set_background`    | Put a live background on, or take the background off                               |
+| `edit_banner`       | Import an image on this computer as a banner, or rename one                        |
+| `get_scene_layout`  | Everything on the picture and where it sits, per orientation                       |
+| `move_on_scene`     | Move or resize an item to where the Scene canvas's snaps would put it              |
+| `set_scene_item`    | Show or hide the camera or screen, its shape, and the overlays' output switch      |
 
 Chat, Sidekick and the avatar, the next stream, settings and the Library:
 

@@ -20,14 +20,20 @@ import {
 import {
   layoutPresetMemoryPatch,
   layoutPresetOrientation,
-  studioModeTogglePreset,
+  ORIENTATION_DEFAULT_PRESET,
   verticalOrientationVideoPatch,
   type CaptureConfig,
   type LayoutOrientation
 } from './capture'
 import { recalledLayoutFraming, rememberLayoutFraming } from './layout-framing-memory'
 import { layoutPresetLabel } from './layout-labels'
-import { sceneSourceGaps, usingVisualSources, type SceneSourceGap } from './scene-presets'
+import {
+  sceneSourceGaps,
+  usingVisualSources,
+  type SavedSceneBackground,
+  type SceneSourceGap
+} from './scene-presets'
+import type { Scene } from './scenes'
 
 // Plan 207 S4: the "Your look" step of first-run setup writes the same state
 // the Studio's own controls write, without a layout transaction. A
@@ -54,15 +60,15 @@ export type FirstRunLookChoice = Pick<FirstRunLook, 'orientation' | 'layoutPrese
 
 /**
  * The preset a look lands on: its own when it belongs to the orientation,
- * otherwise the scene remembered for that orientation (the gallery's toggle).
+ * otherwise that orientation's default layout. The step's own orientation
+ * toggle picks the scene's layout there (`useFirstRunLook`, plan 231 D4).
  */
 export function firstRunLookPreset(
-  config: Pick<CaptureConfig, 'lastHorizontalPreset' | 'lastVerticalPreset'>,
   choice: Pick<FirstRunLookChoice, 'orientation' | 'layoutPreset'>
 ): LayoutPreset {
   return layoutPresetOrientation(choice.layoutPreset) === choice.orientation
     ? choice.layoutPreset
-    : studioModeTogglePreset(choice.orientation, config)
+    : ORIENTATION_DEFAULT_PRESET[choice.orientation]
 }
 
 /**
@@ -91,7 +97,7 @@ export function firstRunLookPatch(
   choice: FirstRunLookChoice
 ): CaptureConfig {
   const current = config.layout.layoutPreset
-  const layoutPreset = firstRunLookPreset(config, choice)
+  const layoutPreset = firstRunLookPreset(choice)
   const layout: LayoutSettings = {
     ...config.layout,
     ...recalledLayoutFraming(config.layoutFramingMemory, current, layoutPreset),
@@ -270,4 +276,38 @@ export function firstRunLayoutOptions(input: FirstRunLayoutOptionsInput): FirstR
         ? screenOnly
         : current
   return { options, preselected }
+}
+
+/**
+ * First-run setup's look on the scenes (plan 207 S4): `onStreamId` takes the
+ * layout whole, and every default scene still on its own layout takes the
+ * camera's shape and the background, as the built-in layouts shared one look.
+ */
+export function scenesWithFirstRunLook(
+  scenes: readonly Scene[],
+  look: { onStreamId: string; layout: LayoutSettings; background: SavedSceneBackground | null }
+): Scene[] {
+  const orientation = layoutPresetOrientation(look.layout.layoutPreset)
+  const { cameraShape, cameraAspect } = look.layout
+  return scenes.map((scene) => {
+    if (scene.id === look.onStreamId)
+      return {
+        ...scene,
+        layouts: {
+          horizontal: { ...scene.layouts.horizontal, cameraShape, cameraAspect },
+          vertical: { ...scene.layouts.vertical, cameraShape, cameraAspect },
+          [orientation]: look.layout
+        },
+        background: look.background
+      }
+    if (!scene.id.startsWith('default-')) return scene
+    return {
+      ...scene,
+      layouts: {
+        horizontal: { ...scene.layouts.horizontal, cameraShape, cameraAspect },
+        vertical: { ...scene.layouts.vertical, cameraShape, cameraAspect }
+      },
+      background: look.background
+    }
+  })
 }

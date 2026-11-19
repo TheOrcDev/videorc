@@ -296,8 +296,9 @@ describe('Retro LCD Sources and Takeover (plan 197)', () => {
     expect(cog).toBeGreaterThan((sources ?? '').indexOf('aria-label="Camera"'))
     // System audio is in Audio since plan 201.
     // Green screen under the Camera picker: Off, Green screen or Blue screen,
-    // with no label and no Adjust (plan 248).
-    expect(rowLabels(sources ?? '')).toEqual(['Screen', 'Camera'])
+    // with no label and no Adjust (plan 248). The Screen lives with the scene
+    // that shows it (plan 231 D8).
+    expect(rowLabels(sources ?? '')).toEqual(['Camera'])
     const greenScreen = (sources ?? '').split('data-testid="green-screen"')[1] ?? ''
     expect(greenScreen).toMatch(
       /aria-label="Green screen"[^>]*role="radiogroup"|role="radiogroup"[^>]*aria-label="Green screen"/
@@ -310,12 +311,9 @@ describe('Retro LCD Sources and Takeover (plan 197)', () => {
     expect(greenScreen).toMatch(/aria-checked="true"[^>]*role="radio"[^>]*><span[^>]*>Off</)
     expect(sources).not.toContain('Adjust')
     expect(sources).not.toContain('System audio')
-    for (const label of ['Screen', 'Camera']) {
-      expect(new RegExp(`<button[^>]*aria-label="${label}"[^>]*>`).exec(markup)?.[0]).toContain(
-        'role="combobox"'
-      )
-    }
-    expect(sources).toContain('title="Display 2"')
+    expect(/<button[^>]*aria-label="Camera"[^>]*>/.exec(markup)?.[0]).toContain('role="combobox"')
+    expect(markup).not.toContain('aria-label="Screen"')
+    expect(markup).not.toContain('Hide screen')
     // No switch: Green screen is a pick, and System audio lives in Audio.
     expect(sources).not.toContain('role="switch"')
     // Captions: under no heading, a door to its page (B-13, B-15).

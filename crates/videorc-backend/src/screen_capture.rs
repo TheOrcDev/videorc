@@ -153,10 +153,169 @@ pub fn app_previews(params: AppPreviewsParams) -> Result<Vec<AppPreview>, String
     }
 }
 
+/// Still pictures are independent of every running capture and compositor.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
+pub enum ScenePictureTarget {
+    App {
+        #[serde(rename = "bundleId")]
+        bundle_id: String,
+    },
+    Window {
+        #[serde(rename = "windowId")]
+        window_id: String,
+    },
+    Display {
+        #[serde(rename = "screenId")]
+        screen_id: String,
+    },
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ScenePicturesParams {
+    pub targets: Vec<ScenePictureTarget>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_width: Option<u32>,
+}
+
+impl ScenePicturesParams {
+    pub fn valid(&self) -> bool {
+        self.targets.len() <= 512
+            && self
+                .max_width
+                .is_none_or(|width| (32..=1920).contains(&width))
+            && self.targets.iter().all(|target| {
+                let id = match target {
+                    ScenePictureTarget::App { bundle_id } => bundle_id,
+                    ScenePictureTarget::Window { window_id } => window_id,
+                    ScenePictureTarget::Display { screen_id } => screen_id,
+                };
+                !id.trim().is_empty() && id.len() <= 16_384
+            })
+    }
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScenePicturesResult {
+    pub pictures: Vec<ScenePicture>,
+    pub elapsed_ms: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hidden: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unsupported: Option<bool>,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct ScenePicture {
+    pub target: ScenePictureTarget,
+    #[serde(flatten)]
+    pub outcome: ScenePictureOutcome,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ScenePictureOutcome {
+    /// Only macOS takes pictures (D17); elsewhere every target is unavailable.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    JpegBase64(String),
+    Unavailable(String),
+}
+
+impl ScenePicturesResult {
+    /// Recheck after the blocking task returns to the async RPC dispatcher too.
+    pub fn guard_privacy(
+        self,
+        start: crate::screen_privacy::ScreenPrivacyView,
+        current: crate::screen_privacy::ScreenPrivacyView,
+    ) -> Self {
+        if scene_pictures_admitted(start, current) {
+            self
+        } else {
+            let mut refused = Self::unavailable(
+                self.pictures
+                    .into_iter()
+                    .map(|picture| picture.target)
+                    .collect(),
+                "hidden",
+            );
+            refused.elapsed_ms = self.elapsed_ms;
+            refused
+        }
+    }
+
+    fn unavailable(targets: Vec<ScenePictureTarget>, reason: &str) -> Self {
+        Self {
+            pictures: targets
+                .into_iter()
+                .map(|target| ScenePicture {
+                    target,
+                    outcome: ScenePictureOutcome::Unavailable(reason.into()),
+                })
+                .collect(),
+            elapsed_ms: 0.0,
+            hidden: (reason == "hidden").then_some(true),
+            unsupported: (reason == "unsupported").then_some(true),
+        }
+    }
+}
+
+/// A hide/show during discovery or screenshot completion invalidates the batch,
+/// even if the screen is visible again by the time the pictures are ready.
+fn scene_pictures_admitted(
+    start: crate::screen_privacy::ScreenPrivacyView,
+    current: crate::screen_privacy::ScreenPrivacyView,
+) -> bool {
+    !start.hidden && !current.hidden && start.span == current.span
+}
+
+pub fn scene_pictures(
+    params: ScenePicturesParams,
+    privacy: std::sync::Arc<crate::screen_privacy::ScreenPrivacyGate>,
+) -> Result<ScenePicturesResult, String> {
+    let started = std::time::Instant::now();
+    let start = privacy.view();
+    let mut result = if !scene_pictures_admitted(start, privacy.view()) {
+        ScenePicturesResult::unavailable(params.targets, "hidden")
+    } else {
+        #[cfg(target_os = "macos")]
+        {
+            macos::scene_pictures(&params, &privacy, start)?
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            ScenePicturesResult::unavailable(params.targets, "unsupported")
+        }
+    };
+    result = result.guard_privacy(start, privacy.view());
+    result.elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
+    tracing::debug!(
+        elapsed_ms = result.elapsed_ms,
+        targets = result.pictures.len(),
+        "scene pictures"
+    );
+    Ok(result)
+}
+
 #[cfg(any(target_os = "macos", test))]
 fn preview_size(width: u32, height: u32, max_width: Option<u32>) -> (u32, u32) {
     let max_width = max_width.unwrap_or(320).clamp(160, 640);
     let target_width = width.max(1).min(max_width);
+    (
+        target_width,
+        ((height as f64 * target_width as f64 / width.max(1) as f64).round() as u32).max(1),
+    )
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn scene_picture_window_admitted(presence: &WindowPresence, frame_capturable: bool) -> bool {
+    matches!(presence, WindowPresence::OnScreen { .. }) && frame_capturable
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn scene_picture_size(width: u32, height: u32, max_width: Option<u32>) -> (u32, u32) {
+    let target_width = width.max(1).min(max_width.unwrap_or(240).clamp(32, 640));
     (
         target_width,
         ((height as f64 * target_width as f64 / width.max(1) as f64).round() as u32).max(1),
@@ -887,8 +1046,8 @@ pub(crate) mod macos {
         rx.recv_timeout(DISPLAY_NAMES_TIMEOUT).unwrap_or_default()
     }
 
-    /// Every display macOS has online (plan 213 F3), mirrored ones included.
-    pub(crate) fn display_facts() -> Vec<DisplayFacts> {
+    /// Fresh WindowServer IDs, shared by discovery and the F-021 guard.
+    pub(crate) fn online_display_ids() -> Vec<CGDirectDisplayID> {
         let mut ids: [CGDirectDisplayID; 32] = [0; 32];
         let mut count = 0_u32;
         // SAFETY: the list holds `ids.len()` ids and the count is one u32.
@@ -897,10 +1056,18 @@ pub(crate) mod macos {
         if listed != CGError::Success {
             return Vec::new();
         }
+        ids.into_iter().take(count as usize).collect()
+    }
+
+    /// Every display macOS has online (plan 213 F3), mirrored ones included.
+    pub(crate) fn display_facts() -> Vec<DisplayFacts> {
+        let ids = online_display_ids();
+        if ids.is_empty() {
+            return Vec::new();
+        }
         let names = display_names();
         let main = CGMainDisplayID();
         ids.iter()
-            .take(count as usize)
             .map(|&id| {
                 let bounds = CGDisplayBounds(id);
                 let (pixel_width, pixel_height) = display_capture_dimensions(
@@ -1194,6 +1361,241 @@ pub(crate) mod macos {
             }
         }
         Ok(apps)
+    }
+
+    pub(super) fn scene_pictures(
+        params: &ScenePicturesParams,
+        privacy: &std::sync::Arc<crate::screen_privacy::ScreenPrivacyGate>,
+        start: crate::screen_privacy::ScreenPrivacyView,
+    ) -> Result<ScenePicturesResult, String> {
+        scene_pictures_with_concurrency(params, privacy, start, 3)
+    }
+
+    fn scene_pictures_with_concurrency(
+        params: &ScenePicturesParams,
+        privacy: &std::sync::Arc<crate::screen_privacy::ScreenPrivacyGate>,
+        start: crate::screen_privacy::ScreenPrivacyView,
+        concurrency: usize,
+    ) -> Result<ScenePicturesResult, String> {
+        use base64::Engine;
+        use objc2::{AnyThread, msg_send, runtime::AnyClass};
+        use objc2_foundation::NSArray;
+        use objc2_screen_capture_kit::{SCContentFilter, SCStreamConfiguration};
+        let mut result =
+            ScenePicturesResult::unavailable(params.targets.clone(), "source-unavailable");
+        let Some(manager) = AnyClass::get(c"SCScreenshotManager") else {
+            return Ok(ScenePicturesResult::unavailable(
+                params.targets.clone(),
+                "unsupported",
+            ));
+        };
+        let content = load_shareable_content()?;
+        let windows = ordered_app_windows(&content)?;
+        let apps = build_app_previews(&windows, unsafe { libc::getppid() });
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut pending = std::collections::VecDeque::new();
+        let collect = |(index, rx): (usize, mpsc::Receiver<Option<String>>),
+                       result: &mut ScenePicturesResult| {
+            result.pictures[index].outcome =
+                match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+                    Ok(Some(jpeg)) => ScenePictureOutcome::JpegBase64(jpeg),
+                    _ => ScenePictureOutcome::Unavailable("screenshot-unavailable".into()),
+                };
+        };
+        for (index, target) in params.targets.iter().enumerate() {
+            if pending.len() >= concurrency.max(1) {
+                collect(pending.pop_front().unwrap(), &mut result);
+            }
+            // A timed-out operation can still be running in WindowServer.
+            // Stop dispatching so timeouts never turn the bound into a burst.
+            if Instant::now() >= deadline || !scene_pictures_admitted(start, privacy.view()) {
+                break;
+            }
+            let window_id = match target {
+                ScenePictureTarget::App { bundle_id } => apps
+                    .iter()
+                    .find(|app| &app.bundle_id == bundle_id)
+                    .and_then(|app| app.front_window_id.as_deref())
+                    .and_then(parse_screencapturekit_window_id),
+                ScenePictureTarget::Window { window_id } => {
+                    parse_screencapturekit_window_id(window_id)
+                }
+                ScenePictureTarget::Display { .. } => None,
+            };
+            let selected = if let ScenePictureTarget::Display { screen_id } = target {
+                parse_screencapturekit_display_id(screen_id).and_then(|id| {
+                    let display = unsafe { content.0.displays() }
+                        .iter()
+                        .find(|display| unsafe { display.displayID() } == id)?;
+                    let frame = unsafe { display.frame() };
+                    Some((
+                        unsafe {
+                            SCContentFilter::initWithDisplay_excludingWindows(
+                                SCContentFilter::alloc(),
+                                &display,
+                                &NSArray::new(),
+                            )
+                        },
+                        frame.size.width,
+                        frame.size.height,
+                    ))
+                })
+            } else {
+                window_id.and_then(|id| {
+                    // Apply the same own-window/protected-window exclusions as app previews.
+                    windows.iter().find(|window| {
+                        window.id == id
+                            && !window.protected
+                            && window.pid != unsafe { libc::getppid() }
+                            && window.pid != std::process::id() as i32
+                            && window.bundle_id != "dev.theorcdev.videorc"
+                            && !is_foreign_session_window_app(Some(&window.app_name))
+                    })?;
+                    let window = unsafe { content.0.windows() }
+                        .iter()
+                        .find(|window| unsafe { window.windowID() } == id)?;
+                    let frame = unsafe { window.frame() };
+                    if !scene_picture_window_admitted(
+                        &window_presence(id),
+                        crate::preview_screen::window_frame_is_capturable(&frame),
+                    ) {
+                        return None;
+                    }
+                    Some((
+                        unsafe {
+                            SCContentFilter::initWithDesktopIndependentWindow(
+                                SCContentFilter::alloc(),
+                                &window,
+                            )
+                        },
+                        frame.size.width,
+                        frame.size.height,
+                    ))
+                })
+            };
+            let Some((filter, width, height)) = selected else {
+                continue;
+            };
+            let (width, height) = scene_picture_size(
+                width.max(1.0) as u32,
+                height.max(1.0) as u32,
+                params.max_width,
+            );
+            let (tx, rx) = mpsc::channel();
+            let gate = privacy.clone();
+            let handler = RcBlock::new(
+                move |image: *mut objc2_core_graphics::CGImage, error: *mut NSError| {
+                    let jpeg = if !scene_pictures_admitted(start, gate.view())
+                        || image.is_null()
+                        || !error.is_null()
+                    {
+                        None
+                    } else {
+                        unsafe { screenshot_jpeg(image) }
+                            .map(|bytes| base64::engine::general_purpose::STANDARD.encode(bytes))
+                    };
+                    let _ = tx.send(jpeg);
+                },
+            );
+            // Limit outstanding WindowServer work independently of the running capture.
+            if !scene_pictures_admitted(start, privacy.view()) {
+                break;
+            }
+            unsafe {
+                let config = SCStreamConfiguration::new();
+                config.setWidth(width as usize);
+                config.setHeight(height as usize);
+                config.setShowsCursor(false);
+                let _: () = msg_send![manager, captureImageWithFilter: &*filter, configuration: &*config, completionHandler: &*handler];
+            }
+            pending.push_back((index, rx));
+        }
+        for item in pending {
+            collect(item, &mut result);
+        }
+        Ok(result)
+    }
+
+    #[cfg(test)]
+    #[test]
+    #[ignore = "requires macOS Screen Recording permission; measures ten real SCK pictures"]
+    fn scene_pictures_ten_picture_timing() -> Result<(), String> {
+        let content = load_shareable_content().expect("Screen Recording grant required");
+        let windows = ordered_app_windows(&content).unwrap();
+        let apps = build_app_previews(&windows, unsafe { libc::getppid() });
+        let mut targets: Vec<_> = apps
+            .iter()
+            .filter(|app| app.front_window_id.is_some())
+            .map(|app| ScenePictureTarget::App {
+                bundle_id: app.bundle_id.clone(),
+            })
+            .collect();
+        targets.extend(
+            apps.iter()
+                .filter_map(|app| app.front_window_id.clone())
+                .map(|window_id| ScenePictureTarget::Window { window_id }),
+        );
+        targets.extend(unsafe { content.0.displays() }.iter().map(|display| {
+            ScenePictureTarget::Display {
+                screen_id: format!("screen:screencapturekit:{}", unsafe { display.displayID() }),
+            }
+        }));
+        if targets.is_empty() {
+            return Err("no picture targets available".into());
+        }
+        let distinct = targets.len().min(10);
+        let targets: Vec<_> = targets.into_iter().cycle().take(10).collect();
+        let gate = std::sync::Arc::new(crate::screen_privacy::ScreenPrivacyGate::default());
+        // Target discovery is setup; force the first measured batch to rediscover.
+        *CONTENT
+            .get()
+            .unwrap()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()) = None;
+        let measure = |phase: &str, run: usize, concurrency: usize| -> Result<f64, String> {
+            let started = Instant::now();
+            let start = gate.view();
+            let result = scene_pictures_with_concurrency(
+                &ScenePicturesParams {
+                    targets: targets.clone(),
+                    max_width: Some(240),
+                },
+                &gate,
+                start,
+                concurrency,
+            )?
+            .guard_privacy(start, gate.view());
+            let elapsed = started.elapsed().as_secs_f64() * 1000.0;
+            let available = result
+                .pictures
+                .iter()
+                .filter(|picture| matches!(picture.outcome, ScenePictureOutcome::JpegBase64(_)))
+                .count();
+            eprintln!(
+                "scene_pictures phase={phase} run={run} concurrency={concurrency} count=10 distinct={distinct} available={available} width=240 elapsed_ms={elapsed:.3}"
+            );
+            Ok(elapsed)
+        };
+        let uptime = || {
+            if let Ok(output) = std::process::Command::new("uptime").output() {
+                eprintln!("{}", String::from_utf8_lossy(&output.stdout).trim());
+            }
+        };
+        uptime();
+        measure("cold", 1, 10)?;
+        for concurrency in [10, 3] {
+            uptime();
+            let mut samples = Vec::new();
+            for run in 1..=5 {
+                samples.push(measure("warm", run, concurrency)?);
+            }
+            samples.sort_by(f64::total_cmp);
+            eprintln!(
+                "scene_pictures summary concurrency={concurrency} n=5 p50_ms={:.3} p95_ms={:.3}",
+                samples[2], samples[4]
+            );
+        }
+        Ok(())
     }
 
     unsafe fn screenshot_jpeg(image: *mut objc2_core_graphics::CGImage) -> Option<Vec<u8>> {
@@ -1562,6 +1964,122 @@ pub(crate) mod macos {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scene_pictures_window_guard_rejects_stale_closed_and_disconnected_windows() {
+        let displays = [(0.0, 0.0, 1512.0, 982.0)];
+        let live = WindowPresence::OnScreen {
+            name: "Window".into(),
+        };
+        for (frame, expected) in [
+            ((100.0, 100.0, 800.0, 600.0), true),
+            ((1600.0, 0.0, 800.0, 600.0), false),
+            ((0.0, 0.0, 0.0, 600.0), false),
+            ((f64::NAN, 0.0, 800.0, 600.0), false),
+            ((0.0, 0.0, f64::INFINITY, 600.0), false),
+        ] {
+            let geometry = crate::preview_screen::window_rect_is_capturable(frame, displays);
+            assert_eq!(scene_picture_window_admitted(&live, geometry), expected);
+        }
+        assert!(!scene_picture_window_admitted(&WindowPresence::Gone, true));
+        assert!(!scene_picture_window_admitted(
+            &WindowPresence::OffScreen {
+                name: "Window".into()
+            },
+            true
+        ));
+        assert!(!crate::preview_screen::window_rect_is_capturable(
+            (0.0, 0.0, 800.0, 600.0),
+            []
+        ));
+    }
+
+    #[test]
+    fn scene_pictures_fixture_parses_all_targets_and_omits_absent_fields() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../protocol-fixtures/scene-pictures.json"
+        ))
+        .unwrap();
+        let params: ScenePicturesParams =
+            serde_json::from_value(fixture["params"].clone()).unwrap();
+        assert!(params.valid());
+        assert_eq!(scene_picture_size(1920, 1080, None), (240, 135));
+        assert_eq!(scene_picture_size(1920, 1080, Some(32)), (32, 18));
+        assert!(matches!(params.targets[0], ScenePictureTarget::App { .. }));
+        assert!(matches!(
+            params.targets[1],
+            ScenePictureTarget::Window { .. }
+        ));
+        assert!(matches!(
+            params.targets[2],
+            ScenePictureTarget::Display { .. }
+        ));
+        assert_eq!(serde_json::to_value(&params).unwrap(), fixture["params"]);
+        let mut result =
+            ScenePicturesResult::unavailable(params.targets.clone(), "source-unavailable");
+        result.pictures[0].outcome = ScenePictureOutcome::JpegBase64("/9j/4AAQ".into());
+        result.pictures[2].outcome = ScenePictureOutcome::JpegBase64("/9j/4AAQ".into());
+        result.elapsed_ms = 42.5;
+        assert_eq!(serde_json::to_value(result).unwrap(), fixture["result"]);
+        for reason in ["hidden", "unsupported"] {
+            assert_eq!(
+                serde_json::to_value(ScenePicturesResult::unavailable(
+                    params.targets.clone(),
+                    reason
+                ))
+                .unwrap(),
+                fixture[reason]
+            );
+        }
+        for bad in [
+            serde_json::json!({"targets":[{"kind":"none"}]}),
+            serde_json::json!({"targets":[{"kind":"app","bundleId":"a","extra":true}]}),
+        ] {
+            assert!(serde_json::from_value::<ScenePicturesParams>(bad).is_err());
+        }
+        assert!(
+            !ScenePicturesParams {
+                targets: vec![],
+                max_width: Some(0)
+            }
+            .valid()
+        );
+    }
+
+    #[test]
+    fn scene_pictures_refuse_hide_and_discard_a_hide_show_during_capture() {
+        use crate::screen_privacy::ScreenPrivacyGate;
+        let gate = std::sync::Arc::new(ScreenPrivacyGate::default());
+        let start = gate.view();
+        assert!(scene_pictures_admitted(start, gate.view()));
+        gate.hide(crate::protocol::ScreenPrivacyReason::You, "now".into());
+        assert!(!scene_pictures_admitted(start, gate.view()));
+        let params = ScenePicturesParams {
+            targets: vec![ScenePictureTarget::App {
+                bundle_id: "test.app".into(),
+            }],
+            max_width: None,
+        };
+        let result = scene_pictures(params, gate.clone()).unwrap();
+        assert_eq!(result.hidden, Some(true));
+        assert!(
+            matches!(&result.pictures[0].outcome, ScenePictureOutcome::Unavailable(reason) if reason == "hidden")
+        );
+        let mut pending = ScenePicturesResult::unavailable(
+            vec![ScenePictureTarget::Display {
+                screen_id: "screen:screencapturekit:1".into(),
+            }],
+            "source-unavailable",
+        );
+        pending.pictures[0].outcome = ScenePictureOutcome::JpegBase64("/9j/4AAQ".into());
+        let refused = pending.guard_privacy(start, gate.view());
+        let serialized = serde_json::to_value(refused).unwrap();
+        assert_eq!(serialized["hidden"], true);
+        assert!(serialized["pictures"][0].get("jpegBase64").is_none());
+        gate.show();
+        assert!(!scene_pictures_admitted(start, gate.view()));
+        assert!(scene_pictures_admitted(gate.view(), gate.view()));
+    }
 
     #[test]
     fn window_presence_copy_names_the_window_and_never_an_id() {

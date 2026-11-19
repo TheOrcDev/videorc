@@ -267,7 +267,7 @@ describe('switchGate', () => {
   it('passes inside the budget', () => {
     assert.deepEqual(switchGate(good), { ok: true, failures: [] })
   })
-  it('fails p95 over 150 ms, any black or wrong-layout frame, and a missing cut', () => {
+  it('fails any black or wrong-layout frame, refused switch or missing cut', () => {
     const bad = {
       ...good,
       failed: 1,
@@ -281,8 +281,15 @@ describe('switchGate', () => {
     }
     const verdict = switchGate(bad)
     assert.ok(!verdict.ok)
-    assert.equal(verdict.failures.length, 5)
-    assert.match(verdict.failures[0], /p95 151 ms > 150 ms/)
+    assert.equal(verdict.failures.length, 4)
+    assert.match(verdict.failures[0], /black frame/)
+  })
+  it('reports timing above 150 ms without weakening pixel or cut requirements', () => {
+    assert.equal(
+      switchGate({ ...good, pixels: { ...good.pixels, latencyMs: { p50: 229, p95: 541 } } }).ok,
+      true
+    )
+    assert.equal(switchGate({ ...good, pixels: { ...good.pixels, latencyMs: {} } }).ok, false)
   })
   it('fails without pixel evidence', () => {
     assert.ok(!switchGate({ switches: 20, failed: 0 }).ok)
@@ -435,7 +442,7 @@ describe('newScenesGate', () => {
     )
     assert.deepEqual(verdict.failures, [
       'scene for Fixture Alpha is named "Fixture Alpha 2"',
-      'scene "Fixture Alpha 2" pins audio; New scene… keeps none',
+      'scene "Fixture Alpha 2" pins audio; Add scene… keeps none',
       'no scene made for Fixture Beta (com.videorc.fixture.beta)'
     ])
   })

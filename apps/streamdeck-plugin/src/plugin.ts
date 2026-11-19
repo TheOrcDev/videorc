@@ -10,6 +10,9 @@ import {
   buddyKeyIntent,
   buddyKeyLit,
   layoutKeyLit,
+  sceneActionIntent,
+  sceneActionOptions,
+  sceneActionTitle,
   micKeyLit,
   recordKeyIntent,
   recordKeyLit,
@@ -263,26 +266,24 @@ class SavedSceneApply extends VideorcAction<SavedSceneSettings> {
   }
 }
 
-type SceneSettings = { layoutPreset?: string }
+type SceneSettings = { sceneId?: string; layoutPreset?: string }
 
 @action({ UUID: 'com.videorc.streamdeck.scene-apply' })
 class SceneApply extends VideorcAction<SceneSettings> {
-  protected renderTitle: TitleRenderer = (state, connected) =>
-    !connected ? 'Videorc\noffline' : `Scene\n${state?.layoutPreset ?? ''}`
+  // An old key names its own layout until a scene is chosen, never the
+  // scene on stream: each old key asks for a different scene.
+  protected renderTitle: TitleRenderer<SceneSettings> = (state, connected, settings) =>
+    sceneActionTitle(state, settings, connected)
   protected override renderPressed(state: RemoteState | null, settings: SceneSettings): boolean {
-    return layoutKeyLit(state, settings.layoutPreset)
+    return settings.sceneId
+      ? state?.activeSavedSceneId === settings.sceneId
+      : layoutKeyLit(state, settings.layoutPreset)
   }
   protected intentFor(settings: SceneSettings): Record<string, unknown> | null {
-    if (!settings.layoutPreset) {
-      return null
-    }
-    return { kind: 'sceneApply', layoutPreset: settings.layoutPreset }
+    return sceneActionIntent(settings)
   }
   protected override inspectorOptions(): InspectorOption[] {
-    return (client.describe?.layoutPresets ?? []).map((preset) => ({
-      value: preset,
-      label: preset
-    }))
+    return sceneActionOptions(client.state)
   }
 }
 

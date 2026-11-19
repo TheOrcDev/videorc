@@ -40,6 +40,7 @@ import {
   type StageItemDraft
 } from '@/components/scene/overlay-stage'
 import { HideScreenSection } from '@/components/scene/hide-screen-section'
+import { useSceneDialogs } from '@/components/scene/scene-dialogs'
 import { SceneList } from '@/components/scene/scene-list'
 import { SceneSwitchPending, SceneSwitchStatus } from '@/components/scene/scene-switch-status'
 import { SceneStage, stageLayoutOnlyNote, type StagePhase } from '@/components/scene/scene-stage'
@@ -88,8 +89,8 @@ import {
   layoutPresetNeedsCamera,
   layoutPresetNeedsScreen,
   layoutPresetOrientation,
-  simulcastLegLiveRequest,
-  studioModeTogglePreset,
+  ORIENTATION_DEFAULT_PRESET,
+  simulcastLegVideo,
   type LayoutOrientation
 } from '@/lib/capture'
 import { bannerSnapRect } from '@/lib/banner-place'
@@ -98,6 +99,7 @@ import { BANNER_SHOWN_LIMIT_REASON, bannerOrderAfterMove } from '@/lib/banners'
 import { bannerSizeAdvice } from '@/lib/banner-size'
 import { rememberFocus } from '@/lib/focus-retention'
 import { freeformEntryPatch, peekLayoutUndo, sourceCroppable } from '@/lib/freeform-memory'
+import { layoutAsksForScreen } from '@/lib/scene-section'
 import { scenePictureSizes, sourcePictureSize } from '@/lib/scene-source-sizes'
 import {
   SCENE_VISIBILITY_LOCK_REASON,
@@ -358,6 +360,7 @@ export function LayoutTab(): ReactElement {
     savedScenePendingId,
     savedScenes,
     activeSavedSceneId,
+    sceneOnStream,
     settings,
     setSettings,
     overlayLayout,
@@ -367,6 +370,7 @@ export function LayoutTab(): ReactElement {
     wsStatus
   } = useStudioCore()
   const editScene = useEditScene()
+  const sceneDialogs = useSceneDialogs()
   // The stage's phase (plan 174, C-5): only a pointer gesture takes the
   // inspector out of play (`inert`); a commit still landing leaves every
   // control enabled and focused, and `runPreciseEdit` drops the input instead.
@@ -425,7 +429,7 @@ export function LayoutTab(): ReactElement {
   // Orientation (D15): the primary canvas places the item's horizontal rect
   // (or its vertical one for a vertical scene); with a vertical stream armed
   // the toggle shows that stream's rects over a greyed 9:16 canvas.
-  const verticalLeg = simulcastLegLiveRequest(captureConfig)
+  const verticalLeg = simulcastLegVideo(captureConfig)
   const primaryOrientation = overlayOrientationForCanvas(
     captureConfig.video.width,
     captureConfig.video.height
@@ -441,8 +445,8 @@ export function LayoutTab(): ReactElement {
   // stream's 9:16 while the stage shows it. A banner's rect converts its
   // image's aspect into these canvas units.
   const stageAspect =
-    verticalView && verticalLeg?.video
-      ? verticalLeg.video.width / Math.max(1, verticalLeg.video.height)
+    verticalView && verticalLeg
+      ? verticalLeg.width / Math.max(1, verticalLeg.height)
       : verticalView
         ? 9 / 16
         : captureConfig.video.width / Math.max(1, captureConfig.video.height)
@@ -670,12 +674,13 @@ export function LayoutTab(): ReactElement {
       })
     )
   }
-  // The orientation control re-enters each mode where it was left; the
-  // orientation ⇄ canvas coupling in applyCameraPreset flips the output
-  // profile alongside it (the Studio gallery's control, brought here: C-23).
+  // The orientation control puts the scene on stream on in its own layout
+  // for that orientation (plan 231 D4); the orientation ⇄ canvas coupling in
+  // applyCameraPreset flips the output profile alongside it (the Studio
+  // gallery's control, brought here: C-23).
   const switchOrientation = (target: LayoutOrientation): void => {
     if (target === orientation) return
-    applyCameraPreset({ layoutPreset: studioModeTogglePreset(target, captureConfig) })
+    applyCameraPreset({ layoutPreset: ORIENTATION_DEFAULT_PRESET[target] }, { toOrientation: true })
   }
   const layoutTabPresets =
     orientation === 'vertical' ? VERTICAL_LAYOUT_TAB_PRESETS : HORIZONTAL_LAYOUT_TAB_PRESETS
@@ -788,10 +793,28 @@ export function LayoutTab(): ReactElement {
     }
   }, [openPreviewWindow, previewWindow.open, setPreviewWindowMode])
 
-  // The canvas edits the scene on stream. A saved scene keeps each edit as it
-  // lands (plan 210 D3), so the section says where they go; there is no
-  // Modified state and no Update to press.
+  // The canvas edits the scene on stream, which keeps each edit as it lands
+  // (plan 231 D11), so the section says where they go; there is no Modified
+  // state and no Update to press.
   const activeSavedScene = savedScenes.find((entry) => entry.id === activeSavedSceneId)
+  // Plan 231 D19, as Studio's Layout field does it: a layout that draws a
+  // screen, chosen for a scene that shows none, asks which screen first
+  // (Change screen…), and Cancel keeps the layout. The capture a scene before
+  // it left running is never taken as its screen.
+  const asksForScreen = (preset: LayoutPreset): boolean =>
+    sceneOnStream !== null && layoutAsksForScreen(sceneOnStream.shows, preset)
+  const chooseLayout = (layoutPreset: LayoutPreset): void => {
+    if (asksForScreen(layoutPreset)) {
+      if (activeSavedScene)
+        sceneDialogs.open({
+          kind: 'change-screen',
+          scene: activeSavedScene,
+          forLayout: layoutPreset
+        })
+      return
+    }
+    applyCameraPreset({ layoutPreset })
+  }
   const canvasDescription = activeSavedScene
     ? `Changes save to “${activeSavedScene.name}” as you make them.`
     : 'Drag sources and overlays into place.'
@@ -855,23 +878,24 @@ export function LayoutTab(): ReactElement {
                         {!preset.enabled ? <Badge variant="outline">Soon</Badge> : null}
                       </>
                     ),
+                    // A scene that shows no screen asks for one (D19) instead.
                     disabled:
-                      !preset.enabled || (needsCamera && !hasCamera) || (needsScreen && !hasScreen),
+                      !preset.enabled ||
+                      (needsCamera && !hasCamera) ||
+                      (needsScreen && !hasScreen && !asksForScreen(preset.id)),
                     'data-videorc-layout-preset': preset.id,
                     // Every click is an intent: the checked preset is the committed
                     // one, so a click on it supersedes a newer pending switch.
                     onClick:
                       !isFreeform && layout.layoutPreset === preset.id
-                        ? () => applyCameraPreset({ layoutPreset: preset.id }, { keepScene: true })
+                        ? () => applyCameraPreset({ layoutPreset: preset.id })
                         : undefined
                   }
                 })}
                 value={isFreeform ? null : layout.layoutPreset}
-                // Plan 210 D3: a layout picked here edits the scene on stream
-                // (a saved one keeps it); the list's Layouts switch to a layout.
-                onValueChange={(layoutPreset) =>
-                  applyCameraPreset({ layoutPreset }, { keepScene: true })
-                }
+                // Plan 231 D2: a layout picked here is the layout of the scene
+                // on stream, which keeps it (D11).
+                onValueChange={chooseLayout}
               />
               <Separator className="data-[orientation=vertical]:h-5" orientation="vertical" />
               {/* Freeform is a mode, not a preset: composition becomes the
@@ -1114,7 +1138,8 @@ export function LayoutTab(): ReactElement {
               and visibility now lives in the Inspector. */}
 
           {/* Hide screen's setup (plan 210 D9, D11), under the canvas that
-              shows its frosted picture; the action is on Studio's Screen row. */}
+              shows its frosted picture; the action is on the scene's Screen
+              row in Studio's Scenes section (plan 231 D8). */}
           <HideScreenSection />
         </div>
 
@@ -1137,7 +1162,7 @@ export function LayoutTab(): ReactElement {
               sizeAdvice={bannerSizeAdvice({
                 banner: selectedBanner,
                 output: captureConfig.video,
-                verticalStream: verticalLeg?.video ?? null
+                verticalStream: verticalLeg ?? null
               })}
               onBringToFront={() => moveSelectedBanner(banners.length - 1)}
               onManage={() => openWorkspaceTab('assets')}
@@ -1422,6 +1447,7 @@ export function LayoutTab(): ReactElement {
           />
         </FieldSet>
       </div>
+      {sceneDialogs.element}
     </div>
   )
 }

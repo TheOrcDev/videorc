@@ -1,6 +1,5 @@
 import type { Device } from './backend'
 import {
-  normalizeSceneVisual,
   visualSources,
   type SavedScene,
   type SceneOrientation,
@@ -9,8 +8,8 @@ import {
 } from './scene-presets'
 
 // Plan 210: what app scenes need beyond the saved scene's shape. Only the
-// Scene page (New scene…, the list), a saved scene's switch and the follower
-// read these, all lazy, so they stay out of the Studio's first paint.
+// scene lists, a scene's switch and the follower read these, all lazy, so
+// they stay out of the Studio's first paint.
 
 export { appWindowFailureCopy, type AppWindowFailure } from './scene-window-state'
 import type { AppWindowFailure } from './scene-window-state'
@@ -56,55 +55,6 @@ export function resolveSceneWindow(
       windowName: resolution.title
     }
   }
-}
-
-export type SceneAppChoice = {
-  bundleId: string
-  name: string
-  frontWindowId?: string
-  frontWindowName?: string
-}
-export type ScenesForAppsOptions = { id: () => string; now: () => string }
-export function scenesForApps(
-  apps: readonly SceneAppChoice[],
-  look: SceneVisual,
-  existingScenes: readonly SavedScene[],
-  options: ScenesForAppsOptions = {
-    id: () => crypto.randomUUID(),
-    now: () => new Date().toISOString()
-  }
-): SavedScene[] {
-  const names = new Set(existingScenes.map((s) => s.name.toLocaleLowerCase()))
-  return apps.map((app) => {
-    const base = app.name.trim().slice(0, 80) || app.bundleId.slice(0, 80)
-    let name = base
-    for (let n = 2; names.has(name.toLocaleLowerCase()); n++) {
-      const suffix = ` ${n}`
-      name = base.slice(0, 80 - suffix.length).trimEnd() + suffix
-    }
-    names.add(name.toLocaleLowerCase())
-    const now = options.now()
-    return {
-      id: options.id(),
-      name,
-      createdAt: now,
-      updatedAt: now,
-      visual: normalizeSceneVisual({
-        ...look,
-        sources: {
-          ...look.sources,
-          screenId: undefined,
-          screenName: undefined,
-          screenUuid: undefined,
-          windowId: app.frontWindowId,
-          windowName: app.frontWindowName,
-          captureOff: false,
-          testPattern: false,
-          app: { bundleId: app.bundleId, name: app.name, follows: true }
-        }
-      })
-    }
-  })
 }
 
 export function sceneForFrontApp(

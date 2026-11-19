@@ -1,4 +1,5 @@
 import type { SavedSceneApplyResult } from '../scene-window-resolution'
+import type { SceneShows } from '../scenes'
 // The Studio's action context (plan 209 S5): what every action needs from the
 // Studio, built per intent (studio-context.ts) from the latest render's
 // handlers that hooks/use-studio.tsx hands over. A Stream Deck key, the phone
@@ -91,7 +92,15 @@ export interface StudioActionContext {
    * a live session picks it up through the latest-wins audio update. */
   setSystemAudioEnabled: (enabled: boolean) => void
   knownLayoutPresets: readonly LayoutPreset[]
-  applyLayoutPreset: (layoutPreset: LayoutPreset) => Promise<boolean>
+  /**
+   * Plan 231 D14: a layout named by a remote or an agent switches to the
+   * first scene with that layout, or is refused with its reason.
+   */
+  applyLayoutPreset: (
+    layoutPreset: LayoutPreset,
+    /** A remote's screen with it: the scene goes on showing it, and keeps it (D2). */
+    options?: { shows?: SceneShows }
+  ) => Promise<boolean | { ok: boolean; message?: string }>
   hasTakeover: (assetId: string) => boolean
   activateTakeover: (assetId: string) => Promise<boolean>
   clearTakeover: () => Promise<boolean>
@@ -125,9 +134,20 @@ export interface StudioActionContext {
   /** A livestream runs now (it may also record): what `stop` ends. */
   sessionLive?: boolean
   /** The streamer's saved scenes, by id and name (`switch_scene`). */
-  savedScenes?: readonly { id: string; name: string }[]
-  /** Applies a saved scene exactly as clicking it in the Studio does. */
-  applySavedSceneResult?: (id: string) => Promise<SavedSceneApplyResult>
+  savedScenes?: readonly {
+    id: string
+    name: string
+    visual?: { layout: Pick<LayoutSettings, 'layoutPreset' | 'arrangementMode'> }
+  }[]
+  /**
+   * Applies a scene exactly as clicking it in the Studio does. With `shows`
+   * (a remote's `sceneId` and `screenId` together) the scene goes on showing
+   * that screen, in the same switch, and keeps it (D2).
+   */
+  applySavedSceneResult?: (
+    id: string,
+    options?: { shows?: SceneShows }
+  ) => Promise<SavedSceneApplyResult>
   applySavedScene?: (id: string) => Promise<boolean>
   /** Each built-in layout's name; `layoutPresetLabel` when left out. */
   layoutLabels?: Readonly<Record<string, string>>

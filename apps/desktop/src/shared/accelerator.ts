@@ -216,7 +216,7 @@ export function findAcceleratorOwner(
 ): GlobalShortcutAction | null {
   const wanted = normalizeAccelerator(accelerator, platform)
   if (!wanted) return null
-  for (const [action, value] of globalShortcutEntries(config)) {
+  for (const [action, value] of globalShortcutEntries(config, platform)) {
     if (action !== exceptAction && normalizeAccelerator(value, platform) === wanted) {
       return action
     }

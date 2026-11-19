@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { defaultCaptureConfig } from './capture'
-import { scenesForApps } from './scene-apps'
+import { normalizeSceneVisual, type SavedScene } from './scene-presets'
 import {
   DEFAULT_PASSWORD_MANAGER_BUNDLE_IDS,
   initialFollowFrontAppState,
@@ -11,16 +11,25 @@ import {
 } from './follow-front-app'
 
 const front = { bundleId: 'com.figma.Desktop', name: 'Figma', pid: 12, frontWindowId: 'window' }
-const scenes = scenesForApps(
-  [front],
+/** Figma's scene, following its app, as plan 210's New scene… made it. */
+const scenes: SavedScene[] = [
   {
-    layout: { ...defaultCaptureConfig.layout, layoutPreset: 'screen-only' },
-    sources: {},
-    background: null
-  },
-  [],
-  { id: () => 'figma', now: () => 'today' }
-)
+    id: 'figma',
+    name: 'Figma',
+    createdAt: 'today',
+    updatedAt: 'today',
+    visual: normalizeSceneVisual({
+      layout: { ...defaultCaptureConfig.layout, layoutPreset: 'screen-only' },
+      sources: {
+        windowId: front.frontWindowId,
+        captureOff: false,
+        testPattern: false,
+        app: { bundleId: front.bundleId, name: front.name, follows: true }
+      },
+      background: null
+    })
+  }
+]
 function harness(overrides: Partial<FollowFrontAppContext> = {}) {
   let state: FollowFrontAppState = initialFollowFrontAppState()
   const context: FollowFrontAppContext = {

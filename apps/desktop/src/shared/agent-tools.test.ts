@@ -140,6 +140,41 @@ describe('the agent tool catalog (plan 209 S1)', () => {
     expect(() => parseAgentToolCatalog(long)).toThrow(/must be 40 to 400/)
   })
 
+  it('lists scene metadata only and documents legacy switch mapping and refusal (D14)', () => {
+    const list = agentTool('list_scenes')!
+    const result = {
+      scenes: [
+        {
+          id: 'figma',
+          name: 'Figma',
+          position: 1,
+          key: 'F13',
+          shows: 'Figma · front window',
+          onStream: true
+        }
+      ]
+    }
+    expect(validateAgentToolValue(list.outputSchema!, result, 'result')).toBeNull()
+    expect(
+      validateAgentToolValue(
+        list.outputSchema!,
+        { scenes: [{ ...result.scenes[0], kind: 'layout' }] },
+        'result'
+      )
+    ).toContain('kind')
+    const tool = agentTool('switch_scene')!
+    expect(validateAgentToolArguments(tool, { sceneId: 'screen-only' })).toBeNull()
+    expect(tool.description).toContain('first scene')
+    expect(tool.description).toContain('No scene uses {Layout}')
+    expect(
+      validateAgentToolValue(
+        tool.outputSchema!,
+        { scene: { id: 'figma', name: 'Figma' } },
+        'result'
+      )
+    ).toBeNull()
+  })
+
   it('checks arguments against the input schema with the same sentences as Rust', () => {
     const notify = agentTool('notify')!
     expect(validateAgentToolArguments(notify, { message: 'hi' })).toBeNull()

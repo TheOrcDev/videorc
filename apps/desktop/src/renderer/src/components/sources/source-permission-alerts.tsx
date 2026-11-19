@@ -95,8 +95,8 @@ export function SourcePermissionAlertsView({
 
 /**
  * The alerts, wired to the studio. `only` keeps one permission's alert, for
- * a place that needs just that one (New scene… needs Screen Recording,
- * plan 210 S5), in the same words as Sources.
+ * a place that needs just that one (Add scene… needs Screen Recording,
+ * plan 210 S5, plan 231 D6), in the same words as Sources.
  */
 export function SourcePermissionAlerts({
   only,

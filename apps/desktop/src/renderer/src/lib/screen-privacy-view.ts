@@ -2,8 +2,8 @@ import { DEFAULT_SCREEN_HIDE_SHORTCUT } from '../../../shared/global-shortcuts'
 import type { ScreenPrivacy } from './backend'
 
 // Plan 210 S8b: the words and the key every Hide screen surface shares (the
-// Studio's Screen row and its Retro LCD twin, the Stream Manager, the Scene
-// page). Studio's own module graph loads it, so it stays words and checks.
+// scene's Screen row in Studio's Scenes section and its Retro LCD twin, plan
+// 231 D8; the Stream Manager; the Scene page). Studio's own module graph loads it, so it stays words and checks.
 
 /** The state's one word (D9): the Studio's chip, the Stream Manager's stats chip. */
 export const SCREEN_HIDDEN_LABEL = 'Screen hidden'

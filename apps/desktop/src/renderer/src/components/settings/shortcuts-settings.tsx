@@ -16,8 +16,7 @@ import { ShortcutKeys } from '@/components/ui/shortcut-keys'
 import { useStudioCore } from '@/hooks/use-studio'
 import { globalShortcutLabel, globalShortcutRegistration } from '@/lib/global-shortcuts'
 import { globalShortcutTakenReason } from '@/lib/global-shortcut-owner'
-import { BUILTIN_LAYOUTS } from '@/lib/layout-framing-memory'
-import { layoutPresetLabel } from '@/lib/layout-labels'
+import { sceneShortcutRows } from '@/lib/scene-shortcuts'
 import type { ShortcutRecorderAppKey } from '@/lib/shortcut-recorder'
 import { shortcutAccelerator, shortcutsByGroup } from '@/lib/shortcuts'
 import { systemAudioDevice } from '@/lib/system-audio'
@@ -81,7 +80,9 @@ export function ShortcutsSettings(): ReactElement {
     globalShortcutRegistration.getSnapshot
   )
   const globalShortcutValue = (action: GlobalShortcutAction): string | undefined =>
-    globalShortcutEntries(settings.globalShortcuts ?? {}).find(([id]) => id === action)?.[1]
+    globalShortcutEntries(settings.globalShortcuts ?? {}, runtimeInfo?.platform).find(
+      ([id]) => id === action
+    )?.[1]
   const setGlobalShortcut = (action: GlobalShortcutAction, accelerator: string): void =>
     setSettings((current) => ({
       ...current,
@@ -128,61 +129,29 @@ export function ShortcutsSettings(): ReactElement {
             />
           ))}
         </FieldGroup>
-        {savedScenes.length > 0 && (
-          <FieldSet className="min-w-0 gap-0">
-            <FieldLegend className="mb-1.5 px-1" variant="label">
-              <SectionLabel>Scenes</SectionLabel>
-            </FieldLegend>
-            <FieldGroup variant="grouped">
-              {savedScenes.map(({ id, name }) => {
-                const action = `scene:${id}` as const
-                return (
-                  <ShortcutRecorderField
-                    key={id}
-                    id={`global-scene-${id}`}
-                    label={name}
-                    platform={runtimeInfo?.platform}
-                    validate={validateGlobalShortcut(action)}
-                    registrationFailed={shortcutRegistration[action] === false}
-                    value={globalShortcutValue(action)}
-                    onChange={(accelerator) => setGlobalShortcut(action, accelerator)}
-                  />
-                )
-              })}
-            </FieldGroup>
-          </FieldSet>
-        )}
-        {/* One inset group per orientation, rows shaped like the ones
-            above: the headers and fields used to sit loose inside the
-            group, flush against its border. */}
-        {(['horizontal', 'vertical'] as const).map((orientation) => (
-          <FieldSet key={orientation} className="min-w-0 gap-0">
-            <FieldLegend className="mb-1.5 px-1" variant="label">
-              <SectionLabel>
-                {orientation === 'horizontal' ? 'Horizontal layouts' : 'Vertical layouts'}
-              </SectionLabel>
-            </FieldLegend>
-            <FieldGroup variant="grouped">
-              {BUILTIN_LAYOUTS.filter(
-                ({ id }) => id.startsWith('vertical-') === (orientation === 'vertical')
-              ).map(({ id }) => {
-                const action = `layout:${id}` as const
-                return (
-                  <ShortcutRecorderField
-                    key={id}
-                    id={`global-layout-${id}`}
-                    label={layoutPresetLabel(id)}
-                    platform={runtimeInfo?.platform}
-                    validate={validateGlobalShortcut(action)}
-                    registrationFailed={shortcutRegistration[action] === false}
-                    value={globalShortcutValue(action)}
-                    onChange={(accelerator) => setGlobalShortcut(action, accelerator)}
-                  />
-                )
-              })}
-            </FieldGroup>
-          </FieldSet>
-        ))}
+        <FieldSet className="min-w-0 gap-0">
+          <FieldLegend className="mb-1.5 px-1" variant="label">
+            <SectionLabel>Scenes</SectionLabel>
+          </FieldLegend>
+          <FieldGroup variant="grouped">
+            {sceneShortcutRows(
+              savedScenes,
+              settings.globalShortcuts ?? {},
+              runtimeInfo?.platform
+            ).map(({ action, label, accelerator }) => (
+              <ShortcutRecorderField
+                key={action}
+                id={`global-shortcut-${action}`}
+                label={label}
+                platform={runtimeInfo?.platform}
+                validate={validateGlobalShortcut(action)}
+                registrationFailed={shortcutRegistration[action] === false}
+                value={accelerator}
+                onChange={(accelerator) => setGlobalShortcut(action, accelerator)}
+              />
+            ))}
+          </FieldGroup>
+        </FieldSet>
         <p className="flex flex-wrap items-center gap-1 px-1 text-xs text-muted-foreground">
           <ShortcutKeys accelerator="Escape" platform={runtimeInfo?.platform} /> cancels,{' '}
           <ShortcutKeys accelerator="Backspace" platform={runtimeInfo?.platform} /> clears.
@@ -190,7 +159,7 @@ export function ShortcutsSettings(): ReactElement {
       </PanelSection>
 
       <PanelSection description="Keys that work while Videorc is in front." title="App shortcuts">
-        {/* One grouped list per group, labelled like the layout groups above
+        {/* One grouped list per group, labelled like the Scenes group above
             (plan 174 S3.17, I-33): the rows used to be loose text. */}
         {[...shortcutsByGroup().entries()].map(([group, entries]) => (
           <GroupedList key={group} label={group}>
