@@ -182,7 +182,11 @@ export function sceneSwitchVerdict({
   fromLayoutMark = null,
   toLayoutMark = null
 }) {
-  const layoutChecked = typeof fromLayoutMark === 'boolean' && typeof toLayoutMark === 'boolean'
+  // The incoming layout is judged whenever it is known. The outgoing one only
+  // when both are: a real camera's picture has no reliable mark, so a caller
+  // leaving a full-frame camera passes `fromLayoutMark: null`.
+  const layoutChecked = typeof toLayoutMark === 'boolean'
+  const fromLayoutChecked = layoutChecked && typeof fromLayoutMark === 'boolean'
   const verdict = {
     requestedAtMs,
     firstNewFrameIndex: null,
@@ -221,7 +225,8 @@ export function sceneSwitchVerdict({
         if (feature.repeated) verdict.frozenFrames += 1
         // The old window drawn under the incoming layout is a wrong-layout
         // frame too (a layout commit that ran ahead of the new source).
-        if (layoutChecked && feature.layoutMark !== fromLayoutMark) verdict.wrongLayoutFrames += 1
+        if (fromLayoutChecked && feature.layoutMark !== fromLayoutMark)
+          verdict.wrongLayoutFrames += 1
       } else if (feature.centre === 'black') {
         verdict.blackFrames += 1
       } else {

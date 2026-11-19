@@ -178,6 +178,30 @@ describe('sceneSwitchVerdict', () => {
     assert.equal(verdict.wrongLayoutFrames, 2)
   })
 
+  it('leaving a camera picture judges only the incoming layout (fromLayoutMark: null)', () => {
+    const features = featuresFromRawFrames(
+      sequence([
+        solidFrame(COLORS.grey, { inset: COLORS.red }), // 0 a textured camera reads as a mark
+        solidFrame(COLORS.grey, { inset: COLORS.red }), // 100 still the camera
+        solidFrame(COLORS.blue), // 200 cut, no inset: wrong layout
+        solidFrame(COLORS.blue, { inset: COLORS.grey }) // 300 right
+      ]),
+      { width: WIDTH, height: HEIGHT }
+    )
+    const verdict = sceneSwitchVerdict({
+      features,
+      ptsMs,
+      offsetMs: 0,
+      requestedAtMs: 0,
+      fromColor: 'other',
+      toColor: 'blue',
+      fromLayoutMark: null,
+      toLayoutMark: true
+    })
+    assert.equal(verdict.oldWindowFrames, 2)
+    assert.equal(verdict.wrongLayoutFrames, 1, 'only the incoming frame drawn without its inset')
+  })
+
   it('reports no cut when the new window never appears', () => {
     const features = featuresFromRawFrames(
       sequence([solidFrame(COLORS.red), solidFrame(COLORS.red)]),

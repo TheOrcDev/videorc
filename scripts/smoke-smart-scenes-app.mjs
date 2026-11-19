@@ -881,8 +881,10 @@ try {
           variant.verticalOnly.push({
             requestedAtMs: editedAtMs,
             fromColor: 'other',
-            // A full-frame Camera only picture carries no inset or border mark.
-            fromLayoutMark: false
+            // A full-frame Camera only picture: a real camera's texture reads
+            // as a mark, a stand-in's doesn't, so only the incoming layout is
+            // judged (its app with the camera inset).
+            fromLayoutMark: null
           })
           await sleep(SETTLE_MS)
           await renderer.goTo(targets.alpha)
