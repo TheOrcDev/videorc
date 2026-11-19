@@ -34,6 +34,7 @@ import {
   startFakeCloudWeb
 } from './lib/fake-cloud-web.mjs'
 import { evaluateTapAfterLegsEnd, startRtmpTap } from './lib/rtmp-tap.mjs'
+import { roomFixtureDevicesSource } from './lib/room-fixture-devices.mjs'
 import { requestSmokeCommand } from './lib/smoke-command-client.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
 
@@ -449,6 +450,7 @@ try {
   launched = launch.launched
   backend = launch.backend
   collected = launch.collected
+  await seedHostDevices(launch.smoke)
   await waitForCloudStatus(
     backend,
     (status) => status.entitled === true && status.settings?.enabled === true,
@@ -1171,6 +1173,7 @@ try {
         launched = launch.launched
         backend = launch.backend
         collected = launch.collected
+        await seedHostDevices(launch.smoke)
         const resumable = await waitForCloudStatus(
           backend,
           (status) => status.show?.id === showId && status.show.resumable === true,
@@ -1401,6 +1404,38 @@ async function launchApp(env, attempt) {
     collected: events,
     smoke: launchedApp.connections['preview-motion-ready']
   }
+}
+
+/**
+ * The host's camera and microphone for the room: the room opens only the
+ * device Sources names (0.31), and Chromium's fake devices are named unlike
+ * any device the backend lists, so each launch seeds the DEV fixture devices
+ * and aliases the fake camera and microphone to them before the room opens
+ * or resumes (`roomFixtureDevicesSource`).
+ */
+async function seedHostDevices(smoke) {
+  const evalJs = async (code) =>
+    (await requestSmokeCommand(smoke, 'eval-js', { code }, { timeoutMs: 15_000 }))?.result
+  await waitFor(
+    () =>
+      evalJs(
+        "return typeof window.__videorcSmokeScenePresets?.roomFixtureDevices === 'function'"
+      ).catch(() => false),
+    45_000,
+    "the renderer's smoke hooks",
+    250
+  )
+  await evalJs(roomFixtureDevicesSource())
+  // Sources names the fixture camera and microphone before the room reads them.
+  await waitFor(
+    () =>
+      evalJs(
+        "const s = window.__videorcSmokeScenePresets.streamingState().captureConfig.sources; return s.cameraId === 'parity-camera' && s.microphoneId === 'parity-microphone'"
+      ),
+    15_000,
+    'Sources to name the fixture camera and microphone',
+    100
+  )
 }
 
 async function prebuildBackendOrThrow(env, onLine = log) {

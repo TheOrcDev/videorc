@@ -641,24 +641,30 @@ try {
     }
   )
   await required(
-    'Library Cloud recordings: the row after Stop, Download progress then Saved, a failure, Cancel, a node row offers the account page',
+    'Library Cloud tab: the row after Stop, Downloading then Downloaded, a failure, Cancel, a node row offers videorc.com',
     async () => {
+      // The Library's Cloud tab (#1544): a table row per recording, its state
+      // on `data-cloud-status`, its one direct action on `data-cloud-action`.
       const section = '[data-testid=library-cloud-recordings]'
       const rowSelector = (id) => `[data-testid=library-cloud-recording][data-recording-id="${id}"]`
       const rowText = (id) =>
         h.eval(
           `return document.querySelector(${JSON.stringify(rowSelector(id))})?.textContent ?? null`
         )
-      const buttons = (id) =>
+      const rowStatus = (id) =>
         h.eval(
-          `return [...(document.querySelector(${JSON.stringify(rowSelector(id))})?.querySelectorAll('button') ?? [])].map((b) => b.textContent.trim())`
+          `return document.querySelector(${JSON.stringify(rowSelector(id))})?.getAttribute('data-cloud-status') ?? null`
         )
-      const click = (selector, label) =>
+      const rowAction = (id) =>
         h.eval(
-          `const b = [...(document.querySelector(${JSON.stringify(selector)})?.querySelectorAll('button') ?? [])].find((b) => b.textContent.trim() === ${JSON.stringify(label)} && !b.disabled); if (!b) return false; b.click(); return true`
+          `return document.querySelector(${JSON.stringify(rowSelector(id))})?.querySelector('[data-cloud-action]')?.getAttribute('data-cloud-action') ?? null`
         )
-      const rowSays = (id, pattern, label, ms = 30000) =>
-        waitFor(async () => pattern.test((await rowText(id)) ?? ''), label, ms)
+      const act = (id, action) =>
+        h.eval(
+          `const b = document.querySelector(${JSON.stringify(rowSelector(id))})?.querySelector(${JSON.stringify(`[data-cloud-action="${action}"]`)}); if (!b || b.disabled) return false; b.click(); return true`
+        )
+      const rowIs = (id, status, label, ms = 30000) =>
+        waitFor(async () => (await rowStatus(id)) === status, label, ms)
       const doneEvent = (recordingId, state) =>
         h.events.find(
           (e) =>
@@ -667,10 +673,28 @@ try {
             e.payload.state === state
         )
       const listed = async (id) => {
-        assert.ok(await click(section, 'Refresh'), 'the section has Refresh')
+        // Refresh reads "Refreshing…" (disabled) while the section's own poll runs.
+        await waitFor(
+          () =>
+            h.eval(
+              `const b = [...(document.querySelector(${JSON.stringify(section)})?.querySelectorAll('button') ?? [])].find((b) => b.textContent.trim() === 'Refresh' && !b.disabled); if (!b) return false; b.click(); return true`
+            ),
+          'the section has Refresh'
+        )
         await waitFor(async () => (await rowText(id)) !== null, 'row listed after Refresh')
       }
-      await h.command('open-tab', { tab: 'library', waitFor: section })
+      // The Library opens on Local; the Cloud tab is a lazy chunk.
+      await h.command('open-tab', { tab: 'library', waitFor: '[data-library-view="cloud"]' })
+      assert.ok(
+        await h.eval(
+          `const t = document.querySelector('[data-library-view="cloud"]'); if (!t) return false; t.click(); return true`
+        ),
+        'the Library has a Cloud tab'
+      )
+      await waitFor(
+        () => h.eval(`return document.querySelector(${JSON.stringify(section)}) !== null`),
+        'the Cloud tab shows the cloud recordings'
+      )
 
       // The take's row: listed by the section's own poll after Stop, here 12 s
       // after Stop (the web still finishing the playlist), inside 2 minutes.
@@ -695,28 +719,26 @@ try {
       console.log(
         `[managed talk] Library row ${((Date.now() - stoppedAt) / 1000).toFixed(1)} s after Stop`
       )
-      const offered = await buttons(take.id)
-      assert.ok(
-        offered.includes('Download to Library'),
-        `the take's row offers ${JSON.stringify(offered)}: ${await rowText(take.id)}`
+      assert.equal(
+        await rowAction(take.id),
+        'download',
+        `the take's row offers Download: ${await rowText(take.id)}`
       )
 
-      // Download: progress while the segment is held, then Saved and Show in Finder.
+      // Download: Downloading and Cancel while the segment is held, then
+      // Downloaded and Open in Library.
       const held = h.web.hooks.pause('segment')
       try {
-        assert.ok(await click(rowSelector(take.id), 'Download to Library'))
-        await rowSays(take.id, /Downloading/, 'row shows Downloading')
-        assert.ok(
-          await h.eval(
-            `return !!document.querySelector(${JSON.stringify(rowSelector(take.id))})?.querySelector('[role=progressbar]')`
-          ),
-          'the row shows a progress bar'
-        )
-        assert.ok((await buttons(take.id)).includes('Cancel'))
+        assert.ok(await act(take.id, 'download'))
+        await rowIs(take.id, 'downloading', 'row shows Downloading')
+        assert.match((await rowText(take.id)) ?? '', /Downloading/)
+        assert.equal(await rowAction(take.id), 'cancel')
       } finally {
         held.release()
       }
-      await rowSays(take.id, /Open in Library/, 'registered local take', 60000)
+      await rowIs(take.id, 'downloaded', 'registered local take', 60000)
+      assert.equal(await rowAction(take.id), 'open-local')
+      assert.match((await rowText(take.id)) ?? '', /Downloaded/)
       assert.ok(doneEvent(take.id, 'done').payload.localSessionId)
       playable(h, doneEvent(take.id, 'done').payload.path)
 
@@ -724,9 +746,10 @@ try {
       const broken = h.web.hooks.addRecording({ showId: h.showId })
       await listed(broken.id)
       h.web.hooks.failNext('segment', 3, 503)
-      assert.ok(await click(rowSelector(broken.id), 'Download to Library'))
-      await rowSays(broken.id, /Couldn.t download/, 'row shows the failure', 60000)
-      assert.ok((await buttons(broken.id)).includes('Try again'))
+      assert.ok(await act(broken.id, 'download'))
+      await rowIs(broken.id, 'failed', 'row shows the failure', 60000)
+      assert.match((await rowText(broken.id)) ?? '', /Download failed/)
+      assert.equal(await rowAction(broken.id), 'retry')
       await noDownloadTemps(h)
 
       // Cancel takes the row back to Download.
@@ -734,13 +757,13 @@ try {
       await listed(spare.id)
       const hold = h.web.hooks.pause('segment')
       try {
-        assert.ok(await click(rowSelector(spare.id), 'Download to Library'))
-        await rowSays(spare.id, /Downloading/, 'spare row downloading')
-        assert.ok(await click(rowSelector(spare.id), 'Cancel'))
+        assert.ok(await act(spare.id, 'download'))
+        await rowIs(spare.id, 'downloading', 'spare row downloading')
+        assert.ok(await act(spare.id, 'cancel'))
         await waitFor(
           async () =>
-            !/Downloading/.test((await rowText(spare.id)) ?? '') &&
-            (await buttons(spare.id)).includes('Download to Library'),
+            (await rowStatus(spare.id)) === 'in-cloud' &&
+            (await rowAction(spare.id)) === 'download',
           'Cancel takes the row back to Download'
         )
         await waitFor(() => doneEvent(spare.id, 'cancelled'), 'cancelled event')
@@ -749,19 +772,17 @@ try {
       }
       await noDownloadTemps(h)
 
-      // A node recording opens the account page; nothing downloads here.
+      // A node recording opens videorc.com; nothing downloads here.
       const node = h.web.hooks.addRecording({ format: w.recordings.formats.node })
       await listed(node.id)
-      const labels = await buttons(node.id)
-      assert.ok(labels.includes('Open videorc.com'))
-      assert.equal(labels.includes('Download to Library'), false)
+      assert.equal(await rowStatus(node.id), 'on-web')
+      assert.equal(await rowAction(node.id), 'open-web')
       // The click itself is not made here: window.videorc is frozen by the
       // context bridge, so its opener cannot be watched, and a click would
       // open a real browser on this Mac. library-cloud-recordings.test.ts
-      // pins it ('opens the account page on videorc.com for a node
-      // recording': openOAuthUrl with .../account).
+      // pins what Open on videorc.com opens.
       console.log(
-        '[managed talk] node row: Open videorc.com offered, no Download; the click is pinned by library-cloud-recordings.test.ts'
+        '[managed talk] node row: Open on videorc.com offered, no Download; the click is pinned by library-cloud-recordings.test.ts'
       )
       await h.command('open-tab', { tab: 'studio' })
     }
