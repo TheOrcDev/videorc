@@ -33,6 +33,17 @@ import {
 } from '@/lib/talk-show-context'
 import type { TalkShowCameraSettings } from '@/lib/talk-show-camera-effects'
 import type { TalkShowRoomClient, TalkShowRoomSnapshot } from '@/lib/talk-show-room'
+import {
+  STAGE_MAX_SCREENS,
+  addScreen,
+  oneScreenStage,
+  pruneStageScreens,
+  removeScreen,
+  stageScreens,
+  stageSharers,
+  twoScreensChosen,
+  twoScreensStage
+} from '@/lib/stage-screens'
 import { cloudAvatarAtlasReason } from '@/lib/cloud-avatar-refusal'
 import type { AvatarMotionSource } from '../../../shared/cloud-avatar-view'
 
@@ -139,12 +150,11 @@ export function stageWith(
   const ordered = hostIdentity
     ? [hostIdentity, ...next.filter((entry) => entry !== hostIdentity)]
     : next
-  return {
+  return pruneStageScreens({
     ...stage,
     onStage: ordered,
-    ...(stage.spotlight && !ordered.includes(stage.spotlight) ? { spotlight: undefined } : {}),
-    ...(stage.screen && !ordered.includes(stage.screen) ? { screen: undefined } : {})
-  }
+    ...(stage.spotlight && !ordered.includes(stage.spotlight) ? { spotlight: undefined } : {})
+  })
 }
 
 /**
@@ -181,12 +191,11 @@ export function stageInRoom(
   ])
   const kept = stage.onStage.filter((identity) => isHost(identity) || present.has(identity))
   if (kept.length === stage.onStage.length) return stage
-  return {
+  return pruneStageScreens({
     ...stage,
     onStage: kept,
-    ...(stage.spotlight && !kept.includes(stage.spotlight) ? { spotlight: undefined } : {}),
-    ...(stage.screen && !kept.includes(stage.screen) ? { screen: undefined } : {})
-  }
+    ...(stage.spotlight && !kept.includes(stage.spotlight) ? { spotlight: undefined } : {})
+  })
 }
 
 /**
@@ -244,7 +253,7 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
   roomOpenRef.current = roomOpen
   const showId = cloudStatus?.show?.id ?? null
   const stage = cloudStatus?.room?.stage ?? null
-  const stageKey = stage ? JSON.stringify([stage.onStage, stage.screen ?? null]) : ''
+  const stageKey = stage ? JSON.stringify([stage.onStage, stageScreens(stage)]) : ''
   const hostIdentity = roomOpen && showId ? `host:${showId}` : null
 
   const cameraName = useMemo(
@@ -322,8 +331,9 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
   }, [deps.cameraSettings])
   const stageRef = useRef<string[]>([])
   stageRef.current = stage?.onStage ?? []
-  const stageScreenRef = useRef<string | null>(null)
-  stageScreenRef.current = stage?.screen ?? null
+  // Plan 251: every screen the program shows, so a guest sees the same ones.
+  const stageScreenRef = useRef<string[]>([])
+  stageScreenRef.current = stage ? stageScreens(stage) : []
   const onCameraReturnedRef = useRef(onCameraReturned)
   onCameraReturnedRef.current = onCameraReturned
 
@@ -939,11 +949,24 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
       )
   }, [onError])
 
+  // Plan 251: the Two screens layout card is chosen. On the wire it is
+  // Screen + people with one or two screens, so the choice is this
+  // renderer's: made by the card, kept while Screen + people is up, and read
+  // back from a stage that names two (a relaunch, another computer).
+  const [twoScreensPicked, setTwoScreensPicked] = useState(false)
+  const namesTwo = stage ? stageScreens(stage).length === STAGE_MAX_SCREENS : false
+  const twoScreens = twoScreensChosen(stage, twoScreensPicked)
+  useEffect(() => {
+    if (namesTwo) setTwoScreensPicked(true)
+    else if (stage?.layout !== 'screen-people') setTwoScreensPicked(false)
+  }, [namesTwo, stage?.layout])
+
   const previewReplaced = roomOpen || previewReplacedOverride
   const value = useMemo<TalkShowContextValue>(
     () => ({
       room: snapshot,
       previewReplaced,
+      twoScreens,
       hostIdentity,
       openRoom: async (params) => {
         // Plan 249 S17: the outputs are decided (and an unmeasured profile
@@ -993,7 +1016,27 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
       },
       setLayout: async (layout) => {
         if (!stage) return
-        await setStage({ ...stage, layout })
+        if (layout === 'two-screens') {
+          // Plan 251: the screens already on stage, then whoever else on
+          // stage shares one, up to two. With one it waits for the second.
+          const next = twoScreensStage(
+            stage,
+            stageSharers(cloudStatusRef.current?.room, hostIdentity, snapshot.local.screen !== null)
+          )
+          if (!next) return
+          setTwoScreensPicked(true)
+          try {
+            await setStage(next)
+          } catch (error) {
+            // Not taken: the choice was never made.
+            setTwoScreensPicked(false)
+            throw error
+          }
+        } else {
+          setTwoScreensPicked(false)
+          // Screen + people is one screen: a second one comes off.
+          await setStage(layout === 'screen-people' ? oneScreenStage(stage) : { ...stage, layout })
+        }
         // Plan 249 S12: choosing a room layout puts the room's own layouts
         // back on the program; a scene stays only until the host does this.
         await clearRoomScene()
@@ -1015,7 +1058,9 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
           await window.videorc?.setTalkShowMediaGrant?.({ video: true, screenSourceId: sourceId })
           await roomClient.startScreenShare(sourceId)
           if (stage && hostIdentity) {
-            await setStage({ ...stage, layout: 'screen-people', screen: hostIdentity })
+            // Plan 251: on Two screens it goes beside the screen already up;
+            // otherwise it takes the one place, as it always did.
+            await setStage(addScreen(stage, hostIdentity, twoScreens ? STAGE_MAX_SCREENS : 1))
           }
         } catch (error) {
           onError(error, 'share the screen')
@@ -1024,12 +1069,9 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
       },
       stopScreenShare: async () => {
         await clientRef.current?.stopScreenShare()
-        if (stage && stage.screen === hostIdentity) {
-          await setStage({
-            ...stage,
-            layout: stage.layout === 'screen-people' ? 'side-by-side' : stage.layout,
-            screen: undefined
-          })
+        if (stage && hostIdentity && stageScreens(stage).includes(hostIdentity)) {
+          // The other screen, when there is one, stays up.
+          await setStage(removeScreen(stage, hostIdentity))
         }
       },
       setGraphicsEnabled,
@@ -1104,7 +1146,8 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
       previewReplaced,
       setStage,
       snapshot,
-      stage
+      stage,
+      twoScreens
     ]
   )
 

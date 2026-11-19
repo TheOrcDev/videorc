@@ -27,6 +27,7 @@ import {
   guestsSessionValue,
   layoutOptions,
   layoutReasonsLine,
+  selectedLayout,
   newLinkAsksFirst,
   qualityStatus,
   renamedGuestName,
@@ -336,8 +337,61 @@ describe('layout chips (C-G3)', () => {
         layoutOptions(openRoom({ stage: { layout: 'side-by-side', onStage: [HOST, 'g_ada'] } }))
       )
     ).toBe(
-      'Solo shows one person. Send the others backstage first. Share a screen first for Screen + people.'
+      'Solo shows one person. Send the others backstage first. Share a screen first for Screen + people. This show puts one screen on the program.'
     )
+  })
+
+  // Plan 251: the fifth card. On the wire it is Screen + people with two
+  // screens; a node show's runner draws one, so the card says so there.
+  it('adds Two screens: on a managed show with a screen to start from', () => {
+    const room = openRoom({ stage: { layout: 'side-by-side', onStage: [HOST, 'g_ada'] } })
+    const two = (options: ReturnType<typeof layoutOptions>) =>
+      options.find((option) => option.value === 'two-screens')
+    expect(layoutOptions(room).map((option) => option.value)).toEqual([
+      'solo',
+      'side-by-side',
+      'screen-people',
+      'spotlight',
+      'two-screens'
+    ])
+    expect(two(layoutOptions(room))).toEqual({
+      value: 'two-screens',
+      label: 'Two screens',
+      disabledReason: 'This show puts one screen on the program.'
+    })
+    // Managed, nobody sharing: it waits on a screen, and the line says it once.
+    const waiting = layoutOptions(room, { managed: true, sharers: 0 })
+    expect(two(waiting)?.disabledReason).toBe('Share a screen first')
+    expect(layoutReasonsLine(waiting)).toBe(
+      'Solo shows one person. Send the others backstage first. Share a screen first for Screen + people and Two screens.'
+    )
+    // Someone on stage shares, or the stage names a screen: it can be chosen.
+    expect(two(layoutOptions(room, { managed: true, sharers: 1 }))?.disabledReason).toBeNull()
+    const named = openRoom({
+      stage: { layout: 'side-by-side', onStage: [HOST, 'g_ada'], screen: HOST }
+    })
+    expect(two(layoutOptions(named, { managed: true, sharers: 0 }))?.disabledReason).toBeNull()
+  })
+
+  it('selects Two screens while it draws two, and while it is chosen with one up', () => {
+    const one = openRoom({
+      stage: { layout: 'screen-people', onStage: [HOST, 'g_ada'], screen: HOST }
+    })
+    const pair = openRoom({
+      stage: {
+        layout: 'screen-people',
+        onStage: [HOST, 'g_ada'],
+        screen: HOST,
+        screens: [HOST, 'g_ada']
+      }
+    })
+    expect(shownLayout(pair)).toBe('two-screens')
+    expect(selectedLayout(pair, false)).toBe('two-screens')
+    expect(selectedLayout(one, false)).toBe('screen-people')
+    expect(selectedLayout(one, true)).toBe('two-screens')
+    // Chosen, but another layout is up: that one is selected.
+    const grid = openRoom({ stage: { layout: 'side-by-side', onStage: [HOST, 'g_ada'] } })
+    expect(selectedLayout(grid, true)).toBe('side-by-side')
   })
 
   it("shows the runner's fallback, never a layout it won't draw", () => {

@@ -1,0 +1,1721 @@
+[
+  {
+    "name": "1920x1080-two-screens-1",
+    "canvas": {
+      "width": 1920,
+      "height": 1080
+    },
+    "layout": "two-screens",
+    "people": ["host:sh_1"],
+    "screens": ["host:sh_1", "g_1"],
+    "plan": {
+      "tiles": [
+        {
+          "identity": "host:sh_1",
+          "kind": "screen",
+          "rect": {
+            "x": 24,
+            "y": 24,
+            "w": 922,
+            "h": 518
+          },
+          "cornerRadius": 20
+        },
+        {
+          "identity": "g_1",
+          "kind": "screen",
+          "rect": {
+            "x": 972,
+            "y": 24,
+            "w": 922,
+            "h": 518
+          },
+          "cornerRadius": 20
+        },
+        {
+          "identity": "host:sh_1",
+          "kind": "person",
+          "rect": {
+            "x": 524,
+            "y": 566,
+            "w": 870,
+            "h": 490
+          },
+          "plate": {
+            "x": 536,
+            "y": 1000,
+            "w": 846,
+            "h": 44
+          },
+          "cornerRadius": 20
+        }
+      ]
+    }
+  },
+  {
+    "name": "1920x1080-two-screens-2",
+    "canvas": {
+      "width": 1920,
+      "height": 1080
+    },
+    "layout": "two-screens",
+    "people": ["host:sh_1", "g_1"],
+    "screens": ["host:sh_1", "g_1"],
+    "plan": {
+      "tiles": [
+        {
+          "identity": "host:sh_1",
+          "kind": "screen",
+          "rect": {
+            "x": 24,
+            "y": 24,
+            "w": 922,
+            "h": 518
+          },
+          "cornerRadius": 20
+        },
+        {
+          "identity": "g_1",
+          "kind": "screen",
+          "rect": {
+            "x": 972,
+            "y": 24,
+            "w": 922,
+            "h": 518
+          },
+          "cornerRadius": 20
+        },
+        {
+          "identity": "host:sh_1",
+          "kind": "person",
+          "rect": {
+            "x": 50,
+            "y": 566,
+            "w": 870,
+            "h": 490
+          },
+          "plate": {
+            "x": 62,
+            "y": 1000,
+            "w": 846,
+            "h": 44
+          },
+          "cornerRadius": 20
+        },
+        {
+          "identity": "g_1",
+          "kind": "person",
+          "rect": {
+            "x": 998,
+            "y": 566,
+            "w": 870,
+            "h": 490
+          },
+          "plate": {
+            "x": 1010,
+            "y": 1000,
+            "w": 846,
+            "h": 44
+          },
+          "cornerRadius": 20
+        }
+      ]
+    }
+  },
+  {
+    "name": "1920x1080-two-screens-3",
+    "canvas": {
+      "width": 1920,
+      "height": 1080
+    },
+    "layout": "two-screens",
+    "people": ["host:sh_1", "g_1", "g_2"],
+    "screens": ["host:sh_1", "g_1"],
+    "plan": {
+      "tiles": [
+        {
+          "identity": "host:sh_1",
+          "kind": "screen",
+          "rect": {
+            "x": 24,
+            "y": 24,
+            "w": 922,
+            "h": 518
+          },
+          "cornerRadius": 20
+        },
+        {
+          "identity": "g_1",
+          "kind": "screen",
+          "rect": {
+            "x": 972,
+            "y": 24,
+            "w": 922,
+            "h": 518
+          },
+          "cornerRadius": 20
+        },
+        {
+          "identity": "host:sh_1",
+          "kind": "person",
+          "rect": {
+            "x": 24,
+            "y": 640,
+            "w": 608,
+            "h": 342
+          },
+          "plate": {
+            "x": 36,
+            "y": 926,
+            "w": 584,
+            "h": 44
+          },
+          "cornerRadius": 20
+        },
+        {
+          "identity": "g_1",
+          "kind": "person",
+          "rect": {
+            "x": 656,
+            "y": 640,
+            "w": 608,
+            "h": 342
+          },
+          "plate": {
+            "x": 668,
+            "y": 926,
+            "w": 584,
+            "h": 44
+          },
+          "cornerRadius": 20
+        },
+        {
+          "identity": "g_2",
+          "kind": "person",
+          "rect": {
+            "x": 1288,
+            "y": 640,
+            "w": 608,
+            "h": 342
+          },
+          "plate": {
+            "x": 1300,
+            "y": 926,
+            "w": 584,
+            "h": 44
+          },
+          "cornerRadius": 20
+        }
+      ]
+    }
+  },
+  {
+    "name": "1920x1080-two-screens-4",
+    "canvas": {
+      "width": 1920,
+      "height": 1080
+    },
+    "layout": "two-screens",
+    "people": ["host:sh_1", "g_1", "g_2", "g_3"],
+    "screens": ["host:sh_1", "g_1"],
+    "plan": {
+      "tiles": [
+        {
+          "identity": "host:sh_1",
+          "kind": "screen",
+          "rect": {
+            "x": 24,
+            "y": 24,
+            "w": 922,
+            "h": 518
+          },
+          "cornerRadius": 20
+        },
+        {
+          "identity": "g_1",
+          "kind": "screen",
+          "rect": {
+            "x": 972,
+            "y": 24,
+            "w": 922,
+            "h": 518
+          },
+          "cornerRadius": 20
+        },
+        {
+          "identity": "host:sh_1",
+          "kind": "person",
+          "rect": {
+            "x": 24,
+            "y": 684,
+            "w": 450,
+            "h": 252
+          },
+          "plate": {
+            "x": 36,
+            "y": 880,
+            "w": 426,
+            "h": 44
+          },
+          "cornerRadius": 20
+        },
+        {
+          "identity": "g_1",
+          "kind": "person",
+          "rect": {
+            "x": 498,
+            "y": 684,
+            "w": 450,
+            "h": 252
+          },
+          "plate": {
+            "x": 510,
+            "y": 880,
+            "w": 426,
+            "h": 44
+          },
+          "cornerRadius": 20
+        },
+        {
+          "identity": "g_2",
+          "kind": "person",
+          "rect": {
+            "x": 972,
+            "y": 684,
+            "w": 450,
+            "h": 252
+          },
+          "plate": {
+            "x": 984,
+            "y": 880,
+            "w": 426,
+            "h": 44
+          },
+          "cornerRadius": 20
+        },
+        {
+          "identity": "g_3",
+          "kind": "person",
+          "rect": {
+            "x": 1446,
+            "y": 684,
+            "w": 450,
+            "h": 252
+          },
+          "plate": {
+            "x": 1458,
+            "y": 880,
+            "w": 426,
+            "h": 44
+          },
+          "cornerRadius": 20
+        }
+      ]
+    }
+  },
+  {
+    "name": "1920x1080-two-screens-5",
+    "canvas": {
+      "width": 1920,
+      "height": 1080
+    },
+    "layout": "two-screens",
+    "people": ["host:sh_1", "g_1", "g_2", "g_3", "g_4"],
+    "screens": ["host:sh_1", "g_1"],
+    "plan": {
+      "tiles": [
+        {
+          "identity": "host:sh_1",
+          "kind": "screen",
+          "rect": {
+            "x": 24,
+            "y": 24,
+            "w": 922,
+            "h": 518
+          },
+          "cornerRadius": 20
+        },
+        {
+          "identity": "g_1",
+          "kind": "screen",
+          "rect": {
+            "x": 972,
+            "y": 24,
+            "w": 922,
+            "h": 518
+          },
+          "cornerRadius": 20
+        },
+        {
+          "identity": "host:sh_1",
+          "kind": "person",
+          "rect": {
+            "x": 24,
+            "y": 712,
+            "w": 354,
+            "h": 198
+          },
+          "plate": {
+            "x": 36,
+            "y": 854,
+            "w": 330,
+            "h": 44
+          },
+          "cornerRadius": 20
+        },
+        {
+          "identity": "g_1",
+          "kind": "person",
+          "rect": {
+            "x": 402,
+            "y": 712,
+            "w": 354,
+            "h": 198
+          },
+          "plate": {
+            "x": 414,
+            "y": 854,
+            "w": 330,
+            "h": 44
+          },
+          "cornerRadius": 20
+        },
+        {
+          "identity": "g_2",
+          "kind": "person",
+          "rect": {
+            "x": 782,
+            "y": 712,
+            "w": 354,
+            "h": 198
+          },
+          "plate": {
+            "x": 794,
+            "y": 854,
+            "w": 330,
+            "h": 44
+          },
+          "cornerRadius": 20
+        },
+        {
+          "identity": "g_3",
+          "kind": "person",
+          "rect": {
+            "x": 1160,
+            "y": 712,
+            "w": 354,
+            "h": 198
+          },
+          "plate": {
+            "x": 1172,
+            "y": 854,
+            "w": 330,
+            "h": 44
+          },
+          "cornerRadius": 20
+        },
+        {
+          "identity": "g_4",
+          "kind": "person",
+          "rect": {
+            "x": 1540,
+            "y": 712,
+            "w": 354,
+            "h": 198
+          },
+          "plate": {
+            "x": 1552,
+            "y": 854,
+            "w": 330,
+            "h": 44
+          },
+          "cornerRadius": 20
+        }
+      ]
+    }
+  },
+  {
+    "name": "1920x1080-two-screens-6",
+    "canvas": {
+      "width": 1920,
+      "height": 1080
+    },
+    "layout": "two-screens",
+    "people": ["host:sh_1", "g_1", "g_2", "g_3", "g_4", "g_5"],
+    "screens": ["host:sh_1", "g_1"],
+    "plan": {
+      "tiles": [
+        {
+          "identity": "host:sh_1",
+          "kind": "screen",
+          "rect": {
+            "x": 24,
+            "y": 24,
+            "w": 922,
+            "h": 518
+          },
+          "cornerRadius": 20
+        },
+        {
+          "identity": "g_1",
+          "kind": "screen",
+          "rect": {
+            "x": 972,
+            "y": 24,
+            "w": 922,
+            "h": 518
+          },
+          "cornerRadius": 20
+        },
+        {
+          "identity": "host:sh_1",
+          "kind": "person",
+          "rect": {
+            "x": 24,
+            "y": 728,
+            "w": 292,
+            "h": 164
+          },
+          "plate": {
+            "x": 36,
+            "y": 836,
+            "w": 268,
+            "h": 44
+          },
+          "cornerRadius": 20
+        },
+        {
+          "identity": "g_1",
+          "kind": "person",
+          "rect": {
+            "x": 340,
+            "y": 728,
+            "w": 292,
+            "h": 164
+          },
+          "plate": {
+            "x": 352,
+            "y": 836,
+            "w": 268,
+            "h": 44
+          },
+          "cornerRadius": 20
+        },
+        {
+          "identity": "g_2",
+          "kind": "person",
+          "rect": {
+            "x": 656,
+            "y": 728,
+            "w": 292,
+            "h": 164
+          },
+          "plate": {
+            "x": 668,
+            "y": 836,
+            "w": 268,
+            "h": 44
+          },
+          "cornerRadius": 20
+        },
+        {
+          "identity": "g_3",
+          "kind": "person",
+          "rect": {
+            "x": 972,
+            "y": 728,
+            "w": 292,
+            "h": 164
+          },
+          "plate": {
+            "x": 984,
+            "y": 836,
+            "w": 268,
+            "h": 44
+          },
+          "cornerRadius": 20
+        },
+        {
+          "identity": "g_4",
+          "kind": "person",
+          "rect": {
+            "x": 1288,
+            "y": 728,
+            "w": 292,
+            "h": 164
+          },
+          "plate": {
+            "x": 1300,
+            "y": 836,
+            "w": 268,
+            "h": 44
+          },
+          "cornerRadius": 20
+        },
+        {
+          "identity": "g_5",
+          "kind": "person",
+          "rect": {
+            "x": 1604,
+            "y": 728,
+            "w": 292,
+            "h": 164
+          },
+          "plate": {
+            "x": 1616,
+            "y": 836,
+            "w": 268,
+            "h": 44
+          },
+          "cornerRadius": 20
+        }
+      ]
+    }
+  },
+  {
+    "name": "1080x1920-two-screens-1",
+    "canvas": {
+      "width": 1080,
+      "height": 1920
+    },
+    "layout": "two-screens",
+    "people": ["host:sh_1"],
+    "screens": ["host:sh_1", "g_1"],
+    "plan": {
+      "tiles": [
+        {
+          "identity": "host:sh_1",
+          "kind": "screen",
+          "rect": {
+            "x": 24,
+            "y": 24,
+            "w": 1030,
+            "h": 580
+          },
+          "cornerRadius": 20
+        },
+        {
+          "identity": "g_1",
+          "kind": "screen",
+          "rect": {
+            "x": 24,
+            "y": 628,
+            "w": 1030,
+            "h": 580
+          },
+          "cornerRadius": 20
+        },
+        {
+          "identity": "host:sh_1",
+          "kind": "person",
+          "rect": {
+            "x": 24,
+            "y": 1274,
+            "w": 1032,
+            "h": 580
+          },
+          "plate": {
+            "x": 36,
+            "y": 1798,
+            "w": 1008,
+            "h": 44
+          },
+          "cornerRadius": 20
+        }
+      ]
+    }
+  },
+  {
+    "name": "1080x1920-two-screens-2",
+    "canvas": {
+      "width": 1080,
+      "height": 1920
+    },
+    "layout": "two-screens",
+    "people": ["host:sh_1", "g_1"],
+    "screens": ["host:sh_1", "g_1"],
+    "plan": {
+      "tiles": [
+        {
+          "identity": "host:sh_1",
+          "kind": "screen",
+          "rect": {
+            "x": 24,
+            "y": 24,
+            "w": 1030,
+            "h": 580
+          },
+          "cornerRadius": 20
+        },
+        {
+          "identity": "g_1",
+          "kind": "screen",
+          "rect": {
+            "x": 24,
+            "y": 628,
+            "w": 1030,
+            "h": 580
+          },
+          "cornerRadius": 20
+        },
+        {
+          "identity": "host:sh_1",
+          "kind": "person",
+          "rect": {
+            "x": 24,
+            "y": 1422,
+            "w": 504,
+            "h": 282
+          },
+          "plate": {
+            "x": 36,
+            "y": 1648,
+            "w": 480,
+            "h": 44
+          },
+          "cornerRadius": 20
+        },
+        {
+          "identity": "g_1",
+          "kind": "person",
+          "rect": {
+            "x": 552,
+            "y": 1422,
+            "w": 504,
+            "h": 282
+          },
+          "plate": {
+            "x": 564,
+            "y": 1648,
+            "w": 480,
+            "h": 44
+          },
+          "cornerRadius": 20
+        }
+      ]
+    }
+  },
+  {
+    "name": "1080x1920-two-screens-3",
+    "canvas": {
+      "width": 1080,
+      "height": 1920
+    },
+    "layout": "two-screens",
+    "people": ["host:sh_1", "g_1", "g_2"],
+    "screens": ["host:sh_1", "g_1"],
+    "plan": {
+      "tiles": [
+        {
+          "identity": "host:sh_1",
+          "kind": "screen",
+          "rect": {
+            "x": 24,
+            "y": 24,
+            "w": 1030,
+            "h": 580
+          },
+          "cornerRadius": 20
+        },
+        {
+          "identity": "g_1",
+          "kind": "screen",
+          "rect": {
+            "x": 24,
+            "y": 628,
+            "w": 1030,
+            "h": 580
+          },
+          "cornerRadius": 20
+        },
+        {
+          "identity": "host:sh_1",
+          "kind": "person",
+          "rect": {
+            "x": 24,
+            "y": 1250,
+            "w": 504,
+            "h": 282
+          },
+          "plate": {
+            "x": 36,
+            "y": 1476,
+            "w": 480,
+            "h": 44
+          },
+          "cornerRadius": 20
+        },
+        {
+          "identity": "g_1",
+          "kind": "person",
+          "rect": {
+            "x": 552,
+            "y": 1250,
+            "w": 504,
+            "h": 282
+          },
+          "plate": {
+            "x": 564,
+            "y": 1476,
+            "w": 480,
+            "h": 44
+          },
+          "cornerRadius": 20
+        },
+        {
+          "identity": "g_2",
+          "kind": "person",
+          "rect": {
+            "x": 288,
+            "y": 1594,
+            "w": 504,
+            "h": 282
+          },
+          "plate": {
+            "x": 300,
+            "y": 1820,
+            "w": 480,
+            "h": 44
+          },
+          "cornerRadius": 20
+        }
+      ]
+    }
+  },
+  {
+    "name": "1080x1920-two-screens-4",
+    "canvas": {
+      "width": 1080,
+      "height": 1920
+    },
+    "layout": "two-screens",
+    "people": ["host:sh_1", "g_1", "g_2", "g_3"],
+    "screens": ["host:sh_1", "g_1"],
+    "plan": {
+      "tiles": [
+        {
+          "identity": "host:sh_1",
+          "kind": "screen",
+          "rect": {
+            "x": 24,
+            "y": 24,
+            "w": 1030,
+            "h": 580
+          },
+          "cornerRadius": 20
+        },
+        {
+          "identity": "g_1",
+          "kind": "screen",
+          "rect": {
+            "x": 24,
+            "y": 628,
+            "w": 1030,
+            "h": 580
+          },
+          "cornerRadius": 20
+        },
+        {
+          "identity": "host:sh_1",
+          "kind": "person",
+          "rect": {
+            "x": 24,
+            "y": 1250,
+            "w": 504,
+            "h": 282
+          },
+          "plate": {
+            "x": 36,
+            "y": 1476,
+            "w": 480,
+            "h": 44
+          },
+          "cornerRadius": 20
+        },
+        {
+          "identity": "g_1",
+          "kind": "person",
+          "rect": {
+            "x": 552,
+            "y": 1250,
+            "w": 504,
+            "h": 282
+          },
+          "plate": {
+            "x": 564,
+            "y": 1476,
+            "w": 480,
+            "h": 44
+          },
+          "cornerRadius": 20
+        },
+        {
+          "identity": "g_2",
+          "kind": "person",
+          "rect": {
+            "x": 24,
+            "y": 1594,
+            "w": 504,
+            "h": 282
+          },
+          "plate": {
+            "x": 36,
+            "y": 1820,
+            "w": 480,
+            "h": 44
+          },
+          "cornerRadius": 20
+        },
+        {
+          "identity": "g_3",
+          "kind": "person",
+          "rect": {
+            "x": 552,
+            "y": 1594,
+            "w": 504,
+            "h": 282
+          },
+          "plate": {
+            "x": 564,
+            "y": 1820,
+            "w": 480,
+            "h": 44
+          },
+          "cornerRadius": 20
+        }
+      ]
+    }
+  },
+  {
+    "name": "1080x1920-two-screens-5",
+    "canvas": {
+      "width": 1080,
+      "height": 1920
+    },
+    "layout": "two-screens",
+    "people": ["host:sh_1", "g_1", "g_2", "g_3", "g_4"],
+    "screens": ["host:sh_1", "g_1"],
+    "plan": {
+      "tiles": [
+        {
+          "identity": "host:sh_1",
+          "kind": "screen",
+          "rect": {
+            "x": 24,
+            "y": 24,
+            "w": 1030,
+            "h": 580
+          },
+          "cornerRadius": 20
+        },
+        {
+          "identity": "g_1",
+          "kind": "screen",
+          "rect": {
+            "x": 24,
+            "y": 628,
+            "w": 1030,
+            "h": 580
+          },
+          "cornerRadius": 20
+        },
+        {
+          "identity": "host:sh_1",
+          "kind": "person",
+          "rect": {
+            "x": 24,
+            "y": 1300,
+            "w": 328,
+            "h": 184
+          },
+          "plate": {
+            "x": 36,
+            "y": 1428,
+            "w": 304,
+            "h": 44
+          },
+          "cornerRadius": 20
+        },
+        {
+          "identity": "g_1",
+          "kind": "person",
+          "rect": {
+            "x": 376,
+            "y": 1300,
+            "w": 328,
+            "h": 184
+          },
+          "plate": {
+            "x": 388,
+            "y": 1428,
+            "w": 304,
+            "h": 44
+          },
+          "cornerRadius": 20
+        },
+        {
+          "identity": "g_2",
+          "kind": "person",
+          "rect": {
+            "x": 728,
+            "y": 1300,
+            "w": 328,
+            "h": 184
+          },
+          "plate": {
+            "x": 740,
+            "y": 1428,
+            "w": 304,
+            "h": 44
+          },
+          "cornerRadius": 20
+        },
+        {
+          "identity": "g_3",
+          "kind": "person",
+          "rect": {
+            "x": 200,
+            "y": 1644,
+            "w": 328,
+            "h": 184
+          },
+          "plate": {
+            "x": 212,
+            "y": 1772,
+            "w": 304,
+            "h": 44
+          },
+          "cornerRadius": 20
+        },
+        {
+          "identity": "g_4",
+          "kind": "person",
+          "rect": {
+            "x": 552,
+            "y": 1644,
+            "w": 328,
+            "h": 184
+          },
+          "plate": {
+            "x": 564,
+            "y": 1772,
+            "w": 304,
+            "h": 44
+          },
+          "cornerRadius": 20
+        }
+      ]
+    }
+  },
+  {
+    "name": "1080x1920-two-screens-6",
+    "canvas": {
+      "width": 1080,
+      "height": 1920
+    },
+    "layout": "two-screens",
+    "people": ["host:sh_1", "g_1", "g_2", "g_3", "g_4", "g_5"],
+    "screens": ["host:sh_1", "g_1"],
+    "plan": {
+      "tiles": [
+        {
+          "identity": "host:sh_1",
+          "kind": "screen",
+          "rect": {
+            "x": 24,
+            "y": 24,
+            "w": 1030,
+            "h": 580
+          },
+          "cornerRadius": 20
+        },
+        {
+          "identity": "g_1",
+          "kind": "screen",
+          "rect": {
+            "x": 24,
+            "y": 628,
+            "w": 1030,
+            "h": 580
+          },
+          "cornerRadius": 20
+        },
+        {
+          "identity": "host:sh_1",
+          "kind": "person",
+          "rect": {
+            "x": 24,
+            "y": 1300,
+            "w": 328,
+            "h": 184
+          },
+          "plate": {
+            "x": 36,
+            "y": 1428,
+            "w": 304,
+            "h": 44
+          },
+          "cornerRadius": 20
+        },
+        {
+          "identity": "g_1",
+          "kind": "person",
+          "rect": {
+            "x": 376,
+            "y": 1300,
+            "w": 328,
+            "h": 184
+          },
+          "plate": {
+            "x": 388,
+            "y": 1428,
+            "w": 304,
+            "h": 44
+          },
+          "cornerRadius": 20
+        },
+        {
+          "identity": "g_2",
+          "kind": "person",
+          "rect": {
+            "x": 728,
+            "y": 1300,
+            "w": 328,
+            "h": 184
+          },
+          "plate": {
+            "x": 740,
+            "y": 1428,
+            "w": 304,
+            "h": 44
+          },
+          "cornerRadius": 20
+        },
+        {
+          "identity": "g_3",
+          "kind": "person",
+          "rect": {
+            "x": 24,
+            "y": 1644,
+            "w": 328,
+            "h": 184
+          },
+          "plate": {
+            "x": 36,
+            "y": 1772,
+            "w": 304,
+            "h": 44
+          },
+          "cornerRadius": 20
+        },
+        {
+          "identity": "g_4",
+          "kind": "person",
+          "rect": {
+            "x": 376,
+            "y": 1644,
+            "w": 328,
+            "h": 184
+          },
+          "plate": {
+            "x": 388,
+            "y": 1772,
+            "w": 304,
+            "h": 44
+          },
+          "cornerRadius": 20
+        },
+        {
+          "identity": "g_5",
+          "kind": "person",
+          "rect": {
+            "x": 728,
+            "y": 1644,
+            "w": 328,
+            "h": 184
+          },
+          "plate": {
+            "x": 740,
+            "y": 1772,
+            "w": 304,
+            "h": 44
+          },
+          "cornerRadius": 20
+        }
+      ]
+    }
+  },
+  {
+    "name": "1280x720-two-screens-1",
+    "canvas": {
+      "width": 1280,
+      "height": 720
+    },
+    "layout": "two-screens",
+    "people": ["host:sh_1"],
+    "screens": ["host:sh_1", "g_1"],
+    "plan": {
+      "tiles": [
+        {
+          "identity": "host:sh_1",
+          "kind": "screen",
+          "rect": {
+            "x": 16,
+            "y": 16,
+            "w": 614,
+            "h": 346
+          },
+          "cornerRadius": 13
+        },
+        {
+          "identity": "g_1",
+          "kind": "screen",
+          "rect": {
+            "x": 648,
+            "y": 16,
+            "w": 614,
+            "h": 346
+          },
+          "cornerRadius": 13
+        },
+        {
+          "identity": "host:sh_1",
+          "kind": "person",
+          "rect": {
+            "x": 350,
+            "y": 378,
+            "w": 578,
+            "h": 326
+          },
+          "plate": {
+            "x": 358,
+            "y": 668,
+            "w": 562,
+            "h": 28
+          },
+          "cornerRadius": 13
+        }
+      ]
+    }
+  },
+  {
+    "name": "1280x720-two-screens-2",
+    "canvas": {
+      "width": 1280,
+      "height": 720
+    },
+    "layout": "two-screens",
+    "people": ["host:sh_1", "g_1"],
+    "screens": ["host:sh_1", "g_1"],
+    "plan": {
+      "tiles": [
+        {
+          "identity": "host:sh_1",
+          "kind": "screen",
+          "rect": {
+            "x": 16,
+            "y": 16,
+            "w": 614,
+            "h": 346
+          },
+          "cornerRadius": 13
+        },
+        {
+          "identity": "g_1",
+          "kind": "screen",
+          "rect": {
+            "x": 648,
+            "y": 16,
+            "w": 614,
+            "h": 346
+          },
+          "cornerRadius": 13
+        },
+        {
+          "identity": "host:sh_1",
+          "kind": "person",
+          "rect": {
+            "x": 34,
+            "y": 378,
+            "w": 578,
+            "h": 326
+          },
+          "plate": {
+            "x": 42,
+            "y": 668,
+            "w": 562,
+            "h": 28
+          },
+          "cornerRadius": 13
+        },
+        {
+          "identity": "g_1",
+          "kind": "person",
+          "rect": {
+            "x": 666,
+            "y": 378,
+            "w": 578,
+            "h": 326
+          },
+          "plate": {
+            "x": 674,
+            "y": 668,
+            "w": 562,
+            "h": 28
+          },
+          "cornerRadius": 13
+        }
+      ]
+    }
+  },
+  {
+    "name": "1280x720-two-screens-3",
+    "canvas": {
+      "width": 1280,
+      "height": 720
+    },
+    "layout": "two-screens",
+    "people": ["host:sh_1", "g_1", "g_2"],
+    "screens": ["host:sh_1", "g_1"],
+    "plan": {
+      "tiles": [
+        {
+          "identity": "host:sh_1",
+          "kind": "screen",
+          "rect": {
+            "x": 16,
+            "y": 16,
+            "w": 614,
+            "h": 346
+          },
+          "cornerRadius": 13
+        },
+        {
+          "identity": "g_1",
+          "kind": "screen",
+          "rect": {
+            "x": 648,
+            "y": 16,
+            "w": 614,
+            "h": 346
+          },
+          "cornerRadius": 13
+        },
+        {
+          "identity": "host:sh_1",
+          "kind": "person",
+          "rect": {
+            "x": 16,
+            "y": 428,
+            "w": 404,
+            "h": 226
+          },
+          "plate": {
+            "x": 24,
+            "y": 618,
+            "w": 388,
+            "h": 28
+          },
+          "cornerRadius": 13
+        },
+        {
+          "identity": "g_1",
+          "kind": "person",
+          "rect": {
+            "x": 436,
+            "y": 428,
+            "w": 404,
+            "h": 226
+          },
+          "plate": {
+            "x": 444,
+            "y": 618,
+            "w": 388,
+            "h": 28
+          },
+          "cornerRadius": 13
+        },
+        {
+          "identity": "g_2",
+          "kind": "person",
+          "rect": {
+            "x": 858,
+            "y": 428,
+            "w": 404,
+            "h": 226
+          },
+          "plate": {
+            "x": 866,
+            "y": 618,
+            "w": 388,
+            "h": 28
+          },
+          "cornerRadius": 13
+        }
+      ]
+    }
+  },
+  {
+    "name": "1280x720-two-screens-4",
+    "canvas": {
+      "width": 1280,
+      "height": 720
+    },
+    "layout": "two-screens",
+    "people": ["host:sh_1", "g_1", "g_2", "g_3"],
+    "screens": ["host:sh_1", "g_1"],
+    "plan": {
+      "tiles": [
+        {
+          "identity": "host:sh_1",
+          "kind": "screen",
+          "rect": {
+            "x": 16,
+            "y": 16,
+            "w": 614,
+            "h": 346
+          },
+          "cornerRadius": 13
+        },
+        {
+          "identity": "g_1",
+          "kind": "screen",
+          "rect": {
+            "x": 648,
+            "y": 16,
+            "w": 614,
+            "h": 346
+          },
+          "cornerRadius": 13
+        },
+        {
+          "identity": "host:sh_1",
+          "kind": "person",
+          "rect": {
+            "x": 16,
+            "y": 456,
+            "w": 300,
+            "h": 168
+          },
+          "plate": {
+            "x": 24,
+            "y": 588,
+            "w": 284,
+            "h": 28
+          },
+          "cornerRadius": 13
+        },
+        {
+          "identity": "g_1",
+          "kind": "person",
+          "rect": {
+            "x": 332,
+            "y": 456,
+            "w": 300,
+            "h": 168
+          },
+          "plate": {
+            "x": 340,
+            "y": 588,
+            "w": 284,
+            "h": 28
+          },
+          "cornerRadius": 13
+        },
+        {
+          "identity": "g_2",
+          "kind": "person",
+          "rect": {
+            "x": 648,
+            "y": 456,
+            "w": 300,
+            "h": 168
+          },
+          "plate": {
+            "x": 656,
+            "y": 588,
+            "w": 284,
+            "h": 28
+          },
+          "cornerRadius": 13
+        },
+        {
+          "identity": "g_3",
+          "kind": "person",
+          "rect": {
+            "x": 964,
+            "y": 456,
+            "w": 300,
+            "h": 168
+          },
+          "plate": {
+            "x": 972,
+            "y": 588,
+            "w": 284,
+            "h": 28
+          },
+          "cornerRadius": 13
+        }
+      ]
+    }
+  },
+  {
+    "name": "1280x720-two-screens-5",
+    "canvas": {
+      "width": 1280,
+      "height": 720
+    },
+    "layout": "two-screens",
+    "people": ["host:sh_1", "g_1", "g_2", "g_3", "g_4"],
+    "screens": ["host:sh_1", "g_1"],
+    "plan": {
+      "tiles": [
+        {
+          "identity": "host:sh_1",
+          "kind": "screen",
+          "rect": {
+            "x": 16,
+            "y": 16,
+            "w": 614,
+            "h": 346
+          },
+          "cornerRadius": 13
+        },
+        {
+          "identity": "g_1",
+          "kind": "screen",
+          "rect": {
+            "x": 648,
+            "y": 16,
+            "w": 614,
+            "h": 346
+          },
+          "cornerRadius": 13
+        },
+        {
+          "identity": "host:sh_1",
+          "kind": "person",
+          "rect": {
+            "x": 18,
+            "y": 474,
+            "w": 236,
+            "h": 132
+          },
+          "plate": {
+            "x": 26,
+            "y": 570,
+            "w": 220,
+            "h": 28
+          },
+          "cornerRadius": 13
+        },
+        {
+          "identity": "g_1",
+          "kind": "person",
+          "rect": {
+            "x": 270,
+            "y": 474,
+            "w": 236,
+            "h": 132
+          },
+          "plate": {
+            "x": 278,
+            "y": 570,
+            "w": 220,
+            "h": 28
+          },
+          "cornerRadius": 13
+        },
+        {
+          "identity": "g_2",
+          "kind": "person",
+          "rect": {
+            "x": 522,
+            "y": 474,
+            "w": 236,
+            "h": 132
+          },
+          "plate": {
+            "x": 530,
+            "y": 570,
+            "w": 220,
+            "h": 28
+          },
+          "cornerRadius": 13
+        },
+        {
+          "identity": "g_3",
+          "kind": "person",
+          "rect": {
+            "x": 774,
+            "y": 474,
+            "w": 236,
+            "h": 132
+          },
+          "plate": {
+            "x": 782,
+            "y": 570,
+            "w": 220,
+            "h": 28
+          },
+          "cornerRadius": 13
+        },
+        {
+          "identity": "g_4",
+          "kind": "person",
+          "rect": {
+            "x": 1026,
+            "y": 474,
+            "w": 236,
+            "h": 132
+          },
+          "plate": {
+            "x": 1034,
+            "y": 570,
+            "w": 220,
+            "h": 28
+          },
+          "cornerRadius": 13
+        }
+      ]
+    }
+  },
+  {
+    "name": "1280x720-two-screens-6",
+    "canvas": {
+      "width": 1280,
+      "height": 720
+    },
+    "layout": "two-screens",
+    "people": ["host:sh_1", "g_1", "g_2", "g_3", "g_4", "g_5"],
+    "screens": ["host:sh_1", "g_1"],
+    "plan": {
+      "tiles": [
+        {
+          "identity": "host:sh_1",
+          "kind": "screen",
+          "rect": {
+            "x": 16,
+            "y": 16,
+            "w": 614,
+            "h": 346
+          },
+          "cornerRadius": 13
+        },
+        {
+          "identity": "g_1",
+          "kind": "screen",
+          "rect": {
+            "x": 648,
+            "y": 16,
+            "w": 614,
+            "h": 346
+          },
+          "cornerRadius": 13
+        },
+        {
+          "identity": "host:sh_1",
+          "kind": "person",
+          "rect": {
+            "x": 18,
+            "y": 486,
+            "w": 194,
+            "h": 108
+          },
+          "plate": {
+            "x": 26,
+            "y": 558,
+            "w": 178,
+            "h": 28
+          },
+          "cornerRadius": 13
+        },
+        {
+          "identity": "g_1",
+          "kind": "person",
+          "rect": {
+            "x": 228,
+            "y": 486,
+            "w": 194,
+            "h": 108
+          },
+          "plate": {
+            "x": 236,
+            "y": 558,
+            "w": 178,
+            "h": 28
+          },
+          "cornerRadius": 13
+        },
+        {
+          "identity": "g_2",
+          "kind": "person",
+          "rect": {
+            "x": 438,
+            "y": 486,
+            "w": 194,
+            "h": 108
+          },
+          "plate": {
+            "x": 446,
+            "y": 558,
+            "w": 178,
+            "h": 28
+          },
+          "cornerRadius": 13
+        },
+        {
+          "identity": "g_3",
+          "kind": "person",
+          "rect": {
+            "x": 648,
+            "y": 486,
+            "w": 194,
+            "h": 108
+          },
+          "plate": {
+            "x": 656,
+            "y": 558,
+            "w": 178,
+            "h": 28
+          },
+          "cornerRadius": 13
+        },
+        {
+          "identity": "g_4",
+          "kind": "person",
+          "rect": {
+            "x": 858,
+            "y": 486,
+            "w": 194,
+            "h": 108
+          },
+          "plate": {
+            "x": 866,
+            "y": 558,
+            "w": 178,
+            "h": 28
+          },
+          "cornerRadius": 13
+        },
+        {
+          "identity": "g_5",
+          "kind": "person",
+          "rect": {
+            "x": 1068,
+            "y": 486,
+            "w": 194,
+            "h": 108
+          },
+          "plate": {
+            "x": 1076,
+            "y": 558,
+            "w": 178,
+            "h": 28
+          },
+          "cornerRadius": 13
+        }
+      ]
+    }
+  }
+]

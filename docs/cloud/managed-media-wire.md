@@ -592,6 +592,29 @@ From P0, "What the program page must do". The page lane keeps each one and tests
 - The page looks up the fixture by canvas, layout and number of people (1 to 6). `onStage[0]` is the host and fills the first slot. A `spotlight` guest takes the second slot. Past 6 people the page draws the first 6.
 - Guests read the same metadata. The host's `videorc.stage` data message (W `guest-wire.ts:18`) stays as it is.
 
+#### 6.1.1 Two screens (plan 251)
+
+A stage may show two screens at once: the two side by side across the top, everyone on stage in a row under them (on the 9:16 output the screens stack and the people take a grid). It adds one optional field and no layout:
+
+```json
+{
+  "layout": "screen-people",
+  "onStage": ["host:sh_…", "g_…"],
+  "screen": "g_…",
+  "screens": ["g_…", "host:sh_…"]
+}
+```
+
+- `screens` is absent, or exactly two different identities, both on `onStage`, the first of them `screen`. `PUT …/stage` answers 400 `invalid-request` for any other shape and 422 `invalid-stage` for an identity that is not in the room or not on the stage (W `media/stage.ts`). The desktop validates the same before it sends (D `cloud_talk.rs`, `CloudStage::validate`), and never sends an empty list or `null`.
+- There is no `two-screens` value of `layout`, on purpose. A reader that knows only `screen` (a desktop, a program page or a guest page from before plan 251, and the runner of a node show) reads a valid `screen-people` stage and shows the first screen and the people. Nothing has to be deployed in a fixed order for an old reader to keep working.
+- The page draws `two-screens` when the layout is `screen-people` and both named screens have a fresh frame (5 s, as one screen). With one fresh it draws `screen-people` with that screen; with none, `side-by-side`. The geometry is `protocol-fixtures/talk-show-two-screens-layout.json` (1 to 6 people, three canvases), worked out by `planTwoScreens` (W `program/stage-layout.ts`) and by the desktop's `talk-show-layout.ts`, both held to that file. The runner has no such layout: `talk-show-layout.json` is unchanged.
+- The page subscribes to the screen share and the screen-share audio of both named screens, and to no other screen (W `program/stage.ts`, `stageWantsTrack`). Both screens' audio goes through the program's auxiliary gain and limiter, so the stream and the cloud recording carry both.
+- The beacon's `shown` gains `screens` (both identities, only when two are drawn) and its `layout` may be `two-screens`; `state.room.shown` passes both on. `screen` is still the first drawn screen. The stage key appends `|a,b` for a stage with a valid pair and is unchanged for every other stage (`cloud-parity-views.json`).
+- The host's `videorc.stage` data message gains `screens` beside `screen`, the same pair, only when there are two. A guest page shows every selected screen that is another guest's (in that guest's tile) and hears its audio; the host's screen keeps its privacy-certified path, and a guest's own screen never comes back to them.
+- Hide screen is per screen: the host's screen is the only one with a privacy state, each surface holds it on that screen's picture alone (W `program/stage-media.ts`, `guest-tracks.tsx`; D `show-stage.tsx`), and the frosted still (plan 210 D8) is drawn in that screen's tile, in either slot, while the screen beside it stays live.
+- A host's scene (plan 249 S12) has one screen box: it shows `screen`, the first of the pair.
+- Node shows: a runner draws one screen. The desktop refuses `cloud.stage.set` with `screens` on a show that is not on web control ("This show puts one screen on the program."), and the Show stage's Two screens card is disabled with the same line.
+
 ### 6.2 `state.room`
 
 | Field                                              | Managed source                                                                                                                                                                                                                                                                          |

@@ -16,7 +16,8 @@ import {
   roomCounts,
   roomPeople,
   roomScreens,
-  stageWithScreen
+  stageWithScreen,
+  stageWithScreenCard
 } from '@/lib/guests-view'
 import { roomOptInTone, roomProgramChips } from '@/lib/room-program-opt-ins'
 
@@ -163,6 +164,60 @@ describe('roomScreens and stageWithScreen (plan 252)', () => {
     })
     // Another layout stays as it is when the screen goes.
     expect(stageWithScreen({ ...stage, screen: 'g_ada' }, null).layout).toBe('spotlight')
+  })
+
+  // Plan 251: a stage that names two screens has two cards on. On the Two
+  // screens layout a card adds or removes its own screen; elsewhere it is
+  // plan 252's one place.
+  it('marks both screens of a pair, and blocks a third while Two screens is chosen', () => {
+    const pair = openRoom({
+      ...room,
+      participants: [
+        ...(openRoom().participants ?? []),
+        guestParticipant(ada, { onStage: true, screen: true }),
+        guestParticipant(grace, { onStage: true, screen: true })
+      ],
+      stage: {
+        layout: 'screen-people',
+        onStage: [HOST, 'g_ada', 'g_grace'],
+        screen: 'g_ada',
+        screens: ['g_ada', HOST]
+      }
+    })
+    const cards = roomScreens(pair, roomPeople(pair, HOST), true, true)
+    expect(cards.map((card) => [card.identity, card.onProgram, card.blockedReason])).toEqual([
+      [HOST, true, null],
+      ['g_ada', true, null],
+      ['g_grace', false, 'Two screens are on stage. Take one off first.']
+    ])
+    // Not on Two screens: a third card is free to take the place.
+    expect(
+      roomScreens(pair, roomPeople(pair, HOST), true).map((card) => card.blockedReason)
+    ).toEqual([null, null, null])
+  })
+
+  it("a card's click adds or removes on Two screens, and takes the one place elsewhere", () => {
+    const one = { layout: 'screen-people' as const, onStage: [HOST, 'g_ada'], screen: 'g_ada' }
+    const hostCard = { identity: HOST, onProgram: false }
+    const adaCard = { identity: 'g_ada', onProgram: true }
+    // Two screens: the host's goes beside Ada's.
+    const two = stageWithScreenCard(one, hostCard, true)
+    expect(two).toMatchObject({ layout: 'screen-people', screen: 'g_ada' })
+    expect(two.screens).toEqual(['g_ada', HOST])
+    // Taking Ada's off leaves the host's up.
+    const left = stageWithScreenCard(two, adaCard, true)
+    expect(left).toMatchObject({ layout: 'screen-people', screen: HOST })
+    expect(left.screens).toBeUndefined()
+    // Elsewhere: the host's takes Ada's place, and a pair becomes that one.
+    const swapped = stageWithScreenCard(one, hostCard, false)
+    expect(swapped).toMatchObject({ layout: 'screen-people', screen: HOST })
+    expect(swapped.screens).toBeUndefined()
+    expect(stageWithScreenCard(two, { identity: 'g_ada', onProgram: true }, false)).toMatchObject({
+      layout: 'screen-people',
+      screen: HOST
+    })
+    expect(stageWithScreen(two, 'g_ada').screens).toBeUndefined()
+    expect(stageWithScreenCard(one, adaCard, false)).toMatchObject({ layout: 'side-by-side' })
   })
 })
 

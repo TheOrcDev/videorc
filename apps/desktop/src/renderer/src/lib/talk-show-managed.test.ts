@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 
 import type { CloudStatus } from '@/lib/backend'
-import { HOST, openRoom, talkStatus } from '@/lib/guests-room-fixtures'
+import { HOST, ada, guestParticipant, openRoom, talkStatus } from '@/lib/guests-room-fixtures'
 import {
   MANAGED_NODE_ID,
   agentRoomProgram,
@@ -13,6 +13,7 @@ import {
   programMonitorView,
   shownLayout
 } from '@/lib/talk-show-managed'
+import { effectiveStageLayout } from '@/lib/talk-show-layout'
 import { stageKey } from '../../../shared/cloud-presentation-views'
 
 // Plan 234 D6 (T3): a managed show has no return picture, so its Program
@@ -135,6 +136,30 @@ describe('the program preview (plan 249 S6)', () => {
     })
     expect(shownLayout(unknown)).toBeNull()
     expect(managedProgramStageInput(unknown).layout).toBe('spotlight')
+  })
+
+  it('draws both screens the page reports for a two-screens stage (plan 251)', () => {
+    const base = openRoom()
+    const room = openRoom({
+      participants: [...(base.participants ?? []), guestParticipant(ada, { onStage: true })],
+      stage: {
+        layout: 'screen-people',
+        onStage: [HOST, 'g_ada'],
+        screen: 'g_ada',
+        screens: ['g_ada', HOST]
+      },
+      shown: {
+        onStage: [HOST, 'g_ada'],
+        layout: 'two-screens',
+        screen: 'g_ada',
+        screens: ['g_ada', HOST]
+      }
+    })
+    expect(shownLayout(room)).toBe('screen-people')
+    const input = managedProgramStageInput(room)
+    expect(input.layout).toBe('screen-people')
+    expect(input.screens).toEqual(['g_ada', HOST])
+    expect(effectiveStageLayout(input)).toBe('two-screens')
   })
 
   it('confirms only the stage this desktop sent', () => {

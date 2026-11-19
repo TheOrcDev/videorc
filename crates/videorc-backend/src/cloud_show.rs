@@ -7943,6 +7943,25 @@ mod tests {
         let room = status.room.unwrap();
         assert_eq!(room.requests.len(), 1);
         assert_eq!(room.guests.len(), 1);
+        // Plan 251: a runner draws one screen. Two are refused before the
+        // socket, never narrowed to one without a word.
+        let refused = harness
+            .context
+            .set_stage(
+                serde_json::from_value(json!({
+                    "layout": "screen-people",
+                    "onStage": ["host:sh_abc", "g_bo"],
+                    "screen": "host:sh_abc",
+                    "screens": ["host:sh_abc", "g_bo"]
+                }))
+                .unwrap(),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(
+            refused.to_string(),
+            crate::cloud_talk::TWO_SCREENS_UNAVAILABLE_MESSAGE
+        );
         // Bring Bo on: one stage.set with the whole stage.
         let context = harness.context.clone();
         let set = tokio::spawn(async move {
@@ -7952,6 +7971,7 @@ mod tests {
                     on_stage: vec!["host:sh_abc".to_string(), "g_bo".to_string()],
                     spotlight: None,
                     screen: None,
+                    screens: Vec::new(),
                     host_shape: Some(crate::cloud_talk::CloudHostShape::Circle),
                 })
                 .await
@@ -15373,6 +15393,32 @@ mod tests {
                     .is_empty()
             );
         }
+    }
+
+    /// Plan 251: both screens reach `PUT …/stage`, with `screen` the first
+    /// of them for a reader that knows only one.
+    #[tokio::test(start_paused = true)]
+    async fn a_managed_talk_show_sends_both_screens_of_a_two_screens_stage() {
+        let harness = harness(true);
+        managed_room(&harness).await;
+        let web = harness.context.web.clone();
+        let stage = json!({
+            "layout": "screen-people",
+            "onStage": ["host:sh_abc", "g_0123456789abcdefghijkl"],
+            "screen": "g_0123456789abcdefghijkl",
+            "screens": ["g_0123456789abcdefghijkl", "host:sh_abc"],
+            "hostShape": "rounded"
+        });
+        let status = harness
+            .context
+            .set_stage(serde_json::from_value(stage.clone()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(web.managed.lock().unwrap().stages, vec![stage.clone()]);
+        // The status carries the stage as sent; the strict renderer contract
+        // reads `screens` as an array, never `null`.
+        let wire = serde_json::to_value(status.room.unwrap().stage).unwrap();
+        assert_eq!(wire, stage);
     }
 
     #[tokio::test(start_paused = true)]

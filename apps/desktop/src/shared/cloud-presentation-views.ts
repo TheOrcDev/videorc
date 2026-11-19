@@ -60,7 +60,23 @@ export type KeyedStage = {
   layout: string
   onStage: readonly string[]
   screen?: string | null
+  /** Plan 251: the two screens of the two-screens layout. */
+  screens?: readonly string[] | null
   spotlight?: string | null
+}
+
+/**
+ * Plan 251: a stage's two screens as the page normalizes them: two different
+ * on-stage identities, the first of them the stage's `screen`. Anything else
+ * is no pair, and the stage shows its one `screen`.
+ */
+export function stageScreenPair(stage: KeyedStage, onStage: readonly string[]): string[] {
+  const pair = stage.screens
+  if (!pair || pair.length !== 2) return []
+  const [first, second] = pair
+  if (first === undefined || second === undefined) return []
+  if (first === second || first !== stage.screen) return []
+  return onStage.includes(first) && onStage.includes(second) ? [first, second] : []
 }
 
 /** The canonical form both sides hash: the page's own normalization. */
@@ -72,13 +88,17 @@ export function canonicalStage(stage: KeyedStage): string {
   const named = (identity: string | null | undefined): string =>
     identity && onStage.includes(identity) ? identity : ''
   const shape = stage.hostShape === 'circle' ? 'circle' : 'rounded'
+  const pair = stageScreenPair(stage, onStage)
   return [
     'v1',
     stage.layout,
     shape,
     onStage.join(','),
     named(stage.spotlight),
-    named(stage.screen)
+    named(stage.screen),
+    // Plan 251: only a stage with two screens has this part, so every
+    // stage an older page or desktop keys keeps the key it had.
+    ...(pair.length === 2 ? [pair.join(',')] : [])
   ].join('|')
 }
 

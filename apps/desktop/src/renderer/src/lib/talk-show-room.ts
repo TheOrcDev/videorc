@@ -301,12 +301,23 @@ export function talkShowRoomOptions(): RoomOptions {
  * sees the same shared screen. Always present (null: none), so a guest can
  * tell a current desktop from an older one; only a screen on the stage is
  * named. An older guest page reads `onStage` and ignores the rest. */
+/** Plan 251: with two screens up, `screens` names both and `screen` stays the
+ * first, which is all an older guest page reads. */
 export function stageMessage(
   onStage: readonly string[],
-  screen: string | null = null
+  screen: string | null | readonly string[] = null
 ): Uint8Array<ArrayBuffer> {
-  const named = screen && onStage.includes(screen) ? screen : null
-  return new TextEncoder().encode(JSON.stringify({ v: 1, onStage: [...onStage], screen: named }))
+  const named = [...new Set(typeof screen === 'string' ? [screen] : (screen ?? []))]
+    .filter((identity) => onStage.includes(identity))
+    .slice(0, 2)
+  return new TextEncoder().encode(
+    JSON.stringify({
+      v: 1,
+      onStage: [...onStage],
+      screen: named[0] ?? null,
+      ...(named.length === 2 ? { screens: named } : {})
+    })
+  )
 }
 
 function qualityOf(quality: ConnectionQuality): CloudRoomQuality {
@@ -359,7 +370,7 @@ export class TalkShowRoomClient {
   #closed = false
   #localOwnershipLost = false
   #lastStage: string[] = []
-  #lastScreen: string | null = null
+  #lastScreen: string | null | readonly string[] = null
   #monitorEnabled = false
   #micMuted = false
   #cameraOff = false
@@ -543,7 +554,10 @@ export class TalkShowRoomClient {
 
   /** The stage, to the guest page's topic (D11): on every change and on
    * every join (data messages are not replayed). */
-  async sendStage(onStage: readonly string[], screen: string | null = null): Promise<void> {
+  async sendStage(
+    onStage: readonly string[],
+    screen: string | null | readonly string[] = null
+  ): Promise<void> {
     this.#lastStage = [...onStage]
     this.#lastScreen = screen
     const room = this.#room

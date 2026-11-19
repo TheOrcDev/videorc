@@ -317,6 +317,194 @@ describe('a hidden screen (plan 210 D8)', () => {
   })
 })
 
+// Plan 251: two shared screens side by side, everyone on stage in a row
+// under them. Each screen is its own tile with its own picture, so a hidden
+// screen frosts alone (plan 210 D8) while the other one stays live. The host
+// chooses it in plan 252's galleries: a fifth layout card, and Screens cards
+// that put up to two screens on stage.
+describe('two screens (plan 251)', () => {
+  const STILL = 'data:image/png;base64,c3RpbGw='
+  const managedShow = { id: 'sh_talk', nodeId: 'livekit', resumable: false, kind: 'talk' as const }
+  const nodeShow = { id: 'sh_talk', nodeId: 'eu-hel-1', resumable: false, kind: 'talk' as const }
+  const GUEST = ada.guestId
+  const pair = { layout: 'screen-people' as const, onStage: [HOST, GUEST], screen: GUEST }
+  const room = (overrides: Parameters<typeof openRoom>[0] = {}) => {
+    const base = openRoom()
+    return openRoom({
+      live: true,
+      guests: [ada],
+      participants: [
+        ...(base.participants ?? []),
+        guestParticipant(ada, { onStage: true, screen: true })
+      ],
+      stage: { ...pair, screens: [GUEST, HOST] },
+      shown: {
+        onStage: [HOST, GUEST],
+        layout: 'two-screens',
+        screen: GUEST,
+        screens: [GUEST, HOST]
+      },
+      ...overrides
+    })
+  }
+  /** The host shares a screen too (the renderer's own track). */
+  const sharing = (overrides: Partial<TalkShowContextValue> = {}) =>
+    talkShow({
+      room: {
+        ...NO_TALK_SHOW.room,
+        local: { ...NO_TALK_SHOW.room.local, screen: {} as MediaStreamTrack }
+      },
+      ...overrides
+    })
+  const tilesIn = (testId: string) => [
+    ...(container
+      .querySelector<HTMLElement>(`[data-testid="${testId}"]`)
+      ?.querySelectorAll<HTMLElement>('[data-testid="show-stage-tile"]') ?? [])
+  ]
+  const named = (tile: HTMLElement) =>
+    `${tile.getAttribute('data-stage-kind')}:${tile.getAttribute('data-stage-identity')}`
+  const layoutCard = (layout: string): HTMLButtonElement =>
+    container.querySelector<HTMLButtonElement>(
+      `[data-testid="show-stage-layout"][data-stage-layout="${layout}"] button`
+    ) as HTMLButtonElement
+  const screenCard = (identity: string): HTMLButtonElement =>
+    container.querySelector<HTMLButtonElement>(
+      `[data-testid="show-stage-screen"][data-stage-identity="${identity}"] button`
+    ) as HTMLButtonElement
+
+  it('draws both screens across the top and the cameras under them, in the room and the Program preview', async () => {
+    await mount(talkStatus({ show: managedShow, room: room() }), talkShow())
+    for (const surface of ['show-stage-well', 'show-stage-program']) {
+      const tiles = tilesIn(surface)
+      expect(tiles.map(named)).toEqual([
+        `screen:${GUEST}`,
+        `screen:${HOST}`,
+        `person:${HOST}`,
+        `person:${GUEST}`
+      ])
+      const top = (tile: HTMLElement) => Number.parseFloat(tile.style.top)
+      const left = (tile: HTMLElement) => Number.parseFloat(tile.style.left)
+      const [first, second, ...cameras] = tiles
+      expect(top(first)).toBe(top(second))
+      expect(left(first)).toBeLessThan(left(second))
+      expect(first.style.width).toBe(second.style.width)
+      for (const camera of cameras) expect(top(camera)).toBeGreaterThan(top(first))
+    }
+  })
+
+  it('frosts the hidden host screen alone and leaves the guest screen live', async () => {
+    const hidden = talkShow({
+      room: {
+        ...NO_TALK_SHOW.room,
+        local: { ...NO_TALK_SHOW.room.local, screenStill: STILL }
+      }
+    })
+    await mount(talkStatus({ show: managedShow, room: room() }), hidden)
+    for (const surface of ['show-stage-well', 'show-stage-program']) {
+      const tiles = tilesIn(surface)
+      const still = (tile: HTMLElement | undefined) =>
+        tile?.querySelector<HTMLImageElement>('[data-testid="show-stage-screen-still"]') ?? null
+      const hostScreen = tiles.find((tile) => named(tile) === `screen:${HOST}`)
+      const guestScreen = tiles.find((tile) => named(tile) === `screen:${GUEST}`)
+      expect(still(hostScreen)?.getAttribute('src')).toBe(STILL)
+      // The guest's screen has no privacy state: never a still, never the host's.
+      expect(guestScreen).toBeDefined()
+      expect(still(guestScreen)).toBeNull()
+      expect(tiles.filter((tile) => still(tile) !== null)).toHaveLength(1)
+    }
+  })
+
+  it('goes back to one screen and the people when the program shows one', async () => {
+    const one = room({ shown: { onStage: [HOST, GUEST], layout: 'screen-people', screen: HOST } })
+    await mount(talkStatus({ show: managedShow, room: one }), talkShow())
+    expect(tilesIn('show-stage-well').map(named)).toEqual([
+      `screen:${HOST}`,
+      `person:${HOST}`,
+      `person:${GUEST}`
+    ])
+  })
+
+  it('is the fifth layout card, with its diagram, pressed while two screens are up', async () => {
+    const show = sharing()
+    await mount(talkStatus({ show: managedShow, room: room() }), show)
+    const card = layoutCard('two-screens')
+    expect(card.textContent).toBe('Two screens')
+    expect(card.getAttribute('aria-pressed')).toBe('true')
+    expect(layoutCard('screen-people').getAttribute('aria-pressed')).toBe('false')
+    expect(
+      container.querySelector(
+        '[data-testid="show-stage-layout"][data-stage-layout="two-screens"] [data-slot="stage-layout-thumb"]'
+      )?.children
+    ).toHaveLength(4)
+    // Screen + people from here is one screen: the card asks for it.
+    await act(async () => layoutCard('screen-people').click())
+    expect(show.setLayout).toHaveBeenCalledWith('screen-people')
+  })
+
+  it('is chosen from the card once someone on stage shares a screen', async () => {
+    const show = sharing()
+    const one = room({
+      stage: { layout: 'side-by-side', onStage: [HOST, GUEST] },
+      shown: undefined
+    })
+    await mount(talkStatus({ show: managedShow, room: one }), show)
+    expect(layoutCard('two-screens').disabled).toBe(false)
+    await act(async () => layoutCard('two-screens').click())
+    expect(show.setLayout).toHaveBeenCalledWith('two-screens')
+
+    // Nobody shares: it waits, and says so with Screen + people.
+    const quiet = openRoom({ stage: { layout: 'solo', onStage: [HOST] } })
+    await mount(talkStatus({ show: managedShow, room: quiet }), talkShow())
+    expect(layoutCard('two-screens').disabled).toBe(true)
+    expect(container.textContent).toContain(
+      'Share a screen first for Screen + people and Two screens.'
+    )
+  })
+
+  it('is refused in words on a node show, whose runner draws one screen', async () => {
+    await mount(talkStatus({ show: nodeShow, room: room({ shown: undefined }) }), sharing())
+    expect(layoutCard('two-screens').disabled).toBe(true)
+    expect(container.innerHTML).toContain('This show puts one screen on the program.')
+  })
+
+  it('puts up to two screens on stage from the Screens cards while it is chosen', async () => {
+    // One screen up, Two screens chosen: the host's card adds beside it.
+    const setStage = vi.fn(async () => {})
+    const one = room({ stage: pair, shown: undefined })
+    await mount(
+      talkStatus({ show: managedShow, room: one }),
+      sharing({ setStage, twoScreens: true })
+    )
+    expect(layoutCard('two-screens').getAttribute('aria-pressed')).toBe('true')
+    expect(screenCard(GUEST).getAttribute('aria-pressed')).toBe('true')
+    expect(screenCard(HOST).textContent).toBe('Your screenPut on stage')
+    await act(async () => screenCard(HOST).click())
+    expect(setStage).toHaveBeenLastCalledWith({ ...pair, screens: [GUEST, HOST] })
+
+    // Both up: both cards are on, and one comes off alone.
+    await mount(
+      talkStatus({ show: managedShow, room: room() }),
+      sharing({ setStage, twoScreens: true })
+    )
+    expect(screenCard(GUEST).getAttribute('aria-pressed')).toBe('true')
+    expect(screenCard(HOST).getAttribute('aria-pressed')).toBe('true')
+    await act(async () => screenCard(GUEST).click())
+    expect(setStage).toHaveBeenLastCalledWith({
+      layout: 'screen-people',
+      onStage: [HOST, GUEST],
+      screen: HOST
+    })
+  })
+
+  it('keeps one place for the screen on any other layout', async () => {
+    const setStage = vi.fn(async () => {})
+    const one = room({ stage: pair, shown: undefined })
+    await mount(talkStatus({ show: managedShow, room: one }), sharing({ setStage }))
+    await act(async () => screenCard(HOST).click())
+    expect(setStage).toHaveBeenLastCalledWith({ ...pair, screen: HOST })
+  })
+})
+
 // Plan 234 D6 (T3): a managed show has no return picture. The Program
 // monitor keeps its frame, its label and its two waiting lines, and draws
 // the Show stage as the program page reports it. Nothing asks for a return.
@@ -842,7 +1030,7 @@ describe('the backstage strip (C-G3)', () => {
       container.querySelectorAll(
         '[data-testid="show-stage-layout"] [data-slot="stage-layout-thumb"]'
       )
-    ).toHaveLength(4)
+    ).toHaveLength(5)
     expect(container.textContent).toContain('Share a screen first for Screen + people.')
   })
 })

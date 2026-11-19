@@ -10,7 +10,16 @@ import type {
 import { plural } from '@/lib/format'
 import type { StatusTone } from '@/lib/status-word'
 import type { ManagedOutputProfile } from '../../../shared/cloud-output-profile'
-import { effectiveStageLayout, showStageInput } from '@/lib/talk-show-layout'
+import {
+  ONE_SCREEN_ON_THIS_SHOW,
+  STAGE_MAX_SCREENS,
+  TWO_SCREENS_AT_MOST,
+  removeScreen,
+  stageScreens,
+  toggleStageScreen,
+  withStageScreens
+} from '@/lib/stage-screens'
+import { effectiveStageLayout, showStageInput, type DrawnStageLayout } from '@/lib/talk-show-layout'
 
 // What the Guests page and the Show stage say about the room (plan 224
 // C-G2, C-G3), derived from the backend's `CloudStatus.room`. Pure, so every
@@ -554,29 +563,46 @@ export type RoomScreen = {
   host: boolean
   /** The program shows this screen (the stage as sent names it). */
   onProgram: boolean
-  /** Why it can't go on the program: its owner is backstage. */
+  /**
+   * Why it can't go on the program: its owner is backstage, or (plan 251)
+   * two screens are on stage already.
+   */
   blockedReason: string | null
 }
 
 /**
  * Every screen shared in the room, the host's first. One list, so a layout
  * that takes more than one screen (two screens side by side) picks from it.
+ *
+ * Plan 251: a stage that names two screens has two cards on. While the Two
+ * screens layout is chosen (`twoScreens`) a card adds its screen beside the
+ * other, so a third waits until one comes off; on any other layout a card
+ * takes the one place.
  */
 export function roomScreens(
   room: CloudRoomStatus | undefined,
   people: readonly RoomPerson[],
-  hostSharing: boolean
+  hostSharing: boolean,
+  twoScreens = false
 ): RoomScreen[] {
-  const shown = room?.stage.screen ?? null
+  const shown = room ? stageScreens(room.stage) : []
+  const full = twoScreens && shown.length >= STAGE_MAX_SCREENS
   return people
     .filter((person) => (person.host ? hostSharing || person.sharingScreen : person.sharingScreen))
-    .map((person) => ({
-      identity: person.identity,
-      name: person.host ? 'Your screen' : `${person.name}'s screen`,
-      host: person.host,
-      onProgram: shown === person.identity,
-      blockedReason: person.onStage ? null : `Bring ${person.name} on first.`
-    }))
+    .map((person) => {
+      const onProgram = shown.includes(person.identity)
+      return {
+        identity: person.identity,
+        name: person.host ? 'Your screen' : `${person.name}'s screen`,
+        host: person.host,
+        onProgram,
+        blockedReason: !person.onStage
+          ? `Bring ${person.name} on first.`
+          : full && !onProgram
+            ? TWO_SCREENS_AT_MOST
+            : null
+      }
+    })
 }
 
 /**
@@ -585,12 +611,29 @@ export function roomScreens(
  * own screen does; taking it off leaves that layout for Side by side.
  */
 export function stageWithScreen(stage: CloudStage, identity: string | null): CloudStage {
-  if (identity) return { ...stage, layout: 'screen-people', screen: identity }
+  // One screen: it takes the place of any other, and of a pair.
+  if (identity) return { ...withStageScreens(stage, [identity]), layout: 'screen-people' }
   return {
-    ...stage,
-    layout: stage.layout === 'screen-people' ? 'side-by-side' : stage.layout,
-    screen: undefined
+    ...withStageScreens(stage, []),
+    layout: stage.layout === 'screen-people' ? 'side-by-side' : stage.layout
   }
+}
+
+/**
+ * A Screens card's click (plan 251). On the Two screens layout the card
+ * adds its screen beside the other or takes it off, and the other stays. On
+ * any other layout it is plan 252's: the screen takes the one place, or
+ * comes off.
+ */
+export function stageWithScreenCard(
+  stage: CloudStage,
+  screen: Pick<RoomScreen, 'identity' | 'onProgram'>,
+  twoScreens: boolean
+): CloudStage {
+  if (twoScreens) return toggleStageScreen(stage, screen.identity)
+  return screen.onProgram
+    ? removeScreen(stage, screen.identity)
+    : stageWithScreen(stage, screen.identity)
 }
 
 // --- Stage controls (C-G3, D8) ------------------------------------------------
@@ -601,51 +644,89 @@ export const LAYOUT_LABELS: Record<CloudStageLayout, string> = {
   'screen-people': 'Screen + people',
   spotlight: 'Spotlight'
 }
+/** Plan 251: the fifth card. Screen + people with two screens on the wire. */
+export const TWO_SCREENS_LABEL = 'Two screens'
 
 export const SHARE_A_SCREEN_FIRST = 'Share a screen first'
 export const SOLO_NEEDS_ONE = 'Solo shows one person. Send the others backstage first.'
 
 export type LayoutOption = {
-  value: CloudStageLayout
+  value: DrawnStageLayout
   label: string
   disabledReason: string | null
 }
 
-/** The four layout chips, each with its reason when it can't apply. */
-export function layoutOptions(room: CloudRoomStatus | undefined): LayoutOption[] {
+/**
+ * The layout cards, each with its reason when it can't apply: the four room
+ * layouts, then Two screens (plan 251). Two screens needs a managed show (a
+ * node show's runner draws one screen) and a screen to start from: one the
+ * stage names, or one someone on stage shares (`sharers`).
+ */
+export function layoutOptions(
+  room: CloudRoomStatus | undefined,
+  screens: { managed: boolean; sharers: number } = { managed: false, sharers: 0 }
+): LayoutOption[] {
   const onStage = room?.stage.onStage.length ?? 0
   const screen = room?.stage.screen
-  return (Object.keys(LAYOUT_LABELS) as CloudStageLayout[]).map((value) => ({
-    value,
-    label: LAYOUT_LABELS[value],
-    disabledReason:
-      value === 'screen-people' && !screen
+  const options: LayoutOption[] = (Object.keys(LAYOUT_LABELS) as CloudStageLayout[]).map(
+    (value) => ({
+      value,
+      label: LAYOUT_LABELS[value],
+      disabledReason:
+        value === 'screen-people' && !screen
+          ? SHARE_A_SCREEN_FIRST
+          : value === 'solo' && onStage > 1
+            ? SOLO_NEEDS_ONE
+            : null
+    })
+  )
+  options.push({
+    value: 'two-screens',
+    label: TWO_SCREENS_LABEL,
+    disabledReason: !screens.managed
+      ? ONE_SCREEN_ON_THIS_SHOW
+      : !screen && screens.sharers === 0
         ? SHARE_A_SCREEN_FIRST
-        : value === 'solo' && onStage > 1
-          ? SOLO_NEEDS_ONE
-          : null
-  }))
+        : null
+  })
+  return options
 }
 
 /** One line under the chips: why each blocked layout waits. */
 export function layoutReasonsLine(options: readonly LayoutOption[]): string | null {
-  const reasons = options.flatMap((option) =>
-    option.disabledReason === null
-      ? []
-      : option.value === 'screen-people'
-        ? [`${option.disabledReason} for ${option.label}.`]
-        : [option.disabledReason]
-  )
+  // "Share a screen first" is said once, for every layout that waits on it.
+  const waiting = options.filter((option) => option.disabledReason === SHARE_A_SCREEN_FIRST)
+  const reasons = options.flatMap((option) => {
+    if (option.disabledReason === null) return []
+    if (option.disabledReason !== SHARE_A_SCREEN_FIRST) return [option.disabledReason]
+    return option === waiting[0]
+      ? [`${SHARE_A_SCREEN_FIRST} for ${waiting.map((entry) => entry.label).join(' and ')}.`]
+      : []
+  })
   return reasons.length > 0 ? reasons.join(' ') : null
 }
 
 /**
  * The layout the stage shows: the runner's own fallbacks applied (D8), on the
  * stage as the program draws it (review M2: a stale screen is Side by side).
+ * Plan 251: `two-screens` while it draws two.
  */
-export function shownLayout(room: CloudRoomStatus | undefined): CloudStageLayout {
+export function shownLayout(room: CloudRoomStatus | undefined): DrawnStageLayout {
   if (!room) return 'solo'
   return effectiveStageLayout(showStageInput(room))
+}
+
+/**
+ * The layout card that is on (plan 251). Two screens stays on while it is
+ * chosen and one screen is up (the program then draws Screen + people and
+ * waits for the second), so the Screens cards keep adding to it.
+ */
+export function selectedLayout(
+  room: CloudRoomStatus | undefined,
+  twoScreens: boolean
+): DrawnStageLayout {
+  const shown = shownLayout(room)
+  return twoScreens && shown === 'screen-people' ? 'two-screens' : shown
 }
 
 // --- Moderation (D5, D14) ------------------------------------------------------

@@ -71,8 +71,8 @@ import {
   roomLimits,
   roomPeople,
   roomScreens,
-  shownLayout,
-  stageWithScreen,
+  selectedLayout,
+  stageWithScreenCard,
   type RoomPerson,
   type RoomScreen
 } from '@/lib/guests-view'
@@ -82,9 +82,11 @@ import type { TalkShowContextValue } from '@/lib/talk-show-context'
 import type { CameraFrameMedia } from '@/lib/camera-frame-media'
 import type { TalkShowLocalMedia, TalkShowPerson } from '@/lib/talk-show-room'
 import { setAgentRoomProgram } from '@/lib/agent-room-program'
+import { stageSharers } from '@/lib/stage-screens'
 import {
   PROGRAM_PREVIEW_COPY,
   agentRoomProgram,
+  isManagedShow,
   managedProgramPreview,
   managedProgramStageInput,
   programMonitorView
@@ -505,10 +507,15 @@ function TrackVideo({
 function StageLayouts({ talkShow }: { talkShow: TalkShowContextValue }): ReactElement {
   const { cloudStatus } = useStudioCloud()
   const room = cloudStatus?.room
-  const options = layoutOptions(room)
+  // Plan 251: the fifth card, Two screens, on a managed show with a screen
+  // to start from.
+  const options = layoutOptions(room, {
+    managed: isManagedShow(cloudStatus),
+    sharers: stageSharers(room, talkShow.hostIdentity, talkShow.room.local.screen !== null).length
+  })
   const reasons = layoutReasonsLine(options)
   const roomOpen = room?.phase === 'open'
-  const current = shownLayout(room)
+  const current = selectedLayout(room, talkShow.twoScreens)
   return (
     <div className="flex min-w-0 flex-col gap-1.5" data-testid="show-stage-layouts">
       <SectionLabel className="px-1">Layout</SectionLabel>
@@ -539,7 +546,7 @@ function StageLayouts({ talkShow }: { talkShow: TalkShowContextValue }): ReactEl
   )
 }
 
-/** Cards in a row of four; two by two when the stage is narrow. */
+/** Cards in rows of four (a fifth layout wraps); two across when the stage is narrow. */
 const CARD_GRID = 'grid grid-cols-2 gap-2 @min-[30rem]/show-stage:grid-cols-4'
 
 /**
@@ -562,7 +569,8 @@ function StageScreens({
   const [pending, setPending] = useState(false)
   const local = talkShow.room.local
   const sharing = local.screen !== null
-  const screens = roomScreens(room, people, sharing)
+  // Plan 251: on Two screens the cards put up to two screens on stage.
+  const screens = roomScreens(room, people, sharing, talkShow.twoScreens)
 
   const pick = async (): Promise<void> => {
     setPending(true)
@@ -588,7 +596,7 @@ function StageScreens({
   const show = (screen: RoomScreen): void => {
     if (!room) return
     void talkShow
-      .setStage(stageWithScreen(room.stage, screen.onProgram ? null : screen.identity))
+      .setStage(stageWithScreenCard(room.stage, screen, talkShow.twoScreens))
       .catch(() => {})
   }
 
