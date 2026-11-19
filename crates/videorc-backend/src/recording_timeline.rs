@@ -36,6 +36,11 @@ pub const MAX_CLICK_TO_ORIGIN_MS: u64 = 60_000;
 /// renegotiate their output type) is absent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RecordingStartPhase {
+    /// A Record or Go Live that hands over from the Clips session (#1330):
+    /// that session has stopped, then released the session slot and its
+    /// microphone. Both come before `admission`, and only on a hand-over.
+    ClipsStopped,
+    ClipsReleased,
     Admission,
     BridgeAdmission,
     FfmpegWorkPermit,
@@ -48,6 +53,21 @@ pub enum RecordingStartPhase {
     CameraCadence,
     SceneCommit,
     StartupBarrier,
+    /// The Windows D3D11 session pump's start (#1330), between `mic-warm` and
+    /// `starting-published`: the pump is called, the media roles are held,
+    /// capture is running, the encoders are attached, and the pump published
+    /// its first surfaces. The pump stamps the last four; the session folds
+    /// them in once the pump is up.
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    D3d11PumpStart,
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    D3d11Roles,
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    D3d11CaptureStart,
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    D3d11Encoder,
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    D3d11FirstSurfaces,
     StartingPublished,
     FfmpegSpawn,
     BridgeFifoOpen,
@@ -80,6 +100,8 @@ pub enum RecordingStartPhase {
 impl RecordingStartPhase {
     pub const fn label(self) -> &'static str {
         match self {
+            Self::ClipsStopped => "clips-stopped",
+            Self::ClipsReleased => "clips-released",
             Self::Admission => "admission",
             Self::BridgeAdmission => "bridge-admission",
             Self::FfmpegWorkPermit => "ffmpeg-work-permit",
@@ -92,6 +114,11 @@ impl RecordingStartPhase {
             Self::CameraCadence => "camera-cadence",
             Self::SceneCommit => "scene-commit",
             Self::StartupBarrier => "startup-barrier",
+            Self::D3d11PumpStart => "d3d11-pump-start",
+            Self::D3d11Roles => "d3d11-roles",
+            Self::D3d11CaptureStart => "d3d11-capture-start",
+            Self::D3d11Encoder => "d3d11-encoder",
+            Self::D3d11FirstSurfaces => "d3d11-first-surfaces",
             Self::StartingPublished => "starting-published",
             Self::FfmpegSpawn => "ffmpeg-spawn",
             Self::BridgeFifoOpen => "bridge-fifo-open",
@@ -497,6 +524,62 @@ mod tests {
         };
         assert!(at("bridge-first-output") >= at("bridge-first-input") + 20);
         assert!(at("bridge-ready") >= at("bridge-first-output"));
+    }
+
+    #[test]
+    fn d3d11_pump_steps_and_clips_hand_over_split_their_phases() {
+        // #1330: the hand-over marks come before `admission`, and the pump's
+        // stamps fold in between `d3d11-pump-start` and `starting-published`.
+        use std::time::Duration;
+        let mut timeline = RecordingStartTimeline::start(None, false);
+        timeline.mark(RecordingStartPhase::ClipsStopped);
+        timeline.mark(RecordingStartPhase::ClipsReleased);
+        timeline.mark(RecordingStartPhase::Admission);
+        timeline.mark(RecordingStartPhase::MicWarm);
+        timeline.mark(RecordingStartPhase::D3d11PumpStart);
+        let base = Instant::now();
+        let pump = [
+            (RecordingStartPhase::D3d11Roles, base),
+            (
+                RecordingStartPhase::D3d11CaptureStart,
+                base + Duration::from_millis(20),
+            ),
+            (
+                RecordingStartPhase::D3d11Encoder,
+                base + Duration::from_millis(60),
+            ),
+            (
+                RecordingStartPhase::D3d11FirstSurfaces,
+                base + Duration::from_millis(70),
+            ),
+        ];
+        for (phase, at) in pump {
+            timeline.mark_at(phase, at);
+        }
+        timeline.mark(RecordingStartPhase::StartingPublished);
+        let line = timeline.summary_line("running");
+        let order: Vec<_> = timeline
+            .snapshot("running")
+            .marks
+            .into_iter()
+            .map(|mark| mark.phase)
+            .collect();
+        assert_eq!(
+            order,
+            [
+                "clips-stopped",
+                "clips-released",
+                "admission",
+                "mic-warm",
+                "d3d11-pump-start",
+                "d3d11-roles",
+                "d3d11-capture-start",
+                "d3d11-encoder",
+                "d3d11-first-surfaces",
+                "starting-published",
+            ]
+        );
+        assert!(line.contains(" d3d11-encoder=+"), "{line}");
     }
 
     #[test]

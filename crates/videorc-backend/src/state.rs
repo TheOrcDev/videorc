@@ -42,8 +42,8 @@ use crate::windows_d3d11_device::{
 };
 #[cfg(target_os = "windows")]
 use crate::windows_d3d11_device::{
-    WindowsD3d11MediaClient, WindowsD3d11MediaRole, WindowsD3d11MediaThread, WindowsD3d11RoleLease,
-    WindowsD3d11TexturePoolConfig, WindowsDxgiOutputSelection,
+    WindowsD3d11MediaClient, WindowsD3d11MediaHold, WindowsD3d11MediaRole, WindowsD3d11MediaThread,
+    WindowsD3d11RoleLease, WindowsD3d11TexturePoolConfig, WindowsDxgiOutputSelection,
 };
 
 const PREVIEW_FRAME_CHANNEL_CAPACITY: usize = 256;
@@ -157,6 +157,10 @@ pub(crate) type WindowsD3d11MediaCoordinatorSlot = Arc<StdMutex<WindowsD3d11Medi
 pub(crate) struct WindowsD3d11MediaCoordinator {
     state: WindowsD3d11MediaCoordinatorState,
     active_adapter_luid: Option<DxgiAdapterLuid>,
+    /// The texture pool the running thread was built with. A held thread
+    /// (#1330) serves only an acquire that asks for the same pool.
+    #[cfg(target_os = "windows")]
+    active_pool_config: Option<WindowsD3d11TexturePoolConfig>,
     #[cfg(target_os = "windows")]
     media_thread: Option<WindowsD3d11MediaThread>,
     #[cfg(target_os = "windows")]
@@ -169,6 +173,8 @@ impl WindowsD3d11MediaCoordinator {
             state: WindowsD3d11MediaCoordinatorState::new(1)
                 .expect("the initial Windows D3D11 generation is valid"),
             active_adapter_luid: None,
+            #[cfg(target_os = "windows")]
+            active_pool_config: None,
             #[cfg(target_os = "windows")]
             media_thread: None,
             #[cfg(target_os = "windows")]
@@ -189,12 +195,24 @@ impl WindowsD3d11MediaCoordinator {
                 let shutdown_result = {
                     self.client.take();
                     if let Some(media_thread) = self.media_thread.take() {
-                        media_thread.shutdown()
+                        let started = Instant::now();
+                        let result = media_thread.shutdown();
+                        tracing::info!(
+                            retired_generation,
+                            elapsed_ms = started.elapsed().as_millis() as u64,
+                            ok = result.is_ok(),
+                            "D3D11 media thread retired"
+                        );
+                        result
                     } else {
                         Ok(())
                     }
                 };
                 self.active_adapter_luid = None;
+                #[cfg(target_os = "windows")]
+                {
+                    self.active_pool_config = None;
+                }
                 let finish_result = self.state.finish_shutdown(retired_generation);
                 #[cfg(target_os = "windows")]
                 {
@@ -212,6 +230,51 @@ impl WindowsD3d11MediaCoordinator {
     fn release_role(&mut self, lease: WindowsD3d11RoleLease) -> Result<(), WindowsD3d11Error> {
         let action = self.state.release(lease)?;
         self.finish_release_action(action)
+    }
+
+    #[cfg(target_os = "windows")]
+    fn release_hold(&mut self, hold: WindowsD3d11MediaHold) -> Result<(), WindowsD3d11Error> {
+        let action = self.state.release_hold(hold)?;
+        self.finish_release_action(action)
+    }
+
+    /// A thread that only a hold keeps (#1330) is reused when it can serve
+    /// this acquire unchanged. Otherwise it retires here and the acquire
+    /// starts a fresh one, as it would have without the hold.
+    #[cfg(target_os = "windows")]
+    fn retire_held_thread_unless_reusable(
+        &mut self,
+        selection: WindowsDxgiOutputSelection,
+        pool_config: WindowsD3d11TexturePoolConfig,
+    ) -> Result<(), WindowsD3d11Error> {
+        if !self.state.only_held() {
+            return Ok(());
+        }
+        let reason = if self.active_adapter_luid != Some(selection.adapter_luid) {
+            "another adapter"
+        } else if self.active_pool_config != Some(pool_config) {
+            "another texture pool"
+        } else if self
+            .client
+            .as_ref()
+            .is_none_or(WindowsD3d11MediaClient::owns_encoders)
+        {
+            "an encoder the last session left on it"
+        } else {
+            tracing::info!(
+                generation = self.state.generation(),
+                "Reusing the held D3D11 media thread for the next session"
+            );
+            return Ok(());
+        };
+        tracing::info!(
+            generation = self.state.generation(),
+            "Retiring the held D3D11 media thread: the next session needs {reason}"
+        );
+        match self.state.retire_held()? {
+            Some(action) => self.finish_release_action(action),
+            None => Ok(()),
+        }
     }
 
     pub(crate) fn shutdown(&mut self) -> Result<(), WindowsD3d11Error> {
@@ -285,14 +348,24 @@ pub(crate) fn acquire_windows_d3d11_media(
     let mut owner = coordinator
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
+    owner.retire_held_thread_unless_reusable(selection, pool_config)?;
     let (lease, action) = owner.state.acquire(selection.adapter_luid, role)?;
     match action {
         crate::windows_d3d11_device::WindowsD3d11CoordinatorAcquireAction::StartMediaThread => {
-            match WindowsD3d11MediaThread::spawn(selection, lease.generation, pool_config) {
+            let started = Instant::now();
+            let spawned = WindowsD3d11MediaThread::spawn(selection, lease.generation, pool_config);
+            tracing::info!(
+                generation = lease.generation,
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                ok = spawned.is_ok(),
+                "D3D11 media thread started"
+            );
+            match spawned {
                 Ok(media_thread) => {
                     owner.client = Some(media_thread.client());
                     owner.media_thread = Some(media_thread);
                     owner.active_adapter_luid = Some(selection.adapter_luid);
+                    owner.active_pool_config = Some(pool_config);
                 }
                 Err(error) => {
                     let rollback = owner.state.release(lease)?;
@@ -325,6 +398,46 @@ pub(crate) fn acquire_windows_d3d11_media(
     Ok(WindowsD3d11MediaRoleHandle {
         lease: Some(lease),
         client,
+        coordinator: Arc::downgrade(coordinator),
+    })
+}
+
+/// Keeps the running D3D11 media thread alive until dropped (#1330), so a
+/// Record that hands over from the Clips session can reuse it.
+#[cfg(target_os = "windows")]
+#[derive(Debug)]
+pub(crate) struct WindowsD3d11MediaHoldHandle {
+    hold: WindowsD3d11MediaHold,
+    coordinator: std::sync::Weak<StdMutex<WindowsD3d11MediaCoordinator>>,
+}
+
+#[cfg(target_os = "windows")]
+impl Drop for WindowsD3d11MediaHoldHandle {
+    fn drop(&mut self) {
+        let Some(coordinator) = self.coordinator.upgrade() else {
+            return;
+        };
+        let mut coordinator = coordinator
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _ = coordinator.release_hold(self.hold);
+    }
+}
+
+/// Holds the running D3D11 media thread, if one runs (#1330).
+#[cfg(target_os = "windows")]
+pub(crate) fn hold_windows_d3d11_media(
+    coordinator: &WindowsD3d11MediaCoordinatorSlot,
+) -> Option<WindowsD3d11MediaHoldHandle> {
+    let hold = coordinator
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .state
+        .hold()
+        .ok()
+        .flatten()?;
+    Some(WindowsD3d11MediaHoldHandle {
+        hold,
         coordinator: Arc::downgrade(coordinator),
     })
 }

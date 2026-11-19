@@ -906,6 +906,7 @@ mod runtime {
     use crate::frame_store::{FrameHandle, FrameStore};
     use crate::preview_camera::{PreviewCameraFrameSource, PreviewCameraPixelFormat};
     use crate::protocol::{LayoutSettings, SceneSourceKind};
+    use crate::recording_timeline::RecordingStartPhase;
     use crate::scene_geometry::{
         SceneFit, SceneMask, camera_chroma_key, camera_mask, resolved_camera_transform,
         scene_crop_from_transform, scene_source_fit,
@@ -1355,6 +1356,8 @@ mod runtime {
         roles: Vec<WindowsD3d11MediaRoleHandle>,
         primary_role: WindowsD3d11MediaRole,
         startup_evidence: WindowsD3d11StartupEvidence,
+        /// When each start step finished (#1330), for the Record timeline.
+        startup_trace: Vec<(RecordingStartPhase, Instant)>,
     }
 
     #[derive(Debug, Clone)]
@@ -1775,6 +1778,8 @@ mod runtime {
                     plan.screen_id
                 ));
             }
+            let mut startup_trace = Vec::with_capacity(4);
+            startup_trace.push((RecordingStartPhase::D3d11Roles, Instant::now()));
             live_sources.generation = status.generation;
             live_sources.authority = Some({
                 let compositor = live_sources
@@ -1826,6 +1831,7 @@ mod runtime {
                     "D3D11 capture adapter {capture_adapter_luid:016x} does not match authority adapter {authority_adapter_luid:016x}"
                 ));
             }
+            startup_trace.push((RecordingStartPhase::D3d11CaptureStart, Instant::now()));
             let primary_encoder = client
                 .create_encoder(
                     plan.primary_role,
@@ -1884,6 +1890,7 @@ mod runtime {
                     }
                 }
             }
+            startup_trace.push((RecordingStartPhase::D3d11Encoder, Instant::now()));
 
             let stop = Arc::new(AtomicBool::new(false));
             let preview_store = new_frame_store();
@@ -1947,6 +1954,11 @@ mod runtime {
             };
             match startup_rx.recv_timeout(STARTUP_TIMEOUT) {
                 Ok(Ok(evidence)) => Ok(Self {
+                    startup_trace: {
+                        startup_trace
+                            .push((RecordingStartPhase::D3d11FirstSurfaces, Instant::now()));
+                        startup_trace
+                    },
                     stop,
                     worker: Some(worker),
                     client: roles
@@ -2010,6 +2022,11 @@ mod runtime {
 
         pub(crate) const fn startup_evidence(&self) -> WindowsD3d11StartupEvidence {
             self.startup_evidence
+        }
+
+        /// The start steps in the order they finished (#1330).
+        pub(crate) fn startup_trace(&self) -> &[(RecordingStartPhase, Instant)] {
+            &self.startup_trace
         }
 
         pub(crate) fn destroy_preview(&self) -> Result<bool, WindowsD3d11Error> {
