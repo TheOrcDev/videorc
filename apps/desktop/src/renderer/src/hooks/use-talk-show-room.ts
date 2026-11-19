@@ -155,7 +155,12 @@ export function stageWith(
  * picture yet" tile (live show, 2026-11-19). In the room means the host, a
  * guest videorc.com lists, or a participant the room reports, so a guest
  * between two connections stays. The host is always kept, as the web keeps
- * them (D8). Without a room status nothing is dropped.
+ * them (D8).
+ *
+ * Nothing is dropped until the status knows who is in the room: it lists a
+ * guest, or reports the host as a participant. Right after a backend restart
+ * both lists can be empty for a moment (2026-11-19), and pruning then would
+ * take every guest who is really there off the stage.
  */
 export function stageInRoom(
   stage: CloudStage,
@@ -163,13 +168,17 @@ export function stageInRoom(
   hostIdentity: string | null
 ): CloudStage {
   if (!room) return stage
+  const isHost = (identity: string): boolean =>
+    identity === hostIdentity || identity.startsWith('host:')
+  const known =
+    (room.guests?.length ?? 0) > 0 ||
+    (room.participants ?? []).some((participant) => isHost(participant.identity))
+  if (!known) return stage
   const present = new Set<string>([
     ...(room.guests ?? []).map((guest) => guest.guestId),
     ...(room.participants ?? []).map((participant) => participant.identity)
   ])
-  const kept = stage.onStage.filter(
-    (identity) => identity === hostIdentity || identity.startsWith('host:') || present.has(identity)
-  )
+  const kept = stage.onStage.filter((identity) => isHost(identity) || present.has(identity))
   if (kept.length === stage.onStage.length) return stage
   return {
     ...stage,

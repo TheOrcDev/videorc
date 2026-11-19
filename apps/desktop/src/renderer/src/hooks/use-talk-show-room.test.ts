@@ -138,6 +138,27 @@ describe('stageInRoom', () => {
     const stage: CloudStage = { layout: 'side-by-side', onStage: [HOST, 'g_old'] }
     expect(stageInRoom(stage, undefined, HOST)).toBe(stage)
   })
+
+  it('drops nothing until the status knows who is in the room', () => {
+    // Right after a backend restart both lists can be empty for a moment:
+    // the guests on stage are still there, so none of them may be dropped.
+    const stage: CloudStage = { layout: 'side-by-side', onStage: [HOST, 'g_ada', 'g_bo'] }
+    expect(stageInRoom(stage, { guests: [], participants: [] }, HOST)).toBe(stage)
+    expect(stageInRoom(stage, {}, HOST)).toBe(stage)
+    // Guests seen in LiveKit before the host and the guest list: still not known.
+    expect(stageInRoom(stage, { guests: [], participants: [participant('g_ada')] }, HOST)).toBe(
+      stage
+    )
+
+    // The host is reported, and every guest has left: the stale ones go.
+    expect(
+      stageInRoom(stage, { guests: [], participants: [participant(HOST)] }, HOST).onStage
+    ).toEqual([HOST])
+    // A listed guest makes the room known even before the host is reported.
+    expect(
+      stageInRoom(stage, { guests: [guest('g_ada')], participants: [] }, HOST).onStage
+    ).toEqual([HOST, 'g_ada'])
+  })
 })
 
 it('names the room once in the failed join toast', () => {
