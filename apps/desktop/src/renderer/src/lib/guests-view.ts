@@ -1,4 +1,5 @@
 import type {
+  CloudRoomParticipant,
   CloudRoomQuality,
   CloudRoomRequest,
   CloudRoomStatus,
@@ -200,10 +201,61 @@ export type RoomPerson = {
   quality: CloudRoomQuality | null
   /** The host's hold on a guest's mic (D14); the host's own mute for the host. */
   muted: boolean
+  /** Their mic as the host tells it apart: the hold, then what the runner hears. */
+  mic: GuestMic
   screenShareAllowed: boolean
   sharingScreen: boolean
   /** On stage with no camera frame for 5 s (D12). */
   away: boolean
+}
+
+/**
+ * A guest's mic as the host tells it apart (D14; live show 2026-11-19).
+ * Unmute only lets go of the host's hold: the guest turns the mic on
+ * themselves, so a lifted hold with the mic still off is a state of its own.
+ * `held`: the host's hold. `off`: no hold, but the mic is muted or not
+ * published. `on`: published and on. `unknown`: the runner doesn't see them.
+ */
+export type GuestMic = 'held' | 'off' | 'on' | 'unknown'
+
+export const GUEST_MIC_HELD = 'Muted by you'
+export const GUEST_MIC_OFF = 'Mic off'
+
+export function guestMic(
+  held: boolean,
+  participant: Pick<CloudRoomParticipant, 'audio' | 'muted'> | undefined
+): GuestMic {
+  if (held) return 'held'
+  if (!participant) return 'unknown'
+  return participant.audio && !participant.muted ? 'on' : 'off'
+}
+
+/**
+ * The host's own room hears a guest too: a mic publication it sees muted is
+ * off before the runner's next report says so. Never overrides the hold.
+ */
+export function withRoomMic(mic: GuestMic, roomMicMuted: boolean): GuestMic {
+  return roomMicMuted && mic !== 'held' ? 'off' : mic
+}
+
+/** The word on the guest's row and what it means; nothing while the mic is on. */
+export function guestMicStatus(
+  mic: GuestMic,
+  name: string
+): { label: string; hint: string } | null {
+  switch (mic) {
+    case 'held':
+      return { label: GUEST_MIC_HELD, hint: `${name} can't unmute until you let them.` }
+    case 'off':
+      return { label: GUEST_MIC_OFF, hint: `Only ${name} can turn their mic on.` }
+    default:
+      return null
+  }
+}
+
+/** After the host's Unmute (D14): the guest still has to unmute themselves. */
+export function unmuteHint(name: string): string {
+  return `${name} can talk again once they unmute.`
 }
 
 const RUNNER_PREFIX = 'runner:'
@@ -235,6 +287,7 @@ export function roomPeople(
       onStage: onStage.includes(host),
       quality: hostParticipant?.quality ?? null,
       muted: hostParticipant?.muted ?? false,
+      mic: guestMic(false, hostParticipant),
       screenShareAllowed: true,
       sharingScreen: hostParticipant?.screen ?? false,
       away: hostParticipant?.away ?? room.hostAway
@@ -253,6 +306,7 @@ export function roomPeople(
       onStage: onStage.includes(guest.guestId),
       quality: participant?.quality ?? null,
       muted: guest.muted,
+      mic: guestMic(guest.muted, participant),
       screenShareAllowed: guest.screenShareAllowed,
       sharingScreen: participant?.screen ?? false,
       away: participant?.away ?? false
@@ -270,6 +324,7 @@ export function roomPeople(
       onStage: onStage.includes(participant.identity),
       quality: participant.quality,
       muted: participant.muted,
+      mic: guestMic(false, participant),
       screenShareAllowed: false,
       sharingScreen: participant.screen,
       away: participant.away

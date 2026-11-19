@@ -24,6 +24,7 @@ import {
   FieldSet,
   SettingsRow
 } from '@/components/ui/field'
+import { InfoTooltip } from '@/components/ui/info-tooltip'
 import { Input } from '@/components/ui/input'
 import { Spinner } from '@/components/ui/spinner'
 import { Switch } from '@/components/ui/switch'
@@ -41,6 +42,7 @@ import {
   ROOM_WAITS_FOR_SESSION,
   declinedLine,
   guestConsentLine,
+  guestMicStatus,
   guestsAccess,
   newLinkAsksFirst,
   qualityStatus,
@@ -51,6 +53,7 @@ import {
   roomPeople,
   roomPhaseLabel,
   stageChipLabel,
+  withRoomMic,
   type RoomPerson
 } from '@/lib/guests-view'
 import { VIDEORC_PREMIUM_URL } from '@/lib/videorc-web-links'
@@ -402,6 +405,12 @@ function WhoIsHere({
         {people.map((person) => {
           const quality = qualityStatus(person.quality)
           const items = moderationItems(person)
+          const roomMicMuted = talkShow.room.people.some(
+            (entry) => entry.identity === person.identity && entry.micMuted
+          )
+          const mic = person.host
+            ? null
+            : guestMicStatus(withRoomMic(person.mic, roomMicMuted), person.name)
           return (
             <ListRow
               className="group/kebab-host"
@@ -410,7 +419,13 @@ function WhoIsHere({
               statusIcons={<StatusDot label={quality.label} tone={quality.tone} />}
               title={person.name}
             >
-              {person.muted && !person.host ? <Badge variant="outline">Muted</Badge> : null}
+              {mic ? (
+                <InfoTooltip content={mic.hint}>
+                  <Badge data-testid="guests-person-mic" variant="outline">
+                    {mic.label}
+                  </Badge>
+                </InfoTooltip>
+              ) : null}
               <Badge variant={person.onStage ? 'default' : 'outline'}>
                 {stageChipLabel(person)}
               </Badge>

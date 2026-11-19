@@ -2,16 +2,27 @@ import { readFileSync } from 'node:fs'
 
 import { describe, expect, it } from 'vitest'
 
-import { HOST, ada, grace, openRoom, talkStatus } from '@/lib/guests-room-fixtures'
+import {
+  HOST,
+  ada,
+  grace,
+  guestParticipant,
+  openRoom,
+  talkStatus
+} from '@/lib/guests-room-fixtures'
 import {
   GUESTS_CLOUD_NOT_YET_REASON,
   GUESTS_NOT_YET_REASON,
   GUESTS_PREMIUM_REASON,
   GUESTS_PREMIUM_SEAT_LINE,
+  GUEST_MIC_HELD,
+  GUEST_MIC_OFF,
   bringOnBlockedReason,
   closeRoomAsksFirst,
   declinedLine,
   guestConsentLine,
+  guestMic,
+  guestMicStatus,
   guestsAccess,
   guestsSessionValue,
   layoutOptions,
@@ -23,7 +34,9 @@ import {
   roomLimits,
   roomLimitsLine,
   roomPeople,
-  shownLayout
+  shownLayout,
+  unmuteHint,
+  withRoomMic
 } from '@/lib/guests-view'
 
 // Plan 224 C-G2 and C-G3: what Destinations → Guests and the Show stage say,
@@ -144,6 +157,41 @@ describe('the consent line (D13)', () => {
   })
 })
 
+describe("a guest's mic (D14)", () => {
+  it('reads the hold first, then what the runner hears', () => {
+    const on = { audio: true, muted: false }
+    expect(guestMic(true, on)).toBe('held')
+    expect(guestMic(true, undefined)).toBe('held')
+    expect(guestMic(false, on)).toBe('on')
+    expect(guestMic(false, { audio: true, muted: true })).toBe('off')
+    expect(guestMic(false, { audio: false, muted: false })).toBe('off')
+    expect(guestMic(false, undefined)).toBe('unknown')
+  })
+
+  it("hears a mute in the host's own room before the runner says so, never over the hold", () => {
+    expect(withRoomMic('on', true)).toBe('off')
+    expect(withRoomMic('unknown', true)).toBe('off')
+    expect(withRoomMic('held', true)).toBe('held')
+    expect(withRoomMic('on', false)).toBe('on')
+  })
+
+  it('says Muted by you, Mic off, or nothing while they talk', () => {
+    expect(guestMicStatus('held', 'Ada')).toEqual({
+      label: GUEST_MIC_HELD,
+      hint: "Ada can't unmute until you let them."
+    })
+    expect(guestMicStatus('off', 'Ada')).toEqual({
+      label: GUEST_MIC_OFF,
+      hint: 'Only Ada can turn their mic on.'
+    })
+    expect(GUEST_MIC_HELD).toBe('Muted by you')
+    expect(GUEST_MIC_OFF).toBe('Mic off')
+    expect(guestMicStatus('on', 'Ada')).toBeNull()
+    expect(guestMicStatus('unknown', 'Ada')).toBeNull()
+    expect(unmuteHint('Ada')).toBe('Ada can talk again once they unmute.')
+  })
+})
+
 describe('roomPeople', () => {
   it('lists the host first, then the stage in order, then backstage; never the runner', () => {
     const room = openRoom({
@@ -185,6 +233,26 @@ describe('roomPeople', () => {
     expect(people[1]).toMatchObject({ guestId: 'g_grace', quality: 'poor', muted: true })
     expect(people[2]).toMatchObject({ guestId: 'g_ada', quality: null })
     expect(people.some((person) => person.identity.startsWith('runner:'))).toBe(false)
+  })
+
+  // Live show 2026-11-19: after Unmute the host saw the guest as unmuted
+  // while the guest's mic was still off. Unmute only lets go (D14).
+  it("tells the host's hold, a mic still off and talking apart", () => {
+    const bo = { ...ada, guestId: 'g_bo', name: 'Bo' }
+    const cy = { ...ada, guestId: 'g_cy', name: 'Cy' }
+    const room = openRoom({
+      guests: [grace, ada, bo, cy],
+      participants: [
+        ...(openRoom().participants ?? []),
+        guestParticipant(grace, { audio: false }),
+        guestParticipant(ada, { audio: false }),
+        guestParticipant(bo)
+      ]
+    })
+    const mics = Object.fromEntries(
+      roomPeople(room, HOST).map((person) => [person.name, person.mic])
+    )
+    expect(mics).toEqual({ You: 'on', Grace: 'held', Ada: 'off', Bo: 'on', Cy: 'unknown' })
   })
 
   it('is empty while the room is closed', () => {

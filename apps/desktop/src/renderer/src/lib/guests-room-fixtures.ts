@@ -1,4 +1,9 @@
-import type { CloudRoomGuest, CloudRoomStatus, CloudStatus } from '@/lib/backend'
+import type {
+  CloudRoomGuest,
+  CloudRoomParticipant,
+  CloudRoomStatus,
+  CloudStatus
+} from '@/lib/backend'
 
 // Plan 224 C-G2, C-G3: a talk show's cloud status for the Guests tab, the
 // Show stage and their view tests. Test data only: nothing in the app
@@ -75,4 +80,25 @@ export const grace: CloudRoomGuest = {
   joinedAt: '2026-11-09T10:01:00Z',
   muted: true,
   screenShareAllowed: true
+}
+
+/** A guest as the runner sees them in the room: mic published and on. */
+export function guestParticipant(
+  guest: CloudRoomGuest,
+  overrides: Partial<CloudRoomParticipant> = {}
+): CloudRoomParticipant {
+  return {
+    identity: guest.guestId,
+    name: guest.name,
+    role: 'guest',
+    onStage: false,
+    video: true,
+    audio: true,
+    muted: false,
+    screen: false,
+    quality: 'good',
+    sinceMs: 1000,
+    away: false,
+    ...overrides
+  }
 }

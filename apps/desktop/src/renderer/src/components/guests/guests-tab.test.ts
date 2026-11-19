@@ -7,7 +7,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import type { CloudStatus } from '@/lib/backend'
 import { defaultCaptureConfig } from '@/lib/capture'
-import { HOST, ada, grace, openRoom, talkStatus } from '@/lib/guests-room-fixtures'
+import {
+  HOST,
+  ada,
+  grace,
+  guestParticipant,
+  openRoom,
+  talkStatus
+} from '@/lib/guests-room-fixtures'
 import { NO_TALK_SHOW, type TalkShowContextValue } from '@/lib/talk-show-context'
 
 import GuestsTab from './guests-tab'
@@ -115,9 +122,35 @@ describe('Destinations → Guests (C-G2)', () => {
     expect(names).toEqual(['You', 'Grace', 'Ada'])
     expect(page).toContain('On stage')
     expect(page).toContain('Backstage')
-    expect(page).toContain('Muted')
+    expect(page).toContain('Muted by you')
     expect(page).toContain('Actions for Grace')
     expect(page).not.toContain('Actions for You')
+  })
+
+  // Live show 2026-11-19: Unmute only lets go (D14). The list tells the
+  // host's hold from a mic the guest still has off, and says nothing of a
+  // guest who talks.
+  it("tells the host's hold, a mic still off and talking apart", () => {
+    const bo = { ...ada, guestId: 'g_bo', name: 'Bo' }
+    const page = html(
+      talkStatus({
+        room: openRoom({
+          guests: [grace, ada, bo],
+          participants: [
+            ...(openRoom().participants ?? []),
+            guestParticipant(grace, { audio: false }),
+            guestParticipant(ada, { muted: true }),
+            guestParticipant(bo)
+          ]
+        })
+      })
+    )
+    const badges = [...page.matchAll(/data-testid="guests-person-mic"[^>]*>([^<]+)</g)].map(
+      (match) => match[1]
+    )
+    expect(badges).toEqual(['Muted by you', 'Mic off'])
+    expect(page).toContain('Grace can&#x27;t unmute until you let them.')
+    expect(page).toContain('Only Ada can turn their mic on.')
   })
 
   it("says a full room is full, and Premium's one seat", () => {
