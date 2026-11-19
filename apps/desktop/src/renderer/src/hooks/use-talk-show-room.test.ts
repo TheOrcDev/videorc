@@ -5,7 +5,8 @@ import {
   NO_TALK_SHOW,
   ROOM_JOIN_ERROR_ACTION,
   stageInRoom,
-  stageWith
+  stageWith,
+  takeoverDeviceHoldEpoch
 } from '@/hooks/use-talk-show-room'
 import { userErrorMessage } from '@/lib/user-error'
 
@@ -168,4 +169,19 @@ it('names the room once in the failed join toast', () => {
       object: 'the room'
     }).title
   ).toBe("Couldn't join the room")
+})
+
+// Plan 249 S24 (D9) with the 2026-11-19 incident: after a backend restart
+// mid-show, Resume took the show back from this computer's own earlier
+// process, and D9 kept the microphone out of the room until Turn on.
+describe('takeoverDeviceHoldEpoch', () => {
+  it('holds the camera and microphone only after a takeover from another device', () => {
+    expect(takeoverDeviceHoldEpoch(undefined)).toBe(0)
+    expect(takeoverDeviceHoldEpoch({ controllerEpoch: 3 })).toBe(0)
+    expect(takeoverDeviceHoldEpoch({ controllerEpoch: 4, takenOverFrom: 'another-device' })).toBe(4)
+  })
+
+  it('holds nothing when the show comes back from this same computer', () => {
+    expect(takeoverDeviceHoldEpoch({ controllerEpoch: 5, takenOverFrom: 'this-device' })).toBe(0)
+  })
 })

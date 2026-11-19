@@ -32,22 +32,28 @@ const room = vi.hoisted(() => {
     disconnect: vi.fn<() => Promise<void>>(),
     reports: [] as ((state: 'connected') => void)[],
     snapshots: [] as ((snapshot: TalkShowRoomSnapshot) => void)[],
-    onAir: [] as ((() => unknown) | undefined)[]
+    onAir: [] as ((() => unknown) | undefined)[],
+    // What each room client was built with: the devices it may open.
+    options: [] as {
+      cameraName?: string | null
+      microphoneName?: string | null
+      microphoneChoice?: { deviceId: string | null; name: string | null }
+    }[]
   }
 })
 vi.mock('@/lib/talk-show-room', async () => {
   await room.loaded
   class TalkShowRoomClient {
-    constructor({
-      report,
-      onSnapshot,
-      onAir
-    }: {
-      report: (state: 'connected') => void
-      onSnapshot: (snapshot: TalkShowRoomSnapshot) => void
-      onAir?: () => unknown
-    }) {
+    constructor(
+      options: {
+        report: (state: 'connected') => void
+        onSnapshot: (snapshot: TalkShowRoomSnapshot) => void
+        onAir?: () => unknown
+      } & (typeof room.options)[number]
+    ) {
+      const { report, onSnapshot, onAir } = options
       room.constructed += 1
+      room.options.push(options)
       room.reports.push(report)
       room.snapshots.push(onSnapshot)
       room.onAir.push(onAir)
@@ -84,6 +90,7 @@ beforeEach(() => {
   room.disconnect.mockReset().mockResolvedValue(undefined)
   room.reports = []
   room.snapshots = []
+  room.options = []
   shown = IDLE_TALK_SHOW_SNAPSHOT
 })
 
@@ -397,6 +404,58 @@ describe('the host room join', () => {
       leave()
       await settle()
     }
+  })
+})
+
+// Plan 249 S24 (D9) with the 2026-11-19 incident: a backend restart mid-show
+// made Resume a takeover from this same computer, and the held devices kept
+// the microphone out of the room. Only a takeover from another device holds.
+describe('the room devices after a takeover', () => {
+  const devices = [
+    { id: 'camera:avfoundation:zv', kind: 'camera', name: 'ZV-E10M2' },
+    { id: 'microphone:coreaudio:108', kind: 'microphone', name: 'Shure MV7+' }
+  ] as unknown as TalkShowRoomControllerDeps['devices']
+  const takenOver = (takenOverFrom: 'this-device' | 'another-device'): CloudStatus =>
+    ({
+      ...openRoom,
+      controller: {
+        controllerEpoch: 7,
+        takenOverFrom,
+        needsEnable: ['camera', 'microphone'],
+        restoredViews: 0,
+        cleared: []
+      }
+    }) as CloudStatus
+  const join = async (status: CloudStatus) => {
+    room.release()
+    const value: TalkShowRoomControllerDeps = {
+      ...deps(vi.fn()),
+      cloudStatus: status,
+      cameraId: 'camera:avfoundation:zv',
+      microphoneId: 'microphone:coreaudio:108',
+      devices
+    }
+    act(() => root.render(createElement(Host, { value })))
+    await settle()
+    expect(room.constructed).toBe(1)
+    return room.options[0]
+  }
+
+  it('opens the camera and microphone again after a Resume on this computer', async () => {
+    const options = await join(takenOver('this-device'))
+    expect(options.cameraName).toBe('ZV-E10M2')
+    expect(options.microphoneName).toBe('Shure MV7+')
+    expect(options.microphoneChoice).toMatchObject({
+      deviceId: 'microphone:coreaudio:108',
+      name: 'Shure MV7+'
+    })
+  })
+
+  it('still holds them after a takeover from another device until Turn on', async () => {
+    const options = await join(takenOver('another-device'))
+    expect(options.cameraName).toBeNull()
+    expect(options.microphoneName).toBeNull()
+    expect(options.microphoneChoice).toMatchObject({ deviceId: null, name: null })
   })
 })
 
