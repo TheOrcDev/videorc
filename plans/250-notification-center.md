@@ -15,8 +15,9 @@ Facts are read from `origin/main` `fe53fde02` (2026-11-18).
   recommendation: D1 to D13 are answered "a". For D12 no ceiling is raised:
   PR #1512 (the minified renderer) merged first, so the bell fits. The ten
   slices are ten commits in one PR, with one more commit for what the
-  by-eye pass found. "What was built" below says what the 317 became and
-  where the build differs from this plan.
+  by-eye pass found and one for a first-run fix the smokes found. "What was
+  built" below says what the 317 became and where the build differs from
+  this plan.
 - **In scope:** the desktop renderer (the bell, the list, the store, routing
   today's toasts through it), a small main-process relay for the Stream
   Manager, and two small backend additions (clear signals, and the open
@@ -86,6 +87,19 @@ landing on their section with focus inside, and the Stream Manager's bell
 and list at 1,040, 800, 640 and 520 px. The pass found three bugs unit
 tests had missed (the list marking itself read on open, a door that did not
 scroll, the Stream Manager's bell stuck at zero); each has a test now.
+
+**One fix outside the plan.** `pnpm smoke:first-run` picks a layout and a
+background 2 ms apart. Setup applied a look one tick after its press, so
+the second press rebuilt the look from the layout still drawn and undid the
+first. The look's helpers are now kept once loaded
+(`lib/first-run-look-door.ts`) and a choice is applied inside its own
+press. `origin/main` has the same race (its third setup profile fails 4
+runs of 4).
+
+**Still red on `origin/main` and here:** in that third profile the smoke
+presses a layout the moment setup's performance check ends, the backend
+refuses the idle scene reload ("superseded by session startup") and setup
+shows "Videorc hit a problem". Not part of this plan.
 
 **Not seen or run:** an urgent pop-up inside the Stream Manager (it shows
 there only while that window is focused, which a background run cannot

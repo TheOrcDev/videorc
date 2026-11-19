@@ -129,6 +129,7 @@ import type * as SavedSceneApply from '@/lib/saved-scene-apply'
 import { recalledLayoutFraming, rememberLayoutFraming } from '@/lib/layout-framing-memory'
 import { backgroundLibrarySyncDecision, firstRunLookWritesHeld } from '@/lib/first-run'
 import type { FirstRunLook } from '@/lib/first-run-look'
+import { warmFirstRunLook, withFirstRunLook } from '@/lib/first-run-look-door'
 import {
   noteLayoutCommitted,
   noteLayoutLeavingFreeform,
@@ -12274,7 +12275,13 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // background), so no device opens while setup is open. The library sync
   // above sees the fingerprint already applied. Setup's changes start the
   // Studio with no undo history and no saved-scene origin (a built-in look).
-  // The setup chunk has already loaded the look's helpers when this runs.
+  // The look's helpers load when setup opens, so a choice is applied inside
+  // its own press: React draws it before the next press. Applied a tick
+  // later, a second choice 2 ms after the first rebuilt the look from the
+  // one still drawn and undid the first.
+  useEffect(() => {
+    if (firstRunSetupOpen) warmFirstRunLook()
+  }, [firstRunSetupOpen])
   const applyFirstRunLook = useCallback(
     (look: FirstRunLook): void => {
       if (firstRunLookWritesHeld(recordingRef.current)) {
@@ -12287,27 +12294,25 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         firstRunLookHoldRef.current = null
         setFirstRunLookHold(null)
       }
-      void import('@/lib/first-run-look').then(
-        ({ firstRunBackgroundChoice, firstRunLookPatch }) => {
-          const current = captureConfigRef.current
-          if (current.layout.arrangementMode === 'freeform') {
-            noteLayoutLeavingFreeform(current.layout)
-          }
-          const next = firstRunLookPatch(current, look)
-          latestRequestedLayoutRef.current = next.layout.layoutPreset
-          setWorkingOrigin('builtin')
-          activeSavedSceneIdRef.current = null
-          setActiveSavedSceneId(null)
-          setCaptureConfig((latest) => firstRunLookPatch(latest, look))
-          const registry = backgroundRegistryRef.current
-          const nextRegistry = firstRunBackgroundChoice(registry, look.liveBackgroundId)
-          const background = effectiveSceneBackground(nextRegistry)
-          libraryBackgroundFingerprintRef.current = JSON.stringify(snapshotBackground(background))
-          workingBackgroundRef.current = background
-          setWorkingBackground(background)
-          if (nextRegistry !== registry) setBackgroundRegistry(nextRegistry)
+      withFirstRunLook(({ firstRunBackgroundChoice, firstRunLookPatch }) => {
+        const current = captureConfigRef.current
+        if (current.layout.arrangementMode === 'freeform') {
+          noteLayoutLeavingFreeform(current.layout)
         }
-      )
+        const next = firstRunLookPatch(current, look)
+        latestRequestedLayoutRef.current = next.layout.layoutPreset
+        setWorkingOrigin('builtin')
+        activeSavedSceneIdRef.current = null
+        setActiveSavedSceneId(null)
+        setCaptureConfig((latest) => firstRunLookPatch(latest, look))
+        const registry = backgroundRegistryRef.current
+        const nextRegistry = firstRunBackgroundChoice(registry, look.liveBackgroundId)
+        const background = effectiveSceneBackground(nextRegistry)
+        libraryBackgroundFingerprintRef.current = JSON.stringify(snapshotBackground(background))
+        workingBackgroundRef.current = background
+        setWorkingBackground(background)
+        if (nextRegistry !== registry) setBackgroundRegistry(nextRegistry)
+      })
     },
     [setBackgroundRegistry, setWorkingOrigin]
   )
