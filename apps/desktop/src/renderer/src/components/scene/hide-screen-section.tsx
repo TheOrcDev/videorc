@@ -38,6 +38,16 @@ import {
 import { screenHideAccelerator } from '@/lib/screen-privacy-view'
 import { openWorkspaceTab } from '@/lib/workspace-navigation'
 
+/**
+ * The Shortcut row's hint. Under Wayland (`globalShortcutsUnavailable` set by
+ * main) the key cannot be heard from other apps, so it does not promise that.
+ */
+export function hideScreenShortcutHint(globalShortcutsUnavailable?: string | null): string {
+  return globalShortcutsUnavailable
+    ? 'Change it in Settings → Shortcuts. Kept for sessions that allow global shortcuts, such as X11.'
+    : 'Change it in Settings → Shortcuts. It works from any app.'
+}
+
 const LAST_APP_REASON =
   'One app stays on the list. To stop hiding for password managers, turn the switch off.'
 
@@ -61,7 +71,7 @@ export function HideScreenSection(): ReactElement {
       <FieldGroup variant="grouped">
         <NavigableRow
           className="rounded-none"
-          hint="Change it in Settings → Shortcuts. It works from any app."
+          hint={hideScreenShortcutHint(runtimeInfo?.globalShortcutsUnavailable)}
           label="Shortcut"
           value={
             accelerator ? <ShortcutKeys accelerator={accelerator} platform={platform} /> : 'Not set'

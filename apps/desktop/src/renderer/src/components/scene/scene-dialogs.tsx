@@ -496,6 +496,19 @@ function SceneNameDialog({
 }
 
 /**
+ * The Set key dialog's description. Under Wayland (`globalShortcutsUnavailable`
+ * set by main) the key cannot be heard from other apps, so it does not promise that.
+ */
+export function sceneKeyDescription(
+  sceneName: string,
+  globalShortcutsUnavailable?: string | null
+): string {
+  return globalShortcutsUnavailable
+    ? `Puts “${sceneName}” on stream in sessions that allow global shortcuts, such as X11. Click the field and press the keys.`
+    : `Puts “${sceneName}” on stream from any app. Click the field and press the keys.`
+}
+
+/**
  * Set key…: the scene's global key, recorded like every key in Settings →
  * Shortcuts (plan 210 D7). There are no default keys.
  */
@@ -526,7 +539,7 @@ function SceneKeyDialog({
         <DialogHeader>
           <DialogTitle>Set key</DialogTitle>
           <DialogDescription>
-            Puts “{scene.name}” on stream from any app. Click the field and press the keys.
+            {sceneKeyDescription(scene.name, runtimeInfo?.globalShortcutsUnavailable)}
           </DialogDescription>
         </DialogHeader>
         {runtimeInfo?.globalShortcutsUnavailable ? (
