@@ -113,36 +113,61 @@ export async function exerciseGraphics({ h, report, clients, newPage, programUrl
       [0, 255, 255],
       [127, 128, 128],
       [255, 0, 0]
-    ]
+    ],
+    // How far down the patch to read it: the middle, unless a layer above
+    // the banners covers that.
+    band = 0.5
   ) => {
     for (const c of consumers) {
       await waitLayer(c, patch, true)
-      await waitFor(
-        async () =>
-          Number(await c.page.locator(selector(patch)).evaluate((img) => img.style.opacity)) === 1,
-        `${c.name} fade settled`
+      // One read in the page: a republished view swaps the layer's image, and
+      // an image taken down between two reads is in no `.overlays` any more.
+      const shape = await waitFor(
+        () =>
+          c.page.evaluate((query) => {
+            const img = document.querySelector(query)
+            const overlays = img?.closest('.overlays')
+            if (!img || !overlays || Number(img.style.opacity) !== 1) return null
+            const r = img.getBoundingClientRect(),
+              root = overlays.getBoundingClientRect()
+            return {
+              x: r.x,
+              y: r.y,
+              w: r.width,
+              h: r.height,
+              normalized: {
+                x: (r.x - root.x) / root.width,
+                y: (r.y - root.y) / root.height,
+                w: r.width / root.width,
+                h: r.height / root.height
+              }
+            }
+          }, selector(patch)),
+        `${c.name} placed, fade settled`
       )
-      const shape = await c.page.locator(selector(patch)).evaluate((img) => {
-        const r = img.getBoundingClientRect(),
-          root = img.closest('.overlays').getBoundingClientRect()
-        return {
-          x: r.x,
-          y: r.y,
-          w: r.width,
-          h: r.height,
-          normalized: {
-            x: (r.x - root.x) / root.width,
-            y: (r.y - root.y) / root.height,
-            w: r.width / root.width,
-            h: r.height / root.height
-          }
-        }
-      })
       assertGraphicsRect(shape.normalized, c.orientation)
+      // A reorder reaches the page a moment after its RPC answers: look
+      // again until the stack shows it, then keep the frame that did.
+      const probe = join(output, `graphics-${label}-${c.name}-probe.png`)
+      const near = (actual, wanted) =>
+        actual.every((value, channel) => Math.abs(value - wanted[channel]) <= 8)
+      await waitFor(
+        async () => {
+          await c.page.screenshot({ path: probe })
+          return [0, 1, 2].every((i) =>
+            near(
+              pixel(probe, shape.x + (shape.w * (i + 0.5)) / 3, shape.y + shape.h * band),
+              expected[i]
+            )
+          )
+        },
+        `${label} ${c.name} stack painted`,
+        10000
+      ).catch(() => {})
       const path = await artifact(c, label)
       for (let i = 0; i < 3; i++)
         assertGraphicsPixel(
-          pixel(path, shape.x + (shape.w * (i + 0.5)) / 3, shape.y + shape.h / 2),
+          pixel(path, shape.x + (shape.w * (i + 0.5)) / 3, shape.y + shape.h * band),
           expected[i],
           `${label} ${c.name} alpha patch ${i}`
         )
@@ -206,6 +231,13 @@ export async function exerciseGraphics({ h, report, clients, newPage, programUrl
   await h.rpc('banners.update', { id: patch, hideAfterSec: 0, repeatEveryMin: 0 })
   await h.rpc('banners.show', { id: patch })
   // Observe real frames across Show/Hide; retain samples and compare the native curve.
+  const fadeOf = async () =>
+    (await h.rpc('cloud.graphics.snapshot', { showId: h.showId })).content.h.find(
+      (l) => l.id === `banner:${patch}`
+    )?.fade
+  // This Show fades too: a page that takes it inside 200 ms paints part of
+  // that curve in the first observed frames.
+  const shown = await fadeOf()
   const observer = consumers[0].page.evaluate(async (id) => {
     const rows = [],
       end = performance.now() + 2500
@@ -216,18 +248,18 @@ export async function exerciseGraphics({ h, report, clients, newPage, programUrl
     }
     return rows
   }, patch)
-  const fadeOf = async () =>
-    (await h.rpc('cloud.graphics.snapshot', { showId: h.showId })).content.h.find(
-      (l) => l.id === `banner:${patch}`
-    )?.fade
   await h.rpc('banners.hide', { id: patch })
   const hiding = await fadeOf()
   for (const c of consumers) await waitLayer(c, patch, false)
   await h.rpc('banners.show', { id: patch })
   const showing = await fadeOf()
   const fades = await observer
-  assertGraphicsFade(fades, [hiding, showing].filter(Boolean))
-  writeFileSync(join(output, 'graphics-fades.json'), JSON.stringify(fades, null, 2) + '\n')
+  // Written first: a refused sample is read against these.
+  writeFileSync(
+    join(output, 'graphics-fades.json'),
+    JSON.stringify({ transitions: { shown, hiding, showing }, samples: fades }, null, 2) + '\n'
+  )
+  assertGraphicsFade(fades, [shown, hiding, showing].filter(Boolean))
   assert.ok(
     fades.some((r) => r.opacity > 0 && r.opacity < 1),
     'Real consumer must show intermediate fade values'
@@ -283,27 +315,56 @@ export async function exerciseGraphics({ h, report, clients, newPage, programUrl
         `${c.name} chat painter`
       )
     for (const c of consumers) {
-      const cyan = await c.page.locator('img[data-graphics-layer="chat"]').evaluate((img) => {
-        const c = document.createElement('canvas')
-        c.width = img.naturalWidth
-        c.height = img.naturalHeight
-        const ctx = c.getContext('2d')
-        ctx.drawImage(img, 0, 0)
-        const p = ctx.getImageData(0, 0, c.width, c.height).data
-        let hits = 0
-        for (let i = 0; i < p.length; i += 4)
-          if (p[i] < 20 && p[i + 1] > 230 && p[i + 2] > 230 && p[i + 3] > 200) hits++
-        return hits
-      })
-      assert.ok(cyan > 5, `${c.name}: the curated chat raster must contain the emote pixels`)
-      await artifact(c, 'chat-emote')
+      // The chat box is repainted as its messages arrive, and each paint is
+      // a new image on the page: wait for one with the rows' text on its
+      // surface. The emote itself is not drawn here: the painter takes emote
+      // images only through main's cache, which takes https from the
+      // platforms' own hosts, never this fixture's loopback http (the row
+      // then shows the emote's name as text).
+      await waitFor(async () => {
+        const pixels = await c.page.evaluate(() => {
+          const img = document.querySelector('img[data-graphics-layer="chat"]')
+          if (!img?.naturalWidth) return null
+          const c = document.createElement('canvas')
+          c.width = img.naturalWidth
+          c.height = img.naturalHeight
+          const ctx = c.getContext('2d')
+          ctx.drawImage(img, 0, 0)
+          const p = ctx.getImageData(0, 0, c.width, c.height).data
+          let opaque = 0,
+            light = 0
+          for (let i = 0; i < p.length; i += 4)
+            if (p[i + 3] > 200) {
+              opaque++
+              if (p[i] > 200 && p[i + 1] > 200 && p[i + 2] > 200) light++
+            }
+          return { opaque, light }
+        })
+        return pixels && pixels.opaque > 500 && pixels.light > 10
+      }, `${c.name}: the curated chat raster must contain the rows' text`)
+      await artifact(c, 'chat-rows')
     }
     for (const milestone of [false, true]) {
+      // The card each page shows now: the milestone replaces the chat card,
+      // and a read of the old image would be checked against the new frame.
+      const shownBefore = new Map()
+      for (const c of consumers)
+        shownBefore.set(
+          c,
+          await c.page.evaluate(
+            () => document.querySelector('img[data-graphics-layer="highlight"]')?.src ?? null
+          )
+        )
       await h.eval(`return window.__videorcSmokeScenePresets.roomHighlight(${milestone})`)
       const nativeSnapshot = await h.rpc('cloud.graphics.snapshot', { showId: h.showId })
       for (const c of consumers) {
+        // This card, painted and past its 200 ms fade-in.
         await waitFor(
-          () => c.page.locator('img[data-graphics-layer="highlight"]').count(),
+          () =>
+            c.page.evaluate((before) => {
+              const img = document.querySelector('img[data-graphics-layer="highlight"]')
+              return Boolean(img) && img.src !== before && Number(img.style.opacity) === 1
+            }, shownBefore.get(c)),
           `${c.name} card painter`
         )
         const pixels = await c.page
@@ -339,18 +400,33 @@ export async function exerciseGraphics({ h, report, clients, newPage, programUrl
             const p = ctx.getImageData(0, 0, canvas.width, canvas.height).data
             const box = img.getBoundingClientRect(),
               parent = img.closest('.overlays').getBoundingClientRect()
-            // Sample an opaque surface pixel that overlaps the banner beneath it.
+            // Sample an opaque pixel that overlaps the banner beneath it. The
+            // card is dark glass with light text, so its opaque light pixels
+            // are glyphs: take one whose neighbours are the same opaque
+            // colour, or the page's scaling blends it with the glass around it.
             const banner = document
               .querySelector('img[data-graphics-layer="banner"]')
               .getBoundingClientRect()
-            for (let y = 1; y < canvas.height - 1; y++)
-              for (let x = 1; x < canvas.width - 1; x++) {
+            const solid = (x, y) => {
+              const at = (y * canvas.width + x) * 4
+              for (let dy = -2; dy <= 2; dy++)
+                for (let dx = -2; dx <= 2; dx++) {
+                  const near = ((y + dy) * canvas.width + x + dx) * 4
+                  if (p[near + 3] !== 255) return false
+                  for (let c = 0; c < 3; c++)
+                    if (Math.abs(p[near + c] - p[at + c]) > 2) return false
+                }
+              return true
+            }
+            for (let y = 2; y < canvas.height - 2; y++)
+              for (let x = 2; x < canvas.width - 2; x++) {
                 const offset = (y * canvas.width + x) * 4
                 const px = box.x + ((x + 0.5) * box.width) / canvas.width
                 const py = box.y + ((y + 0.5) * box.height) / canvas.height
                 if (
                   p[offset + 3] === 255 &&
                   p[offset] > 230 &&
+                  solid(x, y) &&
                   px > banner.x + 2 &&
                   px < banner.right - 2 &&
                   py > banner.y + 2 &&
@@ -466,7 +542,9 @@ export async function exerciseGraphics({ h, report, clients, newPage, programUrl
     await enable(h, true)
     await h.rpc('banners.update', { id: patch, opacity: 1 })
     await page.reload()
-    await checkPatches('late-join-current-snapshot')
+    // The chat box is still up over the patch's lower two thirds (chat sits
+    // above banners): read the patch in the strip above it.
+    await checkPatches('late-join-current-snapshot', undefined, 0.1)
     record.cases.push('clear-beats-stalled-set')
   } finally {
     await new Promise((resolve) => server.close(resolve))

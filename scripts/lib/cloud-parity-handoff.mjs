@@ -16,6 +16,9 @@ export const HANDOFF_RUST_FILTERS = Object.freeze(['cloud_controller::tests'])
 export const HANDOFF_WEB_TESTS = Object.freeze(['tests/cloud-controller-handoff.test.ts'])
 
 const ONE_SHOTS = new Set(['bubble', 'highlight'])
+// The program draws the avatar as an image, or as a canvas once it animates
+// the atlas (S5): either is the avatar on the program.
+const AVATAR = '[data-avatar-layer="avatar"]'
 
 /** Pure: kept views must hold no one-shot layer (D9). */
 export function assertNothingReplayable(views, label = 'kept presentation') {
@@ -49,7 +52,16 @@ export async function exerciseHandoff({ h, report, clients }) {
       ),
     'the applied avatar is kept for both outputs',
     45000
-  )
+  ).catch((error) => {
+    // What the web holds instead, by output: the reason is in the layers.
+    const held = keptAvatar(h).map(
+      (view) =>
+        `${view.output}/${view.orientation} epoch ${view.epoch}: ${view.kept.map((layer) => layer.kind).join('+') || 'nothing'}`
+    )
+    throw new Error(`${error.message} (kept: ${held.join('; ') || 'no avatar view'})`, {
+      cause: error
+    })
+  })
   assertNothingReplayable(h.web.hooks.presentation(showId))
   const firstDevice = h.web.hooks.controller(showId).deviceId
 
@@ -61,7 +73,7 @@ export async function exerciseHandoff({ h, report, clients }) {
   // counted as a layer that stayed on air.
   const lostAt = Date.now()
   await waitFor(
-    async () => (await program.locator('img[data-avatar-layer="avatar"]').count()) === 0,
+    async () => (await program.locator(AVATAR).count()) === 0,
     'the program clears the avatar after its transport lease while no computer controls the show',
     45000
   )
@@ -101,18 +113,26 @@ export async function exerciseHandoff({ h, report, clients }) {
       assert.equal(answer.body.error.code, code)
     }
   }
-  assert.equal(h.web.snapshot(showId).show.endedAt ?? null, null, 'a stale End never ends it')
-  h.assertNoPlatformEnd(startedAt)
+  // The fake web's snapshot is `{ rev, state }`; an ended show's state names why.
+  assert.equal(h.web.snapshot(showId).state.endReason ?? null, null, 'a stale End never ends it')
+  // The only Ends the web saw are the two this case just sent, both refused
+  // (`assertNoPlatformEnd` would count them as a continuation's End).
+  assert.equal(h.calls('end', startedAt).length, 2, 'no End but the two stale ones sent here')
+  assert.equal(
+    h.web.hooks.controllerRefusals().filter((refusal) => refusal.route === 'end').length,
+    2,
+    'both Ends were refused'
+  )
 
   // The kept avatar is back on the program under the new envelope; no
   // bubble is replayed, even one that had not expired yet.
   await waitFor(
-    async () => (await program.locator('img[data-avatar-layer="avatar"]').count()) > 0,
+    async () => (await program.locator(AVATAR).count()) > 0,
     'the kept avatar is back on the program after the takeover',
     60000
   )
   await holdFor(
-    async () => (await program.locator('img[data-avatar-layer="bubble"]').count()) === 0,
+    async () => (await program.locator('[data-avatar-layer="bubble"]').count()) === 0,
     'no bubble is replayed after the takeover',
     6000
   )
