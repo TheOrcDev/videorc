@@ -19,6 +19,7 @@ import {
   NEW_LINK_AFTER_BAN,
   removeGuestCopy,
   renamedGuestName,
+  unmuteHint,
   type RoomPerson
 } from '@/lib/guests-view'
 import type { TalkShowContextValue } from '@/lib/talk-show-context'
@@ -37,11 +38,12 @@ type Pending =
   | null
 
 const NEW_LINK_TOAST_ID = 'videorc-guests-new-link'
+const UNMUTE_TOAST_ID = 'videorc-guests-unmute'
 
 export function useGuestModeration(talkShow: TalkShowContextValue): {
   /** The guest's ⋯ items; the host gets none here. */
   moderationItems: (person: RoomPerson) => KebabMenuItem[]
-  /** Mute holds the guest's mic at the server; Unmute lets them unmute. */
+  /** Mute holds the guest's mic at the server; Unmute lets them unmute, and says so. */
   toggleMute: (person: RoomPerson) => void
   dialogs: ReactElement
 } {
@@ -63,7 +65,13 @@ export function useGuestModeration(talkShow: TalkShowContextValue): {
 
   const toggleMute = useCallback(
     (person: RoomPerson) => {
-      void act(person, person.muted ? 'unmute' : 'mute')
+      const action = person.muted ? 'unmute' : 'mute'
+      void act(person, action).then((done) => {
+        // D14: Unmute only lets go; the guest turns the mic on themselves.
+        if (done && action === 'unmute') {
+          toast.info(unmuteHint(person.name), { id: `${UNMUTE_TOAST_ID}:${person.identity}` })
+        }
+      })
     },
     [act]
   )

@@ -56,6 +56,7 @@ import type {
 } from '@/lib/backend'
 import {
   bringOnBlockedReason,
+  guestMicStatus,
   layoutOptions,
   layoutReasonsLine,
   qualityStatus,
@@ -63,6 +64,7 @@ import {
   roomLimits,
   roomPeople,
   shownLayout,
+  withRoomMic,
   type RoomPerson
 } from '@/lib/guests-view'
 import { openWorkspaceTab } from '@/lib/workspace-navigation'
@@ -1157,7 +1159,11 @@ function StripRow({
   const thumbnail = person.host
     ? cameraPicture(local.camera, local.cameraOff)
     : cameraPicture(remote?.video, remote?.cameraOff)
-  const muted = person.host ? local.micMuted : person.muted || Boolean(remote?.micMuted)
+  // D14: the host's hold, a mic the guest still has off, or talking.
+  const mic = person.host
+    ? null
+    : guestMicStatus(withRoomMic(person.mic, Boolean(remote?.micMuted)), person.name)
+  const muted = person.host ? local.micMuted : mic !== null
   const speaking = !muted && Boolean(remote?.speaking)
   const quality = qualityStatus(person.quality)
   const quietQuality = quality.tone === 'good'
@@ -1217,7 +1223,11 @@ function StripRow({
               </span>
             </InfoTooltip>
           )}
-          {muted ? (
+          {mic ? (
+            <InfoTooltip content={mic.hint}>
+              <WaveformMutedIcon aria-label={mic.label} role="img" />
+            </InfoTooltip>
+          ) : muted ? (
             <WaveformMutedIcon aria-label="Muted" role="img" />
           ) : (
             <WaveformIcon

@@ -5,9 +5,17 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { TooltipProvider } from '@/components/ui/tooltip'
 import type { CloudRoomGuest, CloudStageLayout, CloudStatus, StreamScreen } from '@/lib/backend'
-import { HOST, ada, grace, openRoom, talkStatus } from '@/lib/guests-room-fixtures'
+import {
+  HOST,
+  ada,
+  grace,
+  guestParticipant,
+  openRoom,
+  talkStatus
+} from '@/lib/guests-room-fixtures'
 import { NO_TALK_SHOW, type TalkShowContextValue } from '@/lib/talk-show-context'
 import { planStage } from '@/lib/talk-show-layout'
+import { toast } from '@/lib/toast'
 
 import ShowStage from './show-stage'
 
@@ -662,6 +670,51 @@ describe('the backstage strip (C-G3)', () => {
     expect(show.actOnGuest).toHaveBeenCalledWith('g_ada', 'mute', undefined)
     expect(show.actOnGuest).toHaveBeenCalledWith('g_grace', 'unmute', undefined)
     expect(show.setMicrophoneMuted).toHaveBeenCalledWith(true)
+  })
+
+  // Live show 2026-11-19: Unmute only lets go (D14), so the strip tells the
+  // host's hold from a mic the guest still has off, and says the guest has
+  // to unmute themselves.
+  it("tells the host's hold, a mic still off and talking apart, and says who unmutes", async () => {
+    const info = vi.spyOn(toast, 'info')
+    const bo = { ...ada, guestId: 'g_bo', name: 'Bo' }
+    const show = talkShow()
+    await mount(
+      talkStatus({
+        room: openRoom({
+          guests: [grace, ada, bo],
+          participants: [
+            ...(openRoom().participants ?? []),
+            guestParticipant(grace, { audio: false }),
+            guestParticipant(ada, { audio: false }),
+            guestParticipant(bo)
+          ]
+        })
+      }),
+      show
+    )
+    const mic = (name: string): string | null | undefined =>
+      row(name)
+        .querySelector(
+          '[role="img"][aria-label="Muted by you"], [role="img"][aria-label="Mic off"], [role="img"][aria-label="Quiet"]'
+        )
+        ?.getAttribute('aria-label')
+    expect(mic('Grace')).toBe('Muted by you')
+    expect(button(row('Grace'), 'Unmute')).toBeDefined()
+    expect(mic('Ada')).toBe('Mic off')
+    expect(button(row('Ada'), 'Mute')).toBeDefined()
+    expect(mic('Bo')).toBe('Quiet')
+    expect(container.innerHTML).toContain('Only Ada can turn their mic on.')
+
+    await act(async () => button(row('Grace'), 'Unmute').click())
+    expect(show.actOnGuest).toHaveBeenCalledWith('g_grace', 'unmute', undefined)
+    expect(info).toHaveBeenCalledWith('Grace can talk again once they unmute.', {
+      id: 'videorc-guests-unmute:g_grace'
+    })
+    // Mute says nothing more: the strip shows the hold.
+    await act(async () => button(row('Bo'), 'Mute').click())
+    expect(info).toHaveBeenCalledTimes(1)
+    info.mockRestore()
   })
 
   it("holds Bring on with Premium's one seat taken", async () => {
