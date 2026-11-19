@@ -158,6 +158,9 @@ type _RegistryIconProps = _AssertIconProps<
  * character on the stream, in its own module (`avatar-page-icon.tsx`) so the
  * registry stays a pure re-export for the eager sidebar. The avatar's own
  * picture (or the stone character's artwork) is `BuddyIcon`.
+ * `NotificationsIcon` is the bell that opens Notifications (plan 250), in
+ * the status bar: its own module (`notifications-icon.tsx`) for the same
+ * reason.
  */
 export {
   VideoCamera as StudioIcon,
@@ -173,6 +176,7 @@ export {
   Pulse as HealthIcon
 } from '@phosphor-icons/react'
 export { AvatarPageIcon } from './avatar-page-icon'
+export { NotificationsIcon } from './notifications-icon'
 /**
  * Status and feedback. One glyph per meaning: a triangle warns, a circle
  * alerts, a crossed circle is an error. Never introduce a second variant of

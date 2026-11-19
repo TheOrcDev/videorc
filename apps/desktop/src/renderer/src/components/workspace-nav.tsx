@@ -192,10 +192,8 @@ export function isWorkspaceTab(value: unknown): value is WorkspaceTab {
  */
 export function readWorkspaceNavigation(detail: unknown): WorkspaceNavigation | null {
   if (!detail || typeof detail !== 'object') return null
-  const { tab, settingsTab, buddyTab, avatarTab, livestreamView, sessionId } = detail as Record<
-    string,
-    unknown
-  >
+  const { tab, settingsTab, buddyTab, avatarTab, livestreamView, sessionId, destinationId } =
+    detail as Record<string, unknown>
   if (tab === 'settings') {
     // A link to a retired tab opens the tab that replaced it (plan 174 S3.6).
     const current = migrateSettingsTabId(settingsTab)
@@ -204,6 +202,10 @@ export function readWorkspaceNavigation(detail: unknown): WorkspaceNavigation | 
   if (tab === 'ai') return isBuddyTabId(buddyTab) ? { tab, buddyTab } : { tab }
   if (tab === 'avatar') return isAvatarTabId(avatarTab) ? { tab, avatarTab } : { tab }
   if (tab === 'live') {
+    // A named destination opens its card, which lives in Setup (plan 250 S4).
+    if (typeof destinationId === 'string' && destinationId) {
+      return { tab, livestreamView: 'setup', destinationId }
+    }
     return isLivestreamViewId(livestreamView) ? { tab, livestreamView } : { tab }
   }
   if (tab === 'library') return typeof sessionId === 'string' ? { tab, sessionId } : { tab }

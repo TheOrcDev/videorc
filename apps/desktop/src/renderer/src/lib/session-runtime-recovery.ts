@@ -11,7 +11,6 @@ import type {
 import {
   activityIsLive,
   activitySavesRecording,
-  sessionRuntimeNoticeTitle,
   type SessionRuntimeActivity,
   type SessionRuntimeNotice
 } from '@/lib/session-runtime-notice'
@@ -19,22 +18,33 @@ import { sessionActivity, sessionIsLive, sessionIsReplayOnly } from '../../../sh
 import { revealInFileManagerLabel } from '@/lib/platform'
 import { VIDEORC_PREMIUM_URL } from '@/lib/premium-upgrade'
 import { recordingStartupHealthToast } from '@/lib/studio-health'
-import { requestSystemAudioResume, SYSTEM_AUDIO_ECHO_TOAST_ID } from '@/lib/system-audio'
 import { shouldToastBackendError } from '@/lib/backend-transport'
 import { ipcErrorMessage } from '@/lib/ipc-error-message'
 import { OFFLINE_TOAST_ID, userErrorMessage, type UserErrorContext } from '@/lib/user-error'
 import { recordUserError } from '@/lib/user-error-log'
 import type { WsStatus } from '@/lib/capture'
 import { CHAT_PLATFORM_LABELS } from '@/lib/live-chat-view'
+import { notifications } from '@/lib/notifications'
+import { publishBackendLifecycle } from '@/lib/notifications/sources/app'
+import {
+  publishHealthEvent,
+  publishMicrophoneLoss,
+  publishRecordingFailure,
+  publishRecordingQuality,
+  rebuildHealthNotifications,
+  sessionEndedNotifications
+} from '@/lib/notifications/sources/health'
+import {
+  publishDiscordFailure,
+  publishXPlayback,
+  publishYouTubeBroadcastProblem,
+  publishYouTubeBudget
+} from '@/lib/notifications/sources/platforms'
 import { notifyOnce } from '@/lib/notify-once'
 import { TOAST_WITH_DESCRIPTION_MS, toast } from '@/lib/toast'
 import { openWorkspaceTab } from '@/lib/workspace-navigation'
 import { discordFailureToast } from '@/lib/discord-announce'
 import { openHealthToastAction } from '@/lib/health-door'
-import {
-  separateFileFailedToast,
-  separateFileRoleFromMessage
-} from '@/lib/separate-source-recordings-view'
 import type { StreamPlatform, YouTubeQuotaStatus } from '@/lib/backend'
 import {
   youtubeBroadcastToast,
@@ -43,8 +53,10 @@ import {
   youtubeConnectPausedMessage
 } from '@/lib/youtube-quota-copy'
 
-// Plan 083: the thumbnail warning rides this lazy runtime-toast chunk.
-export { showYouTubeThumbnailFailure, youtubeThumbnailFailure } from '@/lib/youtube-thumbnail-toast'
+// Plan 083: the thumbnail warning rides this lazy runtime chunk. Since plan
+// 250 it is an entry with Retry (`notifications/sources/platforms.ts`).
+export { youtubeThumbnailFailure } from '@/lib/youtube-thumbnail-toast'
+export { publishYouTubeThumbnailFailure as showYouTubeThumbnailFailure } from '@/lib/notifications/sources/platforms'
 // Plan 094: so does every piece of YouTube quota copy the Studio provider shows.
 export { youtubeGoLivePausedMessage } from '@/lib/youtube-quota-copy'
 
@@ -54,11 +66,7 @@ export function showYouTubeBroadcastToast(
   target: { id: string; label: string; platform: StreamPlatform },
   message: string
 ): void {
-  const broadcastToast = youtubeBroadcastToast(step, target, message)
-  toast.warning(broadcastToast.title, {
-    id: `youtube-broadcast-${step}:${target.id}`,
-    description: broadcastToast.description
-  })
+  publishYouTubeBroadcastProblem(step, target, youtubeBroadcastToast(step, target, message))
 }
 
 /** The Discord announcement failure already toasted (plan 187, D13). */
@@ -73,11 +81,7 @@ export function showDiscordAnnounceFailure(snapshot: DiscordAnnounceSnapshot): v
   const failure = discordFailureToast(discordFailureToastedAt, snapshot, Date.now())
   if (!failure) return
   discordFailureToastedAt = failure.at
-  toast[failure.type](failure.title, {
-    id: 'discord-announce-failure',
-    description: failure.description,
-    action: { label: 'Open Destinations', onClick: () => openWorkspaceTab('live', 'setup') }
-  })
+  publishDiscordFailure(failure)
 }
 
 /** One quiet notice per daily-budget step reached (plan 094, S6), never on the way down. */
@@ -88,13 +92,8 @@ export function showYouTubeBudgetStep(
   const reached = youtubeBudgetStepToAnnounce(previous, status)
   const notice = reached ? youtubeBudgetNotice(reached) : null
   if (!reached || !notice) return
-  notifyOnce(`youtube-budget:${reached}`, 'info', notice.title, {
-    description: notice.description
-  })
+  publishYouTubeBudget(reached, notice)
 }
-
-const RECORDING_STOPPED_UNEXPECTEDLY_TOAST_ID = 'recording-stopped-unexpectedly'
-const MICROPHONE_INPUT_LOST_TOAST_ID = 'microphone-input-lost'
 
 type SessionRuntimeRecoveryPlan = {
   failureSessionId?: string
@@ -169,31 +168,13 @@ export function recordingFailurePresentation({
   }
 }
 
+/**
+ * The take ended on its own: an urgent entry behind the bell (plan 250), and
+ * the end of every problem that belonged to the session.
+ */
 export function showRecordingFailure({ notice }: RecordingFailurePresentation): void {
-  const sessionId = notice.sessionId
-  const revealSession = window.videorc?.revealSession
-  toast.dismiss(MICROPHONE_INPUT_LOST_TOAST_ID)
-  toast.error(sessionRuntimeNoticeTitle(notice), {
-    id: RECORDING_STOPPED_UNEXPECTEDLY_TOAST_ID,
-    description: notice.message,
-    duration: Infinity,
-    ...(activitySavesRecording(notice.activity)
-      ? {
-          action: {
-            label: 'Open in Library',
-            onClick: () => openLibrary(sessionId)
-          }
-        }
-      : {}),
-    ...(activitySavesRecording(notice.activity) && sessionId && notice.outputPath && revealSession
-      ? {
-          cancel: {
-            label: revealInFileManagerLabel(),
-            onClick: () => void revealSession(sessionId)
-          }
-        }
-      : {})
-  })
+  sessionEndedNotifications(notifications, notice.activity)
+  publishRecordingFailure(notifications, notice)
 }
 
 export function microphoneLossPresentation({
@@ -258,35 +239,14 @@ export function microphoneLossPresentation({
   }
 }
 
+/** A lost or silent input: the microphone's entry, urgent (plan 250). */
 export function showMicrophoneLoss({ notice }: MicrophoneLossPresentation): void {
-  // System-only failures already have a persistent mixer state; keep the existing no-toast policy.
-  if (notice.audioIssues?.every((issue) => issue.code === 'system-audio-lost')) return
-  toast.warning(sessionRuntimeNoticeTitle(notice), {
-    id: MICROPHONE_INPUT_LOST_TOAST_ID,
-    description: notice.message,
-    duration: Infinity
-  })
+  publishMicrophoneLoss(notifications, notice)
 }
 
+/** The engine restarting, recovered, or beyond recovering: one subject (plan 250). */
 export function showBackendLifecycle(event: BackendLifecycleEvent): void {
-  if (event.state === 'restarting') {
-    toast.warning('Videorc is recovering', {
-      id: 'backend-lifecycle',
-      description: `Restarting automatically (attempt ${event.attempt ?? 1})…`
-    })
-  } else if (event.state === 'failed') {
-    toast.error("Videorc can't recover on its own", {
-      id: 'backend-lifecycle',
-      description: 'Quit and reopen Videorc.',
-      duration: Infinity
-    })
-  } else if (event.state === 'lost') {
-    toast.error('Videorc needs a restart', {
-      id: 'backend-lifecycle',
-      description: 'Quit and reopen Videorc.',
-      duration: Infinity
-    })
-  }
+  publishBackendLifecycle(event)
 }
 
 export function showBackendError(
@@ -321,69 +281,9 @@ export function showBackendError(
   }
 }
 
-/**
- * Plan 198 (D1): a take's Screen or Camera file stopped. One warning per file
- * per take, the reason in plain words, and the door to Health for the rest.
- */
-export function showSeparateFileFailed(
-  event: HealthEvent,
-  recording: Pick<RecordingStatus, 'sessionId' | 'state'>
-): void {
-  const takeRunning =
-    recording.sessionId === event.sessionId &&
-    (recording.state === 'recording' || recording.state === 'streaming')
-  const copy = separateFileFailedToast(event.message, takeRunning)
-  const role = separateFileRoleFromMessage(event.message) ?? 'file'
-  notifyOnce(`separate-file:${event.sessionId ?? 'take'}:${role}`, 'warning', copy.title, {
-    description: copy.description,
-    action: openHealthToastAction(),
-    duration: TOAST_WITH_DESCRIPTION_MS
-  })
-}
-
-/**
- * Plan 200 D1: under encoder pressure the separate files stop first so the
- * Combined recording keeps up. One toast per take, not one per file. The copy
- * names no roles: a file whose source was removed earlier is not shed.
- */
-export const SEPARATE_FILES_SHED_TOAST = {
-  title: 'Separate files stopped so the main recording keeps up',
-  description:
-    'Your Mac fell behind encoding the separate files. The separate files keep what they recorded, and your Combined recording keeps going.'
-} as const
-
-export function showSeparateFilesShed(event: HealthEvent): void {
-  notifyOnce(
-    `separate-files-shed:${event.sessionId ?? 'take'}`,
-    'warning',
-    SEPARATE_FILES_SHED_TOAST.title,
-    {
-      description: SEPARATE_FILES_SHED_TOAST.description,
-      action: openHealthToastAction(),
-      duration: TOAST_WITH_DESCRIPTION_MS
-    }
-  )
-}
-
+/** X's own word on whether viewers can watch: one subject (plan 250). */
 export function showXPlaybackEvent(event: XPlaybackEvent): void {
-  // One toast per playback state: the backend re-checks on a timer.
-  if (event.status === 'verified') {
-    notifyOnce('x-playback', 'success', 'Viewers can watch your X broadcast', {
-      description: event.shareUrl
-    })
-  } else if (event.status === 'pending') {
-    notifyOnce('x-playback', 'warning', 'X is still preparing your stream', {
-      description:
-        'Viewers may see a loading spinner for a few minutes. Keep streaming. Videorc keeps checking.'
-    })
-  } else {
-    // X's API exposes no playback URL any more: `unavailable` means X ended
-    // the broadcast (usually TIMED_OUT: no video reached X in 5 minutes).
-    notifyOnce('x-playback', 'error', 'X ended your broadcast', {
-      description:
-        'X stopped it while Videorc was still streaming, usually because no video reached X. Your local recording is unaffected.'
-    })
-  }
+  publishXPlayback(event)
 }
 
 /**
@@ -451,18 +351,16 @@ export function showSessionFinished({
   currentNotice: SessionRuntimeNotice | null
   replaceNotice: (notice: SessionRuntimeNotice) => void
 }): void {
-  // Plan 218: news about the live stream ends with it.
-  toast.dismiss(STREAM_DELIVERY_TOAST_ID)
-  toast.dismiss(STREAM_UPLINK_TOAST_ID)
   if (currentNotice?.kind === 'microphone-input-lost' && currentNotice.phase !== 'ended') {
-    const endedNotice: SessionRuntimeNotice = { ...currentNotice, phase: 'ended' }
+    const endedNotice = { ...currentNotice, phase: 'ended' as const }
     replaceNotice(endedNotice)
-    toast.warning(sessionRuntimeNoticeTitle(endedNotice), {
-      id: MICROPHONE_INPUT_LOST_TOAST_ID,
-      description: endedNotice.message,
-      duration: Infinity
-    })
+    // The entry takes the ended words ("Microphone was silent during the
+    // livestream") before it ends with the session.
+    publishMicrophoneLoss(notifications, endedNotice)
   }
+  // Plan 218, plan 250: the session's open problems end with it. They stay
+  // in the list as what happened during the stream.
+  sessionEndedNotifications(notifications, activity)
   if (!activitySavesRecording(activity)) return
 
   const sessionId = status.sessionId ?? lastSessionId
@@ -475,253 +373,84 @@ export function showSessionFinished({
       if (problem) openLibrary(sessionId)
     })
   }
-  toast.success('Recording saved', {
-    action: { label: 'Play', onClick: openFinishedRecording },
-    cancel: { label: 'Open in Library', onClick: () => openLibrary(sessionId) },
-    duration: 12_000
+  // Plan 250 (D13): an entry behind the bell with both buttons, and a short
+  // toast while idle: the streamer has just stopped and is looking here.
+  notifications.publish({
+    key: `recording-saved:${sessionId ?? 'session'}`,
+    kind: 'recording-saved',
+    title: 'Recording saved',
+    actions: [
+      { id: 'play', label: 'Play', kind: 'fix', run: openFinishedRecording },
+      {
+        id: 'open-library',
+        label: 'Open in Library',
+        kind: 'door',
+        run: () => openLibrary(sessionId)
+      }
+    ],
+    once: true
   })
 }
 
+/**
+ * One `health` event of the running session. Since plan 250 it is an entry
+ * behind the bell, on its subject (`notifications/health-kinds.ts` is the
+ * table); only an urgent one pops up while recording or live. One toast is
+ * left: a start that was refused answers Record or Go Live.
+ *
+ * Returns the key of a quality notice it showed, so the caller shows it once.
+ */
 export function showSessionHealthEvent(
   event: HealthEvent,
   qualityToastAlreadyShown: boolean,
   recording?: Pick<RecordingStatus, 'sessionId' | 'state'>
 ): string | null {
-  if (event.code === 'separate-source-recordings-role-failed') {
-    showSeparateFileFailed(event, recording ?? { state: 'idle' })
-    return null
-  }
-  if (event.code === 'separate-source-recordings-shed') {
-    showSeparateFilesShed(event)
-    return null
-  }
   const startupToast = recordingStartupHealthToast(event)
-  if (startupToast) {
-    const show = startupToast.variant === 'warning' ? toast.warning : toast.error
-    show(startupToast.title, {
+  if (startupToast?.variant === 'error') {
+    toast.error(startupToast.title, {
       id: startupToast.id,
       description: startupToast.description,
       duration: startupToast.duration
     })
+    return null
   }
-
   if (event.code.startsWith('recording-quality-')) {
     if (event.code !== 'recording-quality-not-100' || event.level !== 'warn') return null
-    const dedupeKey = event.sessionId ?? event.message
     if (qualityToastAlreadyShown) return null
-    toast.warning('This recording has dropped frames', {
-      description: event.message,
-      duration: 15_000,
-      action: { label: 'Open in Library', onClick: () => openLibrary(event.sessionId ?? undefined) }
-    })
-    return dedupeKey
+    publishRecordingQuality(notifications, event)
+    return event.sessionId ?? event.message
   }
-  if (event.code === 'mic-silent') {
-    const show = event.level === 'error' ? toast.error : toast.warning
-    show(event.level === 'error' ? 'Recording has no sound' : 'Microphone is silent', {
-      description: event.message,
-      duration: 15_000
-    })
-  }
-  showSessionAudioNews(event)
-  showLiveOutputNews(event)
+  publishHealthEvent(notifications, event, { recording: recording ?? { state: 'idle' } })
   return null
 }
 
-const STREAM_OUTPUT_TOAST_ID = 'stream-output'
-/** Plan 218: the stream's frame rate, and what its connection can carry. */
-export const STREAM_DELIVERY_TOAST_ID = 'stream-delivery'
-export const STREAM_UPLINK_TOAST_ID = 'stream-uplink'
-const SCREEN_CAPTURE_TOAST_ID = 'screen-capture'
-
-/**
- * Plan 087: what happens to the live output mid-session. Until 0.9.125 a dead
- * stream was reported only when the session stopped, so the streamer kept
- * presenting to nothing. Each pair shares a key: the good news replaces the
- * bad news instead of stacking beside it.
- */
-function showLiveOutputNews(event: HealthEvent): void {
-  if (event.code === 'stream-output-failed') {
-    toast.error('Your stream stopped', {
-      id: STREAM_OUTPUT_TOAST_ID,
-      description: event.message,
-      duration: Infinity
-    })
-  } else if (event.code === 'recording-output-failed') {
-    // The recording leg's encoder stopped taking frames mid-take; the backend
-    // ends the take (or keeps a healthy stream on air) and says which.
-    toast.error('Your recording stopped', {
-      id: 'recording-output',
-      description: event.message,
-      duration: Infinity
-    })
-  } else if (event.code === 'stream-output-stalled') {
-    toast.warning('Your stream is frozen', {
-      id: STREAM_OUTPUT_TOAST_ID,
-      description: event.message,
-      duration: Infinity
-    })
-  } else if (event.code === 'stream-output-resumed') {
-    toast.success('Your stream is moving again', {
-      id: STREAM_OUTPUT_TOAST_ID,
-      description: event.message,
-      duration: 8_000
-    })
-  } else if (event.code === 'stream-delivery-degraded') {
-    // Plan 218: a choppy stream used to be one warning at the start of the
-    // session, in a list nobody reads while live. It stays up until the
-    // stream is smooth again or the session ends.
-    toast.warning('Your stream is choppy', {
-      id: STREAM_DELIVERY_TOAST_ID,
-      description: event.message,
-      duration: Infinity
-    })
-  } else if (event.code === 'stream-delivery-recovered') {
-    toast.success('Your stream is smooth again', {
-      id: STREAM_DELIVERY_TOAST_ID,
-      description: event.message,
-      duration: 8_000
-    })
-  } else if (event.code === 'stream-leg-overflow') {
-    // One key for everything about the connection: an overflow, the step
-    // down it causes, the floor and the way back replace each other.
-    toast.warning('Your connection can’t keep up', {
-      id: STREAM_UPLINK_TOAST_ID,
-      description: event.message,
-      duration: 20_000
-    })
-  } else if (event.code === 'stream-bitrate-lowered') {
-    toast.warning('Stream quality lowered to fit your connection', {
-      id: STREAM_UPLINK_TOAST_ID,
-      description: event.message,
-      duration: 15_000
-    })
-  } else if (event.code === 'stream-bitrate-floor') {
-    toast.warning('Your connection can’t carry this stream', {
-      id: STREAM_UPLINK_TOAST_ID,
-      description: event.message,
-      duration: 30_000
-    })
-  } else if (event.code === 'stream-bitrate-restored') {
-    toast.success('Stream quality is back', {
-      id: STREAM_UPLINK_TOAST_ID,
-      description: event.message,
-      duration: 8_000
-    })
-  } else if (event.code === 'screen-capture-stopped') {
-    const show = event.level === 'error' ? toast.error : toast.warning
-    show('Screen capture stopped', {
-      id: SCREEN_CAPTURE_TOAST_ID,
-      description: event.message,
-      duration: event.level === 'error' ? Infinity : 20_000
-    })
-  } else if (event.code === 'screen-capture-restored') {
-    toast.success('Screen capture is back', {
-      id: SCREEN_CAPTURE_TOAST_ID,
-      description: event.message,
-      duration: 8_000
-    })
-  } else if (event.code === 'screen-window-out-of-sight') {
-    // Plan 219 S1: the captured window is minimized, hidden or on another
-    // desktop. Nothing restarts; the picture holds until it is back.
-    toast.warning('Window out of sight', {
-      id: SCREEN_CAPTURE_TOAST_ID,
-      description: event.message,
-      duration: 20_000
-    })
-  } else if (event.code === 'screen-window-back') {
-    toast.success('The window is back', {
-      id: SCREEN_CAPTURE_TOAST_ID,
-      description: event.message,
-      duration: 8_000
-    })
-  } else if (event.code === 'host-overloaded') {
-    toast.warning('This computer is overloaded', {
-      id: 'host-overloaded',
-      description: event.message,
-      duration: 20_000
-    })
-  } else if (event.code === 'disk-space-low') {
-    // Retest 154 A5: plan 200 C5's low-space notice reached only Diagnostics,
-    // and the take then died on a full disk with no warning at Record.
-    toast.warning('Recording space is low', {
-      id: 'disk-space-low',
-      description: event.message,
-      duration: 20_000
-    })
-  }
-}
-
-/**
- * Plan 076: what the audio bus reports mid-session. An echo pause stays up
- * until it is resumed (a live loop repeats every word); a stall, a silenced
- * microphone and a recovered microphone are news the interface shows
- * nowhere else.
- */
-function showSessionAudioNews(event: HealthEvent): void {
-  if (event.code === 'microphone-noise-reduction-silenced') {
-    // Noise reduction refused a stretch of microphone input and the bus
-    // wrote silence for it; the session went on. One episode, one toast.
-    notifyOnce(event.code, 'warning', 'Microphone silenced for a moment', {
-      description: event.message,
-      duration: 12_000
-    })
-  } else if (event.code === 'system-audio-echo-paused') {
-    toast.warning('System audio paused: your stream was echoing', {
-      id: SYSTEM_AUDIO_ECHO_TOAST_ID,
-      description: event.message,
-      duration: Infinity,
-      action: { label: 'Resume', onClick: requestSystemAudioResume }
-    })
-  } else if (event.code === 'audio-output-stalled') {
-    notifyOnce('audio-output-stalled', 'warning', 'Audio dropped for a moment', {
-      description: event.message,
-      duration: 12_000
-    })
-  } else if (event.code === 'audio-output-failed') {
-    // Unlike a stall this does not come back: the rest of the take is silent.
-    toast.error('Your recording has no sound from here', {
-      id: 'audio-output',
-      description: event.message,
-      duration: Infinity
-    })
-  } else if (
-    event.code === 'microphone-timeline-recovered' ||
-    // Retest 151: a stopped Linux capture worker was opened again.
-    event.code === 'microphone-input-recovered'
-  ) {
-    notifyOnce(event.code, 'success', 'Microphone is back', {
-      description: event.message,
-      duration: 8_000
-    })
-  } else if (event.code === 'microphone-signal-recovered') {
-    // Issue 1064: sound came back after a run of digital silence.
-    notifyOnce(event.code, 'success', 'Your microphone has sound again', {
-      description: event.message,
-      duration: 8_000
-    })
-  }
-}
-
 export function showNoiseCleanupCompleted(jobId: string, outputSessionId: string): void {
-  toast.success('Noise cleanup complete', {
-    id: `noise-cleanup-completed-${jobId}`,
-    description: "A separate cleaned copy is ready. The original wasn't changed.",
-    duration: 15_000,
-    action: {
-      label: 'Play',
-      onClick: () => {
-        const openSession = window.videorc?.openSession
-        if (!openSession) return
-        void openSession(outputSessionId).then((problem) => {
-          if (problem) showPlaybackProblem(outputSessionId, problem)
-        })
+  notifications.publish({
+    key: `noise-cleanup:${jobId}`,
+    kind: 'work-done',
+    title: 'Noise cleanup complete',
+    detail: "A separate cleaned copy is ready. The original wasn't changed.",
+    actions: [
+      {
+        id: 'play',
+        label: 'Play',
+        kind: 'fix',
+        run: () => {
+          const openSession = window.videorc?.openSession
+          if (!openSession) return
+          void openSession(outputSessionId).then((problem) => {
+            if (problem) showPlaybackProblem(outputSessionId, problem)
+          })
+        }
+      },
+      {
+        id: 'reveal',
+        label: revealInFileManagerLabel(),
+        kind: 'fix',
+        run: () => void window.videorc?.revealSession?.(outputSessionId)
       }
-    },
-    cancel: {
-      label: revealInFileManagerLabel(),
-      onClick: () => void window.videorc?.revealSession?.(outputSessionId)
-    }
+    ],
+    once: true
   })
 }
 
@@ -778,12 +507,21 @@ export function showSourceFallbackActiveSession(
   session: Pick<RecordingStatus, 'state' | 'streamUrl'>,
   event?: AutomaticSourceFallbackEvent
 ): void {
-  toast.warning(sourceFallbackTitle(event), {
-    description: sessionIsLive(session)
+  notifications.publish({
+    key: `source-fallback:${event?.sourceKind ?? 'source'}`,
+    kind: 'source-fallback',
+    title: sourceFallbackTitle(event),
+    detail: sessionIsLive(session)
       ? 'Your stream uses it now. Check the output before you continue.'
       : 'Your recording uses it now. Check the output before you continue.',
-    duration: 10_000,
-    id: 'source-reconciliation:active-session'
+    actions: [
+      {
+        id: 'open-sources',
+        label: 'Open Sources',
+        kind: 'door',
+        run: () => openWorkspaceTab('sources')
+      }
+    ]
   })
 }
 
@@ -892,14 +630,25 @@ export function completeSessionRuntimeRecovery({
     }
   }
 
-  const microphoneLoss = latestMatchingEvent(events, (event) => isSessionAudioLossCode(event.code))
+  // The losses still open, in the order they were reported: a later
+  // recovery of the same source closed the ones before it, as it clears the
+  // notice while the Studio watches. Without this a reconnect brought back
+  // a microphone problem that had already ended.
+  const bySource = new Map<'microphone' | 'system', HealthEvent>()
+  for (const event of events) {
+    const source = event.code.startsWith('microphone-') ? 'microphone' : 'system'
+    if (isSessionAudioLossCode(event.code)) {
+      bySource.delete(source)
+      bySource.set(source, event)
+    } else if (isSessionAudioRecoveryCode(event.code)) {
+      bySource.delete(source)
+    }
+  }
+  const microphoneLoss = [...bySource.values()].at(-1)
   if (!microphoneLoss) return null
-  const losses = events.filter(
-    (event) => event.sessionId === microphoneLoss.sessionId && isSessionAudioLossCode(event.code)
-  )
-  const bySource = new Map(
-    losses.map((event) => [event.code.startsWith('microphone-') ? 'microphone' : 'system', event])
-  )
+  for (const [source, event] of bySource) {
+    if (event.sessionId !== microphoneLoss.sessionId) bySource.delete(source)
+  }
   return {
     kind: 'microphone-input-lost',
     event:
@@ -937,6 +686,17 @@ export async function recoverSessionRuntime({
   const events = plan.healthSessionId
     ? await loadHealthEvents(plan.healthSessionId).catch(() => [])
     : []
+  // Plan 250 S9: a session that is still running rebuilds its open problems
+  // in the list from its stored events (the last 120): a reload mid-stream
+  // had lost them, and a reconnect had missed what cleared in the gap.
+  if (
+    ['recording', 'streaming'].includes(recording.state) &&
+    recording.sessionId &&
+    plan.healthSessionId === recording.sessionId &&
+    !plan.failureSessionId
+  ) {
+    rebuildHealthNotifications(notifications, events, { recording })
+  }
   return completeSessionRuntimeRecovery({
     plan,
     recording,
@@ -948,4 +708,13 @@ export async function recoverSessionRuntime({
 
 export function isSessionAudioLossCode(code: string): boolean {
   return ['microphone-input-lost', 'microphone-timeline-lost', 'system-audio-lost'].includes(code)
+}
+
+/** The recovery that ends one of those losses. */
+export function isSessionAudioRecoveryCode(code: string): boolean {
+  return [
+    'microphone-input-recovered',
+    'microphone-timeline-recovered',
+    'system-audio-recovered'
+  ].includes(code)
 }

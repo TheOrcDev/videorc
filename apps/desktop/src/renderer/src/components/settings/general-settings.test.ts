@@ -71,8 +71,36 @@ function switchById(id: string): HTMLElement | null {
 describe('GeneralSettings', () => {
   it('splits into Appearance, Chat, Setup, Import, Privacy and Elsewhere', async () => {
     await act(async () => root.render(createElement(GeneralSettings)))
-    expect(headings()).toEqual(['Appearance', 'Chat', 'Setup', 'Import', 'Privacy', 'Elsewhere'])
+    expect(headings()).toEqual([
+      'Appearance',
+      'Chat',
+      'Notifications',
+      'Setup',
+      'Import',
+      'Privacy',
+      'Elsewhere'
+    ])
     expect(container.textContent).toContain('Open Stream Manager when you go live')
+  })
+
+  // Plan 250 (D4): the quiet rule's one home. On until turned off.
+  it('offers Quiet while recording or live under Notifications, on by default', async () => {
+    await act(async () => root.render(createElement(GeneralSettings)))
+    const toggle = switchById('quiet-while-live')
+    expect(toggle?.getAttribute('role')).toBe('switch')
+    expect(toggle?.getAttribute('aria-checked')).toBe('true')
+    const section = toggle?.closest('[data-slot="panel-section"]')
+    expect(section?.textContent).toContain('Quiet while recording or live')
+    expect(section?.textContent).toContain(
+      'Only urgent problems pop up. Everything else waits in Notifications.'
+    )
+    await act(async () => (toggle as HTMLElement).click())
+    const setSettings = mocked.core.setSettings as ReturnType<typeof vi.fn>
+    const update = setSettings.mock.calls.at(-1)?.[0] as (current: object) => object
+    expect(update({ keepOriginalRecording: false })).toEqual({
+      keepOriginalRecording: false,
+      quietWhileLive: false
+    })
   })
 
   it('offers Retro LCD under Appearance, off until turned on (plan 197)', async () => {
@@ -124,7 +152,15 @@ describe('GeneralSettings', () => {
       runtimeInfo: { platform: 'darwin', commentsWindowEnabled: false }
     }
     await act(async () => root.render(createElement(GeneralSettings)))
-    expect(headings()).toEqual(['Appearance', 'Chat', 'Setup', 'Import', 'Privacy', 'Elsewhere'])
+    expect(headings()).toEqual([
+      'Appearance',
+      'Chat',
+      'Notifications',
+      'Setup',
+      'Import',
+      'Privacy',
+      'Elsewhere'
+    ])
     expect(container.querySelector('#studio-chat')).not.toBeNull()
     expect(container.textContent).not.toContain('Open Stream Manager when you go live')
   })

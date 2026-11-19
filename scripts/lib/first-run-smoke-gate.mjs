@@ -61,8 +61,10 @@ export function evaluateFirstRunSmokeStep(step, observation = {}) {
     if (!condition) failures.push(message)
   }
   const o = observation
-  // A failure Videorc can't explain is never part of setup: its toast is
-  // "Videorc hit a problem" (plan 174 S2.4). Every state() step carries them.
+  // A failure Videorc can't explain is never part of setup: its notice is
+  // "Videorc hit a problem" (plan 174 S2.4), a notification since plan 250.
+  // `toasts` holds every toast and every notification the smoke saw. Every
+  // state() step carries them.
   check(
     !Array.isArray(o.toasts) || o.toasts.every((text) => !text.includes('Videorc hit a problem')),
     'an unknown-error toast appeared ("Videorc hit a problem")'

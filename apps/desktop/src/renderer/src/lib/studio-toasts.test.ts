@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 
 const toast = vi.hoisted(() => ({
   error: vi.fn(),
@@ -13,13 +13,8 @@ import type { CohostState } from '@/lib/backend'
 import {
   cohostStatusDetail,
   cohostStatusToast,
-  showStreamTargetNotice,
-  showChatNeedsVideorcSignIn,
-  showVideorcSignInExpired,
-  showXBroadcastProblem,
   sourceSwitchFailedDescription,
-  sourceSwitchFailedTitle,
-  streamTargetToast
+  sourceSwitchFailedTitle
 } from './studio-toasts'
 
 // Plan 174 S2.4: the Studio's toasts, by meaning, one id per kind of news.
@@ -57,42 +52,6 @@ describe('sourceSwitchFailedTitle', () => {
   })
 })
 
-describe('streamTargetToast', () => {
-  it('gives every notice for one destination the same id, so "is back" replaces the bad news', () => {
-    const stopped = streamTargetToast({
-      key: 'stream-target-failed:yt-1',
-      kind: 'error',
-      title: 'Streaming to YouTube stopped',
-      description: 'The other destinations keep streaming.'
-    })
-    const back = streamTargetToast({
-      key: 'stream-target:yt-1',
-      kind: 'success',
-      title: 'YouTube is back',
-      description: 'Streaming to YouTube resumed.'
-    })
-    expect(stopped.id).toBe('stream-target:yt-1')
-    expect(back.id).toBe(stopped.id)
-    expect(stopped.duration).toBe(Infinity)
-    expect(back.duration).toBeUndefined()
-  })
-
-  it('shows a notice with its type', () => {
-    vi.clearAllMocks()
-    showStreamTargetNotice({
-      key: 'stream-target:tw:1',
-      kind: 'warning',
-      title: 'Twitch is reconnecting',
-      description: 'Viewers there see nothing until it is back.'
-    })
-    expect(toast.warning).toHaveBeenCalledWith('Twitch is reconnecting', {
-      id: 'stream-target:tw:1',
-      description: 'Viewers there see nothing until it is back.',
-      duration: Infinity
-    })
-  })
-})
-
 describe('cohostStatusToast', () => {
   const running = {
     status: 'listening',
@@ -126,68 +85,5 @@ describe('cohostStatusToast', () => {
       action: 'sign-in'
     })
     expect(cohostStatusToast(running, { ...running, status: 'off' } as CohostState)).toBeNull()
-  })
-})
-
-describe('showXBroadcastProblem', () => {
-  beforeEach(() => {
-    vi.clearAllMocks()
-    vi.spyOn(console, 'warn').mockImplementation(() => undefined)
-  })
-
-  it('warns in the YouTube toast words, never with the raw text', async () => {
-    const target = { id: 'x-1', label: 'X' }
-    await showXBroadcastProblem('start', target, new Error('HTTP 503 {"errors":[]}'))
-    expect(toast.warning).toHaveBeenLastCalledWith("Couldn't start the X broadcast", {
-      id: 'x-broadcast-start:x-1',
-      description: 'Try again. If it keeps happening, export a support bundle from Health.'
-    })
-    await showXBroadcastProblem('end', target, new Error('HTTP 500'))
-    expect(toast.warning).toHaveBeenLastCalledWith(
-      "Couldn't end the X broadcast",
-      expect.objectContaining({
-        description: 'End it in X Media Studio.',
-        action: expect.objectContaining({ label: 'Open Media Studio' })
-      })
-    )
-    await showXBroadcastProblem('chat', target, new Error('chat 401'))
-    expect(toast.warning).toHaveBeenLastCalledWith(
-      "X chat isn't connected for X",
-      expect.objectContaining({ action: expect.objectContaining({ label: 'Open Destinations' }) })
-    )
-  })
-})
-
-// Plan 215 A3 and A5 (D7): the Videorc sign-in, named. A streamer read "Sign
-// in to your Videorc account" as an X failure and was sent to Livestream,
-// where X looked fine; Sign in is the fix, so it is the action.
-describe('the Videorc sign-in toasts', () => {
-  it('names the account with Sign in as the fix, never Open Destinations', async () => {
-    await showChatNeedsVideorcSignIn('X')
-    expect(toast.warning).toHaveBeenLastCalledWith(
-      'X chat needs your Videorc sign-in',
-      expect.objectContaining({
-        id: 'chat-videorc-sign-in:X',
-        description: 'Your stream is fine. Sign in to read chat.',
-        action: expect.objectContaining({ label: 'Sign in' })
-      })
-    )
-    await showChatNeedsVideorcSignIn('Kick')
-    expect(toast.warning).toHaveBeenLastCalledWith(
-      'Kick chat needs your Videorc sign-in',
-      expect.objectContaining({ id: 'chat-videorc-sign-in:Kick' })
-    )
-  })
-
-  it('says when the server signed the desktop out', async () => {
-    await showVideorcSignInExpired()
-    expect(toast.warning).toHaveBeenLastCalledWith(
-      'Your Videorc sign-in expired',
-      expect.objectContaining({
-        id: 'account-session-expired',
-        description: 'Sign in again.',
-        action: expect.objectContaining({ label: 'Sign in' })
-      })
-    )
   })
 })

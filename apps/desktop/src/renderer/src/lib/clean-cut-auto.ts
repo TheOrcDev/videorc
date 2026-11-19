@@ -16,7 +16,7 @@ import {
 } from './clean-cut-view'
 import { cloudAiUploadGate } from './entitlement-ui'
 import { applyFinalizationEvent } from './session-finalization'
-import { toast } from './toast'
+import { withWorkNotifications } from './notify'
 
 // Plan 119 S15: with "Make a clean cut of every recording" on, a recording
 // that finishes its MP4 gets its clean cut without a click. Cloud consent
@@ -225,14 +225,13 @@ export async function autoRunCleanCut(
 
 /**
  * Quiet on purpose: nothing retries by itself, and Clean cut has Make and
- * Retry. One toast per recording; its action opens Clean cut on it.
+ * Retry. One entry per recording behind the bell; its button opens Clean cut
+ * on it.
  */
 export function showCleanCutAutoFailed(sessionId: string, reason: string): void {
-  toast.warning("Your clean cut didn't start", {
-    id: `clean-cut-auto-${sessionId}`,
-    description: reason,
-    action: { label: 'Open Clean cut', onClick: () => openCleanCut({ sessionId }) }
-  })
+  withWorkNotifications((work) =>
+    work.publishCleanCutAutoFailed(sessionId, reason, () => openCleanCut({ sessionId }))
+  )
 }
 
 function errorCode(error: unknown): string | null {

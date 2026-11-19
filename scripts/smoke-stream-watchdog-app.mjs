@@ -621,7 +621,7 @@ function sessionParams(outputDirectoryCapability) {
       recordEnabled: true,
       streamEnabled: true,
       outputDirectoryCapability,
-      video: { preset: 'custom', width: 1280, height: 720, fps: 30, bitrateKbps: 4000 },
+      video: recordingVideo(),
       rtmp: { preset: 'custom', serverUrl: targets[0].serverUrl, streamKey: targets[0].streamKey }
     },
     streaming: {
@@ -645,6 +645,17 @@ function sessionParams(outputDirectoryCapability) {
       enabledTargetIds: targets.map((target) => target.id)
     }
   }
+}
+
+// Linux's raw bridge runs one encode for the recording and every horizontal
+// destination, and refuses a recording below them instead of capping the
+// stream to it (plan 0016). There the recording takes the destinations'
+// stream-safe-1080p30 profile.
+function recordingVideo() {
+  if (process.platform === 'linux') {
+    return { preset: 'tutorial-1080p30', width: 1920, height: 1080, fps: 30, bitrateKbps: 6000 }
+  }
+  return { preset: 'custom', width: 1280, height: 720, fps: 30, bitrateKbps: 4000 }
 }
 
 function spawnListener(target) {
