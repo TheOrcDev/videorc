@@ -12,6 +12,7 @@ import {
   frostLeadFailure,
   frostLeadMs,
   hideCoverMs,
+  hideStoresCoveredMs,
   selectWindowsHideScreen,
   sessionFrostLeadMs,
   windowsHideOutputsVerdict,
@@ -410,6 +411,25 @@ test('the hide cover is the first hidden privacy event after the press', () => {
   assert.equal(hideCoverMs(events, 1000), 42)
   assert.equal(hideCoverMs(events, 2000), null)
   assert.equal(hideCoverMs(undefined, 0), null)
+})
+
+test("the stores' cover comes from the backend's first cover line after the press", () => {
+  const lines = [
+    '[backend:info] 2026-11-19T20:57:14.100Z  INFO videorc_backend::state: unrelated',
+    '[backend:info] 2026-11-19T20:57:14.143Z  INFO videorc_backend::preview_screen: [hide-screen] covered the stores in 42 ms (lock 0 ms, cpu still 33 ms: true, texture still 8 ms: true)',
+    '[backend:info] 2026-11-19T20:57:18.000Z  INFO videorc_backend::preview_screen: [hide-screen] covered the stores in 90 ms (lock 0 ms, cpu still 60 ms: true, texture still 30 ms: true)'
+  ]
+  assert.equal(hideStoresCoveredMs(lines), 42)
+  assert.equal(hideStoresCoveredMs(lines.slice(0, 1)), null)
+  assert.equal(hideStoresCoveredMs(undefined), null)
+  // The press-to-stores cover the slack takes: the gate's event, then the
+  // stores' cover after it (the event no longer stands in for both).
+  const budget = captureAlignedHideBudget(SMART_SCENES_BUDGET, 30, {
+    frostLeadMs: 39,
+    canvasFrameMs: 1000 / 30,
+    hideCoverMs: 10 + hideStoresCoveredMs(lines)
+  })
+  assert.equal(budget.showSlackMs, 125)
 })
 
 test('a frost far ahead of the hide press is a misaligned file, not slack', () => {

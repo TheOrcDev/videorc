@@ -59,6 +59,7 @@ import {
   frostLeadFailure,
   frostLeadMs,
   hideCoverMs,
+  hideStoresCoveredMs,
   sessionFrostLeadMs,
   distinctFrameRate,
   selectWindowsHideScreen,
@@ -385,6 +386,7 @@ async function hideStep({ renderer, smoke, screen }) {
     await request(ws, timeoutMs, 'diagnostics.stats').catch(() => null)
   )
 
+  const hideLogFrom = devAppLogLines.length
   const hideAtMs = Date.now()
   await renderer.togglePrivacy()
   const hidden = await waitForBackendState(
@@ -395,11 +397,14 @@ async function hideStep({ renderer, smoke, screen }) {
   )
   const hideAckMs = Date.now() - hideAtMs
   await sleep(HIDDEN_SPAN_MS / 2)
-  // Issue #1329: screen.privacy.changed follows the stills into the stores,
-  // so its arrival bounds how late the frost could reach the outputs. It
-  // comes after the gate the ack above reads, so it is read here, two
+  // Issue #1329: the frost reaches the outputs once the stills are in the
+  // stores. screen.privacy.changed marks the gate closing, and the backend
+  // logs how long it then held the stores to cover them; together they bound
+  // how late the frost could reach the outputs. Both are read here, two
   // seconds on.
-  const coverMs = hideCoverMs(events, hideAtMs)
+  const gateMs = hideCoverMs(events, hideAtMs)
+  const storesCoveredMs = hideStoresCoveredMs(devAppLogLines.slice(hideLogFrom))
+  const coverMs = gateMs == null ? null : gateMs + (storesCoveredMs ?? 0)
   const diagnosticsHidden = await request(ws, timeoutMs, 'diagnostics.stats').catch(() => null)
   await sleep(HIDDEN_SPAN_MS / 2)
   const showAtMs = Date.now()
@@ -554,6 +559,7 @@ async function hideStep({ renderer, smoke, screen }) {
     showAtMs,
     hideAckMs,
     hideCoverMs: coverMs,
+    hideStoresCoveredMs: storesCoveredMs,
     showAckMs,
     hiddenSpanMs: showAtMs - hideAtMs,
     flashes,

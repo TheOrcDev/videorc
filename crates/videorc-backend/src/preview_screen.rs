@@ -1455,14 +1455,32 @@ fn hold_live_d3d11_frame(
 /// The frosted still of a WGC texture into the texture store, and into the
 /// CPU store when that one has no still for this span yet. When the still
 /// can't be built, the texture store is emptied: no frame beats a live one.
+///
+/// `cpu_still` is the still `screen.hide` just published to the CPU store,
+/// of this texture's size. Its pixels become the texture still as they are:
+/// frosting the texture again (a GPU readback and a second blur) held the
+/// capture lock another 35–82 ms, and the D3D11 media loop, which reads the
+/// still through `try_lock`, drew black ticks until the lock was released.
 #[cfg(target_os = "windows")]
 fn frost_d3d11_texture_into_store(
     guard: &mut PreviewScreenShared,
     sequence: u64,
     texture: &RetainedD3D11Texture,
     captured_at: Instant,
+    cpu_still: Option<&FrameHandle<PreviewScreenPixelFormat>>,
 ) {
-    match crate::screen_privacy::d3d11::frost_texture(texture) {
+    let built = match cpu_still {
+        Some(still) => crate::screen_privacy::d3d11::create_bgra_texture(
+            texture,
+            still.width,
+            still.height,
+            &still.bytes,
+        )
+        .map(|texture| (still.width, still.height, texture, None)),
+        None => crate::screen_privacy::d3d11::frost_texture(texture)
+            .map(|(width, height, still, frosted)| (width, height, still, Some(frosted))),
+    };
+    match built {
         Ok((width, height, still, frosted)) => {
             guard.d3d11_frame_store.publish_with_d3d11_texture(
                 sequence,
@@ -1473,8 +1491,10 @@ fn frost_d3d11_texture_into_store(
                 Vec::new(),
                 still,
             );
-            if admit_screen_frame(guard.privacy.view(), &mut guard.privacy_cursor)
-                == ScreenFrameAdmission::Frost
+            // A reused still is already the CPU store's still for this span.
+            if let Some(frosted) = frosted
+                && admit_screen_frame(guard.privacy.view(), &mut guard.privacy_cursor)
+                    == ScreenFrameAdmission::Frost
             {
                 let generation = guard.capture_generation;
                 publish_cpu_still(
@@ -1500,7 +1520,10 @@ fn frost_d3d11_texture_into_store(
 }
 
 #[cfg(target_os = "windows")]
-fn frost_d3d11_store_now(guard: &mut PreviewScreenShared) -> bool {
+fn frost_d3d11_store_now(
+    guard: &mut PreviewScreenShared,
+    cpu_still: Option<&FrameHandle<PreviewScreenPixelFormat>>,
+) -> bool {
     let view = guard.privacy.view();
     if !view.hidden {
         return false;
@@ -1519,7 +1542,11 @@ fn frost_d3d11_store_now(guard: &mut PreviewScreenShared) -> bool {
     // Read before the still moves the store to the current generation: a
     // hide during an in-flight swap keeps the covered frame under its own.
     let held_generation = guard.latest_frame_generation;
-    frost_d3d11_texture_into_store(guard, sequence, &texture, Instant::now());
+    let cpu_still = cpu_still.filter(|still| {
+        (still.width, still.height) == (frame.width, frame.height)
+            && still.bytes.len() == still.width as usize * still.height as usize * 4
+    });
+    frost_d3d11_texture_into_store(guard, sequence, &texture, Instant::now(), cpu_still);
     guard.held_live_d3d11 = Some(HeldLiveFrame {
         width: frame.width,
         height: frame.height,
@@ -1577,8 +1604,15 @@ pub async fn hold_screen_now(state: &AppState) -> bool {
     let locked = started.elapsed();
     let cpu = frost_cpu_store_now(&mut guard);
     let cpu_done = started.elapsed();
+    // The texture still reuses the CPU still's pixels when the sizes match,
+    // so the lock is held for one frost, not two.
     #[cfg(target_os = "windows")]
-    let texture = frost_d3d11_store_now(&mut guard);
+    let cpu_still = guard
+        .frame_store
+        .latest()
+        .filter(|still| cpu && Some(still.storage_identity()) == guard.still_identity);
+    #[cfg(target_os = "windows")]
+    let texture = frost_d3d11_store_now(&mut guard, cpu_still.as_ref());
     #[cfg(not(target_os = "windows"))]
     let texture = false;
     drop(guard);
@@ -6883,7 +6917,7 @@ mod windows {
                 );
             }
             ScreenFrameAdmission::Frost => {
-                frost_d3d11_texture_into_store(&mut guard, sequence, &texture, now);
+                frost_d3d11_texture_into_store(&mut guard, sequence, &texture, now, None);
                 hold_live_d3d11_frame(
                     &mut guard,
                     HeldLiveFrame {

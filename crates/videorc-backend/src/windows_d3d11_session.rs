@@ -869,6 +869,36 @@ impl WindowsD3d11CfrSequencer {
     }
 }
 
+/// Plan 210 S7 (Hide screen): how long the media loop keeps the frame it
+/// already had on air at a Hide edge while it waits for the gate's still.
+/// `screen.hide` covers the stores in 55–70 ms on a GTX 1650 SUPER (#1329);
+/// past this bound the loop draws no screen until the still arrives.
+#[cfg(any(target_os = "windows", test))]
+const WINDOWS_D3D11_PRIVACY_EDGE_HOLD: std::time::Duration = std::time::Duration::from_millis(300);
+
+/// Plan 210 S7 (Hide screen): at a Hide edge the frame in hand (captured
+/// before the loop saw the edge, and already composed on air) stays until
+/// the gate's still is read, but never past `hold_until`. Dropping it at the
+/// edge drew ticks with no screen until the still came: two black frames on
+/// the recording, every stream and Clips at 30 fps. No newer live frame is
+/// taken meanwhile. Returns whether the hold ended this tick; the caller then
+/// drops the held frame and restarts the source fence for the store's clock.
+#[cfg(any(target_os = "windows", test))]
+fn privacy_edge_hold_ends(
+    hold_until: &mut Option<std::time::Instant>,
+    now: std::time::Instant,
+    still_read: bool,
+) -> bool {
+    let Some(until) = *hold_until else {
+        return false;
+    };
+    if still_read || now >= until {
+        *hold_until = None;
+        return true;
+    }
+    false
+}
+
 /// Plan 210 S7 (Hide screen): the first native frame after a Show takes over
 /// from the BGRA stand-in. The stand-in's sequences are the preview store's,
 /// the native frame's are the capture owner's: two clocks, so the source
@@ -2678,6 +2708,7 @@ mod runtime {
         let screen_privacy = Arc::clone(&live_sources.state.screen_privacy);
         let mut privacy_hidden = false;
         let mut privacy_resume_pending = false;
+        let mut privacy_edge_hold_until: Option<Instant> = None;
         let mut upload_revision = 0u64;
         let mut last_capture_upload: Option<(u64, WindowsD3d11UploadPixels, u64)> = None;
         let mut camera_upload_revision = 0u64;
@@ -2703,17 +2734,20 @@ mod runtime {
             if privacy_hidden_now != privacy_hidden {
                 privacy_hidden = privacy_hidden_now;
                 privacy_resume_pending = !privacy_hidden_now;
-                retained_capture_ticket = None;
                 pending_capture = None;
                 if privacy_hidden_now {
-                    // The BGRA frame in hand and its upload are live pixels
-                    // from before the edge: drop them with the texture lease.
-                    // The still replaces them below; until it is read, no
-                    // screen is drawn at all.
-                    capture_frame = None;
-                    last_capture_upload = None;
+                    // The frame in hand (the texture lease, or the BGRA frame
+                    // and its upload) is from before the edge and already on
+                    // air. It stays until the still is read below, within a
+                    // bound, so the edge draws no black ticks; the native poll
+                    // stops and a lease answering after the edge is dropped.
+                    privacy_edge_hold_until =
+                        Some(frame_started_at + super::WINDOWS_D3D11_PRIVACY_EDGE_HOLD);
+                } else {
+                    privacy_edge_hold_until = None;
+                    retained_capture_ticket = None;
+                    cfr.replace_source();
                 }
-                cfr.replace_source();
             }
             let fresh_committed = live_sources.snapshot();
             if fresh_committed
@@ -2932,6 +2966,18 @@ mod runtime {
                             .as_ref()
                             .is_none_or(|previous| previous.sequence != frame.sequence)
                     {
+                        if privacy_hidden
+                            && super::privacy_edge_hold_ends(
+                                &mut privacy_edge_hold_until,
+                                frame_started_at,
+                                true,
+                            )
+                        {
+                            // The still takes over from the frame held at the
+                            // edge; the store counts on its own clock.
+                            retained_capture_ticket = None;
+                            cfr.replace_source();
+                        }
                         new_capture_sequence = Some(frame.sequence);
                         capture_frame = Some(frame);
                     }
@@ -2939,6 +2985,22 @@ mod runtime {
                     capture_frame = None;
                     last_capture_upload = None;
                 }
+            }
+            if privacy_hidden
+                && super::privacy_edge_hold_ends(
+                    &mut privacy_edge_hold_until,
+                    frame_started_at,
+                    false,
+                )
+            {
+                retained_capture_ticket = None;
+                capture_frame = None;
+                last_capture_upload = None;
+                cfr.replace_source();
+                tracing::warn!(
+                    hold_ms = super::WINDOWS_D3D11_PRIVACY_EDGE_HOLD.as_millis() as u64,
+                    "Hide screen: no still within the edge hold; the D3D11 program draws no screen until it arrives"
+                );
             }
             if !resuming
                 && startup_tx.is_some()
@@ -6083,6 +6145,43 @@ mod tests {
     }
 
     #[test]
+    fn windows_d3d11_hide_edge_holds_the_frame_on_air_until_the_still() {
+        let edge = std::time::Instant::now();
+        let ms = std::time::Duration::from_millis;
+        // No Hide edge, nothing held.
+        let mut hold = None;
+        assert!(!privacy_edge_hold_ends(&mut hold, edge, true));
+
+        // Hide: the frame on air stays while the still is pending...
+        let mut hold = Some(edge + WINDOWS_D3D11_PRIVACY_EDGE_HOLD);
+        assert!(!privacy_edge_hold_ends(&mut hold, edge, false));
+        assert!(!privacy_edge_hold_ends(&mut hold, edge + ms(67), false));
+        // ...and the still takes over the tick it is read, once.
+        assert!(privacy_edge_hold_ends(&mut hold, edge + ms(70), true));
+        assert_eq!(hold, None);
+        assert!(!privacy_edge_hold_ends(&mut hold, edge + ms(100), true));
+
+        // A still that never comes ends the hold at its bound, not before.
+        let mut hold = Some(edge + WINDOWS_D3D11_PRIVACY_EDGE_HOLD);
+        assert!(!privacy_edge_hold_ends(
+            &mut hold,
+            edge + WINDOWS_D3D11_PRIVACY_EDGE_HOLD - ms(1),
+            false
+        ));
+        assert!(privacy_edge_hold_ends(
+            &mut hold,
+            edge + WINDOWS_D3D11_PRIVACY_EDGE_HOLD,
+            false
+        ));
+        assert_eq!(hold, None);
+
+        // The bound covers the measured cover (55–70 ms) with room to spare,
+        // and stays far inside the smoke's 700 ms Hide edge.
+        assert!(WINDOWS_D3D11_PRIVACY_EDGE_HOLD >= ms(200));
+        assert!(WINDOWS_D3D11_PRIVACY_EDGE_HOLD <= ms(500));
+    }
+
+    #[test]
     fn windows_d3d11_cfr_show_hands_back_to_the_native_capture_clock() {
         // Issue #1088: native Desktop Duplication frames count from the
         // capture owner (~70 here); the hidden still and the stand-in after
@@ -6092,7 +6191,10 @@ mod tests {
         let mut cfr = WindowsD3d11CfrSequencer::default();
         assert!(cfr.advance(Some(68)).unwrap().is_some());
         assert!(cfr.advance(Some(69)).unwrap().is_some());
-        // Hide: the loop replaces the source and composes the still.
+        // Hide: the held edge frame repeats on the native clock...
+        let held = cfr.advance(None).unwrap().unwrap();
+        assert_eq!((held.source_sequence, held.repeated_source), (69, true));
+        // ...then the still takes over: the loop replaces the source.
         cfr.replace_source();
         assert!(cfr.advance(Some(419)).unwrap().is_some());
         // Show: replaced again; the stand-in keeps drawing from the store
@@ -6115,7 +6217,7 @@ mod tests {
         let first_live = cfr.advance(Some(73)).unwrap().unwrap();
         assert_eq!(
             (first_live.output_sequence, first_live.source_sequence),
-            (6, 73),
+            (7, 73),
             "encoder time continues; the source fence restarts"
         );
         assert!(cfr.advance(Some(74)).unwrap().is_some());
