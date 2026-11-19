@@ -56,6 +56,14 @@ describe('streamTargetNotices', () => {
         description: "Viewers see nothing until it's back."
       })
     ])
+    // Twitch is gone from the list altogether: nobody else is on air.
+    expect(streamTargetNotices(states('failed', 'live'), [target('failed')])).toEqual([
+      expect.objectContaining({ key: 'stream-target:yt', urgent: true })
+    ])
+    // A destination added live was not on air before: YouTube is eased.
+    expect(
+      streamTargetNotices(new Map([['yt', 'failed']]), [target('failed'), other('tw', 'live')])
+    ).toEqual([expect.objectContaining({ key: 'stream-target:yt', urgent: false })])
     // Nothing about the others changed: nothing is said again.
     expect(
       streamTargetNotices(states('failed', 'live'), [target('failed'), other('tw', 'live')])

@@ -96,7 +96,7 @@ first. The look's helpers are now kept once loaded
 press. `origin/main` has the same race (its third setup profile fails 4
 runs of 4).
 
-**What the automated review found** (25 findings, one major; each fixed
+**What the automated review found** (27 findings, one major; each fixed
 with a test where a unit test can reach it):
 
 - A list chunk that failed to load threw while rendering, outside the

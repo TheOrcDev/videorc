@@ -143,6 +143,9 @@ export function relayedPopUpDoor(
           } else if (mine()) {
             asking.delete(key)
             there.add(key)
+            // An earlier offer on this subject was shown here: one toast,
+            // in one window.
+            local.dismiss(key)
           } else if (asking.has(key)) {
             // A newer offer is out: this toast is there until that one lands.
             there.add(key)

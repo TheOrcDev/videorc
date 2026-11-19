@@ -69,10 +69,9 @@ export function streamTargetNotices(
   targets: readonly StreamTargetRuntime[]
 ): StreamTargetNotice[] {
   const notices: StreamTargetNotice[] = []
-  const was = targets.map((target) => ({
-    targetId: target.targetId,
-    state: previous.get(target.targetId) ?? target.state
-  }))
+  // The snapshot before this one, as it was: a destination that has gone
+  // was still on air then, and a new one was not there yet.
+  const was = Array.from(previous, ([targetId, state]) => ({ targetId, state }))
   // A destination that is still down says how many others are on air, and
   // is urgent when none is. That follows the others, so it is said again
   // when they change although its own state did not.

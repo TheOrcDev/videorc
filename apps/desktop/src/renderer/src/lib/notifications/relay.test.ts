@@ -283,7 +283,19 @@ describe("the main window's notification relay (plan 250 S8)", () => {
       expect(local.show).not.toHaveBeenCalled()
       door.dismiss('microphone')
       expect(sent.at(-1)).toEqual({ type: 'dismiss', key: 'microphone' })
-      expect(local.dismiss).not.toHaveBeenCalled()
+
+      // Shown here first, then the worse one is taken there: the toast here goes.
+      local.show.mockClear()
+      local.dismiss.mockClear()
+      door.show(entry, 8_000, undefined)
+      answers[4](false)
+      await flush()
+      expect(local.show).toHaveBeenCalledTimes(1)
+      door.show({ ...entry, tone: 'urgent' }, 15_000, undefined)
+      answers[5](true)
+      await flush()
+      expect(local.dismiss).toHaveBeenCalledWith('microphone')
+      expect(local.show).toHaveBeenCalledTimes(1)
     })
 
     it('a toast showing in the Stream Manager is dismissed there on Clear', async () => {
