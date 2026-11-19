@@ -140,7 +140,8 @@ One verb pair on every surface (plan 174 S2.2). The strings live in
     "Change app…", or a layout as something to switch to.
 - Hide screen (plan 210) reads the same everywhere: the control is "Hide
   screen" and then "Show screen", on the scene's Screen row in Studio's Scenes
-  section, and the chip while it holds is "Screen hidden". Never "blur",
+  section (in the Show stage's Screens while a room is open), and the chip
+  while it holds is "Screen hidden". Never "blur",
   "privacy mode" or "censor".
 - Videorc Camera (plan 214) is the camera other apps see, one name
   everywhere: "Videorc Camera", never "virtual cam", "vcam" or "webcam".

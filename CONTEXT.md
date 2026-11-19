@@ -205,8 +205,9 @@ _Avoid_: crossfade (there is none), warm capture, restart
 Covers the screen on every output (the recording, every stream, Clips and the
 Screen file) with a frosted still of it, while the camera and microphone stay
 on; "Show screen" brings it back. The button sits on the scene's Screen row in
-Studio's Scenes section (plan 231 D8). While it holds, the Studio and the
-Stream Manager say "Screen hidden". Its key is Control-Option-H (Ctrl+Alt+H on
+Studio's Scenes section (plan 231 D8), and while a room is open, in the Show
+stage's Screens (plan 254 D4). While it holds, the Studio and the Stream
+Manager say "Screen hidden". Its key is Control-Option-H (Ctrl+Alt+H on
 Windows and Linux) until changed in Settings → Shortcuts, and on macOS a
 password manager in front hides the screen too. Plan 210.
 _Avoid_: blur (it isn't live), privacy mode, BRB (that's a takeover), censor

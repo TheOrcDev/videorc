@@ -1,4 +1,3 @@
-import { HiddenIcon } from '@/components/icons'
 import { useId, useRef, useState, type ReactElement, type ReactNode } from 'react'
 
 import {
@@ -17,8 +16,12 @@ import {
 } from '@/components/lcd-panel'
 import { SectionLabel } from '@/components/section-label'
 import { SourcePermissionAlerts } from '@/components/sources/source-permission-alerts'
-import { StatusBadge } from '@/components/status-badge'
 import { ScreenFramingControl, VERTICAL_SCENES } from '@/components/studio/scenes-gallery'
+import {
+  ScreenHiddenChip,
+  type ScreenPrivacyControl,
+  useScreenPrivacyControl
+} from '@/components/studio/screen-privacy-control'
 import { SourceSwitchStatus } from '@/components/studio/source-switch-status'
 import {
   editVerticalStreamLayout,
@@ -59,15 +62,8 @@ import {
   sceneLayoutChoices,
   screenFieldWords
 } from '@/lib/scene-section'
-import {
-  SCREEN_HIDDEN_LABEL,
-  screenHideAccelerator,
-  roomPrivacyLabel,
-  screenPrivacyActionLabel,
-  screenPrivacyDisabledReason
-} from '@/lib/screen-privacy-view'
+import { SCREEN_HIDDEN_LABEL, screenPrivacyActionLabel } from '@/lib/screen-privacy-view'
 import { standInLine } from '@/lib/source-status'
-import { toastUserError } from '@/lib/user-error'
 import { cn } from '@/lib/utils'
 
 // Plan 231 D8: under the cards, the scene on stream's own fields. This is
@@ -76,62 +72,6 @@ import { cn } from '@/lib/utils'
 // Studio's Sources rows), its Layout for the studio's mode, Fill or Fit, and
 // with a vertical stream armed its 9:16 layout. Every edit saves into the
 // scene on stream (D11). Part of the lazy Scenes chunk.
-
-/** What both looks' Hide screen controls show and do (the line and the Retro LCD's row). */
-export interface ScreenPrivacyControl {
-  /** Plan 249: the room's own privacy state, while it says more than Hidden. */
-  statusLabel?: string
-  /** Plan 249: what the room confirmed, as the chip's tooltip. */
-  observationDetail?: string
-  hidden: boolean
-  /** The bound key, absent when the streamer cleared it. */
-  accelerator?: string
-  platform?: string
-  /** Why the action is off (a refused hide, Videorc offline), or null. */
-  disabledReason: string | null
-  toggle: () => void
-}
-
-/**
- * Plan 210 S8b: the one Studio Hide screen action, by the state it shows. A
- * failure says so; a refused hide is the hook's warning, and success is silent.
- */
-export function useScreenPrivacyControl(): ScreenPrivacyControl {
-  const {
-    screenPrivacy: privacy,
-    roomScreenPrivacy,
-    hideScreen,
-    showScreen,
-    settings,
-    runtimeInfo,
-    wsStatus
-  } = useStudioCore()
-  // Plan 249: a room's screen share hides too; it holds whichever hid it.
-  const hiddenNow = privacy.hidden || roomScreenPrivacy?.hidden === true
-  return {
-    statusLabel: roomPrivacyLabel(roomScreenPrivacy?.status),
-    observationDetail: roomScreenPrivacy?.hidden
-      ? `Source blocked: ${roomScreenPrivacy.sourceBlockedAt ?? 'unavailable'}. Applied frost observations: ${Object.keys(roomScreenPrivacy.observations).join(', ') || 'none'}. Other receivers remain unconfirmed.`
-      : undefined,
-    hidden: hiddenNow,
-    accelerator: screenHideAccelerator(settings.globalShortcuts?.screenHideToggle),
-    platform: runtimeInfo?.platform,
-    disabledReason: screenPrivacyDisabledReason(
-      { ...privacy, hidden: hiddenNow },
-      wsStatus === 'connected'
-    ),
-    toggle: () => {
-      const hidden = hiddenNow
-      void (hidden ? showScreen() : hideScreen()).catch((error: unknown) =>
-        toastUserError(
-          error,
-          { action: hidden ? 'show' : 'hide', object: 'your screen' },
-          { id: 'screen-privacy' }
-        )
-      )
-    }
-  }
-}
 
 /**
  * The scene on stream's fields, under Studio's scene cards. `onChangeScreen`
@@ -454,21 +394,6 @@ function SceneField({
       </div>
       {children}
     </div>
-  )
-}
-
-/**
- * The Screen field's privacy chip. In a room (plan 249) it can say more than
- * Hidden, and what the room confirmed is its tooltip.
- */
-function ScreenHiddenChip({ value, detail }: { value: string; detail?: string }): ReactElement {
-  const chip = <StatusBadge icon={HiddenIcon} tone="warn" value={value} />
-  return detail ? (
-    <span className="flex" title={detail}>
-      {chip}
-    </span>
-  ) : (
-    chip
   )
 }
 

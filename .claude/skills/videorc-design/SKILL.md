@@ -586,9 +586,14 @@ links home.
   the password-manager switch and list). The control itself sits where the
   streamer is: the scene's Screen row in Studio's Scenes section (plan 231
   D8; never the transport area), the Stream Manager status bar, ⌘K, `/hide`
-  and `/show`, the Deck, the phone and MCP's `hide_screen`. Agents and
-  Sidekick hide, never show. While hidden, the Screen row and the Stream
-  Manager show a "Screen hidden" chip and nothing toasts.
+  and `/show`, the Deck, the phone and MCP's `hide_screen`. While a room is
+  open the Show stage replaces the Preview and the Scenes step aside, so the
+  Show stage's Screens header carries it beside Stop sharing, over the host's
+  own card (plan 254 D4): the same state through `useScreenPrivacyControl`,
+  shown while the host shares a screen or while it is hidden. Agents and
+  Sidekick hide, never show. While hidden, the Screen row, the Show stage's
+  Screens and the Stream Manager show a "Screen hidden" chip and nothing
+  toasts.
 - **The local file**: Output ("Where recordings go", quality). Recordings
   themselves live in Library.
 - **Avatar** (plan 239, owner 2026-11-15): the Avatar page (Livestream, ⌘8;
