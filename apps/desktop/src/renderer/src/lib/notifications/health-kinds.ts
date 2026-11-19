@@ -159,20 +159,35 @@ export const HEALTH_KINDS: Record<string, HealthKindRow> = {
     was: 'It was out of sight'
   },
 
-  // The computer. Neither says it cleared yet (S9 adds that), so both end
-  // with the session.
+  // The computer. Each says when it cleared (plan 250 S9): the load stayed
+  // under 1.5 per core for 30 s, or the volume holds 25 minutes again. An
+  // episode that is still open ends with the session.
   'host-overloaded': {
     effect: 'open',
     key: 'host-overloaded',
     kind: 'host-overloaded',
     title: 'This computer is overloaded'
   },
+  'host-overload-cleared': {
+    effect: 'resolve',
+    key: 'host-overloaded',
+    title: 'This computer is keeping up again',
+    was: 'It was overloaded'
+  },
+  // Sent at Record and again each time it gets worse (five minutes left,
+  // then the last minute): the entry's words follow.
   'disk-space-low': {
     effect: 'open',
     key: 'disk-space',
     kind: 'disk-space',
     title: 'Recording space is low',
     door: 'output'
+  },
+  'disk-space-recovered': {
+    effect: 'resolve',
+    key: 'disk-space',
+    title: 'Recording space is back',
+    was: 'It was low'
   },
   // It stops the take and had no notice of its own. The take's failure is
   // the same happening: both land on the failed recording's entry

@@ -3,7 +3,11 @@ import { beforeEach, describe, expect, it } from 'vitest'
 import type { HealthEvent } from '@/lib/backend'
 import { HEALTH_KINDS, healthKindFor } from '@/lib/notifications/health-kinds'
 import { NOTIFICATION_KINDS } from '@/lib/notifications/kinds'
-import { publishHealthEvent } from '@/lib/notifications/sources/health'
+import {
+  lastHealthWords,
+  publishHealthEvent,
+  rebuildHealthNotifications
+} from '@/lib/notifications/sources/health'
 import { createNotificationStore, type NotificationStore } from '@/lib/notifications/store'
 
 function event(code: string, level: HealthEvent['level'] = 'warn'): HealthEvent {
@@ -182,13 +186,142 @@ describe('health events as notifications (plan 250 S5)', () => {
       'Screen capture is back'
     ],
     ['screen-window-out-of-sight', 'screen-window-back', 'screen-capture', 'The window is back'],
-    ['mic-silent', 'microphone-signal-recovered', 'microphone', 'Your microphone has sound again']
+    ['mic-silent', 'microphone-signal-recovered', 'microphone', 'Your microphone has sound again'],
+    [
+      'host-overloaded',
+      'host-overload-cleared',
+      'host-overloaded',
+      'This computer is keeping up again'
+    ],
+    ['disk-space-low', 'disk-space-recovered', 'disk-space', 'Recording space is back']
   ]
   it.each(recoveries)('%s then %s resolves %s', (opens, recovers, key, title) => {
     publishHealthEvent(store, event(opens), context)
     expect(publishHealthEvent(store, event(recovers, 'info'), context)).toBe(true)
     expect(store.snapshot()).toHaveLength(1)
     expect(store.snapshot()[0]).toMatchObject({ key, state: 'resolved', tone: 'done', title })
+  })
+
+  describe('clear signals from the backend (S9)', () => {
+    it('an overload that ended resolves, and a second one opens the entry again', () => {
+      publishHealthEvent(store, event('host-overloaded'), context)
+      publishHealthEvent(store, event('host-overload-cleared', 'info'), context)
+      expect(store.snapshot()[0]).toMatchObject({
+        key: 'host-overloaded',
+        state: 'resolved',
+        title: 'This computer is keeping up again',
+        detail: 'It was overloaded for 1 s.'
+      })
+      publishHealthEvent(store, event('host-overloaded'), context)
+      expect(store.snapshot()).toHaveLength(1)
+      expect(store.snapshot()[0]).toMatchObject({
+        state: 'open',
+        title: 'This computer is overloaded'
+      })
+    })
+
+    it('low recording space follows the backend words as it gets worse, then resolves', () => {
+      publishHealthEvent(
+        store,
+        { ...event('disk-space-low'), message: 'About 14 minutes of recording fit.' },
+        context
+      )
+      publishHealthEvent(
+        store,
+        { ...event('disk-space-low'), message: 'About 4 minutes of recording fit.' },
+        context
+      )
+      expect(store.snapshot()).toHaveLength(1)
+      expect(store.snapshot()[0]).toMatchObject({
+        state: 'open',
+        detail: 'About 4 minutes of recording fit.'
+      })
+      publishHealthEvent(store, event('disk-space-recovered', 'info'), context)
+      expect(store.snapshot()[0]).toMatchObject({
+        state: 'resolved',
+        title: 'Recording space is back'
+      })
+    })
+
+    it('a clear with nothing open changes nothing', () => {
+      publishHealthEvent(store, event('host-overload-cleared', 'info'), context)
+      publishHealthEvent(store, event('disk-space-recovered', 'info'), context)
+      expect(store.snapshot()).toEqual([])
+    })
+  })
+
+  describe('the rebuild on reconnect (S9)', () => {
+    const at = (
+      code: string,
+      second: number,
+      level: HealthEvent['level'] = 'warn'
+    ): HealthEvent => ({
+      ...event(code, level),
+      id: `${code}-${second}`,
+      createdAt: new Date(Date.UTC(2026, 10, 19, 10, 0, second)).toISOString()
+    })
+    // A recorded page, newest first as the backend sends it.
+    const page = [
+      at('watchdog-mic-muted', 58),
+      at('microphone-noise-reduction-silenced', 55),
+      at('stream-bitrate-floor', 50),
+      at('stream-delivery-recovered', 40, 'info'),
+      at('screen-window-back', 36, 'info'),
+      at('stream-bitrate-lowered', 35),
+      at('host-overloaded', 30),
+      at('stream-output-failed', 28, 'error'),
+      at('screen-window-out-of-sight', 25),
+      at('stream-delivery-degraded', 20),
+      at('screen-capture-stopped', 15, 'error'),
+      at('host-overload-cleared', 12, 'info'),
+      at('host-overloaded', 5),
+      at('recording-startup-cadence-unsteady', 1)
+    ]
+
+    it('reads the last word on each subject, oldest first', () => {
+      expect(lastHealthWords(page).map((item) => item.id)).toEqual([
+        'recording-startup-cadence-unsteady-1',
+        'screen-capture-stopped-15',
+        'host-overloaded-30',
+        'screen-window-back-36',
+        'stream-delivery-recovered-40',
+        'stream-bitrate-floor-50'
+      ])
+    })
+
+    it('folds a recorded page into the conditions that are still open', () => {
+      rebuildHealthNotifications(store, page, context)
+      const open = store
+        .snapshot()
+        .filter((entry) => entry.state === 'open')
+        .map((entry) => [entry.key, entry.tone, entry.title])
+      expect(open).toEqual([
+        ['screen-capture', 'urgent', 'Screen capture stopped'],
+        ['stream-uplink', 'warning', 'Your connection can’t carry this stream'],
+        ['host-overloaded', 'warning', 'This computer is overloaded'],
+        [
+          'session-notice:recording-startup-cadence-unsteady',
+          'warning',
+          'The first seconds may stutter'
+        ]
+      ])
+      // What happened once, and what cleared with nothing open, is not replayed.
+      expect(store.snapshot()).toHaveLength(4)
+    })
+
+    it('a reconnect resolves what cleared in the gap, and repeats nothing', () => {
+      publishHealthEvent(store, at('stream-delivery-degraded', 20), context)
+      publishHealthEvent(store, at('host-overloaded', 30), context)
+      store.markAllRead()
+      rebuildHealthNotifications(store, page, context)
+      const byKey = Object.fromEntries(store.snapshot().map((entry) => [entry.key, entry]))
+      expect(byKey['stream-delivery']).toMatchObject({
+        state: 'resolved',
+        title: 'Your stream is smooth again'
+      })
+      // Already known and unchanged: still one entry, still read.
+      expect(byKey['host-overloaded']).toMatchObject({ state: 'open', read: true, occurrences: 1 })
+    })
   })
 
   it('a stopped capture and a hidden window are two reports on one subject', () => {

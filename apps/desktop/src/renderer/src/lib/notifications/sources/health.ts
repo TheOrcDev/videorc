@@ -223,6 +223,43 @@ export function publishHealthEvent(
   return false
 }
 
+/**
+ * Plan 250 S9: the last word on each subject, from a session's stored
+ * events (oldest first). A `health` event is sent once, so a renderer that
+ * reloads mid-session, or reconnects after a gap, has missed what opened and
+ * what cleared meanwhile. Only conditions are read: an open with no later
+ * resolve is still open, and a resolve that was missed still resolves.
+ * Things that happened once (a blip, a failed file) are not replayed.
+ */
+export function lastHealthWords(events: readonly HealthEvent[]): HealthEvent[] {
+  const ordered = [...events].sort(
+    (a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt) || a.id.localeCompare(b.id)
+  )
+  /** The last event to touch each report, by subject and reporter. */
+  const last = new Map<string, HealthEvent>()
+  for (const event of ordered) {
+    const row = healthKindFor(event.code)
+    if (row?.effect === 'open') {
+      last.set(`${row.key}\n${row.source ?? HEALTH_SOURCE}`, event)
+    } else if (row?.effect === 'resolve') {
+      for (const source of row.sources ?? [HEALTH_SOURCE]) last.set(`${row.key}\n${source}`, event)
+    } else if (recordingStartupHealthToast(event)?.variant === 'warning') {
+      last.set(`session-notice:${event.code}\n${HEALTH_SOURCE}`, event)
+    }
+  }
+  // One event can be the last word on two reports: say it once, in order.
+  return ordered.filter((event) => [...last.values()].includes(event))
+}
+
+/** Rebuilds the session's open conditions in the list from its stored events. */
+export function rebuildHealthNotifications(
+  store: NotificationStore,
+  events: readonly HealthEvent[],
+  context: HealthNotificationContext
+): void {
+  for (const event of lastHealthWords(events)) publishHealthEvent(store, event, context)
+}
+
 /** "This recording has dropped frames", once per recording. */
 export function publishRecordingQuality(store: NotificationStore, event: HealthEvent): void {
   const sessionId = event.sessionId ?? undefined

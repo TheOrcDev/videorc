@@ -6646,13 +6646,15 @@ async fn start_session_with_timeline(
         // Advisory only: `df` and the health-event write stay off the start
         // path. Retest 154 A5: sent before the Starting status, the event
         // named a session the renderer did not know yet and never toasted.
+        // Plan 250 S9: the volume is read again every minute while the take
+        // runs, so the notice can get worse and can be taken back.
         let disk_state = state.clone();
         let disk_session_id = session_id.clone();
         tokio::spawn(async move {
-            let _ = emit_disk_space_health_event(
-                &disk_state,
-                &disk_session_id,
-                &disk_output_dir,
+            watch_recording_disk_space(
+                disk_state,
+                disk_session_id,
+                disk_output_dir,
                 disk_video_kbps,
                 disk_separate_files,
             )
@@ -30963,32 +30965,59 @@ fn emit_audio_track_health_events(
     Ok(())
 }
 
-async fn emit_disk_space_health_event(
-    state: &AppState,
-    session_id: &str,
-    output_dir: &Path,
+/// A take's watch on its recording volume (plan 200 C5, plan 250 S9): low
+/// space at Record and each time it gets worse, and its end when there is
+/// room again. It reads once at the start and then every minute, and stops
+/// with the take.
+async fn watch_recording_disk_space(
+    state: AppState,
+    session_id: String,
+    output_dir: PathBuf,
     video_kbps: u32,
     separate_files: usize,
-) -> Result<()> {
-    let directory = output_dir.to_path_buf();
-    let Ok(Some(available)) =
-        tokio::task::spawn_blocking(move || crate::disk_space::available_bytes(&directory)).await
-    else {
-        return Ok(());
-    };
-    if let Some(message) =
-        crate::disk_space::record_space_notice(available, video_kbps, separate_files)
-    {
-        emit_health_event(
-            state,
-            Some(session_id),
-            HealthLevel::Warn,
-            "disk-space-low",
-            &message,
-        )?;
+) {
+    let mut watch = crate::disk_space::RecordSpaceWatch::default();
+    let mut ticker = tokio::time::interval(crate::disk_space::RECORD_SPACE_CHECK_INTERVAL);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut first = true;
+    loop {
+        // The first tick is immediate: the Record-time reading.
+        ticker.tick().await;
+        if !std::mem::take(&mut first) {
+            let recording = state.recording.lock().await;
+            let running = matches!(
+                recording.as_ref(),
+                Some(active) if active.session_id == session_id
+            );
+            drop(recording);
+            if !running {
+                return;
+            }
+        }
+        let directory = output_dir.clone();
+        let Ok(Some(available)) =
+            tokio::task::spawn_blocking(move || crate::disk_space::available_bytes(&directory))
+                .await
+        else {
+            // A reading that fails says nothing either way.
+            continue;
+        };
+        let Some(notice) = watch.update(available, video_kbps, separate_files) else {
+            continue;
+        };
+        let level = if notice.is_low() {
+            HealthLevel::Warn
+        } else {
+            HealthLevel::Info
+        };
+        let _ = emit_health_event(
+            &state,
+            Some(&session_id),
+            level,
+            notice.code(),
+            notice.message(),
+        );
     }
-
-    Ok(())
 }
 
 pub fn emit_health_event(

@@ -14,6 +14,7 @@ import {
   completeSessionRuntimeRecovery,
   microphoneLossPresentation,
   recordingFailurePresentation,
+  recoverSessionRuntime,
   sessionModeActivity,
   sessionRuntimeContinuationIsCurrent,
   sessionRuntimeRecoveryPlan,
@@ -959,6 +960,70 @@ describe('record+stream notices (plan 174 B-6)', () => {
 
 // Plan 174 S3.18 (D9): a failure Videorc can't explain says "export a support
 // bundle from Health", so its toast opens Health; a known cause doesn't.
+// Plan 250 S9: a `health` event is sent once. A renderer that reloads
+// mid-stream rebuilds the session's open problems from its stored events.
+describe('the rebuild after a reload mid-session (plan 250 S9)', () => {
+  const stored = (code: string, second: number): HealthEvent => ({
+    id: `${code}-${second}`,
+    code,
+    level: 'warn',
+    sessionId: 'live',
+    message: `${code} message`,
+    createdAt: new Date(Date.UTC(2026, 10, 19, 10, 0, second)).toISOString()
+  })
+  const running = (id: string): SessionSummary => ({
+    ...failedSession('record+stream'),
+    id,
+    status: 'running',
+    healthEventCount: 3
+  })
+  const events = [
+    stored('stream-delivery-degraded', 10),
+    stored('host-overloaded', 20),
+    stored('stream-delivery-recovered', 30)
+  ]
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    notifications.reset()
+  })
+
+  it('lists what is still open for the session that is running', async () => {
+    const loadHealthEvents = vi.fn(async () => events)
+    await recoverSessionRuntime({
+      recording: { state: 'streaming', sessionId: 'live' },
+      sessions: [running('live')],
+      priorSessionState: 'idle',
+      loadHealthEvents
+    })
+    expect(loadHealthEvents).toHaveBeenCalledWith('live')
+    expect(notifications.snapshot()).toHaveLength(1)
+    expect(notifications.snapshot()[0]).toMatchObject({
+      key: 'host-overloaded',
+      state: 'open',
+      sessionId: 'live'
+    })
+  })
+
+  it('rebuilds nothing for a session that is not running, or that failed', async () => {
+    await recoverSessionRuntime({
+      recording: { state: 'idle' },
+      sessions: [running('live')],
+      priorSessionId: 'live',
+      priorSessionState: 'streaming',
+      loadHealthEvents: async () => events
+    })
+    expect(notifications.snapshot()).toEqual([])
+    await recoverSessionRuntime({
+      recording: { state: 'failed', sessionId: 'live' },
+      sessions: [{ ...running('live'), status: 'failed' }],
+      priorSessionState: 'streaming',
+      loadHealthEvents: async () => events
+    })
+    expect(notifications.snapshot().some((entry) => entry.key === 'host-overloaded')).toBe(false)
+  })
+})
+
 describe('backend error toasts', () => {
   beforeEach(() => vi.clearAllMocks())
   afterEach(() => vi.unstubAllGlobals())

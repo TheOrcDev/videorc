@@ -31,6 +31,7 @@ import {
   publishMicrophoneLoss,
   publishRecordingFailure,
   publishRecordingQuality,
+  rebuildHealthNotifications,
   sessionEndedNotifications
 } from '@/lib/notifications/sources/health'
 import {
@@ -674,6 +675,17 @@ export async function recoverSessionRuntime({
   const events = plan.healthSessionId
     ? await loadHealthEvents(plan.healthSessionId).catch(() => [])
     : []
+  // Plan 250 S9: a session that is still running rebuilds its open problems
+  // in the list from its stored events (the last 120): a reload mid-stream
+  // had lost them, and a reconnect had missed what cleared in the gap.
+  if (
+    ['recording', 'streaming'].includes(recording.state) &&
+    recording.sessionId &&
+    plan.healthSessionId === recording.sessionId &&
+    !plan.failureSessionId
+  ) {
+    rebuildHealthNotifications(notifications, events, { recording })
+  }
   return completeSessionRuntimeRecovery({
     plan,
     recording,
