@@ -579,8 +579,9 @@ test -p videorc-backend`, typecheck, format, `test:scripts` and
   over a USB link measured 121 ms glass to screen at 4K, sending 60 fps
   into a 30 fps canvas.
   Two of the development switches became the defaults: the pacer polls every
-  2 ms and publishes a new frame as soon as it is decoded (10 to 20 ms
-  less than waiting for the canvas tick), and Cable is 0 ms (about 26 ms
+  2 ms (since 2026-11-19, a stored frame wakes it; see below) and
+  publishes a new frame as soon as it is decoded (10 to 20 ms less than
+  waiting for the canvas tick), and Cable is 0 ms (about 26 ms
   less; no loss on the cable at 0). `VIDEORC_SRT_PACER_POLL_MS` is gone.
   The canvas tick now follows the SRT Camera (`canvas_pace.rs`) when the
   sender runs at the canvas rate or twice it: a newly decoded frame starts
@@ -600,6 +601,12 @@ test -p videorc-backend`, typecheck, format, `test:scripts` and
   at 60 fps 110.5 ms over 3 runs (108.0 to 114.3; 121 ms before), the
   same as the reference camera path measured the same way (110 to 114). The camera led 289 to 300 of every
   300 canvas ticks.
+- **The pacer wakes on a new frame (2026-11-19)**: in place of the 2 ms
+  poll, `put_frames` wakes the pacer, so a frame goes out right after its
+  decode. About 2.4 ms less glass to screen at 4K60 into a 30 fps canvas,
+  against a control run taken in the same hour. With no new frame, the
+  pacer still wakes for the canvas tick and the status, so a stop takes at
+  most 1.5 canvas intervals, never more than the 250 ms status interval.
 - **A camera look change and the SRT Camera (2026-11-18)**: one live drop
   (the sender count went back to 1) came at the same time as a
   Contrast and Saturation reset. On the rebased build, a contrast change,

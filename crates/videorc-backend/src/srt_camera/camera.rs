@@ -5,7 +5,7 @@
 //! every cadence check (D7).
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use super::ListenConfig;
@@ -39,6 +39,8 @@ pub struct CameraState<F> {
     /// frame from the held one.
     latest: Option<F>,
     latest_sequence: u64,
+    /// Wakes the pacer when `put_frames` stores a frame.
+    new_frame: Arc<Condvar>,
     pub listening: bool,
 }
 
@@ -47,6 +49,7 @@ impl<F> CameraState<F> {
     fn put_frames(&mut self, frame: F, count: usize) {
         self.latest = Some(frame);
         self.latest_sequence += count as u64;
+        self.new_frame.notify_all();
     }
 }
 
@@ -56,6 +59,7 @@ impl<F> Default for CameraState<F> {
             tracker: SignalTracker::new(),
             latest: None,
             latest_sequence: 0,
+            new_frame: Arc::new(Condvar::new()),
             listening: false,
         }
     }
@@ -402,10 +406,6 @@ pub fn receive_loop_with<D: FrameDecoder>(
 /// How often the camera's status is offered to the Studio.
 const STATUS_INTERVAL: Duration = Duration::from_millis(250);
 
-/// How often the pacer looks for a new decoded frame: a frame goes out within
-/// this of its decode, not at the next canvas tick.
-const POLL: Duration = Duration::from_millis(2);
-
 /// Publishes the newest frame as soon as it is decoded, and the held frame or
 /// the still once per canvas frame, until `stop` is set.
 pub fn pace_loop<F: Clone>(
@@ -422,13 +422,13 @@ pub fn pace_loop<F: Clone>(
     let mut published: Option<u64> = None;
     while !stop.load(Ordering::Acquire) {
         let now = Instant::now();
-        // Decide first: most polls publish nothing, so they build nothing.
-        let (out, status) = {
+        // Decide first: most wakes publish nothing, so they build nothing.
+        let (out, status, seen) = {
             let state = lock(&shared);
             let picture = state.tracker.picture(now);
             let has_frame = matches!(picture, Picture::Frame) && state.latest.is_some();
             let fresh = has_frame && published != Some(state.latest_sequence);
-            let out = polled_publish(now, next_tick, interval, fresh).map(|next| {
+            let out = publish_due(now, next_tick, interval, fresh).map(|next| {
                 next_tick = next;
                 if has_frame {
                     published = Some(state.latest_sequence);
@@ -448,7 +448,7 @@ pub fn pace_loop<F: Clone>(
             });
             let status = (now.duration_since(last_status) >= STATUS_INTERVAL)
                 .then(|| state.tracker.status(now, state.listening));
-            (out, status)
+            (out, status, state.latest_sequence)
         };
         match out {
             Some((Some(frame), news, _)) => {
@@ -474,12 +474,18 @@ pub fn pace_loop<F: Clone>(
             last_status = now;
             super::publish_status(status);
         }
-        let wake = (now + POLL).min(next_tick);
-        let now = Instant::now();
-        if wake > now {
-            std::thread::sleep(wake - now);
-        }
+        wait_for_frame(&shared, seen, next_tick.min(last_status + STATUS_INTERVAL));
     }
+}
+
+/// Waits until a frame is stored after the `seen`th, or until `deadline`.
+fn wait_for_frame<F>(shared: &Shared<F>, seen: u64, deadline: Instant) {
+    let state = lock(shared);
+    let signal = Arc::clone(&state.new_frame);
+    let timeout = deadline.saturating_duration_since(Instant::now());
+    let _ = signal
+        .wait_timeout_while(state, timeout, |state| state.latest_sequence == seen)
+        .unwrap_or_else(PoisonError::into_inner);
 }
 
 /// The pacer's choice at `now`: Some(next tick) when it publishes.
@@ -487,7 +493,7 @@ pub fn pace_loop<F: Clone>(
 /// still); between ticks, only a frame not yet published, and the cadence
 /// counts from it. Far behind, it starts the cadence again from now, so it
 /// never publishes twice in a row to catch up.
-fn polled_publish(
+fn publish_due(
     now: Instant,
     next_tick: Instant,
     interval: Duration,
@@ -676,35 +682,72 @@ mod tests {
         );
     }
 
-    /// The polled pacer (latency work): a new frame goes out as soon as it
+    /// The pacer (latency work): a new frame goes out as soon as it
     /// is seen and the canvas cadence counts from there; without one, the
     /// held frame or the still goes out at the canvas rate.
     #[test]
-    fn srt_pacer_polled_publishes_a_new_frame_at_once() {
+    fn srt_pacer_publishes_a_new_frame_at_once() {
         let interval = Duration::from_millis(33);
         let tick = Instant::now() + interval;
         let early = tick - Duration::from_millis(20);
         assert_eq!(
-            polled_publish(early, tick, interval, true),
+            publish_due(early, tick, interval, true),
             Some(early + interval.mul_f64(1.5)),
             "a new frame before the tick goes out now"
         );
-        assert_eq!(polled_publish(early, tick, interval, false), None);
+        assert_eq!(publish_due(early, tick, interval, false), None);
         assert_eq!(
-            polled_publish(tick, tick, interval, false),
+            publish_due(tick, tick, interval, false),
             Some(tick + interval),
             "the cadence repeats the last picture on time"
         );
         assert_eq!(
-            polled_publish(tick, tick, interval, true),
+            publish_due(tick, tick, interval, true),
             Some(tick + interval.mul_f64(1.5)),
             "a new frame on the tick also holds the next repeat back"
         );
         let late = tick + interval * 3;
         assert_eq!(
-            polled_publish(late, tick, interval, false),
+            publish_due(late, tick, interval, false),
             Some(late + interval),
             "far behind: no burst to catch up"
+        );
+    }
+
+    /// The pacer waits for a stored frame, not in short polls: a frame
+    /// from the receiver wakes it at once, and with none it waits until
+    /// its next deadline.
+    #[test]
+    fn srt_pacer_wakes_when_a_frame_is_stored() {
+        let shared: Shared<(u32, u32)> = Arc::default();
+        let far = Instant::now() + Duration::from_secs(10);
+        let storer = {
+            let shared = Arc::clone(&shared);
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(50));
+                lock(&shared).put_frames((1, 1), 1);
+            })
+        };
+        let started = Instant::now();
+        wait_for_frame(&shared, 0, far);
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the stored frame woke the pacer"
+        );
+        storer.join().unwrap();
+
+        let started = Instant::now();
+        wait_for_frame(&shared, 0, far);
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "a frame stored before the wait: no wait"
+        );
+
+        let deadline = Instant::now() + Duration::from_millis(30);
+        wait_for_frame(&shared, 1, deadline);
+        assert!(
+            Instant::now() >= deadline,
+            "no new frame: it waits out the deadline"
         );
     }
 
