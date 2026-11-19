@@ -727,7 +727,11 @@ import type { LiveBackgroundId } from '../../../shared/live-background-ids'
 import { useBackgroundAssets } from '@/hooks/use-background-assets'
 import { useChatNewCount } from '@/hooks/use-chat-new-count'
 import { findDevice, isActiveRecordingState, mergeStreamHealth, plural } from '@/lib/format'
-import { REMOTE_SOUND_STALE_MESSAGE, createRemoteIntentQueue } from '@/lib/remote-intent-queue'
+import {
+  REMOTE_SOUND_STALE_MESSAGE,
+  createRemoteIntentQueue,
+  remoteIntentKind
+} from '@/lib/remote-intent-queue'
 import {
   confirmedSystemAudioMix,
   nextSystemAudioJoin,
@@ -20018,7 +20022,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const handleRemoteIntent = useEffectEvent(async (payload: unknown) => {
     const source = studioActionSource()
     if (!source) return
-    const intentKind = (payload as { kind?: unknown } | null)?.kind
+    // The envelope is `{intentId, intent: {kind}}`, not `{kind}`.
+    const intentKind = remoteIntentKind(payload)
     if (intentKind === 'recordStart' || intentKind === 'streamStart') {
       noteRecordClick('start')
     } else if (intentKind === 'recordStop' || intentKind === 'streamStop') {

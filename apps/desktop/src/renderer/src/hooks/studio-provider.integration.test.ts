@@ -6316,6 +6316,84 @@ describe('real StudioProvider lifecycle', () => {
     })
   })
 
+  // The remote envelope is `{intentId, intent: {kind}}`: a deck or phone press
+  // is a real click for the record-latency clock, not a session-call. (The
+  // handler once read `payload.kind`, so no remote press was ever noted.)
+  it('notes remote record, stop and toggle presses as clicks', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date(now))
+    const backend = new StudioBackend()
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => []
+    })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    localStorage.setItem(
+      STORAGE_KEYS.captureConfig,
+      JSON.stringify({
+        ...defaultCaptureConfig,
+        recordEnabled: true,
+        streamEnabled: false
+      } satisfies CaptureConfig)
+    )
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation => observations.at(-1)!
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(() => latest()?.core.wsStatus === 'connected')
+    vi.clearAllMocks()
+
+    const pushEvent = async (event: string, payload: unknown): Promise<void> => {
+      await act(async () => {
+        backend.sockets[0]?.onmessage?.({ data: JSON.stringify({ event, payload }) })
+        await Promise.resolve()
+      })
+    }
+    const acked = (intentId: string): boolean =>
+      backend.sentCommands.some(
+        (command) =>
+          command.method === 'remote.intent.ack' &&
+          (command.params as { intentId?: string }).intentId === intentId
+      )
+    const session = (sessionId: string, state: 'recording' | 'idle'): RecordingStatus => ({
+      state,
+      sessionId,
+      ...(state === 'recording' ? { startedAt: now } : {}),
+      message: state === 'recording' ? 'Recording.' : 'Ended.'
+    })
+
+    // recordStart: the start sample is closed by the status that completes it.
+    await pushEvent('backend.ready', null)
+    await pushEvent('remote.intent', { intentId: 'lat-start', intent: { kind: 'recordStart' } })
+    await waitForObservation(() => acked('lat-start'))
+    await pushEvent('recording.status', session('lat-1', 'recording'))
+    await waitForObservation(() => latest().diagnostics.recordLatency.start !== null)
+    expect(latest().diagnostics.recordLatency.start?.origin).toBe('click')
+
+    // recordStop.
+    await pushEvent('remote.intent', { intentId: 'lat-stop', intent: { kind: 'recordStop' } })
+    await waitForObservation(() => acked('lat-stop'))
+    await pushEvent('recording.status', session('lat-1', 'idle'))
+    await waitForObservation(() => latest().diagnostics.recordLatency.stop !== null)
+    expect(latest().diagnostics.recordLatency.stop?.origin).toBe('click')
+
+    // recordToggle on a running session stops it, and counts as a stop press.
+    const firstStop = latest().diagnostics.recordLatency.stop
+    await pushEvent('recording.status', session('lat-2', 'recording'))
+    await waitForObservation(() => latest().recording.recording.sessionId === 'lat-2')
+    await pushEvent('remote.intent', { intentId: 'lat-toggle', intent: { kind: 'recordToggle' } })
+    await waitForObservation(() => acked('lat-toggle'))
+    await pushEvent('recording.status', session('lat-2', 'idle'))
+    await waitForObservation(() => latest().diagnostics.recordLatency.stop !== firstStop)
+    expect(latest().diagnostics.recordLatency.stop?.origin).toBe('click')
+  })
+
   it.each([false, true])(
     'allows stopping cloud outputs without a local session (live=%s)',
     async (live) => {
