@@ -6,6 +6,7 @@ import {
   type TalkShowContextValue,
   type TalkShowRoomControllerDeps
 } from '@/hooks/use-talk-show-room'
+import { useJoinRequestChime } from '@/hooks/use-join-request-chime'
 import { roomProgramCamera } from '@/hooks/use-room-program-camera'
 import type { CloudStatus } from '@/lib/backend'
 import type { TalkShowRoomSnapshot } from '@/lib/talk-show-room'
@@ -36,6 +37,8 @@ export default function TalkShowRoomHost({
 }): null {
   const value = useTalkShowRoomController(deps)
   const [script, setScript] = useState<TalkShowScript | null>(null)
+  // "Ada wants to join" chimes on this computer only, never on stream.
+  useJoinRequestChime(deps.client, deps.cloudStatus?.room?.phase === 'open')
 
   // Plan 234: a cloud recording that stops is reported to the Library's
   // Cloud recordings section, which then waits for its row (both lazy).
