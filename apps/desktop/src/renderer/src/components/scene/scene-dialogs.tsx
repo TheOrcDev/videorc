@@ -497,14 +497,15 @@ function SceneNameDialog({
 
 /**
  * The Set key dialog's description. Under Wayland (`globalShortcutsUnavailable`
- * set by main) the key cannot be heard from other apps, so it does not promise that.
+ * set by main) no global key is registered at all, so it says the key won't work
+ * here instead of promising it works from any app.
  */
 export function sceneKeyDescription(
   sceneName: string,
   globalShortcutsUnavailable?: string | null
 ): string {
   return globalShortcutsUnavailable
-    ? `Puts “${sceneName}” on stream in sessions that allow global shortcuts, such as X11. Click the field and press the keys.`
+    ? `This Wayland session can't hear keys while Videorc is in the background, so a key for “${sceneName}” won't work here. Click the field and press the keys.`
     : `Puts “${sceneName}” on stream from any app. Click the field and press the keys.`
 }
 

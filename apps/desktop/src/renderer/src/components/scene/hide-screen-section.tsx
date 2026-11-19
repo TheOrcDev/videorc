@@ -40,11 +40,12 @@ import { openWorkspaceTab } from '@/lib/workspace-navigation'
 
 /**
  * The Shortcut row's hint. Under Wayland (`globalShortcutsUnavailable` set by
- * main) the key cannot be heard from other apps, so it does not promise that.
+ * main) no global key is registered at all, so it says the key won't work here
+ * instead of promising it works from any app.
  */
 export function hideScreenShortcutHint(globalShortcutsUnavailable?: string | null): string {
   return globalShortcutsUnavailable
-    ? 'Change it in Settings → Shortcuts. Kept for sessions that allow global shortcuts, such as X11.'
+    ? "Change it in Settings → Shortcuts. This Wayland session can't hear keys while Videorc is in the background, so it won't work here."
     : 'Change it in Settings → Shortcuts. It works from any app.'
 }
 

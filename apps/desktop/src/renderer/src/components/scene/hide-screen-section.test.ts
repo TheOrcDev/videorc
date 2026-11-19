@@ -205,6 +205,8 @@ describe('Scene page: Hide screen (plan 210 S8b)', () => {
     const hint = rowHints.at(-1)
     expect(typeof hint).toBe('string')
     expect(hint).not.toContain('from any app')
+    expect(hint).not.toContain('X11')
+    expect(hint).toContain("can't hear keys while Videorc is in the background")
     expect(hint).toContain('Settings → Shortcuts')
     expect(hideScreenShortcutHint(null)).toBe(original)
   })
