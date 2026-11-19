@@ -456,7 +456,7 @@ try {
   const screenKeyPlan = streamManagerScreenKeyPlan(screenDescribe)
   if (screenKeyPlan === null) {
     fail(
-      `remote.describe lacks the key's screenMoves: ${JSON.stringify(screenDescribe?.screenMoves)}`
+      `remote.describe has no usable screenMoves for ${process.platform}: ${JSON.stringify(screenDescribe?.screenMoves)}`
     )
   }
   if (screenKeyPlan === 'wayland') {

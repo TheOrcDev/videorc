@@ -55,10 +55,13 @@ export const STREAM_MANAGER_WAYLAND_REFUSAL =
  * where the tap moves the window, `wayland` with two screens in a Wayland
  * session (the tap must be refused with the Wayland copy), `one-screen`
  * otherwise. Anything but `supported` or `wayland` is a projection bug: null.
+ * Wayland is a Linux session only, so `wayland` reported on another platform
+ * is a projection bug too (null), never a licence to skip the move check.
  */
-export function streamManagerScreenKeyPlan(describe) {
+export function streamManagerScreenKeyPlan(describe, platform = process.platform) {
   const moves = describe?.screenMoves
   if (moves !== 'supported' && moves !== 'wayland') return null
+  if (moves === 'wayland' && platform !== 'linux') return null
   const count = Array.isArray(describe?.screens) ? describe.screens.length : 0
   if (count < 2) return 'one-screen'
   return moves === 'wayland' ? 'wayland' : 'move'

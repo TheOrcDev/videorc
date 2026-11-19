@@ -31,20 +31,38 @@ test('a bare off, a failed start or a ring still starting is not an answer', () 
 test('the Screen key plan follows what describe reports, not the environment', () => {
   const one = [{ id: '1', name: 'Built-in' }]
   const two = [...one, { id: '2', name: 'External' }]
-  assert.equal(streamManagerScreenKeyPlan({ screenMoves: 'supported', screens: two }), 'move')
-  assert.equal(streamManagerScreenKeyPlan({ screenMoves: 'wayland', screens: two }), 'wayland')
+  const plan = (describe) => streamManagerScreenKeyPlan(describe, 'linux')
+  assert.equal(plan({ screenMoves: 'supported', screens: two }), 'move')
+  assert.equal(plan({ screenMoves: 'wayland', screens: two }), 'wayland')
   assert.equal(
-    streamManagerScreenKeyPlan({
+    plan({
       screenMoves: 'wayland',
       screens: [...two, { id: '3', name: 'C' }]
     }),
     'wayland'
   )
-  assert.equal(streamManagerScreenKeyPlan({ screenMoves: 'supported', screens: one }), 'one-screen')
-  assert.equal(streamManagerScreenKeyPlan({ screenMoves: 'wayland', screens: one }), 'one-screen')
-  assert.equal(streamManagerScreenKeyPlan({ screens: two }), null)
-  assert.equal(streamManagerScreenKeyPlan({ screenMoves: 'x11', screens: two }), null)
-  assert.equal(streamManagerScreenKeyPlan(undefined), null)
+  assert.equal(plan({ screenMoves: 'supported', screens: one }), 'one-screen')
+  assert.equal(plan({ screenMoves: 'wayland', screens: one }), 'one-screen')
+  assert.equal(plan({ screens: two }), null)
+  assert.equal(plan({ screenMoves: 'x11', screens: two }), null)
+  assert.equal(plan(undefined), null)
+})
+
+test('the Wayland plan is taken on Linux only', () => {
+  const two = [
+    { id: '1', name: 'Built-in' },
+    { id: '2', name: 'External' }
+  ]
+  for (const platform of ['darwin', 'win32']) {
+    assert.equal(
+      streamManagerScreenKeyPlan({ screenMoves: 'wayland', screens: two }, platform),
+      null
+    )
+    assert.equal(
+      streamManagerScreenKeyPlan({ screenMoves: 'supported', screens: two }, platform),
+      'move'
+    )
+  }
 })
 
 test('the Wayland refusal is the copy the Studio sends', () => {
