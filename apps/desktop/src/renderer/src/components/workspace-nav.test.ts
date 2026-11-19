@@ -50,17 +50,17 @@ describe('workspace navigation', () => {
   })
 
   // Plan 235 D8: the digits run down the sidebar, ⌘1 to ⌘9; plan 239 D6:
-  // Avatar takes ⌘6 and Library, the tenth page, ⌘0.
-  it('maps the pages in sidebar order (Captions ⌘5, Avatar ⌘6, Destinations ⌘8, Library ⌘0, Settings ⌘,)', () => {
+  // Library, the tenth page, takes ⌘0. Avatar sits in Livestream, on ⌘8.
+  it('maps the pages in sidebar order (Captions ⌘5, Output ⌘6, Destinations ⌘7, Avatar ⌘8, Library ⌘0, Settings ⌘,)', () => {
     expect(WORKSPACE_SHORTCUTS.map((entry) => [entry.digit, entry.tab])).toEqual([
       ['1', 'studio'],
       ['2', 'sources'],
       ['3', 'layouts'],
       ['4', 'assets'],
       ['5', 'captions'],
-      ['6', 'avatar'],
-      ['7', 'recording'],
-      ['8', 'live'],
+      ['6', 'recording'],
+      ['7', 'live'],
+      ['8', 'avatar'],
       ['9', 'ai'],
       ['0', 'library'],
       [',', 'settings']
@@ -71,6 +71,7 @@ describe('workspace navigation', () => {
     const rows = digits.map((entry) => sidebarOrderFor(entry.tab))
     expect(rows).toEqual([...rows].sort((a, b) => a - b))
     expect(sidebarOrderFor('guests')).toBe(sidebarOrderFor('live') + 1)
+    expect(sidebarOrderFor('avatar')).toBe(sidebarOrderFor('ai') - 1)
   })
 
   it('puts Settings on ⌘, and never duplicates a key', () => {
@@ -100,13 +101,13 @@ describe('workspace navigation', () => {
   // Plan 235 D6: Destinations (the page that was Livestream) and Sidekick
   // share the labelled Livestream group, under Setup. Ids, legacy trigger ids
   // and deep links stay: Sidekick is `ai`, Destinations is `live`
-  // (`streaming`). Plan 239: the avatar is part of the picture, so its page
-  // sits in Setup, before Output.
-  it('groups Destinations and Sidekick under Livestream, between Setup and Library, and Avatar in Setup', () => {
+  // (`streaming`). Plan 239 made the avatar a page; the owner moved it from
+  // Setup to Livestream (2026-11-19), just above Sidekick.
+  it('groups Destinations, Avatar and Sidekick under Livestream, between Setup and Library', () => {
     expect(SIDEBAR_ZONES.map((zone) => [zone.id, zone.label ?? null, zone.pages])).toEqual([
       ['stage', null, ['studio']],
-      ['setup', 'Setup', ['sources', 'layouts', 'assets', 'captions', 'avatar', 'recording']],
-      ['livestream', 'Livestream', ['live', 'guests', 'ai']],
+      ['setup', 'Setup', ['sources', 'layouts', 'assets', 'captions', 'recording']],
+      ['livestream', 'Livestream', ['live', 'guests', 'avatar', 'ai']],
       ['library', null, ['library']],
       ['system', null, ['settings']]
     ])
@@ -138,7 +139,7 @@ describe('workspace navigation', () => {
     })
     expect(isStudioPanel('avatar')).toBe(false)
     expect(isWorkspaceTab('avatar')).toBe(true)
-    expect(shortcutDigitFor('avatar')).toBe('6')
+    expect(shortcutDigitFor('avatar')).toBe('8')
     expect(workspaceTabLabel('avatar')).toBe('Avatar')
     expect(workspaceWindowTitle('avatar')).toBe('Avatar – Videorc')
   })
@@ -158,10 +159,10 @@ describe('workspace navigation', () => {
       'layouts',
       'assets',
       'captions',
-      'avatar',
       'recording',
       'live',
       'guests',
+      'avatar',
       'ai',
       'library',
       'settings'

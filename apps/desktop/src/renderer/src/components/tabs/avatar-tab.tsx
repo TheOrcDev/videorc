@@ -25,8 +25,8 @@ import { cn } from '@/lib/utils'
 import { openWorkspaceTab } from '@/lib/workspace-navigation'
 
 /**
- * The Avatar page (plan 239): the character on the stream, in Setup beside
- * the other things that make the picture. Two tabs in a strip under the
+ * The Avatar page (plan 239): the character on the stream, in Livestream
+ * just above Sidekick, the helper it speaks for. Two tabs in a strip under the
  * toolbar, built like Settings and Sidekick:
  *
  * - **Profile**: where the avatar shows, My avatars (the library), its name,

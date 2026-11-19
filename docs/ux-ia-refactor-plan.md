@@ -17,7 +17,8 @@ only via ⌘K, sources diagnostics list unbounded
 >
 > - **Sidebar** (plan 235, 2026-11-14; plan 239, 2026-11-15): Studio ⌘1 as
 >   the chrome slab, then Setup (Sources ⌘2, Scene ⌘3, Assets ⌘4, Captions
->   ⌘5, Avatar ⌘6, Output ⌘7), then Livestream (Destinations ⌘8, Sidekick ⌘9;
+>   ⌘5, Output ⌘6), then Livestream (Destinations ⌘7, Avatar ⌘8, Sidekick ⌘9;
+>   the owner moved Avatar here from Setup on 2026-11-19;
 >   Sidekick keeps Clean cut and every feature of the helper, the page sells
 >   Premium), Library ⌘0, and Settings ⌘, in a bottom block. Health has no
 >   row: the status bar's state opens it.

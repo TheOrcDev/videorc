@@ -103,7 +103,7 @@ function rowOf(markup: string, trigger: string): string {
 }
 
 describe('sidebar zones (plan 174 D8, plan 235 D6, plan 239)', () => {
-  it('leads with Studio, then Setup (Avatar before Output), then Livestream (Destinations and Sidekick) and Library, with Settings at the bottom', () => {
+  it('leads with Studio, then Setup, then Livestream (Destinations, Avatar and Sidekick) and Library, with Settings at the bottom', () => {
     const markup = renderSidebar()
     // Page ids and legacy trigger ids never change: Destinations is `streaming`.
     expect(triggers(markup)).toEqual([
@@ -112,9 +112,9 @@ describe('sidebar zones (plan 174 D8, plan 235 D6, plan 239)', () => {
       'layout',
       'assets',
       'captions',
-      'avatar',
       'recording',
       'streaming',
+      'avatar',
       'ai',
       'library',
       'settings'
@@ -139,7 +139,7 @@ describe('sidebar zones (plan 174 D8, plan 235 D6, plan 239)', () => {
     const markup = renderSidebar({ platform: 'darwin' })
     const keys = [...markup.matchAll(/aria-keyshortcuts="Meta\+(\d)"/g)].map((match) => match[1])
     expect(keys).toEqual(['1', '2', '3', '4', '5', '6', '7', '8', '9', '0'])
-    expect(rowOf(markup, 'avatar')).toContain('aria-keyshortcuts="Meta+6"')
+    expect(rowOf(markup, 'avatar')).toContain('aria-keyshortcuts="Meta+8"')
     expect(rowOf(markup, 'library')).toContain('aria-keyshortcuts="Meta+0"')
   })
 
@@ -243,14 +243,14 @@ describe('the Guests row', () => {
     cloud.cloudStatus = null
   })
 
-  it('shows between Destinations and Sidekick only with talk shows', () => {
+  it('shows right under Destinations only with talk shows', () => {
     expect(triggers(renderSidebar())).not.toContain('guests')
     cloud.cloudStatus = { allowance: { enabled: true, talkShows: true } }
     const rows = triggers(renderSidebar())
     expect(rows.slice(rows.indexOf('streaming'), rows.indexOf('streaming') + 3)).toEqual([
       'streaming',
       'guests',
-      'ai'
+      'avatar'
     ])
   })
 
