@@ -7,7 +7,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import type { CloudStatus } from '@/lib/backend'
 import { defaultCaptureConfig } from '@/lib/capture'
-import { HOST, ada, grace, openRoom, talkStatus } from '@/lib/guests-room-fixtures'
+import {
+  HOST,
+  ada,
+  grace,
+  guestParticipant,
+  openRoom,
+  talkStatus
+} from '@/lib/guests-room-fixtures'
 import { NO_TALK_SHOW, type TalkShowContextValue } from '@/lib/talk-show-context'
 
 import GuestsTab from './guests-tab'
@@ -115,9 +122,39 @@ describe('Destinations → Guests (C-G2)', () => {
     expect(names).toEqual(['You', 'Grace', 'Ada'])
     expect(page).toContain('On stage')
     expect(page).toContain('Backstage')
-    expect(page).toContain('Muted')
-    expect(page).toContain('Actions for Grace')
-    expect(page).not.toContain('Actions for You')
+    expect(page).toContain('Muted by you')
+    expect(page).toContain('More for Grace')
+    expect(page).not.toContain('More for You')
+    // Plan 252: the two lists, each with its count, and the room in numbers.
+    expect(page).toMatch(/aria-label="On stage"/)
+    expect(page).toMatch(/aria-label="Backstage"/)
+    expect(page).toMatch(/data-testid="guests-room-counts"[^]*1 on stage[^]*1 backstage/)
+  })
+
+  // Live show 2026-11-19: Unmute only lets go (D14). The list tells the
+  // host's hold from a mic the guest still has off, and says nothing of a
+  // guest who talks.
+  it("tells the host's hold, a mic still off and talking apart", () => {
+    const bo = { ...ada, guestId: 'g_bo', name: 'Bo' }
+    const page = html(
+      talkStatus({
+        room: openRoom({
+          guests: [grace, ada, bo],
+          participants: [
+            ...(openRoom().participants ?? []),
+            guestParticipant(grace, { audio: false }),
+            guestParticipant(ada, { muted: true }),
+            guestParticipant(bo)
+          ]
+        })
+      })
+    )
+    const badges = [...page.matchAll(/data-testid="guests-person-mic"[^>]*>([^<]+)</g)].map(
+      (match) => match[1]
+    )
+    expect(badges).toEqual(['Muted by you', 'Mic off'])
+    expect(page).toContain('Grace can&#x27;t unmute until you let them.')
+    expect(page).toContain('Only Ada can turn their mic on.')
   })
 
   it("says a full room is full, and Premium's one seat", () => {
@@ -335,5 +372,62 @@ describe('Guests → Room: on the program (plan 249 S4/S9)', () => {
       })
     )
     expect(row('guests-program-avatar')?.textContent).toContain('The stream refused the avatar.')
+  })
+})
+
+// Plan 252: a guest's mic and screen share are controls on their row, not
+// items in a menu, and each says its state.
+describe('Guests rows (plan 252)', () => {
+  let root: Root
+  let container: HTMLDivElement
+  beforeEach(() => {
+    vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
+    container = document.createElement('div')
+    document.body.append(container)
+    root = createRoot(container)
+  })
+  afterEach(async () => {
+    await act(async () => root.unmount())
+    container.remove()
+    vi.unstubAllGlobals()
+  })
+  const row = (identity: string): HTMLElement =>
+    container.querySelector<HTMLElement>(
+      `[data-testid="guests-person"][data-stage-identity="${identity}"]`
+    ) as HTMLElement
+
+  it("shows each guest's screen share as off, allowed or sharing, and toggles it by guest id", async () => {
+    const show = talkShow()
+    const bo = { ...ada, guestId: 'g_bo', name: 'Bo', screenShareAllowed: true }
+    studio.cloud.cloudStatus = talkStatus({
+      room: openRoom({
+        guests: [ada, grace, bo],
+        participants: [
+          ...(openRoom().participants ?? []),
+          guestParticipant(ada),
+          guestParticipant(grace),
+          guestParticipant(bo, { screen: true })
+        ]
+      })
+    })
+    studio.cloud.talkShow = show
+    await act(async () =>
+      root.render(createElement(TooltipProvider, null, createElement(GuestsTab)))
+    )
+    const share = (identity: string): HTMLButtonElement =>
+      row(identity).querySelector<HTMLButtonElement>(
+        '[data-testid="person-screen-share"]'
+      ) as HTMLButtonElement
+    expect(share('g_ada').dataset.screenShare).toBe('off')
+    expect(share('g_ada').getAttribute('aria-label')).toBe('Let Ada share their screen')
+    expect(share('g_grace').dataset.screenShare).toBe('allowed')
+    expect(share('g_grace').getAttribute('aria-pressed')).toBe('true')
+    expect(share('g_bo').dataset.screenShare).toBe('sharing')
+    expect(row(HOST).querySelector('[data-testid="person-screen-share"]')).toBeNull()
+
+    await act(async () => share('g_ada').click())
+    await act(async () => share('g_bo').click())
+    expect(show.actOnGuest).toHaveBeenCalledWith('g_ada', 'allow-screen-share', undefined)
+    expect(show.actOnGuest).toHaveBeenCalledWith('g_bo', 'disallow-screen-share', undefined)
   })
 })

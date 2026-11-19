@@ -9,8 +9,9 @@ import type {
   WatchdogAlertsView
 } from '@/lib/backend'
 import type { BackendClient } from '@/backendClient'
-import { sessionIsReplayOnly } from '../../../shared/capture-state'
+import { sessionIsLive, sessionIsReplayOnly } from '../../../shared/capture-state'
 import { sessionChatTotalsSchema } from '../../../shared/session-chat-totals'
+import { talkShowLiveStartedAt, talkShowSessionView } from './talk-show-session'
 
 import {
   createDashboardPushCoalescer,
@@ -73,6 +74,34 @@ function sessionRunsForTheWindow(status: RecordingStatus): boolean {
   )
 }
 
+/**
+ * A talk show's session as the window folds it (plan 224 C-G6), or null when
+ * no room is open and native sessions speak for themselves. While the room is
+ * open the cloud owns the session: Record goes to the cloud recording and Go
+ * Live hands the destinations to the runner, so no native `recording.status`
+ * ever says the show is on air. The room reads as the status the Studio's
+ * transport already shows, keyed on the show id (the chat's session, the
+ * viewer samples' and the totals'); an open room with nothing running is off
+ * air. The on-air start is the hand-over stamp, else the runner's clock taken
+ * once, so the header's clock never jitters with a status tick.
+ */
+export function talkShowDashboardStatus(
+  status: CloudStatus,
+  current: LiveDashboardState,
+  nowMs: number
+): RecordingStatus | null {
+  const room = status.room
+  if (!room || room.phase === 'closed') return null
+  const view = talkShowSessionView(status, null)
+  if (!view) return { state: 'idle' }
+  if (view.state !== 'streaming') return view
+  const kept =
+    !room.liveSince && current.sessionId === view.sessionId && current.session.state === 'live'
+      ? current.session.startedAt
+      : null
+  return { ...view, startedAt: kept ?? talkShowLiveStartedAt(status, nowMs) }
+}
+
 export function createLiveDashboardRelay(
   push: (state: LiveDashboardState) => void,
   now: () => string = () => new Date().toISOString()
@@ -80,6 +109,8 @@ export function createLiveDashboardRelay(
   let state = emptyLiveDashboardState(now())
   let confirmedSessionId: string | null = null
   let pendingTotals: SessionChatTotals | null = null
+  // Plan 224: an open talk-show room owns the session (`talkShowDashboardStatus`).
+  let roomOwnsSession = false
   const coalescer = createDashboardPushCoalescer(push)
   const apply = (next: LiveDashboardState): void => {
     if (next === state) return
@@ -88,6 +119,8 @@ export function createLiveDashboardRelay(
   }
   return {
     recording: (status) => {
+      // The room's projection is the session; a native status speaks for nothing.
+      if (roomOwnsSession) return
       if (
         status.sessionId &&
         (status.state === 'idle' || status.state === 'failed') &&
@@ -103,7 +136,8 @@ export function createLiveDashboardRelay(
       pendingTotals = null
     },
     viewers: (sample) => {
-      if (!sample || sample.sessionId === confirmedSessionId)
+      // A native session's end clears the count; the room clears its own.
+      if (sample ? sample.sessionId === confirmedSessionId : !roomOwnsSession)
         apply(reduceDashboardViewers(state, sample, now()))
     },
     audience: (snapshot) => {
@@ -132,7 +166,38 @@ export function createLiveDashboardRelay(
       }
       apply(reduceDashboardChatTotals(state, totals, now()))
     },
-    cloud: (status) => apply(reduceDashboardCloud(state, status, now())),
+    cloud: (status) => {
+      const at = now()
+      const room = talkShowDashboardStatus(status, state, Date.parse(at))
+      if (room) {
+        roomOwnsSession = true
+        const wasOnAir = state.session.state !== 'off-air'
+        if (room.sessionId && sessionRunsForTheWindow(room)) confirmedSessionId = room.sessionId
+        apply(reduceDashboardRecording(state, room, at))
+        if (wasOnAir && state.session.state === 'off-air')
+          apply(reduceDashboardViewers(state, null, at))
+        if (confirmedSessionId && pendingTotals?.sessionId === confirmedSessionId) {
+          apply(reduceDashboardChatTotals(state, pendingTotals, at))
+          pendingTotals = null
+        }
+        // The runner's legs are the show's destinations (the Activity pane's
+        // failures and recoveries); nothing sends `stream.targets` for them.
+        if (
+          room.sessionId &&
+          sessionIsLive(room) &&
+          status.legs &&
+          JSON.stringify(status.legs) !== JSON.stringify(state.targets)
+        )
+          apply(
+            reduceDashboardTargets(state, { sessionId: room.sessionId, targets: status.legs }, at)
+          )
+      } else if (roomOwnsSession) {
+        roomOwnsSession = false
+        apply(reduceDashboardRecording(state, { state: 'idle' }, at))
+        apply(reduceDashboardViewers(state, null, at))
+      }
+      apply(reduceDashboardCloud(state, status, at))
+    },
     alerts: (view) => apply(reduceDashboardAlerts(state, view, now())),
     seed: (seeded) => {
       if (!seeded || state.sessionId !== null || !normalizeLiveDashboardState(seeded)) return
@@ -165,6 +230,7 @@ export async function startLiveDashboardRelay({
   })
   relay.seed((await window.videorc?.getDashboard?.().catch(() => null)) ?? null)
   let hydratedSessionId: string | null = null
+  let cloudStateSeen = false
   let totalsRequest: Promise<void> | null = null
   let queuedTotalsSession: string | null = null
   const refreshTotals = (sessionId: string): void => {
@@ -230,9 +296,17 @@ export async function startLiveDashboardRelay({
       case 'liveChat.totals':
         relay.chatTotals(payload as SessionChatTotals)
         return
-      case 'cloud.state':
-        relay.cloud(payload as CloudStatus)
+      case 'cloud.state': {
+        const status = payload as CloudStatus | null
+        if (!status) return
+        cloudStateSeen = true
+        relay.cloud(status)
+        // A talk show on air or recording: its history and totals, once.
+        const { sessionId, session } = relay.current()
+        if (sessionId && session.state !== 'off-air' && sessionId === status.show?.id)
+          hydrate(sessionId)
         return
+      }
       case 'watchdog.alerts':
         relay.alerts(payload as WatchdogAlertsView)
         return
@@ -242,5 +316,13 @@ export async function startLiveDashboardRelay({
       }
     }
   }
+  // A reload mid-show: `cloud.state` fires on the show's next change, which
+  // can be a while; until then the room's session would read off air.
+  void client.requestTyped('cloud.status').then(
+    (status) => {
+      if (isCurrent() && !cloudStateSeen) feed('cloud.state', status)
+    },
+    () => undefined
+  )
   return { feed, dispose: () => relay.dispose() }
 }

@@ -7,6 +7,7 @@ import {
   effectiveStageLayout,
   planStage,
   showStageInput,
+  shownScreens,
   stageRectPercent,
   type StageCanvas,
   type StagePlan,
@@ -91,6 +92,125 @@ describe('planStage', () => {
     expect(
       effectiveStageLayout({ layout: 'screen-people', people: ['host:sh'], screen: 'host:sh' })
     ).toBe('screen-people')
+  })
+})
+
+// Plan 251: two screens across the top, everyone on stage in a row under
+// them. The web's program page draws from the same fixture.
+describe('the two-screens layout (plan 251)', () => {
+  type TwoScreensCase = {
+    name: string
+    canvas: StageCanvas
+    layout: 'two-screens'
+    people: string[]
+    screens: string[]
+    plan: StagePlan
+  }
+  const twoScreens = JSON.parse(
+    readFileSync(
+      new URL(
+        '../../../../../../protocol-fixtures/talk-show-two-screens-layout.json',
+        import.meta.url
+      ),
+      'utf8'
+    )
+  ) as TwoScreensCase[]
+  const input = (fixture: TwoScreensCase) => ({
+    layout: 'screen-people' as const,
+    people: fixture.people,
+    screen: fixture.screens[0],
+    screens: fixture.screens
+  })
+
+  it('covers 1 to 6 people on three canvases', () => {
+    expect(twoScreens).toHaveLength(18)
+  })
+
+  it.each(twoScreens.map((fixture) => [fixture.name, fixture] as const))(
+    'matches the fixture for %s',
+    (_name, fixture) => {
+      expect(effectiveStageLayout(input(fixture))).toBe('two-screens')
+      expect(planStage(fixture.canvas, input(fixture))).toEqual(fixture.plan)
+    }
+  )
+
+  it('keeps every tile even, inside the canvas and apart, the screens first', () => {
+    for (const fixture of twoScreens) {
+      const plan = planStage(fixture.canvas, input(fixture))
+      expect(plan.tiles.slice(0, 2).map((tile) => [tile.kind, tile.identity])).toEqual(
+        fixture.screens.map((identity) => ['screen', identity])
+      )
+      expect(plan.tiles.slice(2).map((tile) => tile.identity)).toEqual(fixture.people)
+      const [first, second] = plan.tiles
+      expect(first.rect.w).toBe(second.rect.w)
+      expect(first.rect.h).toBe(second.rect.h)
+      plan.tiles.forEach((tile, index) => {
+        const { x, y, w, h } = tile.rect
+        expect([x, y, w, h].every((value) => value % 2 === 0)).toBe(true)
+        expect(x + w).toBeLessThanOrEqual(fixture.canvas.width)
+        expect(y + h).toBeLessThanOrEqual(fixture.canvas.height)
+        for (const other of plan.tiles.slice(0, index)) {
+          expect(overlaps(other.rect, tile.rect)).toBe(false)
+        }
+      })
+    }
+  })
+
+  it('falls back to one screen and the people, then to the grid', () => {
+    const people = ['host:sh', 'g_1']
+    const one = { layout: 'screen-people' as const, people, screen: 'g_1', screens: ['g_1'] }
+    expect(effectiveStageLayout(one)).toBe('screen-people')
+    expect(planStage({ width: 1920, height: 1080 }, one)).toEqual(
+      planStage({ width: 1920, height: 1080 }, { layout: 'screen-people', people, screen: 'g_1' })
+    )
+    expect(effectiveStageLayout({ layout: 'screen-people', people, screens: [] })).toBe(
+      'side-by-side'
+    )
+    // Two screens are drawn only on Screen + people.
+    expect(
+      effectiveStageLayout({
+        layout: 'spotlight',
+        people,
+        screen: 'g_1',
+        screens: ['g_1', 'host:sh']
+      })
+    ).toBe('spotlight')
+  })
+
+  it('draws the two screens the program reports, and one when it shows one', () => {
+    const base = {
+      phase: 'open',
+      doorOpen: false,
+      declinedCount: 0,
+      participants: [],
+      stage: {
+        layout: 'screen-people',
+        onStage: ['host:sh', 'g_1'],
+        screen: 'g_1',
+        screens: ['g_1', 'host:sh']
+      },
+      hostAway: false,
+      connected: true,
+      client: 'connected',
+      returnEnabled: false,
+      stageSet: true,
+      live: false
+    } satisfies CloudRoomStatus
+    expect(showStageInput(base).screens).toEqual(['g_1', 'host:sh'])
+    const both = showStageInput({
+      ...base,
+      shown: { onStage: ['host:sh', 'g_1'], screen: 'g_1', screens: ['g_1', 'host:sh'] }
+    })
+    expect(effectiveStageLayout(both)).toBe('two-screens')
+    // The page shows only the host's (the guest's went stale).
+    const one = showStageInput({
+      ...base,
+      shown: { onStage: ['host:sh', 'g_1'], screen: 'host:sh' }
+    })
+    expect(one.screen).toBe('host:sh')
+    expect(one.screens).toBeUndefined()
+    expect(effectiveStageLayout(one)).toBe('screen-people')
+    expect(shownScreens({ screens: ['a', 'a', 'b', 'c'] })).toEqual(['a', 'b'])
   })
 })
 

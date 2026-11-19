@@ -1,13 +1,25 @@
 import type {
+  CloudRoomParticipant,
   CloudRoomQuality,
   CloudRoomRequest,
   CloudRoomStatus,
+  CloudStage,
   CloudStageLayout,
   CloudStatus
 } from '@/lib/backend'
 import { plural } from '@/lib/format'
 import type { StatusTone } from '@/lib/status-word'
-import { effectiveStageLayout, showStageInput } from '@/lib/talk-show-layout'
+import type { ManagedOutputProfile } from '../../../shared/cloud-output-profile'
+import {
+  ONE_SCREEN_ON_THIS_SHOW,
+  STAGE_MAX_SCREENS,
+  TWO_SCREENS_AT_MOST,
+  removeScreen,
+  stageScreens,
+  toggleStageScreen,
+  withStageScreens
+} from '@/lib/stage-screens'
+import { effectiveStageLayout, showStageInput, type DrawnStageLayout } from '@/lib/talk-show-layout'
 
 // What the Guests page and the Show stage say about the room (plan 224
 // C-G2, C-G3), derived from the backend's `CloudStatus.room`. Pure, so every
@@ -98,6 +110,7 @@ export const NEW_LINK_CONFIRM_DESCRIPTION =
   'Everyone keeps their place. The old link stops working.'
 export const NEW_LINK_AFTER_BAN = 'New link. Share it again with your guests.'
 export const NOBODY_YET = 'Nobody has joined yet. Share the link.'
+export const NOBODY_BACKSTAGE = 'Nobody is backstage. Guests join from the invite link.'
 export const ROOM_FULL_LINE = 'The room is full. New guests read “This show is full.”'
 
 /** The room's state in a word, for the Room row and the Studio's Session row. */
@@ -200,10 +213,162 @@ export type RoomPerson = {
   quality: CloudRoomQuality | null
   /** The host's hold on a guest's mic (D14); the host's own mute for the host. */
   muted: boolean
+  /** Their mic as the host tells it apart: the hold, then what the runner hears. */
+  mic: GuestMic
   screenShareAllowed: boolean
   sharingScreen: boolean
   /** On stage with no camera frame for 5 s (D12). */
   away: boolean
+}
+
+/**
+ * A guest's mic as the host tells it apart (D14; live show 2026-11-19).
+ * Unmute only lets go of the host's hold: the guest turns the mic on
+ * themselves, so a lifted hold with the mic still off is a state of its own.
+ * `held`: the host's hold. `off`: no hold, but the mic is muted or not
+ * published. `on`: published and on. `unknown`: the runner doesn't see them.
+ */
+export type GuestMic = 'held' | 'off' | 'on' | 'unknown'
+
+export const GUEST_MIC_HELD = 'Muted by you'
+export const GUEST_MIC_OFF = 'Mic off'
+
+export function guestMic(
+  held: boolean,
+  participant: Pick<CloudRoomParticipant, 'audio' | 'muted'> | undefined
+): GuestMic {
+  if (held) return 'held'
+  if (!participant) return 'unknown'
+  return participant.audio && !participant.muted ? 'on' : 'off'
+}
+
+/**
+ * The host's own room hears a guest too: a mic publication it sees muted is
+ * off before the runner's next report says so. Never overrides the hold.
+ */
+export function withRoomMic(mic: GuestMic, roomMicMuted: boolean): GuestMic {
+  return roomMicMuted && mic !== 'held' ? 'off' : mic
+}
+
+/** The word on the guest's row and what it means; nothing while the mic is on. */
+export function guestMicStatus(
+  mic: GuestMic,
+  name: string
+): { label: string; hint: string } | null {
+  switch (mic) {
+    case 'held':
+      return { label: GUEST_MIC_HELD, hint: `${name} can't unmute until you let them.` }
+    case 'off':
+      return { label: GUEST_MIC_OFF, hint: `Only ${name} can turn their mic on.` }
+    default:
+      return null
+  }
+}
+
+/** After the host's Unmute (D14): the guest still has to unmute themselves. */
+export function unmuteHint(name: string): string {
+  return `${name} can talk again once they unmute.`
+}
+
+/**
+ * A person's mic on their row (plan 252), as one icon and its words. A guest:
+ * the host's hold, a mic the guest still has off, talking, or quiet. The
+ * host: their own mute. The label is what the icon says to a screen reader;
+ * the hint is the sentence on hover, when the state needs one.
+ */
+export type MicView = {
+  state: 'talking' | 'quiet' | 'held' | 'off' | 'muted'
+  label: string
+  hint: string | null
+}
+
+export const MIC_TALKING = 'Talking'
+export const MIC_QUIET = 'Quiet'
+export const MIC_MUTED = 'Muted'
+
+export function personMicView(
+  person: Pick<RoomPerson, 'host' | 'mic' | 'name'>,
+  heard: {
+    /** The host's own mute (the host's row only). */
+    localMicMuted: boolean
+    /** The host's room sees this guest's mic publication muted. */
+    roomMicMuted: boolean
+    speaking: boolean
+  }
+): MicView {
+  if (person.host) {
+    return heard.localMicMuted
+      ? { state: 'muted', label: MIC_MUTED, hint: null }
+      : { state: 'quiet', label: MIC_QUIET, hint: null }
+  }
+  const status = guestMicStatus(withRoomMic(person.mic, heard.roomMicMuted), person.name)
+  if (status) {
+    return {
+      state: status.label === GUEST_MIC_HELD ? 'held' : 'off',
+      label: status.label,
+      hint: status.hint
+    }
+  }
+  return heard.speaking
+    ? { state: 'talking', label: MIC_TALKING, hint: null }
+    : { state: 'quiet', label: MIC_QUIET, hint: null }
+}
+
+/** What a press of the mic control does, as its name: the host's own mute, or the hold. */
+export function micToggleLabel(
+  person: Pick<RoomPerson, 'host' | 'muted' | 'name'>,
+  localMicMuted: boolean
+): string {
+  if (person.host) return localMicMuted ? 'Unmute your microphone' : 'Mute your microphone'
+  return person.muted ? `Let ${person.name} unmute` : `Mute ${person.name}`
+}
+
+/**
+ * A guest's screen share on their row (plan 252): not allowed, allowed, or
+ * sharing now. The control is the host's permission; the guest starts the
+ * share from their own page, and the host puts it on the program under
+ * Screens on the Show stage.
+ */
+export type ScreenShareView = {
+  state: 'off' | 'allowed' | 'sharing'
+  /** The state in words, for a screen reader. */
+  label: string
+  /** The sentence on hover: the state, and what a press does. */
+  hint: string
+  /** The control's name: what a press does. */
+  actionLabel: string
+  action: 'allow-screen-share' | 'disallow-screen-share'
+}
+
+export function guestScreenShare(
+  person: Pick<RoomPerson, 'name' | 'screenShareAllowed' | 'sharingScreen'>
+): ScreenShareView {
+  const { name } = person
+  if (person.sharingScreen) {
+    return {
+      state: 'sharing',
+      label: 'Sharing their screen',
+      hint: `${name} is sharing their screen. Press to stop it.`,
+      actionLabel: `Stop ${name}'s screen share`,
+      action: 'disallow-screen-share'
+    }
+  }
+  if (person.screenShareAllowed) {
+    return {
+      state: 'allowed',
+      label: 'Can share their screen',
+      hint: `${name} can share their screen from their page. Press to take that back.`,
+      actionLabel: `Stop letting ${name} share their screen`,
+      action: 'disallow-screen-share'
+    }
+  }
+  return {
+    state: 'off',
+    label: "Can't share their screen",
+    hint: `Let ${name} share their screen.`,
+    actionLabel: `Let ${name} share their screen`,
+    action: 'allow-screen-share'
+  }
 }
 
 const RUNNER_PREFIX = 'runner:'
@@ -235,6 +400,7 @@ export function roomPeople(
       onStage: onStage.includes(host),
       quality: hostParticipant?.quality ?? null,
       muted: hostParticipant?.muted ?? false,
+      mic: guestMic(false, hostParticipant),
       screenShareAllowed: true,
       sharingScreen: hostParticipant?.screen ?? false,
       away: hostParticipant?.away ?? room.hostAway
@@ -253,6 +419,7 @@ export function roomPeople(
       onStage: onStage.includes(guest.guestId),
       quality: participant?.quality ?? null,
       muted: guest.muted,
+      mic: guestMic(guest.muted, participant),
       screenShareAllowed: guest.screenShareAllowed,
       sharingScreen: participant?.screen ?? false,
       away: participant?.away ?? false
@@ -270,6 +437,7 @@ export function roomPeople(
       onStage: onStage.includes(participant.identity),
       quality: participant.quality,
       muted: participant.muted,
+      mic: guestMic(false, participant),
       screenShareAllowed: false,
       sharingScreen: participant.screen,
       away: participant.away
@@ -344,6 +512,130 @@ export function guestsSessionValue(
   return parts.join(' · ')
 }
 
+/** The room in numbers, for the Guests page's Room row and the lists' labels. */
+export function roomCounts(
+  room: CloudRoomStatus | undefined,
+  people: readonly RoomPerson[]
+): { onStage: number; backstage: number; asking: number } {
+  const guests = people.filter((person) => !person.host)
+  const onStage = guests.filter((person) => person.onStage).length
+  return {
+    onStage,
+    backstage: guests.length - onStage,
+    asking: room?.requests?.length ?? 0
+  }
+}
+
+// --- What the room sends (plan 249 S17, plan 252) ------------------------------
+
+/**
+ * The room's output profile as short facts, one group per cloud output:
+ * "1920×1080", "30 fps", "6 Mbps". The full sentence
+ * (`managedProfileDescription`) stays their tooltip and the Guests page's
+ * line. `differs`: the room sends something other than the settings asked.
+ */
+export function outputProfileChips(
+  profile: ManagedOutputProfile | undefined
+): { orientation: string; facts: string[]; differs: boolean }[] {
+  if (!profile || profile.version !== 1) return []
+  return profile.effective.map((output) => ({
+    orientation: output.orientation,
+    facts: [
+      `${output.width}×${output.height}`,
+      `${output.pictureFps} fps`,
+      `${output.videoKbps / 1000} Mbps`
+    ],
+    differs: output.differences.length > 0
+  }))
+}
+
+// --- Screens (plan 252) --------------------------------------------------------
+
+export const NO_SCREENS_YET = 'Nobody is sharing a screen.'
+export const SCREENS_GUEST_HINT = 'A guest can share theirs once you allow it on their row.'
+
+/** A screen someone shares in the room: a card under Screens on the Show stage. */
+export type RoomScreen = {
+  /** Whose screen: the sharer's identity, as `CloudStage.screen` names it. */
+  identity: string
+  /** "Your screen", "Ada's screen". */
+  name: string
+  host: boolean
+  /** The program shows this screen (the stage as sent names it). */
+  onProgram: boolean
+  /**
+   * Why it can't go on the program: its owner is backstage, or (plan 251)
+   * two screens are on stage already.
+   */
+  blockedReason: string | null
+}
+
+/**
+ * Every screen shared in the room, the host's first. One list, so a layout
+ * that takes more than one screen (two screens side by side) picks from it.
+ *
+ * Plan 251: a stage that names two screens has two cards on. While the Two
+ * screens layout is chosen (`twoScreens`) a card adds its screen beside the
+ * other, so a third waits until one comes off; on any other layout a card
+ * takes the one place.
+ */
+export function roomScreens(
+  room: CloudRoomStatus | undefined,
+  people: readonly RoomPerson[],
+  hostSharing: boolean,
+  twoScreens = false
+): RoomScreen[] {
+  const shown = room ? stageScreens(room.stage) : []
+  const full = twoScreens && shown.length >= STAGE_MAX_SCREENS
+  return people
+    .filter((person) => (person.host ? hostSharing || person.sharingScreen : person.sharingScreen))
+    .map((person) => {
+      const onProgram = shown.includes(person.identity)
+      return {
+        identity: person.identity,
+        name: person.host ? 'Your screen' : `${person.name}'s screen`,
+        host: person.host,
+        onProgram,
+        blockedReason: !person.onStage
+          ? `Bring ${person.name} on first.`
+          : full && !onProgram
+            ? TWO_SCREENS_AT_MOST
+            : null
+      }
+    })
+}
+
+/**
+ * The stage with this screen on the program, or with none: pure, for the
+ * tests. Putting a screen on picks Screen + people, as sharing the host's
+ * own screen does; taking it off leaves that layout for Side by side.
+ */
+export function stageWithScreen(stage: CloudStage, identity: string | null): CloudStage {
+  // One screen: it takes the place of any other, and of a pair.
+  if (identity) return { ...withStageScreens(stage, [identity]), layout: 'screen-people' }
+  return {
+    ...withStageScreens(stage, []),
+    layout: stage.layout === 'screen-people' ? 'side-by-side' : stage.layout
+  }
+}
+
+/**
+ * A Screens card's click (plan 251). On the Two screens layout the card
+ * adds its screen beside the other or takes it off, and the other stays. On
+ * any other layout it is plan 252's: the screen takes the one place, or
+ * comes off.
+ */
+export function stageWithScreenCard(
+  stage: CloudStage,
+  screen: Pick<RoomScreen, 'identity' | 'onProgram'>,
+  twoScreens: boolean
+): CloudStage {
+  if (twoScreens) return toggleStageScreen(stage, screen.identity)
+  return screen.onProgram
+    ? removeScreen(stage, screen.identity)
+    : stageWithScreen(stage, screen.identity)
+}
+
 // --- Stage controls (C-G3, D8) ------------------------------------------------
 
 export const LAYOUT_LABELS: Record<CloudStageLayout, string> = {
@@ -352,51 +644,89 @@ export const LAYOUT_LABELS: Record<CloudStageLayout, string> = {
   'screen-people': 'Screen + people',
   spotlight: 'Spotlight'
 }
+/** Plan 251: the fifth card. Screen + people with two screens on the wire. */
+export const TWO_SCREENS_LABEL = 'Two screens'
 
 export const SHARE_A_SCREEN_FIRST = 'Share a screen first'
 export const SOLO_NEEDS_ONE = 'Solo shows one person. Send the others backstage first.'
 
 export type LayoutOption = {
-  value: CloudStageLayout
+  value: DrawnStageLayout
   label: string
   disabledReason: string | null
 }
 
-/** The four layout chips, each with its reason when it can't apply. */
-export function layoutOptions(room: CloudRoomStatus | undefined): LayoutOption[] {
+/**
+ * The layout cards, each with its reason when it can't apply: the four room
+ * layouts, then Two screens (plan 251). Two screens needs a managed show (a
+ * node show's runner draws one screen) and a screen to start from: one the
+ * stage names, or one someone on stage shares (`sharers`).
+ */
+export function layoutOptions(
+  room: CloudRoomStatus | undefined,
+  screens: { managed: boolean; sharers: number } = { managed: false, sharers: 0 }
+): LayoutOption[] {
   const onStage = room?.stage.onStage.length ?? 0
   const screen = room?.stage.screen
-  return (Object.keys(LAYOUT_LABELS) as CloudStageLayout[]).map((value) => ({
-    value,
-    label: LAYOUT_LABELS[value],
-    disabledReason:
-      value === 'screen-people' && !screen
+  const options: LayoutOption[] = (Object.keys(LAYOUT_LABELS) as CloudStageLayout[]).map(
+    (value) => ({
+      value,
+      label: LAYOUT_LABELS[value],
+      disabledReason:
+        value === 'screen-people' && !screen
+          ? SHARE_A_SCREEN_FIRST
+          : value === 'solo' && onStage > 1
+            ? SOLO_NEEDS_ONE
+            : null
+    })
+  )
+  options.push({
+    value: 'two-screens',
+    label: TWO_SCREENS_LABEL,
+    disabledReason: !screens.managed
+      ? ONE_SCREEN_ON_THIS_SHOW
+      : !screen && screens.sharers === 0
         ? SHARE_A_SCREEN_FIRST
-        : value === 'solo' && onStage > 1
-          ? SOLO_NEEDS_ONE
-          : null
-  }))
+        : null
+  })
+  return options
 }
 
 /** One line under the chips: why each blocked layout waits. */
 export function layoutReasonsLine(options: readonly LayoutOption[]): string | null {
-  const reasons = options.flatMap((option) =>
-    option.disabledReason === null
-      ? []
-      : option.value === 'screen-people'
-        ? [`${option.disabledReason} for ${option.label}.`]
-        : [option.disabledReason]
-  )
+  // "Share a screen first" is said once, for every layout that waits on it.
+  const waiting = options.filter((option) => option.disabledReason === SHARE_A_SCREEN_FIRST)
+  const reasons = options.flatMap((option) => {
+    if (option.disabledReason === null) return []
+    if (option.disabledReason !== SHARE_A_SCREEN_FIRST) return [option.disabledReason]
+    return option === waiting[0]
+      ? [`${SHARE_A_SCREEN_FIRST} for ${waiting.map((entry) => entry.label).join(' and ')}.`]
+      : []
+  })
   return reasons.length > 0 ? reasons.join(' ') : null
 }
 
 /**
  * The layout the stage shows: the runner's own fallbacks applied (D8), on the
  * stage as the program draws it (review M2: a stale screen is Side by side).
+ * Plan 251: `two-screens` while it draws two.
  */
-export function shownLayout(room: CloudRoomStatus | undefined): CloudStageLayout {
+export function shownLayout(room: CloudRoomStatus | undefined): DrawnStageLayout {
   if (!room) return 'solo'
   return effectiveStageLayout(showStageInput(room))
+}
+
+/**
+ * The layout card that is on (plan 251). Two screens stays on while it is
+ * chosen and one screen is up (the program then draws Screen + people and
+ * waits for the second), so the Screens cards keep adding to it.
+ */
+export function selectedLayout(
+  room: CloudRoomStatus | undefined,
+  twoScreens: boolean
+): DrawnStageLayout {
+  const shown = shownLayout(room)
+  return twoScreens && shown === 'screen-people' ? 'two-screens' : shown
 }
 
 // --- Moderation (D5, D14) ------------------------------------------------------

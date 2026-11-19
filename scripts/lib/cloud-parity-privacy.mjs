@@ -9,7 +9,8 @@ import { waitFor, runMedia } from './cloud-managed-smoke.mjs'
 import {
   assertFrostPixels,
   assertPrivacyDrain,
-  assertNoSecretPixels
+  assertNoSecretPixels,
+  hasSecretMarker
 } from './cloud-parity-privacy-contract.mjs'
 
 export async function exercisePrivacy({ h, clients, pages, report, output, newPage, programUrl }) {
@@ -60,14 +61,18 @@ export async function exercisePrivacy({ h, clients, pages, report, output, newPa
       'Fixture transport receipts; real HTTP authorization tested separately. No forged host confirmations.'
   }
   report.privacy = result
-  // Secret marker is a full-frame magenta field with readable text. Every
-  // captured pixel is secret-bearing, making downsampled inspection decisive.
+  // Secret marker is readable magenta text on the wire's neutral grey. Any
+  // decoded raw frame carries text pixels off the grey, so downsampled
+  // inspection stays decisive. A receiver's Hide frost (plan 210 D8: the
+  // frame it last showed, blurred, as in the Studio) keeps the page's
+  // colour as a soft pink band but never a pure magenta stroke, so a pure
+  // magenta pixel in a composed output is a raw frame.
   await h.eval(`
     navigator.mediaDevices.getDisplayMedia = async () => {
       const canvas = document.createElement('canvas'); canvas.width = 640; canvas.height = 360;
       const context = canvas.getContext('2d');
-      const draw = () => { context.fillStyle = '#ff00ff'; context.fillRect(0,0,640,360);
-        context.fillStyle = '#00ffff'; context.font = '48px sans-serif'; context.fillText('SECRET 249',80,160); };
+      const draw = () => { context.fillStyle = '#808080'; context.fillRect(0,0,640,360);
+        context.fillStyle = '#ff00ff'; context.font = 'bold 72px sans-serif'; context.fillText('SECRET 249',40,200); };
       draw(); const timer = setInterval(draw, 33);
       const stream = canvas.captureStream(30);
       const track = stream.getVideoTracks()[0], stop = track.stop.bind(track);
@@ -100,7 +105,7 @@ export async function exercisePrivacy({ h, clients, pages, report, output, newPa
     })
   for (const consumer of consumers)
     await waitFor(
-      async () => (await sample(consumer.page))?.pixels[0] > 220,
+      async () => hasSecretMarker((await sample(consumer.page))?.pixels),
       `${consumer.name} sees real secret before Hide`
     )
   for (const scenario of [

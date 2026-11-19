@@ -5,7 +5,8 @@ import {
   NO_TALK_SHOW,
   ROOM_JOIN_ERROR_ACTION,
   stageInRoom,
-  stageWith
+  stageWith,
+  takeoverDeviceHoldEpoch
 } from '@/hooks/use-talk-show-room'
 import { userErrorMessage } from '@/lib/user-error'
 
@@ -57,6 +58,23 @@ describe('stageWith', () => {
     expect(after.spotlight).toBeUndefined()
     expect(after.screen).toBeUndefined()
     expect(after.layout).toBe('screen-people')
+  })
+
+  it('keeps the other screen when one of two leaves the stage (plan 251)', () => {
+    const stage: CloudStage = {
+      layout: 'screen-people',
+      onStage: [HOST, 'g_ada'],
+      screen: 'g_ada',
+      screens: ['g_ada', HOST]
+    }
+    const after = stageWith(stage, 'g_ada', false, HOST)
+    expect(after.screen).toBe(HOST)
+    expect(after.screens).toBeUndefined()
+    const host = { identity: HOST } as CloudRoomParticipant
+    const gone = stageInRoom(stage, { guests: [], participants: [host] }, HOST)
+    expect(gone.onStage).toEqual([HOST])
+    expect(gone.screen).toBe(HOST)
+    expect(gone.screens).toBeUndefined()
   })
 
   it('is inert outside a provider', async () => {
@@ -138,6 +156,27 @@ describe('stageInRoom', () => {
     const stage: CloudStage = { layout: 'side-by-side', onStage: [HOST, 'g_old'] }
     expect(stageInRoom(stage, undefined, HOST)).toBe(stage)
   })
+
+  it('drops nothing until the status knows who is in the room', () => {
+    // Right after a backend restart both lists can be empty for a moment:
+    // the guests on stage are still there, so none of them may be dropped.
+    const stage: CloudStage = { layout: 'side-by-side', onStage: [HOST, 'g_ada', 'g_bo'] }
+    expect(stageInRoom(stage, { guests: [], participants: [] }, HOST)).toBe(stage)
+    expect(stageInRoom(stage, {}, HOST)).toBe(stage)
+    // Guests seen in LiveKit before the host and the guest list: still not known.
+    expect(stageInRoom(stage, { guests: [], participants: [participant('g_ada')] }, HOST)).toBe(
+      stage
+    )
+
+    // The host is reported, and every guest has left: the stale ones go.
+    expect(
+      stageInRoom(stage, { guests: [], participants: [participant(HOST)] }, HOST).onStage
+    ).toEqual([HOST])
+    // A listed guest makes the room known even before the host is reported.
+    expect(
+      stageInRoom(stage, { guests: [guest('g_ada')], participants: [] }, HOST).onStage
+    ).toEqual([HOST, 'g_ada'])
+  })
 })
 
 it('names the room once in the failed join toast', () => {
@@ -147,4 +186,19 @@ it('names the room once in the failed join toast', () => {
       object: 'the room'
     }).title
   ).toBe("Couldn't join the room")
+})
+
+// Plan 249 S24 (D9) with the 2026-11-19 incident: after a backend restart
+// mid-show, Resume took the show back from this computer's own earlier
+// process, and D9 kept the microphone out of the room until Turn on.
+describe('takeoverDeviceHoldEpoch', () => {
+  it('holds the camera and microphone only after a takeover from another device', () => {
+    expect(takeoverDeviceHoldEpoch(undefined)).toBe(0)
+    expect(takeoverDeviceHoldEpoch({ controllerEpoch: 3 })).toBe(0)
+    expect(takeoverDeviceHoldEpoch({ controllerEpoch: 4, takenOverFrom: 'another-device' })).toBe(4)
+  })
+
+  it('holds nothing when the show comes back from this same computer', () => {
+    expect(takeoverDeviceHoldEpoch({ controllerEpoch: 5, takenOverFrom: 'this-device' })).toBe(0)
+  })
 })

@@ -34,6 +34,74 @@ export function graphicsLayers(
       rect: outputRects?.[output] ?? layer.rect
     }))
 }
+/**
+ * What the room sends to its program pages (plan 249 S9, S15). With the
+ * room's Graphics switch on, everything. Off, only the layers whose own
+ * controls already put them on the stream: captions (Captions on) and the
+ * comment card (a Highlight, or the Sidekick's pick). The switch names
+ * banners, timers and the chat box; before S9 a managed show sent captions
+ * and cards through the room overlay path whatever it said, and S9 moved
+ * them behind it, so on 0.31.0 to 0.32.1 a managed show's captions and cards
+ * never reached the viewers while the desktop reported them on stream (the
+ * owner, 2026-11-19). HTML banners are banners: their placements go only
+ * with the switch on.
+ */
+export function roomGraphicsContent(
+  content: GraphicsContent | null,
+  graphicsEnabled: boolean
+): GraphicsContent | null {
+  if (!content || graphicsEnabled) return content
+  const own = (layers: GraphicsContent['h']) =>
+    layers.filter((layer) => layer.kind === 'caption' || layer.kind === 'highlight')
+  const h = own(content.h)
+  const v = own(content.v)
+  return h.length || v.length ? { h, v, unsupported: [] } : null
+}
+/** A lease renewal of a view its page applied (PERF-06 keeps it cheap). */
+export const GRAPHICS_RENEW_MS = 10_000
+/**
+ * A view its page has not acknowledged goes again, once, after this long.
+ * A program page reads at most one snapshot per 200 ms and drops a sooner
+ * one unread (videorcweb `stage.ts` `takeGraphics`); the same view then
+ * waited the 10 s renewal, as long as a comment card lives, so a card that
+ * landed just after a renewal never reached the viewers.
+ */
+export const GRAPHICS_UNACKED_RESEND_MS = 3_000
+/**
+ * The resend waits for evidence: a receipt from the page this long after the
+ * send that still does not acknowledge it. The page applies in a few hundred
+ * milliseconds and beacons the change about a second later, so a receipt
+ * this late means it dropped the view; a slow relay alone resends nothing
+ * (PERF-06: a picture goes whole once per page session).
+ */
+export const GRAPHICS_ACK_GRACE_MS = 2_000
+
+/**
+ * Whether a page is due `key` now, and whether that send repeats a view it
+ * never acknowledged. A new view (another key) is always due. `heardAt` is
+ * when this computer last took the page's receipt (its own clock, as
+ * `sent.at` is).
+ */
+export function graphicsSendDue(
+  sent:
+    | { key: string; revision: number; at: number; publisherSid: string; retried: boolean }
+    | undefined,
+  key: string,
+  applied: { publisherSid: string; revision: number } | undefined,
+  heardAt: number | undefined,
+  now: number
+): { due: boolean; retry: boolean } {
+  if (!sent || sent.key !== key) return { due: true, retry: false }
+  const age = now - sent.at
+  const acknowledged =
+    applied?.publisherSid === sent.publisherSid && applied.revision === sent.revision
+  if (acknowledged || sent.retried) return { due: age >= GRAPHICS_RENEW_MS, retry: false }
+  const dropped = heardAt !== undefined && heardAt - sent.at >= GRAPHICS_ACK_GRACE_MS
+  return {
+    due: age >= GRAPHICS_RENEW_MS || (dropped && age >= GRAPHICS_UNACKED_RESEND_MS),
+    retry: true
+  }
+}
 export type RoomGraphicsStatus = {
   enabled: boolean
   state: 'off' | 'preview' | 'waiting' | 'applied' | 'failed'
@@ -63,6 +131,8 @@ export type AcceptedGraphicsView = {
 export class RoomGraphicsPublisher {
   #content: GraphicsContent | null = null
   #receipts = new Map<string, CapabilityReceipt>()
+  /** Per peer: when its newest receipt arrived here, by this computer's clock. */
+  #heard = new Map<string, number>()
   /** Per peer: the exact sanitized envelope it was sent (S24 keeps it as sent). */
   #sent = new Map<
     string,
@@ -75,6 +145,8 @@ export class RoomGraphicsPublisher {
       orientation: 'h' | 'v'
       publisherSid: string
       expiresAt: number
+      /** A resend of the same view its page never acknowledged. */
+      retried: boolean
     }
   >()
   /**
@@ -196,6 +268,7 @@ export class RoomGraphicsPublisher {
       const old = this.#receipts.get(parsed.identity)
       if (old && old.at >= raw.at) return
       this.#receipts.set(parsed.identity, { ...parsed, at: raw.at })
+      this.#heard.set(parsed.identity, Date.now())
       this.#refresh()
     } catch {
       /* Untrusted input supplies no capability. */
@@ -204,6 +277,7 @@ export class RoomGraphicsPublisher {
   #lost = (): void => {
     this.#generation++
     this.#receipts.clear()
+    this.#heard.clear()
     this.#sent.clear()
     this.#assets.clear()
     this.#preview = null
@@ -332,6 +406,7 @@ export class RoomGraphicsPublisher {
     for (const [identity, receipt] of this.#receipts)
       if (!consumerSid(this.room, identity, receipt, Date.now())) {
         this.#receipts.delete(identity)
+        this.#heard.delete(identity)
         this.#sent.delete(identity)
         this.#assets.forget(identity)
       }
@@ -375,8 +450,14 @@ export class RoomGraphicsPublisher {
         orientation,
         layers
       ])
-      const old = this.#sent.get(peer.identity)
-      if (old?.key === key && Date.now() - old.at < 10_000) continue
+      const due = graphicsSendDue(
+        this.#sent.get(peer.identity),
+        key,
+        receipt.graphics.static.applied,
+        this.#heard.get(peer.identity),
+        Date.now()
+      )
+      if (!due.due) continue
       const snapshot = this.#snapshot(output, orientation, layers)
       if (!parseGraphicsSnapshot(snapshot, { ...snapshot, now: Date.now() }))
         throw new Error('Invalid graphics snapshot')
@@ -447,7 +528,8 @@ export class RoomGraphicsPublisher {
         output: snapshot.output,
         orientation: snapshot.orientation,
         publisherSid: snapshot.publisherSid,
-        expiresAt: snapshot.expiresAt
+        expiresAt: snapshot.expiresAt,
+        retried: due.retry
       })
       this.#error = this.#content?.unsupported.length ? this.#content.unsupported.join(' ') : null
     }
@@ -456,6 +538,7 @@ export class RoomGraphicsPublisher {
   #left = (participant?: { identity: string }): void => {
     if (participant) {
       this.#receipts.delete(participant.identity)
+      this.#heard.delete(participant.identity)
       this.#sent.delete(participant.identity)
       this.#assets.forget(participant.identity)
     }
@@ -475,6 +558,7 @@ export class RoomGraphicsPublisher {
     this.#content = null
     this.#preview = null
     this.#receipts.clear()
+    this.#heard.clear()
     this.#sent.clear()
     this.#assets.clear()
   }

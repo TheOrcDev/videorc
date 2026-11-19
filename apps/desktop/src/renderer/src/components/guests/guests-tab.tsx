@@ -6,8 +6,18 @@ import { ConfirmDialog } from '@/components/confirm-dialog'
 import { useGuestModeration } from '@/components/guests/guest-moderation'
 import { CloseRoomButton } from '@/components/guests/close-room-button'
 import { CloudIsoSection } from '@/components/guests/cloud-iso-section'
-import { KebabMenu } from '@/components/kebab-menu'
-import { GroupedList, ListRow } from '@/components/list-row'
+import { CountLabel, PersonRow, RequestRow } from '@/components/guests/room-person'
+import {
+  CheckIcon,
+  CopyIcon,
+  ImageIcon,
+  LinkIcon,
+  OutputIcon,
+  RefreshIcon,
+  SparkleIcon,
+  type AppIcon
+} from '@/components/icons'
+import { GroupedList } from '@/components/list-row'
 import { LockAlert, OfflineAlert, SessionLockAlert } from '@/components/lock-alert'
 import { PageStack } from '@/components/page'
 import { PanelSection } from '@/components/panel-section'
@@ -17,6 +27,7 @@ import { Alert, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { DisabledReason } from '@/components/ui/disabled-reason'
+import { Empty } from '@/components/ui/empty'
 import {
   FieldDescription,
   FieldGroup,
@@ -24,7 +35,8 @@ import {
   FieldSet,
   SettingsRow
 } from '@/components/ui/field'
-import { Input } from '@/components/ui/input'
+import { InfoTooltip } from '@/components/ui/info-tooltip'
+import { InputGroup, InputGroupAddon, InputGroupInput } from '@/components/ui/input-group'
 import { Spinner } from '@/components/ui/spinner'
 import { Switch } from '@/components/ui/switch'
 import { useStudioCloud, useStudioCore } from '@/hooks/use-studio'
@@ -43,26 +55,31 @@ import {
   guestConsentLine,
   guestsAccess,
   newLinkAsksFirst,
-  qualityStatus,
-  requestDevice,
+  outputProfileChips,
+  roomCounts,
   roomIsFull,
   roomLimits,
   roomLimitsLine,
   roomPeople,
   roomPhaseLabel,
-  stageChipLabel,
   type RoomPerson
 } from '@/lib/guests-view'
 import { VIDEORC_PREMIUM_URL } from '@/lib/videorc-web-links'
-import { roomAvatarDescription, roomGraphicsDescription } from '@/lib/room-program-opt-ins'
+import {
+  roomAvatarDescription,
+  roomGraphicsDescription,
+  roomOptInTone,
+  type RoomProgramOptIn
+} from '@/lib/room-program-opt-ins'
 import { guestGraphicsLine, isManagedShow } from '@/lib/talk-show-managed'
 import type { CloudRoomRequest } from '@/lib/backend'
 
 /**
  * The Guests page (plan 224 C-G2, D16; its own page since 0.31.1): the room, the invite link and who
  * is in it. One home for Open the room, Close the room, the link and the door
- * switch; the stage itself (Bring on, Send backstage, the layout) is the Show
- * stage's backstage strip in the Studio (C-G3). Locked means disabled, with
+ * switch; the stage itself (Bring on, Send backstage, the layout, the
+ * screens) is the Show stage in the Studio (C-G3). People are rows with
+ * their picture, in On stage and Backstage, as on the Show stage (plan 252). Locked means disabled, with
  * one reason leading the tab: a Premium feature stays on screen behind its
  * lock. Loaded with the tab, never eager.
  */
@@ -86,9 +103,12 @@ export default function GuestsTab(): ReactElement {
   const people = roomPeople(room, talkShow.hostIdentity)
   const requests = room?.requests ?? []
   const full = roomOpen && roomIsFull(people, limits)
+  const roomPending = opening || phase === 'opening'
   // Plan 249 S4/S9: a managed show's program takes the room's avatar and
   // graphics once the streamer turns them on here (their one home).
   const programOptIns = isManagedShow(cloudStatus)
+  const counts = roomCounts(room, people)
+  const profileChips = outputProfileChips(cloudStatus?.show?.outputProfile)
 
   const openRoom = async (): Promise<void> => {
     setOpening(true)
@@ -109,8 +129,6 @@ export default function GuestsTab(): ReactElement {
     }
   }
 
-  const roomPending = opening || phase === 'opening'
-
   return (
     <PageStack>
       <PanelSection
@@ -129,21 +147,35 @@ export default function GuestsTab(): ReactElement {
         ) : sessionLocked ? (
           <SessionLockAlert reason={ROOM_WAITS_FOR_SESSION} />
         ) : null}
-        {/* Plan 249 S17: before the room opens, what it will send (or why it
-            can't open); once open, what the room reported it sends. */}
-        {!roomOpen || cloudStatus?.show?.outputProfile ? (
-          <FieldDescription data-testid="cloud-output-profile">
-            {roomOpen
-              ? managedProfileDescription(cloudStatus?.show?.outputProfile)
-              : outputPlan.description}
-          </FieldDescription>
-        ) : null}
         <FieldGroup variant="grouped">
           <SettingsRow
             data-testid="guests-room-row"
             description={ROOM_BACKSTAGE_TIME_LINE}
-            label={roomPhaseLabel(room)}
+            label={
+              <span className="flex min-w-0 items-center gap-2">
+                <StatusDot
+                  pulse={roomPending || phase === 'closing'}
+                  tone={roomOpen ? 'good' : 'neutral'}
+                />
+                <span className="truncate">{roomPhaseLabel(room)}</span>
+              </span>
+            }
           >
+            {/* The room in numbers: who is where, and who waits on the host. */}
+            {roomOpen ? (
+              <span
+                className="flex shrink-0 flex-wrap items-center justify-end gap-1"
+                data-testid="guests-room-counts"
+              >
+                {counts.asking > 0 ? (
+                  <Badge variant="warning">
+                    {counts.asking === 1 ? '1 wants to join' : `${counts.asking} want to join`}
+                  </Badge>
+                ) : null}
+                <Badge variant="outline">{counts.onStage} on stage</Badge>
+                <Badge variant="outline">{counts.backstage} backstage</Badge>
+              </span>
+            ) : null}
             {roomOpen || phase === 'closing' ? (
               <CloseRoomButton />
             ) : (
@@ -164,20 +196,35 @@ export default function GuestsTab(): ReactElement {
               </Button>
             )}
           </SettingsRow>
-          <SettingsRow
-            data-testid="guests-door"
-            description={DOOR_SWITCH_DESCRIPTION}
-            label={DOOR_SWITCH_LABEL}
-          >
-            <DisabledReason reason={!disabled && !roomOpen ? OPEN_THE_ROOM_FIRST : null}>
-              <Switch
-                checked={room?.doorOpen ?? false}
-                disabled={disabled || !roomOpen}
-                onCheckedChange={(open) => void talkShow.setDoor(open).catch(() => {})}
-              />
-            </DisabledReason>
-          </SettingsRow>
         </FieldGroup>
+        {/* Plan 249 S17: before the room opens, what it will send (or why it
+            can't open); once open, what the room reported it sends, as short
+            facts with the whole sentence on hover. */}
+        {roomOpen && profileChips.length > 0 ? (
+          <InfoTooltip content={managedProfileDescription(cloudStatus?.show?.outputProfile)}>
+            <span
+              className="flex min-w-0 flex-wrap items-center gap-1 px-1 text-meta text-muted-foreground"
+              data-testid="cloud-output-profile"
+            >
+              <OutputIcon aria-hidden className="size-3.5 shrink-0" />
+              <span>Sends</span>
+              {profileChips.map((output) => (
+                <Badge key={output.orientation} variant={output.differs ? 'warning' : 'outline'}>
+                  {output.facts.join(' · ')}
+                </Badge>
+              ))}
+              <span className="sr-only">
+                {managedProfileDescription(cloudStatus?.show?.outputProfile)}
+              </span>
+            </span>
+          </InfoTooltip>
+        ) : !roomOpen || cloudStatus?.show?.outputProfile ? (
+          <FieldDescription data-testid="cloud-output-profile">
+            {roomOpen
+              ? managedProfileDescription(cloudStatus?.show?.outputProfile)
+              : outputPlan.description}
+          </FieldDescription>
+        ) : null}
         {programOptIns ? (
           <RoomProgramOptIns
             disabledReason={disabled ? null : !roomOpen ? OPEN_THE_ROOM_FIRST : null}
@@ -236,7 +283,7 @@ function RoomProgramOptIns({
         <SettingsRow
           data-testid="guests-program-avatar"
           description={roomAvatarDescription(avatar)}
-          label="Avatar"
+          label={<OptInLabel icon={SparkleIcon} optIn={avatar} title="Avatar" />}
         >
           <DisabledReason reason={disabledReason}>
             <Switch
@@ -264,7 +311,7 @@ function RoomProgramOptIns({
         <SettingsRow
           data-testid="guests-program-graphics"
           description={roomGraphicsDescription(graphics)}
-          label="Graphics"
+          label={<OptInLabel icon={ImageIcon} optIn={graphics} title="Graphics" />}
         >
           <DisabledReason reason={disabledReason}>
             <Switch
@@ -277,6 +324,26 @@ function RoomProgramOptIns({
         </SettingsRow>
       </FieldGroup>
     </FieldSet>
+  )
+}
+
+/** An opt-in's name with its icon and its state as a dot; the sentence is the description. */
+function OptInLabel({
+  icon: Icon,
+  title,
+  optIn
+}: {
+  icon: AppIcon
+  title: string
+  optIn: RoomProgramOptIn | null | undefined
+}): ReactElement {
+  return (
+    <span className="flex min-w-0 items-center gap-2">
+      <Icon aria-hidden className="size-4 shrink-0 text-muted-foreground" weight="duotone" />
+      <span className="truncate">{title}</span>
+      {/* Off needs no dot: the switch says it. */}
+      {optIn?.enabled ? <StatusDot tone={roomOptInTone(optIn)} /> : null}
+    </span>
   )
 }
 
@@ -312,16 +379,21 @@ function InviteLinkSection({
   return (
     <PanelSection data-testid="guests-invite" description={limitsLine} title="Invite link">
       <div className="flex min-w-0 items-center gap-2">
-        <Input
-          aria-label="Invite link"
-          className="min-w-0 flex-1 select-text"
-          data-testid="guests-invite-url"
-          disabled={disabled || noLink}
-          placeholder="The link appears when the room opens."
-          readOnly
-          value={inviteUrl}
-          onFocus={(event) => event.currentTarget.select()}
-        />
+        <InputGroup className="min-w-0 flex-1" data-disabled={disabled || noLink}>
+          <InputGroupAddon>
+            <LinkIcon aria-hidden />
+          </InputGroupAddon>
+          <InputGroupInput
+            aria-label="Invite link"
+            className="min-w-0 select-text"
+            data-testid="guests-invite-url"
+            disabled={disabled || noLink}
+            placeholder="The link appears when the room opens."
+            readOnly
+            value={inviteUrl}
+            onFocus={(event) => event.currentTarget.select()}
+          />
+        </InputGroup>
         <DisabledReason reason={linkReason}>
           <Button
             data-testid="guests-invite-copy"
@@ -330,6 +402,11 @@ function InviteLinkSection({
             variant="secondary"
             onClick={() => void copy(inviteUrl, "Couldn't copy the link.")}
           >
+            {copied ? (
+              <CheckIcon data-icon="inline-start" />
+            ) : (
+              <CopyIcon data-icon="inline-start" />
+            )}
             {copied ? 'Copied' : 'Copy'}
           </Button>
         </DisabledReason>
@@ -344,10 +421,31 @@ function InviteLinkSection({
               else void rotate()
             }}
           >
+            {rotating ? (
+              <Spinner aria-hidden data-icon="inline-start" />
+            ) : (
+              <RefreshIcon data-icon="inline-start" />
+            )}
             {rotating ? 'Making…' : 'New link'}
           </Button>
         </DisabledReason>
       </div>
+      {/* The door belongs to the link: who it lets in without asking. */}
+      <FieldGroup variant="grouped">
+        <SettingsRow
+          data-testid="guests-door"
+          description={DOOR_SWITCH_DESCRIPTION}
+          label={DOOR_SWITCH_LABEL}
+        >
+          <DisabledReason reason={!disabled && !roomOpen ? OPEN_THE_ROOM_FIRST : null}>
+            <Switch
+              checked={room?.doorOpen ?? false}
+              disabled={disabled || !roomOpen}
+              onCheckedChange={(open) => void talkShow.setDoor(open).catch(() => {})}
+            />
+          </DisabledReason>
+        </SettingsRow>
+      </FieldGroup>
       <FieldDescription data-testid="guests-consent">
         Guests read this before they ask to join: “{guestConsentLine(room?.platforms)}”
       </FieldDescription>
@@ -378,95 +476,73 @@ function WhoIsHere({
   disabled: boolean
 }): ReactElement {
   const { talkShow } = useStudioCloud()
-  const { moderationItems, dialogs } = useGuestModeration(talkShow)
+  const { moderationItems, toggleMute, toggleScreenShare, dialogs } = useGuestModeration(talkShow)
   const guests = people.filter((person) => !person.host)
   const declined = declinedLine(declinedCount)
 
   if (requests.length === 0 && guests.length === 0) {
     return (
       <>
-        <p className="text-meta text-muted-foreground" data-testid="guests-empty">
-          {NOBODY_YET}
-        </p>
+        <Empty className="rounded-row border border-border bg-inset p-5" data-testid="guests-empty">
+          <span className="text-meta text-muted-foreground">{NOBODY_YET}</span>
+        </Empty>
         {declined ? <p className="text-meta text-muted-foreground">{declined}</p> : null}
       </>
     )
   }
 
+  // The host is always on stage (H2), whatever the stage names yet.
+  const onStage = people.filter((person) => person.host || person.onStage)
+  const backstage = people.filter((person) => !person.host && !person.onStage)
+  const row = (person: RoomPerson): ReactElement => (
+    <PersonRow
+      disabled={disabled}
+      key={person.identity}
+      menuItems={moderationItems(person)}
+      micBadgeTestId="guests-person-mic"
+      person={person}
+      talkShow={talkShow}
+      testId="guests-person"
+      onToggleMute={toggleMute}
+      onToggleScreenShare={toggleScreenShare}
+    />
+  )
+
   return (
-    <>
-      <GroupedList aria-label="People in the room" data-testid="guests-list">
-        {requests.map((request) => (
-          <RequestRow disabled={disabled} key={request.requestId} request={request} />
-        ))}
-        {people.map((person) => {
-          const quality = qualityStatus(person.quality)
-          const items = moderationItems(person)
-          return (
-            <ListRow
-              className="group/kebab-host"
-              data-testid="guests-person"
-              key={person.identity}
-              statusIcons={<StatusDot label={quality.label} tone={quality.tone} />}
-              title={person.name}
-            >
-              {person.muted && !person.host ? <Badge variant="outline">Muted</Badge> : null}
-              <Badge variant={person.onStage ? 'default' : 'outline'}>
-                {stageChipLabel(person)}
-              </Badge>
-              {items.length > 0 ? (
-                <KebabMenu disabled={disabled} items={items} label={`Actions for ${person.name}`} />
-              ) : null}
-            </ListRow>
-          )
-        })}
-      </GroupedList>
+    <div className="flex flex-col gap-4" data-testid="guests-list">
+      {requests.length > 0 ? (
+        <GroupedList
+          aria-label="Wants to join"
+          label={
+            <span className="flex items-center gap-1.5">
+              <StatusDot pulse tone="warn" />
+              <CountLabel count={requests.length}>Wants to join</CountLabel>
+            </span>
+          }
+        >
+          {requests.map((request) => (
+            <RequestRow disabled={disabled} key={request.requestId} request={request} />
+          ))}
+        </GroupedList>
+      ) : null}
+      {onStage.length > 0 ? (
+        <GroupedList
+          aria-label="On stage"
+          label={<CountLabel count={onStage.length}>On stage</CountLabel>}
+        >
+          {onStage.map(row)}
+        </GroupedList>
+      ) : null}
+      {backstage.length > 0 ? (
+        <GroupedList
+          aria-label="Backstage"
+          label={<CountLabel count={backstage.length}>Backstage</CountLabel>}
+        >
+          {backstage.map(row)}
+        </GroupedList>
+      ) : null}
       {declined ? <p className="text-meta text-muted-foreground">{declined}</p> : null}
       {dialogs}
-    </>
-  )
-}
-
-/** "Ada wants to join" with Let in and Decline (D4). */
-export function RequestRow({
-  request,
-  disabled
-}: {
-  request: CloudRoomRequest
-  disabled: boolean
-}): ReactElement {
-  const { talkShow } = useStudioCloud()
-  const [deciding, setDeciding] = useState(false)
-  const decide = (decision: 'let-in' | 'decline'): void => {
-    setDeciding(true)
-    void talkShow
-      .decideGuest(request.requestId, decision)
-      .catch(() => {})
-      .finally(() => setDeciding(false))
-  }
-  return (
-    <ListRow
-      context={requestDevice(request)}
-      data-testid="guests-request"
-      title={`${request.name} wants to join`}
-    >
-      <Button
-        disabled={disabled || deciding}
-        size="xs"
-        type="button"
-        onClick={() => decide('let-in')}
-      >
-        Let in
-      </Button>
-      <Button
-        disabled={disabled || deciding}
-        size="xs"
-        type="button"
-        variant="ghost"
-        onClick={() => decide('decline')}
-      >
-        Decline
-      </Button>
-    </ListRow>
+    </div>
   )
 }

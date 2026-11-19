@@ -5,7 +5,12 @@ import {
   type AcceptedGraphicsView,
   type GraphicsContent,
   graphicsLayers,
+  graphicsSendDue,
+  GRAPHICS_ACK_GRACE_MS,
+  GRAPHICS_RENEW_MS,
+  GRAPHICS_UNACKED_RESEND_MS,
   RoomGraphicsPublisher,
+  roomGraphicsContent,
   type RoomGraphicsStatus
 } from './room-graphics-publisher'
 import { CAPABILITY_TOPIC } from './room-media-v2'
@@ -403,6 +408,189 @@ describe('kept static views for the next controller (plan 249 S24)', () => {
       static: { version: 1, applied: { publisherSid: 'PA_host', revision: sent.revision } }
     })
     expect(h.accepted).toEqual([])
+    h.publisher.close()
+  })
+})
+
+// The owner, 2026-11-19 (0.32.1): on a managed talk show the comment cards
+// and the captions never reached the viewers. Both ride this envelope, and
+// it sent nothing while the room's Graphics switch (banners, timers and the
+// chat box) was off, which it is in every new room.
+describe('what the room sends with its Graphics switch off', () => {
+  const layer = (kind: GraphicsLayer['kind'], id: string) => ({
+    id,
+    kind,
+    rect: { x: 0, y: 0, w: 0.5, h: 0.5 },
+    asset: { png: 'iVBORw0KGgo=', hash: 'a'.repeat(64), width: 1, height: 1 },
+    opacity: 1,
+    fade: null,
+    expiresAt: kind === 'banner' || kind === 'chat' ? null : 10_000,
+    stream: true,
+    recording: true
+  })
+  const content: GraphicsContent = {
+    h: [layer('banner', 'banner:b1'), layer('caption', 'caption'), layer('chat', 'chat')],
+    v: [layer('highlight', 'highlight'), layer('banner', 'banner:b1')],
+    unsupported: ['HTML graphics require the separately qualified dynamic transport.'],
+    html: { h: [], v: [] }
+  }
+
+  it('keeps everything with the switch on', () => {
+    expect(roomGraphicsContent(content, true)).toBe(content)
+    expect(roomGraphicsContent(null, true)).toBeNull()
+  })
+
+  it('sends only captions and the comment card with it off, and nothing else', () => {
+    const off = roomGraphicsContent(content, false)
+    expect(off?.h.map((l) => l.kind)).toEqual(['caption'])
+    expect(off?.v.map((l) => l.kind)).toEqual(['highlight'])
+    // A banner's refusal and the HTML placements speak for banners alone.
+    expect(off?.unsupported).toEqual([])
+    expect(off).not.toHaveProperty('html')
+    expect(roomGraphicsContent({ ...content, h: [content.h[0]!], v: [] }, false)).toBeNull()
+    expect(roomGraphicsContent(null, false)).toBeNull()
+  })
+})
+
+// The program page reads at most one snapshot per 200 ms and drops a sooner
+// one unread (videorcweb stage.ts `takeGraphics`). The same view then waited
+// the 10 s renewal, as long as a comment card lives: a card that landed just
+// after a renewal never reached the viewers.
+describe('a view its page never acknowledged', () => {
+  const sent = (revision: number, at: number, retried = false) => ({
+    key: 'view',
+    revision,
+    at,
+    publisherSid: 'PA_host',
+    retried
+  })
+  const ack = (revision: number) => ({ publisherSid: 'PA_host', revision })
+  const late = GRAPHICS_ACK_GRACE_MS
+
+  it('goes again once the page reported without it, then keeps the renewal pace', () => {
+    const due = (
+      s: ReturnType<typeof sent> | undefined,
+      applied: unknown,
+      heard: number,
+      now: number
+    ) => graphicsSendDue(s, 'view', applied as ReturnType<typeof ack>, heard, now)
+    expect(due(undefined, undefined, 0, 0)).toEqual({ due: true, retry: false })
+    expect(graphicsSendDue(sent(4, 0), 'other', undefined, 0, 1)).toEqual({
+      due: true,
+      retry: false
+    })
+    // The page reported after the send and still holds the older view.
+    expect(due(sent(4, 0), ack(3), late, GRAPHICS_UNACKED_RESEND_MS - 1).due).toBe(false)
+    expect(due(sent(4, 0), ack(3), late, GRAPHICS_UNACKED_RESEND_MS)).toEqual({
+      due: true,
+      retry: true
+    })
+    // Another host session's acknowledgement is none.
+    expect(
+      due(sent(4, 0), { publisherSid: 'PA_old', revision: 4 }, late, GRAPHICS_UNACKED_RESEND_MS).due
+    ).toBe(true)
+    // The resend was not acknowledged either: no storm, the renewal pace.
+    expect(due(sent(5, 0, true), ack(3), late, GRAPHICS_RENEW_MS - 1).due).toBe(false)
+    expect(due(sent(5, 0, true), ack(3), late, GRAPHICS_RENEW_MS).due).toBe(true)
+  })
+
+  it('never resends early for an acknowledged view or a receipt that is merely slow', () => {
+    const due = (applied: unknown, heard: number | undefined, now: number) =>
+      graphicsSendDue(sent(4, 0), 'view', applied as ReturnType<typeof ack>, heard, now).due
+    expect(due(ack(4), late, GRAPHICS_RENEW_MS - 1)).toBe(false)
+    expect(due(ack(4), late, GRAPHICS_RENEW_MS)).toBe(true)
+    // Nothing heard since the send, or only a receipt the page may have sent
+    // before it applied: wait for its acknowledgement.
+    expect(due(ack(3), undefined, GRAPHICS_RENEW_MS - 1)).toBe(false)
+    expect(due(ack(3), -5_000, GRAPHICS_RENEW_MS - 1)).toBe(false)
+    expect(due(ack(3), late - 1, GRAPHICS_RENEW_MS - 1)).toBe(false)
+    expect(due(ack(3), undefined, GRAPHICS_RENEW_MS)).toBe(true)
+  })
+
+  function cardHarness() {
+    const h = harness()
+    const bodies: { revision: number; layers: { kind: string }[] }[] = []
+    h.room.localParticipant.streamBytes.mockImplementation(async () => {
+      const chunks: Uint8Array[] = []
+      return {
+        write: vi.fn(async (bytes: Uint8Array) => {
+          chunks.push(bytes)
+        }),
+        close: vi.fn(async () => {
+          const whole = new Uint8Array(chunks.reduce((n, c) => n + c.length, 0))
+          let at = 0
+          for (const chunk of chunks) {
+            whole.set(chunk, at)
+            at += chunk.length
+          }
+          bodies.push(JSON.parse(new TextDecoder().decode(whole)))
+        })
+      }
+    })
+    const highlight = fixture.snapshot.layers.find((l) => l.kind === 'highlight')!
+    h.publisher.set({
+      h: [{ ...highlight, expiresAt: 60_000, stream: true, recording: true }] as (GraphicsLayer & {
+        stream: boolean
+        recording: boolean
+      })[],
+      v: [],
+      unsupported: []
+    })
+    const lane = { version: 1, output: 'stream', orientation: 'h', static: { version: 1 } }
+    /** The page's beacon, relayed: what it applied last, if anything. */
+    const report = (revision?: number) =>
+      h.receive(
+        revision === undefined
+          ? lane
+          : { ...lane, static: { version: 1, applied: { publisherSid: 'PA_host', revision } } }
+      )
+    /** Seconds of the page beaconing each second with `applied` (or nothing). */
+    const seconds = async (n: number, applied: () => number | undefined = () => undefined) => {
+      for (let i = 0; i < n; i++) {
+        await vi.advanceTimersByTimeAsync(1000)
+        report(applied())
+      }
+    }
+    return { ...h, bodies, report, seconds }
+  }
+
+  it('sends a card again when its page dropped it unread, and only once', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(1000)
+    const h = cardHarness()
+    h.report()
+    // The first send goes on the publisher's next tick.
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(h.bodies.map((b) => b.layers.map((l) => l.kind))).toEqual([['highlight']])
+    // The page dropped it: its beacons keep acknowledging nothing.
+    await h.seconds(GRAPHICS_UNACKED_RESEND_MS / 1000 - 1)
+    expect(h.bodies).toHaveLength(1)
+    await h.seconds(1)
+    expect(h.bodies).toHaveLength(2)
+    expect(h.bodies[1]!.layers.map((l) => l.kind)).toEqual(['highlight'])
+    expect(h.bodies[1]!.revision).toBeGreaterThan(h.bodies[0]!.revision)
+    // Dropped again: the renewal pace, never a resend storm.
+    await h.seconds(GRAPHICS_RENEW_MS / 1000 - 1)
+    expect(h.bodies).toHaveLength(2)
+    h.publisher.close()
+  })
+
+  it('never resends an acknowledged card early, nor one whose acknowledgement is slow', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(1000)
+    const h = cardHarness()
+    h.report()
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(h.bodies).toHaveLength(1)
+    // Slow: no beacon from the page for four seconds after the send.
+    await vi.advanceTimersByTimeAsync(4000)
+    expect(h.bodies).toHaveLength(1)
+    // Then it acknowledges, and beacons each second: nothing until the renewal.
+    const first = h.bodies[0]!.revision
+    await h.seconds(GRAPHICS_RENEW_MS / 1000 - 5, () => first)
+    expect(h.bodies).toHaveLength(1)
+    await h.seconds(1, () => first)
+    expect(h.bodies).toHaveLength(2)
     h.publisher.close()
   })
 })

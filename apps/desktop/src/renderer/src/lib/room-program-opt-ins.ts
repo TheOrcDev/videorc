@@ -39,9 +39,13 @@ export function roomAvatarDescription(avatar: RoomProgramOptIn | null | undefine
   return optInStatus(avatar)
 }
 
-/** The Graphics switch's description in Guests → Room. */
+/**
+ * The Graphics switch's description in Guests → Room. Captions and comment
+ * cards reach the stream with the switch off too (`roomGraphicsContent`), so
+ * their delivery never reads as the banners being on.
+ */
 export function roomGraphicsDescription(graphics: RoomProgramOptIn | null | undefined): string {
-  return `Banners, timers and the chat box. ${optInStatus(graphics)}`
+  return `Banners, timers and the chat box. ${graphics?.enabled ? optInStatus(graphics) : 'Not on the stream.'}`
 }
 
 /** The Program preview's one line: "Avatar off · Graphics off". */
@@ -50,4 +54,32 @@ export function roomProgramSummary(
   graphics: RoomProgramOptIn | null | undefined
 ): string {
   return `Avatar ${avatar?.enabled ? 'on' : 'off'} · Graphics ${graphics?.enabled ? 'on' : 'off'}`
+}
+
+/** The same two facts as chips on the Program card: each with its state. */
+export function roomProgramChips(
+  avatar: RoomProgramOptIn | null | undefined,
+  graphics: RoomProgramOptIn | null | undefined
+): { id: 'avatar' | 'graphics'; label: string; on: boolean }[] {
+  return [
+    {
+      id: 'avatar',
+      label: `Avatar ${avatar?.enabled ? 'on' : 'off'}`,
+      on: avatar?.enabled === true
+    },
+    {
+      id: 'graphics',
+      label: `Graphics ${graphics?.enabled ? 'on' : 'off'}`,
+      on: graphics?.enabled === true
+    }
+  ]
+}
+
+/** An opt-in's state as a status dot: applied, waiting, refused or off. */
+export function roomOptInTone(
+  optIn: RoomProgramOptIn | null | undefined
+): 'good' | 'warn' | 'error' | 'neutral' {
+  if (!optIn?.enabled) return 'neutral'
+  if (optIn.reason) return 'error'
+  return optIn.state === 'applied' ? 'good' : 'warn'
 }

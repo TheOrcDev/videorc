@@ -17,6 +17,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore
 
 import type { BackendClient } from '@/backendClient'
 import type {
+  CloudControllerFacts,
   CloudGuestAction,
   CloudRoomOpenParams,
   CloudRoomOverlayEvent,
@@ -32,6 +33,17 @@ import {
 } from '@/lib/talk-show-context'
 import type { TalkShowCameraSettings } from '@/lib/talk-show-camera-effects'
 import type { TalkShowRoomClient, TalkShowRoomSnapshot } from '@/lib/talk-show-room'
+import {
+  STAGE_MAX_SCREENS,
+  addScreen,
+  oneScreenStage,
+  pruneStageScreens,
+  removeScreen,
+  stageScreens,
+  stageSharers,
+  twoScreensChosen,
+  twoScreensStage
+} from '@/lib/stage-screens'
 import { cloudAvatarAtlasReason } from '@/lib/cloud-avatar-refusal'
 import type { AvatarMotionSource } from '../../../shared/cloud-avatar-view'
 
@@ -138,12 +150,11 @@ export function stageWith(
   const ordered = hostIdentity
     ? [hostIdentity, ...next.filter((entry) => entry !== hostIdentity)]
     : next
-  return {
+  return pruneStageScreens({
     ...stage,
     onStage: ordered,
-    ...(stage.spotlight && !ordered.includes(stage.spotlight) ? { spotlight: undefined } : {}),
-    ...(stage.screen && !ordered.includes(stage.screen) ? { screen: undefined } : {})
-  }
+    ...(stage.spotlight && !ordered.includes(stage.spotlight) ? { spotlight: undefined } : {})
+  })
 }
 
 /**
@@ -155,7 +166,12 @@ export function stageWith(
  * picture yet" tile (live show, 2026-11-19). In the room means the host, a
  * guest videorc.com lists, or a participant the room reports, so a guest
  * between two connections stays. The host is always kept, as the web keeps
- * them (D8). Without a room status nothing is dropped.
+ * them (D8).
+ *
+ * Nothing is dropped until the status knows who is in the room: it lists a
+ * guest, or reports the host as a participant. Right after a backend restart
+ * both lists can be empty for a moment (2026-11-19), and pruning then would
+ * take every guest who is really there off the stage.
  */
 export function stageInRoom(
   stage: CloudStage,
@@ -163,20 +179,39 @@ export function stageInRoom(
   hostIdentity: string | null
 ): CloudStage {
   if (!room) return stage
+  const isHost = (identity: string): boolean =>
+    identity === hostIdentity || identity.startsWith('host:')
+  const known =
+    (room.guests?.length ?? 0) > 0 ||
+    (room.participants ?? []).some((participant) => isHost(participant.identity))
+  if (!known) return stage
   const present = new Set<string>([
     ...(room.guests ?? []).map((guest) => guest.guestId),
     ...(room.participants ?? []).map((participant) => participant.identity)
   ])
-  const kept = stage.onStage.filter(
-    (identity) => identity === hostIdentity || identity.startsWith('host:') || present.has(identity)
-  )
+  const kept = stage.onStage.filter((identity) => isHost(identity) || present.has(identity))
   if (kept.length === stage.onStage.length) return stage
-  return {
+  return pruneStageScreens({
     ...stage,
     onStage: kept,
-    ...(stage.spotlight && !kept.includes(stage.spotlight) ? { spotlight: undefined } : {}),
-    ...(stage.screen && !kept.includes(stage.screen) ? { screen: undefined } : {})
-  }
+    ...(stage.spotlight && !kept.includes(stage.spotlight) ? { spotlight: undefined } : {})
+  })
+}
+
+/**
+ * Plan 249 S24 (D9): the controller epoch whose takeover holds the camera
+ * and microphone until the streamer presses Turn on, or 0 when nothing is
+ * held. A takeover from this same computer holds nothing (2026-11-19): a
+ * backend restart or a relaunch is a new controller, so its Resume takes
+ * the show back from this computer's own earlier process. The streamer
+ * never moved; holding there kept the microphone out of the room while the
+ * Studio meter moved, and viewers heard nothing.
+ */
+export function takeoverDeviceHoldEpoch(
+  controller: Pick<CloudControllerFacts, 'controllerEpoch' | 'takenOverFrom'> | undefined
+): number {
+  if (!controller?.takenOverFrom || controller.takenOverFrom === 'this-device') return 0
+  return controller.controllerEpoch
 }
 
 export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): TalkShowContextValue {
@@ -218,7 +253,7 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
   roomOpenRef.current = roomOpen
   const showId = cloudStatus?.show?.id ?? null
   const stage = cloudStatus?.room?.stage ?? null
-  const stageKey = stage ? JSON.stringify([stage.onStage, stage.screen ?? null]) : ''
+  const stageKey = stage ? JSON.stringify([stage.onStage, stageScreens(stage)]) : ''
   const hostIdentity = roomOpen && showId ? `host:${showId}` : null
 
   const cameraName = useMemo(
@@ -236,10 +271,13 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
   // captures here starts by itself. A muted microphone still opens capture,
   // so the device names are withheld from the room client until the
   // streamer turns them on; then S7b's live selection opens them (no rejoin).
+  // Every takeover rejoins and restores (`holdEpoch`); only one from another
+  // device holds the devices (`deviceHoldEpoch`).
   const controller = cloudStatus?.controller
   const holdEpoch = controller?.takenOverFrom ? controller.controllerEpoch : 0
+  const deviceHoldEpoch = takeoverDeviceHoldEpoch(controller)
   const [enabledEpoch, setEnabledEpoch] = useState(0)
-  const devicesHeld = holdEpoch > 0 && enabledEpoch !== holdEpoch
+  const devicesHeld = deviceHoldEpoch > 0 && enabledEpoch !== deviceHoldEpoch
   const devicesHeldRef = useRef(devicesHeld)
   devicesHeldRef.current = devicesHeld
   useEffect(() => {
@@ -249,12 +287,12 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
     // answers Continue here. It goes when the devices are on.
     const source = import('@/lib/notifications/sources/cloud')
     void source.then((cloud) =>
-      cloud.publishCloudController(needs, () => setEnabledEpoch(holdEpoch))
+      cloud.publishCloudController(needs, () => setEnabledEpoch(deviceHoldEpoch))
     )
     return () => {
       void source.then((cloud) => cloud.withdrawCloudController())
     }
-  }, [devicesHeld, roomOpen, holdEpoch, controller?.needsEnable])
+  }, [devicesHeld, roomOpen, deviceHoldEpoch, controller?.needsEnable])
   const microphoneChoice = useMemo<RoomMicrophoneChoice>(
     () => ({
       mode:
@@ -293,8 +331,9 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
   }, [deps.cameraSettings])
   const stageRef = useRef<string[]>([])
   stageRef.current = stage?.onStage ?? []
-  const stageScreenRef = useRef<string | null>(null)
-  stageScreenRef.current = stage?.screen ?? null
+  // Plan 251: every screen the program shows, so a guest sees the same ones.
+  const stageScreenRef = useRef<string[]>([])
+  stageScreenRef.current = stage ? stageScreens(stage) : []
   const onCameraReturnedRef = useRef(onCameraReturned)
   onCameraReturnedRef.current = onCameraReturned
 
@@ -723,24 +762,25 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
 
   // Plan 249 S24: the streamer's explicit "Turn on" after a takeover opens
   // the camera through S7b's live selection; the microphone follows from
-  // `microphoneChoice` above. Once per epoch, only on a connected room.
+  // `microphoneChoice` above. Once per epoch, only on a connected room. A
+  // takeover from this computer held nothing: its join opened the camera.
   const enabledAppliedRef = useRef(0)
   useEffect(() => {
     const current = clientRef.current
     if (
       devicesHeld ||
-      holdEpoch === 0 ||
+      deviceHoldEpoch === 0 ||
       !current ||
       snapshot.state !== 'connected' ||
-      enabledAppliedRef.current === holdEpoch
+      enabledAppliedRef.current === deviceHoldEpoch
     )
       return
-    enabledAppliedRef.current = holdEpoch
+    enabledAppliedRef.current = deviceHoldEpoch
     const name = cameraNameRef.current
     void current
       .setCameraSelection(name, mediaDepsRef.current.cameraOff === true || !name)
       .catch((error) => onError(error, 'turn the room camera on'))
-  }, [devicesHeld, holdEpoch, snapshot.state, onError])
+  }, [devicesHeld, deviceHoldEpoch, snapshot.state, onError])
 
   // Plan 249 S24: what this controller has on, and the avatar's output flags,
   // so a computer that takes the show over knows what to ask its streamer to
@@ -909,11 +949,24 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
       )
   }, [onError])
 
+  // Plan 251: the Two screens layout card is chosen. On the wire it is
+  // Screen + people with one or two screens, so the choice is this
+  // renderer's: made by the card, kept while Screen + people is up, and read
+  // back from a stage that names two (a relaunch, another computer).
+  const [twoScreensPicked, setTwoScreensPicked] = useState(false)
+  const namesTwo = stage ? stageScreens(stage).length === STAGE_MAX_SCREENS : false
+  const twoScreens = twoScreensChosen(stage, twoScreensPicked)
+  useEffect(() => {
+    if (namesTwo) setTwoScreensPicked(true)
+    else if (stage?.layout !== 'screen-people') setTwoScreensPicked(false)
+  }, [namesTwo, stage?.layout])
+
   const previewReplaced = roomOpen || previewReplacedOverride
   const value = useMemo<TalkShowContextValue>(
     () => ({
       room: snapshot,
       previewReplaced,
+      twoScreens,
       hostIdentity,
       openRoom: async (params) => {
         // Plan 249 S17: the outputs are decided (and an unmeasured profile
@@ -963,7 +1016,27 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
       },
       setLayout: async (layout) => {
         if (!stage) return
-        await setStage({ ...stage, layout })
+        if (layout === 'two-screens') {
+          // Plan 251: the screens already on stage, then whoever else on
+          // stage shares one, up to two. With one it waits for the second.
+          const next = twoScreensStage(
+            stage,
+            stageSharers(cloudStatusRef.current?.room, hostIdentity, snapshot.local.screen !== null)
+          )
+          if (!next) return
+          setTwoScreensPicked(true)
+          try {
+            await setStage(next)
+          } catch (error) {
+            // Not taken: the choice was never made.
+            setTwoScreensPicked(false)
+            throw error
+          }
+        } else {
+          setTwoScreensPicked(false)
+          // Screen + people is one screen: a second one comes off.
+          await setStage(layout === 'screen-people' ? oneScreenStage(stage) : { ...stage, layout })
+        }
         // Plan 249 S12: choosing a room layout puts the room's own layouts
         // back on the program; a scene stays only until the host does this.
         await clearRoomScene()
@@ -985,7 +1058,9 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
           await window.videorc?.setTalkShowMediaGrant?.({ video: true, screenSourceId: sourceId })
           await roomClient.startScreenShare(sourceId)
           if (stage && hostIdentity) {
-            await setStage({ ...stage, layout: 'screen-people', screen: hostIdentity })
+            // Plan 251: on Two screens it goes beside the screen already up;
+            // otherwise it takes the one place, as it always did.
+            await setStage(addScreen(stage, hostIdentity, twoScreens ? STAGE_MAX_SCREENS : 1))
           }
         } catch (error) {
           onError(error, 'share the screen')
@@ -994,12 +1069,9 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
       },
       stopScreenShare: async () => {
         await clientRef.current?.stopScreenShare()
-        if (stage && stage.screen === hostIdentity) {
-          await setStage({
-            ...stage,
-            layout: stage.layout === 'screen-people' ? 'side-by-side' : stage.layout,
-            screen: undefined
-          })
+        if (stage && hostIdentity && stageScreens(stage).includes(hostIdentity)) {
+          // The other screen, when there is one, stays up.
+          await setStage(removeScreen(stage, hostIdentity))
         }
       },
       setGraphicsEnabled,
@@ -1074,7 +1146,8 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
       previewReplaced,
       setStage,
       snapshot,
-      stage
+      stage,
+      twoScreens
     ]
   )
 

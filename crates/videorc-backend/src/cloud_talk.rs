@@ -269,6 +269,10 @@ pub struct CloudRoomShown {
     pub on_stage: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub screen: Option<String>,
+    /// Plan 251: both screens the page draws, in order. Empty (and absent on
+    /// the wire) when it draws one or none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub screens: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub layout: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -509,9 +513,20 @@ pub struct CloudStage {
     pub spotlight: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub screen: Option<String>,
+    /// Plan 251: the two screens of the two-screens layout, left then right.
+    /// Empty (never `null`, and absent on the wire), or exactly two different
+    /// on-stage identities with `screen` the first: a reader that knows only
+    /// `screen` still shows one screen and the people. Managed shows only.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub screens: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host_shape: Option<CloudHostShape>,
 }
+
+/// The most screens a stage shows at once (plan 251).
+pub const MAX_STAGE_SCREENS: usize = 2;
+/// `cloud.stage.set` with two screens on a show a runner composes.
+pub const TWO_SCREENS_UNAVAILABLE_MESSAGE: &str = "This show puts one screen on the program.";
 
 impl CloudStage {
     /// The runner's `validate_stage`, applied before anything is sent.
@@ -525,10 +540,43 @@ impl CloudStage {
         if self.on_stage.iter().any(bad)
             || self.spotlight.as_ref().is_some_and(bad)
             || self.screen.as_ref().is_some_and(bad)
+            || self.screens.iter().any(bad)
         {
             bail!("The stage names an identity that is empty or too long.");
         }
+        if !self.screens.is_empty() {
+            if self.screens.len() != MAX_STAGE_SCREENS || self.screens[0] == self.screens[1] {
+                bail!("A stage shows two different screens, or names one.");
+            }
+            if self.screen.as_ref() != self.screens.first() {
+                bail!("The stage's first screen must be its screen.");
+            }
+            if self
+                .screens
+                .iter()
+                .any(|screen| !self.on_stage.contains(screen))
+            {
+                bail!("Both screens must belong to people on the stage.");
+            }
+        }
         Ok(())
+    }
+
+    /// Takes `identity` off the stage's screens (a guest removed, plan 251):
+    /// the other screen, when there is one, becomes the stage's one screen.
+    pub(crate) fn drop_screen(&mut self, identity: &str) {
+        let mut kept: Vec<String> = if self.screens.is_empty() {
+            self.screen.iter().cloned().collect()
+        } else {
+            self.screens.clone()
+        };
+        kept.retain(|screen| screen != identity);
+        self.screen = kept.first().cloned();
+        self.screens = if kept.len() == MAX_STAGE_SCREENS {
+            kept
+        } else {
+            Vec::new()
+        };
     }
 
     pub(crate) fn frame(&self, id: &str) -> Value {
@@ -544,6 +592,9 @@ impl CloudStage {
         }
         if let Some(screen) = &self.screen {
             frame["screen"] = json!(screen);
+        }
+        if !self.screens.is_empty() {
+            frame["screens"] = json!(self.screens);
         }
         if let Some(shape) = self.host_shape {
             frame["hostShape"] = json!(match shape {
@@ -1157,6 +1208,7 @@ impl TalkShowState {
                 on_stage: vec![host_identity(show_id)],
                 spotlight: None,
                 screen: None,
+                screens: Vec::new(),
                 host_shape: None,
             },
             client: CloudRoomClientState::Idle,
@@ -1948,9 +2000,7 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
                     if talk.stage.spotlight.as_deref() == Some(params.guest_id.as_str()) {
                         talk.stage.spotlight = None;
                     }
-                    if talk.stage.screen.as_deref() == Some(params.guest_id.as_str()) {
-                        talk.stage.screen = None;
-                    }
+                    talk.stage.drop_screen(&params.guest_id);
                     stage_changed = talk.stage.on_stage.len() != before;
                 }
                 GuestAction::Mute | GuestAction::Unmute => {
@@ -2013,6 +2063,11 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
     pub async fn set_stage(&self, stage: CloudStage) -> Result<CloudStatus> {
         stage.validate()?;
         self.open_room_show_id()?;
+        // Plan 251: a node show's runner draws one screen and would drop the
+        // second without a word. Refused here, never silently narrowed.
+        if !stage.screens.is_empty() && self.show_control_kind() != Some(ControlKind::Web) {
+            bail!("{TWO_SCREENS_UNAVAILABLE_MESSAGE}");
+        }
         self.send_stage(&stage).await.map_err(|problem| {
             anyhow::anyhow!("Videorc Cloud did not take the stage: {problem}")
         })?;
@@ -2881,6 +2936,86 @@ mod tests {
             ])
             .is_err()
         );
+    }
+
+    fn stage(value: serde_json::Value) -> CloudStage {
+        serde_json::from_value(value).expect("stage")
+    }
+
+    /// Plan 251: `screens` is absent or a pair. A stage without it serializes
+    /// exactly as before (no `null`, no empty array), so an older renderer
+    /// contract and an older web read what they always read.
+    #[test]
+    fn a_stage_without_two_screens_keeps_its_old_wire_shape() {
+        let wire = serde_json::json!({
+            "layout": "screen-people",
+            "onStage": ["host:sh_abc", "g_ada"],
+            "screen": "g_ada"
+        });
+        let one = stage(wire.clone());
+        assert!(one.screens.is_empty());
+        one.validate().expect("valid");
+        assert_eq!(serde_json::to_value(&one).expect("json"), wire);
+        assert!(one.frame("i1").get("screens").is_none());
+        let shown: CloudRoomShown =
+            serde_json::from_value(serde_json::json!({ "onStage": ["host:sh_abc"] })).unwrap();
+        assert_eq!(
+            serde_json::to_value(&shown).unwrap(),
+            serde_json::json!({ "onStage": ["host:sh_abc"] })
+        );
+    }
+
+    #[test]
+    fn two_screens_are_a_pair_on_stage_led_by_the_stages_screen() {
+        let base = serde_json::json!({
+            "layout": "screen-people",
+            "onStage": ["host:sh_abc", "g_ada", "g_bo"],
+            "screen": "g_ada",
+            "screens": ["g_ada", "host:sh_abc"]
+        });
+        let two = stage(base.clone());
+        two.validate().expect("valid");
+        let frame = two.frame("i1");
+        assert_eq!(frame["screen"], "g_ada");
+        assert_eq!(
+            frame["screens"],
+            serde_json::json!(["g_ada", "host:sh_abc"])
+        );
+        assert_eq!(serde_json::to_value(&two).expect("json"), base);
+
+        let with = |screen: serde_json::Value, screens: serde_json::Value| {
+            let mut value = base.clone();
+            value["screen"] = screen;
+            value["screens"] = screens;
+            stage(value).validate().is_ok()
+        };
+        // One, three, the same twice, a first that is not `screen`, someone
+        // backstage: each is refused before it is sent.
+        assert!(!with("g_ada".into(), serde_json::json!(["g_ada"])));
+        assert!(!with(
+            "g_ada".into(),
+            serde_json::json!(["g_ada", "g_bo", "host:sh_abc"])
+        ));
+        assert!(!with("g_ada".into(), serde_json::json!(["g_ada", "g_ada"])));
+        assert!(!with("g_bo".into(), serde_json::json!(["g_ada", "g_bo"])));
+        assert!(!with("g_ada".into(), serde_json::json!(["g_ada", "g_cy"])));
+    }
+
+    #[test]
+    fn a_removed_guests_screen_leaves_the_other_one_up() {
+        let mut two = stage(serde_json::json!({
+            "layout": "screen-people",
+            "onStage": ["host:sh_abc", "g_ada"],
+            "screen": "g_ada",
+            "screens": ["g_ada", "host:sh_abc"]
+        }));
+        two.drop_screen("g_ada");
+        assert_eq!(two.screen.as_deref(), Some("host:sh_abc"));
+        assert!(two.screens.is_empty());
+        two.drop_screen("g_bo");
+        assert_eq!(two.screen.as_deref(), Some("host:sh_abc"));
+        two.drop_screen("host:sh_abc");
+        assert_eq!(two.screen, None);
     }
 
     #[test]

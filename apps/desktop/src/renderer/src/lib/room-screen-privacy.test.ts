@@ -78,6 +78,68 @@ describe('browser publication privacy authority', () => {
     adapter.close()
     expect(output.stop).toHaveBeenCalled()
   })
+  // Plan 210 D8 in a room: the host's own frosted look is made from the frame
+  // it already published, handed on once, before the frost covers it.
+  function lastFrameFixture(readyState: number) {
+    const calls: string[] = []
+    const video = { readyState, play: async () => {}, pause: vi.fn(), srcObject: null }
+    const canvas = {
+      getContext: () => ({
+        drawImage: () => calls.push('draw'),
+        fillRect: () => calls.push('frost')
+      }),
+      captureStream: () => ({ getVideoTracks: () => [{ stop: vi.fn() }] })
+    }
+    vi.stubGlobal(
+      'MediaStream',
+      class {
+        constructor(public tracks: unknown[]) {}
+      }
+    )
+    vi.stubGlobal('document', {
+      createElement: (tag: string) => (tag === 'video' ? video : canvas)
+    })
+    vi.stubGlobal('window', globalThis)
+    const raw = { getSettings: () => ({ width: 640, height: 360 }) } as MediaStreamTrack
+    return { calls, canvas, raw }
+  }
+  it('hands the last published frame on once, before the frost, and frosts if the hook throws', async () => {
+    vi.useFakeTimers()
+    const { calls, canvas, raw } = lastFrameFixture(2)
+    const gate = new ScreenPrivacyDecision()
+    gate.apply({ hidden: false, generation: 0 })
+    const lastFrame = vi.fn((last: HTMLCanvasElement) => {
+      calls.push(last === (canvas as unknown) ? 'last' : 'other')
+      throw new Error('no copy')
+    })
+    const adapter = createPrivateScreen(raw, gate, vi.fn(), lastFrame)
+    await vi.advanceTimersByTimeAsync(40)
+    calls.length = 0
+    gate.hide()
+    expect(lastFrame).toHaveBeenCalledOnce()
+    expect(calls).toEqual(['last', 'frost'])
+    adapter.block()
+    expect(lastFrame).toHaveBeenCalledOnce()
+    adapter.close()
+  })
+  it('hands nothing on before a frame was drawn, or when it starts hidden', async () => {
+    vi.useFakeTimers()
+    const { raw } = lastFrameFixture(0)
+    const gate = new ScreenPrivacyDecision()
+    gate.apply({ hidden: false, generation: 0 })
+    const early = vi.fn()
+    const first = createPrivateScreen(raw, gate, vi.fn(), early)
+    await vi.advanceTimersByTimeAsync(100)
+    gate.hide()
+    const late = vi.fn()
+    const second = createPrivateScreen(raw, gate, vi.fn(), late)
+    await vi.advanceTimersByTimeAsync(100)
+    second.block()
+    expect(early).not.toHaveBeenCalled()
+    expect(late).not.toHaveBeenCalled()
+    first.close()
+    second.close()
+  })
   it('binds observations to the exact capture epoch and generation', () => {
     const expected = { epoch: 'a'.repeat(32), generation: 3, hidden: true }
     expect(privacyTrackName(expected)).toBe(`vrc-privacy:${expected.epoch}:3:1`)

@@ -146,6 +146,39 @@
       },
       "canonical": "v1|spotlight|rounded|host:show_1,g_0123456789abcdefghijkl|g_0123456789abcdefghijkl|",
       "key": "957c6852"
+    },
+    {
+      "name": "two-screens-host-and-guest",
+      "stage": {
+        "layout": "screen-people",
+        "onStage": ["host:show_1", "g_0123456789abcdefghijkl"],
+        "screen": "g_0123456789abcdefghijkl",
+        "screens": ["g_0123456789abcdefghijkl", "host:show_1"]
+      },
+      "canonical": "v1|screen-people|rounded|host:show_1,g_0123456789abcdefghijkl||g_0123456789abcdefghijkl|g_0123456789abcdefghijkl,host:show_1",
+      "key": "8c5d91f0"
+    },
+    {
+      "name": "two-screens-not-led-by-screen-dropped",
+      "stage": {
+        "layout": "screen-people",
+        "onStage": ["host:show_1", "g_0123456789abcdefghijkl"],
+        "screen": "host:show_1",
+        "screens": ["g_0123456789abcdefghijkl", "host:show_1"]
+      },
+      "canonical": "v1|screen-people|rounded|host:show_1,g_0123456789abcdefghijkl||host:show_1",
+      "key": "93e6554e"
+    },
+    {
+      "name": "two-screens-one-backstage-dropped",
+      "stage": {
+        "layout": "screen-people",
+        "onStage": ["host:show_1"],
+        "screen": "host:show_1",
+        "screens": ["host:show_1", "g_0123456789abcdefghijkl"]
+      },
+      "canonical": "v1|screen-people|rounded|host:show_1||host:show_1",
+      "key": "8af63075"
     }
   ]
 }

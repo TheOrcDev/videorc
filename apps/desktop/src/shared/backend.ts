@@ -5930,6 +5930,12 @@ export interface CloudStage {
   onStage: string[]
   spotlight?: string
   screen?: string
+  /**
+   * Plan 251: the two screens of the two-screens layout, left then right.
+   * Absent, or exactly two different on-stage identities with `screen` the
+   * first, so an older reader still shows one screen. Managed shows only.
+   */
+  screens?: string[]
   hostShape?: CloudHostShape
 }
 
@@ -5940,6 +5946,8 @@ export interface CloudStage {
 export interface CloudRoomShown {
   onStage: string[]
   screen?: string
+  /** Plan 251: both screens the page draws, in order. Absent: one or none (`screen`). */
+  screens?: string[]
   /** Plan 249 S6: the layout the page drew. Absent: a runner or an older page.
    * A plain string on the wire; read it through `shownLayout`. */
   layout?: string
