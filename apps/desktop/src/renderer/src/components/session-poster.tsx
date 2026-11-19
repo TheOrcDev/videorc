@@ -2,6 +2,7 @@ import { VideoFileIcon } from '@/components/icons'
 import { useState, type ReactElement } from 'react'
 
 import { StatusDot } from '@/components/status-dot'
+import { LIBRARY_POSTER_CLASS } from '@/components/tabs/library-table'
 import { useStudioCore, useStudioRecordingState } from '@/hooks/use-studio'
 import type { SessionSummary } from '@/lib/backend'
 import { isLiveSession, sessionPosterUrl } from '@/lib/library-view'
@@ -31,13 +32,7 @@ export function SessionPoster({
   const url = running ? null : sessionPosterUrl(connection, session)
   const source = url && attempt > 0 ? `${url}&attempt=${attempt}` : url
   return (
-    <span
-      className={cn(
-        'grid h-10 w-[4.5rem] shrink-0 place-items-center overflow-hidden rounded-row border bg-muted/30',
-        className
-      )}
-      data-slot="session-poster"
-    >
+    <span className={cn(LIBRARY_POSTER_CLASS, className)} data-slot="session-poster">
       {isLiveSession(session, recording) ? (
         <StatusDot pulse={sessionStatusPulses(recording)} tone={sessionStatusTone(recording)} />
       ) : source && !failed ? (

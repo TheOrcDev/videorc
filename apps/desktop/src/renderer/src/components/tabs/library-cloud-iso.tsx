@@ -37,6 +37,7 @@ import {
 import { cloudRecordingAvailability } from '@/lib/cloud-recordings-view'
 import { formatBytes } from '@/lib/format'
 import { toastUserError, UserFacingError } from '@/lib/user-error'
+import { cn } from '@/lib/utils'
 import { openWorkspaceTab } from '@/lib/workspace-navigation'
 
 // Plan 249 S22: a cloud take's "Separate files" in the Library, under its row
@@ -250,20 +251,25 @@ export function LibraryCloudIsoTake({
   imports,
   disabled,
   onImport,
-  onCancel
+  onCancel,
+  onOpenSession = (sessionId) => openWorkspaceTab('library', sessionId),
+  className
 }: {
   take: CloudIsoLibraryTake
   imports: IsoImports
   disabled: boolean
   onImport: () => void
   onCancel: (jobId: string) => void
+  /** "Open in Library" on an imported file: the Library's Local tab. */
+  onOpenSession?: (sessionId: string) => void
+  className?: string
 }): ReactElement {
   const state = isoTakeImport(imports, take.takeId)
   const rows = take.rows
   const summary = rows ? isoTakeImportSummary(rows, state) : null
   return (
     <div
-      className="flex flex-col gap-1.5 py-2 pr-3 pl-10"
+      className={cn('flex flex-col gap-1.5 py-2 pr-3 pl-10', className)}
       data-take-id={take.takeId || undefined}
       data-testid="library-cloud-iso"
     >
@@ -299,7 +305,7 @@ export function LibraryCloudIsoTake({
           {/* Rows of the take's own list: no second box inside Cloud recordings. */}
           <div aria-label="Separate files" className="flex flex-col" role="list">
             {rows.map((row) => (
-              <IsoFileRow key={row.entryId} row={row} state={state} />
+              <IsoFileRow key={row.entryId} row={row} state={state} onOpenSession={onOpenSession} />
             ))}
           </div>
           {rows.some((row) => row.layoutUnknown) ? (
@@ -316,7 +322,15 @@ export function LibraryCloudIsoTake({
   )
 }
 
-function IsoFileRow({ row, state }: { row: IsoLibraryRow; state: IsoTakeImport }): ReactElement {
+function IsoFileRow({
+  row,
+  state,
+  onOpenSession
+}: {
+  row: IsoLibraryRow
+  state: IsoTakeImport
+  onOpenSession: (sessionId: string) => void
+}): ReactElement {
   const file = state.files.get(row.entryId)
   const word = isoFileWord(file, row.bytes)
   const imported = file?.state === 'complete'
@@ -346,7 +360,7 @@ function IsoFileRow({ row, state }: { row: IsoLibraryRow; state: IsoTakeImport }
       title={row.title}
     >
       {sessionId ? (
-        <Button size="xs" variant="outline" onClick={() => openWorkspaceTab('library', sessionId)}>
+        <Button size="xs" variant="outline" onClick={() => onOpenSession(sessionId)}>
           Open in Library
         </Button>
       ) : word ? (

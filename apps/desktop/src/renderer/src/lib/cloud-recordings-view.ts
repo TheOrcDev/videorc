@@ -150,3 +150,121 @@ export function cloudTakeLabel(recording: CloudRecordingItem): string {
       ? 'Record-only take'
       : `Take · ${count} live ${count === 1 ? 'interval' : 'intervals'}`
 }
+
+/**
+ * Where a cloud recording stands, as its Library row says it. One state per
+ * row, in this order: a copy on this computer wins, then a cloud copy that is
+ * gone, then this computer's download, then where the recording downloads.
+ */
+export type CloudRowStatus =
+  | { kind: 'downloaded'; localSessionId: string | null; jobId: string | null }
+  | { kind: 'expired' }
+  | { kind: 'missing' }
+  | { kind: 'starting' }
+  | { kind: 'downloading'; jobId: string; percent: number | null }
+  | { kind: 'failed' }
+  | { kind: 'in-cloud' }
+  | { kind: 'on-web' }
+
+/** The row's one direct action, beside its ⋯ menu. */
+export type CloudRowAction = 'open-local' | 'reveal' | 'download' | 'retry' | 'cancel' | 'open-web'
+
+export type CloudRowView = {
+  status: CloudRowStatus
+  /** The Status column's tag. */
+  statusLabel: string
+  /** Why, on hover, when the tag alone doesn't say. */
+  statusDetail: string | null
+  /** "Kept until 18 Dec" while the cloud still keeps it. */
+  keptUntilMs: number | null
+  action: CloudRowAction | null
+}
+
+export function cloudRowStatus(
+  recording: CloudRecordingItem,
+  download: CloudDownloadView | null,
+  now = Date.now()
+): CloudRowStatus {
+  const doneSessionId = download?.state === 'done' ? (download.localSessionId ?? null) : null
+  if (recording.localSessionId || doneSessionId) {
+    return {
+      kind: 'downloaded',
+      localSessionId: recording.localSessionId ?? doneSessionId,
+      jobId: download?.state === 'done' ? download.jobId : null
+    }
+  }
+  if (download?.state === 'done') {
+    return { kind: 'downloaded', localSessionId: null, jobId: download.jobId }
+  }
+  const availability = cloudRecordingAvailability(recording, now)
+  if (availability !== 'available') return { kind: availability }
+  if (!downloadsOnThisComputer(recording)) return { kind: 'on-web' }
+  switch (download?.state) {
+    case 'starting':
+      return { kind: 'starting' }
+    case 'running':
+      return { kind: 'downloading', jobId: download.jobId, percent: cloudDownloadPercent(download) }
+    case 'failed':
+      return { kind: 'failed' }
+    default:
+      return { kind: 'in-cloud' }
+  }
+}
+
+const STATUS_LABEL: Record<CloudRowStatus['kind'], string> = {
+  downloaded: 'Downloaded',
+  expired: 'Expired',
+  missing: 'File missing',
+  starting: 'Starting…',
+  downloading: 'Downloading…',
+  failed: 'Download failed',
+  'in-cloud': 'In the cloud',
+  'on-web': 'On videorc.com'
+}
+
+const STATUS_DETAIL: Partial<Record<CloudRowStatus['kind'], string>> = {
+  expired: 'The cloud copy was deleted on the date it was kept until.',
+  missing: 'The cloud no longer has this file.',
+  failed: 'The download stopped. Try again.',
+  'on-web': 'This recording downloads from your account on videorc.com.'
+}
+
+const STATUS_ACTION: Record<CloudRowStatus['kind'], CloudRowAction | null> = {
+  downloaded: 'open-local',
+  expired: null,
+  missing: null,
+  starting: null,
+  downloading: 'cancel',
+  failed: 'retry',
+  'in-cloud': 'download',
+  'on-web': 'open-web'
+}
+
+/** Pure: a cloud recording as its Library row shows it. */
+export function cloudRowView(
+  recording: CloudRecordingItem,
+  download: CloudDownloadView | null,
+  now = Date.now()
+): CloudRowView {
+  const status = cloudRowStatus(recording, download, now)
+  const expires = Date.parse(recording.expiresAt)
+  const kept =
+    status.kind !== 'expired' && status.kind !== 'missing' && Number.isFinite(expires)
+      ? expires
+      : null
+  return {
+    status,
+    statusLabel:
+      status.kind === 'downloading' && status.percent !== null
+        ? `Downloading ${status.percent}%`
+        : STATUS_LABEL[status.kind],
+    statusDetail: STATUS_DETAIL[status.kind] ?? null,
+    keptUntilMs: kept,
+    action:
+      status.kind === 'downloaded' && !status.localSessionId
+        ? status.jobId
+          ? 'reveal'
+          : null
+        : STATUS_ACTION[status.kind]
+  }
+}

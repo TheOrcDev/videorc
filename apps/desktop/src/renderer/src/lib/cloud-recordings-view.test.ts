@@ -1,4 +1,4 @@
-import { cloudRecordingAvailability, cloudTakeLabel } from './cloud-recordings-view'
+import { cloudRecordingAvailability, cloudRowView, cloudTakeLabel } from './cloud-recordings-view'
 import { afterEach, describe, expect, it } from 'vitest'
 
 import type { CloudRecordingDownloadEvent, CloudRecordingItem } from '@/lib/backend'
@@ -170,4 +170,91 @@ it('S20 distinguishes unknown history, record-only, multiple intervals and expir
       localSessionId: 'local'
     }).get('rec')
   ).toEqual({ state: 'done', jobId: 'job', localSessionId: 'local' })
+})
+
+describe('cloudRowView: a cloud recording as its Library row', () => {
+  const now = Date.parse('2026-11-19T12:00:00Z')
+  const kept = Date.parse('2026-12-14T12:04:00Z')
+
+  it('downloads a managed one here, and sends a node one to videorc.com', () => {
+    expect(cloudRowView(item('a', { format: 'segments' }), null, now)).toEqual({
+      status: { kind: 'in-cloud' },
+      statusLabel: 'In the cloud',
+      statusDetail: null,
+      keptUntilMs: kept,
+      action: 'download'
+    })
+    expect(cloudRowView(item('b', { format: 'mp4' }), null, now)).toMatchObject({
+      status: { kind: 'on-web' },
+      statusLabel: 'On videorc.com',
+      keptUntilMs: kept,
+      action: 'open-web'
+    })
+  })
+
+  it('says a download as it goes: starting, a percent, Cancel, then Try again', () => {
+    const managed = item('a', { format: 'segments' })
+    expect(cloudRowView(managed, { state: 'starting' }, now)).toMatchObject({
+      statusLabel: 'Starting…',
+      action: null
+    })
+    expect(
+      cloudRowView(managed, { state: 'running', jobId: 'job_1', done: 1, total: 4 }, now)
+    ).toMatchObject({
+      status: { kind: 'downloading', jobId: 'job_1', percent: 25 },
+      statusLabel: 'Downloading 25%',
+      action: 'cancel'
+    })
+    expect(cloudRowView(managed, { state: 'running', jobId: 'job_1' }, now).statusLabel).toBe(
+      'Downloading…'
+    )
+    expect(cloudRowView(managed, { state: 'failed', jobId: 'job_1' }, now)).toMatchObject({
+      statusLabel: 'Download failed',
+      action: 'retry'
+    })
+  })
+
+  it('a copy on this computer wins, even when the cloud copy is gone', () => {
+    expect(
+      cloudRowView(item('a', { localSessionId: 'sess_1', availability: 'expired' }), null, now)
+    ).toMatchObject({
+      status: { kind: 'downloaded', localSessionId: 'sess_1', jobId: null },
+      statusLabel: 'Downloaded',
+      action: 'open-local'
+    })
+    expect(
+      cloudRowView(
+        item('b', { format: 'segments' }),
+        { state: 'done', jobId: 'job_2', localSessionId: 'sess_2' },
+        now
+      )
+    ).toMatchObject({
+      status: { kind: 'downloaded', localSessionId: 'sess_2', jobId: 'job_2' },
+      action: 'open-local'
+    })
+    // A finished download the Library hasn't listed yet shows its file.
+    expect(
+      cloudRowView(item('c', { format: 'segments' }), { state: 'done', jobId: 'job_3' }, now)
+    ).toMatchObject({
+      status: { kind: 'downloaded', localSessionId: null, jobId: 'job_3' },
+      action: 'reveal'
+    })
+  })
+
+  it('a gone cloud copy says so, with no action and no kept-until date', () => {
+    expect(
+      cloudRowView(item('a', { format: 'segments', expiresAt: '2026-11-01T00:00:00Z' }), null, now)
+    ).toEqual({
+      status: { kind: 'expired' },
+      statusLabel: 'Expired',
+      statusDetail: 'The cloud copy was deleted on the date it was kept until.',
+      keptUntilMs: null,
+      action: null
+    })
+    expect(cloudRowView(item('b', { availability: 'missing' }), null, now)).toMatchObject({
+      statusLabel: 'File missing',
+      keptUntilMs: null,
+      action: null
+    })
+  })
 })

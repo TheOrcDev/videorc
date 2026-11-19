@@ -9,10 +9,10 @@ import { noteCloudRecording, resetCloudRecordingWatch } from '@/lib/cloud-record
 
 import { LibraryCloudRecordings } from './library-cloud-recordings'
 
-// Plan 234: the Library's Cloud recordings section. It lists the account's
-// cloud recordings newest first, downloads a managed one as a job with its
-// progress in the row, sends a node one to videorc.com, and waits for a new
-// take's row after Stop recording.
+// Plan 234: the Library's Cloud tab. It lists the account's cloud recordings
+// newest first in the Local tab's table, downloads a managed one as a job with
+// its progress in the row, opens every one on videorc.com, and shows the
+// stopped take as processing until its row is listed.
 
 const mocked = vi.hoisted(() => ({
   core: {} as Record<string, unknown>,
@@ -144,6 +144,17 @@ function button(row: HTMLElement, label: string): HTMLButtonElement {
   return found
 }
 
+async function openMenu(row: HTMLElement): Promise<HTMLElement[]> {
+  const trigger = row.querySelector<HTMLElement>('button[aria-label="Cloud recording actions"]')
+  if (!trigger) throw new Error('no actions menu')
+  await act(async () => trigger.click())
+  return [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')]
+}
+
+function labels(items: HTMLElement[]): string[] {
+  return items.map((item) => item.textContent?.trim() ?? '')
+}
+
 async function emit(client: ReturnType<typeof fakeClient>, event: CloudRecordingDownloadEvent) {
   await act(async () => client.emit('cloud.recordings.download', event))
 }
@@ -198,11 +209,22 @@ describe('Library → Cloud recordings', () => {
     expect(alert?.textContent).toContain('Try again')
   })
 
-  it('opens the account page on videorc.com for a node recording', async () => {
+  it('opens a node recording on videorc.com, where it downloads', async () => {
     mocked.client = fakeClient([[item('node', { format: 'mp4' })]])
     await render()
-    await act(async () => button(rows()[0], 'Open videorc.com').click())
-    expect(openOAuthUrl).toHaveBeenCalledWith(expect.stringMatching(/\/account$/))
+    expect(rows()[0].dataset.cloudStatus).toBe('on-web')
+    expect(rows()[0].textContent).toContain('On videorc.com')
+    await act(async () => button(rows()[0], 'Open on videorc.com').click())
+    expect(openOAuthUrl).toHaveBeenCalledWith(expect.stringMatching(/\/account#cloud-recordings$/))
+  })
+
+  it('opens any recording on videorc.com from its menu', async () => {
+    mocked.client = fakeClient([[item('managed', { format: 'segments' })]])
+    await render()
+    const items = await openMenu(rows()[0])
+    expect(labels(items)).toEqual(['Open on videorc.com', 'Download to Library', 'Show markers'])
+    await act(async () => items[0].click())
+    expect(openOAuthUrl).toHaveBeenCalledWith(expect.stringMatching(/\/account#cloud-recordings$/))
   })
 
   it('downloads a managed recording as a job: progress, Cancel, then Show in Finder', async () => {
@@ -226,7 +248,7 @@ describe('Library → Cloud recordings', () => {
       totalSegments: 12
     })
     expect(rows()[0].textContent).toContain('Downloading 25%')
-    expect(rows()[0].querySelector('[data-slot="progress"]')).not.toBeNull()
+    expect(rows()[0].dataset.cloudStatus).toBe('downloading')
 
     await act(async () => button(rows()[0], 'Cancel').click())
     expect(client.calls).toContainEqual({
@@ -244,7 +266,7 @@ describe('Library → Cloud recordings', () => {
       state: 'done',
       path: '/Videos/talk-2026-11-10-1204-h.mp4'
     })
-    expect(rows()[0].textContent).toContain('Saved')
+    expect(rows()[0].textContent).toContain('Downloaded')
     // In view, the row is the news: no success toast.
     expect(toasts.success).not.toHaveBeenCalled()
     await act(async () => button(rows()[0], 'Show in Finder').click())
@@ -266,7 +288,7 @@ describe('Library → Cloud recordings', () => {
       state: 'failed',
       error: 'FFmpeg could not make the MP4: (address withheld) 403'
     })
-    expect(rows()[0].textContent).toContain("Couldn't download")
+    expect(rows()[0].textContent).toContain('Download failed')
     expect(button(rows()[0], 'Try again')).toBeDefined()
     expect(work.publishCloudDownloadFailed).toHaveBeenLastCalledWith(
       'rec_1',
@@ -306,7 +328,7 @@ describe('Library → Cloud recordings', () => {
     expect(work.publishCloudDownloadSaved).toHaveBeenCalledWith('rec_1', expect.any(Function))
     // Back in the Library, the row still knows.
     await render()
-    expect(rows()[0].textContent).toContain('Saved')
+    expect(rows()[0].textContent).toContain('Downloaded')
   })
 
   it('after Stop recording, asks every 5 s until the new take is listed', async () => {
@@ -319,6 +341,10 @@ describe('Library → Cloud recordings', () => {
     mocked.client = client
     await render()
     expect(client.listCalls()).toBe(1)
+    // The take the cloud is still saving has a row of its own meanwhile.
+    expect(
+      container.querySelector('[data-testid="library-cloud-processing"]')?.textContent
+    ).toContain('Processing')
     await act(async () => {
       await vi.advanceTimersByTimeAsync(5_000)
     })
@@ -328,6 +354,7 @@ describe('Library → Cloud recordings', () => {
     })
     expect(client.listCalls()).toBe(3)
     expect(rows()[0].dataset.recordingId).toBe('take')
+    expect(container.querySelector('[data-testid="library-cloud-processing"]')).toBeNull()
     await act(async () => {
       await vi.advanceTimersByTimeAsync(20_000)
     })
@@ -354,9 +381,21 @@ it('opens the registered local take and does not offer an expired cloud download
     sessionId: 'cloud-take-local'
   })
   window.removeEventListener('videorc:navigate-workspace', navigate)
-  expect(expired.textContent).toContain('Cloud copy expired')
-  // Plan 249 S19: the show's markers stay readable; nothing downloads or opens.
-  expect([...expired.querySelectorAll('button')].map((b) => b.textContent)).toEqual([
-    'Show markers'
-  ])
+  expect(expired.dataset.cloudStatus).toBe('expired')
+  expect(expired.textContent).toContain('Expired')
+  expect(expired.textContent).not.toContain('Kept until')
+  // Plan 249 S19: the show's markers stay readable; nothing downloads.
+  expect(expired.querySelector('[data-cloud-action]')).toBeNull()
+  expect(labels(await openMenu(expired))).toEqual(['Open on videorc.com', 'Show markers'])
+})
+
+it('hands Open in Library to the Library when it is given, for the Local tab', async () => {
+  mocked.client = fakeClient([[item('local', { format: 'segments', localSessionId: 'sess_9' })]])
+  const onOpenLocal = vi.fn()
+  await act(async () => {
+    root.render(createElement(LibraryCloudRecordings, { onOpenLocal }))
+  })
+  expect(rows()[0].textContent).toContain('Downloaded')
+  await act(async () => button(rows()[0], 'Open in Library').click())
+  expect(onOpenLocal).toHaveBeenCalledWith('sess_9')
 })
