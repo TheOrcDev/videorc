@@ -20,6 +20,7 @@ import type {
   CloudGuestAction,
   CloudRoomOpenParams,
   CloudRoomOverlayEvent,
+  CloudRoomStatus,
   CloudStage,
   CloudStatus,
   Device
@@ -142,6 +143,39 @@ export function stageWith(
     onStage: ordered,
     ...(stage.spotlight && !ordered.includes(stage.spotlight) ? { spotlight: undefined } : {}),
     ...(stage.screen && !ordered.includes(stage.screen) ? { screen: undefined } : {})
+  }
+}
+
+/**
+ * The stage without the guests who have left the room: pure, for the tests.
+ * A guest who leaves and asks again is let in under a new identity, and
+ * videorc.com refuses a stage that names anyone not in the room (422
+ * `invalid-stage`). Left on the stage, the old identity made every later
+ * Bring on, Send backstage and layout change fail, and drew an empty "No
+ * picture yet" tile (live show, 2026-11-19). In the room means the host, a
+ * guest videorc.com lists, or a participant the room reports, so a guest
+ * between two connections stays. The host is always kept, as the web keeps
+ * them (D8). Without a room status nothing is dropped.
+ */
+export function stageInRoom(
+  stage: CloudStage,
+  room: Pick<CloudRoomStatus, 'guests' | 'participants'> | undefined,
+  hostIdentity: string | null
+): CloudStage {
+  if (!room) return stage
+  const present = new Set<string>([
+    ...(room.guests ?? []).map((guest) => guest.guestId),
+    ...(room.participants ?? []).map((participant) => participant.identity)
+  ])
+  const kept = stage.onStage.filter(
+    (identity) => identity === hostIdentity || identity.startsWith('host:') || present.has(identity)
+  )
+  if (kept.length === stage.onStage.length) return stage
+  return {
+    ...stage,
+    onStage: kept,
+    ...(stage.spotlight && !kept.includes(stage.spotlight) ? { spotlight: undefined } : {}),
+    ...(stage.screen && !kept.includes(stage.screen) ? { screen: undefined } : {})
   }
 }
 
@@ -852,14 +886,16 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
   )
 
   const setStage = useCallback(
-    async (next: CloudStage) => {
+    async (requested: CloudStage) => {
+      // A guest who left can't stay named: videorc.com would refuse the whole stage.
+      const next = stageInRoom(requested, cloudStatusRef.current?.room, hostIdentity)
       await call(
         'cloud.stage.set',
         { ...next, ...(next.hostShape ? {} : { hostShape: hostShape() }) },
         'set the stage'
       )
     },
-    [call, hostShape]
+    [call, hostShape, hostIdentity]
   )
 
   const clearRoomScene = useCallback(async () => {
