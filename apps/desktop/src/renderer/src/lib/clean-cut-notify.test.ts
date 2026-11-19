@@ -10,8 +10,12 @@ import {
   resetCleanCutAnnouncements
 } from './clean-cut-notify'
 
-const toastMock = vi.hoisted(() => ({ success: vi.fn() }))
-vi.mock('./toast', () => ({ toast: toastMock }))
+// Plan 250: a cut that finished out of view is an entry behind the bell with
+// Review. The door to the store is stubbed, so the test reads what is asked.
+const work = vi.hoisted(() => ({ publishCleanCutReady: vi.fn() }))
+vi.mock('./notify', () => ({
+  withWorkNotifications: (run: (source: typeof work) => void) => run(work)
+}))
 
 function job(overrides: Partial<CleanCutJob> = {}): CleanCutJob {
   return {
@@ -46,19 +50,15 @@ function storage(): {
 
 beforeEach(() => {
   resetCleanCutAnnouncements()
-  toastMock.success.mockClear()
+  work.publishCleanCutReady.mockClear()
 })
 
-describe('the ready toast (plan 119 S15)', () => {
+describe('the ready notice (plans 119 S15 and 250)', () => {
   it('says the clean cut is ready, with both lengths and Review', () => {
     expect(announceCleanCutReady(job(), storage())).toBe(true)
-    expect(toastMock.success).toHaveBeenCalledWith(
-      'Your clean cut is ready (42:10 → 31:05)',
-      expect.objectContaining({
-        id: 'clean-cut-ready-job-1',
-        description: 'The original is kept.',
-        action: expect.objectContaining({ label: 'Review' })
-      })
+    expect(work.publishCleanCutReady).toHaveBeenCalledWith(
+      { id: 'job-1', title: 'Your clean cut is ready (42:10 → 31:05)' },
+      expect.any(Function)
     )
   })
 
@@ -75,7 +75,7 @@ describe('the ready toast (plan 119 S15)', () => {
       'job-1:0',
       'job-1:1'
     ])
-    expect(toastMock.success).toHaveBeenCalledTimes(2)
+    expect(work.publishCleanCutReady).toHaveBeenCalledTimes(2)
     expect(cleanCutAnnouncementKey(job({ id: 'x', edlRevision: 4 }))).toBe('x:4')
   })
 
@@ -84,7 +84,7 @@ describe('the ready toast (plan 119 S15)', () => {
     expect(
       announceCleanCutReady(job({ state: 'failed', errorCode: 'x', errorMessage: 'y' }), storage())
     ).toBe(false)
-    expect(toastMock.success).not.toHaveBeenCalled()
+    expect(work.publishCleanCutReady).not.toHaveBeenCalled()
   })
 
   it('works without storage', () => {
@@ -94,17 +94,17 @@ describe('the ready toast (plan 119 S15)', () => {
 
   it("opens that job's review from Review", () => {
     announceCleanCutReady(job({ mode: 'condensed' }), storage())
-    const [title, options] = toastMock.success.mock.calls[0] as [
-      string,
-      { action: { onClick: () => void } }
+    const [words, review] = work.publishCleanCutReady.mock.calls[0] as [
+      { title: string },
+      () => void
     ]
-    expect(title).toBe('Your condensed cut is ready (42:10 → 31:05)')
+    expect(words.title).toBe('Your condensed cut is ready (42:10 → 31:05)')
     const heard: unknown[] = []
     const listener = (event: Event): void => {
       heard.push(readCleanCutOpenRequest((event as CustomEvent).detail))
     }
     window.addEventListener(OPEN_CLEAN_CUT_EVENT, listener)
-    options.action.onClick()
+    review()
     window.removeEventListener(OPEN_CLEAN_CUT_EVENT, listener)
     expect(heard).toEqual([{ sessionId: 'rec-1', jobId: 'job-1', mode: 'condensed', review: true }])
   })

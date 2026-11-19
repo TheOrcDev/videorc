@@ -9,7 +9,7 @@
 import { soundAssetUrl } from '../../../shared/sound-assets'
 import type { Sound, SoundVoice } from './backend'
 import type { SoundboardSnapshot } from './soundboard-store'
-import { toast } from './toast'
+import { withAppNotifications } from './notify'
 
 /** A stop or a restart fades the old voice out over 5 ms, like the bus. */
 export const MONITOR_RAMP_SECONDS = 0.005
@@ -100,7 +100,7 @@ export interface SoundMonitorDeps {
   /**
    * Said once per sound and edit when its file can't be read or decoded
    * (release test 147, plan 0002: a 404 left the monitor silent with only a
-   * console line). Defaults to a warning toast.
+   * console line). Defaults to an entry behind the bell.
    */
   onUnplayable?: (sound: Sound) => void
   destination?: (context: AudioContext) => AudioNode
@@ -109,12 +109,15 @@ export interface SoundMonitorDeps {
   suspendIdle?: boolean
 }
 
-/** The warning when the monitor can't play a sound here. */
+/** The news (an entry behind the bell) when the monitor can't play a sound here. */
 export function monitorUnplayableToast(sound: Pick<Sound, 'id' | 'name'>): void {
-  toast.warning(`Couldn't play ${sound.name} on this computer`, {
-    id: `sound-monitor:${sound.id}`,
-    description: "Only your own speakers miss it. Recordings and streams aren't affected."
-  })
+  withAppNotifications((app) =>
+    app.publishAppNews(
+      `sound-monitor:${sound.id}`,
+      `Couldn't play ${sound.name} on this computer`,
+      "Only your own speakers miss it. Recordings and streams aren't affected."
+    )
+  )
 }
 
 const browserDeps: SoundMonitorDeps = {

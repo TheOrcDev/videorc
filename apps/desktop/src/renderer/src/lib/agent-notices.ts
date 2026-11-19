@@ -1,6 +1,6 @@
 import type { AgentsStore } from '@/lib/agents-store'
 import type { AgentActivityEntry } from '@/lib/backend'
-import { toast } from '@/lib/toast'
+import { withAppNotifications } from '@/lib/notify'
 
 // Plan 209 D11: an agent action that changes what the world sees, or is hard
 // to undo, shows a plain notice in the Studio naming the agent ("Claude
@@ -29,7 +29,10 @@ export function agentNoticeId(entry: AgentActivityEntry): string {
 /** Shows the D11 notices from `store` until the returned function is called. */
 export function startAgentNotices(
   store: Pick<AgentsStore, 'onEvent'>,
-  { show = (title: string, id: string) => void toast.info(title, { id }) } = {}
+  {
+    show = (title: string, id: string) =>
+      withAppNotifications((app) => app.publishAgentNotice(id, title))
+  } = {}
 ): () => void {
   return store.onEvent((event) => {
     const title = agentNoticeTitle(event.entry)

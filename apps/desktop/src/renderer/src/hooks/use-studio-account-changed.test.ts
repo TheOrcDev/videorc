@@ -5,11 +5,19 @@ const toast = vi.hoisted(() => ({
   warning: vi.fn(),
   success: vi.fn(),
   info: vi.fn(),
-  message: vi.fn()
+  message: vi.fn(),
+  problem: vi.fn(),
+  dismiss: vi.fn()
 }))
-vi.mock('@/lib/toast', () => ({ toast }))
+// The rest of the module stays real: the notification store guards its words
+// with the toast door's own text guard.
+vi.mock('@/lib/toast', async (original) => ({
+  ...(await original<typeof import('@/lib/toast')>()),
+  toast
+}))
 
 import { AccountSnapshotCommitCoordinator } from '@/lib/account-snapshot-policy'
+import { notifications } from '@/lib/notifications'
 
 import { handleAccountChangedEvent } from './use-studio'
 
@@ -18,7 +26,8 @@ import { handleAccountChangedEvent } from './use-studio'
 // Live with words that blamed X.
 describe('account.changed', () => {
   beforeEach(() => {
-    toast.warning.mockClear()
+    vi.clearAllMocks()
+    notifications.reset()
   })
 
   it('applies the backend account and says when the server signed the desktop out', async () => {
@@ -31,17 +40,29 @@ describe('account.changed', () => {
     )
 
     expect(setAccount).toHaveBeenCalledWith({ status: 'signed-out' })
-    // The connection toasts' words load lazily (plan 224 budget room), so
-    // the warning lands a tick after the event.
-    await vi.waitFor(() => expect(toast.warning).toHaveBeenCalled())
+    // Plan 250: an entry behind the bell with Sign in as its fix. Its words
+    // load lazily (plan 224 budget room), so it lands a tick after the event.
+    const expired = () => notifications.snapshot().find((entry) => entry.key === 'account-session')
+    await vi.waitFor(() => expect(expired()).toBeDefined())
+    expect(expired()).toMatchObject({
+      state: 'open',
+      tone: 'warning',
+      title: 'Your Videorc sign-in expired',
+      detail: 'Sign in again.',
+      actions: [{ id: 'sign-in', label: 'Sign in', kind: 'fix' }]
+    })
+    // Idle, so it also shows for 8 s; nothing is pinned.
     expect(toast.warning).toHaveBeenCalledWith(
       'Your Videorc sign-in expired',
-      expect.objectContaining({
-        id: 'account-session-expired',
-        description: 'Sign in again.',
-        action: expect.objectContaining({ label: 'Sign in' })
-      })
+      expect.objectContaining({ id: 'notification:account-session', duration: 8_000 })
     )
+
+    // The next sign-in resolves it.
+    handleAccountChangedEvent(
+      { account: { status: 'signed-in', username: 'orc_dev' }, reason: 'signed-in' },
+      { coordinator, setAccount }
+    )
+    await vi.waitFor(() => expect(expired()?.state).toBe('resolved'))
   })
 
   it('stays quiet on a sign-in or an explicit sign-out, and yields to one in flight', () => {

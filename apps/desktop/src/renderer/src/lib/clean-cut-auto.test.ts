@@ -25,8 +25,12 @@ import {
 import type { CleanCutSession } from './clean-cut-view'
 import { DEFAULT_BASIC_ENTITLEMENTS } from './entitlements'
 
-const toastMock = vi.hoisted(() => ({ warning: vi.fn() }))
-vi.mock('./toast', () => ({ toast: toastMock }))
+// Plan 250: a clean cut that never started is an entry behind the bell. The
+// door to the store is stubbed, so the test reads what this module asks for.
+const work = vi.hoisted(() => ({ publishCleanCutAutoFailed: vi.fn() }))
+vi.mock('./notify', () => ({
+  withWorkNotifications: (run: (source: typeof work) => void) => run(work)
+}))
 
 const PREMIUM: EntitlementsSnapshot = {
   ...DEFAULT_BASIC_ENTITLEMENTS,
@@ -95,7 +99,7 @@ function input(overrides: Partial<CleanCutAutoInput> = {}): CleanCutAutoInput {
 
 beforeEach(() => {
   resetCleanCutAutoClaims()
-  toastMock.warning.mockClear()
+  work.publishCleanCutAutoFailed.mockClear()
 })
 
 afterEach(() => {
@@ -218,26 +222,23 @@ describe('autoRunCleanCut', () => {
       kind: 'skip',
       reason: 'no-consent'
     })
-    expect(toastMock.warning).toHaveBeenCalledExactlyOnceWith(
-      "Your clean cut didn't start",
-      expect.objectContaining({
-        id: 'clean-cut-auto-rec-1',
-        description: "Cloud AI isn't allowed, so Clean cut can't run.",
-        action: expect.objectContaining({ label: 'Open Clean cut' })
-      })
+    expect(work.publishCleanCutAutoFailed).toHaveBeenCalledExactlyOnceWith(
+      'rec-1',
+      "Cloud AI isn't allowed, so Clean cut can't run.",
+      expect.any(Function)
     )
     // The ledger holds it: the same recording never warns twice.
     resetCleanCutAutoClaims()
     await expect(autoRunCleanCut(FINALIZED, studio)).resolves.toMatchObject({
       reason: 'already-attempted'
     })
-    expect(toastMock.warning).toHaveBeenCalledTimes(1)
+    expect(work.publishCleanCutAutoFailed).toHaveBeenCalledTimes(1)
   })
 
   it('stays silent for a skip the streamer expects', async () => {
     const studio = context({ sessions: [session({ mode: 'stream', mp4Path: undefined })] })
     await autoRunCleanCut(FINALIZED, studio)
-    expect(toastMock.warning).not.toHaveBeenCalled()
+    expect(work.publishCleanCutAutoFailed).not.toHaveBeenCalled()
     expect(cleanCutAutoSkipReason('not-eligible', { premiumReason: 'P', reasonCode: null })).toBe(
       null
     )
@@ -307,21 +308,19 @@ describe('autoRunCleanCut', () => {
     studio.request.mockRejectedValueOnce(refused)
     await autoRunCleanCut(FINALIZED, studio)
     // Plain words, never the raw text, and the way to Clean cut (E-25).
-    expect(toastMock.warning).toHaveBeenCalledWith(
-      "Your clean cut didn't start",
-      expect.objectContaining({
-        description: expect.stringContaining("This month's Clean cut minutes ran out."),
-        action: expect.objectContaining({ label: 'Open Clean cut' })
-      })
+    expect(work.publishCleanCutAutoFailed).toHaveBeenCalledWith(
+      'rec-1',
+      expect.stringContaining("This month's Clean cut minutes ran out."),
+      expect.any(Function)
     )
 
     resetCleanCutAutoClaims()
-    toastMock.warning.mockClear()
+    work.publishCleanCutAutoFailed.mockClear()
     const running = Object.assign(new Error('Already.'), { code: 'already-running' })
     const again = context({ sessions: [session({ id: 'rec-2' })] })
     again.request.mockRejectedValueOnce(running)
     await autoRunCleanCut({ ...FINALIZED, sessionId: 'rec-2' }, again)
-    expect(toastMock.warning).not.toHaveBeenCalled()
+    expect(work.publishCleanCutAutoFailed).not.toHaveBeenCalled()
   })
 
   it('works without storage, once per window', async () => {

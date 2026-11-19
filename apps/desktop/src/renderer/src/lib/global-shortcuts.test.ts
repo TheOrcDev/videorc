@@ -1,6 +1,16 @@
 import { nextEligibleLayout } from '../../../shared/global-shortcuts'
 import { describe, expect, it, vi } from 'vitest'
 vi.mock('sonner', () => ({ toast: { error: vi.fn(), info: vi.fn(), warning: vi.fn() } }))
+// Plan 250: shortcuts that did not register are an entry behind the bell
+// with Open Shortcuts. The door to the store is stubbed here.
+const app = vi.hoisted(() => ({
+  publishGlobalShortcutsProblem: vi.fn(),
+  resolveGlobalShortcuts: vi.fn(),
+  withdrawGlobalShortcuts: vi.fn()
+}))
+vi.mock('@/lib/notify', () => ({
+  withAppNotifications: (run: (source: typeof app) => void) => run(app)
+}))
 import { toast } from 'sonner'
 import {
   executeGlobalShortcut,
@@ -221,20 +231,36 @@ describe('GlobalShortcutsRegistrar conflicts', () => {
     )
     const setGlobalShortcuts = vi.fn(async () => ({ registered: { 'record-toggle': false } }))
     vi.stubGlobal('window', Object.assign(target, { videorc: { setGlobalShortcuts } }))
-    vi.mocked(toast.error).mockClear()
+    app.publishGlobalShortcutsProblem.mockClear()
+    app.resolveGlobalShortcuts.mockClear()
     try {
-      new GlobalShortcutsRegistrar().sync({ recordToggle: 'Cmd+Shift+R' })
-      await vi.waitFor(() => expect(toast.error).toHaveBeenCalledTimes(1))
-
-      const [title, options] = vi.mocked(toast.error).mock.calls[0] ?? []
-      expect(title).toBe("A global shortcut didn't register")
-      expect(options?.description).toBe(
-        'Record / stop recording: another app uses it, or the keys are taken twice. Choose different keys in Settings → Shortcuts.'
-      )
-      const action = options?.action as { label: string; onClick: () => void }
-      expect(action.label).toBe('Open Shortcuts')
-      action.onClick()
+      const registrar = new GlobalShortcutsRegistrar()
+      registrar.sync({ recordToggle: 'Cmd+Shift+R' })
+      await vi.waitFor(() => expect(app.publishGlobalShortcutsProblem).toHaveBeenCalledTimes(1))
+      expect(app.publishGlobalShortcutsProblem).toHaveBeenCalledWith({
+        title: "A global shortcut didn't register",
+        description:
+          'Record / stop recording: another app uses it, or the keys are taken twice. Choose different keys in Settings → Shortcuts.'
+      })
+      // The entry's button is Open Shortcuts (`notifications/sources/app.ts`).
+      const { publishGlobalShortcutsProblem } = await vi.importActual<
+        typeof import('@/lib/notifications/sources/app')
+      >('@/lib/notifications/sources/app')
+      const { createNotificationStore } = await vi.importActual<
+        typeof import('@/lib/notifications/store')
+      >('@/lib/notifications/store')
+      const store = createNotificationStore()
+      publishGlobalShortcutsProblem({ title: 'x', description: 'y' }, store)
+      expect(store.snapshot()[0].actions).toEqual([
+        { id: 'open-shortcuts', label: 'Open Shortcuts', kind: 'door' }
+      ])
+      await store.runAction('global-shortcuts', 'open-shortcuts')
       expect(opened).toEqual([{ tab: 'settings', settingsTab: 'shortcuts' }])
+
+      // A later registration that takes every key resolves the entry.
+      setGlobalShortcuts.mockResolvedValueOnce({ registered: { 'record-toggle': true } })
+      registrar.sync({ recordToggle: 'Cmd+Shift+F9' })
+      await vi.waitFor(() => expect(app.resolveGlobalShortcuts).toHaveBeenCalledTimes(1))
     } finally {
       vi.unstubAllGlobals()
     }
@@ -244,23 +270,29 @@ describe('GlobalShortcutsRegistrar conflicts', () => {
     const unavailable = "Global shortcuts can't work in this Wayland session."
     const setGlobalShortcuts = vi.fn(async () => ({ registered: {}, unavailable }))
     vi.stubGlobal('window', Object.assign(new EventTarget(), { videorc: { setGlobalShortcuts } }))
-    vi.mocked(toast.error).mockClear()
-    vi.mocked(toast.warning).mockClear()
+    app.publishGlobalShortcutsProblem.mockClear()
     try {
       const registrar = new GlobalShortcutsRegistrar()
-      // Only the default Hide screen key: nothing the person set, no toast.
+      // Only the default Hide screen key: nothing the person set, no notice.
       registrar.sync({ recordToggle: '' })
       await vi.waitFor(() => expect(setGlobalShortcuts).toHaveBeenCalledTimes(1))
       await Promise.resolve()
-      expect(toast.warning).not.toHaveBeenCalled()
+      expect(app.publishGlobalShortcutsProblem).not.toHaveBeenCalled()
 
       registrar.sync({ recordToggle: 'Control+Shift+R' })
-      await vi.waitFor(() => expect(toast.warning).toHaveBeenCalledTimes(1))
-      const [title, options] = vi.mocked(toast.warning).mock.calls[0] ?? []
-      expect(title).toBe("Global shortcuts don't work here")
-      expect(options?.description).toBe(unavailable)
-      expect((options!.action as { label: string }).label).toBe('Open Shortcuts')
-      expect(toast.error).not.toHaveBeenCalled()
+      await vi.waitFor(() => expect(app.publishGlobalShortcutsProblem).toHaveBeenCalledTimes(1))
+      expect(app.publishGlobalShortcutsProblem).toHaveBeenCalledWith({
+        title: "Global shortcuts don't work here",
+        description: unavailable
+      })
+
+      // The key is removed again: nothing is left to say, and nothing was
+      // "registered" either.
+      app.withdrawGlobalShortcuts.mockClear()
+      app.resolveGlobalShortcuts.mockClear()
+      registrar.sync({ recordToggle: '' })
+      await vi.waitFor(() => expect(app.withdrawGlobalShortcuts).toHaveBeenCalledTimes(1))
+      expect(app.resolveGlobalShortcuts).not.toHaveBeenCalled()
     } finally {
       vi.unstubAllGlobals()
     }

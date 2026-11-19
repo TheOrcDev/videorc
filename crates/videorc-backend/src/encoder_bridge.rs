@@ -9937,14 +9937,22 @@ async fn emit_encoder_bridge_diagnostics(
 
     // Plan 087: the session record names an overloaded host while it is
     // overloaded, instead of leaving "this Mac was busy" to be reconstructed.
-    if let Some(message) = crate::host_pressure::poll_host_overload_notice(session_id) {
-        tracing::warn!(session_id, "{message}");
+    // Plan 250 S9: and says when the overload is over, so the notice does not
+    // outlive it by the rest of the stream.
+    if let Some(notice) = crate::host_pressure::poll_host_overload_notice(session_id) {
+        let level = if notice.is_overloaded() {
+            tracing::warn!(session_id, "{}", notice.message());
+            crate::protocol::HealthLevel::Warn
+        } else {
+            tracing::info!(session_id, "{}", notice.message());
+            crate::protocol::HealthLevel::Info
+        };
         let _ = crate::recording::emit_health_event(
             state,
             Some(session_id),
-            crate::protocol::HealthLevel::Warn,
-            crate::host_pressure::HOST_OVERLOADED_CODE,
-            &message,
+            level,
+            notice.code(),
+            notice.message(),
         );
     }
 

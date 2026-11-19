@@ -425,16 +425,14 @@ try {
         'takeover requires the real second host join'
       )
       // The backend socket and the renderer's lazy notice module settle
-      // independently. Require the exact toast after the renderer commits it.
+      // independently. Require the exact notification (plan 250: an entry
+      // behind the bell) after the renderer commits it.
       await waitFor(
-        () =>
-          h.eval(
-            `return document.body.textContent.includes('Your show continues on Smoke phone.')`
-          ),
-        'host takeover toast',
+        () => h.hasNotification('Your show continues on Smoke phone'),
+        'host take-over notification',
         3000
       )
-      await h.captureUi('taken-over', '[data-sonner-toast]', 'Your show continues on Smoke phone.')
+      await h.captureNotifications('taken-over')
       await holdFor(
         () => {
           const room = h.web.snapshot(h.showId).state.room

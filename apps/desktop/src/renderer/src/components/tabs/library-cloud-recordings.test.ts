@@ -25,6 +25,15 @@ vi.mock('@/hooks/use-studio', () => ({
 }))
 
 const toasts = vi.hoisted(() => ({ success: vi.fn(), error: vi.fn(), warning: vi.fn() }))
+// Plan 250: a download that finished or failed out of the streamer's hands is
+// an entry behind the bell. The door to the store is stubbed here.
+const work = vi.hoisted(() => ({
+  publishCloudDownloadFailed: vi.fn(),
+  publishCloudDownloadSaved: vi.fn()
+}))
+vi.mock('@/lib/notify', () => ({
+  withWorkNotifications: (run: (source: typeof work) => void) => run(work)
+}))
 vi.mock('@/lib/toast', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/lib/toast')>()
   return { ...actual, toast: Object.assign(vi.fn(), toasts) }
@@ -242,7 +251,7 @@ describe('Library → Cloud recordings', () => {
     expect(revealCloudDownload).toHaveBeenCalledWith('job_2')
   })
 
-  it('names a failure in a toast, withholding text that is not its own, and offers Try again', async () => {
+  it('names a failure in a notification, withholding text that is not its own, and offers Try again', async () => {
     const client = fakeClient([[item('rec_1', { format: 'segments' })]])
     mocked.client = client
     await render()
@@ -259,9 +268,10 @@ describe('Library → Cloud recordings', () => {
     })
     expect(rows()[0].textContent).toContain("Couldn't download")
     expect(button(rows()[0], 'Try again')).toBeDefined()
-    expect(toasts.error).toHaveBeenLastCalledWith(
-      "Couldn't download the cloud recording",
+    expect(work.publishCloudDownloadFailed).toHaveBeenLastCalledWith(
+      'rec_1',
       expect.objectContaining({
+        title: "Couldn't download the cloud recording",
         description: 'Try again. If it keeps happening, export a support bundle from Health.'
       })
     )
@@ -271,13 +281,16 @@ describe('Library → Cloud recordings', () => {
       state: 'failed',
       error: 'Recording segment 4 could not be downloaded.'
     })
-    expect(toasts.error).toHaveBeenLastCalledWith(
-      "Couldn't download the cloud recording",
-      expect.objectContaining({ description: "Part of the recording didn't download. Try again." })
+    expect(work.publishCloudDownloadFailed).toHaveBeenLastCalledWith(
+      'rec_1',
+      expect.objectContaining({
+        title: "Couldn't download the cloud recording",
+        description: "Part of the recording didn't download. Try again."
+      })
     )
   })
 
-  it('toasts a download that finishes after the Library closed', async () => {
+  it('says a download that finishes after the Library closed', async () => {
     const client = fakeClient([[item('rec_1', { format: 'segments' })]])
     mocked.client = client
     await render()
@@ -290,10 +303,7 @@ describe('Library → Cloud recordings', () => {
       state: 'done',
       path: '/Videos/a.mp4'
     })
-    expect(toasts.success).toHaveBeenCalledWith(
-      'Cloud recording saved',
-      expect.objectContaining({ action: expect.objectContaining({ label: 'Show in Finder' }) })
-    )
+    expect(work.publishCloudDownloadSaved).toHaveBeenCalledWith('rec_1', expect.any(Function))
     // Back in the Library, the row still knows.
     await render()
     expect(rows()[0].textContent).toContain('Saved')

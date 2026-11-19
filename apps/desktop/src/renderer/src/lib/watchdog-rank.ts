@@ -106,8 +106,3 @@ function destinationOf(
     alert.title
   )
 }
-
-/** The toast key per check: the clearing toast replaces the alert's (D3). */
-export function watchdogToastId(alert: Pick<WatchdogAlert, 'check' | 'targetId'>): string {
-  return alert.targetId ? `watchdog:${alert.check}:${alert.targetId}` : `watchdog:${alert.check}`
-}

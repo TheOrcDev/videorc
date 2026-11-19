@@ -50,9 +50,12 @@ export function CloudSection(): ReactElement | null {
 
   // Plan 222 U1: "Open Destinations" on the "Videorc Cloud is on" notice
   // brings this section into view, on mount or on an open page.
+  // The request is taken only once the section draws: before the first
+  // cloud status it renders nothing, and the request would be spent.
+  const rendered = kind !== undefined
   useEffect(() => {
     const focus = (): void => {
-      if (!takeCloudSectionFocus()) return
+      if (!rendered || !takeCloudSectionFocus()) return
       requestAnimationFrame(() =>
         document
           .querySelector('[data-testid="cloud-section"]')
@@ -62,7 +65,7 @@ export function CloudSection(): ReactElement | null {
     focus()
     globalThis.addEventListener(CLOUD_SECTION_FOCUS_EVENT, focus)
     return () => globalThis.removeEventListener(CLOUD_SECTION_FOCUS_EVENT, focus)
-  }, [])
+  }, [rendered])
 
   // Fresh hours when the page opens (and when the account becomes entitled);
   // the backend keeps them current during a show.

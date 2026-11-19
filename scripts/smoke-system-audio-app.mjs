@@ -75,6 +75,7 @@ import {
   stimulusWindowOptionsForSource
 } from './lib/screen-motion-stimulus.mjs'
 import { launchDevApp, repoRoot } from './lib/app-launcher.mjs'
+import { describeNotifications, READ_NOTIFICATIONS_CODE } from './lib/notifications-smoke.mjs'
 import { resolveExistingSiblingFfprobe } from './lib/ffmpeg-sibling-paths.mjs'
 import {
   connectRemote,
@@ -596,13 +597,18 @@ async function describeRendererFailure(smoke) {
       {
         code: `
           const nodes = Array.from(document.querySelectorAll('[role="alert"], [data-sonner-toast], [data-videorc-start-failure]'));
-          return nodes.map((node) => node.textContent?.trim()).filter(Boolean).slice(0, 4);
+          const texts = nodes.map((node) => node.textContent?.trim()).filter(Boolean).slice(0, 4);
+          // Plan 250: what Videorc noticed on its own is behind the bell now.
+          const notifications = await (async () => {${READ_NOTIFICATIONS_CODE}})();
+          return { texts, notifications };
         `
       },
       { timeoutMs: 5000 }
     )
-    const texts = response?.result
-    return Array.isArray(texts) && texts.length > 0 ? ` Renderer says: ${texts.join(' | ')}` : ''
+    const texts = response?.result?.texts
+    const said =
+      Array.isArray(texts) && texts.length > 0 ? ` Renderer says: ${texts.join(' | ')}` : ''
+    return `${said}${describeNotifications(response?.result?.notifications)}`
   } catch {
     return ''
   }

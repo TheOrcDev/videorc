@@ -6,6 +6,7 @@
 //! The Record-time notice estimates the minutes left from the take's bitrate.
 
 use std::path::Path;
+use std::time::Duration;
 
 const MIB: u64 = 1024 * 1024;
 /// Headroom on top of the copy itself: the container, the moov rewrite of
@@ -137,6 +138,100 @@ pub fn record_space_notice(
     })
 }
 
+pub const DISK_SPACE_LOW_CODE: &str = "disk-space-low";
+/// Plan 250 S9: there is room again. Until this code existed the low-space
+/// notice was sent once at Record and never taken back.
+pub const DISK_SPACE_RECOVERED_CODE: &str = "disk-space-recovered";
+/// How often a running recording's volume is read. Free space moves slowly.
+pub const RECORD_SPACE_CHECK_INTERVAL: Duration = Duration::from_secs(60);
+/// The recording keeps the notice until it holds this many minutes again
+/// (and 1.25 GiB): a quarter over the line that opened it, so a volume
+/// hovering at 20 minutes is one notice, not many.
+const RECORD_NOTICE_RECOVER_MINUTES: u64 = RECORD_NOTICE_MINUTES + RECORD_NOTICE_MINUTES / 4;
+const RECORD_NOTICE_RECOVER_FLOOR_BYTES: u64 =
+    RECORD_NOTICE_FLOOR_BYTES + RECORD_NOTICE_FLOOR_BYTES / 4;
+
+/// How little room is left, coarsely: a recording is told again each time
+/// it gets worse, never on every reading.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum RecordSpaceStep {
+    /// Under 20 minutes, or under 1 GiB.
+    Low,
+    /// Five minutes or less.
+    FiveMinutes,
+    /// Less than a minute.
+    LastMinute,
+}
+
+/// What a recording should be told about its volume.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RecordSpaceNotice {
+    Low(String),
+    Recovered(String),
+}
+
+impl RecordSpaceNotice {
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::Low(_) => DISK_SPACE_LOW_CODE,
+            Self::Recovered(_) => DISK_SPACE_RECOVERED_CODE,
+        }
+    }
+
+    pub fn message(&self) -> &str {
+        match self {
+            Self::Low(message) | Self::Recovered(message) => message,
+        }
+    }
+
+    pub fn is_low(&self) -> bool {
+        matches!(self, Self::Low(_))
+    }
+}
+
+/// One recording's watch on its volume: low space when it begins or gets
+/// worse, and its end once there is room again.
+#[derive(Debug, Default)]
+pub struct RecordSpaceWatch {
+    /// The worst step already said; `None` while there is room.
+    reported: Option<RecordSpaceStep>,
+}
+
+impl RecordSpaceWatch {
+    /// Feed one reading of the volume's free bytes.
+    pub fn update(
+        &mut self,
+        available: u64,
+        video_kbps: u32,
+        separate_files: usize,
+    ) -> Option<RecordSpaceNotice> {
+        let minutes = recording_minutes_left(available, video_kbps, separate_files);
+        if let Some(message) = record_space_notice(available, video_kbps, separate_files) {
+            let step = match minutes {
+                0 => RecordSpaceStep::LastMinute,
+                1..=5 => RecordSpaceStep::FiveMinutes,
+                _ => RecordSpaceStep::Low,
+            };
+            if self.reported.is_some_and(|reported| step <= reported) {
+                return None;
+            }
+            self.reported = Some(step);
+            return Some(RecordSpaceNotice::Low(message));
+        }
+        self.reported?;
+        if available < RECORD_NOTICE_RECOVER_FLOOR_BYTES || minutes < RECORD_NOTICE_RECOVER_MINUTES
+        {
+            // Over the line, inside the margin: the notice stands.
+            return None;
+        }
+        self.reported = None;
+        Some(RecordSpaceNotice::Recovered(format!(
+            "The selected recording location has room again: about {minutes} minutes of recording fit ({} free).",
+            format_bytes(available)
+        )))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -209,6 +304,88 @@ mod tests {
                 "Less than a minute of recording fits in the selected recording location (105 MB free)."
             )
         );
+    }
+
+    /// Plan 250 S9: open, get worse, clear, open again.
+    #[test]
+    fn a_recording_is_told_when_space_runs_low_gets_worse_and_comes_back() {
+        // 1080p30 at 12 Mbps: 203.04 MB a minute, so 20 minutes is 4.06 GB.
+        const GB: u64 = 1_000_000_000;
+        let mut watch = RecordSpaceWatch::default();
+        let mut read = |available: u64| watch.update(available, 12_000, 0);
+
+        assert_eq!(read(19 * GB), None, "room for 93 minutes");
+        let low = read(3 * GB).expect("under 20 minutes is said");
+        assert_eq!(low.code(), DISK_SPACE_LOW_CODE);
+        assert!(low.is_low());
+        assert_eq!(
+            low.message(),
+            "About 14 minutes of recording fit in the selected recording location (3.0 GB free)."
+        );
+        // The same step on the next readings says nothing more.
+        assert_eq!(read(3 * GB - 200_000_000), None);
+        assert_eq!(read(2 * GB), None);
+
+        // Five minutes or less, then the last minute, are each said once.
+        let five = read(GB).expect("five minutes or less is said again");
+        assert!(
+            five.message().starts_with("About 4 minutes"),
+            "{}",
+            five.message()
+        );
+        assert_eq!(read(900_000_000), None);
+        let last = read(100 * MIB).expect("the last minute is said again");
+        assert!(
+            last.message().starts_with("Less than a minute"),
+            "{}",
+            last.message()
+        );
+        assert_eq!(read(50 * MIB), None);
+
+        // Back over the line, but inside the margin: the notice stands.
+        assert_eq!(recording_minutes_left(4_500_000_000, 12_000, 0), 22);
+        assert_eq!(read(4_500_000_000), None);
+        // A quarter over the line: there is room again.
+        let recovered = read(6 * GB).expect("25 minutes or more ends the notice");
+        assert_eq!(recovered.code(), DISK_SPACE_RECOVERED_CODE);
+        assert!(!recovered.is_low());
+        assert_eq!(
+            recovered.message(),
+            "The selected recording location has room again: about 29 minutes of recording fit (6.0 GB free)."
+        );
+        assert_eq!(read(6 * GB), None, "room stays quiet once it has been said");
+
+        // A second episode in the same recording is said again.
+        assert!(read(3 * GB).is_some_and(|notice| notice.is_low()));
+    }
+
+    #[test]
+    fn the_floor_keeps_its_own_margin() {
+        // A low bitrate fits hours in 1 GiB; only the floor warns.
+        let mut watch = RecordSpaceWatch::default();
+        assert!(
+            watch
+                .update(900 * MIB, 500, 0)
+                .is_some_and(|notice| notice.is_low())
+        );
+        assert_eq!(
+            watch.update(1100 * MIB, 500, 0),
+            None,
+            "over the floor, inside the margin"
+        );
+        assert!(
+            watch
+                .update(1300 * MIB, 500, 0)
+                .is_some_and(|notice| !notice.is_low())
+        );
+    }
+
+    #[test]
+    fn a_volume_that_never_ran_low_never_says_it_recovered() {
+        let mut watch = RecordSpaceWatch::default();
+        for _ in 0..3 {
+            assert_eq!(watch.update(500 * GIB, 12_000, 2), None);
+        }
     }
 
     #[test]

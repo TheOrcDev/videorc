@@ -21,10 +21,16 @@ The registry names icons by **meaning**, not by shape: call sites ask for
   variants, two pins, two locks and two spinners — nobody could have answered
   "which icons does Videorc use?" without a grep.
 
-Today (plan 239, 2026-11-15): **97 semantic slots over 93 glyphs** in the shared registry. Eight of the glyphs sit outside the Nucleo count: seven platform brand marks (`KickIcon` is a hand-drawn inline SVG, plan 063; `YoutubeIcon` is YouTube's official icon file, plan 165; `XPlatformIcon` is the path from X's partner kit, plan 167; `TwitchIcon`, `TiktokIcon`, `InstagramIcon` and `FacebookIcon` come from Phosphor) and `BuddyIcon`, the default avatar's artwork (Flint, the owner's stone character, since plan 164; plan 119 added the slot, and plan 239 D7 gave it to the avatar). That leaves 85 inside the Nucleo count. The Stream Manager adds seven slots in its own registry, `components/stream-manager/activity-icons.tsx`: six activity slots (plan 055: follow, supporter, gift, tip, raid, announcement) and the stats bar's viewer count (plan 057). The shared registry ships in every window's eager chunk, and these are only drawn in the Stream Manager. They count toward the same ceiling. Four slots share a glyph
+Today (plan 250, 2026-11-19): **98 semantic slots over 94 glyphs** in the shared registry. Eight of the glyphs sit outside the Nucleo count: seven platform brand marks (`KickIcon` is a hand-drawn inline SVG, plan 063; `YoutubeIcon` is YouTube's official icon file, plan 165; `XPlatformIcon` is the path from X's partner kit, plan 167; `TwitchIcon`, `TiktokIcon`, `InstagramIcon` and `FacebookIcon` come from Phosphor) and `BuddyIcon`, the default avatar's artwork (Flint, the owner's stone character, since plan 164; plan 119 added the slot, and plan 239 D7 gave it to the avatar). That leaves 86 inside the Nucleo count. The Stream Manager adds seven slots in its own registry, `components/stream-manager/activity-icons.tsx`: six activity slots (plan 055: follow, supporter, gift, tip, raid, announcement) and the stats bar's viewer count (plan 057). The shared registry ships in every window's eager chunk, and these are only drawn in the Stream Manager. They count toward the same ceiling. Four slots share a glyph
 (`StudioIcon`/`CameraIcon`, `SourcesIcon`/`DisplayIcon`, `AssetsIcon`/`ImageIcon`,
 `OutputIcon`/`RecordIcon`) — those are exactly the places the audit below
 expects to diverge.
+
+Plan 250 (2026-11-19) added `NotificationsIcon` (Bell) for the bell that
+opens Notifications, at the right end of the status bar: a meaning no slot
+had. It is one more glyph inside the Nucleo count. Like `AvatarPageIcon` it
+is its own module (`components/notifications-icon.tsx`) drawing two weights
+through `IconBase`, because the status bar is in every window's first paint.
 
 Plan 239 (2026-11-15) added `AvatarPageIcon` (Smiley) for the Avatar page's
 row in the sidebar: a face, the character on the stream, a meaning no slot
@@ -188,7 +194,7 @@ like-for-like glyph.
 
 ### Export shopping list
 
-The 97 slots are the authoritative list: read them straight out of
+The 98 slots are the authoritative list: read them straight out of
 `components/icons.tsx`, where each is grouped and documented. Export one SVG
 per slot name in kebab-case (`sources-icon.svg` → `SourcesIcon`), plus solid
 variants for the filled slots noted above.

@@ -176,9 +176,11 @@ the support bundle.
 
 ## Toasts
 
-A toast is for news the interface does not already show (the design
-skill's "Toast discipline"). Never a success toast for a scene, layout or
-source change: the stage is the confirmation.
+A toast is the answer to something the streamer just did, for news the
+interface does not already show (the design skill's "Toast discipline").
+Never a success toast for a scene, layout or source change: the stage is
+the confirmation. What Videorc notices on its own is a notification
+("Notifications" below), and its words follow the same shape.
 
 - Shape:
   - the title is the outcome, with no period: "MP4 ready", "Couldn't
@@ -196,12 +198,42 @@ source change: the stage is the confirmation.
 - Duration:
   - about 4 s for a one-line toast;
   - 8 s or more with a description;
-  - persistent with an action, or while it mirrors a state still true:
-    "Streaming to {X} stopped" stays until "{X} is back" replaces it.
+  - persistent with an action. Never pinned to mirror a state: a state
+    that is still true is an open notification, and "{X} is back" resolves
+    it.
 - One id per kind of toast, so a newer one replaces the older and the same
   news never stacks twice.
 - Never a refusal as an error. "Renaming takeovers is locked while you're recording
   or live" is a warning.
+
+## Notifications
+
+The list behind the bell (plan 250). One entry per subject, in the words a
+toast would use.
+
+- The title is the outcome with no period ("Your stream is choppy"); the
+  detail is whole sentences ("The other 2 destinations keep streaming.").
+- A recovery takes the entry over with its own title and says how long the
+  problem lasted: "Your stream is smooth again" · "It was choppy for 38 s."
+  Without words of its own: "It lasted 38 s."
+- A repeat says so in the detail and never adds a row: "Twice.",
+  "3 times.". A problem that cleared and returned inside a minute: "Came
+  back once.", "Came back 3 times."
+- A session's open problems end with it: "Ended with the livestream.",
+  "Ended with the recording."
+- At most two buttons, the first one the way out: a fix by its verb
+  ("Unmute", "Retry"), or a door as "Open {page or section}" ("Open Audio",
+  "Open Destinations"), quoted as the page reads.
+- The fixed words: "Notifications", "Now", "Earlier", "Clear all", "Clear
+  {title}" (the button's name), "No notifications" · "Problems and finished
+  work show up here.", "Quiet while recording or live." and "Quiet is off
+  while recording or live." (the list's footer), "Open notifications" (⌘K).
+- The setting reads "Quiet while recording or live" · "Only urgent problems
+  pop up. Everything else waits in Notifications."
+- The bell's name for a screen reader: "Notifications, 2 unread, 1 urgent".
+- Times: an open problem shows how long it has been open ("0:40", then
+  "2 min"); everything else how long ago it happened ("now", "14 min",
+  "3 h").
 
 ## Errors
 

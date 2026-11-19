@@ -11,6 +11,10 @@ use std::sync::Mutex as StdMutex;
 use std::time::{Duration, Instant};
 
 pub(crate) const HOST_OVERLOADED_CODE: &str = "host-overloaded";
+/// Plan 250 S9: the overload ended. Until this code existed an overload was
+/// reported once per session and never taken back, so the notice outlived
+/// the problem by the rest of the stream.
+pub(crate) const HOST_OVERLOAD_CLEARED_CODE: &str = "host-overload-cleared";
 
 /// Runnable work per logical core above which the host is overloaded. A load
 /// of 1.0 per core is a full machine; at 2.0 every thread waits as long as it
@@ -19,6 +23,13 @@ const HOST_OVERLOAD_LOAD_PER_CORE: f64 = 2.0;
 /// Consecutive overloaded samples before the streamer is told. The 1-minute
 /// load average is already smoothed, so this only filters a single spike.
 const HOST_OVERLOAD_SAMPLE_THRESHOLD: u32 = 2;
+/// Load per core under which an overload may end. It sits below the line
+/// that opens one, so a load hovering at 2.0 is one episode, not many.
+const HOST_OVERLOAD_CLEAR_LOAD_PER_CORE: f64 = 1.5;
+/// How long the load must stay under the clear line before the overload is
+/// over. The 1-minute load average already lags, so this only asks that it
+/// keeps falling.
+const HOST_OVERLOAD_CLEAR_AFTER: Duration = Duration::from_secs(30);
 /// The load average moves slowly; sampling it more often buys nothing.
 const HOST_PRESSURE_SAMPLE_INTERVAL: Duration = Duration::from_secs(5);
 
@@ -38,6 +49,11 @@ impl HostPressureSample {
 
     pub(crate) fn is_overloaded(self) -> bool {
         self.load_per_core() >= HOST_OVERLOAD_LOAD_PER_CORE
+    }
+
+    /// Calm enough for an overload to end (not merely "not overloaded").
+    fn is_calm(self) -> bool {
+        self.load_per_core() < HOST_OVERLOAD_CLEAR_LOAD_PER_CORE
     }
 
     /// `host_load=71.9/10 swap_used_mb=17579`, for diagnostics lines.
@@ -61,6 +77,41 @@ impl HostPressureSample {
             "This computer is overloaded: a load of {:.0} on {} cores{swap}. Other apps are taking the time the stream and recording need, so they may freeze or stutter. Close heavy apps or pause background work.",
             self.load_average, self.logical_cores
         )
+    }
+
+    fn cleared_message(self) -> String {
+        format!(
+            "This computer is no longer overloaded: a load of {:.0} on {} cores.",
+            self.load_average, self.logical_cores
+        )
+    }
+}
+
+/// What a session should be told about the host: an overload began, or the
+/// one it was told about ended.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum HostOverloadNotice {
+    Overloaded(String),
+    Cleared(String),
+}
+
+impl HostOverloadNotice {
+    pub(crate) fn code(&self) -> &'static str {
+        match self {
+            Self::Overloaded(_) => HOST_OVERLOADED_CODE,
+            Self::Cleared(_) => HOST_OVERLOAD_CLEARED_CODE,
+        }
+    }
+
+    pub(crate) fn message(&self) -> &str {
+        match self {
+            Self::Overloaded(message) | Self::Cleared(message) => message,
+        }
+    }
+
+    /// An overload is a warning; its end is plain news.
+    pub(crate) fn is_overloaded(&self) -> bool {
+        matches!(self, Self::Overloaded(_))
     }
 }
 
@@ -120,41 +171,63 @@ pub(crate) fn sample_host_pressure() -> Option<HostPressureSample> {
 struct HostOverloadWatch {
     session_id: String,
     overloaded_streak: u32,
+    /// The session was told the host is overloaded and not yet that it ended.
     fired: bool,
+    /// Since when the load has stayed under the clear line, while `fired`.
+    calm_since: Option<Instant>,
     last_sampled_at: Option<Instant>,
 }
 
-/// Feed one host sample for a session; returns the notice text exactly once
-/// per session, when the overload has held for the sample threshold.
+/// Feed one host sample for a session. Returns the notice to publish: the
+/// overload once it has held for the sample threshold, and its end once the
+/// load has stayed under the clear line for 30 s. One pair per episode; a
+/// session may see several episodes.
 fn host_overload_watch_update(
     watch: &mut HostOverloadWatch,
     session_id: &str,
     sample: HostPressureSample,
-) -> Option<String> {
+    now: Instant,
+) -> Option<HostOverloadNotice> {
     if watch.session_id != session_id {
         *watch = HostOverloadWatch {
             session_id: session_id.to_string(),
             ..HostOverloadWatch::default()
         };
     }
+    if watch.fired {
+        if !sample.is_calm() {
+            // Still overloaded, or between the two lines: the episode goes on.
+            watch.calm_since = None;
+            return None;
+        }
+        let calm_since = *watch.calm_since.get_or_insert(now);
+        if now.duration_since(calm_since) < HOST_OVERLOAD_CLEAR_AFTER {
+            return None;
+        }
+        watch.fired = false;
+        watch.calm_since = None;
+        watch.overloaded_streak = 0;
+        return Some(HostOverloadNotice::Cleared(sample.cleared_message()));
+    }
     if !sample.is_overloaded() {
         watch.overloaded_streak = 0;
         return None;
     }
     watch.overloaded_streak = watch.overloaded_streak.saturating_add(1);
-    if watch.fired || watch.overloaded_streak < HOST_OVERLOAD_SAMPLE_THRESHOLD {
+    if watch.overloaded_streak < HOST_OVERLOAD_SAMPLE_THRESHOLD {
         return None;
     }
     watch.fired = true;
-    Some(sample.overloaded_message())
+    watch.calm_since = None;
+    Some(HostOverloadNotice::Overloaded(sample.overloaded_message()))
 }
 
 static HOST_OVERLOAD_WATCH: StdMutex<Option<HostOverloadWatch>> = StdMutex::new(None);
 
 /// Called from a live session's diagnostics cadence. Rate-limits its own
-/// sampling and returns the overload notice to publish, at most once per
-/// session.
-pub(crate) fn poll_host_overload_notice(session_id: &str) -> Option<String> {
+/// sampling and returns the notice to publish: an overload when it begins,
+/// and its end.
+pub(crate) fn poll_host_overload_notice(session_id: &str) -> Option<HostOverloadNotice> {
     let mut guard = HOST_OVERLOAD_WATCH
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -168,7 +241,7 @@ pub(crate) fn poll_host_overload_notice(session_id: &str) -> Option<String> {
         return None;
     }
     let sample = sample_host_pressure()?;
-    let notice = host_overload_watch_update(watch, session_id, sample);
+    let notice = host_overload_watch_update(watch, session_id, sample, now);
     watch.last_sampled_at = Some(now);
     notice
 }
@@ -241,29 +314,132 @@ mod tests {
         assert!(sample(3.0, 0, None).is_overloaded());
     }
 
+    fn overloaded_text(notice: Option<HostOverloadNotice>) -> String {
+        match notice {
+            Some(HostOverloadNotice::Overloaded(message)) => message,
+            other => panic!("expected an overload notice, got {other:?}"),
+        }
+    }
+
     #[test]
-    fn overload_notice_fires_once_per_session_after_it_holds() {
+    fn overload_notice_fires_once_per_episode_after_it_holds() {
         let mut watch = HostOverloadWatch::default();
+        let now = Instant::now();
         let incident = sample(71.9, 10, Some(17_579));
-        assert_eq!(host_overload_watch_update(&mut watch, "s1", incident), None);
-        // One calm sample resets the streak.
         assert_eq!(
-            host_overload_watch_update(&mut watch, "s1", sample(4.0, 10, None)),
+            host_overload_watch_update(&mut watch, "s1", incident, now),
             None
         );
-        assert_eq!(host_overload_watch_update(&mut watch, "s1", incident), None);
-        let message = host_overload_watch_update(&mut watch, "s1", incident)
-            .expect("a sustained overload is reported");
+        // One calm sample resets the streak.
+        assert_eq!(
+            host_overload_watch_update(&mut watch, "s1", sample(4.0, 10, None), now),
+            None
+        );
+        assert_eq!(
+            host_overload_watch_update(&mut watch, "s1", incident, now),
+            None
+        );
+        let message = overloaded_text(host_overload_watch_update(&mut watch, "s1", incident, now));
         assert!(message.contains("a load of 72 on 10 cores"));
         assert!(message.contains("17.2 GB of swap"));
         assert_eq!(
-            host_overload_watch_update(&mut watch, "s1", incident),
+            host_overload_watch_update(&mut watch, "s1", incident, now),
             None,
-            "one notice per session"
+            "one notice while the overload lasts"
         );
         // A new session is told again.
-        assert_eq!(host_overload_watch_update(&mut watch, "s2", incident), None);
-        assert!(host_overload_watch_update(&mut watch, "s2", incident).is_some());
+        assert_eq!(
+            host_overload_watch_update(&mut watch, "s2", incident, now),
+            None
+        );
+        assert!(host_overload_watch_update(&mut watch, "s2", incident, now).is_some());
+    }
+
+    /// Plan 250 S9: open, clear, open again.
+    #[test]
+    fn an_overload_clears_after_thirty_calm_seconds_and_can_open_again() {
+        let mut watch = HostOverloadWatch::default();
+        let start = Instant::now();
+        let at = |seconds: u64| start + Duration::from_secs(seconds);
+        let overloaded = sample(40.0, 10, None);
+        let calm = sample(9.0, 10, None);
+        // Between the two lines: neither a new overload nor calm.
+        let between = sample(17.0, 10, None);
+
+        host_overload_watch_update(&mut watch, "s1", overloaded, at(0));
+        overloaded_text(host_overload_watch_update(
+            &mut watch,
+            "s1",
+            overloaded,
+            at(5),
+        ));
+
+        // Calm has to hold for 30 s.
+        assert_eq!(
+            host_overload_watch_update(&mut watch, "s1", calm, at(10)),
+            None
+        );
+        assert_eq!(
+            host_overload_watch_update(&mut watch, "s1", calm, at(35)),
+            None
+        );
+        // A load back between the lines starts the wait over.
+        assert_eq!(
+            host_overload_watch_update(&mut watch, "s1", between, at(38)),
+            None
+        );
+        assert_eq!(
+            host_overload_watch_update(&mut watch, "s1", calm, at(40)),
+            None
+        );
+        assert_eq!(
+            host_overload_watch_update(&mut watch, "s1", calm, at(69)),
+            None
+        );
+        let cleared = host_overload_watch_update(&mut watch, "s1", calm, at(70))
+            .expect("thirty calm seconds end the overload");
+        assert_eq!(cleared.code(), HOST_OVERLOAD_CLEARED_CODE);
+        assert!(!cleared.is_overloaded());
+        assert_eq!(
+            cleared.message(),
+            "This computer is no longer overloaded: a load of 9 on 10 cores."
+        );
+        // Calm stays quiet once it has been said.
+        assert_eq!(
+            host_overload_watch_update(&mut watch, "s1", calm, at(75)),
+            None
+        );
+
+        // A second episode in the same session is reported again, and it
+        // needs the same two samples.
+        assert_eq!(
+            host_overload_watch_update(&mut watch, "s1", overloaded, at(80)),
+            None
+        );
+        let again = host_overload_watch_update(&mut watch, "s1", overloaded, at(85))
+            .expect("a second overload is a second notice");
+        assert_eq!(again.code(), HOST_OVERLOADED_CODE);
+        assert!(again.is_overloaded());
+    }
+
+    #[test]
+    fn a_load_that_only_dips_between_the_lines_never_clears() {
+        let mut watch = HostOverloadWatch::default();
+        let start = Instant::now();
+        let overloaded = sample(40.0, 10, None);
+        host_overload_watch_update(&mut watch, "s1", overloaded, start);
+        host_overload_watch_update(&mut watch, "s1", overloaded, start);
+        for seconds in (5..300).step_by(5) {
+            assert_eq!(
+                host_overload_watch_update(
+                    &mut watch,
+                    "s1",
+                    sample(17.0, 10, None),
+                    start + Duration::from_secs(seconds)
+                ),
+                None
+            );
+        }
     }
 
     #[test]
