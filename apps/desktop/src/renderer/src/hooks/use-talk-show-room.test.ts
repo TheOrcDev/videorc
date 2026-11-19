@@ -60,6 +60,23 @@ describe('stageWith', () => {
     expect(after.layout).toBe('screen-people')
   })
 
+  it('keeps the other screen when one of two leaves the stage (plan 251)', () => {
+    const stage: CloudStage = {
+      layout: 'screen-people',
+      onStage: [HOST, 'g_ada'],
+      screen: 'g_ada',
+      screens: ['g_ada', HOST]
+    }
+    const after = stageWith(stage, 'g_ada', false, HOST)
+    expect(after.screen).toBe(HOST)
+    expect(after.screens).toBeUndefined()
+    const host = { identity: HOST } as CloudRoomParticipant
+    const gone = stageInRoom(stage, { guests: [], participants: [host] }, HOST)
+    expect(gone.onStage).toEqual([HOST])
+    expect(gone.screen).toBe(HOST)
+    expect(gone.screens).toBeUndefined()
+  })
+
   it('is inert outside a provider', async () => {
     expect(NO_TALK_SHOW.room.state).toBe('idle')
     expect(NO_TALK_SHOW.previewReplaced).toBe(false)

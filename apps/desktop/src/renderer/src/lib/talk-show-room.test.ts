@@ -1164,6 +1164,24 @@ describe('the stage message (plan 249 S6)', () => {
     })
     expect(read(stageMessage(['host:s']))).toEqual({ v: 1, onStage: ['host:s'], screen: null })
   })
+
+  // Plan 251: with two screens up, `screens` names both; `screen` stays the
+  // first, which is all an older guest page reads.
+  it('names both screens of a two-screens stage, and one for an older guest page', () => {
+    expect(read(stageMessage(['host:s', 'g_a'], ['g_a', 'host:s']))).toEqual({
+      v: 1,
+      onStage: ['host:s', 'g_a'],
+      screen: 'g_a',
+      screens: ['g_a', 'host:s']
+    })
+    // One on stage, one not: a plain one-screen message.
+    expect(read(stageMessage(['host:s'], ['g_a', 'host:s']))).toEqual({
+      v: 1,
+      onStage: ['host:s'],
+      screen: 'host:s'
+    })
+    expect(read(stageMessage(['host:s'], []))).toEqual({ v: 1, onStage: ['host:s'], screen: null })
+  })
 })
 
 describe('processed microphone room ownership', () => {

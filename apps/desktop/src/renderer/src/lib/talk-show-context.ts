@@ -62,6 +62,8 @@ export interface TalkShowContextValue {
   listDisplaySources: () => Promise<TalkShowDisplaySource[]>
   startScreenShare: (sourceId: string) => Promise<void>
   stopScreenShare: () => Promise<void>
+  /** Plan 251: put someone's shared screen on the program, or take it off. */
+  setProgramScreen: (identity: string, shown: boolean) => Promise<void>
   setGraphicsEnabled: (enabled: boolean) => Promise<void>
   setAvatarEnabled: (enabled: boolean) => Promise<void>
   /** Plan 249 S5 acceptance: the desktop's avatar motion reference, or null. */
@@ -106,6 +108,7 @@ export const NO_TALK_SHOW: TalkShowContextValue = {
   listDisplaySources: async () => [],
   startScreenShare: async () => {},
   stopScreenShare: async () => {},
+  setProgramScreen: async () => {},
   setMonitor: async () => {},
   setGraphicsEnabled: async () => {},
   setAvatarEnabled: async () => {},
