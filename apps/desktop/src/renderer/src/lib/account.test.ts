@@ -109,7 +109,6 @@ describe('videorc web links', () => {
       home: 'https://www.videorc.com',
       download: 'https://www.videorc.com/download',
       account: 'https://www.videorc.com/account',
-      cloudRecordings: 'https://www.videorc.com/account#cloud-recordings',
       login: 'https://www.videorc.com/login',
       desktopAuthorize: 'https://www.videorc.com/desktop/authorize/v2',
       premium: 'https://www.videorc.com/premium',
