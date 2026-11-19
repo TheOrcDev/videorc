@@ -117,7 +117,8 @@ describe('videorc web links', () => {
       terms: 'https://www.videorc.com/terms',
       billing: 'https://www.videorc.com/account/billing',
       changelogApi: 'https://www.videorc.com/api/changelog',
-      changelog: 'https://www.videorc.com/changelog'
+      changelog: 'https://www.videorc.com/changelog',
+      cloudRecordings: 'https://www.videorc.com/account#cloud-recordings'
     })
   })
 
