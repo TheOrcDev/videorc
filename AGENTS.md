@@ -55,7 +55,7 @@ CI covers Rust advisory audit, Rust fmt, clippy, Rust tests, JS production advis
 - App smokes queue behind one host lock per machine, held across app relaunches.
 - Backend prebuilds and `pnpm cargo:slot …` share two build slots; use the wrapper for heavy cargo work.
 - App launches wait for host memory pressure to clear before starting.
-- While Videorc streams live on this machine (its FFmpeg pushing FLV to a non-loopback ingest), app smokes, build slots, `pnpm cargo:slot` and `pnpm package:backend:macos` wait until the stream ends; a smoke's loopback sink never counts. Run other heavy local work through those wrappers. `VIDEORC_BUILD_WHILE_LIVE=1` skips the wait.
+- While Videorc streams live on this machine (its FFmpeg pushing FLV to a non-loopback ingest, or the installed app's `on-air.json` in its data folder naming a live pid, which also covers cloud talk shows), app smokes, build slots, `pnpm cargo:slot` and `pnpm package:backend:macos` wait until the stream ends; a smoke's loopback sink and smoke apps' isolated profiles never count. A cloud show runs no local FFmpeg, so before the marker these waits never saw one (2026-11-19). Run other heavy local work through those wrappers. `VIDEORC_BUILD_WHILE_LIVE=1` skips the wait.
 - Windows has no host lock or build slots (off by design); see `docs/windows-dev-loop.md`.
 - `VIDEORC_SMOKE_LOCK_PORT` selects the lock port; `VIDEORC_SMOKE_BUILD_SLOTS` sets capacity (0 disables).
 - `VIDEORC_SMOKE_HOST_LOCK=0` and `VIDEORC_SMOKE_MEMORY_CHECK=0` disable their respective checks.

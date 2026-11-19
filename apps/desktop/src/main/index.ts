@@ -533,6 +533,7 @@ import {
 import { installContextMenu } from './context-menu'
 import { installAppMenu } from './app-menu'
 import { LiveExitGuard, type AppExitKind } from './exit-guard'
+import { OnAirMarker, onAirMarkerPath } from './on-air-marker'
 import {
   cloudRoomActivityFromCloudStatus,
   guardCaptureState,
@@ -997,6 +998,7 @@ function setShortcutRecorderArmed(armed: boolean): ShortcutRecorderArmResult {
 }
 
 app.on('will-quit', () => {
+  onAirMarker.update(false)
   unregisterGlobalShortcutsWhenReady(globalShortcut, () => app.isReady())
 })
 let nativePreviewSurfaceWindow: ProofSurfaceHost | null = null
@@ -1552,6 +1554,12 @@ app.on('child-process-gone', (_event, details) => {
 // userData/logs/backend.log so packaged Windows builds keep logs at all.
 const backendCrashLogFile = backendCrashLogPath(app.getPath('userData'))
 let backendCrashRecords = readBackendCrashLog(backendCrashLogFile)
+// userData/on-air.json while a livestream, local or cloud, is on air: builds
+// and app smokes on this Mac wait while it names a live pid (on-air-marker.ts).
+const onAirMarker = new OnAirMarker(onAirMarkerPath(app.getPath('userData')), {
+  write: (path, text) => writeFileSync(path, text),
+  remove: (path) => rmSync(path, { force: true })
+})
 const backendLogFile = new RotatingLogFile({
   path: backendLogFilePath(app.getPath('userData')),
   // Defaults 2 MB x 2; VIDEORC_BACKEND_LOG_MAX_BYTES / _FILES raise it for
@@ -11820,6 +11828,7 @@ function connectBackendEventSocket(connection: BackendConnection): void {
         // Plan 243 R2 B-M1: an older backend has no cloud; the guard stays off.
         if (parsed.id === cloudStatusRequestId && parsed.ok === true) {
           liveExitGuard.observeCloudStatus(parsed.payload)
+          onAirMarker.update(liveExitGuard.livestreamOnAir)
           observeCloudRoomActivity(parsed.payload)
         }
         if (parsed.id === sceneRequestId) {
@@ -11843,6 +11852,7 @@ function connectBackendEventSocket(connection: BackendConnection): void {
       }
       if (parsed.event === 'cloud.state') {
         liveExitGuard.observeCloudStatus(parsed.payload)
+        onAirMarker.update(liveExitGuard.livestreamOnAir)
         observeCloudRoomActivity(parsed.payload)
         return
       }
@@ -16386,6 +16396,7 @@ function updateMainCaptureState(payload: RecordingStatus): void {
   const nextState = captureStateAfterStatusPayload(payload)
   mainCaptureState = nextState
   liveExitGuard.observeRecordingStatus(payload)
+  onAirMarker.update(liveExitGuard.livestreamOnAir)
   applyGuardedCaptureState()
 }
 
