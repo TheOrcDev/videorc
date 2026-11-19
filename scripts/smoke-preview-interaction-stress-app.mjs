@@ -1330,6 +1330,11 @@ async function waitForCgHost(windowOracle, smoke) {
   let consecutiveReadySamples = 0
   while (Date.now() < deadline) {
     const status = await smokeCommand(smoke, 'native-preview-surface-status')
+    // Docked, the layer's screen bounds must sit inside the main window.
+    const windowState =
+      status.nativePreviewHostWindow === 'main'
+        ? await smokeCommand(smoke, 'preview-window-state')
+        : null
     const latest = windowOracle.samples.at(-1)
     if (latest && latest.receivedAt !== lastReceivedAt) {
       lastReceivedAt = latest.receivedAt
@@ -1337,6 +1342,7 @@ async function waitForCgHost(windowOracle, smoke) {
         hostKind: status.nativePreviewHostKind,
         // Docked on macOS, the layer lives in the main window (plan 213 D).
         hostWindow: status.nativePreviewHostWindow ?? null,
+        expectedBounds: windowState?.contentBounds ?? null,
         expectedWindowPid: thresholds.expectedWindowPid,
         requirePixels: thresholds.requirePixelOracle
       })

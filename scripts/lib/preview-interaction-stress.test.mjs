@@ -658,7 +658,7 @@ describe('preview interaction stress contract', () => {
   it('finds a docked preview inside the main window, with no Preview window (plan 213 D)', () => {
     const main = mainWindow()
     const observation = {
-      expectedBounds: { x: 419, y: 300, width: 458, height: 258 },
+      expectedBounds: DOCKED_BOUNDS,
       hostKind: 'in-process',
       hostWindow: 'main',
       windows: [main],
@@ -669,7 +669,10 @@ describe('preview interaction stress contract', () => {
       expectedWindowPid: 10
     })
     assert.deepEqual(result.failures, [])
-    assert.deepEqual(findInProcessHostWindows([main], 10, 'main'), [main])
+    assert.deepEqual(findInProcessHostWindows([main], 10, 'main', DOCKED_BOUNDS), [main])
+    // Setup shows the bare app title.
+    const bare = { ...main, name: 'Videorc' }
+    assert.deepEqual(findInProcessHostWindows([bare], 10, 'main', DOCKED_BOUNDS), [bare])
     // The floating oracle still wants its Preview window: without the host
     // window the same sample has none.
     assert.deepEqual(findInProcessHostWindows([main], 10, null), [])
@@ -680,9 +683,22 @@ describe('preview interaction stress contract', () => {
     assert.equal(
       cgOraclePreviewReady(
         { windows: [main] },
-        { hostKind: 'in-process', hostWindow: 'main', expectedWindowPid: 10 }
+        {
+          hostKind: 'in-process',
+          hostWindow: 'main',
+          expectedBounds: DOCKED_BOUNDS,
+          expectedWindowPid: 10
+        }
       ),
       true
+    )
+    // Without the layer's bounds the docked host cannot be checked: not ready.
+    assert.equal(
+      cgOraclePreviewReady(
+        { windows: [main] },
+        { hostKind: 'in-process', hostWindow: 'main', expectedWindowPid: 10 }
+      ),
+      false
     )
   })
 
@@ -691,7 +707,7 @@ describe('preview interaction stress contract', () => {
     const result = analyzeCgWindowObservations(
       [
         {
-          expectedBounds: { x: 419, y: 300, width: 458, height: 258 },
+          expectedBounds: DOCKED_BOUNDS,
           hostKind: 'in-process',
           hostWindow: 'main',
           windows,
@@ -702,8 +718,54 @@ describe('preview interaction stress contract', () => {
     )
     assert.match(result.failures.join('\n'), /did not resolve to exactly one Electron/)
     assert.equal(
-      cgOraclePreviewReady({ windows }, { hostKind: 'in-process', hostWindow: 'main' }),
+      cgOraclePreviewReady(
+        { windows },
+        { hostKind: 'in-process', hostWindow: 'main', expectedBounds: DOCKED_BOUNDS }
+      ),
       false
+    )
+  })
+
+  it('never takes a Preview window as the sole docked host', () => {
+    const preview = electronWindow()
+    assert.deepEqual(findInProcessHostWindows([preview], 10, 'main', DOCKED_BOUNDS), [])
+    const result = analyzeCgWindowObservations(
+      [
+        {
+          expectedBounds: DOCKED_BOUNDS,
+          hostKind: 'in-process',
+          hostWindow: 'main',
+          windows: [preview],
+          processes: [{ pid: 10, ppid: 1, command: 'Electron' }]
+        }
+      ],
+      { expectedHostKind: 'in-process', expectedWindowPid: 10 }
+    )
+    assert.match(result.failures.join('\n'), /did not resolve to exactly one Electron/)
+    assert.equal(
+      cgOraclePreviewReady(
+        { windows: [preview] },
+        {
+          hostKind: 'in-process',
+          hostWindow: 'main',
+          expectedBounds: DOCKED_BOUNDS,
+          expectedWindowPid: 10
+        }
+      ),
+      false
+    )
+  })
+
+  it('takes only the main window by title, holding the docked layer', () => {
+    // A larger owned window that is not the main one (the Stream Manager).
+    const manager = { ...mainWindow(), id: 102, name: 'Stream Manager', width: 2000, height: 1400 }
+    const main = mainWindow()
+    assert.deepEqual(findInProcessHostWindows([manager, main], 10, 'main', DOCKED_BOUNDS), [main])
+    assert.deepEqual(findInProcessHostWindows([manager], 10, 'main', DOCKED_BOUNDS), [])
+    // The main window found, but the layer sits outside it: no host.
+    assert.deepEqual(
+      findInProcessHostWindows([main], 10, 'main', { x: 1400, y: 300, width: 458, height: 258 }),
+      []
     )
   })
 
@@ -712,7 +774,7 @@ describe('preview interaction stress contract', () => {
       { ...mainWindow(), pid: 99 },
       { ...mainWindow(), name: 'Videorc Native Preview Surface', width: 2000, height: 2000 }
     ]
-    assert.deepEqual(findInProcessHostWindows(windows, 10, 'main'), [])
+    assert.deepEqual(findInProcessHostWindows(windows, 10, 'main', DOCKED_BOUNDS), [])
   })
 
   it('scopes the preview oracle to the launched Electron process', () => {
@@ -963,14 +1025,17 @@ function electronWindow() {
   }
 }
 
-/** The main window: its title follows the open page, so it is not 'Videorc'. */
+/** The docked layer's screen bounds, inside mainWindow(). */
+const DOCKED_BOUNDS = Object.freeze({ x: 419, y: 300, width: 458, height: 258 })
+
+/** The main window: its title follows the open page ('<Page> – Videorc'). */
 function mainWindow() {
   return {
     order: 3,
     id: 101,
     pid: 10,
     owner: 'Electron',
-    name: 'Studio',
+    name: 'Studio – Videorc',
     layer: 0,
     alpha: 1,
     x: 100,

@@ -193,12 +193,21 @@ function assertLayoutLoop(layout, selected, surface, scene, previewWindow, captu
 // 1180x780 window the docked slot starts below the fold and the Preview hides
 // as scrolled-away, which is right for a user. Scroll the canvas into view
 // (a vertical preset reopens the tab through Studio, back at the top) and give
-// the dock a moment to show it before asserting. A floating Preview is
-// unaffected by the scroll.
+// the dock a moment to show it before asserting. A docked Preview with no
+// canvas slot on the page is a failure, never a silent skip. A floating
+// Preview is unaffected by the scroll.
 async function revealDockedPreview(smoke) {
-  await smokeCommand(smoke, 'eval-js', {
-    code: `document.querySelector('[data-videorc-dock-slot="scene"]')?.scrollIntoView({ block: 'center', behavior: 'instant' }); return null;`
-  })
+  const before = await smokeCommand(smoke, 'preview-window-state')
+  if (before?.mode === 'docked') {
+    const revealed = await smokeCommand(smoke, 'eval-js', {
+      code: `const slot = document.querySelector('[data-videorc-dock-slot="scene"]'); if (!slot) return false; slot.scrollIntoView({ block: 'center', behavior: 'instant' }); return true;`
+    })
+    if (revealed?.result !== true) {
+      throw new Error(
+        `The Layout tab has no docked canvas slot ([data-videorc-dock-slot="scene"]) for the docked Preview: ${JSON.stringify(before)}`
+      )
+    }
+  }
   const deadline = Date.now() + 10000
   let state = await smokeCommand(smoke, 'preview-window-state')
   while (!(state?.open && state.visible) && Date.now() < deadline) {
