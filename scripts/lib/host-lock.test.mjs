@@ -13,7 +13,10 @@ import {
   parseAvailableMemory,
   waitForHostMemory,
   liveStreamPids,
-  waitWhileVideorcLive
+  waitWhileVideorcLive,
+  installedAppOnAirMarkerPath,
+  onAirMarkerPid,
+  readOnAirMarkerPids
 } from './host-lock.mjs'
 import { prepareSmokeLaunch } from './app-launcher.mjs'
 
@@ -283,7 +286,7 @@ test('heavy work waits while live, says why once per notice window, and has an o
   })
   assert.equal(reads, 4)
   assert.equal(lines.length, 1)
-  assert.match(lines[0], /Videorc is live on this machine \(ffmpeg pid 4242\)/)
+  assert.match(lines[0], /Videorc is live on this machine \(pid 4242\)/)
   assert.match(lines[0], /VIDEORC_BUILD_WHILE_LIVE=1/)
   const never = () => {
     throw new Error('must not scan')
@@ -297,6 +300,46 @@ test('heavy work waits while live, says why once per notice window, and has an o
   }
   // A scan that fails never holds work back.
   await waitWhileVideorcLive({ env: {}, platform: 'darwin', read: never })
+})
+// 2026-11-19: a cloud talk show has no local ffmpeg push, so the installed app's on-air
+// marker is what makes heavy work wait through one.
+test('the installed app on-air marker counts while its pid lives', async () => {
+  const { mkdtempSync, writeFileSync, rmSync } = await import('node:fs')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+
+  assert.equal(
+    installedAppOnAirMarkerPath({ env: {}, platform: 'darwin', home: '/Users/me' }),
+    '/Users/me/Library/Application Support/Videorc/on-air.json'
+  )
+  // Smoke apps run on isolated profiles; only the installed app's folder is read.
+  assert.equal(installedAppOnAirMarkerPath({ env: {}, platform: 'linux', home: '/h' }), null)
+  assert.equal(
+    installedAppOnAirMarkerPath({
+      env: { VIDEORC_ON_AIR_MARKER: '/x/on-air.json' },
+      platform: 'linux'
+    }),
+    '/x/on-air.json'
+  )
+
+  const alive = (pid) => pid === 4242
+  assert.equal(onAirMarkerPid('{"v":1,"onAir":true,"pid":4242}', alive), 4242)
+  // A crashed app's marker, an off-air marker and junk hold nothing back.
+  assert.equal(onAirMarkerPid('{"v":1,"onAir":true,"pid":5151}', alive), null)
+  assert.equal(onAirMarkerPid('{"v":1,"onAir":false,"pid":4242}', alive), null)
+  assert.equal(onAirMarkerPid('{"v":1,"onAir":true}', alive), null)
+  assert.equal(onAirMarkerPid('not json', alive), null)
+
+  const dir = mkdtempSync(join(tmpdir(), 'videorc-on-air-'))
+  const marker = join(dir, 'on-air.json')
+  try {
+    const env = { VIDEORC_ON_AIR_MARKER: marker }
+    assert.deepEqual(readOnAirMarkerPids({ env }), [])
+    writeFileSync(marker, JSON.stringify({ v: 1, onAir: true, pid: process.pid }))
+    assert.deepEqual(readOnAirMarkerPids({ env }), [process.pid])
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
 })
 test('zero knobs disable each feature', async () => {
   await (

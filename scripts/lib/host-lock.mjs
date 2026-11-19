@@ -271,6 +271,49 @@ export function liveStreamPids(psOutput) {
   }
   return pids
 }
+// 2026-11-19: a cloud talk show has no local ffmpeg push (the room publishes over WebRTC and
+// the runner encodes in the cloud), so the scan above never saw one, and agent builds and
+// tests ran through the owner's show at a 15-minute load of 38 on 10 cores. The installed
+// app also writes `on-air.json` in its data folder while a livestream, local or cloud, is on
+// air (apps/desktop/src/main/on-air-marker.ts). Only the installed app's folder counts:
+// smoke apps run on isolated profiles, so smokes still never wait on each other. A marker
+// whose pid is gone (a crash) holds nothing back.
+export function installedAppOnAirMarkerPath({
+  env = process.env,
+  platform = process.platform,
+  home = os.homedir()
+} = {}) {
+  if (env.VIDEORC_ON_AIR_MARKER) return env.VIDEORC_ON_AIR_MARKER
+  if (platform === 'darwin')
+    return join(home, 'Library', 'Application Support', 'Videorc', 'on-air.json')
+  return null
+}
+export function onAirMarkerPid(text, isLive = live) {
+  let marker
+  try {
+    marker = JSON.parse(text)
+  } catch {
+    return null
+  }
+  const pid = marker?.onAir === true ? Number(marker.pid) : Number.NaN
+  return Number.isInteger(pid) && pid > 0 && isLive(pid) ? pid : null
+}
+export function readOnAirMarkerPids(options = {}) {
+  const path = installedAppOnAirMarkerPath(options)
+  if (!path) return []
+  let text
+  try {
+    text = readFileSync(path, 'utf8')
+  } catch {
+    return []
+  }
+  const pid = onAirMarkerPid(text)
+  return pid === null ? [] : [pid]
+}
+/** Every Videorc pid that is live on this machine: a local push, or the app's marker. */
+export function readVideorcLivePids() {
+  return [...new Set([...readLiveStreamPids(), ...readOnAirMarkerPids()])]
+}
 export function readLiveStreamPids() {
   // `-A`, never `-e`: on macOS `-e` prints every process environment.
   return liveStreamPids(
@@ -285,7 +328,7 @@ export async function waitWhileVideorcLive({
   log = console.error,
   env = process.env,
   platform = process.platform,
-  read = readLiveStreamPids,
+  read = readVideorcLivePids,
   pollMs = 30000,
   noticeMs = 300000
 } = {}) {
@@ -301,7 +344,7 @@ export async function waitWhileVideorcLive({
     if (pids.length === 0) return
     if (noticedAt === undefined || Date.now() - noticedAt >= noticeMs) {
       log(
-        `[host:live] Videorc is live on this machine (ffmpeg pid ${pids.join(', ')}); heavy builds and app smokes wait until the stream ends so it keeps the CPU. VIDEORC_BUILD_WHILE_LIVE=1 skips the wait.`
+        `[host:live] Videorc is live on this machine (pid ${pids.join(', ')}); heavy builds and app smokes wait until the stream ends so it keeps the CPU. VIDEORC_BUILD_WHILE_LIVE=1 skips the wait.`
       )
       noticedAt = Date.now()
     }
