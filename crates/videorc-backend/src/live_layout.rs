@@ -171,6 +171,20 @@ fn transaction_source_needs(
     }
 }
 
+/// Plan 231 D18 (review fix): a camera change keeps the screen demand of the
+/// scene on stream. A scene that shows no screen keeps its screen capture
+/// running (`retain`), and swapping the camera must not retire it. Only while
+/// the capture selection is the one that demand was made for.
+async fn camera_change_keeps_screen(state: &AppState, sources: &SourceSelection) -> bool {
+    let intents = state.layout_intents.lock().await;
+    intents.latest_needs_screen
+        && intents.latest_sources.as_ref().is_some_and(|previous| {
+            previous.screen_id == sources.screen_id
+                && previous.window_id == sources.window_id
+                && previous.camera_id != sources.camera_id
+        })
+}
+
 /// Which real sources are currently delivering fresh frames.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct SourceLiveness {
@@ -699,6 +713,7 @@ pub async fn apply_source_device_switch_live(
             message: None,
         });
     }
+    let retain = camera_change_keeps_screen(state, &params.sources).await;
     apply_scene_transaction(
         state,
         params,
@@ -706,7 +721,10 @@ pub async fn apply_source_device_switch_live(
         None,
         "source device switch",
         None,
-        ScreenDemand::default(),
+        ScreenDemand {
+            retain,
+            vertical_leg: false,
+        },
     )
     .await
 }
@@ -830,10 +848,17 @@ pub(crate) async fn switch_session_video_source(
         protected_overlay_window_ids: request.protected_overlay_window_ids.clone(),
         transition_ms: None,
     };
+    // Plan 231 D18: a camera change never retires the screen the scene on
+    // stream keeps running; it only prevents a stop, never starts one.
+    let keeps_screen = request.kind == SourceKind::Camera
+        && camera_change_keeps_screen(state, &target_sources).await;
     let intent_id = begin_layout_intent_owned(
         state,
         None,
-        preparation_needs,
+        SceneSourceNeeds {
+            screen: preparation_needs.screen || keeps_screen,
+            ..preparation_needs
+        },
         Some(request),
         Some(&target_sources),
     )
@@ -1027,14 +1052,18 @@ pub(crate) async fn switch_session_video_source(
         state.emit_event("compositor.status", status);
         state.emit_event("session.sources.changed", snapshot);
         // Retirement consults union needs for both output scenes.
+        let retirement_needs = SceneSourceNeeds {
+            screen: needs.screen || keeps_screen,
+            ..needs
+        };
         {
             let mut intents = state.layout_intents.lock().await;
             if intents.latest_intent_id == intent_id {
-                intents.latest_needs_camera = needs.camera;
-                intents.latest_needs_screen = needs.screen;
+                intents.latest_needs_camera = retirement_needs.camera;
+                intents.latest_needs_screen = retirement_needs.screen;
             }
         }
-        retire_unused_sources_after_commit(state, intent_id, needs).await;
+        retire_unused_sources_after_commit(state, intent_id, retirement_needs).await;
         Ok(())
     })
     .await;
@@ -3207,6 +3236,48 @@ mod tests {
             );
             crate::preview_camera::stop_preview_camera(&state).await;
         }
+    }
+
+    /// Review fix (plan 231 D18): a scene that shows no screen keeps the
+    /// capture running; changing the camera must not retire it. A capture
+    /// change is not a camera change and keeps the old retirement.
+    #[tokio::test]
+    async fn an_idle_camera_change_keeps_the_screen_a_scene_retains() {
+        let (state, params) = retain_screen_fixture(false, true).await;
+        let before = crate::preview_screen::preview_screen_frame_source(&state)
+            .await
+            .unwrap();
+        apply_retain_screen_fixture(&state, params.clone(), false, 1, Some(true)).await;
+        let mut next = params.clone();
+        next.sources.camera_id = Some("camera:avfoundation-native:1".into());
+        let video = next.video.clone().unwrap();
+        crate::preview_camera::test_install_live_camera_for_layout(
+            &state,
+            "camera:avfoundation-native:1",
+            &next.layout,
+            &video,
+        )
+        .await;
+        assert!(camera_change_keeps_screen(&state, &next.sources).await);
+        let applied = apply_source_device_switch_live(&state, next).await.unwrap();
+        assert!(applied.applied);
+        assert!(state.layout_intents.lock().await.latest_needs_screen);
+        assert_eq!(
+            crate::preview_screen::preview_screen_frame_source(&state)
+                .await
+                .unwrap()
+                .generation(),
+            before.generation(),
+            "the kept capture is the same capture, never restarted"
+        );
+        // The same camera, or another screen, is not a camera change.
+        let mut same = params.clone();
+        same.sources.camera_id = Some("camera:avfoundation-native:1".into());
+        assert!(!camera_change_keeps_screen(&state, &same.sources).await);
+        let mut other_screen = params;
+        other_screen.sources.screen_id = Some("screen:screencapturekit:2".into());
+        assert!(!camera_change_keeps_screen(&state, &other_screen.sources).await);
+        crate::preview_camera::stop_preview_camera(&state).await;
     }
 
     #[tokio::test]

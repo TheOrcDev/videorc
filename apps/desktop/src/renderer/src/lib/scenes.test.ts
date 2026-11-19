@@ -22,6 +22,8 @@ import {
 import { canonicalJson } from './scene-visibility-identity'
 import { defaultScenes, horizontalTwin, migrateToScenes } from './scenes-migration'
 import { sceneFromSaved, savedSceneView } from './scene-studio'
+import { normalizeAccelerator } from '../../../shared/accelerator'
+import { globalShortcutEntries } from '../../../shared/global-shortcuts'
 import {
   canDeleteScene,
   firstSceneWithLayout,
@@ -313,6 +315,32 @@ describe('migrateToScenes on the fixtures (plan 231 D15)', () => {
         'default-side-by-side': 'Control+Alt+7'
       }
     })
+  })
+
+  // Review fix: on macOS a moved layout key can be a position key's default
+  // (⌃⌥N, D5). Registering both made the position key fail. The scene at
+  // that position drops its own copy; a key on any other scene stays, and
+  // the position's default is released, so no two keys are the same.
+  it('built-in user on macOS: no moved key collides with a position key', () => {
+    const { v1, working, config, shortcuts } = inputs(fixture('builtin-user-layout-keys'))
+    const mac = migrateToScenes(v1, working, config, shortcuts, NOW, 'darwin')
+    expect(mac.globalShortcuts.scenes).toEqual({ 'default-side-by-side': 'Control+Alt+7' })
+    expect(mac.globalShortcuts.sceneSlots).toEqual({ 7: '' })
+    const keys = globalShortcutEntries(mac.globalShortcuts, 'darwin')
+      .map(([, key]) => normalizeAccelerator(key, 'darwin'))
+      .filter(Boolean)
+    expect(new Set(keys).size).toBe(keys.length)
+    // Scene 1 and Scene 3 still answer to ⌃⌥1 and ⌃⌥3, by position.
+    expect(sceneAtPosition(mac.library.scenes, 1)!.id).toBe('default-screen-camera')
+    expect(sceneAtPosition(mac.library.scenes, 3)!.id).toBe('default-camera-only')
+    // Elsewhere the position keys carry Shift: nothing collides, nothing moves.
+    const windows = migrateToScenes(v1, working, config, shortcuts, NOW, 'win32')
+    expect(windows.globalShortcuts.scenes).toEqual({
+      'default-screen-camera': 'Control+Alt+1',
+      'default-camera-only': 'Control+Alt+3',
+      'default-side-by-side': 'Control+Alt+7'
+    })
+    expect(windows.globalShortcuts.sceneSlots).toBeUndefined()
   })
 
   it('vertical stream, follow on: Camera only and Screen only keep their twins', () => {

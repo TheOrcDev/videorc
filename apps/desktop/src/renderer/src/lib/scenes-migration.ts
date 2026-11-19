@@ -12,6 +12,7 @@ import {
   type SettingsState
 } from './capture'
 import { layoutPresetLabel } from './layout-labels'
+import { currentPlatform } from './platform'
 import {
   hydrateSceneLibrary,
   hydrateWorkingScene,
@@ -23,6 +24,12 @@ import {
   type WorkingScene
 } from './scene-presets'
 import { canonicalJson } from './scene-visibility-identity'
+import { normalizeAccelerator } from '../../../shared/accelerator'
+import {
+  SCENE_SLOT_ACTIONS,
+  sceneSlotAccelerator,
+  type SceneSlotPosition
+} from '../../../shared/global-shortcuts'
 import {
   displayShows,
   layoutShowsScreen,
@@ -100,7 +107,8 @@ export function migrateToScenes(
   workingScene: WorkingScene | null,
   captureConfig: SceneMigrationConfig,
   globalShortcuts: GlobalShortcutsConfig | undefined,
-  now: string = new Date().toISOString()
+  now: string = new Date().toISOString(),
+  platform: string | undefined = currentPlatform()
 ): { library: SceneLibrary; globalShortcuts: GlobalShortcutsConfig } {
   const saved = v1Library?.scenes ?? []
   const working =
@@ -323,10 +331,50 @@ export function migrateToScenes(
   }
 
   const { layouts: _layouts, ...shortcuts } = globalShortcuts ?? {}
+  const sceneSlots = settleSlotKeys(scenes, customKeys, shortcuts, platform)
   return {
     library: { version: 2, scenes, onStreamId: onStream.id },
-    globalShortcuts: { ...shortcuts, scenes: customKeys }
+    globalShortcuts: {
+      ...shortcuts,
+      scenes: customKeys,
+      ...(sceneSlots ? { sceneSlots } : {})
+    }
   }
+}
+
+/**
+ * A key moved here (a layout key, a v1 scene key) can be a position key's
+ * default (D5: ⌃⌥N on macOS, Ctrl+Alt+Shift+N elsewhere). Both would ask the
+ * OS for the same keys and the second would fail. The scene at that position
+ * needs no key of its own, so it drops it; any other scene keeps the key the
+ * streamer set (nothing changes on update, D15), and that position's default
+ * is released: Settings → Shortcuts can give Scene N another key. Mutates
+ * `customKeys`; returns the position keys to store, or null for none.
+ */
+function settleSlotKeys(
+  scenes: readonly Pick<Scene, 'id'>[],
+  customKeys: Record<string, string>,
+  shortcuts: GlobalShortcutsConfig,
+  platform: string | undefined
+): GlobalShortcutsConfig['sceneSlots'] | null {
+  const sceneSlots: NonNullable<GlobalShortcutsConfig['sceneSlots']> = {
+    ...shortcuts.sceneSlots
+  }
+  let changed = false
+  for (const position of SCENE_SLOT_ACTIONS.map((_, index) => (index + 1) as SceneSlotPosition)) {
+    if (shortcuts.sceneSlots?.[position] !== undefined) continue
+    const slotKey = normalizeAccelerator(sceneSlotAccelerator({}, position, platform), platform)
+    for (const [id, key] of Object.entries(customKeys)) {
+      if (normalizeAccelerator(key, platform) !== slotKey) continue
+      if (scenes[position - 1]?.id === id) {
+        delete customKeys[id]
+      } else {
+        sceneSlots[position] = ''
+        changed = true
+      }
+    }
+  }
+  return changed ? sceneSlots : null
 }
 
 /** The working setup's name: what it shows ("Figma", "Display 1"), or its layout when that shows no screen. */
