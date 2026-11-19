@@ -67,6 +67,7 @@ import {
   PRIVACY_TOPIC,
   type ScreenPrivacyPublication
 } from './room-screen-privacy'
+import { frostedStillUrl, keepFrostSample } from './frost-still'
 // The host in the room (plan 224 C-G4, D6): `livekit-client` publishes the
 // Sources camera and microphone and, on request, a screen picked through
 // main's `desktopCapturer`; it subscribes to everyone in the room (the stage
@@ -171,6 +172,13 @@ export type TalkShowLocalMedia = {
    * compares against it.
    */
   screenSourceId?: string | null
+  /**
+   * Plan 210 D8 in a room: while the screen is hidden, the frosted still of
+   * the last frame the room saw (a PNG data URL), drawn over the host's
+   * screen as guests and the program draw it. Absent while visible, and when
+   * the screen was hidden before any frame was shared (the grey stays).
+   */
+  screenStill?: string
 }
 
 export type TalkShowMonitor = {
@@ -392,6 +400,10 @@ export class TalkShowRoomClient {
   #privacy: TalkShowRoomSnapshot['screenPrivacy']
   #privacyEpoch = crypto.randomUUID().replaceAll('-', '')
   #privacyGeneration = 0
+  /** The hidden screen's frosted still (`TalkShowLocalMedia.screenStill`). */
+  #screenStill: string | null = null
+  /** Bumped when a still is started or dropped: a late frost is ignored. */
+  #stillToken = 0
   #screenWork: Promise<void> = Promise.resolve()
   #speaking = new Set<string>()
   /** Remote voices playing through the audio host; never the runner's return (H1). */
@@ -754,6 +766,9 @@ export class TalkShowRoomClient {
     old?.stop()
     this.#privateScreen?.close()
     this.#privateScreen = null
+    // Shown again: the live picture replaces the still. A new screen while
+    // hidden keeps it, as guests and the program keep theirs.
+    if (!expected.hidden) this.#dropScreenStill()
     this.#privacy = {
       ...expected,
       sourceBlockedAt: expected.hidden ? Date.now() : null,
@@ -790,10 +805,15 @@ export class TalkShowRoomClient {
         if (old && room) await room.localParticipant.unpublishTrack(old, true).catch(() => {})
         if (!current() || !raw || !room) return
         try {
-          const guarded = createPrivateScreen(raw, roomScreenPrivacy, () => {
-            if (!current()) return
-            this.#privacyFailed()
-          })
+          const guarded = createPrivateScreen(
+            raw,
+            roomScreenPrivacy,
+            () => {
+              if (!current()) return
+              this.#privacyFailed()
+            },
+            (last) => this.#keepScreenStill(last)
+          )
           if (!current()) {
             guarded.close()
             return
@@ -822,7 +842,31 @@ export class TalkShowRoomClient {
     return next
   }
 
+  /**
+   * Plan 210 D8 in a room: the host's own frosted look, from the last frame
+   * it published while visible (`createPrivateScreen`'s `lastFrame`), so the
+   * Show stage and the Program preview draw what guests and the program draw.
+   * The copy is a synchronous blit; the frost runs once the hide is done.
+   * Nothing here is published: the wire keeps its neutral grey.
+   */
+  #keepScreenStill(last: HTMLCanvasElement): void {
+    const token = ++this.#stillToken
+    const sample = document.createElement('canvas')
+    if (!keepFrostSample(sample, { image: last, width: last.width, height: last.height })) return
+    setTimeout(() => {
+      if (token !== this.#stillToken || this.#closed) return
+      this.#screenStill = frostedStillUrl(document, sample)
+      this.#publish()
+    }, 0)
+  }
+
+  #dropScreenStill(): void {
+    ++this.#stillToken
+    this.#screenStill = null
+  }
+
   #privacyFailed(): void {
+    this.#dropScreenStill()
     this.#screenRaw?.stop()
     this.#screenRaw = null
     this.#screenSourceId = null
@@ -846,6 +890,7 @@ export class TalkShowRoomClient {
   async stopScreenShare(): Promise<void> {
     this.#screenGeneration += 1
     ++this.#privacyGeneration
+    this.#dropScreenStill()
     this.#screenRaw?.stop()
     this.#screenRaw = null
     this.#screenSourceId = null
@@ -1864,6 +1909,7 @@ export class TalkShowRoomClient {
     const room = this.#room
     ++this.#screenGeneration
     ++this.#privacyGeneration
+    this.#dropScreenStill()
     this.#screenRaw?.stop()
     this.#screenRaw = null
     this.#screenSourceId = null
@@ -2056,7 +2102,10 @@ export class TalkShowRoomClient {
         cameraOff: this.#cameraOff,
         problem: this.#problem,
         ...(this.#cameraFrame && this.#frameSource ? { cameraFrame: this.#cameraFrame } : {}),
-        ...(this.#screenRaw && this.#screenSourceId ? { screenSourceId: this.#screenSourceId } : {})
+        ...(this.#screenRaw && this.#screenSourceId
+          ? { screenSourceId: this.#screenSourceId }
+          : {}),
+        ...(this.#screenRaw && this.#screenStill ? { screenStill: this.#screenStill } : {})
       },
       monitor: { enabled: this.#monitorEnabled, video: monitorVideo, audio: monitorAudio }
     }

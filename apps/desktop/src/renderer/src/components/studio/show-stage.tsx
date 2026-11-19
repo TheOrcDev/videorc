@@ -241,12 +241,14 @@ function tileTrack(
   cameraOff: boolean
   name: string
   cameraFrame?: TalkShowLocalMedia['cameraFrame']
+  /** The host's hidden screen: its frosted still (plan 210 D8 in a room). */
+  still?: string
 } {
   const host = tile.identity === talkShow.hostIdentity
   if (host) {
     const local = talkShow.room.local
     return tile.kind === 'screen'
-      ? { track: local.screen, cameraOff: false, name: 'Your screen' }
+      ? { track: local.screen, cameraOff: false, name: 'Your screen', still: local.screenStill }
       : {
           ...cameraPicture(local.camera, local.cameraOff),
           name: 'You',
@@ -282,10 +284,11 @@ function StageTileView({
   /** In the Program monitor: the picture and its geometry, without words. */
   monitor?: boolean
 }): ReactElement {
-  const { track, cameraOff, name, cameraFrame } = tileTrack(tile, talkShow)
+  const { track, cameraOff, name, cameraFrame, still } = tileTrack(tile, talkShow)
   const label = monitor ? '' : name || participant?.name || ''
   const look = cameraOffLook(tile.rect.w, tile.rect.h)
   const circle = hostCircle(tile, talkShow.hostIdentity, hostShape)
+  const fit = tileFit(tile.kind) === 'contain' ? 'object-contain' : 'object-cover'
   return (
     <>
       <div
@@ -301,11 +304,8 @@ function StageTileView({
             : { borderRadius: cqw(tile.cornerRadius) })
         }}
       >
-        <TrackVideo
-          cameraFrame={cameraFrame}
-          className={tileFit(tile.kind) === 'contain' ? 'object-contain' : 'object-cover'}
-          track={track}
-        />
+        <TrackVideo cameraFrame={cameraFrame} className={fit} track={track} />
+        <ScreenStill className={fit} src={still} />
         {cameraOff ? (
           // The camera-off look, as viewers see it: the circle and the letter.
           <CameraOffAvatar
@@ -313,7 +313,7 @@ function StageTileView({
             letter={cqw(look.fontPx)}
             name={name === 'You' ? (participant?.name ?? name) : name || (participant?.name ?? '')}
           />
-        ) : !track && !monitor ? (
+        ) : !track && !still && !monitor ? (
           <span className="absolute inset-0 flex items-center justify-center text-sm text-video-ground-muted">
             {tile.kind === 'screen' ? 'Waiting for the screen' : 'No picture yet'}
           </span>
@@ -337,6 +337,30 @@ function StageTileView({
         </span>
       ) : null}
     </>
+  )
+}
+
+/**
+ * Plan 210 D8 in a room: while the host's screen is hidden, the frosted still
+ * of the last frame the room saw, fitted as the screen was, over the guarded
+ * track (whose frames are the wire's grey). Guests and the program draw the
+ * same still. Nothing while the screen is visible.
+ */
+function ScreenStill({
+  src,
+  className
+}: {
+  src: string | undefined
+  className: string
+}): ReactElement | null {
+  if (!src) return null
+  return (
+    <img
+      alt=""
+      className={cn('absolute inset-0 size-full', className)}
+      data-testid="show-stage-screen-still"
+      src={src}
+    />
   )
 }
 
@@ -986,7 +1010,7 @@ function SceneTileView({
   talkShow: TalkShowContextValue
 }): ReactElement {
   const [source, setSource] = useState<{ w: number; h: number } | null>(null)
-  const { track, cameraOff, name, cameraFrame } = tileTrack(
+  const { track, cameraOff, name, cameraFrame, still } = tileTrack(
     { identity: tile.identity, kind: tile.kind, rect: tile.rect, cornerRadius: 0 },
     talkShow
   )
@@ -1021,6 +1045,7 @@ function SceneTileView({
             onSize={setSource}
             track={track}
           />
+          <ScreenStill className="object-fill" src={still} />
         </div>
       </div>
       {cameraOff ? (

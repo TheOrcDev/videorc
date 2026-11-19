@@ -255,6 +255,57 @@ describe("the host's circle (plan 247 D-2)", () => {
   })
 })
 
+// Plan 210 D8 in a room (owner, 2026-11-19): a hidden screen shows its
+// frosted still, as in the Studio and as guests and the program draw it,
+// never the guarded track's flat grey. In the room view and the Program
+// preview alike, fitted as the screen is.
+describe('a hidden screen (plan 210 D8)', () => {
+  const STILL = 'data:image/png;base64,c3RpbGw='
+  const managedShow = { id: 'sh_talk', nodeId: 'livekit', resumable: false, kind: 'talk' as const }
+  const hidden = () =>
+    talkShow({
+      room: {
+        ...NO_TALK_SHOW.room,
+        local: { ...NO_TALK_SHOW.room.local, screenStill: STILL }
+      }
+    })
+  const room = () =>
+    openRoom({
+      live: true,
+      stage: { layout: 'screen-people', onStage: [HOST], screen: HOST },
+      shown: { onStage: [HOST], screen: HOST }
+    })
+  const stills = () => [
+    ...container.querySelectorAll<HTMLImageElement>('[data-testid="show-stage-screen-still"]')
+  ]
+
+  it('draws the frosted still over the host screen in the room and the Program preview', async () => {
+    await mount(talkStatus({ show: managedShow, room: room() }), hidden())
+    const well = container.querySelector<HTMLElement>('[data-testid="show-stage-well"]')
+    const program = container.querySelector<HTMLElement>('[data-testid="show-stage-program"]')
+    expect(stills()).toHaveLength(2)
+    for (const still of stills()) {
+      expect(still.getAttribute('src')).toBe(STILL)
+      expect(still.closest('[data-stage-kind]')?.getAttribute('data-stage-kind')).toBe('screen')
+    }
+    const roomStill = well?.querySelector<HTMLImageElement>(
+      '[data-testid="show-stage-screen-still"]'
+    )
+    expect(roomStill?.className).toContain('object-contain')
+    expect(program?.querySelector('[data-testid="show-stage-screen-still"]')).not.toBeNull()
+    // The still is the picture: no waiting words under it.
+    expect(well?.textContent).not.toContain('Waiting for the screen')
+  })
+
+  it('draws nothing over a visible screen', async () => {
+    await mount(talkStatus({ show: managedShow, room: room() }), talkShow())
+    expect(stills()).toHaveLength(0)
+    expect(container.querySelector('[data-testid="show-stage-well"]')?.textContent).toContain(
+      'Waiting for the screen'
+    )
+  })
+})
+
 // Plan 234 D6 (T3): a managed show has no return picture. The Program
 // monitor keeps its frame, its label and its two waiting lines, and draws
 // the Show stage as the program page reports it. Nothing asks for a return.

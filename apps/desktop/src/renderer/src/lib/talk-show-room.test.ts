@@ -32,6 +32,11 @@ const frames = vi.hoisted(() => ({ create: vi.fn() }))
 vi.mock('./room-frame-source', () => ({ createRoomFrameTestSource: frames.create }))
 const encode = vi.hoisted(() => ({ attach: vi.fn() }))
 vi.mock('./room-frame-encode-observer', () => ({ attachEncodeObserver: encode.attach }))
+const frost = vi.hoisted(() => ({
+  keep: vi.fn((_into: unknown, _source: unknown) => true),
+  url: vi.fn((_page: unknown, _sample: unknown) => 'data:image/png;base64,STILL')
+}))
+vi.mock('./frost-still', () => ({ keepFrostSample: frost.keep, frostedStillUrl: frost.url }))
 
 const lk = vi.hoisted(() => {
   type Handler = (...args: unknown[]) => void
@@ -906,7 +911,12 @@ describe('S2 screen publication boundary', () => {
       getTracks: () => [raw]
     } as unknown as MediaStream)
     await share
-    expect(adapter).toHaveBeenCalledWith(raw, privacyModule.roomScreenPrivacy, expect.any(Function))
+    expect(adapter).toHaveBeenCalledWith(
+      raw,
+      privacyModule.roomScreenPrivacy,
+      expect.any(Function),
+      expect.any(Function)
+    )
     expect(room.snapshot.screenPrivacy?.hidden).toBe(true)
     expect(room.snapshot.local.screen).not.toBe(raw)
     expect(latestRoom().localParticipant.publishTrack).toHaveBeenCalledWith(
@@ -979,6 +989,7 @@ describe('S2 screen publication boundary', () => {
     expect(adapter).toHaveBeenLastCalledWith(
       next,
       privacyModule.roomScreenPrivacy,
+      expect.any(Function),
       expect.any(Function)
     )
     expect(room.snapshot.screenPrivacy?.hidden).toBe(true)
@@ -1007,6 +1018,49 @@ describe('S2 screen publication boundary', () => {
     expect(raw.stop).not.toHaveBeenCalled()
     expect(room.screenSourceId).toBe('screen:1:0')
     expect(room.snapshot.local.screen).not.toBeNull()
+    await room.disconnect()
+  })
+  // Plan 210 D8 in a room (owner, 2026-11-19): the Show stage draws a hidden
+  // screen frosted, as guests and the program do, never a flat grey box.
+  it('a hide after a shared frame shows its frosted still until Show; a late frost is dropped', async () => {
+    const { raw, adapter } = fixture()
+    vi.stubGlobal('navigator', {
+      mediaDevices: {
+        getDisplayMedia: async () => ({ getVideoTracks: () => [raw], getTracks: () => [raw] })
+      }
+    })
+    const { room } = client(undefined, undefined, { cameraName: null, microphoneName: null })
+    await room.connect()
+    await room.startScreenShare()
+    const lastFrame = adapter.mock.calls.at(-1)?.[3]
+    expect(lastFrame).toBeTypeOf('function')
+    const published = { width: 1920, height: 1080 } as HTMLCanvasElement
+    const show = () =>
+      privacyModule.roomScreenPrivacy.apply(
+        { hidden: false, generation: 0 },
+        privacyModule.roomScreenPrivacy.showIntent(),
+        true
+      )
+    privacyModule.roomScreenPrivacy.hide()
+    // What block() does with the frame the canvas last published.
+    lastFrame?.(published)
+    expect(frost.keep).toHaveBeenLastCalledWith(expect.anything(), {
+      image: published,
+      width: 1920,
+      height: 1080
+    })
+    // The frost runs after the hide, never inside it.
+    expect(room.snapshot.local.screenStill).toBeUndefined()
+    await vi.advanceTimersByTimeAsync(1)
+    expect(room.snapshot.local.screenStill).toBe('data:image/png;base64,STILL')
+    show()
+    expect(room.snapshot.local.screenStill).toBeUndefined()
+    // Shown again before a frost finished: it never lands.
+    privacyModule.roomScreenPrivacy.hide()
+    adapter.mock.calls.at(-1)?.[3]?.(published)
+    show()
+    await vi.advanceTimersByTimeAsync(1)
+    expect(room.snapshot.local.screenStill).toBeUndefined()
     await room.disconnect()
   })
   it('canvas failure stops and unpublishes without publishing raw as a fallback', async () => {
