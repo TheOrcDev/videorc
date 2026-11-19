@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
 import type { CloudOnAir, CloudStatus } from './backend'
-import { cloudResumeNotice } from './cloud-show-view'
+import { cloudResumeNotice, rejoiningResumeNotice } from './cloud-show-view'
 
 // Plan 184 C5 and plan 243 C5: the Studio's cloud notice for each state of a
 // show this computer is not feeding.
@@ -124,5 +124,22 @@ describe('cloudResumeNotice after a hand-off (plan 243 C5)', () => {
       detail: 'Your guests are still on.',
       action: 'continue'
     })
+  })
+})
+
+describe('rejoiningResumeNotice (2026-11-19: back in the room after a backend restart)', () => {
+  it('says the Studio is reconnecting, and keeps what viewers and guests see', () => {
+    const notice = cloudResumeNotice(talk(held), false)!
+    expect(rejoiningResumeNotice(notice)).toEqual({
+      ...notice,
+      title: 'Reconnecting to your show…',
+      tone: 'default'
+    })
+  })
+
+  it('leaves a show another device has to Continue here', () => {
+    const notice = cloudResumeNotice(talk({ ...held, onAir: phone }), false)!
+    expect(notice.action).toBe('continue')
+    expect(rejoiningResumeNotice(notice)).toBe(notice)
   })
 })

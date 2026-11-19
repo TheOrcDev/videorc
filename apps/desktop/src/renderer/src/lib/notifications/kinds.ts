@@ -67,6 +67,8 @@ const kinds = {
   'cloud-news': { tone: 'news', life: 'event' },
   'cloud-announce': { tone: 'news', life: 'event', announcement: true, popUpMs: 8_000 },
   'cloud-controller': { tone: 'news', life: 'condition', answersAPress: true, popUpMs: 8_000 },
+  // Back in the room by itself after a backend restart: runs, then done or failed.
+  'cloud-rejoin': { tone: 'news', life: 'progress' },
 
   // Devices, the app and finished work (S7).
   // The session runs without the device, so it counts until it is used.

@@ -23,7 +23,7 @@ import {
   useStudioRecordingState
 } from '@/hooks/use-studio'
 import { areEnabledStreamTargetsStartReady } from '@/lib/capture'
-import { cloudResumeNotice } from '@/lib/cloud-show-view'
+import { cloudResumeNotice, rejoiningResumeNotice } from '@/lib/cloud-show-view'
 import { goLiveEntitlementGate } from '@/lib/entitlement-ui'
 import { shouldIgnoreGoLiveAction } from '@/lib/go-live-flow'
 import { OPEN_HEALTH_LABEL, openHealth } from '@/lib/health-door'
@@ -302,14 +302,17 @@ function CloudResumeSlot({
   // so no local source can block it); a solo show's is the start below.
   const talk = cloudStatus?.show?.kind === 'talk'
   const resumeBlockedReason = talk ? null : blockedReason
+  // After a backend restart the Studio asks for its room back by itself.
+  const rejoining = talk && talkShow.rejoining && notice.action === 'resume'
   return (
     <Suspense fallback={null}>
       <CloudResumeNotice
         blockedReason={resumeBlockedReason}
-        notice={notice}
+        notice={rejoining ? rejoiningResumeNotice(notice) : notice}
         pending={pending}
+        rejoining={rejoining}
         onResume={() => {
-          if (pending || resumeBlockedReason) return
+          if (pending || rejoining || resumeBlockedReason) return
           onResumeClick()
           if (talk) {
             void talkShow.resumeRoom()

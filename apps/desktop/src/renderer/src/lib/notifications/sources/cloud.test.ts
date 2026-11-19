@@ -4,8 +4,10 @@ import type { CloudStatus } from '@/lib/backend'
 import {
   announceCloud,
   publishCloudController,
+  publishCloudRejoin,
   publishCloudStatus,
-  withdrawCloudController
+  withdrawCloudController,
+  withdrawCloudRejoin
 } from '@/lib/notifications/sources/cloud'
 import { sessionEndedNotifications } from '@/lib/notifications/sources/health'
 import { createNotificationStore, type NotificationStore } from '@/lib/notifications/store'
@@ -203,6 +205,32 @@ describe('Videorc Cloud as notifications (plan 250 S6)', () => {
     await store.runAction('cloud-controller', 'turn-on')
     expect(turnOn).toHaveBeenCalledTimes(1)
     withdrawCloudController(store)
+    expect(store.snapshot()).toEqual([])
+  })
+
+  it('going back into the room by itself is one entry: it runs, then says how it ended', () => {
+    live = true
+    publishCloudRejoin('running', store)
+    expect(entry('cloud-rejoin')).toMatchObject({
+      state: 'running',
+      tone: 'news',
+      title: 'Reconnecting to your show'
+    })
+    publishCloudRejoin('done', store)
+    expect(entry('cloud-rejoin')).toMatchObject({ state: 'done', title: 'Back in your show' })
+    publishCloudRejoin('failed', store)
+    expect(entry('cloud-rejoin')).toMatchObject({
+      state: 'failed',
+      tone: 'warning',
+      title: "Couldn't reconnect to your show",
+      detail: 'Press Resume in the Studio to go back in.',
+      actions: [{ label: 'Open Studio', kind: 'door' }]
+    })
+    // What already said how it ended stays; only a running one is taken back.
+    withdrawCloudRejoin(store)
+    expect(store.snapshot()).toHaveLength(1)
+    publishCloudRejoin('running', store)
+    withdrawCloudRejoin(store)
     expect(store.snapshot()).toEqual([])
   })
 })
