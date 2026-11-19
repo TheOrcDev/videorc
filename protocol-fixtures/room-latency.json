@@ -1,0 +1,2828 @@
+{
+  "comment": "Plan 253 (docs/cloud/253-latency-contract.md). Edited by hand; videorc-web keeps a byte copy in tests/fixtures/room-latency.json. `blocks` and `relays`: in -> parseNetBlock / parseLatencyRelay -> out (null: refused). `samples`: stats reports at both ends of a window -> netBlock(readNetStats(before), readNetStats(after), windowMs). `room`: held blocks -> roomLatency. Every time is a duration or a holder's own clock (D1).",
+  "version": 1,
+  "topic": "videorc.latency.v1",
+  "constants": {
+    "sampleMs": 10000,
+    "relayMinIntervalMs": 9000,
+    "ttlMs": 25000,
+    "sendAudioMs": 40,
+    "sfuMs": 5,
+    "pageDrawMs": 33,
+    "maxMs": 60000,
+    "minWindowMs": 1000,
+    "maxSenders": 8,
+    "identityMaxChars": 128,
+    "relayMaxBytes": 4096,
+    "programPageIdentityPrefix": "EG_"
+  },
+  "blocks": [
+    {
+      "name": "the contract's example",
+      "in": {
+        "v": 1,
+        "windowMs": 10000,
+        "rttMs": 42,
+        "playoutMs": 18,
+        "partial": false,
+        "send": {
+          "videoMs": 21
+        },
+        "from": [
+          {
+            "identity": "host:sh_0123456789abcdefghijkl",
+            "audioMs": 61,
+            "videoMs": 84
+          }
+        ]
+      },
+      "out": {
+        "v": 1,
+        "windowMs": 10000,
+        "rttMs": 42,
+        "playoutMs": 18,
+        "partial": false,
+        "send": {
+          "videoMs": 21
+        },
+        "from": [
+          {
+            "identity": "host:sh_0123456789abcdefghijkl",
+            "audioMs": 61,
+            "videoMs": 84
+          }
+        ]
+      }
+    },
+    {
+      "name": "only v and windowMs",
+      "in": {
+        "v": 1,
+        "windowMs": 10000
+      },
+      "out": {
+        "v": 1,
+        "windowMs": 10000
+      }
+    },
+    {
+      "name": "the bounds: 0 and 60000",
+      "in": {
+        "v": 1,
+        "windowMs": 60000,
+        "rttMs": 0,
+        "playoutMs": 60000,
+        "send": {
+          "videoMs": 0
+        },
+        "from": [
+          {
+            "identity": "g_Ada0000000000000000000",
+            "audioMs": 0,
+            "videoMs": 60000
+          }
+        ]
+      },
+      "out": {
+        "v": 1,
+        "windowMs": 60000,
+        "rttMs": 0,
+        "playoutMs": 60000,
+        "send": {
+          "videoMs": 0
+        },
+        "from": [
+          {
+            "identity": "g_Ada0000000000000000000",
+            "audioMs": 0,
+            "videoMs": 60000
+          }
+        ]
+      }
+    },
+    {
+      "name": "unknown keys are left out at every level, never kept",
+      "in": {
+        "v": 1,
+        "windowMs": 10000,
+        "rttMs": 42,
+        "address": "203.0.113.7",
+        "send": {
+          "videoMs": 21,
+          "codec": "vp8"
+        },
+        "from": [
+          {
+            "identity": "g_Ada0000000000000000000",
+            "audioMs": 61,
+            "name": "Ada"
+          }
+        ]
+      },
+      "out": {
+        "v": 1,
+        "windowMs": 10000,
+        "rttMs": 42,
+        "send": {
+          "videoMs": 21
+        },
+        "from": [
+          {
+            "identity": "g_Ada0000000000000000000",
+            "audioMs": 61
+          }
+        ]
+      }
+    },
+    {
+      "name": "an empty send block is left out",
+      "in": {
+        "v": 1,
+        "windowMs": 10000,
+        "send": {}
+      },
+      "out": {
+        "v": 1,
+        "windowMs": 10000
+      }
+    },
+    {
+      "name": "eight senders",
+      "in": {
+        "v": 1,
+        "windowMs": 10000,
+        "from": [
+          {
+            "identity": "g_0000000000000000000000",
+            "audioMs": 50
+          },
+          {
+            "identity": "g_0000000000000000000001",
+            "audioMs": 50
+          },
+          {
+            "identity": "g_0000000000000000000002",
+            "audioMs": 50
+          },
+          {
+            "identity": "g_0000000000000000000003",
+            "audioMs": 50
+          },
+          {
+            "identity": "g_0000000000000000000004",
+            "audioMs": 50
+          },
+          {
+            "identity": "g_0000000000000000000005",
+            "audioMs": 50
+          },
+          {
+            "identity": "g_0000000000000000000006",
+            "audioMs": 50
+          },
+          {
+            "identity": "g_0000000000000000000007",
+            "audioMs": 50
+          }
+        ]
+      },
+      "out": {
+        "v": 1,
+        "windowMs": 10000,
+        "from": [
+          {
+            "identity": "g_0000000000000000000000",
+            "audioMs": 50
+          },
+          {
+            "identity": "g_0000000000000000000001",
+            "audioMs": 50
+          },
+          {
+            "identity": "g_0000000000000000000002",
+            "audioMs": 50
+          },
+          {
+            "identity": "g_0000000000000000000003",
+            "audioMs": 50
+          },
+          {
+            "identity": "g_0000000000000000000004",
+            "audioMs": 50
+          },
+          {
+            "identity": "g_0000000000000000000005",
+            "audioMs": 50
+          },
+          {
+            "identity": "g_0000000000000000000006",
+            "audioMs": 50
+          },
+          {
+            "identity": "g_0000000000000000000007",
+            "audioMs": 50
+          }
+        ]
+      }
+    },
+    {
+      "name": "not an object",
+      "in": "net",
+      "out": null
+    },
+    {
+      "name": "null",
+      "in": null,
+      "out": null
+    },
+    {
+      "name": "an array",
+      "in": [
+        {
+          "v": 1,
+          "windowMs": 10000
+        }
+      ],
+      "out": null
+    },
+    {
+      "name": "another version",
+      "in": {
+        "v": 2,
+        "windowMs": 10000
+      },
+      "out": null
+    },
+    {
+      "name": "no windowMs",
+      "in": {
+        "v": 1
+      },
+      "out": null
+    },
+    {
+      "name": "a window under a second",
+      "in": {
+        "v": 1,
+        "windowMs": 999
+      },
+      "out": null
+    },
+    {
+      "name": "a window over the bound",
+      "in": {
+        "v": 1,
+        "windowMs": 60001
+      },
+      "out": null
+    },
+    {
+      "name": "a round trip over the bound",
+      "in": {
+        "v": 1,
+        "windowMs": 10000,
+        "rttMs": 60001
+      },
+      "out": null
+    },
+    {
+      "name": "a negative number",
+      "in": {
+        "v": 1,
+        "windowMs": 10000,
+        "playoutMs": -1
+      },
+      "out": null
+    },
+    {
+      "name": "a fraction of a millisecond",
+      "in": {
+        "v": 1,
+        "windowMs": 10000,
+        "rttMs": 41.5
+      },
+      "out": null
+    },
+    {
+      "name": "a number as text",
+      "in": {
+        "v": 1,
+        "windowMs": 10000,
+        "rttMs": "42"
+      },
+      "out": null
+    },
+    {
+      "name": "null for an absent number",
+      "in": {
+        "v": 1,
+        "windowMs": 10000,
+        "rttMs": null
+      },
+      "out": null
+    },
+    {
+      "name": "partial that is not a boolean",
+      "in": {
+        "v": 1,
+        "windowMs": 10000,
+        "partial": "no"
+      },
+      "out": null
+    },
+    {
+      "name": "send that is not an object",
+      "in": {
+        "v": 1,
+        "windowMs": 10000,
+        "send": 21
+      },
+      "out": null
+    },
+    {
+      "name": "from that is not a list",
+      "in": {
+        "v": 1,
+        "windowMs": 10000,
+        "from": {
+          "identity": "g_Ada0000000000000000000"
+        }
+      },
+      "out": null
+    },
+    {
+      "name": "nine senders",
+      "in": {
+        "v": 1,
+        "windowMs": 10000,
+        "from": [
+          {
+            "identity": "g_0000000000000000000000",
+            "audioMs": 50
+          },
+          {
+            "identity": "g_0000000000000000000001",
+            "audioMs": 50
+          },
+          {
+            "identity": "g_0000000000000000000002",
+            "audioMs": 50
+          },
+          {
+            "identity": "g_0000000000000000000003",
+            "audioMs": 50
+          },
+          {
+            "identity": "g_0000000000000000000004",
+            "audioMs": 50
+          },
+          {
+            "identity": "g_0000000000000000000005",
+            "audioMs": 50
+          },
+          {
+            "identity": "g_0000000000000000000006",
+            "audioMs": 50
+          },
+          {
+            "identity": "g_0000000000000000000007",
+            "audioMs": 50
+          },
+          {
+            "identity": "g_0000000000000000000008",
+            "audioMs": 50
+          }
+        ]
+      },
+      "out": null
+    },
+    {
+      "name": "the same sender twice",
+      "in": {
+        "v": 1,
+        "windowMs": 10000,
+        "from": [
+          {
+            "identity": "g_Ada0000000000000000000",
+            "audioMs": 1
+          },
+          {
+            "identity": "g_Ada0000000000000000000",
+            "audioMs": 2
+          }
+        ]
+      },
+      "out": null
+    },
+    {
+      "name": "a sender with no identity",
+      "in": {
+        "v": 1,
+        "windowMs": 10000,
+        "from": [
+          {
+            "audioMs": 61
+          }
+        ]
+      },
+      "out": null
+    },
+    {
+      "name": "an empty identity",
+      "in": {
+        "v": 1,
+        "windowMs": 10000,
+        "from": [
+          {
+            "identity": "",
+            "audioMs": 61
+          }
+        ]
+      },
+      "out": null
+    },
+    {
+      "name": "an identity over 128 characters",
+      "in": {
+        "v": 1,
+        "windowMs": 10000,
+        "from": [
+          {
+            "identity": "ggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg",
+            "audioMs": 61
+          }
+        ]
+      },
+      "out": null
+    },
+    {
+      "name": "a sender's number out of bounds",
+      "in": {
+        "v": 1,
+        "windowMs": 10000,
+        "from": [
+          {
+            "identity": "g_Ada0000000000000000000",
+            "videoMs": 60001
+          }
+        ]
+      },
+      "out": null
+    }
+  ],
+  "relays": [
+    {
+      "name": "a relayed block",
+      "in": {
+        "v": 1,
+        "identity": "g_Ada0000000000000000000",
+        "at": 1794000000123,
+        "net": {
+          "v": 1,
+          "windowMs": 10000,
+          "rttMs": 42,
+          "playoutMs": 18,
+          "partial": false,
+          "send": {
+            "videoMs": 21
+          },
+          "from": [
+            {
+              "identity": "host:sh_0123456789abcdefghijkl",
+              "audioMs": 61,
+              "videoMs": 84
+            }
+          ]
+        }
+      },
+      "out": {
+        "v": 1,
+        "identity": "g_Ada0000000000000000000",
+        "at": 1794000000123,
+        "net": {
+          "v": 1,
+          "windowMs": 10000,
+          "rttMs": 42,
+          "playoutMs": 18,
+          "partial": false,
+          "send": {
+            "videoMs": 21
+          },
+          "from": [
+            {
+              "identity": "host:sh_0123456789abcdefghijkl",
+              "audioMs": 61,
+              "videoMs": 84
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "unknown keys are left out",
+      "in": {
+        "v": 1,
+        "identity": "EG_wide00000000",
+        "at": 1794000000123,
+        "net": {
+          "v": 1,
+          "windowMs": 10000,
+          "x": 1
+        },
+        "participantSid": "PA_x"
+      },
+      "out": {
+        "v": 1,
+        "identity": "EG_wide00000000",
+        "at": 1794000000123,
+        "net": {
+          "v": 1,
+          "windowMs": 10000
+        }
+      }
+    },
+    {
+      "name": "another version",
+      "in": {
+        "v": 2,
+        "identity": "g_Ada0000000000000000000",
+        "at": 1794000000123,
+        "net": {
+          "v": 1,
+          "windowMs": 10000,
+          "rttMs": 42,
+          "playoutMs": 18,
+          "partial": false,
+          "send": {
+            "videoMs": 21
+          },
+          "from": [
+            {
+              "identity": "host:sh_0123456789abcdefghijkl",
+              "audioMs": 61,
+              "videoMs": 84
+            }
+          ]
+        }
+      },
+      "out": null
+    },
+    {
+      "name": "no identity",
+      "in": {
+        "v": 1,
+        "at": 1794000000123,
+        "net": {
+          "v": 1,
+          "windowMs": 10000,
+          "rttMs": 42,
+          "playoutMs": 18,
+          "partial": false,
+          "send": {
+            "videoMs": 21
+          },
+          "from": [
+            {
+              "identity": "host:sh_0123456789abcdefghijkl",
+              "audioMs": 61,
+              "videoMs": 84
+            }
+          ]
+        }
+      },
+      "out": null
+    },
+    {
+      "name": "a time as text",
+      "in": {
+        "v": 1,
+        "identity": "g_Ada0000000000000000000",
+        "at": "2026-11-19T10:00:00.000Z",
+        "net": {
+          "v": 1,
+          "windowMs": 10000,
+          "rttMs": 42,
+          "playoutMs": 18,
+          "partial": false,
+          "send": {
+            "videoMs": 21
+          },
+          "from": [
+            {
+              "identity": "host:sh_0123456789abcdefghijkl",
+              "audioMs": 61,
+              "videoMs": 84
+            }
+          ]
+        }
+      },
+      "out": null
+    },
+    {
+      "name": "a block the contract refuses",
+      "in": {
+        "v": 1,
+        "identity": "g_Ada0000000000000000000",
+        "at": 1794000000123,
+        "net": {
+          "v": 1,
+          "windowMs": 10000,
+          "rttMs": -4
+        }
+      },
+      "out": null
+    },
+    {
+      "name": "no block",
+      "in": {
+        "v": 1,
+        "identity": "g_Ada0000000000000000000",
+        "at": 1794000000123
+      },
+      "out": null
+    }
+  ],
+  "samples": [
+    {
+      "name": "a Chromium guest: the selected pair, both buffers, playout, two simulcast layers",
+      "windowMs": 10000,
+      "before": [
+        {
+          "direction": "in",
+          "identity": "host:sh_0123456789abcdefghijkl",
+          "kind": "audio",
+          "entries": [
+            {
+              "type": "transport",
+              "id": "T01",
+              "selectedCandidatePairId": "CP1"
+            },
+            {
+              "type": "candidate-pair",
+              "id": "CP0",
+              "nominated": false,
+              "state": "succeeded",
+              "currentRoundTripTime": 0.9
+            },
+            {
+              "type": "candidate-pair",
+              "id": "CP1",
+              "nominated": true,
+              "state": "succeeded",
+              "currentRoundTripTime": 0.05
+            },
+            {
+              "type": "local-candidate",
+              "id": "L1",
+              "address": "203.0.113.7",
+              "port": 50000
+            },
+            {
+              "type": "remote-candidate",
+              "id": "R1",
+              "address": "198.51.100.9",
+              "port": 443
+            },
+            {
+              "type": "inbound-rtp",
+              "kind": "audio",
+              "jitterBufferDelay": 120000,
+              "jitterBufferEmittedCount": 2400000
+            },
+            {
+              "type": "media-playout",
+              "kind": "audio",
+              "totalPlayoutDelay": 24000,
+              "totalSamplesCount": 2400000
+            }
+          ]
+        },
+        {
+          "direction": "in",
+          "identity": "host:sh_0123456789abcdefghijkl",
+          "kind": "video",
+          "entries": [
+            {
+              "type": "transport",
+              "id": "T01",
+              "selectedCandidatePairId": "CP1"
+            },
+            {
+              "type": "candidate-pair",
+              "id": "CP0",
+              "nominated": false,
+              "state": "succeeded",
+              "currentRoundTripTime": 0.9
+            },
+            {
+              "type": "candidate-pair",
+              "id": "CP1",
+              "nominated": true,
+              "state": "succeeded",
+              "currentRoundTripTime": 0.05
+            },
+            {
+              "type": "local-candidate",
+              "id": "L1",
+              "address": "203.0.113.7",
+              "port": 50000
+            },
+            {
+              "type": "remote-candidate",
+              "id": "R1",
+              "address": "198.51.100.9",
+              "port": 443
+            },
+            {
+              "type": "inbound-rtp",
+              "kind": "video",
+              "totalProcessingDelay": 100,
+              "framesDecoded": 1500
+            }
+          ]
+        },
+        {
+          "direction": "out",
+          "kind": "video",
+          "entries": [
+            {
+              "type": "outbound-rtp",
+              "kind": "video",
+              "rid": "q",
+              "totalEncodeTime": 3.0,
+              "framesEncoded": 1500,
+              "totalPacketSendDelay": 2.0,
+              "packetsSent": 10000,
+              "framesPerSecond": 30
+            },
+            {
+              "type": "outbound-rtp",
+              "kind": "video",
+              "rid": "f",
+              "totalEncodeTime": 6.0,
+              "framesEncoded": 1500,
+              "totalPacketSendDelay": 4.0,
+              "packetsSent": 20000,
+              "framesPerSecond": 30
+            },
+            {
+              "type": "remote-inbound-rtp",
+              "kind": "video",
+              "roundTripTime": 0.5
+            }
+          ]
+        }
+      ],
+      "after": [
+        {
+          "direction": "in",
+          "identity": "host:sh_0123456789abcdefghijkl",
+          "kind": "audio",
+          "entries": [
+            {
+              "type": "transport",
+              "id": "T01",
+              "selectedCandidatePairId": "CP1"
+            },
+            {
+              "type": "candidate-pair",
+              "id": "CP0",
+              "nominated": false,
+              "state": "succeeded",
+              "currentRoundTripTime": 0.9
+            },
+            {
+              "type": "candidate-pair",
+              "id": "CP1",
+              "nominated": true,
+              "state": "succeeded",
+              "currentRoundTripTime": 0.04
+            },
+            {
+              "type": "local-candidate",
+              "id": "L1",
+              "address": "203.0.113.7",
+              "port": 50000
+            },
+            {
+              "type": "remote-candidate",
+              "id": "R1",
+              "address": "198.51.100.9",
+              "port": 443
+            },
+            {
+              "type": "inbound-rtp",
+              "kind": "audio",
+              "jitterBufferDelay": 149280,
+              "jitterBufferEmittedCount": 2880000
+            },
+            {
+              "type": "media-playout",
+              "kind": "audio",
+              "totalPlayoutDelay": 32640,
+              "totalSamplesCount": 2880000
+            }
+          ]
+        },
+        {
+          "direction": "in",
+          "identity": "host:sh_0123456789abcdefghijkl",
+          "kind": "video",
+          "entries": [
+            {
+              "type": "transport",
+              "id": "T01",
+              "selectedCandidatePairId": "CP1"
+            },
+            {
+              "type": "candidate-pair",
+              "id": "CP0",
+              "nominated": false,
+              "state": "succeeded",
+              "currentRoundTripTime": 0.9
+            },
+            {
+              "type": "candidate-pair",
+              "id": "CP1",
+              "nominated": true,
+              "state": "succeeded",
+              "currentRoundTripTime": 0.04
+            },
+            {
+              "type": "local-candidate",
+              "id": "L1",
+              "address": "203.0.113.7",
+              "port": 50000
+            },
+            {
+              "type": "remote-candidate",
+              "id": "R1",
+              "address": "198.51.100.9",
+              "port": 443
+            },
+            {
+              "type": "inbound-rtp",
+              "kind": "video",
+              "totalProcessingDelay": 125.2,
+              "framesDecoded": 1800
+            }
+          ]
+        },
+        {
+          "direction": "out",
+          "kind": "video",
+          "entries": [
+            {
+              "type": "outbound-rtp",
+              "kind": "video",
+              "rid": "q",
+              "totalEncodeTime": 3.9,
+              "framesEncoded": 1800,
+              "totalPacketSendDelay": 2.5,
+              "packetsSent": 12000,
+              "framesPerSecond": 30
+            },
+            {
+              "type": "outbound-rtp",
+              "kind": "video",
+              "rid": "f",
+              "totalEncodeTime": 8.4,
+              "framesEncoded": 1800,
+              "totalPacketSendDelay": 6.5,
+              "packetsSent": 24000,
+              "framesPerSecond": 30
+            },
+            {
+              "type": "remote-inbound-rtp",
+              "kind": "video",
+              "roundTripTime": 0.5
+            }
+          ]
+        }
+      ],
+      "block": {
+        "v": 1,
+        "windowMs": 10000,
+        "rttMs": 40,
+        "playoutMs": 18,
+        "partial": false,
+        "send": {
+          "videoMs": 23
+        },
+        "from": [
+          {
+            "identity": "host:sh_0123456789abcdefghijkl",
+            "audioMs": 61,
+            "videoMs": 84
+          }
+        ]
+      }
+    },
+    {
+      "name": "a guest whose browser has no playout stat and no pair: the RTCP round trip, and partial",
+      "windowMs": 10000,
+      "before": [
+        {
+          "direction": "in",
+          "identity": "host:sh_0123456789abcdefghijkl",
+          "kind": "audio",
+          "entries": [
+            {
+              "type": "inbound-rtp",
+              "kind": "audio",
+              "jitterBufferDelay": 96000,
+              "jitterBufferEmittedCount": 1920000
+            }
+          ]
+        },
+        {
+          "direction": "out",
+          "kind": "audio",
+          "entries": [
+            {
+              "type": "outbound-rtp",
+              "kind": "audio",
+              "packetsSent": 500
+            },
+            {
+              "type": "remote-inbound-rtp",
+              "kind": "audio",
+              "roundTripTime": 0.121
+            }
+          ]
+        }
+      ],
+      "after": [
+        {
+          "direction": "in",
+          "identity": "host:sh_0123456789abcdefghijkl",
+          "kind": "audio",
+          "entries": [
+            {
+              "type": "inbound-rtp",
+              "kind": "audio",
+              "jitterBufferDelay": 141600,
+              "jitterBufferEmittedCount": 2400000
+            }
+          ]
+        },
+        {
+          "direction": "out",
+          "kind": "audio",
+          "entries": [
+            {
+              "type": "outbound-rtp",
+              "kind": "audio",
+              "packetsSent": 500
+            },
+            {
+              "type": "remote-inbound-rtp",
+              "kind": "audio",
+              "roundTripTime": 0.121
+            }
+          ]
+        }
+      ],
+      "block": {
+        "v": 1,
+        "windowMs": 10000,
+        "rttMs": 121,
+        "partial": true,
+        "from": [
+          {
+            "identity": "host:sh_0123456789abcdefghijkl",
+            "audioMs": 95
+          }
+        ]
+      }
+    },
+    {
+      "name": "the first sample has nothing to subtract from: no block",
+      "windowMs": 10000,
+      "before": null,
+      "after": [
+        {
+          "direction": "in",
+          "identity": "host:sh_0123456789abcdefghijkl",
+          "kind": "audio",
+          "entries": [
+            {
+              "type": "transport",
+              "id": "T01",
+              "selectedCandidatePairId": "CP1"
+            },
+            {
+              "type": "candidate-pair",
+              "id": "CP0",
+              "nominated": false,
+              "state": "succeeded",
+              "currentRoundTripTime": 0.9
+            },
+            {
+              "type": "candidate-pair",
+              "id": "CP1",
+              "nominated": true,
+              "state": "succeeded",
+              "currentRoundTripTime": 0.04
+            },
+            {
+              "type": "local-candidate",
+              "id": "L1",
+              "address": "203.0.113.7",
+              "port": 50000
+            },
+            {
+              "type": "remote-candidate",
+              "id": "R1",
+              "address": "198.51.100.9",
+              "port": 443
+            },
+            {
+              "type": "inbound-rtp",
+              "kind": "audio",
+              "jitterBufferDelay": 149280,
+              "jitterBufferEmittedCount": 2880000
+            },
+            {
+              "type": "media-playout",
+              "kind": "audio",
+              "totalPlayoutDelay": 32640,
+              "totalSamplesCount": 2880000
+            }
+          ]
+        },
+        {
+          "direction": "in",
+          "identity": "host:sh_0123456789abcdefghijkl",
+          "kind": "video",
+          "entries": [
+            {
+              "type": "transport",
+              "id": "T01",
+              "selectedCandidatePairId": "CP1"
+            },
+            {
+              "type": "candidate-pair",
+              "id": "CP0",
+              "nominated": false,
+              "state": "succeeded",
+              "currentRoundTripTime": 0.9
+            },
+            {
+              "type": "candidate-pair",
+              "id": "CP1",
+              "nominated": true,
+              "state": "succeeded",
+              "currentRoundTripTime": 0.04
+            },
+            {
+              "type": "local-candidate",
+              "id": "L1",
+              "address": "203.0.113.7",
+              "port": 50000
+            },
+            {
+              "type": "remote-candidate",
+              "id": "R1",
+              "address": "198.51.100.9",
+              "port": 443
+            },
+            {
+              "type": "inbound-rtp",
+              "kind": "video",
+              "totalProcessingDelay": 125.2,
+              "framesDecoded": 1800
+            }
+          ]
+        },
+        {
+          "direction": "out",
+          "kind": "video",
+          "entries": [
+            {
+              "type": "outbound-rtp",
+              "kind": "video",
+              "rid": "q",
+              "totalEncodeTime": 3.9,
+              "framesEncoded": 1800,
+              "totalPacketSendDelay": 2.5,
+              "packetsSent": 12000,
+              "framesPerSecond": 30
+            },
+            {
+              "type": "outbound-rtp",
+              "kind": "video",
+              "rid": "f",
+              "totalEncodeTime": 8.4,
+              "framesEncoded": 1800,
+              "totalPacketSendDelay": 6.5,
+              "packetsSent": 24000,
+              "framesPerSecond": 30
+            },
+            {
+              "type": "remote-inbound-rtp",
+              "kind": "video",
+              "roundTripTime": 0.5
+            }
+          ]
+        }
+      ],
+      "block": null
+    },
+    {
+      "name": "a window under a second: no block",
+      "windowMs": 900,
+      "before": [
+        {
+          "direction": "in",
+          "identity": "host:sh_0123456789abcdefghijkl",
+          "kind": "audio",
+          "entries": [
+            {
+              "type": "transport",
+              "id": "T01",
+              "selectedCandidatePairId": "CP1"
+            },
+            {
+              "type": "candidate-pair",
+              "id": "CP0",
+              "nominated": false,
+              "state": "succeeded",
+              "currentRoundTripTime": 0.9
+            },
+            {
+              "type": "candidate-pair",
+              "id": "CP1",
+              "nominated": true,
+              "state": "succeeded",
+              "currentRoundTripTime": 0.05
+            },
+            {
+              "type": "local-candidate",
+              "id": "L1",
+              "address": "203.0.113.7",
+              "port": 50000
+            },
+            {
+              "type": "remote-candidate",
+              "id": "R1",
+              "address": "198.51.100.9",
+              "port": 443
+            },
+            {
+              "type": "inbound-rtp",
+              "kind": "audio",
+              "jitterBufferDelay": 120000,
+              "jitterBufferEmittedCount": 2400000
+            },
+            {
+              "type": "media-playout",
+              "kind": "audio",
+              "totalPlayoutDelay": 24000,
+              "totalSamplesCount": 2400000
+            }
+          ]
+        },
+        {
+          "direction": "in",
+          "identity": "host:sh_0123456789abcdefghijkl",
+          "kind": "video",
+          "entries": [
+            {
+              "type": "transport",
+              "id": "T01",
+              "selectedCandidatePairId": "CP1"
+            },
+            {
+              "type": "candidate-pair",
+              "id": "CP0",
+              "nominated": false,
+              "state": "succeeded",
+              "currentRoundTripTime": 0.9
+            },
+            {
+              "type": "candidate-pair",
+              "id": "CP1",
+              "nominated": true,
+              "state": "succeeded",
+              "currentRoundTripTime": 0.05
+            },
+            {
+              "type": "local-candidate",
+              "id": "L1",
+              "address": "203.0.113.7",
+              "port": 50000
+            },
+            {
+              "type": "remote-candidate",
+              "id": "R1",
+              "address": "198.51.100.9",
+              "port": 443
+            },
+            {
+              "type": "inbound-rtp",
+              "kind": "video",
+              "totalProcessingDelay": 100,
+              "framesDecoded": 1500
+            }
+          ]
+        },
+        {
+          "direction": "out",
+          "kind": "video",
+          "entries": [
+            {
+              "type": "outbound-rtp",
+              "kind": "video",
+              "rid": "q",
+              "totalEncodeTime": 3.0,
+              "framesEncoded": 1500,
+              "totalPacketSendDelay": 2.0,
+              "packetsSent": 10000,
+              "framesPerSecond": 30
+            },
+            {
+              "type": "outbound-rtp",
+              "kind": "video",
+              "rid": "f",
+              "totalEncodeTime": 6.0,
+              "framesEncoded": 1500,
+              "totalPacketSendDelay": 4.0,
+              "packetsSent": 20000,
+              "framesPerSecond": 30
+            },
+            {
+              "type": "remote-inbound-rtp",
+              "kind": "video",
+              "roundTripTime": 0.5
+            }
+          ]
+        }
+      ],
+      "after": [
+        {
+          "direction": "in",
+          "identity": "host:sh_0123456789abcdefghijkl",
+          "kind": "audio",
+          "entries": [
+            {
+              "type": "transport",
+              "id": "T01",
+              "selectedCandidatePairId": "CP1"
+            },
+            {
+              "type": "candidate-pair",
+              "id": "CP0",
+              "nominated": false,
+              "state": "succeeded",
+              "currentRoundTripTime": 0.9
+            },
+            {
+              "type": "candidate-pair",
+              "id": "CP1",
+              "nominated": true,
+              "state": "succeeded",
+              "currentRoundTripTime": 0.04
+            },
+            {
+              "type": "local-candidate",
+              "id": "L1",
+              "address": "203.0.113.7",
+              "port": 50000
+            },
+            {
+              "type": "remote-candidate",
+              "id": "R1",
+              "address": "198.51.100.9",
+              "port": 443
+            },
+            {
+              "type": "inbound-rtp",
+              "kind": "audio",
+              "jitterBufferDelay": 149280,
+              "jitterBufferEmittedCount": 2880000
+            },
+            {
+              "type": "media-playout",
+              "kind": "audio",
+              "totalPlayoutDelay": 32640,
+              "totalSamplesCount": 2880000
+            }
+          ]
+        },
+        {
+          "direction": "in",
+          "identity": "host:sh_0123456789abcdefghijkl",
+          "kind": "video",
+          "entries": [
+            {
+              "type": "transport",
+              "id": "T01",
+              "selectedCandidatePairId": "CP1"
+            },
+            {
+              "type": "candidate-pair",
+              "id": "CP0",
+              "nominated": false,
+              "state": "succeeded",
+              "currentRoundTripTime": 0.9
+            },
+            {
+              "type": "candidate-pair",
+              "id": "CP1",
+              "nominated": true,
+              "state": "succeeded",
+              "currentRoundTripTime": 0.04
+            },
+            {
+              "type": "local-candidate",
+              "id": "L1",
+              "address": "203.0.113.7",
+              "port": 50000
+            },
+            {
+              "type": "remote-candidate",
+              "id": "R1",
+              "address": "198.51.100.9",
+              "port": 443
+            },
+            {
+              "type": "inbound-rtp",
+              "kind": "video",
+              "totalProcessingDelay": 125.2,
+              "framesDecoded": 1800
+            }
+          ]
+        },
+        {
+          "direction": "out",
+          "kind": "video",
+          "entries": [
+            {
+              "type": "outbound-rtp",
+              "kind": "video",
+              "rid": "q",
+              "totalEncodeTime": 3.9,
+              "framesEncoded": 1800,
+              "totalPacketSendDelay": 2.5,
+              "packetsSent": 12000,
+              "framesPerSecond": 30
+            },
+            {
+              "type": "outbound-rtp",
+              "kind": "video",
+              "rid": "f",
+              "totalEncodeTime": 8.4,
+              "framesEncoded": 1800,
+              "totalPacketSendDelay": 6.5,
+              "packetsSent": 24000,
+              "framesPerSecond": 30
+            },
+            {
+              "type": "remote-inbound-rtp",
+              "kind": "video",
+              "roundTripTime": 0.5
+            }
+          ]
+        }
+      ],
+      "block": null
+    },
+    {
+      "name": "a window over a minute (the page slept): no block",
+      "windowMs": 60001,
+      "before": [
+        {
+          "direction": "in",
+          "identity": "host:sh_0123456789abcdefghijkl",
+          "kind": "audio",
+          "entries": [
+            {
+              "type": "transport",
+              "id": "T01",
+              "selectedCandidatePairId": "CP1"
+            },
+            {
+              "type": "candidate-pair",
+              "id": "CP0",
+              "nominated": false,
+              "state": "succeeded",
+              "currentRoundTripTime": 0.9
+            },
+            {
+              "type": "candidate-pair",
+              "id": "CP1",
+              "nominated": true,
+              "state": "succeeded",
+              "currentRoundTripTime": 0.05
+            },
+            {
+              "type": "local-candidate",
+              "id": "L1",
+              "address": "203.0.113.7",
+              "port": 50000
+            },
+            {
+              "type": "remote-candidate",
+              "id": "R1",
+              "address": "198.51.100.9",
+              "port": 443
+            },
+            {
+              "type": "inbound-rtp",
+              "kind": "audio",
+              "jitterBufferDelay": 120000,
+              "jitterBufferEmittedCount": 2400000
+            },
+            {
+              "type": "media-playout",
+              "kind": "audio",
+              "totalPlayoutDelay": 24000,
+              "totalSamplesCount": 2400000
+            }
+          ]
+        },
+        {
+          "direction": "in",
+          "identity": "host:sh_0123456789abcdefghijkl",
+          "kind": "video",
+          "entries": [
+            {
+              "type": "transport",
+              "id": "T01",
+              "selectedCandidatePairId": "CP1"
+            },
+            {
+              "type": "candidate-pair",
+              "id": "CP0",
+              "nominated": false,
+              "state": "succeeded",
+              "currentRoundTripTime": 0.9
+            },
+            {
+              "type": "candidate-pair",
+              "id": "CP1",
+              "nominated": true,
+              "state": "succeeded",
+              "currentRoundTripTime": 0.05
+            },
+            {
+              "type": "local-candidate",
+              "id": "L1",
+              "address": "203.0.113.7",
+              "port": 50000
+            },
+            {
+              "type": "remote-candidate",
+              "id": "R1",
+              "address": "198.51.100.9",
+              "port": 443
+            },
+            {
+              "type": "inbound-rtp",
+              "kind": "video",
+              "totalProcessingDelay": 100,
+              "framesDecoded": 1500
+            }
+          ]
+        },
+        {
+          "direction": "out",
+          "kind": "video",
+          "entries": [
+            {
+              "type": "outbound-rtp",
+              "kind": "video",
+              "rid": "q",
+              "totalEncodeTime": 3.0,
+              "framesEncoded": 1500,
+              "totalPacketSendDelay": 2.0,
+              "packetsSent": 10000,
+              "framesPerSecond": 30
+            },
+            {
+              "type": "outbound-rtp",
+              "kind": "video",
+              "rid": "f",
+              "totalEncodeTime": 6.0,
+              "framesEncoded": 1500,
+              "totalPacketSendDelay": 4.0,
+              "packetsSent": 20000,
+              "framesPerSecond": 30
+            },
+            {
+              "type": "remote-inbound-rtp",
+              "kind": "video",
+              "roundTripTime": 0.5
+            }
+          ]
+        }
+      ],
+      "after": [
+        {
+          "direction": "in",
+          "identity": "host:sh_0123456789abcdefghijkl",
+          "kind": "audio",
+          "entries": [
+            {
+              "type": "transport",
+              "id": "T01",
+              "selectedCandidatePairId": "CP1"
+            },
+            {
+              "type": "candidate-pair",
+              "id": "CP0",
+              "nominated": false,
+              "state": "succeeded",
+              "currentRoundTripTime": 0.9
+            },
+            {
+              "type": "candidate-pair",
+              "id": "CP1",
+              "nominated": true,
+              "state": "succeeded",
+              "currentRoundTripTime": 0.04
+            },
+            {
+              "type": "local-candidate",
+              "id": "L1",
+              "address": "203.0.113.7",
+              "port": 50000
+            },
+            {
+              "type": "remote-candidate",
+              "id": "R1",
+              "address": "198.51.100.9",
+              "port": 443
+            },
+            {
+              "type": "inbound-rtp",
+              "kind": "audio",
+              "jitterBufferDelay": 149280,
+              "jitterBufferEmittedCount": 2880000
+            },
+            {
+              "type": "media-playout",
+              "kind": "audio",
+              "totalPlayoutDelay": 32640,
+              "totalSamplesCount": 2880000
+            }
+          ]
+        },
+        {
+          "direction": "in",
+          "identity": "host:sh_0123456789abcdefghijkl",
+          "kind": "video",
+          "entries": [
+            {
+              "type": "transport",
+              "id": "T01",
+              "selectedCandidatePairId": "CP1"
+            },
+            {
+              "type": "candidate-pair",
+              "id": "CP0",
+              "nominated": false,
+              "state": "succeeded",
+              "currentRoundTripTime": 0.9
+            },
+            {
+              "type": "candidate-pair",
+              "id": "CP1",
+              "nominated": true,
+              "state": "succeeded",
+              "currentRoundTripTime": 0.04
+            },
+            {
+              "type": "local-candidate",
+              "id": "L1",
+              "address": "203.0.113.7",
+              "port": 50000
+            },
+            {
+              "type": "remote-candidate",
+              "id": "R1",
+              "address": "198.51.100.9",
+              "port": 443
+            },
+            {
+              "type": "inbound-rtp",
+              "kind": "video",
+              "totalProcessingDelay": 125.2,
+              "framesDecoded": 1800
+            }
+          ]
+        },
+        {
+          "direction": "out",
+          "kind": "video",
+          "entries": [
+            {
+              "type": "outbound-rtp",
+              "kind": "video",
+              "rid": "q",
+              "totalEncodeTime": 3.9,
+              "framesEncoded": 1800,
+              "totalPacketSendDelay": 2.5,
+              "packetsSent": 12000,
+              "framesPerSecond": 30
+            },
+            {
+              "type": "outbound-rtp",
+              "kind": "video",
+              "rid": "f",
+              "totalEncodeTime": 8.4,
+              "framesEncoded": 1800,
+              "totalPacketSendDelay": 6.5,
+              "packetsSent": 24000,
+              "framesPerSecond": 30
+            },
+            {
+              "type": "remote-inbound-rtp",
+              "kind": "video",
+              "roundTripTime": 0.5
+            }
+          ]
+        }
+      ],
+      "block": null
+    },
+    {
+      "name": "counters that did not move and a track that appeared inside the window give no part",
+      "windowMs": 10000,
+      "before": [
+        {
+          "direction": "in",
+          "identity": "host:sh_0123456789abcdefghijkl",
+          "kind": "audio",
+          "entries": [
+            {
+              "type": "transport",
+              "id": "T01",
+              "selectedCandidatePairId": "CP1"
+            },
+            {
+              "type": "candidate-pair",
+              "id": "CP0",
+              "nominated": false,
+              "state": "succeeded",
+              "currentRoundTripTime": 0.9
+            },
+            {
+              "type": "candidate-pair",
+              "id": "CP1",
+              "nominated": true,
+              "state": "succeeded",
+              "currentRoundTripTime": 0.03
+            },
+            {
+              "type": "local-candidate",
+              "id": "L1",
+              "address": "203.0.113.7",
+              "port": 50000
+            },
+            {
+              "type": "remote-candidate",
+              "id": "R1",
+              "address": "198.51.100.9",
+              "port": 443
+            },
+            {
+              "type": "inbound-rtp",
+              "kind": "audio",
+              "jitterBufferDelay": 1000,
+              "jitterBufferEmittedCount": 960000
+            },
+            {
+              "type": "media-playout",
+              "kind": "audio",
+              "totalPlayoutDelay": 500,
+              "totalSamplesCount": 960000
+            }
+          ]
+        }
+      ],
+      "after": [
+        {
+          "direction": "in",
+          "identity": "host:sh_0123456789abcdefghijkl",
+          "kind": "audio",
+          "entries": [
+            {
+              "type": "transport",
+              "id": "T01",
+              "selectedCandidatePairId": "CP1"
+            },
+            {
+              "type": "candidate-pair",
+              "id": "CP0",
+              "nominated": false,
+              "state": "succeeded",
+              "currentRoundTripTime": 0.9
+            },
+            {
+              "type": "candidate-pair",
+              "id": "CP1",
+              "nominated": true,
+              "state": "succeeded",
+              "currentRoundTripTime": 0.03
+            },
+            {
+              "type": "local-candidate",
+              "id": "L1",
+              "address": "203.0.113.7",
+              "port": 50000
+            },
+            {
+              "type": "remote-candidate",
+              "id": "R1",
+              "address": "198.51.100.9",
+              "port": 443
+            },
+            {
+              "type": "inbound-rtp",
+              "kind": "audio",
+              "jitterBufferDelay": 1000,
+              "jitterBufferEmittedCount": 960000
+            },
+            {
+              "type": "media-playout",
+              "kind": "audio",
+              "totalPlayoutDelay": 500,
+              "totalSamplesCount": 960000
+            }
+          ]
+        },
+        {
+          "direction": "in",
+          "identity": "g_Ada0000000000000000000",
+          "kind": "audio",
+          "entries": [
+            {
+              "type": "inbound-rtp",
+              "kind": "audio",
+              "jitterBufferDelay": 5,
+              "jitterBufferEmittedCount": 48000
+            }
+          ]
+        }
+      ],
+      "block": {
+        "v": 1,
+        "windowMs": 10000,
+        "rttMs": 30,
+        "partial": false
+      }
+    }
+  ],
+  "room": [
+    {
+      "name": "everyone reports: both directions, the record's video, the program",
+      "nowMs": 100000,
+      "host": {
+        "identity": "host:sh_0123456789abcdefghijkl",
+        "atMs": 95000,
+        "block": {
+          "v": 1,
+          "windowMs": 10000,
+          "rttMs": 30,
+          "playoutMs": 20,
+          "partial": false,
+          "send": {
+            "videoMs": 25
+          },
+          "from": [
+            {
+              "identity": "g_Ada0000000000000000000",
+              "audioMs": 60,
+              "videoMs": 80
+            },
+            {
+              "identity": "g_Bo00000000000000000000",
+              "audioMs": 70
+            }
+          ]
+        }
+      },
+      "reports": [
+        {
+          "identity": "g_Ada0000000000000000000",
+          "atMs": 92000,
+          "block": {
+            "v": 1,
+            "windowMs": 10000,
+            "rttMs": 42,
+            "playoutMs": 18,
+            "partial": false,
+            "send": {
+              "videoMs": 21
+            },
+            "from": [
+              {
+                "identity": "host:sh_0123456789abcdefghijkl",
+                "audioMs": 61,
+                "videoMs": 84
+              }
+            ]
+          }
+        },
+        {
+          "identity": "g_Bo00000000000000000000",
+          "atMs": 99000,
+          "block": {
+            "v": 1,
+            "windowMs": 10000,
+            "rttMs": 121,
+            "partial": true,
+            "from": [
+              {
+                "identity": "host:sh_0123456789abcdefghijkl",
+                "audioMs": 95
+              }
+            ]
+          }
+        },
+        {
+          "identity": "EG_wide00000000",
+          "atMs": 96000,
+          "block": {
+            "v": 1,
+            "windowMs": 10000,
+            "rttMs": 8,
+            "partial": true,
+            "from": [
+              {
+                "identity": "host:sh_0123456789abcdefghijkl",
+                "audioMs": 45,
+                "videoMs": 30
+              }
+            ]
+          }
+        }
+      ],
+      "expect": {
+        "hostRttMs": 30,
+        "people": {
+          "g_Ada0000000000000000000": {
+            "ms": 161,
+            "partial": false,
+            "toGuestMs": 160,
+            "fromGuestMs": 161,
+            "video": {
+              "toGuestMs": 150,
+              "fromGuestMs": 142
+            }
+          },
+          "g_Bo00000000000000000000": {
+            "ms": 216,
+            "partial": true,
+            "toGuestMs": 216,
+            "fromGuestMs": 211
+          }
+        },
+        "program": {
+          "ms": 112,
+          "audioMs": 109
+        }
+      }
+    },
+    {
+      "name": "partial: a guest's browser reports no playout, so the figure is a floor",
+      "nowMs": 100000,
+      "host": {
+        "identity": "host:sh_0123456789abcdefghijkl",
+        "atMs": 95000,
+        "block": {
+          "v": 1,
+          "windowMs": 10000,
+          "rttMs": 30,
+          "playoutMs": 20,
+          "partial": false,
+          "send": {
+            "videoMs": 25
+          },
+          "from": [
+            {
+              "identity": "g_Ada0000000000000000000",
+              "audioMs": 60,
+              "videoMs": 80
+            },
+            {
+              "identity": "g_Bo00000000000000000000",
+              "audioMs": 70
+            }
+          ]
+        }
+      },
+      "reports": [
+        {
+          "identity": "g_Bo00000000000000000000",
+          "atMs": 99000,
+          "block": {
+            "v": 1,
+            "windowMs": 10000,
+            "rttMs": 121,
+            "partial": true,
+            "from": [
+              {
+                "identity": "host:sh_0123456789abcdefghijkl",
+                "audioMs": 95
+              }
+            ]
+          }
+        }
+      ],
+      "expect": {
+        "hostRttMs": 30,
+        "people": {
+          "g_Bo00000000000000000000": {
+            "ms": 216,
+            "partial": true,
+            "toGuestMs": 216,
+            "fromGuestMs": 211
+          }
+        }
+      }
+    },
+    {
+      "name": "missing part: a guest block with no round trip gives no number",
+      "nowMs": 100000,
+      "host": {
+        "identity": "host:sh_0123456789abcdefghijkl",
+        "atMs": 95000,
+        "block": {
+          "v": 1,
+          "windowMs": 10000,
+          "rttMs": 30,
+          "playoutMs": 20,
+          "partial": false,
+          "send": {
+            "videoMs": 25
+          },
+          "from": [
+            {
+              "identity": "g_Ada0000000000000000000",
+              "audioMs": 60,
+              "videoMs": 80
+            },
+            {
+              "identity": "g_Bo00000000000000000000",
+              "audioMs": 70
+            }
+          ]
+        }
+      },
+      "reports": [
+        {
+          "identity": "g_Ada0000000000000000000",
+          "atMs": 92000,
+          "block": {
+            "v": 1,
+            "windowMs": 10000,
+            "playoutMs": 18,
+            "partial": false,
+            "send": {
+              "videoMs": 21
+            },
+            "from": [
+              {
+                "identity": "host:sh_0123456789abcdefghijkl",
+                "audioMs": 61,
+                "videoMs": 84
+              }
+            ]
+          }
+        }
+      ],
+      "expect": {
+        "hostRttMs": 30,
+        "people": {}
+      }
+    },
+    {
+      "name": "missing part: the guest does not hear the host yet, so one direction and partial",
+      "nowMs": 100000,
+      "host": {
+        "identity": "host:sh_0123456789abcdefghijkl",
+        "atMs": 95000,
+        "block": {
+          "v": 1,
+          "windowMs": 10000,
+          "rttMs": 30,
+          "playoutMs": 20,
+          "partial": false,
+          "send": {
+            "videoMs": 25
+          },
+          "from": [
+            {
+              "identity": "g_Ada0000000000000000000",
+              "audioMs": 60,
+              "videoMs": 80
+            },
+            {
+              "identity": "g_Bo00000000000000000000",
+              "audioMs": 70
+            }
+          ]
+        }
+      },
+      "reports": [
+        {
+          "identity": "g_Ada0000000000000000000",
+          "atMs": 92000,
+          "block": {
+            "v": 1,
+            "windowMs": 10000,
+            "rttMs": 42,
+            "playoutMs": 18,
+            "partial": false,
+            "send": {
+              "videoMs": 21
+            },
+            "from": []
+          }
+        }
+      ],
+      "expect": {
+        "hostRttMs": 30,
+        "people": {
+          "g_Ada0000000000000000000": {
+            "ms": 161,
+            "partial": true,
+            "toGuestMs": null,
+            "fromGuestMs": 161,
+            "video": {
+              "fromGuestMs": 142
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "missing part: neither end has the other's buffer, so no number",
+      "nowMs": 100000,
+      "host": {
+        "identity": "host:sh_0123456789abcdefghijkl",
+        "atMs": 95000,
+        "block": {
+          "v": 1,
+          "windowMs": 10000,
+          "rttMs": 30,
+          "playoutMs": 20,
+          "partial": false,
+          "send": {
+            "videoMs": 25
+          },
+          "from": [
+            {
+              "identity": "g_Bo00000000000000000000",
+              "audioMs": 70
+            }
+          ]
+        }
+      },
+      "reports": [
+        {
+          "identity": "g_Ada0000000000000000000",
+          "atMs": 92000,
+          "block": {
+            "v": 1,
+            "windowMs": 10000,
+            "rttMs": 42,
+            "playoutMs": 18,
+            "partial": false,
+            "send": {
+              "videoMs": 21
+            },
+            "from": []
+          }
+        }
+      ],
+      "expect": {
+        "hostRttMs": 30,
+        "people": {}
+      }
+    },
+    {
+      "name": "missing part: the host has no round trip, so nobody has a number",
+      "nowMs": 100000,
+      "host": {
+        "identity": "host:sh_0123456789abcdefghijkl",
+        "atMs": 95000,
+        "block": {
+          "v": 1,
+          "windowMs": 10000,
+          "playoutMs": 20,
+          "partial": false,
+          "send": {
+            "videoMs": 25
+          },
+          "from": [
+            {
+              "identity": "g_Ada0000000000000000000",
+              "audioMs": 60,
+              "videoMs": 80
+            },
+            {
+              "identity": "g_Bo00000000000000000000",
+              "audioMs": 70
+            }
+          ]
+        }
+      },
+      "reports": [
+        {
+          "identity": "g_Ada0000000000000000000",
+          "atMs": 92000,
+          "block": {
+            "v": 1,
+            "windowMs": 10000,
+            "rttMs": 42,
+            "playoutMs": 18,
+            "partial": false,
+            "send": {
+              "videoMs": 21
+            },
+            "from": [
+              {
+                "identity": "host:sh_0123456789abcdefghijkl",
+                "audioMs": 61,
+                "videoMs": 84
+              }
+            ]
+          }
+        },
+        {
+          "identity": "EG_wide00000000",
+          "atMs": 96000,
+          "block": {
+            "v": 1,
+            "windowMs": 10000,
+            "rttMs": 8,
+            "partial": true,
+            "from": [
+              {
+                "identity": "host:sh_0123456789abcdefghijkl",
+                "audioMs": 45,
+                "videoMs": 30
+              }
+            ]
+          }
+        }
+      ],
+      "expect": {
+        "people": {}
+      }
+    },
+    {
+      "name": "stale: a report 25 s old still counts",
+      "nowMs": 100000,
+      "host": {
+        "identity": "host:sh_0123456789abcdefghijkl",
+        "atMs": 95000,
+        "block": {
+          "v": 1,
+          "windowMs": 10000,
+          "rttMs": 30,
+          "playoutMs": 20,
+          "partial": false,
+          "send": {
+            "videoMs": 25
+          },
+          "from": [
+            {
+              "identity": "g_Ada0000000000000000000",
+              "audioMs": 60,
+              "videoMs": 80
+            },
+            {
+              "identity": "g_Bo00000000000000000000",
+              "audioMs": 70
+            }
+          ]
+        }
+      },
+      "reports": [
+        {
+          "identity": "g_Ada0000000000000000000",
+          "atMs": 75000,
+          "block": {
+            "v": 1,
+            "windowMs": 10000,
+            "rttMs": 42,
+            "playoutMs": 18,
+            "partial": false,
+            "send": {
+              "videoMs": 21
+            },
+            "from": [
+              {
+                "identity": "host:sh_0123456789abcdefghijkl",
+                "audioMs": 61,
+                "videoMs": 84
+              }
+            ]
+          }
+        }
+      ],
+      "expect": {
+        "hostRttMs": 30,
+        "people": {
+          "g_Ada0000000000000000000": {
+            "ms": 161,
+            "partial": false,
+            "toGuestMs": 160,
+            "fromGuestMs": 161,
+            "video": {
+              "toGuestMs": 150,
+              "fromGuestMs": 142
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "stale: a report older than 25 s disappears, the others stay",
+      "nowMs": 100000,
+      "host": {
+        "identity": "host:sh_0123456789abcdefghijkl",
+        "atMs": 95000,
+        "block": {
+          "v": 1,
+          "windowMs": 10000,
+          "rttMs": 30,
+          "playoutMs": 20,
+          "partial": false,
+          "send": {
+            "videoMs": 25
+          },
+          "from": [
+            {
+              "identity": "g_Ada0000000000000000000",
+              "audioMs": 60,
+              "videoMs": 80
+            },
+            {
+              "identity": "g_Bo00000000000000000000",
+              "audioMs": 70
+            }
+          ]
+        }
+      },
+      "reports": [
+        {
+          "identity": "g_Ada0000000000000000000",
+          "atMs": 74999,
+          "block": {
+            "v": 1,
+            "windowMs": 10000,
+            "rttMs": 42,
+            "playoutMs": 18,
+            "partial": false,
+            "send": {
+              "videoMs": 21
+            },
+            "from": [
+              {
+                "identity": "host:sh_0123456789abcdefghijkl",
+                "audioMs": 61,
+                "videoMs": 84
+              }
+            ]
+          }
+        },
+        {
+          "identity": "g_Bo00000000000000000000",
+          "atMs": 99000,
+          "block": {
+            "v": 1,
+            "windowMs": 10000,
+            "rttMs": 121,
+            "partial": true,
+            "from": [
+              {
+                "identity": "host:sh_0123456789abcdefghijkl",
+                "audioMs": 95
+              }
+            ]
+          }
+        },
+        {
+          "identity": "EG_wide00000000",
+          "atMs": 74999,
+          "block": {
+            "v": 1,
+            "windowMs": 10000,
+            "rttMs": 8,
+            "partial": true,
+            "from": [
+              {
+                "identity": "host:sh_0123456789abcdefghijkl",
+                "audioMs": 45,
+                "videoMs": 30
+              }
+            ]
+          }
+        }
+      ],
+      "expect": {
+        "hostRttMs": 30,
+        "people": {
+          "g_Bo00000000000000000000": {
+            "ms": 216,
+            "partial": true,
+            "toGuestMs": 216,
+            "fromGuestMs": 211
+          }
+        }
+      }
+    },
+    {
+      "name": "stale: the host's own sample is too old, so there is no number at all",
+      "nowMs": 100000,
+      "host": {
+        "identity": "host:sh_0123456789abcdefghijkl",
+        "atMs": 74999,
+        "block": {
+          "v": 1,
+          "windowMs": 10000,
+          "rttMs": 30,
+          "playoutMs": 20,
+          "partial": false,
+          "send": {
+            "videoMs": 25
+          },
+          "from": [
+            {
+              "identity": "g_Ada0000000000000000000",
+              "audioMs": 60,
+              "videoMs": 80
+            },
+            {
+              "identity": "g_Bo00000000000000000000",
+              "audioMs": 70
+            }
+          ]
+        }
+      },
+      "reports": [
+        {
+          "identity": "g_Ada0000000000000000000",
+          "atMs": 99000,
+          "block": {
+            "v": 1,
+            "windowMs": 10000,
+            "rttMs": 42,
+            "playoutMs": 18,
+            "partial": false,
+            "send": {
+              "videoMs": 21
+            },
+            "from": [
+              {
+                "identity": "host:sh_0123456789abcdefghijkl",
+                "audioMs": 61,
+                "videoMs": 84
+              }
+            ]
+          }
+        },
+        {
+          "identity": "EG_wide00000000",
+          "atMs": 99000,
+          "block": {
+            "v": 1,
+            "windowMs": 10000,
+            "rttMs": 8,
+            "partial": true,
+            "from": [
+              {
+                "identity": "host:sh_0123456789abcdefghijkl",
+                "audioMs": 45,
+                "videoMs": 30
+              }
+            ]
+          }
+        }
+      ],
+      "expect": {
+        "people": {}
+      }
+    },
+    {
+      "name": "no host sample yet",
+      "nowMs": 100000,
+      "host": null,
+      "reports": [
+        {
+          "identity": "g_Ada0000000000000000000",
+          "atMs": 99000,
+          "block": {
+            "v": 1,
+            "windowMs": 10000,
+            "rttMs": 42,
+            "playoutMs": 18,
+            "partial": false,
+            "send": {
+              "videoMs": 21
+            },
+            "from": [
+              {
+                "identity": "host:sh_0123456789abcdefghijkl",
+                "audioMs": 61,
+                "videoMs": 84
+              }
+            ]
+          }
+        }
+      ],
+      "expect": {
+        "people": {}
+      }
+    },
+    {
+      "name": "a report stamped after now is not current",
+      "nowMs": 100000,
+      "host": {
+        "identity": "host:sh_0123456789abcdefghijkl",
+        "atMs": 95000,
+        "block": {
+          "v": 1,
+          "windowMs": 10000,
+          "rttMs": 30,
+          "playoutMs": 20,
+          "partial": false,
+          "send": {
+            "videoMs": 25
+          },
+          "from": [
+            {
+              "identity": "g_Ada0000000000000000000",
+              "audioMs": 60,
+              "videoMs": 80
+            },
+            {
+              "identity": "g_Bo00000000000000000000",
+              "audioMs": 70
+            }
+          ]
+        }
+      },
+      "reports": [
+        {
+          "identity": "g_Ada0000000000000000000",
+          "atMs": 100001,
+          "block": {
+            "v": 1,
+            "windowMs": 10000,
+            "rttMs": 42,
+            "playoutMs": 18,
+            "partial": false,
+            "send": {
+              "videoMs": 21
+            },
+            "from": [
+              {
+                "identity": "host:sh_0123456789abcdefghijkl",
+                "audioMs": 61,
+                "videoMs": 84
+              }
+            ]
+          }
+        }
+      ],
+      "expect": {
+        "hostRttMs": 30,
+        "people": {}
+      }
+    },
+    {
+      "name": "a page loaded before the deploy sends no block: no program number",
+      "nowMs": 100000,
+      "host": {
+        "identity": "host:sh_0123456789abcdefghijkl",
+        "atMs": 95000,
+        "block": {
+          "v": 1,
+          "windowMs": 10000,
+          "rttMs": 30,
+          "playoutMs": 20,
+          "partial": false,
+          "send": {
+            "videoMs": 25
+          },
+          "from": [
+            {
+              "identity": "g_Ada0000000000000000000",
+              "audioMs": 60,
+              "videoMs": 80
+            },
+            {
+              "identity": "g_Bo00000000000000000000",
+              "audioMs": 70
+            }
+          ]
+        }
+      },
+      "reports": [
+        {
+          "identity": "g_Ada0000000000000000000",
+          "atMs": 92000,
+          "block": {
+            "v": 1,
+            "windowMs": 10000,
+            "rttMs": 42,
+            "playoutMs": 18,
+            "partial": false,
+            "send": {
+              "videoMs": 21
+            },
+            "from": [
+              {
+                "identity": "host:sh_0123456789abcdefghijkl",
+                "audioMs": 61,
+                "videoMs": 84
+              }
+            ]
+          }
+        }
+      ],
+      "expect": {
+        "hostRttMs": 30,
+        "people": {
+          "g_Ada0000000000000000000": {
+            "ms": 161,
+            "partial": false,
+            "toGuestMs": 160,
+            "fromGuestMs": 161,
+            "video": {
+              "toGuestMs": 150,
+              "fromGuestMs": 142
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "the host's camera is off: no send time, so no program number and no video to the guest",
+      "nowMs": 100000,
+      "host": {
+        "identity": "host:sh_0123456789abcdefghijkl",
+        "atMs": 95000,
+        "block": {
+          "v": 1,
+          "windowMs": 10000,
+          "rttMs": 30,
+          "playoutMs": 20,
+          "partial": false,
+          "from": [
+            {
+              "identity": "g_Ada0000000000000000000",
+              "audioMs": 60,
+              "videoMs": 80
+            },
+            {
+              "identity": "g_Bo00000000000000000000",
+              "audioMs": 70
+            }
+          ]
+        }
+      },
+      "reports": [
+        {
+          "identity": "g_Ada0000000000000000000",
+          "atMs": 92000,
+          "block": {
+            "v": 1,
+            "windowMs": 10000,
+            "rttMs": 42,
+            "playoutMs": 18,
+            "partial": false,
+            "send": {
+              "videoMs": 21
+            },
+            "from": [
+              {
+                "identity": "host:sh_0123456789abcdefghijkl",
+                "audioMs": 61,
+                "videoMs": 84
+              }
+            ]
+          }
+        },
+        {
+          "identity": "EG_wide00000000",
+          "atMs": 96000,
+          "block": {
+            "v": 1,
+            "windowMs": 10000,
+            "rttMs": 8,
+            "partial": true,
+            "from": [
+              {
+                "identity": "host:sh_0123456789abcdefghijkl",
+                "audioMs": 45,
+                "videoMs": 30
+              }
+            ]
+          }
+        }
+      ],
+      "expect": {
+        "hostRttMs": 30,
+        "people": {
+          "g_Ada0000000000000000000": {
+            "ms": 161,
+            "partial": false,
+            "toGuestMs": 160,
+            "fromGuestMs": 161,
+            "video": {
+              "fromGuestMs": 142
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "the page decodes no picture from the host: no program number",
+      "nowMs": 100000,
+      "host": {
+        "identity": "host:sh_0123456789abcdefghijkl",
+        "atMs": 95000,
+        "block": {
+          "v": 1,
+          "windowMs": 10000,
+          "rttMs": 30,
+          "playoutMs": 20,
+          "partial": false,
+          "send": {
+            "videoMs": 25
+          },
+          "from": [
+            {
+              "identity": "g_Ada0000000000000000000",
+              "audioMs": 60,
+              "videoMs": 80
+            },
+            {
+              "identity": "g_Bo00000000000000000000",
+              "audioMs": 70
+            }
+          ]
+        }
+      },
+      "reports": [
+        {
+          "identity": "EG_wide00000000",
+          "atMs": 96000,
+          "block": {
+            "v": 1,
+            "windowMs": 10000,
+            "rttMs": 8,
+            "partial": true,
+            "from": [
+              {
+                "identity": "host:sh_0123456789abcdefghijkl",
+                "audioMs": 45
+              }
+            ]
+          }
+        }
+      ],
+      "expect": {
+        "hostRttMs": 30,
+        "people": {}
+      }
+    },
+    {
+      "name": "two program pages: the slower one is the program",
+      "nowMs": 100000,
+      "host": {
+        "identity": "host:sh_0123456789abcdefghijkl",
+        "atMs": 95000,
+        "block": {
+          "v": 1,
+          "windowMs": 10000,
+          "rttMs": 30,
+          "playoutMs": 20,
+          "partial": false,
+          "send": {
+            "videoMs": 25
+          },
+          "from": [
+            {
+              "identity": "g_Ada0000000000000000000",
+              "audioMs": 60,
+              "videoMs": 80
+            },
+            {
+              "identity": "g_Bo00000000000000000000",
+              "audioMs": 70
+            }
+          ]
+        }
+      },
+      "reports": [
+        {
+          "identity": "EG_wide00000000",
+          "atMs": 96000,
+          "block": {
+            "v": 1,
+            "windowMs": 10000,
+            "rttMs": 8,
+            "partial": true,
+            "from": [
+              {
+                "identity": "host:sh_0123456789abcdefghijkl",
+                "audioMs": 45,
+                "videoMs": 30
+              }
+            ]
+          }
+        },
+        {
+          "identity": "EG_tall00000000",
+          "atMs": 96000,
+          "block": {
+            "v": 1,
+            "windowMs": 10000,
+            "rttMs": 8,
+            "partial": true,
+            "from": [
+              {
+                "identity": "host:sh_0123456789abcdefghijkl",
+                "audioMs": 45,
+                "videoMs": 50
+              }
+            ]
+          }
+        }
+      ],
+      "expect": {
+        "hostRttMs": 30,
+        "people": {},
+        "program": {
+          "ms": 132,
+          "audioMs": 109
+        }
+      }
+    },
+    {
+      "name": "a report that claims the host's identity is ignored",
+      "nowMs": 100000,
+      "host": {
+        "identity": "host:sh_0123456789abcdefghijkl",
+        "atMs": 95000,
+        "block": {
+          "v": 1,
+          "windowMs": 10000,
+          "rttMs": 30,
+          "playoutMs": 20,
+          "partial": false,
+          "send": {
+            "videoMs": 25
+          },
+          "from": [
+            {
+              "identity": "g_Ada0000000000000000000",
+              "audioMs": 60,
+              "videoMs": 80
+            },
+            {
+              "identity": "g_Bo00000000000000000000",
+              "audioMs": 70
+            }
+          ]
+        }
+      },
+      "reports": [
+        {
+          "identity": "host:sh_0123456789abcdefghijkl",
+          "atMs": 99000,
+          "block": {
+            "v": 1,
+            "windowMs": 10000,
+            "rttMs": 42,
+            "playoutMs": 18,
+            "partial": false,
+            "send": {
+              "videoMs": 21
+            },
+            "from": [
+              {
+                "identity": "host:sh_0123456789abcdefghijkl",
+                "audioMs": 61,
+                "videoMs": 84
+              }
+            ]
+          }
+        }
+      ],
+      "expect": {
+        "hostRttMs": 30,
+        "people": {}
+      }
+    }
+  ]
+}

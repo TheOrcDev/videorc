@@ -115,6 +115,21 @@ compares them with the JSON field for field.
 - Rust: `cargo test -p videorc-backend virtual_camera_fixture`
 - TypeScript: `pnpm --filter @videorc/desktop test -- backend-rpc-contract.test.ts`
 
+## `room-latency.json`
+
+How a managed talk show measures its own delay (plan 253,
+`docs/cloud/253-latency-contract.md`), edited by hand: the `net` blocks the
+parser accepts and refuses, the relay's envelope, the sampler's arithmetic on
+canned WebRTC stats reports (deltas over a window, never session totals), and
+the room cases: held blocks in, each guest's conversation delay and the
+program delay out, with a missing part, `partial` and a stale report. The
+desktop model (`apps/desktop/src/shared/room-latency.ts`) and the web's copy
+(videorc-web `lib/cloud/program/room-latency.ts`) must both pass it. The web
+keeps a byte copy in `tests/fixtures/`:
+
+- TypeScript: `pnpm --filter @videorc/desktop test -- room-latency.test.ts`
+- Web: `node --import tsx --test tests/room-latency.test.ts`
+
 ## `room-program-camera.json`
 
 Plan 249 S23: the room's Program preview as Videorc Camera's picture. The
