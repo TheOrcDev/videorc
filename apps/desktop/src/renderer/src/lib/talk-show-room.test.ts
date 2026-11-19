@@ -1527,3 +1527,46 @@ describe('processed camera contribution (S13b)', () => {
     vi.unstubAllGlobals()
   })
 })
+
+// The owner, 2026-11-19 (0.32.1): a managed talk show's comment cards and
+// captions never reached the viewers while the room's Graphics switch was
+// off, its default in every new room.
+describe('room graphics and the Graphics switch', () => {
+  const layer = (kind: 'banner' | 'caption' | 'chat' | 'highlight', id: string) => ({
+    id,
+    kind,
+    rect: { x: 0, y: 0, w: 0.5, h: 0.5 },
+    asset: { png: 'iVBORw0KGgo=', hash: 'a'.repeat(64), width: 1, height: 1 },
+    opacity: 1,
+    fade: null,
+    expiresAt: kind === 'banner' ? null : Date.now() + 10_000,
+    stream: true,
+    recording: true
+  })
+
+  it('sends captions and the comment card with the switch off, banners only once it is on', async () => {
+    const { room } = client()
+    await room.connect()
+    Object.assign(latestRoom().localParticipant, { sid: 'PA_host' })
+    const kinds = () => room.snapshot.graphics?.preview?.layers.map((l) => l.kind) ?? []
+    room.setGraphics({
+      h: [
+        layer('banner', 'banner:b1'),
+        layer('caption', 'caption'),
+        layer('highlight', 'highlight')
+      ],
+      v: [],
+      unsupported: []
+    })
+    expect(room.snapshot.graphics?.enabled).toBe(false)
+    expect(kinds()).toEqual(['caption', 'highlight'])
+    room.setGraphicsEnabled(true)
+    expect(kinds()).toEqual(['banner', 'caption', 'highlight'])
+    room.setGraphicsEnabled(false)
+    expect(kinds()).toEqual(['caption', 'highlight'])
+    // The card expired and the captions stopped: nothing is sent.
+    room.setGraphics({ h: [layer('banner', 'banner:b1')], v: [], unsupported: [] })
+    expect(room.snapshot.graphics?.preview ?? null).toBeNull()
+    await room.disconnect()
+  })
+})

@@ -7,6 +7,7 @@ import {
 } from './room-microphone-source'
 import {
   RoomGraphicsPublisher,
+  roomGraphicsContent,
   type AcceptedGraphicsView,
   type GraphicsContent,
   type RoomGraphicsStatus
@@ -907,19 +908,22 @@ export class TalkShowRoomClient {
     this.#publish()
   }
 
+  // Captions and the comment card go out with the switch off too
+  // (`roomGraphicsContent`); banners, timers and the chat box wait for it.
   setGraphics(content: GraphicsContent | null): void {
     this.#graphicsContent = content
-    this.#graphics?.set(this.#graphicsEnabled ? content : null)
+    this.#graphics?.set(roomGraphicsContent(content, this.#graphicsEnabled))
     this.#htmlLayers?.setPlacements(this.#graphicsEnabled ? (content?.html ?? null) : null)
   }
   failGraphics(): void {
     this.#graphicsContent = null
     if (this.#graphicsEnabled) this.#graphics?.fail()
+    else this.#graphics?.set(null)
     this.#htmlLayers?.setPlacements(null)
   }
   setGraphicsEnabled(enabled: boolean): void {
     this.#graphicsEnabled = enabled
-    this.#graphics?.set(enabled ? this.#graphicsContent : null)
+    this.#graphics?.set(roomGraphicsContent(this.#graphicsContent, enabled))
     this.#htmlLayers?.setPlacements(enabled ? (this.#graphicsContent?.html ?? null) : null)
   }
 
@@ -1189,7 +1193,7 @@ export class TalkShowRoomClient {
         if (this.#owns(room)) this.#deps.onGraphicsAccepted?.(view)
       }
     )
-    this.#graphics.set(this.#graphicsEnabled ? this.#graphicsContent : null)
+    this.#graphics.set(roomGraphicsContent(this.#graphicsContent, this.#graphicsEnabled))
     // Plan 249 S11: bound to this room; any ownership loss closes it.
     void this.#htmlLayers?.close()
     this.#htmlLayers = null

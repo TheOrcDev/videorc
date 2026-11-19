@@ -39,9 +39,13 @@ export function roomAvatarDescription(avatar: RoomProgramOptIn | null | undefine
   return optInStatus(avatar)
 }
 
-/** The Graphics switch's description in Guests → Room. */
+/**
+ * The Graphics switch's description in Guests → Room. Captions and comment
+ * cards reach the stream with the switch off too (`roomGraphicsContent`), so
+ * their delivery never reads as the banners being on.
+ */
 export function roomGraphicsDescription(graphics: RoomProgramOptIn | null | undefined): string {
-  return `Banners, timers and the chat box. ${optInStatus(graphics)}`
+  return `Banners, timers and the chat box. ${graphics?.enabled ? optInStatus(graphics) : 'Not on the stream.'}`
 }
 
 /** The Program preview's one line: "Avatar off · Graphics off". */
