@@ -189,17 +189,17 @@ pub(crate) fn build_payload(install_id: &str) -> DeviceCheckinPayload {
 fn os_version() -> Option<String> {
     #[cfg(target_os = "macos")]
     {
-        return macos_product_version();
+        macos_product_version()
     }
     #[cfg(windows)]
     {
-        return windows_os_version();
+        windows_os_version()
     }
     #[cfg(target_os = "linux")]
     {
-        return std::fs::read_to_string("/etc/os-release")
+        std::fs::read_to_string("/etc/os-release")
             .ok()
-            .and_then(|text| linux_os_version_from_release(&text));
+            .and_then(|text| linux_os_version_from_release(&text))
     }
     #[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
     {
