@@ -5,9 +5,8 @@ import {
   reduceCloudDownload,
   type CloudDownloads
 } from '@/lib/cloud-recordings-view'
-import { revealInFileManagerLabel } from '@/lib/platform'
-import { toast } from '@/lib/toast'
-import { toastUserError, UserFacingError } from '@/lib/user-error'
+import { withWorkNotifications } from '@/lib/notify'
+import { toastUserError, UserFacingError, userErrorMessage } from '@/lib/user-error'
 
 // Plan 234: the Library's cloud downloads. A download is a backend job
 // (`cloud.recordings.download` → `{ jobId }`, then `cloud.recordings.download`
@@ -66,17 +65,19 @@ function announce(event: CloudRecordingDownloadEvent): void {
     // It failed and needs the streamer, whether or not the row is in view.
     // Raw text (FFmpeg's lines) reaches only the console and the support ring.
     const known = knownCloudDownloadRefusal(event.error)
-    toastUserError(known ? new UserFacingError(known) : new Error(event.error ?? ''), CONTEXT, {
-      id: TOAST_ID(event.recordingId)
-    })
+    const copy = userErrorMessage(
+      known ? new UserFacingError(known) : new Error(event.error ?? ''),
+      CONTEXT
+    )
+    console.warn('[cloud-download] failed:', copy.raw)
+    withWorkNotifications((work) => work.publishCloudDownloadFailed(event.recordingId, copy))
     return
   }
   // A download that finishes out of view is news; in view, the row says it.
   if (event.state === 'done' && openViews === 0) {
-    toast.success('Cloud recording saved', {
-      id: TOAST_ID(event.recordingId),
-      action: { label: revealInFileManagerLabel(), onClick: () => revealCloudDownload(event.jobId) }
-    })
+    withWorkNotifications((work) =>
+      work.publishCloudDownloadSaved(event.recordingId, () => revealCloudDownload(event.jobId))
+    )
   }
 }
 

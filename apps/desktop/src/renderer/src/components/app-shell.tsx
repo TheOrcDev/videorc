@@ -7,6 +7,7 @@ import { AppErrorBoundary } from '@/components/app-error-boundary'
 import { Pane, PaneBody, Toolbar } from '@/components/pane'
 import { PageErrorBoundary } from '@/components/page-error-boundary'
 import { PageLoading } from '@/components/page-loading'
+import { MainNotificationBell } from '@/components/notifications/main-notification-bell'
 import { Sidebar } from '@/components/sidebar'
 import { StatusBar, StatusBarHint } from '@/components/status-bar'
 import { StatusBarSessionState } from '@/components/status-bar-session'
@@ -38,6 +39,7 @@ import {
   type CleanCutTabRequest
 } from '@/lib/clean-cut-events'
 import { isModalOpen } from '@/lib/modal-open'
+import { notificationsOpen, toggleNotifications } from '@/lib/notification-count'
 import { pageChunk, useRenderPageWhenLoaded, type PageLoad } from '@/lib/page-chunk'
 import { PAGE_CONTAINER } from '@/lib/page-layout'
 import { navigationShortcutTab, shellShortcutAction } from '@/lib/shell-shortcuts'
@@ -447,6 +449,7 @@ function AppShellContent(): ReactElement {
         platform: runtimeInfo?.platform,
         modalOpen: setupOpenRef.current || isModalOpen(document),
         searchOpen: commandOpenRef.current,
+        notificationsOpen: notificationsOpen(),
         notesWindowEnabled: Boolean(runtimeInfo?.notesWindowEnabled),
         commentsWindowEnabled: Boolean(runtimeInfo?.commentsWindowEnabled)
       })
@@ -460,6 +463,7 @@ function AppShellContent(): ReactElement {
       else if (action === 'show-stream-manager') void openCommentsWindow()
       else if (action === 'toggle-stream-manager') void toggleCommentsWindow()
       else if (action === 'toggle-captions') void toggleCaptionsWindow()
+      else if (action === 'toggle-notifications') toggleNotifications()
       else openSettings('shortcuts')
     }
     document.addEventListener('keydown', onKeyDown)
@@ -510,12 +514,21 @@ function AppShellContent(): ReactElement {
       if (navigation.tab === 'settings') openSettings(navigation.settingsTab)
       else if (navigation.tab === 'ai') openBuddy(navigation.buddyTab)
       else if (navigation.tab === 'avatar') openAvatar(navigation.avatarTab)
-      else if (navigation.tab === 'live') openLivestream(navigation.livestreamView)
-      else setActive(navigation.tab)
+      else if (navigation.tab === 'live') {
+        openLivestream(navigation.livestreamView)
+        // Plan 250 S4: a named destination opens its card, through the same
+        // state the Stream Manager's "Use Sign in" sets.
+        if (navigation.destinationId) setDestinationToOpen(navigation.destinationId)
+      }
+      // Plan 250 S4: "Open in Library" lands on its recording. `setActive`
+      // alone dropped the id.
+      else if (navigation.tab === 'library' && navigation.sessionId) {
+        openLibrarySession(navigation.sessionId)
+      } else setActive(navigation.tab)
     }
     window.addEventListener(WORKSPACE_NAVIGATE_EVENT, onWorkspaceNavigate)
     return () => window.removeEventListener(WORKSPACE_NAVIGATE_EVENT, onWorkspaceNavigate)
-  }, [openAvatar, openBuddy, openLivestream, openSettings, setActive])
+  }, [openAvatar, openBuddy, openLibrarySession, openLivestream, openSettings, setActive])
 
   // Plan 170 D18: `videorc://buddy` opens the avatar's page (main focused the
   // window and synced the library); Make it Alive also opens the creator
@@ -739,6 +752,8 @@ function AppShellContent(): ReactElement {
                   }
                 />
               ) : null}
+              {/* The bell (plan 250, D1): the bar's last control. */}
+              <MainNotificationBell platform={runtimeInfo?.platform} />
             </StatusBar>
           </main>
         </div>

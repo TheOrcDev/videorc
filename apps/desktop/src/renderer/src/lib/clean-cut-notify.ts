@@ -1,7 +1,7 @@
 import type { CleanCutJob } from './backend'
 import { openCleanCut } from './clean-cut-events'
 import { cleanCutReadyTitle } from './clean-cut-view'
-import { toast } from './toast'
+import { withWorkNotifications } from './notify'
 
 // Plan 119 S15: "Your clean cut is ready (42:10 → 31:05)", once per job and
 // cut-list revision, with Review. The render finishes out of view, which is
@@ -57,7 +57,7 @@ function browserStorage(): AnnouncementStorage | null {
   }
 }
 
-/** Shows the ready toast unless this revision was announced. True when shown. */
+/** Says the cut is ready unless this revision was announced. True when said. */
 export function announceCleanCutReady(
   job: CleanCutJob,
   storage: AnnouncementStorage | null = browserStorage()
@@ -75,20 +75,16 @@ export function announceCleanCutReady(
   } catch {
     // The in-window set still holds.
   }
-  toast.success(cleanCutReadyTitle(job), {
-    id: `clean-cut-ready-${job.id}`,
-    description: 'The original is kept.',
-    duration: 15_000,
-    action: {
-      label: 'Review',
-      onClick: () =>
-        openCleanCut({
-          sessionId: job.sourceSessionId,
-          jobId: job.id,
-          mode: job.mode,
-          review: true
-        })
-    }
-  })
+  // Plan 250: an entry behind the bell with Review; a short toast while idle.
+  withWorkNotifications((work) =>
+    work.publishCleanCutReady({ id: job.id, title: cleanCutReadyTitle(job) }, () =>
+      openCleanCut({
+        sessionId: job.sourceSessionId,
+        jobId: job.id,
+        mode: job.mode,
+        review: true
+      })
+    )
+  )
   return true
 }

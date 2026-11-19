@@ -417,7 +417,8 @@ Everything except ⌘K uses the desktop scale.
   on the left, as a button that opens Health ("● On air 12:04",
   `StatusBarSessionState`). On the right, quiet 11 px shortcut hints
   (`StatusBarHint`), each still clickable and pressed while its window is
-  open: ⌘K Search, ⌘P Preview, ⇧⌘N Notes, ⇧⌘J Stream Manager. Every
+  open: ⌘K Search, ⌘P Preview, ⇧⌘N Notes, ⇧⌘J Stream Manager. Last on the
+  right, the bell that opens Notifications (plan 250). Every
   clickable thing in a status bar is a `StatusBarHint` or a
   `StatusBarAction` (20 px, 11 px tertiary text that brightens on hover).
 - **Sections** (`PanelSection`): flush. A 13 px / 600 header (an `h2`; a
@@ -1016,9 +1017,15 @@ which breathes on opacity alone while a session runs (D5, 2026-11-01).
 
 ## Toast discipline
 
-Toasts are for news the interface does not already show, never for
+A toast is the answer to something the streamer just did, in the window
+they did it in ("Couldn't import the image", "Removing {name}'s message ·
+Undo"). It is for news the interface does not already show, never for
 confirming a routine interaction the user just watched succeed. The copy
 (title, description, action, error shape) is `docs/ui-copy.md` → Toasts.
+
+What Videorc notices on its own (a backend event, a dropped destination,
+work that finished out of view) is a **notification**, not a toast: see
+"Notifications" below. Unprompted code never imports `toast`.
 
 - **Never toast success for scene, layout, or source changes.** The
   stage/preview is the confirmation (owner call, 2026-07-16: "no green
@@ -1038,9 +1045,12 @@ confirming a routine interaction the user just watched succeed. The copy
   - a one-line toast keeps sonner's 4 s;
   - a toast with a description stays at least 8 s
     (`TOAST_WITH_DESCRIPTION_MS`);
-  - a toast with an action stays until it is acted on or closed, and so
-    does one that mirrors a state still true ("Streaming to X stopped"
-    until "X is back" replaces it).
+  - a toast with an action stays until it is acted on or closed.
+  - No toast is pinned to mirror a state (plan 250, owner 2026-11-19): a
+    state that is still true is an open entry behind the bell. Only three
+    toasts set `duration: Infinity` themselves, and a guard names them: the
+    "Remove this message?" question, "Couldn't start", and the browser
+    step of a connection.
 - One id per kind of toast, so a newer one replaces the older and the same
   news never stacks. Each window shows at most three, each dismissible,
   above its status bar.
@@ -1050,9 +1060,61 @@ confirming a routine interaction the user just watched succeed. The copy
   {action} {object}" with the known cause or the generic next step, and
   logs the raw text.
 - Warnings and errors always surface. Silence is only for the expected
-  outcome.
+  outcome. For a notification, "surface" means the bell: its number and its
+  tone. While a recording or a livestream runs, only an urgent one also
+  pops up (below).
 - When in doubt, don't toast. A user mid-flow reads every popup as an
   interruption.
+
+## Notifications
+
+The list behind the bell (plan 250). Everything Videorc notices on its own
+is one entry there, and the rules are code: `lib/notifications/policy.ts`
+(tested as tables) and the registry `lib/notifications/kinds.ts`.
+
+- **The bell** (`NotificationBell`) is the last control of a status bar, in
+  the main window and the Stream Manager: a `StatusBarAction` with
+  `NotificationsIcon` and the unread number. The tone is on the icon only
+  (warning amber while a warning is open, the live red while something
+  urgent is) and stays while the problem is open, even with nothing unread.
+  The number is never coloured; above 9 it reads "9+". ⇧⌘B opens it.
+- **The list** is a `Popover` on the popup tier, 380 px, opening upward:
+  a header ("Notifications", "Clear all"), "Now" (what is still true) and
+  "Earlier" under `SectionLabel`s, and one footer line that says what the
+  quiet rule is doing and links to its switch. Rows are flush and split by
+  hairlines, never cards.
+- **One entry** (`NotificationEntryRow`): a 16 px icon in the entry's tone
+  (`ErrorIcon` urgent, `WarningIcon`, `InfoIcon` news, `SuccessIcon` done or
+  resolved, `Spinner` in progress), the title (14 px / 500, one line), the
+  time, the detail (12 px, two lines at most), then at most two `xs`
+  buttons (the first `default`, the second `ghost`) and Clear (ghost
+  `icon-xs`, on hover and focus). Nothing but the icon is tinted.
+- **One entry per subject.** The key names the subject (`microphone`,
+  `stream-target:<id>`), not the message. A second report updates the entry
+  in place, whichever system sent it; a recovery resolves it. Nothing
+  stacks, and a repeat says so in the detail ("3 times.").
+- **Four tones.** Urgent: viewers or the recording are affected right now.
+  Warning: degraded, or it needs you soon. News: worth knowing, nothing to
+  do. Done: work finished out of view, or a problem that cleared. A new
+  urgent kind is a decision: the registry's urgent rows are pinned by a
+  test.
+- **Quiet while recording or live** (Settings → General → Notifications, on
+  by default). Only an urgent entry pops up as a toast, once per episode,
+  for 15 s. Idle, or with quiet off, a warning or finished work pops up for
+  8 s. News never pops up. Nothing pops up while the list is open, and a
+  recovery never pops up: it replaces the problem's toast if that is still
+  on screen.
+- **The pop-up is the entry.** Closing it by hand or pressing its button
+  marks the entry read; one that times out leaves it unread behind the
+  bell. Only `lib/notifications/pop-up.ts` turns an entry into a toast.
+- **Every entry has its way out**: a fix that runs in place (Unmute,
+  Resume, Retry), or the door to the page that owns the control (Open
+  Audio, Open Destinations). A door closes the list; a fix keeps it open.
+  One home per control still holds: an entry never grows a control of its
+  own.
+- **The Session panel's watchdog cards stay** (plan 223 D2): they are state
+  on the Studio page and never pop up. The card and the entry are the same
+  alert with the same buttons; Clear on the entry is the card's Got it.
 
 ## Primitives
 
@@ -1183,6 +1245,7 @@ Words, numbers and navigation
 | Objects with a picture       | `MediaCard` (8 px, hairline, no shadow)                                     |
 | Per-item actions             | `KebabMenu`                                                                 |
 | Global state and hints       | `StatusBar` + `StatusBarHint` / `StatusBarAction`                           |
+| What Videorc noticed itself  | A notification: `notify(…)` / the store, never `toast`                      |
 | Palette / searchable list    | `Command` (+ `CommandDialog`), palette scale                                |
 | First-run setup              | The Liquid Chrome backdrop and one card on the dialog tier                  |
 | Modals                       | `Dialog` with `size`, `DialogBody` for the scroll                           |

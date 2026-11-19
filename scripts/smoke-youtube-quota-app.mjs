@@ -11,6 +11,7 @@ import {
   summarizeYouTubeAttempts
 } from './lib/fake-youtube-api.mjs'
 import { requestSmokeCommand } from './lib/smoke-command-client.mjs'
+import { countNotifications, READ_NOTIFICATIONS_CODE } from './lib/notifications-smoke.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
 
 // Quota-outage drill (plan 094, S4). Drives the dev app through a full
@@ -246,13 +247,16 @@ try {
   )
   const pausedEvents = events.quota.slice(quotaEventsBefore).filter((status) => status.pausedUntil)
   assert(pausedEvents.length === 1, `expected one paused notice, got ${pausedEvents.length}`)
+  // Plan 250: the paused notice is a notification behind the bell now. A
+  // storm would show as toasts, as rows, or as one row that keeps repeating.
   const toastsDuringOutage = await countToasts(smoke, /YouTube/i)
+  const noticesDuringOutage = await countNotices(smoke, /YouTube/i)
   assert(
-    toastsDuringOutage <= 1,
-    `toast storm during the outage: ${toastsDuringOutage} YouTube toasts`
+    toastsDuringOutage + noticesDuringOutage <= 1,
+    `notice storm during the outage: ${toastsDuringOutage} YouTube toasts, ${noticesDuringOutage} notifications`
   )
   results.push(
-    `a: one paused notice (${pausedEvents.length} event, ${toastsDuringOutage} toast), chat waiting until ${pausedStatus.pausedUntil}, ` +
+    `a: one paused notice (${pausedEvents.length} event, ${toastsDuringOutage} toast, ${noticesDuringOutage} notification), chat waiting until ${pausedStatus.pausedUntil}, ` +
       `0 YouTube requests in ${pausedWindowMs} ms, output advanced ${sizesAfter.map((size, index) => `+${size - sizesBefore[index]} B`).join(' / ')}`
   )
   console.log(`[quota] ${results.at(-1)}`)
@@ -584,6 +588,21 @@ async function countToasts(smoke, pattern) {
     { timeoutMs }
   )
   return Number(response?.result ?? 0)
+}
+
+/** How many times Videorc raised a matching notification on its own (plan 250). */
+async function countNotices(smoke, pattern) {
+  const response = await requestSmokeCommand(
+    smoke,
+    'eval-js',
+    { code: READ_NOTIFICATIONS_CODE },
+    { timeoutMs }
+  )
+  // Without the hook the count would be 0 for the wrong reason, and "no
+  // notification" would pass unseen.
+  if (response?.result?.hook !== true)
+    throw new Error('The notification hook is missing: nothing was read')
+  return countNotifications(response?.result, { title: pattern })
 }
 
 /** Like `request`, but resolves the whole envelope so error codes are visible. */

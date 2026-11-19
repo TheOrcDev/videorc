@@ -8,15 +8,18 @@ const toastSpies = vi.hoisted(() => ({
 vi.mock('sonner', () => ({ toast: { ...toastSpies, dismiss: vi.fn() } }))
 
 import type { HealthEvent, SessionSummary } from '@/lib/backend'
+import { notifications } from '@/lib/notifications'
 import { sessionRuntimeNoticeTitle } from '@/lib/session-runtime-notice'
 import {
   completeSessionRuntimeRecovery,
   microphoneLossPresentation,
   recordingFailurePresentation,
+  recoverSessionRuntime,
   sessionModeActivity,
   sessionRuntimeContinuationIsCurrent,
   sessionRuntimeRecoveryPlan,
   showBackendError,
+  showMicrophoneLoss,
   showOAuthCallbackExhausted,
   showOAuthCallbackResult,
   showRecordingFailure,
@@ -44,7 +47,10 @@ function failedSession(mode: string): SessionSummary {
 
 describe('session runtime recovery', () => {
   afterEach(() => vi.useRealTimers())
-  beforeEach(() => vi.clearAllMocks())
+  beforeEach(() => {
+    vi.clearAllMocks()
+    notifications.reset()
+  })
 
   it('keeps combined record-and-stream failures attached to the local recording', () => {
     const summary = failedSession('record+stream')
@@ -80,13 +86,62 @@ describe('session runtime recovery', () => {
     } finally {
       vi.unstubAllGlobals()
     }
+    // Plan 250: an urgent entry behind the bell with both ways out, and one
+    // 15 s toast; nothing pinned.
+    expect(
+      notifications.snapshot().find((item) => item.key === `recording-failed:${summary.id}`)
+    ).toMatchObject({
+      tone: 'urgent',
+      title: 'Livestream stopped unexpectedly',
+      detail: "Videorc couldn't finish this livestream.",
+      actions: [
+        { id: 'open-library', label: 'Open in Library', kind: 'door' },
+        { id: 'reveal', kind: 'fix' }
+      ]
+    })
     expect(toastSpies.error).toHaveBeenCalledWith(
       'Livestream stopped unexpectedly',
       expect.objectContaining({
-        action: expect.objectContaining({ label: 'Open in Library' }),
-        cancel: expect.objectContaining({ onClick: expect.any(Function) })
+        duration: 15_000,
+        action: expect.objectContaining({ label: 'Open in Library' })
       })
     )
+  })
+
+  it('a take that died on a full disk is one entry, whichever report arrives first', () => {
+    const diskFull: HealthEvent = {
+      id: 'disk',
+      code: 'recording-disk-full',
+      level: 'error',
+      sessionId: 'take',
+      message:
+        'The recordings folder ran out of space, so recording stopped. The recording up to that point is kept. Free some space before you record again. (FFmpeg exit: exit status: 228)',
+      createdAt: '2026-11-19T10:00:00Z'
+    }
+    showSessionHealthEvent(diskFull, false, { sessionId: 'take', state: 'recording' })
+    vi.stubGlobal('window', { videorc: {} })
+    try {
+      showRecordingFailure(
+        recordingFailurePresentation({
+          status: { state: 'failed', sessionId: 'take', message: diskFull.message },
+          activity: 'recording',
+          currentDedupeKey: null
+        })!
+      )
+    } finally {
+      vi.unstubAllGlobals()
+    }
+    expect(notifications.snapshot()).toHaveLength(1)
+    // Videorc's own words: the backend's line ends in an FFmpeg exit code.
+    expect(notifications.snapshot()[0]).toMatchObject({
+      key: 'recording-failed:take',
+      tone: 'urgent',
+      title: 'Recording stopped: the recordings folder is full',
+      detail: 'The recording up to that point is kept. Free some space before you record again.',
+      occurrences: 1,
+      actions: [{ label: 'Open Output' }, { label: 'Open in Library' }]
+    })
+    expect(toastSpies.error).toHaveBeenCalledTimes(1)
   })
 
   it('rejects lazy continuations from an old epoch or a different session', () => {
@@ -367,9 +422,46 @@ it('recovers both audio sources after reconnect without dropping either explanat
   ).toBeNull()
 })
 
-describe('session audio news (plan 076)', () => {
+it('a loss that a later recovery of the same source ended is not brought back', () => {
+  const event = (code: string): HealthEvent => ({
+    id: code,
+    code,
+    message: code,
+    sessionId: 'take',
+    level: 'warn',
+    createdAt: '2026-09-28T09:34:41Z'
+  })
+  const recover = (codes: string[]): ReturnType<typeof completeSessionRuntimeRecovery> =>
+    completeSessionRuntimeRecovery({
+      plan: { healthSessionId: 'take' },
+      recording: { state: 'recording', sessionId: 'take' },
+      priorSessionState: 'recording',
+      events: codes.map(event)
+    })
+  // A reconnect had reopened this as an urgent microphone problem.
+  expect(recover(['microphone-input-lost', 'microphone-input-recovered'])).toBeNull()
+  // Another source's recovery, or disk space, ends nothing here.
+  expect(
+    recover(['microphone-input-lost', 'system-audio-recovered', 'disk-space-recovered'])
+  ).toMatchObject({ kind: 'microphone-input-lost', event: { code: 'microphone-input-lost' } })
+  // Lost again after it came back: open.
+  expect(
+    recover(['microphone-timeline-lost', 'microphone-timeline-recovered', 'microphone-input-lost'])
+  ).toMatchObject({ event: { code: 'microphone-input-lost' } })
+  // Two sources lost, one back: only the other is told.
+  expect(
+    recover(['system-audio-lost', 'microphone-input-lost', 'microphone-input-recovered'])
+  ).toMatchObject({ event: { code: 'system-audio-lost' } })
+})
+
+// Plan 250 S5: a session's `health` event is an entry behind the bell, on its
+// subject. Idle (as here) a warning also pops up for 8 s and an urgent one
+// for 15 s; nothing is pinned. `notifications/sources/health.test.ts` walks
+// every code; these are the stories the old toasts told.
+describe('session health events are notifications (plans 076, 087, 218, 250)', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    notifications.reset()
   })
 
   function healthEvent(code: string, level: HealthEvent['level'] = 'warn'): HealthEvent {
@@ -382,280 +474,293 @@ describe('session audio news (plan 076)', () => {
       createdAt: '2026-09-28T14:03:44.000Z'
     }
   }
+  const entry = (key: string) => notifications.snapshot().find((item) => item.key === key)
+  const durations = (spy: ReturnType<typeof vi.fn>): unknown[] =>
+    spy.mock.calls.map((call) => (call[1] as { duration?: number }).duration)
 
-  it('keeps an echo pause up with a Resume that asks the Studio to turn System audio on', () => {
+  it('pauses on an echo with a Resume that asks the Studio to turn System audio on', async () => {
     const dispatchEvent = vi.fn()
     vi.stubGlobal('window', { dispatchEvent })
     try {
       showSessionHealthEvent(healthEvent('system-audio-echo-paused'), false)
-      expect(toastSpies.warning).toHaveBeenCalledWith(
-        'System audio paused: your stream was echoing',
-        expect.objectContaining({
-          id: 'system-audio-echo-paused',
-          description: 'system-audio-echo-paused message',
-          duration: Infinity,
-          action: expect.objectContaining({ label: 'Resume' })
-        })
-      )
-      const options = toastSpies.warning.mock.calls[0][1] as { action: { onClick: () => void } }
-      options.action.onClick()
+      expect(entry('system-audio-echo')).toMatchObject({
+        state: 'open',
+        tone: 'warning',
+        title: 'System audio paused: your stream was echoing',
+        detail: 'system-audio-echo-paused message',
+        actions: [
+          { id: 'resume', label: 'Resume', kind: 'fix' },
+          { id: 'open-sources', label: 'Open Sources', kind: 'door' }
+        ]
+      })
+      // Never pinned: the entry stays, the toast goes after 8 s.
+      expect(durations(toastSpies.warning)).toEqual([8_000])
+      await notifications.runAction('system-audio-echo', 'resume')
       expect(dispatchEvent).toHaveBeenCalledWith(
         expect.objectContaining({ type: 'videorc:resume-system-audio' })
+      )
+      // The press resolves the entry: the backend sends no code for it.
+      await vi.waitFor(() =>
+        expect(entry('system-audio-echo')).toMatchObject({
+          state: 'resolved',
+          title: 'System audio is back on'
+        })
       )
     } finally {
       vi.unstubAllGlobals()
     }
   })
 
-  it('says the microphone was silenced for a moment, once per episode and never sticky', () => {
-    const event = {
-      ...healthEvent('microphone-noise-reduction-silenced'),
-      message:
-        'Noise reduction got an invalid signal from the microphone, so Videorc silenced the microphone for a moment. The session continues.'
-    }
-    showSessionHealthEvent(event, false)
-    expect(toastSpies.warning).toHaveBeenCalledWith(
-      'Microphone silenced for a moment',
-      expect.objectContaining({ description: event.message, duration: 12_000 })
-    )
-    expect(toastSpies.error).not.toHaveBeenCalled()
-    // A second episode inside the notice window updates the same toast.
-    showSessionHealthEvent({ ...event, id: 'second' }, false)
-    expect(toastSpies.warning).toHaveBeenCalledTimes(2)
-    const ids = toastSpies.warning.mock.calls.map(([, options]) => (options as { id: string }).id)
-    expect(ids[0]).toBe(ids[1])
-  })
-
-  it('reports a stalled output and a recovered microphone once each', () => {
+  it('counts short blips on one entry each, and never pops them up', () => {
+    const silenced = healthEvent('microphone-noise-reduction-silenced')
+    showSessionHealthEvent(silenced, false)
+    showSessionHealthEvent(silenced, false)
+    showSessionHealthEvent(silenced, false)
     showSessionHealthEvent(healthEvent('audio-output-stalled'), false)
-    expect(toastSpies.warning).toHaveBeenCalledWith(
-      'Audio dropped for a moment',
-      expect.objectContaining({ description: 'audio-output-stalled message' })
-    )
-    showSessionHealthEvent(healthEvent('microphone-timeline-recovered', 'info'), false)
-    expect(toastSpies.success).toHaveBeenCalledWith(
-      'Microphone is back',
-      expect.objectContaining({ description: 'microphone-timeline-recovered message' })
-    )
-    showSessionHealthEvent(healthEvent('system-audio-recovered', 'info'), false)
-    expect(toastSpies.success).toHaveBeenCalledTimes(1)
-  })
-
-  it('says the microphone is back after a stopped input was opened again (retest 151)', () => {
-    showSessionHealthEvent(healthEvent('microphone-input-recovered', 'info'), false)
-    expect(toastSpies.success).toHaveBeenCalledWith(
-      'Microphone is back',
-      expect.objectContaining({ description: 'microphone-input-recovered message' })
-    )
-  })
-
-  it('says the microphone has sound again after a run of digital silence (issue 1064)', () => {
-    showSessionHealthEvent(healthEvent('microphone-signal-recovered', 'info'), false)
-    expect(toastSpies.success).toHaveBeenCalledWith(
-      'Your microphone has sound again',
-      expect.objectContaining({ description: 'microphone-signal-recovered message' })
-    )
-    // The silent report itself is the microphone-loss notice, not a toast here.
-    showSessionHealthEvent(healthEvent('microphone-silent'), false)
+    expect(entry('microphone-blip')).toMatchObject({
+      tone: 'news',
+      title: 'Microphone silenced for a moment',
+      occurrences: 3,
+      detail: '3 times. microphone-noise-reduction-silenced message'
+    })
+    expect(entry('audio-blip')).toMatchObject({ title: 'Audio dropped for a moment' })
     expect(toastSpies.warning).not.toHaveBeenCalled()
+    expect(notifications.count().unread).toBe(0)
   })
 
-  it('says the stream stopped when it stops, and keeps saying it', () => {
+  it('a silent microphone is one entry that the recovery resolves (issue 1064, retest 151)', () => {
+    showSessionHealthEvent(healthEvent('mic-silent'), false)
+    expect(entry('microphone')).toMatchObject({
+      tone: 'warning',
+      title: 'Microphone is silent',
+      actions: [{ label: 'Open Audio', kind: 'door' }]
+    })
+    showSessionHealthEvent(healthEvent('mic-silent', 'error'), false)
+    expect(entry('microphone')).toMatchObject({ tone: 'urgent', title: 'Recording has no sound' })
+    showSessionHealthEvent(healthEvent('microphone-signal-recovered'), false)
+    expect(notifications.snapshot()).toHaveLength(1)
+    expect(entry('microphone')).toMatchObject({
+      state: 'resolved',
+      title: 'Your microphone has sound again'
+    })
+    // A recovery never pops up on its own: it only takes the place of the
+    // problem's toast while that is still on screen.
+    expect(toastSpies.success).toHaveBeenCalledTimes(1)
+    expect(durations(toastSpies.success)).toEqual([4_000])
+  })
+
+  it('a recovery for a microphone nobody reported lost changes nothing', () => {
+    showSessionHealthEvent(healthEvent('microphone-input-recovered'), false)
+    showSessionHealthEvent(healthEvent('microphone-timeline-recovered'), false)
+    expect(notifications.snapshot()).toEqual([])
+    expect(toastSpies.success).not.toHaveBeenCalled()
+  })
+
+  it('says the stream stopped, urgently, without pinning a toast', () => {
     showSessionHealthEvent(healthEvent('stream-output-failed', 'error'), false)
+    expect(entry('stream-output')).toMatchObject({
+      tone: 'urgent',
+      state: 'happened',
+      title: 'Your stream stopped',
+      detail: 'stream-output-failed message',
+      actions: [{ label: 'Open Health', kind: 'door' }]
+    })
     expect(toastSpies.error).toHaveBeenCalledWith(
       'Your stream stopped',
-      expect.objectContaining({
-        id: 'stream-output',
-        description: 'stream-output-failed message',
-        duration: Infinity
-      })
+      expect.objectContaining({ id: 'notification:stream-output', duration: 15_000 })
     )
   })
 
-  it('says the rest of the take is silent when the audio output stops for good', () => {
+  it('says the take is silent, and that the recording stopped, each as an urgent entry', () => {
     showSessionHealthEvent(healthEvent('audio-output-failed', 'error'), false)
-    expect(toastSpies.error).toHaveBeenCalledWith(
-      'Your recording has no sound from here',
-      expect.objectContaining({
-        id: 'audio-output',
-        description: 'audio-output-failed message',
-        duration: Infinity
-      })
-    )
-  })
-
-  it('says the recording stopped when its encoder stops taking frames (2026-11-03 Iris Xe)', () => {
     showSessionHealthEvent(healthEvent('recording-output-failed', 'error'), false)
-    expect(toastSpies.error).toHaveBeenCalledWith(
-      'Your recording stopped',
-      expect.objectContaining({
-        id: 'recording-output',
-        description: 'recording-output-failed message',
-        duration: Infinity
-      })
-    )
+    expect(entry('audio-output')).toMatchObject({
+      tone: 'urgent',
+      title: 'Your recording has no sound from here'
+    })
+    expect(entry('recording-output')).toMatchObject({
+      tone: 'urgent',
+      title: 'Your recording stopped'
+    })
+    expect(durations(toastSpies.error)).toEqual([15_000, 15_000])
   })
 
-  it('replaces a frozen-stream warning with the news that it resumed', () => {
+  it('a frozen stream that moves again is one entry, resolved', () => {
     showSessionHealthEvent(healthEvent('stream-output-stalled'), false)
-    expect(toastSpies.warning).toHaveBeenCalledWith(
-      'Your stream is frozen',
-      expect.objectContaining({ id: 'stream-output', duration: Infinity })
-    )
+    expect(entry('stream-output')).toMatchObject({ tone: 'urgent', title: 'Your stream is frozen' })
     showSessionHealthEvent(healthEvent('stream-output-resumed', 'info'), false)
-    expect(toastSpies.success).toHaveBeenCalledWith(
-      'Your stream is moving again',
-      expect.objectContaining({ id: 'stream-output' })
-    )
+    expect(notifications.snapshot()).toHaveLength(1)
+    expect(entry('stream-output')).toMatchObject({
+      state: 'resolved',
+      title: 'Your stream is moving again',
+      detail: 'It was frozen for 1 s.'
+    })
   })
 
-  // Plan 218: a choppy stream and a short connection are live news, each on
-  // one key, so the good news replaces the bad and nothing stacks.
-  it('keeps a choppy-stream warning up until the stream is smooth again', () => {
+  it('a choppy stream is open until it is smooth again', () => {
     showSessionHealthEvent(healthEvent('stream-delivery-degraded'), false)
-    expect(toastSpies.warning).toHaveBeenCalledWith(
-      'Your stream is choppy',
-      expect.objectContaining({
-        id: 'stream-delivery',
-        description: 'stream-delivery-degraded message',
-        duration: Infinity
-      })
-    )
+    expect(entry('stream-delivery')).toMatchObject({
+      state: 'open',
+      tone: 'warning',
+      title: 'Your stream is choppy'
+    })
+    expect(notifications.count()).toEqual({ unread: 1, urgent: 0, tone: 'warning' })
     showSessionHealthEvent(healthEvent('stream-delivery-recovered', 'info'), false)
-    expect(toastSpies.success).toHaveBeenCalledWith(
-      'Your stream is smooth again',
-      expect.objectContaining({ id: 'stream-delivery' })
-    )
+    expect(entry('stream-delivery')).toMatchObject({
+      state: 'resolved',
+      title: 'Your stream is smooth again'
+    })
+    // A warning that cleared on its own stops counting.
+    expect(notifications.count()).toEqual({ unread: 0, urgent: 0, tone: null })
   })
 
-  it('tells the connection story on one key: overflow, step down, floor, back', () => {
-    const cases = [
-      ['stream-leg-overflow', 'warn', 'warning', 'Your connection can’t keep up'],
-      [
-        'stream-bitrate-lowered',
-        'warn',
-        'warning',
-        'Stream quality lowered to fit your connection'
-      ],
-      ['stream-bitrate-floor', 'warn', 'warning', 'Your connection can’t carry this stream'],
-      ['stream-bitrate-restored', 'info', 'success', 'Stream quality is back']
-    ] as const
-    for (const [code, level, variant, title] of cases) {
-      showSessionHealthEvent(healthEvent(code, level), false)
-      expect(toastSpies[variant]).toHaveBeenCalledWith(
-        title,
-        expect.objectContaining({ id: 'stream-uplink', description: `${code} message` })
-      )
+  it('tells the connection story on one entry: overflow, step down, floor, back', () => {
+    const titles: (string | undefined)[] = []
+    for (const code of [
+      'stream-leg-overflow',
+      'stream-bitrate-lowered',
+      'stream-bitrate-floor',
+      'stream-bitrate-restored'
+    ]) {
+      showSessionHealthEvent(healthEvent(code), false)
+      titles.push(entry('stream-uplink')?.title)
     }
+    expect(titles).toEqual([
+      'Your connection can’t keep up',
+      'Stream quality lowered to fit your connection',
+      'Your connection can’t carry this stream',
+      'Stream quality is back'
+    ])
+    expect(notifications.snapshot()).toHaveLength(1)
+    // One pop-up for the episode, not one per step.
+    expect(toastSpies.warning).toHaveBeenCalledTimes(1)
   })
 
   it('says once that a Screen file stopped, and that the Combined recording keeps going', () => {
-    // Plan 198 (D1): the role-failed event rides the Combined session.
     const event = {
       ...healthEvent('separate-source-recordings-role-failed'),
-      message: 'Screen capture failed after source recovery'
+      sessionId: 'take',
+      message: 'screen: the encoder stopped accepting frames'
     }
-    expect(showSessionHealthEvent(event, false, { sessionId: 'live', state: 'recording' })).toBe(
-      null
-    )
-    expect(toastSpies.warning).toHaveBeenCalledWith(
-      'Screen file stopped',
-      expect.objectContaining({
-        description:
-          "The screen stopped sending video and couldn't be restarted. Your Combined recording keeps going.",
-        action: expect.objectContaining({ label: 'Open Health' })
-      })
-    )
-    const [, first] = toastSpies.warning.mock.calls[0] as [string, { id: string }]
-    showSessionHealthEvent(event, false, { sessionId: 'live', state: 'recording' })
-    const [, second] = toastSpies.warning.mock.calls[1] as [string, { id: string }]
-    expect(second.id).toBe(first.id)
+    showSessionHealthEvent(event, false, { sessionId: 'take', state: 'recording' })
+    showSessionHealthEvent(event, false, { sessionId: 'take', state: 'recording' })
+    const file = entry('separate-file:take:screen')
+    expect(file).toMatchObject({
+      tone: 'warning',
+      title: 'Screen file stopped',
+      occurrences: 1,
+      actions: [{ label: 'Open Health', kind: 'door' }]
+    })
+    expect(file?.detail).toContain('Your Combined recording keeps going.')
   })
 
   it('says once per take that the separate files stopped so the main recording keeps up', () => {
-    // Plan 200 D1: the still-recording separate files stop together; one
-    // toast, never one per file, and the copy names no roles.
-    const event = healthEvent('separate-source-recordings-shed')
-    expect(showSessionHealthEvent(event, false, { sessionId: 'live', state: 'recording' })).toBe(
-      null
-    )
-    expect(toastSpies.warning).toHaveBeenCalledWith(
-      'Separate files stopped so the main recording keeps up',
-      expect.objectContaining({
-        description:
-          'Your Mac fell behind encoding the separate files. The separate files keep what they recorded, and your Combined recording keeps going.',
-        action: expect.objectContaining({ label: 'Open Health' })
-      })
-    )
-    const [, first] = toastSpies.warning.mock.calls[0] as [string, { id: string }]
-    showSessionHealthEvent(event, false, { sessionId: 'live', state: 'recording' })
-    const [, second] = toastSpies.warning.mock.calls[1] as [string, { id: string }]
-    expect(second.id).toBe(first.id)
-    // The raw backend sentence never reaches the toast.
-    expect(JSON.stringify(toastSpies.warning.mock.calls)).not.toContain(event.message)
-    expect(JSON.stringify(toastSpies.warning.mock.calls)).not.toMatch(/three|Screen|Camera/)
+    const event = { ...healthEvent('separate-source-recordings-shed'), sessionId: 'take' }
+    showSessionHealthEvent(event, false)
+    showSessionHealthEvent(event, false)
+    expect(entry('separate-files-shed:take')).toMatchObject({
+      title: 'Separate files stopped so the main recording keeps up',
+      occurrences: 1
+    })
+    expect(notifications.snapshot()).toHaveLength(1)
   })
 
-  it('reports a stopped screen capture by severity, and its return', () => {
+  it('reports a stopped screen capture by severity, a window out of sight, and their return', () => {
     showSessionHealthEvent(healthEvent('screen-capture-stopped'), false)
-    expect(toastSpies.warning).toHaveBeenCalledWith(
-      'Screen capture stopped',
-      expect.objectContaining({ id: 'screen-capture', duration: 20_000 })
-    )
+    expect(entry('screen-capture')).toMatchObject({
+      tone: 'warning',
+      title: 'Screen capture stopped',
+      actions: [{ label: 'Open Sources' }]
+    })
     showSessionHealthEvent(healthEvent('screen-capture-stopped', 'error'), false)
-    expect(toastSpies.error).toHaveBeenCalledWith(
-      'Screen capture stopped',
-      expect.objectContaining({ id: 'screen-capture', duration: Infinity })
-    )
+    expect(entry('screen-capture')?.tone).toBe('urgent')
     showSessionHealthEvent(healthEvent('screen-capture-restored', 'info'), false)
-    expect(toastSpies.success).toHaveBeenCalledWith(
-      'Screen capture is back',
-      expect.objectContaining({ id: 'screen-capture' })
-    )
-  })
+    expect(entry('screen-capture')).toMatchObject({
+      state: 'resolved',
+      title: 'Screen capture is back'
+    })
 
-  it('reports a captured window that is out of sight, and its return, on the screen-capture key', () => {
+    notifications.reset()
     showSessionHealthEvent(healthEvent('screen-window-out-of-sight'), false)
-    expect(toastSpies.warning).toHaveBeenCalledWith(
-      'Window out of sight',
-      expect.objectContaining({
-        id: 'screen-capture',
-        duration: 20_000,
-        description: 'screen-window-out-of-sight message'
-      })
-    )
+    expect(entry('screen-capture')).toMatchObject({ title: 'Window out of sight', state: 'open' })
     showSessionHealthEvent(healthEvent('screen-window-back', 'info'), false)
-    expect(toastSpies.success).toHaveBeenCalledWith(
-      'The window is back',
-      expect.objectContaining({ id: 'screen-capture' })
-    )
+    expect(entry('screen-capture')).toMatchObject({
+      state: 'resolved',
+      title: 'The window is back'
+    })
   })
 
-  it('warns once that the computer is overloaded', () => {
+  it('sends screen capture that lost its access to Permissions', () => {
+    showSessionHealthEvent(
+      { ...healthEvent('screen-capture-stopped', 'error'), permissionPane: 'screen-recording' },
+      false
+    )
+    expect(entry('screen-capture')?.actions).toEqual([
+      { id: 'open-permissions', label: 'Open Permissions', kind: 'door' }
+    ])
+  })
+
+  it('an overloaded computer and low recording space are open entries, not toasts that stack', () => {
     showSessionHealthEvent(healthEvent('host-overloaded'), false)
-    expect(toastSpies.warning).toHaveBeenCalledWith(
-      'This computer is overloaded',
-      expect.objectContaining({ id: 'host-overloaded', description: 'host-overloaded message' })
+    showSessionHealthEvent(healthEvent('host-overloaded'), false)
+    showSessionHealthEvent(healthEvent('disk-space-low'), false)
+    expect(entry('host-overloaded')).toMatchObject({
+      state: 'open',
+      title: 'This computer is overloaded',
+      actions: []
+    })
+    expect(entry('disk-space')).toMatchObject({
+      state: 'open',
+      title: 'Recording space is low',
+      actions: [{ label: 'Open Output' }]
+    })
+    expect(notifications.snapshot()).toHaveLength(2)
+    expect(toastSpies.warning).toHaveBeenCalledTimes(2)
+  })
+
+  it('the first-seconds notice holds for the session; a refused start stays a toast', () => {
+    showSessionHealthEvent(healthEvent('recording-startup-cadence-unsteady'), false)
+    expect(entry('session-notice:recording-startup-cadence-unsteady')).toMatchObject({
+      state: 'open',
+      title: 'The first seconds may stutter',
+      sessionId: 'live'
+    })
+    notifications.reset()
+    vi.clearAllMocks()
+    showSessionHealthEvent(healthEvent('recording-startup-barrier-timeout', 'error'), false)
+    // It answers Record or Go Live, so it is not a notification.
+    expect(notifications.snapshot()).toEqual([])
+    expect(toastSpies.error).toHaveBeenCalledWith(
+      "Couldn't start",
+      expect.objectContaining({ duration: Infinity })
     )
   })
 
-  it('warns at Record that little recording space is left', () => {
-    showSessionHealthEvent(healthEvent('disk-space-low'), false)
-    expect(toastSpies.warning).toHaveBeenCalledWith(
-      'Recording space is low',
-      expect.objectContaining({
-        id: 'disk-space-low',
-        description: 'disk-space-low message',
-        duration: 20_000
-      })
-    )
+  it('a quality notice is one entry per recording, with the way to its row', () => {
+    const event = { ...healthEvent('recording-quality-not-100'), sessionId: 'take' }
+    expect(showSessionHealthEvent(event, false)).toBe('take')
+    expect(showSessionHealthEvent(event, true)).toBeNull()
+    expect(entry('recording-quality:take')).toMatchObject({
+      title: 'This recording has dropped frames',
+      actions: [{ label: 'Open in Library', kind: 'door' }]
+    })
+    expect(showSessionHealthEvent(healthEvent('recording-quality-ok', 'info'), false)).toBeNull()
+  })
+
+  it('keeps the watchdog history codes and the per-frame codes silent', () => {
+    for (const code of [
+      'watchdog-mic-muted',
+      'watchdog-mic-muted-cleared',
+      'stream-dropped-frames',
+      'live-background-gpu-budget',
+      'some-new-code'
+    ]) {
+      showSessionHealthEvent(healthEvent(code), false)
+    }
+    expect(notifications.snapshot()).toEqual([])
   })
 })
 
-// Plan 174 B-6: Go Live leaves recording on, and the backend reports that
-// record+stream session as `recording` with a stream URL. Its notices speak of
-// the livestream (the audience lost something) and keep the saved file's
-// actions (it recorded too).
 describe('record+stream notices (plan 174 B-6)', () => {
   const goLive = {
     state: 'recording' as const,
@@ -671,7 +776,10 @@ describe('record+stream notices (plan 174 B-6)', () => {
     createdAt: '2026-10-10T10:00:00Z'
   }
 
-  beforeEach(() => vi.clearAllMocks())
+  beforeEach(() => {
+    vi.clearAllMocks()
+    notifications.reset()
+  })
 
   it('says a microphone dropout during Go Live leaves the livestream silent', () => {
     const presentation = microphoneLossPresentation({
@@ -743,16 +851,65 @@ describe('record+stream notices (plan 174 B-6)', () => {
     ).toMatchObject({ activity: 'recording' })
   })
 
-  it('ends the live stream news with the session (plan 218)', async () => {
+  it('ends the live stream news with the session (plans 218 and 250)', async () => {
     const { toast } = await import('sonner')
+    notifications.reset()
+    const choppy: HealthEvent = {
+      id: 'choppy',
+      code: 'stream-delivery-degraded',
+      level: 'warn',
+      sessionId: 'live',
+      message: 'Viewers get 21 of 30 frames.',
+      createdAt: '2026-10-10T10:00:00Z'
+    }
+    showSessionHealthEvent(choppy, false, { sessionId: 'live', state: 'streaming' })
     showSessionFinished({
       status: { state: 'idle' as const, sessionId: 'live' },
       activity: 'live-stream',
       currentNotice: null,
       replaceNotice: vi.fn()
     })
-    expect(toast.dismiss).toHaveBeenCalledWith('stream-delivery')
-    expect(toast.dismiss).toHaveBeenCalledWith('stream-uplink')
+    // It stays in the list as what happened, and its toast goes with it.
+    expect(notifications.snapshot()[0]).toMatchObject({
+      key: 'stream-delivery',
+      state: 'resolved',
+      tone: 'news',
+      title: 'Your stream is choppy',
+      detail: 'Viewers get 21 of 30 frames. Ended with the livestream.'
+    })
+    expect(toast.dismiss).toHaveBeenCalledWith('notification:stream-delivery')
+    expect(notifications.count().tone).toBeNull()
+  })
+
+  it('a microphone lost during the session ends with its ended words', () => {
+    notifications.reset()
+    const lost = microphoneLossPresentation({
+      event: microphoneLost,
+      recording: goLive,
+      lastActivity: 'record+stream',
+      currentDedupeKey: null
+    })!
+    showMicrophoneLoss(lost)
+    expect(notifications.snapshot()[0]).toMatchObject({
+      key: 'microphone',
+      tone: 'urgent',
+      state: 'open',
+      actions: [{ label: 'Open Audio' }]
+    })
+    const replaceNotice = vi.fn()
+    showSessionFinished({
+      status: { state: 'idle' as const, sessionId: 'go-live' },
+      activity: 'record+stream',
+      currentNotice: lost.notice,
+      replaceNotice
+    })
+    expect(replaceNotice).toHaveBeenCalledWith(expect.objectContaining({ phase: 'ended' }))
+    const ended = notifications.snapshot().find((item) => item.key === 'microphone')
+    expect(ended).toMatchObject({ state: 'resolved', peakTone: 'urgent' })
+    expect(ended?.title).toBe(sessionRuntimeNoticeTitle({ ...lost.notice, phase: 'ended' }))
+    expect(ended?.detail).toContain('Ended with the livestream.')
+    // An urgent problem that ended still counts until it has been seen.
+    expect(notifications.count().unread).toBeGreaterThanOrEqual(1)
   })
 
   it('still announces the saved recording when Go Live ends, and never for stream-only', () => {
@@ -764,9 +921,27 @@ describe('record+stream notices (plan 174 B-6)', () => {
       currentNotice: null,
       replaceNotice
     })
-    expect(toastSpies.success).toHaveBeenCalledWith('Recording saved', expect.anything())
+    // Plan 250 (D13): an entry with both buttons, and a short toast while idle.
+    expect(
+      notifications.snapshot().find((item) => item.key === 'recording-saved:go-live')
+    ).toMatchObject({
+      tone: 'done',
+      title: 'Recording saved',
+      actions: [
+        { id: 'play', label: 'Play', kind: 'fix' },
+        { id: 'open-library', label: 'Open in Library', kind: 'door' }
+      ]
+    })
+    expect(toastSpies.success).toHaveBeenCalledWith(
+      'Recording saved',
+      expect.objectContaining({
+        duration: 8_000,
+        action: expect.objectContaining({ label: 'Play' })
+      })
+    )
 
     vi.clearAllMocks()
+    notifications.reset()
     showSessionFinished({
       status: ended,
       activity: 'live-stream',
@@ -774,6 +949,7 @@ describe('record+stream notices (plan 174 B-6)', () => {
       replaceNotice
     })
     expect(toastSpies.success).not.toHaveBeenCalled()
+    expect(notifications.snapshot()).toEqual([])
   })
 
   it('says a source changed while streaming during Go Live, naming the device', () => {
@@ -785,20 +961,21 @@ describe('record+stream notices (plan 174 B-6)', () => {
       nextId: 'cam-2',
       nextName: 'FaceTime HD Camera'
     })
-    expect(toastSpies.warning).toHaveBeenLastCalledWith(
-      'Camera switched to FaceTime HD Camera',
-      expect.objectContaining({
-        id: 'source-reconciliation:active-session',
-        description: 'Your stream uses it now. Check the output before you continue.'
-      })
-    )
+    expect(
+      notifications.snapshot().find((item) => item.key === 'source-fallback:camera')
+    ).toMatchObject({
+      tone: 'warning',
+      title: 'Camera switched to FaceTime HD Camera',
+      detail: 'Your stream uses it now. Check the output before you continue.',
+      actions: [{ label: 'Open Sources', kind: 'door' }]
+    })
     showSourceFallbackActiveSession({ state: 'recording' })
-    expect(toastSpies.warning).toHaveBeenLastCalledWith(
-      'A source changed',
-      expect.objectContaining({
-        description: 'Your recording uses it now. Check the output before you continue.'
-      })
-    )
+    expect(
+      notifications.snapshot().find((item) => item.key === 'source-fallback:source')
+    ).toMatchObject({
+      title: 'A source changed',
+      detail: 'Your recording uses it now. Check the output before you continue.'
+    })
   })
 
   it('names the source a fallback turned off (plan 174 S2.4)', () => {
@@ -815,6 +992,70 @@ describe('record+stream notices (plan 174 B-6)', () => {
 
 // Plan 174 S3.18 (D9): a failure Videorc can't explain says "export a support
 // bundle from Health", so its toast opens Health; a known cause doesn't.
+// Plan 250 S9: a `health` event is sent once. A renderer that reloads
+// mid-stream rebuilds the session's open problems from its stored events.
+describe('the rebuild after a reload mid-session (plan 250 S9)', () => {
+  const stored = (code: string, second: number): HealthEvent => ({
+    id: `${code}-${second}`,
+    code,
+    level: 'warn',
+    sessionId: 'live',
+    message: `${code} message`,
+    createdAt: new Date(Date.UTC(2026, 10, 19, 10, 0, second)).toISOString()
+  })
+  const running = (id: string): SessionSummary => ({
+    ...failedSession('record+stream'),
+    id,
+    status: 'running',
+    healthEventCount: 3
+  })
+  const events = [
+    stored('stream-delivery-degraded', 10),
+    stored('host-overloaded', 20),
+    stored('stream-delivery-recovered', 30)
+  ]
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    notifications.reset()
+  })
+
+  it('lists what is still open for the session that is running', async () => {
+    const loadHealthEvents = vi.fn(async () => events)
+    await recoverSessionRuntime({
+      recording: { state: 'streaming', sessionId: 'live' },
+      sessions: [running('live')],
+      priorSessionState: 'idle',
+      loadHealthEvents
+    })
+    expect(loadHealthEvents).toHaveBeenCalledWith('live')
+    expect(notifications.snapshot()).toHaveLength(1)
+    expect(notifications.snapshot()[0]).toMatchObject({
+      key: 'host-overloaded',
+      state: 'open',
+      sessionId: 'live'
+    })
+  })
+
+  it('rebuilds nothing for a session that is not running, or that failed', async () => {
+    await recoverSessionRuntime({
+      recording: { state: 'idle' },
+      sessions: [running('live')],
+      priorSessionId: 'live',
+      priorSessionState: 'streaming',
+      loadHealthEvents: async () => events
+    })
+    expect(notifications.snapshot()).toEqual([])
+    await recoverSessionRuntime({
+      recording: { state: 'failed', sessionId: 'live' },
+      sessions: [{ ...running('live'), status: 'failed' }],
+      priorSessionState: 'streaming',
+      loadHealthEvents: async () => events
+    })
+    expect(notifications.snapshot().some((entry) => entry.key === 'host-overloaded')).toBe(false)
+  })
+})
+
 describe('backend error toasts', () => {
   beforeEach(() => vi.clearAllMocks())
   afterEach(() => vi.unstubAllGlobals())

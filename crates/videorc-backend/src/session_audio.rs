@@ -6710,6 +6710,11 @@ fn run_bus_owned(
         );
         // A draining bus writes silence after capture ended: no caption tap.
         if !draining.load(Ordering::Acquire) {
+            // The caption tap is process-global and unit tests run in
+            // parallel: a test bus feeding it put a frame into a caption
+            // fixture's tap ("[10, 11]" on a Windows runner). Test buses
+            // report their frames through `caption_observer` instead.
+            #[cfg(not(test))]
             crate::captions::offer_caption_frame(&frame);
             #[cfg(test)]
             {

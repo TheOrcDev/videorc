@@ -91,9 +91,6 @@ export const VIDEORC_CAMERA_COPY = {
   removed: 'Videorc Camera removed'
 } as const
 
-/** One id for the one toast, so it never stacks. */
-export const VIDEORC_CAMERA_TOAST_ID = 'virtual-camera'
-
 /** What the Output page shows for the camera, and what ⌘K and agents mirror. */
 export interface VirtualCameraView {
   /** The hide rule: nothing about the camera shows on this computer. */

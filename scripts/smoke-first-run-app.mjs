@@ -175,6 +175,12 @@ const instrument = `(() => {
     for (const toast of document.querySelectorAll('[data-sonner-toast]')) {
       if (!evidence.toasts.includes(toast.textContent)) evidence.toasts.push(toast.textContent);
     }
+    // Plan 250: what Videorc noticed on its own is an entry behind the bell.
+    // The gate reads both, so "Videorc hit a problem" cannot hide in the list.
+    for (const entry of window.__videorcSmokeNotifications?.().entries ?? []) {
+      const text = entry.detail ? entry.title + ': ' + entry.detail : entry.title;
+      if (!evidence.toasts.includes(text)) evidence.toasts.push(text);
+    }
   };
   new MutationObserver(observe).observe(document, { subtree: true, childList: true, attributes: true, attributeFilter: ['data-first-run-backdrop', 'data-first-run-backdrop-tone', 'data-first-run-setup'] });
   observe();
@@ -213,7 +219,9 @@ const stateExpression = `(() => {
     studioDiagnostics: window.__videorcSmokeScenePresets?.state().diagnostics,
     configRaw, config: configRaw ? JSON.parse(configRaw) : null,
     registryRaw, registry: registryRaw ? JSON.parse(registryRaw) : null,
-    toasts: e?.toasts ?? [], closedAt: e?.closedAt,
+    // Toasts the observer saw, and every notification behind the bell now
+    // (plan 250): an entry changes no DOM the observer watches.
+    toasts: [...(e?.toasts ?? []), ...(window.__videorcSmokeNotifications?.().entries ?? []).map(entry => entry.detail ? entry.title + ': ' + entry.detail : entry.title)], closedAt: e?.closedAt,
     rows: Array.from(document.querySelectorAll('[data-slot="system-access-row"]')).map(row => row.dataset.state),
     loading: !!document.querySelector('[data-first-run-rows="loading"]'),
     primaryCount: document.querySelectorAll('[data-first-run-primary]').length,

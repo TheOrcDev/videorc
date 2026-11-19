@@ -1,47 +1,24 @@
-import { beginVideorcSignIn } from '@/lib/videorc-web-links'
+import {
+  publishChatNeedsSignIn,
+  publishSignInExpired,
+  publishXBroadcastProblem
+} from '@/lib/notifications/sources/platforms'
 import { toast } from '@/lib/toast'
-import { userErrorMessage } from '@/lib/user-error'
-import { openWorkspaceTab } from '@/lib/workspace-navigation'
 import { copyText } from '@/lib/copy-text'
-import { BROWSER_APPROVAL_TOAST_ID, X_MEDIA_STUDIO_URL } from '@/lib/studio-toasts'
+import { BROWSER_APPROVAL_TOAST_ID } from '@/lib/studio-toasts'
 
 // Connection notices load when needed, outside the Studio startup bundle.
 
-function openXMediaStudio(): void {
-  void window.videorc?.openOAuthUrl?.(X_MEDIA_STUDIO_URL)
-}
-
 /**
- * An X broadcast step that failed while the stream goes on, so a warning
- * (plan 174 S2.4). The words match the YouTube broadcast toast.
+ * An X broadcast step that failed while the stream goes on. Since plan 250
+ * it is an entry behind the bell (`notifications/sources/platforms.ts`).
  */
 export function showXBroadcastProblem(
   step: 'start' | 'end' | 'chat',
   target: { id: string; label: string },
   error: unknown
 ): void {
-  const copy = userErrorMessage(error, {
-    action: step === 'end' ? 'end' : 'start',
-    object: 'the X broadcast'
-  })
-  console.warn(`[x] ${step} failed for ${target.label}:`, copy.raw)
-  if (step === 'chat') {
-    toast.warning(`X chat isn't connected for ${target.label}`, {
-      id: `x-chat:${target.id}`,
-      description: 'Your stream is fine. Check X in Destinations.',
-      action: { label: 'Open Destinations', onClick: () => openWorkspaceTab('live') }
-    })
-    return
-  }
-  if (step === 'end') {
-    toast.warning(copy.title, {
-      id: `x-broadcast-end:${target.id}`,
-      description: 'End it in X Media Studio.',
-      action: { label: 'Open Media Studio', onClick: openXMediaStudio }
-    })
-    return
-  }
-  toast.warning(copy.title, { id: `x-broadcast-start:${target.id}`, description: copy.description })
+  publishXBroadcastProblem(step, target, error)
 }
 
 /**
@@ -68,28 +45,17 @@ export function showBrowserApproval(title: string, authUrl: string): void {
 }
 
 /**
- * A chat connector waits on the Videorc sign-in (plan 215 A3). The toast
- * names the account, never X: X is fine, and "Open Destinations" would show it
- * healthy. Sign in is the fix, and it attaches chat without a restart (A4).
- * One id per platform, so X and Kick each say it once and a repeat replaces.
+ * A chat connector waits on the Videorc sign-in (plan 215 A3): an entry
+ * that names the account, with Sign in as its fix.
  */
 export function showChatNeedsVideorcSignIn(platformLabel: string): void {
-  toast.warning(`${platformLabel} chat needs your Videorc sign-in`, {
-    id: `chat-videorc-sign-in:${platformLabel}`,
-    description: 'Your stream is fine. Sign in to read chat.',
-    action: { label: 'Sign in', onClick: beginVideorcSignIn }
-  })
+  publishChatNeedsSignIn(platformLabel)
 }
 
 /**
  * The server refused the stored session and the desktop signed itself out
- * (plan 215 A5, D7). Until now that was silent: the sidebar read "Sign in"
- * and chat failed at the next Go Live.
+ * (plan 215 A5, D7): an entry with Sign in as its fix.
  */
 export function showVideorcSignInExpired(): void {
-  toast.warning('Your Videorc sign-in expired', {
-    id: 'account-session-expired',
-    description: 'Sign in again.',
-    action: { label: 'Sign in', onClick: beginVideorcSignIn }
-  })
+  publishSignInExpired()
 }

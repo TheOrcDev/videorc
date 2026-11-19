@@ -4203,6 +4203,11 @@ export interface ClipMoment {
 
 /** Who placed a clip mark: a spoken "clip that" or the Mark clip control. */
 import type { MarkerContext, MarkerRelayCommand, MarkerRelayResult } from './session-markers'
+import type {
+  NotificationActRequest,
+  NotificationPopUp,
+  NotificationsSnapshot
+} from './notifications-relay'
 import type { BannerRelayCommand, BannerSummary } from './banner-commands'
 export type * from './session-markers'
 
@@ -6679,6 +6684,22 @@ export interface VideorcApi {
   markerFromCommentsWindow: (command: MarkerRelayCommand) => Promise<MarkerRelayResult>
   /** A watchdog fix from the Stream Manager's alert card (plan 223 A6): relayed, never run here. */
   watchdogFixFromCommentsWindow: (request: WatchdogFixRequest) => Promise<boolean>
+  // Plan 250 S8: the Stream Manager's bell. The list lives in the main
+  // window; main keeps the last copy for a Stream Manager that opens later.
+  /** Stream Manager: the list as the main window last pushed it. */
+  getNotifications: () => Promise<NotificationsSnapshot | null>
+  /** Main window: a copy of the list for the Stream Manager. */
+  pushNotifications: (snapshot: NotificationsSnapshot | null) => Promise<boolean>
+  onNotifications: (callback: (snapshot: NotificationsSnapshot | null) => void) => () => void
+  /**
+   * Main window: offers a pop-up to the Stream Manager. True when that
+   * window is in front and took it; false and the main window shows it.
+   */
+  pushNotificationPopUp: (popUp: NotificationPopUp) => Promise<boolean>
+  onNotificationPopUp: (callback: (popUp: NotificationPopUp) => void) => () => void
+  /** Stream Manager: something pressed on an entry, relayed to the main window's store. */
+  notificationActFromCommentsWindow: (request: NotificationActRequest) => Promise<boolean>
+  onNotificationActRequest: (callback: (request: NotificationActRequest) => void) => () => void
   onMarkerRequest: (callback: (command: MarkerRelayCommand) => void) => () => void
   pushMarkerResult: (resolution: CommentsCommandResolution<MarkerRelayResult>) => Promise<boolean>
   markClipFromCommentsWindow: (command: ClipMarkCommand) => Promise<ClipMarkedEvent>
