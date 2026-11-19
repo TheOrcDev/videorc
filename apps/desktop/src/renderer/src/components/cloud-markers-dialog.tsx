@@ -32,7 +32,7 @@ export function CloudMarkersButton({
     </>
   )
 }
-function CloudMarkersDialog({
+export function CloudMarkersDialog({
   showId,
   onClose
 }: {

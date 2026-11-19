@@ -22,6 +22,9 @@ export const VIDEORC_WEB_LINKS = {
   // Every desktop build, for a build that cannot update itself (plan 174 I-20).
   download: `${VIDEORC_WEB_ORIGIN}/download`,
   account: `${VIDEORC_WEB_ORIGIN}/account`,
+  // The account page's Cloud recordings list: the web has no page per
+  // recording, so every Library Cloud row opens this one.
+  cloudRecordings: `${VIDEORC_WEB_ORIGIN}/account#cloud-recordings`,
   login: `${VIDEORC_WEB_ORIGIN}/login`,
   // Desktop sign-in entry point: explicit consent returns only a short-lived,
   // state + PKCE-bound opaque code through the videorc:// deep-link. The app

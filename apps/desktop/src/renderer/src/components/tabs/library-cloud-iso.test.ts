@@ -158,8 +158,10 @@ describe('Library: separate files of a cloud take (Plan 249 S22)', () => {
     expect(sections()).toHaveLength(1)
     const section = sections()[0] as HTMLElement
     expect(section.dataset.takeId).toBe(TAKE)
-    // The section follows its own recording's row.
-    expect(section.previousElementSibling?.getAttribute('data-recording-id')).toBe('rec_program')
+    // The section is the row after its own recording's row.
+    expect(
+      section.closest('[role="row"]')?.previousElementSibling?.getAttribute('data-recording-id')
+    ).toBe('rec_program')
     const titles = [
       ...section.querySelectorAll(
         '[data-testid="library-cloud-iso-file"] [data-slot="list-row-title"]'

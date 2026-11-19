@@ -27,7 +27,6 @@ import {
   lazy,
   Suspense,
   type KeyboardEvent,
-  type MouseEvent,
   type ReactElement
 } from 'react'
 import { toast } from '@/lib/toast'
@@ -37,6 +36,7 @@ import { KebabContextMenu } from '@/components/kebab-context-menu'
 import { KebabMenu, type KebabMenuItem } from '@/components/kebab-menu'
 import { OfflineAlert } from '@/components/lock-alert'
 import { PageHeader } from '@/components/page'
+import { PageTabs } from '@/components/page-tabs'
 import { PANE_OWNS_SCROLL, PaneStrip } from '@/components/pane'
 import { SessionPoster } from '@/components/session-poster'
 import { StatusDot } from '@/components/status-dot'
@@ -67,6 +67,7 @@ import {
   SelectValue
 } from '@/components/ui/select'
 import { Spinner } from '@/components/ui/spinner'
+import { TabsContent } from '@/components/ui/tabs'
 import { useSessionElapsedMs } from '@/hooks/use-session-elapsed'
 import { useStudioCore, useStudioRecording, useStudioRecordingState } from '@/hooks/use-studio'
 import type {
@@ -150,28 +151,28 @@ import { cn } from '@/lib/utils'
 import { openVideorcWebLink, VIDEORC_WEB_LINKS } from '@/lib/videorc-web-links'
 import { openWorkspaceTab } from '@/lib/workspace-navigation'
 import { sessionIsLive, sessionOwnsTransport } from '../../../../shared/capture-state'
+import { fromRowControl, LIBRARY_HEADER_CLASS, LIBRARY_ROW_CLASS } from './library-table'
 
 const SessionMarkersDialog = lazy(async () => ({
   default: (await import('@/components/session-markers-dialog')).SessionMarkersDialog
 }))
-// Plan 234: the account's cloud recordings, a section of its own that loads
-// with the Library page, never in the eager bundle.
+// Plan 234: the account's cloud recordings, the Library's Cloud tab. Its
+// module loads when that tab first opens, never in the eager bundle.
 const LibraryCloudRecordings = lazy(async () => ({
   default: (await import('@/components/tabs/library-cloud-recordings')).LibraryCloudRecordings
 }))
 
+type LibraryView = 'local' | 'cloud'
+const LIBRARY_VIEWS = [
+  { id: 'local', label: 'Local' },
+  { id: 'cloud', label: 'Cloud' }
+] as const satisfies readonly { id: LibraryView; label: string }[]
+// The tab used last, for this run of the app: the Library reopens on it.
+let lastLibraryView: LibraryView = 'local'
+
 /** The table's columns: select, name, scene, duration, size, file, actions. */
 const LIBRARY_COLUMNS =
   'grid grid-cols-[2rem_minmax(0,1fr)_8rem_5.5rem_5.5rem_4.5rem_8rem] items-center gap-2 px-gutter min-[1280px]:grid-cols-[2rem_minmax(0,1fr)_8rem_5.5rem_5.5rem_4.5rem_13rem]'
-
-/** A click that lands on one of the row's own controls is that control's, not the row's. */
-function fromRowControl(event: MouseEvent<HTMLElement>): boolean {
-  const target = event.target instanceof Element ? event.target : null
-  const control = target?.closest(
-    'button, a, input, [role="checkbox"], [data-slot="disabled-reason"]'
-  )
-  return Boolean(control && event.currentTarget.contains(control))
-}
 
 // The Library as a recordings manager (Library rewrite L4; plan 174 S3.11): a
 // desktop table of every recording (poster, name, scene, duration, size,
@@ -232,15 +233,25 @@ export function LibraryTab({
   const [revealedSessionId, setRevealedSessionId] = useState<string | null>(null)
   const rowElementsRef = useRef(new Map<string, HTMLDivElement>())
   const previousCleanupStatusesRef = useRef(new Map<string, string>())
+  const [view, setView] = useState<LibraryView>(() => lastLibraryView)
+  const selectView = useCallback((next: LibraryView): void => {
+    lastLibraryView = next
+    setView(next)
+  }, [])
 
   // An explicit "show this recording" (Clean cut's Open in Library, Show
-  // source recording) clears the search and the filter so the row is there.
-  const focusLibrarySession = useCallback((sessionId: string): void => {
-    setFilter('all')
-    setQuery('')
-    setActiveId(sessionId)
-    setRevealedSessionId(sessionId)
-  }, [])
+  // source recording, a cloud take's Open in Library) opens the Local tab and
+  // clears the search and the filter so the row is there.
+  const focusLibrarySession = useCallback(
+    (sessionId: string): void => {
+      selectView('local')
+      setFilter('all')
+      setQuery('')
+      setActiveId(sessionId)
+      setRevealedSessionId(sessionId)
+    },
+    [selectView]
+  )
   const [appliedFocus, setAppliedFocus] = useState<string | null>(null)
   if (focusSessionId && focusSessionId !== appliedFocus) {
     setAppliedFocus(focusSessionId)
@@ -498,262 +509,284 @@ export function LibraryTab({
     // Library owns its scroll: the header and the filter bar stay pinned and
     // only the table scrolls (plan 174 S1.6b).
     <div {...PANE_OWNS_SCROLL} className="flex min-h-0 flex-1 flex-col">
-      <PageHeader
-        description="Every recording and livestream you make. Files stay on disk."
-        title="Library"
-      />
-
-      {/* Filter bar: filter · sort · search. */}
-      <PaneStrip className="flex flex-wrap items-center gap-2">
-        <Select
-          items={LIBRARY_FILTERS}
-          value={filter}
-          onValueChange={(value) => {
-            if (value !== null) changeView({ filter: value })
-          }}
-        >
-          <SelectTrigger aria-label="Filter" className="w-40">
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectGroup>
-              {LIBRARY_FILTERS.map((option) => (
-                <SelectItem key={option.value} value={option.value}>
-                  {option.label}
-                </SelectItem>
-              ))}
-            </SelectGroup>
-          </SelectContent>
-        </Select>
-        <Select
-          items={LIBRARY_SORTS}
-          value={sort}
-          onValueChange={(value) => {
-            if (value !== null) setSort(value)
-          }}
-        >
-          <SelectTrigger aria-label="Sort" className="w-36">
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectGroup>
-              {LIBRARY_SORTS.map((option) => (
-                <SelectItem key={option.value} value={option.value}>
-                  {option.label}
-                </SelectItem>
-              ))}
-            </SelectGroup>
-          </SelectContent>
-        </Select>
-        <div className="relative min-w-48 flex-1">
-          <SearchIcon className="pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted-foreground" />
-          <Input
-            aria-label="Search recordings"
-            className="pl-8"
-            placeholder="Search recordings…"
-            value={query}
-            onChange={(event) => changeView({ query: event.target.value })}
+      {/* Local | Cloud: the recordings on this computer, and the ones Videorc
+          Cloud keeps, in one table style. */}
+      <PageTabs
+        label="Library view"
+        tabs={LIBRARY_VIEWS}
+        testId="library-tabs"
+        triggerAttribute="data-library-view"
+        value={view}
+        onValueChange={selectView}
+      >
+        <TabsContent className="flex min-h-0 flex-col" value="local">
+          <PageHeader
+            description="Every recording and livestream you make. Files stay on disk."
+            title="Library"
           />
-        </div>
-        <Button disabled={importing} variant="outline" onClick={() => void runImport()}>
-          <UploadIcon data-icon="inline-start" />
-          {importing ? 'Importing…' : 'Import…'}
-        </Button>
-        <Button variant="outline" onClick={() => openWorkspaceTab('studio')}>
-          <CameraIcon data-icon="inline-start" weight="fill" />
-          Open Studio
-        </Button>
-      </PaneStrip>
 
-      {/* Selection bar: the checkbox column's one bulk action. */}
-      {selected.length > 0 ? (
-        <div className="flex shrink-0 items-center gap-3 border-b border-border px-gutter py-1.5 text-sm">
-          <span className="text-muted-foreground">{selected.length} selected</span>
-          <Button
-            disabled={bulkHoldReason !== null}
-            variant="destructive"
-            onClick={() => setDeleting(selectedSessions)}
-          >
-            <DeleteIcon data-icon="inline-start" />
-            Delete
-          </Button>
-          <Button variant="ghost" onClick={() => setSelection({ selected: [], anchor: null })}>
-            Clear selection
-          </Button>
-          {bulkHoldReason ? (
-            <span className="text-meta text-muted-foreground">{bulkHoldReason}</span>
-          ) : null}
-        </div>
-      ) : null}
-
-      {!online && listState !== 'offline' ? (
-        <div className="shrink-0 px-gutter pt-2">
-          <OfflineAlert />
-        </div>
-      ) : null}
-      {partialNotice ? (
-        <div className="shrink-0 px-gutter pt-2">
-          <Alert data-testid="library-partial-notice" variant="quiet">
-            <AlertTitle>{partialNotice}</AlertTitle>
-            <AlertAction>
-              <Button
-                disabled={loadingAll || sessionsLoadingMore || !online}
-                size="xs"
-                variant="outline"
-                onClick={() => setLoadingAll(true)}
-              >
-                {loadingAll ? 'Loading…' : 'Load all'}
-              </Button>
-            </AlertAction>
-          </Alert>
-        </div>
-      ) : null}
-
-      {listState === 'loading' ? (
-        <Empty className="py-16">
-          <EmptyDescription className="flex items-center gap-2">
-            <Spinner aria-hidden />
-            Loading recordings…
-          </EmptyDescription>
-        </Empty>
-      ) : listState === 'offline' ? (
-        <div className="px-gutter py-4">
-          <OfflineAlert />
-        </div>
-      ) : listState === 'empty' ? (
-        <Empty className="py-16">
-          <EmptyTitle>No recordings yet</EmptyTitle>
-          <EmptyDescription>Record or go live from Studio, and it shows up here.</EmptyDescription>
-        </Empty>
-      ) : (
-        <div className="flex min-h-0 flex-1 flex-col">
-          {visible.length === 0 ? (
-            <Empty className="py-10">
-              <EmptyTitle>No recordings match</EmptyTitle>
-              <EmptyContent>
-                <Button variant="outline" onClick={() => changeView({ filter: 'all', query: '' })}>
-                  {libraryClearLabel(filter, query)}
-                </Button>
-              </EmptyContent>
-            </Empty>
-          ) : (
-            <div
-              aria-label="Recordings"
-              aria-multiselectable="true"
-              className="flex min-h-0 flex-1 flex-col"
-              role="grid"
+          {/* Filter bar: filter · sort · search. */}
+          <PaneStrip className="flex flex-wrap items-center gap-2">
+            <Select
+              items={LIBRARY_FILTERS}
+              value={filter}
+              onValueChange={(value) => {
+                if (value !== null) changeView({ filter: value })
+              }}
             >
-              <div role="rowgroup">
-                <div
-                  className={cn(
-                    LIBRARY_COLUMNS,
-                    'border-b border-border py-2 text-meta font-medium text-muted-foreground'
-                  )}
-                  role="row"
-                >
-                  <div role="columnheader">
-                    <Checkbox
-                      aria-label="Select all recordings in view"
-                      checked={selectAllState === true}
-                      indeterminate={selectAllState === 'indeterminate'}
-                      disabled={selectableIds.length === 0}
-                      onCheckedChange={() =>
-                        setSelection((current) => ({
-                          ...current,
-                          selected: toggleAllLibrarySelection(
-                            pruneLibrarySelection(current.selected, inView),
-                            selectableIds
-                          )
-                        }))
-                      }
-                    />
-                  </div>
-                  <div role="columnheader">Name</div>
-                  <div role="columnheader">Scene</div>
-                  <div role="columnheader">Duration</div>
-                  <div role="columnheader">Size</div>
-                  <div role="columnheader">File</div>
-                  <div className="text-right" role="columnheader">
-                    Actions
-                  </div>
-                </div>
-              </div>
-              <div
-                className="min-h-0 flex-1 overflow-y-auto"
-                role="rowgroup"
-                onKeyDown={handleRowsKeyDown}
-              >
-                {visible.map((session) => (
-                  <LibraryRow
-                    key={session.id}
-                    active={activeRowId === session.id}
-                    cleanCutJob={activeCleanCuts.get(session.id) ?? null}
-                    cleanCutReview={cleanCutReviews.get(session.id) ?? null}
-                    revealed={revealedSessionId === session.id}
-                    selected={selected.includes(session.id)}
-                    selectionDisabled={rowLocked(session)}
-                    session={session}
-                    registerRow={(element) => {
-                      if (element) rowElementsRef.current.set(session.id, element)
-                      else rowElementsRef.current.delete(session.id)
-                    }}
-                    onActivate={() => setActiveId(session.id)}
-                    onDelete={() => setDeleting([session])}
-                    onDeleteKey={(rowCanDelete) => deleteFromKeys(session, rowCanDelete)}
-                    onOpenBuddyReport={() => onOpenBuddyReport(session.id)}
-                    onOpenCleanCut={() => onOpenCleanCut(session.id)}
-                    onOpenMarkers={() => setMarkerSession(session)}
-                    onPick={(modifier) => pick(session.id, modifier)}
-                    onRename={() => {
-                      setRenaming(session)
-                      setRenameDraft(session.title)
-                      setRenameError(null)
-                    }}
-                    onRevealSession={focusLibrarySession}
-                    onToggleSelected={() =>
-                      setSelection((current) => ({
-                        selected: toggleLibrarySelection(
-                          pruneLibrarySelection(current.selected, inView),
-                          session.id
-                        ),
-                        anchor: session.id
-                      }))
-                    }
-                  />
-                ))}
-              </div>
+              <SelectTrigger aria-label="Filter" className="w-40">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectGroup>
+                  {LIBRARY_FILTERS.map((option) => (
+                    <SelectItem key={option.value} value={option.value}>
+                      {option.label}
+                    </SelectItem>
+                  ))}
+                </SelectGroup>
+              </SelectContent>
+            </Select>
+            <Select
+              items={LIBRARY_SORTS}
+              value={sort}
+              onValueChange={(value) => {
+                if (value !== null) setSort(value)
+              }}
+            >
+              <SelectTrigger aria-label="Sort" className="w-36">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectGroup>
+                  {LIBRARY_SORTS.map((option) => (
+                    <SelectItem key={option.value} value={option.value}>
+                      {option.label}
+                    </SelectItem>
+                  ))}
+                </SelectGroup>
+              </SelectContent>
+            </Select>
+            <div className="relative min-w-48 flex-1">
+              <SearchIcon className="pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted-foreground" />
+              <Input
+                aria-label="Search recordings"
+                className="pl-8"
+                placeholder="Search recordings…"
+                value={query}
+                onChange={(event) => changeView({ query: event.target.value })}
+              />
             </div>
-          )}
-          {/* Honest storage footer: real totals + real free space, no quota bar. */}
-          {sessionStorageTotals || sessionsNextCursor ? (
-            <div className="flex shrink-0 items-center justify-between gap-3 border-t border-border px-gutter py-2 text-meta text-muted-foreground">
-              <span>
-                {sessionStorageTotals
-                  ? libraryStorageLabel({
-                      count: sessionStorageTotals.count,
-                      totalBytes: sessionStorageTotals.totalBytes,
-                      freeBytes
-                    })
-                  : `${plural(sessions.length, 'recording')} loaded`}
-              </span>
-              {sessionsNextCursor ? (
-                <Button
-                  disabled={sessionsLoadingMore}
-                  size="xs"
-                  variant="ghost"
-                  onClick={() => void loadMoreSessions()}
-                >
-                  {sessionsLoadingMore ? 'Loading…' : 'Load more'}
-                </Button>
+            <Button disabled={importing} variant="outline" onClick={() => void runImport()}>
+              <UploadIcon data-icon="inline-start" />
+              {importing ? 'Importing…' : 'Import…'}
+            </Button>
+            <Button variant="outline" onClick={() => openWorkspaceTab('studio')}>
+              <CameraIcon data-icon="inline-start" weight="fill" />
+              Open Studio
+            </Button>
+          </PaneStrip>
+
+          {/* Selection bar: the checkbox column's one bulk action. */}
+          {selected.length > 0 ? (
+            <div className="flex shrink-0 items-center gap-3 border-b border-border px-gutter py-1.5 text-sm">
+              <span className="text-muted-foreground">{selected.length} selected</span>
+              <Button
+                disabled={bulkHoldReason !== null}
+                variant="destructive"
+                onClick={() => setDeleting(selectedSessions)}
+              >
+                <DeleteIcon data-icon="inline-start" />
+                Delete
+              </Button>
+              <Button variant="ghost" onClick={() => setSelection({ selected: [], anchor: null })}>
+                Clear selection
+              </Button>
+              {bulkHoldReason ? (
+                <span className="text-meta text-muted-foreground">{bulkHoldReason}</span>
               ) : null}
             </div>
           ) : null}
-        </div>
-      )}
 
-      <Suspense fallback={null}>
-        <LibraryCloudRecordings />
-      </Suspense>
+          {!online && listState !== 'offline' ? (
+            <div className="shrink-0 px-gutter pt-2">
+              <OfflineAlert />
+            </div>
+          ) : null}
+          {partialNotice ? (
+            <div className="shrink-0 px-gutter pt-2">
+              <Alert data-testid="library-partial-notice" variant="quiet">
+                <AlertTitle>{partialNotice}</AlertTitle>
+                <AlertAction>
+                  <Button
+                    disabled={loadingAll || sessionsLoadingMore || !online}
+                    size="xs"
+                    variant="outline"
+                    onClick={() => setLoadingAll(true)}
+                  >
+                    {loadingAll ? 'Loading…' : 'Load all'}
+                  </Button>
+                </AlertAction>
+              </Alert>
+            </div>
+          ) : null}
+
+          {listState === 'loading' ? (
+            <Empty className="py-16">
+              <EmptyDescription className="flex items-center gap-2">
+                <Spinner aria-hidden />
+                Loading recordings…
+              </EmptyDescription>
+            </Empty>
+          ) : listState === 'offline' ? (
+            <div className="px-gutter py-4">
+              <OfflineAlert />
+            </div>
+          ) : listState === 'empty' ? (
+            <Empty className="py-16">
+              <EmptyTitle>No recordings yet</EmptyTitle>
+              <EmptyDescription>
+                Record or go live from Studio, and it shows up here.
+              </EmptyDescription>
+            </Empty>
+          ) : (
+            <div className="flex min-h-0 flex-1 flex-col">
+              {visible.length === 0 ? (
+                <Empty className="py-10">
+                  <EmptyTitle>No recordings match</EmptyTitle>
+                  <EmptyContent>
+                    <Button
+                      variant="outline"
+                      onClick={() => changeView({ filter: 'all', query: '' })}
+                    >
+                      {libraryClearLabel(filter, query)}
+                    </Button>
+                  </EmptyContent>
+                </Empty>
+              ) : (
+                <div
+                  aria-label="Recordings"
+                  aria-multiselectable="true"
+                  className="flex min-h-0 flex-1 flex-col"
+                  role="grid"
+                >
+                  <div role="rowgroup">
+                    <div className={cn(LIBRARY_COLUMNS, LIBRARY_HEADER_CLASS)} role="row">
+                      <div role="columnheader">
+                        <Checkbox
+                          aria-label="Select all recordings in view"
+                          checked={selectAllState === true}
+                          indeterminate={selectAllState === 'indeterminate'}
+                          disabled={selectableIds.length === 0}
+                          onCheckedChange={() =>
+                            setSelection((current) => ({
+                              ...current,
+                              selected: toggleAllLibrarySelection(
+                                pruneLibrarySelection(current.selected, inView),
+                                selectableIds
+                              )
+                            }))
+                          }
+                        />
+                      </div>
+                      <div role="columnheader">Name</div>
+                      <div role="columnheader">Scene</div>
+                      <div role="columnheader">Duration</div>
+                      <div role="columnheader">Size</div>
+                      <div role="columnheader">File</div>
+                      <div className="text-right" role="columnheader">
+                        Actions
+                      </div>
+                    </div>
+                  </div>
+                  <div
+                    className="min-h-0 flex-1 overflow-y-auto"
+                    role="rowgroup"
+                    onKeyDown={handleRowsKeyDown}
+                  >
+                    {visible.map((session) => (
+                      <LibraryRow
+                        key={session.id}
+                        active={activeRowId === session.id}
+                        cleanCutJob={activeCleanCuts.get(session.id) ?? null}
+                        cleanCutReview={cleanCutReviews.get(session.id) ?? null}
+                        revealed={revealedSessionId === session.id}
+                        selected={selected.includes(session.id)}
+                        selectionDisabled={rowLocked(session)}
+                        session={session}
+                        registerRow={(element) => {
+                          if (element) rowElementsRef.current.set(session.id, element)
+                          else rowElementsRef.current.delete(session.id)
+                        }}
+                        onActivate={() => setActiveId(session.id)}
+                        onDelete={() => setDeleting([session])}
+                        onDeleteKey={(rowCanDelete) => deleteFromKeys(session, rowCanDelete)}
+                        onOpenBuddyReport={() => onOpenBuddyReport(session.id)}
+                        onOpenCleanCut={() => onOpenCleanCut(session.id)}
+                        onOpenMarkers={() => setMarkerSession(session)}
+                        onPick={(modifier) => pick(session.id, modifier)}
+                        onRename={() => {
+                          setRenaming(session)
+                          setRenameDraft(session.title)
+                          setRenameError(null)
+                        }}
+                        onRevealSession={focusLibrarySession}
+                        onToggleSelected={() =>
+                          setSelection((current) => ({
+                            selected: toggleLibrarySelection(
+                              pruneLibrarySelection(current.selected, inView),
+                              session.id
+                            ),
+                            anchor: session.id
+                          }))
+                        }
+                      />
+                    ))}
+                  </div>
+                </div>
+              )}
+              {/* Honest storage footer: real totals + real free space, no quota bar. */}
+              {sessionStorageTotals || sessionsNextCursor ? (
+                <div className="flex shrink-0 items-center justify-between gap-3 border-t border-border px-gutter py-2 text-meta text-muted-foreground">
+                  <span>
+                    {sessionStorageTotals
+                      ? libraryStorageLabel({
+                          count: sessionStorageTotals.count,
+                          totalBytes: sessionStorageTotals.totalBytes,
+                          freeBytes
+                        })
+                      : `${plural(sessions.length, 'recording')} loaded`}
+                  </span>
+                  {sessionsNextCursor ? (
+                    <Button
+                      disabled={sessionsLoadingMore}
+                      size="xs"
+                      variant="ghost"
+                      onClick={() => void loadMoreSessions()}
+                    >
+                      {sessionsLoadingMore ? 'Loading…' : 'Load more'}
+                    </Button>
+                  ) : null}
+                </div>
+              ) : null}
+            </div>
+          )}
+        </TabsContent>
+        <TabsContent value="cloud">
+          <Suspense
+            fallback={
+              <Empty className="py-16">
+                <EmptyDescription className="flex items-center gap-2">
+                  <Spinner aria-hidden />
+                  Loading cloud recordings…
+                </EmptyDescription>
+              </Empty>
+            }
+          >
+            <LibraryCloudRecordings onOpenLocal={focusLibrarySession} />
+          </Suspense>
+        </TabsContent>
+      </PageTabs>
 
       {liveMarkerSession ? (
         <Suspense fallback={null}>
@@ -958,10 +991,7 @@ function LibraryRow({
       <div
         ref={registerRow}
         aria-selected={selected}
-        className={cn(
-          LIBRARY_COLUMNS,
-          'border-b border-border py-2 outline-hidden last:border-b-0 hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset aria-selected:bg-accent data-revealed:bg-accent'
-        )}
+        className={cn(LIBRARY_COLUMNS, LIBRARY_ROW_CLASS)}
         data-revealed={revealed || undefined}
         data-videorc-library-row={session.id}
         role="row"
