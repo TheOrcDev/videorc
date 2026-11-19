@@ -30,8 +30,9 @@ jobs:
     # workspace dev opt-level 2 (one ~24k-line main.rs, full debuginfo, on a
     # 3-core runner). The test/sentinel builds below compile the backend crate
     # itself at opt-level 0 with line tables only (dependencies keep opt 2),
-    # which is a correctness gate, not a perf gate. 60 min is a hard ceiling.
-    timeout-minutes: 60
+    # which is a correctness gate, not a perf gate. 70 min is a hard ceiling:
+    # the steps before the test compile take ~13 min, the compile up to 45.
+    timeout-minutes: 70
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -110,7 +111,10 @@ jobs:
 
       - name: Compile tests
         # Split from the run so a slow compile and a hung test are told apart.
-        timeout-minutes: 35
+        # It takes 23-30 min on most runs; on a slow runner (Clippy at 9 min
+        # instead of 6) it ran past 35 twice on 2026-11-16 with a full cache
+        # hit, while the same crate's Linux compile held at 9 min.
+        timeout-minutes: 45
         run: cargo test -p videorc-backend --no-run
 
       - name: Test
