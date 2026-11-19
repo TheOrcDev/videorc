@@ -211,3 +211,24 @@ foreground. Shadscan's established baseline/floor is 27; a fresh JSON audit
 must meet it immediately before each local commit. No push or rebase.
 
 <!-- FINAL_GATE_TABLE -->
+
+## After the rebase onto main (2026-11-19)
+
+Branch `plan-231-scenes-v2` (PR #1543), rebased onto `db2313f73`, dev
+backend built in a slot, `VIDEORC_SMOKE_SKIP_PREBUILD=1`,
+`VIDEORC_SMART_SCENES_MAX_HOST_LOAD=10`. The shared Mac was loaded by other
+sessions (load 10–70, up to 8 GB swap), so timing is reported, not judged.
+
+| Step                                     | Run 4                                                        | Run 5                                       |
+| ---------------------------------------- | ------------------------------------------------------------ | ------------------------------------------- |
+| migration, new-scenes, reorder           | PASS                                                         | PASS                                        |
+| switches (20 cuts)                       | PASS: p50/p95 196/241 ms, 0 black, 0 wrong layout            | PASS: 319/446 ms, 0 black, 0 wrong layout   |
+| camera-return (10)                       | PASS: 265/407 ms, every return in place                      | Not judged: load stayed above 10 (33.5)     |
+| rapid-keys, vertical-keys                | PASS                                                         | PASS                                        |
+| relaunch, follow, hide, password-manager | PASS                                                         | PASS                                        |
+| out-of-sight                             | FAIL: capture stopped 3 s into the hold (load 23, 8 GB swap) | PASS: notice 7.2 s, no recovery, back 5.8 s |
+
+Before run 4, vertical-keys failed once (run 2) on five held frames of a real
+camera's full-frame picture. Its texture read as a layout mark. The smoke now
+judges only the incoming layout when it leaves a camera picture
+(`fromLayoutMark: null`); the cut itself was clean.
