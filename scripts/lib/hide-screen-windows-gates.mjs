@@ -267,11 +267,15 @@ export function sessionFrostLeadMs(leads) {
 }
 
 /**
- * When the backend closed the gate after the hide press: the first
- * `screen.privacy.changed` saying hidden at or after `hideAtMs`. `screen.hide`
- * emits it as the gate closes, before it covers the stores
- * ([`hideStoresCoveredMs`] adds that span). Null when no such event arrived.
- * @param {Array<{event:string, payload?:{hidden?:boolean}, atMs:number}>} events
+ * When the backend closed the gate after the hide press, in ms after
+ * `hideAtMs`: the first `screen.privacy.changed` saying hidden at or after
+ * `hideAtMs`. `screen.hide` closes the gate and emits it, then covers the
+ * stores ([`hideStoresCoveredMs`] adds that span), so part of the cover can
+ * run while the event is in flight. The event's own `since` (the backend's
+ * clock at the gate, the same machine's wall clock as `hideAtMs`) is used,
+ * clamped between the press and the event's arrival; the arrival only when
+ * `since` is missing or unparseable. Null when no such event arrived.
+ * @param {Array<{event:string, payload?:{hidden?:boolean, since?:string}, atMs:number}>} events
  * @param {number} hideAtMs
  */
 export function hideCoverMs(events, hideAtMs) {
@@ -281,7 +285,12 @@ export function hideCoverMs(events, hideAtMs) {
       entry.payload?.hidden === true &&
       entry.atMs >= hideAtMs
   )
-  return changed ? changed.atMs - hideAtMs : null
+  if (!changed) return null
+  const sinceMs = Date.parse(changed.payload?.since ?? '')
+  const gateAtMs = Number.isFinite(sinceMs)
+    ? Math.min(changed.atMs, Math.max(hideAtMs, sinceMs))
+    : changed.atMs
+  return gateAtMs - hideAtMs
 }
 
 /**

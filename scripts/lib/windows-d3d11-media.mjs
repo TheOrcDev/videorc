@@ -213,6 +213,7 @@ export const WINDOWS_D3D11_REQUIRED_RUST_TESTS = Object.freeze({
     'windows_d3d11_session::tests::windows_d3d11_cfr_replacement_resets_only_the_source_fence',
     'windows_d3d11_session::tests::windows_d3d11_cfr_show_hands_back_to_the_native_capture_clock',
     'windows_d3d11_session::tests::windows_d3d11_claim_gate_requires_every_ticket_and_encoder',
+    'windows_d3d11_session::tests::windows_d3d11_hide_edge_holds_only_the_frame_last_published',
     'windows_d3d11_session::tests::windows_d3d11_hide_edge_holds_the_frame_on_air_until_the_still',
     'windows_d3d11_session::tests::windows_d3d11_media_env_selects_auto_required_and_disabled',
     'windows_d3d11_session::tests::windows_d3d11_overlay_layer_geometry_follows_the_shared_rect_oracle',

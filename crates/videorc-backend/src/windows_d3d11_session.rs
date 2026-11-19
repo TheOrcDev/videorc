@@ -815,12 +815,22 @@ struct WindowsD3d11CfrTick {
 struct WindowsD3d11CfrSequencer {
     output_sequence: u64,
     source_sequence: Option<u64>,
+    /// Counts source replacements, so a source frame is named by its binding
+    /// as well as its sequence (two bindings' clocks can share a number).
+    source_epoch: u64,
 }
 
 impl WindowsD3d11CfrSequencer {
     fn replace_source(&mut self) {
         // Capture sequences restart per binding; encoder time never does.
         self.source_sequence = None;
+        self.source_epoch = self.source_epoch.wrapping_add(1);
+    }
+    /// The newest source frame the sequencer accepted, by binding and
+    /// sequence. Recorded after a publish, it names the frame on air.
+    fn source_frame(&self) -> Option<(u64, u64)> {
+        self.source_sequence
+            .map(|sequence| (self.source_epoch, sequence))
     }
     fn advance_blank(&mut self) -> Result<Option<WindowsD3d11CfrTick>, String> {
         if self.output_sequence == 0 {
@@ -875,6 +885,17 @@ impl WindowsD3d11CfrSequencer {
 /// past this bound the loop draws no screen until the still arrives.
 #[cfg(any(target_os = "windows", test))]
 const WINDOWS_D3D11_PRIVACY_EDGE_HOLD: std::time::Duration = std::time::Duration::from_millis(300);
+
+/// Plan 210 S7 (Hide screen): whether the frame in hand at a Hide edge may be
+/// held. Only when it is the frame last published: a tick that acquired a
+/// newer frame and then skipped its publish (composition pressure, a startup
+/// gate) leaves a frame in hand that never went on air, possibly captured
+/// after the press, and publishing it after the edge would put a new live
+/// frame on air while hidden. Such a frame is dropped as before the hold.
+#[cfg(any(target_os = "windows", test))]
+fn privacy_edge_may_hold(in_hand: Option<(u64, u64)>, published: Option<(u64, u64)>) -> bool {
+    in_hand.is_some() && in_hand == published
+}
 
 /// Plan 210 S7 (Hide screen): at a Hide edge the frame in hand (captured
 /// before the loop saw the edge, and already composed on air) stays until
@@ -2709,6 +2730,8 @@ mod runtime {
         let mut privacy_hidden = false;
         let mut privacy_resume_pending = false;
         let mut privacy_edge_hold_until: Option<Instant> = None;
+        // The source frame of the last published composition: what is on air.
+        let mut published_source_frame: Option<(u64, u64)> = None;
         let mut upload_revision = 0u64;
         let mut last_capture_upload: Option<(u64, WindowsD3d11UploadPixels, u64)> = None;
         let mut camera_upload_revision = 0u64;
@@ -2735,14 +2758,25 @@ mod runtime {
                 privacy_hidden = privacy_hidden_now;
                 privacy_resume_pending = !privacy_hidden_now;
                 pending_capture = None;
-                if privacy_hidden_now {
+                if privacy_hidden_now
+                    && super::privacy_edge_may_hold(cfr.source_frame(), published_source_frame)
+                {
                     // The frame in hand (the texture lease, or the BGRA frame
-                    // and its upload) is from before the edge and already on
-                    // air. It stays until the still is read below, within a
-                    // bound, so the edge draws no black ticks; the native poll
-                    // stops and a lease answering after the edge is dropped.
+                    // and its upload) is the one on air, from before the edge.
+                    // It stays until the still is read below, within a bound,
+                    // so the edge draws no black ticks; the native poll stops
+                    // and a lease answering after the edge is dropped.
                     privacy_edge_hold_until =
                         Some(frame_started_at + super::WINDOWS_D3D11_PRIVACY_EDGE_HOLD);
+                } else if privacy_hidden_now {
+                    // The frame in hand never went on air: dropped with its
+                    // lease and upload. Until the still is read below, no
+                    // screen is drawn at all.
+                    privacy_edge_hold_until = None;
+                    retained_capture_ticket = None;
+                    capture_frame = None;
+                    last_capture_upload = None;
+                    cfr.replace_source();
                 } else {
                     privacy_edge_hold_until = None;
                     retained_capture_ticket = None;
@@ -3370,6 +3404,7 @@ mod runtime {
                     break;
                 }
             };
+            published_source_frame = cfr.source_frame();
             if let Some(committed) = committed.as_ref().filter(|_| !committed_is_startup) {
                 live_sources.observe(
                     committed,
@@ -6142,6 +6177,30 @@ mod tests {
         let first_b = sequencer.advance(Some(1)).unwrap().unwrap();
         assert_eq!((first_b.output_sequence, first_b.source_sequence), (3, 1));
         assert!(sequencer.advance(Some(1)).is_err());
+    }
+
+    #[test]
+    fn windows_d3d11_hide_edge_holds_only_the_frame_last_published() {
+        let mut cfr = WindowsD3d11CfrSequencer::default();
+        assert!(!privacy_edge_may_hold(cfr.source_frame(), None));
+        assert!(cfr.advance(Some(10)).unwrap().is_some());
+        let mut published = cfr.source_frame();
+        assert!(privacy_edge_may_hold(cfr.source_frame(), published));
+        // A repeat of the frame on air is still that frame.
+        assert!(cfr.advance(None).unwrap().is_some());
+        assert!(privacy_edge_may_hold(cfr.source_frame(), published));
+        // Composition pressure: frame 11 is acquired and sequenced, but its
+        // tick never publishes. Hide now must not put it on air.
+        assert!(cfr.advance(Some(11)).unwrap().is_some());
+        assert!(!privacy_edge_may_hold(cfr.source_frame(), published));
+        // Once a later tick publishes it, it is the frame on air.
+        published = cfr.source_frame();
+        assert!(privacy_edge_may_hold(cfr.source_frame(), published));
+        // A new binding's frame 11 is a different frame.
+        cfr.replace_source();
+        assert!(!privacy_edge_may_hold(cfr.source_frame(), published));
+        assert!(cfr.advance(Some(11)).unwrap().is_some());
+        assert!(!privacy_edge_may_hold(cfr.source_frame(), published));
     }
 
     #[test]

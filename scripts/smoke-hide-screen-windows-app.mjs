@@ -398,10 +398,10 @@ async function hideStep({ renderer, smoke, screen }) {
   const hideAckMs = Date.now() - hideAtMs
   await sleep(HIDDEN_SPAN_MS / 2)
   // Issue #1329: the frost reaches the outputs once the stills are in the
-  // stores. screen.privacy.changed marks the gate closing, and the backend
-  // logs how long it then held the stores to cover them; together they bound
-  // how late the frost could reach the outputs. Both are read here, two
-  // seconds on.
+  // stores. screen.privacy.changed dates the gate closing (its `since`), and
+  // the backend logs how long it then held the stores to cover them;
+  // together they bound how late the frost could reach the outputs. Both are
+  // read here, two seconds on.
   const gateMs = hideCoverMs(events, hideAtMs)
   const storesCoveredMs = hideStoresCoveredMs(devAppLogLines.slice(hideLogFrom))
   const coverMs = gateMs == null ? null : gateMs + (storesCoveredMs ?? 0)

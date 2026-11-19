@@ -413,6 +413,28 @@ test('the hide cover is the first hidden privacy event after the press', () => {
   assert.equal(hideCoverMs(undefined, 0), null)
 })
 
+test("the gate is dated by the event's own since, not its arrival", () => {
+  const press = Date.parse('2026-11-19T21:00:00.000Z')
+  const at = (since, arrivedAfterMs) => [
+    {
+      event: 'screen.privacy.changed',
+      payload: { hidden: true, ...(since ? { since } : {}) },
+      atMs: press + arrivedAfterMs
+    }
+  ]
+  // The gate closed 6 ms after the press; the event arrived 15 ms after it,
+  // with part of the stores' cover already done. Counting from the arrival
+  // would add that overlap to the cover twice.
+  assert.equal(hideCoverMs(at('2026-11-19T21:00:00.006123+00:00', 15), press), 6)
+  // Clamped into [press, arrival]: clock rounding never reads before the
+  // press, and never after the event arrived.
+  assert.equal(hideCoverMs(at('2026-11-19T20:59:59.998Z', 15), press), 0)
+  assert.equal(hideCoverMs(at('2026-11-19T21:00:01.000Z', 15), press), 15)
+  // No since (an older backend) or an unparseable one: the arrival.
+  assert.equal(hideCoverMs(at(null, 15), press), 15)
+  assert.equal(hideCoverMs(at('not a time', 15), press), 15)
+})
+
 test("the stores' cover comes from the backend's first cover line after the press", () => {
   const lines = [
     '[backend:info] 2026-11-19T20:57:14.100Z  INFO videorc_backend::state: unrelated',
