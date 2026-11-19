@@ -59,7 +59,10 @@ describe('streamTargetNotices', () => {
     ).toEqual([
       {
         key: 'stream-target:yt',
+        targetId: 'yt',
         kind: 'error',
+        // Plan 250: the only destination on air stopped, so it is urgent.
+        urgent: true,
         title: 'Streaming to YouTube stopped',
         description: 'YouTube ended this broadcast'
       }
@@ -139,6 +142,7 @@ describe('streamTargetNotices through Videorc Cloud', () => {
     expect(streamTargetNotices(previous, targets)).toEqual([
       {
         key: 'stream-target:videorc-cloud-horizontal',
+        targetId: 'videorc-cloud-horizontal',
         kind: 'warning',
         title: 'Reconnecting to Videorc Cloud',
         description: 'Viewers see Be right back until this computer reconnects.'

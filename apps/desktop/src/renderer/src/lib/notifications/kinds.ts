@@ -14,6 +14,11 @@ export interface NotificationKind {
    * it still pops up, briefly, because the streamer is waiting for it.
    */
   answersAPress?: boolean
+  /**
+   * News Videorc tells once, outside a session (a feature switched on for
+   * the account): it pops up like an answer, or nobody would see it.
+   */
+  announcement?: boolean
   /** How long that pop-up stays, when not the default. */
   popUpMs?: number
 }
@@ -42,7 +47,26 @@ const kinds = {
   microphone: { tone: 'warning', life: 'condition', mayBe: ['urgent'] },
   'audio-blip': { tone: 'news', life: 'event' },
   'system-audio-echo': { tone: 'warning', life: 'condition' },
-  'audio-output-failed': { tone: 'urgent', life: 'event' }
+  'audio-output-failed': { tone: 'urgent', life: 'event' },
+
+  // Destinations, platforms and Videorc Cloud (S6).
+  // Urgent when no other destination is on air: viewers see nothing.
+  'stream-target': { tone: 'warning', life: 'condition', mayBe: ['urgent'] },
+  chat: { tone: 'warning', life: 'condition' },
+  'account-sign-in': { tone: 'warning', life: 'condition' },
+  // A step on a platform that failed while the stream goes on.
+  'platform-step': { tone: 'warning', life: 'event' },
+  // What Go Live did or still needs, said while the streamer waits for it.
+  'go-live-step': { tone: 'news', life: 'event', answersAPress: true, popUpMs: 8_000 },
+  // Urgent when X ended the broadcast itself.
+  'x-playback': { tone: 'warning', life: 'condition', mayBe: ['urgent'] },
+  'x-live': { tone: 'done', life: 'event', answersAPress: true },
+  'platform-news': { tone: 'news', life: 'event' },
+  'youtube-thumbnail': { tone: 'warning', life: 'condition' },
+  'cloud-status': { tone: 'warning', life: 'condition' },
+  'cloud-news': { tone: 'news', life: 'event' },
+  'cloud-announce': { tone: 'news', life: 'event', announcement: true, popUpMs: 8_000 },
+  'cloud-controller': { tone: 'news', life: 'condition', answersAPress: true, popUpMs: 8_000 }
 } satisfies Record<string, NotificationKind>
 
 export type NotificationKindId = keyof typeof kinds

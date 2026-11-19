@@ -23,7 +23,9 @@ describe('the notification registry (plan 250)', () => {
       .filter(([, kind]) => kind.mayBe?.includes('urgent'))
       .map(([id]) => id)
       .sort()
-    expect(mayBecomeUrgent).toEqual(['microphone', 'screen-capture', 'watchdog'].sort())
+    expect(mayBecomeUrgent).toEqual(
+      ['microphone', 'screen-capture', 'stream-target', 'watchdog', 'x-playback'].sort()
+    )
   })
 
   it('a report takes the kind tone unless the kind allows the one it asks for', () => {

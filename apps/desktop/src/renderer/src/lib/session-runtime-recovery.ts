@@ -32,6 +32,12 @@ import {
   publishRecordingQuality,
   sessionEndedNotifications
 } from '@/lib/notifications/sources/health'
+import {
+  publishDiscordFailure,
+  publishXPlayback,
+  publishYouTubeBroadcastProblem,
+  publishYouTubeBudget
+} from '@/lib/notifications/sources/platforms'
 import { notifyOnce } from '@/lib/notify-once'
 import { TOAST_WITH_DESCRIPTION_MS, toast } from '@/lib/toast'
 import { openWorkspaceTab } from '@/lib/workspace-navigation'
@@ -45,8 +51,10 @@ import {
   youtubeConnectPausedMessage
 } from '@/lib/youtube-quota-copy'
 
-// Plan 083: the thumbnail warning rides this lazy runtime-toast chunk.
-export { showYouTubeThumbnailFailure, youtubeThumbnailFailure } from '@/lib/youtube-thumbnail-toast'
+// Plan 083: the thumbnail warning rides this lazy runtime chunk. Since plan
+// 250 it is an entry with Retry (`notifications/sources/platforms.ts`).
+export { youtubeThumbnailFailure } from '@/lib/youtube-thumbnail-toast'
+export { publishYouTubeThumbnailFailure as showYouTubeThumbnailFailure } from '@/lib/notifications/sources/platforms'
 // Plan 094: so does every piece of YouTube quota copy the Studio provider shows.
 export { youtubeGoLivePausedMessage } from '@/lib/youtube-quota-copy'
 
@@ -56,11 +64,7 @@ export function showYouTubeBroadcastToast(
   target: { id: string; label: string; platform: StreamPlatform },
   message: string
 ): void {
-  const broadcastToast = youtubeBroadcastToast(step, target, message)
-  toast.warning(broadcastToast.title, {
-    id: `youtube-broadcast-${step}:${target.id}`,
-    description: broadcastToast.description
-  })
+  publishYouTubeBroadcastProblem(step, target, youtubeBroadcastToast(step, target, message))
 }
 
 /** The Discord announcement failure already toasted (plan 187, D13). */
@@ -75,11 +79,7 @@ export function showDiscordAnnounceFailure(snapshot: DiscordAnnounceSnapshot): v
   const failure = discordFailureToast(discordFailureToastedAt, snapshot, Date.now())
   if (!failure) return
   discordFailureToastedAt = failure.at
-  toast[failure.type](failure.title, {
-    id: 'discord-announce-failure',
-    description: failure.description,
-    action: { label: 'Open Destinations', onClick: () => openWorkspaceTab('live', 'setup') }
-  })
+  publishDiscordFailure(failure)
 }
 
 /** One quiet notice per daily-budget step reached (plan 094, S6), never on the way down. */
@@ -90,9 +90,7 @@ export function showYouTubeBudgetStep(
   const reached = youtubeBudgetStepToAnnounce(previous, status)
   const notice = reached ? youtubeBudgetNotice(reached) : null
   if (!reached || !notice) return
-  notifyOnce(`youtube-budget:${reached}`, 'info', notice.title, {
-    description: notice.description
-  })
+  publishYouTubeBudget(reached, notice)
 }
 
 type SessionRuntimeRecoveryPlan = {
@@ -297,25 +295,9 @@ export function showBackendError(
   }
 }
 
+/** X's own word on whether viewers can watch: one subject (plan 250). */
 export function showXPlaybackEvent(event: XPlaybackEvent): void {
-  // One toast per playback state: the backend re-checks on a timer.
-  if (event.status === 'verified') {
-    notifyOnce('x-playback', 'success', 'Viewers can watch your X broadcast', {
-      description: event.shareUrl
-    })
-  } else if (event.status === 'pending') {
-    notifyOnce('x-playback', 'warning', 'X is still preparing your stream', {
-      description:
-        'Viewers may see a loading spinner for a few minutes. Keep streaming. Videorc keeps checking.'
-    })
-  } else {
-    // X's API exposes no playback URL any more: `unavailable` means X ended
-    // the broadcast (usually TIMED_OUT: no video reached X in 5 minutes).
-    notifyOnce('x-playback', 'error', 'X ended your broadcast', {
-      description:
-        'X stopped it while Videorc was still streaming, usually because no video reached X. Your local recording is unaffected.'
-    })
-  }
+  publishXPlayback(event)
 }
 
 /**

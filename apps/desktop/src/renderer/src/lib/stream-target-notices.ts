@@ -4,9 +4,16 @@ import { destinationLabel } from '@/lib/platform-copy'
 
 export type StreamTargetNotice = {
   key: string
+  /** The destination, for the door to its card. */
+  targetId: string
   kind: NotifyOnceKind
   title: string
   description: string
+  /**
+   * Plan 250: no other destination is on air while this one is down, so
+   * viewers see nothing right now.
+   */
+  urgent?: boolean
 }
 
 /**
@@ -66,14 +73,18 @@ export function streamTargetNotices(
     const before = previous.get(target.targetId)
     if (before === target.state) continue
     const leg = `stream-target:${target.targetId}`
+    const { targetId } = target
     const label = destinationLabel(target.label)
-    const others = otherDestinationsLine(otherDestinationsOnAir(targets, target.targetId))
+    const othersOnAir = otherDestinationsOnAir(targets, target.targetId)
+    const others = otherDestinationsLine(othersOnAir)
+    const urgent = othersOnAir === 0
     if (
       isCloudFeedTarget(target) &&
       (target.state === 'reconnecting' || target.state === 'failed')
     ) {
       notices.push({
         key: leg,
+        targetId,
         kind: 'warning',
         title: 'Reconnecting to Videorc Cloud',
         description: CLOUD_FEED_DOWN
@@ -84,7 +95,9 @@ export function streamTargetNotices(
       case 'failed':
         notices.push({
           key: leg,
+          targetId,
           kind: 'error',
+          urgent,
           title: `Streaming to ${label} stopped`,
           description:
             target.message ?? others ?? 'No other destination is streaming, so viewers see nothing.'
@@ -93,7 +106,9 @@ export function streamTargetNotices(
       case 'reconnecting':
         notices.push({
           key: leg,
+          targetId,
           kind: 'warning',
+          urgent,
           title: `${label} is reconnecting`,
           description: others
             ? `Viewers there see nothing until it's back. ${others}`
@@ -103,6 +118,7 @@ export function streamTargetNotices(
       case 'warning':
         notices.push({
           key: leg,
+          targetId,
           kind: 'warning',
           title: `${label} isn't receiving your stream`,
           description: 'Videorc is still sending it. Check the platform’s live dashboard.'
@@ -112,6 +128,7 @@ export function streamTargetNotices(
         if (before !== undefined && BACK_AFTER.has(before)) {
           notices.push({
             key: leg,
+            targetId,
             kind: 'success',
             title: `${label} is back`,
             description: `Streaming to ${label} resumed.`

@@ -43,6 +43,7 @@ export function normalizeNotifications(read) {
         title: String(entry.title ?? ''),
         detail: entry.detail == null ? '' : String(entry.detail),
         read: entry.read === true,
+        occurrences: Number.isFinite(entry.occurrences) ? entry.occurrences : 1,
         actions: Array.isArray(entry.actions) ? entry.actions.map((action) => action.label) : []
       }))
   }
@@ -66,6 +67,14 @@ export function findNotifications(read, wanted = {}) {
       matches(entry.tone, wanted.tone) &&
       matches(entry.state, wanted.state)
   )
+}
+
+/**
+ * How many times the matching news was raised: each entry counts once per
+ * occurrence, so a notice that repeats is a storm even on one row.
+ */
+export function countNotifications(read, wanted = {}) {
+  return findNotifications(read, wanted).reduce((sum, entry) => sum + entry.occurrences, 0)
 }
 
 /** "title: detail" for each entry, the way a smoke used to collect toast text. */

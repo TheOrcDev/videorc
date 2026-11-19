@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 
 import {
+  countNotifications,
   describeNotifications,
   findNotifications,
   normalizeNotifications,
@@ -42,6 +43,7 @@ test('normalizes a read into plain entries, and survives a page with nothing to 
       title: 'Microphone is silent',
       detail: 'No sound for 40 s.',
       read: false,
+      occurrences: 1,
       actions: ['Open Audio']
     },
     {
@@ -52,6 +54,7 @@ test('normalizes a read into plain entries, and survives a page with nothing to 
       title: 'YouTube is paused',
       detail: '',
       read: false,
+      occurrences: 1,
       actions: []
     }
   ])
@@ -71,6 +74,15 @@ test('finds entries by key, title, tone and state; every field given must match'
   assert.equal(findNotifications(read, { title: /paused/, tone: 'urgent' }).length, 0)
   assert.equal(findNotifications(read, { state: 'open' }).length, 1)
   assert.equal(findNotifications(read).length, 2)
+})
+
+test('counts a notice once per occurrence, so a repeat on one row is still a storm', () => {
+  const repeated = {
+    entries: [{ key: 'youtube-budget:paused', title: 'YouTube is paused', occurrences: 3 }]
+  }
+  assert.equal(countNotifications(repeated, { title: /YouTube/i }), 3)
+  assert.equal(countNotifications(read, { title: /YouTube/i }), 1)
+  assert.equal(countNotifications(read, { title: /Kick/i }), 0)
 })
 
 test('reads like the toast text a smoke used to collect', () => {

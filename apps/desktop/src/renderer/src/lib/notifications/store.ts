@@ -157,7 +157,7 @@ export function createNotificationStore(options: NotificationStoreOptions = {}):
     const durationMs = popUpDecision({
       change,
       tone: item.entry.tone,
-      answersAPress: kind.answersAPress,
+      answersAPress: kind.answersAPress === true || kind.announcement === true,
       popUpMs: kind.popUpMs,
       hasDetail: Boolean(item.entry.detail),
       live: live(),
@@ -359,8 +359,8 @@ export function createNotificationStore(options: NotificationStoreOptions = {}):
   }
 
   const guard = options.guardText
-  function guarded<T extends { title?: string; detail?: string }>(words: T): T {
-    if (!guard) return words
+  function guarded<T extends { title?: string; detail?: string; ownWords?: boolean }>(words: T): T {
+    if (!guard || words.ownWords) return words
     return {
       ...words,
       ...(words.title !== undefined ? { title: guard(words.title) } : {}),

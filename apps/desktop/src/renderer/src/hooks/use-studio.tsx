@@ -377,12 +377,11 @@ import {
   cohostStatusDetail,
   cohostStatusToast,
   showBrowserApproval,
-  showStreamTargetNotice,
+  showStreamTargetNotices,
   showTakeoverEditRefused,
   showChatNeedsVideorcSignIn,
   showVideorcSignInExpired,
   showXBroadcastProblem,
-  X_MEDIA_STUDIO_URL,
   sourceSwitchFailedDescription,
   sourceSwitchFailedTitle
 } from '@/lib/studio-toasts'
@@ -799,6 +798,14 @@ const PLATFORM_CLEANUP_X_END_TIMEOUT_MS = 4000
 const AI_CONSENT_STORAGE_KEY = 'videorc.aiConsent'
 function isPreparedPlatformLifecycleOwner(sessionId: string): boolean {
   return sessionId.startsWith(PREPARED_PLATFORM_LIFECYCLE_OWNER_PREFIX)
+}
+
+/** Plan 250 S6: the notification sources for platforms and Videorc Cloud, on demand. */
+function loadPlatformNotifications() {
+  return import('@/lib/notifications/sources/platforms')
+}
+function loadCloudNotifications() {
+  return import('@/lib/notifications/sources/cloud')
 }
 
 function loadSessionRuntimeRecovery() {
@@ -2681,6 +2688,11 @@ export function handleAccountChangedEvent(
   }
   if (event.reason === 'session-expired') {
     void showVideorcSignInExpired()
+  } else if (event.account.status === 'signed-in') {
+    // Plan 250 S6: what waited on the sign-in resolves.
+    void loadPlatformNotifications().then((source) =>
+      source.resolveSignedIn(Object.values(CHAT_PLATFORM_LABELS))
+    )
   }
 }
 
@@ -3284,8 +3296,14 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // setup failed at go-live (2026-07-10: Twitch chat needed a reconnect and
   // the failure lived only in a backend warn log). Toast each broken
   // destination once per session, with a jump to the Destinations page.
-  const chatSetupWarnedRef = useRef<{ sessionId?: string; warned: Set<string> }>({
-    warned: new Set()
+  const chatSetupWarnedRef = useRef<{
+    sessionId?: string
+    warned: Set<string>
+    /** The platform of each chat warned about, to resolve its entry (plan 250). */
+    platforms: Map<string, keyof typeof CHAT_PLATFORM_LABELS>
+  }>({
+    warned: new Set(),
+    platforms: new Map()
   })
   const workingAppRef = useRef<SceneApp | undefined>(
     hydrateWorkingScene(loadJson(WORKING_SCENE_KEY, null))?.visual.sources.app
@@ -3333,17 +3351,28 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       return
     }
     if (chatSetupWarnedRef.current.sessionId !== sessionId) {
-      chatSetupWarnedRef.current = { sessionId, warned: new Set() }
+      chatSetupWarnedRef.current = { sessionId, warned: new Set(), platforms: new Map() }
     }
-    for (const warning of chatSetupToastWarnings(liveChatSnapshot.providers)) {
+    const chatWarnings = chatSetupToastWarnings(liveChatSnapshot.providers)
+    for (const warning of chatWarnings) {
       if (chatSetupWarnedRef.current.warned.has(warning.id)) {
         continue
       }
       chatSetupWarnedRef.current.warned.add(warning.id)
-      toast.warning(`${CHAT_PLATFORM_LABELS[warning.platform]} chat isn't connected`, {
-        description: warning.message,
-        action: { label: 'Open Destinations', onClick: () => openWorkspaceTab('live') }
-      })
+      chatSetupWarnedRef.current.platforms.set(warning.id, warning.platform)
+      // Plan 250 S6: one entry per destination's chat, behind the bell.
+      void loadPlatformNotifications().then((source) =>
+        source.publishChatNotConnected(warning, CHAT_PLATFORM_LABELS[warning.platform])
+      )
+    }
+    // A chat that connected after all resolves its entry.
+    for (const [id, platform] of chatSetupWarnedRef.current.platforms) {
+      if (chatWarnings.some((warning) => warning.id === id)) continue
+      chatSetupWarnedRef.current.platforms.delete(id)
+      chatSetupWarnedRef.current.warned.delete(id)
+      void loadPlatformNotifications().then((source) =>
+        source.resolveChatNotConnected(id, CHAT_PLATFORM_LABELS[platform])
+      )
     }
     // Plan 215 A3: a connector parked on the Videorc sign-in is not "isn't
     // connected", and Livestream would show X healthy. The toast names the
@@ -5146,9 +5175,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       streamTargetStatesRef.current = new Map()
       return
     }
-    for (const notice of streamTargetNotices(streamTargetStatesRef.current, streamTargets)) {
-      showStreamTargetNotice(notice)
-    }
+    showStreamTargetNotices(streamTargetNotices(streamTargetStatesRef.current, streamTargets))
     streamTargetStatesRef.current = new Map(
       streamTargets.map((target) => [target.targetId, target.state])
     )
@@ -5666,7 +5693,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         if (owner) void settleClaimedPlatformLifecycleOwnerRef.current?.(owner).catch(reportError)
       }
       setCloudStatus(next)
-      void loadCloudNotices().then((n) => n.toastCloudStatus(previous, next))
+      void loadCloudNotifications().then((source) => source.publishCloudStatus(previous, next))
     },
     [claimPlatformLifecycleOwner, latchHandOff, reportError]
   )
@@ -7816,16 +7843,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       return
     }
     xProducerReminderShownRef.current = true
-    toast.info('X feed is connected: start the broadcast on X', {
-      description:
-        "X doesn't go live from the RTMP feed alone: open Media Studio → Producer → Broadcasts, " +
-        'create a broadcast from your source, and press Broadcast.',
-      duration: 20000,
-      action: {
-        label: 'Open Media Studio',
-        onClick: () => void window.videorc?.openOAuthUrl?.(X_MEDIA_STUDIO_URL)
-      }
-    })
+    // Plan 250 S6: a step of Go Live, so it still pops up; the entry keeps
+    // the Media Studio door after the toast has gone.
+    void loadPlatformNotifications().then((source) => source.publishXStartBroadcast())
   }, [recording.state, recordingLive])
 
   useEffect(() => {
@@ -13942,7 +13962,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   useEffect(() => {
     if (!client || !cloudAnnounceDue || isSessionActive || cloudAnnounceShownRef.current) return
     cloudAnnounceShownRef.current = true
-    void loadCloudNotices().then((n) => n.announceCloud(client, commitCloudStatus))
+    void loadCloudNotifications().then((source) => source.announceCloud(client, commitCloudStatus))
   }, [client, cloudAnnounceDue, commitCloudStatus, isSessionActive])
   // Plan 215 D1: the Scene page unlocks a source's position and size only
   // once the session says a commit reaches its picture.
@@ -16700,10 +16720,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             }
             const notice = (await loadGoLiveOutput()).goLiveSessionOutputNotice(output)
             if (notice) {
-              toast.info(notice.title, {
-                id: 'stream-output-adjusted',
-                description: notice.description
-              })
+              void loadPlatformNotifications().then((source) =>
+                source.publishStreamOutputAdjusted(notice)
+              )
             }
           }
           if (talkShowRoomOpenRef.current) {
@@ -19478,11 +19497,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error)
           setLastError(`Couldn't migrate saved ${label} stream key: ${message}`)
-          toast.warning(`Save your ${label} stream key again`, {
-            id: `stream-key-migration:${candidate.targetId}`,
-            description:
-              'Paste it in Destinations → Setup so Videorc can store it securely. It works for now.'
-          })
+          void loadPlatformNotifications().then((source) =>
+            source.publishStreamKeyMigration(label, candidate.targetId)
+          )
         }
       }
     })()

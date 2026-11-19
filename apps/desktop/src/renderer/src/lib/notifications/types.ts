@@ -73,6 +73,12 @@ export interface NotificationInput {
    * repeat.
    */
   once?: boolean
+  /**
+   * The words carry the streamer's own text (a device's name), which may
+   * hold braces or tags. They skip the raw-provider-text guard: React
+   * renders them escaped. Only for news, which never becomes a toast.
+   */
+  ownWords?: boolean
   /** Runs when the streamer clears the entry while it is open ("I know"). */
   onClear?: () => void
 }

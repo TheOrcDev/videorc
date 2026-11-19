@@ -146,7 +146,6 @@ const PINNED_TOASTS_THAT_STAY = new Set([
  */
 const PINNED_TOASTS_STILL_TO_MOVE = new Set([
   'src/hooks/use-studio.tsx',
-  'src/hooks/use-talk-show-room.ts',
   'src/hooks/use-virtual-camera.ts',
   'src/lib/finalization-toast.ts',
   'src/lib/session-runtime-recovery.ts'
