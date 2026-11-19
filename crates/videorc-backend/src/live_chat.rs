@@ -1045,6 +1045,16 @@ pub enum ChatSenderConfig {
     },
 }
 
+/// The job a destination-keyed task does. One destination holds at most one
+/// task per kind, so a repeated start replaces the old one (leak hunt L7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum DestinationTask {
+    /// The chat connector (X).
+    Chat,
+    /// The viewer-count sampler (X).
+    Viewers,
+}
+
 /// What re-spawns an X or Kick connector parked on the Videorc sign-in (plan
 /// 215 A4): the config it was started with, broadcast included. Captured at
 /// spawn and dropped at stop, like the senders; the connector itself reads
@@ -1230,6 +1240,10 @@ pub struct LiveChatCoordinator {
     reconnect_count: u64,
     /// Running connector tasks, aborted on stop/restart.
     tasks: Vec<JoinHandle<()>>,
+    /// Running tasks owned by one destination (X chat and X viewers), one per
+    /// kind: a repeated `liveChat.x.start` aborts the earlier one instead of
+    /// stacking another beside it. Aborted on stop/restart with `tasks`.
+    destination_tasks: HashMap<(String, DestinationTask), JoinHandle<()>>,
     /// Send credentials per concrete destination; session-scoped.
     senders: HashMap<String, ChatSenderConfig>,
     /// What each X and Kick connector needs to attach again after the Videorc
@@ -1339,6 +1353,7 @@ impl LiveChatCoordinator {
             messages_received: 0,
             reconnect_count: 0,
             tasks: Vec::new(),
+            destination_tasks: HashMap::new(),
             senders: HashMap::new(),
             reattach: HashMap::new(),
             send_operations_in_flight: HashMap::new(),
@@ -1881,6 +1896,18 @@ impl LiveChatCoordinator {
         self.tasks.push(task);
     }
 
+    /// Own `task` as this destination's `kind`, aborting the one it replaces.
+    fn replace_destination_task(
+        &mut self,
+        destination_id: String,
+        kind: DestinationTask,
+        task: JoinHandle<()>,
+    ) {
+        if let Some(previous) = self.destination_tasks.insert((destination_id, kind), task) {
+            previous.abort();
+        }
+    }
+
     /// The session's 7TV emote indexes (plan 089); empty until loaded.
     pub(crate) fn seventv_indexes(&self) -> Arc<crate::seventv::SevenTvIndexes> {
         self.seventv_indexes.clone()
@@ -1969,11 +1996,17 @@ impl LiveChatCoordinator {
 
     #[cfg(test)]
     pub(crate) fn runtime_ownership(&self) -> (usize, usize) {
-        (self.tasks.len(), self.senders.len())
+        (
+            self.tasks.len() + self.destination_tasks.len(),
+            self.senders.len(),
+        )
     }
 
     fn abort_tasks(&mut self) {
         for task in self.tasks.drain(..) {
+            task.abort();
+        }
+        for (_, task) in self.destination_tasks.drain() {
             task.abort();
         }
         if let Some(task) = self.seventv_task.take() {
@@ -2875,8 +2908,19 @@ where
     ));
     {
         let mut coordinator = state.live_chat.lock().await;
-        coordinator.attach_task(viewer_handle);
-        coordinator.attach_task(handle);
+        // Leak hunt L7: a repeat for this destination in the same session
+        // replaces its sampler and connector rather than running a second
+        // pair (double X polls, and the same X chat delivered twice).
+        coordinator.replace_destination_task(
+            sender_destination_id.clone(),
+            DestinationTask::Viewers,
+            viewer_handle,
+        );
+        coordinator.replace_destination_task(
+            sender_destination_id.clone(),
+            DestinationTask::Chat,
+            handle,
+        );
         // Plan 215 A4: the Videorc sign-in re-spawns this connector with the
         // broadcast it was attached for.
         coordinator.register_reattachable(
@@ -2940,25 +2984,28 @@ pub async fn reattach_after_videorc_sign_in(state: &AppState) -> usize {
                     stream_platform_id(platform)
                 ),
             );
-            let handle = match connector {
-                ReattachableConnector::X(config) => {
+            match connector {
+                // X chat owns one connector slot per destination (L7), so a
+                // later repeat start replaces this one too.
+                ReattachableConnector::X(config) => coordinator.replace_destination_task(
+                    destination_id,
+                    DestinationTask::Chat,
                     tokio::spawn(crate::x_chat::run_x_chat_connector(
                         state.clone(),
                         session_id.clone(),
                         session_generation,
                         config,
-                    ))
-                }
-                ReattachableConnector::Kick(config) => {
-                    tokio::spawn(crate::kick_chat::run_kick_chat_connector(
+                    )),
+                ),
+                ReattachableConnector::Kick(config) => coordinator.attach_task(tokio::spawn(
+                    crate::kick_chat::run_kick_chat_connector(
                         state.clone(),
                         session_id.clone(),
                         session_generation,
                         config,
-                    ))
-                }
-            };
-            coordinator.attach_task(handle);
+                    ),
+                )),
+            }
             reattached += 1;
         }
         reattached
@@ -7062,6 +7109,43 @@ mod tests {
                 Some("session-b".to_string())
             ))
         );
+    }
+
+    /// Leak hunt L7: a repeated `liveChat.x.start` for the same destination
+    /// replaces its X viewer sampler and connector instead of stacking more
+    /// beside them; a second destination keeps its own pair.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn repeated_x_start_keeps_one_sampler_and_connector_per_destination() {
+        let state = test_state();
+        state
+            .live_chat
+            .lock()
+            .await
+            .start_session("session-a".to_string(), Vec::new());
+        let x_start = |target: &str| StartXLiveChatParams {
+            session_id: "session-a".to_string(),
+            broadcast_id: "broadcast-a".to_string(),
+            target_id: Some(target.to_string()),
+        };
+
+        for call in 1..=5 {
+            start_x_live_chat(&state, x_start("x-a"))
+                .await
+                .expect("X start");
+            assert_eq!(
+                state.live_chat.lock().await.runtime_ownership().0,
+                2,
+                "after X start {call} for one destination"
+            );
+        }
+
+        start_x_live_chat(&state, x_start("x-b"))
+            .await
+            .expect("second destination X start");
+        assert_eq!(state.live_chat.lock().await.runtime_ownership().0, 4);
+
+        stop_live_chat(&state).await;
+        assert_eq!(state.live_chat.lock().await.runtime_ownership().0, 0);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
