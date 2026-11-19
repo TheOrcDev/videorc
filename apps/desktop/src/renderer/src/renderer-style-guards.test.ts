@@ -79,6 +79,8 @@ const GRADIENT_ALLOWLIST = new Set([
   'src/components/banner-thumbnail.tsx',
   // The blank picture a scene thumbnail shows before its first frame.
   'src/components/studio/scenes-gallery.tsx',
+  // The room layout diagrams (plan 252): the same blank picture as the scene thumbnails.
+  'src/components/studio/stage-layout-thumb.tsx',
   // The level meter's zones (healthy, hot, clipping) as one gradient.
   'src/components/studio/mic-level-meter.tsx',
   // Caption style previews: stand-ins for the stream behind a caption.
@@ -790,6 +792,8 @@ const OFF_TIER_RADIUS_ALLOWLIST = new Set([
   // sources in miniature.
   'src/components/captions/captions-controls.tsx',
   'src/components/studio/scenes-gallery.tsx',
+  // The room layout diagrams (plan 252) draw each layout's tiles in miniature, as the scenes do.
+  'src/components/studio/stage-layout-thumb.tsx',
   // Word marks hug the transcript's text, smaller than any control.
   'src/components/clean-cut/clean-cut-transcript.tsx',
   // shadcn: the chart legend's 2 px swatches and the 16 px checkbox's corner.
