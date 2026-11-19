@@ -7,6 +7,11 @@
 // - A person's camera covers its tile (cropped, never stretched). A shared
 //   screen is contained (letterboxed): its edges carry text and window
 //   chrome, and a crop would hide them from viewers.
+// - A person's portrait camera (a phone held upright, plan 254 S2) is drawn
+//   whole, over a blurred, darkened copy of itself that covers the tile: a
+//   centred cover of 9:16 in 16:9 keeps a third of its height and cuts the
+//   eyes off. Where a portrait picture is still cropped (that fill), the
+//   window sits on its upper third, where a selfie's face is.
 // - The stage key names the stage the program page applied, so the desktop
 //   can tell whether the program draws what it sent or still an older stage. A content key, not a counter: the same stage sent twice is the
 //   same picture, and nothing has to be stored to make the two sides agree.
@@ -52,6 +57,63 @@ export function fitScale(source: Size, tile: Size, fit: TileFit): number {
   const x = tile.w / source.w
   const y = tile.h / source.h
   return fit === 'contain' ? Math.min(x, y) : Math.max(x, y)
+}
+
+/**
+ * Plan 254 S2: a picture turns portrait once it is this much taller than
+ * wide, and turns back only when it is square or wider. Between the two it
+ * stays what it was, so a source near square never flickers between fits.
+ */
+export const PORTRAIT_ENTER_RATIO = 1.1
+/** A portrait cover window is centred on this share of the source's height. */
+export const PORTRAIT_COVER_CENTRE = 1 / 3
+
+/**
+ * Whether a source of this decoded size is portrait, given what it `was`.
+ * A size that is no picture (zero, or a track's 2×2 end) changes nothing.
+ */
+export function isPortrait(source: Size, was = false): boolean {
+  if (source.w <= 2 || source.h <= 2) return was
+  if (source.h >= source.w * PORTRAIT_ENTER_RATIO) return true
+  if (source.h <= source.w) return false
+  return was
+}
+
+/**
+ * How a person's camera fills its tile. Landscape: `cover`, as ever.
+ * Portrait: the whole picture (`contain`) over a `fill` of itself.
+ */
+export function personFit(portrait: boolean): { fill: boolean; fit: TileFit } {
+  return portrait ? { fill: true, fit: 'contain' } : { fill: false, fit: 'cover' }
+}
+
+/**
+ * The `cover` window of a portrait source: `fitBox`'s, moved up so its
+ * centre is on the source's upper third (clamped inside the source). A
+ * window as tall as the source is `fitBox`'s own.
+ */
+export function portraitCoverBox(source: Size, tile: Size): Box | null {
+  const box = fitBox(source, tile, 'cover')
+  if (!box) return null
+  const top = source.h * PORTRAIT_COVER_CENTRE - box.h / 2
+  return { ...box, y: Math.min(Math.max(top, 0), source.h - box.h) }
+}
+
+/**
+ * Everything a tile draws for a person's camera of this size, in order: the
+ * `fill` window of the source (stretched over the whole tile, blurred and
+ * darkened by the caller), or null for none; then `picture`, the window of
+ * the source (`cover`) or the box in the tile (`contain`), as `fitBox`.
+ */
+export function personPicture(
+  source: Size,
+  tile: Size,
+  portrait: boolean
+): { fill: Box | null; fit: TileFit; picture: Box } | null {
+  const { fill, fit } = personFit(portrait)
+  const picture = fitBox(source, tile, fit)
+  if (!picture) return null
+  return { fill: fill ? portraitCoverBox(source, tile) : null, fit, picture }
 }
 
 /** The stage as the program page reads it from room metadata. */

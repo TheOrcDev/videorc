@@ -211,6 +211,113 @@ describe('the stage (D8)', () => {
 // stage says `hostShape: 'circle'` (the program page's rule, never in
 // Solo); the Show stage and the Program monitor copy it, and the name plate
 // stays outside the clip.
+describe('a portrait camera (plan 254 S2)', () => {
+  it('is drawn whole over its fill, as the program draws it, and covers again once landscape', async () => {
+    const drawn: number[][] = []
+    const context = {
+      filter: 'none',
+      fillStyle: '',
+      drawImage: (_source: unknown, ...args: number[]) => drawn.push(args),
+      fillRect: () => {}
+    }
+    const getContext = vi
+      .spyOn(HTMLCanvasElement.prototype, 'getContext')
+      .mockReturnValue(context as unknown as CanvasRenderingContext2D)
+    const play = vi.spyOn(HTMLMediaElement.prototype, 'play').mockResolvedValue()
+    await mount(
+      talkStatus({
+        room: openRoom({
+          guests: [ada],
+          participants: [
+            ...(openRoom().participants ?? []),
+            guestParticipant(ada, { onStage: true })
+          ],
+          stage: { layout: 'side-by-side', onStage: [HOST, 'g_ada'] }
+        })
+      }),
+      talkShow({
+        room: {
+          ...NO_TALK_SHOW.room,
+          people: [
+            {
+              identity: 'g_ada',
+              name: 'Ada',
+              video: {} as MediaStreamTrack,
+              audio: null,
+              screen: null,
+              micMuted: false,
+              cameraOff: false,
+              quality: 'good',
+              speaking: false
+            }
+          ]
+        }
+      })
+    )
+    const tile = container.querySelector<HTMLElement>(
+      '[data-testid="show-stage-tile"][data-stage-identity="g_ada"]'
+    ) as HTMLElement
+    const video = tile.querySelector('video') as HTMLVideoElement
+    const fill = (): HTMLCanvasElement | null =>
+      tile.querySelector('[data-testid="show-stage-portrait-fill"]')
+    const size = async (width: number, height: number): Promise<void> => {
+      Object.defineProperties(video, {
+        readyState: { configurable: true, value: 4 },
+        videoHeight: { configurable: true, value: height },
+        videoWidth: { configurable: true, value: width }
+      })
+      await act(async () => {
+        video.dispatchEvent(new Event('resize'))
+      })
+    }
+    // A laptop: today's cover, and nothing behind it.
+    await size(1280, 720)
+    expect(video.className).toContain('object-cover')
+    expect(fill()).toBeNull()
+
+    // A phone held upright: the whole picture, over the fill.
+    await size(720, 1280)
+    expect(video.className).toContain('object-contain')
+    expect(video.className).not.toContain('object-cover')
+    const canvas = fill() as HTMLCanvasElement
+    expect(canvas).not.toBeNull()
+    expect(Math.max(canvas.width, canvas.height)).toBe(64)
+    // One small draw of the frame, from its upper third, past the canvas's edges.
+    expect(drawn).toHaveLength(1)
+    const [sx, sy, sw, sh, dx, dy] = drawn[0] as number[]
+    expect([sx, sw, dx, dy]).toEqual([0, 720, -6, -6])
+    expect((sy as number) + (sh as number) / 2).toBeCloseTo(1280 / 3, 6)
+
+    // Turned on its side: cover again, and the fill is gone.
+    await size(1280, 720)
+    expect(video.className).toContain('object-cover')
+    expect(fill()).toBeNull()
+    getContext.mockRestore()
+    play.mockRestore()
+  })
+
+  it("leaves a screen's contain alone", async () => {
+    const play = vi.spyOn(HTMLMediaElement.prototype, 'play').mockResolvedValue()
+    await mount(
+      talkStatus({
+        room: openRoom({ stage: { layout: 'screen-people', onStage: [HOST], screen: HOST } })
+      }),
+      talkShow({
+        room: {
+          ...NO_TALK_SHOW.room,
+          local: { ...NO_TALK_SHOW.room.local, screen: {} as MediaStreamTrack }
+        }
+      })
+    )
+    const video = container.querySelector(
+      '[data-testid="show-stage-tile"][data-stage-kind="screen"] video'
+    ) as HTMLVideoElement
+    expect(video.className).toContain('object-contain')
+    expect(container.querySelector('[data-testid="show-stage-portrait-fill"]')).toBeNull()
+    play.mockRestore()
+  })
+})
+
 describe("the host's circle (plan 247 D-2)", () => {
   const tiles = (root: ParentNode = container) => [
     ...root.querySelectorAll<HTMLElement>('[data-testid="show-stage-tile"]')

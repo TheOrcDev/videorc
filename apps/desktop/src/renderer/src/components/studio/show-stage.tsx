@@ -4,7 +4,7 @@ import type { GraphicsSnapshot } from '../../../../shared/cloud-graphics'
 import type { ReactNode } from 'react'
 import { createAvatarView, type AvatarMotionSource } from '../../../../shared/cloud-avatar-view'
 import type { AvatarSnapshot } from '../../../../shared/cloud-avatar'
-import { Fragment, useEffect, useRef, useState, type ReactElement } from 'react'
+import { Fragment, useCallback, useEffect, useRef, useState, type ReactElement } from 'react'
 
 import { useGuestModeration } from '@/components/guests/guest-moderation'
 import { CloseRoomButton } from '@/components/guests/close-room-button'
@@ -118,7 +118,14 @@ import {
 } from '@/lib/talk-show-layout'
 import { cn } from '@/lib/utils'
 import { programScenePreview, scenePreviewPicture, sceneStatusLine } from '@/lib/room-scene-preview'
-import { VIEW_SOURCE, tileFit } from '../../../../shared/cloud-presentation-views'
+import {
+  VIEW_SOURCE,
+  isPortrait,
+  personFit,
+  tileFit,
+  type Size
+} from '../../../../shared/cloud-presentation-views'
+import { PORTRAIT_FILL_INTERVAL_MS, drawPortraitFill } from '@/lib/portrait-fill'
 import type { SceneTile } from '../../../../shared/cloud-scene'
 import { roomProgramCameraLine } from '../../../../shared/room-program-camera'
 import { roomProgramChips, roomProgramSummary } from '@/lib/room-program-opt-ins'
@@ -321,7 +328,14 @@ function StageTileView({
   const label = monitor ? '' : name || participant?.name || ''
   const look = cameraOffLook(tile.rect.w, tile.rect.h)
   const circle = hostCircle(tile, talkShow.hostIdentity, hostShape)
-  const fit = tileFit(tile.kind) === 'contain' ? 'object-contain' : 'object-cover'
+  // Plan 254 S2: a phone held upright sends a portrait camera. As on the
+  // program page it is drawn whole over a blurred fill of itself, never
+  // cropped to its middle third. A packed camera keeps its cover.
+  const [portrait, setPortrait] = useState(false)
+  const onSize = useCallback((size: Size) => setPortrait((was) => isPortrait(size, was)), [])
+  const person = personFit(tile.kind === 'person' && portrait && !cameraFrame)
+  const fit =
+    tileFit(tile.kind) === 'contain' || person.fit === 'contain' ? 'object-contain' : 'object-cover'
   const voice = tileVoice(tile, participant, talkShow)
   return (
     <>
@@ -338,7 +352,13 @@ function StageTileView({
             : { borderRadius: cqw(tile.cornerRadius) })
         }}
       >
-        <TrackVideo cameraFrame={cameraFrame} className={fit} track={track} />
+        <TrackVideo
+          cameraFrame={cameraFrame}
+          className={fit}
+          fill={person.fill ? { w: tile.rect.w, h: tile.rect.h } : null}
+          onSize={tile.kind === 'person' ? onSize : undefined}
+          track={track}
+        />
         <ScreenStill className={fit} src={still} />
         {cameraOff ? (
           // The camera-off look, as viewers see it: the circle and the letter.
@@ -431,10 +451,13 @@ function TrackVideo({
   track,
   className,
   cameraFrame,
-  onSize
+  onSize,
+  fill
 }: {
   track: MediaStreamTrack | null
   className?: string
+  /** Plan 254 S2: a tile of this shape draws the portrait fill behind the video. */
+  fill?: Size | null
   /** Packed camera-role source; geometry uses its logical dimensions. */
   cameraFrame?: TalkShowLocalMedia['cameraFrame'] | undefined
   onSize?: (size: { w: number; h: number }) => void
@@ -508,8 +531,46 @@ function TrackVideo({
       video.removeEventListener('resize', report)
     }
   }, [authority, onSize, track])
+  const fillRef = useRef<HTMLCanvasElement>(null)
+  const fillWidth = fill?.w ?? 0
+  const fillHeight = fill?.h ?? 0
+  useEffect(() => {
+    const video = ref.current
+    const canvas = fillRef.current
+    if (!video || !canvas || fillWidth <= 0 || fillHeight <= 0) return
+    const draw = (): void => {
+      drawPortraitFill(canvas, video, { w: fillWidth, h: fillHeight })
+    }
+    draw()
+    video.addEventListener('loadeddata', draw)
+    video.addEventListener('resize', draw)
+    const timer = window.setInterval(draw, PORTRAIT_FILL_INTERVAL_MS)
+    return () => {
+      video.removeEventListener('loadeddata', draw)
+      video.removeEventListener('resize', draw)
+      window.clearInterval(timer)
+    }
+  }, [fillHeight, fillWidth, track])
   if (!track) return null
-  return <video autoPlay className={cn('size-full', className)} muted playsInline ref={ref} />
+  return (
+    <>
+      {fill ? (
+        <canvas
+          aria-hidden
+          className="absolute inset-0 size-full"
+          data-testid="show-stage-portrait-fill"
+          ref={fillRef}
+        />
+      ) : null}
+      <video
+        autoPlay
+        className={cn('size-full', fill && 'relative', className)}
+        muted
+        playsInline
+        ref={ref}
+      />
+    </>
+  )
 }
 
 // --- Under the stage -----------------------------------------------------------

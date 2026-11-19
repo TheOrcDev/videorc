@@ -8,6 +8,10 @@ import {
   canonicalStage,
   fitBox,
   fitScale,
+  isPortrait,
+  personFit,
+  personPicture,
+  portraitCoverBox,
   programPreviewStage,
   stageKey,
   tileFit,
@@ -23,6 +27,16 @@ type Vectors = {
     tile: { w: number; h: number }
     fit: TileFit
     box: { x: number; y: number; w: number; h: number } | null
+  }[]
+  person: {
+    name: string
+    source: { w: number; h: number }
+    tile: { w: number; h: number }
+    was: boolean
+    portrait: boolean
+    fit: TileFit
+    fill: { x: number; y: number; w: number; h: number } | null
+    picture: { x: number; y: number; w: number; h: number }
   }[]
   stages: { name: string; stage: KeyedStage; canonical: string; key: string }[]
 }
@@ -62,6 +76,52 @@ describe('cloud presentation views (plan 249 S6)', () => {
       expect(canonicalStage(one.stage), one.name).toBe(one.canonical)
       expect(stageKey(one.stage), one.name).toBe(one.key)
       expect(stageKey(one.stage)).toMatch(STAGE_KEY_PATTERN)
+    }
+  })
+
+  it('draws a portrait camera whole over a fill, and a landscape one as before (plan 254 S2)', () => {
+    expect(personFit(false)).toEqual({ fill: false, fit: 'cover' })
+    expect(personFit(true)).toEqual({ fill: true, fit: 'contain' })
+    const phone = { w: 720, h: 1280 }
+    const solo = { w: 1920, h: 1080 }
+    expect(personPicture(phone, solo, true)?.picture).toEqual({
+      x: 656.25,
+      y: 0,
+      w: 607.5,
+      h: 1080
+    })
+    const laptop = { w: 1280, h: 720 }
+    expect(personPicture(laptop, { w: 944, h: 1080 }, false)).toEqual({
+      fill: null,
+      fit: 'cover',
+      picture: fitBox(laptop, { w: 944, h: 1080 }, 'cover')
+    })
+    // The cover window of a portrait source sits on its upper third.
+    const box = portraitCoverBox(phone, solo)
+    expect(box?.h).toBe(405)
+    expect((box?.y ?? 0) + 405 / 2).toBeCloseTo(1280 / 3, 9)
+    expect(portraitCoverBox(phone, { w: 720, h: 1080 })).toEqual({ x: 0, y: 0, w: 720, h: 1080 })
+  })
+
+  it('keeps a source near square the fit it had (plan 254 S2)', () => {
+    expect(isPortrait({ w: 720, h: 1280 })).toBe(true)
+    expect(isPortrait({ w: 1280, h: 720 }, true)).toBe(false)
+    expect(isPortrait({ w: 480, h: 500 }, false)).toBe(false)
+    expect(isPortrait({ w: 480, h: 500 }, true)).toBe(true)
+    expect(isPortrait({ w: 480, h: 480 }, true)).toBe(false)
+    expect(isPortrait({ w: 2, h: 2 }, true)).toBe(true)
+  })
+
+  it('holds the shared person vectors the web also runs (plan 254 S2)', () => {
+    expect(vectors.person.length).toBeGreaterThan(0)
+    for (const one of vectors.person) {
+      const portrait = isPortrait(one.source, one.was)
+      expect(portrait, one.name).toBe(one.portrait)
+      expect(personPicture(one.source, one.tile, portrait), one.name).toEqual({
+        fill: one.fill,
+        fit: one.fit,
+        picture: one.picture
+      })
     }
   })
 

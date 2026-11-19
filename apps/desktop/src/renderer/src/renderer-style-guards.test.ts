@@ -46,6 +46,9 @@ const COLOUR_LITERAL_ALLOWLIST = new Set([
   'src/components/tabs/layout-tab.tsx',
   // The privacy frost drawn over a shared screen is published video, not chrome.
   'src/lib/room-screen-privacy.ts',
+  // Plan 254 S2: the shade over a portrait camera's fill, as the program
+  // page draws it onto the stream: a picture's own pixels, not chrome.
+  'src/lib/portrait-fill.ts',
   // Plan 249 S10: the packed-alpha spike draws synthetic test video, not chrome.
   'src/lib/cloud-alpha-fixture.ts',
   'src/lib/room-alpha-experiment.ts',
