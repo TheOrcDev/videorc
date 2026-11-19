@@ -123,7 +123,9 @@ export async function runLibrary() {
     const expiry = await terminal(await start(expired.id))
     assert.equal(expiry.state, 'failed')
     assert.match(expiry.error, /expired/)
-    await h.command('open-tab', { tab: 'library' })
+    // The cloud recordings are the Library's Cloud tab (#1544).
+    await h.command('open-tab', { tab: 'library', waitFor: '[data-library-view="cloud"]' })
+    await h.eval(`document.querySelector('[data-library-view="cloud"]').click(); return true`)
     await waitFor(
       () => h.eval("return document.body.textContent.includes('Open in Library')"),
       'Library local-file navigation'

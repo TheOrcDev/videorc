@@ -16,42 +16,17 @@ import {
 } from './remote-control-client.mjs'
 import { postMcp } from './agent-mcp-client.mjs'
 import { waitFor } from './cloud-managed-smoke.mjs'
+import { roomFixtureDevicesSource } from './room-fixture-devices.mjs'
 import {
   CONTROL_LANES,
   assertControlAudio,
   assertIndependentStop
 } from './cloud-parity-controls-contract.mjs'
 
-/** The fake Chromium devices have labels unlike the native fixture catalog.
- * Alias labels only in this isolated fake-device process, never production.
- * This deliberately supplies no evidence for physical-device matching.
- * The microphone alias goes on a real fake input, never Chromium's synthetic
- * `default`/`communications` entry: the room's matcher (#1504, plan 080's
- * `matchStrictAudioInput`) never opens those, as it never does in production. */
+/** The fake Chromium devices have labels unlike the native fixture catalog:
+ * see `roomFixtureDevicesSource`. */
 export async function prepareParityRoom(h, controls) {
-  return h.eval(`
-    const catalog = window.__videorcSmokeScenePresets.roomFixtureDevices();
-    const camera = catalog.find(d => d.kind === 'camera');
-    const microphone = catalog.find(d => d.kind === 'microphone');
-    const config = window.__videorcSmokeScenePresets.streamingState().captureConfig;
-    const enumerate = navigator.mediaDevices.enumerateDevices.bind(navigator.mediaDevices);
-    navigator.mediaDevices.enumerateDevices = async () => {
-      const devices = await enumerate();
-      const video = devices.find(d => d.kind === 'videoinput');
-      const audio = devices.find(d => d.kind === 'audioinput' &&
-        d.deviceId !== 'default' && d.deviceId !== 'communications');
-      if (!video || !audio) throw new Error('Chromium fake-media devices are missing');
-      return devices.map(d => ({ deviceId: d.deviceId, groupId: d.groupId, kind: d.kind,
-        label: d.deviceId === video.deviceId ? camera.name : d.deviceId === audio.deviceId ? microphone.name : d.label
-      }));
-    };
-    window.__videorcSmokeScenePresets.configure({
-      sources: { ...config.sources, cameraId: ${controls ? 'undefined' : 'camera.id'}, cameraOff: ${controls},
-        microphoneId: microphone.id, microphoneName: microphone.name },
-      audio: { ...config.audio, microphoneMuted: ${controls} }
-    });
-    return camera.id;
-  `)
+  return h.eval(roomFixtureDevicesSource(controls))
 }
 
 export async function assertInitialRoomControls(h, cameraId) {

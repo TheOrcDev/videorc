@@ -25,7 +25,7 @@ import {
   parsePtsTimes,
   sortedGapStats
 } from './cloud-solo-gates.mjs'
-import { requestSmokeCommand } from './smoke-command-client.mjs'
+import { requestSmokeCommand, waitForRendererHook } from './smoke-command-client.mjs'
 import {
   startFakeYouTubeApi,
   FAKE_YOUTUBE_ACCESS_TOKEN,
@@ -578,6 +578,8 @@ export async function managedHarness(
       // app is idle. This smoke starts sessions over its own socket, beside
       // the renderer, so a ring start races them (the renderer never races its
       // own ring); off, as smoke:record-latency's bare baseline turns it off.
+      // On a loaded Mac the renderer is still mounting when main answers.
+      await waitForRendererHook(smoke, '__videorcSmokeSetReplayBuffer')
       assert.equal(
         await h.eval('return window.__videorcSmokeSetReplayBuffer?.(false) ?? null'),
         true,
