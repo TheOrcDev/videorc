@@ -140,13 +140,21 @@ export function SceneCard({
       {compact ? (
         // The icon flows with the words, so a name too long for the line
         // beside it wraps whole, never inside a word.
-        <span
-          className={cn('line-clamp-2 min-w-0 text-xs font-medium break-words')}
-          data-slot="scene-card-label"
-        >
-          {icon ? <span className="mr-1 inline-flex align-text-bottom">{icon}</span> : null}
-          {label}
-        </span>
+        <>
+          <span
+            className={cn('line-clamp-2 min-w-0 text-xs font-medium break-words')}
+            data-slot="scene-card-label"
+          >
+            {icon ? <span className="mr-1 inline-flex align-text-bottom">{icon}</span> : null}
+            {label}
+          </span>
+          {/* A dense card's own quiet line (the room's Screens: "Put on stage"). */}
+          {meta ? (
+            <span className="text-xs text-muted-foreground" data-slot="scene-card-meta">
+              {meta}
+            </span>
+          ) : null}
+        </>
       ) : (
         <>
           <span className="mt-2 flex h-5 min-w-0 items-center gap-1" data-slot="scene-card-name">
