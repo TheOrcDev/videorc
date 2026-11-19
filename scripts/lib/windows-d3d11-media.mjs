@@ -80,6 +80,7 @@ export const WINDOWS_D3D11_REQUIRED_RUST_TESTS = Object.freeze({
     'recording::tests::windows_d3d11_preview_monitor_closes_and_reopens_cleanly',
     'recording::tests::windows_d3d11_recovery_allows_one_immediate_successor_then_fails_closed',
     'recording::tests::windows_d3d11_recovery_rejects_stale_and_skipped_generations',
+    'recording::tests::windows_d3d11_stop_request_cuts_the_monitor_tick_short',
     'recording::windows_d3d11_media_stage_timing_tests::media_stage_timings_convert_to_milliseconds_stage_by_stage',
     'tests::windows_d3d11_main_owned_preview_bounds_are_admin_only',
     'windows_d3d11_device::tests::a_hold_keeps_the_media_thread_across_a_session_hand_over',

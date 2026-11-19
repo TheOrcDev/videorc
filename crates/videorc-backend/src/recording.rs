@@ -35173,19 +35173,13 @@ mod tests {
         );
     }
 
-    /// UHD 620 field log: CheckInterfaceSupport(ID3D11Device) always returned
-    /// DXGI_ERROR_UNSUPPORTED, so every call minted a fresh UUID identity and
-    /// no MF rejection, perf-check verdict or Quick Sync detection ever held.
-    /// CI runners without a hardware adapter may still fail with
-    /// `no-hardware-dxgi-adapter`; any other error leaves the identity
-    /// uncacheable and is a bug.
     /// #1330: Stop publishes `stopping` only after the D3D11 monitor joins.
     /// Waiting out its 250 ms tick let the session's `idle` go out first, so
     /// the Studio sat in `stopping` and never re-armed Clips. A stop request
     /// before or during the tick ends it at once.
     #[cfg(target_os = "windows")]
     #[tokio::test]
-    async fn a_stop_request_cuts_the_d3d11_monitor_tick_short() {
+    async fn windows_d3d11_stop_request_cuts_the_monitor_tick_short() {
         let wake = Arc::new(Notify::new());
         // Requested before the monitor sleeps: the stored permit ends it.
         wake.notify_one();
@@ -35204,6 +35198,12 @@ mod tests {
         assert!(started.elapsed() < std::time::Duration::from_millis(150));
     }
 
+    /// UHD 620 field log: CheckInterfaceSupport(ID3D11Device) always returned
+    /// DXGI_ERROR_UNSUPPORTED, so every call minted a fresh UUID identity and
+    /// no MF rejection, perf-check verdict or Quick Sync detection ever held.
+    /// CI runners without a hardware adapter may still fail with
+    /// `no-hardware-dxgi-adapter`; any other error leaves the identity
+    /// uncacheable and is a bug.
     #[cfg(target_os = "windows")]
     #[test]
     fn windows_graphics_adapter_driver_identity_query_is_supported_and_stable() {
