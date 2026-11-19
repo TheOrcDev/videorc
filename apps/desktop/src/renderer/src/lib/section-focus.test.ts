@@ -24,6 +24,17 @@ function Section({ id }: { id: SectionFocusId }): ReactElement {
   )
 }
 
+/** A section that draws nothing until it knows its state (Videorc Camera). */
+function LateSection({ id, shown }: { id: SectionFocusId; shown: boolean }): ReactElement | null {
+  useSectionFocus(id, shown)
+  if (!shown) return null
+  return createElement(
+    'section',
+    { 'data-section-focus': id },
+    createElement('button', { type: 'button', 'data-first': '' }, 'First control')
+  )
+}
+
 describe('section focus (plan 250 S4)', () => {
   let root: Root
   let container: HTMLDivElement
@@ -79,6 +90,34 @@ describe('section focus (plan 250 S4)', () => {
     await act(async () => new Promise((resolve) => setTimeout(resolve, 5)))
     expect(scrolled).toHaveBeenCalledTimes(1)
     expect(document.activeElement).toBe(container.querySelector('[data-first]'))
+  })
+
+  it('a section that draws nothing yet keeps the request until it appears', async () => {
+    requestSectionFocus('output-clips')
+    await act(async () =>
+      root.render(createElement(LateSection, { id: 'output-clips', shown: false }))
+    )
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 5)))
+    expect(scrolled).not.toHaveBeenCalled()
+    await act(async () =>
+      root.render(createElement(LateSection, { id: 'output-clips', shown: true }))
+    )
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 5)))
+    expect(scrolled).toHaveBeenCalledTimes(1)
+    expect(document.activeElement).toBe(container.querySelector('[data-first]'))
+
+    // And on a page already open while the section is hidden.
+    await act(async () =>
+      root.render(createElement(LateSection, { id: 'output-clips', shown: false }))
+    )
+    await act(async () => requestSectionFocus('output-clips'))
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 5)))
+    expect(scrolled).toHaveBeenCalledTimes(1)
+    await act(async () =>
+      root.render(createElement(LateSection, { id: 'output-clips', shown: true }))
+    )
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 5)))
+    expect(scrolled).toHaveBeenCalledTimes(2)
   })
 
   it('a second mount does not scroll again', async () => {

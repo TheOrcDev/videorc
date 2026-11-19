@@ -54,8 +54,11 @@ export function publishCloudStatus(
     store.sessionEnded('livestream', `${CLOUD_SESSION_PREFIX}${previous.show.id}`)
   }
   if (next.endReason === 'ended-elsewhere' && previous?.endReason !== 'ended-elsewhere') {
+    // One row per show: the next show ended from the web is its own news,
+    // not the first one's row with its read state.
+    const show = next.show?.id ?? previous?.show?.id
     store.publish({
-      key: 'cloud-ended-elsewhere',
+      key: show ? `cloud-ended-elsewhere:${show}` : 'cloud-ended-elsewhere',
       kind: 'cloud-news',
       title: 'The show was ended from videorc.com',
       once: true

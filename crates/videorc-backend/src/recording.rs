@@ -30965,6 +30965,14 @@ fn emit_audio_track_health_events(
     Ok(())
 }
 
+/// Whether the take `session_id` is the one recording right now.
+async fn take_is_running(state: &AppState, session_id: &str) -> bool {
+    matches!(
+        state.recording.lock().await.as_ref(),
+        Some(active) if active.session_id == session_id
+    )
+}
+
 /// A take's watch on its recording volume (plan 200 C5, plan 250 S9): low
 /// space at Record and each time it gets worse, and its end when there is
 /// room again. It reads once at the start and then every minute, and stops
@@ -30983,16 +30991,11 @@ async fn watch_recording_disk_space(
     loop {
         // The first tick is immediate: the Record-time reading.
         ticker.tick().await;
-        if !std::mem::take(&mut first) {
-            let recording = state.recording.lock().await;
-            let running = matches!(
-                recording.as_ref(),
-                Some(active) if active.session_id == session_id
-            );
-            drop(recording);
-            if !running {
-                return;
-            }
+        // The first reading is taken at Record, before the take is in the
+        // state; every later one belongs to a take that still runs.
+        let at_record = std::mem::take(&mut first);
+        if !at_record && !take_is_running(&state, &session_id).await {
+            return;
         }
         let directory = output_dir.clone();
         let Ok(Some(available)) =
@@ -31002,6 +31005,11 @@ async fn watch_recording_disk_space(
             // A reading that fails says nothing either way.
             continue;
         };
+        // The take may have stopped while the reading ran: a notice sent
+        // now would open after its session ended and never close.
+        if !at_record && !take_is_running(&state, &session_id).await {
+            return;
+        }
         let Some(notice) = watch.update(available, video_kbps, separate_files) else {
             continue;
         };

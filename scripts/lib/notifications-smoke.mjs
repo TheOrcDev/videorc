@@ -51,7 +51,11 @@ export function normalizeNotifications(read) {
 
 function matches(value, wanted) {
   if (wanted === undefined) return true
-  return wanted instanceof RegExp ? wanted.test(value) : value === wanted
+  if (!(wanted instanceof RegExp)) return value === wanted
+  // A /g or /y pattern remembers where its last match ended: start over, or
+  // the second of two matching entries is missed.
+  wanted.lastIndex = 0
+  return wanted.test(value)
 }
 
 /**

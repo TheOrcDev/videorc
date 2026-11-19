@@ -90,6 +90,11 @@ export function resolveGlobalShortcuts(store: NotificationStore = notifications)
   store.resolve(GLOBAL_SHORTCUTS_KEY, { title: 'Global shortcuts registered' })
 }
 
+/** No key is set any more: the problem is gone without having been fixed. */
+export function withdrawGlobalShortcuts(store: NotificationStore = notifications): void {
+  store.withdraw(GLOBAL_SHORTCUTS_KEY)
+}
+
 // --- The engine -------------------------------------------------------------
 
 export const BACKEND_KEY = 'backend'

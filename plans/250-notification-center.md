@@ -14,10 +14,10 @@ Facts are read from `origin/main` `fe53fde02` (2026-11-18).
 - **Status: BUILT 2026-11-19, in review.** The owner took every
   recommendation: D1 to D13 are answered "a". For D12 no ceiling is raised:
   PR #1512 (the minified renderer) merged first, so the bell fits. The ten
-  slices are ten commits in one PR, with one more commit for what the
-  by-eye pass found and one for a first-run fix the smokes found. "What was
-  built" below says what the 317 became and where the build differs from
-  this plan.
+  slices are ten commits in one PR, with three more: what the by-eye pass
+  found, a first-run fix the smokes found, and what the automated review of
+  the PR found. "What was built" below says what the 317 became and where
+  the build differs from this plan.
 - **In scope:** the desktop renderer (the bell, the list, the store, routing
   today's toasts through it), a small main-process relay for the Stream
   Manager, and two small backend additions (clear signals, and the open
@@ -95,6 +95,42 @@ first. The look's helpers are now kept once loaded
 (`lib/first-run-look-door.ts`) and a choice is applied inside its own
 press. `origin/main` has the same race (its third setup profile fails 4
 runs of 4).
+
+**What the automated review found** (25 findings, one major; each fixed
+with a test where a unit test can reach it):
+
+- A list chunk that failed to load threw while rendering, outside the
+  page's error boundary, and took the window to the error panel. The bell
+  now loads the list itself: a failure closes it and says so, and the next
+  press tries again.
+- A problem that swings between warning and urgent popped up on every swing
+  back. It pops up as urgent once per five minutes.
+- A condition that had cleared before its session ended came back in the
+  next session as a flap: read, and silent. It is a new problem now.
+- Clear all and a reset left the toasts of what they removed on screen. A
+  recovery toast could not be closed by Clear, and closing it by hand did
+  not mark its entry read.
+- Quiet while recording or live did not cover a cloud room, which has no
+  local session.
+- A destination that stayed down kept its old urgency and words when
+  another destination went down or came back.
+- The second Go Live of a run did not raise "start the broadcast on X"
+  again. A show ended from the web reused the last show's row.
+- A reconnect brought back a microphone loss that had already recovered,
+  and any recovery (disk space, the connection) cleared the Studio's
+  microphone notice.
+- Two fixes pending in two rows shared one busy state. The list's dialog
+  had no name. The same announcement twice in a row was read once.
+- A door to a section that draws nothing yet (Videorc Camera before its
+  first status, Videorc Cloud before its first) spent its request. The
+  Retro LCD Studio's Audio group had no marker.
+- A Stream Manager that closed, reloaded or crashed with its list open
+  held pop-ups back in the main window for good: main now releases it.
+  Two pop-up offers on one subject shared one marker.
+- The disk watcher could send a notice for a take that stopped while the
+  disk was read.
+- Smoke helpers: a `/g` pattern counted one of two matches, and a missing
+  hook read as "no notification".
 
 **Still red on `origin/main` and here:** in that third profile the smoke
 presses a layout the moment setup's performance check ends, the backend

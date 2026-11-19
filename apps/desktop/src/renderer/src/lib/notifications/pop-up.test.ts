@@ -164,6 +164,23 @@ describe('pop-ups (plan 250, "What pops up")', () => {
     expect(toast.success).not.toHaveBeenCalled()
   })
 
+  it('the recovery toast is still the entry: closed by hand it is read, and Clear closes it', () => {
+    problem('urgent')
+    store.resolve('subject', { title: 'All good again' })
+    // An urgent problem that cleared counts until it has been seen.
+    expect(store.count().unread).toBe(1)
+    optionsOf(toast.success).onDismiss?.()
+    expect(store.snapshot()[0].read).toBe(true)
+    expect(store.count().unread).toBe(0)
+
+    store.reset()
+    vi.clearAllMocks()
+    problem('urgent')
+    store.resolve('subject', { title: 'All good again' })
+    store.clear('subject')
+    expect(toast.dismiss).toHaveBeenCalledWith(notificationToastId('subject'))
+  })
+
   it('Clear takes the toast with it, without counting as seen-by-toast twice', () => {
     problem('urgent')
     store.clear('subject')

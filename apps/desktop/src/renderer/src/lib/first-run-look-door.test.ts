@@ -19,9 +19,11 @@ describe('withFirstRunLook', () => {
     expect(run.mock.calls[0][0].firstRunLookPatch).toBeTypeOf('function')
   })
 
-  it('warming is safe to repeat', () => {
+  it('warming is safe to repeat', async () => {
     warmFirstRunLook()
     warmFirstRunLook()
+    // On its own this test starts with nothing loaded: wait for the helpers.
+    await new Promise<void>((resolve) => withFirstRunLook(() => resolve()))
     const run = vi.fn()
     withFirstRunLook(run)
     expect(run).toHaveBeenCalledTimes(1)

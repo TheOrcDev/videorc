@@ -220,6 +220,9 @@ export class GlobalShortcutsRegistrar {
                 description
               })
             )
+          } else {
+            // The last key someone set was removed: nothing is left to say.
+            withAppNotifications((app) => app.withdrawGlobalShortcuts())
           }
           return
         }

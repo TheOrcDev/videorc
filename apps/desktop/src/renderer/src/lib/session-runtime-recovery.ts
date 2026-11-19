@@ -630,14 +630,25 @@ export function completeSessionRuntimeRecovery({
     }
   }
 
-  const microphoneLoss = latestMatchingEvent(events, (event) => isSessionAudioLossCode(event.code))
+  // The losses still open, in the order they were reported: a later
+  // recovery of the same source closed the ones before it, as it clears the
+  // notice while the Studio watches. Without this a reconnect brought back
+  // a microphone problem that had already ended.
+  const bySource = new Map<'microphone' | 'system', HealthEvent>()
+  for (const event of events) {
+    const source = event.code.startsWith('microphone-') ? 'microphone' : 'system'
+    if (isSessionAudioLossCode(event.code)) {
+      bySource.delete(source)
+      bySource.set(source, event)
+    } else if (isSessionAudioRecoveryCode(event.code)) {
+      bySource.delete(source)
+    }
+  }
+  const microphoneLoss = [...bySource.values()].at(-1)
   if (!microphoneLoss) return null
-  const losses = events.filter(
-    (event) => event.sessionId === microphoneLoss.sessionId && isSessionAudioLossCode(event.code)
-  )
-  const bySource = new Map(
-    losses.map((event) => [event.code.startsWith('microphone-') ? 'microphone' : 'system', event])
-  )
+  for (const [source, event] of bySource) {
+    if (event.sessionId !== microphoneLoss.sessionId) bySource.delete(source)
+  }
   return {
     kind: 'microphone-input-lost',
     event:
@@ -697,4 +708,13 @@ export async function recoverSessionRuntime({
 
 export function isSessionAudioLossCode(code: string): boolean {
   return ['microphone-input-lost', 'microphone-timeline-lost', 'system-audio-lost'].includes(code)
+}
+
+/** The recovery that ends one of those losses. */
+export function isSessionAudioRecoveryCode(code: string): boolean {
+  return [
+    'microphone-input-recovered',
+    'microphone-timeline-recovered',
+    'system-audio-recovered'
+  ].includes(code)
 }

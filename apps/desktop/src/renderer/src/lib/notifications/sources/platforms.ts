@@ -169,7 +169,11 @@ export function publishXBroadcastProblem(
   })
 }
 
-/** A Stream key feed reached X: the broadcast still has to be started there. */
+/**
+ * A Stream key feed reached X: the broadcast still has to be started there.
+ * The caller says it once per Go Live, so each call is that attempt's own
+ * reminder: it pops up and counts again, never an update of the last one.
+ */
 export function publishXStartBroadcast(store: NotificationStore = notifications): void {
   store.publish({
     key: 'x-start-broadcast',
@@ -178,8 +182,7 @@ export function publishXStartBroadcast(store: NotificationStore = notifications)
     detail:
       "X doesn't go live from the RTMP feed alone: open Media Studio → Producer → Broadcasts, " +
       'create a broadcast from your source, and press Broadcast.',
-    actions: [OPEN_MEDIA_STUDIO],
-    once: true
+    actions: [OPEN_MEDIA_STUDIO]
   })
 }
 

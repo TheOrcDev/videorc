@@ -380,6 +380,45 @@ describe('the notification store (plan 250)', () => {
     })
   })
 
+  describe('the next session, after a problem that had already cleared', () => {
+    it('is a new problem too: unread, and it pops up', () => {
+      live = true
+      store.publish(problem({ tone: 'urgent', sessionId: 's1' }))
+      store.markRead('microphone')
+      clock += 5_000
+      store.resolve('microphone', { title: 'Microphone is back' })
+      const resolved = only()
+      store.sessionEnded('livestream', 's1')
+      // The session's end changes nothing about a row that had recovered.
+      expect(only()).toEqual(resolved)
+      clock += 5_000
+      store.publish(problem({ tone: 'urgent', sessionId: 's2' }))
+      expect(only()).toMatchObject({
+        state: 'open',
+        read: false,
+        sessionId: 's2',
+        openedAt: clock,
+        detail: undefined
+      })
+      expect(door.show).toHaveBeenCalledTimes(2)
+    })
+  })
+
+  describe('an urgent problem that swings', () => {
+    it('pops up once, not on every swing back to urgent', () => {
+      live = true
+      store.publish(problem({ tone: 'urgent' }))
+      for (let swing = 0; swing < 3; swing += 1) {
+        clock += 10_000
+        store.publish(problem({ tone: 'warning' }))
+        clock += 10_000
+        store.publish(problem({ tone: 'urgent' }))
+      }
+      expect(door.show).toHaveBeenCalledTimes(1)
+      expect(only()).toMatchObject({ tone: 'urgent', read: false })
+    })
+  })
+
   describe('clearing', () => {
     it('Clear on a finished entry removes it', () => {
       store.publish({ key: 'saved', kind: kind('finished'), title: 'Recording saved' })
@@ -431,6 +470,19 @@ describe('the notification store (plan 250)', () => {
       store.publish({ key: 'mp4', kind: kind('work'), title: 'Exporting MP4' })
       store.clearAll()
       expect(store.snapshot().map((entry) => entry.key)).toEqual(['microphone', 'mp4'])
+    })
+
+    it('Clear all and a reset take the toasts of what they remove with them', () => {
+      const onClear = vi.fn()
+      store.publish(problem({ tone: 'urgent' }))
+      store.publish({ key: 'saved', kind: kind('finished'), title: 'Recording saved', onClear })
+      store.clearAll()
+      // The finished entry's toast would have a button that does nothing.
+      expect(door.dismiss.mock.calls).toEqual([['saved']])
+      expect(onClear).toHaveBeenCalledTimes(1)
+      store.reset()
+      expect(door.dismiss).toHaveBeenLastCalledWith('microphone')
+      expect(store.snapshot()).toEqual([])
     })
   })
 

@@ -24,11 +24,15 @@ export function focusSection(id: SectionFocusId, root: ParentNode = document): b
  * The section whose root carries `data-section-focus={id}` answers a
  * `requestSectionFocus(id)`: once, on mount or on a page already open (plan
  * 250 S4). A second mount does not scroll again.
+ *
+ * `rendered` is false while the section draws nothing (Videorc Camera before
+ * its first status): the request then stays pending, and is taken when the
+ * section appears, instead of being spent on a section that is not there.
  */
-export function useSectionFocus(id: SectionFocusId): void {
+export function useSectionFocus(id: SectionFocusId, rendered = true): void {
   useEffect(() => {
     const focus = (): void => {
-      if (!takeSectionFocus(id)) return
+      if (!rendered || !takeSectionFocus(id)) return
       // The frame is never cancelled: a request is taken once, and React's
       // StrictMode unmounts and mounts an effect again at once in
       // development, which would drop the one scroll that was asked for
@@ -38,5 +42,5 @@ export function useSectionFocus(id: SectionFocusId): void {
     focus()
     globalThis.addEventListener(SECTION_FOCUS_EVENT, focus)
     return () => globalThis.removeEventListener(SECTION_FOCUS_EVENT, focus)
-  }, [id])
+  }, [id, rendered])
 }

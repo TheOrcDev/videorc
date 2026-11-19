@@ -85,6 +85,21 @@ test('counts a notice once per occurrence, so a repeat on one row is still a sto
   assert.equal(countNotifications(read, { title: /Kick/i }), 0)
 })
 
+test('a /g pattern counts every matching entry, on every read', () => {
+  const two = {
+    ...read,
+    entries: [
+      { key: 'youtube-budget', title: 'YouTube is paused' },
+      { key: 'youtube-chat', title: 'YouTube is paused' }
+    ]
+  }
+  // A global RegExp remembers where its last match ended.
+  const pattern = /YouTube/gi
+  assert.equal(countNotifications(two, { title: pattern }), 2)
+  assert.equal(countNotifications(two, { title: pattern }), 2)
+  assert.equal(findNotifications(two, { key: /^youtube-/g }).length, 2)
+})
+
 test('reads like the toast text a smoke used to collect', () => {
   assert.deepEqual(notificationTexts(read), [
     'Microphone is silent: No sound for 40 s.',

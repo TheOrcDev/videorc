@@ -89,11 +89,16 @@ describe('Videorc Cloud as notifications (plan 250 S6)', () => {
     const ended: CloudStatus = { ...base, phase: 'off', endReason: 'ended-elsewhere' }
     publishCloudStatus(base, ended, store)
     publishCloudStatus(ended, ended, store)
-    expect(entry('cloud-ended-elsewhere')).toMatchObject({
+    expect(entry('cloud-ended-elsewhere:sh_1')).toMatchObject({
       tone: 'news',
       title: 'The show was ended from videorc.com',
       occurrences: 1
     })
+    // The next show ended from the web is its own row, not the first one's.
+    const next: CloudStatus = { ...base, show: { ...base.show!, id: 'sh_2' } }
+    publishCloudStatus(next, { ...next, phase: 'off', endReason: 'ended-elsewhere' }, store)
+    expect(entry('cloud-ended-elsewhere:sh_2')).toMatchObject({ occurrences: 1, read: false })
+    expect(entry('cloud-ended-elsewhere:sh_1')).toBeDefined()
     store.reset()
     publishCloudStatus(base, { ...base, phase: 'off', endReason: 'ended-by-host' }, store)
     expect(store.snapshot()).toEqual([])

@@ -598,6 +598,10 @@ async function countNotices(smoke, pattern) {
     { code: READ_NOTIFICATIONS_CODE },
     { timeoutMs }
   )
+  // Without the hook the count would be 0 for the wrong reason, and "no
+  // notification" would pass unseen.
+  if (response?.result?.hook !== true)
+    throw new Error('The notification hook is missing: nothing was read')
   return countNotifications(response?.result, { title: pattern })
 }
 

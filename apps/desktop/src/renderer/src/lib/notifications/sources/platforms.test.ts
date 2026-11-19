@@ -127,6 +127,16 @@ describe('platforms as notifications (plan 250 S6)', () => {
       expect(door.show.mock.calls[0][1]).toBe(8_000)
     })
 
+    it('the next Go Live raises the reminder again: unread, and it pops up', () => {
+      live = true
+      publishXStartBroadcast(store)
+      store.markRead('x-start-broadcast')
+      publishXStartBroadcast(store)
+      expect(store.snapshot()).toHaveLength(1)
+      expect(entry('x-start-broadcast')).toMatchObject({ read: false, occurrences: 2 })
+      expect(door.show).toHaveBeenCalledTimes(2)
+    })
+
     it('playback is one subject: preparing, then viewers can watch', () => {
       publishXPlayback({ status: 'pending', shareUrl: 'https://x.com/i/broadcasts/1' }, store)
       expect(entry('x-playback')).toMatchObject({

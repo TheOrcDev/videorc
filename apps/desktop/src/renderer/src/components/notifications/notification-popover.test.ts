@@ -48,6 +48,8 @@ describe('NotificationPopover (plan 250)', () => {
     await render(true)
     expect(list()).not.toBeNull()
     expect(list()?.className).toContain('glass-float')
+    // The popup is a dialog: it has a name, with entries or without.
+    expect(list()?.getAttribute('aria-label')).toBe('Notifications')
     expect(list()?.querySelector('[data-inside]')).not.toBeNull()
   })
 

@@ -28,8 +28,10 @@ import type { NotificationKindId } from '@/lib/notifications/kinds'
 import {
   applyNotificationAct,
   notificationsSnapshot,
+  relayedPopUpDoor,
   startNotificationRelay
 } from '@/lib/notifications/relay'
+import type { NotificationEntry } from '@/lib/notifications/types'
 import { createNotificationStore, type NotificationStore } from '@/lib/notifications/store'
 import {
   notificationsSnapshotSchema,
@@ -228,6 +230,60 @@ describe("the main window's notification relay (plan 250 S8)", () => {
       store.clear('microphone')
       await flush()
       expect(popUps.at(-1)).toEqual({ type: 'dismiss', key: 'microphone' })
+    })
+
+    it('two offers on one subject: each answer acts for its own offer', async () => {
+      const answers: ((taken: boolean) => void)[] = []
+      const sent: NotificationPopUp[] = []
+      const local = { show: vi.fn(), resolved: vi.fn(), dismiss: vi.fn() }
+      const door = relayedPopUpDoor(local, {
+        pushNotificationPopUp: (popUp) => {
+          sent.push(popUp)
+          if (popUp.type !== 'show') return Promise.resolve(true)
+          return new Promise<boolean>((resolve) => answers.push(resolve))
+        }
+      })
+      const entry: NotificationEntry = {
+        key: 'microphone',
+        kind: kind('problem'),
+        tone: 'warning',
+        peakTone: 'warning',
+        life: 'condition',
+        state: 'open',
+        title: 'Microphone is silent',
+        openedAt: 1,
+        updatedAt: 1,
+        occurrences: 1,
+        read: false,
+        actions: []
+      }
+      // It got worse while main was still asked about the first offer.
+      door.show(entry, 8_000, undefined)
+      door.show({ ...entry, tone: 'urgent' }, 15_000, undefined)
+      // The first went to the Stream Manager; by the second it had lost focus.
+      answers[0](true)
+      await flush()
+      expect(local.show).not.toHaveBeenCalled()
+      answers[1](false)
+      await flush()
+      // One toast, in one window: the newer one here, the older taken back.
+      expect(local.show).toHaveBeenCalledTimes(1)
+      expect(local.show.mock.calls[0][1]).toBe(15_000)
+      expect(sent.at(-1)).toEqual({ type: 'dismiss', key: 'microphone' })
+
+      // The other order: the older offer is declined after a newer one is out.
+      local.show.mockClear()
+      door.show(entry, 8_000, undefined)
+      door.show({ ...entry, tone: 'urgent' }, 15_000, undefined)
+      answers[2](false)
+      await flush()
+      expect(local.show).not.toHaveBeenCalled()
+      answers[3](true)
+      await flush()
+      expect(local.show).not.toHaveBeenCalled()
+      door.dismiss('microphone')
+      expect(sent.at(-1)).toEqual({ type: 'dismiss', key: 'microphone' })
+      expect(local.dismiss).not.toHaveBeenCalled()
     })
 
     it('a toast showing in the Stream Manager is dismissed there on Clear', async () => {

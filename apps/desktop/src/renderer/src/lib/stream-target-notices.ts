@@ -69,9 +69,21 @@ export function streamTargetNotices(
   targets: readonly StreamTargetRuntime[]
 ): StreamTargetNotice[] {
   const notices: StreamTargetNotice[] = []
+  const was = targets.map((target) => ({
+    targetId: target.targetId,
+    state: previous.get(target.targetId) ?? target.state
+  }))
+  // A destination that is still down says how many others are on air, and
+  // is urgent when none is. That follows the others, so it is said again
+  // when they change although its own state did not.
+  const othersChanged = (target: StreamTargetRuntime): boolean =>
+    (target.state === 'failed' || target.state === 'reconnecting') &&
+    !isCloudFeedTarget(target) &&
+    otherDestinationsOnAir(was, target.targetId) !==
+      otherDestinationsOnAir(targets, target.targetId)
   for (const target of targets) {
     const before = previous.get(target.targetId)
-    if (before === target.state) continue
+    if (before === target.state && !othersChanged(target)) continue
     const leg = `stream-target:${target.targetId}`
     const { targetId } = target
     const label = destinationLabel(target.label)

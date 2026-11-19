@@ -35,9 +35,9 @@ const PENDING_LABEL: Readonly<Record<Exclude<VirtualCameraAction, 'remove'>, str
  * the section isn't there.
  */
 export function VideorcCameraSection(): ReactElement | null {
-  useSectionFocus('output-videorc-camera')
   const camera = useVirtualCamera()
   const view = virtualCameraView(camera)
+  useSectionFocus('output-videorc-camera', !view.hidden)
   const [pending, setPending] = useState<Exclude<VirtualCameraAction, 'remove'> | 'switch' | null>(
     null
   )

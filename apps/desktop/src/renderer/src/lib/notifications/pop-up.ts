@@ -52,6 +52,18 @@ export function createNotificationPopUpDoor(store: NotificationStore): Notificat
     toast.dismiss(notificationToastId(key))
   }
 
+  /** How a toast on `key` ends, for the problem's toast and its recovery alike. */
+  const ending = (key: string): { onAutoClose: () => void; onDismiss: () => void } => ({
+    onAutoClose: () => {
+      showing.delete(key)
+    },
+    onDismiss: () => {
+      if (closedHere.delete(key)) return
+      // Closed by hand: it has been seen.
+      if (showing.delete(key)) store.markRead(key)
+    }
+  })
+
   return {
     show(entry, durationMs, action: NotificationAction | undefined) {
       const { key } = entry
@@ -74,26 +86,22 @@ export function createNotificationPopUpDoor(store: NotificationStore): Notificat
               }
             }
           : {}),
-        onAutoClose: () => {
-          showing.delete(key)
-        },
-        onDismiss: () => {
-          if (closedHere.delete(key)) return
-          // Closed by hand: it has been seen.
-          if (showing.delete(key)) store.markRead(key)
-        }
+        ...ending(key)
       })
     },
 
     resolved(entry) {
       // A recovery never pops up on its own. It takes the place of the
-      // problem's toast when that is still on screen, briefly.
-      if (!showing.delete(entry.key)) return
+      // problem's toast when that is still on screen, briefly. It stays
+      // tracked: Clear closes it, and closing it by hand marks the entry
+      // read, as for the toast it replaced.
+      if (!showing.has(entry.key)) return
       toast.success(entry.title, {
         id: notificationToastId(entry.key),
         description: undefined,
         duration: RECOVERY_POP_UP_MS,
-        action: undefined
+        action: undefined,
+        ...ending(entry.key)
       })
     },
 

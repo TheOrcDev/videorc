@@ -102,14 +102,33 @@ export function relayedPopUpDoor(
 ): NotificationPopUpDoor {
   /** Keys whose toast is in the Stream Manager. */
   const there = new Set<string>()
-  /** Keys main is being asked about; a key leaves when its problem goes first. */
-  const asking = new Set<string>()
+  /**
+   * The offer main is being asked about, per key. A key leaves when its
+   * problem goes first, and a second offer on the same key (the problem got
+   * worse while main was asked) takes the first one's place: each answer
+   * acts only for the offer it belongs to.
+   */
+  const asking = new Map<string, number>()
+  let offers = 0
+  const takeBack = (key: string): void => {
+    void api.pushNotificationPopUp({ type: 'dismiss', key }).catch(() => {})
+  }
   return {
     show(entry: NotificationEntry, durationMs: number, action: NotificationAction | undefined) {
-      asking.add(entry.key)
+      const { key } = entry
+      offers += 1
+      const offer = offers
+      asking.set(key, offer)
+      const mine = (): boolean => asking.get(key) === offer
       const showHere = (): void => {
-        // Resolved or cleared while main was asked: nothing is left to show.
-        if (asking.delete(entry.key)) local.show(entry, durationMs, action)
+        // Resolved, cleared or offered again while main was asked: this
+        // offer has nothing left to show.
+        if (!mine()) return
+        asking.delete(key)
+        // An earlier offer on this subject went to the Stream Manager: one
+        // toast, in one window.
+        if (there.delete(key)) takeBack(key)
+        local.show(entry, durationMs, action)
       }
       void api
         .pushNotificationPopUp({
@@ -119,10 +138,18 @@ export function relayedPopUpDoor(
           ...(action ? { action: { id: action.id, label: action.label, kind: action.kind } } : {})
         })
         .then((taken) => {
-          if (!taken) showHere()
-          else if (asking.delete(entry.key)) there.add(entry.key)
-          // It went there and its problem has gone since: take it back.
-          else void api.pushNotificationPopUp({ type: 'dismiss', key: entry.key }).catch(() => {})
+          if (!taken) {
+            showHere()
+          } else if (mine()) {
+            asking.delete(key)
+            there.add(key)
+          } else if (asking.has(key)) {
+            // A newer offer is out: this toast is there until that one lands.
+            there.add(key)
+          } else {
+            // It went there and its problem has gone since: take it back.
+            takeBack(key)
+          }
         }, showHere)
     },
     resolved(entry) {

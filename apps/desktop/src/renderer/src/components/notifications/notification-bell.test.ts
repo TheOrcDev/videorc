@@ -17,6 +17,9 @@ import {
 } from '@/lib/notification-count'
 import { WORKSPACE_NAVIGATE_EVENT } from '@/lib/workspace-navigation'
 
+const toastUserError = vi.hoisted(() => vi.fn())
+vi.mock('@/lib/user-error', () => ({ toastUserError }))
+
 describe('NotificationBell (plan 250, "Where the bell lives")', () => {
   let root: Root
   let container: HTMLDivElement
@@ -55,6 +58,7 @@ describe('NotificationBell (plan 250, "Where the bell lives")', () => {
     vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
     load.mockClear()
     listProps.mockClear()
+    toastUserError.mockClear()
     container = document.createElement('div')
     document.body.append(container)
     root = createRoot(container)
@@ -113,6 +117,42 @@ describe('NotificationBell (plan 250, "Where the bell lives")', () => {
     expect(container.querySelector('[role="status"]')?.textContent).toBe('Recording saved')
   })
 
+  it('says the same words twice in a row again: a new node per announcement', async () => {
+    const status = (): Element | null | undefined =>
+      container.querySelector('[role="status"]')?.firstElementChild
+    await render(
+      { unread: 1, urgent: 0, tone: null },
+      { text: 'Clip saved', urgent: false, sequence: 1 }
+    )
+    const first = status()
+    expect(first?.textContent).toBe('Clip saved')
+    await render(
+      { unread: 2, urgent: 0, tone: null },
+      { text: 'Clip saved', urgent: false, sequence: 2 }
+    )
+    // A live region speaks when its content changes; the same text in the
+    // same node would be silent.
+    expect(status()?.textContent).toBe('Clip saved')
+    expect(status() === first).toBe(false)
+  })
+
+  // The status bar sits outside the page's error boundary: a list chunk that
+  // threw while rendering took the whole window to the error panel.
+  it('a list that fails to load closes, says so, and loads on the next press', async () => {
+    await render({ unread: 0, urgent: 0, tone: null })
+    load.mockRejectedValueOnce(new Error('chunk load failed'))
+    await act(async () => bell().click())
+    await vi.waitFor(() => expect(toastUserError).toHaveBeenCalledTimes(1))
+    expect(toastUserError.mock.calls[0][1]).toEqual({ action: 'open', object: 'Notifications' })
+    expect(notificationsOpen()).toBe(false)
+    expect(bell().getAttribute('aria-expanded')).toBe('false')
+    expect(document.querySelector('[data-test-list]')).toBeNull()
+    // The bell is still there, and the next press tries again.
+    await act(async () => bell().click())
+    await vi.waitFor(() => expect(document.querySelector('[data-test-list]')).not.toBeNull())
+    expect(toastUserError).toHaveBeenCalledTimes(1)
+  })
+
   it("opens from its shortcut's event, loads the list then, and closes on a page change", async () => {
     await render({ unread: 0, urgent: 0, tone: null })
     await act(async () => toggleNotifications())
@@ -155,5 +195,7 @@ describe('NotificationBell (plan 250, "Where the bell lives")', () => {
     const source = readFileSync(join(__dirname, 'notification-bell.tsx'), 'utf8')
     expect(source).not.toMatch(/from '@\/components\/ui\/popover'/)
     expect(source).not.toMatch(/@base-ui/)
+    // Nor a mounted lazy() child: its failed load throws while rendering.
+    expect(source).not.toMatch(/import \{[^}]*\blazy\b[^}]*\} from 'react'/)
   })
 })

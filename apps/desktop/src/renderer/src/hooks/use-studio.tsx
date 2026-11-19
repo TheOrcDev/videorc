@@ -4674,7 +4674,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   useEffect(() => {
     void loadNotifications().then(({ notifications, startMainNotificationRelay }) => {
       notifications.configure({
-        live: () => sessionOwnsTransport(recordingRef.current),
+        // A cloud room on air or recording has no local session, and is
+        // live all the same (as for the watchdog, plan 249 S26).
+        live: () =>
+          sessionOwnsTransport(recordingRef.current) ||
+          cloudRoomActivityFromCloudStatus(cloudStatusRef.current) !== null,
         quiet: () => quietWhileLiveOn(settingsRef.current)
       })
       // S8: the Stream Manager's bell reads a copy of the list through main.
@@ -8831,9 +8835,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         ) {
           void publishMicrophoneInputLost(event)
         } else {
-          // Plan 076: a timeline loss that recovered clears its notice.
+          // Plan 076: a timeline loss that recovered clears its notice. Only
+          // the audio's own recoveries: disk space or the connection coming
+          // back says nothing about a microphone that is still lost.
           if (
-            /-recovered$/.test(event.code) &&
+            /^(?:microphone-(?:input|timeline|signal)|system-audio)-recovered$/.test(event.code) &&
             sessionRuntimeNoticeRef.current?.kind === 'microphone-input-lost'
           ) {
             microphoneInputLostSessionRef.current = null

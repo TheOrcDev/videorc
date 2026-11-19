@@ -5,7 +5,8 @@ vi.mock('sonner', () => ({ toast: { error: vi.fn(), info: vi.fn(), warning: vi.f
 // with Open Shortcuts. The door to the store is stubbed here.
 const app = vi.hoisted(() => ({
   publishGlobalShortcutsProblem: vi.fn(),
-  resolveGlobalShortcuts: vi.fn()
+  resolveGlobalShortcuts: vi.fn(),
+  withdrawGlobalShortcuts: vi.fn()
 }))
 vi.mock('@/lib/notify', () => ({
   withAppNotifications: (run: (source: typeof app) => void) => run(app)
@@ -284,6 +285,14 @@ describe('GlobalShortcutsRegistrar conflicts', () => {
         title: "Global shortcuts don't work here",
         description: unavailable
       })
+
+      // The key is removed again: nothing is left to say, and nothing was
+      // "registered" either.
+      app.withdrawGlobalShortcuts.mockClear()
+      app.resolveGlobalShortcuts.mockClear()
+      registrar.sync({ recordToggle: '' })
+      await vi.waitFor(() => expect(app.withdrawGlobalShortcuts).toHaveBeenCalledTimes(1))
+      expect(app.resolveGlobalShortcuts).not.toHaveBeenCalled()
     } finally {
       vi.unstubAllGlobals()
     }

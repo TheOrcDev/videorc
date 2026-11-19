@@ -133,6 +133,16 @@ export function popUpDecision(question: PopUpQuestion): number | null {
         : Math.max(0, question.now - lastPop.at)
     if (fineFor < REALERT_AFTER_MS) return null
   }
+  // A problem that swings between warning and urgent already popped up as
+  // urgent: getting that bad again inside the window is not news.
+  if (
+    lastPop &&
+    question.change === 'escalated' &&
+    TONE_RANK[question.tone] <= TONE_RANK[lastPop.tone] &&
+    question.now - lastPop.at < REALERT_AFTER_MS
+  ) {
+    return null
+  }
   if (question.tone === 'urgent') return URGENT_POP_UP_MS
   if (question.live && question.quiet) return null
   return POP_UP_MS

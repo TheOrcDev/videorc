@@ -1,6 +1,4 @@
 import {
-  lazy,
-  Suspense,
   useCallback,
   useEffect,
   useRef,
@@ -21,13 +19,17 @@ import {
   type NotificationBellCount,
   type NotificationsToggle
 } from '@/lib/notification-count'
+import { toastUserError } from '@/lib/user-error'
 import { cn } from '@/lib/utils'
 import { WORKSPACE_NAVIGATE_EVENT } from '@/lib/workspace-navigation'
 
 // The bell (plan 250, D1): the last control of a status bar. It is in every
 // window's first paint, so it is only an icon and a number on a button. The
 // popover and the list behind it are one lazy chunk, loaded on the first
-// hover, focus or open.
+// hover, focus or open. It is never a mounted `lazy()` child: a chunk that
+// fails to load would throw while rendering, past the page's boundary, and
+// take the whole window to the error panel. A failed load closes the list
+// and says so; the next press tries again.
 //
 // The tone is on the icon alone and stays while a problem is open, even with
 // nothing unread: a glance says "something is still wrong". The number is
@@ -75,20 +77,40 @@ export function NotificationBell({
 }: NotificationBellProps): ReactElement {
   const [open, setOpen] = useState(false)
   // The list mounts with the first open and stays, so it can animate out.
-  const [opened, setOpened] = useState(false)
+  const [List, setList] = useState<ComponentType<NotificationBellListProps> | null>(null)
   const [button, setButton] = useState<HTMLButtonElement | null>(null)
+  // The loader may be a new function each render.
   const loadRef = useRef(load)
   loadRef.current = load
-  // One lazy component per bell: the loader may be a new function each render.
-  const [List] = useState(() => lazy(() => loadRef.current()))
+  const mounted = useRef(true)
+  const loaded = useRef(false)
+  useEffect(() => {
+    mounted.current = true
+    return () => {
+      mounted.current = false
+    }
+  }, [])
+  // A failure while warming is silent: the open below tries again and says so.
   const warm = useCallback((): void => {
     void loadRef.current().catch(() => {})
   }, [])
 
   const change = useCallback((next: boolean): void => {
     setNotificationsOpen(next)
-    if (next) setOpened(true)
     setOpen(next)
+    if (!next || loaded.current) return
+    void loadRef.current().then(
+      (module) => {
+        loaded.current = true
+        if (mounted.current) setList(() => module.default)
+      },
+      (error: unknown) => {
+        if (!mounted.current) return
+        setNotificationsOpen(false)
+        setOpen(false)
+        toastUserError(error, { action: 'open', object: 'Notifications' })
+      }
+    )
   }, [])
 
   useEffect(() => {
@@ -134,17 +156,19 @@ export function NotificationBell({
         onFocus={warm}
         onPointerEnter={warm}
       />
-      {opened ? (
-        <Suspense fallback={null}>
-          <List anchor={anchor} open={open} trigger={button} onOpenChange={change} />
-        </Suspense>
-      ) : null}
-      {/* A new urgent entry interrupts; everything else waits its turn. */}
+      {List ? <List anchor={anchor} open={open} trigger={button} onOpenChange={change} /> : null}
+      {/*
+        A new urgent entry interrupts; everything else waits its turn. The
+        text is a child keyed by the announcement's number: the same words
+        twice in a row are a new node, so they are read again.
+      */}
       <span className="sr-only" role="alert">
-        {announcement?.urgent ? announcement.text : ''}
+        {announcement?.urgent ? <span key={announcement.sequence}>{announcement.text}</span> : null}
       </span>
       <span className="sr-only" role="status">
-        {announcement && !announcement.urgent ? announcement.text : ''}
+        {announcement && !announcement.urgent ? (
+          <span key={announcement.sequence}>{announcement.text}</span>
+        ) : null}
       </span>
     </>
   )

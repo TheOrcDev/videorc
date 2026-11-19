@@ -422,6 +422,38 @@ it('recovers both audio sources after reconnect without dropping either explanat
   ).toBeNull()
 })
 
+it('a loss that a later recovery of the same source ended is not brought back', () => {
+  const event = (code: string): HealthEvent => ({
+    id: code,
+    code,
+    message: code,
+    sessionId: 'take',
+    level: 'warn',
+    createdAt: '2026-09-28T09:34:41Z'
+  })
+  const recover = (codes: string[]): ReturnType<typeof completeSessionRuntimeRecovery> =>
+    completeSessionRuntimeRecovery({
+      plan: { healthSessionId: 'take' },
+      recording: { state: 'recording', sessionId: 'take' },
+      priorSessionState: 'recording',
+      events: codes.map(event)
+    })
+  // A reconnect had reopened this as an urgent microphone problem.
+  expect(recover(['microphone-input-lost', 'microphone-input-recovered'])).toBeNull()
+  // Another source's recovery, or disk space, ends nothing here.
+  expect(
+    recover(['microphone-input-lost', 'system-audio-recovered', 'disk-space-recovered'])
+  ).toMatchObject({ kind: 'microphone-input-lost', event: { code: 'microphone-input-lost' } })
+  // Lost again after it came back: open.
+  expect(
+    recover(['microphone-timeline-lost', 'microphone-timeline-recovered', 'microphone-input-lost'])
+  ).toMatchObject({ event: { code: 'microphone-input-lost' } })
+  // Two sources lost, one back: only the other is told.
+  expect(
+    recover(['system-audio-lost', 'microphone-input-lost', 'microphone-input-recovered'])
+  ).toMatchObject({ event: { code: 'system-audio-lost' } })
+})
+
 // Plan 250 S5: a session's `health` event is an entry behind the bell, on its
 // subject. Idle (as here) a warning also pops up for 8 s and an urgent one
 // for 15 s; nothing is pinned. `notifications/sources/health.test.ts` walks

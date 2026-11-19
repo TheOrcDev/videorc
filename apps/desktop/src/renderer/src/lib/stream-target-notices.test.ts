@@ -25,6 +25,43 @@ const before = (state: StreamTargetState): Map<string, StreamTargetState> =>
   new Map([['yt', state]])
 
 describe('streamTargetNotices', () => {
+  it('says a destination that is still down again when the others change', () => {
+    const states = (yt: StreamTargetState, tw: StreamTargetState) =>
+      new Map<string, StreamTargetState>([
+        ['yt', yt],
+        ['tw', tw]
+      ])
+    // Both were down; Twitch is back: YouTube is no longer the urgent one.
+    const eased = streamTargetNotices(states('failed', 'failed'), [
+      target('failed'),
+      other('tw', 'live')
+    ])
+    expect(eased).toEqual([
+      expect.objectContaining({
+        key: 'stream-target:yt',
+        urgent: false,
+        description: 'The other destination keeps streaming.'
+      }),
+      expect.objectContaining({ key: 'stream-target:tw', kind: 'success' })
+    ])
+    // YouTube reconnects while Twitch is live, then Twitch stops: nobody is on air.
+    const worse = streamTargetNotices(states('reconnecting', 'live'), [
+      target('reconnecting'),
+      other('tw', 'stopped')
+    ])
+    expect(worse).toEqual([
+      expect.objectContaining({
+        key: 'stream-target:yt',
+        urgent: true,
+        description: "Viewers see nothing until it's back."
+      })
+    ])
+    // Nothing about the others changed: nothing is said again.
+    expect(
+      streamTargetNotices(states('failed', 'live'), [target('failed'), other('tw', 'live')])
+    ).toEqual([])
+  })
+
   it('stays quiet for a destination that goes live at start', () => {
     expect(streamTargetNotices(new Map(), [target('live')])).toEqual([])
   })

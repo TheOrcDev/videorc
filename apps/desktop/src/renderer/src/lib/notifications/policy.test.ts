@@ -102,6 +102,21 @@ describe('popUpDecision (plan 250, "What pops up")', () => {
     ).toBe(URGENT_POP_UP_MS)
   })
 
+  it('swinging between warning and urgent pops up as urgent once per five minutes', () => {
+    const again = (now: number): number | null =>
+      popUpDecision(
+        question({
+          tone: 'urgent',
+          change: 'escalated',
+          live: true,
+          now,
+          lastPop: { at: 1_000_000, tone: 'urgent' }
+        })
+      )
+    expect(again(1_000_000 + REALERT_AFTER_MS - 1)).toBeNull()
+    expect(again(1_000_000 + REALERT_AFTER_MS)).toBe(URGENT_POP_UP_MS)
+  })
+
   it('coming back pops up only after five minutes of being fine', () => {
     const lastPop = { at: 0, tone: 'urgent' as const }
     const back = (fineForMs: number): number | null =>

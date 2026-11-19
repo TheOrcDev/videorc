@@ -4556,6 +4556,20 @@ function commentsCaptureHeaderSignal(
   return signal
 }
 
+/**
+ * Plan 250 S8: the Stream Manager's open list holds pop-ups back in the main
+ * window. A window that closed, reloaded or lost its renderer cannot say its
+ * list closed, so main says it: otherwise urgent pop-ups stayed held until
+ * the main window reloaded.
+ */
+function releaseStreamManagerNotificationList(): void {
+  if (!mainWindow || mainWindow.isDestroyed() || mainWindow.webContents.isDestroyed()) return
+  sendElectronEvent(mainWindow.webContents, 'notifications:act-request', {
+    type: 'list-open',
+    open: false
+  })
+}
+
 function emitCommentsWindowState(message?: string): void {
   if (appIsQuitting) {
     return
@@ -4689,7 +4703,16 @@ async function openCommentsWindow({
       commentsWindowClosing = false
       commentsWindowContentProtected = false
       emitCommentsWindowState()
+      releaseStreamManagerNotificationList()
     }
+  })
+  // Plan 250 S8: a Stream Manager that reloads or whose renderer dies never
+  // runs the cleanup that says its list closed.
+  window.webContents.on('did-navigate', () => {
+    if (commentsWindow === window) releaseStreamManagerNotificationList()
+  })
+  window.webContents.on('render-process-gone', () => {
+    if (commentsWindow === window) releaseStreamManagerNotificationList()
   })
 
   const rendererUrl = trustedRendererDevServerUrl(process.env.ELECTRON_RENDERER_URL, app.isPackaged)

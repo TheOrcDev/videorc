@@ -434,7 +434,11 @@ export function createNotificationStore(options: NotificationStoreOptions = {}):
 
     clearAll() {
       for (const [key, item] of held) {
-        if (item.hidden === null && !isNow(item.entry)) held.delete(key)
+        if (item.hidden !== null || isNow(item.entry)) continue
+        held.delete(key)
+        // Its toast may still be on screen, with a button that now does nothing.
+        door?.dismiss(key)
+        item.onClear?.()
       }
       commit()
     },
@@ -460,9 +464,16 @@ export function createNotificationStore(options: NotificationStoreOptions = {}):
       let changed = false
       for (const [key, item] of held) {
         const { entry } = item
-        if (entry.life !== 'condition' || entry.state !== 'open' || !entry.sessionId) continue
+        if (entry.life !== 'condition' || !entry.sessionId) continue
         if (typeof session === 'string' && entry.sessionId !== session) continue
         if (typeof session === 'function' && !session(entry.sessionId)) continue
+        if (entry.state !== 'open') {
+          // It cleared before the session ended. Its row stays as it is, but
+          // the same subject in the next session is a new problem, not this
+          // one coming back.
+          item.endedWithSession = true
+          continue
+        }
         changed = true
         if (item.hidden !== null) {
           held.delete(key)
@@ -513,6 +524,7 @@ export function createNotificationStore(options: NotificationStoreOptions = {}):
     },
 
     reset() {
+      for (const key of held.keys()) door?.dismiss(key)
       held.clear()
       listsOpen.clear()
       listOpen = false

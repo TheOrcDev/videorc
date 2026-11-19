@@ -45,6 +45,8 @@ export function NotificationPopover({
       <PopoverContent
         align="end"
         anchor={anchor ?? trigger ?? undefined}
+        // The popup is a dialog, and nothing registers a title for it.
+        aria-label="Notifications"
         className="w-[380px] max-w-[calc(100vw-1rem)] gap-0 overflow-hidden p-0"
         data-videorc-notification-list=""
         finalFocus={() => trigger}

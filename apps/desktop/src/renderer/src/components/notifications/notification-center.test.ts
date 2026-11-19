@@ -168,6 +168,36 @@ describe('NotificationCenter (plan 250, "The dropdown")', () => {
     expect(onClose).toHaveBeenCalledTimes(1)
   })
 
+  it('two rows each keep their own fix pending, whichever finishes first', async () => {
+    const done: Record<string, () => void> = {}
+    const runs: Record<string, ReturnType<typeof vi.fn>> = {}
+    for (const key of ['a', 'b']) {
+      runs[key] = vi.fn(() => new Promise<void>((resolve) => (done[key] = resolve)))
+      store.publish({
+        key,
+        kind: kind('problem'),
+        title: key,
+        actions: [{ id: 'fix', label: 'Retry', kind: 'fix', run: runs[key] }]
+      })
+    }
+    await render()
+    const button = (key: string): HTMLButtonElement =>
+      row(key).querySelector<HTMLButtonElement>('[data-notification-action]')!
+    await act(async () => button('a').click())
+    await act(async () => button('b').click())
+    // B's press did not hand A its button back.
+    expect(button('a').disabled).toBe(true)
+    expect(button('b').disabled).toBe(true)
+    await act(async () => button('a').click())
+    expect(runs.a).toHaveBeenCalledTimes(1)
+    // A finishing leaves B pending.
+    await act(async () => done.a())
+    expect(button('a').disabled).toBe(false)
+    expect(button('b').disabled).toBe(true)
+    await act(async () => done.b())
+    expect(button('b').disabled).toBe(false)
+  })
+
   it('a fix that fails says so with a toast: it answers the press', async () => {
     store.publish({
       key: 'a',

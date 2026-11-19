@@ -46,7 +46,9 @@ export function NotificationCenter({
   const entries = useSyncExternalStore(source.subscribe, source.snapshot, source.snapshot)
   const [nowMs, setNowMs] = useState(() => Date.now())
   const [activeKey, setActiveKey] = useState<string | null>(null)
-  const [busy, setBusy] = useState<{ key: string; id: string } | null>(null)
+  // The fix that runs, per row: two rows can each have one in flight.
+  const [busy, setBusy] = useState<Readonly<Record<string, string>>>({})
+  const running = useRef(new Set<string>())
   const listRef = useRef<HTMLDivElement | null>(null)
   const mounted = useRef(true)
 
@@ -94,15 +96,24 @@ export function NotificationCenter({
         onClose()
         return
       }
-      // A fix keeps the list open, with a spinner on its button until it ran.
-      setBusy({ key: entry.key, id: action.id })
+      // A fix keeps the list open, with a spinner on its button until it
+      // ran. One at a time per row; another row's fix is its own.
+      const { key } = entry
+      if (running.current.has(key)) return
+      running.current.add(key)
+      setBusy((current) => ({ ...current, [key]: action.id }))
       void source
-        .runAction(entry.key, action.id)
+        .runAction(key, action.id)
         .catch((error: unknown) => {
           toastUserError(error, { action: action.label.toLowerCase() })
         })
         .finally(() => {
-          if (mounted.current) setBusy(null)
+          running.current.delete(key)
+          if (!mounted.current) return
+          setBusy((current) => {
+            const { [key]: _done, ...rest } = current
+            return rest
+          })
         })
     },
     [onClose, source]
@@ -141,7 +152,7 @@ export function NotificationCenter({
     if (event.target !== row) return
     if (event.key === 'Enter') {
       const [first] = entry.actions
-      if (!first || busy) return
+      if (!first || busy[entry.key]) return
       event.preventDefault()
       act(entry, first)
     } else if (event.key === 'Backspace' || event.key === 'Delete') {
@@ -155,7 +166,7 @@ export function NotificationCenter({
       <NotificationEntryRow
         key={entry.key}
         active={entry.key === active}
-        busyActionId={busy?.key === entry.key ? busy.id : null}
+        busyActionId={busy[entry.key] ?? null}
         entry={entry}
         nowMs={nowMs}
         onAction={act}

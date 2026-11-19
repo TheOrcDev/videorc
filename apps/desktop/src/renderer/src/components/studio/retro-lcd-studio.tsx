@@ -257,7 +257,7 @@ export function RetroAudioSectionView({
   systemAudio: SystemAudioRowProps | null
 }): ReactElement {
   return (
-    <PanelSection>
+    <PanelSection data-section-focus="studio-audio">
       {/* No "Audio" header (plan 235 D3): the Mixer's own name says it. */}
       <LcdPanel>
         <Mixer
