@@ -6,8 +6,16 @@
 //! this process sends about the show it controls carries the epoch it holds
 //! (`videorc-controller-epoch`), and the web refuses one that is no longer
 //! current. So a computer that lost the show can never change, and never end,
-//! what its successor runs; a relaunched process is a new controller too (the
-//! epoch is held in memory only, and Resume takes the show over explicitly).
+//! what its successor runs.
+//!
+//! A restarted process of the same computer is the same controller: the
+//! epoch it was granted is kept in the settings ([`KeptController`]) and the
+//! restarted process renews it (the web renews for the same device and epoch,
+//! lapsed lease or not). Before 2026-11-19 the epoch lived in memory only, so
+//! a backend restart in the middle of a live show left this computer refused
+//! (`cloud-controller-required`, `cloud-controller-held`) by its own show, and
+//! "Continue here" had to take the show over from itself, which switched the
+//! camera and the microphone off like a takeover from another computer.
 //!
 //! What a takeover keeps and what it never carries over (decision D9):
 //! - the accepted public presentation (static layers, the avatar layer) is
@@ -316,6 +324,130 @@ pub(crate) fn fence_header_for(path: &str) -> Option<u64> {
     fence_epoch(held().as_ref(), path)
 }
 
+/// The setting that keeps this computer's controllership across a restart.
+pub(crate) const KEPT_CONTROLLER_KEY: &str = "cloud.controller.kept";
+
+/// What a restarted process of this computer needs to stay the controller it
+/// was: the show, the epoch it was granted, and the device that was granted
+/// it. No secret: the epoch means nothing without this account's session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct KeptController {
+    pub show_id: String,
+    pub epoch: u64,
+    pub device_id: String,
+}
+
+/// Pure: what a claim for `show_id` sends first. An epoch held in memory is
+/// renewed; so is one kept from before a restart, for the same show and
+/// device; anything else is a plain claim.
+pub(crate) fn first_intent(
+    held: Option<&HeldController>,
+    kept: Option<&KeptController>,
+    show_id: &str,
+    device_id: &str,
+) -> ControllerIntent {
+    if let Some(held) = held.filter(|held| held.show_id == show_id && !held.lost) {
+        return ControllerIntent::Renew(held.epoch);
+    }
+    match kept {
+        Some(kept) if kept.show_id == show_id && kept.device_id == device_id && kept.epoch > 0 => {
+            ControllerIntent::Renew(kept.epoch)
+        }
+        _ => ControllerIntent::Claim,
+    }
+}
+
+/// How one claim ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ClaimRun {
+    /// The grant, or why not.
+    pub outcome: Result<ControllerAnswer, &'static str>,
+    /// The web refused the kept epoch as stale: another computer took the
+    /// show since, so the kept record is dead whatever the outcome.
+    pub kept_refused: bool,
+}
+
+/// Runs one claim to its answer: `first`, then what [`next_claim_step`] says.
+/// `send` posts one body to the controller route and answers the HTTP status
+/// with the body. `kept` says `first` renews an epoch kept from before a
+/// restart; when the web calls a kept epoch stale, an explicit resume goes
+/// on as a process without one would, and a plain claim stops.
+pub(crate) async fn run_claim<Send, Answer>(
+    resume: bool,
+    device_id: &str,
+    first: ControllerIntent,
+    kept: bool,
+    mut send: Send,
+) -> ClaimRun
+where
+    Send: FnMut(serde_json::Value) -> Answer,
+    Answer: std::future::Future<Output = (u16, serde_json::Value)>,
+{
+    let mut intent = first;
+    let mut reclaiming = kept;
+    let mut kept_refused = false;
+    // Three decisions (claim, takeover, a lost race), one more when a kept
+    // epoch is tried first, and up to ten 1 s waits while the old
+    // controller's last command finishes on the web.
+    let max_decisions = if kept { 4 } else { 3 };
+    let (mut decisions, mut waits) = (0, 0);
+    while decisions < max_decisions && waits <= 10 {
+        let (status, answer) = send(intent_body(device_id, intent)).await;
+        let code = answer
+            .pointer("/error/code")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let controller = answer
+            .get("controller")
+            .cloned()
+            .and_then(|value| serde_json::from_value(value).ok());
+        let step = next_claim_step(resume, intent, status, &code, controller);
+        let kept_stale = reclaiming && status == 409 && code == "cloud-controller-stale";
+        reclaiming = false;
+        if kept_stale {
+            kept_refused = true;
+            // The web named no controller to take over from (the show's
+            // controller row is new): an explicit resume claims it. A plain
+            // claim stops here; it never moves a show this process only
+            // remembers holding.
+            if resume && matches!(step, ClaimStep::Stop(_)) {
+                intent = ControllerIntent::Claim;
+                decisions += 1;
+                continue;
+            }
+        }
+        match step {
+            ClaimStep::Granted(granted) => {
+                return ClaimRun {
+                    outcome: Ok(granted),
+                    kept_refused,
+                };
+            }
+            ClaimStep::Next(next) => {
+                intent = next;
+                decisions += 1;
+            }
+            ClaimStep::Wait(same) => {
+                intent = same;
+                waits += 1;
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            }
+            ClaimStep::Stop(reason) => {
+                return ClaimRun {
+                    outcome: Err(reason),
+                    kept_refused,
+                };
+            }
+        }
+    }
+    ClaimRun {
+        outcome: Err("raced"),
+        kept_refused,
+    }
+}
+
 /// One controller request body.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ControllerIntent {
@@ -551,6 +683,257 @@ mod tests {
         assert_eq!(
             fence_epoch(None, &format!("/api/cloud/shows/{SHOW}/end")),
             None
+        );
+    }
+
+    const DEVICE: &str = "AAAAAAAAAAAAAAAAAAAAAA";
+    const OTHER_DEVICE: &str = "BBBBBBBBBBBBBBBBBBBBBB";
+
+    /// The web's controller rules, as `decideController` and
+    /// `controllerAnswer` state them (videorcweb `lib/cloud/media/controller.ts`):
+    /// a 45 s lease; a claim of a live lease is refused as held, even for the
+    /// device that holds it; a renewal needs the same epoch and device and
+    /// ignores the lease; a takeover needs the current epoch, moves it by one
+    /// and switches off what the old controller had on.
+    #[derive(Default)]
+    struct FakeWeb {
+        now: u64,
+        epoch: u64,
+        device: String,
+        lease_until: u64,
+        previous_device: Option<String>,
+        enabled: Vec<String>,
+        previous_enabled: Vec<String>,
+        intents: Vec<String>,
+    }
+
+    impl FakeWeb {
+        fn answer_for(&self, device: &str) -> serde_json::Value {
+            let this_device = self.device == device;
+            serde_json::json!({
+                "controllerEpoch": self.epoch,
+                "thisDevice": this_device,
+                "leaseLive": self.lease_until > self.now,
+                "takenOverFrom": self.previous_device.as_deref().map(|previous| {
+                    if previous == device { "this-device" } else { "another-device" }
+                }),
+                "needsEnable": if this_device { self.previous_enabled.clone() } else { Vec::new() },
+            })
+        }
+
+        fn refuse(&self, device: &str, code: &str) -> (u16, serde_json::Value) {
+            let controller = (self.epoch > 0).then(|| self.answer_for(device));
+            (
+                409,
+                serde_json::json!({ "controller": controller, "error": { "code": code } }),
+            )
+        }
+
+        fn take(&mut self, device: &str) -> (u16, serde_json::Value) {
+            self.previous_device = (self.epoch > 0).then(|| self.device.clone());
+            self.previous_enabled = std::mem::take(&mut self.enabled);
+            self.epoch += 1;
+            self.device = device.to_string();
+            self.lease_until = self.now + 45;
+            (
+                200,
+                serde_json::json!({ "controller": self.answer_for(device) }),
+            )
+        }
+
+        fn post(&mut self, body: &serde_json::Value) -> (u16, serde_json::Value) {
+            let device = body["device"]["id"].as_str().unwrap().to_string();
+            let intent = body["intent"].as_str().unwrap().to_string();
+            let epoch = body["epoch"].as_u64();
+            self.intents.push(intent.clone());
+            match intent.as_str() {
+                "claim" if self.epoch > 0 && self.lease_until > self.now => {
+                    self.refuse(&device, "cloud-controller-held")
+                }
+                "claim" => self.take(&device),
+                "takeover" if epoch == Some(self.epoch) => self.take(&device),
+                "renew" if epoch == Some(self.epoch) && device == self.device => {
+                    self.lease_until = self.now + 45;
+                    (
+                        200,
+                        serde_json::json!({ "controller": self.answer_for(&device) }),
+                    )
+                }
+                _ => self.refuse(&device, "cloud-controller-stale"),
+            }
+        }
+    }
+
+    /// One claim of this process against the fake web.
+    async fn claim(
+        web: &std::cell::RefCell<FakeWeb>,
+        device: &str,
+        kept: Option<&KeptController>,
+        resume: bool,
+    ) -> ClaimRun {
+        let first = first_intent(None, kept, SHOW, device);
+        let reclaiming = matches!(first, ControllerIntent::Renew(_));
+        run_claim(resume, device, first, reclaiming, |body| {
+            let answer = web.borrow_mut().post(&body);
+            async move { answer }
+        })
+        .await
+    }
+
+    /// The kept record as a restarted process reads it: through the settings
+    /// table, which is all that survives the restart.
+    fn kept_after_restart(
+        database: &crate::storage::Database,
+        granted: &ControllerAnswer,
+    ) -> Option<KeptController> {
+        database
+            .save_setting(
+                KEPT_CONTROLLER_KEY,
+                &Some(KeptController {
+                    show_id: SHOW.to_string(),
+                    epoch: granted.controller_epoch,
+                    device_id: DEVICE.to_string(),
+                }),
+            )
+            .unwrap();
+        database
+            .load_setting::<Option<KeptController>>(KEPT_CONTROLLER_KEY)
+            .unwrap()
+            .flatten()
+    }
+
+    #[tokio::test]
+    async fn a_backend_restart_mid_show_keeps_the_controller_and_continue_here_takes_nothing_over()
+    {
+        // Live talk show, 2026-11-19: the backend recycled at 14:21:19 and
+        // came back 30 s later, inside its own 45 s lease.
+        let web = std::cell::RefCell::new(FakeWeb::default());
+        let database = crate::storage::Database::open_in_memory_for_tests();
+
+        // The room opens: a first claim, then the camera and microphone go on.
+        let opened = claim(&web, DEVICE, None, false).await;
+        let granted = opened.outcome.expect("the first claim is granted");
+        assert_eq!(granted.controller_epoch, 1);
+        web.borrow_mut().enabled = vec!["camera".to_string(), "microphone".to_string()];
+        let kept = kept_after_restart(&database, &granted);
+
+        // The backend restarts mid-show: nothing is held in memory, the lease
+        // of the dead process is still live.
+        web.borrow_mut().now += 30;
+        web.borrow_mut().intents.clear();
+
+        // Without the kept epoch (0.32.1) this computer is a stranger to its
+        // own show: a plain claim is refused for as long as the lease lives.
+        let stranger = claim(&web, DEVICE, None, false).await;
+        assert_eq!(stranger.outcome, Err("held-elsewhere"));
+
+        // With it, the restarted process renews what it held.
+        assert_eq!(
+            first_intent(None, kept.as_ref(), SHOW, DEVICE),
+            ControllerIntent::Renew(1)
+        );
+        let reclaimed = claim(&web, DEVICE, kept.as_ref(), false).await;
+        assert!(!reclaimed.kept_refused);
+        assert_eq!(
+            reclaimed
+                .outcome
+                .as_ref()
+                .map(|answer| answer.controller_epoch),
+            Ok(1)
+        );
+
+        // "Continue here": the same controller again. Nothing is taken over,
+        // so nothing that captures is switched off.
+        let continued = claim(&web, DEVICE, kept.as_ref(), true).await;
+        let answer = continued.outcome.expect("Continue here is granted");
+        let facts = facts_of(&answer, None);
+        assert_eq!(facts.controller_epoch, 1, "the epoch never moved");
+        assert_eq!(facts.taken_over_from, None, "not a takeover");
+        assert!(
+            facts.needs_enable.is_empty(),
+            "camera and microphone stay on"
+        );
+        let web = web.borrow();
+        assert_eq!(web.epoch, 1);
+        assert_eq!(web.enabled, ["camera", "microphone"]);
+        assert_eq!(
+            web.intents,
+            ["claim", "renew", "renew"],
+            "the restarted process never sends a takeover"
+        );
+    }
+
+    #[tokio::test]
+    async fn without_a_kept_epoch_continue_here_takes_the_show_over_from_itself() {
+        // What 0.32.1 did after its backend restarted: the takeover moved
+        // the epoch and switched the camera and the microphone off, like a
+        // takeover from another computer.
+        let web = std::cell::RefCell::new(FakeWeb::default());
+        claim(&web, DEVICE, None, false).await.outcome.unwrap();
+        web.borrow_mut().enabled = vec!["camera".to_string(), "microphone".to_string()];
+        web.borrow_mut().now += 30;
+
+        let continued = claim(&web, DEVICE, None, true).await;
+        let facts = facts_of(&continued.outcome.unwrap(), None);
+        assert_eq!(facts.controller_epoch, 2);
+        assert_eq!(facts.taken_over_from.as_deref(), Some("this-device"));
+        assert_eq!(facts.needs_enable, ["camera", "microphone"]);
+        assert!(web.borrow().enabled.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_kept_epoch_another_computer_took_is_dropped_and_continue_here_takes_the_show_back() {
+        let web = std::cell::RefCell::new(FakeWeb::default());
+        let database = crate::storage::Database::open_in_memory_for_tests();
+        let granted = claim(&web, DEVICE, None, false).await.outcome.unwrap();
+        let kept = kept_after_restart(&database, &granted);
+
+        // Another computer continues the show while this one is down.
+        let other = claim(&web, OTHER_DEVICE, None, true).await;
+        assert_eq!(other.outcome.unwrap().controller_epoch, 2);
+
+        // Back up: the kept epoch is stale. A plain claim never takes the
+        // show from the other computer, and the kept record is dead.
+        let reclaimed = claim(&web, DEVICE, kept.as_ref(), false).await;
+        assert!(reclaimed.kept_refused);
+        assert_eq!(reclaimed.outcome, Err("stale"));
+        assert_eq!(web.borrow().epoch, 2);
+
+        // "Continue here" takes it over from the epoch the web named.
+        let continued = claim(&web, DEVICE, kept.as_ref(), true).await;
+        assert!(continued.kept_refused);
+        let facts = facts_of(&continued.outcome.unwrap(), None);
+        assert_eq!(facts.controller_epoch, 3);
+        assert_eq!(facts.taken_over_from.as_deref(), Some("another-device"));
+    }
+
+    #[test]
+    fn a_kept_epoch_is_renewed_only_for_its_own_show_and_device() {
+        let kept = KeptController {
+            show_id: SHOW.to_string(),
+            epoch: 7,
+            device_id: DEVICE.to_string(),
+        };
+        assert_eq!(
+            first_intent(None, Some(&kept), SHOW, DEVICE),
+            ControllerIntent::Renew(7)
+        );
+        assert_eq!(
+            first_intent(None, Some(&kept), "sh_another", DEVICE),
+            ControllerIntent::Claim
+        );
+        assert_eq!(
+            first_intent(None, Some(&kept), SHOW, OTHER_DEVICE),
+            ControllerIntent::Claim
+        );
+        assert_eq!(
+            first_intent(None, None, SHOW, DEVICE),
+            ControllerIntent::Claim
+        );
+        // What this process holds wins over what an earlier one kept.
+        assert_eq!(
+            first_intent(Some(&held_for_test(9)), Some(&kept), SHOW, DEVICE),
+            ControllerIntent::Renew(9)
         );
     }
 

@@ -17466,6 +17466,7 @@ fn forget_cloud_show_services_if_confirmed(state: &AppState, status: &cloud_show
         forget_cloud_show_services(state, "");
         // Plan 249 S24: the show is over here; its controller epoch goes too.
         cloud_controller::forget("");
+        save_kept_cloud_controller(state, None);
     }
 }
 
@@ -17480,7 +17481,7 @@ async fn claim_cloud_controller(
     show_id: &str,
     resume: bool,
 ) -> Option<&'static str> {
-    use cloud_controller::{ClaimStep, ControllerIntent};
+    use cloud_controller::ControllerIntent;
     let Some(bearer) = account::stored_session_token() else {
         return Some("signed-out");
     };
@@ -17488,66 +17489,88 @@ async fn claim_cloud_controller(
         return Some("no-client");
     };
     let device = cloud_show::load_device(&state.database);
-    let mut intent = match cloud_controller::held_for(show_id) {
-        Some(held) => ControllerIntent::Renew(held.epoch),
-        None => ControllerIntent::Claim,
-    };
-    // Three decisions (claim, takeover, a lost race), and up to ten 1 s
-    // waits while the old controller's last command finishes on the web.
-    let (mut decisions, mut waits) = (0, 0);
-    while decisions < 3 && waits <= 10 {
-        let body = cloud_controller::intent_body(&device.id, intent);
-        let (status, answer) = match web.cloud_controller(&bearer, show_id, &body).await {
-            Ok(answer) => (200, answer),
-            Err((error, answer)) => (cloud_controller::status_of(&error), answer),
-        };
-        let code = answer
-            .pointer("/error/code")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("")
-            .to_string();
-        let controller = answer
-            .get("controller")
-            .cloned()
-            .and_then(|value| serde_json::from_value(value).ok());
-        match cloud_controller::next_claim_step(resume, intent, status, &code, controller) {
-            ClaimStep::Granted(granted) => {
-                let epoch = granted.controller_epoch;
-                let fresh =
-                    cloud_controller::held_for(show_id).map(|held| held.epoch) != Some(epoch);
-                cloud_controller::hold(
-                    show_id,
-                    &device.id,
-                    cloud_controller::facts_of(&granted, None),
-                );
-                if fresh {
-                    // Only the current controller may read it back, so this
-                    // runs with the new epoch held.
-                    if let Ok(restore) = web.cloud_presentation_get(&bearer, show_id).await {
-                        let facts = cloud_controller::facts_of(&granted, Some(&restore));
-                        cloud_controller::set_restore(show_id, epoch, restore, facts);
-                    }
-                    spawn_cloud_controller_renewal(state, show_id.to_string(), epoch);
-                    tracing::info!(
-                        "[cloud] controller held: epoch {epoch}, taken over from {}",
-                        granted.taken_over_from.as_deref().unwrap_or("nobody")
-                    );
-                }
-                return None;
+    let held = cloud_controller::held_for(show_id);
+    let kept = load_kept_cloud_controller(state);
+    let first = cloud_controller::first_intent(held.as_ref(), kept.as_ref(), show_id, &device.id);
+    // Nothing held in memory and a kept epoch to renew: this process is the
+    // same computer's restart (a backend recycle, a relaunch, an update).
+    let reclaiming = held.is_none() && matches!(first, ControllerIntent::Renew(_));
+    let run = cloud_controller::run_claim(resume, &device.id, first, reclaiming, |body| {
+        let (web, bearer) = (&web, &bearer);
+        async move {
+            match web.cloud_controller(bearer, show_id, &body).await {
+                Ok(answer) => (200, answer),
+                Err((error, answer)) => (cloud_controller::status_of(&error), answer),
             }
-            ClaimStep::Next(next) => {
-                intent = next;
-                decisions += 1;
-            }
-            ClaimStep::Wait(same) => {
-                intent = same;
-                waits += 1;
-                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-            }
-            ClaimStep::Stop(reason) => return Some(reason),
         }
+    })
+    .await;
+    if run.kept_refused {
+        save_kept_cloud_controller(state, None);
     }
-    Some("raced")
+    let granted = match run.outcome {
+        Ok(granted) => granted,
+        Err(reason) => return Some(reason),
+    };
+    let epoch = granted.controller_epoch;
+    let fresh = cloud_controller::held_for(show_id).map(|held| held.epoch) != Some(epoch);
+    cloud_controller::hold(
+        show_id,
+        &device.id,
+        cloud_controller::facts_of(&granted, None),
+    );
+    if fresh {
+        save_kept_cloud_controller(
+            state,
+            Some(&cloud_controller::KeptController {
+                show_id: show_id.to_string(),
+                epoch,
+                device_id: device.id.clone(),
+            }),
+        );
+        // Only the current controller may read it back, so this runs with
+        // the new epoch held.
+        if let Ok(restore) = web.cloud_presentation_get(&bearer, show_id).await {
+            let facts = cloud_controller::facts_of(&granted, Some(&restore));
+            cloud_controller::set_restore(show_id, epoch, restore, facts);
+        }
+        spawn_cloud_controller_renewal(state, show_id.to_string(), epoch);
+        tracing::info!(
+            "[cloud] controller held: epoch {epoch} ({})",
+            if reclaiming && !run.kept_refused {
+                "kept across this computer's restart"
+            } else {
+                match granted.taken_over_from.as_deref() {
+                    Some("this-device") => "taken over from this computer's earlier process",
+                    Some(_) => "taken over from another computer",
+                    None => "first claim",
+                }
+            }
+        );
+    }
+    None
+}
+
+/// The controllership a restart of this computer keeps (`None`: none, or a
+/// row this build cannot read, which is ignored and never trusted).
+fn load_kept_cloud_controller(state: &AppState) -> Option<cloud_controller::KeptController> {
+    state
+        .database
+        .load_setting::<Option<cloud_controller::KeptController>>(
+            cloud_controller::KEPT_CONTROLLER_KEY,
+        )
+        .ok()
+        .flatten()
+        .flatten()
+}
+
+fn save_kept_cloud_controller(state: &AppState, kept: Option<&cloud_controller::KeptController>) {
+    if let Err(error) = state
+        .database
+        .save_setting(cloud_controller::KEPT_CONTROLLER_KEY, &kept)
+    {
+        tracing::warn!("Could not save this computer's cloud controller epoch: {error:#}");
+    }
 }
 
 /// Follows `cloud_controller::ownership()`: when a show this process held is
@@ -17632,6 +17655,8 @@ fn spawn_cloud_controller_renewal(state: &AppState, show_id: String, epoch: u64)
                 // follows `cloud_controller::ownership()` stops here.
                 if code == "cloud-controller-stale" || code == "cloud-controller-held" {
                     cloud_controller::mark_lost(epoch, "taken-over");
+                    // Another computer's show now: a restart must not renew it.
+                    save_kept_cloud_controller(&state, None);
                 }
                 state.emit_log(
                     "warn",
@@ -18282,8 +18307,23 @@ async fn cloud_show_detect_at_launch(state: &AppState) {
     let Some(context) = cloud_context(state) else {
         return;
     };
-    if let Err(error) = context.detect_current_show(&bearer).await {
-        tracing::info!("Videorc Cloud launch check did not complete: {error:#}");
+    match context.detect_current_show(&bearer).await {
+        Ok(status) => {
+            // This computer controlled the show before it restarted: renew
+            // the kept epoch now, so nothing this process sends about its
+            // own show is refused as another computer's. A plain claim, which
+            // never takes a show; the room and its devices still wait for
+            // "Continue here".
+            if let Some(show) = status.show.as_ref()
+                && cloud_controller::held_for(&show.id).is_none()
+                && load_kept_cloud_controller(state).is_some_and(|kept| kept.show_id == show.id)
+            {
+                note_claim(claim_cloud_controller(state, &show.id, false).await);
+            }
+        }
+        Err(error) => {
+            tracing::info!("Videorc Cloud launch check did not complete: {error:#}");
+        }
     }
 }
 
