@@ -3,8 +3,8 @@
 - 2026-11-18: [Plan 250](250-notification-center.md), the owner's ask:
   toasts are killing them during livestreams, so a notifications bell with
   an unread count, where each notification can be acted on or cleared.
-  APPROVED 2026-11-19 (D1–D13 = the recommended answers), built as ten
-  commits in one PR:
+  BUILT 2026-11-19 (D1–D13 = the recommended answers), ten slices as ten
+  commits in one PR, in review:
   - 317 toast call sites today. 212 answer a click and stay toasts. 97 are
     Videorc speaking up on its own (a third of them pinned); 91 of those
     move behind the bell.
@@ -19,7 +19,11 @@
     PR #1512 (the minified renderer) merged first (D12).
   - Ten slices: the store, the bell, the quiet rule, doors, then the
     toasts by family, the Stream Manager, two backend clear signals, and a
-    sweep. No new RPC, event or field.
+    sweep. No new backend RPC, event or field: two new `health` codes
+    (`host-overload-cleared`, `disk-space-recovered`), and one Electron
+    relay for the Stream Manager's bell.
+  - After it: 228 direct toast call sites where there were 304, 57 publish
+    sites over 44 kinds, and three pinned toasts left, named by a guard.
 - 2026-11-16: [Plan 247](247-talk-show-live-test-fixes.md), the owner's ask
   after the first live talk show test on 0.30.0 (guest blocked, hearing
   myself, circle only on the stream, no green screen, the show would not end):

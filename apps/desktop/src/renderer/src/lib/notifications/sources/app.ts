@@ -6,7 +6,6 @@
 import type { BackendLifecycleEvent } from '@/lib/backend'
 import { OPEN_HEALTH_LABEL, openHealth } from '@/lib/health-door'
 import { notifications } from '@/lib/notifications'
-import { CURRENT_SESSION } from '@/lib/notifications/sources/health'
 import type { NotificationStore } from '@/lib/notifications/store'
 import type { NotificationAction } from '@/lib/notifications/types'
 import { openOutputVideorcCamera } from '@/lib/section-doors'
@@ -33,8 +32,9 @@ export function publishSourceReturn(
     kind: 'source-return',
     title: `${deviceName} is back`,
     detail: 'This session is running without it.',
-    actions: [{ id: 'use-it', label: 'Use it', kind: 'fix', run: useIt }],
-    sessionId: CURRENT_SESSION
+    // Not bound to the session: the Studio takes it back when the session
+    // ends, as it does when the device is used or unplugged.
+    actions: [{ id: 'use-it', label: 'Use it', kind: 'fix', run: useIt }]
   })
 }
 

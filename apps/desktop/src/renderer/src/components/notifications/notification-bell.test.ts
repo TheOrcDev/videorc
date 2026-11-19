@@ -1,9 +1,14 @@
 // @vitest-environment happy-dom
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { NotificationBell } from '@/components/notifications/notification-bell'
+import {
+  NotificationBell,
+  type NotificationBellListProps
+} from '@/components/notifications/notification-bell'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import {
   notificationsOpen,
@@ -15,8 +20,12 @@ import { WORKSPACE_NAVIGATE_EVENT } from '@/lib/workspace-navigation'
 describe('NotificationBell (plan 250, "Where the bell lives")', () => {
   let root: Root
   let container: HTMLDivElement
+  const listProps = vi.fn()
   const load = vi.fn(async () => ({
-    default: () => createElement('div', { 'data-test-list': '' }, 'the list')
+    default: (props: NotificationBellListProps) => {
+      listProps(props)
+      return props.open ? createElement('div', { 'data-test-list': '' }, 'the list') : null
+    }
   }))
 
   const bell = (): HTMLElement =>
@@ -45,6 +54,7 @@ describe('NotificationBell (plan 250, "Where the bell lives")', () => {
   beforeEach(() => {
     vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
     load.mockClear()
+    listProps.mockClear()
     container = document.createElement('div')
     document.body.append(container)
     root = createRoot(container)
@@ -108,7 +118,13 @@ describe('NotificationBell (plan 250, "Where the bell lives")', () => {
     await act(async () => toggleNotifications())
     expect(notificationsOpen()).toBe(true)
     expect(load).toHaveBeenCalled()
-    expect(document.querySelector('[data-videorc-notification-list]')).not.toBeNull()
+    await vi.waitFor(() => expect(document.querySelector('[data-test-list]')).not.toBeNull())
+    // The list positions against the bell's own button, and returns focus to it.
+    // (Compared by identity: a deep match would walk the whole DOM.)
+    const props = listProps.mock.lastCall?.[0] as NotificationBellListProps
+    expect(props.open).toBe(true)
+    expect(props.trigger === bell()).toBe(true)
+    expect(bell().getAttribute('aria-expanded')).toBe('true')
     await act(async () => {
       window.dispatchEvent(new CustomEvent(WORKSPACE_NAVIGATE_EVENT, { detail: { tab: 'studio' } }))
     })
@@ -117,5 +133,27 @@ describe('NotificationBell (plan 250, "Where the bell lives")', () => {
     expect(notificationsOpen()).toBe(true)
     await act(async () => toggleNotifications())
     expect(notificationsOpen()).toBe(false)
+    expect(bell().getAttribute('aria-expanded')).toBe('false')
+  })
+
+  it('opens and closes on a press, with no popover code until then', async () => {
+    await render({ unread: 0, urgent: 0, tone: null })
+    expect(bell().getAttribute('aria-haspopup')).toBe('dialog')
+    expect(listProps).not.toHaveBeenCalled()
+    await act(async () => bell().click())
+    expect(notificationsOpen()).toBe(true)
+    await vi.waitFor(() => expect(document.querySelector('[data-test-list]')).not.toBeNull())
+    await act(async () => bell().click())
+    expect(notificationsOpen()).toBe(false)
+    expect(document.querySelector('[data-test-list]')).toBeNull()
+  })
+
+  // The bell is in every window's first paint: Base UI's popover (12 KB
+  // gzip) must stay in the list's chunk. Measured 2026-11-19 against the
+  // re-baselined eager budget.
+  it('imports no popover', () => {
+    const source = readFileSync(join(__dirname, 'notification-bell.tsx'), 'utf8')
+    expect(source).not.toMatch(/from '@\/components\/ui\/popover'/)
+    expect(source).not.toMatch(/@base-ui/)
   })
 })

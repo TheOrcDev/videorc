@@ -11,10 +11,12 @@ Facts are read from `origin/main` `fe53fde02` (2026-11-18).
 
 ## Status and scope
 
-- **Status: APPROVED 2026-11-19, building.** The owner took every
+- **Status: BUILT 2026-11-19, in review.** The owner took every
   recommendation: D1 to D13 are answered "a". For D12 no ceiling is raised:
   PR #1512 (the minified renderer) merged first, so the bell fits. The ten
-  slices land as ten commits in one PR.
+  slices are ten commits in one PR, with one more commit for what the
+  by-eye pass found. "What was built" below says what the 317 became and
+  where the build differs from this plan.
 - **In scope:** the desktop renderer (the bell, the list, the store, routing
   today's toasts through it), a small main-process relay for the Stream
   Manager, and two small backend additions (clear signals, and the open
@@ -26,6 +28,70 @@ Facts are read from `origin/main` `fe53fde02` (2026-11-18).
 - **Number:** 250 is the next free number. 248 is unused and 249 (cloud
   parity) lives in other worktrees. If another plan takes 250 first, rename
   this file.
+
+## What was built
+
+Recorded 2026-11-19, from branch `feat/notification-center`.
+
+**What the 317 became.** The inventory script (same script, same rules)
+counts 228 direct toast call sites where it counted 304; the 13 sites
+reached through an alias are down to 7.
+
+- 57 `publish` sites in `lib/notifications/sources/*` and
+  `lib/session-runtime-recovery.ts` replace the unprompted toasts, over 44
+  kinds in `lib/notifications/kinds.ts`.
+- No unprompted toast is left outside the store, except the six this plan
+  keeps (D11): Sidekick's three nudges and the "Remove this message?"
+  question with its two outcomes.
+- Three toasts still set `duration: Infinity`, and the guard names them:
+  the removal question, "Couldn't start", and the browser step of a
+  connection. Every other pinned toast is gone.
+- `showBackendError` (`reportError`) stays a toast: it answers the action
+  that failed. The backend's own `error` event is the entry "Videorc hit a
+  problem".
+
+**Where the build differs from the plan.**
+
+- **Urgent kinds.** Five kinds are urgent on their own (`stream-output`,
+  `stream-output-failed`, `recording-output-failed`, `recording-failed`,
+  `audio-output-failed`), and six may become urgent from a report
+  (`microphone`, `screen-capture`, `stream-target`, `x-playback`,
+  `backend`, `watchdog`). `lib/notifications/kinds.test.ts` pins both lists.
+- **A full disk** (`recording-disk-full`) and the take that failed on it
+  are one entry, in Videorc's own words: the backend's line ends in an
+  FFmpeg exit code.
+- **A session that ended is not a recovery.** Its open problems resolve
+  with a gray icon, never the green tick, and no recovery toast. The same
+  subject in the next session is a new problem, even inside the 60 s flap
+  window.
+- **Repeat words lead the detail** ("3 times. …"), so the two-line clamp
+  never hides them.
+- **The Stream Manager's list is its own relay**, not the live dashboard:
+  four invoke channels and three events in `shared/notifications-relay.ts`,
+  each with a strict schema, a row in the renderer security policy and in
+  the preload allowlist. The dashboard carries only what the phone remote
+  may see.
+- **Low recording space** is sent again each time it gets worse (five
+  minutes left, then the last minute), not only at Record.
+- **The rebuild on reconnect** replays the last word on each subject, so a
+  problem that cleared during the gap also resolves.
+- **`go-live-step`, `cloud-announce` and `cloud-controller`** pop up
+  although they are news: the first two would otherwise never be seen, and
+  the third answers Continue here.
+
+**Seen by eye** (dev app, isolated profile, dark and light): the bell's
+four states, the list live, idle, long and empty, the urgent pop-up, a
+prompted toast over the open list, the Settings section, seven doors
+landing on their section with focus inside, and the Stream Manager's bell
+and list at 1,040, 800, 640 and 520 px. The pass found three bugs unit
+tests had missed (the list marking itself read on open, a door that did not
+scroll, the Stream Manager's bell stuck at zero); each has a test now.
+
+**Not seen or run:** an urgent pop-up inside the Stream Manager (it shows
+there only while that window is focused, which a background run cannot
+do; unit-tested), VoiceOver, Increase Contrast and Reduce Motion, Windows,
+the Videorc Cloud door (the cloud is off on a test profile), and a real
+stream.
 
 ## The short version
 

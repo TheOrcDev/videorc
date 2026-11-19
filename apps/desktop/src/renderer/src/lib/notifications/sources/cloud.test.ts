@@ -7,6 +7,7 @@ import {
   publishCloudStatus,
   withdrawCloudController
 } from '@/lib/notifications/sources/cloud'
+import { sessionEndedNotifications } from '@/lib/notifications/sources/health'
 import { createNotificationStore, type NotificationStore } from '@/lib/notifications/store'
 import { guardToastText, TOAST_DETAILS_SAVED } from '@/lib/toast'
 
@@ -123,6 +124,13 @@ describe('Videorc Cloud as notifications (plan 250 S6)', () => {
     // A warning while live and quiet waits behind the bell.
     expect(door.show).not.toHaveBeenCalled()
     expect(store.count()).toMatchObject({ unread: 1, tone: 'warning' })
+  })
+
+  it("outlives this computer's own session: the show goes on in the cloud", () => {
+    const lost: CloudStatus = { ...base, directFallbackAvailable: true }
+    publishCloudStatus(base, lost, store)
+    sessionEndedNotifications(store, 'record+stream')
+    expect(entry('cloud-status')?.state).toBe('open')
   })
 
   it('a show that is gone takes its open problem with it', () => {

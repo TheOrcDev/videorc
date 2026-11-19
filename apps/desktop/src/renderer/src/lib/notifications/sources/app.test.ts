@@ -44,6 +44,9 @@ describe('devices and the app as notifications (plan 250 S7)', () => {
     expect(store.count()).toEqual({ unread: 1, urgent: 0, tone: 'warning' })
     await store.runAction('source-return:camera:cam-1', 'use-it')
     expect(useIt).toHaveBeenCalledTimes(1)
+    // It does not end with the session on its own: the Studio takes it back.
+    store.sessionEnded('recording')
+    expect(entry('source-return:camera:cam-1')?.state).toBe('open')
     withdrawSourceReturn('camera:cam-1', store)
     expect(store.snapshot()).toEqual([])
   })

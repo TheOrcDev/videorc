@@ -102,9 +102,15 @@ export function relayedPopUpDoor(
 ): NotificationPopUpDoor {
   /** Keys whose toast is in the Stream Manager. */
   const there = new Set<string>()
+  /** Keys main is being asked about; a key leaves when its problem goes first. */
+  const asking = new Set<string>()
   return {
     show(entry: NotificationEntry, durationMs: number, action: NotificationAction | undefined) {
-      const showHere = (): void => local.show(entry, durationMs, action)
+      asking.add(entry.key)
+      const showHere = (): void => {
+        // Resolved or cleared while main was asked: nothing is left to show.
+        if (asking.delete(entry.key)) local.show(entry, durationMs, action)
+      }
       void api
         .pushNotificationPopUp({
           type: 'show',
@@ -113,11 +119,14 @@ export function relayedPopUpDoor(
           ...(action ? { action: { id: action.id, label: action.label, kind: action.kind } } : {})
         })
         .then((taken) => {
-          if (taken) there.add(entry.key)
-          else showHere()
+          if (!taken) showHere()
+          else if (asking.delete(entry.key)) there.add(entry.key)
+          // It went there and its problem has gone since: take it back.
+          else void api.pushNotificationPopUp({ type: 'dismiss', key: entry.key }).catch(() => {})
         }, showHere)
     },
     resolved(entry) {
+      asking.delete(entry.key)
       if (there.delete(entry.key)) {
         void api
           .pushNotificationPopUp({ type: 'resolved', key: entry.key, title: entry.title })
@@ -127,6 +136,7 @@ export function relayedPopUpDoor(
       }
     },
     dismiss(key) {
+      asking.delete(key)
       if (there.delete(key)) {
         void api.pushNotificationPopUp({ type: 'dismiss', key }).catch(() => {})
       } else {

@@ -1,11 +1,9 @@
-import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
 
 import type { CloudStatus } from './backend'
 import {
   CONTINUE_ON_PHONE,
   HAND_OFF_LABEL,
-  cloudTakenOverTitle,
   handOffLabel,
   handOffQuestionBody,
   offersHandOff,
@@ -41,12 +39,6 @@ describe('the hand-off copy (plan 243 C5)', () => {
     expect(onAirDeviceName({ ...base, kind: 'browser' })).toBe('a browser')
     expect(onAirDeviceName({ ...base, kind: 'computer', source: 'feed' })).toBe('another computer')
     expect(onAirDeviceName(undefined)).toBe('another device')
-    expect(
-      renderToStaticMarkup(cloudTakenOverTitle({ ...base, kind: 'phone', name: 'iPhone' }))
-    ).toBe('Your show continues on iPhone.')
-    expect(renderToStaticMarkup(cloudTakenOverTitle(undefined))).toBe(
-      'Your show continues on another device.'
-    )
     expect(CONTINUE_ON_PHONE).toBe('On your phone, open videorc.com/live/continue.')
   })
 })

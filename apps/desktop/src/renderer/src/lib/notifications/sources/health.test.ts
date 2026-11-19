@@ -291,19 +291,21 @@ describe('health events as notifications (plan 250 S5)', () => {
 
     it('folds a recorded page into the conditions that are still open', () => {
       rebuildHealthNotifications(store, page, context)
+      // Sorted by subject: warnings published in the same millisecond tie.
       const open = store
         .snapshot()
         .filter((entry) => entry.state === 'open')
         .map((entry) => [entry.key, entry.tone, entry.title])
+        .sort(([a], [b]) => a.localeCompare(b))
       expect(open).toEqual([
-        ['screen-capture', 'urgent', 'Screen capture stopped'],
-        ['stream-uplink', 'warning', 'Your connection can’t carry this stream'],
         ['host-overloaded', 'warning', 'This computer is overloaded'],
+        ['screen-capture', 'urgent', 'Screen capture stopped'],
         [
           'session-notice:recording-startup-cadence-unsteady',
           'warning',
           'The first seconds may stutter'
-        ]
+        ],
+        ['stream-uplink', 'warning', 'Your connection can’t carry this stream']
       ])
       // What happened once, and what cleared with nothing open, is not replayed.
       expect(store.snapshot()).toHaveLength(4)

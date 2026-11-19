@@ -3364,9 +3364,12 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         source.publishChatNotConnected(warning, CHAT_PLATFORM_LABELS[warning.platform])
       )
     }
-    // A chat that connected after all resolves its entry.
+    // A chat that connected after all resolves its entry. Only a provider
+    // that says it is connected counts: one that is connecting again, or
+    // gone from the snapshot, proves nothing.
     for (const [id, platform] of chatSetupWarnedRef.current.platforms) {
-      if (chatWarnings.some((warning) => warning.id === id)) continue
+      if (liveChatSnapshot.providers.find((provider) => provider.id === id)?.state !== 'connected')
+        continue
       chatSetupWarnedRef.current.platforms.delete(id)
       chatSetupWarnedRef.current.warned.delete(id)
       void loadPlatformNotifications().then((source) =>

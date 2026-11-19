@@ -13,7 +13,7 @@ import {
   cloudShowCapToast
 } from '@/lib/cloud-toasts'
 import { notifications } from '@/lib/notifications'
-import { CURRENT_SESSION } from '@/lib/notifications/sources/health'
+import { CLOUD_SESSION_PREFIX, CURRENT_SESSION } from '@/lib/notifications/sources/health'
 import type { NotificationStore } from '@/lib/notifications/store'
 import type { NotificationAction } from '@/lib/notifications/types'
 import { openDestinationsCloud } from '@/lib/section-doors'
@@ -40,7 +40,7 @@ function asTitle(sentence: string): { title: string; detail?: string } {
 
 /** The session a cloud condition ends with: the show's, or the local one. */
 function cloudSession(status: CloudStatus): string {
-  return status.show?.id ? `cloud:${status.show.id}` : CURRENT_SESSION
+  return status.show?.id ? `${CLOUD_SESSION_PREFIX}${status.show.id}` : CURRENT_SESSION
 }
 
 /** The provider's cloud status, compared with the one before it. */
@@ -51,7 +51,7 @@ export function publishCloudStatus(
 ): void {
   // A show that is gone takes its open problem with it.
   if (previous?.show?.id && previous.show.id !== next.show?.id) {
-    store.sessionEnded('livestream', `cloud:${previous.show.id}`)
+    store.sessionEnded('livestream', `${CLOUD_SESSION_PREFIX}${previous.show.id}`)
   }
   if (next.endReason === 'ended-elsewhere' && previous?.endReason !== 'ended-elsewhere') {
     store.publish({

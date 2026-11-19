@@ -83,8 +83,11 @@ export interface NotificationStore {
   clearAll: () => void
   markRead: (key: string) => void
   markAllRead: () => void
-  /** Conditions that belong to the session resolve. Left out: every session. */
-  sessionEnded: (reason: SessionEndReason, sessionId?: string) => void
+  /**
+   * Conditions that belong to the session resolve. `session` is its id, or
+   * a test of an id; left out, every session.
+   */
+  sessionEnded: (reason: SessionEndReason, session?: string | ((id: string) => boolean)) => void
   runAction: (key: string, actionId: string) => Promise<void>
   has: (key: string) => boolean
   snapshot: () => readonly NotificationEntry[]
@@ -453,12 +456,13 @@ export function createNotificationStore(options: NotificationStoreOptions = {}):
       if (changed) commit()
     },
 
-    sessionEnded(reason, sessionId) {
+    sessionEnded(reason, session) {
       let changed = false
       for (const [key, item] of held) {
         const { entry } = item
         if (entry.life !== 'condition' || entry.state !== 'open' || !entry.sessionId) continue
-        if (sessionId !== undefined && entry.sessionId !== sessionId) continue
+        if (typeof session === 'string' && entry.sessionId !== session) continue
+        if (typeof session === 'function' && !session(entry.sessionId)) continue
         changed = true
         if (item.hidden !== null) {
           held.delete(key)

@@ -348,6 +348,16 @@ describe('the notification store (plan 250)', () => {
     })
   })
 
+  describe('which session ended', () => {
+    it('a test of the id leaves another kind of session alone', () => {
+      store.publish(problem({ sessionId: 's1' }))
+      store.publish(problem({ key: 'cloud-status', sessionId: 'cloud:sh_1' }))
+      store.sessionEnded('recording', (id) => !id.startsWith('cloud:'))
+      const byKey = Object.fromEntries(store.snapshot().map((entry) => [entry.key, entry.state]))
+      expect(byKey).toEqual({ microphone: 'resolved', 'cloud-status': 'open' })
+    })
+  })
+
   describe('the next session', () => {
     it('the same subject in the next session is a new problem, not a flap', () => {
       live = true

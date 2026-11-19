@@ -335,10 +335,20 @@ export function publishRecordingFailure(
   })
 }
 
-/** The session's open problems end with it, and stay in the list as what happened. */
+/** A cloud show's own problems end with the show (`sources/cloud.ts`). */
+export const CLOUD_SESSION_PREFIX = 'cloud:'
+
+/**
+ * The local session's open problems end with it, and stay in the list as
+ * what happened. A Videorc Cloud show can outlive this computer's session,
+ * so its own condition is left alone.
+ */
 export function sessionEndedNotifications(
   store: NotificationStore,
   activity: SessionRuntimeActivity
 ): void {
-  store.sessionEnded(activityIsLive(activity) ? 'livestream' : 'recording')
+  store.sessionEnded(
+    activityIsLive(activity) ? 'livestream' : 'recording',
+    (sessionId) => !sessionId.startsWith(CLOUD_SESSION_PREFIX)
+  )
 }

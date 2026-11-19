@@ -211,6 +211,25 @@ describe("the main window's notification relay (plan 250 S8)", () => {
       expect(toast.problem).toHaveBeenCalledTimes(1)
     })
 
+    it('a problem that cleared while main was being asked shows nothing', async () => {
+      startNotificationRelay(store, api, () => true)
+      publishUrgent()
+      // Resolved before main has answered where the toast should go.
+      store.resolve('microphone', { title: 'Microphone is back' })
+      await flush()
+      expect(toast.problem).not.toHaveBeenCalled()
+      expect(toast.success).not.toHaveBeenCalled()
+    })
+
+    it('a toast that reached the Stream Manager after its problem cleared is taken back', async () => {
+      streamManagerInFront = true
+      startNotificationRelay(store, api, () => true)
+      publishUrgent()
+      store.clear('microphone')
+      await flush()
+      expect(popUps.at(-1)).toEqual({ type: 'dismiss', key: 'microphone' })
+    })
+
     it('a toast showing in the Stream Manager is dismissed there on Clear', async () => {
       streamManagerInFront = true
       startNotificationRelay(store, api, () => true)
