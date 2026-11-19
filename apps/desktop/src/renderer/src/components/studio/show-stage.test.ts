@@ -147,8 +147,11 @@ describe('the stage (D8)', () => {
     const tiles = [...container.querySelectorAll<HTMLElement>('[data-testid="show-stage-tile"]')]
     expect(tiles.map((tile) => tile.dataset.stageIdentity)).toEqual([HOST, 'g_ada'])
     expect(tiles.every((tile) => tile.dataset.stageKind === 'person')).toBe(true)
-    const checked = container.querySelector<HTMLElement>('[role="radio"][aria-checked="true"]')
-    expect(checked?.textContent).toBe('Side by side')
+    const checked = container.querySelector<HTMLElement>(
+      '[data-testid="show-stage-layout"][data-selected]'
+    )
+    expect(checked?.dataset.stageLayout).toBe('side-by-side')
+    expect(checked?.querySelector('button')?.getAttribute('aria-pressed')).toBe('true')
   })
 
   it('says so when nobody is on stage, and keeps the Preview line for the lifecycle probe', async () => {
@@ -678,6 +681,10 @@ describe('the backstage strip (C-G3)', () => {
       (candidate) => candidate.textContent === label
     ) as HTMLButtonElement
 
+  /** The row's mic control: its name is what a press does, its `data-mic` the state. */
+  const micToggle = (element: HTMLElement): HTMLButtonElement =>
+    element.querySelector<HTMLButtonElement>('[data-testid="show-stage-mute"]') as HTMLButtonElement
+
   it('brings a backstage guest on and sends an on-stage one back, by identity', async () => {
     const show = talkShow()
     await mount(
@@ -708,16 +715,19 @@ describe('the backstage strip (C-G3)', () => {
     const host = row('You')
     expect(host.querySelector('[data-testid="show-stage-send-backstage"]')).toBeNull()
     expect(host.querySelector('[data-testid="show-stage-bring-on"]')).toBeNull()
-    expect(button(host, 'Mute')).toBeDefined()
+    expect(micToggle(host).getAttribute('aria-label')).toBe('Mute your microphone')
     expect(row('Ada').querySelector('[data-testid="show-stage-send-backstage"]')).not.toBeNull()
   })
 
   it("holds a guest's mic by guest id, and mutes the host's own mic locally", async () => {
     const show = talkShow()
     await mount(talkStatus({ room: openRoom({ guests: [ada, grace] }) }), show)
-    await act(async () => button(row('Ada'), 'Mute').click())
-    await act(async () => button(row('Grace'), 'Unmute').click())
-    await act(async () => button(row('You'), 'Mute').click())
+    expect(micToggle(row('Ada')).getAttribute('aria-label')).toBe('Mute Ada')
+    expect(micToggle(row('Grace')).getAttribute('aria-label')).toBe('Let Grace unmute')
+    expect(micToggle(row('Grace')).getAttribute('aria-pressed')).toBe('true')
+    await act(async () => micToggle(row('Ada')).click())
+    await act(async () => micToggle(row('Grace')).click())
+    await act(async () => micToggle(row('You')).click())
     expect(show.actOnGuest).toHaveBeenCalledWith('g_ada', 'mute', undefined)
     expect(show.actOnGuest).toHaveBeenCalledWith('g_grace', 'unmute', undefined)
     expect(show.setMicrophoneMuted).toHaveBeenCalledWith(true)
@@ -744,26 +754,29 @@ describe('the backstage strip (C-G3)', () => {
       }),
       show
     )
-    const mic = (name: string): string | null | undefined =>
-      row(name)
-        .querySelector(
-          '[role="img"][aria-label="Muted by you"], [role="img"][aria-label="Mic off"], [role="img"][aria-label="Quiet"]'
-        )
-        ?.getAttribute('aria-label')
-    expect(mic('Grace')).toBe('Muted by you')
-    expect(button(row('Grace'), 'Unmute')).toBeDefined()
-    expect(mic('Ada')).toBe('Mic off')
-    expect(button(row('Ada'), 'Mute')).toBeDefined()
-    expect(mic('Bo')).toBe('Quiet')
+    // The icon is the state, its words stay for a screen reader, and the two
+    // muted states each say which they are beside the name.
+    const mic = (name: string): string | undefined => micToggle(row(name)).dataset.mic
+    const said = (name: string): string | null | undefined =>
+      row(name).querySelector('[data-testid="show-stage-mic"]')?.textContent
+    expect(mic('Grace')).toBe('held')
+    expect(said('Grace')).toBe('Muted by you')
+    expect(micToggle(row('Grace')).getAttribute('aria-label')).toBe('Let Grace unmute')
+    expect(mic('Ada')).toBe('off')
+    expect(said('Ada')).toBe('Mic off')
+    expect(micToggle(row('Ada')).getAttribute('aria-label')).toBe('Mute Ada')
+    expect(mic('Bo')).toBe('quiet')
+    expect(said('Bo')).toBeUndefined()
+    expect(micToggle(row('Bo')).textContent).toBe('Quiet')
     expect(container.innerHTML).toContain('Only Ada can turn their mic on.')
 
-    await act(async () => button(row('Grace'), 'Unmute').click())
+    await act(async () => micToggle(row('Grace')).click())
     expect(show.actOnGuest).toHaveBeenCalledWith('g_grace', 'unmute', undefined)
     expect(info).toHaveBeenCalledWith('Grace can talk again once they unmute.', {
       id: 'videorc-guests-unmute:g_grace'
     })
     // Mute says nothing more: the strip shows the hold.
-    await act(async () => button(row('Bo'), 'Mute').click())
+    await act(async () => micToggle(row('Bo')).click())
     expect(info).toHaveBeenCalledTimes(1)
     info.mockRestore()
   })
@@ -801,7 +814,7 @@ describe('the backstage strip (C-G3)', () => {
     expect(show.decideGuest).toHaveBeenCalledWith('r9', 'let-in')
   })
 
-  it('changes the layout through the chips, and waits on a screen for Screen + people', async () => {
+  it('changes the layout through the cards, and waits on a screen for Screen + people', async () => {
     const show = talkShow()
     await mount(
       talkStatus({
@@ -812,14 +825,223 @@ describe('the backstage strip (C-G3)', () => {
       }),
       show
     )
-    const chip = (label: string): HTMLButtonElement =>
-      [...container.querySelectorAll<HTMLButtonElement>('[role="radio"]')].find(
-        (candidate) => candidate.textContent === label
+    const card = (layout: string): HTMLButtonElement =>
+      container.querySelector<HTMLButtonElement>(
+        `[data-testid="show-stage-layout"][data-stage-layout="${layout}"] button`
       ) as HTMLButtonElement
-    await act(async () => chip('Spotlight').click())
+    expect(card('spotlight').textContent).toBe('Spotlight')
+    await act(async () => card('spotlight').click())
     expect(show.setLayout).toHaveBeenCalledWith('spotlight')
-    expect(chip('Screen + people').disabled).toBe(true)
+    // The layout in use is the pressed card, and choosing it again sends nothing.
+    expect(card('side-by-side').getAttribute('aria-pressed')).toBe('true')
+    await act(async () => card('side-by-side').click())
+    expect(show.setLayout).toHaveBeenCalledTimes(1)
+    expect(card('screen-people').disabled).toBe(true)
+    // Each card draws its own arrangement.
+    expect(
+      container.querySelectorAll(
+        '[data-testid="show-stage-layout"] [data-slot="stage-layout-thumb"]'
+      )
+    ).toHaveLength(4)
     expect(container.textContent).toContain('Share a screen first for Screen + people.')
+  })
+})
+
+// Plan 252: the room in pictures. People in two lists, the shared screens as
+// cards (the one home of which screen is on stage), and a guest's screen
+// share as a control on their row.
+describe('the room in pictures (plan 252)', () => {
+  const rows = (label: string): string[] =>
+    [
+      ...container.querySelectorAll<HTMLElement>(
+        `[aria-label="${label}"] [data-testid="show-stage-strip-row"]`
+      )
+    ].map((element) => element.dataset.stageIdentity ?? '')
+  const screens = (): HTMLElement[] => [
+    ...container.querySelectorAll<HTMLElement>('[data-testid="show-stage-screen"]')
+  ]
+
+  it('lists people On stage and Backstage, the host first, and says when nobody is backstage', async () => {
+    await mount(
+      talkStatus({
+        room: openRoom({
+          guests: [ada, grace],
+          stage: { layout: 'side-by-side', onStage: [HOST, 'g_grace'] }
+        })
+      }),
+      talkShow()
+    )
+    expect(rows('On stage')).toEqual([HOST, 'g_grace'])
+    expect(rows('Backstage')).toEqual(['g_ada'])
+    // The smoke reads every row in the room, in this order.
+    expect(
+      [...container.querySelectorAll<HTMLElement>('[data-testid="show-stage-strip-row"]')].map(
+        (element) => element.dataset.stageIdentity
+      )
+    ).toEqual([HOST, 'g_grace', 'g_ada'])
+    expect(container.querySelector('[data-testid="show-stage-backstage-empty"]')).toBeNull()
+
+    await mount(talkStatus({ room: openRoom() }), talkShow())
+    expect(rows('On stage')).toEqual([HOST])
+    const empty = container.querySelector<HTMLElement>('[data-testid="show-stage-backstage-empty"]')
+    expect(empty?.textContent).toContain('Nobody is backstage.')
+    const opened: string[] = []
+    navigation.open = (tab) => void opened.push(tab)
+    await act(async () => empty?.querySelector('button')?.click())
+    expect(opened).toEqual(['guests'])
+    navigation.open = () => {}
+  })
+
+  it("puts a guest's shared screen on stage from its card, and takes it off again", async () => {
+    const show = talkShow({ setStage: vi.fn(async () => {}) })
+    const stage = { layout: 'side-by-side' as const, onStage: [HOST, 'g_ada'] }
+    await mount(
+      talkStatus({
+        room: openRoom({
+          guests: [ada, grace],
+          participants: [
+            ...(openRoom().participants ?? []),
+            guestParticipant(ada, { onStage: true, screen: true }),
+            guestParticipant(grace, { screen: true })
+          ],
+          stage
+        })
+      }),
+      show
+    )
+    expect(screens().map((card) => card.dataset.stageIdentity)).toEqual(['g_ada', 'g_grace'])
+    const adaCard = screens()[0].querySelector('button') as HTMLButtonElement
+    expect(adaCard.textContent).toBe("Ada's screenPut on stage")
+    // A backstage guest's screen waits for them: the stage names only who is on it.
+    expect((screens()[1].querySelector('button') as HTMLButtonElement).disabled).toBe(true)
+    expect(container.innerHTML).toContain('Bring Grace on first.')
+    await act(async () => adaCard.click())
+    expect(show.setStage).toHaveBeenCalledWith({
+      ...stage,
+      layout: 'screen-people',
+      screen: 'g_ada'
+    })
+
+    await mount(
+      talkStatus({
+        room: openRoom({
+          guests: [ada],
+          participants: [
+            ...(openRoom().participants ?? []),
+            guestParticipant(ada, { onStage: true, screen: true })
+          ],
+          stage: { ...stage, layout: 'screen-people', screen: 'g_ada' }
+        })
+      }),
+      show
+    )
+    expect(screens()[0].dataset.selected).toBe('true')
+    await act(async () => screens()[0].querySelector('button')?.click())
+    expect(show.setStage).toHaveBeenLastCalledWith({ ...stage, screen: undefined })
+  })
+
+  it('says nobody is sharing, where to allow a guest, and keeps Share screen… in Screens', async () => {
+    await mount(talkStatus({ room: openRoom({ guests: [ada] }) }), talkShow())
+    const section = container.querySelector<HTMLElement>('[data-testid="show-stage-screens"]')
+    expect(section?.textContent).toContain('Nobody is sharing a screen.')
+    expect(section?.textContent).toContain('allow it on their row')
+    expect(section?.querySelector('[data-testid="show-stage-share"]')).not.toBeNull()
+    expect(screens()).toHaveLength(0)
+  })
+
+  it("allows a guest's screen share from their row, and keeps it out of the ⋯ menu", async () => {
+    const show = talkShow()
+    await mount(talkStatus({ room: openRoom({ guests: [ada, grace] }) }), show)
+    const share = (identity: string): HTMLButtonElement =>
+      container.querySelector<HTMLButtonElement>(
+        `[data-testid="show-stage-strip-row"][data-stage-identity="${identity}"] [data-testid="person-screen-share"]`
+      ) as HTMLButtonElement
+    expect(share('g_ada').dataset.screenShare).toBe('off')
+    expect(share('g_grace').dataset.screenShare).toBe('allowed')
+    await act(async () => share('g_ada').click())
+    await act(async () => share('g_grace').click())
+    expect(show.actOnGuest).toHaveBeenCalledWith('g_ada', 'allow-screen-share', undefined)
+    expect(show.actOnGuest).toHaveBeenCalledWith('g_grace', 'disallow-screen-share', undefined)
+  })
+
+  it('marks who is muted and who talks on the name plates', async () => {
+    await mount(
+      talkStatus({
+        room: openRoom({
+          guests: [ada, grace],
+          participants: [
+            ...(openRoom().participants ?? []),
+            guestParticipant(ada, { onStage: true }),
+            guestParticipant(grace, { onStage: true, muted: true })
+          ],
+          stage: { layout: 'side-by-side', onStage: [HOST, 'g_ada', 'g_grace'] }
+        })
+      }),
+      talkShow({
+        room: {
+          ...NO_TALK_SHOW.room,
+          people: [
+            {
+              identity: 'g_ada',
+              name: 'Ada',
+              video: null,
+              audio: null,
+              screen: null,
+              micMuted: false,
+              cameraOff: false,
+              quality: 'good',
+              speaking: true
+            }
+          ]
+        }
+      })
+    )
+    const plates = [...container.querySelectorAll<HTMLElement>('[data-testid="show-stage-plate"]')]
+    const plate = (name: string): HTMLElement =>
+      plates.find((element) => element.textContent === name) as HTMLElement
+    expect(plate('Ada').querySelector('[data-testid="show-stage-plate-talking"]')).not.toBeNull()
+    expect(plate('Grace').querySelector('[data-testid="show-stage-plate-muted"]')).not.toBeNull()
+    expect(plate('You').querySelector('[role="img"]')).toBeNull()
+  })
+
+  it('shows what the room sends as short facts, with the whole sentence kept', async () => {
+    const output = {
+      orientation: 'horizontal' as const,
+      width: 1920,
+      height: 1080,
+      fps: 30,
+      videoKbps: 6000,
+      audioKbps: 160,
+      pictureFps: 30,
+      differences: []
+    }
+    await mount(
+      talkStatus({
+        show: {
+          id: 'sh_talk',
+          nodeId: 'livekit',
+          resumable: false,
+          outputProfile: {
+            version: 1,
+            requested: [output],
+            effective: [output],
+            qualification: 'phase0-1080p30-picture',
+            higherProfilesQualified: false,
+            pricePerHour: null,
+            maxProgramEgresses: 2
+          }
+        },
+        room: openRoom()
+      }),
+      talkShow()
+    )
+    const profile = container.querySelector<HTMLElement>(
+      '[data-testid="show-stage-output-profile"]'
+    )
+    expect(profile?.querySelector('[data-slot="badge"]')?.textContent).toBe(
+      '1920×1080 · 30 fps · 6 Mbps'
+    )
+    expect(profile?.textContent).toContain('One cloud output')
   })
 })
 

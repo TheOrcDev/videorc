@@ -15,6 +15,7 @@ import { Input } from '@/components/ui/input'
 import type { CloudGuestAction } from '@/lib/backend'
 import {
   banGuestCopy,
+  guestScreenShare,
   GUEST_NAME_MAX_CHARS,
   NEW_LINK_AFTER_BAN,
   removeGuestCopy,
@@ -25,9 +26,10 @@ import {
 import type { TalkShowContextValue } from '@/lib/talk-show-context'
 import { toast } from '@/lib/toast'
 
-// One moderation kit for a guest (plan 224 D5, D14), shared by Destinations →
-// Guests (C-G2) and the Show stage's backstage strip (C-G3): Rename…, the
-// host's mute hold, screen share per guest, Remove and Ban. Remove and Ban ask
+// One moderation kit for a guest (plan 224 D5, D14), shared by the Guests page
+// (C-G2) and the Show stage's lists (C-G3): the host's mute hold and screen
+// share per guest, which a row shows as its own controls (plan 252), and the
+// ⋯ menu's Rename…, Remove and Ban. Remove and Ban ask
 // first (a destructive action asks or can be undone); a Ban rotates the link,
 // and the toast says so once. A failure is already the controller's toast.
 
@@ -45,6 +47,8 @@ export function useGuestModeration(talkShow: TalkShowContextValue): {
   moderationItems: (person: RoomPerson) => KebabMenuItem[]
   /** Mute holds the guest's mic at the server; Unmute lets them unmute, and says so. */
   toggleMute: (person: RoomPerson) => void
+  /** Lets a guest share their screen, or takes that back (and stops a share). */
+  toggleScreenShare: (person: RoomPerson) => void
   dialogs: ReactElement
 } {
   const [pending, setPending] = useState<Pending>(null)
@@ -76,48 +80,34 @@ export function useGuestModeration(talkShow: TalkShowContextValue): {
     [act]
   )
 
-  const moderationItems = useCallback(
-    (person: RoomPerson): KebabMenuItem[] => {
-      if (person.host || !person.guestId) return []
-      return [
-        {
-          id: 'rename',
-          label: 'Rename…',
-          group: 'guest',
-          onSelect: () => setPending({ kind: 'rename', person })
-        },
-        {
-          id: 'mute',
-          label: person.muted ? 'Let them unmute' : 'Mute',
-          group: 'guest',
-          onSelect: () => toggleMute(person)
-        },
-        {
-          id: 'screen-share',
-          label: person.screenShareAllowed ? 'Stop their screen share' : 'Allow screen share',
-          group: 'guest',
-          onSelect: () =>
-            void act(
-              person,
-              person.screenShareAllowed ? 'disallow-screen-share' : 'allow-screen-share'
-            )
-        },
-        {
-          id: 'remove',
-          label: 'Remove…',
-          destructive: true,
-          onSelect: () => setPending({ kind: 'remove', person })
-        },
-        {
-          id: 'ban',
-          label: 'Ban…',
-          destructive: true,
-          onSelect: () => setPending({ kind: 'ban', person })
-        }
-      ]
-    },
-    [act, toggleMute]
+  const toggleScreenShare = useCallback(
+    (person: RoomPerson) => void act(person, guestScreenShare(person).action),
+    [act]
   )
+
+  const moderationItems = useCallback((person: RoomPerson): KebabMenuItem[] => {
+    if (person.host || !person.guestId) return []
+    return [
+      {
+        id: 'rename',
+        label: 'Rename…',
+        group: 'guest',
+        onSelect: () => setPending({ kind: 'rename', person })
+      },
+      {
+        id: 'remove',
+        label: 'Remove…',
+        destructive: true,
+        onSelect: () => setPending({ kind: 'remove', person })
+      },
+      {
+        id: 'ban',
+        label: 'Ban…',
+        destructive: true,
+        onSelect: () => setPending({ kind: 'ban', person })
+      }
+    ]
+  }, [])
 
   const close = (): void => {
     setPending(null)
@@ -176,7 +166,7 @@ export function useGuestModeration(talkShow: TalkShowContextValue): {
     )
   }
 
-  return { moderationItems, toggleMute, dialogs }
+  return { moderationItems, toggleMute, toggleScreenShare, dialogs }
 }
 
 function RenameGuestDialog({
