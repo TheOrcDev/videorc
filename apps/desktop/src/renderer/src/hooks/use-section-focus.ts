@@ -27,16 +27,16 @@ export function focusSection(id: SectionFocusId, root: ParentNode = document): b
  */
 export function useSectionFocus(id: SectionFocusId): void {
   useEffect(() => {
-    let frame = 0
     const focus = (): void => {
       if (!takeSectionFocus(id)) return
-      frame = requestAnimationFrame(() => focusSection(id))
+      // The frame is never cancelled: a request is taken once, and React's
+      // StrictMode unmounts and mounts an effect again at once in
+      // development, which would drop the one scroll that was asked for
+      // (seen by eye, 2026-11-19). On a section that is gone it finds nothing.
+      requestAnimationFrame(() => focusSection(id))
     }
     focus()
     globalThis.addEventListener(SECTION_FOCUS_EVENT, focus)
-    return () => {
-      globalThis.removeEventListener(SECTION_FOCUS_EVENT, focus)
-      cancelAnimationFrame(frame)
-    }
+    return () => globalThis.removeEventListener(SECTION_FOCUS_EVENT, focus)
   }, [id])
 }

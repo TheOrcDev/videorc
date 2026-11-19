@@ -50,15 +50,27 @@ export function NotificationCenter({
   const listRef = useRef<HTMLDivElement | null>(null)
   const mounted = useRef(true)
 
+  // Closing marks everything read. React's StrictMode unmounts and mounts an
+  // effect again at once in development: a close that is followed by a mount
+  // in the same turn was never a close, or opening the list would mark it
+  // read before anyone had looked (seen by eye, 2026-11-19).
+  const closing = useRef<number | null>(null)
   useEffect(() => {
     mounted.current = true
+    if (closing.current !== null) {
+      window.clearTimeout(closing.current)
+      closing.current = null
+    }
     source.setListOpen(true)
     const timer = window.setInterval(() => setNowMs(Date.now()), 1000)
     return () => {
       mounted.current = false
       window.clearInterval(timer)
-      source.setListOpen(false)
-      source.markAllRead()
+      closing.current = window.setTimeout(() => {
+        closing.current = null
+        source.setListOpen(false)
+        source.markAllRead()
+      }, 0)
     }
   }, [source])
 

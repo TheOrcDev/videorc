@@ -1,5 +1,5 @@
 // @vitest-environment happy-dom
-import { act, createElement } from 'react'
+import { act, createElement, StrictMode } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -223,6 +223,30 @@ describe('NotificationCenter (plan 250, "The dropdown")', () => {
     expect(door.show).toHaveBeenCalledTimes(1)
     expect(store.count().unread).toBe(2)
     await act(async () => root.render(null))
+    // The close lands a turn later (see the StrictMode test below).
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 5)))
     expect(store.count()).toEqual({ unread: 0, urgent: 1, tone: 'urgent' })
+  })
+
+  // Seen by eye in the dev app: StrictMode runs an effect's cleanup at once
+  // after its first mount, and the list marked itself read as it opened.
+  it('opening the list under StrictMode leaves its entries unread until it closes', async () => {
+    store.publish({ key: 'a', kind: kind('problem'), title: 'A' })
+    store.publish({ key: 'saved', kind: kind('finished'), title: 'Recording saved' })
+    await act(async () => {
+      root.render(
+        createElement(
+          StrictMode,
+          null,
+          createElement(NotificationCenter, { source: store, onClose })
+        )
+      )
+    })
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 5)))
+    expect(store.count().unread).toBe(2)
+    expect(container.querySelectorAll('[data-notification-unread]')).toHaveLength(2)
+    await act(async () => root.render(null))
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 5)))
+    expect(store.count().unread).toBe(0)
   })
 })

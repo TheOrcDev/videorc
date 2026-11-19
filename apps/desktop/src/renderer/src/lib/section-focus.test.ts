@@ -1,5 +1,5 @@
 // @vitest-environment happy-dom
-import { act, createElement, type ReactElement } from 'react'
+import { act, createElement, StrictMode, type ReactElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -31,11 +31,11 @@ describe('section focus (plan 250 S4)', () => {
 
   beforeEach(() => {
     vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
-    vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
-      callback(0)
-      return 1
-    })
-    vi.stubGlobal('cancelAnimationFrame', () => {})
+    // A real frame: later, and cancellable.
+    vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) =>
+      window.setTimeout(() => callback(0), 0)
+    )
+    vi.stubGlobal('cancelAnimationFrame', (id: number) => window.clearTimeout(id))
     scrolled.mockClear()
     Element.prototype.scrollIntoView = scrolled
     // Nothing left over from another test.
@@ -63,26 +63,45 @@ describe('section focus (plan 250 S4)', () => {
   it('a section that mounts takes the request: it scrolls into view and focuses its first control', async () => {
     requestSectionFocus('output-clips')
     await act(async () => root.render(createElement(Section, { id: 'output-clips' })))
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 5)))
     expect(scrolled).toHaveBeenCalledTimes(1)
     expect(scrolled).toHaveBeenCalledWith({ behavior: 'auto', block: 'start' })
+    expect(document.activeElement).toBe(container.querySelector('[data-first]'))
+  })
+
+  // Seen by eye in the dev app: StrictMode ran the effect's cleanup at once,
+  // and the one scroll that was asked for was cancelled.
+  it('still scrolls once under StrictMode', async () => {
+    requestSectionFocus('output-clips')
+    await act(async () =>
+      root.render(createElement(StrictMode, null, createElement(Section, { id: 'output-clips' })))
+    )
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 5)))
+    expect(scrolled).toHaveBeenCalledTimes(1)
     expect(document.activeElement).toBe(container.querySelector('[data-first]'))
   })
 
   it('a second mount does not scroll again', async () => {
     requestSectionFocus('output-clips')
     await act(async () => root.render(createElement(Section, { id: 'output-clips' })))
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 5)))
+    expect(scrolled).toHaveBeenCalledTimes(1)
     await act(async () => root.render(null))
     await act(async () => root.render(createElement(Section, { id: 'output-clips' })))
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 5)))
     expect(scrolled).toHaveBeenCalledTimes(1)
   })
 
   it('a page that is already open answers the request, and only its own', async () => {
     await act(async () => root.render(createElement(Section, { id: 'output-clips' })))
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 5)))
     expect(scrolled).not.toHaveBeenCalled()
     await act(async () => requestSectionFocus('output-recordings'))
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 5)))
     expect(scrolled).not.toHaveBeenCalled()
     takeSectionFocus('output-recordings')
     await act(async () => requestSectionFocus('output-clips'))
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 5)))
     expect(scrolled).toHaveBeenCalledTimes(1)
   })
 })

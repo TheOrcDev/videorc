@@ -69,6 +69,26 @@ describe('preload API policy', () => {
     }
   })
 
+  // Plan 250 S8. Found by eye: without these the Stream Manager's bell
+  // stayed at zero, because its preload held none of the relay's methods.
+  it('gives the Stream Manager the notification list to read and a press to ask, never a push', () => {
+    const comments = apiForRendererRole(fakeApi, 'comments')
+    for (const key of [
+      'getNotifications',
+      'onNotifications',
+      'onNotificationPopUp',
+      'notificationActFromCommentsWindow'
+    ]) {
+      expect(comments).toHaveProperty(key)
+    }
+    for (const key of ['pushNotifications', 'pushNotificationPopUp', 'onNotificationActRequest']) {
+      expect(comments).not.toHaveProperty(key)
+    }
+    for (const role of ['notes', 'captions'] as const) {
+      expect(apiForRendererRole(fakeApi, role)).not.toHaveProperty('getNotifications')
+    }
+  })
+
   it('gives the Stream Manager the banner list to read and a show or hide to ask, never a push', () => {
     const comments = apiForRendererRole(fakeApi, 'comments')
     expect(comments).toHaveProperty('getCommentsBanners')
