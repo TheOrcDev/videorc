@@ -69,6 +69,7 @@ import {
   layoutReasonsLine,
   outputProfileChips,
   roomLimits,
+  liveRoomQuality,
   roomPeople,
   roomScreens,
   selectedLayout,
@@ -134,7 +135,12 @@ const cqw = (px: number): string => `${(px / STAGE_CANVAS.width) * 100}cqw`
 export default function ShowStage(): ReactElement {
   const { cloudStatus, talkShow } = useStudioCloud()
   const room = cloudStatus?.room
-  const people = roomPeople(room, talkShow.hostIdentity)
+  const people = roomPeople(
+    room,
+    talkShow.hostIdentity,
+    // Plan 253 S4: a managed show's dot reads LiveKit's own quality.
+    isManagedShow(cloudStatus) ? liveRoomQuality(talkShow.room) : undefined
+  )
   const limits = roomLimits(cloudStatus)
   const requests = room?.requests ?? []
   const connected = talkShow.room.state === 'connected'

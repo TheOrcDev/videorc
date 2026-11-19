@@ -374,12 +374,36 @@ export function guestScreenShare(
 const RUNNER_PREFIX = 'runner:'
 
 /**
+ * Plan 253 S4 (D4): each person's connection as the host's own room client
+ * reads it from LiveKit. On a managed show the web's `quality` is a constant
+ * ("good": LiveKit's server does not report it), so the row's dot reads
+ * this instead. Undefined: this client has no reading of them (it is not
+ * connected, or does not see them yet), and the state's value stands.
+ */
+export type LiveRoomQuality = (identity: string, host: boolean) => CloudRoomQuality | undefined
+
+/** The renderer's own reading, from its room snapshot. */
+export function liveRoomQuality(room: {
+  state: string
+  people: readonly { identity: string; quality: CloudRoomQuality }[]
+  local: { quality?: CloudRoomQuality }
+}): LiveRoomQuality {
+  return (identity, host) => {
+    if (room.state !== 'connected') return undefined
+    if (host) return room.local.quality
+    return room.people.find((person) => person.identity === identity)?.quality
+  }
+}
+
+/**
  * Everyone in the room, the host first, then the stage in its order, then
  * backstage in the order they came in. The runner is never a person.
+ * `live` (managed shows only) replaces the state's connection quality.
  */
 export function roomPeople(
   room: CloudRoomStatus | undefined,
-  hostIdentity: string | null
+  hostIdentity: string | null,
+  live?: LiveRoomQuality
 ): RoomPerson[] {
   if (!room || room.phase === 'closed') return []
   const participants = (room.participants ?? []).filter(
@@ -398,7 +422,7 @@ export function roomPeople(
       name: 'You',
       host: true,
       onStage: onStage.includes(host),
-      quality: hostParticipant?.quality ?? null,
+      quality: live?.(host, true) ?? hostParticipant?.quality ?? null,
       muted: hostParticipant?.muted ?? false,
       mic: guestMic(false, hostParticipant),
       screenShareAllowed: true,
@@ -417,7 +441,7 @@ export function roomPeople(
       name: participant?.name || guest.name,
       host: false,
       onStage: onStage.includes(guest.guestId),
-      quality: participant?.quality ?? null,
+      quality: live?.(guest.guestId, false) ?? participant?.quality ?? null,
       muted: guest.muted,
       mic: guestMic(guest.muted, participant),
       screenShareAllowed: guest.screenShareAllowed,
@@ -435,7 +459,7 @@ export function roomPeople(
       name: participant.name,
       host: false,
       onStage: onStage.includes(participant.identity),
-      quality: participant.quality,
+      quality: live?.(participant.identity, false) ?? participant.quality,
       muted: participant.muted,
       mic: guestMic(false, participant),
       screenShareAllowed: false,

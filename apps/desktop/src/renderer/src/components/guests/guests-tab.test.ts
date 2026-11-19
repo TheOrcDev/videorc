@@ -15,7 +15,11 @@ import {
   openRoom,
   talkStatus
 } from '@/lib/guests-room-fixtures'
-import { NO_TALK_SHOW, type TalkShowContextValue } from '@/lib/talk-show-context'
+import {
+  IDLE_TALK_SHOW_SNAPSHOT,
+  NO_TALK_SHOW,
+  type TalkShowContextValue
+} from '@/lib/talk-show-context'
 
 import GuestsTab from './guests-tab'
 
@@ -129,6 +133,62 @@ describe('Destinations → Guests (C-G2)', () => {
     expect(page).toMatch(/aria-label="On stage"/)
     expect(page).toMatch(/aria-label="Backstage"/)
     expect(page).toMatch(/data-testid="guests-room-counts"[^]*1 on stage[^]*1 backstage/)
+  })
+
+  // Plan 253 S4 (D4): on a managed show the web's `quality` is a constant
+  // "good", so the dot reads the room client's own LiveKit quality.
+  it("lights a managed show's connection dot from the room client, amber on poor", () => {
+    const room = openRoom({
+      guests: [ada, grace],
+      participants: [
+        ...(openRoom().participants ?? []),
+        guestParticipant(ada, { quality: 'good' }),
+        guestParticipant(grace, { quality: 'good' })
+      ]
+    })
+    const person = (identity: string, quality: 'good' | 'poor') => ({
+      identity,
+      name: identity,
+      video: null,
+      audio: null,
+      screen: null,
+      micMuted: false,
+      cameraOff: false,
+      quality,
+      speaking: false
+    })
+    const live = talkShow({
+      room: {
+        ...IDLE_TALK_SHOW_SNAPSHOT,
+        state: 'connected',
+        identity: HOST,
+        people: [person('g_ada', 'poor'), person('g_grace', 'good')],
+        local: { ...IDLE_TALK_SHOW_SNAPSHOT.local, quality: 'good' }
+      }
+    })
+    const render = (status: CloudStatus): string => {
+      studio.cloud.cloudStatus = status
+      studio.cloud.talkShow = live
+      return renderToStaticMarkup(createElement(TooltipProvider, null, createElement(GuestsTab)))
+    }
+    const dots = (page: string): string[] =>
+      [
+        ...page.matchAll(/data-testid="person-connection"[^>]*>\s*<span[^>]*data-tone="([a-z]+)"/g)
+      ].map((match) => match[1]!)
+    const managedShow = {
+      id: 'sh_talk',
+      nodeId: 'livekit',
+      resumable: false,
+      kind: 'talk' as const
+    }
+    const managed = render(talkStatus({ show: managedShow, room }))
+    // One dot, Ada's, and it is amber. Everyone fine shows none.
+    expect(dots(managed)).toEqual(['warn'])
+    expect(managed).toContain('Weak connection')
+    // A node show's runner reports quality itself: the state's value stands.
+    const node = render(talkStatus({ show: { ...managedShow, nodeId: 'eu-hel-1' }, room }))
+    expect(dots(node)).toEqual([])
+    expect(node).not.toContain('Weak connection')
   })
 
   // Live show 2026-11-19: Unmute only lets go (D14). The list tells the

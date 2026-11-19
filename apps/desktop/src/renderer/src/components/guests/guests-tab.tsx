@@ -60,6 +60,7 @@ import {
   roomIsFull,
   roomLimits,
   roomLimitsLine,
+  liveRoomQuality,
   roomPeople,
   roomPhaseLabel,
   type RoomPerson
@@ -100,7 +101,12 @@ export default function GuestsTab(): ReactElement {
   const disabled = offline || locked || sessionLocked || (!roomOpen && !!outputPlan.problem)
   const limits = roomLimits(cloudStatus)
   const limitsLine = roomLimitsLine(limits)
-  const people = roomPeople(room, talkShow.hostIdentity)
+  const people = roomPeople(
+    room,
+    talkShow.hostIdentity,
+    // Plan 253 S4: a managed show's dot reads LiveKit's own quality.
+    isManagedShow(cloudStatus) ? liveRoomQuality(talkShow.room) : undefined
+  )
   const requests = room?.requests ?? []
   const full = roomOpen && roomIsFull(people, limits)
   const roomPending = opening || phase === 'opening'

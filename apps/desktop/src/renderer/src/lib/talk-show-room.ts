@@ -68,6 +68,14 @@ import {
   type ScreenPrivacyPublication
 } from './room-screen-privacy'
 import { frostedStillUrl, keepFrostSample } from './frost-still'
+import { RoomLatencyHost } from './room-latency-host'
+import {
+  LATENCY_TOPIC,
+  type ConversationDelay,
+  type NetStatsTrack,
+  type NetTrack,
+  type ProgramDelay
+} from '../../../shared/room-latency'
 // The host in the room (plan 224 C-G4, D6): `livekit-client` publishes the
 // Sources camera and microphone and, on request, a screen picked through
 // main's `desktopCapturer`; it subscribes to everyone in the room (the stage
@@ -151,6 +159,11 @@ export type TalkShowPerson = {
   cameraOff: boolean
   quality: CloudRoomQuality
   speaking: boolean
+  /**
+   * Plan 253 S4: this guest's conversation delay on a managed show, from
+   * both ends' reports. Absent with no report yet, and once one is 25 s old.
+   */
+  latency?: ConversationDelay
 }
 
 export type TalkShowLocalMedia = {
@@ -161,6 +174,10 @@ export type TalkShowLocalMedia = {
   cameraOff: boolean
   /** Why the camera or the mic did not open, one sentence; null when both did. */
   problem: string | null
+  /** Plan 253 S4: LiveKit's own quality of the host's connection. */
+  quality?: CloudRoomQuality
+  /** Plan 253 S4: the host's round trip to the room, while it is measured. */
+  rttMs?: number
   /**
    * Plan 249 S13a: the camera-frame test publication, bound to the SFU's own
    * participant/track SIDs from the publish result. Absent otherwise.
@@ -199,6 +216,11 @@ export type TalkShowRoomSnapshot = {
   avatar?: RoomAvatarStatus
   /** Plan 249 S12: the scene the program draws, and each output's rendered revision. */
   scene?: RoomSceneStatus
+  /**
+   * Plan 253 S4: the program delay on a managed show (the host's camera to
+   * the program page having drawn it). Absent without the page's report.
+   */
+  program?: ProgramDelay
   screenPrivacy?: ScreenPrivacyPublication & {
     sourceBlockedAt: number | null
     status: 'visible' | 'hiding' | 'observed' | 'unconfirmed' | 'paused'
@@ -256,6 +278,11 @@ export type TalkShowRoomDeps = {
   microphoneChoice?: RoomMicrophoneChoice
   /** Where remote audio plays (a hidden container the hook owns). */
   audioHost: () => HTMLElement | null
+  /**
+   * Plan 253 S4 (D10): true on a managed show. Only then is latency
+   * measured; a node show's room samples nothing and shows no number.
+   */
+  measureLatency?: () => boolean
   /**
    * Plan 243 C5: the device on air, from the latest `cloud.state`, so a
    * second host connection that drops this one reads as taken over.
@@ -432,6 +459,8 @@ export class TalkShowRoomClient {
   /** Plan 249 S5: the avatar's motion stream, per bound room. */
   #motion: RoomAvatarMotion | null = null
   #motionTimer: ReturnType<typeof setInterval> | null = null
+  /** Plan 253 S4: this room's latency, joined from three reports. */
+  readonly #latency: RoomLatencyHost
   /** What a new producer starts from (a re-bind keeps state, not history). */
   #motionSeed: { settings: AnimatorSettings; inputs: MotionInputs } | null = null
   /** Why the worn avatar shows still on cloud outputs (its atlas was refused). */
@@ -479,6 +508,14 @@ export class TalkShowRoomClient {
       deps.initiallyCameraOff === true ||
       (!deps.cameraName && !deps.frameTestSource && !deps.processedCamera)
     this.#audio = new RemoteAudioAttachments<HTMLMediaElement>(() => deps.audioHost())
+    this.#latency = new RoomLatencyHost({
+      changed: () => this.#publish(),
+      clearTimer: (handle) => window.clearTimeout(handle as number),
+      enabled: () => deps.measureLatency?.() === true,
+      now: () => performance.now(),
+      setInterval: (run, everyMs) => window.setInterval(run, everyMs),
+      setTimeout: (run, afterMs) => window.setTimeout(run, afterMs)
+    })
   }
 
   get snapshot(): TalkShowRoomSnapshot {
@@ -516,6 +553,7 @@ export class TalkShowRoomClient {
   /** Leave: the local tracks stop first (D13 for guests; the same here). */
   async disconnect(): Promise<void> {
     this.#closed = true
+    this.#latency.stop()
     this.#aux?.close()
     this.#aux = null
     this.#graphics?.close()
@@ -1290,7 +1328,18 @@ export class TalkShowRoomClient {
     else this.#stopMotion()
     this.#avatar.guests(this.#avatarGuests)
     this.#bindScene(room)
+    this.#latency.start({
+      hostIdentity: () => (this.#owns(room) ? this.#snapshot.identity : null),
+      present: (identity) => this.#owns(room) && room.remoteParticipants.has(identity),
+      tracks: () => this.#latencyTracks(room)
+    })
     room
+      .on(RoomEvent.DataReceived, (payload, participant, _kind, topic) => {
+        // Plan 253 S4: latency reports, relayed by the server only. A
+        // participant cannot send one, whatever topic it names.
+        if (participant || topic !== LATENCY_TOPIC || !this.#owns(room)) return
+        this.#latency.received(payload)
+      })
       .on(RoomEvent.DataReceived, (payload, participant, _kind, topic) => {
         // Only server-relayed observations. A participant cannot impersonate this API.
         if (
@@ -1327,6 +1376,7 @@ export class TalkShowRoomClient {
         this.#publish()
       })
       .on(RoomEvent.ParticipantDisconnected, (participant) => {
+        this.#latency.left(participant.identity)
         if (this.#privacy) {
           delete this.#privacy.observations[participant.identity]
           if (isRecorderIdentity(participant.identity)) {
@@ -1387,6 +1437,7 @@ export class TalkShowRoomClient {
       })
       .on(RoomEvent.Reconnected, () => {
         if (!this.#owns(room)) return
+        this.#latency.reconnected()
         if (this.#nativeCamera() && !this.#cameraOff && !this.#camera) {
           const generation = this.#frameGeneration
           void this.#frameRetiring.then(async () => {
@@ -1416,6 +1467,8 @@ export class TalkShowRoomClient {
       })
       .on(RoomEvent.Disconnected, (reason?: DisconnectReason) => {
         if (!this.#owns(room) || reason === DisconnectReason.CLIENT_INITIATED) return
+        // Out of the room: no sample, and no number from a room that is gone.
+        this.#latency.stop()
         if (
           reason === DisconnectReason.DUPLICATE_IDENTITY ||
           reason === DisconnectReason.PARTICIPANT_REMOVED ||
@@ -2040,6 +2093,36 @@ export class TalkShowRoomClient {
     }
   }
 
+  /**
+   * Plan 253 S4: the tracks the latency sampler reads. Each person's camera
+   * and microphone as this client receives them, and the host's own. A
+   * shared screen, the runner and LiveKit's recorder are not conversation.
+   */
+  #latencyTracks(room: Room): NetTrack[] {
+    const tracks: NetTrack[] = []
+    const kindOf = (source: Track.Source): 'audio' | 'video' | null =>
+      source === Track.Source.Microphone ? 'audio' : source === Track.Source.Camera ? 'video' : null
+    for (const participant of room.remoteParticipants.values()) {
+      if (isRecorderIdentity(participant.identity) || isRunnerIdentity(participant.identity))
+        continue
+      for (const publication of participant.trackPublications.values()) {
+        const kind = kindOf(publication.source)
+        if (!kind || !publication.track || !publication.isSubscribed) continue
+        tracks.push({
+          direction: 'in',
+          identity: participant.identity,
+          kind,
+          track: publication.track as NetStatsTrack
+        })
+      }
+    }
+    if (this.#camera)
+      tracks.push({ direction: 'out', kind: 'video', track: this.#camera as NetStatsTrack })
+    if (this.#microphone)
+      tracks.push({ direction: 'out', kind: 'audio', track: this.#microphone as NetStatsTrack })
+    return tracks
+  }
+
   #clearTimers(): void {
     if (this.#reconnectTimer !== null) {
       window.clearTimeout(this.#reconnectTimer)
@@ -2064,6 +2147,7 @@ export class TalkShowRoomClient {
     if (this.#closed) return
     const room = this.#room
     const people: TalkShowPerson[] = []
+    const latency = this.#latency.current
     let monitorVideo: MediaStreamTrack | null = null
     let monitorAudio: MediaStreamTrack | null = null
     if (room) {
@@ -2098,7 +2182,10 @@ export class TalkShowRoomClient {
           micMuted,
           cameraOff,
           quality: qualityOf(participant.connectionQuality),
-          speaking: this.#speaking.has(participant.identity)
+          speaking: this.#speaking.has(participant.identity),
+          ...(latency.people[participant.identity]
+            ? { latency: latency.people[participant.identity] }
+            : {})
         })
       }
     }
@@ -2115,13 +2202,18 @@ export class TalkShowRoomClient {
         micMuted: this.#microphone?.isMuted ?? this.#micMuted,
         cameraOff: this.#cameraOff,
         problem: this.#problem,
+        ...(room && this.#snapshot.state === 'connected'
+          ? { quality: qualityOf(room.localParticipant.connectionQuality) }
+          : {}),
+        ...(latency.hostRttMs === undefined ? {} : { rttMs: latency.hostRttMs }),
         ...(this.#cameraFrame && this.#frameSource ? { cameraFrame: this.#cameraFrame } : {}),
         ...(this.#screenRaw && this.#screenSourceId
           ? { screenSourceId: this.#screenSourceId }
           : {}),
         ...(this.#screenRaw && this.#screenStill ? { screenStill: this.#screenStill } : {})
       },
-      monitor: { enabled: this.#monitorEnabled, video: monitorVideo, audio: monitorAudio }
+      monitor: { enabled: this.#monitorEnabled, video: monitorVideo, audio: monitorAudio },
+      program: latency.program
     }
     this.#deps.onSnapshot(this.#snapshot)
   }
