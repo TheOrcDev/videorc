@@ -1,7 +1,12 @@
 import { describe, expect, it } from 'vitest'
 
-import type { CloudStage } from '@/lib/backend'
-import { NO_TALK_SHOW, ROOM_JOIN_ERROR_ACTION, stageWith } from '@/hooks/use-talk-show-room'
+import type { CloudRoomGuest, CloudRoomParticipant, CloudStage } from '@/lib/backend'
+import {
+  NO_TALK_SHOW,
+  ROOM_JOIN_ERROR_ACTION,
+  stageInRoom,
+  stageWith
+} from '@/hooks/use-talk-show-room'
 import { userErrorMessage } from '@/lib/user-error'
 
 const HOST = 'host:sh_talk'
@@ -59,6 +64,79 @@ describe('stageWith', () => {
     expect(NO_TALK_SHOW.previewReplaced).toBe(false)
     await expect(NO_TALK_SHOW.openRoom({})).resolves.toBeUndefined()
     await expect(NO_TALK_SHOW.listDisplaySources()).resolves.toEqual([])
+  })
+})
+
+// The live show of 2026-11-19: a guest on stage left, asked again, and was let
+// in under a new identity. The old one stayed on the stage, so videorc.com
+// refused every stage after (422 invalid-stage) and Bring on never worked.
+describe('stageInRoom', () => {
+  const guest = (guestId: string): CloudRoomGuest => ({
+    guestId,
+    name: 'Ada',
+    joinedAt: '2026-11-19T14:49:50Z',
+    muted: false,
+    screenShareAllowed: false
+  })
+  const participant = (identity: string): CloudRoomParticipant => ({
+    identity,
+    name: 'Ada',
+    role: identity.startsWith('host:') ? 'host' : 'guest',
+    onStage: false,
+    video: true,
+    audio: true,
+    muted: false,
+    screen: false,
+    quality: 'good',
+    sinceMs: 0,
+    away: false
+  })
+
+  it('drops a guest who left, so their return under a new identity can be brought on', () => {
+    const stage: CloudStage = { layout: 'side-by-side', onStage: [HOST, 'g_old'] }
+    const room = {
+      guests: [guest('g_new')],
+      participants: [participant(HOST), participant('g_new')]
+    }
+
+    const next = stageInRoom(stageWith(stage, 'g_new', true, HOST), room, HOST)
+    expect(next.onStage).toEqual([HOST, 'g_new'])
+    expect(next.layout).toBe('side-by-side')
+  })
+
+  it('clears the spotlight and the screen of a guest who left', () => {
+    const stage: CloudStage = {
+      layout: 'screen-people',
+      onStage: [HOST, 'g_old'],
+      spotlight: 'g_old',
+      screen: 'g_old'
+    }
+    const next = stageInRoom(stage, { guests: [], participants: [participant(HOST)] }, HOST)
+    expect(next.onStage).toEqual([HOST])
+    expect(next.spotlight).toBeUndefined()
+    expect(next.screen).toBeUndefined()
+  })
+
+  it('keeps a guest either list still has: one between connections, or not listed yet', () => {
+    const stage: CloudStage = { layout: 'side-by-side', onStage: [HOST, 'g_ada', 'g_bo'] }
+    // Ada is listed by videorc.com but out of LiveKit for a moment; Bo is in
+    // LiveKit before the guest list catches up.
+    const room = {
+      guests: [guest('g_ada')],
+      participants: [participant(HOST), participant('g_bo')]
+    }
+    expect(stageInRoom(stage, room, HOST)).toBe(stage)
+  })
+
+  it('always keeps the host, even between two connections or before the room is joined', () => {
+    const stage: CloudStage = { layout: 'solo', onStage: [HOST] }
+    expect(stageInRoom(stage, { guests: [], participants: [] }, HOST)).toBe(stage)
+    expect(stageInRoom(stage, { guests: [], participants: [] }, null)).toBe(stage)
+  })
+
+  it('drops nothing without a room status', () => {
+    const stage: CloudStage = { layout: 'side-by-side', onStage: [HOST, 'g_old'] }
+    expect(stageInRoom(stage, undefined, HOST)).toBe(stage)
   })
 })
 
