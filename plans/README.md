@@ -1,5 +1,22 @@
 # Implementation Plans
 
+- 2026-11-19: [Plan 253](253-latency-measurement.md), the owner's ask:
+  "we definitely need latency measuring so we can see how close we are with
+  other guests". PLANNED 2026-11-19, eleven slices, web first:
+  - Nothing measures latency today: no WebRTC stats are read, no command is
+    timed, and a managed show's connection dot is a constant `good`.
+  - Five numbers: conversation delay per guest (the headline), program
+    delay, output delay (a calibrated "about N s"), viewer delay (the
+    platform's, not known to us), and control delay.
+  - Passive: each end's own WebRTC stats, summed. Durations on the wire,
+    never timestamps, so no clock sync. Guests and the program page report
+    through the heartbeat and the beacon they already send, and the web
+    relays to the host as it does capability receipts. No new grant.
+  - Shown on each person's row, a chip on the Program monitor and a Stream
+    Manager stat; kept per show, in the stream report and for agents.
+  - Proven before it is shown: injected delay in the parity harness must
+    come back out, then a stopwatch on a real show.
+  - Managed shows only. Eleven Owner checks, each with a default.
 - 2026-11-19: [Plan 252](252-room-ui-redesign.md), the owner's ask: the
   room UI in the Studio was only text. The Show stage and the Guests page
   rebuilt in pictures: layout and screen cards, people in On stage and
