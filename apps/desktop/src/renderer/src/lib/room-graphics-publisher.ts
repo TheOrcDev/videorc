@@ -34,6 +34,29 @@ export function graphicsLayers(
       rect: outputRects?.[output] ?? layer.rect
     }))
 }
+/**
+ * What the room sends to its program pages (plan 249 S9, S15). With the
+ * room's Graphics switch on, everything. Off, only the layers whose own
+ * controls already put them on the stream: captions (Captions on) and the
+ * comment card (a Highlight, or the Sidekick's pick). The switch names
+ * banners, timers and the chat box; before S9 a managed show sent captions
+ * and cards through the room overlay path whatever it said, and S9 moved
+ * them behind it, so on 0.31.0 to 0.32.1 a managed show's captions and cards
+ * never reached the viewers while the desktop reported them on stream (the
+ * owner, 2026-11-19). HTML banners are banners: their placements go only
+ * with the switch on.
+ */
+export function roomGraphicsContent(
+  content: GraphicsContent | null,
+  graphicsEnabled: boolean
+): GraphicsContent | null {
+  if (!content || graphicsEnabled) return content
+  const own = (layers: GraphicsContent['h']) =>
+    layers.filter((layer) => layer.kind === 'caption' || layer.kind === 'highlight')
+  const h = own(content.h)
+  const v = own(content.v)
+  return h.length || v.length ? { h, v, unsupported: [] } : null
+}
 export type RoomGraphicsStatus = {
   enabled: boolean
   state: 'off' | 'preview' | 'waiting' | 'applied' | 'failed'

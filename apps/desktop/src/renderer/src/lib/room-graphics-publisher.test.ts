@@ -6,6 +6,7 @@ import {
   type GraphicsContent,
   graphicsLayers,
   RoomGraphicsPublisher,
+  roomGraphicsContent,
   type RoomGraphicsStatus
 } from './room-graphics-publisher'
 import { CAPABILITY_TOPIC } from './room-media-v2'
@@ -404,5 +405,45 @@ describe('kept static views for the next controller (plan 249 S24)', () => {
     })
     expect(h.accepted).toEqual([])
     h.publisher.close()
+  })
+})
+
+// The owner, 2026-11-19 (0.32.1): on a managed talk show the comment cards
+// and the captions never reached the viewers. Both ride this envelope, and
+// it sent nothing while the room's Graphics switch (banners, timers and the
+// chat box) was off, which it is in every new room.
+describe('what the room sends with its Graphics switch off', () => {
+  const layer = (kind: GraphicsLayer['kind'], id: string) => ({
+    id,
+    kind,
+    rect: { x: 0, y: 0, w: 0.5, h: 0.5 },
+    asset: { png: 'iVBORw0KGgo=', hash: 'a'.repeat(64), width: 1, height: 1 },
+    opacity: 1,
+    fade: null,
+    expiresAt: kind === 'banner' || kind === 'chat' ? null : 10_000,
+    stream: true,
+    recording: true
+  })
+  const content: GraphicsContent = {
+    h: [layer('banner', 'banner:b1'), layer('caption', 'caption'), layer('chat', 'chat')],
+    v: [layer('highlight', 'highlight'), layer('banner', 'banner:b1')],
+    unsupported: ['HTML graphics require the separately qualified dynamic transport.'],
+    html: { h: [], v: [] }
+  }
+
+  it('keeps everything with the switch on', () => {
+    expect(roomGraphicsContent(content, true)).toBe(content)
+    expect(roomGraphicsContent(null, true)).toBeNull()
+  })
+
+  it('sends only captions and the comment card with it off, and nothing else', () => {
+    const off = roomGraphicsContent(content, false)
+    expect(off?.h.map((l) => l.kind)).toEqual(['caption'])
+    expect(off?.v.map((l) => l.kind)).toEqual(['highlight'])
+    // A banner's refusal and the HTML placements speak for banners alone.
+    expect(off?.unsupported).toEqual([])
+    expect(off).not.toHaveProperty('html')
+    expect(roomGraphicsContent({ ...content, h: [content.h[0]!], v: [] }, false)).toBeNull()
+    expect(roomGraphicsContent(null, false)).toBeNull()
   })
 })

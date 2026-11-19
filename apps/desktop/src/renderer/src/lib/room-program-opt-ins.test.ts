@@ -27,6 +27,10 @@ describe('room program opt-ins', () => {
     expect(roomGraphicsDescription({ enabled: false })).toBe(
       'Banners, timers and the chat box. Not on the stream.'
     )
+    // Captions and cards go out with the switch off; that is not the banners.
+    expect(roomGraphicsDescription({ ...applied('stream'), enabled: false })).toBe(
+      'Banners, timers and the chat box. Not on the stream.'
+    )
   })
 
   it('names only the outputs that applied it', () => {
