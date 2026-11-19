@@ -10,7 +10,6 @@ import {
   sceneCaptureIsBorrowed,
   sceneDisplayRefreshed,
   sceneDrawsScreen,
-  sceneEditAutosave,
   sceneFromSaved,
   sceneKeepsCapture,
   sceneLegLayouts,
@@ -20,7 +19,7 @@ import {
   verticalLegBorrowsScreen
 } from './scene-studio'
 import { firstSceneWithLayout, type Scene } from './scenes'
-import { canDeleteScene } from './scenes-store'
+import { canDeleteScene, sceneEditAutosave } from './scenes-store'
 import { defaultScenes } from './scenes-migration'
 
 const NOW = '2026-11-15T12:00:00.000Z'

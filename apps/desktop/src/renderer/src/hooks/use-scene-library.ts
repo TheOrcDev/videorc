@@ -1,10 +1,9 @@
 import { useCallback, useMemo, useRef } from 'react'
-import { useScenes } from '@/hooks/use-scenes'
+import { sceneAutosave, useScenes } from '@/hooks/use-scenes'
 import type { AppPreviewsParams, AppPreviewsResult, Device } from '@/lib/backend'
 import type { SavedScene, SceneAudio, SceneOrientation, SceneVisual } from '@/lib/scene-presets'
 import {
   sceneDisplayRefreshed,
-  sceneEditAutosave,
   sceneFromSaved,
   sceneWithShows,
   savedSceneView,
@@ -86,7 +85,7 @@ export function useSceneLibrary(orientation: SceneOrientation, camera: SceneCame
       sceneId: string | null,
       visual: SceneVisual
     ): boolean => {
-      const scene = sceneEditAutosave({
+      const scene = sceneAutosave({
         previousSceneId: previous.sceneId,
         previousShows: previous.shows,
         sceneId,

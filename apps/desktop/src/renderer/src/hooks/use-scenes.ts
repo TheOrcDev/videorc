@@ -47,6 +47,13 @@ export function sceneDeletion(
   return scenesStore().canDeleteScene(input)
 }
 
+/** D11's autosave rule (`sceneEditAutosave`), once the library is prepared. */
+export function sceneAutosave(
+  input: Parameters<typeof import('@/lib/scenes-store').sceneEditAutosave>[0]
+): ReturnType<typeof import('@/lib/scenes-store').sceneEditAutosave> {
+  return scenesStore().sceneEditAutosave(input)
+}
+
 /** Whether the stored library can be read as it is, with no migration. */
 export function scenesStored(): boolean {
   return store !== null && store.hydrateScenes(read(SCENES_KEY)).library !== null

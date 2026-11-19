@@ -8,10 +8,13 @@ import {
   type SceneVisual
 } from './scene-presets'
 import { layoutPresetOrientation } from './capture'
+import { canonicalJson } from './scene-visibility-identity'
 import {
   DELETE_ON_STREAM_REASON,
   GOING_ON_STREAM_REASON,
   KEEP_ONE_SCENE_REASON,
+  sameShows,
+  showsFromSources,
   type MainDisplay,
   type Scene,
   type SceneLibrary,
@@ -200,5 +203,52 @@ export function displayShows(display: MainDisplay | null | undefined): SceneShow
     screenId: display?.id ?? '',
     ...(display?.name ? { screenName: display.name } : {}),
     ...(display?.displayUuid && display.id ? { screenUuid: display.displayUuid } : {})
+  }
+}
+
+/**
+ * The scene a confirmed commit writes, or null when it writes none (D11).
+ *
+ * - Only a commit made while the scene was already on stream writes: the
+ *   commit that puts a scene on stream is a switch, not an edit.
+ * - The look goes into the layout of the committed orientation; the other
+ *   orientation's layout stays.
+ * - The screen is written when it changed while the scene was on: a Screen
+ *   pick in Sources, in Studio, on the phone or by a remote (D2). An app's
+ *   front window changing is not a pick.
+ * - A capture kept running under a scene that shows no screen (D18) is never
+ *   its screen: Change screen… (D19) or a Screen pick decides that.
+ * - Audio never changes this way (D10).
+ */
+export function sceneEditAutosave(input: {
+  /** The scene on stream before this commit, and what the capture showed then. */
+  previousSceneId: string | null
+  previousShows: SceneShows | null
+  sceneId: string | null
+  scenes: readonly Scene[]
+  /** The committed working look and sources. */
+  visual: SceneVisual
+  now: string
+}): Scene | null {
+  const { sceneId, visual } = input
+  if (!sceneId || input.previousSceneId !== sceneId) return null
+  const scene = input.scenes.find((entry) => entry.id === sceneId)
+  if (!scene) return null
+  const orientation = layoutPresetOrientation(visual.layout.layoutPreset)
+  const working = showsFromSources(visual.sources)
+  const picked = input.previousShows !== null && !sameShows(input.previousShows, working)
+  const shows = picked ? working : scene.shows
+  if (
+    canonicalJson(scene.layouts[orientation]) === canonicalJson(visual.layout) &&
+    canonicalJson(scene.background) === canonicalJson(visual.background) &&
+    canonicalJson(scene.shows) === canonicalJson(shows)
+  )
+    return null
+  return {
+    ...scene,
+    shows,
+    layouts: { ...scene.layouts, [orientation]: visual.layout },
+    background: visual.background,
+    updatedAt: input.now
   }
 }
