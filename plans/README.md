@@ -4,6 +4,20 @@
   room UI in the Studio was only text. The Show stage and the Guests page
   rebuilt in pictures: layout and screen cards, people in On stage and
   Backstage with live pictures and icon controls. Built, in review.
+- 2026-11-19: [Plan 251](251-two-screens-layout.md), the owner's ask: two
+  guests' or the host's and a guest's screens side by side on a talk show,
+  with everyone's cameras in a row under them. BUILT 2026-11-19, in review:
+  - One optional field, `screens` (two identities, `screen` the first), and
+    no new layout id: every older desktop, program page, guest page and the
+    runner still reads the stage and shows one screen and the people.
+  - The program page draws `two-screens` when both screens are fresh, and
+    falls back to Screen + people, then Side by side. Both screens' audio is
+    in the program and the recording.
+  - A fifth layout card, Two screens, in plan 252's Show stage; its Screens
+    gallery puts up to two screens on stage.
+  - Managed shows only: a node show's runner draws one screen, and the
+    desktop refuses the second in words.
+  - Web first, then the desktop. The cloud talk-show smokes are owed.
 - 2026-11-18: [Plan 250](250-notification-center.md), the owner's ask:
   toasts are killing them during livestreams, so a notifications bell with
   an unread count, where each notification can be acted on or cleared.
