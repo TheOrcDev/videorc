@@ -92,7 +92,7 @@ import {
 import type { AppExitKind } from '@/lib/backend'
 import { useTheme } from 'next-themes'
 import { useSceneLibrary, type SceneLibraryActions } from '@/hooks/use-scene-library'
-import { prepareScenes, scenesStored } from '@/hooks/use-scenes'
+import { prepareScenes, sceneDeletion, scenesStored } from '@/hooks/use-scenes'
 import {
   cameraSources,
   captureSources,
@@ -108,7 +108,6 @@ import {
   verticalLegBorrowsScreen
 } from '@/lib/scene-studio'
 import {
-  canDeleteScene,
   firstSceneWithLayout,
   GOING_ON_STREAM_REASON,
   layoutShowsScreen,
@@ -12184,7 +12183,7 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
   const deleteSavedScene = useCallback(
     async (id: string): Promise<boolean> => {
       const sessionActive = isActiveRecordingState(recordingRef.current.state)
-      const verdict = canDeleteScene({
+      const verdict = sceneDeletion({
         scenes: storedScenes(),
         id,
         onStreamId: activeSavedSceneIdRef.current ?? '',

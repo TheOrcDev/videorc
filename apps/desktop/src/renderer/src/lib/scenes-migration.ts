@@ -25,13 +25,13 @@ import {
 } from './scene-presets'
 import { canonicalJson } from './scene-visibility-identity'
 import { normalizeAccelerator } from '../../../shared/accelerator'
+import { displayShows } from './scenes-store'
 import {
   SCENE_SLOT_ACTIONS,
   sceneSlotAccelerator,
   type SceneSlotPosition
 } from '../../../shared/global-shortcuts'
 import {
-  displayShows,
   layoutShowsScreen,
   sameShows,
   sceneLayout,
@@ -108,7 +108,7 @@ export function migrateToScenes(
   captureConfig: SceneMigrationConfig,
   globalShortcuts: GlobalShortcutsConfig | undefined,
   now: string = new Date().toISOString(),
-  platform: string | undefined = currentPlatform()
+  platform?: string
 ): { library: SceneLibrary; globalShortcuts: GlobalShortcutsConfig } {
   const saved = v1Library?.scenes ?? []
   const working =
@@ -411,6 +411,15 @@ export function defaultScenes(
   ).library.scenes
 }
 
+/** The platform the position keys default for (D5); unknown reads as not macOS. */
+function hostPlatform(): string | undefined {
+  try {
+    return currentPlatform()
+  } catch {
+    return undefined
+  }
+}
+
 function read(key: string): unknown {
   try {
     return loadJson<unknown>(key, null)
@@ -433,7 +442,9 @@ export function migrateStoredScenes(options: {
       options.readOnly ? null : hydrateSceneLibrary(read(SCENE_LIBRARY_KEY)).library,
       hydrateWorkingScene(read(WORKING_SCENE_KEY)),
       loadCaptureConfig(),
-      settings?.globalShortcuts
+      settings?.globalShortcuts,
+      undefined,
+      hostPlatform()
     )
   } catch {
     return migrateToScenes(null, null, defaultCaptureConfig, undefined)

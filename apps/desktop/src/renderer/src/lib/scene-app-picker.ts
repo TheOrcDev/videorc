@@ -7,7 +7,8 @@ import {
 } from './capture'
 import { plural } from './format'
 import { uniqueSceneName } from './scene-list'
-import { displayShows, layoutShowsScreen, sameShows, type Scene, type SceneShows } from './scenes'
+import { layoutShowsScreen, sameShows, type Scene, type SceneShows } from './scenes'
+import { displayShows } from './scenes-store'
 
 // Plan 231 D6: one picker for what a scene shows. Add scene… offers the open
 // apps (macOS: icon, a picture of the front window, "Chrome · 3 windows"),

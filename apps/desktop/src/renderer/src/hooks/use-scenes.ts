@@ -3,16 +3,7 @@ import type { GlobalShortcutsConfig } from '@/lib/backend'
 import { loadJson } from '@/lib/capture'
 import { movedScenes } from '@/lib/scene-order'
 import { sceneNameError } from '@/lib/scene-presets'
-import {
-  canDeleteScene,
-  hydrateScenes,
-  normalizeScene,
-  SCENES_KEY,
-  withMainDisplay,
-  type MainDisplay,
-  type Scene,
-  type SceneLibrary
-} from '@/lib/scenes'
+import { SCENES_KEY, type MainDisplay, type Scene, type SceneLibrary } from '@/lib/scenes'
 import { toast } from '@/lib/toast'
 
 type ScenesState = {
@@ -41,19 +32,36 @@ function read(key: string): unknown {
 /** The migration `prepareScenes` made for this launch, when the profile needed one. */
 let prepared: { library: SceneLibrary; globalShortcuts: GlobalShortcutsConfig } | null = null
 
+/** The library's reader (`lib/scenes-store`), loaded by `prepareScenes`. */
+let store: typeof import('@/lib/scenes-store') | null = null
+
+function scenesStore(): typeof import('@/lib/scenes-store') {
+  if (!store) throw new Error('The scene library was read before it was prepared.')
+  return store
+}
+
+/** D16's delete rule (`canDeleteScene`), once the library is prepared. */
+export function sceneDeletion(
+  input: Parameters<typeof import('@/lib/scenes-store').canDeleteScene>[0]
+): ReturnType<typeof import('@/lib/scenes-store').canDeleteScene> {
+  return scenesStore().canDeleteScene(input)
+}
+
 /** Whether the stored library can be read as it is, with no migration. */
 export function scenesStored(): boolean {
-  return hydrateScenes(read(SCENES_KEY)).library !== null
+  return store !== null && store.hydrateScenes(read(SCENES_KEY)).library !== null
 }
 
 /**
- * Before the Studio first renders: a profile with no usable scene library
- * gets one made from its v1 scenes and working setup (plan 231 D15). The
- * migration is its own chunk, loaded only on the launch that needs it, so
- * every later launch reads the stored library with no extra code.
+ * Before the Studio first renders: the library's reader is loaded (its own
+ * chunk, so the entry carries none of it), and a profile with no usable
+ * scene library gets one made from its v1 scenes and working setup (plan
+ * 231 D15). The migration is a chunk of its own too, loaded only on the
+ * launch that needs it.
  */
 export async function prepareScenes(): Promise<void> {
-  const stored = hydrateScenes(read(SCENES_KEY))
+  store ??= await import('@/lib/scenes-store')
+  const stored = store.hydrateScenes(read(SCENES_KEY))
   if (stored.library) return
   const { migrateStoredScenes } = await import('@/lib/scenes-migration')
   prepared = migrateStoredScenes({ readOnly: stored.readOnly })
@@ -66,7 +74,7 @@ export async function prepareScenes(): Promise<void> {
  * scenes are then today's setup, in memory, read-only.
  */
 export function loadScenes(): ScenesState {
-  const stored = hydrateScenes(read(SCENES_KEY))
+  const stored = scenesStore().hydrateScenes(read(SCENES_KEY))
   if (stored.library)
     return {
       library: stored.library,
@@ -148,7 +156,7 @@ export function useScenes() {
       const all = [...scenes]
       let normalized: Scene[]
       try {
-        normalized = added.map(normalizeScene)
+        normalized = added.map(scenesStore().normalizeScene)
       } catch {
         return false
       }
@@ -170,7 +178,7 @@ export function useScenes() {
         return false
       let normalized: Scene
       try {
-        normalized = normalizeScene(scene)
+        normalized = scenesStore().normalizeScene(scene)
       } catch {
         return false
       }
@@ -217,7 +225,7 @@ export function useScenes() {
   const remove = useCallback(
     (id: string, options: { sessionActive: boolean }): boolean => {
       const { scenes, onStreamId } = current.current.library
-      const verdict = canDeleteScene({ scenes, id, onStreamId, ...options })
+      const verdict = sceneDeletion({ scenes, id, onStreamId, ...options })
       if (!verdict.allowed) return false
       return writeScenes(
         scenes.filter((scene) => scene.id !== id),
@@ -233,7 +241,7 @@ export function useScenes() {
   const nameMainDisplay = useCallback(
     (display: MainDisplay): boolean => {
       const { library } = current.current
-      const next = withMainDisplay(library, display)
+      const next = scenesStore().withMainDisplay(library, display)
       return next !== library && write(next, { quiet: true })
     },
     [write]
@@ -244,7 +252,7 @@ export function useScenes() {
       const { scenes } = current.current.library
       let normalized: Scene[]
       try {
-        normalized = edit(scenes).map(normalizeScene)
+        normalized = edit(scenes).map(scenesStore().normalizeScene)
       } catch {
         return false
       }

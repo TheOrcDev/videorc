@@ -46,7 +46,8 @@ import {
   type SavedScene,
   type SceneVisual
 } from '@/lib/scene-presets'
-import { canDeleteScene, showsSources } from '@/lib/scenes'
+import { showsSources } from '@/lib/scenes'
+import { canDeleteScene } from '@/lib/scenes-store'
 
 /** One dialog at a time, for the scene list and the Studio gallery alike. */
 export type SceneDialogRequest =

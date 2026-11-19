@@ -21,14 +21,12 @@ import {
 } from './scene-presets'
 import { canonicalJson } from './scene-visibility-identity'
 import { defaultScenes, horizontalTwin, migrateToScenes } from './scenes-migration'
+import { canDeleteScene, hydrateScenes, normalizeScene, withMainDisplay } from './scenes-store'
 import { sceneFromSaved, savedSceneView } from './scene-studio'
 import { normalizeAccelerator } from '../../../shared/accelerator'
 import { globalShortcutEntries } from '../../../shared/global-shortcuts'
 import {
-  canDeleteScene,
   firstSceneWithLayout,
-  hydrateScenes,
-  normalizeScene,
   sameShows,
   sceneAtPosition,
   sceneLayout,
@@ -37,7 +35,6 @@ import {
   SCENES_KEY,
   showsFromSources,
   showsSources,
-  withMainDisplay,
   type Scene,
   type SceneLibrary,
   type SceneShows
