@@ -273,6 +273,10 @@ export async function runBaseline({
         ]
       })
     )
+    // The cases whose fixture relays the program page's receipt with a
+    // graphics lane (`graphicsLanes.EG_parity_baseline` below): only there
+    // can the host's static graphics lane reach the program page.
+    const staticLane = Boolean(outputs || captions || avatar || scenes || graphics || views)
     pages = await startParityPages(
       webRoot,
       guests,
@@ -405,6 +409,9 @@ export async function runBaseline({
     if (avatar || views) await prepareAvatar({ h, report })
     if (scenes) await prepareScenes({ h, report })
     const program = await newPage('program')
+    // The program video's clock, for the card's window in it.
+    const programVideoStartedAtMs = Date.now()
+    let cardWindow = null
     await program.addInitScript(installProgramAudioTap)
     const search = new URLSearchParams({
       show: h.showId,
@@ -533,7 +540,27 @@ export async function runBaseline({
         }
         await h.rpc('cloud.overlay.clear', { slot, orientation: 'h' })
       }
-      if (!graphics) await overlay('card', MEDIA.colors.card)
+      if (!graphics) {
+        // The page withholds the legacy card only once the host's static
+        // lane has reached it (its first snapshot, an empty one here, moves
+        // the graphics roots into `.overlays`). That takes the page's
+        // receipt and the host's answer, so wait for it: the card below is
+        // then the withheld one, on a loaded Mac too.
+        if (staticLane)
+          await waitFor(
+            () =>
+              program.evaluate(
+                () =>
+                  [...(document.querySelector('.overlays')?.children ?? [])].filter(
+                    (child) => !child.classList.contains('overlay')
+                  ).length > 1
+              ),
+            'the static graphics lane live on the program page'
+          )
+        const fromMs = Date.now() - programVideoStartedAtMs
+        await overlay('card', MEDIA.colors.card)
+        cardWindow = { fromMs, toMs: Date.now() - programVideoStartedAtMs }
+      }
       await overlay('takeover', MEDIA.colors.takeover)
       if (controls) await exerciseControls({ h, clients, captureAudio, report, cameraId })
       if (privacy)
@@ -683,6 +710,7 @@ export async function runBaseline({
       const colors = { ...MEDIA.colors, ...(graphics ? { graphics: [0, 255, 255] } : {}) }
       const colorPeaks = {},
         frameHits = {}
+      let cardWindowHits = 0
       for (const { name, video } of videos) {
         const file = await video.path()
         const raw = runMedia(h.ffmpeg, [
@@ -710,14 +738,34 @@ export async function runBaseline({
           for (const [key, color] of Object.entries(colors)) {
             const fraction = colorFraction(frame, color)
             peaks[key] = Math.max(peaks[key], fraction)
-            if (fraction > MEDIA.analysis.minimumColorFraction) hits[key]++
+            if (fraction > MEDIA.analysis.minimumColorFraction) {
+              hits[key]++
+              // The card's colour while the card was up (a second of slack
+              // each side for the video's own start). Later frames may carry
+              // it for another reason: a hidden screen's frosted still keeps
+              // the privacy fixture's magenta as a soft band.
+              const atMs = (at / frameBytes) * 200
+              if (
+                name === 'program' &&
+                key === 'card' &&
+                cardWindow &&
+                atMs >= cardWindow.fromMs - 1000 &&
+                atMs <= cardWindow.toMs + 1000
+              )
+                cardWindowHits++
+            }
           }
         }
         recordArtifact(report, h.root, file, `${name}-browser-video`)
         colorPeaks[name] = peaks
         frameHits[name] = hits
       }
-      report.videoMeasurements = { colorPeaks, frameHits, sampledFps: 5 }
+      report.videoMeasurements = {
+        colorPeaks,
+        frameHits,
+        sampledFps: 5,
+        ...(cardWindow ? { cardWindow, cardWindowHits } : {})
+      }
       if (avatar) assertAvatarVideo(report)
       if (graphics) assertGraphicsArtifacts(report)
       if (scenes && !sourcesCase) assertScenesVideo(report)
@@ -731,12 +779,19 @@ export async function runBaseline({
         {
           name: 'programCard',
           // A managed room's program takes its cards from the host's static
-          // graphics lane (S9), which is live once the page joins (an empty
-          // snapshot is enough). The page then withholds the legacy overlay
-          // card by design; the graphics case proves the lane's own card.
+          // graphics lane (S9), which is live once the page's receipt has
+          // reached the host (an empty snapshot is enough). The page then
+          // withholds the legacy overlay card by design; the graphics case
+          // proves the lane's own card. A case whose fixture relays no
+          // receipt for the program page never has that lane, so there the
+          // legacy card is the card and must show. Both are read in the
+          // card's own window of the program video.
           passed: graphics
             ? report.graphics.cases.includes('chat-emoji-and-milestone')
-            : !seen('card')
+            : staticLane
+              ? cardWindowHits < 5
+              : cardWindowHits >= 5,
+          ...(graphics ? {} : { staticLane, cardWindowHits })
         },
         { name: 'programTakeover', passed: seen('takeover') },
         {

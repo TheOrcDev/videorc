@@ -619,10 +619,21 @@ export async function managedHarness(
       await h.eval(
         `window.__videorcSmokeScenePresets.configure(${JSON.stringify({ recordEnabled, streamEnabled: true, streaming: h.streaming(), video: { preset: 'tutorial-720p30', width: 1280, height: 720, fps: 30, bitrateKbps: 4000 } })}); window.__videorcSmokeScenePresets.layout({layoutPreset:'screen-only'}); return true`
       )
-      await waitFor(
-        () => h.eval('return window.__videorcSmokeScenePresets.streamingState().canStart'),
-        'Studio ready'
-      )
+      // A case with no destination has nothing to go live to (the handoff's
+      // second computer only resumes the room): the Studio rightly says
+      // "Turn on a destination", so there is no start to wait for.
+      if (!(h.targets ?? []).some((target) => target.enabled)) return
+      // On a timeout, say what the Studio gave as its reason.
+      let blocked = null
+      await waitFor(async () => {
+        const state = await h.eval(
+          'const s = window.__videorcSmokeScenePresets.streamingState(); return { canStart: s.canStart, reason: s.startBlockedReason ?? null, lastError: s.lastError ?? null }'
+        )
+        blocked = state
+        return state?.canStart
+      }, 'Studio ready').catch((error) => {
+        throw new Error(`${error.message} (${JSON.stringify(blocked)})`, { cause: error })
+      })
     },
     async startUiLive({ recordEnabled = true } = {}) {
       await h.configureStudio({ recordEnabled })
