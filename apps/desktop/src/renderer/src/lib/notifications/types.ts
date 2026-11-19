@@ -67,6 +67,12 @@ export interface NotificationInput {
   sessionId?: string
   /** The watchdog's report: its words and fixes lead the entry. */
   lead?: boolean
+  /**
+   * An event two systems report (the full disk, then the take that failed
+   * on it): a second publish on the key updates the words and is not a
+   * repeat.
+   */
+  once?: boolean
   /** Runs when the streamer clears the entry while it is open ("I know"). */
   onClear?: () => void
 }

@@ -134,6 +134,8 @@ const PINNED_TOASTS_THAT_STAY = new Set([
   'src/lib/chat-moderation-relay.ts',
   // "Couldn't start": the answer to Record or Go Live, with its way out.
   'src/lib/session-start-failure.ts',
+  // The same "Couldn't start", when the backend's refusal arrives first.
+  'src/lib/studio-health.ts',
   // "Finish connecting in your browser": a step the streamer is in the middle of.
   'src/lib/studio-connection-toasts.ts'
 ])
@@ -147,8 +149,7 @@ const PINNED_TOASTS_STILL_TO_MOVE = new Set([
   'src/hooks/use-talk-show-room.ts',
   'src/hooks/use-virtual-camera.ts',
   'src/lib/finalization-toast.ts',
-  'src/lib/session-runtime-recovery.ts',
-  'src/lib/studio-health.ts'
+  'src/lib/session-runtime-recovery.ts'
 ])
 
 /** Each `duration: Infinity` (or `Number.POSITIVE_INFINITY`) in `source`, as `path:line`. */

@@ -20,12 +20,41 @@ export interface NotificationKind {
 
 const kinds = {
   // The stream watchdog (plan 223): the alert's severity is its tone.
-  watchdog: { tone: 'warning', life: 'condition', mayBe: ['urgent', 'news'] }
+  watchdog: { tone: 'warning', life: 'condition', mayBe: ['urgent', 'news'] },
+
+  // The live output and the connection (`health` events, S5).
+  'stream-output': { tone: 'urgent', life: 'condition' },
+  'stream-output-failed': { tone: 'urgent', life: 'event' },
+  'recording-output-failed': { tone: 'urgent', life: 'event' },
+  'stream-delivery': { tone: 'warning', life: 'condition' },
+  'stream-uplink': { tone: 'warning', life: 'condition' },
+  'screen-capture': { tone: 'warning', life: 'condition', mayBe: ['urgent'] },
+  'host-overloaded': { tone: 'warning', life: 'condition' },
+  'disk-space': { tone: 'warning', life: 'condition' },
+  // What the session said at its start and holds true until it ends.
+  'session-notice': { tone: 'warning', life: 'condition' },
+  'recording-quality': { tone: 'warning', life: 'event' },
+  'separate-file': { tone: 'warning', life: 'event' },
+  'recording-failed': { tone: 'urgent', life: 'event' },
+  'source-fallback': { tone: 'warning', life: 'event' },
+
+  // Audio (`health` events, S5).
+  microphone: { tone: 'warning', life: 'condition', mayBe: ['urgent'] },
+  'audio-blip': { tone: 'news', life: 'event' },
+  'system-audio-echo': { tone: 'warning', life: 'condition' },
+  'audio-output-failed': { tone: 'urgent', life: 'event' }
 } satisfies Record<string, NotificationKind>
 
 export type NotificationKindId = keyof typeof kinds
 
 export const NOTIFICATION_KINDS: Record<NotificationKindId, NotificationKind> = kinds
+
+/** The kinds whose own tone is urgent: the short list, in one place. */
+export function urgentKinds(): NotificationKindId[] {
+  return (Object.keys(kinds) as NotificationKindId[]).filter(
+    (id) => NOTIFICATION_KINDS[id].tone === 'urgent'
+  )
+}
 
 /** Pure. The tone a report takes: the kind's own, or one the kind allows. */
 export function kindTone(

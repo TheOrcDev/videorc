@@ -797,9 +797,6 @@ const NATIVE_PREVIEW_SURFACE_PRESENT_REPORT_INTERVAL_MS = 250
 const PREPARED_PLATFORM_LIFECYCLE_OWNER_PREFIX = 'prepared-platform:'
 const PLATFORM_CLEANUP_X_END_TIMEOUT_MS = 4000
 const AI_CONSENT_STORAGE_KEY = 'videorc.aiConsent'
-const RECORDING_STOPPED_UNEXPECTEDLY_TOAST_ID = 'recording-stopped-unexpectedly'
-const MICROPHONE_INPUT_LOST_TOAST_ID = 'microphone-input-lost'
-
 function isPreparedPlatformLifecycleOwner(sessionId: string): boolean {
   return sessionId.startsWith(PREPARED_PLATFORM_LIFECYCLE_OWNER_PREFIX)
 }
@@ -5485,9 +5482,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   }, [])
   const dismissSessionRuntimeNotice = useCallback(() => {
     sessionRuntimeEpochRef.current += 1
+    // Plan 250: this clears the Studio's inline alert. The entry behind the
+    // bell stays until it resolves or the streamer clears it.
     replaceSessionRuntimeNotice(null)
-    toast.dismiss(RECORDING_STOPPED_UNEXPECTEDLY_TOAST_ID)
-    toast.dismiss(MICROPHONE_INPUT_LOST_TOAST_ID)
   }, [replaceSessionRuntimeNotice])
   const clearSessionRuntimeState = useCallback(() => {
     recordingFailureSessionRef.current = null
@@ -6742,9 +6739,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         setActiveStartIntent(null)
       }
       recordingRef.current = status
-      if (!['recording', 'streaming'].includes(status.state)) {
-        toast.dismiss('recording-degraded')
-      }
       if (!isActiveRecordingState(status.state)) {
         // Plan 174 S3.1: whatever ended the session, an armed hotkey press
         // means nothing now, and the next start brings its own intent.

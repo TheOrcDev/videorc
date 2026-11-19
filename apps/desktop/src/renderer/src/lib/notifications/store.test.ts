@@ -264,13 +264,13 @@ describe('the notification store (plan 250)', () => {
       expect(only()).toMatchObject({
         state: 'open',
         read: true,
-        detail: 'No sound. Came back once.',
+        detail: 'Came back once. No sound.',
         openedAt: 1_000_000
       })
       store.resolve('microphone')
       clock += 1_000
       store.publish(problem({ detail: 'No sound.' }))
-      expect(only().detail).toBe('No sound. Came back 2 times.')
+      expect(only().detail).toBe('Came back 2 times. No sound.')
       expect(door.show).toHaveBeenCalledTimes(1)
     })
 
@@ -286,6 +286,25 @@ describe('the notification store (plan 250)', () => {
       clock += REALERT_AFTER_MS
       store.publish(problem())
       expect(door.show).toHaveBeenCalledTimes(2)
+    })
+
+    it('one happening two systems report is not a repeat', () => {
+      store.publish({
+        key: 'failed:s1',
+        kind: kind('failure'),
+        title: 'The disk is full',
+        once: true
+      })
+      store.markRead('failed:s1')
+      store.publish({
+        key: 'failed:s1',
+        kind: kind('failure'),
+        title: 'The disk is full',
+        detail: 'Free some space.',
+        once: true
+      })
+      expect(only()).toMatchObject({ occurrences: 1, detail: 'Free some space.', read: true })
+      expect(door.show).toHaveBeenCalledTimes(1)
     })
 
     it('a blip that repeats is one counted entry with the time of the last one', () => {
@@ -310,11 +329,15 @@ describe('the notification store (plan 250)', () => {
       store.publish(problem({ key: 'other', sessionId: 's2' }))
       store.sessionEnded('livestream', 's1')
       const byKey = Object.fromEntries(store.snapshot().map((entry) => [entry.key, entry]))
+      // Not a recovery: no green tick, and the problem's toast simply goes.
       expect(byKey.microphone).toMatchObject({
         state: 'resolved',
+        tone: 'news',
         title: 'Microphone is silent',
         detail: 'No sound. Ended with the livestream.'
       })
+      expect(door.resolved).not.toHaveBeenCalled()
+      expect(door.dismiss).toHaveBeenCalledWith('microphone')
       expect(byKey.shortcuts.state).toBe('open')
       expect(byKey.other.state).toBe('open')
       store.sessionEnded('recording')
@@ -322,6 +345,28 @@ describe('the notification store (plan 250)', () => {
         state: 'resolved',
         detail: 'Ended with the recording.'
       })
+    })
+  })
+
+  describe('the next session', () => {
+    it('the same subject in the next session is a new problem, not a flap', () => {
+      live = true
+      store.publish(problem({ tone: 'urgent', sessionId: 's1' }))
+      store.markRead('microphone')
+      clock += 5_000
+      store.sessionEnded('livestream', 's1')
+      clock += 5_000
+      store.publish(problem({ tone: 'urgent', sessionId: 's2' }))
+      // Inside the flap window and inside five minutes, and still news: it
+      // is unread, it pops up, and it says nothing about coming back.
+      expect(only()).toMatchObject({
+        state: 'open',
+        read: false,
+        sessionId: 's2',
+        openedAt: clock,
+        detail: undefined
+      })
+      expect(door.show).toHaveBeenCalledTimes(2)
     })
   })
 

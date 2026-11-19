@@ -26,17 +26,6 @@ const toastSpies = vi.hoisted(() => ({
   warning: vi.fn()
 }))
 vi.mock('sonner', () => ({ toast: toastSpies }))
-// A toast whose two slots are its own (Open in Library, Show in folder)
-// carries Copy after its description (lib/toast.ts).
-const describedWithCopy = (words: string): unknown =>
-  expect.objectContaining({
-    props: expect.objectContaining({
-      children: expect.arrayContaining([
-        words,
-        expect.objectContaining({ props: expect.objectContaining({ children: 'Copy' }) })
-      ])
-    })
-  })
 // The highlight card is painted on an OffscreenCanvas, which the node test
 // environment lacks. Only the painter (and the card pair it paints, whose
 // vertical card exists exactly when a vertical canvas is passed) is stubbed;
@@ -53,6 +42,7 @@ vi.mock('@/lib/caption-overlay', async (importOriginal) => ({
 }))
 
 import { offersHandOff } from '@/lib/cloud-handoff-view'
+import { notifications } from '@/lib/notifications'
 import { revealInFileManagerLabel } from '@/lib/platform'
 import { LayoutTab } from '@/components/tabs/layout-tab'
 import { scenesForApps } from '@/lib/scene-apps'
@@ -2169,7 +2159,12 @@ describe('real StudioProvider lifecycle', () => {
     vi.unstubAllGlobals()
     vi.clearAllMocks()
     vi.useRealTimers()
+    // Plan 250: the notification store is one per window, so one per file.
+    notifications.reset()
   })
+
+  /** The entry behind the bell for a subject (plan 250). */
+  const notification = (key: string) => notifications.snapshot().find((entry) => entry.key === key)
 
   async function mountFreeformTransformProvider(connected = true): Promise<{
     backend: StudioBackend
@@ -4873,8 +4868,11 @@ describe('real StudioProvider lifecycle', () => {
         data: JSON.stringify({ event: 'health.event', payload: degraded })
       })
     })
-    await waitForObservation(() => toastSpies.warning.mock.calls.length === 1)
-    toastSpies.warning.mockClear()
+    // Plan 250: a warning during a recording waits behind the bell.
+    await waitForObservation(
+      () => notification('session-notice:recording-degraded')?.state === 'open'
+    )
+    expect(toastSpies.warning).not.toHaveBeenCalled()
 
     const failedStatus = {
       state: 'failed' as const,
@@ -4924,18 +4922,25 @@ describe('real StudioProvider lifecycle', () => {
       expect.anything()
     )
 
-    expect(toastSpies.dismiss).toHaveBeenCalledWith('recording-degraded')
+    // Plan 250: the take's open problems ended with it, and the failure is
+    // one urgent entry behind the bell with one 15 s toast, never pinned.
+    expect(notification('session-notice:recording-degraded')?.state).not.toBe('open')
     expect(toastSpies.error).toHaveBeenCalledTimes(1)
     expect(toastSpies.error).toHaveBeenCalledWith(
       'Recording stopped unexpectedly',
       expect.objectContaining({
-        id: 'recording-stopped-unexpectedly',
-        description: describedWithCopy(failedStatus.message),
-        duration: Infinity,
-        action: expect.objectContaining({ label: 'Open in Library' }),
-        cancel: expect.objectContaining({ label: revealInFileManagerLabel() })
+        id: 'notification:recording-failed:session-failed',
+        description: failedStatus.message,
+        duration: 15_000,
+        action: expect.objectContaining({ label: 'Open in Library' })
       })
     )
+    expect(notification('recording-failed:session-failed')).toMatchObject({
+      tone: 'urgent',
+      title: 'Recording stopped unexpectedly',
+      detail: failedStatus.message,
+      actions: [{ label: 'Open in Library' }, { label: revealInFileManagerLabel() }]
+    })
     expect(toastSpies.success).not.toHaveBeenCalled()
     expect(latest()?.core.sessionRuntimeNotice).toMatchObject({
       kind: 'recording-failed',
@@ -4945,18 +4950,15 @@ describe('real StudioProvider lifecycle', () => {
       message: failedStatus.message
     })
 
-    const toastOptions = toastSpies.error.mock.calls[0]?.[1] as {
-      action: { onClick: () => void }
-      cancel: { onClick: () => void }
-    }
-    toastOptions.action.onClick()
-    toastOptions.cancel.onClick()
+    await notifications.runAction('recording-failed:session-failed', 'open-library')
+    await notifications.runAction('recording-failed:session-failed', 'reveal')
     expect(libraryNavigations).toEqual([{ tab: 'library', sessionId: 'session-failed' }])
     expect(revealSession).toHaveBeenCalledWith('session-failed')
 
     await act(async () => latest()!.core.dismissSessionRuntimeNotice())
     expect(latest()?.core.sessionRuntimeNotice).toBeNull()
-    expect(toastSpies.dismiss).toHaveBeenCalledWith('recording-stopped-unexpectedly')
+    // Dismissing the Studio's inline alert leaves the entry behind the bell.
+    expect(notification('recording-failed:session-failed')).toBeDefined()
     await act(async () => {
       backend.sockets[0]?.onmessage?.({
         data: JSON.stringify({
@@ -4979,11 +4981,14 @@ describe('real StudioProvider lifecycle', () => {
         })
       })
     })
-    await waitForObservation(() => toastSpies.warning.mock.calls.length === 1)
-    expect(toastSpies.warning).toHaveBeenLastCalledWith(
-      'Recording is falling behind',
-      expect.objectContaining({ id: 'recording-degraded' })
+    // The next recording's own notice opens the subject again.
+    await waitForObservation(
+      () => notification('session-notice:recording-degraded')?.state === 'open'
     )
+    expect(notification('session-notice:recording-degraded')).toMatchObject({
+      title: 'Recording is falling behind',
+      sessionId: 'retry-session'
+    })
   })
 
   it('publishes a terminal recording failure that races initial bootstrap', async () => {
@@ -5053,8 +5058,8 @@ describe('real StudioProvider lifecycle', () => {
     expect(toastSpies.error).toHaveBeenCalledWith(
       'Recording stopped unexpectedly',
       expect.objectContaining({
-        id: 'recording-stopped-unexpectedly',
-        description: describedWithCopy(failedStatus.message)
+        id: `notification:recording-failed:${failedStatus.sessionId}`,
+        description: failedStatus.message
       })
     )
   })
@@ -5171,13 +5176,16 @@ describe('real StudioProvider lifecycle', () => {
     expect(toastSpies.error).toHaveBeenCalledWith(
       'Recording stopped unexpectedly',
       expect.objectContaining({
-        id: 'recording-stopped-unexpectedly',
-        description: describedWithCopy(failureEvent.message),
-        duration: Infinity,
-        action: expect.objectContaining({ label: 'Open in Library' }),
-        cancel: expect.objectContaining({ label: revealInFileManagerLabel() })
+        id: 'notification:recording-failed:session-failed-in-gap',
+        description: failureEvent.message,
+        duration: 15_000,
+        action: expect.objectContaining({ label: 'Open in Library' })
       })
     )
+    expect(notification('recording-failed:session-failed-in-gap')?.actions).toMatchObject([
+      { label: 'Open in Library' },
+      { label: revealInFileManagerLabel() }
+    ])
     expect(reconnectedBackend.commands).toContainEqual(
       expect.objectContaining({
         method: 'sessions.healthEvents.list',
@@ -5185,12 +5193,8 @@ describe('real StudioProvider lifecycle', () => {
       })
     )
 
-    const toastOptions = toastSpies.error.mock.calls.at(-1)?.[1] as {
-      action: { onClick: () => void }
-      cancel: { onClick: () => void }
-    }
-    toastOptions.action.onClick()
-    toastOptions.cancel.onClick()
+    await notifications.runAction('recording-failed:session-failed-in-gap', 'open-library')
+    await notifications.runAction('recording-failed:session-failed-in-gap', 'reveal')
     expect(libraryNavigations).toEqual([{ tab: 'library', sessionId: 'session-failed-in-gap' }])
     expect(revealSession).toHaveBeenCalledWith('session-failed-in-gap')
 
@@ -5265,11 +5269,14 @@ describe('real StudioProvider lifecycle', () => {
     expect(toastSpies.error).toHaveBeenCalledWith(
       'Livestream stopped unexpectedly',
       expect.objectContaining({
-        description: describedWithCopy(failedSnapshotEvent.message),
-        action: expect.objectContaining({ label: 'Open in Library' }),
-        cancel: expect.objectContaining({ label: revealInFileManagerLabel() })
+        description: failedSnapshotEvent.message,
+        action: expect.objectContaining({ label: 'Open in Library' })
       })
     )
+    expect(notification('recording-failed:session-failed-snapshot')?.actions).toMatchObject([
+      { label: 'Open in Library' },
+      { label: revealInFileManagerLabel() }
+    ])
   })
 
   it('recovers a microphone loss missed during reconnect for the still-active session', async () => {
@@ -5363,15 +5370,18 @@ describe('real StudioProvider lifecycle', () => {
       sessionId: 'session-mic-lost-in-gap',
       message: microphoneLost.message
     })
-    expect(toastSpies.warning).toHaveBeenCalledTimes(1)
-    expect(toastSpies.warning).toHaveBeenCalledWith(
+    // Plan 250: one urgent entry on the microphone, one 15 s toast.
+    expect(toastSpies.error).toHaveBeenCalledTimes(1)
+    expect(toastSpies.error).toHaveBeenCalledWith(
       'Microphone stopped: recording continues with silence',
-      {
-        id: 'microphone-input-lost',
+      expect.objectContaining({
+        id: 'notification:microphone',
         description: microphoneLost.message,
-        duration: Infinity
-      }
+        duration: 15_000,
+        action: expect.objectContaining({ label: 'Open Audio' })
+      })
     )
+    expect(notification('microphone')).toMatchObject({ state: 'open', tone: 'urgent' })
     expect(reconnectedBackend.commands).toContainEqual(
       expect.objectContaining({
         method: 'sessions.healthEvents.list',
@@ -5401,7 +5411,9 @@ describe('real StudioProvider lifecycle', () => {
         )
     )
 
-    expect(toastSpies.warning).toHaveBeenCalledTimes(1)
+    // A second reconnect is the same episode: one entry, one pop-up.
+    expect(toastSpies.error).toHaveBeenCalledTimes(1)
+    expect(notification('microphone')).toMatchObject({ state: 'open', occurrences: 1 })
 
     vi.clearAllMocks()
     const replacementSessionBackend = new StudioBackend()
@@ -5598,15 +5610,18 @@ describe('real StudioProvider lifecycle', () => {
     })
     await waitForObservation(() => latest()?.recording.recording.state === 'recording')
 
-    expect(toastSpies.warning).toHaveBeenCalledTimes(1)
-    expect(toastSpies.warning).toHaveBeenCalledWith(
+    // Plan 250: one urgent entry on the microphone, one 15 s toast.
+    expect(toastSpies.error).toHaveBeenCalledTimes(1)
+    expect(toastSpies.error).toHaveBeenCalledWith(
       'Microphone stopped: recording continues with silence',
-      {
-        id: 'microphone-input-lost',
+      expect.objectContaining({
+        id: 'notification:microphone',
         description: microphoneLost.message,
-        duration: Infinity
-      }
+        duration: 15_000,
+        action: expect.objectContaining({ label: 'Open Audio' })
+      })
     )
+    expect(notification('microphone')).toMatchObject({ state: 'open', tone: 'urgent' })
     expect(latest()?.recording.recording.state).toBe('recording')
 
     await act(async () => {
@@ -5631,7 +5646,8 @@ describe('real StudioProvider lifecycle', () => {
       'Recording saved',
       expect.objectContaining({ duration: 12000 })
     )
-    expect(toastSpies.error).not.toHaveBeenCalled()
+    // The microphone's own pop-up, and no failure beside it.
+    expect(toastSpies.error).toHaveBeenCalledTimes(1)
     expect(latest()?.core.sessionRuntimeNotice).toMatchObject({
       kind: 'microphone-input-lost',
       activity: 'recording',
@@ -5639,15 +5655,15 @@ describe('real StudioProvider lifecycle', () => {
       sessionId: 'session-with-silence',
       message: microphoneLost.message
     })
-    expect(toastSpies.warning).toHaveBeenCalledTimes(2)
-    expect(toastSpies.warning).toHaveBeenLastCalledWith(
-      'Microphone stopped: saved recording contains silence',
-      {
-        id: 'microphone-input-lost',
-        description: microphoneLost.message,
-        duration: Infinity
-      }
-    )
+    // The entry takes the ended words and ends with the recording; nothing
+    // pops up a second time.
+    expect(toastSpies.error).toHaveBeenCalledTimes(1)
+    expect(notification('microphone')).toMatchObject({
+      state: 'resolved',
+      peakTone: 'urgent',
+      title: 'Microphone stopped: saved recording contains silence',
+      detail: `${microphoneLost.message} Ended with the recording.`
+    })
 
     vi.clearAllMocks()
     await act(async () => {
@@ -5666,7 +5682,8 @@ describe('real StudioProvider lifecycle', () => {
     })
     await waitForObservation(() => latest()?.recording.recording.sessionId === 'next-session')
     expect(latest()?.core.sessionRuntimeNotice).toBeNull()
-    expect(toastSpies.dismiss).toHaveBeenCalledWith('microphone-input-lost')
+    // The next session clears the Studio's notice; what happened stays listed.
+    expect(notification('microphone')?.state).toBe('resolved')
 
     vi.clearAllMocks()
     await act(async () => {
@@ -5700,9 +5717,9 @@ describe('real StudioProvider lifecycle', () => {
       await Promise.resolve()
     })
 
-    expect(toastSpies.warning).toHaveBeenCalledWith(
+    expect(toastSpies.error).toHaveBeenCalledWith(
       'Microphone stopped: livestream continues with silence',
-      expect.objectContaining({ id: 'microphone-input-lost' })
+      expect.objectContaining({ id: 'notification:microphone' })
     )
     expect(latest()?.core.sessionRuntimeNotice).toMatchObject({
       kind: 'microphone-input-lost',
@@ -5727,10 +5744,10 @@ describe('real StudioProvider lifecycle', () => {
     await waitForObservation(() => latest()?.recording.recording.state === 'idle')
 
     expect(toastSpies.success).not.toHaveBeenCalled()
-    expect(toastSpies.warning).toHaveBeenLastCalledWith(
-      'Microphone stopped during the livestream',
-      expect.objectContaining({ id: 'microphone-input-lost' })
-    )
+    expect(notification('microphone')).toMatchObject({
+      state: 'resolved',
+      title: 'Microphone stopped during the livestream'
+    })
     expect(latest()?.core.sessionRuntimeNotice).toMatchObject({
       kind: 'microphone-input-lost',
       activity: 'live-stream',
@@ -5787,10 +5804,9 @@ describe('real StudioProvider lifecycle', () => {
       await Promise.resolve()
     })
 
-    expect(toastSpies.warning).toHaveBeenCalledWith(
-      'Microphone stopped during the livestream',
-      expect.objectContaining({ id: 'microphone-input-lost' })
-    )
+    expect(notification('microphone')).toMatchObject({
+      title: 'Microphone stopped during the livestream'
+    })
     expect(latest()?.core.sessionRuntimeNotice).toMatchObject({
       kind: 'microphone-input-lost',
       activity: 'live-stream',
@@ -5939,11 +5955,11 @@ describe('real StudioProvider lifecycle', () => {
       () => latest()?.core.sessionRuntimeNotice?.kind === 'microphone-input-lost'
     )
 
-    expect(toastSpies.warning).toHaveBeenCalledWith(
+    expect(toastSpies.error).toHaveBeenCalledWith(
       'Microphone stopped: livestream continues with silence',
-      expect.objectContaining({ id: 'microphone-input-lost' })
+      expect.objectContaining({ id: 'notification:microphone' })
     )
-    expect(toastSpies.warning).not.toHaveBeenCalledWith(
+    expect(toastSpies.error).not.toHaveBeenCalledWith(
       'Microphone stopped: recording continues with silence',
       expect.anything()
     )
@@ -5966,10 +5982,10 @@ describe('real StudioProvider lifecycle', () => {
       'Recording saved',
       expect.objectContaining({ duration: 12000 })
     )
-    expect(toastSpies.warning).toHaveBeenLastCalledWith(
-      'Microphone stopped during the livestream',
-      expect.objectContaining({ id: 'microphone-input-lost' })
-    )
+    expect(notification('microphone')).toMatchObject({
+      state: 'resolved',
+      title: 'Microphone stopped during the livestream'
+    })
   })
 
   // Plan 174 S0.1 (D2): every stop path asks through requestStopSession. While

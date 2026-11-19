@@ -40,6 +40,11 @@ export interface NotificationStoreOptions {
   /** "Quiet while recording or live" (Settings, General). Absent means on. */
   quiet?: () => boolean
   onCount?: (count: NotificationCount) => void
+  /**
+   * Every title and detail passes through it (the toast door's text guard:
+   * a provider's raw error never reaches the list as HTML or a JSON blob).
+   */
+  guardText?: (text: string) => string
   /** A new entry, or one that got worse: what a screen reader is told. */
   onAnnounce?: (entry: NotificationEntry) => void
 }
@@ -58,6 +63,11 @@ interface Held {
    */
   hidden: NotificationTone | null
   lastPop?: { at: number; tone: NotificationTone }
+  /**
+   * Resolved because its session ended, not because it recovered: the same
+   * subject in the next session is a new problem, never a flap.
+   */
+  endedWithSession?: boolean
   onClear?: () => void
 }
 
@@ -178,7 +188,9 @@ export function createNotificationStore(options: NotificationStoreOptions = {}):
     let item = held.get(input.key)
     let change: NotificationChange
     let fineForMs = 0
-    if (!item || item.entry.life !== 'condition') {
+    if (!item || item.entry.life !== 'condition' || item.endedWithSession) {
+      // A subject whose last session ended starts clean: it may pop up again.
+      const lastPop = item?.endedWithSession ? undefined : item?.lastPop
       item = {
         entry: {
           key: input.key,
@@ -198,7 +210,7 @@ export function createNotificationStore(options: NotificationStoreOptions = {}):
         actions: [],
         comebacks: 0,
         hidden: null,
-        lastPop: item?.lastPop
+        lastPop
       }
       held.set(input.key, item)
       change = 'opened'
@@ -243,7 +255,7 @@ export function createNotificationStore(options: NotificationStoreOptions = {}):
       tone: merged.tone,
       peakTone: worseTone(item.entry.peakTone, merged.tone),
       title: merged.title,
-      detail: joinSentences(merged.detail, cameBackWords(item.comebacks)),
+      detail: joinSentences(cameBackWords(item.comebacks), merged.detail),
       updatedAt: at,
       sessionId: input.sessionId ?? item.entry.sessionId,
       actions: view(merged.actions)
@@ -265,8 +277,11 @@ export function createNotificationStore(options: NotificationStoreOptions = {}):
       : kindTone(kind, input.tone)
     const previous = held.get(input.key)
     const again = previous?.entry.life === kind.life ? previous : undefined
-    const repeated = again !== undefined && !progress
-    const occurrences = repeated ? again.entry.occurrences + 1 : 1
+    // One happening two systems report (a full disk, then the failed take)
+    // is not a repeat.
+    const same = again !== undefined && input.once === true
+    const repeated = again !== undefined && !progress && !same
+    const occurrences = repeated ? again.entry.occurrences + 1 : (again?.entry.occurrences ?? 1)
     const actions = input.actions ?? []
     const item: Held = {
       entry: {
@@ -277,13 +292,15 @@ export function createNotificationStore(options: NotificationStoreOptions = {}):
         life: kind.life,
         state,
         title: input.title,
-        detail: joinSentences(input.detail, repeatWords(occurrences)),
+        detail: joinSentences(repeatWords(occurrences), input.detail),
         openedAt: again?.entry.openedAt ?? at,
         updatedAt: at,
         occurrences,
         // The same news with new words (an export's progress line) is not new.
         read:
-          again !== undefined && again.entry.state === state && progress ? again.entry.read : false,
+          again !== undefined && (same || (again.entry.state === state && progress))
+            ? again.entry.read
+            : false,
         sessionId: input.sessionId,
         actions: view(actions)
       },
@@ -297,7 +314,7 @@ export function createNotificationStore(options: NotificationStoreOptions = {}):
     }
     held.set(input.key, item)
     if (state !== 'running') {
-      const settled = progress && again !== undefined && again.entry.state === state
+      const settled = same || (progress && again !== undefined && again.entry.state === state)
       popUp(item, kind, settled ? 'updated' : repeated ? 'repeated' : 'opened')
     }
     commit()
@@ -316,35 +333,51 @@ export function createNotificationStore(options: NotificationStoreOptions = {}):
     setEntry(item, {
       tone: merged.tone,
       title: merged.title,
-      detail: joinSentences(merged.detail, cameBackWords(item.comebacks)),
+      detail: joinSentences(cameBackWords(item.comebacks), merged.detail),
       updatedAt: now(),
       actions: view(merged.actions)
     })
   }
 
-  function settle(item: Held, patch: Partial<NotificationEntry>): void {
+  function settle(item: Held, patch: Partial<NotificationEntry>, recovered = true): void {
     const at = now()
     item.reports.clear()
     item.actions = []
     setEntry(item, {
       state: 'resolved',
-      tone: 'done',
+      // A session that ended is not a recovery: no green tick, and no
+      // recovery toast in the place of the problem's.
+      tone: recovered ? 'done' : 'news',
       resolvedAt: at,
       updatedAt: at,
       actions: [],
       ...patch
     })
-    if (item.hidden === null) door?.resolved(item.entry)
+    if (item.hidden !== null) return
+    if (recovered) door?.resolved(item.entry)
+    else door?.dismiss(item.entry.key)
+  }
+
+  const guard = options.guardText
+  function guarded<T extends { title?: string; detail?: string }>(words: T): T {
+    if (!guard) return words
+    return {
+      ...words,
+      ...(words.title !== undefined ? { title: guard(words.title) } : {}),
+      ...(words.detail !== undefined ? { detail: guard(words.detail) } : {})
+    }
   }
 
   const store: NotificationStore = {
-    publish(input) {
+    publish(raw) {
+      const input = guarded(raw)
       const kind = NOTIFICATION_KINDS[input.kind]
       if (kind.life === 'condition') publishCondition(input, kind)
       else publishOnce(input, kind)
     },
 
-    resolve(key, resolution = {}) {
+    resolve(key, rawResolution = {}) {
+      const resolution = guarded(rawResolution)
       const item = held.get(key)
       if (!item || item.entry.life !== 'condition' || item.entry.state !== 'open') return
       if (resolution.source !== undefined && !item.reports.has(resolution.source)) return
@@ -426,7 +459,8 @@ export function createNotificationStore(options: NotificationStoreOptions = {}):
           held.delete(key)
           continue
         }
-        settle(item, { detail: joinSentences(item.detail, sessionEndedWords(reason)) })
+        settle(item, { detail: joinSentences(item.detail, sessionEndedWords(reason)) }, false)
+        item.endedWithSession = true
       }
       if (changed) commit()
     },
