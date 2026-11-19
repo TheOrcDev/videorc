@@ -15,6 +15,7 @@ import {
   LivestreamIcon,
   CameraIcon,
   NoteIcon,
+  NotificationsIcon,
   PreviewIcon,
   RecordIcon,
   SceneIcon,
@@ -48,6 +49,7 @@ import { GO_LIVE_COMMAND, START_RECORDING_COMMAND } from '@/lib/go-live-copy'
 import { HEALTH_SEARCH_KEYWORDS } from '@/lib/health-door'
 import { openLivestreamView, guestsVisible } from '@/lib/livestream-tabs'
 import { SETTINGS_TABS, type SettingsTabId } from '@/lib/settings-tabs'
+import { toggleNotifications } from '@/lib/notification-count'
 import { shortcutAccelerator } from '@/lib/shortcuts'
 import { sessionStopControl } from '@/lib/studio-session-view'
 import { studioChatOn } from '@/lib/studio-chat'
@@ -466,6 +468,16 @@ export function CommandPalette({
             <LivestreamIcon className="size-4" />
             Upcoming events
             <Context>Destinations</Context>
+          </CommandItem>
+          {/* The list behind the bell (plan 250): the keyboard's way in. */}
+          <CommandItem
+            value="Open notifications"
+            keywords={['bell', 'alerts', 'problems', 'warnings', 'unread', 'inbox']}
+            onSelect={() => run(() => toggleNotifications('open'))}
+          >
+            <NotificationsIcon className="size-4" />
+            Open notifications
+            {shortcut(shortcutAccelerator('notifications'))}
           </CommandItem>
         </CommandGroup>
 

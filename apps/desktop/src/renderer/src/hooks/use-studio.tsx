@@ -129,6 +129,7 @@ import type * as SavedSceneApply from '@/lib/saved-scene-apply'
 import { recalledLayoutFraming, rememberLayoutFraming } from '@/lib/layout-framing-memory'
 import { backgroundLibrarySyncDecision, firstRunLookWritesHeld } from '@/lib/first-run'
 import type { FirstRunLook } from '@/lib/first-run-look'
+import { warmFirstRunLook, withFirstRunLook } from '@/lib/first-run-look-door'
 import {
   noteLayoutCommitted,
   noteLayoutLeavingFreeform,
@@ -160,6 +161,7 @@ import {
   type ReactNode,
   type SetStateAction
 } from 'react'
+import { loadNotifications, withAppNotifications, withWorkNotifications } from '@/lib/notify'
 import { notifyOnce } from '@/lib/notify-once'
 import { streamTargetNotices } from '@/lib/stream-target-notices'
 import {
@@ -182,13 +184,14 @@ import {
   revealInFileManagerLabel,
   trashName
 } from '@/lib/platform'
+import { quietWhileLiveOn } from '@/lib/quiet-while-live'
 import {
   nextPortalShareGrant,
   replayStartWaitsForGrant,
   replayStartWaitsForPreview,
   replayStartWaitsForScreen
 } from '@/lib/replay-buffer-grants'
-import { registerSupportBundleExport, TOAST_WITH_DESCRIPTION_MS, toast } from '@/lib/toast'
+import { registerSupportBundleExport, toast } from '@/lib/toast'
 import { CLOUD_TOAST_ID } from '@/lib/cloud-toast-id'
 import { NO_TALK_SHOW, type TalkShowContextValue } from '@/lib/talk-show-context'
 import type { TalkShowRoomControllerDeps } from '@/hooks/use-talk-show-room'
@@ -199,7 +202,6 @@ import {
   talkShowSessionView
 } from '@/lib/talk-show-session'
 import { openWorkspaceTab } from '@/lib/workspace-navigation'
-import { openHealthToastAction } from '@/lib/health-door'
 
 import { BackendClient, BackendRequestError } from '@/backendClient'
 import {
@@ -375,12 +377,11 @@ import {
   cohostStatusDetail,
   cohostStatusToast,
   showBrowserApproval,
-  showStreamTargetNotice,
+  showStreamTargetNotices,
   showTakeoverEditRefused,
   showChatNeedsVideorcSignIn,
   showVideorcSignInExpired,
   showXBroadcastProblem,
-  X_MEDIA_STUDIO_URL,
   sourceSwitchFailedDescription,
   sourceSwitchFailedTitle
 } from '@/lib/studio-toasts'
@@ -726,7 +727,11 @@ import type { LiveBackgroundId } from '../../../shared/live-background-ids'
 import { useBackgroundAssets } from '@/hooks/use-background-assets'
 import { useChatNewCount } from '@/hooks/use-chat-new-count'
 import { findDevice, isActiveRecordingState, mergeStreamHealth, plural } from '@/lib/format'
-import { REMOTE_SOUND_STALE_MESSAGE, createRemoteIntentQueue } from '@/lib/remote-intent-queue'
+import {
+  REMOTE_SOUND_STALE_MESSAGE,
+  createRemoteIntentQueue,
+  remoteIntentKind
+} from '@/lib/remote-intent-queue'
 import {
   confirmedSystemAudioMix,
   nextSystemAudioJoin,
@@ -795,11 +800,16 @@ const NATIVE_PREVIEW_SURFACE_PRESENT_REPORT_INTERVAL_MS = 250
 const PREPARED_PLATFORM_LIFECYCLE_OWNER_PREFIX = 'prepared-platform:'
 const PLATFORM_CLEANUP_X_END_TIMEOUT_MS = 4000
 const AI_CONSENT_STORAGE_KEY = 'videorc.aiConsent'
-const RECORDING_STOPPED_UNEXPECTEDLY_TOAST_ID = 'recording-stopped-unexpectedly'
-const MICROPHONE_INPUT_LOST_TOAST_ID = 'microphone-input-lost'
-
 function isPreparedPlatformLifecycleOwner(sessionId: string): boolean {
   return sessionId.startsWith(PREPARED_PLATFORM_LIFECYCLE_OWNER_PREFIX)
+}
+
+/** Plan 250 S6: the notification sources for platforms and Videorc Cloud, on demand. */
+function loadPlatformNotifications() {
+  return import('@/lib/notifications/sources/platforms')
+}
+function loadCloudNotifications() {
+  return import('@/lib/notifications/sources/cloud')
 }
 
 function loadSessionRuntimeRecovery() {
@@ -2682,6 +2692,11 @@ export function handleAccountChangedEvent(
   }
   if (event.reason === 'session-expired') {
     void showVideorcSignInExpired()
+  } else if (event.account.status === 'signed-in') {
+    // Plan 250 S6: what waited on the sign-in resolves.
+    void loadPlatformNotifications().then((source) =>
+      source.resolveSignedIn(Object.values(CHAT_PLATFORM_LABELS))
+    )
   }
 }
 
@@ -2948,6 +2963,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // Plan 223: the watchdog's alerts, drawn here and in the Stream Manager.
   const [watchdogAlerts, setWatchdogAlerts] = useState<WatchdogAlert[]>([])
   const watchdogAlertsRef = useRef<WatchdogAlert[]>([])
+  const watchdogActRef = useRef<(action: WatchdogAction) => void>(() => {})
   // Ids that left without a recovery (M2), gathered from every event until
   // the surface drains them with the next list.
   const watchdogWithdrawnRef = useRef<string[]>([])
@@ -3284,8 +3300,14 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // setup failed at go-live (2026-07-10: Twitch chat needed a reconnect and
   // the failure lived only in a backend warn log). Toast each broken
   // destination once per session, with a jump to the Destinations page.
-  const chatSetupWarnedRef = useRef<{ sessionId?: string; warned: Set<string> }>({
-    warned: new Set()
+  const chatSetupWarnedRef = useRef<{
+    sessionId?: string
+    warned: Set<string>
+    /** The platform of each chat warned about, to resolve its entry (plan 250). */
+    platforms: Map<string, keyof typeof CHAT_PLATFORM_LABELS>
+  }>({
+    warned: new Set(),
+    platforms: new Map()
   })
   const workingAppRef = useRef<SceneApp | undefined>(
     hydrateWorkingScene(loadJson(WORKING_SCENE_KEY, null))?.visual.sources.app
@@ -3333,17 +3355,31 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       return
     }
     if (chatSetupWarnedRef.current.sessionId !== sessionId) {
-      chatSetupWarnedRef.current = { sessionId, warned: new Set() }
+      chatSetupWarnedRef.current = { sessionId, warned: new Set(), platforms: new Map() }
     }
-    for (const warning of chatSetupToastWarnings(liveChatSnapshot.providers)) {
+    const chatWarnings = chatSetupToastWarnings(liveChatSnapshot.providers)
+    for (const warning of chatWarnings) {
       if (chatSetupWarnedRef.current.warned.has(warning.id)) {
         continue
       }
       chatSetupWarnedRef.current.warned.add(warning.id)
-      toast.warning(`${CHAT_PLATFORM_LABELS[warning.platform]} chat isn't connected`, {
-        description: warning.message,
-        action: { label: 'Open Destinations', onClick: () => openWorkspaceTab('live') }
-      })
+      chatSetupWarnedRef.current.platforms.set(warning.id, warning.platform)
+      // Plan 250 S6: one entry per destination's chat, behind the bell.
+      void loadPlatformNotifications().then((source) =>
+        source.publishChatNotConnected(warning, CHAT_PLATFORM_LABELS[warning.platform])
+      )
+    }
+    // A chat that connected after all resolves its entry. Only a provider
+    // that says it is connected counts: one that is connecting again, or
+    // gone from the snapshot, proves nothing.
+    for (const [id, platform] of chatSetupWarnedRef.current.platforms) {
+      if (liveChatSnapshot.providers.find((provider) => provider.id === id)?.state !== 'connected')
+        continue
+      chatSetupWarnedRef.current.platforms.delete(id)
+      chatSetupWarnedRef.current.warned.delete(id)
+      void loadPlatformNotifications().then((source) =>
+        source.resolveChatNotConnected(id, CHAT_PLATFORM_LABELS[platform])
+      )
     }
     // Plan 215 A3: a connector parked on the Videorc sign-in is not "isn't
     // connected", and Livestream would show X healthy. The toast names the
@@ -4637,6 +4673,22 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
 
   const settingsRef = useRef(settings)
   settingsRef.current = settings
+  // Plan 250: the notification store asks these two when something might pop
+  // up. The store is a lazy chunk; nothing is published before this lands.
+  useEffect(() => {
+    void loadNotifications().then(({ notifications, startMainNotificationRelay }) => {
+      notifications.configure({
+        // A cloud room on air or recording has no local session, and is
+        // live all the same (as for the watchdog, plan 249 S26).
+        live: () =>
+          sessionOwnsTransport(recordingRef.current) ||
+          cloudRoomActivityFromCloudStatus(cloudStatusRef.current) !== null,
+        quiet: () => quietWhileLiveOn(settingsRef.current)
+      })
+      // S8: the Stream Manager's bell reads a copy of the list through main.
+      startMainNotificationRelay(() => quietWhileLiveOn(settingsRef.current))
+    })
+  }, [])
   // Stable handle for callbacks that only need to READ the config (labels,
   // lookups) without re-creating themselves on every config change.
   const lastRecordingStateRef = useRef<RecordingStatus['state'] | null>(null)
@@ -5136,9 +5188,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       streamTargetStatesRef.current = new Map()
       return
     }
-    for (const notice of streamTargetNotices(streamTargetStatesRef.current, streamTargets)) {
-      showStreamTargetNotice(notice)
-    }
+    showStreamTargetNotices(streamTargetNotices(streamTargetStatesRef.current, streamTargets))
     streamTargetStatesRef.current = new Map(
       streamTargets.map((target) => [target.targetId, target.state])
     )
@@ -5472,9 +5522,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   }, [])
   const dismissSessionRuntimeNotice = useCallback(() => {
     sessionRuntimeEpochRef.current += 1
+    // Plan 250: this clears the Studio's inline alert. The entry behind the
+    // bell stays until it resolves or the streamer clears it.
     replaceSessionRuntimeNotice(null)
-    toast.dismiss(RECORDING_STOPPED_UNEXPECTEDLY_TOAST_ID)
-    toast.dismiss(MICROPHONE_INPUT_LOST_TOAST_ID)
   }, [replaceSessionRuntimeNotice])
   const clearSessionRuntimeState = useCallback(() => {
     recordingFailureSessionRef.current = null
@@ -5656,7 +5706,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         if (owner) void settleClaimedPlatformLifecycleOwnerRef.current?.(owner).catch(reportError)
       }
       setCloudStatus(next)
-      void loadCloudNotices().then((n) => n.toastCloudStatus(previous, next))
+      void loadCloudNotifications().then((source) => source.publishCloudStatus(previous, next))
     },
     [claimPlatformLifecycleOwner, latchHandOff, reportError]
   )
@@ -5802,7 +5852,24 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     const withdrawn = watchdogWithdrawnRef.current.splice(0)
     if (previous.length === 0 && watchdogAlerts.length === 0) return
     void import('@/lib/watchdog-surface').then((surface) =>
-      surface.onWatchdogAlertsChanged(previous, watchdogAlerts, watchdogDeps(), { withdrawn })
+      surface.onWatchdogAlertsChanged(previous, watchdogAlerts, watchdogDeps())
+    )
+    // Plan 250: each open alert is an entry behind the bell, on its subject.
+    void Promise.all([
+      import('@/lib/notifications'),
+      import('@/lib/notifications/sources/watchdog')
+    ]).then(([{ notifications }, source]) =>
+      source.syncWatchdogAlerts(
+        notifications,
+        previous,
+        watchdogAlerts,
+        {
+          fix: (alert, fix) => watchdogActRef.current({ kind: 'fix', alert, fix }),
+          acknowledge: (alert) => watchdogActRef.current({ kind: 'acknowledge', alert }),
+          snooze: (alert, scope) => watchdogActRef.current({ kind: 'snooze', alert, scope })
+        },
+        { withdrawn }
+      )
     )
   }, [watchdogAlerts, watchdogDeps])
   const watchdogAct = useCallback(
@@ -5817,6 +5884,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     },
     [client, watchdogDeps]
   )
+  watchdogActRef.current = watchdogAct
   // The notification's click, a fix from the Stream Manager and the idle
   // time for still-there (plan 223 A6, A7), mounted from the lazy chunk.
   // Plan 249 S26: a cloud room on air is live too: it has no local session,
@@ -6711,9 +6779,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         setActiveStartIntent(null)
       }
       recordingRef.current = status
-      if (!['recording', 'streaming'].includes(status.state)) {
-        toast.dismiss('recording-degraded')
-      }
       if (!isActiveRecordingState(status.state)) {
         // Plan 174 S3.1: whatever ended the session, an armed hotkey press
         // means nothing now, and the next start brings its own intent.
@@ -7791,16 +7856,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       return
     }
     xProducerReminderShownRef.current = true
-    toast.info('X feed is connected: start the broadcast on X', {
-      description:
-        "X doesn't go live from the RTMP feed alone: open Media Studio → Producer → Broadcasts, " +
-        'create a broadcast from your source, and press Broadcast.',
-      duration: 20000,
-      action: {
-        label: 'Open Media Studio',
-        onClick: () => void window.videorc?.openOAuthUrl?.(X_MEDIA_STUDIO_URL)
-      }
-    })
+    // Plan 250 S6: a step of Go Live, so it still pops up; the entry keeps
+    // the Media Studio door after the toast has gone.
+    void loadPlatformNotifications().then((source) => source.publishXStartBroadcast())
   }, [recording.state, recordingLive])
 
   useEffect(() => {
@@ -7849,13 +7907,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           }
         })
       }
-      if (event.state === 'running') {
-        toast.dismiss('backend-lifecycle')
-      } else {
-        void loadSessionRuntimeRecovery().then((runtime) => {
-          if (!disposed && latestLifecycleEvent === event) runtime.showBackendLifecycle(event)
-        })
-      }
+      // Plan 250: one `backend` entry: restarting opens it, running resolves
+      // it, failed and lost make it urgent.
+      void loadSessionRuntimeRecovery().then((runtime) => {
+        if (!disposed && latestLifecycleEvent === event) runtime.showBackendLifecycle(event)
+      })
     })
 
     return () => {
@@ -8783,9 +8839,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         ) {
           void publishMicrophoneInputLost(event)
         } else {
-          // Plan 076: a timeline loss that recovered clears its notice.
+          // Plan 076: a timeline loss that recovered clears its notice. Only
+          // the audio's own recoveries: disk space or the connection coming
+          // back says nothing about a microphone that is still lost.
           if (
-            /-recovered$/.test(event.code) &&
+            /^(?:microphone-(?:input|timeline|signal)|system-audio)-recovered$/.test(event.code) &&
             sessionRuntimeNoticeRef.current?.kind === 'microphone-input-lost'
           ) {
             microphoneInputLostSessionRef.current = null
@@ -9156,6 +9214,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           replayArmedRef.current = false
           setReplayArmedState(false)
           void import('@/lib/replay-buffer').then((replay) => replay.showClipsStopped(next.reason))
+        } else if (next.state === 'on') {
+          // The ring keeps the last seconds again: its entry resolves.
+          withWorkNotifications((work) => work.resolveClips())
         }
         scheduleReplayReconcile()
       }),
@@ -9311,12 +9372,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         // bundle; the streamer gets what to do. A backend `error` event can
         // repeat every reconnect: one toast per text.
         console.warn('[backend-error] event:', message)
-        notifyOnce(`backend-error:${message}`, 'error', 'Videorc hit a problem', {
-          description: 'Export a support bundle from Health if it repeats.',
-          // The door to Health (plan 174 D9), on the toast's timed life.
-          action: openHealthToastAction(),
-          duration: TOAST_WITH_DESCRIPTION_MS
-        })
+        // Plan 250: one counted entry behind the bell, with the door to Health.
+        withAppNotifications((app) => app.publishBackendError())
       }),
       nextClient.on('connection.closed', () => {
         soundboard.disconnect(nextClient)
@@ -11134,10 +11191,13 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
               console.warn(
                 `Layout committed at revision ${status.sceneRevision}; native preview presentation proof was not observed. ${detail}`
               )
-              notifyOnce('layout-preview-proof-lag', 'info', 'The preview may be behind', {
-                description:
+              withAppNotifications((app) =>
+                app.publishAppNews(
+                  'preview-behind',
+                  'The preview may be behind',
                   'Your stream and recording have the new scene. Reopen the preview if it looks stale.'
-              })
+                )
+              )
               return
             }
             console.warn(
@@ -12225,7 +12285,13 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // background), so no device opens while setup is open. The library sync
   // above sees the fingerprint already applied. Setup's changes start the
   // Studio with no undo history and no saved-scene origin (a built-in look).
-  // The setup chunk has already loaded the look's helpers when this runs.
+  // The look's helpers load when setup opens, so a choice is applied inside
+  // its own press: React draws it before the next press. Applied a tick
+  // later, a second choice 2 ms after the first rebuilt the look from the
+  // one still drawn and undid the first.
+  useEffect(() => {
+    if (firstRunSetupOpen) warmFirstRunLook()
+  }, [firstRunSetupOpen])
   const applyFirstRunLook = useCallback(
     (look: FirstRunLook): void => {
       if (firstRunLookWritesHeld(recordingRef.current)) {
@@ -12238,27 +12304,25 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         firstRunLookHoldRef.current = null
         setFirstRunLookHold(null)
       }
-      void import('@/lib/first-run-look').then(
-        ({ firstRunBackgroundChoice, firstRunLookPatch }) => {
-          const current = captureConfigRef.current
-          if (current.layout.arrangementMode === 'freeform') {
-            noteLayoutLeavingFreeform(current.layout)
-          }
-          const next = firstRunLookPatch(current, look)
-          latestRequestedLayoutRef.current = next.layout.layoutPreset
-          setWorkingOrigin('builtin')
-          activeSavedSceneIdRef.current = null
-          setActiveSavedSceneId(null)
-          setCaptureConfig((latest) => firstRunLookPatch(latest, look))
-          const registry = backgroundRegistryRef.current
-          const nextRegistry = firstRunBackgroundChoice(registry, look.liveBackgroundId)
-          const background = effectiveSceneBackground(nextRegistry)
-          libraryBackgroundFingerprintRef.current = JSON.stringify(snapshotBackground(background))
-          workingBackgroundRef.current = background
-          setWorkingBackground(background)
-          if (nextRegistry !== registry) setBackgroundRegistry(nextRegistry)
+      withFirstRunLook(({ firstRunBackgroundChoice, firstRunLookPatch }) => {
+        const current = captureConfigRef.current
+        if (current.layout.arrangementMode === 'freeform') {
+          noteLayoutLeavingFreeform(current.layout)
         }
-      )
+        const next = firstRunLookPatch(current, look)
+        latestRequestedLayoutRef.current = next.layout.layoutPreset
+        setWorkingOrigin('builtin')
+        activeSavedSceneIdRef.current = null
+        setActiveSavedSceneId(null)
+        setCaptureConfig((latest) => firstRunLookPatch(latest, look))
+        const registry = backgroundRegistryRef.current
+        const nextRegistry = firstRunBackgroundChoice(registry, look.liveBackgroundId)
+        const background = effectiveSceneBackground(nextRegistry)
+        libraryBackgroundFingerprintRef.current = JSON.stringify(snapshotBackground(background))
+        workingBackgroundRef.current = background
+        setWorkingBackground(background)
+        if (nextRegistry !== registry) setBackgroundRegistry(nextRegistry)
+      })
     },
     [setBackgroundRegistry, setWorkingOrigin]
   )
@@ -12474,7 +12538,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         : []
     const keys = new Set(returns.map(({ kind, device }) => `${kind}:${device.id}`))
     for (const old of announcedSourceReturnsRef.current) {
-      if (!keys.has(old)) toast.dismiss(`source-return:${old}`)
+      // Used, or unplugged again: its entry goes.
+      if (!keys.has(old)) withAppNotifications((app) => app.withdrawSourceReturn(old))
     }
     for (const { kind, device } of returns) {
       const key = `${kind}:${device.id}`
@@ -12505,11 +12570,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         applyDevice()
         continue
       }
-      toast(`${device.name} is back`, {
-        id: `source-return:${key}`,
-        duration: Infinity,
-        action: { label: 'Use it', onClick: applyDevice }
-      })
+      // Plan 250: an entry behind the bell with Use it, open until the
+      // device is used or unplugged again.
+      withAppNotifications((app) => app.publishSourceReturn(key, device.name, applyDevice))
     }
     announcedSourceReturnsRef.current = keys
   }, [
@@ -13321,9 +13384,13 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     }
     void window.videorc?.closeNotesWindow?.().then(() => {
       console.warn('[notes] closed for the recording: VIDEORC_NOTES_RECORDING_OVERLAY=0')
-      notifyOnce('notes-closed-for-recording', 'warning', 'Notes closed for this recording', {
-        description: 'Videorc closed them so they stay out of the recording.'
-      })
+      withAppNotifications((app) =>
+        app.publishAppNews(
+          'notes-closed-for-recording',
+          'Notes closed for this recording',
+          'Videorc closed them so they stay out of the recording.'
+        )
+      )
     })
   }, [notesWindow.open, recording.state, runtimeInfo?.notesWindowRecordingOverlayAllowed])
 
@@ -13346,13 +13413,12 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       console.warn(
         '[stream-manager] closed for the recording: no capture protection and VIDEORC_COMMENTS_RECORDING_OVERLAY=0'
       )
-      notifyOnce(
-        'chat-closed-for-recording',
-        'warning',
-        `${WINDOW_NAMES.streamManager} closed for this recording`,
-        {
-          description: 'Videorc closed it so your chat stays out of the recording.'
-        }
+      withAppNotifications((app) =>
+        app.publishAppNews(
+          'chat-closed-for-recording',
+          `${WINDOW_NAMES.streamManager} closed for this recording`,
+          'Videorc closed it so your chat stays out of the recording.'
+        )
       )
     })
   }, [
@@ -13917,7 +13983,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   useEffect(() => {
     if (!client || !cloudAnnounceDue || isSessionActive || cloudAnnounceShownRef.current) return
     cloudAnnounceShownRef.current = true
-    void loadCloudNotices().then((n) => n.announceCloud(client, commitCloudStatus))
+    void loadCloudNotifications().then((source) => source.announceCloud(client, commitCloudStatus))
   }, [client, cloudAnnounceDue, commitCloudStatus, isSessionActive])
   // Plan 215 D1: the Scene page unlocks a source's position and size only
   // once the session says a commit reaches its picture.
@@ -16675,10 +16741,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             }
             const notice = (await loadGoLiveOutput()).goLiveSessionOutputNotice(output)
             if (notice) {
-              toast.info(notice.title, {
-                id: 'stream-output-adjusted',
-                description: notice.description
-              })
+              void loadPlatformNotifications().then((source) =>
+                source.publishStreamOutputAdjusted(notice)
+              )
             }
           }
           if (talkShowRoomOpenRef.current) {
@@ -19276,14 +19341,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         const chosen = captureConfigRef.current.video
         const tooHeavy = next.result && performanceCheckTooHeavyToast(chosen, next.result)
         if (tooHeavy) {
-          toast.warning(tooHeavy.title, {
-            id: 'output-too-heavy',
-            description: tooHeavy.description,
-            action: {
-              label: tooHeavy.actionLabel,
-              onClick: () => applyVideoPresetRef.current?.(tooHeavy.preset)
-            }
-          })
+          withAppNotifications((app) =>
+            app.publishOutputTooHeavy(tooHeavy, () =>
+              applyVideoPresetRef.current?.(tooHeavy.preset)
+            )
+          )
         }
       })
     ]
@@ -19453,11 +19515,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error)
           setLastError(`Couldn't migrate saved ${label} stream key: ${message}`)
-          toast.warning(`Save your ${label} stream key again`, {
-            id: `stream-key-migration:${candidate.targetId}`,
-            description:
-              'Paste it in Destinations → Setup so Videorc can store it securely. It works for now.'
-          })
+          void loadPlatformNotifications().then((source) =>
+            source.publishStreamKeyMigration(label, candidate.targetId)
+          )
         }
       }
     })()
@@ -19962,7 +20022,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const handleRemoteIntent = useEffectEvent(async (payload: unknown) => {
     const source = studioActionSource()
     if (!source) return
-    const intentKind = (payload as { kind?: unknown } | null)?.kind
+    // The envelope is `{intentId, intent: {kind}}`, not `{kind}`.
+    const intentKind = remoteIntentKind(payload)
     if (intentKind === 'recordStart' || intentKind === 'streamStart') {
       noteRecordClick('start')
     } else if (intentKind === 'recordStop' || intentKind === 'streamStop') {

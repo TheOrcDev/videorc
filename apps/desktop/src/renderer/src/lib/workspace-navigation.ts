@@ -25,10 +25,15 @@ export type WorkspaceNavigation =
   | { tab: 'settings'; settingsTab?: SettingsTabId }
   | { tab: 'ai'; buddyTab?: BuddyTabId }
   | { tab: 'avatar'; avatarTab?: AvatarTabId }
-  | { tab: 'live'; livestreamView?: LivestreamViewId }
+  | {
+      tab: 'live'
+      livestreamView?: LivestreamViewId
+      /** The destination whose card opens in Setup (plan 250 S4). */
+      destinationId?: string
+    }
   | {
       tab: 'library'
-      /** The session the action is about. The Library does not scroll to it yet. */
+      /** The recording the action is about: the Library opens on its row. */
       sessionId?: string
     }
   | { tab: PlainWorkspaceTab }
@@ -68,6 +73,15 @@ function workspaceNavigation(tab: WorkspaceTab, subTab: string | undefined): Wor
     default:
       return { tab }
   }
+}
+
+/** Opens Destinations → Setup on one destination's card (plan 250 S4). */
+export function openDestination(destinationId: string): void {
+  window.dispatchEvent(
+    new CustomEvent<WorkspaceNavigation>(WORKSPACE_NAVIGATE_EVENT, {
+      detail: { tab: 'live', livestreamView: 'setup', destinationId }
+    })
+  )
 }
 
 // Plan 203 S5/S6: "Run setup again…" (Settings → General, ⌘K) replays

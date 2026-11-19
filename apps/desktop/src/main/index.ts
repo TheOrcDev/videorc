@@ -18,6 +18,7 @@ import {
 } from './camera-extension'
 import { runVirtualCameraAction } from './virtual-camera-action'
 import { WatchdogNotifyLedger, watchdogNotifyDecision } from './watchdog-notify'
+import { notificationActRaisesMainWindow } from '../shared/notifications-relay'
 import { runLinuxLoadModule } from './virtual-camera-linux-setup'
 import { importScheduledThumbnail } from './scheduled-stream-thumbnail'
 import { writeBackgroundThumbnail } from './background-thumbnail'
@@ -1012,6 +1013,9 @@ let latestChatGifMode: TwitchGifMode = DEFAULT_TWITCH_GIF_MODE
 /** The Stream Manager's latest dashboard, history included (plan 055, S7). */
 let latestDashboardState: LiveDashboardState | null = null
 let markerContext: import('../shared/session-markers').MarkerContext | null = null
+/** Plan 250 S8: the main window's notification list, as it last pushed it. */
+let notificationsSnapshot: import('../shared/notifications-relay').NotificationsSnapshot | null =
+  null
 /** The banner list the Stream Manager shows (plan 186 S7): `{id, name, shown}`
  * from the Studio renderer, null until it has read the list. */
 let latestCommentsBanners: import('../shared/banner-commands').BannerSummary[] | null = null
@@ -4552,6 +4556,20 @@ function commentsCaptureHeaderSignal(
   return signal
 }
 
+/**
+ * Plan 250 S8: the Stream Manager's open list holds pop-ups back in the main
+ * window. A window that closed, reloaded or lost its renderer cannot say its
+ * list closed, so main says it: otherwise urgent pop-ups stayed held until
+ * the main window reloaded.
+ */
+function releaseStreamManagerNotificationList(): void {
+  if (!mainWindow || mainWindow.isDestroyed() || mainWindow.webContents.isDestroyed()) return
+  sendElectronEvent(mainWindow.webContents, 'notifications:act-request', {
+    type: 'list-open',
+    open: false
+  })
+}
+
 function emitCommentsWindowState(message?: string): void {
   if (appIsQuitting) {
     return
@@ -4685,7 +4703,16 @@ async function openCommentsWindow({
       commentsWindowClosing = false
       commentsWindowContentProtected = false
       emitCommentsWindowState()
+      releaseStreamManagerNotificationList()
     }
+  })
+  // Plan 250 S8: a Stream Manager that reloads or whose renderer dies never
+  // runs the cleanup that says its list closed.
+  window.webContents.on('did-navigate', () => {
+    if (commentsWindow === window) releaseStreamManagerNotificationList()
+  })
+  window.webContents.on('render-process-gone', () => {
+    if (commentsWindow === window) releaseStreamManagerNotificationList()
   })
 
   const rendererUrl = trustedRendererDevServerUrl(process.env.ELECTRON_RENDERER_URL, app.isPackaged)
@@ -19392,6 +19419,40 @@ app.whenReady().then(async () => {
       throw new Error('Only Stream Manager can ask for a watchdog fix here.')
     if (!mainWindow || mainWindow.webContents.isDestroyed()) return false
     sendElectronEvent(mainWindow.webContents, 'watchdog:fix-request', request)
+    return true
+  })
+  // Plan 250 S8: the Stream Manager's bell. The list lives in the main
+  // window's renderer; main keeps the last copy, hands it to a Stream
+  // Manager that opens later, and carries back what is pressed there.
+  secureIpcHandle('comments-window:notifications-get', () => notificationsSnapshot)
+  secureIpcHandle('comments-window:notifications-push', (event, snapshot) => {
+    if (!mainWindow || event.sender.id !== mainWindow.webContents.id) return false
+    notificationsSnapshot = snapshot
+    if (commentsWindow && !commentsWindow.webContents.isDestroyed())
+      sendElectronEvent(commentsWindow.webContents, 'comments-window:notifications', snapshot)
+    return true
+  })
+  // An urgent pop-up shows in the window the streamer is in: the Stream
+  // Manager takes it only while it is the focused window.
+  secureIpcHandle('comments-window:notification-pop-up-push', (event, popUp) => {
+    if (!mainWindow || event.sender.id !== mainWindow.webContents.id) return false
+    if (!commentsWindow || commentsWindow.webContents.isDestroyed()) return false
+    if (popUp.type === 'show' && !commentsWindow.isFocused()) return false
+    sendElectronEvent(commentsWindow.webContents, 'comments-window:notification-pop-up', popUp)
+    return true
+  })
+  secureIpcHandle('comments-window:notification-act', (event, request) => {
+    if (!commentsWindow || event.sender.id !== commentsWindow.webContents.id)
+      throw new Error('Only Stream Manager can act on a notification here.')
+    if (!mainWindow || mainWindow.webContents.isDestroyed()) return false
+    // A door opens a page in the main window: bring it forward first, as the
+    // watchdog's system notification does on a click.
+    if (notificationActRaisesMainWindow(request)) {
+      if (mainWindow.isMinimized()) mainWindow.restore()
+      mainWindow.show()
+      mainWindow.focus()
+    }
+    sendElectronEvent(mainWindow.webContents, 'notifications:act-request', request)
     return true
   })
   secureIpcHandle('comments-window:marker-context-get', () => markerContext)

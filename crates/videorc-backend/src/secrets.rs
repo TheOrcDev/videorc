@@ -368,6 +368,20 @@ impl SecretStoreBackend for SelectedSecretStore {
     }
 }
 
+/// Points this test thread at the in-memory store with an empty cache, for
+/// tests in other modules that need a stored secret (the session token).
+/// Tokio's default test runtime runs spawned tasks on this same thread.
+#[cfg(test)]
+pub(crate) fn scope_memory_secret_store_for_tests() {
+    TEST_STORE_SCOPE.with(|scope| {
+        *scope.borrow_mut() = Some(TestStoreScope {
+            store: Some(MEMORY_TEST_SECRET_STORE_KIND.to_string()),
+            path: None,
+        });
+    });
+    TEST_STORE_CACHE.with(|cache| *cache.borrow_mut() = None);
+}
+
 /// Runs once at backend start, before any command: loads the store (on
 /// Windows this is where a plaintext file becomes DPAPI-protected), removes
 /// the staged `.tmp` copy a write that died before its rename left behind, and

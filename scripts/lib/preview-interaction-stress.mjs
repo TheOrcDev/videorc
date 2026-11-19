@@ -49,6 +49,12 @@ export const PREVIEW_TIMELINE_LIMITS = Object.freeze({
  */
 export const PREVIEW_WINDOW_TITLES = Object.freeze(['Preview', 'Videorc Preview'])
 
+/** Titles of the native preview surface windows, never the Preview or main window. */
+const PREVIEW_SURFACE_WINDOW_TITLES = Object.freeze([
+  'Videorc Native Preview Surface',
+  'Videorc Preview Surface'
+])
+
 /** Only the already-authenticated Electron PID establishes owned window roles. */
 export function previewCgWindowEvidence(sample, expectedWindowPid) {
   const windows = Array.isArray(sample?.windows) ? sample.windows : []
@@ -71,7 +77,7 @@ export function previewCgWindowEvidence(sample, expectedWindowPid) {
             ? 'preview'
             : window.name === 'Videorc'
               ? 'main'
-              : ['Videorc Native Preview Surface', 'Videorc Preview Surface'].includes(window.name)
+              : PREVIEW_SURFACE_WINDOW_TITLES.includes(window.name)
                 ? 'surface'
                 : 'owned-other',
         layer:
@@ -755,7 +761,12 @@ export function analyzeCgWindowObservations(
     if (hostKind === 'in-process') {
       inProcessSamples += 1
       if (helpers.length > 0) inProcessHelperWindowSamples += 1
-      const bases = findInProcessPreviewWindows(windows, expectedWindowPid)
+      const bases = findInProcessHostWindows(
+        windows,
+        expectedWindowPid,
+        observation.hostWindow ?? null,
+        bounds
+      )
       if (bases.length !== 1) {
         inProcessWindowCountMismatchSamples += 1
         if (bases.length === 0) baseMissingSamples += 1
@@ -914,6 +925,8 @@ export function cgOraclePreviewReady(
   sample,
   {
     hostKind,
+    hostWindow = null,
+    expectedBounds = null,
     helperOwner = 'native_preview_host_helper',
     expectedWindowPid,
     requirePixels = false,
@@ -924,7 +937,8 @@ export function cgOraclePreviewReady(
   const windows = sample.windows ?? []
   const hostReady =
     hostKind === 'in-process'
-      ? findInProcessPreviewWindows(windows, expectedWindowPid).length === 1
+      ? findInProcessHostWindows(windows, expectedWindowPid, hostWindow, expectedBounds).length ===
+        1
       : hostKind === 'helper-process'
         ? windows.some((window) => window.owner === helperOwner && window.alpha > 0)
         : false
@@ -933,6 +947,61 @@ export function cgOraclePreviewReady(
   return (
     (finiteNumber(sample.pixel?.sampleCount) ?? 0) > 0 &&
     (finiteNumber(sample.pixel?.blankBaseFraction) ?? 1) < maxBlankBaseFraction
+  )
+}
+
+/**
+ * The one window that holds the in-process CAMetalLayer. A floating Preview is
+ * its own window, found by title. Since plan 213 D (#1018) a docked Preview on
+ * macOS is a layer inside the main window (`nativePreviewHostWindow: 'main'`),
+ * so there is no Preview window at all: the host is the owned MAIN window,
+ * found by its title ('Videorc', or '<Page> – Videorc' from app-shell.tsx),
+ * and the docked layer's screen bounds must sit inside it. A Preview window is
+ * never the docked host: with no main window there is no host (empty), and a
+ * visible Preview window beside the main one is a second presentation, so the
+ * result has more than one window (a mismatch).
+ */
+export function findInProcessHostWindows(
+  windows,
+  expectedWindowPid,
+  hostWindow = null,
+  expectedBounds = null
+) {
+  const previews = findInProcessPreviewWindows(windows, expectedWindowPid)
+  if (hostWindow !== 'main') return previews
+  // Without the layer's bounds the host cannot be checked: not ready.
+  if (!validBounds(expectedBounds)) return []
+  const expectedPid = finiteNumber(expectedWindowPid)
+  const mains = windows.filter((window) => {
+    const owner = String(window.owner ?? '').toLowerCase()
+    return (
+      window.alpha > 0 &&
+      (expectedPid === null || window.pid === expectedPid) &&
+      (owner.includes('electron') || owner.includes('videorc')) &&
+      isMainWindowTitle(window.name) &&
+      containsBounds(window, expectedBounds, DOCKED_LAYER_BOUNDS_MARGIN_PX)
+    )
+  })
+  if (mains.length === 0) return []
+  return [...mains, ...previews]
+}
+
+/** Slack for rounding between Electron DIP bounds and CGWindow points. */
+const DOCKED_LAYER_BOUNDS_MARGIN_PX = 2
+
+/** The main window's title: 'Videorc', or the open page's '<Page> – Videorc'. */
+export function isMainWindowTitle(name) {
+  const title = String(name ?? '')
+  return title === 'Videorc' || /^.+ – Videorc$/.test(title)
+}
+
+function validBounds(bounds) {
+  return (
+    bounds !== null &&
+    typeof bounds === 'object' &&
+    ['x', 'y', 'width', 'height'].every((key) => Number.isFinite(bounds[key])) &&
+    bounds.width > 0 &&
+    bounds.height > 0
   )
 }
 

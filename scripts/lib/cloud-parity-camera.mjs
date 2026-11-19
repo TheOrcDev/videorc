@@ -14,6 +14,7 @@ import { join } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
 import {
   CASE_LAYOUT_PATCH,
+  CASE_LOOK,
   assessCameraCase,
   cameraCaseConfig,
   markerPoints
@@ -143,6 +144,29 @@ export async function acquireCameraCase({ desktopRoot, webRoot, config = cameraC
       h.env.VIDEORC_ROOM_PROCESSED_CAMERA_FIXTURE = `${source.width}x${source.height}`
       await h.destinations(0)
       await h.launch()
+      // The look is a per-camera setting (`settings.cameraLooks`), never a
+      // layout field: the Studio replaces `layout.cameraLook` with the selected
+      // camera's stored look, so the layout patch alone never reached the
+      // camera ("look patch unchanged"). Store it as a user's saved look for
+      // the fixture camera, then reload the Studio so it reads its settings.
+      await h.eval(
+        `const settings = JSON.parse(localStorage.getItem('videorc.settings') ?? '{}');
+         settings.cameraLooks = { ...settings.cameraLooks, 'parity-camera': ${JSON.stringify(CASE_LOOK)} };
+         localStorage.setItem('videorc.settings', JSON.stringify(settings));
+         window.__parityBeforeReload = true;
+         setTimeout(() => location.reload(), 0);
+         return true`
+      )
+      await waitFor(
+        () =>
+          h
+            .eval(
+              'return !window.__parityBeforeReload && !!window.__videorcSmokeScenePresets?.roomFixtureDevices'
+            )
+            .catch(() => false),
+        'The Studio reloads with the stored camera look',
+        config.readinessMs
+      )
       await prepareParityRoom(h, false)
       await h.eval(
         `const s = window.__videorcSmokeScenePresets; const c = s.streamingState().captureConfig; s.configure({ layout: { ...c.layout, ...${JSON.stringify(CASE_LAYOUT_PATCH)} } }); return true`

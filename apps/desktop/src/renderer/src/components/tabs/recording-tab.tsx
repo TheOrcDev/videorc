@@ -41,6 +41,7 @@ import { Switch } from '@/components/ui/switch'
 import { Spinner } from '@/components/ui/spinner'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { VideoPresetSelectItems, videoPresetItems } from '@/components/video-preset-select-items'
+import { useSectionFocus } from '@/hooks/use-section-focus'
 import { useStudioCloud, useStudioCore, useStudioReplay } from '@/hooks/use-studio'
 import { RECORDING_GOES_TO_CLOUD } from '@/lib/talk-show-session'
 import type { DirectoryFacts, VideoSettings } from '@/lib/backend'
@@ -106,6 +107,7 @@ function ClipsSection(): ReactElement {
   return <NativeClipsSection />
 }
 function NativeClipsSection(): ReactElement {
+  useSectionFocus('output-clips')
   const { captureConfig, settings, setSettings, runtimeInfo, recordBlockedReason } = useStudioCore()
   const clips = useStudioReplay()
   const { enabled } = captureConfig.replayBuffer
@@ -122,6 +124,7 @@ function NativeClipsSection(): ReactElement {
   )
   return (
     <PanelSection
+      data-section-focus="output-clips"
       description="Videorc keeps the last minute of your screen and microphone while it is open, so one key saves the last 30 seconds or the whole minute as a clip. While you record, the moment is also marked in the recording."
       icon={ClipIcon}
       title={CLIPS_LABEL}
@@ -484,6 +487,7 @@ function LocalRecordingSection(): ReactElement {
  * Show in Finder and Use default (I-22, I-23), and Keep original recording.
  */
 function RecordingsFolderSection(): ReactElement {
+  useSectionFocus('output-recordings')
   const { settings, setSettings, runtimeInfo } = useStudioCore()
   const platform = runtimeInfo?.platform
   const handle = settings.outputDirectoryHandle
@@ -530,6 +534,7 @@ function RecordingsFolderSection(): ReactElement {
 
   return (
     <PanelSection
+      data-section-focus="output-recordings"
       description="The folder each recording is saved to, and what Videorc keeps there."
       title="Where recordings go"
     >

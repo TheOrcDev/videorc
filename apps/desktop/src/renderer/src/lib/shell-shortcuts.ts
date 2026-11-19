@@ -14,6 +14,7 @@ export type ShellShortcutAction =
   | 'show-stream-manager'
   | 'toggle-stream-manager'
   | 'toggle-captions'
+  | 'toggle-notifications'
   | 'open-shortcuts'
 
 export interface ShellShortcutContext {
@@ -21,6 +22,8 @@ export interface ShellShortcutContext {
   /** `isModalOpen()` at the time of the press. */
   modalOpen: boolean
   searchOpen: boolean
+  /** The list behind the bell is open (plan 250): its key closes it. */
+  notificationsOpen?: boolean
   notesWindowEnabled: boolean
   commentsWindowEnabled: boolean
 }
@@ -30,7 +33,8 @@ type ShellKey = Pick<KeyboardEvent, 'key' | 'metaKey' | 'ctrlKey' | 'altKey' | '
 /**
  * What a keydown in the main window does, or null when it is not one of the
  * shell's chords. Under a dialog or a menu nothing runs except ⌘K closing
- * Search, so a chord never acts from under a question.
+ * Search and ⇧⌘B closing Notifications (each is the open surface's own key),
+ * so a chord never acts from under a question.
  */
 export function shellShortcutAction(
   event: ShellKey,
@@ -39,9 +43,11 @@ export function shellShortcutAction(
   if (!isCommandKey(event, context.platform) || event.altKey) return null
   const key = event.key.toLowerCase()
   if (context.modalOpen) {
+    if (key === 'b' && event.shiftKey && context.notificationsOpen) return 'toggle-notifications'
     return key === 'k' && !event.shiftKey && context.searchOpen ? 'close-search' : null
   }
   if (event.shiftKey) {
+    if (key === 'b') return 'toggle-notifications'
     if (key === 'n') return context.notesWindowEnabled ? 'toggle-notes' : null
     if (key === 'j') return context.commentsWindowEnabled ? 'toggle-stream-manager' : null
     if (key === 'c') return 'toggle-captions'

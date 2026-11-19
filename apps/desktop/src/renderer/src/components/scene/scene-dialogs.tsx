@@ -496,6 +496,20 @@ function SceneNameDialog({
 }
 
 /**
+ * The Set key dialog's description. Under Wayland (`globalShortcutsUnavailable`
+ * set by main) no global key is registered at all, so it says the key won't work
+ * here instead of promising it works from any app.
+ */
+export function sceneKeyDescription(
+  sceneName: string,
+  globalShortcutsUnavailable?: string | null
+): string {
+  return globalShortcutsUnavailable
+    ? `This Wayland session can't hear keys while Videorc is in the background, so a key for “${sceneName}” won't work here. Click the field and press the keys.`
+    : `Puts “${sceneName}” on stream from any app. Click the field and press the keys.`
+}
+
+/**
  * Set key…: the scene's global key, recorded like every key in Settings →
  * Shortcuts (plan 210 D7). There are no default keys.
  */
@@ -526,7 +540,7 @@ function SceneKeyDialog({
         <DialogHeader>
           <DialogTitle>Set key</DialogTitle>
           <DialogDescription>
-            Puts “{scene.name}” on stream from any app. Click the field and press the keys.
+            {sceneKeyDescription(scene.name, runtimeInfo?.globalShortcutsUnavailable)}
           </DialogDescription>
         </DialogHeader>
         {runtimeInfo?.globalShortcutsUnavailable ? (

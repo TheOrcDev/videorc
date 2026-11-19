@@ -6,7 +6,6 @@ import type { RoomMicrophoneChoice } from '@/lib/room-microphone-source'
 import { roomFrameTestEnabled } from '../lib/room-frame-test-state'
 import { roomPcmTestEnabled } from '../lib/room-pcm-test-state'
 import type { CohostPersona, BuddyOverlaySnapshot, OverlayItemLayout } from '@/lib/backend'
-import { toast } from '@/lib/toast'
 import {
   roomAudioRouting,
   systemControllerEnabled,
@@ -212,20 +211,14 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
   useEffect(() => {
     if (!devicesHeld || !roomOpen) return
     const needs = controller?.needsEnable ?? []
-    toast.info('You control this show here now', {
-      id: 'cloud-controller-continuation',
-      description:
-        needs.length > 0
-          ? `Camera and microphone stay off here until you turn them on. Also off: ${
-              needs.filter((need) => need !== 'camera' && need !== 'microphone').join(', ') ||
-              'nothing else'
-            }.`
-          : 'Camera and microphone stay off here until you turn them on.',
-      duration: Infinity,
-      action: { label: 'Turn on', onClick: () => setEnabledEpoch(holdEpoch) }
-    })
+    // Plan 250 S6: an entry behind the bell that also pops up, because it
+    // answers Continue here. It goes when the devices are on.
+    const source = import('@/lib/notifications/sources/cloud')
+    void source.then((cloud) =>
+      cloud.publishCloudController(needs, () => setEnabledEpoch(holdEpoch))
+    )
     return () => {
-      toast.dismiss('cloud-controller-continuation')
+      void source.then((cloud) => cloud.withdrawCloudController())
     }
   }, [devicesHeld, roomOpen, holdEpoch, controller?.needsEnable])
   const microphoneChoice = useMemo<RoomMicrophoneChoice>(

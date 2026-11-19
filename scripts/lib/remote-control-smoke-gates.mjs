@@ -41,3 +41,28 @@ export function defaultRingVerdict(ring) {
   }
   return null
 }
+
+// Plan 230: the Stream Manager Screen key's tap refusal in a Wayland session
+// (studio-actions/copy.ts). Wayland drops every window position, so the tap
+// does nothing there; only the hold works.
+export const STREAM_MANAGER_WAYLAND_REFUSAL =
+  "Wayland doesn't let Videorc move windows. Hold the key to bring the Stream Manager up."
+
+/**
+ * What the smoke can check of the Screen key's tap on this host, from what
+ * the app reports in `remote.describe` (`screenMoves`, from Electron's
+ * resolved ozone platform) and the screen count: `move` with two screens
+ * where the tap moves the window, `wayland` with two screens in a Wayland
+ * session (the tap must be refused with the Wayland copy), `one-screen`
+ * otherwise. Anything but `supported` or `wayland` is a projection bug: null.
+ * Wayland is a Linux session only, so `wayland` reported on another platform
+ * is a projection bug too (null), never a licence to skip the move check.
+ */
+export function streamManagerScreenKeyPlan(describe, platform = process.platform) {
+  const moves = describe?.screenMoves
+  if (moves !== 'supported' && moves !== 'wayland') return null
+  if (moves === 'wayland' && platform !== 'linux') return null
+  const count = Array.isArray(describe?.screens) ? describe.screens.length : 0
+  if (count < 2) return 'one-screen'
+  return moves === 'wayland' ? 'wayland' : 'move'
+}

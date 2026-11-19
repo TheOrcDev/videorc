@@ -8,7 +8,12 @@ export type AvatarOutput = 'stream' | 'recording'
 export type AvatarOrientation = 'h' | 'v'
 export type AvatarRect = { x: number; y: number; w: number; h: number }
 export type AvatarApplied = { publisherSid: string; revision: number }
-export type StaticCapability = { version: 1; captions?: 1; applied?: AvatarApplied }
+/**
+ * `refs: 1` (PERF-06): this consumer resolves an asset sent without its `png`
+ * (`{ hash, width, height }`) from the snapshot it last applied, so a lease
+ * renewal need not carry the same pixels again. Absent: every asset is sent whole.
+ */
+export type StaticCapability = { version: 1; captions?: 1; refs?: 1; applied?: AvatarApplied }
 export type AvatarCapability = {
   version: 1
   output: AvatarOutput
@@ -17,6 +22,8 @@ export type AvatarCapability = {
   applied?: AvatarApplied
   /** Plan 249 S5: this consumer draws atlas layers and the motion topic. Absent: static only. */
   animation?: 1
+  /** PERF-06: avatar assets may arrive as references (see `StaticCapability.refs`). */
+  refs?: 1
 }
 export type AvatarLayer = {
   kind: 'avatar' | 'bubble'
@@ -49,7 +56,11 @@ const object = (v: unknown): v is Record<string, unknown> =>
 export function parseStaticCapability(v: unknown): StaticCapability | null {
   if (!object(v) || v.version !== 1) return null
   if (v.captions !== undefined && v.captions !== 1) return null
-  const extension = v.captions === 1 ? { captions: 1 as const } : {}
+  if (v.refs !== undefined && v.refs !== 1) return null
+  const extension = {
+    ...(v.captions === 1 ? { captions: 1 as const } : {}),
+    ...(v.refs === 1 ? { refs: 1 as const } : {})
+  }
   if (v.applied === undefined) return { version: 1, ...extension }
   if (
     !object(v.applied) ||
@@ -73,6 +84,7 @@ export function parseAvatarCapability(value: unknown): AvatarCapability | null {
   )
     return null
   if (value.animation !== undefined && value.animation !== 1) return null
+  if (value.refs !== undefined && value.refs !== 1) return null
   const staticCapability =
     value.static === undefined ? undefined : parseStaticCapability(value.static)
   if (value.static !== undefined && !staticCapability) return null
@@ -92,7 +104,8 @@ export function parseAvatarCapability(value: unknown): AvatarCapability | null {
     orientation: value.orientation as AvatarOrientation,
     ...(staticCapability ? { static: staticCapability } : {}),
     ...(applied ? { applied } : {}),
-    ...(value.animation === 1 ? { animation: 1 as const } : {})
+    ...(value.animation === 1 ? { animation: 1 as const } : {}),
+    ...(value.refs === 1 ? { refs: 1 as const } : {})
   }
 }
 export function avatarRect(value: unknown): value is AvatarRect {
@@ -164,6 +177,21 @@ export async function avatarHash(bytes: Uint8Array<ArrayBuffer>): Promise<string
     n.toString(16).padStart(2, '0')
   ).join('')
 }
+/**
+ * PERF-06: a layer whose asset came as a reference (`{ hash, width, height }`,
+ * no `png`) gets the bytes this page holds for that hash; any other layer is
+ * returned as it is. Null: a reference this page cannot resolve. The result is
+ * then validated (and later hashed) exactly like an asset sent whole.
+ */
+export function withHeldPng(
+  layer: unknown,
+  resolve?: (hash: string) => { png: string; width: number; height: number } | undefined
+): unknown {
+  if (!object(layer) || !object(layer.asset) || layer.asset.png !== undefined) return layer
+  const held = typeof layer.asset.hash === 'string' ? resolve?.(layer.asset.hash) : undefined
+  if (!held || held.width !== layer.asset.width || held.height !== layer.asset.height) return null
+  return { ...layer, asset: { ...layer.asset, png: held.png } }
+}
 export function parseAvatarSnapshot(
   value: unknown,
   page: {
@@ -172,6 +200,11 @@ export function parseAvatarSnapshot(
     output: AvatarOutput
     orientation: AvatarOrientation
     now: number
+    /**
+     * PERF-06: the asset this page holds for a hash, for an asset sent as a
+     * reference (no `png`). Absent, or no asset held: such a snapshot is refused.
+     */
+    resolve?: (hash: string) => AvatarLayer['asset'] | undefined
   }
 ): AvatarSnapshot | null {
   if (
@@ -191,7 +224,8 @@ export function parseAvatarSnapshot(
   )
     return null
   const layers: AvatarLayer[] = []
-  for (const layer of value.layers) {
+  for (const input of value.layers) {
+    const layer = withHeldPng(input, page.resolve)
     if (
       !object(layer) ||
       !['avatar', 'bubble'].includes(String(layer.kind)) ||
@@ -237,6 +271,32 @@ export function parseAvatarSnapshot(
   }
 }
 
+/**
+ * PERF-06: whether `next` only renews `current`'s lease: the same layers, in
+ * order, with the same placement, atlas and the very same pixels (hash and
+ * base64), differing at most in `expiresAt`.
+ */
+function avatarRenewal(current: AvatarLayer[], next: AvatarLayer[]): boolean {
+  return (
+    current.length === next.length &&
+    current.every((a, i) => {
+      const b = next[i]!
+      return (
+        a.kind === b.kind &&
+        a.rect.x === b.rect.x &&
+        a.rect.y === b.rect.y &&
+        a.rect.w === b.rect.w &&
+        a.rect.h === b.rect.h &&
+        a.asset.hash === b.asset.hash &&
+        a.asset.width === b.asset.width &&
+        a.asset.height === b.asset.height &&
+        a.asset.png === b.asset.png &&
+        JSON.stringify(a.atlas ?? null) === JSON.stringify(b.atlas ?? null)
+      )
+    })
+  )
+}
+
 /** Latest revision wins even while assets decode; clear outranks older work.
  * One pending decode batch, two retained images, no unbounded asset cache. */
 export class AvatarReceiver<T> {
@@ -245,6 +305,13 @@ export class AvatarReceiver<T> {
   #generation = 0
   #busy = false
   #applied: AvatarApplied | undefined
+  /** PERF-06: the snapshot `#applied` names (null exactly when it is undefined). */
+  #current: AvatarSnapshot | null = null
+  /**
+   * PERF-06: the last snapshot committed, whose pictures a reference may name.
+   * Unlike `#current` it survives a newer apply in flight; only a clear drops it.
+   */
+  #held: AvatarSnapshot | null = null
   #expiresAt = 0
   constructor(
     private readonly deps: {
@@ -253,10 +320,20 @@ export class AvatarReceiver<T> {
       commit(snapshot: AvatarSnapshot, assets: T[]): void | Promise<void>
       clear(): void
       now(): number
+      /**
+       * PERF-06: a lease renewal of what is on screen (same pixels, same
+       * placement): update layer expiries in place. Absent: renewals take
+       * the full prepare/commit path.
+       */
+      renew?(snapshot: AvatarSnapshot): void
     }
   ) {}
   get applied(): AvatarApplied | undefined {
     return this.#applied
+  }
+  /** PERF-06: the asset this page holds for a hash (the applied snapshot's), for references. */
+  asset(hash: string): AvatarLayer['asset'] | undefined {
+    return this.#held?.layers.find((l) => l.asset.hash === hash)?.asset
   }
   owner(sid: string | null): void {
     if (this.#owner === sid) return
@@ -267,6 +344,8 @@ export class AvatarReceiver<T> {
   clear(): void {
     this.#generation++
     this.#applied = undefined
+    this.#current = null
+    this.#held = null
     this.#expiresAt = 0
     this.deps.clear()
   }
@@ -291,6 +370,25 @@ export class AvatarReceiver<T> {
       if (clearGeneration !== this.#generation || snapshot.expiresAt <= this.deps.now())
         return false
       this.#applied = { publisherSid: snapshot.publisherSid, revision: snapshot.revision }
+      this.#current = this.#held = snapshot
+      return true
+    }
+    // PERF-06: a renewal of what is on screen (nothing expired yet) only moves
+    // the lease: no hash, decode or repaint.
+    const current = this.#current
+    const now = this.deps.now()
+    if (
+      this.deps.renew &&
+      current &&
+      !this.#busy &&
+      snapshot.expiresAt > now &&
+      current.layers.every((l) => l.expiresAt === null || l.expiresAt > now) &&
+      avatarRenewal(current.layers, snapshot.layers)
+    ) {
+      this.#expiresAt = snapshot.expiresAt
+      this.deps.renew(snapshot)
+      this.#current = this.#held = snapshot
+      this.#applied = { publisherSid: snapshot.publisherSid, revision: snapshot.revision }
       return true
     }
     if (this.#busy) return false // producer retries a fresh revision, never queues bytes
@@ -308,12 +406,15 @@ export class AvatarReceiver<T> {
       }
       if (generation !== this.#generation || snapshot.expiresAt <= this.deps.now()) return false
       this.#applied = undefined
+      this.#current = null
       this.#expiresAt = snapshot.expiresAt
       const painting = this.deps.commit(snapshot, prepared.splice(0))
       await painting
+      if (generation === this.#generation) this.#held = snapshot
       if (generation !== this.#generation || snapshot.expiresAt <= this.deps.now()) return false
       this.#expiresAt = snapshot.expiresAt
       this.#applied = { publisherSid: snapshot.publisherSid, revision: snapshot.revision }
+      this.#current = snapshot
       return true
     } catch (error) {
       if (generation === this.#generation) this.clear()

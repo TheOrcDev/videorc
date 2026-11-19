@@ -8,6 +8,7 @@ import {
   type CapabilityReceipt,
   CAPABILITY_RECEIPT_MAX_BYTES
 } from './room-media-v2'
+import { SentAssets, withReferences } from './room-asset-references'
 import {
   GRAPHICS_TOPIC,
   GRAPHICS_LEASE_MS,
@@ -82,6 +83,8 @@ export class RoomGraphicsPublisher {
    * revisions; a late acknowledgement of an older one never replaces it.
    */
   #accepted = new Map<string, number>()
+  /** PERF-06: which pictures each program page provably holds (survives `set`). */
+  #assets = new SentAssets()
   #revision = 0
   #generation = 0
   #busy = false
@@ -202,6 +205,7 @@ export class RoomGraphicsPublisher {
     this.#generation++
     this.#receipts.clear()
     this.#sent.clear()
+    this.#assets.clear()
     this.#preview = null
     this.#report()
   }
@@ -329,6 +333,7 @@ export class RoomGraphicsPublisher {
       if (!consumerSid(this.room, identity, receipt, Date.now())) {
         this.#receipts.delete(identity)
         this.#sent.delete(identity)
+        this.#assets.forget(identity)
       }
     this.#report()
     if (this.#busy || this.room.state !== ConnectionState.Connected) return
@@ -375,7 +380,16 @@ export class RoomGraphicsPublisher {
       const snapshot = this.#snapshot(output, orientation, layers)
       if (!parseGraphicsSnapshot(snapshot, { ...snapshot, now: Date.now() }))
         throw new Error('Invalid graphics snapshot')
-      const bytes = new TextEncoder().encode(JSON.stringify(snapshot))
+      const held = this.#assets.held(
+        peer.identity,
+        {
+          refs: receipt.graphics.static.refs === 1,
+          applied: receipt.graphics.static.applied,
+          sid: peer.sid
+        },
+        this.room.localParticipant.sid
+      )
+      const bytes = new TextEncoder().encode(JSON.stringify(withReferences(snapshot, held)))
       if (bytes.length > GRAPHICS_MAX_BYTES) throw new Error('Graphics snapshot too large')
       const timeout = AbortSignal.timeout(8000)
       const bounded = <T>(job: Promise<T>): Promise<T> =>
@@ -416,6 +430,9 @@ export class RoomGraphicsPublisher {
         return
       }
       await bounded(writer.close())
+      // Written whole: the page may commit it even if we were fenced since.
+      if (peer.sid === this.#session(peer.identity))
+        this.#assets.record(peer.identity, peer.sid, snapshot.publisherSid, snapshot)
       if (
         this.#closed ||
         generation !== this.#generation ||
@@ -440,6 +457,7 @@ export class RoomGraphicsPublisher {
     if (participant) {
       this.#receipts.delete(participant.identity)
       this.#sent.delete(participant.identity)
+      this.#assets.forget(participant.identity)
     }
     this.#refresh()
   }
@@ -458,5 +476,6 @@ export class RoomGraphicsPublisher {
     this.#preview = null
     this.#receipts.clear()
     this.#sent.clear()
+    this.#assets.clear()
   }
 }

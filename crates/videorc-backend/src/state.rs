@@ -1331,6 +1331,9 @@ pub struct AppState {
     /// Plan 232: the latest frame of every showing HTML overlay, the targets
     /// main renders and what main reports about its pages.
     pub html_overlays: crate::html_overlay::HtmlOverlayService,
+    /// PERF-02: finished image-banner assets for the cloud room's static
+    /// graphics, reused while the banner file and size are unchanged.
+    pub cloud_graphics_rasters: crate::cloud_graphics::BannerRasterCache,
     /// Backend-owned acknowledgement/lifetime for the viewer-facing comment
     /// card. The image slot above and this state are mutated under this
     /// state-machine lock so stale expiry tasks cannot clear newer cards.
@@ -1621,6 +1624,7 @@ impl AppState {
             buddy_sprite,
             banner_prepare: crate::banner_prepare::BannerPrepareService::new(),
             html_overlays: crate::html_overlay::HtmlOverlayService::default(),
+            cloud_graphics_rasters: crate::cloud_graphics::BannerRasterCache::default(),
             comment_highlight: crate::comment_highlight::new_comment_highlight_slot(),
             comment_highlight_commit: Arc::new(tokio::sync::Mutex::new(())),
             cohost: crate::cohost::new_cohost_slot(cohost_settings),

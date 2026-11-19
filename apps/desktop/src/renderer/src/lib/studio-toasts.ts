@@ -46,39 +46,17 @@ export function sourceSwitchFailedDescription(reason: string): string {
   return `${sentence ? `${sentence} ` : ''}Choose it again in Sources.`
 }
 
-export type StreamTargetToast = {
-  kind: StreamTargetNotice['kind']
-  title: string
-  id: string
-  description: string
-  duration: number | undefined
-}
-
 /**
- * One toast id per destination, so "{X} is back" replaces "Streaming to {X}
- * stopped" or "{X} is reconnecting" in place. A bad state mirrors what is
- * still true, so it stays until the good news replaces it (plan 174 S2.4).
+ * Plan 250 S6: a destination is one notification, on its own subject
+ * (`stream-target:<id>`), where the watchdog's alert for it also lands.
+ * "{X} is back" resolves it. The store is a lazy chunk; notices of one
+ * snapshot stay in order.
  */
-export function streamTargetToast(notice: StreamTargetNotice): StreamTargetToast {
-  const targetId = notice.key.slice(notice.key.indexOf(':') + 1)
-  const persists = notice.kind === 'error' || notice.kind === 'warning'
-  return {
-    kind: notice.kind,
-    title: notice.title,
-    id: `stream-target:${targetId}`,
-    description: notice.description,
-    duration: persists ? Infinity : undefined
-  }
-}
-
-export function showStreamTargetNotice(notice: StreamTargetNotice): void {
-  const shown = streamTargetToast(notice)
-  const show = shown.kind === 'message' ? toast.message : toast[shown.kind]
-  show(shown.title, {
-    id: shown.id,
-    description: shown.description,
-    ...(shown.duration !== undefined ? { duration: shown.duration } : {})
-  })
+export function showStreamTargetNotices(notices: readonly StreamTargetNotice[]): void {
+  if (notices.length === 0) return
+  void import('@/lib/notifications/sources/stream-targets').then((source) =>
+    source.publishStreamTargetNotices(notices)
+  )
 }
 
 /** The one id for Buddy's own failures and stops, so one replaces the other. */

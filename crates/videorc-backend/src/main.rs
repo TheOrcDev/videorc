@@ -197,6 +197,8 @@ mod system_audio_capture;
 mod system_audio_capture_windows;
 mod system_audio_session;
 #[cfg(test)]
+mod test_alloc;
+#[cfg(test)]
 mod test_temp_dir;
 mod transcript;
 mod twitch;
@@ -13287,6 +13289,14 @@ async fn handle_text_message_with_role(
             .await;
             match result {
                 Ok(value) => ServerResponse::ok(command.id, value),
+                // L3: a full archive list says what to do, in words.
+                Err(error) if error.to_string() == cloud_archive::RESUME_OR_DISCARD => {
+                    ServerResponse::error(
+                        command.id,
+                        "archive-full",
+                        cloud_archive::RESUME_OR_DISCARD_WORDS,
+                    )
+                }
                 Err(error) => {
                     ServerResponse::error(command.id, "archive-unavailable", error.to_string())
                 }

@@ -63,7 +63,7 @@ export function clipMarkedToast(
     return {
       kind: 'warning',
       title: 'Marker saved; clip interrupted',
-      description: 'Retry or discard staging files from Clips on the Output page.'
+      description: event.detail ?? 'Retry or discard staging files from Clips on the Output page.'
     }
   if (event.reason === 'cloud-clip-queued')
     return {

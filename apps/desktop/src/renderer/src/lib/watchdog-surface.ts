@@ -1,9 +1,9 @@
 // The stream watchdog's renderer side, loaded the first time an alert opens
-// (plan 223 A5, A7, D2): the toasts keyed `watchdog:<check>` with the fix
-// as their action, the clearing toast that replaces them, the system
-// notification main shows when the Studio isn't in front, and the fixes,
-// which run through the Studio's existing actions (`micUnmute`,
-// `takeoverHide`, the pages) and never a new control of their own.
+// (plan 223 A5, A7, D2): the system notification main shows when the Studio
+// isn't in front, and the fixes, which run through the Studio's existing
+// actions (`micUnmute`, `takeoverHide`, the pages) and never a new control
+// of their own. Since plan 250 an alert is an entry behind the bell, not a
+// toast.
 
 import type { BackendClient } from '@/backendClient'
 import type {
@@ -17,16 +17,11 @@ import type { StudioActionSource } from '@/lib/studio-actions/studio-context'
 import { toast } from '@/lib/toast'
 import { toastUserError } from '@/lib/user-error'
 import {
-  watchdogClearedAlerts,
-  watchdogClearedToast,
   watchdogNotificationWords,
   watchdogNotifies,
   watchdogNotifyCandidates,
   watchdogOpenSeconds,
-  watchdogQuietedAlerts,
-  watchdogSameWords,
-  watchdogStayedOpenDelayMs,
-  watchdogToastId
+  watchdogStayedOpenDelayMs
 } from '@/lib/watchdog-view'
 import { openWorkspaceTab } from '@/lib/workspace-navigation'
 
@@ -112,57 +107,18 @@ function dropStayedOpenAsk(alertId: string) {
   stayedOpenAsks.delete(alertId)
 }
 
-export interface WatchdogListChange {
-  /** The event's `withdrawn` ids (M2): gone without a recovery. */
-  withdrawn?: readonly string[]
-}
-
 /**
- * Called with each `watchdog.alerts` list after the first. Opens and
- * refreshes the toasts, replaces them with the clearing toast when the
- * signal recovered, drops them when the alert was withdrawn or hushed
- * (M2), and asks main for the system notification on an open and on every
- * repeat.
+ * Called with each `watchdog.alerts` list after the first. Asks main for
+ * the system notification on an open and on every repeat. The alerts
+ * themselves are entries behind the bell (plan 250,
+ * `notifications/sources/watchdog.ts`), which pop up by the quiet rule;
+ * this module raises no toast of its own.
  */
 export async function onWatchdogAlertsChanged(
   previous: readonly WatchdogAlert[],
   next: readonly WatchdogAlert[],
-  deps: WatchdogSurfaceDeps,
-  change: WatchdogListChange = {}
+  deps: WatchdogSurfaceDeps
 ): Promise<void> {
-  const withdrawn = change.withdrawn ?? []
-  const before = new Map(previous.map((alert) => [alert.id, alert]))
-  for (const alert of next) {
-    // Seen (Got it) or snoozed: the card stays, the toast never comes back.
-    if (alert.state !== 'open') continue
-    const known = before.get(alert.id)
-    // The clock in the detail moves every second (L1): only new words
-    // re-issue the toast, so a closed toast stays closed.
-    const changed =
-      !known ||
-      !watchdogSameWords(known.title, alert.title) ||
-      !watchdogSameWords(known.detail, alert.detail)
-    if (!changed) continue
-    const [fix] = alert.fixes ?? []
-    // Critical rides the warning toast too: the error toast adds its Copy
-    // affordance (for failures), and a card is the problem's home, not the
-    // toast; the fix is the one action.
-    const show = alert.severity === 'notice' ? toast.info : toast.warning
-    show(alert.title, {
-      id: watchdogToastId(alert),
-      description: alert.detail,
-      duration: alert.severity === 'notice' ? 8_000 : Infinity,
-      ...(fix
-        ? { action: { label: fix.label, onClick: () => void runWatchdogFix(alert, fix, deps) } }
-        : {})
-    })
-  }
-  for (const alert of watchdogQuietedAlerts(previous, next, withdrawn)) {
-    toast.dismiss(watchdogToastId(alert))
-  }
-  for (const alert of watchdogClearedAlerts(previous, next, withdrawn)) {
-    toast.success(watchdogClearedToast(alert), { id: watchdogToastId(alert) })
-  }
   latestAlerts = next
   const now = Date.now()
   for (const id of [...stayedOpenAsks.keys()]) {

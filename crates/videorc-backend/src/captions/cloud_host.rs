@@ -341,6 +341,63 @@ mod tests {
         assert!(!valid_id(""));
         assert!(valid_id("show-1_source:2"));
     }
+    fn leak_test_owner(show: &str) -> Owner {
+        let origin = Instant::now();
+        Owner {
+            show_id: show.into(),
+            source_id: "p".into(),
+            generation: 1,
+            origin,
+            clock: serde_json::json!({"uncertaintyMs":null}),
+            inner: std::sync::Mutex::new(Admission {
+                until: origin + OWNER_LEASE,
+                enabled: true,
+                sequence: 0,
+                samples: 0,
+                sample_budget: 0.0,
+                budget_at: origin,
+                sample_rate: Some(48000),
+            }),
+        }
+    }
+
+    fn leak_test_record(seq: u64) -> super::CaptionChunkRecord {
+        super::CaptionChunkRecord {
+            seq,
+            offset_seconds: seq as f64,
+            duration_seconds: 1.0,
+            text: format!("utterance {seq}"),
+            segments: Vec::new(),
+            capture_epoch: 1,
+            provider_item_id: Some(format!("item-{seq}")),
+            presented: true,
+        }
+    }
+
+    #[tokio::test]
+    async fn closing_the_room_releases_its_caption_records() {
+        let (events, _) = tokio::sync::broadcast::channel(16);
+        let state = AppState::new(
+            "test-token".to_string(),
+            0,
+            events,
+            crate::storage::Database::open_in_memory_for_tests(),
+        );
+        {
+            let mut c = state.captions.lock().await;
+            c.room_chunks = true;
+            c.room_owner = Some(Arc::new(leak_test_owner("show-a")));
+            for seq in 0..32 {
+                c.chunks.push(leak_test_record(seq));
+            }
+        }
+        // Another show's loss leaves this room's records alone.
+        ownership_lost(&state, "show-b").await;
+        assert_eq!(state.captions.lock().await.chunks.len(), 32);
+        ownership_lost(&state, "show-a").await;
+        assert_eq!(state.captions.lock().await.chunks.len(), 0);
+    }
+
     #[test]
     fn revocation_is_immediate_and_never_rewrites_source_origin() {
         let origin = Instant::now();
@@ -430,6 +487,16 @@ pub async fn presentation(state: &AppState) -> Option<Presentation> {
         .cloned()
 }
 
+/// Drop the room's in-memory caption records once its owner is gone. A newer
+/// owner (another show) keeps its own list.
+async fn release_room_chunks(state: &AppState, show_id: &str) {
+    let mut c = state.captions.lock().await;
+    if c.room_owner.as_ref().is_some_and(|o| o.show_id == show_id) {
+        c.chunks.clear();
+        c.chunks.shrink_to_fit();
+    }
+}
+
 /// S24 handoff seam: retire consent before joining a losing provider task.
 /// Source-generation and controller-epoch identities deliberately stay separate.
 pub async fn ownership_lost(state: &AppState, show_id: &str) {
@@ -459,6 +526,10 @@ pub async fn ownership_lost(state: &AppState, show_id: &str) {
     }
     let _control = CAPTION_CONTROL.lock().await;
     finish_caption_task(state, false, false).await;
+    // The provider task is joined: nothing can land behind this. The show's
+    // transcript lives in `cloud_host_transcript`; release the in-memory
+    // records the room kept (leak L4).
+    release_room_chunks(state, show_id).await;
     let status = CaptionsStatus::idle();
     publish_caption_boundary(state, &status, "room-ownership-lost");
 }

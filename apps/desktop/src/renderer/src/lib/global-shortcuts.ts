@@ -6,6 +6,7 @@ import {
 } from '../../../shared/global-shortcuts'
 export type { GlobalShortcutAction } from '../../../shared/global-shortcuts'
 import { LONG_CLIP_SECONDS } from '../../../shared/clip-marks'
+import { withAppNotifications } from '@/lib/notify'
 import { toast } from '@/lib/toast'
 import { GO_LIVE_SHORTCUT_LABEL, RECORD_SHORTCUT_LABEL } from '@/lib/go-live-copy'
 import { layoutPresetLabel } from '@/lib/layout-labels'
@@ -212,11 +213,16 @@ export class GlobalShortcutsRegistrar {
           // Hide screen key alone), Settings says it.
           const userSet = { ...shortcuts, screenHideToggle: shortcuts.screenHideToggle ?? '' }
           if (globalShortcutEntries(userSet).some(([, value]) => value?.trim())) {
-            toast.warning("Global shortcuts don't work here", {
-              id: 'global-shortcuts-conflict',
-              description: result.unavailable,
-              action: { label: 'Open Shortcuts', onClick: () => openSettingsTab('shortcuts') }
-            })
+            const description = result.unavailable
+            withAppNotifications((app) =>
+              app.publishGlobalShortcutsProblem({
+                title: "Global shortcuts don't work here",
+                description
+              })
+            )
+          } else {
+            // The last key someone set was removed: nothing is left to say.
+            withAppNotifications((app) => app.withdrawGlobalShortcuts())
           }
           return
         }
@@ -224,27 +230,31 @@ export class GlobalShortcutsRegistrar {
           .filter(([, ok]) => !ok)
           .map(([action]) => action)
         if (failed.length > 0) {
-          toast.error(
-            failed.length === 1
-              ? "A global shortcut didn't register"
-              : "Some global shortcuts didn't register",
-            {
-              id: 'global-shortcuts-conflict',
-              description: `${failed.map(globalShortcutLabel).join(', ')}: another app uses ${failed.length === 1 ? 'it' : 'them'}, or the keys are taken twice. Choose different keys in Settings → Shortcuts.`,
-              action: { label: 'Open Shortcuts', onClick: () => openSettingsTab('shortcuts') }
-            }
+          // Plan 250: one entry behind the bell with Open Shortcuts, open
+          // until a later registration takes every key.
+          withAppNotifications((app) =>
+            app.publishGlobalShortcutsProblem({
+              title:
+                failed.length === 1
+                  ? "A global shortcut didn't register"
+                  : "Some global shortcuts didn't register",
+              description: `${failed.map(globalShortcutLabel).join(', ')}: another app uses ${failed.length === 1 ? 'it' : 'them'}, or the keys are taken twice. Choose different keys in Settings → Shortcuts.`
+            })
           )
+        } else {
+          withAppNotifications((app) => app.resolveGlobalShortcuts())
         }
       })
       .catch((error: unknown) => {
         // The IPC itself failed — the user's shortcuts silently not working
         // is the one thing this must never do quietly.
         console.error('[global-shortcuts] registration failed', error)
-        toast.error("Global shortcuts didn't register", {
-          id: 'global-shortcuts-conflict',
-          description: "Restart Videorc if they still don't work.",
-          action: { label: 'Open Shortcuts', onClick: () => openSettingsTab('shortcuts') }
-        })
+        withAppNotifications((app) =>
+          app.publishGlobalShortcutsProblem({
+            title: "Global shortcuts didn't register",
+            description: "Restart Videorc if they still don't work."
+          })
+        )
       })
   }
 }

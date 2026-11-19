@@ -8,7 +8,7 @@ import type {
   VirtualCameraStatus
 } from '@/lib/backend'
 import { OFFLINE_LOCK_REASON } from '@/lib/lock-reason'
-import { toast } from '@/lib/toast'
+import { withAppNotifications } from '@/lib/notify'
 import { toastUserError, userErrorMessage } from '@/lib/user-error'
 
 /** A failed switch from ⌘K: its own id, so it never replaces the stop toast. */
@@ -83,15 +83,12 @@ export function useVirtualCameraController(
     setStatus(next)
     void import('@/lib/virtual-camera-view').then((view) => {
       const step = view.virtualCameraToastStep(previous, next, platformRef.current)
+      // Plan 250: a state that is still true is an open entry behind the
+      // bell, never a pinned toast. It resolves when the camera is back.
       if (step.kind === 'show') {
-        toast.warning(step.title, {
-          id: view.VIDEORC_CAMERA_TOAST_ID,
-          description: step.description,
-          // It mirrors a state still true: it stays until the camera is back.
-          duration: Number.POSITIVE_INFINITY
-        })
+        withAppNotifications((app) => app.publishVideorcCameraStopped(step))
       } else if (step.kind === 'dismiss') {
-        toast.dismiss(view.VIDEORC_CAMERA_TOAST_ID)
+        withAppNotifications((app) => app.resolveVideorcCamera())
       }
     })
   }, [])

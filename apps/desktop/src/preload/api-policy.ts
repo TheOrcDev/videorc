@@ -36,6 +36,12 @@ export const AUXILIARY_API_KEYS = {
     'markerFromCommentsWindow',
     // A watchdog fix from the alert chip's card (plan 223 A6): ask, never run.
     'watchdogFixFromCommentsWindow',
+    // The bell (plan 250 S8): read the main window's notification list and
+    // its pop-ups, ask for what is pressed; never push the list itself.
+    'getNotifications',
+    'onNotifications',
+    'onNotificationPopUp',
+    'notificationActFromCommentsWindow',
     'markClipFromCommentsWindow',
     // Banners (plan 186 S7): read the list, ask for a show or hide; never push.
     'getCommentsBanners',

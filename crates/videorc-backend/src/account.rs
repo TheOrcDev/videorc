@@ -19,7 +19,7 @@ pub const MOCK_ACCOUNT_ENV_VAR: &str = "VIDEORC_MOCK_ACCOUNT";
 // Persisted across restarts in the local secrets store (0600 JSON file). The
 // durable session token is sent as a Bearer to the Videorc API; the snapshot is
 // the cached identity so the app can show the signed-in user at boot offline.
-const SESSION_TOKEN_SECRET: &str = "account:videorc:session";
+pub(crate) const SESSION_TOKEN_SECRET: &str = "account:videorc:session";
 const ACCOUNT_SNAPSHOT_SECRET: &str = "account:videorc:snapshot";
 const LAST_SIGN_IN_BINDING_SECRET: &str = "account:videorc:last-sign-in-binding";
 const LEGACY_LAST_SIGN_IN_STATE_SECRET: &str = "account:videorc:last-sign-in-state";
