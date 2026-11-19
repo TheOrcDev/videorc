@@ -4,27 +4,35 @@ import type { GraphicsSnapshot } from '../../../../shared/cloud-graphics'
 import type { ReactNode } from 'react'
 import { createAvatarView, type AvatarMotionSource } from '../../../../shared/cloud-avatar-view'
 import type { AvatarSnapshot } from '../../../../shared/cloud-avatar'
-import { useEffect, useRef, useState, type ReactElement } from 'react'
+import { Fragment, useEffect, useRef, useState, type ReactElement } from 'react'
 
 import { useGuestModeration } from '@/components/guests/guest-moderation'
 import { CloseRoomButton } from '@/components/guests/close-room-button'
+import { CountLabel, PersonRow, RequestRow, ScreenThumb } from '@/components/guests/room-person'
 import {
+  ArrowDownIcon,
+  ArrowUpIcon,
   ChevronRightIcon,
   DisplayIcon,
+  LinkIcon,
+  OutputIcon,
   SpeakerOffIcon,
   SpeakerOnIcon,
-  WaveformIcon,
   WaveformMutedIcon
 } from '@/components/icons'
 import { KebabMenu, type KebabMenuItem } from '@/components/kebab-menu'
-import { GroupedList, ListRow } from '@/components/list-row'
+import { GroupedList } from '@/components/list-row'
 import { MediaCard } from '@/components/media-card'
 import { Gallery } from '@/components/page'
 import { PanelSection } from '@/components/panel-section'
+import { SectionLabel } from '@/components/section-label'
+import { SceneCard } from '@/components/studio/scene-card'
+import { StageLayoutThumb } from '@/components/studio/stage-layout-thumb'
 import { CameraOffAvatar } from '@/components/studio/camera-off-avatar'
 import { PREVIEW_REPLACED_BY_SHOW_STAGE } from '@/components/preview-stage'
 import { StatusDot } from '@/components/status-dot'
-import { Alert, AlertAction, AlertTitle } from '@/components/ui/alert'
+import { Alert, AlertTitle } from '@/components/ui/alert'
+import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import {
   Dialog,
@@ -37,7 +45,6 @@ import {
 import { DisabledReason } from '@/components/ui/disabled-reason'
 import { InfoTooltip } from '@/components/ui/info-tooltip'
 import { Empty } from '@/components/ui/empty'
-import { SegmentedControl } from '@/components/ui/segmented-control'
 import { Spinner } from '@/components/ui/spinner'
 import { useStudioCloud, useStudioCore } from '@/hooks/use-studio'
 import {
@@ -51,21 +58,23 @@ import type {
   CloudHostShape,
   CloudRoomParticipant,
   CloudRoomRequest,
-  CloudStageLayout,
   TalkShowDisplaySource
 } from '@/lib/backend'
 import {
+  NOBODY_BACKSTAGE,
+  NO_SCREENS_YET,
+  SCREENS_GUEST_HINT,
   bringOnBlockedReason,
-  guestMicStatus,
   layoutOptions,
   layoutReasonsLine,
-  qualityStatus,
-  requestTitle,
+  outputProfileChips,
   roomLimits,
   roomPeople,
+  roomScreens,
   shownLayout,
-  withRoomMic,
-  type RoomPerson
+  stageWithScreen,
+  type RoomPerson,
+  type RoomScreen
 } from '@/lib/guests-view'
 import { openWorkspaceTab } from '@/lib/workspace-navigation'
 import { managedScreenAssetUrl } from '@/lib/screen-asset-url'
@@ -100,16 +109,18 @@ import { programScenePreview, scenePreviewPicture, sceneStatusLine } from '@/lib
 import { VIEW_SOURCE, tileFit } from '../../../../shared/cloud-presentation-views'
 import type { SceneTile } from '../../../../shared/cloud-scene'
 import { roomProgramCameraLine } from '../../../../shared/room-program-camera'
-import { roomProgramSummary } from '@/lib/room-program-opt-ins'
+import { roomProgramChips, roomProgramSummary } from '@/lib/room-program-opt-ins'
 
 // The Show stage (plan 224 C-G3, D7, D8): while the room is open it replaces
 // the Studio's Preview. The renderer draws the room's tracks with the
 // runner's own geometry, so the host acts on the picture the cloud sends,
 // 150 to 300 ms behind the room instead of the return's half second. Under
-// it: the layout, the screen share, the Program monitor (the return, or on a
-// managed show the stage as the program page draws it, plan 234 D6), "Ada
-// wants to join", and the backstage strip, the one home of Bring on and Send
-// backstage. Loaded only while the room is open.
+// it (plan 252): "Ada wants to join"; then what goes on the picture, as
+// pictures: the layouts as cards, the shared screens as cards, and the people
+// On stage and Backstage, the one home of Bring on and Send backstage; and
+// beside them the Program monitor (the return, or on a managed show the
+// stage as the program page draws it, plan 234 D6). Loaded only while the
+// room is open.
 
 /** The stage's own canvas: the runner's 16:9 horizontal output. */
 const STAGE_CANVAS: StageCanvas = { width: 1920, height: 1080 }
@@ -157,20 +168,23 @@ export default function ShowStage(): ReactElement {
       title="Show stage"
     >
       <StageWell talkShow={talkShow} />
-      <StageControls talkShow={talkShow} />
-      {/* Plan 249 S17: what each cloud output really sends, as the room reported it. */}
-      {cloudStatus?.show?.outputProfile ? (
-        <p className="text-label text-muted-foreground" data-testid="show-stage-output-profile">
-          {managedProfileDescription(cloudStatus.show.outputProfile)}
-        </p>
-      ) : null}
       {talkShow.room.local.problem ? (
         <Alert variant="warning">
           <AlertTitle>{talkShow.room.local.problem}</AlertTitle>
         </Alert>
       ) : null}
-      <JoinRequests requests={requests} talkShow={talkShow} />
-      <BackstageStrip limitsBlocked={bringOnBlockedReason(people, limits)} people={people} />
+      <JoinRequests disabled={room?.phase !== 'open'} requests={requests} />
+      {/* Plan 252: what goes on the picture on the left (the layout, the
+          screens, the people); what the cloud sends on the right. Narrow, the
+          Program leads so it stays beside the stage it mirrors. */}
+      <div className="flex min-w-0 flex-col gap-4 @min-[44rem]/show-stage:flex-row @min-[44rem]/show-stage:items-start">
+        <div className="flex min-w-0 flex-1 flex-col gap-4">
+          <StageLayouts talkShow={talkShow} />
+          <StageScreens people={people} talkShow={talkShow} />
+          <StagePeople limitsBlocked={bringOnBlockedReason(people, limits)} people={people} />
+        </div>
+        <ProgramMonitor talkShow={talkShow} />
+      </div>
     </PanelSection>
   )
 }
@@ -291,6 +305,7 @@ function StageTileView({
   const look = cameraOffLook(tile.rect.w, tile.rect.h)
   const circle = hostCircle(tile, talkShow.hostIdentity, hostShape)
   const fit = tileFit(tile.kind) === 'contain' ? 'object-contain' : 'object-cover'
+  const voice = tileVoice(tile, participant, talkShow)
   return (
     <>
       <div
@@ -333,8 +348,24 @@ function StageTileView({
           data-testid="show-stage-plate"
           style={stageRectPercent(STAGE_CANVAS, tile.plate)}
         >
-          <span className="max-w-full truncate rounded-full bg-video-ground/70 px-[max(8px,0.8cqw)] py-[max(2px,0.3cqw)] text-[max(11px,1.3cqw)] font-medium text-video-ground-foreground">
-            {label}
+          <span className="flex max-w-full items-center gap-[max(4px,0.4cqw)] rounded-full bg-video-ground/70 px-[max(8px,0.8cqw)] py-[max(2px,0.3cqw)] text-[max(11px,1.3cqw)] font-medium text-video-ground-foreground">
+            {/* Who talks and who can't be heard, on the picture itself. */}
+            {tile.kind !== 'person' ? null : voice === 'muted' ? (
+              <WaveformMutedIcon
+                aria-label="Muted"
+                className="size-[max(12px,1.3cqw)] shrink-0 text-video-ground-muted"
+                data-testid="show-stage-plate-muted"
+                role="img"
+              />
+            ) : voice === 'talking' ? (
+              <span
+                aria-label="Talking"
+                className="tone-success glass-dot size-[max(6px,0.6cqw)] shrink-0 rounded-full"
+                data-testid="show-stage-plate-talking"
+                role="img"
+              />
+            ) : null}
+            <span className="truncate">{label}</span>
           </span>
         </span>
       ) : null}
@@ -364,6 +395,18 @@ function ScreenStill({
       src={src}
     />
   )
+}
+
+/** A person's voice on their name plate: muted (their mute or the host's hold), talking, or neither. */
+function tileVoice(
+  tile: StageTile,
+  participant: CloudRoomParticipant | undefined,
+  talkShow: TalkShowContextValue
+): 'muted' | 'talking' | null {
+  if (tile.identity === talkShow.hostIdentity) return talkShow.room.local.micMuted ? 'muted' : null
+  const person = talkShow.room.people.find((entry) => entry.identity === tile.identity)
+  if (person?.micMuted || participant?.muted) return 'muted'
+  return person?.speaking ? 'talking' : null
 }
 
 /** A `MediaStreamTrack` in a muted `<video>`; nothing while there is none. */
@@ -454,50 +497,72 @@ function TrackVideo({
 
 // --- Under the stage -----------------------------------------------------------
 
-function StageControls({ talkShow }: { talkShow: TalkShowContextValue }): ReactElement {
+/**
+ * The room's layouts as cards, each with its diagram, as the Scenes gallery
+ * shows scenes (plan 252). A layout that can't apply says why on hover, and
+ * the one line under the cards says it for all of them.
+ */
+function StageLayouts({ talkShow }: { talkShow: TalkShowContextValue }): ReactElement {
   const { cloudStatus } = useStudioCloud()
   const room = cloudStatus?.room
   const options = layoutOptions(room)
   const reasons = layoutReasonsLine(options)
   const roomOpen = room?.phase === 'open'
-  // Narrow, the Program monitor goes under the controls instead of beside
-  // them, so the four layout chips keep their row.
+  const current = shownLayout(room)
   return (
-    <div className="flex min-w-0 flex-col gap-3 @min-[40rem]/show-stage:flex-row @min-[40rem]/show-stage:items-start">
-      <div className="flex min-w-0 flex-1 flex-col gap-2">
-        <SegmentedControl<CloudStageLayout>
-          aria-label="Layout"
-          disabled={!roomOpen}
-          options={options.map((option) => ({
-            value: option.value,
-            label: option.label,
-            disabled: option.disabledReason !== null
-          }))}
-          value={shownLayout(room)}
-          onValueChange={(layout) => void talkShow.setLayout(layout).catch(() => {})}
-        />
-        {roomOpen && reasons ? (
-          <p className="text-meta text-muted-foreground" data-testid="show-stage-layout-reasons">
-            {reasons}
-          </p>
-        ) : null}
-        <ScreenShareButton disabled={!roomOpen} talkShow={talkShow} />
+    <div className="flex min-w-0 flex-col gap-1.5" data-testid="show-stage-layouts">
+      <SectionLabel className="px-1">Layout</SectionLabel>
+      <div aria-label="Layout" className={CARD_GRID} role="group">
+        {options.map((option) => (
+          <SceneCard
+            data-stage-layout={option.value}
+            data-testid="show-stage-layout"
+            disabled={!roomOpen || option.disabledReason !== null}
+            disabledReason={roomOpen ? option.disabledReason : null}
+            key={option.value}
+            label={option.label}
+            selected={current === option.value}
+            size="sm"
+            thumb={<StageLayoutThumb layout={option.value} />}
+            onSelect={() => {
+              if (current !== option.value) void talkShow.setLayout(option.value).catch(() => {})
+            }}
+          />
+        ))}
       </div>
-      <ProgramMonitor talkShow={talkShow} />
+      {roomOpen && reasons ? (
+        <p className="px-1 text-meta text-muted-foreground" data-testid="show-stage-layout-reasons">
+          {reasons}
+        </p>
+      ) : null}
     </div>
   )
 }
 
-function ScreenShareButton({
+/** Cards in a row of four; two by two when the stage is narrow. */
+const CARD_GRID = 'grid grid-cols-2 gap-2 @min-[30rem]/show-stage:grid-cols-4'
+
+/**
+ * The screens shared in the room (plan 252), each a card with its live
+ * picture: the host's own and every guest's. A card puts its screen on stage
+ * or takes it off, the one home of that choice; Share screen… starts the
+ * host's own. A layout that takes more than one screen picks from this list.
+ */
+function StageScreens({
   talkShow,
-  disabled
+  people
 }: {
   talkShow: TalkShowContextValue
-  disabled: boolean
+  people: RoomPerson[]
 }): ReactElement {
+  const { cloudStatus } = useStudioCloud()
+  const room = cloudStatus?.room
+  const roomOpen = room?.phase === 'open'
   const [sources, setSources] = useState<TalkShowDisplaySource[] | null>(null)
   const [pending, setPending] = useState(false)
-  const sharing = talkShow.room.local.screen !== null
+  const local = talkShow.room.local
+  const sharing = local.screen !== null
+  const screens = roomScreens(room, people, sharing)
 
   const pick = async (): Promise<void> => {
     setPending(true)
@@ -520,33 +585,77 @@ function ScreenShareButton({
     }
   }
 
+  const show = (screen: RoomScreen): void => {
+    if (!room) return
+    void talkShow
+      .setStage(stageWithScreen(room.stage, screen.onProgram ? null : screen.identity))
+      .catch(() => {})
+  }
+
   return (
-    <div className="flex items-center gap-2">
-      {sharing ? (
-        <Button
-          data-testid="show-stage-stop-share"
-          disabled={disabled || pending}
-          type="button"
-          variant="outline"
-          onClick={() => void talkShow.stopScreenShare().catch(() => {})}
-        >
-          Stop sharing
-        </Button>
+    <div className="flex min-w-0 flex-col gap-1.5" data-testid="show-stage-screens">
+      <div className="flex min-h-6 items-center justify-between gap-2 px-1">
+        <SectionLabel>Screens</SectionLabel>
+        {sharing ? (
+          <Button
+            data-testid="show-stage-stop-share"
+            disabled={!roomOpen || pending}
+            size="xs"
+            type="button"
+            variant="outline"
+            onClick={() => void talkShow.stopScreenShare().catch(() => {})}
+          >
+            Stop sharing
+          </Button>
+        ) : (
+          <Button
+            data-testid="show-stage-share"
+            disabled={!roomOpen || pending}
+            size="xs"
+            type="button"
+            variant="outline"
+            onClick={() => void pick()}
+          >
+            {pending ? (
+              <Spinner aria-hidden data-icon="inline-start" />
+            ) : (
+              <DisplayIcon data-icon="inline-start" />
+            )}
+            Share screen…
+          </Button>
+        )}
+      </div>
+      {screens.length === 0 ? (
+        <p className="px-1 text-meta text-muted-foreground" data-testid="show-stage-screens-empty">
+          {NO_SCREENS_YET} {SCREENS_GUEST_HINT}
+        </p>
       ) : (
-        <Button
-          data-testid="show-stage-share"
-          disabled={disabled || pending}
-          type="button"
-          variant="outline"
-          onClick={() => void pick()}
-        >
-          {pending ? (
-            <Spinner aria-hidden data-icon="inline-start" />
-          ) : (
-            <DisplayIcon data-icon="inline-start" />
-          )}
-          Share screen…
-        </Button>
+        <div aria-label="Screens" className={CARD_GRID} role="group">
+          {screens.map((screen) => (
+            <SceneCard
+              data-stage-identity={screen.identity}
+              data-testid="show-stage-screen"
+              disabled={!roomOpen || screen.blockedReason !== null}
+              disabledReason={roomOpen ? screen.blockedReason : null}
+              key={screen.identity}
+              label={screen.name}
+              meta={screen.onProgram ? 'On stage' : 'Put on stage'}
+              selected={screen.onProgram}
+              size="sm"
+              thumb={
+                <ScreenThumb
+                  track={
+                    screen.host
+                      ? local.screen
+                      : (talkShow.room.people.find((entry) => entry.identity === screen.identity)
+                          ?.screen ?? null)
+                  }
+                />
+              }
+              onSelect={() => show(screen)}
+            />
+          ))}
+        </div>
       )}
       <Dialog open={sources !== null} onOpenChange={(open) => !open && setSources(null)}>
         <DialogContent size="lg">
@@ -787,7 +896,8 @@ function ProgramMonitor({ talkShow }: { talkShow: TalkShowContextValue }): React
 
   return (
     <div
-      className="flex w-1/2 min-w-36 flex-col gap-1.5 self-end @min-[40rem]/show-stage:w-1/3"
+      // Narrow, the Program leads the column: it mirrors the stage above it.
+      className="order-first flex w-1/2 min-w-48 flex-col gap-1.5 @min-[44rem]/show-stage:order-none @min-[44rem]/show-stage:w-[36%] @min-[44rem]/show-stage:shrink-0"
       data-program-source={view.source}
       data-program-stage={preview?.state}
       data-testid="show-stage-program"
@@ -795,10 +905,27 @@ function ProgramMonitor({ talkShow }: { talkShow: TalkShowContextValue }): React
         view.source === 'return' ? VIEW_SOURCE['runner-return'] : VIEW_SOURCE['program-preview']
       }
     >
-      <div className="flex min-h-6 min-w-0 items-center gap-2">
-        <span className="min-w-0 flex-1 truncate text-label text-subtle">
+      <div className="flex min-h-6 min-w-0 items-center gap-1.5 px-1">
+        <SectionLabel className="min-w-0 truncate">
           {view.source === 'return' ? 'Program' : 'Program preview'}
-        </span>
+        </SectionLabel>
+        {/* The program's state beside its name: a chip, with the sentence on hover. */}
+        {previewCopy?.badge ? (
+          <InfoTooltip content={previewCopy.detail}>
+            <Badge
+              data-testid="show-stage-program-state"
+              variant={preview?.state === 'applied' ? 'success' : 'warning'}
+            >
+              {previewCopy.badge}
+            </Badge>
+          </InfoTooltip>
+        ) : null}
+        {takeover ? (
+          <Badge data-testid="show-stage-program-muted" variant="outline">
+            Takeover
+          </Badge>
+        ) : null}
+        <span className="flex-1" />
         {programMenu.length > 0 ? (
           <span
             data-program-camera={
@@ -810,17 +937,22 @@ function ProgramMonitor({ talkShow }: { talkShow: TalkShowContextValue }): React
           </span>
         ) : null}
         {view.source === 'return' ? (
-          <Button
-            aria-label={listening ? 'Mute the program' : 'Listen to the program'}
-            aria-pressed={listening}
-            disabled={!audio}
-            size="icon-xs"
-            type="button"
-            variant="ghost"
-            onClick={() => setListening((value) => !value)}
+          <InfoTooltip
+            content={listening ? 'Mute the program' : 'Listen to the program'}
+            focusable={false}
           >
-            {listening ? <SpeakerOnIcon /> : <SpeakerOffIcon />}
-          </Button>
+            <Button
+              aria-label={listening ? 'Mute the program' : 'Listen to the program'}
+              aria-pressed={listening}
+              disabled={!audio}
+              size="icon-xs"
+              type="button"
+              variant="ghost"
+              onClick={() => setListening((value) => !value)}
+            >
+              {listening ? <SpeakerOnIcon /> : <SpeakerOffIcon />}
+            </Button>
+          </InfoTooltip>
         ) : null}
       </div>
       <div
@@ -878,23 +1010,6 @@ function ProgramMonitor({ talkShow }: { talkShow: TalkShowContextValue }): React
             </ProgramGraphics>
           ) : null}
         </div>
-        {/* The program's state on the picture's corner, as the stage's Room pill. */}
-        {previewCopy?.badge || takeover ? (
-          <span className="absolute top-1.5 right-1.5 flex gap-1">
-            {takeover ? (
-              <span className={PROGRAM_PILL} data-testid="show-stage-program-muted">
-                Takeover
-              </span>
-            ) : null}
-            {previewCopy?.badge ? (
-              <InfoTooltip content={previewCopy.detail}>
-                <span className={PROGRAM_PILL} data-testid="show-stage-program-state">
-                  {previewCopy.badge}
-                </span>
-              </InfoTooltip>
-            ) : null}
-          </span>
-        ) : null}
       </div>
       {/* News stays in words: a refusal, a delivery problem, the scene. */}
       {view.source === 'stage' && avatar?.reason ? (
@@ -930,27 +1045,55 @@ function ProgramMonitor({ talkShow }: { talkShow: TalkShowContextValue }): React
         </span>
       ) : null}
       {view.source === 'stage' ? (
-        // The opt-ins' one home is Guests → Room; this line takes the host there.
+        // The opt-ins' one home is Guests → Room; these chips take the host there.
         <Button
-          className="h-auto min-w-0 justify-start self-start px-0 text-subtle"
+          aria-label={`${roomProgramSummary(avatar, graphics)}. Open Guests`}
+          className="h-auto min-w-0 justify-start gap-1 self-start px-0.5 py-0.5"
           data-testid="show-stage-program-opt-ins"
           size="xs"
           type="button"
-          variant="link"
+          variant="ghost"
           onClick={() => openWorkspaceTab('guests')}
         >
-          <span className="truncate">{roomProgramSummary(avatar, graphics)}</span>
-          <ChevronRightIcon data-icon="inline-end" />
+          {roomProgramChips(avatar, graphics).map((chip, index) => (
+            <Fragment key={chip.id}>
+              {index > 0 ? <span className="sr-only"> · </span> : null}
+              <Badge data-opt-in={chip.id} variant={chip.on ? 'success' : 'neutral'}>
+                {chip.label}
+              </Badge>
+            </Fragment>
+          ))}
+          <ChevronRightIcon className="text-muted-foreground" data-icon="inline-end" />
         </Button>
+      ) : null}
+      {/* Plan 249 S17: what each cloud output really sends, as the room
+          reported it: the facts as chips, the whole sentence on hover. */}
+      {cloudStatus?.show?.outputProfile ? (
+        <InfoTooltip content={managedProfileDescription(cloudStatus.show.outputProfile)}>
+          <span
+            className="flex min-w-0 flex-wrap items-center gap-1 px-0.5 text-muted-foreground"
+            data-testid="show-stage-output-profile"
+          >
+            <OutputIcon aria-hidden className="size-3.5 shrink-0" />
+            {outputProfileChips(cloudStatus.show.outputProfile).map((output) => (
+              <Badge
+                data-orientation={output.orientation}
+                key={output.orientation}
+                variant={output.differs ? 'warning' : 'outline'}
+              >
+                {output.facts.join(' · ')}
+              </Badge>
+            ))}
+            <span className="sr-only">
+              {managedProfileDescription(cloudStatus.show.outputProfile)}
+            </span>
+          </span>
+        </InfoTooltip>
       ) : null}
       {view.source === 'return' ? <audio muted={!listening} ref={audioRef} /> : null}
     </div>
   )
 }
-
-/** The program's corner pill: the stage's Room pill, a size down. */
-const PROGRAM_PILL =
-  'inline-flex items-center rounded-full bg-video-ground/80 px-2 py-0.5 text-xs text-video-ground-foreground'
 
 /** Whether the Program frame holds a picture (else it is the empty inset well). */
 function programPictured(
@@ -1064,51 +1207,38 @@ function SceneTileView({
   )
 }
 
-// --- Requests and the backstage strip ----------------------------------------
+// --- Requests and the people ---------------------------------------------------
 
+/** "Ada wants to join", above everything the host arranges: it waits on them. */
 function JoinRequests({
   requests,
-  talkShow
+  disabled
 }: {
   requests: CloudRoomRequest[]
-  talkShow: TalkShowContextValue
+  disabled: boolean
 }): ReactElement | null {
-  const [deciding, setDeciding] = useState<string | null>(null)
   if (requests.length === 0) return null
-  const decide = (request: CloudRoomRequest, decision: 'let-in' | 'decline'): void => {
-    setDeciding(request.requestId)
-    void talkShow
-      .decideGuest(request.requestId, decision)
-      .catch(() => {})
-      .finally(() => setDeciding(null))
-  }
   const more = requests.length - REQUESTS_SHOWN
   return (
-    <div className="flex flex-col gap-2" data-testid="show-stage-requests">
-      {requests.slice(0, REQUESTS_SHOWN).map((request) => (
-        <Alert data-testid="show-stage-request" key={request.requestId} variant="warning">
-          <AlertTitle>{requestTitle(request)}</AlertTitle>
-          <AlertAction className="flex gap-1">
-            <Button
-              disabled={deciding === request.requestId}
-              size="xs"
-              type="button"
-              onClick={() => decide(request, 'let-in')}
-            >
-              Let in
-            </Button>
-            <Button
-              disabled={deciding === request.requestId}
-              size="xs"
-              type="button"
-              variant="ghost"
-              onClick={() => decide(request, 'decline')}
-            >
-              Decline
-            </Button>
-          </AlertAction>
-        </Alert>
-      ))}
+    <div className="flex flex-col gap-1.5" data-testid="show-stage-requests">
+      <GroupedList
+        aria-label="Wants to join"
+        label={
+          <span className="flex items-center gap-1.5">
+            <StatusDot pulse tone="warn" />
+            <CountLabel count={requests.length}>Wants to join</CountLabel>
+          </span>
+        }
+      >
+        {requests.slice(0, REQUESTS_SHOWN).map((request) => (
+          <RequestRow
+            disabled={disabled}
+            key={request.requestId}
+            request={request}
+            testId="show-stage-request"
+          />
+        ))}
+      </GroupedList>
       {more > 0 ? (
         <Button
           className="self-start"
@@ -1118,6 +1248,7 @@ function JoinRequests({
           onClick={() => openWorkspaceTab('guests')}
         >
           {more === 1 ? '1 more wants to join' : `${more} more want to join`}
+          <ChevronRightIcon data-icon="inline-end" />
         </Button>
       ) : null}
     </div>
@@ -1125,11 +1256,12 @@ function JoinRequests({
 }
 
 /**
- * The backstage strip: everyone in the room, the one home of Bring on and
- * Send backstage (D16). A row per person: their picture, name, connection,
- * whether they're talking, Bring on or Send backstage, Mute, and ⋯.
+ * Everyone in the room, in two lists: On stage and Backstage. The one home
+ * of Bring on and Send backstage (D16). A row per person: their picture,
+ * name, what is wrong when something is, the mic, a guest's screen share,
+ * the stage move, and ⋯.
  */
-function BackstageStrip({
+function StagePeople({
   people,
   limitsBlocked
 }: {
@@ -1137,39 +1269,79 @@ function BackstageStrip({
   limitsBlocked: string | null
 }): ReactElement {
   const { cloudStatus, talkShow } = useStudioCloud()
-  const { moderationItems, toggleMute, dialogs } = useGuestModeration(talkShow)
+  const { moderationItems, toggleMute, toggleScreenShare, dialogs } = useGuestModeration(talkShow)
   const roomOpen = cloudStatus?.room?.phase === 'open'
   const stage = cloudStatus?.room?.stage
   if (people.length === 0) return <></>
+  // The host is always on stage (H2), whatever the stage names yet.
+  const onStage = people.filter((person) => person.host || person.onStage)
+  const backstage = people.filter((person) => !person.host && !person.onStage)
+  const row = (person: RoomPerson): ReactElement => (
+    <StageRow
+      bringOnBlocked={person.host ? null : limitsBlocked}
+      disabled={!roomOpen}
+      key={person.identity}
+      moderation={moderationItems(person)}
+      person={person}
+      spotlit={stage?.layout === 'spotlight' && stage.spotlight === person.identity}
+      talkShow={talkShow}
+      onToggleMute={toggleMute}
+      onToggleScreenShare={toggleScreenShare}
+    />
+  )
   return (
-    <>
-      <GroupedList aria-label="In the room" data-testid="show-stage-strip" label="In the room">
-        {people.map((person) => (
-          <StripRow
-            bringOnBlocked={person.host ? null : limitsBlocked}
-            disabled={!roomOpen}
-            key={person.identity}
-            moderation={moderationItems(person)}
-            person={person}
-            spotlit={stage?.layout === 'spotlight' && stage.spotlight === person.identity}
-            talkShow={talkShow}
-            onMute={() => toggleMute(person)}
-          />
-        ))}
+    <div aria-label="In the room" className="flex flex-col gap-4" data-testid="show-stage-strip">
+      <GroupedList
+        aria-label="On stage"
+        label={<CountLabel count={onStage.length}>On stage</CountLabel>}
+      >
+        {onStage.map(row)}
       </GroupedList>
+      {backstage.length > 0 ? (
+        <GroupedList
+          aria-label="Backstage"
+          label={<CountLabel count={backstage.length}>Backstage</CountLabel>}
+        >
+          {backstage.map(row)}
+        </GroupedList>
+      ) : (
+        <div className="flex flex-col gap-1.5">
+          <SectionLabel className="px-1">
+            <CountLabel count={0}>Backstage</CountLabel>
+          </SectionLabel>
+          <div
+            className="flex items-center justify-between gap-2 rounded-row border border-border bg-inset py-1.5 pr-1.5 pl-3"
+            data-testid="show-stage-backstage-empty"
+          >
+            <span className="min-w-0 text-meta text-muted-foreground">{NOBODY_BACKSTAGE}</span>
+            {/* The link's one home is the Guests page. */}
+            <Button
+              size="xs"
+              type="button"
+              variant="ghost"
+              onClick={() => openWorkspaceTab('guests')}
+            >
+              <LinkIcon data-icon="inline-start" />
+              Invite link
+              <ChevronRightIcon data-icon="inline-end" />
+            </Button>
+          </div>
+        </div>
+      )}
       {dialogs}
-    </>
+    </div>
   )
 }
 
-function StripRow({
+function StageRow({
   person,
   talkShow,
   disabled,
   bringOnBlocked,
   spotlit,
   moderation,
-  onMute
+  onToggleMute,
+  onToggleScreenShare
 }: {
   person: RoomPerson
   talkShow: TalkShowContextValue
@@ -1177,21 +1349,10 @@ function StripRow({
   bringOnBlocked: string | null
   spotlit: boolean
   moderation: KebabMenuItem[]
-  onMute: () => void
+  onToggleMute: (person: RoomPerson) => void
+  onToggleScreenShare: (person: RoomPerson) => void
 }): ReactElement {
   const local = talkShow.room.local
-  const remote = talkShow.room.people.find((entry) => entry.identity === person.identity)
-  const thumbnail = person.host
-    ? cameraPicture(local.camera, local.cameraOff)
-    : cameraPicture(remote?.video, remote?.cameraOff)
-  // D14: the host's hold, a mic the guest still has off, or talking.
-  const mic = person.host
-    ? null
-    : guestMicStatus(withRoomMic(person.mic, Boolean(remote?.micMuted)), person.name)
-  const muted = person.host ? local.micMuted : mic !== null
-  const speaking = !muted && Boolean(remote?.speaking)
-  const quality = qualityStatus(person.quality)
-  const quietQuality = quality.tone === 'good'
   const blocked = !person.onStage ? bringOnBlocked : null
 
   const items: KebabMenuItem[] = [
@@ -1223,47 +1384,16 @@ function StripRow({
   ]
 
   return (
-    <ListRow
-      className="group/kebab-host"
-      compact
-      data-stage-identity={person.identity}
-      data-testid="show-stage-strip-row"
-      leading={
-        <span className="relative flex h-5 w-9 shrink-0 overflow-hidden rounded-chip bg-video-ground">
-          <TrackVideo className="object-cover" track={thumbnail.track} />
-          {thumbnail.cameraOff ? (
-            <CameraOffAvatar circle="14px" letter="9px" name={person.name} />
-          ) : null}
-        </span>
-      }
-      statusIcons={
-        <>
-          {quietQuality ? (
-            <span className="sr-only">{quality.label}</span>
-          ) : (
-            <InfoTooltip content={quality.label}>
-              <span>
-                <StatusDot tone={quality.tone} />
-                <span className="sr-only">{quality.label}</span>
-              </span>
-            </InfoTooltip>
-          )}
-          {mic ? (
-            <InfoTooltip content={mic.hint}>
-              <WaveformMutedIcon aria-label={mic.label} role="img" />
-            </InfoTooltip>
-          ) : muted ? (
-            <WaveformMutedIcon aria-label="Muted" role="img" />
-          ) : (
-            <WaveformIcon
-              aria-label={speaking ? 'Talking' : 'Quiet'}
-              className={speaking ? 'text-foreground' : undefined}
-              role="img"
-            />
-          )}
-        </>
-      }
-      title={person.name}
+    <PersonRow
+      disabled={disabled}
+      menuItems={items}
+      micBadgeTestId="show-stage-mic"
+      micTestId="show-stage-mute"
+      person={person}
+      talkShow={talkShow}
+      testId="show-stage-strip-row"
+      onToggleMute={onToggleMute}
+      onToggleScreenShare={onToggleScreenShare}
     >
       {/* The host is always on stage (H2): their row has no stage move (L3). */}
       {person.host ? null : (
@@ -1282,31 +1412,16 @@ function StripRow({
               ).catch(() => {})
             }
           >
+            {person.onStage ? (
+              <ArrowDownIcon data-icon="inline-start" />
+            ) : (
+              <ArrowUpIcon data-icon="inline-start" />
+            )}
             {person.onStage ? 'Send backstage' : 'Bring on'}
           </Button>
         </DisabledReason>
       )}
-      <Button
-        aria-label={
-          person.host
-            ? undefined
-            : person.muted
-              ? `Let ${person.name} unmute`
-              : `Mute ${person.name}`
-        }
-        data-testid="show-stage-mute"
-        disabled={disabled}
-        size="xs"
-        type="button"
-        variant="ghost"
-        onClick={() =>
-          person.host ? void talkShow.setMicrophoneMuted(!local.micMuted).catch(() => {}) : onMute()
-        }
-      >
-        {person.host ? (local.micMuted ? 'Unmute' : 'Mute') : person.muted ? 'Unmute' : 'Mute'}
-      </Button>
-      <KebabMenu disabled={disabled} items={items} label={`More for ${person.name}`} />
-    </ListRow>
+    </PersonRow>
   )
 }
 

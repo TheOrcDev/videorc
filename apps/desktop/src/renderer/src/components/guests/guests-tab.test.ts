@@ -123,8 +123,12 @@ describe('Destinations → Guests (C-G2)', () => {
     expect(page).toContain('On stage')
     expect(page).toContain('Backstage')
     expect(page).toContain('Muted by you')
-    expect(page).toContain('Actions for Grace')
-    expect(page).not.toContain('Actions for You')
+    expect(page).toContain('More for Grace')
+    expect(page).not.toContain('More for You')
+    // Plan 252: the two lists, each with its count, and the room in numbers.
+    expect(page).toMatch(/aria-label="On stage"/)
+    expect(page).toMatch(/aria-label="Backstage"/)
+    expect(page).toMatch(/data-testid="guests-room-counts"[^]*1 on stage[^]*1 backstage/)
   })
 
   // Live show 2026-11-19: Unmute only lets go (D14). The list tells the
@@ -368,5 +372,62 @@ describe('Guests → Room: on the program (plan 249 S4/S9)', () => {
       })
     )
     expect(row('guests-program-avatar')?.textContent).toContain('The stream refused the avatar.')
+  })
+})
+
+// Plan 252: a guest's mic and screen share are controls on their row, not
+// items in a menu, and each says its state.
+describe('Guests rows (plan 252)', () => {
+  let root: Root
+  let container: HTMLDivElement
+  beforeEach(() => {
+    vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
+    container = document.createElement('div')
+    document.body.append(container)
+    root = createRoot(container)
+  })
+  afterEach(async () => {
+    await act(async () => root.unmount())
+    container.remove()
+    vi.unstubAllGlobals()
+  })
+  const row = (identity: string): HTMLElement =>
+    container.querySelector<HTMLElement>(
+      `[data-testid="guests-person"][data-stage-identity="${identity}"]`
+    ) as HTMLElement
+
+  it("shows each guest's screen share as off, allowed or sharing, and toggles it by guest id", async () => {
+    const show = talkShow()
+    const bo = { ...ada, guestId: 'g_bo', name: 'Bo', screenShareAllowed: true }
+    studio.cloud.cloudStatus = talkStatus({
+      room: openRoom({
+        guests: [ada, grace, bo],
+        participants: [
+          ...(openRoom().participants ?? []),
+          guestParticipant(ada),
+          guestParticipant(grace),
+          guestParticipant(bo, { screen: true })
+        ]
+      })
+    })
+    studio.cloud.talkShow = show
+    await act(async () =>
+      root.render(createElement(TooltipProvider, null, createElement(GuestsTab)))
+    )
+    const share = (identity: string): HTMLButtonElement =>
+      row(identity).querySelector<HTMLButtonElement>(
+        '[data-testid="person-screen-share"]'
+      ) as HTMLButtonElement
+    expect(share('g_ada').dataset.screenShare).toBe('off')
+    expect(share('g_ada').getAttribute('aria-label')).toBe('Let Ada share their screen')
+    expect(share('g_grace').dataset.screenShare).toBe('allowed')
+    expect(share('g_grace').getAttribute('aria-pressed')).toBe('true')
+    expect(share('g_bo').dataset.screenShare).toBe('sharing')
+    expect(row(HOST).querySelector('[data-testid="person-screen-share"]')).toBeNull()
+
+    await act(async () => share('g_ada').click())
+    await act(async () => share('g_bo').click())
+    expect(show.actOnGuest).toHaveBeenCalledWith('g_ada', 'allow-screen-share', undefined)
+    expect(show.actOnGuest).toHaveBeenCalledWith('g_bo', 'disallow-screen-share', undefined)
   })
 })

@@ -1,5 +1,9 @@
 # Implementation Plans
 
+- 2026-11-19: [Plan 252](252-room-ui-redesign.md), the owner's ask: the
+  room UI in the Studio was only text. The Show stage and the Guests page
+  rebuilt in pictures: layout and screen cards, people in On stage and
+  Backstage with live pictures and icon controls. Built, in review.
 - 2026-11-18: [Plan 250](250-notification-center.md), the owner's ask:
   toasts are killing them during livestreams, so a notifications bell with
   an unread count, where each notification can be acted on or cleared.

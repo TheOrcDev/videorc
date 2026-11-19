@@ -55,3 +55,31 @@ export function roomProgramSummary(
 ): string {
   return `Avatar ${avatar?.enabled ? 'on' : 'off'} · Graphics ${graphics?.enabled ? 'on' : 'off'}`
 }
+
+/** The same two facts as chips on the Program card: each with its state. */
+export function roomProgramChips(
+  avatar: RoomProgramOptIn | null | undefined,
+  graphics: RoomProgramOptIn | null | undefined
+): { id: 'avatar' | 'graphics'; label: string; on: boolean }[] {
+  return [
+    {
+      id: 'avatar',
+      label: `Avatar ${avatar?.enabled ? 'on' : 'off'}`,
+      on: avatar?.enabled === true
+    },
+    {
+      id: 'graphics',
+      label: `Graphics ${graphics?.enabled ? 'on' : 'off'}`,
+      on: graphics?.enabled === true
+    }
+  ]
+}
+
+/** An opt-in's state as a status dot: applied, waiting, refused or off. */
+export function roomOptInTone(
+  optIn: RoomProgramOptIn | null | undefined
+): 'good' | 'warn' | 'error' | 'neutral' {
+  if (!optIn?.enabled) return 'neutral'
+  if (optIn.reason) return 'error'
+  return optIn.state === 'applied' ? 'good' : 'warn'
+}
