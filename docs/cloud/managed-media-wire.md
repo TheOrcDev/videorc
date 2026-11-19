@@ -611,9 +611,9 @@ A stage may show two screens at once: the two side by side across the top, every
 - The page subscribes to the screen share and the screen-share audio of both named screens, and to no other screen (W `program/stage.ts`, `stageWantsTrack`). Both screens' audio goes through the program's auxiliary gain and limiter, so the stream and the cloud recording carry both.
 - The beacon's `shown` gains `screens` (both identities, only when two are drawn) and its `layout` may be `two-screens`; `state.room.shown` passes both on. `screen` is still the first drawn screen. The stage key appends `|a,b` for a stage with a valid pair and is unchanged for every other stage (`cloud-parity-views.json`).
 - The host's `videorc.stage` data message gains `screens` beside `screen`, the same pair, only when there are two. A guest page shows every selected screen that is another guest's (in that guest's tile) and hears its audio; the host's screen keeps its privacy-certified path, and a guest's own screen never comes back to them.
-- Hide screen is unchanged: the host's screen is the only one with a privacy state, it is held per publication, and the frosted plate is drawn wherever that screen's tile is, in either slot.
+- Hide screen is per screen: the host's screen is the only one with a privacy state, each surface holds it on that screen's picture alone (W `program/stage-media.ts`, `guest-tracks.tsx`; D `show-stage.tsx`), and the frosted still (plan 210 D8) is drawn in that screen's tile, in either slot, while the screen beside it stays live.
 - A host's scene (plan 249 S12) has one screen box: it shows `screen`, the first of the pair.
-- Node shows: a runner draws one screen. The desktop refuses `cloud.stage.set` with `screens` on a show that is not on web control ("This show puts one screen on the program."), and the Show stage offers one screen there.
+- Node shows: a runner draws one screen. The desktop refuses `cloud.stage.set` with `screens` on a show that is not on web control ("This show puts one screen on the program."), and the Show stage's Two screens card is disabled with the same line.
 
 ### 6.2 `state.room`
 

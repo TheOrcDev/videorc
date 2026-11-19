@@ -18,11 +18,13 @@ Facts are read from desktop `origin/main` `7e00e28d2` and web `origin/main`
   and the targeted Rust tests ran. The app smokes did not (see "Owed").
 - **In scope:** managed talk shows (web control): the web's stage route,
   the program page, the guest page, the desktop backend, the renderer's
-  stage model and one new control in the Show stage.
+  stage model, and a fifth layout card with two-screen picking in plan 252's
+  Show stage.
 - **Out of scope:** the runner (`videorc-cloud`); the Rust UI
   (`videorc-rust`); captions; the controller and lease code; the room's Hide
-  screen plate (`fix/room-hide-screen-plate`); the room UI redesign
-  (`feat/room-ui-redesign`).
+  screen plate (merged meanwhile as #1558, used as it is); the room UI
+  redesign (plan 252, merged meanwhile as #1559, built into at the point it
+  names).
 - **Number:** 251 is the next free number after 250 (248 is unused, 249 is
   cloud parity).
 
@@ -37,13 +39,10 @@ Facts are read from desktop `origin/main` `7e00e28d2` and web `origin/main`
   with the people beside it. The page drops a `screen` whose owner is not on
   the stage, and falls back to `side-by-side` while the screen has no fresh
   frame.
-- **Nothing on the desktop puts a guest's screen on the program.** On a
-  managed show `stage.screen` is set only when the host starts their own
-  share (`startScreenShare`) or when a scene needs a screen
-  (`cloud-scene-adapter.ts`). The page shows no screen the stage does not
-  name. So a guest's share was visible in the room and never reached
-  viewers. (A node show's runner picks the first shared screen on its own.)
-  This plan's picker closes that gap too.
+- **Putting a guest's screen on the program** arrived with plan 252 while
+  this was in review: each shared screen is a card under Screens on the
+  Show stage, and a card puts its screen on stage (`stageWithScreen`). One
+  at a time. Before it, a managed show had no way to do it at all.
 - **Where a stage is read**, and how strictly:
 
   | Reader | A layout it does not know | A field it does not know |
@@ -126,13 +125,16 @@ it, as on Screen + people); everyone on stage in one row under them.
   the camera-off circle). A screen owner whose camera is off keeps their
   screen up. Someone away for 60 s leaves the row; their screen stays while
   it has frames.
-- **Hide screen:** only the host's screen has a privacy state. The page
-  holds it per screen publication and draws the frosted plate on that
-  screen's picture in whichever slot it sits, so the promise holds in the
-  two-screens layout with no new code. The room-side plate fix is
-  `fix/room-hide-screen-plate`; this plan does not touch that code, and the
-  Show stage's screen tiles here go through the same `tileTrack` path that
-  branch fixes.
+- **Hide screen** (plan 210 D8 in a room; desktop #1558 and web #166,
+  merged 2026-11-19 while this was in review, and this branch is rebased on
+  them): each of the two screens keeps its own. Only the host's screen has a
+  privacy state, and every surface holds it per picture, never per layout:
+  the program page on the host's `StageMedia`, the guest page in
+  `PrivateScreenVideo`, the Show stage in `tileTrack`'s `still` for the
+  host's screen tile. So the hidden screen draws its frosted still in its
+  slot while the screen beside it stays live, and Show brings back only that
+  one. Tests pin it on the Show stage (room view and Program preview) and on
+  the program page's pictures.
 - **A host's scene (plan 249 S12)** has one screen box: it shows `screen`,
   the first of the pair.
 
@@ -174,8 +176,9 @@ layout table and has no two-screens layout; adding one is a change to a
 private repo, its fixture and its release, for a path the owner does not
 use (the owner runs managed shows).
 
-- The Show stage offers one screen on a node show: the picker says "This
-  show puts one screen on the program." and a tick replaces the other.
+- The Show stage offers one screen on a node show: the Two screens card is
+  disabled with "This show puts one screen on the program.", and a Screens
+  card takes the one place.
 - The backend refuses `cloud.stage.set` with `screens` on a show that is
   not on web control, with that same line, before anything reaches the
   socket. Never narrowed silently.
@@ -184,28 +187,47 @@ use (the owner runs managed shows).
 
 ### D7. Host UX
 
-One new control in the Show stage, beside Share screen…: **Screens on the
-program**, a menu of checkbox rows.
+Built into plan 252's Show stage (the room in pictures, merged as #1559
+while this was in review), at the integration point that plan names. No
+separate control.
 
-- A row for everyone on stage who shares a screen now ("Your screen",
-  "Ada's screen"), and for any screen the stage still names.
-- Tick one: the layout becomes Screen + people with it. Tick a second: the
-  two-screens layout, in the order ticked (first on the left). Untick the
-  last: Side by side. A third row is disabled with "The program shows two
-  screens at most. Take one off first."
-- The host's own Share screen… puts it up as before, now beside a guest's
-  screen that is already up; Stop sharing takes only the host's off.
-- The Screen + people chip stays selected for both looks; there is no fifth
-  chip. Shown only while there is something to pick.
+- **A fifth layout card, Two screens**, with its diagram in
+  `StageLayoutThumb`: two screens across the top, two people under them.
+  - Choosing it puts up the screens the stage already names, then whoever
+    else on stage shares one, up to two. With one screen it shows that one
+    (the program draws Screen + people) and stays chosen, waiting for the
+    second.
+  - It waits with "Share a screen first" while nobody on stage shares one,
+    said once under the cards for it and Screen + people.
+  - On a node show it is disabled with "This show puts one screen on the
+    program." (D6).
+  - It is pressed while two screens are drawn, and while it is chosen with
+    one up.
+- **The Screens gallery picks up to two while Two screens is chosen.** Each
+  shared screen is already a card there (`roomScreens`). A card on stage is
+  pressed, so a pair shows two pressed cards. A click adds the card's screen
+  beside the other, or takes it off and leaves the other. A third card is
+  disabled with "Two screens are on stage. Take one off first."
+- **On any other layout the gallery is plan 252's:** a card takes the one
+  place, and Screen + people is one screen (choosing that card from Two
+  screens takes the second one off).
+- The host's own Share screen… goes beside the screen already up while Two
+  screens is chosen, and takes the one place otherwise, as before. Stop
+  sharing takes only the host's off.
 - No success toast: the stage is the confirmation (owner call, 2026-07-16).
 
-**Integration point for the room UI redesign:** the control is one file,
-`components/studio/stage-screens-picker.tsx`, with no state of its own. It
-takes `talkShow` and a `disabled` flag and reads the cloud status. It is
-mounted by one line in `StageControls` in `show-stage.tsx`; the redesign can
-move that line anywhere a `talkShow` is at hand. Its rules are pure
-functions in `lib/stage-screens.ts`; its one action is
-`talkShow.setProgramScreen(identity, shown)`.
+"Two screens is chosen" has no field on the wire (D1), so it is the
+renderer's: set by the card, kept while Screen + people is up, and read back
+from a stage that names two after a relaunch or on another computer
+(`twoScreensChosen` in `lib/stage-screens.ts`, `talkShow.twoScreens`). With
+one screen up after a relaunch the choice reads as Screen + people; one click
+on the card chooses it again.
+
+Where it lives: the rules are pure functions in `lib/stage-screens.ts`; the
+view model in `lib/guests-view.ts` (`layoutOptions`, `selectedLayout`,
+`roomScreens`, `stageWithScreenCard`, the widened `stageWithScreen`); the
+choice in `use-talk-show-room.ts` (`setLayout('two-screens')`); the cards in
+`show-stage.tsx` and `stage-layout-thumb.tsx`.
 
 ### D8. Rollout
 
@@ -230,8 +252,8 @@ In dependency order. Each leaves both repos working.
 | W4 | web | the guest page: `parseStageMessage`, `guestScreenOwners`, audio | a guest sees and hears both selected guest screens, never their own |
 | D1 | desktop | Rust: `CloudStage.screens`, `validate`, the frame, `CloudRoomShown.screens`, the node refusal, Remove | targeted `cargo test`, clippy and fmt pass |
 | D2 | desktop | the contract and the model: `backend.ts`, the strict schemas, the stage key, `lib/stage-screens.ts`, `talk-show-layout.ts`, the fixture | unit tests pass; the fixture matches |
-| D3 | desktop | the hook and the room client: prune, the stage message, `setProgramScreen`, share and stop | unit tests pass |
-| D4 | desktop | the picker in the Show stage | typecheck, lint; by eye in both themes (owed) |
+| D3 | desktop | the hook and the room client: prune, the stage message, `setLayout('two-screens')`, share and stop | unit tests pass |
+| D4 | desktop | the fifth layout card and two-screen picking in plan 252's galleries | unit and component tests pass; by eye in both themes (owed) |
 | D5 | desktop | the wire contract (`managed-media-wire.md` 6.1.1), the parity script's mirror | `pnpm test:scripts` passes |
 
 ## Tests per layer
@@ -239,8 +261,11 @@ In dependency order. Each leaves both repos working.
 - **Rust** (`cloud_talk.rs`, `cloud_show.rs`): the old wire shape is
   unchanged; the pair rule; `drop_screen`; a managed show sends both screens
   to `PUT …/stage` and its status carries them; a node show refuses.
-- **Desktop unit:** `stage-screens.test.ts` (every rule of the picker and the
-  model), `talk-show-layout.test.ts` (18 fixture cases, even and apart, the
+- **Desktop unit:** `stage-screens.test.ts` (every rule of the model),
+  `guests-view.test.ts` and `guests-view-room-ui.test.ts` (the fifth card,
+  the selected card, the Screens cards), `show-stage.test.ts` (the tiles in
+  the room view and the Program preview, the cards, a hidden screen frosting
+  alone), `talk-show-layout.test.ts` (18 fixture cases, even and apart, the
   fallbacks, what the program reports), `talk-show-managed.test.ts`,
   `talk-show-room.test.ts` (the stage message), `use-talk-show-room.test.ts`
   (prune), `cloud-presentation-views.test.ts` (key vectors).
@@ -259,7 +284,8 @@ In dependency order. Each leaves both repos working.
   both screen tiles' centres) with that pass.
 - A browser run of the program page with two screen tracks, and the guest
   page with two guest screens.
-- The picker by eye, light and dark (owner feedback "Check both themes").
+- The fifth card, its diagram and two pressed screen cards by eye, light and
+  dark (owner feedback "Check both themes").
 - A release, after the web deploy.
 
 ## After
@@ -268,4 +294,6 @@ In dependency order. Each leaves both repos working.
 - Swap left and right without unticking.
 - Two screens on node shows, if node shows come back into use: a runner
   layout, its fixture cases, and lifting the refusal in D6.
-- The Rust UI (`videorc-rust`) gets the picker in its own pass.
+- The Rust UI (`videorc-rust`) gets the card in its own pass.
+- A field for "Two screens is chosen", if the choice should survive a
+  relaunch with one screen up.
