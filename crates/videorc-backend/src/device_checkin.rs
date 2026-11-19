@@ -24,6 +24,7 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const LAUNCH_DELAY: Duration = Duration::from_secs(15);
 const MIN_INTERVAL: TimeDelta = TimeDelta::days(1);
 const LAST_CHECKIN_SETTING_KEY: &str = "deviceCheckin.last";
+#[cfg(any(target_os = "macos", target_os = "linux", test))]
 const MAX_OS_VERSION_LEN: usize = 64;
 
 // ---------------------------------------------------------------------------
@@ -110,6 +111,7 @@ pub(crate) fn channel_for_version(version: &str) -> &'static str {
     }
 }
 
+#[cfg(any(target_os = "linux", test))]
 pub(crate) fn linux_os_version_from_release(text: &str) -> Option<String> {
     let mut version_id = None;
     let mut pretty_name = None;
@@ -124,6 +126,7 @@ pub(crate) fn linux_os_version_from_release(text: &str) -> Option<String> {
     clip_os_version(version_id.or(pretty_name))
 }
 
+#[cfg(any(target_os = "linux", test))]
 fn os_release_value(line: &str, key: &str) -> Option<String> {
     let (name, value) = line.split_once('=')?;
     if name != key {
@@ -143,6 +146,7 @@ pub(crate) fn format_windows_os_version(major: u32, minor: u32, build: u32) -> S
     format!("{major}.{minor}.{build}")
 }
 
+#[cfg(any(target_os = "macos", target_os = "linux", test))]
 fn clip_os_version(value: Option<String>) -> Option<String> {
     let value = value?.trim().to_string();
     if value.is_empty() {
