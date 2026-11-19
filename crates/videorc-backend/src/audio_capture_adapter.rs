@@ -610,14 +610,20 @@ impl CaptureClock {
                 // backwards is more than one jitter allowance behind. Both
                 // clocks must stay within it: an anchor that advances its
                 // stamp while its mapped start falls back further is stale
-                // audio, not a burst.
+                // audio, not a burst, and a repeated stamp whose mapped start
+                // jumps ahead further than it is a stuck stamp.
                 let jitter = anchor.stamp_jitter;
+                let start_gap = previous
+                    .captured_start
+                    .saturating_duration_since(anchor.captured_start)
+                    .max(
+                        anchor
+                            .captured_start
+                            .saturating_duration_since(previous.captured_start),
+                    );
                 if !jitter.is_zero()
                     && (anchor.pts_us - previous.pts_us).unsigned_abs() <= jitter.as_micros() as u64
-                    && previous
-                        .captured_start
-                        .saturating_duration_since(anchor.captured_start)
-                        <= jitter
+                    && start_gap <= jitter
                 {
                     return Ok(());
                 }
@@ -2277,6 +2283,14 @@ mod tests {
         assert!(
             clock
                 .push(anchor(2670, 19.0, 369.3 - 50.0, DSHOW_STAMP_JITTER))
+                .unwrap_err()
+                .to_string()
+                .contains("regressed")
+        );
+        // And with its mapped start well ahead: a stuck stamp, not a burst.
+        assert!(
+            clock
+                .push(anchor(2670, 19.0, 369.3 + 50.0, DSHOW_STAMP_JITTER))
                 .unwrap_err()
                 .to_string()
                 .contains("regressed")
