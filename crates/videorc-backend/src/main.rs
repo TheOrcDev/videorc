@@ -70,6 +70,7 @@ mod community_service;
 mod community_store;
 mod compositor;
 mod compositor_synthetic;
+mod device_checkin;
 mod device_watch;
 mod devices;
 mod diagnostics;
@@ -854,6 +855,8 @@ async fn run_backend(device_changes: tokio::sync::watch::Receiver<u64>) -> Resul
     // Anonymous usage stats: one event per session start and stop, off the
     // recording path; on unless Settings → General → Privacy turned it off.
     usage_stats::spawn(&state);
+    // Signed-in platform check-in: OS/arch once a day, off the recording path.
+    device_checkin::spawn(&state);
     // Plan 237: the stream report email a minute after each live stream,
     // off the recording path; `VIDEORC_STREAM_REPORT_EMAIL=0` turns it off.
     stream_report_email::spawn(&state);

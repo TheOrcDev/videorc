@@ -478,7 +478,7 @@ fn enabled_from_setting(setting: anyhow::Result<Option<bool>>) -> bool {
 }
 
 /// This install's id, made and saved the first time it is asked for.
-fn ensure_install_id(state: &AppState) -> Option<String> {
+pub(crate) fn ensure_install_id(state: &AppState) -> Option<String> {
     match state
         .database
         .load_setting::<String>(INSTALL_ID_SETTING_KEY)

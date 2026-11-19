@@ -27,6 +27,18 @@ fills `user_id` from it; the desktop never names a user id. The web
 contract, table and weekly query live in videorc-web
 `docs/stream-telemetry.md`; the privacy policy describes it to users.
 
+## Signed-in device check-in
+
+Separately, while a Videorc account is signed in, the desktop posts one
+small check-in to `POST /api/desktop/device-checkin` on launch and on
+sign-in, at most once a day per account on this install. It reuses
+`usageStats.installId` and sends `os`, `arch`, optional `osVersion`,
+`appVersion` and `channel` (`alpha` / `beta` / `stable`). It is
+fire-and-forget: it never blocks the UI, never queues offline, and does
+not follow the usage-stats switch (a signed-in user who never records
+still has a platform). The web table, upsert and platform-split SQL live
+in videorc-web `docs/user-devices.md`.
+
 ## How it works
 
 `crates/videorc-backend/src/usage_stats.rs`. It never touches the recording
