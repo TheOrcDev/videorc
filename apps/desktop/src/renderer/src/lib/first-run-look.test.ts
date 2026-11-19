@@ -86,17 +86,18 @@ describe('firstRunLookPatch', () => {
     expect(back.lastHorizontalPreset).toBe('screen-camera')
   })
 
-  it('a preset of the other orientation lands on the scene remembered for the chosen orientation', () => {
+  it("a preset of the other orientation lands on that orientation's default, never the memory", () => {
+    // Plan 231: the remembered layouts steer nothing.
     const config = { ...fresh(), lastVerticalPreset: 'vertical-screen-only' as const }
-    expect(
-      firstRunLookPreset(config, { orientation: 'vertical', layoutPreset: 'screen-only' })
-    ).toBe('vertical-screen-only')
+    expect(firstRunLookPreset({ orientation: 'vertical', layoutPreset: 'screen-only' })).toBe(
+      'vertical-camera-top'
+    )
     const next = firstRunLookPatch(config, {
       orientation: 'vertical',
       layoutPreset: 'screen-only',
       cameraShape: 'rectangle'
     })
-    expect(next.layout.layoutPreset).toBe('vertical-screen-only')
+    expect(next.layout.layoutPreset).toBe('vertical-camera-top')
     expect(next.video).toEqual(videoPresets['vertical-1080x1920'])
   })
 

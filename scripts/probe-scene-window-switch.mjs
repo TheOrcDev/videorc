@@ -8,7 +8,7 @@
 // the renderer's own scene-preset actions (`__videorcSmokeScenePresets`, the
 // same `applySavedScene` the Studio cards call). `--mode direct` instead
 // switches the working scene's window through the renderer's source picker
-// path (`select-screen-device`).
+// path (`switchSourceDeviceLive`).
 //
 // Run: A→B→A for `--switches` (20) switches per variant:
 //   idle       status evidence only (no program file while idle);
@@ -16,9 +16,10 @@
 //              frame's centre colour (red, blue, black, white, other), the
 //              bottom-right inset patch, and whether the bottom-left motion
 //              strip repeats the previous frame;
-//   layout     recording again, scene Beta = Screen + camera (the synthetic
-//              camera), so a frame of the new window under the old layout
-//              (or the old window under the new one) is countable.
+//   layout     recording again, Beta's window shrunk to 70% in Freeform,
+//              Alpha full-bleed, so a frame of the new window under the old
+//              layout (or the old window under the new one) is countable;
+//              no camera grant is needed.
 //
 // Per switch it reports click → first program frame of the new window,
 // frozen (repeated old-window) frames, black frames, and wrong-layout frames
@@ -55,10 +56,10 @@ import { buildFixtureApps } from './fixtures/build-fixture-apps.mjs'
 import { launchDevApp } from './lib/app-launcher.mjs'
 import { flashFixtureApp, launchFixtureApp, stopFixtureApps } from './lib/fixture-app-process.mjs'
 import { resolveFinalRecordingPath } from './lib/final-recording-path.mjs'
+import { decodeSceneFrames } from './lib/scene-artifact-frames.mjs'
 import { scenePresetStateReadCode } from './lib/scene-presets-smoke-state.mjs'
 import {
   anchorFromFlash,
-  featuresFromRawFrames,
   largestShare,
   parseBackendLogLine,
   percentiles,
@@ -162,6 +163,7 @@ try {
     },
     onLine: (line) => {
       devAppLogLines.push(line)
+      if (line.startsWith('[smoke:')) console.error(line)
       if (
         line.includes('[capture-generation]') ||
         line.includes('[videorc-capture-sizing]') ||
@@ -428,6 +430,7 @@ async function runVariant(name, { renderer, targets, record, smoke, layoutMark =
 
 /** One switch request through the renderer, with status polling for its edges. */
 async function measureSwitch(renderer, { from, to, index }) {
+  const rendererBefore = await renderer.state()
   const baseline = await request(ws, timeoutMs, 'compositor.status')
   const logStart = backendLog.length
   const requestedAtMs = await renderer.requestSwitch(to)
@@ -502,49 +505,29 @@ async function measureSwitch(renderer, { from, to, index }) {
   if (!row.ok) {
     row.lastScreenStatus = lastScreen
     row.lastCompositorStatus = compactCompositor(lastCompositor)
+    const compactLibrary = (current) => ({
+      activeId: current.activeId,
+      pendingId: current.pendingId,
+      sources: current.visual.sources,
+      scenes: current.scenes.map((scene) => ({
+        id: scene.id,
+        name: scene.name,
+        sources: scene.visual.sources
+      }))
+    })
+    row.rendererBefore = compactLibrary(rendererBefore)
+    row.rendererAfter = compactLibrary(await renderer.state())
   }
   return row
 }
 
 function analyzeRecordingFrames(file, variant, targets, layoutMark) {
-  const ptsMs = execFileSync(
-    ffprobePath,
-    [
-      '-v',
-      'error',
-      '-select_streams',
-      'v:0',
-      '-show_entries',
-      'frame=best_effort_timestamp_time',
-      '-of',
-      'csv=p=0',
-      file
-    ],
-    { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 }
-  )
-    .trim()
-    .split(/\r?\n/)
-    .map((line) => Number(line.split(',')[0]) * 1000)
-  const raw = execFileSync(
+  const { features, ptsMs } = decodeSceneFrames(file, {
     ffmpegPath,
-    [
-      '-v',
-      'error',
-      '-i',
-      file,
-      '-map',
-      '0:v:0',
-      '-vf',
-      `scale=${ANALYSIS_WIDTH}:${ANALYSIS_HEIGHT}:flags=area`,
-      '-pix_fmt',
-      'rgb24',
-      '-f',
-      'rawvideo',
-      'pipe:1'
-    ],
-    { maxBuffer: 1024 * 1024 * 1024 }
-  )
-  const features = featuresFromRawFrames(raw, { width: ANALYSIS_WIDTH, height: ANALYSIS_HEIGHT })
+    ffprobePath,
+    width: ANALYSIS_WIDTH,
+    height: ANALYSIS_HEIGHT
+  })
   const result = {
     file,
     frameCount: features.length,
@@ -773,17 +756,9 @@ function createRendererDriver(smoke) {
     )
   }
   const selectWindow = async (target) => {
-    await evaluate(`
-      const current = window.__videorcSmokeScenePresets.state();
-      window.__videorcSmokeScenePresets.configure({sources: {
-        ...current.visual.sources,
-        screenId: undefined, screenName: undefined,
-        windowId: ${JSON.stringify(target.windowId)},
-        windowName: ${JSON.stringify(target.device.name)},
-        testPattern: false
-      }});
-      return true;
-    `)
+    await evaluate(
+      `return await window.__videorcSmokeScenePresets.pickScreen(${JSON.stringify(target.windowId)})`
+    )
     await waitFor(
       (current) => current.visual.sources.windowId === target.windowId,
       `working scene on ${target.key}`
@@ -805,16 +780,19 @@ function createRendererDriver(smoke) {
       `return window.__videorcSmokeScenePresets.save(${JSON.stringify(name)}${id ? `, ${JSON.stringify(id)}` : ''})`
     )
     if (ok !== true) throw new Error(`Saving scene "${name}" returned ${JSON.stringify(ok)}`)
-    const scene = (await state()).scenes.find((entry) =>
-      id ? entry.id === id : entry.name === name
-    )
+    const matches = (entry) => (id ? entry.id === id : entry.name === name)
+    const listed = await waitFor((current) => current.scenes.some(matches), `saved scene ${name}`)
+    const scene = listed.scenes.find(matches)
     if (!scene) throw new Error(`Saved scene "${name}" is not in the library`)
     return scene.id
   }
   const saveWindowScene = async (target, name) => {
+    // An edit saves into the scene on stream. Make the new scene first so
+    // preparing Beta cannot replace Alpha's own screen (plan 231 D11).
+    const id = await save(name)
     await selectWindow(target)
     await waitForScreenLive(target.windowId)
-    return save(name)
+    return save(name, id)
   }
   const goTo = async (target) => {
     if (options.mode === 'scenes') {

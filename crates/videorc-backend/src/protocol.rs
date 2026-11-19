@@ -1141,8 +1141,49 @@ pub struct SceneLayoutApplyParams {
     /// turning the idle program into the portrait leg scene.
     #[serde(default)]
     pub simulcast_leg: bool,
+    /// Retirement only: keep an existing screen capture; never demand/start it.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_retain_screen"
+    )]
+    pub retain_screen: Option<bool>,
+    /// Plan 231 D4: the vertical leg of the running dual-orientation session
+    /// draws the screen this commit selects, while the program draws none.
+    /// The selected screen is then needed as if the program composed it:
+    /// started, or switched to, before the commit, and never retired by it.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_vertical_leg_screen"
+    )]
+    pub vertical_leg_screen: Option<bool>,
     #[serde(flatten)]
     pub config: SceneConfigParams,
+}
+
+fn deserialize_retain_screen<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<bool>, D::Error> {
+    if bool::deserialize(deserializer)? {
+        Ok(Some(true))
+    } else {
+        Err(serde::de::Error::custom(
+            "retainScreen must be true when present",
+        ))
+    }
+}
+
+fn deserialize_vertical_leg_screen<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<bool>, D::Error> {
+    if bool::deserialize(deserializer)? {
+        Ok(Some(true))
+    } else {
+        Err(serde::de::Error::custom(
+            "verticalLegScreen must be true when present",
+        ))
+    }
 }
 
 /// How to finish a transform edit after validating its numeric values.

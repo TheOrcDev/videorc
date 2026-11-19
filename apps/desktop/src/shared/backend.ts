@@ -407,7 +407,7 @@ export type ResolveAppWindowResult =
   | { ok: true; windowId: string; title: string; width: number; height: number }
   | { ok: false; reason: 'not-running' | 'no-window' | 'minimized' }
 
-/** Plan 210 S4: New scene…'s picker asks for these only while it is open. */
+/** Plan 210 S4: Add scene…'s picker asks for these only while it is open. */
 export interface AppPreviewsParams {
   /** The widest picture to return, in pixels. */
   maxWidth?: number
@@ -429,6 +429,30 @@ export interface AppPreview {
 
 export interface AppPreviewsResult {
   apps: AppPreview[]
+}
+
+/** Plan 231 S5: a still of a scene's own screen, independent of the program. */
+export type ScenePictureTarget =
+  | { kind: 'app'; bundleId: string }
+  | { kind: 'window'; windowId: string }
+  | { kind: 'display'; screenId: string }
+
+export interface ScenePicturesParams {
+  targets: ScenePictureTarget[]
+  /** Defaults to 240 pixels. */
+  maxWidth?: number
+}
+
+export type ScenePicture = { target: ScenePictureTarget } & (
+  | { jpegBase64: string }
+  | { unavailable: 'hidden' | 'unsupported' | 'source-unavailable' | 'screenshot-unavailable' }
+)
+
+export interface ScenePicturesResult {
+  pictures: ScenePicture[]
+  elapsedMs: number
+  hidden?: true
+  unsupported?: true
 }
 
 export interface Device {
@@ -6493,9 +6517,13 @@ export interface AgentAddResult {
 // --- end Agents (plan 209) ---
 
 export interface GlobalShortcutsConfig {
+  /** Next/Previous scene. Stored names retained for existing bindings. */
   layoutNext?: string
   layoutPrevious?: string
+  /** Migration input only. Layout actions are no longer registered. */
   layouts?: Partial<Record<LayoutPreset, string>>
+  /** Position keys (plan 231 D5). Missing uses the platform default; '' clears. */
+  sceneSlots?: Partial<Record<1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9, string>>
   scenes?: Record<string, string>
   recordToggle?: string
   streamToggle?: string

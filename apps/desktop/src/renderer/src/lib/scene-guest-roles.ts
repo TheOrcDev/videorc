@@ -92,3 +92,23 @@ export function sceneWithGuestRoles(
   }
   return { ...scene, updatedAt: now, cloud }
 }
+
+/**
+ * Plan 231 D4 on plan 249 S12: one scene works in 16:9 and in 9:16, so the
+ * guest roles saved with it are drawn in the orientation the room program
+ * uses now, from the placement they name. An extension that names no known
+ * placement (a newer version, or guests saved without one) is kept as is.
+ */
+export function sceneExtensionForOrientation(
+  extension: unknown,
+  orientation: SceneOrientation
+): unknown {
+  if (!extension || typeof extension !== 'object' || Array.isArray(extension)) return extension
+  const cloud = extension as { version?: unknown; placement?: unknown }
+  if (cloud.version !== SCENE_EXTENSION_VERSION) return extension
+  if (!SCENE_GUEST_PLACEMENTS.includes(cloud.placement as SceneGuestPlacement)) return extension
+  return {
+    ...cloud,
+    guests: sceneGuestRoles(cloud.placement as SceneGuestPlacement, orientation)
+  }
+}

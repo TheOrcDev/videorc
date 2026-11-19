@@ -6,6 +6,7 @@ import {
 import { describe, expect, it, vi } from 'vitest'
 
 import { unregisterGlobalShortcutsWhenReady } from './global-shortcut-lifecycle'
+import { globalShortcutEntries } from '../shared/global-shortcuts'
 
 describe('global shortcut lifecycle', () => {
   it('does not touch the registry before Electron is ready', () => {
@@ -26,6 +27,43 @@ describe('global shortcut lifecycle', () => {
 })
 
 describe('global shortcut registration replacement', () => {
+  it.each(['darwin', 'win32', 'linux'])(
+    'registers positions, overrides and clearing on %s',
+    (platform) => {
+      const callbacks = new Map<string, () => void>()
+      const failed = `Control+Alt+${platform === 'darwin' ? '' : 'Shift+'}3`
+      const registry = {
+        register: vi.fn((key: string, callback: () => void) => {
+          if (key === failed) return false
+          callbacks.set(key, callback)
+          return true
+        }),
+        unregister: vi.fn()
+      }
+      const dispatch = vi.fn()
+      const result = replaceGlobalShortcutBindings(
+        registry,
+        new Set(),
+        globalShortcutEntries(
+          {
+            sceneSlots: { 1: 'F13', 2: '' },
+            scenes: { figma: 'F14' },
+            layouts: { 'screen-only': 'F15' }
+          },
+          platform
+        ),
+        dispatch
+      )
+      expect(result.registered['scene-slot-1']).toBe(true)
+      expect(result.registered).not.toHaveProperty('scene-slot-2')
+      expect(result.registered['scene-slot-3']).toBe(false)
+      expect(result.registered['scene-slot-9']).toBe(true)
+      expect(registry.register).not.toHaveBeenCalledWith('F15', expect.anything())
+      callbacks.get('F13')!()
+      callbacks.get('F14')!()
+      expect(dispatch.mock.calls).toEqual([['scene-slot-1'], ['scene:figma']])
+    }
+  )
   it('unregisters owned keys, skips blank fields and reports each conflict independently', () => {
     const owned = new Set(['Control+Old'])
     const callbacks = new Map<string, () => void>()

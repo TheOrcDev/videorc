@@ -1,4 +1,5 @@
 import { findAcceleratorOwner } from '../../../shared/accelerator'
+import { acceleratorLabel } from '../../../shared/accelerator-format'
 import type { GlobalShortcutAction } from '../../../shared/global-shortcuts'
 import type { GlobalShortcutsConfig } from '@/lib/backend'
 import { globalShortcutLabel } from '@/lib/global-shortcuts'
@@ -22,4 +23,14 @@ export function globalShortcutTakenReason(input: {
       globalShortcutLabel(owner))
     : globalShortcutLabel(owner)
   return `Already used by ${label}.`
+}
+
+/** The same failed OS registration is named on its Settings row and scene chip. */
+export function globalShortcutConflictReason(
+  accelerator: string | undefined,
+  platform: string | undefined,
+  registrationFailed: boolean
+): string | null {
+  if (!registrationFailed || !accelerator?.trim()) return null
+  return `Another app uses ${acceleratorLabel(accelerator, platform)}`
 }

@@ -178,3 +178,57 @@ test('saved scene keys use ids and render confirmed names and active state', () 
   assert.deepEqual(sceneKeyIntent('figma'), { kind: 'sceneApply', sceneId: 'figma' })
   assert.equal(sceneKeyIntent(undefined), null)
 })
+
+test('legacy Scene keys wait for the mapped switch or its renderer refusal (D14)', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'videorc-sd-'))
+  const server = new WebSocketServer({ host: '127.0.0.1', port: 0 })
+  const client = new VideorcClient(join(dir, 'remote-control.json'))
+  try {
+    await new Promise<void>((resolve) => server.once('listening', resolve))
+    const address = server.address()
+    assert.ok(address && typeof address === 'object')
+    writeFileSync(
+      join(dir, 'remote-control.json'),
+      JSON.stringify({ port: address.port, token: 'secret' })
+    )
+    const received: unknown[] = []
+    server.on('connection', (socket) =>
+      socket.on('message', (raw) => {
+        const request = JSON.parse(String(raw)) as {
+          id: string
+          method: string
+          params: { layoutPreset?: string }
+        }
+        if (request.method !== 'remote.intent') return
+        received.push(request.params)
+        const intentId = `intent-${received.length}`
+        socket.send(
+          JSON.stringify({ id: request.id, ok: true, payload: { accepted: true, intentId } })
+        )
+        const ok = received.length === 1
+        socket.send(
+          JSON.stringify({
+            event: 'remote.ack',
+            payload: { intentId, ok, ...(ok ? {} : { message: 'No scene uses Side by side' }) }
+          })
+        )
+      })
+    )
+    const connected = new Promise<void>((resolve) => client.once('connected', resolve))
+    client.start()
+    await connected
+    assert.equal(await client.sendIntent({ kind: 'sceneApply', layoutPreset: 'screen-only' }), true)
+    assert.equal(
+      await client.sendIntent({ kind: 'sceneApply', layoutPreset: 'side-by-side' }),
+      false
+    )
+    assert.deepEqual(received, [
+      { kind: 'sceneApply', layoutPreset: 'screen-only' },
+      { kind: 'sceneApply', layoutPreset: 'side-by-side' }
+    ])
+  } finally {
+    client.stop()
+    await new Promise<void>((resolve) => server.close(() => resolve()))
+    rmSync(dir, { recursive: true, force: true })
+  }
+})

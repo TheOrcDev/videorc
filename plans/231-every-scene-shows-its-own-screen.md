@@ -1,0 +1,2129 @@
+# Plan 231: every scene shows its own screen
+
+## Status
+
+- **Status:** PLANNED 2026-11-12. The owner answered Q1 to Q6 in a grilling
+  session, then said "continue all questions recommended and make plan":
+  D7 to D20 below are the recommended answers, taken as decided. Two of
+  them bend earlier owner calls and are marked **Owner check**.
+- **Priority:** P1. It is the second time the same streamer has asked for
+  this (plan 210 was the first), and the Scenes section is the first thing
+  a coding or design streamer touches.
+- **Effort:** XL, in four phases (A, B and D in one PR; C separate).
+- **Risk:** MEDIUM-HIGH. It migrates every user's scenes (renderer
+  localStorage), changes what the Screen pickers do, and touches the scene
+  switch, the vertical stream and every remote that names a layout.
+- **Planned against:** `origin/main` `bf6e9077` (release 0.23.0), re-checked
+  on `8d8149d17` before the plan was committed: #1312 (issue #1275) changed
+  how a slow switch looks (item 11 below). Work in a fresh worktree from
+  `origin/main`, never in the shared checkout.
+- **Owner route:** Orchestrator planned it (fit 10). Each slice names its
+  route, fit and model lane from `CLAUDE.md`.
+
+## The ask
+
+A streamer, relayed by the owner on 2026-11-12:
+
+> for my case, as i explain before, I have one Monitor. i want scene one for
+> figma, one t3code and other for browser. and keep switching btw them with
+> hotkeys. also still hard for to understand the relation between screen (in
+> source tab) and scene.
+
+The owner: "We want to create really good UX behind this in our scenes
+section inside of Studio." Asked about platform: "We just want much better
+UX inside of our Studio, all those things, but it needs to be better UX."
+
+## What's there today (verified on `bf6e9077`)
+
+Renderer paths are under `apps/desktop/src/renderer/src/`, shared types under
+`apps/desktop/src/shared/`, backend paths under `crates/videorc-backend/src/`.
+
+Plan 210 (#935, 2026-10-29) built the machinery this user needs on macOS:
+New scene… makes one scene per app ("Figma · front window"), the window
+swaps in place in about 100 to 150 ms, a saved scene can have a global key,
+Follow the app in front is on by default, and Hide screen is on ⌃⌥H. What
+is still hard is the model and the way in.
+
+1. **Two things decide what's on stream.** Studio's Scenes section
+   (`components/studio/scenes-gallery.tsx`) shows "Saved scenes"
+   (`components/scene-presets.tsx`) above "Layouts" (four built-ins in 16:9,
+   six in 9:16). A saved scene carries its own screen, window or app
+   (`lib/scene-presets.ts:25-70`); a layout card carries none and uses
+   whatever the Screen picker holds (`scenes-gallery.tsx:97-107`).
+2. **The Screen picker quietly drops your scene.** With a saved scene on,
+   choosing another screen or window in Sources or in Studio's Screen row
+   (`components/studio/quick-settings.tsx`) leaves the scene
+   (`hooks/use-studio.tsx:11358-11372`, plan 210 D3). Then:
+   - Studio checks a built-in layout card such as "Screen + camera"
+     (`galleryPresetIsActive`, `lib/scene-presets.ts:553-561`);
+   - the Scene page says "Unsaved scene" (`components/scene/scene-list.tsx:214-227`).
+     The two surfaces disagree about what's on stream.
+3. **Different words for one thing.** The picker lists windows ("Figma –
+   Untitled"); a scene lists apps ("Figma · front window",
+   `lib/scene-list.ts:73`).
+4. **Keys are buried.** `GlobalShortcutsConfig.scenes` is empty until the
+   streamer finds ⋯ → Set key… (`components/scene/scene-dialogs.tsx:158-163`)
+   or Settings → Shortcuts. Plan 210 D7 chose no default keys. Next and
+   Previous scene have none either (`shared/global-shortcuts.ts`).
+5. **Cards look the same.** Every card draws the layout diagram
+   (`LayoutThumb`); "Figma", "T3 Code" and "Chrome" differ only by a 16 px
+   icon and the name (`scene-presets.tsx:132-137`).
+6. **The camera follows the scene too.** A saved scene stores `cameraId`
+   (`VisualSources`), and D3's autosave writes a camera change into the scene
+   on stream, so switching scenes can switch the camera back.
+7. **Vertical is a second vocabulary.** The gallery is mode-scoped
+   (`scenes-gallery.tsx:32-36`): 16:9 and 9:16 scenes are disjoint, and a
+   saved scene is one or the other. The Vertical stream panel
+   (`components/studio/vertical-leg-monitor.tsx`) picks one of six vertical
+   layouts and, with `simulcastFollowsProgram` on (the default), mirrors
+   only Camera only and Screen only; everything else streams
+   `lastVerticalPreset` (default `vertical-camera-top`,
+   `lib/capture.ts:455-475,1463-1466`).
+8. **Where the pieces live.**
+   - The scene library is renderer localStorage, `videorc.scene-presets.v1`
+     (`lib/scene-presets.ts:23,69`; `hooks/use-scene-presets.ts:39-46`); a
+     version it doesn't know turns it read-only ("Update Videorc to change
+     your scenes").
+   - Main registers global keys and sends `global-shortcuts:triggered` to the
+     renderer (`main/index.ts:835-836`), which applies `scene:<id>` and the
+     layout actions (`lib/global-shortcuts.ts:54`). Next and Previous walk
+     saved scenes then layouts (`lib/scene-shortcut-walk.ts`).
+   - Remotes: `sceneApply` takes `sceneId`, `screenId` or `layoutPreset`
+     (`remote_control.rs:82-84,229-242`); the Stream Deck's Scene action
+     reads `savedScenes` (`apps/streamdeck-plugin/src/plugin.ts:246-259`);
+     MCP `list_scenes` returns saved scenes and built-in layouts
+     (`protocol-fixtures/agent-tools.json:235`).
+   - Pictures: `sources.app_previews` returns a JPEG of each app's front
+     window on macOS 14 and up, and only the New scene picker asks for it
+     (`shared/backend-rpc-contract.ts:5417`; `hooks/use-app-choices.ts`).
+     Nothing pictures a display.
+   - Capture exclusion for Videorc's own floating windows exists: the
+     Stream Manager's Hide from stream uses Videorc's ScreenCaptureKit filter
+     on macOS and `WDA_EXCLUDEFROMCAPTURE` on Windows
+     (`main/window-capture-protection.ts:46-60`).
+9. **Platforms.** Windows captures displays only (`CreateForMonitor`);
+   Linux has one portal slot and can't change the screen mid-session
+   (plan 210 §24-25).
+10. **IA rule today:** the Scene page is the home of scenes and Studio's
+    gallery mirrors it (design skill, "Where things live"); Sources is the
+    home of every screen and window.
+11. **A slow switch keeps the clicked name** (#1312, issue #1275, landed
+    after `bf6e9077`). The card or row keeps its name with a pending mark
+    (`SceneSwitchPending`). One line under the list says what the switch
+    waits for (`SceneSwitchStatus`, `components/scene/scene-switch-status.tsx`).
+    A newer click takes a pending switch over, and the switch it replaced
+    is not a failure (`result.superseded`, `scene-dialogs.tsx`).
+
+## Decisions
+
+### Answered by the owner
+
+- **D1. Scope.** Better UX in Studio's Scenes section on every platform,
+  built around this user's day: several apps on one monitor, switched by
+  key. Window capture on Windows is its own backend plan.
+- **D2. Every scene owns its screen.** A scene is _what it shows_ (an app's
+  front window, a fixed window, a display, or nothing) plus _how it's
+  arranged_ (its layouts, the camera's spot and shape, its background).
+  - The built-in layouts stop being things you switch to. They become the
+    **Layout** choice inside a scene.
+  - Studio's gallery shows only scenes.
+  - Every Screen picker (Studio, Sources, the phone's display list) changes
+    **the screen of the scene on stream**. There is no "Unsaved scene" and no
+    silent leaving.
+- **D3. Four default scenes.** Today's four 16:9 layouts become scenes:
+  **Screen + camera**, **Screen only**, **Camera only** and **Side by side**.
+  - New user: the three screen scenes show the main display; Camera only
+    shows no screen.
+  - On update: they show whatever screen the user has now, so nothing on
+    stream changes. Migration details are D15.
+- **D4. One scene works in both orientations.** A scene stores what it shows
+  once, plus a **16:9 layout** and a **9:16 layout**.
+  - The 9:16 layouts (Camera top, Camera bottom, Split, Screen + camera,
+    Screen only, Camera only) are layout choices inside a scene.
+  - A scene's key works in a 16:9 studio, a 9:16 studio and on both legs of
+    a dual stream at once, each leg in its own layout.
+  - The Vertical stream panel shrinks to the scene on stream's 9:16 layout
+    and Fill or Fit. "Follow the horizontal program" goes away: every scene
+    now has its own 9:16 layout.
+- **D5. Keys by position.** The first nine scenes answer to **⌃⌥1 to ⌃⌥9**
+  on macOS and **Ctrl+Alt+Shift+1 to 9** on Windows and Linux, from any app,
+  idle or live.
+  - Not Ctrl+Alt on Windows: Ctrl+Alt is AltGr there, and AltGr plus a digit
+    types `{ [ ] }` `² ³` on German, Polish, Nordic and other layouts.
+  - Each card shows its key chip. Reordering moves keys with positions.
+  - Set key… stays for a custom key that sticks to its scene.
+  - Next scene and Previous scene walk the same order (no default keys).
+  - A new scene goes **at the end**, so making one never moves a key in use.
+- **D6. One Add scene… picker.**
+  - Groups: **Apps** (macOS: icon, front-window picture, "Chrome · 3
+    windows"), **Displays** (with a picture on macOS), **Camera only**.
+    Several can be chosen: "Add 3 scenes".
+  - Each new scene is named after what it shows, takes the look of the
+    scene on stream (16:9 and 9:16 layouts, camera spot, background), lands
+    at the end with its key, and never changes what's on stream.
+  - **Save scene… goes away.** ⋯ → Duplicate makes "another one like this".
+  - A **fixed window** moves to a scene's ⋯ → Change screen… as "A specific
+    window".
+  - Windows and Linux show Displays and Camera only.
+
+### Recommended, taken on the owner's "continue all recommended"
+
+- **D7. Cards show what the scene shows.** A card draws its layout with the
+  screen area filled by a still picture of the scene's screen (the app's
+  front window, the fixed window, or the display), the camera area as a
+  neutral plate, then the app icon, the name and the key chip.
+  - Pictures come from one new RPC, `sources.scene_pictures` (D17), on
+    macOS. Windows and Linux keep the glyph inside the layout.
+  - A picture is never the live program and never claims to be: it's a
+    still, refreshed when the Studio or Scene page shows, when a scene is
+    added or its screen changes, and at most every 30 s while the window is
+    visible. Never while the window is hidden, and never while Hide screen
+    holds (the cards keep their last pictures).
+- **D8. Studio's Scenes section becomes the home of scenes.**
+  - Header: the 16:9 / 9:16 toggle (locked while recording or live, as
+    today), "Follow the app in front" (macOS, moved from the Scene page),
+    Edit scene, Add scene….
+  - The cards, draggable to reorder (with ⌥← ⌥→ on a focused card for the
+    keyboard), each with its ⋯ menu.
+  - Under the cards, the scene on stream's own fields: **Screen** ("Figma ·
+    front window", Change…, Hide screen), **Layout** (16:9 or 9:16 by the
+    studio's mode) and Fill / Fit. With a vertical stream armed, a second
+    row, **Vertical stream layout**, sets the scene's 9:16 layout.
+  - Studio's **Sources** section loses its Screen row (the screen now lives
+    with the scene) and keeps Camera. Hide screen's button and the "Screen
+    hidden" chip move to the scene's Screen row.
+  - The Scene page keeps the canvas editor (placement, camera look,
+    background, banners) and the Hide screen settings, and mirrors the same
+    scene list (rows, drag, ⋯). It loses the Layouts group and the Unsaved
+    row.
+  - The design skill's "Where things live" and `docs/ui-copy.md` change to
+    match (S8).
+- **D9. The camera device is one, for every scene.** Sources (and Studio's
+  Camera row) choose the camera for all scenes. A scene decides whether the
+  camera shows, where and in what shape, never which device. Migration drops
+  each scene's `cameraId`; the camera in use at update stays the camera.
+  A different camera per scene is out of scope.
+- **D10. Audio stays as it is.** Scenes keep no audio unless ⋯ → Save audio
+  to scene pins it (owner call #876; plan 210 D4). Microphone and System
+  audio changes never rewrite a scene.
+- **D11. Edits save into the scene on stream** (plan 210 D3 kept): layout,
+  camera spot and shape, background, framing, and now its screen. Undo
+  (`stage-undo-control`) covers mistakes. A scene that isn't on stream
+  changes only through its ⋯ (Rename…, Change screen…, Set key…, Follow,
+  Save audio to scene, Duplicate, Delete).
+- **D12. Follow the app in front stays on by default** (plan 210 D10). A
+  key, a card click or a remote counts as a hand pick and holds until the
+  next app change, as today.
+- **D13. Keys in Settings → Shortcuts.**
+  - A "Scenes" group lists **Scene 1 to Scene 9** with the scene each holds
+    now ("Scene 1 · Figma") and its key, each changeable or clearable like
+    every key there, then each scene's custom key.
+  - The per-layout keys and their group go away (D15 migrates them).
+  - A key another app holds says so on its row and on the card's chip
+    ("Another app uses ⌃⌥3"), through `lib/global-shortcut-owner.ts`.
+  - Scenes after the ninth have no position key; Set key… gives them one.
+- **D14. Remotes and agents switch scenes, never layouts.**
+  - The Stream Deck's Scene action and the phone list every scene (all are
+    named scenes now).
+  - `sceneApply` keeps `sceneId`. A legacy `layoutPreset` goes to the first
+    scene whose layout in the current orientation is that layout, else it
+    is refused with "No scene uses {Layout}". A `screenId` changes the
+    screen of the scene on stream, like every Screen picker (D2).
+  - MCP `list_scenes` returns scenes only; `switch_scene` accepts a legacy
+    layout id with the same rule. ⌘K reads "Switch to {name}" for every
+    scene and gains "Add scene…". Buddy's planner reads `list_scenes`.
+- **D15. Migration: nothing on stream changes on update.** Writes a new key,
+  `videorc.scenes.v2`, and leaves `videorc.scene-presets.v1` untouched, so a
+  downgrade still finds its scenes. Order after migration:
+  1. the user's saved scenes, in their order, so a streamer who made
+     "Figma" and "T3 Code" with plan 210 gets ⌃⌥1 and ⌃⌥2 at once;
+  2. the four default scenes with today's screen, skipping one that equals
+     a saved scene (same screen, same 16:9 layout);
+  3. the working setup, if it matches none of them (a freeform arrangement,
+     or a saved scene left by a Screen pick), named after what it shows
+     ("Display 1", "Figma").
+  - The scene on stream after update is the one matching what was on:
+    the saved scene, the default with its layout, or the scene from step 3.
+  - A scene's 9:16 layout is what the vertical stream shows for it today:
+    with Follow on, Camera only → Camera only and Screen only → Screen only;
+    everything else, and Follow off, `lastVerticalPreset`. A v1 scene saved
+    in 9:16 keeps its layout as its 9:16 one and takes its 16:9 twin
+    (Camera only, Screen only, else Screen + camera).
+  - Keys: each scene's custom key stays. A 16:9 layout key becomes the
+    custom key of the default scene with that layout. A 9:16 layout key
+    becomes the custom key of the first scene whose 9:16 layout matches;
+    if none, a scene is added for that layout (named after it, today's
+    screen) so the key keeps working.
+  - `Follows` on a scene for an app stays.
+  - Tested on fixtures (S1), never by hand alone.
+- **D16. Deleting.** The last scene can't be deleted ("Keep at least one
+  scene."). Off air, deleting the scene on stream first switches to the
+  scene before it. While recording or live, Delete on the scene on stream
+  is disabled: "Switch to another scene first."
+- **D17. Pictures RPC.** `sources.scene_pictures({ targets, maxWidth })`
+  takes the scenes' targets (app bundle ids, window ids, display ids) and
+  returns a small JPEG per target, through `SCScreenshotManager` like
+  `sources.app_previews`, off the capture path. Budget: ten pictures at
+  240 px in under 150 ms of backend time; never while Hide screen holds.
+  Windows and Linux return `unsupported` and the cards keep their glyphs.
+- **D18. A scene that shows no screen leaves the screen capture running.**
+  Camera only (and any scene whose layout shows no screen) composites no
+  screen but doesn't stop the capture, so going back to Figma is a swap in
+  place, not a cold start. S0 measures today's behaviour first. As today
+  with the built-in Camera only, the Screen file keeps the screen.
+- **D19. A layout that needs a screen on a scene that shows none** opens
+  Change screen… first; cancelling keeps the old layout.
+- **D20. The key HUD (Owner check).** When a key, the Stream Deck or the
+  phone switches the scene while no Videorc window is in front, a small
+  chip shows the scene's icon, name and key for 900 ms at the top centre of
+  the display under the pointer, then fades (100 to 150 ms, still under
+  reduced motion).
+  - It is left out of every capture: Videorc's ScreenCaptureKit filter on
+    macOS and `WDA_EXCLUDEFROMCAPTURE` on Windows, the Stream Manager's
+    route. If the exclusion can't be confirmed, it doesn't show. Not on
+    Linux.
+  - A refusal shows too ("Figma isn't open").
+  - Settings → Shortcuts → "Show the scene's name when a key switches it",
+    on by default.
+  - **Owner check:** this bends "No success toast for a scene, layout or
+    source change" (2026-07-16). That call's reason is that the stage
+    confirms the change, but with one monitor and Figma in front no stage
+    is visible. It ships as its own phase and PR, so it can be dropped
+    without touching the rest.
+
+The other **Owner check** is D8: it moves the home of scenes from the Scene
+page (plan 210) to Studio, as the owner's ask reads ("our scenes section
+inside of Studio"), and changes plan 210 D2 (new scenes first) to D5 (new
+scenes last).
+
+## The model
+
+```ts
+// lib/scenes.ts (new); replaces SavedScene for everything but migration.
+type SceneShows =
+  | { kind: 'app'; bundleId: string; name: string; follows: boolean }
+  | { kind: 'window'; windowId: string; windowName?: string }
+  | { kind: 'display'; screenId: string; screenName?: string; screenUuid?: string }
+  | { kind: 'none' } // shows no screen (Camera only); D18
+  | { kind: 'test-pattern' } // development builds
+
+type Scene = {
+  id: string
+  name: string
+  createdAt: string
+  updatedAt: string
+  shows: SceneShows
+  layouts: { horizontal: LayoutSettings; vertical: LayoutSettings }
+  background: SavedSceneBackground | null
+  audio?: SceneAudio // only when pinned (D10)
+}
+
+type SceneLibrary = { version: 2; scenes: Scene[]; onStreamId: string }
+// The custom keys stay in GlobalShortcutsConfig.scenes[id]; the position keys
+// are `scene-slot-1` … `scene-slot-9` with platform defaults (D5, D13).
+```
+
+The camera device lives in `captureConfig.sources` only (D9).
+`lastVerticalPreset`, `lastHorizontalPreset` and `simulcastFollowsProgram`
+become migration inputs, then stop steering anything.
+
+## What the user will see
+
+Their day, on macOS, after this plan:
+
+1. **Setup, once.** Studio → Scenes → Add scene…. Apps shows Figma, T3 Code
+   and Chrome ("3 windows"), each with a picture. They choose all three and
+   press "Add 3 scenes". Three cards appear after the four defaults, each
+   showing its app, with ⌃⌥5, ⌃⌥6 and ⌃⌥7. They drag them to the front:
+   now ⌃⌥1, ⌃⌥2 and ⌃⌥3. Nothing on stream changed.
+2. **The relation is on screen.** Under the cards: "On stream: Figma",
+   Screen "Figma · front window" with Change…, Layout "Screen + camera".
+   Sources → Screen says the same thing and changes the same scene: "Shown
+   by Figma, the scene on stream. Each scene keeps its own screen."
+3. **Streaming.** In Figma, ⌃⌥2: the stream cuts to T3 Code within D5's
+   budget, and the HUD says "T3 Code ⌃⌥2" for a moment, off stream. ⌘-Tab to
+   Chrome: Follow cuts to Chrome. ⌃⌥4 (Camera only) for a break, ⌃⌥1 back to
+   Figma: a swap in place, no cold start.
+4. **Vertical.** With a vertical stream on, every key cuts both legs, each
+   in its own layout. Vertical stream layout under the cards sets this
+   scene's 9:16 layout.
+5. **Tomorrow.** Figma relaunched overnight; the card still shows Figma.
+
+On Windows today: the same cards, keys (Ctrl+Alt+Shift+1–9), defaults and
+model, with Displays and Camera only in Add scene…; scenes differ by display
+and layout until window capture lands.
+
+## Phases and slices
+
+Each slice leaves the branch building and its unit tests green. Write and
+commit every slice of a phase, then run the phase's gates once at the end
+(owner rule). Every UI slice reads the whole design skill and
+`docs/ui-copy.md` first and hands back light and dark screenshots (owner
+rule: both themes).
+
+One branch, `plan-231-scenes-own-their-screen`. Phases A, B and D go in one
+PR (the old gallery can't ship with the new model). Phase C is its own PR.
+
+### Phase A: the model (all platforms)
+
+#### S0. Measure today (Diagnose, fit 9, `gpt-6.1-sol`)
+
+- Record, on this Mac with `smoke:smart-scenes`'s fixture apps:
+  - Camera only → an app scene: does the screen capture stop on Camera
+    only (cold start back) or keep running? Click to new picture, p50 and
+    p95 over 10 round trips.
+  - App scene ↔ app scene through the `scene:<id>` shortcut path (the smoke
+    command server; the T3 terminal can't post HID), to compare with S11.
+  - `sources.app_previews` time for every app at 240 px.
+- Screenshots of Studio's Scenes and Sources sections and the Scene page,
+  light and dark, for the before/after.
+- **Done when** the numbers and screenshots are in this plan's Execution
+  notes, with the host load for each run.
+
+#### S1. Scene library v2 and its migration (Implementation, fit 9, `fable-5.1`)
+
+- New `lib/scenes.ts`: the types above, `hydrateScenes`, `normalizeScene`,
+  `defaultScenes(mainDisplay)`, and `migrateToScenes(v1Library, workingScene,
+captureConfig, globalShortcuts)` implementing D3, D4, D9 and D15.
+- `hooks/use-scenes.ts` reads `videorc.scenes.v2`, migrates from v1 once,
+  writes v2 in one `setItem`, and never writes v1. Read-only on an unknown
+  version, as today.
+- Not wired to the Studio yet.
+- **Tests** (fixtures under `lib/__fixtures__/scenes/`): new user; plan 210
+  user (Figma and T3 Code, working on Figma, follows on); built-in user
+  with layout keys; vertical user with follow on, and with follow off; a
+  saved vertical scene; working freeform; a saved scene left by a Screen
+  pick; unknown version; a default equal to a saved scene (skipped); a 9:16
+  layout key with no matching scene (adds one). Each asserts the order, the
+  scene on stream, every scene's 16:9 and 9:16 layout, and the keys.
+- **Done when** the tests pass and the plan 210 fixture puts Figma first,
+  on stream, with ⌃⌥1.
+
+#### S2. The Studio runs on scenes (Implementation, fit 9, `fable-5.1`)
+
+- `use-studio.tsx` holds `onStreamId` and applies scenes through the
+  existing saved-scene path (`applySavedScene`, `scene-apply-preflight.ts`,
+  the D5 swap in place, `heldAppWindow`), with the layout for the studio's
+  orientation.
+- Every Screen pick changes the scene on stream's `shows` (D2, D11);
+  `capturePickLeavesScene` and the "Unsaved scene" state go away.
+- The camera device comes from `captureConfig.sources` only (D9).
+- A scene that shows no screen keeps the running capture (D18), per S0's
+  finding.
+- Layout edits, canvas edits and framing save into the scene on stream.
+- The old layout apply (`applyCameraPreset({ layoutPreset })`) becomes "set
+  the scene on stream's layout" for the canvas and smokes, and "switch to
+  the first scene with this layout" for keys and remotes (D14).
+- Minimal UI so the branch runs: the gallery lists scenes with today's
+  cards, the Layouts group is gone. S6 replaces it.
+- **Done when** the desktop tests pass, `smoke:smart-scenes`,
+  `smoke:scene-presets` (updated for v2), `smoke:scene-switch-pixels` and
+  `smoke:live-layout-switch-recording` pass, and no surface says "Unsaved
+  scene".
+
+#### S3. One scene, both orientations (Implementation, fit 9, `fable-5.1`)
+
+- The 9:16 studio applies each scene's `layouts.vertical`; the gallery is
+  the same list in both modes.
+- The vertical leg streams the scene on stream's `layouts.vertical` with
+  its framing: `simulcastLegLayout` takes the scene, not
+  `lastVerticalPreset`. A scene switch commits both legs (plan 210's "each
+  leg cuts on its own scene" stays).
+- The Vertical stream panel edits the scene on stream's 9:16 layout and
+  Fill / Fit, and loses its six-card gallery and the follow switch.
+- `ORIENTATION_SWITCH_LOCK_REASON` stops applying to scenes (every scene
+  has both layouts); the canvas orientation itself stays locked while live.
+- **Done when** `smoke:multistream:vertical` and
+  `smoke:multistream:vertical-fill` pass, and a test shows one key cutting
+  both legs to the same scene in their own layouts.
+
+#### S4. Keys by position (Implementation, fit 8, `gpt-6.1-sol`)
+
+- `shared/global-shortcuts.ts`: actions `scene-slot-1` … `scene-slot-9`,
+  defaults `Control+Alt+<n>` on darwin and `Control+Alt+Shift+<n>` on win32
+  and linux; the layout actions go (migrated in S1).
+- The renderer resolves a slot to the scene at that position when pressed.
+- Next and Previous walk scenes only (`scene-shortcut-walk.ts`).
+- Settings → Shortcuts: the Scenes group of D13, with conflicts through
+  `global-shortcut-owner.ts`.
+- **Done when** unit tests cover defaults per platform, slot resolution
+  after a reorder, a custom key beside a slot key, a conflict, and the
+  walk; and Settings → Shortcuts shows "Scene 1 · Figma ⌃⌥1" in light and
+  dark.
+
+### Phase B: the Studio UX
+
+#### S5. Scene pictures (Implementation, fit 8, `gpt-6.1-sol`)
+
+- Backend `sources.scene_pictures` (D17) with its contract entry in
+  `shared/backend-rpc-contract.ts` (strict contract: new fields must be
+  there) and a protocol fixture.
+- `hooks/use-scene-pictures.ts`: D7's refresh rules, nothing while hidden
+  or while Hide screen holds.
+- **Done when** a Rust test covers the target kinds and the Hide screen
+  refusal, a renderer test covers the refresh rules, and ten pictures come
+  back in under 150 ms of backend time on this Mac (logged).
+
+#### S6. Studio's Scenes section (UI/Product Design, fit 9, `opus-5.5`)
+
+- The section of D8: header, picture cards (D7) with key chips and ⋯, drag
+  and keyboard reorder, the "On stream" fields (Screen with Change… and
+  Hide screen, Layout, Fill / Fit, Vertical stream layout).
+- Studio's Sources section drops the Screen row; the stand-in and switch
+  status lines move with it.
+- #1312 stays as it is: the pending mark on the card that's switching, the
+  status line under the cards, and a newer click or key taking the switch
+  over.
+- `SceneCard` and `LayoutThumb` grow the picture; no new primitive where
+  one exists (`MediaCard`, `KebabMenu`, `ShortcutKeys`, `DisabledReason`,
+  `SegmentedControl`, `DevicePicker`).
+- Retro LCD Studio gets the same section in its look
+  (`studio/retro-lcd-studio.tsx`, owner call 2026-10-25).
+- **Done when** the user's day steps 1 to 3 work by hand, light and dark
+  screenshots are in the PR, the renderer guards pass, and
+  `smoke:scene-item-drag` and `smoke:freeform-editor` pass (their
+  pre-existing reds from 11-03 named, not chased).
+
+#### S7. Add scene… and Change screen… (UI/Product Design, fit 9, `opus-5.5`)
+
+- `new-scene-dialog.tsx` becomes Add scene…: Apps, Displays, Camera only,
+  multi-choice, "Add 3 scenes" (D6). Change screen… is the same picker for
+  one scene, with "A specific window" under Apps.
+- Save scene… goes away from Studio, the Scene page and ⌘K.
+- **Done when** making the three app scenes and changing one to a fixed
+  window work by hand, tests cover naming ("Figma 2"), the end-of-list
+  placement and "never touches the stream", with screenshots in both
+  themes.
+
+#### S8. Sources, the Scene page and the words (UI/Product Design, fit 9, `opus-5.5`)
+
+- Sources → Screen: "Shown by {Scene}, the scene on stream. Each scene keeps
+  its own screen." Its picker changes that scene (D2). Permission alerts
+  stay.
+- The Scene page list mirrors Studio's (D8).
+- `CONTEXT.md`: Scene, Layout, Default scene, Scene key; retire "Saved
+  scene" in copy and "Unsaved scene".
+- `docs/ui-copy.md`: "Add scene…", "Change screen…", "Scene 1 · Figma",
+  "Shown by…".
+- The design skill: "Where things live" (Scenes, Devices, Hide screen).
+- **Done when** the copy and style guards pass and both themes are
+  screenshotted.
+
+#### S9. Remotes and agents (Implementation, fit 8, `gpt-6.1-sol`)
+
+- `remote_control.rs` and the renderer's remote surface apply D14; the
+  phone (`crates/videorc-backend/remote_web/app.js`) lists scenes; the Stream Deck plugin's Scene
+  action reads the list and drops the layout-only path; MCP
+  `list_scenes` and `switch_scene` with updated `agent-tools.json`; ⌘K;
+  Buddy's planner.
+- **Done when** `smoke:remote-control` passes, plugin and fixture tests
+  cover the legacy `layoutPreset` mapping and its refusal, and ⌘K lists
+  every scene.
+
+### Phase C: the key HUD (macOS, Windows; Owner check)
+
+#### S10. The HUD (UI/Product Design, fit 8, `opus-5.5`)
+
+- A main-process, non-focusable, click-through window per D20, protected
+  through `window-capture-protection.ts` (a new role, `scene-hud`, with its
+  smoke marker colour), fail closed.
+- The switch in Settings → Shortcuts.
+- **Done when** a Display scene recording through a switch shows no HUD
+  pixels (the protection harness's marker check), the HUD shows only while
+  another app is in front, and both themes are screenshotted.
+
+### Phase D: proof and docs
+
+#### S11. The smoke and acceptance (Implementation, fit 7, `gpt-6.1-sol`)
+
+- Extend `smoke:smart-scenes` (or add `smoke:scene-keys` under
+  `smoke:recording-studio`): migrate a plan 210 v1 fixture library, add
+  three app scenes, reorder, switch by `scene-slot-*` through the smoke
+  command server, assert the program, zero black and zero wrong-layout
+  frames, both legs on a vertical stream, Camera only → app as a swap in
+  place, and two position keys inside one switch ending on the second
+  scene.
+- `docs/` acceptance note with S0's before and the after numbers.
+- **Done when** the smoke passes twice on this Mac on a host under load
+  10, and `pnpm smoke:recording-studio` passes once on the branch.
+
+## Verification summary
+
+- Every slice: `pnpm typecheck`, `pnpm lint`, `pnpm format:check`,
+  `pnpm --filter @videorc/desktop test`.
+- S5: `cargo fmt --check --all`, `cargo test -p videorc-backend` (targeted,
+  one build at a time), `cargo clippy -p videorc-backend -- -D warnings`.
+- Phase A end: `smoke:smart-scenes`, `smoke:scene-presets`,
+  `smoke:scene-switch-pixels`, `smoke:live-layout-switch-recording`,
+  `smoke:multistream:vertical`, `smoke:multistream:vertical-fill`,
+  `smoke:preview-scene-commit`, `probe:scene-window-switch`.
+- Phase B end: `smoke:remote-control`, `smoke:scene-item-drag`,
+  `pnpm build`.
+- Phase D: the new smoke, then `pnpm smoke:recording-studio` once.
+- Windows: `smoke:hide-screen:windows` on the Windows box (Hide screen moved
+  rows), and the Windows CI gates.
+
+## Edge cases
+
+- **The app isn't open.** The card says "Figma isn't open"; its key does
+  nothing on stream, Next and Previous skip it, the HUD says so.
+- **A fixed window closed.** The card says it, with ⋯ → Change screen….
+- **A display unplugged.** "Display 2 isn't connected" on its card.
+- **Camera off in Sources.** Scenes that need the camera (Camera only, Side
+  by side, the banded 9:16 layouts) say so once under the cards, with Open
+  Sources.
+- **Reorder while live.** Keys move at once; the chips show it.
+- **Two keys in quick succession.** ⌃⌥2 then ⌃⌥3 before the first switch
+  lands: the second takes the switch over (#1312), the card shows the
+  pending mark, and the HUD names only the last scene.
+- **Hide screen holds.** A switch keeps the screen hidden (plan 210); card
+  pictures freeze.
+- **Linux mid-session.** A scene showing a different screen is refused with
+  the existing reason; same-screen scenes switch.
+- **More than nine scenes.** The tenth on has no position key.
+- **Two of the same app.** "Figma 2"; both show Figma's front window.
+- **A downgrade.** The older app reads v1 and its scenes as they were; the
+  v2 scenes made since are not there.
+
+## STOP conditions
+
+Stop and ask the owner when:
+
+- The migration would change what's on stream, or what the vertical stream
+  shows, at the first launch after update, on any fixture.
+- Switching regresses: `smoke:smart-scenes` p95 over 150 ms on a host under
+  load 10, or any black or wrong-layout frame.
+- A default position key can't be registered on a clean macOS or Windows
+  install.
+- The HUD's capture exclusion can't be proven on a Display scene (ship
+  without Phase C).
+- Card pictures cost more than D17's budget or can reach a capture while
+  Hide screen holds.
+
+## Out of scope
+
+- Window capture on Windows (`CreateForWindow`): its own plan, next.
+- Whole-app capture with menus and popups; two screens in one scene.
+- A different camera per scene.
+- Keeping every scene's window capturing at once (OBS), unless D5's budget
+  is missed.
+- Crossfades and transitions.
+- The Rust app (`videorc-rust`): it takes this model when its scenes land.
+- Spotting sign-in pages (plan 210 D13).
+
+## Risks
+
+- **User data.** The library is per profile in localStorage. v1 is never
+  written, v2 is written in one call, and every migration rule has a
+  fixture.
+- **Smokes that apply layouts.** 84 scripts mention `layoutPreset`. S2 keeps
+  the layout apply working for them (fresh profiles get the four defaults),
+  and the Phase A gates prove it.
+- **Old Stream Deck plugins and phones** that send `layoutPreset` still work
+  through D14's mapping, or get a named refusal.
+- **Ctrl+Alt+H** (Hide screen) shares the AltGr risk on a few layouts:
+  noted for a follow-up, not changed here.
+- **Load-dependent timing** (plan 210's notes): read every budget on a host
+  under load 10.
+
+## Execution order
+
+S0 → S1 → S2 → S3 → S4 (Phase A gates) → S5 → S6 → S7 → S8 → S9 (Phase B
+gates) → S11 → PR for A, B and D. S10 after, as its own PR, once the owner
+confirms D20. At most three Rust builds at once, one backend test or clippy
+build at a time (the 11-02 kernel panic).
+
+## Execution notes
+
+(Empty until S0.)
+
+### S1. Scene library v2 and its migration (2026-11-15)
+
+Done. Nothing is wired to the Studio and nothing user-visible changed.
+
+**Files**
+
+- `lib/scenes.ts`: the model, the tolerant reads, the defaults, the
+  migration and the pure helpers.
+- `hooks/use-scenes.ts`: the library hook.
+- `lib/scenes.test.ts` (47 tests), `hooks/use-scenes.test.ts` (8 tests),
+  and 11 fixtures in `lib/__fixtures__/scenes/`. Each fixture is one
+  profile's localStorage, parsed, by key.
+- Two small edits to shared code: `sceneNameError` and `movedScenes` take
+  any list of `{ id, name }` / `{ id }`, so v2 scenes reuse them.
+
+**Numbers:** typecheck, lint and Prettier green; the full desktop unit run
+is 701 files, 8130 passed, 1 skipped, no flake seen.
+
+**The API S2 uses**
+
+From `lib/scenes.ts`:
+
+- `SCENES_KEY`, types `SceneShows`, `Scene`, `SceneLibrary`, `MainDisplay`,
+  `ShowsSources`, `SceneMigrationConfig`.
+- `hydrateScenes(raw)` → `{ library | null, readOnly, error }`;
+  `normalizeScene(raw)` (throws on a broken scene).
+- `defaultScenes(mainDisplay, now?)`;
+  `migrateToScenes(v1Library, workingScene, captureConfig, globalShortcuts, now?)`
+  → `{ library, globalShortcuts }`.
+- `sceneOnStream(library)`, `sceneAtPosition(scenes, position)` (1-based),
+  `scenePosition(scenes, id)`, `sceneLayout(scene, orientation)`,
+  `sceneShowsWords(scene, orientation)`,
+  `firstSceneWithLayout(scenes, orientation, preset)` (D14),
+  `canDeleteScene({ scenes, id, onStreamId, sessionActive })` →
+  `{ allowed: true, switchToId } | { allowed: false, reason }` (D16), with
+  `KEEP_ONE_SCENE_REASON` and `DELETE_ON_STREAM_REASON`.
+- `showsFromSources(sources)` and `showsSources(shows)`: between a scene's
+  `shows` and the capture part of a source selection. `showsSources` writes
+  every capture key, so a spread clears the previous screen.
+- `sameShows(a, b)`, `withMainDisplay(library, display)`,
+  `horizontalTwin(preset)`, `defaultSceneId(preset)`, `WORKING_SCENE_ID`.
+
+From `hooks/use-scenes.ts`: `useScenes()` returns `scenes`, `onStreamId`,
+`readOnly`, `error`, `migratedShortcuts`, and `insert(scenes, afterId?)`
+(at the end by default, D5), `replace(scene)`, `rename(id, name)`,
+`move(id, toIndex)`, `setOnStream(id)`, `remove(id, { sessionActive })`.
+`loadScenes()` is the read without React.
+
+**What S2 must know**
+
+- **Save the migrated keys.** `migratedShortcuts` is non-null only on the
+  launch that migrated. S2 must write it into `settings.globalShortcuts` on
+  that launch: it has the layout keys as scene keys and no `layouts`. The
+  hook writes one key, `videorc.scenes.v2`, and never the settings. The ids
+  migration makes are stable (`default-screen-camera`,
+  `layout-vertical-camera-bottom`, `migrated-working`), so a migration that
+  runs twice gives the same keys.
+- **The write is an effect.** The hook migrates in its state initializer
+  (reads only) and stores v2 after the first render, once, also under
+  StrictMode. If that write fails the scenes stay in memory and the next
+  change writes them.
+- **A new user's display is not known at launch.** Their three screen
+  scenes show `{ kind: 'display', screenId: '' }`, v1's "nothing chosen
+  yet". Call `withMainDisplay` and `replace` once the device list has the
+  display. An updating user with no screen chosen gets the same.
+- **`showsSources({ kind: 'none' })` says `captureOff: true`.** D18 keeps
+  the capture running under a scene that shows no screen, so S2 must not
+  stop the capture from that flag.
+- **Unknown version:** the hook is read-only, never writes, and holds the
+  four defaults on today's setup in memory, so the Studio still has a scene
+  on stream.
+- **A v2 library with no usable scene** is treated as missing: the hook
+  migrates from v1 again and writes over it.
+- `normalizeScene` reuses v1's layout check, which keeps only the keys of
+  the default layout. `cameraLook` and `cameraChromaKeyEdges` are dropped
+  from a stored scene, as v1 scenes and the working scene drop them today.
+  If S2 wants a scene to keep the key's hide edges, that check needs them.
+- `scenes.ts` does not import `scene-list.ts`, which stays with the lazy
+  scene UI. Keep it that way when `use-studio.tsx` imports `scenes.ts`: the
+  eager bundle has a few hundred bytes left.
+
+**Choices the plan left open** (none changes a decision)
+
+- **Defaults take today's look.** The built-in layouts share one look
+  today, so each default is the working layout with its preset, the
+  remembered framing for that layout, and the working background.
+- **The scene on stream keeps the working look exactly.** Its layout in the
+  studio's orientation and its background are the working ones. A saved
+  scene whose working look drifted from it takes the working look.
+- **A working look that is exactly a default goes on that default,** also
+  after a Screen pick left a saved scene. Only a look no scene has (a
+  dragged camera, Freeform) becomes the extra scene of D15 step 3. The
+  fixture for "left by a Screen pick" has a dragged camera, so it adds
+  "Display 2".
+- **Plan 210 fixture:** the defaults show today's screen, which is Figma.
+  The default Screen + camera would equal the saved Figma scene, so it is
+  left out: Figma, T3 Code, Screen only, Camera only, Side by side. The
+  defaults do not follow the app (`follows: false`), so only the saved
+  scenes answer "Follow the app in front".
+- **A default is left out only when that is safe:** same screen, same 16:9
+  and 9:16 layout, not Freeform; never when it is on stream with another
+  look, and never when its layout key could not move to the saved scene
+  (that scene already has another key).
+- **A 9:16 layout key** goes to the first scene with that 9:16 layout that
+  has no key yet, because a scene has one custom key. With none free, a
+  scene is added: "Camera bottom", or "Vertical screen only" for a twin
+  name.
+- **Camera only shows no screen only for a new user** (D3). On update it
+  shows today's screen like the others, which also keeps the vertical
+  stream right when Follow is off and its 9:16 layout has a screen.
+- **Fill or Fit in 9:16.** A scene has one 9:16 layout for the 9:16 studio
+  and the vertical stream. From a 16:9 studio it takes the vertical
+  stream's framing (`simulcastScreenFraming`, Fit by default), so the
+  vertical stream doesn't change. From a 9:16 studio it keeps the layout's
+  own (`verticalScreenFraming`, Fill by default). A new user's scenes get
+  Fit, where a 9:16 studio starts on Fill today (owner call O1,
+  2026-09-21). S3 owns that default.
+- **Background with no working scene:** a profile with no
+  `videorc.working-scene.v1` gets scenes with no background. S2 can give
+  them the library's applied background if that case matters.
+
+### S2. The Studio runs on scenes (2026-11-15)
+
+Done, with one thing owed to the owner: the renderer's eager bundle is over
+its cap (see **Bundle**). No backend change, no contract change.
+
+**How it is built**
+
+- The Studio's apply, preflight, swap in place, Follow and list code read a
+  scene as plan 210's snapshot (`SavedScene`: id, name, `visual`, `audio`).
+  S2 keeps that shape as a **view** of the stored scene, so those paths did
+  not change:
+  - `lib/scene-studio.ts`: `savedSceneView(scene, orientation, camera)` and
+    `sceneFromSaved(saved, template)` go between the two shapes;
+    `sceneEditAutosave` is D11; `sceneKeepsCapture` is D18;
+    `sceneOnStreamAtLaunch` picks the scene on stream at launch.
+  - `hooks/use-scene-library.ts`: `useSceneLibrary(orientation, camera)`
+    wraps `useScenes()` and gives `use-studio.tsx` the API the v1 hook had
+    (`scenes`, `save`, `insert`, `replace`, `rename`, `move`, `remove`,
+    `autosave`, `refreshDisplay`) plus `stored(id)`, `storedScenes()`,
+    `setShows`, `setOnStream`, `editAll`, `nameMainDisplay`,
+    `migratedShortcuts`.
+  - `hooks/use-scene-presets.ts` and `lib/scene-autosave.ts` are deleted.
+- `core.savedScenes` and `core.activeSavedSceneId` keep their names and
+  shape, so the remotes, the Stream Deck plugin, ⌘K, the agent surface and
+  the phone get the v2 scenes with no change (brief item 10).
+  `activeSavedSceneId` is never null now. S6 to S9 can rename them.
+- The view is in the **studio's orientation** (`sceneLayout(scene,
+orientation)`), and its camera is `captureConfig.sources` (D9).
+- `videorc.working-scene.v1` is still written on every commit, as before: it
+  is the launch checkpoint (exact sources, the resolved window), and a
+  downgrade reads it.
+
+**What changed in behaviour**
+
+- **A scene is always on stream.** `activeSavedSceneId` starts from the
+  library's `onStreamId`, moves when a switch commits, and is written back.
+  At launch, a look whose layout is not the named scene's (a seeded capture
+  config, a downgrade and back) is on the first scene with that layout.
+- **A Screen pick edits the scene on stream (D2).** Idle, the pick writes the
+  scene's `shows` at once. While recording or live, the session's
+  confirmation commits it and the autosave writes it. The autosave also
+  writes `shows` whenever the capture changed while the same scene stayed on
+  (a smoke's `configure({ sources })`, an agent). An app's front window
+  changing is not a pick. `capturePickLeavesScene`, `sceneListActive`,
+  `galleryPresetIsActive`, `orientationSwitchPreset`, the Unsaved row and
+  both Layouts groups are gone.
+- **One camera (D9).** A scene going on stream never carries camera keys.
+  Only "Resolve scene sources" (the `repaired` argument) carries a camera,
+  and it then becomes every scene's camera. Camera Off is the same: it is
+  Sources' state, and a scene no longer turns the camera off or on.
+- **D18.** A scene whose `shows` is `none` and whose layout draws no screen
+  goes on stream with the capture sources, and the working app, left as they
+  are. It is the request the built-in Camera only sent before S2 (same
+  sources, a Camera only layout), so it matches today's behaviour by
+  construction; S0's numbers were not available. A `none` scene whose layout
+  draws a screen is refused as before ("No screen is chosen"), and once such
+  a layout is committed on it, the scene takes the screen on stream (S7's
+  D19 replaces this).
+- **Edits save into the scene on stream (D11),** into the layout of the
+  committed orientation; the other orientation's layout and the audio stay.
+- **`applyCameraPreset({ layoutPreset })` sets the layout of the scene on
+  stream.** `keepScene` is gone (it is the only behaviour).
+  `applyCameraPreset(patch, { toOrientation: true })` is the 16:9 / 9:16
+  toggle: the scene goes on in its own layout for that orientation. A preset
+  of the other orientation without that option starts from the scene's own
+  layout there and replaces only the preset, so smokes that call
+  `layout({ layoutPreset: 'vertical-…' })` still land on that preset.
+- **Keys and remotes (D14):** `switchToSceneWithLayout(preset)` switches to
+  `firstSceneWithLayout` in the studio's orientation, or returns
+  `No scene uses {Layout}`. The layout shortcut actions and the remote's
+  `sceneApply` `layoutPreset` use it (`context.applyLayoutPreset` now
+  returns `boolean | { ok, message }`). Next and Previous walk scenes only.
+- **Delete (D16):** `deleteSavedScene` is async. Off air it switches to the
+  scene before first and deletes only when that switch landed. The ⋯ item
+  is disabled with its reason, and the confirm says which scene goes on.
+- **Undo** of a commit that put another scene on stream switches back to
+  that scene through the scene path, so its screen comes back too.
+- **Layout framing memory** (camera zoom and offset per layout) is recalled
+  on every layout change and remembered by every commit that is not a scene
+  switch. Before, a saved scene's edits never reached it.
+- **First-run setup's look** goes on the first scene with its layout, and
+  every `default-*` scene takes its camera shape and background
+  (`scenesWithFirstRunLook`, in the lazy `first-run-look.ts`).
+- **Migration is a chunk of its own.** `lib/scenes-migration.ts` has
+  `migrateToScenes`, `defaultScenes`, `horizontalTwin`, the ids and
+  `migrateStoredScenes`. `StudioProvider` is now a small gate: it renders at
+  once when v2 is stored, and otherwise awaits `prepareScenes()` (which
+  loads the chunk) and then renders. Import those names from
+  `@/lib/scenes-migration`, not `@/lib/scenes`.
+- The migrated keys are saved once (`migratedShortcuts` →
+  `settings.globalShortcuts`), and `nameMainDisplay` names the main display
+  for the scenes that wait for it.
+
+**Numbers:** `pnpm typecheck`, `pnpm lint` and Prettier green. Full desktop
+unit run: 701 files, 8149 passed, 1 skipped, no flake seen.
+`studio-provider.integration.test.ts`: 215 passed (14 scene tests rewritten
+for scenes, 2 added: D18, and the migrated keys saved once).
+
+**Bundle (owed: the owner's call).** `pnpm check:renderer-assets` fails.
+
+|                                         |       raw |    gzip |
+| --------------------------------------- | --------: | ------: |
+| Before S2 (`ed6c50c03`)                 | 2,361,337 | 485,281 |
+| S2, first build                         | 2,389,323 | 491,303 |
+| S2, migration and first-run helper lazy | 2,381,700 | 489,705 |
+| Cap                                     | 2,365,000 | 487,000 |
+
+It is 16,700 raw and 2,705 gzip over. None of it is UI: the gallery and the
+scene list are lazy and lost code. It is the scene model the provider needs
+before first paint (the stored-scene check, the view, D11's autosave, the
+library's edits), on top of plan 210's snapshot code that the view keeps
+alive. The renderer is not minified, so raw moves by whole source bytes.
+What I tried: the migration, its v1 reader and the first-run look helper
+are lazy (7,623 raw, 1,598 gzip back). What is left to move is about 6 KB
+raw (the autosave, delete and layout-key helpers behind the scene-apply
+chunk), which makes every edit's save wait on a chunk and still leaves it
+over. Later slices delete eager v1 code (S3: `lastVerticalPreset`,
+`simulcastFollowsProgram`, `studioModeTogglePreset`; S4: the layout
+shortcut actions; S7: Save scene…), so measure again at the Phase A gate
+before asking for a raise. The cap is untouched.
+
+**Deviations**
+
+- The orientation toggle no longer falls back to a layout the current
+  sources can show (retest 150's `orientationSwitchPreset`). A scene has one
+  9:16 layout (D4); when the sources can't show it, the toggle is refused
+  with the existing reason.
+- "Save scene…" still pins the current audio into the scene it makes, as it
+  did (its dialog says so). D10's "no audio unless pinned" holds for New
+  scene… and for every edit. S7 removes Save scene….
+- A remote `sceneApply` `screenId` is not read by the renderer today (the
+  executor takes `sceneId` or `layoutPreset`), so there was nothing to
+  change. The phone's display list and the agents' `set_sources` go through
+  `switchSourceDeviceLive`, which now edits the scene. S9 owns `screenId`.
+- No screenshots: S2 adds no UI, it removes two groups and a row. S6 and S8
+  own the look.
+
+**What S3 must know**
+
+- The 9:16 studio already applies each scene's `layouts.vertical`, and the
+  toggle already keeps the scene (`toOrientation`). What is left of S3's
+  first bullet is the gallery's wording and `ORIENTATION_SWITCH_LOCK_REASON`
+  (it can no longer trigger: a view's layout is always in the studio's
+  orientation).
+- The vertical leg still streams `simulcastLegLayout(lastVerticalPreset, …)`
+  from `sendSimulcastLeg`. Read the scene there with
+  `storedScene(activeSavedSceneIdRef.current)` and
+  `sceneLayout(scene, 'vertical')`.
+- The autosave writes only the committed orientation's layout. A vertical
+  leg edit made from a 16:9 studio (the Vertical stream panel) is not a
+  layout commit, so S3 must write `layouts.vertical` itself: use
+  `sceneLibrary.replace` with a snapshot in the vertical layout, or add a
+  setter beside `setShows`.
+- `captureConfig.lastHorizontalPreset` and `lastVerticalPreset` are still
+  written by every commit (`layoutPresetMemoryPatch`) and still read by
+  `studioModeTogglePreset`, which now only names the orientation.
+- A new user's 9:16 Fill or Fit default is still S1's (Fit); S3 owns it.
+
+**What S4 must know:** the layout shortcut actions still exist and map to
+scenes (D14). Deleting them removes `switchLayout`'s `direct` branch and
+the `layout:` tokens in `handleGlobalShortcut`; `nextEligibleScene` is
+already called with `layouts: []`.
+
+**Smokes S11 must update** (none run in S2; nothing here was a one-line fix)
+
+- `smoke:scene-presets` (`smoke-scene-presets-app.mjs`): expects
+  `activeId === null` after `layout({ layoutPreset })` (lines 199 and 474;
+  the scene now stays on and takes the layout), and its "saved Off after On"
+  steps expect a scene to bring Camera Off or On back (D9: it never does).
+  A fresh profile also starts with four scenes, so count from a baseline.
+- `smoke:smart-scenes`: its delete step waits for `activeId === null`
+  (line 851; D16 puts the scene before it on stream), `remove()` now returns
+  a promise, its `keepScene` step (line 310) is the same edit as any layout
+  set, and New scene… adds at the end, not the top.
+- `smoke:remote-control`: waits for `activeSavedSceneId === null` after a
+  layout (line 536). A remote `layoutPreset` now switches to the first
+  scene with that layout, and is refused when a `layout()` call before it
+  left no scene with it.
+- `smoke:agent-mcp`: `switch_scene { sceneId: 'screen-only' }` now puts the
+  Screen only scene on stream (the result still says `kind: 'layout'` until
+  S9).
+- `scripts/lib/renderer-profile-seed.mjs` (every seeded smoke): a seed that
+  forgets the working scene keeps `videorc.scenes.v2`. The launch rule above
+  puts the seeded layout on the first scene with it, and the seeded sources
+  become that scene's screen on the next commit. A seed that needs a clean
+  library must also remove `videorc.scenes.v2`.
+- `probe:scene-window-switch`, `smoke:hide-screen:windows`,
+  `smoke:record-latency`: `configure({ sources })` now also changes the
+  screen of the scene on stream. They should pass as they are.
+- The scripts that click `[data-videorc-layout-preset]` (freeform editor,
+  preview interaction stress, the preview window probe) set the layout of
+  the scene on stream, and should pass as they are. No script used
+  `[data-scene-preset]`, which is gone from Studio and the Scene page.
+- The Stream Deck plugin and the phone list `savedScenes` and light a
+  layout key only when `activeSavedSceneId` is null, which never happens
+  now (S9).
+
+### S3. One scene, both orientations (2026-11-15)
+
+Done. Renderer only: no backend, contract or smoke script change. Taken over
+from a rate-limited first run: its split of `simulcastLegVideo` out of the leg
+builder, the leg built from a scene, and the migration's inlined copy of the
+old leg rule (same output) are kept; the rest was finished or redone.
+
+**What the vertical stream shows now (D4)**
+
+- The scene on stream's 9:16 layout: `simulcastLegLayout(scene, program)`
+  in `lib/capture.ts`, the one builder for session start
+  (`buildStartSessionParams({ sceneOnStream })`) and live sends. The scene
+  gives the layout, Fill or Fit, the camera's spot, shape, size and zoom, a
+  camera drag and a Freeform arrangement made in a 9:16 studio. The program
+  gives what the sources look like, as before plan 231: the camera's look,
+  mirror and green-screen key (with its Hide edges), and `sourceVisibility`,
+  so one camera reads the same on both legs and a source hidden on stream is
+  hidden on both.
+- A scene switch (click, key, remote, Follow, undo) commits the program, then
+  sends the leg for the scene that commit puts on stream
+  (`committedSnapshot.savedSceneId`), at the same point the leg was re-derived
+  before: plan 210's "each leg cuts on its own scene" is unchanged, with no
+  new window of the old scene on one leg. The re-derive after the commit's
+  proof now skips only a leg equal to the last one sent (a ref), not the one
+  sent at commit, so a Vertical stream edit made during the wait can't leave
+  the leg on the scene before.
+- The Vertical stream panel edits the scene on stream's 9:16 layout and Fill
+  or Fit. It lost its six cards and "Follow horizontal scene". The control is
+  `VerticalStreamLayoutControl` (`components/studio/vertical-stream-layout-control.tsx`,
+  in the lazy bottom-row chunk): "Layout", a `Select` of the six 9:16 layouts
+  with their `LayoutThumb` (six choices are past `SegmentedControl`'s 2 to 4),
+  then the existing Fill / Fit `ScreenFramingControl`. A layout the sources
+  can't show is disabled, with the gallery's one reason line under it (a
+  scene that shows no screen can't take a screen layout here); a read-only
+  library disables both with "Update Videorc to change your scenes."
+- The edit (`editVerticalStreamLayout(core, patch)`) saves through
+  `sceneLibraryActions.replace` with the scene's view carrying the 9:16
+  layout (the ⋯-edit path; `sceneFromSaved` saves a layout of the other
+  orientation as that layout). The provider sends the leg from an effect on
+  `core.sceneOnStream`, deduped against the last leg sent, so the edit goes
+  live on the vertical leg only and any other write of the scene sends
+  nothing new. A layout change is a layout pick (its remembered framing,
+  preset arrangement, no drag); Fill or Fit keeps the arrangement.
+- `lastVerticalPreset`, `lastHorizontalPreset`, `simulcastScreenFraming` and
+  `simulcastFollowsProgram` steer nothing. `simulcastLegPreset`,
+  `studioModeTogglePreset` and `SimulcastLegPatch` are deleted. The 16:9 / 9:16
+  toggles (Studio, Scene page) name the orientation with
+  `ORIENTATION_DEFAULT_PRESET`; first-run setup's toggle lands on the scene on
+  stream's layout there. The fields stay stored and loaded for the migration
+  and a downgrade; the commit point still writes the two layouts, and the
+  panel still writes `lastVerticalPreset` and `simulcastScreenFraming`.
+- `ORIENTATION_SWITCH_LOCK_REASON` is gone, with `savedSceneBlockedReason`'s
+  `sessionActive` and `orientation` inputs. The canvas stays locked while
+  recording or live (`requestLayoutTransaction`'s refusal and the disabled
+  toggle).
+- The gallery is the same list in both modes (verified, and now tested). Its
+  line reads "Click a scene to put it on stream. Each scene keeps its own 9:16
+  layout." in 9:16, and "Click a scene to put it on both streams, the vertical
+  one in its 9:16 layout." in 16:9 with a vertical stream armed.
+
+**O1, owed by S1 (my call):** O1 (2026-09-21) gave the vertical stream Fit (a
+live program's screen is the content) and a 9:16 studio Fill (short-form).
+With one 9:16 layout per scene, a new scene follows O1 by where it is made: in
+a 16:9 studio, where its 9:16 layout is first the vertical stream's, Fit; in a
+9:16 studio, the studio's own Fill. Every new user starts in 16:9, so their
+four scenes are Fit (S1's behaviour, now asserted in `scenes.test.ts`); Add
+scene… copies the scene on stream (D6). The Fill or Fit control is on the
+panel and on the 9:16 gallery.
+
+**API changes:** core `applySimulcastLeg` is gone; core `sceneOnStream`
+(the stored scene on stream, both layouts) is new; `useSceneLibrary` returns
+`storedList` (the stored scenes, reactive). `buildSimulcastParams`,
+`simulcastLegLiveRequest` take the scene; `simulcastLegVideo(config)` is the
+leg's canvas for overlays, captions, banners and the cloud test.
+`SceneCard` lost `pressed` (only the follow case used it).
+
+**Tests:** `capture-simulcast-leg.test.ts` rewritten for scenes (the leg
+follows the scene, never the program's layout or the old settings; what comes
+from the program). `scenes.test.ts` checks on every fixture that the migrated
+scene on stream streams exactly what the leg showed before plan 231 (the old
+builder frozen in the test), and O1 for a new user. Two integration tests:
+one switch by click and one by key, each cutting the program then the leg to
+the target scene's own 9:16 layout, a panel edit landing in `layouts.vertical`
+and on the leg only, and a fast double switch ending on the right leg; and a
+9:16 studio listing the same scenes in their 9:16 layouts and applying one on
+a switch. `vertical-stream-layout-control.test.ts` covers the edit's layout.
+First-run, scene-list, scene-card and capture tests updated.
+
+**Numbers:** `pnpm typecheck`, `pnpm lint`, Prettier on the 27 touched files
+green. Full desktop unit run: 702 files, 8151 passed, 1 skipped, no flake
+seen.
+
+|                         |       raw |    gzip |
+| ----------------------- | --------: | ------: |
+| Before S3 (`e0fdfc93b`) | 2,381,700 | 489,705 |
+| After S3                | 2,381,469 | 489,675 |
+| Cap                     | 2,365,000 | 487,000 |
+
+S3 takes 231 raw and 30 gzip bytes off; the budget is still over by S2's
+amount (the owner's call). A first version with the edit in the provider was
+480 gzip up; the lazy control and the effect took it back. The lazy
+bottom-row chunk grew from 12.75 to 15.46 kB (the control and its `Select`).
+
+**Screenshots** (light and dark, a vertical stream armed through the dev
+smoke API, an isolated profile):
+`/Users/orcdev/projects/plan-231-run/S3/shots/videorc-ui-vertical-stream-{light,dark}.png`
+(the panel) and `…-vertical-stream-layouts-{light,dark}.png` (the layout list
+open). The first shots drew each list item's diagram 14 px wide, unreadable;
+it is 22 px wide now. The list scrolls because the panel is at the page's
+foot. Capture script: `S3/scratch/capture-vertical-stream.mjs` (not
+committed); the backend was built once in this worktree for it (9 min 24 s).
+
+**Deviations**
+
+- The leg takes `sourceVisibility` from the program, beside the camera's
+  look, mirror and key, as before plan 231; the brief named the layout and
+  Fill or Fit only. Everything else is the scene's 9:16 layout.
+- The edit is written by the lazy control through `sceneLibraryActions` and
+  sent by a provider effect, not a provider setter (eager bytes).
+
+**What S4 must know:** nothing in the keys changed. A 9:16 layout key in a
+16:9 studio still goes through `switchToSceneWithLayout`, which looks in the
+studio's orientation only.
+
+**What S6 must know:** mount `<VerticalStreamLayoutControl />` as the
+"Vertical stream layout" row. It reads the core itself, renders nothing beside
+a 9:16 studio or without a scene on stream, and its "Layout" row and Fill or
+Fit are the two controls D8 names. In a 9:16 studio the 9:16 layout is the
+studio's own Layout (`applyCameraPreset`).
+
+**Smokes S11 must run** (none run in S3; the Rust backend was built once in
+this worktree for the screenshots)
+
+- `smoke:multistream:vertical` and `smoke:multistream:vertical-fill` drive the
+  backend directly with their own `simulcast` params
+  (`VIDEORC_SMOKE_VERTICAL_LEG=fit|fill`, `vertical-camera-bottom`), so this
+  renderer change doesn't reach them: they should pass as they are.
+- The new scene smoke's "both legs on a vertical stream": the defaults already
+  differ (Screen + camera streams Camera top, Camera only streams Camera only
+  in 9:16); the stored 9:16 layouts are in `videorc.scenes.v2`. No script in
+  `scripts/` sets `lastVerticalPreset`, `simulcastScreenFraming` or
+  `simulcastFollowsProgram`.
+
+### S4: keys by position (2026-11-15)
+
+- Added `scene-slot-1` to `scene-slot-9`, with `Control+Alt+N` defaults on
+  macOS and `Control+Alt+Shift+N` on Windows/Linux. Main registers them through
+  the existing owner lifecycle. `globalShortcuts.sceneSlots` holds overrides;
+  a missing entry uses the platform default and `''` releases the key. IPC
+  validates positions 1 to 9. Duplicate checks include the platform defaults.
+- A key resolves the current library position through `sceneAtPosition`, then
+  uses the same `scene:<id>` apply path as a custom key: Follow's hand pick,
+  refusal reasons, and superseding an in-flight switch. Empty positions do
+  nothing. Next/Previous walk scenes only, in library order, wrapping and
+  skipping unavailable sources/apps. Their existing `layout-next` /
+  `layout-previous` action IDs and `layoutNext` / `layoutPrevious` config names
+  stay so saved bindings survive. Their dispatch stays synchronous so a canvas
+  edit in the same turn cancels the pending walk.
+- Per-layout actions, groups, `globalShortcutLayout` and `nextEligibleLayout`
+  are deleted. `layouts` stays typed and accepted by IPC only for S1's migration
+  and downgrade compatibility; none of its keys register. The remote action
+  surface still needs `switchToSceneWithLayout`, so that helper remains for
+  legacy remote requests (D14), with no global-key caller.
+- Settings lists all nine positions with the scene name or `no scene`, then
+  scenes with assigned custom keys. Existing recorder rows still
+  change/clear them. Studio cards and Scene page rows show position and custom
+  keys together, including the words `Another app uses <key>` when registration
+  fails. The shared words come from `global-shortcut-owner.ts`; the new
+  `SceneShortcutKeys` and `scene-shortcuts.ts` live in the existing lazy UI
+  paths. Set key… remains how to create a scene's custom binding.
+
+**Verification:** `pnpm typecheck`, `pnpm lint`, Prettier on the touched files,
+and `git diff --check` pass. The focused Vitest run passed 10 files / 143 tests;
+the standalone `studio-provider.integration.test.ts` run passed all 216 tests.
+The first typecheck found one old per-layout assertion in the shared accelerator
+test; it now checks position/custom ownership and platform defaults instead.
+The first full desktop run failed: an unchanged `unavailable display` provider
+test hit its 5-second timeout, leaving overlapping React `act()` calls and 124
+subsequent failures. No known cloud-resume or quota-toast flake was identified in
+that run. The full rerun, `pnpm --filter @videorc/desktop test --maxWorkers=2
+--minWorkers=1`, passed all 704 files: 8,163 tests passed, 1 skipped, in 371.53 s,
+with no overlapping `act()` warnings. No source changes were needed for this
+timeout cascade. Logs: `desktop-full.log` and `desktop-full-final.log` in S4.
+
+`pnpm build` passed both before and after. `pnpm check:renderer-assets` failed
+both times on the inherited S2 cap overage; the cap is unchanged.
+
+|                         |       raw |    gzip |
+| ----------------------- | --------: | ------: |
+| Before S4 (`960029316`) | 2,381,469 | 489,675 |
+| After S4                | 2,380,657 | 489,492 |
+| Cap                     | 2,365,000 | 487,000 |
+
+S4 removes 812 raw / 183 gzip bytes. The remaining overage is 15,657 raw /
+2,492 gzip bytes, still the owner's budget call. Shadscan baseline and floor
+are 27; the audit command is `pnpm dlx @shadscan/cli@next --json` from
+`apps/desktop`, with the pre-commit result in `S4/shadscan-pre-commit.json`.
+The first attempt from the monorepo root reported an unsupported project;
+running from the desktop package establishes the applicable score.
+
+**macOS and screenshots:** all nine default position keys registered in the
+real Electron app using an isolated profile (`S4/mac-registration.json`), so
+the default-key STOP condition did not occur. The screenshot profile seeds
+`Figma` first, with custom key F13. Both standard capture runs and the focused
+Scenes-group captures passed, and these four PNGs were opened and inspected:
+
+- `/Users/orcdev/projects/plan-231-run/S4/shots/videorc-ui-settings-shortcuts-light.png`
+- `/Users/orcdev/projects/plan-231-run/S4/shots/videorc-ui-settings-shortcuts-dark.png`
+- `/Users/orcdev/projects/plan-231-run/S4/shots/videorc-ui-settings-scenes-light.png`
+- `/Users/orcdev/projects/plan-231-run/S4/shots/videorc-ui-settings-scenes-dark.png`
+
+The standard captures used `VIDEORC_SMOKE_SKIP_PREBUILD=1 node
+scripts/capture-ui-pages.mjs --theme=light|dark
+--out=/Users/orcdev/projects/plan-231-run/S4/shots`; the focused launcher scrolled
+the Scenes fieldset into view and captured each theme (`capture-scenes.log`).
+
+Evidence/logs are under `/Users/orcdev/projects/plan-231-run/S4/`. The screenshot
+apps were stopped and their owned children reaped. The shared checkout's status
+matches the status saved before S4; no work was done there.
+
+**Deviations and owed work:** retained the Next/Previous IDs/config names and
+the legacy remote helper as described above. Windows/Linux defaults and main
+registration have unit coverage; real Windows OS registration is owed to the
+Windows box. S11 owns the heavy recording/remote/preview smokes; none ran in S4.
+Global-key smoke intents must use `scene-slot-*` or `scene:<id>`; retired
+`layout:<preset>` global actions are intentionally rejected.
+
+**What S6 must know:** reuse `SceneShortcutKeys` with the scene ID, its library
+index + 1, `settings.globalShortcuts`, and the platform. It handles both keys,
+cleared positions, scenes after the ninth, and reactive registration conflicts.
+Reordering changes the position key immediately; a custom key stays with the
+scene ID. Settings custom-key rows list assigned keys only. S10 should retain
+the `sceneSlots` storage/registration path when wiring the key HUD.
+
+### S6. Studio's Scenes section (2026-11-15)
+
+Done. Renderer only: no backend, contract or smoke script change.
+
+**What the streamer sees** (`components/scene-presets.tsx`, the lazy
+`ScenesSection`; `components/studio/scenes-gallery.tsx` is now its shell)
+
+- **Header:** title "Scenes", the line "Each scene shows its own screen. ⌃⌥1
+  to ⌃⌥9 switch them from any app." (the platform's words through
+  `ShortcutKeys`: Ctrl+Alt+Shift+1 on Windows and Linux; a streamer who changed
+  position 1 or 9 reads "A scene's key switches to it from any app."), and
+  **Edit scene** and **Add scene…** at the header's end. Under it, one row:
+  the 16:9 / 9:16 toggle (locked while recording or live) and, on macOS only,
+  **Follow the app in front**. At 960 × 660 the header has room for two
+  buttons beside its line, not four, so the toggle and Follow sit on the row
+  under it (D8 names what the header holds; this is where it fits).
+- **Cards:** every scene, in order, one grid in both modes, no group labels
+  (`minmax(90px, 1fr)`: seven across at the default size, four at the
+  minimum). Each card draws its layout for the studio's orientation; the
+  screen area holds the scene's picture, else its glyph (the app's icon, a
+  display), and the camera area is a neutral opaque plate. Then the app's icon
+  flowing with the name (so "Chrome" wraps whole, never "Chrom e"), the
+  blocked reason ("Figma isn't open") or "Resolve sources", the key chips
+  (`SceneShortcutKeys`), and ⋯. #1312's pending mark and status line are
+  unchanged. Click goes through `useSceneDialogs().select`, as before.
+- **Reorder:** drag a card (a bar shows where it lands), or ⌥← ⌥→ on a
+  focused card (`sceneMoveKeyStep(event, 'horizontal')`,
+  `MOVE_SCENE_LEFT/RIGHT_ACCELERATOR`). The card keeps focus after the move
+  (found again by id: React may move its node). Chips follow positions at
+  once (S4). Read-only libraries don't move.
+- **The camera is one (D9),** so a scene that needs it while it's off or gone
+  is turned off and **one** `SceneGalleryReason` under the cards names them,
+  with Open Sources ("Camera is off. Choose one in Sources to use Camera only
+  and Side by side."). A gone screen stays each card's own "Resolve sources".
+- **Under the cards, the scene on stream's fields**
+  (`components/studio/scene-on-stream.tsx`, `SceneOnStreamFields`):
+  - "On stream: T3 Code";
+  - **Screen:** the scene's words (`showsWords`: "T3 Code · front window",
+    "Display 1", "No screen"; "Not shown in Camera only" under a screen its
+    layout doesn't draw), **Change…**, then **Hide screen** with its key and
+    the "Screen hidden" chip (moved from Studio's Sources), the stand-in and
+    switch status lines, and the Screen Recording alert
+    (`SourcePermissionAlerts only="screen-recording"`);
+  - **Layout:** 16:9 is a `SegmentedControl` of the four layouts drawn as
+    small `LayoutThumb`s (`compact`), each named by its tooltip, the name as
+    the field's line; 9:16 is a `Select` of the six with their diagrams (S3's
+    `LayoutChoice`). It calls `applyCameraPreset({ layoutPreset })`, which
+    saves into the scene on stream (S2). Camera layouts are off without a
+    camera, with one line why;
+  - **Framing** (Fill / Fit, `ScreenFramingControl`, now with a `label`
+    prop): in 9:16, and in 16:9 for Screen + camera and Screen only with a
+    screen, as the Scene page has it;
+  - **Vertical stream** (16:9 studio with a vertical stream armed only): S3's
+    `VerticalStreamLayoutControl` under a "Vertical stream" label, its Fill
+    or Fit labelled "Framing" (new `framingLabel` prop).
+  - **D19, the simple version:** a layout that draws a screen, chosen on a
+    scene that shows none, opens "Choose a screen" (`SceneScreenDialog`, the
+    Sources picker in a small dialog). Cancel keeps the old layout. "Use this
+    screen" picks the screen through `switchSourceDeviceLive` (which edits the
+    scene's `shows`, S2), then applies the layout once the capture is on that
+    screen (an effect on `sources.screenId ?? windowId`), never on a stale
+    one.
+- **Studio's Sources:** no Screen row (default look and Retro LCD); Camera
+  keeps its row, its stand-in and Green screen lines and plan 235's cog.
+  `useStudioSources` lost its capture and Hide screen fields; the Hide screen
+  control is `useScreenPrivacyControl` in the lazy chunk.
+- **Retro LCD:** the same section; the fields are one LCD screen (On stream;
+  Screen, whose value opens the picker as LCD rows do; Hide screen as its
+  press row; Layout, Framing and the vertical pair as LCD choice lists,
+  `LcdChoicePicker`). Header and cards are the same in both looks.
+- **Follow the app in front moved** from the Scene page's list header to this
+  section (`components/scene/follow-front-app-switch.tsx`). The Scene page
+  keeps Save scene…, New scene… and its list until S7 and S8.
+- **Save scene… is gone from Studio** (D6; the S6 header has no place for
+  it). S7 removes it from the Scene page and ⌘K.
+
+**Seams for S7 and S8**
+
+- `ScenesSection({ look, pictures, onAddScene, onChangeScreen })`:
+  - `onAddScene`: wire Add scene… (the header button,
+    `data-testid="scene-add"`). Without it, it opens New scene…
+    (`dialogs.open({ kind: 'new' })`).
+  - `onChangeScreen`: passed to `SceneOnStreamFields`; with it, the Screen
+    field shows a **Change screen…** button (and an LCD action) that calls
+    it, in place of the picker. S7 should also replace `SceneScreenDialog`
+    (D19) with Change screen… and keep "Cancel keeps the old layout" (the
+    `afterScreen` effect is the part to reuse).
+  - `pictures`: `ReadonlyMap<sceneId, imageUrl>`; each card passes
+    `pictures.get(id)` to `LayoutThumb`'s `picture`, which fills every screen
+    area of the layout (`object-cover`; the camera plate stays opaque on top).
+    Call `useScenePictures` in `ScenesSection` (or pass it from
+    `ScenesGallery`); nothing else changes. No picture keeps the glyph.
+- `sceneShowsWords` moved from `lib/scenes.ts` to `lib/scene-section.ts`
+  (lazy), beside `showsWords`: from the eager module, a lazy caller pulled it
+  into the first paint. Import it from `@/lib/scene-section`.
+- S8: the Scene page list still has its own drag (rows, ⌥↑ ⌥↓). The design
+  skill's "Where things live" and `docs/ui-copy.md` still describe the old
+  homes (Hide screen on "Studio's Screen row", Follow on the Scene page);
+  both moved here.
+- The segmented Layout uses `data-scene-layout="<preset>"` on each option and
+  `data-videorc-scene-layout` on the control; the fields carry
+  `data-slot="scene-on-stream"`, `scene-screen-field`, `scene-layout-field`.
+  `[data-videorc-screen-privacy]` stays on the Hide screen button
+  (`smoke:smart-scenes`, `smoke:hide-screen:windows`); its old home was the
+  inspector, now it is in the lazy Scenes chunk below the preview, so a smoke
+  that waits for it on the Studio page still finds it (`waitFor`).
+
+**Numbers:** `pnpm typecheck`, `pnpm lint`, Prettier on the 24 touched files
+and `git diff --check` green. Full desktop unit run
+(`--maxWorkers=2 --minWorkers=1`): 705 files, 8,198 passed, 1 skipped, no
+flake seen. New tests: `lib/scene-section.test.ts`;
+`components/studio/scene-on-stream.test.ts` (the Screen words, Change…, the
+Hide screen tests moved from `screen-privacy-row.test.ts`, the Layout saving
+into the scene on stream, D19 with Cancel and with a screen, Framing, 9:16,
+the vertical stream, Retro LCD); `scene-presets.test.ts` rewritten for the
+section (header, keys line per platform, order, ⌥← ⌥→ with focus kept, drag,
+read-only, pictures, the camera line, Follow); quick-settings (no Screen row)
+and Retro LCD Sources updated.
+
+|                         |       raw |    gzip |
+| ----------------------- | --------: | ------: |
+| Before S6 (`7cc0891d8`) | 2,380,657 | 489,492 |
+| After S6                | 2,380,784 | 489,575 |
+| Cap                     | 2,365,000 | 487,000 |
+
+S6 adds no code to the first paint (the entry diffed against a build of
+`7cc0891d8` differs only in its first line). The +127 raw / +83 gzip is the
+entry's chunk preload map naming five new shared lazy chunks
+(`follow-settings`, `source-switch-status`, `lcd-panel`, `lcd-device-picker`,
+`vertical-stream-layout-control`), split out because the Studio's chunk and
+the new Scenes chunk now share them. A first build was +524 raw: a lazy
+import of `showsWords` from the eager `scenes.ts` pulled it into the entry;
+it lives in `scene-section.ts` now. The Screen row and Hide screen came out
+of the Studio chunk, which is lazy too (77.53 kB from 88.47); the Scenes
+chunk is 41.64 kB (from 6.12). The cap is untouched; the overage is still
+the owner's call.
+
+**Screenshots** (light and dark; isolated profile seeded as the user's day:
+Figma, T3 Code and Chrome first, then the four defaults), in
+`/Users/orcdev/projects/plan-231-run/S6/shots/`:
+
+- the section at 1280 × 860 and 960 × 660:
+  `videorc-ui-scenes-{1280x860,960x660}-{light,dark}.png` and the fields,
+  `videorc-ui-scenes-fields-{size}-{theme}.png`;
+- the standard page sweep (`capture-ui-pages.mjs --themes=light,dark
+--sizes=1280x860,960x660`): `videorc-ui-studio-{size}-{theme}.png`, the
+  Scene page `videorc-ui-layout-…`, Sources `videorc-ui-sources-…`, and the
+  rest;
+- the Change… list `videorc-ui-scenes-change-{theme}.png`; a vertical stream
+  armed `videorc-ui-scenes-vertical-stream-{theme}.png`; the 9:16 studio
+  `videorc-ui-scenes-9x16{,-fields}-{theme}.png`; Retro LCD
+  `videorc-ui-scenes-lcd-{theme}.png`; a scene that shows no screen and
+  D19's dialog `videorc-ui-scenes-{none,d19-dialog}-{theme}.png`.
+
+T3 Code is the scene on stream in them, not Figma: Figma isn't installed on
+this Mac, so its card says "Figma isn't open", and a seeded scene on stream
+whose app the launch checkpoint doesn't hold has its screen saved over by
+S2's autosave at launch (a seed artifact: a real checkpoint holds the app).
+T3 Code went on through the real apply path. What the first shots showed and
+was fixed: "Chrom e" split inside the word (the icon now flows with the
+name), the 16:9 Layout diagrams were too faint at icon size (stronger
+plates), and a Clips toast covered the fields (closed before each shot).
+Capture script: `S6/scratch/capture-scenes.mjs` (not committed).
+
+**Deviations**
+
+- The 16:9 / 9:16 toggle and Follow sit on a row under the header, not in
+  it: four controls don't fit beside the title at 960 × 660.
+- Save scene… is gone from Studio now (S7's job elsewhere).
+- Follow the app in front left the Scene page (D8 "moved"), not mirrored.
+- `sceneShowsWords` moved to `lib/scene-section.ts` (bundle, above).
+- D19 opens a small "Choose a screen" dialog with the Sources picker: the
+  synced `DevicePicker` can't be opened from code, so the popover Change…
+  uses could not be reused for it.
+- Smokes: none run (S11 runs `smoke:scene-item-drag` and
+  `smoke:freeform-editor`). `[data-videorc-screen-privacy]` moved from the
+  inspector to the Scenes section (lazy, below the preview); the two smokes
+  that click it wait for it, so they should pass as they are.
+
+### S7. Add scene… and Change screen… (2026-11-15)
+
+Done. Renderer only: no backend, contract or smoke script change (four
+contract and IPC comments now say Add scene…).
+
+**Add scene…** (`components/scene/scene-picker-dialog.tsx`, which was
+`new-scene-dialog.tsx`; its pure model is `lib/scene-app-picker.ts`)
+
+- One picker, three groups, several choices: **Apps** (macOS: the
+  front-window picture through `sources.app_previews`, the icon, "2 windows"),
+  **Displays** (a card whose well takes `DisplayChoice.picture` once S5 fills
+  it, the display glyph until then; macOS names a display "Built-in Retina
+  Display · 3024 × 1964", so the card shows the name and the size as its
+  line) and **Camera** (one "Camera only" card, its line the camera's name or
+  "Camera is off"). Search filters apps and displays. Windows and Linux show
+  Displays and Camera only.
+- The button reads "Add scene" or "Add 3 scenes" (`plural`); nothing chosen
+  says "Choose at least one."
+- `newScenes(picks, sceneOnStream, scenes, { cameraOn })`: each scene is named
+  after what it shows, unique across the batch too ("Figma 2", "Figma 3",
+  "Camera only 2"); it copies the stored scene on stream's two layouts (camera
+  spot, shape, size, framing) and background, made to show its screen (Camera
+  only becomes Screen + camera, a camera layout with the camera off its
+  screen-only twin, the screen visible), or Camera only in both orientations
+  for the camera card; no audio (D10); app scenes follow (plan 210 D10); the
+  app's front window is the scene's window hint (plan 210 D5).
+- Scenes are added in the list's order (apps A to Z, displays, camera), not
+  the click order, through the new `sceneLibraryActions.add` at the end (D5).
+  Nothing is applied and `onStreamId` doesn't move.
+
+**Change screen…** (the same picker, `mode: 'change'`)
+
+- Apps, then **A specific window** (a `Collapsible` under Apps, open when the
+  scene keeps a window; rows of title and app, never Videorc's own), Displays,
+  and Camera's **No screen**. It starts on what the scene shows, and the
+  button says "“Figma” already shows this." until another is chosen.
+- A scene that isn't on stream: only it changes (`sceneLibraryActions.edit`).
+- The scene on stream (D2): a display or window goes through
+  `switchSourceDeviceLive`, the Screen pick S2 built, which writes the
+  scene's `shows`; an app is written and the scene applied again with the
+  app's front window (plan 210's Change app path); No screen is written and,
+  when the layout drew a screen, `applyCameraPreset` puts it on Camera only
+  (D18 keeps the capture running).
+- **No screen puts both layouts on Camera only** (my call): a scene that
+  shows no screen then never holds a layout that needs one, which is D19's
+  rule seen from the other side. The card says "Puts the scene on Camera
+  only" when that happens.
+- A screen chosen for a scene whose layout draws none says so under the
+  list ("“Camera only” uses Camera only, which shows no screen. Change its
+  layout to show it."); its layout is not changed.
+- Names: a scene named after what it showed (an app, a window's app, a
+  display, "Figma 2") takes the new one's name; a typed name and a default
+  scene's layout name ("Camera only") stay.
+- For the scene on stream the button and ⋯ item are off with
+  `sourceSwitchReason('capture')` (a Linux session, a switch in flight).
+- **D19:** S6's `SceneScreenDialog` is gone. The Layout field calls
+  `onChangeScreen({ forLayout })`; the picker then offers no No screen and
+  says "Screen + camera shows a screen, and “Camera only” shows none yet.";
+  Cancel keeps the layout. S6's "apply once the screen lands" effect moved to
+  `useSceneDialogs`: the layout goes on once the capture is on the chosen
+  screen (or after an app's apply lands), and is dropped when another scene
+  goes on or another layout is chosen meanwhile.
+
+**The ⋯ menu** reads Rename…, Change screen…, Set key… | Follow the app or
+Stop following (app scenes), Save audio to scene | Duplicate | Delete.
+Duplicate copies the stored scene (both layouts, screen, audio) to the end;
+its keys stay with the original.
+
+**Save scene… is gone**
+
+- The Scene page header is Edit scene and Add scene… (the same picker; its
+  test id `scene-new` stays for `smoke:smart-scenes`). The name dialog is
+  Rename only.
+- ⌘K's Scenes group leads with **Add scene…** (context "Studio", off while the
+  library is read-only): `lib/scene-add-request.ts` opens Studio and the
+  Scenes section takes the request at mount or by its event. The scenes'
+  context reads "Scene", not "Saved scene".
+- Deleted: `saveSceneBlockedReason`, `suggestedSceneName`, `sceneWithApp`,
+  the view-based `duplicatedScene`, `lookForAppScenes`, `newAppScenes`,
+  `newCaptureScene`, `captureChoices` and `scenesForApps` (test fixtures that
+  used it are literals now).
+- The provider: `canSaveScene`, `saveScene` and `useSceneLibrary.save` left the
+  core. `SceneLibraryActions` lost `workingVisual` and the view `insert`, and
+  gained `stored(id)`, `add(scenes, windowHints)` and `edit(scene, hint)` on
+  stored scenes. The dev smoke harness keeps `save(name, id?)` and
+  `state().canSave` with the old behaviour (compiled out of production) for
+  the smokes; the integration tests reach them through two helpers.
+- `ScenesSection` lost its `onAddScene` and `onChangeScreen` props (both are
+  built in). `SceneOnStreamFields` requires `onChangeScreen` and takes
+  `changeScreenReason`; its Retro LCD Screen row is a Change screen… action
+  (`LcdPanelAction` gained `disabled`). Its `DevicePicker` and
+  `LcdDevicePicker` fallbacks are gone.
+- `git grep -n "Save scene"` in `apps/`, `scripts/`, `docs/ui-copy.md`,
+  `CONTEXT.md` and the skill finds only tests that assert it's absent; the
+  changelog, an acceptance doc and the plans keep their history.
+
+**Tests:** `lib/scene-app-picker.test.ts` (naming "Figma 2"/"Figma 3", the look
+of the scene on stream, Camera only, end placement with ⌃⌥6 to ⌃⌥9 and none
+for the tenth, displays and windows, Change screen's shows and names, No
+screen, a default keeping its name, Duplicate);
+`scene-picker-dialog.test.ts` (groups, "Add 3 scenes", search, pictures,
+grant, Windows, Change screen's start, A specific window, No screen, the
+layout note, D19); `scene-list.test.ts` (no Save scene…, the ⋯ order, Change
+screen… on another scene, a specific window, on stream by window, app and No
+screen, the disabled reason); `scene-presets.test.ts` (Add scene… never
+touches the stream, ⌘K at mount and while mounted, Change screen… from the
+field, D19 Cancel keeps the layout and the layout follows the screen);
+`scene-on-stream.test.ts`; `command-palette.test.ts`; and in
+`studio-provider.integration.test.ts` Add scene… through the real provider:
+appended last, the same scene on stream in state and storage, and no
+`scene.*` or `session.source*` command sent.
+
+**Numbers:** `pnpm typecheck`, `pnpm lint`, Prettier on the 34 touched files
+and `git diff --check` green. `studio-provider.integration.test.ts`: 216
+passed. Full desktop run (`--maxWorkers=2 --minWorkers=1`): 705 files, 8,219
+passed, 1 skipped, no flake seen.
+
+|                         |       raw |    gzip |
+| ----------------------- | --------: | ------: |
+| Before S7 (`736669532`) | 2,380,784 | 489,575 |
+| After S7                | 2,378,584 | 489,155 |
+| Cap                     | 2,365,000 | 487,000 |
+
+S7 takes 2,200 raw and 420 gzip bytes off the first paint (Save scene…'s
+provider code); the budget is still over by S2's amount, the owner's call.
+The new UI is lazy: ⌘K's request module is its own 0.49 kB chunk, the
+picker and dialogs ride the scene-dialogs chunk (`scene-shortcut-keys`,
+45.74 to 56.54 kB), and the Scenes chunk fell from 41.64 to 37.33 kB.
+
+**By hand** (the real dev app, an isolated profile, `S7/scratch/capture-s7*.mjs`,
+not committed): Add scene… with Chrome, T3 Code (Nightly) and Discord read "Add
+3 scenes" and appended them as positions 5 to 7 with ⌃⌥5 to ⌃⌥7, the scene on
+stream unchanged in storage and state; Change screen… → A specific window →
+Discord's window made that scene a fixed window; D19 on Camera only: Cancel
+kept Camera only, a display chosen put the screen on and then Screen + camera,
+the scene keeping its name. Figma isn't installed on this Mac.
+
+**Screenshots** (light and dark) in `/Users/orcdev/projects/plan-231-run/S7/shots/`:
+`videorc-ui-add-scene-{light,dark}` (three chosen, "Add 3 scenes"),
+`-add-scene-bottom-` (Displays and Camera), `-studio-added-` (the new cards at
+the end), `-scene-menu-` (the ⋯ menu), `-change-screen-` (A specific window
+open), `-change-screen-d19-`, `-scene-page-`, and `-studio-fixed-window-dark`,
+`-d19-landed-dark`.
+
+**What S8 must know:** `docs/ui-copy.md` ("New scene…" makes scenes for
+apps), the design skill's "Where things live" (New scene…, Change app…, Save as
+new scene…) and `CONTEXT.md` (line 128, "New scene…") still have the old words;
+the copy is now Add scene…, Change screen…, A specific window, No screen,
+Camera only. The Scene page header is done; its rows are still its own list.
+
+**What S5 must know:** fill `DisplayChoice.picture` where the picker builds
+its displays (`displayChoices(deviceList.devices, platform)` in
+`scene-picker-dialog.tsx`, keyed by display id), and the cards' `pictures`.
+
+**What S9 and S11 must know:** ⌘K's Scenes group is "Add scene…" then
+"Switch to {name}" (context "Scene"). The smokes' `save()` and `canSave` are
+the dev harness's own now; `smoke:smart-scenes`'s `scene-new`,
+`data-app-choice` and `new-scene-add` still match, the new picker's are
+`add-scene-dialog`, `change-screen-dialog`, `change-screen-apply` and
+`data-pick`; S6's `scene-screen-dialog` is gone; and
+`scripts/lib/smart-scenes-gate.mjs` still says "New scene… keeps none".
+
+### S6b. Pictures on the cards, and the Scenes section polish (2026-11-15)
+
+Done. Renderer only: no backend, contract or smoke script change. The
+backend binary was rebuilt once (`cargo build -p videorc-backend` in a build
+slot, 6 min 22 s) so the dev app had S5's `sources.scene_pictures` for the
+screenshots.
+
+**Pictures (D7, D17)**
+
+- `ScenesSection` calls `useScenePictures` once. Its targets are what each
+  scene shows when its layout in the studio's orientation draws a screen
+  (`scenePictureTarget` in `lib/scene-section.ts`: the app, before its
+  resolved window; a fixed window; a display), one per thing shown, keyed by
+  `scenePictureTargetKey` (the three default scenes on Display 1 ask once).
+  Camera only, No screen, a test pattern and a main display not yet named ask
+  for none. `hidden` is `screenPrivacy.hidden`, `busy` is `isSessionActive`.
+  Each card takes its scene's still by key; the `pictures` prop is gone.
+- Add scene… and Change screen… ask for the displays while the picker is open
+  and fill `DisplayChoice.picture` (`object-cover` in the well).
+- A still fills the layout's screen area with `object-cover`, the camera area
+  stays a neutral opaque plate (now with the camera glyph at card size), and
+  there is no live badge; the same in both themes. Windows and Linux get no
+  pictures (the hook asks nothing off macOS) and keep their glyphs.
+- On this Mac all 6 stills came back (Discord, Chrome, T3 Code (Nightly) and
+  Display 1 behind the four defaults) and both displays in the picker, through
+  the terminal's Screen Recording grant.
+
+**The cards** (`components/studio/scene-card.tsx`)
+
+- Grid `repeat(auto-fill, minmax(160px, 1fr))`, gap 8. Measured in the app:
+  the Scenes column is 704 px at 1280 × 860 (4 across, 170 px cards) and
+  384 px at 960 × 660 (2 across, 188 px cards).
+- One structure at fixed heights: the picture well; a 20 px name row (the
+  icon of what it shows, for every scene, then the name on one line, then the
+  check, or the ⋯ in the same place on hover and focus); a 20 px meta row
+  (`sceneCardWords`: "Front window", "Figma · front window" for a renamed app
+  scene, the display's name without its size, a window's title, "No screen";
+  or the blocked reason, "Resolve sources", "Applying…"), with the key chips at
+  its end. "Screen + camera" fits whole at 170 px; a cut name (and cut meta
+  words) shows whole in a tooltip, measured after render and on resize.
+- The scene on stream: the chrome plate, a 2 px `outline-foreground` ring
+  around the picture (black in light, white in dark) and the check.
+- A blocked card dims its picture, icon and name, never its reason.
+- 9:16 studio: the upright layout stands in a 4:3 well, so its picture stays
+  readable (a 16:9 well made it 48 px wide).
+- First-run setup's `size="sm"` keeps its wrapping two-line names and the
+  check on the picture (#1083).
+
+**The fields** (`components/studio/scene-on-stream.tsx`)
+
+- "On stream: T3 Code" is an h3 at 13 px / 600 with "Changes here save into
+  this scene." under it, after a hairline and 16 px, as a nested section.
+- Screen: **Hide screen** and **Change screen…** side by side in the row's
+  action area (`HideScreenButton`, 28 px like its neighbour). Its key chip
+  rides inside it while the fields are at least 512 px wide
+  (`@lg/scene-fields`), always in its tooltip. "Screen hidden" sits beside
+  the field's name. `ScreenPrivacyLine` is gone; `data-slot="screen-privacy"`
+  and `[data-videorc-screen-privacy]` stay.
+- Layout: one `Select` in both orientations (my call: the skill's
+  SegmentedControl is for 2 to 4 values and 9:16 has six; one control keeps
+  them consistent, and the Vertical stream's own Select already was one).
+  Each item and the trigger show the layout's icon-size diagram and name
+  (`LayoutChoice`, now `inTrigger`); the Vertical stream's trigger shows its
+  diagram too. `LayoutThumb`'s `compact` now also thins the 9:16 diagram,
+  and it takes a sizing `className`. Items keep `data-scene-layout`, the
+  trigger `data-videorc-scene-layout`.
+
+**Numbers:** `pnpm typecheck`, `pnpm lint`, Prettier on the 13 touched files
+and `git diff --check` green. Full desktop unit run (`--maxWorkers=2
+--minWorkers=1`): 706 files, 8,243 passed, 1 skipped, no flake seen. New or
+rewritten tests: `scene-card.test.ts` (structure, fixed rows, the ring, check
+or ⋯, the dimmed card's reason, the cut name's tooltip, first-run's wrap);
+`scene-presets.test.ts` (targets per card, deduplicated, `hidden` and `busy`,
+pictures to the right cards, glyphs without, the meta words and icons);
+`scene-picker-dialog.test.ts` (display stills, `hidden`, `busy`);
+`scene-on-stream.test.ts` (the heading, Hide screen beside Change screen…
+with its key, the chip by the name, Layout as a Select); `scene-section.test.ts`
+(`scenePictureTarget`, `sceneCardWords`); `scene-list.test.ts`'s fixture.
+
+|                          |       raw |    gzip |
+| ------------------------ | --------: | ------: |
+| Before S6b (`ad21548fc`) | 2,378,584 | 489,160 |
+| After S6b                | 2,378,584 | 489,165 |
+| Cap                      | 2,365,000 | 487,000 |
+
+Nothing new is eager: the entry is byte-for-byte the same size (+5 gzip from
+the lazy chunks' new hashed names in its preload map). The hook rides the lazy
+`scene-shortcut-keys` chunk (56.54 to 61.82 kB), the Scenes chunk is 39.71 kB
+(from 37.33), `scene-card` 7.09 kB (from 3.18, the tooltip). The overage is
+still S2's, the owner's call.
+
+**Screenshots** (light and dark, 1280 × 860 and 960 × 660; an isolated
+profile, Add scene… with T3 Code (Nightly), Google Chrome and Discord moved to
+the front, T3 Code on stream, Follow off so the app in front never takes the
+stream) in `/Users/orcdev/projects/plan-231-run/S6b/shots/`:
+`videorc-ui-scenes-{size}-{theme}` and `-scenes-fields-`, `-add-scene-` (the
+display pictures), `-scenes-9x16-`, `-scenes-9x16-fields-`, `-scenes-lcd-`,
+and at 1280: `-scenes-focused-` (the ⋯ and the whole name's tooltip),
+`-scenes-layout-open-`, `-scenes-9x16-layout-open-`, `-scenes-hidden-` (Hide
+screen holding). Capture script: `S6b/scratch/capture-s6b.mjs` (not
+committed). A card under the real pointer shows its ⋯ in some shots.
+
+**Deviations**
+
+- 960 × 660 shows two cards across, not about three: the column is 384 px,
+  and three across would be 122 px cards, S6's problem again. The brief's
+  160 to 200 px minimum wins.
+- The 9:16 studio's cards use a 4:3 well, not 16:9 (above).
+- The 16:9 Layout is a Select, not a SegmentedControl (above).
+- The camera plate on a card draws the camera glyph.
+
+**What S8, S9 and S11 must know:** the Layout field has no `role="radio"`
+anymore: open `[data-slot="scene-layout-field"] [aria-label="Layout"]` and
+choose `[data-scene-layout="<preset>"]`. Hide screen is a 28 px button whose
+text is "Hide screen" plus its key chip while there is room. The Scene page's
+rows (S8) don't show pictures yet; `scenePictureTarget` and the hook are
+ready for them.
+
+### S8. Sources, the Scene page and the words (2026-11-15)
+
+Done. Renderer and docs only: no backend, contract or smoke script change.
+
+**Sources → Screen** (`components/sources/video-sources.tsx`)
+
+- Under the picker and its facts, one line names the scene the screen belongs
+  to, from `savedScenes` and `activeSavedSceneId`, so it follows every switch
+  (`screenSceneLine`): "Shown by “Figma”, the scene on stream. Each scene keeps
+  its own screen." A scene whose layout draws no screen reads "“Camera only”,
+  the scene on stream, shows no screen. Each scene keeps its own screen." (A
+  first "Kept by “Camera only”…" was wrong: under D18 the picker shows the
+  capture left running, which isn't that scene's screen.) Names are in curly
+  quotes, as in the app's other scene sentences.
+- **Open Scenes** (an `xs` ghost button at the line's end, the pattern of
+  "Open Sources" under the cards) opens Studio scrolled to its Scenes
+  section: `openScenes()` in `lib/scene-add-request.ts`, which now carries
+  both requests (`takeScenesRequest()` → `'add' | 'show'`,
+  `SCENES_REQUEST_EVENT`; `ADD_SCENE_EVENT` and `takeAddSceneRequest` are
+  gone). The copy guard allows "Scenes" as the section's name, and
+  `docs/ui-copy.md` lists it under Casing.
+- The picker is unchanged. Checked: its pick is
+  `switchSourceDeviceLive('capture', buildCaptureSources(…))`, the S2 Screen
+  pick that writes the scene on stream's `shows` (the provider test "a Screen
+  pick edits the scene on stream", and a new connected test that the Sources
+  picker calls it). The permission alerts, the lock, the facts and the switch
+  status are as they were.
+
+**The Scene page list** (`components/scene/scene-list.tsx`)
+
+- One shared module, `components/scene/scene-entries.tsx`, for both lists:
+  - `useSceneEntries(needsSources)`: per scene its position, on stream,
+    pending, disabled with its own reason or the camera's (D9), the meta
+    words (the pending mark, the blocked reason, "Resolve sources", else
+    `sceneCardWords`), the glyph and its still; plus the app icons and the
+    one camera line. It calls `useScenePictures` once per list.
+  - `useSceneReorder({ axis, focusSelector })`: drag, ⌥← ⌥→ or ⌥↑ ⌥↓, the
+    `aria-keyshortcuts`, read-only, and the focus kept after a keyboard move.
+  - `ScenesLine` (the header's keys line) and `SCENES_READ_ONLY_REASON`.
+  - Studio's `ScenesSection` now reads its cards through them too (its own
+    copy of that code is gone; its tests pass unchanged).
+- Rows: a 43 × 24 picture (a compact `LayoutThumb` with the still, in
+  `ListRow`'s `leading`; a 9:16 layout stands upright in the same box), the
+  icon, the name, Studio's words ("Front window", "Built-in Retina Display",
+  "No screen"), Follows, the key chips, the check and ⋯. Rows that need a
+  camera that's off turn off, with the one line and Open Sources under the
+  list (new on this page). ⌥↑ ⌥↓ keep the focus now, as the cards do. The
+  header reads like Studio's: the keys line, then a ghost Edit scene and an
+  outline Add scene… (it was the chrome primary).
+- No Layouts group, no Unsaved row (S2), Add scene… in the header (S7),
+  Follow in Studio (S6); the canvas editor and the Hide screen section stay.
+- `useScenePictures` is never called twice in one window: the shell renders
+  one page at a time (`app-shell.tsx`), so Studio's section and the Scene page
+  are never mounted together.
+- `sceneShows` (`lib/scene-list.ts`) is deleted; the rows use
+  `sceneCardWords`.
+
+**The words**
+
+- `CONTEXT.md`: Scene (what it shows and how it's arranged, both layouts, one
+  always on stream, its home), Layout (a choice inside a scene), Default
+  scene, Scene key (positions and a custom key), Add scene… and Change
+  screen…; Scene for an app no longer says New scene…; Follow, Hide screen and
+  Vertical stream say where they live now. "saved scene" and "unsaved scene"
+  are in Scene's _Avoid_.
+- `docs/ui-copy.md`: the ellipsis examples (Add scene…, Change screen…, Set
+  key…; not Duplicate, Open Scenes, "Add 3 scenes"), a Scenes block with the
+  strings (the keys line, Add scene…'s button, Change screen…, "Scene 1 ·
+  Figma", "Another app uses ⌃⌥3", the Shown by line, the HUD switch, the
+  refusals) and what never to write, Hide screen's own bullet, and the HUD as
+  the one exception in Toasts.
+- The design skill: the D20 exception on the "no success toast" owner call,
+  a D8 owner call, the Audio call's Sources mirror (Camera only), "Where
+  things live" (Devices, Scenes, Hide screen), the confirm example ("Delete
+  scene?") and the toast discipline line.
+- Copy: Assets → Backgrounds reads "A background this scene kept" and "Other
+  scenes keep their copy."; v1's unused error "Some invalid scenes couldn't
+  be loaded."; comments that put Hide screen on "Studio's Screen row" now say
+  the scene's Screen row in Studio's Scenes section.
+
+**Numbers:** `pnpm typecheck`, `pnpm lint` (with the em dash gate), Prettier on
+the 21 touched files and `git diff --check` green. Full desktop unit run
+(`--maxWorkers=2 --minWorkers=1`): 706 files, 8,250 passed, 1 skipped, in
+355 s, no flake seen. New or changed tests: `video-sources.test.ts` (the line and its two
+forms, Open Scenes, the lock kept, and wired to the studio: the words follow
+the scene on stream as it changes, the pick goes through the Screen pick, Open
+Scenes opens Studio), `scene-list.test.ts` (Studio's words, the same stills
+and keys as the cards, Hide screen and a session freezing them, the camera
+line with Open Sources, the focus kept after ⌥↑), `scene-presets.test.ts`
+(Open Scenes scrolls the section into view, at mount or while mounted, once
+per request), `lib/scene-list.test.ts` (`sceneShows` gone).
+
+|                         |       raw |    gzip |
+| ----------------------- | --------: | ------: |
+| Before S8 (`c88a7497d`) | 2,378,584 | 489,165 |
+| After S8                | 2,378,551 | 489,148 |
+| Cap                     | 2,365,000 | 487,000 |
+
+Nothing new is eager (the entry is 33 bytes smaller: one lazy chunk fewer in
+its preload map, `scene-card` now rides the `scene-shortcut-keys` chunk with
+`scene-entries`, 61.82 to 70.03 kB). The Scenes chunk fell from 39.71 to
+32.22 kB, the Scene page's from 210.10 to 209.20 kB, Sources' grew from 45.74
+to 47.05 kB, the request module from 0.49 to 0.56 kB. The overage is still
+S2's, the owner's call.
+
+**Screenshots** (light and dark; the dev app on an isolated profile, Add
+scene… with T3 Code (Nightly), Google Chrome and Discord moved to the front, T3
+Code on stream, Follow off) in `/Users/orcdev/projects/plan-231-run/S8/shots/`:
+`videorc-ui-sources-{1280x860,960x660}-{theme}` (the line and Open Scenes),
+`-sources-camera-only-` (the no-screen line), `-scene-page-{size}-{theme}` (the
+rows with their pictures), `-scene-page-focused-` (a focused row and its ⋯),
+`-scene-page-9x16-`, `-open-scenes-` (Studio after Open Scenes, the section at
+the top) and `-studio-scenes-` (the section after the refactor, as in S6b).
+Capture script: `S8/scratch/capture-s8.mjs` (not committed). What the first
+shots showed and was fixed: Open Scenes wrapped onto its own indented line in
+the two-column Sources (it now keeps the line's end), the facts line sat under
+the scene line (back under the picker), and the "Kept by" words.
+
+**Deviations**
+
+- "Open Scenes" opens Studio at its Scenes section (the brief's optional
+  link); "Scenes" joined the copy guard's names for it.
+- The Scene page's header buttons now match Studio's (ghost Edit scene,
+  outline Add scene…).
+- In a 9:16 studio the rows' pictures are small upright diagrams (14 × 24):
+  they show the layout more than the screen. A taller row would cost the list
+  its density; the cards in Studio are the place for big pictures.
+- A few words outside the brief changed with "saved scene": Assets →
+  Backgrounds' two lines and v1's unused error.
+
+**What S9 must know:** `lib/scene-add-request.ts` exports `openAddScene`,
+`openScenes`, `takeScenesRequest` and `SCENES_REQUEST_EVENT`. The Scene page
+keeps its test ids (`scene-new`, `scene-edit`, `[data-saved-scene]` rows with
+`[data-slot="list-row-button"]`); the row picture is
+`[data-slot="scene-row-thumb"]` and Sources' line `[data-slot="screen-scene"]`.
+No script in `scripts/` reads the Scene page's row words, the old event or the
+old description. The design skill and `docs/ui-copy.md` now say remotes,
+agents and ⌘K switch scenes only; S9's code is what makes that true.
+
+### S9. Remotes and agents, and D18's renderer (2026-11-15 to 2026-11-16)
+
+Done. D18's renderer is committed separately as `7a822aa85`; Part B and
+these notes accompany the S9 commit. The completed checks below supersede
+all interrupted runs. No guard was bypassed, and the shared checkout was
+only inspected. No push, PR, merge or rebase.
+
+**D18 (Part A, with the final picker refinement in Part B)**
+
+- No-screen layout commits send S5's `retainScreen: true` only with an
+  existing screen owner (`starting`/`live`) and no explicit `captureOff`.
+  This covers a switch to Camera only, a none-scene or another layout
+  without a screen slot, and later look/background edits. Retention never
+  needs or starts a missing capture.
+- `sceneKeepsCapture` judges the layout, including a scene that owns a
+  screen its current orientation doesn't draw. Source selection and the
+  working app stay intact. Native preview returns early for every
+  no-screen layout; explicit Off still takes its stop path.
+- Change screen… → No screen on the scene on stream now uses the Sources
+  picker's `buildCaptureSources(..., undefined)` and
+  `switchSourceDeviceLive`, then sets Camera only if needed. The idle picker
+  updates its ref before returning so the chained layout sees Off before
+  React flushes. This corrects S7's old explicit-choice retention behavior,
+  as the S9 brief requires, and clears the picker's stand-in wishes too.
+- Provider regressions cover idle/live switches, running/absent owners,
+  no renderer stop/source switch, and explicit No screen omitting retention.
+  The scene-list test covers Change screen… taking the explicit-stop path.
+
+**Remotes and agents (D14)**
+
+- Remote `sceneId` applies a scene. The existing legacy `layoutPreset` path
+  uses `firstSceneWithLayout` and its display-name refusal. `screenId` now
+  uses the Screen picker (display or window), editing the scene on stream
+  with the same source-switch confirmation/refusal. Rust bounds and
+  round-trips screen/layout strings as it already did scene ids.
+- The phone renders only ordered `state.savedScenes`, marked by
+  `activeSavedSceneId`. Layout cards and their name fallback are gone;
+  CSS and key primitives are unchanged. Both Deck Scene actions list scenes.
+  The old action UUID and saved `layoutPreset` still send legacy requests
+  until a scene is chosen; a refusal reaches the existing key alert. Its
+  property inspector now chooses Scene.
+- MCP `list_scenes` returns only `id`, `name`, 1-based `position`, display
+  `key`, screen words `shows`, and `onStream`. Position/custom keys join
+  with a slash; unbound is empty. The lazy publisher builds these field by
+  field: no source object, bundle id, credential, path or image is added.
+  The bounded surface RPC already accepts this shape; its contract now
+  documents the fields.
+- `switch_scene` resolves a scene id first, then a legacy layout against
+  current-orientation scene views, skipping Freeform. It returns the actual
+  matched scene id/name, or `No scene uses {Layout}`. Catalog/schema tests
+  cover inventory and result shapes. Sidekick's planner uses the exact
+  allowlisted inventory function used by `list_scenes`; its regression
+  excludes a stale layout entry alongside two named scenes.
+- ⌘K already had Add scene… from S7 and one item per scene. Visible text
+  now also says `Switch to {name}`; its test lists several scenes in order.
+  No layout-switch items remain. Agents and remote-control docs match.
+
+**Final verification**
+
+Evidence is in `/Users/orcdev/projects/plan-231-run/S9/`. Every completed
+command below has its own log; `final-rust-results.jsonl` and
+`final-js-results.jsonl` record commands, timestamps and exit status as each
+finishes. `final-changed-files.json` lists all 30 Part B files by absolute
+path. The initial Shadscan audit passed at 27 (baseline/floor 27); its final
+pre-commit repeat is in `final-shadscan.json`.
+
+- `pnpm typecheck`, `pnpm lint`: PASS on final source code
+  (`typecheck-complete.log`, `lint-complete.log`). This resume changed
+  documentation only.
+- `pnpm --filter @videorc/desktop test --maxWorkers=2 --minWorkers=1`:
+  PASS, 706 files, 8,256 passed / 1 skipped, 308.77 s
+  (`final-desktop.log`). No quota-toast or cloud-resume flake occurred.
+- `pnpm --filter @videorc/streamdeck-plugin test`: PASS, 34 tests,
+  including admitted legacy requests waiting for mapped success or renderer
+  refusal (`final-plugin.log`). Plugin `typecheck`: PASS.
+- Rust: all commands passed in ONE foreground build-slot hold, with
+  `VIDEORC_SMOKE_BUILD_SLOT_WAIT_MS=7200000 CARGO_BUILD_JOBS=2`:
+  `cargo test -p videorc-backend --bin videorc-backend --no-run` (21m17s),
+  then `remote_control::tests` (17 passed), `agent_look::tests` (12),
+  `agent_tools::tests` (15), `buddy_act::tests` (23),
+  `cargo clippy -p videorc-backend --all-targets -- -D warnings` (2m54s),
+  and `cargo fmt --check --all`. Total targeted tests: 67 passed.
+  Logs: `final-rust-slot.log`, `final-rust-{compile,remote-control,agent-look,agent-tools,buddy-act,clippy,fmt}.log`.
+- `pnpm build`: PASS (`final-build.log`). `pnpm check:renderer-assets`:
+  inherited S2 FAIL; cap unchanged (`final-renderer-budget.log`).
+  S8: 2,378,551 raw / 489,148 gzip; final S9: 2,379,208 raw / 489,317 gzip
+  (+657 / +169). Cap: 2,365,000 / 487,000. Remote/inventory logic remains
+  lazy; D18's request builder and ref synchronization are eager. No cap raise.
+- Focused coverage also passed: 9 files / 170 tests, the added catalog
+  regression (12), provider S9 (1), D18 (2), and scene neighbors (82).
+- Prettier on all touched files and `git diff --check`: PASS. The final
+  commit audit enforces the unchanged Shadscan floor 27.
+
+**Deviations and visual evidence**
+
+No LAN route/event, credential, registry or smoke script changed.
+`CLAUDE.md` is absent in this worktree; the briefs, plan and AGENTS.md apply.
+Earlier long runs were interrupted by T3 restarts or held by the live guard;
+those results are not counted as passes above. The final Rust hold completed
+without interruption. The earlier `pnpm clean:worktrees --apply` kept all
+67 worktrees (none eligible); this resume had 77 GiB free.
+
+Light/dark capture attempts could not produce PNGs: the initial standard
+runner waited on the Cargo target lock; retries reused the unchanged native
+addon through the same isolated launcher and capture runner, preserving
+host guards, but timed out on memory pressure before an app launched.
+The final attempt is checkpointed in `final-capture-result.json` and
+`final-capture.log`. Both-theme visual acceptance remains owed in S11.
+No owned app or capture process remains from these attempts.
+
+**S11 handoff** (heavy smokes deliberately deferred by the brief)
+
+- `smoke:remote-control`, `scripts/smoke-remote-control-app.mjs`: lines
+  205–232 should assert the matched scene id as well as layout for a legacy
+  request; debounce stays. Lines 528–537 currently await
+  `activeSavedSceneId === null` after a layout edit: that same scene stays
+  on. Keep the exact `savedScenes` `id,name` allowlist at 518–524. Add a
+  screenId pick editing that scene and a layout refusal after its last
+  matching scene changes layout. Scene-id ACK/state checks at 538–555 stay.
+  Discovery, credentials and intent allowlists are unchanged.
+- `smoke:agent-mcp`, `scripts/smoke-agent-mcp-app.mjs`: lines 636–640 must
+  use `onStream`, not `active`, and named scene ids, not `kind: layout`.
+  Check inventory `id,name,position,key,shows,onStream`. Lines 690–693 must
+  expect the actual matched scene id for legacy `screen-only`; compute it
+  from the prepared library rather than hard-coding the layout id (a fresh
+  unchanged profile normally maps to `default-screen-only`). Test a listed
+  id and no matching layout too. The return at 1262 and legacy request at
+  1310 must use the new inventory. `get_status.scene` retains compatibility
+  `kind: saved`/`modified`; `switch_scene.scene` is id/name only. Tool names
+  and allowlists are unchanged.
+- Run deferred `smoke:remote-lan` for phone inventory, `smoke:buddy-act` and
+  unchanged `smoke:buddy-commands` for planner vocabulary, plus S11's
+  recording/preview gates and both-theme captures.
+- D18 acceptance must prove the retained capture generation, Camera only →
+  app swap in place, no missing-owner start, and explicit No screen
+  retirement, idle/live. Check a no-screen 9:16 scene and later look edits.
+  Unit mocks do not prove native timing or artifacts. Screen ISO policy is
+  untouched; the renderer-budget overage remains the inherited owner call.
+
+### Review fixes (2026-11-16)
+
+The independent review's nine findings (2 high, 6 medium, 1 low), all
+confirmed by reading the code path and fixed. Each has a regression test that
+fails without the fix: the six provider tests named "review #" failed with
+the renderer sources stashed and pass with them; the component, unit,
+contract and plugin tests below are new or changed for the new behaviour.
+
+- **#1 (high), a kept capture under another scene's identity.** Fixed.
+  - `sceneKeepsCapture` and `sceneDrawsScreen` (`lib/scene-studio.ts`) judge
+    every leg that is on: the program, plus the scene's 9:16 layout while a
+    vertical stream is armed or live beside a 16:9 studio
+    (`sceneLegLayouts`). A scene whose vertical leg draws a screen goes on
+    with its own screen.
+  - Backend: a live layout request may carry `verticalLegScreen: true`
+    (contract, `protocol.rs`, fixture `verticalLeg`). The selected screen is
+    then needed as if the program composed it: started or switched to before
+    the commit (warm), and never retired. It is live only; the preview route
+    ignores it and the TS contract refuses it there. Without it a program
+    with no screen could never start the screen its vertical leg draws.
+  - `retainScreen` is sent only when the capture target doesn't change: a
+    capture kept running is never another screen than the selection.
+  - A layout that starts drawing a screen on the scene on stream while the
+    capture is one another scene left (`sceneCaptureIsBorrowed`) puts the
+    scene on again with its own screen in that layout, in one switch
+    (`applySavedSceneResult`'s new `layout` option, saved into the scene once
+    it lands). The vertical leg's case (a 9:16 layout edited, a vertical
+    stream armed since) does the same from an effect, and holds the leg send
+    until then (`verticalLegBorrowsScreen`).
+  - `sceneEditAutosave` no longer adopts the kept capture into a scene that
+    shows none ("takes the screen on stream" is gone).
+  - Tests: provider "a scene whose vertical leg draws its screen goes on with
+    its own screen (review #1)", "a layout that starts drawing a screen shows
+    the scene's own, never a kept one (review #1, #4)"; `scene-studio.test.ts`
+    (legs, borrowed, `sameCaptureTarget`, no adopt); Rust
+    `vertical_leg_screen_demands_the_selected_screen_only`,
+    `vertical_leg_screen_keeps_the_running_selected_screen_through_retirement`,
+    `vertical_leg_screen_wire_contract_accepts_only_true`; contract
+    "accepts verticalLegScreen true on live only".
+- **#2 (high), delete while switching.** Fixed. A scene is "going on stream"
+  from the click until its last transaction settles (`holdSceneGoingOn`, a
+  hold per apply and per transaction through the new `onSettled`), and while
+  it is the backend's latest commit not yet proven on screen.
+  `canDeleteScene` takes `goingOn` and refuses with "This scene is going on
+  stream. Try again in a moment."; the provider checks it before and after
+  D16's switch, and ⋯ → Delete is off for `savedScenePendingId` with that
+  reason. `applyLayoutTransactionState` never publishes a scene the library
+  no longer has: the scene on stream stays (else the first) and goes on
+  again. Tests: provider "refuses to delete a scene while its switch is
+  pending or unproven (review #2)" (a held source, then a committed switch
+  whose preview proof lags); `scene-list.test.ts` "turns Delete off for the
+  scene that is switching, saying why"; `scene-studio.test.ts` "a scene going
+  on stream stays until its switch is over". The existence recheck has no
+  test of its own: the refusals keep it from being reached.
+- **#3 (medium), a remote scene and screen together.** Fixed. The executor
+  resolves the screen first, then makes one switch to the named scene (or the
+  legacy layout's scene) carrying it (`shows`); the scene keeps it once the
+  switch lands. No Screen pick runs afterwards. Tests: provider "a remote
+  sceneId with a screenId puts that scene on with that screen (review #3)"
+  (with lagging preview proof); `remote.test.ts` "a remote sceneId with a
+  screenId switches to that scene with that screen (D2)".
+- **#4 (medium), the Scene page's Layout bypassed D19.** Fixed. The Scene
+  page uses Studio's `layoutAsksForScreen` and Change screen… (`forLayout`,
+  through its own `useSceneDialogs`); Cancel keeps the layout, and its screen
+  layouts stay enabled for a scene that shows none so D19 can ask. Anything
+  else that asks for a screen layout on a scene that shows none (an agent,
+  a smoke's `layout()`, Freeform) is refused: "“Camera only” shows no
+  screen. Choose one with Change screen… first." Change screen… on the
+  scene on stream now writes a display or window into the scene at once,
+  idle and live, so D19's layout finds it. Tests: provider "review #1, #4";
+  `scene-list.test.ts` (Change screen… writes before the switch).
+- **#5 (medium), an interrupted shortcut migration.** Fixed. The migrated
+  library stores `pendingShortcuts` (in the same one `setItem`); every launch
+  that finds it saves those keys into the settings again (the library is
+  never made again), and `settleShortcuts` drops it once settings holding
+  them are stored. Every library write keeps it; a failed settle keeps it
+  for the next launch. Tests: `use-scenes.test.ts` (replay, settle, edits and
+  a failed settle keep it); provider "replays a shortcut migration whose
+  settings were never stored (review #5)".
+- **#6 (medium), a no-screen scene blocked by its closed app.** Fixed. App
+  state (cards, rows, keys), Next/Previous eligibility and the switch's app
+  resolution are gated on screen demand across the legs that are on: a scene
+  no leg draws a screen for never asks for its app's window. Test: provider
+  "never blocks a scene that shows no screen on its closed app (review #6)".
+- **#7 (medium), keyboard reorder of unavailable scenes.** Fixed without
+  touching the registry components: the ⌥ arrow handler sits on the card's
+  and the row's own element and answers keys pressed on the scene's button
+  or, while it's off, on the focusable `DisabledReason` around it (never the
+  ⋯). The moved scene's focus goes back to the reason. The hover tooltip
+  stays. Tests: "moves a card whose app isn't open with ⌥← and ⌥→, from its
+  reason", "moves a row whose app isn't open with ⌥↑ and ⌥↓, from its reason".
+- **#8 (medium), legacy Stream Deck key titles.** Fixed. An old key without a
+  scene names its own layout on two lines ("Screen only", "Camera only"),
+  never the scene on stream (`sceneActionTitle`). Test: "an old Scene key is titled by
+  its own layout until a scene is chosen".
+- **#9 (low), the inspector's words.** Both hints read "Scenes from Videorc,
+  in their order." Test: "the Scene inspector hints say scenes from Videorc".
+
+`docs/ui-copy.md` lists the two new refusals.
+
+**Numbers:** `pnpm typecheck` and `pnpm lint` green (one warning, a
+`useMemo` dependency in main's #1394 talk-show code, not this change);
+Prettier on the touched files, `git diff --check` and `cargo fmt --check
+--all` green. Full desktop run (`--maxWorkers=2 --minWorkers=1`): 709 files,
+8,303 passed, 1 skipped. One earlier full run, with clippy compiling beside
+it, failed once on "starts one clean cut when a recording finalizes with the
+switch on" (a toast timing, nothing to do with scenes); it passed three
+times alone and in the next full run. The provider file alone: 225 passed.
+Stream Deck plugin: 36 tests and its typecheck green. Rust, in one build-slot
+hold (`CARGO_BUILD_JOBS=2`): `cargo test --no-run` 30 min, then
+`live_layout::tests` 75 passed (with `vertical_leg_screen` 3 and
+`retain_screen` 4). `cargo clippy -p videorc-backend --all-targets -D
+warnings` fails only on dead code in `live_status.rs`: main's #1397 adds `mod
+live_status;` with no caller outside its tests, on `8620b5fc2` too; the same
+clippy with `-A dead_code` is green (1 min, the same hold as the binary build).
+
+|                        |       raw |    gzip |
+| ---------------------- | --------: | ------: |
+| Before (`6cccad49e`)   | 2,380,044 | 489,517 |
+| After the review fixes | 2,389,534 | 491,625 |
+| Cap                    | 2,365,000 | 487,000 |
+
++9,490 raw and +2,108 gzip in the first paint. It is the provider's switch,
+retention, delete and migration logic: it runs synchronously on every switch,
+layout edit and render, so none of it can wait on a lazy chunk without
+changing the switch's ordering (a key's walk and a canvas edit in the same
+turn rely on it). The UI parts (#4, #7, #8, #9) are in lazy chunks or the
+plugin. The cap is untouched; the overage is the owner's call, as before.
+
+**Screenshots** (light and dark, the dev app on an isolated profile with the
+backend built from this commit; capture script `FIX/scratch/capture-fix.mjs`,
+not committed) in `/Users/orcdev/projects/plan-231-run/FIX/shots/`:
+`videorc-ui-scene-page-camera-only-{light,dark}` (Camera only on stream, its
+screen layouts enabled on the Scene page) and `videorc-ui-scene-page-d19-`
+(Screen + camera chosen there opens Change screen… with D19's line; Cancel
+kept Camera only). The other fixes have no new look: the ⋯ item turning off
+uses the menu's existing disabled reason.
+
+**What S11 must know**
+
+- Smokes that set a screen layout with `layout()` while a scene that shows
+  no screen is on stream are now refused (D19): choose a screen first.
+- D18's acceptance now includes a dual stream: a scene with Camera only on
+  the program and its screen on the vertical leg must start or switch to its
+  own screen (`verticalLegScreen`), and an edit of its 9:16 layout must put
+  its own screen on, never the kept one.
+- The backend change is small but is a live capture path: S11's
+  `smoke:multistream:vertical` and the recording-studio gates cover it.
+
+### S11. Smokes and acceptance (2026-11-16)
+
+The orchestrator cleared the vertical-only STOP: all seven flagged frames
+were before the cut, in a correct full-frame Camera-only placeholder. That
+picture has no inset/border mark. Only the second verticalOnly row's
+`fromLayoutMark` changes to false, with a comment; every assertion and the
+plan's zero-black/zero-wrong-layout intent remain unchanged. Both requested
+post-ruling runs pass this case. Original evidence remains in S11/STOP.md.
+
+Switch timing is report-only under the explicit A/B ruling, not a new
+relative bound. Matched main/branch app p50/p95: 189/229 versus 208/241 ms,
+load 9.7–9.9; +12 ms (+5.2%) is within host noise, and main also misses
+150 ms. Cuts, pixel integrity, Follow and privacy remain hard gates.
+
+Scene-model smokes now cover v1 migration, app additions at the end, order
+and real position-key actions, dual legs, retained Camera-only capture and
+rapid keys. Seed/remote/MCP/scene-preset expectations follow the new model;
+assertion changes are listed individually in S11/assertion-changes.md.
+Password-manager setup uses the real screen picker and checks scene-owned
+display selection. No privacy product fix; auto-hide passes at 3/2 ms in the
+requested runs, with show-on-leave and manual-hide preservation.
+
+The native window probe exposed a separate source-ownership mutation:
+pending source confirmations could save the next window into the departing
+scene; a late reload could checkpoint under a newer owner. Product fences
+and two red→green provider tests are a separate fix commit. The full probe
+passes 20 idle + 20 recording + 20 layout-changing cuts: 5,103 decoded frames,
+zero black/other/wrong-layout. Recording p50/p95 95/153 ms, load 11.3→7.8;
+layout 118/158 ms, load 7.9→7.1. Main's focused window baseline passes 2/2.
+
+The two requested final smart-scenes runs are FAIL, not waived: app cuts
+20/20 at 264/323 ms (load 9.3→11.2) and 194/260 ms (10.0→9.3), all clean;
+Camera return fails on native SDK fallback at 0/10 and 6/10 returns. Main
+also has 250 ms SDK timeouts, but that does not prove every failure's cause
+or turn D18 into a pass. Follow/Screen ISO's single-flash inference is
+identical to main's; run 1 fails it, run 2 passes Follow at 608/542 ms and
+all four hide outputs at 97/97 frosted samples. No assertion was relaxed.
+
+Typecheck, lint, 43 focused Node tests, full desktop (709 files, 8,305 pass,
+one skip), build, scene-presets, scene-item-drag, remote-control, layout/
+source loop and both multistream vertical gates pass. Rust targeted tests
+212/212, format and clippy with -A dead_code pass; plain clippy is main
+#1397's dead-code red. No full Rust suite, per owner. Bundled LGPL FFmpeg
+provisioning and pinned parity pass. Owner cap commit 23c6a3ca0 is untouched;
+final renderer gate passes at 2,389,940 raw/491,709 gzip, with 7,060/1,291
+headroom (+406/+84 over c9c2e1d24). Six light/dark screenshots were reviewed.
+
+Final recording-studio results and the complete gate/log table are in
+`docs/acceptance/plan-231-scenes.md` and the immediately checkpointed
+`/Users/orcdev/projects/plan-231-run/S11/results.md`. Windows clean-install
+keys, hide-screen/CI, physical camera/microphone device acceptance and owner
+hands-on checks remain owed; S10's HUD is separate. No push or rebase.

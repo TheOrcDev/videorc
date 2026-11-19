@@ -1,52 +1,29 @@
-import {
-  galleryPresetIsActive,
-  orientationSwitchPreset,
-  sceneGalleryReason,
-  sceneSourceGaps,
-  usingVisualSources
-} from '@/lib/scene-presets'
-import { ShortcutKeys } from '@/components/ui/shortcut-keys'
-import { DisplayIcon, MobileIcon } from '@/components/icons'
-import { lazy, Suspense, type ReactElement } from 'react'
-const ScenePresetControls = lazy(() => import('@/components/scene-presets'))
+import { CameraIcon } from '@/components/icons'
+import { lazy, Suspense, type ReactElement, type ReactNode } from 'react'
+const ScenesSection = lazy(() => import('@/components/scene-presets'))
 
 import { PanelSection } from '@/components/panel-section'
-import { SceneSwitchPending, SceneSwitchStatus } from '@/components/scene/scene-switch-status'
-import { SectionLabel } from '@/components/section-label'
-import { SceneCard, SceneGalleryReason } from '@/components/studio/scene-card'
-import { Button } from '@/components/ui/button'
-import { DisabledReason } from '@/components/ui/disabled-reason'
 import { SegmentedControl, type SegmentedControlOption } from '@/components/ui/segmented-control'
-import { useEditScene } from '@/hooks/use-edit-scene'
+import { Skeleton } from '@/components/ui/skeleton'
 import { useStudioCore } from '@/hooks/use-studio'
 import type { LayoutPreset, VerticalScreenFraming } from '@/lib/backend'
-import {
-  layoutPresetOrientation,
-  studioModeTogglePreset,
-  type LayoutOrientation
-} from '@/lib/capture'
-import { EDIT_SCENE_LABEL } from '@/lib/edit-scene'
+import { layoutPresetOrientation } from '@/lib/capture'
 import { LAYOUT_PRESET_LABELS } from '@/lib/layout-labels'
-import { openWorkspaceTab } from '@/lib/workspace-navigation'
-import { presetSwitching } from '@/lib/layout-switch-pending'
+import { cn } from '@/lib/utils'
 
-// Built-in layouts and named visual snapshots share the Scenes surface.
-// The gallery is MODE-SCOPED: horizontal and vertical are two disjoint scene
-// vocabularies, and the orientation toggle in the header is the only way to
-// cross between them (off-air only — the canvas flips with the mode).
+// Plan 231 D8: Studio's Scenes section is the home of scenes. Its header, the
+// cards, their reorder and the scene on stream's own fields (Screen, Layout,
+// Fill or Fit, Vertical stream layout) are one lazy chunk
+// (`components/scene-presets.tsx`), loaded right after this below-the-fold
+// row: none of it is in the Studio's first paint. Both looks share it; with
+// Retro LCD the fields sit on a screen (plan 197).
 // Names come from the one layout table (plan 174 S1.4, V-X3).
 const scene = (id: LayoutPreset): { id: LayoutPreset; label: string } => ({
   id,
   label: LAYOUT_PRESET_LABELS[id]
 })
 
-const HORIZONTAL_SCENES: { id: LayoutPreset; label: string }[] = [
-  scene('screen-camera'),
-  scene('screen-only'),
-  scene('camera-only'),
-  scene('side-by-side')
-]
-
+/** The 9:16 layouts, for the Vertical stream panel. */
 export const VERTICAL_SCENES: { id: LayoutPreset; label: string }[] = [
   scene('vertical-camera-top'),
   scene('vertical-camera-bottom'),
@@ -56,175 +33,27 @@ export const VERTICAL_SCENES: { id: LayoutPreset; label: string }[] = [
   scene('vertical-camera-only')
 ]
 
-const STUDIO_ORIENTATION_OPTIONS: SegmentedControlOption<LayoutOrientation>[] = [
-  {
-    value: 'horizontal',
-    label: <DisplayIcon />,
-    'aria-label': 'Horizontal studio (16:9)',
-    tooltip: 'Horizontal · 16:9'
-  },
-  {
-    value: 'vertical',
-    label: <MobileIcon />,
-    'aria-label': 'Vertical studio (9:16)',
-    tooltip: 'Vertical · 9:16'
-  }
-]
-
 const SCREEN_FRAMING_OPTIONS: SegmentedControlOption<VerticalScreenFraming>[] = [
   { value: 'fill', label: 'Fill' },
   { value: 'fit', label: 'Fit' }
 ]
 
 export function ScenesGallery(): ReactElement {
-  const {
-    captureConfig,
-    applyCameraPreset,
-    layoutSwitchPending,
-    isSessionActive,
-    activeSavedSceneId,
-    deviceList,
-    settings,
-    runtimeInfo
-  } = useStudioCore()
-  const editScene = useEditScene()
-  const activePreset = captureConfig.layout.layoutPreset
-  const mode = layoutPresetOrientation(activePreset)
-  const scenes = mode === 'vertical' ? VERTICAL_SCENES : HORIZONTAL_SCENES
-
-  // Entering a mode re-applies its remembered scene; the orientation⇄canvas
-  // coupling in applyCameraPreset flips the output profile alongside it.
-  // What each scene needs that the current sources lack (plan 174 S3.3).
-  const cards = scenes.map((preset) => ({
-    preset,
-    gaps: sceneSourceGaps(
-      {
-        layout: { ...captureConfig.layout, layoutPreset: preset.id, arrangementMode: 'preset' },
-        sources: usingVisualSources(captureConfig.sources),
-        background: null
-      },
-      deviceList.devices
-    )
-  }))
-  const reason = sceneGalleryReason(
-    cards.map(({ preset, gaps }) => ({ label: preset.label, gaps }))
-  )
-
-  const switchMode = (target: LayoutOrientation): void => {
-    if (target === mode) {
-      return
-    }
-    const targetScenes = target === 'vertical' ? VERTICAL_SCENES : HORIZONTAL_SCENES
-    const usable = (layoutPreset: LayoutPreset): boolean =>
-      sceneSourceGaps(
-        {
-          layout: { ...captureConfig.layout, layoutPreset, arrangementMode: 'preset' },
-          sources: usingVisualSources(captureConfig.sources),
-          background: null
-        },
-        deviceList.devices
-      ).length === 0
-    applyCameraPreset({
-      layoutPreset: orientationSwitchPreset(
-        studioModeTogglePreset(target, captureConfig),
-        targetScenes.map((scene) => scene.id),
-        usable
-      )
-    })
-  }
-
+  const { settings } = useStudioCore()
+  // Settings → General → Retro LCD (plan 197): the same section in its look.
+  const look = settings.retroLcdStudio === true ? 'lcd' : 'default'
   return (
-    <PanelSection
-      title="Scenes"
-      description={
-        mode === 'vertical'
-          ? 'Click a scene to put it on the 9:16 stream.'
-          : 'Click a scene to put it on stream.'
-      }
-      action={
-        <div className="flex items-center gap-1.5">
-          {/* The mode toggle changes the canvas orientation, and the encoder
-              canvas is fixed at session start — disabled while live (the
-              backend refuses cross-orientation scene switches too). The
-              gallery is in the EAGER Studio chunk: SegmentedControl has no
-              Tabs primitive, so it costs the initial asset budget nothing. A switch
-              restarts the canvas, so arrows only move focus (manual). */}
-          <DisabledReason
-            reason={
-              isSessionActive
-                ? 'Locked while you’re recording or live. Stop to switch orientation.'
-                : null
-            }
-          >
-            <SegmentedControl
-              activationMode="manual"
-              aria-label="Studio orientation"
-              disabled={isSessionActive}
-              options={STUDIO_ORIENTATION_OPTIONS}
-              size="sm"
-              value={mode}
-              onValueChange={switchMode}
-            />
-          </DisabledReason>
-          {/* Plan 215 D4: the same Edit scene as the Scene page's and ⌘K's. */}
-          <Button variant="ghost" onClick={editScene}>
-            {EDIT_SCENE_LABEL}
-          </Button>
-        </div>
-      }
-    >
-      {/* Plan 210 D6: your saved scenes first, in their order, then the
-          layouts, each under its heading. */}
-      <Suspense fallback={null}>
-        <ScenePresetControls />
-      </Suspense>
-      <SectionLabel className="px-1">Layouts</SectionLabel>
-      <div className="grid gap-3 [grid-template-columns:repeat(auto-fill,minmax(104px,1fr))]">
-        {cards.map(({ preset, gaps }) => {
-          const active = galleryPresetIsActive(captureConfig.layout, preset.id, activeSavedSceneId)
-          const shortcut = settings.globalShortcuts?.layouts?.[preset.id]
-          return (
-            <SceneCard
-              key={preset.id}
-              data-scene-preset={preset.id}
-              disabled={gaps.length > 0}
-              label={preset.label}
-              meta={
-                presetSwitching(layoutSwitchPending, preset.id) ? (
-                  <SceneSwitchPending />
-                ) : shortcut ? (
-                  <ShortcutKeys accelerator={shortcut} platform={runtimeInfo?.platform} />
-                ) : undefined
-              }
-              selected={active}
-              thumb={
-                <LayoutThumb
-                  framing={captureConfig.layout.verticalScreenFraming}
-                  preset={preset.id}
-                />
-              }
-              onSelect={() => applyCameraPreset({ layoutPreset: preset.id })}
-            />
-          )
-        })}
-      </div>
-      {/* Issue #1275: what a slow switch is waiting for. */}
-      <SceneSwitchStatus />
-      {/* Why some scenes can't be chosen, once, under the gallery (B-20). */}
-      <SceneGalleryReason
-        action={
-          <Button size="xs" variant="ghost" onClick={() => openWorkspaceTab('sources')}>
-            Open Sources
-          </Button>
-        }
-        reason={reason}
-      />
-      {mode === 'vertical' ? (
-        <ScreenFramingControl
-          value={captureConfig.layout.verticalScreenFraming}
-          onChange={(verticalScreenFraming) => applyCameraPreset({ verticalScreenFraming })}
-        />
-      ) : null}
+    <Suspense fallback={<ScenesSectionFallback />}>
+      <ScenesSection look={look} />
+    </Suspense>
+  )
+}
+
+/** The section's room while its chunk loads, so the page under it never jumps far. */
+function ScenesSectionFallback(): ReactElement {
+  return (
+    <PanelSection title="Scenes">
+      <Skeleton className="h-80" />
     </PanelSection>
   )
 }
@@ -239,10 +68,16 @@ export function ScenesGallery(): ReactElement {
 export function ScreenFramingControl({
   value,
   orientation = 'vertical',
+  label = 'Screen',
+  disabledReason = null,
   onChange
 }: {
   value: VerticalScreenFraming
   orientation?: 'vertical' | 'horizontal'
+  /** The visible name ("Framing" beside Studio's Screen field, plan 231 S6). */
+  label?: string
+  /** Why it can't change now; it is disabled while there is one. */
+  disabledReason?: string | null
   onChange: (value: VerticalScreenFraming) => void
 }): ReactElement {
   return (
@@ -252,7 +87,7 @@ export function ScreenFramingControl({
       data-videorc-screen-framing={orientation}
     >
       <div className="flex min-w-0 flex-col gap-0.5">
-        <span className="text-sm font-medium">Screen</span>
+        <span className="text-sm font-medium">{label}</span>
         <span className="text-xs text-muted-foreground">
           {orientation === 'horizontal'
             ? value === 'fit'
@@ -266,10 +101,69 @@ export function ScreenFramingControl({
       <SegmentedControl
         aria-label="Screen framing"
         className="shrink-0"
+        disabled={disabledReason !== null}
+        disabledReason={disabledReason}
         options={SCREEN_FRAMING_OPTIONS}
         value={value}
         onValueChange={onChange}
       />
+    </div>
+  )
+}
+
+/**
+ * Where a layout draws the screen (plan 231 D7): the scene's still picture
+ * when it has one, else what it shows as a glyph (an app's icon, a display),
+ * else the empty area. Never the live program.
+ */
+function ThumbScreen({
+  className,
+  picture,
+  glyph
+}: {
+  className: string
+  picture?: string
+  glyph?: ReactNode
+}): ReactElement {
+  return (
+    <div
+      className={cn('absolute overflow-hidden bg-foreground/10', className)}
+      data-picture={picture ? '' : undefined}
+      data-slot="layout-thumb-screen"
+    >
+      {picture ? (
+        <img alt="" className="size-full object-cover" draggable={false} src={picture} />
+      ) : glyph ? (
+        <span className="flex size-full items-center justify-center">{glyph}</span>
+      ) : null}
+    </div>
+  )
+}
+
+/** Where a layout draws the camera: a neutral plate, opaque over a picture (D7). */
+function ThumbCamera({
+  className,
+  strong = false,
+  glyph = true
+}: {
+  className: string
+  /** At icon size the plate needs more contrast to read. */
+  strong?: boolean
+  /** The camera's glyph on the plate; too small to read at icon size. */
+  glyph?: boolean
+}): ReactElement {
+  return (
+    <div
+      className={cn('absolute overflow-hidden bg-glass-solid', className)}
+      data-slot="layout-thumb-camera"
+    >
+      <span className={cn('absolute inset-0', strong ? 'bg-foreground/55' : 'bg-foreground/25')} />
+      {/* At card size the plate says what it stands for. */}
+      {glyph ? (
+        <span className="absolute inset-0 flex items-center justify-center">
+          <CameraIcon aria-hidden className="size-3.5 max-h-[60%] text-foreground/45" />
+        </span>
+      ) : null}
     </div>
   )
 }
@@ -279,94 +173,162 @@ export function ScreenFramingControl({
 // Vertical scenes draw on a portrait frame so the whole gallery reads 9:16.
 export function LayoutThumb({
   preset,
-  framing = 'fill'
+  framing = 'fill',
+  picture,
+  glyph,
+  compact = false,
+  className
 }: {
   preset: LayoutPreset
   /** Vertical scenes only: draws the Fit geometry (geometry truth, like the
    *  bands the backend composes: a 16:9 screen is ~32% of the 9:16 canvas). */
   framing?: VerticalScreenFraming
+  /** A still of the scene's screen for the screen area (plan 231 D7, `sources.scene_pictures`). */
+  picture?: string
+  /** Drawn in the screen area while there is no picture: the app's icon, a display glyph. */
+  glyph?: ReactNode
+  /** A diagram at icon size (a choice in the Layout field): no glyphs; a 16:9 one has thinner insets. */
+  compact?: boolean
+  /** Sizing only: a 9:16 frame is 3/5 of its box's width unless told (`h-full w-auto` in a 16:9 well). */
+  className?: string
 }): ReactElement {
-  if (layoutPresetOrientation(preset) === 'vertical' && framing === 'fit') {
-    return (
-      <div className="relative mx-auto aspect-[9/16] w-3/5 overflow-hidden rounded-chip border bg-gradient-to-br from-muted/40 to-muted/70">
-        {preset === 'vertical-camera-top' ? (
-          <>
-            <div className="absolute inset-x-1 top-1 h-[62%] rounded-[2px] bg-foreground/30" />
-            <div className="absolute inset-x-1 bottom-1 h-[30%] rounded-[2px] bg-foreground/10" />
-          </>
-        ) : null}
-        {preset === 'vertical-camera-bottom' || preset === 'vertical-split' ? (
-          <>
-            <div className="absolute inset-x-1 top-1 h-[30%] rounded-[2px] bg-foreground/10" />
-            <div className="absolute inset-x-1 bottom-1 h-[62%] rounded-[2px] bg-foreground/30" />
-          </>
-        ) : null}
-        {preset === 'vertical-screen-camera' ? (
-          <>
-            <div className="absolute inset-x-1 top-[35%] h-[30%] rounded-[2px] bg-foreground/10" />
-            <div className="absolute right-1.5 bottom-1.5 h-[13%] w-[38%] rounded-[2px] border border-background/60 bg-foreground/30" />
-          </>
-        ) : null}
-        {preset === 'vertical-screen-only' ? (
-          <div className="absolute inset-x-1 top-[35%] h-[30%] rounded-[2px] bg-foreground/10" />
-        ) : null}
-        {preset === 'vertical-camera-only' ? (
-          <div className="absolute inset-1 rounded-[2px] bg-foreground/30" />
-        ) : null}
-      </div>
-    )
-  }
+  const screen = { picture, glyph: compact ? undefined : glyph }
+  const plate = { glyph: !compact, strong: compact }
   if (layoutPresetOrientation(preset) === 'vertical') {
+    // At icon size the insets thin to a hairline and the areas get stronger
+    // fills, as the 16:9 diagram does.
+    const v = compact
+      ? {
+          x: 'inset-x-[1.5px]',
+          top: 'top-[1.5px]',
+          bottom: 'bottom-[1.5px]',
+          all: 'inset-[1.5px]',
+          pip: 'right-[2px] bottom-[2px]',
+          round: 'rounded-[1px]',
+          fill: 'bg-foreground/25'
+        }
+      : {
+          x: 'inset-x-1',
+          top: 'top-1',
+          bottom: 'bottom-1',
+          all: 'inset-1',
+          pip: 'right-1.5 bottom-1.5',
+          round: 'rounded-[2px]',
+          fill: undefined
+        }
+    // Fit: the screen keeps its shape (a 16:9 screen is about 30% of the 9:16
+    // canvas) and the camera takes the rest; Fill: the bands the backend composes.
+    const fit = framing === 'fit'
     return (
-      <div className="relative mx-auto aspect-[9/16] w-3/5 overflow-hidden rounded-chip border bg-gradient-to-br from-muted/40 to-muted/70">
+      <div
+        className={cn(
+          'relative mx-auto aspect-[9/16] w-3/5 overflow-hidden rounded-chip border bg-gradient-to-br from-muted/40 to-muted/70',
+          compact && 'border-foreground/25',
+          className
+        )}
+      >
         {preset === 'vertical-camera-top' ? (
           <>
-            <div className="absolute inset-x-1 top-1 h-[37%] rounded-[2px] bg-foreground/30" />
-            <div className="absolute inset-x-1 bottom-1 h-[55%] rounded-[2px] bg-foreground/10" />
+            <ThumbCamera
+              className={cn(v.x, v.top, v.round, fit ? 'h-[62%]' : 'h-[37%]')}
+              {...plate}
+            />
+            <ThumbScreen
+              className={cn(v.x, v.bottom, v.round, v.fill, fit ? 'h-[30%]' : 'h-[55%]')}
+              {...screen}
+            />
           </>
         ) : null}
-        {preset === 'vertical-camera-bottom' ? (
+        {preset === 'vertical-camera-bottom' || (fit && preset === 'vertical-split') ? (
           <>
-            <div className="absolute inset-x-1 top-1 h-[55%] rounded-[2px] bg-foreground/10" />
-            <div className="absolute inset-x-1 bottom-1 h-[37%] rounded-[2px] bg-foreground/30" />
+            <ThumbScreen
+              className={cn(v.x, v.top, v.round, v.fill, fit ? 'h-[30%]' : 'h-[55%]')}
+              {...screen}
+            />
+            <ThumbCamera
+              className={cn(v.x, v.bottom, v.round, fit ? 'h-[62%]' : 'h-[37%]')}
+              {...plate}
+            />
           </>
         ) : null}
-        {preset === 'vertical-split' ? (
+        {!fit && preset === 'vertical-split' ? (
           <>
-            <div className="absolute inset-x-1 top-1 h-[46%] rounded-[2px] bg-foreground/10" />
-            <div className="absolute inset-x-1 bottom-1 h-[46%] rounded-[2px] bg-foreground/30" />
+            <ThumbScreen className={cn(v.x, v.top, v.round, v.fill, 'h-[46%]')} {...screen} />
+            <ThumbCamera className={cn(v.x, v.bottom, v.round, 'h-[46%]')} {...plate} />
           </>
+        ) : null}
+        {preset === 'vertical-screen-camera' || preset === 'vertical-screen-only' ? (
+          <ThumbScreen
+            className={cn(v.round, v.fill, fit ? cn(v.x, 'top-[35%] h-[30%]') : v.all)}
+            {...screen}
+          />
         ) : null}
         {preset === 'vertical-screen-camera' ? (
-          <>
-            <div className="absolute inset-1 rounded-[2px] bg-foreground/10" />
-            <div className="absolute right-1.5 bottom-1.5 h-[13%] w-[38%] rounded-[2px] border border-background/60 bg-foreground/30" />
-          </>
-        ) : null}
-        {preset === 'vertical-screen-only' ? (
-          <div className="absolute inset-1 rounded-[2px] bg-foreground/10" />
+          <ThumbCamera
+            className={cn(v.pip, v.round, 'h-[13%] w-[38%] border border-background/60')}
+            {...plate}
+          />
         ) : null}
         {preset === 'vertical-camera-only' ? (
-          <div className="absolute inset-1 rounded-[2px] bg-foreground/30" />
+          <ThumbCamera className={cn(v.all, v.round)} {...plate} />
         ) : null}
       </div>
     )
   }
   return (
-    <div className="relative aspect-video w-full overflow-hidden rounded-chip border bg-gradient-to-br from-muted/40 to-muted/70">
+    <div
+      className={cn(
+        'relative aspect-video w-full overflow-hidden border bg-gradient-to-br from-muted/40 to-muted/70',
+        compact ? 'rounded-[3px] border-foreground/25' : 'rounded-chip',
+        className
+      )}
+    >
       {preset === 'screen-only' || preset === 'screen-camera' ? (
-        <div className="absolute inset-1.5 rounded-[3px] bg-foreground/10" />
+        <ThumbScreen
+          className={
+            compact ? 'inset-[2px] rounded-[1px] bg-foreground/25' : 'inset-1.5 rounded-[3px]'
+          }
+          {...screen}
+        />
       ) : null}
       {preset === 'camera-only' ? (
-        <div className="absolute inset-x-1/4 inset-y-1.5 rounded-[3px] bg-foreground/20" />
+        <ThumbCamera
+          className={
+            compact
+              ? 'inset-x-1/4 inset-y-[2px] rounded-[1px]'
+              : 'inset-x-1/4 inset-y-1.5 rounded-[3px]'
+          }
+          {...plate}
+        />
       ) : null}
       {preset === 'screen-camera' ? (
-        <div className="absolute right-1.5 bottom-1.5 h-2/5 w-[30%] rounded-[2px] border border-background/60 bg-foreground/30" />
+        <ThumbCamera
+          className={
+            compact
+              ? 'right-[3px] bottom-[3px] h-1/2 w-[34%] rounded-[1px]'
+              : 'right-1.5 bottom-1.5 h-2/5 w-[30%] rounded-[2px] border border-background/60'
+          }
+          {...plate}
+        />
       ) : null}
       {preset === 'side-by-side' ? (
         <>
-          <div className="absolute inset-y-1.5 left-1.5 w-[44%] rounded-[3px] bg-foreground/10" />
-          <div className="absolute inset-y-1.5 right-1.5 w-[44%] rounded-[3px] bg-foreground/25" />
+          <ThumbScreen
+            className={
+              compact
+                ? 'inset-y-[2px] left-[2px] w-[45%] rounded-[1px] bg-foreground/25'
+                : 'inset-y-1.5 left-1.5 w-[44%] rounded-[3px]'
+            }
+            {...screen}
+          />
+          <ThumbCamera
+            className={
+              compact
+                ? 'inset-y-[2px] right-[2px] w-[45%] rounded-[1px]'
+                : 'inset-y-1.5 right-1.5 w-[44%] rounded-[3px]'
+            }
+            {...plate}
+          />
         </>
       ) : null}
     </div>

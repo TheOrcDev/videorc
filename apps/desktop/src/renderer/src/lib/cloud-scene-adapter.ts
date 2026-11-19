@@ -9,6 +9,7 @@ import type {
 } from '@/lib/backend'
 import { layoutPresetOrientation } from '@/lib/capture'
 import { cloudSceneFromNative } from '@/lib/cloud-scene-native'
+import { sceneExtensionForOrientation } from '@/lib/scene-guest-roles'
 import type {
   PreparedBackgroundAsset,
   RoomSceneCommit,
@@ -146,7 +147,7 @@ export async function applySceneToRoom(
     layout: target.layout,
     background: target.background,
     orientation,
-    extension: target.extension
+    extension: sceneExtensionForOrientation(target.extension, orientation)
   })
   // S14: the scene's own screen or window goes on the room share first, so
   // the screen box shows what the scene names (Follow, an app scene, a

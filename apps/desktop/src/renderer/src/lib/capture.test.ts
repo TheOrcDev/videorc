@@ -35,7 +35,7 @@ import {
   layoutPresetMemoryPatch,
   layoutPresetNeedsCamera,
   layoutPresetOrientation,
-  studioModeTogglePreset,
+  ORIENTATION_DEFAULT_PRESET,
   verticalOrientationVideoPatch,
   verticalTwinVideo,
   layoutPresetNeedsScreen,
@@ -2196,22 +2196,15 @@ describe('per-mode scene memory and the mode toggle', () => {
     })
   })
 
-  it('the toggle re-enters each mode on its remembered scene', () => {
-    const memory = {
-      lastHorizontalPreset: 'camera-only' as const,
-      lastVerticalPreset: 'vertical-split' as const
-    }
-    expect(studioModeTogglePreset('horizontal', memory)).toBe('camera-only')
-    expect(studioModeTogglePreset('vertical', memory)).toBe('vertical-split')
-  })
-
-  it('falls back to the mode default when the memory is cross-class', () => {
-    const swapped = {
-      lastHorizontalPreset: 'vertical-camera-top' as const,
-      lastVerticalPreset: 'screen-camera' as const
-    }
-    expect(studioModeTogglePreset('horizontal', swapped)).toBe('screen-camera')
-    expect(studioModeTogglePreset('vertical', swapped)).toBe('vertical-camera-top')
+  it('the toggle names each orientation by its default layout, never the memory (plan 231 D4)', () => {
+    // The scene on stream goes on in its own layout there; the preset only
+    // names the orientation, and the remembered presets steer nothing.
+    expect(ORIENTATION_DEFAULT_PRESET).toEqual({
+      horizontal: 'screen-camera',
+      vertical: 'vertical-camera-top'
+    })
+    for (const orientation of ['horizontal', 'vertical'] as const)
+      expect(layoutPresetOrientation(ORIENTATION_DEFAULT_PRESET[orientation])).toBe(orientation)
   })
 })
 
@@ -2520,22 +2513,30 @@ describe('freeform arrangement (plan phase 4)', () => {
     ).toEqual({})
   })
 
-  it('the simulcast leg never inherits freeform from the program', () => {
-    const leg = simulcastLegLayout({
-      layout: {
-        ...defaultCaptureConfig.layout,
-        arrangementMode: 'freeform',
-        sourceTransformOverrides: {
-          'source:base': { x: 0.05, y: 0.1, width: 0.6, height: 0.6 }
-        }
-      },
-      lastVerticalPreset: 'vertical-camera-top',
-      simulcastFollowsProgram: false,
-      simulcastScreenFraming: 'fit'
-    })
-
+  it('the simulcast leg never inherits freeform from the program, only from its scene', () => {
+    const freeform = {
+      arrangementMode: 'freeform' as const,
+      sourceTransformOverrides: {
+        'source:base': { x: 0.05, y: 0.1, width: 0.6, height: 0.6 }
+      }
+    }
+    const vertical = {
+      ...defaultCaptureConfig.layout,
+      layoutPreset: 'vertical-camera-top' as const
+    }
+    const leg = simulcastLegLayout(
+      { layouts: { vertical } },
+      { ...defaultCaptureConfig.layout, ...freeform }
+    )
     expect(leg.arrangementMode).toBe('preset')
     expect(leg.sourceTransformOverrides).toEqual({})
+    // A scene arranged by hand in a 9:16 studio streams that arrangement.
+    const arranged = simulcastLegLayout(
+      { layouts: { vertical: { ...vertical, ...freeform } } },
+      defaultCaptureConfig.layout
+    )
+    expect(arranged.arrangementMode).toBe('freeform')
+    expect(arranged.sourceTransformOverrides).toEqual(freeform.sourceTransformOverrides)
   })
 })
 

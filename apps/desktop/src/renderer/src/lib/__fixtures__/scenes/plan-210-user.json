@@ -1,0 +1,221 @@
+{
+  "videorc.scene-presets.v1": {
+    "version": 1,
+    "scenes": [
+      {
+        "id": "5d0c8a4e-figma",
+        "name": "Figma",
+        "createdAt": "2026-10-30T09:00:00.000Z",
+        "updatedAt": "2026-10-30T09:00:00.000Z",
+        "visual": {
+          "layout": {
+            "layoutPreset": "screen-camera",
+            "cameraTransformMode": "preset",
+            "cameraTransform": null,
+            "cameraCorner": "bottom-right",
+            "cameraSize": "medium",
+            "cameraShape": "rectangle",
+            "cameraCornerRadiusPct": 12,
+            "cameraAspect": "source",
+            "cameraChromaKeyEnabled": false,
+            "cameraChromaKeyColor": "#00FF00",
+            "cameraChromaKeySimilarityPct": 40,
+            "cameraChromaKeySmoothnessPct": 8,
+            "cameraChromaKeySpillPct": 10,
+            "cameraMargin": 32,
+            "cameraFit": "fill",
+            "cameraMirror": false,
+            "cameraZoom": 100,
+            "cameraOffsetX": 0,
+            "cameraOffsetY": 0,
+            "sideBySideSplit": "70-30",
+            "sideBySideCameraSide": "right",
+            "verticalScreenFraming": "fill",
+            "horizontalScreenFraming": "fit",
+            "arrangementMode": "preset",
+            "sourceTransformOverrides": {},
+            "sourceVisibility": {
+              "camera": true,
+              "capture": true
+            }
+          },
+          "sources": {
+            "cameraId": "camera:facetime",
+            "cameraName": "FaceTime HD Camera",
+            "cameraOff": false,
+            "captureOff": false,
+            "windowId": "window:4211",
+            "windowName": "Figma – Landing page",
+            "app": {
+              "bundleId": "com.figma.Desktop",
+              "name": "Figma",
+              "follows": true
+            },
+            "testPattern": false
+          },
+          "background": null
+        }
+      },
+      {
+        "id": "9b7e21c3-t3code",
+        "name": "T3 Code",
+        "createdAt": "2026-10-30T09:00:00.000Z",
+        "updatedAt": "2026-10-30T09:00:00.000Z",
+        "visual": {
+          "layout": {
+            "layoutPreset": "screen-camera",
+            "cameraTransformMode": "preset",
+            "cameraTransform": null,
+            "cameraCorner": "bottom-right",
+            "cameraSize": "medium",
+            "cameraShape": "rectangle",
+            "cameraCornerRadiusPct": 12,
+            "cameraAspect": "source",
+            "cameraChromaKeyEnabled": false,
+            "cameraChromaKeyColor": "#00FF00",
+            "cameraChromaKeySimilarityPct": 40,
+            "cameraChromaKeySmoothnessPct": 8,
+            "cameraChromaKeySpillPct": 10,
+            "cameraMargin": 32,
+            "cameraFit": "fill",
+            "cameraMirror": false,
+            "cameraZoom": 100,
+            "cameraOffsetX": 0,
+            "cameraOffsetY": 0,
+            "sideBySideSplit": "70-30",
+            "sideBySideCameraSide": "right",
+            "verticalScreenFraming": "fill",
+            "horizontalScreenFraming": "fit",
+            "arrangementMode": "preset",
+            "sourceTransformOverrides": {},
+            "sourceVisibility": {
+              "camera": true,
+              "capture": true
+            }
+          },
+          "sources": {
+            "cameraId": "camera:facetime",
+            "cameraName": "FaceTime HD Camera",
+            "cameraOff": false,
+            "captureOff": false,
+            "windowId": "window:5120",
+            "windowName": "T3 Code – videorc",
+            "app": {
+              "bundleId": "tools.t3.code",
+              "name": "T3 Code",
+              "follows": true
+            },
+            "testPattern": false
+          },
+          "background": null
+        }
+      }
+    ]
+  },
+  "videorc.working-scene.v1": {
+    "version": 1,
+    "origin": "saved",
+    "sceneId": "5d0c8a4e-figma",
+    "visual": {
+      "layout": {
+        "layoutPreset": "screen-camera",
+        "cameraTransformMode": "preset",
+        "cameraTransform": null,
+        "cameraCorner": "bottom-right",
+        "cameraSize": "medium",
+        "cameraShape": "rectangle",
+        "cameraCornerRadiusPct": 12,
+        "cameraAspect": "source",
+        "cameraChromaKeyEnabled": false,
+        "cameraChromaKeyColor": "#00FF00",
+        "cameraChromaKeySimilarityPct": 40,
+        "cameraChromaKeySmoothnessPct": 8,
+        "cameraChromaKeySpillPct": 10,
+        "cameraMargin": 32,
+        "cameraFit": "fill",
+        "cameraMirror": false,
+        "cameraZoom": 100,
+        "cameraOffsetX": 0,
+        "cameraOffsetY": 0,
+        "sideBySideSplit": "70-30",
+        "sideBySideCameraSide": "right",
+        "verticalScreenFraming": "fill",
+        "horizontalScreenFraming": "fit",
+        "arrangementMode": "preset",
+        "sourceTransformOverrides": {},
+        "sourceVisibility": {
+          "camera": true,
+          "capture": true
+        }
+      },
+      "sources": {
+        "cameraId": "camera:facetime",
+        "cameraName": "FaceTime HD Camera",
+        "cameraOff": false,
+        "captureOff": false,
+        "windowId": "window:4211",
+        "windowName": "Figma – Landing page",
+        "app": {
+          "bundleId": "com.figma.Desktop",
+          "name": "Figma",
+          "follows": true
+        },
+        "testPattern": false
+      },
+      "background": null
+    }
+  },
+  "videorc.captureConfig": {
+    "sources": {
+      "cameraId": "camera:facetime",
+      "cameraName": "FaceTime HD Camera",
+      "cameraOff": false,
+      "captureOff": false,
+      "windowId": "window:4211",
+      "windowName": "Figma – Landing page",
+      "testPattern": false
+    },
+    "layout": {
+      "layoutPreset": "screen-camera",
+      "cameraTransformMode": "preset",
+      "cameraTransform": null,
+      "cameraCorner": "bottom-right",
+      "cameraSize": "medium",
+      "cameraShape": "rectangle",
+      "cameraCornerRadiusPct": 12,
+      "cameraAspect": "source",
+      "cameraChromaKeyEnabled": false,
+      "cameraChromaKeyColor": "#00FF00",
+      "cameraChromaKeySimilarityPct": 40,
+      "cameraChromaKeySmoothnessPct": 8,
+      "cameraChromaKeySpillPct": 10,
+      "cameraMargin": 32,
+      "cameraFit": "fill",
+      "cameraMirror": false,
+      "cameraZoom": 100,
+      "cameraOffsetX": 0,
+      "cameraOffsetY": 0,
+      "sideBySideSplit": "70-30",
+      "sideBySideCameraSide": "right",
+      "verticalScreenFraming": "fill",
+      "horizontalScreenFraming": "fit",
+      "arrangementMode": "preset",
+      "sourceTransformOverrides": {},
+      "sourceVisibility": {
+        "camera": true,
+        "capture": true
+      }
+    },
+    "lastHorizontalPreset": "screen-camera",
+    "lastVerticalPreset": "vertical-camera-top",
+    "simulcastScreenFraming": "fit",
+    "simulcastFollowsProgram": true
+  },
+  "videorc.settings": {
+    "globalShortcuts": {
+      "scenes": {
+        "9b7e21c3-t3code": "Control+Alt+T"
+      }
+    }
+  }
+}

@@ -191,6 +191,8 @@ import type {
   ResolveAppWindowParams,
   ResolveAppWindowResult,
   AppPreviewsParams,
+  ScenePicturesParams,
+  ScenePicturesResult,
   AppPreviewsResult,
   DiagnosticStats,
   EntitlementsSnapshot,
@@ -499,8 +501,9 @@ export interface BackendRpcMethodMap {
   'account.sign_out': BackendRpcDefinition<undefined, VideorcAccountSnapshot>
   'platformAccounts.oauth.complete': BackendRpcDefinition<OAuthCompleteParams, OAuthCallbackResult>
   'sources.resolve_app_window': BackendRpcDefinition<ResolveAppWindowParams, ResolveAppWindowResult>
-  // Plan 210 S4: New scene…'s picker, only while it is open.
+  // Plan 210 S4: Add scene…'s picker (plan 231 D6), only while it is open.
   'sources.app_previews': BackendRpcDefinition<AppPreviewsParams | undefined, AppPreviewsResult>
+  'sources.scene_pictures': BackendRpcDefinition<ScenePicturesParams, ScenePicturesResult>
   'devices.list': BackendRpcDefinition<{ ffmpegPath?: string } | undefined, DeviceList>
   'recording.status': BackendRpcDefinition<undefined, RecordingStatus>
   'stream.output.topology.probe': BackendRpcDefinition<
@@ -547,12 +550,20 @@ export interface BackendRpcMethodMap {
   /** Plan 249 S12, renderer only: the native engine's scene for a room, never committed. */
   'cloud.scene.resolve': BackendRpcDefinition<SceneConfigParams, Scene>
   'scene.layout.apply_preview': BackendRpcDefinition<
-    SceneConfigParams & { intentId: number },
+    SceneConfigParams & { intentId: number; retainScreen?: true },
     LayoutTransactionResult
   >
   'scene.layout.apply_live': BackendRpcDefinition<
     SceneConfigParams & {
       intentId: number
+      /** Keep an existing screen for retirement only; never start it. */
+      retainScreen?: true
+      /**
+       * Plan 231 D4: the running vertical leg draws the selected screen while
+       * the program draws none, so the commit needs it (starts or switches to
+       * it, and keeps it). Live only: off air there is no leg.
+       */
+      verticalLegScreen?: true
       /** Target the vertical simulcast leg only (refused when none runs). */
       simulcastLeg?: boolean
     },
@@ -1284,6 +1295,18 @@ const appPreviewPictureSchema = runtimeSchema<string>('a JPEG data URL', (value,
   return url
 })
 
+const scenePictureTargetSchema = unionSchema([
+  objectSchema({ kind: literalSchema('app'), bundleId: boundedString }, { allowUnknown: false }),
+  objectSchema({ kind: literalSchema('window'), windowId: boundedString }, { allowUnknown: false }),
+  objectSchema({ kind: literalSchema('display'), screenId: boundedString }, { allowUnknown: false })
+])
+const scenePictureJpegSchema = runtimeSchema<string>('base64 JPEG bytes', (value, path) => {
+  const jpeg = stringSchema({ minLength: 4, maxLength: 2_000_000 }).parse(value, path)
+  if (!jpeg.startsWith('/9j/') || !/^[A-Za-z0-9+/]+={0,2}$/.test(jpeg) || jpeg.length % 4 !== 0)
+    throw new RuntimeSchemaError(path, 'base64 JPEG bytes')
+  return jpeg
+})
+
 const deviceSchema = objectSchema(
   {
     app: optionalSchema(
@@ -1809,6 +1832,9 @@ const agentIntentAckParamsSchema = objectSchema(
   },
   { allowUnknown: false }
 ) as RuntimeSchema<AgentIntentAckParams>
+// Scene list entries: id/name, 1-based position, display key, screen words
+// (shows) and onStream. The publisher and list_scenes catalog allowlist those
+// fields; the bounded projection also carries the other Studio tool families.
 const agentSurfacePublishParamsSchema = objectSchema(
   { surface: boundedBackendParamValueSchema },
   { allowUnknown: false }
@@ -2187,7 +2213,8 @@ const layoutTransactionParamsSchema = runtimeSchema<unknown>(
     if (typeof value !== 'object' || value === null || Array.isArray(value)) {
       return sceneConfigSchema.parse(value, path)
     }
-    const { intentId, ...sceneConfig } = value as Record<string, unknown>
+    const { intentId, retainScreen, ...sceneConfig } = value as Record<string, unknown>
+    optionalSchema(literalSchema(true)).parse(retainScreen, `${path}.retainScreen`)
     numberSchema({ integer: true, min: 1 }).parse(intentId, `${path}.intentId`)
     sceneConfigSchema.parse(sceneConfig, path)
     return value
@@ -2202,8 +2229,9 @@ const liveLayoutTransactionParamsSchema = runtimeSchema<unknown>(
     if (typeof value !== 'object' || value === null || Array.isArray(value)) {
       return layoutTransactionParamsSchema.parse(value, path)
     }
-    const { simulcastLeg, ...transaction } = value as Record<string, unknown>
+    const { simulcastLeg, verticalLegScreen, ...transaction } = value as Record<string, unknown>
     optionalSchema(booleanSchema).parse(simulcastLeg, `${path}.simulcastLeg`)
+    optionalSchema(literalSchema(true)).parse(verticalLegScreen, `${path}.verticalLegScreen`)
     layoutTransactionParamsSchema.parse(transaction, path)
     return value
   }
@@ -7273,6 +7301,44 @@ const runtimeContracts = {
           ),
           { maxLength: 512 }
         )
+      },
+      { allowUnknown: false }
+    )
+  },
+  'sources.scene_pictures': {
+    params: objectSchema(
+      {
+        targets: arraySchema(scenePictureTargetSchema, { maxLength: 512 }),
+        maxWidth: optionalSchema(numberSchema({ integer: true, min: 32, max: 1_920 }))
+      },
+      { allowUnknown: false }
+    ),
+    result: objectSchema(
+      {
+        pictures: arraySchema(
+          unionSchema([
+            objectSchema(
+              { target: scenePictureTargetSchema, jpegBase64: scenePictureJpegSchema },
+              { allowUnknown: false }
+            ),
+            objectSchema(
+              {
+                target: scenePictureTargetSchema,
+                unavailable: enumSchema([
+                  'hidden',
+                  'unsupported',
+                  'source-unavailable',
+                  'screenshot-unavailable'
+                ])
+              },
+              { allowUnknown: false }
+            )
+          ]),
+          { maxLength: 512 }
+        ),
+        elapsedMs: numberSchema({ min: 0 }),
+        hidden: optionalSchema(literalSchema(true)),
+        unsupported: optionalSchema(literalSchema(true))
       },
       { allowUnknown: false }
     )

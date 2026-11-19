@@ -20,7 +20,7 @@ vi.mock('@/components/workspace-nav', () => ({
   useWorkspaceNav: () => ({ openSettings: vi.fn() })
 }))
 
-describe('Studio Sources rows (plan 080 S4)', () => {
+describe('Studio Sources rows (plan 080 S4, plan 231 D8)', () => {
   const display: Device = { id: 'screen:2', name: 'Display 2', kind: 'screen', status: 'available' }
   const camera: Device = {
     id: 'camera:1',
@@ -70,7 +70,7 @@ describe('Studio Sources rows (plan 080 S4)', () => {
       (match) => match[1] as string
     )
 
-  it('gives screen and camera their own rows, in order, and leaves audio to the Audio section', () => {
+  it('gives the camera its row, and leaves audio to the Audio section', () => {
     const systemAudio: Device = {
       id: 'system-audio',
       name: 'System audio',
@@ -85,7 +85,7 @@ describe('Studio Sources rows (plan 080 S4)', () => {
     // The microphone and System audio live in the Audio section above (plans
     // 092 and 201); Output is the Session row (plan 174 S3.3, B-15).
     // Captions is a door to its page (plan 174 S3.2, B-13), not a switch row.
-    expect(rowLabels(markup)).toEqual(['Screen', 'Camera'])
+    expect(rowLabels(markup)).toEqual(['Camera'])
     expect(markup).not.toContain('System audio')
     // No switch at all: Green screen is a three-way pick, and no audio row.
     expect(markup).not.toContain('role="switch"')
@@ -93,7 +93,6 @@ describe('Studio Sources rows (plan 080 S4)', () => {
     expect(markup).toMatch(/data-slot="navigable-row"[^>]*>[\s\S]*?>Captions</)
     expect(markup).not.toContain('aria-label="Enable live captions"')
     expect(markup).not.toContain('Mute microphone')
-    expect(markup).toContain('title="Display 2"')
     expect(markup).toContain('title="MacBook Pro Camera"')
     // The old joined trigger ("Display 2 · MacBook Pro Camera") is gone.
     expect(markup).not.toContain('Display 2 · MacBook Pro Camera')
@@ -112,13 +111,13 @@ describe('Studio Sources rows (plan 080 S4)', () => {
     const cogs = [...(sources ?? '').matchAll(/<button[^>]*aria-label="Open Sources"[^>]*>/g)]
     expect(cogs).toHaveLength(1)
     expect(cogs[0]?.[0]).toContain('data-testid="open-page-cog"')
-    const cameraRow = (sources ?? '').split('data-slot="inspector-row"')[2] ?? ''
+    const cameraRow = (sources ?? '').split('data-slot="inspector-row"')[1] ?? ''
     expect(cameraRow).toContain('aria-label="Open Sources"')
     expect(cameraRow.indexOf('aria-label="Open Sources"')).toBeGreaterThan(
       cameraRow.indexOf('aria-label="Camera"')
     )
     expect(sources).not.toContain('>Open Sources</button>')
-    expect(rowLabels(sources ?? '')).toEqual(['Screen', 'Camera'])
+    expect(rowLabels(sources ?? '')).toEqual(['Camera'])
     expect(captions).not.toContain('<h2')
     // Captions is a door to its page there (plan 174 S3.2, B-13), not a switch row.
     expect(rowLabels(captions ?? '')).toEqual([])
@@ -131,18 +130,24 @@ describe('Studio Sources rows (plan 080 S4)', () => {
     ).toEqual(['Captions', 'Chat'])
   })
 
-  it('opens Screen and Camera with one click: the row control is the dropdown', () => {
+  it('opens Camera with one click: the row control is the dropdown', () => {
     // Owner, 2026-09-30: "for screen we're opening two dropdowns, it should
     // just be one ... same for camera". No popover wraps a second select.
     const markup = renderInputs({ screenId: 'screen:2', cameraId: 'camera:1' })
-    for (const label of ['Screen', 'Camera']) {
-      const trigger = new RegExp(`<button[^>]*aria-label="${label}"[^>]*>`).exec(markup)?.[0]
-      expect(trigger).toContain('role="combobox"')
-    }
-    const rows = markup.split('data-slot="inspector-row"')
-    for (const row of rows.slice(1, 3)) {
-      expect(row).not.toContain('aria-haspopup="dialog"')
-    }
+    const trigger = /<button[^>]*aria-label="Camera"[^>]*>/.exec(markup)?.[0]
+    expect(trigger).toContain('role="combobox"')
+    const row = markup.split('data-slot="inspector-row"')[1] ?? ''
+    expect(row).not.toContain('aria-haspopup="dialog"')
+  })
+
+  it('has no Screen row: the screen lives with the scene that shows it (plan 231 D8)', () => {
+    const markup = renderInputs({ screenId: 'screen:2', cameraId: 'camera:1' })
+    expect(markup).not.toContain('aria-label="Screen"')
+    expect(markup).not.toContain('title="Display 2"')
+    // Hide screen and its chip moved with it, to the scene's Screen field.
+    expect(markup).not.toContain('data-videorc-screen-privacy')
+    expect(markup).not.toContain('Hide screen')
+    expect(markup).not.toContain('data-slot="screen-privacy"')
   })
 
   it('shows Off for no camera, and the saved name for a missing one', () => {
@@ -170,15 +175,8 @@ describe('Studio Sources rows (plan 080 S4)', () => {
     expect(markup).not.toContain('title="Off"')
   })
 
-  it('names the test pattern and a missing screen instead of going blank', () => {
-    expect(renderInputs({ testPattern: true, cameraOff: true })).toContain('title="Test pattern"')
-    expect(renderInputs({ screenId: 'screen:gone', screenName: 'Display 3' })).toContain(
-      'title="Display 3"'
-    )
-  })
-
   const greenScreenLine = (markup: string): string =>
-    (markup.split('data-slot="inspector-row"')[2] ?? '').split('data-slot="green-screen"')[1] ?? ''
+    (markup.split('data-slot="inspector-row"')[1] ?? '').split('data-slot="green-screen"')[1] ?? ''
   const radios = (line: string): { label: string; checked: boolean }[] =>
     [
       ...line.matchAll(/<button[^>]*aria-checked="(true|false)"[^>]*role="radio"[^>]*>([^<]+)</g)

@@ -126,16 +126,15 @@ describe('normalizeAccelerator', () => {
 describe('findAcceleratorOwner', () => {
   const config = {
     recordToggle: 'Cmd+Shift+R',
-    layouts: { 'screen-camera': 'Control+Alt+1' }
+    scenes: { figma: 'F13' }
   }
 
-  it('finds duplicates across action rows and layout rows', () => {
+  it('finds duplicates across action rows, default positions and custom keys', () => {
     expect(findAcceleratorOwner(config, 'Shift+Cmd+R', 'mic-toggle', 'darwin')).toBe(
       'record-toggle'
     )
-    expect(findAcceleratorOwner(config, 'Ctrl+Alt+1', 'layout:screen-only', 'darwin')).toBe(
-      'layout:screen-camera'
-    )
+    expect(findAcceleratorOwner(config, 'Ctrl+Alt+1', 'scene:figma', 'darwin')).toBe('scene-slot-1')
+    expect(findAcceleratorOwner(config, 'F13', 'scene-slot-1', 'darwin')).toBe('scene:figma')
   })
 
   it('ignores the row being edited and free combinations', () => {

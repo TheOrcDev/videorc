@@ -1,20 +1,21 @@
-import type { AppPreview, Device, LayoutPreset } from './backend'
+import type { AppPreview, Device, LayoutPreset, LayoutSettings } from './backend'
 import {
   capturePickerDevices,
   isSystemSessionWindowDevice,
   layoutPresetNeedsCamera,
-  layoutPresetNeedsScreen,
   layoutPresetOrientation
 } from './capture'
 import { plural } from './format'
-import { scenesForApps, type ScenesForAppsOptions } from './scene-apps'
-import { normalizeSceneVisual, type SavedScene, type SceneVisual } from './scene-presets'
 import { uniqueSceneName } from './scene-list'
+import { displayShows, layoutShowsScreen, sameShows, type Scene, type SceneShows } from './scenes'
 
-// Plan 210 D2: New scene… lists the open apps, each with a picture of its
-// front window and its icon. Several can be chosen; each becomes a scene in
-// the current look, named after its app, with no audio (D4) and following
-// its app (D10). The scene on stream is never touched.
+// Plan 231 D6: one picker for what a scene shows. Add scene… offers the open
+// apps (macOS: icon, a picture of the front window, "Chrome · 3 windows"),
+// the displays and Camera only; several can be chosen, and each becomes a
+// scene in the look of the scene on stream, at the end of the list, without
+// touching what's on stream. Change screen… is the same picker for one
+// scene, with "A specific window" under Apps (plan 210's fixed window) and
+// "No screen". Windows and Linux offer the displays and Camera only.
 
 /** One app the picker offers. */
 export type AppChoice = {
@@ -23,11 +24,26 @@ export type AppChoice = {
   windowCount: number
   frontWindowId?: string
   frontWindowTitle?: string
-  /** A small JPEG of the front window (S4, macOS 14 and up). */
+  /** A small JPEG of the front window (plan 210 S4, macOS 14 and up). */
   picture?: string
   width?: number
   height?: number
 }
+
+/** A display the picker offers, with its still once the scene pictures have one (D7, S5). */
+export type DisplayChoice = { device: Device; picture?: string }
+
+/** One thing a scene can show, as the picker offers it. */
+export type ScreenPick =
+  | { kind: 'app'; app: AppChoice }
+  /** A fixed window (Change screen… → A specific window). */
+  | { kind: 'window'; device: Device }
+  | { kind: 'display'; device: Device }
+  /** Camera only in Add scene…, No screen in Change screen… (D18). */
+  | { kind: 'none' }
+
+/** What a scene that shows no screen is called when it's named after what it shows. */
+export const NO_SCREEN_SCENE_NAME = 'Camera only'
 
 /** D1's floor: palettes and popups under 400 × 300 aren't an app's window. */
 const MIN_WINDOW_WIDTH = 400
@@ -72,15 +88,14 @@ function isAppWindow(device: Device): boolean {
   )
 }
 
-function byName(a: AppChoice, b: AppChoice): number {
-  return a.name.localeCompare(b.name, undefined, { sensitivity: 'base' })
-}
+const byText = (a: string, b: string): number =>
+  a.localeCompare(b, undefined, { sensitivity: 'base' })
 
 /**
- * Before S4's pictures (or when they fail), the device list is the picker:
- * window sources grouped by their app, counted, the first one standing in
- * for the front window. Videorc's own app (and so its Notes window) is never
- * offered.
+ * Before the app pictures come (or when they fail), the device list is the
+ * picker: window sources grouped by their app, counted, the first one
+ * standing in for the front window. Videorc's own app (and so its Notes
+ * window) is never offered.
  */
 export function appChoicesFromDevices(
   devices: readonly Device[],
@@ -106,10 +121,10 @@ export function appChoicesFromDevices(
       frontWindowTitle: windowTitle(device.windowTitle, app.name)
     })
   }
-  return [...apps.values()].sort(byName)
+  return [...apps.values()].sort((a, b) => byText(a.name, b.name))
 }
 
-/** S4's answer, without Videorc itself and without apps that have no window. */
+/** The app pictures' answer, without Videorc itself and without apps that have no window. */
 export function appChoicesFromPreviews(
   previews: readonly AppPreview[],
   selfBundleIds: readonly string[] = []
@@ -132,28 +147,131 @@ export function appChoicesFromPreviews(
       height: preview.height
     })
   }
-  return apps.sort(byName)
+  return apps.sort((a, b) => byText(a.name, b.name))
 }
 
-/** The search field matches the app's name or its front window's title. */
-export function searchAppChoices(choices: readonly AppChoice[], query: string): AppChoice[] {
-  const needle = query.trim().toLocaleLowerCase()
-  if (!needle) return [...choices]
-  return choices.filter(
-    (choice) =>
-      choice.name.toLocaleLowerCase().includes(needle) ||
-      (choice.frontWindowTitle ?? '').toLocaleLowerCase().includes(needle)
+/**
+ * The displays a scene can show: on macOS the screens (windows are apps, or
+ * "A specific window"); on Windows and Linux what Sources offers there, the
+ * displays or the Linux portal's one source.
+ */
+export function displayChoices(
+  devices: readonly Device[],
+  platform: string | undefined
+): DisplayChoice[] {
+  const available = capturePickerDevices([...devices]).filter(
+    (device) => device.status === 'available'
   )
+  return (
+    platform === 'darwin' ? available.filter((device) => device.kind === 'screen') : available
+  ).map((device) => ({ device }))
 }
 
-/** The primary button: "Add scene", or "Add 2 scenes". */
+/** "A specific window": every app window, by app then title, never Videorc's own. */
+export function windowChoices(
+  devices: readonly Device[],
+  selfBundleIds: readonly string[] = []
+): Device[] {
+  const self = new Set(selfBundleIds.map((id) => id.toLowerCase()))
+  return devices
+    .filter((device) => isAppWindow(device) && offered(device.app!.bundleId, self))
+    .sort((a, b) => byText(a.app!.name, b.app!.name) || byText(windowLabel(a), windowLabel(b)))
+}
+
+/** A window's own words: its title, else its source name. */
+export function windowLabel(device: Pick<Device, 'name' | 'windowTitle'>): string {
+  return device.windowTitle?.trim() || device.name
+}
+
+/** Whether a search matches any of a choice's words. */
+export function matchesSearch(words: readonly (string | undefined)[], query: string): boolean {
+  const needle = query.trim().toLocaleLowerCase()
+  return !needle || words.some((word) => (word ?? '').toLocaleLowerCase().includes(needle))
+}
+
+/** The search matches an app's name or its front window's title. */
+export function searchAppChoices(choices: readonly AppChoice[], query: string): AppChoice[] {
+  return choices.filter((choice) => matchesSearch([choice.name, choice.frontWindowTitle], query))
+}
+
+/** The primary button: "Add scene", or "Add 3 scenes". */
 export function addScenesLabel(count: number): string {
-  return count > 1 ? `Add ${count} scenes` : 'Add scene'
+  return count > 1 ? `Add ${plural(count, 'scene')}` : 'Add scene'
 }
 
 /** "3 windows" under an app with several; nothing for one. */
 export function windowCountLabel(count: number): string | null {
   return count > 1 ? plural(count, 'window') : null
+}
+
+/** One key per choice, for the selection. */
+export function pickKey(pick: ScreenPick): string {
+  switch (pick.kind) {
+    case 'app':
+      return `app:${pick.app.bundleId.toLowerCase()}`
+    case 'window':
+      return `window:${pick.device.id}`
+    case 'display':
+      return `display:${pick.device.id}`
+    case 'none':
+      return 'none'
+  }
+}
+
+/** What a scene made from the pick shows. A new app scene follows its app (plan 210 D10). */
+export function pickShows(pick: ScreenPick, follows = true): SceneShows {
+  switch (pick.kind) {
+    case 'app':
+      return { kind: 'app', bundleId: pick.app.bundleId, name: pick.app.name, follows }
+    case 'window':
+      return { kind: 'window', windowId: pick.device.id, windowName: pick.device.name }
+    case 'display':
+      return displayShows(pick.device)
+    case 'none':
+      return { kind: 'none' }
+  }
+}
+
+/** The name a scene made from the pick takes: what it shows. */
+export function pickName(pick: ScreenPick): string {
+  switch (pick.kind) {
+    case 'app':
+      return pick.app.name
+    case 'window':
+      return pick.device.app?.name ?? windowLabel(pick.device)
+    case 'display':
+      return pick.device.name
+    case 'none':
+      return NO_SCREEN_SCENE_NAME
+  }
+}
+
+/** Whether a scene already shows what the pick shows (Change screen… has nothing to do). */
+export function showsPick(shows: SceneShows, pick: ScreenPick): boolean {
+  return sameShows(shows, pickShows(pick))
+}
+
+/** The name of what a scene shows, when a scene named after it reads so. */
+function showsName(shows: SceneShows): string | undefined {
+  switch (shows.kind) {
+    case 'app':
+      return shows.name
+    case 'window':
+      return shows.windowName
+    case 'display':
+      return shows.screenName
+    // "Camera only" is a layout's name (a default scene, D3): the scene keeps it.
+    case 'none':
+    case 'test-pattern':
+      return undefined
+  }
+}
+
+/** "Figma", "Figma 2": a name that is what the scene shows, not one the streamer typed. */
+function namedAfter(name: string, base: string | undefined): boolean {
+  if (!base) return false
+  const escaped = base.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  return new RegExp(`^${escaped}( \\d+)?$`, 'i').test(name.trim())
 }
 
 function screenLayoutFor(preset: LayoutPreset, cameraOn: boolean): LayoutPreset {
@@ -164,89 +282,109 @@ function screenLayoutFor(preset: LayoutPreset, cameraOn: boolean): LayoutPreset 
 }
 
 /**
- * The current look, made to show a screen: a scene made for an app that
- * showed no screen (the Studio on Camera only, or its screen hidden) would
- * never show the app. A camera layout with the camera off becomes its
- * screen-only twin, so every new scene can go on stream. The orientation
- * never changes, so new scenes follow the Studio's.
+ * A layout made to show a screen: a scene made for an app that kept the
+ * look of Camera only would never show the app. A camera layout with the
+ * camera off becomes its screen-only twin, so every new scene can go on
+ * stream. The orientation never changes.
  */
-export function lookForAppScenes(look: SceneVisual): SceneVisual {
-  const { layout } = look
-  const freeform = layout.arrangementMode === 'freeform'
-  const cameraOn = Boolean(look.sources.cameraId) && look.sources.cameraOff !== true
+export function layoutShowingScreen(layout: LayoutSettings, cameraOn: boolean): LayoutSettings {
   const fits =
-    freeform ||
-    (layoutPresetNeedsScreen(layout.layoutPreset) &&
-      (cameraOn || !layoutPresetNeedsCamera(layout.layoutPreset)))
+    layoutShowsScreen(layout) && (cameraOn || !layoutPresetNeedsCamera(layout.layoutPreset))
   const layoutPreset = fits ? layout.layoutPreset : screenLayoutFor(layout.layoutPreset, cameraOn)
-  return normalizeSceneVisual({
-    ...look,
-    layout: {
-      ...layout,
-      layoutPreset,
-      ...(layoutPreset !== layout.layoutPreset
-        ? { arrangementMode: 'preset' as const, sourceTransformOverrides: {} }
-        : {}),
-      sourceVisibility: { ...layout.sourceVisibility, capture: true }
-    }
-  })
+  return {
+    ...layout,
+    layoutPreset,
+    ...(layoutPreset !== layout.layoutPreset
+      ? { arrangementMode: 'preset' as const, sourceTransformOverrides: {} }
+      : {}),
+    sourceVisibility: { camera: layout.sourceVisibility?.camera ?? true, capture: true }
+  }
 }
 
-/** The scenes "Add N scenes" makes, through S2's `scenesForApps`. */
-export function newAppScenes(
-  choices: readonly AppChoice[],
-  look: SceneVisual,
-  existing: readonly SavedScene[],
-  options?: ScenesForAppsOptions
-): SavedScene[] {
-  return scenesForApps(
-    choices.map((choice) => ({
-      bundleId: choice.bundleId,
-      name: choice.name,
-      frontWindowId: choice.frontWindowId,
-      frontWindowName: choice.frontWindowTitle
-    })),
-    lookForAppScenes(look),
-    existing,
-    options
-  )
+/** A layout that shows no screen: Camera only in its orientation (D18, D19). */
+export function layoutShowingNoScreen(layout: LayoutSettings): LayoutSettings {
+  if (!layoutShowsScreen(layout)) return layout
+  return {
+    ...layout,
+    layoutPreset:
+      layoutPresetOrientation(layout.layoutPreset) === 'vertical'
+        ? 'vertical-camera-only'
+        : 'camera-only',
+    arrangementMode: 'preset',
+    sourceTransformOverrides: {},
+    sourceVisibility: { camera: true, capture: layout.sourceVisibility?.capture ?? true }
+  }
 }
 
 /**
- * Windows and Linux (D12): what Sources offers there, the displays or the
- * Linux portal's one source, one of which becomes a scene.
+ * Add scene…'s scenes (D6). Each is named after what it shows ("Figma",
+ * then "Figma 2" and "Figma 3"), takes the look of the scene on stream (both
+ * layouts with the camera's spot and shape, and the background) made to
+ * show its screen, or Camera only, and keeps no audio (D10). An app's front
+ * window is where its scene looks first (`windowHints`, plan 210 D5).
  */
-export function captureChoices(devices: readonly Device[]): Device[] {
-  return capturePickerDevices([...devices]).filter((device) => device.status === 'available')
+export function newScenes(
+  picks: readonly ScreenPick[],
+  template: Pick<Scene, 'layouts' | 'background'>,
+  existing: readonly Pick<Scene, 'id' | 'name'>[],
+  options: { cameraOn: boolean; id: () => string; now: () => string }
+): { scenes: Scene[]; windowHints: Record<string, string> } {
+  const taken: Pick<Scene, 'id' | 'name'>[] = [...existing]
+  const windowHints: Record<string, string> = {}
+  const scenes = picks.map((pick): Scene => {
+    const id = options.id()
+    const now = options.now()
+    const name = uniqueSceneName(pickName(pick), taken)
+    taken.push({ id, name })
+    if (pick.kind === 'app' && pick.app.frontWindowId) windowHints[id] = pick.app.frontWindowId
+    const look = (layout: LayoutSettings): LayoutSettings =>
+      pick.kind === 'none'
+        ? layoutShowingNoScreen(layout)
+        : layoutShowingScreen(layout, options.cameraOn)
+    return {
+      id,
+      name,
+      createdAt: now,
+      updatedAt: now,
+      shows: pickShows(pick),
+      layouts: {
+        horizontal: look(template.layouts.horizontal),
+        vertical: look(template.layouts.vertical)
+      },
+      background: template.background ? structuredClone(template.background) : null
+    }
+  })
+  return { scenes, windowHints }
 }
 
-/** A scene for one display (or the portal's source), named after it, with no audio. */
-export function newCaptureScene(
-  device: Pick<Device, 'id' | 'name' | 'kind' | 'displayUuid'>,
-  look: SceneVisual,
-  existing: readonly SavedScene[],
-  options: { id: string; now: string }
-): SavedScene {
-  const base = lookForAppScenes(look)
-  const window = device.kind === 'window'
+/**
+ * Change screen… (D6): the scene shows what was picked, and keeps its look,
+ * keys and audio. An app keeps the scene's following. No screen puts the
+ * scene's layouts on Camera only, so a scene that shows no screen never has
+ * a layout that needs one (D19). A name that was what the scene showed
+ * ("Figma", "Display 1") becomes the new one's; a name the streamer typed
+ * stays.
+ */
+export function sceneShowingPick(
+  scene: Scene,
+  pick: ScreenPick,
+  scenes: readonly Pick<Scene, 'id' | 'name'>[],
+  now: string
+): Scene {
+  const follows = scene.shows.kind === 'app' ? scene.shows.follows : true
   return {
-    id: options.id,
-    name: uniqueSceneName(device.name, existing),
-    createdAt: options.now,
-    updatedAt: options.now,
-    visual: normalizeSceneVisual({
-      ...base,
-      sources: {
-        ...base.sources,
-        screenId: window ? undefined : device.id,
-        screenName: window ? undefined : device.name,
-        screenUuid: window ? undefined : device.displayUuid,
-        windowId: window ? device.id : undefined,
-        windowName: window ? device.name : undefined,
-        captureOff: false,
-        testPattern: false,
-        app: undefined
-      }
-    })
+    ...scene,
+    name: namedAfter(scene.name, showsName(scene.shows))
+      ? uniqueSceneName(pickName(pick), scenes, scene.id)
+      : scene.name,
+    updatedAt: now,
+    shows: pickShows(pick, follows),
+    layouts:
+      pick.kind === 'none'
+        ? {
+            horizontal: layoutShowingNoScreen(scene.layouts.horizontal),
+            vertical: layoutShowingNoScreen(scene.layouts.vertical)
+          }
+        : scene.layouts
   }
 }

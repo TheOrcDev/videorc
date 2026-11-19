@@ -1,13 +1,13 @@
 import { describe, expect, it } from 'vitest'
 
-import type { CaptureConfig } from './capture'
+import type { LayoutSettings } from './backend'
+import type { CaptureConfig, SimulcastScene } from './capture'
 import {
   buildSimulcastParams,
   defaultCaptureConfig,
   normalizeLayoutSettings,
   simulcastLegLayout,
   simulcastLegLiveRequest,
-  simulcastLegPreset,
   videoPresets
 } from './capture'
 
@@ -27,22 +27,36 @@ function dualOrientationConfig(patch: Partial<CaptureConfig> = {}): CaptureConfi
     ...defaultCaptureConfig,
     streamEnabled: true,
     streaming,
-    lastVerticalPreset: 'vertical-camera-bottom',
     ...patch
   }
 }
 
-describe('vertical simulcast leg', () => {
-  it('defaults the leg to Fit while vertical Studio mode keeps the Fill law', () => {
+/** A scene with this 9:16 layout (plan 231 D4): what the vertical stream shows for it. */
+function sceneWithVertical(patch: Partial<LayoutSettings> = {}): SimulcastScene {
+  return {
+    layouts: {
+      vertical: {
+        ...defaultCaptureConfig.layout,
+        layoutPreset: 'vertical-camera-bottom',
+        verticalScreenFraming: 'fit',
+        ...patch
+      }
+    }
+  }
+}
+
+describe('vertical simulcast leg (plan 231 D4: the scene on stream, in its 9:16 layout)', () => {
+  it('keeps the old vertical stream settings, with O1 defaults, as migration inputs', () => {
     // Owner decision O1 (2026-09-21): the leg mirrors a live program where
-    // the shared screen is the content; short-form recording stays filled.
+    // the shared screen is the content (Fit); short-form recording stays
+    // filled. A scene made in a 16:9 studio takes the first (scenes-migration).
     expect(defaultCaptureConfig.simulcastScreenFraming).toBe('fit')
     expect(defaultCaptureConfig.layout.verticalScreenFraming).toBe('fill')
     expect(defaultCaptureConfig.simulcastFollowsProgram).toBe(true)
   })
 
-  it('goes live with the whole screen: camera bottom + fit, on the portrait canvas', () => {
-    const params = buildSimulcastParams(dualOrientationConfig())
+  it("goes live with the scene's 9:16 layout: camera bottom + fit, on the portrait canvas", () => {
+    const params = buildSimulcastParams(dualOrientationConfig(), sceneWithVertical())
     expect(params?.layout.layoutPreset).toBe('vertical-camera-bottom')
     expect(params?.layout.verticalScreenFraming).toBe('fit')
     expect(params?.layout.cameraTransformMode).toBe('preset')
@@ -52,7 +66,7 @@ describe('vertical simulcast leg', () => {
 
   it('uses HD vertical stream settings independently of 4K local recording', () => {
     const config = dualOrientationConfig({ video: videoPresets['record-4k30'] })
-    expect(buildSimulcastParams(config)?.video).toMatchObject({
+    expect(buildSimulcastParams(config, sceneWithVertical())?.video).toMatchObject({
       width: 1080,
       height: 1920,
       fps: 30,
@@ -61,38 +75,99 @@ describe('vertical simulcast leg', () => {
     expect(config.video).toEqual(videoPresets['record-4k30'])
   })
 
-  it('the leg framing is its own setting, never the recording layout framing', () => {
-    const config = dualOrientationConfig({ simulcastScreenFraming: 'fill' })
+  it("takes the scene's Fill or Fit, never the program's or the old leg setting", () => {
+    const config = dualOrientationConfig({ simulcastScreenFraming: 'fit' })
     config.layout = { ...config.layout, verticalScreenFraming: 'fit' }
-    expect(buildSimulcastParams(config)?.layout.verticalScreenFraming).toBe('fill')
+    expect(
+      buildSimulcastParams(config, sceneWithVertical({ verticalScreenFraming: 'fill' }))?.layout
+        .verticalScreenFraming
+    ).toBe('fill')
   })
 
-  it('is not armed without a vertical destination or in vertical Studio mode', () => {
-    expect(buildSimulcastParams(defaultCaptureConfig)).toBeUndefined()
+  it('is not armed without a vertical destination or in a 9:16 studio', () => {
+    expect(buildSimulcastParams(defaultCaptureConfig, sceneWithVertical())).toBeUndefined()
     const vertical = dualOrientationConfig()
     vertical.layout = { ...vertical.layout, layoutPreset: 'vertical-split' }
-    expect(buildSimulcastParams(vertical)).toBeUndefined()
+    expect(buildSimulcastParams(vertical, sceneWithVertical())).toBeUndefined()
   })
 
-  it('follows the program only where a vertical twin exists', () => {
-    const config = dualOrientationConfig()
-    expect(simulcastLegPreset(config, 'camera-only')).toBe('vertical-camera-only')
-    expect(simulcastLegPreset(config, 'screen-only')).toBe('vertical-screen-only')
-    expect(simulcastLegPreset(config, 'screen-camera')).toBe('vertical-camera-bottom')
-    expect(simulcastLegPreset(config, 'side-by-side')).toBe('vertical-camera-bottom')
-
-    const pinned = dualOrientationConfig({ simulcastFollowsProgram: false })
-    expect(simulcastLegPreset(pinned, 'camera-only')).toBe('vertical-camera-bottom')
+  it("follows the scene, never the program's layout, the remembered layout or Follow", () => {
+    // Before plan 231 a Camera only program streamed vertical Camera only
+    // (Follow) and anything else the remembered vertical layout. Now each
+    // scene says, and those settings steer nothing.
+    const config = dualOrientationConfig({
+      lastVerticalPreset: 'vertical-split',
+      simulcastFollowsProgram: true
+    })
+    for (const program of ['camera-only', 'screen-only', 'screen-camera'] as const) {
+      const legLayout = buildSimulcastParams(
+        { ...config, layout: { ...config.layout, layoutPreset: program } },
+        sceneWithVertical({ layoutPreset: 'vertical-screen-camera' })
+      )?.layout
+      expect(legLayout?.layoutPreset).toBe('vertical-screen-camera')
+    }
   })
 
   it('session start and live edits build the leg from one function', () => {
     const config = dualOrientationConfig()
-    config.layout = { ...config.layout, layoutPreset: 'camera-only' }
-    // The 2026-09-21 live session: a camera-only program must not leave the
-    // vertical leg asking for a screen scene the program is not showing.
-    expect(buildSimulcastParams(config)?.layout).toEqual(simulcastLegLayout(config))
-    expect(simulcastLegLayout(config).layoutPreset).toBe('vertical-camera-only')
-    expect(simulcastLegLayout(config, 'screen-camera').layoutPreset).toBe('vertical-camera-bottom')
+    const scene = sceneWithVertical({ layoutPreset: 'vertical-split' })
+    expect(buildSimulcastParams(config, scene)?.layout).toEqual(
+      simulcastLegLayout(scene, config.layout)
+    )
+  })
+
+  it("takes the scene's arrangement and the program's sources: look, mirror, key, visibility", () => {
+    const program: LayoutSettings = {
+      ...defaultCaptureConfig.layout,
+      layoutPreset: 'screen-camera',
+      cameraShape: 'circle',
+      cameraMirror: true,
+      cameraLook: { brightness: 0.05, contrast: 1.1, saturation: 0.8 },
+      cameraChromaKeyEnabled: true,
+      cameraChromaKeyColor: '#0000FF',
+      cameraChromaKeySimilarityPct: 31,
+      cameraChromaKeySmoothnessPct: 12,
+      cameraChromaKeySpillPct: 44,
+      cameraChromaKeyEdges: { leftPct: 3, topPct: 0, rightPct: 0, bottomPct: 2 },
+      sourceVisibility: { camera: true, capture: false }
+    }
+    const leg = simulcastLegLayout(
+      sceneWithVertical({
+        layoutPreset: 'vertical-screen-camera',
+        cameraShape: 'rounded',
+        cameraSize: 'large',
+        cameraMirror: false,
+        cameraChromaKeyEnabled: false,
+        sourceVisibility: { camera: true, capture: true }
+      }),
+      program
+    )
+    // Where and in what shape: the scene's 9:16 layout.
+    expect(leg).toMatchObject({
+      layoutPreset: 'vertical-screen-camera',
+      cameraShape: 'rounded',
+      cameraSize: 'large',
+      verticalScreenFraming: 'fit'
+    })
+    // What the camera looks like and which sources show: the program's.
+    expect(leg).toMatchObject({
+      cameraMirror: true,
+      cameraLook: program.cameraLook,
+      cameraChromaKeyEnabled: true,
+      cameraChromaKeyColor: '#0000FF',
+      cameraChromaKeySimilarityPct: 31,
+      cameraChromaKeySmoothnessPct: 12,
+      cameraChromaKeySpillPct: 44,
+      cameraChromaKeyEdges: program.cameraChromaKeyEdges,
+      sourceVisibility: { camera: true, capture: false }
+    })
+    // A neutral look and no key edges stay out of the request.
+    const plain = simulcastLegLayout(
+      sceneWithVertical({ cameraLook: { brightness: 0.2, contrast: 1, saturation: 1 } }),
+      defaultCaptureConfig.layout
+    )
+    expect(plain).not.toHaveProperty('cameraLook')
+    expect(plain).not.toHaveProperty('cameraChromaKeyEdges')
   })
 })
 
@@ -114,8 +189,9 @@ describe('verticalScreenFraming normalisation', () => {
 describe('simulcastLegLiveRequest (the leg of a running session)', () => {
   it('is built exactly like the session-start leg, as an explicit leg request', () => {
     const config = dualOrientationConfig()
-    const request = simulcastLegLiveRequest(config)
-    const start = buildSimulcastParams(config)
+    const scene = sceneWithVertical()
+    const request = simulcastLegLiveRequest(config, scene)
+    const start = buildSimulcastParams(config, scene)
     expect(request).toEqual({
       simulcastLeg: true,
       sources: config.sources,
@@ -130,40 +206,23 @@ describe('simulcastLegLiveRequest (the leg of a running session)', () => {
   })
 
   it('sends nothing when no vertical leg is armed', () => {
-    expect(simulcastLegLiveRequest(defaultCaptureConfig)).toBeNull()
+    expect(simulcastLegLiveRequest(defaultCaptureConfig, sceneWithVertical())).toBeNull()
   })
 
-  it('re-derives from the program layout it is given', () => {
-    // After a committed program switch the hook passes the COMMITTED layout;
-    // the leg follows it, whatever the pre-commit snapshot said.
+  it('a scene switch cuts the leg to the new scene, each leg in its own layout', () => {
+    // After a committed switch the hook passes the committed program and the
+    // scene now on stream: the leg is that scene's 9:16 layout.
     const config = dualOrientationConfig()
-    const cameraOnly = {
+    const figma = sceneWithVertical({ layoutPreset: 'vertical-split' })
+    const brb = sceneWithVertical({ layoutPreset: 'vertical-camera-only' })
+    const program = (layoutPreset: LayoutSettings['layoutPreset']) => ({
       ...config,
-      layout: {
-        ...config.layout,
-        layoutPreset: 'camera-only' as const,
-        cameraMirror: true,
-        cameraLook: { brightness: 0.05, contrast: 1.1, saturation: 0.8 }
-      }
-    }
-    const followed = simulcastLegLiveRequest(cameraOnly)
-    expect(followed?.layout.layoutPreset).toBe('vertical-camera-only')
-    // Shared camera settings travel with the program.
-    expect(followed?.layout.cameraMirror).toBe(true)
-    expect(followed?.layout.cameraLook).toEqual(cameraOnly.layout.cameraLook)
-    // Back to Screen + Cam: the remembered vertical scene, never a stale twin.
-    const back = simulcastLegLiveRequest({
-      ...config,
-      layout: { ...config.layout, layoutPreset: 'screen-camera' }
+      layout: { ...config.layout, layoutPreset, cameraMirror: true }
     })
-    expect(back?.layout.layoutPreset).toBe('vertical-camera-bottom')
-    // Follow off pins the leg to the picked scene.
-    expect(
-      simulcastLegLiveRequest({ ...cameraOnly, simulcastFollowsProgram: false })?.layout
-        .layoutPreset
-    ).toBe('vertical-camera-bottom')
-    expect(
-      simulcastLegLiveRequest({ ...cameraOnly, simulcastFollowsProgram: false })?.layout.cameraLook
-    ).toEqual(cameraOnly.layout.cameraLook)
+    const onBrb = simulcastLegLiveRequest(program('camera-only'), brb)
+    expect(onBrb?.layout.layoutPreset).toBe('vertical-camera-only')
+    expect(onBrb?.layout.cameraMirror).toBe(true)
+    const backOnFigma = simulcastLegLiveRequest(program('screen-camera'), figma)
+    expect(backOnFigma?.layout.layoutPreset).toBe('vertical-split')
   })
 })

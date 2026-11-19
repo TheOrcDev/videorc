@@ -7,7 +7,8 @@ import {
   CAPTURE_CONFIG_STORAGE_KEY,
   RELOAD_KEEPING_SEED_JS,
   reloadKeepingSeedJs,
-  WORKING_SCENE_STORAGE_KEY
+  WORKING_SCENE_STORAGE_KEY,
+  SCENES_STORAGE_KEY
 } from './renderer-profile-seed.mjs'
 
 const renderer = resolve(import.meta.dirname, '../../apps/desktop/src/renderer/src')
@@ -17,7 +18,8 @@ test('the seed keys are the renderer storage keys', () => {
   assert.match(presets, /export const WORKING_SCENE_KEY = '([^']+)'/)
   assert.equal(
     presets.match(/export const WORKING_SCENE_KEY = '([^']+)'/)[1],
-    WORKING_SCENE_STORAGE_KEY
+    WORKING_SCENE_STORAGE_KEY,
+    SCENES_STORAGE_KEY
   )
   const capture = readFileSync(resolve(renderer, 'lib/capture.ts'), 'utf8')
   assert.equal(capture.match(/captureConfig: '([^']+)'/)?.[1], CAPTURE_CONFIG_STORAGE_KEY)
@@ -64,7 +66,10 @@ test('the reload snippet forgets the working scene and reloads', () => {
 test('the seed survives the renderer persisting its old config before the reload', () => {
   const seed = JSON.stringify({ layout: { layoutPreset: 'screen-only' } })
   const run = runSeedSnippet({ [CAPTURE_CONFIG_STORAGE_KEY]: seed })
-  run.store.set(CAPTURE_CONFIG_STORAGE_KEY, JSON.stringify({ layout: { layoutPreset: 'screen-camera' } }))
+  run.store.set(
+    CAPTURE_CONFIG_STORAGE_KEY,
+    JSON.stringify({ layout: { layoutPreset: 'screen-camera' } })
+  )
   run.store.set(WORKING_SCENE_STORAGE_KEY, '{"visual":{}}')
   run.listeners.get('pagehide')()
   assert.equal(run.store.get(CAPTURE_CONFIG_STORAGE_KEY), seed)
@@ -103,4 +108,23 @@ test('no smoke seeds the capture config and reloads on its own timer', () => {
       )
     })
   assert.deepEqual(offenders, [])
+})
+
+// A stale v2 library must not override a deterministic capture seed (D15).
+test('a clean seed clears v2 again on pagehide; a real-source seed preserves it', () => {
+  const stored = { [SCENES_STORAGE_KEY]: '{"version":2}', [WORKING_SCENE_STORAGE_KEY]: '{}' }
+  const clean = runSeedSnippet(stored)
+  assert.equal(clean.store.has(SCENES_STORAGE_KEY), false)
+  clean.store.set(SCENES_STORAGE_KEY, 'late renderer write')
+  clean.listeners.get('pagehide')()
+  assert.equal(clean.store.has(SCENES_STORAGE_KEY), false)
+  const kept = runSeedSnippet(stored, reloadKeepingSeedJs({ forgetWorkingScene: false }))
+  kept.listeners.get('pagehide')()
+  assert.equal(kept.store.get(SCENES_STORAGE_KEY), stored[SCENES_STORAGE_KEY])
+  const migration = runSeedSnippet(
+    stored,
+    reloadKeepingSeedJs({ forgetWorkingScene: false, forgetScenes: true })
+  )
+  assert.equal(migration.store.has(SCENES_STORAGE_KEY), false)
+  assert.equal(migration.store.get(WORKING_SCENE_STORAGE_KEY), '{}')
 })

@@ -4,7 +4,7 @@ import { APP_ICONS_MAX_IDS } from '../../../shared/app-icons'
 
 // Plan 210 S5: app icons come from main (`getAppIcons`, filled in by S4),
 // once per bundle id for the whole window: the scene list, the Studio
-// gallery and New scene… share them. An app main leaves out keeps the
+// gallery and Add scene… share them. An app main leaves out keeps the
 // generic glyph; it is not asked again this launch.
 
 const icons = new Map<string, string | null>()

@@ -1,6 +1,6 @@
 import {
   globalShortcutEntries,
-  globalShortcutLayout,
+  sceneSlotPosition,
   isGlobalShortcutAction,
   type GlobalShortcutAction
 } from '../../../shared/global-shortcuts'
@@ -9,7 +9,7 @@ import { LONG_CLIP_SECONDS } from '../../../shared/clip-marks'
 import { withAppNotifications } from '@/lib/notify'
 import { toast } from '@/lib/toast'
 import { GO_LIVE_SHORTCUT_LABEL, RECORD_SHORTCUT_LABEL } from '@/lib/go-live-copy'
-import { layoutPresetLabel } from '@/lib/layout-labels'
+import { sceneAtPosition } from '@/lib/scenes'
 
 import type {
   ClipLength,
@@ -47,7 +47,8 @@ export interface GlobalShortcutContext {
   systemAudio?: readonly [status: DeviceStatus | undefined, shown: boolean]
   /** Sets captureConfig.audio.systemAudioEnabled, exactly as the switch does. */
   setSystemAudioEnabled?: (enabled: boolean) => void
-  switchLayout?: (action: GlobalShortcutAction) => void
+  scenes?: readonly { id: string }[]
+  switchScene?: (action: GlobalShortcutAction) => void
 }
 
 export function executeGlobalShortcut(
@@ -55,8 +56,14 @@ export function executeGlobalShortcut(
   context: GlobalShortcutContext
 ): void {
   if (!isGlobalShortcutAction(action)) return
-  if (action.startsWith('layout') || action.startsWith('scene:')) {
-    context.switchLayout?.(action)
+  const position = sceneSlotPosition(action)
+  if (position !== null) {
+    const scene = sceneAtPosition(context.scenes ?? [], position)
+    if (scene) context.switchScene?.(`scene:${scene.id}`)
+    return
+  }
+  if (action === 'layout-next' || action === 'layout-previous' || action.startsWith('scene:')) {
+    context.switchScene?.(action)
     return
   }
   if (action === 'record-toggle') {
@@ -118,13 +125,12 @@ const GLOBAL_SHORTCUT_LABELS: Partial<Record<GlobalShortcutAction, string>> = {
 
 /**
  * Pure. What a global shortcut does, in words, never its id (plan 174 A-22).
- * Read out of its list (a toast, "Already used by …"), so a vertical layout
- * says so ("Vertical screen + camera").
+ * Read out of its list in a toast or an "Already used by …" refusal too.
  */
 export function globalShortcutLabel(action: string): string {
   if (!isGlobalShortcutAction(action)) return action
-  const layout = globalShortcutLayout(action)
-  if (layout) return layoutPresetLabel(layout, { bothOrientations: true })
+  const position = sceneSlotPosition(action)
+  if (position !== null) return `Scene ${position}`
   return GLOBAL_SHORTCUT_LABELS[action] ?? action
 }
 
@@ -209,10 +215,17 @@ export class GlobalShortcutsRegistrar {
         publishRegistration({ ...result?.registered })
         if (result?.unavailable) {
           // Nothing registered (Linux on Wayland). Keys someone set would
-          // otherwise do nothing without a word; with none set (the default
-          // Hide screen key alone), Settings says it.
+          // otherwise do nothing without a word; with only the default
+          // Hide screen and position keys, Settings says it.
           const userSet = { ...shortcuts, screenHideToggle: shortcuts.screenHideToggle ?? '' }
-          if (globalShortcutEntries(userSet).some(([, value]) => value?.trim())) {
+          if (
+            globalShortcutEntries(userSet).some(
+              ([action, value]) =>
+                value?.trim() &&
+                (sceneSlotPosition(action) === null ||
+                  shortcuts.sceneSlots?.[sceneSlotPosition(action)!] !== undefined)
+            )
+          ) {
             const description = result.unavailable
             withAppNotifications((app) =>
               app.publishGlobalShortcutsProblem({

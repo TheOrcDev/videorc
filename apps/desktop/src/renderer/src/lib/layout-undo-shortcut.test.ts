@@ -44,7 +44,7 @@ describe('what blocks the layout undo', () => {
       <input id="name" />
       <textarea id="notes"></textarea>
       <div id="editor" contenteditable="true"></div>
-      <button id="plain">Save scene</button>
+      <button id="plain">Add scene…</button>
       <div id="page"></div>
     `
     const byId = (id: string) => document.getElementById(id)

@@ -1,6 +1,6 @@
 import type { CloudTestOutput } from '@/lib/backend'
 import {
-  buildSimulcastParams,
+  simulcastLegVideo,
   type CaptureConfig,
   streamOutputVideoForTarget,
   streamOutputVideoSettings
@@ -35,7 +35,7 @@ export function cloudTestOutputs(config: CaptureConfig): CloudTestOutput[] {
       videoKbps: Math.min(first.bitrateKbps, ...horizontal.map((video) => video.bitrateKbps))
     }
   ]
-  const vertical = buildSimulcastParams(config)?.video
+  const vertical = simulcastLegVideo(config)
   if (vertical) {
     outputs.push({
       orientation: 'vertical',

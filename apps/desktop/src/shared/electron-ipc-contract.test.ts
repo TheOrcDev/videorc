@@ -1115,13 +1115,21 @@ describe('shortcut recorder IPC', () => {
   })
 })
 
-describe('global layout shortcut IPC', () => {
+describe('global scene shortcut IPC', () => {
   it('accepts every canonical action and rejects unknown payloads', () => {
     for (const action of GLOBAL_SHORTCUT_ACTIONS)
       expect(validateElectronEventPayload('global-shortcuts:triggered', action)).toBe(action)
     expect(() =>
       validateElectronEventPayload('global-shortcuts:triggered', 'layout:unknown')
     ).toThrow()
+    expect(() =>
+      validateElectronEventPayload('global-shortcuts:triggered', 'layout:camera-only')
+    ).toThrow()
+    for (const sceneSlots of [{ 0: 'F13' }, { 10: 'F13' }, { '01': 'F13' }, { 1: 123 }, []])
+      expect(() => validateElectronInvokeArgs('global-shortcuts:set', [{ sceneSlots }])).toThrow()
+    expect(() =>
+      validateElectronInvokeArgs('global-shortcuts:set', [{ sceneSlots: { 1: '', 9: 'F13' } }])
+    ).not.toThrow()
     expect(() =>
       validateElectronInvokeArgs('global-shortcuts:set', [{ layouts: { unknown: 'Control+1' } }])
     ).toThrow()

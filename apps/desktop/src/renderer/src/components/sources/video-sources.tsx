@@ -7,6 +7,7 @@ import { PanelSection } from '@/components/panel-section'
 import { SourceFacts, SourceItem } from '@/components/sources/source-item'
 import { SourceSwitchStatus } from '@/components/studio/source-switch-status'
 import { Alert, AlertTitle } from '@/components/ui/alert'
+import { Button } from '@/components/ui/button'
 import { Switch } from '@/components/ui/switch'
 import { useCameraLowLight } from '@/hooks/use-camera-low-light'
 import { useStudioCore, useStudioDiagnostics, useStudioPreview } from '@/hooks/use-studio'
@@ -18,6 +19,8 @@ import {
   capturePickerDevices,
   sourceStandIn
 } from '@/lib/capture'
+import { openScenes } from '@/lib/scene-add-request'
+import { layoutShowsScreen } from '@/lib/scenes'
 import { cameraFacts, screenFacts } from '@/lib/source-facts'
 import { screenShareLostStatus } from '@/lib/screen-share-recovery'
 import { selectedDeviceStatus, videoSourceStatus, type SourceStatus } from '@/lib/source-status'
@@ -29,6 +32,28 @@ import { systemAccessRows } from '@/lib/system-access'
 // permission is the page's alert with its fix (plan 174 S3.8,
 // `source-permission-alerts.tsx`); the screen picker stays locked while
 // nothing can be captured at all.
+//
+// Plan 231 D2: every scene keeps its own screen, so the Screen picker here
+// changes the screen of the scene on stream, and its row says so, with the
+// way to Studio's Scenes section, the home of scenes (D8).
+
+/** The scene the Screen picker changes: the one on stream. */
+export interface ScreenScene {
+  name: string
+  /** Whether its layout draws the screen (Camera only doesn't). */
+  showsScreen: boolean
+}
+
+/**
+ * Sources → Screen's line (D2, D8): the scene on stream, whose screen the
+ * picker changes. A scene whose layout draws no screen (Camera only) says so:
+ * the capture still running under it (D18) isn't its screen.
+ */
+export function screenSceneLine(scene: ScreenScene): string {
+  return scene.showsScreen
+    ? `Shown by “${scene.name}”, the scene on stream. Each scene keeps its own screen.`
+    : `“${scene.name}”, the scene on stream, shows no screen. Each scene keeps its own screen.`
+}
 
 export interface VideoSourcesViewProps {
   sessionActive: boolean
@@ -44,6 +69,10 @@ export interface VideoSourcesViewProps {
     status: SourceStatus | null
     facts: string | null
     switchStatus?: ReactNode
+    /** The scene on stream, whose screen this is (D2), or null before the library is read. */
+    scene?: ScreenScene | null
+    /** Studio's Scenes section, the home of scenes (D8). */
+    onOpenScenes?: () => void
     onChange: (captureId: string | undefined) => void
   }
   camera: {
@@ -110,6 +139,26 @@ export function VideoSourcesView({
             onChange={screen.onChange}
           />
           {screen.facts ? <SourceFacts>{screen.facts}</SourceFacts> : null}
+          {/* Whose screen this is (D2), and the way to scenes' home (D8):
+              the action keeps the line's end, however the words wrap. */}
+          {screen.scene ? (
+            <p
+              className="flex items-baseline justify-between gap-3 text-xs text-muted-foreground"
+              data-slot="screen-scene"
+            >
+              <span className="min-w-0">{screenSceneLine(screen.scene)}</span>
+              {screen.onOpenScenes ? (
+                <Button
+                  className="-mr-2 shrink-0"
+                  size="xs"
+                  variant="ghost"
+                  onClick={screen.onOpenScenes}
+                >
+                  Open Scenes
+                </Button>
+              ) : null}
+            </p>
+          ) : null}
           {synthetic ? (
             <div className="flex items-center justify-between gap-3">
               <span className="flex min-w-0 flex-col">
@@ -250,7 +299,9 @@ export function VideoSources(): ReactElement {
     mediaAccess,
     systemAccessContext,
     wsStatus,
-    requestCameraLowLight
+    requestCameraLowLight,
+    savedScenes,
+    activeSavedSceneId
   } = useStudioCore()
   const { previewCameraStatus, previewCameraLowFrameRate, previewScreenStatus } = useStudioPreview()
   const { diagnosticStats } = useStudioDiagnostics()
@@ -287,6 +338,9 @@ export function VideoSources(): ReactElement {
     sources.cameraId && cameraLowLight?.cameraId === sources.cameraId && cameraLowLight.supported
       ? cameraLowLight
       : null
+
+  // D2: the Screen pick below changes this scene's screen.
+  const sceneOnStream = savedScenes.find((scene) => scene.id === activeSavedSceneId)
 
   const switchCapture = (captureId: string | undefined): void => {
     const next: SourceSelection = buildCaptureSources(sources, captureDevices, captureId)
@@ -361,6 +415,13 @@ export function VideoSources(): ReactElement {
           }),
         facts: selectedCaptureId ? screenFacts(previewScreenStatus) : null,
         switchStatus: <SourceSwitchStatus kind="capture" />,
+        scene: sceneOnStream
+          ? {
+              name: sceneOnStream.name,
+              showsScreen: layoutShowsScreen(sceneOnStream.visual.layout)
+            }
+          : null,
+        onOpenScenes: openScenes,
         onChange: switchCapture
       }}
       sessionActive={isSessionActive}

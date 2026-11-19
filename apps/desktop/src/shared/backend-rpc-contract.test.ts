@@ -4666,3 +4666,83 @@ describe('cloud recording download jobs', () => {
     ).toThrow()
   })
 })
+
+describe('Scene pictures contract (plan 231 S5)', () => {
+  const fixture = JSON.parse(
+    readFileSync(
+      new URL('../../../../protocol-fixtures/scene-pictures.json', import.meta.url),
+      'utf8'
+    )
+  )
+  it('accepts every target and the available, hidden and unsupported fixtures', () => {
+    expect(runtimeValidatedBackendRpcMethods).toContain('sources.scene_pictures')
+    expect(validateBackendRpcParams('sources.scene_pictures', fixture.params)).toEqual(
+      fixture.params
+    )
+    for (const result of [fixture.result, fixture.hidden, fixture.unsupported])
+      expect(validateBackendRpcResult('sources.scene_pictures', result)).toEqual(result)
+  })
+  it('rejects unknown, null, malformed and ambiguous fields', () => {
+    for (const params of [
+      {},
+      { targets: [{ kind: 'none' }] },
+      { targets: [{ kind: 'app', bundleId: 'a', windowId: 'w' }] },
+      { ...fixture.params, maxWidth: null },
+      { ...fixture.params, maxWidth: 0 },
+      { ...fixture.params, secret: true },
+      { targets: Array.from({ length: 513 }, () => ({ kind: 'app', bundleId: 'a' })) }
+    ])
+      expect(() => validateBackendRpcParams('sources.scene_pictures', params)).toThrow()
+    const target = fixture.params.targets[0]
+    for (const result of [
+      { ...fixture.result, hidden: null },
+      { ...fixture.result, unsupported: false },
+      { ...fixture.result, extra: true },
+      { ...fixture.result, elapsedMs: -1 },
+      ...[
+        { target, jpegBase64: null },
+        { target, jpegBase64: 'https://example.com/picture.jpg' },
+        { target, jpegBase64: '/9j/4AAQ', unavailable: 'hidden' },
+        { target, unavailable: 'other' },
+        { target, jpegBase64: '/9j/4AAQ', width: 240 }
+      ].map((picture) => ({ pictures: [picture], elapsedMs: 1 }))
+    ])
+      expect(() => validateBackendRpcResult('sources.scene_pictures', result)).toThrow()
+  })
+})
+
+describe('Retirement-only screen retention (plan 231 D18)', () => {
+  const fixture = JSON.parse(
+    readFileSync(
+      new URL('../../../../protocol-fixtures/scene-layout-retention.json', import.meta.url),
+      'utf8'
+    )
+  )
+  it('accepts legacy omission and retainScreen true on preview and live', () => {
+    for (const method of ['scene.layout.apply_preview', 'scene.layout.apply_live'] as const) {
+      for (const params of [fixture.legacy, fixture.retain])
+        expect(validateBackendRpcParams(method, params)).toEqual(params)
+      for (const retainScreen of [false, null, 'true', 1])
+        expect(() =>
+          validateBackendRpcParams(method, { ...fixture.legacy, retainScreen })
+        ).toThrow()
+    }
+  })
+
+  // Plan 231 D4: the vertical leg's screen demand is live only.
+  it('accepts verticalLegScreen true on live only', () => {
+    expect(validateBackendRpcParams('scene.layout.apply_live', fixture.verticalLeg)).toEqual(
+      fixture.verticalLeg
+    )
+    expect(() =>
+      validateBackendRpcParams('scene.layout.apply_preview', fixture.verticalLeg)
+    ).toThrow()
+    for (const verticalLegScreen of [false, null, 'true', 1])
+      expect(() =>
+        validateBackendRpcParams('scene.layout.apply_live', {
+          ...fixture.legacy,
+          verticalLegScreen
+        })
+      ).toThrow()
+  })
+})

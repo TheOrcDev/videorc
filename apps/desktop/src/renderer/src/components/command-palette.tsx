@@ -70,6 +70,7 @@ import { useVirtualCamera } from '@/hooks/use-virtual-camera'
 import { VIDEORC_CAMERA_COPY, virtualCameraView } from '@/lib/virtual-camera-view'
 import { CONNECT_AGENT_COMMAND, STOP_AGENTS_COMMAND } from '@/lib/agents-view'
 import { EDIT_SCENE_LABEL } from '@/lib/edit-scene'
+import { openAddScene } from '@/lib/scene-add-request'
 import {
   GREEN_SCREEN_KEYWORDS,
   GREEN_SCREEN_SETTINGS_LABEL,
@@ -87,7 +88,7 @@ import { sessionIsReplayOnly } from '../../../shared/capture-state'
 import { WINDOW_NAMES } from '../../../shared/window-names'
 
 // ⌘K (plan 174 S3.21, A-9, A-13): Session first (the transport's own
-// actions), then every page with one verb, the windows, the saved scenes,
+// actions), then every page with one verb, the windows, the scenes (with Add scene…),
 // the banners (plan 186), the sounds (plan 189), the Avatar's, Sidekick's and Settings' tabs,
 // and the look. Each item's value is the words the footer shows for it, and its keywords are what
 // people type instead.
@@ -182,6 +183,7 @@ export function CommandPalette({
     toggleScreenHidden,
     runtimeInfo,
     savedScenes,
+    sceneLibraryActions,
     applySavedSceneResult,
     captureConfig,
     requestRemoteMicrophoneMute,
@@ -576,6 +578,17 @@ export function CommandPalette({
           <>
             <CommandSeparator />
             <CommandGroup heading="Scenes">
+              {/* Plan 231 D14: Studio's Add scene…, the home of scenes (D8). */}
+              <CommandItem
+                disabled={sceneLibraryActions.readOnly}
+                value="Add scene…"
+                keywords={['new scene', 'scene', 'app', 'window', 'display', 'camera only']}
+                onSelect={() => run(openAddScene)}
+              >
+                <SceneIcon className="size-4" />
+                Add scene…
+                <Context>Studio</Context>
+              </CommandItem>
               {savedScenes.map((scene) => (
                 <CommandItem
                   key={scene.id}
@@ -588,8 +601,8 @@ export function CommandPalette({
                   }
                 >
                   <SceneIcon className="size-4" />
-                  {scene.name}
-                  <Context>Saved scene</Context>
+                  Switch to {scene.name}
+                  <Context>Scene</Context>
                 </CommandItem>
               ))}
             </CommandGroup>

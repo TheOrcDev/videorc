@@ -407,15 +407,6 @@ function updateKeys(container, nodes) {
   })
 }
 
-// The desktop sends each layout's name with describe (plan 174 I-14); an
-// older desktop without it still gets a readable key.
-function presetName(id) {
-  const label = describe?.layoutLabels?.[id]
-  if (typeof label === 'string' && label) return label
-  const words = id.replace(/[-_]/g, ' ')
-  return words.charAt(0).toUpperCase() + words.slice(1)
-}
-
 function key({ name, hint, on = false, toggle = false, accent, disabled = false, onTap, onHold }) {
   const node = el('button', 'key')
   node.type = 'button'
@@ -554,9 +545,8 @@ function renderDeck() {
     [session, mic, systemAudio, comments].filter((node) => node !== null)
   )
 
-  const presets = describe.layoutPresets ?? []
   const savedScenes = state.savedScenes ?? []
-  $('scenes-label').hidden = presets.length === 0 && savedScenes.length === 0
+  $('scenes-label').hidden = savedScenes.length === 0
   $('deck-scenes').replaceChildren(
     ...savedScenes.map(({ id, name }) =>
       key({
@@ -564,14 +554,6 @@ function renderDeck() {
         on: state.activeSavedSceneId === id,
         toggle: true,
         onTap: () => send({ kind: 'sceneApply', sceneId: id })
-      })
-    ),
-    ...presets.map((layoutPreset) =>
-      key({
-        name: presetName(layoutPreset),
-        on: !state.activeSavedSceneId && state.layoutPreset === layoutPreset,
-        toggle: true,
-        onTap: () => send({ kind: 'sceneApply', layoutPreset })
       })
     )
   )

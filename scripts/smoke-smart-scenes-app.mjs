@@ -1,47 +1,25 @@
 #!/usr/bin/env node
-// Proves plan 210 end to end on the dev app (S11): scenes made for apps,
-// swap in place within D5's budget, a scene that survives its app's relaunch,
-// Follow the app in front (D10), Hide screen on every output (D8) and the
-// password-manager hide (D11).
+// Plan 231 acceptance on an isolated dev profile with real fixture windows:
+// v1 migration (Figma/T3 Code stand-ins), three appended app scenes, reorder,
+// position keys through the OS-global handler, native Camera-only retention,
+// a key superseding a pending switch, and both stream orientations (including
+// a screen on the vertical leg while the program is Camera only).
+// Keeps plan 210's relaunch, Follow, Hide screen on every output,
+// password-manager hide, and plan 219's out-of-sight recovery checks.
 //
-// Setup: the two fixture apps (scripts/fixtures/build-fixture-apps.mjs:
-// Fixture Alpha, red; Fixture Beta, blue), the dev app on an isolated smoke
-// profile with the smoke command server, a 1920x1080@30 canvas, camera off,
-// Clips off except where a step needs the ring.
-//
-// Steps, each PASS, FAIL or SKIP (a SKIP names the macOS grant it lacks):
-//   1 new-scenes       New scene… on the Scene page picks both fixtures and
-//                      adds two scenes with `app` and no `audio`.
-//   2 switches         20 switches A→B→A while recording; the recording,
-//                      decoded per frame and aligned by Alpha's white flash,
-//                      gives click→new picture p50/p95, black and
-//                      wrong-layout frames (Beta is a shrunk freeform layout,
-//                      so every switch also changes the layout). Gate: D5.
-//   3 relaunch         Quit Fixture Beta: its scene is refused. Relaunch it:
-//                      the scene switches to the new window.
-//   4 follow           Bring Beta, then Alpha, then Finder (no scene) to the
-//                      front with `open`; the program follows within the
-//                      400 ms settle plus the budget and stays on Finder (and
-//                      on Videorc when it is the only Electron app running).
-//   5 hide             Record + stream to a local FFmpeg RTMP sink with the
-//                      Screen file (separate source recordings) and the Clips
-//                      ring on; Hide screen for four seconds, Show, save a
-//                      clip. The recording, the stream, the Screen file and
-//                      the clip each show a frosted, still picture for the
-//                      hidden span and a sharp, moving one after Show.
-//   6 password-manager Fixture Beta goes on the password-manager list; on a
-//                      display scene, Beta in front hides, leaving shows, and
-//                      a manual hide is never auto-shown.
-//
-// Output: `<out>/smart-scenes-summary.json` (every number, per-frame
-// classes per output) and one line per step. Exit 1 on any FAIL. Never goes
-// live on a real channel.
+// Alpha is red/full-bleed; Beta is blue/shrunk. Encoded frame analysis must
+// see every cut, zero black and zero wrong-layout frames. Switch timing and
+// host load are reported: main also misses 150 ms (plan-231-run/AB/notes.md).
+// Follow/privacy gates retain their existing budgets. Never streams to a
+// real channel; the dual leg and privacy stream use local FFmpeg receivers.
 //
 // Usage: pnpm smoke:smart-scenes [-- --switches 20 --out <dir>]
-//   VIDEORC_SMOKE_TIMEOUT_MS, VIDEORC_SMOKE_RTMP_PORT (13937),
-//   VIDEORC_SMOKE_FFMPEG_PATH, VIDEORC_SMOKE_FFPROBE_PATH
+// VIDEORC_SMOKE_TIMEOUT_MS, VIDEORC_SMOKE_RTMP_PORT (13937),
+// VIDEORC_SMOKE_FFMPEG_PATH, VIDEORC_SMOKE_FFPROBE_PATH.
+// VIDEORC_SMART_SCENES_MAX_HOST_LOAD optionally waits for a timing host.
 
 import { execFileSync, spawn, spawnSync } from 'node:child_process'
+import assert from 'node:assert/strict'
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:net'
 import { hostname, loadavg, tmpdir } from 'node:os'
@@ -50,6 +28,8 @@ import { fileURLToPath } from 'node:url'
 
 import { buildFixtureApps } from './fixtures/build-fixture-apps.mjs'
 import { launchDevApp } from './lib/app-launcher.mjs'
+import { reloadKeepingSeedJs } from './lib/renderer-profile-seed.mjs'
+import { decodeSceneFrames } from './lib/scene-artifact-frames.mjs'
 import { resolveFinalRecordingPath } from './lib/final-recording-path.mjs'
 import {
   activateApp,
@@ -76,7 +56,6 @@ import {
   SHARP_LIVE_MIN,
   followBudgetMs,
   followGate,
-  frostFeaturesFromRawFrames,
   hideSpanVerdict,
   newScenesGate,
   passwordManagerGate,
@@ -143,6 +122,9 @@ const summary = {
   hostLoadAtStart: loadavg().map((value) => Number(value.toFixed(1))),
   budget: {
     ...SMART_SCENES_BUDGET,
+    switchTimingPolicy: 'report-only',
+    mainMeasuredAppSwitchP95Ms: 229,
+    timingBaseline: 'plan-231-run/AB/notes.md (orchestrator ruling 2026-11-16)',
     followBudgetMs: followBudgetMs(),
     sharpLiveMin: SHARP_LIVE_MIN,
     sharpHiddenMax: SHARP_HIDDEN_MAX
@@ -197,7 +179,11 @@ try {
       VIDEORC_SMOKE_PREVIEW_MOTION: '0',
       VIDEORC_NATIVE_PREVIEW_SURFACE: '1'
     },
-    onLine: (line) => devAppLogLines.push(line)
+    onLine: (line) => {
+      devAppLogLines.push(line)
+      if (line.startsWith('[smoke:'))
+        console.log(line.replace(/(token|capability).*$/i, '[handshake omitted]'))
+    }
   })
   const smoke = launched.connections['preview-motion-ready']
   smokeConnection = smoke
@@ -243,7 +229,6 @@ try {
   await renderer.evaluate(
     `window.__videorcSmokeScenePresets.configure({video: ${JSON.stringify(video)}}); return true`
   )
-  await renderer.chooseCameraOff()
   await renderer.setClips(false)
   await waitForRecordingIdle()
   await renderer.applyLayout(
@@ -251,55 +236,187 @@ try {
     (state) => state.canSave && state.visual.layout.layoutPreset === 'screen-only',
     'screen-only working scene'
   )
+  await renderer.chooseCameraOff()
 
-  // ------------------------------------------------------------------ step 1
+  // Plan 231 D15: a real plan-210 library, using the fixture windows as the
+  // Figma/T3 Code stand-ins. Camera Off is this host's selected device, not
+  // something a migrated scene may change. Follow remains on.
+  summary.steps.migration = await step('migration', async () => {
+    const before = await renderer.state()
+    const now = '2026-10-30T09:00:00.000Z'
+    const scenes = [alpha, beta].map((fixture, index) => ({
+      id: index === 0 ? 'plan210-figma' : 'plan210-t3code',
+      name: index === 0 ? 'Figma' : 'T3 Code',
+      createdAt: now,
+      updatedAt: now,
+      visual: {
+        ...before.visual,
+        sources: {
+          ...before.visual.sources,
+          screenId: undefined,
+          screenName: undefined,
+          windowId: fixture.windowId,
+          windowName: fixture.name,
+          captureOff: false,
+          testPattern: false,
+          app: { bundleId: fixture.bundleId, name: fixture.name, follows: true }
+        }
+      }
+    }))
+    const working = { version: 1, origin: 'saved', sceneId: scenes[0].id, visual: scenes[0].visual }
+    await renderer.evaluate(`
+      const state = window.__videorcSmokeScenePresets.streamingState();
+      const config = { ...state.captureConfig, sources: ${JSON.stringify(scenes[0].visual.sources)},
+        layout: ${JSON.stringify(scenes[0].visual.layout)}, simulcastFollowsProgram: true,
+        lastVerticalPreset: 'vertical-camera-top' };
+      const old = ${JSON.stringify({ version: 1, scenes })};
+      const working = ${JSON.stringify(working)};
+      const seed = () => {
+        localStorage.setItem('videorc.captureConfig', JSON.stringify(config));
+        localStorage.setItem('videorc.scene-presets.v1', JSON.stringify(old));
+        localStorage.setItem('videorc.working-scene.v1', JSON.stringify(working));
+        localStorage.removeItem('videorc.scenes.v2');
+      };
+      seed(); window.addEventListener('pagehide', seed);
+      ${reloadKeepingSeedJs({ forgetWorkingScene: false, forgetScenes: true, delayMs: 100 })}
+      return true;
+    `)
+    await sleep(500)
+    const state = await renderer.waitFor(
+      (state) => state.canSave && state.scenes[0]?.id === scenes[0].id,
+      'plan 210 migration settled'
+    )
+    const library = await renderer.evaluate(
+      `return JSON.parse(localStorage.getItem('videorc.scenes.v2'))`
+    )
+    assert.deepEqual(
+      library.scenes.map((scene) => scene.name),
+      ['Figma', 'T3 Code', 'Screen + camera', 'Camera only', 'Side by side']
+    )
+    assert.equal(state.activeId, scenes[0].id, 'STOP: migration changed the scene on stream')
+    assert.equal(
+      state.visual.sources.windowId,
+      alpha.windowId,
+      'STOP: migration changed the program window'
+    )
+    assert.deepEqual(
+      state.visual.layout,
+      before.visual.layout,
+      'STOP: migration changed the program layout'
+    )
+    assert.equal(library.scenes[0].shows.follows, true)
+    assert.equal(library.scenes[0].layouts.vertical.layoutPreset, 'vertical-screen-only')
+    assert.deepEqual(
+      await renderer.evaluate(
+        `return JSON.parse(localStorage.getItem('videorc.scene-presets.v1'))`
+      ),
+      JSON.parse(JSON.stringify({ version: 1, scenes })),
+      'migration must never rewrite v1'
+    )
+    await waitForScreenLive(alpha.windowId)
+    await openTab(smoke, 'layout', '[data-testid="scene-new"]')
+    const chip = await renderer.evaluate(
+      `return document.querySelector('[data-saved-scene="plan210-figma"] [data-slot="scene-shortcut-keys"]')?.textContent`
+    )
+    assert.match(chip, /1/, 'position 1 belongs to Figma')
+    return {
+      ok: true,
+      failures: [],
+      library,
+      detail:
+        'v1 order, Figma on stream, position 1, Follow and both layouts preserved; v1 untouched'
+    }
+  })
+  if (!summary.steps.migration.ok) fail('STOP: migration acceptance failed; see migration evidence')
+
   const targets = {
     alpha: { key: 'alpha', color: 'red', fixture: alpha, app: fixtures.apps.alpha, sceneId: null },
     beta: { key: 'beta', color: 'blue', fixture: beta, app: fixtures.apps.beta, sceneId: null }
   }
   summary.steps.newScenes = await step('new-scenes', async () => {
     await openTab(smoke, 'layout', '[data-testid="scene-new"]')
-    const before = (await renderer.state()).scenes.length
-    await renderer.evaluate(`
+    const before = await renderer.state()
+    const add = async (ids) =>
+      renderer.evaluate(`
+      const closeDeadline = performance.now() + 8000;
+      while (document.querySelector('[data-testid="add-scene-dialog"]') && performance.now() < closeDeadline) await sleep(50);
+      if (document.querySelector('[data-testid="add-scene-dialog"]')) throw new Error('Previous Add scene dialog did not close');
       (await waitFor('[data-testid="scene-new"]', 8000)).click();
-      for (const id of ${JSON.stringify([fixtures.apps.alpha.bundleId, fixtures.apps.beta.bundleId])}) {
+      await waitFor('[data-testid="add-scene-dialog"]', 8000);
+      for (const id of ${JSON.stringify(ids)}) {
         const card = await waitFor('[data-app-choice="' + id + '"]', 20000);
         if (card.getAttribute('aria-pressed') !== 'true') card.click();
+        await sleep(50);
       }
-      const add = await waitFor('[data-testid="new-scene-add"]', 8000);
+      const button = await waitFor('[data-testid="new-scene-add"]', 8000);
       const deadline = performance.now() + 8000;
-      while (add.disabled && performance.now() < deadline) await sleep(50);
-      if (add.disabled) throw new Error('Add scenes stayed disabled: ' + (add.closest('[data-slot]')?.textContent ?? ''));
-      add.click();
-      return true;
+      while (button.disabled && performance.now() < deadline) await sleep(50);
+      if (button.disabled) throw new Error('Add scenes stayed disabled: ' + button.closest('[role="dialog"]')?.textContent);
+      button.click(); return true;
     `)
-    const state = await renderer.waitFor(
-      (current) =>
-        current.scenes.length >= before + 2 &&
-        [fixtures.apps.alpha.bundleId, fixtures.apps.beta.bundleId].every((id) =>
-          current.scenes.some((scene) => scene.visual?.sources?.app?.bundleId === id)
-        ),
-      'two scenes made for the fixtures'
+    await add([fixtures.apps.alpha.bundleId, fixtures.apps.beta.bundleId])
+    await renderer.waitFor(
+      (state) => state.scenes.length === before.scenes.length + 2,
+      'two app scenes added'
     )
+    // A second scene for Alpha is a supported app scene too; proves naming and
+    // a third append without requiring an unrelated installed application.
+    await add([fixtures.apps.alpha.bundleId])
+    const state = await renderer.waitFor(
+      (state) => state.scenes.length === before.scenes.length + 3,
+      'three app scenes appended'
+    )
+    assert.deepEqual(
+      state.scenes.slice(0, before.scenes.length).map((scene) => scene.id),
+      before.scenes.map((scene) => scene.id)
+    )
+    assert.equal(state.activeId, before.activeId)
+    assert.deepEqual(state.visual, before.visual, 'Add scene must never change the program')
+    const added = state.scenes.slice(before.scenes.length)
     for (const target of Object.values(targets)) {
-      target.sceneId = state.scenes.find(
+      target.sceneId = added.find(
         (scene) => scene.visual.sources.app?.bundleId === target.app.bundleId
       ).id
     }
-    const verdict = newScenesGate(state.scenes, [fixtures.apps.alpha, fixtures.apps.beta])
+    assert.equal(added[2].name, 'Fixture Alpha 2')
+    const verdict = newScenesGate(added, [fixtures.apps.alpha, fixtures.apps.beta])
     return {
       ...verdict,
-      scenes: state.scenes.map((scene) => ({
-        id: scene.id,
-        name: scene.name,
-        app: scene.visual.sources.app ?? null,
-        windowId: scene.visual.sources.windowId ?? null,
-        audio: scene.audio ?? null
-      })),
-      detail: `"${state.scenes.find((scene) => scene.id === targets.alpha.sceneId).name}" and "${state.scenes.find((scene) => scene.id === targets.beta.sceneId).name}", app scenes, no audio`
+      scenes: added,
+      detail: 'three app scenes at the end; existing keys and program unchanged'
     }
   })
-  if (!summary.steps.newScenes.ok) fail('every later step needs the two app scenes; stopping here')
+  if (!summary.steps.newScenes.ok) fail('every later step needs the app scenes')
+  summary.steps.reorder = await step('reorder', async () => {
+    const before = await renderer.state()
+    const last = before.scenes.at(-1)
+    await renderer.evaluate(`
+      const button = await waitFor('[data-saved-scene="${last.id}"] [data-slot="list-row-button"]');
+      button.focus(); button.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowUp', altKey: true, bubbles: true }));
+      return true;
+    `)
+    const state = await renderer.waitFor(
+      (state) => state.scenes.at(-2)?.id === last.id,
+      'keyboard reorder'
+    )
+    assert.equal(state.activeId, before.activeId)
+    const rows = await renderer.evaluate(
+      `return [...document.querySelectorAll('[data-saved-scene]')].map((row) => ({ id: row.getAttribute('data-saved-scene'), key: row.querySelector('[data-slot="scene-shortcut-keys"]')?.textContent }))`
+    )
+    for (let i = 0; i < Math.min(9, state.scenes.length); i += 1) {
+      assert.match(
+        rows.find((row) => row.id === state.scenes[i].id)?.key ?? '',
+        new RegExp(String(i + 1))
+      )
+    }
+    return {
+      ok: true,
+      failures: [],
+      rows,
+      detail: 'reorder kept program; position chips follow the new order'
+    }
+  })
+  if (!summary.steps.reorder.ok) fail('reorder acceptance failed')
   await openTab(smoke, 'studio', '[data-videorc-preview-card]')
 
   // Beta becomes a shrunk freeform layout (edits auto-save into the scene on
@@ -307,8 +424,7 @@ try {
   // frame is countable. Alpha stays full-bleed for the frost checks.
   // The edit is the Scene page's Freeform entry (`freeformEntryPatch`): the
   // arrangement and the placement, never a layout preset. A preset without
-  // `keepScene` is a switch to a built-in layout, which leaves the saved scene
-  // by design (D3), so it would never save into Beta.
+  // Layout edits save into the scene on stream (D11).
   await renderer.goTo(targets.beta)
   await waitForScreenLive(targets.beta.fixture.windowId)
   await renderer.applyLayout(
@@ -347,8 +463,13 @@ try {
       let current = targets.alpha
       for (let index = 0; index < options.switches; index += 1) {
         const next = current === targets.alpha ? targets.beta : targets.alpha
-        const requestedAtMs = await renderer.requestSwitch(next.sceneId)
-        const done = await renderer.waitForSwitchDone(switchTimeoutMs)
+        const requestedAtMs = await renderer.requestSlot(next.sceneId)
+        const settled = await renderer.waitFor(
+          (state) => state.activeId === next.sceneId && !state.pendingId,
+          'position key put the requested scene on stream',
+          switchTimeoutMs
+        )
+        const done = { ok: settled.activeId === next.sceneId, at: Date.now() }
         variant.switches.push({
           index,
           from: current.key,
@@ -411,9 +532,440 @@ try {
       })),
       recording: run.recording,
       hostLoad: run.hostLoad,
-      detail: `${stats.switches} switches, click→new picture p50 ${fmt(latency.p50)} p95 ${fmt(latency.p95)} max ${fmt(latency.max)} ms (budget ${SMART_SCENES_BUDGET.switchP95Ms}), black ${stats.pixels.blackFramesTotal + stats.pixels.afterCutBlackFramesTotal}, wrong layout ${stats.pixels.wrongLayoutFramesTotal}, cuts ${stats.pixels.cutsSeen}/${stats.switches}, host load ${run.hostLoad.start}→${run.hostLoad.end}`
+      detail: `${stats.switches} switches, click→new picture p50 ${fmt(latency.p50)} p95 ${fmt(latency.p95)} max ${fmt(latency.max)} ms (timing report-only; main p95 229 ms), black ${stats.pixels.blackFramesTotal + stats.pixels.afterCutBlackFramesTotal}, wrong layout ${stats.pixels.wrongLayoutFramesTotal}, cuts ${stats.pixels.cutsSeen}/${stats.switches}, host load ${run.hostLoad.start}→${run.hostLoad.end}`
     }
   })
+
+  const switchPixels = summary.steps.switches.stats?.pixels
+  if (
+    switchPixels &&
+    (switchPixels.blackFramesTotal + switchPixels.afterCutBlackFramesTotal > 0 ||
+      switchPixels.wrongLayoutFramesTotal > 0)
+  )
+    fail('STOP: black or wrong-layout frames in the switching recording')
+  // D18: ten Camera only → app swaps, retaining the native capture owner.
+  summary.steps.cameraReturn = await step('camera-return', async () => {
+    const camera = (devices.devices ?? []).find(
+      (device) => device.kind === 'camera' && device.status === 'available'
+    )
+    if (!camera)
+      return {
+        skipped: true,
+        ok: true,
+        failures: [],
+        reason: 'No available camera / Camera grant; Camera only acceptance needs the packaged app',
+        detail: 'SKIP: no camera grant'
+      }
+    await requestSmokeCommand(smoke, 'select-camera-device', { settleMs: 500 }, { timeoutMs })
+    const base = await renderer.evaluate(
+      `return JSON.parse(localStorage.getItem('videorc.scenes.v2')).scenes.find((scene) => scene.id === ${JSON.stringify(targets.alpha.sceneId)})`
+    )
+    const cameraScene = {
+      ...base,
+      id: 'acceptance-camera-only',
+      name: 'Acceptance Camera only',
+      shows: { kind: 'none' },
+      layouts: {
+        horizontal: { ...base.layouts.horizontal, layoutPreset: 'camera-only' },
+        vertical: { ...base.layouts.vertical, layoutPreset: 'vertical-camera-only' }
+      }
+    }
+    assert.equal(
+      await renderer.evaluate(
+        `return window.__videorcSmokeScenePresets.add([${JSON.stringify(cameraScene)}])`
+      ),
+      true
+    )
+    await renderer.waitFor(
+      (state) => state.scenes.some((scene) => scene.id === cameraScene.id),
+      'Camera only added'
+    )
+    await renderer.goTo(targets.alpha)
+    const run = await recordWhile('camera-return', smoke, async (variant) => {
+      // Establish fresh native switch attribution inside this recording.
+      await renderer.goTo(targets.beta)
+      await renderer.goTo(targets.alpha)
+      let current = targets.alpha
+      for (let i = 0; i < 10; i += 1) {
+        const before = await request(ws, timeoutMs, 'compositor.status')
+        const screenBefore = await request(ws, timeoutMs, 'preview.screen.status')
+        await renderer.goTo({ key: 'Camera only', sceneId: cameraScene.id })
+        await sleep(300)
+        const held = await request(ws, timeoutMs, 'preview.screen.status')
+        const heldCompositor = await request(ws, timeoutMs, 'compositor.status')
+        assert.equal(held.state, 'live')
+        assert.equal(held.sourceId, screenBefore.sourceId, 'D18 kept the same capture identity')
+        assert.ok(
+          held.framesCaptured >= screenBefore.framesCaptured,
+          'D18 never resets the native frame counter'
+        )
+        assert.equal(heldCompositor.screenSwitch?.generation, before.screenSwitch?.generation)
+        const next = current === targets.alpha ? targets.beta : targets.alpha
+        const requestedAtMs = await renderer.requestSlot(next.sceneId)
+        await renderer.waitFor(
+          (state) => state.activeId === next.sceneId && !state.pendingId,
+          'Camera only return'
+        )
+        const after = await request(ws, timeoutMs, 'compositor.status')
+        assert.equal(after.screenSwitch?.mode, 'in-place', 'Camera only return must swap in place')
+        assert.ok(
+          Number.isInteger(before.screenSwitch?.generation),
+          'native generation evidence required'
+        )
+        // Rebinding a target advances its logical generation even when the
+        // native stream is reused. The held identity above and in-place mode
+        // prove D18 without mistaking that attribution change for a cold start.
+        assert.equal(after.screenSwitch.sourceId, next.fixture.windowId)
+        variant.switches.push({
+          requestedAtMs,
+          to: next.key,
+          generationBeforeCamera: before.screenSwitch.generation,
+          generationWhileCamera: heldCompositor.screenSwitch.generation,
+          generationAfterRebind: after.screenSwitch.generation,
+          mode: after.screenSwitch.mode
+        })
+        current = next
+        await sleep(SETTLE_MS)
+      }
+      await renderer.goTo(targets.alpha)
+    })
+    const rows = run.switches.map((row, index) => ({
+      ...row,
+      pixels: sceneSwitchVerdict({
+        features: run.analysis.features,
+        ptsMs: run.analysis.ptsMs,
+        offsetMs: run.analysis.anchor.offsetMs,
+        requestedAtMs: row.requestedAtMs,
+        untilMs: row.requestedAtMs + SETTLE_MS,
+        fromColor: 'other',
+        toColor: targets[row.to].color,
+        fromLayoutMark: true,
+        toLayoutMark: layoutMark[row.to]
+      })
+    }))
+    for (const row of rows) {
+      assert.equal(row.pixels.cutSeen, true)
+      assert.equal(row.pixels.afterCutBlackFrames, 0, 'STOP: black frame after Camera only return')
+      assert.equal(
+        row.pixels.wrongLayoutFrames,
+        0,
+        'STOP: wrong-layout frame after Camera only return'
+      )
+    }
+    const latencyMs = percentiles(rows.map((row) => row.pixels.latencyMs))
+    return {
+      ok: true,
+      failures: [],
+      timingPolicy: 'report-only',
+      latencyMs,
+      rows,
+      hostLoad: run.hostLoad,
+      recording: run.recording,
+      detail: `10 Camera only round trips: p50 ${fmt(latencyMs.p50)}, p95 ${fmt(latencyMs.p95)} ms; native generation retained, every return in-place; host load ${run.hostLoad.start}→${run.hostLoad.end}`
+    }
+  })
+  const cameraReturn = summary.steps.cameraReturn
+  if (cameraReturn.failures?.some((failure) => failure.includes('STOP:')))
+    fail('STOP: Camera only pixel regression')
+  summary.steps.rapidKeys = await step('rapid-keys', async () => {
+    await renderer.goTo(targets.alpha)
+    const state = await renderer.state()
+    const first = state.scenes.findIndex((scene) => scene.id === targets.beta.sceneId) + 1
+    const second = state.scenes.findIndex((scene) => scene.id === targets.alpha.sceneId) + 1
+    let firstPending = null
+    const run = await recordWhile('rapid-keys', smoke, async (variant) => {
+      firstPending = await renderer.evaluate(`
+        window.__videorcSmokeScenePresets.shortcut('scene-slot-${first}');
+        const deadline = performance.now() + 8000;
+        let pending = window.__videorcSmokeScenePresets.state();
+        while (pending.pendingId !== ${JSON.stringify(targets.beta.sceneId)} && performance.now() < deadline) { await sleep(1); pending = window.__videorcSmokeScenePresets.state(); }
+        if (pending.pendingId !== ${JSON.stringify(targets.beta.sceneId)}) throw new Error('The first position key never entered a pending switch');
+        const proof = { pendingId: pending.pendingId, activeId: pending.activeId, atMs: Date.now() };
+        window.__videorcSmokeScenePresets.shortcut('scene-slot-${second}');
+        const trace = [];
+        const end = performance.now() + 1500;
+        while (performance.now() < end) {
+          const state = window.__videorcSmokeScenePresets.state();
+          const row = { atMs: Date.now(), activeId: state.activeId, pendingId: state.pendingId,
+            windowId: state.visual.sources.windowId, intent: state.diagnostics.layoutIntentId,
+            queued: state.diagnostics.sceneShortcutQueued, requested: state.diagnostics.sceneShortcutRequested,
+            generation: state.diagnostics.sceneResolveGeneration };
+          if (!trace.length || JSON.stringify({ ...trace.at(-1), atMs: 0 }) !== JSON.stringify({ ...row, atMs: 0 })) trace.push(row);
+          await sleep(5);
+        }
+        return { ...proof, trace };
+      `)
+      variant.rapidKeys = firstPending
+      await renderer.waitFor(
+        (state) => state.activeId === targets.alpha.sceneId && !state.pendingId,
+        'the second key wins'
+      )
+      await sleep(SETTLE_MS)
+      variant.rapidKeys.final = await renderer.state()
+      const compositor = await request(ws, timeoutMs, 'compositor.status')
+      variant.rapidKeys.compositor = compositor
+      const screen = (compositor.sources ?? []).find(
+        (source) => source.kind === 'screen' || source.kind === 'window'
+      )
+      // Capture status may still describe the preceding retained target. The
+      // encoded final picture below is the program oracle for the second key.
+      variant.rapidKeys.captureStatus = screen
+    })
+    const bad = run.analysis.features.filter(
+      (frame) =>
+        frame.centre === 'black' ||
+        (frame.centre === 'red' && frame.layoutMark) ||
+        (frame.centre === 'blue' && !frame.layoutMark)
+    )
+    assert.equal(bad.length, 0, 'STOP: rapid-key recording contains black or wrong-layout frames')
+    assert.equal(
+      firstPending.final.activeId,
+      targets.alpha.sceneId,
+      'the second scene is on stream'
+    )
+    assert.equal(firstPending.final.pendingId, null)
+    const tail = run.analysis.features.filter(
+      (frame) =>
+        frame.centre !== 'white' &&
+        run.analysis.ptsMs[frame.index] >= run.analysis.ptsMs.at(-1) - 1000
+    )
+    assert.ok(tail.length >= 15, 'a sustained final picture is required')
+    assert.ok(
+      tail.every((frame) => frame.centre === 'red' && !frame.layoutMark),
+      'the final recorded program must be Alpha in its own layout'
+    )
+
+    return {
+      ok: true,
+      failures: [],
+      recording: run.recording,
+      firstPending,
+      detail:
+        'two position keys inside one switch; second scene owns the program; zero black/wrong-layout frames'
+    }
+  })
+  if (summary.steps.rapidKeys.failures?.some((failure) => failure.includes('STOP:')))
+    fail('STOP: rapid-key pixel regression')
+
+  summary.steps.verticalKeys = await step('vertical-keys', async () => {
+    await renderer.goTo(targets.alpha)
+    // Different layouts on both orientations make a stale leg observable.
+    const library = await renderer.evaluate(
+      `return JSON.parse(localStorage.getItem('videorc.scenes.v2'))`
+    )
+    for (const target of Object.values(targets)) {
+      const scene = library.scenes.find((scene) => scene.id === target.sceneId)
+      scene.layouts.vertical = {
+        ...scene.layouts.horizontal,
+        layoutPreset: 'vertical-screen-only',
+        verticalScreenFraming: 'fill'
+      }
+      assert.equal(
+        await renderer.evaluate(
+          `return window.__videorcSmokeScenePresets.edit(${JSON.stringify(scene)})`
+        ),
+        true
+      )
+    }
+    const port = await freeTcpPort(rtmpPortBase)
+    const receiver = startReceiver({
+      port,
+      recvPath: join(outputDirectory, 'position-keys-vertical.flv')
+    })
+    receivers.push(receiver)
+    await waitForOwnedTcpListener({
+      child: receiver.child,
+      port,
+      timeoutMs: 8000,
+      diagnostics: () => receiver.log
+    })
+    const target = {
+      id: 'scene-keys-vertical',
+      platform: 'custom',
+      label: 'Scene keys vertical',
+      enabled: true,
+      serverUrl: `rtmp://127.0.0.1:${port}/live`,
+      streamKey: 'scene-keys',
+      urlMode: 'server-and-key',
+      streamKeyPresent: true,
+      authMode: 'manual-rtmp',
+      outputOrientation: 'vertical',
+      createdAt: '2026-01-01T00:00:00Z',
+      updatedAt: '2026-01-01T00:00:00Z'
+    }
+    const streaming = {
+      enabled: true,
+      mode: 'multi',
+      targets: [target],
+      enabledTargetIds: [target.id],
+      defaultOutputPreset: 'custom',
+      defaultBitrateKbps: 6000
+    }
+    await renderer.evaluate(
+      `window.__videorcSmokeScenePresets.configure({streamEnabled: true, streaming: ${JSON.stringify(streaming)}}); return true`
+    )
+    await sleep(500)
+    const active = library.scenes.find((scene) => scene.id === targets.alpha.sceneId)
+    const run = await recordWhile(
+      'vertical-keys',
+      smoke,
+      async (variant) => {
+        let current = targets.alpha
+        for (let i = 0; i < 4; i += 1) {
+          const next = current === targets.alpha ? targets.beta : targets.alpha
+          const requestedAtMs = await renderer.requestSlot(next.sceneId)
+          await renderer.waitFor(
+            (state) => state.activeId === next.sceneId && !state.pendingId,
+            'both-leg position key'
+          )
+          variant.switches.push({ from: current.key, to: next.key, requestedAtMs })
+          await sleep(SETTLE_MS)
+          current = next
+        }
+        const stored = await renderer.evaluate(
+          `return JSON.parse(localStorage.getItem('videorc.scenes.v2'))`
+        )
+        const noScreen = stored.scenes.find((scene) => scene.id === 'acceptance-camera-only')
+        if (noScreen) {
+          const own = stored.scenes.find((scene) => scene.id === targets.beta.sceneId)
+          noScreen.shows = own.shows
+          noScreen.layouts.vertical = own.layouts.vertical
+          assert.equal(
+            await renderer.evaluate(
+              `return window.__videorcSmokeScenePresets.edit(${JSON.stringify(noScreen)})`
+            ),
+            true
+          )
+          const requestedAtMs = await renderer.requestSlot(noScreen.id)
+          await renderer.waitFor(
+            (state) => state.activeId === noScreen.id && !state.pendingId,
+            'camera program with its own vertical screen'
+          )
+          await waitForScreenLive(beta.windowId)
+          variant.verticalOnly = [{ requestedAtMs, fromColor: 'red', fromLayoutMark: false }]
+          await sleep(SETTLE_MS)
+          await renderer.goTo(targets.alpha)
+          noScreen.shows = { kind: 'none' }
+          noScreen.layouts.vertical = {
+            ...noScreen.layouts.vertical,
+            layoutPreset: 'vertical-camera-only',
+            arrangementMode: 'preset',
+            sourceTransformOverrides: {}
+          }
+          assert.equal(
+            await renderer.evaluate(
+              `return window.__videorcSmokeScenePresets.edit(${JSON.stringify(noScreen)})`
+            ),
+            true
+          )
+          await renderer.goTo({ key: 'Camera only on both legs', sceneId: noScreen.id })
+          const kept = await request(ws, timeoutMs, 'preview.screen.status')
+          assert.equal(kept.sourceId, alpha.windowId, 'no-screen legs retain Alpha')
+          noScreen.shows = own.shows
+          noScreen.layouts.vertical = own.layouts.vertical
+          const editedAtMs = Date.now()
+          assert.equal(
+            await renderer.evaluate(
+              `return window.__videorcSmokeScenePresets.edit(${JSON.stringify(noScreen)})`
+            ),
+            true
+          )
+          await renderer.waitFor(
+            (state) =>
+              state.activeId === noScreen.id &&
+              state.visual.sources.windowId === beta.windowId &&
+              !state.pendingId,
+            'vertical edit put its own app on'
+          )
+          await waitForScreenLive(beta.windowId)
+          variant.verticalOnly.push({
+            requestedAtMs: editedAtMs,
+            fromColor: 'other',
+            // A full-frame Camera only picture carries no inset or border mark.
+            fromLayoutMark: false
+          })
+          await sleep(SETTLE_MS)
+          await renderer.goTo(targets.alpha)
+        }
+      },
+      {
+        streaming,
+        simulcast: {
+          layout: active.layouts.vertical,
+          video: { ...streamVideo, width: 1080, height: 1920 }
+        }
+      }
+    )
+    await waitForReceiverExit(receiver, 10000)
+    const vertical = analyzeFile(receiver.path, run.flashes)
+    assert.ok(vertical.anchor, 'vertical leg must contain the clock anchor')
+    assert.deepEqual(
+      [run.analysis.width, run.analysis.height],
+      [1920, 1080],
+      'horizontal recording canvas'
+    )
+    assert.deepEqual([vertical.width, vertical.height], [1080, 1920], 'vertical stream canvas')
+    const legs = {}
+    for (const [name, analysis] of Object.entries({ horizontal: run.analysis, vertical })) {
+      const rows = run.switches.map((row, index) =>
+        sceneSwitchVerdict({
+          features: analysis.features,
+          ptsMs: analysis.ptsMs,
+          offsetMs: analysis.anchor.offsetMs,
+          requestedAtMs: row.requestedAtMs,
+          untilMs: run.switches[index + 1]?.requestedAtMs ?? row.requestedAtMs + SETTLE_MS,
+          fromColor: targets[row.from].color,
+          toColor: targets[row.to].color,
+          fromLayoutMark: layoutMark[row.from],
+          toLayoutMark: layoutMark[row.to]
+        })
+      )
+      for (const row of rows) {
+        assert.equal(row.cutSeen, true, `${name} cut missing`)
+        assert.equal(row.blackFrames + row.afterCutBlackFrames, 0, `STOP: ${name} black frame`)
+        assert.equal(row.wrongLayoutFrames, 0, `STOP: ${name} wrong-layout frame`)
+      }
+      legs[name] = rows
+    }
+    const verticalOnly = (run.verticalOnly ?? []).map((row) =>
+      sceneSwitchVerdict({
+        features: vertical.features,
+        ptsMs: vertical.ptsMs,
+        offsetMs: vertical.anchor.offsetMs,
+        requestedAtMs: row.requestedAtMs,
+        untilMs: row.requestedAtMs + SETTLE_MS,
+        fromColor: row.fromColor,
+        toColor: 'blue',
+        fromLayoutMark: row.fromLayoutMark,
+        toLayoutMark: true
+      })
+    )
+    for (const row of verticalOnly) {
+      assert.equal(row.cutSeen, true, 'vertical-only own app picture required')
+      assert.equal(row.afterCutBlackFrames, 0, 'STOP: vertical-only black frame')
+      assert.equal(row.wrongLayoutFrames, 0, 'STOP: vertical-only wrong-layout frame')
+    }
+    await renderer.evaluate(
+      `window.__videorcSmokeScenePresets.configure({streamEnabled: false}); return true`
+    )
+    return {
+      ok: true,
+      failures: [],
+      legs,
+      verticalOnly,
+      hostLoad: run.hostLoad,
+      recording: run.recording,
+      detail:
+        'four position-key cuts on both legs, each in its own layout; zero black/wrong-layout frames'
+    }
+  })
+  if (summary.steps.verticalKeys.failures?.some((failure) => failure.includes('STOP:')))
+    fail('STOP: vertical-key pixel regression')
+
+  // D18 and the Camera-only vertical cases temporarily turn the shared
+  // camera on. Restore the original camera-off fixture before the existing
+  // Follow test, so it measures an app cut rather than a cold camera start.
+  await renderer.chooseCameraOff()
 
   // ------------------------------------------------------------------ step 3
   summary.steps.relaunch = await step('relaunch', async () => {
@@ -834,9 +1386,12 @@ try {
     // hide, and an app scene left on keeps its window on the preview while the
     // smoke's direct source pick takes effect; the list check wants a display
     // scene that stays on, so both app scenes go.
-    for (const target of [targets.beta, targets.alpha]) {
+    for (const scene of (await renderer.state()).scenes.filter(
+      (scene) => scene.visual.sources.app
+    )) {
+      const target = { sceneId: scene.id }
       await renderer.evaluate(
-        `return window.__videorcSmokeScenePresets.remove(${JSON.stringify(target.sceneId)})`
+        `return await window.__videorcSmokeScenePresets.remove(${JSON.stringify(target.sceneId)})`
       )
     }
     await renderer.waitFor(
@@ -848,13 +1403,13 @@ try {
     )
     // Deleting the scene on stream restores the working picture a moment
     // later; a display picked before that lands is overwritten by it.
-    await renderer.waitFor((state) => state.activeId === null, 'no saved scene on')
+    await renderer.waitFor(
+      (state) => Boolean(state.activeId) && !state.pendingId,
+      'D16 put the preceding scene on stream'
+    )
     await sleep(1500)
-    // D11 acts while a whole display is on stream; the working picture (no
-    // saved scene on) is that. The smoke's direct pick keeps the previous
-    // scene's `app` on the working sources, which the follower ignores with
-    // no saved scene on, and which a saved display scene would carry, so no
-    // display scene is saved here.
+    // D11 needs a display scene. Use the real Screen pick so D2 writes the
+    // scene's display and clears the previous app before D19's layout edit.
     await renderer.selectDisplay(display)
     await waitForScreenLive(display.id)
 
@@ -895,6 +1450,19 @@ try {
     await activateApp('/System/Library/CoreServices/Finder.app')
     await waitForFrontApp((front) => front.bundleId === 'com.apple.finder')
     await sleep(SMART_SCENES_BUDGET.followSettleMs + 400)
+
+    writeFileSync(
+      join(outputDirectory, 'password-manager-setup.json'),
+      JSON.stringify(
+        {
+          state: await renderer.state(),
+          listed,
+          native: await request(ws, timeoutMs, 'preview.screen.status')
+        },
+        null,
+        2
+      )
+    )
 
     // Beta to the front: hidden for the list.
     await activateApp(fixtures.apps.beta.appPath)
@@ -1170,6 +1738,7 @@ async function step(name, run) {
   try {
     const result = await run()
     result.durationMs = Date.now() - startedAt
+    writeFileSync(join(outputDirectory, name + '-result.json'), JSON.stringify(result, null, 2))
     console.log(
       `${result.ok ? 'PASS' : 'FAIL'} ${name}: ${result.detail ?? ''}${result.ok ? '' : `; ${result.failures.join('; ')}`}`
     )
@@ -1182,6 +1751,7 @@ async function step(name, run) {
       durationMs: Date.now() - startedAt,
       error: error?.stack ?? String(error)
     }
+    writeFileSync(join(outputDirectory, name + '-result.json'), JSON.stringify(result, null, 2))
     console.log(`FAIL ${name}: ${result.failures[0]}`)
     return result
   }
@@ -1191,7 +1761,19 @@ async function step(name, run) {
  * Records the program while `drive` runs (the fixture flashes at the start
  * and the end for the clock anchor), then decodes the file.
  */
-async function recordWhile(name, smoke, drive) {
+async function recordWhile(name, smoke, drive, { streaming, simulcast } = {}) {
+  const maxLoad = Number(process.env.VIDEORC_SMART_SCENES_MAX_HOST_LOAD ?? Infinity)
+  if (['switches', 'camera-return'].includes(name) && Number.isFinite(maxLoad)) {
+    const deadline = Date.now() + 600_000
+    while (loadavg()[0] >= maxLoad) {
+      if (Date.now() >= deadline)
+        throw new Error(
+          `No qualifying timing host: load ${loadavg()[0].toFixed(1)} is not below ${maxLoad}`
+        )
+      log(`waiting for a timing host below load ${maxLoad}; current ${loadavg()[0].toFixed(1)}`)
+      await sleep(15000)
+    }
+  }
   const variant = {
     name,
     hostLoad: { start: loadavg()[0].toFixed(1), end: null },
@@ -1212,11 +1794,16 @@ async function recordWhile(name, smoke, drive) {
     background: null,
     output: {
       recordEnabled: true,
-      streamEnabled: false,
+      streamEnabled: Boolean(streaming),
       outputDirectoryCapability: directory.capabilityId,
       video,
-      rtmp: { preset: 'custom', serverUrl: '', streamKey: '' }
-    }
+      rtmp: {
+        preset: 'custom',
+        serverUrl: streaming?.targets[0]?.serverUrl ?? '',
+        streamKey: streaming?.targets[0]?.streamKey ?? ''
+      }
+    },
+    ...(streaming ? { streaming, simulcast } : {})
   })
   if (!['recording', 'streaming'].includes(started.state))
     fail(`[${name}] expected a recording after session.start, got ${started.state}`)
@@ -1227,7 +1814,12 @@ async function recordWhile(name, smoke, drive) {
   await sleep(1500)
   variant.flashes.push(await flashFixtureApp(fixtureByKey('alpha'), 'start'))
   await sleep(1200)
-  await drive(variant)
+  let driveError = null
+  try {
+    await drive(variant)
+  } catch (error) {
+    driveError = error
+  }
   await sleep(400)
   variant.flashes.push(await flashFixtureApp(fixtureByKey('alpha'), 'end'))
   await sleep(900)
@@ -1258,6 +1850,23 @@ async function recordWhile(name, smoke, drive) {
     anchorOffsetMs: analysis.anchor.offsetMs,
     anchorDriftMs: analysis.anchorDriftMs
   }
+  writeFileSync(
+    join(outputDirectory, name + '-recording.json'),
+    JSON.stringify(
+      {
+        recording: variant.recording,
+        switches: variant.switches,
+        verticalOnly: variant.verticalOnly,
+        rapidKeys: variant.rapidKeys,
+        flashes: variant.flashes,
+        hostLoad: variant.hostLoad,
+        driveError: driveError?.message ?? null
+      },
+      null,
+      2
+    )
+  )
+  if (driveError) throw driveError
   variant.analysis = analysis
   log(
     `  ${name} recording ${file}: ${analysis.features.length} frames, anchor drift ${fmt(analysis.anchorDriftMs)} ms`
@@ -1267,44 +1876,9 @@ async function recordWhile(name, smoke, drive) {
 
 /** Decodes one file to per-frame features and anchors it on the flashes. */
 function analyzeFile(file, flashes) {
-  const ptsMs = execFileSync(
-    ffprobePath,
-    [
-      '-v',
-      'error',
-      '-select_streams',
-      'v:0',
-      '-show_entries',
-      'frame=best_effort_timestamp_time',
-      '-of',
-      'csv=p=0',
-      file
-    ],
-    { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 }
-  )
-    .trim()
-    .split(/\r?\n/)
-    .map((line) => Number(line.split(',')[0]) * 1000)
-  const raw = execFileSync(
+  const { features, ptsMs, width, height } = decodeSceneFrames(file, {
     ffmpegPath,
-    [
-      '-v',
-      'error',
-      '-i',
-      file,
-      '-map',
-      '0:v:0',
-      '-vf',
-      `scale=${ANALYSIS_WIDTH}:${ANALYSIS_HEIGHT}:flags=area`,
-      '-pix_fmt',
-      'rgb24',
-      '-f',
-      'rawvideo',
-      'pipe:1'
-    ],
-    { maxBuffer: 2 * 1024 * 1024 * 1024 }
-  )
-  const features = frostFeaturesFromRawFrames(raw, {
+    ffprobePath,
     width: ANALYSIS_WIDTH,
     height: ANALYSIS_HEIGHT
   })
@@ -1327,6 +1901,8 @@ function analyzeFile(file, flashes) {
   }
   return {
     file,
+    width,
+    height,
     ptsMs,
     features,
     anchor: anchor ? { ...anchor, by: anchoredBy } : null,
@@ -1387,13 +1963,7 @@ function createRendererDriver(smoke) {
     throw lastError
   }
   const chooseCameraOff = async () => {
-    await evaluate(`
-      const current = window.__videorcSmokeScenePresets.state();
-      window.__videorcSmokeScenePresets.configure({sources: {
-        ...current.visual.sources, cameraId: undefined, cameraName: undefined, cameraOff: true
-      }});
-      return true;
-    `)
+    await evaluate(`return await window.__videorcSmokeScenePresets.pickCameraOff()`)
     return waitFor(
       (current) =>
         current.canSave &&
@@ -1426,11 +1996,9 @@ function createRendererDriver(smoke) {
     let lastError = null
     for (let attempt = 1; attempt <= attempts; attempt += 1) {
       try {
-        await requestSmokeCommand(
-          smoke,
-          'select-screen-device',
-          { sourceId: device.id, settleMs: 0 },
-          { timeoutMs }
+        const before = await state()
+        await evaluate(
+          `return await window.__videorcSmokeScenePresets.pickScreen(${JSON.stringify(device.id)})`
         )
         await waitFor(settled, `working scene on ${device.name} (attempt ${attempt})`, 5000)
         await sleep(1000)
@@ -1439,8 +2007,17 @@ function createRendererDriver(smoke) {
           throw new Error(`${device.name} did not hold: ${JSON.stringify(held.visual.sources)}`)
         await applyLayout(
           { layoutPreset: 'screen-only' },
-          (current) => current.canSave && settled(current),
-          `${device.name} working scene confirmed (canSave)`
+          (current) =>
+            current.canSave &&
+            settled(current) &&
+            current.visual.layout.layoutPreset === 'screen-only',
+          `${device.name} scene-screen pick and Screen only confirmed`
+        )
+        const after = await state()
+        assert.equal(after.activeId, before.activeId, 'a Screen pick edits the scene on stream')
+        assert.equal(
+          after.scenes.find((scene) => scene.id === after.activeId).visual.sources.app,
+          undefined
         )
         return
       } catch (error) {
@@ -1511,6 +2088,15 @@ function createRendererDriver(smoke) {
       );
       return window.__vrcSmokeSwitch.reqAt;
     `)
+  const requestSlot = async (sceneId) => {
+    const position = (await state()).scenes.findIndex((scene) => scene.id === sceneId) + 1
+    assert.ok(position >= 1 && position <= 9)
+    return evaluate(`
+      const requested = Date.now();
+      window.__videorcSmokeScenePresets.shortcut('scene-slot-${position}');
+      return requested;
+    `)
+  }
   const waitForSwitchDone = async (waitMs) => {
     const until = Date.now() + waitMs
     while (Date.now() < until) {
@@ -1539,6 +2125,7 @@ function createRendererDriver(smoke) {
     waitForSceneToCarry,
     goTo,
     requestSwitch,
+    requestSlot,
     waitForSwitchDone,
     togglePrivacy
   }
@@ -1769,7 +2356,7 @@ function printHuman(summaryValue) {
   if (summaryValue.verdict) {
     console.log(
       summaryValue.verdict.ok
-        ? 'smoke:smart-scenes: PASS (new scenes, switches, relaunch, follow, hide on every output, password manager)'
+        ? 'smoke:smart-scenes: PASS (migration, append/reorder/keys, retained capture, both legs, relaunch, Follow and privacy)'
         : `smoke:smart-scenes: FAIL ${summaryValue.verdict.failures.join('; ')}`
     )
   }

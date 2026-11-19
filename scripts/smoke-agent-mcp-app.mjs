@@ -634,8 +634,19 @@ try {
   if (connected.connectedCount !== 1)
     fail(`agents.status after a call: ${JSON.stringify(connected)}`)
   const scenes = (await callOk(bridge, 'list_scenes')).structuredContent.scenes
-  const active = scenes.find((scene) => scene.active)
-  if (!active || !scenes.some((scene) => scene.id === 'screen-only' && scene.kind === 'layout')) {
+  const active = scenes.find((scene) => scene.onStream)
+  if (
+    !active ||
+    scenes.length < 4 ||
+    scenes.some(
+      (scene, index) =>
+        Object.keys(scene).sort().join(',') !== 'id,key,name,onStream,position,shows' ||
+        scene.position !== index + 1 ||
+        typeof scene.key !== 'string' ||
+        typeof scene.shows !== 'string' ||
+        typeof scene.onStream !== 'boolean'
+    )
+  ) {
     fail(`list_scenes: ${JSON.stringify(scenes)}`)
   }
   const sources = (await callOk(bridge, 'list_sources')).structuredContent
@@ -687,10 +698,41 @@ try {
   )
 
   // 4. Studio round trips against backend-confirmed state.
+  const sceneLibraryV2 = await evalRenderer(
+    `return JSON.parse(localStorage.getItem('videorc.scenes.v2'))`
+  )
+  const screenOnlyId = sceneLibraryV2.scenes.find(
+    (scene) => scene.layouts.horizontal.layoutPreset === 'screen-only'
+  ).id
+  // Scene-owned fixture: switching restores this scene's own source rather
+  // than a transient synthetic toggle left on the previous scene.
+  if (
+    (await evalRenderer(`
+    const scene = JSON.parse(localStorage.getItem('videorc.scenes.v2')).scenes.find((entry) => entry.id === ${JSON.stringify(screenOnlyId)});
+    scene.shows = {kind: 'test-pattern'};
+    return await window.__videorcSmokeScenePresets.edit(scene);
+  `)) !== true
+  )
+    fail('could not prepare the synthetic Screen only scene')
   const switched = await callOk(bridge, 'switch_scene', { sceneId: 'screen-only' })
-  if (switched.structuredContent?.scene?.id !== 'screen-only') {
+  if (switched.structuredContent?.scene?.id !== screenOnlyId) {
     fail(`switch_scene: ${JSON.stringify(switched)}`)
   }
+  const byId = await callOk(bridge, 'switch_scene', { sceneId: screenOnlyId })
+  if (byId.structuredContent?.scene?.id !== screenOnlyId) fail('listed scene id did not switch')
+  const sideId = sceneLibraryV2.scenes.find(
+    (scene) => scene.layouts.horizontal.layoutPreset === 'side-by-side'
+  )?.id
+  if (!sideId) fail('the fresh library must contain a Side by side scene')
+  if (
+    (await evalRenderer(
+      `const scene = JSON.parse(localStorage.getItem('videorc.scenes.v2')).scenes.find((scene) => scene.id === ${JSON.stringify(sideId)}); scene.layouts.horizontal.layoutPreset = 'screen-only'; return window.__videorcSmokeScenePresets.edit(scene)`
+    )) !== true
+  )
+    fail('could not prepare the missing-layout refusal')
+  const missingLayout = await call(bridge, 'switch_scene', { sceneId: 'side-by-side' })
+  if (!missingLayout.isError || !resultText(missingLayout).includes('No scene uses Side by side'))
+    fail(`missing legacy layout was not refused: ${resultText(missingLayout)}`)
   const committed = await request(renderer, timeoutMs, 'scene.get')
   if (committed?.sources?.some((source) => source.kind === 'camera' && source.visible !== false)) {
     fail(
@@ -701,7 +743,7 @@ try {
     'get_status to show Screen only',
     async () => {
       const value = (await call(bridge, 'get_status')).structuredContent
-      return { done: value?.scene?.id === 'screen-only', value: value?.scene }
+      return { done: value?.scene?.id === screenOnlyId, value: value?.scene }
     },
     AGENT_POLL
   )

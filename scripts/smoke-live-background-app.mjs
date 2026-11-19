@@ -191,6 +191,42 @@ try {
       'the clip buffer to turn off'
     )
     await requestSmokeCommand(smoke, 'enable-synthetic-source', { settleMs: 0 }, { timeoutMs })
+    // A scene owns the fixture too (D2/D9): a later renderer resync must
+    // restore this screen-only pattern, not a camera-enabled default.
+    const prepared = await requestSmokeCommand(
+      smoke,
+      'eval-js',
+      {
+        code: `
+      const hook = window.__videorcSmokeScenePresets;
+      const library = JSON.parse(localStorage.getItem('videorc.scenes.v2'));
+      const scene = library.scenes.find((entry) => entry.id === library.onStreamId);
+      scene.shows = {kind: 'test-pattern'};
+      scene.layouts.horizontal.layoutPreset = 'screen-only';
+      if (!await hook.edit(scene)) throw new Error('Fixture scene edit refused');
+      await hook.pickCameraOff();
+      if (!await hook.apply(scene.id)) throw new Error('Fixture scene apply refused');
+      return hook.state();
+    `
+      },
+      { timeoutMs }
+    )
+    await waitFor(async () => {
+      const { result } = await requestSmokeCommand(
+        smoke,
+        'eval-js',
+        { code: 'return window.__videorcSmokeScenePresets.state()' },
+        { timeoutMs }
+      )
+      return (
+        result.canSave &&
+        result.visual.sources.cameraOff === true &&
+        !result.visual.sources.cameraId &&
+        result.visual.sources.testPattern === true &&
+        result.visual.layout.layoutPreset === 'screen-only'
+      )
+    }, 'the renderer-owned screen-only pattern with Camera Off')
+    assert(prepared.result.activeId, 'the fixture must keep a scene on stream')
     await requestSmokeCommand(smoke, 'preview-window-open', {}, { timeoutMs })
     await waitFor(async () => (await status()).framesRendered > 0, 'the first preview frame')
 

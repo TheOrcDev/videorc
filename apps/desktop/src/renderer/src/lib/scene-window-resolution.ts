@@ -1,4 +1,4 @@
-import type { Device, ResolveAppWindowResult } from './backend'
+import type { Device, LayoutSettings, ResolveAppWindowResult } from './backend'
 import {
   appWindowFailureCopy,
   resolveSceneWindow,
@@ -12,6 +12,7 @@ import {
   type RememberedSceneApps,
   type ResolveAppWindow
 } from './scene-window-state'
+import type { SceneShows } from './scenes'
 
 export {
   reconcileWorkingSceneSources,
@@ -39,6 +40,17 @@ export type SavedSceneApplyOptions = {
   preferWindowId?: string
   /** `follow`: the follower's own apply, which never counts as the streamer's pick. */
   origin?: 'follow'
+  /**
+   * Plan 231: the scene goes on with this screen (a remote's `sceneId` and
+   * `screenId` together), which it keeps once the switch lands (D2).
+   */
+  shows?: SceneShows
+  /**
+   * Plan 231 D11, D18: the scene goes on with this layout (a layout chosen on
+   * the scene on stream that needs its own screen back), which it keeps once
+   * the switch lands. Its orientation is the layout's own.
+   */
+  layout?: LayoutSettings
 }
 
 export function rememberSceneWindowApp(

@@ -1,4 +1,5 @@
 import type { SavedSceneApplyResult } from '../scene-window-resolution'
+import type { SceneShows } from '../scenes'
 // The Studio's action context, built from the Studio's handles (plan 209 S5).
 // hooks/use-studio.tsx hands over, per intent, the latest render's handlers,
 // state and refs (`StudioActionSource`); this module turns them into the
@@ -41,7 +42,7 @@ import {
   VERTICAL_LAYOUT_PRESETS,
   capturePickerDevices,
   microphonePickerDevices,
-  simulcastLegLiveRequest,
+  simulcastLegVideo,
   type CaptureConfig,
   type SettingsState,
   type WsStatus
@@ -86,6 +87,11 @@ export interface StudioActionSource extends Omit<
   systemAudioShown: boolean
   setSystemAudioEnabled: (enabled: boolean) => void
   requestCameraPresetTransaction: (patch: Partial<LayoutSettings>) => Promise<boolean>
+  /** Plan 231 D14: the first scene with this layout goes on stream, or a refusal in words. */
+  switchToSceneWithLayout: (
+    layoutPreset: LayoutPreset,
+    options?: { shows?: SceneShows }
+  ) => Promise<SavedSceneApplyResult>
   screens: readonly Pick<StreamScreen, 'id'>[]
   activateScreen: (assetId: string) => Promise<boolean>
   clearActiveScreen: () => Promise<boolean>
@@ -103,8 +109,12 @@ export interface StudioActionSource extends Omit<
   ) => Promise<CommentHighlightState | null>
   publishCommentHighlightState: (state: CommentHighlightState) => void
   bannerListRef: Ref<readonly Banner[] | null>
-  savedScenes: readonly { id: string; name: string }[]
-  applySavedSceneResult?: (id: string) => Promise<SavedSceneApplyResult>
+  savedScenes: NonNullable<StudioActionContext['savedScenes']>
+  applySavedSceneResult?: (
+    id: string,
+    repaired?: undefined,
+    options?: { shows?: SceneShows }
+  ) => Promise<SavedSceneApplyResult>
   applySavedScene: (id: string) => Promise<boolean>
   captureConfigRef: Ref<CaptureConfig>
   deviceListRef: Ref<DeviceList>
@@ -213,7 +223,7 @@ export function studioActionContext(studio: StudioActionSource): StudioActionCon
     systemAudio: [studio.systemAudioStatus, studio.systemAudioShown],
     setSystemAudioEnabled: studio.setSystemAudioEnabled,
     knownLayoutPresets,
-    applyLayoutPreset: (layoutPreset) => studio.requestCameraPresetTransaction({ layoutPreset }),
+    applyLayoutPreset: studio.switchToSceneWithLayout,
     hasTakeover: (assetId) => studio.screens.some((screen) => screen.id === assetId),
     activateTakeover: studio.activateScreen,
     clearTakeover: studio.clearActiveScreen,
@@ -276,7 +286,13 @@ export function studioActionContext(studio: StudioActionSource): StudioActionCon
         ? studio.outputFacts.live
         : sessionIsLive(studio.recordingRef.current),
     savedScenes: studio.savedScenes,
-    applySavedSceneResult: studio.applySavedSceneResult,
+    // Plan 231: a remote's screen rides in the switch to the scene it names.
+    applySavedSceneResult: studio.applySavedSceneResult
+      ? (id, options) =>
+          options?.shows
+            ? studio.applySavedSceneResult!(id, undefined, { shows: options.shows })
+            : studio.applySavedSceneResult!(id)
+      : undefined,
     applySavedScene: (id) => studio.applySavedScene(id),
     // Plan 209 PR B: what the Run the show and Arrange tools add. A deck
     // key never reads them.
@@ -331,7 +347,7 @@ export function studioActionContext(studio: StudioActionSource): StudioActionCon
       read: () => {
         const current = captureConfigRef.current
         const orientation = overlayOrientationForCanvas(current.video.width, current.video.height)
-        const verticalLeg = simulcastLegLiveRequest(current)
+        const verticalLeg = simulcastLegVideo(current)
         // The stage's own shapes: the Output, or the vertical stream's 9:16.
         const programAspect = current.video.width / Math.max(1, current.video.height)
         const sessionActive = sessionOwnsTransport(studio.recordingRef.current)
@@ -345,8 +361,8 @@ export function studioActionContext(studio: StudioActionSource): StudioActionCon
             vertical:
               orientation === 'vertical'
                 ? programAspect
-                : verticalLeg?.video
-                  ? verticalLeg.video.width / Math.max(1, verticalLeg.video.height)
+                : verticalLeg
+                  ? verticalLeg.width / Math.max(1, verticalLeg.height)
                   : 9 / 16
           },
           orientation,

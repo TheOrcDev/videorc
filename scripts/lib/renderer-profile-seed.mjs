@@ -20,23 +20,32 @@
  */
 export const CAPTURE_CONFIG_STORAGE_KEY = 'videorc.captureConfig'
 export const WORKING_SCENE_STORAGE_KEY = 'videorc.working-scene.v1'
+export const SCENES_STORAGE_KEY = 'videorc.scenes.v2'
 
 /**
  * Renderer JS (inside an `eval-js` seed, after it wrote the capture config):
  * keeps the seeded capture config through the reload, and reloads after
  * `delayMs`. By default it also forgets the working scene; a seed that keeps
  * the remembered sources and layout (a real-source run, a seed that only
- * adds destinations) passes `forgetWorkingScene: false`.
+ * adds destinations) passes `forgetWorkingScene: false`. The v2 scene library
+ * follows that choice; `forgetScenes` can override it for migration fixtures.
  */
-export function reloadKeepingSeedJs({ forgetWorkingScene = true, delayMs = 50 } = {}) {
+export function reloadKeepingSeedJs({
+  forgetWorkingScene = true,
+  forgetScenes = forgetWorkingScene,
+  delayMs = 50
+} = {}) {
   if (!Number.isInteger(delayMs) || delayMs < 0) throw new Error(`Not a reload delay: ${delayMs}`)
   const forget = forgetWorkingScene
     ? `\n    localStorage.removeItem(${JSON.stringify(WORKING_SCENE_STORAGE_KEY)});`
     : ''
+  const forgetLibrary = forgetScenes
+    ? `\n    localStorage.removeItem(${JSON.stringify(SCENES_STORAGE_KEY)});`
+    : ''
   return `{
   const seededCaptureConfig = localStorage.getItem(${JSON.stringify(CAPTURE_CONFIG_STORAGE_KEY)});
   const writeSeed = () => {
-    if (seededCaptureConfig !== null) localStorage.setItem(${JSON.stringify(CAPTURE_CONFIG_STORAGE_KEY)}, seededCaptureConfig);${forget}
+    if (seededCaptureConfig !== null) localStorage.setItem(${JSON.stringify(CAPTURE_CONFIG_STORAGE_KEY)}, seededCaptureConfig);${forget}${forgetLibrary}
   };
   writeSeed();
   window.addEventListener('pagehide', writeSeed);

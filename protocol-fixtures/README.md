@@ -164,3 +164,23 @@ backend's parser must both reproduce every case byte for byte:
 
 The overlay's RPC and event shapes (`htmlOverlays.*`, a banner with
 `kind: "html"`) ride `high-risk-contracts.json` under `htmlOverlay`.
+
+## `scene-pictures.json`
+
+Scene stills (plan 231 S5): ordered app/window/display targets, JPEG bytes,
+per-target unavailability, Hide screen refusal, and unsupported platforms.
+Optional flags are omitted, never null. Both languages read this fixture:
+
+- Rust: `cargo test -p videorc-backend scene_pictures`
+- TypeScript: `pnpm --filter @videorc/desktop test -- backend-rpc-contract.test.ts`
+
+## `scene-layout-retention.json`
+
+Plan 231 D18's layout request pair: legacy omission and `retainScreen: true`,
+shared by preview/live. It prevents retirement only and never requests startup.
+`verticalLeg` is plan 231 D4's live-only `verticalLegScreen: true`: a program
+that draws no screen while the running vertical leg draws the selected one,
+which the commit then needs (started, or switched to, and kept).
+Rust: `cargo test -p videorc-backend retain_screen` and `vertical_leg_screen`;
+TypeScript:
+`pnpm --filter @videorc/desktop exec vitest run src/shared/backend-rpc-contract.test.ts`.

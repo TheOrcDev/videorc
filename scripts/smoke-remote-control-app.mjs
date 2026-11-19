@@ -208,11 +208,30 @@ try {
     'synthetic compositor readiness'
   )
 
+  const prepared = await requestSmokeCommand(
+    smoke,
+    'eval-js',
+    {
+      code: `
+        const library = JSON.parse(localStorage.getItem('videorc.scenes.v2'));
+        const scene = library.scenes.find((entry) => entry.layouts.horizontal.layoutPreset === 'screen-only');
+        scene.shows = {kind: 'test-pattern'};
+        if (!await window.__videorcSmokeScenePresets.edit(scene)) throw new Error('Synthetic fixture scene edit refused');
+        return window.__videorcSmokeScenePresets.state();
+      `
+    },
+    { timeoutMs }
+  )
+  const mappedScreenOnly = prepared.result.scenes.find(
+    (scene) => scene.visual.layout.layoutPreset === 'screen-only'
+  )?.id
+  if (!mappedScreenOnly) fail('no scene prepared for the legacy Screen only request')
   const sceneAckPromise = waitForRemoteEvent(remote, 'remote.ack')
   const sceneStatePromise = waitForRemoteEvent(
     remote,
     'remote.state',
-    (state) => state?.layoutPreset === 'screen-only'
+    (state) =>
+      state?.layoutPreset === 'screen-only' && state?.activeSavedSceneId === mappedScreenOnly
   )
   const sceneTicket = await remoteRequest(remote, 'remote.intent', {
     kind: 'sceneApply',
@@ -601,8 +620,27 @@ try {
   await waitForBackendState(
     renderer,
     'remote.describe',
-    (surface) => surface?.state?.activeSavedSceneId === null,
-    'built-in layout confirmation'
+    (surface) =>
+      surface?.state?.activeSavedSceneId === savedScene.id &&
+      surface.state.layoutPreset === 'screen-only',
+    'layout edits the same scene'
+  )
+  // Layout edits no longer leave Figma. Switch away explicitly so the
+  // remote key proves a real confirmed-state edge rather than a no-op.
+  const away = await requestSmokeCommand(
+    smoke,
+    'eval-js',
+    {
+      code: `return await window.__videorcSmokeScenePresets.apply(${JSON.stringify(mappedScreenOnly)})`
+    },
+    { timeoutMs }
+  )
+  if (away.result !== true) fail('could not switch away before the saved-scene key')
+  await waitForBackendState(
+    renderer,
+    'remote.describe',
+    (surface) => surface?.state?.activeSavedSceneId === mappedScreenOnly,
+    'different scene before the saved-scene key'
   )
   const savedAckPromise = waitForRemoteEvent(remote, 'remote.ack')
   const savedStatePromise = waitForRemoteEvent(
@@ -620,6 +658,77 @@ try {
     fail(`saved scene intent refused: ${JSON.stringify(savedAck)}`)
   await savedStatePromise
   console.log('remote-control smoke: saved Figma scene ack + confirmed state OK')
+
+  // D2: a legacy display pick edits the scene on stream.
+  const available = await request(renderer, timeoutMs, 'devices.list', { ffmpegPath: 'ffmpeg' })
+  const display = available.devices.find(
+    (device) => device.kind === 'screen' && device.status === 'available'
+  )
+  if (display) {
+    await new Promise((resolve) => setTimeout(resolve, 400))
+    const ackPromise = waitForRemoteEvent(remote, 'remote.ack')
+    const ticket = await remoteRequest(remote, 'remote.intent', {
+      kind: 'sceneApply',
+      screenId: display.id
+    })
+    const ack = await ackPromise
+    if (!ticket.payload?.accepted || ack.intentId !== ticket.payload.intentId || !ack.ok)
+      fail(`screenId pick refused: ${JSON.stringify(ack)}`)
+    const confirmedBy = Date.now() + timeoutMs
+    let confirmed = null
+    do {
+      const snapshot = await requestSmokeCommand(
+        smoke,
+        'eval-js',
+        {
+          code: `const state = window.__videorcSmokeScenePresets.state(); const library = JSON.parse(localStorage.getItem('videorc.scenes.v2')); return {activeId: state.activeId, sources: state.visual.sources, shows: library.scenes.find((scene) => scene.id === state.activeId)?.shows}`
+        },
+        { timeoutMs }
+      )
+      confirmed = snapshot.result
+      if (
+        confirmed.activeId === savedScene.id &&
+        confirmed.sources.screenId === display.id &&
+        confirmed.shows?.kind === 'display' &&
+        confirmed.shows.screenId === display.id
+      )
+        break
+      await new Promise((resolve) => setTimeout(resolve, 100))
+    } while (Date.now() < confirmedBy)
+    if (
+      confirmed?.activeId !== savedScene.id ||
+      confirmed.sources.screenId !== display.id ||
+      confirmed.shows?.kind !== 'display' ||
+      confirmed.shows.screenId !== display.id
+    )
+      fail(`screenId pick did not persist in the same scene: ${JSON.stringify(confirmed)}`)
+  } else
+    console.log(
+      'remote-control smoke: screenId SKIP: no available display / Screen Recording grant'
+    )
+
+  const removed = await requestSmokeCommand(
+    smoke,
+    'eval-js',
+    {
+      code: `const scene = JSON.parse(localStorage.getItem('videorc.scenes.v2')).scenes.find((scene) => scene.layouts.horizontal.layoutPreset === 'side-by-side'); if (!scene) throw new Error('No Side by side scene to prepare'); scene.layouts.horizontal.layoutPreset = 'screen-only'; return window.__videorcSmokeScenePresets.edit(scene)`
+    },
+    { timeoutMs }
+  )
+  if (removed.result !== true) fail('could not prepare the legacy layout refusal')
+  await new Promise((resolve) => setTimeout(resolve, 400))
+  const refusedPromise = waitForRemoteEvent(remote, 'remote.ack')
+  const refusedTicket = await remoteRequest(remote, 'remote.intent', {
+    kind: 'sceneApply',
+    layoutPreset: 'side-by-side'
+  })
+  const refused = await refusedPromise
+  if (
+    !refusedTicket.payload?.accepted ||
+    refused.ok !== false ||
+    !refused.message?.includes('No scene uses Side by side')
+  )
+    fail(`missing layout did not get its named refusal: ${JSON.stringify(refused)}`)
 
   // 5. Regenerate cuts the paired client.
   const closed = new Promise((resolveClose) => remote.once('close', resolveClose))

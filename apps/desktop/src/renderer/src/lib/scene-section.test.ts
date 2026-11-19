@@ -1,0 +1,222 @@
+import { describe, expect, it } from 'vitest'
+
+import type { Device } from './backend'
+import { defaultCaptureConfig } from './capture'
+import {
+  landscapeFramingShows,
+  layoutAsksForScreen,
+  sceneCardsCameraGaps,
+  sceneCardWords,
+  sceneLayoutCameraLine,
+  scenePictureTarget,
+  sceneLayoutChoices,
+  sceneSlotKeysLine,
+  screenFieldWords
+} from './scene-section'
+import { normalizeSceneVisual, type VisualSources } from './scene-presets'
+
+// Plan 231 S6: the reads behind Studio's Scenes section.
+
+const layout = (layoutPreset: typeof defaultCaptureConfig.layout.layoutPreset) => ({
+  ...defaultCaptureConfig.layout,
+  layoutPreset
+})
+
+describe('screenFieldWords (D8)', () => {
+  it('names what the scene keeps, and says when its layout draws no screen', () => {
+    const figma = {
+      kind: 'app',
+      bundleId: 'com.figma.Desktop',
+      name: 'Figma',
+      follows: true
+    } as const
+    expect(screenFieldWords(figma, layout('screen-camera'))).toEqual({
+      words: 'Figma · front window',
+      note: null
+    })
+    const display = { kind: 'display', screenId: 'screen:1', screenName: 'Display 1' } as const
+    expect(screenFieldWords(display, layout('camera-only'))).toEqual({
+      words: 'Display 1',
+      note: 'Not shown in Camera only'
+    })
+    expect(screenFieldWords({ kind: 'none' }, layout('camera-only'))).toEqual({
+      words: 'No screen',
+      note: null
+    })
+    // Freeform draws what it has.
+    expect(
+      screenFieldWords(display, { ...layout('camera-only'), arrangementMode: 'freeform' }).note
+    ).toBeNull()
+  })
+})
+
+describe('layoutAsksForScreen (D19)', () => {
+  it('asks only when a screen layout goes on a scene that shows none', () => {
+    expect(layoutAsksForScreen({ kind: 'none' }, 'screen-camera')).toBe(true)
+    expect(layoutAsksForScreen({ kind: 'none' }, 'vertical-split')).toBe(true)
+    expect(layoutAsksForScreen({ kind: 'none' }, 'camera-only')).toBe(false)
+    expect(layoutAsksForScreen({ kind: 'display', screenId: 'screen:1' }, 'screen-only')).toBe(
+      false
+    )
+  })
+})
+
+describe('sceneLayoutChoices', () => {
+  it('lists the layouts of the studio’s mode, the camera ones off without a camera', () => {
+    expect(sceneLayoutChoices('horizontal', true).map((choice) => choice.label)).toEqual([
+      'Screen + camera',
+      'Screen only',
+      'Camera only',
+      'Side by side'
+    ])
+    expect(sceneLayoutChoices('vertical', true)).toHaveLength(6)
+    const off = sceneLayoutChoices('horizontal', false)
+    expect(off.filter((choice) => choice.disabled).map((choice) => choice.value)).toEqual([
+      'screen-camera',
+      'camera-only',
+      'side-by-side'
+    ])
+    expect(sceneLayoutCameraLine(off)).toBe(
+      'Choose a camera in Sources to use Screen + camera, Camera only, and Side by side.'
+    )
+    expect(sceneLayoutCameraLine(sceneLayoutChoices('horizontal', true))).toBeNull()
+  })
+})
+
+describe('sceneCardsCameraGaps (D9)', () => {
+  const devices: Device[] = [
+    { id: 'camera:1', name: 'FaceTime', kind: 'camera', status: 'available' },
+    { id: 'screen:screencapturekit:1', name: 'Display 1', kind: 'screen', status: 'available' }
+  ]
+  const scene = (
+    id: string,
+    name: string,
+    preset: Parameters<typeof layout>[0],
+    cameraId?: string
+  ) => ({
+    id,
+    name,
+    visual: normalizeSceneVisual({
+      layout: layout(preset),
+      sources: {
+        screenId: 'screen:screencapturekit:1',
+        ...(cameraId ? { cameraId } : { cameraOff: true })
+      },
+      background: null
+    })
+  })
+
+  it('turns off the scenes that need the one camera, with one line naming them', () => {
+    const gaps = sceneCardsCameraGaps(
+      [
+        scene('a', 'Figma', 'screen-only'),
+        scene('b', 'Camera only', 'camera-only'),
+        scene('c', 'Side by side', 'side-by-side')
+      ],
+      devices
+    )
+    expect([...gaps.blocked]).toEqual(['b', 'c'])
+    expect(gaps.reason).toBe(
+      'Camera is off. Choose one in Sources to use Camera only and Side by side.'
+    )
+  })
+
+  it('says nothing while the camera works', () => {
+    const gaps = sceneCardsCameraGaps(
+      [scene('b', 'Camera only', 'camera-only', 'camera:1')],
+      devices
+    )
+    expect(gaps.blocked.size).toBe(0)
+    expect(gaps.reason).toBeNull()
+  })
+})
+
+describe('landscapeFramingShows', () => {
+  it('is for the landscape screen layouts with a choice of Fill or Fit', () => {
+    expect(landscapeFramingShows(layout('screen-camera'))).toBe(true)
+    expect(landscapeFramingShows(layout('screen-only'))).toBe(true)
+    expect(landscapeFramingShows(layout('side-by-side'))).toBe(false)
+    expect(landscapeFramingShows(layout('camera-only'))).toBe(false)
+  })
+})
+
+describe('sceneSlotKeysLine (D5)', () => {
+  it('teaches the platform’s position keys while they are the defaults', () => {
+    expect(sceneSlotKeysLine(undefined, 'darwin')).toEqual({
+      first: 'Control+Alt+1',
+      last: 'Control+Alt+9'
+    })
+    expect(sceneSlotKeysLine({}, 'win32')).toEqual({
+      first: 'Control+Alt+Shift+1',
+      last: 'Control+Alt+Shift+9'
+    })
+    expect(sceneSlotKeysLine({ sceneSlots: { 9: '' } }, 'darwin')).toBeNull()
+    expect(sceneSlotKeysLine({ sceneSlots: { 1: 'F13' } }, 'linux')).toBeNull()
+  })
+})
+
+describe('scenePictureTarget (D7, D17)', () => {
+  const visual = (layoutPreset: Parameters<typeof layout>[0], sources: VisualSources) =>
+    normalizeSceneVisual({ layout: layout(layoutPreset), sources, background: null })
+  const figma = { bundleId: 'com.figma.Desktop', name: 'Figma', follows: true }
+
+  it('asks for what the scene shows: the app before its window, a fixed window, a display', () => {
+    expect(
+      scenePictureTarget(visual('screen-camera', { app: figma, windowId: 'window:4' }))
+    ).toEqual({ kind: 'app', bundleId: 'com.figma.Desktop' })
+    expect(scenePictureTarget(visual('screen-only', { windowId: 'window:9' }))).toEqual({
+      kind: 'window',
+      windowId: 'window:9'
+    })
+    expect(scenePictureTarget(visual('side-by-side', { screenId: 'screen:1' }))).toEqual({
+      kind: 'display',
+      screenId: 'screen:1'
+    })
+  })
+
+  it('asks for nothing a card can’t draw: no screen area, no screen, or a test pattern', () => {
+    expect(scenePictureTarget(visual('camera-only', { screenId: 'screen:1' }))).toBeNull()
+    expect(scenePictureTarget(visual('screen-only', { captureOff: true }))).toBeNull()
+    expect(scenePictureTarget(visual('screen-only', { testPattern: true }))).toBeNull()
+  })
+})
+
+describe('sceneCardWords', () => {
+  const card = (
+    name: string,
+    layoutPreset: Parameters<typeof layout>[0],
+    sources: VisualSources
+  ) => ({
+    name,
+    visual: normalizeSceneVisual({ layout: layout(layoutPreset), sources, background: null })
+  })
+  const figma = { bundleId: 'com.figma.Desktop', name: 'Figma', follows: true }
+
+  it('says what the scene shows in a few words, never its own name again', () => {
+    expect(sceneCardWords(card('Figma', 'screen-camera', { app: figma }))).toBe('Front window')
+    expect(sceneCardWords(card('Figma 2', 'screen-camera', { app: figma }))).toBe('Front window')
+    expect(sceneCardWords(card('Design', 'screen-camera', { app: figma }))).toBe(
+      'Figma · front window'
+    )
+    expect(
+      sceneCardWords(
+        card('Screen + camera', 'screen-camera', {
+          screenId: 'screen:1',
+          screenName: 'Built-in Retina Display · 3024 × 1964'
+        })
+      )
+    ).toBe('Built-in Retina Display')
+    expect(
+      sceneCardWords(
+        card('Display 1', 'screen-only', { screenId: 'screen:1', screenName: 'Display 1' })
+      )
+    ).toBeNull()
+    expect(
+      sceneCardWords(card('Notes', 'screen-only', { windowId: 'window:9', windowName: 'Ideas' }))
+    ).toBe('Ideas')
+    expect(sceneCardWords(card('Camera only', 'camera-only', { screenId: 'screen:1' }))).toBe(
+      'No screen'
+    )
+    expect(sceneCardWords(card('Break', 'screen-only', { captureOff: true }))).toBe('No screen')
+  })
+})
