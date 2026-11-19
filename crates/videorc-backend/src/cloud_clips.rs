@@ -18,6 +18,12 @@ use std::{
 };
 use tokio::sync::watch;
 pub const MAX_BYTES: u64 = 64 * 1024 * 1024;
+/// Journal rows, the new job's included; the jobs list shows every one (L2).
+const MAX_ROWS: usize = 16;
+/// Clips that can still be retried at once (L2).
+const MAX_RETRYABLE: usize = 16;
+/// Clips that may keep staging files for Retry: 4 × `MAX_BYTES` (L2; was 1).
+const MAX_STAGING: usize = 4;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Segment {
@@ -241,6 +247,61 @@ fn valid(token: &str, stop: &watch::Receiver<bool>) -> Result<()> {
     );
     Ok(())
 }
+fn finished(j: &Job) -> bool {
+    matches!(j.state.as_str(), "complete" | "cancelled")
+}
+/// L2: room for one new clip. Clips used to be capped for the app's lifetime:
+/// finished jobs kept their rows, so the 17th clip was refused. Now a row
+/// leaves the journal, oldest first, once nothing can come of it: a finished
+/// clip (its Library entry stays) or one whose cloud segments expired (Retry
+/// re-fetches and validates the plan, so it can never succeed; its staging
+/// files go first). Only clips that can still be retried, and the staging
+/// files on disk, count against the caps. A running job is never touched.
+fn admit(db: &Database, own: &str, now: i64) -> Result<()> {
+    let running: Vec<String> = workers().lock().unwrap().keys().cloned().collect();
+    let mut jobs = db.all_cloud_clips()?;
+    let mut rows = jobs.len();
+    jobs.retain(|j| j.plan.id != own && !running.contains(&j.plan.id));
+    for j in jobs
+        .iter_mut()
+        .filter(|j| !finished(j) && j.plan.expires_at <= now)
+    {
+        if !j.files.is_empty() {
+            if !j.root.exists() {
+                j.files.clear();
+            } else if let Err(error) = j.cleanup(db) {
+                tracing::warn!(
+                    "expired cloud clip {} keeps its staging: {error}",
+                    j.plan.id
+                );
+                continue;
+            }
+        }
+        j.reason = "Clip not saved. Its program segments expired in the cloud buffer.".into();
+        db.save_cloud_clip(j)?;
+    }
+    for j in jobs.iter().rev() {
+        if rows < MAX_ROWS {
+            break;
+        }
+        if j.files.is_empty() && (finished(j) || j.plan.expires_at <= now) {
+            db.delete_cloud_clip(&j.plan.id)?;
+            rows -= 1;
+        }
+    }
+    ensure!(
+        jobs.iter()
+            .filter(|j| !finished(j) && j.plan.expires_at > now)
+            .count()
+            < MAX_RETRYABLE,
+        "clip-journal-full"
+    );
+    ensure!(
+        jobs.iter().filter(|j| !j.files.is_empty()).count() < MAX_STAGING,
+        "clip-staging-full-discard-or-retry"
+    );
+    Ok(())
+}
 pub struct Save {
     pub show: String,
     pub marker: String,
@@ -300,11 +361,7 @@ pub async fn save(
             );
             return Ok(j);
         }
-        ensure!(db.cloud_clips()?.len() < 16, "clip-journal-full");
-        ensure!(
-            db.cloud_clips()?.iter().all(|j| j.files.is_empty()),
-            "clip-staging-full-discard-or-retry"
-        );
+        admit(&db, &plan.id, chrono::Utc::now().timestamp_millis())?;
         let folder = folder.join("Clips");
         std::fs::create_dir_all(&folder)?;
         let root = folder.join(format!(".cloud-clip-{}", uuid::Uuid::new_v4()));
@@ -684,22 +741,63 @@ fn status(value: &Value) -> Value {
     crate::replay_buffer::cloud_capability(value)
 }
 
+/// What a clip mark got besides the mark itself.
+pub enum ClipOutcome {
+    /// Clips are off for this show (or there is no account): a mark only.
+    Off,
+    /// The clip job, queued or already known.
+    Job(Value),
+    /// The clip was refused; the host must hear it (L2): `busy` (another clip
+    /// is still saving), `full` (unfinished clips fill the journal or hold
+    /// staging) or `failed` (anything else, such as the cloud refusing).
+    Refused(&'static str),
+}
+pub fn refusal(error: &anyhow::Error) -> &'static str {
+    match error.to_string().as_str() {
+        "clip-already-running" => "busy",
+        "clip-journal-full" | "clip-staging-full-discard-or-retry" => "full",
+        _ => "failed",
+    }
+}
 /// Every existing clip owner (UI/remote/agent/consented host voice) reaches the
-/// same mark creation path. An extraction failure never discards that mark.
-pub async fn maybe_save(state: &crate::state::AppState, mark: &Value) -> Option<Value> {
-    let show = mark.get("showId")?.as_str()?;
-    let marker = mark.get("id")?.as_str()?;
+/// same mark creation path. An extraction failure never discards that mark,
+/// and is never silent either.
+pub async fn maybe_save(state: &crate::state::AppState, mark: &Value) -> ClipOutcome {
+    let Some((show, marker)) = mark
+        .get("showId")
+        .and_then(Value::as_str)
+        .zip(mark.get("id").and_then(Value::as_str))
+    else {
+        return ClipOutcome::Off;
+    };
     if let Ok(jobs) = state.database.cloud_clips()
         && let Some(job) = jobs
             .iter()
             .find(|j| j.plan.show_id == show && j.plan.marker_id == marker)
     {
         return if job.state == "cancelled" {
-            None
+            ClipOutcome::Off
         } else {
-            Some(job.view())
+            ClipOutcome::Job(job.view())
         };
     }
+    let Some(started) = start_save(state, show, marker).await else {
+        return ClipOutcome::Off;
+    };
+    match started {
+        Ok(job) => ClipOutcome::Job(job),
+        Err(error) => {
+            tracing::warn!("cloud clip for marker {marker} not saved: {error}");
+            ClipOutcome::Refused(refusal(&error))
+        }
+    }
+}
+/// `None` while Clips are off for the show; otherwise what `save` said.
+async fn start_save(
+    state: &crate::state::AppState,
+    show: &str,
+    marker: &str,
+) -> Option<Result<Value>> {
     let token = crate::account::stored_session_token()?;
     let api = VideorcApiClient::new().ok()?;
     let status = api
@@ -710,8 +808,11 @@ pub async fn maybe_save(state: &crate::state::AppState, mark: &Value) -> Option<
         return None;
     }
     let generation = status.get("generation")?.as_str()?;
-    let folder = output_folder(&state.database, show, None).ok()?;
-    save(
+    let folder = match output_folder(&state.database, show, None) {
+        Ok(folder) => folder,
+        Err(error) => return Some(Err(error)),
+    };
+    let saved = save(
         state.clone(),
         api,
         token,
@@ -727,8 +828,8 @@ pub async fn maybe_save(state: &crate::state::AppState, mark: &Value) -> Option<
             ),
         },
     )
-    .await
-    .ok()
+    .await;
+    Some(saved)
 }
 
 pub fn output_folder(db: &Database, show: &str, configured: Option<&str>) -> Result<PathBuf> {
@@ -742,6 +843,46 @@ pub fn output_folder(db: &Database, show: &str, configured: Option<&str>) -> Res
         .and_then(|v| v.get("path"))
         .and_then(Value::as_str);
     crate::recording::resolve_output_directory(selected)
+}
+
+/// A local stand-in for the account API in tests: answers every request with
+/// whatever `answer` returns for its path and query, then closes the connection.
+#[cfg(test)]
+pub(crate) mod test_api {
+    use std::{net::SocketAddr, sync::Arc};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    pub(crate) type Answer = Arc<dyn Fn(&reqwest::Url) -> (u16, Vec<u8>) + Send + Sync>;
+    pub(crate) async fn serve(answer: Answer) -> SocketAddr {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let answer = answer.clone();
+                tokio::spawn(async move {
+                    let mut head = Vec::new();
+                    let mut buf = [0u8; 4096];
+                    while !head.windows(4).any(|w| w == b"\r\n\r\n") {
+                        match socket.read(&mut buf).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => head.extend_from_slice(&buf[..n]),
+                        }
+                    }
+                    let text = String::from_utf8_lossy(&head);
+                    let target = text.split_whitespace().nth(1).unwrap_or("/");
+                    let url = reqwest::Url::parse(&format!("http://fixture{target}")).unwrap();
+                    let (status, body) = answer(&url);
+                    let head = format!(
+                        "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    let _ = socket.write_all(head.as_bytes()).await;
+                    let _ = socket.write_all(&body).await;
+                    let _ = socket.shutdown().await;
+                });
+            }
+        });
+        address
+    }
 }
 
 #[cfg(test)]
@@ -831,5 +972,284 @@ mod tests {
         assert_eq!(jobs.len(), 1);
         assert!(jobs[0].local_session_id.is_none());
         assert_eq!(jobs[0].plan.take_id, "tk_fixture");
+    }
+
+    /// A journal row for `n`, its plan expiring at `expires_at`, with one
+    /// real staging file when `staged`.
+    fn job_row(
+        db: &Database,
+        dir: &Path,
+        n: u32,
+        state: &str,
+        expires_at: i64,
+        staged: bool,
+    ) -> Job {
+        let mut p = plan();
+        p.id = format!("clip_{:064x}", n);
+        p.marker_id = format!("marker-{n}");
+        p.expires_at = expires_at;
+        let mut j = Job {
+            root: dir.join(format!(".cloud-clip-{n}")),
+            destination: dir.join(format!("{n}.mp4")),
+            plan: p,
+            files: vec![],
+            state: state.into(),
+            reason: "test".into(),
+            local_session_id: None,
+            verified: None,
+        };
+        db.save_cloud_clip(&j).unwrap();
+        if staged {
+            std::fs::create_dir_all(&j.root).unwrap();
+            j.create(db, "seg-0.ts")
+                .unwrap()
+                .write_all(&[1; 4096])
+                .unwrap();
+        }
+        j
+    }
+
+    /// L2: one interrupted clip holding staging files used to refuse every
+    /// later clip; an expired one could never be retried yet blocked forever.
+    #[test]
+    fn interrupted_clips_no_longer_block_new_ones_and_expired_staging_goes() {
+        let temp = crate::test_temp_dir::TestTempDir::new("cloud-clips-admit");
+        let db = Database::open_in_memory_for_tests();
+        let now = 1_000_000;
+        let live = job_row(&db, &temp, 1, "interrupted", now + 60_000, true);
+        admit(&db, "new", now).expect("one interrupted clip must not block the next");
+        let expired = job_row(&db, &temp, 2, "trimming", now - 1, true);
+        for n in 3..=4 {
+            job_row(&db, &temp, n, "interrupted", now + 60_000, true);
+        }
+        // Live 1, 3, 4 hold staging; the expired 2 is cleaned, not counted.
+        admit(&db, "new", now).expect("three retryable staging holders fit");
+        assert!(!expired.root.exists(), "expired staging must be removed");
+        let row = db.cloud_clip(&expired.plan.id).unwrap().unwrap();
+        assert!(row.files.is_empty());
+        assert!(row.reason.contains("expired"), "{}", row.reason);
+        assert!(
+            live.root.join("seg-0.ts").exists(),
+            "a retryable clip keeps its staging"
+        );
+        job_row(&db, &temp, 5, "interrupted", now + 60_000, true);
+        let refused = admit(&db, "new", now).unwrap_err().to_string();
+        assert_eq!(refused, "clip-staging-full-discard-or-retry");
+        assert_eq!(refusal(&anyhow::anyhow!(refused)), "full");
+    }
+
+    /// L2: finished rows leave oldest first, so the journal (and the jobs
+    /// list) stays at 16 rows with the new job, and retryable rows stay.
+    #[test]
+    fn finished_clip_rows_are_pruned_oldest_first() {
+        let temp = crate::test_temp_dir::TestTempDir::new("cloud-clips-prune");
+        let db = Database::open_in_memory_for_tests();
+        let now = 1_000_000;
+        let first = job_row(&db, &temp, 1, "interrupted", now + 60_000, false);
+        for n in 2..=30 {
+            job_row(
+                &db,
+                &temp,
+                n,
+                if n % 2 == 0 { "complete" } else { "cancelled" },
+                now + 60_000,
+                false,
+            );
+        }
+        admit(&db, "new", now).unwrap();
+        let rows = db.all_cloud_clips().unwrap();
+        assert_eq!(rows.len(), MAX_ROWS - 1);
+        assert_eq!(rows[0].plan.id, format!("clip_{:064x}", 30), "newest kept");
+        assert!(
+            rows.iter().any(|j| j.plan.id == first.plan.id),
+            "retryable kept"
+        );
+        for n in 0..MAX_RETRYABLE as u32 {
+            job_row(&db, &temp, 100 + n, "interrupted", now + 60_000, false);
+        }
+        assert_eq!(
+            admit(&db, "new", now).unwrap_err().to_string(),
+            "clip-journal-full"
+        );
+    }
+
+    fn ffmpeg_for_tests() -> Option<String> {
+        let path = crate::ffmpeg::resolve_ffmpeg_path(None);
+        match std::process::Command::new(&path).arg("-version").output() {
+            Ok(output) if output.status.success() => Some(path),
+            _ => {
+                eprintln!("skipping: no FFmpeg at {path} on this machine");
+                None
+            }
+        }
+    }
+
+    fn clip_rows(db: &Database) -> i64 {
+        db.lock()
+            .unwrap()
+            .query_row("SELECT count(*) FROM cloud_program_clips", [], |r| r.get(0))
+            .unwrap()
+    }
+
+    /// Real 2 s HLS segments (picture + tone) the fake API serves.
+    fn fixture_segments(ffmpeg: &str, dir: &Path) -> Option<(Vec<Segment>, Vec<Vec<u8>>)> {
+        std::fs::create_dir_all(dir).unwrap();
+        let made = std::process::Command::new(ffmpeg)
+            .args([
+                "-v",
+                "error",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=320x180:rate=30",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:sample_rate=48000",
+                "-t",
+                "6",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "ultrafast",
+                "-g",
+                "30",
+                "-pix_fmt",
+                "yuv420p",
+                "-c:a",
+                "aac",
+                "-f",
+                "hls",
+                "-hls_time",
+                "2",
+                "-hls_list_size",
+                "0",
+                "-hls_segment_filename",
+            ])
+            .arg(dir.join("part-%d.ts"))
+            .arg(dir.join("index.m3u8"))
+            .output()
+            .unwrap();
+        if !made.status.success() {
+            eprintln!(
+                "skipping: this FFmpeg cannot make H.264/AAC HLS: {}",
+                String::from_utf8_lossy(&made.stderr)
+            );
+            return None;
+        }
+        let playlist = std::fs::read_to_string(dir.join("index.m3u8")).unwrap();
+        let (mut segments, mut data, mut cursor) = (vec![], vec![], 0.0);
+        let mut lines = playlist.lines();
+        while let Some(line) = lines.next() {
+            let Some(rest) = line.strip_prefix("#EXTINF:") else {
+                continue;
+            };
+            let duration_ms = rest.trim_end_matches(',').parse::<f64>().unwrap() * 1000.0;
+            let bytes = std::fs::read(dir.join(lines.next().unwrap())).unwrap();
+            segments.push(Segment {
+                sequence: segments.len() as u64,
+                sha256: format!("{:x}", Sha256::digest(&bytes)),
+                bytes: bytes.len() as u64,
+                start_ms: cursor,
+                end_ms: cursor + duration_ms,
+                duration_ms,
+                expires_at: chrono::Utc::now().timestamp_millis() + 3_600_000,
+            });
+            cursor += duration_ms;
+            data.push(bytes);
+        }
+        Some((segments, data))
+    }
+
+    /// L2: the 17th clip of the app's lifetime was refused (`clip-journal-full`)
+    /// because finished jobs kept their rows forever. Twenty marks in a row
+    /// through the real download, FFmpeg trim, decode check and publish must
+    /// each put a decodable MP4 in Library, and the journal must stay bounded.
+    #[tokio::test]
+    async fn twenty_clips_in_a_row_each_save_video() {
+        let temp = crate::test_temp_dir::TestTempDir::new("cloud-clips-twenty");
+        let Some(ffmpeg) = ffmpeg_for_tests() else {
+            return;
+        };
+        let Some((segments, data)) = fixture_segments(&ffmpeg, &temp.join("media")) else {
+            return;
+        };
+        crate::secrets::scope_memory_secret_store_for_tests();
+        let token = "clip-fixture-token".to_string();
+        crate::secrets::put_secret(crate::account::SESSION_TOKEN_SECRET, &token).unwrap();
+        let mut template = plan();
+        template.bytes = segments.iter().map(|s| s.bytes).sum();
+        template.expires_at = chrono::Utc::now().timestamp_millis() + 3_600_000;
+        template.trim_start_ms = 500.0;
+        template.duration_ms = 2000.0;
+        template.requested = Window {
+            start_ms: 500.0,
+            end_ms: 2500.0,
+        };
+        template.segments = segments;
+        let address = test_api::serve(std::sync::Arc::new(move |url: &reqwest::Url| {
+            let query: BTreeMap<String, String> = url.query_pairs().into_owned().collect();
+            if let Some(n) = query.get("segment") {
+                return (200, data[n.parse::<usize>().unwrap()].clone());
+            }
+            let marker = query.get("marker").cloned().unwrap_or_default();
+            let mut p = template.clone();
+            p.marker_id = marker.clone();
+            p.id = format!("clip_{:x}", Sha256::digest(marker.as_bytes()));
+            (200, serde_json::to_vec(&p).unwrap())
+        }))
+        .await;
+        let api = VideorcApiClient::for_base_url(format!("http://{address}"));
+        let (events, _) = tokio::sync::broadcast::channel(64);
+        let db = Database::open_in_memory_for_tests();
+        let state = crate::state::AppState::new("t".into(), 1, events, db.clone());
+        let folder = temp.join("output");
+        std::fs::create_dir_all(&folder).unwrap();
+        for n in 1..=20 {
+            let started = std::time::Instant::now();
+            let marker = uuid::Uuid::new_v4().to_string();
+            let view = save(
+                state.clone(),
+                api.clone(),
+                token.clone(),
+                Save {
+                    show: "sh_fixture".into(),
+                    marker,
+                    generation: "generation".into(),
+                    folder: folder.clone(),
+                    ffmpeg: ffmpeg.clone(),
+                },
+            )
+            .await
+            .unwrap_or_else(|e| panic!("clip {n} refused: {e} (rows {})", clip_rows(&db)));
+            let id = view["id"].as_str().unwrap().to_string();
+            while workers().lock().unwrap().contains_key(&id) {
+                assert!(started.elapsed() < Duration::from_secs(90), "clip {n} hung");
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            let job = db.cloud_clip(&id).unwrap().unwrap();
+            assert_eq!(job.state, "complete", "clip {n}: {}", job.reason);
+            let session = job.local_session_id.unwrap();
+            let path = db.cloud_clip_session_path(&session).unwrap().unwrap();
+            let decoded = std::process::Command::new(&ffmpeg)
+                .args([
+                    "-v", "error", "-xerror", "-i", &path, "-map", "0:v:0", "-map", "0:a:0",
+                ])
+                .args(["-f", "null", "-"])
+                .output()
+                .unwrap();
+            assert!(decoded.status.success(), "clip {n} does not decode");
+            let ms = crate::session_ops::probe_duration_ms(&ffmpeg, Path::new(&path))
+                .await
+                .unwrap();
+            assert!((ms - 2000).abs() <= 100, "clip {n} lasts {ms} ms");
+            eprintln!(
+                "clip {n}: saved {ms} ms of video in {} ms, journal rows {}",
+                started.elapsed().as_millis(),
+                clip_rows(&db)
+            );
+        }
+        assert!(clip_rows(&db) <= 16, "journal rows {}", clip_rows(&db));
     }
 }

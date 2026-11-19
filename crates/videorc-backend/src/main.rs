@@ -13287,6 +13287,14 @@ async fn handle_text_message_with_role(
             .await;
             match result {
                 Ok(value) => ServerResponse::ok(command.id, value),
+                // L3: a full archive list says what to do, in words.
+                Err(error) if error.to_string() == cloud_archive::RESUME_OR_DISCARD => {
+                    ServerResponse::error(
+                        command.id,
+                        "archive-full",
+                        cloud_archive::RESUME_OR_DISCARD_WORDS,
+                    )
+                }
                 Err(error) => {
                     ServerResponse::error(command.id, "archive-unavailable", error.to_string())
                 }

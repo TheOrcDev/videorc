@@ -98,3 +98,52 @@ describe('cloud marker target and boundaries', () => {
     })
   })
 })
+
+// L2: a cloud clip mark used to drop its clip silently once 16 clips had
+// been saved; the host now hears why, and the wire takes every cloud reason.
+describe('cloud clip mark reasons', () => {
+  const cloudMark = (reason: string, detail?: string) => ({
+    showId: marker.showId,
+    markerId: id,
+    atSeconds: 60,
+    source: 'manual',
+    saved: true,
+    reason,
+    ...(detail ? { detail } : {})
+  })
+  it('the clip.mark reply and the clip.marked event take every cloud reason', () => {
+    for (const reason of [
+      'cloud-marker-no-media',
+      'cloud-clip-saved',
+      'cloud-clip-queued',
+      'cloud-clip-interrupted'
+    ]) {
+      expect(validateBackendRpcResult('clip.mark', cloudMark(reason))).toEqual(cloudMark(reason))
+      expect(validateBackendEventPayload('clip.marked', cloudMark(reason))).toEqual(
+        cloudMark(reason)
+      )
+    }
+    const refused = cloudMark('cloud-clip-interrupted', 'Another clip is still saving.')
+    expect(validateBackendEventPayload('clip.marked', refused)).toEqual(refused)
+    expect(() => validateBackendRpcResult('clip.mark', cloudMark('cloud-clip-lost'))).toThrow()
+  })
+  it('a mark carries why its clip was refused, and nothing else', () => {
+    for (const clipRefused of ['busy', 'full', 'failed'] as const)
+      expect(cloudMarkerSchema.parse({ ...marker, clipRefused }, 'm')).toEqual({
+        ...marker,
+        clipRefused
+      })
+    expect(() => cloudMarkerSchema.parse({ ...marker, clipRefused: 'other' }, 'm')).toThrow()
+  })
+  it('a refused clip says the marker is kept and why, in words', () => {
+    const words = 'Retry or discard the unfinished clips in Clips on the Output page.'
+    expect(clipMarkedToast(cloudMark('cloud-clip-interrupted', words) as never)).toEqual({
+      kind: 'warning',
+      title: 'Marker saved; clip interrupted',
+      description: words
+    })
+    expect(clipMarkedToast(cloudMark('cloud-clip-interrupted') as never).description).toBe(
+      'Retry or discard staging files from Clips on the Output page.'
+    )
+  })
+})

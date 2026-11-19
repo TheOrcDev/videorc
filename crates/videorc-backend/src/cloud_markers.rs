@@ -176,16 +176,29 @@ pub async fn create(
         body["sourcePosition"] = serde_json::to_value(p)?;
     }
     let mut mark = request(state, &input.show_id, "POST", None, Some(body)).await?;
-    if input.kind == "clip"
-        && let Some(job) = crate::cloud_clips::maybe_save(state, &mark).await
-    {
-        mark["clipJob"] = job;
+    if input.kind == "clip" {
+        match crate::cloud_clips::maybe_save(state, &mark).await {
+            crate::cloud_clips::ClipOutcome::Job(job) => mark["clipJob"] = job,
+            crate::cloud_clips::ClipOutcome::Refused(why) => mark["clipRefused"] = json!(why),
+            crate::cloud_clips::ClipOutcome::Off => {}
+        }
     }
     state.emit_event("cloud.marker.created", mark.clone());
     Ok(mark)
 }
+/// L2: a refused clip is `cloud-clip-interrupted` with why in words (the
+/// renderer shows `detail` as the toast's description), never "no media".
 pub fn clip_event(mark: &Value) -> Value {
-    json!({"showId":mark["showId"],"markerId":mark["id"],"atSeconds":mark["atSeconds"],"source":if mark["source"]=="voice" {"voice"}else{"manual"},"saved":true,"reason":match mark.pointer("/clipJob/state").and_then(Value::as_str) {Some("complete")=>"cloud-clip-saved",Some("interrupted")=>"cloud-clip-interrupted",Some("downloading"|"trimming"|"publishing")=>"cloud-clip-queued",_=>"cloud-marker-no-media"}})
+    let mut event = json!({"showId":mark["showId"],"markerId":mark["id"],"atSeconds":mark["atSeconds"],"source":if mark["source"]=="voice" {"voice"}else{"manual"},"saved":true,"reason":match mark.pointer("/clipJob/state").and_then(Value::as_str) {Some("complete")=>"cloud-clip-saved",Some("interrupted")=>"cloud-clip-interrupted",Some("downloading"|"trimming"|"publishing")=>"cloud-clip-queued",_=>"cloud-marker-no-media"}});
+    if let Some(why) = mark.get("clipRefused").and_then(Value::as_str) {
+        event["reason"] = json!("cloud-clip-interrupted");
+        event["detail"] = json!(match why {
+            "busy" => "Another clip is still saving. Mark again when it finishes.",
+            "full" => "Retry or discard the unfinished clips in Clips on the Output page.",
+            _ => "The cloud buffer could not supply this clip.",
+        });
+    }
+    event
 }
 pub async fn mark_clip(
     state: &AppState,
@@ -218,6 +231,37 @@ mod tests {
         assert_ne!(a, stable_operation(&["show", "speech", "2"]));
         assert_ne!(a, stable_operation(&["other", "speech", "1"]));
         assert!(uuid::Uuid::parse_str(&a).is_ok());
+    }
+    /// L2: a refused clip is said, never folded into "no media".
+    #[test]
+    fn a_refused_clip_has_its_own_reason() {
+        let mark = |extra: Value| {
+            let mut m = json!({"showId":"sh_a","id":"m","atSeconds":3,"source":"manual"});
+            m.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            let event = clip_event(&m);
+            (event["reason"].clone(), event.get("detail").cloned())
+        };
+        for (why, words) in [
+            ("busy", "Another clip is still saving"),
+            ("full", "Retry or discard the unfinished clips"),
+            ("failed", "could not supply this clip"),
+        ] {
+            let (reason, detail) = mark(json!({ "clipRefused": why }));
+            assert_eq!(reason, "cloud-clip-interrupted");
+            assert!(detail.unwrap().as_str().unwrap().contains(words), "{why}");
+        }
+        assert_eq!(
+            mark(json!({"clipJob":{"state":"trimming"}})),
+            (json!("cloud-clip-queued"), None)
+        );
+        assert_eq!(mark(json!({})), (json!("cloud-marker-no-media"), None));
+        let full = anyhow::anyhow!("clip-staging-full-discard-or-retry");
+        assert_eq!(crate::cloud_clips::refusal(&full), "full");
+        let busy = anyhow::anyhow!("clip-already-running");
+        assert_eq!(crate::cloud_clips::refusal(&busy), "busy");
+        assert_eq!(crate::cloud_clips::refusal(&anyhow::anyhow!("x")), "failed");
     }
     #[test]
     fn cloud_target_has_no_native_session() {

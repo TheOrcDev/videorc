@@ -4242,6 +4242,8 @@ export interface ClipMarkedEvent {
   source: ClipMarkSource
   saved: boolean
   reason?: string
+  /** L2: why a cloud clip was refused while its mark was kept, in words. */
+  detail?: string
 }
 
 /** Stream Manager → main renderer: mark a clip now (plan 068 D6). */

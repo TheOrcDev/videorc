@@ -5124,6 +5124,16 @@ const nativeClipMarkedEventSchema = objectSchema(
   { allowUnknown: false }
 ) as RuntimeSchema<ClipMarkedEvent>
 
+/**
+ * Every reason a cloud clip mark can carry (`cloud_markers::clip_event`); a
+ * refused clip is `cloud-clip-interrupted` with its `detail` in words (L2).
+ */
+const CLOUD_CLIP_MARK_REASONS = [
+  'cloud-marker-no-media',
+  'cloud-clip-saved',
+  'cloud-clip-queued',
+  'cloud-clip-interrupted'
+] as const
 const clipMarkedEventSchema = unionSchema([
   nativeClipMarkedEventSchema,
   objectSchema(
@@ -5133,7 +5143,8 @@ const clipMarkedEventSchema = unionSchema([
       atSeconds: numberSchema({ min: 0, max: 1e9 }),
       source: clipMarkSourceSchema,
       saved: literalSchema(true),
-      reason: literalSchema('cloud-marker-no-media')
+      reason: enumSchema(CLOUD_CLIP_MARK_REASONS),
+      detail: optionalSchema(stringSchema({ minLength: 1, maxLength: 200 }))
     },
     { allowUnknown: false }
   )

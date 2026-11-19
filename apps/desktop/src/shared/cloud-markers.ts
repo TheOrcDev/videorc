@@ -21,8 +21,16 @@ export type CloudMarkerCreate = {
   kind?: 'marker' | 'clip'
   lookbackSeconds?: 30 | 60
 }
+/**
+ * Why a clip mark kept no clip (L2): another clip was still saving (`busy`),
+ * too many unfinished clips wait in Clips (`full`), or the cloud buffer could
+ * not supply it (`failed`). The mark itself is saved either way.
+ */
+export const CLOUD_CLIP_REFUSALS = ['busy', 'full', 'failed'] as const
+export type CloudClipRefusal = (typeof CLOUD_CLIP_REFUSALS)[number]
 export type CloudMarker = {
   clipJob?: CloudClipJob
+  clipRefused?: CloudClipRefusal
   id: string
   showId: string
   atSeconds: number
@@ -77,6 +85,7 @@ export const cloudMarkerParamsSchema = objectSchema({ showId: id, markerId: id }
 export const cloudMarkerSchema = objectSchema(
   {
     clipJob: optionalSchema(cloudClipJobSchema),
+    clipRefused: optionalSchema(enumSchema(CLOUD_CLIP_REFUSALS)),
     id,
     showId: id,
     atSeconds: seconds,

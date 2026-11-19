@@ -31,6 +31,18 @@ impl Database {
             .map(|s| serde_json::from_str(s).map_err(Into::into))
             .collect()
     }
+    /// Every archive journal, newest first: what admission prunes from (L3).
+    pub(crate) fn all_cloud_archives(&self) -> Result<Vec<Journal>> {
+        let conn = self.lock()?;
+        let mut query =
+            conn.prepare("SELECT journal_json FROM cloud_program_archives ORDER BY rowid DESC")?;
+        let rows = query
+            .query_map([], |r| r.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows.iter()
+            .map(|s| serde_json::from_str(s).map_err(Into::into))
+            .collect()
+    }
     pub(crate) fn delete_cloud_archive(&self, id: &str) -> Result<()> {
         self.lock()?
             .execute("DELETE FROM cloud_program_archives WHERE id=?1", [id])?;
