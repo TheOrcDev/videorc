@@ -5040,6 +5040,22 @@ const WEBSOCKET_ORDERED_MAX_QUEUE_AGE: Duration = Duration::from_secs(5);
 // started. Their own lane is bounded like the others; its worker collapses
 // a backlog to the newest publish per method.
 const WEBSOCKET_SURFACE_PUBLISH_MAX_QUEUE_AGE: Duration = Duration::from_secs(5);
+// 2026-11-19 live incident: on a starved Mac the mutation workers stopped
+// for 10 s while a 100 ms host-speech frame (`cloud.speech.audio`) and an
+// `agent.surface.publish` were in flight. Both tripped the 10 s mutation
+// contract above and the backend recycled in the middle of a live talk
+// show. That contract exists for operator controls whose outcome is unknown
+// once they stop replying (the 2026-08-27 screens.activate wedge). These
+// commands are not that: a speech frame is worthless once it is late and the
+// next one is 100 ms away; a surface projection is replaced by the next
+// publish. So they are disposable: each runs beside the mutation workers
+// with a short deadline, and one that misses it is refused and forgotten.
+// It never recycles the backend and never barriers an operator control.
+const WEBSOCKET_DISPOSABLE_MAX_EXECUTION_AGE: Duration = Duration::from_secs(2);
+// A queued speech frame older than this is behind the conversation: it is
+// refused rather than transcribed late (the admission budget in
+// `captions::cloud_host::audio` holds at most 200 ms of audio anyway).
+const WEBSOCKET_HOST_SPEECH_MAX_QUEUE_AGE: Duration = Duration::from_secs(1);
 const COMMAND_LANE_SMOKE_BLOCK_METHOD: &str = "test.commandLanes.accountMaintenance.block";
 const LIVE_CONTROL_RECYCLE_SMOKE_BLOCK_METHOD: &str = "test.commandLanes.liveControl.block";
 const COMMAND_LANE_SMOKE_STATUS_METHOD: &str = "test.commandLanes.accountMaintenance.status";
@@ -5101,6 +5117,30 @@ fn websocket_mutation_executor() -> Result<WebSocketMutationExecutor, &'static s
         .as_ref()
         .cloned()
         .map_err(String::as_str)
+}
+
+const WEBSOCKET_MUTATION_EXECUTOR_PROBE_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// How long an empty task waits for a mutation worker, as a log sentence. A
+/// probe that is not answered means every worker is blocked or starved, so a
+/// slow command is waiting for a thread and not for its own work.
+async fn probe_websocket_mutation_executor(executor: &WebSocketMutationExecutor) -> String {
+    let started = Instant::now();
+    match tokio::time::timeout(
+        WEBSOCKET_MUTATION_EXECUTOR_PROBE_TIMEOUT,
+        executor.spawn(async {}),
+    )
+    .await
+    {
+        Ok(_) => format!(
+            "mutation workers answered a probe in {}ms",
+            started.elapsed().as_millis()
+        ),
+        Err(_) => format!(
+            "no mutation worker answered a probe within {}ms: every worker is blocked or starved",
+            WEBSOCKET_MUTATION_EXECUTOR_PROBE_TIMEOUT.as_millis()
+        ),
+    }
 }
 
 /// Arm the dispatched-mutation deadline outside Tokio. Live controls, durable
@@ -5838,7 +5878,16 @@ fn websocket_command_has_session_lifecycle_policy(text: &str) -> bool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WebSocketMethodExecutionPolicy {
     Observation,
-    Mutation { max_execution_age: Duration },
+    Mutation {
+        max_execution_age: Duration,
+    },
+    /// Real-time or latest-wins traffic whose late outcome is worthless and
+    /// never unknown: refused at its deadline, never a backend recycle. Every
+    /// such method has its own isolated lane (see
+    /// `WEBSOCKET_DISPOSABLE_MAX_EXECUTION_AGE`).
+    Disposable {
+        max_execution_age: Duration,
+    },
     SessionLifecycle,
 }
 
@@ -5851,9 +5900,17 @@ const DEFAULT_MUTATION_POLICY: WebSocketMethodExecutionPolicy =
 /// `handle_text_message_with_role`. The source-derived regression below fails
 /// when an arm is added without choosing one of these policies.
 fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExecutionPolicy> {
-    use WebSocketMethodExecutionPolicy::{Mutation, Observation, SessionLifecycle};
+    use WebSocketMethodExecutionPolicy::{Disposable, Mutation, Observation, SessionLifecycle};
 
     match method {
+        // A bounded PCM frame of the published host microphone (10 a second)
+        // and the renderer's latest-wins projections for the remotes.
+        "cloud.speech.audio" | "remote.surface.publish" | "agent.surface.publish" => {
+            Some(Disposable {
+                max_execution_age: WEBSOCKET_DISPOSABLE_MAX_EXECUTION_AGE,
+            })
+        }
+
         COMMAND_LANE_SMOKE_RELEASE_METHOD
         | LIVE_CONTROL_RECYCLE_SMOKE_BLOCK_METHOD
         | CAPTURE_RECOVERY_SMOKE_INJECT_METHOD
@@ -5874,7 +5931,6 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "cloud.marker.voice.configure"
         | "cloud.speech.overlay"
         | "cloud.speech.sync"
-        | "cloud.speech.audio"
         | "captions.start"
         | "captions.stop"
         | "captions.style.set"
@@ -5980,9 +6036,7 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "remote.lan.pairing.cancel"
         | "remote.lan.devices.revoke"
         | "remote.lan.devices.rename"
-        | "remote.surface.publish"
         | "remote.intent.ack"
-        | "agent.surface.publish"
         | "agent.intent.ack"
         | "remote.intent"
         | "cloud.settings.set"
@@ -6354,7 +6408,18 @@ fn websocket_command_mutation_max_execution_age(text: &str) -> Option<Duration> 
     match websocket_method_execution_policy(command.method.as_str())? {
         WebSocketMethodExecutionPolicy::Mutation { max_execution_age } => Some(max_execution_age),
         WebSocketMethodExecutionPolicy::Observation
+        | WebSocketMethodExecutionPolicy::Disposable { .. }
         | WebSocketMethodExecutionPolicy::SessionLifecycle => None,
+    }
+}
+
+/// The deadline of a disposable command (`Disposable`), after which it is
+/// refused and its handler future dropped. `None` for every other policy.
+fn websocket_command_disposable_max_execution_age(text: &str) -> Option<Duration> {
+    let command = serde_json::from_str::<ClientCommand>(text).ok()?;
+    match websocket_method_execution_policy(command.method.as_str())? {
+        WebSocketMethodExecutionPolicy::Disposable { max_execution_age } => Some(max_execution_age),
+        _ => None,
     }
 }
 
@@ -6368,6 +6433,10 @@ enum WebSocketIsolatedCommandLaneKind {
     Stop,
     /// The renderer's latest-wins projections for the remotes (issue #1068).
     SurfacePublish,
+    /// The published host microphone's PCM frames for captions and Sidekick,
+    /// 10 a second in a talk show. In order, one at a time, and never a
+    /// barrier for (or behind) an operator control on the ordered lane.
+    HostSpeech,
 }
 
 fn websocket_isolated_command_lane(text: &str) -> Option<WebSocketIsolatedCommandLaneKind> {
@@ -6425,6 +6494,7 @@ fn websocket_isolated_command_lane(text: &str) -> Option<WebSocketIsolatedComman
         "remote.surface.publish" | "agent.surface.publish" => {
             Some(WebSocketIsolatedCommandLaneKind::SurfacePublish)
         }
+        "cloud.speech.audio" => Some(WebSocketIsolatedCommandLaneKind::HostSpeech),
         _ => None,
     }
 }
@@ -6571,6 +6641,9 @@ fn accept_websocket_command(state: &AppState, text: String) -> WebSocketAccepted
             Some(WebSocketIsolatedCommandLaneKind::SurfacePublish) => {
                 WEBSOCKET_SURFACE_PUBLISH_MAX_QUEUE_AGE
             }
+            Some(WebSocketIsolatedCommandLaneKind::HostSpeech) => {
+                WEBSOCKET_HOST_SPEECH_MAX_QUEUE_AGE
+            }
             // Observation is classified above because it is a read-only
             // property rather than a mutation-lane classifier result.
             Some(WebSocketIsolatedCommandLaneKind::Observation) => {
@@ -6647,6 +6720,7 @@ struct WebSocketIsolatedCommandLanes {
     live_control: WebSocketIsolatedCommandLane,
     stop: WebSocketIsolatedCommandLane,
     surface_publish: WebSocketIsolatedCommandLane,
+    host_speech: WebSocketIsolatedCommandLane,
 }
 
 struct WebSocketIsolatedCommandLaneReceivers {
@@ -6657,6 +6731,7 @@ struct WebSocketIsolatedCommandLaneReceivers {
     live_control: mpsc::Receiver<WebSocketQueuedLaneCommand>,
     stop: mpsc::Receiver<WebSocketQueuedLaneCommand>,
     surface_publish: mpsc::Receiver<WebSocketQueuedLaneCommand>,
+    host_speech: mpsc::Receiver<WebSocketQueuedLaneCommand>,
 }
 
 impl WebSocketIsolatedCommandLanes {
@@ -6707,6 +6782,12 @@ impl WebSocketIsolatedCommandLanes {
             WEBSOCKET_SURFACE_PUBLISH_MAX_QUEUE_AGE,
             transport.register_command_lane("surfacePublish"),
         );
+        let (host_speech, host_speech_rx) = WebSocketIsolatedCommandLane::new(
+            WebSocketIsolatedCommandLaneKind::HostSpeech,
+            WEBSOCKET_ISOLATED_LANE_QUEUE_CAPACITY,
+            WEBSOCKET_HOST_SPEECH_MAX_QUEUE_AGE,
+            transport.register_command_lane("hostSpeech"),
+        );
         (
             Self {
                 observation,
@@ -6716,6 +6797,7 @@ impl WebSocketIsolatedCommandLanes {
                 live_control,
                 stop,
                 surface_publish,
+                host_speech,
             },
             WebSocketIsolatedCommandLaneReceivers {
                 observation: observation_rx,
@@ -6725,6 +6807,7 @@ impl WebSocketIsolatedCommandLanes {
                 live_control: live_control_rx,
                 stop: stop_rx,
                 surface_publish: surface_publish_rx,
+                host_speech: host_speech_rx,
             },
         )
     }
@@ -6738,6 +6821,7 @@ impl WebSocketIsolatedCommandLanes {
             WebSocketIsolatedCommandLaneKind::LiveControl => self.live_control.clone(),
             WebSocketIsolatedCommandLaneKind::Stop => self.stop.clone(),
             WebSocketIsolatedCommandLaneKind::SurfacePublish => self.surface_publish.clone(),
+            WebSocketIsolatedCommandLaneKind::HostSpeech => self.host_speech.clone(),
         }
     }
 }
@@ -6765,6 +6849,7 @@ impl WebSocketIsolatedCommandLaneKind {
             Self::LiveControl => "liveControl",
             Self::Stop => "stop",
             Self::SurfacePublish => "surfacePublish",
+            Self::HostSpeech => "hostSpeech",
         }
     }
 }
@@ -7258,6 +7343,25 @@ struct WebSocketCommandLaneWorkerContext {
     command_handler: WebSocketCommandHandler,
 }
 
+/// One line for a disposable command refused at its deadline, at most once
+/// every 5 s per process: a starved host drops speech frames 10 a second.
+fn warn_disposable_command_dropped(lane: &str, method: &str, max_execution_age: Duration) {
+    static DROPPED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    static LAST_WARNED: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+    let dropped = DROPPED.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+    let mut last = LAST_WARNED
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if last.is_some_and(|at| at.elapsed() < Duration::from_secs(5)) {
+        return;
+    }
+    *last = Some(std::time::Instant::now());
+    tracing::warn!(
+        "[command-lane] {method} did not finish within {}ms in the {lane} lane and was dropped ({dropped} dropped since launch); the backend keeps running",
+        max_execution_age.as_millis()
+    );
+}
+
 async fn run_websocket_command_lane_worker(
     mut commands: mpsc::Receiver<WebSocketQueuedLaneCommand>,
     max_concurrency: usize,
@@ -7627,6 +7731,41 @@ async fn run_websocket_command_lane_worker(
                     return;
                 }
 
+                if let Some(max_execution_age) =
+                    websocket_command_disposable_max_execution_age(text.as_str())
+                {
+                    let method = websocket_command_method(text.as_str());
+                    let lane = websocket_lane_label(&text);
+                    // Dropping the handler future at the deadline is the
+                    // whole recovery: a disposable handler changes nothing a
+                    // later command of its lane does not replace.
+                    let response = match tokio::time::timeout(
+                        max_execution_age,
+                        handler(command_state, text),
+                    )
+                    .await
+                    {
+                        Ok(response) => response,
+                        Err(_) => {
+                            warn_disposable_command_dropped(lane, &method, max_execution_age);
+                            ServerResponse::error(
+                                command_id,
+                                "command-dropped",
+                                "Videorc was too busy to apply this in time; it was dropped.",
+                            )
+                        }
+                    };
+                    drop(_admission);
+                    let _ = queue_websocket_response(
+                        &response_tx,
+                        &response_metrics,
+                        &response_pressure,
+                        response,
+                    )
+                    .await;
+                    return;
+                }
+
                 let response = handler(command_state, text).await;
                 // Application completion, rather than a slow peer's response
                 // queue, is the fence edge observed by Stop/reconciliation.
@@ -7807,6 +7946,14 @@ async fn run_websocket_command_dispatcher(
         lane_receivers.surface_publish,
         1,
         lanes.surface_publish.metrics.clone(),
+        &lane_worker_context,
+    );
+    // One frame at a time keeps the audio in order.
+    spawn_websocket_command_lane_worker(
+        &mut lane_workers,
+        lane_receivers.host_speech,
+        1,
+        lanes.host_speech.metrics.clone(),
         &lane_worker_context,
     );
 
@@ -8232,12 +8379,21 @@ async fn run_websocket_ordered_command_dispatcher_with_mutation_executor(
             // budget, aborted on completion — so a wedged command is named
             // WHILE it is wedged, not only in the post-mortem.
             let slow_method = method.clone();
+            let slow_executor = mutation_executor.clone();
             let slow_watch = tokio::spawn(async move {
                 tokio::time::sleep(WEBSOCKET_SLOW_STATEFUL_COMMAND_THRESHOLD).await;
                 tracing::warn!(
                     "[command-lane] stateful command {slow_method} still running after {}ms; later ordered commands are barriered behind it",
                     WEBSOCKET_SLOW_STATEFUL_COMMAND_THRESHOLD.as_millis()
                 );
+                // 2026-11-19: says whether the command itself waits (a lock,
+                // a provider) or no mutation worker is running anything.
+                if let Ok(executor) = slow_executor {
+                    tracing::warn!(
+                        "[command-lane] {}",
+                        probe_websocket_mutation_executor(&executor).await
+                    );
+                }
             });
             if let Some(max_execution_age) = mutation_max_execution_age {
                 let result = run_websocket_mutation_with_deadline(
@@ -12847,11 +13003,16 @@ async fn handle_text_message_with_role(
                         }
                         ServerResponse::ok(command.id, status)
                     }
-                    Err(error) => ServerResponse::error(
-                        command.id,
-                        cloud_talk_error_code(&error, "cloud-room-resume-failed"),
-                        format!("{error:#}"),
-                    ),
+                    Err(error) => {
+                        // 2026-11-19: a Continue here that failed left no
+                        // line; the renderer's toast was the only record.
+                        tracing::warn!("[cloud] room resume failed: {error:#}");
+                        ServerResponse::error(
+                            command.id,
+                            cloud_talk_error_code(&error, "cloud-room-resume-failed"),
+                            format!("{error:#}"),
+                        )
+                    }
                 }
             }
             None => cloud_unavailable(command.id),
@@ -17367,6 +17528,10 @@ async fn claim_cloud_controller(
                         cloud_controller::set_restore(show_id, epoch, restore, facts);
                     }
                     spawn_cloud_controller_renewal(state, show_id.to_string(), epoch);
+                    tracing::info!(
+                        "[cloud] controller held: epoch {epoch}, taken over from {}",
+                        granted.taken_over_from.as_deref().unwrap_or("nobody")
+                    );
                 }
                 return None;
             }
@@ -21692,6 +21857,7 @@ mod tests {
         );
 
         let mut lifecycle_exemptions = Vec::new();
+        let mut disposable = Vec::new();
         for method in methods {
             let command = json!({ "id": method, "method": method, "params": {} }).to_string();
             let policy = websocket_method_execution_policy(method.as_str())
@@ -21718,6 +21884,27 @@ mod tests {
                         None,
                         "observation RPC {method} must not arm an outcome-unknown mutation deadline"
                     );
+                }
+                WebSocketMethodExecutionPolicy::Disposable { max_execution_age } => {
+                    assert!(
+                        !websocket_command_is_read_only(command.as_str()),
+                        "disposable RPC {method} stores something: it is not an observation"
+                    );
+                    assert_eq!(
+                        websocket_command_mutation_max_execution_age(command.as_str()),
+                        None,
+                        "disposable RPC {method} must never arm the backend-recycling mutation deadline"
+                    );
+                    assert_eq!(
+                        websocket_command_disposable_max_execution_age(command.as_str()),
+                        Some(max_execution_age),
+                        "disposable RPC {method} must be refused at its own deadline"
+                    );
+                    assert!(
+                        websocket_isolated_command_lane(command.as_str()).is_some(),
+                        "disposable RPC {method} needs its own lane: the ordered lane has no deadline for it"
+                    );
+                    disposable.push(method);
                 }
                 WebSocketMethodExecutionPolicy::SessionLifecycle => {
                     assert!(
@@ -21750,6 +21937,143 @@ mod tests {
             .to_vec(),
             "only atomic Start and fail-closed recording finalization may bypass generic mutation deadlines"
         );
+        disposable.sort_unstable();
+        assert_eq!(
+            disposable,
+            [
+                "agent.surface.publish",
+                "cloud.speech.audio",
+                "remote.surface.publish",
+            ]
+            .map(str::to_string)
+            .to_vec(),
+            "only real-time frames and latest-wins projections may be dropped instead of recycling the backend"
+        );
+    }
+
+    #[test]
+    fn host_speech_frames_ride_their_own_lane_and_never_recycle_the_backend() {
+        // 2026-11-19: a 100 ms PCM frame held the ordered lane for 10 s on a
+        // starved Mac and the backend restarted in the middle of a live show.
+        let frame =
+            json!({ "id": "pcm", "method": "cloud.speech.audio", "params": {} }).to_string();
+        assert_eq!(
+            websocket_isolated_command_lane(frame.as_str()),
+            Some(WebSocketIsolatedCommandLaneKind::HostSpeech),
+            "a speech frame must never barrier an operator control on the ordered lane"
+        );
+        assert_eq!(
+            websocket_command_mutation_max_execution_age(frame.as_str()),
+            None
+        );
+        assert_eq!(
+            websocket_command_disposable_max_execution_age(frame.as_str()),
+            Some(WEBSOCKET_DISPOSABLE_MAX_EXECUTION_AGE)
+        );
+        assert!(WEBSOCKET_DISPOSABLE_MAX_EXECUTION_AGE < WEBSOCKET_MUTATION_MAX_EXECUTION_AGE);
+        // The source sync starts and stops the speech provider: it stays an
+        // ordered, watched mutation.
+        let sync = json!({ "id": "sync", "method": "cloud.speech.sync", "params": {} }).to_string();
+        assert_eq!(websocket_isolated_command_lane(sync.as_str()), None);
+        assert_eq!(
+            websocket_command_mutation_max_execution_age(sync.as_str()),
+            Some(WEBSOCKET_MUTATION_MAX_EXECUTION_AGE)
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_host_speech_frame_that_never_finishes_is_dropped_and_the_backend_keeps_running() {
+        // The frame's handler never returns (a starved host, a held lock).
+        // At its deadline the frame is refused, the next frame is served, and
+        // no backend recycle is requested.
+        let handler: WebSocketCommandHandler = std::sync::Arc::new(move |_state, text| {
+            Box::pin(async move {
+                let command: ClientCommand = serde_json::from_str(&text).unwrap();
+                if command.id == "stuck" {
+                    std::future::pending::<()>().await;
+                }
+                ServerResponse::ok(command.id, json!({ "uploadAllowed": true }))
+            })
+        });
+        let (outgoing_tx, mut outgoing_rx) = mpsc::channel(WEBSOCKET_RELIABLE_QUEUE_CAPACITY);
+        let transport = std::sync::Arc::new(WebSocketTransportMetrics::default());
+        let (lane, lane_rx) = WebSocketIsolatedCommandLane::new(
+            WebSocketIsolatedCommandLaneKind::HostSpeech,
+            WEBSOCKET_ISOLATED_LANE_QUEUE_CAPACITY,
+            WEBSOCKET_HOST_SPEECH_MAX_QUEUE_AGE,
+            transport.register_command_lane("hostSpeech"),
+        );
+        let connection = transport.register_connection();
+        let (pressure_tx, _pressure_rx) = mpsc::channel(1);
+        let state = test_state();
+        let mut workers = tokio::task::JoinSet::new();
+        spawn_websocket_command_lane_worker(
+            &mut workers,
+            lane_rx,
+            1,
+            lane.metrics.clone(),
+            &WebSocketCommandLaneWorkerContext {
+                state: state.clone(),
+                outgoing: outgoing_tx,
+                reliable_metrics: connection.reliable_response_queue,
+                slow_pressure: WebSocketSlowPressureSignal::new(pressure_tx, transport),
+                command_handler: handler,
+            },
+        );
+        let enqueue = |id: &str| {
+            try_enqueue_websocket_lane_command(
+                &lane,
+                json!({ "id": id, "method": "cloud.speech.audio", "params": {} }).to_string(),
+                tokio::time::Instant::now() + Duration::from_secs(5),
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        };
+        async fn next_response(outgoing: &mut mpsc::Receiver<Message>) -> serde_json::Value {
+            let message = timeout(Duration::from_secs(60), outgoing.recv())
+                .await
+                .expect("every frame is answered")
+                .expect("the response queue stays open");
+            let Message::Text(text) = message else {
+                panic!("unexpected response frame");
+            };
+            serde_json::from_str(&text).unwrap()
+        }
+
+        let started = tokio::time::Instant::now();
+        enqueue("stuck");
+        let dropped = next_response(&mut outgoing_rx).await;
+        assert_eq!(dropped["id"], json!("stuck"));
+        assert_eq!(dropped["ok"], json!(false), "{dropped}");
+        assert_eq!(
+            dropped["error"]["code"],
+            json!("command-dropped"),
+            "{dropped}"
+        );
+        let waited = started.elapsed();
+        assert!(
+            waited >= WEBSOCKET_DISPOSABLE_MAX_EXECUTION_AGE
+                && waited < WEBSOCKET_DISPOSABLE_MAX_EXECUTION_AGE + Duration::from_secs(1),
+            "the frame is refused at its own deadline, not the 10 s mutation contract: {waited:?}"
+        );
+
+        enqueue("next");
+        let served = next_response(&mut outgoing_rx).await;
+        assert_eq!(served["id"], json!("next"));
+        assert_eq!(served["ok"], json!(true), "{served}");
+        assert!(
+            !state.process_shutdown_requested(),
+            "a dropped speech frame must never recycle the backend"
+        );
+
+        drop(lane);
+        timeout(Duration::from_secs(5), async {
+            while workers.join_next().await.is_some() {}
+        })
+        .await
+        .expect("the host speech lane worker should stop after its sender closes");
     }
 
     #[test]
