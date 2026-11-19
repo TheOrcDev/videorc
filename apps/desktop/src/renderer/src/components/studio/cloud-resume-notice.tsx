@@ -22,17 +22,22 @@ import {
  * hand-off (with where a phone continues) or is live from another device,
  * and its first action reads Continue here: the same resume, which takes
  * the show back to this computer.
+ *
+ * `rejoining`: the Studio is already going back into the room by itself
+ * (a backend restart). Resume waits for it; End livestream never does.
  */
 export function CloudResumeNotice({
   blockedReason,
   notice,
   pending,
+  rejoining = false,
   onResume
 }: {
   /** Why Go Live can't run right now; Resume says it on hover. */
   blockedReason: string | null
   notice: CloudResumeNoticeCopy
   pending: boolean
+  rejoining?: boolean
   onResume: () => void
 }): ReactElement {
   const { endCloudShow } = useStudioCloud()
@@ -54,18 +59,20 @@ export function CloudResumeNotice({
             <DisabledReason reason={pending ? null : blockedReason}>
               <Button
                 data-testid="cloud-resume"
-                disabled={pending || Boolean(blockedReason)}
+                disabled={pending || rejoining || Boolean(blockedReason)}
                 size="xs"
                 type="button"
                 onClick={onResume}
               >
-                {continues
-                  ? pending
-                    ? 'Continuing…'
-                    : 'Continue here'
-                  : pending
-                    ? 'Resuming…'
-                    : 'Resume'}
+                {rejoining
+                  ? 'Reconnecting…'
+                  : continues
+                    ? pending
+                      ? 'Continuing…'
+                      : 'Continue here'
+                    : pending
+                      ? 'Resuming…'
+                      : 'Resume'}
               </Button>
             </DisabledReason>
             <Button

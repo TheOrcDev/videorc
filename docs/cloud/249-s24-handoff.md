@@ -98,6 +98,9 @@ only with its current epoch, sent in `videorc-controller-epoch`:
   - solo Go Live (plain claim, after the show exists);
   - room Resume and **solo Resume** (explicit takeover, before anything is
     sent).
+  - the Studio's own resume after a backend restart sends the same room
+    Resume, and only for a show whose kept epoch was renewed (see "Back in
+    the room after a backend restart").
 - A refused renewal, or any fenced request answered as stale, marks the show
   lost:
   - `cloud_controller::Ownership::Lost` is announced on a watch
@@ -188,7 +191,7 @@ preserved through the gap.
   camera name are masked to null) until the streamer presses "Turn on".
 - "Turn on" opens them through S7b's live selection, with no rejoin.
 - Not after a takeover from this same computer (`takenOverFrom:
-  this-device`: a backend restart or a relaunch, then Resume). The room
+this-device`: a backend restart or a relaunch, then Resume). The room
   opens the camera and microphone as this computer had them, and nothing
   waits for "Turn on" (2026-11-19: the hold kept the host's microphone out
   of a live room after a backend restart).
@@ -199,6 +202,53 @@ preserved through the gap.
 - System audio (S8) and HTML (S11) are named in `needsEnable`.
 - Nothing ends a provider broadcast. Private Sidekick context and local
   files never move.
+
+### Back in the room after a backend restart (rule change, 2026-11-19)
+
+S24's rule was "Resume takes the show over explicitly": after any restart,
+the room and its devices waited for the streamer's Resume. The owner changed
+it on 2026-11-19, after the backend restarted in the middle of a live talk
+show (14:21:19Z) and the host stayed out of their own room until they
+pressed Resume.
+
+- When the backend restarts while this computer's room is open, the Studio
+  sends `cloud.room.resume` itself. Nobody presses Resume or Continue here.
+- It does so only when all of this holds (`autoRejoinDecision` in
+  `lib/talk-show-auto-rejoin.ts`, pure and tested):
+  - this renderer had the room open (joined or joining) when its backend
+    connection went away, and the room was not closed, ended or taken over
+    under the backend that held it;
+  - the new backend reports the same talk show as resumable;
+  - the new backend holds the show's controller epoch, not lost. That is
+    the kept epoch videorc.com renewed for this computer (#1565), so nobody
+    took the show over;
+  - no other device is on air, and the show is not waiting for a device
+    after a hand-off.
+- A show another device took over is never resumed this way. The kept epoch
+  is refused there, no controller is reported, and the notice keeps its
+  explicit Continue here, which is still the only takeover.
+- Once per backend. The Studio asks the new backend for its status for up to
+  30 s (the launch check and the renewal), then resumes. A failed resume is
+  tried again after 2 s and after 5 s, with the rule checked again each
+  time; then it gives up and the Resume notice is the streamer's.
+- Camera and microphone come back as they were, the same as a Resume from
+  this computer: nothing waits for "Turn on". A muted microphone stays
+  muted and a camera that was off stays off (the join reads the Studio's
+  own `microphoneMuted` and `cameraOff`, which a backend restart does not
+  touch).
+- What the host sees: the Resume notice reads "Reconnecting to your show…"
+  with its button waiting ("Reconnecting…"; End livestream stays), and one
+  entry behind the bell, "Reconnecting to your show", which becomes "Back in
+  your show" once the room is connected, or "Couldn't reconnect to your
+  show. Press Resume in the Studio to go back in."
+- A relaunch of the whole app is unchanged: a new Studio had no room open,
+  so its notice waits for Resume.
+- The join now also waits for the new backend's first status. The Studio
+  keeps the old backend's status until then, and joining on it asked the new
+  backend for a room token it could not give.
+- Known limit: the rule is decided in the renderer from the backend's
+  status. A takeover by another device in the instant between that status
+  and the resume is not seen, and the resume would take the show back.
 
 ## Acceptance case (maintained, not executed)
 

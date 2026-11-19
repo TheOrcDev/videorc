@@ -94,6 +94,17 @@ export function cloudResumeNotice(
 }
 
 /**
+ * The notice while the Studio goes back into the room by itself after a
+ * backend restart (2026-11-19, `lib/talk-show-auto-rejoin.ts`): it says so,
+ * and nothing is asked of the host. Only a talk show this computer resumes:
+ * a show another device has keeps its own words and Continue here.
+ */
+export function rejoiningResumeNotice(notice: CloudResumeNotice): CloudResumeNotice {
+  if (notice.action !== 'resume') return notice
+  return { ...notice, title: 'Reconnecting to your show…', tone: 'default' }
+}
+
+/**
  * C4: the Go Live button while the session starts through the cloud: the
  * switch is on for an entitled account, or a show is still live on our
  * servers, which Go Live feeds whatever the switch or rollout says (plan 222

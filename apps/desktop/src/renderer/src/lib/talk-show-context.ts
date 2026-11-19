@@ -48,6 +48,12 @@ export interface TalkShowContextValue {
   twoScreens: boolean
   /** `host:<showId>` while the room is open, for "You" on the stage. */
   hostIdentity: string | null
+  /**
+   * The backend restarted while the room was open, and the Studio is asking
+   * for the room back by itself (`lib/talk-show-auto-rejoin.ts`). The Resume
+   * notice says so in place of its button.
+   */
+  rejoining: boolean
   openRoom: (
     params: Omit<CloudRoomOpenParams, 'outputs'> & { outputs?: CloudRoomOpenParams['outputs'] }
   ) => Promise<void>
@@ -98,6 +104,7 @@ export const NO_TALK_SHOW: TalkShowContextValue = {
   previewReplaced: false,
   twoScreens: false,
   hostIdentity: null,
+  rejoining: false,
   openRoom: async () => {},
   closeRoom: async () => {},
   resumeRoom: async () => {},

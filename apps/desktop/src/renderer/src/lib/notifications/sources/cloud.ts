@@ -166,3 +166,48 @@ export function publishCloudController(
 export function withdrawCloudController(store: NotificationStore = notifications): void {
   store.withdraw(CLOUD_CONTROLLER_KEY)
 }
+
+export const CLOUD_REJOIN_KEY = 'cloud-rejoin'
+
+/**
+ * The backend restarted while this computer's room was open, and the Studio
+ * goes back in by itself (2026-11-19). One entry: it runs, then says the
+ * host is back, or that Resume is theirs to press.
+ */
+export function publishCloudRejoin(
+  state: 'running' | 'done' | 'failed',
+  store: NotificationStore = notifications
+): void {
+  store.publish({
+    key: CLOUD_REJOIN_KEY,
+    kind: 'cloud-rejoin',
+    state,
+    ...(state === 'running'
+      ? { title: 'Reconnecting to your show' }
+      : state === 'done'
+        ? { title: 'Back in your show', detail: 'Videorc restarted and put you back in the room.' }
+        : {
+            title: "Couldn't reconnect to your show",
+            detail: 'Press Resume in the Studio to go back in.',
+            actions: [
+              {
+                id: 'open-studio',
+                label: 'Open Studio',
+                kind: 'door' as const,
+                run: () => openWorkspaceTab('studio')
+              }
+            ]
+          })
+  })
+}
+
+/**
+ * Nothing to go back to after all (the show ended, or another device has
+ * it): the running entry goes. One that already said how it ended stays.
+ */
+export function withdrawCloudRejoin(store: NotificationStore = notifications): void {
+  const running = store
+    .snapshot()
+    .some((entry) => entry.key === CLOUD_REJOIN_KEY && entry.state === 'running')
+  if (running) store.clear(CLOUD_REJOIN_KEY)
+}

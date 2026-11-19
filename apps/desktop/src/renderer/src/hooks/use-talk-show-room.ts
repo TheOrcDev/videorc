@@ -31,6 +31,7 @@ import {
   NO_TALK_SHOW,
   type TalkShowContextValue
 } from '@/lib/talk-show-context'
+import { runAutoRejoin, type AutoRejoinHeld } from '@/lib/talk-show-auto-rejoin'
 import type { TalkShowCameraSettings } from '@/lib/talk-show-camera-effects'
 import type { TalkShowRoomClient, TalkShowRoomSnapshot } from '@/lib/talk-show-room'
 import {
@@ -65,6 +66,10 @@ const IDLE_SNAPSHOT = IDLE_TALK_SHOW_SNAPSHOT
 
 const loadRoomClient = () => import('@/lib/talk-show-room')
 const loadOverlays = () => import('@/lib/talk-show-overlays')
+const loadCloudNotifications = () => import('@/lib/notifications/sources/cloud')
+
+/** After a resume by itself, how long the join gets before the host is told it failed. */
+const AUTO_REJOIN_JOIN_MS = 60_000
 
 /** The Studio supplies the object, "the room", when it builds the toast. */
 export const ROOM_JOIN_ERROR_ACTION = 'join'
@@ -345,13 +350,23 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
   const onAirRef = useRef(cloudStatus?.onAir)
   onAirRef.current = cloudStatus?.onAir
 
+  // The provider keeps the last backend's status until the new one reports,
+  // so a status counts only under the client it arrived with. A restarted
+  // backend holds no room until it is resumed: joining on the old status
+  // asked it for a token it could not give ("Couldn't join the room").
+  const statusSourceRef = useRef({ status: cloudStatus, client })
+  if (statusSourceRef.current.status !== cloudStatus) {
+    statusSourceRef.current = { status: cloudStatus, client }
+  }
+  const statusIsCurrent = client !== null && statusSourceRef.current.client === client
+
   // Each open show owns one join. Closing, changing shows or losing the
   // backend cancels it, even while the media grant or lazy import is pending.
   // A replacement waits for teardown so the old leave cannot revoke its grant.
   useEffect(() => {
     setSnapshot(IDLE_SNAPSHOT)
     mediaDepsRef.current.onMediaSnapshot?.(IDLE_SNAPSHOT)
-    if (!roomOpen || !client || !showId) {
+    if (!roomOpen || !client || !showId || !statusIsCurrent) {
       return
     }
     let cancelled = false
@@ -524,7 +539,7 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
     }
     // An epoch change (a takeover) rejoins even for the same show; the
     // explicit enable does not.
-  }, [client, roomOpen, showId, controlsRef, holdEpoch])
+  }, [client, roomOpen, showId, controlsRef, holdEpoch, statusIsCurrent])
 
   useEffect(() => {
     const current = clientRef.current
@@ -866,6 +881,103 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
     }
   }, [])
 
+  // Back in the room by itself after a backend restart (2026-11-19). The join
+  // above is keyed on the backend client, so a restarted backend takes the
+  // host out of the room, and the new one holds the show as resumable until
+  // someone asks for it. This renderer asks, once per backend, when the room
+  // it had open is still this computer's (`autoRejoinDecision`); the Resume
+  // it sends is the one the notice's button sends, so the join above opens
+  // the camera and microphone as they were (muted stays muted: the join
+  // reads `microphoneMuted` and `cameraOff`, which the Studio keeps).
+  /** The room this renderer has open, and the backend that holds it. */
+  const heldRoomRef = useRef<(AutoRejoinHeld & { client: BackendClient }) | null>(null)
+  /** The backend this renderer already sent its own resume to. */
+  const autoResumedRef = useRef<BackendClient | null>(null)
+  /** The host was told "Reconnecting" and is owed how it ended. */
+  const rejoinToldRef = useRef(false)
+  const [rejoining, setRejoining] = useState(false)
+  const [awaitingRejoin, setAwaitingRejoin] = useState(false)
+  useEffect(() => {
+    if (!client || !statusIsCurrent) return
+    if (roomOpen && showId) {
+      heldRoomRef.current = { showId, client }
+    } else if (heldRoomRef.current?.client === client) {
+      // Closed, ended or taken over under the backend that held it: nothing
+      // is owed to a later restart.
+      heldRoomRef.current = null
+    }
+  }, [client, statusIsCurrent, roomOpen, showId])
+  useEffect(() => {
+    const held = heldRoomRef.current
+    if (!client || !held || held.client === client || autoResumedRef.current === client) return
+    let cancelled = false
+    const settle = (state: 'done' | 'failed' | null): void => {
+      if (!rejoinToldRef.current) return
+      rejoinToldRef.current = false
+      void loadCloudNotifications().then((cloud) =>
+        state ? cloud.publishCloudRejoin(state) : cloud.withdrawCloudRejoin()
+      )
+    }
+    void runAutoRejoin({
+      held: { showId: held.showId },
+      readStatus: () => client.requestTyped('cloud.status'),
+      resume: () => {
+        autoResumedRef.current = client
+        return client.requestTyped('cloud.room.resume')
+      },
+      sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+      cancelled: () => cancelled,
+      onStatus: (status) => callbacksRef.current.commitCloudStatus(status),
+      onReconnecting: () => {
+        rejoinToldRef.current = true
+        setRejoining(true)
+        void loadCloudNotifications().then((cloud) => {
+          if (rejoinToldRef.current) cloud.publishCloudRejoin('running')
+        })
+      }
+    }).then((outcome) => {
+      if (outcome.result === 'cancelled') return
+      setRejoining(false)
+      if (outcome.result === 'resumed') {
+        callbacksRef.current.commitCloudStatus(outcome.status)
+        // "Back in your show" waits for the room itself (below).
+        if (rejoinToldRef.current) setAwaitingRejoin(true)
+        return
+      }
+      // Whatever ended it, this room is not asked for again by itself.
+      if (heldRoomRef.current?.client !== client) heldRoomRef.current = null
+      if (outcome.result === 'failed') {
+        console.warn('[talk-show] could not rejoin the room by itself:', outcome.reason)
+        settle('failed')
+      } else {
+        settle(null)
+      }
+    })
+    return () => {
+      cancelled = true
+      setRejoining(false)
+    }
+  }, [client])
+  useEffect(() => {
+    if (!awaitingRejoin) return
+    const finish = (state: 'done' | 'failed' | null): void => {
+      setAwaitingRejoin(false)
+      if (!rejoinToldRef.current) return
+      rejoinToldRef.current = false
+      void loadCloudNotifications().then((cloud) =>
+        state ? cloud.publishCloudRejoin(state) : cloud.withdrawCloudRejoin()
+      )
+    }
+    if (snapshot.state === 'connected') return finish('done')
+    // A room the host closed meanwhile is not a failure; a join that never
+    // connected is (its own error already said why).
+    const timer = setTimeout(
+      () => finish(roomOpenRef.current ? 'failed' : null),
+      AUTO_REJOIN_JOIN_MS
+    )
+    return () => clearTimeout(timer)
+  }, [awaitingRejoin, snapshot.state])
+
   const setGraphicsEnabled = useCallback(async (enabled: boolean) => {
     clientRef.current?.setGraphicsEnabled(enabled)
   }, [])
@@ -968,6 +1080,7 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
       previewReplaced,
       twoScreens,
       hostIdentity,
+      rejoining,
       openRoom: async (params) => {
         // Plan 249 S17: the outputs are decided (and an unmeasured profile
         // refused) before anything is created; a refusal toasts like any.
@@ -1144,6 +1257,7 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
       onError,
       outputs,
       previewReplaced,
+      rejoining,
       setStage,
       snapshot,
       stage,
