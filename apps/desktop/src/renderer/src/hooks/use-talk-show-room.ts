@@ -17,6 +17,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore
 
 import type { BackendClient } from '@/backendClient'
 import type {
+  CloudControllerFacts,
   CloudGuestAction,
   CloudRoomOpenParams,
   CloudRoomOverlayEvent,
@@ -188,6 +189,22 @@ export function stageInRoom(
   }
 }
 
+/**
+ * Plan 249 S24 (D9): the controller epoch whose takeover holds the camera
+ * and microphone until the streamer presses Turn on, or 0 when nothing is
+ * held. A takeover from this same computer holds nothing (2026-11-19): a
+ * backend restart or a relaunch is a new controller, so its Resume takes
+ * the show back from this computer's own earlier process. The streamer
+ * never moved; holding there kept the microphone out of the room while the
+ * Studio meter moved, and viewers heard nothing.
+ */
+export function takeoverDeviceHoldEpoch(
+  controller: Pick<CloudControllerFacts, 'controllerEpoch' | 'takenOverFrom'> | undefined
+): number {
+  if (!controller?.takenOverFrom || controller.takenOverFrom === 'this-device') return 0
+  return controller.controllerEpoch
+}
+
 export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): TalkShowContextValue {
   const {
     client,
@@ -245,10 +262,13 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
   // captures here starts by itself. A muted microphone still opens capture,
   // so the device names are withheld from the room client until the
   // streamer turns them on; then S7b's live selection opens them (no rejoin).
+  // Every takeover rejoins and restores (`holdEpoch`); only one from another
+  // device holds the devices (`deviceHoldEpoch`).
   const controller = cloudStatus?.controller
   const holdEpoch = controller?.takenOverFrom ? controller.controllerEpoch : 0
+  const deviceHoldEpoch = takeoverDeviceHoldEpoch(controller)
   const [enabledEpoch, setEnabledEpoch] = useState(0)
-  const devicesHeld = holdEpoch > 0 && enabledEpoch !== holdEpoch
+  const devicesHeld = deviceHoldEpoch > 0 && enabledEpoch !== deviceHoldEpoch
   const devicesHeldRef = useRef(devicesHeld)
   devicesHeldRef.current = devicesHeld
   useEffect(() => {
@@ -258,12 +278,12 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
     // answers Continue here. It goes when the devices are on.
     const source = import('@/lib/notifications/sources/cloud')
     void source.then((cloud) =>
-      cloud.publishCloudController(needs, () => setEnabledEpoch(holdEpoch))
+      cloud.publishCloudController(needs, () => setEnabledEpoch(deviceHoldEpoch))
     )
     return () => {
       void source.then((cloud) => cloud.withdrawCloudController())
     }
-  }, [devicesHeld, roomOpen, holdEpoch, controller?.needsEnable])
+  }, [devicesHeld, roomOpen, deviceHoldEpoch, controller?.needsEnable])
   const microphoneChoice = useMemo<RoomMicrophoneChoice>(
     () => ({
       mode:
@@ -732,24 +752,25 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
 
   // Plan 249 S24: the streamer's explicit "Turn on" after a takeover opens
   // the camera through S7b's live selection; the microphone follows from
-  // `microphoneChoice` above. Once per epoch, only on a connected room.
+  // `microphoneChoice` above. Once per epoch, only on a connected room. A
+  // takeover from this computer held nothing: its join opened the camera.
   const enabledAppliedRef = useRef(0)
   useEffect(() => {
     const current = clientRef.current
     if (
       devicesHeld ||
-      holdEpoch === 0 ||
+      deviceHoldEpoch === 0 ||
       !current ||
       snapshot.state !== 'connected' ||
-      enabledAppliedRef.current === holdEpoch
+      enabledAppliedRef.current === deviceHoldEpoch
     )
       return
-    enabledAppliedRef.current = holdEpoch
+    enabledAppliedRef.current = deviceHoldEpoch
     const name = cameraNameRef.current
     void current
       .setCameraSelection(name, mediaDepsRef.current.cameraOff === true || !name)
       .catch((error) => onError(error, 'turn the room camera on'))
-  }, [devicesHeld, holdEpoch, snapshot.state, onError])
+  }, [devicesHeld, deviceHoldEpoch, snapshot.state, onError])
 
   // Plan 249 S24: what this controller has on, and the avatar's output flags,
   // so a computer that takes the show over knows what to ask its streamer to

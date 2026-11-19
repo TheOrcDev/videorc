@@ -187,6 +187,11 @@ preserved through the gap.
 - Camera and microphone are withheld (S7b's `microphoneChoice` and the
   camera name are masked to null) until the streamer presses "Turn on".
 - "Turn on" opens them through S7b's live selection, with no rejoin.
+- Not after a takeover from this same computer (`takenOverFrom:
+  this-device`: a backend restart or a relaunch, then Resume). The room
+  opens the camera and microphone as this computer had them, and nothing
+  waits for "Turn on" (2026-11-19: the hold kept the host's microphone out
+  of a live room after a backend restart).
 - A Sources pick meanwhile is refused (`sourcesHeld`). Turning things off
   stays allowed.
 - An epoch change still rejoins, for the same show too.
