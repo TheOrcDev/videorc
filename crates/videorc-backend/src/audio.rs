@@ -955,8 +955,43 @@ pub(crate) fn fold_interleaved_f32(
     plan: FoldPlan,
     clamp: bool,
 ) -> Vec<f32> {
+    fold_interleaved_f32_reusing(input, source_channels, settings, plan, clamp, Vec::new())
+}
+
+/// [`fold_interleaved_f32`] into a caller-owned buffer, replacing its
+/// contents. The session bus reuses one buffer across chunks and write
+/// attempts (PERF-04), so a warmed buffer folds without allocating.
+pub(crate) fn fold_interleaved_f32_into(
+    input: &[f32],
+    source_channels: usize,
+    settings: AudioProcessingSettings,
+    plan: FoldPlan,
+    clamp: bool,
+    output: &mut Vec<f32>,
+) {
+    // The fold pushes into an owned local (the buffer moved out with its
+    // capacity), which keeps the loop as fast as a fresh vector's.
+    *output = fold_interleaved_f32_reusing(
+        input,
+        source_channels,
+        settings,
+        plan,
+        clamp,
+        std::mem::take(output),
+    );
+}
+
+fn fold_interleaved_f32_reusing(
+    input: &[f32],
+    source_channels: usize,
+    settings: AudioProcessingSettings,
+    plan: FoldPlan,
+    clamp: bool,
+    mut output: Vec<f32>,
+) -> Vec<f32> {
+    output.clear();
     if input.is_empty() || source_channels == 0 {
-        return Vec::new();
+        return output;
     }
 
     let gain = if settings.muted {
@@ -965,7 +1000,7 @@ pub(crate) fn fold_interleaved_f32(
         db_to_gain(settings.gain_db)
     };
     let frame_count = input.len() / source_channels;
-    let mut output = Vec::with_capacity(frame_count * usize::from(NATIVE_AUDIO_CHANNELS));
+    output.reserve(frame_count * usize::from(NATIVE_AUDIO_CHANNELS));
 
     for frame_index in 0..frame_count {
         let base = frame_index * source_channels;

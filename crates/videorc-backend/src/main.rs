@@ -197,6 +197,8 @@ mod system_audio_capture;
 mod system_audio_capture_windows;
 mod system_audio_session;
 #[cfg(test)]
+mod test_alloc;
+#[cfg(test)]
 mod test_temp_dir;
 mod transcript;
 mod twitch;
