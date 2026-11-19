@@ -1,9 +1,10 @@
 import type { CloudRoomStatus, CloudStage } from '@/lib/backend'
 
 // Plan 251: which screens the program shows. The host shares their own
-// screen, a guest shares theirs once allowed, and the host picks up to two
-// of them. One screen is `screen-people`; two are the two-screens layout:
-// the screens side by side and everyone on stage in a row under them.
+// screen, a guest shares theirs once allowed, and the host puts up to two
+// of them on stage from the Show stage's Screens cards (plan 252). One
+// screen is `screen-people`; two are the two-screens layout: the screens
+// side by side and everyone on stage in a row under them.
 //
 // On the wire a stage keeps its one `screen`, and names both in `screens`
 // only when there are two. An older desktop, program page, guest page or
@@ -34,8 +35,7 @@ export function maxStageScreens(managed: boolean): number {
   return managed ? STAGE_MAX_SCREENS : 1
 }
 
-export const TWO_SCREENS_AT_MOST = 'The program shows two screens at most. Take one off first.'
-export const UP_TO_TWO_SCREENS = 'Show up to two screens'
+export const TWO_SCREENS_AT_MOST = 'Two screens are on stage. Take one off first.'
 export const ONE_SCREEN_ON_THIS_SHOW = 'This show puts one screen on the program.'
 
 /**
@@ -77,20 +77,11 @@ export function showScreens(stage: CloudStage, chosen: readonly string[], max: n
 }
 
 /**
- * The screens on the program now. A stage keeps naming its screens while
- * another layout is up (Screen + people brings them back); they are on the
- * program only on Screen + people.
- */
-export function programScreens(stage: CloudStage): string[] {
-  return stage.layout === 'screen-people' ? stageScreens(stage) : []
-}
-
-/**
- * One more screen on the program (the host starts sharing): beside the one
- * already there while there is room, else in the last place.
+ * One more screen on the stage: beside the one already there while there is
+ * room (`max` 2, the two-screens layout), else in its place (`max` 1).
  */
 export function addScreen(stage: CloudStage, identity: string, max: number): CloudStage {
-  const current = programScreens(stage)
+  const current = stageScreens(stage)
   if (current.includes(identity)) return showScreens(stage, current, max)
   const kept = current.slice(0, Math.max(0, max - 1))
   return showScreens(stage, [...kept, identity], max)
@@ -114,62 +105,58 @@ export function removeScreen(stage: CloudStage, identity: string): CloudStage {
   }
 }
 
-export type StageScreenChoice = {
-  identity: string
-  label: string
-  checked: boolean
-  /** Why it can't be ticked now. Null: it can. An unticking is never blocked. */
-  disabledReason: string | null
+/**
+ * A card's click while the two-screens layout is chosen: a screen on stage
+ * comes off; one that is off goes on beside the other, while there is room
+ * for it. A third changes nothing (its card says why).
+ */
+export function toggleStageScreen(stage: CloudStage, identity: string): CloudStage {
+  const current = stageScreens(stage)
+  if (current.includes(identity)) return removeScreen(stage, identity)
+  if (current.length >= STAGE_MAX_SCREENS) return stage
+  return showScreens(stage, [...current, identity], STAGE_MAX_SCREENS)
 }
 
 /**
- * The picker's rows: everyone on stage who shares a screen now, and every
- * screen on the program (so one that stopped can be taken off).
+ * Whether the Two screens layout card is the one chosen. On the wire it is
+ * Screen + people with one or two screens, so the choice is the renderer's:
+ * `picked` by the card, kept while Screen + people is up, and read back from
+ * a stage that names two (after a relaunch, or from another computer).
  */
-export function stageScreenChoices(
-  room: Pick<CloudRoomStatus, 'participants' | 'stage'> | undefined,
-  options: { hostIdentity: string | null; hostSharing: boolean; managed: boolean }
-): StageScreenChoice[] {
-  if (!room) return []
-  const selected = programScreens(room.stage)
-  const max = maxStageScreens(options.managed)
-  // With room for one, a tick takes the other's place; nothing is blocked.
-  const full = max > 1 && selected.length >= max
-  const sharing = (identity: string): boolean =>
-    identity === options.hostIdentity
-      ? options.hostSharing
-      : (room.participants ?? []).some(
-          (participant) => participant.identity === identity && participant.screen
-        )
-  const nameOf = (identity: string): string => {
-    if (identity === options.hostIdentity) return 'Your screen'
-    const name = (room.participants ?? []).find((entry) => entry.identity === identity)?.name
-    return name ? `${name}'s screen` : "A guest's screen"
-  }
-  return room.stage.onStage
-    .filter((identity) => selected.includes(identity) || sharing(identity))
-    .map((identity) => {
-      const checked = selected.includes(identity)
-      return {
-        identity,
-        label: nameOf(identity),
-        checked,
-        disabledReason: checked || !full ? null : TWO_SCREENS_AT_MOST
-      }
-    })
+export function twoScreensChosen(stage: CloudStage | null | undefined, picked: boolean): boolean {
+  if (!stage || stage.layout !== 'screen-people') return false
+  return picked || stageScreens(stage).length === STAGE_MAX_SCREENS
 }
 
-/** The stage after a row is ticked or unticked. */
-export function toggleStageScreen(
-  stage: CloudStage,
-  identity: string,
-  checked: boolean,
-  max: number
-): CloudStage {
-  const current = programScreens(stage)
-  if (!checked) return current.includes(identity) ? removeScreen(stage, identity) : stage
-  if (current.includes(identity)) return stage
-  if (max <= 1) return showScreens(stage, [identity], max)
-  if (current.length >= max) return stage
-  return showScreens(stage, [...current, identity], max)
+/** Who on stage shares a screen now, in stage order. */
+export function stageSharers(
+  room: Pick<CloudRoomStatus, 'participants' | 'stage'> | undefined,
+  hostIdentity: string | null,
+  hostSharing: boolean
+): string[] {
+  if (!room) return []
+  const sharing = new Set(
+    (room.participants ?? [])
+      .filter((participant) => participant.screen)
+      .map((participant) => participant.identity)
+  )
+  if (hostIdentity && hostSharing) sharing.add(hostIdentity)
+  return room.stage.onStage.filter((identity) => sharing.has(identity))
+}
+
+/**
+ * The Two screens layout card: the screens the stage already names, then
+ * whoever else on stage shares one, up to two. With one it shows that one
+ * and waits for the second card; with none there is nothing to show (null).
+ */
+export function twoScreensStage(stage: CloudStage, sharers: readonly string[]): CloudStage | null {
+  const named = stageScreens(stage).filter((identity) => stage.onStage.includes(identity))
+  const picks = [...named, ...sharers.filter((identity) => !named.includes(identity))]
+  if (picks.length === 0) return null
+  return showScreens(stage, picks, STAGE_MAX_SCREENS)
+}
+
+/** The Screen + people layout card: the stage's one screen, never a pair. */
+export function oneScreenStage(stage: CloudStage): CloudStage {
+  return { ...withStageScreens(stage, stageScreens(stage).slice(0, 1)), layout: 'screen-people' }
 }

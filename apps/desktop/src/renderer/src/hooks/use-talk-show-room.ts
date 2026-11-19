@@ -34,12 +34,15 @@ import {
 import type { TalkShowCameraSettings } from '@/lib/talk-show-camera-effects'
 import type { TalkShowRoomClient, TalkShowRoomSnapshot } from '@/lib/talk-show-room'
 import {
+  STAGE_MAX_SCREENS,
   addScreen,
-  maxStageScreens,
+  oneScreenStage,
   pruneStageScreens,
   removeScreen,
   stageScreens,
-  toggleStageScreen
+  stageSharers,
+  twoScreensChosen,
+  twoScreensStage
 } from '@/lib/stage-screens'
 import { cloudAvatarAtlasReason } from '@/lib/cloud-avatar-refusal'
 import type { AvatarMotionSource } from '../../../shared/cloud-avatar-view'
@@ -946,17 +949,24 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
       )
   }, [onError])
 
-  /** Plan 251: two screens on a managed show; a node show's runner draws one. */
-  const screenLimit = useCallback(async (): Promise<number> => {
-    const { isManagedShow } = await import('@/lib/talk-show-managed')
-    return maxStageScreens(isManagedShow(cloudStatusRef.current))
-  }, [])
+  // Plan 251: the Two screens layout card is chosen. On the wire it is
+  // Screen + people with one or two screens, so the choice is this
+  // renderer's: made by the card, kept while Screen + people is up, and read
+  // back from a stage that names two (a relaunch, another computer).
+  const [twoScreensPicked, setTwoScreensPicked] = useState(false)
+  const namesTwo = stage ? stageScreens(stage).length === STAGE_MAX_SCREENS : false
+  const twoScreens = twoScreensChosen(stage, twoScreensPicked)
+  useEffect(() => {
+    if (namesTwo) setTwoScreensPicked(true)
+    else if (stage?.layout !== 'screen-people') setTwoScreensPicked(false)
+  }, [namesTwo, stage?.layout])
 
   const previewReplaced = roomOpen || previewReplacedOverride
   const value = useMemo<TalkShowContextValue>(
     () => ({
       room: snapshot,
       previewReplaced,
+      twoScreens,
       hostIdentity,
       openRoom: async (params) => {
         // Plan 249 S17: the outputs are decided (and an unmeasured profile
@@ -1006,7 +1016,27 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
       },
       setLayout: async (layout) => {
         if (!stage) return
-        await setStage({ ...stage, layout })
+        if (layout === 'two-screens') {
+          // Plan 251: the screens already on stage, then whoever else on
+          // stage shares one, up to two. With one it waits for the second.
+          const next = twoScreensStage(
+            stage,
+            stageSharers(cloudStatusRef.current?.room, hostIdentity, snapshot.local.screen !== null)
+          )
+          if (!next) return
+          setTwoScreensPicked(true)
+          try {
+            await setStage(next)
+          } catch (error) {
+            // Not taken: the choice was never made.
+            setTwoScreensPicked(false)
+            throw error
+          }
+        } else {
+          setTwoScreensPicked(false)
+          // Screen + people is one screen: a second one comes off.
+          await setStage(layout === 'screen-people' ? oneScreenStage(stage) : { ...stage, layout })
+        }
         // Plan 249 S12: choosing a room layout puts the room's own layouts
         // back on the program; a scene stays only until the host does this.
         await clearRoomScene()
@@ -1028,8 +1058,9 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
           await window.videorc?.setTalkShowMediaGrant?.({ video: true, screenSourceId: sourceId })
           await roomClient.startScreenShare(sourceId)
           if (stage && hostIdentity) {
-            // Plan 251: beside a guest's screen already up, when the show can.
-            await setStage(addScreen(stage, hostIdentity, await screenLimit()))
+            // Plan 251: on Two screens it goes beside the screen already up;
+            // otherwise it takes the one place, as it always did.
+            await setStage(addScreen(stage, hostIdentity, twoScreens ? STAGE_MAX_SCREENS : 1))
           }
         } catch (error) {
           onError(error, 'share the screen')
@@ -1042,14 +1073,6 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
           // The other screen, when there is one, stays up.
           await setStage(removeScreen(stage, hostIdentity))
         }
-      },
-      setProgramScreen: async (identity, shown) => {
-        if (!stage) return
-        const next = toggleStageScreen(stage, identity, shown, await screenLimit())
-        if (next === stage) return
-        await setStage(next)
-        // A screen put up shows on the room's own layouts, as a layout pick does.
-        if (shown) await clearRoomScene()
       },
       setGraphicsEnabled,
       setAvatarEnabled,
@@ -1121,10 +1144,10 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
       onError,
       outputs,
       previewReplaced,
-      screenLimit,
       setStage,
       snapshot,
-      stage
+      stage,
+      twoScreens
     ]
   )
 

@@ -2,17 +2,17 @@ import { describe, expect, it } from 'vitest'
 
 import type { CloudRoomParticipant, CloudStage } from '@/lib/backend'
 import {
-  ONE_SCREEN_ON_THIS_SHOW,
-  TWO_SCREENS_AT_MOST,
   addScreen,
   maxStageScreens,
-  programScreens,
+  oneScreenStage,
   pruneStageScreens,
   removeScreen,
   showScreens,
-  stageScreenChoices,
   stageScreens,
+  stageSharers,
   toggleStageScreen,
+  twoScreensChosen,
+  twoScreensStage,
   withStageScreens
 } from '@/lib/stage-screens'
 
@@ -27,14 +27,12 @@ describe('the stage screens (plan 251)', () => {
     onStage: [HOST, 'g_ada', 'g_bo'],
     ...over
   })
+  const pair = stage({ layout: 'screen-people', screen: 'g_ada', screens: ['g_ada', HOST] })
 
   it('reads two screens, one screen or none', () => {
     expect(stageScreens(stage())).toEqual([])
     expect(stageScreens(stage({ screen: 'g_ada' }))).toEqual(['g_ada'])
-    expect(stageScreens(stage({ screen: 'g_ada', screens: ['g_ada', HOST] }))).toEqual([
-      'g_ada',
-      HOST
-    ])
+    expect(stageScreens(pair)).toEqual(['g_ada', HOST])
     // A pair that is not a pair is the one screen.
     expect(stageScreens(stage({ screen: 'g_ada', screens: ['g_ada', 'g_ada'] }))).toEqual(['g_ada'])
     expect(stageScreens(stage({ screen: 'g_ada', screens: [] }))).toEqual(['g_ada'])
@@ -61,74 +59,61 @@ describe('the stage screens (plan 251)', () => {
     expect(showScreens(stage({ layout: 'spotlight' }), [], 2).layout).toBe('spotlight')
   })
 
-  it("puts the host's own share beside a guest's, and in the last place when full", () => {
+  it("puts the host's own share beside a guest's on Two screens, and in its place otherwise", () => {
     const guest = stage({ layout: 'screen-people', screen: 'g_ada' })
     expect(addScreen(guest, HOST, 2).screens).toEqual(['g_ada', HOST])
-    const full = addScreen(guest, 'g_bo', 2)
-    expect(addScreen(full, HOST, 2).screens).toEqual(['g_ada', HOST])
-    // A node show draws one: the host's share takes the place, as before.
-    const node = addScreen(guest, HOST, 1)
-    expect(node.screen).toBe(HOST)
-    expect(node.screens).toBeUndefined()
-    expect(addScreen(stage(), HOST, 2)).toMatchObject({ layout: 'screen-people', screen: HOST })
+    // Two already up: the host's takes the last place.
+    expect(addScreen(addScreen(guest, 'g_bo', 2), HOST, 2).screens).toEqual(['g_ada', HOST])
+    // Any other layout, and every node show: one screen, the host's.
+    const one = addScreen(guest, HOST, 1)
+    expect(one.screen).toBe(HOST)
+    expect(one.screens).toBeUndefined()
+    expect(addScreen(stage(), HOST, 1)).toMatchObject({ layout: 'screen-people', screen: HOST })
+    expect(maxStageScreens(true)).toBe(2)
+    expect(maxStageScreens(false)).toBe(1)
   })
 
   it('takes one screen off and leaves the other up', () => {
-    const two = stage({ layout: 'screen-people', screen: 'g_ada', screens: ['g_ada', HOST] })
-    const left = removeScreen(two, 'g_ada')
+    const left = removeScreen(pair, 'g_ada')
     expect(left).toMatchObject({ layout: 'screen-people', screen: HOST })
     expect(left.screens).toBeUndefined()
     expect(removeScreen(left, HOST)).toMatchObject({ layout: 'side-by-side' })
-    expect(removeScreen(two, 'g_bo')).toBe(two)
+    expect(removeScreen(pair, 'g_bo')).toBe(pair)
     // Another layout is up: it stays, with or without a screen left.
-    const spotlight = removeScreen({ ...two, layout: 'spotlight' }, HOST)
+    const spotlight = removeScreen({ ...pair, layout: 'spotlight' }, HOST)
     expect(spotlight).toMatchObject({ layout: 'spotlight', screen: 'g_ada' })
     expect(removeScreen(spotlight, 'g_ada').layout).toBe('spotlight')
   })
 
-  it('counts a named screen as on the program only on Screen + people', () => {
-    const named = stage({ layout: 'spotlight', screen: 'g_ada' })
-    expect(programScreens(named)).toEqual([])
-    expect(programScreens({ ...named, layout: 'screen-people' })).toEqual(['g_ada'])
-    // Ticking another screen from there shows that one, not the stale pair.
-    const picked = toggleStageScreen(named, HOST, true, 2)
-    expect(picked).toMatchObject({ layout: 'screen-people', screen: HOST })
-    expect(picked.screens).toBeUndefined()
-    expect(toggleStageScreen(named, 'g_ada', false, 2)).toBe(named)
-    expect(addScreen(named, HOST, 2).screens).toBeUndefined()
-  })
-
   it('prunes a screen whose owner left the stage', () => {
-    const two = stage({
-      layout: 'screen-people',
-      onStage: [HOST],
-      screen: 'g_ada',
-      screens: ['g_ada', HOST]
-    })
-    const pruned = pruneStageScreens(two)
+    const pruned = pruneStageScreens({ ...pair, onStage: [HOST] })
     expect(pruned.screen).toBe(HOST)
     expect(pruned.screens).toBeUndefined()
     const plain = stage()
     expect(pruneStageScreens(plain)).toBe(plain)
   })
 
-  it('ticks up to two on a managed show and swaps on a node show', () => {
+  it('toggles a card on Two screens: on beside the other, off alone, a third not at all', () => {
     const one = stage({ layout: 'screen-people', screen: 'g_ada' })
-    expect(toggleStageScreen(one, HOST, true, 2).screens).toEqual(['g_ada', HOST])
-    const two = toggleStageScreen(one, HOST, true, 2)
-    expect(toggleStageScreen(two, 'g_bo', true, 2)).toBe(two)
-    expect(toggleStageScreen(two, 'g_ada', false, 2).screen).toBe(HOST)
-    const swapped = toggleStageScreen(one, HOST, true, 1)
-    expect(swapped.screen).toBe(HOST)
-    expect(swapped.screens).toBeUndefined()
-    expect(maxStageScreens(true)).toBe(2)
-    expect(maxStageScreens(false)).toBe(1)
+    const two = toggleStageScreen(one, HOST)
+    expect(two.screens).toEqual(['g_ada', HOST])
+    expect(toggleStageScreen(two, 'g_bo')).toBe(two)
+    const back = toggleStageScreen(two, 'g_ada')
+    expect(back).toMatchObject({ layout: 'screen-people', screen: HOST })
+    expect(back.screens).toBeUndefined()
+    // The last one off: the grid.
+    expect(toggleStageScreen(back, HOST).layout).toBe('side-by-side')
+    // The first one on, from any layout.
+    expect(toggleStageScreen(stage(), 'g_bo')).toMatchObject({
+      layout: 'screen-people',
+      screen: 'g_bo'
+    })
   })
 
-  it('lists who shares a screen on stage, and why a third waits', () => {
-    const person = (identity: string, name: string, screen: boolean): CloudRoomParticipant => ({
+  it('lists who on stage shares a screen, in stage order', () => {
+    const person = (identity: string, screen: boolean): CloudRoomParticipant => ({
       identity,
-      name,
+      name: identity,
       role: identity === HOST ? 'host' : 'guest',
       onStage: true,
       video: true,
@@ -139,47 +124,50 @@ describe('the stage screens (plan 251)', () => {
       sinceMs: 1000,
       away: false
     })
-    const participants = [
-      person(HOST, 'Orc', false),
-      person('g_ada', 'Ada', true),
-      person('g_bo', 'Bo', true),
-      person('g_cy', 'Cy', true)
-    ]
     const room = {
-      participants,
-      stage: stage({ layout: 'screen-people', screen: 'g_ada', screens: ['g_ada', HOST] })
+      participants: [person('g_cy', true), person('g_bo', true), person('g_ada', false)],
+      stage: stage()
     }
-    const managed = stageScreenChoices(room, {
-      hostIdentity: HOST,
-      hostSharing: true,
-      managed: true
+    // Cy shares but is backstage; the host's own share is the renderer's to know.
+    expect(stageSharers(room, HOST, true)).toEqual([HOST, 'g_bo'])
+    expect(stageSharers(room, HOST, false)).toEqual(['g_bo'])
+    expect(stageSharers(undefined, HOST, true)).toEqual([])
+  })
+
+  it('the Two screens card: the screens already named, then who else shares, up to two', () => {
+    // One named, one more shared: both.
+    const one = stage({ layout: 'screen-people', screen: 'g_ada' })
+    expect(twoScreensStage(one, ['g_ada', HOST])?.screens).toEqual(['g_ada', HOST])
+    // From another layout, with nothing named: the first two sharers.
+    const fresh = twoScreensStage(stage({ layout: 'spotlight' }), [HOST, 'g_ada', 'g_bo'])
+    expect(fresh).toMatchObject({ layout: 'screen-people', screen: HOST })
+    expect(fresh?.screens).toEqual([HOST, 'g_ada'])
+    // One screen only: it goes up and the second card is waited for.
+    const waiting = twoScreensStage(stage(), ['g_bo'])
+    expect(waiting).toMatchObject({ layout: 'screen-people', screen: 'g_bo' })
+    expect(waiting?.screens).toBeUndefined()
+    // Nothing to show.
+    expect(twoScreensStage(stage(), [])).toBeNull()
+  })
+
+  it('knows Two screens is chosen: picked on Screen + people, or a stage that names two', () => {
+    const one = stage({ layout: 'screen-people', screen: 'g_ada' })
+    expect(twoScreensChosen(one, false)).toBe(false)
+    expect(twoScreensChosen(one, true)).toBe(true)
+    expect(twoScreensChosen(pair, false)).toBe(true)
+    // Another layout is up: not chosen, whatever was picked or is still named.
+    expect(twoScreensChosen({ ...pair, layout: 'spotlight' }, true)).toBe(false)
+    expect(twoScreensChosen(stage(), true)).toBe(false)
+    expect(twoScreensChosen(null, true)).toBe(false)
+  })
+
+  it('the Screen + people card: one screen, never a pair', () => {
+    const one = oneScreenStage(pair)
+    expect(one).toMatchObject({ layout: 'screen-people', screen: 'g_ada' })
+    expect(one.screens).toBeUndefined()
+    expect(oneScreenStage(stage({ screen: HOST }))).toMatchObject({
+      layout: 'screen-people',
+      screen: HOST
     })
-    // Cy shares but is backstage: not a choice.
-    expect(managed).toEqual([
-      { identity: HOST, label: 'Your screen', checked: true, disabledReason: null },
-      { identity: 'g_ada', label: "Ada's screen", checked: true, disabledReason: null },
-      {
-        identity: 'g_bo',
-        label: "Bo's screen",
-        checked: false,
-        disabledReason: TWO_SCREENS_AT_MOST
-      }
-    ])
-    // The host stopped sharing: their named screen stays listed, to take off.
-    const stopped = stageScreenChoices(room, {
-      hostIdentity: HOST,
-      hostSharing: false,
-      managed: true
-    })
-    expect(stopped.map((choice) => choice.identity)).toEqual([HOST, 'g_ada', 'g_bo'])
-    const node = stageScreenChoices(
-      { participants, stage: stage({ layout: 'screen-people', screen: 'g_ada' }) },
-      { hostIdentity: HOST, hostSharing: false, managed: false }
-    )
-    expect(node.every((choice) => choice.disabledReason === null)).toBe(true)
-    expect(ONE_SCREEN_ON_THIS_SHOW).toMatch(/one screen/)
-    expect(
-      stageScreenChoices(undefined, { hostIdentity: HOST, hostSharing: true, managed: true })
-    ).toEqual([])
   })
 })

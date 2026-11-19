@@ -3,10 +3,10 @@ import type {
   CloudGuestDecision,
   CloudRoomOpenParams,
   CloudStage,
-  CloudStageLayout,
   CloudStatus,
   TalkShowDisplaySource
 } from '@/lib/backend'
+import type { DrawnStageLayout } from '@/lib/talk-show-layout'
 import type { TalkShowRoomSnapshot } from '@/lib/talk-show-room'
 import type { AvatarMotionSource } from '../../../shared/cloud-avatar-view'
 
@@ -41,6 +41,11 @@ export interface TalkShowContextValue {
    * room is open (and under the lifecycle probe's scripted room).
    */
   previewReplaced: boolean
+  /**
+   * Plan 251: the Two screens layout is chosen, so the Screens cards put up
+   * to two screens on stage. False on any other layout.
+   */
+  twoScreens: boolean
   /** `host:<showId>` while the room is open, for "You" on the stage. */
   hostIdentity: string | null
   openRoom: (
@@ -56,14 +61,13 @@ export interface TalkShowContextValue {
   setStage: (stage: CloudStage) => Promise<void>
   bringOn: (identity: string) => Promise<void>
   sendBackstage: (identity: string) => Promise<void>
-  setLayout: (layout: CloudStageLayout) => Promise<void>
+  /** A room layout, or (plan 251) the two-screens look of Screen + people. */
+  setLayout: (layout: DrawnStageLayout) => Promise<void>
   setSpotlight: (identity: string | null) => Promise<void>
   /** The screens and windows main's `desktopCapturer` lists, with thumbnails. */
   listDisplaySources: () => Promise<TalkShowDisplaySource[]>
   startScreenShare: (sourceId: string) => Promise<void>
   stopScreenShare: () => Promise<void>
-  /** Plan 251: put someone's shared screen on the program, or take it off. */
-  setProgramScreen: (identity: string, shown: boolean) => Promise<void>
   setGraphicsEnabled: (enabled: boolean) => Promise<void>
   setAvatarEnabled: (enabled: boolean) => Promise<void>
   /** Plan 249 S5 acceptance: the desktop's avatar motion reference, or null. */
@@ -92,6 +96,7 @@ export interface TalkShowContextValue {
 export const NO_TALK_SHOW: TalkShowContextValue = {
   room: IDLE_TALK_SHOW_SNAPSHOT,
   previewReplaced: false,
+  twoScreens: false,
   hostIdentity: null,
   openRoom: async () => {},
   closeRoom: async () => {},
@@ -108,7 +113,6 @@ export const NO_TALK_SHOW: TalkShowContextValue = {
   listDisplaySources: async () => [],
   startScreenShare: async () => {},
   stopScreenShare: async () => {},
-  setProgramScreen: async () => {},
   setMonitor: async () => {},
   setGraphicsEnabled: async () => {},
   setAvatarEnabled: async () => {},

@@ -1,6 +1,6 @@
 import type { ReactElement } from 'react'
 
-import type { CloudStageLayout } from '@/lib/backend'
+import type { DrawnStageLayout } from '@/lib/talk-show-layout'
 
 /**
  * A small diagram of a room layout (plan 252), as the Scenes gallery draws
@@ -8,7 +8,7 @@ import type { CloudStageLayout } from '@/lib/backend'
  * are the stronger boxes and a shared screen the lighter one, so "Screen +
  * people" reads at a glance. A new room layout adds its diagram here.
  */
-export function StageLayoutThumb({ layout }: { layout: CloudStageLayout }): ReactElement {
+export function StageLayoutThumb({ layout }: { layout: DrawnStageLayout }): ReactElement {
   return (
     <div
       aria-hidden
@@ -28,6 +28,15 @@ export function StageLayoutThumb({ layout }: { layout: CloudStageLayout }): Reac
           <div className={`${SCREEN} top-1 bottom-1 left-1 w-[68%]`} />
           <div className={`${PERSON} top-1 right-1 h-[28%] w-[24%]`} />
           <div className={`${PERSON} top-[36%] right-1 h-[28%] w-[24%]`} />
+        </>
+      ) : null}
+      {layout === 'two-screens' ? (
+        <>
+          {/* Plan 251: two screens across the top, everyone in a row under them. */}
+          <div className={`${SCREEN} top-1 left-1 h-[50%] w-[47%]`} />
+          <div className={`${SCREEN} top-1 right-1 h-[50%] w-[47%]`} />
+          <div className={`${PERSON} bottom-1 left-[23%] h-[30%] w-[25%]`} />
+          <div className={`${PERSON} right-[23%] bottom-1 h-[30%] w-[25%]`} />
         </>
       ) : null}
       {layout === 'spotlight' ? (
