@@ -105,6 +105,321 @@
       "box": null
     }
   ],
+  "person": [
+    {
+      "name": "phone-9x16-in-solo-16x9",
+      "source": {
+        "w": 720,
+        "h": 1280
+      },
+      "tile": {
+        "w": 1920,
+        "h": 1080
+      },
+      "was": false,
+      "portrait": true,
+      "fit": "contain",
+      "fill": {
+        "h": 405,
+        "w": 720,
+        "x": 0,
+        "y": 224.16666666666663
+      },
+      "picture": {
+        "h": 1080,
+        "w": 607.5,
+        "x": 656.25,
+        "y": 0
+      }
+    },
+    {
+      "name": "phone-9x16-in-side-by-side-half",
+      "source": {
+        "w": 720,
+        "h": 1280
+      },
+      "tile": {
+        "w": 944,
+        "h": 1080
+      },
+      "was": false,
+      "portrait": true,
+      "fit": "contain",
+      "fill": {
+        "h": 823.728813559322,
+        "w": 720,
+        "x": 0,
+        "y": 14.802259887005619
+      },
+      "picture": {
+        "h": 1080,
+        "w": 607.5,
+        "x": 168.25,
+        "y": 0
+      }
+    },
+    {
+      "name": "phone-9x16-in-vertical-output",
+      "source": {
+        "w": 720,
+        "h": 1280
+      },
+      "tile": {
+        "w": 1080,
+        "h": 1920
+      },
+      "was": false,
+      "portrait": true,
+      "fit": "contain",
+      "fill": {
+        "h": 1280,
+        "w": 720,
+        "x": 0,
+        "y": 0
+      },
+      "picture": {
+        "h": 1920,
+        "w": 1080,
+        "x": 0,
+        "y": 0
+      }
+    },
+    {
+      "name": "phone-9x16-in-vertical-half",
+      "source": {
+        "w": 720,
+        "h": 1280
+      },
+      "tile": {
+        "w": 1080,
+        "h": 952
+      },
+      "was": false,
+      "portrait": true,
+      "fit": "contain",
+      "fill": {
+        "h": 634.6666666666666,
+        "w": 720,
+        "x": 0,
+        "y": 109.33333333333331
+      },
+      "picture": {
+        "h": 952,
+        "w": 535.5,
+        "x": 272.25,
+        "y": 0
+      }
+    },
+    {
+      "name": "tablet-3x4-in-16x9",
+      "source": {
+        "w": 960,
+        "h": 1280
+      },
+      "tile": {
+        "w": 1280,
+        "h": 720
+      },
+      "was": false,
+      "portrait": true,
+      "fit": "contain",
+      "fill": {
+        "h": 540,
+        "w": 960,
+        "x": 0,
+        "y": 156.66666666666663
+      },
+      "picture": {
+        "h": 720,
+        "w": 540,
+        "x": 370,
+        "y": 0
+      }
+    },
+    {
+      "name": "laptop-16x9-in-side-by-side-half",
+      "source": {
+        "w": 1280,
+        "h": 720
+      },
+      "tile": {
+        "w": 944,
+        "h": 1080
+      },
+      "was": false,
+      "portrait": false,
+      "fit": "cover",
+      "fill": null,
+      "picture": {
+        "h": 720,
+        "w": 629.3333333333334,
+        "x": 325.3333333333333,
+        "y": 0
+      }
+    },
+    {
+      "name": "laptop-16x9-after-a-phone",
+      "source": {
+        "w": 1280,
+        "h": 720
+      },
+      "tile": {
+        "w": 1920,
+        "h": 1080
+      },
+      "was": true,
+      "portrait": false,
+      "fit": "cover",
+      "fill": null,
+      "picture": {
+        "h": 720,
+        "w": 1280,
+        "x": 0,
+        "y": 0
+      }
+    },
+    {
+      "name": "camera-4x3-in-16x9",
+      "source": {
+        "w": 640,
+        "h": 480
+      },
+      "tile": {
+        "w": 1280,
+        "h": 720
+      },
+      "was": false,
+      "portrait": false,
+      "fit": "cover",
+      "fill": null,
+      "picture": {
+        "h": 360,
+        "w": 640,
+        "x": 0,
+        "y": 60
+      }
+    },
+    {
+      "name": "near-square-stays-landscape",
+      "source": {
+        "w": 480,
+        "h": 500
+      },
+      "tile": {
+        "w": 1280,
+        "h": 720
+      },
+      "was": false,
+      "portrait": false,
+      "fit": "cover",
+      "fill": null,
+      "picture": {
+        "h": 270,
+        "w": 480,
+        "x": 0,
+        "y": 115
+      }
+    },
+    {
+      "name": "near-square-stays-portrait",
+      "source": {
+        "w": 480,
+        "h": 500
+      },
+      "tile": {
+        "w": 1280,
+        "h": 720
+      },
+      "was": true,
+      "portrait": true,
+      "fit": "contain",
+      "fill": {
+        "h": 270,
+        "w": 480,
+        "x": 0,
+        "y": 31.666666666666657
+      },
+      "picture": {
+        "h": 720,
+        "w": 691.1999999999999,
+        "x": 294.40000000000003,
+        "y": 0
+      }
+    },
+    {
+      "name": "square-turns-back",
+      "source": {
+        "w": 480,
+        "h": 480
+      },
+      "tile": {
+        "w": 1280,
+        "h": 720
+      },
+      "was": true,
+      "portrait": false,
+      "fit": "cover",
+      "fill": null,
+      "picture": {
+        "h": 270,
+        "w": 480,
+        "x": 0,
+        "y": 105
+      }
+    },
+    {
+      "name": "at-the-enter-ratio",
+      "source": {
+        "w": 1000,
+        "h": 1100
+      },
+      "tile": {
+        "w": 1280,
+        "h": 720
+      },
+      "was": false,
+      "portrait": true,
+      "fit": "contain",
+      "fill": {
+        "h": 562.5,
+        "w": 1000,
+        "x": 0,
+        "y": 85.41666666666663
+      },
+      "picture": {
+        "h": 720,
+        "w": 654.5454545454545,
+        "x": 312.72727272727275,
+        "y": 0
+      }
+    },
+    {
+      "name": "track-end-keeps-portrait",
+      "source": {
+        "w": 2,
+        "h": 2
+      },
+      "tile": {
+        "w": 1280,
+        "h": 720
+      },
+      "was": true,
+      "portrait": true,
+      "fit": "contain",
+      "fill": {
+        "h": 1.125,
+        "w": 2,
+        "x": 0,
+        "y": 0.10416666666666663
+      },
+      "picture": {
+        "h": 720,
+        "w": 720,
+        "x": 280,
+        "y": 0
+      }
+    }
+  ],
   "stages": [
     {
       "name": "solo-host",
