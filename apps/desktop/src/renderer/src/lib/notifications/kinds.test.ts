@@ -24,7 +24,7 @@ describe('the notification registry (plan 250)', () => {
       .map(([id]) => id)
       .sort()
     expect(mayBecomeUrgent).toEqual(
-      ['microphone', 'screen-capture', 'stream-target', 'watchdog', 'x-playback'].sort()
+      ['backend', 'microphone', 'screen-capture', 'stream-target', 'watchdog', 'x-playback'].sort()
     )
   })
 

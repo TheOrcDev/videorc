@@ -140,17 +140,6 @@ const PINNED_TOASTS_THAT_STAY = new Set([
   'src/lib/studio-connection-toasts.ts'
 ])
 
-/**
- * Unprompted toasts that are still pinned because their slice has not moved
- * them yet (S5 to S7). This list only shrinks; S10 deletes it.
- */
-const PINNED_TOASTS_STILL_TO_MOVE = new Set([
-  'src/hooks/use-studio.tsx',
-  'src/hooks/use-virtual-camera.ts',
-  'src/lib/finalization-toast.ts',
-  'src/lib/session-runtime-recovery.ts'
-])
-
 /** Each `duration: Infinity` (or `Number.POSITIVE_INFINITY`) in `source`, as `path:line`. */
 function pinnedDurations(path: string, source: string): string[] {
   const file = ts.createSourceFile(
@@ -210,20 +199,18 @@ describe('notifications never toast around the store (plan 250)', SOURCE_SCAN_TI
 
   it('no toast is pinned outside the named list', () => {
     const offenders = sources()
-      .filter(
-        ({ path }) => !PINNED_TOASTS_THAT_STAY.has(path) && !PINNED_TOASTS_STILL_TO_MOVE.has(path)
-      )
+      .filter(({ path }) => !PINNED_TOASTS_THAT_STAY.has(path))
       .flatMap(({ path, source }) => pinnedDurations(path, source))
     expect(offenders).toEqual([])
   })
 
-  it('every file on the two lists still pins a toast: a list entry is never stale', () => {
+  it('every file on the list still pins a toast: a list entry is never stale', () => {
     const pinned = new Set(
       sources()
         .filter(({ source, path }) => pinnedDurations(path, source).length > 0)
         .map(({ path }) => path)
     )
-    for (const path of [...PINNED_TOASTS_THAT_STAY, ...PINNED_TOASTS_STILL_TO_MOVE]) {
+    for (const path of PINNED_TOASTS_THAT_STAY) {
       expect(pinned.has(path), path).toBe(true)
     }
   })

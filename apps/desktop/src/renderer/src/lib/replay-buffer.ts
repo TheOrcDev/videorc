@@ -7,7 +7,7 @@ import { formatTimecode } from '../../../shared/timecode'
 import type { BackendClient } from '@/backendClient'
 import type { RecordingStatus, Scene } from '@/lib/backend'
 import type { CaptureConfig, SettingsState } from '@/lib/capture'
-import { revealInFileManagerLabel } from '@/lib/platform'
+import { withWorkNotifications } from '@/lib/notify'
 import { buildStartSessionParams } from '@/lib/session-params'
 import { toast } from '@/lib/toast'
 import { openWorkspaceTab } from '@/lib/workspace-navigation'
@@ -57,25 +57,14 @@ export function formatBytes(bytes: number): string {
   return `${Math.max(1, Math.round(bytes / 1_000_000))} MB`
 }
 
+/** A clip saved by the Clip key: an entry, and a short toast wherever the streamer is. */
 export function showClipSaved(event: ReplaySavedEvent): void {
   const held = replayClock(Math.round(event.coveredSeconds))
-  toast.success('Clip saved', {
-    id: `${TOAST_ID}-saved-${event.saveId}`,
-    duration: 12_000,
-    description: event.complete ? `Last ${held}.` : `Last ${held}, the buffer was still filling.`,
-    action: {
-      label: revealInFileManagerLabel(),
-      onClick: () => void window.videorc?.revealSession(event.replaySessionId)
-    }
-  })
+  withWorkNotifications((work) => work.publishClipSaved(event, held))
 }
 
 export function showClipSaveFailed(event: ReplaySaveFailedEvent): void {
-  toast.error("Couldn't save the clip", {
-    id: `${TOAST_ID}-failed-${event.saveId}`,
-    duration: 10_000,
-    description: event.message
-  })
+  withWorkNotifications((work) => work.publishClipSaveFailed(event))
 }
 
 /**
@@ -117,21 +106,14 @@ export function showNothingToClip(input: {
   })
 }
 
-/** The ring ended with its session, not by the switch. */
+/** The ring ended with its session, not by the switch: one `clips` entry. */
 export function showClipsStopped(reason: string | undefined): void {
-  toast.warning('Clips stopped', {
-    id: TOAST_ID,
-    duration: 10_000,
-    description: reason ?? `Turn on ${KEEP_LAST_SECONDS_LABEL} again on the Output page.`
-  })
+  const detail = reason ?? `Turn on ${KEEP_LAST_SECONDS_LABEL} again on the Output page.`
+  withWorkNotifications((work) => work.publishClipsStopped(detail))
 }
 
 export function showClipsCouldNotStart(reason: string): void {
-  toast.error("Clips couldn't start", {
-    id: TOAST_ID,
-    duration: 10_000,
-    description: reason
-  })
+  withWorkNotifications((work) => work.publishClipsCouldNotStart(reason))
 }
 
 /**

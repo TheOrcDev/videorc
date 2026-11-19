@@ -743,7 +743,10 @@ describe('record+stream notices (plan 174 B-6)', () => {
     createdAt: '2026-10-10T10:00:00Z'
   }
 
-  beforeEach(() => vi.clearAllMocks())
+  beforeEach(() => {
+    vi.clearAllMocks()
+    notifications.reset()
+  })
 
   it('says a microphone dropout during Go Live leaves the livestream silent', () => {
     const presentation = microphoneLossPresentation({
@@ -885,9 +888,27 @@ describe('record+stream notices (plan 174 B-6)', () => {
       currentNotice: null,
       replaceNotice
     })
-    expect(toastSpies.success).toHaveBeenCalledWith('Recording saved', expect.anything())
+    // Plan 250 (D13): an entry with both buttons, and a short toast while idle.
+    expect(
+      notifications.snapshot().find((item) => item.key === 'recording-saved:go-live')
+    ).toMatchObject({
+      tone: 'done',
+      title: 'Recording saved',
+      actions: [
+        { id: 'play', label: 'Play', kind: 'fix' },
+        { id: 'open-library', label: 'Open in Library', kind: 'door' }
+      ]
+    })
+    expect(toastSpies.success).toHaveBeenCalledWith(
+      'Recording saved',
+      expect.objectContaining({
+        duration: 8_000,
+        action: expect.objectContaining({ label: 'Play' })
+      })
+    )
 
     vi.clearAllMocks()
+    notifications.reset()
     showSessionFinished({
       status: ended,
       activity: 'live-stream',
@@ -895,6 +916,7 @@ describe('record+stream notices (plan 174 B-6)', () => {
       replaceNotice
     })
     expect(toastSpies.success).not.toHaveBeenCalled()
+    expect(notifications.snapshot()).toEqual([])
   })
 
   it('says a source changed while streaming during Go Live, naming the device', () => {

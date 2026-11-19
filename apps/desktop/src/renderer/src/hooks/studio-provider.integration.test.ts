@@ -5643,7 +5643,8 @@ describe('real StudioProvider lifecycle', () => {
     expect(toastSpies.success).toHaveBeenCalledTimes(1)
     expect(toastSpies.success).toHaveBeenCalledWith(
       'Recording saved',
-      expect.objectContaining({ duration: 12000 })
+      // Plan 250 (D13): the entry's short toast while idle, never 12 s.
+      expect.objectContaining({ duration: 8_000 })
     )
     // The microphone's own pop-up, and no failure beside it.
     expect(toastSpies.error).toHaveBeenCalledTimes(1)
@@ -5898,7 +5899,8 @@ describe('real StudioProvider lifecycle', () => {
     await waitForObservation(() => toastSpies.success.mock.calls.length === 1)
     expect(toastSpies.success).toHaveBeenCalledWith(
       'Recording saved',
-      expect.objectContaining({ duration: 12000 })
+      // Plan 250 (D13): the entry's short toast while idle, never 12 s.
+      expect.objectContaining({ duration: 8_000 })
     )
   })
 
@@ -5979,7 +5981,8 @@ describe('real StudioProvider lifecycle', () => {
     await waitForObservation(() => toastSpies.success.mock.calls.length === 1)
     expect(toastSpies.success).toHaveBeenCalledWith(
       'Recording saved',
-      expect.objectContaining({ duration: 12000 })
+      // Plan 250 (D13): the entry's short toast while idle, never 12 s.
+      expect.objectContaining({ duration: 8_000 })
     )
     expect(notification('microphone')).toMatchObject({
       state: 'resolved',
@@ -9300,16 +9303,20 @@ describe('real StudioProvider lifecycle', () => {
     await act(async () => {
       expect(await latest().applySavedScene(saved.id)).toBe(true)
     })
-    // Plan 174 S2.4: a lagging preview is neutral news, so info.
-    await waitForObservation(() => latest().canSaveScene && toastSpies.info.mock.calls.length > 0)
+    // Plan 174 S2.4, plan 250: a lagging preview is neutral news, so it is
+    // an entry behind the bell and never a pop-up.
+    await waitForObservation(
+      () => latest().canSaveScene && notification('preview-behind') !== undefined
+    )
     expect(latest().activeSavedSceneId).toBe(saved.id)
     expect(latest().scene?.background?.assetId).toBe('builtin-bg-01')
     expect(latest().captureConfig.layoutFramingMemory).toEqual(memory)
     expect(JSON.parse(localStorage.getItem(WORKING_SCENE_KEY)!).sceneId).toBe(saved.id)
-    expect(toastSpies.info).toHaveBeenCalledWith(
-      'The preview may be behind',
-      expect.objectContaining({ id: expect.stringContaining('layout-preview-proof-lag') })
-    )
+    expect(notification('preview-behind')).toMatchObject({
+      tone: 'news',
+      title: 'The preview may be behind'
+    })
+    expect(toastSpies.info).not.toHaveBeenCalled()
     showPreview = false
     api.getNativePreviewSurfaceStatus = async () => nativePreviewStatus()
     await act(async () => {
@@ -17322,16 +17329,22 @@ describe('real StudioProvider lifecycle', () => {
       ([message]) => message === 'Noise cleanup complete'
     )
     expect(completionToasts).toHaveLength(1)
+    // Plan 250: one entry behind the bell with both buttons; its short toast
+    // carries the first.
     const completionToast = completionToasts[0]?.[1] as
-      | {
-          action?: { label: string; onClick: () => void }
-          cancel?: { label: string; onClick: () => void }
-        }
+      | { action?: { label: string }; duration?: number }
       | undefined
     expect(completionToast?.action?.label).toBe('Play')
-    expect(completionToast?.cancel?.label).toBe(revealInFileManagerLabel())
-    completionToast?.action?.onClick()
-    completionToast?.cancel?.onClick()
+    expect(completionToast?.duration).toBe(8_000)
+    const cleaned = notifications.snapshot().find((entry) => entry.key.startsWith('noise-cleanup:'))
+    expect(cleaned).toMatchObject({
+      tone: 'done',
+      title: 'Noise cleanup complete',
+      occurrences: 1,
+      actions: [{ label: 'Play' }, { label: revealInFileManagerLabel() }]
+    })
+    await notifications.runAction(cleaned!.key, 'play')
+    await notifications.runAction(cleaned!.key, 'reveal')
     await act(async () => Promise.resolve())
     expect(openedSessions).toEqual(['cleaned-session'])
     expect(revealedSessions).toEqual(['cleaned-session'])

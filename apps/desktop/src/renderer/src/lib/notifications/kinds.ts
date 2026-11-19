@@ -66,7 +66,26 @@ const kinds = {
   'cloud-status': { tone: 'warning', life: 'condition' },
   'cloud-news': { tone: 'news', life: 'event' },
   'cloud-announce': { tone: 'news', life: 'event', announcement: true, popUpMs: 8_000 },
-  'cloud-controller': { tone: 'news', life: 'condition', answersAPress: true, popUpMs: 8_000 }
+  'cloud-controller': { tone: 'news', life: 'condition', answersAPress: true, popUpMs: 8_000 },
+
+  // Devices, the app and finished work (S7).
+  // The session runs without the device, so it counts until it is used.
+  'source-return': { tone: 'warning', life: 'condition' },
+  'videorc-camera': { tone: 'warning', life: 'condition' },
+  'global-shortcuts': { tone: 'warning', life: 'condition' },
+  // Urgent when the engine cannot come back on its own.
+  backend: { tone: 'warning', life: 'condition', mayBe: ['urgent'] },
+  'backend-error': { tone: 'warning', life: 'event' },
+  'output-too-heavy': { tone: 'warning', life: 'event' },
+  'app-news': { tone: 'news', life: 'event' },
+  'recording-saved': { tone: 'done', life: 'event' },
+  mp4: { tone: 'news', life: 'progress' },
+  'work-done': { tone: 'done', life: 'event' },
+  'work-failed': { tone: 'warning', life: 'event' },
+  // The answer to the Clip key, wherever the streamer is.
+  clip: { tone: 'done', life: 'event', answersAPress: true, popUpMs: 4_000 },
+  'clip-failed': { tone: 'warning', life: 'event', answersAPress: true },
+  clips: { tone: 'warning', life: 'condition' }
 } satisfies Record<string, NotificationKind>
 
 export type NotificationKindId = keyof typeof kinds

@@ -25,6 +25,7 @@ import { recordUserError } from '@/lib/user-error-log'
 import type { WsStatus } from '@/lib/capture'
 import { CHAT_PLATFORM_LABELS } from '@/lib/live-chat-view'
 import { notifications } from '@/lib/notifications'
+import { publishBackendLifecycle } from '@/lib/notifications/sources/app'
 import {
   publishHealthEvent,
   publishMicrophoneLoss,
@@ -242,25 +243,9 @@ export function showMicrophoneLoss({ notice }: MicrophoneLossPresentation): void
   publishMicrophoneLoss(notifications, notice)
 }
 
+/** The engine restarting, recovered, or beyond recovering: one subject (plan 250). */
 export function showBackendLifecycle(event: BackendLifecycleEvent): void {
-  if (event.state === 'restarting') {
-    toast.warning('Videorc is recovering', {
-      id: 'backend-lifecycle',
-      description: `Restarting automatically (attempt ${event.attempt ?? 1})…`
-    })
-  } else if (event.state === 'failed') {
-    toast.error("Videorc can't recover on its own", {
-      id: 'backend-lifecycle',
-      description: 'Quit and reopen Videorc.',
-      duration: Infinity
-    })
-  } else if (event.state === 'lost') {
-    toast.error('Videorc needs a restart', {
-      id: 'backend-lifecycle',
-      description: 'Quit and reopen Videorc.',
-      duration: Infinity
-    })
-  }
+  publishBackendLifecycle(event)
 }
 
 export function showBackendError(
@@ -387,10 +372,22 @@ export function showSessionFinished({
       if (problem) openLibrary(sessionId)
     })
   }
-  toast.success('Recording saved', {
-    action: { label: 'Play', onClick: openFinishedRecording },
-    cancel: { label: 'Open in Library', onClick: () => openLibrary(sessionId) },
-    duration: 12_000
+  // Plan 250 (D13): an entry behind the bell with both buttons, and a short
+  // toast while idle: the streamer has just stopped and is looking here.
+  notifications.publish({
+    key: `recording-saved:${sessionId ?? 'session'}`,
+    kind: 'recording-saved',
+    title: 'Recording saved',
+    actions: [
+      { id: 'play', label: 'Play', kind: 'fix', run: openFinishedRecording },
+      {
+        id: 'open-library',
+        label: 'Open in Library',
+        kind: 'door',
+        run: () => openLibrary(sessionId)
+      }
+    ],
+    once: true
   })
 }
 
@@ -427,24 +424,32 @@ export function showSessionHealthEvent(
 }
 
 export function showNoiseCleanupCompleted(jobId: string, outputSessionId: string): void {
-  toast.success('Noise cleanup complete', {
-    id: `noise-cleanup-completed-${jobId}`,
-    description: "A separate cleaned copy is ready. The original wasn't changed.",
-    duration: 15_000,
-    action: {
-      label: 'Play',
-      onClick: () => {
-        const openSession = window.videorc?.openSession
-        if (!openSession) return
-        void openSession(outputSessionId).then((problem) => {
-          if (problem) showPlaybackProblem(outputSessionId, problem)
-        })
+  notifications.publish({
+    key: `noise-cleanup:${jobId}`,
+    kind: 'work-done',
+    title: 'Noise cleanup complete',
+    detail: "A separate cleaned copy is ready. The original wasn't changed.",
+    actions: [
+      {
+        id: 'play',
+        label: 'Play',
+        kind: 'fix',
+        run: () => {
+          const openSession = window.videorc?.openSession
+          if (!openSession) return
+          void openSession(outputSessionId).then((problem) => {
+            if (problem) showPlaybackProblem(outputSessionId, problem)
+          })
+        }
+      },
+      {
+        id: 'reveal',
+        label: revealInFileManagerLabel(),
+        kind: 'fix',
+        run: () => void window.videorc?.revealSession?.(outputSessionId)
       }
-    },
-    cancel: {
-      label: revealInFileManagerLabel(),
-      onClick: () => void window.videorc?.revealSession?.(outputSessionId)
-    }
+    ],
+    once: true
   })
 }
 

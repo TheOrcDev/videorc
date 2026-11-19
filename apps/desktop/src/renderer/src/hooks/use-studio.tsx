@@ -160,7 +160,7 @@ import {
   type ReactNode,
   type SetStateAction
 } from 'react'
-import { loadNotifications } from '@/lib/notify'
+import { loadNotifications, withAppNotifications, withWorkNotifications } from '@/lib/notify'
 import { notifyOnce } from '@/lib/notify-once'
 import { streamTargetNotices } from '@/lib/stream-target-notices'
 import {
@@ -190,7 +190,7 @@ import {
   replayStartWaitsForPreview,
   replayStartWaitsForScreen
 } from '@/lib/replay-buffer-grants'
-import { registerSupportBundleExport, TOAST_WITH_DESCRIPTION_MS, toast } from '@/lib/toast'
+import { registerSupportBundleExport, toast } from '@/lib/toast'
 import { CLOUD_TOAST_ID } from '@/lib/cloud-toast-id'
 import { NO_TALK_SHOW, type TalkShowContextValue } from '@/lib/talk-show-context'
 import type { TalkShowRoomControllerDeps } from '@/hooks/use-talk-show-room'
@@ -201,7 +201,6 @@ import {
   talkShowSessionView
 } from '@/lib/talk-show-session'
 import { openWorkspaceTab } from '@/lib/workspace-navigation'
-import { openHealthToastAction } from '@/lib/health-door'
 
 import { BackendClient, BackendRequestError } from '@/backendClient'
 import {
@@ -7894,13 +7893,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           }
         })
       }
-      if (event.state === 'running') {
-        toast.dismiss('backend-lifecycle')
-      } else {
-        void loadSessionRuntimeRecovery().then((runtime) => {
-          if (!disposed && latestLifecycleEvent === event) runtime.showBackendLifecycle(event)
-        })
-      }
+      // Plan 250: one `backend` entry: restarting opens it, running resolves
+      // it, failed and lost make it urgent.
+      void loadSessionRuntimeRecovery().then((runtime) => {
+        if (!disposed && latestLifecycleEvent === event) runtime.showBackendLifecycle(event)
+      })
     })
 
     return () => {
@@ -9201,6 +9198,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           replayArmedRef.current = false
           setReplayArmedState(false)
           void import('@/lib/replay-buffer').then((replay) => replay.showClipsStopped(next.reason))
+        } else if (next.state === 'on') {
+          // The ring keeps the last seconds again: its entry resolves.
+          withWorkNotifications((work) => work.resolveClips())
         }
         scheduleReplayReconcile()
       }),
@@ -9356,12 +9356,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         // bundle; the streamer gets what to do. A backend `error` event can
         // repeat every reconnect: one toast per text.
         console.warn('[backend-error] event:', message)
-        notifyOnce(`backend-error:${message}`, 'error', 'Videorc hit a problem', {
-          description: 'Export a support bundle from Health if it repeats.',
-          // The door to Health (plan 174 D9), on the toast's timed life.
-          action: openHealthToastAction(),
-          duration: TOAST_WITH_DESCRIPTION_MS
-        })
+        // Plan 250: one counted entry behind the bell, with the door to Health.
+        withAppNotifications((app) => app.publishBackendError())
       }),
       nextClient.on('connection.closed', () => {
         soundboard.disconnect(nextClient)
@@ -11179,10 +11175,13 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
               console.warn(
                 `Layout committed at revision ${status.sceneRevision}; native preview presentation proof was not observed. ${detail}`
               )
-              notifyOnce('layout-preview-proof-lag', 'info', 'The preview may be behind', {
-                description:
+              withAppNotifications((app) =>
+                app.publishAppNews(
+                  'preview-behind',
+                  'The preview may be behind',
                   'Your stream and recording have the new scene. Reopen the preview if it looks stale.'
-              })
+                )
+              )
               return
             }
             console.warn(
@@ -12519,7 +12518,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         : []
     const keys = new Set(returns.map(({ kind, device }) => `${kind}:${device.id}`))
     for (const old of announcedSourceReturnsRef.current) {
-      if (!keys.has(old)) toast.dismiss(`source-return:${old}`)
+      // Used, or unplugged again: its entry goes.
+      if (!keys.has(old)) withAppNotifications((app) => app.withdrawSourceReturn(old))
     }
     for (const { kind, device } of returns) {
       const key = `${kind}:${device.id}`
@@ -12550,11 +12550,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         applyDevice()
         continue
       }
-      toast(`${device.name} is back`, {
-        id: `source-return:${key}`,
-        duration: Infinity,
-        action: { label: 'Use it', onClick: applyDevice }
-      })
+      // Plan 250: an entry behind the bell with Use it, open until the
+      // device is used or unplugged again.
+      withAppNotifications((app) => app.publishSourceReturn(key, device.name, applyDevice))
     }
     announcedSourceReturnsRef.current = keys
   }, [
@@ -13366,9 +13364,13 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     }
     void window.videorc?.closeNotesWindow?.().then(() => {
       console.warn('[notes] closed for the recording: VIDEORC_NOTES_RECORDING_OVERLAY=0')
-      notifyOnce('notes-closed-for-recording', 'warning', 'Notes closed for this recording', {
-        description: 'Videorc closed them so they stay out of the recording.'
-      })
+      withAppNotifications((app) =>
+        app.publishAppNews(
+          'notes-closed-for-recording',
+          'Notes closed for this recording',
+          'Videorc closed them so they stay out of the recording.'
+        )
+      )
     })
   }, [notesWindow.open, recording.state, runtimeInfo?.notesWindowRecordingOverlayAllowed])
 
@@ -13391,13 +13393,12 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       console.warn(
         '[stream-manager] closed for the recording: no capture protection and VIDEORC_COMMENTS_RECORDING_OVERLAY=0'
       )
-      notifyOnce(
-        'chat-closed-for-recording',
-        'warning',
-        `${WINDOW_NAMES.streamManager} closed for this recording`,
-        {
-          description: 'Videorc closed it so your chat stays out of the recording.'
-        }
+      withAppNotifications((app) =>
+        app.publishAppNews(
+          'chat-closed-for-recording',
+          `${WINDOW_NAMES.streamManager} closed for this recording`,
+          'Videorc closed it so your chat stays out of the recording.'
+        )
       )
     })
   }, [
@@ -19320,14 +19321,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         const chosen = captureConfigRef.current.video
         const tooHeavy = next.result && performanceCheckTooHeavyToast(chosen, next.result)
         if (tooHeavy) {
-          toast.warning(tooHeavy.title, {
-            id: 'output-too-heavy',
-            description: tooHeavy.description,
-            action: {
-              label: tooHeavy.actionLabel,
-              onClick: () => applyVideoPresetRef.current?.(tooHeavy.preset)
-            }
-          })
+          withAppNotifications((app) =>
+            app.publishOutputTooHeavy(tooHeavy, () =>
+              applyVideoPresetRef.current?.(tooHeavy.preset)
+            )
+          )
         }
       })
     ]
