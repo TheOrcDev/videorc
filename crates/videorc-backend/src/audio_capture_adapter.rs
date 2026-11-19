@@ -601,6 +601,32 @@ impl CaptureClock {
         if let Some(previous) = self.anchors.back() {
             if anchor.pts_us <= previous.pts_us || anchor.captured_start <= previous.captured_start
             {
+                // A delivery-stamped DirectShow buffer is stamped from a 1 ms
+                // clock: after a capture-thread stall the held buffers arrive
+                // in a burst, two in the same millisecond (Intel SST, a 250 ms
+                // stall). The second adds nothing to the mapping; its PCM
+                // matches the anchor before it, as a burst's PCM already does
+                // (`DSHOW_STALL_ALLOWANCE`). A device clock that really runs
+                // backwards is more than one jitter allowance behind. Both
+                // clocks must stay within it: an anchor that advances its
+                // stamp while its mapped start falls back further is stale
+                // audio, not a burst, and a repeated stamp whose mapped start
+                // jumps ahead further than it is a stuck stamp.
+                let jitter = anchor.stamp_jitter;
+                let start_gap = previous
+                    .captured_start
+                    .saturating_duration_since(anchor.captured_start)
+                    .max(
+                        anchor
+                            .captured_start
+                            .saturating_duration_since(previous.captured_start),
+                    );
+                if !jitter.is_zero()
+                    && (anchor.pts_us - previous.pts_us).unsigned_abs() <= jitter.as_micros() as u64
+                    && start_gap <= jitter
+                {
+                    return Ok(());
+                }
                 bail!("Capture clock regressed");
             }
             let device_delta = Duration::from_micros((anchor.pts_us - previous.pts_us) as u64);
@@ -2190,6 +2216,102 @@ mod tests {
         assert!(frames[0].captured_at.elapsed() < MAX_CAPTURE_AGE);
     }
 
+    #[test]
+    fn a_burst_after_a_capture_stall_may_stamp_two_buffers_in_one_millisecond() {
+        // Intel SST under a 250 ms stall of the worker: (stamp ms, graph read
+        // after it ms, callback ms). #105 waited 276 ms; the burst after the
+        // stall stamped #106 and #107 in the same millisecond, which stopped
+        // the microphone as "Capture clock regressed".
+        let start = Instant::now();
+        let records = [
+            (2302, 18.0, 0.0),
+            (2319, 276.0, 275.9),
+            (2595, 50.0, 325.9),
+            (2595, 55.0, 329.9),
+            (2609, 44.0, 334.6),
+            (2630, 40.0, 350.1),
+            (2670, 19.0, 369.3),
+        ];
+        let anchor =
+            |stamp_ms: i64, delay_ms: f64, callback_ms: f64, jitter: Duration| CaptureAnchor {
+                pts_us: stamp_ms * 1000,
+                captured_start: start
+                    + Duration::from_secs(1)
+                    + Duration::from_secs_f64(callback_ms / 1000.0)
+                    - Duration::from_secs_f64(delay_ms / 1000.0),
+                input_duration: Some(Duration::from_millis(20)),
+                uncertainty: jitter,
+                stamp_jitter: jitter,
+            };
+        let mut clock = CaptureClock {
+            anchors: VecDeque::new(),
+            last_sequence: None,
+            first_pts: None,
+            last_end_pts: None,
+        };
+        for (stamp, delay, callback) in records {
+            clock
+                .push(anchor(stamp, delay, callback, DSHOW_STAMP_JITTER))
+                .unwrap();
+        }
+        let kept: Vec<_> = clock.anchors.iter().map(|anchor| anchor.pts_us).collect();
+        assert_eq!(
+            kept,
+            [
+                2_302_000, 2_319_000, 2_595_000, 2_609_000, 2_630_000, 2_670_000
+            ]
+        );
+        // A stamp further back than the jitter allowance is a broken clock.
+        assert!(
+            clock
+                .push(anchor(2655, 19.0, 380.0, DSHOW_STAMP_JITTER))
+                .unwrap_err()
+                .to_string()
+                .contains("regressed")
+        );
+        // A stamp that advances while its mapped start falls back more than
+        // the allowance describes stale audio: refused, not skipped. Here the
+        // stamp moves 500 ms on and the mapped start 460 ms back.
+        assert!(
+            clock
+                .push(anchor(3170, 19.0 + 460.0, 369.3, DSHOW_STAMP_JITTER))
+                .unwrap_err()
+                .to_string()
+                .contains("regressed")
+        );
+        // The same stamp with its mapped start well behind is refused too.
+        assert!(
+            clock
+                .push(anchor(2670, 19.0, 369.3 - 50.0, DSHOW_STAMP_JITTER))
+                .unwrap_err()
+                .to_string()
+                .contains("regressed")
+        );
+        // And with its mapped start well ahead: a stuck stamp, not a burst.
+        assert!(
+            clock
+                .push(anchor(2670, 19.0, 369.3 + 50.0, DSHOW_STAMP_JITTER))
+                .unwrap_err()
+                .to_string()
+                .contains("regressed")
+        );
+        // Exact device clocks (AVFoundation, Pulse) never repeat a stamp.
+        let mut exact = CaptureClock {
+            anchors: VecDeque::new(),
+            last_sequence: None,
+            first_pts: None,
+            last_end_pts: None,
+        };
+        exact
+            .push(anchor(2595, 50.0, 325.9, Duration::ZERO))
+            .unwrap();
+        assert!(
+            exact
+                .push(anchor(2595, 55.0, 329.9, Duration::ZERO))
+                .is_err()
+        );
+    }
+
     /// Contiguous 20 ms PCM from 20 ms DirectShow packets stamped at delivery:
     /// packet `n` is stamped `late_ms[n]` after its sample-count position and
     /// read from the graph clock 20 ms later. FFmpeg carries the stamp into
@@ -2784,6 +2906,123 @@ mod tests {
             "pulse worker: {frames} frames in {:?}, last timestamp {:?} us",
             started.elapsed(),
             last_micros
+        );
+    }
+
+    /// A starved capture thread costs audio, never the microphone. A loaded
+    /// UHD 620 laptop (stream and recording at 1080p30) delivered Intel SST
+    /// buffers 102-267 ms late; the worker refused each one past 100 ms and
+    /// the microphone stopped for 3-15 s at a time. This pauses the real
+    /// worker for 250 ms every 700 ms, so every stall delivers a buffer later
+    /// than the old cap, and requires the backend to keep the microphone.
+    /// `VIDEORC_DSHOW_TEST_FFMPEG` is the output `ffmpeg.exe` with the built
+    /// `ffmpeg-capture.exe` beside it; `VIDEORC_DSHOW_TEST_MICROPHONE` is the
+    /// device's DirectShow name.
+    /// `cargo test … dshow_worker_rides_out -- --ignored --nocapture`.
+    #[cfg(target_os = "windows")]
+    #[test]
+    #[ignore = "needs a DirectShow microphone and the built capture worker"]
+    fn dshow_worker_rides_out_capture_thread_stalls_from_a_real_microphone() {
+        use windows::Win32::Foundation::{CloseHandle, HANDLE};
+        use windows::Win32::System::Diagnostics::ToolHelp::{
+            CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW,
+            TH32CS_SNAPPROCESS,
+        };
+        use windows::Win32::System::Threading::{OpenProcess, PROCESS_SUSPEND_RESUME};
+        #[link(name = "ntdll")]
+        unsafe extern "system" {
+            fn NtSuspendProcess(process: HANDLE) -> i32;
+            fn NtResumeProcess(process: HANDLE) -> i32;
+        }
+
+        let name =
+            std::env::var("VIDEORC_DSHOW_TEST_MICROPHONE").expect("VIDEORC_DSHOW_TEST_MICROPHONE");
+        let ffmpeg = std::env::var("VIDEORC_DSHOW_TEST_FFMPEG").expect("VIDEORC_DSHOW_TEST_FFMPEG");
+        let id = format!(
+            "microphone:windows-dshow:{}",
+            name.bytes()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        );
+        let input = open(&ffmpeg, &id).unwrap();
+
+        // The worker is this test's own child: match it by parent PID.
+        let worker = unsafe {
+            let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0).unwrap();
+            let mut entry = PROCESSENTRY32W {
+                dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
+                ..Default::default()
+            };
+            let mut found = None;
+            let mut more = Process32FirstW(snapshot, &mut entry).is_ok();
+            while more {
+                let exe = String::from_utf16_lossy(&entry.szExeFile);
+                if entry.th32ParentProcessID == std::process::id()
+                    && exe.trim_end_matches('\0') == "ffmpeg-capture.exe"
+                {
+                    found = Some(entry.th32ProcessID);
+                }
+                more = Process32NextW(snapshot, &mut entry).is_ok();
+            }
+            let _ = CloseHandle(snapshot);
+            found.expect("the capture worker child")
+        };
+        let handle = unsafe { OpenProcess(PROCESS_SUSPEND_RESUME, false, worker) }.unwrap();
+        let handle_bits = handle.0 as usize;
+
+        let run = Duration::from_secs(30);
+        let started = Instant::now();
+        let done = Arc::new(AtomicBool::new(false));
+        let staller_done = done.clone();
+        let staller = thread::spawn(move || {
+            let handle = HANDLE(handle_bits as *mut _);
+            thread::sleep(Duration::from_secs(2));
+            let mut stalls = 0;
+            while !staller_done.load(Ordering::Acquire) {
+                unsafe { NtSuspendProcess(handle) };
+                thread::sleep(Duration::from_millis(250));
+                unsafe { NtResumeProcess(handle) };
+                stalls += 1;
+                thread::sleep(Duration::from_millis(700));
+            }
+            stalls
+        });
+        let mut frames = 0_usize;
+        let mut last_micros = None;
+        let mut failed = None;
+        while started.elapsed() < run {
+            match input.receiver.recv_timeout(Duration::from_secs(2)) {
+                Ok(frame) => {
+                    assert!(frame.samples.iter().all(|sample| sample.is_finite()));
+                    if let Some(last) = last_micros {
+                        assert!(frame.timestamp_micros > last, "timestamps regressed");
+                    }
+                    last_micros = Some(frame.timestamp_micros);
+                    frames += frame.samples.len() / 2;
+                }
+                Err(error) => {
+                    failed = Some(error);
+                    break;
+                }
+            }
+        }
+        // Resume before judging, so a failed run never leaves the worker paused.
+        done.store(true, Ordering::Release);
+        let stalls = staller.join().unwrap();
+        let _ = unsafe { CloseHandle(handle) };
+        let failure = input.failure.lock().unwrap().clone();
+        assert!(
+            failed.is_none() && failure.is_none(),
+            "the worker stopped delivering after {stalls} stalls ({failed:?}): {failure:?}"
+        );
+        assert!(stalls >= 25, "only {stalls} stalls");
+        // A quarter of the run is paused; the age check drops what a stall
+        // makes stale. Half the run must still reach the session.
+        assert!(frames >= 48_000 * 15, "only {frames} frames in 30 s");
+        eprintln!(
+            "dshow worker: {stalls} stalls of 250 ms, {frames} frames in {:?}, {} dropped",
+            started.elapsed(),
+            input.stats.dropped_frames()
         );
     }
 

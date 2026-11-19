@@ -225,3 +225,32 @@ test('every refused DirectShow clock record names the check it failed', () => {
     assert.ok(patch.includes(`"${reason}"`) || patch.includes(`reason=${reason}`), reason)
   assert.match(patch, /capture_clock\.valid = !capture_clock\.invalid;/)
 })
+
+test('the worker refuses a late or long DirectShow packet only where the backend does', () => {
+  // The worker kept 100 ms caps after the backend's `dshow_anchor` moved to
+  // 1 s (plan 195 S2). A loaded laptop delivered Intel SST buffers 102-267 ms
+  // late, and each one stopped the microphone for 3-15 s of a recording. The
+  // backend's 100 ms age check drops a stale packet; the worker must not
+  // refuse one first.
+  const patch = readFileSync(
+    new URL('../patches/dshow-capture-clock.patch', import.meta.url),
+    'utf8'
+  )
+  const adapter = readFileSync(
+    new URL('../../crates/videorc-backend/src/audio_capture_adapter.rs', import.meta.url),
+    'utf8'
+  )
+  assert.match(adapter, /\|\| graph - sample > 10_000_000\n/)
+  assert.match(patch, /graphtime - sampletime > 10000000\)/)
+  assert.match(adapter, /\|\| frames > rate\n/)
+  assert.match(patch, /if \(capture_clock\.frames > capture_clock\.rate\)/)
+  assert.doesNotMatch(patch, /frames \* 10 >/)
+  // Both sides cap the wall bracket at 1 ms; the worker reads it again after a
+  // preemption instead of refusing the packet (a 1.07 ms bracket stopped one).
+  assert.match(adapter, /\|\| after - before > 10_000\n/)
+  assert.match(patch, /after - before > 10000\)/)
+  assert.match(
+    patch,
+    /\} while \(--bracket_reads > 0 &&\n\+\s+videorc_filetime\(wall_after\) - videorc_filetime\(wall_before\) > 10000\);/
+  )
+})
