@@ -9,7 +9,7 @@ import {
   PRIVACY_SETTINGS_STORAGE_KEY,
   resetPrivacySettingsForTest
 } from '@/lib/privacy-settings'
-import { HideScreenSection } from './hide-screen-section'
+import { HideScreenSection, hideScreenShortcutHint } from './hide-screen-section'
 
 // Plan 210 S8b (D9, D11, D12): the Scene page's Hide screen section. What
 // viewers see, the key and its home, and on macOS the password-manager hide
@@ -30,6 +30,18 @@ vi.mock('@/hooks/use-app-choices', () => ({
     refresh: () => {}
   })
 }))
+// The Shortcut row's hint is a tooltip; record what the section hands it.
+const rowHints = vi.hoisted(() => [] as unknown[])
+vi.mock('@/components/navigable-row', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/components/navigable-row')>()
+  return {
+    ...actual,
+    NavigableRow: (props: Parameters<typeof actual.NavigableRow>[0]) => {
+      rowHints.push(props.hint)
+      return createElement(actual.NavigableRow, props)
+    }
+  }
+})
 const openWorkspaceTab = vi.hoisted(() => vi.fn())
 vi.mock('@/lib/workspace-navigation', () => ({ openWorkspaceTab }))
 
@@ -56,9 +68,14 @@ afterEach(async () => {
   vi.unstubAllGlobals()
 })
 
-async function render(platform: string, screenHideToggle?: string): Promise<void> {
+async function render(
+  platform: string,
+  screenHideToggle?: string,
+  globalShortcutsUnavailable?: string
+): Promise<void> {
+  rowHints.length = 0
   mocked.core = {
-    runtimeInfo: { platform },
+    runtimeInfo: { platform, globalShortcutsUnavailable },
     settings: { globalShortcuts: screenHideToggle === undefined ? {} : { screenHideToggle } }
   }
   await act(async () =>
@@ -176,5 +193,21 @@ describe('Scene page: Hide screen (plan 210 S8b)', () => {
       expect(container.querySelector('[data-videorc-password-managers]')).toBeNull()
       expect(container.querySelector('[role="switch"]')).toBeNull()
     }
+  })
+
+  it('promises the key from any app only where global shortcuts can work (Linux L-01)', async () => {
+    const original = 'Change it in Settings → Shortcuts. It works from any app.'
+    for (const platform of ['darwin', 'win32', 'linux']) {
+      await render(platform)
+      expect(rowHints.at(-1)).toBe(original)
+    }
+    await render('linux', undefined, "Global shortcuts can't work in this Wayland session.")
+    const hint = rowHints.at(-1)
+    expect(typeof hint).toBe('string')
+    expect(hint).not.toContain('from any app')
+    expect(hint).not.toContain('X11')
+    expect(hint).toContain("can't hear keys while Videorc is in the background")
+    expect(hint).toContain('Settings → Shortcuts')
+    expect(hideScreenShortcutHint(null)).toBe(original)
   })
 })
