@@ -81,13 +81,19 @@ export function privacyObservationMatches(
 
 /** Raw capture is NEVER passed to LiveKit. All output frames pass this synchronous gate.
  * Neutral opaque frost matches the native no-picture frost. We deliberately do not
- * sample a potentially sensitive frame to make a blurred still. A canvas failure
- * stops the output immediately; the owner unpublishes and reports paused.
+ * sample a potentially sensitive frame to make a blurred still for the wire. A canvas
+ * failure stops the output immediately; the owner unpublishes and reports paused.
+ *
+ * `lastFrame` (plan 210 D8 in a room) is handed the canvas once, on the first
+ * block after a raw frame was drawn, before the frost covers it: the frame
+ * already published while visible, for the host's own frosted look. It must
+ * copy synchronously and never publish what it copies.
  */
 export function createPrivateScreen(
   raw: MediaStreamTrack,
   decision: ScreenPrivacyDecision,
-  failed: (error: unknown) => void
+  failed: (error: unknown) => void,
+  lastFrame?: (canvas: HTMLCanvasElement) => void
 ): { track: MediaStreamTrack; block(): void; pixels(): number[]; close(): void } {
   const video = document.createElement('video')
   video.muted = true
@@ -108,8 +114,18 @@ export function createPrivateScreen(
   if (!track) throw new Error('Screen privacy capture unavailable')
   let closed = false
   let blocked = decision.hidden
+  /** A raw frame reached the canvas, so it holds something to hand on. */
+  let drawn = false
   const block = () => {
+    const first = !blocked && drawn
     blocked = true
+    if (first && lastFrame) {
+      try {
+        lastFrame(canvas)
+      } catch {
+        // The look only: the frost below covers either way.
+      }
+    }
     frost()
   }
   const off = decision.subscribe(() => {
@@ -127,7 +143,10 @@ export function createPrivateScreen(
     if (closed) return
     try {
       if (blocked || decision.hidden) frost()
-      else if (video.readyState >= 2) context.drawImage(video, 0, 0, canvas.width, canvas.height)
+      else if (video.readyState >= 2) {
+        context.drawImage(video, 0, 0, canvas.width, canvas.height)
+        drawn = true
+      }
     } catch (error) {
       track.stop()
       failed(error)

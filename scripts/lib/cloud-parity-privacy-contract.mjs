@@ -20,7 +20,19 @@ export function assertPrivacyDrain({ blockedAt, appliedAt, lastRawAt }) {
   )
 }
 
-/** Full composed page/artifact frames: reject the fixture's magenta secret field. */
+/** A decoded raw frame: some sample lands on the fixture's magenta text. */
+export function hasSecretMarker(data) {
+  if (!data || data.length < 4) return false
+  for (let i = 0; i < data.length; i += 4)
+    if (data[i] > 180 && data[i + 1] < 90 && data[i + 2] > 180) return true
+  return false
+}
+
+/**
+ * Full composed page/artifact frames: reject a pure magenta stroke of the
+ * fixture's secret text. A receiver's Hide frost (plan 210 D8) may keep the
+ * text band's colour as a soft pink, which is not a secret.
+ */
 export function assertNoSecretPixels(data, label) {
   assert.ok(data?.length >= 4096 && data.length % 4 === 0, `${label}: missing composed pixels`)
   for (let i = 0; i < data.length; i += 4)
