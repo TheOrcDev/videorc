@@ -217,6 +217,8 @@ pub struct ScenePicture {
 #[derive(Debug, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ScenePictureOutcome {
+    /// Only macOS takes pictures (D17); elsewhere every target is unavailable.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     JpegBase64(String),
     Unavailable(String),
 }
