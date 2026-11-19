@@ -532,9 +532,12 @@ export function StreamManagerStatusBar({
               <div className="flex min-w-0 items-center" data-slot="stream-manager-controls" />
             }
           >
+            {/* No gap from 640 to 799 px: the bell (plan 250) filled the
+                bar to the last pixel at 640, and each chip's own padding
+                already spaces the words. */}
             <div
               className={cn(
-                'items-center gap-0.5 [-webkit-app-region:no-drag]',
+                'items-center gap-0.5 [-webkit-app-region:no-drag] @max-[799px]/stream-manager:gap-0',
                 'flex',
                 ABOVE_NARROW
               )}
