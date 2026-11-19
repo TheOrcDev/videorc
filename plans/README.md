@@ -1,5 +1,11 @@
 # Implementation Plans
 
+- 2026-11-20: [Plan 254](254-live-test-2-fixes.md), the fixes from the
+  owner's second live test on 0.34.0 (F1-F7): a departed guest leaves the
+  stage at once, a portrait phone camera is drawn whole, the guest theme
+  switch hides in the call, chat follows a show taken back, Hide screen in
+  the Show stage, fenced calls wait for the controller renewal, and the mic
+  survives a drifted CoreAudio id. PLANNED 2026-11-20, seven slices.
 - 2026-11-19: [Plan 253](253-latency-measurement.md), the owner's ask:
   "we definitely need latency measuring so we can see how close we are with
   other guests". PLANNED 2026-11-19, eleven slices, web first:
