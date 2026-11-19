@@ -199,6 +199,13 @@ export const IPC_INVOKE_ROLES = {
   // the Studio's own.
   'comments-window:watchdog-fix': MAIN_AND_COMMENTS,
   'watchdog:notify': MAIN_ONLY,
+  // Plan 250 S8: the Stream Manager's bell. The main window pushes the list
+  // and offers pop-ups; the Stream Manager reads the list and sends presses
+  // (the handler checks the sender, as the watchdog's fix relay does).
+  'comments-window:notifications-get': MAIN_AND_COMMENTS,
+  'comments-window:notifications-push': MAIN_ONLY,
+  'comments-window:notification-pop-up-push': MAIN_ONLY,
+  'comments-window:notification-act': MAIN_AND_COMMENTS,
   'watchdog:idle': MAIN_ONLY,
   'comments-window:marker-result-push': MAIN_ONLY,
   'comments-window:clip-mark': MAIN_AND_COMMENTS,

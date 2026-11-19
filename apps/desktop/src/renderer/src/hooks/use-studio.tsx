@@ -4668,12 +4668,14 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // Plan 250: the notification store asks these two when something might pop
   // up. The store is a lazy chunk; nothing is published before this lands.
   useEffect(() => {
-    void loadNotifications().then(({ notifications }) =>
+    void loadNotifications().then(({ notifications, startMainNotificationRelay }) => {
       notifications.configure({
         live: () => sessionOwnsTransport(recordingRef.current),
         quiet: () => quietWhileLiveOn(settingsRef.current)
       })
-    )
+      // S8: the Stream Manager's bell reads a copy of the list through main.
+      startMainNotificationRelay(() => quietWhileLiveOn(settingsRef.current))
+    })
   }, [])
   // Stable handle for callbacks that only need to READ the config (labels,
   // lookups) without re-creating themselves on every config change.

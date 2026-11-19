@@ -52,6 +52,14 @@ import type {
 } from './backend'
 import type { MarkerContext, MarkerRelayCommand } from './session-markers'
 import {
+  notificationActRequestSchema,
+  notificationPopUpSchema,
+  notificationsSnapshotSchema,
+  type NotificationActRequest,
+  type NotificationPopUp,
+  type NotificationsSnapshot
+} from './notifications-relay'
+import {
   markerContextSchema,
   markerRelayCommandSchema,
   markerRelayResolutionSchema,
@@ -257,6 +265,10 @@ export const electronInvokeApiMethods = {
   'comments-window:watchdog-fix': 'watchdogFixFromCommentsWindow',
   'watchdog:notify': 'notifyWatchdog',
   'watchdog:idle': 'getSystemIdleSeconds',
+  'comments-window:notifications-get': 'getNotifications',
+  'comments-window:notifications-push': 'pushNotifications',
+  'comments-window:notification-pop-up-push': 'pushNotificationPopUp',
+  'comments-window:notification-act': 'notificationActFromCommentsWindow',
   'comments-window:marker-result-push': 'pushMarkerResult',
   'comments-window:clip-mark': 'markClipFromCommentsWindow',
   'comments-window:clip-mark-result-push': 'pushClipMarkResult',
@@ -415,6 +427,9 @@ export interface ElectronIpcEventMap {
   'comments-window:marker-request': MarkerRelayCommand
   'watchdog:focus': string
   'watchdog:fix-request': WatchdogFixRequest
+  'comments-window:notifications': NotificationsSnapshot | null
+  'comments-window:notification-pop-up': NotificationPopUp
+  'notifications:act-request': NotificationActRequest
   'comments-window:clip-mark-request': ClipMarkCommand
   'comments-window:banners': BannerSummary[] | null
   'comments-window:banner-request': BannerRelayCommand
@@ -478,6 +493,9 @@ export const electronEventChannels = [
   'comments-window:marker-request',
   'watchdog:focus',
   'watchdog:fix-request',
+  'comments-window:notifications',
+  'comments-window:notification-pop-up',
+  'notifications:act-request',
   'comments-window:clip-mark-request',
   'comments-window:banners',
   'comments-window:banner-request',
@@ -1866,6 +1884,23 @@ const specificRuntimeInvokeContracts = {
   ),
   'watchdog:notify': invokeContract(tupleSchema([watchdogNoticeSchema]), booleanSchema),
   'watchdog:idle': invokeContract(noArgs, numberSchema({ min: 0 })),
+  // Plan 250 S8: the Stream Manager's bell. The main window pushes a copy of
+  // its notification list (plain entries, no functions); the Stream Manager
+  // reads it and sends back what was pressed, as a key and an action id. An
+  // urgent pop-up is offered to the Stream Manager first: true when it took it.
+  'comments-window:notifications-get': invokeContract(noArgs, notificationsSnapshotSchema),
+  'comments-window:notifications-push': invokeContract(
+    tupleSchema([notificationsSnapshotSchema]),
+    booleanSchema
+  ),
+  'comments-window:notification-pop-up-push': invokeContract(
+    tupleSchema([notificationPopUpSchema]),
+    booleanSchema
+  ),
+  'comments-window:notification-act': invokeContract(
+    tupleSchema([notificationActRequestSchema]),
+    booleanSchema
+  ),
   'comments-window:marker-result-push': invokeContract(
     tupleSchema([markerRelayResolutionSchema]),
     booleanSchema
@@ -2520,6 +2555,9 @@ const specificRuntimeEventSchemas = {
   'window:visible': booleanSchema,
   'watchdog:focus': stringSchema({ minLength: 1, maxLength: 256 }),
   'watchdog:fix-request': watchdogFixRequestSchema,
+  'comments-window:notifications': notificationsSnapshotSchema,
+  'comments-window:notification-pop-up': notificationPopUpSchema,
+  'notifications:act-request': notificationActRequestSchema,
   'app:front-changed': objectSchema(
     {
       bundleId: optionalSchema(nullableSchema(stringSchema({ maxLength: 1024 }))),

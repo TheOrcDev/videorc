@@ -11,8 +11,10 @@ import {
   HiddenFromStreamIcon,
   HiddenIcon,
   MoreIcon,
+  NotificationsIcon,
   PreviewIcon
 } from '@/components/icons'
+import { StreamManagerNotificationBell } from '@/components/notifications/stream-manager-notification-bell'
 import { PIN_WINDOW_LABEL, PinWindowButton } from '@/components/pin-window-button'
 import { StatusBar, StatusBarHint } from '@/components/status-bar'
 import { StatusBarAction } from '@/components/status-bar-action'
@@ -51,6 +53,8 @@ import type { ScreenPrivacyContext } from '../../../../shared/session-markers'
 import { shortcutLabel } from '@/lib/platform'
 import { screenPrivacyActionLabel, screenPrivacyDisabledReason } from '@/lib/screen-privacy-view'
 import { shortcutAccelerator } from '@/lib/shortcuts'
+import { toggleNotifications } from '@/lib/notification-count'
+import { useStreamManagerNotificationCount } from '@/lib/stream-manager-notifications'
 import {
   ABOVE_NARROW,
   COMPACT_ICON,
@@ -81,6 +85,12 @@ const SoundsPopoverBody = lazy(() => import('@/components/stream-manager/sounds-
 // Below 640 px the controls fold into one ⋯ menu so none is ever clipped.
 // Quiet when fine (plan 057, D3): a platform that reads and sends is its icon
 // and a green dot, and the controls are icons with their names on hover.
+
+/** The ⋯ menu's row for the bell below 640 px: "Notifications", or "Notifications (2)". */
+export function notificationsMenuLabel(unread: number): string {
+  if (unread <= 0) return 'Notifications'
+  return `Notifications (${unread > 9 ? '9+' : unread})`
+}
 
 function providerTone(provider: LiveChatProviderState): StatusDotTone {
   switch (provider.state) {
@@ -381,6 +391,12 @@ export function StreamManagerStatusBar({
   // The ⋯ menu's Sounds… opens the popover once the menu has let the focus
   // go, so the menu's focus return never dismisses what it opened.
   const soundsAfterMenu = useRef(false)
+  // Plan 250 S8: the bell is the bar's last control. Below 640 px it folds
+  // into the ⋯ menu as "Notifications (2)", and its list opens from the
+  // controls, which are always on screen, like the Sounds popover.
+  const notificationCount = useStreamManagerNotificationCount()
+  const notificationsAfterMenu = useRef(false)
+  const [controls, setControls] = useState<HTMLDivElement | null>(null)
   const privacy = screenPrivacyAction(screen, onScreenPrivacy)
   const hideFromStream = hideFromStreamAction(
     hiddenFromStream,
@@ -511,6 +527,7 @@ export function StreamManagerStatusBar({
       >
         <Popover open={soundsOpen} onOpenChange={setSoundsOpen}>
           <PopoverAnchor
+            ref={setControls}
             render={
               <div className="flex min-w-0 items-center" data-slot="stream-manager-controls" />
             }
@@ -668,6 +685,7 @@ export function StreamManagerStatusBar({
                   onClick={onOpenPreview}
                 />
               ) : null}
+              <StreamManagerNotificationBell anchor={controls} />
             </div>
             <DropdownMenu>
               {/* The menu's trigger outside the tooltip's: the menu's open state
@@ -697,6 +715,11 @@ export function StreamManagerStatusBar({
                 className="w-56"
                 side="top"
                 finalFocus={() => {
+                  if (notificationsAfterMenu.current) {
+                    notificationsAfterMenu.current = false
+                    toggleNotifications('open')
+                    return false
+                  }
                   if (!soundsAfterMenu.current) return true
                   soundsAfterMenu.current = false
                   setSoundsOpen(true)
@@ -814,6 +837,21 @@ export function StreamManagerStatusBar({
                       {`Open ${WINDOW_NAMES.preview}`}
                     </DropdownMenuItem>
                   ) : null}
+                  <DropdownMenuItem
+                    data-testid="stream-manager-notifications-menu-item"
+                    onClick={() => {
+                      notificationsAfterMenu.current = true
+                    }}
+                  >
+                    <NotificationsIcon />
+                    {notificationsMenuLabel(notificationCount.unread)}
+                    <DropdownMenuShortcut>
+                      <ShortcutKeys
+                        accelerator={shortcutAccelerator('notifications')}
+                        variant="text"
+                      />
+                    </DropdownMenuShortcut>
+                  </DropdownMenuItem>
                   {statsLayout && onStatsLayoutChange ? (
                     <DropdownMenuSub>
                       <DropdownMenuSubTrigger>Show or hide stats</DropdownMenuSubTrigger>

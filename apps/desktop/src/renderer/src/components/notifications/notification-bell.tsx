@@ -44,6 +44,12 @@ export interface NotificationBellProps {
   platform?: string
   /** The list, in its own chunk. */
   load: () => Promise<{ default: ComponentType<NotificationBellListProps> }>
+  /**
+   * What the list lines up with, when that is not the bell: the Stream
+   * Manager folds the bell into its ⋯ menu below 640 px, and the list then
+   * opens from the bar's end.
+   */
+  anchor?: Element | null
   className?: string
 }
 
@@ -55,6 +61,7 @@ export function NotificationBell({
   accelerator,
   platform,
   load,
+  anchor,
   className
 }: NotificationBellProps): ReactElement {
   const [open, setOpen] = useState(false)
@@ -123,6 +130,7 @@ export function NotificationBell({
         />
         <PopoverContent
           align="end"
+          anchor={anchor ?? undefined}
           className="w-[380px] max-w-[calc(100vw-1rem)] gap-0 overflow-hidden p-0"
           data-videorc-notification-list=""
           side="top"

@@ -57,11 +57,19 @@ export function announceNotification(text: string, urgent: boolean): void {
 }
 
 export function useNotificationCount(): NotificationBellCount {
-  return useSyncExternalStore(subscribe, () => state.count)
+  return useSyncExternalStore(
+    subscribe,
+    () => state.count,
+    () => NONE
+  )
 }
 
 export function useNotificationAnnouncement(): NotificationAnnouncement | null {
-  return useSyncExternalStore(subscribe, () => state.announcement)
+  return useSyncExternalStore(
+    subscribe,
+    () => state.announcement,
+    () => null
+  )
 }
 
 /** "9+" above nine; nothing at zero. */

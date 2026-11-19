@@ -90,7 +90,11 @@ export interface NotificationStore {
   snapshot: () => readonly NotificationEntry[]
   count: () => NotificationCount
   subscribe: (listener: () => void) => () => void
-  setListOpen: (open: boolean) => void
+  /**
+   * The list is on screen in a window (`who`): nothing pops up while it is
+   * open anywhere. The main window and the Stream Manager each say their own.
+   */
+  setListOpen: (open: boolean, who?: string) => void
   setPopUpDoor: (door: NotificationPopUpDoor | null) => void
   configure: (options: Pick<NotificationStoreOptions, 'live' | 'quiet'>) => void
   reset: () => void
@@ -103,6 +107,7 @@ export function createNotificationStore(options: NotificationStoreOptions = {}):
   const held = new Map<string, Held>()
   const listeners = new Set<() => void>()
   let door: NotificationPopUpDoor | null = null
+  const listsOpen = new Set<string>()
   let listOpen = false
   let cached: readonly NotificationEntry[] = []
   let counted: NotificationCount = { unread: 0, urgent: 0, tone: null }
@@ -488,8 +493,10 @@ export function createNotificationStore(options: NotificationStoreOptions = {}):
       }
     },
 
-    setListOpen(open) {
-      listOpen = open
+    setListOpen(open, who = 'main') {
+      if (open) listsOpen.add(who)
+      else listsOpen.delete(who)
+      listOpen = listsOpen.size > 0
     },
 
     setPopUpDoor(next) {
@@ -503,6 +510,7 @@ export function createNotificationStore(options: NotificationStoreOptions = {}):
 
     reset() {
       held.clear()
+      listsOpen.clear()
       listOpen = false
       commit()
     }

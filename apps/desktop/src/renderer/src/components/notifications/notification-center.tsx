@@ -43,7 +43,7 @@ export function NotificationCenter({
   onClose,
   footer
 }: NotificationCenterProps): ReactElement {
-  const entries = useSyncExternalStore(source.subscribe, source.snapshot)
+  const entries = useSyncExternalStore(source.subscribe, source.snapshot, source.snapshot)
   const [nowMs, setNowMs] = useState(() => Date.now())
   const [activeKey, setActiveKey] = useState<string | null>(null)
   const [busy, setBusy] = useState<{ key: string; id: string } | null>(null)

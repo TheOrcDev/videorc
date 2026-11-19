@@ -19,6 +19,11 @@ export function notificationToastId(key: string): string {
 
 type Show = (typeof toast)['warning']
 
+/** The toast a tone pops up as: the type colours the icon only. */
+export function notificationToast(tone: NotificationEntry['tone']): Show {
+  return showFor({ tone })
+}
+
 function showFor(entry: Pick<NotificationEntry, 'tone'>): Show {
   switch (entry.tone) {
     case 'urgent':
