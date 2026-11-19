@@ -1,0 +1,160 @@
+# Plan 253 latency contract
+
+How a managed talk show measures its own delay (plan 253, slices S1 to S4). Three participants each report what they measured, the web relays two of the reports to the host, and the host's renderer adds them up. This file is the only source for the shapes and the constants. The cases are `protocol-fixtures/room-latency.json`; the desktop model is `apps/desktop/src/shared/room-latency.ts` and the web's copy is `lib/cloud/program/room-latency.ts` (re-exported by `lib/cloud/latency.ts`), each held to the same fixture.
+
+No prices, costs, keys or account ids belong here. This repo is public.
+
+## 1. The rule: durations, never timestamps (D1)
+
+Every reporter sends how long something took on its own monotonic clock, or how long ago it happened. Nobody sends a wall-clock time for another machine to subtract from. The machines' clocks are not synced and nothing here may assume they are.
+
+- A `net` block holds durations only.
+- The relay's `at` is the web's receive time. It is there for the record. No reader subtracts it from its own clock.
+- The host ages a block from the moment it arrived, on the host's own clock.
+- Where two machines' events must be compared (the stage apply time of section 6), both events are stamped by the one web server and the page contributes only an age.
+
+The one planned exception is D5's active probe (option A), which is not built.
+
+## 2. The `net` block
+
+What one participant measured over one sample window. Every number is whole milliseconds, 0 to 60000. Everything but `v` and `windowMs` is optional.
+
+```json
+{
+  "v": 1,
+  "windowMs": 10000,
+  "rttMs": 42,
+  "playoutMs": 18,
+  "partial": false,
+  "send": { "videoMs": 21 },
+  "from": [{ "identity": "host:sh_…", "audioMs": 61, "videoMs": 84 }]
+}
+```
+
+| Field             | Meaning                                                                                                         | Source (WebRTC stats)                                                                                                                                 |
+| ----------------- | --------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `v`               | `1`                                                                                                             |                                                                                                                                                       |
+| `windowMs`        | The sample window, 1000 to 60000. Normally 10000                                                                | The sampler's own monotonic clock                                                                                                                     |
+| `rttMs`           | Round trip from this participant to its LiveKit edge                                                            | `candidate-pair.currentRoundTripTime` of the selected pair; else `remote-inbound-rtp.roundTripTime` of a published track                              |
+| `playoutMs`       | Audio playout after the jitter buffer, the mean over the window                                                 | Δ`totalPlayoutDelay` / Δ`totalSamplesCount` of `media-playout`. Chromium only                                                                         |
+| `partial`         | `true`: sound was received and its playout is unknown, so a figure built on this block is a floor               | Set by the sampler                                                                                                                                    |
+| `send.videoMs`    | This participant's camera, from a frame entering the encoder to its packets leaving, plus half a frame interval | Δ`totalEncodeTime` / Δ`framesEncoded` + Δ`totalPacketSendDelay` / Δ`packetsSent` over every `outbound-rtp` layer, + 500 / `framesPerSecond` (else 30) |
+| `from[]`          | At most 8 senders this participant receives, each once                                                          |                                                                                                                                                       |
+| `from[].identity` | The sender's room identity, 1 to 128 characters                                                                 | The room                                                                                                                                              |
+| `from[].audioMs`  | The audio jitter buffer's mean delay for that sender's microphone                                               | Δ`jitterBufferDelay` / Δ`jitterBufferEmittedCount` of `inbound-rtp`                                                                                   |
+| `from[].videoMs`  | First packet received to decoded, the mean for that sender's camera                                             | Δ`totalProcessingDelay` / Δ`framesDecoded` of `inbound-rtp`                                                                                           |
+
+Rules for whoever makes one:
+
+- One sample per 10 s (`LATENCY_SAMPLE_MS`), never faster, and never on a 50 ms or 1 s timer.
+- Deltas over the window, never session totals. The first sample has nothing to subtract from and makes no block. A counter that did not move, or a track that appeared inside the window, gives no part. A window under a second or over a minute (the page slept) makes no block. After a reconnect the sampler forgets its last reading: the new connection's counters start again.
+- One implementation does this for all three: `NetSampler` in the shared module, given the tracks of the moment and a monotonic clock.
+- Camera and microphone tracks only. A shared screen is not conversation.
+- The sampler reads `transport`, `candidate-pair`, `inbound-rtp`, `outbound-rtp`, `remote-inbound-rtp` and `media-playout` entries. It never reads `local-candidate` or `remote-candidate` (D12): no IP address, candidate address or device name is in a block.
+
+Rules for whoever reads one (`parseNetBlock`):
+
+- A key the reader does not know is left out, at every level. It is never stored or relayed.
+- A known key with a bad value (a fraction, text, `null`, out of bounds, nine senders, a sender twice) refuses the whole block. The block is dropped. The heartbeat or beacon that carried it is still answered as if it had none.
+- What is relayed is the block rebuilt field by field, never the sender's own object.
+
+## 3. Who reports, and how it reaches the host (D3)
+
+| Participant         | Makes a block from                                          | Sends it                                                        |
+| ------------------- | ----------------------------------------------------------- | --------------------------------------------------------------- |
+| Guest `g_…`         | The host's and the other guests' tracks, and its own camera | `net` beside `capability` in `POST /api/guest/:slug/media` (S2) |
+| Program page `EG_…` | The tracks it draws and mixes                               | `net` in its beacon (S3)                                        |
+| Host `host:<show>`  | The guests' tracks and its own camera                       | Nowhere. It is the reader                                       |
+
+The web checks each block and relays it to `host:<show>` only, with `RoomServiceClient.sendData` (reliable) on the topic **`videorc.latency.v1`**:
+
+```json
+{
+  "v": 1,
+  "identity": "g_…",
+  "at": 1794000000123,
+  "net": { "v": 1, "windowMs": 10000, "rttMs": 42 }
+}
+```
+
+- `identity` comes from the guest's session cookie or the page token's egress, never from the body.
+- `at` is the web's receive time (section 1).
+- One relay per sender per sample: a block is relayed only when 9 s (`LATENCY_RELAY_MIN_INTERVAL_MS`) have passed since that sender's last relayed one. It is the 10 s sample less a second, because two requests sent 10 s apart can arrive a little closer than that, and a strict 10 s would drop every other one. A block inside the 9 s is not relayed, and its request is still answered. A sender attaches each sample to one request only.
+- Nothing is stored on the web. No new grant, route or table.
+- A failed relay never changes the answer of the heartbeat or the beacon.
+
+The host reads the topic only from the server: a message with a participant as its sender is ignored, as with `videorc.privacy.ack.v2`. A message over 4096 bytes is ignored. A guest's block counts only while that identity is in the room.
+
+In a beacon, `net` is not in the change key, so it never causes a beacon: it rides whichever goes next. Over 4 KiB the beacon drops `net` first, before `shown`.
+
+## 4. The sum (D2)
+
+A one-way path through the room, sender S to receiver R:
+
+`delay(S→R) = send(S) + rtt(S)/2 + sfu + rtt(R)/2 + buffer(R, S's track) + playout(R)`
+
+| Part      | Sound                                                   | Picture               |
+| --------- | ------------------------------------------------------- | --------------------- |
+| `send`    | The constant `SEND_AUDIO_MS`                            | S's `send.videoMs`    |
+| `rtt`     | Each end's `rttMs`                                      | The same              |
+| `sfu`     | The constant `SFU_MS`                                   | The same              |
+| `buffer`  | R's `from[S].audioMs`                                   | R's `from[S].videoMs` |
+| `playout` | R's `playoutMs`. Absent: 0, and the figure is `partial` | None                  |
+
+The sum is rounded once, to a whole millisecond.
+
+| Number                        | Definition                                                                                                                                                                                            |
+| ----------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Conversation delay, per guest | `delay(host→G)` and `delay(G→host)`, sound. The row's number is the larger. With one direction missing it is the other, marked `partial`. With both missing there is no number                        |
+| Its picture, for the record   | The same two paths for the cameras. Kept beside the number, never on the row                                                                                                                          |
+| Program delay                 | `delay(host→page)` for the picture, plus `PAGE_DRAW_MS`. No number without the picture's path (the host's camera is off, or the page decodes none). The sound's path is kept beside it for the record |
+| Guest to guest                | Falls out of the same parts (each guest reports its buffer per sender). Not computed by the host's model in v1                                                                                        |
+
+With two program pages (wide and tall, or a separate recording page) the slowest one is the program's number.
+
+**What the sum cannot see**: a hop between LiveKit regions, an asymmetric route (`rtt/2` assumes the two ways are equal), the speaker, the room and the microphone's own hardware delay.
+
+## 5. Constants
+
+| Name                            | Value                | Meaning                                                                      |
+| ------------------------------- | -------------------- | ---------------------------------------------------------------------------- |
+| `LATENCY_TOPIC`                 | `videorc.latency.v1` | The relay's room data topic                                                  |
+| `LATENCY_SAMPLE_MS`             | 10000                | One sample per participant                                                   |
+| `LATENCY_RELAY_MIN_INTERVAL_MS` | 9000                 | The least time between two relays of one sender                              |
+| `LATENCY_TTL_MS`                | 25000                | A block is current this long after it arrived. Then its numbers go away      |
+| `SEND_AUDIO_MS`                 | 40                   | Capture, one 20 ms Opus frame, packetizing. No stat exists. Calibrated in S5 |
+| `SFU_MS`                        | 5                    | Forwarding inside one LiveKit region. Calibrated in S5                       |
+| `PAGE_DRAW_MS`                  | 33                   | The page's draw: two frames at 60 fps (its double rAF). Calibrated in S5     |
+| `NET_MAX_MS`                    | 60000                | The bound of every duration                                                  |
+| `NET_MAX_SENDERS`               | 8                    | The length of `from`                                                         |
+| `LATENCY_RELAY_MAX_BYTES`       | 4096                 | The largest relayed message the host reads                                   |
+
+The 25 s rule: a block older than `LATENCY_TTL_MS` gives no number, and neither does any block once the host's own sample is that old. A number goes away. It never goes stale on screen.
+
+## 6. Stage applied (D8, built in S3)
+
+- The web stores `stageSetAt`, its own time, when it accepts a `PUT …/stage`.
+- The page's beacon gains `shown.appliedAgoMs`: how long ago, on the page's monotonic clock, it drew the stage whose key is `shown.stage`.
+- The state answer gains `room.shown.applyMs` = the beacon's receive time − `appliedAgoMs` − `stageSetAt`, when the drawn key is the set stage's. It is not material: it never moves `rev`.
+- An older page sends no `appliedAgoMs`, and then there is no `applyMs`.
+
+## 7. Node shows
+
+Not supported in v1 (D10), and nothing is drawn for them: no number, no chip, no "not available" line. The runner composes natively, sends no beacon, and its guests' reports would need its own relay. The gate is `isManagedShow()`. Do not port half of this to the runner.
+
+## 8. Compatibility (D11)
+
+| Pair                                    | What happens                                                                  |
+| --------------------------------------- | ----------------------------------------------------------------------------- |
+| New web, old desktop                    | The topic is unknown to the old room client: ignored                          |
+| Old web, new desktop                    | No relays arrive: no numbers. The row's dot still reads LiveKit's own quality |
+| A guest page loaded before the deploy   | No `net` from that guest: no number for them until they reload                |
+| A program page loaded before the deploy | No `net`, no `appliedAgoMs`: no program number, no `applyMs`                  |
+| Old web, new guest or program page      | `net` is an unknown key to the old routes: ignored                            |
+
+## 9. Tests
+
+- Desktop: `pnpm --filter @videorc/desktop test -- room-latency.test.ts`
+- Web: `node --import tsx --test tests/room-latency.test.ts`
+
+Both read `room-latency.json` (the web's is a byte copy in `tests/fixtures/`): the block cases, the relay cases, the sampler's arithmetic on canned stats reports, and the room cases with their missing-part, `partial` and stale variants.
