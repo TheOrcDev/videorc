@@ -14,6 +14,7 @@ import {
   ArrowUpIcon,
   ChevronRightIcon,
   DisplayIcon,
+  HiddenIcon,
   LinkIcon,
   OutputIcon,
   SpeakerOffIcon,
@@ -27,6 +28,11 @@ import { Gallery } from '@/components/page'
 import { PanelSection } from '@/components/panel-section'
 import { SectionLabel } from '@/components/section-label'
 import { SceneCard } from '@/components/studio/scene-card'
+import {
+  ScreenHiddenChip,
+  type ScreenPrivacyControl,
+  useScreenPrivacyControl
+} from '@/components/studio/screen-privacy-control'
 import { StageLayoutThumb } from '@/components/studio/stage-layout-thumb'
 import { CameraOffAvatar } from '@/components/studio/camera-off-avatar'
 import { PREVIEW_REPLACED_BY_SHOW_STAGE } from '@/components/preview-stage'
@@ -45,6 +51,8 @@ import {
 import { DisabledReason } from '@/components/ui/disabled-reason'
 import { InfoTooltip } from '@/components/ui/info-tooltip'
 import { Empty } from '@/components/ui/empty'
+import { ShortcutKeys } from '@/components/ui/shortcut-keys'
+import { ShortcutTooltip } from '@/components/ui/shortcut-tooltip'
 import { Spinner } from '@/components/ui/spinner'
 import { useStudioCloud, useStudioCore } from '@/hooks/use-studio'
 import {
@@ -79,6 +87,7 @@ import {
 } from '@/lib/guests-view'
 import { openWorkspaceTab } from '@/lib/workspace-navigation'
 import { managedScreenAssetUrl } from '@/lib/screen-asset-url'
+import { SCREEN_HIDDEN_LABEL, screenPrivacyActionLabel } from '@/lib/screen-privacy-view'
 import type { TalkShowContextValue } from '@/lib/talk-show-context'
 import type { CameraFrameMedia } from '@/lib/camera-frame-media'
 import type { TalkShowLocalMedia, TalkShowPerson } from '@/lib/talk-show-room'
@@ -577,6 +586,11 @@ function StageScreens({
   const sharing = local.screen !== null
   // Plan 251: on Two screens the cards put up to two screens on stage.
   const screens = roomScreens(room, people, sharing, talkShow.twoScreens)
+  // Plan 254 D4: the Studio's own Hide screen, the same state as the scene's
+  // Screen field, which steps aside with the Scenes while the room is open.
+  const privacy = useScreenPrivacyControl()
+  const privacyShown =
+    sharing || screens.some((screen) => screen.host) || privacy.hidden || !!privacy.statusLabel
 
   const pick = async (): Promise<void> => {
     setPending(true)
@@ -607,37 +621,51 @@ function StageScreens({
   }
 
   return (
-    <div className="flex min-w-0 flex-col gap-1.5" data-testid="show-stage-screens">
-      <div className="flex min-h-6 items-center justify-between gap-2 px-1">
+    <div
+      className="@container/stage-screens flex min-w-0 flex-col gap-1.5"
+      data-testid="show-stage-screens"
+    >
+      <div className="flex min-h-6 flex-wrap items-center gap-x-2 gap-y-1 px-1">
         <SectionLabel>Screens</SectionLabel>
-        {sharing ? (
-          <Button
-            data-testid="show-stage-stop-share"
-            disabled={!roomOpen || pending}
-            size="xs"
-            type="button"
-            variant="outline"
-            onClick={() => void talkShow.stopScreenShare().catch(() => {})}
-          >
-            Stop sharing
-          </Button>
-        ) : (
-          <Button
-            data-testid="show-stage-share"
-            disabled={!roomOpen || pending}
-            size="xs"
-            type="button"
-            variant="outline"
-            onClick={() => void pick()}
-          >
-            {pending ? (
-              <Spinner aria-hidden data-icon="inline-start" />
-            ) : (
-              <DisplayIcon data-icon="inline-start" />
-            )}
-            Share screen…
-          </Button>
-        )}
+        {/* While it holds, the chip says so beside the section's name, as on
+            the scene's Screen field; nothing toasts. */}
+        {privacy.hidden || privacy.statusLabel ? (
+          <ScreenHiddenChip
+            detail={privacy.observationDetail}
+            value={privacy.statusLabel ?? SCREEN_HIDDEN_LABEL}
+          />
+        ) : null}
+        <div className="ml-auto flex shrink-0 items-center gap-2">
+          {privacyShown ? <StageScreenPrivacy control={privacy} /> : null}
+          {sharing ? (
+            <Button
+              data-testid="show-stage-stop-share"
+              disabled={!roomOpen || pending}
+              size="xs"
+              type="button"
+              variant="outline"
+              onClick={() => void talkShow.stopScreenShare().catch(() => {})}
+            >
+              Stop sharing
+            </Button>
+          ) : (
+            <Button
+              data-testid="show-stage-share"
+              disabled={!roomOpen || pending}
+              size="xs"
+              type="button"
+              variant="outline"
+              onClick={() => void pick()}
+            >
+              {pending ? (
+                <Spinner aria-hidden data-icon="inline-start" />
+              ) : (
+                <DisplayIcon data-icon="inline-start" />
+              )}
+              Share screen…
+            </Button>
+          )}
+        </div>
       </div>
       {screens.length === 0 ? (
         <p className="px-1 text-meta text-muted-foreground" data-testid="show-stage-screens-empty">
@@ -710,6 +738,61 @@ function StageScreens({
         </DialogContent>
       </Dialog>
     </div>
+  )
+}
+
+/**
+ * Hide screen on the Show stage (plan 254 D4). While the room is open the
+ * stage replaces the Preview and the Scenes step aside, and the scene's
+ * Screen field (the Studio's Hide screen since plan 231 D8) goes with them;
+ * this is the same action by the same state (`useScreenPrivacyControl`), a
+ * mirror and never a second state. It sits in the Screens header beside Stop
+ * sharing, over the host's own card (one screen or two, plan 251): a 24 px
+ * button with its key, as the Studio's Screen row had it (plan 210 D9). It
+ * reads Show screen in the same place while hidden, and the key then lives
+ * in the tooltip, because the chip takes the room. The room's phase never
+ * holds it: a hide always runs, and only a refused hide is disabled, with its
+ * reason. No toast: the chip and the frosted stage say it.
+ */
+function StageScreenPrivacy({ control }: { control: ScreenPrivacyControl }): ReactElement {
+  const { hidden, accelerator, platform, disabledReason, toggle } = control
+  const label = screenPrivacyActionLabel(hidden)
+  const button = (
+    <Button
+      data-testid="show-stage-screen-privacy"
+      data-videorc-screen-privacy=""
+      disabled={disabledReason !== null}
+      size="xs"
+      type="button"
+      variant="outline"
+      onClick={toggle}
+    >
+      <HiddenIcon data-icon="inline-start" />
+      {label}
+    </Button>
+  )
+  return (
+    <span
+      className="flex items-center gap-2"
+      data-hidden={hidden || undefined}
+      data-slot="screen-privacy"
+    >
+      {/* The key teaches itself while there is room for it. */}
+      {accelerator && !hidden ? (
+        <ShortcutKeys
+          accelerator={accelerator}
+          className="hidden @min-[22rem]/stage-screens:inline-flex"
+          platform={platform}
+        />
+      ) : null}
+      {disabledReason ? (
+        <DisabledReason reason={disabledReason}>{button}</DisabledReason>
+      ) : (
+        <ShortcutTooltip accelerator={accelerator} label={label} platform={platform}>
+          {button}
+        </ShortcutTooltip>
+      )}
+    </span>
   )
 }
 

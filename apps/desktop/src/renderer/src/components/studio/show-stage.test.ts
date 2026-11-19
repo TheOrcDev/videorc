@@ -4,7 +4,13 @@ import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { TooltipProvider } from '@/components/ui/tooltip'
-import type { CloudRoomGuest, CloudStageLayout, CloudStatus, StreamScreen } from '@/lib/backend'
+import type {
+  CloudRoomGuest,
+  CloudStageLayout,
+  CloudStatus,
+  ScreenPrivacy,
+  StreamScreen
+} from '@/lib/backend'
 import {
   HOST,
   ada,
@@ -25,8 +31,37 @@ import ShowStage from './show-stage'
 
 const studio = vi.hoisted(() => ({
   cloud: { cloudStatus: null as CloudStatus | null, talkShow: null as unknown },
-  core: { activeScreen: null as StreamScreen | null }
+  core: {} as StudioCoreStub
 }))
+
+/** What the Show stage reads from the Studio core: the active screen and Hide screen's state. */
+interface StudioCoreStub {
+  activeScreen: StreamScreen | null
+  screenPrivacy: ScreenPrivacy
+  roomScreenPrivacy?: {
+    hidden: boolean
+    status: 'visible' | 'hiding' | 'observed' | 'unconfirmed' | 'paused'
+    sourceBlockedAt: number | null
+    observations: Record<string, number>
+  }
+  hideScreen: () => Promise<unknown>
+  showScreen: () => Promise<unknown>
+  settings: { globalShortcuts?: { screenHideToggle?: string } }
+  runtimeInfo: { platform: string }
+  wsStatus: string
+}
+
+function coreStub(): StudioCoreStub {
+  return {
+    activeScreen: null,
+    screenPrivacy: { hidden: false },
+    hideScreen: vi.fn(async () => ({ ok: true })),
+    showScreen: vi.fn(async () => ({ ok: true })),
+    settings: {},
+    runtimeInfo: { platform: 'darwin' },
+    wsStatus: 'connected'
+  }
+}
 
 vi.mock('@/hooks/use-studio', () => ({
   useStudioCloud: () => studio.cloud,
@@ -71,6 +106,7 @@ let container: HTMLDivElement
 
 beforeEach(() => {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
+  studio.core = coreStub()
   container = document.createElement('div')
   document.body.append(container)
   root = createRoot(container)
@@ -80,7 +116,6 @@ afterEach(async () => {
   await act(async () => root.unmount())
   container.remove()
   vi.unstubAllGlobals()
-  studio.core.activeScreen = null
 })
 
 async function mount(status: CloudStatus, show: TalkShowContextValue): Promise<void> {
@@ -1270,5 +1305,162 @@ describe('the avatar animation line under the Program preview (plan 249 S5)', ()
     // A still avatar (no Alive pack) has nothing to explain.
     await mount(status, avatar())
     expect(line()).toBeNull()
+  })
+})
+
+// Plan 254 D4 (F5, the second live test): while the room is open the Show
+// stage replaces the Preview and the Scenes step aside, and the scene's Screen
+// field, the Studio's Hide screen since plan 231 D8, goes with them. The
+// Show stage's Screens carry the same action by the same state, beside the
+// host's own card: a mirror, never a second state.
+describe('Hide screen on the Show stage (plan 254 D4)', () => {
+  const managedShow = { id: 'sh_talk', nodeId: 'livekit', resumable: false, kind: 'talk' as const }
+  /** The host shares a screen (the renderer's own track). */
+  const sharing = (overrides: Partial<TalkShowContextValue> = {}) =>
+    talkShow({
+      room: {
+        ...NO_TALK_SHOW.room,
+        local: { ...NO_TALK_SHOW.room.local, screen: {} as MediaStreamTrack }
+      },
+      ...overrides
+    })
+  const hostOnScreen = (overrides: Parameters<typeof openRoom>[0] = {}) =>
+    openRoom({
+      stage: { layout: 'screen-people', onStage: [HOST], screen: HOST },
+      ...overrides
+    })
+  const section = (): HTMLElement =>
+    container.querySelector<HTMLElement>('[data-testid="show-stage-screens"]') as HTMLElement
+  const header = (): HTMLElement => section().firstElementChild as HTMLElement
+  const button = (): HTMLButtonElement | null =>
+    container.querySelector<HTMLButtonElement>('[data-testid="show-stage-screen-privacy"]')
+  const chip = (): HTMLElement | null =>
+    header().querySelector<HTMLElement>('[data-slot="status-badge"]')
+  const hostCard = (): HTMLElement | null =>
+    container.querySelector<HTMLElement>(
+      `[data-testid="show-stage-screen"][data-stage-identity="${HOST}"]`
+    )
+
+  it('offers Hide screen beside the host’s own screen while they share in the open room', async () => {
+    await mount(talkStatus({ room: hostOnScreen() }), sharing())
+    expect(hostCard()).not.toBeNull()
+    // In the Screens header, beside Stop sharing: the host's own screen's actions.
+    expect(header().contains(button())).toBe(true)
+    expect(header().querySelector('[data-testid="show-stage-stop-share"]')).not.toBeNull()
+    expect(button()?.textContent).toBe('Hide screen')
+    expect(button()?.disabled).toBe(false)
+    // Quick settings' look: a 24 px button with Hide screen's icon, and its key beside it.
+    expect(button()?.dataset.size).toBe('xs')
+    expect(button()?.hasAttribute('data-videorc-screen-privacy')).toBe(true)
+    expect(button()?.querySelector('svg[data-icon="inline-start"]')).not.toBeNull()
+    const key = header().querySelector<HTMLElement>('kbd')
+    expect(key?.dataset.accelerator).toBe('Control+Alt+H')
+    expect(key?.textContent).toBe('⌃⌥H')
+    expect(chip()).toBeNull()
+  })
+
+  it('toggles the Studio’s one Hide screen state, and its words follow that state', async () => {
+    const core = studio.core
+    vi.mocked(core.hideScreen).mockImplementation(async () => {
+      core.screenPrivacy = { hidden: true, reason: 'you' }
+      return { ok: true }
+    })
+    vi.mocked(core.showScreen).mockImplementation(async () => {
+      core.screenPrivacy = { hidden: false }
+      return { ok: true }
+    })
+    const status = talkStatus({ room: hostOnScreen() })
+    const show = sharing()
+    await mount(status, show)
+    await act(async () => button()?.click())
+    expect(core.hideScreen).toHaveBeenCalledTimes(1)
+    expect(core.showScreen).not.toHaveBeenCalled()
+
+    // The state changed (here, as the backend's event would): the same place reads Show screen.
+    await mount(status, show)
+    expect(button()?.textContent).toBe('Show screen')
+    expect(button()?.dataset.hidden).toBeUndefined()
+    expect(
+      header().querySelector('[data-slot="screen-privacy"]')?.hasAttribute('data-hidden')
+    ).toBe(true)
+    expect(chip()?.textContent).toBe('Screen hidden')
+    expect(chip()?.dataset.tone).toBe('warn')
+    // While hidden the chip takes the room; the key stays in the tooltip.
+    expect(header().querySelector('kbd')).toBeNull()
+    await act(async () => button()?.click())
+    expect(core.showScreen).toHaveBeenCalledTimes(1)
+    expect(core.hideScreen).toHaveBeenCalledTimes(1)
+
+    await mount(status, show)
+    expect(button()?.textContent).toBe('Hide screen')
+    expect(chip()).toBeNull()
+  })
+
+  it('reads Show screen while the room’s share holds hidden, with what the room confirmed', async () => {
+    studio.core.roomScreenPrivacy = {
+      hidden: true,
+      status: 'observed',
+      sourceBlockedAt: 1,
+      observations: { program: 2 }
+    }
+    await mount(talkStatus({ room: hostOnScreen() }), sharing())
+    expect(button()?.textContent).toBe('Show screen')
+    expect(chip()?.textContent).toBe('Frost observed · others unconfirmed')
+    await act(async () => button()?.click())
+    expect(studio.core.showScreen).toHaveBeenCalledTimes(1)
+  })
+
+  it('sits beside the host’s card on Two screens too (plan 251)', async () => {
+    const GUEST = ada.guestId
+    const room = openRoom({
+      live: true,
+      guests: [ada],
+      participants: [
+        ...(openRoom().participants ?? []),
+        guestParticipant(ada, { onStage: true, screen: true })
+      ],
+      stage: {
+        layout: 'screen-people',
+        onStage: [HOST, GUEST],
+        screen: GUEST,
+        screens: [GUEST, HOST]
+      }
+    })
+    await mount(talkStatus({ show: managedShow, room }), sharing({ twoScreens: true }))
+    expect(hostCard()?.querySelector('button')?.getAttribute('aria-pressed')).toBe('true')
+    expect(section().contains(button())).toBe(true)
+    expect(button()?.textContent).toBe('Hide screen')
+  })
+
+  it('stays out of the way while the host shares nothing, and comes back to show a hidden screen', async () => {
+    await mount(talkStatus({ room: openRoom() }), talkShow())
+    expect(button()).toBeNull()
+    expect(section().querySelector('[data-testid="show-stage-share"]')).not.toBeNull()
+
+    // Hidden by the key or ⌘K with no share up: Show screen is never out of reach.
+    studio.core.screenPrivacy = { hidden: true, reason: 'you' }
+    await mount(talkStatus({ room: openRoom() }), talkShow())
+    expect(button()?.textContent).toBe('Show screen')
+    expect(chip()?.textContent).toBe('Screen hidden')
+  })
+
+  it('is never held back by the room’s phase, and says why a hide is refused', async () => {
+    // Closing: the share's own buttons wait, a hide still runs.
+    await mount(talkStatus({ room: hostOnScreen({ phase: 'closing' }) }), sharing())
+    expect(
+      header().querySelector<HTMLButtonElement>('[data-testid="show-stage-stop-share"]')?.disabled
+    ).toBe(true)
+    expect(button()?.disabled).toBe(false)
+
+    studio.core.screenPrivacy = {
+      hidden: false,
+      unavailable: "Hide screen isn't available on this recording. Stop and record again."
+    }
+    await mount(talkStatus({ room: hostOnScreen() }), sharing())
+    expect(button()?.disabled).toBe(true)
+    const wrapper = header().querySelector<HTMLElement>('[data-slot="disabled-reason"]')
+    expect(
+      document.getElementById(wrapper?.getAttribute('aria-describedby') ?? '')?.textContent
+    ).toBe("Hide screen isn't available on this recording. Stop and record again.")
   })
 })
