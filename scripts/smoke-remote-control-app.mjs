@@ -26,7 +26,12 @@ import {
   remoteRequest as remoteRequestClient,
   waitForRemoteEvent as waitForRemoteEventClient
 } from './lib/remote-control-client.mjs'
-import { defaultRingVerdict, syntheticCompositorReady } from './lib/remote-control-smoke-gates.mjs'
+import {
+  defaultRingVerdict,
+  STREAM_MANAGER_WAYLAND_REFUSAL,
+  streamManagerScreenKeyPlan,
+  syntheticCompositorReady
+} from './lib/remote-control-smoke-gates.mjs'
 import { CAPTURE_CONFIG_STORAGE_KEY, RELOAD_KEEPING_SEED_JS } from './lib/renderer-profile-seed.mjs'
 import { requestSmokeCommand, waitForRendererHook } from './lib/smoke-command-client.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
@@ -445,7 +450,70 @@ try {
   ) {
     fail(`a missing screen was not refused by main: ${JSON.stringify(missing)}`)
   }
-  if (screens.length >= 2) {
+  // Plan 230: Wayland drops every window position, so there a tap must come
+  // back refused with the Wayland copy and only the hold is checked. The app
+  // says which (describe's `screenMoves`, Electron's resolved ozone platform).
+  const screenKeyPlan = streamManagerScreenKeyPlan(screenDescribe)
+  if (screenKeyPlan === null) {
+    fail(
+      `remote.describe has no usable screenMoves for ${process.platform}: ${JSON.stringify(screenDescribe?.screenMoves)}`
+    )
+  }
+  if (screenKeyPlan === 'wayland') {
+    const [presenting, monitor] = screens
+    const before = (await remoteRequest(remote, 'remote.describe')).payload?.state
+    if (before?.windows?.comments) {
+      fail('the Stream Manager is already open, so the hold cannot be checked to open it')
+    }
+    await new Promise((resolveSleep) => setTimeout(resolveSleep, 400))
+    const tapAck = waitForRemoteEvent(remote, 'remote.ack')
+    const tap = await remoteRequest(remote, 'remote.intent', {
+      kind: 'streamManagerScreenSwap',
+      presentingScreen: presenting.id,
+      monitorScreen: monitor.id
+    })
+    if (!tap.payload?.accepted) {
+      fail(`streamManagerScreenSwap was not accepted: ${JSON.stringify(tap)}`)
+    }
+    const tapped = await tapAck
+    if (
+      tapped?.intentId !== tap.payload.intentId ||
+      tapped?.ok !== false ||
+      tapped?.message !== STREAM_MANAGER_WAYLAND_REFUSAL
+    ) {
+      fail(
+        `streamManagerScreenSwap on Wayland was not refused as documented: ${JSON.stringify(tapped)}`
+      )
+    }
+    const afterTap = (await remoteRequest(remote, 'remote.describe')).payload?.state
+    if (afterTap?.windows?.comments) {
+      fail(
+        `the refused Wayland tap opened the Stream Manager: ${JSON.stringify(afterTap.streamManager)}`
+      )
+    }
+    // The hold still works on Wayland: a closed Stream Manager opens.
+    await new Promise((resolveSleep) => setTimeout(resolveSleep, 400))
+    const holdAck = waitForRemoteEvent(remote, 'remote.ack')
+    const hold = await remoteRequest(remote, 'remote.intent', { kind: 'streamManagerFrontOrClose' })
+    if (!hold.payload?.accepted)
+      fail(`streamManagerFrontOrClose was not accepted: ${JSON.stringify(hold)}`)
+    const held = await holdAck
+    if (held?.intentId !== hold.payload.intentId || held?.ok !== true) {
+      fail(`streamManagerFrontOrClose was not applied: ${JSON.stringify(held)}`)
+    }
+    const afterHold = await waitForBackendState(
+      renderer,
+      'remote.describe',
+      (surface) => surface?.state?.windows?.comments === true,
+      'Stream Manager opened by the hold on Wayland'
+    )
+    if (afterHold.state.streamManager?.hiddenFromStream !== false) {
+      fail(`the hold changed Hide from stream: ${JSON.stringify(afterHold.state.streamManager)}`)
+    }
+    console.log(
+      `remote-control smoke: streamManagerScreenSwap ${presenting.name} ↔ ${monitor.name} refused on Wayland as documented; hold opened it`
+    )
+  } else if (screenKeyPlan === 'move') {
     const [presenting, monitor] = screens
     const before = (await remoteRequest(remote, 'remote.describe')).payload?.state
     if (before?.windows?.comments) {
