@@ -11,8 +11,10 @@ use super::libsrt::{self, Api, SrtSocket};
 use super::signal::{Acceptance, Admission, ListenerTrouble, SenderGate};
 use crate::protocol::SrtSenderRefusal;
 
-/// How long `recv` blocks, so stop, the hold and a setting change run on time.
-const RECEIVE_TIMEOUT_MS: c_int = 100;
+/// The pause after a read that finds nothing. Reads don't block: libsrt
+/// wakes a blocking reader only on its next full ACK, about 10 ms after the
+/// last packet of a frame (libsrt 1.5.7 core.cpp `checkACKTimer`).
+const READ_POLL: Duration = Duration::from_millis(1);
 const ACCEPT_POLL: Duration = Duration::from_millis(50);
 /// One SRT live message is at most 1456 bytes; TS senders use 1316.
 const MESSAGE_BUFFER: usize = 1500;
@@ -393,13 +395,12 @@ pub fn run(
                         );
                         on_event(ListenerEvent::SenderLeft);
                     }
-                    let blocking = [
-                        SocketOption::Int(libsrt::SRTO_RCVSYN, 1),
-                        SocketOption::Int(libsrt::SRTO_RCVTIMEO, RECEIVE_TIMEOUT_MS),
-                    ];
-                    let setup_error = blocking
-                        .iter()
-                        .find_map(|option| set_option(api, caller.socket, option).err());
+                    let setup_error = set_option(
+                        api,
+                        caller.socket,
+                        &SocketOption::Int(libsrt::SRTO_RCVSYN, 0),
+                    )
+                    .err();
                     if setup_error.is_none() {
                         let socket = caller.socket;
                         tracing::info!("[srt-camera] sender {socket} accepted");
@@ -438,7 +439,7 @@ pub fn run(
                 last_data = Instant::now();
                 on_event(ListenerEvent::Data(bytes));
             }
-            Received::Nothing => {}
+            Received::Nothing => std::thread::sleep(READ_POLL),
             Received::Left => {
                 let socket = active.socket;
                 tracing::info!("[srt-camera] sender {socket} left: {}", api.last_error().1);
@@ -478,8 +479,7 @@ fn receive_outcome(read: c_int, error: impl FnOnce() -> c_int) -> Outcome {
     if read > 0 {
         return Outcome::Data(read as usize);
     }
-    if read == libsrt::SRT_ERROR && matches!(error(), libsrt::SRT_EASYNCRCV | libsrt::SRT_ETIMEOUT)
-    {
+    if read == libsrt::SRT_ERROR && error() == libsrt::SRT_EASYNCRCV {
         return Outcome::Nothing;
     }
     Outcome::Left
@@ -666,14 +666,9 @@ mod tests {
     }
 
     #[test]
-    fn srt_listener_a_receive_timeout_keeps_the_sender() {
-        // A blocking receive whose SRTO_RCVTIMEO runs out says SRT_ETIMEOUT
-        // (libsrt 1.5.7 core.cpp: MJ_AGAIN, MN_XMTIMEOUT); a non-blocking
-        // one says SRT_EASYNCRCV. Neither means the sender left.
-        assert_eq!(
-            receive_outcome(-1, || libsrt::SRT_ETIMEOUT),
-            Outcome::Nothing
-        );
+    fn srt_listener_nothing_to_read_keeps_the_sender() {
+        // A non-blocking read with nothing to read says SRT_EASYNCRCV: the
+        // sender is still there.
         assert_eq!(
             receive_outcome(-1, || libsrt::SRT_EASYNCRCV),
             Outcome::Nothing
@@ -1051,6 +1046,76 @@ mod tests {
                 SocketOption::Int(libsrt::SRTO_MINVERSION, 0x01_03_00),
                 SocketOption::Int(libsrt::SRTO_RCVSYN, 0),
             ]
+        );
+    }
+
+    /// libsrt 1.5.7 wakes a blocking reader only on its next full ACK, which
+    /// comes about 10 ms after the last packet of a burst (core.cpp
+    /// `checkACKTimer`, queue.cpp's idle sweep). Each message must reach the
+    /// camera as soon as it arrives.
+    #[cfg(unix)]
+    #[test]
+    fn srt_listener_hands_on_each_message_without_waiting_for_an_ack() {
+        let Some(api) = real_libsrt() else {
+            return;
+        };
+        let _one_at_a_time = REAL_LIBSRT.lock().unwrap_or_else(PoisonError::into_inner);
+        let config = ListenConfig {
+            latency_ms: 0,
+            ..test_config(free_port())
+        };
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (ready, listening) = std::sync::mpsc::channel();
+        let (data, arrivals) = std::sync::mpsc::channel();
+        let listener = {
+            let config = config.clone();
+            let stop = stop.clone();
+            std::thread::spawn(move || {
+                let keep_running = || !stop.load(std::sync::atomic::Ordering::Acquire);
+                run(&config, &keep_running, &mut |event| match event {
+                    ListenerEvent::Listening => {
+                        let _ = ready.send(());
+                    }
+                    ListenerEvent::Data(_) => {
+                        let _ = data.send(Instant::now());
+                    }
+                    _ => {}
+                })
+                .expect("the listener opens");
+            })
+        };
+        listening
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the listener is listening");
+        let sender = dial(
+            api,
+            std::net::Ipv4Addr::LOCALHOST,
+            config.port,
+            &config.passphrase,
+        )
+        .expect("the sender is let in");
+        std::thread::sleep(Duration::from_millis(200));
+        let packet = [0x47_u8; 188];
+        let mut delays = Vec::new();
+        for _ in 0..20 {
+            let sent = Instant::now();
+            // SAFETY: the buffer outlives the call; the socket is the test's.
+            unsafe { (api.sendmsg2)(sender, packet.as_ptr().cast(), 188, std::ptr::null_mut()) };
+            let arrived = arrivals
+                .recv_timeout(Duration::from_secs(1))
+                .expect("the message arrives");
+            delays.push(arrived.duration_since(sent));
+            std::thread::sleep(Duration::from_millis(30));
+        }
+        // SAFETY: the socket is this test's.
+        unsafe { (api.close)(sender) };
+        stop.store(true, std::sync::atomic::Ordering::Release);
+        listener.join().expect("the listener stops");
+        delays.sort();
+        let median = delays[delays.len() / 2];
+        assert!(
+            median < Duration::from_millis(5),
+            "a message took {median:?} (median) to reach the camera"
         );
     }
 }

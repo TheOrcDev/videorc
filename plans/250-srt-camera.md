@@ -601,6 +601,15 @@ test -p videorc-backend`, typecheck, format, `test:scripts` and
   at 60 fps 110.5 ms over 3 runs (108.0 to 114.3; 121 ms before), the
   same as the reference camera path measured the same way (110 to 114). The camera led 289 to 300 of every
   300 canvas ticks.
+- **Reads don't block (2026-11-20)**: libsrt 1.5.7 wakes a blocking reader
+  only on its next full ACK. After the last packet of a frame, that comes
+  about 10 ms later (`checkACKTimer` waits for the socket to be idle 10 ms),
+  with TSBPD on or off and at any receive latency. A packet capture showed
+  frames on the wire about 1 ms after the phone sent them, then about 11 ms
+  more before `srt_recvmsg` returned, in Videorc and in a bare reader. The
+  accepted socket is now non-blocking, read again 1 ms after an empty read.
+  About 9 ms less glass to screen at 4K60 into a 60 fps canvas (3 runs
+  each, interleaved with the control), for about 2 points more backend CPU.
 - **The pacer wakes on a new frame (2026-11-19)**: in place of the 2 ms
   poll, `put_frames` wakes the pacer, so a frame goes out right after its
   decode. About 2.4 ms less glass to screen at 4K60 into a 30 fps canvas,

@@ -16,14 +16,11 @@ pub const SRT_ERROR: c_int = -1;
 
 /// `SRT_EASYNCRCV`: nothing to read or accept before the timeout.
 pub const SRT_EASYNCRCV: c_int = 6002;
-/// `SRT_ETIMEOUT`: a blocking receive's `SRTO_RCVTIMEO` ran out.
-pub const SRT_ETIMEOUT: c_int = 6003;
 /// `SRT_REJX_OVERLOAD` (libsrt `access_control.h`): "busy", the reason a
 /// second sender is given (D14, D18).
 pub const SRT_REJX_OVERLOAD: c_int = 1402;
 
 pub const SRTO_RCVSYN: c_int = 2;
-pub const SRTO_RCVTIMEO: c_int = 14;
 pub const SRTO_PASSPHRASE: c_int = 26;
 pub const SRTO_RCVLATENCY: c_int = 43;
 pub const SRTO_PEERLATENCY: c_int = 44;
