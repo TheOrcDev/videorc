@@ -21,6 +21,7 @@ import {
 } from './scene-presets'
 import { canonicalJson } from './scene-visibility-identity'
 import { defaultScenes, horizontalTwin, migrateToScenes } from './scenes-migration'
+import { sceneFromSaved, savedSceneView } from './scene-studio'
 import {
   canDeleteScene,
   firstSceneWithLayout,
@@ -591,6 +592,32 @@ describe('migrateToScenes rules', () => {
       sources,
       background: null
     })
+  })
+
+  // Plan 249 S12: a v1 scene's room guest roles (⋯ → Guests in the room…)
+  // move with it to v2, are stored again as they were, and are listed with
+  // the scene in either orientation.
+  it('keeps each saved scene’s room guest roles through the migration', () => {
+    const { v1, config } = base()
+    const cloud = {
+      version: 1,
+      placement: 'over',
+      guests: { host: { x: 0, y: 0, w: 1, h: 1 }, region: { x: 0, y: 0.78, w: 1, h: 0.22 } }
+    }
+    const [first, ...rest] = v1!.scenes
+    const withRoles = { scenes: [{ ...first!, cloud }, ...rest] }
+    const { library } = migrateToScenes(withRoles, null, config, undefined, NOW)
+    const migrated = library.scenes.find(({ id }) => id === first!.id)!
+    expect(migrated.cloud).toEqual(cloud)
+    for (const scene of library.scenes.filter(({ id }) => id !== first!.id))
+      expect(scene.cloud).toBeUndefined()
+    const stored = hydrateScenes(JSON.parse(JSON.stringify(library))).library!
+    expect(stored.scenes.find(({ id }) => id === first!.id)!.cloud).toEqual(cloud)
+    const camera = { cameraId: 'camera:1' }
+    expect(savedSceneView(migrated, 'horizontal', camera).cloud).toEqual(cloud)
+    expect(savedSceneView(migrated, 'vertical', camera).cloud).toEqual(cloud)
+    const view = savedSceneView(migrated, 'vertical', camera)
+    expect(sceneFromSaved(view, migrated).cloud).toEqual(cloud)
   })
 
   it('a 9:16 studio lands on the default the 16:9 toggle would, with its own Fill', () => {

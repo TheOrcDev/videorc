@@ -320,13 +320,10 @@ export function SceneOnStreamFields({
         // While it holds, the chip says so beside the field's name; nothing toasts.
         status={
           privacy.hidden || privacy.statusLabel ? (
-            <span className="flex" title={privacy.observationDetail}>
-              <StatusBadge
-                icon={HiddenIcon}
-                tone="warn"
-                value={privacy.statusLabel ?? SCREEN_HIDDEN_LABEL}
-              />
-            </span>
+            <ScreenHiddenChip
+              detail={privacy.observationDetail}
+              value={privacy.statusLabel ?? SCREEN_HIDDEN_LABEL}
+            />
           ) : null
         }
         note={note}
@@ -457,6 +454,21 @@ function SceneField({
       </div>
       {children}
     </div>
+  )
+}
+
+/**
+ * The Screen field's privacy chip. In a room (plan 249) it can say more than
+ * Hidden, and what the room confirmed is its tooltip.
+ */
+function ScreenHiddenChip({ value, detail }: { value: string; detail?: string }): ReactElement {
+  const chip = <StatusBadge icon={HiddenIcon} tone="warn" value={value} />
+  return detail ? (
+    <span className="flex" title={detail}>
+      {chip}
+    </span>
+  ) : (
+    chip
   )
 }
 

@@ -4,6 +4,7 @@ import { hydrateSceneLibrary, type SavedScene } from './scene-presets'
 import {
   SCENE_GUEST_PLACEMENTS,
   sceneGuestPlacement,
+  sceneExtensionForOrientation,
   sceneGuestRoles,
   sceneWithGuestRoles
 } from './scene-guest-roles'
@@ -108,5 +109,32 @@ describe('S12 guest roles (D7) chosen per saved scene', () => {
     for (const box of boxes) expect(box.x + box.w).toBeLessThanOrEqual(1920)
     for (let i = 1; i < boxes.length; i++)
       expect(boxes[i].x).toBeGreaterThanOrEqual(boxes[i - 1].x + boxes[i - 1].w)
+  })
+})
+
+// Plan 231 D4: one scene works in both orientations, so its guest roles are
+// drawn for the orientation the room program uses, from their placement.
+describe('guest roles in the orientation the room draws', () => {
+  it('redraws a placement for each orientation, whichever it was saved in', () => {
+    const saved = sceneWithGuestRoles(scene('screen-camera'), 'over', '2026-11-19T00:00:00.000Z')
+    expect(sceneExtensionForOrientation(saved.cloud, 'h')).toMatchObject({
+      placement: 'over',
+      guests: sceneGuestRoles('over', 'h')
+    })
+    expect(sceneExtensionForOrientation(saved.cloud, 'v')).toMatchObject({
+      placement: 'over',
+      guests: sceneGuestRoles('over', 'v')
+    })
+    expect(
+      parseCloudSceneExtension(sceneExtensionForOrientation(saved.cloud, 'v'))?.guests
+    ).toEqual(sceneGuestRoles('over', 'v'))
+  })
+
+  it('keeps what it cannot redraw as it is', () => {
+    const newer = { version: 99, placement: 'over', guests: {} }
+    const unnamed = { version: 1, guests: sceneGuestRoles('below', 'h') }
+    expect(sceneExtensionForOrientation(newer, 'v')).toBe(newer)
+    expect(sceneExtensionForOrientation(unnamed, 'v')).toBe(unnamed)
+    expect(sceneExtensionForOrientation(undefined, 'v')).toBeUndefined()
   })
 })

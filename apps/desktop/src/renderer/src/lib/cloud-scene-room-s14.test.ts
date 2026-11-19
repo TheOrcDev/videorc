@@ -12,6 +12,7 @@ import {
   type SceneContent
 } from './room-scene-publisher'
 import { CAPABILITY_TOPIC } from './room-media-v2'
+import { showsSources } from './scenes'
 import { SCENE_TOPIC } from '../../../shared/cloud-scene'
 import {
   BACKGROUND_ASSET_TOPIC,
@@ -166,6 +167,42 @@ describe('S14 adapter: the scene names the room screen and its background', () =
     expect(result).toMatchObject({ ok: true, screen: 'unsupported' })
     expect(result.message).toMatch(/Share it yourself/)
     expect(h.shareScreen).not.toHaveBeenCalled()
+  })
+  // Plan 231 in a room (owner, 2026-11-19): the scene's own screen wins. A
+  // v2 scene's switch carries what it shows over the screen the Studio had;
+  // a scene that shows no screen (Camera only, D18) leaves the share alone.
+  it('a v2 scene shares its own screen; Camera only keeps the share as it is', async () => {
+    const studio = { cameraId: 'cam', screenId: 'screen:screencapturekit:1' }
+    const figma = make()
+    const shown = await applySceneToRoom(
+      target({
+        ...studio,
+        ...showsSources({ kind: 'window', windowId: 'window:screencapturekit:42' })
+      }),
+      figma.deps
+    )
+    expect(shown).toMatchObject({ ok: true, screen: 'switched' })
+    expect(figma.order).toEqual(['share:window:42:0', 'commit'])
+
+    const cameraOnly = make(
+      {},
+      {
+        resolve: async () => ({ ...screenCamera(), sources: [source('source:camera', 'camera')] })
+      }
+    )
+    const kept = await applySceneToRoom(
+      {
+        ...target({ ...studio, ...showsSources({ kind: 'none' }) }),
+        layout: {
+          ...structuredClone(defaultCaptureConfig.layout),
+          layoutPreset: 'camera-only' as const
+        }
+      },
+      cameraOnly.deps
+    )
+    expect(kept).toMatchObject({ ok: true, screen: 'kept' })
+    expect(cameraOnly.shareScreen).not.toHaveBeenCalled()
+    expect(cameraOnly.commits).toHaveLength(1)
   })
   it('sends the background inside the scene with its picture', async () => {
     const h = make({}, { background: async () => ({ background: picture, asset }) })
