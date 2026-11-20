@@ -19,6 +19,7 @@ import { roomPcmTestResources, setRoomPcmTestEnabled } from '../lib/room-pcm-tes
 import { cloudTerminalOwner } from '@/lib/cloud-provider-lifecycle'
 import { roomHoldsTheCamera } from '@/lib/replay-buffer-reconcile'
 import type { RoomSceneResult, RoomSceneTarget } from '@/lib/cloud-scene-adapter'
+import type { IdleCommit, IdleCommitState } from '@/lib/room-idle-commit'
 import { createRoomSceneEditSync } from '@/lib/room-scene-resender'
 import { outputSessionFacts } from '../../../shared/output-session'
 import { cloudRoomActivityFromCloudStatus } from '../../../shared/cloud-room-activity'
@@ -1325,6 +1326,9 @@ type LayoutTransactionStatus = LiveLayoutApplyStatus & {
   compositorStatus: CompositorStatus
   presentationProven: boolean
 }
+
+/** The room scene adapter's lazy chunk, as the idle commit uses it. */
+type RoomIdleCommit = typeof import('@/lib/room-idle-commit')
 
 type LayoutTransactionSnapshot = {
   sceneRevision: number
@@ -7327,7 +7331,7 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
   }, [])
 
   const applyCommittedScene = useCallback(
-    (status: SceneCommitStatus) => {
+    (status: Pick<SceneCommitStatus, 'scene' | 'sceneRevision' | 'compositorStatus'>) => {
       nativePreviewCommittedSceneRef.current = {
         sceneId: status.scene.id,
         sceneRevision: status.sceneRevision,
@@ -10915,6 +10919,37 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
     ]
   )
 
+  /**
+   * A native scene commit while a room holds the camera: idle, then the same
+   * working-state update a native transaction makes. The plan and the commit
+   * live in the room scene adapter's lazy chunk (`lib/room-idle-commit.ts`).
+   */
+  const commitSceneIdle = useCallback(
+    async (
+      plan: (adapter: RoomIdleCommit, state: IdleCommitState) => IdleCommit
+    ): Promise<boolean> => {
+      const client = clientRef.current
+      if (!client) return false
+      const state = {
+        config: captureConfigRef.current,
+        background: workingBackgroundRef.current,
+        app: workingAppRef.current,
+        origin: workingOriginRef.current
+      }
+      try {
+        const adapter = await import('@/lib/cloud-scene-adapter')
+        const snapshot = await adapter.commitSceneIdle(client, plan(adapter, state))
+        applyCommittedScene(snapshot)
+        applyLayoutTransactionState(snapshot)
+        return true
+      } catch (error) {
+        reportError(error, { action: 'switch', object: 'the scene' })
+        return false
+      }
+    },
+    [applyCommittedScene, applyLayoutTransactionState, reportError]
+  )
+
   const readLayoutTransactionBackendTruth = useCallback(async () => {
     if (!client) {
       return null
@@ -11095,6 +11130,20 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
         options?.onSettled?.()
         return Promise.resolve(false)
       }
+      // Live test 3 (2026-11-20): a background picked in Assets while a room
+      // was open never changed. The room holds the camera (plan 224 D6), so
+      // this transaction waited 15 s for it and failed, and the background
+      // the room camera is keyed onto never moved. In a room every native
+      // change commits idle and then goes to the room: the working
+      // background reaches the room camera, the rest the scene on its program.
+      if (roomHoldsTheCamera(cloudStatusRef.current?.room))
+        return commitSceneIdle((adapter, state) =>
+          adapter.roomTransactionCommit(state, layout, options)
+        ).then((committed) => {
+          if (committed) requestRoomSceneResendRef.current()
+          options?.onSettled?.()
+          return committed
+        })
 
       if (layoutShortcutTimerRef.current) {
         clearTimeout(layoutShortcutTimerRef.current)
@@ -11478,6 +11527,7 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
     [
       applyLayoutTransactionState,
       client,
+      commitSceneIdle,
       noteSceneSwitchPhase,
       readLayoutTransactionBackendTruth,
       recordAutomaticSourceFallbacks,
@@ -11743,48 +11793,9 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
    * when the room closes.
    */
   const alignNativeToRoomScene = useCallback(
-    async (target: Omit<RoomSceneTarget, 'video'>, savedSceneId: string | null) => {
-      const client = clientRef.current
-      if (!client) return
-      const current = captureConfigRef.current
-      const coupling = verticalOrientationVideoPatch(
-        current.layout.layoutPreset,
-        target.layout.layoutPreset,
-        current.video,
-        current.verticalRestoreVideo
-      )
-      const sources = withoutSceneApp(target.sources)
-      try {
-        const status = await client.request<SceneCommitStatus>('scene.load_from_capture_config', {
-          sources,
-          layout: target.layout,
-          video: coupling?.video ?? current.video,
-          ...(target.background ? { background: target.background } : {})
-        })
-        applyCommittedScene(status)
-        applyLayoutTransactionState({
-          sceneRevision: status.sceneRevision,
-          scene: status.scene,
-          layout: target.layout,
-          compositorStatus: status.compositorStatus,
-          origin: savedSceneId ? 'saved' : 'builtin',
-          sources,
-          savedSceneId,
-          sceneSwitch: true,
-          ...(coupling
-            ? {
-                captureConfigPatch: {
-                  video: coupling.video,
-                  verticalRestoreVideo: coupling.verticalRestoreVideo
-                }
-              }
-            : {})
-        })
-      } catch (error) {
-        reportError(error, { action: 'switch', object: 'the scene' })
-      }
-    },
-    [applyCommittedScene, applyLayoutTransactionState, reportError]
+    (target: Omit<RoomSceneTarget, 'video'>, savedSceneId: string | null) =>
+      commitSceneIdle((adapter, state) => adapter.roomAlignmentCommit(state, target, savedSceneId)),
+    [commitSceneIdle]
   )
   /** A scene is on this room's program and scenes are on: edits go to the room. */
   const roomSceneLive = useCallback(
@@ -11825,11 +11836,13 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
       savedSceneId: string | null = null
     ): Promise<{ ok: boolean; message?: string }> => {
       if (!roomScenesOn()) {
-        const message = 'Scenes are off in this room. The room layouts stay on the program.'
+        // The copy lives with the lazy adapter: the entry chunk has no room for it.
+        const { ROOM_SCENES_OFF: message, USE_SCENES: label } =
+          await import('@/lib/cloud-scene-adapter')
         toast.warning(message, {
           id: 'room-scenes',
           action: {
-            label: 'Use scenes',
+            label,
             onClick: () => {
               setRoomScenesEnabled(true)
               retry()
