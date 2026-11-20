@@ -771,7 +771,7 @@ describe('the Program monitor on a managed show (plan 234 D6)', () => {
     }
     await mount(talkStatus({ show: managedShow, room: shownRoom }), talkShow())
     expect(takeover()?.getAttribute('src')).toBe('videorc-asset://screen/brb%201.png')
-    expect(monitor()?.textContent).toContain('Takeover')
+    expect(monitor()?.textContent).toContain('Muted for takeover')
     // The pills sit over the picture, never inside what Videorc Camera rasterizes.
     const picture = monitor()?.querySelector('[data-testid="show-stage-program-picture"]')
     expect(picture?.querySelector('[data-testid="show-stage-program-muted"]')).toBeNull()

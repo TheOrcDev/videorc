@@ -58,6 +58,7 @@ import { buildCameraSources } from '@/lib/capture'
 import { GREEN_SCREEN_MODES } from '@/lib/green-screen'
 import { GO_LIVE_CHECKING_LABEL, GO_LIVE_LABEL, RECORD_LABEL } from '@/lib/go-live-copy'
 import { MIC_SESSION_LEVEL_UNAVAILABLE_COPY } from '@/lib/mic-meter-input'
+import { TAKEOVER_MUTED_HINT, TAKEOVER_MUTED_LABEL } from '@/lib/takeover-microphone'
 import { shortcutAccelerator } from '@/lib/shortcuts'
 import { captionsStatusLabel, micSignalLabel, systemAudioIssueLabel } from '@/lib/state-labels'
 import { STOP_FINALIZE_OVERRUN_ALERT, streamingSummary } from '@/lib/studio-session-view'
@@ -314,6 +315,7 @@ function RetroMicrophoneRows({
   monitorState,
   sessionLevelUnavailable = false,
   muted,
+  takeoverHold = null,
   muteShortcut,
   platform,
   gainDb,
@@ -401,6 +403,12 @@ function RetroMicrophoneRows({
           {micSignalLabel(monitorState)}
         </span>
       </div>
+      {/* A takeover holds the voice: the screen says so until it ends. */}
+      {takeoverHold ? (
+        <div className={LCD_MESSAGE} data-videorc-mic-takeover-hint="">
+          {TAKEOVER_MUTED_LABEL}. {TAKEOVER_MUTED_HINT[takeoverHold]}
+        </div>
+      ) : null}
       {/* Issue 1064: a session meter with no backend level says so. */}
       {sessionLevelUnavailable ? (
         <div className={LCD_MESSAGE} data-videorc-mic-level-reason="session">

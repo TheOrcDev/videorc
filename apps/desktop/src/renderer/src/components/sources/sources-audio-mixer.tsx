@@ -83,6 +83,7 @@ import {
 import type { MicStreamFailureReason } from '@/lib/mic-stream'
 import { microphoneIndicatorCopy, platformCopy } from '@/lib/platform-copy'
 import { isCoreAudioMicrophoneId } from '@/lib/warm-microphone-gate'
+import { takeoverMicrophoneStatus, useTakeoverMicrophoneHold } from '@/lib/takeover-microphone'
 import type { MicMonitorState } from '@/lib/state-labels'
 import {
   microphoneStatus,
@@ -205,6 +206,7 @@ export function SourcesAudioMixer(): ReactElement {
     systemAudioJoining,
     systemAudioIssue
   } = useStudioCore()
+  const takeoverHold = useTakeoverMicrophoneHold()
   const { openSettings } = useWorkspaceNav()
   const microphone = useMicrophoneMeter()
   const backendLevelsLive = useBackendAudioLevelsLive()
@@ -312,6 +314,7 @@ export function SourcesAudioMixer(): ReactElement {
                     switching: sourceDeviceSwitchPending === 'microphone',
                     device: selectedDeviceStatus(deviceList.devices, microphoneId),
                     muted: audio.microphoneMuted,
+                    takeover: takeoverMicrophoneStatus(takeoverHold),
                     sessionActive: isSessionActive,
                     silent: microphone.monitorState === 'silent'
                   })}

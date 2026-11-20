@@ -55,6 +55,7 @@ import { ShortcutKeys } from '@/components/ui/shortcut-keys'
 import { ShortcutTooltip } from '@/components/ui/shortcut-tooltip'
 import { Spinner } from '@/components/ui/spinner'
 import { useStudioCloud, useStudioCore } from '@/hooks/use-studio'
+import { TAKEOVER_MUTED_HINT, TAKEOVER_MUTED_LABEL } from '@/lib/takeover-microphone'
 import {
   roomProgramCamera,
   useRoomProgramCamera,
@@ -1078,10 +1079,14 @@ function ProgramMonitor({ talkShow }: { talkShow: TalkShowContextValue }): React
             </Badge>
           </InfoTooltip>
         ) : null}
+        {/* The host's voice included (live show 2026-11-20): one word with the
+            mic rows, the sentence on hover. */}
         {takeover ? (
-          <Badge data-testid="show-stage-program-muted" variant="outline">
-            Takeover
-          </Badge>
+          <InfoTooltip content={TAKEOVER_MUTED_HINT.stream}>
+            <Badge data-testid="show-stage-program-muted" variant="outline">
+              {TAKEOVER_MUTED_LABEL}
+            </Badge>
+          </InfoTooltip>
         ) : null}
         <span className="flex-1" />
         {programMenu.length > 0 ? (

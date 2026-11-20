@@ -9,6 +9,7 @@ import {
   SCREEN_SHARE_DIALOG_PENDING_MESSAGE,
   videoSourceStatus
 } from '@/lib/source-status'
+import { takeoverMicrophoneStatus } from '@/lib/takeover-microphone'
 
 // Plan 173: one status vocabulary for the four Sources rows.
 
@@ -216,6 +217,33 @@ describe('microphoneStatus', () => {
       'Needs permission'
     )
     expect(microphoneStatus({ ...base, muted: true, device: 'missing' })?.label).toBe('Not found')
+  })
+
+  // Live show 2026-11-20: the takeover muted the host and nothing said so.
+  it('says Muted for takeover, with when it ends, while a takeover holds the voice', () => {
+    expect(
+      microphoneStatus({
+        ...base,
+        sessionActive: true,
+        takeover: takeoverMicrophoneStatus('stream')
+      })
+    ).toEqual({
+      label: 'Muted for takeover',
+      tone: 'neutral',
+      hint: "Your audience can't hear you until the takeover ends. Guests in the room still can."
+    })
+    expect(
+      microphoneStatus({ ...base, muted: true, takeover: takeoverMicrophoneStatus('microphone') })
+    ).toEqual({
+      label: 'Muted for takeover',
+      tone: 'neutral',
+      hint: 'Your microphone comes back on when the takeover ends.'
+    })
+    expect(
+      microphoneStatus({ ...base, takeover: takeoverMicrophoneStatus('stream'), device: 'missing' })
+        ?.label
+    ).toBe('Not found')
+    expect(microphoneStatus({ ...base, muted: true, takeover: null })?.label).toBe('Muted')
   })
 
   it('shows no chip with no microphone selected', () => {
