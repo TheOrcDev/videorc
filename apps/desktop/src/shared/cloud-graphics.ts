@@ -2,6 +2,7 @@
 import {
   avatarHash,
   avatarRect,
+  base64Bytes,
   withHeldPng,
   type AvatarApplied,
   type AvatarRect
@@ -86,13 +87,12 @@ export function graphicsPng(asset: GraphicsAsset): Uint8Array<ArrayBuffer> | nul
     width * height > 1920 * 1080
   )
     return null
-  let bytes: Uint8Array<ArrayBuffer>
-  try {
-    bytes = Uint8Array.from(atob(png), (c) => c.charCodeAt(0))
-  } catch {
-    return null
-  }
-  if (bytes.length < 33 || ![137, 80, 78, 71, 13, 10, 26, 10].every((v, i) => bytes[i] === v))
+  const bytes = base64Bytes(png)
+  if (
+    !bytes ||
+    bytes.length < 33 ||
+    ![137, 80, 78, 71, 13, 10, 26, 10].every((v, i) => bytes[i] === v)
+  )
     return null
   const view = new DataView(bytes.buffer)
   if (
@@ -112,6 +112,47 @@ export function graphicsPng(asset: GraphicsAsset): Uint8Array<ArrayBuffer> | nul
     if (kind === 0x49454e44) return size === 0 && offset === bytes.length ? bytes : null
   }
   return null
+}
+/**
+ * PH-05, PH-06: the pictures `graphicsPng` passed last, by hash, newest last.
+ * A caption update re-sends every layer, and each unchanged banner was decoded
+ * and walked again by every parse, page send and apply. A hit needs the very
+ * same base64 and size, so it can only repeat an answer already given; a miss
+ * checks as before. Bounded in count and in base64 held.
+ */
+const checked = new Map<string, GraphicsAsset>()
+let checkedLength = 0
+const CHECKED_MAX = 4 * GRAPHICS_MAX_LAYERS
+const CHECKED_LENGTH_MAX = 2 * GRAPHICS_MAX_BYTES
+/** Whether `asset` passes `graphicsPng`; one it passed before is not decoded again. */
+export function graphicsPngChecked(asset: GraphicsAsset): boolean {
+  const seen = checked.get(asset.hash)
+  if (
+    seen &&
+    seen.png === asset.png &&
+    seen.width === asset.width &&
+    seen.height === asset.height
+  ) {
+    checked.delete(asset.hash)
+    checked.set(asset.hash, seen)
+    return true
+  }
+  if (!graphicsPng(asset)) return false
+  if (seen) checkedLength -= seen.png.length
+  checked.delete(asset.hash)
+  const { png, hash, width, height } = asset
+  checked.set(hash, { png, hash, width, height })
+  checkedLength += png.length
+  for (const [oldest, old] of checked) {
+    if (checked.size <= CHECKED_MAX && checkedLength <= CHECKED_LENGTH_MAX) break
+    checked.delete(oldest)
+    checkedLength -= old.png.length
+  }
+  return true
+}
+/** Whether two assets are the very same picture: hash, size and base64. */
+export function sameGraphicsAsset(a: GraphicsAsset, b: GraphicsAsset): boolean {
+  return a.hash === b.hash && a.width === b.width && a.height === b.height && a.png === b.png
 }
 export function graphicsOpacity(layer: GraphicsLayer, now: number): number {
   if (layer.expiresAt !== null && layer.expiresAt <= now) return 0
@@ -164,7 +205,7 @@ export function parseGraphicsSnapshot(
     )
       return null
     const asset = l.asset as GraphicsAsset
-    if (!graphicsPng(asset)) return null
+    if (!graphicsPngChecked(asset)) return null
     bytes += asset.png.length
     if (bytes > GRAPHICS_MAX_BYTES - 4096) return null
     if (l.expiresAt !== null && (!positive(l.expiresAt) || l.expiresAt > value.expiresAt))
@@ -232,10 +273,7 @@ function graphicsRenewal(current: GraphicsLayer[], next: GraphicsLayer[]): boole
         a.fade?.at === b.fade?.at &&
         a.fade?.from === b.fade?.from &&
         a.fade?.to === b.fade?.to &&
-        a.asset.hash === b.asset.hash &&
-        a.asset.width === b.asset.width &&
-        a.asset.height === b.asset.height &&
-        a.asset.png === b.asset.png
+        sameGraphicsAsset(a.asset, b.asset)
       )
     })
   )
@@ -264,11 +302,20 @@ export class GraphicsReceiver<T> {
   constructor(
     private deps: {
       now(): number
-      prepare(layer: GraphicsLayer): Promise<T>
+      /** `bytes`: the layer's PNG, decoded and hashed once here. */
+      prepare(layer: GraphicsLayer, bytes: Uint8Array<ArrayBuffer>): Promise<T>
       discard(asset: T): void
       commit(s: GraphicsSnapshot, assets: T[]): Promise<void>
       clear(): void
       retain?(ids: ReadonlySet<string>): void
+      /**
+       * PH-06: the prepared asset of a layer the view shows right now with
+       * these very pixels (same id, kind, hash, size and base64). `commit`
+       * gets it in place of a new one: no hash, no decode, no new element.
+       * It stays the view's; the receiver never discards it. Absent, or
+       * `undefined`: the layer is prepared.
+       */
+      kept?(layer: GraphicsLayer): T | undefined
       /**
        * PERF-06: a lease renewal of what is on screen (same pixels, same
        * placement): update layer expiries in place. Absent: renewals take
@@ -339,19 +386,44 @@ export class GraphicsReceiver<T> {
   }
   async #apply(s: GraphicsSnapshot, gen: number): Promise<boolean> {
     if (s.layers.length) this.#busy = true
-    const assets: T[] = []
+    // Prepared here, and this apply's to discard until `commit` takes them.
+    // A kept asset is the view's and is never in this map.
+    const fresh = new Map<GraphicsLayer, T>()
     try {
-      for (const l of s.layers) {
-        if ((await avatarHash(graphicsPng(l.asset)!)) !== l.asset.hash)
+      let assets: T[]
+      for (;;) {
+        // PH-06: one changed layer (a caption line) used to hash, decode and
+        // rebuild every layer. A picture the view shows now is kept instead.
+        // The view can drop one while this waits (its expiry passed), so the
+        // kept ones are looked up again after every wait: nothing runs
+        // between the last lookup and `commit`.
+        assets = []
+        let next: GraphicsLayer | undefined
+        for (const l of s.layers) {
+          if (fresh.has(l)) {
+            assets.push(fresh.get(l)!)
+            continue
+          }
+          const kept = this.deps.kept?.(l)
+          if (kept === undefined || assets.includes(kept)) {
+            next = l
+            break
+          }
+          assets.push(kept)
+        }
+        if (!next) break
+        const bytes = graphicsPng(next.asset)
+        if (!bytes || (await avatarHash(bytes)) !== next.asset.hash)
           throw Error('Graphic hash mismatch')
         if (gen !== this.#generation) return false
-        assets.push(await this.deps.prepare(l))
+        fresh.set(next, await this.deps.prepare(next, bytes))
       }
       if (gen !== this.#generation || s.expiresAt <= this.deps.now()) return false
       this.applied = undefined
       this.#current = null
       this.#expires = s.expiresAt
-      await this.deps.commit(s, assets.splice(0))
+      fresh.clear()
+      await this.deps.commit(s, assets)
       if (gen === this.#generation) this.#held = s
       if (gen !== this.#generation || s.expiresAt <= this.deps.now()) return false
       this.applied = { publisherSid: s.publisherSid, revision: s.revision }
@@ -361,7 +433,7 @@ export class GraphicsReceiver<T> {
       if (gen === this.#generation) this.clear()
       throw error
     } finally {
-      assets.forEach((a) => this.deps.discard(a))
+      fresh.forEach((a) => this.deps.discard(a))
       if (s.layers.length) {
         this.#busy = false
         const next = this.#pending
@@ -373,7 +445,14 @@ export class GraphicsReceiver<T> {
 }
 
 export type GraphicsSource = { signature: string; content: GraphicsContent | null }
-export function parseGraphicsSource(value: unknown): GraphicsSource | null {
+export function parseGraphicsSource(
+  value: unknown,
+  /**
+   * PH-05: the picture the reader holds for a hash, for a layer the backend
+   * answered by reference (no `png`). Absent, or none held: refused.
+   */
+  resolve?: (hash: string) => GraphicsAsset | undefined
+): GraphicsSource | null {
   if (
     !object(value) ||
     typeof value.signature !== 'string' ||
@@ -413,7 +492,8 @@ export function parseGraphicsSource(value: unknown): GraphicsSource | null {
       publisherSid: 'PA_local',
       output: 'stream' as const,
       orientation,
-      now
+      now,
+      ...(resolve ? { resolve } : {})
     }
     const snapshot = parseGraphicsSnapshot(
       { ...page, version: 1, revision: 1, expiresAt: now + GRAPHICS_LEASE_MS, layers: input },
@@ -442,6 +522,42 @@ export function parseGraphicsSource(value: unknown): GraphicsSource | null {
     content.html = html
   }
   return { signature: value.signature, content }
+}
+
+/**
+ * PH-05: the pictures of the last two `cloud.graphics.snapshot` answers this
+ * window read, by hash. With live captions on, every caption update is a full
+ * answer; each one carried every banner, the chat box and the card again as
+ * base64, although only the caption bar had changed. The room's poll names
+ * the hashes of the last answer (`graphicsSourceHeld`), the backend answers
+ * those layers without their `png`, and the answer is completed from here.
+ * Two answers, not one: a poll that was still in flight when the room's
+ * effect restarted may be read after a newer one.
+ */
+let sourceHeld = new Map<string, GraphicsAsset>()
+let sourceHeldBefore = new Map<string, GraphicsAsset>()
+/** The `held` of the next `cloud.graphics.snapshot`: what the last answer carried. */
+export function graphicsSourceHeld(): string[] {
+  return [...sourceHeld.keys()]
+}
+/** The room closed, or an answer could not be read: the next answer comes whole. */
+export function forgetGraphicsSource(): void {
+  sourceHeld = new Map()
+  sourceHeldBefore = new Map()
+}
+/** Reads a `cloud.graphics.snapshot` answer, completing layers sent by reference. */
+export function readGraphicsSource(value: unknown): GraphicsSource | null {
+  const source = parseGraphicsSource(
+    value,
+    (hash) => sourceHeld.get(hash) ?? sourceHeldBefore.get(hash)
+  )
+  if (source?.content) {
+    sourceHeldBefore = sourceHeld
+    sourceHeld = new Map(
+      [...source.content.h, ...source.content.v].map((layer) => [layer.asset.hash, layer.asset])
+    )
+  }
+  return source
 }
 
 const unitNumber = (v: unknown): v is number =>
