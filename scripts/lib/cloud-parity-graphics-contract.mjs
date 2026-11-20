@@ -60,21 +60,26 @@ export function assertGraphicsRect(actual, orientation) {
     )
 }
 
+/**
+ * How stale a sampled opacity may be. The program page does not step a fade
+ * per frame: it sets the opacity on its 50 ms clock (videorcweb `stage.ts`
+ * `CLOCK_TIMER_MS`), so a sample read at any moment shows the value of a
+ * step up to 50 ms old, plus one 60 Hz frame for the observer's own read.
+ * The lag is one-sided: a sample is never ahead of the curve.
+ */
+export const GRAPHICS_FADE_MAX_LAG_MS = 66
 export function assertGraphicsFade(samples, transitions) {
   const intermediate = samples.filter((row) => row.opacity > 0 && row.opacity < 1)
   assert.ok(intermediate.length, 'The real consumer must paint the fade')
   for (const row of intermediate) {
-    assert.ok(
-      transitions.some((fade) => {
-        // A screenshot observes the preceding animation frame; permit two 60Hz frames.
-        return [-34, 0, 34].some((jitter) => {
-          const t = Math.max(0, Math.min(1, (row.at + jitter - fade.at) / 200))
-          return (
-            Math.abs(row.opacity - (fade.from + (fade.to - fade.from) * (1 - (1 - t) ** 3))) <= 0.08
-          )
-        })
-      }),
-      `Fade sample at ${row.at} differs from native 200ms ease-out`
-    )
+    let fits = false
+    for (let lag = 0; lag <= GRAPHICS_FADE_MAX_LAG_MS && !fits; lag += 2)
+      fits = transitions.some((fade) => {
+        const t = Math.max(0, Math.min(1, (row.at - lag - fade.at) / 200))
+        return (
+          Math.abs(row.opacity - (fade.from + (fade.to - fade.from) * (1 - (1 - t) ** 3))) <= 0.08
+        )
+      })
+    assert.ok(fits, `Fade sample at ${row.at} differs from native 200ms ease-out`)
   }
 }
