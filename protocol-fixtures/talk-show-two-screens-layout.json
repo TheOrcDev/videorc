@@ -1717,5 +1717,377 @@
         }
       ]
     }
+  },
+  {
+    "name": "1920x1080-two-screens-2-guest-first",
+    "canvas": {
+      "width": 1920,
+      "height": 1080
+    },
+    "layout": "two-screens",
+    "people": ["host:sh_1", "g_1"],
+    "screens": ["g_1", "host:sh_1"],
+    "plan": {
+      "tiles": [
+        {
+          "identity": "host:sh_1",
+          "kind": "screen",
+          "rect": {
+            "x": 24,
+            "y": 24,
+            "w": 922,
+            "h": 518
+          },
+          "cornerRadius": 20
+        },
+        {
+          "identity": "g_1",
+          "kind": "screen",
+          "rect": {
+            "x": 972,
+            "y": 24,
+            "w": 922,
+            "h": 518
+          },
+          "cornerRadius": 20
+        },
+        {
+          "identity": "host:sh_1",
+          "kind": "person",
+          "rect": {
+            "x": 50,
+            "y": 566,
+            "w": 870,
+            "h": 490
+          },
+          "plate": {
+            "x": 62,
+            "y": 1000,
+            "w": 846,
+            "h": 44
+          },
+          "cornerRadius": 20
+        },
+        {
+          "identity": "g_1",
+          "kind": "person",
+          "rect": {
+            "x": 998,
+            "y": 566,
+            "w": 870,
+            "h": 490
+          },
+          "plate": {
+            "x": 1010,
+            "y": 1000,
+            "w": 846,
+            "h": 44
+          },
+          "cornerRadius": 20
+        }
+      ]
+    }
+  },
+  {
+    "name": "1920x1080-two-screens-1-owner-away",
+    "canvas": {
+      "width": 1920,
+      "height": 1080
+    },
+    "layout": "two-screens",
+    "people": ["g_1"],
+    "onStage": ["host:sh_1", "g_1"],
+    "screens": ["g_1", "host:sh_1"],
+    "plan": {
+      "tiles": [
+        {
+          "identity": "host:sh_1",
+          "kind": "screen",
+          "rect": {
+            "x": 24,
+            "y": 24,
+            "w": 922,
+            "h": 518
+          },
+          "cornerRadius": 20
+        },
+        {
+          "identity": "g_1",
+          "kind": "screen",
+          "rect": {
+            "x": 972,
+            "y": 24,
+            "w": 922,
+            "h": 518
+          },
+          "cornerRadius": 20
+        },
+        {
+          "identity": "g_1",
+          "kind": "person",
+          "rect": {
+            "x": 524,
+            "y": 566,
+            "w": 870,
+            "h": 490
+          },
+          "plate": {
+            "x": 536,
+            "y": 1000,
+            "w": 846,
+            "h": 44
+          },
+          "cornerRadius": 20
+        }
+      ]
+    }
+  },
+  {
+    "name": "1080x1920-two-screens-2-guest-first",
+    "canvas": {
+      "width": 1080,
+      "height": 1920
+    },
+    "layout": "two-screens",
+    "people": ["host:sh_1", "g_1"],
+    "screens": ["g_1", "host:sh_1"],
+    "plan": {
+      "tiles": [
+        {
+          "identity": "host:sh_1",
+          "kind": "screen",
+          "rect": {
+            "x": 24,
+            "y": 24,
+            "w": 1030,
+            "h": 580
+          },
+          "cornerRadius": 20
+        },
+        {
+          "identity": "g_1",
+          "kind": "screen",
+          "rect": {
+            "x": 24,
+            "y": 628,
+            "w": 1030,
+            "h": 580
+          },
+          "cornerRadius": 20
+        },
+        {
+          "identity": "host:sh_1",
+          "kind": "person",
+          "rect": {
+            "x": 24,
+            "y": 1422,
+            "w": 504,
+            "h": 282
+          },
+          "plate": {
+            "x": 36,
+            "y": 1648,
+            "w": 480,
+            "h": 44
+          },
+          "cornerRadius": 20
+        },
+        {
+          "identity": "g_1",
+          "kind": "person",
+          "rect": {
+            "x": 552,
+            "y": 1422,
+            "w": 504,
+            "h": 282
+          },
+          "plate": {
+            "x": 564,
+            "y": 1648,
+            "w": 480,
+            "h": 44
+          },
+          "cornerRadius": 20
+        }
+      ]
+    }
+  },
+  {
+    "name": "1080x1920-two-screens-1-owner-away",
+    "canvas": {
+      "width": 1080,
+      "height": 1920
+    },
+    "layout": "two-screens",
+    "people": ["g_1"],
+    "onStage": ["host:sh_1", "g_1"],
+    "screens": ["g_1", "host:sh_1"],
+    "plan": {
+      "tiles": [
+        {
+          "identity": "host:sh_1",
+          "kind": "screen",
+          "rect": {
+            "x": 24,
+            "y": 24,
+            "w": 1030,
+            "h": 580
+          },
+          "cornerRadius": 20
+        },
+        {
+          "identity": "g_1",
+          "kind": "screen",
+          "rect": {
+            "x": 24,
+            "y": 628,
+            "w": 1030,
+            "h": 580
+          },
+          "cornerRadius": 20
+        },
+        {
+          "identity": "g_1",
+          "kind": "person",
+          "rect": {
+            "x": 24,
+            "y": 1274,
+            "w": 1032,
+            "h": 580
+          },
+          "plate": {
+            "x": 36,
+            "y": 1798,
+            "w": 1008,
+            "h": 44
+          },
+          "cornerRadius": 20
+        }
+      ]
+    }
+  },
+  {
+    "name": "1280x720-two-screens-2-guest-first",
+    "canvas": {
+      "width": 1280,
+      "height": 720
+    },
+    "layout": "two-screens",
+    "people": ["host:sh_1", "g_1"],
+    "screens": ["g_1", "host:sh_1"],
+    "plan": {
+      "tiles": [
+        {
+          "identity": "host:sh_1",
+          "kind": "screen",
+          "rect": {
+            "x": 16,
+            "y": 16,
+            "w": 614,
+            "h": 346
+          },
+          "cornerRadius": 13
+        },
+        {
+          "identity": "g_1",
+          "kind": "screen",
+          "rect": {
+            "x": 648,
+            "y": 16,
+            "w": 614,
+            "h": 346
+          },
+          "cornerRadius": 13
+        },
+        {
+          "identity": "host:sh_1",
+          "kind": "person",
+          "rect": {
+            "x": 34,
+            "y": 378,
+            "w": 578,
+            "h": 326
+          },
+          "plate": {
+            "x": 42,
+            "y": 668,
+            "w": 562,
+            "h": 28
+          },
+          "cornerRadius": 13
+        },
+        {
+          "identity": "g_1",
+          "kind": "person",
+          "rect": {
+            "x": 666,
+            "y": 378,
+            "w": 578,
+            "h": 326
+          },
+          "plate": {
+            "x": 674,
+            "y": 668,
+            "w": 562,
+            "h": 28
+          },
+          "cornerRadius": 13
+        }
+      ]
+    }
+  },
+  {
+    "name": "1280x720-two-screens-1-owner-away",
+    "canvas": {
+      "width": 1280,
+      "height": 720
+    },
+    "layout": "two-screens",
+    "people": ["g_1"],
+    "onStage": ["host:sh_1", "g_1"],
+    "screens": ["g_1", "host:sh_1"],
+    "plan": {
+      "tiles": [
+        {
+          "identity": "host:sh_1",
+          "kind": "screen",
+          "rect": {
+            "x": 16,
+            "y": 16,
+            "w": 614,
+            "h": 346
+          },
+          "cornerRadius": 13
+        },
+        {
+          "identity": "g_1",
+          "kind": "screen",
+          "rect": {
+            "x": 648,
+            "y": 16,
+            "w": 614,
+            "h": 346
+          },
+          "cornerRadius": 13
+        },
+        {
+          "identity": "g_1",
+          "kind": "person",
+          "rect": {
+            "x": 350,
+            "y": 378,
+            "w": 578,
+            "h": 326
+          },
+          "plate": {
+            "x": 358,
+            "y": 668,
+            "w": 562,
+            "h": 28
+          },
+          "cornerRadius": 13
+        }
+      ]
+    }
   }
 ]

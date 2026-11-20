@@ -113,6 +113,17 @@ it, as on Screen + people); everyone on stage in one row under them.
 - **9:16 output (1080×1920):** the screens stack, each 1030×580, and the
   people take a grid under them: 1 or 2 in one row, 3 or 4 in two columns,
   5 or 6 in three.
+- **Each screen over its owner's camera** (fix, 2026-11-20, after the third
+  live test: "My screen recording is above the guest and the guest's screen
+  recording is above me"). The screens were drawn in the order they went up
+  (`screens`) and the cameras in stage order (`onStage`), so a guest who
+  shared first had their screen over the host. Now the screen of whoever
+  stands first on the stage is on the left (on top on a portrait canvas),
+  in both models (`screensByOwner`), ordered by `onStage` so a screen keeps
+  its side while its owner is away from the row. The wire is unchanged:
+  `screen` is still the first one put up. With two people each screen is
+  exactly over its owner; with more, the screens are in the same order as
+  their owners in the row.
 - **1 screen** (one of the two has no fresh frame for 5 s, or the host
   ticked only one): Screen + people, with that screen. **0 screens:** Side
   by side. A stage change waits 1 s for a named screen's first frame before

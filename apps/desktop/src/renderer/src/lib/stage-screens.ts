@@ -30,6 +30,24 @@ export function stageScreens(stage: {
   return named
 }
 
+/**
+ * Two screens, each on its owner's side: the screen of whoever stands first
+ * in `order` (the stage's people) comes first, so the two-screens layout
+ * draws it on the left, above that person's camera (on top on a portrait
+ * canvas). A stage names its screens in the order they went up, which says
+ * nothing about where their owners stand: a guest who shared first had their
+ * screen over the host's camera. An owner `order` does not name leaves the
+ * pair as it came. The program page orders them the same way (the web's
+ * `screensByOwner`).
+ */
+export function screensByOwner(screens: readonly string[], order: readonly string[]): string[] {
+  const [first, second] = screens
+  if (first === undefined || second === undefined) return [...screens]
+  const a = order.indexOf(first)
+  const b = order.indexOf(second)
+  return a >= 0 && b >= 0 && a > b ? [second, first] : [first, second]
+}
+
 /** A managed show can show two screens; a node show's runner draws one. */
 export function maxStageScreens(managed: boolean): number {
   return managed ? STAGE_MAX_SCREENS : 1
