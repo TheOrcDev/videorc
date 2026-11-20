@@ -31,7 +31,8 @@ describe('PageLoading', () => {
     for (const tab of EVERY_PAGE) {
       expect(pageLoadingLabel(tab, false)).toBe(`Loading ${workspaceTabLabel(tab)}…`)
     }
-    expect(pageLoadingLabel('assets', false)).toBe('Loading Assets…')
+    expect(pageLoadingLabel('assets', false)).toBe('Loading Images…')
+    expect(pageLoadingLabel('sounds', false)).toBe('Loading Sounds…')
     expect(pageLoadingLabel('ai', false)).toBe('Loading Sidekick…')
   })
 

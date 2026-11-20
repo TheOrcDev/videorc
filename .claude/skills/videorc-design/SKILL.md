@@ -160,19 +160,19 @@ for the owner, not a design choice.
   (2026-11-14, plan 235 D1: the status bar and the sidebar's Studio row carry
   the state and the clock), and a page's own actions sit
   in its body.
-- **Sidekick sits in the sidebar's Livestream group, under Destinations, on
-  ⌘9, and the Avatar page sits in Setup, between Captions and Output, on
-  ⌘6** (plan 239, owner 2026-11-15; Sidekick moved to ⌘8 on 2026-11-14, plan
-  235 D6 and D8, and from 2026-10-10 it sat second under Studio on ⌘9, plan
-  174 D6 and D8). Sidekick keeps Community, Reports, Clean cut and every
+- **Sidekick sits in the sidebar's Livestream group, last, on ⌘9, with the
+  Avatar page just above it on ⌘8** (owner 2026-11-20; Avatar moved from
+  Setup to Livestream on 2026-11-19; plan 239, plan 235 D6 and D8, plan 174
+  D6 and D8 before that). Sidekick keeps Community, Reports, Clean cut and every
   other feature of the helper, because the page sells Premium: never move
   one of them out of it. The character's settings (My avatars, the persona,
   the look, reactions, motion and the greeting lines) live on Avatar.
 - **The sidebar's way home is its big button, and its keys run in order**
   (2026-11-14, plan 235 D5 and D8). Studio is a 40 px slab of the chrome
-  primary's metal on every page, never Record's red; ⌘1–⌘9 open the rows top
-  to bottom, and ⌘0 opens the tenth, Library (plan 239 D6, owner
-  2026-11-15). The rows for Sidekick and Avatar wear plain glyphs,
+  primary's metal on every page, never Record's red. ⌘1–⌘9 open the nine
+  rows above the Assets group top to bottom, Guests included; Images is
+  ⇧⌘G, Sounds ⇧⌘S, Library ⌘0 and Settings ⌘, (owner 2026-11-20). The order
+  and the keys live in one place, `apps/desktop/src/shared/sidebar-pages.ts`. The rows for Sidekick and Avatar wear plain glyphs,
   `BuddyPageIcon` (Phosphor UserSound, plan 235 D7) and `AvatarPageIcon`
   (Phosphor Smiley, plan 239), like every other row.
 - **A click on a live chat row puts the message on stream**, and a click on
@@ -410,21 +410,26 @@ Everything except ⌘K uses the desktop scale.
   row, right above Session; a page's own actions sit in its body (a filter bar, a
   section header, or the PageHeader row). The toolbar never scrolls; only
   `PaneBody` does.
-- **Sidebar** (plan 174 D8, plan 235, plan 239).
+- **Sidebar** (plan 174 D8, plan 235, plan 239, owner 2026-11-20).
   - The top row holds the traffic lights and the ⌘K button.
   - Studio ⌘1 leads as a 40 px `chrome-fill` slab (the chrome primary's
     metal: silver in dark, black chrome in light) with a 20 px icon, which
     fills while Studio is the page you're on. The live dot and the clock
     show on it while a recording or livestream runs, in the slab's ink.
   - "Setup" labels the pages you configure between sessions: Sources ⌘2,
-    Scene ⌘3, Assets ⌘4, Captions ⌘5, Avatar ⌘6, Output ⌘7 (plan 239, owner
-    2026-11-15: the avatar is part of the picture).
-  - "Livestream" labels Destinations ⌘8 (the page that was Livestream) and
-    Sidekick ⌘9 (owner call). Library ⌘0 follows under no label: a group of
-    one row carries none. ⌘1–⌘9, then ⌘0, run down the rows in order (plan
-    239 D6, owner 2026-11-15).
-  - Settings (⌘,) sits in a bottom block above the account row. Health has
-    no row: the status bar's state is its door (D9).
+    Scene ⌘3, Captions ⌘4, Output ⌘5.
+  - "Livestream" labels Destinations ⌘6 (the page that was Livestream),
+    Guests ⌘7 (shown only with talk shows; it keeps ⌘7 while hidden, and the
+    key opens the page, which says what it needs), Avatar ⌘8 and Sidekick ⌘9.
+  - "Assets" labels Images ⇧⌘G (backgrounds, banners and takeovers: the
+    page that was Assets, id `assets`) and Sounds ⇧⌘S (the soundboard's
+    sounds), owner 2026-11-20.
+  - Library (⌘0) and Settings (⌘,) sit in a bottom block above the account
+    row. Health has no row: the status bar's state is its door (D9).
+  - The order and the keys live in `apps/desktop/src/shared/sidebar-pages.ts`
+    (a layout and its fixed keys; the digits run down the rest), which the
+    sidebar, ⌘K, Settings → Shortcuts, main's key routing and the macOS
+    View menu all read.
   - Section labels are `SectionLabel` (11 px / 600, tertiary). Rows are
     28 px, with 14 px text and 16 px icons.
   - On Windows the native title bar carries the app's name, so the sidebar

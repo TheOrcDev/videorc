@@ -1,11 +1,12 @@
 // ST4 (Settings rework): the single source of truth for keyboard shortcuts.
-// Consumers: the workspace nav digit map (consistency-tested), the Settings
-// "Shortcuts" reference table, the app menu's mirror (shared/app-menu-items),
-// and any surface that renders key hints. Add a binding HERE first — a chord
-// string hardcoded elsewhere is a bug. Plan 174 S1.2: bindings are Electron
+// Consumers: the Settings "Shortcuts" reference table, the app menu's mirror
+// (shared/app-menu-items), the shortcut recorder's refusals, and any surface
+// that renders key hints. Add a binding HERE first — a chord string hardcoded
+// elsewhere is a bug. The page keys are the exception: their order and map
+// live in shared/sidebar-pages, and the Navigation rows are built from it. Plan 174 S1.2: bindings are Electron
 // accelerators, printed per platform by ShortcutKeys.
 
-import { parseAccelerator } from '@/lib/accelerator'
+import { PAGE_KEYS, SIDEBAR_PAGE_LABELS, pageKeyAccelerator } from '../../../shared/sidebar-pages'
 import { WINDOW_NAMES } from '../../../shared/window-names'
 import { RECORD_SHORTCUT_LABEL } from './go-live-copy'
 
@@ -21,19 +22,18 @@ export interface ShortcutEntry {
   group: 'Navigation' | 'Studio' | 'Windows' | 'Stream Manager' | 'Appearance'
 }
 
+/** One row per page with a key; a page without one (Sidekick today) has no row. */
+const NAV_SHORTCUTS = PAGE_KEYS.map(({ key, page }) => ({
+  id: `nav-${page}` as const,
+  accelerators: [pageKeyAccelerator(key)] as const,
+  label: SIDEBAR_PAGE_LABELS[page],
+  group: 'Navigation' as const
+}))
+
 const SHORTCUT_LIST = [
-  // Navigation — mirrors WORKSPACE_SHORTCUTS (vitest enforces consistency).
-  { id: 'nav-studio', accelerators: ['CmdOrCtrl+1'], label: 'Studio', group: 'Navigation' },
-  { id: 'nav-sources', accelerators: ['CmdOrCtrl+2'], label: 'Sources', group: 'Navigation' },
-  { id: 'nav-layouts', accelerators: ['CmdOrCtrl+3'], label: 'Scene', group: 'Navigation' },
-  { id: 'nav-assets', accelerators: ['CmdOrCtrl+4'], label: 'Assets', group: 'Navigation' },
-  { id: 'nav-captions', accelerators: ['CmdOrCtrl+5'], label: 'Captions', group: 'Navigation' },
-  { id: 'nav-recording', accelerators: ['CmdOrCtrl+6'], label: 'Output', group: 'Navigation' },
-  { id: 'nav-live', accelerators: ['CmdOrCtrl+7'], label: 'Destinations', group: 'Navigation' },
-  { id: 'nav-avatar', accelerators: ['CmdOrCtrl+8'], label: 'Avatar', group: 'Navigation' },
-  { id: 'nav-ai', accelerators: ['CmdOrCtrl+9'], label: 'Sidekick', group: 'Navigation' },
-  { id: 'nav-library', accelerators: ['CmdOrCtrl+0'], label: 'Library', group: 'Navigation' },
-  { id: 'nav-settings', accelerators: ['CmdOrCtrl+,'], label: 'Settings', group: 'Navigation' },
+  // Navigation: the page keys, in sidebar order, from shared/sidebar-pages
+  // (the one home of the order and the key map, owner 2026-11-20).
+  ...NAV_SHORTCUTS,
   // ⌘K is "Search" everywhere it is named (plan 174 A-13, docs/ui-copy.md).
   { id: 'search', accelerators: ['CmdOrCtrl+K'], label: 'Search', group: 'Navigation' },
   // The list behind the bell (plan 250, D10), from anywhere in the window.
@@ -212,9 +212,7 @@ export function shortcutsByGroup(): Map<ShortcutEntry['group'], ShortcutEntry[]>
   return groups
 }
 
-/** Navigation key for a workspace tab id ("nav-<tab>" convention). */
-export function navShortcutDigit(tab: string): string | undefined {
-  const entry = SHORTCUTS.find((candidate) => candidate.id === `nav-${tab}`)
-  const digit = entry ? parseAccelerator(entry.accelerators[0], 'darwin')?.key : undefined
-  return digit && (/^[0-9]$/.test(digit) || digit === ',') ? digit : undefined
+/** A workspace page's shortcut, by the "nav-<tab>" convention, or undefined. */
+export function navShortcutAccelerator(tab: string): string | undefined {
+  return SHORTCUTS.find((candidate) => candidate.id === `nav-${tab}`)?.accelerators[0]
 }

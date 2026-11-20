@@ -176,6 +176,7 @@ export {
   Pulse as HealthIcon
 } from '@phosphor-icons/react'
 export { AvatarPageIcon } from './avatar-page-icon'
+export { SoundsPageIcon } from './sounds-page-icon'
 export { NotificationsIcon } from './notifications-icon'
 /**
  * Status and feedback. One glyph per meaning: a triangle warns, a circle

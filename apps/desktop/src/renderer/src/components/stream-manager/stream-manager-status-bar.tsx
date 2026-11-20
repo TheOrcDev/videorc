@@ -160,7 +160,7 @@ export function providerCapabilityTitle(
 }
 
 /**
- * The Banners menu's items (plan 186 S7), in Assets order: one check per
+ * The Banners menu's items (plan 186 S7), in Images order: one check per
  * banner (checked while it shows), then Hide all banners. Each choice asks
  * Studio, and the check moves when the list comes back, so the menu stays
  * open for the next one. Before the list loads, and with none, one line says
@@ -176,7 +176,7 @@ function BannerMenuItems({
   if (!banners?.length) {
     return (
       <DropdownMenuItem disabled>
-        {banners ? 'Import banners in Assets' : 'Loading banners…'}
+        {banners ? 'Import banners in Images' : 'Loading banners…'}
       </DropdownMenuItem>
     )
   }

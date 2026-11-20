@@ -647,15 +647,15 @@ export function RetroTakeoverSection(): ReactElement {
   return (
     <PanelSection>
       <LcdPanel>
-        {/* The one title left (plan 235 D3), with the cog to Assets (D4). */}
+        {/* The one title left (plan 235 D3), with the cog to Images (D4). */}
         <LcdPanelHeader
-          action={<LcdPanelCog label="Open Assets" onOpen={() => setActive('assets')} />}
+          action={<LcdPanelCog label="Open Images" onOpen={() => setActive('assets')} />}
           title="Takeover"
         />
         {ready.length === 0 ? (
           <LcdPanelNavRow
             label="None yet"
-            value="Add in Assets"
+            value="Add in Images"
             onNavigate={() => setActive('assets')}
           />
         ) : (

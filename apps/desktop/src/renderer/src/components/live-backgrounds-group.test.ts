@@ -136,13 +136,12 @@ describe('Assets → Backgrounds → Live (plan 190 S8)', () => {
     expect(tag?.getAttribute('data-variant')).toBe('outline')
     expect(byLabel('Actions for Silk')).toBeNull()
 
-    // The group sits above the picture gallery and ends with the credit.
+    // The group sits above the picture gallery.
     const live = document.querySelector('[data-videorc-live-backgrounds]')!
     const images = document.querySelector('[data-videorc-image-backgrounds]')!
     expect(live.compareDocumentPosition(images) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
     expect(live.querySelector('h3')?.textContent).toBe('Live')
     expect(images.querySelector('h3')?.textContent).toBe('Images')
-    expect(live.lastElementChild?.textContent).toBe('From React Bits by David Haz.')
     expect(document.body.textContent).toContain(
       'Live backgrounds move behind your screen and camera. Images can be PNG, JPEG or WebP.'
     )

@@ -36,7 +36,7 @@ export default function SoundsPopoverBody({
       {!board ? (
         <p className="text-xs text-muted-foreground">Loading sounds…</p>
       ) : board.sounds.length === 0 ? (
-        <p className="text-xs text-muted-foreground">No sounds yet. Add sounds in Assets.</p>
+        <p className="text-xs text-muted-foreground">No sounds yet. Add them in Sounds.</p>
       ) : (
         <SoundPadBoard
           columns={4}

@@ -10,8 +10,9 @@
 // Chromium handles the editing keys itself there, and every app shortcut
 // already lives in the renderer and main's before-input-event.
 //
-// The page and window items repeat chords the app already handles (⌘1–⌘9,
-// ⌘,, ⌘P, ⇧⌘N, ⇧⌘J, ⇧⌘C); every other accelerator is a standard macOS one.
+// The page and window items repeat chords the app already handles (the page
+// keys of shared/sidebar-pages, ⌘P, ⇧⌘N, ⇧⌘J, ⇧⌘C); every other accelerator
+// is a standard macOS one.
 // The page and main's before-input-event see a chord before the menu does and
 // preventDefault the ones they handle, so nothing fires twice: the menu acts
 // on a click, and on a chord pressed where nothing else listens (the Preview
@@ -22,13 +23,13 @@ import { Menu, type MenuItemConstructorOptions } from 'electron'
 import {
   APP_MENU_PAGE_GROUPS,
   APP_MENU_WINDOWS,
-  type AppMenuPageKey,
   type AppMenuWindowId
 } from '../shared/app-menu-items'
+import { pageKeyAccelerator, type PageKey } from '../shared/sidebar-pages'
 
 export interface AppMenuActions {
-  /** Brings the main window up on a page: the key ⌘1–⌘9 or ⌘, forwards. */
-  showPage: (key: AppMenuPageKey) => void
+  /** Brings the main window up on a page: the page key main forwards. */
+  showPage: (key: PageKey) => void
   /** Opens the window, or closes it when it is open: what its shortcut does. */
   toggleWindow: (id: AppMenuWindowId) => void
   openReleaseNotes: () => void
@@ -72,7 +73,7 @@ export function appMenuTemplate(options: AppMenuOptions): MenuItemConstructorOpt
     ...group.map(
       (page): MenuItemConstructorOptions => ({
         label: page.label,
-        accelerator: `CmdOrCtrl+${page.key}`,
+        accelerator: pageKeyAccelerator(page.key),
         click: () => actions.showPage(page.key)
       })
     )
@@ -91,7 +92,11 @@ export function appMenuTemplate(options: AppMenuOptions): MenuItemConstructorOpt
       submenu: [
         { role: 'about' },
         separator(),
-        { label: 'Settings…', accelerator: 'CmdOrCtrl+,', click: () => actions.showPage(',') },
+        {
+          label: 'Settings…',
+          accelerator: pageKeyAccelerator(','),
+          click: () => actions.showPage(',')
+        },
         separator(),
         { role: 'services' },
         separator(),

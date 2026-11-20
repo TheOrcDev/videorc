@@ -223,7 +223,10 @@ const CAPITALIZED_NAMES = new Set([
   'Scene',
   // Plan 231 D8: Studio's Scenes section, the home of scenes ("Open Scenes").
   'Scenes',
+  // The sidebar group and its two pages (owner 2026-11-20): "Open Images".
   'Assets',
+  'Images',
+  'Sounds',
   // The sidebar group; its page is Destinations (plan 235 D6).
   'Livestream',
   'Destinations',

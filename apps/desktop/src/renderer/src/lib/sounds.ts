@@ -146,7 +146,7 @@ export function soundsSectionDescription(count: number | null): string {
   return count === null ? `Sounds ${rules}` : `${plural(count, 'sound')} · ${rules}`
 }
 
-/** A sound's length in Assets: "1.6 s", "30.0 s". */
+/** A sound's length in Sounds: "1.6 s", "30.0 s". */
 export function formatSoundDuration(durationMs: number): string {
   return `${(Math.max(0, durationMs) / 1000).toFixed(1)} s`
 }

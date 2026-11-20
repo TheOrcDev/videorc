@@ -152,7 +152,7 @@ describe('Import from OBS', () => {
   it('names the background the import replaces, then applies exactly that', async () => {
     await render({ obsDiscover: vi.fn(async () => DISCOVERY), obsRead: vi.fn(async () => SETUP) })
     // A fresh profile has no empty slot: the last built-in preset is named.
-    expect(text()).toContain('Becomes the scene background, in place of Focus in Assets.')
+    expect(text()).toContain('Becomes the scene background, in place of Focus in Images.')
     const importButton = button('Import setup')!
     expect(importButton.querySelectorAll('svg')).toHaveLength(1)
 

@@ -65,7 +65,7 @@ export function ScreenSizeField({
       />
       <p className="text-xs text-muted-foreground">
         How much of the canvas your screen fills. The background shows around it. This is the
-        background&apos;s Visibility in Assets.
+        background&apos;s Visibility in Images.
       </p>
     </div>
   )

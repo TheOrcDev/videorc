@@ -61,7 +61,6 @@ import {
   LiveBackgroundsGroup
 } from '@/components/live-backgrounds-group'
 import { SectionLabel } from '@/components/section-label'
-import { SoundsSection } from '@/components/sounds-section'
 import {
   IN_USE_RING,
   InUseChip,
@@ -207,7 +206,7 @@ export function AssetsTab(): ReactElement {
     <PageStack className="min-h-full">
       <PageHeader
         description="Backgrounds for your scenes, banners for your picture and takeovers for the output. Click a background to apply it, then tune it with Adjust style on its tile."
-        title="Assets"
+        title="Images"
       />
 
       <PanelSection
@@ -338,8 +337,6 @@ export function AssetsTab(): ReactElement {
       />
       <BannersSection />
       <TakeoverScreensSection />
-      {/* Plan 189: the soundboard's sounds, after the pictures. */}
-      <SoundsSection />
       <BackgroundReplaceDialog
         pending={pendingReplace}
         registry={registry}

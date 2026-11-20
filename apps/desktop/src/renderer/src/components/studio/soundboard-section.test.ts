@@ -288,7 +288,7 @@ describe('Studio → Soundboard (plan 189 S6)', () => {
     expect(board().press).not.toHaveBeenCalled()
   })
 
-  it('sends the streamer to Assets when the board is empty, never before it loads', async () => {
+  it('sends the streamer to Sounds when the board is empty, never before it loads', async () => {
     setBoard({ sounds: [], loaded: false })
     await render()
     expect(container.textContent).toContain('Loading sounds…')
@@ -297,9 +297,9 @@ describe('Studio → Soundboard (plan 189 S6)', () => {
     await render()
     expect(container.textContent).toContain('No sounds yet.')
     const add = [...container.querySelectorAll('button')].find(
-      (button) => button.textContent === 'Add in Assets'
+      (button) => button.textContent === 'Add in Sounds'
     )!
     await act(async () => add.click())
-    expect(nav.setActive).toHaveBeenCalledWith('assets')
+    expect(nav.setActive).toHaveBeenCalledWith('sounds')
   })
 })

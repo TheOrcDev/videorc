@@ -1,52 +1,58 @@
 import { describe, expect, it } from 'vitest'
 
-import { WORKSPACE_SHORTCUTS } from '@/components/workspace-nav'
+import { WORKSPACE_SHORTCUTS, pageShortcutFor, workspaceTabLabel } from '@/components/workspace-nav'
 
 import { parseAccelerator } from '@/lib/accelerator'
 
-import { SHORTCUTS, navShortcutDigit, shortcutsByGroup } from './shortcuts'
+import { SHORTCUTS, navShortcutAccelerator, shortcutsByGroup } from './shortcuts'
 
 describe('SHORTCUTS registry', () => {
-  // ST4: the registry is the source of truth — the nav digit map must agree
-  // with it exactly, or the Settings reference table lies.
-  it('matches the workspace nav digit map one-to-one', () => {
-    for (const { digit, tab } of WORKSPACE_SHORTCUTS) {
-      expect(navShortcutDigit(tab), `nav-${tab}`).toBe(digit)
-    }
-    const navEntries = SHORTCUTS.filter((entry) =>
-      entry.id.startsWith('nav-') && entry.id !== 'nav-settings'
-        ? true
-        : entry.id.startsWith('nav-')
+  // ST4: the registry's Navigation rows are built from the page key map, so
+  // the Settings reference table can never disagree with the sidebar.
+  it('matches the workspace page shortcut map one-to-one, in sidebar order', () => {
+    const navEntries = SHORTCUTS.filter((entry) => entry.id.startsWith('nav-'))
+    expect(navEntries.map((entry) => entry.id)).toEqual(
+      WORKSPACE_SHORTCUTS.map(({ tab }) => `nav-${tab}`)
     )
-    expect(
-      navEntries.filter((entry) => /^CmdOrCtrl\+([0-9]|,)$/.test(entry.accelerators[0])).length
-    ).toBe(WORKSPACE_SHORTCUTS.length)
+    for (const { tab } of WORKSPACE_SHORTCUTS) {
+      expect(navShortcutAccelerator(tab), `nav-${tab}`).toBe(pageShortcutFor(tab))
+      expect(SHORTCUTS.find((entry) => entry.id === `nav-${tab}`)?.label).toBe(
+        workspaceTabLabel(tab)
+      )
+    }
   })
 
-  // Plan 235 D6 and D8: the keys run down the sidebar; plan 239 D6: Library,
-  // the tenth page, takes ⌘0; Avatar sits in Livestream, above Sidekick.
-  it('labels ⌘6 Output, ⌘7 Destinations, ⌘8 Avatar, ⌘9 Sidekick and ⌘0 Library', () => {
-    expect(SHORTCUTS.find((entry) => entry.id === 'nav-recording')).toMatchObject({
-      accelerators: ['CmdOrCtrl+6'],
-      label: 'Output'
+  // Owner 2026-11-20: ⌘1–⌘9 down the rows above Assets; Images ⇧⌘G, Sounds
+  // ⇧⌘S, Library ⌘0, Settings ⌘,.
+  it('labels ⌘7 Guests, ⌘9 Sidekick, ⇧⌘G Images, ⇧⌘S Sounds, ⌘0 Library and ⌘, Settings', () => {
+    const row = (id: string): unknown => SHORTCUTS.find((entry) => entry.id === id)
+    expect(row('nav-guests')).toMatchObject({ accelerators: ['CmdOrCtrl+7'], label: 'Guests' })
+    expect(row('nav-ai')).toMatchObject({ accelerators: ['CmdOrCtrl+9'], label: 'Sidekick' })
+    expect(row('nav-assets')).toMatchObject({
+      accelerators: ['CmdOrCtrl+Shift+G'],
+      label: 'Images'
     })
-    expect(SHORTCUTS.find((entry) => entry.id === 'nav-live')).toMatchObject({
-      accelerators: ['CmdOrCtrl+7'],
-      label: 'Destinations'
+    expect(row('nav-sounds')).toMatchObject({
+      accelerators: ['CmdOrCtrl+Shift+S'],
+      label: 'Sounds'
     })
-    expect(SHORTCUTS.find((entry) => entry.id === 'nav-avatar')).toMatchObject({
-      accelerators: ['CmdOrCtrl+8'],
-      label: 'Avatar'
-    })
-    expect(SHORTCUTS.find((entry) => entry.id === 'nav-ai')).toMatchObject({
-      accelerators: ['CmdOrCtrl+9'],
-      label: 'Sidekick'
-    })
-    expect(SHORTCUTS.find((entry) => entry.id === 'nav-library')).toMatchObject({
-      accelerators: ['CmdOrCtrl+0'],
-      label: 'Library'
-    })
-    expect(navShortcutDigit('library')).toBe('0')
+    expect(row('nav-library')).toMatchObject({ accelerators: ['CmdOrCtrl+0'], label: 'Library' })
+    expect(row('nav-settings')).toMatchObject({ accelerators: ['CmdOrCtrl+,'], label: 'Settings' })
+  })
+
+  // No other chord the registry knows (main window, Stream Manager, the
+  // windows) is a page key.
+  it('gives every page key a chord nothing else uses', () => {
+    for (const { tab } of WORKSPACE_SHORTCUTS) {
+      const accelerator = pageShortcutFor(tab)
+      const owners = SHORTCUTS.filter((entry) =>
+        entry.accelerators.some((key) => key === accelerator)
+      )
+      expect(
+        owners.map((entry) => entry.id),
+        tab
+      ).toEqual([`nav-${tab}`])
+    }
   })
 
   it('has unique ids and accelerators that parse on every platform', () => {

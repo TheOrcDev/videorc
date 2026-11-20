@@ -470,14 +470,14 @@ describe('mapping table rows', () => {
       const result = map(image(managed), { slotId: 'bg-10', replaces: 'Focus' })
       expect(result.backgroundSlotId).toBe('bg-10')
       expect(reportNotes(result, 'approximated')).toContain(
-        'BG: Becomes the scene background, in place of Focus in Assets.'
+        'BG: Becomes the scene background, in place of Focus in Images.'
       )
     })
 
     it('says when it goes into an empty slot', () => {
       const result = map(image(managed), { slotId: 'bg-04', replaces: null })
       expect(reportNotes(result, 'approximated')).toContain(
-        'BG: Becomes the scene background, in an empty slot in Assets.'
+        'BG: Becomes the scene background, in an empty slot in Images.'
       )
     })
 
@@ -486,7 +486,7 @@ describe('mapping table rows', () => {
       expect(noSlot.backgroundAsset).toBeUndefined()
       expect(noSlot.backgroundSlotId).toBeUndefined()
       expect(reportNotes(noSlot, 'skipped')).toContain(
-        'BG: Assets has no slot for it. Import it from Assets.'
+        'BG: Images has no slot for it. Import it from Images.'
       )
 
       const notCopied = map(image(), { slotId: 'bg-10', replaces: 'Focus' })

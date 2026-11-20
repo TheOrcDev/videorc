@@ -18,7 +18,7 @@ import { sessionOwnsTransport } from '../../../../shared/capture-state'
 
 /**
  * Studio → Soundboard (plan 189 S6): the pads, under Scenes. Studio plays,
- * Assets → Sounds manages and Sources → Sounds holds the level (D1). A pad
+ * the Sounds page manages and Sources → Sounds holds the level (D1). A pad
  * plays on its own mode; its key, 1 to 9, presses it while Studio is the page
  * in front. Nothing toasts when a sound plays: the pad's ring and progress
  * are the confirmation.
@@ -75,8 +75,8 @@ export function SoundboardSection(): ReactElement {
         <Empty className="py-6" data-videorc-sounds-empty="">
           <EmptyTitle>No sounds yet.</EmptyTitle>
           <EmptyContent>
-            <Button variant="outline" onClick={() => setActive('assets')}>
-              Add in Assets
+            <Button variant="outline" onClick={() => setActive('sounds')}>
+              Add in Sounds
             </Button>
           </EmptyContent>
         </Empty>

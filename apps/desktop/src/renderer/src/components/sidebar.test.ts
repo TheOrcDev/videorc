@@ -103,44 +103,72 @@ function rowOf(markup: string, trigger: string): string {
 }
 
 describe('sidebar zones (plan 174 D8, plan 235 D6, plan 239)', () => {
-  it('leads with Studio, then Setup, then Livestream (Destinations, Avatar and Sidekick) and Library, with Settings at the bottom', () => {
+  it('leads with Studio, then Setup, Livestream and Assets (Images and Sounds), with Library and Settings at the bottom', () => {
     const markup = renderSidebar()
     // Page ids and legacy trigger ids never change: Destinations is `streaming`.
     expect(triggers(markup)).toEqual([
       'studio',
       'sources',
       'layout',
-      'assets',
       'captions',
       'recording',
       'streaming',
       'avatar',
       'ai',
+      'assets',
+      'sounds',
       'library',
       'settings'
     ])
-    // Two labelled groups; the single rows carry no group label.
+    // Three labelled groups; the single rows carry no group label.
     const labels = [...markup.matchAll(/data-slot="section-label"[^>]*>([^<]*)</g)].map(
       (match) => match[1]
     )
-    expect(labels).toEqual(['Setup', 'Livestream'])
+    expect(labels).toEqual(['Setup', 'Livestream', 'Assets'])
+    expect(rowOf(markup, 'assets')).toContain('>Images<')
+    expect(rowOf(markup, 'sounds')).toContain('>Sounds<')
     expect(rowOf(markup, 'streaming')).toContain('>Destinations<')
     expect(rowOf(markup, 'avatar')).toContain('>Avatar<')
-    // Settings sits in the bottom block, after Library, above the account row.
+    // Owner 2026-11-20: Library sits in the bottom block, above Settings,
+    // above the account row.
     const bottom = markup.indexOf('data-testid="sidebar-bottom"')
-    expect(bottom).toBeGreaterThan(markup.indexOf('data-videorc-tab-trigger="library"'))
-    expect(markup.indexOf('data-videorc-tab-trigger="settings"')).toBeGreaterThan(bottom)
+    const library = markup.indexOf('data-videorc-tab-trigger="library"')
+    expect(library).toBeGreaterThan(bottom)
+    expect(markup.indexOf('data-videorc-tab-trigger="settings"')).toBeGreaterThan(library)
+    expect(markup).not.toContain('data-sidebar-zone="library"')
     expect(markup).not.toContain('data-videorc-tab-trigger="diagnostics"')
   })
 
-  // Plan 235 D8: the shortcuts run down the rows, ⌘1 to ⌘9; plan 239 D6:
-  // Library, the tenth page, takes ⌘0.
-  it('puts ⌘1–⌘9 on the rows top to bottom, then ⌘0 on Library', () => {
+  // Owner 2026-11-20: ⌘1–⌘9 run down the nine rows above Assets with no gap,
+  // Guests included (hidden here, so its ⌘7 shows no chip); Images ⇧⌘G,
+  // Sounds ⇧⌘S, Library ⌘0, Settings ⌘,.
+  it('puts ⌘1–⌘9 on the top rows, ⇧⌘G and ⇧⌘S on Images and Sounds, ⌘0 on Library and ⌘, on Settings', () => {
     const markup = renderSidebar({ platform: 'darwin' })
-    const keys = [...markup.matchAll(/aria-keyshortcuts="Meta\+(\d)"/g)].map((match) => match[1])
-    expect(keys).toEqual(['1', '2', '3', '4', '5', '6', '7', '8', '9', '0'])
-    expect(rowOf(markup, 'avatar')).toContain('aria-keyshortcuts="Meta+8"')
+    const keys = [...markup.matchAll(/aria-keyshortcuts="([^"]+)"/g)].map((match) => match[1])
+    expect(keys).toEqual([
+      'Meta+K',
+      'Meta+1',
+      'Meta+2',
+      'Meta+3',
+      'Meta+4',
+      'Meta+5',
+      'Meta+6',
+      'Meta+8',
+      'Meta+9',
+      'Shift+Meta+G',
+      'Shift+Meta+S',
+      'Meta+0',
+      'Meta+,'
+    ])
+    expect(rowOf(markup, 'ai')).toContain('aria-keyshortcuts="Meta+9"')
     expect(rowOf(markup, 'library')).toContain('aria-keyshortcuts="Meta+0"')
+    // The chips print the same keys.
+    expect(rowOf(markup, 'assets')).toContain('data-accelerator="CmdOrCtrl+Shift+G"')
+    expect(rowOf(markup, 'sounds')).toContain('data-accelerator="CmdOrCtrl+Shift+S"')
+    // Windows and Linux use Ctrl.
+    const win = renderSidebar({ platform: 'win32' })
+    expect(rowOf(win, 'sounds')).toContain('aria-keyshortcuts="Control+Shift+S"')
+    expect(rowOf(win, 'sounds')).toContain('>Ctrl+Shift+S<')
   })
 
   // Plan 235 D7: a plain glyph like its neighbours, never the Buddy artwork,
@@ -233,8 +261,8 @@ describe('sidebar update chip (plan 174 A-25)', () => {
 })
 
 // 0.31.1: Guests is its own page under Livestream, between Destinations and
-// Sidekick, shown only with talk shows (the rule ⌘K follows too). It has no
-// digit, so every other row keeps its key.
+// Avatar, shown only with talk shows (the rule ⌘K follows too). It keeps ⌘7
+// whether or not it shows, so every row keeps its key (owner 2026-11-20).
 describe('the Guests row', () => {
   const triggers = (html: string): string[] =>
     [...html.matchAll(/data-videorc-tab-trigger="([a-z]+)"/g)].map((match) => match[1])
@@ -252,6 +280,14 @@ describe('the Guests row', () => {
       'guests',
       'avatar'
     ])
+  })
+
+  it('wears ⌘7, between Destinations ⌘6 and Avatar ⌘8', () => {
+    cloud.cloudStatus = { allowance: { enabled: true, talkShows: true } }
+    const markup = renderSidebar({ platform: 'darwin' })
+    expect(rowOf(markup, 'guests')).toContain('aria-keyshortcuts="Meta+7"')
+    expect(rowOf(markup, 'streaming')).toContain('aria-keyshortcuts="Meta+6"')
+    expect(rowOf(markup, 'avatar')).toContain('aria-keyshortcuts="Meta+8"')
   })
 
   it('stays while a room is open, even without the allowance', () => {

@@ -661,7 +661,7 @@ export function CohostSessionRow({ look = 'default' }: { look?: StudioLook }): R
 }
 
 /**
- * The takeover on-air switch (its ONE home: the Assets grid manages images,
+ * The takeover on-air switch (its ONE home: the Images grid manages images,
  * this flips them). Live-safe: activation only needs the backend socket, so it
  * works mid-session; a takeover replaces the output regardless of scene.
  */
@@ -673,11 +673,11 @@ export function TakeoverSection(): ReactElement {
 
   return (
     // The one inspector title left (plan 235 D3): the buttons are only
-    // takeover names ("Intro", "BRB"). Its way to Assets is the inspector's
+    // takeover names ("Intro", "BRB"). Its way to Images is the inspector's
     // one cog (D4).
     <PanelSection
       title="Takeover"
-      action={<OpenPageCog label="Open Assets" onOpen={() => setActive('assets')} />}
+      action={<OpenPageCog label="Open Images" onOpen={() => setActive('assets')} />}
     >
       {ready.length === 0 ? (
         <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
@@ -688,7 +688,7 @@ export function TakeoverSection(): ReactElement {
             type="button"
             onClick={() => setActive('assets')}
           >
-            Add in Assets
+            Add in Images
           </button>
         </div>
       ) : (
