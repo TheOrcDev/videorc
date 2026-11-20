@@ -202,7 +202,7 @@ export const WINDOWS_D3D11_REQUIRED_RUST_TESTS = Object.freeze({
     'windows_d3d11_session::tests::the_preview_draws_the_program_and_each_encoded_leg_keeps_its_plan',
     'windows_d3d11_session::tests::windows_banner_layers_sit_between_scene_and_captions',
     'windows_d3d11_session::tests::windows_d3d11_accepts_scaled_split_outputs_and_screen_camera_upload',
-    'windows_d3d11_session::tests::windows_d3d11_auto_falls_back_for_unqualified_2k_output',
+    'windows_d3d11_session::tests::windows_d3d11_auto_falls_back_past_level_5_1',
     'windows_d3d11_session::tests::windows_d3d11_auto_names_layout_and_window_fallbacks',
     'windows_d3d11_session::tests::windows_d3d11_buddy_bubble_sits_above_the_head_like_cpu_and_metal',
     'windows_d3d11_session::tests::windows_d3d11_buddy_sprite_clips_at_the_canvas_edge_instead_of_squashing',
@@ -224,6 +224,7 @@ export const WINDOWS_D3D11_REQUIRED_RUST_TESTS = Object.freeze({
     'windows_d3d11_session::tests::windows_d3d11_sessions_size_deep_render_pools',
     'windows_d3d11_session::tests::windows_d3d11_split_session_assigns_record_and_stream_roles',
     'windows_d3d11_session::tests::windows_d3d11_supported_auto_session_gets_generation_roles',
+    'windows_d3d11_session::tests::windows_d3d11_takes_every_level_5_1_shipping_profile',
     'windows_d3d11_session::tests::windows_d3d11_ticket_source_treats_every_stopped_pump_as_terminal',
     'windows_d3d11_session::tests::windows_source_presenter_liveness_distinguishes_unavailable_inputs_none_and_takeover'
   ])
