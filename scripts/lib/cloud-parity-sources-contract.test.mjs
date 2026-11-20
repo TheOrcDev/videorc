@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import test from 'node:test'
 import {
   FROST_RGB,
@@ -21,6 +22,23 @@ test('classifies the fixture sources, frost and the plain ground', () => {
   assert.equal(classifySource(FROST_RGB), 'frost')
   assert.equal(classifySource(STAGE_GROUND_RGB), 'ground')
   assert.equal(classifySource([250, 250, 0]), null)
+})
+
+test("a receiver's hidden still reads as frost at its centre, at every landscape size", () => {
+  const fixture = JSON.parse(
+    readFileSync(
+      new URL('../../protocol-fixtures/hidden-screen-still.json', import.meta.url),
+      'utf8'
+    )
+  )
+  for (const { width, height, samples } of fixture.stills) {
+    if (width < height || height < 100) continue
+    const centre = samples.find(
+      ([x, y]) => x === Math.floor(width / 2) && y === Math.floor(height / 2)
+    )
+    assert.ok(centre, `${width}x${height} has a centre sample`)
+    assert.equal(classifySource(centre.slice(2)), 'frost', `${width}x${height}`)
+  }
 })
 
 test('ring points stay inside the margin band', () => {

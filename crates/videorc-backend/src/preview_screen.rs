@@ -47,7 +47,8 @@ use crate::screen_capture::{
     parse_windows_dxgi_output_index,
 };
 use crate::screen_privacy::{
-    ScreenFrameAdmission, ScreenPrivacyCursor, ScreenPrivacyGate, admit_screen_frame, frost_bgra,
+    ScreenFrameAdmission, ScreenPrivacyCursor, ScreenPrivacyGate, admit_screen_frame,
+    hidden_still_bgra,
 };
 use crate::source_registry::{
     SourceConsumerReason, SourceIdentityConfidence, SourceKey, SourceKind,
@@ -1242,7 +1243,7 @@ fn publish_gated_bgra_frame(
             guard.frame_store.checkout_overwrite_buffer(frame_len)
         }
         ScreenFrameAdmission::Frost => {
-            let still = frost_bgra(width, height, Some(&bytes));
+            let still = hidden_still_bgra(width, height);
             publish_cpu_still(
                 guard,
                 sequence,
@@ -1317,37 +1318,6 @@ fn publish_cpu_still(
     guard.latest_frame_generation = generation;
 }
 
-/// The live pixels of a stored frame: its bytes, or on macOS a readback of
-/// its retained surface when the capture skipped the CPU copy.
-fn stored_frame_pixels(frame: &FrameHandle<PreviewScreenPixelFormat>) -> Option<Cow<'_, [u8]>> {
-    let frame_len = frame.width as usize * frame.height as usize * 4;
-    if frame.width > 0 && frame.height > 0 && frame.bytes.len() >= frame_len {
-        return Some(Cow::Borrowed(&frame.bytes[..frame_len]));
-    }
-    #[cfg(target_os = "macos")]
-    {
-        if let Some(surface) = frame.source_iosurface.as_ref()
-            && let Some(bytes) = crate::screen_privacy::macos::read_bgra_from_iosurface(
-                surface,
-                frame.width,
-                frame.height,
-            )
-        {
-            return Some(Cow::Owned(bytes));
-        }
-        if let Some(pixel_buffer) = frame.source_pixel_buffer.as_ref()
-            && let Some(bytes) = crate::screen_privacy::macos::read_bgra_from_pixel_buffer(
-                pixel_buffer,
-                frame.width,
-                frame.height,
-            )
-        {
-            return Some(Cow::Owned(bytes));
-        }
-    }
-    None
-}
-
 /// The hide RPC's synchronous half for the CPU store: frost whatever is
 /// published now, so a static screen (no new frame coming) can't keep its
 /// live picture in the store. The capture's next frame then holds. Returns
@@ -1366,10 +1336,7 @@ fn frost_cpu_store_now(guard: &mut PreviewScreenShared) -> bool {
         return false;
     }
     let (width, height) = (frame.width, frame.height);
-    let still = {
-        let pixels = stored_frame_pixels(&frame);
-        frost_bgra(width, height, pixels.as_deref())
-    };
+    let still = hidden_still_bgra(width, height);
     guard.frames_captured = guard.frames_captured.saturating_add(1);
     let sequence = guard.frames_captured;
     // The still carries the CURRENT capture generation, not the covered
@@ -1477,7 +1444,7 @@ fn frost_d3d11_texture_into_store(
             &still.bytes,
         )
         .map(|texture| (still.width, still.height, texture, None)),
-        None => crate::screen_privacy::d3d11::frost_texture(texture)
+        None => crate::screen_privacy::d3d11::still_texture(texture)
             .map(|(width, height, still, frosted)| (width, height, still, Some(frosted))),
     };
     match built {
@@ -8270,19 +8237,7 @@ mod macos {
                 guard.latest_frame_generation = generation;
             }
             ScreenFrameAdmission::Frost => {
-                let still = {
-                    let pixels: Option<Cow<'_, [u8]>> = if bytes.len() >= frame_bytes {
-                        Some(Cow::Borrowed(&bytes[..frame_bytes]))
-                    } else {
-                        crate::screen_privacy::macos::read_bgra_from_pixel_buffer(
-                            &crate::frame_store::RetainedPixelBuffer::new(pixel_buffer.clone()),
-                            width,
-                            height,
-                        )
-                        .map(Cow::Owned)
-                    };
-                    frost_bgra(width, height, pixels.as_deref())
-                };
+                let still = hidden_still_bgra(width, height);
                 publish_cpu_still(&mut guard, sequence, width, height, still, now, generation);
                 hold_live_frame(
                     &mut guard,
@@ -8875,7 +8830,7 @@ mod tests {
     const PRIVACY_W: u32 = 64;
     const PRIVACY_H: u32 = 36;
 
-    /// Vertical stripes two pixels wide: structure the frost removes.
+    /// Vertical stripes two pixels wide: a live picture the still never shows.
     fn privacy_stripes(phase: usize) -> Vec<u8> {
         let mut bytes = vec![0_u8; (PRIVACY_W * PRIVACY_H * 4) as usize];
         for (index, px) in bytes.chunks_exact_mut(4).enumerate() {
@@ -8895,29 +8850,15 @@ mod tests {
         vec![0xff; (PRIVACY_W * PRIVACY_H * 4) as usize]
     }
 
-    /// Mid-grey with no stripe left, away from the mirrored borders: the
-    /// still, not a live frame. Every pixel is opaque.
-    fn assert_frosted_stripes(bytes: &[u8]) {
+    /// The hidden still at the frame's size, exactly: nothing of the live
+    /// stripes, every pixel opaque.
+    fn assert_hidden_still(bytes: &[u8]) {
         assert_eq!(bytes.len(), (PRIVACY_W * PRIVACY_H * 4) as usize);
         assert!(bytes.chunks_exact(4).all(|px| px[3] == 0xff));
-        for y in 0..PRIVACY_H as usize {
-            let row: Vec<&[u8]> = bytes
-                [y * PRIVACY_W as usize * 4..(y + 1) * PRIVACY_W as usize * 4]
-                .chunks_exact(4)
-                .collect();
-            for px in &row[8..PRIVACY_W as usize - 8] {
-                assert!(
-                    (100..=160).contains(&px[0]) && (100..=160).contains(&px[1]),
-                    "not the frost: {px:?}"
-                );
-            }
-            for pair in row[8..PRIVACY_W as usize - 8].windows(2) {
-                assert!(
-                    pair[0][0].abs_diff(pair[1][0]) <= 4,
-                    "a stripe edge survived"
-                );
-            }
-        }
+        assert!(
+            bytes == crate::screen_privacy::hidden_still_bgra(PRIVACY_W, PRIVACY_H).as_slice(),
+            "not the hidden still"
+        );
     }
 
     #[test]
@@ -8942,7 +8883,7 @@ mod tests {
         let still = shared.frame_store.latest().unwrap();
         assert_ne!(still.storage_identity(), live.storage_identity());
         assert!(still.sequence > live.sequence);
-        assert_frosted_stripes(&still.bytes);
+        assert_hidden_still(&still.bytes);
         #[cfg(target_os = "macos")]
         assert!(
             still.source_iosurface.is_some(),
@@ -8992,7 +8933,7 @@ mod tests {
         assert!(frost_cpu_store_now(&mut shared));
         let second = shared.frame_store.latest().unwrap();
         assert_ne!(second.storage_identity(), still.storage_identity());
-        assert_frosted_stripes(&second.bytes);
+        assert_hidden_still(&second.bytes);
         shared.frames_captured = 6;
         publish_gated_bgra_frame(
             &mut shared,
@@ -9027,7 +8968,7 @@ mod tests {
             Instant::now(),
         );
         let still = shared.frame_store.latest().unwrap();
-        assert_frosted_stripes(&still.bytes);
+        assert_hidden_still(&still.bytes);
         shared.frames_captured = 2;
         publish_gated_bgra_frame(
             &mut shared,
@@ -9081,7 +9022,7 @@ mod tests {
             Instant::now(),
         );
         let still = shared.frame_store.latest().unwrap();
-        assert_frosted_stripes(&still.bytes);
+        assert_hidden_still(&still.bytes);
         assert_eq!(shared.latest_frame_generation, 2);
         assert_eq!(shared.held_live.as_ref().unwrap().generation, 2);
         // One still per hide: the next frame holds.
@@ -9137,7 +9078,7 @@ mod tests {
         assert!(frost_cpu_store_now(&mut shared));
         let still = latest_frame_of_generation(&shared, 2)
             .expect("the still carries the current generation, so the switch cuts to it");
-        assert_frosted_stripes(&still.bytes);
+        assert_hidden_still(&still.bytes);
         assert_eq!(shared.latest_frame_generation, 2);
         assert!(latest_frame_of_generation(&shared, 1).is_none());
         assert_eq!(
@@ -9212,7 +9153,7 @@ mod tests {
             .try_latest_still_frame_result()
             .unwrap()
             .expect("the still");
-        assert_frosted_stripes(&still.bytes);
+        assert_hidden_still(&still.bytes);
         assert_eq!(
             source
                 .try_latest_frame_result()
@@ -9565,7 +9506,7 @@ mod tests {
             .hide(crate::protocol::ScreenPrivacyReason::You, "t".into());
         assert!(hold_screen_now(&state).await);
         let still = source.latest_frame_blocking().unwrap();
-        assert_frosted_stripes(&still.bytes);
+        assert_hidden_still(&still.bytes);
         assert!(test_publish_screen_bgra(&state, 3, privacy_white(), Instant::now()).await);
         assert_eq!(
             source.latest_frame_blocking().unwrap().storage_identity(),

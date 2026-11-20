@@ -2279,7 +2279,7 @@ async fn windows_source_render_edit_samples_glide_without_mutating_committed_pro
     assert!(!compositor.source_edit_is_current(&rendered));
 }
 
-/// Plan 210 S7: while the screen is hidden every leg carries the frosted
+/// Plan 210 S7: while the screen is hidden every leg carries the hidden
 /// still and never a live frame: the program (which Clips and the native
 /// preview read), the vertical aux leg (its own composition from the
 /// simulcast snapshot) and the Screen ISO leg, on CPU and on Metal. The
@@ -2488,12 +2488,16 @@ async fn hidden_screen_frost_reaches_every_leg() {
                 ("Screen ISO", iso_screen(&iso)),
             ] {
                 let mean = mean(&samples);
+                // The hidden still is a dark navy gradient (mean luma ~52);
+                // the live stripes average ~128 and white is 255.
                 assert!(
-                    (70.0..=190.0).contains(&mean),
-                    "{mode} tick {tick}: the {leg} does not carry the frost (mean luma {mean})"
+                    (35.0..=80.0).contains(&mean),
+                    "{mode} tick {tick}: the {leg} does not carry the hidden still (mean luma {mean})"
                 );
+                // The still's glass disc steps luma by up to ~30 at this
+                // size; the live stripes step by 255.
                 assert!(
-                    max_step(&samples) < 24,
+                    max_step(&samples) < 48,
                     "{mode} tick {tick}: live stripes on the {leg} while hidden"
                 );
                 assert!(

@@ -282,7 +282,7 @@ function tileTrack(
   cameraOff: boolean
   name: string
   cameraFrame?: TalkShowLocalMedia['cameraFrame']
-  /** The host's hidden screen: its frosted still (plan 210 D8 in a room). */
+  /** The host's hidden screen: the designed hidden still (hidden-still.ts). */
   still?: string
 } {
   const host = tile.identity === talkShow.hostIdentity
@@ -412,10 +412,10 @@ function StageTileView({
 }
 
 /**
- * Plan 210 D8 in a room: while the host's screen is hidden, the frosted still
- * of the last frame the room saw, fitted as the screen was, over the guarded
- * track (whose frames are the wire's grey). Guests and the program draw the
- * same still. Nothing while the screen is visible.
+ * Hide screen in a room: while the host's screen is hidden, the designed
+ * hidden still at the screen's size, fitted as the screen was, over the
+ * guarded track (whose frames are the wire's grey). Guests, the program and
+ * every local output draw the same still. Nothing while the screen is visible.
  */
 function ScreenStill({
   src,
@@ -814,7 +814,7 @@ function StageScreens({
  * reads Show screen in the same place while hidden, and the key then lives
  * in the tooltip, because the chip takes the room. The room's phase never
  * holds it: a hide always runs, and only a refused hide is disabled, with its
- * reason. No toast: the chip and the frosted stage say it.
+ * reason. No toast: the chip and the hidden still on the stage say it.
  */
 function StageScreenPrivacy({ control }: { control: ScreenPrivacyControl }): ReactElement {
   const { hidden, accelerator, platform, disabledReason, toggle } = control
