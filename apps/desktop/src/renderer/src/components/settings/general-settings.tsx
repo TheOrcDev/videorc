@@ -215,7 +215,7 @@ export function GeneralSettings(): ReactElement {
           <ObsImportDialog open={obsImportOpen} onOpenChange={setObsImportOpen} />
         </PanelSection>
 
-        {/* Plan 250: a stream from another app or device as a camera (Beta, macOS). */}
+        {/* Plan 255: a stream from another app or device as a camera (Beta, macOS). */}
         <SrtInputSection />
 
         <PrivacySettingsSection />

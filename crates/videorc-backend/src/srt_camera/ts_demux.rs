@@ -1,4 +1,4 @@
-//! A small MPEG-TS demuxer for the SRT Camera (plan 250): PAT, PMT and the
+//! A small MPEG-TS demuxer for the SRT Camera (plan 255): PAT, PMT and the
 //! first video stream's PES. Every other PID, audio included, is dropped
 //! (D10). No FFmpeg in this path (D12).
 

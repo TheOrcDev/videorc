@@ -11457,7 +11457,7 @@ function startBackendWithRegistryLock(): void {
       VIDEORC_BUNDLED_FFMPEG_PATH: ffmpegBinDir
         ? join(ffmpegBinDir, process.platform === 'win32' ? 'ffmpeg.exe' : 'ffmpeg')
         : '',
-      // Plan 250: the SRT Camera's library, shipped beside FFmpeg. A dev
+      // Plan 255: the SRT Camera's library, shipped beside FFmpeg. A dev
       // backend finds the staged or Homebrew copy itself.
       VIDEORC_BUNDLED_LIBSRT_PATH: resolvePackagedLibsrtPath() ?? '',
       VIDEORC_MANAGED_BACKGROUND_ROOTS: managedBackgroundRoots().join(delimiter),

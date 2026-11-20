@@ -543,7 +543,7 @@ class StudioBackend {
     partial: false
   }
   private readonly deferredResponses = new Map<string, DeferredBackendResponse[]>()
-  /** Plan 250: `srtInput.get`; null is a backend without the SRT input. */
+  /** Plan 255: `srtInput.get`; null is a backend without the SRT input. */
   srtInput: SrtInputState | null = null
   deviceList: DeviceList = {
     devices: [
@@ -6845,7 +6845,7 @@ describe('real StudioProvider lifecycle', () => {
     expect(toastSpies.error).not.toHaveBeenCalled()
   })
 
-  // Plan 250 D15 asks before a Go Live, and a resume is none: the show is
+  // Plan 255 D15 asks before a Go Live, and a resume is none: the show is
   // already live. A Retry of a failed resume resumes again, with no SRT
   // Camera signal, and never turns into an ordinary Go Live.
   it('retries a failed cloud resume as a resume, whatever the SRT Camera signal', async () => {
@@ -17078,7 +17078,7 @@ describe('real StudioProvider lifecycle', () => {
     await waitForObservation(() => latest()?.recording.recording.state === 'idle')
   })
 
-  // Plan 250 D15: the confirm and the start await account,
+  // Plan 255 D15: the confirm and the start await account,
   // output and window checks before `session.start`. The SRT Camera's hold
   // can run out during any of them; the start checks the composition it
   // sends once more and refuses an agent without allowNoSignal, cleaning up
@@ -17254,7 +17254,7 @@ describe('real StudioProvider lifecycle', () => {
     await waitForObservation(() => latest()?.recording.recording.state === 'idle')
   })
 
-  // Plan 250 D15, the dialog: it asked before platform setup, and the hold
+  // Plan 255 D15, the dialog: it asked before platform setup, and the hold
   // can run out since. Without "Go live anyway" the start refuses, cleans
   // up, and Go Live opens again to ask.
   it('opens Go Live again when the SRT Camera loses its signal right before the start', async () => {

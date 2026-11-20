@@ -153,7 +153,7 @@ export function GoLiveConfirmationDialog({
   // The privacy step is up: a YouTube destination goes live Unlisted or
   // Private, and the streamer has pressed Go live once.
   const [privacyConfirmOpen, setPrivacyConfirmOpen] = useState(false)
-  // Plan 250 D15: the SRT Camera's ask is up for this path, and the facts
+  // Plan 255 D15: the SRT Camera's ask is up for this path, and the facts
   // ("Go live anyway") the streamer accepted while the dialog is open.
   const [srtAskPath, setSrtAskPath] = useState<GoOnPath | null>(null)
   const [srtAccepted, setSrtAccepted] = useState<readonly string[]>([])
@@ -250,7 +250,7 @@ export function GoLiveConfirmationDialog({
     if (privacyCopy) setPrivacyConfirmOpen(true)
     else goOn('confirm')
   }
-  // Plan 250 D15: the one place the dialog goes on, after
+  // Plan 255 D15: the one place the dialog goes on, after
   // every other step. The SRT Camera's ask wraps it: when the destinations
   // this path streams show the camera without a signal, and "Go live
   // anyway" was not accepted for these same facts while the dialog is open.

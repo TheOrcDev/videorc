@@ -1,4 +1,4 @@
-//! Plan 250: the canvas tick follows the SRT Camera. A new frame starts the
+//! Plan 255: the canvas tick follows the SRT Camera. A new frame starts the
 //! tick itself instead of waiting up to one canvas interval for the timer,
 //! and the timer stays as the fallback, so the canvas keeps its rate when the
 //! camera stops or never runs.

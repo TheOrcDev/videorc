@@ -1,4 +1,4 @@
-//! libsrt (Haivision SRT 1.5, MPL-2.0), loaded at run time (plan 250). The
+//! libsrt (Haivision SRT 1.5, MPL-2.0), loaded at run time (plan 255). The
 //! packaged app ships it next to FFmpeg and main names it in
 //! `VIDEORC_BUNDLED_LIBSRT_PATH`; a dev build also tries the staged
 //! `vendor/libsrt/current` and Homebrew's copy. Only the calls the listener

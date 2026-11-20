@@ -1492,7 +1492,7 @@ struct CompositorLiveSources {
     screen_binding_verified: bool,
     pending_camera_change: Option<CompositorCameraSourceChange>,
     pending_screen_change: Option<CompositorScreenSourceChange>,
-    /// Plan 250: the last tick drew a camera on the main, simulcast or ISO scene.
+    /// Plan 255: the last tick drew a camera on the main, simulcast or ISO scene.
     draws_camera: bool,
 }
 
@@ -1703,7 +1703,7 @@ impl CompositorRenderCache {
 }
 
 impl CompositorLiveSources {
-    /// Plan 250: this compositor draws the SRT Camera, so its tick may follow it.
+    /// Plan 255: this compositor draws the SRT Camera, so its tick may follow it.
     fn shows_srt_camera(&self) -> bool {
         self.draws_camera
             && self
@@ -6906,7 +6906,7 @@ async fn run_synthetic_compositor_loop(
     let mut frame_interval = Duration::from_secs_f64(1.0 / f64::from(target_fps.max(1)));
     let mut ticker = tokio::time::interval(frame_interval);
     ticker.set_missed_tick_behavior(compositor_missed_tick_behavior(frame_consumer));
-    // Plan 250: a new SRT Camera frame may start the tick (`canvas_pace.rs`).
+    // Plan 255: a new SRT Camera frame may start the tick (`canvas_pace.rs`).
     let mut canvas_pace = crate::canvas_pace::CanvasPace::default();
     let mut srt_frames = crate::srt_camera::NEW_FRAME.subscribe();
     // Only the record/stream compositor feeds the session's frame accounting;
@@ -17918,7 +17918,7 @@ mod tests {
         assert!(frame.export_handle.has_metal_iosurface_target());
     }
 
-    /// Plan 250: the frame path records whether the tick drew a camera, so
+    /// Plan 255: the frame path records whether the tick drew a camera, so
     /// the next tick may follow the SRT Camera only then.
     #[tokio::test]
     async fn a_published_frame_records_whether_it_drew_a_camera() {

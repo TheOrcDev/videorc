@@ -70,7 +70,7 @@ const state = (patch: Partial<SrtInputState> = {}): SrtInputState => ({
   ...patch
 })
 
-describe('SRT input view (plan 250)', () => {
+describe('SRT input view (plan 255)', () => {
   it('is hidden until the backend answers and where it is not supported (D9)', () => {
     expect(srtInputHidden(null)).toBe(true)
     expect(srtInputHidden(state({ supported: false }))).toBe(true)

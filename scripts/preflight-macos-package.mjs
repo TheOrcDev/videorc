@@ -47,7 +47,7 @@ const inputs = [
     remedy: 'FFMPEG_REBUILD=1 pnpm ffmpeg:build:macos'
   },
   {
-    // Plan 250: the SRT Camera's library.
+    // Plan 255: the SRT Camera's library.
     path: join(repoRoot, 'vendor', 'libsrt', 'current', 'lib', 'libsrt.dylib'),
     remedy: 'pnpm libsrt:build:macos'
   }

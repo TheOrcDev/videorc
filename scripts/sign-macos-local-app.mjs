@@ -85,7 +85,7 @@ const toolPaths = [
   join(appPath, 'Contents/Resources/videorc_native_preview.node'),
   join(appPath, 'Contents/Resources/ffmpeg/bin/ffmpeg'),
   join(appPath, 'Contents/Resources/ffmpeg/bin/ffprobe'),
-  // Plan 250: the SRT Camera's library, loaded by the backend at run time.
+  // Plan 255: the SRT Camera's library, loaded by the backend at run time.
   join(appPath, 'Contents/Resources/libsrt/lib/libsrt.dylib')
 ]
 for (const toolPath of toolPaths) {

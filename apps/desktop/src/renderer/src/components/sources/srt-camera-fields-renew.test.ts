@@ -83,7 +83,7 @@ async function confirmRenewal(): Promise<(result: SrtInputResult) => Promise<voi
   }
 }
 
-describe('New passphrase (plan 250)', () => {
+describe('New passphrase (plan 255)', () => {
   it('keeps the dialog up while the save runs, then gives focus back to an enabled button', async () => {
     const settle = await confirmRenewal()
     // Pending: the dialog stays, its answers wait.

@@ -1,4 +1,4 @@
-//! The SRT input setting (plan 250 D3, D4, D11): off by default, a port, a
+//! The SRT input setting (plan 255 D3, D4, D11): off by default, a port, a
 //! generated passphrase and a Connection. The switch, port and Connection
 //! live in `app_settings`; the passphrase lives in the secret store.
 

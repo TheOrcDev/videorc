@@ -1,4 +1,4 @@
-//! The SRT Camera's two loops (plan 250). The receiver listens, demuxes and
+//! The SRT Camera's two loops (plan 255). The receiver listens, demuxes and
 //! decodes. The pacer publishes each new frame into the camera frame store
 //! as soon as it is decoded, and the held frame or the still once per canvas
 //! interval, so a camera that is silent by design still looks healthy to

@@ -94,7 +94,7 @@ export interface VideoSourcesViewProps {
      * it (a Windows camera with the control); null hides the switch.
      */
     lowLight?: { checked: boolean; disabled: boolean; onChange: (on: boolean) => void } | null
-    /** Plan 250: the SRT Camera's own settings; the row shows them only
+    /** Plan 255: the SRT Camera's own settings; the row shows them only
      * while the SRT Camera is the picked camera. */
     srtFields?: ReactNode
   }
@@ -330,7 +330,7 @@ export function VideoSources(): ReactElement {
       platform: runtimeInfo?.platform,
       mediaAccess
     })
-  // Plan 250: the SRT Camera is a network stream; it needs no camera grant,
+  // Plan 255: the SRT Camera is a network stream; it needs no camera grant,
   // and its facts line is its status (D17).
   const srtInput = useSrtInput()
   const srtCameraSelected = isSrtCameraId(selectedCameraId)
@@ -363,7 +363,7 @@ export function VideoSources(): ReactElement {
     void switchSourceDeviceLive('camera', buildCameraSources(sources, cameras, cameraId))
   }
 
-  // Plan 250: the SRT Camera's pacer keeps its pipeline busy, so its badge
+  // Plan 255: the SRT Camera's pacer keeps its pipeline busy, so its badge
   // follows the SRT signal instead (live QA, 2026-11-15).
   const cameraPipelineStatus = videoSourceStatus({
     kind: 'camera',

@@ -40,7 +40,7 @@ const render = (value: SrtInputState | null, connected = true): string => {
   )
 }
 
-describe('SrtInputSection (plan 250)', () => {
+describe('SrtInputSection (plan 255)', () => {
   it('is absent until the backend answers and off macOS (D9)', () => {
     expect(render(null)).toBe('')
     expect(render(state({ supported: false }))).toBe('')

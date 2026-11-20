@@ -114,7 +114,7 @@ mac:
         - BUILD-CONFIG.txt
         - licenses/**/*
         - source-patches/**/*
-    # Plan 250: libsrt for the SRT Camera (MPL-2.0, OpenSSL linked in), built
+    # Plan 255: libsrt for the SRT Camera (MPL-2.0, OpenSSL linked in), built
     # by scripts/build-libsrt-macos.sh. The backend loads it at run time from
     # the path main passes in VIDEORC_BUNDLED_LIBSRT_PATH.
     - from: ../../vendor/libsrt/current

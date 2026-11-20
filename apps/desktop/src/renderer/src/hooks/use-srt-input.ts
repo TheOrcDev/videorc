@@ -5,7 +5,7 @@ import type { SrtInputSetParams, SrtInputState } from '@/lib/backend'
 import { OFFLINE_LOCK_REASON } from '@/lib/lock-reason'
 import { userErrorMessage } from '@/lib/user-error'
 
-// The SRT input (plan 250): the backend's setting and its camera's status as
+// The SRT input (plan 255): the backend's setting and its camera's status as
 // the Studio holds it, in a small context of its own, so the status reaches
 // only the surfaces that show it (the Settings opt-in, the Sources camera
 // row, Go Live). Without a provider the state is unknown and every surface

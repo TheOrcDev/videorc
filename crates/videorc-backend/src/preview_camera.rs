@@ -688,7 +688,7 @@ impl PreviewCameraShared {
         }
     }
 
-    /// Plan 250: one SRT Camera frame from its pacer, counted like a capture
+    /// Plan 255: one SRT Camera frame from its pacer, counted like a capture
     /// callback so cadence checks and recovery see a live camera.
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub(crate) fn publish_srt_frame(
@@ -4577,7 +4577,7 @@ enum SelectedCameraSource {
     LinuxV4l2 {
         device_path: String,
     },
-    /// Plan 250: the SRT Camera, while its setting is on.
+    /// Plan 255: the SRT Camera, while its setting is on.
     SrtInput,
 }
 
@@ -5465,7 +5465,7 @@ fn run_native_camera_preview(
     }
 }
 
-/// Plan 250: the SRT Camera. No device and no camera grant: the listener
+/// Plan 255: the SRT Camera. No device and no camera grant: the listener
 /// and the pacer run for exactly as long as this camera session (D16).
 mod srt {
     use super::*;

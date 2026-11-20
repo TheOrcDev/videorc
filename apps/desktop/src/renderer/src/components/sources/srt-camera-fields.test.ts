@@ -43,7 +43,7 @@ const render = (value: SrtInputState | null, connected = true): string => {
   )
 }
 
-describe('SRT Camera fields on the Camera row (plan 250, option B)', () => {
+describe('SRT Camera fields on the Camera row (plan 255, option B)', () => {
   it('are absent until the backend answers, off macOS and while the input is off', () => {
     expect(render(null)).toBe('')
     expect(render(state({ supported: false }))).toBe('')

@@ -199,7 +199,7 @@ describe('Sources Video column (plan 173)', () => {
     expect(onToggle).toContain('aria-checked="true"')
   })
 
-  // Plan 250 option B: Sources is the home of every camera, so the SRT
+  // Plan 255 option B: Sources is the home of every camera, so the SRT
   // Camera's own settings sit on the Camera row, only while it is picked.
   it("shows the SRT Camera's settings on the Camera row only while it is picked", () => {
     const srtFields = createElement('div', { 'data-testid': 'srt-fields' })

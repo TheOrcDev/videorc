@@ -32,7 +32,7 @@ import {
 
 /**
  * The SRT Camera's own settings on its row in Sources → Video → Camera
- * (plan 250, option B): the port, the passphrase every sender needs, the
+ * (plan 255, option B): the port, the passphrase every sender needs, the
  * Connection and the lip-sync note. The row shows them only while the SRT
  * Camera is the picked camera; the Settings opt-in adds it to the list.
  */

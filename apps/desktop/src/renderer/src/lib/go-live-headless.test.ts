@@ -177,7 +177,7 @@ describe('go_live without the dialog (plan 209 S10, D13)', () => {
     ).toEqual({ kind: 'confirm' })
   })
 
-  // Plan 250 D15: the dialog asks "Go live anyway?" when the SRT Camera has
+  // Plan 255 D15: the dialog asks "Go live anyway?" when the SRT Camera has
   // no signal, before the privacy step; an agent is refused unless the call
   // accepts it.
   it('refuses an SRT Camera with no signal unless allowNoSignal, before the privacy', () => {

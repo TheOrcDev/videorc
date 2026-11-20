@@ -652,7 +652,7 @@ describe('Go Live privacy step', () => {
   })
 })
 
-// Plan 250 D15: every way the dialog goes on (the primary,
+// Plan 255 D15: every way the dialog goes on (the primary,
 // ⌘↵, the privacy step, "Go live anyway", "Go live on {ready}") asks what is
 // still unanswered in this attempt, with the SRT Camera's signal as it is
 // now. An answer counts until the dialog closes.

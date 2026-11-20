@@ -1,4 +1,4 @@
-//! The SRT Camera's stills (plan 250 D7, D12): a dark frame with centred
+//! The SRT Camera's stills (plan 255 D7, D12): a dark frame with centred
 //! text, wrapped into a 9:16 column in the middle.
 //! A portrait canvas, a vertical leg or a square box crops a camera to its
 //! middle; with no camera pan or zoom, that crop keeps the column whole.

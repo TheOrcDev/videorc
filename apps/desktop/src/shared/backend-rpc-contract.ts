@@ -845,13 +845,13 @@ export interface BackendRpcMethodMap {
     VirtualCameraStatus
   >
   // --- end Videorc Camera (plan 214 A4) ---
-  // --- SRT Camera (plan 250) ---
+  // --- SRT Camera (plan 255) ---
   'srtInput.get': BackendRpcDefinition<undefined, SrtInputState>
   /** Saves the switch, port or Connection; the camera rebinds while it runs. */
   'srtInput.set': BackendRpcDefinition<SrtInputSetParams, SrtInputState>
   /** A new passphrase (D4): every sender must be given it again. */
   'srtInput.renewPassphrase': BackendRpcDefinition<undefined, SrtInputState>
-  // --- end SRT Camera (plan 250) ---
+  // --- end SRT Camera (plan 255) ---
   // --- Camera low-light compensation (issue #1066) ---
   'camera.lowLight.get': BackendRpcDefinition<CameraLowLightParams, CameraLowLightState>
   /** Saved per camera and written to the device now; open or not. */
@@ -1111,7 +1111,7 @@ export interface BackendEventMap {
   'screen.privacy.changed': ScreenPrivacy
   // --- Videorc Camera (plan 214 A4): the status, on every change ---
   'virtualCamera.changed': VirtualCameraStatus
-  // --- SRT Camera (plan 250): the setting and the camera's status, on every change ---
+  // --- SRT Camera (plan 255): the setting and the camera's status, on every change ---
   'srtInput.changed': SrtInputState
   'sounds.playback': SoundsPlayback
   // --- Buddy look (plan 169 D9) ---
@@ -4564,7 +4564,7 @@ const virtualCameraSetParamsSchema = objectSchema(
   { on: booleanSchema },
   { allowUnknown: false }
 ) as RuntimeSchema<VirtualCameraSetParams>
-// Plan 250: the SRT input setting and its camera's status.
+// Plan 255: the SRT input setting and its camera's status.
 const srtInputConnectionSchema = enumSchema(['cableOrThisComputer', 'wifi', 'internet'])
 const srtInputPortSchema = numberSchema({ integer: true, min: 1024, max: 65535 })
 const srtCameraStatusSchema = objectSchema(

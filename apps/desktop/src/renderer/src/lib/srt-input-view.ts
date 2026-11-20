@@ -10,7 +10,7 @@ import { buildSimulcastParams, type CaptureConfig } from './capture'
 import type { SourceStatus } from './source-status'
 import { SOURCE_RECEIVING_LABEL } from './state-labels'
 
-// Plan 250: the SRT input setting and its camera, as the Studio shows them.
+// Plan 255: the SRT input setting and its camera, as the Studio shows them.
 // Pure, so the Settings opt-in, the Sources camera row and the Go Live ask
 // (the dialog's and an agent's `go_live`) share one answer.
 

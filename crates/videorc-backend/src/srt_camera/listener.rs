@@ -1,4 +1,4 @@
-//! The SRT listener (plan 250 D2, D4, D14, D16): bound on every interface,
+//! The SRT listener (plan 255 D2, D4, D14, D16): bound on every interface,
 //! encryption enforced, one sender at a time. Videorc only listens; opening
 //! the port is the only thing a sender can see.
 

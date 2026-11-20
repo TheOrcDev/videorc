@@ -58,7 +58,7 @@ pub fn camera_format_ceiling(camera_id: &str) -> Option<(u32, u32)> {
 /// false return means a step-down is unavailable or already applied, so no
 /// restart is warranted (restart-for-slowness stays banned).
 pub fn arm_camera_step_down(camera_id: &str) -> bool {
-    // Plan 250 D7: the sender picks the SRT Camera's format; there is no
+    // Plan 255 D7: the sender picks the SRT Camera's format; there is no
     // tier to step down to.
     if crate::srt_camera::is_srt_camera_id(camera_id) {
         return false;

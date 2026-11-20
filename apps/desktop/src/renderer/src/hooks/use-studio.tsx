@@ -1784,7 +1784,7 @@ export type StudioContextValue = {
   saveStreamMetadataDraft: () => Promise<void>
   cancelGoLiveConfirmation: () => void
   /** `goLiveAnyway`: the streamer chose "Go live anyway" for an SRT Camera
-   * with no signal (plan 250 D15). */
+   * with no signal (plan 255 D15). */
   confirmGoLive: (goLiveAnyway?: boolean) => Promise<void>
   continueGoLiveWithReadyDestinations: (goLiveAnyway?: boolean) => Promise<void>
   /** Why the last Record / Go Live was refused; null once the user starts
@@ -4372,7 +4372,7 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
   const [runtimeInfo, setRuntimeInfo] = useState<RuntimeInfo | null>(null)
   // Plan 214 E: Videorc Camera's status, switch and actions, in its own context.
   const virtualCamera = useVirtualCameraController(client, wsStatus, runtimeInfo)
-  // Plan 250: the SRT input setting and its camera's status.
+  // Plan 255: the SRT input setting and its camera's status.
   const srtInput = useSrtInputController(client, wsStatus)
   // Linux can't caption at all (no native microphone path): every session
   // skips captions there, as if "Continue without captions" were chosen.
@@ -17023,7 +17023,7 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
       ) => Promise<boolean>)
     | null
   >(null)
-  // Plan 250 D15: the streamer's own start (the dialog's, or a Retry)
+  // Plan 255 D15: the streamer's own start (the dialog's, or a Retry)
   // checks the SRT Camera right before `session.start`: the hold can run
   // out after the dialog asked, and a Retry can come long after. A Retry
   // never carries "Go live anyway". Without it, no signal refuses the start,
@@ -17062,7 +17062,7 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
       // broadcast is activated here.
       rpc: SessionStartRpc = 'session.start',
       // A start gate (an agent's, the dialog's or a Retry's) checks the exact
-      // composition once more right before the RPC (plan 250 D15). A cloud
+      // composition once more right before the RPC (plan 255 D15). A cloud
       // resume picks up a show that is already live: no Go Live to ask in,
       // so it ignores the gate.
       startGate?: GoLiveStartGate
@@ -20415,7 +20415,7 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
       runGoLiveConfirmation,
       settlePreparedPlatformLifecycle,
       startOnReadyDestinations,
-      // Plan 250 D15: the dialog's "Go live anyway?" for an SRT Camera with
+      // Plan 255 D15: the dialog's "Go live anyway?" for an SRT Camera with
       // no signal.
       srtInputRef: srtInput.stateRef,
       captureConfigRef,

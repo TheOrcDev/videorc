@@ -1,7 +1,7 @@
 import type { StartSessionParams } from './backend'
 
 /**
- * A last check a Go Live hands the Studio's start (plan 250 D15): it
+ * A last check a Go Live hands the Studio's start (plan 255 D15): it
  * runs on the exact `session.start` parameters, after every await before
  * the RPC, and keeps the refusal it gave. Small and
  * eager on purpose: the Studio's start imports it, the headless Go Live

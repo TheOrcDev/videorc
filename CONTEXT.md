@@ -303,7 +303,7 @@ computer, named "SRT Camera (port 9000)" in the camera list. Settings →
 General → SRT input (Beta, macOS) is the switch that adds it; its port,
 passphrase and Connection sit on the Camera row in Sources while it is the
 picked camera, as Sources is the home of every camera. Videorc only listens,
-and only while a scene uses the camera. Plan 250.
+and only while a scene uses the camera. Plan 255.
 _Avoid_: network camera, IP camera, SRT source
 
 ### Destinations and accounts

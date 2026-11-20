@@ -9,7 +9,7 @@ import { useStudioCore } from '@/hooks/use-studio'
 import { SRT_INPUT_DESCRIPTION, SRT_INPUT_TITLE, srtInputHidden } from '@/lib/srt-input-view'
 
 /**
- * Settings → General → SRT input (plan 250, Beta): the opt-in alone. On, the
+ * Settings → General → SRT input (plan 255, Beta): the opt-in alone. On, the
  * camera list in Sources gains "SRT Camera (port N)", and the camera's own
  * settings (port, passphrase, Connection) show on its row there, the one
  * home of every camera. Only where the backend supports it (macOS, D9).

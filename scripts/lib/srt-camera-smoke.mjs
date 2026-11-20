@@ -1,4 +1,4 @@
-// Plan 250 S7: the pure parts of the SRT Camera smoke.
+// Plan 255 S7: the pure parts of the SRT Camera smoke.
 import { join } from 'node:path'
 
 /** Never the default SRT input port (9000) or 9100, which other local tools use. */

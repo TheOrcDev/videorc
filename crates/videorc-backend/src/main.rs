@@ -691,7 +691,7 @@ async fn run_backend(device_changes: tokio::sync::watch::Receiver<u64>) -> Resul
     tokio::spawn(html_overlay::run_html_overlay_targets(state.clone()));
     // Plan 214 D4: Videorc Camera comes back on when it was on.
     virtual_camera_service::start_from_settings(&state).await;
-    // Plan 250: the SRT input setting, and its changes on the event stream.
+    // Plan 255: the SRT input setting, and its changes on the event stream.
     {
         let events = state.clone();
         srt_camera::set_change_listener(move |srt_state| {
@@ -16754,7 +16754,7 @@ async fn handle_text_message_with_role(
                 }
             }
         }
-        // Plan 250: the SRT input setting. Its changes and the camera's
+        // Plan 255: the SRT input setting. Its changes and the camera's
         // status ride `srtInput.changed`.
         "srtInput.get" => {
             if !rpc_params_are_empty(&command.params) {

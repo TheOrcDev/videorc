@@ -47,7 +47,7 @@ import { connectionBlockedReason, START_BLOCKED_COPY } from './start-blocked-cop
 // accounts. A YouTube destination going live Unlisted or Private is refused
 // too unless the call says `allowNonPublic`, as the dialog asks the streamer
 // once more (owner report, 2026-11-12), and so is an SRT Camera with no
-// signal unless the call says `allowNoSignal` (plan 250 D15). Loaded with the first agent Go Live,
+// signal unless the call says `allowNoSignal` (plan 255 D15). Loaded with the first agent Go Live,
 // never in the eager bundle: the Studio hands `goLiveWithoutDialog` its
 // handlers and latest state.
 
@@ -66,7 +66,7 @@ export interface HeadlessGoLiveRequest {
    * dialog's privacy step); without it, that is a refusal. */
   allowNonPublic?: boolean
   /** Go live while the SRT Camera has no signal (the dialog's "Go live
-   * anyway?", plan 250 D15); without it, that is a refusal. */
+   * anyway?", plan 255 D15); without it, that is a refusal. */
   allowNoSignal?: boolean
   /** Stop agents, Off or Remove cancelled the call (plan 209 review fix 1):
    * checked right before it confirms and before it starts. */
@@ -169,7 +169,7 @@ export type HeadlessGoLiveDecision =
  * that is Unlisted or Private confirms only with `allowNonPublic`, the
  * dialog's privacy step; otherwise the agent reads the step's own sentence.
  * Before it, an SRT Camera with no signal confirms only with
- * `allowNoSignal`, the dialog's first ask (plan 250 D15).
+ * `allowNoSignal`, the dialog's first ask (plan 255 D15).
  */
 export function decideHeadlessGoLive(input: {
   preflight: GoLivePreflight
@@ -363,7 +363,7 @@ export interface HeadlessGoLiveStudio {
     suppressCaptions: boolean
     startGate?: GoLiveStartGate
   }) => Promise<boolean>
-  /** The SRT input as it is now (plan 250 D15), read when the gate decides,
+  /** The SRT input as it is now (plan 255 D15), read when the gate decides,
    * after the preflight: the 2 s hold can run out while it runs. */
   srtInputRef: { readonly current: SrtInputState | null }
 }

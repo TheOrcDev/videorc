@@ -1,7 +1,7 @@
 # SRT Camera
 
 The SRT Camera turns an SRT stream from another app or device into a camera
-(plan 250). It is a Beta on macOS.
+(plan 255). It is a Beta on macOS.
 
 ## Set it up
 

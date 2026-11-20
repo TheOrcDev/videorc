@@ -5,7 +5,7 @@ edition = "2024"
 license = "AGPL-3.0-only"
 
 [dependencies]
-# Plan 250: the SRT Camera's stills draw text with a system font (none shipped).
+# Plan 255: the SRT Camera's stills draw text with a system font (none shipped).
 ab_glyph = "0.2.32"
 anyhow = "1.0"
 # Plan 190: optional here only for the `live-background-gl-check` feature; the

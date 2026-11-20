@@ -81,7 +81,7 @@ const CAPTURE_DECAY_D3_SENSITIVE_EXACT_PATHS = new Set([
   '.github/workflows/promote-macos-capture-decay-d3.yml',
   '.github/workflows/release-macos.yml',
   'scripts/build-ffmpeg-macos.sh',
-  // Plan 250: libsrt ships inside the signed macOS bundle.
+  // Plan 255: libsrt ships inside the signed macOS bundle.
   'scripts/build-libsrt-macos.sh',
   'scripts/patches/avfoundation-capture-clock.patch'
 ])

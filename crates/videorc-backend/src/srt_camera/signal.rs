@@ -1,4 +1,4 @@
-//! What the SRT Camera shows and says (plan 250 D7, D8, D12, D14, D17).
+//! What the SRT Camera shows and says (plan 255 D7, D8, D12, D14, D17).
 //! Pure, with the clock passed in: frames are timed by their arrival, never
 //! by the sender's PTS (a sender may stamp the nominal rate while sending
 //! fewer frames).

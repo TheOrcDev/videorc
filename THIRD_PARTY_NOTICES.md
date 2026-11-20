@@ -54,7 +54,7 @@ SOFTWARE.
 
 ## libsrt
 
-The SRT Camera (plan 250) receives SRT with libsrt, the Secure Reliable
+The SRT Camera (plan 255) receives SRT with libsrt, the Secure Reliable
 Transport library by Haivision, https://github.com/Haivision/srt.
 
 - Files: the macOS app's `Contents/Resources/libsrt/`, built from the

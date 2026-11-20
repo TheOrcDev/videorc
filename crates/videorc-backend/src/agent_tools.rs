@@ -1017,7 +1017,7 @@ mod tests {
         assert!(catalog.tool("go_live").unwrap().annotations.open_world_hint);
     }
 
-    /// Plan 250 D15: `go_live` takes the dialog's "Go live anyway?" answer
+    /// Plan 255 D15: `go_live` takes the dialog's "Go live anyway?" answer
     /// for an SRT Camera with no signal, beside `allowNonPublic`.
     #[test]
     fn go_live_takes_allow_no_signal_beside_allow_non_public() {

@@ -1,4 +1,4 @@
-//! Plan 250: the SRT Camera. A generic SRT input that shows up as one more
+//! Plan 255: the SRT Camera. A generic SRT input that shows up as one more
 //! camera (D1, D3). Videorc only listens (D2), and only while a scene in use
 //! holds the camera (D16).
 //!

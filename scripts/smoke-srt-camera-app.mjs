@@ -1,4 +1,4 @@
-// Plan 250 S7: the SRT Camera end to end through the dev app, with no real
+// Plan 255 S7: the SRT Camera end to end through the dev app, with no real
 // device. FFmpeg makes a 10-bit HEVC TS and an H.264 TS; a small test sender
 // (scripts/fixtures/srt-test-sender.c, built here on the libsrt Videorc
 // ships) sends them as SRT callers with the passphrase to a random free port
@@ -56,7 +56,7 @@ const skip = (reason) => {
   process.exit(0)
 }
 
-if (process.platform !== 'darwin') skip('the SRT Camera works on macOS only for now (plan 250 D9).')
+if (process.platform !== 'darwin') skip('the SRT Camera works on macOS only for now (plan 255 D9).')
 
 const repoRoot = resolve(import.meta.dirname, '..')
 const ffmpegPath = process.env.VIDEORC_SMOKE_FFMPEG_PATH ?? 'ffmpeg'

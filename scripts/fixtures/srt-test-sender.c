@@ -1,4 +1,4 @@
-// Plan 250 (D18): a test SRT caller for `pnpm smoke:srt-camera`, built on
+// Plan 255 (D18): a test SRT caller for `pnpm smoke:srt-camera`, built on
 // the libsrt Videorc ships. It sends an MPEG-TS file in 7 x 188 = 1316-byte
 // messages, paced by the file's PCR, so the camera gets a clean feed.
 //

@@ -1,4 +1,4 @@
-# Plan 250: SRT Camera (a network stream as a camera, Beta, macOS first)
+# Plan 255: SRT Camera (a network stream as a camera, Beta, macOS first)
 
 > **Executor instructions**: this plan holds the product decisions
 > (D1 to D17, brainstorm of 2026-11-13). Cut it into slices before you build

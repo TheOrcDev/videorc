@@ -5809,7 +5809,7 @@ pub struct VirtualCameraPlatformReportParams {
     pub message: Option<String>,
 }
 
-/// Plan 250 D11: how the sender reaches this computer. It sets the SRT
+/// Plan 255 D11: how the sender reaches this computer. It sets the SRT
 /// receive latency; there is no free number.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -5820,7 +5820,7 @@ pub enum SrtInputConnection {
     Internet,
 }
 
-/// What the SRT Camera shows (plan 250 D7, D8, D12).
+/// What the SRT Camera shows (plan 255 D7, D8, D12).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum SrtCameraSignal {
@@ -5834,7 +5834,7 @@ pub enum SrtCameraSignal {
     UnsupportedCodec,
 }
 
-/// Why the last sender was turned away (plan 250 D14, D17).
+/// Why the last sender was turned away (plan 255 D14, D17).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum SrtSenderRefusal {
@@ -5871,7 +5871,7 @@ pub struct SrtCameraStatus {
 }
 
 /// `srtInput.get`, `srtInput.set`, `srtInput.renewPassphrase` and the
-/// `srtInput.changed` event (plan 250 D3, D4, D11).
+/// `srtInput.changed` event (plan 255 D3, D4, D11).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SrtInputState {

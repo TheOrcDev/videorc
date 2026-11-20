@@ -378,10 +378,10 @@ describe('the agent tool catalog (plan 209 S1)', () => {
     expect(said.required).toEqual(['bubble'])
   })
 
-  // Plan 250 D15: the Go Live dialog asks before it goes live with an SRT
+  // Plan 255 D15: the Go Live dialog asks before it goes live with an SRT
   // Camera that has no signal; `go_live` takes the answer as allowNoSignal,
   // the way it takes allowNonPublic for the privacy step.
-  it('go_live takes allowNoSignal beside allowNonPublic (plan 250 D15)', () => {
+  it('go_live takes allowNoSignal beside allowNonPublic (plan 255 D15)', () => {
     const goLive = agentTool('go_live')!
     const input = goLive.inputSchema as { properties: Record<string, unknown> }
     expect(Object.keys(input.properties)).toEqual([
