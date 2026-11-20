@@ -4,6 +4,9 @@ import type { RoomOptions } from 'livekit-client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import * as privacyModule from './room-screen-privacy'
+import { CAPABILITY_TOPIC } from './room-media-v2'
+import { AVATAR_TOPIC, type AvatarLayer } from '../../../shared/cloud-avatar'
+import avatarFixture from '../../../../../..//protocol-fixtures/cloud-parity-avatar.json'
 import { setRoomFrameEncodeObserver } from './room-frame-test-state'
 import vectors from '../../../shared/chroma-key-vectors.json'
 import type { TalkShowCameraSettings } from './talk-show-camera-effects'
@@ -1837,5 +1840,82 @@ describe('latency in the room (plan 253 S4)', () => {
     expect(room.snapshot.local.quality).toBe('excellent')
     await room.disconnect()
     expect(room.snapshot.local.quality).toBeUndefined()
+  })
+})
+
+// The owner, 2026-11-20 (0.35.0): "Sidekick Avatar is not showing up on our
+// livestream". On a managed show the avatar's own "on stream" switch did
+// nothing: the room held the avatar back until a second switch in Guests →
+// Room was turned on, and that one started off in every new room.
+describe('room avatar in the default setup', () => {
+  const onStream = {
+    h: (avatarFixture.snapshot.layers as AvatarLayer[]).filter((l) => l.kind === 'avatar'),
+    v: [],
+    stream: true,
+    recording: false
+  }
+  /** The program page's receipt, relayed by the server (it names no participant). */
+  const programPageCanDraw = () =>
+    latestRoom().emit(
+      'DataReceived',
+      new TextEncoder().encode(
+        JSON.stringify({
+          v: 2,
+          identity: 'EG_program',
+          participantSid: 'PA_program',
+          at: Date.now(),
+          graphics: { version: 1, output: 'stream', orientation: 'h' }
+        })
+      ),
+      undefined,
+      undefined,
+      CAPABILITY_TOPIC
+    )
+  /** Avatar snapshots that carry layers (a hide is an empty one). */
+  const sentToProgram = () =>
+    latestRoom().streams.filter(
+      (stream) => stream.topic === AVATAR_TOPIC && stream.attributes?.empty === 'false'
+    )
+
+  afterEach(() => vi.useRealTimers())
+
+  it('sends the avatar to the program page with no room switch pressed', async () => {
+    vi.useFakeTimers()
+    const { room } = client()
+    await room.connect()
+    Object.assign(latestRoom().localParticipant, { sid: 'PA_host' })
+    // The streamer's own switch chose the stream; nothing was pressed in Guests → Room.
+    room.setAvatar(onStream)
+    expect(room.snapshot.avatar?.enabled).toBe(true)
+    expect(room.snapshot.avatar?.preview?.layers.map((l) => l.kind)).toEqual(['avatar'])
+    programPageCanDraw()
+    await vi.advanceTimersByTimeAsync(1100)
+    expect(sentToProgram().length).toBeGreaterThan(0)
+    expect(room.snapshot.avatar?.state).toBe('waiting')
+    await room.disconnect()
+  })
+
+  it('keeps an avatar that is off by its own switch off, and Guests → Room hides it per room', async () => {
+    vi.useFakeTimers()
+    const { room } = client()
+    await room.connect()
+    Object.assign(latestRoom().localParticipant, { sid: 'PA_host' })
+    // "On stream" and Show in recording are both off: the hook sends no content.
+    room.setAvatar(null)
+    programPageCanDraw()
+    await vi.advanceTimersByTimeAsync(1100)
+    expect(room.snapshot.avatar).toMatchObject({ enabled: true, state: 'off', preview: null })
+    expect(sentToProgram()).toEqual([])
+    // Hidden for this room: content the avatar's own switch chose stays here.
+    room.setAvatarEnabled(false)
+    room.setAvatar(onStream)
+    await vi.advanceTimersByTimeAsync(1100)
+    expect(room.snapshot.avatar).toMatchObject({ enabled: false, state: 'off', preview: null })
+    expect(sentToProgram()).toEqual([])
+    room.setAvatarEnabled(true)
+    await vi.advanceTimersByTimeAsync(1100)
+    expect(room.snapshot.avatar?.preview?.layers.map((l) => l.kind)).toEqual(['avatar'])
+    expect(sentToProgram().length).toBeGreaterThan(0)
+    await room.disconnect()
   })
 })

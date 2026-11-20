@@ -1,8 +1,9 @@
 /**
- * The room's opt-ins for the program (plan 249 S4, S9): the avatar and the
- * graphics, each off until the streamer turns it on for this room. Their one
- * home is Guests → Room; the Show stage's Program preview only summarises
- * them and links there. Plain words: what the stream gets, never how.
+ * The room's switches for the program (plan 249 S4, S9) in Guests → Room: the
+ * graphics, off until the streamer turns them on for this room, and the
+ * avatar, on in every room so it follows its own "on stream" switch (off
+ * here hides it for this room only). The Show stage's Program preview only
+ * summarises them and links there. Plain words: what the stream gets, never how.
  *
  * Imported only by lazy pages (the Show stage, Guests), so it stays out of
  * the eager bundle.
@@ -34,8 +35,27 @@ function optInStatus(optIn: RoomProgramOptIn | null | undefined): string {
   return 'Not on the stream.'
 }
 
-/** The Avatar switch's description in Guests → Room. */
+/**
+ * The room lets the avatar through, but its own switches keep it off every
+ * output ("on stream" in Stream Manager, Show on stream and Show in recording
+ * on Scene), or no avatar is worn: the publisher's `off`.
+ */
+function avatarOffByItsOwnSwitch(avatar: RoomProgramOptIn | null | undefined): boolean {
+  return avatar?.enabled === true && avatar.state === 'off' && !avatar.reason
+}
+
+/** Whether the avatar is headed for the program: let through here and on by its own switch. */
+function avatarOn(avatar: RoomProgramOptIn | null | undefined): boolean {
+  return avatar?.enabled === true && !avatarOffByItsOwnSwitch(avatar)
+}
+
+/**
+ * The Avatar switch's description in Guests → Room. The switch starts on, so
+ * an avatar that is off by its own switch says where that switch is.
+ */
 export function roomAvatarDescription(avatar: RoomProgramOptIn | null | undefined): string {
+  if (avatarOffByItsOwnSwitch(avatar))
+    return 'Your avatar is off. Turn on its “on stream” switch in Stream Manager.'
   return optInStatus(avatar)
 }
 
@@ -53,7 +73,7 @@ export function roomProgramSummary(
   avatar: RoomProgramOptIn | null | undefined,
   graphics: RoomProgramOptIn | null | undefined
 ): string {
-  return `Avatar ${avatar?.enabled ? 'on' : 'off'} · Graphics ${graphics?.enabled ? 'on' : 'off'}`
+  return `Avatar ${avatarOn(avatar) ? 'on' : 'off'} · Graphics ${graphics?.enabled ? 'on' : 'off'}`
 }
 
 /** The same two facts as chips on the Program card: each with its state. */
@@ -64,8 +84,8 @@ export function roomProgramChips(
   return [
     {
       id: 'avatar',
-      label: `Avatar ${avatar?.enabled ? 'on' : 'off'}`,
-      on: avatar?.enabled === true
+      label: `Avatar ${avatarOn(avatar) ? 'on' : 'off'}`,
+      on: avatarOn(avatar)
     },
     {
       id: 'graphics',
@@ -81,5 +101,7 @@ export function roomOptInTone(
 ): 'good' | 'warn' | 'error' | 'neutral' {
   if (!optIn?.enabled) return 'neutral'
   if (optIn.reason) return 'error'
+  // On here, off by its own switch (the avatar): nothing is waiting.
+  if (optIn.state === 'off') return 'neutral'
   return optIn.state === 'applied' ? 'good' : 'warn'
 }

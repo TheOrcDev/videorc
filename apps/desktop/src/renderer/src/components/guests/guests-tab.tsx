@@ -267,8 +267,9 @@ export default function GuestsTab(): ReactElement {
 }
 
 /**
- * Plan 249 S4/S9: the room's avatar and graphics on the program, each off
- * until turned on for this room. Guests see the avatar only once it is on.
+ * Plan 249 S4/S9: the room's avatar and graphics on the program. Graphics
+ * are off until turned on for this room; the avatar is on in every room and
+ * follows its own "on stream" switch. Guests see the avatar only once it is on.
  */
 function RoomProgramOptIns({
   disabled,

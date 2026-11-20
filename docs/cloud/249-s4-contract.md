@@ -22,7 +22,10 @@ Both branches `feat/249-s4-cloud-parity`. Implementation reconciled onto these c
 - `RoomAvatarPublisher` owns targeted byte streams on
   `videorc.presentation.avatar.v1`. Existing S3 server capability topic/receipts
   authorize consumers. `AvatarContent={h:AvatarLayer[],v:AvatarLayer[],stream,
-recording}`; `set(content|null)`, `close()`. Per-room enablement defaults off.
+recording}`; `set(content|null)`, `close()`. Per-room enablement defaults on
+  since 2026-11-20 (it shipped off through 0.35.0): the avatar's own output
+  switches (`overlayLayout.buddy.showOnStream` / `showInRecording`) choose the
+  outputs, and the Guests → Room switch only hides it for that room.
 - `TalkShowRoomSnapshot.avatar?:RoomAvatarStatus` exposes state
   off/preview/waiting/applied/failed, reason, revision, preview snapshot and
   per-egress observed revision/output/orientation; productionQualified:false.
