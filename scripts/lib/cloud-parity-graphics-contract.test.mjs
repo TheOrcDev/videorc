@@ -44,4 +44,17 @@ test('observed fades use the native absolute clock and reject delayed animation'
   assert.throws(() =>
     assertGraphicsFade([{ at: 1100, opacity: 1 }], [{ at: 1000, from: 0, to: 1 }])
   )
+  // The page steps the fade on its 50 ms clock: a sample shows a step up to
+  // 50 ms old (release-gate run, 2026-11-20: 12 ms and 46 ms after a Show).
+  const show = [{ at: 1740, from: 0, to: 1 }]
+  assertGraphicsFade(
+    [
+      { at: 1773, opacity: 0.283 },
+      { at: 1807, opacity: 0.283 }
+    ],
+    show
+  )
+  // Never ahead of the curve, and never staler than the step plus a frame.
+  assert.throws(() => assertGraphicsFade([{ at: 1750, opacity: 0.6 }], show))
+  assert.throws(() => assertGraphicsFade([{ at: 1860, opacity: 0.283 }], show))
 })

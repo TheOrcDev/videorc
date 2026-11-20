@@ -383,6 +383,7 @@ export async function runBaseline({
       return page
     }
     const clients = []
+    const guestSaid = new Map()
     for (const [name] of guests) {
       const page = await newPage(name)
       await page.addInitScript(installGuestFixture, {
@@ -396,10 +397,44 @@ export async function runBaseline({
           hz: SCREEN_TONE_HZ,
           peak: MEDIA.tonePeak
         })
+      // What each guest page said, for the timeout below: a guest that never
+      // publishes says why only in its own console.
+      const said = []
+      const note = (line) => {
+        said.push(String(line).slice(0, 300))
+        if (said.length > 40) said.shift()
+      }
+      page.on('console', (message) => {
+        if (message.type() === 'error' || message.type() === 'warning')
+          note(`${message.type()}: ${message.text()}`)
+      })
+      page.on('pageerror', (error) => note(`pageerror: ${error.message}`))
+      page.on('requestfailed', (request) =>
+        note(`requestfailed: ${request.method()} ${new URL(request.url()).pathname}`)
+      )
+      guestSaid.set(name, said)
       await page.goto(`${pages.origin}/guest/${name}`)
       clients.push({ name, page })
     }
-    await h.status((s) => s.room?.participants?.length === 3, 'real guest components publish')
+    await h
+      .status((s) => s.room?.participants?.length === 3, 'real guest components publish')
+      .catch(async (error) => {
+        const status = await h.rpc('cloud.status').catch(() => null)
+        const pagesSay = {}
+        for (const { name, page } of clients)
+          pagesSay[name] = {
+            shows: await page
+              .evaluate(() => document.body.innerText.replace(/\s+/g, ' ').slice(0, 200))
+              .catch((e) => String(e)),
+            said: guestSaid.get(name)
+          }
+        throw new Error(
+          `${error.message} (room participants: ${JSON.stringify(
+            (status?.room?.participants ?? []).map((p) => p.identity)
+          )}; guest pages: ${JSON.stringify(pagesSay)})`,
+          { cause: error }
+        )
+      })
     await h.rpc('cloud.stage.set', {
       layout: 'side-by-side',
       onStage: [`host:${h.showId}`, ...[...guests.values()].map((g) => g.identity)]
