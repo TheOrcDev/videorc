@@ -779,11 +779,8 @@ import {
 import {
   deviceListWithoutProtectedOverlayWindows,
   protectedOverlayWindowIdsFromOverlayWindows,
-  sceneHudProtectedOverlayWindow,
   streamManagerProtectedOverlayWindow
 } from '@/lib/protected-overlay-windows'
-import type { SceneHudScreenStart } from '@/lib/scene-hud-capture'
-import type { SceneHudWindowState } from '../../../shared/scene-hud'
 
 export type { GoLivePartialSetup, GoLiveSetupFailure } from '@/lib/go-live-flow'
 
@@ -2602,9 +2599,6 @@ const idlePreviewSupervisorState = (): PreviewSupervisorState => ({
   updatedAt: new Date(0).toISOString()
 })
 
-/** The key HUD's lazy half (plan 231 D20): one import site, off first paint. */
-const loadSceneHud = () => import('@/lib/scene-hud')
-
 async function currentProtectedOverlayWindowIds(): Promise<number[]> {
   // Notes is capture-protected: it is a private teleprompter. Comments and
   // Captions are part of the show and stay visible in recordings (owner
@@ -2612,17 +2606,13 @@ async function currentProtectedOverlayWindowIds(): Promise<number[]> {
   // from the source picker. The one choice (plan 215 D6): the Stream Manager
   // joins the list while its Hide from stream switch is on. The backend
   // applies a changed list to a running capture in place (C2).
-  // The key HUD (plan 231 D20) is never part of the show: on macOS its
-  // window is always on the list while it exists.
-  const [latestNotesWindow, latestCommentsWindow, latestSceneHud] = await Promise.all([
+  const [latestNotesWindow, latestCommentsWindow] = await Promise.all([
     window.videorc?.getNotesWindowState?.().catch(() => null),
-    window.videorc?.getCommentsWindowState?.().catch(() => null),
-    window.videorc?.getSceneHudWindowState?.().catch(() => null)
+    window.videorc?.getCommentsWindowState?.().catch(() => null)
   ])
   return protectedOverlayWindowIdsFromOverlayWindows(
     latestNotesWindow ?? idleNotesWindowState(),
-    streamManagerProtectedOverlayWindow(latestCommentsWindow ?? idleCommentsWindowState()),
-    sceneHudProtectedOverlayWindow(latestSceneHud)
+    streamManagerProtectedOverlayWindow(latestCommentsWindow ?? idleCommentsWindowState())
   )
 }
 
@@ -5120,12 +5110,6 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
   const nativePreviewFramePollingRequestKeyRef = useRef<string | null>(null)
   const nativePreviewCameraKeyRef = useRef<string | null>(null)
   const nativePreviewScreenKeyRef = useRef<string | null>(null)
-  // The key HUD (plan 231 D20): main's window, and the last screen start
-  // (the list it carried and its answer), which says whether Videorc's own
-  // capture leaves the window out (lib/scene-hud-capture.ts, loaded lazily).
-  const [sceneHudWindow, setSceneHudWindow] = useState<SceneHudWindowState | null>(null)
-  const sceneHudStartRef = useRef<SceneHudScreenStart | null>(null)
-  useEffect(() => window.videorc?.onSceneHudWindowState?.(setSceneHudWindow), [])
   const nativePreviewCommittedSceneRef = useRef<{
     sceneId: string
     sceneRevision: number
@@ -5236,20 +5220,6 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
     layoutPresetOrientation(captureConfig.layout.layoutPreset),
     captureConfig.sources
   )
-  // Settings → Shortcuts' switch makes or drops main's window, made only
-  // once a key can switch a scene (no key, no window on screen).
-  const { sceneHud, globalShortcuts } = settings
-  useEffect(() => {
-    loadSceneHud()
-      .then((hud) =>
-        hud.syncSceneHudWindow(
-          { sceneHud, globalShortcuts },
-          sceneLibrary.scenes,
-          runtimeInfo?.platform
-        )
-      )
-      .then(setSceneHudWindow, () => undefined)
-  }, [sceneHud, globalShortcuts, sceneLibrary.scenes, runtimeInfo?.platform])
   const rememberedAppsRef = useRef(
     rememberedSceneApps(loadJson(SCENE_WINDOW_APPS_KEY, {}), sceneLibrary.scenes)
   )
@@ -13162,8 +13132,6 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
       video: captureConfig.video,
       protectedOverlayWindowIds
     })
-    // The key HUD (plan 231 D20) shows only once the capture took its id.
-    sceneHudStartRef.current = [protectedOverlayWindowIds, status]
     nativePreviewScreenKeyRef.current =
       status.state === 'failed' || status.state === 'source-missing' ? null : key
     applyPreviewScreenStatus(status)
@@ -13775,10 +13743,9 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
     () =>
       protectedOverlayWindowIdsFromOverlayWindows(
         notesWindow,
-        streamManagerProtectedOverlayWindow(commentsWindow),
-        sceneHudProtectedOverlayWindow(sceneHudWindow)
+        streamManagerProtectedOverlayWindow(commentsWindow)
       ).join(','),
-    [notesWindow, commentsWindow, sceneHudWindow]
+    [notesWindow, commentsWindow]
   )
 
   useEffect(() => {
@@ -20037,10 +20004,9 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
       deviceListWithoutProtectedOverlayWindows(
         deviceList,
         notesWindow,
-        streamManagerProtectedOverlayWindow(commentsWindow),
-        sceneHudProtectedOverlayWindow(sceneHudWindow)
+        streamManagerProtectedOverlayWindow(commentsWindow)
       ),
-    [deviceList, notesWindow, commentsWindow, sceneHudWindow]
+    [deviceList, notesWindow, commentsWindow]
   )
   const selectedCaptureDevice = findDevice(
     visibleDeviceList.devices,
@@ -20426,38 +20392,6 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
 
   studioActionSourceRef.current = studioActionSource
 
-  // The key HUD (plan 231 D20): a key or a remote switched the scene (or was
-  // refused). The Studio checks the setting and the capture; main checks that
-  // no Videorc window is in front. The request is built lazily, off the
-  // Studio's first paint.
-  const reportSceneSwitchForHud = useEffectEvent(
-    (
-      source: 'key' | 'remote',
-      sceneId: string,
-      outcome: SavedSceneApplyResult,
-      pressed?: GlobalShortcutAction
-    ) => {
-      if (!sceneHudWindow?.enabled) return
-      // What the Studio knows now; the request is built in the lazy module.
-      const input = {
-        source,
-        sceneId,
-        outcome,
-        pressed,
-        window: sceneHudWindow,
-        lastStart: sceneHudStartRef.current,
-        status: previewScreenStatusRef.current,
-        settings: settingsRef.current,
-        scenes: sceneLibrary.scenes,
-        devices: deviceListRef.current.devices,
-        platform: runtimeInfo?.platform
-      }
-      loadSceneHud()
-        .then((hud) => hud.showSceneHudFor(input))
-        .catch(() => undefined)
-    }
-  )
-
   // An effect event: stable identity for the one-time client subscription,
   // latest closure inside.
   const handleRemoteIntent = useEffectEvent(async (payload: unknown) => {
@@ -20474,12 +20408,7 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
     }
     try {
       const actions = await import('@/lib/studio-actions')
-      // A Stream Deck or phone scene switch tells the key HUD how it landed.
-      await actions.executeRemoteIntent(
-        payload,
-        actions.studioActionContext(source),
-        (id, result) => reportSceneSwitchForHud('remote', id, result)
-      )
+      await actions.executeRemoteIntent(payload, actions.studioActionContext(source))
     } catch (error) {
       reportError(error)
     }
@@ -20785,7 +20714,6 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
               toast.info(result.message ?? "That scene couldn't be applied", {
                 id: 'scene-shortcut-refused'
               })
-            reportSceneSwitchForHud('key', next.slice(6), result, action)
             return result.ok
           })
           void apply.then(() => {

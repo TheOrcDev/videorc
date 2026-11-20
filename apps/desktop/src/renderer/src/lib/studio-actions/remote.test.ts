@@ -208,24 +208,6 @@ it('applies a saved scene and acknowledges its typed refusal', async () => {
   expect(requests.at(-1)?.params).toEqual({ intentId: 'yes', ok: true })
 })
 
-it('tells the key HUD how a remote scene switch landed, and only a scene switch', async () => {
-  const applySavedSceneResult = vi.fn(async () => ({ ok: true }) as never)
-  const sceneSwitched = vi.fn()
-  const { context } = studioContext({ applySavedSceneResult })
-  await executeRemoteIntent(
-    { intentId: 'hud', intent: { kind: 'sceneApply', sceneId: 'figma' } },
-    context,
-    sceneSwitched
-  )
-  expect(sceneSwitched).toHaveBeenCalledWith('figma', { ok: true })
-  await executeRemoteIntent(
-    { intentId: 'rec', intent: { kind: 'recordStart' } },
-    context,
-    sceneSwitched
-  )
-  expect(sceneSwitched).toHaveBeenCalledTimes(1)
-})
-
 describe('cloud output owners', () => {
   it.each(['recordStop', 'streamStop'] as const)(
     '%s stops only its matching output',

@@ -6,7 +6,6 @@
 import { screenPrivacyAction } from './privacy'
 import { clipMark } from './clips'
 import { commentHighlight, commentHighlightClear } from './comments'
-import type { SavedSceneApplyResult } from '@/lib/scene-window-resolution'
 import type { StudioActionContext, StudioActionExecutor } from './context'
 import { REMOTE_INTENT_COPY } from './copy'
 import { bannerHide, bannerShow, bannerToggle } from './banners'
@@ -65,9 +64,7 @@ export const REMOTE_INTENT_EXECUTORS: Readonly<Record<string, StudioActionExecut
 /** Executes a remote intent through the Studio's existing action handlers. */
 export async function executeRemoteIntent(
   payload: unknown,
-  context: StudioActionContext,
-  /** A `sceneApply` that landed or was refused (the key HUD, plan 231 D20). */
-  sceneSwitched?: (sceneId: string, result: SavedSceneApplyResult) => void
+  context: StudioActionContext
 ): Promise<void> {
   const envelope = payload as {
     intentId?: string
@@ -76,17 +73,6 @@ export async function executeRemoteIntent(
   const intentId = envelope?.intentId
   const intent = envelope?.intent
   if (!intentId || !intent?.kind) return
-  const applyScene = context.applySavedSceneResult
-  if (sceneSwitched && applyScene && intent.kind === 'sceneApply') {
-    context = {
-      ...context,
-      applySavedSceneResult: (id, options) =>
-        applyScene(id, options).then((result) => {
-          sceneSwitched(id, result)
-          return result
-        })
-    }
-  }
 
   const ack = async (ok: boolean, message?: string): Promise<void> => {
     try {
