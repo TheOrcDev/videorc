@@ -554,7 +554,7 @@ describe('active speakers (PH-12)', () => {
 
   it('publishes when the talking guests change, never for levels or the host', async () => {
     const snapshots: TalkShowRoomSnapshot[] = []
-    const { room } = client({ onSnapshot: (next) => snapshots.push(next) })
+    const { room } = client(undefined, undefined, { onSnapshot: (next) => snapshots.push(next) })
     await room.connect()
     const ada = participant('g_ada', 'Ada')
     const bo = participant('g_bo', 'Bo')

@@ -105,6 +105,7 @@ vi.mock('@/components/studio/retro-lcd-studio', () => ({
   RetroTakeoverSection: none
 }))
 vi.mock('@/components/preview-stage', () => ({ PreviewStage: none }))
+vi.mock('@/lib/studio-health', () => ({ studioHealth: () => ({ tone: 'ok' }) }))
 vi.mock('@/components/studio/show-stage', () => ({ default: none }))
 vi.mock('@/components/studio/studio-dashboard-bottom-row', () => ({
   StudioDashboardBottomRow: none
