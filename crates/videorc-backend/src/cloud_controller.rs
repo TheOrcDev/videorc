@@ -324,6 +324,125 @@ pub(crate) fn fence_header_for(path: &str) -> Option<u64> {
     fence_epoch(held().as_ref(), path)
 }
 
+/// Pure: the show a request to `path` is about, when the controller fence
+/// applies to it. The controller route itself is never held back: it is the
+/// request the others wait for.
+fn fenced_show(path: &str) -> Option<&str> {
+    let rest = path
+        .trim_start_matches('/')
+        .strip_prefix("api/cloud/shows/")?;
+    let mut parts = rest.split(['/', '?']);
+    let show = parts.next().filter(|show| !show.is_empty())?;
+    (parts.next() != Some("controller")).then_some(show)
+}
+
+/// How long a request waits for a claim that never answers. The claim's own
+/// requests time out on their own; this only bounds the wait, so a claim
+/// that is never made (signed out, the show gone) holds nothing for good.
+pub(crate) const RENEWAL_WAIT: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// Plan 254 S6: the window between a backend start and its controller
+/// claim. A restarted process holds no epoch until its kept one is renewed
+/// (`first_intent`), so a write it sends about its own show in that window
+/// carries no epoch and the web refuses it (`cloud-controller-required`; on
+/// 2026-11-19 the Discord announcement claim went out in the same
+/// millisecond as the renewal). While a claim for a show is awaited, writes
+/// about that show wait for it here, for at most [`RENEWAL_WAIT`].
+pub(crate) struct RenewalGate {
+    /// The show whose claim is awaited, and when the wait for it runs out.
+    awaited: tokio::sync::watch::Sender<Option<(String, tokio::time::Instant)>>,
+}
+
+impl RenewalGate {
+    pub(crate) fn new() -> Self {
+        Self {
+            awaited: tokio::sync::watch::channel(None).0,
+        }
+    }
+
+    /// A claim for `show_id` is coming (a kept record read at start) or in
+    /// flight: writes about the show wait from now.
+    pub(crate) fn expect(&self, show_id: &str) {
+        self.awaited.send_replace(Some((
+            show_id.to_string(),
+            tokio::time::Instant::now() + RENEWAL_WAIT,
+        )));
+    }
+
+    /// The claim for `show_id` answered, whatever it answered (empty: any).
+    pub(crate) fn settle(&self, show_id: &str) {
+        self.awaited.send_if_modified(|awaited| {
+            let ours = awaited
+                .as_ref()
+                .is_some_and(|(show, _)| show_id.is_empty() || show == show_id);
+            if ours {
+                *awaited = None;
+            }
+            ours
+        });
+    }
+
+    /// When the wait for `show_id`'s claim runs out; `None` when no claim
+    /// for it is awaited (or the wait already ran out).
+    fn deadline(&self, show_id: &str) -> Option<tokio::time::Instant> {
+        self.awaited
+            .borrow()
+            .as_ref()
+            .filter(|(show, deadline)| show == show_id && *deadline > tokio::time::Instant::now())
+            .map(|(_, deadline)| *deadline)
+    }
+
+    /// Whether a claim for the show `path` is about is awaited right now.
+    #[cfg(test)]
+    pub(crate) fn awaits(&self, path: &str) -> bool {
+        fenced_show(path).is_some_and(|show| self.deadline(show).is_some())
+    }
+
+    /// Waits until the claim for the show `path` is about has answered, or
+    /// its wait ran out. Returns at once for any other path, for the
+    /// controller route, and when nothing is awaited. Never waits longer
+    /// than [`RENEWAL_WAIT`] past the claim's start, so a claim that fails,
+    /// hangs or is never made delays a request and never blocks it.
+    pub(crate) async fn settled(&self, path: &str) {
+        let Some(show) = fenced_show(path) else {
+            return;
+        };
+        let mut watch = self.awaited.subscribe();
+        while let Some(deadline) = self.deadline(show) {
+            if tokio::time::timeout_at(deadline, watch.changed())
+                .await
+                .is_err()
+            {
+                return;
+            }
+        }
+    }
+}
+
+static RENEWAL: LazyLock<RenewalGate> = LazyLock::new(RenewalGate::new);
+
+/// The gate every cloud request of this process passes (`cloud_send`).
+pub(crate) fn renewal_gate() -> &'static RenewalGate {
+    &RENEWAL
+}
+
+/// Settles the claim for its show when dropped, so no return path of a claim
+/// leaves requests waiting.
+pub(crate) struct RenewalInFlight(String);
+
+impl Drop for RenewalInFlight {
+    fn drop(&mut self) {
+        RENEWAL.settle(&self.0);
+    }
+}
+
+/// A claim for `show_id` starts: writes about the show wait until the
+/// returned guard drops.
+pub(crate) fn renewal_in_flight(show_id: &str) -> RenewalInFlight {
+    RENEWAL.expect(show_id);
+    RenewalInFlight(show_id.to_string())
+}
+
 /// The setting that keeps this computer's controllership across a restart.
 pub(crate) const KEPT_CONTROLLER_KEY: &str = "cloud.controller.kept";
 
@@ -1061,6 +1180,82 @@ mod tests {
             intent_body("AAAAAAAAAAAAAAAAAAAAAA", ControllerIntent::Claim),
             serde_json::json!({ "device": { "id": "AAAAAAAAAAAAAAAAAAAAAA" }, "intent": "claim" })
         );
+    }
+
+    const GATED: &str = "sh_fixture";
+    const EFFECTS: &str = "/api/cloud/shows/sh_fixture/effects";
+
+    #[test]
+    fn the_gate_reads_the_show_of_a_path_and_never_holds_the_controller_route() {
+        assert_eq!(fenced_show(EFFECTS), Some("sh_fixture"));
+        assert_eq!(
+            fenced_show("api/cloud/shows/sh_fixture/presentation?asset=abc"),
+            Some("sh_fixture")
+        );
+        assert_eq!(
+            fenced_show("/api/cloud/shows/sh_fixture"),
+            Some("sh_fixture")
+        );
+        assert_eq!(fenced_show("/api/cloud/shows/sh_fixture/controller"), None);
+        assert_eq!(
+            fenced_show("/api/cloud/shows/sh_fixture/controller?desired=1"),
+            None
+        );
+        assert_eq!(fenced_show("/api/cloud/shows"), None);
+        assert_eq!(fenced_show("/api/account"), None);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_request_about_the_awaited_show_waits_for_its_claim_and_no_other_does() {
+        let gate = std::sync::Arc::new(RenewalGate::new());
+        // Nothing awaited: nothing waits.
+        gate.settled(EFFECTS).await;
+        gate.expect(GATED);
+        assert!(gate.awaits(EFFECTS));
+        assert!(!gate.awaits("/api/cloud/shows/sh_other/effects"));
+        assert!(!gate.awaits("/api/cloud/shows/sh_fixture/controller"));
+        // Another show, the claim itself and other routes go at once.
+        gate.settled("/api/cloud/shows/sh_other/effects").await;
+        gate.settled("/api/cloud/shows/sh_fixture/controller").await;
+        gate.settled("/api/cloud/shows/current").await;
+        let waiter = tokio::spawn({
+            let gate = gate.clone();
+            async move { gate.settled(EFFECTS).await }
+        });
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        assert!(!waiter.is_finished(), "held until the claim answers");
+        // Another show's claim settling changes nothing here.
+        gate.settle("sh_other");
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        assert!(!waiter.is_finished());
+        gate.settle(GATED);
+        waiter.await.unwrap();
+        assert!(!gate.awaits(EFFECTS));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_claim_that_never_answers_delays_a_request_and_never_blocks_it() {
+        let gate = RenewalGate::new();
+        gate.expect(GATED);
+        let started = tokio::time::Instant::now();
+        gate.settled(EFFECTS).await;
+        assert_eq!(started.elapsed(), RENEWAL_WAIT);
+        // The wait ran out with the claim's start: later requests go at once.
+        let later = tokio::time::Instant::now();
+        gate.settled(EFFECTS).await;
+        assert_eq!(later.elapsed(), std::time::Duration::ZERO);
+        assert!(!gate.awaits(EFFECTS));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_claim_in_flight_settles_on_every_return_path() {
+        // The process gate: only this test arms it, for a show of its own.
+        let path = "/api/cloud/shows/sh_in_flight/stage";
+        let claim = renewal_in_flight("sh_in_flight");
+        assert!(renewal_gate().awaits(path));
+        drop(claim);
+        assert!(!renewal_gate().awaits(path));
+        renewal_gate().settled(path).await;
     }
 
     // The only test that touches the process-global holder.
