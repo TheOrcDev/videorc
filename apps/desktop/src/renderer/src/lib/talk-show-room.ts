@@ -68,7 +68,7 @@ import {
   PRIVACY_TOPIC,
   type ScreenPrivacyPublication
 } from './room-screen-privacy'
-import { frostedStillUrl, keepFrostSample } from './frost-still'
+import { hiddenStillUrl } from './hidden-still'
 import { RoomLatencyHost } from './room-latency-host'
 import { roomLatencyReport } from './room-latency-report'
 import {
@@ -140,6 +140,8 @@ export { isRunnerIdentity } from '@/lib/talk-show-room-audio'
 /** The data topic the guest page listens on (`guest-wire.ts`, `STAGE_TOPIC`). */
 export const STAGE_TOPIC = 'videorc.stage'
 const RECONNECT_BACKOFF_MS = [1000, 2000, 4000, 8000, 15000]
+/** The Show stage's hidden still is drawn at most this tall; the stage scales it. */
+const STAGE_STILL_ROWS = 720
 /** Plan 243 C5: how long a duplicate host waits for `onAir` to name the new device. */
 export const TAKEN_OVER_GRACE_MS = 3000
 const TAKEN_OVER_POLL_MS = 100
@@ -193,10 +195,9 @@ export type TalkShowLocalMedia = {
    */
   screenSourceId?: string | null
   /**
-   * Plan 210 D8 in a room: while the screen is hidden, the frosted still of
-   * the last frame the room saw (a PNG data URL), drawn over the host's
-   * screen as guests and the program draw it. Absent while visible, and when
-   * the screen was hidden before any frame was shared (the grey stays).
+   * Hide screen in a room: while the screen is hidden, the designed hidden
+   * still at the screen's size (a PNG data URL, hidden-still.ts), drawn over
+   * the host's screen as guests and the program draw it. Absent while visible.
    */
   screenStill?: string
 }
@@ -447,9 +448,9 @@ export class TalkShowRoomClient {
   #privacy: TalkShowRoomSnapshot['screenPrivacy']
   #privacyEpoch = crypto.randomUUID().replaceAll('-', '')
   #privacyGeneration = 0
-  /** The hidden screen's frosted still (`TalkShowLocalMedia.screenStill`). */
+  /** The hidden screen's still (`TalkShowLocalMedia.screenStill`). */
   #screenStill: string | null = null
-  /** Bumped when a still is started or dropped: a late frost is ignored. */
+  /** Bumped when a still is started or dropped: a late still is ignored. */
   #stillToken = 0
   #screenWork: Promise<void> = Promise.resolve()
   #speaking = new Set<string>()
@@ -835,9 +836,11 @@ export class TalkShowRoomClient {
     old?.stop()
     this.#privateScreen?.close()
     this.#privateScreen = null
-    // Shown again: the live picture replaces the still. A new screen while
-    // hidden keeps it, as guests and the program keep theirs.
+    // Shown again: the live picture replaces the still. Hidden: the still,
+    // drawn once per hide, kept for a new screen while hidden, as guests and
+    // the program keep theirs.
     if (!expected.hidden) this.#dropScreenStill()
+    else if (!this.#screenStill) this.#keepScreenStill(raw)
     this.#privacy = {
       ...expected,
       sourceBlockedAt: expected.hidden ? Date.now() : null,
@@ -874,15 +877,10 @@ export class TalkShowRoomClient {
         if (old && room) await room.localParticipant.unpublishTrack(old, true).catch(() => {})
         if (!current() || !raw || !room) return
         try {
-          const guarded = createPrivateScreen(
-            raw,
-            roomScreenPrivacy,
-            () => {
-              if (!current()) return
-              this.#privacyFailed()
-            },
-            (last) => this.#keepScreenStill(last)
-          )
+          const guarded = createPrivateScreen(raw, roomScreenPrivacy, () => {
+            if (!current()) return
+            this.#privacyFailed()
+          })
           if (!current()) {
             guarded.close()
             return
@@ -912,19 +910,22 @@ export class TalkShowRoomClient {
   }
 
   /**
-   * Plan 210 D8 in a room: the host's own frosted look, from the last frame
-   * it published while visible (`createPrivateScreen`'s `lastFrame`), so the
-   * Show stage and the Program preview draw what guests and the program draw.
-   * The copy is a synchronous blit; the frost runs once the hide is done.
-   * Nothing here is published: the wire keeps its neutral grey.
+   * Hide screen in a room: the host's own look of the hidden screen, the
+   * designed still guests and the program draw, at the screen's size. It
+   * never reads the screen. Drawn after the hide, never inside it; nothing
+   * here is published: the wire keeps its neutral grey.
    */
-  #keepScreenStill(last: HTMLCanvasElement): void {
+  #keepScreenStill(raw: MediaStreamTrack | null): void {
     const token = ++this.#stillToken
-    const sample = document.createElement('canvas')
-    if (!keepFrostSample(sample, { image: last, width: last.width, height: last.height })) return
+    const settings = raw?.getSettings?.() ?? {}
     setTimeout(() => {
       if (token !== this.#stillToken || this.#closed) return
-      this.#screenStill = frostedStillUrl(document, sample)
+      this.#screenStill = hiddenStillUrl(
+        document,
+        settings.width ?? 0,
+        settings.height ?? 0,
+        STAGE_STILL_ROWS
+      )
       this.#publish()
     }, 0)
   }

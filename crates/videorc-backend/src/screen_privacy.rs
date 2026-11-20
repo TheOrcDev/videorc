@@ -1,18 +1,17 @@
 //! Hide screen (plan 210 S7): the process-wide privacy gate every screen
-//! capture publishes through, and the frost that replaces the live picture.
+//! capture publishes through, and the still that replaces the live picture.
 //!
 //! The promise is made at the capture source. While hidden, each capture path's
-//! publish point drops live frames and publishes one frosted still in its own
-//! frame format, so the program, the aux stream leg, the vertical leg, the
-//! Screen ISO file, Clips and the native preview, which all read the same
-//! frame store, get the still and nothing else. The decision is pure
+//! publish point drops live frames and publishes one still in its own frame
+//! format, so the program, the aux stream leg, the vertical leg, the Screen ISO
+//! file, Clips and the native preview, which all read the same frame store,
+//! get the still and nothing else. The decision is pure
 //! ([`admit_screen_frame`]) so a new capture path can't forget it, and the
 //! platform glue around it stays thin.
 //!
-//! The frost is a pure function of one frame: an area average down to at most
-//! [`FROST_MAX_HEIGHT`] rows, a Gaussian blur of σ [`FROST_SIGMA`] px at that
-//! size, then one bilinear scale back up. Colours and shapes survive; text
-//! does not. It runs once per hide, never per frame.
+//! The still ([`hidden_still_bgra`]) is a designed picture of the frame's
+//! size and nothing else: it never reads the screen. It is built once per
+//! size and copied on every later hide, never per frame.
 
 use std::sync::Mutex as StdMutex;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -23,13 +22,6 @@ use crate::protocol::{ScreenPrivacy, ScreenPrivacyReason};
 /// session reads the display through FFmpeg itself (plan 210 S7.5).
 pub const SCREEN_HIDE_UNAVAILABLE_LEGACY: &str =
     "Hide screen isn't available on this recording. Stop and record again.";
-
-/// The frosted still is built from a picture at most this many rows tall.
-pub const FROST_MAX_HEIGHT: u32 = 48;
-/// Gaussian σ, in pixels of the small picture.
-pub const FROST_SIGMA: f32 = 2.0;
-/// The still with no frame to frost: a neutral grey, opaque.
-pub const FROST_GREY: [u8; 4] = [0x80, 0x80, 0x80, 0xff];
 
 // ---------------------------------------------------------------------------
 // The gate
@@ -177,7 +169,7 @@ pub enum ScreenFrameAdmission {
     /// Visible: publish the live frame as always.
     Publish,
     /// Hidden and this store has no still for the current span yet: publish
-    /// the frosted still built from this frame (or grey), once.
+    /// the hidden still at this frame's size, once.
     Frost,
     /// Hidden and the still is already published: never publish this frame.
     Hold,
@@ -202,253 +194,225 @@ pub fn admit_screen_frame(
 }
 
 // ---------------------------------------------------------------------------
-// The frost
+// The hidden still
 // ---------------------------------------------------------------------------
+//
+// Owner, live show 2026-11-20, on the frost this replaced: "Hiding is a little
+// bit weird ... make it look good, nice, and like some gradients, like a
+// glassy thing, but without transparency." The still is one designed picture,
+// a pure function of the frame's size: a calm diagonal gradient, two soft
+// glows, a glassy diagonal sheen, and a glass disc with the Hide screen eye in
+// the middle. It is fully opaque and never reads the screen, so nothing of
+// what was hidden shows through it.
+//
+// The same arithmetic, step for step, draws it in the renderer's Show stage
+// (`lib/hidden-still.ts`) and on the web's program and guest pages
+// (`lib/cloud/program/hidden-still.ts`); `protocol-fixtures/hidden-screen-still.json`
+// pins all three to the same pixels, each within one level for its `exp`.
 
-/// The small picture the frost works at, for a frame of `width`×`height`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct FrostPlan {
-    pub width: u32,
-    pub height: u32,
-    pub small_width: u32,
-    pub small_height: u32,
+/// The diagonal gradient: top left, middle, bottom right (sRGB).
+const STILL_TOP_LEFT: [f64; 3] = [46.0, 56.0, 88.0];
+const STILL_MIDDLE: [f64; 3] = [30.0, 33.0, 54.0];
+const STILL_BOTTOM_RIGHT: [f64; 3] = [38.0, 28.0, 58.0];
+/// Corners darken by this much.
+const STILL_VIGNETTE: f64 = 0.16;
+/// (u, v, σ, colour): a cool glow at the top left, a violet one at the
+/// bottom right. σ in min-side units.
+const STILL_GLOWS: [(f64, f64, f64, [f64; 3]); 2] = [
+    (0.22, 0.06, 0.42, [22.0, 34.0, 60.0]),
+    (0.86, 0.98, 0.36, [30.0, 18.0, 46.0]),
+];
+/// (at, σ, amount): lightening bands across the "/" diagonal, the glass sheen.
+const STILL_SHEEN: [(f64, f64, f64); 3] = [
+    (-0.3, 0.16, 0.05),
+    (-0.19, 0.012, 0.03),
+    (0.46, 0.03, 0.018),
+];
+/// The glass disc, in min-side units.
+const DISC_RADIUS: f64 = 0.118;
+const DISC_RIM: f64 = 0.0028;
+const DISC_FILL: f64 = 0.05;
+const DISC_FILL_TOP: f64 = 0.035;
+const DISC_RIM_BASE: f64 = 0.06;
+const DISC_RIM_TOP: f64 = 0.16;
+/// The eye with a slash (Hide screen's icon), in min-side units.
+const EYE_HALF_WIDTH: f64 = 0.058;
+const EYE_HALF_HEIGHT: f64 = 0.034;
+const EYE_STROKE: f64 = 0.0085;
+const PUPIL_RADIUS: f64 = 0.0155;
+const SLASH_X: f64 = 0.05;
+const SLASH_Y: f64 = 0.054;
+const SLASH_GAP: f64 = 0.0075;
+const ICON_AMOUNT: f64 = 0.3;
+/// 4×4 ordered dither, against banding in the encoder.
+const STILL_BAYER: [u8; 16] = [0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5];
+
+fn clamp01(value: f64) -> f64 {
+    value.clamp(0.0, 1.0)
 }
 
-pub fn frost_plan(width: u32, height: u32) -> FrostPlan {
-    let small_height = height.clamp(1, FROST_MAX_HEIGHT);
-    let small_width = if height == 0 {
-        1
-    } else {
-        ((u64::from(width) * u64::from(small_height) + u64::from(height) / 2) / u64::from(height))
-            .clamp(1, u64::from(width.max(1))) as u32
-    };
-    FrostPlan {
-        width,
-        height,
-        small_width,
-        small_height,
-    }
+/// Distance from (px, py) to the segment (ax, ay)–(bx, by).
+fn segment_distance(px: f64, py: f64, ax: f64, ay: f64, bx: f64, by: f64) -> f64 {
+    let dx = bx - ax;
+    let dy = by - ay;
+    let h = clamp01(((px - ax) * dx + (py - ay) * dy) / (dx * dx + dy * dy));
+    let ex = px - ax - dx * h;
+    let ey = py - ay - dy * h;
+    (ex * ex + ey * ey).sqrt()
 }
 
-/// The frosted still for a BGRA8 frame with tight rows, at the frame's own
-/// size. `None` (or a short buffer) gives the neutral grey still. Alpha is
-/// opaque: capture alpha is never trustworthy and the still covers.
-pub fn frost_bgra(width: u32, height: u32, bgra: Option<&[u8]>) -> Vec<u8> {
-    let pixel_count = width as usize * height as usize;
-    if pixel_count == 0 {
-        return Vec::new();
+/// Signed distance to a horizontal lens (the eye's outline): two circles of
+/// radius r, centres d above and below, tips at ±EYE_HALF_WIDTH.
+fn eye_distance(px: f64, py: f64) -> f64 {
+    let a = EYE_HALF_WIDTH;
+    let b = EYE_HALF_HEIGHT;
+    let r = (a * a + b * b) / (2.0 * b);
+    let d = r - b;
+    let qx = py.abs();
+    let qy = px.abs();
+    if (qy - a) * d > qx * a {
+        let ex = qx;
+        let ey = qy - a;
+        return (ex * ex + ey * ey).sqrt();
     }
-    let Some(bgra) = bgra.filter(|bytes| bytes.len() >= pixel_count * 4) else {
-        return FROST_GREY.repeat(pixel_count);
-    };
-    let plan = frost_plan(width, height);
+    let ex = qx + d;
+    (ex * ex + qy * qy).sqrt() - r
+}
+
+fn axis_table(len: usize, value: impl Fn(f64) -> f64) -> Vec<f64> {
+    (0..len).map(|i| value(i as f64)).collect()
+}
+
+/// The still at `width`×`height`: tight BGRA rows, opaque. Empty for an empty
+/// size.
+pub fn hidden_still_pixels(width: u32, height: u32) -> Vec<u8> {
     let (w, h) = (width as usize, height as usize);
-    let (sw, sh) = (plan.small_width as usize, plan.small_height as usize);
-
-    // Issue #1329: the hide builds this under the capture's lock, so the full
-    // frame is read and written as bytes, never as full-size f32 planes. The
-    // arithmetic is the planes form's own (B, G, R in f32; alpha dropped and
-    // rewritten opaque), so the still is byte-identical to it at about a
-    // third of the time (1080p 51 -> 18 ms in release).
-    let narrow = area_resample_horizontal_bgra(&bgra[..pixel_count * 4], w, h, sw);
-    let small = area_resample_vertical(&narrow, sw, h, sh);
-    let blurred = gaussian_blur(&small, sw, sh, FROST_SIGMA);
-    bilinear_upscale_bgra(&blurred, sw, sh, w, h)
-}
-
-fn quantize(value: f32) -> u8 {
-    (value + 0.5).clamp(0.0, 255.0) as u8
-}
-
-/// For each destination index, the source span it averages: start index and
-/// the weight of each covered source index (exact fractional coverage).
-fn area_spans(source_len: usize, dest_len: usize) -> Vec<(usize, Vec<f32>)> {
-    let scale = source_len as f64 / dest_len as f64;
-    (0..dest_len)
-        .map(|index| {
-            let from = index as f64 * scale;
-            let to = ((index + 1) as f64 * scale).min(source_len as f64);
-            let start = from.floor() as usize;
-            let end = (to.ceil() as usize).max(start + 1).min(source_len);
-            let mut weights = Vec::with_capacity(end - start);
-            for source in start..end {
-                let lo = (source as f64).max(from);
-                let hi = ((source + 1) as f64).min(to);
-                weights.push(((hi - lo).max(0.0) / (to - from).max(f64::EPSILON)) as f32);
-            }
-            (start, weights)
-        })
-        .collect()
-}
-
-/// The horizontal area pass straight from BGRA8 bytes (alpha ignored), into
-/// B, G, R f32 planes `dest_w` wide.
-fn area_resample_horizontal_bgra(bgra: &[u8], w: usize, h: usize, dest_w: usize) -> Vec<f32> {
-    if dest_w == w {
-        let mut planes = vec![0.0_f32; w * h * 3];
-        for (cell, pixel) in planes.chunks_exact_mut(3).zip(bgra.chunks_exact(4)) {
-            cell[0] = f32::from(pixel[0]);
-            cell[1] = f32::from(pixel[1]);
-            cell[2] = f32::from(pixel[2]);
-        }
-        return planes;
-    }
-    let spans = area_spans(w, dest_w);
-    let mut out = vec![0.0_f32; dest_w * h * 3];
-    for (y, row) in bgra.chunks_exact(w * 4).enumerate() {
-        for (dx, (start, weights)) in spans.iter().enumerate() {
-            let mut acc = [0.0_f32; 3];
-            let pixels = &row[start * 4..(start + weights.len()) * 4];
-            for (pixel, weight) in pixels.chunks_exact(4).zip(weights) {
-                acc[0] += f32::from(pixel[0]) * weight;
-                acc[1] += f32::from(pixel[1]) * weight;
-                acc[2] += f32::from(pixel[2]) * weight;
-            }
-            let base = (y * dest_w + dx) * 3;
-            out[base..base + 3].copy_from_slice(&acc);
-        }
-    }
-    out
-}
-
-fn area_resample_vertical(planes: &[f32], w: usize, h: usize, dest_h: usize) -> Vec<f32> {
-    if dest_h == h {
-        return planes.to_vec();
-    }
-    let spans = area_spans(h, dest_h);
-    let mut out = vec![0.0_f32; w * dest_h * 3];
-    for (dy, (start, weights)) in spans.iter().enumerate() {
-        let dest_row = &mut out[dy * w * 3..(dy + 1) * w * 3];
-        for (offset, weight) in weights.iter().enumerate() {
-            let source_row = &planes[(start + offset) * w * 3..(start + offset + 1) * w * 3];
-            for (dest, source) in dest_row.iter_mut().zip(source_row) {
-                *dest += source * weight;
-            }
-        }
-    }
-    out
-}
-
-fn gaussian_kernel(sigma: f32) -> Vec<f32> {
-    let radius = (3.0 * sigma).ceil() as i32;
-    let mut kernel: Vec<f32> = (-radius..=radius)
-        .map(|x| (-(x as f32 * x as f32) / (2.0 * sigma * sigma)).exp())
-        .collect();
-    let sum: f32 = kernel.iter().sum();
-    for weight in &mut kernel {
-        *weight /= sum;
-    }
-    kernel
-}
-
-/// A sample index reflected back into `0..len` at the edges, so a border
-/// blurs with its own neighbourhood instead of a smeared edge column.
-fn mirrored_index(index: isize, len: usize) -> usize {
-    let last = len as isize - 1;
-    if last <= 0 {
-        return 0;
-    }
-    let period = 2 * last;
-    let mut i = index.rem_euclid(period);
-    if i > last {
-        i = period - i;
-    }
-    i as usize
-}
-
-/// Separable Gaussian blur with mirrored edges.
-fn gaussian_blur(planes: &[f32], w: usize, h: usize, sigma: f32) -> Vec<f32> {
-    let kernel = gaussian_kernel(sigma);
-    let radius = (kernel.len() / 2) as isize;
-    let mut horizontal = vec![0.0_f32; w * h * 3];
-    for y in 0..h {
-        for x in 0..w {
-            let mut acc = [0.0_f32; 3];
-            for (k, weight) in kernel.iter().enumerate() {
-                let sx = mirrored_index(x as isize + k as isize - radius, w);
-                let base = (y * w + sx) * 3;
-                acc[0] += planes[base] * weight;
-                acc[1] += planes[base + 1] * weight;
-                acc[2] += planes[base + 2] * weight;
-            }
-            let base = (y * w + x) * 3;
-            horizontal[base..base + 3].copy_from_slice(&acc);
-        }
-    }
-    let mut out = vec![0.0_f32; w * h * 3];
-    for y in 0..h {
-        for x in 0..w {
-            let mut acc = [0.0_f32; 3];
-            for (k, weight) in kernel.iter().enumerate() {
-                let sy = mirrored_index(y as isize + k as isize - radius, h);
-                let base = (sy * w + x) * 3;
-                acc[0] += horizontal[base] * weight;
-                acc[1] += horizontal[base + 1] * weight;
-                acc[2] += horizontal[base + 2] * weight;
-            }
-            let base = (y * w + x) * 3;
-            out[base..base + 3].copy_from_slice(&acc);
-        }
-    }
-    out
-}
-
-/// The bilinear scale back up to `w`x`h`, quantized straight into opaque
-/// BGRA8. Each small row is first interpolated across the full width (the
-/// same products the per-pixel form takes, in the same order), so a pixel
-/// costs one vertical blend.
-fn bilinear_upscale_bgra(planes: &[f32], sw: usize, sh: usize, w: usize, h: usize) -> Vec<u8> {
     let mut out = vec![0_u8; w * h * 4];
-    if sw == w && sh == h {
-        for (pixel, source) in out.chunks_exact_mut(4).zip(planes.chunks_exact(3)) {
-            pixel[0] = quantize(source[0]);
-            pixel[1] = quantize(source[1]);
-            pixel[2] = quantize(source[2]);
-            pixel[3] = 0xff;
-        }
+    if w == 0 || h == 0 {
         return out;
     }
-    let x_scale = sw as f32 / w as f32;
-    let y_scale = sh as f32 / h as f32;
-    let max_x = (sw - 1) as f32;
-    let max_y = (sh - 1) as f32;
-    let xs: Vec<(usize, usize, f32)> = (0..w)
-        .map(|x| {
-            let u = (((x as f32 + 0.5) * x_scale) - 0.5).clamp(0.0, max_x);
-            let x0 = u.floor() as usize;
-            (x0, (x0 + 1).min(sw - 1), u - x0 as f32)
+    let (wf, hf) = (w as f64, h as f64);
+    let unit = wf.min(hf);
+
+    let tu = axis_table(w, |x| (x + 0.5) / wf / 2.0);
+    let vu = axis_table(w, |x| {
+        let u = (x + 0.5) / wf;
+        (2.0 * u - 1.0) * (2.0 * u - 1.0)
+    });
+    let tv = axis_table(h, |y| (y + 0.5) / hf / 2.0);
+    let vv = axis_table(h, |y| {
+        let v = (y + 0.5) / hf;
+        (2.0 * v - 1.0) * (2.0 * v - 1.0)
+    });
+    let glow_x: Vec<Vec<f64>> = STILL_GLOWS
+        .iter()
+        .map(|&(u, _, sigma, _)| {
+            axis_table(w, |x| {
+                let g = (x + 0.5 - u * wf) / unit;
+                (-(g * g) / (2.0 * sigma * sigma)).exp()
+            })
         })
         .collect();
-    let mut wide = vec![0.0_f32; sh * w * 3];
-    for (row, dest) in planes
-        .chunks_exact(sw * 3)
-        .zip(wide.chunks_exact_mut(w * 3))
-    {
-        for (cell, &(x0, x1, fx)) in dest.chunks_exact_mut(3).zip(&xs) {
-            for channel in 0..3 {
-                cell[channel] = row[x0 * 3 + channel] * (1.0 - fx) + row[x1 * 3 + channel] * fx;
-            }
+    let glow_y: Vec<Vec<f64>> = STILL_GLOWS
+        .iter()
+        .map(|&(_, v, sigma, _)| {
+            axis_table(h, |y| {
+                let g = (y + 0.5 - v * hf) / unit;
+                (-(g * g) / (2.0 * sigma * sigma)).exp()
+            })
+        })
+        .collect();
+    // The sheen depends on x + y only.
+    let sheen = axis_table(w + h - 1, |k| {
+        let s = (k + 1.0 - (wf + hf) / 2.0) / (unit * std::f64::consts::SQRT_2);
+        let mut amount = 0.0;
+        for &(at, sigma, band) in &STILL_SHEEN {
+            let e = s - at;
+            amount += band * (-(e * e) / (2.0 * sigma * sigma)).exp();
         }
-    }
-    for (y, out_row) in out.chunks_exact_mut(w * 4).enumerate() {
-        let v = (((y as f32 + 0.5) * y_scale) - 0.5).clamp(0.0, max_y);
-        let y0 = v.floor() as usize;
-        let y1 = (y0 + 1).min(sh - 1);
-        let fy = v - y0 as f32;
-        let top = &wide[y0 * w * 3..(y0 + 1) * w * 3];
-        let bottom = &wide[y1 * w * 3..(y1 + 1) * w * 3];
-        for ((pixel, t), b) in out_row
-            .chunks_exact_mut(4)
-            .zip(top.chunks_exact(3))
-            .zip(bottom.chunks_exact(3))
-        {
-            pixel[0] = quantize(t[0] * (1.0 - fy) + b[0] * fy);
-            pixel[1] = quantize(t[1] * (1.0 - fy) + b[1] * fy);
-            pixel[2] = quantize(t[2] * (1.0 - fy) + b[2] * fy);
-            pixel[3] = 0xff;
+        amount
+    });
+
+    let [(_, _, _, c0), (_, _, _, c1)] = STILL_GLOWS;
+    let reach = DISC_RADIUS + 2.0 / unit;
+    for y in 0..h {
+        let py = (y as f64 + 0.5 - hf / 2.0) / unit;
+        let near_y = py.abs() < reach;
+        for x in 0..w {
+            let t = tu[x] + tv[y];
+            let low = t < 0.5;
+            let f = if low { t * 2.0 } else { t * 2.0 - 1.0 };
+            let vignette = 1.0 - (STILL_VIGNETTE * (vu[x] + vv[y])) / 2.0;
+            let e0 = glow_x[0][x] * glow_y[0][y];
+            let e1 = glow_x[1][x] * glow_y[1][y];
+            let lift = sheen[x + y];
+            let mut rgb = [0.0_f64; 3];
+            for (c, value) in rgb.iter_mut().enumerate() {
+                let base = if low {
+                    STILL_TOP_LEFT[c] + (STILL_MIDDLE[c] - STILL_TOP_LEFT[c]) * f
+                } else {
+                    STILL_MIDDLE[c] + (STILL_BOTTOM_RIGHT[c] - STILL_MIDDLE[c]) * f
+                } * vignette;
+                let glowed = base + c0[c] * e0 + c1[c] * e1;
+                *value = glowed + (255.0 - glowed) * lift;
+            }
+
+            let px = (x as f64 + 0.5 - wf / 2.0) / unit;
+            if near_y && px.abs() < reach {
+                let d = (px * px + py * py).sqrt();
+                let top = clamp01(0.5 - py / (2.0 * DISC_RADIUS));
+                let inside = clamp01(0.5 - (d - DISC_RADIUS) * unit);
+                let rim = clamp01(0.5 - ((d - DISC_RADIUS).abs() - DISC_RIM / 2.0) * unit);
+                let slash = segment_distance(px, py, -SLASH_X, -SLASH_Y, SLASH_X, SLASH_Y);
+                let gap = clamp01((slash - EYE_STROKE / 2.0 - SLASH_GAP) * unit + 0.5);
+                let eye = clamp01(0.5 - (eye_distance(px, py).abs() - EYE_STROKE / 2.0) * unit);
+                let pupil = clamp01(0.5 - ((d - PUPIL_RADIUS).abs() - EYE_STROKE / 2.0) * unit);
+                let bar = clamp01(0.5 - (slash - EYE_STROKE / 2.0) * unit);
+                let icon = (eye.max(pupil) * gap).max(bar);
+                for amount in [
+                    (DISC_FILL + DISC_FILL_TOP * top) * inside,
+                    (DISC_RIM_BASE + DISC_RIM_TOP * top) * rim,
+                    ICON_AMOUNT * icon,
+                ] {
+                    for value in &mut rgb {
+                        *value += (255.0 - *value) * amount;
+                    }
+                }
+            }
+
+            let dither = (f64::from(STILL_BAYER[(y & 3) * 4 + (x & 3)]) + 0.5) / 16.0 - 0.5;
+            let level = |value: f64| (value + 0.5 + dither).floor().clamp(0.0, 255.0) as u8;
+            let o = (y * w + x) * 4;
+            out[o] = level(rgb[2]);
+            out[o + 1] = level(rgb[1]);
+            out[o + 2] = level(rgb[0]);
+            out[o + 3] = 0xff;
         }
     }
     out
+}
+
+/// The last still built, by size: a hide repeats the size it hid last time,
+/// so it costs a copy, not a render, under the capture's lock.
+static HIDDEN_STILL_CACHE: StdMutex<Option<CachedStill>> = StdMutex::new(None);
+
+/// A built still: its width, height and pixels.
+type CachedStill = (u32, u32, std::sync::Arc<Vec<u8>>);
+
+/// The still every capture path publishes while the screen is hidden, at the
+/// frame's own size (tight BGRA rows, opaque). It never reads the frame.
+pub fn hidden_still_bgra(width: u32, height: u32) -> Vec<u8> {
+    let mut cache = HIDDEN_STILL_CACHE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some((w, h, still)) = cache.as_ref()
+        && (*w, *h) == (width, height)
+    {
+        return still.as_ref().clone();
+    }
+    let still = std::sync::Arc::new(hidden_still_pixels(width, height));
+    *cache = Some((width, height, std::sync::Arc::clone(&still)));
+    still.as_ref().clone()
 }
 
 // ---------------------------------------------------------------------------
@@ -457,20 +421,14 @@ fn bilinear_upscale_bgra(planes: &[f32], sw: usize, sh: usize, w: usize, h: usiz
 
 #[cfg(target_os = "macos")]
 pub mod macos {
-    use std::ptr::NonNull;
-
     use objc2_core_foundation::{CFDictionary, CFNumber, CFRetained, CFType};
-    use objc2_core_video::{
-        CVPixelBuffer, CVPixelBufferGetBaseAddress, CVPixelBufferGetBytesPerRow,
-        CVPixelBufferLockBaseAddress, CVPixelBufferLockFlags, CVPixelBufferUnlockBaseAddress,
-        kCVPixelFormatType_32BGRA,
-    };
+    use objc2_core_video::kCVPixelFormatType_32BGRA;
     use objc2_io_surface::{
         IOSurfaceLockOptions, IOSurfaceRef, kIOSurfaceAllocSize, kIOSurfaceBytesPerElement,
         kIOSurfaceBytesPerRow, kIOSurfaceHeight, kIOSurfacePixelFormat, kIOSurfaceWidth,
     };
 
-    use crate::frame_store::{RetainedIoSurface, RetainedPixelBuffer};
+    use crate::frame_store::RetainedIoSurface;
 
     /// A new BGRA IOSurface holding `bgra` (tight rows). The compositor
     /// imports it exactly like a ScreenCaptureKit surface.
@@ -543,7 +501,8 @@ pub mod macos {
         Some(RetainedIoSurface::new(surface))
     }
 
-    /// The BGRA pixels of a capture surface, tight rows.
+    /// The BGRA pixels of a surface, tight rows (the round-trip test's reader).
+    #[cfg(test)]
     pub fn read_bgra_from_iosurface(
         surface: &RetainedIoSurface,
         width: u32,
@@ -574,42 +533,6 @@ pub mod macos {
         }
         Some(out)
     }
-
-    /// The BGRA pixels of a retained CoreVideo buffer, tight rows.
-    pub fn read_bgra_from_pixel_buffer(
-        pixel_buffer: &RetainedPixelBuffer,
-        width: u32,
-        height: u32,
-    ) -> Option<Vec<u8>> {
-        let (w, h) = (width as usize, height as usize);
-        let tight_row = w.checked_mul(4)?;
-        if w == 0 || h == 0 {
-            return None;
-        }
-        let pixel_buffer: &CVPixelBuffer = pixel_buffer.pixel_buffer();
-        // SAFETY: a read-only base-address lock around a bounded row copy.
-        unsafe {
-            if CVPixelBufferLockBaseAddress(pixel_buffer, CVPixelBufferLockFlags::ReadOnly) != 0 {
-                return None;
-            }
-            let pitch = CVPixelBufferGetBytesPerRow(pixel_buffer);
-            let Some(base) = NonNull::new(CVPixelBufferGetBaseAddress(pixel_buffer)) else {
-                CVPixelBufferUnlockBaseAddress(pixel_buffer, CVPixelBufferLockFlags::ReadOnly);
-                return None;
-            };
-            let base = base.as_ptr().cast::<u8>();
-            let mut out = vec![0_u8; tight_row * h];
-            for row in 0..h {
-                std::ptr::copy_nonoverlapping(
-                    base.add(row * pitch),
-                    out.as_mut_ptr().add(row * tight_row),
-                    tight_row,
-                );
-            }
-            CVPixelBufferUnlockBaseAddress(pixel_buffer, CVPixelBufferLockFlags::ReadOnly);
-            Some(out)
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -620,83 +543,12 @@ pub mod macos {
 pub mod d3d11 {
     use anyhow::{Context, Result, ensure};
     use windows::Win32::Graphics::Direct3D11::{
-        D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE, D3D11_CPU_ACCESS_READ,
-        D3D11_MAP_READ, D3D11_MAPPED_SUBRESOURCE, D3D11_SUBRESOURCE_DATA, D3D11_TEXTURE2D_DESC,
-        D3D11_USAGE_DEFAULT, D3D11_USAGE_STAGING, ID3D11Device, ID3D11Texture2D,
+        D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE, D3D11_SUBRESOURCE_DATA,
+        D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT, ID3D11Device, ID3D11Texture2D,
     };
     use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC};
 
     use crate::frame_store::RetainedD3D11Texture;
-
-    /// A capture texture's BGRA pixels (tight rows) through a staging copy on
-    /// the texture's own device. The capture device is multithread-protected,
-    /// so this runs from the capture thread or from the hide RPC alike.
-    pub fn read_bgra_texture(texture: &RetainedD3D11Texture) -> Result<(u32, u32, Vec<u8>)> {
-        let source = texture.texture();
-        let mut desc = D3D11_TEXTURE2D_DESC::default();
-        // SAFETY: querying a live COM texture.
-        unsafe { source.GetDesc(&mut desc) };
-        ensure!(
-            desc.Format == DXGI_FORMAT_B8G8R8A8_UNORM,
-            "the screen texture is not BGRA8 ({:?})",
-            desc.Format
-        );
-        ensure!(
-            desc.Width > 0 && desc.Height > 0,
-            "the screen texture is empty"
-        );
-        // SAFETY: the device and context that own the texture.
-        let device: ID3D11Device = unsafe { source.GetDevice() }?;
-        let context = unsafe { device.GetImmediateContext() }?;
-        let staging_desc = D3D11_TEXTURE2D_DESC {
-            Width: desc.Width,
-            Height: desc.Height,
-            MipLevels: 1,
-            ArraySize: 1,
-            Format: desc.Format,
-            SampleDesc: desc.SampleDesc,
-            Usage: D3D11_USAGE_STAGING,
-            BindFlags: 0,
-            CPUAccessFlags: D3D11_CPU_ACCESS_READ.0 as u32,
-            MiscFlags: 0,
-        };
-        let mut staging = None;
-        // SAFETY: a staging texture of the source's geometry.
-        unsafe { device.CreateTexture2D(&staging_desc, None, Some(&mut staging)) }
-            .context("could not create the Hide screen staging texture")?;
-        let staging = staging.context("D3D11 returned no staging texture")?;
-        // SAFETY: GPU copy, then a CPU map of the staging texture.
-        unsafe { context.CopyResource(&staging, source) };
-        let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
-        unsafe { context.Map(&staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped)) }
-            .context("could not map the Hide screen staging texture")?;
-        let result = (|| -> Result<Vec<u8>> {
-            ensure!(!mapped.pData.is_null(), "staging texture mapped to null");
-            let (w, h) = (desc.Width as usize, desc.Height as usize);
-            let tight_row = w * 4;
-            let pitch = mapped.RowPitch as usize;
-            ensure!(
-                pitch >= tight_row,
-                "staging row pitch is narrower than a row"
-            );
-            let mut out = vec![0_u8; tight_row * h];
-            // SAFETY: bounded row copies from the mapped pointer.
-            unsafe {
-                let base = mapped.pData.cast::<u8>();
-                for row in 0..h {
-                    std::ptr::copy_nonoverlapping(
-                        base.add(row * pitch),
-                        out.as_mut_ptr().add(row * tight_row),
-                        tight_row,
-                    );
-                }
-            }
-            Ok(out)
-        })();
-        // SAFETY: unmap what was mapped above.
-        unsafe { context.Unmap(&staging, 0) };
-        Ok((desc.Width, desc.Height, result?))
-    }
 
     /// A new default-usage BGRA8 texture holding `bgra` (tight rows), on the
     /// same device and adapter as `like`, bindable as a shader resource and a
@@ -745,14 +597,21 @@ pub mod d3d11 {
         ))
     }
 
-    /// The frosted still of a capture texture, as a texture plus its pixels.
-    pub fn frost_texture(
+    /// The hidden still at a capture texture's size, as a texture on its
+    /// device plus the still's pixels. The texture's pixels are never read.
+    pub fn still_texture(
         texture: &RetainedD3D11Texture,
     ) -> Result<(u32, u32, RetainedD3D11Texture, Vec<u8>)> {
-        let (width, height, live) = read_bgra_texture(texture)?;
-        let frosted = super::frost_bgra(width, height, Some(&live));
-        let still = create_bgra_texture(texture, width, height, &frosted)?;
-        Ok((width, height, still, frosted))
+        let mut desc = D3D11_TEXTURE2D_DESC::default();
+        // SAFETY: querying a live COM texture.
+        unsafe { texture.texture().GetDesc(&mut desc) };
+        ensure!(
+            desc.Width > 0 && desc.Height > 0,
+            "the screen texture is empty"
+        );
+        let still = super::hidden_still_bgra(desc.Width, desc.Height);
+        let made = create_bgra_texture(texture, desc.Width, desc.Height, &still)?;
+        Ok((desc.Width, desc.Height, made, still))
     }
 }
 
@@ -764,124 +623,10 @@ pub mod d3d11 {
 mod tests {
     use super::*;
 
-    // The f32-planes frost as it was before issue #1329, kept as the
-    // reference the byte-path frost must match exactly.
-    fn frost_bgra_planes_reference(width: u32, height: u32, bgra: &[u8]) -> Vec<u8> {
-        let pixel_count = width as usize * height as usize;
-        let plan = frost_plan(width, height);
-        let (w, h) = (width as usize, height as usize);
-        let (sw, sh) = (plan.small_width as usize, plan.small_height as usize);
-        let mut planes = vec![0.0_f32; w * h * 3];
-        for (index, pixel) in bgra[..pixel_count * 4].chunks_exact(4).enumerate() {
-            planes[index * 3] = f32::from(pixel[0]);
-            planes[index * 3 + 1] = f32::from(pixel[1]);
-            planes[index * 3 + 2] = f32::from(pixel[2]);
-        }
-        let narrow = area_resample_horizontal(&planes, w, h, sw);
-        let small = area_resample_vertical(&narrow, sw, h, sh);
-        let blurred = gaussian_blur(&small, sw, sh, FROST_SIGMA);
-        let full = bilinear_upscale(&blurred, sw, sh, w, h);
-        let mut out = vec![0_u8; pixel_count * 4];
-        for (index, pixel) in out.chunks_exact_mut(4).enumerate() {
-            pixel[0] = quantize(full[index * 3]);
-            pixel[1] = quantize(full[index * 3 + 1]);
-            pixel[2] = quantize(full[index * 3 + 2]);
-            pixel[3] = 0xff;
-        }
-        out
-    }
-
-    fn area_resample_horizontal(planes: &[f32], w: usize, h: usize, dest_w: usize) -> Vec<f32> {
-        if dest_w == w {
-            return planes.to_vec();
-        }
-        let spans = area_spans(w, dest_w);
-        let mut out = vec![0.0_f32; dest_w * h * 3];
-        for y in 0..h {
-            let row = &planes[y * w * 3..(y + 1) * w * 3];
-            for (dx, (start, weights)) in spans.iter().enumerate() {
-                let mut acc = [0.0_f32; 3];
-                for (offset, weight) in weights.iter().enumerate() {
-                    let sx = start + offset;
-                    acc[0] += row[sx * 3] * weight;
-                    acc[1] += row[sx * 3 + 1] * weight;
-                    acc[2] += row[sx * 3 + 2] * weight;
-                }
-                let base = (y * dest_w + dx) * 3;
-                out[base..base + 3].copy_from_slice(&acc);
-            }
-        }
-        out
-    }
-
-    fn bilinear_upscale(planes: &[f32], sw: usize, sh: usize, w: usize, h: usize) -> Vec<f32> {
-        if sw == w && sh == h {
-            return planes.to_vec();
-        }
-        let mut out = vec![0.0_f32; w * h * 3];
-        let x_scale = sw as f32 / w as f32;
-        let y_scale = sh as f32 / h as f32;
-        let max_x = (sw - 1) as f32;
-        let max_y = (sh - 1) as f32;
-        let xs: Vec<(usize, usize, f32)> = (0..w)
-            .map(|x| {
-                let u = (((x as f32 + 0.5) * x_scale) - 0.5).clamp(0.0, max_x);
-                let x0 = u.floor() as usize;
-                (x0, (x0 + 1).min(sw - 1), u - x0 as f32)
-            })
-            .collect();
-        for y in 0..h {
-            let v = (((y as f32 + 0.5) * y_scale) - 0.5).clamp(0.0, max_y);
-            let y0 = v.floor() as usize;
-            let y1 = (y0 + 1).min(sh - 1);
-            let fy = v - y0 as f32;
-            for (x, &(x0, x1, fx)) in xs.iter().enumerate() {
-                let base = (y * w + x) * 3;
-                for channel in 0..3 {
-                    let top = planes[(y0 * sw + x0) * 3 + channel] * (1.0 - fx)
-                        + planes[(y0 * sw + x1) * 3 + channel] * fx;
-                    let bottom = planes[(y1 * sw + x0) * 3 + channel] * (1.0 - fx)
-                        + planes[(y1 * sw + x1) * 3 + channel] * fx;
-                    out[base + channel] = top * (1.0 - fy) + bottom * fy;
-                }
-            }
-        }
-        out
-    }
-
-    #[test]
-    fn the_byte_path_frost_matches_the_planes_frost_exactly() {
-        let mut seed = 0x1329_u64;
-        let mut next = move || {
-            seed ^= seed << 13;
-            seed ^= seed >> 7;
-            seed ^= seed << 17;
-            (seed & 0xff) as u8
-        };
-        for (w, h) in [
-            (1920_u32, 1080_u32),
-            (1280, 720),
-            (641, 47),
-            (640, 48),
-            (100, 30),
-            (48, 48),
-            (7, 5),
-            (3, 200),
-            (1, 1),
-        ] {
-            let len = w as usize * h as usize * 4;
-            let noise: Vec<u8> = (0..len).map(|_| next()).collect();
-            let stripes: Vec<u8> = (0..len)
-                .map(|i| if (i / 4 / 9) % 2 == 0 { 250 } else { 3 })
-                .collect();
-            for (name, bgra) in [("noise", &noise), ("stripes", &stripes)] {
-                assert!(
-                    frost_bgra(w, h, Some(bgra)) == frost_bgra_planes_reference(w, h, bgra),
-                    "{name} {w}x{h}"
-                );
-            }
-        }
-    }
+    /// The smokes call a frame hidden when it has almost no neighbouring pixel
+    /// pairs that jump by more than 200 summed over R, G and B
+    /// (`SHARP_EDGE_THRESHOLD`); every pair in the still stays under this.
+    const HIDDEN_STILL_EDGE_MAX: u32 = 190;
 
     fn gate() -> ScreenPrivacyGate {
         ScreenPrivacyGate::default()
@@ -986,228 +731,142 @@ mod tests {
         );
     }
 
-    #[test]
-    fn frost_plan_keeps_the_aspect_ratio_and_never_upscales() {
-        let plan = frost_plan(1920, 1080);
-        assert_eq!((plan.small_width, plan.small_height), (85, 48));
-        let plan = frost_plan(3840, 2160);
-        assert_eq!((plan.small_width, plan.small_height), (85, 48));
-        let plan = frost_plan(1080, 1920);
-        assert_eq!((plan.small_width, plan.small_height), (27, 48));
-        let plan = frost_plan(100, 30);
-        assert_eq!((plan.small_width, plan.small_height), (100, 30));
-        let plan = frost_plan(64, 36);
-        assert_eq!((plan.small_width, plan.small_height), (64, 36));
-        let plan = frost_plan(1, 1);
-        assert_eq!((plan.small_width, plan.small_height), (1, 1));
-    }
-
-    #[test]
-    fn frost_without_a_frame_is_neutral_grey() {
-        let still = frost_bgra(8, 4, None);
-        assert_eq!(still.len(), 8 * 4 * 4);
-        assert!(still.chunks_exact(4).all(|px| px == FROST_GREY));
-        let short = frost_bgra(8, 4, Some(&[0; 16]));
-        assert!(short.chunks_exact(4).all(|px| px == FROST_GREY));
-        assert!(frost_bgra(0, 4, None).is_empty());
-    }
-
-    #[test]
-    fn frost_keeps_size_and_colour() {
-        let (w, h) = (1920_u32, 1080_u32);
-        let red = [0_u8, 0, 220, 0].repeat((w * h) as usize);
-        let still = frost_bgra(w, h, Some(&red));
-        assert_eq!(still.len(), red.len());
-        for px in still.chunks_exact(4) {
-            assert!(px[0] <= 1 && px[1] <= 1, "blue/green leaked in: {px:?}");
-            assert!((219..=221).contains(&px[2]), "red drifted: {px:?}");
-            assert_eq!(px[3], 0xff, "the still is opaque");
-        }
-    }
-
-    /// A 5×7 block font, enough for the fixture's word.
-    fn glyph(letter: char) -> [u8; 7] {
-        match letter {
-            'P' => [
-                0b11110, 0b10001, 0b10001, 0b11110, 0b10000, 0b10000, 0b10000,
-            ],
-            'A' => [
-                0b01110, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001,
-            ],
-            'S' => [
-                0b01111, 0b10000, 0b10000, 0b01110, 0b00001, 0b00001, 0b11110,
-            ],
-            'W' => [
-                0b10001, 0b10001, 0b10001, 0b10101, 0b10101, 0b10101, 0b01010,
-            ],
-            'O' => [
-                0b01110, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110,
-            ],
-            'R' => [
-                0b11110, 0b10001, 0b10001, 0b11110, 0b10100, 0b10010, 0b10001,
-            ],
-            'D' => [
-                0b11110, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b11110,
-            ],
-            _ => [0; 7],
-        }
-    }
-
-    /// White 1920×1080 with "PASSWORD" in 72 px black block glyphs across
-    /// the middle, like a password field a screen capture would show.
-    fn text_fixture(w: usize, h: usize) -> Vec<u8> {
-        let mut bgra = vec![0xff_u8; w * h * 4];
-        let glyph_height = 72_usize;
-        let glyph_width = glyph_height * 5 / 7;
-        let advance = glyph_width + glyph_height / 4;
-        let top = h / 2 - glyph_height / 2;
-        let mut left = w / 8;
-        for letter in "PASSWORD".chars() {
-            let rows = glyph(letter);
-            for y in 0..glyph_height {
-                let row = rows[y * 7 / glyph_height];
-                for x in 0..glyph_width {
-                    let column = 4 - x * 5 / glyph_width;
-                    if row & (1 << column) != 0 {
-                        let index = ((top + y) * w + left + x) * 4;
-                        bgra[index..index + 3].copy_from_slice(&[0, 0, 0]);
-                    }
+    /// The largest R+G+B jump between neighbouring pixels.
+    fn max_edge(bgra: &[u8], w: usize, h: usize) -> u32 {
+        let jump = |a: usize, b: usize| -> u32 {
+            (0..3)
+                .map(|c| u32::from(bgra[a + c].abs_diff(bgra[b + c])))
+                .sum()
+        };
+        let mut max = 0;
+        for y in 0..h {
+            for x in 0..w {
+                let o = (y * w + x) * 4;
+                if x + 1 < w {
+                    max = max.max(jump(o, o + 4));
+                }
+                if y + 1 < h {
+                    max = max.max(jump(o, o + w * 4));
                 }
             }
-            left += advance;
         }
-        bgra
-    }
-
-    fn luma(bgra: &[u8], w: usize, h: usize) -> Vec<f32> {
-        (0..w * h)
-            .map(|i| {
-                let px = &bgra[i * 4..i * 4 + 4];
-                0.114 * f32::from(px[0]) + 0.587 * f32::from(px[1]) + 0.299 * f32::from(px[2])
-            })
-            .collect()
-    }
-
-    /// Mean and max absolute horizontal luma step: the high-frequency energy
-    /// a glyph edge carries.
-    fn horizontal_edges(luma: &[f32], w: usize, h: usize) -> (f32, f32) {
-        let mut sum = 0.0_f32;
-        let mut max = 0.0_f32;
-        for y in 0..h {
-            for x in 1..w {
-                let step = (luma[y * w + x] - luma[y * w + x - 1]).abs();
-                sum += step;
-                max = max.max(step);
-            }
-        }
-        (sum / ((w - 1) * h) as f32, max)
-    }
-
-    /// Row means over a band of rows. Inside the text band the rows differ
-    /// while the letters are legible (a bar row is darker than a stem row);
-    /// that is the variance between glyph rows that must collapse. The band
-    /// as a whole staying a little darker than the margins is the shape the
-    /// frost keeps on purpose.
-    fn row_mean_spread(luma: &[f32], w: usize, rows: std::ops::Range<usize>) -> f32 {
-        let means: Vec<f32> = rows
-            .map(|y| luma[y * w..(y + 1) * w].iter().sum::<f32>() / w as f32)
-            .collect();
-        let max = means.iter().cloned().fold(f32::MIN, f32::max);
-        let min = means.iter().cloned().fold(f32::MAX, f32::min);
-        max - min
-    }
-
-    /// The glyph structure of a band's row means with the band's own smooth
-    /// shading removed: each row mean minus the mean of its eleven nearest
-    /// rows. Strokes of 72 px text are about ten rows tall, so a legible
-    /// fixture has jumps at every stroke edge that an eleven-row average
-    /// keeps; the frosted band is one smooth bump, which it removes.
-    fn detrended_row_spread(luma: &[f32], w: usize, rows: std::ops::Range<usize>) -> f32 {
-        let means: Vec<f32> = rows
-            .map(|y| luma[y * w..(y + 1) * w].iter().sum::<f32>() / w as f32)
-            .collect();
-        (0..means.len())
-            .map(|y| {
-                let lo = y.saturating_sub(5);
-                let hi = (y + 6).min(means.len());
-                let local = means[lo..hi].iter().sum::<f32>() / (hi - lo) as f32;
-                (means[y] - local).abs()
-            })
-            .fold(0.0_f32, f32::max)
+        max
     }
 
     #[test]
-    fn frost_makes_seventy_two_pixel_text_unreadable() {
-        let (w, h) = (1920_usize, 1080_usize);
-        let band = (h / 2 - 36)..(h / 2 + 36);
-        let live = text_fixture(w, h);
-        let live_luma = luma(&live, w, h);
-        let (live_mean_step, live_max_step) = horizontal_edges(&live_luma, w, h);
-        let live_spread = detrended_row_spread(&live_luma, w, band.clone());
-        assert!(live_max_step > 200.0, "the fixture has hard glyph edges");
-        assert!(
-            live_spread > 3.0,
-            "glyph rows differ while legible: {live_spread}"
-        );
-
-        let still = frost_bgra(w as u32, h as u32, Some(&live));
-        assert_eq!(still.len(), live.len());
-        let still_luma = luma(&still, w, h);
-        let (mean_step, max_step) = horizontal_edges(&still_luma, w, h);
-        let spread = detrended_row_spread(&still_luma, w, band);
-
-        // Why these bounds: a legible edge is a luma step of well over 40 within
-        // a pixel or two. At 48 rows the 72 px glyphs are 3.2 px tall, under
-        // the σ 2 px blur's support (±6 px), so every stroke averages into its
-        // neighbours; scaled back up by 22.5×, the steepest surviving ramp is
-        // spread over tens of pixels. Per-pixel steps under 2 luma and a mean
-        // under 0.1 leave no edge to read. Inside the band, a stroke edge of
-        // the legible fixture leaves a detrended row residual above 8 luma;
-        // under 1 luma (and twenty times less than live) is what the bilinear
-        // upscale's own kinks between small rows leave, with no glyph in it.
-        assert!(
-            max_step < 2.0,
-            "an edge survived the frost: max step {max_step}"
-        );
-        assert!(
-            mean_step < 0.1,
-            "high-frequency energy survived: mean step {mean_step}"
-        );
-        assert!(
-            spread < live_spread / 20.0 && spread < 1.0,
-            "glyph rows still differ inside the band: spread {spread} vs live {live_spread}"
-        );
-        assert!(
-            live_mean_step > mean_step * 20.0,
-            "the frost removed too little energy: {live_mean_step} vs {mean_step}"
-        );
-        // The shape stays: the band is still a little darker than the margins.
-        let margin_rows = 0..64;
-        let margin = row_mean_spread(&still_luma, w, margin_rows);
-        assert!(margin < 1.0, "the margins are flat: {margin}");
-        let band_mean = still_luma[(h / 2) * w..(h / 2 + 1) * w].iter().sum::<f32>() / w as f32;
-        let margin_mean = still_luma[..w].iter().sum::<f32>() / w as f32;
-        assert!(band_mean < margin_mean, "the text band vanished entirely");
+    fn the_hidden_still_is_opaque_at_the_frames_size_and_soft() {
+        for (w, h) in [
+            (1920, 1080),
+            (1080, 1920),
+            (3840, 2160),
+            (640, 360),
+            (97, 55),
+            (3, 2),
+        ] {
+            let still = hidden_still_pixels(w, h);
+            assert_eq!(still.len(), (w * h * 4) as usize, "{w}x{h}");
+            assert!(
+                still.chunks_exact(4).all(|px| px[3] == 0xff),
+                "{w}x{h} opaque"
+            );
+            // The smokes read a frame with hard edges as the live screen.
+            let edge = max_edge(&still, w as usize, h as usize);
+            assert!(edge <= HIDDEN_STILL_EDGE_MAX, "{w}x{h}: an edge of {edge}");
+        }
+        assert!(hidden_still_pixels(0, 4).is_empty());
+        assert!(hidden_still_bgra(4, 0).is_empty());
     }
 
     #[test]
-    fn frost_keeps_large_shapes() {
-        // A left black half and a right white half: the shape survives as a
-        // ramp, so the viewer still sees "a dark app on the left".
-        let (w, h) = (640_u32, 360_u32);
-        let mut bgra = vec![0xff_u8; (w * h * 4) as usize];
-        for y in 0..h as usize {
-            for x in 0..(w / 2) as usize {
-                let i = (y * w as usize + x) * 4;
-                bgra[i..i + 3].copy_from_slice(&[0, 0, 0]);
+    fn the_hidden_still_is_designed_not_flat() {
+        let (w, h) = (640_usize, 360_usize);
+        let still = hidden_still_pixels(w as u32, h as u32);
+        let at = |x: usize, y: usize| {
+            let o = (y * w + x) * 4;
+            [still[o + 2], still[o + 1], still[o]]
+        };
+        // A cool top left, a violet bottom right, a lighter glass disc with
+        // the eye in the middle.
+        let top_left = at(40, 30);
+        let bottom_right = at(600, 330);
+        assert!(
+            top_left[2] > top_left[0] + 30,
+            "blue at the top left: {top_left:?}"
+        );
+        assert!(
+            bottom_right[0] > bottom_right[1],
+            "violet at the bottom right: {bottom_right:?}"
+        );
+        let disc = at(320, 180 + 30);
+        let outside = at(320, 180 + 60);
+        assert!(
+            disc.iter().zip(outside).all(|(a, b)| *a > b),
+            "{disc:?} vs {outside:?}"
+        );
+        // Not the old grey, anywhere.
+        assert!(
+            still
+                .chunks_exact(4)
+                .all(|px| px[..3].iter().any(|c| c.abs_diff(0x80) > 6))
+        );
+    }
+
+    #[test]
+    fn the_hidden_still_is_cached_by_size() {
+        let a = hidden_still_bgra(97, 55);
+        let b = hidden_still_bgra(55, 97);
+        assert_eq!(a, hidden_still_pixels(97, 55));
+        assert_eq!(b, hidden_still_pixels(55, 97));
+        assert_eq!(hidden_still_bgra(97, 55), a);
+    }
+
+    /// The renderer's and the web's stills match this one: the shared fixture.
+    #[test]
+    fn the_hidden_still_matches_the_shared_fixture() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../protocol-fixtures/hidden-screen-still.json"
+        ))
+        .expect("protocol-fixtures/hidden-screen-still.json is valid JSON");
+        let level = fixture["tolerance"]["level"].as_i64().unwrap();
+        let mean_tolerance = fixture["tolerance"]["mean"].as_f64().unwrap();
+        for one in fixture["stills"].as_array().unwrap() {
+            let w = one["width"].as_u64().unwrap() as usize;
+            let h = one["height"].as_u64().unwrap() as usize;
+            let still = hidden_still_pixels(w as u32, h as u32);
+            for sample in one["samples"].as_array().unwrap() {
+                let v: Vec<i64> = sample
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|n| n.as_i64().unwrap())
+                    .collect();
+                let o = (v[1] as usize * w + v[0] as usize) * 4;
+                let got = [still[o + 2], still[o + 1], still[o]];
+                for c in 0..3 {
+                    assert!(
+                        (i64::from(got[c]) - v[2 + c]).abs() <= level,
+                        "{w}x{h} at ({}, {}): {got:?} vs {:?}",
+                        v[0],
+                        v[1],
+                        &v[2..]
+                    );
+                }
+            }
+            let mut sum = [0_u64; 3];
+            for px in still.chunks_exact(4) {
+                sum[0] += u64::from(px[2]);
+                sum[1] += u64::from(px[1]);
+                sum[2] += u64::from(px[0]);
+            }
+            for c in 0..3 {
+                let mean = sum[c] as f64 / (w * h) as f64;
+                let want = one["mean"][c].as_f64().unwrap();
+                assert!(
+                    (mean - want).abs() <= mean_tolerance,
+                    "{w}x{h} channel {c}: {mean} vs {want}"
+                );
             }
         }
-        let still = frost_bgra(w, h, Some(&bgra));
-        let still_luma = luma(&still, w as usize, h as usize);
-        let left = still_luma[(180 * w + 40) as usize];
-        let right = still_luma[(180 * w + 600) as usize];
-        assert!(left < 30.0, "the dark half went away: {left}");
-        assert!(right > 225.0, "the light half went away: {right}");
     }
 
     /// The shared wire fixture: absent fields are omitted, never `null`, and
