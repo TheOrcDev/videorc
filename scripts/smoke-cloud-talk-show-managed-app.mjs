@@ -394,6 +394,13 @@ try {
       await h.rpc('cloud.show.goLive', { streaming: h.streaming() })
       await h.status((s) => s.room?.client === 'connected', 'desktop host before continuation')
       const before = structuredClone(h.web.snapshot(h.showId).state.room.stage)
+      // Plan 254 S4: the show's chat follow is this computer's while it holds
+      // the show, leaves with the hand-off, and comes back with Continue here.
+      const chat = () => h.rpc('liveChat.status')
+      await waitFor(
+        async () => (await chat()).sessionId === h.showId,
+        'chat follows the show before the host moves'
+      )
       const phone = h.newDevice()
       const at = Date.now()
       const go = await h.webRequest('on-air', { device: phone, source: 'host', step: 'go' })
@@ -433,6 +440,10 @@ try {
         3000
       )
       await h.captureNotifications('taken-over')
+      await waitFor(
+        async () => (await chat()).sessionId !== h.showId,
+        'the takeover stops this computer following the chat'
+      )
       await holdFor(
         () => {
           const room = h.web.snapshot(h.showId).state.room
@@ -454,6 +465,29 @@ try {
       await waitFor(
         () => listener.hostWasReplaced(),
         'browser host displaced by desktop duplicate identity'
+      )
+      // No manual step: the follow is back, and nothing that settles after
+      // the take-back (the Clips stop as the room takes the camera, a late
+      // state from the other device) ends it again.
+      await waitFor(
+        async () => (await chat()).sessionId === h.showId,
+        'chat follows the show again after Continue here',
+        15000
+      )
+      await holdFor(
+        async () => {
+          const snapshot = await chat()
+          return (
+            snapshot.sessionId === h.showId &&
+            !snapshot.providers.some((provider) => provider.state === 'ended')
+          )
+        },
+        'the chat follow ended again after Continue here',
+        6000
+      )
+      assert.ok(
+        (await h.rpc('cloud.status')).legs?.every((leg) => leg.state !== 'stopped'),
+        'the legs read from the runner after Continue here, none ended'
       )
       assert.deepEqual(h.web.snapshot(h.showId).state.room.stage, before)
       assert.ok(h.calls('onAir', at).some((c) => c.body.source === 'host' && c.body.step === 'go'))

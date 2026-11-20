@@ -368,4 +368,75 @@ describe('talk show room as the session', () => {
       relay.dispose()
     }
   })
+
+  // Plan 254 S4 (2026-11-19): Mac → phone → Mac. The window read "YouTube
+  // ended" and "–" viewers after the take-back while YouTube was live.
+  it('reads the show again when this computer takes it back from another device', async () => {
+    vi.useFakeTimers()
+    const pushed: import('../../../shared/live-dashboard').LiveDashboardState[] = []
+    vi.stubGlobal('window', {
+      videorc: {
+        getDashboard: async () => null,
+        pushDashboard: async (state: (typeof pushed)[number]) => {
+          pushed.push(state)
+        }
+      }
+    })
+    const youtube = {
+      targetId: 'youtube-1',
+      platform: 'youtube' as const,
+      label: 'YouTube',
+      state: 'live' as const
+    }
+    const live = cloud({ live: true, liveSince: at }, { legs: [youtube] })
+    let viewers = 12
+    const requestTyped = vi.fn((method: string) => {
+      if (method === 'cloud.status') return Promise.resolve(live)
+      if (method === 'sessions.comments.totals') return Promise.resolve(totals(show, 5))
+      if (method === 'sessions.viewers.list')
+        return Promise.resolve({ samples: [sample(show, viewers)] })
+      return Promise.resolve(null)
+    })
+    const calls = (method: string): number =>
+      requestTyped.mock.calls.filter(([called]) => called === method).length
+    const relay = await startLiveDashboardRelay({
+      client: { requestTyped } as unknown as BackendClient,
+      isCurrent: () => true
+    })
+    try {
+      relay.feed('cloud.state', live)
+      await vi.advanceTimersByTimeAsync(1000)
+      expect(pushed.at(-1)?.session.state).toBe('live')
+      expect(pushed.at(-1)?.targets).toEqual([youtube])
+      expect(calls('sessions.viewers.list')).toBe(1)
+      expect(calls('stream.audience.snapshot')).toBe(1)
+
+      // Handed to the phone: the show stays live there, and every state
+      // meanwhile reads nothing again.
+      const handedOff = cloud(
+        { live: true, liveSince: at, client: 'idle' },
+        { legs: [youtube], stoppedBy: 'hand-off' }
+      )
+      relay.feed('cloud.state', handedOff)
+      relay.feed('cloud.state', handedOff)
+      await vi.advanceTimersByTimeAsync(1000)
+      expect(calls('sessions.viewers.list')).toBe(1)
+
+      // Continue here: on air under the show id with the runner's legs live,
+      // and the viewers, audience and totals read again, once.
+      viewers = 20
+      relay.feed('cloud.state', live)
+      relay.feed('cloud.state', live)
+      await vi.advanceTimersByTimeAsync(1000)
+      expect(pushed.at(-1)?.sessionId).toBe(show)
+      expect(pushed.at(-1)?.session.state).toBe('live')
+      expect(pushed.at(-1)?.targets).toEqual([youtube])
+      expect(pushed.at(-1)?.targets.some((target) => target.state === 'stopped')).toBe(false)
+      expect(calls('sessions.viewers.list')).toBe(2)
+      expect(calls('stream.audience.snapshot')).toBe(2)
+      expect(calls('sessions.comments.totals')).toBe(2)
+    } finally {
+      relay.dispose()
+    }
+  })
 })

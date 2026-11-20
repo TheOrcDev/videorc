@@ -1348,6 +1348,16 @@ impl CloudShowRuntime {
         })
     }
 
+    /// Plan 254 S4: the show whose room this desktop holds. Its chat, viewers
+    /// and Sidekick are named by this id and live and die with the room,
+    /// never with a local Clips session that runs beside it.
+    pub fn held_talk_show_id(&self) -> Option<String> {
+        if !self.talk_show_open() {
+            return None;
+        }
+        self.show.as_ref().map(|show| show.record.id.clone())
+    }
+
     /// S4: a local preview is never evidence that a cloud output can show a
     /// generated bubble. Renderer reports expire and are reset on room loss.
     pub fn room_avatar_visible(&self, stream: bool, recording: bool) -> Option<bool> {

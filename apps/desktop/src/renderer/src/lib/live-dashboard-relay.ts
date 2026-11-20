@@ -301,10 +301,17 @@ export async function startLiveDashboardRelay({
         if (!status) return
         cloudStateSeen = true
         relay.cloud(status)
-        // A talk show on air or recording: its history and totals, once.
         const { sessionId, session } = relay.current()
-        if (sessionId && session.state !== 'off-air' && sessionId === status.show?.id)
-          hydrate(sessionId)
+        const showId = status.show?.id
+        // Plan 254 S4: a show handed to another device, or off air, is read
+        // again when this computer has it back (Continue here, or the next
+        // Go Live): its viewers, audience and totals, with no manual step.
+        if (status.stoppedBy || session.state === 'off-air') {
+          if (showId && hydratedSessionId === showId) hydratedSessionId = null
+          return
+        }
+        // A talk show on air or recording: its history and totals, once.
+        if (sessionId && sessionId === showId) hydrate(sessionId)
         return
       }
       case 'watchdog.alerts':

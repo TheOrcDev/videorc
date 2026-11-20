@@ -13028,11 +13028,8 @@ async fn handle_text_message_with_role(
                     Ok(status) => {
                         spawn_active_takeover_push(state);
                         // Plan 249 S18: chat, viewers and audience follow the show
-                        // to this owner, once, with its history. After a relaunch
-                        // the runner's legs can land just after this answer.
-                        if reattach_cloud_show_services(state).await == Some("not-live") {
-                            spawn_late_cloud_show_reattach(state);
-                        }
+                        // to this owner, once, with its history.
+                        reattach_cloud_show_services_after_resume(state).await;
                         ServerResponse::ok(command.id, status)
                     }
                     Err(error) => {
@@ -14471,7 +14468,7 @@ async fn handle_text_message_with_role(
         }
         "session.stop" => {
             // Buddy's listen task drains with this capture (plan 068 review).
-            live_chat::stop_live_chat_for_capture_end(state).await;
+            stop_live_chat_for_session_stop(state).await;
             // Older renderers send no params; the click timestamp is telemetry
             // only, so a malformed payload degrades to "no timestamp".
             let stop_params = if command.params.is_null() {
@@ -17280,6 +17277,46 @@ fn stored_ai_session_token() -> Result<String> {
 type AppCloudShowContext =
     cloud_show::CloudShowContext<videorc_api::VideorcApiClient, cloud_show::WsConnector>;
 
+/// `session.stop` ends the chat that came with the capture it stops. A held
+/// talk show's chat belongs to the room, not to a local session: while the
+/// room is open the only local session is Clips, and the renderer stops it
+/// whenever the room takes the camera. Plan 254 S4 (2026-11-19): after
+/// Mac → phone → Mac, Continue here reattached the show's chat and the Clips
+/// stop that followed 0.9 s later ended it again ("YouTube · Ended" while
+/// YouTube was live). The room's own paths end its chat: Close, End
+/// livestream, a hand-off or takeover, and the camera's return.
+async fn stop_live_chat_for_session_stop(state: &AppState) {
+    let held_show = state
+        .cloud_show
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .held_talk_show_id();
+    if let Some(show_id) = held_show {
+        let chat_session_id = state
+            .live_chat
+            .lock()
+            .await
+            .session_id()
+            .map(str::to_string);
+        if chat_session_id.as_deref().is_none_or(|id| id == show_id) {
+            if chat_session_id.is_some() {
+                tracing::info!(
+                    "Cloud show chat kept: a local session stopped beside the room of {show_id}."
+                );
+            }
+            return;
+        }
+    }
+    live_chat::stop_live_chat_for_capture_end(state).await;
+}
+
+/// Reasons a reattach skipped that the next runner state can change: the
+/// room's legs not reported yet, or an on-air row that still names the
+/// device this computer just took the show back from.
+fn cloud_show_reattach_may_follow(skipped: Option<&'static str>) -> bool {
+    matches!(skipped, Some("not-live" | "another-device-owns-the-show"))
+}
+
 async fn stop_talk_show_chat(state: &AppState, show_id: &str) {
     if live_chat::stop_live_chat_for_session(state, show_id)
         .await
@@ -17466,12 +17503,24 @@ fn forget_cloud_show_services(state: &AppState, show_id: &str) {
     }
 }
 
+/// A Resume or Continue here answered: the show's services follow it to this
+/// computer, the same step after a relaunch and after taking the show back
+/// from another device (plan 254 S4). After a relaunch the runner's legs can
+/// land just after the answer; after a take-back its on-air row can name the
+/// other device for one more state. Both wait a bounded while.
+async fn reattach_cloud_show_services_after_resume(state: &AppState) {
+    if cloud_show_reattach_may_follow(reattach_cloud_show_services(state).await) {
+        spawn_late_cloud_show_reattach(state);
+    }
+}
+
 /// Steps of the bounded wait for a resumed room's first legs (500 ms each).
 const CLOUD_SHOW_REATTACH_WAIT_STEPS: u32 = 20;
 
-/// A resume answered before the runner reported the room's legs: wait a
-/// bounded while for them, then reattach once. Stops early when the room
-/// closes or the reattach decides anything else.
+/// A resume answered before the runner reported the room's legs, or while
+/// its on-air row still named the device the show was taken back from: wait
+/// a bounded while, then reattach once. Stops early when the room closes or
+/// the reattach decides anything else.
 fn spawn_late_cloud_show_reattach(state: &AppState) {
     let state = state.clone();
     tokio::spawn(async move {
@@ -17483,7 +17532,7 @@ fn spawn_late_cloud_show_reattach(state: &AppState) {
                 Some(room) if !room.live => continue,
                 Some(_) => {}
             }
-            if reattach_cloud_show_services(&state).await != Some("not-live") {
+            if !cloud_show_reattach_may_follow(reattach_cloud_show_services(&state).await) {
                 return;
             }
         }
@@ -17964,6 +18013,11 @@ async fn reattach_cloud_show_services(state: &AppState) -> Option<&'static str> 
     if params.destinations.is_empty() {
         return Some("no-live-destinations");
     }
+    tracing::info!(
+        "Cloud show chat reattached here: {} destination(s), {} unavailable on this computer.",
+        destinations.len(),
+        unavailable.len()
+    );
     live_chat::resume_live_chat(state, params, first_attached_at).await;
     // X reads chat for the broadcast the renderer attached at Go Live; its
     // connector takes this computer's X account and Videorc sign-in at
@@ -29044,6 +29098,142 @@ mod tests {
             Some("replacement")
         );
         live_chat::stop_live_chat(&state).await;
+    }
+
+    /// Plan 254 S4 (the live test of 2026-11-19, Mac → phone → Mac): the
+    /// hand-off ends this computer's chat follow; Continue here brings it
+    /// back with the runner's legs, with no manual step; and the Clips stop
+    /// the renderer sends as the room takes the camera back never ends it.
+    #[tokio::test]
+    async fn taking_a_show_back_restores_its_chat_and_legs_and_a_clips_stop_keeps_them() {
+        const SHOW: &str = "sh_takeback";
+        let state = test_state();
+        let _runner = cloud_talk::open_talk_show_for_tests(&state.cloud_show, SHOW, true);
+        let streaming = streaming_with_enabled_target(
+            StreamPlatform::Youtube,
+            crate::streaming::StreamAuthMode::ManualRtmp,
+        );
+        let target_id = streaming.enabled_target_ids[0].clone();
+        let device_id = state
+            .cloud_show
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .device
+            .id
+            .clone();
+        // The runner (the source of truth for legs) with YouTube live, and
+        // the on-air row naming `device`.
+        let set_runner = |on_air_device: &str| {
+            let mut runtime = state.cloud_show.lock().unwrap_or_else(|p| p.into_inner());
+            runtime.runner = Some(
+                serde_json::from_value(json!({
+                    "phase": "live",
+                    "liveSeconds": 600,
+                    "legs": [{
+                        "id": target_id, "platform": "youtube", "label": "YouTube",
+                        "state": "live"
+                    }],
+                    "room": { "connected": true },
+                    "onAir": { "deviceId": on_air_device, "since": "2026-11-19T22:38:00.000Z" }
+                }))
+                .expect("a runner state"),
+            );
+        };
+        let chat_session = || async {
+            state
+                .live_chat
+                .lock()
+                .await
+                .session_id()
+                .map(str::to_string)
+        };
+        let youtube_chat_ended = || async {
+            live_chat::current_status(&state)
+                .await
+                .providers
+                .iter()
+                .filter(|provider| provider.platform == StreamPlatform::Youtube)
+                .any(|provider| provider.state == live_chat::LiveChatProviderConnectionState::Ended)
+        };
+
+        // Go Live from this computer: the identity is remembered, chat follows.
+        set_runner(&device_id);
+        remember_cloud_show_services(&state, &cloud_show_status(&state), &streaming);
+        assert_eq!(reattach_cloud_show_services(&state).await, None);
+        assert_eq!(chat_session().await.as_deref(), Some(SHOW));
+
+        // "Quit and keep it live", then the phone goes on: the hand-off stops
+        // this computer's readers (`CloudHooks::stop`) and the runner names
+        // the phone.
+        state
+            .cloud_show
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .stopped_by = Some(cloud_show::CloudStoppedBy::HandOff);
+        live_chat::stop_live_chat_for_capture_end(&state).await;
+        set_runner("device-phone");
+        assert_eq!(chat_session().await, None);
+        assert!(youtube_chat_ended().await, "the chip reads Ended meanwhile");
+        assert_eq!(
+            reattach_cloud_show_services(&state).await,
+            Some("another-device-owns-the-show"),
+            "nothing follows a show another device holds"
+        );
+
+        // Continue here answered, the runner still naming the phone for one
+        // more state: the reattach waits for the next one instead of giving up.
+        state
+            .cloud_show
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .stopped_by = None;
+        let skipped = reattach_cloud_show_services(&state).await;
+        assert_eq!(skipped, Some("another-device-owns-the-show"));
+        assert!(cloud_show_reattach_may_follow(skipped));
+        assert!(cloud_show_reattach_may_follow(Some("not-live")));
+        assert!(!cloud_show_reattach_may_follow(Some("interval-ended")));
+        assert!(!cloud_show_reattach_may_follow(None));
+
+        // The runner names this computer: chat is back with no manual step,
+        // and the legs read live from the runner.
+        set_runner(&device_id);
+        reattach_cloud_show_services_after_resume(&state).await;
+        assert_eq!(chat_session().await.as_deref(), Some(SHOW));
+        assert!(
+            !youtube_chat_ended().await,
+            "the chip no longer reads Ended"
+        );
+        let status = cloud_show_status(&state);
+        assert!(status.room.as_ref().is_some_and(|room| room.live));
+        assert_eq!(status.legs.len(), 1);
+        assert_eq!(
+            status.legs[0].state,
+            crate::streaming::StreamTargetState::Live
+        );
+
+        // The room took the camera, so the renderer stops Clips: a bare
+        // `session.stop`. On 0.34.0 this ended the show's chat again.
+        handle_text_message(
+            &state,
+            r#"{"id":"clips-stop","method":"session.stop","params":{}}"#,
+        )
+        .await;
+        assert_eq!(chat_session().await.as_deref(), Some(SHOW));
+        assert!(!youtube_chat_ended().await);
+
+        // The room's own End still stops it, and without a room `session.stop`
+        // ends the chat that came with its capture, as before.
+        stop_talk_show_chat(&state, SHOW).await;
+        assert_eq!(chat_session().await, None);
+        *state.cloud_show.lock().unwrap_or_else(|p| p.into_inner()) = Default::default();
+        live_chat::start_live_chat(&state, fake_live_chat_start_params("local-1", "target")).await;
+        handle_text_message(
+            &state,
+            r#"{"id":"stop","method":"session.stop","params":{}}"#,
+        )
+        .await;
+        assert_eq!(chat_session().await, None);
+        save_cloud_show_services(&state, None);
     }
 
     #[tokio::test]
