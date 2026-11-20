@@ -13,10 +13,11 @@ import { streamManagerHideMethod } from './window-capture-protection'
 /**
  * The key HUD's window (plan 231 D20): a click-through, non-focusable panel
  * that never activates Videorc, never takes key focus and never shows in the
- * Dock, the taskbar or Mission Control. It is left out of every capture the
- * Stream Manager's way: Videorc's ScreenCaptureKit filter on macOS (the
- * window stays on screen, fully transparent, because the filter only finds
- * windows on screen) and content protection on Windows. Linux shows none.
+ * Dock, the taskbar or Mission Control. It is left out of every capture:
+ * content protection on macOS and Windows (on macOS that covers a cloud
+ * room's Chromium screen share), and on macOS also Videorc's ScreenCaptureKit
+ * filter (the window stays on screen, fully transparent, because the filter
+ * only finds windows on screen). Linux shows none.
  */
 
 /** Room for the widest pill (420 px) and the popup tier's drop around it. */
@@ -47,10 +48,12 @@ export function sceneHudBounds(
 }
 
 /**
- * Pure. Whether the exclusion holds well enough to draw (fail closed). macOS:
- * the window is alive, loaded and on screen with a window id the Studio can
- * hand the capture filter (the Studio confirms the capture took it). Windows:
- * content protection is confirmed on the window. Anything else never draws.
+ * Pure. Whether the exclusion holds well enough to draw (fail closed). Both
+ * platforms: the window is alive, loaded and its content protection is
+ * confirmed (on macOS that keeps it out of a cloud room's Chromium screen
+ * share). macOS also: the window is on screen with a window id the Studio
+ * can hand the capture filter (the Studio confirms the capture took it).
+ * Anything else never draws.
  */
 export function sceneHudWindowReady(input: {
   platform: NodeJS.Platform
@@ -62,9 +65,9 @@ export function sceneHudWindowReady(input: {
 }): boolean {
   if (!input.alive || !input.loaded) return false
   const method = streamManagerHideMethod(input.platform)
+  if (!input.contentProtected) return false
   if (method === 'capture-filter') return input.onScreen && input.windowId !== undefined
-  if (method === 'content-protection') return input.contentProtected
-  return false
+  return method === 'content-protection'
 }
 
 /**
@@ -146,7 +149,7 @@ export interface SceneHudHost<W extends SceneHudWindowHandle = SceneHudWindowHan
   platform: NodeJS.Platform
   /** Makes the window and loads its page; null when it could not. */
   createWindow(): Promise<W | null>
-  /** Windows: applies content protection and confirms it (`isContentProtected`). */
+  /** Applies content protection and confirms it (`isContentProtected`). */
   protect(window: W): boolean
   /** The work area of the display under the pointer. */
   cursorWorkArea(): Rectangle
@@ -278,8 +281,8 @@ export class SceneHudController<W extends SceneHudWindowHandle = SceneHudWindowH
             return
           }
           this.window = window
-          this.contentProtected = this.host.platform === 'win32' ? this.host.protect(window) : false
-          if (this.host.platform === 'win32' && !this.contentProtected) {
+          this.contentProtected = this.host.protect(window)
+          if (!this.contentProtected) {
             // Fail closed: the window stays, and never draws (`ready` false).
             this.host.warn('Scene HUD content protection could not be confirmed.')
           }

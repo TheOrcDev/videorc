@@ -25,11 +25,11 @@ describe('window capture protection policy', () => {
   it('protects ONLY the notes teleprompter by default, on every platform', () => {
     // Owner call, 2026-08-19: comments and captions are part of the show and
     // must stay visible in recordings; notes is the one private window. The
-    // key HUD (plan 231 D20) is never part of the show: on Windows content
-    // protection is its exclusion, on macOS the capture filter is.
+    // key HUD (plan 231 D20) is never part of the show: content protection
+    // wherever it shows (macOS and Windows), the filter too on macOS.
     for (const platform of ['darwin', 'win32', 'linux'] as const) {
       for (const role of everyRole) {
-        const expected = role === 'notes' || (role === 'scene-hud' && platform === 'win32')
+        const expected = role === 'notes' || (role === 'scene-hud' && platform !== 'linux')
         expect(videorcWindowRequiresCaptureProtection(role, platform)).toBe(expected)
         expect(
           videorcWindowRequiresCaptureProtection(role, platform, { hiddenFromStream: false })
@@ -38,20 +38,26 @@ describe('window capture protection policy', () => {
     }
   })
 
-  it('leaves the key HUD out of every capture: content protection on Windows, the filter on macOS', () => {
+  it('leaves the key HUD out of every capture: content protection on macOS and Windows', () => {
     const window = { setContentProtection: vi.fn() }
     expect(applyVideorcWindowCaptureProtection(window, 'scene-hud', { platform: 'win32' })).toEqual(
       { state: 'protected', protected: true }
     )
     expect(window.setContentProtection).toHaveBeenCalledWith(true)
-    // macOS: never content protection, so the streamer's screenshots still
-    // see it; Videorc's own ScreenCaptureKit filter leaves it out instead.
+    // macOS too: Videorc's own ScreenCaptureKit filter leaves it out of the
+    // stream, but a cloud room's Chromium screen share knows no filter.
     const mac = { setContentProtection: vi.fn() }
     expect(applyVideorcWindowCaptureProtection(mac, 'scene-hud', { platform: 'darwin' })).toEqual({
+      state: 'protected',
+      protected: true
+    })
+    expect(mac.setContentProtection).toHaveBeenCalledWith(true)
+    // Linux shows no HUD.
+    const linux = { setContentProtection: vi.fn() }
+    expect(applyVideorcWindowCaptureProtection(linux, 'scene-hud', { platform: 'linux' })).toEqual({
       state: 'not-required',
       protected: false
     })
-    expect(mac.setContentProtection).not.toHaveBeenCalled()
     // A failure is reported, so the HUD can fail closed.
     const failing = {
       setContentProtection: vi.fn(() => {
@@ -79,7 +85,8 @@ describe('window capture protection policy', () => {
           videorcWindowRequiresCaptureProtection(role, platform, { hiddenFromStream: true })
         ).toBe(
           role === 'notes' ||
-            ((role === 'comments' || role === 'scene-hud') && platform === 'win32')
+            (role === 'comments' && platform === 'win32') ||
+            (role === 'scene-hud' && platform !== 'linux')
         )
       }
     }

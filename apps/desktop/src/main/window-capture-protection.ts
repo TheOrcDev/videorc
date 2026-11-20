@@ -76,8 +76,9 @@ export function streamManagerHideMethod(platform: NodeJS.Platform): StreamManage
  * how it hides (Windows). On macOS the capture filter does that job, and
  * content protection would also hide the window from the streamer's own
  * tools, so it is never applied there. Notes' rule stays identical on every
- * platform. The key HUD (plan 231 D20) takes the Stream Manager's route with
- * no switch: always out of the stream.
+ * platform. The key HUD (plan 231 D20) is always protected where it shows
+ * (macOS and Windows): it is never part of the show, and a cloud room's
+ * Chromium screen share sees no capture filter.
  */
 export function videorcWindowRequiresCaptureProtection(
   role: VideorcWindowRole,
@@ -87,12 +88,14 @@ export function videorcWindowRequiresCaptureProtection(
   if (role === 'notes') {
     return true
   }
-  // The key HUD (plan 231 D20) is never part of the show. On Windows content
-  // protection is its only exclusion; on macOS Videorc's own capture filter
-  // leaves it out (it must stay on screen for the filter to find it), so
-  // the streamer's screenshots still see it. Linux shows no HUD.
+  // The key HUD (plan 231 D20) is never part of the show, so it is protected
+  // wherever it shows. On Windows content protection is its only exclusion.
+  // On macOS Videorc's own capture filter also leaves it out (it must stay on
+  // screen for the filter to find it), but a cloud room shares the screen
+  // through Chromium's capturer, which knows no filter: content protection
+  // is what keeps the HUD out of that share. Linux shows no HUD.
   if (role === 'scene-hud') {
-    return streamManagerHideMethod(platform) === 'content-protection'
+    return streamManagerHideMethod(platform) !== 'unsupported'
   }
   if (role === 'comments') {
     return (

@@ -1,5 +1,6 @@
-import type { PreviewScreenStatus } from '@/lib/backend'
+import type { GlobalShortcutsConfig, PreviewScreenStatus } from '@/lib/backend'
 import type { SettingsState } from '@/lib/capture'
+import { sceneSlotAccelerator, type SceneSlotPosition } from '../../../shared/global-shortcuts'
 import type { SceneHudWindowState } from '../../../shared/scene-hud'
 
 // The key HUD (plan 231 D20), the Studio's eager half: the setting, and
@@ -9,6 +10,24 @@ import type { SceneHudWindowState } from '../../../shared/scene-hud'
 /** Settings → Shortcuts' switch, on by default: an absent key is on. */
 export function sceneHudEnabled(settings: Pick<SettingsState, 'sceneHud'>): boolean {
   return settings.sceneHud !== false
+}
+
+/**
+ * Pure. Whether any key can switch a scene: Next or Previous, a scene's own
+ * key, or a position key with a scene in that place (on by default; an empty
+ * key is released). Main makes the HUD's window only then.
+ */
+export function sceneHudKeySet(
+  config: GlobalShortcutsConfig = {},
+  scenes: readonly { id: string }[],
+  platform: string | undefined
+): boolean {
+  if (!scenes.length) return false
+  if (config.layoutNext || config.layoutPrevious) return true
+  if (scenes.some((scene) => config.scenes?.[scene.id])) return true
+  return scenes
+    .slice(0, 9)
+    .some((_, index) => !!sceneSlotAccelerator(config, (index + 1) as SceneSlotPosition, platform))
 }
 
 /**

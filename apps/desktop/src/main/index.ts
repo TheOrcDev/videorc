@@ -5129,7 +5129,11 @@ const sceneHud = new SceneHudController<BrowserWindow>({
       onFailure: (reason) =>
         safeConsole.warn(`Scene HUD content protection could not be enabled: ${reason}`)
     })
-    return result.protected && windowsExcludesFromCapture(release()) && window.isContentProtected()
+    return (
+      result.protected &&
+      (process.platform !== 'win32' || windowsExcludesFromCapture(release())) &&
+      window.isContentProtected()
+    )
   },
   cursorWorkArea: () => screen.getDisplayNearestPoint(screen.getCursorScreenPoint()).workArea,
   videorcWindowFocused: () => BrowserWindow.getFocusedWindow() !== null,

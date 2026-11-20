@@ -7,6 +7,7 @@ import {
   sceneHudEnabled,
   sceneHudExclusionAfterStart,
   sceneHudExclusionForWindow,
+  sceneHudKeySet,
   screenStartHoldsExclusion
 } from './scene-hud-capture'
 import type { SceneHudWindowState } from '../../../shared/scene-hud'
@@ -133,5 +134,35 @@ describe('the capture leaves the key HUD out (fail closed)', () => {
     expect(sceneHudProtectedOverlayWindow(WINDOWS)).toEqual({ open: false })
     expect(sceneHudProtectedOverlayWindow({ method: 'capture-filter' })).toEqual({ open: false })
     expect(sceneHudProtectedOverlayWindow(null)).toEqual({ open: false })
+  })
+})
+
+describe('sceneHudKeySet', () => {
+  const scenes = [{ id: 'a' }, { id: 'b' }]
+  const allSlotsCleared = {
+    sceneSlots: { 1: '', 2: '', 3: '', 4: '', 5: '', 6: '', 7: '', 8: '', 9: '' }
+  }
+
+  it('makes no window until a key can switch a scene', () => {
+    // No scenes: nothing to switch to.
+    expect(sceneHudKeySet({}, [], 'darwin')).toBe(false)
+    // Default position keys switch the first scenes.
+    expect(sceneHudKeySet(undefined, scenes, 'darwin')).toBe(true)
+    expect(sceneHudKeySet({}, scenes, 'win32')).toBe(true)
+    // Every position key released, no other key: no window.
+    expect(sceneHudKeySet(allSlotsCleared, scenes, 'darwin')).toBe(false)
+    // A position key left only for a place with no scene does not count.
+    expect(
+      sceneHudKeySet({ sceneSlots: { ...allSlotsCleared.sceneSlots, 5: 'F5' } }, scenes, 'darwin')
+    ).toBe(false)
+    expect(
+      sceneHudKeySet({ sceneSlots: { ...allSlotsCleared.sceneSlots, 2: 'F2' } }, scenes, 'darwin')
+    ).toBe(true)
+    // A scene's own key, or Next / Previous.
+    expect(sceneHudKeySet({ ...allSlotsCleared, scenes: { b: 'F9' } }, scenes, 'darwin')).toBe(true)
+    expect(sceneHudKeySet({ ...allSlotsCleared, scenes: { gone: 'F9' } }, scenes, 'darwin')).toBe(
+      false
+    )
+    expect(sceneHudKeySet({ ...allSlotsCleared, layoutNext: 'F8' }, scenes, 'darwin')).toBe(true)
   })
 })

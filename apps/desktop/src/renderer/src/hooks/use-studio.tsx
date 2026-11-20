@@ -786,6 +786,7 @@ import {
   sceneHudEnabled,
   sceneHudExclusionAfterStart,
   sceneHudExclusionForWindow,
+  sceneHudKeySet,
   screenCaptureRunning,
   type SceneHudExclusion
 } from '@/lib/scene-hud-capture'
@@ -5143,19 +5144,6 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
     () => window.videorc?.onSceneHudWindowState?.(applySceneHudWindow),
     [applySceneHudWindow]
   )
-  // Settings → Shortcuts' switch makes or drops main's window.
-  const sceneHudOn = sceneHudEnabled(settings)
-  useEffect(() => {
-    let cancelled = false
-    Promise.resolve(window.videorc?.setSceneHudEnabled?.(sceneHudOn))
-      .then((state) => {
-        if (!cancelled && state) applySceneHudWindow(state)
-      })
-      .catch(() => undefined)
-    return () => {
-      cancelled = true
-    }
-  }, [applySceneHudWindow, sceneHudOn])
   const nativePreviewCommittedSceneRef = useRef<{
     sceneId: string
     sceneRevision: number
@@ -5266,6 +5254,22 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
     layoutPresetOrientation(captureConfig.layout.layoutPreset),
     captureConfig.sources
   )
+  // Settings → Shortcuts' switch makes or drops main's window, made only
+  // once a key can switch a scene (no key, no window on screen).
+  const sceneHudOn =
+    sceneHudEnabled(settings) &&
+    sceneHudKeySet(settings.globalShortcuts, sceneLibrary.scenes, runtimeInfo?.platform)
+  useEffect(() => {
+    let cancelled = false
+    Promise.resolve(window.videorc?.setSceneHudEnabled?.(sceneHudOn))
+      .then((state) => {
+        if (!cancelled && state) applySceneHudWindow(state)
+      })
+      .catch(() => undefined)
+    return () => {
+      cancelled = true
+    }
+  }, [applySceneHudWindow, sceneHudOn])
   const rememberedAppsRef = useRef(
     rememberedSceneApps(loadJson(SCENE_WINDOW_APPS_KEY, {}), sceneLibrary.scenes)
   )
@@ -20503,8 +20507,9 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
       intentKind === 'sceneApply' && applyScene
         ? {
             ...studioSource,
-            applySavedSceneResult: (id: string) =>
-              applyScene(id).then((result) => {
+            // Every argument goes through (a remote's screen rides `options`).
+            applySavedSceneResult: (id, repaired, options) =>
+              applyScene(id, repaired, options).then((result) => {
                 reportSceneSwitchForHud('remote', id, result)
                 return result
               })

@@ -55,15 +55,19 @@ describe('the key HUD decision in main (plan 231 D20)', () => {
       loaded: true,
       onScreen: true,
       windowId: 42,
-      contentProtected: false
+      contentProtected: true
     }
-    // macOS: on screen with an id the capture filter can find.
+    // macOS: protected (a cloud room's Chromium share), and on screen with an
+    // id the capture filter can find.
     expect(sceneHudWindowReady({ ...live, platform: 'darwin' })).toBe(true)
+    expect(sceneHudWindowReady({ ...live, platform: 'darwin', contentProtected: false })).toBe(
+      false
+    )
     expect(sceneHudWindowReady({ ...live, platform: 'darwin', onScreen: false })).toBe(false)
     expect(sceneHudWindowReady({ ...live, platform: 'darwin', windowId: undefined })).toBe(false)
     expect(sceneHudWindowReady({ ...live, platform: 'darwin', loaded: false })).toBe(false)
     // Windows: content protection confirmed.
-    expect(sceneHudWindowReady({ ...live, platform: 'win32' })).toBe(false)
+    expect(sceneHudWindowReady({ ...live, platform: 'win32', contentProtected: false })).toBe(false)
     expect(sceneHudWindowReady({ ...live, platform: 'win32', contentProtected: true })).toBe(true)
     expect(
       sceneHudWindowReady({ ...live, platform: 'win32', contentProtected: true, alive: false })
@@ -226,6 +230,20 @@ describe('SceneHudController', () => {
     const hud = new SceneHudController(host)
     expect(await hud.setEnabled(true)).toMatchObject({
       method: 'content-protection',
+      ready: false
+    })
+    expect(await hud.show(FIGMA)).toEqual({ shown: false, reason: 'not-ready' })
+    expect(presented).toEqual([])
+    expect(warn).toHaveBeenCalled()
+  })
+
+  it('fails closed on macOS too: the filter alone misses a cloud room share', async () => {
+    const warn = vi.fn()
+    const { host, presented } = fakeHost('darwin', { protect: () => false, warn })
+    const hud = new SceneHudController(host)
+    expect(await hud.setEnabled(true)).toMatchObject({
+      method: 'capture-filter',
+      windowId: 77,
       ready: false
     })
     expect(await hud.show(FIGMA)).toEqual({ shown: false, reason: 'not-ready' })
