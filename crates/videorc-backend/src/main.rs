@@ -861,6 +861,13 @@ async fn run_backend(device_changes: tokio::sync::watch::Receiver<u64>) -> Resul
     // off the recording path; `VIDEORC_STREAM_REPORT_EMAIL=0` turns it off.
     stream_report_email::spawn(&state);
     live_status::spawn(&state);
+    // Plan 254 S6: this computer controlled a show before it restarted, and
+    // the launch check renews that below. Until it has, nothing this process
+    // writes about the show goes out ahead of the renewal. Armed before any
+    // service that may write about it starts.
+    if let Some(kept) = load_kept_cloud_controller(&state) {
+        cloud_controller::renewal_gate().expect(&kept.show_id);
+    }
     // Plan 187: the Discord go-live announcement (free, off until a webhook is set).
     discord_announce::spawn(&state);
     // Plan 225: the community store's retention prune (now and daily) and
@@ -17576,6 +17583,11 @@ async fn claim_cloud_controller(
     // Nothing held in memory and a kept epoch to renew: this process is the
     // same computer's restart (a backend recycle, a relaunch, an update).
     let reclaiming = held.is_none() && matches!(first, ControllerIntent::Renew(_));
+    // Plan 254 S6: while nothing is held for the show, its writes wait for
+    // this claim's answer, whatever it is (the guard settles on every return).
+    let in_flight = held
+        .is_none()
+        .then(|| cloud_controller::renewal_in_flight(show_id));
     let run = cloud_controller::run_claim(resume, &device.id, first, reclaiming, |body| {
         let (web, bearer) = (&web, &bearer);
         async move {
@@ -17600,6 +17612,8 @@ async fn claim_cloud_controller(
         &device.id,
         cloud_controller::facts_of(&granted, None),
     );
+    // Held: what waited for this claim goes out now, with the epoch.
+    drop(in_flight);
     if fresh {
         save_kept_cloud_controller(
             state,

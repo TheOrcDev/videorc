@@ -2325,53 +2325,14 @@ impl VideorcApiClient {
         timeout: std::time::Duration,
     ) -> std::result::Result<reqwest::Response, (crate::cloud_show::CloudApiError, serde_json::Value)>
     {
-        use crate::cloud_show::{CloudApiError, ShowRecord, classify_cloud_failure};
-        // Plan 249 S24: every request about the show this process controls
-        // carries its controller epoch, so the web refuses it once another
-        // device took the show over (never ending the successor's).
-        let fenced = crate::cloud_controller::fence_header_for(path);
-        let request = match fenced {
-            Some(epoch) => request.header(
-                crate::cloud_controller::CONTROLLER_EPOCH_HEADER,
-                epoch.to_string(),
-            ),
-            None => request,
-        };
-        let response = request.timeout(timeout).send().await.map_err(|error| {
-            (
-                CloudApiError::Transport(format!("{path}: {error}")),
-                serde_json::Value::Null,
-            )
-        })?;
-        let status = response.status();
-        if status.is_success() {
-            return Ok(response);
-        }
-        let text = response.text().await.unwrap_or_default();
-        let (code, message) = parse_error_envelope(&text);
-        // A fenced request refused as stale: another device controls the show.
-        if let Some(epoch) = fenced
-            && status.as_u16() == 409
-            && code == "cloud-controller-stale"
-        {
-            crate::cloud_controller::mark_lost(epoch, "stale-command");
-        }
-        let body: serde_json::Value =
-            serde_json::from_str(&text).unwrap_or(serde_json::Value::Null);
-        let live_show = body
-            .get("show")
-            .or_else(|| body.pointer("/error/show"))
-            .cloned()
-            .and_then(|value| serde_json::from_value::<ShowRecord>(value).ok());
-        let reset_at = body
-            .get("resetAt")
-            .or_else(|| body.pointer("/error/resetAt"))
-            .and_then(|value| value.as_str())
-            .map(str::to_string);
-        Err((
-            classify_cloud_failure(status.as_u16(), &code, message, live_show, reset_at),
-            body,
-        ))
+        cloud_send_fenced(
+            request,
+            path,
+            timeout,
+            crate::cloud_controller::renewal_gate(),
+            &crate::cloud_controller::fence_header_for,
+        )
+        .await
     }
 
     /// One synchronous Live Co-host tick. Every failure class is mapped to a
@@ -4320,6 +4281,138 @@ pub(crate) async fn read_error_code_and_message(response: reqwest::Response) -> 
     parse_error_envelope(&text)
 }
 
+/// `cloud_send` with its controller state passed in: `renewal` is the claim
+/// a restarted process still owes its show, and `epoch_for` reads the epoch
+/// a request to a path carries.
+///
+/// Plan 254 S6: a write about a show whose claim is awaited waits for it
+/// (bounded, `RenewalGate::settled`), so it goes out with the epoch and not
+/// ahead of it. Reads go at once: the launch check reads the show's state
+/// before it claims. Any request that went out with no epoch and was refused
+/// for it (`cloud-controller-required`) is sent once more after the claim,
+/// when this process holds the epoch by then.
+async fn cloud_send_fenced(
+    request: reqwest::RequestBuilder,
+    path: &str,
+    timeout: std::time::Duration,
+    renewal: &crate::cloud_controller::RenewalGate,
+    epoch_for: &(dyn Fn(&str) -> Option<u64> + Sync),
+) -> std::result::Result<reqwest::Response, (crate::cloud_show::CloudApiError, serde_json::Value)> {
+    use crate::cloud_show::CloudApiError;
+    let (client, built) = request.build_split();
+    let mut request = built.map_err(|error| {
+        (
+            CloudApiError::Transport(format!("{path}: {error}")),
+            serde_json::Value::Null,
+        )
+    })?;
+    *request.timeout_mut() = Some(timeout);
+    let write = !matches!(
+        *request.method(),
+        reqwest::Method::GET | reqwest::Method::HEAD
+    );
+    if write {
+        renewal.settled(path).await;
+    }
+    // Plan 249 S24: every request about the show this process controls
+    // carries its controller epoch, so the web refuses it once another
+    // device took the show over (never ending the successor's).
+    let fenced = epoch_for(path);
+    // Kept only for a request that goes out with no epoch: the one that can
+    // be refused for lacking it. A streamed body has no copy.
+    let again = match fenced {
+        None => request.try_clone(),
+        Some(_) => None,
+    };
+    let refused = match cloud_attempt(&client, request, fenced, path).await {
+        Ok(response) => return Ok(response),
+        Err(refused) => refused,
+    };
+    let required = refused.status == 409 && refused.code == "cloud-controller-required";
+    if let Some(again) = again.filter(|_| required) {
+        renewal.settled(path).await;
+        if let Some(epoch) = epoch_for(path) {
+            tracing::info!(
+                "[cloud] {path} went out ahead of the controller claim; sent again with epoch {epoch}."
+            );
+            return cloud_attempt(&client, again, Some(epoch), path)
+                .await
+                .map_err(CloudRefusal::classified);
+        }
+    }
+    Err(refused.classified())
+}
+
+/// A cloud request that did not answer 2xx: its status, its envelope's code,
+/// and the failure classified from them, with the parsed body.
+struct CloudRefusal {
+    status: u16,
+    code: String,
+    error: crate::cloud_show::CloudApiError,
+    body: serde_json::Value,
+}
+
+impl CloudRefusal {
+    fn classified(self) -> (crate::cloud_show::CloudApiError, serde_json::Value) {
+        (self.error, self.body)
+    }
+}
+
+/// One attempt of a cloud request, carrying `fenced` as its controller epoch.
+async fn cloud_attempt(
+    client: &reqwest::Client,
+    mut request: reqwest::Request,
+    fenced: Option<u64>,
+    path: &str,
+) -> std::result::Result<reqwest::Response, CloudRefusal> {
+    use crate::cloud_show::{CloudApiError, ShowRecord, classify_cloud_failure};
+    if let Some(epoch) = fenced {
+        request.headers_mut().insert(
+            crate::cloud_controller::CONTROLLER_EPOCH_HEADER,
+            reqwest::header::HeaderValue::from(epoch),
+        );
+    }
+    let response = client
+        .execute(request)
+        .await
+        .map_err(|error| CloudRefusal {
+            status: 0,
+            code: String::new(),
+            error: CloudApiError::Transport(format!("{path}: {error}")),
+            body: serde_json::Value::Null,
+        })?;
+    let status = response.status();
+    if status.is_success() {
+        return Ok(response);
+    }
+    let text = response.text().await.unwrap_or_default();
+    let (code, message) = parse_error_envelope(&text);
+    // A fenced request refused as stale: another device controls the show.
+    if let Some(epoch) = fenced
+        && status.as_u16() == 409
+        && code == "cloud-controller-stale"
+    {
+        crate::cloud_controller::mark_lost(epoch, "stale-command");
+    }
+    let body: serde_json::Value = serde_json::from_str(&text).unwrap_or(serde_json::Value::Null);
+    let live_show = body
+        .get("show")
+        .or_else(|| body.pointer("/error/show"))
+        .cloned()
+        .and_then(|value| serde_json::from_value::<ShowRecord>(value).ok());
+    let reset_at = body
+        .get("resetAt")
+        .or_else(|| body.pointer("/error/resetAt"))
+        .and_then(|value| value.as_str())
+        .map(str::to_string);
+    Err(CloudRefusal {
+        status: status.as_u16(),
+        error: classify_cloud_failure(status.as_u16(), &code, message, live_show, reset_at),
+        code,
+        body,
+    })
+}
+
 /// `{ error: { code, message } }` → `(code, message)` with honest fallbacks:
 /// `unknown` / `request failed` when the body is not the envelope (HTML from
 /// a proxy, an empty body, a different JSON shape) or a part is blank.
@@ -5776,6 +5869,201 @@ mod tests {
         assert!(odd.targets.is_empty());
         let empty: CohostCommandResponse = serde_json::from_value(serde_json::json!({})).unwrap();
         assert_eq!(empty, CohostCommandResponse::default());
+    }
+
+    /// A fake web for one show's fenced routes: every request is noted with
+    /// the epoch it carried; a write with no epoch is refused as the web
+    /// refuses it (`cloud-controller-required`).
+    type SeenFenced = std::sync::Arc<std::sync::Mutex<Vec<(String, Option<String>)>>>;
+
+    async fn spawn_fenced_web(seen: SeenFenced) -> VideorcApiClient {
+        async fn answer(
+            seen: SeenFenced,
+            method: axum::http::Method,
+            uri: axum::http::Uri,
+            headers: axum::http::HeaderMap,
+        ) -> axum::response::Response {
+            use axum::response::IntoResponse;
+            let epoch = headers
+                .get(crate::cloud_controller::CONTROLLER_EPOCH_HEADER)
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_string);
+            seen.lock()
+                .unwrap()
+                .push((uri.path().to_string(), epoch.clone()));
+            // Reads are open, as the show's state is to the launch check.
+            match epoch.or((method == axum::http::Method::GET).then(String::new)) {
+                Some(_) => axum::Json(serde_json::json!({ "claimed": true })).into_response(),
+                None => (
+                    axum::http::StatusCode::CONFLICT,
+                    axum::Json(serde_json::json!({
+                        "error": { "code": "cloud-controller-required", "message": "No controller." }
+                    })),
+                )
+                    .into_response(),
+            }
+        }
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = axum::Router::new()
+            .fallback(move |method, uri, headers| answer(seen.clone(), method, uri, headers));
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        VideorcApiClient::for_base_url(format!("http://{address}"))
+    }
+
+    const FENCED_SHOW: &str = "sh_fenced";
+    const FENCED_EFFECTS: &str = "/api/cloud/shows/sh_fenced/effects";
+
+    fn effects_request(client: &VideorcApiClient) -> reqwest::RequestBuilder {
+        client
+            .http
+            .post(client.endpoint(FENCED_EFFECTS))
+            .json(&serde_json::json!({ "intervalId": "iv_1", "effect": "discord-announce" }))
+    }
+
+    /// The epoch a restarted process holds: none until its claim answers.
+    fn held_epoch() -> (
+        std::sync::Arc<std::sync::atomic::AtomicU64>,
+        impl Fn(&str) -> Option<u64> + Send + Sync + 'static,
+    ) {
+        let held = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let read = held.clone();
+        (held, move |_: &str| {
+            Some(read.load(std::sync::atomic::Ordering::SeqCst)).filter(|epoch| *epoch > 0)
+        })
+    }
+
+    #[tokio::test]
+    async fn after_a_restart_no_fenced_write_goes_out_before_the_kept_epoch_is_renewed() {
+        let seen = SeenFenced::default();
+        let client = spawn_fenced_web(seen.clone()).await;
+        let gate = std::sync::Arc::new(crate::cloud_controller::RenewalGate::new());
+        let (held, epoch_for) = held_epoch();
+        // A restarted process: a kept record, nothing held yet.
+        gate.expect(FENCED_SHOW);
+        let sent = tokio::spawn({
+            let (gate, request) = (gate.clone(), effects_request(&client));
+            async move {
+                cloud_send_fenced(
+                    request,
+                    FENCED_EFFECTS,
+                    std::time::Duration::from_secs(5),
+                    &gate,
+                    &epoch_for,
+                )
+                .await
+                .map(|response| response.status().as_u16())
+                .map_err(|(error, _)| error.to_string())
+            }
+        });
+        // A read of the same show is not held back: the launch check reads
+        // the show's state before it claims.
+        let read = cloud_send_fenced(
+            client
+                .http
+                .get(client.endpoint("/api/cloud/shows/sh_fenced/state")),
+            "/api/cloud/shows/sh_fenced/state",
+            std::time::Duration::from_secs(5),
+            &gate,
+            &|_: &str| None,
+        )
+        .await;
+        assert!(
+            read.is_ok(),
+            "a read is answered while the claim is awaited"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![("/api/cloud/shows/sh_fenced/state".to_string(), None)],
+            "the write is still waiting for the renewal"
+        );
+        assert!(!sent.is_finished());
+        // The renewal answers: the epoch is held, then the claim settles.
+        held.store(1, std::sync::atomic::Ordering::SeqCst);
+        gate.settle(FENCED_SHOW);
+        assert_eq!(sent.await.unwrap(), Ok(200));
+        assert_eq!(
+            seen.lock().unwrap().last().cloned(),
+            Some((FENCED_EFFECTS.to_string(), Some("1".to_string()))),
+            "sent once, with the renewed epoch"
+        );
+        assert_eq!(seen.lock().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_request_refused_for_its_missing_epoch_is_sent_once_more_after_the_renewal() {
+        let seen = SeenFenced::default();
+        let client = spawn_fenced_web(seen.clone()).await;
+        let gate = crate::cloud_controller::RenewalGate::new();
+        // The request goes out with no epoch (no claim was awaited yet) and
+        // the renewal lands while it is in the air.
+        let calls = std::sync::atomic::AtomicU64::new(0);
+        let epoch_for =
+            |_: &str| (calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) > 0).then_some(4);
+        let response = cloud_send_fenced(
+            effects_request(&client),
+            FENCED_EFFECTS,
+            std::time::Duration::from_secs(5),
+            &gate,
+            &epoch_for,
+        )
+        .await
+        .map_err(|(error, _)| error.to_string())
+        .unwrap();
+        assert_eq!(response.status().as_u16(), 200);
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![
+                (FENCED_EFFECTS.to_string(), None),
+                (FENCED_EFFECTS.to_string(), Some("4".to_string())),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refusal_is_final_when_the_renewal_failed_and_is_never_sent_a_third_time() {
+        let seen = SeenFenced::default();
+        let client = spawn_fenced_web(seen.clone()).await;
+        let gate = crate::cloud_controller::RenewalGate::new();
+        // The claim failed: nothing is ever held. One request, one refusal.
+        let refused = cloud_send_fenced(
+            effects_request(&client),
+            FENCED_EFFECTS,
+            std::time::Duration::from_secs(5),
+            &gate,
+            &|_: &str| None,
+        )
+        .await
+        .map(|response| response.status().as_u16())
+        .map_err(|(error, _)| crate::cloud_controller::status_of(&error));
+        assert_eq!(refused, Err(409));
+        assert_eq!(seen.lock().unwrap().len(), 1);
+
+        // A claim that settles with nothing held (refused, signed out, the
+        // web down) lets the waiting write go: it is refused, not stuck.
+        gate.expect(FENCED_SHOW);
+        let gate = std::sync::Arc::new(gate);
+        let sent = tokio::spawn({
+            let (gate, request) = (gate.clone(), effects_request(&client));
+            async move {
+                cloud_send_fenced(
+                    request,
+                    FENCED_EFFECTS,
+                    std::time::Duration::from_secs(5),
+                    &gate,
+                    &|_: &str| None,
+                )
+                .await
+                .map(|response| response.status().as_u16())
+                .map_err(|(error, _)| crate::cloud_controller::status_of(&error))
+            }
+        });
+        gate.settle(FENCED_SHOW);
+        assert_eq!(sent.await.unwrap(), Err(409));
+        assert_eq!(seen.lock().unwrap().len(), 2, "never sent a third time");
     }
 
     #[allow(clippy::type_complexity)]
