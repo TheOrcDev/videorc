@@ -222,9 +222,10 @@ export function frostLeadMs({
  * of the span outside the edges, and `hideEdgeMs` is never shortened.
  *
  * With `frostLeadMs` (issue #1329), the slack also grows to the measured lead
- * plus the hide's cover time (press to the backend's `screen.privacy.changed`,
- * sent once the stills are in the stores; the lead took that delay off, and
- * Show has none: the held live frame goes back at once) plus one canvas frame
+ * plus the hide's cover time (press to the stills in the stores: the
+ * backend's `screen.privacy.changed`, sent as the gate closes, plus the
+ * stores' cover after it; the lead took that delay off, and Show has none:
+ * the held live frame goes back at once) plus one canvas frame
  * (the compositor samples each edge on its own tick). That bounds the
  * un-frost against the Show press on the file's own clock, on either capture
  * path: a frost lifted more than about two frames before Show is still a
@@ -266,11 +267,15 @@ export function sessionFrostLeadMs(leads) {
 }
 
 /**
- * How long the backend took to cover the stores after the hide press: the
- * first `screen.privacy.changed` saying hidden at or after `hideAtMs`, which
- * `screen.hide` emits only once its stills are published. Null when no such
- * event arrived.
- * @param {Array<{event:string, payload?:{hidden?:boolean}, atMs:number}>} events
+ * When the backend closed the gate after the hide press, in ms after
+ * `hideAtMs`: the first `screen.privacy.changed` saying hidden at or after
+ * `hideAtMs`. `screen.hide` closes the gate and emits it, then covers the
+ * stores ([`hideStoresCoveredMs`] adds that span), so part of the cover can
+ * run while the event is in flight. The event's own `since` (the backend's
+ * clock at the gate, the same machine's wall clock as `hideAtMs`) is used,
+ * clamped between the press and the event's arrival; the arrival only when
+ * `since` is missing or unparseable. Null when no such event arrived.
+ * @param {Array<{event:string, payload?:{hidden?:boolean, since?:string}, atMs:number}>} events
  * @param {number} hideAtMs
  */
 export function hideCoverMs(events, hideAtMs) {
@@ -280,7 +285,31 @@ export function hideCoverMs(events, hideAtMs) {
       entry.payload?.hidden === true &&
       entry.atMs >= hideAtMs
   )
-  return changed ? changed.atMs - hideAtMs : null
+  if (!changed) return null
+  const sinceMs = Date.parse(changed.payload?.since ?? '')
+  const gateAtMs = Number.isFinite(sinceMs)
+    ? Math.min(changed.atMs, Math.max(hideAtMs, sinceMs))
+    : changed.atMs
+  return gateAtMs - hideAtMs
+}
+
+/**
+ * How long `screen.hide` held the capture stores while it built the stills,
+ * from the backend's `[hide-screen] covered the stores in N ms` line (the
+ * first one in `lines`). `screen.privacy.changed` is emitted when the gate
+ * closes, BEFORE the stores are covered (the talk-show room hides on it), so
+ * the frost reaches the program this much after the event. Until the D3D11
+ * program stopped drawing black at the Hide edge, its black frames started
+ * the frost run early and hid this span from the lead. Null when the backend
+ * logged no such line.
+ * @param {string[]} lines dev-app output after the hide press
+ */
+export function hideStoresCoveredMs(lines) {
+  for (const line of lines ?? []) {
+    const match = /\[hide-screen\] covered the stores in (\d+) ms/.exec(line)
+    if (match) return Number(match[1])
+  }
+  return null
 }
 
 /**
