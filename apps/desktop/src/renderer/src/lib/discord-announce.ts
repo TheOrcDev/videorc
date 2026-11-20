@@ -1,6 +1,6 @@
 /**
  * The Discord go-live announcement (plan 187): the pure rules behind the
- * Destinations → Setup Discord section and its failure toast. The backend owns
+ * Destinations → Discord tab and its failure toast. The backend owns
  * the webhook, the links and the posting; this only shapes what the section
  * sends and says.
  */
@@ -120,7 +120,7 @@ function failureCopy(
       return {
         type: 'error',
         title,
-        description: `${webhook} was deleted in Discord. Paste a new one in Destinations → Setup.`
+        description: `${webhook} was deleted in Discord. Paste a new one in Destinations → Discord.`
       }
     case 'unreachable':
       return {
@@ -135,8 +135,8 @@ function failureCopy(
         type: 'error',
         title,
         description: name
-          ? `Discord refused the post to ${name}. Check the webhook in Destinations → Setup.`
-          : 'Discord refused the post. Check the webhook in Destinations → Setup.'
+          ? `Discord refused the post to ${name}. Check the webhook in Destinations → Discord.`
+          : 'Discord refused the post. Check the webhook in Destinations → Discord.'
       }
   }
 }

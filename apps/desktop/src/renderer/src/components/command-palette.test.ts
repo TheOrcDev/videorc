@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { toastUserError } from '@/lib/user-error'
 import { WorkspaceNavContext } from '@/components/workspace-nav'
-import { FIRST_RUN_SETUP_OPEN_EVENT } from '@/lib/workspace-navigation'
+import { FIRST_RUN_SETUP_OPEN_EVENT, WORKSPACE_NAVIGATE_EVENT } from '@/lib/workspace-navigation'
 
 import { CommandPalette } from './command-palette'
 
@@ -373,6 +373,7 @@ describe('CommandPalette order and verbs (plan 174 A-9, A-13)', () => {
       'Open Settings',
       'Open Health',
       'Open Upcoming events',
+      'Open Discord announcements',
       // The list behind the bell (plan 250): not a page, but opened like one.
       'Open notifications'
     ])
@@ -411,6 +412,18 @@ describe('CommandPalette order and verbs (plan 174 A-9, A-13)', () => {
     expect(values()).toContain('Open Avatar')
     await search('moderation')
     expect(values()).toContain('Open Sidekick')
+    await search('webhook')
+    expect(values()).toContain('Open Discord announcements')
+  })
+
+  it('opens Destinations on its Discord tab (plan 187)', async () => {
+    await render()
+    const requests: unknown[] = []
+    const listen = (event: Event): void => void requests.push((event as CustomEvent).detail)
+    window.addEventListener(WORKSPACE_NAVIGATE_EVENT, listen)
+    await act(async () => item('Open Discord announcements').click())
+    window.removeEventListener(WORKSPACE_NAVIGATE_EVENT, listen)
+    expect(requests).toEqual([{ tab: 'live', livestreamView: 'discord' }])
   })
 
   // Plan 239 (D7): the avatar's tabs wear the streamer's own avatar; the

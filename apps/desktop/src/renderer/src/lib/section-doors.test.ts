@@ -7,6 +7,7 @@ import { readWorkspaceNavigation } from '@/components/workspace-nav'
 import {
   openDestinations,
   openDestinationsCloud,
+  openDestinationsDiscord,
   openLibraryRecording,
   openNotificationSettings,
   openOutputClips,
@@ -80,6 +81,15 @@ describe('doors (plan 250 S4)', () => {
       readWorkspaceNavigation({ tab: 'live', livestreamView: 'upcoming', destinationId: 'tw-1' })
     ).toEqual({ tab: 'live', livestreamView: 'setup', destinationId: 'tw-1' })
     expect(readWorkspaceNavigation({ tab: 'live', destinationId: 7 })).toEqual({ tab: 'live' })
+  })
+
+  it('Open Discord settings opens Destinations on its Discord tab (plan 187)', () => {
+    openDestinationsDiscord()
+    expect(opened).toEqual([{ tab: 'live', livestreamView: 'discord' }])
+    expect(readWorkspaceNavigation({ tab: 'live', livestreamView: 'discord' })).toEqual({
+      tab: 'live',
+      livestreamView: 'discord'
+    })
   })
 
   it('Open in Library keeps the recording', () => {

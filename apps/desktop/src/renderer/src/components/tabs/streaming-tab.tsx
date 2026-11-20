@@ -10,6 +10,10 @@ const GuestsTab = lazy(() => import('@/components/guests/guests-tab'))
 const ScheduledStreams = lazy(() =>
   import('@/components/scheduled-streams').then((m) => ({ default: m.ScheduledStreams }))
 )
+// Plan 187: the Discord tab loads with its first open, like Upcoming.
+const DiscordTab = lazy(() =>
+  import('@/components/streaming/discord-section').then((m) => ({ default: m.DiscordTab }))
+)
 // Plan 224 C-G2: the Guests tab loads with its first open.
 // Plan 226: Chat commands loads on its own, after the page.
 const ChatCommandsSection = lazy(() =>
@@ -26,7 +30,6 @@ import { StatusBadge } from '@/components/status-badge'
 import { BroadcastInfoFields } from '@/components/streaming/broadcast-info-fields'
 import { CategoryCombobox } from '@/components/streaming/category-combobox'
 import { DestinationCard } from '@/components/streaming/destination-card'
-import { DiscordSection } from '@/components/streaming/discord-section'
 import { youtubeQuotaPausedUntil } from '@/lib/youtube-quota'
 import { GoLivePanel } from '@/components/streaming/go-live-panel'
 import { ThumbnailField } from '@/components/streaming/thumbnail-field'
@@ -88,10 +91,11 @@ import { broadcastThumbnailHint } from '@/lib/broadcast-info'
 import { streamLanguageOptions } from '@/lib/stream-languages'
 
 /**
- * Destinations (plan 174 S1.6b, A-14; plan 235 D6): Setup, Upcoming and Guests (plan 224
- * D16) in a strip pinned under the toolbar, like Settings; only the view
- * under it scrolls. The view lives in the shell, so the page reopens on the
- * one used last and ⌘K can open Upcoming and Guests by name.
+ * Destinations (plan 174 S1.6b, A-14; plan 235 D6): Setup, Upcoming and
+ * Discord (plan 187) in a strip pinned under the toolbar, like Settings; only
+ * the view under it scrolls. The view lives in the shell, so the page reopens
+ * on the one used last and ⌘K and notices can open Upcoming and Discord by
+ * name. Guests (plan 224 D16) is its own page and renders through here.
  */
 export function StreamingTab({
   view,
@@ -130,6 +134,11 @@ export function StreamingTab({
       <TabsContent value="upcoming">
         <Suspense fallback={<p role="status">Loading upcoming streams…</p>}>
           <ScheduledStreams />
+        </Suspense>
+      </TabsContent>
+      <TabsContent value="discord">
+        <Suspense fallback={<p role="status">Loading Discord settings…</p>}>
+          <DiscordTab />
         </Suspense>
       </TabsContent>
     </PageTabs>
@@ -397,9 +406,6 @@ function StreamingSetup({
           onSearchTwitchCategories={searchTwitchCategories}
           onSearchKickCategories={searchKickCategories}
         />
-        {/* Plan 187: tell the streamer's Discord server when they go live. It
-            stays editable while live; changes apply to the next stream. */}
-        <DiscordSection sessionActive={isSessionActive} targets={streaming.targets} />
         {/* Plan 226: viewers type !name and Videorc answers as you. Free, and
             editable while live: a change answers the next !name. */}
         <Suspense fallback={null}>

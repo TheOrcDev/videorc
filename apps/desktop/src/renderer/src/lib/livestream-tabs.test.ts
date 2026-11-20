@@ -12,12 +12,13 @@ import {
 // Plan 174 S1.6b (A-14): Destinations reopens on the view used last.
 
 describe('livestream views', () => {
-  it('lists Setup then Upcoming, and opens on Setup by default', () => {
+  it('lists Setup, Upcoming then Discord, and opens on Setup by default', () => {
     // Guests is its own page since 0.31.1, no longer a Destinations view.
-    expect(LIVESTREAM_VIEWS.map(({ id }) => id)).toEqual(['setup', 'upcoming'])
+    expect(LIVESTREAM_VIEWS.map(({ id }) => id)).toEqual(['setup', 'upcoming', 'discord'])
     expect(isLivestreamViewId('guests')).toBe(false)
     expect(DEFAULT_LIVESTREAM_VIEW).toBe('setup')
     expect(isLivestreamViewId('upcoming')).toBe(true)
+    expect(isLivestreamViewId('discord')).toBe(true)
     expect(isLivestreamViewId('streaming')).toBe(false)
   })
 

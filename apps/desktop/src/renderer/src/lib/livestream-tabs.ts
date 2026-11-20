@@ -5,7 +5,8 @@ import { openWorkspaceTab } from '@/lib/workspace-navigation'
 /**
  * The Destinations page's views (plan 174 S1.6b, A-14), in strip order, built
  * like Settings' tabs: Setup prepares the destinations and the stream
- * details, Upcoming lists scheduled streams. The talk show's room is its own
+ * details, Upcoming lists scheduled streams, Discord holds the go-live
+ * announcement and its settings (plan 187). The talk show's room is its own
  * page, Guests, since 0.31.1. Ids are stable: they are stored
  * as the view used last and carried by links. Labels are copy.
  *
@@ -14,7 +15,8 @@ import { openWorkspaceTab } from '@/lib/workspace-navigation'
  */
 export const LIVESTREAM_VIEWS = [
   { id: 'setup', label: 'Setup' },
-  { id: 'upcoming', label: 'Upcoming' }
+  { id: 'upcoming', label: 'Upcoming' },
+  { id: 'discord', label: 'Discord' }
 ] as const
 
 /** The Guests page shows (plan 224 D16): launch flags fail closed, but an open room stays controllable. */

@@ -44,7 +44,7 @@ export function openWorkspaceTab(tab: 'settings', settingsTab?: SettingsTabId): 
 export function openWorkspaceTab(tab: 'ai', buddyTab?: BuddyTabId): void
 /** Opens the Avatar page on `avatarTab`, or on the tab used last. */
 export function openWorkspaceTab(tab: 'avatar', avatarTab?: AvatarTabId): void
-/** Opens Destinations on `livestreamView` (Setup or Upcoming), or on the view used last. */
+/** Opens Destinations on `livestreamView` (Setup, Upcoming or Discord), or on the view used last. */
 export function openWorkspaceTab(tab: 'live', livestreamView?: LivestreamViewId): void
 /** Opens the Library, about `sessionId` when there is one. */
 export function openWorkspaceTab(tab: 'library', sessionId?: string): void

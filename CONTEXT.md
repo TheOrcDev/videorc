@@ -301,7 +301,7 @@ _Avoid_: virtual cam, vcam, webcam, virtual camera (in copy)
 
 **Destinations** (the page):
 Where destinations and stream details are set up, in the sidebar's Livestream
-group: Setup, Upcoming and Guests. It was the Livestream page until plan 235
+group: Setup, Upcoming and Discord (Guests is its own page since 0.31.1). It was the Livestream page until plan 235
 (2026-11-14); its id is still `live`, and ⌘K still finds it by "livestream" and
 "stream key". Quote its tabs as "Destinations → Setup".
 _Avoid_: Livestream (for the page), Connections, Channels, Streaming tab
@@ -347,7 +347,7 @@ _Avoid_: re-auth, re-authorize
 
 **Discord announcement**:
 The one message Videorc posts to each of the streamer's Discord channels when
-they go live, through the webhooks they pasted in Destinations → Setup → Discord
+they go live, through the webhooks they pasted in Destinations → Discord
 (one per server). It links each live destination and becomes "Was live" at
 the stop (plan 187).
 _Avoid_: notification, alert, ping (a ping is only the @here or @everyone it

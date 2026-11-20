@@ -19,6 +19,12 @@ import {
   resolveSignedIn
 } from '@/lib/notifications/sources/platforms'
 import { createNotificationStore, type NotificationStore } from '@/lib/notifications/store'
+import { openDestinationsDiscord } from '@/lib/section-doors'
+
+vi.mock('@/lib/section-doors', () => ({
+  openDestinations: vi.fn(),
+  openDestinationsDiscord: vi.fn()
+}))
 
 describe('platforms as notifications (plan 250 S6)', () => {
   let store: NotificationStore
@@ -176,7 +182,7 @@ describe('platforms as notifications (plan 250 S6)', () => {
   })
 
   describe('YouTube and Discord', () => {
-    it('a broadcast step, the budget and a Discord post each have their entry', () => {
+    it('a broadcast step, the budget and a Discord post each have their entry', async () => {
       publishYouTubeBroadcastProblem(
         'start',
         { id: 'yt-1' },
@@ -195,12 +201,15 @@ describe('platforms as notifications (plan 250 S6)', () => {
       })
       // One quiet notice per step, never counted and never a pop-up.
       expect(entry('youtube-budget:paused')).toMatchObject({ tone: 'news', occurrences: 1 })
+      // The webhooks live on Destinations → Discord, so the way out opens that tab.
       expect(entry('discord-announce')).toMatchObject({
         tone: 'warning',
         title: "Couldn't post to Discord",
-        actions: [{ label: 'Open Destinations' }]
+        actions: [{ label: 'Open Discord settings' }]
       })
       expect(store.snapshot()).toHaveLength(3)
+      await store.runAction('discord-announce', 'open-destinations-discord')
+      expect(openDestinationsDiscord).toHaveBeenCalledOnce()
     })
 
     const failure: YouTubeThumbnailResult = {

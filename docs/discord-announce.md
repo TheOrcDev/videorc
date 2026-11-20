@@ -1,7 +1,7 @@
 # Discord go-live announcement
 
 Plan 187 ([issue #634](https://github.com/TheOrcDev/videorc/issues/634)). The
-streamer pastes a Discord webhook URL in **Destinations → Setup → Discord**, one
+streamer pastes a Discord webhook URL in **Destinations → Discord** (its own tab), one
 per server, up to ten. After that, every public Go Live posts one message to
 each of those channels:
 
@@ -32,12 +32,12 @@ session (its own state machine), so every server sees the same facts.
 The **Links in the post** list shows every configured destination and the
 link it will post:
 
-| Link        | Where it comes from                                                                                                                                                                     |
-| ----------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Auto        | Built from the connected account: `twitch.tv/{login}`, `kick.com/{slug}`, or `youtube.com/@{handle}/live` for a YouTube stream key. YouTube resolves `/live` only while a public stream runs. |
-| At Go Live  | YouTube (signed in): `youtube.com/watch?v={broadcast}`. X: its share link.                                                                                                              |
-| Typed       | Any `https` link the streamer types, at most 512 characters. A typed link wins over the other two.                                                                                     |
-| None        | Nothing known, for example TikTok, Instagram, Custom RTMP or a stream key with no account. The row can't be switched on until a link is typed.                                         |
+| Link       | Where it comes from                                                                                                                                                                           |
+| ---------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Auto       | Built from the connected account: `twitch.tv/{login}`, `kick.com/{slug}`, or `youtube.com/@{handle}/live` for a YouTube stream key. YouTube resolves `/live` only while a public stream runs. |
+| At Go Live | YouTube (signed in): `youtube.com/watch?v={broadcast}`. X: its share link.                                                                                                                    |
+| Typed      | Any `https` link the streamer types, at most 512 characters. A typed link wins over the other two.                                                                                            |
+| None       | Nothing known, for example TikTok, Instagram, Custom RTMP or a stream key with no account. The row can't be switched on until a link is typed.                                                |
 
 Every destination is included by default. The backend stores the switched-off
 ones (`excludedTargetIds`), so a new destination is included automatically.
@@ -113,16 +113,16 @@ platform needs its own proof:
 
 ## Failures
 
-| Discord answers                | Videorc does                                                                                        |
-| ------------------------------ | --------------------------------------------------------------------------------------------------- |
-| 401, or 404 "Unknown Webhook"  | That webhook is gone. It reports `webhook-deleted` on its row and doesn't retry; the others go on.  |
-| 404 on an edit                 | The message is gone. It forgets that webhook's message, quietly.                                    |
-| 429                            | It waits `retry_after` (at most 60 s), then retries.                                                |
-| 5xx, timeout (10 s), offline   | It retries after 2, 5, 15, 30 and 60 s, then every 60 s, for up to 5 minutes. Then it reports `unreachable`. |
-| Any other 4xx                  | It reports `rejected`. Discord's code goes to the log, never to the copy.                           |
+| Discord answers               | Videorc does                                                                                                 |
+| ----------------------------- | ------------------------------------------------------------------------------------------------------------ |
+| 401, or 404 "Unknown Webhook" | That webhook is gone. It reports `webhook-deleted` on its row and doesn't retry; the others go on.           |
+| 404 on an edit                | The message is gone. It forgets that webhook's message, quietly.                                             |
+| 429                           | It waits `retry_after` (at most 60 s), then retries.                                                         |
+| 5xx, timeout (10 s), offline  | It retries after 2, 5, 15, 30 and 60 s, then every 60 s, for up to 5 minutes. Then it reports `unreachable`. |
+| Any other 4xx                 | It reports `rejected`. Discord's code goes to the log, never to the copy.                                    |
 
 A failed post raises one neutral toast wherever the streamer is: "Couldn't
-post to Discord", with **Open Destinations**; the description names the webhook
+post to Discord", with **Open Discord settings** (Destinations → Discord); the description names the webhook
 ("The Stream alerts webhook was deleted in Discord. …") so servers tell
 apart, and the newest failure across the webhooks is the one that toasts.
 That webhook's row shows the same line, and a health event records it
@@ -160,14 +160,14 @@ written again.
 
 ## RPCs
 
-| Method                     | Policy      | Notes                                                                   |
-| -------------------------- | ----------- | ----------------------------------------------------------------------- |
-| `discord.announce.get`     | Observation | The snapshot. It never includes the URL.                                |
-| `discord.announce.update`  | Mutation    | Every field is optional. `linkOverride` with no `link` removes the typed link. |
+| Method                     | Policy      | Notes                                                                                                                                                                                                |
+| -------------------------- | ----------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `discord.announce.get`     | Observation | The snapshot. It never includes the URL.                                                                                                                                                             |
+| `discord.announce.update`  | Mutation    | Every field is optional. `linkOverride` with no `link` removes the typed link.                                                                                                                       |
 | `discord.webhook.save`     | Mutation    | `{ url }`. Checks the format, then Discord verifies it with a `GET`, then it is added. A webhook already saved (same id) is replaced in place; past ten it refuses with `discord-too-many-webhooks`. |
-| `discord.webhook.remove`   | Mutation    | `{ webhookId }`. Deletes that webhook's secret, settings and last message; the others stay. |
-| `discord.webhook.sendTest` | Mutation    | `{ targets, webhookId }`: a test post through that one webhook. Not `.test`: a name ending in `.test` is admin-only, for smoke sockets. |
-| `discord.links.preview`    | Observation | The rows of the links list, and who Automatic resolves to.              |
+| `discord.webhook.remove`   | Mutation    | `{ webhookId }`. Deletes that webhook's secret, settings and last message; the others stay.                                                                                                          |
+| `discord.webhook.sendTest` | Mutation    | `{ targets, webhookId }`: a test post through that one webhook. Not `.test`: a name ending in `.test` is admin-only, for smoke sockets.                                                              |
+| `discord.links.preview`    | Observation | The rows of the links list, and who Automatic resolves to.                                                                                                                                           |
 
 The event is `discord.announce.changed`, which carries the snapshot.
 
