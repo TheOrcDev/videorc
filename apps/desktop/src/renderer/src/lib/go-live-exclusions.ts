@@ -34,7 +34,11 @@ export function streamingWithoutTargets(
 
 /** The destinations on in `saved` that `sent` leaves out: what a start left out. */
 export function targetsLeftOut(saved: StreamingSettings, sent: StreamingSettings): string[] {
-  return saved.enabledTargetIds.filter((id) => !sent.enabledTargetIds.includes(id))
+  // Off in either form: a failed setup turns the flag off and keeps the id.
+  const on = (id: string): boolean =>
+    sent.enabledTargetIds.includes(id) &&
+    sent.targets.find((target) => target.id === id)?.enabled !== false
+  return saved.enabledTargetIds.filter((id) => !on(id))
 }
 
 /** The exclusion list after a "Go live without" (add) or an "Add back" (remove). */

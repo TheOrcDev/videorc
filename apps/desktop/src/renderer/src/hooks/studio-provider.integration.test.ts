@@ -17444,9 +17444,9 @@ describe('real StudioProvider lifecycle', () => {
     const reopenCheck = backend.sentCommands
       .filter((command) => command.method === 'streamTargets.confirmation.validate')
       .at(-1)?.params as { streaming: StreamingSettings }
-    expect(reopenCheck.streaming.targets.find((target) => target.id === leftOut[0])?.enabled).toBe(
-      false
-    )
+    // The failed setup already saved X's flag off; only the exclusion drops
+    // it from the list the backend preflight also reads.
+    expect(reopenCheck.streaming.enabledTargetIds).not.toContain(leftOut[0])
 
     // A recording never asks (D15): its Retry records, with no signal.
     await act(async () => {

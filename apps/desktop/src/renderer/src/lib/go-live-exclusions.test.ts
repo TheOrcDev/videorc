@@ -60,6 +60,14 @@ describe('Go live without a destination (plan 174 S3.4, B-8)', () => {
     const [left] = streaming.enabledTargetIds
     expect(targetsLeftOut(streaming, streamingWithoutTargets(streaming, [left!]))).toEqual([left])
     expect(targetsLeftOut(streaming, streaming)).toEqual([])
+    // A failed setup turns the flag off and keeps the id.
+    const flagOff = {
+      ...streaming,
+      targets: streaming.targets.map((target) =>
+        target.id === left ? { ...target, enabled: false } : target
+      )
+    }
+    expect(targetsLeftOut(streaming, flagOff)).toEqual([left])
   })
 
   it('adds and removes a destination from the list once', () => {

@@ -4377,6 +4377,8 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
   const [goLiveConfirmationPending, setGoLiveConfirmationPending] = useState(false)
   const [goLivePartialSetup, setGoLivePartialSetup] = useState<GoLivePartialSetup | null>(null)
   const [suppressCaptionsChoice, setSuppressCaptionsForSession] = useState(false)
+  const suppressCaptionsChoiceRef = useRef(suppressCaptionsChoice)
+  suppressCaptionsChoiceRef.current = suppressCaptionsChoice
   const [runtimeInfo, setRuntimeInfo] = useState<RuntimeInfo | null>(null)
   // Plan 214 E: Videorc Camera's status, switch and actions, in its own context.
   const virtualCamera = useVirtualCameraController(client, wsStatus, runtimeInfo)
@@ -17058,6 +17060,7 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
   const [srtAskAgain, setSrtAskAgain] = useState<{
     intent: SessionStartIntent
     excludedTargetIds: readonly string[]
+    withoutCaptions: boolean
   } | null>(null)
   const askAgainAfterSrtRefusal = useCallback(
     (
@@ -17070,7 +17073,8 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
       })
       setSrtAskAgain({
         intent: livestreamIntent(captureConfigRef.current.recordEnabled),
-        excludedTargetIds
+        excludedTargetIds,
+        withoutCaptions: suppressCaptionsChoiceRef.current
       })
     },
     []
@@ -17078,9 +17082,13 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
   useEffect(() => {
     if (srtAskAgain === null || startRequestPending || goLiveConfirmationPending) return
     setSrtAskAgain(null)
-    // The attempt's own cleanup (above) has just cleared them.
+    // The attempt's own cleanup (above) has just cleared them, and the
+    // preflight clears "Go live without captions": both come back.
     commitGoLiveExclusions(srtAskAgain.excludedTargetIds)
-    void openGoLiveConfirmationRef.current?.(srtAskAgain.intent)
+    void openGoLiveConfirmationRef.current?.(srtAskAgain.intent).then(() => {
+      // Only for the dialog it reopened: no dialog, no attempt to keep it for.
+      if (srtAskAgain.withoutCaptions && dialogOpenRef.current) setSuppressCaptionsForSession(true)
+    })
   }, [commitGoLiveExclusions, srtAskAgain, startRequestPending, goLiveConfirmationPending])
   const runStartSession = useCallback(
     (
