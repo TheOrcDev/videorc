@@ -62,8 +62,8 @@ import {
   type RoomSceneStatus,
   type SceneContent
 } from './room-scene-publisher'
+import { createPrivateScreen } from './room-private-screen'
 import {
-  createPrivateScreen,
   roomScreenPrivacy,
   privacyTrackName,
   privacyObservationMatches,

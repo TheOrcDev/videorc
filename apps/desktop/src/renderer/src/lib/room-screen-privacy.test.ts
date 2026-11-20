@@ -1,8 +1,8 @@
 import fixture from '../../../../../../protocol-fixtures/cloud-parity-privacy.json'
 import { describe, it, expect, vi, afterEach } from 'vitest'
+import { createPrivateScreen } from './room-private-screen'
 import {
   ScreenPrivacyDecision,
-  createPrivateScreen,
   privacyTrackName,
   privacyObservationMatches
 } from './room-screen-privacy'

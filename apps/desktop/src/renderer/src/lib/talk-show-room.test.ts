@@ -4,6 +4,7 @@ import type { RoomOptions } from 'livekit-client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import * as privacyModule from './room-screen-privacy'
+import * as privateScreenModule from './room-private-screen'
 import { CAPABILITY_TOPIC } from './room-media-v2'
 import { AVATAR_TOPIC, type AvatarLayer } from '../../../shared/cloud-avatar'
 import avatarFixture from '../../../../../..//protocol-fixtures/cloud-parity-avatar.json'
@@ -939,7 +940,7 @@ describe('S2 screen publication boundary', () => {
     )
     const raw = { stop: vi.fn(), addEventListener: vi.fn() } as unknown as MediaStreamTrack
     const outputs: { stop: ReturnType<typeof vi.fn>; kind: string }[] = []
-    const adapter = vi.spyOn(privacyModule, 'createPrivateScreen').mockImplementation(() => {
+    const adapter = vi.spyOn(privateScreenModule, 'createPrivateScreen').mockImplementation(() => {
       const output = { stop: vi.fn(), kind: 'video' }
       outputs.push(output)
       return {
