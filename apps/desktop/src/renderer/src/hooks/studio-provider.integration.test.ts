@@ -952,6 +952,9 @@ class StudioBackend {
         this.currentLayout = params.layout as LayoutSettings
         this.currentScene = {
           ...this.currentScene,
+          // Rust `scene_from_capture_config`: the idle commit's scene has the
+          // background it was given, and none when it was given none.
+          background: params.background as Scene['background'],
           sources: this.currentScene.sources.map((source) => ({
             ...source,
             visible:
@@ -6588,6 +6591,98 @@ describe('real StudioProvider lifecycle', () => {
       expect(latest().recording.recording.state).toBe(live ? 'streaming' : 'recording')
       expect(latest().core.canStop).toBe(true)
     }
+  )
+
+  // Live test 3 (owner, 2026-11-20): "I cannot switch asset background while
+  // in a room". The room holds the camera, so the backend answers a native
+  // layout transaction with the camera's 15 s readiness failure; the working
+  // background never changed, and the room camera is keyed onto it. In a room
+  // the change commits idle, on air or not, and with no room it stays a
+  // native transaction.
+  it.each([false, true])(
+    'switches the background while a room holds the camera (live=%s)',
+    async (live) => {
+      const backend = new StudioBackend()
+      backend.cloudStatus = {
+        ...resumableCloudStatus(),
+        phase: 'live',
+        plan: 'premium',
+        show: { id: 'sh_test', nodeId: 'local-1', resumable: false, kind: 'talk' },
+        room: {
+          phase: 'open',
+          doorOpen: false,
+          declinedCount: 0,
+          stage: { layout: 'solo', onStage: ['host:sh_test'] },
+          hostAway: false,
+          connected: true,
+          client: 'connected',
+          returnEnabled: false,
+          stageSet: true,
+          live
+        },
+        recording: { active: true, seconds: 0, bytes: 0 }
+      }
+      TestWebSocket.backend = backend
+      vi.stubGlobal('WebSocket', TestWebSocket)
+      const api = createVideorcApi({
+        acknowledge: async () => true,
+        pending: async () => [],
+        acknowledgeProvider: async () => true,
+        pendingProvider: async () => []
+      })
+      api.backgroundAssetExists = async () => true
+      const testDom = installProviderTestEnvironment(api)
+      restoreEnvironment = testDom.restore
+      const observations: StudioObservation[] = []
+      const latest = (): StudioObservation => observations.at(-1)!
+      root = await mountStudioProvider(testDom.container, (value) => {
+        observations.push(value)
+      })
+      await waitForObservation(
+        () => latest()?.cloud.cloudStatus?.room?.phase === 'open' && canSaveScene()
+      )
+      // The real backend in a room: the lent camera never becomes ready.
+      backend.layoutApplyFailure = 'camera-not-ready'
+      const layoutApplies = (): number =>
+        backend.commands.filter((command) => command.method.startsWith('scene.layout.apply_'))
+          .length
+      const appliesBefore = layoutApplies()
+      const loadedBackground = (assetId: string | null): boolean =>
+        backend.commands.some(
+          (command) =>
+            command.method === 'scene.load_from_capture_config' &&
+            ((command.params as { background?: { assetId: string } }).background?.assetId ??
+              null) === assetId
+        )
+
+      await act(async () => latest().core.applyBackgroundSlot('bg-01'))
+      await waitForObservation(() => latest().core.scene?.background?.assetId === 'builtin-bg-01')
+      expect(loadedBackground('builtin-bg-01')).toBe(true)
+
+      // A second pick while still in the room, then none.
+      await act(async () => latest().core.applyBackgroundSlot('bg-02'))
+      await waitForObservation(() => latest().core.scene?.background?.assetId === 'builtin-bg-02')
+      await act(async () => latest().core.applyBackgroundSlot(null))
+      await waitForObservation(() => latest().core.scene?.background == null)
+
+      expect(layoutApplies()).toBe(appliesBefore)
+      // No "Couldn't switch the scene" (the room's own join toast is not ours).
+      expect(toastSpies.error.mock.calls.filter(([title]) => /scene/i.test(String(title)))).toEqual(
+        []
+      )
+
+      // The room closed: the camera is back, and a pick is a native transaction again.
+      backend.layoutApplyFailure = null
+      backend.cloudStatus = { ...backend.cloudStatus!, room: undefined, recording: undefined }
+      await act(async () => {
+        backend.pushEvent('cloud.state', backend.cloudStatus)
+      })
+      await waitForObservation(() => latest().cloud.cloudStatus?.room === undefined)
+      await act(async () => latest().core.applyBackgroundSlot('bg-01'))
+      await waitForObservation(() => latest().core.scene?.background?.assetId === 'builtin-bg-01')
+      expect(layoutApplies()).toBe(appliesBefore + 1)
+    },
+    30000
   )
 
   // 0.28.1 (owner, 11-16): the host never got into the room, and End
