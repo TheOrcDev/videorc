@@ -579,6 +579,19 @@ impl CloudStage {
         };
     }
 
+    /// Takes `identity` off the stage whole (removed, banned, or left): the
+    /// people, the spotlight and the screens. The stage stays valid. True
+    /// when the stage named them.
+    pub(crate) fn take_off(&mut self, identity: &str) -> bool {
+        let before = self.clone();
+        self.on_stage.retain(|on_stage| on_stage != identity);
+        if self.spotlight.as_deref() == Some(identity) {
+            self.spotlight = None;
+        }
+        self.drop_screen(identity);
+        *self != before
+    }
+
     pub(crate) fn frame(&self, id: &str) -> Value {
         let mut frame = json!({
             "t": "intent",
@@ -1168,6 +1181,17 @@ pub(crate) struct TalkShowState {
     pub poll_cursor: Option<String>,
     pub poll_generation: u64,
     pub seen_requests: HashSet<String>,
+    /// The guests the last guests answer of this room listed. `None` until
+    /// the first one: after a restart nobody is known yet, so nobody has
+    /// "left" (plan 254 D1, the #1554 known-room rule).
+    pub polled_guests: Option<HashSet<String>>,
+    /// Guests an earlier answer listed and a later one did not: they left,
+    /// or were removed or banned (the web lists a guest while their request
+    /// is let in). They stay off the stage until the web lists them again.
+    pub departed_guests: HashSet<String>,
+    /// A stage a departed guest was taken off has not reached Videorc Cloud
+    /// yet: the next guests answer sends it again.
+    pub departed_stage_owed: bool,
     /// Plan 234 (web control): the overlays that are up, one per slot and
     /// orientation, with their bytes. Empty on a node show.
     pub(crate) overlays: Vec<StoredOverlay>,
@@ -1219,9 +1243,47 @@ impl TalkShowState {
             poll_cursor: None,
             poll_generation: 0,
             seen_requests: HashSet::new(),
+            polled_guests: None,
+            departed_guests: HashSet::new(),
+            departed_stage_owed: false,
             overlays: Vec::new(),
             avatar_applied: None,
         }
+    }
+
+    /// One answer of the guests long-poll (plan 254 D1). A guest the answer
+    /// before listed and this one does not has left the show: an explicit
+    /// Leave, a Remove or a Ban, the only ways off the web's list. They come
+    /// off the stage, the spotlight and the screens. A guest whose connection
+    /// only dropped is still listed, and keeps their place ("Back in a
+    /// moment", plan 249 D12). The first answer of a room prunes nobody.
+    /// Returns the requests not seen before, and whether the stage changed.
+    fn take_guests_answer(&mut self, answer: GuestsAnswer) -> (Vec<CloudRoomRequest>, bool) {
+        let new_requests: Vec<CloudRoomRequest> = answer
+            .requests
+            .iter()
+            .filter(|request| self.seen_requests.insert(request.request_id.clone()))
+            .cloned()
+            .collect();
+        let listed: HashSet<String> = answer
+            .guests
+            .iter()
+            .map(|guest| guest.guest_id.clone())
+            .collect();
+        self.departed_guests.retain(|guest| !listed.contains(guest));
+        if let Some(before) = self.polled_guests.take() {
+            self.departed_guests
+                .extend(before.into_iter().filter(|guest| !listed.contains(guest)));
+        }
+        self.polled_guests = Some(listed);
+        let mut stage_changed = false;
+        for guest in &self.departed_guests {
+            stage_changed |= self.stage.take_off(guest);
+        }
+        self.requests = answer.requests;
+        self.guests = answer.guests;
+        self.declined_count = answer.declined_count;
+        (new_requests, stage_changed)
     }
 
     pub(crate) fn status(&self, runner_room: Option<&RunnerRoomState>) -> CloudRoomStatus {
@@ -1993,15 +2055,7 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
                 GuestAction::Remove | GuestAction::Ban => {
                     talk.guests
                         .retain(|guest| guest.guest_id != params.guest_id);
-                    let before = talk.stage.on_stage.len();
-                    talk.stage
-                        .on_stage
-                        .retain(|identity| identity != &params.guest_id);
-                    if talk.stage.spotlight.as_deref() == Some(params.guest_id.as_str()) {
-                        talk.stage.spotlight = None;
-                    }
-                    talk.stage.drop_screen(&params.guest_id);
-                    stage_changed = talk.stage.on_stage.len() != before;
+                    stage_changed = talk.stage.take_off(&params.guest_id);
                 }
                 GuestAction::Mute | GuestAction::Unmute => {
                     if let Some(guest) = talk
@@ -2074,6 +2128,7 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
         if let Some(talk) = lock(&self.slot).talk.as_mut() {
             talk.stage = stage;
             talk.stage_sent = true;
+            talk.departed_stage_owed = false;
         }
         self.hooks.emit_from(&self.slot);
         Ok(lock(&self.slot).status())
@@ -2745,6 +2800,62 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
             .ok_or_else(|| anyhow::anyhow!("The room is closed."))
     }
 
+    /// Applies one guests answer to the room of `generation`: the lists, a
+    /// request event for each new request, and, when a guest who left was
+    /// on the stage, the stage without them, sent once the way a Remove
+    /// sends it (plan 254 D1). A stage Videorc Cloud did not take is owed,
+    /// and goes again with the next answer. False when the room is no
+    /// longer this generation's.
+    pub(crate) async fn take_guests_answer(&self, generation: u64, answer: GuestsAnswer) -> bool {
+        let (new_requests, stage) = {
+            let mut runtime = lock(&self.slot);
+            let Some(talk) = runtime
+                .talk
+                .as_mut()
+                .filter(|talk| talk.poll_generation == generation)
+            else {
+                return false;
+            };
+            let cursor = (!answer.cursor.is_empty()).then(|| answer.cursor.clone());
+            let (new_requests, stage_changed) = talk.take_guests_answer(answer);
+            talk.poll_cursor = cursor;
+            talk.departed_stage_owed |= stage_changed;
+            (
+                new_requests,
+                talk.departed_stage_owed.then(|| talk.stage.clone()),
+            )
+        };
+        for request in new_requests {
+            (self.hooks.request)(request);
+        }
+        // The Studio drops the guest's tile now; the program follows the send.
+        self.hooks.emit_from(&self.slot);
+        let Some(stage) = stage else {
+            return true;
+        };
+        match self.send_stage(&stage).await {
+            Ok(()) => {
+                if let Some(talk) = lock(&self.slot)
+                    .talk
+                    .as_mut()
+                    .filter(|talk| talk.poll_generation == generation)
+                {
+                    talk.stage_sent = true;
+                    if talk.stage == stage {
+                        talk.departed_stage_owed = false;
+                    }
+                }
+                self.hooks.emit_from(&self.slot);
+            }
+            Err(problem) => {
+                tracing::warn!(
+                    "The stage after a guest left did not reach Videorc Cloud: {problem}"
+                );
+            }
+        }
+        true
+    }
+
     /// The guests long-poll (W-G2's `GET …/guests?since=`): requests, guests
     /// and the hidden count, while the room is this generation's.
     fn spawn_guests_poll(&self, bearer: String, show_id: String, generation: u64) {
@@ -2769,33 +2880,9 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
                 {
                     Ok(answer) => {
                         since = (!answer.cursor.is_empty()).then(|| answer.cursor.clone());
-                        let new_requests = {
-                            let mut runtime = lock(&context.slot);
-                            let Some(talk) = runtime
-                                .talk
-                                .as_mut()
-                                .filter(|talk| talk.poll_generation == generation)
-                            else {
-                                return;
-                            };
-                            let new_requests: Vec<CloudRoomRequest> = answer
-                                .requests
-                                .iter()
-                                .filter(|request| {
-                                    talk.seen_requests.insert(request.request_id.clone())
-                                })
-                                .cloned()
-                                .collect();
-                            talk.requests = answer.requests;
-                            talk.guests = answer.guests;
-                            talk.declined_count = answer.declined_count;
-                            talk.poll_cursor = since.clone();
-                            new_requests
-                        };
-                        for request in new_requests {
-                            (context.hooks.request)(request);
+                        if !context.take_guests_answer(generation, answer).await {
+                            return;
                         }
-                        context.hooks.emit_from(&context.slot);
                         tokio::time::sleep(GUESTS_POLL_REST).await;
                     }
                     Err(error) => {
@@ -3016,6 +3103,45 @@ mod tests {
         assert_eq!(two.screen.as_deref(), Some("host:sh_abc"));
         two.drop_screen("host:sh_abc");
         assert_eq!(two.screen, None);
+    }
+
+    /// Plan 254 D1: a guest who left comes off the people, the spotlight
+    /// and the screens, and what is left is a stage the cloud accepts.
+    #[test]
+    fn a_guest_taken_off_the_stage_leaves_a_valid_stage() {
+        let mut two = stage(json!({
+            "layout": "screen-people",
+            "onStage": ["host:sh_abc", "g_ada", "g_bo"],
+            "spotlight": "g_ada",
+            "screen": "g_ada",
+            "screens": ["g_ada", "host:sh_abc"]
+        }));
+        // Someone the stage never named changes nothing.
+        assert!(!two.take_off("g_cy"));
+        // Bo is on neither screen: the pair stays.
+        assert!(two.clone().take_off("g_bo"));
+        let mut without_bo = two.clone();
+        without_bo.take_off("g_bo");
+        assert_eq!(without_bo.screens, vec!["g_ada", "host:sh_abc"]);
+        assert_eq!(without_bo.spotlight.as_deref(), Some("g_ada"));
+        without_bo.validate().unwrap();
+        // Ada had the spotlight and one of the screens: both go, and the
+        // host's screen becomes the stage's one screen.
+        assert!(two.take_off("g_ada"));
+        assert_eq!(two.on_stage, vec!["host:sh_abc", "g_bo"]);
+        assert_eq!(two.spotlight, None);
+        assert_eq!(two.screen.as_deref(), Some("host:sh_abc"));
+        assert!(two.screens.is_empty());
+        two.validate().unwrap();
+        // One screen, the leaver's: no screen is left.
+        let mut one = stage(json!({
+            "layout": "screen-people",
+            "onStage": ["host:sh_abc", "g_ada"],
+            "screen": "g_ada"
+        }));
+        assert!(one.take_off("g_ada"));
+        assert_eq!(one.screen, None);
+        one.validate().unwrap();
     }
 
     #[test]

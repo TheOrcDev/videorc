@@ -6809,7 +6809,13 @@ mod tests {
             _show_id: &str,
             _since: Option<&str>,
         ) -> std::result::Result<GuestsAnswer, CloudApiError> {
-            Ok(self.guests.lock().unwrap().pop_front().unwrap_or_default())
+            // Past the scripted answers the poll fails: an empty answer
+            // would say every guest left (plan 254 D1).
+            self.guests
+                .lock()
+                .unwrap()
+                .pop_front()
+                .ok_or_else(|| CloudApiError::Transport("no scripted guests answer".into()))
         }
 
         async fn decide_request(
@@ -15419,6 +15425,227 @@ mod tests {
         // reads `screens` as an array, never `null`.
         let wire = serde_json::to_value(status.room.unwrap().stage).unwrap();
         assert_eq!(wire, stage);
+    }
+
+    const GUEST: &str = "g_0123456789abcdefghijkl";
+
+    /// A guests answer that lists `guests` (plan 254).
+    fn guests_answer(guests: &[&str]) -> crate::cloud_talk::GuestsAnswer {
+        crate::cloud_talk::GuestsAnswer {
+            cursor: "2026-11-20T10:00:00Z".to_string(),
+            declined_count: 0,
+            guests: guests
+                .iter()
+                .map(|guest| crate::cloud_talk::CloudRoomGuest {
+                    guest_id: guest.to_string(),
+                    name: "Ada".to_string(),
+                    joined_at: "2026-11-20T09:59:00Z".to_string(),
+                    muted: false,
+                    screen_share_allowed: true,
+                })
+                .collect(),
+            requests: Vec::new(),
+        }
+    }
+
+    fn guests_poll_generation(harness: &Harness) -> u64 {
+        lock(&harness.context.slot)
+            .talk
+            .as_ref()
+            .unwrap()
+            .poll_generation
+    }
+
+    /// Plan 254 D1 (F1): a guest who leaves a managed show comes off the
+    /// stage, the spotlight and the screens, and `PUT …/stage` gets the
+    /// stage without them, once. The web lists a guest until a Leave, a
+    /// Remove or a Ban, so a guest who only dropped is still listed and
+    /// keeps their place ("Back in a moment", plan 249 D12).
+    #[tokio::test(start_paused = true)]
+    async fn a_guest_who_leaves_a_managed_show_comes_off_the_stage_once() {
+        let harness = harness(true);
+        managed_room(&harness).await;
+        let web = harness.context.web.clone();
+        let context = harness.context.clone();
+        let generation = guests_poll_generation(&harness);
+        assert!(
+            context
+                .take_guests_answer(generation, guests_answer(&[GUEST]))
+                .await
+        );
+        let stage = json!({
+            "layout": "screen-people",
+            "onStage": ["host:sh_abc", GUEST],
+            "spotlight": GUEST,
+            "screen": GUEST,
+            "screens": [GUEST, "host:sh_abc"],
+            "hostShape": "rounded"
+        });
+        context
+            .set_stage(serde_json::from_value(stage.clone()).unwrap())
+            .await
+            .unwrap();
+        // Still listed (their connection may have dropped; the managed
+        // state lists the host alone): nothing is sent, the stage stays.
+        assert!(
+            context
+                .take_guests_answer(generation, guests_answer(&[GUEST]))
+                .await
+        );
+        assert_eq!(web.managed.lock().unwrap().stages, vec![stage.clone()]);
+        assert_eq!(
+            lock(&context.slot).status().room.unwrap().stage.on_stage,
+            vec!["host:sh_abc".to_string(), GUEST.to_string()]
+        );
+        // Gone from the list: they left. One PUT, naming the host alone,
+        // with the host's screen as the one screen.
+        let emitted = harness.emitted.lock().unwrap().len();
+        assert!(
+            context
+                .take_guests_answer(generation, guests_answer(&[]))
+                .await
+        );
+        let left = json!({
+            "layout": "screen-people",
+            "onStage": ["host:sh_abc"],
+            "screen": "host:sh_abc",
+            "hostShape": "rounded"
+        });
+        assert_eq!(
+            web.managed.lock().unwrap().stages,
+            vec![stage.clone(), left.clone()]
+        );
+        assert!(harness.emitted.lock().unwrap().len() > emitted);
+        let room = lock(&context.slot).status().room.unwrap();
+        assert!(room.guests.is_empty());
+        room.stage.validate().unwrap();
+        assert_eq!(serde_json::to_value(&room.stage).unwrap(), left);
+        // The answers after it send nothing more.
+        for _ in 0..2 {
+            assert!(
+                context
+                    .take_guests_answer(generation, guests_answer(&[]))
+                    .await
+            );
+        }
+        assert_eq!(web.managed.lock().unwrap().stages.len(), 2);
+        // An answer for a room that is no longer this one changes nothing.
+        assert!(
+            !context
+                .take_guests_answer(generation + 1, guests_answer(&[]))
+                .await
+        );
+    }
+
+    /// Plan 254 D1, the #1554 known-room rule: the first guests answer of a
+    /// room (a restart, a resume) has no answer before it, so nobody has
+    /// left yet, even when it lists nobody. Only a guest an answer listed
+    /// can leave.
+    #[tokio::test(start_paused = true)]
+    async fn the_first_guests_answer_after_a_restart_takes_nobody_off_the_stage() {
+        let harness = harness(true);
+        managed_room(&harness).await;
+        let web = harness.context.web.clone();
+        let context = harness.context.clone();
+        let generation = guests_poll_generation(&harness);
+        context.set_stage(stage_with_a_guest()).await.unwrap();
+        for _ in 0..2 {
+            assert!(
+                context
+                    .take_guests_answer(generation, guests_answer(&[]))
+                    .await
+            );
+        }
+        assert_eq!(web.managed.lock().unwrap().stages.len(), 1);
+        let talk = lock(&context.slot).talk.clone().unwrap();
+        assert_eq!(talk.stage, stage_with_a_guest());
+        assert!(talk.departed_guests.is_empty());
+    }
+
+    /// Plan 254 D1: a stage the cloud did not take after a guest left is
+    /// owed, and goes again with the next guests answer; a guest who comes
+    /// back may be brought on again.
+    #[tokio::test(start_paused = true)]
+    async fn a_stage_refused_after_a_guest_left_goes_again_with_the_next_answer() {
+        let node = harness(true);
+        let mut runner =
+            crate::cloud_talk::open_talk_show_for_tests(&node.context.slot, "sh_talk", true);
+        let context = node.context.clone();
+        let generation = guests_poll_generation(&node);
+        let with_guest: crate::cloud_talk::CloudStage = serde_json::from_value(json!({
+            "layout": "spotlight",
+            "onStage": ["host:sh_talk", GUEST, "g_bo"],
+            "spotlight": GUEST
+        }))
+        .unwrap();
+        assert!(
+            context
+                .take_guests_answer(generation, guests_answer(&[GUEST, "g_bo"]))
+                .await
+        );
+        {
+            let mut runtime = lock(&context.slot);
+            let talk = runtime.talk.as_mut().unwrap();
+            talk.stage = with_guest.clone();
+            talk.stage_sent = true;
+        }
+        // Nobody left: no frame.
+        assert!(runner.try_recv().is_err());
+        // The guest leaves; the runner refuses the stage.
+        let (taken, frame) = tokio::join!(
+            context.take_guests_answer(generation, guests_answer(&["g_bo"])),
+            async {
+                runner
+                    .recv()
+                    .await
+                    .expect("the stage")
+                    .answer_for_tests(Some("busy"))
+            }
+        );
+        assert!(taken);
+        assert_eq!(frame["kind"], "stage.set");
+        assert_eq!(frame["onStage"], json!(["host:sh_talk", "g_bo"]));
+        assert!(frame.get("spotlight").is_none());
+        assert!(
+            lock(&context.slot)
+                .talk
+                .as_ref()
+                .unwrap()
+                .departed_stage_owed
+        );
+        // The next answer sends it again, and then it is settled.
+        let (_, frame) = tokio::join!(
+            context.take_guests_answer(generation, guests_answer(&["g_bo"])),
+            async {
+                runner
+                    .recv()
+                    .await
+                    .expect("the stage again")
+                    .answer_for_tests(None)
+            }
+        );
+        assert_eq!(frame["onStage"], json!(["host:sh_talk", "g_bo"]));
+        assert!(
+            context
+                .take_guests_answer(generation, guests_answer(&["g_bo"]))
+                .await
+        );
+        assert!(runner.try_recv().is_err());
+        // The guest is let in again: back on the list, and a stage that
+        // names them stays as the host set it.
+        assert!(
+            context
+                .take_guests_answer(generation, guests_answer(&[GUEST, "g_bo"]))
+                .await
+        );
+        lock(&context.slot).talk.as_mut().unwrap().stage = with_guest.clone();
+        assert!(
+            context
+                .take_guests_answer(generation, guests_answer(&[GUEST, "g_bo"]))
+                .await
+        );
+        assert!(runner.try_recv().is_err());
+        assert_eq!(lock(&context.slot).talk.as_ref().unwrap().stage, with_guest);
     }
 
     #[tokio::test(start_paused = true)]
