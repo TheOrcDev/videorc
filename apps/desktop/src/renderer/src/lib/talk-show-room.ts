@@ -455,7 +455,14 @@ export class TalkShowRoomClient {
   #graphicsEnabled = false
   #avatar: RoomAvatarPublisher | null = null
   #avatarContent: AvatarContent | null = null
-  #avatarEnabled = false
+  /**
+   * On in every new room: the avatar's own switches ("on stream", Show in
+   * recording) already chose its outputs, and `AvatarContent` carries them.
+   * Off was the default until 0.35.0, so on a managed show those switches did
+   * nothing until a second one in Guests → Room was found (the owner,
+   * 2026-11-20). The Guests → Room switch still hides it for this room.
+   */
+  #avatarEnabled = true
   /** Plan 249 S5: the avatar's motion stream, per bound room. */
   #motion: RoomAvatarMotion | null = null
   #motionTimer: ReturnType<typeof setInterval> | null = null

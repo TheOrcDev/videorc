@@ -378,6 +378,29 @@ describe('Guests → Room: on the program (plan 249 S4/S9)', () => {
     expect(setGraphicsEnabled).toHaveBeenCalledWith(true)
   })
 
+  // The owner, 2026-11-20 (0.35.0): the room lets the avatar through from the
+  // start, so its own "on stream" switch is the one that matters; while that
+  // is off the row says where it is, and never that the stream is waiting.
+  it('says where the avatar is turned on while its own switch is off', async () => {
+    await mount(
+      talkStatus({ show: managedShow, room: openRoom({ live: true }) }),
+      talkShow({
+        room: {
+          ...NO_TALK_SHOW.room,
+          avatar: {
+            ...avatar(true, { enabled: false, capable: 0, applied: 0 }),
+            state: 'off',
+            preview: null
+          }
+        }
+      })
+    )
+    expect(toggle('guests-program-avatar')?.getAttribute('aria-checked')).toBe('true')
+    expect(row('guests-program-avatar')?.textContent).toContain(
+      'Your avatar is off. Turn on its “on stream” switch in Stream Manager.'
+    )
+  })
+
   it('offers guests the avatar once it is on, and says how many confirmed', async () => {
     const setAvatarGuests = vi.fn(async () => {})
     const status = talkStatus({ show: managedShow, room: openRoom({ live: true }) })

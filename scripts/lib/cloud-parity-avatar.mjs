@@ -49,8 +49,9 @@ export async function prepareAvatar({ h, report }) {
       vertical: { x: 0.4, y: 0.65, w: 0.5, h: 0.3 }
     }
   })
-  assert.equal((await state(h)).enabled, false, 'Room avatar must start off')
-  await enable(h, true)
+  // The avatar's own switches above chose its outputs; the room lets it
+  // through with nothing pressed in Guests → Room (the owner, 2026-11-20).
+  assert.equal((await state(h)).enabled, true, 'Room avatar must follow its own switches')
   await say(h)
   await waitFor(
     () =>
