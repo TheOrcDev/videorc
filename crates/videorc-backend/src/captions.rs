@@ -8,6 +8,7 @@
 //! for the SRT + burned copy.
 
 pub mod cloud_host;
+pub mod guest_lane;
 
 use std::ffi::OsString;
 use std::sync::Arc;
@@ -3152,6 +3153,9 @@ pub struct CaptionContractTestCue {
 #[derive(Default)]
 pub struct CaptionsCoordinator {
     room_owner: Option<Arc<cloud_host::Owner>>,
+    /// The talk show's captions-only guest stream (`guest_lane`). Its own
+    /// source, channel, provider task and leases: never the host tap.
+    guests: guest_lane::GuestLane,
     room_presentation: Option<cloud_host::Presentation>,
     // Source-clock room cues must never be drained into a native recording artifact.
     room_chunks: bool,
@@ -4849,6 +4853,8 @@ pub async fn stop_listen_with(state: &AppState, how: ListenStop) {
 
 pub async fn stop_captions(state: &AppState) -> CaptionsStatus {
     let _control = CAPTION_CONTROL.lock().await;
+    // The guests' stream ends with the switch, whatever Sidekick wants.
+    guest_lane::stop(state).await;
     let keep_listen_task = {
         let mut coordinator = state.captions.lock().await;
         advance_caption_start_intent(&mut coordinator);
@@ -4898,6 +4904,7 @@ pub async fn stop_captions_for_sign_out(
         artifact_publication,
         private_frame_io,
         task_mark_target,
+        guest_runtime,
     ) = {
         let _control = CAPTION_CONTROL.lock().await;
         let mut coordinator = state.captions.lock().await;
@@ -4932,6 +4939,7 @@ pub async fn stop_captions_for_sign_out(
             coordinator.stop.take(),
             coordinator.task_mark_target.take(),
         );
+        let guest_runtime = guest_lane::take_for_sign_out(&mut coordinator.guests);
         let pending_frames_dirs = take_pending_caption_frame_dirs(&mut coordinator);
         let caption_burn_tasks = std::mem::take(&mut coordinator.caption_burn_tasks);
         let artifact_publication = coordinator.artifact_publication.clone();
@@ -4946,6 +4954,7 @@ pub async fn stop_captions_for_sign_out(
             artifact_publication,
             private_frame_io,
             runtime.2,
+            guest_runtime,
         )
     };
 
@@ -4956,8 +4965,11 @@ pub async fn stop_captions_for_sign_out(
     TAP_FRAMES_SEEN.store(0, Ordering::Release);
     TAP_FRAMES_DROPPED.store(0, Ordering::Release);
     clear_caption_presentation(state, "signing-out");
-    let runtime_stopped = finish_taken_caption_task(task, stop, false).await;
-    note_caption_provider_join(state, task_mark_target.as_ref(), runtime_stopped);
+    let host_runtime_stopped = finish_taken_caption_task(task, stop, false).await;
+    note_caption_provider_join(state, task_mark_target.as_ref(), host_runtime_stopped);
+    // The guests' stream joins before credentials go too.
+    let guest_runtime_stopped = guest_lane::finish_runtime(guest_runtime).await;
+    let runtime_stopped = host_runtime_stopped && guest_runtime_stopped;
     if runtime_stopped {
         // The provider was detached under the generation fence, but an
         // already-polled future could have committed one last chunk before
@@ -5071,6 +5083,7 @@ async fn shutdown_caption_runtime_after_control(state: &AppState) {
         let mut coordinator = state.captions.lock().await;
         advance_caption_start_intent(&mut coordinator);
     }
+    guest_lane::stop(state).await;
     finish_caption_task(state, true, false).await;
     TAP_FRAMES_SEEN.store(0, Ordering::Release);
     TAP_FRAMES_DROPPED.store(0, Ordering::Release);
@@ -5271,6 +5284,8 @@ async fn block_captions_after_control(state: &AppState, reason_code: &str, messa
         let mut coordinator = state.captions.lock().await;
         advance_caption_start_intent(&mut coordinator);
     }
+    // A block (a used-up allowance included) stops both streams.
+    guest_lane::stop(state).await;
     // A block is terminal for this runtime. Discard pending PCM just like an
     // explicit opt-out; only a normal capture end may drain final audio. A
     // task Buddy's listen intent still wants keeps running unpresented.

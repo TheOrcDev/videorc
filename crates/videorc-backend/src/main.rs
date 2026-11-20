@@ -5920,7 +5920,10 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
     match method {
         // A bounded PCM frame of the published host microphone (10 a second)
         // and the renderer's latest-wins projections for the remotes.
-        "cloud.speech.audio" | "remote.surface.publish" | "agent.surface.publish" => {
+        "cloud.speech.audio"
+        | "cloud.speech.guests.audio"
+        | "remote.surface.publish"
+        | "agent.surface.publish" => {
             Some(Disposable {
                 max_execution_age: WEBSOCKET_DISPOSABLE_MAX_EXECUTION_AGE,
             })
@@ -5946,6 +5949,7 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "cloud.marker.voice.configure"
         | "cloud.speech.overlay"
         | "cloud.speech.sync"
+        | "cloud.speech.guests.sync"
         | "captions.start"
         | "captions.stop"
         | "captions.style.set"
@@ -6512,7 +6516,9 @@ fn websocket_isolated_command_lane(text: &str) -> Option<WebSocketIsolatedComman
         "remote.surface.publish" | "agent.surface.publish" => {
             Some(WebSocketIsolatedCommandLaneKind::SurfacePublish)
         }
-        "cloud.speech.audio" => Some(WebSocketIsolatedCommandLaneKind::HostSpeech),
+        "cloud.speech.audio" | "cloud.speech.guests.audio" => {
+            Some(WebSocketIsolatedCommandLaneKind::HostSpeech)
+        }
         _ => None,
     }
 }
@@ -11246,6 +11252,26 @@ async fn handle_text_message_with_role(
         },
         "cloud.speech.audio" => match serde_json::from_value(command.params.clone()) {
             Ok(input) => match captions::cloud_host::audio(state, input).await {
+                Ok(value) => ServerResponse::ok(command.id, value),
+                Err(error) => {
+                    ServerResponse::error(command.id, "cloud-speech-refused", error.to_string())
+                }
+            },
+            Err(error) => ServerResponse::error(command.id, "invalid-params", error.to_string()),
+        },
+        // Guest captions: a captions-only stream with its own source and
+        // channel. Nothing it hears reaches Sidekick (`guest_lane`).
+        "cloud.speech.guests.sync" => match serde_json::from_value(command.params.clone()) {
+            Ok(input) => match captions::guest_lane::sync(state, input).await {
+                Ok(value) => ServerResponse::ok(command.id, value),
+                Err(error) => {
+                    ServerResponse::error(command.id, "cloud-speech-refused", error.to_string())
+                }
+            },
+            Err(error) => ServerResponse::error(command.id, "invalid-params", error.to_string()),
+        },
+        "cloud.speech.guests.audio" => match serde_json::from_value(command.params.clone()) {
+            Ok(input) => match captions::guest_lane::audio(state, input).await {
                 Ok(value) => ServerResponse::ok(command.id, value),
                 Err(error) => {
                     ServerResponse::error(command.id, "cloud-speech-refused", error.to_string())
@@ -21415,6 +21441,8 @@ mod tests {
             "cloud.speech.sync",
             "cloud.speech.audio",
             "cloud.speech.overlay",
+            "cloud.speech.guests.sync",
+            "cloud.speech.guests.audio",
         ] {
             let request = json!({"id":"speech", "method":method,"params":{}}).to_string();
             for role in [BackendRole::Admin, BackendRole::Agent, BackendRole::Remote] {
