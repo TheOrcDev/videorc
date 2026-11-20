@@ -105,23 +105,36 @@ impl MediaFoundationDrain {
     }
 }
 
-/// Whether the D3D11 drain keeps waiting for owed frames before it sends
-/// `COMMAND_DRAIN` (#1527).
-fn d3d11_pre_drain_wait_continues(owed_frames: usize, waited: Duration) -> bool {
-    owed_frames > 0 && waited < D3D11_PRE_DRAIN_OUTPUT_WAIT
+/// Whether a drain (D3D11 or CPU input) keeps waiting for owed frames before
+/// it sends `COMMAND_DRAIN` (#1527).
+fn pre_drain_wait_continues(owed_frames: usize, waited: Duration) -> bool {
+    owed_frames > 0 && waited < PRE_DRAIN_OUTPUT_WAIT
+}
+
+/// [`pre_drain_wait_continues`] inside the drain's own deadline: the CPU
+/// drain's wait for owed frames is part of its timeout, never added to it.
+fn pre_drain_wait_within(
+    owed_frames: usize,
+    waited: Duration,
+    now: Instant,
+    deadline: Instant,
+) -> bool {
+    now < deadline && pre_drain_wait_continues(owed_frames, waited)
 }
 
 const EVENT_TIMEOUT: Duration = Duration::from_secs(3);
 pub const DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
-/// #1527: how long a D3D11 drain first waits for the frames the transform
-/// already accepted. A `COMMAND_DRAIN` sent while the NVIDIA H.264 MFT is
-/// still encoding a frame blocks inside the transform for its own ~5 s
-/// (GTX 1650 SUPER: 2 of 11 such drains, 0 of 49 with nothing owed), and the
-/// Stop or the Clips → Record hand-over waits with it. The owed frame comes
-/// out within 5 ms (18 of 18), so the bound only matters for a stuck encoder.
-const D3D11_PRE_DRAIN_OUTPUT_WAIT: Duration = Duration::from_millis(100);
+/// #1527: how long a drain first waits for the frames the transform already
+/// accepted. A `COMMAND_DRAIN` sent while the NVIDIA H.264 MFT is still
+/// encoding a frame blocks inside the transform for its own ~5 s (GTX 1650
+/// SUPER: 2 of 11 such D3D11 drains, 0 of 49 with nothing owed), and the Stop
+/// or the Clips → Record hand-over waits with it. The owed frame comes out
+/// within 5 ms (18 of 18), so the bound only matters for a stuck encoder. The
+/// CPU-input path blocks the same way (1 of 7 drains, 5007 ms), and there the
+/// block outlasts FFmpeg's graceful stop, so the take ends as recovery media.
+const PRE_DRAIN_OUTPUT_WAIT: Duration = Duration::from_millis(100);
 /// Drain messages slower than this are logged, so a field log names the stall.
-const D3D11_SLOW_DRAIN_MESSAGES: Duration = Duration::from_millis(500);
+const SLOW_DRAIN_MESSAGES: Duration = Duration::from_millis(500);
 const D3D11_INPUT_SURFACE_COUNT: usize = 4;
 const TRACKED_SAMPLE_CALLBACK_QUEUE_MULTIPLIER: usize = 4;
 const TRACKED_SAMPLE_GENERATION_KEY: GUID = GUID::from_u128(0xc243c261_ba33_46fd_b45f_3b03013c26d1);
@@ -1354,6 +1367,32 @@ impl MediaFoundationH264Encoder {
                 abandoned_frames: 0,
             });
         }
+        // #1527: hand back every frame the transform already accepted before
+        // asking it to drain. A COMMAND_DRAIN sent while the NVIDIA MFT is
+        // still encoding a frame can block inside the transform for ~5 s,
+        // where no deadline below can reach it. The wait counts against the
+        // caller's timeout and follows `deadline_now`, like the drain after
+        // it: a Stop's drain budget is never stretched by it.
+        let mut output = self.collect_available_events()?;
+        let owed_wait_started_at = Instant::now();
+        let mut deadline = owed_wait_started_at + timeout;
+        loop {
+            let now = Instant::now();
+            deadline = deadline_now(now, deadline);
+            if !pre_drain_wait_within(
+                self.submitted_pts.len(),
+                now.saturating_duration_since(owed_wait_started_at),
+                now,
+                deadline,
+            ) {
+                break;
+            }
+            thread::sleep(EVENT_POLL_INTERVAL);
+            output.extend(self.collect_available_events()?);
+        }
+        let waited_for_owed = owed_wait_started_at.elapsed();
+        let owed_at_drain = self.submitted_pts.len();
+        let drain_messages_started_at = Instant::now();
         unsafe {
             self.transform
                 .ProcessMessage(MFT_MESSAGE_NOTIFY_END_OF_STREAM, 0)
@@ -1378,8 +1417,17 @@ impl MediaFoundationH264Encoder {
                     )
                 })?;
         }
-        let mut deadline = Instant::now() + timeout;
-        let mut output = Vec::new();
+        let drain_messages_took = drain_messages_started_at.elapsed();
+        if drain_messages_took >= SLOW_DRAIN_MESSAGES {
+            tracing::warn!(
+                encoder = %self.identity,
+                input = self.input_subtype.label(),
+                took_ms = drain_messages_took.as_millis() as u64,
+                owed_frames = owed_at_drain,
+                waited_for_owed_ms = waited_for_owed.as_millis() as u64,
+                "The Media Foundation encoder blocked on its drain request (#1527)"
+            );
+        }
         let mut drain_complete = false;
         loop {
             let now = Instant::now();
@@ -2980,10 +3028,7 @@ impl MediaFoundationD3d11H264Encoder {
         let mut progress = MediaFoundationD3d11EncoderProgress::default();
         self.collect_available_events(&mut progress)?;
         let owed_wait_started_at = Instant::now();
-        while d3d11_pre_drain_wait_continues(
-            self.submitted_pts.len(),
-            owed_wait_started_at.elapsed(),
-        ) {
+        while pre_drain_wait_continues(self.submitted_pts.len(), owed_wait_started_at.elapsed()) {
             thread::sleep(EVENT_POLL_INTERVAL);
             self.collect_available_events(&mut progress)?;
         }
@@ -3018,7 +3063,7 @@ impl MediaFoundationD3d11H264Encoder {
                 })?;
         }
         let drain_messages_took = drain_messages_started_at.elapsed();
-        if drain_messages_took >= D3D11_SLOW_DRAIN_MESSAGES {
+        if drain_messages_took >= SLOW_DRAIN_MESSAGES {
             tracing::warn!(
                 encoder = %self.identity,
                 took_ms = drain_messages_took.as_millis() as u64,
@@ -4653,25 +4698,61 @@ mod tests {
     }
 
     #[test]
-    fn d3d11_drain_waits_for_owed_frames_only_within_its_bound() {
+    fn drain_waits_for_owed_frames_only_within_its_bound() {
         // #1527: nothing owed sends the drain at once.
-        assert!(!d3d11_pre_drain_wait_continues(0, Duration::ZERO));
+        assert!(!pre_drain_wait_continues(0, Duration::ZERO));
         // An owed frame is waited for until the bound, never past it.
-        assert!(d3d11_pre_drain_wait_continues(1, Duration::ZERO));
-        assert!(d3d11_pre_drain_wait_continues(
+        assert!(pre_drain_wait_continues(1, Duration::ZERO));
+        assert!(pre_drain_wait_continues(
             2,
-            D3D11_PRE_DRAIN_OUTPUT_WAIT - Duration::from_millis(1)
+            PRE_DRAIN_OUTPUT_WAIT - Duration::from_millis(1)
         ));
-        assert!(!d3d11_pre_drain_wait_continues(
-            1,
-            D3D11_PRE_DRAIN_OUTPUT_WAIT
-        ));
+        assert!(!pre_drain_wait_continues(1, PRE_DRAIN_OUTPUT_WAIT));
         // The wait stays far inside the Stop drain bound it precedes.
         assert!(
-            D3D11_PRE_DRAIN_OUTPUT_WAIT * 5
-                <= crate::encoder_bridge::MEDIA_FOUNDATION_STOP_DRAIN_TIMEOUT
+            PRE_DRAIN_OUTPUT_WAIT * 5 <= crate::encoder_bridge::MEDIA_FOUNDATION_STOP_DRAIN_TIMEOUT
         );
-        assert!(D3D11_SLOW_DRAIN_MESSAGES < DRAIN_TIMEOUT);
+        assert!(SLOW_DRAIN_MESSAGES < DRAIN_TIMEOUT);
+    }
+
+    #[test]
+    fn cpu_drain_waits_for_owed_frames_inside_its_own_deadline() {
+        let start = Instant::now();
+        let ms = Duration::from_millis;
+        // Budget to spare: the wait is the 100 ms owed-frame bound.
+        assert!(pre_drain_wait_within(
+            1,
+            ms(50),
+            start + ms(50),
+            start + ms(1000)
+        ));
+        assert!(!pre_drain_wait_within(
+            1,
+            PRE_DRAIN_OUTPUT_WAIT,
+            start + PRE_DRAIN_OUTPUT_WAIT,
+            start + ms(1000)
+        ));
+        // Less budget than the bound (a Stop pulled the deadline in): the
+        // wait ends with the budget, so the drain never outlasts its timeout.
+        assert!(!pre_drain_wait_within(
+            1,
+            ms(20),
+            start + ms(20),
+            start + ms(20)
+        ));
+        assert!(!pre_drain_wait_within(
+            1,
+            ms(30),
+            start + ms(30),
+            start + ms(20)
+        ));
+        // Nothing owed: no wait, whatever the budget.
+        assert!(!pre_drain_wait_within(
+            0,
+            Duration::ZERO,
+            start,
+            start + ms(1000)
+        ));
     }
 
     #[test]
