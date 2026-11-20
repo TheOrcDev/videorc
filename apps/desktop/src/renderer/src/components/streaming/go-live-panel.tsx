@@ -2,16 +2,14 @@ import { CloudSection } from './cloud-section'
 
 import { StreamQualityControl } from './stream-quality-control'
 import { withStreamQuality } from '@/lib/output-quality'
-import { AlertIcon, ChevronDownIcon, SuccessIcon, SyncIcon, WarningIcon } from '@/components/icons'
-import { lazy, Suspense, useMemo, useState, type ReactElement, type ReactNode } from 'react'
+import { AlertIcon, SuccessIcon, SyncIcon } from '@/components/icons'
+import { lazy, Suspense, useMemo, type ReactElement, type ReactNode } from 'react'
 
 import { NavigableRow } from '@/components/navigable-row'
 import { PanelSection } from '@/components/panel-section'
 import { Alert, AlertDescription } from '@/components/ui/alert'
-import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { InfoTooltip } from '@/components/ui/info-tooltip'
-import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
 import {
   useStudioCloud,
   useStudioCore,
@@ -22,7 +20,6 @@ import {
 import type {
   DiagnosticStats,
   PlatformAccount,
-  StreamDeliveryState,
   StreamHealth,
   StreamPlatform,
   StreamTargetRuntime,
@@ -35,7 +32,6 @@ import {
   simulcastStreamVideo,
   providerStreamOutputPlanOptions,
   resolveProviderStreamOutputPlan,
-  STREAM_OUTPUT_GOP_SECONDS,
   streamVideoProfileValidationReason,
   type CaptureConfig,
   type ProviderStreamOutputPlan,
@@ -51,14 +47,13 @@ import { destinationSetup, destinationSetupHint } from '@/lib/destination-readin
 import { NO_VALUE } from '@/lib/format'
 import { PAGE_TRAIL_COLUMN } from '@/lib/page-layout'
 import { destinationLabel } from '@/lib/platform-copy'
-import { formatBitrate, formatVideoQuality } from '@/lib/format-video'
+import { formatVideoQuality } from '@/lib/format-video'
 import {
   classifyStreamHealthAttribution,
   liveProblemLabel,
   type RecentStreamDrops,
   type StreamHealthAttribution
 } from '@/lib/stream-health-attribution'
-import { cloudDestinationCount, cloudHealthySummary } from '@/lib/cloud-show-view'
 import { cloudStreamReading } from '@/lib/live-session-view'
 
 import {
@@ -83,15 +78,11 @@ const StreamReportEmailSection = lazy(async () => ({
 
 // The Livestream right column (plan 080 S7). Owner, 2026-09-30: "Live stream
 // should be about connecting your accounts and not about reading some tech
-// data." A short checklist in plain words says whether you can go live; the
-// encoder paths and frame counters sit in Technical details, closed by
-// default. This component owns the diagnostics subscription, so the stats
-// tick no longer re-renders the destination list and the Broadcast info form.
-
-type BadgeTone = 'success' | 'warning' | 'destructive' | 'live' | 'outline'
-
-/** Per-viewer convenience only; the page renders the closed default without it. */
-export const TECHNICAL_DETAILS_STORAGE_KEY = 'videorc.livestream.technicalDetails'
+// data." A short checklist in plain words says whether you can go live. The
+// encoder paths and frame counters live in Health only (owner, 2026-11-20:
+// "This is technical"). This component owns the diagnostics subscription, so
+// the stats tick no longer re-renders the destination list and the Broadcast
+// info form.
 
 export function GoLivePanel({
   onOpenDestination
@@ -216,16 +207,6 @@ export function GoLivePanel({
         targets={streaming.targets}
         onOpenDestination={onOpenDestination}
         onRetry={refreshStreamOutputTopology}
-      />
-      <TechnicalDetails
-        cloud={cloud}
-        diagnosticStats={diagnosticStats}
-        liveOutputActive={liveOutputActive}
-        preflight={streamOutputTopologyPreflight}
-        providerPlan={providerPlan}
-        recentStreamDrops={recentStreamDrops}
-        streamHealth={currentStreamHealth}
-        streamTargets={streamTargets}
       />
     </div>
   )
@@ -428,8 +409,8 @@ function StreamCheckRow({
     case 'failed':
       return (
         <div className="flex flex-col gap-1">
-          {/* The raw probe message is one hover or focus away, not inline;
-              Technical details reads it too (plan 174 S1.10, D-23). */}
+          {/* The raw probe message is one hover or focus away, not inline
+              (plan 174 S1.10, D-23). */}
           <ChecklistRow
             detail="Couldn't check"
             detailHint={preflight.message}
@@ -491,199 +472,11 @@ function LiveStreamRow({
     <ChecklistRow
       detail={cloudReading ?? (healthy ? 'Healthy' : liveProblemLabel(attribution))}
       // The problem's whole sentence on hover and on focus (plan 174 S1.10).
-      detailHint={streamHealthDescription(attribution, true, { state: 'not-requested' })}
+      detailHint={streamHealthDescription(attribution)}
       label="Stream"
       ok={healthy}
     />
   )
-}
-
-export function TechnicalDetails({
-  cloud = null,
-  diagnosticStats,
-  liveOutputActive,
-  preflight,
-  providerPlan,
-  recentStreamDrops,
-  streamHealth,
-  streamTargets
-}: {
-  /** The Videorc Cloud show carrying the session, if any (plan 184 C7). */
-  cloud?: LiveDashboardCloud | null
-  diagnosticStats: DiagnosticStats
-  liveOutputActive: boolean
-  preflight: StreamOutputTopologyPreflight
-  providerPlan: ProviderStreamOutputPlan
-  recentStreamDrops: RecentStreamDrops
-  streamHealth: StreamHealth | null
-  streamTargets: StreamTargetRuntime[]
-}): ReactElement {
-  const [open, setOpen] = useState(readTechnicalDetailsOpen)
-  const attribution = liveOutputActive
-    ? classifyStreamHealthAttribution(
-        diagnosticStats,
-        streamHealth,
-        streamTargets,
-        recentStreamDrops
-      )
-    : preflightAttribution(preflight)
-  const badge = streamHealthBadge(attribution, liveOutputActive)
-  const probeResult = !liveOutputActive && preflight.state === 'ready' ? preflight.result : null
-  const requestedPath = liveOutputActive
-    ? diagnosticStats.encoderBridgeRequestedVideoOutput
-    : probeResult?.requestedBridgeOutput
-  const effectivePath = liveOutputActive
-    ? diagnosticStats.encoderBridgeEffectiveVideoOutput
-    : probeResult?.effectiveBridgeOutput
-  const effectiveEncoder = liveOutputActive
-    ? diagnosticStats.encodeBackend
-    : probeResult?.effectiveEncodeBackend
-  const fallbackReason = liveOutputActive
-    ? diagnosticStats.encoderBridgeEncodedOutputFallbackReason
-    : probeResult?.fallbackReason
-  // Plan 0015: why the raw path uses this encoder (Linux OpenH264, VAAPI
-  // rejected). Informational; the live diagnostics fold it into the reason.
-  const encoderNote = liveOutputActive ? undefined : probeResult?.encoderSelectionReason
-  const coalescedFrames = diagnosticStats.encoderBridgeSeparateOutputEncodersActive
-    ? diagnosticStats.encoderBridgeStreamQueueDroppedFrames
-    : diagnosticStats.encoderBridgeOutputQueueDroppedFrames
-  // Through the cloud, the cloud's own measure of the upload when FFmpeg
-  // can't count one (the raw path's tee says `bitrate=N/A`; plan 184 C7).
-  const bitrate =
-    streamHealth?.bitrateKbps ?? diagnosticStats.streamMeasuredBitrateKbps ?? cloud?.feedKbps
-  const loweredBitrate = formatLoweredBitrate(diagnosticStats.streamDelivery)
-  const summary = liveOutputActive
-    ? (cloudStreamReading(cloud) ??
-      (attribution === 'healthy'
-        ? cloudHealthySummary(
-            cloud,
-            [formatBitrate(bitrate), formatLiveFps(streamHealth?.fps)],
-            cloudDestinationCount(streamTargets)
-          )
-        : liveProblemLabel(attribution)))
-    : null
-  const outputs = streamOutputs(providerPlan)
-
-  return (
-    <Collapsible
-      className="border-b border-border"
-      data-testid="technical-details"
-      open={open}
-      onOpenChange={(next) => {
-        setOpen(next)
-        writeTechnicalDetailsOpen(next)
-      }}
-    >
-      <CollapsibleTrigger className="group flex w-full items-center gap-2 px-gutter py-3 text-left text-[13px] font-semibold text-foreground hover:bg-accent">
-        <ChevronDownIcon className="size-3.5 shrink-0 text-muted-foreground transition-transform group-data-panel-open:rotate-180" />
-        <span className="flex-1">Technical details</span>
-        {summary ? (
-          <span
-            className={cn(
-              'flex min-w-0 items-center gap-1 text-xs font-normal tabular-nums',
-              attribution === 'healthy' ? 'text-muted-foreground' : 'text-foreground'
-            )}
-          >
-            {/* The tone rides on the icon (plan 174 S1.8, D-35). */}
-            {attribution === 'healthy' ? null : (
-              <WarningIcon aria-hidden className="size-3.5 shrink-0 text-warning" weight="fill" />
-            )}
-            <span className="truncate">{summary}</span>
-          </span>
-        ) : null}
-      </CollapsibleTrigger>
-      <CollapsibleContent className="flex flex-col gap-3 px-gutter pb-gutter">
-        <div className="flex items-center justify-between gap-3">
-          <span className="text-xs text-muted-foreground">
-            {streamHealthDescription(attribution, liveOutputActive, preflight)}
-          </span>
-          <Badge variant={badge.tone}>{badge.label}</Badge>
-        </div>
-
-        {liveOutputActive ? (
-          <div className="grid grid-cols-2 gap-x-4 gap-y-3 sm:grid-cols-3">
-            <OutputMetric
-              label="Frame rate"
-              value={
-                formatDeliveredFps(diagnosticStats.streamDelivery) ||
-                formatLiveFps(streamHealth?.fps) ||
-                NO_VALUE
-              }
-            />
-            <OutputMetric label="Bitrate" value={formatLiveBitrate(bitrate)} />
-            {loweredBitrate ? <OutputMetric label="Bitrate target" value={loweredBitrate} /> : null}
-            <OutputMetric
-              label="Encoder speed"
-              value={formatEncoderSpeed(streamHealth?.speed ?? diagnosticStats.encoderSpeed)}
-            />
-            <OutputMetric
-              label="Dropped frames"
-              value={formatFrameCount(streamHealth?.droppedFrames ?? diagnosticStats.droppedFrames)}
-            />
-            <OutputMetric
-              label="Duplicated frames"
-              value={formatFrameCount(
-                streamHealth?.duplicatedFrames ?? diagnosticStats.streamDuplicatedFrames
-              )}
-            />
-            <OutputMetric label="Coalesced frames" value={formatFrameCount(coalescedFrames)} />
-          </div>
-        ) : (
-          <p className="text-xs text-muted-foreground">Stats appear when you go live.</p>
-        )}
-
-        <div className="flex flex-col gap-1.5 border-t border-border pt-3">
-          <DetailRow label="Encoder" value={encoderLabel(effectiveEncoder)} />
-          <DetailRow
-            code
-            label="Output path"
-            value={
-              effectivePath && requestedPath && requestedPath !== effectivePath
-                ? `${effectivePath} (requested ${requestedPath})`
-                : effectivePath
-            }
-          />
-          {fallbackReason ? <DetailRow label="Fallback reason" value={fallbackReason} /> : null}
-          {encoderNote && !fallbackReason ? (
-            <DetailRow label="Encoder note" value={encoderNote} />
-          ) : null}
-          <DetailRow label="Keyframe interval" value={`${STREAM_OUTPUT_GOP_SECONDS} s`} />
-          <DetailRow
-            label="Encode sharing"
-            value={
-              providerPlan.separateEncodedOutputRole
-                ? 'Separate recording and stream encoders'
-                : 'One shared encode (strictest destination)'
-            }
-          />
-          {outputs.map(({ target, video }, index) => (
-            <DetailRow
-              key={target?.id ?? `stream-${index}`}
-              label={target ? destinationLabel(target.label) : 'Stream'}
-              value={formatEffectiveStreamProfile(video)}
-            />
-          ))}
-        </div>
-        <p className="text-xs text-muted-foreground">{encodeFootnote(providerPlan, outputs)}</p>
-      </CollapsibleContent>
-    </Collapsible>
-  )
-}
-
-function readTechnicalDetailsOpen(): boolean {
-  try {
-    return globalThis.localStorage?.getItem(TECHNICAL_DETAILS_STORAGE_KEY) === 'open'
-  } catch {
-    return false
-  }
-}
-
-function writeTechnicalDetailsOpen(open: boolean): void {
-  try {
-    globalThis.localStorage?.setItem(TECHNICAL_DETAILS_STORAGE_KEY, open ? 'open' : 'closed')
-  } catch {
-    // Storage is a convenience; the closed default is always correct.
-  }
 }
 
 type StreamOutput = { target?: StreamTargetSettings; video: VideoSettings }
@@ -719,102 +512,7 @@ export function qualitySummary(outputs: StreamOutput[]): { text: string; lines?:
   }
 }
 
-/** "hardware-videotoolbox" → "VideoToolbox · hardware"; unknown values pass through. */
-export function encoderLabel(value?: string): string | undefined {
-  if (!value) return undefined
-  const match = /^(hardware|software)-(.+)$/.exec(value)
-  if (!match) return value
-  const names: Record<string, string> = {
-    videotoolbox: 'VideoToolbox',
-    nvenc: 'NVENC',
-    qsv: 'Quick Sync',
-    amf: 'AMF',
-    mediafoundation: 'Media Foundation',
-    'media-foundation': 'Media Foundation',
-    x264: 'x264',
-    openh264: 'OpenH264',
-    vaapi: 'VA-API'
-  }
-  return `${names[match[2]] ?? match[2]} · ${match[1]}`
-}
-
-function encodeFootnote(plan: ProviderStreamOutputPlan, outputs: StreamOutput[]): string {
-  const true4k = outputs.some(({ video }) => video.preset === 'stream-youtube-4k30')
-  if (true4k) {
-    return outputs.some(({ video }) => video.preset !== 'stream-youtube-4k30')
-      ? 'YouTube 4K30 uses normal latency. Other destinations get separate stream-safe 1080p outputs; upload is the sum of every destination.'
-      : 'YouTube 4K30 uses normal latency. Keep stable upload comfortably above 30 Mbps.'
-  }
-  return plan.separateEncodedOutputRole
-    ? 'Recording and streaming use separate encoders; the stream stays platform-safe for every destination.'
-    : 'All destinations share one encode, so the bitrate is capped by the strictest platform (Twitch about 6 Mbps).'
-}
-
-function preflightAttribution(preflight: StreamOutputTopologyPreflight): StreamHealthAttribution {
-  if (preflight.state !== 'ready') {
-    return 'unknown'
-  }
-  const result = preflight.result
-  return result.fallbackReason ||
-    result.requestedBridgeOutput !== result.effectiveBridgeOutput ||
-    result.probeState === 'rejected' ||
-    result.probeState === 'unsupported'
-    ? 'fallback'
-    : 'healthy'
-}
-
-function streamHealthBadge(
-  attribution: StreamHealthAttribution,
-  liveOutputActive: boolean
-): { label: string; tone: BadgeTone } {
-  if (!liveOutputActive && attribution === 'healthy') {
-    return { label: 'Ready', tone: 'success' }
-  }
-  if (attribution === 'healthy') {
-    return { label: 'Healthy', tone: 'success' }
-  }
-  if (attribution === 'unknown') {
-    return { label: 'Unknown', tone: 'outline' }
-  }
-  // Plan 218: the stream's own verdicts, in words a streamer can act on.
-  if (attribution === 'choppy') {
-    return { label: 'Choppy', tone: 'warning' }
-  }
-  if (attribution === 'uplink') {
-    return { label: 'Slow connection', tone: 'warning' }
-  }
-  if (attribution === 'fallback' || attribution === 'network' || attribution === 'preview') {
-    return {
-      label: attribution.charAt(0).toUpperCase() + attribution.slice(1),
-      tone: 'warning'
-    }
-  }
-  return {
-    label: attribution.charAt(0).toUpperCase() + attribution.slice(1),
-    tone: 'destructive'
-  }
-}
-
-function streamHealthDescription(
-  attribution: StreamHealthAttribution,
-  liveOutputActive: boolean,
-  preflight: StreamOutputTopologyPreflight
-): string {
-  if (!liveOutputActive) {
-    switch (preflight.state) {
-      case 'not-requested':
-        return "The output path hasn't been checked yet."
-      case 'pending':
-        return 'Checking the output path…'
-      case 'failed':
-        return `Output path check failed: ${preflight.message}`
-      case 'ready':
-        return attribution === 'fallback'
-          ? 'Checked. This profile uses a fallback output path.'
-          : 'Checked. This profile uses its exact output path.'
-    }
-  }
-
+function streamHealthDescription(attribution: StreamHealthAttribution): string {
   switch (attribution) {
     case 'device':
       return 'A disconnected capture device is interrupting the stream.'
@@ -841,93 +539,6 @@ function streamHealthDescription(
     default:
       return 'Waiting for enough evidence to judge the stream.'
   }
-}
-
-function OutputMetric({ label, value }: { label: string; value: string }): ReactElement {
-  return (
-    <div className="flex min-w-0 flex-col gap-0.5">
-      <div className="truncate text-[11px] text-muted-foreground">{label}</div>
-      <div className="text-sm font-medium tabular-nums">{value}</div>
-    </div>
-  )
-}
-
-function DetailRow({
-  label,
-  value,
-  code = false
-}: {
-  label: string
-  value?: string
-  code?: boolean
-}): ReactElement {
-  return (
-    <div className="flex items-start justify-between gap-3 text-xs">
-      <span className="shrink-0 text-muted-foreground">{label}</span>
-      {code ? (
-        <code className="min-w-0 text-right break-words text-foreground">{value ?? NO_VALUE}</code>
-      ) : (
-        <span className="min-w-0 text-right break-words text-foreground">{value ?? NO_VALUE}</span>
-      )}
-    </div>
-  )
-}
-
-function formatLiveFps(value?: number): string {
-  return typeof value === 'number' && Number.isFinite(value) ? `${value.toFixed(1)} fps` : ''
-}
-
-/**
- * Plan 218: what the stream encoder delivered over its 30 s window, against
- * the target, e.g. "21 of 30 fps". FFmpeg's own fps describes the recording
- * file when one is written, so the stream's figure wins when it exists.
- */
-export function formatDeliveredFps(delivery?: StreamDeliveryState): string {
-  if (!delivery || !Number.isFinite(delivery.deliveredFps) || delivery.windowSeconds <= 0) {
-    return ''
-  }
-  return `${Math.round(delivery.deliveredFps)} of ${delivery.targetFps} fps`
-}
-
-/**
- * Plan 218 S3a: "4.8 of 6 Mbps" while Videorc holds the stream under its
- * chosen bitrate to fit the connection; empty once it is back.
- */
-export function formatLoweredBitrate(delivery?: StreamDeliveryState): string {
-  const current = delivery?.bitrateKbps
-  const chosen = delivery?.chosenBitrateKbps
-  if (
-    typeof current !== 'number' ||
-    typeof chosen !== 'number' ||
-    !Number.isFinite(current) ||
-    !Number.isFinite(chosen) ||
-    current >= chosen
-  ) {
-    return ''
-  }
-  const mbps = (kbps: number): string => {
-    const value = kbps / 1000
-    return Number.isInteger(value) ? `${value}` : value.toFixed(1)
-  }
-  return `${mbps(current)} of ${mbps(chosen)} Mbps`
-}
-
-function formatLiveBitrate(value?: number): string {
-  return formatBitrate(value) || NO_VALUE
-}
-
-function formatEncoderSpeed(value?: number): string {
-  return typeof value === 'number' && Number.isFinite(value) ? `${value.toFixed(2)}×` : NO_VALUE
-}
-
-function formatFrameCount(value?: number): string {
-  return typeof value === 'number' && Number.isFinite(value)
-    ? Math.max(0, Math.round(value)).toLocaleString()
-    : NO_VALUE
-}
-
-function formatEffectiveStreamProfile(video: VideoSettings): string {
-  return `${formatVideoQuality(video, { size: 'full', bitrate: true })} CBR`
 }
 
 /**

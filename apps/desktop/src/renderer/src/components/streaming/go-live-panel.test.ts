@@ -1,8 +1,7 @@
 // @vitest-environment happy-dom
-import { act, createElement } from 'react'
-import { createRoot, type Root } from 'react-dom/client'
+import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 
 import type { StreamOutputTopologyPreflight } from '@/hooks/use-studio'
 import type {
@@ -15,19 +14,10 @@ import type {
 import { defaultCaptureConfig, videoPresets, type ProviderStreamOutputPlan } from '@/lib/capture'
 import { NO_RECENT_DROPS } from '@/lib/stream-health-attribution'
 
-import {
-  encoderLabel,
-  goLiveProviderPlan,
-  qualitySummary,
-  ReadyToGoLive,
-  TECHNICAL_DETAILS_STORAGE_KEY,
-  TechnicalDetails,
-  formatDeliveredFps,
-  formatLoweredBitrate
-} from './go-live-panel'
+import { goLiveProviderPlan, qualitySummary, ReadyToGoLive } from './go-live-panel'
 
-// Plan 080 S7: the right column is a plain-words checklist, and the encoder
-// paths and frame counters sit in Technical details, closed by default.
+// Plan 080 S7: the right column is a plain-words checklist. The encoder paths
+// and frame counters live in Health only (owner, 2026-11-20).
 
 const stream1080 = videoPresets['stream-safe-1080p30']
 
@@ -146,7 +136,7 @@ describe('Ready to go live', () => {
     expect(markup).toContain('TikTok · add a stream key')
   })
 
-  it('keeps the Go Live blocker visible outside Technical details', () => {
+  it('keeps the Go Live blocker visible in the checklist', () => {
     const markup = renderToStaticMarkup(
       readiness({
         targets: [target('youtube', 'YouTube')],
@@ -192,88 +182,6 @@ describe('qualitySummary', () => {
     expect(summary.lines).toContain('TikTok: 1080 × 1920 · 30 fps · 6 Mbps')
     expect(summary.lines?.some((line) => line.startsWith('Instagram: 1080 × 1920'))).toBe(true)
     expect(summary.lines?.join('\n')).not.toContain('Custom')
-  })
-})
-
-describe('encoderLabel', () => {
-  it('reads encoder backends in words', () => {
-    expect(encoderLabel('hardware-videotoolbox')).toBe('VideoToolbox · hardware')
-    expect(encoderLabel('software-x264')).toBe('x264 · software')
-    expect(encoderLabel('something-new')).toBe('something-new')
-    expect(encoderLabel(undefined)).toBeUndefined()
-  })
-})
-
-describe('Technical details', () => {
-  let container: HTMLDivElement
-  let root: Root
-
-  beforeEach(() => {
-    vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
-    localStorage.clear()
-    container = document.createElement('div')
-    document.body.append(container)
-    root = createRoot(container)
-  })
-
-  afterEach(async () => {
-    await act(async () => root.unmount())
-    container.remove()
-    localStorage.clear()
-    vi.unstubAllGlobals()
-  })
-
-  function details(liveOutputActive = false) {
-    return createElement(TechnicalDetails, {
-      diagnosticStats: {} as DiagnosticStats,
-      liveOutputActive,
-      preflight: readyPreflight,
-      providerPlan: plan([
-        { target: target('youtube', 'YouTube'), video: stream1080 },
-        { target: target('tiktok', 'TikTok'), video: stream1080 }
-      ]),
-      recentStreamDrops: NO_RECENT_DROPS,
-      streamHealth: null,
-      streamTargets: []
-    })
-  }
-
-  it('is closed by default and remembers being opened', async () => {
-    await act(async () => root.render(details()))
-    expect(container.textContent).toContain('Technical details')
-    expect(container.textContent).not.toContain('Keyframe interval')
-
-    const trigger = container.querySelector('[data-slot="collapsible-trigger"]') as HTMLElement
-    await act(async () => trigger.click())
-    expect(container.textContent).toContain('Keyframe interval')
-    expect(localStorage.getItem(TECHNICAL_DETAILS_STORAGE_KEY)).toBe('open')
-  })
-
-  it('shows no dash-filled stats while idle, and one row per destination', async () => {
-    localStorage.setItem(TECHNICAL_DETAILS_STORAGE_KEY, 'open')
-    await act(async () => root.render(details()))
-    const text = container.textContent ?? ''
-    expect(text).toContain('Stats appear when you go live.')
-    expect(text).not.toContain('Frame rate')
-    expect(text).not.toContain('Classified stage')
-    expect(text).not.toContain('The backend verified')
-    expect(text).toContain('VideoToolbox · hardware')
-    expect(text).toContain('TikTok')
-    expect(text).not.toContain(' / ')
-  })
-
-  it('renders the closed default when storage throws', async () => {
-    vi.stubGlobal('localStorage', {
-      getItem: () => {
-        throw new Error('blocked')
-      },
-      setItem: () => {
-        throw new Error('blocked')
-      },
-      clear: () => undefined
-    })
-    await act(async () => root.render(details()))
-    expect(container.textContent).not.toContain('Keyframe interval')
   })
 })
 
@@ -338,34 +246,5 @@ describe('goLiveProviderPlan (plan 0016)', () => {
       width: 1920,
       bitrateKbps: 6000
     })
-  })
-})
-
-// Plan 218: the stream's own frame rate and the bitrate Videorc holds it at.
-describe('stream delivery figures', () => {
-  const delivery = {
-    targetFps: 30,
-    deliveredFps: 20.9,
-    dropPercent: 30,
-    windowSeconds: 30,
-    degraded: true,
-    atFloor: false,
-    uplinkOverflows: 0
-  }
-
-  it('reads the delivered frame rate against the target', () => {
-    expect(formatDeliveredFps(delivery)).toBe('21 of 30 fps')
-    expect(formatDeliveredFps(undefined)).toBe('')
-    expect(formatDeliveredFps({ ...delivery, windowSeconds: 0 })).toBe('')
-  })
-
-  it('shows the bitrate target only while it is lowered', () => {
-    expect(
-      formatLoweredBitrate({ ...delivery, bitrateKbps: 4_800, chosenBitrateKbps: 6_000 })
-    ).toBe('4.8 of 6 Mbps')
-    expect(
-      formatLoweredBitrate({ ...delivery, bitrateKbps: 6_000, chosenBitrateKbps: 6_000 })
-    ).toBe('')
-    expect(formatLoweredBitrate(delivery)).toBe('')
   })
 })
