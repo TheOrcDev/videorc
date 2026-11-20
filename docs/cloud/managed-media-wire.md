@@ -567,6 +567,7 @@ From P0, "What the program page must do". The page lane keeps each one and tests
 - [ ] Load the font itself. Do not rely on the recorder having it.
 - [ ] ◇ The talk mix limiter is an AudioWorklet with a 5 ms look-ahead at −1 dBFS. The solo page plays one feed without a limiter; its Web Audio meter listens beside the sound path.
 - [ ] Play each remote voice in a media element too, or Chrome feeds Web Audio nothing.
+- [ ] ◇ Never silence the talk mix because the host's audio routing stopped (plan 249 S8; live test 2026-11-20, where a show continued on a phone reached viewers with no voice). Program gains and mutes change only by a fresh `videorc.audio-routing.v1` packet from the host session in the seat; a packet holds the lease 3 s. When the lease lapses (the host left, its packets stopped) the page keeps the last settings it accepted: a mute stays muted, open sound stays open. The settings belong to the session that sent them: once another host session has held the seat 15 s without routing of its own (a phone or browser that took the show), the page returns to the defaults, everything open. A desktop back under a new session renews inside those 15 s (one capability relay is at most a 10 s beacon heartbeat), so its mute holds across the gap.
 - [ ] Log `START_RECORDING` exactly once.
 - [ ] ◇ Draw a muted camera as the camera-off tile (section 5.5): never its last frame, never "Back in a moment", never out of the layout.
 

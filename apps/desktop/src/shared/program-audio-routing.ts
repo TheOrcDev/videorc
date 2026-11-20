@@ -37,12 +37,14 @@ export function parseAudioRouting(
     return null
   return v
 }
-export function programAudioGains(
-  settings: ProgramAudioSettings | null,
-  takeover: boolean,
-  stale = false
-) {
-  if (stale) return { speech: 0, auxiliary: 0, reason: 'routing-unavailable' }
+/**
+ * What the program page plays (the web's `lib/cloud/program/audio-routing.ts`).
+ * `settings` is the routing the page follows: this computer's fresh packet, the
+ * last one it accepted once the lease lapsed, or null (the defaults) before any
+ * packet and after another host session took the seat without routing of its
+ * own. A lapsed lease is never whole-program silence (wire contract 5.7).
+ */
+export function programAudioGains(settings: ProgramAudioSettings | null, takeover: boolean) {
   if (!settings)
     return {
       speech: takeover ? 0 : 1,

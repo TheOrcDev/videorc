@@ -113,7 +113,8 @@ describe('Room system PCM and deliberate routing', () => {
     expect(programAudioGains(settings, true)).toMatchObject({ speech: 0, auxiliary: 0.5 })
     expect(programAudioGains({ ...settings, speechMuted: true }, false).speech).toBe(0)
     expect(programAudioGains(null, true)).toMatchObject({ speech: 0, auxiliary: 0 })
-    expect(programAudioGains(settings, false, true).reason).toBe('routing-unavailable')
+    // No routing (none yet, or a phone took the show): the program is open.
+    expect(programAudioGains(null, false)).toEqual({ speech: 1, auxiliary: 1, reason: null })
   })
   it('Fences routing leases by owner and freshness', () => {
     const packet = {
