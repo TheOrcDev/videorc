@@ -9,8 +9,9 @@ The SRT Camera turns an SRT stream from another app or device into a camera
    Sources gains **SRT Camera (port 9000)**.
 2. In Sources → Video → Camera, pick **SRT Camera (port 9000)**. Its row
    shows the camera's settings.
-3. Give the sender three things from that row:
-   - this computer's address and the **Port** (9000 by default);
+3. Give the sender three things:
+   - this computer's IP address (System Settings → Network, on the link the
+     sender uses) and the row's **Port** (9000 by default);
    - the **Passphrase** (Copy). Videorc refuses a sender without it, and
      the stream is encrypted;
    - the latency, through **Connection**: Cable or this computer 0 ms, Wi-Fi
@@ -65,8 +66,8 @@ stops or sets up a sender.
 
 Videorc is the SRT listener. Any caller that follows these rules works:
 
-- **Mode:** SRT 1.3 or newer (the v5 handshake; an older caller is
-  refused with reject reason `SRT_REJ_VERSION` (8)), live mode, MPEG-TS
+- **Mode:** SRT 1.3 or newer (the v5 handshake; SRT disconnects an older
+  caller, which can't read a reject reason), live mode, MPEG-TS
   carrying H.264 or HEVC. The passphrase is required; a caller without one,
   or with the wrong one, is refused by SRT itself with reject reason
   `SRT_REJ_BADSECRET` (10), or `SRT_REJ_UNSECURE` (11) without one.

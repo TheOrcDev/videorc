@@ -86,7 +86,7 @@ The numbers below were measured with a real sender over a USB network link: HEVC
 ## Copy
 
 - Setting title: **SRT input** + Beta badge.
-- Setting description: "Use a stream from another app or device as a camera."
+- Setting description: "Adds the SRT Camera to the camera list in Sources."
 - Camera name: **SRT Camera (port {PORT})**.
 - Still: "Waiting for SRT stream on port {PORT}".
 - Codec still: "This SRT stream uses a codec Videorc can't show ({codec})."
@@ -96,7 +96,7 @@ The numbers below were measured with a real sender over a USB network link: HEVC
 ## Verification the slices must carry
 
 - **Unit tests:** setting defaults; the passphrase is generated, kept and renewed; the port and Connection map to the listener's options; the camera entry shows only when the setting is on; the TS demuxer (PAT/PMT, PES split across packets, PTS wrap, discontinuity, video PID only); retime by arrival; the 2 s hold; one sender at a time; a pairing check that connects and leaves.
-- **A fixture smoke** (new, `pnpm smoke:srt-camera`, dev app, macOS, no real device): FFmpeg makes a 10-bit HEVC TS and an H.264 TS, and `srt-live-transmit` sends them as SRT callers with the passphrase. The smoke checks:
+- **A fixture smoke** (new, `pnpm smoke:srt-camera`, dev app, macOS, no real device): FFmpeg makes a 10-bit HEVC TS and an H.264 TS, and a test sender (`scripts/fixtures/srt-test-sender.c`) sends them as SRT callers with the passphrase. The smoke checks:
   - the waiting still before the first frame;
   - the picture after it;
   - the hold, then the still, after the sender stops;
@@ -151,7 +151,7 @@ The numbers below were measured with a real sender over a USB network link: HEVC
 
 ## Slices
 
-Order: S1 → S2 → S3 → S4 → S5 → S6 → S7. Each slice leaves the tree green.
+Order: S1 → S2 → S3 → S4 → S5 → S6 → S7 → S8. Each slice leaves the tree green.
 D9's boundary is one module, `srt_camera/apple_decode.rs`: it turns an
 access unit into a frame in the camera frame store. Everything else is
 shared code that compiles everywhere.
@@ -215,7 +215,7 @@ detail string.
 
 ### S4: libsrt and the listener (shared, library macOS-packaged)
 
-`scripts/build-libsrt-macos.sh` (new), `vendor/libsrt/README.md` (new),
+`scripts/build-libsrt-macos.sh` (new),
 `.gitignore`, `package.json` (`libsrt:build:macos`),
 `apps/desktop/electron-builder.yml`, `apps/desktop/src/main/index.ts`
 (`VIDEORC_BUNDLED_LIBSRT_PATH`), `THIRD_PARTY_NOTICES.md`,
@@ -228,7 +228,7 @@ detail string.
   2026-11-18). libsrt says a passphrase refusal only in its log
   (`rsp(REJECT): 1010` / `1011`), so a log handler counts those and the line
   says "Sender refused: wrong passphrase".
-- Receive with a short timeout so stop and the hold run on time.
+- Read without blocking (a 1 ms poll) so stop and the hold run on time.
 
 Done when the option list is a pure function with a test, `cargo test`
 passes without libsrt on the machine, and the build script stages a dylib
@@ -263,7 +263,7 @@ fixture smoke (S7) shows a picture.
 `components/settings/srt-input-section.tsx` (new), `hooks/use-srt-input.ts`
 (new), `lib/srt-input-view.ts` (new), `general-settings.tsx`,
 `components/sources/video-sources.tsx`, `components/go-live-dialog.tsx`,
-`lib/go-live-srt.ts` (new), the shared contract and schemas.
+`lib/go-live-start-gate.ts` (new), the shared contract and schemas.
 
 - Settings → General → **SRT input** with the Beta badge (precedent
   `encoder-preference-field.tsx`), on macOS only: the switch alone (option
@@ -273,7 +273,7 @@ fixture smoke (S7) shows a picture.
 - Sources → Camera: with the SRT Camera chosen, its facts line is the
   status (D17).
 - Go Live asks "The SRT Camera has no signal. Go live anyway?" when the
-  camera is in use without a picture (D15), before the privacy step.
+  camera is in use without a picture (D15), after every other step of the dialog.
   Recording never asks.
 
 Done when renderer tests cover the view (hidden off macOS, copy, the
@@ -285,9 +285,9 @@ live ask's decision and words.
 `scripts/smoke-srt-camera.mjs` (new), `package.json`
 (`smoke:srt-camera`), `docs/srt-camera.md` (new), `AGENTS.md`.
 
-- FFmpeg makes a 10-bit HEVC TS and an H.264 TS; Homebrew
+- FFmpeg makes a 10-bit HEVC TS and an H.264 TS; a
   test sender (`scripts/fixtures/srt-test-sender.c`, on the shipped libsrt;
-  Homebrew's `srt-live-transmit` replaced it in D18) sends them as callers with the passphrase to a random
+  it replaced Homebrew's `srt-live-transmit` in D18) sends them as callers with the passphrase to a random
   free port (never 9000). The dev app with an isolated profile proves: the
   still before the first frame, the picture after it, the hold then the
   still after the sender stops, recovery, a wrong passphrase refused with no
