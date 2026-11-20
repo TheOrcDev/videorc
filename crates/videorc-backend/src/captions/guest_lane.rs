@@ -1177,7 +1177,10 @@ mod tests {
             "TAP.",
             "CaptionSession",
             "handle_realtime_event",
-            ".chunks",
+            "c.chunks",
+            "coordinator.chunks",
+            "upsert_caption_record",
+            "CaptionChunkRecord",
             "CaptionChunkPurpose::Listen",
         ] {
             assert!(

@@ -22142,6 +22142,7 @@ mod tests {
             [
                 "agent.surface.publish",
                 "cloud.speech.audio",
+                "cloud.speech.guests.audio",
                 "remote.surface.publish",
             ]
             .map(str::to_string)
