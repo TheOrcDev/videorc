@@ -22,9 +22,8 @@ export default defineConfig({
   },
   test: {
     environment: 'node',
-    // Expectations spell en-US output ("$20", "Oct 9").
-    // On macOS and Linux, workers read their default Intl locale from LC_ALL at start,
-    // so pin it whatever the shell has (Windows uses the system locale instead).
+    // Tests expect en-US output. Forked workers read their Intl locale from LC_ALL at start,
+    // so this pin needs the forks pool (Windows uses its system setting instead).
     env: { LC_ALL: 'en_US.UTF-8' },
     // Node 25+ ships a global `localStorage` (Web Storage) that is undefined
     // without `--localstorage-file` and shadows jsdom's, so every DOM test
