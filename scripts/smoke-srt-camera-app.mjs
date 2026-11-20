@@ -11,7 +11,7 @@
 //     leaves the camera free for the next one;
 //   - the picture after the first frame (bright, Receiving · HEVC);
 //   - a second sender (another address) refused with exactly 1402;
-//   - a sender that stalls past a receive timeout keeps the camera and
+//   - a sender that stalls until the camera holds keeps the camera and
 //     its picture comes back by itself;
 //   - the hold after the sender stops (the picture stays), then the still;
 //   - recovery when a sender (H.264 this time) starts again;
@@ -83,7 +83,11 @@ const built = spawnSync(
   ['-O2', '-o', senderPath, join(repoRoot, 'scripts', 'fixtures', 'srt-test-sender.c')],
   { encoding: 'utf8' }
 )
-if (built.status !== 0) skip(`the test sender does not build (cc): ${built.stderr ?? built.error}`)
+// No compiler is a reason to skip; a sender that does not compile is a failure.
+if (built.error?.code === 'ENOENT') skip('no C compiler (cc)')
+if (built.error || built.status !== 0) {
+  throw new Error(`the test sender does not build (cc):\n${built.error?.message ?? built.stderr}`)
+}
 
 const senders = new Set()
 /** How a timeout reads the SRT state for its message. */
@@ -268,8 +272,8 @@ try {
     step('second sender SKIP', { reason: 'this Mac has no local IPv4 address but loopback' })
   }
 
-  // A sender that stalls for longer than a receive timeout, then goes on, is
-  // still the same sender: the picture comes back by itself.
+  // A sender that stalls until the camera holds, then goes on, is still the
+  // same sender: the picture comes back by itself.
   first.process.kill('SIGSTOP')
   const stallTrail = []
   const stallStarted = Date.now()
@@ -330,8 +334,14 @@ try {
   const holdMs = Date.now() - stoppedAt
   measured.holdMs = holdMs
   step('hold ended', { holdMs })
-  assert(holdMs >= 1500, `the last frame holds about 2 s (${holdMs} ms)`)
+  // About 2 s, with room for the 250 ms status and the polling.
+  assert(holdMs >= 1500 && holdMs <= 4000, `the last frame holds about 2 s (${holdMs} ms)`)
   await expectPicture('the still after the hold', 'still')
+  // The picture follows the status: a preview that stays frozen past the
+  // hold fails here, with room for one picture sample.
+  const stillMs = Date.now() - stoppedAt
+  measured.stillMs = stillMs
+  assert(stillMs <= 5000, `the still replaces the held frame about 2 s in (${stillMs} ms)`)
 
   const beforeRecovery = await currentSession()
   const recovered = startSender(h264, port, passphrase, 'h264')
@@ -794,7 +804,14 @@ function backendResources(pid) {
   const udp = spawnSync('lsof', ['-nP', '-a', '-p', String(pid), '-i', 'UDP'], {
     encoding: 'utf8'
   })
-  return { threads: countLines(threads.stdout ?? ''), udpSockets: countLines(udp.stdout ?? '') }
+  const counts = {
+    threads: countLines(threads.stdout ?? ''),
+    udpSockets: countLines(udp.stdout ?? '')
+  }
+  // Both samples come while the port listens: a count of 0 is a failed probe.
+  assert(threads.status === 0 && counts.threads > 0, `ps read the backend's threads`)
+  assert(udp.status === 0 && counts.udpSockets > 0, `lsof read the listening UDP socket`)
+  return counts
 }
 
 /** H.264 at 1280 x 720 for 4 s, then 960 x 540 for 4 s, in one TS. */

@@ -13,11 +13,6 @@ export function libsrtCandidates(repoRoot) {
   ]
 }
 
-/** A caller with the passphrase, in srt-live-transmit's form; loopback unless named. */
-export function srtCallerUrl(port, passphrase, host = '127.0.0.1') {
-  return `srt://${host}:${port}?mode=caller&passphrase=${encodeURIComponent(passphrase)}`
-}
-
 /**
  * A local IPv4 address other than loopback, so a caller reaches the camera
  * from a second address. Never a link-local (169.254) link.

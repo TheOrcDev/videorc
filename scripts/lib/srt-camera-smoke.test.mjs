@@ -13,17 +13,11 @@ import {
   newSenderDecoding,
   sameSenderDecoding,
   senderPictureOnOutput,
-  steadyFeed,
-  srtCallerUrl
+  steadyFeed
 } from './srt-camera-smoke.mjs'
 
 test('the smoke never uses port 9000 or 9100', () => {
   assert.deepEqual(SRT_SMOKE_RESERVED_PORTS, [9000, 9100])
-})
-
-test('the caller URL carries the passphrase, escaped', () => {
-  assert.equal(srtCallerUrl(45678, 'a-b_c'), 'srt://127.0.0.1:45678?mode=caller&passphrase=a-b_c')
-  assert.equal(srtCallerUrl(1, 'a b'), 'srt://127.0.0.1:1?mode=caller&passphrase=a%20b')
 })
 
 test('the staged libsrt comes before Homebrew', () => {
@@ -81,13 +75,6 @@ test('a pairing check counts only once the camera accepted it, and left only onc
   assert.equal(pairingLeft({ ...waiting, senderConnected: true }), false)
   assert.equal(pairingLeft({ ...waiting, senderConnected: false }), true)
   assert.equal(pairingLeft({ ...waiting }), false, 'a status without the field proves nothing')
-})
-
-test('a caller can dial another local address', () => {
-  assert.equal(
-    srtCallerUrl(45678, 'p', '192.168.1.20'),
-    'srt://192.168.1.20:45678?mode=caller&passphrase=p'
-  )
 })
 
 test('the second address is a real local IPv4 address, never loopback or a link-local link', () => {
