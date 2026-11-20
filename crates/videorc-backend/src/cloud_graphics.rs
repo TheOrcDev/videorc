@@ -285,6 +285,31 @@ impl BannerRasterCache {
     }
 }
 
+/// Whether the caption source a snapshot was built from still holds once its
+/// rasters are done. A newer caption frame of the same source, on the same
+/// outputs, only moves the expiry: the snapshot is as current as one that
+/// finished a moment before that frame arrived, and the next poll carries the
+/// newer bar. A source that ended, another source, or a changed output is
+/// refused: that bar must never reach an output it no longer belongs on.
+///
+/// The snapshot is an observation, so it runs beside `cloud.speech.overlay`
+/// (several frames a second while someone speaks). Comparing the expiry too
+/// would refuse most snapshots built during speech.
+fn caption_source_held(
+    built_from: &Option<crate::captions::cloud_host::Presentation>,
+    now: &Option<crate::captions::cloud_host::Presentation>,
+) -> bool {
+    match (built_from, now) {
+        (None, None) => true,
+        (Some(built), Some(now)) => {
+            built.session == now.session
+                && built.stream == now.stream
+                && built.recording == now.recording
+        }
+        _ => false,
+    }
+}
+
 pub async fn snapshot(state: &AppState, params: SnapshotParams) -> Result<Value> {
     let generation = {
         let runtime = crate::cloud_show::lock(&state.cloud_show);
@@ -559,7 +584,10 @@ pub async fn snapshot(state: &AppState, params: SnapshotParams) -> Result<Value>
         }))
     })
     .await??;
-    if crate::captions::cloud_host::presentation(state).await != expected_caption {
+    if !caption_source_held(
+        &expected_caption,
+        &crate::captions::cloud_host::presentation(state).await,
+    ) {
         bail!("Caption source changed during graphic preparation")
     }
     let runtime = crate::cloud_show::lock(&state.cloud_show);
@@ -574,6 +602,45 @@ pub async fn snapshot(state: &AppState, params: SnapshotParams) -> Result<Value>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_newer_caption_frame_of_the_same_source_keeps_the_snapshot() {
+        use crate::captions::cloud_host::Presentation;
+        let built = Some(Presentation {
+            session: "host-1".into(),
+            expires_at: 1_000,
+            stream: true,
+            recording: false,
+        });
+        let newer = |change: fn(&mut Presentation)| {
+            let mut next = built.clone().unwrap();
+            change(&mut next);
+            Some(next)
+        };
+        assert!(caption_source_held(&built, &built));
+        assert!(caption_source_held(&None, &None));
+        // The next frame while the rasters were prepared: only the expiry moved.
+        assert!(caption_source_held(
+            &built,
+            &newer(|next| next.expires_at = 4_000)
+        ));
+        // Captions ended, started, moved to another source or another output.
+        assert!(!caption_source_held(&built, &None));
+        assert!(!caption_source_held(&None, &built));
+        assert!(!caption_source_held(
+            &built,
+            &newer(|next| next.session = "guests-1".into())
+        ));
+        assert!(!caption_source_held(
+            &built,
+            &newer(|next| next.stream = false)
+        ));
+        assert!(!caption_source_held(
+            &built,
+            &newer(|next| next.recording = true)
+        ));
+    }
+
     #[test]
     fn public_png_keeps_straight_alpha_and_bounds() {
         let source =
