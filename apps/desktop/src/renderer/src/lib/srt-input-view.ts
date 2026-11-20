@@ -14,7 +14,8 @@ import { SOURCE_RECEIVING_LABEL } from './state-labels'
 // Pure, so the Settings opt-in, the Sources camera row and the Go Live ask
 // (the dialog's and an agent's `go_live`) share one answer.
 
-export const SRT_CAMERA_ID = 'camera:srt-input'
+export { SRT_CAMERA_ID, isSrtCameraId } from './srt-camera-id'
+import { isSrtCameraId } from './srt-camera-id'
 
 export const SRT_INPUT_TITLE = 'SRT input'
 /** Option B: the opt-in in Settings; the camera's own settings live in Sources. */
@@ -34,10 +35,6 @@ export const SRT_CONNECTION_OPTIONS: ReadonlyArray<{ value: SrtInputConnection; 
 /** D9: the setting exists only where the backend supports it (macOS). */
 export function srtInputHidden(state: SrtInputState | null): boolean {
   return !state?.supported
-}
-
-export function isSrtCameraId(cameraId: string | null | undefined): boolean {
-  return cameraId === SRT_CAMERA_ID
 }
 
 export type SrtPortParse = { kind: 'port'; port: number } | { kind: 'refused'; message: string }

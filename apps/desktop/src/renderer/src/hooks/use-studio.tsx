@@ -255,7 +255,6 @@ import type {
   HeadlessGoLiveConfirmation
 } from '@/lib/go-live-headless'
 import { GoLiveStartRefused, type GoLiveStartGate } from '@/lib/go-live-start-gate'
-import { SRT_NO_SIGNAL_CONFIRM, srtCameraHasNoSignal } from '@/lib/srt-input-view'
 import { previewSurfaceBoundsChanged } from '../../../shared/native-preview-bounds'
 import {
   commentsRefreshRevisionIsCurrent,
@@ -17044,14 +17043,18 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
   // out after the dialog asked, and a Retry can come long after. A Retry
   // never carries "Go live anyway". Without it, no signal refuses the start,
   // and Go Live opens again to ask.
+  // The SRT view loads with the gate, so it stays out of the eager bundle.
   const dialogSrtStartGate = useCallback(
-    (goLiveAnyway: boolean): GoLiveStartGate => ({
-      refusal: null,
-      check: (params) =>
-        !goLiveAnyway && srtCameraHasNoSignal(srtInput.stateRef.current, params)
-          ? SRT_NO_SIGNAL_CONFIRM.description
-          : null
-    }),
+    async (goLiveAnyway: boolean): Promise<GoLiveStartGate> => {
+      const { SRT_NO_SIGNAL_CONFIRM, srtCameraHasNoSignal } = await import('@/lib/srt-input-view')
+      return {
+        refusal: null,
+        check: (params) =>
+          !goLiveAnyway && srtCameraHasNoSignal(srtInput.stateRef.current, params)
+            ? SRT_NO_SIGNAL_CONFIRM.description
+            : null
+      }
+    },
     [srtInput.stateRef]
   )
   // The refused start is still pending when the gate answers, and Go Live
@@ -17555,26 +17558,27 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
             reportSessionStartFailure(
               error,
               () => {
-                const gate = dialogSrtStartGate(false)
-                void runStartSessionRef
-                  .current?.(
-                    streamingOverride,
-                    preparedOutput,
-                    intent,
-                    suppressCaptionsOverride,
-                    rpc,
-                    gate
-                  )
-                  .then(() =>
-                    // The failed start ended the attempt and its list; the
-                    // Retry's own streaming still says what it left out.
-                    askAgainAfterSrtRefusal(
-                      gate,
-                      streamingOverride
-                        ? targetsLeftOut(captureConfigRef.current.streaming, streamingOverride)
-                        : []
+                void dialogSrtStartGate(false).then((gate) =>
+                  runStartSessionRef
+                    .current?.(
+                      streamingOverride,
+                      preparedOutput,
+                      intent,
+                      suppressCaptionsOverride,
+                      rpc,
+                      gate
                     )
-                  )
+                    .then(() =>
+                      // The failed start ended the attempt and its list; the
+                      // Retry's own streaming still says what it left out.
+                      askAgainAfterSrtRefusal(
+                        gate,
+                        streamingOverride
+                          ? targetsLeftOut(captureConfigRef.current.streaming, streamingOverride)
+                          : []
+                      )
+                    )
+                )
               },
               resumingCloudShow ? 'resume' : streamingOverride ? 'live' : 'record'
             )
@@ -18586,7 +18590,7 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
   )
   const confirmGoLive = useCallback(
     async (goLiveAnyway = false): Promise<void> => {
-      const gate = dialogSrtStartGate(goLiveAnyway)
+      const gate = await dialogSrtStartGate(goLiveAnyway)
       await runGoLiveConfirmation(undefined, gate)
       askAgainAfterSrtRefusal(gate)
     },
@@ -18653,7 +18657,7 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
   )
   const continueGoLiveWithReadyDestinations = useCallback(
     async (goLiveAnyway = false): Promise<void> => {
-      const gate = dialogSrtStartGate(goLiveAnyway)
+      const gate = await dialogSrtStartGate(goLiveAnyway)
       // "Go live on {ready}" leaves out the destinations whose setup failed;
       // they are not in the list.
       const failed = goLivePartialSetup?.failures.map((failure) => failure.targetId) ?? []

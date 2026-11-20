@@ -1,5 +1,5 @@
 import type { PreviewCameraStatus } from '@/lib/backend'
-import { isSrtCameraId } from '@/lib/srt-input-view'
+import { isSrtCameraId } from '@/lib/srt-camera-id'
 
 // Issue #1066: a live camera can deliver half its rate for minutes (a webcam's
 // auto exposure stretches each frame in low light, on every platform) while
