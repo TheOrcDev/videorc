@@ -377,4 +377,25 @@ describe('the agent tool catalog (plan 209 S1)', () => {
     expect(Object.keys(said.properties)).toEqual(['bubble'])
     expect(said.required).toEqual(['bubble'])
   })
+
+  // Plan 255 D15: the Go Live dialog asks before it goes live with an SRT
+  // Camera that has no signal; `go_live` takes the answer as allowNoSignal,
+  // the way it takes allowNonPublic for the privacy step.
+  it('go_live takes allowNoSignal beside allowNonPublic (plan 255 D15)', () => {
+    const goLive = agentTool('go_live')!
+    const input = goLive.inputSchema as { properties: Record<string, unknown> }
+    expect(Object.keys(input.properties)).toEqual([
+      'destinations',
+      'title',
+      'allowPartial',
+      'withoutCaptions',
+      'allowNonPublic',
+      'allowNoSignal'
+    ])
+    expect(goLive.description).toContain('allowNoSignal')
+    expect(validateAgentToolArguments(goLive, { allowNoSignal: true })).toBeNull()
+    expect(validateAgentToolArguments(goLive, { allowNoSignal: 'yes' })).toBe(
+      'arguments.allowNoSignal must be true or false.'
+    )
+  })
 })

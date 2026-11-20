@@ -15983,6 +15983,17 @@ async fn await_recording_camera_cadence_ready(
     // evidence; wiping it here (the pre-instant-record behaviour) forced every
     // Record click to wait for the 250 ms diagnostics ticker to refill it.
     let mut started_at = Instant::now();
+    // Plan 255 D7: the SRT Camera is never restarted for its cadence; a
+    // restart would close the port under a sender. D6: its sender picks the
+    // rate, so a rate that differs from the session's is no mismatch to warn of.
+    let srt_camera = camera_restart.as_ref().is_some_and(|params| {
+        params
+            .sources
+            .camera_id
+            .as_deref()
+            .is_some_and(crate::srt_camera::is_srt_camera_id)
+    });
+    let camera_restart = camera_restart.filter(|_| !srt_camera);
     let mut restarted = false;
 
     loop {
@@ -16044,7 +16055,10 @@ async fn await_recording_camera_cadence_ready(
             // A settled cadence can still be the WRONG cadence (camera feeding 24p
             // into a 30fps session). Warn — loudly enough to toast — but never block:
             // the recording is still usable, just not smooth.
-            if let Some(warning) = camera_cadence_mismatch_warning(camera_source_fps, target_fps) {
+            if !srt_camera
+                && let Some(warning) =
+                    camera_cadence_mismatch_warning(camera_source_fps, target_fps)
+            {
                 let _ = emit_health_event(
                     state,
                     Some(session_id),
@@ -45668,6 +45682,138 @@ drawbox=x=0:y=ih-ih*0.250000:w=iw:h=ih*0.250000:color=black@0:t=fill:replace=1,"
                 .iter()
                 .any(|event| event.code == "recording-camera-cadence-degraded"),
             "proceeding on a jittery camera must leave a warning in the session record"
+        );
+    }
+
+    /// The barrier's health event codes for an SRT Camera session whose
+    /// diagnostics stay pinned at these values.
+    async fn srt_camera_cadence_codes(
+        sample_pts_gap_p95_ms: f64,
+        capture_gap_p95_ms: f64,
+        frame_age_ms: u64,
+        source_fps: f64,
+    ) -> Vec<String> {
+        let state = test_state();
+        // Background samplers recompute camera diagnostics from the (absent)
+        // session; pin the snapshot for the whole run.
+        let pin_state = state.clone();
+        let pin = tokio::spawn(async move {
+            loop {
+                {
+                    let mut diagnostics = pin_state.diagnostics.lock().await;
+                    diagnostics.preview_camera_sample_pts_gap_p95_ms = Some(sample_pts_gap_p95_ms);
+                    diagnostics.preview_camera_capture_gap_p95_ms = Some(capture_gap_p95_ms);
+                    diagnostics.preview_camera_frame_age_ms = Some(frame_age_ms);
+                    diagnostics.preview_camera_source_fps = Some(source_fps);
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        });
+        let requirements = CompositorStartupSourceRequirements {
+            require_real_source: true,
+            require_camera_source: true,
+            require_screen_source: false,
+        };
+        let sources = crate::protocol::SourceSelection {
+            screen_id: None,
+            window_id: None,
+            camera_id: Some(crate::srt_camera::SRT_CAMERA_ID.to_string()),
+            microphone_id: None,
+            test_pattern: false,
+        };
+        let restart = crate::protocol::PreviewCameraStartParams {
+            sources: sources.clone(),
+            layout: crate::protocol::default_layout_settings(),
+            video: default_video_settings(),
+            ffmpeg_path: None,
+        };
+        state
+            .database
+            .create_completed_session(
+                &crate::storage::NewSession {
+                    id: "session-srt".to_string(),
+                    title: "session-srt".to_string(),
+                    started_at: chrono::Utc::now().to_rfc3339(),
+                    mode: "record".to_string(),
+                    output_path: None,
+                    container: None,
+                    stream_preset: None,
+                    sources,
+                    layout: crate::protocol::default_layout_settings(),
+                    output: OutputSettings {
+                        keep_original_mkv: false,
+                        separate_source_recordings: None,
+                        record_enabled: true,
+                        stream_enabled: false,
+                        output_directory: None,
+                        ffmpeg_path: None,
+                        video: default_video_settings(),
+                        rtmp: RtmpSettings {
+                            preset: RtmpPreset::YouTube,
+                            server_url: "rtmp://a.rtmp.youtube.com/live2".to_string(),
+                            stream_key: "abc123".to_string(),
+                        },
+                    },
+                },
+                &chrono::Utc::now().to_rfc3339(),
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+
+        let result = await_recording_camera_cadence_ready(
+            &state,
+            "session-srt",
+            30,
+            requirements,
+            Some(restart),
+        )
+        .await;
+        pin.abort();
+        assert!(result.is_ok(), "{result:?}");
+        state
+            .database
+            .list_health_events("session-srt")
+            .unwrap()
+            .into_iter()
+            .map(|event| event.code)
+            .collect()
+    }
+
+    // Plan 255 D6: a 60 fps sender into a 30 fps session is the lowest delay
+    // setup, not a mismatch.
+    #[tokio::test(start_paused = true)]
+    async fn cadence_barrier_never_warns_of_a_mismatch_for_the_srt_camera() {
+        let codes = srt_camera_cadence_codes(17.0, 17.0, 10, 60.0).await;
+        assert!(
+            codes
+                .iter()
+                .any(|code| code == "recording-camera-cadence-ready"),
+            "{codes:?}"
+        );
+        assert!(
+            !codes.iter().any(|code| code == "camera-cadence-mismatch"),
+            "{codes:?}"
+        );
+    }
+
+    // Plan 255 D7: a jittery SRT Camera records with a warning, and is never
+    // restarted: a restart would close the port under its sender.
+    #[tokio::test(start_paused = true)]
+    async fn cadence_barrier_never_restarts_the_srt_camera() {
+        let codes = srt_camera_cadence_codes(192.4, 193.8, 123, 23.96).await;
+        assert!(
+            codes
+                .iter()
+                .any(|code| code == "recording-camera-cadence-degraded"),
+            "{codes:?}"
+        );
+        assert!(
+            !codes
+                .iter()
+                .any(|code| code == "recording-camera-cadence-restart"),
+            "{codes:?}"
         );
     }
 

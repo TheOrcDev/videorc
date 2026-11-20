@@ -16,6 +16,18 @@ import {
   type SimulcastScene
 } from './capture'
 
+/**
+ * The main scene `session.start` sends: whenever edit mode is on OR it carries
+ * a background, so the backend learns the selected background even outside
+ * transform editing (A5). The SRT Camera's ask reads the same (plan 255 D15).
+ */
+export function sessionScene(
+  scene: Scene | null | undefined,
+  sceneEditMode: boolean
+): Scene | undefined {
+  return sceneEditMode || scene?.background != null ? (scene ?? undefined) : undefined
+}
+
 export function buildStartSessionParams(input: {
   captureConfig: CaptureConfig
   scene: Scene | null
@@ -42,9 +54,6 @@ export function buildStartSessionParams(input: {
     replayArmed = false
   } = input
 
-  // Send the scene whenever edit mode is on OR it carries a background, so the
-  // backend learns the selected background even outside transform editing (A5).
-  const includeScene = sceneEditMode || scene?.background != null
   const captionOutputReadiness = captionSessionOutputReadiness({
     burnTarget: captureConfig.captions.burnTarget,
     recordEnabled: captureConfig.recordEnabled,
@@ -69,7 +78,7 @@ export function buildStartSessionParams(input: {
       captureConfig.sources.cameraId,
       settings.cameraLooks
     ),
-    scene: includeScene ? (scene ?? undefined) : undefined,
+    scene: sessionScene(scene, sceneEditMode),
     output: {
       recordEnabled: captureConfig.recordEnabled,
       streamEnabled: captureConfig.streamEnabled,

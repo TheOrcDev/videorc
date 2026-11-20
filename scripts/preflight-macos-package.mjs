@@ -45,6 +45,11 @@ const inputs = [
   {
     path: join(repoRoot, 'vendor', 'ffmpeg', 'current', 'bin', 'ffprobe'),
     remedy: 'FFMPEG_REBUILD=1 pnpm ffmpeg:build:macos'
+  },
+  {
+    // Plan 255: the SRT Camera's library.
+    path: join(repoRoot, 'vendor', 'libsrt', 'current', 'lib', 'libsrt.dylib'),
+    remedy: 'pnpm libsrt:build:macos'
   }
 ]
 
@@ -88,6 +93,18 @@ try {
     `preflight-macos-package: native preview addon is not universal arm64+x86_64: ${
       error instanceof Error ? error.message : String(error)
     }\nRebuild with: pnpm build:native-preview-addon:release`
+  )
+  process.exit(1)
+}
+
+// Plan 255: the backend loads libsrt at run time, so a libsrt staged for
+// another architecture (a Rosetta shell, say) would only fail on first use.
+const archs = (path) => execFileSync('lipo', ['-archs', path], { encoding: 'utf8' }).trim()
+const backendArchs = archs(join(repoRoot, 'target', 'release', 'videorc-backend'))
+const libsrtArchs = archs(join(repoRoot, 'vendor', 'libsrt', 'current', 'lib', 'libsrt.dylib'))
+if (libsrtArchs !== backendArchs) {
+  console.error(
+    `preflight-macos-package: libsrt is ${libsrtArchs}, the backend is ${backendArchs}\nRebuild with: LIBSRT_REBUILD=1 pnpm libsrt:build:macos`
   )
   process.exit(1)
 }

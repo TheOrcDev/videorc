@@ -613,6 +613,17 @@ pub struct PreviewCameraFrameSource {
 }
 
 impl PreviewCameraFrameSource {
+    #[cfg(test)]
+    pub(crate) fn for_test(camera_id: &str) -> Self {
+        Self {
+            shared: Arc::default(),
+            layout: crate::protocol::default_layout_settings(),
+            source_key: Some(SourceKey::camera(camera_id)),
+            target_fps: 30,
+            generation: 1,
+        }
+    }
+
     pub fn source_key(&self) -> Option<&SourceKey> {
         self.source_key.as_ref()
     }
@@ -675,6 +686,45 @@ impl PreviewCameraShared {
             frame_store: FrameStore::new_with_surface_backing_tracker(1, tracker),
             ..Self::default()
         }
+    }
+
+    /// Plan 255: one SRT Camera frame from its pacer, counted like a capture
+    /// callback so cadence checks and recovery see a live camera.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub(crate) fn publish_srt_frame(
+        &mut self,
+        width: u32,
+        height: u32,
+        bytes: Vec<u8>,
+        pixel_buffer: Option<crate::frame_store::RetainedPixelBuffer>,
+    ) {
+        let started_at = Instant::now();
+        self.capture_timings.record_callback_at(started_at);
+        self.capture_callback_count = self.capture_callback_count.saturating_add(1);
+        self.frames_captured = self.frames_captured.saturating_add(1);
+        self.frames_in_window = self.frames_in_window.saturating_add(1);
+        let window_started = *self.window_started_at.get_or_insert(started_at);
+        let elapsed = window_started.elapsed();
+        if elapsed >= Duration::from_millis(500) {
+            self.source_fps = Some(self.frames_in_window as f64 / elapsed.as_secs_f64().max(0.001));
+            self.frames_in_window = 0;
+            self.window_started_at = Some(started_at);
+        }
+        let frame_bytes = bytes.len() as u64;
+        let sequence = self.frames_captured;
+        self.frame_store.publish_with_source_handles(
+            sequence,
+            width,
+            height,
+            PreviewCameraPixelFormat::Bgra8,
+            started_at,
+            bytes,
+            None,
+            pixel_buffer,
+        );
+        let publish_ms = started_at.elapsed().as_secs_f64() * 1000.0;
+        self.capture_timings
+            .record_valid_frame(0.0, 0.0, publish_ms, frame_bytes);
     }
 
     /// A frame read from the capture process pipe (Windows dshow, Linux v4l2)
@@ -4509,7 +4559,6 @@ fn scale_preserving_aspect(source_dimension: u32, target_dimension: u32, source_
 
 #[derive(Clone)]
 struct NativeCameraPreviewConfig {
-    #[cfg_attr(not(target_os = "macos"), allow(dead_code))] // only the AVFoundation start reads it
     camera_id: String,
     unique_id: String,
     ffmpeg_path: String,
@@ -4519,9 +4568,17 @@ struct NativeCameraPreviewConfig {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum SelectedCameraSource {
-    MacAvFoundation { unique_id: String },
-    WindowsDshow { device_name: String },
-    LinuxV4l2 { device_path: String },
+    MacAvFoundation {
+        unique_id: String,
+    },
+    WindowsDshow {
+        device_name: String,
+    },
+    LinuxV4l2 {
+        device_path: String,
+    },
+    /// Plan 255: the SRT Camera, while its setting is on.
+    SrtInput,
 }
 
 impl SelectedCameraSource {
@@ -4530,11 +4587,18 @@ impl SelectedCameraSource {
             SelectedCameraSource::MacAvFoundation { unique_id } => unique_id,
             SelectedCameraSource::WindowsDshow { device_name } => device_name,
             SelectedCameraSource::LinuxV4l2 { device_path } => device_path,
+            SelectedCameraSource::SrtInput => crate::srt_camera::SRT_CAMERA_ID,
         }
     }
 }
 
 fn selected_camera_source(camera_id: &str) -> Option<SelectedCameraSource> {
+    if crate::srt_camera::is_srt_camera_id(camera_id) {
+        return crate::srt_camera::listen_config()
+            .1
+            .enabled
+            .then_some(SelectedCameraSource::SrtInput);
+    }
     parse_native_camera_id(camera_id)
         .map(|unique_id| SelectedCameraSource::MacAvFoundation { unique_id })
         .or_else(|| {
@@ -4562,6 +4626,7 @@ impl SelectedCameraSource {
             Self::LinuxV4l2 { device_path } => {
                 crate::virtual_camera::is_videorc_camera_linux_path(device_path)
             }
+            Self::SrtInput => false,
         }
     }
 }
@@ -5371,6 +5436,11 @@ fn run_native_camera_preview(
 ) {
     let _ = config.ffmpeg_path.as_str();
 
+    if crate::srt_camera::is_srt_camera_id(&config.camera_id) {
+        srt::run_srt_camera_preview(&config, shared, stop_rx, startup_tx);
+        return;
+    }
+
     #[cfg(target_os = "macos")]
     macos::run_native_camera_preview(config, shared, stop_rx, startup_tx);
 
@@ -5392,6 +5462,174 @@ fn run_native_camera_preview(
         let _ = startup_tx.send(NativeCameraStartup::Failed(
             "Native camera preview is only available on macOS, Windows and Linux.".to_string(),
         ));
+    }
+}
+
+/// Plan 255: the SRT Camera. No device and no camera grant: the listener
+/// and the pacer run for exactly as long as this camera session (D16).
+mod srt {
+    use super::*;
+
+    pub fn run_srt_camera_preview(
+        config: &NativeCameraPreviewConfig,
+        camera: Arc<StdMutex<PreviewCameraShared>>,
+        stop_rx: std_mpsc::Receiver<()>,
+        startup_tx: std_mpsc::Sender<NativeCameraStartup>,
+    ) {
+        #[cfg(target_os = "macos")]
+        {
+            use crate::srt_camera::apple_decode::{DecodedFrame, VideoToolboxDecoder, copy_bgra};
+            use crate::srt_camera::camera::{CameraState, Shared};
+            use crate::srt_camera::still::{STILL_HEIGHT, STILL_WIDTH, render_still};
+            use std::sync::atomic::{AtomicBool, Ordering};
+
+            let fps = config.video.fps.clamp(1, 120);
+            let stop = Arc::new(AtomicBool::new(false));
+            let shared: Shared<DecodedFrame> = Arc::new(StdMutex::new(CameraState::default()));
+            let receiver = {
+                let shared = Arc::clone(&shared);
+                let stop = Arc::clone(&stop);
+                thread::Builder::new()
+                    .name("videorc-srt-camera".to_string())
+                    .spawn(move || {
+                        // A panic in the receiver must not leave a dead
+                        // port behind a "Waiting" still: start it again.
+                        loop {
+                            let receiver = crate::srt_camera::camera::Receiver::new(
+                                VideoToolboxDecoder::default(),
+                            );
+                            // A development tap on the decoded frames, when set.
+                            #[cfg(debug_assertions)]
+                            let receiver = match crate::srt_camera::frame_tap::FrameTap::from_env()
+                            {
+                                Some(mut tap) => {
+                                    receiver.with_frame_hook(Box::new(move |frame, meta| {
+                                        tap.on_frame(frame, meta)
+                                    }))
+                                }
+                                None => receiver,
+                            };
+                            let (shared, stop) = (Arc::clone(&shared), Arc::clone(&stop));
+                            let run =
+                                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                    crate::srt_camera::camera::receive_loop(
+                                        receiver,
+                                        Arc::clone(&shared),
+                                        Arc::clone(&stop),
+                                    );
+                                }));
+                            if run.is_ok() || stop.load(Ordering::Acquire) {
+                                break;
+                            }
+                            tracing::error!("[srt-camera] the receiver panicked; it starts again");
+                            let mut state = shared
+                                .lock()
+                                .unwrap_or_else(|poisoned| poisoned.into_inner());
+                            state.listening = false;
+                            state.tracker.on_sender_left();
+                            drop(state);
+                            thread::sleep(Duration::from_secs(1));
+                        }
+                    })
+            };
+            let Ok(receiver) = receiver else {
+                let _ = startup_tx.send(NativeCameraStartup::Failed(
+                    "The SRT Camera could not start its receiver.".to_string(),
+                ));
+                return;
+            };
+            {
+                let stop = Arc::clone(&stop);
+                thread::spawn(move || {
+                    let _ = stop_rx.recv();
+                    stop.store(true, Ordering::Release);
+                });
+            }
+            let _ = startup_tx.send(NativeCameraStartup::Live {
+                requested_width: STILL_WIDTH,
+                requested_height: STILL_HEIGHT,
+                selected_format_width: STILL_WIDTH,
+                selected_format_height: STILL_HEIGHT,
+                selected_format_min_fps: f64::from(fps),
+                selected_format_max_fps: f64::from(fps),
+                width: STILL_WIDTH,
+                height: STILL_HEIGHT,
+                selected_fps: f64::from(fps),
+                message: Some(
+                    "SRT Camera: the sender picks the size and rate; Videorc fits them to the canvas."
+                        .to_string(),
+                ),
+            });
+            let zero_copy = should_skip_camera_capture_cpu_copy(true);
+            let mut still: Option<((String, bool), Vec<u8>)> = None;
+            // Frames in a row whose pixels could not be read: one warning per
+            // streak, as a readable frame resets it.
+            let mut unreadable = 0_u32;
+            crate::srt_camera::camera::pace_loop(
+                shared,
+                Arc::clone(&stop),
+                fps,
+                |frame: &DecodedFrame| {
+                    let bytes = if zero_copy {
+                        Vec::new()
+                    } else {
+                        match copy_bgra(frame) {
+                            Some(bytes) => {
+                                unreadable = 0;
+                                bytes
+                            }
+                            None => {
+                                if unreadable == 0 {
+                                    tracing::warn!(
+                                        "[srt-camera] a frame's pixels could not be read"
+                                    );
+                                }
+                                unreadable += 1;
+                                return false;
+                            }
+                        }
+                    };
+                    camera
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .publish_srt_frame(
+                            frame.width,
+                            frame.height,
+                            bytes,
+                            zero_copy.then(|| frame.pixel_buffer.clone()),
+                        );
+                    true
+                },
+                |text: &str| {
+                    let mirrored = crate::srt_camera::scene_mirrors_camera();
+                    let stale = still
+                        .as_ref()
+                        .is_none_or(|((shown, flipped), _)| shown != text || *flipped != mirrored);
+                    if stale {
+                        let bgra = render_still(STILL_WIDTH, STILL_HEIGHT, text, mirrored);
+                        still = Some(((text.to_string(), mirrored), bgra));
+                    }
+                    let Some((_, bgra)) = still.as_ref() else {
+                        return;
+                    };
+                    // Copied before the lock: the compositor reads frames under it.
+                    let bytes = bgra.clone();
+                    camera
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .publish_srt_frame(STILL_WIDTH, STILL_HEIGHT, bytes, None);
+                },
+            );
+            let _ = receiver.join();
+            crate::srt_camera::camera_session_ended();
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (config, camera, stop_rx);
+            let _ = startup_tx.send(NativeCameraStartup::Failed(
+                "The SRT Camera is not available on this computer.".to_string(),
+            ));
+        }
     }
 }
 

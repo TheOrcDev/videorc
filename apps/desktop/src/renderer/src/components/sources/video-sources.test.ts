@@ -8,6 +8,7 @@ import { TooltipProvider } from '@/components/ui/tooltip'
 import type { Device } from '@/lib/backend'
 import { defaultCaptureConfig } from '@/lib/capture'
 import { normalizeSceneVisual, type SavedScene } from '@/lib/scene-presets'
+import { SRT_CAMERA_ID } from '@/lib/srt-input-view'
 import {
   screenSceneLine,
   VideoSources,
@@ -196,6 +197,31 @@ describe('Sources Video column (plan 173)', () => {
     })
     const onToggle = on.match(/<span[^>]*data-videorc-camera-low-light-toggle[^>]*>/)?.[0]
     expect(onToggle).toContain('aria-checked="true"')
+  })
+
+  // Plan 255 option B: Sources is the home of every camera, so the SRT
+  // Camera's own settings sit on the Camera row, only while it is picked.
+  it("shows the SRT Camera's settings on the Camera row only while it is picked", () => {
+    const srtFields = createElement('div', { 'data-testid': 'srt-fields' })
+    const base = {
+      devices: cameras,
+      disabled: false,
+      status: null,
+      facts: 'Waiting for SRT stream on port 9000',
+      shortfall: null,
+      onChange: noop,
+      srtFields
+    }
+    const picked = render({
+      camera: { ...base, value: SRT_CAMERA_ID, selectedName: 'SRT Camera (port 9000)' }
+    })
+    const row = picked.slice(picked.indexOf('data-source="camera"'))
+    expect(row).toContain('data-testid="srt-fields"')
+    expect(row.indexOf('srt-fields')).toBeGreaterThan(row.indexOf('Waiting for SRT stream'))
+    const other = render({
+      camera: { ...base, value: 'cam:built-in', selectedName: 'MacBook Pro Camera' }
+    })
+    expect(other).not.toContain('srt-fields')
   })
 })
 

@@ -1492,6 +1492,8 @@ struct CompositorLiveSources {
     screen_binding_verified: bool,
     pending_camera_change: Option<CompositorCameraSourceChange>,
     pending_screen_change: Option<CompositorScreenSourceChange>,
+    /// Plan 255: the last tick drew a camera on the main, simulcast or ISO scene.
+    draws_camera: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1701,6 +1703,16 @@ impl CompositorRenderCache {
 }
 
 impl CompositorLiveSources {
+    /// Plan 255: this compositor draws the SRT Camera, so its tick may follow it.
+    fn shows_srt_camera(&self) -> bool {
+        self.draws_camera
+            && self
+                .camera
+                .as_ref()
+                .and_then(PreviewCameraFrameSource::source_key)
+                .is_some_and(|key| crate::srt_camera::is_srt_camera_id(&key.id))
+    }
+
     async fn refresh(state: &AppState) -> Self {
         Self::default().refresh_sources(state).await
     }
@@ -5877,6 +5889,7 @@ async fn update_compositor_scene_with_selection_and_prepare_hook(
         compositor.status.scene_revision = Some(snapshot.revision);
         compositor.status.scene_id = snapshot.scene.as_ref().map(|scene| scene.id.clone());
         compositor.status.scene_layout = Some(snapshot.layout.clone());
+        crate::srt_camera::set_scene_mirrors_camera(snapshot.layout.camera_mirror);
         compositor.status.active_screen_id = snapshot
             .active_screen
             .as_ref()
@@ -6893,6 +6906,9 @@ async fn run_synthetic_compositor_loop(
     let mut frame_interval = Duration::from_secs_f64(1.0 / f64::from(target_fps.max(1)));
     let mut ticker = tokio::time::interval(frame_interval);
     ticker.set_missed_tick_behavior(compositor_missed_tick_behavior(frame_consumer));
+    // Plan 255: a new SRT Camera frame may start the tick (`canvas_pace.rs`).
+    let mut canvas_pace = crate::canvas_pace::CanvasPace::default();
+    let mut srt_frames = crate::srt_camera::NEW_FRAME.subscribe();
     // Only the record/stream compositor feeds the session's frame accounting;
     // a preview-only loop must not inflate "ticks" for a session it never fed.
     let mut accounts_session_frames = frame_consumer.requires_cpu_fallback();
@@ -7043,7 +7059,12 @@ async fn run_synthetic_compositor_loop(
                     pending_loop_config = Some(*config_rx.borrow_and_update());
                 }
             }
-            _ = ticker.tick() => {
+            _ = canvas_pace.next_tick(
+                &mut ticker,
+                &mut srt_frames,
+                frame_interval,
+                live_sources.shows_srt_camera(),
+            ) => {
                 let ticked_at = Instant::now();
                 let mut skipped_intervals = 0_u64;
                 if let Some(previous_tick_at) = previous_tick_at {
@@ -10237,22 +10258,23 @@ fn publish_compositor_frame(
         .as_ref()
         .and_then(|_| source_iso_snapshot(snapshot.as_ref(), SourceIsoRole::Camera));
     let scene_snapshot_ms = scene_snapshot_started_at.elapsed().as_secs_f64() * 1000.0;
-    let (camera_frame, camera_frame_fetch_ms) =
-        if scene_needs_live_camera_frame(snapshot.as_ref(), active_image_source.as_ref())
+    let draws_camera =
+        scene_needs_live_camera_frame(snapshot.as_ref(), active_image_source.as_ref())
             || scene_needs_live_camera_frame(simulcast_snapshot.as_ref(), None)
-            || scene_needs_live_camera_frame(iso_camera_snapshot.as_ref(), None)
-        {
-            let camera_fetch_started_at = Instant::now();
-            (
-                live_sources
-                    .camera_binding_verified
-                    .then(|| live_sources.latest_camera_frame())
-                    .flatten(),
-                camera_fetch_started_at.elapsed().as_secs_f64() * 1000.0,
-            )
-        } else {
-            (None, 0.0)
-        };
+            || scene_needs_live_camera_frame(iso_camera_snapshot.as_ref(), None);
+    live_sources.draws_camera = draws_camera;
+    let (camera_frame, camera_frame_fetch_ms) = if draws_camera {
+        let camera_fetch_started_at = Instant::now();
+        (
+            live_sources
+                .camera_binding_verified
+                .then(|| live_sources.latest_camera_frame())
+                .flatten(),
+            camera_fetch_started_at.elapsed().as_secs_f64() * 1000.0,
+        )
+    } else {
+        (None, 0.0)
+    };
     // Plan 210 S3: a frame of the adopted capture replaces the frame on air
     // only once a leg's scene names that capture; until then (and while the
     // authority is contended) the frame on air holds.
@@ -15437,6 +15459,23 @@ mod tests {
     }
 
     #[test]
+    fn compositor_follows_the_srt_camera_only_while_it_draws_it() {
+        let mut sources = CompositorLiveSources {
+            camera: Some(PreviewCameraFrameSource::for_test(
+                crate::srt_camera::SRT_CAMERA_ID,
+            )),
+            ..CompositorLiveSources::default()
+        };
+        assert!(!sources.shows_srt_camera(), "no scene draws the camera");
+        sources.draws_camera = true;
+        assert!(sources.shows_srt_camera());
+        sources.camera = Some(PreviewCameraFrameSource::for_test("camera:built-in"));
+        assert!(!sources.shows_srt_camera(), "another camera");
+        sources.camera = None;
+        assert!(!sources.shows_srt_camera(), "no camera");
+    }
+
+    #[test]
     fn live_source_fetch_demand_tracks_visible_scene_sources() {
         let camera_only =
             test_scene_snapshot(LayoutPreset::CameraOnly, None, Some("camera-device"));
@@ -17877,6 +17916,56 @@ mod tests {
 
         assert!(frame.pixel_format.has_metal_iosurface_target());
         assert!(frame.export_handle.has_metal_iosurface_target());
+    }
+
+    /// Plan 255: the frame path records whether the tick drew a camera, so
+    /// the next tick may follow the SRT Camera only then.
+    #[tokio::test]
+    async fn a_published_frame_records_whether_it_drew_a_camera() {
+        let state = test_state();
+        state.compositor.lock().await.run_id = Some("draws-camera-test".into());
+        let mut live_sources = CompositorLiveSources::default();
+        let mut cache = CompositorRenderCache::refresh_initial(&state).await;
+        let mut publish = |cache: &mut CompositorRenderCache, sequence: u64| {
+            publish_compositor_frame(
+                &state,
+                "draws-camera-test",
+                sequence,
+                8,
+                4,
+                &mut live_sources,
+                cache,
+                None,
+                CompositorFrameConsumer::NativePreview,
+                None,
+                None,
+                None,
+                None,
+                None,
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                ChatOverlayLegs::OFF,
+                LiveBackgroundLeg::unmeasured(&mut None),
+                ProgramLeg::off(&mut None),
+            );
+            live_sources.draws_camera
+        };
+        state.compositor.lock().await.scene = Some(test_scene_snapshot(
+            LayoutPreset::CameraOnly,
+            None,
+            Some("camera-device"),
+        ));
+        assert!(publish(&mut cache, 1), "a camera scene draws the camera");
+        state.compositor.lock().await.scene = Some(test_scene_snapshot(
+            LayoutPreset::ScreenOnly,
+            Some("screen-1"),
+            None,
+        ));
+        assert!(!publish(&mut cache, 2), "a screen-only scene does not");
     }
 
     #[tokio::test]

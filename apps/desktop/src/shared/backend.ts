@@ -4830,6 +4830,57 @@ export interface VirtualCameraStatus {
 /** Plan 249 S23: what Videorc Camera shows while a room's Program preview owns it. */
 export type VirtualCameraSource = 'room-program-preview' | 'room-program-paused'
 
+/** Plan 255 D11: how the sender reaches this computer; it sets the SRT receive latency. */
+export type SrtInputConnection = 'cableOrThisComputer' | 'wifi' | 'internet'
+
+/** What the SRT Camera shows (plan 255 D7, D8, D12). */
+export type SrtCameraSignal = 'waiting' | 'receiving' | 'holding' | 'unsupportedCodec'
+
+/** Why the last sender was turned away (plan 255 D14, D17). */
+export type SrtSenderRefusal = 'wrongPassphrase' | 'secondSender'
+
+/** The SRT Camera's live state. `detail` is the camera's detail line (D17). */
+export interface SrtCameraStatus {
+  /** The port is open: a scene in use holds the camera (D16). */
+  listening: boolean
+  signal: SrtCameraSignal
+  width?: number
+  height?: number
+  fps?: number
+  codec?: string
+  refusal?: SrtSenderRefusal
+  /** A sender is connected, sending or not (a pairing check sends nothing). */
+  senderConnected: boolean
+  /** Counts the senders accepted since the camera started; names the current or last one. */
+  senderSession: number
+  /** Frames decoded from that sender. Changes alone are not announced. */
+  framesDecoded: number
+  detail: string
+}
+
+/**
+ * The SRT input setting and its camera (plan 255). `srtInput.get`, `.set` and
+ * `.renewPassphrase` return it; `srtInput.changed` carries it on every change.
+ * `supported` is false off macOS (D9): the setting is absent there.
+ */
+export interface SrtInputState {
+  supported: boolean
+  enabled: boolean
+  port: number
+  connection: SrtInputConnection
+  latencyMs: number
+  passphrase: string
+  cameraId: string
+  cameraName: string
+  status: SrtCameraStatus
+}
+
+export interface SrtInputSetParams {
+  enabled?: boolean
+  port?: number
+  connection?: SrtInputConnection
+}
+
 /** `camera.lowLight.get` (issue #1066). */
 export interface CameraLowLightParams {
   cameraId: string
