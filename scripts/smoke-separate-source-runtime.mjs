@@ -276,9 +276,11 @@ for (const [width, fps, offset, variant = 'normal', overrides = {}] of lifecycle
           'scripts/smoke-separate-source-take.mjs',
           combined,
           '--no-motion',
-          ...(Object.keys(manifest.intervals ?? {}).length
-            ? ['--expectations', join(evidence, 'runtime-take.json')]
-            : [])
+          // Always: the manifest also says whether the microphone was
+          // selected and muted, which the silent-track gate reads. With no
+          // shed interval the duration checks stay strict.
+          '--expectations',
+          join(evidence, 'runtime-take.json')
         ])
         const paths = takeSiblingPaths(combined)
         const events = {}

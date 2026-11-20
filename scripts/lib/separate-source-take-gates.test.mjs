@@ -7,6 +7,7 @@ import {
   evaluateRoleAudioSources,
   evaluateTake,
   summarizeRoleProbe,
+  takeRoleExpectsSound,
   takeSiblingPaths,
   toneAmplitude
 } from './separate-source-take-gates.mjs'
@@ -286,5 +287,37 @@ describe('evaluateRoleAudioSources', () => {
       roles: ['screen']
     })
     assert.equal(result.pass, true, result.failures.join('; '))
+  })
+})
+
+describe('takeRoleExpectsSound', () => {
+  it('reads the Camera file of a take with no microphone, or a muted one, as expected silence', () => {
+    const noMicrophone = { microphoneSelected: false, systemAudio: true }
+    assert.equal(takeRoleExpectsSound(noMicrophone, 'camera'), false)
+    assert.equal(takeRoleExpectsSound(noMicrophone, 'screen'), true)
+    assert.equal(takeRoleExpectsSound(noMicrophone, 'combined'), true)
+    const muted = { microphoneSelected: true, audio: { microphoneMuted: true } }
+    assert.equal(takeRoleExpectsSound(muted, 'camera'), false)
+    assert.equal(takeRoleExpectsSound(muted, 'combined'), true)
+  })
+
+  it('reads the Screen file of a take with system audio off as expected silence', () => {
+    const systemOff = { microphoneSelected: true, systemAudio: false }
+    assert.equal(takeRoleExpectsSound(systemOff, 'screen'), false)
+    assert.equal(takeRoleExpectsSound(systemOff, 'camera'), true)
+    assert.equal(takeRoleExpectsSound(systemOff, 'combined'), true)
+  })
+
+  it('expects silence in every file only when nothing feeds the take', () => {
+    const silent = { microphoneSelected: false, systemAudio: false }
+    for (const role of ['combined', 'screen', 'camera'])
+      assert.equal(takeRoleExpectsSound(silent, role), false)
+  })
+
+  it('stays strict for a take that says nothing', () => {
+    for (const role of ['combined', 'screen', 'camera']) {
+      assert.equal(takeRoleExpectsSound(undefined, role), true)
+      assert.equal(takeRoleExpectsSound({ intervals: {} }, role), true)
+    }
   })
 })

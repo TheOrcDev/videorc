@@ -35,6 +35,24 @@ export const DEFAULT_TAKE_GATES = Object.freeze({
 })
 
 /**
+ * Whether a role's audio track is expected to carry sound. Camera holds the
+ * microphone, Screen holds system audio, Combined holds both. A take with no
+ * microphone (or a muted one), or with system audio off, still writes that
+ * track from the paced-silence bus: silence is its expected content there,
+ * not a source that recorded nothing (the analyzer's silent-track gate,
+ * issue 1064). Unknown (no expectations, an older manifest) reads as sound
+ * expected, so the gate stays strict.
+ */
+export function takeRoleExpectsSound(expectations, role) {
+  const microphone =
+    expectations?.microphoneSelected !== false && expectations?.audio?.microphoneMuted !== true
+  const system = expectations?.systemAudio !== false
+  if (role === 'camera') return microphone
+  if (role === 'screen') return system
+  return microphone || system
+}
+
+/**
  * Sibling paths for one take. The Combined file keeps its legacy name; the
  * ISO files insert the role before the extension (`...-screen.mkv`), which is
  * `recording_role_mkv_path` in `source_iso.rs`. Works for `.mkv` and `.mp4`.
