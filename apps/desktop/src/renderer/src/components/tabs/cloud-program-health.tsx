@@ -16,13 +16,15 @@ import {
 // open room it lists each layer: what reaches the room, what each program
 // page reports, and each output's egress, so a missing microphone, a page
 // that stopped reporting and a failed output read as three different things.
+// Plan 253 S7 adds how long Videorc Cloud took to answer the show's commands.
 // It lives in Health's lazy chunk and reads the room microphone's store
 // every two seconds, never at its 20 Hz meter rate.
 
 const LAYER_LABEL: Record<ProgramHealthLayer, string> = {
   contribution: 'In the room',
   page: 'Program pages',
-  egress: 'Outputs'
+  egress: 'Outputs',
+  control: 'Videorc Cloud'
 }
 
 const MICROPHONE_FRESH_MS = 500
@@ -54,13 +56,21 @@ export function CloudProgramHealth(): ReactElement | null {
             room,
             outputHealth: cloudStatus?.outputHealth,
             show: cloudStatus?.show,
-            microphone
+            microphone,
+            commandTimes: cloudStatus?.commandTimes
           })
         : [],
-    [open, room, cloudStatus?.outputHealth, cloudStatus?.show, microphone]
+    [
+      open,
+      room,
+      cloudStatus?.outputHealth,
+      cloudStatus?.show,
+      cloudStatus?.commandTimes,
+      microphone
+    ]
   )
   if (!open) return null
-  const layers = (['contribution', 'page', 'egress'] as const)
+  const layers = (['contribution', 'page', 'egress', 'control'] as const)
     .map((layer) => ({ layer, rows: rows.filter((row) => row.layer === layer) }))
     .filter((group) => group.rows.length > 0)
   return (

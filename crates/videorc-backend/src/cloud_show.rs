@@ -684,6 +684,10 @@ pub struct CloudStatus {
     /// Plan 224 D10: the cloud recording, on a talk show.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recording: Option<CloudRecordingStatus>,
+    /// Plan 253 S7: how long the web took to answer this show's commands.
+    /// Absent until a command of a managed talk show was timed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command_times: Option<crate::cloud_latency::CloudCommandTimes>,
 }
 
 impl CloudStatus {
@@ -2017,6 +2021,9 @@ pub struct CloudShowRuntime {
     pub(crate) destinations_generation: Arc<crate::cloud_control_web::DestinationGeneration>,
     pub(crate) control_tx: Option<ControlHandle>,
     pub(crate) downloads: Arc<crate::cloud_control_web::RecordingDownloadJobs>,
+    /// Plan 253 S7: the show whose web commands were timed, and their
+    /// times. On the status only while that show is the one held.
+    pub(crate) command_times: Option<(String, crate::cloud_latency::CloudCommandTimes)>,
     /// Plan 224: the room this desktop holds, beside `show`; cleared with
     /// it. Its token is the one secret in the runtime.
     pub(crate) talk: Option<TalkShowState>,
@@ -2341,6 +2348,12 @@ impl CloudShowRuntime {
             recording: runner
                 .and_then(|runner| runner.recording.as_ref())
                 .map(CloudRecordingStatus::from_runner),
+            command_times: self.show.as_ref().and_then(|show| {
+                self.command_times
+                    .as_ref()
+                    .filter(|(show_id, _)| *show_id == show.record.id)
+                    .map(|(_, times)| *times)
+            }),
         }
     }
 

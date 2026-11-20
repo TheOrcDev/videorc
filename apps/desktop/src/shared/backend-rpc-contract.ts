@@ -148,6 +148,7 @@ import type {
   CloudControllerFacts,
   CloudPresentationAccepted,
   CloudPresentationRestore,
+  CloudRoomLatencyReport,
   CloudTestParams,
   CloudGuestActParams,
   CloudGuestDecideParams,
@@ -660,6 +661,8 @@ export interface BackendRpcMethodMap {
     CloudPresentationAccepted,
     { queued: boolean }
   >
+  /** Plan 253 S7: what the room renderer measured, for the show's record. */
+  'cloud.room.latency.report': BackendRpcDefinition<CloudRoomLatencyReport, { kept: boolean }>
   /** Plan 249 S24: this controller's output flags and what it switched on. */
   'cloud.controller.desired': BackendRpcDefinition<
     {
@@ -1175,6 +1178,8 @@ const nonNegativeInteger = numberSchema({
   min: 0,
   max: Number.MAX_SAFE_INTEGER
 })
+// Plan 253 S7: a reported duration, the latency contract's `NET_MAX_MS`.
+const latencyReportMs = numberSchema({ integer: true, min: 0, max: 60_000 })
 const positiveSafeInteger = numberSchema({
   integer: true,
   min: 1,
@@ -6487,7 +6492,9 @@ const cloudRoomStatusSchema = objectSchema(
           // status; the renderer drops what it does not know (plan 249 S6).
           layout: optionalSchema(boundedString),
           stageKey: optionalSchema(boundedString),
-          at: optionalSchema(boundedString)
+          at: optionalSchema(boundedString),
+          // Plan 253 S7: the backend bounds it the same (`APPLY_MS_MAX`).
+          applyMs: optionalSchema(numberSchema({ integer: true, min: 0, max: 86_400_000 }))
         },
         { allowUnknown: false }
       )
@@ -6740,6 +6747,13 @@ const cloudStatusSchema = objectSchema(
     // Plan 224: the room and the cloud recording, on a talk show.
     room: optionalSchema(cloudRoomStatusSchema),
     recording: optionalSchema(cloudRecordingStatusSchema),
+    // Plan 253 S7: the web's command times on a managed talk show.
+    commandTimes: optionalSchema(
+      objectSchema(
+        { lastMs: nonNegativeInteger, slowestMs: nonNegativeInteger },
+        { allowUnknown: false }
+      )
+    ),
     // Plan 243: who is on air, and why a stop of this computer was no end (D7).
     onAir: optionalSchema(cloudOnAirSchema),
     stoppedBy: optionalSchema(enumSchema(['hand-off', 'taken-over'])),
@@ -7659,6 +7673,38 @@ const runtimeContracts = {
       { allowUnknown: false }
     ) as RuntimeSchema<CloudPresentationAccepted>,
     result: objectSchema({ queued: booleanSchema }, { allowUnknown: false })
+  },
+  'cloud.room.latency.report': {
+    params: objectSchema(
+      {
+        showId: stringSchema({ minLength: 1, maxLength: 128 }),
+        hostRttMs: optionalSchema(latencyReportMs),
+        people: arraySchema(
+          objectSchema(
+            {
+              identity: stringSchema({ minLength: 1, maxLength: 128 }),
+              name: optionalSchema(stringSchema({ maxLength: 200 })),
+              ms: latencyReportMs,
+              partial: booleanSchema,
+              toGuestMs: optionalSchema(latencyReportMs),
+              fromGuestMs: optionalSchema(latencyReportMs),
+              videoToGuestMs: optionalSchema(latencyReportMs),
+              videoFromGuestMs: optionalSchema(latencyReportMs)
+            },
+            { allowUnknown: false }
+          ),
+          { maxLength: 16 }
+        ),
+        program: optionalSchema(
+          objectSchema(
+            { ms: latencyReportMs, audioMs: optionalSchema(latencyReportMs) },
+            { allowUnknown: false }
+          )
+        )
+      },
+      { allowUnknown: false }
+    ) as RuntimeSchema<CloudRoomLatencyReport>,
+    result: objectSchema({ kept: booleanSchema }, { allowUnknown: false })
   },
   'cloud.controller.desired': {
     params: objectSchema(
