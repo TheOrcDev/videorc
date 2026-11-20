@@ -11,11 +11,11 @@ same place.
 
 ## The three items
 
-| Item      | What it is                                                                          | Default place       | Default switches (stream / recording)                                    |
-| --------- | ----------------------------------------------------------------------------------- | ------------------- | ------------------------------------------------------------------------ |
-| Highlight | The highlighted comment card ("show on stream" in Stream Manager, voice, auto-show) | Bottom left corner  | on / on                                                                  |
-| Captions  | The live caption bar; its width is the rect, style and size stay in Captions        | Bottom, centred     | off / off (captions off burn nothing; the switches replace `burnTarget`) |
-| Avatar    | Your avatar and its speech bubble ([avatar.md](avatar.md))                          | Bottom right corner | off / off (opt-in)                                                       |
+| Item      | What it is                                                                          | Default place       | Default switches (stream / recording)                       |
+| --------- | ----------------------------------------------------------------------------------- | ------------------- | ----------------------------------------------------------- |
+| Highlight | The highlighted comment card ("show on stream" in Stream Manager, voice, auto-show) | Bottom left corner  | on / on                                                     |
+| Captions  | The live caption bar; its width is the rect, style and size stay in Captions        | Bottom, centred     | none: Live captions in Captions decides (one switch, below) |
+| Avatar    | Your avatar and its speech bubble ([avatar.md](avatar.md))                          | Bottom right corner | off / off (opt-in)                                          |
 
 A place is a normalized rect, `x y w h` in canvas units (0 to 1), one for
 the horizontal picture and one for the vertical one. The smallest side a
@@ -85,12 +85,13 @@ their frame shows the zone. With the preview floating in its own window,
 the canvas is the schematic and that window follows each drag. Click one
 to open its inspector on the right:
 
-- **Show on stream** and **Show in recording** switches.
+- **Show on stream** and **Show in recording** switches (not for captions:
+  their row says Live captions On or Off and opens Captions).
 - **Snap** for the orientation on the stage: Top left, Top right, Bottom
   left, Bottom right, Bottom centre. A snap writes the item's default size at
   that position.
-- For captions, style and size stay in the Captions panel; the panel points
-  here under "Placement and output".
+- For captions, turning them on, where they show, style and size stay in the
+  Captions panel; its Placement row points here for where the bar sits.
 
 When the switches differ, the item's label carries a **stream only** or
 **recording only** badge. The docked native preview shows the program, so
@@ -153,15 +154,15 @@ sheet under the destinations, with the item's name, never silently. The
 same sentence is written to the session's health log (`overlay-start-notice`,
 info) when the session starts. The sentences, word for word:
 
-| Session                            | Switches                                  | Sentence                                                                                                                     |
-| ---------------------------------- | ----------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
-| Record + stream, one shared encode | stream on, recording off (or the reverse) | "Both the stream and the recording will include highlights: this computer shares one encode for them."                       |
-| Record + stream, one shared encode | same, for the avatar                      | "Both the stream and the recording will include the avatar: this computer shares one encode for them."                       |
-| Record + dual-orientation stream   | stream on, recording off                  | "Recording will include highlights while streaming vertical." (also "... captions ..." and "... the avatar ...")             |
-| Record + dual-orientation stream   | recording on, stream off                  | "The horizontal stream will include highlights while streaming vertical." (also "... captions ..." and "... the avatar ...") |
+| Session                            | Switches                                  | Sentence                                                                                               |
+| ---------------------------------- | ----------------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| Record + stream, one shared encode | stream on, recording off (or the reverse) | "Both the stream and the recording will include highlights: this computer shares one encode for them." |
+| Record + stream, one shared encode | same, for the avatar                      | "Both the stream and the recording will include the avatar: this computer shares one encode for them." |
+| Record + dual-orientation stream   | stream on, recording off                  | "Recording will include highlights while streaming vertical." (also "... the avatar ...")              |
+| Record + dual-orientation stream   | recording on, stream off                  | "The horizontal stream will include highlights while streaming vertical." (also "... the avatar ...")  |
 
-Captions on one shared encode get no sentence: they keep the plan 090
-behaviour (below). A session with a split stream leg needs no sentence.
+Captions never get a sentence: their switches are not read (one switch,
+below), and the Captions panel says what a vertical stream does to them. A session with a split stream leg needs no sentence.
 
 Sentences are built from the item's mid-sentence label: `highlights`,
 `captions`, `the avatar`. The renderer (`lib/overlay-layout.ts`) and the
@@ -192,7 +193,8 @@ the recording and the stream. Then:
 - **Captions**: today's block, unchanged. Captions burned into the stream
   only need a clean recording beside a captioned stream, which one encode
   cannot give; the sheet says so and Go Live waits for you to change the
-  captions switches. Captions that are off never block a start.
+  stream or recording settings, or go live without captions. Captions that
+  are off never block a start.
 
 ## Changing things mid-session
 
@@ -205,12 +207,23 @@ parameter, pre-armed with its leg. The Windows D3D11 pump keeps its
 start-time overlay input; a mid-session change there is said in the log,
 not hidden. A new session always reads the stored layout at start.
 
-Captions keep `burnTarget` on the wire for one release (D14). It is derived
-from the captions item's switches: on/on = `both`, on/off = `stream`,
-off/on = `recording`, off/off = `off` (`lib/captions-output.ts`,
-`burnTargetFromOverlaySwitches`). The first layout after the update is
-seeded once from a saved target that was on, so nobody loses it. The old
-`position: top | bottom` picker is gone; the rect is the position.
+**One switch for captions (owner, 2026-11-20).** Live captions in the
+Captions panel is the only thing that puts captions on the stream, in every
+scene, local and cloud; its one choice, "Show captions on", is Live stream
+only (`burnTarget: stream`, the default) or Live stream and recording
+(`both`). A scene only places the bar. `burnTarget` stays on the wire, but
+the renderer saves only `stream` or `both`: a saved `off` (a scene that hid
+captions) loads as `stream`, and a saved `recording` loads as `both`
+(`captionsOutputsFromSaved` in `lib/capture.ts`). The captions item keeps its
+two switch fields in the stored layout, but nothing reads them: not the
+split or start-notice loops (`OVERLAY_SWITCHED_ITEMS` in Rust and TS), not
+the managed show's graphics (`cloud_graphics.rs` takes the renderer's
+caption presentation), not the stage or the agents, which read
+`overlayLayoutForDisplay` (`lib/captions-output.ts`). There is no automatic
+exception either: the overlay layout was never per scene, and a takeover
+(Be right back, Starting soon) keeps the D5 order, so captions still draw
+above it while you speak. The old `position: top | bottom` picker
+is gone; the rect is the position.
 
 ## How a rect reaches the picture
 

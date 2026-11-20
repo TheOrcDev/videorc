@@ -1,3 +1,4 @@
+import { overlayLayoutForDisplay } from '@/lib/captions-output'
 import type { SavedSceneApplyResult } from '../scene-window-resolution'
 import type { SceneShows } from '../scenes'
 // The Studio's action context, built from the Studio's handles (plan 209 S5).
@@ -354,7 +355,9 @@ export function studioActionContext(studio: StudioActionSource): StudioActionCon
         return {
           scene: transformSceneRef.current,
           layout: current.layout,
-          overlayLayout: overlayLayoutRef.current,
+          // Captions show by Live captions alone (owner, 2026-11-20), so
+          // the agent reads their state from the Captions settings too.
+          overlayLayout: overlayLayoutForDisplay(overlayLayoutRef.current, current.captions),
           banners: studio.bannerListRef.current ?? NO_BANNERS,
           canvasAspect: {
             horizontal: orientation === 'horizontal' ? programAspect : 16 / 9,

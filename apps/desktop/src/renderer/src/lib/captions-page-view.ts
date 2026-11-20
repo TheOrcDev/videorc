@@ -1,13 +1,45 @@
 import type { CaptionsStatus, OverlayItemLayout, OverlayOrientation } from '@/lib/backend'
+import type { CaptionsOutputs } from '@/lib/capture'
+import { SESSION_LOCK_REASON } from '@/lib/lock-reason'
 import { overlayRectBottomGravity } from '@/lib/overlay-layout'
 
 // The Captions page and the Captions reader in words (plan 174 S3.7: D-25,
 // D-27, V-5, J2-18). The state word and its tone are `captionsStatusLabel` /
 // `captionsStatusTone` (S2.3a); these are the lines that go with them.
 
+/** The Captions page's one line (owner, 2026-11-20): the switch puts
+ * captions on the stream, in every scene, and nothing else has to. */
+export const CAPTIONS_PANEL_DESCRIPTION =
+  'Turn on Live captions to put what you say on your livestream, in every scene. On a livestream, captions need 30 fps or less, and one stream quality when you also record.'
+
 /** The Live captions switch's line while it is off: what turning it on does. */
 export const CAPTIONS_OFF_HINT =
-  'Transcribes your microphone during your next recording or livestream.'
+  'Puts captions on your livestream. Your microphone is transcribed only while you record or go live.'
+
+/** "Show captions on": the live stream always, the recording if picked. */
+export const CAPTIONS_OUTPUT_OPTIONS: readonly { value: CaptionsOutputs; label: string }[] = [
+  { value: 'stream', label: 'Live stream only' },
+  { value: 'both', label: 'Live stream and recording' }
+]
+
+/** Why "Show captions on" is off mid-session: a session keeps the outputs it
+ * started with. */
+export const CAPTIONS_OUTPUTS_LOCK_REASON = SESSION_LOCK_REASON
+
+/** The line under "Show captions on". A vertical destination shares the
+ * recording's picture with the horizontal stream (plan 077), so captions on
+ * that stream are in the recording either way, and the line says so. */
+export function captionsOutputsDescription(
+  outputs: CaptionsOutputs,
+  verticalLegArmed: boolean
+): string {
+  if (verticalLegArmed) {
+    return 'A vertical destination shares the recording picture with the horizontal stream, so captions on stream are in the recording too.'
+  }
+  return outputs === 'both'
+    ? 'Your recording also gets a copy with captions.'
+    : 'Your recording stays clean.'
+}
 
 /** The line under the captions state on the Captions page, while it is on. */
 export function captionsStatusDetail(status: CaptionsStatus, sessionActive: boolean): string {
@@ -85,22 +117,15 @@ export function captionsReaderNotice(
 }
 
 /**
- * Where the caption bar sits and what it shows on, for the Captions page's
- * Placement row (D-27): "Bottom, on stream". Scene owns both.
+ * Where the caption bar sits, for the Captions page's Placement row (D-27):
+ * "Bottom". Scene places the bar; whether it shows is Live captions alone
+ * (owner, 2026-11-20), so the scene's old switches never make it "Hidden".
  */
 export function captionsPlacementSummary(
-  item: OverlayItemLayout,
+  item: Pick<OverlayItemLayout, OverlayOrientation>,
   orientation: OverlayOrientation
 ): string {
-  if (!item.showOnStream && !item.showInRecording) return 'Hidden'
-  const edge = overlayRectBottomGravity(item[orientation]) ? 'Bottom' : 'Top'
-  const where =
-    item.showOnStream && item.showInRecording
-      ? 'on stream and in the recording'
-      : item.showOnStream
-        ? 'on stream'
-        : 'in the recording'
-  return `${edge}, ${where}`
+  return overlayRectBottomGravity(item[orientation]) ? 'Bottom' : 'Top'
 }
 
 /** The month's caption allowance in one unit (D-27), or null until it is known. */

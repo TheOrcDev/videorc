@@ -758,7 +758,11 @@ describe('set_scene_item and get_scene_layout (plan 209 S11b)', () => {
       [{ item: 'banner:sponsor', shown: true }, SCENE_LAYOUT_COPY.bannerShown],
       [{ item: 'camera', showOnStream: false }, SCENE_LAYOUT_COPY.sourceSwitches],
       [{ item: 'buddy', shape: 'circle' }, SCENE_LAYOUT_COPY.shapeCameraOnly],
-      [{ item: 'buddy' }, SCENE_LAYOUT_COPY.setEmpty]
+      [{ item: 'buddy' }, SCENE_LAYOUT_COPY.setEmpty],
+      // One switch (2026-11-20): a scene never turns captions on or off.
+      [{ item: 'captions', showOnStream: true }, SCENE_LAYOUT_COPY.captionsSwitches],
+      [{ item: 'captions', showInRecording: false }, SCENE_LAYOUT_COPY.captionsSwitches],
+      [{ item: 'captions', shown: true }, SCENE_LAYOUT_COPY.captionsSwitches]
     ] as const) {
       expect(await executeAgentIntent(call('set_scene_item', args), context)).toEqual({
         ok: false,

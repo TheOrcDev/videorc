@@ -2745,7 +2745,7 @@
     {
       "name": "set_captions",
       "title": "Turn live captions on or off",
-      "description": "Turn live captions on or off, like the Live captions switch. Captions transcribe the microphone onto the picture during a recording or livestream. Turning them on needs what the switch needs, such as Videorc Premium; off always works.",
+      "description": "Turn live captions on or off, like the Live captions switch. On puts captions on the livestream in every scene (the Captions page chooses whether the recording gets them too); captions transcribe the microphone only during a recording or livestream. Turning them on needs what the switch needs, such as Videorc Premium; off always works.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -3308,7 +3308,7 @@
     {
       "name": "set_scene_item",
       "title": "Show, hide or shape something on the picture",
-      "description": "Change an item's switches and look, like the Scene inspector: show or hide the camera or the screen, the camera's shape (rectangle, rounded, circle), and Show on stream and Show in recording for the avatar, the highlight card, the captions bar and banners. Use set_banner to show or hide a banner itself.",
+      "description": "Change an item's switches and look, like the Scene inspector: show or hide the camera or the screen, the camera's shape (rectangle, rounded, circle), and Show on stream and Show in recording for the avatar, the highlight card, the chat box and banners. Use set_banner to show or hide a banner itself, and set_captions for the captions bar, which a scene only places.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -3329,11 +3329,11 @@
           },
           "showOnStream": {
             "type": "boolean",
-            "description": "The avatar, highlight, captions or a banner: shown on the livestream."
+            "description": "The avatar, highlight, chat or a banner: shown on the livestream."
           },
           "showInRecording": {
             "type": "boolean",
-            "description": "The avatar, highlight, captions or a banner: shown in the recording."
+            "description": "The avatar, highlight, chat or a banner: shown in the recording."
           }
         },
         "required": ["item"],

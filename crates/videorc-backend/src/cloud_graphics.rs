@@ -459,8 +459,11 @@ pub async fn snapshot(state: &AppState, params: SnapshotParams) -> Result<Value>
                     "caption",
                     canvas,
                     placement,
-                    presentation.stream && layout.captions.show_on_stream,
-                    presentation.recording && layout.captions.show_in_recording,
+                    // Live captions alone decides (owner, 2026-11-20): the
+                    // renderer's presentation carries its outputs, and the
+                    // scene's captions item only places the bar.
+                    presentation.stream,
+                    presentation.recording,
                     Some(presentation.expires_at),
                 )?;
                 let mut output_rects = serde_json::Map::new();

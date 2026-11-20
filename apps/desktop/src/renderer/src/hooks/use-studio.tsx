@@ -328,10 +328,6 @@ import {
   type WsStatus
 } from '@/lib/capture'
 import {
-  burnTargetFromOverlaySwitches,
-  seedCaptionsSwitchesFromBurnTarget
-} from '@/lib/captions-output'
-import {
   DEFAULT_OVERLAY_LAYOUT,
   overlayLayoutsEqual,
   overlayOrientationForCanvas,
@@ -1081,14 +1077,12 @@ export function buildStreamOutputTopologyProbeParams(
     recordingVideo: recordingProfile,
     streamVideos: streamProfiles
   })
-  const burnsStream =
-    captureConfig.captions.burnTarget === 'stream' || captureConfig.captions.burnTarget === 'both'
-  const prearmCaptions =
-    !captureConfig.captions.enabled ||
-    suppressCaptionsForSession ||
-    captureConfig.captions.burnTarget === 'off'
+  // Live captions on always burn the stream (one switch, 2026-11-20), so a
+  // captioned stream beside a recording always needs its own leg; off, the
+  // leg is only pre-armed for a mid-stream opt-in.
+  const prearmCaptions = !captureConfig.captions.enabled || suppressCaptionsForSession
   const forceSameProfileSplit =
-    captureConfig.recordEnabled && (prearmCaptions ? captionOutputReadiness.ready : burnsStream)
+    captureConfig.recordEnabled && (prearmCaptions ? captionOutputReadiness.ready : true)
   const split =
     captureConfig.recordEnabled &&
     (forceSameProfileSplit || !sameTopologyVideoProfile(recordingProfile, streamProfile))
@@ -3623,11 +3617,6 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
   const commitOverlayLayout = useCallback((next: OverlayLayout) => {
     setOverlayLayoutState((current) => (overlayLayoutsEqual(current, next) ? current : next))
   }, [])
-  // Whether this connection has the backend's layout yet. Until then the
-  // state holds the shipped defaults, and nothing may write a layout built
-  // from them (the captions seed below once saved the defaults over the
-  // streamer's layout at every launch, turning Buddy off the stream).
-  const [overlayLayoutLoaded, setOverlayLayoutLoaded] = useState(false)
   // The layout itself: loaded on connect, pushed on change (`overlays.layout`).
   useEffect(() => {
     if (!client || wsStatus !== 'connected') return
@@ -3640,13 +3629,9 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
       // An older backend has no such method (or answers off-contract); the
       // shipped defaults stand.
       .catch(() => undefined)
-      .finally(() => {
-        if (!cancelled) setOverlayLayoutLoaded(true)
-      })
     const off = client.on('overlays.layout', commitOverlayLayout)
     return () => {
       cancelled = true
-      setOverlayLayoutLoaded(false)
       off()
     }
   }, [client, commitOverlayLayout, wsStatus])
@@ -3658,43 +3643,6 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
     },
     [client, commitOverlayLayout]
   )
-  // Captions keep `burnTarget` on the wire, derived from the captions item's
-  // two switches (plan 164, D14). The first layout after the update is
-  // seeded once from a saved target that was on, so nobody loses it.
-  const captionsSwitchesKey = `${overlayLayout.captions.showOnStream}:${overlayLayout.captions.showInRecording}`
-  const captionsSeedRef = useRef<string | null>(null)
-  const captionsBurnTargetRef = useRef(captureConfig.captions.burnTarget)
-  captionsBurnTargetRef.current = captureConfig.captions.burnTarget
-  useEffect(() => {
-    if (!client || wsStatus !== 'connected' || !overlayLayoutLoaded) return
-    const savedTarget = captionsBurnTargetRef.current
-    const seeded =
-      captionsSeedRef.current === null
-        ? seedCaptionsSwitchesFromBurnTarget(overlayLayout.captions, savedTarget)
-        : null
-    captionsSeedRef.current = captionsSwitchesKey
-    if (seeded) {
-      void setOverlayLayout({ ...overlayLayoutRef.current, captions: seeded }).catch(() => {})
-      return
-    }
-    const derived = burnTargetFromOverlaySwitches(overlayLayout.captions)
-    if (derived === savedTarget) return
-    setCaptureConfig((current) =>
-      current.captions.burnTarget === derived
-        ? current
-        : { ...current, captions: { ...current.captions, burnTarget: derived } }
-    )
-    // The layout's switches are the one home; the key keeps this effect on
-    // switch changes (and a saved target arriving) only, never on a rect drag.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [
-    client,
-    wsStatus,
-    overlayLayoutLoaded,
-    captionsSwitchesKey,
-    captureConfig.captions.burnTarget,
-    setOverlayLayout
-  ])
   // The streamer's corner pick lives in main (it must survive the Chat window
   // being closed). A ref, not state, feeds the highlight RPC so a pick applies
   // to the very next highlight without re-creating the relay listeners.
@@ -15303,7 +15251,7 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
           )
           .join('|')
       : undefined
-    const burnIn = outputs.length > 0 && captureConfig.captions.burnTarget !== 'off'
+    const burnIn = outputs.length > 0
     const captionsRunning = captionsStatusIsActive(captionsStatus)
     const decision = decideOverlayPush({
       burnIn,
@@ -15344,12 +15292,10 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
             room: {
               sessionClientId: latest.sessionClientId,
               expiresAt: captionCueExpiryRef.current.get(latest)!,
-              stream:
-                captureConfig.captions.burnTarget === 'stream' ||
-                captureConfig.captions.burnTarget === 'both',
-              recording:
-                captureConfig.captions.burnTarget === 'recording' ||
-                captureConfig.captions.burnTarget === 'both'
+              // The managed show follows the same one switch: on stream
+              // always, in the recording for "Live stream and recording".
+              stream: true,
+              recording: captureConfig.captions.burnTarget === 'both'
             }
           }
         : {}),
@@ -15389,12 +15335,7 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
   // partial refresh restarts the clock; finals dwell by readable text length.
   const latestCaption = captionLines.at(-1)
   useEffect(() => {
-    if (
-      !client ||
-      !latestCaption ||
-      !captionsCaptureActive ||
-      captureConfig.captions.burnTarget === 'off'
-    ) {
+    if (!client || !latestCaption || !captionsCaptureActive) {
       return
     }
     const identity = captionLineIdentity(latestCaption)

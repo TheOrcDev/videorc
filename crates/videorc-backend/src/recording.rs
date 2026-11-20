@@ -5227,8 +5227,9 @@ async fn start_session_with_timeline(
         "caption leg plan (capacity reserved independently of transcription consent)"
     );
     // Plan 164: the highlight card and the Buddy follow the streamer's
-    // per-output switches in the backend-owned overlay layout; captions keep
-    // `burnTarget` (derived from the same switches by the renderer).
+    // per-output switches in the backend-owned overlay layout; captions follow
+    // `burnTarget` alone (Live captions and its outputs in the Captions tab,
+    // owner 2026-11-20), and take only their placement from the layout.
     let overlay_layout = crate::overlay_layout::load_overlay_layout(&state.database);
     // A new session must never inherit a composited caption bar. The overlay
     // slot is app-global and the renderer's stop-time clear is best-effort

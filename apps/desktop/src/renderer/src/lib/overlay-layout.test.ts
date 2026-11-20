@@ -225,7 +225,8 @@ describe('overlay start notices (D13)', () => {
       ).map((notice) => notice.notice)
     ).toStrictEqual([
       'Recording will include highlights while streaming vertical.',
-      'Recording will include captions while streaming vertical.',
+      // Never the captions: Live captions alone decides them (one switch,
+      // 2026-11-20), and the Captions tab says what a vertical stream does.
       'The horizontal stream will include the avatar while streaming vertical.'
     ])
   })

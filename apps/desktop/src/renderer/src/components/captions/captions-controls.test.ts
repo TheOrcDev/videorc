@@ -33,7 +33,9 @@ function render({
   status = { state: 'idle' } as CaptionsStatus,
   microphoneId = 'mic-1' as string | null,
   overlayCaptions = { showOnStream: true, showInRecording: false },
-  platform = 'darwin'
+  platform = 'darwin',
+  burnTarget = 'stream' as CaptureConfig['captions']['burnTarget'],
+  isSessionActive = false
 } = {}): string {
   const captureConfig: CaptureConfig = {
     ...defaultCaptureConfig,
@@ -42,7 +44,7 @@ function render({
       microphoneId: microphoneId ?? undefined,
       microphoneName: 'Shure MV7'
     },
-    captions: { ...defaultCaptureConfig.captions, enabled }
+    captions: { ...defaultCaptureConfig.captions, enabled, burnTarget }
   }
   mocked.core = {
     captionsCommandPending: false,
@@ -50,7 +52,7 @@ function render({
     captionsWindow: { open: false, enabled: true },
     captureConfig,
     entitlements: null,
-    isSessionActive: false,
+    isSessionActive,
     overlayLayout: {
       ...DEFAULT_OVERLAY_LAYOUT,
       captions: { ...DEFAULT_OVERLAY_LAYOUT.captions, ...overlayCaptions }
@@ -141,7 +143,7 @@ describe('Captions page (plan 174 S3.7)', () => {
   it('names the microphone and the placement, and opens their pages (D-27)', () => {
     const markup = render()
     expect(markup).toMatch(/Microphone<\/span>[^]*Shure MV7/)
-    expect(markup).toContain('Bottom, on stream')
+    expect(markup).toMatch(/Placement<\/span>[^]*>Bottom</)
     expect(markup).not.toMatch(/Realtime|Live transcription|credits/)
     expect(
       markup.match(
@@ -149,9 +151,30 @@ describe('Captions page (plan 174 S3.7)', () => {
       )
     ).toHaveLength(2)
     expect(render({ microphoneId: null })).toMatch(/Microphone<\/span>[^]*>Off</)
-    expect(render({ overlayCaptions: { showOnStream: false, showInRecording: false } })).toContain(
-      '>Hidden<'
-    )
+    // A scene saved with captions hidden no longer hides them (one switch,
+    // 2026-11-20): the row names only where the bar sits.
+    expect(
+      render({ enabled: true, overlayCaptions: { showOnStream: false, showInRecording: false } })
+    ).not.toContain('>Hidden<')
+  })
+
+  it('puts captions on the stream with the one switch, and asks only about the recording', () => {
+    const markup = render()
+    expect(markup).toContain('your livestream, in every scene')
+    expect(markup).not.toMatch(/Open Scene|in Scene/)
+    expect(markup).toContain('Show captions on')
+    expect(markup).toMatch(/aria-checked="true"[^>]*>Live stream only</)
+    expect(markup).toContain('Live stream and recording')
+    expect(markup).toContain('Your recording stays clean.')
+    const both = render({ burnTarget: 'both' })
+    expect(both).toMatch(/aria-checked="true"[^>]*>Live stream and recording</)
+    expect(both).toContain('Your recording also gets a copy with captions.')
+  })
+
+  it('keeps the outputs a session started with', () => {
+    const markup = render({ enabled: true, isSessionActive: true })
+    expect(markup).toMatch(/data-testid="captions-outputs"[^>]*data-disabled|aria-disabled="true"/)
+    expect(markup).toContain('Changes apply the next time you record or go live.')
   })
 
   it('counts the allowance in minutes this month, once it is known', () => {

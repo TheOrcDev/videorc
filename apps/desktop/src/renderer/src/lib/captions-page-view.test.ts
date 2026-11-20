@@ -2,7 +2,9 @@ import { describe, expect, it } from 'vitest'
 
 import type { CaptionsStatus } from './backend'
 import {
+  CAPTIONS_OUTPUT_OPTIONS,
   captionsAllowanceLabel,
+  captionsOutputsDescription,
   captionsPlacementSummary,
   captionsReaderNotice,
   captionsStatusDetail
@@ -68,28 +70,39 @@ describe('captionsStatusDetail', () => {
 describe('captionsPlacementSummary (D-27)', () => {
   const captions = DEFAULT_OVERLAY_LAYOUT.captions
 
-  it('names the edge and the outputs', () => {
-    expect(captionsPlacementSummary({ ...captions, showOnStream: true }, 'horizontal')).toBe(
-      'Bottom, on stream'
-    )
+  it('names the edge the scene puts the bar on', () => {
+    expect(captionsPlacementSummary(captions, 'horizontal')).toBe('Bottom')
     expect(
       captionsPlacementSummary(
-        {
-          ...captions,
-          showOnStream: true,
-          showInRecording: true,
-          horizontal: { x: 0.1, y: 0.05, w: 0.8, h: 0.1 }
-        },
+        { ...captions, horizontal: { x: 0.1, y: 0.05, w: 0.8, h: 0.1 } },
         'horizontal'
       )
-    ).toBe('Top, on stream and in the recording')
-    expect(captionsPlacementSummary({ ...captions, showInRecording: true }, 'vertical')).toBe(
-      'Bottom, in the recording'
-    )
+    ).toBe('Top')
+    expect(captionsPlacementSummary(captions, 'vertical')).toBe('Bottom')
   })
 
-  it('says Hidden when the bar shows nowhere', () => {
-    expect(captionsPlacementSummary(captions, 'horizontal')).toBe('Hidden')
+  it('never says Hidden: the scene only places the bar (one switch, 2026-11-20)', () => {
+    // The default captions item has both old switches off, which used to
+    // read "Hidden" while Live captions was on.
+    expect(captions.showOnStream || captions.showInRecording).toBe(false)
+    expect(captionsPlacementSummary(captions, 'horizontal')).not.toBe('Hidden')
+  })
+})
+
+describe('captionsOutputsDescription', () => {
+  it('says what the recording gets, and what a vertical stream does to it', () => {
+    expect(captionsOutputsDescription('stream', false)).toBe('Your recording stays clean.')
+    expect(captionsOutputsDescription('both', false)).toBe(
+      'Your recording also gets a copy with captions.'
+    )
+    expect(captionsOutputsDescription('stream', true)).toMatch(/in the recording too/)
+  })
+
+  it('offers the live stream always, the recording as the only choice', () => {
+    expect(CAPTIONS_OUTPUT_OPTIONS.map((option) => option.label)).toEqual([
+      'Live stream only',
+      'Live stream and recording'
+    ])
   })
 })
 
