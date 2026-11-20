@@ -212,6 +212,11 @@ export function microphoneStatus(input: {
   switching: boolean
   device?: SelectedDeviceStatus
   muted: boolean
+  /**
+   * A takeover holds the voice (live show 2026-11-20): its chip, from
+   * `takeoverMicrophoneStatus`, which keeps the copy out of the entry chunk.
+   */
+  takeover?: SourceStatus | null
   sessionActive: boolean
   /** The backend's silence watchdog reports the captured microphone silent. */
   silent?: boolean
@@ -224,6 +229,7 @@ export function microphoneStatus(input: {
   if (input.device === 'missing' || input.device === 'unavailable') {
     return notFound('microphone')
   }
+  if (input.takeover) return input.takeover
   if (input.muted) return { label: 'Muted', tone: 'neutral' }
   if (input.silent) return { label: MIC_SILENT_LABEL, tone: 'warn' }
   if (input.sessionActive) return { label: SOURCE_RECEIVING_LABEL, tone: 'good' }

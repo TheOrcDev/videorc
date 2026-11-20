@@ -26,6 +26,7 @@ const mocked = vi.hoisted(() => ({
 }))
 vi.mock('@/hooks/use-studio', () => ({
   useStudioCore: () => mocked.core,
+  useStudioCloud: () => ({ cloudStatus: null }),
   useStudioReplay: () => mocked.clips
 }))
 vi.mock('@/hooks/use-studio-mic-sources', async (importOriginal) => ({
@@ -224,6 +225,22 @@ describe('Audio section (plan 201 S2)', () => {
     // Gain stays editable while muted.
     expect(markup).toContain('aria-label="Microphone gain"')
     expect(render()).not.toContain('data-muted')
+  })
+
+  // Live show 2026-11-20: the takeover muted the owner and the row said nothing.
+  it('says Muted for takeover with when it ends, in a room and alone', () => {
+    const room = render({ takeoverHold: 'stream' })
+    expect(room).toContain('>Muted for takeover</span>')
+    expect(room).toContain('Your audience can&#x27;t hear you until the takeover ends.')
+    // In a room the microphone itself stays on: guests still hear the host.
+    expect(/<button[^>]*aria-label="Mute microphone"[^>]*>/.exec(room)?.[0]).toContain(
+      'aria-pressed="false"'
+    )
+    const solo = render({ muted: true, takeoverHold: 'microphone' })
+    expect(solo).toContain('>Muted for takeover</span>')
+    expect(solo).not.toContain('>Muted</span>')
+    expect(solo).toContain('Your microphone comes back on when the takeover ends.')
+    expect(render({ muted: true })).not.toContain('data-videorc-mic-takeover-hint')
   })
 
   it('shows the mute hotkey as a key chip only when one is bound', () => {

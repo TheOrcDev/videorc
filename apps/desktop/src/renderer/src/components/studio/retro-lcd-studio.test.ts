@@ -151,6 +151,15 @@ describe('Retro LCD Audio (plans 197 and 201)', () => {
     expect(markup).toMatch(/class="py-1 opacity-50"[^>]*data-muted=""[^>]*data-videorc-mic-level/)
   })
 
+  it('says Muted for takeover on the screen while a takeover holds the voice', () => {
+    const markup = renderAudio({ kind: 'value', peakDb: -20 }, { takeoverHold: 'stream' })
+    expect(markup).toContain('data-videorc-mic-takeover-hint')
+    expect(markup).toContain('Muted for takeover.')
+    expect(renderAudio({ kind: 'value', peakDb: -20 })).not.toContain(
+      'data-videorc-mic-takeover-hint'
+    )
+  })
+
   it('shows the live switch status on the screen, under the dropdown', () => {
     const markup = renderAudio(
       { kind: 'value', peakDb: -12 },

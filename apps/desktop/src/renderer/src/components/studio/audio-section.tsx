@@ -34,6 +34,12 @@ import {
   systemAudioMeterInput,
   type MeterInput
 } from '@/lib/mic-meter-input'
+import {
+  TAKEOVER_MUTED_HINT,
+  TAKEOVER_MUTED_LABEL,
+  useTakeoverMicrophoneHold,
+  type TakeoverMicrophoneHold
+} from '@/lib/takeover-microphone'
 import { systemAudioStatus } from '@/lib/source-status'
 import { micSignalLabel, type MicMonitorState } from '@/lib/state-labels'
 import {
@@ -91,6 +97,7 @@ export function AudioSection(): ReactElement {
     systemAudioJoining,
     systemAudioIssue
   } = useStudioCore()
+  const takeoverHold = useTakeoverMicrophoneHold()
   const { openSettings } = useWorkspaceNav()
   const { meter, monitorState, sessionLevelUnavailable } = useMicrophoneMeter()
   const backendLevelsLive = useBackendAudioLevelsLive()
@@ -123,6 +130,7 @@ export function AudioSection(): ReactElement {
     sessionLevelUnavailable,
     muteShortcut: settings.globalShortcuts?.micToggle,
     muted: audio.microphoneMuted,
+    takeoverHold,
     platform,
     selectedDevice: selectedMicrophone,
     selectedName: captureConfig.sources.microphoneName,
@@ -283,6 +291,8 @@ export type MicrophoneRowProps = {
   /** Issue 1064: the running bus sends no level, so the meter shows none. */
   sessionLevelUnavailable?: boolean
   muted: boolean
+  /** A takeover holds the voice (live show 2026-11-20): the row says so until it ends. */
+  takeoverHold?: TakeoverMicrophoneHold
   /** The bound global mute shortcut (an accelerator); absent when none is bound. */
   muteShortcut?: string
   platform?: string
@@ -305,6 +315,7 @@ function MicrophoneRow({
   monitorState,
   sessionLevelUnavailable = false,
   muted,
+  takeoverHold = null,
   muteShortcut,
   platform,
   gainDb,
@@ -320,7 +331,12 @@ function MicrophoneRow({
         // microphone says so in words: flat bars alone read as a dead
         // microphone (plan 174 S3.3).
         <>
-          {muted ? <StatusBadge icon={SpeakerOffIcon} value="Muted" /> : null}
+          {takeoverHold || muted ? (
+            <StatusBadge
+              icon={SpeakerOffIcon}
+              value={takeoverHold ? TAKEOVER_MUTED_LABEL : 'Muted'}
+            />
+          ) : null}
           {muteShortcut ? <ShortcutKeys accelerator={muteShortcut} platform={platform} /> : null}
           <ShortcutTooltip
             accelerator={muteShortcut}
@@ -382,6 +398,11 @@ function MicrophoneRow({
           {micSignalLabel(monitorState)}
         </span>
       </div>
+      {takeoverHold ? (
+        <p className="text-xs text-muted-foreground" data-videorc-mic-takeover-hint="">
+          {TAKEOVER_MUTED_HINT[takeoverHold]}
+        </p>
+      ) : null}
       <MicrophoneGainFader gainDb={gainDb} onGainChange={onGainChange} />
       {/* Issue 1064: a session meter with no backend level says so, instead
           of painting the renderer's own microphone. */}
