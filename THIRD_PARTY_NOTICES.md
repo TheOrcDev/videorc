@@ -64,5 +64,9 @@ Transport library by Haivision, https://github.com/Haivision/srt.
   MPL-2.0 lets a larger work be licensed under the AGPL-3.0 (its Secondary
   License clause); libsrt's files carry no "Incompatible With Secondary
   Licenses" notice.
+- libsrt includes code from UDT (Copyright (c) 2001 - 2011, The Board of
+  Trustees of the University of Illinois) under a BSD licence, in
+  `licenses/libsrt/UDT-LICENSE.txt`; the app's `libsrt/licenses/` carries it.
 - The library links OpenSSL 3 (Apache License 2.0) statically for SRT
-  encryption, as the bundled FFmpeg does.
+  encryption, as the bundled FFmpeg does; the app's `libsrt/licenses/`
+  carries OpenSSL's licence.

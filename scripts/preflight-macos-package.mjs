@@ -97,6 +97,18 @@ try {
   process.exit(1)
 }
 
+// Plan 255: the backend loads libsrt at run time, so a libsrt staged for
+// another architecture (a Rosetta shell, say) would only fail on first use.
+const archs = (path) => execFileSync('lipo', ['-archs', path], { encoding: 'utf8' }).trim()
+const backendArchs = archs(join(repoRoot, 'target', 'release', 'videorc-backend'))
+const libsrtArchs = archs(join(repoRoot, 'vendor', 'libsrt', 'current', 'lib', 'libsrt.dylib'))
+if (libsrtArchs !== backendArchs) {
+  console.error(
+    `preflight-macos-package: libsrt is ${libsrtArchs}, the backend is ${backendArchs}\nRebuild with: LIBSRT_REBUILD=1 pnpm libsrt:build:macos`
+  )
+  process.exit(1)
+}
+
 const ffmpegBin = join(repoRoot, 'vendor', 'ffmpeg', 'current', 'bin', 'ffmpeg')
 let capabilities
 try {

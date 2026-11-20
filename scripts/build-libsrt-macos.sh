@@ -22,12 +22,23 @@ if [[ "$(uname -s)" != "Darwin" ]]; then
   exit 1
 fi
 
+LICENSE_FILES=(LICENSE-libsrt-MPL-2.0.txt LICENSE-UDT-BSD.txt LICENSE-OpenSSL-Apache-2.0.txt)
+staged_copy_is_current() {
+  grep -q "SRT version: ${SRT_VERSION}$" "${CURRENT_DIR}/SOURCE.txt" || return 1
+  # A copy built in another shell (Rosetta, say) is for another machine.
+  [[ "$(lipo -archs "${CURRENT_DIR}/lib/libsrt.dylib")" == "${ARCH}" ]] || return 1
+  local license
+  for license in "${LICENSE_FILES[@]}"; do
+    [[ -f "${CURRENT_DIR}/licenses/${license}" ]] || return 1
+  done
+}
+
 if [[ -f "${CURRENT_DIR}/lib/libsrt.dylib" && -f "${CURRENT_DIR}/SOURCE.txt" && "${LIBSRT_REBUILD:-0}" != "1" ]]; then
-  if grep -q "SRT version: ${SRT_VERSION}$" "${CURRENT_DIR}/SOURCE.txt"; then
-    echo "Using existing libsrt ${SRT_VERSION} at ${CURRENT_DIR}/lib/libsrt.dylib"
+  if staged_copy_is_current; then
+    echo "Using existing libsrt ${SRT_VERSION} (${ARCH}) at ${CURRENT_DIR}/lib/libsrt.dylib"
     exit 0
   fi
-  echo "Rebuilding libsrt: the staged copy is not ${SRT_VERSION}." >&2
+  echo "Rebuilding libsrt: the staged copy is not ${SRT_VERSION} for ${ARCH} with its licences." >&2
 fi
 
 if ! command -v cmake >/dev/null 2>&1; then
@@ -38,6 +49,10 @@ fi
 OPENSSL_PREFIX="${VIDEORC_OPENSSL_PREFIX:-$(brew --prefix openssl@3 2>/dev/null || true)}"
 if [[ -z "${OPENSSL_PREFIX}" || ! -f "${OPENSSL_PREFIX}/lib/libcrypto.a" ]]; then
   echo "OpenSSL static libraries not found. Install openssl@3 (brew install openssl@3) or set VIDEORC_OPENSSL_PREFIX." >&2
+  exit 1
+fi
+if [[ ! -f "${OPENSSL_PREFIX}/LICENSE.txt" ]]; then
+  echo "OpenSSL's LICENSE.txt is missing at ${OPENSSL_PREFIX}; the bundle must ship it." >&2
   exit 1
 fi
 
@@ -110,15 +125,26 @@ cp "${DYLIB}" "${CURRENT_DIR}/lib/libsrt.dylib"
 install_name_tool -id "@rpath/libsrt.dylib" "${CURRENT_DIR}/lib/libsrt.dylib"
 codesign --force --sign - "${CURRENT_DIR}/lib/libsrt.dylib"
 cp "${EXTRACTED_DIR}/LICENSE" "${CURRENT_DIR}/licenses/LICENSE-libsrt-MPL-2.0.txt"
+# libsrt keeps UDT's code, whose BSD licence asks binaries to carry its notice.
+sed -n '/Copyright (c) 2001 - 2011, The Board of Trustees of the University of Illinois/,/POSSIBILITY OF SUCH DAMAGE/p' \
+  "${EXTRACTED_DIR}/srtcore/api.cpp" > "${CURRENT_DIR}/licenses/LICENSE-UDT-BSD.txt"
+if ! grep -q 'POSSIBILITY OF SUCH DAMAGE' "${CURRENT_DIR}/licenses/LICENSE-UDT-BSD.txt"; then
+  echo "The UDT licence notice was not found in srtcore/api.cpp." >&2
+  exit 1
+fi
+cp "${OPENSSL_PREFIX}/LICENSE.txt" "${CURRENT_DIR}/licenses/LICENSE-OpenSSL-Apache-2.0.txt"
 
 cat > "${CURRENT_DIR}/NOTICE.txt" <<NOTICE
 This product includes libsrt, the Secure Reliable Transport library by
 Haivision Systems Inc., licensed under the Mozilla Public License 2.0
 (licenses/LICENSE-libsrt-MPL-2.0.txt). Its source files are unmodified; the
-exact source archive is named in SOURCE.txt.
+exact source archive is named in SOURCE.txt. libsrt includes code from UDT,
+Copyright (c) 2001 - 2011, The Board of Trustees of the University of
+Illinois, under the BSD licence in licenses/LICENSE-UDT-BSD.txt.
 
 This build statically links OpenSSL (https://www.openssl.org/), licensed
-under the Apache License 2.0, for SRT encryption.
+under the Apache License 2.0 (licenses/LICENSE-OpenSSL-Apache-2.0.txt), for
+SRT encryption.
 
 SRT project: https://github.com/Haivision/srt
 NOTICE
