@@ -62,6 +62,9 @@ objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSAp
 objc2-av-foundation = { version = "0.3.2", default-features = false, features = ["AVCaptureDevice", "AVCaptureInput", "AVCaptureOutputBase", "AVCaptureSession", "AVCaptureSessionPreset", "AVCaptureVideoDataOutput", "AVMediaFormat", "AVVideoSettings", "dispatch2", "objc2-core-media", "objc2-core-video"] }
 objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "CFCGTypes", "CFDate", "CFNumber", "CFRunLoop", "CFUUID"] }
 objc2-core-graphics = { version = "0.3.2", default-features = false, features = ["CGDirectDisplay", "CGDisplayConfiguration", "CGError", "CGWindow", "CGImage"] }
+# The device UID (`kAudioDevicePropertyDeviceUID`): what a saved microphone
+# is found by once CoreAudio hands it a new id (plan 254 S7).
+objc2-core-audio = { version = "0.3.2", default-features = false, features = ["std", "objc2-core-audio-types", "AudioHardware"] }
 objc2-core-audio-types = { version = "0.3.2", default-features = false, features = ["std", "CoreAudioBaseTypes"] }
 # `CMSimpleQueue` and `CMSync`: Videorc Camera's sink queue and host-clock PTS (plan 214 B4).
 objc2-core-media = { version = "0.3.2", default-features = false, features = ["CMBlockBuffer", "CMFormatDescription", "CMSampleBuffer", "CMSimpleQueue", "CMSync", "CMTime", "objc2", "objc2-core-audio-types", "objc2-core-video"] }
