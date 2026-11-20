@@ -639,7 +639,10 @@ try {
         untilMs: row.requestedAtMs + SETTLE_MS,
         fromColor: 'other',
         toColor: targets[row.to].color,
-        fromLayoutMark: true,
+        // Leaving a real camera's full-frame picture: it has no reliable mark
+        // (a dark room reads black, daylight reads with or without one), so
+        // only the incoming layout is judged.
+        fromLayoutMark: null,
         toLayoutMark: layoutMark[row.to]
       })
     }))
