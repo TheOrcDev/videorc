@@ -1,42 +1,55 @@
 import { describe, expect, it } from 'vitest'
 
+import { captionsOutputSwitches, overlayLayoutForDisplay } from './captions-output'
 import { DEFAULT_OVERLAY_LAYOUT } from './overlay-layout'
-import {
-  burnTargetFromOverlaySwitches,
-  overlaySwitchesFromBurnTarget,
-  seedCaptionsSwitchesFromBurnTarget
-} from './captions-output'
 
-describe('captions burnTarget derives from the overlay switches (plan 164, D14)', () => {
-  it('maps all four switch combinations and back', () => {
-    const table = [
-      [false, false, 'off'],
-      [true, false, 'stream'],
-      [false, true, 'recording'],
-      [true, true, 'both']
-    ] as const
-    for (const [showOnStream, showInRecording, burnTarget] of table) {
-      expect(burnTargetFromOverlaySwitches({ showOnStream, showInRecording })).toBe(burnTarget)
-      expect(overlaySwitchesFromBurnTarget(burnTarget)).toStrictEqual({
-        showOnStream,
-        showInRecording
-      })
-    }
-  })
-
-  it('seeds a fresh layout from a saved target once and never overrides a placed one', () => {
-    const fresh = DEFAULT_OVERLAY_LAYOUT.captions
-    expect(seedCaptionsSwitchesFromBurnTarget(fresh, 'off')).toBeNull()
-    expect(seedCaptionsSwitchesFromBurnTarget(fresh, 'stream')).toStrictEqual({
-      ...fresh,
+// One switch (owner, 2026-11-20): Live captions in the Captions tab decides
+// whether captions show, in every scene; a scene only places the bar.
+describe('captions show by Live captions alone', () => {
+  it('maps the switch and its one choice onto the outputs', () => {
+    expect(captionsOutputSwitches({ enabled: false, burnTarget: 'stream' })).toStrictEqual({
+      showOnStream: false,
+      showInRecording: false
+    })
+    expect(captionsOutputSwitches({ enabled: false, burnTarget: 'both' })).toStrictEqual({
+      showOnStream: false,
+      showInRecording: false
+    })
+    expect(captionsOutputSwitches({ enabled: true, burnTarget: 'stream' })).toStrictEqual({
       showOnStream: true,
       showInRecording: false
     })
-    expect(seedCaptionsSwitchesFromBurnTarget(fresh, 'both')).toMatchObject({
+    expect(captionsOutputSwitches({ enabled: true, burnTarget: 'both' })).toStrictEqual({
       showOnStream: true,
       showInRecording: true
     })
-    const placed = { ...fresh, showInRecording: true }
-    expect(seedCaptionsSwitchesFromBurnTarget(placed, 'stream')).toBeNull()
+  })
+
+  it('ignores a scene saved with captions hidden once Live captions is on', () => {
+    const hidden = {
+      ...DEFAULT_OVERLAY_LAYOUT,
+      captions: { ...DEFAULT_OVERLAY_LAYOUT.captions, showOnStream: false, showInRecording: false }
+    }
+    const shown = overlayLayoutForDisplay(hidden, { enabled: true, burnTarget: 'stream' })
+    expect(shown.captions).toMatchObject({ showOnStream: true, showInRecording: false })
+    // Placement survives; every other item is untouched.
+    expect(shown.captions.horizontal).toStrictEqual(hidden.captions.horizontal)
+    expect(shown.highlight).toBe(hidden.highlight)
+  })
+
+  it('ignores a scene saved with captions on once Live captions is off', () => {
+    const on = {
+      ...DEFAULT_OVERLAY_LAYOUT,
+      captions: { ...DEFAULT_OVERLAY_LAYOUT.captions, showOnStream: true, showInRecording: true }
+    }
+    expect(
+      overlayLayoutForDisplay(on, { enabled: false, burnTarget: 'both' }).captions
+    ).toMatchObject({ showOnStream: false, showInRecording: false })
+  })
+
+  it('keeps the same layout object when nothing differs', () => {
+    expect(
+      overlayLayoutForDisplay(DEFAULT_OVERLAY_LAYOUT, { enabled: false, burnTarget: 'stream' })
+    ).toBe(DEFAULT_OVERLAY_LAYOUT)
   })
 })

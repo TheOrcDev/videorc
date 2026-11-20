@@ -102,7 +102,8 @@ export const SCENE_LAYOUT_COPY = {
   shapeCameraOnly: 'Only the camera has a shape.',
   shapeNotHere: "The camera's shape works in the Screen + camera scenes and in freeform.",
   windowsNextSession: 'Saved. On this PC it shows from your next recording or stream.',
-  captionsNextSession: 'Saved. Captions keep where they show until your next recording or stream.',
+  captionsSwitches:
+    'Captions are on the stream whenever Live captions is on, in every scene. Use set_captions to turn them on or off; the Captions page chooses whether the recording gets them too.',
   failed: "Couldn't change the picture. Check the Scene page on your computer."
 } as const
 
@@ -855,8 +856,9 @@ export const moveOnScene: AgentToolExecutor = async (context, args) => {
  * `set_scene_item`: an item's switches and look. The camera and the screen
  * are shown or hidden (the inspector's Visible, locked while recording or
  * live); the camera has a shape where the inspector offers one; Buddy, the
- * highlight card, the captions and every banner have "Show on stream" and
- * "Show in recording".
+ * highlight card, the chat box and every banner have "Show on stream" and
+ * "Show in recording". The captions have neither: Live captions alone puts
+ * them on the stream (`set_captions`).
  */
 export const setSceneItem: AgentToolExecutor = async (context, args) => {
   const arrange = arrangeOf(context)
@@ -911,6 +913,15 @@ export const setSceneItem: AgentToolExecutor = async (context, args) => {
     return { ok: true, message: said.join(' '), result }
   }
 
+  // One switch (owner, 2026-11-20): a scene places the caption bar and
+  // never turns it on or off.
+  if (
+    target.kind === 'overlay' &&
+    target.item === 'captions' &&
+    (shown !== undefined || hasSwitches)
+  ) {
+    return { ok: false, message: SCENE_LAYOUT_COPY.captionsSwitches }
+  }
   if (shown !== undefined) {
     return {
       ok: false,
@@ -921,9 +932,7 @@ export const setSceneItem: AgentToolExecutor = async (context, args) => {
   const note =
     snapshot.sessionActive && snapshot.startTimeOverlays
       ? SCENE_LAYOUT_COPY.windowsNextSession
-      : snapshot.sessionActive && target.id === 'captions'
-        ? SCENE_LAYOUT_COPY.captionsNextSession
-        : null
+      : null
   const outcome: StudioActionOutcome =
     target.kind === 'overlay'
       ? await arrange

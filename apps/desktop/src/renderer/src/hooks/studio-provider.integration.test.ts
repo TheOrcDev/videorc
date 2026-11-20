@@ -11310,7 +11310,7 @@ describe('real StudioProvider lifecycle', () => {
       captions: {
         ...defaultCaptureConfig.captions,
         enabled: false,
-        burnTarget: 'off' as const
+        burnTarget: 'stream' as const
       }
     }
 
@@ -11324,9 +11324,10 @@ describe('real StudioProvider lifecycle', () => {
       buildStreamOutputTopologyProbeParams(sharedConfig, sharedConfig.streaming, true).outputRoles
     ).toEqual(['recording', 'stream'])
 
+    // Live captions on always burn the stream (one switch, 2026-11-20).
     const captionSplit = buildStreamOutputTopologyProbeParams({
       ...sharedConfig,
-      captions: { ...sharedConfig.captions, burnTarget: 'stream' }
+      captions: { ...sharedConfig.captions, enabled: true }
     })
     expect(captionSplit.outputRoles).toEqual(['recording', 'stream'])
 

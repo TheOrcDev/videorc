@@ -50,7 +50,11 @@ import {
 } from '@/lib/captions-ui'
 import {
   CAPTIONS_OFF_HINT,
+  CAPTIONS_OUTPUTS_LOCK_REASON,
+  CAPTIONS_OUTPUT_OPTIONS,
+  CAPTIONS_PANEL_DESCRIPTION,
   captionsAllowanceLabel,
+  captionsOutputsDescription,
   captionsPlacementSummary,
   captionsStatusDetail
 } from '@/lib/captions-page-view'
@@ -63,7 +67,8 @@ import {
 import {
   layoutPresetOrientation,
   simulcastArmed,
-  type CaptionsCaptureSettings
+  type CaptionsCaptureSettings,
+  type CaptionsOutputs
 } from '@/lib/capture'
 import { cloudAiUploadGate } from '@/lib/entitlement-ui'
 import { SESSION_LOCK_REASON } from '@/lib/lock-reason'
@@ -76,6 +81,9 @@ import { openWorkspaceTab } from '@/lib/workspace-navigation'
 import { WINDOW_NAMES } from '../../../../shared/window-names'
 
 const LANGUAGES = CAPTION_LANGUAGES
+
+const CAPTION_OUTPUT_OPTIONS: SegmentedControlOption<CaptionsOutputs>[] =
+  CAPTIONS_OUTPUT_OPTIONS.map(({ value, label }) => ({ value, label }))
 
 const CAPTION_TEXT_SIZE_OPTIONS: SegmentedControlOption<CaptionTextSize>[] = [
   { value: 's', label: 'Small' },
@@ -196,7 +204,7 @@ export function CaptionsControls(): ReactElement {
 
   return (
     <PanelSection
-      description="Transcribe your microphone during a recording or livestream. On a livestream, captions need 30 fps or less, and one stream quality when you also record."
+      description={CAPTIONS_PANEL_DESCRIPTION}
       icon={CaptionsIcon}
       title="Live captions"
     >
@@ -268,8 +276,27 @@ export function CaptionsControls(): ReactElement {
           </Alert>
         ) : null}
 
-        {/* What captions listen to and where they show belong to Sources and
-            Scene (D-27): these rows say it and open the page. */}
+        {/* The one choice beside the one switch (owner, 2026-11-20): the
+            live stream always, the recording too if picked. A scene only
+            places the bar; nothing else turns captions on or off. */}
+        <Field>
+          <FieldLabel>Show captions on</FieldLabel>
+          <SegmentedControl
+            className="w-full"
+            data-testid="captions-outputs"
+            disabled={locked || isSessionActive}
+            disabledReason={!locked && isSessionActive ? CAPTIONS_OUTPUTS_LOCK_REASON : undefined}
+            options={CAPTION_OUTPUT_OPTIONS}
+            value={captions.burnTarget}
+            onValueChange={(burnTarget) => patchCaptions({ burnTarget })}
+          />
+          <FieldDescription>
+            {captionsOutputsDescription(captions.burnTarget, verticalLegArmed)}
+          </FieldDescription>
+        </Field>
+
+        {/* What captions listen to and where the bar sits belong to Sources
+            and Scene (D-27): these rows say it and open the page. */}
         <GroupedList aria-label="Captions on other pages" data-testid="captions-elsewhere">
           <NavigableRow
             icon={MicrophoneIcon}
@@ -290,13 +317,6 @@ export function CaptionsControls(): ReactElement {
             <NavigableRow icon={CaptionsIcon} label="Allowance" value={allowance} />
           ) : null}
         </GroupedList>
-        {verticalLegArmed ? (
-          <FieldDescription>
-            A vertical destination shares the recording picture with the horizontal stream, so
-            captions on stream are in the recording too.
-          </FieldDescription>
-        ) : null}
-
         <Field>
           <FieldContent>
             <FieldTitle>Style</FieldTitle>

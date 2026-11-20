@@ -117,7 +117,9 @@ try {
 
   fake.state.realtimeAvailable = false
   fake.state.realtimeFailureCode = 'captions-realtime-disabled'
-  await ensureCaptionsOnBothOutputs(backend)
+  // One switch (owner, 2026-11-20): the seeded Live captions settings alone
+  // put captions on the stream; the scene's captions item is never touched,
+  // so a pass proves no second gate exists.
   await seedRendererCaptionsProfile(smoke)
   await waitForCaptionStatus(backend, (status) => {
     return status.state === 'idle' && status.desiredEnabled === false
@@ -606,34 +608,6 @@ try {
 }
 if (captionsUnavailableReason) {
   console.log(captionsSkipLine('Captions live smoke', 'every check', captionsUnavailableReason))
-}
-
-/** Plan 164 D14: the captions item's two switches are the one home of the
- * burn target. The renderer derives `captions.burnTarget` from them after
- * every load, so a seeded `both` reads back as the default layout's `stream`.
- * Both switches go on through the backend, written until the layout reads
- * back the same twice in a row (the renderer pushes its own copy at start). */
-async function ensureCaptionsOnBothOutputs(ws) {
-  let steady = 0
-  let last = null
-  for (let attempt = 0; attempt < 20 && steady < 2; attempt += 1) {
-    last = await request(ws, timeoutMs, 'overlays.layout.get', {})
-    if (last?.captions?.showOnStream === true && last?.captions?.showInRecording === true) {
-      steady += 1
-    } else {
-      steady = 0
-      await request(ws, timeoutMs, 'overlays.layout.set', {
-        ...last,
-        captions: { ...last?.captions, showOnStream: true, showInRecording: true }
-      })
-    }
-    await sleep(750)
-  }
-  if (steady < 2) {
-    throw new Error(
-      `The overlay layout would not hold both captions switches: ${JSON.stringify(last?.captions)}`
-    )
-  }
 }
 
 async function enableCaptionsMidSession(smoke) {

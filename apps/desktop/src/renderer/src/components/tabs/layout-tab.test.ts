@@ -82,6 +82,28 @@ function renderSection(
 
 const OFF_LINE = "Off. Viewers don't see your avatar."
 
+// One switch (owner, 2026-11-20): Live captions in Captions turns captions
+// on; a scene only places the bar, so the captions item has no switch here.
+describe('the Captions item (one switch)', () => {
+  it('has no per-scene switch, says Live captions, and opens Captions', () => {
+    const off = renderSection('captions', { showOnStream: false, showInRecording: false })
+    expect(off).toContain('data-videorc-overlay-inspector="captions"')
+    expect(switches(off)).toHaveLength(0)
+    expect(off).not.toContain('Show on stream')
+    expect(off).not.toContain('Show in recording')
+    expect(off).toMatch(/Live captions<\/span>[^]*>Off</)
+    expect(off).toContain('Turning captions on, style and text size live in Captions.')
+    // The snaps stay: the scene still places the bar.
+    expect(snaps(off).length).toBeGreaterThan(0)
+    expect(renderSection('captions', { showOnStream: true, showInRecording: false })).toContain(
+      'On, live stream only'
+    )
+    expect(renderSection('captions', { showOnStream: true, showInRecording: true })).toContain(
+      'On, live stream and recording'
+    )
+  })
+})
+
 // Plan 215 G (D5): the chat box is an overlay item like Highlight and
 // Captions, with the same two switches, off by default.
 describe('the Chat item (plan 215 G)', () => {

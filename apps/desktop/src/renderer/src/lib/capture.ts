@@ -106,11 +106,23 @@ export type SettingsState = {
 
 export type CaptionBurnTarget = 'off' | 'stream' | 'recording' | 'both'
 
+/**
+ * Where Live captions go while they are on (owner, 2026-11-20): the live
+ * stream always, and the recording too when the streamer picks it. The
+ * Captions tab is the one home of both the switch and this choice; a scene
+ * only places the bar. It rides the wire as `burnTarget`, so the backend's
+ * caption legs keep their shape, but `off` and `recording` are never saved.
+ */
+export type CaptionsOutputs = Extract<CaptionBurnTarget, 'stream' | 'both'>
+
 export type CaptionsCaptureSettings = {
-  /** Explicit, persisted consent. Audio is uploaded only during capture sessions. */
+  /**
+   * Explicit, persisted consent, and the one switch that puts captions on the
+   * stream. Audio is uploaded only during capture sessions.
+   */
   enabled: boolean
-  /** Which output legs the LIVE caption bar burns into (R1). */
-  burnTarget: CaptionBurnTarget
+  /** The live stream only, or the live stream and the recording. */
+  burnTarget: CaptionsOutputs
   styleId: CaptionStyleId
   language: string
   styleRevision: number
@@ -1522,26 +1534,35 @@ export function defaultCaptionsCaptureSettings(): CaptionsCaptureSettings {
   }
 }
 
-const CAPTION_BURN_TARGETS: CaptionBurnTarget[] = ['off', 'stream', 'recording', 'both']
 const CAPTION_STYLE_IDS: CaptionStyleId[] = ['classic', 'glass', 'lower-third', 'high-contrast']
 
+/**
+ * The saved caption target after the one-switch change (owner, 2026-11-20).
+ * Until then a scene's captions switches decided the target, so `off` (both
+ * switches off) or `recording` (stream switch off) could sit beside Live
+ * captions on and keep captions off the stream. Now turning Live captions on
+ * puts them on the stream, so the old scene flag is read once and dropped:
+ * a saved recording copy (`recording`, `both`) keeps the recording, and
+ * everything else (`off`, `stream`, a pre-R1 `burnInEnabled`, garbage) is
+ * the live stream only. Pure and idempotent: it runs on every load.
+ */
+export function captionsOutputsFromSaved(saved: unknown): CaptionsOutputs {
+  return saved === 'both' || saved === 'recording' ? 'both' : 'stream'
+}
+
 export function normalizeCaptionsCaptureSettings(
-  loaded: (Partial<CaptionsCaptureSettings> & { burnInEnabled?: boolean }) | undefined
+  loaded:
+    | (Partial<Omit<CaptionsCaptureSettings, 'burnTarget'>> & {
+        burnTarget?: unknown
+        burnInEnabled?: boolean
+      })
+    | undefined
 ): CaptionsCaptureSettings {
   const defaults = defaultCaptionsCaptureSettings()
-  // Pre-R1 configs carried a boolean; true meant the stream leg.
-  const migrated: CaptionBurnTarget | undefined =
-    loaded?.burnTarget === undefined && typeof loaded?.burnInEnabled === 'boolean'
-      ? loaded.burnInEnabled
-        ? 'stream'
-        : 'off'
-      : undefined
   return {
     // Missing consent is always false. Never infer permission from legacy burn-in.
     enabled: loaded?.enabled === true,
-    burnTarget: CAPTION_BURN_TARGETS.includes(loaded?.burnTarget as CaptionBurnTarget)
-      ? (loaded?.burnTarget as CaptionBurnTarget)
-      : (migrated ?? (loaded ? 'off' : defaults.burnTarget)),
+    burnTarget: captionsOutputsFromSaved(loaded?.burnTarget),
     // A real legacy captions object had the single Glass renderer. Preserve it;
     // brand-new profiles come from defaultCaptionsCaptureSettings (Classic).
     styleId: CAPTION_STYLE_IDS.includes(loaded?.styleId as CaptionStyleId)

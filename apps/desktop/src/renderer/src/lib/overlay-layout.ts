@@ -281,12 +281,23 @@ export function overlayLegPlan(
   }
 }
 
+/**
+ * The items whose two layout switches decide where they show (Rust's
+ * `OVERLAY_SWITCHED_ITEMS`). Not the captions: Live captions and its outputs
+ * in the Captions tab alone put them on the stream (owner, 2026-11-20); the
+ * layout only places the bar, and the captions item's saved switches are
+ * never read.
+ */
+export const OVERLAY_SWITCHED_ITEMS: readonly OverlayItem[] = OVERLAY_ITEMS.filter(
+  (item) => item !== 'captions'
+)
+
 /** True when any item would need a separate stream leg to honour both switches. */
 export function overlayLayoutNeedsSplit(
   shape: OverlaySessionShape,
   layout: OverlayLayout
 ): boolean {
-  return OVERLAY_ITEMS.some(
+  return OVERLAY_SWITCHED_ITEMS.some(
     (item) =>
       overlayLegPlan(
         shape.recordEnabled,
@@ -314,7 +325,7 @@ export function overlayStartNotices(
 ): OverlayStartNotice[] {
   if (!(shape.recordEnabled && shape.streamEnabled)) return []
   const notices: OverlayStartNotice[] = []
-  for (const item of OVERLAY_ITEMS) {
+  for (const item of OVERLAY_SWITCHED_ITEMS) {
     const switches = layout[item]
     if (switches.showOnStream === switches.showInRecording) continue
     const label = OVERLAY_ITEM_SENTENCE_LABELS[item]
@@ -328,7 +339,6 @@ export function overlayStartNotices(
       })
       continue
     }
-    if (item === 'captions') continue
     notices.push({
       item,
       notice: `Both the stream and the recording will include ${label}: this computer shares one encode for them.`

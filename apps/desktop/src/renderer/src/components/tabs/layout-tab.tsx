@@ -5,6 +5,7 @@ import {
   ArrowLeftIcon,
   ArrowRightIcon,
   ArrowUpIcon,
+  CaptionsIcon,
   DisplayIcon,
   LayoutIcon,
   MobileIcon
@@ -20,7 +21,9 @@ import {
 } from 'react'
 import type { ComponentProps, ReactElement, ReactNode } from 'react'
 
+import { GroupedList } from '@/components/list-row'
 import { LockAlert } from '@/components/lock-alert'
+import { NavigableRow } from '@/components/navigable-row'
 import { PanelSection } from '@/components/panel-section'
 import { dockHiddenDisplay } from '@/components/preview-stage'
 import { BannerInspector, SceneBannersSection } from '@/components/scene/banner-inspector'
@@ -123,6 +126,7 @@ import {
   SCENE_INSPECTOR_PAIR
 } from '@/lib/page-layout'
 import { openWorkspaceTab } from '@/lib/workspace-navigation'
+import { overlayLayoutForDisplay } from '@/lib/captions-output'
 import {
   GREEN_SCREEN_MODES,
   type GreenScreenMode,
@@ -606,11 +610,17 @@ export function LayoutTab(): ReactElement {
     overlayEdits.stageDraft(overlayOrientation),
     bannerEdits.stageDraft(overlayOrientation)
   ].filter((draft): draft is StageItemDraft => draft !== null)
-  const selectedOverlayLayout = selectedOverlayItem ? overlayLayout[selectedOverlayItem] : null
+  // Whether captions show is Live captions alone (owner, 2026-11-20): the
+  // stage and the inspector read it from the Captions settings, never from
+  // the captions item's old switches. Display only; writes use the saved one.
+  const displayOverlayLayout = overlayLayoutForDisplay(overlayLayout, captureConfig.captions)
+  const selectedOverlayLayout = selectedOverlayItem
+    ? displayOverlayLayout[selectedOverlayItem]
+    : null
   const patchSelectedOverlay = (
     patch: Partial<{ showOnStream: boolean; showInRecording: boolean }>
   ): void => {
-    if (!selectedOverlayItem) return
+    if (!selectedOverlayItem || selectedOverlayItem === 'captions') return
     void setOverlayLayout(withOverlaySwitches(overlayLayout, selectedOverlayItem, patch)).catch(
       reportError
     )
@@ -1052,7 +1062,7 @@ export function LayoutTab(): ReactElement {
                 // Banners first: they draw under the overlay items (D5).
                 items: [
                   ...bannerStageItems(banners, selectedBannerId, overlayOrientation, stageAspect),
-                  ...overlayStageItems(overlayLayout, overlayOrientation, buddyPicture)
+                  ...overlayStageItems(displayOverlayLayout, overlayOrientation, buddyPicture)
                 ],
                 // A source selected from elsewhere (Edit scene, plan 215 D4)
                 // wins over an overlay item, as it does in the inspector.
@@ -1891,7 +1901,7 @@ function SourceVisibilityField({
 const OVERLAY_ITEM_DESCRIPTIONS: Record<OverlayItem, string> = {
   highlight: 'The highlighted message card. Drag it on the stage or snap it to a corner.',
   captions:
-    'The caption bar. Drag its edges to set its width; style and text size live in Captions.',
+    'The caption bar. Drag its edges to set its width. Turning captions on, style and text size live in Captions.',
   buddy: 'Your avatar and its speech bubble. Drag it on the stage or snap it to a corner.',
   // Plan 215 D5: viewers' names go on stream, so the switches say so.
   chat: "The last five chat messages, with each viewer's name. Drag the box on the stage or snap it to a corner."
@@ -1951,6 +1961,43 @@ export function OverlayItemInspector({
     <div className="flex flex-col gap-4" data-videorc-overlay-inspector={item}>
       {blockedReason ? <LockAlert reason={blockedReason} /> : null}
       <p className="text-sm text-muted-foreground">{OVERLAY_ITEM_DESCRIPTIONS[item]}</p>
+      {item === 'captions' ? (
+        <CaptionsOutputsRow layout={layout} />
+      ) : (
+        <OverlayOutputSwitches blocked={blocked} item={item} layout={layout} onPatch={onPatch} />
+      )}
+      <Field>
+        <FieldLabel>
+          {orientation === 'vertical' ? 'Snap on the vertical stream' : 'Snap to'}
+        </FieldLabel>
+        {/* One-shot moves, so plain Buttons: nothing stays selected (plan 174 C-37). */}
+        <div aria-label="Snap overlay" className="flex w-full flex-wrap gap-2" role="group">
+          {OVERLAY_SNAPS.map((snap) => (
+            <Button key={snap} disabled={blocked} variant="outline" onClick={() => onSnap(snap)}>
+              {OVERLAY_SNAP_LABELS[snap]}
+            </Button>
+          ))}
+        </div>
+      </Field>
+    </div>
+  )
+}
+
+/** The two output switches of an overlay item that has them: every item but
+ * the captions, whose one switch is Live captions in Captions. */
+function OverlayOutputSwitches({
+  item,
+  layout,
+  blocked,
+  onPatch
+}: {
+  item: OverlayItem
+  layout: { showOnStream: boolean; showInRecording: boolean }
+  blocked: boolean
+  onPatch: (patch: Partial<{ showOnStream: boolean; showInRecording: boolean }>) => void
+}): ReactElement {
+  return (
+    <>
       <Field orientation="horizontal">
         <FieldContent>
           <FieldLabel htmlFor={`overlay-${item}-stream`}>Show on stream</FieldLabel>
@@ -1973,20 +2020,35 @@ export function OverlayItemInspector({
           onCheckedChange={(showInRecording) => onPatch({ showInRecording })}
         />
       </Field>
-      <Field>
-        <FieldLabel>
-          {orientation === 'vertical' ? 'Snap on the vertical stream' : 'Snap to'}
-        </FieldLabel>
-        {/* One-shot moves, so plain Buttons: nothing stays selected (plan 174 C-37). */}
-        <div aria-label="Snap overlay" className="flex w-full flex-wrap gap-2" role="group">
-          {OVERLAY_SNAPS.map((snap) => (
-            <Button key={snap} disabled={blocked} variant="outline" onClick={() => onSnap(snap)}>
-              {OVERLAY_SNAP_LABELS[snap]}
-            </Button>
-          ))}
-        </div>
-      </Field>
-    </div>
+    </>
+  )
+}
+
+/** The captions item's state in Scene (owner, 2026-11-20): a summary that
+ * opens Captions, the one home of turning captions on and of where they
+ * show. A scene only places the bar. */
+export function captionsOutputsSummary(layout: {
+  showOnStream: boolean
+  showInRecording: boolean
+}): string {
+  if (!layout.showOnStream) return 'Off'
+  return layout.showInRecording ? 'On, live stream and recording' : 'On, live stream only'
+}
+
+function CaptionsOutputsRow({
+  layout
+}: {
+  layout: { showOnStream: boolean; showInRecording: boolean }
+}): ReactElement {
+  return (
+    <GroupedList aria-label="Live captions" data-videorc-captions-outputs="">
+      <NavigableRow
+        icon={CaptionsIcon}
+        label="Live captions"
+        value={captionsOutputsSummary(layout)}
+        onNavigate={() => openWorkspaceTab('captions')}
+      />
+    </GroupedList>
   )
 }
 

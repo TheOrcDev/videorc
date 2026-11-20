@@ -282,9 +282,9 @@ fn snapped_item(
 
 impl Default for OverlayLayout {
     /// Highlight: the pre-plan-164 default corner (bottom left), on both
-    /// outputs. Captions: the bottom bar; their switches mirror the shipped
-    /// `burnTarget` default (`off`), so a fresh install burns nothing until
-    /// the streamer turns captions on. Buddy: bottom right, off for both
+    /// outputs. Captions: the bottom bar; their switches stay off and are
+    /// never read (Live captions alone puts captions on the stream, owner
+    /// 2026-11-20; the layout only places the bar). Buddy: bottom right, off for both
     /// outputs (opt-in: the streamer turns it on per output). Chat: top left,
     /// off for both outputs (plan 215 D5).
     fn default() -> Self {
@@ -583,11 +583,22 @@ pub fn overlay_session_plans(
     }
 }
 
+/// The items whose two layout switches decide where they show. Not the
+/// captions: Live captions and its outputs (`burnTarget`, the Captions tab)
+/// alone put them on the stream (owner, 2026-11-20), and their leg plan is
+/// `caption_leg_plan`'s; the layout only places the bar, and the captions
+/// item's saved switches are never read.
+pub const OVERLAY_SWITCHED_ITEMS: [OverlayItem; 3] = [
+    OverlayItem::Highlight,
+    OverlayItem::Buddy,
+    OverlayItem::Chat,
+];
+
 /// True when any item would need a separate stream leg to honour both of its
 /// switches (`force_same_profile_split` is raised for every item, not only
-/// captions; S-B2.2).
+/// captions; S-B2.2). Captions raise their own through the caption leg plan.
 pub fn overlay_layout_needs_split(shape: OverlaySessionShape, layout: &OverlayLayout) -> bool {
-    OverlayItem::ALL.iter().any(|item| {
+    OVERLAY_SWITCHED_ITEMS.iter().any(|item| {
         let layout = layout.item(*item);
         overlay_leg_plan(
             shape.record_enabled,
@@ -731,7 +742,7 @@ pub fn overlay_start_notices(
     banners: &[OverlaySwitches],
 ) -> Vec<OverlayStartNotice> {
     let mut notices = Vec::new();
-    for item in OverlayItem::ALL {
+    for item in OVERLAY_SWITCHED_ITEMS {
         let layout = layout.item(item);
         let switches = OverlaySwitches {
             show_on_stream: layout.show_on_stream,
@@ -1298,9 +1309,11 @@ mod tests {
 
         layout.highlight.show_in_recording = true;
         assert!(!overlay_layout_needs_split(shared, &layout));
-        // Captions count too: stream-only captions on a shared leg need a split.
+        // Never the captions item's saved switches (owner, 2026-11-20): a
+        // stale stream-only pair from before the one switch must not force a
+        // split; the caption leg plan raises captions' own.
         layout.captions.show_on_stream = true;
-        assert!(overlay_layout_needs_split(shared, &layout));
+        assert!(!overlay_layout_needs_split(shared, &layout));
         layout.captions.show_on_stream = false;
         // Plan 215 G: a stream-only chat box takes the same path as the
         // highlight card: the split when the topology has one, else the
@@ -1382,7 +1395,8 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![
                 "Recording will include highlights while streaming vertical.",
-                "Recording will include captions while streaming vertical.",
+                // Not the captions: their saved switches are never read, and
+                // the Captions tab says what a vertical stream does to them.
                 "The horizontal stream will include the avatar while streaming vertical.",
             ]
         );

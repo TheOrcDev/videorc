@@ -2352,16 +2352,18 @@ describe('normalizeCaptionsCaptureSettings', () => {
       position: 'bottom',
       textSize: 'm'
     })
+    // One switch (2026-11-20): nothing saved keeps captions off the stream.
     expect(normalizeCaptionsCaptureSettings({ burnInEnabled: false })).toEqual({
       enabled: false,
-      burnTarget: 'off',
+      burnTarget: 'stream',
       styleId: 'glass',
       language: 'auto',
       styleRevision: 0,
       position: 'bottom',
       textSize: 'm'
     })
-    // Explicit target wins over the legacy flag; junk falls back to off.
+    // A saved recording copy keeps the recording, now beside the stream;
+    // junk falls back to the live stream only.
     expect(
       normalizeCaptionsCaptureSettings({
         burnTarget: 'recording',
@@ -2371,7 +2373,7 @@ describe('normalizeCaptionsCaptureSettings', () => {
       })
     ).toEqual({
       enabled: false,
-      burnTarget: 'recording',
+      burnTarget: 'both',
       styleId: 'glass',
       language: 'auto',
       styleRevision: 0,
@@ -2380,7 +2382,7 @@ describe('normalizeCaptionsCaptureSettings', () => {
     })
     expect(normalizeCaptionsCaptureSettings({ burnTarget: 'sideways' as never })).toEqual({
       enabled: false,
-      burnTarget: 'off',
+      burnTarget: 'stream',
       styleId: 'glass',
       language: 'auto',
       styleRevision: 0,
@@ -2410,6 +2412,42 @@ describe('normalizeCaptionsCaptureSettings', () => {
       position: 'top',
       textSize: 's'
     })
+  })
+})
+
+// Owner, 2026-11-20: "If we turn on live captions, we turn on live
+// captions." Until then a scene's captions switches set the saved target, so
+// Live captions on could sit beside `off` (scene hid captions) or
+// `recording` (scene kept them off the stream). The old flag is read once and
+// dropped: Live captions on always means the live stream.
+describe('the one-switch migration of the saved caption target', () => {
+  it('turns every saved target into stream or both, keeping a recording copy', async () => {
+    const { captionsOutputsFromSaved } = await import('./capture')
+    expect(captionsOutputsFromSaved('off')).toBe('stream')
+    expect(captionsOutputsFromSaved('stream')).toBe('stream')
+    expect(captionsOutputsFromSaved('recording')).toBe('both')
+    expect(captionsOutputsFromSaved('both')).toBe('both')
+    expect(captionsOutputsFromSaved(undefined)).toBe('stream')
+    expect(captionsOutputsFromSaved(42)).toBe('stream')
+  })
+
+  it('puts captions on the stream for a streamer whose scene hid them', async () => {
+    const { normalizeCaptionsCaptureSettings } = await import('./capture')
+    const hidden = normalizeCaptionsCaptureSettings({ enabled: true, burnTarget: 'off' })
+    expect(hidden).toMatchObject({ enabled: true, burnTarget: 'stream' })
+    const recordingOnly = normalizeCaptionsCaptureSettings({
+      enabled: true,
+      burnTarget: 'recording'
+    })
+    expect(recordingOnly).toMatchObject({ enabled: true, burnTarget: 'both' })
+    // Idempotent: a second load changes nothing.
+    expect(normalizeCaptionsCaptureSettings(hidden)).toEqual(hidden)
+    expect(normalizeCaptionsCaptureSettings(recordingOnly)).toEqual(recordingOnly)
+  })
+
+  it('never turns captions on by itself: consent stays as saved', async () => {
+    const { normalizeCaptionsCaptureSettings } = await import('./capture')
+    expect(normalizeCaptionsCaptureSettings({ burnTarget: 'both' }).enabled).toBe(false)
   })
 })
 
