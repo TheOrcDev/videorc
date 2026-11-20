@@ -126,3 +126,34 @@ describe('New passphrase (plan 255)', () => {
     expect(byTestId('srt-input-renew-dialog')!.textContent).not.toContain(reason)
   })
 })
+
+describe('SRT Camera port field', () => {
+  it('keeps a refused port in the field until it is corrected or Escape', async () => {
+    const set = vi.fn(async (): Promise<SrtInputResult> => ({ ok: true }))
+    const controls: SrtInputControls = {
+      state,
+      stateRef: { current: state },
+      connected: true,
+      set,
+      renewPassphrase: async () => ({ ok: true })
+    }
+    await act(async () =>
+      root.render(createElement(SrtCameraFieldsView, { controls, onCameraListChanged: () => {} }))
+    )
+    const input = byTestId('srt-input-port') as HTMLInputElement
+    const key = (name: string): void => {
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: name, bubbles: true }))
+    }
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(input, '22')
+      input.dispatchEvent(new Event('input', { bubbles: true }))
+    })
+    await act(async () => key('Enter'))
+    expect(input.value).toBe('22')
+    expect(input.getAttribute('aria-invalid')).toBe('true')
+    expect(set).not.toHaveBeenCalled()
+    await act(async () => key('Escape'))
+    expect(input.value).toBe('45678')
+    expect(input.getAttribute('aria-invalid')).toBeNull()
+  })
+})

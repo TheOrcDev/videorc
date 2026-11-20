@@ -8,6 +8,7 @@ import { useStudioCore } from '@/hooks/use-studio'
 import { OPEN_HEALTH_LABEL, openHealth } from '@/lib/health-door'
 import { sourcePermissionAlerts, type SourcePermissionAlert } from '@/lib/source-permissions'
 import { unknownDeviceWarnings } from '@/lib/source-status'
+import { isSrtCameraId } from '@/lib/srt-input-view'
 import {
   isMediaAccessSnapshotReady,
   systemAccessAction,
@@ -148,7 +149,11 @@ export function SourcePermissionAlerts({
           })
         }
       : undefined,
-    camera: media('camera', Boolean(captureConfig.sources.cameraId)),
+    // Plan 255: the SRT Camera is a network stream; it needs no camera grant.
+    camera: media(
+      'camera',
+      Boolean(captureConfig.sources.cameraId) && !isSrtCameraId(captureConfig.sources.cameraId)
+    ),
     microphone: media('microphone', Boolean(captureConfig.sources.microphoneId))
   })
 

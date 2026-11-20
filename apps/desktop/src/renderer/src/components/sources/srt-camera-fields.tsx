@@ -139,12 +139,14 @@ function PortRow({
   const [refused, setRefused] = useState<string | null>(null)
   const commit = (): void => {
     if (draft === null) return
-    setDraft(null)
     const parsed = parseSrtPort(draft)
+    // A refused port stays in the field, beside its reason, until it is
+    // corrected or Escape puts the saved one back.
     if (parsed.kind === 'refused') {
       setRefused(parsed.message)
       return
     }
+    setDraft(null)
     setRefused(null)
     if (parsed.port !== port) onCommit(parsed.port)
   }
