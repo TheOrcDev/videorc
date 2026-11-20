@@ -5814,7 +5814,7 @@ pub struct VirtualCameraPlatformReportParams {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum SrtInputConnection {
-    Cable,
+    CableOrThisComputer,
     #[default]
     Wifi,
     Internet,

@@ -55,7 +55,7 @@ impl SrtInputSettings {
 /// larger of the two ends' values, so this is a floor for the sender.
 pub fn connection_latency_ms(connection: SrtInputConnection) -> u32 {
     match connection {
-        SrtInputConnection::Cable => 0,
+        SrtInputConnection::CableOrThisComputer => 0,
         SrtInputConnection::Wifi => 120,
         SrtInputConnection::Internet => 500,
     }
@@ -164,7 +164,7 @@ pub mod tests {
         let on = SrtInputSettings {
             enabled: true,
             port: 9100,
-            connection: SrtInputConnection::Cable,
+            connection: SrtInputConnection::CableOrThisComputer,
         };
         save_settings(&database, &on).unwrap();
         assert_eq!(load_settings(&database).unwrap(), on);
@@ -218,7 +218,10 @@ pub mod tests {
 
     #[test]
     fn srt_connection_maps_to_its_latency() {
-        assert_eq!(connection_latency_ms(SrtInputConnection::Cable), 0);
+        assert_eq!(
+            connection_latency_ms(SrtInputConnection::CableOrThisComputer),
+            0
+        );
         assert_eq!(connection_latency_ms(SrtInputConnection::Wifi), 120);
         assert_eq!(connection_latency_ms(SrtInputConnection::Internet), 500);
     }

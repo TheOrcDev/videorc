@@ -4565,7 +4565,7 @@ const virtualCameraSetParamsSchema = objectSchema(
   { allowUnknown: false }
 ) as RuntimeSchema<VirtualCameraSetParams>
 // Plan 250: the SRT input setting and its camera's status.
-const srtInputConnectionSchema = enumSchema(['cable', 'wifi', 'internet'])
+const srtInputConnectionSchema = enumSchema(['cableOrThisComputer', 'wifi', 'internet'])
 const srtInputPortSchema = numberSchema({ integer: true, min: 1024, max: 65535 })
 const srtCameraStatusSchema = objectSchema(
   {

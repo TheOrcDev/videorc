@@ -281,7 +281,7 @@ mod tests {
             supported,
             enabled,
             port: 9100,
-            connection: SrtInputConnection::Cable,
+            connection: SrtInputConnection::CableOrThisComputer,
             latency_ms: 40,
             passphrase: "p".repeat(32),
             camera_id: SRT_CAMERA_ID.to_string(),

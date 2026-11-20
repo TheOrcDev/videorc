@@ -4831,7 +4831,7 @@ export interface VirtualCameraStatus {
 export type VirtualCameraSource = 'room-program-preview' | 'room-program-paused'
 
 /** Plan 250 D11: how the sender reaches this computer; it sets the SRT receive latency. */
-export type SrtInputConnection = 'cable' | 'wifi' | 'internet'
+export type SrtInputConnection = 'cableOrThisComputer' | 'wifi' | 'internet'
 
 /** What the SRT Camera shows (plan 250 D7, D8, D12). */
 export type SrtCameraSignal = 'waiting' | 'receiving' | 'holding' | 'unsupportedCodec'

@@ -13,7 +13,7 @@ The SRT Camera turns an SRT stream from another app or device into a camera
    - this computer's address and the **Port** (9000 by default);
    - the **Passphrase** (Copy). Videorc refuses a sender without it, and
      the stream is encrypted;
-   - the latency, through **Connection**: Cable or Ethernet 0 ms, Wi-Fi
+   - the latency, through **Connection**: Cable or this computer 0 ms, Wi-Fi
      120 ms, Internet 500 ms. SRT uses the larger of the two ends' values.
 4. Use the camera in a scene, like any camera.
 

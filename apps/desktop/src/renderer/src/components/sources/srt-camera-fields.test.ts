@@ -51,12 +51,12 @@ describe('SRT Camera fields on the Camera row (plan 250, option B)', () => {
   })
 
   it('show the port, the passphrase with Copy and New passphrase, the Connection and the lip-sync note', () => {
-    const markup = render(state({ connection: 'cable', port: 9100 }))
+    const markup = render(state({ connection: 'cableOrThisComputer', port: 9100 }))
     expect(markup).toContain('value="9100"')
     expect(markup).toContain('Abcdefghijklmnopqrstuvwxyz012345')
     expect(copyButton(markup)).not.toMatch(/^<button[^>]*\sdisabled=""/)
     expect(markup).toContain('New passphrase')
-    expect(markup).toContain('Cable or Ethernet · 0 ms')
+    expect(markup).toContain('Cable or this computer · 0 ms')
     expect(markup).toContain(
       'This camera arrives late. Set the microphone sync offset in the audio mixer to match.'
     )

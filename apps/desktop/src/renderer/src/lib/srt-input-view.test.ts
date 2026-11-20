@@ -79,7 +79,7 @@ describe('SRT input view (plan 250)', () => {
 
   it('names each Connection with its latency (D11)', () => {
     expect(SRT_CONNECTION_OPTIONS).toEqual([
-      { value: 'cable', label: 'Cable or Ethernet · 0 ms' },
+      { value: 'cableOrThisComputer', label: 'Cable or this computer · 0 ms' },
       { value: 'wifi', label: 'Wi-Fi · 120 ms' },
       { value: 'internet', label: 'Internet · 500 ms' }
     ])

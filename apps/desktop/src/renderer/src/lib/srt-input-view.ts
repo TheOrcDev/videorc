@@ -26,7 +26,7 @@ export const SRT_PORT_REFUSED = 'Choose a port from 1024 to 65535.'
 
 /** D11: a Connection, never a number; each label shows its latency. */
 export const SRT_CONNECTION_OPTIONS: ReadonlyArray<{ value: SrtInputConnection; label: string }> = [
-  { value: 'cable', label: 'Cable or Ethernet · 0 ms' },
+  { value: 'cableOrThisComputer', label: 'Cable or this computer · 0 ms' },
   { value: 'wifi', label: 'Wi-Fi · 120 ms' },
   { value: 'internet', label: 'Internet · 500 ms' }
 ]
