@@ -94,15 +94,18 @@ pnpm release:candidate:verify:windows
       `VIDEORC_RELEASE_UPLOAD_S3_*`, `VIDEORC_DOWNLOAD_S3_*`,
       `VIDEORC_WINDOWS_SIGNING_*` and `AZURE_*` variable with the
       `Get-ChildItem Env:` block in runbook section 3. [S1]
-- [ ] 2.4 Installer hash and byte size match the manifest. [S2, Candidate
-      Identity]
+- [ ] 2.4 Installer hash and byte size match the manifest. The download puts
+      the installer in `apps\desktop\release` (or in `VIDEORC_RELEASE_DIR` if
+      you set it), so point `$installer` there and use it for 2.4 to 2.6.
+      [S2, Candidate Identity]
 
 ```powershell
-Get-FileHash -Algorithm SHA256 .\Videorc-*-win-x64.exe | Format-List
-(Get-Item .\Videorc-*-win-x64.exe).Length
+$installer = (Get-Item .\apps\desktop\release\Videorc-*-win-x64.exe).FullName
+Get-FileHash -Algorithm SHA256 $installer | Format-List
+(Get-Item $installer).Length
 ```
 
-- [ ] 2.5 Signature: `Get-AuthenticodeSignature` on the installer shows Valid
+- [ ] 2.5 Signature: `Get-AuthenticodeSignature $installer` shows Valid
       and the exact publisher, and `signtool verify /pa /all /v` shows a
       trusted timestamp. Unsigned, NotSigned, UnknownError, another publisher
       or no timestamp is an automatic FAIL. [S2, Signing]
@@ -112,7 +115,7 @@ Get-FileHash -Algorithm SHA256 .\Videorc-*-win-x64.exe | Format-List
 
 ```powershell
 Get-MpComputerStatus | Select-Object AMEngineVersion,AntivirusSignatureVersion,AntivirusSignatureLastUpdated,RealTimeProtectionEnabled
-Start-MpScan -ScanType CustomScan -ScanPath .\Videorc-*-win-x64.exe
+Start-MpScan -ScanType CustomScan -ScanPath $installer
 Get-MpThreatDetection
 ```
 
@@ -250,7 +253,9 @@ Evidence: the rollback and default-deny row of Signing, Installer, And Updates.
 
 ## Phase 8: Update from the prior Alpha to the candidate
 
-- [ ] 8.1 Start the prior Alpha on the pilot feed from PowerShell. [S1]
+- [ ] 8.1 Quit every running Videorc process, then start the prior Alpha on
+      the pilot feed from PowerShell. A running copy holds the single-instance
+      lock and never sees the pilot variables. [S1]
 
 ```powershell
 $env:VIDEORC_WINDOWS_PILOT_UPDATE = '1'
