@@ -95,3 +95,37 @@ export class RemoteAudioAttachments<Element extends AudioElementLike> {
     return [...this.#attached.keys()]
   }
 }
+
+/** What guest captions need of one remote participant's microphone. */
+export interface GuestMicrophone<Track> {
+  identity: string
+  /** The Microphone-source publication; screen-share audio is never one. */
+  microphone: { track: Track | null; subscribed: boolean; muted: boolean } | null
+}
+
+/**
+ * Guest captions: the microphone tracks whose words may go on air as
+ * captions. Only guests on stage (their voices are in the program), only a
+ * subscribed microphone that is not muted, never the host, the runner's
+ * return, LiveKit's recorder or a screen's audio. Pure, so the rule is a
+ * unit test.
+ */
+export function guestCaptionTracks<Track>(
+  people: readonly GuestMicrophone<Track>[],
+  onStage: readonly string[]
+): Track[] {
+  const tracks: Track[] = []
+  for (const person of people) {
+    if (
+      person.identity.startsWith('host:') ||
+      isRunnerIdentity(person.identity) ||
+      isRecorderIdentity(person.identity) ||
+      !onStage.includes(person.identity)
+    )
+      continue
+    const microphone = person.microphone
+    if (!microphone?.track || !microphone.subscribed || microphone.muted) continue
+    tracks.push(microphone.track)
+  }
+  return tracks
+}
