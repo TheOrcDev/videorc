@@ -86,7 +86,9 @@ pnpm release:candidate:verify:windows
 
 - [ ] 2.2 Derive the two expected hashes from the verified `win-unpacked`
       copy, with the `Get-FileHash` and `packagedAppPayloadIdentity` commands
-      exactly as written in runbook section 3. Set
+      exactly as written in runbook section 3. If you set
+      `VIDEORC_RELEASE_DIR`, use that folder in place of
+      `apps\desktop\release` in those commands. Set
       `VIDEORC_WINDOWS_ACCEPTANCE_EXPECTED_APP_SHA256` and
       `VIDEORC_WINDOWS_ACCEPTANCE_EXPECTED_PAYLOAD_SHA256`. Never take either
       from the installed copy. [S1]
@@ -95,12 +97,16 @@ pnpm release:candidate:verify:windows
       `VIDEORC_WINDOWS_SIGNING_*` and `AZURE_*` variable with the
       `Get-ChildItem Env:` block in runbook section 3. [S1]
 - [ ] 2.4 Installer hash and byte size match the manifest. The download puts
-      the installer in `apps\desktop\release` (or in `VIDEORC_RELEASE_DIR` if
-      you set it), so point `$installer` there and use it for 2.4 to 2.6.
+      the installer in `apps\desktop\release`, or in `VIDEORC_RELEASE_DIR` if
+      you set it. The block below picks that folder, stops unless it holds
+      exactly one installer, and sets `$installer` for 2.4 to 2.6.
       [S2, Candidate Identity]
 
 ```powershell
-$installer = (Get-Item .\apps\desktop\release\Videorc-*-win-x64.exe).FullName
+$releaseDir = if ($env:VIDEORC_RELEASE_DIR) { $env:VIDEORC_RELEASE_DIR } else { '.\apps\desktop\release' }
+$candidates = @(Get-ChildItem $releaseDir -Filter 'Videorc-*-win-x64.exe')
+if ($candidates.Count -ne 1) { throw "Expected one installer in $releaseDir, found $($candidates.Count)." }
+$installer = $candidates[0].FullName
 Get-FileHash -Algorithm SHA256 $installer | Format-List
 (Get-Item $installer).Length
 ```
