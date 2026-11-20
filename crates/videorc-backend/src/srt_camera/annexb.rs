@@ -22,17 +22,21 @@ impl ParameterSets {
         }
     }
 
-    /// Keeps the newest of each set from `other`.
-    pub fn update(&mut self, other: &ParameterSets) {
-        if other.vps.is_some() {
-            self.vps.clone_from(&other.vps);
+    /// Keeps the newest of each set from `other`; true when one changed.
+    pub fn update(&mut self, other: ParameterSets) -> bool {
+        fn keep(current: &mut Option<Vec<u8>>, new: Option<Vec<u8>>) -> bool {
+            match new {
+                Some(new) if current.as_ref() != Some(&new) => {
+                    *current = Some(new);
+                    true
+                }
+                _ => false,
+            }
         }
-        if other.sps.is_some() {
-            self.sps.clone_from(&other.sps);
-        }
-        if other.pps.is_some() {
-            self.pps.clone_from(&other.pps);
-        }
+        let vps = keep(&mut self.vps, other.vps);
+        let sps = keep(&mut self.sps, other.sps);
+        let pps = keep(&mut self.pps, other.pps);
+        vps || sps || pps
     }
 }
 
@@ -46,30 +50,32 @@ pub struct ParsedAccessUnit {
 }
 
 /// The NAL units of an Annex B byte stream, start codes and trailing zero
-/// bytes removed.
-pub fn split_nal_units(data: &[u8]) -> Vec<&[u8]> {
-    let mut starts = Vec::new();
-    let mut index = 0;
-    while index + 3 <= data.len() {
-        if data[index] == 0 && data[index + 1] == 0 && data[index + 2] == 1 {
-            starts.push(index + 3);
-            index += 3;
-        } else {
-            index += 1;
+/// bytes removed. Found one at a time: a unit of start codes alone keeps
+/// nothing per code.
+pub fn split_nal_units(data: &[u8]) -> impl Iterator<Item = &[u8]> {
+    let mut next = after_start_code(data, 0);
+    std::iter::from_fn(move || {
+        loop {
+            let start = next?;
+            next = after_start_code(data, start);
+            let end = next.map_or(data.len(), |following| following - 3);
+            let mut unit = &data[start..end];
+            while let Some((&0, rest)) = unit.split_last() {
+                unit = rest;
+            }
+            if !unit.is_empty() {
+                return Some(unit);
+            }
         }
-    }
-    let mut units = Vec::with_capacity(starts.len());
-    for (position, &start) in starts.iter().enumerate() {
-        let end = starts.get(position + 1).map_or(data.len(), |next| next - 3);
-        let mut unit = &data[start..end];
-        while let Some((&0, rest)) = unit.split_last() {
-            unit = rest;
-        }
-        if !unit.is_empty() {
-            units.push(unit);
-        }
-    }
-    units
+    })
+}
+
+/// The index just past the first start code at or after `from`.
+fn after_start_code(data: &[u8], from: usize) -> Option<usize> {
+    data.get(from..)?
+        .windows(3)
+        .position(|window| window == [0, 0, 1])
+        .map(|position| from + position + 3)
 }
 
 enum NalKind {
@@ -144,8 +150,20 @@ mod tests {
     fn srt_annexb_splits_three_and_four_byte_start_codes() {
         let data = annexb(&[&[0x67, 1, 2], &[0x68, 3], &[0x65, 4, 5, 6]]);
         assert_eq!(
-            split_nal_units(&data),
+            split_nal_units(&data).collect::<Vec<_>>(),
             vec![&[0x67, 1, 2][..], &[0x68, 3][..], &[0x65, 4, 5, 6][..]]
+        );
+    }
+
+    #[test]
+    fn srt_annexb_start_codes_alone_give_no_units() {
+        let data = [0, 0, 1].repeat(1000);
+        assert_eq!(split_nal_units(&data).count(), 0);
+        let mut data = [0, 0, 1, 0, 0, 0, 1].repeat(3);
+        data.extend_from_slice(&[0, 0, 1, 0x65, 7, 0, 0]);
+        assert_eq!(
+            split_nal_units(&data).collect::<Vec<_>>(),
+            vec![&[0x65, 7][..]]
         );
     }
 
@@ -191,11 +209,11 @@ mod tests {
             sps: Some(vec![2]),
             pps: None,
         };
-        kept.update(&ParameterSets {
+        assert!(kept.update(ParameterSets {
             vps: None,
             sps: Some(vec![3]),
             pps: Some(vec![4]),
-        });
+        }));
         assert_eq!(
             kept,
             ParameterSets {
@@ -204,5 +222,11 @@ mod tests {
                 pps: Some(vec![4])
             }
         );
+        // The same sets again change nothing.
+        assert!(!kept.update(ParameterSets {
+            vps: Some(vec![1]),
+            sps: Some(vec![3]),
+            pps: None,
+        }));
     }
 }

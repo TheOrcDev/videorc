@@ -220,6 +220,16 @@ pub fn load_saved(
     }
 }
 
+/// One change at a time, from its first read to `configure`: two clients
+/// racing must not bring back a renewed passphrase or a port turned off.
+static WRITER: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn writer() -> std::sync::MutexGuard<'static, ()> {
+    WRITER
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 /// `srtInput.set`.
 pub fn apply(
     database: &crate::storage::Database,
@@ -229,6 +239,7 @@ pub fn apply(
     if !supported() {
         anyhow::bail!("The SRT input isn't available on this computer yet.");
     }
+    let _writer = writer();
     let next = settings::load_settings(database)?.with(params)?;
     // The passphrase first: a setting that could not get one is never saved.
     // Turning the input off needs none, so a failing secret store can't keep
@@ -250,6 +261,7 @@ pub fn renew(
     if !supported() {
         anyhow::bail!("The SRT input isn't available on this computer yet.");
     }
+    let _writer = writer();
     let saved = settings::load_settings(database)?;
     Ok(configure(saved, settings::renew_passphrase(vault)?))
 }

@@ -198,6 +198,7 @@ impl<D: FrameDecoder> Receiver<D> {
             }
             ListenerEvent::Refused(refusal) => lock(shared).tracker.on_refusal(refusal, now),
             ListenerEvent::Data(bytes) => {
+                lock(shared).tracker.on_data(now);
                 let mut events = std::mem::take(&mut self.events);
                 self.demuxer.push(&bytes, &mut events);
                 for event in events.drain(..) {
@@ -210,9 +211,13 @@ impl<D: FrameDecoder> Receiver<D> {
 
     fn demuxed(&mut self, event: DemuxEvent, shared: &Shared<D::Frame>, now: Instant) {
         match event {
+            // A video stream: decoding starts at its first key frame, and the
+            // no-output deadline runs from there, never from an older stream.
+            // The decoder opens a new session if it can't take the new format.
             DemuxEvent::Video(codec) => {
                 self.parameter_sets = ParameterSets::default();
                 self.need_keyframe = true;
+                self.last_output = None;
                 lock(shared).tracker.on_video(codec);
             }
             DemuxEvent::Discontinuity => self.need_keyframe = true,
@@ -220,11 +225,12 @@ impl<D: FrameDecoder> Receiver<D> {
                 if matches!(codec, VideoCodec::Unsupported(_)) {
                     return;
                 }
-                lock(shared).tracker.on_unit(now);
-                let unit = parse_access_unit(codec, &data);
-                let previous = self.parameter_sets.clone();
-                self.parameter_sets.update(&unit.parameter_sets);
-                if previous.complete(codec) && previous != self.parameter_sets {
+                let mut unit = parse_access_unit(codec, &data);
+                let was_complete = self.parameter_sets.complete(codec);
+                let changed = self
+                    .parameter_sets
+                    .update(std::mem::take(&mut unit.parameter_sets));
+                if was_complete && changed {
                     // The sender changed its format mid-stream (D18): a new
                     // session, from the next key frame.
                     self.rebuild_decoder(now);
@@ -336,8 +342,24 @@ pub fn receive_loop<D: FrameDecoder>(
         &stop,
         &super::listen_config,
         &mut listener::run,
-        &mut std::thread::sleep,
+        &mut |delay| sleep_unless_stopped(&stop, delay),
     );
+}
+
+/// How often a wait checks `stop`, so the camera's teardown never waits
+/// out a retry delay.
+const STOP_POLL: Duration = Duration::from_millis(20);
+
+/// Sleeps for `delay`, or until `stop` is set.
+fn sleep_unless_stopped(stop: &AtomicBool, delay: Duration) {
+    let end = Instant::now() + delay;
+    while !stop.load(Ordering::Acquire) {
+        let left = end.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return;
+        }
+        std::thread::sleep(left.min(STOP_POLL));
+    }
 }
 
 type Listen<'a> = dyn FnMut(
@@ -381,6 +403,7 @@ pub fn receive_loop_with<D: FrameDecoder>(
         receiver.handle(ListenerEvent::SenderLeft, shared, Instant::now());
         if heard_listening {
             failures_in_a_row = 0;
+            last_error = None;
         }
         match result {
             Ok(()) => last_error = None,
@@ -970,6 +993,41 @@ mod tests {
     }
 
     #[test]
+    fn srt_receiver_counts_data_with_no_video_it_reads() {
+        let (mut receiver, shared, now) = accepted_receiver();
+        // Not MPEG-TS at all: no access unit ever comes out.
+        receiver.handle(ListenerEvent::Data(vec![0xab; 1316]), &shared, now);
+        assert_eq!(
+            shared.lock().unwrap().tracker.status(now, true).detail,
+            "Receiving, but no picture yet"
+        );
+    }
+
+    #[test]
+    fn srt_receiver_a_retry_wait_ends_when_the_camera_stops() {
+        // Stopped in the middle of a 10 s wait.
+        let stop = Arc::new(AtomicBool::new(false));
+        let stopper = {
+            let stop = Arc::clone(&stop);
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(100));
+                stop.store(true, Ordering::Release);
+            })
+        };
+        let started = Instant::now();
+        sleep_unless_stopped(&stop, Duration::from_secs(10));
+        stopper.join().unwrap();
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "{:?}",
+            started.elapsed()
+        );
+        let started = Instant::now();
+        sleep_unless_stopped(&AtomicBool::new(false), Duration::from_millis(60));
+        assert!(started.elapsed() >= Duration::from_millis(60));
+    }
+
+    #[test]
     fn srt_listener_retry_waits_short_and_never_more_than_2_s() {
         assert_eq!(listener_retry_delay(0), Duration::from_millis(250));
         assert_eq!(listener_retry_delay(1), Duration::from_millis(500));
@@ -1088,6 +1146,67 @@ mod tests {
                 .detail,
             "The passphrase didn't load. Turn SRT input off and on in Settings → General to try again."
         );
+    }
+
+    /// A new passphrase or port ends the running listener, the next one
+    /// opens with them, and with the input off none opens again (D4, D16).
+    #[test]
+    fn srt_receiver_listens_again_with_a_new_setting_and_never_while_off() {
+        let shared: Shared<(u32, u32)> = Arc::default();
+        let stop = AtomicBool::new(false);
+        let current = std::cell::RefCell::new((
+            1_u64,
+            ListenConfig {
+                enabled: true,
+                port: 9123,
+                latency_ms: 40,
+                passphrase: "a".repeat(32),
+            },
+        ));
+        let config = || current.borrow().clone();
+        let mut heard = Vec::new();
+        let mut listen = |settings: &ListenConfig,
+                          keep_running: &dyn Fn() -> bool,
+                          on_event: &mut dyn FnMut(ListenerEvent)|
+         -> Result<(), ListenError> {
+            heard.push((settings.port, settings.passphrase.clone()));
+            on_event(ListenerEvent::Listening);
+            let mut rounds = 0;
+            while keep_running() {
+                rounds += 1;
+                assert!(rounds < 1000, "a new setting ends the listener");
+                let mut next = current.borrow_mut();
+                next.0 += 1;
+                if heard.len() == 1 {
+                    next.1.port = 9124;
+                    next.1.passphrase = "b".repeat(32);
+                } else {
+                    next.1.enabled = false;
+                }
+            }
+            Ok(())
+        };
+        let mut waits = 0;
+        let mut sleep = |_: Duration| {
+            waits += 1;
+            if waits == 3 {
+                stop.store(true, Ordering::Release);
+            }
+        };
+        receive_loop_with(
+            Receiver::new(FakeDecoder::default()),
+            &shared,
+            &stop,
+            &config,
+            &mut listen,
+            &mut sleep,
+        );
+        assert_eq!(
+            heard,
+            vec![(9123, "a".repeat(32)), (9124, "b".repeat(32))],
+            "the second listener has the new port and passphrase, and none opens while off"
+        );
+        assert!(!shared.lock().unwrap().listening);
     }
 
     #[test]

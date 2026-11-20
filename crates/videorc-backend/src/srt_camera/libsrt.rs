@@ -14,7 +14,7 @@ pub type SrtSocket = c_int;
 pub const SRT_INVALID_SOCK: SrtSocket = -1;
 pub const SRT_ERROR: c_int = -1;
 
-/// `SRT_EASYNCRCV`: nothing to read or accept before the timeout.
+/// `SRT_EASYNCRCV`: nothing to read or accept yet.
 pub const SRT_EASYNCRCV: c_int = 6002;
 /// `SRT_REJX_OVERLOAD` (libsrt `access_control.h`): "busy", the reason a
 /// second sender is given (D14, D18).
@@ -202,7 +202,15 @@ fn load() -> Result<Api, String> {
             }
             continue;
         }
-        let api = bind(handle).map_err(|missing| format!("{path} has no {missing}"))?;
+        let api = match bind(handle) {
+            Ok(api) => api,
+            Err(missing) => {
+                // SAFETY: a handle dlopen gave, unused from here on.
+                unsafe { libc::dlclose(handle) };
+                tried.push(format!("{path} (no {missing})"));
+                continue;
+            }
+        };
         // SAFETY: plain libsrt calls; the handler is a plain function. Its
         // log is the only place libsrt says a caller had the wrong
         // passphrase: libsrt checks it after the listen callback has run.
@@ -216,6 +224,11 @@ fn load() -> Result<Api, String> {
         }
         tracing::info!("[srt-camera] loaded libsrt from {path}");
         return Ok(api);
+    }
+    if tried.is_empty() {
+        return Err(format!(
+            "no library path given ({LIBSRT_PATH_ENV} is empty)"
+        ));
     }
     Err(format!("tried {}", tried.join(", ")))
 }

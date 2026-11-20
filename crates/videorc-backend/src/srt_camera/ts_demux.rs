@@ -28,7 +28,7 @@ impl VideoCodec {
         match stream_type {
             0x1b => Some(Self::H264),
             0x24 => Some(Self::Hevc),
-            0x01 | 0x02 | 0x10 | 0x1e | 0x1f | 0x20 | 0x33 | 0x42 | 0xd1 | 0xea => {
+            0x01 | 0x02 | 0x10 | 0x1e | 0x1f | 0x20 | 0x21 | 0x32 | 0x33 | 0x42 | 0xd1 | 0xea => {
                 Some(Self::Unsupported(stream_type))
             }
             _ => None,
@@ -43,6 +43,8 @@ impl VideoCodec {
             Self::Unsupported(0x01) => "MPEG-1".to_string(),
             Self::Unsupported(0x02) => "MPEG-2".to_string(),
             Self::Unsupported(0x10) => "MPEG-4".to_string(),
+            Self::Unsupported(0x21) => "JPEG 2000".to_string(),
+            Self::Unsupported(0x32) => "JPEG XS".to_string(),
             Self::Unsupported(0x33) => "VVC".to_string(),
             Self::Unsupported(0x42) => "AVS".to_string(),
             Self::Unsupported(0xd1) => "Dirac".to_string(),
@@ -305,9 +307,14 @@ fn collect_section(
     Some(buffer.bytes[..total].to_vec())
 }
 
+/// A table that applies now, not one sent ahead for the next version.
+fn current(section: &[u8]) -> bool {
+    section[5] & 0x01 != 0
+}
+
 /// The first program's PMT PID.
 fn parse_pat(section: &[u8]) -> Option<u16> {
-    if section.first() != Some(&0x00) || section.len() < 12 {
+    if section.first() != Some(&0x00) || section.len() < 12 || !current(section) {
         return None;
     }
     let programs = section.get(8..section.len() - 4)?;
@@ -319,7 +326,7 @@ fn parse_pat(section: &[u8]) -> Option<u16> {
 
 /// The first video stream's PID and codec.
 fn parse_pmt(section: &[u8]) -> Option<(u16, VideoCodec)> {
-    if section.first() != Some(&0x02) || section.len() < 16 {
+    if section.first() != Some(&0x02) || section.len() < 16 || !current(section) {
         return None;
     }
     let end = section.len() - 4;
@@ -518,6 +525,34 @@ pub(crate) mod tests {
     fn srt_demux_finds_the_video_pid_through_pat_and_pmt() {
         let events = demux(&stream(0x24, &[(9000, vec![1, 2, 3])]));
         assert_eq!(events[0], DemuxEvent::Video(VideoCodec::Hevc));
+    }
+
+    #[test]
+    fn srt_demux_ignores_a_table_sent_ahead_for_the_next_version() {
+        let video_changes = |current_next: u8| {
+            let mut bytes = stream(0x1b, &[(10, vec![7])]);
+            let mut next = pmt(&[(0x24, VIDEO_PID + 1)]);
+            next[6] = 0xc0 | current_next;
+            bytes.extend(packet(PMT_PID, true, 1, &next));
+            demux(&bytes)
+                .iter()
+                .filter(|event| matches!(event, DemuxEvent::Video(_)))
+                .count()
+        };
+        assert_eq!(video_changes(0), 1);
+        assert_eq!(video_changes(1), 2);
+    }
+
+    #[test]
+    fn srt_demux_names_jpeg_video_as_a_codec_it_cannot_show() {
+        assert_eq!(
+            VideoCodec::from_stream_type(0x21).map(VideoCodec::label),
+            Some("JPEG 2000".to_string())
+        );
+        assert_eq!(
+            VideoCodec::from_stream_type(0x32).map(VideoCodec::label),
+            Some("JPEG XS".to_string())
+        );
     }
 
     #[test]

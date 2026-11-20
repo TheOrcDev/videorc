@@ -599,7 +599,7 @@ mod tests {
     }
 
     #[test]
-    fn srt_listener_an_accept_error_restarts_the_listener() {
+    fn srt_listener_sorts_accept_results_into_sender_none_yet_or_failed() {
         assert_eq!(accept_outcome(42, || 0), AcceptOutcome::Sender);
         assert_eq!(
             accept_outcome(libsrt::SRT_INVALID_SOCK, || libsrt::SRT_EASYNCRCV),
@@ -707,7 +707,61 @@ mod tests {
             })
     }
 
-    /// Dials `host:port` as an SRT caller; the reject code when refused.
+    /// `second_local_address`, or None to skip a test that needs it. With
+    /// `VIDEORC_REQUIRE_LIBSRT` set, a missing address fails the test
+    /// instead of skipping it unseen.
+    fn second_local_address_or_skip() -> Option<std::net::Ipv4Addr> {
+        let other = second_local_address();
+        if other.is_none() {
+            assert!(
+                std::env::var_os("VIDEORC_REQUIRE_LIBSRT").is_none(),
+                "VIDEORC_REQUIRE_LIBSRT is set, but this machine has no local IPv4 address but loopback"
+            );
+            eprintln!("this machine has no local IPv4 address but loopback; not checked");
+        }
+        other
+    }
+
+    /// A listener on its own thread until `stop`, once it is listening, and
+    /// every event it raises after that.
+    fn start_recording_listener(
+        config: ListenConfig,
+        stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) -> (
+        std::thread::JoinHandle<()>,
+        std::sync::mpsc::Receiver<ListenerEvent>,
+    ) {
+        let (send, events) = std::sync::mpsc::channel();
+        let handle = std::thread::spawn(move || {
+            let keep_running = || !stop.load(std::sync::atomic::Ordering::Acquire);
+            run(&config, &keep_running, &mut |event| {
+                let _ = send.send(event);
+            })
+            .expect("the listener opens");
+        });
+        let listening = wait_for(&events, |event| *event == ListenerEvent::Listening);
+        assert!(listening, "the listener is listening");
+        (handle, events)
+    }
+
+    /// True once an event `wanted` takes arrives, within 2 s.
+    fn wait_for(
+        events: &std::sync::mpsc::Receiver<ListenerEvent>,
+        wanted: impl Fn(&ListenerEvent) -> bool,
+    ) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while let Some(left) = deadline.checked_duration_since(Instant::now()) {
+            match events.recv_timeout(left) {
+                Ok(event) if wanted(&event) => return true,
+                Ok(_) => {}
+                Err(_) => return false,
+            }
+        }
+        false
+    }
+
+    /// Dials `host:port` as an SRT caller, unencrypted with an empty
+    /// passphrase; the reject code when refused.
     #[cfg(unix)]
     fn dial(
         api: &Api,
@@ -719,12 +773,14 @@ mod tests {
         // address and passphrase outlive each call.
         unsafe {
             let socket = (api.create_socket)();
-            set_option(
-                api,
-                socket,
-                &SocketOption::Text(libsrt::SRTO_PASSPHRASE, passphrase.to_string()),
-            )
-            .expect("the passphrase is set");
+            if !passphrase.is_empty() {
+                set_option(
+                    api,
+                    socket,
+                    &SocketOption::Text(libsrt::SRTO_PASSPHRASE, passphrase.to_string()),
+                )
+                .expect("the passphrase is set");
+            }
             let mut address: libc::sockaddr_in = std::mem::zeroed();
             #[cfg(any(target_os = "macos", target_os = "ios"))]
             {
@@ -846,8 +902,7 @@ mod tests {
         let Some(api) = real_libsrt() else {
             return;
         };
-        let Some(other) = second_local_address() else {
-            eprintln!("this machine has no local IPv4 address but loopback; not checked");
+        let Some(other) = second_local_address_or_skip() else {
             return;
         };
         let _one_at_a_time = REAL_LIBSRT.lock().unwrap_or_else(PoisonError::into_inner);
@@ -987,12 +1042,109 @@ mod tests {
         }
         stop.store(true, std::sync::atomic::Ordering::Release);
         listener.join().expect("the listener stops");
-        assert!(wrong.is_err(), "a wrong passphrase is refused");
+        assert_eq!(
+            wrong,
+            Err(SRT_REJ_BADSECRET),
+            "a wrong passphrase is refused as one"
+        );
         assert_eq!(
             *seen.lock().unwrap(),
             (1, 0),
             "the live sender was neither replaced nor dropped"
         );
+    }
+
+    /// libsrt's reject reasons a caller reads (srt.h `SRT_REJECT_REASON`).
+    const SRT_REJ_BADSECRET: c_int = 10;
+    const SRT_REJ_UNSECURE: c_int = 11;
+
+    /// D4: a caller with a wrong passphrase or none is refused, and the
+    /// camera says so (its only source is libsrt's log).
+    #[cfg(unix)]
+    #[test]
+    fn srt_listener_refuses_a_wrong_or_missing_passphrase_and_says_so() {
+        let Some(api) = real_libsrt() else {
+            return;
+        };
+        let _one_at_a_time = REAL_LIBSRT.lock().unwrap_or_else(PoisonError::into_inner);
+        let config = test_config(free_port());
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (listener, events) = start_recording_listener(config.clone(), stop.clone());
+        let wrong = dial(
+            api,
+            std::net::Ipv4Addr::LOCALHOST,
+            config.port,
+            "not-the-passphrase-of-this-test0",
+        );
+        let said = wait_for(&events, |event| {
+            *event == ListenerEvent::Refused(SrtSenderRefusal::WrongPassphrase)
+        });
+        let none = dial(api, std::net::Ipv4Addr::LOCALHOST, config.port, "");
+        let said_none = wait_for(&events, |event| {
+            *event == ListenerEvent::Refused(SrtSenderRefusal::WrongPassphrase)
+        });
+        stop.store(true, std::sync::atomic::Ordering::Release);
+        listener.join().expect("the listener stops");
+        // SAFETY: the sockets are this test's.
+        unsafe {
+            for socket in [wrong, none].into_iter().flatten() {
+                (api.close)(socket);
+            }
+        }
+        assert_eq!(
+            wrong,
+            Err(SRT_REJ_BADSECRET),
+            "a wrong passphrase is refused"
+        );
+        assert_eq!(
+            none,
+            Err(SRT_REJ_UNSECURE),
+            "a caller without one is refused"
+        );
+        assert!(said, "the camera says the passphrase was wrong");
+        assert!(said_none, "and says so for a caller without one");
+    }
+
+    /// D14: once a sender leaves, a caller from another address gets in at
+    /// once, and the camera hears the first one leave before it.
+    #[cfg(unix)]
+    #[test]
+    fn srt_listener_a_sender_that_left_frees_the_camera_for_another_address() {
+        let Some(api) = real_libsrt() else {
+            return;
+        };
+        let Some(other) = second_local_address_or_skip() else {
+            return;
+        };
+        let _one_at_a_time = REAL_LIBSRT.lock().unwrap_or_else(PoisonError::into_inner);
+        let config = test_config(free_port());
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (listener, events) = start_recording_listener(config.clone(), stop.clone());
+        let accepted = |event: &ListenerEvent| matches!(event, ListenerEvent::SenderAccepted(_));
+        let first = dial(
+            api,
+            std::net::Ipv4Addr::LOCALHOST,
+            config.port,
+            &config.passphrase,
+        )
+        .expect("the first sender is let in");
+        let first_accepted = wait_for(&events, accepted);
+        // SAFETY: the socket is this test's.
+        unsafe { (api.close)(first) };
+        // The camera hears the first sender leave, then the next one dials.
+        let left = wait_for(&events, |event| *event == ListenerEvent::SenderLeft);
+        let next = dial(api, other, config.port, &config.passphrase);
+        let next_accepted = wait_for(&events, accepted);
+        stop.store(true, std::sync::atomic::Ordering::Release);
+        listener.join().expect("the listener stops");
+        if let Ok(next) = next {
+            // SAFETY: the socket is this test's.
+            unsafe { (api.close)(next) };
+        }
+        assert!(first_accepted, "the first sender is accepted");
+        assert!(next.is_ok(), "the next sender gets in at once: {next:?}");
+        assert!(left, "the camera hears the first sender leave");
+        assert!(next_accepted, "then it accepts the next sender");
     }
 
     /// Needs libsrt (staged or Homebrew); without it there is nothing to check.

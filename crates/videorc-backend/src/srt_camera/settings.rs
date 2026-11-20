@@ -65,10 +65,16 @@ pub fn camera_name(port: u16) -> String {
     format!("SRT Camera (port {port})")
 }
 
+/// The saved setting. A port the setting would refuse (a hand-edited row)
+/// reads as the default, so the streamer can still change it in the app.
 pub fn load_settings(database: &Database) -> Result<SrtInputSettings> {
-    Ok(database
+    let mut settings = database
         .load_setting::<SrtInputSettings>(SRT_INPUT_SETTINGS_KEY)?
-        .unwrap_or_default())
+        .unwrap_or_default();
+    if settings.port < MIN_SRT_PORT {
+        settings.port = DEFAULT_SRT_PORT;
+    }
+    Ok(settings)
 }
 
 pub fn save_settings(database: &Database, settings: &SrtInputSettings) -> Result<()> {
@@ -168,6 +174,18 @@ pub mod tests {
         };
         save_settings(&database, &on).unwrap();
         assert_eq!(load_settings(&database).unwrap(), on);
+    }
+
+    #[test]
+    fn srt_settings_a_saved_privileged_port_loads_as_the_default() {
+        let database = Database::open_in_memory_for_tests();
+        let edited = SrtInputSettings {
+            enabled: true,
+            port: 80,
+            connection: SrtInputConnection::Wifi,
+        };
+        save_settings(&database, &edited).unwrap();
+        assert_eq!(load_settings(&database).unwrap().port, DEFAULT_SRT_PORT);
     }
 
     #[test]

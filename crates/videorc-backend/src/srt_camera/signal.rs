@@ -53,8 +53,8 @@ pub struct SignalTracker {
     sender_connected: bool,
     sender_session: u32,
     frames_decoded: u64,
-    /// The last access unit that could be decoded arrived then.
-    last_unit_at: Option<Instant>,
+    /// The sender's last data arrived then, video or not.
+    last_data_at: Option<Instant>,
     /// Why the receiver is not listening. Port, Stopped and Library try
     /// again by themselves (D18); NoPassphrase waits for a setting change,
     /// a renewal or a restart (see `load_saved`).
@@ -93,15 +93,17 @@ impl SignalTracker {
         }
     }
 
-    /// The sender left: the hold runs from its last frame. Its codec goes
-    /// with it, so the next sender's stream decides the still.
+    /// The sender left: the hold runs from its last frame. Its codec and its
+    /// data go with it, so the next sender's stream decides the still.
     pub fn on_sender_left(&mut self) {
         self.codec = None;
+        self.last_data_at = None;
         self.sender_connected = false;
     }
 
-    /// A new sender: its own session, frame count and frame rate.
+    /// A new sender: its own session, data, frame count and frame rate.
     pub fn on_sender_accepted(&mut self) {
+        self.last_data_at = None;
         self.refusal = None;
         self.sender_connected = true;
         self.sender_session = self.sender_session.wrapping_add(1);
@@ -131,9 +133,9 @@ impl SignalTracker {
         self.refusal = Some((refusal, now));
     }
 
-    /// An access unit in a codec Videorc decodes arrived, picture or not.
-    pub fn on_unit(&mut self, now: Instant) {
-        self.last_unit_at = Some(now);
+    /// Data from the sender arrived, picture or not.
+    pub fn on_data(&mut self, now: Instant) {
+        self.last_data_at = Some(now);
     }
 
     pub fn on_listener_failed(&mut self, trouble: ListenerTrouble) {
@@ -148,7 +150,7 @@ impl SignalTracker {
     fn data_without_picture(&self, now: Instant) -> bool {
         self.signal(now) == SrtCameraSignal::Waiting
             && self
-                .last_unit_at
+                .last_data_at
                 .is_some_and(|at| now.saturating_duration_since(at) < RECEIVING_GAP)
     }
 
@@ -463,7 +465,7 @@ mod tests {
         tracker.on_frame(start, 1920, 1080);
         // Data keeps coming, nothing decodes: never a frozen frame past 2 s.
         for step in 0..30 {
-            tracker.on_unit(start + ms(step * 100));
+            tracker.on_data(start + ms(step * 100));
         }
         let now = start + ms(2950);
         assert_eq!(tracker.picture(now), Picture::Waiting);
@@ -481,7 +483,7 @@ mod tests {
         let mut tracker = SignalTracker::new();
         tracker.on_video(VideoCodec::Hevc);
         tracker.on_sender_accepted();
-        tracker.on_unit(start);
+        tracker.on_data(start);
         for _ in 1..DECODE_FAILURES_NAMED {
             tracker.on_decode_failed();
         }
@@ -496,7 +498,7 @@ mod tests {
         tracker.on_frame(start, 1920, 1080);
         tracker.on_decode_failed();
         let later = start + ms(3000);
-        tracker.on_unit(later);
+        tracker.on_data(later);
         assert_eq!(
             tracker.status(later, true).detail,
             "Receiving, but no picture yet"
@@ -506,6 +508,7 @@ mod tests {
             tracker.on_decode_failed();
         }
         tracker.on_sender_accepted();
+        tracker.on_data(later);
         assert_eq!(
             tracker.status(later, true).detail,
             "Receiving, but no picture yet"
@@ -571,6 +574,35 @@ mod tests {
         assert_eq!(tracker.picture(start + ms(5000)), Picture::Waiting);
         tracker.on_frame(start + ms(5000), 1280, 720);
         assert_eq!(tracker.picture(start + ms(5010)), Picture::Frame);
+    }
+
+    /// D8: a sender that leaves still gets its 2 s hold on the last frame.
+    #[test]
+    fn srt_signal_holds_the_last_frame_after_the_sender_leaves() {
+        let start = Instant::now();
+        let mut tracker = SignalTracker::new();
+        tracker.on_frame(start, 1280, 720);
+        tracker.on_sender_left();
+        assert_eq!(tracker.picture(start + ms(1500)), Picture::Frame);
+        assert_eq!(tracker.signal(start + ms(1500)), SrtCameraSignal::Holding);
+    }
+
+    #[test]
+    fn srt_signal_a_new_sender_starts_with_none_of_the_last_ones_data() {
+        let start = Instant::now();
+        let mut tracker = SignalTracker::new();
+        tracker.on_sender_accepted();
+        tracker.on_data(start);
+        assert_eq!(
+            tracker.status(start, true).detail,
+            "Receiving, but no picture yet"
+        );
+        tracker.on_sender_left();
+        tracker.on_sender_accepted();
+        assert_ne!(
+            tracker.status(start + ms(100), true).detail,
+            "Receiving, but no picture yet"
+        );
     }
 
     #[test]
