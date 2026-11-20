@@ -27,6 +27,7 @@ import { GO_LIVE_EXCLUDED_NOTE, GoLiveConfirmationDialog } from './go-live-dialo
 
 const mocked = vi.hoisted(() => ({
   srt: null as unknown,
+  sceneOnStream: null as unknown,
   captureConfig: undefined as unknown,
   banners: [] as unknown[],
   sharedVideo: null as unknown,
@@ -36,12 +37,20 @@ vi.mock('@/hooks/use-studio', () => ({
   useStudioBanners: () => ({ banners: mocked.banners }),
   useStudioCore: () => ({
     captureConfig: mocked.captureConfig,
+    sceneOnStream: mocked.sceneOnStream,
     performanceCheck: undefined,
     streamOutputTopologyPreflight: mocked.topology,
     streamSharedEncodeFallbackVideo: mocked.sharedVideo,
     overlayLayout: DEFAULT_OVERLAY_LAYOUT
   })
 }))
+
+// Plan 231 D4: the vertical leg is the scene on stream's 9:16 layout.
+const VERTICAL_CAMERA_SCENE = {
+  layouts: {
+    vertical: { ...defaultCaptureConfig.layout, layoutPreset: 'vertical-camera-bottom' as const }
+  }
+}
 
 const CAPTIONS_OFF: GoLiveCaptionsReadiness = {
   kind: 'disabled',
@@ -113,6 +122,7 @@ beforeEach(() => {
   root = createRoot(container)
   mocked.captureConfig = twitchOn()
   mocked.srt = null
+  mocked.sceneOnStream = null
   mocked.banners = []
   mocked.sharedVideo = null
   mocked.topology = { state: 'idle' }
@@ -895,10 +905,9 @@ describe('Go Live SRT Camera ask', () => {
     )
     mocked.captureConfig = {
       ...config,
-      layout: { ...config.layout, layoutPreset: 'screen-only' },
-      simulcastFollowsProgram: false,
-      lastVerticalPreset: 'vertical-camera-bottom'
+      layout: { ...config.layout, layoutPreset: 'screen-only' }
     }
+    mocked.sceneOnStream = VERTICAL_CAMERA_SCENE
     mocked.srt = srtState('waiting')
     const props = render()
     act(() => primary().click())
@@ -948,10 +957,9 @@ describe('Go Live SRT Camera ask', () => {
     )
     mocked.captureConfig = {
       ...config,
-      layout: { ...config.layout, layoutPreset: 'screen-only' },
-      simulcastFollowsProgram: false,
-      lastVerticalPreset: 'vertical-camera-bottom'
+      layout: { ...config.layout, layoutPreset: 'screen-only' }
     }
+    mocked.sceneOnStream = VERTICAL_CAMERA_SCENE
     mocked.srt = srtState('waiting')
     const props = render({
       partialSetup: {

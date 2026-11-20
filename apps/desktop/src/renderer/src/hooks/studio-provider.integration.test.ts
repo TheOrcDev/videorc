@@ -469,6 +469,9 @@ class StudioBackend {
   screenActivateFailure: 'definite' | null = null
   screenClearFailure: 'request-outcome-unknown-before-commit' | null = null
   sessionStartResponseDelayMs = 0
+  /** Answers these methods after a timer: a caller not awaited inside `act`
+   * then sees React render between its calls, as in the app. */
+  macrotaskMethods = new Set<string>()
   sessionStartError: string | null = null
   resumeFailuresRemaining = 0
   emitRecordingStatusBeforeStartResponse = false
@@ -1883,6 +1886,8 @@ class TestWebSocket {
       void deferredResponse.ready.then(() => respond(deferredResponse.payload))
     } else if (responseDelayMs > 0) {
       setTimeout(respond, responseDelayMs)
+    } else if (this.backend.macrotaskMethods.has(command.method)) {
+      setTimeout(respond, 0)
     } else {
       queueMicrotask(respond)
     }
@@ -17193,6 +17198,8 @@ describe('real StudioProvider lifecycle', () => {
     }
     // The hold runs out while the start's last await before `session.start`
     // (its account check, after the platform setup) is being answered.
+    // A real backend answers over the socket, after React has rendered.
+    backend.macrotaskMethods.add('platformAccounts.validate')
     const answer = backend.response.bind(backend)
     let flipAtTheStart = false
     backend.response = (command) => {
@@ -17344,6 +17351,8 @@ describe('real StudioProvider lifecycle', () => {
         })
       })
     }
+    // A real backend answers over the socket, after React has rendered.
+    backend.macrotaskMethods.add('platformAccounts.validate')
     const answer = backend.response.bind(backend)
     let flipAtTheStart = false
     const signalAtStart: string[] = []
@@ -17372,13 +17381,15 @@ describe('real StudioProvider lifecycle', () => {
       await waitForObservation(() => latest()?.core.goLiveConfirmationOpen === true)
     }
 
+    // Not awaited inside `act`: React renders while the start runs, as it
+    // does in the app, so the reopen meets the start still pending.
     await openGoLive()
     await act(async () => {
-      await latest()!.core.confirmGoLive(false)
+      void latest()!.core.confirmGoLive(false)
     })
-    expect(starts()).toHaveLength(0)
     await waitForObservation(() => completed() === 1)
     await waitForObservation(() => latest()?.core.goLiveConfirmationOpen === true)
+    expect(starts()).toHaveLength(0)
     expect(latest()?.recording.recording.state).toBe('idle')
 
     // "Go live anyway" in the dialog: the same start goes ahead.
@@ -17422,10 +17433,20 @@ describe('real StudioProvider lifecycle', () => {
     })
     await waitForObservation(() => latest()?.core.goLivePartialSetup !== null)
     await act(async () => {
-      await latest()!.core.continueGoLiveWithReadyDestinations(false)
+      void latest()!.core.continueGoLiveWithReadyDestinations(false)
     })
     await waitForObservation(() => latest()?.core.goLiveConfirmationOpen === true)
     expect(starts()).toHaveLength(2)
+    // The reopen is the same attempt: X stays left out, in the list and in
+    // the preflight it runs.
+    const leftOut = latest()!.core.goLiveExcludedTargetIds
+    expect(leftOut).toHaveLength(1)
+    const reopenCheck = backend.sentCommands
+      .filter((command) => command.method === 'streamTargets.confirmation.validate')
+      .at(-1)?.params as { streaming: StreamingSettings }
+    expect(reopenCheck.streaming.targets.find((target) => target.id === leftOut[0])?.enabled).toBe(
+      false
+    )
 
     // A recording never asks (D15): its Retry records, with no signal.
     await act(async () => {

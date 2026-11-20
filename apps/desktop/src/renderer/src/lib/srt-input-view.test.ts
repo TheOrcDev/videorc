@@ -163,6 +163,13 @@ describe('SRT input view (plan 255)', () => {
     expect(srtCameraSourceStatus(withSignal('waiting'), starting)).toEqual(starting)
     expect(srtCameraSourceStatus(null, pipeline)).toEqual(pipeline)
     expect(srtCameraSourceStatus(withSignal('waiting'), null)).toBeNull()
+    // A stand-in's line, naming the camera it replaces, stays under the badge.
+    const standIn = { ...pipeline, hint: 'Using SRT Camera until C920 is back.' }
+    expect(srtCameraSourceStatus(withSignal('waiting'), standIn)).toEqual({
+      label: 'No signal',
+      tone: 'neutral',
+      hint: 'Using SRT Camera until C920 is back.'
+    })
   })
 
   it('has no signal while waiting or on a codec it cannot show, never while frames arrive', () => {
@@ -273,8 +280,14 @@ describe('SRT input view (plan 255)', () => {
       layout: { ...defaultCaptureConfig.layout, layoutPreset },
       streaming: streamingTo({ id: 'twitch' })
     })
-    expect(goLiveSrtNoSignal(state(), config('screen-only'))).toBe(false)
-    expect(goLiveSrtNoSignal(state(), config('screen-camera'))).toBe(true)
+    expect(goLiveSrtNoSignal(state(), config('screen-only'), undefined)).toBe(false)
+    expect(goLiveSrtNoSignal(state(), config('screen-camera'), undefined)).toBe(true)
+    // The main scene the start sends decides, as it does for the start: a
+    // camera shown in edit mode on a screen-only layout still asks.
+    const shown = {
+      sources: [{ id: 'source:camera', kind: 'camera', visible: true } as never]
+    } as unknown as Scene
+    expect(goLiveSrtNoSignal(state(), config('screen-only'), undefined, shown)).toBe(true)
   })
 
   // Only the legs that stream count (D15: a local
@@ -326,16 +339,23 @@ describe('SRT input view (plan 255)', () => {
       streamEnabled: false,
       sources: { ...defaultCaptureConfig.sources, cameraId: SRT_CAMERA_ID },
       layout: { ...defaultCaptureConfig.layout, layoutPreset: 'screen-only' },
-      simulcastFollowsProgram: false,
-      lastVerticalPreset: 'vertical-camera-bottom',
       streaming: streamingTo({ id: 'twitch' }, { id: 'tiktok', vertical: true })
     }
-    expect(goLiveSrtNoSignal(state(), config)).toBe(true)
+    // Plan 231 D4: the vertical leg is the scene on stream's 9:16 layout.
+    const scene = {
+      layouts: {
+        vertical: {
+          ...defaultCaptureConfig.layout,
+          layoutPreset: 'vertical-camera-bottom' as const
+        }
+      }
+    }
+    expect(goLiveSrtNoSignal(state(), config, scene)).toBe(true)
     const withoutTikTok = {
       ...config,
       streaming: streamingWithoutTargets(config.streaming, ['tiktok'])
     }
-    expect(goLiveSrtNoSignal(state(), withoutTikTok)).toBe(false)
+    expect(goLiveSrtNoSignal(state(), withoutTikTok, scene)).toBe(false)
   })
 
   // The facts an answer covers, and nothing

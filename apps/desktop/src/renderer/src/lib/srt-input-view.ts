@@ -6,7 +6,7 @@ import type {
   SrtInputState,
   StreamingSettings
 } from './backend'
-import { buildSimulcastParams, type CaptureConfig } from './capture'
+import { buildSimulcastParams, type CaptureConfig, type SimulcastScene } from './capture'
 import type { SourceStatus } from './source-status'
 import { SOURCE_RECEIVING_LABEL } from './state-labels'
 
@@ -106,8 +106,8 @@ function streamedLegs(
  * The SRT Camera's badge in Sources (live QA, 2026-11-15). Its pacer keeps
  * the camera's pipeline busy with the held frame or the still, so the
  * pipeline reads "Receiving" whatever the sender does: while it does, the
- * SRT signal decides, as the detail line does. Any other pipeline status
- * (starting, failed, switching) stands.
+ * SRT signal decides, as the detail line does; a stand-in's line stays.
+ * Any other pipeline status (starting, failed, switching) stands.
  */
 export function srtCameraSourceStatus(
   state: SrtInputState | null,
@@ -118,11 +118,11 @@ export function srtCameraSourceStatus(
     case 'receiving':
       return pipeline
     case 'holding':
-      return { label: 'No frames', tone: 'warn' }
+      return { ...pipeline, label: 'No frames', tone: 'warn' }
     case 'waiting':
-      return { label: 'No signal', tone: 'neutral' }
+      return { ...pipeline, label: 'No signal', tone: 'neutral' }
     case 'unsupportedCodec':
-      return { label: 'No picture', tone: 'warn' }
+      return { ...pipeline, label: 'No picture', tone: 'warn' }
   }
 }
 
@@ -165,20 +165,29 @@ export function srtAskFacts(state: SrtInputState | null, going: GoLiveCompositio
  * Output's saved mode. The start itself checks the exact `session.start`
  * composition again.
  */
-export function goLiveSrtNoSignal(state: SrtInputState | null, config: CaptureConfig): boolean {
-  return goLiveSrtAskFacts(state, config) !== null
+export function goLiveSrtNoSignal(
+  state: SrtInputState | null,
+  config: CaptureConfig,
+  sceneOnStream: SimulcastScene | undefined,
+  mainScene?: Scene
+): boolean {
+  return goLiveSrtAskFacts(state, config, sceneOnStream, mainScene) !== null
 }
 
 /** `srtAskFacts` for this attempt's capture setup, as `goLiveSrtNoSignal` reads it. */
 export function goLiveSrtAskFacts(
   state: SrtInputState | null,
-  config: CaptureConfig
+  config: CaptureConfig,
+  sceneOnStream: SimulcastScene | undefined,
+  // The main scene the start sends (`sessionScene`), when it sends one.
+  mainScene?: Scene
 ): string | null {
   const live = { ...config, streamEnabled: true }
   return srtAskFacts(state, {
     sources: live.sources,
     layout: live.layout,
-    simulcast: buildSimulcastParams(live),
+    scene: mainScene,
+    simulcast: buildSimulcastParams(live, sceneOnStream),
     streaming: live.streaming
   })
 }

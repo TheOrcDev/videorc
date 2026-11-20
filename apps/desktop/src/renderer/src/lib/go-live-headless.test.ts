@@ -495,6 +495,9 @@ describe('goLiveWithoutDialog (plan 209 S10, D13)', () => {
       settlePreparedPlatformLifecycle: vi.fn(async () => undefined),
       startOnReadyDestinations: vi.fn(async () => true),
       srtInputRef: { current: null },
+      sceneOnStream: () => undefined,
+      goLiveMainScene: () => undefined,
+      talkShowRoomOpenRef: { current: false },
       ...overrides
     }
   }
@@ -536,6 +539,22 @@ describe('goLiveWithoutDialog (plan 209 S10, D13)', () => {
 
     expect(await goLiveWithoutDialog({ allowNoSignal: true }, fake)).toMatchObject({ ok: true })
     expect(fake.runGoLiveConfirmation).toHaveBeenCalledTimes(1)
+  })
+
+  // Plan 224: in an open talk show the cloud streams the Show stage, so this
+  // computer's SRT Camera is no reason to refuse.
+  it('never asks about the SRT Camera while a talk show room is open', async () => {
+    const srtCamera = {
+      ...defaultCaptureConfig,
+      streaming: twoOn,
+      sources: { ...defaultCaptureConfig.sources, cameraId: SRT_CAMERA_ID }
+    }
+    const fake = studio({
+      config: srtCamera,
+      srtInputRef: { current: srtInput('waiting') },
+      talkShowRoomOpenRef: { current: true }
+    })
+    expect(await goLiveWithoutDialog({}, fake)).toMatchObject({ ok: true })
   })
 
   // The 2 s hold can run out while the preflight runs; the
@@ -982,11 +1001,22 @@ describe('goLiveWithoutDialog (plan 209 S10, D13)', () => {
       ...defaultCaptureConfig,
       streaming: withVertical,
       sources: { ...defaultCaptureConfig.sources, cameraId: SRT_CAMERA_ID },
-      layout: { ...defaultCaptureConfig.layout, layoutPreset: 'screen-only' as const },
-      simulcastFollowsProgram: false,
-      lastVerticalPreset: 'vertical-camera-bottom' as const
+      layout: { ...defaultCaptureConfig.layout, layoutPreset: 'screen-only' as const }
     }
-    const fake = studio({ config, srtInputRef: { current: srtInput('waiting') } })
+    // Plan 231 D4: the vertical leg is the scene on stream's 9:16 layout.
+    const scene = {
+      layouts: {
+        vertical: {
+          ...defaultCaptureConfig.layout,
+          layoutPreset: 'vertical-camera-bottom' as const
+        }
+      }
+    }
+    const fake = studio({
+      config,
+      srtInputRef: { current: srtInput('waiting') },
+      sceneOnStream: () => scene
+    })
     expect(await goLiveWithoutDialog({ destinations: ['twitch-1'] }, fake)).toMatchObject({
       ok: true
     })

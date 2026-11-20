@@ -4,12 +4,13 @@ import type {
   EntitlementsSnapshot,
   GoLivePreflight,
   RecordingStatus,
+  Scene,
   SrtInputState,
   StreamMetadataDraft,
   StreamPlatform,
   StreamingSettings
 } from './backend'
-import type { CaptureConfig, WsStatus } from './capture'
+import type { CaptureConfig, SimulcastScene, WsStatus } from './capture'
 import {
   decideGoLiveCaptionsReadiness,
   type CaptionSessionOutputReadiness,
@@ -169,7 +170,7 @@ export type HeadlessGoLiveDecision =
  * that is Unlisted or Private confirms only with `allowNonPublic`, the
  * dialog's privacy step; otherwise the agent reads the step's own sentence.
  * Before it, an SRT Camera with no signal confirms only with
- * `allowNoSignal`, the dialog's first ask (plan 255 D15).
+ * `allowNoSignal` (plan 255 D15); the dialog asks that last.
  */
 export function decideHeadlessGoLive(input: {
   preflight: GoLivePreflight
@@ -366,6 +367,14 @@ export interface HeadlessGoLiveStudio {
   /** The SRT input as it is now (plan 255 D15), read when the gate decides,
    * after the preflight: the 2 s hold can run out while it runs. */
   srtInputRef: { readonly current: SrtInputState | null }
+  /** The scene on stream as the start reads it: its 9:16 layout is the
+   * vertical leg (plan 231 D4). */
+  sceneOnStream: () => SimulcastScene | undefined
+  /** The main scene the start sends (`sessionScene`), when it sends one. */
+  goLiveMainScene: () => Scene | undefined
+  /** Plan 224: in an open talk show the cloud streams the Show stage, not
+   * this computer's camera. */
+  talkShowRoomOpenRef: { readonly current: boolean }
 }
 
 /**
@@ -495,10 +504,18 @@ async function goLiveOwningTheTransport(
       allowPartial: partial,
       allowNonPublic: request.allowNonPublic === true,
       // This attempt's destinations only.
-      srtNoSignal: goLiveSrtNoSignal(studio.srtInputRef.current, {
-        ...config,
-        streaming: streamingWithoutTargets(config.streaming, excludedTargetIds)
-      }),
+      // In an open talk show the cloud streams the Show stage, not this camera.
+      srtNoSignal:
+        !studio.talkShowRoomOpenRef.current &&
+        goLiveSrtNoSignal(
+          studio.srtInputRef.current,
+          {
+            ...config,
+            streaming: streamingWithoutTargets(config.streaming, excludedTargetIds)
+          },
+          studio.sceneOnStream(),
+          studio.goLiveMainScene()
+        ),
       allowNoSignal: request.allowNoSignal === true
     })
   let decision = decide(allowPartial)

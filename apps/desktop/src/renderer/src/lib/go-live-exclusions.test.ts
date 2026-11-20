@@ -2,7 +2,11 @@ import { describe, expect, it } from 'vitest'
 
 import type { StreamingSettings } from './backend'
 import { defaultCaptureConfig } from './capture'
-import { streamingWithoutTargets, updateGoLiveExclusions } from './go-live-exclusions'
+import {
+  streamingWithoutTargets,
+  targetsLeftOut,
+  updateGoLiveExclusions
+} from './go-live-exclusions'
 
 function twoDestinations(): StreamingSettings {
   const base = defaultCaptureConfig.streaming
@@ -47,6 +51,15 @@ describe('Go live without a destination (plan 174 S3.4, B-8)', () => {
     const sent = streamingWithoutTargets(streaming, streaming.enabledTargetIds)
     expect(sent.enabled).toBe(false)
     expect(sent.enabledTargetIds).toEqual([])
+  })
+
+  // A Retry carries the streaming it sent, not the list: its exclusions
+  // come back from the two.
+  it('names the destinations a sent streaming left out of the saved one', () => {
+    const streaming = twoDestinations()
+    const [left] = streaming.enabledTargetIds
+    expect(targetsLeftOut(streaming, streamingWithoutTargets(streaming, [left!]))).toEqual([left])
+    expect(targetsLeftOut(streaming, streaming)).toEqual([])
   })
 
   it('adds and removes a destination from the list once', () => {

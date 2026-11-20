@@ -138,6 +138,9 @@ export function GoLiveConfirmationDialog({
 }): ReactElement {
   const {
     captureConfig,
+    sceneOnStream,
+    goLiveMainScene,
+    talkShowRoomOpen,
     performanceCheck,
     streamOutputTopologyPreflight,
     streamSharedEncodeFallbackVideo,
@@ -255,13 +258,18 @@ export function GoLiveConfirmationDialog({
   // this path streams show the camera without a signal, and "Go live
   // anyway" was not accepted for these same facts while the dialog is open.
   // With the SRT input off or a signal, it goes on at once.
+  // In an open talk show the cloud streams the Show stage, not this camera.
   const srtFacts = (path: GoOnPath): string | null =>
-    goLiveSrtAskFacts(
-      srtInput.state,
-      path === 'partial' && partialSetup
-        ? { ...sentCapture, streaming: partialSetup.streaming }
-        : sentCapture
-    )
+    talkShowRoomOpen
+      ? null
+      : goLiveSrtAskFacts(
+          srtInput.state,
+          path === 'partial' && partialSetup
+            ? { ...sentCapture, streaming: partialSetup.streaming }
+            : sentCapture,
+          sceneOnStream ?? undefined,
+          goLiveMainScene
+        )
   const goOn = (path: GoOnPath, accepted: readonly string[] = srtAccepted): void => {
     const facts = srtFacts(path)
     if (facts !== null && !accepted.includes(facts)) {

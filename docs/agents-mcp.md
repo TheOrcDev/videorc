@@ -218,9 +218,9 @@ Private is refused too ("YouTube is Unlisted. Only people with the link can
 watch."), the way the dialog asks you once more before it goes live that
 way; the agent passes `allowNonPublic` only when you asked for it. When the
 camera going live is the SRT Camera and it has no signal, the call is
-refused before that ("The SRT Camera has no signal."), the way the dialog
-asks "Go live anyway?" first; the agent passes `allowNoSignal` only when you
-asked for it. Recording never asks. While an agent's Go Live runs, the Go
+refused before that ("The SRT Camera has no signal."), where the dialog
+asks "Go live anyway?" after its other steps; the agent passes
+`allowNoSignal` only when you asked for it. Recording never asks. While an agent's Go Live runs, the Go
 Live button and the dialog wait for it. It records too only when Output's
 recording is on, as the dialog does.
 

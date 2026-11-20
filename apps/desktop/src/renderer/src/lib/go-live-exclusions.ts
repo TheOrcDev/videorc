@@ -32,6 +32,11 @@ export function streamingWithoutTargets(
   }
 }
 
+/** The destinations on in `saved` that `sent` leaves out: what a start left out. */
+export function targetsLeftOut(saved: StreamingSettings, sent: StreamingSettings): string[] {
+  return saved.enabledTargetIds.filter((id) => !sent.enabledTargetIds.includes(id))
+}
+
 /** The exclusion list after a "Go live without" (add) or an "Add back" (remove). */
 export function updateGoLiveExclusions(
   excludedTargetIds: readonly string[],

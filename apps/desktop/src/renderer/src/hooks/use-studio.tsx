@@ -374,7 +374,7 @@ import {
 import { providerOAuthRetryDelayMs } from '@/lib/provider-oauth-retry'
 import { isRetryableBackgroundSurfaceSyncError } from '@/lib/surface-sync-retry'
 import { accountCallbackRetryDelayMs } from '@/lib/account-callback-retry'
-import { buildStartSessionParams } from '@/lib/session-params'
+import { buildStartSessionParams, sessionScene } from '@/lib/session-params'
 import {
   rebindRememberedWindow,
   shouldRefreshWindowListBeforeStart
@@ -673,7 +673,11 @@ import {
   type GoLiveCaptionsReadiness
 } from '@/lib/captions-preflight'
 import { sceneVisibilityIdentity } from '@/lib/scene-visibility-identity'
-import { streamingWithoutTargets, updateGoLiveExclusions } from '@/lib/go-live-exclusions'
+import {
+  streamingWithoutTargets,
+  targetsLeftOut,
+  updateGoLiveExclusions
+} from '@/lib/go-live-exclusions'
 import type { GoLivePhase } from '@/lib/go-live-dialog-view'
 import {
   goLiveEntitlementGate,
@@ -1580,6 +1584,10 @@ export type StudioContextValue = {
    * and nothing writes them back. Cleared when the attempt ends.
    */
   goLiveExcludedTargetIds: readonly string[]
+  /** Plan 255 D15: the main scene `session.start` sends, for the SRT ask. */
+  goLiveMainScene: Scene | undefined
+  /** Plan 224: a talk show room is open; Go Live streams the Show stage. */
+  talkShowRoomOpen: boolean
   /** Where a confirmed Go Live is, for the dialog's pending label (B-14). */
   goLivePhase: GoLivePhase | null
   /** Runs the Go Live check again (after a Reconnect), with this attempt's exclusions. */
@@ -5366,6 +5374,12 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
     () => (scene ? { ...scene, background: activeSceneBackground } : null),
     [scene, activeSceneBackground]
   )
+  const goLiveMainScene = useMemo(
+    () => sessionScene(sceneWithBackground, sceneEditMode),
+    [sceneWithBackground, sceneEditMode]
+  )
+  const goLiveMainSceneRef = useRef(goLiveMainScene)
+  goLiveMainSceneRef.current = goLiveMainScene
   const persistWorkingVisual = useCallback(
     (
       layout: LayoutSettings,
@@ -17038,15 +17052,36 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
     }),
     [srtInput.stateRef]
   )
-  const askAgainAfterSrtRefusal = useCallback((gate: GoLiveStartGate): void => {
-    if (gate.refusal === null) return
-    toast.warning('The SRT Camera has no signal', {
-      description: 'Go Live opens again to ask before it starts.'
-    })
-    void openGoLiveConfirmationRef.current?.(
-      livestreamIntent(captureConfigRef.current.recordEnabled)
-    )
-  }, [])
+  // The refused start is still pending when the gate answers, and Go Live
+  // refuses to open over a pending start: it opens again once both settle,
+  // as the same attempt, with the destinations it left out still out.
+  const [srtAskAgain, setSrtAskAgain] = useState<{
+    intent: SessionStartIntent
+    excludedTargetIds: readonly string[]
+  } | null>(null)
+  const askAgainAfterSrtRefusal = useCallback(
+    (
+      gate: GoLiveStartGate,
+      excludedTargetIds: readonly string[] = goLiveExcludedTargetIdsRef.current
+    ): void => {
+      if (gate.refusal === null) return
+      toast.warning('The SRT Camera has no signal', {
+        description: 'Go Live opens again to ask before it starts.'
+      })
+      setSrtAskAgain({
+        intent: livestreamIntent(captureConfigRef.current.recordEnabled),
+        excludedTargetIds
+      })
+    },
+    []
+  )
+  useEffect(() => {
+    if (srtAskAgain === null || startRequestPending || goLiveConfirmationPending) return
+    setSrtAskAgain(null)
+    // The attempt's own cleanup (above) has just cleared them.
+    commitGoLiveExclusions(srtAskAgain.excludedTargetIds)
+    void openGoLiveConfirmationRef.current?.(srtAskAgain.intent)
+  }, [commitGoLiveExclusions, srtAskAgain, startRequestPending, goLiveConfirmationPending])
   const runStartSession = useCallback(
     (
       streamingOverride?: StreamingSettings,
@@ -17522,7 +17557,16 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
                     rpc,
                     gate
                   )
-                  .then(() => askAgainAfterSrtRefusal(gate))
+                  .then(() =>
+                    // The failed start ended the attempt and its list; the
+                    // Retry's own streaming still says what it left out.
+                    askAgainAfterSrtRefusal(
+                      gate,
+                      streamingOverride
+                        ? targetsLeftOut(captureConfigRef.current.streaming, streamingOverride)
+                        : []
+                    )
+                  )
               },
               resumingCloudShow ? 'resume' : streamingOverride ? 'live' : 'record'
             )
@@ -18036,7 +18080,13 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
         try {
           // "Checking…" from the first click (B-7), before the first await.
           setGoLiveConfirmationPending(true)
-          const run = await runGoLivePreflight(intent, captureConfig.streaming, streamMetadataDraft)
+          // Without what this attempt left out, as a recheck sends it: empty
+          // on a first open, kept on an SRT reopen.
+          const run = await runGoLivePreflight(
+            intent,
+            streamingWithoutTargets(captureConfig.streaming, goLiveExcludedTargetIdsRef.current),
+            streamMetadataDraft
+          )
           if (run.kind === 'refused') {
             if (!isSessionActive) {
               refuseStart(run.reason, intent)
@@ -18596,10 +18646,15 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
   const continueGoLiveWithReadyDestinations = useCallback(
     async (goLiveAnyway = false): Promise<void> => {
       const gate = dialogSrtStartGate(goLiveAnyway)
+      // "Go live on {ready}" leaves out the destinations whose setup failed;
+      // they are not in the list.
+      const failed = goLivePartialSetup?.failures.map((failure) => failure.targetId) ?? []
       await startOnReadyDestinations(undefined, gate)
-      askAgainAfterSrtRefusal(gate)
+      askAgainAfterSrtRefusal(gate, [
+        ...new Set([...goLiveExcludedTargetIdsRef.current, ...failed])
+      ])
     },
-    [askAgainAfterSrtRefusal, dialogSrtStartGate, startOnReadyDestinations]
+    [askAgainAfterSrtRefusal, dialogSrtStartGate, goLivePartialSetup, startOnReadyDestinations]
   )
 
   const stopSession = useCallback(
@@ -20418,6 +20473,9 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
       // Plan 255 D15: the dialog's "Go live anyway?" for an SRT Camera with
       // no signal.
       srtInputRef: srtInput.stateRef,
+      sceneOnStream: () => storedScene(activeSavedSceneIdRef.current),
+      goLiveMainScene: () => goLiveMainSceneRef.current,
+      talkShowRoomOpenRef,
       captureConfigRef,
       deviceListRef,
       sourceSwitchReason,
@@ -21464,6 +21522,8 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
       goLiveCaptionsReadiness,
       continueGoLiveWithoutCaptions,
       goLiveExcludedTargetIds,
+      goLiveMainScene,
+      talkShowRoomOpen,
       goLivePhase,
       recheckGoLive,
       previewUrl,
@@ -21718,6 +21778,8 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
       goLiveCaptionsReadiness,
       continueGoLiveWithoutCaptions,
       goLiveExcludedTargetIds,
+      goLiveMainScene,
+      talkShowRoomOpen,
       goLivePhase,
       recheckGoLive,
       previewUrl,
