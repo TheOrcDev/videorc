@@ -63,7 +63,7 @@ describe('window-theme-bootstrap (Stream Manager, Notes, Captions)', () => {
   })
 
   it('is loaded by every secondary window, and none hard-codes a theme', () => {
-    for (const page of ['comments.html', 'notes.html', 'captions.html']) {
+    for (const page of ['comments.html', 'notes.html', 'captions.html', 'scene-hud.html']) {
       const html = readFileSync(join(RENDERER_DIR, page), 'utf8')
       expect(html).toContain('<script type="module" src="/window-theme-bootstrap.js"></script>')
       expect(html).toContain('<html lang="en">')

@@ -12,6 +12,12 @@ import type { FrontAppChanged } from './front-app'
 import { APP_ICONS_MAX_IDS } from './app-icons'
 import { PAGE_KEYS, type PageKey } from './sidebar-pages'
 import {
+  sceneHudRequest,
+  type SceneHudPresentation,
+  type SceneHudRequest,
+  type SceneHudWindowState
+} from './scene-hud'
+import {
   validateChatDelivery,
   validateChatDeliveryBoundary,
   type ChatDeliveryBoundary
@@ -321,6 +327,10 @@ export const electronInvokeApiMethods = {
   'captions-window:toggle': 'toggleCaptionsWindow',
   'captions-window:get-state': 'getCaptionsWindowState',
   'captions-window:set-always-on-top': 'setCaptionsWindowAlwaysOnTop',
+  // The key HUD (plan 231 D20): the Studio renderer only.
+  'scene-hud:get-state': 'getSceneHudWindowState',
+  'scene-hud:set-enabled': 'setSceneHudEnabled',
+  'scene-hud:show': 'showSceneHud',
   'captions-window:push-snapshot': 'pushCaptionSnapshot',
   'captions-window:get-snapshot': 'getCaptionSnapshot',
   'captions-window:push-lines': 'pushCaptionLines',
@@ -451,6 +461,8 @@ export interface ElectronIpcEventMap {
   'captions-window:state': CaptionsWindowState
   'captions-window:snapshot': CaptionWindowSnapshot
   'captions-window:lines': CaptionsUpdate[]
+  'scene-hud:state': SceneHudWindowState
+  'scene-hud:present': SceneHudPresentation
   'oauth:callback-url': OAuthCallbackEnvelope
   'shortcut:navigate': string
   'buddy:deep-link': BuddyDeepLinkNavigation
@@ -517,6 +529,8 @@ export const electronEventChannels = [
   'captions-window:state',
   'captions-window:snapshot',
   'captions-window:lines',
+  'scene-hud:state',
+  'scene-hud:present',
   'oauth:callback-url',
   'shortcut:navigate',
   'buddy:deep-link',
@@ -1861,7 +1875,73 @@ const chatCommandFailuresSchema = arraySchema(
   { maxLength: CHAT_COMMAND_FAILURES_MAX }
 ) as RuntimeSchema<ChatCommandReplyFailed[]>
 
+// The key HUD (plan 231 D20). Main trusts nothing the renderer sends: the
+// request is re-made from its words, and the window state is closed.
+const sceneHudWindowStateSchema = objectSchema(
+  {
+    enabled: booleanSchema,
+    method: enumSchema(['capture-filter', 'content-protection', 'unsupported']),
+    windowId: optionalSchema(numberSchema({ integer: true, min: 1 })),
+    ready: booleanSchema
+  },
+  { allowUnknown: false }
+)
+const sceneHudRequestSchema = runtimeSchema<SceneHudRequest>(
+  'a scene HUD request',
+  (value, path) => {
+    const request = sceneHudRequest(value)
+    if (!request) throw new RuntimeSchemaError(path, 'a scene HUD request')
+    return request
+  }
+)
+const sceneHudShowResultSchema = unionSchema([
+  objectSchema({ shown: literalSchema(true) }, { allowUnknown: false }),
+  objectSchema(
+    {
+      shown: literalSchema(false),
+      reason: enumSchema(['disabled', 'unsupported', 'not-ready', 'videorc-in-front', 'invalid'])
+    },
+    { allowUnknown: false }
+  )
+])
+const sceneHudPresentationSchema = runtimeSchema<SceneHudPresentation>(
+  'a scene HUD presentation',
+  (value, path) => {
+    const request = sceneHudRequest(value)
+    const raw = (value ?? {}) as Partial<SceneHudPresentation>
+    if (
+      !request ||
+      typeof raw.sequence !== 'number' ||
+      !Number.isInteger(raw.sequence) ||
+      raw.sequence < 1 ||
+      typeof raw.platform !== 'string' ||
+      raw.platform.length > 32 ||
+      (raw.iconDataUrl !== undefined &&
+        (typeof raw.iconDataUrl !== 'string' ||
+          !raw.iconDataUrl.startsWith('data:image/png;base64,') ||
+          raw.iconDataUrl.length > 4_000_000)) ||
+      (raw.holdMs !== undefined &&
+        (typeof raw.holdMs !== 'number' ||
+          !Number.isInteger(raw.holdMs) ||
+          raw.holdMs < 0 ||
+          raw.holdMs > 120_000))
+    ) {
+      throw new RuntimeSchemaError(path, 'a scene HUD presentation')
+    }
+    return {
+      ...request,
+      sequence: raw.sequence,
+      platform: raw.platform,
+      ...(raw.iconDataUrl ? { iconDataUrl: raw.iconDataUrl } : {}),
+      ...(raw.holdMs !== undefined ? { holdMs: raw.holdMs } : {})
+    }
+  }
+)
+
 const specificRuntimeInvokeContracts = {
+  'scene-hud:get-state': invokeContract(noArgs, sceneHudWindowStateSchema),
+  'scene-hud:set-enabled': invokeContract(tupleSchema([booleanSchema]), sceneHudWindowStateSchema),
+  'scene-hud:show': invokeContract(tupleSchema([sceneHudRequestSchema]), sceneHudShowResultSchema),
   'app:front-window-watch': invokeContract(
     tupleSchema([objectSchema({ enabled: booleanSchema }, { allowUnknown: false })]),
     undefinedSchema
@@ -2507,6 +2587,8 @@ const backendConnectionSchema = objectSchema(
 )
 
 const specificRuntimeEventSchemas = {
+  'scene-hud:state': sceneHudWindowStateSchema,
+  'scene-hud:present': sceneHudPresentationSchema,
   'chat-gifs:mode': twitchGifModeSchema,
   'comments-window:marker-context': markerContextSchema,
   'comments-window:marker-request': markerRelayCommandSchema,

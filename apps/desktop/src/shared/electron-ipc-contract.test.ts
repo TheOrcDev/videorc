@@ -111,8 +111,9 @@ describe('Electron IPC contract', () => {
     // 202: plan 250 S8 adds the Stream Manager's bell: the notification list
     // (get, push), the pop-up offered to the Stream Manager, and the relay of
     // what is pressed there (comments-window:notification-act).
-    expect(Object.keys(electronInvokeApiMethods)).toHaveLength(202)
-    expect(new Set(Object.values(electronInvokeApiMethods)).size).toBe(202)
+    // 205: plan 231 D20 adds the key HUD's state, its switch and its show.
+    expect(Object.keys(electronInvokeApiMethods)).toHaveLength(205)
+    expect(new Set(Object.values(electronInvokeApiMethods)).size).toBe(205)
     expectTypeOf<ElectronInvokeArgs<'resource:trash-session-deletion'>>().toEqualTypeOf<
       Parameters<VideorcApi['trashSessionDeletion']>
     >()

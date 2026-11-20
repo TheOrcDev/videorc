@@ -268,6 +268,12 @@ const api: VideorcApi = {
   pushCaptionLines: (lines) => invoke('captions-window:push-lines', lines),
   getCaptionLines: () => invoke('captions-window:get-lines'),
   onCaptionLines: (callback) => subscribe('captions-window:lines', callback),
+  // The key HUD (plan 231 D20): the Studio asks, the HUD window listens.
+  getSceneHudWindowState: () => invoke('scene-hud:get-state'),
+  setSceneHudEnabled: (enabled) => invoke('scene-hud:set-enabled', enabled),
+  showSceneHud: (request) => invoke('scene-hud:show', request),
+  onSceneHudWindowState: (callback) => subscribe('scene-hud:state', callback),
+  onSceneHudPresent: (callback) => subscribe('scene-hud:present', callback),
   createNativePreviewSurface: (bounds, generation) =>
     invoke('preview-surface:create', bounds, generation),
   updateNativePreviewSurfaceBounds: (bounds, generation) =>

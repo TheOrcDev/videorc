@@ -48,6 +48,7 @@
 //   VIDEORC_SMOKE_FFMPEG_PATH / VIDEORC_SMOKE_FFPROBE_PATH
 
 import { randomBytes } from 'node:crypto'
+import { spawnSync } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
@@ -201,6 +202,17 @@ const config = {
   streamManagerOverlaySettleMs: Number(
     process.env.VIDEORC_BASELINE_STREAM_MANAGER_SETTLE_MS ?? 1500
   ),
+  // Plan 231 D20: the key HUD over the captured display, red edge to edge,
+  // its window id on the exclusion list, a real key switch while it holds,
+  // then off the list and on again to prove the gate sees the window.
+  sceneHudOverlay: process.env.VIDEORC_BASELINE_SCENE_HUD_OVERLAY === '1',
+  sceneHudOverlayMaxMarkerPixelRatio: Number(
+    process.env.VIDEORC_BASELINE_SCENE_HUD_MAX_MARKER_RATIO ?? 0.002
+  ),
+  sceneHudOverlayMinVisibleMarkerPixelRatio: Number(
+    process.env.VIDEORC_BASELINE_SCENE_HUD_MIN_VISIBLE_MARKER_RATIO ?? 0.02
+  ),
+  sceneHudOverlaySettleMs: Number(process.env.VIDEORC_BASELINE_SCENE_HUD_SETTLE_MS ?? 1500),
   microphoneSyncOffsetMs: Number(process.env.VIDEORC_BASELINE_MIC_SYNC_OFFSET_MS ?? 0),
   systemAudio: process.env.VIDEORC_BASELINE_SYSTEM_AUDIO === '1',
   screenMotionFocusIntervalMs: Number(process.env.VIDEORC_SCREEN_MOTION_FOCUS_INTERVAL_MS ?? 1000),
@@ -215,6 +227,7 @@ const config = {
   screenRecordingGate: process.argv.includes('--screen-recording-gate'),
   notesOverlayGate: process.argv.includes('--notes-overlay-gate'),
   streamManagerOverlayGate: process.argv.includes('--stream-manager-overlay-gate'),
+  sceneHudOverlayGate: process.argv.includes('--scene-hud-overlay-gate'),
   packagedExecutable: process.env.VIDEORC_PERF_APP_EXECUTABLE
     ? resolve(process.env.VIDEORC_PERF_APP_EXECUTABLE)
     : null,
@@ -282,6 +295,9 @@ let notesOverlayBounds
 let streamManagerOverlayState
 let streamManagerOverlayBounds
 let streamManagerOverlayHidden = false
+let sceneHudOverlayState
+let sceneHudOverlayBounds
+let sceneHudOverlayHidden = false
 const previewSurfaceOutputGuard = createPreviewSurfaceOutputGuard()
 const performanceLedgerPaths = ownedProcessLedgerPaths({
   appDataDir: join(config.outputDirectory, 'app-data'),
@@ -303,7 +319,8 @@ try {
     (config.gate ||
       config.screenRecordingGate ||
       config.notesOverlayGate ||
-      config.streamManagerOverlayGate) &&
+      config.streamManagerOverlayGate ||
+      config.sceneHudOverlayGate) &&
     verdict &&
     !verdict.pass
       ? 1
@@ -439,6 +456,7 @@ async function main() {
     requiresPreviewHostCommandServer ||
     config.notesOverlay ||
     config.streamManagerOverlay ||
+    config.sceneHudOverlay ||
     needsSmokeResourceAuthorization ||
     config.performanceReportRequested
   launched = await launchDevApp({
@@ -559,6 +577,16 @@ async function main() {
         'Stream Manager overlay smoke requires VIDEORC_BASELINE_SCREEN_MOTION_STIMULUS=1 for controlled background colors.'
       )
     }
+    if (config.sceneHudOverlay && (!sources.screen || !config.screenMotionStimulus)) {
+      throw new Error(
+        'Scene HUD overlay smoke requires a selected real screen source and VIDEORC_BASELINE_SCREEN_MOTION_STIMULUS=1.'
+      )
+    }
+    if (config.sceneHudOverlay && process.platform !== 'darwin') {
+      throw new Error(
+        'Scene HUD overlay smoke proves the macOS capture filter; Windows is the marker harness on a Windows box.'
+      )
+    }
     if (config.streamManagerOverlay && process.platform !== 'darwin') {
       throw new Error(
         'Stream Manager overlay smoke proves the macOS capture filter; Windows is the marker harness on a Windows box.'
@@ -624,6 +652,12 @@ async function main() {
       streamManagerOverlayState = await setupStreamManagerOverlay(sources.screen)
       console.log(
         `Stream Manager overlay window ${streamManagerOverlayBounds?.width ?? 'n/a'}x${streamManagerOverlayBounds?.height ?? 'n/a'} @ ${streamManagerOverlayBounds?.x ?? 'n/a'},${streamManagerOverlayBounds?.y ?? 'n/a'} hiddenFromStream=${streamManagerOverlayState.hiddenFromStream} method=${streamManagerOverlayState.hideFromStreamMethod} windowId=${streamManagerOverlayState.windowId ?? 'n/a'} level=${streamManagerOverlayState.level ?? 'n/a'}.`
+      )
+    }
+    if (config.sceneHudOverlay) {
+      sceneHudOverlayState = await setupSceneHudOverlay(sources.screen)
+      console.log(
+        `Scene HUD overlay window ${sceneHudOverlayBounds?.width ?? 'n/a'}x${sceneHudOverlayBounds?.height ?? 'n/a'} @ ${sceneHudOverlayBounds?.x ?? 'n/a'},${sceneHudOverlayBounds?.y ?? 'n/a'} method=${sceneHudOverlayState.method} ready=${sceneHudOverlayState.ready} windowId=${sceneHudOverlayState.windowId ?? 'n/a'}.`
       )
     }
     const protectedOverlayWindowIds = protectedOverlayWindowIdsFromOverlays()
@@ -763,7 +797,14 @@ async function main() {
     let previewMeasurement
     let snapshots
     let streamManagerToggles = null
+    let sceneHudToggles = null
     try {
+      const sceneHudTogglePromise = config.sceneHudOverlay
+        ? runSceneHudToggleSchedule(ws, sourceSelection, recordingStartedAt).catch((error) => ({
+            error: error?.message ?? String(error),
+            steps: []
+          }))
+        : Promise.resolve(null)
       const streamManagerTogglePromise = config.streamManagerOverlay
         ? runStreamManagerToggleSchedule(ws, sourceSelection, recordingStartedAt).catch(
             (error) => ({ error: error?.message ?? String(error), steps: [] })
@@ -783,11 +824,13 @@ async function main() {
           })
         : Promise.resolve(null)
       snapshots = await sampleDuringRecording(ws, config.recordingMs)
-      ;[previewMeasurement, processEndurance, streamManagerToggles] = await Promise.all([
-        previewMeasurementPromise,
-        processEndurancePromise,
-        streamManagerTogglePromise
-      ])
+      ;[previewMeasurement, processEndurance, streamManagerToggles, sceneHudToggles] =
+        await Promise.all([
+          previewMeasurementPromise,
+          processEndurancePromise,
+          streamManagerTogglePromise,
+          sceneHudTogglePromise
+        ])
     } finally {
       if (stopCaptionOverlayStimulus) await stopCaptionOverlayStimulus()
       if (motionStimulusFocusKeepalive) clearInterval(motionStimulusFocusKeepalive)
@@ -866,6 +909,20 @@ async function main() {
           endMs: stopRequestedAt - recordingStartedAt
         })
       : null
+    const sceneHudOverlay = config.sceneHudOverlay
+      ? await analyzeSceneHudOverlayArtifact(outputPath, {
+          toggles: sceneHudToggles,
+          endMs: stopRequestedAt - recordingStartedAt
+        })
+      : null
+    if (sceneHudOverlay) {
+      console.log(formatOverlayArtifactPhasesSummary(sceneHudOverlay, 'Scene HUD'))
+      for (const failure of sceneHudOverlay.failures) console.log(`  - ${failure}`)
+      writeFileSync(
+        join(config.outputDirectory, 'scene-hud-overlay-verdict.json'),
+        `${JSON.stringify({ outputPath, ...sceneHudOverlay }, null, 2)}\n`
+      )
+    }
     const claimsNative = claimsNativePreview({ previewTransport, diagnostics })
     const previewSurfaceOutputFailures = previewSurfaceOutputGuard.failures()
     // Full real-source acceptance gate: final-file verdict + recording repeats +
@@ -893,7 +950,10 @@ async function main() {
         ),
         notesOverlay
       ),
-      streamManagerOverlay
+      appendNotesOverlayFailures(
+        streamManagerOverlay ?? { pass: true, failures: [] },
+        sceneHudOverlay
+      )
     )
     const qualityMode = classifyMediaQualityMode({
       diagnostics,
@@ -977,6 +1037,15 @@ async function main() {
       pass: false,
       failures: ['stream-manager: overlay gate was requested but no overlay evidence was produced'],
       warnings: []
+    }
+    if (config.sceneHudOverlayGate) {
+      return (
+        sceneHudOverlay ?? {
+          pass: false,
+          failures: ['scene-hud: overlay gate was requested but no overlay evidence was produced'],
+          warnings: []
+        }
+      )
     }
     if (config.streamManagerOverlayGate) return streamManagerOverlayVerdict
     return config.notesOverlayGate ? notesOverlayVerdict : (screenRecording ?? acceptance)
@@ -1269,6 +1338,9 @@ function protectedOverlayWindowIdsFromOverlays() {
   if (streamManagerOverlayHidden && typeof streamManagerOverlayState?.windowId === 'number') {
     ids.push(streamManagerOverlayState.windowId)
   }
+  if (sceneHudOverlayHidden && typeof sceneHudOverlayState?.windowId === 'number') {
+    ids.push(sceneHudOverlayState.windowId)
+  }
   return ids
 }
 
@@ -1389,6 +1461,171 @@ async function analyzeStreamManagerOverlayArtifact(outputPath, { toggles, endMs 
     failures: allFailures,
     toggles
   }
+}
+
+/**
+ * Plan 231 D20: the key HUD's window over the captured display, painted red
+ * edge to edge (main's own window, the one a key switch draws in). Its id
+ * joins the exclusion list the Studio sends, as `currentProtectedOverlayWindowIds`
+ * does. The same bounds recipe as Notes, so the marker sits on the stimulus.
+ */
+async function setupSceneHudOverlay(screenSource) {
+  const smoke = launched?.connections?.['preview-motion-ready']
+  if (!smoke) throw new Error('Scene HUD overlay smoke requires the main-process command server.')
+  await smokeCommand(smoke, 'scene-hud-set-enabled', { enabled: true })
+  let state = null
+  const deadline = Date.now() + 30_000
+  while (Date.now() < deadline) {
+    state = await smokeCommand(smoke, 'scene-hud-state')
+    if (state?.enabled && state.ready && typeof state.windowId === 'number') break
+    await sleep(250)
+  }
+  if (!state?.ready || typeof state.windowId !== 'number') {
+    throw new Error(
+      `Scene HUD overlay smoke: the HUD window never got ready (${JSON.stringify(state)}).`
+    )
+  }
+  if (state.method !== 'capture-filter') {
+    throw new Error(
+      `Scene HUD overlay smoke expects the macOS capture filter, got ${state.method}.`
+    )
+  }
+  sceneHudOverlayBounds = notesOverlayBoundsForSource(screenSource)
+  const marked = await smokeCommand(smoke, 'scene-hud-set-smoke-marker', {
+    ...sceneHudOverlayBounds,
+    color: '#ff0000'
+  })
+  if (marked.markerInstalled !== true) {
+    throw new Error('Scene HUD overlay smoke could not paint its marker.')
+  }
+  if (marked.windowId !== state.windowId) {
+    throw new Error(
+      `Scene HUD overlay smoke: the window changed (${marked.windowId} vs ${state.windowId}).`
+    )
+  }
+  sceneHudOverlayBounds = marked.bounds ?? sceneHudOverlayBounds
+  sceneHudOverlayHidden = true
+  return marked
+}
+
+/**
+ * A real key switch a sixth of the way in (the event a pressed key sends:
+ * the Studio switches the scene, asks for the HUD, and main draws it in the
+ * marked window), then off the list a third of the way in and on again at
+ * two thirds, each through the same screen start the Studio sends.
+ */
+async function runSceneHudToggleSchedule(ws, sourceSelection, recordingStartedAt) {
+  const smoke = launched?.connections?.['preview-motion-ready']
+  const steps = []
+  const elapsed = () => Date.now() - recordingStartedAt
+  await sleep(Math.max(0, Math.round(config.recordingMs / 6) - elapsed()))
+  // The HUD shows only while another app is in front: the stimulus panel never
+  // takes the focus, so Finder takes it for the key press (its window is never
+  // red, and the marked HUD sits above it).
+  spawnSync('open', ['-a', 'Finder'], { timeout: 10_000 })
+  await sleep(1200)
+  const before = await smokeCommand(smoke, 'scene-hud-state')
+  const keyAtMs = elapsed()
+  await smokeCommand(smoke, 'global-shortcut-trigger', { action: 'scene-slot-2' })
+  let after = before
+  const answerDeadline = Date.now() + 8_000
+  while (Date.now() < answerDeadline && after.requests === before.requests) {
+    await sleep(150)
+    after = await smokeCommand(smoke, 'scene-hud-state')
+  }
+  await smokeCommand(smoke, 'main-window-focus').catch(() => null)
+  const keySwitch = {
+    atMs: keyAtMs,
+    answeredMs: elapsed() - keyAtMs,
+    requests: after.requests - before.requests,
+    lastResult: after.lastResult ?? null,
+    videorcWindowFocused: after.videorcWindowFocused
+  }
+  console.log(`Scene HUD key switch (scene-slot-2) at ${keyAtMs} ms: ${JSON.stringify(keySwitch)}.`)
+  const flip = async (hidden) => {
+    sceneHudOverlayHidden = hidden
+    const atMs = elapsed()
+    const status = await request(
+      ws,
+      config.timeoutMs,
+      'preview.screen.start',
+      previewSourceParams(sourceSelection, {
+        protectedOverlayWindowIds: protectedOverlayWindowIdsFromOverlays()
+      })
+    )
+    const step = {
+      hidden,
+      atMs,
+      appliedMs: elapsed() - atMs,
+      screenState: status?.state ?? null,
+      message: status?.message ?? null
+    }
+    steps.push(step)
+    console.log(
+      `Scene HUD exclusion -> ${hidden ? 'on' : 'off'} at ${atMs} ms: ${step.screenState} (${step.message ?? 'no message'}; ${step.appliedMs} ms).`
+    )
+    return atMs
+  }
+  await sleep(Math.max(0, Math.round(config.recordingMs / 3) - elapsed()))
+  const offAtMs = await flip(false)
+  await sleep(Math.max(0, Math.round((config.recordingMs * 2) / 3) - elapsed()))
+  const onAtMs = await flip(true)
+  return { keySwitch, offAtMs, onAtMs, steps }
+}
+
+async function analyzeSceneHudOverlayArtifact(outputPath, { toggles, endMs }) {
+  const failures = []
+  const settle = config.sceneHudOverlaySettleMs
+  const margin = 500
+  if (!toggles || toggles.error || !Number.isFinite(toggles.offAtMs)) {
+    failures.push(`scene-hud: the schedule did not run (${toggles?.error ?? 'no timeline'})`)
+  }
+  const key = toggles?.keySwitch
+  if (!key || key.requests < 1) {
+    failures.push('scene-hud: the key switch never asked main for the HUD')
+  } else if (!key.lastResult?.shown) {
+    failures.push(
+      `scene-hud: the key switch did not draw the HUD (${JSON.stringify(key.lastResult)})`
+    )
+  }
+  for (const step of toggles?.steps ?? []) {
+    const label = `exclusion ${step.hidden ? 'on' : 'off'} at ${step.atMs} ms`
+    if (step.screenState !== 'live') {
+      failures.push(`scene-hud: ${label} left the capture ${step.screenState ?? 'unknown'}`)
+    }
+    if (!/applied to the running capture/.test(step.message ?? '')) {
+      failures.push(
+        `scene-hud: ${label} was not applied in place (${step.message ?? 'no message'})`
+      )
+    }
+  }
+  const phases =
+    toggles && Number.isFinite(toggles.offAtMs) && Number.isFinite(toggles.onAtMs)
+      ? [
+          {
+            name: 'hidden, key switch',
+            fromMs: 0,
+            toMs: toggles.offAtMs - margin,
+            expect: 'absent'
+          },
+          {
+            name: 'off the list',
+            fromMs: toggles.offAtMs + settle,
+            toMs: toggles.onAtMs - margin,
+            expect: 'present'
+          },
+          { name: 'hidden again', fromMs: toggles.onAtMs + settle, toMs: endMs, expect: 'absent' }
+        ]
+      : [{ name: 'hidden', fromMs: 0, toMs: endMs, expect: 'absent' }]
+  const artifact = await analyzeOverlayArtifactPhases(outputPath, {
+    ffmpegPath: config.ffmpegPath,
+    phases,
+    maxMarkerPixelRatio: config.sceneHudOverlayMaxMarkerPixelRatio,
+    minPresentMarkerPixelRatio: config.sceneHudOverlayMinVisibleMarkerPixelRatio,
+    window: 'scene-hud'
+  })
+  const allFailures = [...failures, ...artifact.failures]
+  return { ...artifact, pass: allFailures.length === 0, failures: allFailures, toggles }
 }
 
 async function waitForPreviewSourceReadiness(ws, sources, screenPreviewParams) {
