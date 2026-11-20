@@ -174,6 +174,9 @@ fn renderer_only_method(method: &str) -> bool {
             | "cloud.speech.sync"
             | "cloud.speech.audio"
             | "cloud.speech.overlay"
+            // Guest captions: the room renderer's guest mix, captions only.
+            | "cloud.speech.guests.sync"
+            | "cloud.speech.guests.audio"
             // Plan 224: the one answer that carries a LiveKit token goes to
             // the renderer that joins the room, never to a remote or main.
             | "cloud.room.token.refresh"

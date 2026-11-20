@@ -19,6 +19,25 @@ export type CloudSpeechStatus = {
   productionQualified: false
 }
 
+/**
+ * Guest captions: the room renderer's mix of the guests on stage. A
+ * captions-only stream, never a host, Sidekick or remote-control input.
+ */
+export type CloudSpeechGuestSync = {
+  showId: string
+  sourceId: string
+  generation: number
+  /** Guests on stage whose microphone audio is in the mix right now. */
+  guests: number
+}
+export type CloudSpeechGuestPcm = CloudSpeechPcm
+export type CloudSpeechGuestStatus = {
+  uploadAllowed: boolean
+  /** The guests' caption stream is up: what they say is captioned. */
+  captioning: boolean
+  reason: string
+}
+
 export type HostTranscriptCue = {
   sourceId: string
   speechSessionId: string

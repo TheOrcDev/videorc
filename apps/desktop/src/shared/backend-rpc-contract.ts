@@ -1015,6 +1015,14 @@ export interface BackendRpcMethodMap {
     import('./cloud-speech').CloudSpeechPcm,
     import('./cloud-speech').CloudSpeechStatus
   >
+  'cloud.speech.guests.sync': BackendRpcDefinition<
+    import('./cloud-speech').CloudSpeechGuestSync,
+    import('./cloud-speech').CloudSpeechGuestStatus
+  >
+  'cloud.speech.guests.audio': BackendRpcDefinition<
+    import('./cloud-speech').CloudSpeechGuestPcm,
+    import('./cloud-speech').CloudSpeechGuestStatus
+  >
   'captions.status.get': BackendRpcDefinition<undefined, import('./backend').CaptionsStatus>
   'session.marker.voice.configure': BackendRpcDefinition<
     { sessionId: string; consent: boolean },
@@ -5194,6 +5202,22 @@ const cloudSpeechStatusSchema = objectSchema(
   },
   { allowUnknown: false }
 )
+const cloudSpeechGuestStatusSchema = objectSchema(
+  {
+    uploadAllowed: booleanSchema,
+    captioning: booleanSchema,
+    reason: stringSchema({ maxLength: 128 })
+  },
+  { allowUnknown: false }
+)
+const boundedSpeechPcmSchema = runtimeSchema('bounded nonempty speech PCM', (value, path) => {
+  const samples = arraySchema(numberSchema({ min: -1, max: 1 }), { maxLength: 4800 }).parse(
+    value,
+    path
+  )
+  if (!samples.length) throw new RuntimeSchemaError(path, 'nonempty speech PCM')
+  return samples
+})
 const cloudSpeechOverlayTargetSchema = objectSchema(
   {
     active: booleanSchema,
@@ -8166,6 +8190,30 @@ const runtimeContracts = {
       { allowUnknown: false }
     ),
     result: cloudSpeechStatusSchema
+  },
+  'cloud.speech.guests.sync': {
+    params: objectSchema(
+      {
+        showId: stringSchema({ minLength: 1, maxLength: 160 }),
+        sourceId: stringSchema({ minLength: 1, maxLength: 160 }),
+        generation: numberSchema({ integer: true, min: 1, max: Number.MAX_SAFE_INTEGER }),
+        guests: numberSchema({ integer: true, min: 0, max: 16 })
+      },
+      { allowUnknown: false }
+    ),
+    result: cloudSpeechGuestStatusSchema
+  },
+  'cloud.speech.guests.audio': {
+    params: objectSchema(
+      {
+        sourceId: stringSchema({ minLength: 1, maxLength: 160 }),
+        sequence: numberSchema({ integer: true, min: 1, max: Number.MAX_SAFE_INTEGER }),
+        sampleRate: numberSchema({ integer: true, min: 16000, max: 48000 }),
+        samples: boundedSpeechPcmSchema
+      },
+      { allowUnknown: false }
+    ),
+    result: cloudSpeechGuestStatusSchema
   },
   'captions.status.get': { params: undefinedSchema, result: captionsStatusSchema },
   'session.marker.voice.configure': {
