@@ -1,5 +1,8 @@
 import type { BackendClient } from '@/backendClient'
 import type { HostSpeechTap } from './room-speech-source'
+import type { GuestSpeechTap } from './room-guest-speech'
+// Guest captions ride the lazily loaded room chunk, never the eager bundle.
+export { attachGuestSpeech } from './room-guest-speech'
 import {
   createRoomMicrophoneSource,
   microphoneRequiresReplacement,
@@ -131,8 +134,10 @@ import {
 import { sendOverlay, type OverlayImage } from '@/lib/talk-show-overlays'
 import {
   RemoteAudioAttachments,
+  guestCaptionTracks,
   isRecorderIdentity,
-  isRunnerIdentity
+  isRunnerIdentity,
+  type GuestMicrophone
 } from '@/lib/talk-show-room-audio'
 
 export { isRunnerIdentity } from '@/lib/talk-show-room-audio'
@@ -255,6 +260,15 @@ export type TalkShowRoomDeps = {
     muted: boolean,
     current: () => boolean
   ) => HostSpeechTap
+  /**
+   * Guest captions: the mix of the on-stage guests' microphones for the
+   * backend's captions-only guest stream. Host rooms only.
+   */
+  attachGuestSpeech?: (
+    showId: string,
+    current: () => boolean,
+    onCaptioning: (captioning: boolean) => void
+  ) => GuestSpeechTap
   /** S7a explicit dev fixture; not inferred from media-v2 or exposed as production mode. */
   pcmTestSource?: boolean
   onPcmDiagnostic?: (value: unknown) => void
@@ -342,7 +356,9 @@ export function talkShowRoomOptions(): RoomOptions {
  * first, which is all an older guest page reads. */
 export function stageMessage(
   onStage: readonly string[],
-  screen: string | null | readonly string[] = null
+  screen: string | null | readonly string[] = null,
+  /** Guest captions: the on-stage guests are being captioned right now. */
+  captions = false
 ): Uint8Array<ArrayBuffer> {
   const named = [...new Set(typeof screen === 'string' ? [screen] : (screen ?? []))]
     .filter((identity) => onStage.includes(identity))
@@ -352,7 +368,9 @@ export function stageMessage(
       v: 1,
       onStage: [...onStage],
       screen: named[0] ?? null,
-      ...(named.length === 2 ? { screens: named } : {})
+      ...(named.length === 2 ? { screens: named } : {}),
+      // The guest page's "Live captions are on" line (web guest-wire.ts).
+      ...(captions ? { captions: true } : {})
     })
   )
 }
@@ -436,6 +454,8 @@ export class TalkShowRoomClient {
   #microphoneOpening: Promise<void> = Promise.resolve()
   #microphoneCleanupFailed = false
   #speech: HostSpeechTap | null = null
+  #guestSpeech: GuestSpeechTap | null = null
+  #guestCaptioning = false
   #microphoneGeneration = 0
   #screen: LocalVideoTrack | null = null
   #screenGeneration = 0
@@ -617,12 +637,17 @@ export class TalkShowRoomClient {
     this.#lastStage = [...onStage]
     this.#lastScreen = screen
     const room = this.#room
+    // Who is on stage decides whose voice is captioned.
+    this.#feedGuestSpeech(room)
     if (!room || room.state !== ConnectionState.Connected) return
     try {
-      await room.localParticipant.publishData(stageMessage(onStage, screen), {
-        reliable: true,
-        topic: STAGE_TOPIC
-      })
+      await room.localParticipant.publishData(
+        stageMessage(onStage, screen, this.#guestCaptioning),
+        {
+          reliable: true,
+          topic: STAGE_TOPIC
+        }
+      )
     } catch (error) {
       console.warn('[talk-show] the stage did not reach the room', error)
     }
@@ -1977,6 +2002,10 @@ export class TalkShowRoomClient {
     ++this.#microphoneGeneration
     const speechClosing = this.#speech?.close()
     this.#speech = null
+    const guestSpeechClosing = this.#guestSpeech?.close()
+    this.#guestSpeech = null
+    this.#guestCaptioning = false
+    await guestSpeechClosing
     this.#pcmAbort?.abort()
     this.#pcmAbort = null
     await speechClosing
@@ -2178,6 +2207,41 @@ export class TalkShowRoomClient {
     this.#publish()
   }
 
+  /**
+   * Guest captions: the host room's guest mix follows the stage and each
+   * guest's microphone on every change. The tap opens lazily and only asks
+   * the backend for its captions-only stream; it never reaches Sidekick.
+   */
+  #feedGuestSpeech(room: Room | null): void {
+    if (!room || this.#snapshot.state !== 'connected' || !this.#owns(room)) return
+    const identity = room.localParticipant.identity
+    if (!identity.startsWith('host:') || !this.#deps.attachGuestSpeech) return
+    this.#guestSpeech ??= this.#deps.attachGuestSpeech(
+      identity.replace(/^host:/, ''),
+      () => this.#owns(room) && !this.#closed,
+      (captioning) => {
+        if (!this.#owns(room) || captioning === this.#guestCaptioning) return
+        this.#guestCaptioning = captioning
+        // Tell the guest page (data messages are not replayed).
+        void this.sendStage(this.#lastStage, this.#lastScreen)
+      }
+    )
+    const people: GuestMicrophone<MediaStreamTrack>[] = []
+    for (const participant of room.remoteParticipants.values()) {
+      let microphone: GuestMicrophone<MediaStreamTrack>['microphone'] = null
+      for (const publication of participant.trackPublications.values()) {
+        if (publication.source !== Track.Source.Microphone) continue
+        microphone = {
+          track: publication.track?.mediaStreamTrack ?? null,
+          subscribed: publication.isSubscribed,
+          muted: publication.isMuted
+        }
+      }
+      people.push({ identity: participant.identity, microphone })
+    }
+    this.#guestSpeech.setSources(guestCaptionTracks(people, this.#lastStage))
+  }
+
   #publish(): void {
     if (this.#microphone) this.#micMuted = this.#microphone.isMuted ?? this.#micMuted
     if (this.#closed) return
@@ -2186,6 +2250,7 @@ export class TalkShowRoomClient {
     const latency = this.#latency.current
     let monitorVideo: MediaStreamTrack | null = null
     let monitorAudio: MediaStreamTrack | null = null
+    this.#feedGuestSpeech(room)
     if (room) {
       for (const participant of room.remoteParticipants.values()) {
         // LiveKit's recorder is nobody (plan 234).

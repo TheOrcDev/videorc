@@ -10,6 +10,7 @@ import {
   captionSessionFloor,
   CaptionCueRenderGuard,
   captionStripLines,
+  captionsBarRunning,
   captionsStatusIsActive,
   decideCaptionsRuntimeIntent,
   decideOverlayPush,
@@ -106,6 +107,27 @@ describe('caption runtime helpers', () => {
     expect(captionsStatusIsActive({ state: 'degraded' })).toBe(true)
     expect(captionsStatusIsActive({ state: 'live' })).toBe(true)
     expect(captionsStatusIsActive({ state: 'ready' })).toBe(false)
+  })
+
+  // Guest captions: a muted host's session rests in `ready` while the guests'
+  // captions-only stream keeps captioning the talk show.
+  it('keeps the on-air bar for guest lines in a room, never when captions are off or blocked', () => {
+    const guest = update(1, { sessionClientId: 'guests-abc' })
+    const host = update(1, { sessionClientId: 'captions-abc' })
+    expect(captionsBarRunning({ status: { state: 'live' }, latest: host, roomOpen: false })).toBe(
+      true
+    )
+    expect(captionsBarRunning({ status: { state: 'ready' }, latest: guest, roomOpen: true })).toBe(
+      true
+    )
+    expect(captionsBarRunning({ status: { state: 'ready' }, latest: host, roomOpen: true })).toBe(
+      false
+    )
+    expect(captionsBarRunning({ status: { state: 'ready' }, latest: guest, roomOpen: false })).toBe(
+      false
+    )
+    for (const state of ['idle', 'blocked'] as const)
+      expect(captionsBarRunning({ status: { state }, latest: guest, roomOpen: true })).toBe(false)
   })
 
   it('bounds caption dwell between two and six seconds', () => {

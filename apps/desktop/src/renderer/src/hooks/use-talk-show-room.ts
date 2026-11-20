@@ -406,7 +406,8 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
         closeVisualMicrophoneStreams()
         await client.request('audio.mic.disarm')
         if (cancelled) return
-        const { TalkShowRoomClient } = await loadRoomClient()
+        const roomModule = await loadRoomClient()
+        const { TalkShowRoomClient } = roomModule
         if (cancelled) return
         const host = document.createElement('div')
         host.setAttribute('data-talk-show-audio-host', '')
@@ -418,6 +419,8 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
         keptGraphicsRef.current.clear()
         const roomClient = new TalkShowRoomClient({
           attachHostSpeech: (...args) => attachHostSpeech(client, ...args),
+          // Read at call time: the guest mixer rides the lazy room chunk.
+          attachGuestSpeech: (...args) => roomModule.attachGuestSpeech(client, ...args),
           // S7a harness opt-in; main also requires VIDEORC_ROOM_PCM_TEST=1 and
           // the native source requires a debug build with smoke RPC enabled.
           pcmTestSource:

@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import {
   RemoteAudioAttachments,
+  guestCaptionTracks,
   isRecorderIdentity,
   isRunnerIdentity,
   playsRemoteAudio
@@ -121,5 +122,43 @@ describe('remote audio in the host room', () => {
     expect(ada.elements[0]?.removed).toBe(true)
     expect(cy.elements[0]?.removed).toBe(true)
     expect(attachments.identities()).toEqual([])
+  })
+})
+
+// Guest captions: only voices that are on air may become on-air captions.
+describe('guest caption tracks', () => {
+  const mic = (track: string, state: { subscribed?: boolean; muted?: boolean } = {}) => ({
+    track,
+    subscribed: state.subscribed ?? true,
+    muted: state.muted ?? false
+  })
+  it('takes the on-stage guests subscribed, unmuted microphones and nothing else', () => {
+    const tracks = guestCaptionTracks(
+      [
+        { identity: 'g_on', microphone: mic('on') },
+        { identity: 'g_second', microphone: mic('second') },
+        { identity: 'g_backstage', microphone: mic('backstage') },
+        { identity: 'g_muted', microphone: mic('muted', { muted: true }) },
+        { identity: 'g_unsubscribed', microphone: mic('unsubscribed', { subscribed: false }) },
+        { identity: 'g_no_mic', microphone: null },
+        { identity: 'host:s', microphone: mic('host') },
+        { identity: 'runner:s', microphone: mic('runner') },
+        { identity: 'EG_recorder', microphone: mic('recorder') }
+      ],
+      [
+        'g_on',
+        'g_second',
+        'g_muted',
+        'g_unsubscribed',
+        'g_no_mic',
+        'host:s',
+        'runner:s',
+        'EG_recorder'
+      ]
+    )
+    expect(tracks).toEqual(['on', 'second'])
+  })
+  it('captions nobody with an empty stage', () => {
+    expect(guestCaptionTracks([{ identity: 'g_on', microphone: mic('on') }], [])).toEqual([])
   })
 })

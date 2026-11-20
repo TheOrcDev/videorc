@@ -1176,6 +1176,22 @@ describe('the stage message (plan 249 S6)', () => {
     })
     expect(read(stageMessage(['host:s'], []))).toEqual({ v: 1, onStage: ['host:s'], screen: null })
   })
+
+  // Guest captions: the guest page's "Live captions are on" line. Only while
+  // the guests are captioned; otherwise the message is byte-for-byte the old one.
+  it('says captions only while the guests are captioned', () => {
+    expect(read(stageMessage(['g_a'], null, true))).toEqual({
+      v: 1,
+      onStage: ['g_a'],
+      screen: null,
+      captions: true
+    })
+    expect(read(stageMessage(['g_a'], null, false))).toEqual({
+      v: 1,
+      onStage: ['g_a'],
+      screen: null
+    })
+  })
 })
 
 describe('processed microphone room ownership', () => {

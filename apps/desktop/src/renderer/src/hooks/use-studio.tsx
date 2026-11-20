@@ -655,6 +655,7 @@ import {
   captionOverlayTargetPlan,
   captionSessionFloor,
   CaptionCueRenderGuard,
+  captionsBarRunning,
   captionsStatusIsActive,
   decideCaptionsRuntimeIntent,
   decideOverlayPush,
@@ -15298,7 +15299,11 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
           .join('|')
       : undefined
     const burnIn = outputs.length > 0
-    const captionsRunning = captionsStatusIsActive(captionsStatus)
+    const captionsRunning = captionsBarRunning({
+      status: captionsStatus,
+      latest,
+      roomOpen: talkShowRoomOpen
+    })
     const decision = decideOverlayPush({
       burnIn,
       captionsRunning,
