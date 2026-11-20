@@ -5,8 +5,6 @@ edition = "2024"
 license = "AGPL-3.0-only"
 
 [dependencies]
-# Plan 255: the SRT Camera's stills draw text with a system font (none shipped).
-ab_glyph = "0.2.32"
 anyhow = "1.0"
 # Plan 190: optional here only for the `live-background-gl-check` feature; the
 # Linux target table below always enables them.
@@ -62,8 +60,11 @@ dispatch2 = "0.3.1"
 objc2 = { version = "0.6.4", features = ["exception"] }
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSApplication", "NSColor", "NSGraphics", "NSResponder", "NSRunningApplication", "NSScreen", "NSView", "NSWindow", "objc2-quartz-core"] }
 objc2-av-foundation = { version = "0.3.2", default-features = false, features = ["AVCaptureDevice", "AVCaptureInput", "AVCaptureOutputBase", "AVCaptureSession", "AVCaptureSessionPreset", "AVCaptureVideoDataOutput", "AVMediaFormat", "AVVideoSettings", "dispatch2", "objc2-core-media", "objc2-core-video"] }
-objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "CFCGTypes", "CFDate", "CFNumber", "CFRunLoop", "CFUUID"] }
-objc2-core-graphics = { version = "0.3.2", default-features = false, features = ["CGDirectDisplay", "CGDisplayConfiguration", "CGError", "CGWindow", "CGImage"] }
+objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "CFAttributedString", "CFCGTypes", "CFDate", "CFDictionary", "CFNumber", "CFRunLoop", "CFString", "CFUUID"] }
+objc2-core-graphics = { version = "0.3.2", default-features = false, features = ["CGBitmapContext", "CGColorSpace", "CGContext", "CGDirectDisplay", "CGDisplayConfiguration", "CGError", "CGWindow", "CGImage"] }
+# Plan 255: the SRT Camera's stills draw their text with CoreText and the
+# system font, so Videorc ships no font file.
+objc2-core-text = { version = "0.3.2", default-features = false, features = ["std", "CTFont", "CTLine", "CTStringAttributes", "objc2-core-graphics"] }
 # The device UID (`kAudioDevicePropertyDeviceUID`): what a saved microphone
 # is found by once CoreAudio hands it a new id (plan 254 S7).
 objc2-core-audio = { version = "0.3.2", default-features = false, features = ["std", "objc2-core-audio-types", "AudioHardware"] }

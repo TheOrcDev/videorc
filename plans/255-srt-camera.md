@@ -239,12 +239,13 @@ that `otool -L` shows free of Homebrew paths.
 `srt_camera/apple_decode.rs` (new, the D9 boundary), `srt_camera/still.rs`
 (new), `srt_camera/camera.rs` (new), `preview_camera.rs`,
 `camera_capture.rs`, `recording.rs`, `Cargo.toml` (`objc2-video-toolbox`
-decompression features, `ab_glyph`).
+decompression features, `objc2-core-text`).
 
 - VideoToolbox decodes H.264 and HEVC (Main 10 included) to IOSurface BGRA
   (D12), rebuilt when the parameter sets change.
-- The still: dark, centred text drawn with `ab_glyph` from a system font
-  (no font file shipped); a plain still when no font is found.
+- The still: dark, centred text drawn by the platform's `TextRenderer` with
+  a system font (no font file shipped; CoreText on macOS); a plain still
+  where no renderer exists.
 - One pacer publishes into the camera frame store at the canvas rate, the
   newest frame or the still, so the camera looks healthy to every cadence
   check while it waits (D7). On top: an SRT Camera never arms the step-down
@@ -601,6 +602,12 @@ test -p videorc-backend`, typecheck, format, `test:scripts` and
   at 60 fps 110.5 ms over 3 runs (108.0 to 114.3; 121 ms before), the
   same as the reference camera path measured the same way (110 to 114). The camera led 289 to 300 of every
   300 canvas ticks.
+- **Still text through CoreText (2026-11-20)**: `ab_glyph` is gone; its
+  `ttf-parser` is unmaintained (RUSTSEC-2026-0192, no fixed release) and CI
+  denies the advisory. `still.rs` keeps the layout (wrap, the 9:16 column,
+  mirroring) behind a `TextRenderer` trait; `still/core_text.rs` draws with
+  CoreText and the system UI font into a coverage mask. Windows and Linux
+  can add their own renderer; until then their stills have no text.
 - **Reads don't block (2026-11-20)**: libsrt 1.5.7 wakes a blocking reader
   only on its next full ACK. After the last packet of a frame, that comes
   about 10 ms later (`checkACKTimer` waits for the socket to be idle 10 ms),
