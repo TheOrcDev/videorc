@@ -134,6 +134,7 @@ function harness(options: { enabled?: boolean } = {}) {
   let hostIdentity: string | null = HOST
   const present = new Set([ADA, BO, PAGE])
   let trackReads = 0
+  const sampled: RoomLatency[] = []
   const source: RoomLatencySource = {
     hostIdentity: () => hostIdentity,
     present: (identity) => present.has(identity),
@@ -151,6 +152,9 @@ function harness(options: { enabled?: boolean } = {}) {
     },
     enabled: () => enabled,
     now: () => now,
+    sampled: (latency) => {
+      sampled.push(latency)
+    },
     setInterval: (run, every) => {
       timers.set(nextHandle, { at: now + every, every, run })
       return nextHandle++
@@ -166,6 +170,7 @@ function harness(options: { enabled?: boolean } = {}) {
   return {
     latency,
     present,
+    sampled,
     source,
     timers,
     settle,
@@ -399,5 +404,45 @@ describe('the host measures (plan 253 S4)', () => {
     await h.advance(LATENCY_SAMPLE_MS)
     h.relay(ADA, blockOf(ADA))
     expect(JSON.stringify(h.latency.current)).not.toMatch(/203\.0\.113|address/)
+  })
+})
+
+// Plan 253 S7: the numbers go to the backend's record once per sample.
+describe('the host reports each sample (plan 253 S7)', () => {
+  it('hands over the numbers once per 10 s sample, never for a relay alone', async () => {
+    const h = harness()
+    h.latency.start(h.source)
+    await h.settle()
+    // The first reading has no block: what it hands over holds no number.
+    expect(h.sampled).toEqual([{ people: {} }])
+    h.relay(ADA, blockOf(ADA))
+    h.relay(PAGE, blockOf(PAGE))
+    expect(h.sampled).toHaveLength(1)
+    await h.advance(LATENCY_SAMPLE_MS)
+    expect(h.sampled).toHaveLength(2)
+    expect(h.sampled[1]).toEqual(h.latency.current)
+    expect(h.sampled[1]?.people[ADA]?.ms).toBe(161)
+    expect(h.sampled[1]?.program).toEqual({ ms: 112, audioMs: 109 })
+    // More relays inside the window: still one hand-over per sample.
+    for (let index = 0; index < 4; index += 1) h.relay(ADA, blockOf(ADA))
+    await h.advance(LATENCY_SAMPLE_MS - 1)
+    expect(h.sampled).toHaveLength(2)
+    await h.advance(1)
+    expect(h.sampled).toHaveLength(3)
+  })
+
+  it('hands over nothing on a show that does not measure, or after it stops', async () => {
+    const node = harness({ enabled: false })
+    node.latency.start(node.source)
+    await node.advance(3 * LATENCY_SAMPLE_MS)
+    expect(node.sampled).toEqual([])
+
+    const h = harness()
+    h.latency.start(h.source)
+    await h.advance(LATENCY_SAMPLE_MS)
+    const before = h.sampled.length
+    h.latency.stop()
+    await h.advance(3 * LATENCY_SAMPLE_MS)
+    expect(h.sampled).toHaveLength(before)
   })
 })

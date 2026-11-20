@@ -11,6 +11,7 @@ import { setRoomFrameEncodeObserver } from './room-frame-test-state'
 import vectors from '../../../shared/chroma-key-vectors.json'
 import type { TalkShowCameraSettings } from './talk-show-camera-effects'
 import type { CloudOnAir, CloudRoomClientState, CloudRoomTokenAnswer } from '@/lib/backend'
+import { validateBackendRpcParams } from '../../../shared/backend-rpc-contract'
 import {
   TAKEN_OVER_DETAIL,
   TAKEN_OVER_GRACE_MS,
@@ -1779,6 +1780,62 @@ describe('latency in the room (plan 253 S4)', () => {
       from: [{ identity: HOST, audioMs: 45, videoMs: 30 }]
     })
     expect(room.snapshot.program).toBeUndefined()
+    await room.disconnect()
+  })
+
+  // Plan 253 S7: each sample goes to the backend's record, in the strict
+  // contract's own shape.
+  it("reports each sample to the backend for the show's record", async () => {
+    const reports: unknown[][] = []
+    const backend = {
+      requestTyped: vi.fn(async (...args: unknown[]) => {
+        reports.push(args)
+        return { kept: true }
+      })
+    } as never
+    const { room } = client(undefined, undefined, { measureLatency: () => true, backend })
+    await room.connect()
+    people()
+    latestRoom().emit('ParticipantConnected', latestRoom().remoteParticipants.get(ADA))
+    // Two samples 10 s apart make the host's first block: its own round
+    // trip is all there is to report until a guest's block arrives.
+    await vi.advanceTimersByTimeAsync(20_000)
+    expect(reports.at(-1)).toEqual([
+      'cloud.room.latency.report',
+      { showId: 'sh_talk', hostRttMs: 30, people: [] }
+    ])
+    // The relay alone reports nothing: the next sample does.
+    const before = reports.length
+    relay(ADA, adaBlock)
+    expect(room.snapshot.people[0]?.latency?.ms).toBe(161)
+    expect(reports).toHaveLength(before)
+    await vi.advanceTimersByTimeAsync(10_000)
+    expect(reports).toHaveLength(before + 1)
+    const [method, report] = reports.at(-1)!
+    expect(method).toBe('cloud.room.latency.report')
+    expect(report).toEqual({
+      showId: 'sh_talk',
+      hostRttMs: 30,
+      people: [
+        { identity: ADA, name: 'Ada', ms: 161, partial: false, toGuestMs: 160, fromGuestMs: 161 }
+      ]
+    })
+    expect(() => validateBackendRpcParams('cloud.room.latency.report', report)).not.toThrow()
+    await room.disconnect()
+    const after = reports.length
+    await vi.advanceTimersByTimeAsync(30_000)
+    expect(reports).toHaveLength(after)
+  })
+
+  it('reports nothing on a show that does not measure', async () => {
+    const backend = { requestTyped: vi.fn(async () => ({ kept: true })) } as never
+    const { room } = client(undefined, undefined, { measureLatency: () => false, backend })
+    await room.connect()
+    people()
+    await vi.advanceTimersByTimeAsync(30_000)
+    expect(
+      (backend as { requestTyped: ReturnType<typeof vi.fn> }).requestTyped
+    ).not.toHaveBeenCalled()
     await room.disconnect()
   })
 

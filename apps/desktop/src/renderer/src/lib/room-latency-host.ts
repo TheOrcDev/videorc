@@ -38,6 +38,11 @@ export type RoomLatencyDeps = {
   enabled(): boolean
   /** A monotonic clock, in ms. */
   now(): number
+  /**
+   * Plan 253 S7: the numbers after each 10 s sample, for the show's record.
+   * Once per sample and never between two: a relay alone reports nothing.
+   */
+  sampled?(latency: RoomLatency): void
   setInterval(run: () => void, everyMs: number): unknown
   setTimeout(run: () => void, afterMs: number): unknown
 }
@@ -153,7 +158,9 @@ export class RoomLatencyHost {
     } finally {
       this.#sampling = false
     }
-    if (this.#source === source) this.#recompute()
+    if (this.#source !== source) return
+    this.#recompute()
+    this.#deps.sampled?.(this.#current)
   }
 
   #recompute(): void {

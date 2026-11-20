@@ -1,5 +1,7 @@
 mod cloud_archives;
 mod cloud_clips;
+mod cloud_latency;
+pub(crate) use cloud_latency::LatencyMinuteRow;
 mod cloud_recordings;
 mod cloud_speech;
 pub(crate) use cloud_speech::HostTranscriptCue;
@@ -9060,6 +9062,7 @@ impl Database {
         conn.execute_batch(include_str!("storage/cloud_archives.sql"))?;
         conn.execute_batch(include_str!("storage/cloud_source_iso.sql"))?;
         conn.execute_batch(include_str!("storage/cloud_clips.sql"))?;
+        conn.execute_batch(include_str!("storage/cloud_latency.sql"))?;
         ensure_column(&conn, "sessions", "source_title", "source_title TEXT")?;
         ensure_column(&conn, "sessions", "processing_kind", "processing_kind TEXT")?;
         // Stream Manager (plan 055): structured event facts, reply context and

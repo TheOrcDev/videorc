@@ -1,6 +1,6 @@
 # Plan 253 latency contract
 
-How a managed talk show measures its own delay (plan 253, slices S1 to S4). Three participants each report what they measured, the web relays two of the reports to the host, and the host's renderer adds them up. This file is the only source for the shapes and the constants. The cases are `protocol-fixtures/room-latency.json`; the desktop model is `apps/desktop/src/shared/room-latency.ts` and the web's copy is `lib/cloud/program/room-latency.ts` (re-exported by `lib/cloud/latency.ts`), each held to the same fixture.
+How a managed talk show measures its own delay (plan 253, slices S1 to S4), and how the host's computer remembers it (S7, section 10). Three participants each report what they measured, the web relays two of the reports to the host, and the host's renderer adds them up. This file is the only source for the shapes and the constants. The cases are `protocol-fixtures/room-latency.json`; the desktop model is `apps/desktop/src/shared/room-latency.ts` and the web's copy is `lib/cloud/program/room-latency.ts` (re-exported by `lib/cloud/latency.ts`), each held to the same fixture.
 
 No prices, costs, keys or account ids belong here. This repo is public.
 
@@ -140,7 +140,8 @@ How long the program page took to draw a stage the web accepted. One clock, the 
 - The state answer gains `room.shown.applyMs` = the beacon's receive time − `appliedAgoMs` − `stageSetAt`, never below 0, and only while the page's `shown.stage` equals `stageSetKey`. Right after a new stage is accepted there is no `applyMs` until the page says it drew that stage.
 - `applyMs` includes the beacon's own trip from the page to the web (the receive time is taken at the web), so it reads a little high. A later heartbeat of the same draw gives the same figure give or take that trip.
 - It is not material: `materialOf` leaves it out, so it never moves `rev`.
-- An older page sends no `appliedAgoMs`, and then there is no `applyMs`. The desktop's Rust `CloudRoomShown` ignores the field until S7 reads it; the page's age itself never reaches the desktop.
+- An older page sends no `appliedAgoMs`, and then there is no `applyMs`. The page's age itself never reaches the desktop.
+- The desktop reads it since S7: Rust `CloudRoomShown.apply_ms`, a whole number of ms up to 86400000. Any other value (`null`, text, a fraction, a negative, a larger one) is dropped, and the state that carried it is read as if it had none. The renderer's strict schema holds the same bound. The backend keeps one sample per drawn stage in the record (section 10). No UI shows it.
 
 ## 7. Node shows
 
@@ -162,3 +163,94 @@ Not supported in v1 (D10), and nothing is drawn for them: no number, no chip, no
 - Web: `node --import tsx --test tests/room-latency.test.ts`
 
 Both read `room-latency.json` (the web's is a byte copy in `tests/fixtures/`): the block cases, the relay cases, the sampler's arithmetic on canned stats reports, and the room cases with their missing-part, `partial` and stale variants.
+
+The record (section 10):
+
+- Backend: `cargo test -p videorc-backend cloud_latency` (minute folding, the report's bounds, the slow-command event, the status byte for byte without latency, the record deleted with its show) and `cargo test -p videorc-backend the_rooms_latency_report_is_renderer_only`
+- Desktop: `pnpm --filter @videorc/desktop test -- room-latency-report.test.ts room-latency-host.test.ts cloud-program-health.test.ts`
+
+## 10. The record (S7)
+
+The renderer computes, the backend remembers (D4). Desktop only: nothing here is sent to the web, and the web stores nothing.
+
+### The report
+
+After each 10 s sample the host's room client hands the backend what it holds, as the RPC **`cloud.room.latency.report`** (renderer role only; main, remotes and agents are refused):
+
+```json
+{
+  "showId": "sh_…",
+  "hostRttMs": 30,
+  "people": [
+    {
+      "identity": "g_…",
+      "name": "Ada",
+      "ms": 161,
+      "partial": false,
+      "toGuestMs": 160,
+      "fromGuestMs": 161,
+      "videoToGuestMs": 150,
+      "videoFromGuestMs": 142
+    }
+  ],
+  "program": { "ms": 112, "audioMs": 109 }
+}
+```
+
+- Durations only, whole ms, 0 to 60000 (D1). A figure that was not measured is left out, never `null`. With nothing measured no report is sent.
+- At most 16 people, each identity once, never `program` or `control`. `name` is the name the guest joined with, cut to 80 characters.
+- Strict at both ends: the renderer's contract and the backend's parser each refuse an unknown key, a fraction or a value out of bounds, and a refused report keeps nothing.
+- Once per sample, never for a relay alone. A report that fails is not sent again: the next sample is.
+- The answer is `{ "kept": true }` when the show is the managed talk show this computer holds a room of. For any other show, a node show or no room it is `{ "kept": false }` and nothing is kept (section 7).
+- The backend never sends it on as `cloud.state`.
+
+### Command time and stage apply (D8)
+
+- **Command time.** The backend times every intent it sends the web (`stage.set`, `destinations.set`, `legs.end`, `recording.start`, `recording.stop`, `hold.image.set`) on its own monotonic clock, from the send to the answer, a failure or the deadline. An intent with no route on web control sends nothing and is not timed.
+- A command of 2000 ms or more (`SLOW_COMMAND_MS`) writes a `health_events` row with the code **`cloud-command-slow`**, level warn: "Videorc Cloud took 3.4 s to answer stage.set (3412 ms)." It carries the show's session once the show has a Library entry.
+- `CloudStatus.commandTimes` `{ lastMs, slowestMs }` is the last and the slowest command of the show this computer holds. It is absent until a command of a managed talk show was timed, and it is the Health page's **Commands** row (Normal, or Slow when the last one took 2 s or more). It is a stopwatch on this computer's own requests, not one of the summed figures of section 4.
+- **Stage apply.** `room.shown.applyMs` (section 6) is one sample per stage the page drew: a later state answer for the same stage is not counted again.
+
+### The table
+
+`cloud_latency_minutes` in the app's database (`storage/cloud_latency.sql`), one row per show, minute, subject and kind:
+
+| Column                       | Meaning                                                                             |
+| ---------------------------- | ----------------------------------------------------------------------------------- |
+| `show_id`                    | The show                                                                            |
+| `minute`                     | Unix time / 60, on this computer's clock. It says when the row was written, no more |
+| `subject`                    | A room identity (`g_…`, or `host:<show>`), `program` or `control`                   |
+| `kind`                       | The figure, below                                                                   |
+| `name`                       | The name a guest joined with. On this computer only (D12)                           |
+| `p50_ms`, `p95_ms`, `max_ms` | The minute's median, 95th percentile (nearest rank) and worst                       |
+| `samples`                    | How many samples the minute holds: up to six reports, or one per command            |
+| `partial`                    | How many of them are a floor (a part or a direction was missing)                    |
+
+| Subject       | Kind                                    | Figure                                                         |
+| ------------- | --------------------------------------- | -------------------------------------------------------------- |
+| A guest       | `conversation`                          | The conversation delay: the worse direction (the row's number) |
+| A guest       | `to-guest`, `from-guest`                | Each direction of the sound                                    |
+| A guest       | `video-to-guest`, `video-from-guest`    | Each direction of the picture, for the record                  |
+| `host:<show>` | `rtt`                                   | The host's own round trip to the room                          |
+| `program`     | `picture`, `sound`                      | The program delay, and its sound's path                        |
+| `program`     | `stage-apply`                           | `room.shown.applyMs`, once per drawn stage                     |
+| `control`     | The intent (`stage.set`, `legs.end`, …) | The command time                                               |
+
+- The backend holds the open minute's samples and writes the row again at each report, so the record is never more than one sample behind. After a backend restart inside a minute, that minute's row holds only the samples since the restart.
+- **Deleted with its show** (D12). A show's Library entry is the `sessions` row with the show's id, and deleting it deletes the show's minutes (a trigger, because a room measures before it is live or recording, when that row does not exist yet). A room that never went live or recorded has no Library entry: its minutes are deleted 30 days on, at the next launch.
+- These numbers are the model's until S5 proves them: the constants of section 5 are not calibrated yet.
+
+### Reading it after a show
+
+With the app's database (macOS: `~/Library/Application Support/Videorc/videorc.sqlite3`), read only. The last show's figures, each as its typical and worst minute:
+
+```sh
+sqlite3 -readonly ~/Library/Application\ Support/Videorc/videorc.sqlite3 "
+  SELECT COALESCE(name, subject) AS who, kind, COUNT(*) AS minutes,
+         CAST(AVG(p50_ms) AS INTEGER) AS typical_ms, MAX(max_ms) AS worst_ms, SUM(partial) AS floor_samples
+  FROM cloud_latency_minutes
+  WHERE show_id = (SELECT show_id FROM cloud_latency_minutes ORDER BY minute DESC LIMIT 1)
+  GROUP BY subject, kind ORDER BY subject, kind"
+```
+
+Minute by minute, replace the `SELECT` list with `time(minute * 60, 'unixepoch', 'localtime'), COALESCE(name, subject), kind, p50_ms, p95_ms, max_ms, samples, partial` and drop the `GROUP BY`. The slow commands of any show: `SELECT created_at, message FROM health_events WHERE code = 'cloud-command-slow' ORDER BY created_at`.

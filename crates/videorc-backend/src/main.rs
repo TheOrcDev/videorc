@@ -48,6 +48,7 @@ mod cloud_clips;
 mod cloud_control_web;
 mod cloud_controller;
 mod cloud_graphics;
+mod cloud_latency;
 mod cloud_markers;
 mod cloud_output_session;
 mod cloud_services;
@@ -878,6 +879,9 @@ async fn run_backend(device_changes: tokio::sync::watch::Receiver<u64>) -> Resul
     // its one-time, resumable backfill.
     community_service::spawn_startup_jobs(&state);
     watchdog::spawn_talk_show_watch(&state);
+    // Plan 253 S7: each web command's time goes into the show's latency
+    // record, and a slow one leaves a health event.
+    cloud_latency::spawn_command_recorder(&state);
     // Plan 249 S24 x S15: once this process loses a show it controlled,
     // captions listening for it retires (consent and intents revoked before
     // the provider task is joined). The synchronous gate is in cloud_host.
@@ -5981,6 +5985,8 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "cloud.htmlLayers.want"
         | "buddy.cloud.report"
         | "cloud.presentation.accepted"
+        // Plan 253 S7: folded in memory at once; the write is its own task.
+        | "cloud.room.latency.report"
         | "cloud.controller.desired"
         | "cloud.presentation.restore"
         | "buddy.overlay.set"
@@ -13131,6 +13137,25 @@ async fn handle_text_message_with_role(
                 _ => ServerResponse::ok(command.id, cloud_presentation_restore(&show_id).await),
             }
         }
+        // --- Plan 253 S7: what the room renderer measured, for the record ---
+        "cloud.room.latency.report" => {
+            if role != BackendRole::Renderer {
+                return ServerResponse::error(
+                    command.id,
+                    "forbidden",
+                    "Only the room renderer reports the room's latency.",
+                );
+            }
+            match serde_json::from_value::<cloud_latency::LatencyReportParams>(command.params) {
+                Ok(params) => match cloud_latency::report(state, &params) {
+                    Ok(kept) => ServerResponse::ok(command.id, serde_json::json!({ "kept": kept })),
+                    Err(problem) => ServerResponse::error(command.id, "invalid-params", problem),
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
         "cloud.room.client.report" => {
             match serde_json::from_value::<cloud_talk::RoomClientReportParams>(command.params) {
                 Ok(params) => match cloud_context(state) {
@@ -18124,6 +18149,8 @@ fn cloud_hooks(state: &AppState) -> cloud_show::CloudHooks {
             // Plan 249 S25: a local session feeding a live interval is
             // reported by the interval, before any observer sees its end.
             cloud_output_session::note_status(&status);
+            // Plan 253 S7: a newly drawn stage's apply time, for the record.
+            cloud_latency::observe_status(&emit_state, &status);
             emit_state.emit_event(cloud_show::CLOUD_STATE_EVENT, status);
         }),
         // Lane 3 F2: the show this desktop holds survives a relaunch, so the

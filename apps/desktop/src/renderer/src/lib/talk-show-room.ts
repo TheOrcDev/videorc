@@ -1,3 +1,4 @@
+import type { BackendClient } from '@/backendClient'
 import type { HostSpeechTap } from './room-speech-source'
 import {
   createRoomMicrophoneSource,
@@ -69,12 +70,14 @@ import {
 } from './room-screen-privacy'
 import { frostedStillUrl, keepFrostSample } from './frost-still'
 import { RoomLatencyHost } from './room-latency-host'
+import { roomLatencyReport } from './room-latency-report'
 import {
   LATENCY_TOPIC,
   type ConversationDelay,
   type NetStatsTrack,
   type NetTrack,
-  type ProgramDelay
+  type ProgramDelay,
+  type RoomLatency
 } from '../../../shared/room-latency'
 // The host in the room (plan 224 C-G4, D6): `livekit-client` publishes the
 // Sources camera and microphone and, on request, a screen picked through
@@ -283,6 +286,12 @@ export type TalkShowRoomDeps = {
    * measured; a node show's room samples nothing and shows no number.
    */
   measureLatency?: () => boolean
+  /**
+   * Plan 253 S7: the backend, which keeps the show's latency record
+   * (`cloud.room.latency.report` after each 10 s sample). Without it
+   * nothing is reported and the numbers stay in this window.
+   */
+  backend?: Pick<BackendClient, 'requestTyped'> | null
   /**
    * Plan 243 C5: the device on air, from the latest `cloud.state`, so a
    * second host connection that drops this one reads as taken over.
@@ -520,6 +529,7 @@ export class TalkShowRoomClient {
       clearTimer: (handle) => window.clearTimeout(handle as number),
       enabled: () => deps.measureLatency?.() === true,
       now: () => performance.now(),
+      sampled: (latency) => this.#reportLatency(latency),
       setInterval: (run, everyMs) => window.setInterval(run, everyMs),
       setTimeout: (run, afterMs) => window.setTimeout(run, afterMs)
     })
@@ -2098,6 +2108,24 @@ export class TalkShowRoomClient {
       console.warn('[talk-show] reconnect failed', messageOf(error))
       this.#scheduleReconnect()
     }
+  }
+
+  /**
+   * Plan 253 S7: one report per 10 s sample, for the show's record. The
+   * host's identity is `host:<showId>`. A report that is not kept (the
+   * backend is busy or gone) is not sent again: the next sample is.
+   */
+  #reportLatency(latency: RoomLatency): void {
+    const room = this.#room
+    const identity = this.#snapshot.identity
+    if (!room || !identity?.startsWith('host:')) return
+    const report = roomLatencyReport(
+      identity.slice(5),
+      latency,
+      (guest) => room.remoteParticipants.get(guest)?.name
+    )
+    if (report)
+      void this.#deps.backend?.requestTyped('cloud.room.latency.report', report).catch(() => {})
   }
 
   /**

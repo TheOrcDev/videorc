@@ -168,3 +168,98 @@ describe('the room as live activity for the app guards (plan 249 S26)', () => {
     ).toBe('live')
   })
 })
+
+// Plan 253 S7: the Commands row, and the two status fields the backend adds
+// on a managed talk show. Both are optional and strict: absent never null.
+
+const ROOM = {
+  phase: 'open',
+  doorOpen: false,
+  declinedCount: 0,
+  stage: { layout: 'solo', onStage: ['host:sh_abc'] },
+  hostAway: false,
+  connected: true,
+  client: 'connected',
+  returnEnabled: false,
+  stageSet: true,
+  live: true
+}
+
+describe('the Commands row (plan 253 S7)', () => {
+  const commands = (commandTimes: ProgramHealthInput['commandTimes']) =>
+    programHealthRows({ room: { participants: [] }, commandTimes }).find(
+      (row) => row.id === 'commands'
+    )
+
+  it('is not drawn until a command was timed', () => {
+    expect(commands(undefined)).toBeUndefined()
+    expect(commands(null)).toBeUndefined()
+    // Every shared vector is a show without command times: no row is added.
+    for (const vector of fixture.layers)
+      expect(programHealthRows(vector.input).some((row) => row.layer === 'control')).toBe(false)
+  })
+
+  it('says how long the last and the slowest command took', () => {
+    expect(commands({ lastMs: 420, slowestMs: 3412 })).toEqual({
+      id: 'commands',
+      layer: 'control',
+      label: 'Commands',
+      status: 'Normal',
+      tone: 'good',
+      detail: 'Last answered in 420 ms. Slowest this show: 3.4 s.'
+    })
+  })
+
+  it('reads Slow from two seconds, on the last command only', () => {
+    expect(commands({ lastMs: 1999, slowestMs: 9000 })?.tone).toBe('good')
+    const slow = commands({ lastMs: 2000, slowestMs: 2000 })
+    expect([slow?.status, slow?.tone]).toEqual(['Slow', 'warn'])
+    expect(slow?.detail).toBe('Last answered in 2.0 s. Slowest this show: 2.0 s.')
+    expect(programHealthVerdict([slow!])).toBe('warn')
+  })
+})
+
+describe('cloud.state carries the latency fields strictly (plan 253 S7)', () => {
+  it('reads a status with neither field exactly as before', () => {
+    const status = { ...CLOUD_BASE, room: { ...ROOM, shown: { onStage: ['host:sh_abc'] } } }
+    expect(validateBackendEventPayload('cloud.state', status)).toEqual(status)
+  })
+
+  it('accepts command times and a stage apply time', () => {
+    const status = {
+      ...CLOUD_BASE,
+      commandTimes: { lastMs: 420, slowestMs: 3412 },
+      room: {
+        ...ROOM,
+        shown: {
+          onStage: ['host:sh_abc'],
+          stageKey: 'k1',
+          at: '2026-11-20T10:00:00Z',
+          applyMs: 412
+        }
+      }
+    }
+    expect(validateBackendEventPayload('cloud.state', status)).toEqual(status)
+    expect(validateBackendRpcResult('cloud.status', status)).toEqual(status)
+  })
+
+  it('refuses null, a fraction, an unknown key and a time out of bounds', () => {
+    for (const commandTimes of [
+      null,
+      { lastMs: 420 },
+      { lastMs: 420, slowestMs: null },
+      { lastMs: 4.2, slowestMs: 5 },
+      { lastMs: 420, slowestMs: 420, kind: 'stage.set' }
+    ])
+      expect(() =>
+        validateBackendEventPayload('cloud.state', { ...CLOUD_BASE, commandTimes })
+      ).toThrow()
+    for (const applyMs of [null, -1, 12.5, '412', 86_400_001])
+      expect(() =>
+        validateBackendEventPayload('cloud.state', {
+          ...CLOUD_BASE,
+          room: { ...ROOM, shown: { onStage: [], applyMs } }
+        })
+      ).toThrow()
+  })
+})

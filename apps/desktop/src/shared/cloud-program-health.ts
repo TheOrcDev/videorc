@@ -1,4 +1,9 @@
-import type { CloudOutputHealth, CloudRoomParticipant, CloudShowSummary } from './backend'
+import type {
+  CloudCommandTimes,
+  CloudOutputHealth,
+  CloudRoomParticipant,
+  CloudShowSummary
+} from './backend'
 
 /**
  * Plan 249 S26: a cloud room's health, layer by layer, so an operator can
@@ -10,6 +15,9 @@ import type { CloudOutputHealth, CloudRoomParticipant, CloudShowSummary } from '
  * - `page`: each program page, from its beacons as the web keeps them. A page
  *   that does not report is Unknown: never healthy, never silent or black.
  * - `egress`: each program output's egress, with the profile it encodes.
+ * - `control`: how long Videorc Cloud took to answer what the host changed
+ *   in the show (plan 253 S7), timed on this computer's own clock. Only on
+ *   a managed talk show, and only once a command was timed.
  *
  * The page measures the sound it plays and the picture it draws. Neither is
  * proof of the encoded stream, and no A/V skew is measured for a managed
@@ -17,7 +25,7 @@ import type { CloudOutputHealth, CloudRoomParticipant, CloudShowSummary } from '
  * acceptance read the same rows. Every row's status is a sentence-case word.
  */
 
-export type ProgramHealthLayer = 'contribution' | 'page' | 'egress'
+export type ProgramHealthLayer = 'contribution' | 'page' | 'egress' | 'control'
 export type ProgramHealthTone = 'good' | 'warn' | 'error' | 'neutral'
 
 export interface ProgramHealthRow {
@@ -42,7 +50,12 @@ export interface ProgramHealthInput {
   outputHealth?: readonly CloudOutputHealth[]
   show?: Pick<CloudShowSummary, 'outputProfile'> | null
   microphone?: ProgramHealthMicrophone | null
+  /** Plan 253 S7: the show's command times, when the backend has timed one. */
+  commandTimes?: CloudCommandTimes | null
 }
+
+/** A command that took this long was slow (the backend's `SLOW_COMMAND_MS`). */
+export const COMMAND_SLOW_MS = 2000
 
 /** Says what the program preview is, and what it is not. */
 export const PROGRAM_PREVIEW_NOTE =
@@ -315,7 +328,28 @@ function egressRow(
   }
 }
 
-/** Every row, contributions first, then each output's page and egress. */
+/** "420 ms" under a second, "3.4 s" from there. */
+function commandTime(ms: number): string {
+  return ms < 1000 ? `${ms} ms` : `${(ms / 1000).toFixed(1)} s`
+}
+
+function commandsRow(times: CloudCommandTimes): ProgramHealthRow {
+  const slow = times.lastMs >= COMMAND_SLOW_MS
+  return {
+    id: 'commands',
+    layer: 'control',
+    label: 'Commands',
+    status: slow ? 'Slow' : 'Normal',
+    tone: slow ? 'warn' : 'good',
+    // Short, so a narrow row keeps both numbers and the row's own name.
+    detail: `Last answered in ${commandTime(times.lastMs)}. Slowest this show: ${commandTime(times.slowestMs)}.`
+  }
+}
+
+/**
+ * Every row, contributions first, then each output's page and egress, then
+ * the show's commands.
+ */
 export function programHealthRows(input: ProgramHealthInput): ProgramHealthRow[] {
   const rows = contributionRows(input)
   for (const entry of (input.outputHealth ?? []).slice(0, 4)) {
@@ -323,6 +357,7 @@ export function programHealthRows(input: ProgramHealthInput): ProgramHealthRow[]
     if (!label) continue
     rows.push(pageRow(entry, label), egressRow(entry, label, input.show))
   }
+  if (input.commandTimes) rows.push(commandsRow(input.commandTimes))
   return rows
 }
 
