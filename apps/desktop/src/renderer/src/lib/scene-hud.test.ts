@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest'
 
-import { sceneHudKey, sceneHudRequestFor, type SceneSwitchSource } from './scene-hud'
+import {
+  sceneHudKey,
+  sceneHudRequestFor,
+  sceneHudSwitchRequest,
+  sceneHudWanted,
+  type SceneSwitchSource
+} from './scene-hud'
 
 const FIGMA = { name: 'Figma', icon: { kind: 'app' as const, bundleId: 'com.figma.Desktop' } }
 
@@ -98,5 +104,52 @@ describe('the key on the chip', () => {
         platform: 'darwin'
       })
     ).toBeUndefined()
+  })
+})
+
+describe('the Studio’s whole ask (plan 231 D20)', () => {
+  const scenes = [
+    {
+      id: 'a',
+      name: 'Screen only',
+      visual: { layout: { layoutPreset: 'screen-only' }, sources: {} }
+    },
+    { id: 'b', name: 'Camera', visual: { layout: { layoutPreset: 'camera-only' }, sources: {} } }
+  ] as unknown as Parameters<typeof sceneHudSwitchRequest>[0]['scenes']
+  const input = {
+    source: 'key' as const,
+    sceneId: 'b',
+    outcome: { ok: true } as const,
+    pressed: 'scene-slot-2' as const,
+    window: { enabled: true, method: 'content-protection' as const, ready: true },
+    lastStart: null,
+    status: { state: 'live' as const },
+    settings: {},
+    scenes,
+    devices: [],
+    platform: 'win32'
+  }
+
+  it('names the scene and its position key, from what the Studio knew', () => {
+    expect(sceneHudSwitchRequest(input)).toMatchObject({
+      name: 'Camera',
+      key: 'Control+Alt+Shift+2'
+    })
+    // Fail closed: macOS with a running capture that never took the id.
+    expect(
+      sceneHudSwitchRequest({
+        ...input,
+        window: { enabled: true, method: 'capture-filter', windowId: 9, ready: true },
+        lastStart: [[1], { state: 'live' }] as const
+      })
+    ).toBeNull()
+    expect(sceneHudSwitchRequest({ ...input, sceneId: 'gone' })).toBeNull()
+    expect(sceneHudSwitchRequest({ ...input, settings: { sceneHud: false } })).toBeNull()
+  })
+
+  it('wants main’s window only with the setting on and a key that switches a scene', () => {
+    expect(sceneHudWanted({}, scenes, 'darwin')).toBe(true)
+    expect(sceneHudWanted({ sceneHud: false }, scenes, 'darwin')).toBe(false)
+    expect(sceneHudWanted({}, [], 'darwin')).toBe(false)
   })
 })

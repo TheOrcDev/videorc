@@ -5,8 +5,6 @@ import { sceneHudProtectedOverlayWindow } from './protected-overlay-windows'
 import {
   sceneHudCaptureConfirmed,
   sceneHudEnabled,
-  sceneHudExclusionAfterStart,
-  sceneHudExclusionForWindow,
   sceneHudKeySet,
   screenStartHoldsExclusion
 } from './scene-hud-capture'
@@ -50,83 +48,72 @@ describe('the capture leaves the key HUD out (fail closed)', () => {
     expect(screenStartHoldsExclusion({ state: 'failed' })).toBe(false)
   })
 
+  const LIVE = { state: 'live' } as const
+  const IDLE = { state: 'source-missing' } as const
+  const APPLIED = {
+    state: 'live',
+    message:
+      'Native screen preview source reused; the capture exclusion set was applied to the running capture.'
+  } as const
+  const DEFERRED = {
+    state: 'live',
+    message:
+      'Native screen preview source reused; the capture exclusion set updates at the next capture start.'
+  } as const
+
   it('confirms the macOS filter only once the running capture took the window id', () => {
-    // A capture running when the window appeared: unconfirmed until the resend.
-    const pending = sceneHudExclusionForWindow(MAC, null, true)
-    expect(pending).toEqual({ windowId: 42, held: false })
-    expect(
-      sceneHudCaptureConfirmed({ window: MAC, exclusion: pending, captureRunning: true })
-    ).toBe(false)
+    // A capture started before the window appeared: unconfirmed until the resend.
+    expect(sceneHudCaptureConfirmed({ window: MAC, lastStart: [[7], LIVE], status: LIVE })).toBe(
+      false
+    )
+    expect(sceneHudCaptureConfirmed({ window: MAC, lastStart: null, status: LIVE })).toBe(false)
     // The resend carried the id and the capture took it in place.
-    const held = sceneHudExclusionAfterStart(pending, [7, 42], {
-      state: 'live',
-      message:
-        'Native screen preview source reused; the capture exclusion set was applied to the running capture.'
-    })
-    expect(sceneHudCaptureConfirmed({ window: MAC, exclusion: held, captureRunning: true })).toBe(
+    expect(
+      sceneHudCaptureConfirmed({ window: MAC, lastStart: [[7, 42], APPLIED], status: LIVE })
+    ).toBe(true)
+    // A fresh start with the id is built with it.
+    expect(sceneHudCaptureConfirmed({ window: MAC, lastStart: [[42], LIVE], status: LIVE })).toBe(
       true
     )
     // A deferred set leaves it unconfirmed while that capture runs.
-    const deferred = sceneHudExclusionAfterStart(pending, [42], {
-      state: 'live',
-      message:
-        'Native screen preview source reused; the capture exclusion set updates at the next capture start.'
-    })
     expect(
-      sceneHudCaptureConfirmed({ window: MAC, exclusion: deferred, captureRunning: true })
+      sceneHudCaptureConfirmed({ window: MAC, lastStart: [[42], DEFERRED], status: LIVE })
     ).toBe(false)
-    // A start that never carried the id changes nothing.
-    expect(sceneHudExclusionAfterStart(pending, [7], { state: 'live' })).toBe(pending)
     // No capture running: every later start carries the id.
-    expect(sceneHudExclusionForWindow(MAC, null, false)).toEqual({ windowId: 42, held: true })
     expect(
-      sceneHudCaptureConfirmed({ window: MAC, exclusion: deferred, captureRunning: false })
+      sceneHudCaptureConfirmed({ window: MAC, lastStart: [[42], DEFERRED], status: IDLE })
     ).toBe(true)
+    expect(sceneHudCaptureConfirmed({ window: MAC, lastStart: null, status: IDLE })).toBe(true)
   })
 
   it('never confirms a window that is not ready, an id it never handed over, or Linux', () => {
-    const held = { windowId: 42, held: true }
+    const held = [[42], LIVE] as const
     expect(
-      sceneHudCaptureConfirmed({
-        window: { ...MAC, ready: false },
-        exclusion: held,
-        captureRunning: false
-      })
+      sceneHudCaptureConfirmed({ window: { ...MAC, ready: false }, lastStart: held, status: IDLE })
     ).toBe(false)
+    // A new window (a new id) while the capture runs with the old one.
     expect(
-      sceneHudCaptureConfirmed({
-        window: { ...MAC, windowId: 43 },
-        exclusion: held,
-        captureRunning: false
-      })
+      sceneHudCaptureConfirmed({ window: { ...MAC, windowId: 43 }, lastStart: held, status: LIVE })
     ).toBe(false)
-    expect(sceneHudCaptureConfirmed({ window: MAC, exclusion: null, captureRunning: false })).toBe(
-      false
-    )
     expect(
       sceneHudCaptureConfirmed({
         window: { enabled: false, method: 'unsupported', ready: false },
-        exclusion: null,
-        captureRunning: false
+        lastStart: null,
+        status: IDLE
       })
     ).toBe(false)
-    expect(sceneHudCaptureConfirmed({ window: null, exclusion: held, captureRunning: false })).toBe(
-      false
-    )
+    expect(sceneHudCaptureConfirmed({ window: null, lastStart: held, status: IDLE })).toBe(false)
   })
 
   it('trusts Windows content protection only as main confirmed it', () => {
-    expect(
-      sceneHudCaptureConfirmed({ window: WINDOWS, exclusion: null, captureRunning: true })
-    ).toBe(true)
+    expect(sceneHudCaptureConfirmed({ window: WINDOWS, lastStart: null, status: LIVE })).toBe(true)
     expect(
       sceneHudCaptureConfirmed({
         window: { ...WINDOWS, ready: false },
-        exclusion: null,
-        captureRunning: true
+        lastStart: null,
+        status: LIVE
       })
     ).toBe(false)
-    expect(sceneHudExclusionForWindow(WINDOWS, null, true)).toBeNull()
   })
 
   it('puts the macOS window on every exclusion list, and nothing on Windows or Linux', () => {
