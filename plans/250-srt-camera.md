@@ -605,7 +605,7 @@ test -p videorc-backend`, typecheck, format, `test:scripts` and
   only on its next full ACK. After the last packet of a frame, that comes
   about 10 ms later (`checkACKTimer` waits for the socket to be idle 10 ms),
   with TSBPD on or off and at any receive latency. A packet capture showed
-  frames on the wire about 1 ms after the phone sent them, then about 11 ms
+  frames on the wire about 1 ms after the sender sent them, then about 11 ms
   more before `srt_recvmsg` returned, in Videorc and in a bare reader. The
   accepted socket is now non-blocking, read again 1 ms after an empty read.
   Glass to screen at 4K60, against interleaved control runs: 9.4 ms less
