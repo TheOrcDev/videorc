@@ -39,7 +39,8 @@ for (const { id, width, height, fps, bitrateKbps } of options.profiles) {
       ...(!options.d3d11 && !options.expectFallback
         ? { VIDEORC_WINDOWS_REQUIRE_GRAPHICS_CAPTURE: '1' }
         : {}),
-      ...(!options.d3d11 && !options.expectFallback && !id.startsWith('vertical-')
+      // #173: every shipping profile, portrait twins included, records on D3D11.
+      ...(!options.d3d11 && !options.expectFallback
         ? { VIDEORC_WINDOWS_REQUIRE_DIRECT_D3D11_RECORDING: '1' }
         : {}),
       ...(options.d3d11 ? { VIDEORC_WINDOWS_D3D11_MEDIA: '1' } : {}),
