@@ -89,7 +89,7 @@ export function SrtCameraFieldsView({
             if (value !== null) void change.run(() => controls.set({ connection: value }), false)
           }}
         >
-          <SelectTrigger className="w-52 shrink-0" data-testid="srt-input-connection">
+          <SelectTrigger className="w-64 shrink-0" data-testid="srt-input-connection">
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
