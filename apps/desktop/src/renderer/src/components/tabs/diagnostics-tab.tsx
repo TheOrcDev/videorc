@@ -28,6 +28,7 @@ import type {
   WebSocketQueueDiagnosticStats
 } from '@/lib/backend'
 import { backendCrashView, latestBackendCrash } from '@/lib/backend-crash-view'
+import { formatDeliveredFps, formatLoweredBitrate } from '@/lib/stream-delivery-format'
 import { NO_VALUE, compactTime, formatDroppedFrames, formatMetric, plural } from '@/lib/format'
 import { formatBitrate, formatFrameRate } from '@/lib/format-video'
 import {
@@ -907,6 +908,17 @@ function EncoderMetrics({
       <DiagnosticMetric
         label="Stream bitrate"
         value={formatKbps(stats.streamMeasuredBitrateKbps)}
+      />
+      {/* Plan 218: the stream's own frame rate and the bitrate Videorc holds
+          it at; the Destinations page showed these until its Technical
+          details went (owner, 2026-11-20). */}
+      <DiagnosticMetric
+        label="Stream frame rate"
+        value={formatDeliveredFps(stats.streamDelivery) || NO_VALUE}
+      />
+      <DiagnosticMetric
+        label="Stream bitrate target"
+        value={formatLoweredBitrate(stats.streamDelivery) || 'Not lowered'}
       />
       <DiagnosticMetric
         label="Stream bitrate range"

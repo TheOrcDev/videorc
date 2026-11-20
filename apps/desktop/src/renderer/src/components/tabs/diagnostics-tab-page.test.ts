@@ -188,6 +188,40 @@ describe('Health page', () => {
     expect(container.querySelector('[data-check="camera"]')?.textContent).toContain('No video')
   })
 
+  // Plan 218's two stream figures moved here when the Destinations page lost
+  // its Technical details (owner, 2026-11-20).
+  it("shows the stream's delivered frame rate and lowered bitrate target", async () => {
+    // The encoder group reads every counter; the ones this fixture leaves
+    // out read 0, like an idle session's.
+    const stats = healthyStats({
+      streamDelivery: {
+        targetFps: 30,
+        deliveredFps: 20.9,
+        dropPercent: 30,
+        windowSeconds: 30,
+        degraded: true,
+        atFloor: false,
+        uplinkOverflows: 0,
+        bitrateKbps: 4_800,
+        chosenBitrateKbps: 6_000
+      }
+    })
+    mocked.stats = new Proxy(stats, { get: (target, key) => target[key as string] ?? 0 })
+    await render()
+    await act(async () => button('Technical details')!.click())
+    const group = [
+      ...container.querySelectorAll(
+        '[data-testid="health-technical-details"] [data-slot="collapsible"]'
+      )
+    ].find((entry) => entry.querySelector('h3')?.textContent?.startsWith('Recording and encoder'))!
+    if (!group.hasAttribute('data-open')) {
+      await act(async () => (group.querySelector('h3 button') as HTMLButtonElement).click())
+    }
+    const text = group.textContent ?? ''
+    expect(text).toContain('Stream frame rate21 of 30 fps')
+    expect(text).toContain('Stream bitrate target4.8 of 6 Mbps')
+  })
+
   it('keeps the support bundle on top and the numbers in one closed Technical details', async () => {
     mocked.stats = healthyStats({ bottleneck: 'encoder' })
     await render()

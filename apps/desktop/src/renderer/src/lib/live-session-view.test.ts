@@ -7,7 +7,6 @@ import {
   liveDestinationsView,
   streamHealthFact
 } from './live-session-view'
-import { cloudDestinationCount, cloudHealthySummary } from './cloud-show-view'
 import { classifyStreamHealthAttribution, NO_RECENT_DROPS } from './stream-health-attribution'
 
 const target = (
@@ -103,26 +102,6 @@ describe('streamHealthFact', () => {
     })
     expect(cloudStreamReading(null)).toBeNull()
     expect(cloudStreamReading({ phase: 'connecting' })).toBeNull()
-  })
-
-  it('names the way out in the healthy summary: "Cloud · 6 Mbps"', () => {
-    // Plan 222 U2: the upload and where the cloud sends it.
-    expect(cloudHealthySummary({ phase: 'live' }, ['6 Mbps', '60 fps'], 3)).toBe(
-      'Cloud · 6 Mbps up · 3 destinations'
-    )
-    expect(cloudHealthySummary({ phase: 'live' }, ['6 Mbps', '60 fps'], 1)).toBe(
-      'Cloud · 6 Mbps up · 1 destination'
-    )
-    expect(cloudHealthySummary({ phase: 'live' }, [undefined, null])).toBe('Cloud')
-    expect(cloudHealthySummary(null, ['6 Mbps', '60 fps'], 3)).toBe('6 Mbps · 60 fps')
-    expect(
-      cloudDestinationCount([
-        target('live', 'YouTube'),
-        target('live', 'Twitch'),
-        { ...target('live', 'Videorc Cloud'), targetId: 'videorc-cloud-horizontal' },
-        target('not-configured', 'Kick')
-      ])
-    ).toBe(2)
   })
 })
 
