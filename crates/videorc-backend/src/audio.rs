@@ -1883,30 +1883,95 @@ mod windows_native {
     }
 }
 
+/// `kAudioDevicePropertyDeviceUID`: the identity of a CoreAudio device that
+/// survives a new `AudioDeviceID` (plan 254 S7). `None` when CoreAudio does
+/// not answer it.
 #[cfg(target_os = "macos")]
-fn list_platform_microphones() -> Result<Vec<Device>> {
+fn coreaudio_device_uid(device_id: u32) -> Option<String> {
+    use objc2_core_audio::{
+        AudioObjectGetPropertyData, AudioObjectPropertyAddress, kAudioDevicePropertyDeviceUID,
+        kAudioObjectPropertyElementMain, kAudioObjectPropertyScopeGlobal,
+    };
+    use objc2_core_foundation::{CFRetained, CFString};
+    use std::ptr::NonNull;
+
+    let address = AudioObjectPropertyAddress {
+        mSelector: kAudioDevicePropertyDeviceUID,
+        mScope: kAudioObjectPropertyScopeGlobal,
+        mElement: kAudioObjectPropertyElementMain,
+    };
+    let mut uid: *const CFString = std::ptr::null();
+    let size = std::mem::size_of::<*const CFString>() as u32;
+    // SAFETY: the address, the size and the out pointer live across the
+    // call, and the property is one `CFStringRef` the caller owns (the
+    // "Get" rule of `AudioObjectGetPropertyData` for CF properties).
+    let uid = unsafe {
+        let status = AudioObjectGetPropertyData(
+            device_id,
+            NonNull::from(&address),
+            0,
+            std::ptr::null(),
+            NonNull::from(&size),
+            NonNull::from(&mut uid).cast(),
+        );
+        if status != 0 {
+            return None;
+        }
+        CFRetained::from_raw(NonNull::new(uid.cast_mut())?)
+    };
+    Some(uid.to_string()).filter(|uid| !uid.is_empty())
+}
+
+/// CoreAudio's input devices as it names them now: id, UID and name. Every
+/// answer is remembered (`microphone_identity`), so a saved id that drifts
+/// is still resolved to its device (plan 254 S7).
+#[cfg(target_os = "macos")]
+pub(crate) fn list_native_microphone_identities()
+-> Result<Vec<crate::microphone_identity::MicrophoneIdentity>> {
     use coreaudio::audio_unit::Scope;
     use coreaudio::audio_unit::macos_helpers::{
-        get_audio_device_ids_for_scope, get_audio_device_supports_scope, get_default_device_id,
-        get_device_name,
+        get_audio_device_ids_for_scope, get_audio_device_supports_scope, get_device_name,
     };
 
-    let default_input = get_default_device_id(true);
     let mut devices = Vec::new();
-
     for device_id in get_audio_device_ids_for_scope(Scope::Input)? {
         if !get_audio_device_supports_scope(device_id, Scope::Input).unwrap_or(false) {
             continue;
         }
-        let name =
-            get_device_name(device_id).unwrap_or_else(|_| format!("CoreAudio device {device_id}"));
+        devices.push(crate::microphone_identity::MicrophoneIdentity {
+            device_id,
+            uid: coreaudio_device_uid(device_id),
+            name: get_device_name(device_id)
+                .unwrap_or_else(|_| format!("CoreAudio device {device_id}")),
+        });
+    }
+    Ok(devices)
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn list_native_microphone_identities()
+-> Result<Vec<crate::microphone_identity::MicrophoneIdentity>> {
+    bail!("CoreAudio microphones exist only on macOS")
+}
+
+#[cfg(target_os = "macos")]
+fn list_platform_microphones() -> Result<Vec<Device>> {
+    use coreaudio::audio_unit::macos_helpers::get_default_device_id;
+
+    let default_input = get_default_device_id(true);
+    let identities = list_native_microphone_identities()?;
+    crate::microphone_identity::observe(&identities);
+    let mut devices = Vec::new();
+
+    for identity in identities {
+        let device_id = identity.device_id;
         let is_default = default_input == Some(device_id);
         devices.push(Device {
             app: None,
             window_title: None,
             display_uuid: None,
             id: format!("microphone:coreaudio:{device_id}"),
-            name,
+            name: identity.name,
             kind: DeviceKind::Microphone,
             status: DeviceStatus::Available,
             detail: Some(if is_default {

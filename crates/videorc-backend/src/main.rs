@@ -127,6 +127,7 @@ mod marker_voice;
 mod metal_compositor;
 mod metrics_journal;
 mod microphone_denoise;
+mod microphone_identity;
 mod moments;
 #[cfg(any(target_os = "macos", target_os = "windows", test))]
 mod mpeg_ts;
@@ -573,6 +574,9 @@ async fn run_backend(device_changes: tokio::sync::watch::Receiver<u64>) -> Resul
     let (events, _) = broadcast::channel(256);
     let database = Database::open_default()?;
     database.recover_scheduled_operations_after_restart()?;
+    // Plan 254 S7: what each CoreAudio microphone id named before this
+    // start, so a saved id that drifted still opens its microphone.
+    microphone_identity::restore(&database);
     // Plan 249 S22: a cloud ISO transfer the previous run left running is
     // retried, and only staging files its journal created are removed.
     if let Err(error) = database.recover_cloud_iso_imports() {

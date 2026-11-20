@@ -804,22 +804,34 @@ async fn prepare_native_with_readiness(
     prepare_producer_with(
         move || {
             // Enumeration and open share the limited owner's five-second budget.
-            let id = format!("microphone:coreaudio:{device_id}");
-            let exact = crate::audio::list_native_microphones()
-                .iter()
-                .filter(|device| device.id == id)
-                .count()
-                == 1;
             #[cfg(debug_assertions)]
-            let exact = exact
-                || device_id == crate::audio::CAPTION_CONTRACT_TEST_DEVICE_ID
+            let fixture = device_id == crate::audio::CAPTION_CONTRACT_TEST_DEVICE_ID
                 || (device_id == crate::audio::CAPTION_CONTRACT_TEST_DEVICE_ID - 1
                     && std::env::var("VIDEORC_LIVE_SOURCE_SWITCH_TEST").as_deref() == Ok("1"));
-            if !exact {
-                anyhow::bail!("The selected microphone is missing or its identity is ambiguous.");
-            }
-            crate::audio::start_native_audio_source(device_id, AudioProcessingSettings::default())
-                .map(ProducerSource::native)
+            #[cfg(not(debug_assertions))]
+            let fixture = false;
+            // Plan 254 S7: the saved id may be from an earlier device list.
+            // CoreAudio hands its ids out again, so the microphone is found
+            // by what the id named (UID, then a unique exact name) before it
+            // is called missing. The requested id and CoreAudio's list are
+            // logged when nothing matches.
+            let open_id = if fixture {
+                device_id
+            } else {
+                match crate::microphone_identity::current_device_id(device_id) {
+                    Ok(open_id) => open_id,
+                    Err(_) => anyhow::bail!(
+                        "The selected microphone is missing or its identity is ambiguous."
+                    ),
+                }
+            };
+            crate::audio::start_native_audio_source(open_id, AudioProcessingSettings::default())
+                .map(|mut source| {
+                    // The session keeps naming the microphone as it was
+                    // asked for: the id the renderer holds and compares.
+                    source.device_id = device_id;
+                    ProducerSource::native(source)
+                })
         },
         cancelled,
         count,
