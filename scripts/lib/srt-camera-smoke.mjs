@@ -1,5 +1,6 @@
 // Plan 255 S7: the pure parts of the SRT Camera smoke.
-import { join } from 'node:path'
+// The smoke runs on macOS only: its paths are POSIX paths on every host.
+import { posix } from 'node:path'
 
 /** Never the default SRT input port (9000) or 9100, which other local tools use. */
 export const SRT_SMOKE_RESERVED_PORTS = [9000, 9100]
@@ -7,7 +8,7 @@ export const SRT_SMOKE_RESERVED_PORTS = [9000, 9100]
 /** The libsrt copies a dev backend tries (srt_camera/libsrt.rs). */
 export function libsrtCandidates(repoRoot) {
   return [
-    join(repoRoot, 'vendor', 'libsrt', 'current', 'lib', 'libsrt.dylib'),
+    posix.join(repoRoot, 'vendor', 'libsrt', 'current', 'lib', 'libsrt.dylib'),
     '/opt/homebrew/opt/srt/lib/libsrt.dylib',
     '/usr/local/opt/srt/lib/libsrt.dylib'
   ]
