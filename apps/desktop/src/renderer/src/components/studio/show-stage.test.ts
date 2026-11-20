@@ -518,19 +518,24 @@ describe('two screens (plan 251)', () => {
     await mount(talkStatus({ show: managedShow, room: room() }), talkShow())
     for (const surface of ['show-stage-well', 'show-stage-program']) {
       const tiles = tilesIn(surface)
+      // The stage names the guest's screen first (it went up first); each
+      // screen is still drawn over its owner's camera, the host's on the left.
       expect(tiles.map(named)).toEqual([
-        `screen:${GUEST}`,
         `screen:${HOST}`,
+        `screen:${GUEST}`,
         `person:${HOST}`,
         `person:${GUEST}`
       ])
       const top = (tile: HTMLElement) => Number.parseFloat(tile.style.top)
       const left = (tile: HTMLElement) => Number.parseFloat(tile.style.left)
+      const centre = (tile: HTMLElement) => left(tile) + Number.parseFloat(tile.style.width) / 2
       const [first, second, ...cameras] = tiles
       expect(top(first)).toBe(top(second))
       expect(left(first)).toBeLessThan(left(second))
       expect(first.style.width).toBe(second.style.width)
       for (const camera of cameras) expect(top(camera)).toBeGreaterThan(top(first))
+      expect(centre(cameras[0])).toBeCloseTo(centre(first), 6)
+      expect(centre(cameras[1])).toBeCloseTo(centre(second), 6)
     }
   })
 

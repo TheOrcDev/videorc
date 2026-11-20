@@ -513,7 +513,8 @@ pub struct CloudStage {
     pub spotlight: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub screen: Option<String>,
-    /// Plan 251: the two screens of the two-screens layout, left then right.
+    /// Plan 251: the two screens of the two-screens layout, the first one put
+    /// up first (each is drawn on its owner's side, whatever the order here).
     /// Empty (never `null`, and absent on the wire), or exactly two different
     /// on-stage identities with `screen` the first: a reader that knows only
     /// `screen` still shows one screen and the people. Managed shows only.
