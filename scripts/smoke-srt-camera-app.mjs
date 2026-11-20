@@ -327,6 +327,13 @@ try {
     return state.status.signal === 'holding' ? state : null
   })
   await expectPicture('the held frame', 'picture')
+  // Late in the hold the picture is still the held frame, not the still.
+  await sleep(Math.max(0, 1400 - (Date.now() - stoppedAt)))
+  const lateInHold = await cameraSample()
+  assert(
+    lateInHold && classifyCameraPicture(lateInHold) === 'picture',
+    `the held frame stays up to the end of the hold (${Date.now() - stoppedAt} ms)`
+  )
   await waitFor('the still after the hold', async () => {
     const state = await request(ws, timeoutMs, 'srtInput.get')
     return state.status.signal === 'waiting' ? state : null
