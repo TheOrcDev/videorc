@@ -111,6 +111,17 @@ fn pre_drain_wait_continues(owed_frames: usize, waited: Duration) -> bool {
     owed_frames > 0 && waited < PRE_DRAIN_OUTPUT_WAIT
 }
 
+/// [`pre_drain_wait_continues`] inside the drain's own deadline: the CPU
+/// drain's wait for owed frames is part of its timeout, never added to it.
+fn pre_drain_wait_within(
+    owed_frames: usize,
+    waited: Duration,
+    now: Instant,
+    deadline: Instant,
+) -> bool {
+    now < deadline && pre_drain_wait_continues(owed_frames, waited)
+}
+
 const EVENT_TIMEOUT: Duration = Duration::from_secs(3);
 pub const DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 /// #1527: how long a drain first waits for the frames the transform already
@@ -1359,10 +1370,23 @@ impl MediaFoundationH264Encoder {
         // #1527: hand back every frame the transform already accepted before
         // asking it to drain. A COMMAND_DRAIN sent while the NVIDIA MFT is
         // still encoding a frame can block inside the transform for ~5 s,
-        // where no deadline below can reach it.
+        // where no deadline below can reach it. The wait counts against the
+        // caller's timeout and follows `deadline_now`, like the drain after
+        // it: a Stop's drain budget is never stretched by it.
         let mut output = self.collect_available_events()?;
         let owed_wait_started_at = Instant::now();
-        while pre_drain_wait_continues(self.submitted_pts.len(), owed_wait_started_at.elapsed()) {
+        let mut deadline = owed_wait_started_at + timeout;
+        loop {
+            let now = Instant::now();
+            deadline = deadline_now(now, deadline);
+            if !pre_drain_wait_within(
+                self.submitted_pts.len(),
+                now.saturating_duration_since(owed_wait_started_at),
+                now,
+                deadline,
+            ) {
+                break;
+            }
             thread::sleep(EVENT_POLL_INTERVAL);
             output.extend(self.collect_available_events()?);
         }
@@ -1404,7 +1428,6 @@ impl MediaFoundationH264Encoder {
                 "The Media Foundation encoder blocked on its drain request (#1527)"
             );
         }
-        let mut deadline = Instant::now() + timeout;
         let mut drain_complete = false;
         loop {
             let now = Instant::now();
@@ -4690,6 +4713,46 @@ mod tests {
             PRE_DRAIN_OUTPUT_WAIT * 5 <= crate::encoder_bridge::MEDIA_FOUNDATION_STOP_DRAIN_TIMEOUT
         );
         assert!(SLOW_DRAIN_MESSAGES < DRAIN_TIMEOUT);
+    }
+
+    #[test]
+    fn cpu_drain_waits_for_owed_frames_inside_its_own_deadline() {
+        let start = Instant::now();
+        let ms = Duration::from_millis;
+        // Budget to spare: the wait is the 100 ms owed-frame bound.
+        assert!(pre_drain_wait_within(
+            1,
+            ms(50),
+            start + ms(50),
+            start + ms(1000)
+        ));
+        assert!(!pre_drain_wait_within(
+            1,
+            PRE_DRAIN_OUTPUT_WAIT,
+            start + PRE_DRAIN_OUTPUT_WAIT,
+            start + ms(1000)
+        ));
+        // Less budget than the bound (a Stop pulled the deadline in): the
+        // wait ends with the budget, so the drain never outlasts its timeout.
+        assert!(!pre_drain_wait_within(
+            1,
+            ms(20),
+            start + ms(20),
+            start + ms(20)
+        ));
+        assert!(!pre_drain_wait_within(
+            1,
+            ms(30),
+            start + ms(30),
+            start + ms(20)
+        ));
+        // Nothing owed: no wait, whatever the budget.
+        assert!(!pre_drain_wait_within(
+            0,
+            Duration::ZERO,
+            start,
+            start + ms(1000)
+        ));
     }
 
     #[test]
