@@ -113,7 +113,10 @@ publisher, and candidate prefix. Those are inputs to all later work.
 Retrieve the exact private candidate for the operator without publishing it as
 a GitHub artifact. Copy `docs/acceptance/windows-app-acceptance-template.md` to
 a dated private-evidence record and complete every required row on clean
-physical Windows 11 x64 hardware. At minimum prove:
+physical Windows 11 x64 hardware. For a numbered, step-by-step version of
+this section, see
+[windows-physical-acceptance-checklist.md](../acceptance/windows-physical-acceptance-checklist.md).
+At minimum prove:
 
 ```powershell
 $env:VIDEORC_RELEASE_ID = '<releaseId>'
