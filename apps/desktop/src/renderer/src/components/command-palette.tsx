@@ -471,6 +471,16 @@ export function CommandPalette({
             Upcoming events
             <Context>Destinations</Context>
           </CommandItem>
+          {/* Destinations → Discord (plan 187): the go-live announcement. */}
+          <CommandItem
+            value="Open Discord announcements"
+            keywords={['discord', 'webhook', 'announce', 'server', 'go live post', 'ping']}
+            onSelect={() => run(() => openLivestreamView('discord'))}
+          >
+            <LivestreamIcon className="size-4" />
+            Discord announcements
+            <Context>Destinations</Context>
+          </CommandItem>
           {/* The list behind the bell (plan 250): the keyboard's way in. */}
           <CommandItem
             value="Open notifications"

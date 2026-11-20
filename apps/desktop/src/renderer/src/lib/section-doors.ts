@@ -39,6 +39,11 @@ export const openDestinationsCloud = door('destinations-cloud', () =>
   openWorkspaceTab('live', 'setup')
 )
 
+/** Destinations → Discord: the go-live announcement and its webhooks (plan 187). */
+export function openDestinationsDiscord(): void {
+  openWorkspaceTab('live', 'discord')
+}
+
 /** Destinations → Setup, on one destination's card when it is named. */
 export function openDestinations(targetId?: string): void {
   if (targetId) openDestination(targetId)

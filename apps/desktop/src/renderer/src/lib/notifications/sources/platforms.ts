@@ -9,7 +9,7 @@ import { notifications } from '@/lib/notifications'
 import { CURRENT_SESSION } from '@/lib/notifications/sources/health'
 import type { NotificationStore } from '@/lib/notifications/store'
 import type { NotificationAction } from '@/lib/notifications/types'
-import { openDestinations } from '@/lib/section-doors'
+import { openDestinations, openDestinationsDiscord } from '@/lib/section-doors'
 import { X_MEDIA_STUDIO_URL } from '@/lib/studio-toasts'
 import { userErrorMessage } from '@/lib/user-error'
 import { beginVideorcSignIn } from '@/lib/videorc-web-links'
@@ -22,6 +22,14 @@ function openDestinationsAction(targetId?: string): NotificationAction {
     kind: 'door',
     run: () => openDestinations(targetId)
   }
+}
+
+/** Destinations → Discord, where the webhooks are fixed. */
+const OPEN_DISCORD_SETTINGS: NotificationAction = {
+  id: 'open-destinations-discord',
+  label: 'Open Discord settings',
+  kind: 'door',
+  run: openDestinationsDiscord
 }
 
 const SIGN_IN: NotificationAction = {
@@ -270,7 +278,7 @@ export function publishYouTubeBudget(
   })
 }
 
-/** A go-live post to Discord that failed, with the way to fix it. */
+/** A go-live post to Discord that failed, with the way to fix it: Destinations → Discord. */
 export function publishDiscordFailure(
   failure: { title: string; description?: string },
   store: NotificationStore = notifications
@@ -280,7 +288,7 @@ export function publishDiscordFailure(
     kind: 'platform-step',
     title: failure.title,
     detail: failure.description,
-    actions: [openDestinationsAction()]
+    actions: [OPEN_DISCORD_SETTINGS]
   })
 }
 

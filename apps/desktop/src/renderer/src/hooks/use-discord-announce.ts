@@ -27,7 +27,7 @@ export interface DiscordAnnounceState {
 }
 
 /**
- * Destinations → Setup → Discord (plan 187). The settings live in the backend
+ * Destinations → Discord (plan 187). The settings live in the backend
  * (it posts at Go Live), so the section uses the app's shared backend
  * client, which the Studio provider replaces on every reconnect (as the privacy
  * and chat rows do). `discord.announce.changed`

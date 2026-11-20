@@ -3,6 +3,7 @@ import { useId, useMemo, useState, type KeyboardEvent, type ReactElement } from 
 import { ConfirmDialog } from '@/components/confirm-dialog'
 import { CloseIcon, EditIcon, ExternalLinkIcon, SendIcon } from '@/components/icons'
 import { GroupedList, ListRow } from '@/components/list-row'
+import { PageHeader } from '@/components/page'
 import { PanelSection } from '@/components/panel-section'
 import { PlatformGlyph } from '@/components/platform-glyph'
 import { Button } from '@/components/ui/button'
@@ -26,6 +27,7 @@ import {
 } from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
 import { useDiscordAnnounce } from '@/hooks/use-discord-announce'
+import { useStudioCore } from '@/hooks/use-studio'
 import {
   DISCORD_MAX_WEBHOOKS,
   type DiscordAnnounceSnapshot,
@@ -48,10 +50,21 @@ import {
 import { formatRelativeTime } from '@/lib/format-time'
 
 /**
- * Destinations → Setup → Discord (plan 187, issue #634): paste a webhook per
- * server, and every public Go Live posts to each of them under the
- * streamer's own name, with a link button per live destination. It stays
- * editable while live; changes apply to the next stream.
+ * Destinations → Discord (plan 187, issue #634): paste a webhook per server,
+ * and every public Go Live posts to each of them under the streamer's own
+ * name, with a link button per live destination. It stays editable while
+ * live; changes apply to the next stream. The tab loads with its first open.
+ */
+export function DiscordTab(): ReactElement {
+  const { captureConfig, isSessionActive } = useStudioCore()
+  return (
+    <DiscordSection sessionActive={isSessionActive} targets={captureConfig.streaming.targets} />
+  )
+}
+
+/**
+ * The tab's content. The tab names it, so it has no heading of its own: like
+ * Upcoming, the page header carries its name (for assistive tech) and its line.
  */
 export function DiscordSection({
   targets,
@@ -66,32 +79,34 @@ export function DiscordSection({
   const several = (snapshot?.webhooks.length ?? 0) > 1
 
   return (
-    <PanelSection
-      description={`Tell your ${several ? 'servers' : 'server'} when you go live. Unlisted and private YouTube streams are never announced.`}
-      icon={SendIcon}
-      title="Discord"
-    >
-      <div className="flex flex-col gap-3" data-testid="discord-section">
-        {!snapshot ? (
-          discord.error ? (
-            <FieldError>{discord.error}</FieldError>
+    <>
+      <PageHeader
+        description={`Tell your ${several ? 'servers' : 'server'} when you go live. Unlisted and private YouTube streams are never announced.`}
+        title="Discord announcements"
+      />
+      <PanelSection>
+        <div className="flex flex-col gap-3" data-testid="discord-section">
+          {!snapshot ? (
+            discord.error ? (
+              <FieldError>{discord.error}</FieldError>
+            ) : (
+              <p className="text-meta text-muted-foreground" role="status">
+                Loading Discord settings…
+              </p>
+            )
+          ) : snapshot.webhooks.length === 0 ? (
+            <WebhookPaste onSave={discord.saveWebhook} />
           ) : (
-            <p className="text-meta text-muted-foreground" role="status">
-              Loading Discord settings…
-            </p>
-          )
-        ) : snapshot.webhooks.length === 0 ? (
-          <WebhookPaste onSave={discord.saveWebhook} />
-        ) : (
-          <ConnectedDiscord
-            discord={discord}
-            platformById={new Map(targets.map((target) => [target.id, target.platform]))}
-            sessionActive={sessionActive}
-            snapshot={snapshot}
-          />
-        )}
-      </div>
-    </PanelSection>
+            <ConnectedDiscord
+              discord={discord}
+              platformById={new Map(targets.map((target) => [target.id, target.platform]))}
+              sessionActive={sessionActive}
+              snapshot={snapshot}
+            />
+          )}
+        </div>
+      </PanelSection>
+    </>
   )
 }
 
