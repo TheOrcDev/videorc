@@ -38,6 +38,7 @@ import {
   TAKE_ROLES,
   evaluateTake,
   summarizeRoleProbe,
+  takeRoleExpectsSound,
   takeSiblingPaths
 } from './lib/separate-source-take-gates.mjs'
 
@@ -176,6 +177,9 @@ async function main() {
         ffmpegPath,
         ffprobePath,
         expectAudio: true,
+        // A file whose source was off (no microphone, muted, system audio
+        // off) holds silence by design: never a silent-microphone failure.
+        microphoneAvailable: takeRoleExpectsSound(args.expectations, role),
         intendedFps: video?.fps || undefined,
         gates: { requireMotion: args.requireMotion }
       })
