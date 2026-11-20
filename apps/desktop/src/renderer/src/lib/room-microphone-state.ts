@@ -18,12 +18,32 @@ const empty: RoomMicrophoneObservation = {
   observedAt: null,
   nativeQualified: false
 }
+/**
+ * What React shows of the room microphone: its state and words, and whether
+ * levels arrive. The 20 Hz levels themselves go to `roomMicrophoneMeter`
+ * only, so a level never re-renders the Audio section (PH-12).
+ */
+export type RoomMicrophoneView = Pick<RoomMicrophoneObservation, 'mode' | 'state' | 'reason'> & {
+  /** Levels arrive: the last tick measured one (`observedAt` is set). */
+  levels: boolean
+}
+const viewOf = (observation: RoomMicrophoneObservation): RoomMicrophoneView => ({
+  mode: observation.mode,
+  state: observation.state,
+  reason: observation.reason,
+  levels: observation.observedAt !== null
+})
 let snapshot = empty
+let view = viewOf(empty)
 let owner = 0
 const listeners = new Set<() => void>()
 const meters = new Set<(frame: MeterFrame) => void>()
 export const roomMicrophoneState = {
+  /** The latest observation, levels included: read it, never subscribe to it. */
   getSnapshot: () => snapshot,
+  /** For `useSyncExternalStore` with `subscribe`: changes only when the view does. */
+  getView: () => view,
+  /** Called when the view changes, never for a level alone. */
   subscribe: (fn: () => void) => {
     listeners.add(fn)
     return () => {
@@ -38,7 +58,16 @@ export const roomMicrophoneState = {
     const update = (patch: Partial<RoomMicrophoneObservation>): void => {
       if (owner !== epoch) return
       snapshot = { ...snapshot, ...patch }
-      for (const fn of listeners) fn()
+      const next = viewOf(snapshot)
+      if (
+        next.mode !== view.mode ||
+        next.state !== view.state ||
+        next.reason !== view.reason ||
+        next.levels !== view.levels
+      ) {
+        view = next
+        for (const fn of listeners) fn()
+      }
       for (const fn of meters)
         fn({ channels: [{ peakDb: snapshot.peakDb ?? NaN, rmsDb: snapshot.rmsDb ?? undefined }] })
     }

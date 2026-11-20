@@ -78,6 +78,84 @@ describe('browser publication privacy authority', () => {
     adapter.close()
     expect(output.stop).toHaveBeenCalled()
   })
+  // PH-13 (perf hunt 11-20): with frame callbacks, one draw per captured
+  // frame and no timer draw between them; the 30 Hz timer takes over only
+  // when callbacks stop. Every draw still passes the gate.
+  it('draws once per captured frame and falls back to the timer when frames stop', async () => {
+    vi.useFakeTimers()
+    const raw = { getSettings: () => ({ width: 640, height: 360 }) } as MediaStreamTrack
+    const output = { stop: vi.fn() }
+    const drawImage = vi.fn(),
+      fillRect = vi.fn()
+    let pending: ((now: number) => void) | null = null
+    let handles = 0
+    const video = {
+      readyState: 2,
+      play: async () => {},
+      pause: vi.fn(),
+      srcObject: null,
+      requestVideoFrameCallback: (callback: (now: number) => void) => {
+        pending = callback
+        return ++handles
+      },
+      cancelVideoFrameCallback: vi.fn()
+    }
+    let clock = 0
+    const frame = async (gapMs: number): Promise<void> => {
+      clock += gapMs
+      await vi.advanceTimersByTimeAsync(gapMs)
+      const callback = pending
+      pending = null
+      callback?.(clock)
+    }
+    vi.stubGlobal(
+      'MediaStream',
+      class {
+        constructor(public tracks: unknown[]) {}
+      }
+    )
+    vi.stubGlobal('document', {
+      createElement: (tag: string) =>
+        tag === 'video'
+          ? video
+          : {
+              getContext: () => ({ drawImage, fillRect }),
+              captureStream: () => ({ getVideoTracks: () => [output] })
+            }
+    })
+    vi.stubGlobal('window', globalThis)
+    const gate = new ScreenPrivacyDecision()
+    gate.apply({ hidden: false, generation: 0 })
+    const adapter = createPrivateScreen(raw, gate, vi.fn())
+
+    // A 30 fps capture for one second, a little jittery: 30 frames, 30 draws.
+    for (let index = 0; index < 30; index += 1) await frame(index % 2 ? 41 : 25)
+    expect(drawImage).toHaveBeenCalledTimes(30)
+
+    // A 60 fps capture: every other frame.
+    drawImage.mockClear()
+    for (let index = 0; index < 30; index += 1) await frame(1000 / 60)
+    expect(drawImage).toHaveBeenCalledTimes(15)
+
+    // The screen goes still: no draw for about 100 ms, then the timer's 30 Hz.
+    drawImage.mockClear()
+    await vi.advanceTimersByTimeAsync(90)
+    expect(drawImage).not.toHaveBeenCalled()
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(drawImage.mock.calls.length).toBeGreaterThanOrEqual(28)
+
+    // Hidden: frames frost, never draw the capture.
+    drawImage.mockClear()
+    const frosted = fillRect.mock.calls.length
+    gate.hide()
+    for (let index = 0; index < 5; index += 1) await frame(1000 / 30)
+    expect(drawImage).not.toHaveBeenCalled()
+    expect(fillRect.mock.calls.length).toBeGreaterThan(frosted + 5)
+
+    adapter.close()
+    expect(video.cancelVideoFrameCallback).toHaveBeenCalledWith(handles)
+    expect(output.stop).toHaveBeenCalled()
+  })
   it('binds observations to the exact capture epoch and generation', () => {
     const expected = { epoch: 'a'.repeat(32), generation: 3, hidden: true }
     expect(privacyTrackName(expected)).toBe(`vrc-privacy:${expected.epoch}:3:1`)

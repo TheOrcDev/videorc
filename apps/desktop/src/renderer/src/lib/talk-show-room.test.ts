@@ -21,7 +21,8 @@ import {
   onAirElsewhere,
   stageMessage,
   talkShowRoomOptions,
-  type TalkShowRoomDeps
+  type TalkShowRoomDeps,
+  type TalkShowRoomSnapshot
 } from '@/lib/talk-show-room'
 
 // Plan 224 C-G4 and the review of 2026-11-09 (L4, L9's room client): the host
@@ -536,6 +537,61 @@ describe("LiveKit's recorder in the room (plan 234 T3)", () => {
     latestRoom().emit('ParticipantConnected', ada)
     await vi.advanceTimersByTimeAsync(0)
     expect(publishData).toHaveBeenCalledTimes(1)
+    await room.disconnect()
+  })
+})
+
+// PH-12 (perf hunt 11-20): LiveKit fires ActiveSpeakersChanged on every
+// speaker update, level-only ones too. A snapshot re-renders every room
+// reader, so only a change in which guests talk publishes one.
+describe('active speakers (PH-12)', () => {
+  const participant = (identity: string, name: string) => ({
+    identity,
+    name,
+    trackPublications: new Map(),
+    connectionQuality: 'good'
+  })
+
+  it('publishes when the talking guests change, never for levels or the host', async () => {
+    const snapshots: TalkShowRoomSnapshot[] = []
+    const { room } = client({ onSnapshot: (next) => snapshots.push(next) })
+    await room.connect()
+    const ada = participant('g_ada', 'Ada')
+    const bo = participant('g_bo', 'Bo')
+    for (const guest of [ada, bo]) {
+      latestRoom().remoteParticipants.set(guest.identity, guest)
+      latestRoom().emit('ParticipantConnected', guest)
+    }
+    const host = latestRoom().localParticipant
+    const speakers = (...people: { identity: string }[]): void =>
+      latestRoom().emit('ActiveSpeakersChanged', people)
+    const speaking = (): string[] =>
+      room.snapshot.people.filter((person) => person.speaking).map((person) => person.identity)
+
+    let before = snapshots.length
+    speakers(ada)
+    expect(snapshots.length).toBe(before + 1)
+    expect(speaking()).toEqual(['g_ada'])
+
+    // The same set again (a level update), in another order, or with the
+    // host in it: nothing the snapshot shows changed.
+    before = snapshots.length
+    speakers(ada)
+    speakers(host, ada)
+    speakers(ada, host)
+    expect(snapshots.length).toBe(before)
+
+    speakers(bo, ada)
+    expect(snapshots.length).toBe(before + 1)
+    expect(speaking()).toEqual(['g_ada', 'g_bo'])
+    speakers(ada, bo)
+    expect(snapshots.length).toBe(before + 1)
+
+    speakers(host)
+    expect(snapshots.length).toBe(before + 2)
+    expect(speaking()).toEqual([])
+    speakers()
+    expect(snapshots.length).toBe(before + 2)
     await room.disconnect()
   })
 })

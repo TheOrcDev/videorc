@@ -79,6 +79,18 @@ export function privacyObservationMatches(
   )
 }
 
+/**
+ * Timer ticks (at 30 Hz) with no frame callback before the timer paints
+ * again: about 100 ms, longer than any gap between frames of moving content.
+ */
+const FRAME_CALLBACK_IDLE_TICKS = 3
+/**
+ * The shortest gap between two drawn frames. A 30 fps capture can land 25 ms
+ * apart on a 120 Hz display, so this is not 33 ms; a 60 fps one draws every
+ * other frame.
+ */
+const MIN_FRAME_GAP_MS = 20
+
 /** Raw capture is NEVER passed to LiveKit. All output frames pass this synchronous gate.
  * Neutral opaque frost matches the native no-picture frost. We deliberately do not
  * sample a potentially sensitive frame to make a blurred still for the wire. A canvas
@@ -124,17 +136,54 @@ export function createPrivateScreen(
       }
     }
   })
-  const timer = window.setInterval(() => {
-    if (closed) return
+  // One gate for every output frame: the frost while hidden, else the capture.
+  const paint = (): boolean => {
     try {
       if (blocked || decision.hidden) frost()
       else if (video.readyState >= 2) {
         context.drawImage(video, 0, 0, canvas.width, canvas.height)
       }
+      return true
     } catch (error) {
       track.stop()
       failed(error)
+      return false
     }
+  }
+  // PH-13: one draw per captured frame, so a 30 Hz timer and the capture's
+  // own clock never beat (a frame sent twice, the next one skipped). The
+  // timer below keeps today's 30 Hz output whenever no frame callback comes:
+  // a still screen, a window whose rendering stopped, or no callback API.
+  let frameHandle = 0
+  let lastFrameAt = -Infinity
+  let frameSeen = false
+  const onFrame = (now: number): void => {
+    frameHandle = 0
+    if (closed) return
+    frameSeen = true
+    // The capture may run faster than the 30 fps the publication carries.
+    if (now - lastFrameAt >= MIN_FRAME_GAP_MS) {
+      lastFrameAt = now
+      if (!paint()) return
+    }
+    frameHandle = video.requestVideoFrameCallback(onFrame)
+  }
+  if (typeof video.requestVideoFrameCallback === 'function') {
+    frameHandle = video.requestVideoFrameCallback(onFrame)
+  }
+  let idleTicks = FRAME_CALLBACK_IDLE_TICKS
+  const timer = window.setInterval(() => {
+    if (closed) return
+    if (frameSeen) {
+      frameSeen = false
+      idleTicks = 0
+      return
+    }
+    if (idleTicks < FRAME_CALLBACK_IDLE_TICKS) {
+      idleTicks += 1
+      return
+    }
+    paint()
   }, 1000 / 30)
   void video.play().catch((error) => {
     track.stop()
@@ -148,6 +197,8 @@ export function createPrivateScreen(
       closed = true
       off()
       window.clearInterval(timer)
+      if (frameHandle) video.cancelVideoFrameCallback(frameHandle)
+      frameHandle = 0
       track.stop()
       video.pause()
       video.srcObject = null
