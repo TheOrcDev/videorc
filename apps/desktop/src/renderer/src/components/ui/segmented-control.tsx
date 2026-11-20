@@ -3,13 +3,18 @@
 import * as React from 'react'
 
 import { useFieldLabelledBy } from '@/components/ui/field-context'
-import { tabsListVariants, tabsTriggerBaseClassName } from '@/components/ui/tabs-variants'
+import {
+  segmentedItemClassName,
+  segmentedTrackClassName,
+  segmentedTrackVariantClassName
+} from '@/components/ui/tabs-variants'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { cn } from '@/lib/utils'
 
 /**
  * One segmented control: pick one of 2–4 exclusive options. It wears the Tabs
- * track (`tabsListVariants`) without Base UI Tabs, so it costs the initial
+ * track's look (`segmentedTrackClassName`, without the rules a TabsList takes
+ * from its Tabs root) without Base UI Tabs, so it costs the initial
  * bundle nothing (an icon option's `tooltip` uses the Tooltip every window
  * already loads).
  *
@@ -201,7 +206,7 @@ function SegmentedControl<T extends string>({
           variant === 'lcd'
             ? 'inline-flex min-w-0 flex-1 items-center justify-center rounded-chip px-1.5 py-0.5 text-(--lcd-display-ink-dim) uppercase outline-none hover:bg-(--lcd-display-ink-unlit) hover:text-(--lcd-display-lit) focus-visible:ring-1 focus-visible:ring-(--lcd-display-lit) aria-checked:bg-(--lcd-display-ink-unlit) aria-checked:text-(--lcd-display-lit) disabled:pointer-events-none disabled:opacity-50'
             : cn(
-                tabsTriggerBaseClassName,
+                segmentedItemClassName,
                 size === 'sm' ? 'h-5 px-2 text-xs' : 'h-6',
                 'aria-checked:text-foreground aria-checked:chrome-plate'
               ),
@@ -249,9 +254,12 @@ function SegmentedControl<T extends string>({
         variant === 'lcd'
           ? 'flex w-full min-w-0 items-center gap-1'
           : cn(
-              tabsListVariants({ variant: 'default' }),
-              // One row when it fits; a narrow pane wraps it instead of clipping.
-              'flex-wrap',
+              segmentedTrackClassName,
+              segmentedTrackVariantClassName,
+              // One row when it fits; a narrow pane wraps it instead of
+              // clipping, and the track grows with its rows (never a fixed
+              // height), so every option stays inside it.
+              'flex-wrap gap-y-0.5',
               size === 'sm' ? 'min-h-6' : 'min-h-control'
             ),
         className

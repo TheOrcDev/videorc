@@ -126,6 +126,20 @@ describe('SegmentedControl', () => {
     expect(radio('Dark').className).toContain('aria-checked:chrome-plate')
   })
 
+  it('grows with its wrapped rows, whatever Tabs it sits in', async () => {
+    // A page inside PageTabs (Destinations) once pinned the track to one
+    // 28 px row through the TabsList's Tabs-group rules, so a wrapped
+    // option lay over the description under it.
+    await render(
+      h(Controlled, { 'aria-label': 'Theme', changes: [], initial: 'dark', options: THEMES })
+    )
+    expect(group().className).toContain('flex-wrap')
+    expect(group().className).toContain('min-h-control')
+    for (const element of [group(), ...radios()]) {
+      expect(element.className).not.toMatch(/group-data-[a-z]+\/tabs:/)
+    }
+  })
+
   it('lets Tab reach the first enabled option when nothing is checked', async () => {
     await render(
       h(Controlled, {
