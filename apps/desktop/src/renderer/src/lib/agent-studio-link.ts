@@ -17,11 +17,8 @@
 import type { BackendClient } from '@/backendClient'
 import { AgentSurfacePublisher, type AgentSurfaceInput } from '@/lib/agent-surface'
 import type { AgentIntentCancelEvent, AgentsStatus } from '@/lib/backend'
-import {
-  BUDDY_AGENT_ID,
-  type AgentIntent,
-  type AgentIntentOutcome
-} from '@/lib/studio-actions/agent'
+import type { AgentIntent, AgentIntentOutcome } from '@/lib/studio-actions/agent'
+import { BUDDY_AGENT_ID } from '@/lib/studio-actions/agent-ids'
 
 /** Whether a cancel reaches this intent: its agent's (Remove), or any
  * agent's but Buddy's (Stop agents, Off), sent in an older generation. */

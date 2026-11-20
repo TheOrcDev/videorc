@@ -83,6 +83,10 @@ import { WINDOW_NAMES } from '../../../shared/window-names'
 // heavier dependencies stay out of the shell's eager entry chunk. A page the
 // shell is waiting on renders as soon as its chunk is in (page-chunk.ts).
 const studioPage = pageChunk(async () => (await import('@/components/tabs/studio-tab')).StudioTab)
+// PH-09 (11-20): the launch surface's chunk loads while the entry runs and the
+// backend starts, not after the shell's first render; it is in by then, so the
+// Studio never suspends on it ("a page loaded ahead of time never suspends").
+void studioPage.preload().catch(() => undefined)
 const assetsPage = pageChunk(async () => (await import('@/components/tabs/assets-tab')).AssetsTab)
 const soundsPage = pageChunk(async () => (await import('@/components/tabs/sounds-tab')).SoundsTab)
 const captionsPage = pageChunk(

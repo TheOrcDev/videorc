@@ -1,4 +1,4 @@
-import { htmlLayerFrameUrl } from '../lib/room-html-layer-publisher'
+import { htmlLayerFrameUrl } from '../lib/room-html-layer-url'
 import { attachHostSpeech } from '@/lib/room-speech-source'
 import { roomNativeMicrophoneEnabled } from '@/lib/room-microphone-state'
 import { closeVisualMicrophoneStreams } from '@/lib/mic-visual-ownership'

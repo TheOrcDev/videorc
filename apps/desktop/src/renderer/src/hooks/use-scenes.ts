@@ -32,8 +32,26 @@ function read(key: string): unknown {
 /** The migration `prepareScenes` made for this launch, when the profile needed one. */
 let prepared: { library: SceneLibrary; globalShortcuts: GlobalShortcutsConfig } | null = null
 
-/** The library's reader (`lib/scenes-store`), loaded by `prepareScenes`. */
+/** The library's reader (`lib/scenes-store`), loaded by `loadStore`. */
 let store: typeof import('@/lib/scenes-store') | null = null
+let storeLoad: Promise<unknown> | null = null
+
+/** One load of the reader at a time; a failed load is tried again by the next caller. */
+function loadStore(): Promise<unknown> {
+  return (storeLoad ??= import('@/lib/scenes-store').then(
+    (module) => (store = module),
+    (error: unknown) => {
+      storeLoad = null
+      throw error
+    }
+  ))
+}
+
+// PH-09 (11-20): the load starts as the entry runs, so the Studio's first
+// render usually finds the reader and renders at once, instead of rendering
+// nothing for one more chunk round trip. Only the reader starts here: the v1
+// migration still runs in `prepareScenes`, in the Studio's own order.
+void loadStore().catch(() => undefined)
 
 function scenesStore(): typeof import('@/lib/scenes-store') {
   if (!store) throw new Error('The scene library was read before it was prepared.')
@@ -67,8 +85,8 @@ export function scenesStored(): boolean {
  * launch that needs it.
  */
 export async function prepareScenes(): Promise<void> {
-  store ??= await import('@/lib/scenes-store')
-  const stored = store.hydrateScenes(read(SCENES_KEY))
+  await loadStore()
+  const stored = scenesStore().hydrateScenes(read(SCENES_KEY))
   if (stored.library) return
   const { migrateStoredScenes } = await import('@/lib/scenes-migration')
   prepared = migrateStoredScenes({ readOnly: stored.readOnly })

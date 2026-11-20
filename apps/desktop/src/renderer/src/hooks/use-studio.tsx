@@ -5196,6 +5196,11 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
   // One-shot playback toasts per broadcast+status (probe events may repeat).
   const xPlaybackToastsRef = useRef(new Set<string>())
   const [previewRefreshNonce, setPreviewRefreshNonce] = useState(0)
+  // PH-08 (11-20): the client whose first automatic Preview start ran, and the
+  // device list the working sources were last reconciled with. A connection's
+  // first start runs once its sources are reconciled, not after 500 ms.
+  const autoPreviewStartedForRef = useRef<BackendClient | null>(null)
+  const sourcesReconciledForRef = useRef<DeviceList | null>(null)
   const nativePreviewSurfaceEnabled = Boolean(runtimeInfo?.nativePreviewSurfaceProofEnabled)
 
   // Surface a per-target stream drop from any tab (the Streaming tab has the full
@@ -8092,6 +8097,11 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
           recordAutomaticSourceFallbacks(before, nextSources)
           return { ...current, sources: withoutSceneApp(nextSources) }
         })
+        // PH-08: a connection's first Preview start waits for this, not a
+        // timer; the bump commits with the sources above and runs it.
+        sourcesReconciledForRef.current = deviceList
+        if (autoPreviewStartedForRef.current !== clientRef.current)
+          setPreviewRefreshNonce((current) => current + 1)
       })
       .catch((error) => console.warn('[scenes] working window resolution failed', error))
     return () => {
@@ -9593,6 +9603,22 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
           },
           (error: unknown) => console.warn('[banners] overlay status read failed:', error)
         )
+        // PH-08 (11-20): the batch below gates health, devices and the
+        // camera/Preview start, so it reads the backend's entitlements as they
+        // stand (`entitlements.get`, local). The revalidation with the Videorc
+        // API (up to 10 s) runs beside it and commits its answer unless a newer
+        // snapshot (an `entitlements.updated`) came in after the batch's.
+        let entitlementsLaunchRevision = entitlementsRevisionAtBootstrapStart
+        void bootstrapRequest<EntitlementsSnapshot>('entitlements.refresh').then(
+          (refreshed) => {
+            if (
+              generationIsCurrent() &&
+              entitlementsRevisionRef.current === entitlementsLaunchRevision
+            )
+              commitEntitlementsSnapshot(refreshed)
+          },
+          (error: unknown) => console.warn('[entitlements] launch refresh failed:', error)
+        )
         const [
           nextHealth,
           nextEntitlements,
@@ -9616,7 +9642,7 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
           nextNoiseCleanupJobs
         ] = await Promise.all([
           bootstrapRequest<BackendHealth>('health.ping'),
-          bootstrapRequest<EntitlementsSnapshot>('entitlements.refresh'),
+          bootstrapRequest<EntitlementsSnapshot>('entitlements.get'),
           bootstrapRequest<VideorcAccountSnapshot>('account.get'),
           bootstrapRequest<DeviceList>('devices.list'),
           recordingStatusBootstrap,
@@ -9703,6 +9729,7 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
           .catch(() => undefined)
         if (entitlementsRevisionRef.current === entitlementsRevisionAtBootstrapStart) {
           commitEntitlementsSnapshot(nextEntitlements)
+          entitlementsLaunchRevision = entitlementsRevisionRef.current
         }
         if (accountBootstrapToken && accountSnapshotCoordinator.canCommit(accountBootstrapToken)) {
           setAccount(nextAccount)
@@ -15997,6 +16024,7 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
     }
   }, [client, reportError, streamMetadataDraft, wsStatus])
 
+  const runtimeInfoKnown = runtimeInfo !== null
   useEffect(() => {
     if (firstRunSetupOpen || runtimeInfo?.disableAutoPreview) {
       return
@@ -16011,9 +16039,21 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
       return
     }
 
-    const timer = window.setTimeout(() => {
-      void refreshPreview()
-    }, 500)
+    // PH-08 (11-20): a connection's first start runs at once when the working
+    // sources are reconciled with the device list in hand (the reconcile bumps
+    // the nonce), instead of 500 ms after the launch batch; later changes keep
+    // the debounce. Runtime info first: it holds the first-run and smoke flags.
+    const launchStart =
+      autoPreviewStartedForRef.current !== client &&
+      runtimeInfoKnown &&
+      sourcesReconciledForRef.current === deviceListRef.current
+    const timer = window.setTimeout(
+      () => {
+        autoPreviewStartedForRef.current = client
+        void refreshPreview()
+      },
+      launchStart ? 0 : 500
+    )
 
     return () => window.clearTimeout(timer)
   }, [
@@ -16025,6 +16065,7 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
     refreshPreview,
     firstRunSetupOpen,
     runtimeInfo?.disableAutoPreview,
+    runtimeInfoKnown,
     wsStatus
   ])
 
