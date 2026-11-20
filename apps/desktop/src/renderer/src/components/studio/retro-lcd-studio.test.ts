@@ -342,7 +342,7 @@ describe('Retro LCD Sources and Takeover (plan 197)', () => {
     expect(markup).toContain('Be right back is covering the output. Click it to return.')
   })
 
-  it('points to Assets when there are no takeovers yet', () => {
+  it('points to Images when there are no takeovers yet', () => {
     core({ screenId: 'screen:2' }, [display], {
       screens: [],
       activeScreen: null,
@@ -351,6 +351,6 @@ describe('Retro LCD Sources and Takeover (plan 197)', () => {
     })
     const markup = renderToStaticMarkup(createElement(RetroTakeoverSection))
     expect(markup).toContain('>None yet</span>')
-    expect(markup).toContain('>Add in Assets</span>')
+    expect(markup).toContain('>Add in Images</span>')
   })
 })

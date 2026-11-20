@@ -49,7 +49,7 @@ describe('openWorkspaceTab', () => {
     expect(readWorkspaceNavigation(sent[0])).toEqual({ tab })
   })
 
-  it('covers all thirteen pages, Destinations as `live` (Avatar since plan 239, Guests 0.31.1)', () => {
+  it('covers all fourteen pages, Destinations as `live` (Avatar since plan 239, Guests 0.31.1, Sounds 2026-11-20)', () => {
     expect([...EVERY_PAGE].sort()).toEqual(
       [
         'ai',
@@ -63,6 +63,7 @@ describe('openWorkspaceTab', () => {
         'live',
         'recording',
         'settings',
+        'sounds',
         'sources',
         'studio'
       ].sort()

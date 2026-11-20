@@ -10,6 +10,7 @@ import { parseRoomMicrophoneCommand } from './room-microphone'
 import { parseRoomPcmCommand, parseRoomPcmFrame, parseRoomPcmResources } from './room-pcm'
 import type { FrontAppChanged } from './front-app'
 import { APP_ICONS_MAX_IDS } from './app-icons'
+import { PAGE_KEYS, type PageKey } from './sidebar-pages'
 import {
   validateChatDelivery,
   validateChatDeliveryBoundary,
@@ -2528,7 +2529,7 @@ const specificRuntimeEventSchemas = {
   'notes-window:document': notesDocumentSchema,
   'notes-window:flush-request': undefinedSchema,
   'oauth:callback-url': oauthCallbackEnvelopeSchema,
-  'shortcut:navigate': enumSchema(['1', '2', '3', '4', '5', '6', '7', '8', '9', '0', ',']),
+  'shortcut:navigate': enumSchema(PAGE_KEYS.map((entry) => entry.key) as [PageKey, ...PageKey[]]),
   // Plan 174 S3.1 (D2): which exit is waiting on the End livestream question.
   'app:exit-request': enumSchema(['quit', 'close']),
   // Plan 170 D18: `videorc://buddy` opens the Buddy tab; `openCreator` also

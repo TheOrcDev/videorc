@@ -67,7 +67,7 @@ const NO_KEY = 'none'
 const NO_KEY_ITEM = { [NO_KEY]: 'None' }
 
 /**
- * Assets → Sounds (plan 189 S7): the one home that imports, renames, orders,
+ * The Sounds page (plan 189 S7; its own page since 2026-11-20): the one home that imports, renames, orders,
  * trims and removes the soundboard's sounds, and sets how a press plays each
  * one and its key. Studio's Soundboard plays them; Sources → Sounds holds the
  * board's level. Nothing here waits for a session to end. Remove waits behind

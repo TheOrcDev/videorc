@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest'
 import {
   SIDEBAR_ZONES,
   WORKSPACE_SHORTCUTS,
+  pageShortcutFor,
   sidebarOrderFor,
   workspaceTabLabel,
   type WorkspaceTab
@@ -16,36 +17,35 @@ import {
   appMenuReleaseNotesUrl,
   type AppMenuWindowId
 } from '../../../shared/app-menu-items'
+import { pageKeyAccelerator } from '../../../shared/sidebar-pages'
 
 // Plan 174 S0.6 (A-8): the macOS menu is built from workspace-nav and
 // SHORTCUTS. Main cannot import them, so shared/app-menu-items.ts mirrors
 // them, and this test holds the mirror equal.
 
 function tabFor(key: string): WorkspaceTab {
-  const tab = WORKSPACE_SHORTCUTS.find((entry) => entry.digit === key)?.tab
-  if (!tab) throw new Error(`No page on ⌘${key}`)
+  const tab = WORKSPACE_SHORTCUTS.find((entry) => entry.key === key)?.tab
+  if (!tab) throw new Error(`No page on key ${key}`)
   return tab
 }
 
 const MENU_PAGES = APP_MENU_PAGE_GROUPS.flat()
 
 describe('the application menu mirrors workspace-nav', () => {
-  it('names every ⌘1–⌘9 and ⌘0 page once, as the sidebar does', () => {
+  it('names every page key once, as the sidebar does (Settings is Settings…)', () => {
     expect(MENU_PAGES.map((page) => page.key).sort()).toEqual(
-      WORKSPACE_SHORTCUTS.map((entry) => entry.digit)
-        .filter((digit) => digit !== ',')
+      WORKSPACE_SHORTCUTS.map((entry) => entry.key)
+        .filter((key) => key !== ',')
         .sort()
     )
     for (const page of MENU_PAGES) {
-      expect(page.label, `⌘${page.key}`).toBe(workspaceTabLabel(tabFor(page.key)))
+      expect(page.label, page.key).toBe(workspaceTabLabel(tabFor(page.key)))
     }
   })
 
-  it('keeps sidebar order and its zones: Studio, Setup, Livestream, then Library', () => {
+  it('keeps sidebar order and its blocks: Studio, Setup, Livestream, Assets, then Library', () => {
     const order = MENU_PAGES.map((page) => sidebarOrderFor(tabFor(page.key)))
     expect(order).toEqual([...order].sort((left, right) => left - right))
-    // Plan 235 D8: the digits themselves run in order; plan 239 D6: the
-    // tenth page, Library, takes 0.
     expect(MENU_PAGES.map((page) => page.key)).toEqual([
       '1',
       '2',
@@ -56,18 +56,24 @@ describe('the application menu mirrors workspace-nav', () => {
       '7',
       '8',
       '9',
+      'G',
+      'S',
       '0'
     ])
-    expect(APP_MENU_PAGE_GROUPS.map((group) => group.map((page) => tabFor(page.key)))).toEqual(
-      // The View menu lists the pages with a digit; Guests has none (0.31.1).
-      SIDEBAR_ZONES.filter((zone) => zone.id !== 'system').map((zone) =>
-        zone.pages.filter((tab) => tab !== 'guests')
-      )
-    )
+    expect(APP_MENU_PAGE_GROUPS.map((group) => group.map((page) => tabFor(page.key)))).toEqual([
+      ...SIDEBAR_ZONES.filter((zone) => zone.id !== 'system').map((zone) => zone.pages),
+      ['library']
+    ])
   })
 
   it('opens Settings on the ⌘, the shell maps', () => {
     expect(tabFor(',')).toBe('settings')
+  })
+
+  it('prints each menu page on the accelerator the sidebar shows', () => {
+    for (const page of MENU_PAGES) {
+      expect(pageKeyAccelerator(page.key), page.label).toBe(pageShortcutFor(tabFor(page.key)))
+    }
   })
 })
 
@@ -90,13 +96,14 @@ describe('the application menu mirrors SHORTCUTS', () => {
     }
   })
 
-  it('lists the page digits SHORTCUTS documents', () => {
+  it('lists the page keys SHORTCUTS documents', () => {
     for (const page of MENU_PAGES) {
       const entry = SHORTCUTS.find(
         (shortcut) =>
-          shortcut.group === 'Navigation' && shortcut.accelerators[0] === `CmdOrCtrl+${page.key}`
+          shortcut.group === 'Navigation' &&
+          shortcut.accelerators[0] === pageKeyAccelerator(page.key)
       )
-      expect(entry?.label, `⌘${page.key}`).toBe(page.label)
+      expect(entry?.label, page.key).toBe(page.label)
     }
   })
 })

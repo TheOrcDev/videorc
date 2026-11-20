@@ -78,14 +78,25 @@ describe('shellShortcutAction (plan 174 S3.21, A-2, A-12)', () => {
 })
 
 describe('navigationShortcutTab', () => {
-  it('maps the forwarded keys to pages, Library on 0, and none from under a dialog (plan 239 D6)', () => {
+  it('maps the forwarded keys to pages, and none from under a dialog (owner 2026-11-20)', () => {
     expect(navigationShortcutTab('1', false)).toBe('studio')
-    expect(navigationShortcutTab('8', false)).toBe('avatar')
+    expect(navigationShortcutTab('4', false)).toBe('captions')
+    expect(navigationShortcutTab('7', false)).toBe('guests')
     expect(navigationShortcutTab('9', false)).toBe('ai')
+    expect(navigationShortcutTab('G', false)).toBe('assets')
+    expect(navigationShortcutTab('S', false)).toBe('sounds')
     expect(navigationShortcutTab('0', false)).toBe('library')
     expect(navigationShortcutTab(',', false)).toBe('settings')
     expect(navigationShortcutTab('k', false)).toBeNull()
     expect(navigationShortcutTab('1', true)).toBeNull()
-    expect(navigationShortcutTab('0', true)).toBeNull()
+    expect(navigationShortcutTab('S', true)).toBeNull()
+  })
+
+  // Main forwards the ⇧⌘ letters (Chromium would deliver them, but one route
+  // keeps the aux windows and the main window alike), so the shell leaves them.
+  it('leaves ⇧⌘G and ⇧⌘S to main', () => {
+    for (const key of ['g', 'G', 's', 'S']) {
+      expect(shellShortcutAction(press(key, { shiftKey: true }), mac), key).toBeNull()
+    }
   })
 })

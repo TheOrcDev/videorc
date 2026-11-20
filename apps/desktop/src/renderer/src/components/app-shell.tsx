@@ -84,6 +84,7 @@ import { WINDOW_NAMES } from '../../../shared/window-names'
 // shell is waiting on renders as soon as its chunk is in (page-chunk.ts).
 const studioPage = pageChunk(async () => (await import('@/components/tabs/studio-tab')).StudioTab)
 const assetsPage = pageChunk(async () => (await import('@/components/tabs/assets-tab')).AssetsTab)
+const soundsPage = pageChunk(async () => (await import('@/components/tabs/sounds-tab')).SoundsTab)
 const captionsPage = pageChunk(
   async () => (await import('@/components/tabs/captions-tab')).CaptionsTab
 )
@@ -115,6 +116,7 @@ const PAGE_CHUNKS: Record<WorkspaceTab, PageLoad> = {
   sources: sourcesPage,
   layouts: layoutPage,
   assets: assetsPage,
+  sounds: soundsPage,
   live: streamingPage,
   guests: streamingPage,
   captions: captionsPage,
@@ -131,6 +133,7 @@ function anyPageOpened(): boolean {
 }
 const StudioTab = studioPage.Page
 const AssetsTab = assetsPage.Page
+const SoundsTab = soundsPage.Page
 const CaptionsTab = captionsPage.Page
 const DiagnosticsTab = diagnosticsPage.Page
 const LayoutTab = layoutPage.Page
@@ -482,7 +485,8 @@ function AppShellContent(): ReactElement {
     togglePreviewWindow
   ])
 
-  // ⌘1–⌘9 / ⌘, arrive from the main process (Chromium swallows ⌘+digit before
+  // The page keys (⌘ digits, ⇧⌘ letters, ⌘,) arrive from the main process
+  // (shared/sidebar-pages; Chromium swallows ⌘+digit before
   // the renderer keydown — see main's before-input-event handler). Map the raw
   // key to a page here, where navigation state lives. The IPC path bypasses
   // dialog focus entirely, so it asks the same `isModalOpen` as every other
@@ -669,6 +673,7 @@ function AppShellContent(): ReactElement {
                       {active === 'sources' ? <SourcesTab /> : null}
                       {active === 'layouts' ? <LayoutTab /> : null}
                       {active === 'assets' ? <AssetsTab /> : null}
+                      {active === 'sounds' ? <SoundsTab /> : null}
                       {active === 'live' || active === 'guests' ? (
                         <StreamingTab
                           guests={active === 'guests'}

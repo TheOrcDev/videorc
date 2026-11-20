@@ -96,6 +96,7 @@ const pages = [
   { tab: 'sources' },
   { tab: 'layout' },
   { tab: 'assets' },
+  { tab: 'sounds' },
   { tab: 'streaming' },
   { tab: 'captions' },
   { tab: 'recording' },

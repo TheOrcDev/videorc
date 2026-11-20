@@ -24,7 +24,7 @@ import { updateChip } from '@/lib/update-ui'
 import {
   SIDEBAR_ZONES,
   STUDIO_PANELS,
-  shortcutDigitFor,
+  pageShortcutFor,
   sidebarOrderFor,
   workspacePageMeta,
   type StudioPanel,
@@ -39,7 +39,7 @@ function NavRow({
   label,
   isActive,
   triggerId,
-  shortcutDigit,
+  shortcut,
   platform,
   shortcutVisible,
   shortcutIndex,
@@ -49,7 +49,8 @@ function NavRow({
   label: string
   isActive: boolean
   triggerId: string
-  shortcutDigit?: string
+  /** The page's shortcut as an accelerator (`pageShortcutFor`). */
+  shortcut?: string
   platform?: string
   shortcutVisible: boolean
   shortcutIndex: number
@@ -60,9 +61,7 @@ function NavRow({
     <button
       type="button"
       aria-current={isActive ? 'page' : undefined}
-      aria-keyshortcuts={
-        shortcutDigit ? shortcutAriaKeys(`CmdOrCtrl+${shortcutDigit}`, platform) : undefined
-      }
+      aria-keyshortcuts={shortcut ? shortcutAriaKeys(shortcut, platform) : undefined}
       data-videorc-tab-trigger={triggerId}
       onClick={onClick}
       className={cn(
@@ -79,12 +78,12 @@ function NavRow({
         className={cn('size-4 shrink-0', isActive && 'text-primary')}
       />
       <span className="flex-1 truncate text-left">{label}</span>
-      {shortcutDigit ? (
+      {shortcut ? (
         // Mounted whether or not it shows: reserving the width stops every
         // row from reflowing the instant ⌘ goes down. `aria-keyshortcuts` on
         // the button already tells assistive tech about the shortcut, so the
         // hidden chip is decoration and stays out of the accessibility tree.
-        <ShortcutKeys accelerator={`CmdOrCtrl+${shortcutDigit}`} platform={platform} {...chip} />
+        <ShortcutKeys accelerator={shortcut} platform={platform} {...chip} />
       ) : null}
     </button>
   )
@@ -110,7 +109,7 @@ function StudioNavButton({
   icon: SlabIcon,
   label,
   isActive,
-  shortcutDigit,
+  shortcut,
   platform,
   shortcutVisible,
   trailing,
@@ -119,7 +118,7 @@ function StudioNavButton({
   icon: AppIcon
   label: string
   isActive: boolean
-  shortcutDigit?: string
+  shortcut?: string
   platform?: string
   shortcutVisible: boolean
   /** The session clock, shown while the shortcut chips are hidden. */
@@ -132,9 +131,7 @@ function StudioNavButton({
     <button
       type="button"
       aria-current={isActive ? 'page' : undefined}
-      aria-keyshortcuts={
-        shortcutDigit ? shortcutAriaKeys(`CmdOrCtrl+${shortcutDigit}`, platform) : undefined
-      }
+      aria-keyshortcuts={shortcut ? shortcutAriaKeys(shortcut, platform) : undefined}
       data-videorc-tab-trigger="studio"
       data-testid="sidebar-studio-slab"
       onClick={onClick}
@@ -143,10 +140,10 @@ function StudioNavButton({
       <SlabIcon weight={isActive ? 'fill' : 'regular'} className="size-5 shrink-0" />
       <span className="flex-1 truncate text-left">{label}</span>
       {trailingShown ? trailing : null}
-      {shortcutDigit ? (
+      {shortcut ? (
         // The clock lends the chip its slot while ⌘ is held.
         <ShortcutKeys
-          accelerator={`CmdOrCtrl+${shortcutDigit}`}
+          accelerator={shortcut}
           platform={platform}
           {...chip}
           className={cn(chip.className, KBD_ON_SLAB, trailingShown && 'hidden')}
@@ -315,7 +312,7 @@ export function Sidebar({
         // The panels keep their pre-rail trigger ids (`streaming` for
         // Destinations), so smokes and automation keep working.
         triggerId={panel?.legacyTabId ?? tab}
-        shortcutDigit={shortcutDigitFor(tab)}
+        shortcut={pageShortcutFor(tab)}
         shortcutIndex={reducedMotion ? 0 : sidebarOrderFor(tab)}
         platform={platform}
         shortcutVisible={shortcutVisible}
@@ -364,10 +361,11 @@ export function Sidebar({
       </div>
 
       {/* The zones (plan 174 D8, plan 235): Studio leads as the chrome slab,
-          then the two labelled groups, Setup and Livestream (Destinations and
-          Buddy, which keeps every feature: it sells Premium), then Library;
-          Settings sits in a bottom block above the account row. ⌘1–⌘9 run
-          down the rows in order. */}
+          then the two labelled groups, Setup and Livestream (Destinations,
+          Guests, Avatar and Sidekick, which keeps every feature: it sells
+          Premium); Library and Settings sit in a bottom block above the
+          account row (owner 2026-11-20). ⌘1–⌘9 run down the top rows in
+          order; Library is ⇧⌘L and Settings ⌘,. */}
       <nav
         aria-label="Primary"
         className="flex flex-1 flex-col gap-4 overflow-y-auto px-3 pt-1 pb-2"
@@ -376,7 +374,7 @@ export function Sidebar({
           icon={studio.icon}
           label={studio.label}
           isActive={active === 'studio'}
-          shortcutDigit={shortcutDigitFor('studio')}
+          shortcut={pageShortcutFor('studio')}
           platform={platform}
           shortcutVisible={shortcutVisible}
           trailing={

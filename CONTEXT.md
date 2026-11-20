@@ -218,13 +218,13 @@ _Avoid_: input, feed
 
 **Takeover**:
 A full-frame image the streamer puts on stream over everything else.
-Assets → Takeovers manages them; Studio's Takeover section puts one on
+Images → Takeovers manages them; Studio's Takeover section puts one on
 stream.
 _Avoid_: screen, takeover screen
 
 **Banner**:
 An image the streamer places anywhere on the picture: a sponsor, their
-socials, a logo, a frame. Assets → Banners imports and manages them; the
+socials, a logo, a frame. Images → Banners imports and manages them; the
 Scene page places them and shows or hides them ("Show", "Hide"). A banner
 stays over a takeover and under captions, the avatar and the highlight card.
 _Avoid_: overlay (in copy), image source, sticker, sponsor (as the feature's
@@ -232,7 +232,7 @@ name)
 
 **HTML banner**:
 A banner whose picture is a web page with a transparent background, so it
-can move: an animated badge, a ticker, a lower third (plan 232). Assets →
+can move: an animated badge, a ticker, a lower third (plan 232). Images →
 Banners → "Import HTML…" takes an `.html` file or a folder with
 `index.html`. It is a banner in every other way. Code and wire names say
 `html overlay`; copy never does.
@@ -240,7 +240,7 @@ _Avoid_: HTML overlay (in copy), browser source, web source, widget
 
 **Live background**:
 An animated background behind the screen and camera: Silk, Side Rays, Plasma
-Wave, Liquid Chrome or Line Waves, from React Bits (plan 190). Assets →
+Wave, Liquid Chrome or Line Waves, from React Bits (plan 190). Images →
 Backgrounds → Live puts one on the scene, and a click on its tile takes it
 off. A scene has one background, live or an image. Where it can't move, it
 shows a still frame of its look, and its Adjust style says why.
@@ -256,7 +256,7 @@ _Avoid_: preset (a preset is quality only), theme, variant, style
 **Sound**:
 A short audio file (up to 30 seconds) the streamer plays into the recording
 and every stream from the Soundboard: an airhorn, applause, a laugh.
-Assets → Sounds imports and manages them; Sources → Sounds sets their level
+The Sounds page imports and manages them; Sources → Sounds sets their level
 and whether the streamer hears them.
 _Avoid_: clip (a clip is a stretch of a recording), sample, SFX, sound effect
 (as the feature's name), jingle

@@ -16,19 +16,21 @@ only via ⌘K, sources diagnostics list unbounded
 > keeps the current map.
 >
 > - **Sidebar** (plan 235, 2026-11-14; plan 239, 2026-11-15): Studio ⌘1 as
->   the chrome slab, then Setup (Sources ⌘2, Scene ⌘3, Assets ⌘4, Captions
->   ⌘5, Output ⌘6), then Livestream (Destinations ⌘7, Avatar ⌘8, Sidekick ⌘9;
->   the owner moved Avatar here from Setup on 2026-11-19;
->   Sidekick keeps Clean cut and every feature of the helper, the page sells
->   Premium), Library ⌘0, and Settings ⌘, in a bottom block. Health has no
->   row: the status bar's state opens it.
+>   the chrome slab, then Setup (Sources ⌘2, Scene ⌘3, Captions ⌘4, Output
+>   ⌘5), then Livestream (Destinations ⌘6, Guests ⌘7 with talk shows, Avatar
+>   ⌘8, Sidekick ⌘9; Sidekick keeps Clean cut and every feature of the
+>   helper, the page sells Premium), then Assets (Images ⇧⌘G, the page that
+>   was Assets, and Sounds ⇧⌘S; owner 2026-11-20), and Library ⌘0 and
+>   Settings ⌘, in a bottom block. The order and the keys live in
+>   `apps/desktop/src/shared/sidebar-pages.ts`. Health has no row: the
+>   status bar's state opens it.
 > - **Devices**: Sources is the home of every screen, window, camera,
 >   microphone and system audio source. Studio mirrors the few needed
 >   mid-session, editing the same state: its Sources section (Screen,
 >   Camera, System audio, with Open Sources) and its Microphone section
 >   (picker, level, mute).
-> - **Takeovers** (the "Screens" below) live on the Assets page, Assets →
->   Takeovers, which manages them; Studio's Takeover section puts one on stream.
+> - **Takeovers** (the "Screens" below) live on the Images page (the page
+>   that was Assets), Images → Takeovers, which manages them; Studio's Takeover section puts one on stream.
 >   They never moved to the Scene page.
 > - **Space** works only on the Studio page: Record when idle, Stop recording
 >   while recording, and the End livestream confirmation while live, with

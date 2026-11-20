@@ -96,7 +96,7 @@ describe('StreamManagerStatusBar Banners', () => {
   it('says how to get banners, or that they are loading, and turns Hide all off with none showing', async () => {
     await render([])
     expect(rows(await open('Banners'))).toEqual([
-      { text: 'Import banners in Assets', checked: null, disabled: true }
+      { text: 'Import banners in Images', checked: null, disabled: true }
     ])
     await act(async () => root.unmount())
     root = createRoot(container)

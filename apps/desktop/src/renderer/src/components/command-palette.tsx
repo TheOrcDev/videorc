@@ -58,7 +58,7 @@ import { openFirstRunSetup } from '@/lib/workspace-navigation'
 import {
   SIDEBAR_ZONES,
   isStudioPanel,
-  shortcutDigitFor,
+  pageShortcutFor,
   useWorkspaceNav,
   workspacePageMeta,
   type WorkspaceTab
@@ -113,7 +113,9 @@ export const PAGE_KEYWORDS: Readonly<Record<WorkspaceTab, readonly string[]>> = 
     'edit scene',
     'scene editor'
   ],
-  assets: ['backgrounds', 'overlays', 'images', 'takeovers', 'banners', 'sounds', 'soundboard'],
+  // 2026-11-20: Assets became two pages; the old name finds both.
+  assets: ['assets', 'backgrounds', 'overlays', 'pictures', 'takeovers', 'banners'],
+  sounds: ['assets', 'soundboard', 'sound effects', 'sfx', 'import sounds'],
   // The page was Livestream until plan 235 D6: the old name still finds it.
   live: [
     'livestream',
@@ -422,7 +424,7 @@ export function CommandPalette({
           {PAGES.map((page) => {
             // Guests shows only with talk shows, as its sidebar row does.
             if (page.id === 'guests' && !guestsVisible(cloudStatus)) return null
-            const digit = shortcutDigitFor(page.id)
+            const pageShortcut = pageShortcutFor(page.id)
             const PageIcon = page.icon
             return (
               <Fragment key={page.id}>
@@ -433,7 +435,7 @@ export function CommandPalette({
                 >
                   <PageIcon className="size-4" />
                   {page.label}
-                  {shortcut(digit ? `CmdOrCtrl+${digit}` : undefined)}
+                  {shortcut(pageShortcut)}
                 </CommandItem>
                 {/* Plan 215 D4: the Scene page with the editor on and the
                     camera selected, the same Edit scene as the page's own. */}

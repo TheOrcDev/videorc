@@ -1,39 +1,29 @@
 // What the macOS application menu lists (plan 174 S0.6, A-8), as plain data
-// the main process can read. Main cannot import the renderer's workspace-nav
-// or SHORTCUTS, so this mirrors them; workspace-nav-menu.test.ts holds them
-// equal.
+// the main process can read. The pages and their keys come from
+// shared/sidebar-pages, the one home of the sidebar's order and key map; the
+// windows mirror SHORTCUTS, and workspace-nav-menu.test.ts holds them equal.
 
+import { SIDEBAR_LAYOUT, SIDEBAR_PAGE_LABELS, pageKeyFor, type PageKey } from './sidebar-pages'
 import { WINDOW_NAMES } from './window-names'
 
-/** A key main forwards on `shortcut:navigate`: ⌘1–⌘9 and ⌘0 open a page, ⌘, Settings. */
-export type AppMenuPageKey = '1' | '2' | '3' | '4' | '5' | '6' | '7' | '8' | '9' | '0' | ','
-
 export interface AppMenuPage {
-  key: Exclude<AppMenuPageKey, ','>
+  key: Exclude<PageKey, ','>
   label: string
 }
 
 /**
- * The View menu's pages in sidebar order, one group per sidebar zone: Studio,
- * Setup, Livestream, then Library. The digits run down the sidebar (plan 235
- * D8); Library, the tenth page, takes 0 (plan 239 D6).
+ * The View menu's pages in sidebar order, one group per sidebar block, built
+ * from shared/sidebar-pages: every page with a key except Settings, which is
+ * the app menu's Settings… item. A page without a key (Sidekick today) is
+ * left out.
  */
-export const APP_MENU_PAGE_GROUPS: readonly (readonly AppMenuPage[])[] = [
-  [{ key: '1', label: 'Studio' }],
-  [
-    { key: '2', label: 'Sources' },
-    { key: '3', label: 'Scene' },
-    { key: '4', label: 'Assets' },
-    { key: '5', label: 'Captions' },
-    { key: '6', label: 'Output' }
-  ],
-  [
-    { key: '7', label: 'Destinations' },
-    { key: '8', label: 'Avatar' },
-    { key: '9', label: 'Sidekick' }
-  ],
-  [{ key: '0', label: 'Library' }]
-]
+export const APP_MENU_PAGE_GROUPS: readonly (readonly AppMenuPage[])[] = SIDEBAR_LAYOUT.map(
+  (zone) =>
+    zone.pages.flatMap((page): AppMenuPage[] => {
+      const key = pageKeyFor(page)
+      return key && key !== ',' ? [{ key, label: SIDEBAR_PAGE_LABELS[page] }] : []
+    })
+).filter((group) => group.length > 0)
 
 export type AppMenuWindowId = 'preview' | 'notes' | 'stream-manager' | 'captions'
 

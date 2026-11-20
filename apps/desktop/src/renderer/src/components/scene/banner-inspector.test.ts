@@ -386,10 +386,10 @@ describe('BannerInspector', () => {
     expect(timed.onPatch).toHaveBeenCalledTimes(2)
   })
 
-  it('opens Assets to manage the banner', async () => {
+  it('opens Images to manage the banner', async () => {
     const props = inspectorProps()
     await renderInspector(props)
-    await act(async () => button('Manage in Assets').click())
+    await act(async () => button('Manage in Images').click())
     expect(props.onManage).toHaveBeenCalledTimes(1)
   })
 
@@ -415,7 +415,7 @@ describe('BannerInspector', () => {
       expect(button(label).disabled, label).toBe(true)
     expect(switchFor('Stream').hasAttribute('data-disabled')).toBe(true)
     expect(switchFor('Recording').hasAttribute('data-disabled')).toBe(true)
-    expect(button('Manage in Assets').disabled).toBe(false)
+    expect(button('Manage in Images').disabled).toBe(false)
     const fold = document.querySelector('[data-videorc-banner-timing-fold]')!
     await act(async () => fold.querySelector<HTMLButtonElement>('h3 button')!.click())
     expect(
@@ -508,7 +508,7 @@ describe('SceneBannersSection', () => {
     ).toBe(false)
   })
 
-  it('says "No banners yet." with Open Assets, only once the list is known', async () => {
+  it('says "No banners yet." with Open Images, only once the list is known', async () => {
     await renderSection(sectionProps({ banners: [], loaded: false }))
     expect(document.body.textContent).toContain('Loading banners…')
     expect(document.body.textContent).not.toContain('No banners yet.')
@@ -516,7 +516,7 @@ describe('SceneBannersSection', () => {
     const props = sectionProps({ banners: [] })
     await renderSection(props)
     expect(document.body.textContent).toContain('No banners yet.')
-    await act(async () => button('Open Assets').click())
+    await act(async () => button('Open Images').click())
     expect(props.onOpenAssets).toHaveBeenCalledTimes(1)
   })
 

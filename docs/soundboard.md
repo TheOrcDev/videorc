@@ -14,15 +14,15 @@ an airhorn, applause, a laugh track (plan 189). It is free for everyone.
 - **Where it goes**: while you record or stream, a sound goes into the
   recording and every stream, at the moment you pressed it. Between
   sessions only you hear it, so you can try sounds out.
-- **Manage** in Assets → Sounds: "Import sounds…" takes WAV, MP3, M4A, OGG
+- **Manage** on the Sounds page (the sidebar's Assets group): "Import sounds…" takes WAV, MP3, M4A, OGG
   or FLAC, up to 30 seconds each, 24 sounds and 5 minutes in all. Each row
   sets the sound's name, volume, key and how a press plays it:
   - **Play once**: every press plays it from the start;
   - **Play/stop**: a press starts it, the next press stops it;
   - **Loop**: like Play/stop, and it repeats until stopped;
   - **While held**: it plays while you hold the pad or the key.
-  Remove has an Undo. "Restore starter sounds" brings back any of the
-  twelve starters you removed.
+    Remove has an Undo. "Restore starter sounds" brings back any of the
+    twelve starters you removed.
 - **Level** on Sources → Sounds, beside Microphone and System audio: the
   soundboard's Level, its meter, and **Hear sounds yourself** (on by
   default). Off, you don't hear sounds while recording or live, but your

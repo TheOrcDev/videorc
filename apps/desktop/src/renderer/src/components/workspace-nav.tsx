@@ -11,16 +11,26 @@ import {
   OutputIcon,
   SceneIcon,
   SettingsIcon,
+  SoundsPageIcon,
   SourcesIcon,
   StudioIcon
 } from '@/components/icons'
 import { createContext, useContext } from 'react'
 
-import { AVATAR_TAB_LABEL, isAvatarTabId, type AvatarTabId } from '@/lib/avatar-tabs'
-import { BUDDY_TAB_LABEL, isBuddyTabId, type BuddyTabId } from '@/lib/buddy-tabs'
+import { isAvatarTabId, type AvatarTabId } from '@/lib/avatar-tabs'
+import { isBuddyTabId, type BuddyTabId } from '@/lib/buddy-tabs'
 import { isLivestreamViewId } from '@/lib/livestream-tabs'
 import { migrateSettingsTabId, type SettingsTabId } from '@/lib/settings-tabs'
 import type { FirstRunSetupRequest, WorkspaceNavigation } from '@/lib/workspace-navigation'
+import {
+  PAGE_KEYS,
+  SIDEBAR_LAYOUT,
+  SIDEBAR_PAGE_LABELS,
+  pageKeyAccelerator,
+  pageKeyFor,
+  type PageKey,
+  type SidebarZoneId
+} from '../../../shared/sidebar-pages'
 
 // The panel pages: one click away, but they are FULL pages — studio content
 // renders only on the Studio tab (user decision 2026-06-09, overriding the
@@ -29,8 +39,16 @@ import type { FirstRunSetupRequest, WorkspaceNavigation } from '@/lib/workspace-
 // never requires hunting across pages (UI rewrite plan, 2026-06-10). Most sit
 // under the sidebar's "Setup" label; Destinations (`live`) sits under
 // "Livestream" with Buddy (plan 235 D6), and stays a panel so
-// `openStudioPanel('live')` keeps working.
-export type StudioPanel = 'sources' | 'layouts' | 'assets' | 'live' | 'captions' | 'recording'
+// `openStudioPanel('live')` keeps working. Images (id `assets`, the page that
+// was Assets) and Sounds sit under "Assets" (owner 2026-11-20).
+export type StudioPanel =
+  | 'sources'
+  | 'layouts'
+  | 'assets'
+  | 'sounds'
+  | 'live'
+  | 'captions'
+  | 'recording'
 
 // Full pages: they replace the workspace content area.
 export type WorkspaceTab =
@@ -65,29 +83,32 @@ export type StudioPanelMeta = {
 // talk show's room (plan 224 D16), is its own page since 0.31.1. (No comments
 // inside these arrays: the eager build ships them.)
 export const WORKSPACE_TABS: WorkspaceTabMeta[] = [
-  { id: 'studio', label: 'Studio', icon: StudioIcon },
-  { id: 'avatar', label: AVATAR_TAB_LABEL, icon: AvatarPageIcon },
-  { id: 'guests', label: 'Guests', icon: AccountIcon },
-  { id: 'ai', label: BUDDY_TAB_LABEL, icon: BuddyPageIcon },
-  { id: 'library', label: 'Library', icon: LibraryIcon },
-  { id: 'settings', label: 'Settings', icon: SettingsIcon },
+  { id: 'studio', label: SIDEBAR_PAGE_LABELS.studio, icon: StudioIcon },
+  { id: 'avatar', label: SIDEBAR_PAGE_LABELS.avatar, icon: AvatarPageIcon },
+  { id: 'guests', label: SIDEBAR_PAGE_LABELS.guests, icon: AccountIcon },
+  { id: 'ai', label: SIDEBAR_PAGE_LABELS.ai, icon: BuddyPageIcon },
+  { id: 'library', label: SIDEBAR_PAGE_LABELS.library, icon: LibraryIcon },
+  { id: 'settings', label: SIDEBAR_PAGE_LABELS.settings, icon: SettingsIcon },
   { id: 'diagnostics', label: 'Health', icon: HealthIcon }
 ]
 
 // The panel pages in sidebar order. There is no Audio page — the microphone and
 // mixer live on Sources with every other capture device. Labels renamed
 // 2026-06-13 (ux-ia-refactor-plan) and 2026-11-14 (plan 235 D6: Livestream →
-// Destinations); ids and legacyTabId stay so smokes and deep links keep working.
+// Destinations; 2026-11-20: Assets → Images, its sounds moved to Sounds); ids
+// and legacyTabId stay so smokes and deep links keep working.
+const L = SIDEBAR_PAGE_LABELS
 export const STUDIO_PANELS: StudioPanelMeta[] = [
-  { id: 'sources', label: 'Sources', icon: SourcesIcon, legacyTabId: 'sources' },
-  { id: 'layouts', label: 'Scene', icon: SceneIcon, legacyTabId: 'layout' },
-  { id: 'assets', label: 'Assets', icon: AssetsIcon, legacyTabId: 'assets' },
-  { id: 'captions', label: 'Captions', icon: CaptionsIcon, legacyTabId: 'captions' },
-  { id: 'recording', label: 'Output', icon: OutputIcon, legacyTabId: 'recording' },
-  { id: 'live', label: 'Destinations', icon: LivestreamIcon, legacyTabId: 'streaming' }
+  { id: 'sources', label: L.sources, icon: SourcesIcon, legacyTabId: 'sources' },
+  { id: 'layouts', label: L.layouts, icon: SceneIcon, legacyTabId: 'layout' },
+  { id: 'assets', label: L.assets, icon: AssetsIcon, legacyTabId: 'assets' },
+  { id: 'sounds', label: L.sounds, icon: SoundsPageIcon, legacyTabId: 'sounds' },
+  { id: 'captions', label: L.captions, icon: CaptionsIcon, legacyTabId: 'captions' },
+  { id: 'recording', label: L.recording, icon: OutputIcon, legacyTabId: 'recording' },
+  { id: 'live', label: L.live, icon: LivestreamIcon, legacyTabId: 'streaming' }
 ]
 
-export type SidebarZoneId = 'stage' | 'setup' | 'livestream' | 'library' | 'system'
+export type { SidebarZoneId }
 
 export type SidebarZone = {
   id: SidebarZoneId
@@ -96,48 +117,26 @@ export type SidebarZone = {
   pages: readonly WorkspaceTab[]
 }
 
-// The sidebar, top to bottom (plan 174 D8, plan 235 D6): Studio leads alone as
-// the chrome slab, then the two labelled groups, Setup and Livestream, then
-// Library. The avatar is used on livestreams, so it sits in Livestream just
-// above Sidekick, whose character it is (owner 2026-11-19; it was in Setup
-// from plan 239). Guests sits beside Destinations (0.31.1; shown only with
-// talk shows). The 'system' rows sit
-// in a bottom block above the account row. Health has no row at all: the
-// status bar's state is its door (D9).
-export const SIDEBAR_ZONES: readonly SidebarZone[] = [
-  { id: 'stage', pages: ['studio'] },
-  {
-    id: 'setup',
-    label: 'Setup',
-    pages: ['sources', 'layouts', 'assets', 'captions', 'recording']
-  },
-  { id: 'livestream', label: 'Livestream', pages: ['live', 'guests', 'avatar', 'ai'] },
-  { id: 'library', pages: ['library'] },
-  { id: 'system', pages: ['settings'] }
-]
+// The sidebar, top to bottom, and its keys live in shared/sidebar-pages (one
+// home for the order and the key map, owner 2026-11-20): Studio, the Setup,
+// Livestream and Assets groups, then Library and Settings in the bottom
+// block above the account row. Guests shows only with talk shows. Health has
+// no row at all: the status bar's state is its door (D9).
+export const SIDEBAR_ZONES: readonly SidebarZone[] = SIDEBAR_LAYOUT
 
-// Page shortcuts run down the sidebar (plan 235 D8): ⌘1–⌘9, then ⌘0 for the
-// tenth page, Library (plan 239 D6). Settings keeps the platform-standard ⌘,.
-// Guests has none either (0.31.1): it shows only with talk shows, and the
-// digits keep their rows. Health intentionally has NO digit — it stays reachable via ⌘K (and the
-// account menu). The main process emits the raw key ('0'–'9' or ',') and
-// AppShell maps whatever is listed here.
-export const WORKSPACE_SHORTCUTS: { digit: string; tab: WorkspaceTab }[] = [
-  { digit: '1', tab: 'studio' },
-  { digit: '2', tab: 'sources' },
-  { digit: '3', tab: 'layouts' },
-  { digit: '4', tab: 'assets' },
-  { digit: '5', tab: 'captions' },
-  { digit: '6', tab: 'recording' },
-  { digit: '7', tab: 'live' },
-  { digit: '8', tab: 'avatar' },
-  { digit: '9', tab: 'ai' },
-  { digit: '0', tab: 'library' },
-  { digit: ',', tab: 'settings' }
-]
+// Page shortcuts, derived there: ⌘1–⌘9 down the nine rows above the Assets
+// group (Guests ⌘7 whether or not its row shows), ⇧⌘G Images, ⇧⌘S Sounds,
+// ⌘0 Library, ⌘, Settings. Health has NO key: it stays reachable via ⌘K, the
+// status bar and the account menu. Main forwards the key and AppShell maps it
+// here.
+export const WORKSPACE_SHORTCUTS: readonly { key: PageKey; tab: WorkspaceTab }[] = PAGE_KEYS.map(
+  ({ key, page }) => ({ key, tab: page })
+)
 
-export function shortcutDigitFor(tab: WorkspaceTab): string | undefined {
-  return WORKSPACE_SHORTCUTS.find((entry) => entry.tab === tab)?.digit
+/** A page's shortcut as an Electron accelerator (`CmdOrCtrl+7`, `CmdOrCtrl+Shift+G`), if it has one. */
+export function pageShortcutFor(tab: WorkspaceTab): string | undefined {
+  const key = pageKeyFor(tab)
+  return key ? pageKeyAccelerator(key) : undefined
 }
 
 /** Every page the sidebar shows, top to bottom (Health has no row). */

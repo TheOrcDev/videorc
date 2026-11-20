@@ -420,15 +420,15 @@ export function mapObsSetup(
         verdict: 'approximated',
         subject: bottom.name,
         note: backgroundTarget.replaces
-          ? `Becomes the scene background, in place of ${backgroundTarget.replaces} in Assets.`
-          : 'Becomes the scene background, in an empty slot in Assets.'
+          ? `Becomes the scene background, in place of ${backgroundTarget.replaces} in Images.`
+          : 'Becomes the scene background, in an empty slot in Images.'
       })
     } else if (bottom) {
       report.push({
         verdict: 'skipped',
         subject: bottom.name,
         note: bottom.managedBackground
-          ? 'Assets has no slot for it. Import it from Assets.'
+          ? 'Images has no slot for it. Import it from Images.'
           : "The image couldn't be copied. Check that the file still exists and is a PNG, JPEG or WebP."
       })
     }

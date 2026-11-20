@@ -240,7 +240,7 @@ export function SceneBannersSection({
           <EmptyDescription>No banners yet.</EmptyDescription>
           <EmptyContent>
             <Button variant="outline" onClick={onOpenAssets}>
-              Open Assets
+              Open Images
             </Button>
           </EmptyContent>
         </Empty>
@@ -448,7 +448,7 @@ export function BannerInspector({
         </Field>
         <BannerTimingFold banner={banner} disabled={blocked} onPatch={onPatch} />
         <Button className="self-end" variant="ghost" onClick={onManage}>
-          Manage in Assets
+          Manage in Images
           <ArrowRightIcon data-icon="inline-end" />
         </Button>
       </div>

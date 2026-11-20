@@ -128,9 +128,6 @@ export const LIVE_BACKGROUND_MOTION_OPTIONS: readonly {
   { value: 'normal', label: 'Normal' }
 ]
 
-/** The one Live group credit line (plan 190 D3). */
-export const LIVE_BACKGROUND_CREDIT = 'From React Bits by David Haz.'
-
 const STILL_FRAME_REASONS: Readonly<Record<LiveBackgroundStillReason, string>> = {
   forced: 'Showing a still frame: animation is turned off for testing.',
   'legacy-graph': "Showing a still frame: it can't move at this resolution and frame rate.",

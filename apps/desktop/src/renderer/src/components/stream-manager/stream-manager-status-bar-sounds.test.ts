@@ -108,7 +108,7 @@ describe('StreamManagerStatusBar Sounds (plan 189 S9)', () => {
     root = createRoot(container)
     await render({ sounds: [], voices: [] })
     const empty = await openSounds()
-    expect(empty.textContent).toContain('No sounds yet. Add sounds in Assets.')
+    expect(empty.textContent).toContain('No sounds yet. Add them in Sounds.')
     // Nothing plays: Stop all keeps its place but isn't there.
     const stopAll = empty.querySelector<HTMLElement>('[data-videorc-stop-all-sounds]')!
     expect(stopAll.hasAttribute('data-playing')).toBe(false)

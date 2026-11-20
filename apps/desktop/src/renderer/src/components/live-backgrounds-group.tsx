@@ -28,7 +28,6 @@ import {
   setLiveBackgroundSettings
 } from '@/lib/background-library'
 import {
-  LIVE_BACKGROUND_CREDIT,
   LIVE_BACKGROUND_MOTION_OPTIONS,
   LIVE_BACKGROUND_OFFERED,
   liveBackgroundEntry,
@@ -86,7 +85,6 @@ export function LiveBackgroundsGroup(): ReactElement {
           )
         })}
       </Gallery>
-      <p className="text-meta text-muted-foreground">{LIVE_BACKGROUND_CREDIT}</p>
     </div>
   )
 }

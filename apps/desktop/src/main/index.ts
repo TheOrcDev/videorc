@@ -540,11 +540,8 @@ import {
   type CloudRoomActivity
 } from './live-activity'
 import { DisplaySleepGuard } from './display-sleep-guard'
-import {
-  appMenuReleaseNotesUrl,
-  type AppMenuPageKey,
-  type AppMenuWindowId
-} from '../shared/app-menu-items'
+import { appMenuReleaseNotesUrl, type AppMenuWindowId } from '../shared/app-menu-items'
+import { pageKeyForInput, type PageKey } from '../shared/sidebar-pages'
 import {
   DARK_GLASS_COATS,
   DARK_WINDOW_PALETTE,
@@ -3052,8 +3049,9 @@ function createWindow(): void {
   }
 
   // Page-navigation shortcuts must be caught here, not in the renderer:
-  // Chromium reserves ⌘1–⌘9 (tab switching) and ⌘0 (zoom) and never delivers
-  // them to the page's keydown, so a document listener silently misses them.
+  // Chromium reserves ⌘1–⌘9 (tab switching) and never delivers them to the
+  // page's keydown, so a document listener silently misses them. The other
+  // page keys (⌘0, ⇧⌘ letters, ⌘,) ride the same path: one route for all.
   // before-input-event runs ahead of that handling; we preventDefault and
   // forward the raw key to the renderer, which owns the key→tab mapping.
   mainWindow.webContents.on('before-input-event', (event, input) => {
@@ -3084,18 +3082,16 @@ function createWindow(): void {
       return
     }
 
-    if (input.type !== 'keyDown' || input.alt || input.shift) {
+    if (input.type !== 'keyDown' || !commandModifierHeld(input, process.platform)) {
       return
     }
-    if (!commandModifierHeld(input, process.platform)) {
-      return
-    }
-    // ⌘0 opens the tenth page, Library (plan 239 D6).
-    const isDigit = input.key >= '0' && input.key <= '9'
-    if (isDigit || input.key === ',') {
+    // The page keys (shared/sidebar-pages): ⌘ digits, ⇧⌘ letters and ⌘,, one
+    // key list for every window.
+    const pageKey = pageKeyForInput(input)
+    if (pageKey) {
       event.preventDefault()
       if (mainWindow) {
-        sendElectronEvent(mainWindow.webContents, 'shortcut:navigate', input.key)
+        sendElectronEvent(mainWindow.webContents, 'shortcut:navigate', pageKey)
       }
     }
   })
@@ -3626,7 +3622,7 @@ function saveNotesDocument(patch: Partial<NotesDocument>): NotesDocument {
 
 // FX6: app shortcuts died while an aux window (Notes/Comments) held key focus
 // — the forwarding above only listens on the main window. Aux windows forward
-// the exact same chords: ⌘1–9/⌘, focus main and navigate; ⌘⇧N/⌘⇧J/⌘⇧C toggle
+// the exact same chords: the page keys focus main and navigate; ⌘⇧N/⌘⇧J/⌘⇧C toggle
 // the aux windows. Nothing else is intercepted (typing in Notes stays untouched).
 function attachAuxWindowShortcuts(window: BrowserWindow): void {
   window.webContents.on('before-input-event', (event, input) => {
@@ -3657,11 +3653,11 @@ function attachAuxWindowShortcuts(window: BrowserWindow): void {
           void openCaptionsWindow()
         }
       }
-      return
     }
-    // ⌘0 opens the tenth page, Library (plan 239 D6).
-    const isDigit = input.key >= '0' && input.key <= '9'
-    if (isDigit || input.key === ',') {
+    // The page keys' ⇧⌘ letters go on to here with the digits and ⌘,; the
+    // window chords above carry no page key, so nothing acts twice.
+    const pageKey = pageKeyForInput(input)
+    if (pageKey) {
       event.preventDefault()
       if (mainWindow && !mainWindow.isDestroyed()) {
         if (mainWindow.isMinimized()) {
@@ -3669,7 +3665,7 @@ function attachAuxWindowShortcuts(window: BrowserWindow): void {
         }
         mainWindow.show()
         mainWindow.focus()
-        sendElectronEvent(mainWindow.webContents, 'shortcut:navigate', input.key)
+        sendElectronEvent(mainWindow.webContents, 'shortcut:navigate', pageKey)
       }
     }
   })
@@ -17988,7 +17984,7 @@ function appMenuMainWindowOpen(): boolean {
   return false
 }
 
-function showMainWindowPage(key: AppMenuPageKey): void {
+function showMainWindowPage(key: PageKey): void {
   if (!appMenuMainWindowOpen() || !mainWindow) {
     return
   }

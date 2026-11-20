@@ -144,23 +144,27 @@ describe('appMenuTemplate on macOS', () => {
     expect(actions.showPage).toHaveBeenCalledWith(',')
   })
 
-  it('lists the pages in sidebar order, on ⌘ digits that run in order, Library on ⌘0 (plan 235 D8, plan 239 D6)', () => {
+  it('lists the pages in sidebar order: ⌘1–⌘9, then Images, Sounds and Library (owner 2026-11-20)', () => {
     const view = submenu(topLevel(appMenuTemplate(options())!, 'View'))
-    const pages = view.filter((item) => /^CmdOrCtrl\+\d$/.test(String(item.accelerator ?? '')))
+    const pages = view.filter((item) => /^CmdOrCtrl\+/.test(String(item.accelerator ?? '')))
     expect(pages.map((item) => `${item.label} ${item.accelerator}`)).toEqual([
       'Studio CmdOrCtrl+1',
       'Sources CmdOrCtrl+2',
       'Scene CmdOrCtrl+3',
-      'Assets CmdOrCtrl+4',
-      'Captions CmdOrCtrl+5',
-      'Output CmdOrCtrl+6',
-      'Destinations CmdOrCtrl+7',
+      'Captions CmdOrCtrl+4',
+      'Output CmdOrCtrl+5',
+      'Destinations CmdOrCtrl+6',
+      'Guests CmdOrCtrl+7',
       'Avatar CmdOrCtrl+8',
       'Sidekick CmdOrCtrl+9',
+      'Images CmdOrCtrl+Shift+G',
+      'Sounds CmdOrCtrl+Shift+S',
       'Library CmdOrCtrl+0'
     ])
-    click(pages.find((item) => item.label === 'Destinations'))
+    click(pages.find((item) => item.label === 'Guests'))
     expect(actions.showPage).toHaveBeenCalledWith('7')
+    click(pages.find((item) => item.label === 'Sounds'))
+    expect(actions.showPage).toHaveBeenCalledWith('S')
     click(pages.find((item) => item.label === 'Library'))
     expect(actions.showPage).toHaveBeenCalledWith('0')
     expect(view.at(-1)?.role).toBe('togglefullscreen')
