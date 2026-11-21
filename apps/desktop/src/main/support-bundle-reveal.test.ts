@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
@@ -8,6 +8,7 @@ import {
   supportBundleDirectory,
   supportBundleRevealPath
 } from './support-bundle-reveal'
+import { symlinkOrSkip } from './symlink.test-helper'
 
 // Plan 174 S3.18 (I-1): Show in Finder for a support bundle reveals only a
 // bundle file inside the backend's export folder, never any other path.
@@ -74,19 +75,15 @@ describe('isRegularFileNoFollow', () => {
     rmSync(root, { recursive: true, force: true })
   })
 
-  // Windows needs a privilege to make a symlink; the rule is the same there.
-  it.skipIf(process.platform === 'win32')(
-    'accepts a file, never a folder, a missing path or a symlink',
-    () => {
-      const file = join(root, 'videorc-support-bundle-20261011-093000Z.json')
-      writeFileSync(file, '{}')
-      mkdirSync(join(root, 'folder'))
-      const link = join(root, 'link.json')
-      symlinkSync(file, link)
-      expect(isRegularFileNoFollow(file)).toBe(true)
-      expect(isRegularFileNoFollow(join(root, 'folder'))).toBe(false)
-      expect(isRegularFileNoFollow(join(root, 'missing.json'))).toBe(false)
-      expect(isRegularFileNoFollow(link)).toBe(false)
-    }
-  )
+  it('accepts a file, never a folder, a missing path or a symlink', (ctx) => {
+    const file = join(root, 'videorc-support-bundle-20261011-093000Z.json')
+    writeFileSync(file, '{}')
+    mkdirSync(join(root, 'folder'))
+    const link = join(root, 'link.json')
+    symlinkOrSkip(ctx, file, link)
+    expect(isRegularFileNoFollow(file)).toBe(true)
+    expect(isRegularFileNoFollow(join(root, 'folder'))).toBe(false)
+    expect(isRegularFileNoFollow(join(root, 'missing.json'))).toBe(false)
+    expect(isRegularFileNoFollow(link)).toBe(false)
+  })
 })
