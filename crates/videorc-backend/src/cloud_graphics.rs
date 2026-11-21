@@ -1019,9 +1019,20 @@ mod tests {
     }
 
     /// A caption bar, chat box or card as its slot holds it.
+    /// Pixels of their own per `seed` that compress like a real overlay (bands
+    /// of flat colour, as a caption bar or a chat box): byte noise at caption
+    /// size would exceed the lossless asset budget, which no real overlay does.
     fn raster(width: u32, height: u32, seed: u8) -> CaptionOverlay {
-        let rgba = (0..width * height * 4)
-            .map(|n| (n as u8).wrapping_mul(31).wrapping_add(seed))
+        let rgba = (0..width * height)
+            .flat_map(|n| {
+                let (x, y) = (n % width, n / width);
+                [
+                    (x / 7) as u8 ^ seed,
+                    (y / 3) as u8,
+                    seed.wrapping_mul(37),
+                    255,
+                ]
+            })
             .collect::<Vec<_>>();
         CaptionOverlay {
             bgra: Arc::new(Vec::new()),
