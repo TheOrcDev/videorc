@@ -44,6 +44,9 @@ struct Seen {
 struct Fake {
     seen: Mutex<Vec<Seen>>,
     script: Mutex<VecDeque<(u16, String)>>,
+    /// Set as the handler records a request, before it answers: a cancel
+    /// that lands during an attempt, with no timer racing the retry sleep.
+    cancel_on_request: Mutex<Option<Arc<AtomicBool>>>,
 }
 
 async fn handle(
@@ -65,6 +68,9 @@ async fn handle(
             .to_string(),
         body: body.to_vec(),
     });
+    if let Some(flag) = fake.cancel_on_request.lock().unwrap().as_ref() {
+        flag.store(true, Ordering::Release);
+    }
     let (status, body) = fake.script.lock().unwrap().pop_front().unwrap_or_else(|| {
         (
             200,
@@ -522,17 +528,17 @@ async fn execute_stops_retrying_once_cancelled() {
     let (origin, fake) = serve(vec![(503, "{}"), (503, "{}"), (503, "{}")]).await;
     let client = http_client().unwrap();
     let cancelled = Arc::new(AtomicBool::new(false));
-    let flag = cancelled.clone();
+    // The cancel lands while the first attempt is in flight. A timer task
+    // used to set it after 20 ms against a 50 ms retry; on a loaded Windows
+    // runner both timers fired in one turn, the test's own future ran first,
+    // and a second attempt went out before the flag (2 seen, not 1).
+    *fake.cancel_on_request.lock().unwrap() = Some(cancelled.clone());
     const SLOW_STEPS: &[Duration] = &[Duration::from_millis(50)];
     let policy = RetryPolicy {
         steps: SLOW_STEPS,
         budget: Duration::from_secs(5),
         max_retry_after: Duration::from_millis(50),
     };
-    let cancel = tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(20)).await;
-        flag.store(true, Ordering::Release);
-    });
     let result = execute(
         &client,
         &origin,
@@ -543,7 +549,6 @@ async fn execute_stops_retrying_once_cancelled() {
         &cancelled,
     )
     .await;
-    cancel.await.unwrap();
     assert_eq!(result, Err(SendError::Cancelled));
     assert_eq!(fake.seen.lock().unwrap().len(), 1);
 }
