@@ -286,7 +286,19 @@ export function createAppObserver({
   let lastJournal = null
   let censusTimer = null
   let censusFailures = 0
-  const write = (name, text) => append(join(runDir, name), text).catch(() => {})
+  // One append at a time per file, in call order. Unawaited appends to the
+  // same file run on libuv's thread pool and can land out of order, and a
+  // reader right after an event could find them still in flight (a Windows
+  // CI flake in the observer test).
+  const writes = new Map()
+  const write = (name, text) => {
+    const path = join(runDir, name)
+    const next = (writes.get(path) ?? Promise.resolve())
+      .then(() => append(path, text))
+      .catch(() => {})
+    writes.set(path, next)
+    return next
+  }
 
   function pushCard() {
     if (!card) return
@@ -385,6 +397,8 @@ export function createAppObserver({
     // YouTube-side incidents arrive with the U8 observer (wired by U9).
     incidents: () => [],
     lastCensus: () => lastCensus,
-    journalPath: () => tail.currentPath()
+    journalPath: () => tail.currentPath(),
+    /** Resolves once every evidence write issued so far has landed. */
+    flushed: () => Promise.all(writes.values()).then(() => {})
   }
 }

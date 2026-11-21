@@ -212,11 +212,51 @@ test('the observer writes evidence, emits bus events and pushes the card', async
   assert.ok(
     pushes.some((snapshot) => snapshot.memoryMb?.main === 100 && snapshot.memoryMb?.backend === 300)
   )
-  await new Promise((resolve) => setImmediate(resolve))
+  await observer.flushed()
   const census = await readFile(join(runDir, 'census.csv'), 'utf8')
   assert.ok(census.startsWith('ts,pid,ppid,role,rssKb\n'))
   const journal = (await readFile(join(runDir, 'journal.ndjson'), 'utf8')).trim().split('\n')
   assert.ok(journal.length >= 3)
   assert.equal(JSON.parse(journal[0]).tsMs, undefined)
   assert.ok((await readFile(join(runDir, 'health.ndjson'), 'utf8')).includes('host-overloaded'))
+})
+
+test('evidence lines land in the order they happened, even when an append finishes late', async () => {
+  const journalDir = await mkdtemp(join(tmpdir(), 'videorc-observer-order-'))
+  const landed = []
+  let releaseFirst
+  const firstHeld = new Promise((resolve) => {
+    releaseFirst = resolve
+  })
+  let healthAppends = 0
+  const observer = createAppObserver({
+    bus: createEventBus(),
+    card: null,
+    runDir: '/run',
+    journalDirs: [journalDir],
+    ledgerPaths: async () => [],
+    rootPid: async () => null,
+    clock: createFakeClock(Date.parse('2026-10-12T10:00:00.000Z')),
+    collectCensus: async () => ({ summary: {}, aliveRecords: [], processRows: [] }),
+    append: async (path, text) => {
+      if (!path.endsWith('health.ndjson')) return
+      healthAppends += 1
+      // The first health append is the slow one; the second would win a race.
+      if (healthAppends === 1) await firstHeld
+      landed.push(JSON.parse(text).code)
+    }
+  })
+  await observer.start()
+  for (const code of ['first-code', 'second-code']) {
+    observer.onBackendMessage({
+      event: 'health.event',
+      payload: { code, level: 'warn', createdAt: '2026-10-12T10:00:30.000Z' }
+    })
+  }
+  await new Promise((resolve) => setImmediate(resolve))
+  assert.deepEqual(landed, [], 'the second append waits for the first')
+  releaseFirst()
+  await observer.flushed()
+  observer.stop()
+  assert.deepEqual(landed, ['first-code', 'second-code'])
 })
