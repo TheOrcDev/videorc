@@ -18,13 +18,27 @@
 //   VIDEORC_LINUX_AV_TONE=1          play a 1 kHz tone on the default sink during the
 //                                    mic take and require the recording to carry it
 //                                    (peak above -40 dB), proving an acoustic path
+//   VIDEORC_LINUX_AV_VIDEO           canvas as WxH@FPS (default 1280x720@30)
+//   VIDEORC_LINUX_AV_CAMERA_CPU_MAX  camera FFmpeg child CPU cap in % (default 40)
+//
+// Plan 257 S2: the camera leg also requires the camera to start one of its
+// own V4L2 modes and samples the camera FFmpeg child's CPU for 10 s (found
+// among the app's own descendants, never by a process-name scan).
 //
 // Safe GPU: the encoder defaults to OpenH264.
 
 import { spawn, spawnSync } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
-import { existsSync, mkdirSync, mkdtempSync, statSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  statSync,
+  writeFileSync
+} from 'node:fs'
+import { loadavg, tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
 import { launchDevApp } from './lib/app-launcher.mjs'
@@ -32,11 +46,15 @@ import { siblingFfprobePath } from './lib/ffmpeg-sibling-paths.mjs'
 import { resolveFinalRecordingPath } from './lib/final-recording-path.mjs'
 import { packagedSmokeLaunchOptions } from './lib/packaged-smoke-paths.mjs'
 import {
+  assessCameraChildCpu,
+  assessCameraNativeMode,
   assessCameraPreview,
   assessLinuxDeviceList,
   assessMicMeter,
   assessMicRecordingAudio,
-  parseVolumedetect
+  cpuPercent,
+  parseVolumedetect,
+  procStatCpuTicks
 } from './lib/linux-av-device-gates.mjs'
 import { assessPortalRecording } from './lib/linux-portal-capture-gates.mjs'
 import { isLinuxSmokeEvidenceLine } from './lib/linux-smoke-evidence.mjs'
@@ -66,7 +84,16 @@ const packagedLaunch = packagedSmokeLaunchOptions({
   capability: appExecutable ? randomBytes(32).toString('base64url') : undefined
 })
 
-const video = { preset: 'custom', width: 1280, height: 720, fps: 30, bitrateKbps: 6000 }
+const videoMatch = /^(\d+)x(\d+)@(\d+)$/.exec(process.env.VIDEORC_LINUX_AV_VIDEO ?? '1280x720@30')
+if (!videoMatch) throw new Error('VIDEORC_LINUX_AV_VIDEO must look like 1920x1080@30')
+const video = {
+  preset: 'custom',
+  width: Number(videoMatch[1]),
+  height: Number(videoMatch[2]),
+  fps: Number(videoMatch[3]),
+  bitrateKbps: 6000
+}
+const cameraCpuMax = Number(process.env.VIDEORC_LINUX_AV_CAMERA_CPU_MAX ?? 40)
 const layoutFor = (layoutPreset) => ({
   layoutPreset,
   cameraTransformMode: 'preset',
@@ -111,6 +138,72 @@ function check(label, assessment) {
   }
   saveEvidence()
   return assessment.ok
+}
+
+/** The app's own descendants, from /proc/<pid>/task/<tid>/children. */
+function descendantPids(rootPid) {
+  const seen = new Set()
+  const queue = [rootPid]
+  while (queue.length > 0) {
+    const pid = queue.shift()
+    let tasks = []
+    try {
+      tasks = readdirSync(`/proc/${pid}/task`)
+    } catch {
+      continue
+    }
+    for (const task of tasks) {
+      let children = ''
+      try {
+        children = readFileSync(`/proc/${pid}/task/${task}/children`, 'utf8')
+      } catch {
+        continue
+      }
+      for (const child of children.trim().split(/\s+/).filter(Boolean).map(Number)) {
+        if (!seen.has(child)) {
+          seen.add(child)
+          queue.push(child)
+        }
+      }
+    }
+  }
+  return [...seen]
+}
+
+function cameraChildPid(appPid) {
+  for (const pid of descendantPids(appPid)) {
+    try {
+      const argv = readFileSync(`/proc/${pid}/cmdline`, 'utf8').split('\0')
+      const at = argv.indexOf('-f')
+      if (at !== -1 && argv[at + 1] === 'v4l2') return { pid, argv: argv.filter(Boolean) }
+    } catch {
+      // Gone between the listing and the read.
+    }
+  }
+  return null
+}
+
+async function sampleCameraChildCpu(appPid, ms = 10000) {
+  const child = appPid ? cameraChildPid(appPid) : null
+  if (!child) return null
+  const clock = Number(spawnSync('getconf', ['CLK_TCK'], { encoding: 'utf8' }).stdout.trim()) || 100
+  const ticks = () => {
+    try {
+      return procStatCpuTicks(readFileSync(`/proc/${child.pid}/stat`, 'utf8'))
+    } catch {
+      return null
+    }
+  }
+  const before = ticks()
+  const startedAt = Date.now()
+  await sleep(ms)
+  const after = ticks()
+  return {
+    pid: child.pid,
+    argv: child.argv.slice(1).join(' '),
+    cpuPercent: cpuPercent(before, after, Date.now() - startedAt, clock),
+    loadAverage: loadavg().map((value) => Number(value.toFixed(2)))
+  }
 }
 
 function audioLevels(path) {
@@ -359,6 +452,22 @@ try {
         message: status.message ?? null
       })
       if (check('camera preview', assessCameraPreview(status))) {
+        const native = assessCameraNativeMode(status)
+        check('camera native mode', native)
+        const diagnostics = await request(ws, stepTimeoutMs, 'diagnostics.stats')
+        const cpu = await sampleCameraChildCpu(launch.process?.pid)
+        step('camera native mode', {
+          mode: native.mode,
+          pixelFormat: diagnostics?.previewCameraCapturePixelFormat ?? null,
+          selectedFormat: [
+            diagnostics?.previewCameraSelectedFormatWidth ?? null,
+            diagnostics?.previewCameraSelectedFormatHeight ?? null,
+            diagnostics?.previewCameraSelectedFormatMaxFps ?? null
+          ],
+          capabilityFormats: diagnostics?.previewCameraCapabilityFormats ?? null,
+          cpu
+        })
+        check('camera child cpu', assessCameraChildCpu(cpu, { maxPercent: cameraCpuMax }))
         const { summary, metrics } = await record(ws, smoke, 'camera-only', {
           sources,
           layoutPreset: 'camera-only'

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { cameraFacts, screenFacts } from '@/lib/source-facts'
+import { cameraFacts, cameraFormatFacts, screenFacts } from '@/lib/source-facts'
 
 // Plan 173: the facts line under a live video source's picker.
 
@@ -63,5 +63,36 @@ describe('cameraFacts', () => {
     expect(cameraFacts(null)).toBeNull()
     expect(cameraFacts({ ...live, state: 'starting' })).toBeNull()
     expect(cameraFacts({ state: 'live', targetFps: 30 })).toBeNull()
+  })
+})
+
+describe('cameraFormatFacts', () => {
+  it('names the mode the camera streams for Health (plan 257 S2)', () => {
+    expect(
+      cameraFormatFacts({
+        previewCameraSelectedFormatWidth: 1280,
+        previewCameraSelectedFormatHeight: 720,
+        previewCameraSelectedFormatMaxFps: 30,
+        previewCameraCapturePixelFormat: 'NV12'
+      })
+    ).toBe('1280 × 720 NV12 · 30 fps')
+  })
+
+  it('drops what the camera did not report', () => {
+    expect(
+      cameraFormatFacts({
+        previewCameraSelectedFormatWidth: 1920,
+        previewCameraSelectedFormatHeight: 1080,
+        previewCameraSelectedFormatMaxFps: 29.97
+      })
+    ).toBe('1920 × 1080 · 30 fps')
+    expect(
+      cameraFormatFacts({
+        previewCameraSelectedFormatWidth: 640,
+        previewCameraSelectedFormatHeight: 480,
+        previewCameraCapturePixelFormat: ' '
+      })
+    ).toBe('640 × 480')
+    expect(cameraFormatFacts({})).toBeNull()
   })
 })

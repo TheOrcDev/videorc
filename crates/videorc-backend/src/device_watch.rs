@@ -28,7 +28,7 @@ fn camera_history() -> &'static std::sync::Mutex<std::collections::VecDeque<Came
     HISTORY.get_or_init(Default::default)
 }
 
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", target_os = "linux", test))]
 fn remember_camera_event(
     history: &mut std::collections::VecDeque<CameraConnectionEvent>,
     event: CameraConnectionEvent,
@@ -50,7 +50,7 @@ pub(crate) fn recent_camera_connections() -> Vec<CameraConnectionEvent> {
 
 static CAMERA_EVENT_READY: tokio::sync::Notify = tokio::sync::Notify::const_new();
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn camera_changed(event: CameraConnectionEvent) {
     remember_camera_event(
         &mut camera_history().lock().unwrap_or_else(|p| p.into_inner()),
@@ -103,11 +103,32 @@ async fn next_change(changes: &mut watch::Receiver<u64>) -> bool {
 pub async fn run(mut changes: watch::Receiver<u64>, state: crate::state::AppState) {
     let camera_state = state.clone();
     state.spawn_process_task(async move { run_camera_events(camera_state).await });
+    // Linux has no per-camera notification: the edges come from comparing
+    // the openable cameras before and after each change.
+    #[cfg(target_os = "linux")]
+    let mut cameras =
+        linux_cameras::available(&crate::camera_capture::list_native_cameras().devices);
     while next_change(&mut changes).await {
         #[cfg(target_os = "macos")]
         crate::devices::invalidate_avfoundation_probe_cache();
+        #[cfg(target_os = "linux")]
+        crate::linux_v4l2_camera::forget_v4l2_modes(None);
         let ffmpeg_path = crate::ffmpeg::resolve_ffmpeg_path_ref(None);
         let devices = crate::devices::list_devices(&ffmpeg_path).await;
+        #[cfg(target_os = "linux")]
+        {
+            let now = linux_cameras::available(&devices.devices);
+            for event in linux_cameras::edges(&cameras, &now, &chrono::Utc::now().to_rfc3339()) {
+                tracing::info!(
+                    camera = %event.unique_id,
+                    connected = event.connected,
+                    "[device-watch] V4L2 camera {}",
+                    if event.connected { "connected" } else { "disconnected" }
+                );
+                camera_changed(event);
+            }
+            cameras = now;
+        }
         state
             .live_source_switch
             .lock()
@@ -119,8 +140,179 @@ pub async fn run(mut changes: watch::Receiver<u64>, state: crate::state::AppStat
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 pub fn install(_changes: watch::Sender<u64>) {}
+
+#[cfg(target_os = "linux")]
+pub use linux::install;
+
+/// Connection edges between two camera snapshots (plan 257 S2). A camera
+/// counts once it can be opened, so a node udev has not yet handed to the
+/// `video` group connects when its permissions land, not before.
+#[cfg(any(target_os = "linux", test))]
+mod linux_cameras {
+    use std::collections::BTreeMap;
+
+    use super::CameraConnectionEvent;
+    use crate::protocol::{Device, DeviceKind, DeviceStatus};
+
+    /// Openable cameras by the unique id a running camera reports (the
+    /// V4L2 device path), with their names.
+    pub fn available(devices: &[Device]) -> BTreeMap<String, String> {
+        devices
+            .iter()
+            .filter(|device| {
+                device.kind == DeviceKind::Camera && device.status == DeviceStatus::Available
+            })
+            .map(|device| {
+                (
+                    crate::linux_v4l2_camera::parse_linux_v4l2_camera_id(&device.id)
+                        .unwrap_or_else(|| device.id.clone()),
+                    device.name.clone(),
+                )
+            })
+            .collect()
+    }
+
+    pub fn edges(
+        before: &BTreeMap<String, String>,
+        after: &BTreeMap<String, String>,
+        timestamp: &str,
+    ) -> Vec<CameraConnectionEvent> {
+        let event = |unique_id: &String, name: &String, connected| CameraConnectionEvent {
+            unique_id: unique_id.clone(),
+            name: name.clone(),
+            connected,
+            timestamp: timestamp.to_string(),
+            device_type: "v4l2".to_string(),
+            transport: 0,
+        };
+        before
+            .iter()
+            .filter(|(id, _)| !after.contains_key(*id))
+            .map(|(id, name)| event(id, name, false))
+            .chain(
+                after
+                    .iter()
+                    .filter(|(id, _)| !before.contains_key(*id))
+                    .map(|(id, name)| event(id, name, true)),
+            )
+            .collect()
+    }
+}
+
+/// Camera hotplug on Linux (plan 257 S2): inotify on `/dev` for `video*`
+/// nodes appearing, going, or getting their permissions from udev, and on
+/// `/dev/v4l` and `/dev/v4l/by-id` for the stable links udev adds last. Each
+/// relevant event bumps the same revision the macOS observers do; the
+/// debounce in `run` folds udev's burst into one fresh listing.
+#[cfg(target_os = "linux")]
+mod linux {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+    use std::path::{Path, PathBuf};
+
+    use tokio::sync::watch;
+
+    const DIR_MASK: u32 = libc::IN_CREATE
+        | libc::IN_DELETE
+        | libc::IN_ATTRIB
+        | libc::IN_MOVED_FROM
+        | libc::IN_MOVED_TO;
+
+    pub fn install(changes: watch::Sender<u64>) {
+        if let Err(error) = spawn_watch(PathBuf::from("/dev"), changes) {
+            tracing::warn!("Could not watch /dev for camera hotplug: {error}");
+        }
+    }
+
+    fn add_watch(fd: i32, path: &Path) -> Option<i32> {
+        let path = CString::new(path.as_os_str().as_bytes()).ok()?;
+        // SAFETY: a valid NUL-terminated path on an inotify fd this thread owns.
+        let wd = unsafe { libc::inotify_add_watch(fd, path.as_ptr(), DIR_MASK) };
+        (wd >= 0).then_some(wd)
+    }
+
+    /// Whether an event in `/dev` names a V4L2 node or the `v4l` link tree.
+    pub(super) fn dev_entry_is_camera(name: &[u8]) -> bool {
+        name.starts_with(b"video") || name == b"v4l"
+    }
+
+    /// Watches `dev` until it goes away (tests remove theirs; `/dev` never
+    /// does).
+    pub(super) fn spawn_watch(
+        dev: PathBuf,
+        changes: watch::Sender<u64>,
+    ) -> std::io::Result<std::thread::JoinHandle<()>> {
+        // SAFETY: plain syscall; the fd is owned below and closed on exit.
+        let fd = unsafe { libc::inotify_init1(libc::IN_CLOEXEC) };
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let Some(dev_wd) = add_watch(fd, &dev) else {
+            let error = std::io::Error::last_os_error();
+            // SAFETY: closing the fd created above.
+            unsafe { libc::close(fd) };
+            return Err(error);
+        };
+        let links = [dev.join("v4l"), dev.join("v4l/by-id")];
+        for link_dir in &links {
+            add_watch(fd, link_dir);
+        }
+        std::thread::Builder::new()
+            .name("videorc-camera-hotplug".to_string())
+            .spawn(move || {
+                // Room for many events; each is 16 bytes plus a padded name.
+                let mut buffer = [0_u8; 8192];
+                'watch: loop {
+                    // SAFETY: reads into a buffer this thread owns.
+                    let read = unsafe { libc::read(fd, buffer.as_mut_ptr().cast(), buffer.len()) };
+                    if read < 0 {
+                        if std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+                            continue;
+                        }
+                        break;
+                    }
+                    let read = read as usize;
+                    let mut relevant = false;
+                    let mut offset = 0;
+                    while offset + 16 <= read {
+                        let field = |at: usize| {
+                            u32::from_ne_bytes(
+                                buffer[offset + at..offset + at + 4].try_into().unwrap(),
+                            )
+                        };
+                        let wd = field(0) as i32;
+                        let mask = field(4);
+                        let len = field(12) as usize;
+                        let name_end = (offset + 16 + len).min(read);
+                        let name = &buffer[offset + 16..name_end];
+                        let name = &name[..name.iter().position(|b| *b == 0).unwrap_or(name.len())];
+                        offset += 16 + len;
+                        if wd == dev_wd {
+                            if mask & libc::IN_IGNORED != 0 {
+                                break 'watch;
+                            }
+                            relevant |= dev_entry_is_camera(name);
+                        } else if mask & libc::IN_IGNORED == 0 {
+                            // Anything in /dev/v4l or /dev/v4l/by-id.
+                            relevant = true;
+                        }
+                    }
+                    if relevant {
+                        // The link tree comes and goes with the first and
+                        // last camera; re-adding an existing watch is a no-op.
+                        for link_dir in &links {
+                            add_watch(fd, link_dir);
+                        }
+                        changes.send_modify(|revision| *revision = revision.wrapping_add(1));
+                    }
+                }
+                // SAFETY: closing the fd this thread owns.
+                unsafe { libc::close(fd) };
+            })
+    }
+}
 
 #[cfg(target_os = "macos")]
 pub use macos::install;
@@ -265,6 +457,117 @@ mod tests {
         assert_eq!(json[0]["timestamp"], "2026-11-01T12:00:05Z");
         assert_eq!(json[19]["uniqueId"], "stable-iPhone-id");
         assert_eq!(json[19]["connected"], true);
+    }
+
+    fn camera(
+        path: &str,
+        name: &str,
+        status: crate::protocol::DeviceStatus,
+    ) -> crate::protocol::Device {
+        crate::protocol::Device {
+            app: None,
+            window_title: None,
+            display_uuid: None,
+            id: crate::linux_v4l2_camera::linux_v4l2_camera_id(path),
+            name: name.to_string(),
+            kind: crate::protocol::DeviceKind::Camera,
+            status,
+            detail: None,
+            width: None,
+            height: None,
+        }
+    }
+
+    #[test]
+    fn linux_camera_edges_follow_openable_cameras_by_device_path() {
+        use crate::protocol::DeviceStatus;
+        let lid = "/dev/v4l/by-id/usb-Apple_FaceTime-video-index0";
+        let usb = "/dev/v4l/by-id/usb-Logitech_C920-video-index0";
+        let before =
+            linux_cameras::available(&[camera(lid, "FaceTime HD", DeviceStatus::Available)]);
+        // udev has created the node but not yet handed it to `video`.
+        let racing = linux_cameras::available(&[
+            camera(lid, "FaceTime HD", DeviceStatus::Available),
+            camera(usb, "C920", DeviceStatus::PermissionRequired),
+        ]);
+        assert!(linux_cameras::edges(&before, &racing, "t0").is_empty());
+        let plugged = linux_cameras::available(&[
+            camera(lid, "FaceTime HD", DeviceStatus::Available),
+            camera(usb, "C920", DeviceStatus::Available),
+        ]);
+        let connected = linux_cameras::edges(&racing, &plugged, "t1");
+        assert_eq!(connected.len(), 1);
+        // The unique id is the device path a running camera reports.
+        assert_eq!(connected[0].unique_id, usb);
+        assert_eq!(connected[0].name, "C920");
+        assert!(connected[0].connected);
+        assert_eq!(connected[0].timestamp, "t1");
+        let unplugged = linux_cameras::edges(&plugged, &before, "t2");
+        assert_eq!(unplugged.len(), 1);
+        assert_eq!(unplugged[0].unique_id, usb);
+        assert!(!unplugged[0].connected);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_hotplug_watch_signals_video_nodes_and_links_only() {
+        let dev = std::env::temp_dir().join(format!("videorc-dev-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dev).unwrap();
+        let (sender, mut receiver) = channel();
+        let handle = linux::spawn_watch(dev.clone(), sender).unwrap();
+        let wait_for_change = |receiver: &mut watch::Receiver<u64>| {
+            let deadline = std::time::Instant::now() + Duration::from_secs(2);
+            while std::time::Instant::now() < deadline {
+                if receiver.has_changed().unwrap() {
+                    receiver.mark_unchanged();
+                    return true;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            false
+        };
+
+        // An unrelated node: no change.
+        std::fs::write(dev.join("ttyS9"), b"").unwrap();
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(!receiver.has_changed().unwrap());
+
+        // A camera appears: node, then udev's permissions, then its links.
+        std::fs::write(dev.join("video4"), b"").unwrap();
+        assert!(wait_for_change(&mut receiver), "node create");
+        std::fs::set_permissions(
+            dev.join("video4"),
+            std::os::unix::fs::PermissionsExt::from_mode(0o660),
+        )
+        .unwrap();
+        assert!(wait_for_change(&mut receiver), "udev chmod");
+        std::fs::create_dir_all(dev.join("v4l/by-id")).unwrap();
+        assert!(wait_for_change(&mut receiver), "link tree");
+        // The by-id watch is added after the tree appears; give it a beat.
+        std::thread::sleep(Duration::from_millis(100));
+        while receiver.has_changed().unwrap() {
+            receiver.mark_unchanged();
+        }
+        std::os::unix::fs::symlink("../../video4", dev.join("v4l/by-id/usb-cam-video-index0"))
+            .unwrap();
+        assert!(wait_for_change(&mut receiver), "stable link");
+
+        // And goes.
+        std::fs::remove_file(dev.join("v4l/by-id/usb-cam-video-index0")).unwrap();
+        std::fs::remove_file(dev.join("video4")).unwrap();
+        assert!(wait_for_change(&mut receiver), "unplug");
+
+        std::fs::remove_dir_all(&dev).unwrap();
+        handle.join().unwrap();
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn dev_entries_that_count_as_cameras() {
+        assert!(linux::dev_entry_is_camera(b"video0"));
+        assert!(linux::dev_entry_is_camera(b"v4l"));
+        assert!(!linux::dev_entry_is_camera(b"v4l-subdev0"));
+        assert!(!linux::dev_entry_is_camera(b"hidraw3"));
     }
 
     #[tokio::test(start_paused = true)]

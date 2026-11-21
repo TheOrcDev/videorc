@@ -162,6 +162,7 @@
     "smoke:session-decay:gate": "node scripts/run-with-env.mjs VIDEORC_DECAY_SESSIONS=3 VIDEORC_DECAY_RECORDING_MS=10000 VIDEORC_DECAY_IDLE_MS=1000 -- node scripts/smoke-recording-session-decay.mjs",
     "smoke:linux-encoder-acceptance": "node scripts/smoke-linux-encoder-acceptance.mjs",
     "smoke:linux-av-devices": "node scripts/smoke-linux-av-devices.mjs",
+    "probe:linux-camera-hotplug": "node scripts/probe-linux-camera-hotplug.mjs",
     "smoke:linux-portal-capture": "node scripts/smoke-linux-portal-capture.mjs",
     "smoke:linux-portal-record": "node scripts/smoke-linux-portal-record.mjs",
     "smoke:portal-preview-proof": "node scripts/smoke-portal-preview-proof.mjs",
