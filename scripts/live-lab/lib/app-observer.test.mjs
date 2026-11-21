@@ -109,6 +109,27 @@ test('the tail reads appended lines, a late file, and rolls over at UTC midnight
   ])
 })
 
+test("the tail skips the day's lines from before the run", async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'videorc-journal-'))
+  const clock = createFakeClock(Date.parse('2026-11-21T18:36:21.000Z'))
+  const seen = []
+  const tail = createJournalTail({
+    dirs: [dir],
+    onLine: (line) => seen.push(line.ts),
+    sinceMs: clock.now(),
+    clock
+  })
+  const line = (ts) =>
+    `${JSON.stringify({ schemaVersion: 1, kind: 'sample', ts, state: 'live', legs: [] })}\n`
+  // A morning run on the same profile, then this run's first sample.
+  await writeFile(
+    join(dir, '2026-11-21.ndjson'),
+    line('2026-11-21T11:07:00.000Z') + line('2026-11-21T18:36:22.000Z')
+  )
+  await tail.poll()
+  assert.deepEqual(seen, ['2026-11-21T18:36:22.000Z'])
+})
+
 test('census memory per card role and CSV rows without args', () => {
   const census = {
     processRows: [
@@ -246,13 +267,13 @@ test("the backend's stream-output figures come from diagnostics.stats only", () 
       configuredBitrateKbps: 6000
     }
   )
-  // Linux's raw-frame bridge: only the configured figure.
+  // Linux's raw-frame bridge: 0 kbps over no encoded bytes is no measure.
   assert.deepEqual(
     streamOutputFromEvent(
       {
         event: 'diagnostics.stats',
         payload: {
-          streamMeasuredBitrateKbps: null,
+          streamMeasuredBitrateKbps: 0,
           streamOutputTotalBytes: 0,
           streamOutputBitrateKbps: 6000
         }

@@ -99,6 +99,7 @@ export function utcDay(ms) {
 export function createJournalTail({
   dirs,
   onLine,
+  sinceMs = null,
   clock = systemClock,
   statFn = stat,
   openFn = open,
@@ -144,7 +145,10 @@ export function createJournalTail({
       for (const text of lines) {
         if (!text.trim()) continue
         const line = parseJournalLine(text)
-        if (line) onLine(line)
+        // The day's file holds every earlier run on this profile today; a
+        // run reads only its own lines (ogre, 2026-11-21: a morning run's
+        // encoder speed in an evening verdict).
+        if (line && (sinceMs === null || line.tsMs >= sinceMs)) onLine(line)
       }
     } finally {
       await handle.close()
@@ -251,8 +255,10 @@ export const STREAM_OUTPUT_SAMPLE_MS = 10_000
 export function streamOutputFromEvent(message, ts) {
   if (message?.event !== 'diagnostics.stats') return null
   const payload = message.payload ?? {}
-  const measuredBitrateKbps = num(payload.streamMeasuredBitrateKbps)
   const totalBytes = num(payload.streamOutputTotalBytes)
+  // A window over no encoded bytes is no measure: Linux's raw-frame bridge
+  // reports 0 kbps because FFmpeg, not the bridge, encodes (ogre, 0.36).
+  const measuredBitrateKbps = totalBytes > 0 ? num(payload.streamMeasuredBitrateKbps) : null
   const configuredBitrateKbps = num(payload.streamOutputBitrateKbps)
   if (measuredBitrateKbps === null && !totalBytes && configuredBitrateKbps === null) return null
   return {
@@ -302,6 +308,7 @@ export function createAppObserver({
   collectCensus = collectProcessCensus,
   append = appendFile,
   censusIntervalMs = CENSUS_INTERVAL_MS,
+  sinceMs = null,
   log = () => {}
 }) {
   const journal = []
@@ -326,6 +333,7 @@ export function createAppObserver({
 
   const tail = createJournalTail({
     dirs: journalDirs,
+    sinceMs,
     clock,
     onLine(line) {
       journal.push(line)

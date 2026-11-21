@@ -31575,10 +31575,15 @@ fn stream_health_with_measured_stream_output(
     diagnostic_stats: &crate::protocol::DiagnosticStats,
     progress_describes_recording: bool,
 ) {
+    // A window over no encoded bytes measured nothing: the raw-frame bridge
+    // reports 0 kbps because FFmpeg, not the bridge, encodes.
     let measured_total_bytes = (diagnostic_stats.stream_output_total_bytes > 0)
         .then_some(diagnostic_stats.stream_output_total_bytes);
+    let measured_bitrate_kbps = diagnostic_stats
+        .stream_measured_bitrate_kbps
+        .filter(|_| measured_total_bytes.is_some());
     if progress_describes_recording || stream_health.bitrate_kbps.is_none() {
-        stream_health.bitrate_kbps = diagnostic_stats.stream_measured_bitrate_kbps;
+        stream_health.bitrate_kbps = measured_bitrate_kbps;
     }
     if progress_describes_recording || stream_health.total_bytes.is_none() {
         stream_health.total_bytes = measured_total_bytes;
@@ -54587,9 +54592,10 @@ drawbox=x=0:y=ih-ih*0.250000:w=iw:h=ih*0.250000:color=black@0:t=fill:replace=1,"
         assert_eq!(recording.bitrate_kbps, Some(5_950.0));
         assert_eq!(recording.total_bytes, Some(40_000));
 
-        // Nothing measures the stream (the raw-frame bridge): still unknown,
-        // never the recording file's figure.
-        let unmeasured = crate::diagnostics::idle_diagnostics();
+        // Nothing measures the stream (the raw-frame bridge reports 0 kbps
+        // over no bytes): still unknown, never 0 or the recording file's.
+        let mut unmeasured = crate::diagnostics::idle_diagnostics();
+        unmeasured.stream_measured_bitrate_kbps = Some(0.0);
         let mut raw = health(None, None);
         stream_health_with_measured_stream_output(&mut raw, &unmeasured, false);
         assert_eq!((raw.bitrate_kbps, raw.total_bytes), (None, None));
