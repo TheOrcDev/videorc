@@ -19,7 +19,8 @@ import {
   parseCensusCsv,
   readRunFolder,
   slopePerIndex,
-  verdictForRun
+  verdictForRun,
+  youtubeSideLine
 } from './verdict.mjs'
 
 const FIXTURES = join(import.meta.dirname, '..', 'fixtures')
@@ -389,6 +390,16 @@ test('a low bitrate with fps, speed and frames on target is content-limited, not
       features: run.features.filter((feature) => feature.kind !== 'profile')
     })
     assert.equal(byId(noProfile, 'stream:bitrate').status, 'warn')
+
+    // A lone fifo RTMP leg with no bitrate (FFmpeg's N/A) is not measured,
+    // never "0 kbps, content-limited" (ogre, 0.36, 2026-11-21).
+    const unmeasured = byId(
+      await verdictFor(journalOf((i) => ({ ...steady(i), bitrateKbps: null }))),
+      'stream:bitrate'
+    )
+    assert.equal(unmeasured.status, 'skipped')
+    assert.match(unmeasured.summary, /^not measured: no live leg reported a bitrate/)
+    assert.equal(unmeasured.value ?? null, null)
   } finally {
     await rm(dir, { recursive: true, force: true })
   }
@@ -540,4 +551,27 @@ test('renderReport never leaks and lists signals, incidents and the owner digest
   assert.match(report, /\[frame\]\(frames\/q\.png\)/)
   assert.match(report, /VOD \| unknown/)
   assert.deepEqual(findSensitive(report), [])
+})
+
+test("the report says what was checked on YouTube's side", () => {
+  assert.equal(youtubeSideLine({}), 'not applicable (no YouTube destination)')
+  assert.equal(
+    youtubeSideLine({
+      session: {
+        youtube: {
+          unavailable:
+            'the broadcaster role is not authorized (pnpm live:hookup --role broadcaster)'
+        }
+      }
+    }),
+    "YouTube-side checks skipped: no broadcaster OAuth (pnpm live:hookup --role broadcaster); only the app's own output was checked"
+  )
+  assert.equal(
+    youtubeSideLine({ session: { youtube: { unavailable: 'quota spent' } } }),
+    'YouTube-side checks skipped: quota spent'
+  )
+  assert.equal(
+    youtubeSideLine({ session: { youtube: { unavailable: null, polls: 3 } } }),
+    'checked (3 observer polls)'
+  )
 })

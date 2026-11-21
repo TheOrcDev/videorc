@@ -14,18 +14,29 @@ import { isLinux } from './platform.mjs'
 //    key travels only as an RPC parameter over loopback; it is never put in
 //    localStorage, the environment, argv or a log.
 // 3. `remote.control.enable` (backend): the remote surface and its discovery file.
-// 4. The renderer's saved Studio config (localStorage `videorc.captureConfig`,
-//    written over CDP, then a reload): lab display as Screen, camera off,
-//    BlackHole as mic, screen-only scene, stream on, record off, captions off,
-//    and only the seeded destinations enabled. The renderer normalizes the
-//    config on load (lib/capture.ts loadCaptureConfig), and seeding is checked
-//    by reading it back after the reload.
+// 4. The renderer's saved Studio (localStorage, written over CDP, then a
+//    reload): lab display as Screen, camera off, BlackHole as mic, the
+//    screen-only scene on stream, stream on, record off, captions off, and
+//    only the seeded destinations enabled. Since scenes v2 the Studio starts
+//    from its working scene (`videorc.working-scene.v1`, use-studio.tsx's
+//    storedCaptureConfig), which overrides `videorc.captureConfig`'s sources
+//    and layout, and from the scene on stream (`videorc.scenes.v2`
+//    onStreamId). So all three are written as one: a profile whose working
+//    scene kept a camera ("Screen + camera", a new profile's first scene)
+//    otherwise put it back over the seed seconds after the reload.
+//    Seeding is checked against what the app does, not what was written:
+//    the backend's scene (`scene.get`) must show no camera, and the config
+//    the renderer saved after the reload must match.
 
 export const CAPTURE_CONFIG_KEY = 'videorc.captureConfig'
+export const WORKING_SCENE_KEY = 'videorc.working-scene.v1'
+export const SCENES_KEY = 'videorc.scenes.v2'
 export const ONBOARDING_KEY = 'videorc.onboardingComplete'
 export const ONBOARDING_DISMISSED_VALUE = 'permissions-v1'
 export const YOUTUBE_RTMPS_URL = 'rtmps://a.rtmps.youtube.com:443/live2'
 export const LAB_SCENE = 'screen-only'
+export const SEED_SETTLE_DEADLINE_MS = 20_000
+const SEED_SETTLE_POLL_MS = 250
 const MIC_NAME = /blackhole/i
 // Plan 179: Linux lists exactly one screen row, the ScreenCast portal (the
 // output it captures is the lab share picker's answer, see session.mjs), and
@@ -186,7 +197,14 @@ function isObject(value) {
  * null), `stored` maps target id to the manualKey.store result. The raw key
  * is never part of the result: streamKey is always ''.
  */
-export function buildCaptureConfig({ existing, devices, targets, stored, now = new Date() }) {
+export function buildCaptureConfig({
+  existing,
+  devices,
+  targets,
+  stored,
+  layout = null,
+  now = new Date()
+}) {
   const base = isObject(existing) ? existing : {}
   const at = now.toISOString()
   const seededIds = targets.map((target) => target.id)
@@ -236,6 +254,7 @@ export function buildCaptureConfig({ existing, devices, targets, stored, now = n
     },
     layout: {
       ...(isObject(base.layout) ? base.layout : {}),
+      ...(isObject(layout) ? layout : {}),
       layoutPreset: LAB_SCENE,
       arrangementMode: 'preset'
     },
@@ -253,12 +272,76 @@ export function buildCaptureConfig({ existing, devices, targets, stored, now = n
   }
 }
 
+/** The scenes v2 scene the lab streams (pure): the first whose 16:9 layout is Screen only. */
+export function labSceneOf(library) {
+  const scenes = Array.isArray(library?.scenes) ? library.scenes : []
+  return (
+    scenes.find(
+      (scene) =>
+        isObject(scene) &&
+        typeof scene.id === 'string' &&
+        scene.layouts?.horizontal?.layoutPreset === LAB_SCENE &&
+        scene.layouts.horizontal.arrangementMode !== 'freeform'
+    ) ?? null
+  )
+}
+
+/**
+ * The working scene and scene library to save with the capture config (pure).
+ * The Studio starts from the working scene and the scene on stream, so both
+ * must say what the capture config says: the lab display, no camera, the
+ * screen-only scene on stream. `library` is the parsed `videorc.scenes.v2`
+ * (null before the app made one); `library: null` in the result means it is
+ * left as it is. A library without a Screen only scene is a refusal: the
+ * harness never streams a look it did not pick.
+ */
+export function buildWorkingScene({ existingWorking, library, devices }) {
+  const hasLibrary = isObject(library) && Array.isArray(library.scenes)
+  const scene = hasLibrary ? labSceneOf(library) : null
+  if (hasLibrary && !scene) {
+    throw new SeedRefused(
+      'no-lab-scene',
+      'The lab profile has no "Screen only" scene to put on stream.'
+    )
+  }
+  const previous = isObject(existingWorking?.visual) ? existingWorking.visual : {}
+  const layout = {
+    ...(isObject(previous.layout) ? previous.layout : {}),
+    ...(isObject(scene?.layouts?.horizontal) ? scene.layouts.horizontal : {}),
+    layoutPreset: LAB_SCENE,
+    arrangementMode: 'preset'
+  }
+  return {
+    working: {
+      version: 1,
+      origin: scene ? 'saved' : 'builtin',
+      sceneId: scene?.id ?? null,
+      visual: {
+        layout,
+        // No cameraId: the camera stays off whatever the scene's layout.
+        sources: {
+          screenId: devices.screen.id,
+          screenName: devices.screen.name,
+          cameraOff: true,
+          captureOff: false,
+          testPattern: false
+        },
+        background: scene ? (scene.background ?? null) : (previous.background ?? null)
+      }
+    },
+    library: scene ? { ...library, onStreamId: scene.id } : null
+  }
+}
+
 /**
  * Checks the config the renderer saved after the reload (pure). Returns a
  * list of problems; empty means the seed took. For local-sink runs every
  * enabled destination must be the loopback sink.
  */
-export function verifySeededConfig(saved, { targets, devices, scenario }) {
+export function verifySeededConfig(
+  saved,
+  { targets, devices, scenario, working, sceneSources, onStreamId, labSceneId }
+) {
   const problems = []
   if (!isObject(saved)) return ['the renderer has no saved Studio config']
   if (saved.sources?.screenId !== devices.screen.id)
@@ -266,6 +349,25 @@ export function verifySeededConfig(saved, { targets, devices, scenario }) {
   if (saved.sources?.microphoneId !== devices.microphone.id)
     problems.push(`microphone is not the lab mic (${devices.microphone.name})`)
   if (saved.sources?.cameraId) problems.push('a camera is selected')
+  if (saved.layout?.layoutPreset !== LAB_SCENE)
+    problems.push(`the layout is ${saved.layout?.layoutPreset ?? 'unset'}, not ${LAB_SCENE}`)
+  if (working !== undefined) {
+    const visual = working?.visual
+    if (!isObject(visual)) problems.push('the Studio has no working scene')
+    else {
+      if (visual.sources?.cameraId || visual.sources?.cameraOff !== true)
+        problems.push('the working scene keeps a camera')
+      if (visual.layout?.layoutPreset !== LAB_SCENE)
+        problems.push(`the working scene's layout is ${visual.layout?.layoutPreset ?? 'unset'}`)
+    }
+  }
+  if (labSceneId && onStreamId !== labSceneId)
+    problems.push(`the scene on stream is ${onStreamId ?? 'none'}, not ${labSceneId}`)
+  if (sceneSources !== undefined) {
+    if (!Array.isArray(sceneSources)) problems.push('the backend has no scene')
+    else if (sceneSources.some((source) => source?.kind === 'camera'))
+      problems.push("the backend's scene shows a camera")
+  }
   if (saved.streamEnabled !== true) problems.push('streaming is off')
   const enabled = (saved.streaming?.targets ?? []).filter((target) => target?.enabled)
   const enabledIds = enabled.map((target) => target.id).sort()
@@ -298,7 +400,10 @@ export async function seedProfile({
   sink,
   titlePrefix,
   platform = process.platform,
-  log = () => {}
+  log = () => {},
+  settleDeadlineMs = SEED_SETTLE_DEADLINE_MS,
+  now = Date.now,
+  sleep = (ms) => new Promise((resolveSleep) => setTimeout(resolveSleep, ms))
 }) {
   const listed = await rpc('devices.list')
   const devices = isLinux(platform)
@@ -320,26 +425,54 @@ export async function seedProfile({
       'remote.control.enable did not enable the remote surface.'
     )
   }
-  const existingText = await evaluate(`localStorage.getItem(${JSON.stringify(CAPTURE_CONFIG_KEY)})`)
-  let existing = null
-  try {
-    existing = existingText ? JSON.parse(existingText) : null
-  } catch {
-    existing = null
+  const readKey = async (key) => {
+    try {
+      const text = await evaluate(`localStorage.getItem(${JSON.stringify(key)})`)
+      return text ? JSON.parse(text) : null
+    } catch {
+      return null
+    }
   }
-  const next = buildCaptureConfig({ existing, devices, targets, stored })
+  const { working, library } = buildWorkingScene({
+    existingWorking: await readKey(WORKING_SCENE_KEY),
+    library: await readKey(SCENES_KEY),
+    devices
+  })
+  const next = buildCaptureConfig({
+    existing: await readKey(CAPTURE_CONFIG_KEY),
+    devices,
+    targets,
+    stored,
+    layout: working.visual.layout
+  })
+  const writes = [
+    [CAPTURE_CONFIG_KEY, JSON.stringify(next)],
+    [WORKING_SCENE_KEY, JSON.stringify(working)],
+    ...(library ? [[SCENES_KEY, JSON.stringify(library)]] : []),
+    [ONBOARDING_KEY, ONBOARDING_DISMISSED_VALUE]
+  ]
   await evaluate(
-    `(() => { localStorage.setItem(${JSON.stringify(CAPTURE_CONFIG_KEY)}, ${JSON.stringify(JSON.stringify(next))}); localStorage.setItem(${JSON.stringify(ONBOARDING_KEY)}, ${JSON.stringify(ONBOARDING_DISMISSED_VALUE)}); return true })()`
+    `(() => { for (const [key, value] of ${JSON.stringify(writes)}) localStorage.setItem(key, value); return true })()`
   )
   await reloadAndWait()
-  const savedText = await evaluate(`localStorage.getItem(${JSON.stringify(CAPTURE_CONFIG_KEY)})`)
-  let saved = null
-  try {
-    saved = JSON.parse(savedText)
-  } catch {
-    saved = null
+  // The reloaded Studio commits its scene to the backend and saves its config
+  // a moment later; wait for what it does to match, never just for the write.
+  const deadline = now() + settleDeadlineMs
+  let problems = []
+  for (;;) {
+    const scene = await rpc('scene.get').catch(() => null)
+    problems = verifySeededConfig(await readKey(CAPTURE_CONFIG_KEY), {
+      targets,
+      devices,
+      scenario,
+      working: await readKey(WORKING_SCENE_KEY),
+      onStreamId: (await readKey(SCENES_KEY))?.onStreamId,
+      labSceneId: working.sceneId,
+      sceneSources: scene?.sources
+    })
+    if (!problems.length || now() >= deadline) break
+    await sleep(SEED_SETTLE_POLL_MS)
   }
-  const problems = verifySeededConfig(saved, { targets, devices, scenario })
   if (problems.length) {
     throw new SeedRefused(
       'seed-not-applied',

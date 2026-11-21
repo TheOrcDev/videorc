@@ -10,10 +10,15 @@
 // radios), go-live-destination rows (data-target-id, data-ready),
 // go-live-destination-exclude, go-live-excluded + go-live-include,
 // go-live-blockers, go-live-partial-setup, go-live-continue-partial,
-// go-live-captions-skip, go-live-confirm and go-live-cancel. A
-// MutationObserver pushes a snapshot through the CDP binding
-// __videorcLabEmit on every change, so the harness waits on events, never on
-// a timer.
+// go-live-captions-skip, go-live-confirm and go-live-cancel, and the
+// "Go live unlisted?" step a non-Public YouTube Go Live asks (#1316:
+// go-live-privacy-dialog, go-live-privacy-confirm). A MutationObserver pushes
+// a snapshot through the CDP binding __videorcLabEmit on every change, so the
+// harness waits on events, never on a timer.
+//
+// A Base UI popup can stay in the DOM after it closes (data-closed, until its
+// exit animation reports finished; on ogre's lab output that never happened
+// while live), so "open" is the popup without data-closed, never mere presence.
 
 export const BINDING = '__videorcLabEmit'
 const CDP_TIMEOUT_MS = 15_000
@@ -150,7 +155,22 @@ export function pageHelper(bindingName) {
   const q = (selector, root = document) => root.querySelector(selector)
   const qa = (selector, root = document) => Array.from(root.querySelectorAll(selector))
   const text = (element) => (element?.textContent ?? '').replace(/\s+/g, ' ').trim()
-  const dialogEl = () => q('[data-testid="go-live-dialog"]')
+  const isOpen = (element) =>
+    Boolean(element) && !element.hasAttribute('data-closed') && !element.hidden
+  const openEl = (selector) => qa(selector).find(isOpen) ?? null
+  const dialogEl = () => openEl('[data-testid="go-live-dialog"]')
+  const privacyEl = () => openEl('[data-testid="go-live-privacy-dialog"]')
+
+  function privacyConfirmState() {
+    const sheet = privacyEl()
+    if (!sheet) return null
+    const confirm = q('[data-testid="go-live-privacy-confirm"]', sheet)
+    return {
+      title: text(q('[data-slot="alert-dialog-title"], h2', sheet)).slice(0, 120),
+      description: text(q('[data-slot="alert-dialog-description"], p', sheet)).slice(0, 300),
+      confirm: confirm ? { disabled: confirm.disabled, label: text(confirm).slice(0, 80) } : null
+    }
+  }
 
   function dialogState() {
     const dialog = dialogEl()
@@ -182,7 +202,8 @@ export function pageHelper(bindingName) {
       partialSetup: Boolean(q('[data-testid="go-live-partial-setup"]', dialog)),
       captionsBlocked: Boolean(q('[data-testid="go-live-captions-skip"]', dialog)),
       confirm: confirm ? { disabled: confirm.disabled, label: text(confirm).slice(0, 80) } : null,
-      continuePartial: partial ? { disabled: partial.disabled } : null
+      continuePartial: partial ? { disabled: partial.disabled } : null,
+      privacyConfirm: privacyConfirmState()
     }
   }
 
@@ -248,7 +269,9 @@ export function pageHelper(bindingName) {
       )
       return click(row && q('[data-testid="go-live-include"]', row))
     },
-    confirm: () => click(q('[data-testid="go-live-confirm"]')),
+    confirm: () => click(dialogEl() && q('[data-testid="go-live-confirm"]', dialogEl())),
+    confirmPrivacy: () =>
+      click(privacyEl() && q('[data-testid="go-live-privacy-confirm"]', privacyEl())),
     continuePartial: () => click(q('[data-testid="go-live-continue-partial"]')),
     skipCaptions: () => click(q('[data-testid="go-live-captions-skip"]')),
     cancel: () => click(q('[data-testid="go-live-cancel"]')),
@@ -325,6 +348,33 @@ export function classifyGoLiveOutcome({ dialog, toasts = [], remoteState, confir
     if (error) return { outcome: 'failed', reason: error.text }
   }
   return null
+}
+
+/**
+ * Whether the harness may answer the "Go live unlisted?" step (pure). It only
+ * says yes to the privacy the run asked for: the sheet must name exactly that
+ * privacy ("Go live unlisted?", #1316 goLivePrivacyConfirmCopy), so a sheet
+ * about another privacy, or several, is a refusal, never a click.
+ */
+export function privacyConfirmDecision(privacyConfirm, privacy) {
+  if (!privacyConfirm) return { answer: false, reason: 'no privacy step' }
+  if (!privacyConfirm.confirm || privacyConfirm.confirm.disabled) {
+    return { answer: false, reason: 'its Go live button is missing or disabled' }
+  }
+  const word = typeof privacy === 'string' ? privacy.trim().toLowerCase() : ''
+  if (word !== 'unlisted' && word !== 'private') {
+    return {
+      answer: false,
+      reason: `the run asked for ${word || 'no privacy'}, yet the app asks "${privacyConfirm.title}"`
+    }
+  }
+  if (privacyConfirm.title.trim().toLowerCase() !== `go live ${word}?`) {
+    return {
+      answer: false,
+      reason: `it asks "${privacyConfirm.title}", not "Go live ${word}?"`
+    }
+  }
+  return { answer: true }
 }
 
 /**
@@ -448,10 +498,39 @@ export function createUiDriver({ cdp, bus, waitFor }) {
       )
     },
 
-    async confirmGoLive() {
+    /**
+     * Clicks Go live. A non-Public YouTube Go Live then asks "Go live
+     * unlisted?" (#1316) and starts nothing until it is answered: the step is
+     * answered when it names the run's `privacy`, refused otherwise. Resolves
+     * with what the step said (null when none was shown, e.g. Public).
+     */
+    async confirmGoLive({ privacy, deadlineMs = 10_000 } = {}) {
       const clicked = await call('window.__videorcLab.confirm()')
       if (!clicked) throw new Error('The Go Live button is missing or disabled.')
-      return true
+      // The click either opens the privacy step or starts the Go Live
+      // (pending, then closed); whichever shows first decides.
+      const settled = await waitForDialog(
+        (dialog) =>
+          !dialog?.open ||
+          dialog.pending ||
+          Boolean(dialog.privacyConfirm) ||
+          isLiveState(bus.last('remote.state')),
+        { deadlineMs, label: 'Go Live started or its privacy step' }
+      )
+      const step = settled?.privacyConfirm ?? null
+      if (!step) return { privacyConfirm: null }
+      const decision = privacyConfirmDecision(step, privacy)
+      if (!decision.answer) {
+        throw new Error(`Refusing the Go Live privacy step: ${decision.reason}.`)
+      }
+      if (!(await call('window.__videorcLab.confirmPrivacy()'))) {
+        throw new Error(`The "${step.confirm.label}" button is missing or disabled.`)
+      }
+      await waitForDialog((dialog) => !dialog?.privacyConfirm, {
+        deadlineMs,
+        label: 'Go Live privacy step answered'
+      })
+      return { privacyConfirm: { title: step.title, answered: step.confirm.label } }
     },
 
     /** Waits until the Go Live either went live or visibly did not. */

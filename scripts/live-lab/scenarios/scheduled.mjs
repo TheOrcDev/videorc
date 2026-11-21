@@ -85,8 +85,8 @@ export default defineScenario({
       title: 'Go live',
       deadlineMs: 180_000,
       async run(ctx) {
-        await ctx.ui.confirmGoLive()
-        return ctx.ui.readGoLiveOutcome({ deadlineMs: 160_000 })
+        const { privacyConfirm } = await ctx.ui.confirmGoLive({ privacy: ctx.run.privacy })
+        return { ...(await ctx.ui.readGoLiveOutcome({ deadlineMs: 160_000 })), privacyConfirm }
       },
       expect: (outcome) =>
         outcome.outcome === 'live' || `${outcome.outcome}: ${outcome.reason ?? ''}`

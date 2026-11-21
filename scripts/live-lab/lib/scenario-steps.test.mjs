@@ -11,7 +11,9 @@ import {
   chatSteps,
   clipPullStep,
   evaluateYoutubeHealth,
+  legBitrate,
   liveHoldStep,
+  liveSampleStep,
   matchCaption,
   needsEyes,
   outputProfileStep,
@@ -348,4 +350,65 @@ test('the U9 suites: metadata, quota estimates and step order', async () => {
       `${name} goes live`
     )
   }
+})
+
+test("a leg's bitrate: its own, else the backend's for a lone leg, else not measured", () => {
+  const output = { measuredBitrateKbps: 5900 }
+  assert.deepEqual(legBitrate({ bitrateKbps: 6010 }, { streamOutput: output }), {
+    bitrateKbps: 6010,
+    source: 'leg'
+  })
+  assert.deepEqual(legBitrate({ bitrateKbps: null }, { streamOutput: output }), {
+    bitrateKbps: 5900,
+    source: 'backend'
+  })
+  // Two legs share the session's encoder figure; it is no one leg's.
+  assert.deepEqual(legBitrate({ bitrateKbps: null }, { streamOutput: output, liveLegCount: 2 }), {
+    bitrateKbps: null,
+    source: 'not-measured'
+  })
+  assert.deepEqual(legBitrate({ bitrateKbps: null }, { streamOutput: null }), {
+    bitrateKbps: null,
+    source: 'not-measured'
+  })
+})
+
+test('the live sample takes a sending fifo leg with no bitrate and says so', async () => {
+  const bus = createEventBus()
+  const clock = createFakeClock()
+  const logs = []
+  const journal = {
+    tsMs: 10,
+    state: 'live',
+    encoderQueueAgeMs: 0,
+    legs: [
+      {
+        targetId: 'youtube',
+        state: 'live',
+        bitrateKbps: null,
+        fps: 29.9,
+        speed: 0.99,
+        droppedFrames: 0
+      }
+    ]
+  }
+  const ctx = {
+    clock: { now: () => 0 },
+    log: (line) => logs.push(line),
+    waitFor: createWaitFor({ bus, clock }),
+    observe: { latestJournal: () => journal, latestStreamOutput: () => null }
+  }
+  const evidence = await liveSampleStep().run(ctx)
+  assert.deepEqual(evidence.legs, [
+    {
+      targetId: 'youtube',
+      state: 'live',
+      bitrateKbps: null,
+      bitrateSource: 'not-measured',
+      fps: 29.9,
+      speed: 0.99,
+      droppedFrames: 0
+    }
+  ])
+  assert.match(logs[0], /^Output youtube: 29\.9 fps, speed 0\.99, 0 dropped, bitrate not measured/)
 })

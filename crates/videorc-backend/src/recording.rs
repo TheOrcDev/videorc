@@ -31561,6 +31561,30 @@ impl StreamHealthAccumulator {
     }
 }
 
+/// Plan 218 S2: `stream.health` says what the stream sends. With a recording
+/// FFmpeg's `bitrate=` / `total_size=` describe the recording file, so the
+/// stream encoder's measured figures replace them (the diagnostics carry the
+/// recording's under their own names). Without one FFmpeg's first output is
+/// the stream's `fifo`-wrapped RTMP leg, for which it prints `N/A`: the
+/// stream encoder's figures fill what FFmpeg left empty, so a stream-only
+/// session no longer reports a delivering leg with no bitrate. Where nothing
+/// measures the stream (the raw-frame bridge, whose encoding FFmpeg does),
+/// they stay `None`.
+fn stream_health_with_measured_stream_output(
+    stream_health: &mut StreamHealth,
+    diagnostic_stats: &crate::protocol::DiagnosticStats,
+    progress_describes_recording: bool,
+) {
+    let measured_total_bytes = (diagnostic_stats.stream_output_total_bytes > 0)
+        .then_some(diagnostic_stats.stream_output_total_bytes);
+    if progress_describes_recording || stream_health.bitrate_kbps.is_none() {
+        stream_health.bitrate_kbps = diagnostic_stats.stream_measured_bitrate_kbps;
+    }
+    if progress_describes_recording || stream_health.total_bytes.is_none() {
+        stream_health.total_bytes = measured_total_bytes;
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn publish_pending_ffmpeg_stream_health(
     state: &AppState,
@@ -31608,14 +31632,11 @@ async fn publish_pending_ffmpeg_stream_health(
         *diagnostics = next.clone();
         next
     };
-    // Plan 218 S2: `stream.health` says what the stream sends. FFmpeg's
-    // figures described the recording file; the stream encoder's replace
-    // them (the diagnostics carry the recording's under their own names).
-    if progress_describes_recording {
-        stream_health.bitrate_kbps = diagnostic_stats.stream_measured_bitrate_kbps;
-        stream_health.total_bytes = (diagnostic_stats.stream_output_total_bytes > 0)
-            .then_some(diagnostic_stats.stream_output_total_bytes);
-    }
+    stream_health_with_measured_stream_output(
+        &mut stream_health,
+        &diagnostic_stats,
+        progress_describes_recording,
+    );
     state.emit_event(
         "diagnostics.stats",
         apply_runtime_diagnostics_snapshot(diagnostic_stats, state.ffmpeg_work.snapshot()),
@@ -54530,6 +54551,54 @@ drawbox=x=0:y=ih-ih*0.250000:w=iw:h=ih*0.250000:color=black@0:t=fill:replace=1,"
                 "non-finite or negative progress must not cross the diagnostics contract: {line}"
             );
         }
+    }
+
+    #[test]
+    fn stream_health_takes_the_measured_stream_bitrate_when_ffmpeg_prints_none() {
+        let health = |bitrate_kbps: Option<f64>, total_bytes: Option<u64>| StreamHealth {
+            session_id: "session".to_string(),
+            fps: Some(30.0),
+            dropped_frames: Some(0),
+            speed: Some(1.0),
+            bitrate_kbps,
+            total_bytes,
+            duplicated_frames: Some(0),
+            created_at: "2026-11-21T00:00:00Z".to_string(),
+        };
+        let mut measured = crate::diagnostics::idle_diagnostics();
+        measured.stream_measured_bitrate_kbps = Some(5_950.0);
+        measured.stream_output_total_bytes = 40_000;
+
+        // Stream only: FFmpeg's first output is the fifo RTMP leg (`N/A`).
+        let mut stream_only = health(None, None);
+        stream_health_with_measured_stream_output(&mut stream_only, &measured, false);
+        assert_eq!(stream_only.bitrate_kbps, Some(5_950.0));
+        assert_eq!(stream_only.total_bytes, Some(40_000));
+
+        // A figure FFmpeg did print for the stream stays.
+        let mut printed = health(Some(6_010.0), Some(50_000));
+        stream_health_with_measured_stream_output(&mut printed, &measured, false);
+        assert_eq!(printed.bitrate_kbps, Some(6_010.0));
+        assert_eq!(printed.total_bytes, Some(50_000));
+
+        // With a recording FFmpeg's figures are the file's: always replaced.
+        let mut recording = health(Some(12_000.0), Some(90_000));
+        stream_health_with_measured_stream_output(&mut recording, &measured, true);
+        assert_eq!(recording.bitrate_kbps, Some(5_950.0));
+        assert_eq!(recording.total_bytes, Some(40_000));
+
+        // Nothing measures the stream (the raw-frame bridge): still unknown,
+        // never the recording file's figure.
+        let unmeasured = crate::diagnostics::idle_diagnostics();
+        let mut raw = health(None, None);
+        stream_health_with_measured_stream_output(&mut raw, &unmeasured, false);
+        assert_eq!((raw.bitrate_kbps, raw.total_bytes), (None, None));
+        let mut raw_recording = health(Some(12_000.0), Some(90_000));
+        stream_health_with_measured_stream_output(&mut raw_recording, &unmeasured, true);
+        assert_eq!(
+            (raw_recording.bitrate_kbps, raw_recording.total_bytes),
+            (None, None)
+        );
     }
 
     #[test]

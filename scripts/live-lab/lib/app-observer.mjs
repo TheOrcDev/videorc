@@ -238,6 +238,32 @@ export function healthRecordFromEvent(message) {
  * The same event usually arrives through both feeds; one copy per code per
  * second is kept.
  */
+export const STREAM_OUTPUT_SAMPLE_MS = 10_000
+
+/**
+ * The backend's own measure of what the stream encoder sent, from a
+ * `diagnostics.stats` event (pure): plan 218 S2's measured bitrate and bytes,
+ * and the bitrate the stream was set to. Null for any other message, or one
+ * with no stream figures at all. The journal leg carries FFmpeg's figure,
+ * which is `N/A` for a lone `fifo` RTMP leg; this is what the harness falls
+ * back to.
+ */
+export function streamOutputFromEvent(message, ts) {
+  if (message?.event !== 'diagnostics.stats') return null
+  const payload = message.payload ?? {}
+  const measuredBitrateKbps = num(payload.streamMeasuredBitrateKbps)
+  const totalBytes = num(payload.streamOutputTotalBytes)
+  const configuredBitrateKbps = num(payload.streamOutputBitrateKbps)
+  if (measuredBitrateKbps === null && !totalBytes && configuredBitrateKbps === null) return null
+  return {
+    ts,
+    sessionId: str(payload.sessionId),
+    measuredBitrateKbps,
+    totalBytes: totalBytes || null,
+    configuredBitrateKbps
+  }
+}
+
 export function flattenHealthEvents(records) {
   const seen = new Set()
   const flat = []
@@ -284,6 +310,8 @@ export function createAppObserver({
   const seenChat = new Set()
   let lastCensus = null
   let lastJournal = null
+  let lastStreamOutput = null
+  let lastStreamOutputWrittenMs = -Infinity
   let censusTimer = null
   let censusFailures = 0
   const write = (name, text) => append(join(runDir, name), text).catch(() => {})
@@ -355,6 +383,16 @@ export function createAppObserver({
     },
     /** Feed every renderer-socket message here. */
     onBackendMessage(message) {
+      const output = streamOutputFromEvent(message, new Date(clock.now()).toISOString())
+      if (output) {
+        lastStreamOutput = output
+        // One sample per 10 s in output.ndjson: diagnostics arrive every second.
+        const atMs = clock.now()
+        if (atMs - lastStreamOutputWrittenMs >= STREAM_OUTPUT_SAMPLE_MS) {
+          lastStreamOutputWrittenMs = atMs
+          write('output.ndjson', `${JSON.stringify(output)}\n`)
+        }
+      }
       const record = healthRecordFromEvent(message)
       if (record) {
         health.push(record)
@@ -379,6 +417,8 @@ export function createAppObserver({
     pollJournal: () => tail.poll(),
     sampleCensus,
     latestJournal: () => lastJournal,
+    /** The backend's latest stream-output figures (diagnostics.stats), or null. */
+    latestStreamOutput: () => lastStreamOutput,
     journalLines: (sinceMs = 0) => journal.filter((line) => line.tsMs >= sinceMs),
     healthEvents: () => [...health],
     healthEventsFlat: () => flattenHealthEvents(health),

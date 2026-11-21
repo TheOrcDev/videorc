@@ -12,7 +12,8 @@ import {
   healthRecordFromEvent,
   journalDirCandidates,
   memoryFromCensus,
-  parseJournalLine
+  parseJournalLine,
+  streamOutputFromEvent
 } from './app-observer.mjs'
 import { createFakeClock } from './harness-test-fakes.mjs'
 import { createEventBus } from './step-engine.mjs'
@@ -219,4 +220,53 @@ test('the observer writes evidence, emits bus events and pushes the card', async
   assert.ok(journal.length >= 3)
   assert.equal(JSON.parse(journal[0]).tsMs, undefined)
   assert.ok((await readFile(join(runDir, 'health.ndjson'), 'utf8')).includes('host-overloaded'))
+})
+
+test("the backend's stream-output figures come from diagnostics.stats only", () => {
+  const at = '2026-11-21T11:12:00.000Z'
+  assert.deepEqual(
+    streamOutputFromEvent(
+      {
+        event: 'diagnostics.stats',
+        payload: {
+          sessionId: 's1',
+          streamMeasuredBitrateKbps: 5950.5,
+          streamOutputTotalBytes: 40000,
+          streamOutputBitrateKbps: 6000,
+          streamKey: 'never-copied'
+        }
+      },
+      at
+    ),
+    {
+      ts: at,
+      sessionId: 's1',
+      measuredBitrateKbps: 5950.5,
+      totalBytes: 40000,
+      configuredBitrateKbps: 6000
+    }
+  )
+  // Linux's raw-frame bridge: only the configured figure.
+  assert.deepEqual(
+    streamOutputFromEvent(
+      {
+        event: 'diagnostics.stats',
+        payload: {
+          streamMeasuredBitrateKbps: null,
+          streamOutputTotalBytes: 0,
+          streamOutputBitrateKbps: 6000
+        }
+      },
+      at
+    ),
+    {
+      ts: at,
+      sessionId: null,
+      measuredBitrateKbps: null,
+      totalBytes: null,
+      configuredBitrateKbps: 6000
+    }
+  )
+  assert.equal(streamOutputFromEvent({ event: 'diagnostics.stats', payload: {} }, at), null)
+  assert.equal(streamOutputFromEvent({ event: 'health.event', payload: {} }, at), null)
 })

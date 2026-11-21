@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict'
+import { createRequire } from 'node:module'
 import test from 'node:test'
+import { pathToFileURL } from 'node:url'
 
 import { createFakeClock } from './harness-test-fakes.mjs'
 import { createEventBus, createWaitFor } from './step-engine.mjs'
@@ -9,7 +11,8 @@ import {
   createUiDriver,
   httpBaseFromDevtools,
   pageHelperSource,
-  pickMainTarget
+  pickMainTarget,
+  privacyConfirmDecision
 } from './ui-driver.mjs'
 
 test('the main Studio renderer is picked among CDP targets', () => {
@@ -125,7 +128,8 @@ test('Go Live outcomes: live, blocked, partial setup, failed, undecided', () => 
 // interpreted, then a 'ui' snapshot is emitted through the binding.
 function fakePage({
   destinations = [{ targetId: 'youtube', ready: true, canExclude: false }],
-  excluded = []
+  excluded = [],
+  privacyStep = null
 } = {}) {
   const listeners = new Set()
   const dialog = {
@@ -140,7 +144,8 @@ function fakePage({
     blockers: [],
     partialSetup: false,
     captionsBlocked: false,
-    confirm: { disabled: false, label: 'Go live' }
+    confirm: { disabled: false, label: 'Go live' },
+    privacyConfirm: null
   }
   const sent = []
   const calls = []
@@ -190,6 +195,15 @@ function fakePage({
         result = true
       } else if (name === 'confirm') {
         result = !dialog.confirm.disabled
+        // The app: a non-Public YouTube Go Live asks first (#1316), else starts.
+        if (result && privacyStep) dialog.privacyConfirm = privacyStep
+        else if (result) dialog.pending = true
+      } else if (name === 'confirmPrivacy') {
+        result = Boolean(dialog.privacyConfirm && !dialog.privacyConfirm.confirm.disabled)
+        if (result) {
+          dialog.privacyConfirm = null
+          dialog.pending = true
+        }
       } else if (name === 'dismissOtherDialogs') {
         result = 0
       }
@@ -262,7 +276,8 @@ test('fill, destinations and confirm drive the dialog and wait on its snapshots'
     ]
   )
 
-  await ui.confirmGoLive()
+  assert.deepEqual(await ui.confirmGoLive({ privacy: 'public' }), { privacyConfirm: null })
+  assert.equal(cdp.dialog.pending, true)
   const outcome = ui.readGoLiveOutcome({ deadlineMs: 1000 })
   cdp.dialog.open = false
   bus.emit('remote.state', { sessionState: 'streaming', sessionActive: true })
@@ -303,4 +318,134 @@ test('a disabled Go live button is an error, and the outcome wait has a deadline
   )
   await clock.advance(5000)
   await outcome
+})
+
+const UNLISTED_STEP = {
+  title: 'Go live unlisted?',
+  description: 'Videorc lab is Unlisted.',
+  confirm: { disabled: false, label: 'Go live unlisted' }
+}
+
+test('the privacy step is answered only for the privacy the run asked for', () => {
+  assert.deepEqual(privacyConfirmDecision(UNLISTED_STEP, 'unlisted'), { answer: true })
+  assert.deepEqual(
+    privacyConfirmDecision({ ...UNLISTED_STEP, title: 'Go live private?' }, 'private'),
+    { answer: true }
+  )
+  assert.match(privacyConfirmDecision(UNLISTED_STEP, 'private').reason, /not "Go live private\?"/)
+  assert.match(privacyConfirmDecision(UNLISTED_STEP, 'public').reason, /asked for public/)
+  assert.match(privacyConfirmDecision(UNLISTED_STEP, null).reason, /asked for no privacy/)
+  assert.match(
+    privacyConfirmDecision({ ...UNLISTED_STEP, title: 'Go live unlisted and private?' }, 'unlisted')
+      .reason,
+    /not "Go live unlisted\?"/
+  )
+  assert.match(
+    privacyConfirmDecision(
+      { ...UNLISTED_STEP, confirm: { disabled: true, label: 'x' } },
+      'unlisted'
+    ).reason,
+    /disabled/
+  )
+  assert.equal(privacyConfirmDecision(null, 'unlisted').answer, false)
+})
+
+test('Go live answers "Go live unlisted?" (#1316) and reports it', async () => {
+  const cdp = fakePage({ privacyStep: UNLISTED_STEP })
+  const { ui, bus } = driver(cdp)
+  await ui.install()
+  cdp.dialog.open = true
+  assert.deepEqual(await ui.confirmGoLive({ privacy: 'unlisted', deadlineMs: 1000 }), {
+    privacyConfirm: { title: 'Go live unlisted?', answered: 'Go live unlisted' }
+  })
+  assert.deepEqual(
+    cdp.calls.filter((call) => call.name.startsWith('confirm')).map((call) => call.name),
+    ['confirm', 'confirmPrivacy']
+  )
+  const outcome = ui.readGoLiveOutcome({ deadlineMs: 1000 })
+  cdp.dialog.open = false
+  bus.emit('remote.state', { sessionState: 'streaming', sessionActive: true })
+  cdp.emit()
+  assert.deepEqual(await outcome, { outcome: 'live' })
+})
+
+test('a privacy step naming another privacy is refused, never clicked', async () => {
+  const cdp = fakePage({ privacyStep: { ...UNLISTED_STEP, title: 'Go live private?' } })
+  const { ui } = driver(cdp)
+  await ui.install()
+  cdp.dialog.open = true
+  await assert.rejects(
+    ui.confirmGoLive({ privacy: 'unlisted', deadlineMs: 1000 }),
+    /Refusing the Go Live privacy step: it asks "Go live private\?"/
+  )
+  assert.equal(
+    cdp.calls.some((call) => call.name === 'confirmPrivacy'),
+    false
+  )
+})
+
+// The real page helper over a DOM (happy-dom, the desktop app's test DOM).
+async function helperOver(html) {
+  const require = createRequire(new URL('../../../apps/desktop/package.json', import.meta.url))
+  const { Window } = await import(pathToFileURL(require.resolve('happy-dom')).href)
+  const window = new Window()
+  window.document.body.innerHTML = html
+  const globals = [
+    'window',
+    'document',
+    'MutationObserver',
+    'Event',
+    'KeyboardEvent',
+    'HTMLInputElement',
+    'HTMLTextAreaElement'
+  ]
+  const run = new Function(...globals, `return ${pageHelperSource()}`)
+  assert.equal(
+    run(...globals.map((name) => (name === 'window' ? window : window[name]))),
+    'installed'
+  )
+  return { api: window.__videorcLab, window }
+}
+
+const GO_LIVE_DOM = (state) => `
+  <div data-testid="go-live-dialog" ${state} data-pending="false">
+    <section data-testid="go-live-details">
+      <input id="go-live-title" value="Automated test: x" />
+    </section>
+    <button data-testid="go-live-confirm">Go live</button>
+  </div>`
+
+test('a closed Base UI popup still in the DOM reads as closed', async () => {
+  const { api, window } = await helperOver(GO_LIVE_DOM('data-closed=""'))
+  assert.deepEqual(api.dialogState(), { open: false })
+  assert.equal(api.confirm(), false)
+  await window.happyDOM.close()
+})
+
+test('the open dialog reads its privacy step and the helper answers it', async () => {
+  const { api, window } = await helperOver(`
+    ${GO_LIVE_DOM('data-open=""')}
+    <div data-testid="go-live-privacy-dialog" data-closed=""><h2>Go live private?</h2>
+      <button data-testid="go-live-privacy-confirm">Go live private</button></div>
+    <div data-testid="go-live-privacy-dialog" data-open="">
+      <h2 data-slot="alert-dialog-title">Go live unlisted?</h2>
+      <p data-slot="alert-dialog-description">Videorc lab is Unlisted.</p>
+      <button data-testid="go-live-privacy-cancel">Change privacy</button>
+      <button data-testid="go-live-privacy-confirm">Go live unlisted</button>
+    </div>`)
+  const state = api.dialogState()
+  assert.equal(state.open, true)
+  assert.equal(state.pending, false)
+  assert.deepEqual(state.privacyConfirm, {
+    title: 'Go live unlisted?',
+    description: 'Videorc lab is Unlisted.',
+    confirm: { disabled: false, label: 'Go live unlisted' }
+  })
+  let clicked = null
+  window.document
+    .querySelectorAll('[data-testid="go-live-privacy-confirm"]')
+    .forEach((button) => button.addEventListener('click', () => (clicked = button.textContent)))
+  assert.equal(api.confirmPrivacy(), true)
+  assert.equal(clicked, 'Go live unlisted')
+  await window.happyDOM.close()
 })

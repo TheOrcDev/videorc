@@ -192,7 +192,11 @@ export function createYoutubeSide({
 
   async function start() {
     if (unavailable) {
-      log(`YouTube observer off: ${unavailable}. YouTube-side checks are skipped.`)
+      log(
+        /broadcaster role is not authorized/.test(unavailable)
+          ? `YouTube-side checks skipped: no broadcaster OAuth (${unavailable}). Only the app's own output is checked.`
+          : `YouTube observer off: ${unavailable}. YouTube-side checks are skipped.`
+      )
       return
     }
     watching = observerApi

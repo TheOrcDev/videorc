@@ -292,6 +292,21 @@ function signal(id, fields) {
  * frame checks (`frameChecks` injectable; `runFrames: false` skips them).
  * Returns { verdict, series } where series feeds the report's charts.
  */
+/**
+ * The report's one line on YouTube's side (pure): checked, skipped for want
+ * of the broadcaster OAuth (only the app's own output is checked then), or
+ * not applicable (a local sink).
+ */
+export function youtubeSideLine(manifest) {
+  const youtube = manifest?.session?.youtube
+  if (!youtube) return 'not applicable (no YouTube destination)'
+  if (/broadcaster role is not authorized/.test(youtube.unavailable ?? '')) {
+    return "YouTube-side checks skipped: no broadcaster OAuth (pnpm live:hookup --role broadcaster); only the app's own output was checked"
+  }
+  if (youtube.unavailable) return `YouTube-side checks skipped: ${youtube.unavailable}`
+  return `checked (${youtube.polls ?? 0} observer polls)`
+}
+
 export async function computeVerdict(
   run,
   thresholds,
@@ -481,9 +496,13 @@ export async function computeVerdict(
     const legs = line.legs ?? []
     const fpsValues = live ? legs.map((leg) => leg.fps).filter(Number.isFinite) : []
     const speeds = live ? legs.map((leg) => leg.speed).filter(Number.isFinite) : []
+    // A leg with no bitrate is not measured, never 0 kbps: FFmpeg prints
+    // `N/A` for a lone `fifo` RTMP leg, and a build or path that measures
+    // nothing else leaves it null (ogre, 0.36, 2026-11-21).
+    const bitrates = live ? legs.map((leg) => leg.bitrateKbps).filter(Number.isFinite) : []
     return {
       atMs: line.tsMs,
-      value: live ? legs.reduce((sum, leg) => sum + (leg.bitrateKbps ?? 0), 0) : null,
+      value: bitrates.length ? bitrates.reduce((sum, value) => sum + value, 0) : null,
       fps: fpsValues.length ? Math.min(...fpsValues) : null,
       speed: speeds.length ? Math.min(...speeds) : null,
       lostFrames: index > 0 && lostFramesBetween(samples[index - 1], line)
@@ -597,22 +616,35 @@ export async function computeVerdict(
     const medianBitrate = series.bitrate.map((p) => p.value).sort((a, b) => a - b)[
       Math.floor(series.bitrate.length / 2)
     ]
-    signals.push(
-      signal('stream:bitrate', {
-        status: bitrateJudge.status,
-        severity: bitrateJudge.severity,
-        signature: bitrateBreach ? 'stream:bitrate' : null,
-        summary: bitrateBreach
-          ? `bitrate under ${Math.round(fraction * 100)}% of ${target} kbps for ${Math.round(low / 1000)} s`
-          : lowAtAll >= bitrateFor
-            ? `median bitrate ${Math.round(medianBitrate)} kbps against a ${target} kbps target: content-limited (fps, speed and frames held while it was under ${Math.round(fraction * 100)}%)`
-            : `median bitrate ${Math.round(medianBitrate)} kbps against a ${target} kbps target`,
-        value: Math.round(medianBitrate),
-        threshold: Math.round(target * fraction),
-        unit: 'kbps',
-        evidence: ['journal.ndjson', 'charts/bitrate.png']
-      })
-    )
+    if (!series.bitrate.length) {
+      signals.push(
+        signal('stream:bitrate', {
+          status: 'skipped',
+          summary:
+            'not measured: no live leg reported a bitrate (FFmpeg prints N/A for a lone fifo RTMP leg, and this build measured no stream encoder output)',
+          threshold: Math.round(target * fraction),
+          unit: 'kbps',
+          evidence: ['journal.ndjson']
+        })
+      )
+    } else {
+      signals.push(
+        signal('stream:bitrate', {
+          status: bitrateJudge.status,
+          severity: bitrateJudge.severity,
+          signature: bitrateBreach ? 'stream:bitrate' : null,
+          summary: bitrateBreach
+            ? `bitrate under ${Math.round(fraction * 100)}% of ${target} kbps for ${Math.round(low / 1000)} s`
+            : lowAtAll >= bitrateFor
+              ? `median bitrate ${Math.round(medianBitrate)} kbps against a ${target} kbps target: content-limited (fps, speed and frames held while it was under ${Math.round(fraction * 100)}%)`
+              : `median bitrate ${Math.round(medianBitrate)} kbps against a ${target} kbps target`,
+          value: Math.round(medianBitrate),
+          threshold: Math.round(target * fraction),
+          unit: 'kbps',
+          evidence: ['journal.ndjson', 'charts/bitrate.png']
+        })
+      )
+    }
   }
 
   // --- health events: destination, host overload ------------------------------
@@ -1049,6 +1081,8 @@ export async function computeVerdict(
     vod: vodId ? { videoId: vodId, url: `https://www.youtube.com/watch?v=${vodId}` } : null,
     // Additions to the pinned contract (fields only, never renames):
     thresholdsVersion: thresholds.version ?? 1,
+    // What was checked on YouTube's side, in one line for the report.
+    youtubeSide: youtubeSideLine(manifest),
     generatedAt: now().toISOString(),
     stopReason: manifest.stopReason ?? null,
     exitCode: manifest.exitCode ?? null,

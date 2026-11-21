@@ -119,7 +119,31 @@ export function liveHoldStep({ id = 'hold-live', minutes = 10, title = 'Hold liv
   }
 }
 
-/** Waits for a journal sample with a live leg carrying bitrate. */
+/**
+ * A live leg's bitrate and where it came from (pure): the leg's own (FFmpeg's
+ * progress), else the backend's measure of the stream encoder's output
+ * (`diagnostics.stats`, plan 218 S2) for a lone leg, else not measured. A
+ * lone `fifo` RTMP leg gets `N/A` from FFmpeg; with several legs the
+ * backend's figure is the session's, not one leg's, so it is not lent.
+ */
+export function legBitrate(leg, { streamOutput = null, liveLegCount = 1 } = {}) {
+  if (Number.isFinite(leg?.bitrateKbps)) return { bitrateKbps: leg.bitrateKbps, source: 'leg' }
+  if (liveLegCount === 1 && Number.isFinite(streamOutput?.measuredBitrateKbps)) {
+    return { bitrateKbps: streamOutput.measuredBitrateKbps, source: 'backend' }
+  }
+  return { bitrateKbps: null, source: 'not-measured' }
+}
+
+/** A leg that is sending: live, with frames going out (fps) or a bitrate. */
+function deliveringLeg(leg) {
+  return leg.state === 'live' && (leg.bitrateKbps > 0 || leg.fps > 0)
+}
+
+/**
+ * Waits for a journal sample with a live leg that is sending, and records
+ * each leg's output health: fps, speed, drops and its bitrate (with where the
+ * bitrate came from, see legBitrate).
+ */
 export function liveSampleStep({ id = 'live-sample', title = 'Live sample' } = {}) {
   return {
     id,
@@ -133,20 +157,42 @@ export function liveSampleStep({ id = 'live-sample', title = 'Live sample' } = {
           return latest &&
             latest.tsMs >= since &&
             isLiveJournalState(latest.state) &&
-            liveLegs(latest).some((leg) => leg.bitrateKbps > 0)
+            liveLegs(latest).some(deliveringLeg)
             ? latest
             : null
         },
-        { label: 'a journal sample with a live leg' }
+        { label: 'a journal sample with a live leg sending' }
       )
+      const streamOutput = ctx.observe?.latestStreamOutput?.() ?? null
+      const liveLegCount = liveLegs(line).length
+      const legs = line.legs.map((leg) => {
+        const bitrate = legBitrate(leg, { streamOutput, liveLegCount })
+        return {
+          targetId: leg.targetId,
+          state: leg.state,
+          bitrateKbps: bitrate.bitrateKbps,
+          bitrateSource: bitrate.source,
+          fps: leg.fps,
+          speed: leg.speed,
+          droppedFrames: leg.droppedFrames
+        }
+      })
+      for (const leg of legs.filter((entry) => entry.state === 'live')) {
+        ctx.log(
+          `Output ${leg.targetId}: ${leg.fps ?? '?'} fps, speed ${leg.speed ?? '?'}, ${
+            leg.droppedFrames ?? '?'
+          } dropped, ${
+            leg.bitrateKbps === null
+              ? 'bitrate not measured (the leg reports none and the backend measured none)'
+              : `${Math.round(leg.bitrateKbps)} kbps (${leg.bitrateSource === 'leg' ? 'leg' : "backend's stream encoder"})`
+          }.`
+        )
+      }
       return {
         state: line.state,
-        legs: line.legs.map((leg) => ({
-          targetId: leg.targetId,
-          bitrateKbps: leg.bitrateKbps,
-          fps: leg.fps,
-          speed: leg.speed
-        }))
+        legs,
+        encoderQueueAgeMs: line.encoderQueueAgeMs ?? null,
+        streamOutput
       }
     }
   }
