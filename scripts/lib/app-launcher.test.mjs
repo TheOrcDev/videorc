@@ -775,61 +775,53 @@ test(
   }
 )
 
-test(
-  'launchDevApp rejects a smoke command marker without a capability',
-  { skip: process.platform === 'win32' },
-  async () => {
-    const fixtureScript = `
+test('launchDevApp rejects a smoke command marker without a capability', async () => {
+  const fixtureScript = `
       console.log('[smoke] preview-motion-ready ' + JSON.stringify({ host: '127.0.0.1', port: 43210 }))
       setInterval(() => {}, 1_000)
     `
 
-    await assert.rejects(
-      launchDevApp({
-        timeoutMs: 2_000,
-        requiredMarkers: ['preview-motion-ready'],
-        spawnSpec: {
-          command: process.execPath,
-          args: ['-e', fixtureScript],
-          cwd: process.cwd()
-        }
-      }),
-      /Invalid \[smoke\] preview-motion-ready marker:.*per-run capability/
-    )
-  }
-)
-
-test(
-  'launchDevApp attaches a caller-held packaged capability before marker validation',
-  { skip: process.platform === 'win32' },
-  async () => {
-    const capability = 'x'.repeat(43)
-    const fixtureScript = `
-      console.log('[smoke] preview-motion-ready ' + JSON.stringify({ host: '127.0.0.1', port: 43210 }))
-      setInterval(() => {}, 1_000)
-    `
-    const launched = await launchDevApp({
+  await assert.rejects(
+    launchDevApp({
       timeoutMs: 2_000,
       requiredMarkers: ['preview-motion-ready'],
-      packagedSmokeCommandCapability: capability,
       spawnSpec: {
         command: process.execPath,
         args: ['-e', fixtureScript],
         cwd: process.cwd()
       }
-    })
+    }),
+    /Invalid \[smoke\] preview-motion-ready marker:.*per-run capability/
+  )
+})
 
-    try {
-      assert.deepEqual(launched.connections['preview-motion-ready'], {
-        host: '127.0.0.1',
-        port: 43210,
-        capability
-      })
-    } finally {
-      await launched.stop()
+test('launchDevApp attaches a caller-held packaged capability before marker validation', async () => {
+  const capability = 'x'.repeat(43)
+  const fixtureScript = `
+      console.log('[smoke] preview-motion-ready ' + JSON.stringify({ host: '127.0.0.1', port: 43210 }))
+      setInterval(() => {}, 1_000)
+    `
+  const launched = await launchDevApp({
+    timeoutMs: 2_000,
+    requiredMarkers: ['preview-motion-ready'],
+    packagedSmokeCommandCapability: capability,
+    spawnSpec: {
+      command: process.execPath,
+      args: ['-e', fixtureScript],
+      cwd: process.cwd()
     }
+  })
+
+  try {
+    assert.deepEqual(launched.connections['preview-motion-ready'], {
+      host: '127.0.0.1',
+      port: 43210,
+      capability
+    })
+  } finally {
+    await launched.stop()
   }
-)
+})
 
 test('stopProcess reports a graceful process-group stop', async () => {
   const child = fakeChild(123)
