@@ -6,6 +6,7 @@ import {
   NativePreviewMutationQueue,
   NativePreviewMutationQueueCapacityError,
   NativePreviewBackendBoundsRefusedError,
+  NATIVE_PREVIEW_PLACEMENT_HELD,
   NativePreviewPlacementQueue,
   NativePreviewPumpOwnership,
   handoffNativePreviewPumpOwnership,
@@ -799,6 +800,135 @@ describe('NativePreviewPlacementQueue', () => {
     expect(queue.requestDepth).toBe(0)
     expect(queue.pendingCount).toBe(0)
     expect(queue.retryScheduled).toBe(true)
+  })
+
+  // #1629: on Windows the backend refuses bounds until its surface is live,
+  // and main's window events can beat the renderer's surface create.
+  it('holds a placement the host cannot take yet: no failure, no retry timer, no warning', async () => {
+    const clock = new ManualRetryClock()
+    const failures: NativePreviewPlacementFailure[] = []
+    let hostUp = false
+    const appliedX: number[] = []
+    const queue = new NativePreviewPlacementQueue(
+      async ({ bounds }) => {
+        if (!hostUp) {
+          return NATIVE_PREVIEW_PLACEMENT_HELD
+        }
+        appliedX.push(bounds.screenX)
+      },
+      (_error, failure) => failures.push(failure),
+      () => 0,
+      0,
+      [100, 250],
+      clock
+    )
+
+    queue.enqueue({ bounds: surfaceBounds(10), generation: 1 })
+    await queue.waitForIdle()
+    queue.enqueue({ bounds: surfaceBounds(20), generation: 1 })
+    await queue.waitForIdle()
+
+    expect(queue.placementHeld).toBe(true)
+    expect(queue.retryScheduled).toBe(false)
+    expect(clock.pending).toBe(0)
+    expect(failures).toEqual([])
+    expect(appliedX).toEqual([])
+    expect(queue.metrics()).toMatchObject({ applied: 0, failed: 0, retried: 0, held: 2 })
+
+    hostUp = true
+    expect(queue.releaseHeld()).toBe(true)
+    await queue.waitForIdle()
+
+    // Only the newest rect runs, once.
+    expect(appliedX).toEqual([20])
+    expect(queue.placementHeld).toBe(false)
+    expect(queue.releaseHeld()).toBe(false)
+    // Landed: an echo of it is coalesced.
+    expect(queue.enqueue({ bounds: surfaceBounds(20), generation: 1 })).toBe(false)
+    expect(queue.metrics()).toMatchObject({ applied: 1, failed: 0, held: 2 })
+  })
+
+  it('releases a held placement at the live rect main hands it', async () => {
+    let hostUp = false
+    const appliedX: number[] = []
+    const queue = new NativePreviewPlacementQueue(async ({ bounds }) => {
+      if (!hostUp) {
+        return NATIVE_PREVIEW_PLACEMENT_HELD
+      }
+      appliedX.push(bounds.screenX)
+    })
+
+    queue.enqueue({ bounds: surfaceBounds(10), generation: 1 })
+    await queue.waitForIdle()
+    hostUp = true
+    queue.releaseHeld({ bounds: surfaceBounds(30), generation: 1 })
+    await queue.waitForIdle()
+
+    expect(appliedX).toEqual([30])
+  })
+
+  it('runs an echo of the last landed rect after it was held, since it never reached the host', async () => {
+    let hostUp = true
+    const appliedX: number[] = []
+    const queue = new NativePreviewPlacementQueue(async ({ bounds }) => {
+      if (!hostUp) {
+        return NATIVE_PREVIEW_PLACEMENT_HELD
+      }
+      appliedX.push(bounds.screenX)
+    })
+
+    queue.enqueue({ bounds: surfaceBounds(10), generation: 1 })
+    await queue.waitForIdle()
+    hostUp = false
+    // A forced push of the landed rect (a refused scene reconcile) is held.
+    queue.enqueue({ bounds: surfaceBounds(10), generation: 1 }, { force: true })
+    await queue.waitForIdle()
+    expect(queue.placementHeld).toBe(true)
+
+    hostUp = true
+    // A fresh window event for the same rect replaces the held one and runs.
+    expect(queue.enqueue({ bounds: surfaceBounds(10), generation: 1 })).toBe(true)
+    await queue.waitForIdle()
+    expect(appliedX).toEqual([10, 10])
+    expect(queue.placementHeld).toBe(false)
+  })
+
+  it('drops a held placement on teardown so a late release cannot recreate the surface', async () => {
+    let hostUp = false
+    let applies = 0
+    const queue = new NativePreviewPlacementQueue(async () => {
+      applies += 1
+      if (!hostUp) {
+        return NATIVE_PREVIEW_PLACEMENT_HELD
+      }
+    })
+
+    queue.enqueue({ bounds: surfaceBounds(10), generation: 1 })
+    await queue.waitForIdle()
+    expect(queue.cancelPending()).toBe(true)
+    expect(queue.placementHeld).toBe(false)
+
+    hostUp = true
+    expect(queue.releaseHeld()).toBe(false)
+    await queue.waitForIdle()
+    expect(applies).toBe(1)
+  })
+
+  it('does not hold a placement teardown cancelled while it was in flight', async () => {
+    let finish: () => void = () => undefined
+    const queue = new NativePreviewPlacementQueue(
+      () =>
+        new Promise<typeof NATIVE_PREVIEW_PLACEMENT_HELD>((resolve) => {
+          finish = () => resolve(NATIVE_PREVIEW_PLACEMENT_HELD)
+        })
+    )
+
+    queue.enqueue({ bounds: surfaceBounds(10), generation: 1 })
+    queue.cancelPending()
+    finish()
+    await queue.waitForIdle()
+
+    expect(queue.placementHeld).toBe(false)
   })
 })
 

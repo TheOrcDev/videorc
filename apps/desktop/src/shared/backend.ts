@@ -3107,6 +3107,8 @@ export interface PreviewSurfaceStatus {
   nativePreviewPlacementsFailed?: number
   /** Retries run after a refused placement push (#1272). */
   nativePreviewPlacementsRetried?: number
+  /** Placement pushes held until the backend surface was live (#1629). */
+  nativePreviewPlacementsHeld?: number
   nativePreviewPlacementRoundTripP95Ms?: number
   nativePreviewPresentRoundTripP95Ms?: number
   nativePreviewIosurfaceCacheHits?: number

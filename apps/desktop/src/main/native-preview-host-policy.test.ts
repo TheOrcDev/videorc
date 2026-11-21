@@ -3,6 +3,9 @@ import { describe, expect, it } from 'vitest'
 import type { PreviewSurfaceStatus } from '../shared/backend'
 import { nativePreviewStatusProvesSceneRevision } from '../shared/native-preview-scene-authority'
 import {
+  backendPreviewSurfaceAcceptsPlacement,
+  backendPreviewSurfaceHoldsPlacement,
+  heldPreviewPlacementRelease,
   nativePreviewClosedWindowUnsuppressStatus,
   nativePreviewDriverFailureFallbackStatus,
   nativePreviewValidatedHandoffStatus,
@@ -22,6 +25,59 @@ import {
 } from './native-preview-host-policy'
 
 describe('native preview host policy', () => {
+  // #1629: Windows bounds pushes wait for the backend surface instead of
+  // being refused and retried.
+  it('holds Windows placements only while the backend surface is known to be down', () => {
+    for (const state of ['unavailable', 'stopped', 'failed'] as const) {
+      expect(backendPreviewSurfaceAcceptsPlacement(state)).toBe(false)
+      expect(
+        backendPreviewSurfaceHoldsPlacement({ platform: 'win32', backendSurfaceState: state })
+      ).toBe(true)
+      expect(
+        backendPreviewSurfaceHoldsPlacement({ platform: 'darwin', backendSurfaceState: state })
+      ).toBe(false)
+    }
+    for (const state of ['starting', 'live'] as const) {
+      expect(backendPreviewSurfaceAcceptsPlacement(state)).toBe(true)
+      expect(
+        backendPreviewSurfaceHoldsPlacement({ platform: 'win32', backendSurfaceState: state })
+      ).toBe(false)
+    }
+    // Unknown (no status yet, or the event socket retired): push as before.
+    expect(
+      backendPreviewSurfaceHoldsPlacement({ platform: 'win32', backendSurfaceState: null })
+    ).toBe(false)
+  })
+
+  it('runs a held placement after the renderer has created the surface, not ahead of it', () => {
+    const held = {
+      placementHeld: true,
+      platform: 'win32' as const,
+      backendSurfaceState: 'live' as const,
+      surfaceExists: false,
+      surfaceWaitElapsed: false
+    }
+    // The backend is up but its create has not drained: a release now would
+    // create the proof window ahead of the drain's own create.
+    expect(heldPreviewPlacementRelease(held)).toBe('wait-for-surface')
+    expect(heldPreviewPlacementRelease({ ...held, surfaceExists: true })).toBe('release')
+    // The drain never came: run it anyway, as a refused push used to retry.
+    expect(heldPreviewPlacementRelease({ ...held, surfaceWaitElapsed: true })).toBe('release')
+    expect(heldPreviewPlacementRelease({ ...held, backendSurfaceState: 'starting' })).toBe(
+      'wait-for-surface'
+    )
+    // Still down, unknown, or nothing held: nothing to do.
+    expect(
+      heldPreviewPlacementRelease({ ...held, backendSurfaceState: 'stopped', surfaceExists: true })
+    ).toBe('none')
+    expect(
+      heldPreviewPlacementRelease({ ...held, backendSurfaceState: null, surfaceExists: true })
+    ).toBe('none')
+    expect(
+      heldPreviewPlacementRelease({ ...held, placementHeld: false, surfaceExists: true })
+    ).toBe('none')
+  })
+
   it('stamps the main-validated scene revision and run onto external presenter status', () => {
     expect(
       nativePreviewValidatedHandoffStatus(
