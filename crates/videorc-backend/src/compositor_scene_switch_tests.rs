@@ -263,7 +263,7 @@ async fn publish(
         false,
         super::ChatOverlayLegs::OFF,
         super::LiveBackgroundLeg::unmeasured(&mut None),
-        super::ProgramLeg::off(&mut None),
+        super::ProgramLeg::off(&mut super::ProgramLegState::default()),
     )
 }
 
@@ -519,7 +519,7 @@ async fn publish_dual(
         false,
         super::ChatOverlayLegs::OFF,
         super::LiveBackgroundLeg::unmeasured(&mut None),
-        super::ProgramLeg::off(&mut None),
+        super::ProgramLeg::off(&mut super::ProgramLegState::default()),
     )
 }
 
@@ -1227,7 +1227,7 @@ async fn scene_switch_artifact_fixture() {
                 false,
                 super::ChatOverlayLegs::OFF,
                 super::LiveBackgroundLeg::unmeasured(&mut None),
-                super::ProgramLeg::off(&mut None),
+                super::ProgramLeg::off(&mut super::ProgramLegState::default()),
             );
             if metal {
                 assert_eq!(result.compositor_backend, CompositorBackend::Metal);
@@ -1396,7 +1396,7 @@ async fn source_iso_artifact_fixture() {
                 false,
                 super::ChatOverlayLegs::OFF,
                 super::LiveBackgroundLeg::unmeasured(&mut None),
-                super::ProgramLeg::off(&mut None),
+                super::ProgramLeg::off(&mut super::ProgramLegState::default()),
             );
             if metal {
                 assert_eq!(result.compositor_backend, CompositorBackend::Metal);
@@ -1503,7 +1503,7 @@ async fn source_iso_artifact_fixture() {
             false,
             super::ChatOverlayLegs::OFF,
             super::LiveBackgroundLeg::unmeasured(&mut None),
-            super::ProgramLeg::off(&mut None),
+            super::ProgramLeg::off(&mut super::ProgramLegState::default()),
         );
         let latest_sequence =
             |store: &CompositorFrameStore| store.lock().unwrap().latest().unwrap().sequence;
@@ -1983,7 +1983,7 @@ async fn source_edit_publication_refuses_stale_camera_and_failed_auxiliary_outpu
             false,
             super::ChatOverlayLegs::OFF,
             super::LiveBackgroundLeg::unmeasured(&mut None),
-            super::ProgramLeg::off(&mut None),
+            super::ProgramLeg::off(&mut super::ProgramLegState::default()),
         );
         let snapshot = state
             .live_source_switch
@@ -2177,7 +2177,7 @@ async fn source_edit_takeover_pixels_do_not_prove_hidden_capture_and_clear_revea
             false,
             super::ChatOverlayLegs::OFF,
             super::LiveBackgroundLeg::unmeasured(&mut None),
-            super::ProgramLeg::off(&mut None),
+            super::ProgramLeg::off(&mut super::ProgramLegState::default()),
         );
         let observed = state
             .live_source_switch
@@ -2588,7 +2588,7 @@ async fn hide_screen_render(
         false,
         super::ChatOverlayLegs::OFF,
         super::LiveBackgroundLeg::unmeasured(&mut None),
-        super::ProgramLeg::off(&mut None),
+        super::ProgramLeg::off(&mut super::ProgramLegState::default()),
     );
     if metal {
         assert_eq!(result.compositor_backend, CompositorBackend::Metal);
