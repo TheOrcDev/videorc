@@ -11405,6 +11405,141 @@ describe('real StudioProvider lifecycle', () => {
     await waitForObservation(() => liveBackgroundId(backend.currentScene.background) === 'silk')
   }, 15_000)
 
+  // The same race on a Record or Go Live click (after #1640): their
+  // session.start carries the scene as the Studio held it too, and the
+  // backend commits it as the session starts.
+  const mountForStartRace = async (start: 'record' | 'live') => {
+    const backend = new StudioBackend()
+    if (start === 'live') enableYouTubeOauthForTest(backend)
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => []
+    })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(
+      () =>
+        latest()?.core.wsStatus === 'connected' &&
+        latest()?.core.captureConfig.sources.cameraId === 'camera:1' &&
+        latest()?.core.recordBlockedReason == null
+    )
+    await act(async () => latest()!.core.applyCameraPreset({ layoutPreset: 'screen-only' }))
+    await waitForObservation(
+      () => latest()?.core.captureConfig.layout.layoutPreset === 'screen-only' && canSaveScene()
+    )
+    if (start === 'live') {
+      // Go Live's checks run and its dialog opens before the scene work: the
+      // click under test is the dialog's Go Live.
+      await act(async () => {
+        const current = latest()!.core.captureConfig
+        latest()!.core.setCaptureConfig({
+          ...youtubeOauthStreamCaptureConfig(),
+          layout: current.layout,
+          sources: current.sources
+        })
+      })
+      await waitForObservation(
+        () =>
+          latest()?.core.streamOutputTopologyPreflight.state === 'ready' &&
+          latest()?.core.startBlockedReason === null
+      )
+      await act(async () => {
+        await latest()!.core.startSession()
+      })
+      await waitForObservation(() => latest()?.core.goLiveConfirmationOpen === true)
+    }
+    const clickStart = (): Promise<unknown> =>
+      start === 'live' ? latest()!.core.confirmGoLive() : latest()!.core.startRecording()
+    return { backend, latest, clickStart }
+  }
+  const sessionStarts = (commands: BackendCommand[]) =>
+    commands.filter((command) => command.method === 'session.start')
+
+  it.each(['record', 'live'] as const)(
+    'holds a %s start while a scene change awaits its proof, then starts it with that scene',
+    async (start) => {
+      const { backend, latest, clickStart } = await mountForStartRace(start)
+      const commandsBefore = backend.sentCommands.length
+      const releaseApply = backend.deferResponse('scene.layout.apply_preview', BACKEND_RESPONSE)
+      await act(async () => {
+        void latest()!.core.applyLiveBackground('silk')
+      })
+      await waitForObservation(() => backend.sentCommands.slice(commandsBefore).some(isLayoutApply))
+      let started: Promise<unknown> | undefined
+      await act(async () => {
+        started = clickStart()
+      })
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 400))
+      })
+      // Sent now, it would commit the scene the change is leaving.
+      expect(sessionStarts(backend.sentCommands.slice(commandsBefore))).toHaveLength(0)
+
+      await act(async () => {
+        releaseApply()
+        await Promise.resolve()
+      })
+      await waitForObservation(
+        () => sessionStarts(backend.sentCommands.slice(commandsBefore)).length > 0
+      )
+      const sent = sessionStarts(backend.sentCommands.slice(commandsBefore))
+      expect(sent).toHaveLength(1)
+      expect(liveBackgroundId(ringScene(sent[0])?.background)).toBe('silk')
+      await act(async () => {
+        await started
+      })
+      await waitForObservation(() => latest()?.recording.recording.state === 'recording')
+    },
+    20_000
+  )
+
+  it.each(['record', 'live'] as const)(
+    'runs a scene change asked for while a %s start is in flight once the start answers, on its session',
+    async (start) => {
+      const { backend, latest, clickStart } = await mountForStartRace(start)
+      const releaseStart = backend.deferResponse('session.start', BACKEND_RESPONSE)
+      let started: Promise<unknown> | undefined
+      await act(async () => {
+        started = clickStart()
+      })
+      await waitForObservation(() => sessionStarts(backend.sentCommands).length > 0)
+      const commandsBefore = backend.sentCommands.length
+      let committed: Promise<unknown> | undefined
+      await act(async () => {
+        committed = Promise.resolve(latest()!.core.applyLiveBackground('silk'))
+      })
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 300))
+      })
+      // Sent now, it would commit before the start's scene commit and be lost.
+      expect(backend.sentCommands.slice(commandsBefore).some(isLayoutApply)).toBe(false)
+
+      await act(async () => {
+        releaseStart()
+        await Promise.resolve()
+      })
+      await waitForObservation(() => backend.sentCommands.slice(commandsBefore).some(isLayoutApply))
+      const apply = backend.sentCommands.slice(commandsBefore).find(isLayoutApply)!
+      // The session is running now: the change goes to it.
+      expect(apply.method).toBe('scene.layout.apply_live')
+      expect(liveBackgroundId((apply.params as { background?: unknown }).background)).toBe('silk')
+      await act(async () => {
+        await Promise.all([committed, started])
+      })
+      await waitForObservation(() => liveBackgroundId(backend.currentScene.background) === 'silk')
+    },
+    20_000
+  )
+
   it('records a live camera Off as intent that survives confirmation', async () => {
     const backend = new StudioBackend()
     backend.recordingState = 'recording'
