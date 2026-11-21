@@ -1,5 +1,17 @@
 # Implementation Plans
 
+- 2026-11-21: [Plan 255](255-linux-beta.md), the owner's ask: Linux from
+  Alpha to Beta with every Mac feature working, or an honest Linux
+  equivalent. PLANNED 2026-11-21, 23 slices (S0-S22), twelve owner checks:
+  - A 55-row parity matrix from the code and a spot check on ogre with the
+    0.36.0 build: 11 work as seen, 12 work in code, 11 degraded, 2 broke
+    (mic dropout and an FFmpeg hang at Stop, under host load), 11 missing,
+    5 OS-limited.
+  - Beta defined: Tier 1 desktops, AppImage with self-update, a Linux
+    physical acceptance checklist like the Windows one, two named boxes, no
+    waiver.
+  - First: lab lock detection, the recording repro, a lighter camera, the
+    preview transport, portal global shortcuts and PipeWire desktop audio.
 - 2026-11-20: [Plan 254](254-live-test-2-fixes.md), the fixes from the
   owner's second live test on 0.34.0 (F1-F7): a departed guest leaves the
   stage at once, a portrait phone camera is drawn whole, the guest theme
