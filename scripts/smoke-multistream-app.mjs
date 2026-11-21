@@ -178,6 +178,7 @@ try {
   // the offline destination is reported failed while the healthy ones stay live.
   const targetSnapshots = []
   const diagnosticSamples = []
+  const streamHealthSamples = []
   const replayOutcomes = []
   ws.addEventListener('message', (event) => {
     let message
@@ -191,6 +192,9 @@ try {
     }
     if (message?.event === 'diagnostics.stats') {
       diagnosticSamples.push(message.payload)
+    }
+    if (message?.event === 'stream.health') {
+      streamHealthSamples.push(message.payload)
     }
     if (message?.event === 'replay.saved' || message?.event === 'replay.saveFailed') {
       replayOutcomes.push({ event: message.event, payload: message.payload })
@@ -226,7 +230,9 @@ try {
       const ring = await waitForReplayRing(
         ws,
         (state) =>
-          state?.state === 'on' && state?.replayOnly !== true && state?.sessionId === started.sessionId,
+          state?.state === 'on' &&
+          state?.replayOnly !== true &&
+          state?.sessionId === started.sessionId,
         'the ring riding the record + stream session'
       )
       console.log(`Replay ring riding session ${ring.sessionId} (${ring.seconds} s)`)
@@ -240,7 +246,8 @@ try {
       console.log(`Save replay mid-stream accepted (${accepted.saveId})`)
       const deadline = Date.now() + 45_000
       while (!replayOutcomes.some((outcome) => outcome.payload?.saveId === accepted.saveId)) {
-        if (Date.now() > deadline) throw new Error('No replay.saved or replay.saveFailed within 45 s.')
+        if (Date.now() > deadline)
+          throw new Error('No replay.saved or replay.saveFailed within 45 s.')
         await sleep(200)
       }
       replay = replayOutcomes.find((outcome) => outcome.payload?.saveId === accepted.saveId)
@@ -444,6 +451,20 @@ async function verifyResults(outputPath, targetSnapshots, diagnosticSamples) {
     failures.push('record+stream bridge reported duplicate capture diagnostics')
   } else {
     console.log('  ✓ Record+stream bridge reported no duplicate capture diagnostics')
+  }
+
+  // The stream's measured bitrate (plan 218 S2): the encoder bridge's own
+  // count on macOS/Windows, FFmpeg's encoded packet sizes on Linux, where a
+  // fifo RTMP leg's progress `bitrate=` reads N/A. A stream with none is
+  // a leg the app cannot say it is sending.
+  const measured = measuredStreamBitrate(diagnosticSamples, streamHealthSamples)
+  if (measured.ok) {
+    console.log(
+      `  ✓ Measured stream bitrate: diagnostics median ${measured.diagnosticsMedianKbps} kbps over ${measured.totalBytes} bytes, stream.health median ${measured.healthMedianKbps} kbps`
+    )
+  } else {
+    console.log(`  ✗ measured stream bitrate: ${measured.reason}`)
+    failures.push(`Measured stream bitrate missing: ${measured.reason}`)
   }
 
   // M5 failure-handling: the offline leg must be reported down while the healthy
@@ -656,4 +677,37 @@ function stopListener(proc) {
 
 function sleep(ms) {
   return new Promise((resolveSleep) => setTimeout(resolveSleep, ms))
+}
+
+/**
+ * The stream's measured bitrate across the session (pure): diagnostics must
+ * carry one over counted bytes, and `stream.health` must say it too.
+ */
+function measuredStreamBitrate(diagnosticSamples, streamHealthSamples) {
+  const median = (values) =>
+    values.length ? Math.round(values.sort((a, b) => a - b)[Math.floor(values.length / 2)]) : null
+  const measured = diagnosticSamples.filter(
+    (sample) => sample?.streamMeasuredBitrateKbps > 0 && sample?.streamOutputTotalBytes > 0
+  )
+  const health = streamHealthSamples
+    .map((sample) => sample?.bitrateKbps)
+    .filter((value) => Number.isFinite(value) && value > 0)
+  if (!measured.length) {
+    return {
+      ok: false,
+      reason: `no diagnostics sample of ${diagnosticSamples.length} measured the stream`
+    }
+  }
+  if (!health.length) {
+    return {
+      ok: false,
+      reason: `no stream.health of ${streamHealthSamples.length} carried a bitrate`
+    }
+  }
+  return {
+    ok: true,
+    diagnosticsMedianKbps: median(measured.map((sample) => sample.streamMeasuredBitrateKbps)),
+    totalBytes: Math.max(...measured.map((sample) => sample.streamOutputTotalBytes)),
+    healthMedianKbps: median(health)
+  }
 }

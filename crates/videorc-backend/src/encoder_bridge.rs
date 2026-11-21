@@ -10480,10 +10480,14 @@ async fn emit_encoder_bridge_diagnostics(
                 stream_video_toolbox_fifo_enqueue_p95_ms,
                 recording_video_toolbox_fifo_enqueue_max_ms,
                 stream_video_toolbox_fifo_enqueue_max_ms,
-                stream_measured_bitrate_kbps: feeds_stream
+                // Only an encoder that counted bytes measured anything: the
+                // raw-frame path (FFmpeg encodes) reports a 0 kbps window over
+                // none, which would overwrite FFmpeg's own packet count.
+                stream_measured_bitrate_kbps: (feeds_stream
+                    && runtime.video_toolbox_output_bytes > 0)
                     .then_some(runtime.encoded_output_window_kbps)
                     .flatten(),
-                stream_output_total_bytes: feeds_stream
+                stream_output_total_bytes: (feeds_stream && runtime.video_toolbox_output_bytes > 0)
                     .then_some(runtime.video_toolbox_output_bytes),
                 stream_video_toolbox_fifo_write_p95_ms: feeds_stream
                     .then_some(runtime.video_toolbox_fifo_write_p95_ms)
