@@ -297,14 +297,18 @@ function signal(id, fields) {
  * of the broadcaster OAuth (only the app's own output is checked then), or
  * not applicable (a local sink).
  */
-export function youtubeSideLine(manifest) {
+export function youtubeSideLine(manifest, readablePolls = 0) {
   const youtube = manifest?.session?.youtube
   if (!youtube) return 'not applicable (no YouTube destination)'
   if (/broadcaster role is not authorized/.test(youtube.unavailable ?? '')) {
     return "YouTube-side checks skipped: no broadcaster OAuth (pnpm live:hookup --role broadcaster); only the app's own output was checked"
   }
   if (youtube.unavailable) return `YouTube-side checks skipped: ${youtube.unavailable}`
-  return `checked (${youtube.polls ?? 0} observer polls)`
+  // Authorized is not checked: only a poll that read the stream counts.
+  if (!readablePolls) {
+    return `YouTube-side checks unavailable: no observer poll read the stream (${youtube.polls ?? 0} polls${youtube.stoppedBy ? `, stopped by ${youtube.stoppedBy}` : ''})`
+  }
+  return `checked (${readablePolls} readable observer polls)`
 }
 
 export async function computeVerdict(
@@ -499,7 +503,12 @@ export async function computeVerdict(
     // A leg with no bitrate is not measured, never 0 kbps: FFmpeg prints
     // `N/A` for a lone `fifo` RTMP leg, and a build or path that measures
     // nothing else leaves it null (ogre, 0.36, 2026-11-21).
-    const bitrates = live ? legs.map((leg) => leg.bitrateKbps).filter(Number.isFinite) : []
+    const bitrates = live
+      ? legs
+          .filter((leg) => leg.state === 'live')
+          .map((leg) => leg.bitrateKbps)
+          .filter(Number.isFinite)
+      : []
     return {
       atMs: line.tsMs,
       value: bitrates.length ? bitrates.reduce((sum, value) => sum + value, 0) : null,
@@ -621,7 +630,7 @@ export async function computeVerdict(
         signal('stream:bitrate', {
           status: 'skipped',
           summary:
-            'not measured: no live leg reported a bitrate (FFmpeg prints N/A for a lone fifo RTMP leg, and this build measured no stream encoder output)',
+            'not measured: no live leg reported a bitrate (FFmpeg prints N/A for a lone fifo RTMP leg, and the app filled in no measured figure)',
           threshold: Math.round(target * fraction),
           unit: 'kbps',
           evidence: ['journal.ndjson']
@@ -1082,7 +1091,7 @@ export async function computeVerdict(
     // Additions to the pinned contract (fields only, never renames):
     thresholdsVersion: thresholds.version ?? 1,
     // What was checked on YouTube's side, in one line for the report.
-    youtubeSide: youtubeSideLine(manifest),
+    youtubeSide: youtubeSideLine(manifest, readable.length),
     generatedAt: now().toISOString(),
     stopReason: manifest.stopReason ?? null,
     exitCode: manifest.exitCode ?? null,

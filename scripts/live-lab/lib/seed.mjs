@@ -468,7 +468,8 @@ export async function seedProfile({
       working: await readKey(WORKING_SCENE_KEY),
       onStreamId: (await readKey(SCENES_KEY))?.onStreamId,
       labSceneId: working.sceneId,
-      sceneSources: scene?.sources
+      // A failed scene.get is no confirmation: it retries to the deadline.
+      sceneSources: scene?.sources ?? null
     })
     if (!problems.length || now() >= deadline) break
     await sleep(SEED_SETTLE_POLL_MS)

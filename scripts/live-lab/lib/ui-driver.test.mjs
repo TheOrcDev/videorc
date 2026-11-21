@@ -129,7 +129,8 @@ test('Go Live outcomes: live, blocked, partial setup, failed, undecided', () => 
 function fakePage({
   destinations = [{ targetId: 'youtube', ready: true, canExclude: false }],
   excluded = [],
-  privacyStep = null
+  privacyStep = null,
+  onPrivacyClick = null
 } = {}) {
   const listeners = new Set()
   const dialog = {
@@ -199,11 +200,17 @@ function fakePage({
         if (result && privacyStep) dialog.privacyConfirm = privacyStep
         else if (result) dialog.pending = true
       } else if (name === 'confirmPrivacy') {
-        result = Boolean(dialog.privacyConfirm && !dialog.privacyConfirm.confirm.disabled)
-        if (result) {
+        // The sheet's copy may have moved on since the snapshot (a draft update).
+        if (onPrivacyClick) onPrivacyClick(dialog)
+        const title = dialog.privacyConfirm?.title ?? null
+        const clicked = Boolean(
+          dialog.privacyConfirm && !dialog.privacyConfirm.confirm.disabled && title === args
+        )
+        if (clicked) {
           dialog.privacyConfirm = null
           dialog.pending = true
         }
+        result = { clicked, title }
       } else if (name === 'dismissOtherDialogs') {
         result = 0
       }
@@ -369,6 +376,23 @@ test('Go live answers "Go live unlisted?" (#1316) and reports it', async () => {
   assert.deepEqual(await outcome, { outcome: 'live' })
 })
 
+test('a privacy step that changes before the click is refused, not confirmed', async () => {
+  const cdp = fakePage({
+    privacyStep: UNLISTED_STEP,
+    onPrivacyClick: (dialog) => {
+      dialog.privacyConfirm = { ...dialog.privacyConfirm, title: 'Go live private?' }
+    }
+  })
+  const { ui } = driver(cdp)
+  await ui.install()
+  cdp.dialog.open = true
+  await assert.rejects(
+    ui.confirmGoLive({ privacy: 'unlisted', deadlineMs: 1000 }),
+    /it changed to "Go live private\?" before the click/
+  )
+  assert.equal(cdp.dialog.pending, false)
+})
+
 test('a privacy step naming another privacy is refused, never clicked', async () => {
   const cdp = fakePage({ privacyStep: { ...UNLISTED_STEP, title: 'Go live private?' } })
   const { ui } = driver(cdp)
@@ -445,7 +469,16 @@ test('the open dialog reads its privacy step and the helper answers it', async (
   window.document
     .querySelectorAll('[data-testid="go-live-privacy-confirm"]')
     .forEach((button) => button.addEventListener('click', () => (clicked = button.textContent)))
-  assert.equal(api.confirmPrivacy(), true)
+  // Another title than the open sheet's is never clicked.
+  assert.deepEqual(api.confirmPrivacy('Go live private?'), {
+    clicked: false,
+    title: 'Go live unlisted?'
+  })
+  assert.equal(clicked, null)
+  assert.deepEqual(api.confirmPrivacy('Go live unlisted?'), {
+    clicked: true,
+    title: 'Go live unlisted?'
+  })
   assert.equal(clicked, 'Go live unlisted')
   await window.happyDOM.close()
 })

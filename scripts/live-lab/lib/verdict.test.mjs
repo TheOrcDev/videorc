@@ -400,6 +400,20 @@ test('a low bitrate with fps, speed and frames on target is content-limited, not
     assert.equal(unmeasured.status, 'skipped')
     assert.match(unmeasured.summary, /^not measured: no live leg reported a bitrate/)
     assert.equal(unmeasured.value ?? null, null)
+    // A reconnecting leg's stale figure is no measure of the live one.
+    const staleSibling = byId(
+      await verdictFor(
+        journalOf(steady).map((line) => ({
+          ...line,
+          legs: [
+            { ...line.legs[0], bitrateKbps: null },
+            { targetId: 'tw', state: 'reconnecting', bitrateKbps: 4000 }
+          ]
+        }))
+      ),
+      'stream:bitrate'
+    )
+    assert.equal(staleSibling.status, 'skipped')
   } finally {
     await rm(dir, { recursive: true, force: true })
   }
@@ -571,7 +585,12 @@ test("the report says what was checked on YouTube's side", () => {
     'YouTube-side checks skipped: quota spent'
   )
   assert.equal(
-    youtubeSideLine({ session: { youtube: { unavailable: null, polls: 3 } } }),
-    'checked (3 observer polls)'
+    youtubeSideLine({ session: { youtube: { unavailable: null, polls: 3 } } }, 3),
+    'checked (3 readable observer polls)'
+  )
+  // Authorized but nothing read the stream: not a check.
+  assert.equal(
+    youtubeSideLine({ session: { youtube: { unavailable: null, polls: 0, stoppedBy: 'error' } } }),
+    'YouTube-side checks unavailable: no observer poll read the stream (0 polls, stopped by error)'
   )
 })

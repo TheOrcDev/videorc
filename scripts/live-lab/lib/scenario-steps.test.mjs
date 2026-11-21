@@ -354,14 +354,19 @@ test('the U9 suites: metadata, quota estimates and step order', async () => {
 
 test("a leg's bitrate: its own, else the backend's for a lone leg, else not measured", () => {
   const output = { measuredBitrateKbps: 5900 }
-  assert.deepEqual(legBitrate({ bitrateKbps: 6010 }, { streamOutput: output }), {
+  assert.deepEqual(legBitrate({ state: 'live', bitrateKbps: 6010 }, { streamOutput: output }), {
     bitrateKbps: 6010,
     source: 'leg'
   })
-  assert.deepEqual(legBitrate({ bitrateKbps: null }, { streamOutput: output }), {
+  assert.deepEqual(legBitrate({ state: 'live', bitrateKbps: null }, { streamOutput: output }), {
     bitrateKbps: 5900,
     source: 'backend'
   })
+  // A reconnecting leg never borrows what the live one sent.
+  assert.deepEqual(
+    legBitrate({ state: 'reconnecting', bitrateKbps: null }, { streamOutput: output }),
+    { bitrateKbps: null, source: 'not-measured' }
+  )
   // Two legs share the session's encoder figure; it is no one leg's.
   assert.deepEqual(legBitrate({ bitrateKbps: null }, { streamOutput: output, liveLegCount: 2 }), {
     bitrateKbps: null,

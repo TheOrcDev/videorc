@@ -128,7 +128,12 @@ export function liveHoldStep({ id = 'hold-live', minutes = 10, title = 'Hold liv
  */
 export function legBitrate(leg, { streamOutput = null, liveLegCount = 1 } = {}) {
   if (Number.isFinite(leg?.bitrateKbps)) return { bitrateKbps: leg.bitrateKbps, source: 'leg' }
-  if (liveLegCount === 1 && Number.isFinite(streamOutput?.measuredBitrateKbps)) {
+  // Only a live leg sends what the encoder made; a reconnecting one never.
+  if (
+    leg?.state === 'live' &&
+    liveLegCount === 1 &&
+    Number.isFinite(streamOutput?.measuredBitrateKbps)
+  ) {
     return { bitrateKbps: streamOutput.measuredBitrateKbps, source: 'backend' }
   }
   return { bitrateKbps: null, source: 'not-measured' }
@@ -163,7 +168,13 @@ export function liveSampleStep({ id = 'live-sample', title = 'Live sample' } = {
         },
         { label: 'a journal sample with a live leg sending' }
       )
-      const streamOutput = ctx.observe?.latestStreamOutput?.() ?? null
+      // The figures of this journal line's session only: a new session's
+      // first sample can arrive before its own diagnostics.
+      const latestOutput = ctx.observe?.latestStreamOutput?.() ?? null
+      const streamOutput =
+        latestOutput && line.sessionId && latestOutput.sessionId === line.sessionId
+          ? latestOutput
+          : null
       const liveLegCount = liveLegs(line).length
       const legs = line.legs.map((leg) => {
         const bitrate = legBitrate(leg, { streamOutput, liveLegCount })

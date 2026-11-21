@@ -579,3 +579,32 @@ test('plan 179: Linux picks the portal screen and the lab remap source, nothing 
   }
   assert.equal(code(unavailable), 'lab-display-unavailable')
 })
+
+test('a backend scene the seed cannot read is no confirmation: a refusal at the deadline', async () => {
+  const studio = fakeStudio({
+    storage: {
+      'videorc.working-scene.v1': CAMERA_WORKING,
+      'videorc.scenes.v2': SCREEN_CAMERA_LIBRARY
+    },
+    settleAfterPolls: 0
+  })
+  const rpc = async (method, params) => {
+    if (method === 'scene.get') throw new Error('scene.get timed out')
+    return studio.rpc(method, params)
+  }
+  await assert.rejects(
+    seedProfile({
+      platform: 'darwin',
+      rpc,
+      evaluate: studio.evaluate,
+      reloadAndWait: studio.reloadAndWait,
+      scenario: LOCAL,
+      config: CONFIG,
+      sink: SINK,
+      titlePrefix: 'Automated test',
+      settleDeadlineMs: 2000,
+      ...fakeTime()
+    }),
+    (error) => error.code === 'seed-not-applied' && /the backend has no scene/.test(error.message)
+  )
+})

@@ -270,8 +270,15 @@ export function pageHelper(bindingName) {
       return click(row && q('[data-testid="go-live-include"]', row))
     },
     confirm: () => click(dialogEl() && q('[data-testid="go-live-confirm"]', dialogEl())),
-    confirmPrivacy: () =>
-      click(privacyEl() && q('[data-testid="go-live-privacy-confirm"]', privacyEl())),
+    // Checks and clicks in one call: the sheet's copy follows the draft, so
+    // it must still name the privacy the harness agreed to when it clicks.
+    confirmPrivacy(expectedTitle) {
+      const sheet = privacyEl()
+      const title = privacyConfirmState()?.title ?? null
+      if (!sheet || title?.toLowerCase() !== String(expectedTitle).trim().toLowerCase())
+        return { clicked: false, title }
+      return { clicked: click(q('[data-testid="go-live-privacy-confirm"]', sheet)), title }
+    },
     continuePartial: () => click(q('[data-testid="go-live-continue-partial"]')),
     skipCaptions: () => click(q('[data-testid="go-live-captions-skip"]')),
     cancel: () => click(q('[data-testid="go-live-cancel"]')),
@@ -523,8 +530,15 @@ export function createUiDriver({ cdp, bus, waitFor }) {
       if (!decision.answer) {
         throw new Error(`Refusing the Go Live privacy step: ${decision.reason}.`)
       }
-      if (!(await call('window.__videorcLab.confirmPrivacy()'))) {
-        throw new Error(`The "${step.confirm.label}" button is missing or disabled.`)
+      const answered = await call(
+        `window.__videorcLab.confirmPrivacy(${JSON.stringify(step.title)})`
+      )
+      if (!answered?.clicked) {
+        throw new Error(
+          answered?.title && answered.title !== step.title
+            ? `Refusing the Go Live privacy step: it changed to "${answered.title}" before the click.`
+            : `The "${step.confirm.label}" button is missing or disabled.`
+        )
       }
       await waitForDialog((dialog) => !dialog?.privacyConfirm, {
         deadlineMs,
