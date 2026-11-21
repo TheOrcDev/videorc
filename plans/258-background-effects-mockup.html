@@ -1,0 +1,571 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="ghostex-page" content="v2">
+<title>Background effects: where the control lives</title>
+<style>
+  /* ---------- Videorc desktop palette (apps/desktop/src/renderer/src/styles.css) ---------- */
+  .vr { --win: #070707; --pop: #1d1d1d; --fg: #f5f5f5; --muted: #a1a1a1; --subtle: #868686;
+        --line: rgba(255,255,255,.10); --hover: rgba(255,255,255,.08); --inset: rgba(245,245,245,.03);
+        --plate-top: rgba(255,255,255,.14); --plate-bot: rgba(255,255,255,.04); --plate-hi: rgba(255,255,255,.16); --plate-rim: rgba(255,255,255,.05);
+        --sel-rim: rgba(255,255,255,.55); --warn: oklch(0.81 0.15 75); --track: rgba(255,255,255,.06);
+        --bead: linear-gradient(#fff, #e6e6e6 55%, #b3b3b3);
+        --fill: linear-gradient(#f2f2f2, #cfcfcf 55%, #a8a8a8); --fill-ink: #0f0f0f;
+        --drop: 0 14px 44px rgba(0,0,0,.5), 0 1px 3px rgba(0,0,0,.3);
+        background: var(--win); color: var(--fg);
+        font: 14px/1.35 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", Arial, sans-serif;
+        border-radius: 12px; border: 1px solid rgba(255,255,255,.12);
+        box-shadow: 0 18px 50px rgba(0,0,0,.35); overflow: hidden; }
+  .vr.light { --win: #fafafa; --pop: #fdfdfd; --fg: #0f0f0f; --muted: #5b5b5b; --subtle: #6f6f6f;
+        --line: rgba(0,0,0,.12); --hover: rgba(0,0,0,.06); --inset: rgba(15,15,15,.03);
+        --plate-top: rgba(0,0,0,.09); --plate-bot: rgba(0,0,0,.03); --plate-hi: rgba(255,255,255,.9); --plate-rim: rgba(0,0,0,.07);
+        --sel-rim: rgba(0,0,0,.6); --warn: oklch(0.62 0.15 70); --track: rgba(0,0,0,.06);
+        --bead: linear-gradient(#fff, #f2f2f2 55%, #cccccc);
+        --fill: linear-gradient(#4a4a4a, #262626 55%, #0d0d0d); --fill-ink: #fafafa;
+        --drop: 0 12px 36px rgba(0,0,0,.14), 0 1px 3px rgba(0,0,0,.08);
+        border-color: rgba(0,0,0,.14); box-shadow: 0 18px 50px rgba(0,0,0,.12); }
+
+  .vr * { box-sizing: border-box; }
+  .vr .bar { height: 40px; display: flex; align-items: center; padding: 0 16px; font-weight: 600; border-bottom: 1px solid var(--line); }
+  .vr .sec { padding: 12px 0; border-bottom: 1px solid var(--line); }
+  .vr .sec:last-child { border-bottom: 0; }
+  .vr .row { display: flex; align-items: center; gap: 10px; min-height: 32px; padding: 2px 4px 2px 12px; }
+  .vr .row .lab { width: 88px; flex: none; color: var(--muted); }
+  .vr .row .val { flex: 1; min-width: 0; display: flex; justify-content: flex-end; align-items: center; gap: 6px; color: var(--fg); }
+  .vr .ico { width: 16px; height: 16px; flex: none; color: var(--muted); }
+  .vr .line { padding: 0 4px 8px 38px; }
+  .vr .note { font-size: 12px; color: var(--muted); padding: 0 12px 8px 38px; display: flex; gap: 6px; align-items: flex-start; }
+  .vr .note svg { flex: none; margin-top: 1px; }
+  .vr .chev { color: var(--subtle); }
+  .vr .cog { width: 24px; height: 24px; border-radius: 6px; display: grid; place-items: center; color: var(--muted); }
+
+  /* the transport buttons at the top of the inspector */
+  .vr .transport { display: flex; gap: 8px; padding: 12px 16px; border-bottom: 1px solid var(--line); }
+  .vr .rec, .vr .live { flex: 1; height: 28px; border-radius: 6px; display: flex; align-items: center; justify-content: center; gap: 6px; font-weight: 600; font-size: 13px; white-space: nowrap; }
+  .vr .rec { background: linear-gradient(#b8312b, #8f1f1b 55%, #6e1512); color: #fff; box-shadow: inset 0 1px 0 rgba(255,255,255,.25); }
+  .vr .rec i { width: 8px; height: 8px; border-radius: 50%; background: #ffd2cc; }
+  .vr .live { background: linear-gradient(#e8b38a, #c98a5c 55%, #a86a40); color: #2b1a10; box-shadow: inset 0 1px 0 rgba(255,255,255,.4); }
+
+  /* select-like trigger, 24px (xs) */
+  .vr .trig { width: 100%; height: 24px; border-radius: 6px; display: flex; align-items: center; gap: 8px; padding: 0 6px 0 3px;
+              background-image: linear-gradient(var(--plate-top), var(--plate-bot)); box-shadow: inset 0 1px 0 var(--plate-hi), inset 0 0 0 1px var(--plate-rim); font-size: 13px; }
+  .vr .trig .thumb { width: 30px; height: 18px; border-radius: 4px; overflow: hidden; flex: none; }
+  .vr .trig .k { color: var(--muted); }
+  .vr .trig .v { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .vr .trig.open { box-shadow: inset 0 1px 0 var(--plate-hi), inset 0 0 0 1px var(--sel-rim); }
+
+  /* popover, popup tier */
+  .vr .pop { margin: 4px 12px 12px 38px; width: 320px; background: var(--pop); border-radius: 10px; border: 1px solid var(--line); box-shadow: var(--drop); padding: 12px; }
+  .vr .pop h4 { margin: 0 0 8px; font-size: 13px; font-weight: 600; }
+  .vr .viewer { position: relative; border-radius: 8px; overflow: hidden; border: 1px solid var(--line); background: #070707; }
+  .vr .viewer svg { display: block; width: 100%; height: auto; }
+  .vr .viewer .tag { position: absolute; left: 6px; top: 6px; font-size: 11px; font-weight: 600; color: #f5f5f5; background: rgba(7,7,7,.72); padding: 2px 6px; border-radius: 999px; white-space: nowrap; }
+  .vr .slab { font-size: 11px; font-weight: 600; color: var(--subtle); margin: 10px 0 6px; }
+  .vr .tiles { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
+  .vr .tile { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+  .vr .tile .pic { aspect-ratio: 16/10; border-radius: 8px; overflow: hidden; border: 1px solid var(--line); background: var(--inset); position: relative; display: grid; place-items: center; color: var(--muted); }
+  .vr .tile .pic svg.cam { position: absolute; inset: 0; width: 100%; height: 100%; }
+  .vr .tile.sel .pic { box-shadow: 0 0 0 2px var(--sel-rim); border-color: transparent; }
+  .vr .tile span { font-size: 11px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-align: center; }
+  .vr .tile.sel span { color: var(--fg); font-weight: 600; }
+  .vr .play { position: absolute; right: 4px; bottom: 4px; width: 14px; height: 14px; border-radius: 50%; background: rgba(7,7,7,.7); display: grid; place-items: center; }
+  .vr .foot { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--line); display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); }
+  .vr .foot .grow { flex: 1; min-width: 0; }
+  .vr .btn { height: 24px; padding: 0 8px; border-radius: 6px; display: inline-flex; align-items: center; font-size: 12px; font-weight: 500; color: var(--fg); white-space: nowrap;
+             background-image: linear-gradient(var(--plate-top), var(--plate-bot)); box-shadow: inset 0 1px 0 var(--plate-hi), inset 0 0 0 1px var(--plate-rim); }
+  .vr .btn.ghost { background: none; box-shadow: none; color: var(--muted); }
+
+  /* the Scene page's camera inspector */
+  .vr .ps { padding: 16px; border-bottom: 1px solid var(--line); }
+  .vr .ps h3 { margin: 0; font-size: 13px; font-weight: 600; }
+  .vr .ps .desc { margin: 4px 0 12px; font-size: 12px; color: var(--muted); }
+  .vr .ps .tiles { grid-template-columns: repeat(4, 1fr); }
+  .vr .slider { margin-top: 14px; }
+  .vr .slider .top { display: flex; justify-content: space-between; font-size: 13px; }
+  .vr .slider .top b { font-weight: 500; font-variant-numeric: tabular-nums; color: var(--muted); }
+  .vr .slider .rail { position: relative; height: 4px; border-radius: 4px; background: var(--track); margin: 12px 0 6px; }
+  .vr .slider .rail .fillr { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 4px; background: var(--fill); }
+  .vr .slider .rail .knob { position: absolute; top: 50%; width: 16px; height: 16px; margin: -8px 0 0 -8px; border-radius: 50%; background: var(--bead); box-shadow: 0 1px 3px rgba(0,0,0,.35); }
+  .vr .slider .marks { display: flex; justify-content: space-between; font-size: 11px; color: var(--subtle); }
+  .vr .seg { display: flex; gap: 2px; padding: 2px; border-radius: 8px; background: var(--track); margin-top: 6px; }
+  .vr .seg span { flex: 1; text-align: center; height: 24px; line-height: 24px; border-radius: 6px; font-size: 13px; color: var(--muted); white-space: nowrap; }
+  .vr .seg span.on { color: var(--fg); background-image: linear-gradient(var(--plate-top), var(--plate-bot)); box-shadow: inset 0 1px 0 var(--plate-hi), inset 0 0 0 1px var(--plate-rim); }
+  .vr .fieldlab { font-size: 13px; margin-top: 14px; }
+  .vr .hint { font-size: 12px; color: var(--muted); margin-top: 12px; display: flex; gap: 6px; }
+  .vr .hint svg { flex: none; margin-top: 1px; }
+
+  /* ---------- Videorc web palette (videorc-web app/globals.css, shadcn radix-rhea) ---------- */
+  .gw { --bg: #1e1e22; --card: #26262b; --fg: #f5f5f7; --muted: #a8a8b3; --line: rgba(255,255,255,.08);
+        --sec: rgba(255,255,255,.08); --sec-h: rgba(255,255,255,.14); --primary: #f5f5f7; --primary-ink: #232327; --pop: #2b2b31;
+        --sel-rim: rgba(255,255,255,.7); --red: oklch(0.704 0.191 22.216);
+        background: var(--bg); color: var(--fg); border-radius: 14px; border: 1px solid rgba(255,255,255,.1);
+        font: 14px/1.4 Inter, -apple-system, "Segoe UI", Arial, sans-serif; box-shadow: 0 18px 50px rgba(0,0,0,.35); overflow: hidden; }
+  .gw.light { --bg: #ececef; --card: #f6f6f8; --fg: #2e2e33; --muted: #74747f; --line: rgba(0,0,0,.08);
+        --sec: rgba(0,0,0,.06); --sec-h: rgba(0,0,0,.1); --primary: #2e2e33; --primary-ink: #fafafa; --pop: #ffffff;
+        --sel-rim: rgba(0,0,0,.65); --red: oklch(0.577 0.245 27.325);
+        border-color: rgba(0,0,0,.1); box-shadow: 0 18px 50px rgba(0,0,0,.12); }
+  .gw * { box-sizing: border-box; }
+  .gw .card { margin: 20px; background: var(--card); border-radius: 12px; border: 1px solid var(--line); padding: 20px; }
+  .gw .brand { font-size: 12px; font-weight: 600; letter-spacing: .02em; color: var(--muted); }
+  .gw h5 { margin: 6px 0 2px; font-size: 20px; font-weight: 500; letter-spacing: -.01em; }
+  .gw .cdesc { font-size: 14px; color: var(--muted); margin: 0 0 16px; }
+  .gw .grid { display: grid; grid-template-columns: 1.5fr 1fr; gap: 20px; }
+  .gw .self { position: relative; border-radius: 10px; background: #111; }
+  .gw .self > svg.cam { border-radius: 10px; }
+  .gw .self svg.cam { display: block; width: 100%; height: auto; transform: scaleX(-1); }
+  .gw .rounds { position: absolute; left: 0; right: 0; bottom: 12px; display: flex; justify-content: center; gap: 8px; }
+  .gw .round { width: 48px; height: 48px; border-radius: 50%; display: grid; place-items: center; background: rgba(30,30,34,.72); color: #f5f5f7; border: 1px solid rgba(255,255,255,.08); }
+  .gw .round.on { background: #f5f5f7; color: #232327; }
+  .gw .meter { height: 6px; border-radius: 6px; background: var(--sec); margin-top: 10px; overflow: hidden; }
+  .gw .meter i { display: block; height: 100%; width: 38%; background: oklch(0.7 0.15 150); }
+  .gw label { display: block; font-size: 14px; font-weight: 500; margin-bottom: 6px; }
+  .gw .input { height: 36px; border-radius: 8px; border: 1px solid var(--line); background: var(--sec); padding: 0 10px; display: flex; align-items: center; }
+  .gw .fd { font-size: 13px; color: var(--muted); margin-top: 6px; }
+  .gw .ask { margin-top: 16px; height: 44px; border-radius: 10px; background: var(--primary); color: var(--primary-ink); display: grid; place-items: center; font-weight: 500; }
+  .gw .consent { font-size: 13px; color: var(--muted); margin-top: 14px; }
+  .gw .gpop { position: absolute; left: 50%; bottom: 72px; transform: translateX(-50%); width: 484px; background: var(--pop); color: var(--fg); border: 1px solid var(--line);
+              border-radius: 12px; padding: 12px; box-shadow: 0 16px 40px rgba(0,0,0,.35); }
+  .gw .gpop h6 { margin: 0 0 8px; font-size: 14px; font-weight: 600; }
+  .gw .gtiles { display: grid; grid-template-columns: repeat(8, 1fr); gap: 5px; }
+  .gw .gt { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+  .gw .gt .pic { aspect-ratio: 16/10; border-radius: 8px; overflow: hidden; border: 1px solid var(--line); position: relative; display: grid; place-items: center; color: var(--muted); background: var(--sec); }
+  .gw .gt .pic svg.cam { position: absolute; inset: 0; width: 100%; height: 100%; }
+  .gw .gt.sel .pic { box-shadow: 0 0 0 2px var(--sel-rim); border-color: transparent; }
+  .gw .gt span { font-size: 11px; color: var(--muted); text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .gw .gt.sel span { color: var(--fg); font-weight: 500; }
+  .gw .gfoot { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--line); font-size: 12px; color: var(--muted); display: flex; gap: 6px; }
+  .gw .gfoot svg { flex: none; margin-top: 1px; }
+  .gw .callbar { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 16px; padding: 12px 24px 16px; }
+  .gw .callbar .title { font-size: 14px; font-weight: 500; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .gw .callbar .title small { display: inline-block; margin-left: 8px; font-size: 12px; color: var(--muted); }
+  .gw .tools { display: flex; gap: 12px; align-items: center; }
+  .gw .tools .round { background: var(--sec); color: var(--fg); border-color: transparent; }
+  .gw .tools .round.on { background: var(--primary); color: var(--primary-ink); }
+  .gw .leave { width: 64px; height: 48px; border-radius: 999px; background: var(--red); color: #fff; display: grid; place-items: center; margin-left: 8px; }
+  .gw .tiles2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; padding: 20px 24px 0; }
+  .gw .tiles2 .t { position: relative; border-radius: 12px; overflow: hidden; background: #111; }
+  .gw .tiles2 svg.cam { display: block; width: 100%; height: auto; }
+  .gw .tiles2 .nm { position: absolute; left: 8px; bottom: 8px; font-size: 12px; font-weight: 500; color: #fff; background: rgba(0,0,0,.55); padding: 2px 8px; border-radius: 999px; white-space: nowrap; }
+
+  .vr h3, .vr h4, .vr p, .gw h5, .gw h6, .gw label, .gw p { color: var(--fg); }
+  .vr p.desc, .vr p.note, .gw p.cdesc, .gw p.fd, .gw p.consent { color: var(--muted); }
+  .pair { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 420px), 1fr)); gap: 20px; align-items: start; }
+  .pair > * { min-width: 0; }
+  .themecap { font-size: 12px; color: var(--gx-muted); margin: 0 0 6px; }
+  .w-studio { width: 400px; }
+  .w-scene { width: 400px; }
+  .w-guest { width: 900px; }
+  .w-call { width: 680px; }
+</style>
+</head>
+<body>
+<gx-page>
+  <header>
+    <span class="gx-eyebrow">Plan 258 · Background effects</span>
+    <h1>Background effects: where the control lives</h1>
+    <p class="gx-lede">Blur or replace what is behind you without a green screen. One Background control sits where Green screen sits today: a line on the Studio's Camera row, a section in the Scene page's camera inspector, and a round button on the guest page.</p>
+    <div class="gx-chips">
+      <span class="gx-chip"><b>1</b> Background choice</span>
+      <span class="gx-chip"><b>0</b> raw frames out</span>
+      <span class="gx-chip">Dark and light</span>
+    </div>
+  </header>
+
+  <!-- hidden shared drawing: the room, the person, the pictures -->
+  <svg width="0" height="0" style="position:absolute" aria-hidden="true">
+    <defs>
+      <filter id="b-slight" x="-5%" y="-5%" width="110%" height="110%"><feGaussianBlur stdDeviation="2.2"/></filter>
+      <filter id="b-strong" x="-5%" y="-5%" width="110%" height="110%"><feGaussianBlur stdDeviation="6"/></filter>
+      <linearGradient id="g-wall" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#6d6458"/><stop offset="1" stop-color="#3c3630"/></linearGradient>
+      <linearGradient id="g-dusk" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#2b3a67"/><stop offset=".55" stop-color="#8a5a8c"/><stop offset="1" stop-color="#e59a6b"/></linearGradient>
+      <linearGradient id="g-studio" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#1b2230"/><stop offset="1" stop-color="#3a4256"/></linearGradient>
+      <linearGradient id="g-loft" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#d9d2c6"/><stop offset="1" stop-color="#a99f90"/></linearGradient>
+      <linearGradient id="g-aurora" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#0f2a3a"/><stop offset=".5" stop-color="#1f7a6a"/><stop offset="1" stop-color="#5a3f8f"/></linearGradient>
+      <linearGradient id="g-rain" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#26303b"/><stop offset="1" stop-color="#4b5a68"/></linearGradient>
+      <pattern id="p-check" width="16" height="16" patternUnits="userSpaceOnUse"><rect width="16" height="16" fill="#9a9a9a"/><rect width="8" height="8" fill="#c8c8c8"/><rect x="8" y="8" width="8" height="8" fill="#c8c8c8"/></pattern>
+      <g id="room">
+        <rect width="160" height="90" fill="url(#g-wall)"/>
+        <rect x="8" y="10" width="44" height="62" fill="#4a3a2a"/>
+        <rect x="11" y="14" width="6" height="16" fill="#c0503c"/><rect x="18" y="16" width="5" height="14" fill="#3c7ab0"/><rect x="24" y="13" width="7" height="17" fill="#d9b24a"/><rect x="32" y="15" width="5" height="15" fill="#5aa06a"/><rect x="38" y="14" width="9" height="16" fill="#e8e0d0"/>
+        <rect x="11" y="36" width="8" height="15" fill="#7a5bb0"/><rect x="20" y="38" width="6" height="13" fill="#d06a3a"/><rect x="27" y="35" width="10" height="16" fill="#2e8a8a"/><rect x="38" y="37" width="8" height="14" fill="#b04a6a"/>
+        <rect x="110" y="8" width="40" height="30" fill="#bcd3e6"/><rect x="129" y="8" width="2" height="30" fill="#6d6458"/><rect x="110" y="22" width="40" height="2" fill="#6d6458"/>
+        <rect x="122" y="54" width="18" height="22" fill="#8a5a3a"/><circle cx="131" cy="48" r="11" fill="#3f8a4a"/><circle cx="124" cy="52" r="7" fill="#4f9a55"/>
+        <rect x="0" y="76" width="160" height="14" fill="#2c2621"/>
+      </g>
+      <g id="screen">
+        <rect width="160" height="90" fill="#15171c"/>
+        <rect x="0" y="0" width="160" height="8" fill="#22252c"/>
+        <rect x="0" y="8" width="26" height="82" fill="#1b1e24"/>
+        <rect x="32" y="16" width="60" height="3" fill="#c678dd"/><rect x="36" y="23" width="80" height="3" fill="#61afef"/><rect x="36" y="30" width="52" height="3" fill="#98c379"/><rect x="40" y="37" width="70" height="3" fill="#e5c07b"/><rect x="40" y="44" width="46" height="3" fill="#56b6c2"/><rect x="36" y="51" width="64" height="3" fill="#61afef"/><rect x="32" y="58" width="30" height="3" fill="#c678dd"/>
+      </g>
+      <g id="person">
+        <path d="M44 90 C46 72 60 64 80 64 C100 64 114 72 116 90 Z" fill="#2f3b52"/>
+        <rect x="73" y="54" width="14" height="13" rx="5" fill="#d9a07c"/>
+        <ellipse cx="80" cy="40" rx="15" ry="18" fill="#e2ab86"/>
+        <path d="M64 38 C63 22 74 17 82 18 C93 19 98 27 96 38 C93 30 86 27 78 28 C71 29 67 33 64 38 Z" fill="#3a2a20"/>
+      </g>
+      <g id="glyph-person"><circle cx="12" cy="8" r="4" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M4.5 20c.8-4 3.8-6 7.5-6s6.7 2 7.5 6" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></g>
+    </defs>
+  </svg>
+
+  <h2>1. Studio: the Camera row's Background line</h2>
+  <p>The line under the Camera picker that holds Green screen today (plan 248) becomes Background. One click opens the picker: a live "What viewers see" picture over the choices. A pick applies at once and the stage confirms it, so no toast.</p>
+  <gx-wide>
+    <div class="pair">
+      <figure class="gx-figure"><p class="themecap">Dark</p>
+        <div class="gx-frame">
+          <div class="vr w-studio" data-mock="studio-dark">
+            <div class="transport"><div class="rec"><i></i>Record</div><div class="live">Go Live</div></div>
+            <div class="sec">
+              <div class="row">
+                <svg class="ico" viewBox="0 0 24 24"><rect x="2.5" y="6" width="13" height="12" rx="2.5" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M15.5 10.5 21 7.5v9l-5.5-3" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></svg>
+                <span class="lab">Camera</span>
+                <span class="val">FaceTime HD Camera <svg class="chev" width="12" height="12" viewBox="0 0 12 12"><path d="M3 4.5 6 7.5 9 4.5" fill="none" stroke="currentColor" stroke-width="1.4"/></svg></span>
+                <span class="cog"><svg width="14" height="14" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3M5.3 5.3l2.1 2.1M16.6 16.6l2.1 2.1M5.3 18.7l2.1-2.1M16.6 7.4l2.1-2.1" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg></span>
+              </div>
+              <div class="line">
+                <div class="trig open">
+                  <span class="thumb"><svg viewBox="0 0 160 90" width="30" height="18"><g filter="url(#b-strong)"><use href="#room"/></g><use href="#person"/></svg></span>
+                  <span class="k">Background</span><span class="v">Strong blur</span>
+                  <svg class="chev" width="12" height="12" viewBox="0 0 12 12"><path d="M3 7.5 6 4.5 9 7.5" fill="none" stroke="currentColor" stroke-width="1.4"/></svg>
+                </div>
+              </div>
+              <div class="pop" role="dialog" aria-label="Background">
+                <h4>Background</h4>
+                <div class="viewer">
+                  <svg viewBox="0 0 160 90"><g filter="url(#b-strong)"><use href="#room"/></g><use href="#person"/></svg>
+                  <span class="tag">What viewers see</span>
+                </div>
+                <div class="slab">Blur</div>
+                <div class="tiles">
+                  <div class="tile"><div class="pic"><svg class="cam" viewBox="0 0 160 90" preserveAspectRatio="xMidYMid slice"><use href="#room"/><use href="#person"/></svg></div><span>Off</span></div>
+                  <div class="tile"><div class="pic"><svg class="cam" viewBox="0 0 160 90" preserveAspectRatio="xMidYMid slice"><g filter="url(#b-slight)"><use href="#room"/></g><use href="#person"/></svg></div><span>Slight blur</span></div>
+                  <div class="tile sel"><div class="pic"><svg class="cam" viewBox="0 0 160 90" preserveAspectRatio="xMidYMid slice"><g filter="url(#b-strong)"><use href="#room"/></g><use href="#person"/></svg></div><span>Strong blur</span></div>
+                  <div class="tile"><div class="pic"><svg class="cam" viewBox="0 0 160 90" preserveAspectRatio="xMidYMid slice"><use href="#screen"/><use href="#person"/></svg></div><span>Cut out</span></div>
+                </div>
+                <div class="slab">Images and videos</div>
+                <div class="tiles">
+                  <div class="tile"><div class="pic"><svg class="cam" viewBox="0 0 160 90" preserveAspectRatio="xMidYMid slice"><rect width="160" height="90" fill="url(#g-dusk)"/><use href="#person"/></svg></div><span>Dusk</span></div>
+                  <div class="tile"><div class="pic"><svg class="cam" viewBox="0 0 160 90" preserveAspectRatio="xMidYMid slice"><rect width="160" height="90" fill="url(#g-loft)"/><use href="#person"/></svg></div><span>Loft</span></div>
+                  <div class="tile"><div class="pic"><svg class="cam" viewBox="0 0 160 90" preserveAspectRatio="xMidYMid slice"><rect width="160" height="90" fill="url(#g-aurora)"/><use href="#person"/></svg><span class="play"><svg width="6" height="6" viewBox="0 0 6 6"><path d="M1 .5 5.5 3 1 5.5Z" fill="#f5f5f5"/></svg></span></div><span>Aurora</span></div>
+                  <div class="tile"><div class="pic"><svg width="16" height="16" viewBox="0 0 16 16"><path d="M8 3v10M3 8h10" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg></div><span>Choose…</span></div>
+                </div>
+                <div class="slab">Screen behind you</div>
+                <div class="tiles">
+                  <div class="tile"><div class="pic"><svg class="cam" viewBox="0 0 160 90" preserveAspectRatio="xMidYMid slice"><rect width="160" height="90" fill="#1fae4b"/><use href="#person"/></svg></div><span>Green screen</span></div>
+                  <div class="tile"><div class="pic"><svg class="cam" viewBox="0 0 160 90" preserveAspectRatio="xMidYMid slice"><rect width="160" height="90" fill="#2456d6"/><use href="#person"/></svg></div><span>Blue screen</span></div>
+                </div>
+                <div class="foot">
+                  <svg width="14" height="14" viewBox="0 0 24 24"><rect x="5" y="10.5" width="14" height="10" rx="2" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M8 10.5V8a4 4 0 0 1 8 0v2.5" fill="none" stroke="currentColor" stroke-width="1.8"/></svg>
+                  <span class="grow">Done on this Mac. Your room never reaches the stream.</span>
+                  <span class="btn ghost">Settings</span>
+                </div>
+              </div>
+            </div>
+            <div class="sec">
+              <div class="row"><svg class="ico" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2.5" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M7 12.5h3M7 15h6M13 12.5h4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg><span class="lab">Captions</span><span class="val" style="color:var(--muted)">Off <svg class="chev" width="12" height="12" viewBox="0 0 12 12"><path d="M4.5 3 7.5 6 4.5 9" fill="none" stroke="currentColor" stroke-width="1.4"/></svg></span></div>
+            </div>
+          </div>
+        </div>
+      </figure>
+      <figure class="gx-figure"><p class="themecap">Light</p>
+        <div class="gx-frame">
+          <div class="vr light w-studio" data-mock="studio-light">
+            <div class="transport"><div class="rec"><i></i>Record</div><div class="live">Go Live</div></div>
+            <div class="sec">
+              <div class="row">
+                <svg class="ico" viewBox="0 0 24 24"><rect x="2.5" y="6" width="13" height="12" rx="2.5" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M15.5 10.5 21 7.5v9l-5.5-3" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></svg>
+                <span class="lab">Camera</span>
+                <span class="val">FaceTime HD Camera <svg class="chev" width="12" height="12" viewBox="0 0 12 12"><path d="M3 4.5 6 7.5 9 4.5" fill="none" stroke="currentColor" stroke-width="1.4"/></svg></span>
+                <span class="cog"><svg width="14" height="14" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3M5.3 5.3l2.1 2.1M16.6 16.6l2.1 2.1M5.3 18.7l2.1-2.1M16.6 7.4l2.1-2.1" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg></span>
+              </div>
+              <div class="line">
+                <div class="trig open">
+                  <span class="thumb"><svg viewBox="0 0 160 90" width="30" height="18"><rect width="160" height="90" fill="url(#g-loft)"/><use href="#person"/></svg></span>
+                  <span class="k">Background</span><span class="v">Loft</span>
+                  <svg class="chev" width="12" height="12" viewBox="0 0 12 12"><path d="M3 7.5 6 4.5 9 7.5" fill="none" stroke="currentColor" stroke-width="1.4"/></svg>
+                </div>
+              </div>
+              <div class="pop" role="dialog" aria-label="Background">
+                <h4>Background</h4>
+                <div class="viewer">
+                  <svg viewBox="0 0 160 90"><rect width="160" height="90" fill="url(#g-loft)"/><use href="#person"/></svg>
+                  <span class="tag">What viewers see</span>
+                </div>
+                <div class="slab">Blur</div>
+                <div class="tiles">
+                  <div class="tile"><div class="pic"><svg class="cam" viewBox="0 0 160 90" preserveAspectRatio="xMidYMid slice"><use href="#room"/><use href="#person"/></svg></div><span>Off</span></div>
+                  <div class="tile"><div class="pic"><svg class="cam" viewBox="0 0 160 90" preserveAspectRatio="xMidYMid slice"><g filter="url(#b-slight)"><use href="#room"/></g><use href="#person"/></svg></div><span>Slight blur</span></div>
+                  <div class="tile"><div class="pic"><svg class="cam" viewBox="0 0 160 90" preserveAspectRatio="xMidYMid slice"><g filter="url(#b-strong)"><use href="#room"/></g><use href="#person"/></svg></div><span>Strong blur</span></div>
+                  <div class="tile"><div class="pic"><svg class="cam" viewBox="0 0 160 90" preserveAspectRatio="xMidYMid slice"><use href="#screen"/><use href="#person"/></svg></div><span>Cut out</span></div>
+                </div>
+                <div class="slab">Images and videos</div>
+                <div class="tiles">
+                  <div class="tile"><div class="pic"><svg class="cam" viewBox="0 0 160 90" preserveAspectRatio="xMidYMid slice"><rect width="160" height="90" fill="url(#g-dusk)"/><use href="#person"/></svg></div><span>Dusk</span></div>
+                  <div class="tile sel"><div class="pic"><svg class="cam" viewBox="0 0 160 90" preserveAspectRatio="xMidYMid slice"><rect width="160" height="90" fill="url(#g-loft)"/><use href="#person"/></svg></div><span>Loft</span></div>
+                  <div class="tile"><div class="pic"><svg class="cam" viewBox="0 0 160 90" preserveAspectRatio="xMidYMid slice"><rect width="160" height="90" fill="url(#g-aurora)"/><use href="#person"/></svg><span class="play"><svg width="6" height="6" viewBox="0 0 6 6"><path d="M1 .5 5.5 3 1 5.5Z" fill="#f5f5f5"/></svg></span></div><span>Aurora</span></div>
+                  <div class="tile"><div class="pic"><svg width="16" height="16" viewBox="0 0 16 16"><path d="M8 3v10M3 8h10" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg></div><span>Choose…</span></div>
+                </div>
+                <div class="slab">Screen behind you</div>
+                <div class="tiles">
+                  <div class="tile"><div class="pic"><svg class="cam" viewBox="0 0 160 90" preserveAspectRatio="xMidYMid slice"><rect width="160" height="90" fill="#1fae4b"/><use href="#person"/></svg></div><span>Green screen</span></div>
+                  <div class="tile"><div class="pic"><svg class="cam" viewBox="0 0 160 90" preserveAspectRatio="xMidYMid slice"><rect width="160" height="90" fill="#2456d6"/><use href="#person"/></svg></div><span>Blue screen</span></div>
+                </div>
+                <div class="foot">
+                  <svg width="14" height="14" viewBox="0 0 24 24"><rect x="5" y="10.5" width="14" height="10" rx="2" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M8 10.5V8a4 4 0 0 1 8 0v2.5" fill="none" stroke="currentColor" stroke-width="1.8"/></svg>
+                  <span class="grow">Done on this Mac. Your room never reaches the stream.</span>
+                  <span class="btn ghost">Settings</span>
+                </div>
+              </div>
+            </div>
+            <div class="sec">
+              <div class="row"><svg class="ico" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2.5" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M7 12.5h3M7 15h6M13 12.5h4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg><span class="lab">Captions</span><span class="val" style="color:var(--muted)">Off <svg class="chev" width="12" height="12" viewBox="0 0 12 12"><path d="M4.5 3 7.5 6 4.5 9" fill="none" stroke="currentColor" stroke-width="1.4"/></svg></span></div>
+            </div>
+          </div>
+        </div>
+      </figure>
+    </div>
+  </gx-wide>
+
+  <h2>2. Scene page: the camera's Background section (the home)</h2>
+  <p>The camera inspector's Green screen section becomes Background, in the same place, right under the camera's name. The tuning for the pick folds open under the tiles: Blur strength for a blur, Fit and Choose image… for a picture, and today's Similarity, Smoothness, Spill removal and Hide edges for a green or blue screen.</p>
+  <gx-wide>
+    <div class="pair">
+      <figure class="gx-figure"><p class="themecap">Dark</p>
+        <div class="gx-frame">
+          <div class="vr w-scene" data-mock="scene-dark">
+            <div class="ps">
+              <h3>Background</h3>
+              <p class="desc">Hides what's behind you in the recording, the livestream, Clips, Videorc Camera and the room. This camera keeps it in every scene.</p>
+              <div class="tiles">
+                <div class="tile"><div class="pic"><svg class="cam" viewBox="0 0 160 90" preserveAspectRatio="xMidYMid slice"><use href="#room"/><use href="#person"/></svg></div><span>Off</span></div>
+                <div class="tile"><div class="pic"><svg class="cam" viewBox="0 0 160 90" preserveAspectRatio="xMidYMid slice"><g filter="url(#b-slight)"><use href="#room"/></g><use href="#person"/></svg></div><span>Slight blur</span></div>
+                <div class="tile sel"><div class="pic"><svg class="cam" viewBox="0 0 160 90" preserveAspectRatio="xMidYMid slice"><g filter="url(#b-strong)"><use href="#room"/></g><use href="#person"/></svg></div><span>Strong blur</span></div>
+                <div class="tile"><div class="pic"><svg class="cam" viewBox="0 0 160 90" preserveAspectRatio="xMidYMid slice"><use href="#screen"/><use href="#person"/></svg></div><span>Cut out</span></div>
+                <div class="tile"><div class="pic"><svg class="cam" viewBox="0 0 160 90" preserveAspectRatio="xMidYMid slice"><rect width="160" height="90" fill="url(#g-dusk)"/><use href="#person"/></svg></div><span>Dusk</span></div>
+                <div class="tile"><div class="pic"><svg class="cam" viewBox="0 0 160 90" preserveAspectRatio="xMidYMid slice"><rect width="160" height="90" fill="url(#g-aurora)"/><use href="#person"/></svg><span class="play"><svg width="6" height="6" viewBox="0 0 6 6"><path d="M1 .5 5.5 3 1 5.5Z" fill="#f5f5f5"/></svg></span></div><span>Aurora</span></div>
+                <div class="tile"><div class="pic"><svg class="cam" viewBox="0 0 160 90" preserveAspectRatio="xMidYMid slice"><rect width="160" height="90" fill="#1fae4b"/><use href="#person"/></svg></div><span>Green screen</span></div>
+                <div class="tile"><div class="pic"><svg class="cam" viewBox="0 0 160 90" preserveAspectRatio="xMidYMid slice"><rect width="160" height="90" fill="#2456d6"/><use href="#person"/></svg></div><span>Blue screen</span></div>
+              </div>
+              <div class="slider">
+                <div class="top"><span>Blur strength</span><b>70%</b></div>
+                <div class="rail"><div class="fillr" style="width:70%"></div><div class="knob" style="left:70%"></div></div>
+                <div class="marks"><span>Slight</span><span>Strong</span></div>
+              </div>
+              <div class="fieldlab">Edges</div>
+              <div class="seg"><span>Soft</span><span class="on">Balanced</span><span>Sharp</span></div>
+              <div class="hint"><svg width="14" height="14" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M12 2.5v2.5M12 19v2.5M2.5 12H5M19 12h2.5M5.3 5.3l1.8 1.8M16.9 16.9l1.8 1.8M5.3 18.7l1.8-1.8M16.9 7.1l1.8-1.8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg><span>Works best with light on your face. Done on this Mac; nothing is uploaded.</span></div>
+            </div>
+            <div class="ps"><h3>Placement</h3><p class="desc" style="margin-bottom:0">Where the camera sits in this scene.</p></div>
+          </div>
+        </div>
+      </figure>
+      <figure class="gx-figure"><p class="themecap">Light</p>
+        <div class="gx-frame">
+          <div class="vr light w-scene" data-mock="scene-light">
+            <div class="ps">
+              <h3>Background</h3>
+              <p class="desc">Hides what's behind you in the recording, the livestream, Clips, Videorc Camera and the room. This camera keeps it in every scene.</p>
+              <div class="tiles">
+                <div class="tile"><div class="pic"><svg class="cam" viewBox="0 0 160 90" preserveAspectRatio="xMidYMid slice"><use href="#room"/><use href="#person"/></svg></div><span>Off</span></div>
+                <div class="tile"><div class="pic"><svg class="cam" viewBox="0 0 160 90" preserveAspectRatio="xMidYMid slice"><g filter="url(#b-slight)"><use href="#room"/></g><use href="#person"/></svg></div><span>Slight blur</span></div>
+                <div class="tile"><div class="pic"><svg class="cam" viewBox="0 0 160 90" preserveAspectRatio="xMidYMid slice"><g filter="url(#b-strong)"><use href="#room"/></g><use href="#person"/></svg></div><span>Strong blur</span></div>
+                <div class="tile sel"><div class="pic"><svg class="cam" viewBox="0 0 160 90" preserveAspectRatio="xMidYMid slice"><use href="#screen"/><use href="#person"/></svg></div><span>Cut out</span></div>
+                <div class="tile"><div class="pic"><svg class="cam" viewBox="0 0 160 90" preserveAspectRatio="xMidYMid slice"><rect width="160" height="90" fill="url(#g-dusk)"/><use href="#person"/></svg></div><span>Dusk</span></div>
+                <div class="tile"><div class="pic"><svg class="cam" viewBox="0 0 160 90" preserveAspectRatio="xMidYMid slice"><rect width="160" height="90" fill="url(#g-aurora)"/><use href="#person"/></svg><span class="play"><svg width="6" height="6" viewBox="0 0 6 6"><path d="M1 .5 5.5 3 1 5.5Z" fill="#f5f5f5"/></svg></span></div><span>Aurora</span></div>
+                <div class="tile"><div class="pic"><svg class="cam" viewBox="0 0 160 90" preserveAspectRatio="xMidYMid slice"><rect width="160" height="90" fill="#1fae4b"/><use href="#person"/></svg></div><span>Green screen</span></div>
+                <div class="tile"><div class="pic"><svg class="cam" viewBox="0 0 160 90" preserveAspectRatio="xMidYMid slice"><rect width="160" height="90" fill="#2456d6"/><use href="#person"/></svg></div><span>Blue screen</span></div>
+              </div>
+              <div class="fieldlab">Edges</div>
+              <div class="seg"><span>Soft</span><span class="on">Balanced</span><span>Sharp</span></div>
+              <div class="hint"><svg width="14" height="14" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2.5" fill="none" stroke="currentColor" stroke-width="1.6"/></svg><span>Your scene shows behind you, like a green screen without one.</span></div>
+            </div>
+            <div class="ps"><h3>Placement</h3><p class="desc" style="margin-bottom:0">Where the camera sits in this scene.</p></div>
+          </div>
+        </div>
+      </figure>
+    </div>
+  </gx-wide>
+
+  <h2>3. When it can't keep up, and when macOS already does it</h2>
+  <p>The two lines the Camera row adds under Background. Neither toasts. While the effect is behind, viewers see the whole camera blurred (or the picture alone), never the room.</p>
+  <gx-wide>
+    <div class="pair">
+      <figure class="gx-figure"><p class="themecap">Dark: the effect fell behind</p>
+        <div class="gx-frame">
+          <div class="vr w-studio" data-mock="state-paused">
+            <div class="sec">
+              <div class="row">
+                <svg class="ico" viewBox="0 0 24 24"><rect x="2.5" y="6" width="13" height="12" rx="2.5" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M15.5 10.5 21 7.5v9l-5.5-3" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></svg>
+                <span class="lab">Camera</span>
+                <span class="val">FaceTime HD Camera <svg class="chev" width="12" height="12" viewBox="0 0 12 12"><path d="M3 4.5 6 7.5 9 4.5" fill="none" stroke="currentColor" stroke-width="1.4"/></svg></span>
+              </div>
+              <div class="line">
+                <div class="trig">
+                  <span class="thumb"><svg viewBox="0 0 160 90" width="30" height="18"><g filter="url(#b-strong)"><use href="#room"/><use href="#person"/></g></svg></span>
+                  <span class="k">Background</span><span class="v">Strong blur</span>
+                  <svg class="chev" width="12" height="12" viewBox="0 0 12 12"><path d="M3 4.5 6 7.5 9 4.5" fill="none" stroke="currentColor" stroke-width="1.4"/></svg>
+                </div>
+              </div>
+              <p class="note"><svg width="14" height="14" viewBox="0 0 24 24"><path d="M12 3.5 22 20H2Z" fill="none" stroke="var(--warn)" stroke-width="1.8" stroke-linejoin="round"/><path d="M12 10v4.5M12 17v.5" stroke="var(--warn)" stroke-width="1.8" stroke-linecap="round"/></svg><span>Background is catching up. Viewers see your whole camera blurred until it's back.</span></p>
+            </div>
+          </div>
+        </div>
+      </figure>
+      <figure class="gx-figure"><p class="themecap">Light: macOS Video Effects is on</p>
+        <div class="gx-frame">
+          <div class="vr light w-studio" data-mock="state-macos">
+            <div class="sec">
+              <div class="row">
+                <svg class="ico" viewBox="0 0 24 24"><rect x="2.5" y="6" width="13" height="12" rx="2.5" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M15.5 10.5 21 7.5v9l-5.5-3" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></svg>
+                <span class="lab">Camera</span>
+                <span class="val">FaceTime HD Camera <svg class="chev" width="12" height="12" viewBox="0 0 12 12"><path d="M3 4.5 6 7.5 9 4.5" fill="none" stroke="currentColor" stroke-width="1.4"/></svg></span>
+              </div>
+              <div class="line">
+                <div class="trig">
+                  <span class="thumb"><svg viewBox="0 0 160 90" width="30" height="18"><use href="#room"/><use href="#person"/></svg></span>
+                  <span class="k">Background</span><span class="v">Off</span>
+                  <svg class="chev" width="12" height="12" viewBox="0 0 12 12"><path d="M3 4.5 6 7.5 9 4.5" fill="none" stroke="currentColor" stroke-width="1.4"/></svg>
+                </div>
+              </div>
+              <p class="note"><svg width="14" height="14" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M12 11v5M12 8v.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg><span>macOS is blurring this camera (Video menu, Portrait). Turn it off there to use Videorc's background.</span></p>
+            </div>
+          </div>
+        </div>
+      </figure>
+    </div>
+  </gx-wide>
+
+  <h2>4. Guest page: the green room</h2>
+  <p>A round Background button joins the camera's controls on the preview, between Camera and Devices. Its popover shows the same blur and picture choices; the preview is what the host and viewers will see. The effect runs in the guest's browser before anything is sent.</p>
+  <gx-wide>
+    <figure class="gx-figure"><p class="themecap">Dark</p>
+      <div class="gx-frame">
+        <div class="gw w-guest" data-mock="guest-dark">
+          <div class="card">
+            <div class="brand">Videorc</div>
+            <h5>Join “Friday talk show”</h5>
+            <p class="cdesc">Check your camera and mic, then ask the host to let you in.</p>
+            <div class="grid">
+              <div>
+                <div class="self">
+                  <svg class="cam" viewBox="0 0 160 90"><g filter="url(#b-slight)"><use href="#room"/></g><use href="#person"/></svg>
+                  <div class="gpop" role="dialog" aria-label="Background">
+                    <h6>Background</h6>
+                    <div class="gtiles">
+                      <div class="gt"><div class="pic"><svg class="cam" viewBox="0 0 160 90" preserveAspectRatio="xMidYMid slice"><use href="#room"/><use href="#person"/></svg></div><span>Off</span></div>
+                      <div class="gt sel"><div class="pic"><svg class="cam" viewBox="0 0 160 90" preserveAspectRatio="xMidYMid slice"><g filter="url(#b-slight)"><use href="#room"/></g><use href="#person"/></svg></div><span>Slight blur</span></div>
+                      <div class="gt"><div class="pic"><svg class="cam" viewBox="0 0 160 90" preserveAspectRatio="xMidYMid slice"><g filter="url(#b-strong)"><use href="#room"/></g><use href="#person"/></svg></div><span>Strong blur</span></div>
+                      <div class="gt"><div class="pic"><svg class="cam" viewBox="0 0 160 90" preserveAspectRatio="xMidYMid slice"><rect width="160" height="90" fill="url(#g-studio)"/><use href="#person"/></svg></div><span>Show set</span></div>
+                      <div class="gt"><div class="pic"><svg class="cam" viewBox="0 0 160 90" preserveAspectRatio="xMidYMid slice"><rect width="160" height="90" fill="url(#g-dusk)"/><use href="#person"/></svg></div><span>Dusk</span></div>
+                      <div class="gt"><div class="pic"><svg class="cam" viewBox="0 0 160 90" preserveAspectRatio="xMidYMid slice"><rect width="160" height="90" fill="url(#g-loft)"/><use href="#person"/></svg></div><span>Loft</span></div>
+                      <div class="gt"><div class="pic"><svg class="cam" viewBox="0 0 160 90" preserveAspectRatio="xMidYMid slice"><rect width="160" height="90" fill="url(#g-rain)"/><use href="#person"/></svg></div><span>Rain</span></div>
+                      <div class="gt"><div class="pic"><svg width="16" height="16" viewBox="0 0 16 16"><path d="M8 3v10M3 8h10" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg></div><span>Upload…</span></div>
+                    </div>
+                    <div class="gfoot"><svg width="14" height="14" viewBox="0 0 24 24"><rect x="5" y="10.5" width="14" height="10" rx="2" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M8 10.5V8a4 4 0 0 1 8 0v2.5" fill="none" stroke="currentColor" stroke-width="1.8"/></svg><span>Done in your browser. Your real background never leaves your computer.</span></div>
+                  </div>
+                  <div class="rounds">
+                    <span class="round"><svg width="20" height="20" viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="11" rx="3" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M6 11a6 6 0 0 0 12 0M12 17v4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg></span>
+                    <span class="round"><svg width="20" height="20" viewBox="0 0 24 24"><rect x="2.5" y="6" width="13" height="12" rx="2.5" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M15.5 10.5 21 7.5v9l-5.5-3" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg></span>
+                    <span class="round on" aria-label="Background"><svg width="20" height="20" viewBox="0 0 24 24"><use href="#glyph-person"/><path d="M2.5 4.5h3M2.5 4.5v3M21.5 4.5h-3M21.5 4.5v3M2.5 19.5v-3M21.5 19.5v-3" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg></span>
+                    <span class="round"><svg width="20" height="20" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3M5.3 5.3l2.1 2.1M16.6 16.6l2.1 2.1M5.3 18.7l2.1-2.1M16.6 7.4l2.1-2.1" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg></span>
+                  </div>
+                </div>
+                <div class="meter"><i></i></div>
+              </div>
+              <div>
+                <label>Your name</label>
+                <div class="input">Maya</div>
+                <p class="fd">Viewers see this name under your picture.</p>
+                <p class="consent">The host records this show. You can leave at any time.</p>
+                <div class="ask">Ask to join</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </figure>
+  </gx-wide>
+  <gx-wide>
+    <figure class="gx-figure"><p class="themecap">Light</p>
+      <div class="gx-frame">
+        <div class="gw light w-guest" data-mock="guest-light">
+          <div class="card">
+            <div class="brand">Videorc</div>
+            <h5>Join “Friday talk show”</h5>
+            <p class="cdesc">Check your camera and mic, then ask the host to let you in.</p>
+            <div class="grid">
+              <div>
+                <div class="self">
+                  <svg class="cam" viewBox="0 0 160 90"><rect width="160" height="90" fill="url(#g-studio)"/><use href="#person"/></svg>
+                  <div class="gpop" role="dialog" aria-label="Background">
+                    <h6>Background</h6>
+                    <div class="gtiles">
+                      <div class="gt"><div class="pic"><svg class="cam" viewBox="0 0 160 90" preserveAspectRatio="xMidYMid slice"><use href="#room"/><use href="#person"/></svg></div><span>Off</span></div>
+                      <div class="gt"><div class="pic"><svg class="cam" viewBox="0 0 160 90" preserveAspectRatio="xMidYMid slice"><g filter="url(#b-slight)"><use href="#room"/></g><use href="#person"/></svg></div><span>Slight blur</span></div>
+                      <div class="gt"><div class="pic"><svg class="cam" viewBox="0 0 160 90" preserveAspectRatio="xMidYMid slice"><g filter="url(#b-strong)"><use href="#room"/></g><use href="#person"/></svg></div><span>Strong blur</span></div>
+                      <div class="gt sel"><div class="pic"><svg class="cam" viewBox="0 0 160 90" preserveAspectRatio="xMidYMid slice"><rect width="160" height="90" fill="url(#g-studio)"/><use href="#person"/></svg></div><span>Show set</span></div>
+                      <div class="gt"><div class="pic"><svg class="cam" viewBox="0 0 160 90" preserveAspectRatio="xMidYMid slice"><rect width="160" height="90" fill="url(#g-dusk)"/><use href="#person"/></svg></div><span>Dusk</span></div>
+                      <div class="gt"><div class="pic"><svg class="cam" viewBox="0 0 160 90" preserveAspectRatio="xMidYMid slice"><rect width="160" height="90" fill="url(#g-loft)"/><use href="#person"/></svg></div><span>Loft</span></div>
+                      <div class="gt"><div class="pic"><svg class="cam" viewBox="0 0 160 90" preserveAspectRatio="xMidYMid slice"><rect width="160" height="90" fill="url(#g-rain)"/><use href="#person"/></svg></div><span>Rain</span></div>
+                      <div class="gt"><div class="pic"><svg width="16" height="16" viewBox="0 0 16 16"><path d="M8 3v10M3 8h10" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg></div><span>Upload…</span></div>
+                    </div>
+                    <div class="gfoot"><svg width="14" height="14" viewBox="0 0 24 24"><rect x="5" y="10.5" width="14" height="10" rx="2" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M8 10.5V8a4 4 0 0 1 8 0v2.5" fill="none" stroke="currentColor" stroke-width="1.8"/></svg><span>Done in your browser. Your real background never leaves your computer.</span></div>
+                  </div>
+                  <div class="rounds">
+                    <span class="round"><svg width="20" height="20" viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="11" rx="3" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M6 11a6 6 0 0 0 12 0M12 17v4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg></span>
+                    <span class="round"><svg width="20" height="20" viewBox="0 0 24 24"><rect x="2.5" y="6" width="13" height="12" rx="2.5" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M15.5 10.5 21 7.5v9l-5.5-3" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg></span>
+                    <span class="round on" aria-label="Background"><svg width="20" height="20" viewBox="0 0 24 24"><use href="#glyph-person"/><path d="M2.5 4.5h3M2.5 4.5v3M21.5 4.5h-3M21.5 4.5v3M2.5 19.5v-3M21.5 19.5v-3" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg></span>
+                    <span class="round"><svg width="20" height="20" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3M5.3 5.3l2.1 2.1M16.6 16.6l2.1 2.1M5.3 18.7l2.1-2.1M16.6 7.4l2.1-2.1" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg></span>
+                  </div>
+                </div>
+                <div class="meter"><i></i></div>
+              </div>
+              <div>
+                <label>Your name</label>
+                <div class="input">Maya</div>
+                <p class="fd">Viewers see this name under your picture.</p>
+                <p class="consent">The host records this show. You can leave at any time.</p>
+                <div class="ask">Ask to join</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </figure>
+  </gx-wide>
+
+  <h2>5. Guest page: in the call</h2>
+  <p>The same round button sits in the call's control bar after Camera, so a guest can change it mid-show. The guest's own tile shows the processed picture, the one that is sent.</p>
+  <gx-wide>
+    <div class="pair" style="--x:0">
+      <figure class="gx-figure"><p class="themecap">Dark</p>
+        <div class="gx-frame">
+          <div class="gw w-call" data-mock="call-dark">
+            <div class="tiles2">
+              <div class="t"><svg class="cam" viewBox="0 0 160 90"><rect width="160" height="90" fill="url(#g-studio)"/><use href="#person"/></svg><span class="nm">You</span></div>
+              <div class="t"><svg class="cam" viewBox="0 0 160 90"><g filter="url(#b-strong)"><use href="#room"/></g><use href="#person"/></svg><span class="nm">Host</span></div>
+            </div>
+            <div class="callbar">
+              <div class="title">Friday talk show<small>On stage</small></div>
+              <div class="tools">
+                <span class="round"><svg width="20" height="20" viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="11" rx="3" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M6 11a6 6 0 0 0 12 0M12 17v4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg></span>
+                <span class="round"><svg width="20" height="20" viewBox="0 0 24 24"><rect x="2.5" y="6" width="13" height="12" rx="2.5" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M15.5 10.5 21 7.5v9l-5.5-3" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg></span>
+                <span class="round on"><svg width="20" height="20" viewBox="0 0 24 24"><use href="#glyph-person"/><path d="M2.5 4.5h3M2.5 4.5v3M21.5 4.5h-3M21.5 4.5v3M2.5 19.5v-3M21.5 19.5v-3" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg></span>
+                <span class="round"><svg width="20" height="20" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3M5.3 5.3l2.1 2.1M16.6 16.6l2.1 2.1M5.3 18.7l2.1-2.1M16.6 7.4l2.1-2.1" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg></span>
+                <span class="leave"><svg width="20" height="20" viewBox="0 0 24 24"><path d="M3 14c5-5 13-5 18 0l-2.5 2.5-3-1.5v-2.5c-2.3-.8-4.7-.8-7 0V15l-3 1.5Z" fill="currentColor"/></svg></span>
+              </div>
+              <div></div>
+            </div>
+          </div>
+        </div>
+      </figure>
+    </div>
+  </gx-wide>
+
+  <div class="gx-callout">The pictures are schematic. Tile names stand for the bundled images and loops; "Show set" is the host's own scene background, offered to guests so a talk show looks like one set.</div>
+</gx-page>
+</body>
+</html>
