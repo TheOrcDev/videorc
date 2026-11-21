@@ -111,10 +111,12 @@ export type MicrophoneMeter = Readonly<{
 export function useMicrophoneMeter(): MicrophoneMeter {
   const { captureConfig, selectedMicrophone, isSessionActive, audioBusActive } = useStudioCore()
   const roomOpen = useStudioCloud().cloudStatus?.room?.phase === 'open'
+  // The view, not the levels: a level re-rendering this hook's host 20 times
+  // a second is what the meter's own frame source exists to avoid (PH-12).
   const roomMic = useSyncExternalStore(
     roomMicrophoneState.subscribe,
-    roomMicrophoneState.getSnapshot,
-    roomMicrophoneState.getSnapshot
+    roomMicrophoneState.getView,
+    roomMicrophoneState.getView
   )
   const { diagnosticStats } = useStudioDiagnostics()
   const muted = captureConfig.audio.microphoneMuted
@@ -144,10 +146,9 @@ export function useMicrophoneMeter(): MicrophoneMeter {
   const signalLive =
     !muted && (backendLevelsLive || (micVisual.active && !audioBusActive) || liveLevel !== null)
   if (roomOpen) {
-    const available =
-      roomMic.state === 'published' &&
-      roomMic.observedAt !== null &&
-      performance.now() - roomMic.observedAt < 500
+    // Levels stop with a null tick (unpublished, context not running) or
+    // the close, either of which changes the view.
+    const available = roomMic.state === 'published' && roomMic.levels
     return {
       meter: available
         ? { kind: 'source', source: roomMicrophoneMeter }
