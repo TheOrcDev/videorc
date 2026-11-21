@@ -58,17 +58,6 @@ export const LINUX_TIER1_DESKTOPS = Object.freeze([
 // D11: "physical acceptance on both Tier 1 boxes".
 export const MIN_LINUX_BETA_ACCEPTANCE_BOXES = 2
 
-// Committed history that predates this validator and cannot be rewritten
-// (records are immutable and promotion pinned them by commit). Each entry
-// says what is wrong; the loader checks only that it is still an honest
-// waiver for its release.
-export const LEGACY_MALFORMED_LINUX_ALPHA_RECORDS = Object.freeze({
-  '0.15.0-alpha.1':
-    'Committed in #894 with a corrupted candidateIdentity (the artifact is intact).',
-  '0.16.0-alpha.1':
-    'Committed in #921 with a truncated candidateIdentity and without artifact, decidedAt and basis.'
-})
-
 const ALPHA_RELEASE_ID = /^(\d+\.\d+\.\d+)-alpha\.(\d+)$/
 const BETA_RELEASE_ID = /^(\d+\.\d+\.\d+)-beta\.(\d+)$/
 const ALPHA_RECORD_FILENAME = /^(\d+\.\d+\.\d+-alpha\.\d+)\.json$/
@@ -136,6 +125,7 @@ export function assertLinuxAcceptanceRecord(record, expectations) {
         'A Linux Beta needs a physical acceptance PASS on two Tier 1 boxes; an owner waiver is refused (plan 257 D11).'
       )
     }
+    assertSelfConsistentCandidateIdentity(record)
     return assertLinuxAlphaOwnerWaiver(record, expectations)
   }
   if (track === 'alpha') {
@@ -144,7 +134,22 @@ export function assertLinuxAcceptanceRecord(record, expectations) {
       `A Linux Alpha record must be a ${LINUX_ALPHA_OWNER_WAIVER_KIND}; a physical PASS record is a Beta record.`
     )
   }
+  assertSelfConsistentCandidateIdentity(record)
   return assertLinuxBetaAcceptance(record, expectations)
+}
+
+// The record must agree with itself before it is compared with the candidate:
+// candidateIdentity is exactly linux:<releaseId>:<sourceCommit>:sha256:<artifact.sha256>.
+// 0.15.0-alpha.1 and 0.16.0-alpha.1 were once committed with a corrupted
+// identity (repaired in #1645); this check keeps that from coming back.
+function assertSelfConsistentCandidateIdentity(record) {
+  const expected = `linux:${record.releaseId}:${record.sourceCommit}:sha256:${record.artifact?.sha256}`
+  if (record.candidateIdentity !== expected) {
+    throw new LinuxAcceptanceRecordError(
+      'candidate-identity-mismatch',
+      'candidateIdentity must equal linux:<releaseId>:<sourceCommit>:sha256:<artifact.sha256>.'
+    )
+  }
 }
 
 function assertLinuxAlphaOwnerWaiver(record, expectations) {
@@ -352,11 +357,6 @@ export async function loadValidatedLinuxAlphaAcceptanceHistory(directory) {
   const releaseIds = await listRecordIds(directory, ALPHA_RECORD_FILENAME, 'Alpha')
   for (const releaseId of releaseIds) {
     const record = await readRecord(directory, releaseId, 'Alpha')
-    const legacyReason = LEGACY_MALFORMED_LINUX_ALPHA_RECORDS[releaseId]
-    if (legacyReason) {
-      assertLegacyAlphaWaiver(record, releaseId)
-      continue
-    }
     const core = ALPHA_RELEASE_ID.exec(releaseId)[1]
     if (record?.artifact?.filename !== linuxAlphaAppImageFilename(core)) {
       throw new LinuxAcceptanceRecordError(
@@ -393,24 +393,6 @@ export async function loadValidatedLinuxBetaAcceptanceHistory(directory) {
     validated.push(releaseId)
   }
   return validated
-}
-
-function assertLegacyAlphaWaiver(record, releaseId) {
-  // Not a full check: only that the record is still an honest Alpha waiver
-  // for this release and claims no physical acceptance.
-  if (
-    !isObject(record) ||
-    record.kind !== LINUX_ALPHA_OWNER_WAIVER_KIND ||
-    record.status !== 'OWNER_WAIVED' ||
-    record.releaseId !== releaseId ||
-    !/^[a-f0-9]{40}$/.test(record.sourceCommit ?? '') ||
-    record.physicalAcceptance?.performed !== false
-  ) {
-    throw new LinuxAcceptanceRecordError(
-      'legacy-record-changed',
-      `Legacy Linux Alpha record ${releaseId} is no longer an owner waiver for its release.`
-    )
-  }
 }
 
 async function listRecordIds(directory, pattern, trackName) {

@@ -91,11 +91,11 @@ Every Linux Alpha so far shipped on the release owner's waiver:
 - `candidateStoragePrefix` (`candidates/linux-alpha/<releaseId>/<sourceCommit>`)
   is optional, as older records carry it; `artifact.sizeBytes` is optional.
 - The AppImage filename must match the release's version.
-- Two records were committed malformed: `0.15.0-alpha.1` (#894, a
-  corrupted `candidateIdentity`) and `0.16.0-alpha.1` (#921, a truncated
-  `candidateIdentity`, no `artifact`, `decidedAt` or `basis`). Records are
-  immutable, so they are listed in `LEGACY_MALFORMED_LINUX_ALPHA_RECORDS`
-  and only checked for still being an honest waiver for their release. Do
-  not add to that list: a new malformed record fails `pnpm test:scripts`.
+- In both kinds, `candidateIdentity` must equal
+  `linux:<releaseId>:<sourceCommit>:sha256:<artifact.sha256>` from the
+  record's own fields (`candidate-identity-mismatch`), before it is compared
+  with the candidate. `0.15.0-alpha.1` and `0.16.0-alpha.1` were committed
+  with a corrupted identity and repaired in #1645; this check stops it
+  coming back.
 - There is no Alpha PASS contract: a physical acceptance PASS is a Beta
   record.

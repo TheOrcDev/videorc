@@ -8,7 +8,6 @@ import { fileURLToPath } from 'node:url'
 import {
   assertLinuxAcceptanceRecord,
   compareLinuxReleaseIds,
-  LEGACY_MALFORMED_LINUX_ALPHA_RECORDS,
   LINUX_ALPHA_OWNER_WAIVER_KIND,
   LINUX_BETA_ACCEPTANCE_KIND,
   LINUX_TIER1_DESKTOPS,
@@ -220,7 +219,13 @@ describe('Linux Beta acceptance record', () => {
     rejects(validBetaRecord({ sourceCommit: 'c'.repeat(40) }), betaExpectations)
     rejects(
       validBetaRecord({ artifact: { filename, sha256: 'd'.repeat(64), sizeBytes } }),
-      betaExpectations
+      betaExpectations,
+      'candidate-identity-mismatch'
+    )
+    rejects(
+      validAlphaWaiver({ sourceCommit: 'c'.repeat(40) }),
+      { ...alphaExpectations, sourceCommit: 'c'.repeat(40) },
+      'candidate-identity-mismatch'
     )
     rejects(
       validBetaRecord({ artifact: { filename, sha256: appImageSha256, sizeBytes: sizeBytes + 1 } }),
@@ -380,9 +385,7 @@ describe('committed Linux acceptance history', () => {
     const ids = await loadValidatedLinuxAlphaAcceptanceHistory(dir)
     assert.equal(ids.length, files.length)
     assert.equal(ids[0], '0.9.122-alpha.1')
-    for (const legacy of Object.keys(LEGACY_MALFORMED_LINUX_ALPHA_RECORDS)) {
-      assert.ok(ids.includes(legacy), `${legacy} is still committed`)
-    }
+    assert.ok(ids.includes('0.15.0-alpha.1') && ids.includes('0.16.0-alpha.1'))
   })
 
   it('validates every committed Linux Beta record as one chain', async () => {
@@ -454,18 +457,25 @@ describe('committed Linux acceptance history', () => {
     })
   })
 
-  it('still holds a legacy record to being an honest waiver', async () => {
-    const dir = await scratchDir({
-      '0.16.0-alpha.1.json': {
-        ...JSON.parse(
-          await readFile(join(acceptanceDir, 'linux-alpha', '0.16.0-alpha.1.json'), 'utf8')
-        ),
-        physicalAcceptance: { performed: true }
-      }
-    })
-    await assert.rejects(loadValidatedLinuxAlphaAcceptanceHistory(dir), {
-      code: 'legacy-record-changed'
-    })
+  it('refuses a committed record whose candidateIdentity disagrees with its own fields', async () => {
+    // The shapes 0.15.0-alpha.1 and 0.16.0-alpha.1 had before #1645.
+    const committed = JSON.parse(
+      await readFile(join(acceptanceDir, 'linux-alpha', '0.15.0-alpha.1.json'), 'utf8')
+    )
+    const corrupted = {
+      ...committed,
+      candidateIdentity: `linux:${committed.releaseId}:${committed.sourceCommit}a.1/${committed.sourceCommit}`
+    }
+    const truncated = {
+      ...committed,
+      candidateIdentity: `linux:${committed.releaseId}:${committed.sourceCommit}a-testers`
+    }
+    for (const record of [corrupted, truncated]) {
+      const dir = await scratchDir({ [`${committed.releaseId}.json`]: record })
+      await assert.rejects(loadValidatedLinuxAlphaAcceptanceHistory(dir), {
+        code: 'candidate-identity-mismatch'
+      })
+    }
   })
 })
 
