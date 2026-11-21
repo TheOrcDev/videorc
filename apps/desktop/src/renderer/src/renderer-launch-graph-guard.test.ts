@@ -1,5 +1,5 @@
 import { existsSync, readFileSync, statSync } from 'node:fs'
-import { dirname, join, relative, resolve } from 'node:path'
+import { dirname, join, relative, resolve, sep } from 'node:path'
 import ts from 'typescript'
 import { describe, expect, it } from 'vitest'
 
@@ -24,6 +24,11 @@ const RENDERER_SRC = __dirname
 const DESKTOP_SRC = resolve(RENDERER_SRC, '..', '..')
 const EXTENSIONS = ['.ts', '.tsx', '/index.ts', '/index.tsx']
 
+/** A file's path under `src/`, with `/` on every platform (Windows CI too). */
+function srcPath(file: string): string {
+  return relative(DESKTOP_SRC, file).split(sep).join('/')
+}
+
 const LIVEKIT = /^(livekit-client|@livekit\/)/
 /** Paths relative to `src/`. */
 const AGENT_CATALOG =
@@ -47,7 +52,7 @@ function resolveLocal(fromFile: string, specifier: string): string | null {
   for (const extension of EXTENSIONS) {
     if (existsSync(base + extension)) return base + extension
   }
-  throw new Error(`${relative(DESKTOP_SRC, fromFile)}: cannot resolve '${specifier}'`)
+  throw new Error(`${srcPath(fromFile)}: cannot resolve '${specifier}'`)
 }
 
 /** The specifiers of `file` that survive TypeScript's type-import elision. */
@@ -95,8 +100,8 @@ function forbiddenReach(entry: string, forbidden: RegExp): string[] {
   const walk = (file: string, trail: string[]): void => {
     if (seen.has(file)) return
     seen.add(file)
-    const here = [...trail, relative(DESKTOP_SRC, file)]
-    if (forbidden.test(relative(DESKTOP_SRC, file))) {
+    const here = [...trail, srcPath(file)]
+    if (forbidden.test(srcPath(file))) {
       found.push(here.join(' -> '))
       return
     }
