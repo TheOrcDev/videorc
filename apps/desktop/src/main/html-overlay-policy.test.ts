@@ -36,6 +36,7 @@ import {
   resolveHtmlOverlayFile,
   type HtmlOverlayFileSystem
 } from './html-overlay-policy'
+import { symlinkOrSkip } from './symlink.test-helper'
 
 const BADGE = '0f9d1c2e-5b7a-4c3d-9e8f-a1b2c3d4e5f6'
 const OTHER = '7a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d'
@@ -285,14 +286,27 @@ describe('the file a request names', () => {
     expect(resolve(join(banners, 'gone.overlay'), '/index.html')).toBeNull()
   })
 
-  it.skipIf(process.platform === 'win32')('refuses a link, even one inside the folder', () => {
+  it('refuses a link, even one inside the folder', (ctx) => {
     const { banners, root } = bannersFolder()
-    symlinkSync(join(banners, 'sponsor.png'), join(root, 'link.png'))
+    symlinkOrSkip(ctx, join(banners, 'sponsor.png'), join(root, 'link.png'))
     symlinkSync(join(root, 'index.html'), join(root, 'inner-link.html'))
     symlinkSync(banners, join(root, 'up'))
     expect(resolve(root, '/link.png')).toBeNull()
     expect(resolve(root, '/inner-link.html')).toBeNull()
     expect(resolve(root, '/up/sponsor.png')).toBeNull()
+  })
+
+  // Windows makes a directory junction without Developer Mode or elevation,
+  // so it is the link a page's folder can most easily carry there. The
+  // `junction` type is ignored elsewhere, where these are directory symlinks.
+  it('never follows a directory junction out of the folder', () => {
+    const { banners, root } = bannersFolder()
+    symlinkSync(banners, join(root, 'up'), 'junction')
+    symlinkSync(join(root, 'img'), join(root, 'pictures'), 'junction')
+    expect(resolve(root, '/up/sponsor.png')).toBeNull()
+    expect(resolve(root, `/up/${htmlOverlayFolderName(OTHER)}/index.html`)).toBeNull()
+    // One that stays inside resolves to the real file, still inside.
+    expect(resolve(root, '/pictures/logo.png')).toBe(join(realpathSync(root), 'img', 'logo.png'))
   })
 
   it('serves a file as what its extension says, and anything else as bytes', () => {
