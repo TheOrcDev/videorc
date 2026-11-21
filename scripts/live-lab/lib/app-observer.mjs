@@ -286,7 +286,16 @@ export function createAppObserver({
   let lastJournal = null
   let censusTimer = null
   let censusFailures = 0
-  const write = (name, text) => append(join(runDir, name), text).catch(() => {})
+  // One queue per file: appends land in call order, and stop() can wait for
+  // the last one before teardown collects the run folder.
+  const pendingWrites = new Map()
+  const write = (name, text) => {
+    const next = (pendingWrites.get(name) ?? Promise.resolve())
+      .then(() => append(join(runDir, name), text))
+      .catch(() => {})
+    pendingWrites.set(name, next)
+    return next
+  }
 
   function pushCard() {
     if (!card) return
@@ -348,10 +357,12 @@ export function createAppObserver({
         sampleCensus()
       }, censusIntervalMs)
     },
-    stop() {
+    /** Stops sampling; resolves once every queued evidence write has landed. */
+    async stop() {
       tail.stop()
       if (censusTimer !== null) clock.clearInterval(censusTimer)
       censusTimer = null
+      await Promise.all(pendingWrites.values())
     },
     /** Feed every renderer-socket message here. */
     onBackendMessage(message) {
