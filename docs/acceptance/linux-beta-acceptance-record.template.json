@@ -1,0 +1,75 @@
+{
+  "schemaVersion": 1,
+  "kind": "videorc-linux-beta-acceptance",
+  "status": "REPLACE_WITH_PASS_AFTER_BOTH_BOXES_PASS_EVERY_GATE",
+  "releaseId": "REPLACE_WITH_X.Y.Z-beta.N",
+  "sourceCommit": "REPLACE_WITH_40_CHARACTER_CANDIDATE_SOURCE_COMMIT",
+  "candidateIdentity": "linux:REPLACE_RELEASE_ID:REPLACE_SOURCE_COMMIT:sha256:REPLACE_APPIMAGE_SHA256",
+  "artifact": {
+    "filename": "REPLACE_WITH_Videorc-X.Y.Z-linux-x64.AppImage",
+    "sha256": "REPLACE_WITH_64_CHARACTER_LOWERCASE_SHA256",
+    "sizeBytes": "REPLACE_WITH_BYTE_SIZE_AS_A_NUMBER"
+  },
+  "releaseSequence": {
+    "kind": "REPLACE_WITH_first-public-beta_OR_successor",
+    "previousReleaseId": "REMOVE_FOR_FIRST_BETA_OR_REPLACE_WITH_PRIOR_ACCEPTED_BETA_RELEASE_ID"
+  },
+  "boxes": [
+    {
+      "desktop": "REPLACE_WITH_A_TIER_1_DESKTOP_ID",
+      "architecture": "x64",
+      "physicalHardware": true,
+      "testedAt": "REPLACE_WITH_CANONICAL_UTC_TIMESTAMP",
+      "requiredGates": {
+        "cleanInstall": { "status": "REPLACE_WITH_PASS" },
+        "protocolSignIn": { "status": "REPLACE_WITH_PASS" },
+        "portalScreenGrant": { "status": "REPLACE_WITH_PASS" },
+        "restoreToken": { "status": "REPLACE_WITH_PASS" },
+        "screenOnlyRecording": { "status": "REPLACE_WITH_PASS" },
+        "cameraOnlyRecording": { "status": "REPLACE_WITH_PASS" },
+        "screenCameraMicrophoneRecording": { "status": "REPLACE_WITH_PASS" },
+        "desktopAudioRecording": { "status": "REPLACE_WITH_PASS" },
+        "liveSourceChange": { "status": "REPLACE_WITH_PASS" },
+        "vaapiPath": { "status": "REPLACE_WITH_PASS" },
+        "softwareFallbackPath": { "status": "REPLACE_WITH_PASS" },
+        "globalShortcuts": { "status": "REPLACE_WITH_PASS" },
+        "liveCaptions": { "status": "REPLACE_WITH_PASS" },
+        "allFourPlatformsLive": { "status": "REPLACE_WITH_PASS" },
+        "talkShowScreenShare": { "status": "REPLACE_WITH_PASS" },
+        "virtualCamera": { "status": "REPLACE_WITH_PASS" },
+        "betaToBetaUpdate": { "status": "REPLACE_WITH_PASS" },
+        "ownedProcessCleanup": { "status": "REPLACE_WITH_PASS" },
+        "supportBundleRedaction": { "status": "REPLACE_WITH_PASS" },
+        "artifactSignature": { "status": "REPLACE_WITH_PASS" }
+      }
+    },
+    {
+      "desktop": "REPLACE_WITH_A_DIFFERENT_TIER_1_DESKTOP_ID",
+      "architecture": "x64",
+      "physicalHardware": true,
+      "testedAt": "REPLACE_WITH_CANONICAL_UTC_TIMESTAMP",
+      "requiredGates": {
+        "cleanInstall": { "status": "REPLACE_WITH_PASS" },
+        "protocolSignIn": { "status": "REPLACE_WITH_PASS" },
+        "portalScreenGrant": { "status": "REPLACE_WITH_PASS" },
+        "restoreToken": { "status": "REPLACE_WITH_PASS" },
+        "screenOnlyRecording": { "status": "REPLACE_WITH_PASS" },
+        "cameraOnlyRecording": { "status": "REPLACE_WITH_PASS" },
+        "screenCameraMicrophoneRecording": { "status": "REPLACE_WITH_PASS" },
+        "desktopAudioRecording": { "status": "REPLACE_WITH_PASS" },
+        "liveSourceChange": { "status": "REPLACE_WITH_PASS" },
+        "vaapiPath": { "status": "REPLACE_WITH_PASS" },
+        "softwareFallbackPath": { "status": "REPLACE_WITH_PASS" },
+        "globalShortcuts": { "status": "REPLACE_WITH_PASS" },
+        "liveCaptions": { "status": "REPLACE_WITH_PASS" },
+        "allFourPlatformsLive": { "status": "REPLACE_WITH_PASS" },
+        "talkShowScreenShare": { "status": "REPLACE_WITH_PASS" },
+        "virtualCamera": { "status": "REPLACE_WITH_PASS" },
+        "betaToBetaUpdate": { "status": "REPLACE_WITH_PASS" },
+        "ownedProcessCleanup": { "status": "REPLACE_WITH_PASS" },
+        "supportBundleRedaction": { "status": "REPLACE_WITH_PASS" },
+        "artifactSignature": { "status": "REPLACE_WITH_PASS" }
+      }
+    }
+  ]
+}
