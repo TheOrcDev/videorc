@@ -448,7 +448,7 @@ fn stepwise_sizes(
     (min_height, max_height, step_height): (u32, u32, u32),
 ) -> Vec<(u32, u32)> {
     let fits = |value: u32, min: u32, max: u32, step: u32| {
-        value >= min && value <= max && (step <= 1 || (value - min) % step == 0)
+        value >= min && value <= max && (step <= 1 || (value - min).is_multiple_of(step))
     };
     let mut sizes = vec![(max_width, max_height)];
     for (width, height) in [
@@ -472,7 +472,9 @@ fn stepwise_sizes(
 
 /// V4L2 enumeration (`VIDIOC_ENUM_FMT`, `VIDIOC_ENUM_FRAMESIZES`,
 /// `VIDIOC_ENUM_FRAMEINTERVALS`). Enumerating never starts streaming, so it
-/// is safe while another process captures from the node.
+/// is safe while another process captures from the node. Only Linux runs
+/// the probe; tests elsewhere check the ABI mirror.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 mod ioctl {
     #[cfg(target_os = "linux")]
     use std::path::Path;
