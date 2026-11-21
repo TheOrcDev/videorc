@@ -345,10 +345,24 @@ fn windows_scene_sources_live<'a>(
 #[cfg(any(target_os = "windows", test))]
 const WINDOWS_D3D11_RENDER_POOL_SLOTS: usize = 5;
 
-/// The per-format texture ceiling the device pool enforces; the primary and
+/// The NV12 texture ceiling the device pool enforces; the primary and
 /// auxiliary NV12 buckets share it.
 #[cfg(any(target_os = "windows", test))]
-const WINDOWS_D3D11_NV12_POOL_CEILING: usize = 8;
+const WINDOWS_D3D11_NV12_POOL_CEILING: usize = crate::windows_d3d11_device::D3D11_MAX_NV12_TEXTURES;
+
+/// How long a Quick Sync stall the Record leg's encoder queue rides out
+/// without refusing a frame (#1042). On the Intel UHD 620 the transform's
+/// hold per input is about 22 ms (p95), but while the iGPU clock moves it
+/// spikes to 70–220 ms mid-take. The transform keeps issuing input credits
+/// through those spikes (0 credit refusals in 29 takes on 0.35.0); Videorc's
+/// own cap of 4 inputs refused 4–80 frames per spike and failed one take in
+/// nine at 2.7% short.
+#[cfg(any(target_os = "windows", test))]
+const WINDOWS_D3D11_RECORD_HOLD_BUDGET_MS: u32 = 200;
+
+/// The Record leg never queues fewer inputs than #1362 shipped.
+#[cfg(any(target_os = "windows", test))]
+const WINDOWS_D3D11_RECORD_MIN_IN_FLIGHT: usize = 4;
 
 /// The auxiliary (Stream) leg's NV12 bucket.
 #[cfg(any(target_os = "windows", test))]
@@ -376,12 +390,17 @@ struct WindowsD3d11PrimaryEncoderPlan {
 /// its pipelined mode with more inputs in flight. A live (Stream) leg keeps
 /// low latency and the original depth.
 ///
-/// The NV12 bucket must hold the encoder's inputs plus the texture being
-/// composed and the newest published frame, hence `in_flight = slots - 2`.
+/// The Record queue is sized in time, not frames: enough inputs to cover
+/// `WINDOWS_D3D11_RECORD_HOLD_BUDGET_MS` at the leg's frame rate (12 at
+/// 60 fps, 6 at 30 fps), bounded by the NV12 ceiling left after an auxiliary
+/// leg's bucket. The NV12 bucket must hold the encoder's inputs plus the
+/// texture being composed and the newest published frame, hence
+/// `nv12_slots = in_flight + 2`.
 #[cfg(any(target_os = "windows", test))]
 fn windows_d3d11_primary_encoder_plan(
     record: bool,
     has_auxiliary: bool,
+    fps: u32,
 ) -> WindowsD3d11PrimaryEncoderPlan {
     if !record {
         return WindowsD3d11PrimaryEncoderPlan {
@@ -390,15 +409,24 @@ fn windows_d3d11_primary_encoder_plan(
             nv12_slots: WINDOWS_D3D11_RENDER_POOL_SLOTS,
         };
     }
-    let nv12_slots = if has_auxiliary {
+    let available_slots = if has_auxiliary {
         WINDOWS_D3D11_NV12_POOL_CEILING - WINDOWS_D3D11_AUXILIARY_NV12_SLOTS
     } else {
-        WINDOWS_D3D11_NV12_POOL_CEILING - 1
+        WINDOWS_D3D11_NV12_POOL_CEILING
     };
+    let budget_inputs = usize::try_from(
+        u64::from(fps)
+            .saturating_mul(u64::from(WINDOWS_D3D11_RECORD_HOLD_BUDGET_MS))
+            .div_ceil(1000),
+    )
+    .unwrap_or(usize::MAX);
+    let in_flight = budget_inputs
+        .max(WINDOWS_D3D11_RECORD_MIN_IN_FLIGHT)
+        .min(available_slots - 2);
     WindowsD3d11PrimaryEncoderPlan {
         low_latency: false,
-        in_flight: (nv12_slots - 2).min(4),
-        nv12_slots,
+        in_flight,
+        nv12_slots: in_flight + 2,
     }
 }
 
@@ -1778,6 +1806,7 @@ mod runtime {
             let encoder_plan = super::windows_d3d11_primary_encoder_plan(
                 plan.primary_role == WindowsD3d11MediaRole::Record,
                 plan.auxiliary.is_some(),
+                plan.primary.fps,
             );
             let pool = WindowsD3d11TexturePoolConfig::dimension_keyed(
                 WindowsD3d11BgraTextureDescriptor::new(plan.source_width, plan.source_height)
@@ -6014,7 +6043,7 @@ mod tests {
     fn windows_d3d11_record_encoder_pipelines_and_live_keeps_low_latency() {
         // #1042: a recording trades latency for headroom against Quick Sync's
         // hold time; a live leg keeps the shipped low-latency depth.
-        let live = windows_d3d11_primary_encoder_plan(false, false);
+        let live = windows_d3d11_primary_encoder_plan(false, false, 60);
         assert_eq!(
             live,
             WindowsD3d11PrimaryEncoderPlan {
@@ -6023,28 +6052,53 @@ mod tests {
                 nv12_slots: WINDOWS_D3D11_RENDER_POOL_SLOTS,
             }
         );
-        assert_eq!(windows_d3d11_primary_encoder_plan(false, true), live);
+        assert_eq!(windows_d3d11_primary_encoder_plan(false, true, 60), live);
+        assert_eq!(windows_d3d11_primary_encoder_plan(false, false, 30), live);
 
-        let record = windows_d3d11_primary_encoder_plan(true, false);
-        assert!(!record.low_latency);
-        assert_eq!(record.in_flight, 4);
-        assert_eq!(record.nv12_slots, 7);
+        // A recording's queue covers a 200 ms Quick Sync stall at its rate.
+        let record_60 = windows_d3d11_primary_encoder_plan(true, false, 60);
+        assert!(!record_60.low_latency);
+        assert_eq!(record_60.in_flight, 12);
+        assert_eq!(record_60.nv12_slots, 14);
+        let record_30 = windows_d3d11_primary_encoder_plan(true, false, 30);
+        assert_eq!(record_30.in_flight, 6);
+        assert_eq!(record_30.nv12_slots, 8);
+        // Never shallower than the depth #1362 shipped.
+        let record_10 = windows_d3d11_primary_encoder_plan(true, false, 10);
+        assert_eq!(record_10.in_flight, WINDOWS_D3D11_RECORD_MIN_IN_FLIGHT);
 
-        let record_and_stream = windows_d3d11_primary_encoder_plan(true, true);
-        assert!(!record_and_stream.low_latency);
-        assert_eq!(record_and_stream.nv12_slots, 5);
-        assert_eq!(record_and_stream.in_flight, 3);
+        // With a Stream leg the Record queue gives up the auxiliary bucket.
+        let record_and_stream_60 = windows_d3d11_primary_encoder_plan(true, true, 60);
+        assert!(!record_and_stream_60.low_latency);
+        assert_eq!(record_and_stream_60.in_flight, 11);
+        assert_eq!(record_and_stream_60.nv12_slots, 13);
+        let record_and_stream_30 = windows_d3d11_primary_encoder_plan(true, true, 30);
+        assert_eq!(record_and_stream_30.in_flight, 6);
+
+        // A rate past the ceiling is clamped, never overflowed.
+        let record_max = windows_d3d11_primary_encoder_plan(true, false, u32::MAX);
+        assert_eq!(record_max.nv12_slots, WINDOWS_D3D11_NV12_POOL_CEILING);
 
         // One texture being composed and the newest published frame stay
-        // outside the encoder, and both legs fit the per-format ceiling.
-        for plan in [live, record, record_and_stream] {
+        // outside the encoder, and both legs fit the NV12 ceiling.
+        for plan in [
+            live,
+            record_60,
+            record_30,
+            record_10,
+            record_and_stream_60,
+            record_and_stream_30,
+            record_max,
+        ] {
             assert!(plan.in_flight + 2 <= plan.nv12_slots);
             assert!(plan.nv12_slots <= WINDOWS_D3D11_NV12_POOL_CEILING);
         }
-        assert!(
-            record_and_stream.nv12_slots + WINDOWS_D3D11_AUXILIARY_NV12_SLOTS
-                <= WINDOWS_D3D11_NV12_POOL_CEILING
-        );
+        for plan in [record_and_stream_60, record_and_stream_30] {
+            assert!(
+                plan.nv12_slots + WINDOWS_D3D11_AUXILIARY_NV12_SLOTS
+                    <= WINDOWS_D3D11_NV12_POOL_CEILING
+            );
+        }
     }
 
     #[test]
