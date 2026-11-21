@@ -274,7 +274,8 @@ try {
     await verifyResults(
       stopped.outputPath ?? started.outputPath,
       targetSnapshots,
-      diagnosticSamples
+      diagnosticSamples,
+      streamHealthSamples
     )
   } finally {
     ws.close()
@@ -337,7 +338,7 @@ async function verifyReplay(saved) {
   )
 }
 
-async function verifyResults(outputPath, targetSnapshots, diagnosticSamples) {
+async function verifyResults(outputPath, targetSnapshots, diagnosticSamples, streamHealthSamples) {
   const failures = []
   for (const target of targets) {
     const size = existsSync(target.recvPath) ? statSync(target.recvPath).size : 0
