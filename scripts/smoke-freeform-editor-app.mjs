@@ -227,18 +227,18 @@ try {
     }
     await gesture({ orientation, kind: 'move', index: 1, delayMs: 250, noop: true })
     await gesture({ orientation, kind: 'move', index: 1, delayMs: 250, modifiers: 8 })
-    await cdp.eval(`document.querySelector('[aria-label="Snap"]').click()`)
+    await clickSnap()
     await gesture({ orientation, kind: 'move', index: 0, delayMs: 250, modifiers: 1 })
-    await cdp.eval(`document.querySelector('[aria-label="Snap"]').click()`)
+    await clickSnap()
     await gesture({ orientation, kind: 'move', index: 1, delayMs: 250, quickEdits: true })
     await cdp.eval(`document.querySelector('[aria-label="Lock aspect ratio"]')?.click()`)
     await frames(2)
     await gesture({ orientation, kind: 'resize', index: 1, delayMs: 250, aspectLocked: true })
     await cdp.eval(`document.querySelector('[aria-label="Unlock aspect ratio"]')?.click()`)
     await setRect({ width: 30, height: 30, x: 3, y: 30 })
-    await cdp.eval(`document.querySelector('[aria-label="Snap"]').click()`)
+    await clickSnap()
     await gesture({ orientation, kind: 'move', index: 1, delayMs: 250, snapCase: true })
-    await cdp.eval(`document.querySelector('[aria-label="Snap"]').click()`)
+    await clickSnap()
     await visualMatrix(orientation)
   }
   await freeformMaskAppliesFromNonInsetPresets()
@@ -1536,40 +1536,74 @@ async function visualMatrix(orientation) {
  * live canvas keeps it docked for this whole smoke), so a fixed settle delay
  * no longer covers a switch: a precise edit issued while the tab still
  * reports a pending switch is a silent no-op (`runPreciseEdit`). Wait for the
- * switch and the stage to go idle before the next step. */
+ * switch and the stage to go idle before the next step. A Freeform or camera
+ * aspect commit never shows "Switching" on a preset button, so the Studio's
+ * own pending switch is read too (0.36.1 pass: with the Clips ring running,
+ * each of those commits waits for its live proof, and the W edit that
+ * followed the aspect click was dropped inside that window). */
 async function settled() {
   await waitUntil(
-    `![...document.querySelectorAll('[data-videorc-layout-preset]')].some((button) => button.textContent.includes('Switching')) && document.querySelector('[data-videorc-stage-phase]')?.dataset.videorcStagePhase === 'idle'`
+    `![...document.querySelectorAll('[data-videorc-layout-preset]')].some((button) => button.textContent.includes('Switching')) && document.querySelector('[data-videorc-stage-phase]')?.dataset.videorcStagePhase === 'idle' && (() => { const state = window.__videorcSmokeScenePresets?.state?.(); return state != null && state.pendingId == null && state.pendingLayout == null })()`
   )
 }
+/** Types each field and waits for the committed value. The inspector drops a
+ * precise edit, never queues it, while a commit or a session start or stop is
+ * landing (`runPreciseEdit`, the session's placement lock), and the Clips ring
+ * starts and stops on its own around scene switches. So a field waits until it
+ * is editable, and an edit that was dropped is typed again, as a person would;
+ * the last try still has to land. */
 async function setRect(rect) {
   await settled()
+  const editable = (field) =>
+    `(() => {const input=document.querySelector('[data-videorc-transform-field="${field}"]');return Boolean(input)&&!input.disabled})()`
   for (const [field, value] of Object.entries(rect)) {
-    await cdp.eval(
-      `(() => {const input=document.querySelector('[data-videorc-transform-field="${field}"]');if(!input||input.disabled)throw Error('Missing editable ${field}');input.focus();input.select()})()`
-    )
-    await cdp.send('Input.insertText', { text: String(value) })
-    await cdp.send('Input.dispatchKeyEvent', {
-      type: 'rawKeyDown',
-      key: 'Enter',
-      code: 'Enter',
-      windowsVirtualKeyCode: 13
-    })
-    await cdp.send('Input.dispatchKeyEvent', {
-      type: 'keyUp',
-      key: 'Enter',
-      code: 'Enter',
-      windowsVirtualKeyCode: 13
-    })
-    await frames(3)
-    await waitUntil(
-      `document.querySelector('[data-videorc-transform-field="${field}"]')?.value === '${value}'`
-    )
+    const landed = `document.querySelector('[data-videorc-transform-field="${field}"]')?.value === '${value}'`
+    for (let attempt = 1; ; attempt++) {
+      await waitUntil(editable(field)).catch(() => {
+        throw new Error(`Missing editable ${field}`)
+      })
+      await cdp.eval(
+        `(() => {const input=document.querySelector('[data-videorc-transform-field="${field}"]');input.focus();input.select()})()`
+      )
+      await cdp.send('Input.insertText', { text: String(value) })
+      await cdp.send('Input.dispatchKeyEvent', {
+        type: 'rawKeyDown',
+        key: 'Enter',
+        code: 'Enter',
+        windowsVirtualKeyCode: 13
+      })
+      await cdp.send('Input.dispatchKeyEvent', {
+        type: 'keyUp',
+        key: 'Enter',
+        code: 'Enter',
+        windowsVirtualKeyCode: 13
+      })
+      await frames(3)
+      if (attempt === 3) {
+        await waitUntil(landed)
+        break
+      }
+      if (
+        await waitUntil(landed, 3000).then(
+          () => true,
+          () => false
+        )
+      )
+        break
+      console.log(`Freeform: ${field} ${value} was dropped (attempt ${attempt}); typing it again`)
+      await settled()
+    }
   }
   await cdp.eval(
     `document.activeElement?.blur(); document.querySelector('[data-videorc-stage-phase]').scrollIntoView({block:'center',behavior:'instant'})`
   )
   await frames(2)
+}
+/** The stage footer's Snap toggle; the footer may be re-rendering for a
+ * session the Clips ring starts or stops, so wait for the button. */
+async function clickSnap() {
+  await waitUntil(`document.querySelector('[aria-label="Snap"]') !== null`)
+  await cdp.eval(`document.querySelector('[aria-label="Snap"]').click()`)
 }
 async function clickText(text) {
   await settled()
@@ -1607,9 +1641,9 @@ async function waitForPointerDown(count) {
     `new Promise((resolve,reject)=>{const end=performance.now()+1000;const tick=()=>{if(window.__freeformSmoke.pointerDowns.filter(event=>event.trusted).length===${count})resolve();else if(performance.now()>end)reject(Error('Trusted pointerdown was not delivered'));else requestAnimationFrame(tick)};tick()})`
   )
 }
-async function waitUntil(expression) {
+async function waitUntil(expression, timeoutMs = 10000) {
   await cdp.eval(
-    `new Promise((resolve,reject)=>{const end=performance.now()+10000;const tick=()=>{if(${expression})resolve();else if(performance.now()>end)reject(Error('Timed out: '+${JSON.stringify(expression)}));else requestAnimationFrame(tick)};tick()})`
+    `new Promise((resolve,reject)=>{const end=performance.now()+${timeoutMs};const tick=()=>{if(${expression})resolve();else if(performance.now()>end)reject(Error('Timed out: '+${JSON.stringify(expression)}));else requestAnimationFrame(tick)};tick()})`
   )
 }
 
