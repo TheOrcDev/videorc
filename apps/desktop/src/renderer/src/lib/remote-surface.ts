@@ -199,12 +199,15 @@ interface RemoteSurfaceClient {
 // The intent executor lives in lib/studio-actions (plan 209 S5): one context
 // and one executor per action, shared by remote intents and agent tools.
 // These names stay here for the callers that read them from the surface.
-export {
-  REMOTE_INTENT_COPY,
-  executeRemoteIntent,
-  type StudioActionContext as RemoteIntentContext,
-  type StudioActionOutcome as RemoteIntentOutcome
-} from '@/lib/studio-actions'
+// From the modules themselves, not the barrel: the surface loads with every
+// Studio socket, and the barrel brings the agent tools and their catalog
+// (performance finding PH-09).
+export { REMOTE_INTENT_COPY } from '@/lib/studio-actions/copy'
+export { executeRemoteIntent } from '@/lib/studio-actions/remote'
+export type {
+  StudioActionContext as RemoteIntentContext,
+  StudioActionOutcome as RemoteIntentOutcome
+} from '@/lib/studio-actions/context'
 
 /** Coalesce same-commit bursts; deck latency is invisible below ~50ms. */
 const PUBLISH_DEBOUNCE_MS = 25

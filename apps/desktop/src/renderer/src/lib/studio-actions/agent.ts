@@ -5,12 +5,11 @@
 // subscription in hooks/use-studio.tsx does, with the catalog's notice.
 
 import { agentTool } from '../../../../shared/agent-tools'
+import { BUDDY_AGENT_ID } from './agent-ids'
 import type { StudioActionContext, StudioActionFields, StudioActionOutcome } from './context'
 import { STUDIO_AGENT_TOOLS } from './tools'
 
-/** Buddy's built-in caller (plan 209 S18): never a registry agent, whose ids
- * are uuids. */
-export const BUDDY_AGENT_ID = 'buddy'
+export { BUDDY_AGENT_ID }
 
 /** One tool call as the backend relays it. */
 export interface AgentIntent {

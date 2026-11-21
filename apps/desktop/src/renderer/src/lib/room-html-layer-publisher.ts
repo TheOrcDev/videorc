@@ -106,20 +106,6 @@ type Frame = {
   readAt: number
 }
 
-/** The backend's latest frame of one HTML banner, with the renderer's token. */
-export function htmlLayerFrameUrl(
-  connection: { host: string; port: number; token: string },
-  bannerId: string,
-  after: { generation: string; sequence: number } | null
-): string {
-  const params = new URLSearchParams({ token: connection.token, id: bannerId })
-  if (after) {
-    params.set('afterGeneration', after.generation)
-    params.set('afterSequence', String(after.sequence))
-  }
-  return `http://${connection.host}:${connection.port}/preview/html-overlay/latest.bmp?${params}`
-}
-
 /** A sheet's identity: its orientation and the exact layers it shows. */
 export function htmlSheetKey(
   orientation: HtmlLayerOrientation,
