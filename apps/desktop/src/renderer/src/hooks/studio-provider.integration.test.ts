@@ -4733,6 +4733,50 @@ describe('real StudioProvider lifecycle', () => {
     expect(latest()?.lastError).toBeNull()
   })
 
+  it('never toasts an idle scene reload a session superseded, and reloads once the slot frees', async () => {
+    // A 0.36.0 Windows tester: first-run setup's performance check took the
+    // session slot, the backend refused the idle reload ("superseded by
+    // session startup") and the Studio said "Videorc hit a problem".
+    const backend = new StudioBackend()
+    let superseded = 1
+    const respond = backend.response.bind(backend)
+    vi.spyOn(backend, 'response').mockImplementation((command) => {
+      if (command.method === 'scene.load_from_capture_config' && superseded > 0) {
+        superseded -= 1
+        throw Object.assign(
+          new Error('Idle capture-config scene reload was superseded by session startup'),
+          { code: 'scene-reload-superseded' }
+        )
+      }
+      return respond(command)
+    })
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const testDom = installProviderTestEnvironment(
+      createVideorcApi({
+        acknowledge: async () => true,
+        pending: async () => [],
+        acknowledgeProvider: async () => true,
+        pendingProvider: async () => []
+      })
+    )
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioCoreContextValue | undefined => observations.at(-1)?.core
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+
+    const reloads = (): number =>
+      backend.sentCommands.filter((command) => command.method === 'scene.load_from_capture_config')
+        .length
+    await waitForObservation(() => superseded === 0)
+    // The refused reload tries again by itself (1 s) and commits.
+    await waitForObservation(() => reloads() >= 2)
+    expectNoBusyOrGenericToast()
+    expect(latest()?.lastError).toBeNull()
+  })
+
   it('never toasts a busy takeover read on a focus refresh, and commits the rest (plan 195 S4)', async () => {
     const backend = new StudioBackend()
     TestWebSocket.backend = backend

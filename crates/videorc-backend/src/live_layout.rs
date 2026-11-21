@@ -254,6 +254,30 @@ impl LayoutSourceNotSelected {
     }
 }
 
+/// An idle scene reload that found a session already in the slot: a
+/// recording, a Clips ring, or a performance check's hidden session. Nothing
+/// failed; the session carries its own scene and the renderer reloads once the
+/// slot is free. Its own code keeps it out of "Videorc hit a problem" (a 0.36.0
+/// tester saw that toast as first-run setup's performance check started).
+#[derive(Debug, PartialEq, thiserror::Error)]
+#[error("Idle capture-config scene reload was superseded by session startup")]
+pub struct IdleSceneReloadSuperseded;
+
+pub const SCENE_RELOAD_SUPERSEDED_CODE: &str = "scene-reload-superseded";
+
+/// The response code for a failed idle scene reload: the superseded refusal
+/// has its own, anything else keeps the route's own code.
+pub fn idle_scene_reload_failure_code(
+    error: &anyhow::Error,
+    fallback: &'static str,
+) -> &'static str {
+    if error.downcast_ref::<IdleSceneReloadSuperseded>().is_some() {
+        SCENE_RELOAD_SUPERSEDED_CODE
+    } else {
+        fallback
+    }
+}
+
 /// The response code for a failed layout apply: a typed refusal names its
 /// source kind, anything else keeps the route's own code.
 pub fn layout_failure_code(error: &anyhow::Error, fallback: &'static str) -> &'static str {
@@ -2699,7 +2723,7 @@ async fn commit_scene_with_layout_at_time_with_policy(
     let _commit = state.scene_commit.lock().await;
 
     if idle_only && state.recording.lock().await.is_some() {
-        bail!("Idle capture-config scene reload was superseded by session startup");
+        return Err(IdleSceneReloadSuperseded.into());
     }
 
     {
@@ -4843,6 +4867,33 @@ mod tests {
         assert_eq!(
             next_scene_revision(Some(current_compositor_revision), renderer_local_revision),
             current_compositor_revision + 1
+        );
+    }
+
+    #[tokio::test]
+    async fn idle_reload_behind_a_session_is_superseded_with_its_own_code_and_leaves_the_scene() {
+        let state = test_state();
+        *state.recording.lock().await = Some(crate::recording::test_active_recording_stub("check"));
+        let scene_before = state.scene.lock().await.clone();
+        let scene = scene_from_capture_config(config(LayoutPreset::CameraOnly, true, false));
+
+        let error =
+            commit_idle_scene_with_layout(&state, &scene, layout(LayoutPreset::CameraOnly), None)
+                .await
+                .expect_err("an idle reload never commits over a session");
+
+        assert_eq!(
+            error.downcast_ref::<IdleSceneReloadSuperseded>(),
+            Some(&IdleSceneReloadSuperseded)
+        );
+        assert_eq!(
+            idle_scene_reload_failure_code(&error, "scene-commit-failed"),
+            SCENE_RELOAD_SUPERSEDED_CODE
+        );
+        assert_eq!(*state.scene.lock().await, scene_before);
+        assert_eq!(
+            idle_scene_reload_failure_code(&anyhow::anyhow!("other"), "scene-commit-failed"),
+            "scene-commit-failed"
         );
     }
 

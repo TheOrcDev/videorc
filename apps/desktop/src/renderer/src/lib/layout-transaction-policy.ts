@@ -2,6 +2,29 @@ import type { RecordingStatus } from '../../../shared/backend'
 
 export type LayoutTransactionProofDisposition = 'ignore-stale' | 'apply-proven' | 'apply-unproven'
 
+/**
+ * The backend's refusal of an idle scene reload that found a session already
+ * in the slot (`IdleSceneReloadSuperseded` in live_layout.rs): a recording,
+ * a Clips ring or a performance check's hidden session. Nothing failed, so it
+ * is never "Videorc hit a problem" (a 0.36.0 Windows tester saw that toast as
+ * first-run setup's check started); the reload tries again once the slot
+ * frees.
+ */
+export const SCENE_RELOAD_SUPERSEDED_CODE = 'scene-reload-superseded'
+
+export function isSceneReloadSuperseded(error: unknown): boolean {
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    (error as { code?: unknown }).code === SCENE_RELOAD_SUPERSEDED_CODE
+  )
+}
+
+/** The wait before a superseded reload tries again: 1 s, doubling, at most 15 s. */
+export function sceneReloadRetryDelayMs(attempt: number): number {
+  return Math.min(1_000 * 2 ** Math.max(0, attempt), 15_000)
+}
+
 export function shouldReloadSceneFromCaptureConfig(input: {
   connected: boolean
   sceneEditMode: boolean

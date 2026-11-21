@@ -14121,7 +14121,10 @@ async fn handle_text_message_with_role(
                         Ok(status) => ServerResponse::ok(command.id, status),
                         Err(error) => ServerResponse::error(
                             command.id,
-                            "scene-commit-failed",
+                            live_layout::idle_scene_reload_failure_code(
+                                &error,
+                                "scene-commit-failed",
+                            ),
                             error.to_string(),
                         ),
                     }

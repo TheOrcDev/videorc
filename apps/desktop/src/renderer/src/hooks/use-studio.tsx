@@ -457,6 +457,8 @@ import {
   layoutTransactionSourcesFromScene,
   layoutTransactionUnprovenSeverity,
   NativePreviewPresentationProofError,
+  isSceneReloadSuperseded,
+  sceneReloadRetryDelayMs,
   shouldReloadSceneFromCaptureConfig
 } from '@/lib/layout-transaction-policy'
 import {
@@ -4805,6 +4807,11 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
   const layoutIntentAwaitingProofRef = useRef<number | null>(null)
   const latestLayoutTransactionCommitRef = useRef<LayoutTransactionSnapshot | null>(null)
   const skipNextConfigSceneReloadRef = useRef(false)
+  // A reload the backend refused because a session held the slot tries again
+  // through this tick (backoff in `sceneReloadRetryDelayMs`).
+  const [sceneReloadRetryTick, setSceneReloadRetryTick] = useState(0)
+  const sceneReloadRetryTimerRef = useRef<number | null>(null)
+  const sceneReloadSupersededAttemptsRef = useRef(0)
   useEffect(() => {
     captureConfigRef.current = captureConfig
   }, [captureConfig])
@@ -10497,20 +10504,40 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
       ) {
         return
       }
-      void reloadSceneFromCaptureConfig().catch((error) => {
-        if (
-          shouldReloadSceneFromCaptureConfig({
-            connected: wsStatusRef.current === 'connected',
-            sceneEditMode,
-            recordingState: recordingRef.current.state,
-            startRequestPending,
-            stopRequestPending,
-            performanceCheckRunning: checkRunning()
-          })
-        ) {
-          reportError(error)
+      void reloadSceneFromCaptureConfig().then(
+        () => {
+          sceneReloadSupersededAttemptsRef.current = 0
+        },
+        (error: unknown) => {
+          // A session took the slot first (a check's hidden session can do so
+          // before the guards above see it). Nothing failed: never a toast,
+          // and the reload tries again so the scene still follows the config.
+          if (isSceneReloadSuperseded(error)) {
+            const attempt = sceneReloadSupersededAttemptsRef.current
+            sceneReloadSupersededAttemptsRef.current = attempt + 1
+            if (sceneReloadRetryTimerRef.current !== null) {
+              window.clearTimeout(sceneReloadRetryTimerRef.current)
+            }
+            sceneReloadRetryTimerRef.current = window.setTimeout(() => {
+              sceneReloadRetryTimerRef.current = null
+              setSceneReloadRetryTick((tick) => tick + 1)
+            }, sceneReloadRetryDelayMs(attempt))
+            return
+          }
+          if (
+            shouldReloadSceneFromCaptureConfig({
+              connected: wsStatusRef.current === 'connected',
+              sceneEditMode,
+              recordingState: recordingRef.current.state,
+              startRequestPending,
+              stopRequestPending,
+              performanceCheckRunning: checkRunning()
+            })
+          ) {
+            reportError(error)
+          }
         }
-      })
+      )
     }, 250)
 
     return () => window.clearTimeout(timer)
@@ -10521,10 +10548,20 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
     reloadSceneFromCaptureConfig,
     reportError,
     sceneEditMode,
+    sceneReloadRetryTick,
     startRequestPending,
     stopRequestPending,
     wsStatus
   ])
+  useEffect(
+    () => () => {
+      if (sceneReloadRetryTimerRef.current !== null) {
+        window.clearTimeout(sceneReloadRetryTimerRef.current)
+        sceneReloadRetryTimerRef.current = null
+      }
+    },
+    []
+  )
 
   const resetSceneSource = useCallback(
     async (sourceId = selectedSceneSourceId ?? undefined) => {
