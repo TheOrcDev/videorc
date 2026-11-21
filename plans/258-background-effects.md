@@ -13,9 +13,8 @@ also for our guests. It also needs to have good placement inside of our app
 ## Status and scope
 
 - **Status: PLANNED 2026-11-22.** Research and plan only; no product code
-  changed. Owner checks D3–D7 and D10–D11 are OWNER-OWED; the recommended
-  defaults below are what an agent takes if the owner says "start" without
-  picking (the plan 233 convention).
+  changed. Decisions D3–D11 DECIDED 2026-11-22: the owner said "start with
+  the defaults", so every recommended default below stands.
 - **Mockup:** [258-background-effects-mockup.html](258-background-effects-mockup.html)
   (the Studio control, the Scene page's home section, the two status lines,
   the guest green room and the call bar, in dark and light). Checked with
@@ -36,9 +35,8 @@ also for our guests. It also needs to have good placement inside of our app
   processed); the separate Rust UI app.
 - **Base:** `origin/main` at `a6ae381fa` (2026-11-22). Web: `TheOrcDev/videorc-web`
   `origin/main` at `39ccdc87`.
-- **Main is frozen for a release:** this plan is committed on the local
-  branch `plan/258-background-effects` in `~/projects/videorc-wt-258-plan`
-  and is not pushed.
+- **Branch:** `plan/258-background-effects`; the plan PR merges once 0.36.1
+  is cut (main was frozen for that release).
 
 ## Research: how others do it
 
@@ -213,7 +211,8 @@ also for our guests. It also needs to have good placement inside of our app
 
 ## Decisions
 
-Recommended defaults first; **owner checks** are marked.
+Recommended defaults first. The owner said "start with the defaults"
+(2026-11-22): D3–D11 are DECIDED as recommended.
 
 - **D1 Engines.** macOS: Apple Vision person segmentation, stateful,
   `OneComponent16Half` into Metal (no model to ship, free on the Neural
@@ -229,12 +228,12 @@ Recommended defaults first; **owner checks** are marked.
   Camera, the Preview, agent looks, debug samples) reads only processed
   frames. Raw frames never enter the store while an effect is on. Same rule
   as Hide screen; no compositor cover a leg can miss.
-- **D3 One setting per camera, kept in every scene (OWNER CHECK).** Like the
+- **D3 One setting per camera, kept in every scene (DECIDED 2026-11-22: recommended default).** Like the
   camera look (`cameraLooks`, keyed by camera id): your background follows
   you across scenes and both stream legs. Alternative: per scene, as the key
   is today (a scene could blur and another not). Recommended: per camera,
   because the effect is about the room behind you, not the scene.
-- **D4 Green screen joins the same choice (OWNER CHECK).** Background is one
+- **D4 Green screen joins the same choice (DECIDED 2026-11-22: recommended default).** Background is one
   pick: Off, Slight blur, Strong blur, an image, a video, Cut out, Green
   screen, Blue screen. Never two at once (`camera_background_treatment` picks
   exactly one). The key moves to the camera with D3; on first launch the
@@ -245,13 +244,13 @@ Recommended defaults first; **owner checks** are marked.
   keys override the camera's effect. Recommended: migrate, because a
   per-scene key beside a per-camera blur can show the room when switching to
   an old keyed scene without the screen up.
-- **D5 What the choices are (OWNER CHECK).** Off (default), Slight blur
+- **D5 What the choices are (DECIDED 2026-11-22: recommended default).** Off (default), Slight blur
   (30 %), Strong blur (70 %), Blur strength slider at the home, images
   (bundled set plus the Images library), videos (two bundled loops plus
   imported MP4/MOV, macOS first), Cut out (the scene shows behind you, the
   green screen without one), Green screen, Blue screen. Recommended: all,
   in that slice order; Cut out and video come after blur and images.
-- **D6 Fail closed (OWNER CHECK on what viewers see).** If the stage has no
+- **D6 Fail closed (DECIDED 2026-11-22: recommended default).** If the stage has no
   mask newer than 100 ms (3 frames at 30 fps), or has not produced its first
   mask since the effect, the camera or the session started, it outputs the
   **cover** instead of the camera: for blur, the whole frame at Strong blur
@@ -260,29 +259,29 @@ Recommended defaults first; **owner checks** are marked.
   drawn by the same Metal or D3D11 pass, never by the CPU on the render
   thread. After 2 s of cover the Studio line says so (mockup §3). Turning the
   effect Off is the only way raw frames return.
-- **D7 The Camera ISO file carries the effect (OWNER CHECK).** With an effect
+- **D7 The Camera ISO file carries the effect (DECIDED 2026-11-22: recommended default).** With an effect
   on, the Camera file is the processed camera (blur or picture behind you;
   Cut out over the neutral `--video-ground`). Alternative: keep a clean
   camera file for editing. Recommended: processed, because the file goes
   into editors and shares; a later opt-in "Also keep an unprocessed camera
   file" could follow, off by default.
-- **D8 Paths that can't keep the promise refuse.** With an effect on, a
+- **D8 Paths that can't keep the promise refuse (DECIDED 2026-11-22: recommended default).** With an effect on, a
   session that would take the legacy FFmpeg graph refuses with a named
   reason (as Hide screen does); the Electron fallback preview and the debug
   camera routes serve processed frames.
-- **D9 The host in a room runs the browser processor for now.** While a room
+- **D9 The host in a room runs the browser processor for now (DECIDED 2026-11-22: recommended default).** While a room
   is open the renderer owns the camera, so the host's background runs in the
   same processor as guests', composed with today's key in
   `TalkShowCameraEffects` (one or the other). The renderer CSP gains
   `'wasm-unsafe-eval'` and the WASM and model ship in the app (no CDN). When
   the native frame camera path (`#publishFrameCamera`) graduates, the room
   switches to the native stage and the local and room looks become one.
-- **D10 Guests choose their own (OWNER CHECK).** Off, Slight blur, Strong
+- **D10 Guests choose their own (DECIDED 2026-11-22: recommended default).** Off, Slight blur, Strong
   blur, the host's scene background ("Show set", so a talk show looks like
   one set), the bundled images and Upload… (kept in the browser, never
   uploaded). No video for guests in v1. The host can't force a guest's
   effect; a later plan may let the host suggest Show set.
-- **D11 Free, not Premium (OWNER CHECK).** Meet, Zoom, Teams and StreamYard
+- **D11 Free, not Premium (DECIDED 2026-11-22: recommended default).** Meet, Zoom, Teams and StreamYard
   give it away, and a guest feature can't be locked to the host's plan.
   Recommended: free on every platform.
 - **D12 System effects.** macOS: observe `isPortraitEffectActive` and

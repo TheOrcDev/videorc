@@ -3,7 +3,7 @@
 - 2026-11-22: [Plan 258](258-background-effects.md), the owner's ask:
   background blur and replacement without a green screen, like Google Meet,
   for recording, streaming, rooms and guests. PLANNED 2026-11-22, 13 slices
-  (S0-S12), owner checks D3-D7, D10, D11:
+  (S0-S12); D3-D11 DECIDED 2026-11-22 (the recommended defaults):
   - Research across Meet, Zoom, Teams, macOS and Windows effects, OBS,
     NVIDIA, StreamYard, Restream, Riverside, Camo and the libraries (Vision,
     MediaPipe, ONNX models, LiveKit's processors).
