@@ -283,8 +283,14 @@ function screen(now: () => number = () => 1000) {
     }
   }
 }
-const settle = async () => {
-  for (let i = 0; i < 20; i++) await new Promise<void>((resolve) => setImmediate(resolve))
+/** Until the receiver has asked the view to prepare `count` pictures. Its
+ * hash runs on WebCrypto first, so no fixed number of turns is enough on a
+ * slow machine (CI saw the next snapshot arrive before the hash was done). */
+const prepared = async (s: { calls: { prepare: string[] } }, count: number) => {
+  const deadline = Date.now() + 5000
+  while (s.calls.prepare.length < count && Date.now() < deadline)
+    await new Promise<void>((resolve) => setTimeout(resolve, 1))
+  expect(s.calls.prepare).toHaveLength(count)
 }
 
 describe('a caption update touches only what changed (PH-05, PH-06)', () => {
@@ -419,7 +425,7 @@ describe('a caption update touches only what changed (PH-05, PH-06)', () => {
     expect(await s.receiver.accept(view(1, [banner, caption(1)]))).toBe(true)
     const release = s.stall()
     const second = s.receiver.accept(view(2, [banner, caption(2)]))
-    await settle()
+    await prepared(s, 3)
     const third = s.receiver.accept(view(3, [banner, caption(3)]))
     release()
     expect(await second).toBe(false)
@@ -430,7 +436,7 @@ describe('a caption update touches only what changed (PH-05, PH-06)', () => {
     // A clear while one decodes: the same rule.
     const again = s.stall()
     const fourth = s.receiver.accept(view(4, [banner, caption(4)]))
-    await settle()
+    await prepared(s, 5)
     expect(await s.receiver.accept(view(5, []))).toBe(true)
     again()
     expect(await fourth).toBe(false)
@@ -447,7 +453,7 @@ describe('a caption update touches only what changed (PH-05, PH-06)', () => {
     expect(await s.receiver.accept(view(1, [banner, caption(1), card]))).toBe(true)
     const release = s.stall()
     const next = s.receiver.accept(view(2, [banner, caption(2), card]))
-    await settle()
+    await prepared(s, 4)
     s.drop('highlight')
     release()
     expect(await next).toBe(true)
