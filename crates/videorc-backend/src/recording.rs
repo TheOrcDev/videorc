@@ -56835,7 +56835,9 @@ mod low_end_windows_recording_tests {
 
         // A stream-only session has no file: it is never "intact" by itself,
         // but its reconnecting legs can still be let go.
-        let stream_only = issue_1623_ledger(&[ISSUE_1623_HEADERS[1]]);
+        // Its first leg is output 0.
+        let stream_only =
+            issue_1623_ledger(&["Output #0, fifo, to 'rtmp://127.0.0.1:11935/live/a':"]);
         assert!(!stream_only.non_leg_outputs_closed());
         assert!(only_reconnecting_legs_remain(
             &stream_only,
