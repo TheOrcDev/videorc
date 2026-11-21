@@ -84,8 +84,9 @@ passed, 0 cap or credit refusals, 1 frame short in one take.
 **What this shows and what it does not.** No take in the A/B or the B-only
 run had a full spike. The longest hold was 83 ms (H101), and even then at
 most 3 inputs were in flight, so neither plan was tested against the case it
-differs on. B showed no regression in 104 takes: hold p95, GPU compose and
-completion times, device lock waits and texture-pool pressure (0) match A.
+differs on. B passed all 64 of its step-17 takes (34 in the A/B, 30 in the
+B-only run) and showed no regression against A's 34: hold p95, GPU compose
+and completion times, device lock waits and texture-pool pressure (0) match.
 Whether Quick Sync keeps issuing input credits past 4 during a real spike is
 not shown. If it does not, the spike would show as credit refusals instead of
 cap refusals, and this change would not help.
