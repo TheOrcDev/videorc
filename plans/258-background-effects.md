@@ -228,6 +228,12 @@ Recommended defaults first. The owner said "start with the defaults"
   Camera, the Preview, agent looks, debug samples) reads only processed
   frames. Raw frames never enter the store while an effect is on. Same rule
   as Hide screen; no compositor cover a leg can miss.
+  - **Activation swaps the stored frame.** The store is depth-1, so turning
+    an effect on (or arming one at camera start) first replaces the frame
+    already in `FrameStore` with the cover, under the store's own lock and
+    before the call returns. A reader between activation and the first
+    processed capture gets the cover, never the raw frame captured before
+    it. The setting only takes effect once that swap is done.
 - **D3 One setting per camera, kept in every scene (DECIDED 2026-11-22: recommended default).** Like the
   camera look (`cameraLooks`, keyed by camera id): your background follows
   you across scenes and both stream legs. Alternative: per scene, as the key
@@ -359,7 +365,9 @@ machine.
 1. With an effect on, no raw camera frame enters `FrameStore` (stage unit
    test with a fake segmenter that stalls, errors and returns empty mattes).
 2. The first frame after enabling, a camera switch, a session start, a room
-   open and a relaunch is the cover or processed, never raw.
+   open and a relaunch is the cover or processed, never raw. That includes a
+   read between activation and the next capture, which gets the swapped
+   cover, not the frame stored before it.
 3. A stalled or failed segmenter yields the cover within 100 ms and never
    raw; Off is the only path back to raw.
 4. Legacy FFmpeg sessions refuse while an effect is on.
@@ -403,8 +411,8 @@ downscaled copy.
   "What viewers see" picture (the processed camera, so it reads true even
   with the Preview closed) over the tiles in three groups: Blur (Off, Slight,
   Strong, Cut out), Images and videos (recent ones and Choose…), Screen behind
-  you (Green screen, Blue screen); a lock line, "Done on this Mac. Your room
-  never reaches the stream.", and Settings (opens the home). A pick applies
+  you (Green screen, Blue screen); a lock line, "Done on this Mac, before
+  anything is recorded or sent.", and Settings (opens the home). A pick applies
   at once; the stage confirms it, so no toast (the 2026-07-16 call). The
   Retro LCD Studio gets the same control in its look (plan 197: a Studio
   change lands in both looks).
@@ -420,16 +428,23 @@ downscaled copy.
   blur", "replace background").
 - **The room's Show stage:** no new control. The host's own tile shows the
   processed camera, and the Studio's Background control still works (the
-  room re-reads it, as it does the key today).
+  room re-reads it, as it does the key today). Until S8 lands, the room
+  can't apply an effect: see S5.
 - **Guest page** (mockup §4, §5): a round Background button after Camera, in
   the green room's preview controls and in the call bar, with Phosphor's
   `UserFocus` glyph; pressed while an effect is on. Its popover: the choices
-  in one row of tiles and "Done in your browser. Your real background never
-  leaves your computer." The preview is the processed track. If the browser
+  in one row of tiles and "Done in your browser, before your video is sent."
+  The preview is the processed track. If the browser
   can't run it (no WebGL2), the button is disabled with the reason in its
   tooltip ("Background effects need a browser with graphics acceleration
   on."); if it fails mid-call, the camera turns off with "Your background
   effect stopped, so your camera was turned off. Turn it on to try again."
+- **No stronger promise than the processing.** The copy says where and when
+  the effect runs (on this computer, before anything is recorded or sent),
+  never that the room is invisible: a blur can still show large shapes and
+  colours, and Meet and Teams say the same. The home and the guest popover
+  say it once: "A blur can still show large shapes and colours behind you.
+  For full privacy, pick a picture."
 - **Both themes:** every control is a token or a shared primitive; the
   pictures inside tiles are on-stream pixels and don't follow the theme
   (like the Hide screen still).
@@ -439,11 +454,13 @@ downscaled copy.
 - Choices: Off, Slight blur, Strong blur, Cut out, Choose image…, Choose
   video…, Green screen, Blue screen. Section: Background. Slider: Blur
   strength. Field: Edges (Soft, Balanced, Sharp).
-- Home description: "Hides what's behind you in the recording, the
+- Home description: "Blurs or replaces what's behind you in the recording, the
   livestream, Clips, Videorc Camera and the room. This camera keeps it in
   every scene."
-- Hint: "Works best with light on your face. Done on this Mac; nothing is
-  uploaded." Cut out hint: "Your scene shows behind you, like a green screen
+- Hint: "Works best with light on your face. Done on this Mac, before
+  anything is recorded or sent."
+- Blur caveat (home and guest popover): "A blur can still show large shapes
+  and colours behind you. For full privacy, pick a picture." Cut out hint: "Your scene shows behind you, like a green screen
   without one."
 - Legacy refusal: "Background effects can't run with this recording
   setting. Turn off the background effect or choose 30 fps."
@@ -539,10 +556,14 @@ segmenter. The smoke grows the effect-on passes: Strong blur and an image,
 then a forced stall (`VIDEORC_DEBUG_SEGMENTATION_STALL=1`, dev only), a
 camera switch, Record pressed with the effect already on, and a relaunch;
 zero pattern frames in every artifact, cover within 100 ms of the stall.
-**Verify:** the S1 gates plus `pnpm smoke:camera-background`, `pnpm
-smoke:recording-studio`, `pnpm smoke:record-latency:gate`, `pnpm
-smoke:preview-check-invisible`, `pnpm smoke:virtual-camera` against a
-packaged build, and the S0 budget table re-measured in a release build.
+**Verify:** the S1 gates plus `pnpm smoke:camera-background` against the
+dev app or an unpackaged release build (it needs `VIDEORC_FIXTURE_CAMERA`,
+which packaged builds refuse), `pnpm smoke:recording-studio`, `pnpm
+smoke:record-latency:gate` and `pnpm smoke:preview-check-invisible`. Against
+the packaged, signed app, separately: `pnpm smoke:virtual-camera` with a real
+camera and an effect on, and a by-eye check that no frame of the room shows
+in Videorc Camera at enable and camera switch. The S0 budget table is
+re-measured in a release build.
 Add the AGENTS.md rule paragraph for the new smoke (beside Hide screen).
 **Done when:** every output passes the leak smoke with blur and image, the
 stall shows the cover, and the budgets hold in a release build.
@@ -569,11 +590,17 @@ viewers see" picture (a small processed-camera feed from the store, never a
 raw one); status lines; ⌘K entries and keywords; Retro LCD control; Images
 library tiles reuse the background assets. Update the design skill's "Where
 things live" with the Background home and mirror.
+**Rooms before S8:** if S8 has not landed, the room can't apply an effect,
+so it fails closed: while a room is open the effect tiles are disabled with
+"Background effects come to rooms in a later update." (Off, Green screen and
+Blue screen stay), and a room opened with an effect already on publishes no
+camera, with that line on the Show stage. S8 removes both.
 **Verify:** desktop unit tests, `pnpm typecheck`, `pnpm lint`, `pnpm
 format:check`, `pnpm probe:ui-glass --gate --surfaces`, by-eye screenshots in
 both themes and both looks, `pnpm smoke:camera-background`.
 **Done when:** a streamer can pick every S3 choice from the Studio in two
-clicks and tune it at the home, in light and dark, Retro LCD on and off.
+clicks and tune it at the home, in light and dark, Retro LCD on and off; and
+before S8 a room never publishes a camera the effect was meant to cover.
 
 ### S6: Video backgrounds and Edges
 
