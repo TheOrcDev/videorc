@@ -1926,6 +1926,18 @@ function Probe({ observe }: { observe: (value: StudioObservation) => void }): nu
   return null
 }
 
+/** Runs only 0 ms timers (setTimeout is faked) while real time passes for
+ * module loads and socket replies, until `done` or `withinMs` runs out. */
+async function turnZeroTimersUntil(done: () => boolean, withinMs = 3_000): Promise<void> {
+  const deadline = performance.now() + withinMs
+  while (!done() && performance.now() < deadline) {
+    await act(async () => {
+      await new Promise<void>((resolve) => setImmediate(resolve))
+      await vi.advanceTimersByTimeAsync(0)
+    })
+  }
+}
+
 async function mountStudioProvider(
   container: Element,
   observe: (value: StudioObservation) => void,
@@ -19765,17 +19777,76 @@ describe('real StudioProvider lifecycle', () => {
       backend.sentCommands.filter((command) =>
         /^preview\.(camera|screen)\.(start|stop)$/.test(command.method)
       ).length
-    root = await mountStudioProvider(testDom.container, () => {})
-
-    const deadline = performance.now() + 3_000
-    while (previewSourceCommands() === 0 && performance.now() < deadline) {
-      await act(async () => {
-        await new Promise<void>((resolve) => setImmediate(resolve))
-        await vi.advanceTimersByTimeAsync(0)
-      })
+    // The shell's report once it decided setup stays closed.
+    function DecidedShell(): null {
+      const { setFirstRunSetupOpen } = useStudioShell()
+      useEffect(() => setFirstRunSetupOpen(false), [setFirstRunSetupOpen])
+      return null
     }
+    root = await mountStudioProvider(testDom.container, () => {}, createElement(DecidedShell))
+
+    await turnZeroTimersUntil(() => previewSourceCommands() > 0)
 
     expect(previewSourceCommands()).toBeGreaterThan(0)
+  })
+
+  // PH-08: first-run setup holds preview, and the shell decides whether it
+  // opens a few renders after runtime info. The launch start waits for that
+  // decision, so a 0 ms start never beats setup opening.
+  it('holds the launch Preview start until the shell decides first-run setup (PH-08)', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    const backend = new StudioBackend()
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => [],
+      nativePreview: {
+        getWindowState: () => previewWindowClosed,
+        drainHostCommands: async () => nativePreviewStatus()
+      }
+    })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    const previewSourceStarts = (): number =>
+      backend.sentCommands.filter((command) =>
+        /^preview\.(camera|screen)\.start$/.test(command.method)
+      ).length
+    const observations: StudioObservation[] = []
+    let shell: ReturnType<typeof useStudioShell> | undefined
+    function ShellProbe(): null {
+      const value = useStudioShell()
+      useEffect(() => {
+        shell = value
+      }, [value])
+      return null
+    }
+    root = await mountStudioProvider(
+      testDom.container,
+      (value) => {
+        observations.push(value)
+      },
+      createElement(ShellProbe)
+    )
+    await turnZeroTimersUntil(
+      () =>
+        observations.at(-1)?.core.wsStatus === 'connected' &&
+        observations.at(-1)?.core.health?.ffmpeg.available === true &&
+        backend.sentCommands.some((command) => command.method === 'devices.list'),
+      1_000
+    )
+    await turnZeroTimersUntil(() => previewSourceStarts() > 0, 500)
+    expect(previewSourceStarts()).toBe(0)
+
+    await act(async () => shell?.setFirstRunSetupOpen(true))
+    await turnZeroTimersUntil(() => previewSourceStarts() > 0, 500)
+    expect(previewSourceStarts()).toBe(0)
+
+    await act(async () => shell?.setFirstRunSetupOpen(false))
+    await turnZeroTimersUntil(() => previewSourceStarts() > 0)
+    expect(previewSourceStarts()).toBeGreaterThan(0)
   })
 
   it('keeps a newer Basic entitlement event over a stale Premium focus response', async () => {

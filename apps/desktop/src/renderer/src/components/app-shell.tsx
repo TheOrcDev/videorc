@@ -339,9 +339,12 @@ function AppShellContent(): ReactElement {
     decision: firstRunVisibility,
     setupOpen
   })
+  // Reported once decided: the provider starts the launch Preview at once only
+  // after it knows setup stays closed (PH-08).
+  const firstRunDecided = firstRunVisibility !== null || replay !== null
   useEffect(() => {
-    setFirstRunSetupOpen(setupOpen)
-  }, [setFirstRunSetupOpen, setupOpen])
+    if (firstRunDecided) setFirstRunSetupOpen(setupOpen)
+  }, [firstRunDecided, setFirstRunSetupOpen, setupOpen])
   // Main restores the launch Preview window only once the workspace shows,
   // so it never floats over first-run setup (main ignores the repeats).
   useEffect(() => {

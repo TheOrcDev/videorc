@@ -2897,7 +2897,14 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
   // mounted and the preview has no slot. Auto-preview capture, the native
   // source previews, the Preview window and the OS-global shortcuts wait for it
   // to close; the shell owns the flag.
-  const [firstRunSetupOpen, setFirstRunSetupOpen] = useState(false)
+  const [firstRunSetupOpen, setFirstRunSetupOpenState] = useState(false)
+  // PH-08: the shell reports the flag once it has decided whether setup opens.
+  // Until then the launch's first Preview start keeps its 500 ms debounce.
+  const [firstRunDecided, setFirstRunDecided] = useState(false)
+  const setFirstRunSetupOpen = useCallback((open: boolean) => {
+    setFirstRunDecided(true)
+    setFirstRunSetupOpenState(open)
+  }, [])
   // Plan 209 S14: `update_settings` sets the theme through next-themes, like
   // Settings → General's control.
   const { theme: appTheme, setTheme: setAppTheme } = useTheme()
@@ -16042,10 +16049,12 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
     // PH-08 (11-20): a connection's first start runs at once when the working
     // sources are reconciled with the device list in hand (the reconcile bumps
     // the nonce), instead of 500 ms after the launch batch; later changes keep
-    // the debounce. Runtime info first: it holds the first-run and smoke flags.
+    // the debounce. Runtime info and the shell's first-run decision first: they
+    // hold the smoke flags and whether setup (which holds preview) opens.
     const launchStart =
       autoPreviewStartedForRef.current !== client &&
       runtimeInfoKnown &&
+      firstRunDecided &&
       sourcesReconciledForRef.current === deviceListRef.current
     const timer = window.setTimeout(
       () => {
@@ -16063,6 +16072,7 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
     previewDevicesSignature,
     previewRefreshNonce,
     refreshPreview,
+    firstRunDecided,
     firstRunSetupOpen,
     runtimeInfo?.disableAutoPreview,
     runtimeInfoKnown,
@@ -20842,6 +20852,7 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
       accountNeedsSignIn,
       cancelStopSession,
       firstRunSetupOpen,
+      setFirstRunSetupOpen,
       closeCommentsWindow,
       closeNotesWindow,
       commentsWindow.open,
