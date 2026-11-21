@@ -8,9 +8,10 @@ repeatable per-release process. For one-time signing setup see
 [../distribution.md](../distribution.md).
 
 This runbook publishes the **macOS Beta only**. Windows is a separate,
-default-deny **Alpha** track. Linux is a third, candidate-only **Alpha**
-track. Do not rename these artifacts, reuse the macOS or Windows storage
-keys, or treat a CI artifact as a public release.
+default-deny **Alpha** track. Linux is a third **Alpha** track, public under
+an owner waiver (no physical acceptance yet). Do not rename these artifacts,
+reuse the macOS or Windows storage keys, or treat a CI artifact as a public
+release.
 
 ## Faster coordinated release
 
@@ -73,22 +74,31 @@ pnpm ffmpeg:status:macos
 passes the capture-clock check. Do not `cargo clean` before
 `pnpm package:backend:macos`. A clean clone is the only cold compile.
 
-## Linux Alpha Is A Separate Candidate-Only Track
+## Linux Alpha Is A Separate, Owner-Waived Public Track
 
-Linux x64 AppImage builds stay private until a promote workflow, Ubuntu 24.04
-named-box packaged smoke, and videorc-web download state exist. The candidate
-lane is `.github/workflows/release-linux-alpha.yml`. It writes only:
+Linux x64 AppImage builds are stored privately by the candidate lane,
+`.github/workflows/release-linux-alpha.yml`, and become public only when the
+release owner publishes them: there is no promote workflow yet. The sequence
+is the candidate workflow, an exact-candidate owner-waiver record committed
+under `docs/acceptance/linux-alpha/<releaseId>.json`, a create-only
+`releases/linux-alpha/<releaseId>/release.json` (`stage: release`,
+`acceptanceStatus: waived`, the commit-pinned waiver URL), and the
+videorc-web download manifest env. The release records say "owner-waived",
+never PASS (see `docs/releases/0.36.0.md`). The candidate lane writes only:
 
 - `candidates/linux-alpha/<releaseId>/<sourceCommit>/` in private storage
-- intended later public keys under `releases/linux-alpha/<releaseId>/`
-- the updater filename `latest-linux.yml`
+- the public keys under `releases/linux-alpha/<releaseId>/`, written by the
+  owner's publish step, not by the workflow
+- the updater filename `latest-linux.yml`, which is not published yet (Linux
+  shows a changelog notice, not a self-update, until plan 257 D4 lands)
 
 It must never write `releases/macos/`, `releases/windows/`, `updates/macos/`,
-`updates/windows/`, `latest-mac.yml`, or the Windows `latest.yml` feed. Public
-download remains disabled. When a Linux step changes
+`updates/windows/`, `latest-mac.yml`, or the Windows `latest.yml` feed. Linux
+moves from Alpha to Beta only with physical acceptance on both Tier 1 boxes
+and no waiver ([plan 257](../../plans/257-linux-beta.md)). When a Linux step changes
 `VIDEORC_LINUX_DOWNLOAD_MANIFEST_OBJECT_KEY` on videorc-web, apply it with
-`pnpm release:web:redeploy` (see "Redeploying videorc-web production"). Hold the Linux Discord announcement until that
-download is public; preview with
+`pnpm release:web:redeploy` (see "Redeploying videorc-web production"). Send
+the Linux Discord announcement once that download is public; preview with
 `pnpm release:notify:discord <releaseId> --dry-run`, then send with
 `pnpm release:notify:discord <releaseId>`. Never print
 `VIDEORC_DISCORD_RELEASE_WEBHOOK`. See [../distribution.md](../distribution.md)
