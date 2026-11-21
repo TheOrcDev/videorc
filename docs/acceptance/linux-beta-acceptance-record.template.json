@@ -16,7 +16,7 @@
   },
   "boxes": [
     {
-      "desktop": "REPLACE_WITH_A_TIER_1_DESKTOP_ID",
+      "desktop": "ubuntu-24.04-gnome-wayland",
       "architecture": "x64",
       "physicalHardware": true,
       "testedAt": "REPLACE_WITH_CANONICAL_UTC_TIMESTAMP",
@@ -44,7 +44,7 @@
       }
     },
     {
-      "desktop": "REPLACE_WITH_A_DIFFERENT_TIER_1_DESKTOP_ID",
+      "desktop": "REPLACE_WITH_arch-hyprland-wayland_OR_fedora-kde-plasma-6-wayland",
       "architecture": "x64",
       "physicalHardware": true,
       "testedAt": "REPLACE_WITH_CANONICAL_UTC_TIMESTAMP",

@@ -16,7 +16,8 @@ import {
   linuxReleaseTrack,
   loadValidatedLinuxAlphaAcceptanceHistory,
   loadValidatedLinuxBetaAcceptanceHistory,
-  REQUIRED_LINUX_BETA_ACCEPTANCE_GATES
+  REQUIRED_LINUX_BETA_ACCEPTANCE_GATES,
+  REQUIRED_LINUX_BETA_DESKTOP
 } from './linux-acceptance-record.mjs'
 import { linuxCandidateIdentity, linuxCandidatePrefix } from './linux-release-candidate.mjs'
 
@@ -168,7 +169,7 @@ describe('Linux Beta acceptance record', () => {
     }
   })
 
-  it('needs at least two physical boxes on different Tier 1 desktops', () => {
+  it('needs at least two physical boxes on different Tier 1 desktops, one of them Ubuntu 24.04', () => {
     rejects(
       validBetaRecord({ boxes: [box('arch-hyprland-wayland')] }),
       betaExpectations,
@@ -183,6 +184,21 @@ describe('Linux Beta acceptance record', () => {
       validBetaRecord({ boxes: [box('arch-hyprland-wayland'), box('ubuntu-22.04-gnome-x11')] }),
       betaExpectations,
       'acceptance-desktop-not-tier1'
+    )
+    rejects(
+      validBetaRecord({
+        boxes: [box('arch-hyprland-wayland'), box('fedora-kde-plasma-6-wayland')]
+      }),
+      betaExpectations,
+      'acceptance-ubuntu-box-missing'
+    )
+    assert.ok(
+      assertLinuxAcceptanceRecord(
+        validBetaRecord({
+          boxes: [box('fedora-kde-plasma-6-wayland'), box(REQUIRED_LINUX_BETA_DESKTOP)]
+        }),
+        betaExpectations
+      )
     )
     const vm = validBetaRecord()
     vm.boxes[1].physicalHardware = false

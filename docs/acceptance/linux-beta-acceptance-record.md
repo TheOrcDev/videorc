@@ -35,7 +35,9 @@ The record binds the verdict to:
 preceding validated Beta>" }`; a skipped or uncommitted predecessor fails;
 - `boxes`: two or more entries, each a different Tier 1 desktop id
   (`ubuntu-24.04-gnome-wayland`, `arch-hyprland-wayland`,
-  `fedora-kde-plasma-6-wayland`), `architecture: "x64"`,
+  `fedora-kde-plasma-6-wayland`), one of them always
+  `ubuntu-24.04-gnome-wayland` (`acceptance-ubuntu-box-missing` otherwise),
+  `architecture: "x64"`,
   `physicalHardware: true`, a canonical UTC `testedAt` not before the
   candidate's `releasedAt` and not in the future, and all 20 gates `PASS`.
 

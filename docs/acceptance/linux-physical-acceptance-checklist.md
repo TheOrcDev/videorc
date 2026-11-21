@@ -19,10 +19,12 @@ commit raw evidence.
 ## Before you start: what one pass can and can't prove
 
 - **One pass is one box.** A Linux Beta needs a PASS on **at least two
-  physical boxes on different Tier 1 desktops** with every gate PASS on each,
-  and **no owner waiver** (D11). The validator refuses a waived Beta record.
-  Today that is ogre (Arch/Omarchy, Hyprland) plus an Ubuntu 24.04 GNOME box
-  that does not exist yet (D2, owner-owed). [S1, S3]
+  physical boxes on different Tier 1 desktops, one of them Ubuntu 24.04
+  GNOME** (`ubuntu-24.04-gnome-wayland`), with every gate PASS on each, and
+  **no owner waiver** (D11). The validator refuses a waived Beta record and
+  one without the Ubuntu box. Today that is ogre (Arch/Omarchy, Hyprland)
+  plus an Ubuntu 24.04 GNOME box that does not exist yet (D2, owner-owed).
+  [S1, S3]
 - **Tier 1 desktops (D1):** Ubuntu 24.04 LTS GNOME 46+ Wayland
   (`ubuntu-24.04-gnome-wayland`), Arch-family Hyprland 0.5x Wayland
   (`arch-hyprland-wayland`), Fedora 41+ KDE Plasma 6 Wayland
@@ -184,8 +186,11 @@ each platform's player, not only "went live". [S1, S6]
 - [ ] 6.3 Scene hotkey: with another app focused, press a scene hotkey; the
       scene switches. On a desktop with the GlobalShortcuts portal (Hyprland,
       KDE 6, GNOME 48+) the desktop's own bind dialog assigned it and Videorc
-      shows the assignment (D9). On GNOME 46 (Ubuntu 24.04), see the open
-      question below. **(needs S11)** [S1]
+      shows the assignment (D9). On GNOME 46 (Ubuntu 24.04), which has no
+      such portal, PASS means Videorc clearly says global shortcuts need a
+      newer desktop and points to Phone remote and Stream Deck; Phone remote
+      then switches the scene (6.4). GNOME 48+ is not required. **(needs
+      S11)** [S1]
 - [ ] 6.4 Stream Manager opens and shows chat and activity; phone remote
       pairs and switches a scene. [S1]
 - [ ] 6.5 Change one source while live (step 4.6). [S1]
@@ -247,8 +252,12 @@ Evidence: Encoders section. Gates: `vaapiPath`, `softwareFallbackPath`.
 - [ ] 10.4 Stop, go idle, Restart to update. Pass: the relaunched app shows
       the candidate version, and a short screen + camera + mic take passes
       the analyzer. **(needs S19)** [S1]
-- [ ] 10.5 Rollback: put the previous AppImage back; it starts with the same
-      profile and its recordings. **(inferred** method**)** [S1]
+- [ ] 10.5 Rollback is forward-only, as on Windows: installed apps are
+      never downgraded, and a bad release is fixed by a higher version. On
+      the updated candidate, with the feed serving the previous release,
+      check for updates. Pass: the previous release is not offered as a
+      downgrade. **(needs S19; inferred** method, mirrors Windows step 7.3**)**
+      [S1, S9]
 
 Evidence: Update section. Gate: `betaToBetaUpdate`.
 
@@ -314,20 +323,19 @@ under the gate beside them: a FAIL there fails that gate. [S1]
 
 ## Open questions for the release owner
 
-- [ ] On GNOME 46 (Ubuntu 24.04) there is no GlobalShortcuts portal. Does
-      `globalShortcuts` PASS there when Videorc says so and points to Phone
-      remote and Stream Deck (S11's design), or does Ubuntu 24.04 need GNOME
-      48+ for the gate?
-- [ ] Must one of the two boxes be Ubuntu 24.04 (the distribution doc's
-      supported target), or do any two Tier 1 desktops do? The validator
-      currently accepts any two.
-- [ ] Which signature tool and public key does `artifactSignature` verify
-      against (D5: minisign or GPG)? S19 decides; replace step 2.2's wording
-      when it lands.
-- [ ] Rollback (10.5): is "the previous AppImage starts on the same profile"
-      the bar, or must the feed also refuse a downgrade, as on Windows?
+The release owner took the recommended defaults on 2026-11-22.
 
-When one is answered, replace the matching step above and tick it off here.
+- [x] **`globalShortcuts` on GNOME 46 (Ubuntu 24.04). DECIDED:** the gate
+      PASSes there when Videorc clearly says global shortcuts need a newer
+      desktop and points to Phone remote and Stream Deck. No GNOME 48+
+      requirement: 24.04 is the LTS most users run. Step 6.3.
+- [x] **Which two boxes. DECIDED:** one of the Beta boxes must be Ubuntu
+      24.04 GNOME (`ubuntu-24.04-gnome-wayland`), the other a different Tier
+      1 desktop. The validator enforces it (`acceptance-ubuntu-box-missing`).
+- [x] **Signature tool for `artifactSignature`. DECIDED:** left to S19 (D5:
+      minisign or GPG). Step 2.2 keeps its wording until S19 lands.
+- [x] **Rollback. DECIDED:** matches Windows: forward-only, and the update
+      feed must refuse a downgrade. Step 10.5.
 
 ## Sources
 

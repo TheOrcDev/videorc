@@ -114,7 +114,7 @@ sound checked in the player, chat in, chat out.
 - **`allFourPlatformsLive`:** PASS / FAIL / BLOCKED
 - Captions follow speech into the stream: PASS / FAIL / BLOCKED
 - **`liveCaptions`:** PASS / FAIL / BLOCKED
-- Scene hotkey from another focused app (how it was bound): PASS / FAIL / BLOCKED
+- Scene hotkey from another focused app (how it was bound), or on GNOME 46 the clear "needs a newer desktop" message pointing to Phone remote and Stream Deck: PASS / FAIL / BLOCKED
 - **`globalShortcuts`:** PASS / FAIL / BLOCKED
 
 ## Talk Show
@@ -147,7 +147,7 @@ sound checked in the player, chat in, chat out.
 - Held while recording or live: PASS / FAIL / BLOCKED
 - Restart to update shows the candidate version: PASS / FAIL / BLOCKED
 - Short take on the updated app passes the analyzer: PASS / FAIL / BLOCKED
-- Previous AppImage starts again on the same profile (rollback): PASS / FAIL / BLOCKED
+- Rollback is forward-only: with the feed serving the previous release, the updated app is not offered a downgrade: PASS / FAIL / BLOCKED
 - **`betaToBetaUpdate`:** PASS / FAIL / BLOCKED
 
 ## Support Bundle

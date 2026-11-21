@@ -58,6 +58,10 @@ export const LINUX_TIER1_DESKTOPS = Object.freeze([
 // D11: "physical acceptance on both Tier 1 boxes".
 export const MIN_LINUX_BETA_ACCEPTANCE_BOXES = 2
 
+// Owner decision 2026-11-22: one of the boxes is always Ubuntu 24.04 GNOME,
+// the LTS most Linux users run; the others are different Tier 1 desktops.
+export const REQUIRED_LINUX_BETA_DESKTOP = 'ubuntu-24.04-gnome-wayland'
+
 const ALPHA_RELEASE_ID = /^(\d+\.\d+\.\d+)-alpha\.(\d+)$/
 const BETA_RELEASE_ID = /^(\d+\.\d+\.\d+)-beta\.(\d+)$/
 const ALPHA_RECORD_FILENAME = /^(\d+\.\d+\.\d+-alpha\.\d+)\.json$/
@@ -287,6 +291,12 @@ function assertLinuxBetaAcceptance(record, expectations) {
       requireEqual(box.requiredGates[gate].status, 'PASS', `${gateLabel}.status`)
     }
   })
+  if (!desktops.has(REQUIRED_LINUX_BETA_DESKTOP)) {
+    throw new LinuxAcceptanceRecordError(
+      'acceptance-ubuntu-box-missing',
+      `One Linux Beta box must be ${REQUIRED_LINUX_BETA_DESKTOP}.`
+    )
+  }
   return record
 }
 
