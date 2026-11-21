@@ -91,7 +91,7 @@ function oauthGoLive(suffix) {
         const skip = skipWithout(ctx, `go-live${suffix}`)
         if (skip) return skip
         const confirmedAt = Date.now()
-        await ctx.ui.confirmGoLive()
+        const { privacyConfirm } = await ctx.ui.confirmGoLive({ privacy: ctx.run.privacy })
         const outcome = await ctx.ui.readGoLiveOutcome({ deadlineMs: 160_000 })
         await recordFeature(ctx, {
           id: `go-live${suffix}`,
@@ -99,7 +99,7 @@ function oauthGoLive(suffix) {
           via: 'oauth',
           liveAfterMs: Date.now() - confirmedAt
         })
-        return { ...outcome, liveAfterMs: Date.now() - confirmedAt }
+        return { ...outcome, privacyConfirm, liveAfterMs: Date.now() - confirmedAt }
       },
       expect: (outcome) =>
         outcome.outcome === 'live' || `${outcome.outcome}: ${outcome.reason ?? ''}`
