@@ -1,8 +1,12 @@
-# Plan 255: Linux beta, every Mac feature on Linux or an honest Linux equivalent
+# Plan 257: Linux beta, every Mac feature on Linux or an honest Linux equivalent
 
 ## Status and scope
 
-- **Status:** PLANNED 2026-11-21. Audit and plan only; no product code changed.
+- **Status:** PLANNED 2026-11-21. Audit and plan only; no product code
+  changed. Owner decisions D1 and D3–D12 DECIDED 2026-11-21 (the recommended
+  defaults); D2 (a second Linux machine) is OWNER-OWED, and the checks only
+  that machine can make wait in S21 and S22.
+- **Summary for dispatch:** [257-linux-beta-summary.md](257-linux-beta-summary.md).
 - **The owner's ask (2026-11-21):** "lets continue now working towards beta
   for linux on ogre machine, what's your recommendation what can we do to
   match all features to work same like on mac there?"
@@ -326,8 +330,8 @@ Release) with a fit score, and a **Model lane** (`fable-5.1`,
 | S18 | Secret Service, groups and portal preflight                      | Implementation · `gpt-6.1-sol` · 8            | —                         |
 | S19 | AppImage self-update and the Linux feed                          | Implementation · `fable-5.1` · 9              | D4, D5                    |
 | S20 | Linux acceptance checklist, record schema, validator             | Docs · `gpt-6.1-sol` · 8                      | —                         |
-| S21 | Feature sweep on both boxes (no going live)                      | Review · `fable-5.1` · 9                      | S1–S19                    |
-| S22 | Physical acceptance and the Beta flip                            | Release · human gate                          | S20, S21, D2, D11         |
+| S21 | Feature sweep on both boxes (no going live)                      | Review · `fable-5.1` · 9                      | S1–S19; second box: D2    |
+| S22 | Physical acceptance and the Beta flip                            | Release · human gate                          | S20, S21, **D2 (owed)**   |
 
 Streamer relief comes early: S1 (recordings you can trust), S2 (a lighter
 camera), S11 (hotkeys) and S8 (desktop audio) can run in parallel after S0.
@@ -455,7 +459,8 @@ quarantine stays on ogre's amdgpu node. AMD proof waits for the second box
 (D2).
 **Done when:** `pnpm smoke:linux-encoder-acceptance` passes on ogre with
 both backends; the Output page no longer says Clips are off on ogre; the
-evidence JSON is committed.
+evidence JSON is committed. The AMD VAAPI check moves to S21's second-box
+pass (blocked on D2).
 
 ### S6: NVENC arm
 
@@ -537,9 +542,9 @@ gateway).
    implements it (GNOME 46), keep today's reason and point to Phone remote
    and Stream Deck.
    **Done when:** on ogre (xdph) a scene hotkey switches scenes while another
-   app has focus; same on a GNOME 48+ or KDE 6 session (second box or live USB);
-   the X11 path keeps `globalShortcut`; unit tests for the mapping; `pnpm
-smoke:remote-control` still passes.
+   app has focus; the X11 path keeps `globalShortcut`; unit tests for the mapping; `pnpm
+smoke:remote-control` still passes. The GNOME 48+ / KDE 6 check moves to
+   S21's second-box pass (blocked on D2).
 
 ### S12: Wayland window behaviours
 
@@ -586,8 +591,9 @@ the analyzer on ogre; the recording-matrix passes.
 **Goal:** spike P0c passes on two boxes and `PROVEN` flips to true.
 **Steps:** owner installs `v4l2loopback-dkms` on ogre (sudo); run the
 `docs/linux-dev-loop.md:247-323` spike; Secure Boot guidance on Ubuntu.
-**Done when:** Videorc Camera shows in a browser call on ogre and the Ubuntu
-box; Load module, unload and the missing-module copy are tested.
+**Done when:** Videorc Camera shows in a browser call on ogre; Load module,
+unload and the missing-module copy are tested. The Ubuntu/Secure Boot check
+moves to S21's second-box pass (blocked on D2).
 
 ### S17: first-run onboarding for Linux
 
@@ -635,51 +641,57 @@ form) in `pnpm test:scripts`.
 **Goal:** rerun this audit's matrix on an unlocked, quiet ogre and the
 Ubuntu box after S1–S19, and turn every W\* into W or a bug.
 **Done when:** the matrix in this plan is updated with a dated column per
-box, with screenshots of every area from the real Wayland window.
+box, with screenshots of every area from the real Wayland window. The ogre
+half can run as soon as S1–S19 land; the second-box half is **blocked on
+D2** and also carries the checks moved here from S5 (AMD VAAPI), S11 (GNOME
+48+ / KDE 6 portal) and S16 (Ubuntu, Secure Boot).
 
 ### S22: physical acceptance and the Beta flip
 
 **Owner route:** Release (human gate).
+**Blocked on:** D2 (owner-owed): the second box must exist first.
 **Done when:** both Tier 1 boxes pass the checklist with no waiver (D11);
 the record is committed; `release-track.ts` says Beta on Linux; the release
 skill publishes a Linux Beta.
 
-## Owner decisions (recommended default first)
+## Owner decisions
 
-- **D1. Supported desktops.** Default: Tier 1 = Ubuntu 24.04 GNOME Wayland,
-  Arch/Omarchy Hyprland (ogre), Fedora KDE Plasma 6 Wayland; X11 and other
-  wlroots best effort. Alternative: only Ubuntu + ogre for the first Beta.
-- **D2. A second named Linux box.** Default: one Ubuntu 24.04 machine with
-  an Intel or AMD GPU that works (ogre's AMD is quarantined), as a second
-  named tester. Without it, AMD VAAPI, GNOME and the GlobalShortcuts portal
-  on GNOME/KDE can't be accepted.
-- **D3. Formats.** Default: AppImage only for Beta; `.deb` and Flatpak
-  after. Alternative: add `.deb` now for Ubuntu users.
-- **D4. Self-update.** Default: electron-updater AppImage updates from a
-  published `latest-linux.yml`. Alternative: keep notice-only (then Beta
-  users must redownload every release).
-- **D5. Integrity.** Default: sha512 feed over HTTPS plus a detached
-  signature (minisign or GPG) and `.sha256` per release. Alternative:
-  hashes only.
-- **D6. GPU compositor.** Default: not in Beta; the CPU compositor stays if
-  S1 and S3 meet their budgets on both boxes. A GLES compositor is a 1.0
-  plan. Alternative: make it a Beta blocker (adds weeks).
-- **D7. NVENC in Beta.** Default: yes if someone can lend an NVIDIA box for
-  acceptance; otherwise right after Beta.
-- **D8. Hide from capture on Hyprland.** Default: Videorc offers (never
-  silently writes) the `noscreenshare`/`pin` rules for its own windows.
-  Alternative: copy only.
-- **D9. Global shortcuts UX.** Default: on portal desktops the desktop owns
-  the key choice (its own dialog); Videorc shows what was assigned.
-  Alternative: keep Videorc's key fields and pass them as preferred
-  triggers only.
-- **D10. arm64.** Default: not in Beta.
-- **D11. Beta gate.** Default: physical acceptance on both Tier 1 boxes, no
-  owner waiver. Alternative: allow a waiver for the second box.
-- **D12. Lab under a locked session.** Default: the lab refuses to run while
-  the session is locked (S0); attended runs need the owner to unlock at the
-  console. Alternative: a dedicated lab seat/account that doesn't auto-lock
-  (security trade-off on the owner's laptop).
+The owner took the recommended defaults on 2026-11-21. D2 needs a purchase.
+
+- **D1. Supported desktops. DECIDED (recommended default).** Tier 1 =
+  Ubuntu 24.04 GNOME Wayland, Arch/Omarchy Hyprland (ogre), Fedora KDE
+  Plasma 6 Wayland; X11 and other wlroots are best effort.
+- **D2. A second named Linux box. OWNER-OWED.** Recommended: one Ubuntu
+  24.04 machine with an Intel or AMD GPU that works (ogre's AMD is
+  quarantined), as a second named tester. It needs the owner's purchase.
+  Until it exists, S21's second-box half and all of S22 are blocked, and
+  AMD VAAPI, GNOME, KDE's GlobalShortcuts portal and Ubuntu's Secure Boot
+  path can't be accepted.
+- **D3. Formats. DECIDED (recommended default).** AppImage only for Beta;
+  `.deb` and Flatpak after.
+- **D4. Self-update. DECIDED (recommended default).** electron-updater
+  AppImage updates from a published `latest-linux.yml`; the changelog notice
+  stays for extracted installs.
+- **D5. Integrity. DECIDED (recommended default).** sha512 feed over HTTPS
+  plus a detached signature (minisign or GPG) and `.sha256` per release.
+- **D6. GPU compositor. DECIDED (recommended default).** Not in Beta; the
+  CPU compositor stays if S1 and S3 meet their budgets. A GLES compositor is
+  a 1.0 plan.
+- **D7. NVENC in Beta. DECIDED (recommended default).** Yes if someone can
+  lend an NVIDIA box for acceptance; otherwise right after Beta. S6 builds
+  the arm either way; only its NVIDIA check waits for such a box.
+- **D8. Hide from capture on Hyprland. DECIDED (recommended default).**
+  Videorc offers (never silently writes) the `noscreenshare`/`pin` rules for
+  its own windows.
+- **D9. Global shortcuts UX. DECIDED (recommended default).** On portal
+  desktops the desktop owns the key choice (its own dialog); Videorc shows
+  what was assigned.
+- **D10. arm64. DECIDED (recommended default).** Not in Beta.
+- **D11. Beta gate. DECIDED (recommended default).** Physical acceptance on
+  both Tier 1 boxes, no owner waiver.
+- **D12. Lab under a locked session. DECIDED (recommended default).** The
+  lab refuses to run while the session is locked (S0); attended runs need
+  the owner to unlock at the console.
 
 ## Sources
 

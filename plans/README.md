@@ -1,6 +1,6 @@
 # Implementation Plans
 
-- 2026-11-21: [Plan 255](255-linux-beta.md), the owner's ask: Linux from
+- 2026-11-21: [Plan 257](257-linux-beta.md), the owner's ask: Linux from
   Alpha to Beta with every Mac feature working, or an honest Linux
   equivalent. PLANNED 2026-11-21, 23 slices (S0-S22), twelve owner checks:
   - A 55-row parity matrix from the code and a spot check on ogre with the
