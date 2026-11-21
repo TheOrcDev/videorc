@@ -1048,7 +1048,7 @@ impl RepairVideoEncoder {
     /// the old hardcoded `libx264 -crf 18` failed on every bundled build with
     /// "Unrecognized option 'crf'". `video_bitrate_kbps` is the target for
     /// the encoder without one (libopenh264).
-    fn encode_args(self, video_bitrate_kbps: u32) -> Vec<String> {
+    pub(crate) fn encode_args(self, video_bitrate_kbps: u32) -> Vec<String> {
         let args: &[&str] = match self {
             RepairVideoEncoder::Libx264 => &[
                 "-c:v", "libx264", "-crf", "18", "-preset", "medium", "-threads", "1",
