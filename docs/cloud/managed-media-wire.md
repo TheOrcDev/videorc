@@ -1357,6 +1357,8 @@ process created; it cannot end an adopted or discovered show.
 
 Idle signed-in discovery checks current every 60 seconds; renderer-only
 `cloud.show.check {}` checks focus with a shared 10-second minimum interval.
+The RPC only starts the check and answers `{ ok: true }` at once; what the
+check finds arrives as `cloud.state`, as the idle discovery's does.
 A held show without a feeding session or destinations polls with `viewer=idle`
 (the web treats it like `viewer=page`, without stamping desktop presence).
 The same control switches to normal polling once it feeds or holds keys to
