@@ -78,35 +78,31 @@ describe('browser publication privacy authority', () => {
     adapter.close()
     expect(output.stop).toHaveBeenCalled()
   })
-  // PH-13 (perf hunt 11-20): with frame callbacks, one draw per captured
-  // frame and no timer draw between them; the 30 Hz timer takes over only
-  // when callbacks stop. Every draw still passes the gate.
-  it('draws once per captured frame and falls back to the timer when frames stop', async () => {
+  // PH-13 (perf hunt 11-20): each captured frame is drawn once (no frame
+  // sent twice, none skipped at 30 fps), at most 30 draws a second; after
+  // about 100 ms of a still screen the 30 Hz repaint is back. Every draw
+  // still passes the gate.
+  it('draws each captured frame once and repaints a still screen at 30 Hz', async () => {
     vi.useFakeTimers()
     const raw = { getSettings: () => ({ width: 640, height: 360 }) } as MediaStreamTrack
     const output = { stop: vi.fn() }
-    const drawImage = vi.fn(),
+    let frames = 0
+    const drawn: number[] = []
+    const drawImage = vi.fn(() => drawn.push(frames)),
       fillRect = vi.fn()
-    let pending: ((now: number) => void) | null = null
-    let handles = 0
     const video = {
       readyState: 2,
       play: async () => {},
       pause: vi.fn(),
       srcObject: null,
-      requestVideoFrameCallback: (callback: (now: number) => void) => {
-        pending = callback
-        return ++handles
-      },
-      cancelVideoFrameCallback: vi.fn()
+      getVideoPlaybackQuality: () => ({ totalVideoFrames: frames })
     }
-    let clock = 0
-    const frame = async (gapMs: number): Promise<void> => {
-      clock += gapMs
-      await vi.advanceTimersByTimeAsync(gapMs)
-      const callback = pending
-      pending = null
-      callback?.(clock)
+    // The capture's own clock: a frame every `gaps[i]` ms, off the timer's grid.
+    const capture = async (gaps: number[]): Promise<void> => {
+      for (const gap of gaps) {
+        await vi.advanceTimersByTimeAsync(gap)
+        frames += 1
+      }
     }
     vi.stubGlobal(
       'MediaStream',
@@ -127,33 +123,41 @@ describe('browser publication privacy authority', () => {
     const gate = new ScreenPrivacyDecision()
     gate.apply({ hidden: false, generation: 0 })
     const adapter = createPrivateScreen(raw, gate, vi.fn())
+    const duplicates = (): number => drawn.length - new Set(drawn).size
 
-    // A 30 fps capture for one second, a little jittery: 30 frames, 30 draws.
-    for (let index = 0; index < 30; index += 1) await frame(index % 2 ? 41 : 25)
-    expect(drawImage).toHaveBeenCalledTimes(30)
+    // One second of a 30 fps capture, a little jittery: every frame, once.
+    await capture(Array.from({ length: 30 }, (_, index) => (index % 2 ? 37 : 29.6)))
+    await vi.advanceTimersByTimeAsync(20)
+    expect(duplicates()).toBe(0)
+    expect(drawn.slice(1)).toEqual(Array.from({ length: 30 }, (_, index) => index + 1))
 
-    // A 60 fps capture: every other frame.
-    drawImage.mockClear()
-    for (let index = 0; index < 30; index += 1) await frame(1000 / 60)
-    expect(drawImage).toHaveBeenCalledTimes(15)
+    // A 60 fps capture: never more than 30 draws a second, none twice.
+    drawn.length = 0
+    await capture(Array.from({ length: 60 }, () => 1000 / 60))
+    expect(drawn.length).toBeLessThanOrEqual(31)
+    expect(drawn.length).toBeGreaterThanOrEqual(29)
+    expect(duplicates()).toBe(0)
 
-    // The screen goes still: no draw for about 100 ms, then the timer's 30 Hz.
-    drawImage.mockClear()
-    await vi.advanceTimersByTimeAsync(90)
-    expect(drawImage).not.toHaveBeenCalled()
+    // The screen goes still: the newest frame once (it came during the
+    // cap), then nothing for about 100 ms, then 30 Hz again.
+    await vi.advanceTimersByTimeAsync(20)
+    expect(drawn.at(-1)).toBe(frames)
+    drawn.length = 0
+    await vi.advanceTimersByTimeAsync(70)
+    expect(drawn).toEqual([])
     await vi.advanceTimersByTimeAsync(1000)
-    expect(drawImage.mock.calls.length).toBeGreaterThanOrEqual(28)
+    expect(drawn.length).toBeGreaterThanOrEqual(28)
+    expect(drawn.length).toBeLessThanOrEqual(31)
 
-    // Hidden: frames frost, never draw the capture.
-    drawImage.mockClear()
+    // Hidden: every tick frosts, nothing of the capture is drawn.
+    drawn.length = 0
     const frosted = fillRect.mock.calls.length
     gate.hide()
-    for (let index = 0; index < 5; index += 1) await frame(1000 / 30)
-    expect(drawImage).not.toHaveBeenCalled()
+    await capture(Array.from({ length: 10 }, () => 1000 / 30))
+    expect(drawn).toEqual([])
     expect(fillRect.mock.calls.length).toBeGreaterThan(frosted + 5)
 
     adapter.close()
-    expect(video.cancelVideoFrameCallback).toHaveBeenCalledWith(handles)
     expect(output.stop).toHaveBeenCalled()
   })
   it('binds observations to the exact capture epoch and generation', () => {

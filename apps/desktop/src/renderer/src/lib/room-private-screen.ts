@@ -4,17 +4,13 @@ import type { ScreenPrivacyDecision } from './room-screen-privacy'
 // the published track. Its own module, loaded with the room client, so the
 // eager privacy decision (room-screen-privacy.ts) stays small (PH-13).
 
+/** The timer runs at twice the capture's 30 fps, so a new frame waits at most one tick. */
+const TICK_MS = 1000 / 60
 /**
- * Timer ticks (at 30 Hz) with no frame callback before the timer paints
- * again: about 100 ms, longer than any gap between frames of moving content.
+ * Ticks with no new frame before the still-screen repaint: about 100 ms,
+ * longer than any gap between frames of moving content.
  */
-const FRAME_CALLBACK_IDLE_TICKS = 3
-/**
- * The shortest gap between two drawn frames. A 30 fps capture can land 25 ms
- * apart on a 120 Hz display, so this is not 33 ms; a 60 fps one draws every
- * other frame.
- */
-const MIN_FRAME_GAP_MS = 20
+const STILL_TICKS = 6
 
 /** Raw capture is NEVER passed to LiveKit. All output frames pass this synchronous gate.
  * Neutral opaque frost matches the native no-picture frost. We deliberately do not
@@ -62,54 +58,44 @@ export function createPrivateScreen(
     }
   })
   // One gate for every output frame: the frost while hidden, else the capture.
-  const paint = (): boolean => {
+  const paint = (): void => {
     try {
       if (blocked || decision.hidden) frost()
       else if (video.readyState >= 2) {
         context.drawImage(video, 0, 0, canvas.width, canvas.height)
       }
-      return true
     } catch (error) {
       track.stop()
       failed(error)
-      return false
     }
   }
-  // PH-13: one draw per captured frame, so a 30 Hz timer and the capture's
-  // own clock never beat (a frame sent twice, the next one skipped). The
-  // timer below keeps today's 30 Hz output whenever no frame callback comes:
-  // a still screen, a window whose rendering stopped, or no callback API.
-  let frameHandle = 0
-  let lastFrameAt = -Infinity
-  let frameSeen = false
-  const onFrame = (now: number): void => {
-    frameHandle = 0
-    if (closed) return
-    frameSeen = true
-    // The capture may run faster than the 30 fps the publication carries.
-    if (now - lastFrameAt >= MIN_FRAME_GAP_MS) {
-      lastFrameAt = now
-      if (!paint()) return
-    }
-    frameHandle = video.requestVideoFrameCallback(onFrame)
-  }
-  if (typeof video.requestVideoFrameCallback === 'function') {
-    frameHandle = video.requestVideoFrameCallback(onFrame)
-  }
-  let idleTicks = FRAME_CALLBACK_IDLE_TICKS
+  // PH-13: draw each captured frame once. A 30 Hz timer blind to the
+  // capture's own clock sent some frames twice and skipped the next. A timer,
+  // not a frame callback: frame callbacks wait for the window to render, so a
+  // busy or hidden Studio lost more frames with them. After about 100 ms with
+  // no new frame (a still screen, or no frame count) it repaints at 30 Hz, as
+  // before, so the published track never goes quiet.
+  let tick = 0
+  let drawnTick = -2
+  let lastFrames = -1
+  let stillTicks = STILL_TICKS
   const timer = window.setInterval(() => {
     if (closed) return
-    if (frameSeen) {
-      frameSeen = false
-      idleTicks = 0
+    tick += 1
+    const frames = video.getVideoPlaybackQuality?.().totalVideoFrames
+    const fresh = frames !== undefined && frames !== lastFrames
+    if (fresh) stillTicks = 0
+    else if (stillTicks < STILL_TICKS) {
+      stillTicks += 1
       return
     }
-    if (idleTicks < FRAME_CALLBACK_IDLE_TICKS) {
-      idleTicks += 1
-      return
-    }
+    // At most every other tick: the 30 fps the publication carries. A new
+    // frame seen too soon is drawn on the next tick.
+    if (tick - drawnTick < 2) return
+    drawnTick = tick
+    if (frames !== undefined) lastFrames = frames
     paint()
-  }, 1000 / 30)
+  }, TICK_MS)
   void video.play().catch((error) => {
     track.stop()
     failed(error)
@@ -122,8 +108,6 @@ export function createPrivateScreen(
       closed = true
       off()
       window.clearInterval(timer)
-      if (frameHandle) video.cancelVideoFrameCallback(frameHandle)
-      frameHandle = 0
       track.stop()
       video.pause()
       video.srcObject = null
