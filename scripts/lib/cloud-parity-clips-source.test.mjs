@@ -20,7 +20,7 @@ test('actual trim argument helper compiles independently and decodes both lanes 
       binary = join(folder, process.platform === 'win32' ? 'helper.exe' : 'helper')
     writeFileSync(
       path,
-      `use std::{path::Path,ffi::OsString};\n${source.slice(start, end)}\nfn main(){let a=trim_args(Path::new("index.m3u8"),Path::new("clip.part"),1250.0,30000.0);let a:Vec<_>=a.iter().map(|s|s.to_str().unwrap()).collect();assert!(!a.contains(&"copy"));assert!(!a.contains(&"-ss"));assert!(a.contains(&"[0:v:0]trim=start=1.250000:duration=30.000000,setpts=PTS-STARTPTS[v];[0:a:0]atrim=start=1.250000:duration=30.000000,asetpts=PTS-STARTPTS[a]"));assert!(a.windows(2).any(|w|w==["-protocol_whitelist","file"]));assert!(a.windows(2).any(|w|w==["-fs","134217728"]));}`
+      `use std::{path::Path,ffi::OsString};\n${source.slice(start, end)}\nfn main(){let v=["-c:v","libopenh264","-pix_fmt","yuv420p"].map(String::from);let a=trim_args(Path::new("index.m3u8"),Path::new("clip.part"),1250.0,30000.0,&v);let a:Vec<_>=a.iter().map(|s|s.to_str().unwrap()).collect();assert!(!a.contains(&"copy"));assert!(!a.contains(&"libx264"));assert!(a.windows(2).any(|w|w==["-c:v","libopenh264"]));assert!(a.windows(2).any(|w|w==["-map","[a]"]));assert!(!a.contains(&"-ss"));assert!(a.contains(&"[0:v:0]trim=start=1.250000:duration=30.000000,setpts=PTS-STARTPTS[v];[0:a:0]atrim=start=1.250000:duration=30.000000,asetpts=PTS-STARTPTS[a]"));assert!(a.windows(2).any(|w|w==["-protocol_whitelist","file"]));assert!(a.windows(2).any(|w|w==["-fs","134217728"]));}`
     )
     execFileSync('rustc', ['--edition', '2024', path, '-o', binary], { timeout: 30000 })
     execFileSync(binary, [], { timeout: 5000 })
