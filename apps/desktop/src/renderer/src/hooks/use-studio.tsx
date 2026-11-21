@@ -2997,6 +2997,13 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
   const [replayBlockedReason, setReplayBlockedReasonState] = useState<string | null>(null)
   const replayBlockedReasonRef = useRef<string | null>(null)
   const replayStartInFlightRef = useRef(false)
+  // The ring's own start while it is in flight. Its session.start carries
+  // the scene as the Studio held it when the start was asked for, and the
+  // backend commits that scene as the session starts: a layout transaction
+  // committed meanwhile would be put back. A transaction asked for in that
+  // window waits for the start to answer (0.36.1: an agent's background and
+  // a Freeform entry were lost this way).
+  const replayStartPromiseRef = useRef<Promise<void> | null>(null)
   // A source picked while the ring's own start was in flight: that start
   // carried the old sources, so the ring restarts once it answers.
   const replaySourcesMovedDuringStartRef = useRef<'visual' | 'audio' | null>(null)
@@ -11131,6 +11138,13 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
         onSettled?: () => void
       }
     ): Promise<boolean> => {
+      // The ring's start is in flight with the scene as it was: this change
+      // runs once it answers, as a change to the session it started, so the
+      // start's scene commit never lands over it.
+      const replayStart = replayStartPromiseRef.current
+      if (replayStart) {
+        return replayStart.then(() => requestLayoutTransactionRef.current(layout, options))
+      }
       const crossesOrientation =
         layoutPresetOrientation(layout.layoutPreset) !==
         layoutPresetOrientation(captureConfigRef.current.layout.layoutPreset)
@@ -11543,6 +11557,9 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
           settleCommitReceipt(false)
           if (layoutIntentAwaitingProofRef.current === intentId) {
             layoutIntentAwaitingProofRef.current = null
+            // The ring held its start for this transaction: start it now,
+            // with the scene the transaction left.
+            if (replayArmedRef.current) scheduleReplayReconcileRef.current()
           }
           if (layoutIntentIdRef.current === intentId) {
             setLayoutSwitchPending(null)
@@ -19261,9 +19278,17 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
       // launch before Sources settle never turns clips off.
       return
     }
+    // A scene change awaiting its proof has not reached the Studio's scene
+    // yet, so a start now would commit the scene it is leaving. Its end
+    // reconciles the ring again.
+    if (layoutIntentAwaitingProofRef.current !== null) return
     replayStartInFlightRef.current = true
     replaySourcesMovedDuringStartRef.current = null
     let started = false
+    let answered: () => void = () => undefined
+    replayStartPromiseRef.current = new Promise<void>((resolve) => {
+      answered = resolve
+    })
     try {
       const replay = await import('@/lib/replay-buffer')
       const status = await replay.startBufferOnlySession({
@@ -19328,6 +19353,8 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
       }
     } finally {
       replayStartInFlightRef.current = false
+      replayStartPromiseRef.current = null
+      answered()
       const moved = replaySourcesMovedDuringStartRef.current
       replaySourcesMovedDuringStartRef.current = null
       if (started && moved !== null) restartReplayForSourcesRef.current(moved === 'visual')
@@ -19372,6 +19399,8 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
           stopPending: stopSessionInFlightPromiseRef.current !== null,
           replayStartInFlight:
             replayStartInFlightRef.current ||
+            // A scene change awaiting proof: its end reconciles again.
+            layoutIntentAwaitingProofRef.current !== null ||
             replayReconcileHoldRef.current ||
             replaySceneReloadsRef.current > 0 ||
             performanceCheckHoldRef.current,
