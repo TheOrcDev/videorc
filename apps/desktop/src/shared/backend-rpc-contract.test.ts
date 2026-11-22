@@ -4805,3 +4805,34 @@ describe('Retirement-only screen retention (plan 231 D18)', () => {
       ).toThrow()
   })
 })
+
+describe('diagnostics.linuxDesktop (plan 257 S18)', () => {
+  const answer = {
+    secretService: 'missing',
+    portal: { frontend: 'running', screenCastVersion: 5, backends: ['gtk', 'hyprland'] },
+    groups: [{ name: 'video', exists: true, member: false, devices: 2, accessible: 0 }],
+    currentDesktop: 'Hyprland'
+  }
+
+  it('accepts what Rust sends, with its optional fields omitted', () => {
+    expect(validateBackendRpcResult('diagnostics.linuxDesktop', answer)).toStrictEqual(answer)
+    const bare = {
+      secretService: 'unknown',
+      portal: { frontend: 'unknown', backends: [], detail: 'session bus: no address' },
+      groups: []
+    }
+    expect(validateBackendRpcResult('diagnostics.linuxDesktop', bare)).toStrictEqual(bare)
+  })
+
+  it('refuses unknown states, nulls and extra fields', () => {
+    for (const bad of [
+      { ...answer, secretService: 'locked' },
+      { ...answer, currentDesktop: null },
+      { ...answer, portal: { ...answer.portal, screenCastVersion: null } },
+      { ...answer, groups: [{ ...answer.groups[0], path: '/dev/video0' }] },
+      { ...answer, extra: true }
+    ]) {
+      expect(() => validateBackendRpcResult('diagnostics.linuxDesktop', bad)).toThrow()
+    }
+  })
+})

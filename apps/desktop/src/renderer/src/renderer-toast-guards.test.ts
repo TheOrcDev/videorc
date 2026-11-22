@@ -593,6 +593,7 @@ const TOAST_SITES: Record<string, number> = {
   'src/lib/system-permission-orchestration.ts > runSystemPermissionAction': 4,
   'src/lib/talk-show-end.ts > onClick': 1,
   'src/lib/talk-show-end.ts > showTalkShowEndFailure': 1,
+  'src/lib/videorc-web-links.ts > beginVideorcSignIn': 1,
   'src/lib/watchdog-surface.ts > acknowledgeWatchdogAlert': 1,
   'src/lib/watchdog-surface.ts > runWatchdogFix': 2,
   'src/lib/watchdog-surface.ts > snoozeWatchdogAlert': 1,

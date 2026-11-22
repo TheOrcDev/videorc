@@ -3,6 +3,8 @@ import { join } from 'node:path'
 
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { LINUX_KEYRING_SIGN_IN_REFUSAL } from '../../../shared/linux-keyring'
+
 const toast = vi.hoisted(() => ({ error: vi.fn(), warning: vi.fn() }))
 vi.mock('@/lib/toast', () => ({ toast }))
 
@@ -132,6 +134,22 @@ describe('userErrorMessage', () => {
       description: SECURE_STORAGE_REASON,
       tone: 'error'
     })
+  })
+
+  it("shows main's Linux keyring sign-in refusal as is (plan 257 S18)", () => {
+    const copy = userErrorMessage(
+      new Error(
+        `Error invoking remote method 'account:begin-sign-in': Error: ${LINUX_KEYRING_SIGN_IN_REFUSAL}`
+      ),
+      { action: 'sign in' }
+    )
+    expect(copy).toMatchObject({
+      kind: 'known',
+      title: "Couldn't sign in",
+      description: LINUX_KEYRING_SIGN_IN_REFUSAL,
+      tone: 'error'
+    })
+    expect(LINUX_KEYRING_SIGN_IN_REFUSAL).toContain('GNOME Keyring or KWallet')
   })
 
   it("keeps an MP4 export's disk-space refusal, which names the sizes and the next step", () => {
