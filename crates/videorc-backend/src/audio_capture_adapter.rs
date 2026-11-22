@@ -1614,18 +1614,53 @@ impl CaptureDiagnostics {
     }
 }
 
+/// Where `assemble_pcm` reads time and waits for PCM. The host clock in the
+/// app; a test drives it so a packet's PCM lands at an exact age instead of
+/// racing the runner's scheduler against the match budget.
+trait CaptureTime {
+    fn now(&self) -> Instant;
+    /// A monotonic instant and the wall clock (ns) read at it, for
+    /// `observe_wall`.
+    fn wall_now(&self) -> Option<(Instant, i128)>;
+    /// Waits up to `poll` for the next PCM chunk.
+    fn recv_pcm(
+        &self,
+        raw: &mpsc::Receiver<Vec<u8>>,
+        poll: Duration,
+    ) -> Result<Vec<u8>, mpsc::RecvTimeoutError>;
+}
+
+struct HostTime;
+
+impl CaptureTime for HostTime {
+    fn now(&self) -> Instant {
+        Instant::now()
+    }
+    fn wall_now(&self) -> Option<(Instant, i128)> {
+        ClockPair::sample_wall_now()
+    }
+    fn recv_pcm(
+        &self,
+        raw: &mpsc::Receiver<Vec<u8>>,
+        poll: Duration,
+    ) -> Result<Vec<u8>, mpsc::RecvTimeoutError> {
+        raw.recv_timeout(poll)
+    }
+}
+
 fn observe_wall(
+    time: &impl CaptureTime,
     clock_pair: &mut ClockPair,
     watch: &mut WallStepWatch,
     last_check: &mut Instant,
     rate_limit: bool,
 ) {
-    let now = Instant::now();
+    let now = time.now();
     if rate_limit && now.saturating_duration_since(*last_check) < PULSE_WALL_CHECK_INTERVAL {
         return;
     }
     *last_check = now;
-    let Some((sampled_now, wall_ns)) = ClockPair::sample_wall_now() else {
+    let Some((sampled_now, wall_ns)) = time.wall_now() else {
         return;
     };
     let offset = wall_offset_ns(clock_pair, sampled_now, wall_ns);
@@ -1643,6 +1678,22 @@ fn observe_wall(
 }
 
 fn assemble_pcm(
+    protocol: CaptureProtocol,
+    clock_pair: ClockPair,
+    metadata: mpsc::Receiver<String>,
+    raw: mpsc::Receiver<Vec<u8>>,
+    output: mpsc::SyncSender<AudioFrame>,
+    stop: &AtomicBool,
+    stats: &AudioCaptureStats,
+) -> Result<()> {
+    assemble_pcm_with(
+        &HostTime, protocol, clock_pair, metadata, raw, output, stop, stats,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn assemble_pcm_with(
+    time: &impl CaptureTime,
     protocol: CaptureProtocol,
     mut clock_pair: ClockPair,
     metadata: mpsc::Receiver<String>,
@@ -1662,11 +1713,12 @@ fn assemble_pcm(
     // Pulse and DirectShow: the sample count and capture clock (see
     // `PulseTimeline`).
     let mut pulse = PulseTimeline::default();
-    let mut last_diagnostic = Instant::now();
+    let mut last_diagnostic = time.now();
     let mut wall_watch = WallStepWatch::default();
-    let mut last_wall_check = Instant::now()
+    let mut last_wall_check = time
+        .now()
         .checked_sub(PULSE_WALL_CHECK_INTERVAL)
-        .unwrap_or_else(Instant::now);
+        .unwrap_or_else(|| time.now());
     while !stop.load(Ordering::Acquire) {
         let line = match metadata.recv_timeout(Duration::from_millis(10)) {
             Ok(line) => line,
@@ -1683,6 +1735,7 @@ fn assemble_pcm(
         }
         if line.contains("VIDEORC_DSHOW_CLOCK version=") {
             observe_wall(
+                time,
                 &mut clock_pair,
                 &mut wall_watch,
                 &mut last_wall_check,
@@ -1702,12 +1755,16 @@ fn assemble_pcm(
         }
         let mut packet = parse_pcm_description(&line)?;
         if protocol == CaptureProtocol::Pulse {
-            observe_wall(&mut clock_pair, &mut wall_watch, &mut last_wall_check, true);
-            let stamp = packet.pts.min(latest_pulse_stamp(
-                &clock_pair,
-                Instant::now(),
-                packet.frames,
-            ));
+            observe_wall(
+                time,
+                &mut clock_pair,
+                &mut wall_watch,
+                &mut last_wall_check,
+                true,
+            );
+            let stamp = packet
+                .pts
+                .min(latest_pulse_stamp(&clock_pair, time.now(), packet.frames));
             let (position, captured) = pulse.place(stamp, packet.frames);
             packet.pts = position;
             clock.push(pulse_anchor(
@@ -1727,14 +1784,14 @@ fn assemble_pcm(
         // the PCM may trail it by as long as the packet may age (Pulse: the
         // worker stopped on a loaded Linux desktop at 100 ms, retest 153).
         let match_budget = max_capture_age(protocol);
-        let deadline = Instant::now() + match_budget;
+        let deadline = time.now() + match_budget;
         while queued.len() < wanted {
             if stop.load(Ordering::Acquire) {
                 return Ok(());
             }
             // Receive before judging the deadline: after this thread was
             // descheduled, PCM that arrived in time is already queued.
-            match raw.recv_timeout(Duration::from_millis(5)) {
+            match time.recv_pcm(&raw, Duration::from_millis(5)) {
                 Ok(bytes) => {
                     queued.extend(bytes);
                     continue;
@@ -1744,7 +1801,7 @@ fn assemble_pcm(
                     bail!("Capture PCM ended in a partial timestamped packet")
                 }
             }
-            if Instant::now() >= deadline {
+            if time.now() >= deadline {
                 bail!(
                     "Capture PCM did not match its timestamp metadata within {}ms",
                     match_budget.as_millis()
@@ -1760,9 +1817,8 @@ fn assemble_pcm(
             bail!("Capture PCM contains a non-finite sample");
         }
         diagnostics.pcm(packet, clock.last_end_pts);
-        let (timestamp_micros, captured_at) =
-            clock.interval_at(packet, clock_pts, Instant::now())?;
-        if last_diagnostic.elapsed() >= Duration::from_secs(5) {
+        let (timestamp_micros, captured_at) = clock.interval_at(packet, clock_pts, time.now())?;
+        if time.now().saturating_duration_since(last_diagnostic) >= Duration::from_secs(5) {
             tracing::info!(
                 packets = diagnostics.packets,
                 input_frames = diagnostics.input_frames,
@@ -1775,12 +1831,12 @@ fn assemble_pcm(
                 max_pcm_gap_frames = diagnostics.max_pcm_gap_frames,
                 "Capture worker interval diagnostics"
             );
-            last_diagnostic = Instant::now();
+            last_diagnostic = time.now();
         }
-        if captured_at > Instant::now() {
-            thread::sleep(captured_at.saturating_duration_since(Instant::now()));
+        if captured_at > time.now() {
+            thread::sleep(captured_at.saturating_duration_since(time.now()));
         }
-        if captured_at.elapsed() > max_capture_age(protocol) {
+        if time.now().saturating_duration_since(captured_at) > max_capture_age(protocol) {
             stats.record_dropped_frames(packet.frames as u64);
             continue;
         }
@@ -2768,100 +2824,131 @@ mod tests {
         assert!(frames.is_empty());
     }
 
+    /// Time for `assemble_pcm_with` that moves only while the assembler polls
+    /// for PCM, one poll at a time. The scripted PCM arrives once the clock is
+    /// `pcm_at` past `start`, so a packet's PCM trails its record by exactly
+    /// that, however busy the host is.
+    struct ScriptedTime {
+        start: Instant,
+        now: std::cell::Cell<Instant>,
+        pcm_at: Duration,
+        pcm: std::cell::RefCell<Option<Vec<u8>>>,
+    }
+
+    impl CaptureTime for ScriptedTime {
+        fn now(&self) -> Instant {
+            self.now.get()
+        }
+        fn wall_now(&self) -> Option<(Instant, i128)> {
+            // Matches `pair(start)`: the wall clock never steps.
+            let now = self.now.get();
+            Some((
+                now,
+                1_000_000_000 + now.duration_since(self.start).as_nanos() as i128,
+            ))
+        }
+        fn recv_pcm(
+            &self,
+            _raw: &mpsc::Receiver<Vec<u8>>,
+            poll: Duration,
+        ) -> Result<Vec<u8>, mpsc::RecvTimeoutError> {
+            if self.now.get().duration_since(self.start) >= self.pcm_at
+                && let Some(bytes) = self.pcm.borrow_mut().take()
+            {
+                return Ok(bytes);
+            }
+            self.now.set(self.now.get() + poll);
+            Err(mpsc::RecvTimeoutError::Timeout)
+        }
+    }
+
     #[test]
     fn pulse_pcm_may_trail_its_record_within_the_pulse_age_budget() {
-        // The PCM arrives 130 ms after its record: past the 100 ms that
-        // stopped the Linux worker under load, inside Pulse's 250 ms budget.
-        let late = Duration::from_millis(130);
         let bytes: Vec<u8> = (0..960).flat_map(|_| 0.25f32.to_le_bytes()).collect();
-        // `Some(delay)`: the PCM follows its record by `delay`. `None`: it
-        // arrives only once `assemble_pcm` has returned, so a refusal never
-        // depends on how long the host took to read the record.
-        let run = |protocol: CaptureProtocol,
-                   pair: ClockPair,
-                   records: Vec<String>,
-                   delay: Option<Duration>| {
+        // The record is read at `start`; its PCM lands `pcm_at` later on the
+        // scripted clock (a real sleep raced the budget on loaded runners).
+        let run = |protocol: CaptureProtocol, records: Vec<String>, pcm_at: Duration| {
+            let start = Instant::now();
+            let time = ScriptedTime {
+                start,
+                now: std::cell::Cell::new(start),
+                pcm_at,
+                pcm: std::cell::RefCell::new(Some(bytes.clone())),
+            };
             let (meta_tx, meta_rx) = mpsc::channel();
             for record in records {
                 meta_tx.send(record).unwrap();
             }
             drop(meta_tx);
-            let (raw_tx, raw_rx) = mpsc::channel();
-            let (returned_tx, returned_rx) = mpsc::channel::<()>();
-            let bytes = bytes.clone();
-            let started = Instant::now();
-            let sender = thread::spawn(move || {
-                match delay {
-                    Some(delay) => thread::sleep(delay),
-                    // Ends when `returned_tx` drops after `assemble_pcm`.
-                    None => while returned_rx.recv().is_ok() {},
-                }
-                let sent = Instant::now();
-                let _ = raw_tx.send(bytes);
-                sent
-            });
+            // Held open: only the scripted clock delivers PCM.
+            let (_raw_tx, raw_rx) = mpsc::channel::<Vec<u8>>();
             let (out_tx, out_rx) = mpsc::sync_channel(4);
-            let stats = Arc::new(AudioCaptureStats::default());
-            let result = assemble_pcm(
+            let stats = AudioCaptureStats::default();
+            let result = assemble_pcm_with(
+                &time,
                 protocol,
-                pair,
+                pair(start),
                 meta_rx,
                 raw_rx,
                 out_tx,
                 &AtomicBool::new(false),
                 &stats,
             );
-            drop(returned_tx);
-            let arrived_after = sender.join().unwrap().saturating_duration_since(started);
-            (result, out_rx.try_iter().collect::<Vec<_>>(), arrived_after)
+            (result, out_rx.try_iter().collect::<Vec<_>>())
         };
-        // A loaded CI host (macOS runners, the full suite in parallel) can
-        // oversleep the 130 ms past the whole 250 ms budget; that attempt
-        // proves nothing about the budget, so it is retried. A miss with the
-        // PCM inside the budget still fails.
-        let mut attempts = 0;
-        let (result, frames) = loop {
-            attempts += 1;
-            let wall_us = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_micros() as i64;
-            let pts = i64::try_from(i128::from(wall_us - 10_000) * 48_000 / 1_000_000).unwrap();
-            let (result, frames, arrived_after) = run(
-                CaptureProtocol::Pulse,
-                ClockPair::sample().unwrap(),
-                vec![pcm(0, pts, 480)],
-                Some(late),
-            );
-            let host_overslept = arrived_after >= PULSE_MAX_CAPTURE_AGE;
-            if !(host_overslept && result.is_err()) || attempts == 5 {
-                break (result, frames);
-            }
-        };
+        // `pair(start)` reads wall 1 s at `start`: 47_520 / 48 kHz = 0.99 s,
+        // so the packet was captured 10 ms before its record was read.
+        let pulse_record = || vec![pcm(0, 47_520, 480)];
+
+        // 130 ms: past the 100 ms that stopped the Linux worker under load,
+        // inside Pulse's 250 ms budget. The packet goes out; the worker then
+        // ends only because the test's record stream does.
+        let (result, frames) = run(
+            CaptureProtocol::Pulse,
+            pulse_record(),
+            Duration::from_millis(130),
+        );
         assert!(
-            result.as_ref().map_or_else(
-                |error| error.to_string().contains("stopped producing"),
-                |_| true
-            ),
+            result
+                .as_ref()
+                .unwrap_err()
+                .to_string()
+                .contains("stopped producing"),
             "{result:?}"
         );
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].samples, vec![0.25; 960]);
-        // macOS and Windows keep their 100 ms match budget. Their PCM is held
-        // until the refusal: a 130 ms delay counted from before the record was
-        // read raced the budget, which starts at the read, and a loaded CI
-        // host that took over 30 ms to get there let the PCM in (#1349).
-        let (result, frames, _) = run(
-            CaptureProtocol::AvFoundation,
-            pair(Instant::now()),
-            vec![metadata(), pcm(0, 0, 480)],
-            None,
+
+        // Past the 250 ms budget, Pulse refuses too.
+        let (result, frames) = run(
+            CaptureProtocol::Pulse,
+            pulse_record(),
+            Duration::from_millis(260),
         );
         assert!(
             result
+                .as_ref()
                 .unwrap_err()
                 .to_string()
-                .contains("did not match its timestamp metadata within 100ms")
+                .contains("did not match its timestamp metadata within 250ms"),
+            "{result:?}"
+        );
+        assert!(frames.is_empty());
+
+        // macOS and Windows keep their 100 ms match budget: the same 130 ms
+        // trail is refused.
+        let (result, frames) = run(
+            CaptureProtocol::AvFoundation,
+            vec![metadata(), pcm(0, 0, 480)],
+            Duration::from_millis(130),
+        );
+        assert!(
+            result
+                .as_ref()
+                .unwrap_err()
+                .to_string()
+                .contains("did not match its timestamp metadata within 100ms"),
+            "{result:?}"
         );
         assert!(frames.is_empty());
     }
