@@ -7,7 +7,8 @@
 //!   (S0: the same cost as 16-bit half).
 //! - **The pass:** one Metal command buffer on its own queue: a quarter-size
 //!   copy of the camera, weighted by `1 - matte` so the person never bleeds
-//!   into the blur; a separable Gaussian; then a full-size draw that refines
+//!   into the blur, halved again (exact 2x2 averages) until the blur's sigma
+//!   is at most 6 px there; a separable Gaussian at that level; then a full-size draw that refines
 //!   the matte against the camera's luma (a small joint bilateral) and mixes
 //!   the camera over the blur or the picture. The output is a BGRA
 //!   IOSurface buffer from a `CVPixelBufferPool`, so the compositor keeps
@@ -99,6 +100,17 @@ kernel void k_down(texture2d<float, access::sample> src [[texture(0)]],
         w = 1.0 - smoothstep(0.15, 0.5, m);
     }
     out.write(float4(c * w, w), gid);
+}
+
+// Half size by an exact 2x2 average (one bilinear tap at the block's
+// centre): the room's fine pattern cannot alias into a coarser level.
+kernel void k_half(texture2d<float, access::sample> in [[texture(0)]],
+                   texture2d<float, access::write> out [[texture(1)]],
+                   uint2 gid [[thread_position_in_grid]]) {
+    if (gid.x >= out.get_width() || gid.y >= out.get_height()) return;
+    constexpr sampler s(filter::linear, address::clamp_to_edge, coord::normalized);
+    float2 uv = (float2(gid) + 0.5) / float2(out.get_width(), out.get_height());
+    out.write(in.sample(s, uv), gid);
 }
 
 struct BlurParams { int radius; float sigma; int dir_x; int dir_y; };
@@ -456,6 +468,31 @@ impl PersonSegmenter for VisionSegmenter {
     }
 }
 
+#[derive(Clone)]
+struct Pyramid {
+    key: (usize, usize, usize),
+    levels: Vec<Retained<Texture>>,
+    scratch: Retained<Texture>,
+}
+
+/// The largest blur sigma, in pixels of the level it runs at.
+const MAX_LEVEL_SIGMA: f32 = 6.0;
+
+/// How many halvings past quarter size the blur of `sigma_px` (full-frame
+/// pixels) runs at, and its sigma there: halve while the sigma there is over
+/// [`MAX_LEVEL_SIGMA`] and the level keeps at least 8 px on its short side.
+fn blur_levels(sigma_px: f32, short_side: usize) -> (usize, f32) {
+    let mut sigma = (sigma_px / 4.0).max(0.5);
+    let mut side = short_side.div_ceil(4);
+    let mut halvings = 0;
+    while sigma > MAX_LEVEL_SIGMA && side / 2 >= 8 {
+        sigma /= 2.0;
+        side = side.div_ceil(2);
+        halvings += 1;
+    }
+    (halvings, sigma)
+}
+
 struct Picture {
     texture: Retained<Texture>,
     width: f32,
@@ -471,7 +508,10 @@ pub(crate) struct MetalEffectRenderer {
     compose: Retained<RenderPipeline>,
     output_pool: Option<BufferPool>,
     staging: Option<Retained<Texture>>,
-    quarter: Option<[Retained<Texture>; 2]>,
+    /// The blur pyramid for one frame size and depth: the quarter-size copy,
+    /// its halvings, and a scratch texture at the last level.
+    pyramid: Option<Pyramid>,
+    half: Retained<ComputePipeline>,
     matte: Option<Retained<Texture>>,
     blank: Retained<Texture>,
     pictures: HashMap<PathBuf, Option<Picture>>,
@@ -497,7 +537,14 @@ impl MetalEffectRenderer {
                 .newFunctionWithName(&NSString::from_str(name))
                 .ok_or_else(|| unavailable(name))
         };
-        let (k_down, k_blur) = (function("k_down")?, function("k_blur")?);
+        let (k_down, k_blur, k_half) = (
+            function("k_down")?,
+            function("k_blur")?,
+            function("k_half")?,
+        );
+        let half = device
+            .newComputePipelineStateWithFunction_error(&k_half)
+            .map_err(|_| unavailable("k_half"))?;
         let (v_full, f_compose) = (function("v_full")?, function("f_compose")?);
         let down = device
             .newComputePipelineStateWithFunction_error(&k_down)
@@ -531,7 +578,8 @@ impl MetalEffectRenderer {
             compose,
             output_pool: None,
             staging: None,
-            quarter: None,
+            pyramid: None,
+            half,
             matte: None,
             blank,
             pictures: HashMap::new(),
@@ -600,26 +648,39 @@ impl MetalEffectRenderer {
         Ok(texture)
     }
 
-    fn quarter_textures(&mut self, width: usize, height: usize) -> Option<[Retained<Texture>; 2]> {
-        let (qw, qh) = (width.div_ceil(4).max(1), height.div_ceil(4).max(1));
+    /// The pyramid for a `width` x `height` frame with `halvings` levels past
+    /// the quarter-size copy, made once per size and depth.
+    fn pyramid(&mut self, width: usize, height: usize, halvings: usize) -> Option<Pyramid> {
+        let key = (width, height, halvings);
         if self
-            .quarter
+            .pyramid
             .as_ref()
-            .is_none_or(|textures| textures[0].width() != qw || textures[0].height() != qh)
+            .is_none_or(|pyramid| pyramid.key != key)
         {
-            let make = || {
+            let make = |w: usize, h: usize| {
                 make_texture(
                     &self.device,
-                    qw,
-                    qh,
+                    w,
+                    h,
                     MTLPixelFormat::RGBA16Float,
                     MTLTextureUsage::ShaderRead | MTLTextureUsage::ShaderWrite,
                     MTLStorageMode::Private,
                 )
             };
-            self.quarter = Some([make()?, make()?]);
+            let (mut w, mut h) = (width.div_ceil(4).max(1), height.div_ceil(4).max(1));
+            let mut levels = vec![make(w, h)?];
+            for _ in 0..halvings {
+                (w, h) = (w.div_ceil(2).max(1), h.div_ceil(2).max(1));
+                levels.push(make(w, h)?);
+            }
+            let scratch = make(w, h)?;
+            self.pyramid = Some(Pyramid {
+                key,
+                levels,
+                scratch,
+            });
         }
-        self.quarter.clone()
+        self.pyramid.clone()
     }
 
     fn matte_texture(&mut self, matte: &Matte) -> Option<Retained<Texture>> {
@@ -727,8 +788,10 @@ impl MetalEffectRenderer {
             .ok_or_else(|| "No command buffer.".to_string())?;
         let mut blurred = None;
         if mode == 0 {
-            let quarter = self
-                .quarter_textures(width, height)
+            // Halve past quarter size until the sigma there is at most 6 px.
+            let (halvings, sigma) = blur_levels(sigma_px, width.min(height));
+            let pyramid = self
+                .pyramid(width, height, halvings)
                 .ok_or_else(|| "No blur textures.".to_string())?;
             let encoder = command_buffer
                 .computeCommandEncoder()
@@ -742,15 +805,33 @@ impl MetalEffectRenderer {
                 encoder.setTexture_atIndex(Some(&source), 0);
                 encoder
                     .setTexture_atIndex(Some(matte_texture.as_deref().unwrap_or(&self.blank)), 1);
-                encoder.setTexture_atIndex(Some(&quarter[0]), 2);
+                encoder.setTexture_atIndex(Some(&pyramid.levels[0]), 2);
                 set_compute_bytes(&encoder, &down);
             }
-            dispatch(&encoder, quarter[0].width(), quarter[0].height());
-            // The pass runs at quarter size: a quarter of the sigma there.
-            let sigma = (sigma_px / 4.0).max(0.5);
+            dispatch(
+                &encoder,
+                pyramid.levels[0].width(),
+                pyramid.levels[0].height(),
+            );
+            encoder.setComputePipelineState(&self.half);
+            for pair in pyramid.levels.windows(2) {
+                unsafe {
+                    encoder.setTexture_atIndex(Some(&pair[0]), 0);
+                    encoder.setTexture_atIndex(Some(&pair[1]), 1);
+                }
+                dispatch(&encoder, pair[1].width(), pair[1].height());
+            }
+            let last = pyramid
+                .levels
+                .last()
+                .expect("a pyramid has a level")
+                .clone();
             let taps = (sigma * 3.0).ceil() as i32;
             encoder.setComputePipelineState(&self.blur);
-            for (input, output, dir) in [(0usize, 1usize, (1, 0)), (1, 0, (0, 1))] {
+            for (input, output, dir) in [
+                (&last, &pyramid.scratch, (1, 0)),
+                (&pyramid.scratch, &last, (0, 1)),
+            ] {
                 let params = BlurParams {
                     radius: taps,
                     sigma,
@@ -758,14 +839,14 @@ impl MetalEffectRenderer {
                     dir_y: dir.1,
                 };
                 unsafe {
-                    encoder.setTexture_atIndex(Some(&quarter[input]), 0);
-                    encoder.setTexture_atIndex(Some(&quarter[output]), 1);
+                    encoder.setTexture_atIndex(Some(input), 0);
+                    encoder.setTexture_atIndex(Some(output), 1);
                     set_compute_bytes(&encoder, &params);
                 }
-                dispatch(&encoder, quarter[0].width(), quarter[0].height());
+                dispatch(&encoder, last.width(), last.height());
             }
             encoder.endEncoding();
-            blurred = Some(quarter[0].clone());
+            blurred = Some(last);
         }
 
         let (image_texture, image_xform) = match &picture {
@@ -1153,6 +1234,24 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn the_blur_runs_where_its_sigma_is_at_most_six_pixels() {
+        // Strong blur at 1080p (48 px): quarter 12, one halving to 6.
+        assert_eq!(blur_levels(48.0, 1080), (1, 6.0));
+        // At 4K (96 px): quarter 24, two halvings to 6.
+        assert_eq!(blur_levels(96.0, 2160), (2, 6.0));
+        // The 4K cover (144 px): quarter 36, three halvings to 4.5.
+        assert_eq!(blur_levels(144.0, 2160), (3, 4.5));
+        // Slight blur at 720p (13.7 px): stays at quarter size.
+        let (halvings, sigma) = blur_levels(13.7, 720);
+        assert_eq!(halvings, 0);
+        assert!((sigma - 3.425).abs() < 1e-4);
+        // A level never drops under 8 px on its short side: 64 px (quarter
+        // 16) halves once, to 8; 60 px (quarter 15) never does.
+        assert_eq!(blur_levels(200.0, 64).0, 1);
+        assert_eq!(blur_levels(200.0, 60).0, 0);
     }
 
     #[test]
