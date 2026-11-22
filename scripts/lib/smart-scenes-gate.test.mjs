@@ -12,6 +12,12 @@ import {
   followBudgetMs,
   followGate,
   frostFeaturesFromRawFrames,
+  CONTENT_CLOCK,
+  CONTENT_CLOCK_PERIOD_MS,
+  HIDE_CONTENT_BUDGET,
+  decodeContentClock,
+  frostRunVerdict,
+  hiddenContentVerdict,
   hideSpanVerdict,
   newScenesGate,
   passwordManagerGate,
@@ -100,6 +106,260 @@ describe('frostFeaturesFromRawFrames', () => {
       assert.equal(typeof feature.sharp, 'number')
       assert.equal(feature.centre, 'red')
     }
+  })
+})
+
+describe('content clock (plan 210 D8)', () => {
+  const W = 320
+  const H = 180
+  /** The fixture's strip, cell for cell (fixture-window.swift `contentClockCells`). */
+  function cells(epochMs) {
+    const value = Math.floor(epochMs / CONTENT_CLOCK.stepMs) % 2 ** CONTENT_CLOCK.dataBits
+    const out = [true, false]
+    let ones = 0
+    for (let bit = CONTENT_CLOCK.dataBits - 1; bit >= 0; bit -= 1) {
+      const on = ((value >> bit) & 1) === 1
+      if (on) ones += 1
+      out.push(on)
+    }
+    out.push(ones % 2 === 1)
+    return out
+  }
+  function clockFrame(epochMs, { strip = cells(epochMs), blur = false } = {}) {
+    const frame = Buffer.alloc(W * H * 3)
+    for (let index = 0; index < W * H; index += 1) {
+      frame[index * 3] = RED[0]
+      frame[index * 3 + 1] = RED[1]
+      frame[index * 3 + 2] = RED[2]
+    }
+    const x0 = CONTENT_CLOCK.x0 * W
+    const cellWidth = ((CONTENT_CLOCK.x1 - CONTENT_CLOCK.x0) * W) / CONTENT_CLOCK.cells
+    for (let y = Math.round(CONTENT_CLOCK.y0 * H); y < Math.round(CONTENT_CLOCK.y1 * H); y += 1) {
+      for (let x = Math.floor(x0); x < Math.ceil(CONTENT_CLOCK.x1 * W); x += 1) {
+        const cell = Math.min(CONTENT_CLOCK.cells - 1, Math.floor((x + 0.5 - x0) / cellWidth))
+        const value = strip[cell] ? 255 : 0
+        frame.fill(value, (y * W + x) * 3, (y * W + x) * 3 + 3)
+      }
+    }
+    if (!blur) return frame
+    // A 3x3 box blur stands in for the encoder and the scaler.
+    const out = Buffer.from(frame)
+    for (let y = 1; y < H - 1; y += 1) {
+      for (let x = 1; x < W - 1; x += 1) {
+        for (let c = 0; c < 3; c += 1) {
+          let sum = 0
+          for (let dy = -1; dy <= 1; dy += 1)
+            for (let dx = -1; dx <= 1; dx += 1) sum += frame[((y + dy) * W + x + dx) * 3 + c]
+          out[(y * W + x) * 3 + c] = Math.round(sum / 9)
+        }
+      }
+    }
+    return out
+  }
+
+  it('reads back the draw time the fixture wrote, through a blur', () => {
+    for (const epochMs of [1_795_365_580_047, 1_795_365_584_050, 1_795_365_600_000]) {
+      const expected =
+        Math.floor(epochMs / CONTENT_CLOCK.stepMs) * CONTENT_CLOCK.stepMs -
+        Math.floor(epochMs / CONTENT_CLOCK_PERIOD_MS) * CONTENT_CLOCK_PERIOD_MS
+      assert.equal(decodeContentClock(clockFrame(epochMs), W, H), expected)
+      assert.equal(decodeContentClock(clockFrame(epochMs, { blur: true }), W, H), expected)
+    }
+  })
+
+  it('reads nothing from a frame without the strip, or with a bad parity bit', () => {
+    const flat = clockFrame(0, { strip: Array(CONTENT_CLOCK.cells).fill(false) })
+    assert.equal(decodeContentClock(flat, W, H), null)
+    const strip = cells(1_795_365_580_047)
+    strip[CONTENT_CLOCK.cells - 1] = !strip[CONTENT_CLOCK.cells - 1]
+    assert.equal(decodeContentClock(clockFrame(0, { strip }), W, H), null)
+    const frosted = Buffer.alloc(W * H * 3, 60)
+    assert.equal(decodeContentClock(frosted, W, H), null)
+  })
+
+  it('features carry the clock for each frame', () => {
+    const buffer = Buffer.concat([clockFrame(1_795_365_580_047), clockFrame(1_795_365_580_080)])
+    const features = frostFeaturesFromRawFrames(buffer, { width: W, height: H })
+    assert.equal(features.length, 2)
+    assert.ok(features.every((feature) => typeof feature.contentMs === 'number'))
+    // Drawn 33 ms apart, read in 8 ms steps.
+    const step = features[1].contentMs - features[0].contentMs
+    assert.ok(step >= 32 && step <= 40, `step ${step}`)
+  })
+})
+
+describe('hiddenContentVerdict', () => {
+  const hideGateAtMs = 1_795_365_580_050
+  const showAtMs = hideGateAtMs + 4000
+  const wrap = (epochMs) =>
+    (Math.floor(epochMs / CONTENT_CLOCK.stepMs) * CONTENT_CLOCK.stepMs) % CONTENT_CLOCK_PERIOD_MS
+  /** One output frame per entry: a drawn time (live) or null (the frost). */
+  function features(drawnTimes) {
+    return {
+      features: drawnTimes.map((drawnAtMs, index) => ({
+        index,
+        centre: 'red',
+        sharp: drawnAtMs == null ? 0 : 0.0013,
+        contentMs: drawnAtMs == null ? null : wrap(drawnAtMs)
+      })),
+      ptsMs: drawnTimes.map((_, index) => index * 33.3)
+    }
+  }
+  const live = (fromMs, toMs, stepMs = 100) => {
+    const out = []
+    for (let t = fromMs; t < toMs; t += stepMs) out.push(t, t, t)
+    return out
+  }
+  const frost = (count) => Array(count).fill(null)
+
+  it('passes when the frost covers every picture of the hidden span', () => {
+    const input = features([
+      ...live(hideGateAtMs - 2000, hideGateAtMs - 30),
+      ...frost(120),
+      ...live(showAtMs + 20, showAtMs + 2000)
+    ])
+    const verdict = hiddenContentVerdict({ ...input, hideGateAtMs, showAtMs })
+    assert.deepEqual(verdict.failures, [])
+    // Read in 8 ms steps.
+    assert.ok(verdict.lastBeforeHideMs >= 30, `before ${verdict.lastBeforeHideMs}`)
+    assert.ok(verdict.firstAfterShowMs >= 12, `after ${verdict.firstAfterShowMs}`)
+  })
+
+  it('names the picture held while hidden and published at the show (the S3 leak)', () => {
+    // The capture's last frame before the show was taken 70 ms before it;
+    // the show published it, then the first frame taken after the show.
+    const input = features([
+      ...live(hideGateAtMs - 2000, hideGateAtMs - 30),
+      ...frost(120),
+      showAtMs - 70,
+      showAtMs - 70,
+      showAtMs - 70,
+      ...live(showAtMs + 30, showAtMs + 2000)
+    ])
+    const verdict = hiddenContentVerdict({ ...input, hideGateAtMs, showAtMs })
+    assert.equal(verdict.ok, false)
+    assert.equal(verdict.leaks.length, 3)
+    const { drawnBeforeShowMs } = verdict.leaks[0]
+    assert.ok(drawnBeforeShowMs >= 70 && drawnBeforeShowMs < 78, `${drawnBeforeShowMs}`)
+    assert.match(verdict.failures.join('; '), /show the screen while it was hidden/)
+  })
+
+  it('names a picture drawn after the gate closed at the hide edge', () => {
+    const input = features([
+      ...live(hideGateAtMs - 2000, hideGateAtMs - 30),
+      hideGateAtMs + 40,
+      ...frost(120),
+      ...live(showAtMs + 20, showAtMs + 2000)
+    ])
+    const verdict = hiddenContentVerdict({ ...input, hideGateAtMs, showAtMs })
+    assert.equal(verdict.leaks.length, 1)
+    const { drawnAfterHideMs } = verdict.leaks[0]
+    assert.ok(drawnAfterHideMs > 32 && drawnAfterHideMs <= 40, `${drawnAfterHideMs}`)
+  })
+
+  it('lets a picture drawn within one refresh of the show through', () => {
+    const input = features([
+      ...live(hideGateAtMs - 2000, hideGateAtMs - 30),
+      ...frost(120),
+      showAtMs - HIDE_CONTENT_BUDGET.showDisplaySlackMs + 9,
+      ...live(showAtMs + 20, showAtMs + 2000)
+    ])
+    assert.deepEqual(hiddenContentVerdict({ ...input, hideGateAtMs, showAtMs }).failures, [])
+  })
+
+  it('refuses to judge blind, and names an old picture coming back', () => {
+    const blind = features([...live(hideGateAtMs - 2000, hideGateAtMs - 30), ...frost(120)])
+    for (const feature of blind.features) feature.contentMs = null
+    assert.match(
+      hiddenContentVerdict({ ...blind, hideGateAtMs, showAtMs }).failures.join('; '),
+      /readable on only 0\/60 live frames/
+    )
+    const stale = features([
+      ...live(hideGateAtMs - 2000, hideGateAtMs - 30),
+      ...frost(120),
+      ...live(showAtMs + 20, showAtMs + 600),
+      hideGateAtMs - 500,
+      ...live(showAtMs + 700, showAtMs + 2000)
+    ])
+    assert.match(
+      hiddenContentVerdict({ ...stale, hideGateAtMs, showAtMs }).failures.join('; '),
+      /ran backwards 1 time/
+    )
+  })
+})
+
+describe('frostRunVerdict', () => {
+  const hideAtMs = 3000
+  const showAtMs = 7000
+  /** [{fromMs, toMs, kind}] in the file's own timeline (pts), 30 fps. */
+  function run(segments) {
+    const features = []
+    const ptsMs = []
+    let tick = 0
+    for (const segment of segments) {
+      for (let t = segment.fromMs; t < segment.toMs; t += 33.3) {
+        ptsMs.push(t)
+        const frosted = segment.kind === 'frosted'
+        features.push({
+          index: features.length,
+          centre: segment.kind === 'white' ? 'white' : 'red',
+          sharp: frosted ? 0 : 0.0013,
+          repeated: frosted ? features.length > 0 : tick++ % 3 !== 0
+        })
+      }
+    }
+    return { features, ptsMs }
+  }
+
+  it('judges the frost in the file timeline when the flash anchor is 400 ms early (S3)', () => {
+    // The file shows the frost from pts 3030 to 7030; the anchor puts every
+    // frame 400 ms early on the wall clock, so the frost "starts" before the
+    // press. hideSpanVerdict reads that as live frames before the show.
+    const input = run([
+      { fromMs: 0, toMs: 3030, kind: 'live' },
+      { fromMs: 3030, toMs: 7030, kind: 'frosted' },
+      { fromMs: 7030, toMs: 10_000, kind: 'live' }
+    ])
+    const old = hideSpanVerdict({ ...input, offsetMs: -400, hideAtMs, showAtMs })
+    assert.equal(old.ok, false, 'the wall-clock judge misreads the shifted file')
+    const verdict = frostRunVerdict({ ...input, offsetMs: -400, hideAtMs, showAtMs })
+    assert.deepEqual(verdict.failures, [])
+    assert.equal(verdict.hidden.leaks.length, 0)
+    assert.ok(verdict.frost.durationMs >= 3990 && verdict.frost.durationMs <= 4040)
+  })
+
+  it('names a live frame inside the frost, wherever the anchor puts it', () => {
+    const input = run([
+      { fromMs: 0, toMs: 3030, kind: 'live' },
+      { fromMs: 3030, toMs: 5000, kind: 'frosted' },
+      { fromMs: 5000, toMs: 5020, kind: 'live' },
+      { fromMs: 5020, toMs: 7030, kind: 'frosted' },
+      { fromMs: 7030, toMs: 10_000, kind: 'live' }
+    ])
+    const verdict = frostRunVerdict({ ...input, offsetMs: 0, hideAtMs, showAtMs })
+    assert.equal(verdict.ok, false)
+    assert.equal(verdict.hidden.leaks.length, 1)
+    assert.match(verdict.failures.join('; '), /1 live frame\(s\) inside the frost/)
+  })
+
+  it('names a frost much shorter than the press span', () => {
+    const input = run([
+      { fromMs: 0, toMs: 3800, kind: 'live' },
+      { fromMs: 3800, toMs: 6200, kind: 'frosted' },
+      { fromMs: 6200, toMs: 10_000, kind: 'live' }
+    ])
+    assert.match(
+      frostRunVerdict({ ...input, offsetMs: 0, hideAtMs, showAtMs }).failures.join('; '),
+      /the frost lasts \d+ ms in the file, the screen was hidden for 4000 ms/
+    )
+  })
+
+  it('names a file with no frost at all', () => {
+    const input = run([{ fromMs: 0, toMs: 10_000, kind: 'live' }])
+    assert.match(
+      frostRunVerdict({ ...input, offsetMs: 0, hideAtMs, showAtMs }).failures.join('; '),
+      /no frosted frame/
+    )
   })
 })
 

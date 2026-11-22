@@ -16,6 +16,15 @@
 //   --x 80 --y 80                    bottom-left origin on the main display
 //   --fps 30                         redraw cadence
 //
+// Content clock (plan 210 D8): a strip of 17 black and white cells along the
+// top right carries the wall time each frame was drawn, so a smoke can read
+// from any recorded frame WHEN its picture was on the screen, without
+// aligning the file's timeline to a wall clock. Cells, left to right: a white
+// guard, a black guard, 14 bits of (epoch ms / 8) mod 2^14 (most significant
+// first), and an even-parity bit. `scripts/lib/smart-scenes-gate.mjs`
+// (`decodeContentClock`) reads it back; the geometry lives in both files.
+// It is not drawn during a flash.
+//
 // Signals: SIGUSR1 flashes the whole window white for 200 ms and prints
 // `flash drawn_at_ms=<epoch ms>` when the first white frame is drawn. The
 // probe uses that frame as a clock anchor between its wall clock and the
@@ -102,6 +111,30 @@ func epochMilliseconds() -> Int64 {
   Int64((Date().timeIntervalSince1970 * 1000).rounded())
 }
 
+/// The content clock's geometry, in fractions of the view (origin top left,
+/// as the decoder reads a frame). Keep in step with CONTENT_CLOCK in
+/// scripts/lib/smart-scenes-gate.mjs.
+let contentClockX0: CGFloat = 0.45
+let contentClockX1: CGFloat = 0.97
+let contentClockY0: CGFloat = 0.03
+let contentClockY1: CGFloat = 0.10
+let contentClockDataBits = 14
+let contentClockStepMs: Int64 = 8
+
+/// The 17 cells for one draw time: guards 1 and 0, the data bits, parity.
+func contentClockCells(epochMs: Int64) -> [Bool] {
+  let value = Int((epochMs / contentClockStepMs) & Int64((1 << contentClockDataBits) - 1))
+  var cells: [Bool] = [true, false]
+  var ones = 0
+  for bit in stride(from: contentClockDataBits - 1, through: 0, by: -1) {
+    let on = (value >> bit) & 1 == 1
+    if on { ones += 1 }
+    cells.append(on)
+  }
+  cells.append(ones % 2 == 1)
+  return cells
+}
+
 final class FixtureView: NSView {
   let color: NSColor
   let letter: String
@@ -160,6 +193,24 @@ final class FixtureView: NSView {
     let counterText = String(format: "%08llu", frameCounter) as NSString
     counterText.draw(
       at: NSPoint(x: 16, y: bounds.height - 56), withAttributes: counterAttributes)
+
+    // The content clock: when this frame was drawn, readable from any copy.
+    if !flashing {
+      let cells = contentClockCells(epochMs: epochMilliseconds())
+      let stripX = bounds.width * contentClockX0
+      let stripWidth = bounds.width * (contentClockX1 - contentClockX0)
+      // AppKit's origin is bottom left; the fractions are from the top.
+      let stripY = bounds.height * (1 - contentClockY1)
+      let stripHeight = bounds.height * (contentClockY1 - contentClockY0)
+      let cellWidth = stripWidth / CGFloat(cells.count)
+      for (index, on) in cells.enumerated() {
+        (on ? NSColor.white : NSColor.black).setFill()
+        NSRect(
+          x: stripX + CGFloat(index) * cellWidth, y: stripY, width: cellWidth + 0.5,
+          height: stripHeight
+        ).fill()
+      }
+    }
 
     // Motion the probe can see after downscaling: a white block that sweeps
     // the bottom-left 40% of the window in 12 steps (bottom 8% of the height).

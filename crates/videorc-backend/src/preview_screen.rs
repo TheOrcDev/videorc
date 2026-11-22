@@ -48,7 +48,7 @@ use crate::screen_capture::{
 };
 use crate::screen_privacy::{
     ScreenFrameAdmission, ScreenPrivacyCursor, ScreenPrivacyGate, admit_screen_frame,
-    hidden_still_bgra,
+    admit_screen_frame_captured_at, hidden_still_bgra,
 };
 use crate::source_registry::{
     SourceConsumerReason, SourceIdentityConfidence, SourceKey, SourceKind,
@@ -731,6 +731,12 @@ impl ScreenCaptureFrameStatusCounts {
 }
 
 #[cfg(any(target_os = "macos", test))]
+/// Plan 210 D8: how much older than its arrival an undated ScreenCaptureKit
+/// callback counts, so a frame without a capture time is never mistaken for
+/// one taken after a Show it may predate.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+const SCREEN_CAPTURE_TIME_UNKNOWN_MARGIN: Duration = Duration::from_millis(100);
+
 fn record_screen_capture_callback_status(
     shared: &Arc<StdMutex<PreviewScreenShared>>,
     callback_at: Instant,
@@ -1084,6 +1090,17 @@ pub struct PreviewScreenShared {
     /// Storage identity of the still in the CPU store, so a show never puts a
     /// held frame over a newer live one.
     still_identity: Option<u64>,
+    /// Plan 210 D8, the Show edge: the held frame was captured while hidden,
+    /// so a show publishes it only once this capture proves it is still the
+    /// screen after the Show ([`confirm_cpu_store_current`]: macOS
+    /// ScreenCaptureKit sends an idle callback, dated, for every frame time
+    /// nothing changed). A capture with no such proof (the fixture
+    /// publisher, Linux PipeWire, the Windows paths) publishes it at the
+    /// Show, as before.
+    show_waits_for_capture_evidence: bool,
+    /// When `screen.show` last opened the gate with a held frame waiting,
+    /// for the release's diagnostic.
+    show_pending_since: Option<Instant>,
     /// Live frames held back while hidden.
     privacy_held_frames: u64,
     /// Plan 210 S3: the capture generation stamped on the next publish (a
@@ -1190,6 +1207,9 @@ impl PreviewScreenShared {
             frame_store: FrameStore::new_with_surface_backing_tracker(1, tracker),
             privacy,
             capture_generation: generation,
+            // macOS captures through ScreenCaptureKit, whose callbacks carry
+            // the capture time (PTS) and say when nothing changed (idle).
+            show_waits_for_capture_evidence: cfg!(target_os = "macos"),
             ..Self::default()
         }
     }
@@ -1227,9 +1247,14 @@ fn publish_gated_bgra_frame(
 ) -> Vec<u8> {
     let frame_len = bytes.len();
     let generation = guard.capture_generation;
-    match admit_screen_frame(guard.privacy.view(), &mut guard.privacy_cursor) {
+    match admit_screen_frame_captured_at(
+        guard.privacy.view(),
+        &mut guard.privacy_cursor,
+        Some(captured_at),
+    ) {
         ScreenFrameAdmission::Publish => {
             guard.held_live = None;
+            guard.show_pending_since = None;
             guard.frame_store.publish_with_metadata(
                 sequence,
                 width,
@@ -1336,6 +1361,9 @@ fn frost_cpu_store_now(guard: &mut PreviewScreenShared) -> bool {
         return false;
     }
     let (width, height) = (frame.width, frame.height);
+    // A hide again before the previous show was confirmed: the store still
+    // shows that still, and the live picture already waits in `held_live`.
+    let covering_a_still = Some(frame.storage_identity()) == guard.still_identity;
     let still = hidden_still_bgra(width, height);
     guard.frames_captured = guard.frames_captured.saturating_add(1);
     let sequence = guard.frames_captured;
@@ -1363,16 +1391,19 @@ fn frost_cpu_store_now(guard: &mut PreviewScreenShared) -> bool {
         still_generation,
     );
     // The live picture stays private for the show.
-    guard.held_live = Some(HeldLiveFrame {
-        width,
-        height,
-        bytes: frame.bytes.clone(),
-        generation: held_generation,
-        source_iosurface: frame.source_iosurface.clone(),
-        source_pixel_buffer: frame.source_pixel_buffer.clone(),
-        #[cfg(target_os = "windows")]
-        source_d3d11_texture: None,
-    });
+    if !covering_a_still {
+        guard.held_live = Some(HeldLiveFrame {
+            width,
+            height,
+            bytes: frame.bytes.clone(),
+            generation: held_generation,
+            source_iosurface: frame.source_iosurface.clone(),
+            source_pixel_buffer: frame.source_pixel_buffer.clone(),
+            #[cfg(target_os = "windows")]
+            source_d3d11_texture: None,
+        });
+    }
+    guard.show_pending_since = None;
     true
 }
 
@@ -1407,7 +1438,51 @@ fn release_cpu_store_now(guard: &mut PreviewScreenShared) -> bool {
     );
     guard.latest_frame_generation = generation;
     guard.still_identity = None;
+    guard.show_pending_since = None;
     true
+}
+
+/// Plan 210 D8, the Show edge: the capture proved, with a callback taken at
+/// `evidence_at`, that nothing changed since its last frame. When that
+/// moment is at or after the Show, the held frame is the screen as it is
+/// now, not as it was while hidden, and is published. Anything earlier
+/// proves nothing: the still stays (the covered frame wins). Returns the
+/// time the show waited, when this published the held frame.
+fn confirm_cpu_store_current(
+    guard: &mut PreviewScreenShared,
+    evidence_at: Instant,
+) -> Option<Duration> {
+    let view = guard.privacy.view();
+    if view.hidden || guard.held_live.is_none() {
+        return None;
+    }
+    if view.shown_at.is_none_or(|shown_at| evidence_at < shown_at) {
+        return None;
+    }
+    let waited = guard
+        .show_pending_since
+        .map(|since| since.elapsed())
+        .unwrap_or_default();
+    release_cpu_store_now(guard).then_some(waited)
+}
+
+/// [`confirm_cpu_store_current`] from a capture callback that carried no
+/// frame, taking the store's lock once and only when a show is waiting.
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+fn confirm_screen_current_at(shared: &Arc<StdMutex<PreviewScreenShared>>, evidence_at: Instant) {
+    let mut guard = shared
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if guard.held_live.is_none() {
+        return;
+    }
+    if let Some(waited) = confirm_cpu_store_current(&mut guard, evidence_at) {
+        drop(guard);
+        tracing::info!(
+            "[hide-screen] show published the held picture after {} ms, once the capture confirmed it unchanged after the show",
+            waited.as_millis()
+        );
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -1613,7 +1688,19 @@ pub async fn release_screen_now(state: &AppState) -> bool {
     let mut guard = shared
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let cpu = release_cpu_store_now(&mut guard);
+    // Plan 210 D8: the held frame was captured while hidden. A capture that
+    // can prove it is still current after the Show keeps the still until it
+    // does (its next callback, idle or a new frame); one that can't publishes
+    // it now. A held frame waiting counts as released for the caller.
+    let cpu = if guard.show_waits_for_capture_evidence {
+        let waiting = guard.held_live.is_some() && !guard.privacy.view().hidden;
+        if waiting {
+            guard.show_pending_since = Some(Instant::now());
+        }
+        waiting
+    } else {
+        release_cpu_store_now(&mut guard)
+    };
     #[cfg(target_os = "windows")]
     let texture = release_d3d11_store_now(&mut guard);
     #[cfg(not(target_os = "windows"))]
@@ -4506,6 +4593,36 @@ pub(crate) async fn test_publish_screen_bgra(
     true
 }
 
+/// Test-only: make the installed fixture capture behave like macOS
+/// ScreenCaptureKit at the Show edge (plan 210 D8): the show waits for the
+/// capture's proof instead of publishing the held picture at once.
+#[cfg(test)]
+pub(crate) async fn test_set_show_waits_for_capture_evidence(state: &AppState, waits: bool) {
+    let slot = state.preview_screen.lock().await;
+    if let Some(active) = slot.active.as_ref() {
+        active
+            .shared
+            .lock()
+            .unwrap()
+            .show_waits_for_capture_evidence = waits;
+    }
+}
+
+/// Test-only: the installed capture reports, as a ScreenCaptureKit idle
+/// callback does, that nothing changed at `evidence_at`.
+#[cfg(test)]
+pub(crate) async fn test_confirm_screen_current(state: &AppState, evidence_at: Instant) {
+    let shared = {
+        let slot = state.preview_screen.lock().await;
+        slot.active
+            .as_ref()
+            .map(|active| Arc::clone(&active.shared))
+    };
+    if let Some(shared) = shared {
+        confirm_screen_current_at(&shared, evidence_at);
+    }
+}
+
 /// Test-only: live frames the fixture capture held back while hidden.
 #[cfg(test)]
 pub(crate) async fn test_privacy_held_frames(state: &AppState) -> u64 {
@@ -7068,7 +7185,7 @@ mod macos {
         CGDirectDisplayID, CGDisplayBounds, CGDisplayCopyDisplayMode, CGDisplayMode,
         CGPreflightScreenCaptureAccess,
     };
-    use objc2_core_media::{CMSampleBuffer, CMTime};
+    use objc2_core_media::{CMSampleBuffer, CMTime, CMTimeFlags};
     use objc2_core_video::{
         CVPixelBufferGetBaseAddress, CVPixelBufferGetBytesPerRow, CVPixelBufferGetHeight,
         CVPixelBufferGetIOSurface, CVPixelBufferGetPixelFormatType, CVPixelBufferGetWidth,
@@ -8076,11 +8193,20 @@ mod macos {
         let callback_started_at = Instant::now();
         let frame_status = sample_buffer_frame_status(sample_buffer);
         let screen_rect = sample_buffer_screen_rect(sample_buffer);
+        // Plan 210 D8: when ScreenCaptureKit took this frame (or found nothing
+        // changed), so Hide screen's Show edge can tell a frame of the hidden
+        // span from one of the screen shown again.
+        let captured_at = sample_buffer_capture_instant(sample_buffer, callback_started_at);
         if !record_screen_capture_callback_status(shared, callback_started_at, frame_status) {
             // Keep the latest complete frame published. ScreenCaptureKit uses
             // idle and transition statuses for static content; clearing or
             // republishing them would turn a valid static frame into a false
             // source advance.
+            if frame_status == ScreenCaptureFrameStatus::Idle {
+                // Nothing changed since the last frame, at `captured_at`: a
+                // show waiting on that proof publishes the held picture.
+                confirm_screen_current_at(shared, captured_at);
+            }
             return;
         }
 
@@ -8220,10 +8346,17 @@ mod macos {
         // Plan 210 S7: the Hide screen gate, decided under the store's lock at
         // the publish itself. A held frame keeps exactly what a live publish
         // would have published (handles, and bytes unless the copy is
-        // skipped), so a show can publish it at once.
-        match admit_screen_frame(guard.privacy.view(), &mut guard.privacy_cursor) {
+        // skipped), so a show can publish it at once. D8: a frame taken
+        // before the Show holds too, however late it is handed over.
+        let mut show_waited = None;
+        match admit_screen_frame_captured_at(
+            guard.privacy.view(),
+            &mut guard.privacy_cursor,
+            Some(captured_at),
+        ) {
             ScreenFrameAdmission::Publish => {
                 guard.held_live = None;
+                show_waited = guard.show_pending_since.take().map(|since| since.elapsed());
                 guard.frame_store.publish_with_source_handles(
                     sequence,
                     width,
@@ -8272,6 +8405,36 @@ mod macos {
             publish_ms,
             frame_bytes as u64,
         );
+        drop(guard);
+        if let Some(waited) = show_waited {
+            tracing::info!(
+                "[hide-screen] show published a frame captured after the show, {} ms after it",
+                waited.as_millis()
+            );
+        }
+    }
+
+    /// When ScreenCaptureKit took this sample: its PTS, on the CoreMedia host
+    /// clock. Without a valid PTS the arrival time minus
+    /// [`SCREEN_CAPTURE_TIME_UNKNOWN_MARGIN`] stands in, so an undated frame
+    /// counts as older than it is (Hide screen's Show edge fails closed).
+    fn sample_buffer_capture_instant(
+        sample_buffer: &CMSampleBuffer,
+        arrived_at: Instant,
+    ) -> Instant {
+        let pts = unsafe { sample_buffer.presentation_time_stamp() };
+        crate::system_audio_capture::cm_time_to_host_nanos(
+            pts.value,
+            pts.timescale,
+            pts.flags.contains(CMTimeFlags::Valid),
+        )
+        .and_then(crate::system_audio_capture::instant_for_host_nanos)
+        .filter(|captured_at| *captured_at <= arrived_at + Duration::from_millis(5))
+        .unwrap_or_else(|| {
+            arrived_at
+                .checked_sub(SCREEN_CAPTURE_TIME_UNKNOWN_MARGIN)
+                .unwrap_or(arrived_at)
+        })
     }
 
     fn sample_buffer_frame_status(sample_buffer: &CMSampleBuffer) -> ScreenCaptureFrameStatus {
@@ -9482,6 +9645,160 @@ mod tests {
         assert!(!release_cpu_store_now(&mut shared));
     }
 
+    /// Plan 210 D8, the Show edge (smart-scenes, S3 thread 2026-11-22): a
+    /// capture that dates its frames (macOS ScreenCaptureKit) never puts a
+    /// picture of the hidden span on air. The show keeps the still; a frame
+    /// taken before the Show but handed over after it is held; an idle
+    /// callback dated before the Show proves nothing; one dated after it
+    /// publishes the held picture, which is then the screen as it is.
+    #[test]
+    fn a_show_never_publishes_a_frame_taken_while_hidden() {
+        let gate = Arc::new(ScreenPrivacyGate::default());
+        let mut shared = PreviewScreenShared::with_privacy(Arc::clone(&gate));
+        shared.show_waits_for_capture_evidence = true;
+        shared.frames_captured = 1;
+        publish_gated_bgra_frame(
+            &mut shared,
+            1,
+            PRIVACY_W,
+            PRIVACY_H,
+            privacy_stripes(0),
+            Instant::now(),
+        );
+        gate.hide(crate::protocol::ScreenPrivacyReason::You, "t".into());
+        assert!(frost_cpu_store_now(&mut shared));
+        let still = shared.frame_store.latest().unwrap();
+        let taken_while_hidden = Instant::now();
+        shared.frames_captured = 2;
+        publish_gated_bgra_frame(
+            &mut shared,
+            2,
+            PRIVACY_W,
+            PRIVACY_H,
+            privacy_white(),
+            taken_while_hidden,
+        );
+        std::thread::sleep(Duration::from_millis(2));
+        gate.show();
+        let shown_at = gate.view().shown_at.expect("the show is dated");
+        let on_air = |shared: &PreviewScreenShared| shared.frame_store.latest().unwrap();
+
+        // The capture's frame taken just before the show, handed over after
+        // it (ScreenCaptureKit's delivery latency): it holds behind the still.
+        shared.frames_captured = 3;
+        publish_gated_bgra_frame(
+            &mut shared,
+            3,
+            PRIVACY_W,
+            PRIVACY_H,
+            privacy_stripes(1),
+            shown_at - Duration::from_millis(1),
+        );
+        assert_eq!(
+            on_air(&shared).storage_identity(),
+            still.storage_identity(),
+            "a frame of the hidden span reached the store after the show"
+        );
+        // An idle callback taken before the show proves nothing.
+        assert_eq!(
+            confirm_cpu_store_current(&mut shared, shown_at - Duration::from_millis(1)),
+            None
+        );
+        assert_eq!(on_air(&shared).storage_identity(), still.storage_identity());
+        // One taken after it: nothing changed since the last frame, so the
+        // newest held picture is the screen now.
+        assert!(confirm_cpu_store_current(&mut shared, shown_at).is_some());
+        assert_eq!(on_air(&shared).bytes, privacy_stripes(1));
+        assert!(shared.held_live.is_none());
+        assert_eq!(confirm_cpu_store_current(&mut shared, Instant::now()), None);
+        // The next frame publishes as always.
+        shared.frames_captured = 4;
+        publish_gated_bgra_frame(
+            &mut shared,
+            4,
+            PRIVACY_W,
+            PRIVACY_H,
+            privacy_white(),
+            Instant::now(),
+        );
+        assert_eq!(on_air(&shared).bytes, privacy_white());
+    }
+
+    /// The Show edge's other proof: the capture's first frame taken after
+    /// the Show publishes over the still and drops the held picture, which
+    /// a later idle callback never brings back.
+    #[test]
+    fn a_frame_taken_after_the_show_replaces_the_still_and_the_held_picture() {
+        let gate = Arc::new(ScreenPrivacyGate::default());
+        let mut shared = PreviewScreenShared::with_privacy(Arc::clone(&gate));
+        shared.show_waits_for_capture_evidence = true;
+        shared.frames_captured = 1;
+        publish_gated_bgra_frame(
+            &mut shared,
+            1,
+            PRIVACY_W,
+            PRIVACY_H,
+            privacy_white(),
+            Instant::now(),
+        );
+        gate.hide(crate::protocol::ScreenPrivacyReason::You, "t".into());
+        assert!(frost_cpu_store_now(&mut shared));
+        std::thread::sleep(Duration::from_millis(1));
+        gate.show();
+        let shown_at = gate.view().shown_at.unwrap();
+        shared.frames_captured = 2;
+        publish_gated_bgra_frame(
+            &mut shared,
+            2,
+            PRIVACY_W,
+            PRIVACY_H,
+            privacy_stripes(0),
+            shown_at + Duration::from_millis(3),
+        );
+        assert_eq!(
+            shared.frame_store.latest().unwrap().bytes,
+            privacy_stripes(0)
+        );
+        assert!(shared.held_live.is_none());
+        assert_eq!(confirm_cpu_store_current(&mut shared, Instant::now()), None);
+        assert_eq!(
+            shared.frame_store.latest().unwrap().bytes,
+            privacy_stripes(0)
+        );
+    }
+
+    /// Hidden again before the capture confirmed the show: the store still
+    /// shows the still, and the live picture waiting for the show is kept,
+    /// never replaced by the still itself.
+    #[test]
+    fn a_hide_before_the_show_is_confirmed_keeps_the_held_picture() {
+        let gate = Arc::new(ScreenPrivacyGate::default());
+        let mut shared = PreviewScreenShared::with_privacy(Arc::clone(&gate));
+        shared.show_waits_for_capture_evidence = true;
+        shared.frames_captured = 1;
+        publish_gated_bgra_frame(
+            &mut shared,
+            1,
+            PRIVACY_W,
+            PRIVACY_H,
+            privacy_stripes(0),
+            Instant::now(),
+        );
+        gate.hide(crate::protocol::ScreenPrivacyReason::You, "t".into());
+        assert!(frost_cpu_store_now(&mut shared));
+        gate.show();
+        gate.hide(crate::protocol::ScreenPrivacyReason::You, "t2".into());
+        assert!(frost_cpu_store_now(&mut shared));
+        assert_hidden_still(&shared.frame_store.latest().unwrap().bytes);
+        std::thread::sleep(Duration::from_millis(1));
+        gate.show();
+        assert!(confirm_cpu_store_current(&mut shared, Instant::now()).is_some());
+        assert_eq!(
+            shared.frame_store.latest().unwrap().bytes,
+            privacy_stripes(0)
+        );
+    }
+
     #[tokio::test]
     async fn hold_and_release_cover_the_installed_capture_through_the_state() {
         let state = test_state();
@@ -9519,6 +9836,29 @@ mod tests {
         assert_eq!(
             source.latest_frame_blocking().unwrap().bytes,
             privacy_white()
+        );
+
+        // A capture that dates its frames (macOS): the show RPC keeps the
+        // still until the capture confirms the held picture after the show.
+        test_set_show_waits_for_capture_evidence(&state, true).await;
+        state
+            .screen_privacy
+            .hide(crate::protocol::ScreenPrivacyReason::You, "t".into());
+        assert!(hold_screen_now(&state).await);
+        let still = source.latest_frame_blocking().unwrap();
+        assert_hidden_still(&still.bytes);
+        assert!(test_publish_screen_bgra(&state, 4, privacy_stripes(1), Instant::now()).await);
+        state.screen_privacy.show();
+        assert!(release_screen_now(&state).await, "a held picture waits");
+        assert_eq!(
+            source.latest_frame_blocking().unwrap().storage_identity(),
+            still.storage_identity(),
+            "the show RPC published a frame taken while hidden"
+        );
+        test_confirm_screen_current(&state, Instant::now()).await;
+        assert_eq!(
+            source.latest_frame_blocking().unwrap().bytes,
+            privacy_stripes(1)
         );
 
         // A new generation installed while hidden starts frosted.
