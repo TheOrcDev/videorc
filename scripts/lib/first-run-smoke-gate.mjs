@@ -404,8 +404,9 @@ export function evaluateFirstRunSmokeStep(step, observation = {}) {
         o.watchMs >= FIRST_RUN_SMOKE_LIMITS.idleQuietWatchMs,
         `the watch was shorter than ${FIRST_RUN_SMOKE_LIMITS.idleQuietWatchMs / 1000} s`
       )
+      // After the store's own first minute, which starts when its chunk loads.
       check(
-        (o.idleReportsAt ?? 0) >= FIRST_RUN_SMOKE_LIMITS.launchQuietWatchMs,
+        (o.idleReportsAfterStoreMs ?? 0) >= FIRST_RUN_SMOKE_LIMITS.launchQuietWatchMs,
         'the idle reports were not sent after the first minute'
       )
       const toasts = o.launchToasts ?? []

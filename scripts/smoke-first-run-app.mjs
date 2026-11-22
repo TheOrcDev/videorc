@@ -880,16 +880,25 @@ async function launchQuiet() {
       await delay(Math.min(5000, left))
     }
   }
-  await waitUntil(FIRST_RUN_SMOKE_LIMITS.launchQuietWatchMs + 1000)
+  // The store's minute counts from when its chunk loaded, a few seconds into
+  // the document: the idle batch waits for the end of that minute.
+  const storeStartedAt = await evaluate('window.__videorcSmokeNotifications?.().startedAt ?? null')
+  if (typeof storeStartedAt !== 'number') throw new Error('the store start was not read')
+  await waitUntil(storeStartedAt + FIRST_RUN_SMOKE_LIMITS.launchQuietWatchMs + 1000)
   const idleReportsAt = await evaluate('performance.now()')
   expectedKeys = [...expectedKeys, ...(await evaluate(IDLE_REPORTS))]
-  await waitUntil(FIRST_RUN_SMOKE_LIMITS.idleQuietWatchMs + 500)
+  await waitUntil(Math.max(FIRST_RUN_SMOKE_LIMITS.idleQuietWatchMs, idleReportsAt + 14000) + 500)
   const observed = await evaluate(launchObservation)
   await screenshot('launch-quiet-dark')
   await setTheme('light')
   await settled()
   await screenshot('launch-quiet-light')
-  await check('launch-quiet', { ...observed, expectedKeys, idleReportsAt })
+  await check('launch-quiet', {
+    ...observed,
+    expectedKeys,
+    idleReportsAt,
+    idleReportsAfterStoreMs: idleReportsAt - storeStartedAt
+  })
 }
 
 // Every setup profile after the launch check.

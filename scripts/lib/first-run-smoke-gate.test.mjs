@@ -568,7 +568,8 @@ test('launch-quiet: a minute with no input shows no toast, and what Videorc foun
     notificationHook: true,
     pressed: false,
     watchMs: FIRST_RUN_SMOKE_LIMITS.idleQuietWatchMs,
-    idleReportsAt: 61_000,
+    idleReportsAt: 66_000,
+    idleReportsAfterStoreMs: 61_000,
     launchToasts: [],
     entries: [{ key: 'host-overloaded' }, { key: 'global-shortcuts' }],
     expectedKeys: ['host-overloaded', 'global-shortcuts'],
@@ -587,7 +588,12 @@ test('launch-quiet: a minute with no input shows no toast, and what Videorc foun
   assert.match(toasted.failures.join('\n'), /6914 ms warning "This computer is overloaded"/)
   // Idle after the first minute is no different (the owner, 2026-11-22).
   assert.match(toasted.failures.join('\n'), /61000 ms success "Clip saved"/)
-  const early = evaluateFirstRunSmokeStep('launch-quiet', { ...quiet, idleReportsAt: 30_000 })
+  // 61 s into the document is still the launch when the store started at 5 s.
+  const early = evaluateFirstRunSmokeStep('launch-quiet', {
+    ...quiet,
+    idleReportsAt: 61_000,
+    idleReportsAfterStoreMs: 56_000
+  })
   assert.match(early.failures.join('\n'), /not sent after the first minute/)
 
   const blind = evaluateFirstRunSmokeStep('launch-quiet', { ...quiet, toastHook: false })
