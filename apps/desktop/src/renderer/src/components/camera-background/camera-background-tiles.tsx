@@ -30,7 +30,8 @@ export function CameraBackgroundTiles({
   onChooseImage,
   grouped = false,
   reason,
-  label = 'Background'
+  label = 'Background',
+  compact = false
 }: {
   choices: CameraBackgroundChoice[]
   selected: CameraBackgroundChoiceId | null
@@ -42,6 +43,8 @@ export function CameraBackgroundTiles({
   /** The line under the tiles: why the disabled ones can't be picked. */
   reason?: string | null
   label?: string
+  /** A narrow row (the 320 px popover): Choose image… reads "Choose…". */
+  compact?: boolean
 }): ReactElement {
   const reasonId = useId()
   const tiles = useRef<Map<string, HTMLButtonElement>>(new Map())
@@ -58,73 +61,72 @@ export function CameraBackgroundTiles({
     const next = order[(index + step + order.length) % order.length]
     if (next) tiles.current.get(next)?.focus()
   }
+  // The card is the picture (the pick on its chrome plate) and the name sits
+  // under it, as in the mockup, so the words get the tile's whole width.
+  const TILE =
+    'group/tile flex min-w-0 flex-col gap-1 rounded-row text-left outline-none focus-visible:ring-3 focus-visible:ring-ring/30 disabled:opacity-50'
   const tile = (choice: CameraBackgroundChoice): ReactElement => {
     const checked = choice.id === selected
     const disabled = choice.disabledReason !== null
     return (
-      <MediaCard
-        interactive={!disabled}
+      <button
+        aria-checked={checked}
+        aria-describedby={disabled && reason ? reasonId : undefined}
+        aria-label={choice.label}
+        className={TILE}
+        data-videorc-camera-background-choice={choice.id}
+        disabled={disabled}
         key={choice.id}
-        render={
-          <button
-            aria-checked={checked}
-            aria-describedby={disabled && reason ? reasonId : undefined}
-            data-videorc-camera-background-choice={choice.id}
-            disabled={disabled}
-            ref={(element) => {
-              if (element) tiles.current.set(choice.id, element)
-              else tiles.current.delete(choice.id)
-            }}
-            role="radio"
-            tabIndex={choice.id === focusable ? 0 : -1}
-            type="button"
-            onClick={() => onChoose(choice.id)}
-            onKeyDown={(event) => onKeyDown(event, choice.id)}
-          />
-        }
-        selected={checked}
-        className="gap-1 p-1 text-left outline-none focus-visible:ring-3 focus-visible:ring-ring/30 disabled:opacity-50"
+        ref={(element) => {
+          if (element) tiles.current.set(choice.id, element)
+          else tiles.current.delete(choice.id)
+        }}
+        role="radio"
+        tabIndex={choice.id === focusable ? 0 : -1}
+        type="button"
+        onClick={() => onChoose(choice.id)}
+        onKeyDown={(event) => onKeyDown(event, choice.id)}
       >
-        <span className="relative aspect-[16/10] overflow-hidden rounded-chip bg-video-ground">
+        <MediaCard
+          className="relative aspect-[16/10] overflow-hidden bg-video-ground group-enabled/tile:group-hover/tile:border-foreground/30"
+          selected={checked}
+        >
           <CameraBackgroundArt art={choiceArt(choice)} />
-        </span>
+        </MediaCard>
         <span
           className={cn(
-            'truncate px-0.5 text-center text-label',
+            'truncate text-center text-label',
             checked ? 'text-foreground' : 'font-normal text-muted-foreground'
           )}
         >
           {choice.label}
         </span>
-      </MediaCard>
+      </button>
     )
   }
   const chooseImage = onChooseImage ? (
-    <MediaCard
-      interactive
+    <button
+      aria-label={CHOOSE_IMAGE_LABEL}
+      className={TILE}
+      data-videorc-camera-background-choose-image=""
       key="choose-image"
-      render={
-        <button
-          data-videorc-camera-background-choose-image=""
-          ref={(element) => {
-            if (element) tiles.current.set('choose-image', element)
-            else tiles.current.delete('choose-image')
-          }}
-          tabIndex={focusable === 'choose-image' ? 0 : -1}
-          type="button"
-          onClick={onChooseImage}
-          onKeyDown={(event) => onKeyDown(event, 'choose-image')}
-        />
-      }
-      className="gap-1 p-1 outline-none focus-visible:ring-3 focus-visible:ring-ring/30"
+      ref={(element) => {
+        if (element) tiles.current.set('choose-image', element)
+        else tiles.current.delete('choose-image')
+      }}
+      tabIndex={focusable === 'choose-image' ? 0 : -1}
+      type="button"
+      onClick={onChooseImage}
+      onKeyDown={(event) => onKeyDown(event, 'choose-image')}
     >
-      <span className="flex aspect-[16/10] items-center justify-center rounded-chip bg-inset text-muted-foreground">
+      <MediaCard className="flex aspect-[16/10] items-center justify-center text-muted-foreground group-hover/tile:border-foreground/30">
         <ImageIcon aria-hidden className="size-4" />
+      </MediaCard>
+      <span className="truncate text-center text-label font-normal text-muted-foreground">
+        {/* "Choose…" in a narrow row (the popover), as in the mockup. */}
+        {compact ? 'Choose…' : CHOOSE_IMAGE_LABEL}
       </span>
-      <span className="truncate px-0.5 text-center text-label font-normal text-muted-foreground">
-        {CHOOSE_IMAGE_LABEL}
-      </span>
-    </MediaCard>
+    </button>
   ) : null
   const groups: CameraBackgroundGroup[] = ['blur', 'images', 'screens']
   return (

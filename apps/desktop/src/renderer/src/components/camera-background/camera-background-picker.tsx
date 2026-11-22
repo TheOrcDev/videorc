@@ -52,6 +52,7 @@ export function CameraBackgroundPicker({
       />
       <CameraBackgroundTiles
         choices={control.choices({ images, imageLimit: POPOVER_IMAGES })}
+        compact
         grouped
         reason={control.effectReason}
         selected={control.choiceId}
