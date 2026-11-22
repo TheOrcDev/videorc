@@ -382,6 +382,20 @@ describe('the host in the room (C-G4)', () => {
       await room.disconnect()
     })
 
+    it('keeps a queued switch’s own background through a settings update meanwhile', async () => {
+      const { room } = client(undefined, () => withBackground())
+      await room.connect()
+      const publishes = latestRoom().localParticipant.publishTrack.mock.calls.length
+      // The previous camera's settings arrive while the switch to a blurred
+      // camera waits in the queue: they must not let it open raw.
+      const switching = room.setCameraSelection('Camera', false, blur)
+      await room.updateCameraSettings(withBackground())
+      await switching
+      expect(latestRoom().localParticipant.publishTrack.mock.calls.length).toBe(publishes)
+      expect(room.snapshot.local.cameraHeld).toBe(true)
+      await room.disconnect()
+    })
+
     it('opens the camera once connected when the effect went off while connecting', async () => {
       let settings = withBackground(blur)
       const { room } = client(undefined, () => settings)

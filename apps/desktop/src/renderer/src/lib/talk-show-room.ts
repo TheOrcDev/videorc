@@ -137,6 +137,9 @@ import {
   ROOM_CAMERA_OFF_FOR_BACKGROUND
 } from '@/lib/camera-background-view'
 import type { CameraBackground } from '@/lib/backend'
+
+/** A switched-to camera's own background (null: none); undefined: read the settings. */
+type OpeningBackground = Pick<CameraBackground, 'mode'> | null | undefined
 import {
   RemoteAudioAttachments,
   guestCaptionTracks,
@@ -454,12 +457,6 @@ export class TalkShowRoomClient {
   #cameraWanted = false
   /** The effect went off while the room was still connecting: open the camera once it is. */
   #cameraRestorePending = false
-  /**
-   * The background of the camera a switch is opening (the Studio passes the
-   * target camera's own, before its settings reach the room), so a camera
-   * whose background is an effect is never published raw in between.
-   */
-  #targetBackground: Pick<CameraBackground, 'mode'> | null | undefined = undefined
   #cameraSettingsRevision = 0
   #microphone: LocalAudioTrack | null = null
   #pcmSource: RoomPcmSource | null = null
@@ -784,7 +781,6 @@ export class TalkShowRoomClient {
       // Each queued switch opens its camera with its own camera's background;
       // a camera with none is not held for the previous camera's effect.
       if (background !== undefined) {
-        this.#targetBackground = background
         if (!cameraBackgroundIsEffect(background) && this.#backgroundBlocked) {
           this.#backgroundBlocked = false
           if (this.#problem === ROOM_CAMERA_OFF_FOR_BACKGROUND) this.#problem = null
@@ -811,7 +807,7 @@ export class TalkShowRoomClient {
       this.#cameraName = name
       this.#publish()
       if (!off && (name || this.#nativeCamera())) {
-        await this.#publishCamera(room)
+        await this.#publishCamera(room, background)
         // A camera the background effect keeps out of the room stays off.
         this.#cameraOff = this.#backgroundBlocked
         this.#publish()
@@ -1597,8 +1593,6 @@ export class TalkShowRoomClient {
   async updateCameraSettings(settings: TalkShowCameraSettings | undefined): Promise<void> {
     const camera = this.#camera
     const revision = ++this.#cameraSettingsRevision
-    // The settings now name the camera in use: they decide from here.
-    this.#targetBackground = undefined
     const effect = cameraBackgroundIsEffect(settings?.layout.cameraBackground)
     if (effect && !this.#nativeCamera()) {
       // Plan 258 S5, before S8: an effect turned on while the room shows the
@@ -1673,21 +1667,23 @@ export class TalkShowRoomClient {
     }).catch(() => {})
   }
 
-  /** The background the camera being opened will have: a switch's target, else the settings'. */
-  #openingBackgroundIsEffect(): boolean {
+  /**
+   * Whether the camera being opened has an effect: the switched-to camera's
+   * own background when a switch passed one (the Studio's settings may still
+   * name the previous camera), else the settings'.
+   */
+  #openingBackgroundIsEffect(target: OpeningBackground): boolean {
     return cameraBackgroundIsEffect(
-      this.#targetBackground !== undefined
-        ? this.#targetBackground
-        : this.#deps.cameraSettings?.()?.layout.cameraBackground
+      target !== undefined ? target : this.#deps.cameraSettings?.()?.layout.cameraBackground
     )
   }
 
-  async #publishCamera(room: Room): Promise<void> {
+  async #publishCamera(room: Room, target?: OpeningBackground): Promise<void> {
     if (this.#nativeCamera()) return this.#publishFrameCamera(room)
     // Plan 258 S5, before S8: the browser camera can't carry the background
     // effect yet, so with one on the room opens no camera at all: nothing of
     // the room behind the streamer is captured, let alone published.
-    if (this.#openingBackgroundIsEffect()) {
+    if (this.#openingBackgroundIsEffect(target)) {
       this.#blockCameraForBackground()
       return
     }
@@ -1721,7 +1717,7 @@ export class TalkShowRoomClient {
         return
       }
       // An effect turned on while the camera was opening: it never goes out.
-      if (this.#backgroundBlocked || this.#openingBackgroundIsEffect()) {
+      if (this.#backgroundBlocked || this.#openingBackgroundIsEffect(target)) {
         effects.close()
         camera.stop()
         if (this.#camera === camera) {
