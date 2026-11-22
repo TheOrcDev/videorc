@@ -1267,9 +1267,21 @@ pub(crate) struct FfmpegProgressBeacon {
     unflushed_stop: Arc<AtomicBool>,
     first_fatal: Arc<StdMutex<Option<&'static str>>>,
     evidence: Arc<StdMutex<FfmpegEvidenceSnapshot>>,
+    /// Bytes of every encoded video packet of the primary output, counted
+    /// from `-stats_enc_post` lines (Linux stream legs, see
+    /// `encoded_video_packet_stats_args`). Zero where nothing prints them.
+    encoded_video_bytes: Arc<AtomicU64>,
 }
 
 impl FfmpegProgressBeacon {
+    fn add_encoded_video_bytes(&self, bytes: u64) {
+        self.encoded_video_bytes.fetch_add(bytes, Ordering::Relaxed);
+    }
+
+    fn encoded_video_bytes(&self) -> u64 {
+        self.encoded_video_bytes.load(Ordering::Relaxed)
+    }
+
     fn observe_fatal(&self, line: &str) {
         // A tee/fifo destination can fail its header while other legs remain
         // healthy. Only FFmpeg's process-wide terminal marker invalidates an
@@ -1621,6 +1633,13 @@ async fn relay_ffmpeg_stderr_teed<R>(
     loop {
         match read_bounded_ffmpeg_line(&mut reader).await {
             Ok(Some(raw_line)) => {
+                // One line per encoded video packet (30+ a second): counted
+                // here and dropped, so it never reaches the journal tee, the
+                // failure-evidence tail or the monitor's channel.
+                if let Some(bytes) = parse_encoded_video_packet_bytes(&raw_line) {
+                    progress.add_encoded_video_bytes(bytes);
+                    continue;
+                }
                 if let Some(tee) = tee.as_ref() {
                     tee.offer(&raw_line);
                 }
@@ -6932,6 +6951,7 @@ async fn start_session_with_timeline(
                 StreamHealthAccumulator::new(&log_session_id, process_generation);
             let mut pending_stream_health = ParsedStreamHealthDelta::default();
             let mut last_stream_health_published_at = Instant::now();
+            let mut encoded_video_meter = EncodedVideoMeter::default();
             let stderr_reached_eof = loop {
                 let (line, informational) = match stderr_events.recv().await {
                     Some(FfmpegStderrEvent::Line(line)) => (line, false),
@@ -7069,6 +7089,10 @@ async fn start_session_with_timeline(
                         progress_describes_recording,
                         &mut stream_health_accumulator,
                         &mut pending_stream_health,
+                        encoded_video_meter.sample(
+                            progress_beacon.encoded_video_bytes(),
+                            progress_beacon.media_micros(),
+                        ),
                     )
                     .await
                 {
@@ -7130,6 +7154,10 @@ async fn start_session_with_timeline(
                 progress_describes_recording,
                 &mut stream_health_accumulator,
                 &mut pending_stream_health,
+                encoded_video_meter.sample(
+                    progress_beacon.encoded_video_bytes(),
+                    progress_beacon.media_micros(),
+                ),
             )
             .await;
             if stderr_reached_eof
@@ -22847,6 +22875,11 @@ fn bridge_compositor_ffmpeg_args_with_encoder_and_replay(
                     encoder.vaapi_arg_profile,
                     performance_check,
                 );
+                args.extend(encoded_video_packet_stats_args(
+                    encoder.platform,
+                    video_output,
+                    !stream_targets.is_empty(),
+                ));
             }
             EncoderBridgeVideoOutput::VideoToolboxH264AnnexB
             | EncoderBridgeVideoOutput::VideoToolboxH264MpegTs
@@ -31599,6 +31632,7 @@ async fn publish_pending_ffmpeg_stream_health(
     progress_describes_recording: bool,
     accumulator: &mut StreamHealthAccumulator,
     pending: &mut ParsedStreamHealthDelta,
+    encoded_video: Option<EncodedVideoSample>,
 ) -> bool {
     if *pending == ParsedStreamHealthDelta::default() {
         return false;
@@ -31625,7 +31659,7 @@ async fn publish_pending_ffmpeg_stream_health(
     };
     let diagnostic_stats = {
         let mut diagnostics = state.diagnostics.lock().await;
-        let next = apply_active_scene_revision(
+        let mut next = apply_active_scene_revision(
             crate::diagnostics::apply_stream_health_from(
                 diagnostics.clone(),
                 &stream_health,
@@ -31634,6 +31668,12 @@ async fn publish_pending_ffmpeg_stream_health(
             ),
             scene_revision,
         );
+        // Linux stream legs: FFmpeg encodes the stream, and its own packet
+        // sizes are the stream's measured bitrate (the bridge's elsewhere).
+        if let Some(sample) = encoded_video {
+            next = crate::diagnostics::apply_measured_stream_bitrate(next, sample.bitrate_kbps);
+            next.stream_output_total_bytes = next.stream_output_total_bytes.max(sample.total_bytes);
+        }
         *diagnostics = next.clone();
         next
     };
@@ -31666,6 +31706,80 @@ fn monotonic_counter(current: Option<u64>, update: Option<u64>) -> Option<u64> {
     match (current, update) {
         (Some(current), Some(update)) => Some(current.max(update)),
         (current, update) => update.or(current),
+    }
+}
+
+/// What a `-stats_enc_post` line starts with: one per encoded video packet
+/// of the primary output, `{size}` in bytes.
+const ENCODED_VIDEO_PACKET_STAT_PREFIX: &str = "videorc_video_packet_bytes=";
+
+/// The output options that make FFmpeg print each encoded video packet's size
+/// on stderr (`pipe:2`, beside `-progress`). Linux's raw-frame path only, with
+/// a stream leg: there FFmpeg is the stream encoder and its own `bitrate=` /
+/// `total_size=` read `N/A` for a `fifo`-wrapped RTMP leg, so nothing else
+/// measures what the leg sends. Elsewhere the encoder bridge counts the
+/// encoded bytes itself (VideoToolbox, Media Foundation).
+fn encoded_video_packet_stats_args(
+    platform: FfmpegH264Platform,
+    video_output: EncoderBridgeVideoOutput,
+    has_stream_targets: bool,
+) -> Vec<String> {
+    let linux = matches!(
+        platform,
+        FfmpegH264Platform::LinuxVaapi | FfmpegH264Platform::LinuxSoftware
+    );
+    if !linux || !has_stream_targets || video_output != EncoderBridgeVideoOutput::RawYuv420p {
+        return Vec::new();
+    }
+    vec![
+        "-stats_enc_post:v:0".to_string(),
+        "pipe:2".to_string(),
+        "-stats_enc_post_fmt:v:0".to_string(),
+        format!("{ENCODED_VIDEO_PACKET_STAT_PREFIX}{{size}}"),
+    ]
+}
+
+fn parse_encoded_video_packet_bytes(line: &str) -> Option<u64> {
+    line.trim()
+        .strip_prefix(ENCODED_VIDEO_PACKET_STAT_PREFIX)?
+        .parse()
+        .ok()
+}
+
+/// One measure of the encoded video FFmpeg produced for the stream.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct EncodedVideoSample {
+    bitrate_kbps: f64,
+    total_bytes: u64,
+}
+
+/// The encoded video bitrate between two diagnostics publishes: the packet
+/// bytes FFmpeg counted over the media time its output clock advanced, so a
+/// slow or bursty pipe never reads as a bitrate swing.
+#[derive(Debug, Default)]
+struct EncodedVideoMeter {
+    last: Option<(u64, u64)>,
+}
+
+impl EncodedVideoMeter {
+    fn sample(&mut self, total_bytes: u64, media_micros: u64) -> Option<EncodedVideoSample> {
+        if total_bytes == 0 {
+            return None;
+        }
+        let sample = match self.last {
+            Some((_, last_micros)) if media_micros <= last_micros => return None,
+            Some((last_bytes, last_micros)) => {
+                let seconds = (media_micros - last_micros) as f64 / 1_000_000.0;
+                let bits = total_bytes.saturating_sub(last_bytes) as f64 * 8.0;
+                Some(EncodedVideoSample {
+                    bitrate_kbps: bits / seconds / 1_000.0,
+                    total_bytes,
+                })
+            }
+            None => None,
+        };
+        self.last = Some((total_bytes, media_micros));
+        sample
     }
 }
 
@@ -40799,6 +40913,148 @@ mod tests {
     }
 
     #[test]
+    fn linux_raw_stream_legs_print_each_encoded_video_packet_size() {
+        // A Linux stream leg is a fifo-wrapped RTMP output FFmpeg encodes
+        // for: its `bitrate=`/`total_size=` read N/A, so FFmpeg prints each
+        // encoded video packet's size on stderr for the backend to count.
+        let capture = CaptureInputs {
+            video: VideoInput::TestPattern,
+            camera_index: None,
+            microphone: None,
+        };
+        let fifo_path = Path::new("/tmp/videorc-bridge-raw.yuv");
+        let software = ResolvedFfmpegH264Encoder::for_platform(FfmpegH264Platform::LinuxSoftware);
+        for (record, file) in [
+            (false, None),
+            (true, Some(Path::new("/tmp/videorc-raw.mkv"))),
+        ] {
+            let params = base_params(record, true);
+            let targets = vec![build_stream_url(&params.output.rtmp).unwrap()];
+            let args = bridge_compositor_ffmpeg_args_with_encoder(
+                &capture,
+                &params,
+                file,
+                &targets,
+                fifo_path,
+                EncoderBridgeVideoOutput::RawYuv420p,
+                &software,
+            )
+            .unwrap();
+            assert_eq!(arg_value(&args, "-stats_enc_post:v:0"), Some("pipe:2"));
+            assert_eq!(
+                arg_value(&args, "-stats_enc_post_fmt:v:0"),
+                Some("videorc_video_packet_bytes={size}")
+            );
+            // An output option of the primary (encoding) output: before its URL.
+            let stats = args.iter().position(|arg| arg == "-stats_enc_post:v:0");
+            let url = args
+                .iter()
+                .position(|arg| arg.contains("rtmp") || arg == "tee");
+            assert!(stats < url, "{args:?}");
+            assert_eq!(arg_value(&args, "-progress"), Some("pipe:2"));
+        }
+
+        let raw = EncoderBridgeVideoOutput::RawYuv420p;
+        for platform in [
+            FfmpegH264Platform::LinuxVaapi,
+            FfmpegH264Platform::LinuxSoftware,
+        ] {
+            assert_eq!(
+                encoded_video_packet_stats_args(platform, raw, true).len(),
+                4
+            );
+            // A record-only session has no leg to measure.
+            assert!(encoded_video_packet_stats_args(platform, raw, false).is_empty());
+        }
+        // The bridge measures its own encoders elsewhere.
+        for platform in [
+            FfmpegH264Platform::Macos,
+            FfmpegH264Platform::WindowsHardware,
+            FfmpegH264Platform::WindowsSoftware,
+        ] {
+            assert!(encoded_video_packet_stats_args(platform, raw, true).is_empty());
+        }
+        assert!(
+            encoded_video_packet_stats_args(
+                FfmpegH264Platform::LinuxSoftware,
+                EncoderBridgeVideoOutput::VideoToolboxH264MpegTs,
+                true
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn encoded_video_packet_lines_parse_and_meter_over_the_media_clock() {
+        assert_eq!(
+            parse_encoded_video_packet_bytes("videorc_video_packet_bytes=34328"),
+            Some(34_328)
+        );
+        assert_eq!(
+            parse_encoded_video_packet_bytes("videorc_video_packet_bytes=12\r"),
+            Some(12)
+        );
+        assert_eq!(parse_encoded_video_packet_bytes("total_size=34328"), None);
+        assert_eq!(
+            parse_encoded_video_packet_bytes("videorc_video_packet_bytes=N/A"),
+            None
+        );
+
+        let mut meter = EncodedVideoMeter::default();
+        assert_eq!(meter.sample(0, 1_000_000), None, "no bytes yet: no measure");
+        assert_eq!(
+            meter.sample(100_000, 1_000_000),
+            None,
+            "the first sample opens the window"
+        );
+        // 1.5 MB over 2 s of media: 6000 kbps.
+        assert_eq!(
+            meter.sample(1_600_000, 3_000_000),
+            Some(EncodedVideoSample {
+                bitrate_kbps: 6_000.0,
+                total_bytes: 1_600_000
+            })
+        );
+        // A clock that did not advance keeps the window open.
+        assert_eq!(meter.sample(1_700_000, 3_000_000), None);
+        assert_eq!(
+            meter.sample(2_350_000, 4_000_000),
+            Some(EncodedVideoSample {
+                bitrate_kbps: 6_000.0,
+                total_bytes: 2_350_000
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn ffmpeg_stderr_relay_counts_encoded_packet_lines_and_drops_them() {
+        let (event_sender, mut events) = mpsc::channel(256);
+        let input = "videorc_video_packet_bytes=1000\n\
+                     frame=30\n\
+                     videorc_video_packet_bytes=2500\n\
+                     progress=continue\n";
+        let progress = FfmpegProgressBeacon::default();
+        relay_ffmpeg_stderr(
+            BufReader::new(input.as_bytes()),
+            event_sender,
+            None,
+            progress.clone(),
+        )
+        .await;
+        let mut lines = Vec::new();
+        while let Some(event) = events.recv().await {
+            if let FfmpegStderrEvent::Line(line) = event {
+                lines.push(line);
+            }
+        }
+        assert_eq!(
+            lines,
+            vec!["frame=30".to_string(), "progress=continue".to_string()]
+        );
+        assert_eq!(progress.encoded_video_bytes(), 3_500);
+    }
+
+    #[test]
     fn output_headers_map_ffmpeg_output_indexes_to_urls() {
         assert_eq!(
             parse_ffmpeg_output_header(&format!("Output #1, fifo, to '{YOUTUBE_URL}':")),
@@ -47993,6 +48249,7 @@ drawbox=x=0:y=ih-ih*0.250000:w=iw:h=ih*0.250000:color=black@0:t=fill:replace=1,"
                 false,
                 &mut accumulator,
                 &mut pending,
+                None,
             )
             .await
         );
@@ -48039,6 +48296,7 @@ drawbox=x=0:y=ih-ih*0.250000:w=iw:h=ih*0.250000:color=black@0:t=fill:replace=1,"
                     false,
                     &mut accumulator,
                     &mut pending,
+                    None,
                 )
                 .await
             );
@@ -48080,6 +48338,7 @@ drawbox=x=0:y=ih-ih*0.250000:w=iw:h=ih*0.250000:color=black@0:t=fill:replace=1,"
                 false,
                 &mut accumulator,
                 &mut pending,
+                None,
             )
             .await
         );
