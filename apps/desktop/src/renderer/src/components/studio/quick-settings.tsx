@@ -1,4 +1,4 @@
-import { type AppIcon, CameraIcon, CaptionsIcon, ChatIcon } from '@/components/icons'
+import { type AppIcon, CameraIcon, CaptionsIcon, ChatIcon, InfoIcon } from '@/components/icons'
 import type { ReactElement, ReactNode } from 'react'
 
 import { DevicePicker } from '@/components/device-picker'
@@ -13,9 +13,11 @@ import { ShortcutKeys } from '@/components/ui/shortcut-keys'
 import {
   useStudioChat,
   useStudioCore,
+  useStudioPreview,
   useStudioRecordingState,
   useStudioShell
 } from '@/hooks/use-studio'
+import { cameraSystemEffectLine } from '@/lib/camera-system-effect'
 import { buildCameraSources, sourceStandIn, type SourceStandIn } from '@/lib/capture'
 import { shortcutAccelerator } from '@/lib/shortcuts'
 import { standInLine } from '@/lib/source-status'
@@ -73,6 +75,7 @@ export function QuickSettings(): ReactElement {
               <>
                 <StandInLine standIn={cameraStandIn} />
                 <GreenScreenLine control={greenScreen} />
+                <SystemEffectLine />
               </>
             }
             icon={CameraIcon}
@@ -236,6 +239,31 @@ function StandInLine({ standIn }: { standIn: SourceStandIn | undefined }): React
       {standInLine(standIn)}
     </p>
   )
+}
+
+/**
+ * Plan 258 S4: macOS Video Effects or Windows Studio Effects is changing the
+ * camera's background before Videorc sees it. One calm line under the row,
+ * never a toast (mockup §3). Its own component, so the camera status's
+ * 4 Hz updates re-render this line and nothing else.
+ */
+function SystemEffectLine(): ReactElement | null {
+  const line = useCameraSystemEffectLine()
+  if (!line) return null
+  return (
+    <p
+      className="flex items-start gap-1.5 px-3 pb-2 pl-9.5 text-xs text-muted-foreground"
+      data-slot="camera-system-effect"
+    >
+      <InfoIcon aria-hidden className="mt-px size-3.5 shrink-0" />
+      <span className="min-w-0">{line}</span>
+    </p>
+  )
+}
+
+/** Both looks' system effect line (plan 258 S4): the copy for the camera in use, or null. */
+export function useCameraSystemEffectLine(): string | null {
+  return cameraSystemEffectLine(useStudioPreview().previewCameraStatus.systemEffect)
 }
 
 /**

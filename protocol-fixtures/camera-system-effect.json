@@ -1,0 +1,64 @@
+{
+  "$comment": "The camera status's systemEffect (plan 258 S4). Rust: cargo test -p videorc-backend camera_system_effect_fixture. TypeScript: pnpm --filter @videorc/desktop test -- backend-rpc-contract.test.ts",
+  "macosPortrait": {
+    "state": "live",
+    "cameraId": "camera:avfoundation:0",
+    "targetFps": 30,
+    "framesCaptured": 120,
+    "droppedFrames": 0,
+    "updatedAt": "2026-11-22T10:00:00Z",
+    "systemEffect": {
+      "provider": "macos-video-effects",
+      "backgroundBlur": true,
+      "backgroundReplacement": false,
+      "studioLight": true,
+      "turnedOffByVideorc": false
+    }
+  },
+  "windowsTurnedOff": {
+    "state": "live",
+    "cameraId": "camera:windows-dshow:48502048442043616d657261",
+    "targetFps": 30,
+    "framesCaptured": 120,
+    "droppedFrames": 0,
+    "updatedAt": "2026-11-22T10:00:00Z",
+    "systemEffect": {
+      "provider": "windows-studio-effects",
+      "backgroundBlur": false,
+      "backgroundReplacement": false,
+      "studioLight": false,
+      "turnedOffByVideorc": true
+    }
+  },
+  "rejectedSystemEffects": [
+    {
+      "provider": "linux",
+      "backgroundBlur": false,
+      "backgroundReplacement": false,
+      "studioLight": false,
+      "turnedOffByVideorc": false
+    },
+    {
+      "provider": "macos-video-effects",
+      "backgroundBlur": "yes",
+      "backgroundReplacement": false,
+      "studioLight": false,
+      "turnedOffByVideorc": false
+    },
+    {
+      "provider": "macos-video-effects",
+      "backgroundBlur": true,
+      "backgroundReplacement": false,
+      "studioLight": false
+    },
+    {
+      "provider": "macos-video-effects",
+      "backgroundBlur": true,
+      "backgroundReplacement": false,
+      "studioLight": false,
+      "turnedOffByVideorc": false,
+      "extra": 1
+    },
+    null
+  ]
+}

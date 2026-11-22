@@ -667,6 +667,9 @@ pub struct PreviewCameraShared {
     window_started_at: Option<Instant>,
     source_fps: Option<f64>,
     capture_timings: CameraCaptureTimingWindow,
+    /// Plan 258 S4: the system's own effects on this camera, as the camera
+    /// thread last read them from the device.
+    system_effect: Option<crate::protocol::CameraSystemEffect>,
 }
 
 impl PreviewCameraShared {
@@ -1165,6 +1168,7 @@ async fn start_preview_camera_with_owner(
         updated_at: Utc::now().to_rfc3339(),
         message: Some("Starting native camera preview.".to_string()),
         no_video: None,
+        system_effect: None,
     };
     let start_key = PreviewCameraStartKey {
         source_key: source_key.clone(),
@@ -1667,6 +1671,14 @@ async fn start_registered_preview_camera(
         ffmpeg_path: ffmpeg_path.clone(),
         video: params.video.clone(),
         layout: params.layout.clone(),
+        // Plan 258 D12: Videorc's own background effect never runs on a
+        // Windows camera until the Windows stage (S10), so Studio Effects is
+        // only reported for now; S10 sets `turn_off_background_blur` while it
+        // processes this camera.
+        studio_effects: crate::camera_system_effect::StudioEffectsPolicy {
+            turn_off_background_blur: false,
+            restore_ledger: Some(state.database.clone()),
+        },
     };
 
     // Acquire the runtime before spawning so there is no suspension point
@@ -1788,6 +1800,7 @@ async fn start_registered_preview_camera(
                 updated_at: Utc::now().to_rfc3339(),
                 message,
                 no_video: None,
+                system_effect: None,
             };
             let capture_target = camera_capture_target_dimensions(&params.layout, &params.video);
             let installed = {
@@ -1881,6 +1894,7 @@ async fn start_registered_preview_camera(
                 updated_at: Utc::now().to_rfc3339(),
                 message: Some(message),
                 no_video: None,
+                system_effect: None,
             };
             if set_camera_status_for_start(&state, &start_lease, recovery_epoch, status.clone())
                 .await
@@ -1921,6 +1935,7 @@ async fn start_registered_preview_camera(
                 updated_at: Utc::now().to_rfc3339(),
                 message: Some(message),
                 no_video: None,
+                system_effect: None,
             };
             if set_camera_status_for_start(&state, &start_lease, recovery_epoch, status.clone())
                 .await
@@ -2556,6 +2571,7 @@ async fn begin_forced_camera_restart(
                 "Restarting native camera capture after verified degradation.".to_string(),
             ),
             no_video: None,
+            system_effect: None,
         };
         slot.status = starting.clone();
         slot.run_id = None;
@@ -2664,6 +2680,7 @@ async fn begin_failed_camera_recovery_retry(
             updated_at: Utc::now().to_rfc3339(),
             message: Some("Retrying the failed native camera recovery generation.".to_string()),
             no_video: None,
+            system_effect: None,
         };
         slot.status = starting.clone();
         slot.run_id = None;
@@ -4274,6 +4291,7 @@ async fn poll_camera_metrics(
                 latest_frame,
                 frame_store_stats: guard.frame_store.stats(),
                 capture_timings: guard.capture_timings.snapshot(),
+                system_effect: guard.system_effect,
             }
         };
 
@@ -4285,6 +4303,7 @@ async fn poll_camera_metrics(
             slot.status.frames_captured = snapshot.frames_captured;
             slot.status.dropped_frames = snapshot.dropped_frames;
             slot.status.source_fps = snapshot.source_fps.or(Some(f64::from(target_fps)));
+            slot.status.system_effect = snapshot.system_effect;
             if let Some(frame) = snapshot.latest_frame {
                 if slot.status.state != PreviewCameraState::Disconnected {
                     slot.status.state = PreviewCameraState::Live;
@@ -4323,6 +4342,7 @@ async fn poll_camera_metrics(
 
 #[derive(Debug)]
 struct CameraSharedSnapshot {
+    system_effect: Option<crate::protocol::CameraSystemEffect>,
     frames_captured: u64,
     dropped_frames: u64,
     source_fps: Option<f64>,
@@ -4366,6 +4386,7 @@ fn idle_status(message: Option<String>) -> PreviewCameraStatus {
         updated_at: Utc::now().to_rfc3339(),
         message,
         no_video: None,
+        system_effect: None,
     }
 }
 
@@ -4393,6 +4414,7 @@ fn status_for_missing_camera(camera_id: Option<String>, message: &str) -> Previe
         updated_at: Utc::now().to_rfc3339(),
         message: Some(message.to_string()),
         no_video: None,
+        system_effect: None,
     }
 }
 
@@ -4425,6 +4447,7 @@ fn failed_status(
         updated_at: Utc::now().to_rfc3339(),
         message: Some(message),
         no_video: None,
+        system_effect: None,
     }
 }
 
@@ -4509,12 +4532,16 @@ fn scale_preserving_aspect(source_dimension: u32, target_dimension: u32, source_
 
 #[derive(Clone)]
 struct NativeCameraPreviewConfig {
-    #[cfg_attr(not(target_os = "macos"), allow(dead_code))] // only the AVFoundation start reads it
+    #[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
+    // the AVFoundation start and the Studio Effects watch read it
     camera_id: String,
     unique_id: String,
     ffmpeg_path: String,
     video: VideoSettings,
     layout: LayoutSettings,
+    /// Plan 258 S4: what to do with Windows Studio Effects on this camera.
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    studio_effects: crate::camera_system_effect::StudioEffectsPolicy,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -5693,8 +5720,24 @@ mod windows {
         let stop_flag = Arc::new(AtomicBool::new(false));
         {
             let stop_flag = Arc::clone(&stop_flag);
+            // Plan 258 S4: the same thread watches Windows Studio Effects on
+            // this camera until the stop, then puts back anything it turned
+            // off, so the restore never outlives the camera session.
+            let camera_id = config.camera_id.clone();
+            let policy = config.studio_effects.clone();
+            let effect_shared = Arc::clone(&shared);
             thread::spawn(move || {
-                let _ = stop_rx.recv();
+                crate::camera_system_effect::windows_device::watch_session(
+                    &camera_id,
+                    &policy,
+                    &stop_rx,
+                    |effect| {
+                        effect_shared
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner())
+                            .system_effect = effect;
+                    },
+                );
                 stop_flag.store(true, Ordering::Release);
             });
         }
@@ -6458,7 +6501,7 @@ mod macos {
                     selected_fps: session.selected_fps,
                     message: session.message,
                 });
-                let _ = stop_rx.recv();
+                watch_system_effects_until_stop(&session.device, &shared, &stop_rx);
                 unsafe {
                     session.session.stopRunning();
                     session.output.setSampleBufferDelegate_queue(None, None);
@@ -6470,7 +6513,55 @@ mod macos {
         });
     }
 
+    /// Plan 258 S4: until the camera is told to stop, reads macOS Video
+    /// Effects on the device every `MACOS_POLL_INTERVAL` into the shared
+    /// state the status poll publishes. Apps can't turn these off, so this
+    /// only reports them.
+    fn watch_system_effects_until_stop(
+        device: &AVCaptureDevice,
+        shared: &Arc<StdMutex<PreviewCameraShared>>,
+        stop_rx: &std_mpsc::Receiver<()>,
+    ) {
+        loop {
+            let effect = autoreleasepool(|_| read_system_effect(device));
+            shared
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .system_effect = effect;
+            match stop_rx.recv_timeout(crate::camera_system_effect::MACOS_POLL_INTERVAL) {
+                Err(std_mpsc::RecvTimeoutError::Timeout) => {}
+                Ok(()) | Err(std_mpsc::RecvTimeoutError::Disconnected) => return,
+            }
+        }
+    }
+
+    /// The device's Video Effects flags. Each getter is asked only when the
+    /// running macOS has it (Portrait 12, Studio Light 13, background
+    /// replacement 15); a missing one reads as off. `None` when the system
+    /// has none of them, so the status stays absent.
+    fn read_system_effect(device: &AVCaptureDevice) -> Option<crate::protocol::CameraSystemEffect> {
+        let responds = |selector: objc2::runtime::Sel| -> bool {
+            let responds: bool = unsafe { msg_send![device, respondsToSelector: selector] };
+            responds
+        };
+        let portrait_known = responds(objc2::sel!(isPortraitEffectActive));
+        let studio_light_known = responds(objc2::sel!(isStudioLightActive));
+        let replacement_known = responds(objc2::sel!(isBackgroundReplacementActive));
+        if !portrait_known && !studio_light_known && !replacement_known {
+            return None;
+        }
+        let portrait = portrait_known && unsafe { device.isPortraitEffectActive() };
+        let studio_light = studio_light_known && unsafe { device.isStudioLightActive() };
+        let replacement = replacement_known && unsafe { device.isBackgroundReplacementActive() };
+        Some(crate::camera_system_effect::macos_effect(
+            portrait,
+            replacement,
+            studio_light,
+        ))
+    }
+
     struct CameraSession {
+        device: Retained<AVCaptureDevice>,
         session: Retained<AVCaptureSession>,
         output: Retained<AVCaptureVideoDataOutput>,
         _input: Retained<AVCaptureDeviceInput>,
@@ -6643,6 +6734,7 @@ mod macos {
             });
 
         Ok(CameraSession {
+            device,
             session,
             output,
             _input: input,
@@ -7383,6 +7475,7 @@ mod tests {
             updated_at: Utc::now().to_rfc3339(),
             message: Some("Starting fake native camera.".to_string()),
             no_video: None,
+            system_effect: None,
         }
     }
 
@@ -7576,6 +7669,7 @@ mod tests {
             updated_at: Utc::now().to_rfc3339(),
             message: Some("Fake native camera live.".to_string()),
             no_video: None,
+            system_effect: None,
         };
         slot.active = Some(NativeCameraPreviewThread {
             stop_tx,
@@ -9163,6 +9257,7 @@ mod tests {
             updated_at: Utc::now().to_rfc3339(),
             message: Some("Live".to_string()),
             no_video: None,
+            system_effect: None,
         };
         slot.active = Some(NativeCameraPreviewThread {
             stop_tx,
@@ -10293,6 +10388,7 @@ mod tests {
             ffmpeg_path: "C:\\ffmpeg\\bin\\ffmpeg.exe".to_string(),
             video: test_video(),
             layout: test_layout(false),
+            studio_effects: Default::default(),
         };
         let (width, height) = windows_camera_preview_output_dimensions(&config);
         let args = windows_camera_preview_ffmpeg_args_for(
@@ -10328,6 +10424,7 @@ mod tests {
             ffmpeg_path: "C:\\ffmpeg\\bin\\ffmpeg.exe".to_string(),
             video: test_video(),
             layout: test_layout(false),
+            studio_effects: Default::default(),
         };
         let attempt = WindowsCameraCaptureAttempt::Mode {
             mode: test_dshow_mode(DshowModeFormat::Mjpeg, 1280, 720, 5.0, 30.0),
@@ -10393,6 +10490,7 @@ mod tests {
             ffmpeg_path: "C:\\ffmpeg\\bin\\ffmpeg.exe".to_string(),
             video: test_video(),
             layout: test_layout(false),
+            studio_effects: Default::default(),
         };
         // A mode listed at 29.97 is asked for at 29.97: DirectShow refuses
         // a rate outside the mode's range, so 30 would fail the rung.
@@ -11060,6 +11158,7 @@ Error opening input file video=HP HD Camera."#;
             ffmpeg_path: "C:\\ffmpeg\\bin\\ffmpeg.exe".to_string(),
             video: test_video(),
             layout: test_layout(false),
+            studio_effects: Default::default(),
         };
 
         let args = windows_camera_preview_ffmpeg_args_for(
@@ -11196,6 +11295,7 @@ Error opening input file video=HP HD Camera."#;
             ffmpeg_path: "C:\\ffmpeg\\bin\\ffmpeg.exe".to_string(),
             video: test_video(),
             layout,
+            studio_effects: Default::default(),
         };
         let camera_only = test_layout(false);
         let mut inset = test_layout(false);
@@ -11350,6 +11450,7 @@ Error opening input file video=HP HD Camera."#;
             updated_at: Utc::now().to_rfc3339(),
             message: Some("Starting native camera preview.".to_string()),
             no_video: None,
+            system_effect: None,
         };
 
         let lease = match begin_camera_start(&state, start_key, &layout, starting, None).await {
@@ -11413,6 +11514,7 @@ Error opening input file video=HP HD Camera."#;
                 updated_at: Utc::now().to_rfc3339(),
                 message: Some("Live".to_string()),
                 no_video: None,
+                system_effect: None,
             };
             slot.start_generation = 1;
             slot.active_generation = Some(1);

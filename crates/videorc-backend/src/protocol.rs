@@ -4815,6 +4815,44 @@ pub struct PreviewCameraStatus {
     /// Sources and Health can name a camera that is on but sends no video.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub no_video: Option<bool>,
+    /// Plan 258 S4 (D12): the operating system's own effects on this camera
+    /// (macOS Video Effects, Windows Studio Effects), read from the device
+    /// Videorc has open. Absent until the camera is live and the system has
+    /// answered, and on a camera or system that has no such effects.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_effect: Option<CameraSystemEffect>,
+}
+
+/// Which operating system feature is changing the camera's picture.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum CameraSystemEffectProvider {
+    /// macOS Video Effects (Control Center, Video menu).
+    MacosVideoEffects,
+    /// Windows Studio Effects (Quick Settings, Studio effects).
+    WindowsStudioEffects,
+}
+
+/// Plan 258 S4: what the system is doing to the camera Videorc has open.
+/// Every flag is what the device reports now, after anything Videorc
+/// changed.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CameraSystemEffect {
+    pub provider: CameraSystemEffectProvider,
+    /// macOS Portrait, or Windows Studio Effects background blur (standard
+    /// or portrait).
+    pub background_blur: bool,
+    /// macOS 15's background replacement. Never on Windows.
+    pub background_replacement: bool,
+    /// macOS Studio Light. It changes the light on the face, not the
+    /// background, so the Studio says nothing about it.
+    pub studio_light: bool,
+    /// Windows: Videorc turned Studio Effects background blur off at camera
+    /// start because its own background effect runs on this camera (as
+    /// Microsoft asks of apps with their own blur); it is put back when the
+    /// camera stops. Always false on macOS, where apps can't turn it off.
+    pub turned_off_by_videorc: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
