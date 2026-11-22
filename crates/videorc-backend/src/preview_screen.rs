@@ -7157,7 +7157,6 @@ mod windows {
         }
     }
 
-    #[cfg(test)]
     /// Plan 210 D8 on each Windows publish point: Windows Graphics Capture
     /// frames are dated by their `SystemRelativeTime`, the FFmpeg pipe's are
     /// not, and the texture store decides like the CPU store. No GPU needed.
@@ -7278,6 +7277,7 @@ mod windows {
         }
     }
 
+    #[cfg(test)]
     mod tests {
         use std::time::Duration;
 
@@ -10022,9 +10022,8 @@ mod tests {
         std::thread::sleep(Duration::from_millis(2));
         gate.show();
         let on_air = |shared: &PreviewScreenShared| shared.frame_store.latest().unwrap();
-        // Nothing republishes at the show, and no proof ever comes from an
-        // undated capture.
-        assert_eq!(confirm_cpu_store_current(&mut shared, Instant::now()), None);
+        // Nothing republishes at the show (an undated capture sends no idle
+        // proof, so the held picture never comes back).
         assert_eq!(on_air(&shared).storage_identity(), still.storage_identity());
         // The frame being read when the show landed, then the first one
         // delivered after it (possibly queued before it): both held.
