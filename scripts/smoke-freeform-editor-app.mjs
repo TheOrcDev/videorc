@@ -132,6 +132,9 @@ const report = {
 // each. The camera starts at the artifact proof's box below.
 const LIVE_PLACEMENT_HINT = 'Changes apply to your stream when you let go.'
 const LIVE_MOVE_SETTLE_MS = Number(process.env.VIDEORC_FREEFORM_LIVE_MOVE_SETTLE_MS ?? 2000)
+// The stream leg is sized by its own preset, never by the recording's video
+// (there is no 640x360 stream preset): the sink's picture is judged there.
+const LIVE_MOVE_STREAM_PRESET = { id: 'tutorial-1080p30', width: 1920, height: 1080 }
 const LIVE_MOVE_STREAM_PORT = Number(process.env.VIDEORC_FREEFORM_LIVE_MOVE_STREAM_PORT ?? 19631)
 const LIVE_MOVE_DEFINITION =
   "Record (then Record + stream to a local RTMP sink), wait, set the camera's X field (one commit), wait, set its Height field (one commit), wait, Stop. Every decoded frame of the recording (and of what the sink received) is matched against the committed placement before, after the move and after the resize with the artifact placement gate; the frames must step through those three in order. Gate: no black frame, no frame matching none of them, and no two identical consecutive frames within 10 frames of either commit; identical pairs elsewhere are counted, not gated. The session id, its state and the compositor run id must be the same before and after both commits."
@@ -478,7 +481,7 @@ async function recordWithLiveMoveTo(
                 updatedAt: timestamp
               }
             ],
-            defaultOutputPreset: 'tutorial-1080p30',
+            defaultOutputPreset: LIVE_MOVE_STREAM_PRESET.id,
             defaultBitrateKbps: 2000,
             enabledTargetIds: ['custom']
           }
@@ -568,10 +571,18 @@ async function recordWithLiveMoveTo(
     { label: 'moved', rects: [transforms[baseSourceId], moved] },
     { label: 'resized', rects: [transforms[baseSourceId], resized] }
   ]
-  const outputs = [{ kind: 'recording', artifact: path }]
-  if (received) outputs.push({ kind: 'stream', artifact: received })
+  // Each output at its own size: the recording at the session's video, the
+  // stream at its preset's, and every frame decoded there.
+  const outputs = [{ kind: 'recording', artifact: path, width, height }]
+  if (received)
+    outputs.push({
+      kind: 'stream',
+      artifact: received,
+      width: LIVE_MOVE_STREAM_PRESET.width,
+      height: LIVE_MOVE_STREAM_PRESET.height
+    })
   const results = {}
-  for (const { kind, artifact } of outputs) {
+  for (const { kind, artifact, width, height } of outputs) {
     const quality = await analyzeRecording(artifact, {
       ffmpegPath,
       ffprobePath,
