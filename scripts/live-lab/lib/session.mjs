@@ -272,7 +272,7 @@ export function createSessionStarter({
             // The YouTube side stops first so its last poll can still see the
             // broadcast end; it must never outlive the app observer.
             if (parts.youtube) parts.youtubeSummary = await parts.youtube.stop()
-            parts.observer?.stop()
+            await parts.observer?.stop()
           }
         },
         quitApp: parts.app?.stop,

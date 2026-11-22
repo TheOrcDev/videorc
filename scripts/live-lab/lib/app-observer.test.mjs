@@ -225,7 +225,7 @@ test('the observer writes evidence, emits bus events and pushes the card', async
     payload: { code: 'host-overloaded', level: 'warn', createdAt: '2026-10-12T10:00:30.000Z' }
   })
   await clock.advance(10_000)
-  observer.stop()
+  await observer.stop()
   assert.ok(observer.journalLines().length >= 3)
   assert.equal(observer.latestJournal().kind, 'sample')
   assert.ok(observer.healthEventsFlat().some((event) => event.code === 'host-overloaded'))
@@ -234,13 +234,56 @@ test('the observer writes evidence, emits bus events and pushes the card', async
   assert.ok(
     pushes.some((snapshot) => snapshot.memoryMb?.main === 100 && snapshot.memoryMb?.backend === 300)
   )
-  await new Promise((resolve) => setImmediate(resolve))
   const census = await readFile(join(runDir, 'census.csv'), 'utf8')
   assert.ok(census.startsWith('ts,pid,ppid,role,rssKb\n'))
   const journal = (await readFile(join(runDir, 'journal.ndjson'), 'utf8')).trim().split('\n')
   assert.ok(journal.length >= 3)
   assert.equal(JSON.parse(journal[0]).tsMs, undefined)
   assert.ok((await readFile(join(runDir, 'health.ndjson'), 'utf8')).includes('host-overloaded'))
+})
+
+test('evidence lines land in call order and stop() waits for the last write', async () => {
+  const runDir = await mkdtemp(join(tmpdir(), 'videorc-observer-order-'))
+  const clock = createFakeClock(Date.parse('2026-10-12T10:00:00.000Z'))
+  const written = []
+  let calls = 0
+  // The first append is the slowest, as a busy disk can make it.
+  const append = (path, text) => {
+    const delayMs = calls++ === 0 ? 40 : 0
+    return new Promise((resolve) =>
+      setTimeout(() => {
+        written.push({ path, text })
+        resolve()
+      }, delayMs)
+    )
+  }
+  const observer = createAppObserver({
+    bus: createEventBus(),
+    runDir,
+    journalDirs: [],
+    ledgerPaths: async () => [],
+    rootPid: async () => null,
+    clock,
+    append,
+    collectCensus: async () => ({ summary: {}, aliveRecords: [], processRows: [] })
+  })
+  observer.onBackendMessage({
+    event: 'health.event',
+    payload: { code: 'host-overloaded', level: 'warn', createdAt: '2026-10-12T10:00:01.000Z' }
+  })
+  observer.onBackendMessage({
+    event: 'health.event',
+    payload: {
+      code: 'stream-target-reconnecting',
+      level: 'warn',
+      createdAt: '2026-10-12T10:00:02.000Z'
+    }
+  })
+  await observer.stop()
+  const health = written.filter(({ path }) => path.endsWith('health.ndjson'))
+  assert.equal(health.length, 2)
+  assert.ok(health[0].text.includes('host-overloaded'))
+  assert.ok(health[1].text.includes('stream-target-reconnecting'))
 })
 
 test("the backend's stream-output figures come from diagnostics.stats only", () => {
