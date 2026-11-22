@@ -2997,6 +2997,22 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
   const [replayBlockedReason, setReplayBlockedReasonState] = useState<string | null>(null)
   const replayBlockedReasonRef = useRef<string | null>(null)
   const replayStartInFlightRef = useRef(false)
+  // The ring's own start while it is in flight. Its session.start carries
+  // the scene as the Studio held it when the start was asked for, and the
+  // backend commits that scene as the session starts: a layout transaction
+  // committed meanwhile would be put back. A transaction asked for in that
+  // window waits for the start to answer (0.36.1: an agent's background and
+  // a Freeform entry were lost this way).
+  const replayStartPromiseRef = useRef<Promise<void> | null>(null)
+  // The same race on a Record or Go Live start: its session.start carries
+  // the scene of the render it was asked for in, and the backend commits it
+  // as the session starts. From that moment until the start answers, a
+  // layout transaction waits for it; a start asked for while a transaction
+  // awaits its proof waits for the render that takes the transaction's
+  // scene (the waiters run from an effect on `layoutProofSettledTick`).
+  const sessionStartScenePromiseRef = useRef<Promise<void> | null>(null)
+  const layoutProofWaitersRef = useRef<Array<() => void>>([])
+  const [layoutProofSettledTick, setLayoutProofSettledTick] = useState(0)
   // A source picked while the ring's own start was in flight: that start
   // carried the old sources, so the ring restarts once it answers.
   const replaySourcesMovedDuringStartRef = useRef<'visual' | 'audio' | null>(null)
@@ -11131,6 +11147,18 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
         onSettled?: () => void
       }
     ): Promise<boolean> => {
+      // The ring's start is in flight with the scene as it was: this change
+      // runs once it answers, as a change to the session it started, so the
+      // start's scene commit never lands over it.
+      const replayStart = replayStartPromiseRef.current
+      if (replayStart) {
+        return replayStart.then(() => requestLayoutTransactionRef.current(layout, options))
+      }
+      // A Record or Go Live start holds the scene as it was: the same.
+      const sessionStart = sessionStartScenePromiseRef.current
+      if (sessionStart) {
+        return sessionStart.then(() => requestLayoutTransactionRef.current(layout, options))
+      }
       const crossesOrientation =
         layoutPresetOrientation(layout.layoutPreset) !==
         layoutPresetOrientation(captureConfigRef.current.layout.layoutPreset)
@@ -11543,6 +11571,12 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
           settleCommitReceipt(false)
           if (layoutIntentAwaitingProofRef.current === intentId) {
             layoutIntentAwaitingProofRef.current = null
+            // The ring held its start for this transaction: start it now,
+            // with the scene the transaction left.
+            if (replayArmedRef.current) scheduleReplayReconcileRef.current()
+            // A Record or Go Live start held for it runs once this
+            // transaction's scene has rendered.
+            if (layoutProofWaitersRef.current.length) setLayoutProofSettledTick((tick) => tick + 1)
           }
           if (layoutIntentIdRef.current === intentId) {
             setLayoutSwitchPending(null)
@@ -17085,7 +17119,23 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
       // Its destinations are the runner's, so no account is checked and no
       // broadcast is activated here.
       rpc: SessionStartRpc = 'session.start'
-    ) => {
+    ): Promise<boolean> => {
+      // A scene change awaiting its proof has not reached this render's
+      // scene: started now, the session would commit the scene it is
+      // leaving. The start runs from the render that takes its scene.
+      if (layoutIntentAwaitingProofRef.current !== null) {
+        return new Promise<void>((resolve) => {
+          layoutProofWaitersRef.current.push(resolve)
+        }).then(() =>
+          runStartSessionRef.current!(
+            streamingOverride,
+            preparedOutput,
+            intent,
+            suppressCaptionsOverride,
+            rpc
+          )
+        )
+      }
       const suppressCaptions = suppressCaptionsOverride ?? suppressCaptionsForSession
       // R2 B-H1: a resume's saved destinations are reconnect candidates, never
       // broadcasts this start may complete: no owner, no cleanup, success or not.
@@ -17124,6 +17174,19 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
         return Promise.resolve(false)
       }
 
+      // This start carries `sceneWithBackground` as this render holds it: a
+      // scene change asked for before its session.start answers waits.
+      let answerStartScene: () => void = () => undefined
+      const startScene = new Promise<void>((resolve) => {
+        answerStartScene = resolve
+      })
+      sessionStartScenePromiseRef.current = startScene
+      const releaseStartScene = (): void => {
+        if (sessionStartScenePromiseRef.current === startScene) {
+          sessionStartScenePromiseRef.current = null
+        }
+        answerStartScene()
+      }
       const startPromise = (async (): Promise<boolean> => {
         if (!client) {
           return false
@@ -17233,6 +17296,8 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
           // activations run against the show id, the way they run against a
           // session id; Stop completes them the same way.
           if (talkShowRoomOpenRef.current && streamingForStart) {
+            // No local session starts, so no scene is committed.
+            releaseStartScene()
             const talkStreaming = streamingForStart
             const cloudAfterGoLive = await startTalkShowLivestream(
               intent.record,
@@ -17432,6 +17497,9 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
               ? { sessionId: status.sessionId, ...startAudioSnapshot }
               : null
           applyRecordingStatus(status)
+          // The start's scene is committed and the session's state known: a
+          // scene change held for it now goes to the session it started.
+          releaseStartScene()
           if (
             startResolution.sessionActive &&
             streamingForStart &&
@@ -17556,6 +17624,8 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
         }
       }
       void startPromise.then(clearStartPromise, clearStartPromise)
+      // Every other way out (refused, failed, a talk show) answers the hold.
+      void startPromise.then(releaseStartScene, releaseStartScene)
       return startPromise
     },
     [
@@ -17589,6 +17659,14 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
     ]
   )
   runStartSessionRef.current = runStartSession
+  // A start held for a scene change's proof runs from the first render after
+  // the transaction ended, so it reads the scene the transaction left (a
+  // newer transaction awaiting proof keeps it waiting for that one).
+  useEffect(() => {
+    if (layoutIntentAwaitingProofRef.current !== null) return
+    const waiters = layoutProofWaitersRef.current.splice(0)
+    for (const resume of waiters) resume()
+  }, [layoutProofSettledTick])
 
   const prepareOauthTargetsForGoLive = useCallback(
     async (
@@ -19261,9 +19339,17 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
       // launch before Sources settle never turns clips off.
       return
     }
+    // A scene change awaiting its proof has not reached the Studio's scene
+    // yet, so a start now would commit the scene it is leaving. Its end
+    // reconciles the ring again.
+    if (layoutIntentAwaitingProofRef.current !== null) return
     replayStartInFlightRef.current = true
     replaySourcesMovedDuringStartRef.current = null
     let started = false
+    let answered: () => void = () => undefined
+    replayStartPromiseRef.current = new Promise<void>((resolve) => {
+      answered = resolve
+    })
     try {
       const replay = await import('@/lib/replay-buffer')
       const status = await replay.startBufferOnlySession({
@@ -19328,6 +19414,8 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
       }
     } finally {
       replayStartInFlightRef.current = false
+      replayStartPromiseRef.current = null
+      answered()
       const moved = replaySourcesMovedDuringStartRef.current
       replaySourcesMovedDuringStartRef.current = null
       if (started && moved !== null) restartReplayForSourcesRef.current(moved === 'visual')
@@ -19372,6 +19460,8 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
           stopPending: stopSessionInFlightPromiseRef.current !== null,
           replayStartInFlight:
             replayStartInFlightRef.current ||
+            // A scene change awaiting proof: its end reconciles again.
+            layoutIntentAwaitingProofRef.current !== null ||
             replayReconcileHoldRef.current ||
             replaySceneReloadsRef.current > 0 ||
             performanceCheckHoldRef.current,

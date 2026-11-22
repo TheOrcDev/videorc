@@ -12,7 +12,8 @@ import {
   healthRecordFromEvent,
   journalDirCandidates,
   memoryFromCensus,
-  parseJournalLine
+  parseJournalLine,
+  streamOutputFromEvent
 } from './app-observer.mjs'
 import { createFakeClock } from './harness-test-fakes.mjs'
 import { createEventBus } from './step-engine.mjs'
@@ -106,6 +107,27 @@ test('the tail reads appended lines, a late file, and rolls over at UTC midnight
     '2026-10-12T23:59:59.000Z',
     '2026-10-13T00:00:04.000Z'
   ])
+})
+
+test("the tail skips the day's lines from before the run", async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'videorc-journal-'))
+  const clock = createFakeClock(Date.parse('2026-11-21T18:36:21.000Z'))
+  const seen = []
+  const tail = createJournalTail({
+    dirs: [dir],
+    onLine: (line) => seen.push(line.ts),
+    sinceMs: clock.now(),
+    clock
+  })
+  const line = (ts) =>
+    `${JSON.stringify({ schemaVersion: 1, kind: 'sample', ts, state: 'live', legs: [] })}\n`
+  // A morning run on the same profile, then this run's first sample.
+  await writeFile(
+    join(dir, '2026-11-21.ndjson'),
+    line('2026-11-21T11:07:00.000Z') + line('2026-11-21T18:36:22.000Z')
+  )
+  await tail.poll()
+  assert.deepEqual(seen, ['2026-11-21T18:36:22.000Z'])
 })
 
 test('census memory per card role and CSV rows without args', () => {
@@ -259,4 +281,53 @@ test('evidence lines land in the order they happened, even when an append finish
   await observer.flushed()
   observer.stop()
   assert.deepEqual(landed, ['first-code', 'second-code'])
+})
+
+test("the backend's stream-output figures come from diagnostics.stats only", () => {
+  const at = '2026-11-21T11:12:00.000Z'
+  assert.deepEqual(
+    streamOutputFromEvent(
+      {
+        event: 'diagnostics.stats',
+        payload: {
+          sessionId: 's1',
+          streamMeasuredBitrateKbps: 5950.5,
+          streamOutputTotalBytes: 40000,
+          streamOutputBitrateKbps: 6000,
+          streamKey: 'never-copied'
+        }
+      },
+      at
+    ),
+    {
+      ts: at,
+      sessionId: 's1',
+      measuredBitrateKbps: 5950.5,
+      totalBytes: 40000,
+      configuredBitrateKbps: 6000
+    }
+  )
+  // Linux's raw-frame bridge: 0 kbps over no encoded bytes is no measure.
+  assert.deepEqual(
+    streamOutputFromEvent(
+      {
+        event: 'diagnostics.stats',
+        payload: {
+          streamMeasuredBitrateKbps: 0,
+          streamOutputTotalBytes: 0,
+          streamOutputBitrateKbps: 6000
+        }
+      },
+      at
+    ),
+    {
+      ts: at,
+      sessionId: null,
+      measuredBitrateKbps: null,
+      totalBytes: null,
+      configuredBitrateKbps: 6000
+    }
+  )
+  assert.equal(streamOutputFromEvent({ event: 'diagnostics.stats', payload: {} }, at), null)
+  assert.equal(streamOutputFromEvent({ event: 'health.event', payload: {} }, at), null)
 })
