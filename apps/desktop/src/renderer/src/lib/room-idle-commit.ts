@@ -6,6 +6,7 @@ import type {
   SourceSelection,
   VideoSettings
 } from '@/lib/backend'
+import { cameraOutputLayout } from '@/lib/camera-background'
 import { verticalOrientationVideoPatch, type CaptureConfig } from '@/lib/capture'
 import type { SceneApp } from '@/lib/scene-presets'
 import { withoutSceneApp } from '@/lib/scene-window-state'
@@ -55,6 +56,26 @@ export type IdleCommit = {
     background?: NonNullable<Scene['background']>
   }
   rest: IdleCommitRest
+}
+
+/**
+ * An idle commit is an output boundary like a session start: the selected
+ * camera's look and background go on its layout, from the settings that keep
+ * them per camera (a scene's own layout carries neither). Plan 258 S1 put on
+ * the background only, so a scene put on the room program took the look off
+ * the room camera while every other output kept it.
+ */
+export function idleCommitOutput(
+  commit: IdleCommit,
+  settings: Parameters<typeof cameraOutputLayout>[2]
+): IdleCommit {
+  return {
+    ...commit,
+    params: {
+      ...commit.params,
+      layout: cameraOutputLayout(commit.params.layout, commit.params.sources.cameraId, settings)
+    }
+  }
 }
 
 /** The committed scene as the Studio's working-state update reads it. */
