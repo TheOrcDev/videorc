@@ -2574,7 +2574,7 @@ fn parse_process_sample_row(line: &str) -> Option<ProcessSampleRow> {
 /// row cannot be read.
 #[cfg(target_os = "windows")]
 fn collect_windows_process_rows() -> Result<Vec<ProcessSampleRow>, String> {
-    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::Foundation::{CloseHandle, ERROR_NO_MORE_FILES};
     use windows::Win32::System::Diagnostics::ToolHelp::{
         CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW,
         TH32CS_SNAPPROCESS,
@@ -2589,9 +2589,18 @@ fn collect_windows_process_rows() -> Result<Vec<ProcessSampleRow>, String> {
         dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
         ..Default::default()
     };
-    // SAFETY: `entry.dwSize` is set as the API requires; an error ends the list.
-    let mut more = unsafe { Process32FirstW(snapshot, &mut entry) }.is_ok();
-    while more {
+    // ERROR_NO_MORE_FILES is the end of the list; any other error means the
+    // list is incomplete, and a partial list must not pass for a sample.
+    let ended = |step: &str, result: windows::core::Result<()>| match result {
+        Ok(()) => Ok(false),
+        Err(error) if error.code() == ERROR_NO_MORE_FILES.to_hresult() => Ok(true),
+        Err(error) => Err(format!("listing processes failed at {step}: {error}")),
+    };
+    // SAFETY: `entry.dwSize` is set as the API requires.
+    let mut done = ended("Process32FirstW", unsafe {
+        Process32FirstW(snapshot, &mut entry)
+    });
+    while let Ok(false) = done {
         let name_len = entry
             .szExeFile
             .iter()
@@ -2603,10 +2612,13 @@ fn collect_windows_process_rows() -> Result<Vec<ProcessSampleRow>, String> {
             String::from_utf16_lossy(&entry.szExeFile[..name_len]),
         ));
         // SAFETY: as above.
-        more = unsafe { Process32NextW(snapshot, &mut entry) }.is_ok();
+        done = ended("Process32NextW", unsafe {
+            Process32NextW(snapshot, &mut entry)
+        });
     }
-    // SAFETY: the snapshot handle is owned here and closed once.
+    // SAFETY: the snapshot handle is owned here and closed once, on every path.
     let _ = unsafe { CloseHandle(snapshot) };
+    done?;
 
     let rss_kib = windows_own_working_set_bytes()
         .map_err(|error| format!("reading the backend's working set failed: {error}"))?
