@@ -41,7 +41,6 @@ import {
 } from './lib/camera-background-leak.mjs'
 import {
   CAMERA_BACKGROUND_OUTPUTS,
-  IMAGE_ASSET_ID,
   cameraBackgroundFor,
   effectRequestFrom,
   expectationFor,
@@ -80,11 +79,6 @@ const RTMP_PORT_BASE = Number(process.env.VIDEORC_SMOKE_RTMP_PORT ?? 13985)
 // camera's own raster and about 11 px on the 360x640 vertical leg.
 const VIDEO = { preset: 'custom', width: 1280, height: 720, fps: 30, bitrateKbps: 4000 }
 const VERTICAL_VIDEO = { preset: 'custom', width: 360, height: 640, fps: 30, bitrateKbps: 1500 }
-const BUNDLED_PICTURE = resolve(
-  import.meta.dirname,
-  '..',
-  'apps/desktop/src/renderer/src/assets/backgrounds/podcast.webp'
-)
 
 mkdirSync(outputRoot, { recursive: true })
 mkdirSync(userDataDir, { recursive: true })
@@ -207,17 +201,11 @@ async function launchApp() {
       // not JSON
     }
   })
-  // The image pass's picture: main registers the bundled set when the
-  // renderer asks for it; registering it here keeps the pass independent of
-  // that (a refusal is logged, and the pass then fails on a missing picture).
-  try {
-    await request(ws, 5000, 'resource.capability.register_background', {
-      assetId: IMAGE_ASSET_ID,
-      path: BUNDLED_PICTURE
-    })
-  } catch (error) {
-    log(`register_background ${IMAGE_ASSET_ID}: ${error?.message ?? error}`)
-  }
+  // The image pass's picture is one of the bundled set, which main registers
+  // with the backend when the renderer loads its background library
+  // (`backgrounds:bundled-assets`); the registration RPC is main's alone. A
+  // picture that never resolves draws the neutral ground, which the image
+  // pass fails by name.
   return {
     ws,
     events,
@@ -442,7 +430,8 @@ async function runShortSession(context) {
       recordEnabled: true,
       streamEnabled: false,
       outputDirectoryCapability: directory.capabilityId,
-      video: VIDEO
+      video: VIDEO,
+      rtmp: { preset: 'custom', serverUrl: '', streamKey: '' }
     }
   })
   log(`${pass}: session ${started.sessionId} ${started.state}`)

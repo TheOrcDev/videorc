@@ -41,9 +41,11 @@ use crate::protocol::{
     CameraBackground, CameraBackgroundMode, CameraBackgroundStageState, CameraBackgroundStatus,
 };
 
-/// S2's leak detector needs about this radius at 1080p before the room stops
-/// reading; Strong blur (70 %) draws it.
-pub(crate) const STRONG_BLUR_RADIUS_AT_1080: f32 = 40.0;
+/// Strong blur's Gaussian sigma at 1080p, in pixels. S2's leak detector
+/// stops reading the fixture room once the sigma is about two of its cells
+/// (40 px at 1080p; measured in S3: 1 cell leaves 8 pattern tiles a frame,
+/// 1.5 cells 2, 2 cells none). 48 px (2.4 cells) keeps a margin for H.264.
+pub(crate) const STRONG_BLUR_SIGMA_AT_1080: f32 = 48.0;
 /// D5: Strong blur's strength.
 pub(crate) const STRONG_BLUR_PCT: f32 = 70.0;
 /// D6: the blur cover is Strong blur plus 50 % more.
@@ -117,17 +119,17 @@ impl EffectLook {
     }
 }
 
-/// The blur radius in pixels of a frame `height` tall at `pct` strength:
-/// Strong blur is [`STRONG_BLUR_RADIUS_AT_1080`] at 1080p and it scales with
-/// both. Never under 2 px for a blur that is on.
-pub(crate) fn blur_radius_px(pct: u32, height: u32) -> f32 {
+/// The blur's Gaussian sigma in pixels for a frame `height` tall at `pct`
+/// strength: Strong blur is [`STRONG_BLUR_SIGMA_AT_1080`] at 1080p and it
+/// scales with both. Never under 2 px for a blur that is on.
+pub(crate) fn blur_sigma_px(pct: u32, height: u32) -> f32 {
     let scale = height.max(1) as f32 / 1080.0;
-    (STRONG_BLUR_RADIUS_AT_1080 * (pct as f32 / STRONG_BLUR_PCT) * scale).max(2.0)
+    (STRONG_BLUR_SIGMA_AT_1080 * (pct as f32 / STRONG_BLUR_PCT) * scale).max(2.0)
 }
 
-/// D6: the blur cover's radius, Strong blur plus 50 %, whatever the strength.
-pub(crate) fn cover_blur_radius_px(height: u32) -> f32 {
-    blur_radius_px(STRONG_BLUR_PCT as u32, height) * COVER_BLUR_FACTOR
+/// D6: the blur cover's sigma, Strong blur plus 50 %, whatever the strength.
+pub(crate) fn cover_blur_sigma_px(height: u32) -> f32 {
+    blur_sigma_px(STRONG_BLUR_PCT as u32, height) * COVER_BLUR_FACTOR
 }
 
 /// A camera frame handed to the stage, always BGRA.
@@ -1616,13 +1618,19 @@ mod tests {
     }
 
     #[test]
-    fn blur_radius_scales_with_strength_and_height() {
+    fn blur_sigma_scales_with_strength_and_height() {
         let near = |a: f32, b: f32| (a - b).abs() < 0.01;
-        assert!(near(blur_radius_px(70, 1080), 40.0));
-        assert!(near(blur_radius_px(30, 1080), 17.14));
-        assert!(near(blur_radius_px(70, 720), 26.67));
-        assert!(near(cover_blur_radius_px(1080), 60.0));
-        assert!(near(blur_radius_px(0, 1080), 2.0));
+        assert!(near(blur_sigma_px(70, 1080), 48.0));
+        assert!(near(blur_sigma_px(30, 1080), 20.57));
+        assert!(near(blur_sigma_px(70, 720), 32.0));
+        assert!(near(cover_blur_sigma_px(1080), 72.0));
+        assert!(near(blur_sigma_px(0, 1080), 2.0));
+        // Strong blur clears the S2 detector's two-cell bar at every size
+        // (the fixture room has 54 cells per frame height).
+        for height in [360, 720, 1080, 2160] {
+            let cell = height as f32 / 54.0;
+            assert!(blur_sigma_px(70, height) >= 2.0 * cell, "{height}");
+        }
     }
 
     #[test]

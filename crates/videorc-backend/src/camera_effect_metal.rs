@@ -50,7 +50,7 @@ use objc2_metal::{
 use crate::frame_store::RetainedPixelBuffer;
 use crate::preview_camera::effect_stage::{
     EffectFrame, EffectKind, EffectLook, EffectOutput, EffectPixels, EffectRenderer, EngineParts,
-    Matte, NEUTRAL_GROUND_BGRA, PersonSegmenter, blur_radius_px, cover_blur_radius_px,
+    Matte, NEUTRAL_GROUND_BGRA, PersonSegmenter, blur_sigma_px, cover_blur_sigma_px,
 };
 
 type Device = ProtocolObject<dyn MTLDevice>;
@@ -677,13 +677,13 @@ impl MetalEffectRenderer {
             None => None,
         };
         let mut picture = None;
-        let (mode, radius) = match &look.kind {
+        let (mode, sigma_px) = match &look.kind {
             EffectKind::Blur { pct } => (
                 0u32,
                 if cover {
-                    cover_blur_radius_px(frame.height)
+                    cover_blur_sigma_px(frame.height)
                 } else {
-                    blur_radius_px(*pct, frame.height)
+                    blur_sigma_px(*pct, frame.height)
                 },
             ),
             EffectKind::Image { path, .. } => {
@@ -746,8 +746,8 @@ impl MetalEffectRenderer {
                 set_compute_bytes(&*encoder, &down);
             }
             dispatch(&*encoder, quarter[0].width(), quarter[0].height());
-            let quarter_radius = radius / 4.0;
-            let sigma = (quarter_radius / 2.0).max(0.5);
+            // The pass runs at quarter size: a quarter of the sigma there.
+            let sigma = (sigma_px / 4.0).max(0.5);
             let taps = (sigma * 3.0).ceil() as i32;
             encoder.setComputePipelineState(&self.blur);
             for (input, output, dir) in [(0usize, 1usize, (1, 0)), (1, 0, (0, 1))] {
