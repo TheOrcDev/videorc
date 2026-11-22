@@ -80,11 +80,26 @@ describe('Alert (J1-8, D-38, G-26, E-PAT)', () => {
     expect(title).toContain('group-data-[variant=locked]/alert:text-muted-foreground')
   })
 
-  it('stays a flush row: a tint, the row radius, no border and no shadow', () => {
+  it('stays a flush row: one neutral fill, the row radius, no border and no shadow', () => {
     const tag = openingTag(render(h(Alert, { variant: 'warning' })), 'alert')
     expect(tag).toContain('rounded-row')
-    expect(tag).toContain('bg-warning/10')
+    expect(tag).toContain('bg-foreground/4')
     expect(tag).not.toMatch(/\bborder\b|shadow/)
+  })
+
+  it('never tints the row: every tone shares the neutral fill and colours its icon only', () => {
+    for (const variant of [
+      'default',
+      'destructive',
+      'locked',
+      'quiet',
+      'success',
+      'warning'
+    ] as const) {
+      const tag = openingTag(render(h(Alert, { variant })), 'alert')
+      expect(tag, variant).toContain('bg-foreground/4')
+      expect(tag, variant).not.toMatch(/\bbg-(?:destructive|warning|success)/)
+    }
   })
 })
 
