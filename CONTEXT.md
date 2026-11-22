@@ -201,6 +201,17 @@ window's first frame, then cuts. No black frame, no frame of the new window
 under the old scene's layout. Budget: 150 ms p95 from the click.
 _Avoid_: crossfade (there is none), warm capture, restart
 
+**Background** (the camera's):
+What is behind the person on one camera, as one pick kept in every scene
+(plan 258): Off, Slight blur, Strong blur, a picture from the Images library,
+Green screen or Blue screen; never two at once. It runs on the computer
+before anything is recorded or sent, on every output; while it can't keep
+up, viewers see the cover (the whole camera blurred, or the picture alone),
+never the room. Its home is the Scene page's Background section; the Studio's
+Camera row and ⌘K mirror it.
+_Avoid_: virtual background, privacy blur, background removal, green screen
+(that is one of its picks)
+
 **Hide screen**:
 Covers the screen on every output (the recording, every stream, Clips and the
 Screen file) with a designed still (a calm gradient with a glass disc and

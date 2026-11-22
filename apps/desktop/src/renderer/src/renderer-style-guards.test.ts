@@ -45,6 +45,9 @@ const COLOUR_LITERAL_ALLOWLIST = new Set([
   'src/lib/chroma-key-reference.ts',
   'src/lib/talk-show-camera-effects.ts',
   'src/components/tabs/layout-tab.tsx',
+  // Plan 258 S5: the Background tiles' pictures (a room, a person, the
+  // screen colours) are what the camera looks like on stream, not chrome.
+  'src/components/camera-background/camera-background-art.tsx',
   // The privacy frost drawn over a shared screen is published video, not chrome.
   'src/lib/room-private-screen.ts',
   // Plan 254 S2: the shade over a portrait camera's fill, as the program

@@ -8492,6 +8492,89 @@ describe('real StudioProvider lifecycle', () => {
     expect(latest().captureConfig.sources.microphoneId).toBeUndefined()
   }, 15_000)
 
+  it('keeps the camera background on every commit after it is picked, and never in a scene (plan 258 S5)', async () => {
+    const backend = new StudioBackend()
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const testDom = installProviderTestEnvironment(
+      createVideorcApi({
+        acknowledge: async () => true,
+        pending: async () => [],
+        acknowledgeProvider: async () => true,
+        pendingProvider: async () => []
+      })
+    )
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioCoreContextValue => observations.at(-1)!.core
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(() => canSaveScene())
+    const cameras = latest().deviceList.devices.filter((device) => device.kind === 'camera')
+    await act(async () =>
+      latest().switchSourceDeviceLive(
+        'camera',
+        buildCameraSources(latest().captureConfig.sources, cameras, 'camera:1')
+      )
+    )
+    await waitForObservation(
+      () => latest().captureConfig.sources.cameraId === 'camera:1' && canSaveScene()
+    )
+    // The D4 migration settled on this profile (no keyed scene, nothing moved).
+    expect(latest().settings.cameraBackgroundMigration).toBe(1)
+    const layoutCommand = (from: number) =>
+      backend.sentCommands
+        .slice(from)
+        .filter((command) => command.method.startsWith('scene.layout.apply'))
+        .at(-1)?.params as { layout?: Record<string, unknown> } | undefined
+    // The Studio's pick: stored for the camera and committed at once.
+    let from = backend.sentCommands.length
+    await act(async () => {
+      expect(
+        await latest().applyCameraBackground({ mode: 'blur', blurPct: 70, edges: 'balanced' })
+      ).toBe(true)
+    })
+    expect(layoutCommand(from)?.layout).toMatchObject({
+      cameraBackground: { mode: 'blur', blurPct: 70 },
+      cameraChromaKeyEnabled: false
+    })
+    // A later edit is built from the scene's own layout, which never carries
+    // the background; the commit still does (S3's smoke put it on the layout
+    // and a commit like this one disarmed it).
+    from = backend.sentCommands.length
+    await act(async () => {
+      await latest().applyLayoutPatch({ cameraSize: 'large' })
+    })
+    expect(layoutCommand(from)?.layout).toMatchObject({
+      cameraSize: 'large',
+      cameraBackground: { mode: 'blur', blurPct: 70 }
+    })
+    // Kept per camera in the settings, never in a scene or the capture config.
+    await waitForObservation(
+      () =>
+        JSON.parse(localStorage.getItem(STORAGE_KEYS.settings) ?? '{}').cameraBackgrounds?.[
+          'camera:1'
+        ]?.mode === 'blur'
+    )
+    expect(JSON.stringify(storedLibrary())).not.toContain('cameraBackground')
+    expect(localStorage.getItem(STORAGE_KEYS.captureConfig)).not.toContain('cameraBackground')
+    // Record carries it too.
+    await act(async () => latest().startSession())
+    await waitForObservation(() => observations.at(-1)?.recording.recording.state === 'recording')
+    expect(
+      (
+        backend.sentCommands.find((command) => command.method === 'session.start')?.params as {
+          layout: Record<string, unknown>
+        }
+      ).layout
+    ).toMatchObject({ cameraBackground: { mode: 'blur', blurPct: 70 } })
+    await act(async () => {
+      expect(await latest().stopSession()).toBe(true)
+    })
+    await waitForObservation(() => observations.at(-1)?.recording.recording.state === 'idle')
+  }, 15_000)
+
   it('never changes the camera when a scene goes on stream (plan 231 D9), and keeps Camera Off through device discovery and a finished session', async () => {
     const backend = new StudioBackend()
     TestWebSocket.backend = backend

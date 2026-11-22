@@ -5,9 +5,12 @@ import {
   SpeakerOnIcon,
   StopIcon
 } from '@/components/icons'
-import { Fragment, useContext, type ReactElement, type ReactNode } from 'react'
+import { Fragment, useContext, useId, useState, type ReactElement, type ReactNode } from 'react'
 
 import { MicrophoneGainFader, SystemAudioGainFader } from '@/components/audio/gain-faders'
+import { CameraBackgroundImageDialog } from '@/components/camera-background/camera-background-image-dialog'
+import { CameraBackgroundPicker } from '@/components/camera-background/camera-background-popover'
+import type { CameraBackgroundControl } from '@/components/camera-background/use-camera-background'
 import { LcdDevicePicker } from '@/components/lcd-device-picker'
 import {
   LCD_FADER,
@@ -17,18 +20,19 @@ import {
   LcdPanelAction,
   LcdPanelCog,
   LcdPanelHeader,
-  LcdPanelChoice,
   LcdPanelKey,
   LcdPanelNavRow,
   LcdPanelPressRow,
-  LcdPanelSwitch
+  LcdPanelRow,
+  LcdPanelSwitch,
+  LcdPixelChevron
 } from '@/components/lcd-panel'
 import { PanelSection } from '@/components/panel-section'
 import { AgentsSessionRow } from '@/components/studio/agents-session-row'
 import { MicLcdMeter } from '@/components/studio/mic-level-meter'
 import type { MicrophoneRowProps, SystemAudioRowProps } from '@/components/studio/audio-section'
 import {
-  type GreenScreenControl,
+  useCameraBackgroundStageLine,
   useCameraSystemEffectLine,
   useStudioChatDoor,
   useStudioSources
@@ -49,14 +53,16 @@ import { SourceSwitchStatus } from '@/components/studio/source-switch-status'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { DisabledReason } from '@/components/ui/disabled-reason'
 import { InfoTooltip } from '@/components/ui/info-tooltip'
-import { LcdDisplayRow, LcdDisplaySeparator } from '@/components/ui/lcd-display'
+import { LcdDisplaySeparator } from '@/components/ui/lcd-display'
 import { Mixer, MixerChannels } from '@/components/ui/mixer'
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { ShortcutKeys } from '@/components/ui/shortcut-keys'
 import { ShortcutTooltip } from '@/components/ui/shortcut-tooltip'
 import { useWorkspaceNav, WorkspaceNavContext } from '@/components/workspace-nav'
 import { useStudioCore } from '@/hooks/use-studio'
 import { buildCameraSources } from '@/lib/capture'
-import { GREEN_SCREEN_MODES } from '@/lib/green-screen'
+import { CAMERA_BACKGROUND_LABEL } from '@/lib/camera-background-view'
+import { openSceneBackground } from '@/lib/green-screen'
 import { GO_LIVE_CHECKING_LABEL, GO_LIVE_LABEL, RECORD_LABEL } from '@/lib/go-live-copy'
 import { MIC_SESSION_LEVEL_UNAVAILABLE_COPY } from '@/lib/mic-meter-input'
 import { TAKEOVER_MUTED_HINT, TAKEOVER_MUTED_LABEL } from '@/lib/takeover-microphone'
@@ -500,7 +506,7 @@ export function RetroQuickSettings(): ReactElement {
     openStudioPanel,
     discoveryPending,
     cameras,
-    greenScreen
+    cameraBackground
   } = useStudioSources()
   return (
     <>
@@ -530,7 +536,8 @@ export function RetroQuickSettings(): ReactElement {
             }
           />
           <RetroSwitchStatusLine kind="camera" />
-          <RetroGreenScreenRow control={greenScreen} />
+          <RetroBackgroundRow control={cameraBackground} />
+          <RetroBackgroundStageLine />
           <RetroSystemEffectLine />
         </LcdPanel>
       </PanelSection>
@@ -572,18 +579,72 @@ function RetroChatDoorRow(): ReactElement | null {
   )
 }
 
-/** Green screen under the camera, as in the default look: Off, Green screen or Blue screen (plan 248). */
-function RetroGreenScreenRow({ control }: { control: GreenScreenControl }): ReactElement | null {
+/**
+ * Background under the camera, as in the default look (plan 258 S5): the
+ * pick lit on the screen, opening the same picker (the live picture and the
+ * tiles are on-stream pixels, so they sit on the popup, not on the screen).
+ */
+function RetroBackgroundRow({
+  control
+}: {
+  control: CameraBackgroundControl
+}): ReactElement | null {
+  const id = useId()
+  const [open, setOpen] = useState(false)
+  const [choosingImage, setChoosingImage] = useState(false)
   if (!control.available) return null
   return (
-    <LcdDisplayRow className="min-w-0 py-2" data-testid="green-screen">
-      <LcdPanelChoice
-        aria-label="Green screen"
-        options={GREEN_SCREEN_MODES}
-        value={control.mode}
-        onValueChange={control.setMode}
+    <LcdPanelRow htmlFor={id} label={CAMERA_BACKGROUND_LABEL}>
+      <Popover open={open} onOpenChange={setOpen}>
+        <PopoverTrigger
+          id={id}
+          render={
+            <button
+              aria-label={`${CAMERA_BACKGROUND_LABEL}: ${control.valueLabel}`}
+              className={cn(LCD_VALUE_BUTTON, 'data-popup-open:bg-(--lcd-display-ink-unlit)')}
+              data-videorc-camera-background-trigger=""
+              type="button"
+            />
+          }
+        >
+          <span className="min-w-0 truncate" title={control.valueLabel}>
+            {control.valueLabel}
+          </span>
+          <LcdPixelChevron />
+        </PopoverTrigger>
+        <PopoverContent align="end" className="w-80" data-videorc-camera-background-popover="">
+          <CameraBackgroundPicker
+            control={control}
+            onChooseImage={() => {
+              setOpen(false)
+              setChoosingImage(true)
+            }}
+            onSettings={() => {
+              setOpen(false)
+              openSceneBackground()
+            }}
+          />
+        </PopoverContent>
+      </Popover>
+      <CameraBackgroundImageDialog
+        choices={control.choices().filter((choice) => choice.group === 'images')}
+        open={choosingImage}
+        reason={control.effectReason}
+        selected={control.choiceId}
+        onChoose={control.choose}
+        onOpenChange={setChoosingImage}
       />
-    </LcdDisplayRow>
+    </LcdPanelRow>
+  )
+}
+
+/** The stage's line under the camera, as in the default look (plan 258 S5, mockup §3). */
+function RetroBackgroundStageLine(): ReactElement {
+  const line = useCameraBackgroundStageLine()
+  return (
+    <div aria-live="polite" className={cn(LCD_MESSAGE, 'empty:sr-only')}>
+      {line ? <span data-slot="camera-background-stage">{line}</span> : null}
+    </div>
   )
 }
 

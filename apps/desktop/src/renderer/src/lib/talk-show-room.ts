@@ -132,6 +132,8 @@ import {
   type TalkShowCameraSettings
 } from '@/lib/talk-show-camera-effects'
 import { sendOverlay, type OverlayImage } from '@/lib/talk-show-overlays'
+import { cameraBackgroundIsEffect } from '@/lib/camera-background'
+import { ROOM_CAMERA_OFF_FOR_BACKGROUND } from '@/lib/camera-background-view'
 import {
   RemoteAudioAttachments,
   guestCaptionTracks,
@@ -434,6 +436,14 @@ export class TalkShowRoomClient {
   #camera: LocalVideoTrack | null = null
   #cameraEffects: TalkShowCameraEffects | null = null
   #cameraEffectError = false
+  /**
+   * Plan 258 S5, before S8: the camera's background is an effect the room
+   * can't apply yet, so the room publishes no camera (fail closed) and says
+   * why on the Show stage. Off, or a screen key, lets it publish again.
+   */
+  #backgroundBlocked = false
+  /** Whether the streamer wants the camera on in the room (it comes back on unblock). */
+  #cameraWanted = false
   #cameraSettingsRevision = 0
   #microphone: LocalAudioTrack | null = null
   #pcmSource: RoomPcmSource | null = null
@@ -544,6 +554,7 @@ export class TalkShowRoomClient {
     this.#cameraOff =
       deps.initiallyCameraOff === true ||
       (!deps.cameraName && !deps.frameTestSource && !deps.processedCamera)
+    this.#cameraWanted = !this.#cameraOff
     this.#audio = new RemoteAudioAttachments<HTMLMediaElement>(() => deps.audioHost())
     this.#latency = new RoomLatencyHost({
       changed: () => this.#publish(),
@@ -748,6 +759,7 @@ export class TalkShowRoomClient {
 
   setCameraSelection(name: string | null, off: boolean): Promise<void> {
     if (!off && name && this.#deps.sourcesHeld?.()) return Promise.reject(new Error(SOURCES_HELD))
+    this.#cameraWanted = !off
     return this.#control(async (room) => {
       // Release capture, not just its publication, for None/off.
       this.#cameraEffects?.close()
@@ -771,7 +783,9 @@ export class TalkShowRoomClient {
       this.#publish()
       if (!off && (name || this.#nativeCamera())) {
         await this.#publishCamera(room)
-        this.#cameraOff = false
+        // A camera the background effect keeps out of the room stays off.
+        this.#cameraOff = this.#backgroundBlocked
+        this.#publish()
       } else if (!off) {
         this.#publish()
         throw new Error('Choose a camera before turning it on.')
@@ -1554,6 +1568,25 @@ export class TalkShowRoomClient {
   async updateCameraSettings(settings: TalkShowCameraSettings | undefined): Promise<void> {
     const camera = this.#camera
     const revision = ++this.#cameraSettingsRevision
+    const effect = cameraBackgroundIsEffect(settings?.layout.cameraBackground)
+    if (effect && !this.#nativeCamera()) {
+      // Plan 258 S5, before S8: an effect turned on while the room shows the
+      // browser's own camera takes the camera out of the room at once. The
+      // controls refuse it while a room is open; this holds for any other way in.
+      if (camera || !this.#backgroundBlocked) this.#blockCameraForBackground()
+      if (camera) await this.#releaseCameraForBackground()
+      return
+    }
+    if (this.#backgroundBlocked && !effect) {
+      // The effect is off: the camera may come back, as the streamer had it.
+      this.#backgroundBlocked = false
+      this.#cameraOff = !this.#cameraWanted
+      if (this.#problem === ROOM_CAMERA_OFF_FOR_BACKGROUND) this.#problem = null
+      this.#publish()
+      if (this.#room && this.#cameraName && this.#cameraWanted)
+        await this.setCameraSelection(this.#cameraName, false).catch(() => {})
+      return
+    }
     try {
       await this.#cameraEffects?.update(settings)
       if (revision !== this.#cameraSettingsRevision || camera !== this.#camera) return
@@ -1577,8 +1610,41 @@ export class TalkShowRoomClient {
     this.#publish()
   }
 
+  /** The room keeps the camera off for the background effect (plan 258 S5), and says so. */
+  #blockCameraForBackground(): void {
+    this.#backgroundBlocked = true
+    this.#cameraOff = true
+    if (!this.#cameraEffectError) {
+      this.#problem = ROOM_CAMERA_OFF_FOR_BACKGROUND
+      if (this.#room) this.#deps.report('connected', this.#problem)
+    }
+    this.#publish()
+  }
+
+  /** Unpublishes and stops the browser camera an effect was turned on over. */
+  async #releaseCameraForBackground(): Promise<void> {
+    await this.#control(async (room) => {
+      this.#cameraEffects?.close()
+      this.#cameraEffects = null
+      const old = this.#camera
+      this.#camera = null
+      if (old) {
+        old.stop()
+        await room.localParticipant.unpublishTrack(old, true)
+      }
+      this.#publish()
+    }).catch(() => {})
+  }
+
   async #publishCamera(room: Room): Promise<void> {
     if (this.#nativeCamera()) return this.#publishFrameCamera(room)
+    // Plan 258 S5, before S8: the browser camera can't carry the background
+    // effect yet, so with one on the room opens no camera at all: nothing of
+    // the room behind the streamer is captured, let alone published.
+    if (cameraBackgroundIsEffect(this.#deps.cameraSettings?.()?.layout.cameraBackground)) {
+      this.#blockCameraForBackground()
+      return
+    }
     let openedCamera: LocalVideoTrack | null = null
     let openedEffects: TalkShowCameraEffects | null = null
     try {
@@ -1606,6 +1672,20 @@ export class TalkShowRoomClient {
       await effects.update(this.#deps.cameraSettings?.())
       if (!this.#owns(room)) {
         camera.stop()
+        return
+      }
+      // An effect turned on while the camera was opening: it never goes out.
+      if (
+        this.#backgroundBlocked ||
+        cameraBackgroundIsEffect(this.#deps.cameraSettings?.()?.layout.cameraBackground)
+      ) {
+        effects.close()
+        camera.stop()
+        if (this.#camera === camera) {
+          this.#cameraEffects = null
+          this.#camera = null
+        }
+        this.#blockCameraForBackground()
         return
       }
       await room.localParticipant.publishTrack(camera, {
@@ -1855,7 +1935,9 @@ export class TalkShowRoomClient {
       ? problems.join(' ')
       : this.#cameraEffectError
         ? this.#problem
-        : null
+        : this.#backgroundBlocked
+          ? ROOM_CAMERA_OFF_FOR_BACKGROUND
+          : null
     if (this.#problem) this.#deps.report('connected', this.#problem)
   }
 

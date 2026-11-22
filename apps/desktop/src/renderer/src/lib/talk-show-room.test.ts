@@ -11,6 +11,7 @@ import avatarFixture from '../../../../../..//protocol-fixtures/cloud-parity-ava
 import { setRoomFrameEncodeObserver } from './room-frame-test-state'
 import vectors from '../../../shared/chroma-key-vectors.json'
 import type { TalkShowCameraSettings } from './talk-show-camera-effects'
+import { ROOM_CAMERA_OFF_FOR_BACKGROUND } from './camera-background-view'
 import type { CloudOnAir, CloudRoomClientState, CloudRoomTokenAnswer } from '@/lib/backend'
 import { validateBackendRpcParams } from '../../../shared/backend-rpc-contract'
 import {
@@ -259,6 +260,100 @@ describe('the host in the room (C-G4)', () => {
       )
     ).toBe(false)
     await room.disconnect()
+  })
+
+  describe('a background effect before S8 (plan 258 S5)', () => {
+    const blur = { mode: 'blur' as const, blurPct: 70, edges: 'balanced' as const }
+    const withBackground = (cameraBackground?: typeof blur) => ({
+      layout: { ...vectors[0].settings, cameraChromaKeyEnabled: false, cameraBackground }
+    })
+    const publishedCamera = () =>
+      latestRoom().localParticipant.publishTrack.mock.calls.some(
+        (args: unknown[]) => (args[1] as { source?: string } | undefined)?.source === 'camera'
+      )
+
+    it('opens no camera at all when the room opens with an effect on, and says why', async () => {
+      const { room } = client(undefined, () => withBackground(blur))
+      await room.connect()
+      // Nothing of the room behind the streamer is captured, let alone sent.
+      expect(lk.video).not.toHaveBeenCalled()
+      expect(publishedCamera()).toBe(false)
+      expect(room.snapshot.local.camera).toBeNull()
+      expect(room.snapshot.local.cameraOff).toBe(true)
+      expect(room.snapshot.local.problem).toBe(ROOM_CAMERA_OFF_FOR_BACKGROUND)
+      // Turning the camera on in the room can't get around it.
+      await room.setCameraOff(false)
+      expect(lk.video).not.toHaveBeenCalled()
+      expect(room.snapshot.local.cameraOff).toBe(true)
+      await room.disconnect()
+    })
+
+    it('takes the camera out of the room when an effect is turned on, and back when it is off', async () => {
+      const camera = lk.fakeLocalTrack()
+      lk.video.mockResolvedValueOnce(camera)
+      let settings = withBackground()
+      const { room } = client(undefined, () => settings)
+      await room.connect()
+      expect(publishedCamera()).toBe(true)
+      settings = withBackground(blur)
+      await room.updateCameraSettings(settings)
+      expect(camera.stop).toHaveBeenCalled()
+      expect(latestRoom().localParticipant.unpublishTrack).toHaveBeenCalledWith(camera, true)
+      expect(room.snapshot.local.camera).toBeNull()
+      expect(room.snapshot.local.problem).toBe(ROOM_CAMERA_OFF_FOR_BACKGROUND)
+      // Off: the camera the streamer had on comes back, and the line goes.
+      settings = withBackground()
+      await room.updateCameraSettings(settings)
+      expect(lk.video).toHaveBeenCalledTimes(2)
+      expect(room.snapshot.local.cameraOff).toBe(false)
+      expect(room.snapshot.local.problem).toBeNull()
+      await room.disconnect()
+    })
+
+    it('never publishes a camera an effect was turned on over while it opened', async () => {
+      const camera = lk.fakeLocalTrack()
+      let settings = withBackground()
+      lk.video.mockImplementationOnce(async () => {
+        // The streamer picks Strong blur while the browser opens the camera.
+        settings = withBackground(blur)
+        return camera
+      })
+      const { room } = client(undefined, () => settings)
+      await room.connect()
+      expect(camera.stop).toHaveBeenCalled()
+      expect(publishedCamera()).toBe(false)
+      expect(room.snapshot.local.camera).toBeNull()
+      expect(room.snapshot.local.problem).toBe(ROOM_CAMERA_OFF_FOR_BACKGROUND)
+      await room.disconnect()
+    })
+
+    it('leaves a camera the streamer turned off, off, when the effect goes', async () => {
+      let settings = withBackground(blur)
+      const { room } = client(undefined, () => settings)
+      await room.connect()
+      await room.setCameraOff(true)
+      settings = withBackground()
+      await room.updateCameraSettings(settings)
+      expect(lk.video).not.toHaveBeenCalled()
+      expect(room.snapshot.local.cameraOff).toBe(true)
+      expect(room.snapshot.local.problem).toBeNull()
+      await room.disconnect()
+    })
+
+    it('keeps a green screen in the room: only effects wait for S8', async () => {
+      const camera = lk.fakeLocalTrack()
+      lk.video.mockResolvedValueOnce(camera)
+      const { room } = client(undefined, () => ({
+        layout: {
+          ...vectors[0].settings,
+          cameraBackground: { mode: 'green' as const, blurPct: 70, edges: 'balanced' as const }
+        }
+      }))
+      await room.connect()
+      expect(publishedCamera()).toBe(true)
+      expect(room.snapshot.local.problem).toBeNull()
+      await room.disconnect()
+    })
   })
 
   it('keeps adaptive stream off for the raw-track stage and dynacast on (plan 247 D1)', () => {

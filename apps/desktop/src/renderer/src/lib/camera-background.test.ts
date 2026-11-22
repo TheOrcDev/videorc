@@ -169,8 +169,106 @@ describe('camera background at the output boundary', () => {
     })
     expect(out.cameraLook).toEqual(look)
     expect(out.cameraBackground).toStrictEqual(fixture.full)
-    // Nothing renders differently yet: the scene's own key is untouched.
+    // Before the D4 migration has run, the scene's own key goes out as it was.
     expect(out.cameraChromaKeyEnabled).toBe(layout.cameraChromaKeyEnabled)
+  })
+
+  it('once migrated, the camera’s choice is what keys: one pick, never a key beside an effect', () => {
+    const migrated = (backgrounds: Record<string, CameraBackground>) => ({
+      cameraBackgrounds: backgrounds,
+      cameraBackgroundMigration: CAMERA_BACKGROUND_MIGRATION_VERSION
+    })
+    const sceneKeyed = {
+      ...layout,
+      cameraChromaKeyEnabled: true,
+      cameraChromaKeyColor: '#00FF00',
+      cameraChromaKeySimilarityPct: 12,
+      cameraChromaKeyEdges: { leftPct: 9, topPct: 0, rightPct: 0, bottomPct: 0 }
+    }
+    const edges = { leftPct: 3, topPct: 1, rightPct: 0, bottomPct: 0 }
+    const blue: CameraBackground = {
+      ...DEFAULT_CAMERA_BACKGROUND,
+      mode: 'blue',
+      key: { similarityPct: 44, smoothnessPct: 5, spillPct: 21, hideEdges: edges }
+    }
+    // Blue screen on the camera: the layout keys blue with the camera's tuning,
+    // whatever the scene said, and goes out with the background.
+    const keyed = cameraOutputLayout(sceneKeyed, 'camera-a', migrated({ 'camera-a': blue }))
+    expect(keyed).toMatchObject({
+      cameraChromaKeyEnabled: true,
+      cameraChromaKeyColor: '#0000FF',
+      cameraChromaKeySimilarityPct: 44,
+      cameraChromaKeySmoothnessPct: 5,
+      cameraChromaKeySpillPct: 21,
+      cameraChromaKeyEdges: edges,
+      cameraBackground: blue
+    })
+    // Without its own Hide edges the scene's are dropped, not kept.
+    const green = { ...DEFAULT_CAMERA_BACKGROUND, mode: 'green' as const }
+    const plainGreen = cameraOutputLayout(sceneKeyed, 'camera-a', migrated({ 'camera-a': green }))
+    expect(plainGreen.cameraChromaKeyColor).toBe('#00FF00')
+    expect(plainGreen.cameraChromaKeySimilarityPct).toBe(40)
+    expect(plainGreen).not.toHaveProperty('cameraChromaKeyEdges')
+    // A blur, a picture, Off, another camera's pick or no camera: never a key.
+    for (const [cameraId, backgrounds] of [
+      ['camera-a', { 'camera-a': { ...DEFAULT_CAMERA_BACKGROUND, mode: 'blur' as const } }],
+      [
+        'camera-a',
+        { 'camera-a': { ...DEFAULT_CAMERA_BACKGROUND, mode: 'image' as const, assetId: 'loft' } }
+      ],
+      ['camera-a', { 'camera-a': { ...blue, mode: 'off' as const } }],
+      ['camera-b', { 'camera-a': blue }],
+      [undefined, { 'camera-a': blue }]
+    ] as const) {
+      const out = cameraOutputLayout(sceneKeyed, cameraId, migrated(backgrounds))
+      expect(out.cameraChromaKeyEnabled, JSON.stringify(backgrounds)).toBe(false)
+      // Off touches only the switch: a rollback still reads the last tuning.
+      expect(out.cameraChromaKeySimilarityPct).toBe(12)
+    }
+    // Strong blur reaches the vertical leg with the key off there too.
+    const blurred = cameraOutputLayout(
+      sceneKeyed,
+      'camera-a',
+      migrated({ 'camera-a': { ...DEFAULT_CAMERA_BACKGROUND, mode: 'blur' } })
+    )
+    const leg = simulcastLegLayout({ layouts: { vertical: sceneKeyed } }, blurred)
+    expect(leg.cameraChromaKeyEnabled).toBe(false)
+    expect(leg.cameraBackground?.mode).toBe('blur')
+  })
+
+  it('no layout the renderer commits can drop it: every commit takes it from the settings', () => {
+    // S3's smoke put the background on the layout itself; any later renderer
+    // commit (a scene switch, an edit, a room's idle commit) built from a
+    // scene's layout, which never carries it, disarmed the effect. The
+    // controls write the per-camera setting instead, and every output
+    // boundary puts it back on.
+    const strong = { ...DEFAULT_CAMERA_BACKGROUND, mode: 'blur' as const }
+    const stored = {
+      ...settings({ 'camera-a': strong }),
+      cameraBackgroundMigration: CAMERA_BACKGROUND_MIGRATION_VERSION
+    }
+    const fromScene = {
+      ...layout,
+      layoutPreset: 'camera-only' as const,
+      cameraSize: 'large' as const
+    }
+    expect(fromScene).not.toHaveProperty('cameraBackground')
+    expect(cameraOutputLayout(fromScene, 'camera-a', stored).cameraBackground).toStrictEqual(strong)
+    // A commit that carries a stale or foreign background gets the camera's.
+    const stale = { ...fromScene, cameraBackground: { ...strong, mode: 'off' as const } }
+    expect(cameraOutputLayout(stale, 'camera-a', stored).cameraBackground).toStrictEqual(strong)
+    // Session start reads the same settings.
+    expect(
+      buildStartSessionParams({
+        captureConfig: {
+          ...defaultCaptureConfig,
+          layout: fromScene,
+          sources: { ...defaultCaptureConfig.sources, cameraId: 'camera-a' }
+        },
+        scene: null,
+        settings: stored
+      }).layout.cameraBackground
+    ).toStrictEqual(strong)
   })
 
   it('reads damaged storage as bounded, and an unknown pick as Off, never an effect', () => {
@@ -239,7 +337,9 @@ function migrate(
     cameraId: 'cameraId' in options ? options.cameraId : 'camera-a',
     scenes,
     onStreamId,
-    settle: options.settle
+    // The tables below pin the rule run by run; the default (it settles, S5)
+    // has its own test.
+    settle: options.settle ?? false
   })
 }
 
@@ -271,7 +371,7 @@ describe('D4 migration: the scenes’ key moves to the camera', () => {
       mode: 'green',
       key: { similarityPct: 51, smoothnessPct: 6, spillPct: 20, hideEdges: edges }
     })
-    // Not settled before S5: the camera keeps following the scenes.
+    // Not settled on a run told not to: the camera keeps following the scenes.
     expect(result?.cameraBackgroundMigration).toBeUndefined()
   })
 
@@ -343,8 +443,70 @@ describe('D4 migration: the scenes’ key moves to the camera', () => {
     })
   })
 
-  it('follows the scenes until it settles, then never runs again', () => {
-    expect(CAMERA_BACKGROUND_MIGRATION_SETTLES).toBe(false)
+  it('settles by default since S5: one run moves the keys as they are and stores the version', () => {
+    // S5 made the camera's choice what renders, so the migration settles.
+    expect(CAMERA_BACKGROUND_MIGRATION_SETTLES).toBe(true)
+    const camera = 'camera-a'
+    const keyed = [scene('live', keyedLayout('#0000FF', { cameraChromaKeySpillPct: 33 }))]
+    const first = migrateCameraBackgrounds({
+      cameraBackgrounds: undefined,
+      cameraBackgroundMigration: undefined,
+      cameraId: camera,
+      scenes: keyed,
+      onStreamId: 'live'
+    })
+    expect(first).toStrictEqual({
+      cameraBackgrounds: {
+        [camera]: {
+          ...DEFAULT_CAMERA_BACKGROUND,
+          mode: 'blue',
+          key: { similarityPct: 35, smoothnessPct: 6, spillPct: 33 }
+        }
+      },
+      cameraBackgroundMigration: CAMERA_BACKGROUND_MIGRATION_VERSION
+    })
+    // Settled: a scene keyed differently afterwards never reaches the camera,
+    // and a picked blur is never touched again.
+    for (const scenes of [
+      [scene('live', keyedLayout('#00FF00'))],
+      [scene('live')],
+      [scene('other', keyedLayout('#00FF00'))]
+    ])
+      expect(
+        migrateCameraBackgrounds({
+          cameraBackgrounds: { [camera]: { ...fixture.minimal, mode: 'blur' } },
+          cameraBackgroundMigration: first?.cameraBackgroundMigration,
+          cameraId: camera,
+          scenes,
+          onStreamId: 'live'
+        })
+      ).toBeNull()
+    // With no keyed scene it settles with nothing moved; with a keyed scene
+    // and no camera it waits (nothing stored, so the key isn't lost).
+    expect(
+      migrateCameraBackgrounds({
+        cameraBackgrounds: undefined,
+        cameraBackgroundMigration: undefined,
+        cameraId: undefined,
+        scenes: [scene('live')],
+        onStreamId: 'live'
+      })
+    ).toStrictEqual({
+      cameraBackgrounds: undefined,
+      cameraBackgroundMigration: CAMERA_BACKGROUND_MIGRATION_VERSION
+    })
+    expect(
+      migrateCameraBackgrounds({
+        cameraBackgrounds: undefined,
+        cameraBackgroundMigration: undefined,
+        cameraId: undefined,
+        scenes: keyed,
+        onStreamId: 'live'
+      })
+    ).toBeNull()
+  })
+
+  it('follows the scenes on runs that do not settle, then never runs again once it has', () => {
     const camera = 'camera-a'
     // A camera chosen with no keyed scene, then a key turned on later: it moves.
     expect(migrate([scene('live')], 'live')).toBeNull()

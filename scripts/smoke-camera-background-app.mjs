@@ -11,8 +11,13 @@
 //     proves the detector sees the fixture on each one, so a later clean
 //     scan means something.
 //   --effect strong-blur | slight-blur | image: the camera's background is
-//     put on the layout as the renderer does (plan 258 S1), the macOS stage
-//     (S3) draws it, and the room must be found in NO output.
+//     turned on the way a streamer does it (plan 258 S5): the smoke pins the
+//     fixture camera in the renderer, clicks the Studio's Background trigger
+//     and the pass's tile (a picture through Choose image… when it is not in
+//     the popover's row), and reads the per-camera setting the click stored;
+//     the session's layout carries exactly that, as every renderer commit
+//     does. The macOS stage (S3) draws it, and the room must be found in NO
+//     output. The relaunch pass clicks nothing: the setting must come back.
 //   --effect all (the S3 gate): Off, Strong blur and the picture on every
 //     output, then three short passes that scan every recorded frame:
 //     a segmentation stall mid-recording (the cover within D6's budget,
@@ -41,7 +46,8 @@ import {
 } from './lib/camera-background-leak.mjs'
 import {
   CAMERA_BACKGROUND_OUTPUTS,
-  cameraBackgroundFor,
+  controlChoiceFor,
+  controlsMatchPass,
   effectRequestFrom,
   expectationFor,
   finalVerdict,
@@ -263,7 +269,11 @@ async function runPass(pass, appHandle, setup) {
   const { ws } = appHandle
   const outputDirectory = join(outputRoot, pass)
   mkdirSync(outputDirectory, { recursive: true })
-  const background = cameraBackgroundFor(pass)
+  const controls = await backgroundThroughControls(appHandle, setup, pass)
+  log(
+    `${pass}: Background ${controls.clicked ? `clicked "${controls.clicked}"` : 'kept'} → ${controls.trigger ?? '(no trigger label)'}; stored ${JSON.stringify(controls.stored)}`
+  )
+  const background = layoutBackgroundFromControls(controls.stored)
   const layout = { ...setup.layout, ...(background ? { cameraBackground: background } : {}) }
   const expectation = expectationFor(pass)
   if (pass === 'camera-switch-record') {
@@ -341,6 +351,7 @@ async function runPass(pass, appHandle, setup) {
     }
     const stage = await stageStatus(ws)
     return {
+      controls,
       effectRequest,
       stage,
       files,
@@ -350,6 +361,7 @@ async function runPass(pass, appHandle, setup) {
   }
   const { outputs, stage, stall } = await runShortSession(context)
   return {
+    controls,
     effectRequest,
     stage,
     stall,
@@ -361,6 +373,103 @@ async function runPass(pass, appHandle, setup) {
       outputIds: Object.keys(outputs)
     })
   }
+}
+
+/** Renderer JS run through the smoke command server; returns the code's value. */
+async function evaluate(smoke, code, params = {}) {
+  const response = await requestSmokeCommand(smoke, 'eval-js', { code, ...params }, { timeoutMs })
+  return response && typeof response === 'object' && 'result' in response
+    ? response.result
+    : response
+}
+
+/** The renderer's stored background for the camera (settings.cameraBackgrounds), or null. */
+const READ_STORED_BACKGROUND = `
+  const settings = JSON.parse(localStorage.getItem('videorc.settings') ?? '{}');
+  return settings.cameraBackgrounds?.[params.cameraId] ?? null;
+`
+
+/**
+ * Plan 258 S5: clicks the Studio's Background trigger and the pass's tile,
+ * the way a streamer turns the effect on. A picture outside the popover's
+ * row goes through Choose image…. Returns the trigger's name after the
+ * click and the per-camera setting the click stored.
+ */
+const PICK_BACKGROUND = `
+  const inside = (scope, choice) =>
+    document.querySelector(scope + ' [data-videorc-camera-background-choice="' + choice + '"]');
+  await openTab('studio', '[data-videorc-camera-background-trigger]');
+  const trigger = await waitFor('[data-videorc-camera-background-trigger]', 15000);
+  const before = trigger.getAttribute('aria-label');
+  if (!document.querySelector('[data-videorc-camera-background-popover]')) trigger.click();
+  await waitFor('[data-videorc-camera-background-popover]');
+  let tile = inside('[data-videorc-camera-background-popover]', params.choice);
+  if (!tile && params.choice.startsWith('image:')) {
+    (await waitFor('[data-videorc-camera-background-popover] [data-videorc-camera-background-choose-image]')).click();
+    await waitFor('[data-videorc-camera-background-image-dialog]');
+    tile = inside('[data-videorc-camera-background-image-dialog]', params.choice);
+  }
+  if (!tile) throw new Error('No Background tile ' + params.choice);
+  if (tile.disabled) {
+    const reason = document.querySelector('[data-videorc-camera-background-reason]')?.textContent ?? '';
+    throw new Error('The Background tile ' + params.choice + ' is disabled: ' + reason);
+  }
+  tile.click();
+  let stored = null;
+  const deadline = performance.now() + 5000;
+  while (performance.now() < deadline) {
+    const settings = JSON.parse(localStorage.getItem('videorc.settings') ?? '{}');
+    stored = settings.cameraBackgrounds?.[params.cameraId] ?? null;
+    if ((stored?.mode ?? 'off') === params.mode) break;
+    await sleep(50);
+  }
+  // Close the popover (a pick leaves it open, as the Studio does).
+  document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+  await sleep(200);
+  const after = document.querySelector('[data-videorc-camera-background-trigger]')?.getAttribute('aria-label') ?? null;
+  return { before, after, stored };
+`
+
+/**
+ * Plan 258 S5: the pass's background through the Studio's controls, never
+ * the layout shortcut S3 used (a renderer commit dropped that). The renderer
+ * first pins the fixture camera, so the per-camera setting is the recorded
+ * camera's. The relaunch pass clicks nothing: the stored setting must have
+ * survived the relaunch on the same profile.
+ */
+async function backgroundThroughControls(appHandle, setup, pass) {
+  const { smoke } = appHandle
+  const cameraId = setup.camera.id
+  if (!appHandle.rendererCameraPinned) {
+    await requestSmokeCommand(
+      smoke,
+      'select-camera-device',
+      { cameraId, settleMs: 800 },
+      { timeoutMs }
+    )
+    appHandle.rendererCameraPinned = true
+  }
+  let stored = await evaluate(smoke, READ_STORED_BACKGROUND, { cameraId })
+  if (pass === 'relaunch') {
+    if (!controlsMatchPass(pass, stored))
+      throw new Error(
+        `the camera's background did not survive the relaunch: stored ${JSON.stringify(stored)}`
+      )
+    return { clicked: null, trigger: null, stored }
+  }
+  if (controlsMatchPass(pass, stored)) return { clicked: null, trigger: null, stored }
+  const choice = controlChoiceFor(pass)
+  const picked = await evaluate(smoke, PICK_BACKGROUND, {
+    cameraId,
+    choice,
+    mode: choice === 'off' ? 'off' : choice.startsWith('image:') ? 'image' : 'blur'
+  })
+  stored = picked?.stored ?? null
+  if (!controlsMatchPass(pass, stored))
+    throw new Error(
+      `clicking "${choice}" stored ${JSON.stringify(stored)} for ${cameraId}, not the ${pass} background`
+    )
+  return { clicked: choice, trigger: picked?.after ?? null, triggerBefore: picked?.before, stored }
 }
 
 async function stageStatus(ws) {

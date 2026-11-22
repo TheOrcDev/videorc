@@ -40,7 +40,11 @@ import {
 } from '@/lib/camera-frame-rate'
 import type { CameraLowLightRequest } from '@/hooks/use-camera-low-light'
 import { cameraLookLayout, normalizeCameraLook, createCameraLookThrottle } from '@/lib/camera-look'
-import { cameraOutputLayout, migrateCameraBackgrounds } from '@/lib/camera-background'
+import {
+  cameraOutputLayout,
+  migrateCameraBackgrounds,
+  withCameraBackground
+} from '@/lib/camera-background'
 import type { ChatOverlayDriver } from '@/lib/chat-overlay'
 import type { MicrophonePermissionProof } from '@/lib/system-permission-orchestration'
 import { isReplacementPermissionClient } from '@/lib/permission-evidence'
@@ -633,6 +637,7 @@ import type {
   OverlayLayout,
   OverlayRect,
   SetCommentHighlightParams,
+  CameraBackground,
   ViewerSample
 } from '@/lib/backend'
 import {
@@ -1650,6 +1655,16 @@ export type StudioContextValue = {
   patchLayout: (patch: Partial<LayoutSettings>) => void
   applyLayoutPatch: (patch: Partial<LayoutSettings>) => void
   applyCameraLook: (look: NonNullable<LayoutSettings['cameraLook']>) => void
+  /**
+   * Plan 258 S5: the camera's background (Studio's Background, the Scene
+   * page's section, ⌘K), stored per camera and committed through the same
+   * transaction, so every later commit carries it. False with no camera.
+   * `commit: false` only stores it (a slider mid-drag); the drop commits.
+   */
+  applyCameraBackground: (
+    background: CameraBackground,
+    options?: { commit?: boolean }
+  ) => Promise<boolean>
   /** Takes the last committed layout change back (plan 174 S3.9, D15); false when there is none. */
   undoLayoutPatch: () => Promise<boolean>
   /** `keepScene`: the Scene page's Layout edits the saved scene on stream (plan 210 D3). */
@@ -2124,6 +2139,12 @@ const StudioCaptionsContext = createContext<StudioCaptionsContextValue | null>(n
 export interface StudioCloudContextValue {
   /** Null until the backend answers (an older backend never does). */
   cloudStatus: CloudStatus | null
+  /**
+   * The talk show's room is open (the cloud's room phase, or the smoke's
+   * stand-in for one). Plan 258 S5: the camera's background effects wait for
+   * S8 while it is.
+   */
+  talkShowRoomOpen: boolean
   setCloudSettings: (patch: CloudSettingsPatch) => Promise<void>
   refreshCloudAllowance: () => Promise<void>
   endCloudShow: () => Promise<void>
@@ -2149,6 +2170,7 @@ export interface StudioCloudContextValue {
 
 const NO_CLOUD: StudioCloudContextValue = {
   cloudStatus: null,
+  talkShowRoomOpen: false,
   setCloudSettings: async () => {},
   refreshCloudAllowance: async () => {},
   endCloudShow: async () => {},
@@ -3421,10 +3443,16 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
       ...storedCaptureConfig,
       layout: cameraOutputLayout(storedCaptureConfig.layout, storedCaptureConfig.sources.cameraId, {
         cameraLooks: settings.cameraLooks,
-        cameraBackgrounds: settings.cameraBackgrounds
+        cameraBackgrounds: settings.cameraBackgrounds,
+        cameraBackgroundMigration: settings.cameraBackgroundMigration
       })
     }),
-    [storedCaptureConfig, settings.cameraLooks, settings.cameraBackgrounds]
+    [
+      storedCaptureConfig,
+      settings.cameraLooks,
+      settings.cameraBackgrounds,
+      settings.cameraBackgroundMigration
+    ]
   )
   useEffect(() => {
     const sessionId = liveChatSnapshot.sessionId
@@ -4919,7 +4947,7 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
     }
     const smokeWindow = window as Window & {
       __videorcSmokeSetTalkShowRoomOpen?: (open: boolean) => boolean
-      __videorcSmokeSelectFirstCamera?: () => string | null
+      __videorcSmokeSelectFirstCamera?: (cameraId?: string) => string | null
       __videorcSmokeSelectFirstScreen?: (
         sourceId?: string
       ) => { id: string; kind: 'screen' | 'window' } | null
@@ -4954,9 +4982,14 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
       setSmokeTalkShowRoomOpen(open)
       return open
     }
-    smokeWindow.__videorcSmokeSelectFirstCamera = (): string | null => {
+    // An explicit camera ID pins one (plan 258 S5: the fixture camera, so the
+    // Studio's Background control acts on the camera the smoke records).
+    smokeWindow.__videorcSmokeSelectFirstCamera = (cameraId?: string): string | null => {
       const camera = deviceList.devices.find(
-        (device) => device.kind === 'camera' && device.status === 'available'
+        (device) =>
+          device.kind === 'camera' &&
+          device.status === 'available' &&
+          (!cameraId || device.id === cameraId)
       )
       if (!camera) {
         return null
@@ -5325,10 +5358,10 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
     if (migratedShortcuts)
       setSettings((current) => ({ ...current, globalShortcuts: migratedShortcuts }))
   }, [migratedShortcuts])
-  // Plan 258 D4: the scenes' green or blue screen moves to the camera. Until
-  // the camera's choice renders (S5), it follows the scenes on every change,
-  // and a key waits for a selected camera rather than being lost. The scenes
-  // keep their key fields for a rollback; nothing renders from it yet (S3).
+  // Plan 258 D4: the scenes' green or blue screen moves to the camera, once
+  // (S5 settles it: from then on the camera's choice is what keys, at the
+  // output boundary). A key waits for a selected camera rather than being
+  // lost. The scenes keep their key fields for a rollback.
   const migrationCameraId = captureConfig.sources.cameraId
   const migrationScenes = sceneLibrary.storedList
   useEffect(() => {
@@ -11741,6 +11774,37 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
     })
     cameraLookThrottleRef.current.schedule()
   }, [])
+
+  // Plan 258 S5: the camera's background is a per-camera setting (D3), like
+  // the look: stored under the camera that renders and put on every output
+  // at the boundary (`cameraOutputLayout`), so a scene switch, an idle commit
+  // or any other layout transaction carries it and nothing the renderer
+  // commits can drop it. The commit right after reaches the live camera's
+  // stage (`apply_camera_background`); the stage itself confirms, so no toast.
+  const applyCameraBackground = useCallback(
+    (background: CameraBackground, options?: { commit?: boolean }): Promise<boolean> => {
+      const cameraId = captureConfigRef.current.sources.cameraId
+      if (!cameraId) return Promise.resolve(false)
+      const cameraBackgrounds = withCameraBackground(
+        settingsRef.current.cameraBackgrounds,
+        cameraId,
+        background
+      )
+      const nextSettings = { ...settingsRef.current, cameraBackgrounds }
+      settingsRef.current = nextSettings
+      // The transaction below commits it to the live camera; suppress the
+      // idle reload, so a pick never tears down and reopens the camera.
+      skipNextConfigSceneReloadRef.current = true
+      captureConfigRef.current = {
+        ...captureConfigRef.current,
+        layout: cameraOutputLayout(captureConfigRef.current.layout, cameraId, nextSettings)
+      }
+      setSettings((current) => ({ ...current, cameraBackgrounds }))
+      if (options?.commit === false) return Promise.resolve(true)
+      return requestLayoutTransaction(captureConfigRef.current.layout, { pendingIndicator: false })
+    },
+    [requestLayoutTransaction]
+  )
 
   // Single-level undo of the last committed layout change (plan 174 S3.9,
   // D15): the remembered layout goes back through the same transaction, with
@@ -18458,6 +18522,7 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
   const cloudValue = useMemo<StudioCloudContextValue>(
     () => ({
       cloudStatus,
+      talkShowRoomOpen,
       endCloudShow,
       refreshCloudAllowance,
       resumeCloudShow,
@@ -18467,6 +18532,7 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
     }),
     [
       cloudStatus,
+      talkShowRoomOpen,
       endCloudShow,
       refreshCloudAllowance,
       resumeCloudShow,
@@ -21647,6 +21713,7 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
       patchLayout,
       applyLayoutPatch,
       applyCameraLook,
+      applyCameraBackground,
       undoLayoutPatch,
       patchVideo,
       applyVideoPreset,
@@ -21901,6 +21968,7 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
       patchLayout,
       applyLayoutPatch,
       applyCameraLook,
+      applyCameraBackground,
       undoLayoutPatch,
       patchVideo,
       applyVideoPreset,

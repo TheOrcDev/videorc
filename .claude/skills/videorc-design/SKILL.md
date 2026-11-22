@@ -604,6 +604,25 @@ links home.
   pages): a calm navy-to-violet gradient, a soft diagonal sheen and a glass
   disc with the eye-slash. Never a blur of the screen and never grey. It is
   on-stream pixels, so it does not follow the app theme.
+- **The camera's Background** (plan 258 S5): one pick per camera, kept in
+  every scene (Off, Slight blur, Strong blur, a picture from the Images
+  library, Green screen, Blue screen; never two at once). Home: the Scene
+  page's camera inspector, the Background section right under the camera's
+  name where Green screen was (tiles in `MediaCard`'s look, then the tuning
+  for the pick: Blur strength with Slight and Strong marks, or the key's
+  Similarity, Smoothness, Spill removal and Hide edges). Mirror: the Studio
+  Camera row's "Background · Strong blur" trigger, opening a 320 px popover
+  with the live "What viewers see" picture (the processed camera from the
+  store, never a raw feed), the tiles in Blur, Images and Screen behind you,
+  the lock line and Settings (the home); the Retro LCD shows the pick on the
+  screen and opens the same picker. ⌘K: "Blur background" or "Turn off
+  background effect", the green-screen switch and "Background settings". A
+  pick applies at once and the stage confirms it, so no toast; the stage's
+  cover and system effects are lines under the trigger, never toasts. The
+  tile pictures are on-stream pixels and don't follow the theme. While a
+  room is open (until plan 258 S8) the effect tiles are disabled with
+  "Background effects come to rooms in a later update."; Off and the two
+  screens stay.
 - **The local file**: Output ("Where recordings go", quality). Recordings
   themselves live in Library.
 - **Avatar** (plan 239, owner 2026-11-15): the Avatar page (Livestream, ⌘8;

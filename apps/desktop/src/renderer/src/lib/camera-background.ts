@@ -16,7 +16,9 @@ import { cameraLookLayout } from './camera-look'
 // in the settings beside `cameraLooks` and put on the layout at the output
 // boundary the way the look is. Green and blue screen are two of its picks
 // (D4); a scene's own key fields stay readable for one release, so a rollback
-// loses nothing. Nothing renders from this yet: S3's stage reads it.
+// loses nothing. S3's stage draws the blur and the picture; since S5 the
+// camera's choice is also what keys (once the D4 migration has settled), so
+// the Studio and the Scene page edit only this setting.
 
 /** What a camera has before anything is picked: Off, with Strong blur ready. */
 export const DEFAULT_CAMERA_BACKGROUND: CameraBackground = {
@@ -25,17 +27,38 @@ export const DEFAULT_CAMERA_BACKGROUND: CameraBackground = {
   edges: 'balanced'
 }
 
+/**
+ * An effect the camera effect stage draws (a blur, a picture, a video, Cut
+ * out), as opposed to Off or a screen key. The privacy rules (D2, D6) and
+ * the room's fail-closed rule (S5, before S8) apply to these.
+ */
+export function cameraBackgroundIsEffect(
+  background: Pick<CameraBackground, 'mode'> | undefined | null
+): boolean {
+  return (
+    background?.mode === 'blur' ||
+    background?.mode === 'image' ||
+    background?.mode === 'video' ||
+    background?.mode === 'cutout'
+  )
+}
+
 /** The D4 migration's version, stored once it settles. */
 export const CAMERA_BACKGROUND_MIGRATION_VERSION = 1
 
 /**
- * Whether the D4 migration settles (stores its version and stops). Until the
- * camera's choice is what renders (S5), the scenes' keys are still what the
- * streamer edits, so the camera's screen follows them on every run and
- * nothing is stored as done. S5 turns this on in the same change that makes
- * the camera's choice render, so the last run moves the keys as they are then.
+ * Whether the D4 migration settles (stores its version and stops). S5 made
+ * the camera's choice what renders (`cameraBackgroundLayout` keys from it
+ * once the version is stored), so the next run moves the scenes' keys as
+ * they are then and never runs again. Before S5 it followed the scenes on
+ * every run and stored nothing.
  */
-export const CAMERA_BACKGROUND_MIGRATION_SETTLES = false
+export const CAMERA_BACKGROUND_MIGRATION_SETTLES = true
+
+/** True once the D4 migration has moved the scenes' keys to the camera. */
+export function cameraBackgroundMigrated(version: number | undefined): boolean {
+  return (version ?? 0) >= CAMERA_BACKGROUND_MIGRATION_VERSION
+}
 
 const ASSET_ID_MAX = 256
 
@@ -116,18 +139,50 @@ export function normalizeCameraBackgrounds(
   return Object.keys(backgrounds).length > 0 ? backgrounds : undefined
 }
 
+/** The two screen colours as the key's hex (lib/green-screen's, kept here free of UI imports). */
+const KEY_HEX = { green: '#00FF00', blue: '#0000FF' } as const
+
+/**
+ * The layout's key fields from the camera's choice (D4): on, with the
+ * colour and tuning, for Green or Blue screen; off for anything else, so a
+ * key never runs with a blur or a picture. Only the switch changes for Off,
+ * so the fields a rollback reads keep their last tuning.
+ */
+function cameraKeyLayout(base: LayoutSettings, background: CameraBackground | undefined) {
+  if (background?.mode !== 'green' && background?.mode !== 'blue')
+    return base.cameraChromaKeyEnabled ? { ...base, cameraChromaKeyEnabled: false } : base
+  const key = background.key ?? DEFAULT_KEY
+  const { cameraChromaKeyEdges: _edges, ...rest } = base
+  return {
+    ...rest,
+    cameraChromaKeyEnabled: true,
+    cameraChromaKeyColor: KEY_HEX[background.mode],
+    cameraChromaKeySimilarityPct: key.similarityPct,
+    cameraChromaKeySmoothnessPct: key.smoothnessPct,
+    cameraChromaKeySpillPct: key.spillPct,
+    ...(key.hideEdges ? { cameraChromaKeyEdges: key.hideEdges } : {})
+  }
+}
+
 /**
  * The layout an output gets: the selected camera's background on it, or none
  * while that camera's is Off (so layouts from before plan 258 go out as they
  * were). A previous camera's background never carries over.
+ *
+ * `keyFromCamera` (true once the D4 migration has settled): the key fields
+ * come from the camera's choice too, so one pick is the whole truth and a
+ * scene's own key can't come back on, beside a blur or after Off. Before the
+ * migration has run the scene's key goes out as it was.
  */
 export function cameraBackgroundLayout(
   layout: LayoutSettings,
   cameraId: string | undefined,
-  backgrounds: Record<string, CameraBackground> | undefined
+  backgrounds: Record<string, CameraBackground> | undefined,
+  keyFromCamera = false
 ): LayoutSettings {
-  const { cameraBackground: _previous, ...base } = layout
+  const { cameraBackground: _previous, ...rest } = layout
   const cameraBackground = normalizeCameraBackground(cameraId ? backgrounds?.[cameraId] : undefined)
+  const base = keyFromCamera ? cameraKeyLayout(rest, cameraBackground) : rest
   return cameraBackground && cameraBackground.mode !== 'off' ? { ...base, cameraBackground } : base
 }
 
@@ -142,12 +197,41 @@ export function cameraOutputLayout(
   settings: {
     cameraLooks?: Parameters<typeof cameraLookLayout>[2]
     cameraBackgrounds?: Record<string, CameraBackground>
+    cameraBackgroundMigration?: number
   }
 ): LayoutSettings {
   return cameraBackgroundLayout(
     cameraLookLayout(layout, cameraId, settings.cameraLooks),
     cameraId,
-    settings.cameraBackgrounds
+    settings.cameraBackgrounds,
+    cameraBackgroundMigrated(settings.cameraBackgroundMigration)
+  )
+}
+
+/**
+ * One camera's background set in the settings (the Studio's and the Scene
+ * page's picks): stored under the camera that renders, or nothing for no
+ * camera. Off is kept with its tuning, so picking Blur again finds it.
+ */
+export function withCameraBackground(
+  backgrounds: Record<string, CameraBackground> | undefined,
+  cameraId: string | undefined,
+  background: CameraBackground
+): Record<string, CameraBackground> | undefined {
+  if (!cameraId) return backgrounds
+  const normalized = normalizeCameraBackground(background)
+  if (!normalized) return backgrounds
+  return { ...backgrounds, [cameraId]: normalized }
+}
+
+/** The selected camera's background, Off with Strong blur ready when it has none. */
+export function cameraBackgroundFor(
+  backgrounds: Record<string, CameraBackground> | undefined,
+  cameraId: string | undefined
+): CameraBackground {
+  return (
+    normalizeCameraBackground(cameraId ? backgrounds?.[cameraId] : undefined) ??
+    DEFAULT_CAMERA_BACKGROUND
   )
 }
 
@@ -212,7 +296,7 @@ export function migrateCameraBackgrounds(input: {
   onStreamId: string | null | undefined
   settle?: boolean
 }): CameraBackgroundMigration | null {
-  if ((input.cameraBackgroundMigration ?? 0) >= CAMERA_BACKGROUND_MIGRATION_VERSION) return null
+  if (cameraBackgroundMigrated(input.cameraBackgroundMigration)) return null
   const settle = input.settle ?? CAMERA_BACKGROUND_MIGRATION_SETTLES
   const backgrounds = normalizeCameraBackgrounds(input.cameraBackgrounds) ?? {}
   const result = (next: Record<string, CameraBackground>): CameraBackgroundMigration | null => {
