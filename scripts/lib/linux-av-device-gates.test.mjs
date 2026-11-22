@@ -2,8 +2,13 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 import {
+  assessCameraChildCpu,
+  assessCameraNativeMode,
   assessCameraPreview,
   assessLinuxDeviceList,
+  cameraNativeMode,
+  cpuPercent,
+  procStatCpuTicks,
   assessMicMeter,
   assessMicRecordingAudio,
   parseVolumedetect
@@ -104,4 +109,39 @@ test('a live camera preview needs frames and dimensions', () => {
     assessCameraPreview({ state: 'live', framesCaptured: 2, width: 1280, height: 720 }).failures[0],
     /framesCaptured=2/
   )
+})
+
+test('plan 257 S2: the camera live message names the native mode it streams', () => {
+  assert.deepEqual(
+    cameraNativeMode(
+      "Linux V4L2 camera preview is using the camera's native NV12 1280x720@30 from /dev/v4l/by-id/x, piped at 1280x720."
+    ),
+    { format: 'NV12', width: 1280, height: 720, fps: 30 }
+  )
+  assert.deepEqual(
+    cameraNativeMode(
+      'Requested 1920x1080@30 was not available; selected native 1280x720 at 1-30 fps. Linux V4L2 camera preview is using MJPG 1280x720@30 from /dev/video2, piped at 1280x720.'
+    ),
+    { format: 'MJPG', width: 1280, height: 720, fps: 30 }
+  )
+  const negotiated = {
+    message:
+      'Linux V4L2 camera preview requested 1920x1080@30 from /dev/video0; the driver streams its nearest mode, piped at 1280x720.'
+  }
+  assert.equal(cameraNativeMode(negotiated.message), null)
+  assert.equal(assessCameraNativeMode(negotiated).ok, false)
+  assert.equal(assessCameraNativeMode(null).ok, false)
+})
+
+test('plan 257 S2: camera child CPU from /proc stat ticks', () => {
+  const stat =
+    '4242 (ffmpeg (x) y) S 1 4242 4242 0 -1 4194304 1000 0 0 0 1234 567 0 0 20 0 9 0 100 0 0'
+  assert.equal(procStatCpuTicks(stat), 1801)
+  assert.equal(procStatCpuTicks('garbage'), null)
+  assert.equal(cpuPercent(1000, 1230, 10000, 100), 23)
+  assert.equal(cpuPercent(1000, 900, 10000, 100), null)
+  assert.equal(cpuPercent(1000, 1100, 0, 100), null)
+  assert.equal(assessCameraChildCpu({ cpuPercent: 23.4 }).ok, true)
+  assert.match(assessCameraChildCpu({ cpuPercent: 168 }).failures[0], /168\.0 % CPU \(max 40 %\)/)
+  assert.equal(assessCameraChildCpu(null).ok, false)
 })

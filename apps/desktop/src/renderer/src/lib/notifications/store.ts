@@ -39,6 +39,16 @@ export interface NotificationStoreOptions {
   live?: () => boolean
   /** "Quiet while recording or live" (Settings, General). Absent means on. */
   quiet?: () => boolean
+  /**
+   * The streamer has pressed something in this run (a click, a key, a global
+   * shortcut). Absent means not yet: at launch nothing pops up unasked.
+   */
+  pressed?: () => boolean
+  /**
+   * How long the launch lasts (`LAUNCH_QUIET_MS` in the app). Absent means no
+   * launch window, for tests that are about the other rules.
+   */
+  launchQuietMs?: number
   onCount?: (count: NotificationCount) => void
   /**
    * Every title and detail passes through it (the toast door's text guard:
@@ -99,7 +109,8 @@ export interface NotificationStore {
    */
   setListOpen: (open: boolean, who?: string) => void
   setPopUpDoor: (door: NotificationPopUpDoor | null) => void
-  configure: (options: Pick<NotificationStoreOptions, 'live' | 'quiet'>) => void
+  configure: (options: Pick<NotificationStoreOptions, 'live' | 'quiet' | 'pressed'>) => void
+  /** Tests only: forgets every entry, and the launch is over. */
   reset: () => void
 }
 
@@ -107,6 +118,10 @@ export function createNotificationStore(options: NotificationStoreOptions = {}):
   const now = options.now ?? Date.now
   let live = options.live ?? (() => false)
   let quiet = options.quiet ?? (() => true)
+  let pressed = options.pressed ?? (() => false)
+  // The run starts with the store: its first minute is the launch.
+  const startedAt = now()
+  let launchQuietMs = options.launchQuietMs ?? 0
   const held = new Map<string, Held>()
   const listeners = new Set<() => void>()
   let door: NotificationPopUpDoor | null = null
@@ -165,7 +180,10 @@ export function createNotificationStore(options: NotificationStoreOptions = {}):
     const durationMs = popUpDecision({
       change,
       tone: item.entry.tone,
-      answersAPress: kind.answersAPress === true || kind.announcement === true,
+      answersAPress: kind.answersAPress === true,
+      announcement: kind.announcement === true,
+      launching: at - startedAt < launchQuietMs,
+      pressed: pressed(),
       popUpMs: kind.popUpMs,
       hasDetail: Boolean(item.entry.detail),
       live: live(),
@@ -521,9 +539,12 @@ export function createNotificationStore(options: NotificationStoreOptions = {}):
     configure(next) {
       if (next.live) live = next.live
       if (next.quiet) quiet = next.quiet
+      if (next.pressed) pressed = next.pressed
     },
 
     reset() {
+      // Tests only: a reset is past the launch, so the plan 250 rules apply.
+      launchQuietMs = 0
       for (const key of held.keys()) door?.dismiss(key)
       held.clear()
       listsOpen.clear()

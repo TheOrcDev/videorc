@@ -6,9 +6,14 @@ import type { Device, SourceSelection } from '@/lib/backend'
 import { defaultCaptureConfig } from '@/lib/capture'
 import { QuickSettings } from './quick-settings'
 
-const mocked = vi.hoisted(() => ({ core: {} as Record<string, unknown> }))
+const mocked = vi.hoisted(() => ({
+  core: {} as Record<string, unknown>,
+  // Plan 258 S4: the camera status the system effect line reads.
+  preview: { previewCameraStatus: {} as Record<string, unknown> }
+}))
 vi.mock('@/hooks/use-studio', () => ({
   useStudioCore: () => mocked.core,
+  useStudioPreview: () => mocked.preview,
   useStudioChat: () => ({
     liveChatSnapshot: { providers: [], messages: [], unreadCount: 0, updatedAt: '' },
     chatNewCount: 0
@@ -209,6 +214,37 @@ describe('Studio Sources rows (plan 080 S4, plan 231 D8)', () => {
     expect(pick(true, '#0000ff')).toBe('Blue screen')
     expect(pick(true, '#00FF00')).toBe('Green screen')
     expect(pick(false, '#0000FF')).toBe('Off')
+  })
+
+  it('says under the Camera row when the system changes its background, never as a toast (plan 258 S4)', () => {
+    const withEffect = (systemEffect: Record<string, unknown> | undefined): string => {
+      mocked.preview = { previewCameraStatus: systemEffect ? { systemEffect } : {} }
+      const markup = renderInputs({ screenId: 'screen:2', cameraId: 'camera:1' })
+      mocked.preview = { previewCameraStatus: {} }
+      return markup
+    }
+    const flags = {
+      backgroundBlur: false,
+      backgroundReplacement: false,
+      studioLight: false,
+      turnedOffByVideorc: false
+    }
+    expect(withEffect(undefined)).not.toContain('data-slot="camera-system-effect"')
+    expect(
+      withEffect({ provider: 'macos-video-effects', ...flags, studioLight: true })
+    ).not.toContain('data-slot="camera-system-effect"')
+    const portrait = withEffect({ provider: 'macos-video-effects', ...flags, backgroundBlur: true })
+    const line = portrait.split('data-slot="camera-system-effect"')[1] ?? ''
+    expect(line).toContain(
+      'macOS is blurring this camera (Video menu, Portrait). Turn it off there to use Videorc&#x27;s background.'
+    )
+    // Under the green screen line, inside the Camera row.
+    expect(portrait.indexOf('data-slot="camera-system-effect"')).toBeGreaterThan(
+      portrait.indexOf('data-slot="green-screen"')
+    )
+    expect(
+      withEffect({ provider: 'windows-studio-effects', ...flags, backgroundBlur: true })
+    ).toContain('Windows Studio Effects is blurring this camera')
   })
 
   it('has no green screen while the camera is Off: there is nothing to key', () => {

@@ -90,7 +90,7 @@ function releasePresentation(entry, base) {
         entry.channel === 'alpha'
           ? 'Videorc Linux Alpha changelog'
           : `Videorc ${platformLabel} changelog`,
-      ctaLabel: 'Linux Alpha is not public yet',
+      ctaLabel: 'Download the public Linux Alpha, heading to Beta',
       downloadUrl: `${base}/download`
     }
   }

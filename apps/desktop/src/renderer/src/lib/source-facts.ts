@@ -1,4 +1,4 @@
-import type { PreviewCameraStatus, PreviewScreenStatus } from '@/lib/backend'
+import type { DiagnosticStats, PreviewCameraStatus, PreviewScreenStatus } from '@/lib/backend'
 import { cameraExpectedFps } from '@/lib/camera-frame-rate'
 import { formatFrameRate, formatResolution } from '@/lib/format-video'
 
@@ -53,4 +53,30 @@ export function cameraFacts(
   const fps = cameraExpectedFps(status)
   if (fps === undefined) return size
   return `${size} · ${formatFrameRate(Math.round(fps))}`
+}
+
+/**
+ * Health's camera format line (plan 257 S2): the mode the camera streams,
+ * its pixel format and the fastest rate that mode lists, e.g.
+ * "1280 × 720 NV12 · 30 fps". Null until a camera has negotiated a mode.
+ */
+export function cameraFormatFacts(
+  stats: Pick<
+    DiagnosticStats,
+    | 'previewCameraSelectedFormatWidth'
+    | 'previewCameraSelectedFormatHeight'
+    | 'previewCameraSelectedFormatMaxFps'
+    | 'previewCameraCapturePixelFormat'
+  >
+): string | null {
+  const size = dimensions(
+    stats.previewCameraSelectedFormatWidth,
+    stats.previewCameraSelectedFormatHeight
+  )
+  if (!size) return null
+  const pixelFormat = stats.previewCameraCapturePixelFormat?.trim()
+  const head = pixelFormat ? `${size} ${pixelFormat}` : size
+  const fps = stats.previewCameraSelectedFormatMaxFps
+  if (typeof fps !== 'number' || !Number.isFinite(fps) || fps <= 0) return head
+  return `${head} · ${formatFrameRate(Math.round(fps))}`
 }

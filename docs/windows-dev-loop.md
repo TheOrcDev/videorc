@@ -378,9 +378,11 @@ and the manifest records `host.powerSource`; on battery it adds a warning,
 and the native-screen and native-preview smokes print the same. Battery is
 never a blocker or a waiver, but a laptop iGPU's encoder is throttled there:
 on the Intel UHD 620 laptop, Quick Sync recorded 1080p60 at about 43 fps on
-battery. On AC, the 1080p60 screen+camera step still misses the 2%
-frame-count gate in about 1 take in 8, during D3D11 media-thread stalls (#1042,
-`docs/acceptance/2026-11-14-windows-uhd620-d3d11-gates-recheck.md`).
+battery. On AC, 0.35.0 missed the 1080p60 screen+camera step's 2%
+frame-count gate in 1 take of 29: Quick Sync held inputs for 70–222 ms and
+the Record encoder's 4-input queue refused frames. The Record queue now
+covers a 200 ms hold at its frame rate (#1042,
+`docs/acceptance/2026-11-20-windows-uhd620-d3d11-record-queue-depth.md`).
 
 The gate writes `windows-local-gates.manifest.json` under the selected
 acceptance directory. Before each candidate-bound smoke, the parent gate hashes

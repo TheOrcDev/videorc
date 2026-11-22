@@ -1253,6 +1253,35 @@
   }
 }
 
+/* A door's landing (plan 250 S4, the silent-mic alert): "Open Audio" marks
+   the Microphone row for a moment (SECTION_FOCUS_MARK_MS) so the eye finds
+   it and its flat meter. A neutral wash and hairline, never a tone: the
+   alert that sent the streamer here already said what is wrong. Reduced
+   motion keeps the same mark without the fade. */
+[data-section-focus-mark] {
+  animation: section-focus-mark 1.6s ease-out both;
+}
+
+@keyframes section-focus-mark {
+  0%,
+  50% {
+    background-color: color-mix(in oklab, var(--foreground) 8%, transparent);
+    box-shadow: inset 0 0 0 1px var(--ring);
+  }
+  100% {
+    background-color: transparent;
+    box-shadow: inset 0 0 0 1px transparent;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  [data-section-focus-mark] {
+    animation: none;
+    background-color: color-mix(in oklab, var(--foreground) 8%, transparent);
+    box-shadow: inset 0 0 0 1px var(--ring);
+  }
+}
+
 @layer base {
   * {
     @apply border-border outline-ring/50;

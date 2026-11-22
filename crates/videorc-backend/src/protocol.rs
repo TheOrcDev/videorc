@@ -560,11 +560,70 @@ impl CameraKeyEdges {
     }
 }
 
+/// Plan 258 D4/D5: what is behind the person on one camera, as one pick.
+/// Never two at once: `camera_background::camera_background_treatment`
+/// picks exactly one treatment for a frame.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum CameraBackgroundMode {
+    Off,
+    Blur,
+    Image,
+    Video,
+    Cutout,
+    Green,
+    Blue,
+}
+
+/// How hard the outline between the person and what's behind them is.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum CameraBackgroundEdges {
+    Soft,
+    Balanced,
+    Sharp,
+}
+
+/// The green or blue screen's tuning, kept with the camera (D4). The colour
+/// is the mode; the fields mirror the scene key's.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CameraBackgroundKey {
+    pub similarity_pct: u32,
+    pub smoothness_pct: u32,
+    pub spill_pct: u32,
+    /// Hide edges; omitted while every side is 0.
+    #[serde(default, skip_serializing_if = "CameraKeyEdges::is_none")]
+    pub hide_edges: CameraKeyEdges,
+}
+
+/// Plan 258 D3: one camera's background, kept in every scene. The renderer
+/// stores it per camera (beside the camera look) and puts it on the layout
+/// at the output boundary; absent while Off.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CameraBackground {
+    pub mode: CameraBackgroundMode,
+    /// Blur strength (%), 0–100; Slight is 30, Strong 70.
+    pub blur_pct: u32,
+    pub edges: CameraBackgroundEdges,
+    /// The picture or video behind the person: a background asset id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub asset_id: Option<String>,
+    /// The green or blue screen's tuning.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<CameraBackgroundKey>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct LayoutSettings {
     #[serde(default, skip_serializing_if = "CameraLook::is_neutral")]
     pub camera_look: CameraLook,
+    /// Plan 258: the camera's background, injected by the renderer like the
+    /// look. Nothing renders from it until the camera effect stage (S3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub camera_background: Option<CameraBackground>,
     #[serde(default = "default_layout_preset")]
     pub layout_preset: LayoutPreset,
     #[serde(default = "default_camera_transform_mode")]
@@ -1372,6 +1431,7 @@ pub(crate) fn default_layout_settings() -> LayoutSettings {
         camera_corner_radius_pct: default_camera_corner_radius_pct(),
         camera_aspect: default_camera_aspect(),
         camera_look: Default::default(),
+        camera_background: None,
         camera_chroma_key_enabled: false,
         camera_chroma_key_color: default_camera_chroma_key_color(),
         camera_chroma_key_similarity_pct: default_camera_chroma_key_similarity_pct(),
@@ -4815,6 +4875,91 @@ pub struct PreviewCameraStatus {
     /// Sources and Health can name a camera that is on but sends no video.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub no_video: Option<bool>,
+    /// Plan 258 S4 (D12): the operating system's own effects on this camera
+    /// (macOS Video Effects, Windows Studio Effects), read from the device
+    /// Videorc has open. Absent until the camera is live and the system has
+    /// answered, and on a camera or system that has no such effects.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_effect: Option<CameraSystemEffect>,
+    /// Plan 258 S3: the camera effect stage, while this camera's background
+    /// is an effect (a blur or a picture). Absent while Off or a screen key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub camera_background: Option<CameraBackgroundStatus>,
+}
+
+/// How the camera effect stage is doing (plan 258 S3, D6).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum CameraBackgroundStageState {
+    /// Every frame drawn with its own fresh matte.
+    Running,
+    /// The cover: no matte yet, or the newest is 100 ms old or more.
+    Cover,
+    /// No engine here (platform, OS version); the cover stands in.
+    Unavailable,
+}
+
+/// Plan 258 S3: the stage's line for the Studio, Health and the support
+/// bundle. The system's own effect stays on `systemEffect` beside it (S4).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CameraBackgroundStatus {
+    pub mode: CameraBackgroundMode,
+    pub state: CameraBackgroundStageState,
+    /// The newest matte's age at the last capture.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mask_age_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub segment_ms_p95: Option<f64>,
+    /// The effect pass, wall time on the worker (upload, GPU, wait).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compose_ms_p95: Option<f64>,
+    /// The effect pass's GPU time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compose_gpu_ms_p95: Option<f64>,
+    pub processed_frames: u64,
+    pub cover_frames: u64,
+    /// How long the cover has stood in (the Studio says so after 2 s).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cover_for_ms: Option<u64>,
+    /// The newest matte's age when the cover last took over from processed
+    /// frames (D6: the first capture past 100 ms).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cover_after_mask_age_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+/// Which operating system feature is changing the camera's picture.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum CameraSystemEffectProvider {
+    /// macOS Video Effects (Control Center, Video menu).
+    MacosVideoEffects,
+    /// Windows Studio Effects (Quick Settings, Studio effects).
+    WindowsStudioEffects,
+}
+
+/// Plan 258 S4: what the system is doing to the camera Videorc has open.
+/// Every flag is what the device reports now, after anything Videorc
+/// changed.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CameraSystemEffect {
+    pub provider: CameraSystemEffectProvider,
+    /// macOS Portrait, or Windows Studio Effects background blur (standard
+    /// or portrait).
+    pub background_blur: bool,
+    /// macOS 15's background replacement. Never on Windows.
+    pub background_replacement: bool,
+    /// macOS Studio Light. It changes the light on the face, not the
+    /// background, so the Studio says nothing about it.
+    pub studio_light: bool,
+    /// Windows: Videorc turned Studio Effects background blur off at camera
+    /// start because its own background effect runs on this camera (as
+    /// Microsoft asks of apps with their own blur); it is put back when the
+    /// camera stops. Always false on macOS, where apps can't turn it off.
+    pub turned_off_by_videorc: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -8489,6 +8634,7 @@ mod tests {
             source_transform_overrides: std::collections::BTreeMap::new(),
             source_visibility: Default::default(),
             camera_look: Default::default(),
+            camera_background: None,
             camera_chroma_key_enabled: false,
             camera_chroma_key_color: "#00FF00".to_string(),
             camera_chroma_key_similarity_pct: 40,

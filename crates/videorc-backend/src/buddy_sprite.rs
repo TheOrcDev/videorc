@@ -2025,6 +2025,19 @@ pub(crate) mod tests {
     /// The S-B5 fixture atlas: 3 x 2 cells of flat, distinct colours, each
     /// with a 1 px outer ring at half alpha (the alpha ramp edge).
     pub(crate) fn parity_atlas(cell_px: u32) -> BuddySpriteAtlas {
+        parity_atlas_of(parity_pack(cell_px), cell_px)
+    }
+
+    /// The parity fixture's pack. Every leg's atlas of one loaded pack holds
+    /// the same `meta`, as in the app: build per-leg atlases from one of these.
+    pub(crate) fn parity_pack(cell_px: u32) -> Arc<BuddySpritePackMeta> {
+        meta(6, cell_px)
+    }
+
+    pub(crate) fn parity_atlas_of(
+        pack: Arc<BuddySpritePackMeta>,
+        cell_px: u32,
+    ) -> BuddySpriteAtlas {
         const COLOURS: [[u8; 3]; 6] = [
             [230, 40, 40],
             [40, 200, 60],
@@ -2056,7 +2069,7 @@ pub(crate) mod tests {
                 )
             })
             .collect();
-        BuddySpriteAtlas::from_cells(&cells, cell_px, frames, meta(6, cell_px))
+        BuddySpriteAtlas::from_cells(&cells, cell_px, frames, pack)
     }
 
     fn atlas_pixel(atlas: &BuddySpriteAtlas, x: u32, y: u32) -> [u8; 4] {

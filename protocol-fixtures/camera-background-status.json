@@ -1,0 +1,60 @@
+{
+  "$comment": "Plan 258 S3: preview.camera.status carrying the camera effect stage (cameraBackground). Rust: camera_effect_stage::tests::camera_background_status_fixture_round_trips. TypeScript: backend-rpc-contract.test.ts.",
+  "running": {
+    "state": "live",
+    "cameraId": "camera:builtin",
+    "targetFps": 30,
+    "framesCaptured": 900,
+    "droppedFrames": 0,
+    "updatedAt": "2026-11-22T18:00:00Z",
+    "cameraBackground": {
+      "mode": "blur",
+      "state": "running",
+      "maskAgeMs": 33,
+      "segmentMsP95": 24.6,
+      "composeMsP95": 1.9,
+      "composeGpuMsP95": 0.62,
+      "processedFrames": 880,
+      "coverFrames": 20,
+      "coverAfterMaskAgeMs": 100,
+      "message": "Person segmentation failed: busy"
+    }
+  },
+  "cover": {
+    "state": "live",
+    "targetFps": 30,
+    "framesCaptured": 12,
+    "droppedFrames": 0,
+    "updatedAt": "2026-11-22T18:00:00Z",
+    "cameraBackground": {
+      "mode": "image",
+      "state": "cover",
+      "processedFrames": 0,
+      "coverFrames": 12,
+      "coverForMs": 400
+    }
+  },
+  "unavailable": {
+    "state": "live",
+    "targetFps": 30,
+    "framesCaptured": 30,
+    "droppedFrames": 0,
+    "updatedAt": "2026-11-22T18:00:00Z",
+    "cameraBackground": {
+      "mode": "blur",
+      "state": "unavailable",
+      "processedFrames": 0,
+      "coverFrames": 30,
+      "coverForMs": 1000,
+      "message": "Background effects need macOS 12 or later."
+    }
+  },
+  "rejectedCameraBackground": [
+    { "mode": "blur", "state": "stalled", "processedFrames": 0, "coverFrames": 0 },
+    { "mode": "sepia", "state": "cover", "processedFrames": 0, "coverFrames": 0 },
+    { "mode": "blur", "state": "cover", "coverFrames": 0 },
+    { "mode": "blur", "state": "cover", "processedFrames": -1, "coverFrames": 0 },
+    { "mode": "blur", "state": "cover", "processedFrames": 0, "coverFrames": 0, "maskAgeMs": null },
+    { "mode": "blur", "state": "cover", "processedFrames": 0, "coverFrames": 0, "rawFrames": 1 }
+  ]
+}

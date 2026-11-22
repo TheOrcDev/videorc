@@ -78,18 +78,20 @@ describe('renderChangelogEmail', () => {
     assert.doesNotMatch(email.text, /Update Videorc:/)
   })
 
-  it('keeps Linux Alpha fail-closed without a public download button', () => {
+  it('offers the public Linux Alpha download without a Windows or per-OS link', () => {
     const linuxAlpha = {
       ...entry,
       version: '0.10.0-alpha.2',
       channel: 'alpha',
       platforms: ['linux'],
-      summary: 'The unsigned Linux test build is private.'
+      summary: 'The unsigned Linux test build is public.'
     }
     const email = renderChangelogEmail(linuxAlpha, { webBaseUrl: 'https://videorc.com/' })
 
     assert.match(email.html, /Videorc Linux Alpha changelog/)
-    assert.match(email.html, /Linux Alpha is not public yet/)
+    assert.match(email.html, /Download the public Linux Alpha, heading to Beta/)
+    assert.doesNotMatch(email.html, /not public yet/)
+    assert.match(email.html, /href="https:\/\/videorc\.com\/download"/)
     assert.doesNotMatch(email.text, /Download Windows Alpha/)
     assert.doesNotMatch(email.text, /\/download\/windows/)
     assert.doesNotMatch(email.text, /\/download\/linux/)

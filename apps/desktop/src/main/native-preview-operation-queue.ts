@@ -213,7 +213,17 @@ export interface NativePreviewPlacementRequest {
   generation: number
 }
 
-type NativePreviewPlacementApply = (request: NativePreviewPlacementRequest) => Promise<void>
+/**
+ * What an apply hands back when it did not push the placement because the
+ * surface host cannot take one yet (#1629): on Windows the backend refuses
+ * bounds until its preview surface is live. A held placement is neither
+ * applied nor failed: it waits, without a retry timer, for `releaseHeld`.
+ */
+export const NATIVE_PREVIEW_PLACEMENT_HELD = 'held'
+
+type NativePreviewPlacementApply = (
+  request: NativePreviewPlacementRequest
+) => Promise<void | typeof NATIVE_PREVIEW_PLACEMENT_HELD>
 
 /**
  * The backend refused a bounds update after the Electron proof window had
@@ -303,6 +313,8 @@ export interface NativePreviewPlacementMetrics {
   failed: number
   /** Retries run after a failed placement. */
   retried: number
+  /** Placements held until the surface host could take them (#1629). */
+  held: number
   currentRequestDepth: number
   maxRequestDepth: number
   roundTripP95Ms?: number
@@ -319,8 +331,10 @@ export class NativePreviewPlacementQueue {
   private pending: NativePreviewPlacementRequest | null = null
   private lastApplied: NativePreviewPlacementRequest | null = null
   private retry: ScheduledPlacementRetry | null = null
+  private held: NativePreviewPlacementRequest | null = null
   private failedCount = 0
   private retriedCount = 0
+  private heldCount = 0
   private cancelEpoch = 0
   private readonly idleWaiters = new Set<() => void>()
   private receivedCount = 0
@@ -354,6 +368,29 @@ export class NativePreviewPlacementQueue {
     return this.retry !== null
   }
 
+  /** A placement is waiting for the surface host to take it (#1629). */
+  get placementHeld(): boolean {
+    return this.held !== null
+  }
+
+  /**
+   * The surface host can take placements again: run the held one, or
+   * `latest` (the window's live rect, which supersedes it) when given. Does
+   * nothing when nothing is held, or when a newer placement is already
+   * queued or running. Returns whether a placement started.
+   */
+  releaseHeld(latest?: NativePreviewPlacementRequest): boolean {
+    const held = this.held
+    this.held = null
+    if (!held || this.active || this.pending) {
+      return false
+    }
+    this.cancelRetry()
+    this.start(latest ?? held, 1)
+    this.maxRequestDepth = Math.max(this.maxRequestDepth, this.requestDepth)
+    return true
+  }
+
   /**
    * Queue a placement. `force` is for one the caller knows did not land
    * (a refused reconcile outside this queue): it is not coalesced against
@@ -365,7 +402,10 @@ export class NativePreviewPlacementQueue {
     // Every push reads the window's live rect, so the newest one supersedes a
     // retry: a fresh push of the failed rect runs now instead of waiting out
     // the backoff, and one back at the last landed rect needs no retry at all.
+    // It supersedes a held placement the same way; if the host still cannot
+    // take it, the apply holds the newer one instead.
     this.cancelRetry()
+    this.held = null
     const desired = this.pending ?? this.active ?? (options.force ? null : this.lastApplied)
     if (desired && placementRequestsEqual(desired, request)) {
       this.coalescedCount += 1
@@ -384,8 +424,9 @@ export class NativePreviewPlacementQueue {
   }
 
   cancelPending(): boolean {
-    const hadPending = this.pending !== null || this.retry !== null
+    const hadPending = this.pending !== null || this.retry !== null || this.held !== null
     this.pending = null
+    this.held = null
     this.cancelRetry()
     // A placement already in flight cannot be stopped, but if it fails it
     // must not schedule a retry: teardown destroyed the surface, and a late
@@ -409,6 +450,7 @@ export class NativePreviewPlacementQueue {
         applied: this.appliedCount,
         failed: this.failedCount,
         retried: this.retriedCount,
+        held: this.heldCount,
         currentRequestDepth: this.requestDepth,
         maxRequestDepth: this.maxRequestDepth,
         roundTripP95Ms: percentile(this.roundTripSamplesMs, 0.95)
@@ -434,9 +476,19 @@ export class NativePreviewPlacementQueue {
     const startedAtMs = this.nowMs()
     const epoch = this.cancelEpoch
     let failure: { error: unknown } | null = null
+    let held = false
     void this.apply(request)
       .then(
-        () => {
+        (outcome) => {
+          if (outcome === NATIVE_PREVIEW_PLACEMENT_HELD) {
+            held = true
+            this.heldCount += 1
+            // Not landed: an echo of this rect must run once the host is back.
+            if (this.lastApplied && placementRequestsEqual(this.lastApplied, request)) {
+              this.lastApplied = null
+            }
+            return
+          }
           this.lastApplied = request
           this.appliedCount += 1
         },
@@ -481,6 +533,10 @@ export class NativePreviewPlacementQueue {
         if (next) {
           this.start(next, 1)
           return
+        }
+        // A newer placement replaces a held one, and teardown drops it.
+        if (held && !cancelled) {
+          this.held = request
         }
         if (retryInMs !== null) {
           this.scheduleRetry(request, attempt + 1, retryInMs)

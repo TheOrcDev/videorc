@@ -15,9 +15,14 @@ import {
 import { SystemAudioIdleLine, type SystemAudioRowProps } from './audio-section'
 import { RetroAudioSectionView, RetroQuickSettings, RetroTakeoverSection } from './retro-lcd-studio'
 
-const mocked = vi.hoisted(() => ({ core: {} as Record<string, unknown> }))
+const mocked = vi.hoisted(() => ({
+  core: {} as Record<string, unknown>,
+  // Plan 258 S4: the camera status the system effect line reads.
+  preview: { previewCameraStatus: {} as Record<string, unknown> }
+}))
 vi.mock('@/hooks/use-studio', () => ({
   useStudioCore: () => mocked.core,
+  useStudioPreview: () => mocked.preview,
   // The Chat row under Captions (plan 213 B1), idle.
   useStudioChat: () => ({
     liveChatSnapshot: { providers: [], messages: [], unreadCount: 0, updatedAt: '' },
@@ -331,6 +336,32 @@ describe('Retro LCD Sources and Takeover (plan 197)', () => {
     // Chat's door shares the Captions screen, right under it (plan 213 B1).
     expect(captions).toMatch(/>Captions<[\s\S]*data-slot="lcd-panel-nav-row"[^>]*>[\s\S]*?>Chat</)
     expect(captions).toContain('Stream Manager · <span')
+  })
+
+  it('says under the camera when macOS is blurring it, and nothing otherwise (plan 258 S4)', () => {
+    core({ screenId: 'screen:2', cameraId: 'camera:1' }, [display, camera])
+    mocked.preview = { previewCameraStatus: {} }
+    expect(renderToStaticMarkup(createElement(RetroQuickSettings))).not.toContain(
+      'data-slot="camera-system-effect"'
+    )
+    mocked.preview = {
+      previewCameraStatus: {
+        systemEffect: {
+          provider: 'macos-video-effects',
+          backgroundBlur: true,
+          backgroundReplacement: false,
+          studioLight: false,
+          turnedOffByVideorc: false
+        }
+      }
+    }
+    const markup = renderToStaticMarkup(createElement(RetroQuickSettings))
+    mocked.preview = { previewCameraStatus: {} }
+    const line = markup.split('data-slot="camera-system-effect"')[1] ?? ''
+    expect(line).toContain('macOS is blurring this camera (Video menu, Portrait).')
+    expect(markup.indexOf('data-slot="camera-system-effect"')).toBeGreaterThan(
+      markup.indexOf('data-testid="green-screen"')
+    )
   })
 
   it('switches takeovers from rows that say On or Off, and says what a click does', () => {

@@ -61,10 +61,42 @@ the program's items, at the primary's canvas, so every prepared bitmap is
 the one the legs already hold. The Preview lease and the pixel oracle
 present that picture while it is current; the ring, the recording and the
 stream are untouched. While the primary leg is the program nothing extra
-runs on the GPU. `compositor.status.framePipeline.previewProgramLeg` says
-when the program leg is on; `VIDEORC_PREVIEW_PROGRAM_LEG=0` keeps the
+runs on the GPU.
+
+The program leg composes only on the ticks no other leg has already drawn
+its picture (`ProgramLegSource` in `compositor.rs`). A tick compares what
+each leg draws above the scene (the caption bar, the comment card, the
+chat box, the avatar and its bubble, the banners) by the very rasters:
+
+- **The stream leg is the program.** In a split record + stream whose
+  stream leg has the recording's size, that leg composes the same scene
+  from the same frames. While it also draws everything the program has,
+  the Preview presents that leg's own frame and no third pass runs.
+- **The primary leg is the program.** While nothing of the stream-only
+  items is on screen (no card up, no caption line, no banner showing),
+  the Preview presents the primary leg's frame. The program leg is
+  parked: it keeps its compositor for the tick an item appears and lets
+  go of the capture frames it drew last.
+- **Its own pass.** Otherwise, as before: a stream leg of another size or
+  scene (a 4K recording beside a 1080p stream, the vertical leg), an item
+  only the recording has, or a Scene editor draft. Beside a split stream
+  leg the log says why that leg could not stand in, once and again when
+  the reason changes: `Preview program leg composes its own pass ...
+  reason=` with `size`, `simulcast`, `consumer` (the CPU fallback),
+  `editor-draft`, the overlay that differs (`caption`, `highlight`,
+  `chat`, `bubble`, `pet`, `banners`), or `no-presentable-frame`.
+
+`compositor.status.framePipeline.previewProgramLeg` says when the Preview
+shows the program rather than the primary leg (its own pass, or the
+stream leg's frame); `VIDEORC_PREVIEW_PROGRAM_LEG=0` keeps the
 Preview on the primary leg (a measurement and support switch, said in
-the log). The pure trigger is `preview_needs_program_leg` in
+the log). The backend log has two lines for the cost: `Preview program
+leg cost` every 2 s while the leg composes, and `Compositor leg cost`
+every 10 s for any run with more than one leg, with each leg's wall time,
+GPU wait, GPU time and share of CPU work, and how many ticks the program
+leg was parked or took the stream leg's frame
+(`VIDEORC_COMPOSITOR_LEG_COST=1` writes it for single-leg runs too). The
+pure trigger for the plan is `preview_needs_program_leg` in
 `compositor.rs`. The verdict travels with the run: a Clips arm in place
 carries it on `CompositorArmParams`, and a run the ring starts for itself
 (a cold launch arms the ring before the Preview's run exists, logged as

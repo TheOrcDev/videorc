@@ -79,6 +79,10 @@ const kinds = {
   backend: { tone: 'warning', life: 'condition', mayBe: ['urgent'] },
   'backend-error': { tone: 'warning', life: 'event' },
   'output-too-heavy': { tone: 'warning', life: 'event' },
+  // Sidekick stopped or failed on its own (a lapse, a quota, a sign-out).
+  sidekick: { tone: 'warning', life: 'event', mayBe: ['news'] },
+  // Live captions the Studio starts on its own with a session could not start.
+  captions: { tone: 'warning', life: 'event' },
   'app-news': { tone: 'news', life: 'event' },
   'recording-saved': { tone: 'done', life: 'event' },
   mp4: { tone: 'news', life: 'progress' },

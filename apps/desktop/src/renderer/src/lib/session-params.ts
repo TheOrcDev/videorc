@@ -1,4 +1,4 @@
-import { cameraLookLayout } from './camera-look'
+import { cameraOutputLayout } from './camera-background'
 import type { Scene, StartSessionParams } from './backend'
 import {
   captionsEnabledForSession,
@@ -64,11 +64,7 @@ export function buildStartSessionParams(input: {
 
   return {
     sources: captureConfig.sources,
-    layout: cameraLookLayout(
-      captureConfig.layout,
-      captureConfig.sources.cameraId,
-      settings.cameraLooks
-    ),
+    layout: cameraOutputLayout(captureConfig.layout, captureConfig.sources.cameraId, settings),
     scene: includeScene ? (scene ?? undefined) : undefined,
     output: {
       recordEnabled: captureConfig.recordEnabled,
@@ -104,11 +100,7 @@ export function buildStartSessionParams(input: {
     simulcast: buildSimulcastParams(
       {
         ...captureConfig,
-        layout: cameraLookLayout(
-          captureConfig.layout,
-          captureConfig.sources.cameraId,
-          settings.cameraLooks
-        )
+        layout: cameraOutputLayout(captureConfig.layout, captureConfig.sources.cameraId, settings)
       },
       input.sceneOnStream
     ),

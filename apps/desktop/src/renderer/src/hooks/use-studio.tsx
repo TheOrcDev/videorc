@@ -40,6 +40,7 @@ import {
 } from '@/lib/camera-frame-rate'
 import type { CameraLowLightRequest } from '@/hooks/use-camera-low-light'
 import { cameraLookLayout, normalizeCameraLook, createCameraLookThrottle } from '@/lib/camera-look'
+import { cameraOutputLayout, migrateCameraBackgrounds } from '@/lib/camera-background'
 import type { ChatOverlayDriver } from '@/lib/chat-overlay'
 import type { MicrophonePermissionProof } from '@/lib/system-permission-orchestration'
 import { isReplacementPermissionClient } from '@/lib/permission-evidence'
@@ -394,7 +395,6 @@ import {
 import { ipcErrorMessage } from '@/lib/ipc-error-message'
 import { showMp4ExportFailed, showMp4Finalizing, showMp4Ready } from '@/lib/finalization-toast'
 import {
-  COHOST_STATUS_TOAST_ID,
   cohostStatusDetail,
   cohostStatusToast,
   showBrowserApproval,
@@ -406,11 +406,7 @@ import {
   sourceSwitchFailedDescription,
   sourceSwitchFailedTitle
 } from '@/lib/studio-toasts'
-import {
-  beginVideorcSignIn,
-  openVideorcWebLink,
-  VIDEORC_PREMIUM_URL
-} from '@/lib/videorc-web-links'
+import { beginVideorcSignIn } from '@/lib/videorc-web-links'
 import {
   OFFLINE_TOAST_ID,
   offlineError,
@@ -457,6 +453,8 @@ import {
   layoutTransactionSourcesFromScene,
   layoutTransactionUnprovenSeverity,
   NativePreviewPresentationProofError,
+  isSceneReloadSuperseded,
+  sceneReloadRetryDelayMs,
   shouldReloadSceneFromCaptureConfig
 } from '@/lib/layout-transaction-policy'
 import {
@@ -2897,7 +2895,14 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
   // mounted and the preview has no slot. Auto-preview capture, the native
   // source previews, the Preview window and the OS-global shortcuts wait for it
   // to close; the shell owns the flag.
-  const [firstRunSetupOpen, setFirstRunSetupOpen] = useState(false)
+  const [firstRunSetupOpen, setFirstRunSetupOpenState] = useState(false)
+  // PH-08: the shell reports the flag once it has decided whether setup opens.
+  // Until then the launch's first Preview start keeps its 500 ms debounce.
+  const [firstRunDecided, setFirstRunDecided] = useState(false)
+  const setFirstRunSetupOpen = useCallback((open: boolean) => {
+    setFirstRunDecided(true)
+    setFirstRunSetupOpenState(open)
+  }, [])
   // Plan 209 S14: `update_settings` sets the theme through next-themes, like
   // Settings → General's control.
   const { theme: appTheme, setTheme: setAppTheme } = useTheme()
@@ -2990,6 +2995,22 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
   const [replayBlockedReason, setReplayBlockedReasonState] = useState<string | null>(null)
   const replayBlockedReasonRef = useRef<string | null>(null)
   const replayStartInFlightRef = useRef(false)
+  // The ring's own start while it is in flight. Its session.start carries
+  // the scene as the Studio held it when the start was asked for, and the
+  // backend commits that scene as the session starts: a layout transaction
+  // committed meanwhile would be put back. A transaction asked for in that
+  // window waits for the start to answer (0.36.1: an agent's background and
+  // a Freeform entry were lost this way).
+  const replayStartPromiseRef = useRef<Promise<void> | null>(null)
+  // The same race on a Record or Go Live start: its session.start carries
+  // the scene of the render it was asked for in, and the backend commits it
+  // as the session starts. From that moment until the start answers, a
+  // layout transaction waits for it; a start asked for while a transaction
+  // awaits its proof waits for the render that takes the transaction's
+  // scene (the waiters run from an effect on `layoutProofSettledTick`).
+  const sessionStartScenePromiseRef = useRef<Promise<void> | null>(null)
+  const layoutProofWaitersRef = useRef<Array<() => void>>([])
+  const [layoutProofSettledTick, setLayoutProofSettledTick] = useState(0)
   // A source picked while the ring's own start was in flight: that start
   // carried the old sources, so the ring restarts once it answers.
   const replaySourcesMovedDuringStartRef = useRef<'visual' | 'audio' | null>(null)
@@ -3398,13 +3419,12 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
   const captureConfig = useMemo(
     () => ({
       ...storedCaptureConfig,
-      layout: cameraLookLayout(
-        storedCaptureConfig.layout,
-        storedCaptureConfig.sources.cameraId,
-        settings.cameraLooks
-      )
+      layout: cameraOutputLayout(storedCaptureConfig.layout, storedCaptureConfig.sources.cameraId, {
+        cameraLooks: settings.cameraLooks,
+        cameraBackgrounds: settings.cameraBackgrounds
+      })
     }),
-    [storedCaptureConfig, settings.cameraLooks]
+    [storedCaptureConfig, settings.cameraLooks, settings.cameraBackgrounds]
   )
   useEffect(() => {
     const sessionId = liveChatSnapshot.sessionId
@@ -3534,6 +3554,8 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
     },
     [client, commitCaptionsStatus, runCaptionsCommand]
   )
+  const startCaptionsRef = useRef(startCaptions)
+  startCaptionsRef.current = startCaptions
   const stopCaptions = useCallback(async () => {
     if (!client) return
     let status: CaptionsStatus
@@ -4805,6 +4827,11 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
   const layoutIntentAwaitingProofRef = useRef<number | null>(null)
   const latestLayoutTransactionCommitRef = useRef<LayoutTransactionSnapshot | null>(null)
   const skipNextConfigSceneReloadRef = useRef(false)
+  // A reload the backend refused because a session held the slot tries again
+  // through this tick (backoff in `sceneReloadRetryDelayMs`).
+  const [sceneReloadRetryTick, setSceneReloadRetryTick] = useState(0)
+  const sceneReloadRetryTimerRef = useRef<number | null>(null)
+  const sceneReloadSupersededAttemptsRef = useRef(0)
   useEffect(() => {
     captureConfigRef.current = captureConfig
   }, [captureConfig])
@@ -5196,6 +5223,11 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
   // One-shot playback toasts per broadcast+status (probe events may repeat).
   const xPlaybackToastsRef = useRef(new Set<string>())
   const [previewRefreshNonce, setPreviewRefreshNonce] = useState(0)
+  // PH-08 (11-20): the client whose first automatic Preview start ran, and the
+  // device list the working sources were last reconciled with. A connection's
+  // first start runs once its sources are reconciled, not after 500 ms.
+  const autoPreviewStartedForRef = useRef<BackendClient | null>(null)
+  const sourcesReconciledForRef = useRef<DeviceList | null>(null)
   const nativePreviewSurfaceEnabled = Boolean(runtimeInfo?.nativePreviewSurfaceProofEnabled)
 
   // Surface a per-target stream drop from any tab (the Streaming tab has the full
@@ -5293,6 +5325,24 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
     if (migratedShortcuts)
       setSettings((current) => ({ ...current, globalShortcuts: migratedShortcuts }))
   }, [migratedShortcuts])
+  // Plan 258 D4: the scenes' green or blue screen moves to the camera. Until
+  // the camera's choice renders (S5), it follows the scenes on every change,
+  // and a key waits for a selected camera rather than being lost. The scenes
+  // keep their key fields for a rollback; nothing renders from it yet (S3).
+  const migrationCameraId = captureConfig.sources.cameraId
+  const migrationScenes = sceneLibrary.storedList
+  useEffect(() => {
+    setSettings((current) => {
+      const migrated = migrateCameraBackgrounds({
+        cameraBackgrounds: current.cameraBackgrounds,
+        cameraBackgroundMigration: current.cameraBackgroundMigration,
+        cameraId: migrationCameraId,
+        scenes: migrationScenes,
+        onStreamId: activeSavedSceneId
+      })
+      return migrated ? { ...current, ...migrated } : current
+    })
+  }, [migrationCameraId, migrationScenes, activeSavedSceneId])
   // A new user's scenes show the main display before the device list names it.
   useEffect(() => {
     const display = deviceList.devices.find(
@@ -5485,6 +5535,14 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
       })
   )
   useEffect(() => () => sourceSelectionController.dispose(), [sourceSelectionController])
+  // `get` reads `clientRef`, which follows `client` at render. A bootstrap
+  // `recording.status` that lands before React commits a new client asks with
+  // no client yet, fails ("couldn't check your sources") and nothing asks
+  // again. So the committed client reads once more; with no active session
+  // this is a no-op, and a read in flight runs again after it.
+  useEffect(() => {
+    if (client) void sourceSelectionController.refresh()
+  }, [client, sourceSelectionController])
   const allowCaptureNone =
     !sessionOwnsTransport(recording) ||
     sourceSelectionState.snapshot?.capabilities.some(
@@ -5529,6 +5587,17 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
     const status = wsStatusRef.current
     void loadSessionRuntimeRecovery().then((runtime) =>
       runtime.showBackendError(error, status, context)
+    )
+  }, [])
+  // What Videorc tried on its own failed: a load at launch, a reload, a
+  // retry. Nobody pressed anything, so it is an entry behind the bell and
+  // never a toast (the owner, 2026-11-22: "the first thing you see is a bunch
+  // of toasts"). The record and the console line are a toast's.
+  const reportUnasked = useCallback((error: unknown, context?: UserErrorContext) => {
+    setLastError(ipcErrorMessage(error))
+    const status = wsStatusRef.current
+    void loadSessionRuntimeRecovery().then((runtime) =>
+      runtime.noteBackgroundError(error, status, context)
     )
   }, [])
 
@@ -5832,25 +5901,9 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
     if (statusToast) {
       const detail = cohostStatusDetail(merged)
       if (detail) console.warn('[buddy] stopped:', detail)
-      const show =
-        statusToast.kind === 'message'
-          ? toast
-          : statusToast.kind === 'warning'
-            ? toast.warning
-            : toast.error
-      show(statusToast.title, {
-        id: COHOST_STATUS_TOAST_ID,
-        ...(statusToast.action === 'sign-in'
-          ? { action: { label: 'Sign in', onClick: beginVideorcSignIn } }
-          : statusToast.action === 'view-premium'
-            ? {
-                action: {
-                  label: 'View Premium',
-                  onClick: () => openVideorcWebLink(VIDEORC_PREMIUM_URL)
-                }
-              }
-            : {})
-      })
+      // Sidekick's status reaches the Studio on its own (at launch too):
+      // an entry behind the bell with its fix, never a toast.
+      withAppNotifications((app) => app.publishSidekickStatus(statusToast, beginVideorcSignIn))
     }
   }, [])
 
@@ -5922,8 +5975,7 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
       client,
       live: () => watchdogLiveRef.current,
       source: () => studioActionSourceRef.current?.() ?? null,
-      openStudioPanel: (panel: 'assets' | 'layouts') => openWorkspaceTab(panel),
-      openStudio: () => openWorkspaceTab('studio')
+      openStudioPanel: (panel: 'assets' | 'layouts') => openWorkspaceTab(panel)
     }),
     [client]
   )
@@ -7642,12 +7694,15 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
         if (options.background && isYouTubeChannelAuthFailure(error)) {
           return
         }
-        reportError(error, { action: 'load', object: 'your YouTube channels' })
+        ;(options.background ? reportUnasked : reportError)(error, {
+          action: 'load',
+          object: 'your YouTube channels'
+        })
       } finally {
         setYoutubeChannelsLoading(false)
       }
     },
-    [client, reportError]
+    [client, reportError, reportUnasked]
   )
 
   const selectYouTubeChannel = useCallback(
@@ -7815,12 +7870,13 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
         setXNativeCapability(capability)
       } catch (error) {
         setXNativeCapability(null)
-        reportError(error)
+        // Read for the X account on its own, never at a press.
+        reportUnasked(error)
       } finally {
         setXNativeCapabilityLoading(false)
       }
     },
-    [client, reportError]
+    [client, reportUnasked]
   )
 
   useEffect(() => {
@@ -8092,6 +8148,11 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
           recordAutomaticSourceFallbacks(before, nextSources)
           return { ...current, sources: withoutSceneApp(nextSources) }
         })
+        // PH-08: a connection's first Preview start waits for this, not a
+        // timer; the bump commits with the sources above and runs it.
+        sourcesReconciledForRef.current = deviceList
+        if (autoPreviewStartedForRef.current !== clientRef.current)
+          setPreviewRefreshNonce((current) => current + 1)
       })
       .catch((error) => console.warn('[scenes] working window resolution failed', error))
     return () => {
@@ -8395,7 +8456,7 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
       liveChatRecoveryRetryTimer = window.setTimeout(() => {
         liveChatRecoveryRetryTimer = null
         void recoverLiveChatSnapshot().catch((error: unknown) => {
-          if (!disposed) reportError(error)
+          if (!disposed) reportUnasked(error)
         })
       }, LIVE_CHAT_RECOVERY_RETRY_DELAY_MS)
     }
@@ -8517,7 +8578,7 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
         if (remoteSurfaceConnected) remoteSurfacePublisher.markConnected()
       })
       .catch((error: unknown) => {
-        if (!disposed) reportError(error)
+        if (!disposed) reportUnasked(error)
       })
     const remoteIntents = createRemoteIntentQueue({
       run: async (payload) => {
@@ -8556,7 +8617,7 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
         if (remoteSurfaceConnected) agentLink.markConnected()
       })
       .catch((error: unknown) => {
-        if (!disposed) reportError(error)
+        if (!disposed) reportUnasked(error)
       })
     const unsubscribers = [
       nextClient.on('session.sources.changed', () => {
@@ -8574,11 +8635,11 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
         void nextClient
           .request<RemoteControlStatus>('remote.control.status')
           .then(setRemoteControlStatus)
-          .catch(reportError)
+          .catch(reportUnasked)
         void nextClient
           .request<RemoteLanStatus>('remote.lan.status')
           .then(setRemoteLanStatus)
-          .catch(reportError)
+          .catch(reportUnasked)
       }),
       // Remote-control intents (Stream Deck et al) arrive as events relayed
       // by the backend and run in arrival order (lib/remote-intent-queue.ts);
@@ -9330,7 +9391,7 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
         if (lagged.skipped < 1) return
         feedDashboard('events.lagged', payload)
         void recoverLiveChatSnapshot().catch((error: unknown) => {
-          if (!disposed) reportError(error)
+          if (!disposed) reportUnasked(error)
         })
       }),
       nextClient.on('captions.status', (payload) =>
@@ -9593,6 +9654,22 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
           },
           (error: unknown) => console.warn('[banners] overlay status read failed:', error)
         )
+        // PH-08 (11-20): the batch below gates health, devices and the
+        // camera/Preview start, so it reads the backend's entitlements as they
+        // stand (`entitlements.get`, local). The revalidation with the Videorc
+        // API (up to 10 s) runs beside it and commits its answer unless a newer
+        // snapshot (an `entitlements.updated`) came in after the batch's.
+        let entitlementsLaunchRevision = entitlementsRevisionAtBootstrapStart
+        void bootstrapRequest<EntitlementsSnapshot>('entitlements.refresh').then(
+          (refreshed) => {
+            if (
+              generationIsCurrent() &&
+              entitlementsRevisionRef.current === entitlementsLaunchRevision
+            )
+              commitEntitlementsSnapshot(refreshed)
+          },
+          (error: unknown) => console.warn('[entitlements] launch refresh failed:', error)
+        )
         const [
           nextHealth,
           nextEntitlements,
@@ -9616,7 +9693,7 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
           nextNoiseCleanupJobs
         ] = await Promise.all([
           bootstrapRequest<BackendHealth>('health.ping'),
-          bootstrapRequest<EntitlementsSnapshot>('entitlements.refresh'),
+          bootstrapRequest<EntitlementsSnapshot>('entitlements.get'),
           bootstrapRequest<VideorcAccountSnapshot>('account.get'),
           bootstrapRequest<DeviceList>('devices.list'),
           recordingStatusBootstrap,
@@ -9703,6 +9780,7 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
           .catch(() => undefined)
         if (entitlementsRevisionRef.current === entitlementsRevisionAtBootstrapStart) {
           commitEntitlementsSnapshot(nextEntitlements)
+          entitlementsLaunchRevision = entitlementsRevisionRef.current
         }
         if (accountBootstrapToken && accountSnapshotCoordinator.canCommit(accountBootstrapToken)) {
           setAccount(nextAccount)
@@ -9898,7 +9976,8 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
         // so captions and other live controls do not freeze behind a false
         // "Backend offline" state.
         setWsStatus(nextClient.connected ? 'connected' : 'failed')
-        reportError(error)
+        // The launch's own reads: an entry behind the bell, never a toast.
+        reportUnasked(error)
       })
 
     return () => {
@@ -10030,7 +10109,8 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
     updateLiveChatSnapshot,
     validatePlatformAccountsForClient,
     refreshSessions,
-    reportError
+    reportError,
+    reportUnasked
   ])
 
   const loadScene = useCallback(
@@ -10497,20 +10577,41 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
       ) {
         return
       }
-      void reloadSceneFromCaptureConfig().catch((error) => {
-        if (
-          shouldReloadSceneFromCaptureConfig({
-            connected: wsStatusRef.current === 'connected',
-            sceneEditMode,
-            recordingState: recordingRef.current.state,
-            startRequestPending,
-            stopRequestPending,
-            performanceCheckRunning: checkRunning()
-          })
-        ) {
-          reportError(error)
+      void reloadSceneFromCaptureConfig().then(
+        () => {
+          sceneReloadSupersededAttemptsRef.current = 0
+        },
+        (error: unknown) => {
+          // A session took the slot first (a check's hidden session can do so
+          // before the guards above see it). Nothing failed: never a toast,
+          // and the reload tries again so the scene still follows the config.
+          if (isSceneReloadSuperseded(error)) {
+            const attempt = sceneReloadSupersededAttemptsRef.current
+            sceneReloadSupersededAttemptsRef.current = attempt + 1
+            if (sceneReloadRetryTimerRef.current !== null) {
+              window.clearTimeout(sceneReloadRetryTimerRef.current)
+            }
+            sceneReloadRetryTimerRef.current = window.setTimeout(() => {
+              sceneReloadRetryTimerRef.current = null
+              setSceneReloadRetryTick((tick) => tick + 1)
+            }, sceneReloadRetryDelayMs(attempt))
+            return
+          }
+          if (
+            shouldReloadSceneFromCaptureConfig({
+              connected: wsStatusRef.current === 'connected',
+              sceneEditMode,
+              recordingState: recordingRef.current.state,
+              startRequestPending,
+              stopRequestPending,
+              performanceCheckRunning: checkRunning()
+            })
+          ) {
+            // The scene follows the saved config on its own: nobody pressed.
+            reportUnasked(error)
+          }
         }
-      })
+      )
     }, 250)
 
     return () => window.clearTimeout(timer)
@@ -10519,12 +10620,22 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
     performanceCheckRunning,
     recording.state,
     reloadSceneFromCaptureConfig,
-    reportError,
+    reportUnasked,
     sceneEditMode,
+    sceneReloadRetryTick,
     startRequestPending,
     stopRequestPending,
     wsStatus
   ])
+  useEffect(
+    () => () => {
+      if (sceneReloadRetryTimerRef.current !== null) {
+        window.clearTimeout(sceneReloadRetryTimerRef.current)
+        sceneReloadRetryTimerRef.current = null
+      }
+    },
+    []
+  )
 
   const resetSceneSource = useCallback(
     async (sourceId = selectedSceneSourceId ?? undefined) => {
@@ -10939,7 +11050,13 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
       }
       try {
         const adapter = await import('@/lib/cloud-scene-adapter')
-        const snapshot = await adapter.commitSceneIdle(client, plan(adapter, state))
+        // Plan 258: a room's idle commit is an output boundary too, so the
+        // selected camera's look and background go with it, as on a native
+        // switch.
+        const snapshot = await adapter.commitSceneIdle(
+          client,
+          adapter.idleCommitOutput(plan(adapter, state), settingsRef.current)
+        )
         applyCommittedScene(snapshot)
         applyLayoutTransactionState(snapshot)
         return true
@@ -11097,6 +11214,18 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
         onSettled?: () => void
       }
     ): Promise<boolean> => {
+      // The ring's start is in flight with the scene as it was: this change
+      // runs once it answers, as a change to the session it started, so the
+      // start's scene commit never lands over it.
+      const replayStart = replayStartPromiseRef.current
+      if (replayStart) {
+        return replayStart.then(() => requestLayoutTransactionRef.current(layout, options))
+      }
+      // A Record or Go Live start holds the scene as it was: the same.
+      const sessionStart = sessionStartScenePromiseRef.current
+      if (sessionStart) {
+        return sessionStart.then(() => requestLayoutTransactionRef.current(layout, options))
+      }
       const crossesOrientation =
         layoutPresetOrientation(layout.layoutPreset) !==
         layoutPresetOrientation(captureConfigRef.current.layout.layoutPreset)
@@ -11203,11 +11332,7 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
                     : undefined
               }
             )
-          layout = cameraLookLayout(
-            layout,
-            requestedSources.cameraId,
-            settingsRef.current.cameraLooks
-          )
+          layout = cameraOutputLayout(layout, requestedSources.cameraId, settingsRef.current)
           const requestedBackground =
             options && 'backgroundOverride' in options
               ? (options.backgroundOverride ?? undefined)
@@ -11509,6 +11634,12 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
           settleCommitReceipt(false)
           if (layoutIntentAwaitingProofRef.current === intentId) {
             layoutIntentAwaitingProofRef.current = null
+            // The ring held its start for this transaction: start it now,
+            // with the scene the transaction left.
+            if (replayArmedRef.current) scheduleReplayReconcileRef.current()
+            // A Record or Go Live start held for it runs once this
+            // transaction's scene has rendered.
+            if (layoutProofWaitersRef.current.length) setLayoutProofSettledTick((tick) => tick + 1)
           }
           if (layoutIntentIdRef.current === intentId) {
             setLayoutSwitchPending(null)
@@ -13159,99 +13290,105 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
     wsStatus
   ])
 
-  const refreshPreview = useCallback(async () => {
-    if (!client || wsStatus !== 'connected') {
-      return
-    }
+  // `unasked`: the Studio opened the preview itself (at launch), not a press.
+  const refreshPreview = useCallback(
+    async (options: { unasked?: boolean } = {}) => {
+      if (!client || wsStatus !== 'connected') {
+        return
+      }
 
-    if (nativePreviewSurfaceEnabled) {
-      const cameraStatus = await ensureNativePreviewCamera()
-      const screenStatus = await ensureNativePreviewScreen()
-      const permissionStatus =
-        screenStatus.state === 'permission-needed'
-          ? screenStatus
-          : cameraStatus.state === 'permission-needed'
-            ? cameraStatus
-            : null
-      if (permissionStatus) {
+      if (nativePreviewSurfaceEnabled) {
+        const cameraStatus = await ensureNativePreviewCamera()
+        const screenStatus = await ensureNativePreviewScreen()
+        const permissionStatus =
+          screenStatus.state === 'permission-needed'
+            ? screenStatus
+            : cameraStatus.state === 'permission-needed'
+              ? cameraStatus
+              : null
+        if (permissionStatus) {
+          setPreviewLoading(false)
+          setPreviewUrl(null)
+          setPreviewLiveStatus({
+            state: 'unavailable',
+            source: 'unavailable',
+            transport: 'unavailable',
+            backing: 'none',
+            message: permissionStatus.message ?? 'Permission is required before preview can run.'
+          })
+          return
+        }
+        const activeSourceStatus = screenStatus.state === 'live' ? screenStatus : cameraStatus
         setPreviewLoading(false)
         setPreviewUrl(null)
+        setPreviewLiveStatus({
+          state: 'live',
+          source: 'idle-preview',
+          transport: 'electron-proof-surface',
+          backing: 'electron-browser-window',
+          targetFps: activeSourceStatus.targetFps || previewSurfaceStatusRef.current.targetFps,
+          width: (activeSourceStatus.width ?? previewSurfaceStatusRef.current.width) || undefined,
+          height:
+            (activeSourceStatus.height ?? previewSurfaceStatusRef.current.height) || undefined,
+          message:
+            screenStatus.state === 'live'
+              ? 'Screen source is live on the preview surface.'
+              : cameraStatus.state === 'live'
+                ? 'Camera source is live on the preview surface.'
+                : (screenStatus.message ??
+                  cameraStatus.message ??
+                  'Preview surface proof mode is active.')
+        })
+        return
+      }
+
+      if (previewRequestPending.current) {
+        previewRefreshQueued.current = true
+        return
+      }
+
+      try {
+        previewRequestPending.current = true
+        setPreviewLoading(true)
+        const status = await client.request<PreviewLiveStatus>('preview.live.start', {
+          sources: captureConfig.sources,
+          layout: captureConfig.layout,
+          video: captureConfig.video
+        })
+        applyPreviewLiveStatus(status)
+      } catch (error) {
+        ;(options.unasked ? reportUnasked : reportError)(error)
         setPreviewLiveStatus({
           state: 'unavailable',
           source: 'unavailable',
           transport: 'unavailable',
           backing: 'none',
-          message: permissionStatus.message ?? 'Permission is required before preview can run.'
+          message: error instanceof Error ? error.message : 'Live preview failed.'
         })
-        return
+        setPreviewUrl(null)
+      } finally {
+        previewRequestPending.current = false
+        setPreviewLoading(false)
+        if (previewRefreshQueued.current) {
+          previewRefreshQueued.current = false
+          setPreviewRefreshNonce((current) => current + 1)
+        }
       }
-      const activeSourceStatus = screenStatus.state === 'live' ? screenStatus : cameraStatus
-      setPreviewLoading(false)
-      setPreviewUrl(null)
-      setPreviewLiveStatus({
-        state: 'live',
-        source: 'idle-preview',
-        transport: 'electron-proof-surface',
-        backing: 'electron-browser-window',
-        targetFps: activeSourceStatus.targetFps || previewSurfaceStatusRef.current.targetFps,
-        width: (activeSourceStatus.width ?? previewSurfaceStatusRef.current.width) || undefined,
-        height: (activeSourceStatus.height ?? previewSurfaceStatusRef.current.height) || undefined,
-        message:
-          screenStatus.state === 'live'
-            ? 'Screen source is live on the preview surface.'
-            : cameraStatus.state === 'live'
-              ? 'Camera source is live on the preview surface.'
-              : (screenStatus.message ??
-                cameraStatus.message ??
-                'Preview surface proof mode is active.')
-      })
-      return
-    }
-
-    if (previewRequestPending.current) {
-      previewRefreshQueued.current = true
-      return
-    }
-
-    try {
-      previewRequestPending.current = true
-      setPreviewLoading(true)
-      const status = await client.request<PreviewLiveStatus>('preview.live.start', {
-        sources: captureConfig.sources,
-        layout: captureConfig.layout,
-        video: captureConfig.video
-      })
-      applyPreviewLiveStatus(status)
-    } catch (error) {
-      reportError(error)
-      setPreviewLiveStatus({
-        state: 'unavailable',
-        source: 'unavailable',
-        transport: 'unavailable',
-        backing: 'none',
-        message: error instanceof Error ? error.message : 'Live preview failed.'
-      })
-      setPreviewUrl(null)
-    } finally {
-      previewRequestPending.current = false
-      setPreviewLoading(false)
-      if (previewRefreshQueued.current) {
-        previewRefreshQueued.current = false
-        setPreviewRefreshNonce((current) => current + 1)
-      }
-    }
-  }, [
-    applyPreviewLiveStatus,
-    captureConfig.layout,
-    captureConfig.sources,
-    captureConfig.video,
-    client,
-    ensureNativePreviewCamera,
-    ensureNativePreviewScreen,
-    nativePreviewSurfaceEnabled,
-    reportError,
-    wsStatus
-  ])
+    },
+    [
+      applyPreviewLiveStatus,
+      captureConfig.layout,
+      captureConfig.sources,
+      captureConfig.video,
+      client,
+      ensureNativePreviewCamera,
+      ensureNativePreviewScreen,
+      nativePreviewSurfaceEnabled,
+      reportError,
+      reportUnasked,
+      wsStatus
+    ]
+  )
 
   const syncNativePreviewSurfaceBounds = useCallback(
     async (bounds: PreviewSurfaceBounds, generation?: number) => {
@@ -13581,8 +13718,10 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
         visible: previewWindow.visible
       }
       previewWindowSurfaceActiveRef.current = true
+      // The Preview window's surface follows the window on its own (and is
+      // restored at launch): a failure is an entry, never a toast.
       void syncNativePreviewSurfaceBounds(bounds, previewWindow.supervisor.generation).catch(
-        reportError
+        reportUnasked
       )
       return
     }
@@ -13593,7 +13732,7 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
   }, [
     nativePreviewSurfaceEnabled,
     previewWindow,
-    reportError,
+    reportUnasked,
     runtimeInfo?.disableAutoPreview,
     syncFramePollingSuppression,
     syncNativePreviewSurfaceBounds,
@@ -14835,7 +14974,9 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
               : requestError
                 ? ` ${String(requestError)}`
                 : ''
-          reportError(new Error(`${rejection.message}${detail}`))
+          // The sync runs on its own (a session's start, the Clips ring at
+          // launch too): a refusal is an entry behind the bell.
+          reportUnasked(new Error(`${rejection.message}${detail}`))
           return !rejection.disableForSession
         }
       )
@@ -14923,7 +15064,7 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
     systemAudioRetry,
     commitLiveAudioProcessingApplied,
     failLiveMicrophoneWaiters,
-    reportError,
+    reportUnasked,
     runtimeInfo?.windowsLiveAudioSmokeMode,
     startRequestPending,
     stopRequestPending,
@@ -15008,25 +15149,26 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
           reasonCode: 'captions-output-unsupported',
           message: captionOutputReadiness.description
         })
-        toast.warning("Live captions can't start in this session", {
-          id: 'captions-output-unsupported',
-          description:
-            captionOutputReadiness.description ??
-            "The active output configuration can't carry caption pixels."
-        })
+        // Captions start on their own with a session (the Clips ring at
+        // launch too): an entry behind the bell, never a toast.
+        withAppNotifications((app) =>
+          app.publishCaptionsOutputUnsupported(captionOutputReadiness.description)
+        )
         return
       }
       captionsStartAttemptedRef.current = true
       captionsStopAttemptedRef.current = false
       const language = captureConfig.captions.language
-      const start = (): void => {
-        void startCaptions(language).catch((error: unknown) => {
-          toastUserError(
-            error,
-            { action: 'start', object: 'live captions' },
-            { id: 'captions-start', action: { label: 'Retry', onClick: start } }
-          )
+      const start = (current = language): void => {
+        void startCaptionsRef.current(current).catch((error: unknown) => {
+          withAppNotifications((app) => app.publishCaptionsStartFailure(error, retry))
         })
+      }
+      // The entry's Retry may be pressed later: it asks the Studio's current
+      // client, in the language chosen now, and only while captions are on.
+      const retry = (): void => {
+        const { captions } = captureConfigRef.current
+        if (captions.enabled) start(captions.language)
       }
       start()
     } else if (action === 'stop') {
@@ -15997,6 +16139,7 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
     }
   }, [client, reportError, streamMetadataDraft, wsStatus])
 
+  const runtimeInfoKnown = runtimeInfo !== null
   useEffect(() => {
     if (firstRunSetupOpen || runtimeInfo?.disableAutoPreview) {
       return
@@ -16011,9 +16154,23 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
       return
     }
 
-    const timer = window.setTimeout(() => {
-      void refreshPreview()
-    }, 500)
+    // PH-08 (11-20): a connection's first start runs at once when the working
+    // sources are reconciled with the device list in hand (the reconcile bumps
+    // the nonce), instead of 500 ms after the launch batch; later changes keep
+    // the debounce. Runtime info and the shell's first-run decision first: they
+    // hold the smoke flags and whether setup (which holds preview) opens.
+    const launchStart =
+      autoPreviewStartedForRef.current !== client &&
+      runtimeInfoKnown &&
+      firstRunDecided &&
+      sourcesReconciledForRef.current === deviceListRef.current
+    const timer = window.setTimeout(
+      () => {
+        autoPreviewStartedForRef.current = client
+        void refreshPreview({ unasked: true })
+      },
+      launchStart ? 0 : 500
+    )
 
     return () => window.clearTimeout(timer)
   }, [
@@ -16023,8 +16180,10 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
     previewDevicesSignature,
     previewRefreshNonce,
     refreshPreview,
+    firstRunDecided,
     firstRunSetupOpen,
     runtimeInfo?.disableAutoPreview,
+    runtimeInfoKnown,
     wsStatus
   ])
 
@@ -17034,7 +17193,23 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
       // Its destinations are the runner's, so no account is checked and no
       // broadcast is activated here.
       rpc: SessionStartRpc = 'session.start'
-    ) => {
+    ): Promise<boolean> => {
+      // A scene change awaiting its proof has not reached this render's
+      // scene: started now, the session would commit the scene it is
+      // leaving. The start runs from the render that takes its scene.
+      if (layoutIntentAwaitingProofRef.current !== null) {
+        return new Promise<void>((resolve) => {
+          layoutProofWaitersRef.current.push(resolve)
+        }).then(() =>
+          runStartSessionRef.current!(
+            streamingOverride,
+            preparedOutput,
+            intent,
+            suppressCaptionsOverride,
+            rpc
+          )
+        )
+      }
       const suppressCaptions = suppressCaptionsOverride ?? suppressCaptionsForSession
       // R2 B-H1: a resume's saved destinations are reconnect candidates, never
       // broadcasts this start may complete: no owner, no cleanup, success or not.
@@ -17073,6 +17248,19 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
         return Promise.resolve(false)
       }
 
+      // This start carries `sceneWithBackground` as this render holds it: a
+      // scene change asked for before its session.start answers waits.
+      let answerStartScene: () => void = () => undefined
+      const startScene = new Promise<void>((resolve) => {
+        answerStartScene = resolve
+      })
+      sessionStartScenePromiseRef.current = startScene
+      const releaseStartScene = (): void => {
+        if (sessionStartScenePromiseRef.current === startScene) {
+          sessionStartScenePromiseRef.current = null
+        }
+        answerStartScene()
+      }
       const startPromise = (async (): Promise<boolean> => {
         if (!client) {
           return false
@@ -17182,6 +17370,8 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
           // activations run against the show id, the way they run against a
           // session id; Stop completes them the same way.
           if (talkShowRoomOpenRef.current && streamingForStart) {
+            // No local session starts, so no scene is committed.
+            releaseStartScene()
             const talkStreaming = streamingForStart
             const cloudAfterGoLive = await startTalkShowLivestream(
               intent.record,
@@ -17381,6 +17571,9 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
               ? { sessionId: status.sessionId, ...startAudioSnapshot }
               : null
           applyRecordingStatus(status)
+          // The start's scene is committed and the session's state known: a
+          // scene change held for it now goes to the session it started.
+          releaseStartScene()
           if (
             startResolution.sessionActive &&
             streamingForStart &&
@@ -17505,6 +17698,8 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
         }
       }
       void startPromise.then(clearStartPromise, clearStartPromise)
+      // Every other way out (refused, failed, a talk show) answers the hold.
+      void startPromise.then(releaseStartScene, releaseStartScene)
       return startPromise
     },
     [
@@ -17538,6 +17733,14 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
     ]
   )
   runStartSessionRef.current = runStartSession
+  // A start held for a scene change's proof runs from the first render after
+  // the transaction ended, so it reads the scene the transaction left (a
+  // newer transaction awaiting proof keeps it waiting for that one).
+  useEffect(() => {
+    if (layoutIntentAwaitingProofRef.current !== null) return
+    const waiters = layoutProofWaitersRef.current.splice(0)
+    for (const resume of waiters) resume()
+  }, [layoutProofSettledTick])
 
   const prepareOauthTargetsForGoLive = useCallback(
     async (
@@ -19210,9 +19413,17 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
       // launch before Sources settle never turns clips off.
       return
     }
+    // A scene change awaiting its proof has not reached the Studio's scene
+    // yet, so a start now would commit the scene it is leaving. Its end
+    // reconciles the ring again.
+    if (layoutIntentAwaitingProofRef.current !== null) return
     replayStartInFlightRef.current = true
     replaySourcesMovedDuringStartRef.current = null
     let started = false
+    let answered: () => void = () => undefined
+    replayStartPromiseRef.current = new Promise<void>((resolve) => {
+      answered = resolve
+    })
     try {
       const replay = await import('@/lib/replay-buffer')
       const status = await replay.startBufferOnlySession({
@@ -19277,6 +19488,8 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
       }
     } finally {
       replayStartInFlightRef.current = false
+      replayStartPromiseRef.current = null
+      answered()
       const moved = replaySourcesMovedDuringStartRef.current
       replaySourcesMovedDuringStartRef.current = null
       if (started && moved !== null) restartReplayForSourcesRef.current(moved === 'visual')
@@ -19321,6 +19534,8 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
           stopPending: stopSessionInFlightPromiseRef.current !== null,
           replayStartInFlight:
             replayStartInFlightRef.current ||
+            // A scene change awaiting proof: its end reconciles again.
+            layoutIntentAwaitingProofRef.current !== null ||
             replayReconcileHoldRef.current ||
             replaySceneReloadsRef.current > 0 ||
             performanceCheckHoldRef.current,
@@ -20652,7 +20867,7 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
         registrar.sync(settingsRef.current.globalShortcuts ?? {})
       })
       .catch((error: unknown) => {
-        if (!disposed) reportError(error, { action: 'start', object: 'phone pairing' })
+        if (!disposed) reportUnasked(error, { action: 'turn on', object: 'global shortcuts' })
       })
     return () => {
       disposed = true
@@ -20661,7 +20876,7 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
         globalShortcutsRegistrarRef.current = null
       }
     }
-  }, [reportError])
+  }, [reportUnasked])
   globalShortcutsRegistrarRef.current?.sync(settings.globalShortcuts ?? {})
   const handleGlobalShortcut = useEffectEvent((action: GlobalShortcutAction) => {
     // Plan 203 S5: no global key records, goes live or switches a scene while
@@ -20801,6 +21016,7 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
       accountNeedsSignIn,
       cancelStopSession,
       firstRunSetupOpen,
+      setFirstRunSetupOpen,
       closeCommentsWindow,
       closeNotesWindow,
       commentsWindow.open,

@@ -3,6 +3,8 @@
 //
 //   steps: [...goLiveSteps({ destinationIds: ['youtube'] }), ...ownSteps, stopStreamStep()]
 
+import { labPictureProblem } from './linux-desktop.mjs'
+
 export const CARD_UP_DEADLINE_MS = 45_000
 
 export function cardUpStep() {
@@ -10,14 +12,21 @@ export function cardUpStep() {
     id: 'card-up',
     title: 'Test card',
     deadlineMs: CARD_UP_DEADLINE_MS,
-    run: (ctx) =>
-      ctx.waitFor(
+    async run(ctx) {
+      const pulse = await ctx.waitFor(
         () => {
-          const pulse = ctx.card.lastPulse()
-          return pulse ? { audioState: pulse.audioState, visible: pulse.visible } : null
+          const latest = ctx.card.lastPulse()
+          return latest ? { audioState: latest.audioState, visible: latest.visible } : null
         },
         { label: 'test card pulse' }
       )
+      // Plan 257 S0. The card's page pulsing proves its window runs, not that
+      // the lab output shows it: a lock screen or a dark output streams
+      // instead. On Linux one frame of the lab output must decode as the card.
+      if (!ctx.labPicture) return pulse
+      return { ...pulse, picture: await ctx.labPicture() }
+    },
+    expect: (evidence) => !evidence.picture || labPictureProblem(evidence.picture) || true
   }
 }
 
@@ -79,10 +88,15 @@ export function goLiveSteps({
       deadlineMs: 120_000,
       async run(ctx) {
         const confirmedAt = Date.now()
-        await ctx.ui.confirmGoLive()
+        // A non-Public YouTube Go Live asks "Go live unlisted?" first (#1316).
+        const { privacyConfirm } = await ctx.ui.confirmGoLive({ privacy: ctx.run.privacy })
+        if (privacyConfirm) {
+          ctx.log(`Go Live privacy step "${privacyConfirm.title}": ${privacyConfirm.answered}.`)
+        }
         const outcome = await ctx.ui.readGoLiveOutcome({ deadlineMs: 100_000 })
-        // Start latency for the verdict (plan 166 "Start latency" signal).
-        return { ...outcome, liveAfterMs: Date.now() - confirmedAt }
+        // Start latency for the verdict (plan 166 "Start latency" signal):
+        // from the Go live click, the privacy step included.
+        return { ...outcome, privacyConfirm, liveAfterMs: Date.now() - confirmedAt }
       },
       expect: (outcome) =>
         outcome.outcome === 'live' || `${outcome.outcome}: ${outcome.reason ?? ''}`

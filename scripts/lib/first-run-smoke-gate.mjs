@@ -11,6 +11,8 @@ export const FIRST_RUN_SMOKE_LIMITS = Object.freeze({
   toneFlipWithinMs: 250,
   lookSampleAtLeastMs: 30000,
   clipsWatchMs: 10000,
+  // The owner, 2026-11-22: no toast in the first minute after launch.
+  launchQuietWatchMs: 60000,
   // Plan 212's check took 6–50 s on the owner's Mac, depending on load (#973).
   performanceCheckSettleMs: 180000
 })
@@ -387,6 +389,36 @@ export function evaluateFirstRunSmokeStep(step, observation = {}) {
         'backend refused a session start'
       )
       break
+    case 'launch-quiet': {
+      // A returning user opens Videorc and touches nothing for a minute. What
+      // Videorc finds on its own (the owner's Mac at launch: overloaded, a
+      // silent microphone, a shortcut taken, the Cloud announcement) waits
+      // behind the bell; not one toast shows.
+      check(o.toastHook === true, 'the toast record is missing: nothing was read')
+      check(o.notificationHook === true, 'the notification hook is missing: nothing was read')
+      check(o.pressed === false, 'something pressed the window during the watch')
+      check(
+        o.watchMs >= FIRST_RUN_SMOKE_LIMITS.launchQuietWatchMs,
+        `the launch watch was shorter than ${FIRST_RUN_SMOKE_LIMITS.launchQuietWatchMs / 1000} s`
+      )
+      const early = (o.launchToasts ?? []).filter(
+        (toast) => toast.at < FIRST_RUN_SMOKE_LIMITS.launchQuietWatchMs
+      )
+      check(
+        early.length === 0,
+        `toasts in the first minute with no input: ${early
+          .map((toast) => `${Math.round(toast.at)} ms ${toast.kind} "${toast.title}"`)
+          .join('; ')}`
+      )
+      const keys = new Set((o.entries ?? []).map((entry) => entry.key))
+      const missing = (o.expectedKeys ?? []).filter((key) => !keys.has(key))
+      check(missing.length === 0, `not behind the bell: ${missing.join(', ')}`)
+      check(
+        (o.expectedKeys ?? []).length === 0 || o.bellCount > 0,
+        'the bell does not count what waited behind it'
+      )
+      break
+    }
     case 'destinations':
       check(o.cardStep === 'destinations' && o.position === '5/5', 'streaming step is missing')
       check(

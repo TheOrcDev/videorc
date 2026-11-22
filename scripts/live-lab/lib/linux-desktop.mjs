@@ -1,8 +1,10 @@
 import { execFile } from 'node:child_process'
-import { readdir, stat } from 'node:fs/promises'
-import { homedir } from 'node:os'
+import { readFile, readdir, stat } from 'node:fs/promises'
+import { homedir, userInfo } from 'node:os'
 import { delimiter, join } from 'node:path'
 import { promisify } from 'node:util'
+
+import { decodeMarkers } from './card-markers.mjs'
 
 // Plan 179. The Linux lab's desktop: a Hyprland session (Omarchy on ogre)
 // with a headless output as the lab display, xdg-desktop-portal-hyprland for
@@ -388,3 +390,273 @@ export const CHROME_NAMES = Object.freeze([
   'chromium',
   'chromium-browser'
 ])
+
+// ---------------------------------------------------------------------------
+// Plan 257 S0. A locked session draws its lock screen on every output, the
+// lab output included, so a run under a lock streams the lock screen as if it
+// were the test card. The lock is read from the compositor and logind, not
+// from a process name: ogre's locker is omarchy-shell (quickshell holding
+// ext-session-lock), which also draws the bar and so runs all the time.
+
+// Lockers whose only job is the lock: one running means a lock is held. Used
+// only when neither Hyprland nor logind can say.
+export const LOCKER_COMMANDS = Object.freeze(['hyprlock', 'swaylock', 'gtklock', 'waylock'])
+// Shells that hold the lock among other jobs (omarchy-shell is quickshell):
+// they only name the locker of a lock Hyprland or logind reported.
+const SHELL_LOCKERS = Object.freeze({ quickshell: 'omarchy-shell (quickshell)', qs: 'quickshell' })
+
+/** `hyprctl -j locked` (Hyprland 0.56+): true, false, or null when unknown (pure). */
+export function parseHyprlandLocked(text) {
+  const body = String(text ?? '').trim()
+  try {
+    const parsed = JSON.parse(body)
+    if (typeof parsed === 'boolean') return parsed
+    return typeof parsed?.locked === 'boolean' ? parsed.locked : null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * The lock as `hyprctl -j monitors` shows it (pure): an ext-session-lock puts
+ * LOCK in a monitor's solitaryBlockedBy. Hyprland stops at the first reason on
+ * a monitor with no workspace yet, so only monitors without WORKSPACE there
+ * can say "unlocked". Same rule as Omarchy's omarchy-hyprland-session-locked.
+ */
+export function monitorsShowLock(monitors) {
+  const all = Array.isArray(monitors) ? monitors : []
+  const blockers = (entry) =>
+    Array.isArray(entry?.solitaryBlockedBy) ? entry.solitaryBlockedBy : null
+  if (all.some((entry) => blockers(entry)?.includes('LOCK'))) return true
+  if (all.some((entry) => blockers(entry) && !blockers(entry).includes('WORKSPACE'))) return false
+  return null
+}
+
+/** `loginctl show-session <id> -p LockedHint --value`: true, false or null (pure). */
+export function parseLockedHint(text) {
+  const value = String(text ?? '')
+    .trim()
+    .replace(/^LockedHint=/, '')
+  return value === 'yes' ? true : value === 'no' ? false : null
+}
+
+/**
+ * Combines the lock signals (pure). `hyprland` (the `locked` request),
+ * `monitors` (solitaryBlockedBy) and `logind` (LockedHint) are true, false or
+ * null; `running` is a Set of process names. Any signal saying locked wins:
+ * omarchy-shell never sets LockedHint, so logind says "no" under its lock.
+ * Returns { locked: true | false | null, sources, locker, detail }.
+ */
+export function judgeSessionLock({ hyprland = null, monitors = null, logind = null, running }) {
+  const names = running instanceof Set ? running : new Set(running ?? [])
+  const signals = { hyprland, monitors, logind }
+  const said = Object.entries(signals).filter(([, value]) => value !== null)
+  const lockedBy = said.filter(([, value]) => value === true).map(([name]) => name)
+  const locker =
+    LOCKER_COMMANDS.find((name) => names.has(name)) ??
+    Object.entries(SHELL_LOCKERS).find(([name]) => names.has(name))?.[1] ??
+    null
+  const sources = said.map(([name, value]) => `${name}=${value ? 'locked' : 'unlocked'}`)
+  if (lockedBy.length) {
+    return {
+      locked: true,
+      sources,
+      locker,
+      detail: `The session is locked (${lockedBy.join(', ')}${locker ? `; locker: ${locker}` : ''}).`
+    }
+  }
+  if (said.length) {
+    return { locked: false, sources, locker, detail: `unlocked (${sources.join(', ')})` }
+  }
+  const dedicated = LOCKER_COMMANDS.find((name) => names.has(name))
+  if (dedicated) {
+    return {
+      locked: true,
+      sources: [`process=${dedicated}`],
+      locker: dedicated,
+      detail: `The session is likely locked: ${dedicated} runs, and neither Hyprland nor logind could say.`
+    }
+  }
+  return {
+    locked: null,
+    sources: [],
+    locker,
+    detail:
+      'Could not read the session lock (no hyprctl locked, no LOCK blocker, no logind LockedHint).'
+  }
+}
+
+/** Names of running processes, from /proc/<pid>/comm. Read-only. */
+export async function runningCommands({
+  listDir = (path) => readdir(path),
+  readComm = (pid) => readFile(`/proc/${pid}/comm`, 'utf8')
+} = {}) {
+  const names = new Set()
+  const entries = await listDir('/proc').catch(() => [])
+  for (const entry of entries) {
+    if (!/^\d+$/.test(entry)) continue
+    const comm = String(await readComm(entry).catch(() => '')).trim()
+    if (comm) names.add(comm)
+  }
+  return names
+}
+
+/** The graphical session's id for `user`: `loginctl show-user -p Display`. */
+async function displaySessionId(user, exec) {
+  const shown = await exec('loginctl', ['show-user', user, '-p', 'Display', '--value'])
+  const id = shown.code === 0 ? shown.stdout.trim() : ''
+  return /^[A-Za-z0-9_-]+$/.test(id) ? id : null
+}
+
+/** Reads every lock signal and judges them (judgeSessionLock). */
+export async function readSessionLock({
+  sessionEnv,
+  exec = defaultExec,
+  user = userInfo().username,
+  running = runningCommands
+} = {}) {
+  const env = { env: { ...process.env, ...sessionEnv } }
+  const hyprlandRead = exec('hyprctl', ['-j', 'locked'], env).then((result) =>
+    result.code === 0 ? parseHyprlandLocked(result.stdout) : null
+  )
+  const monitorsRead = hyprctlJson(['monitors'], { sessionEnv, exec }).then(
+    monitorsShowLock,
+    () => null
+  )
+  const logindRead = displaySessionId(user, exec).then(async (id) => {
+    if (!id) return null
+    const shown = await exec('loginctl', ['show-session', id, '-p', 'LockedHint', '--value'])
+    return shown.code === 0 ? parseLockedHint(shown.stdout) : null
+  })
+  const [hyprland, monitors, logind, names] = await Promise.all([
+    hyprlandRead,
+    monitorsRead,
+    logindRead,
+    running()
+  ])
+  return judgeSessionLock({ hyprland, monitors, logind, running: names })
+}
+
+/** A binary PPM (P6, maxval 255) into { width, height, channels: 3, pixels } (pure). */
+export function parsePpm(buffer) {
+  const bytes = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer ?? [])
+  const fields = []
+  let index = 0
+  while (fields.length < 4 && index < bytes.length) {
+    const char = bytes[index]
+    if (char === 0x23) {
+      while (index < bytes.length && bytes[index] !== 0x0a) index += 1
+    } else if (char === 0x20 || char === 0x09 || char === 0x0a || char === 0x0d) {
+      index += 1
+    } else {
+      let token = ''
+      while (index < bytes.length && bytes[index] > 0x20)
+        token += String.fromCharCode(bytes[index++])
+      fields.push(token)
+    }
+  }
+  const [magic, width, height, maxval] = [
+    fields[0],
+    Number(fields[1]),
+    Number(fields[2]),
+    Number(fields[3])
+  ]
+  if (magic !== 'P6') throw new Error(`not a binary PPM (magic ${magic ?? 'none'})`)
+  if (!(width > 0 && height > 0) || maxval !== 255) {
+    throw new Error(`unsupported PPM header ${fields.join(' ')}`)
+  }
+  const pixels = bytes.subarray(index + 1, index + 1 + width * height * 3)
+  if (pixels.length < width * height * 3) {
+    throw new Error(`PPM holds ${pixels.length} pixel bytes, expected ${width * height * 3}`)
+  }
+  return { width, height, channels: 3, pixels }
+}
+
+// A frame whose brightest sampled pixel stays under this is black: the output
+// is off (DPMS) or nothing is drawn. The card always has white markers.
+export const BLACK_MAX_LUMA = 24
+
+function maxLuma({ width, height, channels, pixels }) {
+  let max = 0
+  for (let y = 0; y < height; y += 4) {
+    for (let x = 0; x < width; x += 4) {
+      const offset = (y * width + x) * channels
+      const value = 0.299 * pixels[offset] + 0.587 * pixels[offset + 1] + 0.114 * pixels[offset + 2]
+      if (value > max) max = value
+    }
+  }
+  return Math.round(max)
+}
+
+/**
+ * What one frame of the lab output shows (pure): 'card' when the card's
+ * markers decode, 'black' when the frame is black, else 'not-card' (a lock
+ * screen, a desktop, another window). The card fills the lab output, so the
+ * whole frame is the card rect.
+ */
+export function judgeLabPicture(frame, { spec } = {}) {
+  const decoded = decodeMarkers(frame.pixels, frame.width, frame.height, {
+    channels: frame.channels,
+    ...(spec ? { spec } : {})
+  })
+  const brightest = maxLuma(frame)
+  const shows = decoded.ok ? 'card' : brightest < BLACK_MAX_LUMA ? 'black' : 'not-card'
+  return {
+    shows,
+    width: frame.width,
+    height: frame.height,
+    meanLuma: decoded.meanLuma,
+    maxLuma: brightest,
+    sceneId: decoded.sceneId,
+    step: decoded.step,
+    errors: decoded.ok ? [] : decoded.errors.slice(0, 3)
+  }
+}
+
+/** One frame of `outputName` from grim, as PPM bytes. */
+export async function grabOutputPpm(outputName, { sessionEnv, timeoutMs = 15_000 } = {}) {
+  const { stdout } = await execFileAsync('grim', ['-t', 'ppm', '-o', outputName, '-'], {
+    env: { ...process.env, ...sessionEnv },
+    encoding: 'buffer',
+    timeout: timeoutMs,
+    maxBuffer: 128 * 1024 * 1024
+  })
+  return stdout
+}
+
+/**
+ * Grabs one frame of the lab output and says what it shows; when it is not
+ * the card, also reads the session lock so the failure names the cause.
+ * Returns judgeLabPicture's answer plus { lock } (or { shows: 'unreadable' }).
+ */
+export async function checkLabPicture({
+  outputName,
+  sessionEnv,
+  grab = grabOutputPpm,
+  readLock = () => readSessionLock({ sessionEnv })
+}) {
+  let picture
+  try {
+    picture = judgeLabPicture(parsePpm(await grab(outputName, { sessionEnv })))
+  } catch (error) {
+    picture = { shows: 'unreadable', error: error.message }
+  }
+  if (picture.shows === 'card') return { ...picture, output: outputName }
+  const lock = await readLock().catch((error) => ({ locked: null, detail: error.message }))
+  return { ...picture, output: outputName, lock: { locked: lock.locked, detail: lock.detail } }
+}
+
+/** Why a lab picture is not the card, in words for a step failure (pure). */
+export function labPictureProblem(picture) {
+  if (!picture || picture.shows === 'card') return null
+  const where = `the lab output "${picture.output}"`
+  if (picture.lock?.locked === true) {
+    const seen = picture.shows === 'black' ? 'is black' : 'shows the lock screen, not the test card'
+    return `${where} ${seen}: ${picture.lock.detail} The lab refuses to run under a lock (plan 257 D12); unlock at the console.`
+  }
+  if (picture.shows === 'black') {
+    return `${where} is black (brightest pixel luma ${picture.maxLuma}): the output is off (DPMS) or nothing is drawn on it.`
+  }
+  if (picture.shows === 'unreadable') return `could not grab ${where}: ${picture.error}`
+  return `${where} does not show the test card (markers: ${picture.errors.join('; ') || 'none decoded'}).`
+}

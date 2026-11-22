@@ -22,6 +22,11 @@ export function parseWindowsNativeScreenArgs(argv = []) {
   // screen moved off its preset place, so a moved source proves the D3D11
   // path and its placement from the first frame. Combines with --background.
   const sceneEdit = takeFlag(values, '--scene-edit')
+  // #173: stream to a loopback RTMP sink as well (split: record the session
+  // profile and stream --stream-preset beside it) or instead (stream-only:
+  // the session streams --stream-preset alone).
+  const stream = takeOption(values, '--stream')
+  const streamPreset = takeOption(values, '--stream-preset')
   if (values.length > 0) {
     throw new Error(`Unknown Windows native-screen argument: ${values[0]}`)
   }
@@ -34,12 +39,87 @@ export function parseWindowsNativeScreenArgs(argv = []) {
   if (expectFallback === 'natural' && (d3d11 || requireD3d11)) {
     throw new Error('--expect-fallback natural cannot be combined with an explicit D3D11 path.')
   }
+  if (stream !== undefined && !WINDOWS_NATIVE_SCREEN_STREAM_MODES.includes(stream)) {
+    throw new Error(
+      `--stream must be ${WINDOWS_NATIVE_SCREEN_STREAM_MODES.join(' or ')}; received ${stream}.`
+    )
+  }
+  if (streamPreset !== undefined && stream === undefined) {
+    throw new Error('--stream-preset requires --stream.')
+  }
+  if (streamPreset !== undefined && !(streamPreset in WINDOWS_NATIVE_SCREEN_STREAM_PRESETS)) {
+    throw new Error(
+      `--stream-preset must be one of ${Object.keys(WINDOWS_NATIVE_SCREEN_STREAM_PRESETS).join(', ')}; received ${streamPreset}.`
+    )
+  }
   return {
     d3d11,
     requireD3d11,
     expectFallback: expectFallback ?? null,
     background,
-    sceneEdit
+    sceneEdit,
+    stream: stream ?? null,
+    streamPreset: stream === undefined ? null : (streamPreset ?? 'stream-safe-1080p30')
+  }
+}
+
+export const WINDOWS_NATIVE_SCREEN_STREAM_MODES = Object.freeze(['split', 'stream-only'])
+
+/**
+ * #173: the stream profiles a native-screen run can send to its loopback
+ * sink, as the backend's presets define them. Only the YouTube 4K30 profile
+ * may stream past 1080p, and only to a YouTube destination, so the sink is
+ * always registered as one.
+ */
+export const WINDOWS_NATIVE_SCREEN_STREAM_PRESETS = Object.freeze({
+  'stream-safe-1080p30': Object.freeze({
+    preset: 'stream-safe-1080p30',
+    width: 1920,
+    height: 1080,
+    fps: 30,
+    bitrateKbps: 6000
+  }),
+  'stream-safe-1080p60': Object.freeze({
+    preset: 'stream-safe-1080p60',
+    width: 1920,
+    height: 1080,
+    fps: 60,
+    bitrateKbps: 6000
+  }),
+  'stream-youtube-4k30': Object.freeze({
+    preset: 'stream-youtube-4k30',
+    width: 3840,
+    height: 2160,
+    fps: 30,
+    bitrateKbps: 30000
+  })
+})
+
+/**
+ * #173: what a native-screen run asks the session for. Without --stream it
+ * records `video`. Split records `video` and streams the preset beside it;
+ * stream-only streams the preset as the session profile and records nothing.
+ */
+export function windowsNativeScreenOutputPlan({ stream = null, streamPreset = null, video }) {
+  if (stream === null) {
+    return { outputMode: 'record', recordEnabled: true, sessionVideo: video, streamVideo: null }
+  }
+  const streamVideo = WINDOWS_NATIVE_SCREEN_STREAM_PRESETS[streamPreset]
+  if (!streamVideo) throw new Error(`Unknown stream preset ${streamPreset}.`)
+  if (stream === 'stream-only') {
+    return {
+      outputMode: 'stream',
+      recordEnabled: false,
+      sessionVideo: { ...streamVideo },
+      streamVideo: { ...streamVideo }
+    }
+  }
+  if (stream !== 'split') throw new Error(`Unknown stream mode ${stream}.`)
+  return {
+    outputMode: 'record+stream',
+    recordEnabled: true,
+    sessionVideo: video,
+    streamVideo: { ...streamVideo }
   }
 }
 
@@ -251,14 +331,21 @@ export function windowsNativeScreenPerformanceBudgetContext({
   }
 }
 
-export function nativeWindowsScreenRecordingActive(evidence, sourceId) {
+export function nativeWindowsScreenRecordingActive(
+  evidence,
+  sourceId,
+  { outputMode = 'record' } = {}
+) {
   const { diagnostics, compositor, recording } = evidence ?? {}
   const sourceEntry = diagnostics?.sourceRegistry?.entries?.find(
     (entry) => entry?.key?.kind === 'screen' && entry?.key?.id === sourceId
   )
+  // A session that streams reports either live state; one that only
+  // records is `recording`.
+  const liveStates = outputMode === 'record' ? ['recording'] : ['recording', 'streaming']
   return (
-    diagnostics?.activeOutputMode === 'record' &&
-    recording?.state === 'recording' &&
+    diagnostics?.activeOutputMode === outputMode &&
+    liveStates.includes(recording?.state) &&
     (nativeWindowsCompositorUsesScreen(compositor, sourceId) ||
       nativeWindowsD3d11MediaEncodingActive(diagnostics)) &&
     sourceEntry?.status === 'live'

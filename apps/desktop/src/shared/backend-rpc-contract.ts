@@ -12,7 +12,7 @@ import {
   cloudMarkerSchema,
   cloudMarkerLookupSchema
 } from './cloud-markers'
-import { parseGraphicsSource, type GraphicsSource } from './cloud-graphics'
+import { readGraphicsSource, type GraphicsSource } from './cloud-graphics'
 import { parseManagedOutputProfile } from './cloud-output-profile'
 import type {
   CloudArchiveView,
@@ -302,6 +302,8 @@ import {
   BANNER_OPACITY_MIN,
   HTML_OVERLAY_MAX_FPS,
   HTML_OVERLAY_MAX_TARGETS,
+  CAMERA_BACKGROUND_EDGES,
+  CAMERA_BACKGROUND_MODES,
   LAYOUT_PRESET_VALUES,
   SOUND_HOTKEYS,
   SOUND_LEVEL_DB_MAX,
@@ -639,7 +641,12 @@ export interface BackendRpcMethodMap {
   'cloud.room.token.refresh': BackendRpcDefinition<undefined, CloudRoomTokenAnswer>
   /** Renderer-only bounded raster source for the explicitly enabled public output. */
   'cloud.graphics.snapshot': BackendRpcDefinition<
-    { showId: string; known?: string },
+    {
+      showId: string
+      known?: string
+      /** PH-05: hashes of the pictures held from the last answer; those come back without `png`. */
+      held?: string[]
+    },
     GraphicsSource
   >
   /**
@@ -2166,6 +2173,38 @@ const layoutSchema = objectSchema(
         { allowUnknown: false }
       )
     ),
+    cameraBackground: optionalSchema(
+      objectSchema(
+        {
+          mode: enumSchema(CAMERA_BACKGROUND_MODES),
+          blurPct: numberSchema({ integer: true, min: 0, max: 100 }),
+          edges: enumSchema(CAMERA_BACKGROUND_EDGES),
+          assetId: optionalSchema(stringSchema({ minLength: 1, maxLength: 256 })),
+          key: optionalSchema(
+            objectSchema(
+              {
+                similarityPct: numberSchema({ integer: true, min: 0, max: 100 }),
+                smoothnessPct: numberSchema({ integer: true, min: 0, max: 100 }),
+                spillPct: numberSchema({ integer: true, min: 0, max: 100 }),
+                hideEdges: optionalSchema(
+                  objectSchema(
+                    {
+                      leftPct: numberSchema({ integer: true, min: 0, max: 25 }),
+                      topPct: numberSchema({ integer: true, min: 0, max: 25 }),
+                      rightPct: numberSchema({ integer: true, min: 0, max: 25 }),
+                      bottomPct: numberSchema({ integer: true, min: 0, max: 25 })
+                    },
+                    { allowUnknown: false }
+                  )
+                )
+              },
+              { allowUnknown: false }
+            )
+          )
+        },
+        { allowUnknown: false }
+      )
+    ),
     cameraChromaKeyEnabled: booleanSchema,
     cameraChromaKeyColor: stringSchema({ minLength: 1, maxLength: 16 }),
     cameraChromaKeySimilarityPct: numberSchema({ min: 0, max: 100 }),
@@ -2681,6 +2720,32 @@ const previewCameraStatusSchema = boundedSemanticValue(
       droppedFrames: nonNegativeInteger,
       frameAgeMs: optionalSchema(nonNegativeInteger),
       noVideo: optionalSchema(booleanSchema),
+      // Plan 258 S4: strict, so a renamed Rust field fails here, not in the Studio.
+      systemEffect: optionalSchema(
+        objectSchema({
+          provider: enumSchema(['macos-video-effects', 'windows-studio-effects']),
+          backgroundBlur: booleanSchema,
+          backgroundReplacement: booleanSchema,
+          studioLight: booleanSchema,
+          turnedOffByVideorc: booleanSchema
+        })
+      ),
+      // Plan 258 S3: strict, like systemEffect.
+      cameraBackground: optionalSchema(
+        objectSchema({
+          mode: enumSchema(['off', 'blur', 'image', 'video', 'cutout', 'green', 'blue']),
+          state: enumSchema(['running', 'cover', 'unavailable']),
+          maskAgeMs: optionalSchema(nonNegativeInteger),
+          segmentMsP95: optionalSchema(numberSchema({ min: 0 })),
+          composeMsP95: optionalSchema(numberSchema({ min: 0 })),
+          composeGpuMsP95: optionalSchema(numberSchema({ min: 0 })),
+          processedFrames: nonNegativeInteger,
+          coverFrames: nonNegativeInteger,
+          coverForMs: optionalSchema(nonNegativeInteger),
+          coverAfterMaskAgeMs: optionalSchema(nonNegativeInteger),
+          message: optionalSchema(stringSchema({ maxLength: 2000 }))
+        })
+      ),
       updatedAt: timestamp
     },
     { allowUnknown: true }
@@ -7655,12 +7720,15 @@ const runtimeContracts = {
     params: objectSchema(
       {
         showId: stringSchema({ minLength: 1, maxLength: 128 }),
-        known: optionalSchema(stringSchema({ maxLength: 64 }))
+        known: optionalSchema(stringSchema({ maxLength: 64 })),
+        held: optionalSchema(
+          arraySchema(stringSchema({ minLength: 64, maxLength: 64 }), { maxLength: 32 })
+        )
       },
       { allowUnknown: false }
     ),
     result: runtimeSchema('a bounded public graphics snapshot', (value, path) => {
-      const result = parseGraphicsSource(value)
+      const result = readGraphicsSource(value)
       if (!result) throw new RuntimeSchemaError(path, 'a public graphics snapshot')
       return result
     })
