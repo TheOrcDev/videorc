@@ -363,6 +363,17 @@ describe('popUpDecision at launch (the owner, 2026-11-22: no toasts when you ope
     )
   })
 
+  it('an urgent problem at launch still pops up once per episode', () => {
+    const again = launch({
+      tone: 'urgent',
+      live: true,
+      pressed: true,
+      change: 'escalated',
+      lastPop: { at: 1_000_000 - 2_000, tone: 'urgent' }
+    })
+    expect(popUpDecision(again)).toBeNull()
+  })
+
   it('a startup check stays behind the bell even after a press', () => {
     expect(popUpDecision(launch({ tone: 'warning', pressed: true }))).toBeNull()
     expect(popUpDecision(launch({ tone: 'done', pressed: true }))).toBeNull()

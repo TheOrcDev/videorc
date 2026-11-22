@@ -192,6 +192,21 @@ export function publishCaptionsProblem(
   })
 }
 
+/** The session's output cannot carry caption pixels, so captions did not start. */
+export function publishCaptionsOutputUnsupported(
+  description: string | undefined,
+  store: NotificationStore = notifications
+): void {
+  publishCaptionsProblem(
+    {
+      title: "Live captions can't start in this session",
+      description: description ?? "The active output configuration can't carry caption pixels."
+    },
+    undefined,
+    store
+  )
+}
+
 /** The captions' own start failed: its words, recorded for support, with Retry. */
 export function publishCaptionsStartFailure(
   error: unknown,

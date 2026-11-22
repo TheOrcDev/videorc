@@ -13737,8 +13737,10 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
         visible: previewWindow.visible
       }
       previewWindowSurfaceActiveRef.current = true
+      // The Preview window's surface follows the window on its own (and is
+      // restored at launch): a failure is an entry, never a toast.
       void syncNativePreviewSurfaceBounds(bounds, previewWindow.supervisor.generation).catch(
-        reportError
+        reportUnasked
       )
       return
     }
@@ -13749,7 +13751,7 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
   }, [
     nativePreviewSurfaceEnabled,
     previewWindow,
-    reportError,
+    reportUnasked,
     runtimeInfo?.disableAutoPreview,
     syncFramePollingSuppression,
     syncNativePreviewSurfaceBounds,
@@ -14991,7 +14993,9 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
               : requestError
                 ? ` ${String(requestError)}`
                 : ''
-          reportError(new Error(`${rejection.message}${detail}`))
+          // The sync runs on its own (a session's start, the Clips ring at
+          // launch too): a refusal is an entry behind the bell.
+          reportUnasked(new Error(`${rejection.message}${detail}`))
           return !rejection.disableForSession
         }
       )
@@ -15079,7 +15083,7 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
     systemAudioRetry,
     commitLiveAudioProcessingApplied,
     failLiveMicrophoneWaiters,
-    reportError,
+    reportUnasked,
     runtimeInfo?.windowsLiveAudioSmokeMode,
     startRequestPending,
     stopRequestPending,
@@ -15167,12 +15171,7 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
         // Captions start on their own with a session (the Clips ring at
         // launch too): an entry behind the bell, never a toast.
         withAppNotifications((app) =>
-          app.publishCaptionsProblem({
-            title: "Live captions can't start in this session",
-            description:
-              captionOutputReadiness.description ??
-              "The active output configuration can't carry caption pixels."
-          })
+          app.publishCaptionsOutputUnsupported(captionOutputReadiness.description)
         )
         return
       }

@@ -260,6 +260,26 @@ const EFFECT_HOOK = /^(?:React\.)?(?:useEffect|useLayoutEffect|useInsertionEffec
 const EVENT_SUBSCRIPTION = /(?:\.on|\.once|\.subscribe|\.addEventListener|\.videorc\.on[A-Z]\w*)$/
 const TIMER = /^(?:window\.)?(?:setTimeout|setInterval|requestAnimationFrame|queueMicrotask)$/
 
+/** A function, or a hook that wraps one (`useCallback(() => …)`). */
+function isFunctionLike(node: ts.Node): boolean {
+  if (ts.isArrowFunction(node) || ts.isFunctionExpression(node)) return true
+  return (
+    ts.isCallExpression(node) &&
+    node.arguments.some(
+      (argument) => ts.isArrowFunction(argument) || ts.isFunctionExpression(argument)
+    )
+  )
+}
+
+/** The callee shows a toast, also behind `(pressed ? reportError : reportUnasked)(…)`. */
+function isToastCallee(callee: ts.Expression, file: ts.SourceFile): boolean {
+  if (ts.isParenthesizedExpression(callee)) return isToastCallee(callee.expression, file)
+  if (ts.isConditionalExpression(callee)) {
+    return isToastCallee(callee.whenTrue, file) || isToastCallee(callee.whenFalse, file)
+  }
+  return TOAST_SITE_CALLEE.test(callee.getText(file))
+}
+
 /** What runs the code with no press: the innermost effect, event or timer around it. */
 type Unasked = 'effect' | 'event' | 'timer'
 
@@ -283,8 +303,13 @@ function siteOwner(node: ts.Node, file: ts.SourceFile): { name: string; unasked:
       return { name: at.name.getText(file), unasked }
     }
     if (ts.isVariableDeclaration(at) || ts.isPropertyAssignment(at) || ts.isJsxAttribute(at)) {
-      const { initializer } = at
-      if (initializer && initializer.pos <= node.pos && node.end <= initializer.end) {
+      const value =
+        at.initializer && ts.isJsxExpression(at.initializer)
+          ? at.initializer.expression
+          : at.initializer
+      // Only a function names the site (a handler, a callback); a value such
+      // as `const id = toast.loading(…)` runs where it stands.
+      if (value && isFunctionLike(value) && value.pos <= node.pos && node.end <= value.end) {
         return { name: at.name.getText(file), unasked }
       }
     }
@@ -309,7 +334,7 @@ function toastSites(path: string, source: string): ToastSite[] {
   )
   const found: ToastSite[] = []
   const visit = (node: ts.Node): void => {
-    if (ts.isCallExpression(node) && TOAST_SITE_CALLEE.test(node.expression.getText(file))) {
+    if (ts.isCallExpression(node) && isToastCallee(node.expression, file)) {
       const { line } = file.getLineAndCharacterOfPosition(node.getStart(file))
       const owner = siteOwner(node, file)
       found.push({ path, line: line + 1, owner: owner.name, unasked: owner.unasked })
@@ -332,12 +357,12 @@ function siteKey(site: ToastSite): string {
  * own is published to the notification store instead.
  */
 const TOAST_SITES: Record<string, number> = {
-  'comments/main.tsx > action': 1,
+  'comments/main.tsx > CommentsWindowApp': 1,
+  'comments/main.tsx > action': 2,
   'comments/main.tsx > answerBuddyConsent': 1,
   'comments/main.tsx > answerCommand': 1,
   'comments/main.tsx > answerRemoval': 1,
-  'comments/main.tsx > onClear': 1,
-  'comments/main.tsx > onMarkClip': 1,
+  'comments/main.tsx > onMarkClip': 2,
   'comments/main.tsx > onReconnectScopes': 2,
   'comments/main.tsx > onShowFollowNames': 2,
   'comments/main.tsx > openBuddyChatSettings': 1,
@@ -363,10 +388,9 @@ const TOAST_SITES: Record<string, number> = {
   'src/components/clean-cut/clean-cut-card.tsx > startCut': 1,
   'src/components/command-palette.tsx > onSelect': 1,
   'src/components/community/community-tab.tsx > answer': 1,
-  'src/components/community/community-tab.tsx > exportCommunity': 2,
-  'src/components/community/community-tab.tsx > importCommunity': 2,
+  'src/components/community/community-tab.tsx > exportCommunity': 3,
+  'src/components/community/community-tab.tsx > importCommunity': 3,
   'src/components/community/community-tab.tsx > onConfirm': 1,
-  'src/components/community/community-tab.tsx > picked': 2,
   'src/components/community/community-tab.tsx > save': 1,
   'src/components/community/person-card-body.tsx > onClick': 1,
   'src/components/community/person-card-body.tsx > run': 1,
@@ -382,11 +406,11 @@ const TOAST_SITES: Record<string, number> = {
   'src/components/settings/agents-section.tsx > onAgentChange': 1,
   'src/components/settings/agents-section.tsx > run': 1,
   'src/components/stream-manager/person-card-host.tsx > onConfirm': 2,
+  'src/components/stream-manager/stream-manager.tsx > StreamManager': 1,
   'src/components/stream-manager/stream-manager.tsx > StreamManager (effect)': 3,
   'src/components/stream-manager/stream-manager.tsx > markAsBot': 2,
   'src/components/stream-manager/stream-manager.tsx > onClick': 1,
   'src/components/stream-manager/stream-manager.tsx > onUndo': 1,
-  'src/components/stream-manager/stream-manager.tsx > onWelcomeBackWave': 1,
   'src/components/streaming/stream-report-email-section.tsx > onEnabledChange': 1,
   'src/components/streaming/stream-report-email-section.tsx > onHistoryChange': 1,
   'src/components/streaming/watchdog-section.tsx > patch': 1,
@@ -407,25 +431,25 @@ const TOAST_SITES: Record<string, number> = {
   'src/components/tabs/library-tab.tsx > runNoiseCleanupAction': 2,
   'src/components/tabs/library-tab.tsx > runRepair': 5,
   'src/components/tabs/library-tab.tsx > runRestore': 3,
+  'src/components/tabs/recording-tab.tsx > chooseFolder': 1,
   'src/components/tabs/recording-tab.tsx > onChange': 1,
-  'src/components/tabs/recording-tab.tsx > selection': 1,
   'src/hooks/use-camera-low-light.ts > setCompensation': 1,
   'src/hooks/use-scenes.ts > rename': 1,
   'src/hooks/use-scenes.ts > write': 1,
   'src/hooks/use-screen-privacy.ts > turn': 1,
   'src/hooks/use-studio.tsx > StudioProviderReady (effect)': 2,
+  'src/hooks/use-studio.tsx > StudioProviderReady (event)': 3,
   'src/hooks/use-studio.tsx > activateScreen': 3,
   'src/hooks/use-studio.tsx > apply': 1,
   'src/hooks/use-studio.tsx > applyDevice': 1,
   'src/hooks/use-studio.tsx > applySavedSceneResult': 8,
-  'src/hooks/use-studio.tsx > applySceneInRoom': 1,
+  'src/hooks/use-studio.tsx > applySceneInRoom': 2,
   'src/hooks/use-studio.tsx > applyVideoPreset': 1,
   'src/hooks/use-studio.tsx > authorizeXLive': 2,
   'src/hooks/use-studio.tsx > beginRemoteLanPairing': 1,
   'src/hooks/use-studio.tsx > clearActiveScreen': 3,
   'src/hooks/use-studio.tsx > commitSceneIdle': 1,
   'src/hooks/use-studio.tsx > completeAccountSignIn': 1,
-  'src/hooks/use-studio.tsx > confirmationPromise': 1,
   'src/hooks/use-studio.tsx > connectPlatformAccount': 2,
   'src/hooks/use-studio.tsx > deleteBanner': 1,
   'src/hooks/use-studio.tsx > deleteSavedScene': 2,
@@ -447,9 +471,10 @@ const TOAST_SITES: Record<string, number> = {
   'src/hooks/use-studio.tsx > openSessionCommentsWindow': 2,
   'src/hooks/use-studio.tsx > openSystemPermissionSettings': 1,
   'src/hooks/use-studio.tsx > persistWorkingVisual': 1,
-  'src/hooks/use-studio.tsx > queue': 1,
   'src/hooks/use-studio.tsx > refreshBackend': 2,
   'src/hooks/use-studio.tsx > refreshDevices': 1,
+  'src/hooks/use-studio.tsx > refreshPreview': 1,
+  'src/hooks/use-studio.tsx > refreshYouTubeChannels': 1,
   'src/hooks/use-studio.tsx > refuseStart': 2,
   'src/hooks/use-studio.tsx > remoteControlRequest': 1,
   'src/hooks/use-studio.tsx > remoteLanRequest': 1,
@@ -470,8 +495,9 @@ const TOAST_SITES: Record<string, number> = {
   'src/hooks/use-studio.tsx > revalidateGoLive': 1,
   'src/hooks/use-studio.tsx > revealPermissionTarget': 1,
   'src/hooks/use-studio.tsx > runBannerCommand': 1,
-  'src/hooks/use-studio.tsx > runGoLiveConfirmation': 1,
+  'src/hooks/use-studio.tsx > runGoLiveConfirmation': 2,
   'src/hooks/use-studio.tsx > runPerformanceCheck': 1,
+  'src/hooks/use-studio.tsx > runStartSession': 1,
   'src/hooks/use-studio.tsx > sampleAudioMeter': 2,
   'src/hooks/use-studio.tsx > save': 1,
   'src/hooks/use-studio.tsx > saveManualStreamKey': 2,
@@ -488,17 +514,15 @@ const TOAST_SITES: Record<string, number> = {
   'src/hooks/use-studio.tsx > settleRetainedPreparedPlatformLifecycles': 3,
   'src/hooks/use-studio.tsx > signOutAccount': 1,
   'src/hooks/use-studio.tsx > startOnReadyDestinations': 2,
-  'src/hooks/use-studio.tsx > startPromise': 1,
   'src/hooks/use-studio.tsx > startWithIntent': 1,
-  'src/hooks/use-studio.tsx > stopPromise': 2,
   'src/hooks/use-studio.tsx > stopReplayBuffer': 1,
+  'src/hooks/use-studio.tsx > stopSession': 2,
   'src/hooks/use-studio.tsx > switchScene': 1,
   'src/hooks/use-studio.tsx > switchSourceDeviceLive': 2,
   'src/hooks/use-studio.tsx > talkShowError': 1,
   'src/hooks/use-studio.tsx > undoLayoutPatch': 1,
-  'src/hooks/use-studio.tsx > unsubscribers (event)': 2,
   'src/hooks/use-studio.tsx > warn': 1,
-  'src/hooks/use-virtual-camera.ts > copy': 1,
+  'src/hooks/use-virtual-camera.ts > setOn': 1,
   'src/lib/audio/frame-loop.ts > tick': 1,
   'src/lib/chat-link-actions.ts > openChatLink': 1,
   'src/lib/chat-moderation-relay.ts > show': 1,
@@ -553,8 +577,8 @@ const UNASKED_TOASTS_THAT_STAY: Record<string, string> = {
     'Answers a marker the streamer asked for by voice',
   'src/hooks/use-studio.tsx > StudioProviderReady (effect)':
     'Answers an image import the streamer started (the connection dropped under it), and a microphone permission the streamer just granted',
-  'src/hooks/use-studio.tsx > unsubscribers (event)':
-    'Answers a phone remote or Stream Deck press, and a phone the streamer just paired'
+  'src/hooks/use-studio.tsx > StudioProviderReady (event)':
+    'Answers a phone remote or Stream Deck press, a phone the streamer just paired, and a clip the streamer marked'
 }
 
 describe(
@@ -602,16 +626,20 @@ describe(
         '  }, [])',
         "  client.on('health', () => toast.warning('This computer is overloaded'))",
         "  window.setTimeout(() => notifyOnce('k', 'info', 'Later'), 10)",
+        "  useEffect(() => { const id = toast.loading('Starting') }, [])",
         "  return <Button onClick={() => toast.success('Saved')} />",
         '}',
-        "const refresh = () => reportError(new Error('x'))"
+        "const refresh = () => reportError(new Error('x'))",
+        "const load = useCallback(() => (asked ? reportError : reportUnasked)(new Error('x')), [])"
       ].join('\n')
       expect(toastSites('src/sample.tsx', source).map(siteKey)).toEqual([
         'src/sample.tsx > Panel (effect)',
         'src/sample.tsx > Panel (event)',
         'src/sample.tsx > Panel (timer)',
+        'src/sample.tsx > Panel (effect)',
         'src/sample.tsx > onClick',
-        'src/sample.tsx > refresh'
+        'src/sample.tsx > refresh',
+        'src/sample.tsx > load'
       ])
     })
   }

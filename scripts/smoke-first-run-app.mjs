@@ -853,6 +853,8 @@ async function launchQuiet() {
       await delay(500)
     }
   }
+  // Without the reports the check would pass without testing anything.
+  if (expectedKeys.length === 0) throw new Error('the owner launch reports never ran')
   await delay(2000)
   await screenshot('launch-quiet-dark-6s')
   for (;;) {

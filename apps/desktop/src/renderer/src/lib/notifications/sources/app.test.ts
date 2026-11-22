@@ -6,6 +6,7 @@ import {
   publishBackendError,
   publishBackendLifecycle,
   publishBackgroundProblem,
+  publishCaptionsOutputUnsupported,
   publishCaptionsProblem,
   publishGlobalShortcutsProblem,
   publishOutputTooHeavy,
@@ -205,5 +206,14 @@ describe('devices and the app as notifications (plan 250 S7)', () => {
     })
     await store.runAction('captions', 'retry')
     expect(retry).toHaveBeenCalledTimes(1)
+  })
+
+  it('an output that cannot carry captions says so, with no Retry to press', () => {
+    publishCaptionsOutputUnsupported(undefined, store)
+    expect(entry('captions')).toMatchObject({
+      title: "Live captions can't start in this session",
+      detail: "The active output configuration can't carry caption pixels.",
+      actions: []
+    })
   })
 })

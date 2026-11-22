@@ -137,7 +137,9 @@ export function popUpDecision(question: PopUpQuestion): number | null {
   if (question.launching) {
     if (!question.pressed) return null
     if (question.answersAPress) return pressAnswerMs(question)
-    return question.tone === 'urgent' && question.live ? URGENT_POP_UP_MS : null
+    if (question.tone !== 'urgent' || !question.live) return null
+    // An urgent problem in a recording the streamer started: the re-alert
+    // rules below still hold it to once per episode.
   }
   if (question.answersAPress || question.announcement) {
     return pressAnswerMs(question)
