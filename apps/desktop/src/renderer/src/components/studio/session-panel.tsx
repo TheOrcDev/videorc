@@ -45,6 +45,7 @@ import { cohostPresenceView } from '@/lib/cohost-presence'
 import { activeCohostAlerts, cohostAlertLabel } from '@/lib/cohost-view'
 import { providerStreamOutputPlanOptions, streamOutputVideosForTargets } from '@/lib/capture'
 import { liveDestinationsView, streamHealthFact } from '@/lib/live-session-view'
+import { openStudioAudio } from '@/lib/section-doors'
 import { MICROPHONE_SILENT_CODE } from '@/lib/session-runtime-notice'
 import { topWatchdogAlert, visibleWatchdogAlerts } from '@/lib/watchdog-rank'
 import {
@@ -451,6 +452,7 @@ export function SessionNotices({
         <SessionRuntimeAlert
           notice={runtimeNotice}
           onDismiss={onDismissRuntimeNotice}
+          onOpenAudio={openStudioAudio}
           onOpenLibrary={() => setActive('library')}
           onRevealOutput={
             runtimeNotice.kind === 'recording-failed' &&

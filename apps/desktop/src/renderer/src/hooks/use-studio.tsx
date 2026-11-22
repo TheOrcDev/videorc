@@ -5965,8 +5965,7 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
       client,
       live: () => watchdogLiveRef.current,
       source: () => studioActionSourceRef.current?.() ?? null,
-      openStudioPanel: (panel: 'assets' | 'layouts') => openWorkspaceTab(panel),
-      openStudio: () => openWorkspaceTab('studio')
+      openStudioPanel: (panel: 'assets' | 'layouts') => openWorkspaceTab(panel)
     }),
     [client]
   )

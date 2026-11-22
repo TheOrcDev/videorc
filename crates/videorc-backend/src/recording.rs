@@ -11651,7 +11651,7 @@ fn emit_microphone_silence_health_event(
         MicrophoneSilenceChange::Silent => (
             HealthLevel::Warn,
             MICROPHONE_SILENT_CODE,
-            microphone_silent_message(&change.device_name, change.after_ms, change.silent_ms),
+            microphone_silent_message(&change.device_name),
         ),
         MicrophoneSilenceChange::Recovered => (
             HealthLevel::Info,
@@ -11671,11 +11671,20 @@ fn emit_microphone_silence_health_event(
 }
 
 /// Activity-neutral, like the loss message: the renderer's title says
-/// whether a recording, a livestream or Clips is affected.
-fn microphone_silent_message(device_name: &str, after_ms: u64, silent_ms: u64) -> String {
+/// whether a recording, a livestream or Clips is affected. Pure digital
+/// silence from a microphone that delivers frames is almost always the
+/// device's own mute, a switch or a cable (the owner's Shure MV7+ muted on
+/// the microphone, 2026-11-22), not a wrong pick: the line says to check
+/// those first and to choose it again only after that.
+fn microphone_silent_message(device_name: &str) -> String {
+    let device_name = device_name.trim();
+    let subject = if device_name.is_empty() {
+        "Your microphone"
+    } else {
+        device_name
+    };
     format!(
-        "Microphone \"{device_name}\" has sent only silence since {:.1} seconds into this session. Try choosing it again.",
-        after_ms.saturating_sub(silent_ms) as f64 / 1_000.0
+        "{subject} is sending only silence. Check its own mute button or switch, and its cable. If it's still silent, choose it again."
     )
 }
 
@@ -32160,16 +32169,17 @@ mod tests {
     }
 
     #[test]
-    fn microphone_silence_messages_name_the_device_and_the_run() {
-        // Issue 1064: the report arrives at the end of the hold, so the
-        // silence began a hold earlier.
+    fn microphone_silence_messages_name_the_device_and_the_likely_cause() {
+        // Silent-mic report 2026-11-22: the likely cause first (the
+        // microphone's own mute, a switch, the cable), choosing it again
+        // only after that, and the device by its name alone.
         assert_eq!(
-            microphone_silent_message("HD Pro Webcam C920", 15_300, 3_000),
-            "Microphone \"HD Pro Webcam C920\" has sent only silence since 12.3 seconds into this session. Try choosing it again."
+            microphone_silent_message("Shure MV7+"),
+            "Shure MV7+ is sending only silence. Check its own mute button or switch, and its cable. If it's still silent, choose it again."
         );
         assert_eq!(
-            microphone_silent_message("Desk Mic", 1_000, 3_000),
-            "Microphone \"Desk Mic\" has sent only silence since 0.0 seconds into this session. Try choosing it again."
+            microphone_silent_message("  "),
+            "Your microphone is sending only silence. Check its own mute button or switch, and its cable. If it's still silent, choose it again."
         );
         assert_eq!(
             microphone_signal_recovered_message("Desk Mic", 7_450),

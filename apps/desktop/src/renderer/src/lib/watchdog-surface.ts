@@ -13,6 +13,7 @@ import type {
   WatchdogSettings
 } from '@/lib/backend'
 import { openHealth } from '@/lib/health-door'
+import { openStudioAudio } from '@/lib/section-doors'
 import type { StudioActionSource } from '@/lib/studio-actions/studio-context'
 import { toast } from '@/lib/toast'
 import { toastUserError } from '@/lib/user-error'
@@ -36,8 +37,6 @@ export interface WatchdogSurfaceDeps {
   source: () => StudioActionSource | null
   /** Opens the Takeover list (assets) or the Scenes list (layouts). */
   openStudioPanel: (panel: 'assets' | 'layouts') => void
-  /** The Studio page, where the one Audio section lives. */
-  openStudio: () => void
 }
 
 let settingsCache: { at: number; settings: WatchdogSettings } | null = null
@@ -167,7 +166,11 @@ export async function runWatchdogFix(
         deps.openStudioPanel('layouts')
         return
       case 'open-audio':
-        deps.openStudio()
+        // The door, not the bare tab: the card sits on the Studio page, so
+        // opening the tab alone changed nothing and the button looked dead
+        // (silent-mic report, 2026-11-22). The door lands on the Microphone
+        // row, with its meter and picker, on a page already open too.
+        openStudioAudio()
         return
       case 'open-health':
         openHealth()

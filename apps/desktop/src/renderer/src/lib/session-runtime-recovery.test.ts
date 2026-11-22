@@ -335,7 +335,7 @@ describe('audio-loss provenance', () => {
   // Issue 1064: the microphone never stopped; its frames hold no sound.
   it('says the microphone is silent, per activity, and ends the notice honestly', () => {
     const message =
-      'Microphone "HD Pro Webcam C920" has sent only silence since 12.3 seconds into this session. Try choosing it again.'
+      "HD Pro Webcam C920 is sending only silence. Check its own mute button or switch, and its cable. If it's still silent, choose it again."
     const recording = microphoneLossPresentation({
       event: event('microphone-silent', message),
       recording: { state: 'recording' as const, sessionId: 'take' },

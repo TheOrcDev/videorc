@@ -148,4 +148,57 @@ describe('SessionRuntimeAlert', () => {
     expect(markup).toContain('Microphone stopped: finishing recording with silence')
     expect(markup).not.toContain('recording continues')
   })
+
+  // Silent-mic report 2026-11-22: this notice hides the watchdog card while
+  // it is up, so it carries the card's door. Only for a microphone that can
+  // still be fixed.
+  describe('Open Audio', () => {
+    const silent = {
+      kind: 'microphone-input-lost' as const,
+      audioIssues: [{ code: 'microphone-silent', message: 'Shure MV7+ is sending only silence.' }],
+      activity: 'recording' as const,
+      phase: 'active' as const,
+      message:
+        "Shure MV7+ is sending only silence. Check its own mute button or switch, and its cable. If it's still silent, choose it again.",
+      at: 8
+    }
+
+    it('a silent microphone gets the door, first, beside Dismiss', () => {
+      const markup = renderToStaticMarkup(
+        createElement(SessionRuntimeAlert, {
+          notice: silent,
+          onDismiss: vi.fn(),
+          onOpenAudio: vi.fn()
+        })
+      )
+      expect(markup).toContain('Your microphone is silent in the recording')
+      expect(markup).toContain('Check its own mute button or switch, and its cable.')
+      expect(markup).toContain('data-testid="session-runtime-open-audio"')
+      expect(markup.indexOf('Open Audio')).toBeLessThan(markup.indexOf('Dismiss'))
+    })
+
+    it('a stopped microphone gets it too, a system-audio loss and a finished take do not', () => {
+      const door = (notice: Parameters<typeof SessionRuntimeAlert>[0]['notice']): boolean =>
+        renderToStaticMarkup(
+          createElement(SessionRuntimeAlert, { notice, onDismiss: vi.fn(), onOpenAudio: vi.fn() })
+        ).includes('Open Audio')
+      expect(door({ ...silent, audioIssues: undefined })).toBe(true)
+      expect(
+        door({ ...silent, audioIssues: [{ code: 'microphone-timeline-lost', message: 'x' }] })
+      ).toBe(true)
+      expect(door({ ...silent, audioIssues: [{ code: 'system-audio-lost', message: 'x' }] })).toBe(
+        false
+      )
+      expect(door({ ...silent, phase: 'ended' })).toBe(false)
+      expect(door({ kind: 'recording-failed', activity: 'recording', message: 'x', at: 9 })).toBe(
+        false
+      )
+      // No handler, no button: never a dead one.
+      expect(
+        renderToStaticMarkup(
+          createElement(SessionRuntimeAlert, { notice: silent, onDismiss: vi.fn() })
+        )
+      ).not.toContain('Open Audio')
+    })
+  })
 })

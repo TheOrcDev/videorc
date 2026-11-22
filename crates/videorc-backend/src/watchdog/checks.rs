@@ -1176,7 +1176,9 @@ fn time_of_day(wall: chrono::DateTime<chrono::Utc>) -> String {
 }
 
 /// The 1064 silence watchdog adopted into the alert model (A2): the notice
-/// copy unchanged, the backend's line as the detail, Open Audio as the fix.
+/// copy unchanged, the backend's line as the detail (the device's own mute,
+/// switch and cable first, choosing it again after), Open Audio as the fix:
+/// the door to Studio's Microphone row, its meter and its picker.
 pub fn mic_silent_spec(live: bool, message: &str) -> AlertSpec {
     AlertSpec::new(
         AlertSeverity::Critical,
@@ -2233,8 +2235,10 @@ mod tests {
 
     #[test]
     fn the_adopted_silence_watchdog_keeps_its_notice_copy() {
-        let spec = mic_silent_spec(true, "Microphone \"Desk Mic\" has sent only silence.");
+        let detail = "Desk Mic is sending only silence. Check its own mute button or switch, and its cable. If it's still silent, choose it again.";
+        let spec = mic_silent_spec(true, detail);
         assert_eq!(spec.title, "Your microphone is silent on the livestream");
+        assert_eq!(spec.detail, detail, "the backend's line is the detail");
         assert_eq!(spec.severity, AlertSeverity::Critical);
         assert_eq!(spec.fixes[0].kind, FixKind::OpenAudio);
         assert_eq!(
