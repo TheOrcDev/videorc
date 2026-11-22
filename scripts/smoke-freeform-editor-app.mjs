@@ -357,6 +357,15 @@ async function recordCommittedComposition() {
   // while recording and streaming to a local RTMP sink (on macOS the stream
   // is the aux compositor leg, so the file alone proves nothing about it).
   report.liveMove = { definition: LIVE_MOVE_DEFINITION, passes: [] }
+  // These passes start and stop their sessions on the backend directly, past
+  // the Studio's Record, which would hand over from the Clips ring. The ring
+  // re-arms on its own the moment a pass stops (with the app's scene, whose
+  // camera the dev app can't read, so it retries), and the next pass's
+  // session.start landed on its half-open start: "The previous microphone is
+  // still opening or closing" (11-22 run). Switch it off first, as
+  // smoke:live-background and smoke:record-latency do; the editor steps above
+  // keep running against the ring.
+  await clipsOff()
   for (const streaming of [false, true]) {
     // An output-directory capability is single-use: each session.start
     // consumes one, so each pass gets its own.
@@ -399,21 +408,27 @@ async function recordCommittedComposition() {
  * frame of every output and check the boxes step through the three
  * placements with nothing black, unmatched or frozen around either commit.
  */
-async function recordWithLiveMove({
-  scene,
-  saved,
-  resource,
-  transforms,
-  streaming,
-  width,
-  height,
-  fps,
-  ffmpegPath,
-  ffprobePath
-}) {
-  const label = streaming ? 'record-stream' : 'recording'
-  console.log(`Freeform: live move while ${streaming ? 'recording and streaming' : 'recording'}`)
-  const sink = streaming ? await startRtmpSink(ffmpegPath, label) : null
+async function recordWithLiveMove(pass) {
+  const label = pass.streaming ? 'record-stream' : 'recording'
+  console.log(
+    `Freeform: live move while ${pass.streaming ? 'recording and streaming' : 'recording'}`
+  )
+  const sink = pass.streaming ? await startRtmpSink(pass.ffmpegPath, label) : null
+  // A pass that fails still closes its listener: a sink left behind keeps the
+  // port and takes the next run's stream (11-22: run 3's sink could not bind,
+  // and run 2's orphan wrote run 3's stream into run 2's file).
+  try {
+    return await recordWithLiveMoveTo(pass, label, sink)
+  } finally {
+    await sink?.close()
+  }
+}
+
+async function recordWithLiveMoveTo(
+  { scene, saved, resource, transforms, streaming, width, height, fps, ffmpegPath, ffprobePath },
+  label,
+  sink
+) {
   const sourceIds = Object.keys(transforms)
   const fields = ['x', 'y', 'width', 'height']
   const timestamp = '2026-01-01T00:00:00.000Z'
@@ -694,6 +709,11 @@ async function startRtmpSink(ffmpegPath, label) {
         }
       )
       return indexed
+    },
+    /** Ends the listener whatever it received; a no-op once it exited. */
+    async close() {
+      stopping = true
+      await stopProcess(proc)
     }
   }
 }
@@ -1640,6 +1660,26 @@ async function waitForPointerDown(count) {
   await cdp.eval(
     `new Promise((resolve,reject)=>{const end=performance.now()+1000;const tick=()=>{if(window.__freeformSmoke.pointerDowns.filter(event=>event.trusted).length===${count})resolve();else if(performance.now()>end)reject(Error('Trusted pointerdown was not delivered'));else requestAnimationFrame(tick)};tick()})`
   )
+}
+/** The Studio's Clips switch off (its smoke hook takes the Output switch's
+ * path), then the ring's session gone: replay off and the recorder idle. */
+async function clipsOff() {
+  assert.equal(
+    await cdp.eval(`window.__videorcSmokeSetReplayBuffer?.(false) ?? null`),
+    true,
+    'the renderer has no clip buffer smoke hook'
+  )
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    const replay = await request(backend, timeoutMs, 'replay.status')
+    const recording = await request(backend, timeoutMs, 'recording.status')
+    if (replay?.state === 'off' && recording?.state === 'idle') return
+    if (Date.now() > deadline)
+      throw new Error(
+        `Clips never went off: replay ${JSON.stringify(replay?.state)}, recording ${JSON.stringify(recording?.state)}`
+      )
+    await sleep(250)
+  }
 }
 async function waitUntil(expression, timeoutMs = 10000) {
   await cdp.eval(

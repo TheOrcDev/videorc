@@ -168,7 +168,28 @@ function percentile(values, p) {
   return sorted[Math.ceil((p / 100) * sorted.length) - 1]
 }
 
-/** Pixel oracle for two disjoint synthetic sources on the compositor's dark canvas. */
+// The debug synthetic source (compositor.rs `synthetic_test_pattern_bgra`) is
+// a 64x64 raster whose top 3 rows are its frame-number strip
+// (synthetic_diagnostic.rs `overlay_frame_markers`): 16 cells, white for a set
+// bit and black for a clear one. Black reads as canvas, so a box whose visible
+// part of the strip has no set bit (the camera's cover crop shows bits 3-12,
+// all clear for sequence 0-7, the first frames of a session whose source
+// restarted) shows its first bright row exactly one strip below its top.
+const SYNTHETIC_PATTERN_SIZE = 64
+const SYNTHETIC_STRIP_ROWS = 3
+
+/** Rows of the frame-number strip visible at the top of `box` (the pattern
+ * covers the box, centred), or 0 when the cover crop cuts the strip off. */
+export function syntheticStripBand(box) {
+  const scale = Math.max(box.width, box.height) / SYNTHETIC_PATTERN_SIZE
+  const cutAbove = (SYNTHETIC_PATTERN_SIZE * scale - box.height) / 2
+  return Math.max(0, SYNTHETIC_STRIP_ROWS * scale - cutAbove)
+}
+
+/** Pixel oracle for two disjoint synthetic sources on the compositor's dark canvas.
+ * A box's top edge is where it was committed, or exactly one frame-number
+ * strip below it when no set bit of the strip is in view; the other three
+ * edges and the coverage are judged as they are. */
 export function evaluateFreeformArtifact({ pixels, width, height, rects }) {
   const failures = []
   if (!pixels || pixels.length !== width * height * 3 || rects?.length !== 2) {
@@ -216,15 +237,20 @@ export function evaluateFreeformArtifact({ pixels, width, height, rects }) {
   const measurements = boxes.map((box, index) => {
     const found = detected[index]
     const coverage = found.pixels / (box.width * box.height)
+    const band = syntheticStripBand(box)
+    const topError = Math.min(
+      Math.abs(found.top - box.y),
+      band > 0 ? Math.abs(found.top - box.y - band) : Infinity
+    )
     const error = Math.max(
       Math.abs(found.left - box.x),
-      Math.abs(found.top - box.y),
+      topError,
       Math.abs(found.right - box.x - box.width),
       Math.abs(found.bottom - box.y - box.height)
     )
     if (coverage < 0.8 || error > 3)
       failures.push(`source ${index} decoded bounds differ from committed placement`)
-    return { expected: box, detected: found, coverage, error }
+    return { expected: box, detected: found, coverage, error, stripBand: band }
   })
   return { ok: failures.length === 0, failures, outsidePixels, measurements }
 }
