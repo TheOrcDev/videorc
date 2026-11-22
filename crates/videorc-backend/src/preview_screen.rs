@@ -7163,7 +7163,8 @@ mod windows {
     #[cfg(test)]
     mod show_edge_tests {
         use super::*;
-        use windows::Win32::System::Performance::{
+        // `::windows`: the crate, not this module, which `super::*` names too.
+        use ::windows::Win32::System::Performance::{
             QueryPerformanceCounter, QueryPerformanceFrequency,
         };
 
