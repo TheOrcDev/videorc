@@ -1,5 +1,19 @@
 # Implementation Plans
 
+- 2026-11-22: [Plan 258](258-background-effects.md), the owner's ask:
+  background blur and replacement without a green screen, like Google Meet,
+  for recording, streaming, rooms and guests. PLANNED 2026-11-22, 13 slices
+  (S0-S12); D3-D11 DECIDED 2026-11-22 (the recommended defaults):
+  - Research across Meet, Zoom, Teams, macOS and Windows effects, OBS,
+    NVIDIA, StreamYard, Restream, Riverside, Camo and the libraries (Vision,
+    MediaPipe, ONNX models, LiveKit's processors).
+  - One camera effect stage at the camera publish point, so no raw frame
+    reaches any output, failing closed to a full blur; the browser processor
+    for the room's host and guests, before publishing.
+  - One Background control: the Scene page camera inspector (home) and the
+    Studio Camera row (mirror), with Green and Blue screen in the same pick;
+    a round button on the guest page. Mockup:
+    [258-background-effects-mockup.html](258-background-effects-mockup.html).
 - 2026-11-21: [Plan 257](257-linux-beta.md), the owner's ask: Linux from
   Alpha to Beta with every Mac feature working, or an honest Linux
   equivalent. PLANNED 2026-11-21, 23 slices (S0-S22), twelve owner checks:
