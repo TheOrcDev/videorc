@@ -82,9 +82,9 @@ export function openVideorcWebLink(url: string): void {
 export function beginVideorcSignIn(): void {
   const beginSignIn = window.videorc?.beginAccountSignIn
   if (beginSignIn) {
-    void Promise.resolve()
-      .then(() => beginSignIn(VIDEORC_WEB_LINKS.desktopAuthorize))
-      .catch((error: unknown) => toastUserError(error, { action: 'sign in' }))
+    beginSignIn(VIDEORC_WEB_LINKS.desktopAuthorize).catch((error: unknown) =>
+      toastUserError(error, { action: 'sign in' })
+    )
     return
   }
   openVideorcWebLink(VIDEORC_WEB_LINKS.desktopAuthorize)

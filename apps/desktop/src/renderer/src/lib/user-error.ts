@@ -63,7 +63,7 @@ const UNKNOWN_OUTCOME = /its outcome is unknown\.$/
 // folder grants or sign-in with (on Linux, no keyring answered).
 const SECURE_STORAGE_UNAVAILABLE = /^Protected desktop persistence is unavailable\.$/
 // Matched by its opening, so the eager bundle doesn't carry the whole sentence.
-const LINUX_KEYRING_REFUSAL = /^Signing in needs a keyring \(Secret Service\)/
+const LINUX_KEYRING_REFUSAL = /^Signing in needs a keyring/
 /** The sentence for that refusal. */
 export const SECURE_STORAGE_REASON =
   "Videorc couldn't reach your system keyring to save this. Make sure a keyring is running and unlocked, then try again."
