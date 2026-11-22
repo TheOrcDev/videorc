@@ -53,6 +53,7 @@ import {
   finalVerdict,
   isFullPass,
   judgeStall,
+  layoutBackgroundFromControls,
   neutralGroundFraction,
   parseSmokeArgs,
   passesFor
@@ -126,9 +127,22 @@ const READ_STORED_BACKGROUND = `
  */
 const PIN_CAMERA = `
   const trigger = '[data-slot="device-picker-trigger"][aria-label="Camera"]';
+  const option = '[cmdk-item][data-value="' + params.cameraId + '"]';
   await openTab('studio', trigger);
-  (await waitFor(trigger, 15000)).click();
-  const item = await waitFor('[cmdk-item][data-value="' + params.cameraId + '"]', 15000);
+  // The renderer may not list the fixture camera yet right after launch:
+  // open the picker and look again until it does.
+  const deadline = performance.now() + 30000;
+  let item = null;
+  while (!item && performance.now() < deadline) {
+    if (!document.querySelector('[cmdk-list]')) (await waitFor(trigger, 15000)).click();
+    await sleep(800);
+    item = document.querySelector(option);
+    if (!item) {
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      await sleep(1000);
+    }
+  }
+  if (!item) throw new Error('The Camera picker never listed ' + params.cameraId);
   item.click();
   await waitFor('[data-videorc-camera-background-trigger]', 15000);
   await sleep(800);
@@ -149,6 +163,8 @@ const PICK_BACKGROUND = `
   const before = trigger.getAttribute('aria-label');
   if (!document.querySelector('[data-videorc-camera-background-popover]')) trigger.click();
   await waitFor('[data-videorc-camera-background-popover]');
+  // The picker's body is its own chunk: wait for its tiles.
+  await waitFor('[data-videorc-camera-background-popover] [data-videorc-camera-background-choice]', 15000);
   let tile = inside('[data-videorc-camera-background-popover]', params.choice);
   if (!tile && params.choice.startsWith('image:')) {
     (await waitFor('[data-videorc-camera-background-popover] [data-videorc-camera-background-choose-image]')).click();
