@@ -1381,6 +1381,15 @@ async function assertIdleHold(label) {
 async function staleDraftExpires() {
   console.log('Freeform: stale editor draft never outlives the heartbeat')
   await selectSource(baseSourceId)
+  // The visual matrix and the mask-law steps leave the page scrolled, and a
+  // docked Preview scrolled out of view hides (`dockHiddenReason:
+  // "scrolled-away"`): the stage is then no live canvas and holds nothing
+  // (11-22, every run). Bring the stage back and require the live surface, as
+  // the pointer matrix does, before judging the hold.
+  await cdp.eval(
+    `document.querySelector('[data-videorc-stage-phase]').scrollIntoView({block:'center',behavior:'instant'})`
+  )
+  await ensureLiveSurface('stale-draft step')
   await assertIdleHold(`stale-draft step, ${baseSourceId} selected`)
   const transform = { x: 0.11, y: 0.12, width: 0.3, height: 0.3 }
   const params = {
