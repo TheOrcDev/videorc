@@ -8,6 +8,7 @@ import { clipMark } from './clips'
 import { commentHighlight, commentHighlightClear } from './comments'
 import type { StudioActionContext, StudioActionExecutor } from './context'
 import { REMOTE_INTENT_COPY } from './copy'
+import { notePressed } from '@/lib/user-pressed'
 import { bannerHide, bannerShow, bannerToggle } from './banners'
 import { buddyLiveOff, buddyLiveOn, buddyLiveToggle } from './buddy'
 import {
@@ -73,6 +74,8 @@ export async function executeRemoteIntent(
   const intentId = envelope?.intentId
   const intent = envelope?.intent
   if (!intentId || !intent?.kind) return
+  // A press on the phone or a Stream Deck: its answers may pop up at launch.
+  notePressed()
 
   const ack = async (ok: boolean, message?: string): Promise<void> => {
     try {

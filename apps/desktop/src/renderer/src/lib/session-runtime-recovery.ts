@@ -25,7 +25,8 @@ import { recordUserError } from '@/lib/user-error-log'
 import type { WsStatus } from '@/lib/capture'
 import { CHAT_PLATFORM_LABELS } from '@/lib/live-chat-view'
 import { notifications } from '@/lib/notifications'
-import { publishBackendLifecycle } from '@/lib/notifications/sources/app'
+import { publishBackendLifecycle, publishBackgroundProblem } from '@/lib/notifications/sources/app'
+import { publishClipsCouldNotStart } from '@/lib/notifications/sources/work'
 import {
   publishHealthEvent,
   publishMicrophoneLoss,
@@ -281,6 +282,28 @@ export function showBackendError(
   }
 }
 
+/**
+ * Something Videorc tried on its own failed: a read at launch, a reload, a
+ * retry. Nobody pressed anything, so it is an entry behind the bell and never
+ * a toast (the owner, 2026-11-22). The console line and the support record
+ * are `showBackendError`'s; one entry per kind of failure, counted.
+ */
+export function noteBackgroundError(
+  error: unknown,
+  status: WsStatus,
+  context?: UserErrorContext
+): void {
+  const message = ipcErrorMessage(error)
+  if (!shouldToastBackendError(message, status)) return
+  const copy = userErrorMessage(error, context)
+  if (copy.kind === 'canceled') return
+  console.warn(`[background-error] ${copy.title}:`, message)
+  recordUserError(copy, error, context)
+  // Reconnecting: the Session badge already says so.
+  if (copy.kind === 'offline') return
+  publishBackgroundProblem({ title: copy.title, description: copy.description })
+}
+
 /** X's own word on whether viewers can watch: one subject (plan 250). */
 export function showXPlaybackEvent(event: XPlaybackEvent): void {
   publishXPlayback(event)
@@ -403,9 +426,15 @@ export function showSessionFinished({
 export function showSessionHealthEvent(
   event: HealthEvent,
   qualityToastAlreadyShown: boolean,
-  recording?: Pick<RecordingStatus, 'sessionId' | 'state'>
+  recording?: Pick<RecordingStatus, 'sessionId' | 'state' | 'replayOnly'>
 ): string | null {
   const startupToast = recordingStartupHealthToast(event)
+  if (startupToast?.variant === 'error' && recording && sessionIsReplayOnly(recording)) {
+    // The Clips ring starts on its own at launch: nobody pressed Record, so
+    // "Couldn't start" is the ring's entry behind the bell, never a toast.
+    publishClipsCouldNotStart(startupToast.description ?? startupToast.title)
+    return null
+  }
   if (startupToast?.variant === 'error') {
     toast.error(startupToast.title, {
       id: startupToast.id,

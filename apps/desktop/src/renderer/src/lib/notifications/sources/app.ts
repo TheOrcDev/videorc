@@ -10,6 +10,8 @@ import type { NotificationStore } from '@/lib/notifications/store'
 import type { NotificationAction } from '@/lib/notifications/types'
 import { openOutputVideorcCamera } from '@/lib/section-doors'
 import { openSettingsTab } from '@/lib/settings-tabs'
+import { userErrorMessage } from '@/lib/user-error'
+import { recordUserError } from '@/lib/user-error-log'
 
 // --- Devices ----------------------------------------------------------------
 
@@ -136,14 +138,72 @@ const OPEN_HEALTH: NotificationAction = {
  * A backend `error` event: something failed that Videorc cannot explain. It
  * can repeat on every reconnect, so it is one counted entry.
  */
+const BACKEND_ERROR_KEY = 'backend-error'
+const BACKEND_ERROR_TITLE = 'Videorc hit a problem'
+
 export function publishBackendError(store: NotificationStore = notifications): void {
   store.publish({
-    key: 'backend-error',
+    key: BACKEND_ERROR_KEY,
     kind: 'backend-error',
-    title: 'Videorc hit a problem',
+    title: BACKEND_ERROR_TITLE,
     detail: 'Export a support bundle from Health if it repeats.',
     actions: [OPEN_HEALTH]
   })
+}
+
+/**
+ * Something Videorc tried on its own failed (a read at launch, a reload, a
+ * retry): nobody pressed anything, so it waits behind the bell. The same
+ * failure again is one counted entry ("3 times."), never a second row.
+ */
+export function publishBackgroundProblem(
+  words: { title: string; description?: string },
+  store: NotificationStore = notifications
+): void {
+  store.publish({
+    // A failure Videorc cannot explain joins the backend's own "Videorc hit a
+    // problem": one cause, one entry.
+    key:
+      words.title === BACKEND_ERROR_TITLE ? BACKEND_ERROR_KEY : `background-problem:${words.title}`,
+    kind: 'backend-error',
+    title: words.title,
+    detail: words.description,
+    actions: [OPEN_HEALTH]
+  })
+}
+
+export const CAPTIONS_KEY = 'captions'
+
+/**
+ * Live captions start on their own with a session (the Clips ring at launch
+ * too), so a start that failed is an entry with its Retry, never a toast.
+ */
+export function publishCaptionsProblem(
+  words: { title: string; description?: string },
+  retry?: () => void,
+  store: NotificationStore = notifications
+): void {
+  store.publish({
+    key: CAPTIONS_KEY,
+    kind: 'captions',
+    title: words.title,
+    detail: words.description,
+    actions: retry ? [{ id: 'retry', label: 'Retry', kind: 'fix', run: retry }] : []
+  })
+}
+
+/** The captions' own start failed: its words, recorded for support, with Retry. */
+export function publishCaptionsStartFailure(
+  error: unknown,
+  retry: () => void,
+  store: NotificationStore = notifications
+): void {
+  const context = { action: 'start', object: 'live captions' } as const
+  const copy = userErrorMessage(error, context)
+  if (copy.kind === 'canceled') return
+  console.warn(`[captions] ${copy.title}:`, copy.raw || error)
+  recordUserError(copy, error, context)
+  publishCaptionsProblem({ title: copy.title, description: copy.description }, retry, store)
 }
 
 // --- What Videorc did on its own ---------------------------------------------

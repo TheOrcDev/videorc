@@ -79,6 +79,8 @@ const kinds = {
   backend: { tone: 'warning', life: 'condition', mayBe: ['urgent'] },
   'backend-error': { tone: 'warning', life: 'event' },
   'output-too-heavy': { tone: 'warning', life: 'event' },
+  // Live captions the Studio starts on its own with a session could not start.
+  captions: { tone: 'warning', life: 'event' },
   'app-news': { tone: 'news', life: 'event' },
   'recording-saved': { tone: 'done', life: 'event' },
   mp4: { tone: 'news', life: 'progress' },

@@ -8,6 +8,7 @@ export type { GlobalShortcutAction } from '../../../shared/global-shortcuts'
 import { LONG_CLIP_SECONDS } from '../../../shared/clip-marks'
 import { withAppNotifications } from '@/lib/notify'
 import { toast } from '@/lib/toast'
+import { notePressed } from '@/lib/user-pressed'
 import { GO_LIVE_SHORTCUT_LABEL, RECORD_SHORTCUT_LABEL } from '@/lib/go-live-copy'
 import { sceneAtPosition } from '@/lib/scenes'
 
@@ -56,6 +57,8 @@ export function executeGlobalShortcut(
   context: GlobalShortcutContext
 ): void {
   if (!isGlobalShortcutAction(action)) return
+  // A key pressed in another app: its answers may pop up at launch.
+  notePressed()
   const position = sceneSlotPosition(action)
   if (position !== null) {
     const scene = sceneAtPosition(context.scenes ?? [], position)

@@ -5,6 +5,8 @@ import {
   publishAppNews,
   publishBackendError,
   publishBackendLifecycle,
+  publishBackgroundProblem,
+  publishCaptionsProblem,
   publishGlobalShortcutsProblem,
   publishOutputTooHeavy,
   publishSourceReturn,
@@ -178,5 +180,30 @@ describe('devices and the app as notifications (plan 250 S7)', () => {
     await store.runAction('output-too-heavy', 'use-preset')
     expect(apply).toHaveBeenCalledTimes(1)
     expect(store.snapshot()).toEqual([])
+  })
+
+  it('what Videorc tried on its own and could not do is one entry per cause', () => {
+    publishBackendError(store)
+    publishBackgroundProblem({ title: 'Videorc hit a problem', description: 'Try again.' }, store)
+    publishBackgroundProblem({ title: "Couldn't load your YouTube channels" }, store)
+    publishBackgroundProblem({ title: "Couldn't load your YouTube channels" }, store)
+    expect(store.snapshot()).toHaveLength(2)
+    expect(entry('backend-error')).toMatchObject({ occurrences: 2 })
+    expect(entry("background-problem:Couldn't load your YouTube channels")).toMatchObject({
+      tone: 'warning',
+      occurrences: 2,
+      actions: [{ label: 'Open Health', kind: 'door' }]
+    })
+  })
+
+  it('live captions that could not start on their own offer Retry', async () => {
+    const retry = vi.fn()
+    publishCaptionsProblem({ title: "Couldn't start live captions" }, retry, store)
+    expect(entry('captions')).toMatchObject({
+      tone: 'warning',
+      actions: [{ id: 'retry', label: 'Retry', kind: 'fix' }]
+    })
+    await store.runAction('captions', 'retry')
+    expect(retry).toHaveBeenCalledTimes(1)
   })
 })

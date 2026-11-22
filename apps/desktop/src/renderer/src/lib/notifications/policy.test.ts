@@ -172,6 +172,16 @@ describe('countsAsUnread (plan 250, "What the number counts")', () => {
       false
     ],
     ['news that happened', { state: 'happened', tone: 'news', life: 'event' }, false],
+    [
+      'an announcement that waited behind the bell at launch',
+      { state: 'happened', tone: 'news', life: 'event', kind: 'cloud-announce' },
+      true
+    ],
+    [
+      'an announcement, seen',
+      { state: 'happened', tone: 'news', life: 'event', kind: 'cloud-announce', read: true },
+      false
+    ],
     ['finished work', { state: 'happened', tone: 'done', life: 'event' }, true],
     ['an error that happened', { state: 'happened', tone: 'warning', life: 'event' }, true],
     ['work in progress', { state: 'running', tone: 'news', life: 'progress' }, false],
@@ -315,5 +325,50 @@ describe('words', () => {
     expect(cameBackWords(0)).toBeUndefined()
     expect(cameBackWords(1)).toBe('Came back once.')
     expect(cameBackWords(3)).toBe('Came back 3 times.')
+  })
+})
+
+describe('popUpDecision at launch (the owner, 2026-11-22: no toasts when you open the app)', () => {
+  const launch = (patch: Partial<PopUpQuestion>): PopUpQuestion =>
+    question({ launching: true, ...patch })
+
+  it.each<NotificationTone>(['urgent', 'warning', 'done', 'news'])(
+    'nothing Videorc found on its own pops up: %s',
+    (tone) => {
+      expect(popUpDecision(launch({ tone }))).toBeNull()
+      expect(popUpDecision(launch({ tone, live: true, quiet: false }))).toBeNull()
+    }
+  )
+
+  it('an announcement waits behind the bell at launch, and pops up after it', () => {
+    expect(popUpDecision(launch({ tone: 'news', announcement: true }))).toBeNull()
+    expect(popUpDecision(launch({ tone: 'news', announcement: true, pressed: true }))).toBeNull()
+    expect(popUpDecision(question({ tone: 'news', announcement: true }))).toBe(
+      PRESS_ANSWER_POP_UP_MS
+    )
+  })
+
+  it('the answer to a press still pops up once the streamer has pressed something', () => {
+    expect(popUpDecision(launch({ tone: 'done', answersAPress: true }))).toBeNull()
+    expect(popUpDecision(launch({ tone: 'done', answersAPress: true, pressed: true }))).toBe(
+      PRESS_ANSWER_POP_UP_MS
+    )
+  })
+
+  it('an urgent problem pops up only in a recording or livestream the streamer started', () => {
+    expect(popUpDecision(launch({ tone: 'urgent', pressed: true }))).toBeNull()
+    expect(popUpDecision(launch({ tone: 'urgent', live: true }))).toBeNull()
+    expect(popUpDecision(launch({ tone: 'urgent', live: true, pressed: true }))).toBe(
+      URGENT_POP_UP_MS
+    )
+  })
+
+  it('a startup check stays behind the bell even after a press', () => {
+    expect(popUpDecision(launch({ tone: 'warning', pressed: true }))).toBeNull()
+    expect(popUpDecision(launch({ tone: 'done', pressed: true }))).toBeNull()
+  })
+
+  it('after the first minute the plan 250 table applies again', () => {
+    expect(popUpDecision(question({ tone: 'warning', launching: false }))).toBe(POP_UP_MS)
   })
 })

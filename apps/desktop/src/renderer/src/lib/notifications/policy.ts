@@ -3,6 +3,7 @@
 // the list keeps things. The store applies them; the tables in
 // `policy.test.ts` are the plan's tables.
 
+import { NOTIFICATION_KINDS } from '@/lib/notifications/kinds'
 import type {
   NotificationAction,
   NotificationCount,
@@ -20,6 +21,12 @@ export const POP_UP_MS = 8_000
 export const PRESS_ANSWER_POP_UP_MS = 4_000
 /** A recovery that replaces a toast still showing. */
 export const RECOVERY_POP_UP_MS = 4_000
+/**
+ * The first minute of a run (a launch, or a reload that rebuilds the list):
+ * what Videorc finds on its own waits behind the bell. The owner, 2026-11-22:
+ * "the first thing you see is a bunch of toasts".
+ */
+export const LAUNCH_QUIET_MS = 60_000
 
 const TONE_RANK: Record<NotificationTone, number> = { done: 0, news: 1, warning: 2, urgent: 3 }
 
@@ -99,6 +106,12 @@ export interface PopUpQuestion {
   change: NotificationChange
   tone: NotificationTone
   answersAPress?: boolean
+  /** News told once outside a session: it pops up like an answer, but never at launch. */
+  announcement?: boolean
+  /** Inside the first minute of this run (`LAUNCH_QUIET_MS`). */
+  launching?: boolean
+  /** The streamer has pressed something in this run: a click, a key, a shortcut. */
+  pressed?: boolean
   popUpMs?: number
   hasDetail: boolean
   /** A recording or a livestream runs. */
@@ -117,8 +130,17 @@ export interface PopUpQuestion {
 export function popUpDecision(question: PopUpQuestion): number | null {
   if (question.listOpen) return null
   if (question.change === 'updated' || question.change === 'flapped') return null
-  if (question.answersAPress) {
-    return question.popUpMs ?? (question.hasDetail ? POP_UP_MS : PRESS_ANSWER_POP_UP_MS)
+  // At launch nothing Videorc checked on its own pops up: devices, accounts,
+  // updates, quotas, memory, a recovered take, the engine starting. Only the
+  // answer to a press, or an urgent problem in a recording or livestream the
+  // streamer started, speaks.
+  if (question.launching) {
+    if (!question.pressed) return null
+    if (question.answersAPress) return pressAnswerMs(question)
+    return question.tone === 'urgent' && question.live ? URGENT_POP_UP_MS : null
+  }
+  if (question.answersAPress || question.announcement) {
+    return pressAnswerMs(question)
   }
   if (question.tone === 'news') return null
   const { lastPop } = question
@@ -148,6 +170,10 @@ export function popUpDecision(question: PopUpQuestion): number | null {
   return POP_UP_MS
 }
 
+function pressAnswerMs(question: Pick<PopUpQuestion, 'popUpMs' | 'hasDetail'>): number {
+  return question.popUpMs ?? (question.hasDetail ? POP_UP_MS : PRESS_ANSWER_POP_UP_MS)
+}
+
 /** Still true: an open problem, or work in progress. The list's "Now" group. */
 export function isNow(entry: Pick<NotificationEntry, 'state'>): boolean {
   return entry.state === 'open' || entry.state === 'running'
@@ -155,11 +181,14 @@ export function isNow(entry: Pick<NotificationEntry, 'state'>): boolean {
 
 /**
  * The number is what waits for you: unread urgent and warning entries, and
- * unread finished work. News never counts. A warning that cleared on its own
- * stops counting; an urgent problem that cleared counts until it is seen.
+ * unread finished work. News never counts, except an announcement: it waits
+ * behind the bell at launch, so the number is how it is seen. A warning that
+ * cleared on its own stops counting; an urgent problem that cleared counts
+ * until it is seen.
  */
 export function countsAsUnread(
-  entry: Pick<NotificationEntry, 'read' | 'state' | 'tone' | 'peakTone'>
+  entry: Pick<NotificationEntry, 'read' | 'state' | 'tone' | 'peakTone'> &
+    Partial<Pick<NotificationEntry, 'kind'>>
 ): boolean {
   if (entry.read) return false
   switch (entry.state) {
@@ -168,7 +197,10 @@ export function countsAsUnread(
     case 'resolved':
       return entry.peakTone === 'urgent'
     case 'happened':
-      return entry.tone !== 'news'
+      return (
+        entry.tone !== 'news' ||
+        (entry.kind !== undefined && NOTIFICATION_KINDS[entry.kind].announcement === true)
+      )
     case 'running':
       return false
     case 'done':
