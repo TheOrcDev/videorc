@@ -4881,6 +4881,53 @@ pub struct PreviewCameraStatus {
     /// answered, and on a camera or system that has no such effects.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub system_effect: Option<CameraSystemEffect>,
+    /// Plan 258 S3: the camera effect stage, while this camera's background
+    /// is an effect (a blur or a picture). Absent while Off or a screen key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub camera_background: Option<CameraBackgroundStatus>,
+}
+
+/// How the camera effect stage is doing (plan 258 S3, D6).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum CameraBackgroundStageState {
+    /// Every frame drawn with its own fresh matte.
+    Running,
+    /// The cover: no matte yet, or the newest is 100 ms old or more.
+    Cover,
+    /// No engine here (platform, OS version); the cover stands in.
+    Unavailable,
+}
+
+/// Plan 258 S3: the stage's line for the Studio, Health and the support
+/// bundle. The system's own effect stays on `systemEffect` beside it (S4).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CameraBackgroundStatus {
+    pub mode: CameraBackgroundMode,
+    pub state: CameraBackgroundStageState,
+    /// The newest matte's age at the last capture.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mask_age_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub segment_ms_p95: Option<f64>,
+    /// The effect pass, wall time on the worker (upload, GPU, wait).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compose_ms_p95: Option<f64>,
+    /// The effect pass's GPU time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compose_gpu_ms_p95: Option<f64>,
+    pub processed_frames: u64,
+    pub cover_frames: u64,
+    /// How long the cover has stood in (the Studio says so after 2 s).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cover_for_ms: Option<u64>,
+    /// The newest matte's age when the cover last took over from processed
+    /// frames (D6: the first capture past 100 ms).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cover_after_mask_age_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
 }
 
 /// Which operating system feature is changing the camera's picture.

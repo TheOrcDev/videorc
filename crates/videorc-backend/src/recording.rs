@@ -3633,6 +3633,45 @@ fn refuse_legacy_start_while_hidden(use_encoder_bridge: bool, hidden: bool) -> R
     Ok(())
 }
 
+/// Plan 258 D8: what a session refused for its camera background says.
+pub const CAMERA_BACKGROUND_UNAVAILABLE_LEGACY: &str = "Background effects can't run with this recording setting. Turn off the background effect or choose 30 fps.";
+
+/// What a refused legacy start says after the exact copy.
+pub const CAMERA_BACKGROUND_LEGACY_START_DETAIL: &str = "This profile records through the legacy FFmpeg capture path, which opens the camera itself and never sees the background effect.";
+
+/// Plan 258 S3 (D8, privacy invariant 4): the legacy FFmpeg graph opens the
+/// camera itself, outside the camera store the effect stage gates, so a
+/// session that would take it while a camera's background is an effect is
+/// refused with a named reason, on the program or the vertical layout.
+fn refuse_legacy_start_with_camera_effect(
+    use_encoder_bridge: bool,
+    params: &StartSessionParams,
+) -> Result<()> {
+    if use_encoder_bridge || params.sources.camera_id.is_none() {
+        return Ok(());
+    }
+    let effect_on = |layout: &crate::protocol::LayoutSettings| {
+        crate::preview_camera::effect_stage::EffectLook::from_setting(
+            layout.camera_background.as_ref(),
+            None,
+            false,
+        )
+        .is_some()
+    };
+    let vertical = params
+        .simulcast
+        .as_ref()
+        .is_some_and(|simulcast| effect_on(&simulcast.layout));
+    if effect_on(&params.layout) || vertical {
+        bail!(
+            "{} {}",
+            CAMERA_BACKGROUND_UNAVAILABLE_LEGACY,
+            CAMERA_BACKGROUND_LEGACY_START_DETAIL
+        );
+    }
+    Ok(())
+}
+
 /// `Some(session_id)` while a session that reads the display directly runs:
 /// `screen.hide` refuses with [`crate::screen_privacy::SCREEN_HIDE_UNAVAILABLE_LEGACY`]
 /// and `screen.privacy.get` says why.
@@ -5128,6 +5167,10 @@ async fn start_session_with_timeline(
     // outside the gated frame store. Starting it while the screen is hidden
     // would record the live screen under a "Screen hidden" chip: refuse.
     refuse_legacy_start_while_hidden(use_encoder_bridge, state.screen_privacy.view().hidden)?;
+    refuse_legacy_start_with_camera_effect(use_encoder_bridge, &params)?;
+    // Plan 258 S3: the session's layout carries the camera's background; the
+    // live camera's stage takes it before the session reads a frame.
+    crate::preview_camera::apply_camera_background(&state, &params.layout).await;
     if legacy_graph_lacks_ffmpeg_devices(use_encoder_bridge, ffmpeg_devices_resolved) {
         // The bridge decision says "legacy" only for a request ruled out
         // above, so this does not run today. It keeps a later change to
@@ -33422,6 +33465,85 @@ mod tests {
         assert!(error.contains(SCREEN_HIDE_LEGACY_START_DETAIL), "{error}");
         assert!(state.recording.lock().await.is_none());
         let _ = std::fs::remove_dir_all(&output_dir);
+    }
+
+    fn blurred_layout(
+        mut layout: crate::protocol::LayoutSettings,
+    ) -> crate::protocol::LayoutSettings {
+        layout.camera_background = Some(crate::protocol::CameraBackground {
+            mode: crate::protocol::CameraBackgroundMode::Blur,
+            blur_pct: 70,
+            edges: crate::protocol::CameraBackgroundEdges::Balanced,
+            asset_id: None,
+            key: None,
+        });
+        layout
+    }
+
+    /// Plan 258 S3, privacy invariant 4: a legacy FFmpeg start (it opens the
+    /// camera itself) is refused while the camera's background is an effect,
+    /// on the program or the vertical layout; the bridge, a screen key, Off
+    /// and a session with no camera start as always.
+    #[test]
+    fn invariant_4_a_legacy_start_with_a_camera_effect_is_refused() {
+        let plain = base_params(true, false);
+        assert!(plain.sources.camera_id.is_some());
+        assert!(refuse_legacy_start_with_camera_effect(false, &plain).is_ok());
+
+        let mut blurred = plain.clone();
+        blurred.layout = blurred_layout(blurred.layout);
+        let error = refuse_legacy_start_with_camera_effect(false, &blurred)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.starts_with(CAMERA_BACKGROUND_UNAVAILABLE_LEGACY),
+            "{error}"
+        );
+        assert!(
+            error.ends_with(CAMERA_BACKGROUND_LEGACY_START_DETAIL),
+            "{error}"
+        );
+        assert!(
+            refuse_legacy_start_with_camera_effect(true, &blurred).is_ok(),
+            "the bridge reads the gated store"
+        );
+
+        for mode in [
+            crate::protocol::CameraBackgroundMode::Image,
+            crate::protocol::CameraBackgroundMode::Video,
+            crate::protocol::CameraBackgroundMode::Cutout,
+        ] {
+            let mut params = blurred.clone();
+            params.layout.camera_background.as_mut().unwrap().mode = mode;
+            assert!(
+                refuse_legacy_start_with_camera_effect(false, &params).is_err(),
+                "{mode:?}"
+            );
+        }
+        for mode in [
+            crate::protocol::CameraBackgroundMode::Off,
+            crate::protocol::CameraBackgroundMode::Green,
+            crate::protocol::CameraBackgroundMode::Blue,
+        ] {
+            let mut params = blurred.clone();
+            params.layout.camera_background.as_mut().unwrap().mode = mode;
+            assert!(
+                refuse_legacy_start_with_camera_effect(false, &params).is_ok(),
+                "{mode:?}"
+            );
+        }
+
+        let mut no_camera = blurred.clone();
+        no_camera.sources.camera_id = None;
+        assert!(refuse_legacy_start_with_camera_effect(false, &no_camera).is_ok());
+
+        let mut vertical = plain.clone();
+        vertical.simulcast = Some(crate::protocol::SimulcastParams {
+            layout: blurred_layout(plain.layout.clone()),
+            scene: None,
+            video: plain.output.video.clone(),
+        });
+        assert!(refuse_legacy_start_with_camera_effect(false, &vertical).is_err());
     }
 
     /// Plan 186 S4: which sessions take a banner shown after their start.

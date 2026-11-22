@@ -4036,6 +4036,7 @@ mod tests {
                 message: Some("Live".to_string()),
                 no_video: None,
                 system_effect: None,
+                camera_background: None,
             },
         );
 
@@ -4105,6 +4106,7 @@ mod tests {
             message: Some("Live".to_string()),
             no_video: None,
             system_effect: None,
+            camera_background: None,
         }
     }
 
