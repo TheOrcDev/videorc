@@ -26,12 +26,12 @@ cover the same scenarios against local `ffmpeg -listen 1` RTMP receivers.
 
 ## Results
 
-| Scenario (#156)                      | Smoke                                             | Result       |
-| ------------------------------------ | ------------------------------------------------- | ------------ |
-| Record plus RTMP, at the cap         | `smoke:multistream`, `VIDEORC_SMOKE_TARGETS=5`    | PASS         |
-| Record plus RTMP, unavailable target | `smoke:multistream` (3 targets + an offline Kick) | PASS         |
-| Split profile (vertical leg)         | `smoke:multistream:vertical`                      | PASS         |
-| Clean stop with a leg mid-retry      | `smoke:stream-leg-eof`                            | FAIL, 3 of 3 |
+| Scenario (#156)                      | Smoke                                             | Result                                    |
+| ------------------------------------ | ------------------------------------------------- | ----------------------------------------- |
+| Record plus RTMP, at the cap         | `smoke:multistream`, `VIDEORC_SMOKE_TARGETS=5`    | PASS                                      |
+| Record plus RTMP, unavailable target | `smoke:multistream` (3 targets + an offline Kick) | PASS                                      |
+| Split profile (vertical leg)         | `smoke:multistream:vertical`                      | PASS                                      |
+| Clean stop with a leg mid-retry      | `smoke:stream-leg-eof`                            | FAIL, 3 of 3 (fixed by #1626, see Update) |
 
 - **At the cap:** one record+stream encode reached all five receivers
   (562,056 bytes each), every leg passed the stream artifact gates, and the
@@ -63,6 +63,29 @@ FFmpeg alone, with the app's fifo options and the same close, reopen and
 close of a local receiver before `q`, took 6.3 s from `q` to exit (exit 0).
 Against a port that never listened it took 2.8 s. The app's session (a
 recording plus two fifo legs in one tee) crosses 8 s.
+
+## Update, 2026-11-22: clean stop fixed (#1623, #1626)
+
+#1626 (merge `6062a10a4`) fixed #1623. The stderr monitor now tracks which
+FFmpeg outputs have written their trailers. A streaming Stop ends FFmpeg as
+soon as every output still open is a leg that is reconnecting. If FFmpeg has
+to be forced after the recording has closed, the session finalizes normally
+instead of keeping recovery media.
+
+The evidence in #1626 comes from this host (same laptop, Quick Sync MFT, dev
+app on the release backend):
+
+- `smoke:stream-leg-eof`: PASS. Stop took 8.37 s, logged
+  `Capture session finalized after stop signal`, and kept no recovery media.
+  The healthy leg sits behind the dead one, so this Stop still uses the 8 s
+  grace.
+- `smoke:multistream` (offline Kick leg): PASS. FFmpeg exited 0.60 s after
+  Stop and the session finalized. Before the fix every Stop was forced into
+  recovery media, but that smoke does not check how Stop ends, so it still
+  passed.
+
+The leg-EOF row above keeps its original result from `3035a0b0`. This record
+did not re-run the smoke on a build with the fix.
 
 ## Not covered here
 
