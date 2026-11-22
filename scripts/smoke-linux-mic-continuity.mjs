@@ -18,7 +18,7 @@
 //
 //   node scripts/smoke-linux-mic-continuity.mjs [--takes 10] [--recording-ms 60000]
 //     [--sources camera,screen] [--load-cpus 0] [--tone-sink videorc_lab_speech]
-//     [--microphone videorc_lab_mic] [--stop-budget-ms 15000]
+//     [--microphone videorc_lab_mic] [--stop-budget-ms 15000] [--height 1080|720]
 //
 //   VIDEORC_SMOKE_OUTPUT_DIR          evidence + recordings
 //   VIDEORC_PACKAGED_APP_EXECUTABLE   run a packaged build instead of the dev app
@@ -62,7 +62,9 @@ const { values: args } = parseArgs({
     'tone-sink': { type: 'string', default: 'videorc_lab_speech' },
     microphone: { type: 'string', default: 'videorc_lab_mic' },
     'stop-budget-ms': { type: 'string', default: '15000' },
-    'idle-gap-ms': { type: 'string', default: '3000' }
+    'idle-gap-ms': { type: 'string', default: '3000' },
+    // 1080 (the audit's shape) or 720: the canvas a loaded box can keep up with.
+    height: { type: 'string', default: '1080' }
   },
   strict: true
 })
@@ -90,8 +92,13 @@ const packagedLaunch = packagedSmokeLaunchOptions({
   capability: appExecutable ? randomBytes(32).toString('base64url') : undefined
 })
 
-// The audit's shape: 1080p30 at the shipping bitrate.
-const video = { preset: 'custom', width: 1920, height: 1080, fps: 30, bitrateKbps: 6000 }
+// The audit's shape: 1080p30 at the shipping bitrate; --height 720 for 720p30.
+const VIDEO_SHAPES = {
+  1080: { preset: 'custom', width: 1920, height: 1080, fps: 30, bitrateKbps: 6000 },
+  720: { preset: 'custom', width: 1280, height: 720, fps: 30, bitrateKbps: 4000 }
+}
+const video = VIDEO_SHAPES[args.height]
+if (!video) throw new Error(`--height must be one of ${Object.keys(VIDEO_SHAPES).join(', ')}`)
 const layoutFor = (layoutPreset) => ({
   layoutPreset,
   cameraTransformMode: 'preset',
