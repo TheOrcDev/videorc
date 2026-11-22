@@ -181,6 +181,19 @@ pub fn camera_capability_matrix_for_id(
         );
     }
 
+    // Plan 257 S2: every mode the V4L2 node lists, one row per size.
+    if let Some(device_path) = crate::linux_v4l2_camera::parse_linux_v4l2_camera_id(camera_id) {
+        #[cfg(target_os = "linux")]
+        {
+            return linux_v4l2_capability_matrix(&device_path);
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = device_path;
+            return Err("Linux V4L2 camera capability diagnostics need a Linux box.".to_string());
+        }
+    }
+
     let unique_id = parse_native_camera_id(camera_id)
         .ok_or_else(|| "Selected camera is not a native AVFoundation camera.".to_string())?;
 
@@ -197,6 +210,20 @@ pub fn camera_capability_matrix_for_id(
                 .to_string(),
         )
     }
+}
+
+#[cfg(target_os = "linux")]
+fn linux_v4l2_capability_matrix(device_path: &str) -> Result<Vec<CameraFormatSummary>, String> {
+    let modes = crate::linux_v4l2_camera::cached_v4l2_modes(device_path)?;
+    Ok(crate::linux_v4l2_camera::v4l2_size_summary(&modes)
+        .into_iter()
+        .map(|size| CameraFormatSummary {
+            width: size.width,
+            height: size.height,
+            min_fps: size.min_fps,
+            max_fps: size.max_fps,
+        })
+        .collect())
 }
 
 #[cfg(any(target_os = "macos", test))]

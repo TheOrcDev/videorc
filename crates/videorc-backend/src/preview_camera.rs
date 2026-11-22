@@ -4362,7 +4362,13 @@ fn camera_capture_pixel_format_label(pixel_format: Option<u32>) -> Option<String
     pixel_format.map(macos::format_fourcc)
 }
 
-#[cfg(not(target_os = "macos"))]
+/// Plan 257 S2: the V4L2 fourcc of the mode the camera streams.
+#[cfg(target_os = "linux")]
+fn camera_capture_pixel_format_label(pixel_format: Option<u32>) -> Option<String> {
+    pixel_format.map(crate::linux_v4l2_camera::fourcc_label)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 fn camera_capture_pixel_format_label(_pixel_format: Option<u32>) -> Option<String> {
     None
 }
@@ -4501,7 +4507,7 @@ fn downscale_rgba_for_preview(
     (next.into_raw(), next_width, next_height)
 }
 
-#[cfg(any(target_os = "macos", target_os = "windows", test))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux", test))]
 fn fit_camera_source_in_target_box(
     source_width: u32,
     source_height: u32,
@@ -4525,7 +4531,7 @@ fn fit_camera_source_in_target_box(
     )
 }
 
-#[cfg(any(target_os = "macos", target_os = "windows", test))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux", test))]
 fn scale_preserving_aspect(source_dimension: u32, target_dimension: u32, source_basis: u32) -> u32 {
     if source_basis == 0 {
         return target_dimension;
@@ -5543,9 +5549,12 @@ fn run_native_camera_preview(
     }
 }
 
-/// Linux (L3): an owned FFmpeg V4L2 child writes scaled BGRA frames to the
-/// camera frame store, the Windows DirectShow shape. The capture box is the
-/// full output canvas (`camera_capture_target_dimensions`), so a layout
+/// Linux (L3): an owned FFmpeg V4L2 child writes BGRA frames to the camera
+/// frame store, the Windows DirectShow shape. Plan 257 S2: the child asks
+/// for one of the camera's own modes (`-input_format`, size, rate) and pipes
+/// it at its native size, fitted into the output canvas and never enlarged;
+/// the compositor scales it like any other camera frame. The capture box
+/// stays the full canvas (`camera_capture_target_dimensions`), so a layout
 /// switch never restarts the device.
 #[cfg(target_os = "linux")]
 mod linux {
@@ -5555,7 +5564,9 @@ mod linux {
 
     use super::*;
     use crate::linux_v4l2_camera::{
-        V4l2StartFailure, classify_v4l2_failure, v4l2_preview_ffmpeg_args,
+        V4l2CaptureRequest, V4l2Mode, V4l2StartFailure, cached_v4l2_modes, choose_v4l2_mode,
+        classify_v4l2_failure, forget_v4l2_modes, fourcc_label, largest_v4l2_size,
+        v4l2_preview_ffmpeg_args,
     };
     use crate::process_job::spawn_owned_std;
 
@@ -5565,23 +5576,59 @@ mod linux {
         FailedBeforeFirstFrame(String),
     }
 
+    /// The size an attempt pipes at: a listed mode keeps its own size and
+    /// shape, fitted into the canvas; the fallbacks don't know the mode the
+    /// driver will pick, so they keep the canvas shape, shrunk to the
+    /// camera's largest listed size (the Windows rule, issue #1271).
+    pub(super) fn linux_camera_attempt_output(
+        request: &V4l2CaptureRequest,
+        target: (u32, u32),
+        modes: Option<&[V4l2Mode]>,
+    ) -> (u32, u32) {
+        match request {
+            V4l2CaptureRequest::Mode(mode) => {
+                fit_camera_source_in_target_box(mode.width, mode.height, target.0, target.1)
+            }
+            V4l2CaptureRequest::Size { .. } | V4l2CaptureRequest::DeviceDefault => {
+                match modes.and_then(largest_v4l2_size) {
+                    Some((width, height)) => {
+                        fit_camera_source_in_target_box(target.0, target.1, width, height)
+                    }
+                    None => target,
+                }
+            }
+        }
+    }
+
+    /// The start ladder: the camera's own mode when it lists one, then the
+    /// canvas size at the session rate (the driver settles on its nearest
+    /// mode), then the device default.
+    pub(super) fn linux_camera_attempts(
+        target: (u32, u32),
+        fps: u32,
+        modes: Option<&[V4l2Mode]>,
+    ) -> Vec<V4l2CaptureRequest> {
+        let mut attempts = Vec::new();
+        if let Some(mode) = modes.and_then(|modes| choose_v4l2_mode(modes, target, fps)) {
+            attempts.push(V4l2CaptureRequest::Mode(mode));
+        }
+        attempts.push(V4l2CaptureRequest::Size {
+            width: target.0,
+            height: target.1,
+            fps,
+        });
+        attempts.push(V4l2CaptureRequest::DeviceDefault);
+        attempts
+    }
+
     pub fn run_native_camera_preview(
         config: NativeCameraPreviewConfig,
         shared: Arc<StdMutex<PreviewCameraShared>>,
         stop_rx: std_mpsc::Receiver<()>,
         startup_tx: std_mpsc::Sender<NativeCameraStartup>,
     ) {
-        let (width, height) = camera_capture_target_dimensions(&config.layout, &config.video);
+        let target = camera_capture_target_dimensions(&config.layout, &config.video);
         let fps = config.video.fps.clamp(1, 120);
-        let Some(frame_len) = (width as usize)
-            .checked_mul(height as usize)
-            .and_then(|pixels| pixels.checked_mul(4))
-        else {
-            let _ = startup_tx.send(NativeCameraStartup::Failed(
-                "Linux camera preview dimensions are too large.".to_string(),
-            ));
-            return;
-        };
 
         let stop_flag = Arc::new(AtomicBool::new(false));
         {
@@ -5592,24 +5639,81 @@ mod linux {
             });
         }
 
-        // Ask for the canvas size at the session rate (the driver settles on
-        // its nearest mode), then fall back to the device default.
-        let attempts = [Some((width, height, fps)), None];
+        let probe_started_at = Instant::now();
+        let modes = match cached_v4l2_modes(&config.unique_id) {
+            Ok(modes) => {
+                tracing::info!(
+                    camera = %config.unique_id,
+                    probe_ms = probe_started_at.elapsed().as_millis() as u64,
+                    "[camera-modes] V4L2 lists {} mode(s): {}",
+                    modes.len(),
+                    modes
+                        .iter()
+                        .map(|mode| format!(
+                            "{} {}x{}@{:.0}",
+                            fourcc_label(mode.fourcc),
+                            mode.width,
+                            mode.height,
+                            mode.max_fps
+                        ))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+                Some(modes)
+            }
+            Err(error) => {
+                tracing::warn!(
+                    camera = %config.unique_id,
+                    "[camera-modes] V4L2 mode probe failed; negotiating instead: {error}"
+                );
+                None
+            }
+        };
+
+        // Every rung must answer inside LINUX_CAMERA_PREVIEW_STARTUP_TIMEOUT:
+        // a mode that opens but never delivers is killed at its deadline so
+        // the next rung still runs.
+        let start_deadline = Instant::now() + LINUX_CAMERA_START_BUDGET;
         let mut last_stderr = String::new();
-        for request in attempts {
+        for request in linux_camera_attempts(target, fps, modes.as_deref()) {
             if stop_flag.load(Ordering::Acquire) {
                 return;
             }
+            let Some(first_frame_timeout) = linux_camera_attempt_first_frame_timeout(
+                start_deadline.saturating_duration_since(Instant::now()),
+            ) else {
+                last_stderr = format!(
+                    "{last_stderr}\nstart budget of {} s spent before {request:?}",
+                    LINUX_CAMERA_START_BUDGET.as_secs()
+                );
+                break;
+            };
+            let output = linux_camera_attempt_output(&request, target, modes.as_deref());
+            let Some(frame_len) = (output.0 as usize)
+                .checked_mul(output.1 as usize)
+                .and_then(|pixels| pixels.checked_mul(4))
+            else {
+                let _ = startup_tx.send(NativeCameraStartup::Failed(
+                    "Linux camera preview dimensions are too large.".to_string(),
+                ));
+                return;
+            };
             match run_attempt(
                 &config,
                 &shared,
                 &startup_tx,
                 &stop_flag,
-                (width, height, fps, frame_len),
-                request,
+                (target, output, fps, frame_len),
+                &request,
+                first_frame_timeout,
             ) {
                 Attempt::ProducedFrames | Attempt::Stopped => return,
                 Attempt::FailedBeforeFirstFrame(stderr) => {
+                    tracing::warn!(
+                        camera = %config.unique_id,
+                        "Linux camera preview attempt {request:?} produced no frame: {}",
+                        stderr.lines().rev().find(|line| !line.trim().is_empty()).unwrap_or("")
+                    );
                     let fatal = matches!(
                         classify_v4l2_failure(&config.unique_id, &stderr),
                         V4l2StartFailure::PermissionNeeded(_) | V4l2StartFailure::DeviceMissing(_)
@@ -5621,6 +5725,9 @@ mod linux {
                 }
             }
         }
+        // The modes may be what failed (another driver, a replugged
+        // device): probe again next time.
+        forget_v4l2_modes(Some(&config.unique_id));
         let _ = startup_tx.send(
             match classify_v4l2_failure(&config.unique_id, &last_stderr) {
                 V4l2StartFailure::PermissionNeeded(message) => {
@@ -5639,15 +5746,17 @@ mod linux {
         shared: &Arc<StdMutex<PreviewCameraShared>>,
         startup_tx: &std_mpsc::Sender<NativeCameraStartup>,
         stop_flag: &Arc<AtomicBool>,
-        (width, height, fps, frame_len): (u32, u32, u32, usize),
-        request: Option<(u32, u32, u32)>,
+        (target, (width, height), fps, frame_len): ((u32, u32), (u32, u32), u32, usize),
+        request: &V4l2CaptureRequest,
+        first_frame_timeout: Duration,
     ) -> Attempt {
+        let first_frame_deadline = Instant::now() + first_frame_timeout;
         let mut command = Command::new(&config.ffmpeg_path);
         command
             .args(v4l2_preview_ffmpeg_args(
                 &config.unique_id,
-                width,
-                height,
+                (width, height),
+                fps,
                 request,
             ))
             .stdin(Stdio::null())
@@ -5670,48 +5779,58 @@ mod linux {
         let stderr = collect_stderr(child.stderr.take());
         let child = Arc::new(StdMutex::new(child));
         let done = Arc::new(AtomicBool::new(false));
-        let killer =
-            spawn_stop_flag_killer(Arc::clone(&child), Arc::clone(&done), Arc::clone(stop_flag));
+        let race = Arc::new(FirstFrameRace::default());
+        let killer = spawn_stop_flag_killer(
+            Arc::clone(&child),
+            Arc::clone(&done),
+            Arc::clone(stop_flag),
+            (first_frame_deadline, Arc::clone(&race)),
+        );
 
-        let mut buffer = shared
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .frame_store
-            .checkout_overwrite_buffer(frame_len);
+        let mut buffer = {
+            let mut guard = shared
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            // Health names the format the camera streams; the fallbacks
+            // don't know it.
+            guard.capture_pixel_format = match request {
+                V4l2CaptureRequest::Mode(mode) => Some(mode.fourcc),
+                _ => None,
+            };
+            guard.frame_store.checkout_overwrite_buffer(frame_len)
+        };
         let mut startup_sent = false;
         loop {
             if stdout.read_exact(&mut buffer).is_err() {
                 break;
             }
+            if !startup_sent && !race.claim_live() {
+                // The deadline passed while this frame was in the pipe: the
+                // killer owns the attempt, and reporting Live now would hand
+                // the ladder a preview that is already dead.
+                let _ = child
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .kill();
+                break;
+            }
             buffer = publish_bgra_frame(shared, width, height, buffer);
             if !startup_sent {
-                let _ = startup_tx.send(NativeCameraStartup::Live {
-                    requested_width: width,
-                    requested_height: height,
-                    selected_format_width: request.map_or(width, |request| request.0),
-                    selected_format_height: request.map_or(height, |request| request.1),
-                    selected_format_min_fps: fps as f64,
-                    selected_format_max_fps: fps as f64,
-                    width,
-                    height,
-                    selected_fps: fps as f64,
-                    message: Some(if request.is_some() {
-                        format!(
-                            "Linux V4L2 camera preview requested {width}x{height}@{fps} from {}; the driver streams its nearest mode, scaled to fit.",
-                            config.unique_id
-                        )
-                    } else {
-                        format!(
-                            "Linux V4L2 camera preview is using the device default mode of {}, scaled to {width}x{height}.",
-                            config.unique_id
-                        )
-                    }),
-                });
+                let _ = startup_tx.send(linux_camera_live_startup(
+                    &config.unique_id,
+                    target,
+                    (width, height),
+                    fps,
+                    request,
+                ));
                 startup_sent = true;
             }
         }
 
         done.store(true, Ordering::Release);
+        // Nothing reads the pipe any more; closing it lets an FFmpeg still
+        // writing exit instead of blocking the `wait`.
+        drop(stdout);
         let _ = child
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -5721,6 +5840,11 @@ mod linux {
             Attempt::ProducedFrames
         } else if stop_flag.load(Ordering::Acquire) {
             Attempt::Stopped
+        } else if race.timed_out() {
+            Attempt::FailedBeforeFirstFrame(format!(
+                "no frame within {} ms",
+                first_frame_timeout.as_millis()
+            ))
         } else {
             Attempt::FailedBeforeFirstFrame(
                 String::from_utf8_lossy(
@@ -5730,6 +5854,82 @@ mod linux {
                 )
                 .into_owned(),
             )
+        }
+    }
+
+    /// What the first frame reports: the mode the camera streams (Health's
+    /// format line and the Sources shortfall warning, in the words the
+    /// Windows start uses) and the size frames are piped at.
+    pub(super) fn linux_camera_live_startup(
+        device: &str,
+        (target_width, target_height): (u32, u32),
+        (width, height): (u32, u32),
+        fps: u32,
+        request: &V4l2CaptureRequest,
+    ) -> NativeCameraStartup {
+        let (selected_format, selected_fps, message) = match request {
+            V4l2CaptureRequest::Mode(mode) => {
+                let rate = if mode.max_fps >= 1.0 {
+                    mode.max_fps.min(f64::from(fps))
+                } else {
+                    f64::from(fps)
+                };
+                let label = format!(
+                    "{} {}x{}@{rate:.0}",
+                    fourcc_label(mode.fourcc),
+                    mode.width,
+                    mode.height
+                );
+                let short = mode.max_fps + 0.5 < f64::from(fps)
+                    || mode.width < target_width
+                    || mode.height < target_height;
+                let message = if short {
+                    format!(
+                        "Requested {target_width}x{target_height}@{fps} was not available; selected native {}x{} at {:.0}-{:.0} fps. Linux V4L2 camera preview is using {label} from {device}, piped at {width}x{height}.",
+                        mode.width, mode.height, mode.min_fps, mode.max_fps
+                    )
+                } else {
+                    format!(
+                        "Linux V4L2 camera preview is using the camera's native {label} from {device}, piped at {width}x{height}."
+                    )
+                };
+                (
+                    (mode.width, mode.height, mode.min_fps, mode.max_fps),
+                    rate,
+                    message,
+                )
+            }
+            V4l2CaptureRequest::Size {
+                width: asked_width,
+                height: asked_height,
+                ..
+            } => (
+                (width, height, f64::from(fps), f64::from(fps)),
+                f64::from(fps),
+                format!(
+                    "Linux V4L2 camera preview requested {asked_width}x{asked_height}@{fps} from {device}; the driver streams its nearest mode, piped at {width}x{height}."
+                ),
+            ),
+            V4l2CaptureRequest::DeviceDefault => (
+                (width, height, f64::from(fps), f64::from(fps)),
+                f64::from(fps),
+                format!(
+                    "Linux V4L2 camera preview is using the device default mode of {device}, piped at {width}x{height}."
+                ),
+            ),
+        };
+        let (selected_format_width, selected_format_height, min_fps, max_fps) = selected_format;
+        NativeCameraStartup::Live {
+            requested_width: target_width,
+            requested_height: target_height,
+            selected_format_width,
+            selected_format_height,
+            selected_format_min_fps: min_fps,
+            selected_format_max_fps: max_fps,
+            width,
+            height,
+            selected_fps,
+            message: Some(message),
         }
     }
 
@@ -5756,14 +5956,21 @@ mod linux {
         bytes
     }
 
+    /// Kills the attempt's FFmpeg on Stop, or when it has produced no frame by
+    /// the deadline: a V4L2 mode that opens but never delivers would
+    /// otherwise block `read_exact` past the whole start budget.
     fn spawn_stop_flag_killer(
         child: Arc<StdMutex<Child>>,
         done: Arc<AtomicBool>,
         stop_flag: Arc<AtomicBool>,
+        (first_frame_deadline, race): (Instant, Arc<FirstFrameRace>),
     ) -> thread::JoinHandle<()> {
         thread::spawn(move || {
             while !done.load(Ordering::Acquire) {
-                if stop_flag.load(Ordering::Acquire) {
+                // Past the deadline the killer acts only if it wins the race;
+                // a reader that already claimed Live keeps its child.
+                let stalled = Instant::now() >= first_frame_deadline && race.claim_timed_out();
+                if stop_flag.load(Ordering::Acquire) || stalled {
                     let _ = child
                         .lock()
                         .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -5773,6 +5980,224 @@ mod linux {
                 thread::sleep(Duration::from_millis(50));
             }
         })
+    }
+
+    /// The whole ladder's share of LINUX_CAMERA_PREVIEW_STARTUP_TIMEOUT, with
+    /// a second left for the start to report.
+    const LINUX_CAMERA_START_BUDGET: Duration = Duration::from_secs(11);
+    /// One rung's wait for its first frame; a camera that streams starts well
+    /// inside it (the FaceTime HD's first frame lands in ~1.8 s).
+    const LINUX_CAMERA_ATTEMPT_FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(4);
+    const LINUX_CAMERA_MIN_ATTEMPT: Duration = Duration::from_secs(1);
+
+    /// A rung's first-frame deadline from what is left of the start budget;
+    /// `None` when too little is left to try it.
+    pub(super) fn linux_camera_attempt_first_frame_timeout(
+        remaining: Duration,
+    ) -> Option<Duration> {
+        let timeout = remaining.min(LINUX_CAMERA_ATTEMPT_FIRST_FRAME_TIMEOUT);
+        (timeout >= LINUX_CAMERA_MIN_ATTEMPT).then_some(timeout)
+    }
+
+    const FIRST_FRAME_IDLE: u8 = 0;
+    const FIRST_FRAME_LIVE: u8 = 1;
+    const FIRST_FRAME_TIMED_OUT: u8 = 2;
+
+    /// The attempt's first-frame race, settled exactly once (the Windows
+    /// ladder's rule): the reader claims Live when `read_exact` hands it a
+    /// frame, the killer claims TimedOut when the deadline passes first, and
+    /// only the winner acts.
+    #[derive(Debug, Default)]
+    pub(super) struct FirstFrameRace(std::sync::atomic::AtomicU8);
+
+    impl FirstFrameRace {
+        pub(super) fn claim_live(&self) -> bool {
+            self.0
+                .compare_exchange(
+                    FIRST_FRAME_IDLE,
+                    FIRST_FRAME_LIVE,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                )
+                .is_ok()
+        }
+
+        pub(super) fn claim_timed_out(&self) -> bool {
+            self.0
+                .compare_exchange(
+                    FIRST_FRAME_IDLE,
+                    FIRST_FRAME_TIMED_OUT,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                )
+                .is_ok()
+        }
+
+        pub(super) fn timed_out(&self) -> bool {
+            self.0.load(Ordering::Acquire) == FIRST_FRAME_TIMED_OUT
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use crate::linux_v4l2_camera::fourcc;
+
+        fn mode(code: &[u8; 4], width: u32, height: u32, max_fps: f64) -> V4l2Mode {
+            V4l2Mode {
+                fourcc: fourcc(code),
+                width,
+                height,
+                min_fps: 1.0,
+                max_fps,
+            }
+        }
+
+        #[test]
+        fn the_ladder_tries_the_native_mode_first_and_pipes_it_unscaled() {
+            let facetime = [
+                mode(b"NV12", 1280, 720, 30.0),
+                mode(b"NV12", 640, 480, 30.0),
+            ];
+            let attempts = linux_camera_attempts((1920, 1080), 30, Some(&facetime));
+            assert_eq!(
+                attempts,
+                [
+                    V4l2CaptureRequest::Mode(mode(b"NV12", 1280, 720, 30.0)),
+                    V4l2CaptureRequest::Size {
+                        width: 1920,
+                        height: 1080,
+                        fps: 30
+                    },
+                    V4l2CaptureRequest::DeviceDefault,
+                ]
+            );
+            // 720p native on a 1080p canvas: 3.7 MB frames, not 8.3 MB.
+            assert_eq!(
+                linux_camera_attempt_output(&attempts[0], (1920, 1080), Some(&facetime)),
+                (1280, 720)
+            );
+            // The fallbacks keep the canvas shape, no bigger than the camera.
+            assert_eq!(
+                linux_camera_attempt_output(&attempts[1], (1920, 1080), Some(&facetime)),
+                (1280, 720)
+            );
+            // A 4K mode on a 1080p canvas is fitted down.
+            assert_eq!(
+                linux_camera_attempt_output(
+                    &V4l2CaptureRequest::Mode(mode(b"MJPG", 3840, 2160, 30.0)),
+                    (1920, 1080),
+                    None
+                ),
+                (1920, 1080)
+            );
+        }
+
+        #[test]
+        fn every_rung_gets_a_first_frame_deadline_inside_the_start_budget() {
+            // A stalled native mode can no longer eat the whole 12 s start.
+            assert_eq!(
+                linux_camera_attempt_first_frame_timeout(LINUX_CAMERA_START_BUDGET),
+                Some(Duration::from_secs(4))
+            );
+            assert_eq!(
+                linux_camera_attempt_first_frame_timeout(Duration::from_millis(2500)),
+                Some(Duration::from_millis(2500))
+            );
+            assert_eq!(
+                linux_camera_attempt_first_frame_timeout(Duration::from_millis(900)),
+                None
+            );
+            assert!(LINUX_CAMERA_START_BUDGET < super::super::LINUX_CAMERA_PREVIEW_STARTUP_TIMEOUT);
+            // Three stalled rungs: 4 s + 4 s + 3 s fit the budget.
+            let mut remaining = LINUX_CAMERA_START_BUDGET;
+            let mut rungs = 0;
+            while let Some(timeout) = linux_camera_attempt_first_frame_timeout(remaining) {
+                remaining -= timeout;
+                rungs += 1;
+            }
+            assert_eq!(rungs, 3);
+        }
+
+        #[test]
+        fn the_first_frame_race_settles_once() {
+            let race = FirstFrameRace::default();
+            assert!(race.claim_live());
+            assert!(!race.claim_timed_out());
+            assert!(!race.timed_out());
+            let race = FirstFrameRace::default();
+            assert!(race.claim_timed_out());
+            assert!(!race.claim_live());
+            assert!(race.timed_out());
+        }
+
+        #[test]
+        fn an_unreadable_camera_keeps_the_old_negotiated_ladder() {
+            let attempts = linux_camera_attempts((1920, 1080), 30, None);
+            assert_eq!(attempts.len(), 2);
+            assert_eq!(
+                linux_camera_attempt_output(&attempts[0], (1920, 1080), None),
+                (1920, 1080)
+            );
+        }
+
+        #[test]
+        fn the_first_frame_reports_the_native_mode_and_any_shortfall() {
+            let NativeCameraStartup::Live {
+                requested_width,
+                selected_format_width,
+                selected_format_height,
+                selected_format_max_fps,
+                width,
+                height,
+                selected_fps,
+                message,
+                ..
+            } = linux_camera_live_startup(
+                "/dev/video0",
+                (1920, 1080),
+                (1280, 720),
+                30,
+                &V4l2CaptureRequest::Mode(mode(b"NV12", 1280, 720, 30.0)),
+            )
+            else {
+                panic!("live");
+            };
+            assert_eq!(requested_width, 1920);
+            assert_eq!(
+                (
+                    selected_format_width,
+                    selected_format_height,
+                    selected_format_max_fps
+                ),
+                (1280, 720, 30.0)
+            );
+            assert_eq!((width, height, selected_fps), (1280, 720, 30.0));
+            let message = message.unwrap();
+            // The Sources shortfall warning reads these words.
+            assert!(
+                message.starts_with(
+                    "Requested 1920x1080@30 was not available; selected native 1280x720"
+                ),
+                "{message}"
+            );
+            assert!(message.contains("NV12 1280x720@30"), "{message}");
+
+            let NativeCameraStartup::Live { message, .. } = linux_camera_live_startup(
+                "/dev/video0",
+                (1280, 720),
+                (1280, 720),
+                30,
+                &V4l2CaptureRequest::Mode(mode(b"NV12", 1280, 720, 30.0)),
+            ) else {
+                panic!("live");
+            };
+            assert!(
+                message
+                    .unwrap()
+                    .contains("the camera's native NV12 1280x720@30")
+            );
+        }
     }
 }
 

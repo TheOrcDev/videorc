@@ -51,6 +51,7 @@ import {
 } from '@/lib/health-checks'
 import { isMacPlatform } from '@/lib/platform'
 import { formatLatencyMs, formatTimelineSummary, slowestTimelinePhase } from '@/lib/record-latency'
+import { cameraFormatFacts } from '@/lib/source-facts'
 import { unknownDeviceWarnings } from '@/lib/source-status'
 import { previewSourceStateLabel } from '@/lib/state-labels'
 import { statusWordFromValue } from '@/lib/status-word'
@@ -846,6 +847,7 @@ function PreviewMetrics({ macOS }: { macOS: boolean }): ReactElement {
         label="Surface resizes"
         value={stats.previewSurfaceResizeCount.toString()}
       />
+      <DiagnosticMetric label="Camera format" value={cameraFormatFacts(stats) ?? NO_VALUE} />
       <DiagnosticMetric
         label="Camera source"
         value={formatPreviewSourceStatus(
