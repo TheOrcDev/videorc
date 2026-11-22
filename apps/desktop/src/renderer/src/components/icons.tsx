@@ -172,10 +172,10 @@ export {
   ClosedCaptioning as CaptionsIcon,
   Record as OutputIcon,
   FilmReel as LibraryIcon,
-  GearSix as SettingsIcon,
   Pulse as HealthIcon
 } from '@phosphor-icons/react'
 export { AvatarPageIcon } from './avatar-page-icon'
+export { SettingsIcon } from './settings-icon'
 export { SoundsPageIcon } from './sounds-page-icon'
 export { NotificationsIcon } from './notifications-icon'
 /**

@@ -21,6 +21,7 @@ import { fetchControlFromUrl, stopFilePath } from './lib/kill-switch.mjs'
 import { loadPolicy } from './lib/policy.mjs'
 import { createQuotaLedger } from './lib/quota-ledger.mjs'
 import { acquireRunLock, processAlive, readRunLock, releaseRunLock } from './lib/run-lock.mjs'
+import { labSessionEnv, readSessionLock } from './lib/linux-desktop.mjs'
 import { createSessionStarter } from './lib/session.mjs'
 
 const repoRoot = resolve(import.meta.dirname, '..', '..')
@@ -70,6 +71,11 @@ const result = await executeRun({
     processAlive,
     countRunsToday: (day, timeZone) => countRunsToday({ runsDir: runsDirOf(work), day, timeZone }),
     machineFacts: () => gatherMachineFacts({ repoRoot }),
+    // Plan 257 D12: the lab refuses to run while the Linux session is locked.
+    sessionLock:
+      process.platform === 'linux'
+        ? async () => readSessionLock({ sessionEnv: await labSessionEnv() })
+        : undefined,
     startSession: async (options) =>
       createSessionStarter({
         config: await readConfig(lab),

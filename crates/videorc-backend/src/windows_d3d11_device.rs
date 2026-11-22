@@ -8,6 +8,10 @@ use std::time::Instant;
 const WINDOWS_DXGI_SCREEN_PREFIX: &str = "screen:dxgi:";
 const D3D11_MAX_TEXTURE_DIMENSION: u32 = 16_384;
 const D3D11_MAX_TEXTURES_PER_FORMAT: usize = 8;
+/// NV12 gets a deeper ceiling than BGRA: a Record encoder queues a time
+/// budget of inputs, 12 at 60 fps (#1042). 16 NV12 textures are about 50 MB
+/// at 1080p and 200 MB at 4K.
+pub(crate) const D3D11_MAX_NV12_TEXTURES: usize = 16;
 const D3D11_MAX_MEDIA_QUEUE_CAPACITY: usize = 256;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -207,8 +211,8 @@ impl WindowsD3d11TexturePoolConfig {
         nv12: WindowsD3d11Nv12TextureDescriptor,
         nv12_slots: usize,
     ) -> Result<Self, WindowsD3d11Error> {
-        validate_pool_size("BGRA", bgra_slots)?;
-        validate_pool_size("NV12", nv12_slots)?;
+        validate_pool_size("BGRA", bgra_slots, D3D11_MAX_TEXTURES_PER_FORMAT)?;
+        validate_pool_size("NV12", nv12_slots, D3D11_MAX_NV12_TEXTURES)?;
         Ok(Self {
             bgra,
             bgra_slots,
@@ -231,18 +235,36 @@ impl WindowsD3d11TexturePoolConfig {
         primary_nv12_slots: usize,
         auxiliary_nv12: Option<(WindowsD3d11Nv12TextureDescriptor, usize)>,
     ) -> Result<Self, WindowsD3d11Error> {
-        validate_pool_size("capture BGRA", capture_bgra_slots)?;
-        validate_pool_size("preview BGRA", preview_bgra_slots)?;
-        validate_pool_size("primary NV12", primary_nv12_slots)?;
+        validate_pool_size(
+            "capture BGRA",
+            capture_bgra_slots,
+            D3D11_MAX_TEXTURES_PER_FORMAT,
+        )?;
+        validate_pool_size(
+            "preview BGRA",
+            preview_bgra_slots,
+            D3D11_MAX_TEXTURES_PER_FORMAT,
+        )?;
+        validate_pool_size("primary NV12", primary_nv12_slots, D3D11_MAX_NV12_TEXTURES)?;
         let (auxiliary_nv12, auxiliary_nv12_slots) = match auxiliary_nv12 {
             Some((descriptor, slots)) => {
-                validate_pool_size("auxiliary NV12", slots)?;
+                validate_pool_size("auxiliary NV12", slots, D3D11_MAX_NV12_TEXTURES)?;
                 (Some(descriptor), slots)
             }
             None => (None, 0),
         };
-        validate_combined_pool_size("BGRA", capture_bgra_slots, preview_bgra_slots)?;
-        validate_combined_pool_size("NV12", primary_nv12_slots, auxiliary_nv12_slots)?;
+        validate_combined_pool_size(
+            "BGRA",
+            capture_bgra_slots,
+            preview_bgra_slots,
+            D3D11_MAX_TEXTURES_PER_FORMAT,
+        )?;
+        validate_combined_pool_size(
+            "NV12",
+            primary_nv12_slots,
+            auxiliary_nv12_slots,
+            D3D11_MAX_NV12_TEXTURES,
+        )?;
         Ok(Self {
             bgra: capture_bgra,
             bgra_slots: capture_bgra_slots,
@@ -342,13 +364,11 @@ fn add_pool_bucket(
     }
 }
 
-fn validate_pool_size(label: &str, slots: usize) -> Result<(), WindowsD3d11Error> {
-    if !(1..=D3D11_MAX_TEXTURES_PER_FORMAT).contains(&slots) {
+fn validate_pool_size(label: &str, slots: usize, ceiling: usize) -> Result<(), WindowsD3d11Error> {
+    if !(1..=ceiling).contains(&slots) {
         return Err(WindowsD3d11Error::new(
             WindowsD3d11ErrorCode::InvalidTextureDescriptor,
-            format!(
-                "{label} texture pool size must be between 1 and {D3D11_MAX_TEXTURES_PER_FORMAT}"
-            ),
+            format!("{label} texture pool size must be between 1 and {ceiling}"),
         ));
     }
     Ok(())
@@ -358,6 +378,7 @@ fn validate_combined_pool_size(
     label: &str,
     first: usize,
     second: usize,
+    ceiling: usize,
 ) -> Result<(), WindowsD3d11Error> {
     let combined = first.checked_add(second).ok_or_else(|| {
         WindowsD3d11Error::new(
@@ -365,12 +386,10 @@ fn validate_combined_pool_size(
             format!("{label} texture pool size overflowed"),
         )
     })?;
-    if combined > D3D11_MAX_TEXTURES_PER_FORMAT {
+    if combined > ceiling {
         return Err(WindowsD3d11Error::new(
             WindowsD3d11ErrorCode::InvalidTextureDescriptor,
-            format!(
-                "combined {label} texture pool size must not exceed {D3D11_MAX_TEXTURES_PER_FORMAT}"
-            ),
+            format!("combined {label} texture pool size must not exceed {ceiling}"),
         ));
     }
     Ok(())
@@ -6263,6 +6282,42 @@ mod tests {
                 1,
             )
             .is_err()
+        );
+        // NV12 has its own, deeper ceiling (#1042): a Record queue sized in
+        // time fits, one more does not, and BGRA keeps the shallow one.
+        let bgra = WindowsD3d11BgraTextureDescriptor::new(1920, 1080).unwrap();
+        let nv12 = WindowsD3d11Nv12TextureDescriptor::new(1920, 1080).unwrap();
+        assert!(WindowsD3d11TexturePoolConfig::new(bgra, 5, nv12, D3D11_MAX_NV12_TEXTURES).is_ok());
+        assert!(
+            WindowsD3d11TexturePoolConfig::new(bgra, 5, nv12, D3D11_MAX_NV12_TEXTURES + 1).is_err()
+        );
+        assert!(
+            WindowsD3d11TexturePoolConfig::dimension_keyed(
+                bgra,
+                5,
+                bgra,
+                3,
+                nv12,
+                13,
+                Some((nv12, 3))
+            )
+            .is_ok()
+        );
+        assert!(
+            WindowsD3d11TexturePoolConfig::dimension_keyed(
+                bgra,
+                5,
+                bgra,
+                3,
+                nv12,
+                14,
+                Some((nv12, 3))
+            )
+            .is_err()
+        );
+        assert!(
+            WindowsD3d11TexturePoolConfig::dimension_keyed(bgra, 5, bgra, 4, nv12, 14, None)
+                .is_err()
         );
     }
 

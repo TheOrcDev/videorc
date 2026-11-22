@@ -1599,13 +1599,19 @@ async fn send_web_intent<W: CloudWebApi>(
     } else {
         CONTROL_INTENT_BUDGET
     };
-    let deadline = tokio::time::Instant::now() + budget;
-    tokio::time::timeout_at(
+    // Plan 253 S7 (D8): the command time, on this one clock, from the send
+    // to the web's answer, a failure or the deadline.
+    let kind = frame["kind"].as_str().unwrap_or_default().to_string();
+    let sent = tokio::time::Instant::now();
+    let deadline = sent + budget;
+    let answer = tokio::time::timeout_at(
         deadline,
         send_web_intent_until(web, bearer, show_id, floor, destinations, frame, deadline),
     )
     .await
-    .unwrap_or_else(|_| Err(failure_line(&intent_timeout())))
+    .unwrap_or_else(|_| Err(failure_line(&intent_timeout())));
+    crate::cloud_latency::note_command(show_id, &kind, sent.elapsed(), answer.is_err());
+    answer
 }
 
 async fn send_web_intent_until<W: CloudWebApi>(

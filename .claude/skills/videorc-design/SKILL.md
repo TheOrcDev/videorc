@@ -598,7 +598,12 @@ links home.
   shown while the host shares a screen or while it is hidden. Agents and
   Sidekick hide, never show. While hidden, the Screen row, the Show stage's
   Screens and the Stream Manager show a "Screen hidden" chip and nothing
-  toasts.
+  toasts. What the hidden screen shows (owner 2026-11-20: "gradients, like a
+  glassy thing, but without transparency"): one designed, fully opaque still
+  everywhere it is drawn (every output, the Show stage, the program and guest
+  pages): a calm navy-to-violet gradient, a soft diagonal sheen and a glass
+  disc with the eye-slash. Never a blur of the screen and never grey. It is
+  on-stream pixels, so it does not follow the app theme.
 - **The local file**: Output ("Where recordings go", quality). Recordings
   themselves live in Library.
 - **Avatar** (plan 239, owner 2026-11-15): the Avatar page (Livestream, ⌘8;

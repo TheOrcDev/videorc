@@ -1,4 +1,8 @@
+import type { BackendClient } from '@/backendClient'
 import type { HostSpeechTap } from './room-speech-source'
+import type { GuestSpeechTap } from './room-guest-speech'
+// Guest captions ride the lazily loaded room chunk, never the eager bundle.
+export { attachGuestSpeech } from './room-guest-speech'
 import {
   createRoomMicrophoneSource,
   microphoneRequiresReplacement,
@@ -58,8 +62,8 @@ import {
   type RoomSceneStatus,
   type SceneContent
 } from './room-scene-publisher'
+import { createPrivateScreen } from './room-private-screen'
 import {
-  createPrivateScreen,
   roomScreenPrivacy,
   privacyTrackName,
   privacyObservationMatches,
@@ -67,14 +71,16 @@ import {
   PRIVACY_TOPIC,
   type ScreenPrivacyPublication
 } from './room-screen-privacy'
-import { frostedStillUrl, keepFrostSample } from './frost-still'
+import { hiddenStillUrl } from './hidden-still'
 import { RoomLatencyHost } from './room-latency-host'
+import { roomLatencyReport } from './room-latency-report'
 import {
   LATENCY_TOPIC,
   type ConversationDelay,
   type NetStatsTrack,
   type NetTrack,
-  type ProgramDelay
+  type ProgramDelay,
+  type RoomLatency
 } from '../../../shared/room-latency'
 // The host in the room (plan 224 C-G4, D6): `livekit-client` publishes the
 // Sources camera and microphone and, on request, a screen picked through
@@ -128,8 +134,10 @@ import {
 import { sendOverlay, type OverlayImage } from '@/lib/talk-show-overlays'
 import {
   RemoteAudioAttachments,
+  guestCaptionTracks,
   isRecorderIdentity,
-  isRunnerIdentity
+  isRunnerIdentity,
+  type GuestMicrophone
 } from '@/lib/talk-show-room-audio'
 
 export { isRunnerIdentity } from '@/lib/talk-show-room-audio'
@@ -137,6 +145,8 @@ export { isRunnerIdentity } from '@/lib/talk-show-room-audio'
 /** The data topic the guest page listens on (`guest-wire.ts`, `STAGE_TOPIC`). */
 export const STAGE_TOPIC = 'videorc.stage'
 const RECONNECT_BACKOFF_MS = [1000, 2000, 4000, 8000, 15000]
+/** The Show stage's hidden still is drawn at most this tall; the stage scales it. */
+const STAGE_STILL_ROWS = 720
 /** Plan 243 C5: how long a duplicate host waits for `onAir` to name the new device. */
 export const TAKEN_OVER_GRACE_MS = 3000
 const TAKEN_OVER_POLL_MS = 100
@@ -190,10 +200,9 @@ export type TalkShowLocalMedia = {
    */
   screenSourceId?: string | null
   /**
-   * Plan 210 D8 in a room: while the screen is hidden, the frosted still of
-   * the last frame the room saw (a PNG data URL), drawn over the host's
-   * screen as guests and the program draw it. Absent while visible, and when
-   * the screen was hidden before any frame was shared (the grey stays).
+   * Hide screen in a room: while the screen is hidden, the designed hidden
+   * still at the screen's size (a PNG data URL, hidden-still.ts), drawn over
+   * the host's screen as guests and the program draw it. Absent while visible.
    */
   screenStill?: string
 }
@@ -251,6 +260,15 @@ export type TalkShowRoomDeps = {
     muted: boolean,
     current: () => boolean
   ) => HostSpeechTap
+  /**
+   * Guest captions: the mix of the on-stage guests' microphones for the
+   * backend's captions-only guest stream. Host rooms only.
+   */
+  attachGuestSpeech?: (
+    showId: string,
+    current: () => boolean,
+    onCaptioning: (captioning: boolean) => void
+  ) => GuestSpeechTap
   /** S7a explicit dev fixture; not inferred from media-v2 or exposed as production mode. */
   pcmTestSource?: boolean
   onPcmDiagnostic?: (value: unknown) => void
@@ -283,6 +301,12 @@ export type TalkShowRoomDeps = {
    * measured; a node show's room samples nothing and shows no number.
    */
   measureLatency?: () => boolean
+  /**
+   * Plan 253 S7: the backend, which keeps the show's latency record
+   * (`cloud.room.latency.report` after each 10 s sample). Without it
+   * nothing is reported and the numbers stay in this window.
+   */
+  backend?: Pick<BackendClient, 'requestTyped'> | null
   /**
    * Plan 243 C5: the device on air, from the latest `cloud.state`, so a
    * second host connection that drops this one reads as taken over.
@@ -332,7 +356,9 @@ export function talkShowRoomOptions(): RoomOptions {
  * first, which is all an older guest page reads. */
 export function stageMessage(
   onStage: readonly string[],
-  screen: string | null | readonly string[] = null
+  screen: string | null | readonly string[] = null,
+  /** Guest captions: the on-stage guests are being captioned right now. */
+  captions = false
 ): Uint8Array<ArrayBuffer> {
   const named = [...new Set(typeof screen === 'string' ? [screen] : (screen ?? []))]
     .filter((identity) => onStage.includes(identity))
@@ -342,7 +368,9 @@ export function stageMessage(
       v: 1,
       onStage: [...onStage],
       screen: named[0] ?? null,
-      ...(named.length === 2 ? { screens: named } : {})
+      ...(named.length === 2 ? { screens: named } : {}),
+      // The guest page's "Live captions are on" line (web guest-wire.ts).
+      ...(captions ? { captions: true } : {})
     })
   )
 }
@@ -426,6 +454,8 @@ export class TalkShowRoomClient {
   #microphoneOpening: Promise<void> = Promise.resolve()
   #microphoneCleanupFailed = false
   #speech: HostSpeechTap | null = null
+  #guestSpeech: GuestSpeechTap | null = null
+  #guestCaptioning = false
   #microphoneGeneration = 0
   #screen: LocalVideoTrack | null = null
   #screenGeneration = 0
@@ -438,9 +468,9 @@ export class TalkShowRoomClient {
   #privacy: TalkShowRoomSnapshot['screenPrivacy']
   #privacyEpoch = crypto.randomUUID().replaceAll('-', '')
   #privacyGeneration = 0
-  /** The hidden screen's frosted still (`TalkShowLocalMedia.screenStill`). */
+  /** The hidden screen's still (`TalkShowLocalMedia.screenStill`). */
   #screenStill: string | null = null
-  /** Bumped when a still is started or dropped: a late frost is ignored. */
+  /** Bumped when a still is started or dropped: a late still is ignored. */
   #stillToken = 0
   #screenWork: Promise<void> = Promise.resolve()
   #speaking = new Set<string>()
@@ -520,6 +550,7 @@ export class TalkShowRoomClient {
       clearTimer: (handle) => window.clearTimeout(handle as number),
       enabled: () => deps.measureLatency?.() === true,
       now: () => performance.now(),
+      sampled: (latency) => this.#reportLatency(latency),
       setInterval: (run, everyMs) => window.setInterval(run, everyMs),
       setTimeout: (run, afterMs) => window.setTimeout(run, afterMs)
     })
@@ -606,12 +637,17 @@ export class TalkShowRoomClient {
     this.#lastStage = [...onStage]
     this.#lastScreen = screen
     const room = this.#room
+    // Who is on stage decides whose voice is captioned.
+    this.#feedGuestSpeech(room)
     if (!room || room.state !== ConnectionState.Connected) return
     try {
-      await room.localParticipant.publishData(stageMessage(onStage, screen), {
-        reliable: true,
-        topic: STAGE_TOPIC
-      })
+      await room.localParticipant.publishData(
+        stageMessage(onStage, screen, this.#guestCaptioning),
+        {
+          reliable: true,
+          topic: STAGE_TOPIC
+        }
+      )
     } catch (error) {
       console.warn('[talk-show] the stage did not reach the room', error)
     }
@@ -825,9 +861,11 @@ export class TalkShowRoomClient {
     old?.stop()
     this.#privateScreen?.close()
     this.#privateScreen = null
-    // Shown again: the live picture replaces the still. A new screen while
-    // hidden keeps it, as guests and the program keep theirs.
+    // Shown again: the live picture replaces the still. Hidden: the still,
+    // drawn once per hide, kept for a new screen while hidden, as guests and
+    // the program keep theirs.
     if (!expected.hidden) this.#dropScreenStill()
+    else if (!this.#screenStill) this.#keepScreenStill(raw)
     this.#privacy = {
       ...expected,
       sourceBlockedAt: expected.hidden ? Date.now() : null,
@@ -864,15 +902,10 @@ export class TalkShowRoomClient {
         if (old && room) await room.localParticipant.unpublishTrack(old, true).catch(() => {})
         if (!current() || !raw || !room) return
         try {
-          const guarded = createPrivateScreen(
-            raw,
-            roomScreenPrivacy,
-            () => {
-              if (!current()) return
-              this.#privacyFailed()
-            },
-            (last) => this.#keepScreenStill(last)
-          )
+          const guarded = createPrivateScreen(raw, roomScreenPrivacy, () => {
+            if (!current()) return
+            this.#privacyFailed()
+          })
           if (!current()) {
             guarded.close()
             return
@@ -902,19 +935,22 @@ export class TalkShowRoomClient {
   }
 
   /**
-   * Plan 210 D8 in a room: the host's own frosted look, from the last frame
-   * it published while visible (`createPrivateScreen`'s `lastFrame`), so the
-   * Show stage and the Program preview draw what guests and the program draw.
-   * The copy is a synchronous blit; the frost runs once the hide is done.
-   * Nothing here is published: the wire keeps its neutral grey.
+   * Hide screen in a room: the host's own look of the hidden screen, the
+   * designed still guests and the program draw, at the screen's size. It
+   * never reads the screen. Drawn after the hide, never inside it; nothing
+   * here is published: the wire keeps its neutral grey.
    */
-  #keepScreenStill(last: HTMLCanvasElement): void {
+  #keepScreenStill(raw: MediaStreamTrack | null): void {
     const token = ++this.#stillToken
-    const sample = document.createElement('canvas')
-    if (!keepFrostSample(sample, { image: last, width: last.width, height: last.height })) return
+    const settings = raw?.getSettings?.() ?? {}
     setTimeout(() => {
       if (token !== this.#stillToken || this.#closed) return
-      this.#screenStill = frostedStillUrl(document, sample)
+      this.#screenStill = hiddenStillUrl(
+        document,
+        settings.width ?? 0,
+        settings.height ?? 0,
+        STAGE_STILL_ROWS
+      )
       this.#publish()
     }, 0)
   }
@@ -1427,7 +1463,16 @@ export class TalkShowRoomClient {
       .on(RoomEvent.ParticipantNameChanged, () => this.#publish())
       .on(RoomEvent.ConnectionQualityChanged, () => this.#publish())
       .on(RoomEvent.ActiveSpeakersChanged, (speakers: Participant[]) => {
-        this.#speaking = new Set(speakers.map((speaker) => speaker.identity))
+        // LiveKit fires this on every speaker update, level-only ones too
+        // (re-sorted by level), and the host is one of the speakers. Only
+        // which guests talk reaches the snapshot, so anything else publishes
+        // nothing: each publish re-renders every room reader (PH-12).
+        const local = room.localParticipant.identity
+        const next = new Set(
+          speakers.map((speaker) => speaker.identity).filter((identity) => identity !== local)
+        )
+        if (sameMembers(next, this.#speaking)) return
+        this.#speaking = next
         this.#publish()
       })
       .on(RoomEvent.Reconnecting, () => {
@@ -1966,6 +2011,10 @@ export class TalkShowRoomClient {
     ++this.#microphoneGeneration
     const speechClosing = this.#speech?.close()
     this.#speech = null
+    const guestSpeechClosing = this.#guestSpeech?.close()
+    this.#guestSpeech = null
+    this.#guestCaptioning = false
+    await guestSpeechClosing
     this.#pcmAbort?.abort()
     this.#pcmAbort = null
     await speechClosing
@@ -2101,6 +2150,24 @@ export class TalkShowRoomClient {
   }
 
   /**
+   * Plan 253 S7: one report per 10 s sample, for the show's record. The
+   * host's identity is `host:<showId>`. A report that is not kept (the
+   * backend is busy or gone) is not sent again: the next sample is.
+   */
+  #reportLatency(latency: RoomLatency): void {
+    const room = this.#room
+    const identity = this.#snapshot.identity
+    if (!room || !identity?.startsWith('host:')) return
+    const report = roomLatencyReport(
+      identity.slice(5),
+      latency,
+      (guest) => room.remoteParticipants.get(guest)?.name
+    )
+    if (report)
+      void this.#deps.backend?.requestTyped('cloud.room.latency.report', report).catch(() => {})
+  }
+
+  /**
    * Plan 253 S4: the tracks the latency sampler reads. Each person's camera
    * and microphone as this client receives them, and the host's own. A
    * shared screen, the runner and LiveKit's recorder are not conversation.
@@ -2149,6 +2216,41 @@ export class TalkShowRoomClient {
     this.#publish()
   }
 
+  /**
+   * Guest captions: the host room's guest mix follows the stage and each
+   * guest's microphone on every change. The tap opens lazily and only asks
+   * the backend for its captions-only stream; it never reaches Sidekick.
+   */
+  #feedGuestSpeech(room: Room | null): void {
+    if (!room || this.#snapshot.state !== 'connected' || !this.#owns(room)) return
+    const identity = room.localParticipant.identity
+    if (!identity.startsWith('host:') || !this.#deps.attachGuestSpeech) return
+    this.#guestSpeech ??= this.#deps.attachGuestSpeech(
+      identity.replace(/^host:/, ''),
+      () => this.#owns(room) && !this.#closed,
+      (captioning) => {
+        if (!this.#owns(room) || captioning === this.#guestCaptioning) return
+        this.#guestCaptioning = captioning
+        // Tell the guest page (data messages are not replayed).
+        void this.sendStage(this.#lastStage, this.#lastScreen)
+      }
+    )
+    const people: GuestMicrophone<MediaStreamTrack>[] = []
+    for (const participant of room.remoteParticipants.values()) {
+      let microphone: GuestMicrophone<MediaStreamTrack>['microphone'] = null
+      for (const publication of participant.trackPublications.values()) {
+        if (publication.source !== Track.Source.Microphone) continue
+        microphone = {
+          track: publication.track?.mediaStreamTrack ?? null,
+          subscribed: publication.isSubscribed,
+          muted: publication.isMuted
+        }
+      }
+      people.push({ identity: participant.identity, microphone })
+    }
+    this.#guestSpeech.setSources(guestCaptionTracks(people, this.#lastStage))
+  }
+
   #publish(): void {
     if (this.#microphone) this.#micMuted = this.#microphone.isMuted ?? this.#micMuted
     if (this.#closed) return
@@ -2157,6 +2259,7 @@ export class TalkShowRoomClient {
     const latency = this.#latency.current
     let monitorVideo: MediaStreamTrack | null = null
     let monitorAudio: MediaStreamTrack | null = null
+    this.#feedGuestSpeech(room)
     if (room) {
       for (const participant of room.remoteParticipants.values()) {
         // LiveKit's recorder is nobody (plan 234).
@@ -2228,6 +2331,12 @@ export class TalkShowRoomClient {
 
 function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
+}
+
+function sameMembers(a: ReadonlySet<string>, b: ReadonlySet<string>): boolean {
+  if (a.size !== b.size) return false
+  for (const member of a) if (!b.has(member)) return false
+  return true
 }
 
 /** For the tests: the publication shapes the snapshot reads. */

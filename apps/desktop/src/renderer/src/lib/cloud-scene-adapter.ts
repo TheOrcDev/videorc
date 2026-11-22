@@ -23,6 +23,9 @@ import {
 import type { SceneBackground } from '../../../shared/cloud-background'
 import { SCENE_MOTION_MS, type SceneOrientation } from '../../../shared/cloud-scene'
 
+// The native commit a room makes rides in this lazy chunk.
+export * from '@/lib/room-idle-commit'
+
 /**
  * Plan 249 S12: the active-output scene adapter. While a room holds the
  * camera, a scene command (click, hotkey, remote, agent, Follow) changes the
@@ -32,6 +35,11 @@ import { SCENE_MOTION_MS, type SceneOrientation } from '../../../shared/cloud-sc
  * only then is it committed to every lane at once. The answer names what the
  * outputs confirmed; nothing is reported applied that was not drawn.
  */
+
+/** A scene command while scenes are off in this room (per room, off by default). */
+export const ROOM_SCENES_OFF = 'Scenes are off in this room. The room layouts stay on the program.'
+/** Its toast action: turn scenes on for this room and run the command again. */
+export const USE_SCENES = 'Use scenes'
 
 /** The room program's canvas for each orientation (web `STAGE_CANVAS`). */
 export const ROOM_SCENE_CANVAS: Record<SceneOrientation, { width: number; height: number }> = {

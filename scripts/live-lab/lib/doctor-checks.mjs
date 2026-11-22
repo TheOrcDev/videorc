@@ -815,26 +815,39 @@ export function evaluateLinuxSleep(output) {
     : check('sleep', PASS, 'sleep, suspend and hibernate masked')
 }
 
-// Whether hypridle / hyprlock run in the lab session ({ hypridle, hyprlock }
-// booleans). A locked session draws the lock screen on every output,
-// including the lab output; hypridle locks and powers outputs off between
-// runs (runs themselves hold a systemd idle inhibitor).
-export function evaluateLinuxScreenLock({ hypridle, hyprlock }) {
-  if (hyprlock) {
+// Plan 257 S0 (D12): the session lock as readSessionLock() judged it
+// (linux-desktop.mjs: Hyprland's `locked` request and LOCK blocker, logind's
+// LockedHint, known lockers). A locked session draws the lock screen on every
+// output, the lab output included, so the lab refuses to run under it.
+export function evaluateLinuxSessionLock(lock) {
+  if (!lock) return check('session lock', WARN, 'Could not read the session lock.')
+  if (lock.locked === true) {
     return check(
-      'screen lock',
+      'session lock',
       FAIL,
-      'The session is locked (hyprlock runs). Unlock it at the console.'
+      `${lock.detail} It covers the lab output, and the lab refuses to run under it (plan 257 D12). Unlock it at the console.`
     )
   }
+  if (lock.locked === false) return check('session lock', PASS, lock.detail)
+  return check(
+    'session lock',
+    WARN,
+    `${lock.detail} Runs still check the lab output's picture at card-up.`
+  )
+}
+
+// Whether hypridle runs in the lab session. hypridle locks and powers outputs
+// off between runs (runs themselves hold a systemd idle inhibitor); a lock
+// already held is evaluateLinuxSessionLock's.
+export function evaluateLinuxScreenLock({ hypridle }) {
   if (hypridle) {
     return check(
-      'screen lock',
+      'idle lock',
       FAIL,
       'hypridle runs and would lock the session or turn the outputs off between runs. Stop it for the lab user (Omarchy: remove it from autostart).'
     )
   }
-  return check('screen lock', PASS, 'no idle locker running')
+  return check('idle lock', PASS, 'no idle locker running')
 }
 
 // Which notification daemon runs and whether it is in Do Not Disturb:

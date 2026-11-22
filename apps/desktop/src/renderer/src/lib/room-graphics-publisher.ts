@@ -353,7 +353,13 @@ export class RoomGraphicsPublisher {
       observed,
       productionQualified: false
     }
-    const key = JSON.stringify(status)
+    // PH-05: never the preview's pixels. A preview is made with a revision
+    // of its own, so revision and lease name it; stringifying megabytes of
+    // PNG on every refresh and receipt to learn that is waste.
+    const key = JSON.stringify({
+      ...status,
+      preview: status.preview && [status.preview.revision, status.preview.expiresAt]
+    })
     if (key !== this.#lastStatus) {
       this.#lastStatus = key
       this.changed(status)
@@ -443,12 +449,16 @@ export class RoomGraphicsPublisher {
         orientation,
         receipt.graphics.static.captions === 1
       )
+      // PH-05: a picture is named by its hash here, not by its base64.
       const key = JSON.stringify([
         peer.sid,
         this.room.localParticipant.sid,
         output,
         orientation,
-        layers
+        layers.map((l) => ({
+          ...l,
+          asset: [l.asset.hash, l.asset.width, l.asset.height]
+        }))
       ])
       const due = graphicsSendDue(
         this.#sent.get(peer.identity),

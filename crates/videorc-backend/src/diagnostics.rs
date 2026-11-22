@@ -4035,6 +4035,7 @@ mod tests {
                 updated_at: "2026-06-08T00:00:00Z".to_string(),
                 message: Some("Live".to_string()),
                 no_video: None,
+                system_effect: None,
             },
         );
 
@@ -4103,6 +4104,7 @@ mod tests {
             updated_at: "2026-11-04T00:00:00Z".to_string(),
             message: Some("Live".to_string()),
             no_video: None,
+            system_effect: None,
         }
     }
 

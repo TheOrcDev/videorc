@@ -574,7 +574,7 @@ fn device_control(camera_id: &str, write: Option<bool>) -> DeviceLowLight {
 }
 
 #[cfg(target_os = "windows")]
-mod windows_device {
+pub(crate) mod windows_device {
     use super::{
         DeviceLowLight, auto_exposure_priority_value, compensation_from_priority,
         ks_get_error_means_unsupported,
@@ -631,58 +631,103 @@ mod windows_device {
         write: Option<bool>,
     ) -> Result<DeviceLowLight, DeviceLowLight> {
         let failed = DeviceLowLight::Failed;
-        let com = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
-        let _com = ComScope(com.is_ok());
-        unsafe { MFStartup(MF_VERSION, MFSTARTUP_FULL) }
-            .map_err(|error| failed(format!("Media Foundation did not start: {error}")))?;
-        let _media_foundation = MediaFoundationScope;
-
-        let mut attributes = None;
-        unsafe { MFCreateAttributes(&mut attributes, 1) }
-            .map_err(|error| failed(format!("Camera enumeration failed: {error}")))?;
-        let attributes = attributes
-            .ok_or_else(|| failed("Camera enumeration returned no attributes.".to_string()))?;
-        unsafe {
-            attributes.SetGUID(
-                &MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE,
-                &MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_GUID,
-            )
-        }
-        .map_err(|error| failed(format!("Camera enumeration failed: {error}")))?;
-        let mut activates: *mut Option<IMFActivate> = std::ptr::null_mut();
-        let mut count = 0;
-        unsafe { MFEnumDeviceSources(&attributes, &mut activates, &mut count) }
-            .map_err(|error| failed(format!("Camera enumeration failed: {error}")))?;
-        let mut matches = Vec::new();
-        for index in 0..count {
-            // Reading takes ownership, so every activate is released.
-            if let Some(activate) = unsafe { activates.add(index as usize).read() }
-                && friendly_name(&activate).as_deref() == Some(device_name)
-            {
-                matches.push(activate);
-            }
-        }
-        unsafe { CoTaskMemFree(Some(activates.cast())) };
-
-        if matches.is_empty() {
-            return Err(DeviceLowLight::Unsupported(format!(
-                "No camera named `{device_name}` is connected."
-            )));
-        }
+        let cameras = MatchingCameras::open(device_name).map_err(|error| match error {
+            CameraLookupError::NotConnected(reason) => DeviceLowLight::Unsupported(reason),
+            CameraLookupError::Failed(reason) => failed(reason),
+        })?;
         let mut result = None;
         let mut last_error = None;
-        for activate in matches {
-            match control_one(&activate, write) {
+        for activate in &cameras.activates {
+            match control_one(activate, write) {
                 Ok(device) => {
                     result.get_or_insert(device);
                 }
                 Err(error) => last_error = Some(error),
             }
-            let _ = unsafe { activate.ShutdownObject() };
         }
         result.ok_or_else(|| {
             last_error.unwrap_or_else(|| failed("The camera gave no answer.".to_string()))
         })
+    }
+
+    /// Why [`MatchingCameras::open`] found no camera to work on.
+    pub(crate) enum CameraLookupError {
+        /// No camera with that name is connected. Asking again will not help
+        /// until one is.
+        NotConnected(String),
+        /// Media Foundation failed this time, and why. Worth retrying.
+        Failed(String),
+    }
+
+    /// Every connected camera whose DirectShow friendly name is the one asked
+    /// for, with COM and Media Foundation started for as long as it lives.
+    /// Each activate is shut down when this drops, before Media Foundation.
+    /// Shared with plan 258's Studio Effects control
+    /// (`camera_system_effect`).
+    pub(crate) struct MatchingCameras {
+        pub(crate) activates: Vec<IMFActivate>,
+        _media_foundation: MediaFoundationScope,
+        _com: ComScope,
+    }
+
+    impl Drop for MatchingCameras {
+        /// Releases every activate's object while Media Foundation still runs.
+        fn drop(&mut self) {
+            for activate in self.activates.drain(..) {
+                let _ = unsafe { activate.ShutdownObject() };
+            }
+        }
+    }
+
+    impl MatchingCameras {
+        /// Enumerates the video capture devices and keeps those named
+        /// `device_name`. Two identical cameras share a name; both are kept.
+        pub(crate) fn open(device_name: &str) -> Result<Self, CameraLookupError> {
+            let failed = CameraLookupError::Failed;
+            let com = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
+            let com = ComScope(com.is_ok());
+            unsafe { MFStartup(MF_VERSION, MFSTARTUP_FULL) }
+                .map_err(|error| failed(format!("Media Foundation did not start: {error}")))?;
+            let media_foundation = MediaFoundationScope;
+
+            let mut attributes = None;
+            unsafe { MFCreateAttributes(&mut attributes, 1) }
+                .map_err(|error| failed(format!("Camera enumeration failed: {error}")))?;
+            let attributes = attributes
+                .ok_or_else(|| failed("Camera enumeration returned no attributes.".to_string()))?;
+            unsafe {
+                attributes.SetGUID(
+                    &MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE,
+                    &MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_GUID,
+                )
+            }
+            .map_err(|error| failed(format!("Camera enumeration failed: {error}")))?;
+            let mut activates: *mut Option<IMFActivate> = std::ptr::null_mut();
+            let mut count = 0;
+            unsafe { MFEnumDeviceSources(&attributes, &mut activates, &mut count) }
+                .map_err(|error| failed(format!("Camera enumeration failed: {error}")))?;
+            let mut matches = Vec::new();
+            for index in 0..count {
+                // Reading takes ownership, so every activate is released.
+                if let Some(activate) = unsafe { activates.add(index as usize).read() }
+                    && friendly_name(&activate).as_deref() == Some(device_name)
+                {
+                    matches.push(activate);
+                }
+            }
+            unsafe { CoTaskMemFree(Some(activates.cast())) };
+
+            if matches.is_empty() {
+                return Err(CameraLookupError::NotConnected(format!(
+                    "No camera named `{device_name}` is connected."
+                )));
+            }
+            Ok(Self {
+                activates: matches,
+                _media_foundation: media_foundation,
+                _com: com,
+            })
+        }
     }
 
     /// The camera's friendly name, the one DirectShow (and FFmpeg) shows.

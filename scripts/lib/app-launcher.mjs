@@ -1246,16 +1246,19 @@ export async function runDevBackendPrebuild(spec, { onLine, env } = {}) {
  *   to rebuild.
  * @param {(line:string)=>void} [options.onLine]
  * @param {ReturnType<typeof devBackendPrebuildSpec>} [options.spec]
+ * @param {typeof withBuildSlot} [options.buildSlot] - tests pass their own, so
+ *   they never wait on this machine's real build slots.
  * @returns {Promise<string|null>}
  */
 export async function prebuildDevBackend({
   env = process.env,
   onLine,
-  spec = devBackendPrebuildSpec({ env: process.env })
+  spec = devBackendPrebuildSpec({ env: process.env }),
+  buildSlot = withBuildSlot
 } = {}) {
   if (!spec) return null
   let failure = null
-  await withBuildSlot(
+  await buildSlot(
     async () => {
       failure = await runDevBackendPrebuild(spec, { onLine, env })
     },

@@ -44,6 +44,9 @@ struct Seen {
 struct Fake {
     seen: Mutex<Vec<Seen>>,
     script: Mutex<VecDeque<(u16, String)>>,
+    /// Set as the next request arrives, before it is answered: a cancel that
+    /// lands mid-attempt without racing a timer.
+    cancel_on_request: Mutex<Option<Arc<AtomicBool>>>,
 }
 
 async fn handle(
@@ -65,6 +68,9 @@ async fn handle(
             .to_string(),
         body: body.to_vec(),
     });
+    if let Some(cancelled) = fake.cancel_on_request.lock().unwrap().take() {
+        cancelled.store(true, Ordering::Release);
+    }
     let (status, body) = fake.script.lock().unwrap().pop_front().unwrap_or_else(|| {
         (
             200,
@@ -521,29 +527,22 @@ async fn execute_gives_up_after_the_budget() {
 async fn execute_stops_retrying_once_cancelled() {
     let (origin, fake) = serve(vec![(503, "{}"), (503, "{}"), (503, "{}")]).await;
     let client = http_client().unwrap();
-    let cancelled = Arc::new(AtomicBool::new(false));
-    let flag = cancelled.clone();
-    const SLOW_STEPS: &[Duration] = &[Duration::from_millis(50)];
-    let policy = RetryPolicy {
-        steps: SLOW_STEPS,
-        budget: Duration::from_secs(5),
-        max_retry_after: Duration::from_millis(50),
-    };
-    let cancel = tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(20)).await;
-        flag.store(true, Ordering::Release);
-    });
+    let cancelled = never();
+    // The cancel lands while the first attempt is in flight, so the retry it
+    // earns (a 503) must stop before a second request. The fake sets it, not a
+    // timer: a 20 ms cancel racing a 50 ms retry sleep lost on Windows, whose
+    // timers tick about every 15.6 ms.
+    *fake.cancel_on_request.lock().unwrap() = Some(cancelled.clone());
     let result = execute(
         &client,
         &origin,
         &webhook(),
         &json!({}),
         None,
-        policy,
+        FAST,
         &cancelled,
     )
     .await;
-    cancel.await.unwrap();
     assert_eq!(result, Err(SendError::Cancelled));
     assert_eq!(fake.seen.lock().unwrap().len(), 1);
 }

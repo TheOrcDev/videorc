@@ -4,10 +4,11 @@ How to develop and verify Videorc on a Linux box. First run on real hardware
 2026-09-24 (ogre: T2 MacBook Pro, Omarchy 4.0.4, Hyprland/Wayland, Intel UHD
 630 plus Radeon Pro 555X).
 
-Linux is an incremental port (`linux-port-plan.md`). L1 through L6 packaging
-exist as engineering paths. A private Linux Alpha candidate can be stored
-from protected `main`; nothing in this document is public release
-authorization.
+Linux is a public Alpha on its way to Beta (`linux-port-plan.md`, plan 257).
+L1 through L6 packaging exist and have shipped as owner-waived Alpha
+releases. A private Linux Alpha candidate can be stored from protected
+`main`; nothing in this document is public release authorization, which stays
+with the release owner and the release skill.
 
 ## One-time setup
 
@@ -45,6 +46,29 @@ real fix):
 ```bash
 sudo setfacl -m "u:$USER:rw" /dev/video0
 ```
+
+### Camera modes and hotplug (plan 257 S2)
+
+The camera asks for one of its own V4L2 modes (read once per device with
+`VIDIOC_ENUM_FMT`/`ENUM_FRAMESIZES`/`ENUM_FRAMEINTERVALS`): the most picture
+that fits the canvas at the session rate, MJPEG above 720p and raw
+(NV12, then YUYV) at or below. Frames are piped at that native size and
+the compositor scales them. Health → Preview shows the mode as
+**Camera format** (`1280 × 720 NV12 · 30 fps`). `v4l2-ctl --list-formats-ext
+-d /dev/video0` (package `v4l-utils`) lists the same modes.
+
+Cameras appear and disappear in the picker on their own: the backend
+watches `/dev` and `/dev/v4l/by-id` with inotify. To check it with a USB
+webcam (the probe asks you to unplug and replug it):
+
+```bash
+VIDEORC_DEV_BACKEND_PROFILE=release VIDEORC_HOTPLUG_CAMERA_NAME="<part of its name>" \
+  pnpm probe:linux-camera-hotplug
+```
+
+Without a spare webcam, `VIDEORC_HOTPLUG_UVC_INTERFACE=<usb interface>`
+(from `ls /sys/bus/usb/drivers/uvcvideo/`) unbinds and rebinds a built-in
+camera with `sudo -n` instead.
 
 Check that the portal and PipeWire are live before expecting any capture
 path to work later:
@@ -199,7 +223,7 @@ Do not enable AMD VAAPI / renderD129 for this smoke.
 
 ## Packaged run (L6 / Plan 0008)
 
-`pnpm package:desktop:linux` builds an unsigned x64 AppImage after `package:backend`, `ffmpeg:fetch:linux`, and `scripts/preflight-linux-package.mjs`. Ubuntu 24.04 remains the named packaging box; ogre can produce the artifact for smoke. Dispatch `release-linux-alpha.yml` from protected `main` to store a private candidate. Public updater promotion and the videorc-web download button are still owed. Hold the Linux Discord announcement until that public download exists (`pnpm release:notify:discord <releaseId> --dry-run` first; never print `VIDEORC_DISCORD_RELEASE_WEBHOOK`).
+`pnpm package:desktop:linux` builds an unsigned x64 AppImage after `package:backend`, `ffmpeg:fetch:linux`, and `scripts/preflight-linux-package.mjs`. Ubuntu 24.04 remains the named packaging box; ogre can produce the artifact for smoke. Dispatch `release-linux-alpha.yml` from protected `main` to store a private candidate; the owner then publishes it as an owner-waived Alpha (see `docs/releases/release-runbook.md`). There is no promote workflow and no updater feed yet: Linux gets a changelog notice, not a self-update. Send the Linux Discord announcement once the release is public (`pnpm release:notify:discord <releaseId> --dry-run` first; never print `VIDEORC_DISCORD_RELEASE_WEBHOOK`).
 
 ## Verify gates that work on Linux
 

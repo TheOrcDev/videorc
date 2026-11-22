@@ -177,6 +177,81 @@ describe('room static graphics publisher', () => {
   })
 })
 
+describe('pictures are named by hash, never serialized to see what changed (PH-05)', () => {
+  it('a status report or an idle refresh serializes no PNG; a new view of held pictures sends none', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(1000)
+    const h = harness()
+    const bodies: Uint8Array[] = []
+    h.room.localParticipant.streamBytes.mockImplementation(async () => ({
+      write: vi.fn(async (bytes: Uint8Array) => {
+        bodies.push(bytes)
+      }),
+      close: vi.fn(async () => {})
+    }))
+    const png = fixture.snapshot.layers[0]!.asset.png
+    const stringify = vi.spyOn(JSON, 'stringify')
+    const withPixels = () =>
+      stringify.mock.results.filter(
+        (result) => typeof result.value === 'string' && result.value.includes(png)
+      ).length
+    const content = {
+      h: fixture.snapshot.layers.map((l) => ({
+        ...l,
+        stream: true,
+        recording: false
+      })) as (GraphicsLayer & { stream: boolean; recording: boolean })[],
+      v: [],
+      unsupported: []
+    }
+    try {
+      h.publisher.set(content)
+      // No page yet: a second of status reports and refreshes.
+      await vi.advanceTimersByTimeAsync(1000)
+      expect(h.statuses.at(-1)?.preview?.layers).toHaveLength(3)
+      expect(withPixels()).toBe(0)
+      const lane = {
+        version: 1,
+        output: 'stream',
+        orientation: 'h',
+        static: { version: 1, refs: 1 }
+      }
+      h.receive(lane)
+      await vi.advanceTimersByTimeAsync(100)
+      // The one upload of the pictures to the page that does not hold them.
+      expect(bodies).toHaveLength(1)
+      expect(withPixels()).toBe(1)
+      const sent = JSON.parse(new TextDecoder().decode(bodies[0]))
+      h.receive({
+        ...lane,
+        static: { ...lane.static, applied: { publisherSid: 'PA_host', revision: sent.revision } }
+      })
+      // Five seconds of refreshes and reports with nothing new.
+      await vi.advanceTimersByTimeAsync(5000)
+      expect(h.statuses.at(-1)?.state).toBe('applied')
+      expect(bodies).toHaveLength(1)
+      expect(withPixels()).toBe(1)
+      // A new view of the same pictures (as a caption update is for the
+      // banners): reported with its new preview, sent by reference.
+      const reports = h.statuses.length
+      h.publisher.set({ ...content })
+      await vi.advanceTimersByTimeAsync(100)
+      expect(h.statuses.length).toBeGreaterThan(reports)
+      expect(h.statuses.at(-1)!.preview!.revision).toBeGreaterThan(sent.revision)
+      expect(bodies).toHaveLength(2)
+      const again = JSON.parse(new TextDecoder().decode(bodies[1]))
+      expect(again.layers).toHaveLength(3)
+      expect(
+        again.layers.every((l: { asset: { png?: string } }) => l.asset.png === undefined)
+      ).toBe(true)
+      expect(withPixels()).toBe(1)
+    } finally {
+      stringify.mockRestore()
+      h.publisher.close()
+    }
+  })
+})
+
 describe('S6 guest avatar coexistence', () => {
   it('does not send caption pixels to a loaded old page until a fresh caption capability arrives', async () => {
     vi.useFakeTimers()

@@ -14,6 +14,7 @@ import {
   type MotionOrientation,
   type MotionRect
 } from '../../../shared/cloud-avatar-motion'
+import { base64Bytes } from '../../../shared/cloud-avatar'
 import { BUDDY_PET_TALK_IDS } from './buddy-pet-player'
 import { CloudAvatarAtlasRefusal } from './cloud-avatar-refusal'
 import type { BuddyPreviewImage, BuddyPreviewPack } from './buddy-pet-preview-pack'
@@ -139,7 +140,8 @@ export async function buildCloudAvatarAtlas(
       }
       const meta = parseAvatarAtlasMeta(metaRaw, { width, height })
       if (!meta) throw new Error('Avatar atlas is not a valid cloud pack')
-      const bytes = Uint8Array.from(atob(png), (c) => c.charCodeAt(0))
+      const bytes = base64Bytes(png)
+      if (!bytes) throw new Error('Avatar atlas is not a valid cloud pack')
       return { png, width, height, hash: await deps.hash(bytes), meta, pack: animatorPack }
     }
     cellPx = Math.floor(grid.cellPx * 0.8)

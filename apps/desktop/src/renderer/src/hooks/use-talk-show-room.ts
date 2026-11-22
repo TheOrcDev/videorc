@@ -1,4 +1,4 @@
-import { htmlLayerFrameUrl } from '../lib/room-html-layer-publisher'
+import { htmlLayerFrameUrl } from '../lib/room-html-layer-url'
 import { attachHostSpeech } from '@/lib/room-speech-source'
 import { roomNativeMicrophoneEnabled } from '@/lib/room-microphone-state'
 import { closeVisualMicrophoneStreams } from '@/lib/mic-visual-ownership'
@@ -12,7 +12,11 @@ import {
   systemControllerStep
 } from '@/lib/room-audio-routing'
 import { withRestoredBanners } from '@/lib/cloud-restored-banners'
-import type { GraphicsContent } from '../../../shared/cloud-graphics'
+import {
+  forgetGraphicsSource,
+  graphicsSourceHeld,
+  type GraphicsContent
+} from '../../../shared/cloud-graphics'
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 
 import type { BackendClient } from '@/backendClient'
@@ -406,7 +410,8 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
         closeVisualMicrophoneStreams()
         await client.request('audio.mic.disarm')
         if (cancelled) return
-        const { TalkShowRoomClient } = await loadRoomClient()
+        const roomModule = await loadRoomClient()
+        const { TalkShowRoomClient } = roomModule
         if (cancelled) return
         const host = document.createElement('div')
         host.setAttribute('data-talk-show-audio-host', '')
@@ -418,6 +423,8 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
         keptGraphicsRef.current.clear()
         const roomClient = new TalkShowRoomClient({
           attachHostSpeech: (...args) => attachHostSpeech(client, ...args),
+          // Read at call time: the guest mixer rides the lazy room chunk.
+          attachGuestSpeech: (...args) => roomModule.attachGuestSpeech(client, ...args),
           // S7a harness opt-in; main also requires VIDEORC_ROOM_PCM_TEST=1 and
           // the native source requires a debug build with smoke RPC enabled.
           pcmTestSource:
@@ -454,6 +461,8 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
           // Plan 253 S4 (D10): latency is measured on managed shows only
           // (`isManagedShow`, whose module this eager hook does not import).
           measureLatency: () => cloudStatusRef.current?.show?.nodeId === 'livekit',
+          // Plan 253 S7: the room client reports each sample for the record.
+          backend: client,
           onAir: () => onAirRef.current,
           // Plan 249 S11: HTML banners reach only the egress pages the web
           // lets draw the sheet (default-off), and only while this computer
@@ -560,8 +569,15 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
       }
       const token = ++generation
       active++
+      // PH-05: the pictures of the last answer come back by reference, so a
+      // caption update no longer carries every banner again.
+      const held = graphicsSourceHeld()
       void client
-        .requestTyped('cloud.graphics.snapshot', { showId, ...(known ? { known } : {}) })
+        .requestTyped('cloud.graphics.snapshot', {
+          showId,
+          ...(known ? { known } : {}),
+          ...(held.length ? { held } : {})
+        })
         .then((result) => {
           if (closed || token !== generation) return
           known = result.signature
@@ -571,6 +587,8 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
         .catch(() => {
           if (!closed && token === generation) {
             known = undefined
+            // Whatever went wrong, the next answer comes whole.
+            forgetGraphicsSource()
             current.failGraphics()
           }
         })
@@ -607,6 +625,7 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
       clearInterval(timer)
       off.forEach((fn) => fn())
       if (graphicsInvalidateRef.current === invalidate) graphicsInvalidateRef.current = null
+      forgetGraphicsSource()
       current.setGraphics(null)
     }
   }, [client, roomOpen, showId, snapshot.state])

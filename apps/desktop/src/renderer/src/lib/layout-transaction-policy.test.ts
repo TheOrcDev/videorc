@@ -1,12 +1,14 @@
 import { describe, expect, it } from 'vitest'
 
 import {
+  isSceneReloadSuperseded,
   latestLayoutTransactionCommit,
   idlePreviewLayoutProofRequired,
   layoutTransactionBackendSnapshotIsStable,
   layoutTransactionFailureReconciliation,
   layoutTransactionFailureDisposition,
   layoutTransactionProofDisposition,
+  sceneReloadRetryDelayMs,
   layoutTransactionSourcesFromScene,
   layoutTransactionUnprovenSeverity,
   liveBackgroundCommitDecision,
@@ -323,6 +325,28 @@ describe('layout transaction policy', () => {
         performanceCheckRunning: true
       })
     ).toBe(false)
+  })
+})
+
+describe('a superseded idle scene reload', () => {
+  it('is recognized by its own backend code, never by its text', () => {
+    expect(isSceneReloadSuperseded({ code: 'scene-reload-superseded' })).toBe(true)
+    expect(
+      isSceneReloadSuperseded(
+        Object.assign(new Error('Idle capture-config scene reload was superseded'), {
+          code: 'scene-commit-failed'
+        })
+      )
+    ).toBe(false)
+    expect(isSceneReloadSuperseded(new Error('superseded by session startup'))).toBe(false)
+    expect(isSceneReloadSuperseded(null)).toBe(false)
+    expect(isSceneReloadSuperseded('scene-reload-superseded')).toBe(false)
+  })
+
+  it('tries again after 1 s, doubling to at most 15 s', () => {
+    expect([0, 1, 2, 3, 4, 5, 40].map(sceneReloadRetryDelayMs)).toEqual([
+      1_000, 2_000, 4_000, 8_000, 15_000, 15_000, 15_000
+    ])
   })
 })
 

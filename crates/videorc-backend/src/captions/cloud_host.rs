@@ -50,7 +50,7 @@ struct Admission {
     budget_at: Instant,
     sample_rate: Option<u32>,
 }
-fn show_owned(state: &AppState, show: &str) -> bool {
+pub(super) fn show_owned(state: &AppState, show: &str) -> bool {
     let status = crate::cloud_show::lock(&state.cloud_show).status();
     !state.process_shutdown_requested()
         && status.show.as_ref().is_some_and(|s| s.id == show)
@@ -83,7 +83,7 @@ impl Owner {
         }
     }
 }
-fn valid_id(id: &str) -> bool {
+pub(super) fn valid_id(id: &str) -> bool {
     !id.is_empty()
         && id.len() <= 160
         && id
@@ -441,6 +441,19 @@ pub struct Overlay {
     recording: bool,
     frame: SetCaptionOverlayParams,
 }
+/// A room caption picture belongs to a live caption source: the host's
+/// provider session over a valid host microphone, or the guests' captions-only
+/// stream while it runs. Either one alone keeps the bar (a muted host still
+/// shows the guests' lines).
+fn session_presents(c: &CaptionsCoordinator, state: &AppState, session: &str) -> bool {
+    let host = c.room_owner.as_ref().is_some_and(|o| o.valid(state))
+        && c.shadow_status
+            .as_ref()
+            .and_then(|s| s.session_client_id.as_deref())
+            == Some(session);
+    host || super::guest_lane::presents(c, state, session)
+}
+
 pub async fn install_overlay(
     state: &AppState,
     input: Overlay,
@@ -449,11 +462,7 @@ pub async fn install_overlay(
     let now = chrono::Utc::now().timestamp_millis();
     anyhow::ensure!(
         c.desired_enabled
-            && c.room_owner.as_ref().is_some_and(|o| o.valid(state))
-            && c.shadow_status
-                .as_ref()
-                .and_then(|s| s.session_client_id.as_deref())
-                == Some(input.session_client_id.as_str())
+            && session_presents(&c, state, &input.session_client_id)
             && input.expires_at > now
             && input.expires_at <= now + 10_000,
         "Caption source or cue expired."
@@ -478,11 +487,7 @@ pub async fn presentation(state: &AppState) -> Option<Presentation> {
         .filter(|p| {
             c.desired_enabled
                 && p.expires_at > chrono::Utc::now().timestamp_millis()
-                && c.room_owner.as_ref().is_some_and(|o| o.valid(state))
-                && c.shadow_status
-                    .as_ref()
-                    .and_then(|s| s.session_client_id.as_deref())
-                    == Some(p.session.as_str())
+                && session_presents(&c, state, &p.session)
         })
         .cloned()
 }
@@ -500,6 +505,8 @@ async fn release_room_chunks(state: &AppState, show_id: &str) {
 /// S24 handoff seam: retire consent before joining a losing provider task.
 /// Source-generation and controller-epoch identities deliberately stay separate.
 pub async fn ownership_lost(state: &AppState, show_id: &str) {
+    // The guests' stream of this show stops with the room, host mic or not.
+    super::guest_lane::stop_for_show(state, show_id).await;
     {
         let mut c = state.captions.lock().await;
         if c.marker_session_id.as_deref() == Some(show_id) {

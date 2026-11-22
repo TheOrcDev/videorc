@@ -3107,6 +3107,8 @@ export interface PreviewSurfaceStatus {
   nativePreviewPlacementsFailed?: number
   /** Retries run after a refused placement push (#1272). */
   nativePreviewPlacementsRetried?: number
+  /** Placement pushes held until the backend surface was live (#1629). */
+  nativePreviewPlacementsHeld?: number
   nativePreviewPlacementRoundTripP95Ms?: number
   nativePreviewPresentRoundTripP95Ms?: number
   nativePreviewIosurfaceCacheHits?: number
@@ -3271,6 +3273,28 @@ export interface PreviewCameraStatus {
    * the backend's first-frame grace. Absent otherwise.
    */
   noVideo?: boolean
+  /**
+   * Plan 258 S4 (D12): the operating system's own effects on this camera
+   * (macOS Video Effects, Windows Studio Effects), read from the device.
+   * Absent until the camera is live and the system has answered.
+   */
+  systemEffect?: CameraSystemEffect
+}
+
+/** Which operating system feature is changing the camera's picture (plan 258 S4). */
+export type CameraSystemEffectProvider = 'macos-video-effects' | 'windows-studio-effects'
+
+/** What the system is doing to the camera Videorc has open (plan 258 S4). */
+export interface CameraSystemEffect {
+  provider: CameraSystemEffectProvider
+  /** macOS Portrait, or Windows Studio Effects background blur. */
+  backgroundBlur: boolean
+  /** macOS 15's background replacement; never on Windows. */
+  backgroundReplacement: boolean
+  /** macOS Studio Light: the light on the face, not the background. */
+  studioLight: boolean
+  /** Windows: Videorc turned Studio Effects blur off while its own background runs. */
+  turnedOffByVideorc: boolean
 }
 
 export interface CameraCapabilityFormat {
@@ -5729,6 +5753,8 @@ export interface CloudStatus {
   room?: CloudRoomStatus
   /** Plan 224 D10: the cloud recording, on a talk show. */
   recording?: CloudRecordingStatus
+  /** Plan 253 S7: how long the web took to answer this show's commands. */
+  commandTimes?: CloudCommandTimes
   /** Plan 243: the device on air, on a managed show. */
   onAir?: CloudOnAir
   /**
@@ -5979,6 +6005,46 @@ export interface CloudRoomShown {
   stageKey?: string
   /** Plan 249 S6: when that report arrived, ISO 8601. Present with `stageKey`. */
   at?: string
+  /**
+   * Plan 253 S7 (contract section 6): how long the program page took to draw
+   * the stage the web accepted, in ms. Only on a managed show, and only
+   * while the page shows that stage. Kept in the record; no UI reads it yet.
+   */
+  applyMs?: number
+}
+
+/**
+ * Plan 253 S7 (D8): how long the web took to answer this show's commands,
+ * in ms on the backend's clock. Absent until a command of a managed talk
+ * show was timed.
+ */
+export interface CloudCommandTimes {
+  lastMs: number
+  slowestMs: number
+}
+
+/**
+ * Plan 253 S7, `cloud.room.latency.report`: what the host's room client
+ * measured over its last sample, for the show's record. Durations only, in
+ * whole ms (0 to 60000); a figure that could not be measured is absent.
+ */
+export interface CloudRoomLatencyReport {
+  showId: string
+  /** The host's own round trip to the room. */
+  hostRttMs?: number
+  people: Array<{
+    identity: string
+    name?: string
+    /** The conversation delay: the worse of the two directions. */
+    ms: number
+    /** A part or a direction is missing: `ms` is a floor. */
+    partial: boolean
+    toGuestMs?: number
+    fromGuestMs?: number
+    videoToGuestMs?: number
+    videoFromGuestMs?: number
+  }>
+  program?: { ms: number; audioMs?: number }
 }
 
 /** `CloudStatus.room`: what the Guests tab, the Show stage and the strip draw. */

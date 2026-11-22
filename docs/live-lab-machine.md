@@ -382,13 +382,13 @@ Arch / Omarchy:
 
 ```sh
 sudo pacman -S --needed git nodejs pnpm ffmpeg yt-dlp github-cli espeak-ng chromium \
-  nftables iproute2 wl-clipboard xdg-desktop-portal-hyprland
+  nftables iproute2 wl-clipboard grim xdg-desktop-portal-hyprland
 ```
 
 Debian / Ubuntu (the Hyprland lab display still needs Hyprland):
 
 ```sh
-sudo apt install git ffmpeg gh espeak-ng nftables iproute2 wl-clipboard pipx
+sudo apt install git ffmpeg gh espeak-ng nftables iproute2 wl-clipboard grim pipx
 pipx install yt-dlp       # apt's yt-dlp is usually too old for YouTube
 # Chrome: Google's .deb (the chromium snap cannot be driven reliably); node 24 via mise; corepack enable for pnpm
 ```
@@ -493,14 +493,15 @@ prints:
 | Check             | PASS means                                                                       |
 | ----------------- | -------------------------------------------------------------------------------- |
 | desktop session   | a Hyprland session with Wayland and a session bus (found even over SSH)          |
+| session lock      | the session is not locked (see below); any machine, not only the lab account     |
 | lab display       | the lab output exists, is on, at least 1280x720, and (WARN) does not hold focus  |
 | screen grant      | xdph's `custom_picker_binary` is the lab share picker (it reads `portal-pick`)   |
 | lab audio         | `videorc_lab_speech` and `videorc_lab_mic` exist, neither is the system default  |
-| espeak-ng, chrome | installed                                                                         |
+| espeak-ng, chrome, grim | installed (grim grabs the lab output's picture at card-up)                  |
 | auto-login        | SDDM, greetd or getty logs the lab account in                                    |
 | linger            | `loginctl` linger is on (WARN when off)                                          |
 | unattended boot   | no LUKS passphrase at boot (WARN when there is one)                              |
-| screen lock       | neither hypridle nor hyprlock runs                                               |
+| idle lock         | hypridle does not run                                                            |
 | sleep             | the four sleep targets are masked                                                |
 | focus             | mako / dunst / swaync is in do not disturb                                       |
 | lab user rights   | no passwordless sudo beyond the fault helper's verbs (FAIL); admin group (WARN)  |
@@ -509,6 +510,25 @@ prints:
 Prove the important ones fail: `chmod 666` the policy as root (FAIL), unmask
 `suspend.target` (FAIL), `hyprctl output remove videorc-lab` (FAIL), start
 hypridle (FAIL); then put everything back.
+
+**A locked session (plan 257 S0, D12).** A lock draws the lock screen on every
+output, the lab output included, so a run under it would stream the lock
+screen as the test card. The lock is read from the compositor and logind, not
+from a process name: Hyprland's `hyprctl -j locked` and the `LOCK` reason in
+each monitor's `solitaryBlockedBy` (both set by any `ext-session-lock` client,
+such as Omarchy's omarchy-shell, hyprlock or swaylock), then logind's
+`LockedHint` (omarchy-shell never sets it, so it reads `no` under that lock).
+A dedicated locker process (hyprlock, swaylock, gtklock, waylock) counts only
+when none of those can answer. Under a lock, `live:doctor` FAILs `session
+lock`, and `live:run` refuses with `REFUSED (session-locked: …)` before it
+takes the run lock or makes a run folder, so the refusal costs none of the
+day's runs. Attended runs need the owner to unlock at the console; never type
+into the lock screen.
+
+On Linux the `card-up` step also checks the picture: once the card pulses it
+grabs one frame of the lab output (`grim -t ppm -o <output> -`) and decodes the
+card's markers (`lib/card-markers.mjs`). A lock screen, another window or a
+black output (off by DPMS, or nothing drawn) fails the step with its cause.
 
 ### L7. Schedule
 

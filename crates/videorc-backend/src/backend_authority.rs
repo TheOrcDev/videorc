@@ -174,6 +174,9 @@ fn renderer_only_method(method: &str) -> bool {
             | "cloud.speech.sync"
             | "cloud.speech.audio"
             | "cloud.speech.overlay"
+            // Guest captions: the room renderer's guest mix, captions only.
+            | "cloud.speech.guests.sync"
+            | "cloud.speech.guests.audio"
             // Plan 224: the one answer that carries a LiveKit token goes to
             // the renderer that joins the room, never to a remote or main.
             | "cloud.room.token.refresh"
@@ -184,6 +187,8 @@ fn renderer_only_method(method: &str) -> bool {
             | "cloud.presentation.accepted"
             | "cloud.controller.desired"
             | "cloud.presentation.restore"
+            // Plan 253 S7: only the room renderer measures the room.
+            | "cloud.room.latency.report"
             // Plan 249 S11: only the room renderer asks for room HTML layers.
             | "cloud.htmlLayers.want"
     )
@@ -332,6 +337,22 @@ mod tests {
             );
             assert!(authorize_backend_method(BackendRole::Remote, method, false).is_err());
         }
+    }
+
+    /// Plan 253 S7: only the room renderer measures the room.
+    #[test]
+    fn the_rooms_latency_report_is_renderer_only() {
+        let method = "cloud.room.latency.report";
+        assert_eq!(
+            authorize_backend_method(BackendRole::Renderer, method, false),
+            Ok(())
+        );
+        assert_eq!(
+            authorize_backend_method(BackendRole::Admin, method, false),
+            Err(MethodAdmissionError::RendererOnly)
+        );
+        assert!(authorize_backend_method(BackendRole::Remote, method, false).is_err());
+        assert!(authorize_backend_method(BackendRole::Agent, method, false).is_err());
     }
 
     #[test]

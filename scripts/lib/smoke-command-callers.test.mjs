@@ -99,7 +99,10 @@ test('the server allowlist covers literal commands used by smoke callers and nam
   const securitySource = readFileSync(securitySourcePath, 'utf8')
   const allowlistBlock = securitySource.match(/SMOKE_COMMAND_NAMES = new Set\(\[([\s\S]*?)\]\)/)
   assert.ok(allowlistBlock, 'Could not locate SMOKE_COMMAND_NAMES.')
-  const allowed = new Set([...allowlistBlock[1].matchAll(/'([^']+)'/g)].map((match) => match[1]))
+  // Line comments go first: an apostrophe in one ("can't") would pair with the
+  // next entry's quote and shift every name after it.
+  const entries = allowlistBlock[1].replace(/\/\/.*$/gm, '')
+  const allowed = new Set([...entries.matchAll(/'([^']+)'/g)].map((match) => match[1]))
   const callers = new Map()
 
   for (const path of scriptFiles()) {

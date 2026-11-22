@@ -15,14 +15,16 @@ use super::*;
 /// once per run. Dev builds and the smokes keep presenting such frames.
 ///
 /// Otherwise the program leg's store while the Preview's own picture is
-/// current (plan 205 S6), else the primary's. Current means the program leg
-/// published this tick or the one before: the loop publishes the primary
-/// first and the twin last in one tick, and a twin tick that retained its
-/// frame (the ring busy) still shows the program a tick late rather than
-/// flipping to a primary without it. The first tick the leg is off empties
-/// its store, so the switch back is immediate; neither switch drops a frame,
-/// because the lease keeps the surface it holds until main takes the next
-/// one.
+/// current (plan 205 S6), else the primary's. That store holds the frame the
+/// program leg composed, or the split stream leg's own frame on the ticks
+/// that leg already drew the program's picture (`ProgramLegSource`). Current
+/// means it took a frame this tick or the one before: the loop publishes the
+/// primary first and the program last in one tick, and a tick whose leg
+/// retained its frame (the ring busy) still shows the program a tick late
+/// rather than flipping to a primary without it. The first tick the primary
+/// leg is the program again empties the store, so the switch back is
+/// immediate; neither switch drops a frame, because the lease keeps the
+/// surface it holds until main takes the next one.
 pub(crate) fn presented_frame_store(compositor: &CompositorRuntime) -> CompositorFrameStore {
     presented_frame_store_for(compositor, packaged_build())
 }

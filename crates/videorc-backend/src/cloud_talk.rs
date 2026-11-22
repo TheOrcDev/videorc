@@ -279,6 +279,28 @@ pub struct CloudRoomShown {
     pub stage_key: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub at: Option<String>,
+    /// Plan 253 S7 (contract section 6): how long the program page took to
+    /// draw the stage the web accepted, in ms on the web's one clock. Only
+    /// from the web, and only while the page shows that stage. A value this
+    /// reader cannot use is dropped, never a reason to refuse the state.
+    #[serde(
+        default,
+        deserialize_with = "whole_ms_or_nothing",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub apply_ms: Option<u64>,
+}
+
+/// The bound of `applyMs`, as of the page's `appliedAgoMs`: a day. The
+/// renderer's strict schema holds the same bound.
+pub(crate) const APPLY_MS_MAX: u64 = 86_400_000;
+
+fn whole_ms_or_nothing<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Option<u64>, D::Error> {
+    Ok(serde_json::Value::deserialize(deserializer)?
+        .as_u64()
+        .filter(|ms| *ms <= APPLY_MS_MAX))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -513,7 +535,8 @@ pub struct CloudStage {
     pub spotlight: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub screen: Option<String>,
-    /// Plan 251: the two screens of the two-screens layout, left then right.
+    /// Plan 251: the two screens of the two-screens layout, the first one put
+    /// up first (each is drawn on its owner's side, whatever the order here).
     /// Empty (never `null`, and absent on the wire), or exactly two different
     /// on-stage identities with `screen` the first: a reader that knows only
     /// `screen` still shows one screen and the people. Managed shows only.

@@ -1,5 +1,5 @@
 import type { CloudRoomShown, CloudRoomStatus, CloudStageLayout } from '@/lib/backend'
-import { STAGE_MAX_SCREENS, stageScreens } from '@/lib/stage-screens'
+import { STAGE_MAX_SCREENS, screensByOwner, stageScreens } from '@/lib/stage-screens'
 
 // The talk-show geometry (plan 224 D8), mirrored from the runner's
 // `talk_show_layout.rs` so the Show stage draws the picture the cloud sends.
@@ -32,12 +32,18 @@ export type StageInput = {
   layout: CloudStageLayout
   /** The on-stage identities, in order. */
   people: readonly string[]
+  /**
+   * Everyone on the stage, in stage order, drawn or not: where each screen's
+   * owner stands (`screensByOwner`). Absent: `people`.
+   */
+  onStage?: readonly string[] | null
   spotlight?: string | null
   /** The identity whose screen is shared, when one is. */
   screen?: string | null
   /**
-   * Plan 251: the two screens of the two-screens layout, left then right
-   * (top then bottom on a portrait canvas). Read through `stageScreens`.
+   * Plan 251: the two screens of the two-screens layout, as the stage names
+   * them (the first one put up first). Read through `stageScreens`; drawn
+   * each on its owner's side (`screensByOwner`).
    */
   screens?: readonly string[] | null
 }
@@ -183,7 +189,9 @@ function underScreensCols(n: number, portrait: boolean): number {
  * Plan 251: two screens across the top, everyone on stage in a row under
  * them. On a portrait canvas the screens stack, each full width, and the
  * people take a grid under them. Each screen's box is 16:9; the picture is
- * contained in it, as on `screen-people`.
+ * contained in it, as on `screen-people`. The first of `screens` is on the
+ * left (on top on a portrait canvas): `planStage` orders them by their
+ * owners before it asks.
  */
 function twoScreensTiles(
   canvas: StageCanvas,
@@ -242,6 +250,8 @@ export function showStageInput(room: CloudRoomStatus | undefined): StageInput {
   const input: StageInput = {
     layout: stage?.layout ?? 'solo',
     people: stage?.onStage ?? [],
+    // Where each screen's owner stands, in the row or away from it.
+    ...(stage ? { onStage: stage.onStage } : {}),
     spotlight: stage?.spotlight ?? null,
     screen: stage?.screen ?? null,
     ...(stage?.screens ? { screens: stage.screens } : {})
@@ -289,7 +299,9 @@ export function planStage(canvas: StageCanvas, input: StageInput): StagePlan {
     const cells = gridCells(area, people.length, gridCols(people.length, portrait), gutter)
     people.forEach((identity, index) => tiles.push(person(canvas, identity, fit16x9(cells[index]))))
   } else if (layout === 'two-screens') {
-    tiles.push(...twoScreensTiles(canvas, people, screens))
+    // Each screen over its owner's camera, not in the order they went up.
+    const paired = screensByOwner(screens, input.onStage ?? people)
+    tiles.push(...twoScreensTiles(canvas, people, paired))
   } else if (layout === 'screen-people') {
     const screenIdentity = screens[0] ?? ''
     if (portrait) {

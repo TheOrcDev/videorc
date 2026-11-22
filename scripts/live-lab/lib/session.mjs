@@ -27,6 +27,7 @@ import {
 } from './launch.mjs'
 import {
   CHROME_NAMES,
+  checkLabPicture,
   LAB_SPEECH_SINK,
   findOnPath,
   focusLabOutput,
@@ -249,7 +250,8 @@ export function createSessionStarter({
   youtubeSide = createYoutubeSide,
   speechRig = createSpeechRig,
   platform = process.platform,
-  sessionEnvFor = labSessionEnv
+  sessionEnvFor = labSessionEnv,
+  labPicture = checkLabPicture
 }) {
   const linux = isLinux(platform)
   return async function startSession({ runInfo, scenario, policy, runDir, bus, signal, log }) {
@@ -270,7 +272,7 @@ export function createSessionStarter({
             // The YouTube side stops first so its last poll can still see the
             // broadcast end; it must never outlive the app observer.
             if (parts.youtube) parts.youtubeSummary = await parts.youtube.stop()
-            parts.observer?.stop()
+            await parts.observer?.stop()
           }
         },
         quitApp: parts.app?.stop,
@@ -321,6 +323,7 @@ export function createSessionStarter({
       })
       if (linux) {
         const bounds = await linuxLabOutputBounds(config?.labDisplay?.name, { sessionEnv })
+        parts.labOutput = bounds.name
         parts.portalPick = await preparePortalGrant({
           appDataDir: dirs.appDataDir,
           outputName: bounds.name
@@ -433,6 +436,7 @@ export function createSessionStarter({
         ledgerPaths: () => ledgerPathsFor(dirs, install.appPath),
         rootPid: async () => parts.appPid ?? (await parts.app.appPid()),
         clock,
+        sinceMs: startedAtMs,
         log
       })
       parts.backendSocket.addEventListener('message', (event) => {
@@ -479,6 +483,8 @@ export function createSessionStarter({
           ui,
           observe,
           card: parts.card,
+          // Plan 257 S0: card-up checks one frame of the lab output (Linux).
+          labPicture: linux ? () => labPicture({ outputName: parts.labOutput, sessionEnv }) : null,
           sink: parts.sink ?? null,
           observer: parts.youtube?.observer ?? null,
           viewer: parts.youtube?.viewer ?? null,

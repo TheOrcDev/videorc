@@ -100,3 +100,66 @@ export function assessCameraPreview(status, { minFrames = 10 } = {}) {
   }
   return { ok: failures.length === 0, failures }
 }
+
+// Plan 257 S2: the camera streams one of its own V4L2 modes, which its live
+// message names ("... the camera's native NV12 1280x720@30 from ..." or, when
+// short of the canvas, "... is using NV12 1280x720@30 from ...").
+const NATIVE_MODE = /(?:native|is using) ([A-Z0-9]{2,4}) (\d+)x(\d+)@(\d+)/
+
+export function cameraNativeMode(message) {
+  const match = NATIVE_MODE.exec(message ?? '')
+  if (!match) return null
+  return {
+    format: match[1],
+    width: Number(match[2]),
+    height: Number(match[3]),
+    fps: Number(match[4])
+  }
+}
+
+export function assessCameraNativeMode(status) {
+  const mode = cameraNativeMode(status?.message)
+  return mode
+    ? { ok: true, failures: [], mode }
+    : {
+        ok: false,
+        failures: [
+          `camera did not start one of its own modes: ${status?.message ?? '(no message)'}`
+        ],
+        mode: null
+      }
+}
+
+/** utime + stime clock ticks from a /proc/<pid>/stat line. */
+export function procStatCpuTicks(text) {
+  // The command name may hold spaces and parentheses: fields restart after
+  // the last ')'. utime and stime are fields 14 and 15 (11 and 12 after it).
+  const rest = String(text ?? '')
+    .slice(String(text ?? '').lastIndexOf(')') + 1)
+    .trim()
+    .split(/\s+/)
+  const utime = Number(rest[11])
+  const stime = Number(rest[12])
+  return Number.isFinite(utime) && Number.isFinite(stime) ? utime + stime : null
+}
+
+export function cpuPercent(ticksBefore, ticksAfter, elapsedMs, clockTicks = 100) {
+  if (![ticksBefore, ticksAfter, elapsedMs, clockTicks].every(Number.isFinite)) return null
+  if (elapsedMs <= 0 || clockTicks <= 0 || ticksAfter < ticksBefore) return null
+  return ((ticksAfter - ticksBefore) * 100 * 1000) / clockTicks / elapsedMs
+}
+
+/** Plan 257 S2 done-when: the camera child is under 40 % CPU at 720p30. */
+export function assessCameraChildCpu(sample, { maxPercent = 40 } = {}) {
+  if (!sample || typeof sample.cpuPercent !== 'number') {
+    return { ok: false, failures: ['camera FFmpeg child CPU was not measured'] }
+  }
+  return sample.cpuPercent < maxPercent
+    ? { ok: true, failures: [] }
+    : {
+        ok: false,
+        failures: [
+          `camera FFmpeg child used ${sample.cpuPercent.toFixed(1)} % CPU (max ${maxPercent} %)`
+        ]
+      }
+}

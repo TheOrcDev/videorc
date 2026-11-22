@@ -32,7 +32,9 @@ mod buddy_pet;
 mod buddy_pet_store;
 mod buddy_sprite;
 mod camera_capture;
+mod camera_fixture;
 mod camera_low_light;
+mod camera_system_effect;
 mod captions;
 mod capture_health;
 mod capture_input;
@@ -48,6 +50,7 @@ mod cloud_clips;
 mod cloud_control_web;
 mod cloud_controller;
 mod cloud_graphics;
+mod cloud_latency;
 mod cloud_markers;
 mod cloud_output_session;
 mod cloud_services;
@@ -577,6 +580,9 @@ async fn run_backend(device_changes: tokio::sync::watch::Receiver<u64>) -> Resul
     // Plan 254 S7: what each CoreAudio microphone id named before this
     // start, so a saved id that drifted still opens its microphone.
     microphone_identity::restore(&database);
+    // Plan 258 S4: a Windows Studio Effects blur an earlier run turned off
+    // and never put back (it crashed or was force-quit) goes back on.
+    camera_system_effect::settle_owed_restores_at_launch(&database);
     // Plan 249 S22: a cloud ISO transfer the previous run left running is
     // retried, and only staging files its journal created are removed.
     if let Err(error) = database.recover_cloud_iso_imports() {
@@ -842,14 +848,7 @@ async fn run_backend(device_changes: tokio::sync::watch::Receiver<u64>) -> Resul
             let mut tick = tokio::time::interval(std::time::Duration::from_secs(10));
             loop {
                 tick.tick().await;
-                if !cloud_test_blocked_by(&current_recording_status(&discovery_state).await)
-                    && let (Some(context), Some(bearer)) = (
-                        cloud_context(&discovery_state),
-                        account::stored_session_token(),
-                    )
-                {
-                    let _ = context.check_current_show(&bearer, false).await;
-                }
+                let _ = cloud_show_check_current(&discovery_state, false).await;
             }
         });
     }
@@ -878,6 +877,9 @@ async fn run_backend(device_changes: tokio::sync::watch::Receiver<u64>) -> Resul
     // its one-time, resumable backfill.
     community_service::spawn_startup_jobs(&state);
     watchdog::spawn_talk_show_watch(&state);
+    // Plan 253 S7: each web command's time goes into the show's latency
+    // record, and a slow one leaves a health event.
+    cloud_latency::spawn_command_recorder(&state);
     // Plan 249 S24 x S15: once this process loses a show it controlled,
     // captions listening for it retires (consent and intents revoked before
     // the provider task is joined). The synchronous gate is in cloud_host.
@@ -5067,6 +5069,28 @@ const WEBSOCKET_DISPOSABLE_MAX_EXECUTION_AGE: Duration = Duration::from_secs(2);
 // refused rather than transcribed late (the admission budget in
 // `captions::cloud_host::audio` holds at most 200 ms of audio anyway).
 const WEBSOCKET_HOST_SPEECH_MAX_QUEUE_AGE: Duration = Duration::from_secs(1);
+// 2026-11-19 09:57: the window's focus check (`cloud.show.check`) waited on
+// videorc.com for its whole 10 s request timeout, which was also its whole
+// mutation contract, and the backend recycled in the middle of a Clips
+// session. The same days a room's controls (`cloud.stage.set`, 2.3 to 4.1 s)
+// held the ordered lane, and scene switches, mute and Save clip waited behind
+// them. A command whose time is a web service's is not what the mutation
+// contract is for: its handler waits on a request, it is not wedged in native
+// code. So it is web-bound: it runs in a lane beside the ordered one (never a
+// barrier for a local control), and at its deadline its handler is cancelled
+// and the command is refused, which is what its request's own timeout does.
+// It never recycles the backend. The deadline stays under the renderer's
+// 30 s request envelope.
+const WEBSOCKET_WEB_BOUND_MAX_EXECUTION_AGE: Duration = Duration::from_secs(25);
+// A cancelled handler lets go at its next await. One that has not after this
+// long is blocked in synchronous code: said once in the log, never a recycle.
+const WEBSOCKET_WEB_BOUND_CANCEL_GRACE: Duration = Duration::from_secs(1);
+// Room controls keep the ordered lane's queue age: a control that waited 5 s
+// behind a slow one is refused, never applied late.
+const WEBSOCKET_CLOUD_CONTROL_MAX_QUEUE_AGE: Duration = Duration::from_secs(5);
+// `clip.mark` in a cloud show: what it may spend on videorc.com inside its
+// 10 s mutation contract (the stream report's RPCs keep the same 8 s).
+const CLOUD_CLIP_MARK_BUDGET: Duration = Duration::from_secs(8);
 const COMMAND_LANE_SMOKE_BLOCK_METHOD: &str = "test.commandLanes.accountMaintenance.block";
 const LIVE_CONTROL_RECYCLE_SMOKE_BLOCK_METHOD: &str = "test.commandLanes.liveControl.block";
 const COMMAND_LANE_SMOKE_STATUS_METHOD: &str = "test.commandLanes.accountMaintenance.status";
@@ -5899,6 +5923,16 @@ enum WebSocketMethodExecutionPolicy {
     Disposable {
         max_execution_age: Duration,
     },
+    /// A command whose time is a web service's (videorc.com, a platform, a
+    /// webhook): cancelled and refused at its deadline, as its request's own
+    /// timeout would do, never a backend recycle. Every such method has an
+    /// isolated lane, so it never barriers a local control either (see
+    /// `WEBSOCKET_WEB_BOUND_MAX_EXECUTION_AGE`). Only for a handler whose
+    /// awaits are requests and short local locks: nothing it leaves half done
+    /// may need an error path to undo.
+    WebBound {
+        max_execution_age: Duration,
+    },
     SessionLifecycle,
 }
 
@@ -5911,12 +5945,17 @@ const DEFAULT_MUTATION_POLICY: WebSocketMethodExecutionPolicy =
 /// `handle_text_message_with_role`. The source-derived regression below fails
 /// when an arm is added without choosing one of these policies.
 fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExecutionPolicy> {
-    use WebSocketMethodExecutionPolicy::{Disposable, Mutation, Observation, SessionLifecycle};
+    use WebSocketMethodExecutionPolicy::{
+        Disposable, Mutation, Observation, SessionLifecycle, WebBound,
+    };
 
     match method {
         // A bounded PCM frame of the published host microphone (10 a second)
         // and the renderer's latest-wins projections for the remotes.
-        "cloud.speech.audio" | "remote.surface.publish" | "agent.surface.publish" => {
+        "cloud.speech.audio"
+        | "cloud.speech.guests.audio"
+        | "remote.surface.publish"
+        | "agent.surface.publish" => {
             Some(Disposable {
                 max_execution_age: WEBSOCKET_DISPOSABLE_MAX_EXECUTION_AGE,
             })
@@ -5932,16 +5971,10 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "resource.capability.register_thumbnail"
         | "account.auth.begin_intent"
         | "account.sign_out"
-        | "cloud.clips.enable"
-        | "cloud.clips.disable"
-        | "cloud.clips.save"
-        | "cloud.clips.cancel"
-        | "cloud.clips.discard"
-        | "cloud.marker.create"
-        | "cloud.marker.delete"
         | "cloud.marker.voice.configure"
         | "cloud.speech.overlay"
         | "cloud.speech.sync"
+        | "cloud.speech.guests.sync"
         | "captions.start"
         | "captions.stop"
         | "captions.style.set"
@@ -5977,12 +6010,12 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "cohost.library.update"
         | "cohost.library.delete"
         | "cohost.library.saveToLibrary"
-        | "cloud.graphics.snapshot"
         | "cloud.htmlLayers.want"
         | "buddy.cloud.report"
         | "cloud.presentation.accepted"
+        // Plan 253 S7: folded in memory at once; the write is its own task.
+        | "cloud.room.latency.report"
         | "cloud.controller.desired"
-        | "cloud.presentation.restore"
         | "buddy.overlay.set"
         | "buddy.overlay.clear"
         | "cohost.pet.import"
@@ -6081,8 +6114,6 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "liveChat.x.start"
         | "liveChat.stop"
         | "liveChat.send"
-        | "liveChat.moderation.request"
-        | "liveChat.moderation.confirm"
         | "liveChat.moderation.cancel"
         | "liveChat.clearLocal"
         | "liveChat.emotes.set"
@@ -6101,7 +6132,6 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "scheduledStreams.complete"
         | "streamTargets.manualKey.store"
         | "streamTargets.manualKey.restorePrevious"
-        | "platformAccounts.youtube.selectChannel"
         | "screens.rename"
         | "screens.delete"
         | "screens.reorder"
@@ -6131,6 +6161,46 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "virtualCamera.platform.report"
         | "htmlOverlays.host.report"
         | "camera.lowLight.set" => Some(DEFAULT_MUTATION_POLICY),
+
+        // Web-bound (see `WEBSOCKET_WEB_BOUND_MAX_EXECUTION_AGE`). The
+        // controls of an open room and a cloud show, all through videorc.com
+        // or the show's control channel:
+        "cloud.allowance.refresh"
+        | "cloud.room.invite.rotate"
+        | "cloud.room.door.set"
+        | "cloud.room.token.refresh"
+        | "cloud.guest.decide"
+        | "cloud.guest.act"
+        | "cloud.stage.set"
+        | "cloud.recording.start"
+        | "cloud.recording.stop"
+        | "cloud.return.set"
+        | "cloud.show.reconnectDestination"
+        // Cloud clips and markers: up to three requests in a row.
+        | "cloud.clips.enable"
+        | "cloud.clips.disable"
+        | "cloud.clips.save"
+        | "cloud.clips.cancel"
+        | "cloud.clips.discard"
+        | "cloud.marker.create"
+        | "cloud.marker.delete"
+        // Plan 249 S24: one request per kept picture.
+        | "cloud.presentation.restore"
+        // Plan 234 T3, plan 249 S22: the account's cloud recordings and the
+        // show's ISO request, read from videorc.com.
+        | "cloud.archive.availability"
+        | "cloud.recordings.list"
+        | "cloud.iso.status"
+        | "cloud.iso.enable"
+        | "cloud.iso.disable"
+        // Discord verifies or posts (a test post retries for up to 22 s) and
+        // YouTube lists the account's channels, on a client with no timeout
+        // of its own.
+        | "discord.webhook.save"
+        | "discord.webhook.sendTest"
+        | "platformAccounts.youtube.selectChannel" => Some(WebBound {
+            max_execution_age: WEBSOCKET_WEB_BOUND_MAX_EXECUTION_AGE,
+        }),
 
         "session.source.switch" => Some(Mutation {
             max_execution_age: live_source_switch::SOURCE_SWITCH_EXECUTION_TIMEOUT,
@@ -6189,35 +6259,24 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "streamTargets.x.prepare"
         | "streamTargets.x.publish"
         | "streamTargets.x.end"
-        // Plan 184: both talk to videorc.com (and the show's node).
-        | "cloud.allowance.refresh"
+        // Plan 184: talks to videorc.com (and the show's node).
         | "cloud.show.end"
         // Plan 224: the room's doors, all through videorc.com or the node.
         | "cloud.room.open"
         | "cloud.room.close"
         | "cloud.room.resume"
-        | "cloud.room.invite.rotate"
-        | "cloud.room.door.set"
-        | "cloud.room.token.refresh"
-        | "cloud.guest.decide"
-        | "cloud.guest.act"
-        | "cloud.stage.set"
-        | "cloud.recording.start"
-        | "cloud.recording.stop"
-        | "cloud.return.set"
         | "cloud.show.goLive"
         | "cloud.show.legs.end"
         | "cloud.overlay.set"
         | "cloud.overlay.clear"
-        // Plan 234 T3: the account's cloud recordings, from videorc.com.
-        | "cloud.archive.availability"
+        // Plan 234 T3: a managed cloud recording made into an MP4 here.
         | "cloud.archive.start"
         | "cloud.archive.resume"
-        | "cloud.recordings.list"
-        // Plan 249 S22: the show's ISO request, through videorc.com.
-        | "cloud.iso.status"
-        | "cloud.iso.enable"
-        | "cloud.iso.disable"
+        // A removal tries the platform twice, 8 s each
+        // (`live_chat_moderation::PROVIDER_TIMEOUT`): 16 s never fitted the
+        // default 10 s contract.
+        | "liveChat.moderation.request"
+        | "liveChat.moderation.confirm"
         | "repair.restore_file"
         | "preview.snapshot" => Some(Mutation {
             max_execution_age: WEBSOCKET_PROVIDER_MUTATION_MAX_EXECUTION_AGE,
@@ -6249,9 +6308,7 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "diagnostics.metricsJournal.set"
         | "usageStats.set"
         | "discord.announce.update"
-        | "discord.webhook.save"
         | "discord.webhook.remove"
-        | "discord.webhook.sendTest"
         | "streamReport.email.set"
         | "streamReport.history.set"
         | "streamReport.email.sendLast"
@@ -6259,7 +6316,6 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "watchdog.alert.snooze"
         | "watchdog.settings.set"
         | "watchdog.idle.report"
-        | "cloud.show.reconnectDestination"
         | "cloud.show.check"
         | "cloud.room.client.report"
         | "cloud.recordings.download"
@@ -6334,6 +6390,11 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "agents.status"
         | "agents.activity.list"
         | "cloud.status"
+        // The room renderer's 2 Hz read of the public graphics. It changes
+        // only its own raster cache. As a mutation every poll was an ordering
+        // barrier with a 10 s recycle contract (2.3 to 6.1 s polls in the
+        // 2026-11-18 owner log).
+        | "cloud.graphics.snapshot"
         | "cloud.archive.status"
         | "cloud.recordings.downloads"
         | "cloud.iso.imports"
@@ -6421,6 +6482,7 @@ fn websocket_command_mutation_max_execution_age(text: &str) -> Option<Duration> 
         WebSocketMethodExecutionPolicy::Mutation { max_execution_age } => Some(max_execution_age),
         WebSocketMethodExecutionPolicy::Observation
         | WebSocketMethodExecutionPolicy::Disposable { .. }
+        | WebSocketMethodExecutionPolicy::WebBound { .. }
         | WebSocketMethodExecutionPolicy::SessionLifecycle => None,
     }
 }
@@ -6431,6 +6493,16 @@ fn websocket_command_disposable_max_execution_age(text: &str) -> Option<Duration
     let command = serde_json::from_str::<ClientCommand>(text).ok()?;
     match websocket_method_execution_policy(command.method.as_str())? {
         WebSocketMethodExecutionPolicy::Disposable { max_execution_age } => Some(max_execution_age),
+        _ => None,
+    }
+}
+
+/// The deadline of a web-bound command (`WebBound`), after which its handler
+/// is cancelled and the command refused. `None` for every other policy.
+fn websocket_command_web_bound_max_execution_age(text: &str) -> Option<Duration> {
+    let command = serde_json::from_str::<ClientCommand>(text).ok()?;
+    match websocket_method_execution_policy(command.method.as_str())? {
+        WebSocketMethodExecutionPolicy::WebBound { max_execution_age } => Some(max_execution_age),
         _ => None,
     }
 }
@@ -6449,6 +6521,11 @@ enum WebSocketIsolatedCommandLaneKind {
     /// 10 a second in a talk show. In order, one at a time, and never a
     /// barrier for (or behind) an operator control on the ordered lane.
     HostSpeech,
+    /// The web-bound controls of an open room and a cloud show. In order, one
+    /// at a time among themselves (a stage change never overtakes the one
+    /// before it), and never a barrier for a local control: a scene switch,
+    /// mute or Save clip does not wait for videorc.com.
+    CloudControl,
 }
 
 fn websocket_isolated_command_lane(text: &str) -> Option<WebSocketIsolatedCommandLaneKind> {
@@ -6464,9 +6541,43 @@ fn websocket_isolated_command_lane(text: &str) -> Option<WebSocketIsolatedComman
         | "entitlements.refresh"
         | "platformAccounts.refresh"
         | "platformAccounts.validate"
+        // Web-bound account and settings work: a platform or Discord answers.
+        | "platformAccounts.youtube.selectChannel"
+        | "discord.webhook.save"
+        | "discord.webhook.sendTest"
         | COMMAND_LANE_SMOKE_BLOCK_METHOD => {
             Some(WebSocketIsolatedCommandLaneKind::AccountMaintenance)
         }
+        // Every one waits on videorc.com or the show's control channel and
+        // changes only the cloud show's own state (see `CloudControl`). What
+        // lends or returns the camera, starts or ends the broadcast or the
+        // chat (`cloud.room.open`, `.close`, `.resume`, `cloud.show.goLive`,
+        // `.legs.end`, `.end`) stays ordered against the local session and
+        // source commands.
+        "cloud.allowance.refresh"
+        | "cloud.room.invite.rotate"
+        | "cloud.room.door.set"
+        | "cloud.room.token.refresh"
+        | "cloud.guest.decide"
+        | "cloud.guest.act"
+        | "cloud.stage.set"
+        | "cloud.recording.start"
+        | "cloud.recording.stop"
+        | "cloud.return.set"
+        | "cloud.show.reconnectDestination"
+        | "cloud.clips.enable"
+        | "cloud.clips.disable"
+        | "cloud.clips.save"
+        | "cloud.clips.cancel"
+        | "cloud.clips.discard"
+        | "cloud.marker.create"
+        | "cloud.marker.delete"
+        | "cloud.presentation.restore"
+        | "cloud.archive.availability"
+        | "cloud.recordings.list"
+        | "cloud.iso.status"
+        | "cloud.iso.enable"
+        | "cloud.iso.disable" => Some(WebSocketIsolatedCommandLaneKind::CloudControl),
         "liveChat.send"
         // Plan 226: the streamer's `!go` posts to every chat, like a send.
         | "chatCommands.post"
@@ -6506,7 +6617,9 @@ fn websocket_isolated_command_lane(text: &str) -> Option<WebSocketIsolatedComman
         "remote.surface.publish" | "agent.surface.publish" => {
             Some(WebSocketIsolatedCommandLaneKind::SurfacePublish)
         }
-        "cloud.speech.audio" => Some(WebSocketIsolatedCommandLaneKind::HostSpeech),
+        "cloud.speech.audio" | "cloud.speech.guests.audio" => {
+            Some(WebSocketIsolatedCommandLaneKind::HostSpeech)
+        }
         _ => None,
     }
 }
@@ -6656,6 +6769,9 @@ fn accept_websocket_command(state: &AppState, text: String) -> WebSocketAccepted
             Some(WebSocketIsolatedCommandLaneKind::HostSpeech) => {
                 WEBSOCKET_HOST_SPEECH_MAX_QUEUE_AGE
             }
+            Some(WebSocketIsolatedCommandLaneKind::CloudControl) => {
+                WEBSOCKET_CLOUD_CONTROL_MAX_QUEUE_AGE
+            }
             // Observation is classified above because it is a read-only
             // property rather than a mutation-lane classifier result.
             Some(WebSocketIsolatedCommandLaneKind::Observation) => {
@@ -6733,6 +6849,7 @@ struct WebSocketIsolatedCommandLanes {
     stop: WebSocketIsolatedCommandLane,
     surface_publish: WebSocketIsolatedCommandLane,
     host_speech: WebSocketIsolatedCommandLane,
+    cloud_control: WebSocketIsolatedCommandLane,
 }
 
 struct WebSocketIsolatedCommandLaneReceivers {
@@ -6744,6 +6861,7 @@ struct WebSocketIsolatedCommandLaneReceivers {
     stop: mpsc::Receiver<WebSocketQueuedLaneCommand>,
     surface_publish: mpsc::Receiver<WebSocketQueuedLaneCommand>,
     host_speech: mpsc::Receiver<WebSocketQueuedLaneCommand>,
+    cloud_control: mpsc::Receiver<WebSocketQueuedLaneCommand>,
 }
 
 impl WebSocketIsolatedCommandLanes {
@@ -6800,6 +6918,12 @@ impl WebSocketIsolatedCommandLanes {
             WEBSOCKET_HOST_SPEECH_MAX_QUEUE_AGE,
             transport.register_command_lane("hostSpeech"),
         );
+        let (cloud_control, cloud_control_rx) = WebSocketIsolatedCommandLane::new(
+            WebSocketIsolatedCommandLaneKind::CloudControl,
+            WEBSOCKET_ISOLATED_LANE_QUEUE_CAPACITY,
+            WEBSOCKET_CLOUD_CONTROL_MAX_QUEUE_AGE,
+            transport.register_command_lane("cloudControl"),
+        );
         (
             Self {
                 observation,
@@ -6810,6 +6934,7 @@ impl WebSocketIsolatedCommandLanes {
                 stop,
                 surface_publish,
                 host_speech,
+                cloud_control,
             },
             WebSocketIsolatedCommandLaneReceivers {
                 observation: observation_rx,
@@ -6820,6 +6945,7 @@ impl WebSocketIsolatedCommandLanes {
                 stop: stop_rx,
                 surface_publish: surface_publish_rx,
                 host_speech: host_speech_rx,
+                cloud_control: cloud_control_rx,
             },
         )
     }
@@ -6834,6 +6960,7 @@ impl WebSocketIsolatedCommandLanes {
             WebSocketIsolatedCommandLaneKind::Stop => self.stop.clone(),
             WebSocketIsolatedCommandLaneKind::SurfacePublish => self.surface_publish.clone(),
             WebSocketIsolatedCommandLaneKind::HostSpeech => self.host_speech.clone(),
+            WebSocketIsolatedCommandLaneKind::CloudControl => self.cloud_control.clone(),
         }
     }
 }
@@ -6862,6 +6989,7 @@ impl WebSocketIsolatedCommandLaneKind {
             Self::Stop => "stop",
             Self::SurfacePublish => "surfacePublish",
             Self::HostSpeech => "hostSpeech",
+            Self::CloudControl => "cloudControl",
         }
     }
 }
@@ -7374,6 +7502,104 @@ fn warn_disposable_command_dropped(lane: &str, method: &str, max_execution_age: 
     );
 }
 
+/// Run a web-bound command (`WebBound`) on the mutation workers, beside the
+/// process runtime like every watched mutation. At its deadline the handler
+/// task is aborted, which drops its future at the request it is waiting on,
+/// and the command is refused with `request-outcome-unknown`: the request may
+/// have reached the web. The backend is never recycled for the wait. Only a
+/// panic is still outcome-unknown the hard way.
+///
+/// `retention` (the lane admission) lives in the handler task and is released
+/// when that task ends, by completion or by the abort. The lane serves its
+/// next command as soon as this returns.
+async fn run_websocket_web_bound_command<Retention>(
+    mutation_executor: Result<WebSocketMutationExecutor, &'static str>,
+    state: AppState,
+    text: String,
+    handler: WebSocketCommandHandler,
+    retention: Retention,
+    max_execution_age: Duration,
+    cancel_grace: Duration,
+) -> ServerResponse
+where
+    Retention: Send + 'static,
+{
+    let command_id = websocket_command_id(text.as_str());
+    let method = websocket_command_method(text.as_str());
+    let lane = websocket_lane_label(text.as_str());
+    let executor = match mutation_executor {
+        Ok(executor) => executor,
+        Err(_) => {
+            // No isolated execution boundary exists: fail closed, as a
+            // watched mutation does, before the handler can be invoked.
+            state.request_process_shutdown();
+            drop(retention);
+            return ServerResponse::error(
+                command_id,
+                "command-not-applied",
+                "Videorc could not arm isolated command execution. The command was not applied and the backend is restarting.",
+            );
+        }
+    };
+    let restart_state = state.clone();
+    let started = std::time::Instant::now();
+    let mut execution = executor.spawn(async move {
+        let _retention = retention;
+        std::panic::AssertUnwindSafe(handler(state, text))
+            .catch_unwind()
+            .await
+    });
+    let outcome_unknown = |cause: String| {
+        // The latch is the recovery authority; diagnostics follow it.
+        restart_state.request_process_shutdown();
+        restart_state.emit_log(
+            "error",
+            format!(
+                "Web-bound command {method} {cause}; its outcome is unknown and the backend is restarting after safe recording finalization."
+            ),
+        );
+        ServerResponse::error(
+            command_id.clone(),
+            "request-outcome-unknown",
+            "The command failed after dispatch. Its outcome is unknown; Videorc is restarting the backend and will reconcile authoritative state.",
+        )
+    };
+    match tokio::time::timeout(max_execution_age, &mut execution).await {
+        Ok(Ok(Ok(response))) => response,
+        Ok(Ok(Err(_panic))) => outcome_unknown("panicked after dispatch".to_string()),
+        Ok(Err(error)) => outcome_unknown(format!("task failed after dispatch ({error})")),
+        Err(_) => {
+            execution.abort();
+            match tokio::time::timeout(cancel_grace, &mut execution).await {
+                // It finished in the instant the deadline fired.
+                Ok(Ok(Ok(response))) => return response,
+                Ok(Ok(Err(_panic))) => {
+                    return outcome_unknown("panicked after dispatch".to_string());
+                }
+                Ok(Err(error)) if !error.is_cancelled() => {
+                    return outcome_unknown(format!("task failed after dispatch ({error})"));
+                }
+                // Cancelled: the handler let go of its request.
+                Ok(Err(_)) => {}
+                Err(_) => tracing::error!(
+                    "[command-lane] {method} was cancelled at its deadline but has not let go after {}ms: it is blocked in synchronous code, and its {lane} lane slot stays taken until it returns",
+                    cancel_grace.as_millis()
+                ),
+            }
+            tracing::warn!(
+                "[command-lane] {method} waited {}ms on the web in the {lane} lane, past its {}ms deadline; it was cancelled and refused, and the backend keeps running",
+                started.elapsed().as_millis(),
+                max_execution_age.as_millis()
+            );
+            ServerResponse::error(
+                command_id,
+                "request-outcome-unknown",
+                "The web did not answer in time, so Videorc stopped waiting. The request may still have arrived; its outcome is unknown.",
+            )
+        }
+    }
+}
+
 async fn run_websocket_command_lane_worker(
     mut commands: mpsc::Receiver<WebSocketQueuedLaneCommand>,
     max_concurrency: usize,
@@ -7744,6 +7970,30 @@ async fn run_websocket_command_lane_worker(
                 }
 
                 if let Some(max_execution_age) =
+                    websocket_command_web_bound_max_execution_age(text.as_str())
+                {
+                    // The handler owns the lane admission until it lets go.
+                    let response = run_websocket_web_bound_command(
+                        mutation_executor,
+                        command_state,
+                        text,
+                        handler,
+                        _admission,
+                        mutation_max_execution_age_override.unwrap_or(max_execution_age),
+                        WEBSOCKET_WEB_BOUND_CANCEL_GRACE,
+                    )
+                    .await;
+                    let _ = queue_websocket_response(
+                        &response_tx,
+                        &response_metrics,
+                        &response_pressure,
+                        response,
+                    )
+                    .await;
+                    return;
+                }
+
+                if let Some(max_execution_age) =
                     websocket_command_disposable_max_execution_age(text.as_str())
                 {
                     let method = websocket_command_method(text.as_str());
@@ -7966,6 +8216,14 @@ async fn run_websocket_command_dispatcher(
         lane_receivers.host_speech,
         1,
         lanes.host_speech.metrics.clone(),
+        &lane_worker_context,
+    );
+    // One at a time keeps a room's controls in the order they were given.
+    spawn_websocket_command_lane_worker(
+        &mut lane_workers,
+        lane_receivers.cloud_control,
+        1,
+        lanes.cloud_control.metrics.clone(),
         &lane_worker_context,
     );
 
@@ -11247,6 +11505,26 @@ async fn handle_text_message_with_role(
             },
             Err(error) => ServerResponse::error(command.id, "invalid-params", error.to_string()),
         },
+        // Guest captions: a captions-only stream with its own source and
+        // channel. Nothing it hears reaches Sidekick (`guest_lane`).
+        "cloud.speech.guests.sync" => match serde_json::from_value(command.params.clone()) {
+            Ok(input) => match captions::guest_lane::sync(state, input).await {
+                Ok(value) => ServerResponse::ok(command.id, value),
+                Err(error) => {
+                    ServerResponse::error(command.id, "cloud-speech-refused", error.to_string())
+                }
+            },
+            Err(error) => ServerResponse::error(command.id, "invalid-params", error.to_string()),
+        },
+        "cloud.speech.guests.audio" => match serde_json::from_value(command.params.clone()) {
+            Ok(input) => match captions::guest_lane::audio(state, input).await {
+                Ok(value) => ServerResponse::ok(command.id, value),
+                Err(error) => {
+                    ServerResponse::error(command.id, "cloud-speech-refused", error.to_string())
+                }
+            },
+            Err(error) => ServerResponse::error(command.id, "invalid-params", error.to_string()),
+        },
         "captions.start" => {
             let language = command
                 .params
@@ -12796,16 +13074,9 @@ async fn handle_text_message_with_role(
         // every answer and the `cloud.state` event are the same secret-free
         // `CloudStatus`.
         "cloud.status" => ServerResponse::ok(command.id, cloud_show_status(state)),
+        // The RPC only starts the check (see `spawn_cloud_show_focus_check`).
         "cloud.show.check" => {
-            if cloud_test_blocked_by(&current_recording_status(state).await) {
-                return ServerResponse::ok(command.id, serde_json::json!({"ok":true}));
-            }
-            if let (Some(context), Some(bearer)) =
-                (cloud_context(state), account::stored_session_token())
-                && let Err(error) = context.check_current_show(&bearer, true).await
-            {
-                return ServerResponse::error(command.id, "cloud-check-failed", error.to_string());
-            }
+            spawn_cloud_show_focus_check(state);
             ServerResponse::ok(command.id, serde_json::json!({"ok":true}))
         }
         "cloud.show.handOff" => {
@@ -13129,6 +13400,25 @@ async fn handle_text_message_with_role(
                     ServerResponse::ok(command.id, serde_json::json!({ "queued": queued }))
                 }
                 _ => ServerResponse::ok(command.id, cloud_presentation_restore(&show_id).await),
+            }
+        }
+        // --- Plan 253 S7: what the room renderer measured, for the record ---
+        "cloud.room.latency.report" => {
+            if role != BackendRole::Renderer {
+                return ServerResponse::error(
+                    command.id,
+                    "forbidden",
+                    "Only the room renderer reports the room's latency.",
+                );
+            }
+            match serde_json::from_value::<cloud_latency::LatencyReportParams>(command.params) {
+                Ok(params) => match cloud_latency::report(state, &params) {
+                    Ok(kept) => ServerResponse::ok(command.id, serde_json::json!({ "kept": kept })),
+                    Err(problem) => ServerResponse::error(command.id, "invalid-params", problem),
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
             }
         }
         "cloud.room.client.report" => {
@@ -14070,7 +14360,10 @@ async fn handle_text_message_with_role(
                         Ok(status) => ServerResponse::ok(command.id, status),
                         Err(error) => ServerResponse::error(
                             command.id,
-                            "scene-commit-failed",
+                            live_layout::idle_scene_reload_failure_code(
+                                &error,
+                                "scene-commit-failed",
+                            ),
                             error.to_string(),
                         ),
                     }
@@ -17104,20 +17397,35 @@ async fn handle_text_message_with_role(
         // callers send no params (or null): that is `{}`, today's 30 s.
         "clip.mark" => {
             if cloud_markers::current_show(state).is_some() {
-                return match cloud_markers::dispatch_clip(
-                    state,
-                    command.params,
-                    &command.id.to_string(),
+                // In a cloud show the mark is up to three requests to
+                // videorc.com (34 s at their own timeouts) under this
+                // command's 10 s contract. It shares its method with the
+                // local mark, so it stays on the ordered lane and is bounded
+                // here: a slow answer is a refusal, never a recycle.
+                return match tokio::time::timeout(
+                    CLOUD_CLIP_MARK_BUDGET,
+                    cloud_markers::dispatch_clip(state, command.params, &command.id.to_string()),
                 )
                 .await
                 {
-                    Ok(mark) => {
+                    Ok(Ok(mark)) => {
                         let event = cloud_markers::clip_event(&mark);
                         state.emit_event("clip.marked", event.clone());
                         ServerResponse::ok(command.id, event)
                     }
-                    Err(e) => {
+                    Ok(Err(e)) => {
                         ServerResponse::error(command.id, "cloud-marker-refused", e.to_string())
+                    }
+                    Err(_) => {
+                        tracing::warn!(
+                            "[cloud] clip.mark waited {}ms on videorc.com and was refused; the backend keeps running",
+                            CLOUD_CLIP_MARK_BUDGET.as_millis()
+                        );
+                        ServerResponse::error(
+                            command.id,
+                            "cloud-marker-refused",
+                            "videorc.com didn't answer in time. Try again.",
+                        )
                     }
                 };
             }
@@ -18124,6 +18432,8 @@ fn cloud_hooks(state: &AppState) -> cloud_show::CloudHooks {
             // Plan 249 S25: a local session feeding a live interval is
             // reported by the interval, before any observer sees its end.
             cloud_output_session::note_status(&status);
+            // Plan 253 S7: a newly drawn stage's apply time, for the record.
+            cloud_latency::observe_status(&emit_state, &status);
             emit_state.emit_event(cloud_show::CLOUD_STATE_EVENT, status);
         }),
         // Lane 3 F2: the show this desktop holds survives a relaunch, so the
@@ -18262,6 +18572,37 @@ fn cloud_unavailable(id: String) -> ServerResponse {
 /// buffer-only session, which runs between sessions whenever Clips is on.
 fn cloud_test_blocked_by(recording: &protocol::RecordingStatus) -> bool {
     !matches!(recording.state, RecordingState::Idle) && !recording.replay_only
+}
+
+/// Plan 243 D10: asks videorc.com for a show live on another device, never
+/// while this computer records or is live. The discovery tick and the
+/// window's focus check share it (and `check_current_show`'s one clock).
+async fn cloud_show_check_current(state: &AppState, focus: bool) -> Result<()> {
+    if cloud_test_blocked_by(&current_recording_status(state).await) {
+        return Ok(());
+    }
+    let (Some(context), Some(bearer)) = (cloud_context(state), account::stored_session_token())
+    else {
+        return Ok(());
+    };
+    context.check_current_show(&bearer, focus).await
+}
+
+/// `cloud.show.check`: the focus check runs on its own task and the RPC
+/// answers at once. `GET current` may take its whole request timeout
+/// (`videorc_api::CLOUD_REQUEST_TIMEOUT`), which is this command's whole
+/// mutation contract: awaited inline, a slow answer from videorc.com recycled
+/// the backend in the middle of a Clips session (2026-11-19 09:57) and held
+/// the window's other controls for the wait. What the check finds reaches the
+/// renderer as `cloud.state`, as the discovery tick's does; the renderer
+/// never read this RPC's answer.
+fn spawn_cloud_show_focus_check(state: &AppState) {
+    let state = state.clone();
+    tokio::spawn(async move {
+        if let Err(error) = cloud_show_check_current(&state, true).await {
+            tracing::info!("[cloud] the focus check for a show live elsewhere failed: {error:#}");
+        }
+    });
 }
 
 fn cloud_talk_error_code(error: &anyhow::Error, default: &'static str) -> &'static str {
@@ -21353,6 +21694,7 @@ mod tests {
             "capture.recovery.status",
             "cloud.recordings.downloads",
             "cloud.iso.imports",
+            "cloud.graphics.snapshot",
             CAPTURE_RECOVERY_SMOKE_CAMERA_CADENCE_EVIDENCE_METHOD,
             CAPTURE_RECOVERY_SMOKE_SCREEN_CADENCE_EVIDENCE_METHOD,
         ] {
@@ -21388,6 +21730,8 @@ mod tests {
             "cloud.speech.sync",
             "cloud.speech.audio",
             "cloud.speech.overlay",
+            "cloud.speech.guests.sync",
+            "cloud.speech.guests.audio",
         ] {
             let request = json!({"id":"speech", "method":method,"params":{}}).to_string();
             for role in [BackendRole::Admin, BackendRole::Agent, BackendRole::Remote] {
@@ -22002,6 +22346,7 @@ mod tests {
 
         let mut lifecycle_exemptions = Vec::new();
         let mut disposable = Vec::new();
+        let mut web_bound = Vec::new();
         for method in methods {
             let command = json!({ "id": method, "method": method, "params": {} }).to_string();
             let policy = websocket_method_execution_policy(method.as_str())
@@ -22050,6 +22395,27 @@ mod tests {
                     );
                     disposable.push(method);
                 }
+                WebSocketMethodExecutionPolicy::WebBound { max_execution_age } => {
+                    assert!(
+                        !websocket_command_is_read_only(command.as_str()),
+                        "web-bound RPC {method} asks a web service for something: it is not an observation"
+                    );
+                    assert_eq!(
+                        websocket_command_mutation_max_execution_age(command.as_str()),
+                        None,
+                        "web-bound RPC {method} must never arm the backend-recycling mutation deadline"
+                    );
+                    assert_eq!(
+                        websocket_command_web_bound_max_execution_age(command.as_str()),
+                        Some(max_execution_age),
+                        "web-bound RPC {method} must be refused at its own deadline"
+                    );
+                    assert!(
+                        websocket_isolated_command_lane(command.as_str()).is_some(),
+                        "web-bound RPC {method} needs an isolated lane: the ordered lane has no deadline for it, and it must not barrier a local control"
+                    );
+                    web_bound.push(method);
+                }
                 WebSocketMethodExecutionPolicy::SessionLifecycle => {
                     assert!(
                         websocket_command_has_session_lifecycle_policy(command.as_str()),
@@ -22087,11 +22453,381 @@ mod tests {
             [
                 "agent.surface.publish",
                 "cloud.speech.audio",
+                "cloud.speech.guests.audio",
                 "remote.surface.publish",
             ]
             .map(str::to_string)
             .to_vec(),
             "only real-time frames and latest-wins projections may be dropped instead of recycling the backend"
+        );
+        // A handler joins this list only after it is read: every await is a
+        // request or a short local lock, and nothing it leaves half done
+        // needs an error path to undo (its cancel is a dropped future).
+        web_bound.sort_unstable();
+        assert_eq!(
+            web_bound,
+            [
+                "cloud.allowance.refresh",
+                "cloud.archive.availability",
+                "cloud.clips.cancel",
+                "cloud.clips.disable",
+                "cloud.clips.discard",
+                "cloud.clips.enable",
+                "cloud.clips.save",
+                "cloud.guest.act",
+                "cloud.guest.decide",
+                "cloud.iso.disable",
+                "cloud.iso.enable",
+                "cloud.iso.status",
+                "cloud.marker.create",
+                "cloud.marker.delete",
+                "cloud.presentation.restore",
+                "cloud.recording.start",
+                "cloud.recording.stop",
+                "cloud.recordings.list",
+                "cloud.return.set",
+                "cloud.room.door.set",
+                "cloud.room.invite.rotate",
+                "cloud.room.token.refresh",
+                "cloud.show.reconnectDestination",
+                "cloud.stage.set",
+                "discord.webhook.save",
+                "discord.webhook.sendTest",
+                "platformAccounts.youtube.selectChannel",
+            ]
+            .map(str::to_string)
+            .to_vec(),
+            "only commands that wait on a web service, and are safe to cancel there, may be refused instead of recycling the backend"
+        );
+    }
+
+    #[test]
+    fn a_slow_web_answer_is_never_a_backend_recycle_or_an_ordered_lane_barrier() {
+        // 2026-11-19 09:57: `cloud.show.check` waited 10 s on videorc.com
+        // under a 10 s mutation contract and the backend recycled in the
+        // middle of a Clips session. The same morning a room's controls
+        // (2.3 to 4.1 s `cloud.stage.set`) held the ordered lane, and scene
+        // switches, mute and Save clip waited behind them.
+        let command =
+            |method: &str| json!({ "id": method, "method": method, "params": {} }).to_string();
+        for method in [
+            "cloud.stage.set",
+            "cloud.guest.decide",
+            "cloud.guest.act",
+            "cloud.room.token.refresh",
+            "cloud.recording.start",
+            "cloud.clips.enable",
+            "cloud.marker.create",
+            "cloud.iso.status",
+        ] {
+            let text = command(method);
+            assert_eq!(
+                websocket_isolated_command_lane(text.as_str()),
+                Some(WebSocketIsolatedCommandLaneKind::CloudControl),
+                "{method} waits on videorc.com: it must not barrier a local control"
+            );
+            assert_eq!(
+                websocket_command_mutation_max_execution_age(text.as_str()),
+                None,
+                "{method} must never recycle the backend for a slow answer"
+            );
+            assert_eq!(
+                websocket_command_web_bound_max_execution_age(text.as_str()),
+                Some(WEBSOCKET_WEB_BOUND_MAX_EXECUTION_AGE)
+            );
+        }
+        for method in [
+            "discord.webhook.save",
+            "discord.webhook.sendTest",
+            "platformAccounts.youtube.selectChannel",
+        ] {
+            let text = command(method);
+            assert_eq!(
+                websocket_isolated_command_lane(text.as_str()),
+                Some(WebSocketIsolatedCommandLaneKind::AccountMaintenance),
+                "{method} waits on a platform beside the other account work"
+            );
+            assert_eq!(
+                websocket_command_web_bound_max_execution_age(text.as_str()),
+                Some(WEBSOCKET_WEB_BOUND_MAX_EXECUTION_AGE)
+            );
+        }
+        // The renderer gives a request 30 s before it calls the outcome
+        // unknown itself; the refusal must come first.
+        assert!(WEBSOCKET_WEB_BOUND_MAX_EXECUTION_AGE < Duration::from_secs(30));
+
+        // The room's 2 Hz graphics read is an observation: no barrier, no
+        // recycle contract.
+        let snapshot = command("cloud.graphics.snapshot");
+        assert!(websocket_command_is_read_only(snapshot.as_str()));
+        assert!(!websocket_observation_requires_operator_fence(
+            snapshot.as_str()
+        ));
+        assert_eq!(
+            websocket_command_mutation_max_execution_age(snapshot.as_str()),
+            None
+        );
+
+        // The focus check answers at once (its request runs on its own task),
+        // so it keeps the ordinary contract.
+        let check = command("cloud.show.check");
+        assert_eq!(websocket_isolated_command_lane(check.as_str()), None);
+        assert_eq!(
+            websocket_command_mutation_max_execution_age(check.as_str()),
+            Some(WEBSOCKET_MUTATION_MAX_EXECUTION_AGE)
+        );
+
+        // What lends the camera or starts and ends the broadcast stays
+        // ordered against the local session and source commands, watched.
+        for method in [
+            "cloud.room.open",
+            "cloud.room.close",
+            "cloud.room.resume",
+            "cloud.show.goLive",
+            "cloud.show.legs.end",
+            "cloud.show.end",
+        ] {
+            let text = command(method);
+            assert_eq!(
+                websocket_isolated_command_lane(text.as_str()),
+                None,
+                "{method}"
+            );
+            assert_eq!(
+                websocket_command_mutation_max_execution_age(text.as_str()),
+                Some(WEBSOCKET_PROVIDER_MUTATION_MAX_EXECUTION_AGE),
+                "{method}"
+            );
+        }
+
+        // A mark shares its method with the local mark, so it stays ordered;
+        // its cloud branch gives up inside the contract.
+        let mark = command("clip.mark");
+        assert_eq!(websocket_isolated_command_lane(mark.as_str()), None);
+        let contract = websocket_command_mutation_max_execution_age(mark.as_str())
+            .expect("clip.mark is a watched mutation");
+        assert!(CLOUD_CLIP_MARK_BUDGET < contract);
+
+        // Two tries of 8 s each never fitted 10 s.
+        for method in ["liveChat.moderation.request", "liveChat.moderation.confirm"] {
+            assert_eq!(
+                websocket_command_mutation_max_execution_age(command(method).as_str()),
+                Some(WEBSOCKET_PROVIDER_MUTATION_MAX_EXECUTION_AGE),
+                "{method}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_web_bound_command_that_never_answers_is_refused_and_the_backend_keeps_running() {
+        // The handler waits on a request that never comes back. At the
+        // deadline its future is dropped (the request is abandoned), the
+        // command is refused, the lane serves the next command, and no
+        // backend recycle is requested.
+        struct Abandoned(std::sync::Arc<std::sync::atomic::AtomicBool>);
+        impl Drop for Abandoned {
+            fn drop(&mut self) {
+                self.0.store(true, std::sync::atomic::Ordering::Release);
+            }
+        }
+        let abandoned = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let handler: WebSocketCommandHandler = {
+            let abandoned = abandoned.clone();
+            std::sync::Arc::new(move |_state, text| {
+                let abandoned = abandoned.clone();
+                Box::pin(async move {
+                    let command: ClientCommand = serde_json::from_str(&text).unwrap();
+                    if command.id == "stuck" {
+                        let _request = Abandoned(abandoned);
+                        std::future::pending::<()>().await;
+                    }
+                    ServerResponse::ok(command.id, json!({ "ok": true }))
+                })
+            })
+        };
+        let deadline = Duration::from_millis(200);
+        let (outgoing_tx, mut outgoing_rx) = mpsc::channel(WEBSOCKET_RELIABLE_QUEUE_CAPACITY);
+        let transport = std::sync::Arc::new(WebSocketTransportMetrics::default());
+        let (lane, lane_rx) = WebSocketIsolatedCommandLane::new(
+            WebSocketIsolatedCommandLaneKind::CloudControl,
+            WEBSOCKET_ISOLATED_LANE_QUEUE_CAPACITY,
+            WEBSOCKET_CLOUD_CONTROL_MAX_QUEUE_AGE,
+            transport.register_command_lane("cloudControl"),
+        );
+        let connection = transport.register_connection();
+        let (pressure_tx, _pressure_rx) = mpsc::channel(1);
+        let state = test_state();
+        let mut workers = tokio::task::JoinSet::new();
+        spawn_websocket_command_lane_worker_with_mutation_executor(
+            &mut workers,
+            lane_rx,
+            1,
+            lane.metrics.clone(),
+            &WebSocketCommandLaneWorkerContext {
+                state: state.clone(),
+                outgoing: outgoing_tx,
+                reliable_metrics: connection.reliable_response_queue,
+                slow_pressure: WebSocketSlowPressureSignal::new(pressure_tx, transport),
+                command_handler: handler,
+            },
+            websocket_mutation_executor(),
+            Some(deadline),
+        );
+        let enqueue = |id: &str| {
+            try_enqueue_websocket_lane_command(
+                &lane,
+                json!({ "id": id, "method": "cloud.stage.set", "params": {} }).to_string(),
+                tokio::time::Instant::now() + Duration::from_secs(5),
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        };
+        async fn next_response(outgoing: &mut mpsc::Receiver<Message>) -> serde_json::Value {
+            let message = timeout(Duration::from_secs(20), outgoing.recv())
+                .await
+                .expect("every command is answered")
+                .expect("the response queue stays open");
+            let Message::Text(text) = message else {
+                panic!("unexpected response frame");
+            };
+            serde_json::from_str(&text).unwrap()
+        }
+
+        let started = std::time::Instant::now();
+        enqueue("stuck");
+        let refused = next_response(&mut outgoing_rx).await;
+        assert_eq!(refused["id"], json!("stuck"));
+        assert_eq!(refused["ok"], json!(false), "{refused}");
+        assert_eq!(
+            refused["error"]["code"],
+            json!("request-outcome-unknown"),
+            "the request may have reached the web: {refused}"
+        );
+        assert!(
+            started.elapsed() >= deadline,
+            "the command is refused at its deadline, not before: {:?}",
+            started.elapsed()
+        );
+        assert!(
+            abandoned.load(std::sync::atomic::Ordering::Acquire),
+            "the refused handler must have let go of its request before the lane moves on"
+        );
+
+        enqueue("next");
+        let served = next_response(&mut outgoing_rx).await;
+        assert_eq!(served["id"], json!("next"));
+        assert_eq!(served["ok"], json!(true), "{served}");
+        assert!(
+            !state.process_shutdown_requested(),
+            "a slow answer from the web must never recycle the backend"
+        );
+
+        drop(lane);
+        timeout(Duration::from_secs(5), async {
+            while workers.join_next().await.is_some() {}
+        })
+        .await
+        .expect("the cloud control lane worker should stop after its sender closes");
+    }
+
+    #[tokio::test]
+    async fn a_slow_room_control_does_not_barrier_local_controls() {
+        // `cloud.stage.set` waits on videorc.com. Mute and an ordinary
+        // ordered mutation dispatch while it waits; the next room control
+        // keeps its turn behind it.
+        let stage_entered = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+        let release_stage = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+        let dispatched = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::<String>::new()));
+        let handler: WebSocketCommandHandler = {
+            let stage_entered = stage_entered.clone();
+            let release_stage = release_stage.clone();
+            let dispatched = dispatched.clone();
+            std::sync::Arc::new(move |_state, text| {
+                let stage_entered = stage_entered.clone();
+                let release_stage = release_stage.clone();
+                let dispatched = dispatched.clone();
+                Box::pin(async move {
+                    let command: ClientCommand = serde_json::from_str(&text).unwrap();
+                    if command.method == "cloud.stage.set" {
+                        stage_entered.add_permits(1);
+                        release_stage.acquire().await.unwrap().forget();
+                    }
+                    dispatched.lock().await.push(command.method);
+                    ServerResponse::ok(command.id, json!({ "ok": true }))
+                })
+            })
+        };
+        let (command_tx, command_rx) = mpsc::channel(WEBSOCKET_COMMAND_QUEUE_CAPACITY);
+        let (outgoing_tx, _outgoing_rx) = mpsc::channel(WEBSOCKET_RELIABLE_QUEUE_CAPACITY);
+        let transport = std::sync::Arc::new(WebSocketTransportMetrics::default());
+        let connection = transport.register_connection();
+        let command_metrics = connection.incoming_command_queue;
+        let reliable_metrics = connection.reliable_response_queue;
+        let (pressure_tx, _pressure_rx) = mpsc::channel(1);
+        let slow_pressure = WebSocketSlowPressureSignal::new(pressure_tx, transport.clone());
+        let state = test_state();
+        let dispatcher = tokio::spawn(run_websocket_command_dispatcher(
+            state.clone(),
+            command_rx,
+            command_metrics.clone(),
+            outgoing_tx,
+            reliable_metrics,
+            slow_pressure,
+            handler,
+        ));
+
+        send_test_websocket_command(
+            &state,
+            &command_tx,
+            &command_metrics,
+            json!({ "id": "stage", "method": "cloud.stage.set", "params": {} }).to_string(),
+        )
+        .await;
+        timeout(Duration::from_secs(5), stage_entered.acquire())
+            .await
+            .expect("cloud.stage.set should enter and hold the cloud control lane")
+            .unwrap()
+            .forget();
+
+        for (id, method) in [
+            ("guest", "cloud.guest.decide"),
+            ("mute", "audio.processing.update"),
+            ("rename", "sessions.rename"),
+        ] {
+            send_test_websocket_command(
+                &state,
+                &command_tx,
+                &command_metrics,
+                json!({ "id": id, "method": method, "params": {} }).to_string(),
+            )
+            .await;
+        }
+
+        timeout(Duration::from_secs(5), async {
+            loop {
+                if dispatched.lock().await.len() == 2 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("local controls must dispatch while cloud.stage.set waits on the web");
+        let mut observed = dispatched.lock().await.clone();
+        observed.sort();
+        assert_eq!(observed, ["audio.processing.update", "sessions.rename"]);
+        assert!(!state.process_shutdown_requested());
+
+        release_stage.add_permits(1);
+        drop(command_tx);
+        dispatcher.await.unwrap();
+        let observed = dispatched.lock().await.clone();
+        assert_eq!(
+            &observed[2..],
+            ["cloud.stage.set", "cloud.guest.decide"],
+            "room controls keep their order among themselves: {observed:?}"
         );
     }
 

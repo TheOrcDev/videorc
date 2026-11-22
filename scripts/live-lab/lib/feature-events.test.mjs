@@ -145,5 +145,6 @@ test('the app observer records feature events once and emits them on the bus', a
     ['chat', 'chat', 'clip-mark']
   )
   assert.equal(observer.featureEvents('clip-mark').length, 1)
+  await observer.stop()
   assert.equal(written.filter(([path]) => path.endsWith('events.ndjson')).length, 3)
 })

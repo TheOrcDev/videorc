@@ -34,6 +34,53 @@ controller epoch is not reused as the microphone generation. This named S24
 watch integration is pending its publication; no uncommitted controller code
 was copied.
 
+## Guest captions lane (captions only)
+
+The host speech contract above is unchanged: `cloud.speech.sync` and
+`cloud.speech.audio` carry only the processed local host microphone, and only
+that source feeds the one provider task that captions **and** Sidekick's
+listening, voice commands and voice markers (S19) read. Guest audio never
+becomes a host command.
+
+On a talk show the guests on stage are captioned by a **second, separate,
+captions-only lane** (`captions/guest_lane.rs`):
+
+- The room renderer mixes the subscribed, unmuted **microphone** tracks of the
+  guests on stage (never backstage guests, the host, the runner's return,
+  LiveKit's recorder or screen audio) into one mono worklet mix. Its own
+  renderer-only RPCs, `cloud.speech.guests.sync` (showId, sourceId, monotonic
+  generation, guest count, unknown fields refused) and
+  `cloud.speech.guests.audio` (the same bounded PCM as host audio), are the
+  only way in. They never touch the host source, the host caption tap or the
+  host provider task.
+- **One** extra provider stream, whatever the number of guests. It runs only
+  while Live captions is on and not blocked, the show is live from this
+  computer (`CloudPhase::Live`, room owned), and the renderer reports at least
+  one guest's audio. The renderer renews a two-second source lease every
+  250 ms; zero guests, captions off or blocked, a lost room or sign-out stop
+  the stream within one 100 ms tick and settle its lease with the audio sent.
+- Guest words only ever become `captions.update` lines, with the lane's own
+  `guests-…` session id, in arrival (spoken) order, in the same caption bar and
+  under the same Live stream only / and recording choice. They never reach
+  Sidekick listening, voice commands, voice markers, clip words, the host
+  transcript or a recording's caption records. The Rust test
+  `the_guest_lane_never_reaches_sidekick` fails if the lane's code names any of
+  those entry points; `a_guest_command_is_only_ever_a_caption_line` and
+  `guest_audio_never_enters_the_host_caption_tap` pin the behaviour; the
+  renderer test pins that guest audio uses only the guest RPCs.
+- `cloud.speech.overlay` and the S9 snapshot accept a caption picture from
+  either live source: the host session over a valid host microphone, or the
+  running guest lane. A muted host therefore still shows the guests' lines.
+- Metering: each guest socket mints its own lease from the same monthly
+  caption allowance (`/api/ai/captions/realtime-token`, settled through
+  `/api/ai/captions/usage`). A refusal (allowance used up, Premium, sign-in)
+  blocks captions exactly like a host refusal, which stops both streams. There
+  is no chunked fallback for guests: an unavailable streaming transport pauses
+  the lane for 60 seconds.
+- Guests are told: the stage message carries `captions: true` while the lane
+  is captioning, and the guest page shows "Live captions are on: what you say
+  is transcribed." to guests on stage.
+
 ## Clocks and persistence
 
 Transcript cues persist by show/source/provider-session/sequence in the additive

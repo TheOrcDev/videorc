@@ -253,9 +253,9 @@ test('doctor: Linux machine checks fail clearly when broken on purpose', posixOn
   assert.match(awake.detail, /suspend\.target not masked.*sudo systemctl mask/)
   assert.equal(evaluateLinuxSleep('').status, FAIL)
 
-  assert.equal(evaluateLinuxScreenLock({ hypridle: false, hyprlock: false }).status, PASS)
-  assert.match(evaluateLinuxScreenLock({ hypridle: true, hyprlock: false }).detail, /hypridle/)
-  assert.match(evaluateLinuxScreenLock({ hypridle: true, hyprlock: true }).detail, /locked/)
+  assert.equal(evaluateLinuxScreenLock({ hypridle: false }).status, PASS)
+  assert.equal(evaluateLinuxScreenLock({ hypridle: true }).status, FAIL)
+  assert.match(evaluateLinuxScreenLock({ hypridle: true }).detail, /hypridle/)
 
   assert.equal(
     evaluateLinuxNotifications({ daemon: 'mako', output: 'default\ndo-not-disturb\n' }).status,
