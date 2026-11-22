@@ -11787,7 +11787,10 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
       const normalized = normalizeCameraBackground(background)
       if (!normalized) return Promise.resolve(false)
       const cameraBackgrounds = { ...settingsRef.current.cameraBackgrounds, [cameraId]: normalized }
-      const nextSettings = { ...settingsRef.current, cameraBackgrounds }
+      // An explicit pick settles the D4 migration, so a run still loading
+      // can't replace it with a scene's key.
+      const migrated = { cameraBackgrounds, cameraBackgroundMigration: 1 }
+      const nextSettings = { ...settingsRef.current, ...migrated }
       settingsRef.current = nextSettings
       // The transaction below commits it to the live camera; suppress the
       // idle reload, so a pick never tears down and reopens the camera.
@@ -11796,9 +11799,15 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
         ...captureConfigRef.current,
         layout: cameraOutputLayout(captureConfigRef.current.layout, cameraId, nextSettings)
       }
-      setSettings((current) => ({ ...current, cameraBackgrounds }))
+      setSettings((current) => ({ ...current, ...migrated }))
       if (options?.commit === false) return Promise.resolve(true)
-      return requestLayoutTransaction(captureConfigRef.current.layout, { pendingIndicator: false })
+      return requestLayoutTransaction(captureConfigRef.current.layout, {
+        pendingIndicator: false
+      }).then((committed) => {
+        // Refused (Videorc reconnecting): the next idle reload carries it.
+        if (!committed) skipNextConfigSceneReloadRef.current = false
+        return committed
+      })
     },
     [requestLayoutTransaction]
   )
@@ -12949,7 +12958,10 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
         if (sources.cameraId && !camera) throw new Error('The selected camera is unavailable.')
         await controls.setCameraSelection(
           camera?.name ?? null,
-          sources.cameraOff === true || !sources.cameraId
+          sources.cameraOff === true || !sources.cameraId,
+          // Plan 258 S5: the new camera's own background, before its
+          // settings reach the room, so an effect camera never goes out raw.
+          settingsRef.current.cameraBackgrounds?.[sources.cameraId ?? ''] ?? null
         )
         setCaptureConfig((current) => ({
           ...current,

@@ -42,7 +42,9 @@ export function CameraBackgroundPicker({
   return (
     <div className="flex flex-col gap-3" data-videorc-camera-background-picker="">
       <h4 className="text-section">{CAMERA_BACKGROUND_LABEL}</h4>
+      {/* A new pick starts a new picture: nothing drawn before it stays. */}
       <CameraBackgroundViewer
+        key={control.choiceId ?? control.background.mode}
         fallback={
           <CameraBackgroundArt
             art={choiceArt({ id: control.choiceId ?? 'off', picture: control.picture })}

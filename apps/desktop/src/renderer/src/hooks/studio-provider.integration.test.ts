@@ -8539,6 +8539,9 @@ describe('real StudioProvider lifecycle', () => {
       cameraBackground: { mode: 'blur', blurPct: 70 },
       cameraChromaKeyEnabled: false
     })
+    // An explicit pick settles D4 itself, so a migration still loading can't
+    // replace it with a scene's key.
+    expect(latest().settings.cameraBackgroundMigration).toBe(1)
     // A later edit is built from the scene's own layout, which never carries
     // the background; the commit still does (S3's smoke put it on the layout
     // and a commit like this one disarmed it).

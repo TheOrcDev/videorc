@@ -340,6 +340,35 @@ describe('the host in the room (C-G4)', () => {
       await room.disconnect()
     })
 
+    it('never publishes a camera switched to whose own background is an effect', async () => {
+      const first = lk.fakeLocalTrack()
+      lk.video.mockResolvedValueOnce(first)
+      const { room } = client(undefined, () => withBackground())
+      await room.connect()
+      expect(publishedCamera()).toBe(true)
+      const publishes = latestRoom().localParticipant.publishTrack.mock.calls.length
+      // The Studio passes the new camera's own background before its
+      // settings reach the room.
+      await room.setCameraSelection('Camera', false, blur)
+      expect(latestRoom().localParticipant.publishTrack.mock.calls.length).toBe(publishes)
+      expect(room.snapshot.local.cameraOff).toBe(true)
+      expect(room.snapshot.local.problem).toBe(ROOM_CAMERA_OFF_FOR_BACKGROUND)
+      await room.disconnect()
+    })
+
+    it('opens the camera once connected when the effect went off while connecting', async () => {
+      let settings = withBackground(blur)
+      const { room } = client(undefined, () => settings)
+      await room.updateCameraSettings(settings)
+      settings = withBackground()
+      await room.updateCameraSettings(settings)
+      await room.connect()
+      expect(publishedCamera()).toBe(true)
+      expect(room.snapshot.local.cameraOff).toBe(false)
+      expect(room.snapshot.local.problem).toBeNull()
+      await room.disconnect()
+    })
+
     it('keeps a green screen in the room: only effects wait for S8', async () => {
       const camera = lk.fakeLocalTrack()
       lk.video.mockResolvedValueOnce(camera)

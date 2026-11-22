@@ -353,6 +353,25 @@ async function runPass(pass, appHandle, setup) {
     `${pass}: Background ${controls.clicked ? `clicked "${controls.clicked}"` : 'kept'} → ${controls.trigger ?? '(no trigger label)'}; stored ${JSON.stringify(controls.stored)}`
   )
   const background = layoutBackgroundFromControls(controls.stored)
+  if (background) {
+    // The renderer's own commit (the click, or the relaunch with no click)
+    // must arm the stage before the smoke sends any layout of its own: the
+    // per-camera setting reaches the backend without the smoke's help.
+    const armed = await waitFor(
+      async () => {
+        const status = await request(ws, 5000, 'preview.camera.status')
+        return status.cameraBackground?.mode === background.mode ? status.cameraBackground : null
+      },
+      `the renderer's own commit to arm ${background.mode} on the camera`,
+      20_000
+    )
+    controls.rendererArmed = { mode: armed.mode, state: armed.state }
+    log(
+      `${pass}: the renderer's commit armed ${armed.mode} (${armed.state}) before the smoke's session`
+    )
+  }
+  // The session the smoke starts carries the same setting the renderer
+  // commits (the leak scan needs the smoke's own legs and files).
   const layout = { ...setup.layout, ...(background ? { cameraBackground: background } : {}) }
   const expectation = expectationFor(pass)
   if (pass === 'camera-switch-record') {

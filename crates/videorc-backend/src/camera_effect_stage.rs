@@ -488,6 +488,15 @@ impl CameraEffectStage {
         self.look.is_some()
     }
 
+    /// Plan 258 S5: whether a frame read off the store's lock may be raw,
+    /// and the arming epoch it was read in. A reader that copied a frame
+    /// while the stage was off checks the epoch again after the copy: if the
+    /// stage armed meanwhile, the copy may be the raw frame arming replaced,
+    /// and it must not be served.
+    pub(crate) fn raw_read_epoch(&self) -> Option<u64> {
+        (!self.is_armed()).then_some(self.generation)
+    }
+
     fn stage_state(&self, captured_at: Instant) -> StageState {
         if self.unavailable.is_some() {
             return StageState::Unavailable;
@@ -1387,6 +1396,30 @@ mod tests {
         assert_eq!(fresh.latest_tag(), None);
         fresh.capture();
         assert_eq!(fresh.latest_tag(), Some(COVER));
+    }
+
+    /// Plan 258 S5: a reader that copied a frame while the stage was off
+    /// (the Studio's "What viewers see" BMP) can tell that an effect armed
+    /// during the copy, and never serves the raw frame arming replaced.
+    #[test]
+    fn a_raw_read_knows_when_an_effect_armed_during_it() {
+        let shared = Arc::new(StdMutex::new(PreviewCameraShared::default()));
+        let before = shared.lock().unwrap().effect.raw_read_epoch();
+        assert!(
+            before.is_some(),
+            "Off: a read may be raw, so it carries an epoch"
+        );
+        let background = setting(CameraBackgroundMode::Blur);
+        apply_look(
+            &shared,
+            Some(&background),
+            EffectLook::from_setting(Some(&background), None, false),
+        );
+        assert_eq!(shared.lock().unwrap().effect.raw_read_epoch(), None);
+        apply_look(&shared, None, None);
+        let after = shared.lock().unwrap().effect.raw_read_epoch();
+        assert!(after.is_some());
+        assert_ne!(after, before, "arming and disarming moved the epoch on");
     }
 
     #[test]

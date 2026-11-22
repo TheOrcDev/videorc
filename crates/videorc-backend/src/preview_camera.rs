@@ -3417,7 +3417,7 @@ pub async fn latest_preview_camera_bmp(
     requested_max_width: Option<u32>,
     cursor: Option<PreviewBmpCursor>,
 ) -> Option<LatestPreviewBmpPoll> {
-    let (generation, frame) = {
+    let (generation, frame, shared, raw_epoch) = {
         let slot = state.preview_camera.lock().await;
         let active = slot.active.as_ref()?;
         let generation = slot.run_id.clone()?;
@@ -3426,37 +3426,62 @@ pub async fn latest_preview_camera_bmp(
         let guard = shared
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        (generation, guard.frame_store.latest()?)
+        let frame = guard.frame_store.latest()?;
+        let raw_epoch = guard.effect.raw_read_epoch();
+        drop(guard);
+        (generation, frame, shared, raw_epoch)
     };
 
     let max_width = preview_camera_png_max_width(requested_max_width);
     tokio::task::spawn_blocking(move || {
-        // Plan 258 S5: on macOS the store's frames are zero-copy pixel
-        // buffers with no CPU bytes (the stage's processed buffers too), so
-        // the Studio's "What viewers see" picture reads the buffer itself.
-        // Only for a frame the caller has not seen: an unchanged poll copies
-        // nothing.
-        let unchanged = cursor.as_ref().is_some_and(|cursor| {
-            cursor.generation == generation && frame.sequence <= cursor.sequence
-        });
-        let surface_bytes = if frame.bytes.is_empty() && !unchanged {
-            camera_frame_surface_bgra(&frame)
-        } else {
-            None
-        };
-        encode_latest_bgra_bmp(
-            cursor.as_ref(),
-            generation,
-            frame.sequence,
-            frame.width,
-            frame.height,
-            surface_bytes.as_deref().unwrap_or(&frame.bytes),
-            max_width,
-        )
+        let poll = camera_bmp_poll(&generation, &frame, cursor.as_ref(), max_width)?;
+        // Plan 258 S5 (D2): a frame read while the stage was off is raw. If
+        // an effect armed while it was being copied, arming replaced it in
+        // the store, so this copy must never be served: the next poll reads
+        // the cover. Checked after the copy, under the store's lock.
+        if let Some(epoch) = raw_epoch {
+            let guard = shared
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if guard.effect.raw_read_epoch() != Some(epoch) {
+                return None;
+            }
+        }
+        Some(poll)
     })
     .await
     .ok()
     .flatten()
+}
+
+/// The BMP poll for one stored camera frame (`None` when it can't be read).
+fn camera_bmp_poll(
+    generation: &str,
+    frame: &FrameHandle<PreviewCameraPixelFormat>,
+    cursor: Option<&PreviewBmpCursor>,
+    max_width: u32,
+) -> Option<LatestPreviewBmpPoll> {
+    // Plan 258 S5: on macOS the store's frames are zero-copy pixel
+    // buffers with no CPU bytes (the stage's processed buffers too), so
+    // the Studio's "What viewers see" picture reads the buffer itself.
+    // Only for a frame the caller has not seen: an unchanged poll copies
+    // nothing.
+    let unchanged = cursor
+        .is_some_and(|cursor| cursor.generation == generation && frame.sequence <= cursor.sequence);
+    let surface_bytes = if frame.bytes.is_empty() && !unchanged {
+        camera_frame_surface_bgra(frame)
+    } else {
+        None
+    };
+    encode_latest_bgra_bmp(
+        cursor,
+        generation.to_string(),
+        frame.sequence,
+        frame.width,
+        frame.height,
+        surface_bytes.as_deref().unwrap_or(&frame.bytes),
+        max_width,
+    )
 }
 
 /// A zero-copy camera frame's BGRA, read from its retained pixel buffer
