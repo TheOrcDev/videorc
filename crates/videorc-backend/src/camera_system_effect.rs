@@ -31,6 +31,7 @@ use crate::storage::Database;
 /// How often the macOS camera thread reads the device's effect flags. The
 /// reads are property getters on an open device (no I/O), and a second is
 /// quicker than anyone finds the Studio after flipping the Video menu.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub const MACOS_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
 /// How often a Windows camera with Studio Effects is read again. Each read

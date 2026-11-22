@@ -39,6 +39,8 @@ vi.mock('@/hooks/use-studio', () => ({
     chatNewCount: 0
   }),
   useStudioRecordingState: () => ({ recording: { state: 'idle' } }),
+  // Plan 258 S4: the Camera row's system effect line reads the camera status.
+  useStudioPreview: () => ({ previewCameraStatus: {} }),
   useStudioShell: () => ({ openCommentsWindow: vi.fn(), runtimeInfo: { platform: 'darwin' } })
 }))
 const toast = vi.hoisted(() => ({ error: vi.fn(), warning: vi.fn() }))
