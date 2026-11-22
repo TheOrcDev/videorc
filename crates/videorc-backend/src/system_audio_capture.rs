@@ -333,6 +333,19 @@ pub(crate) fn system_audio_frame(
     }
 }
 
+/// The `Instant` a CoreMedia host-clock time stands for, through one
+/// process-wide anchor (the offset between the two clocks is constant).
+/// Hide screen dates ScreenCaptureKit screen frames with it (plan 210 D8).
+/// `None` when `mach_timebase_info` is unavailable.
+#[cfg(target_os = "macos")]
+pub(crate) fn instant_for_host_nanos(host_nanos: u64) -> Option<Instant> {
+    static ANCHOR: std::sync::OnceLock<Option<HostClockAnchor>> = std::sync::OnceLock::new();
+    ANCHOR
+        .get_or_init(|| host_clock::timebase().map(host_clock::sample_anchor))
+        .as_ref()
+        .map(|anchor| anchor.instant_for_host_nanos(host_nanos))
+}
+
 #[cfg(target_os = "macos")]
 mod host_clock {
     use super::{HostClockAnchor, MachTimebase};
