@@ -1115,18 +1115,49 @@ test('the async dev backend prebuild keeps the event loop running and names its 
     cwd: tmpdir(),
     timeoutMs
   })
+  // A stand-in slot: the real one waits while other sessions hold both of this
+  // machine's build slots, and the file then never finishes. It still proves
+  // every build runs inside a slot, with the launch's env and log.
+  const slotCalls = []
+  let inSlot = false
+  const buildSlot = async (fn, options) => {
+    slotCalls.push(options)
+    inSlot = true
+    try {
+      return await fn()
+    } finally {
+      inSlot = false
+    }
+  }
+  const prebuild = (options) =>
+    prebuildDevBackend({
+      buildSlot,
+      ...options,
+      spec: {
+        ...options.spec,
+        // The child starts only inside the slot.
+        get command() {
+          assert.ok(inSlot, 'the prebuild runs inside a build slot')
+          return options.spec.command
+        }
+      }
+    })
   let ticks = 0
   const ticker = setInterval(() => {
     ticks += 1
   }, 20)
   const lines = []
+  const onLine = (line) => lines.push(line)
   try {
-    const built = await prebuildDevBackend({
+    const built = await prebuild({
       spec: nodeSpec('console.log("Finished dev profile"); setTimeout(() => {}, 300)'),
       env: process.env,
-      onLine: (line) => lines.push(line)
+      onLine
     })
     assert.equal(built, null)
+    assert.equal(slotCalls.length, 1)
+    assert.equal(slotCalls[0].env, process.env)
+    assert.equal(slotCalls[0].log, onLine)
     assert.ok(ticks >= 5, `the event loop ticked ${ticks} times while the prebuild ran`)
     assert.ok(lines.some((line) => line.includes('Finished dev profile')))
     assert.ok(lines.at(-1).startsWith('[smoke:prebuild] backend built in '))
@@ -1134,16 +1165,18 @@ test('the async dev backend prebuild keeps the event loop running and names its 
     clearInterval(ticker)
   }
 
-  const failed = await prebuildDevBackend({
+  const failed = await prebuild({
     spec: nodeSpec('console.error("error[E0425]: cannot find value"); process.exit(101)')
   })
   assert.match(failed, /Backend prebuild failed .*exited 101/)
   assert.match(failed, /E0425/)
-  const timedOut = await prebuildDevBackend({ spec: nodeSpec('setTimeout(() => {}, 10_000)', 200) })
+  const timedOut = await prebuild({ spec: nodeSpec('setTimeout(() => {}, 10_000)', 200) })
   assert.match(timedOut, /Backend still compiling after 0s/)
-  const missing = await prebuildDevBackend({
+  const missing = await prebuild({
     spec: { command: 'videorc-no-such-cargo', args: [], cwd: tmpdir(), timeoutMs: 5_000 }
   })
   assert.match(missing, /could not start/)
-  assert.equal(await prebuildDevBackend({ spec: null }), null, 'opted out')
+  assert.equal(slotCalls.length, 4, 'every build took a slot')
+  assert.equal(await prebuildDevBackend({ spec: null, buildSlot }), null, 'opted out')
+  assert.equal(slotCalls.length, 4, 'an opted-out prebuild takes no slot')
 })
