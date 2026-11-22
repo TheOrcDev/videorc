@@ -3335,6 +3335,34 @@ export interface PreviewCameraStatus {
    * Absent until the camera is live and the system has answered.
    */
   systemEffect?: CameraSystemEffect
+  /**
+   * Plan 258 S3: the camera effect stage, while this camera's background is
+   * an effect (a blur or a picture). Absent while Off or a screen key.
+   */
+  cameraBackground?: CameraBackgroundStatus
+}
+
+/** How the camera effect stage is doing (plan 258 S3, D6). */
+export type CameraBackgroundStageState = 'running' | 'cover' | 'unavailable'
+
+/** The camera effect stage's line for the Studio, Health and support (plan 258 S3). */
+export interface CameraBackgroundStatus {
+  mode: CameraBackgroundMode
+  state: CameraBackgroundStageState
+  /** The newest matte's age at the last capture. */
+  maskAgeMs?: number
+  segmentMsP95?: number
+  /** The effect pass, wall time on the worker. */
+  composeMsP95?: number
+  /** The effect pass's GPU time. */
+  composeGpuMsP95?: number
+  processedFrames: number
+  coverFrames: number
+  /** How long the cover has stood in (the Studio says so after 2 s). */
+  coverForMs?: number
+  /** The newest matte's age when the cover last took over (D6: the first capture past 100 ms). */
+  coverAfterMaskAgeMs?: number
+  message?: string
 }
 
 /** Which operating system feature is changing the camera's picture (plan 258 S4). */

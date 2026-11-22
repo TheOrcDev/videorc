@@ -179,6 +179,52 @@ fn should_skip_camera_capture_cpu_copy(zero_copy_source_handle_available: bool) 
 #[cfg(target_os = "macos")]
 use crate::metal_compositor::source_zerocopy_enabled;
 
+/// Plan 258 S3: put the layout's camera background (the renderer injects
+/// the selected camera's at the output boundary) on a camera session's
+/// stage. A picture resolves through the managed background registry; one
+/// that does not resolve still arms, and its cover shows the neutral ground.
+pub(crate) fn apply_camera_background_to_shared(
+    state: &AppState,
+    shared: &Arc<StdMutex<PreviewCameraShared>>,
+    layout: &LayoutSettings,
+) {
+    let setting = layout.camera_background.as_ref();
+    let image_path = setting
+        .filter(|setting| setting.mode == crate::protocol::CameraBackgroundMode::Image)
+        .and_then(|setting| setting.asset_id.as_deref())
+        .and_then(|asset_id| {
+            state
+                .resource_authority
+                .resolve_managed_background(asset_id)
+                .map_err(|error| {
+                    tracing::warn!("Camera background picture {asset_id}: {error:#}");
+                })
+                .ok()
+        });
+    let look = effect_stage::EffectLook::from_setting(setting, image_path, layout.camera_mirror);
+    effect_stage::apply_look(shared, setting, look);
+}
+
+/// Plan 258 S3: a committed layout's camera background reaches the live
+/// camera even when the commit does not restart or reuse it (a scene
+/// switch mid-session leaves the camera alone).
+pub(crate) async fn apply_camera_background(state: &AppState, layout: &LayoutSettings) {
+    let shared = state
+        .preview_camera
+        .lock()
+        .await
+        .active
+        .as_ref()
+        .map(|active| Arc::clone(&active.shared));
+    if let Some(shared) = shared {
+        apply_camera_background_to_shared(state, &shared, layout);
+    }
+}
+
+/// Plan 258 S3: the camera effect stage at this module's publish points.
+#[path = "camera_effect_stage.rs"]
+pub(crate) mod effect_stage;
+
 pub type PreviewCameraSlot = Arc<tokio::sync::Mutex<PreviewCameraRuntime>>;
 
 #[derive(Debug)]
@@ -670,6 +716,9 @@ pub struct PreviewCameraShared {
     /// Plan 258 S4: the system's own effects on this camera, as the camera
     /// thread last read them from the device.
     system_effect: Option<crate::protocol::CameraSystemEffect>,
+    /// Plan 258 S3: the camera effect stage. Kept behind this lock, so the
+    /// store's lock is the stage's: a raw publish and an arm never race.
+    effect: effect_stage::CameraEffectStage,
 }
 
 impl PreviewCameraShared {
@@ -1174,6 +1223,7 @@ async fn start_preview_camera_with_owner(
         message: Some("Starting native camera preview.".to_string()),
         no_video: None,
         system_effect: None,
+        camera_background: None,
     };
     let start_key = PreviewCameraStartKey {
         source_key: source_key.clone(),
@@ -1664,6 +1714,9 @@ async fn start_registered_preview_camera(
     let shared = Arc::new(StdMutex::new(
         PreviewCameraShared::with_surface_backing_tracker(surface_backing_tracker),
     ));
+    // Plan 258 S3: arm before the first frame, so a camera switch, a session
+    // start or a relaunch with an effect on starts on the cover (invariant 2).
+    apply_camera_background_to_shared(&state, &shared, &params.layout);
     let (stop_tx, stop_rx) = std_mpsc::channel();
     let (startup_tx, startup_rx) = std_mpsc::channel();
     let thread_shared = Arc::clone(&shared);
@@ -1806,6 +1859,7 @@ async fn start_registered_preview_camera(
                 message,
                 no_video: None,
                 system_effect: None,
+                camera_background: None,
             };
             let capture_target = camera_capture_target_dimensions(&params.layout, &params.video);
             let installed = {
@@ -1900,6 +1954,7 @@ async fn start_registered_preview_camera(
                 message: Some(message),
                 no_video: None,
                 system_effect: None,
+                camera_background: None,
             };
             if set_camera_status_for_start(&state, &start_lease, recovery_epoch, status.clone())
                 .await
@@ -1941,6 +1996,7 @@ async fn start_registered_preview_camera(
                 message: Some(message),
                 no_video: None,
                 system_effect: None,
+                camera_background: None,
             };
             if set_camera_status_for_start(&state, &start_lease, recovery_epoch, status.clone())
                 .await
@@ -2577,6 +2633,7 @@ async fn begin_forced_camera_restart(
             ),
             no_video: None,
             system_effect: None,
+            camera_background: None,
         };
         slot.status = starting.clone();
         slot.run_id = None;
@@ -2686,6 +2743,7 @@ async fn begin_failed_camera_recovery_retry(
             message: Some("Retrying the failed native camera recovery generation.".to_string()),
             no_video: None,
             system_effect: None,
+            camera_background: None,
         };
         slot.status = starting.clone();
         slot.run_id = None;
@@ -3622,6 +3680,7 @@ async fn begin_camera_start(
         registry.set_status(start_key.source_key.clone(), SourceLifecycleStatus::Live);
         if let Some(active) = slot.active.as_mut() {
             active.layout = layout.clone();
+            apply_camera_background_to_shared(state, &active.shared, layout);
         }
         let mut reused = slot.status.clone();
         reused.updated_at = Utc::now().to_rfc3339();
@@ -4240,6 +4299,7 @@ async fn reuse_current_camera_source(
 
     if let Some(active) = slot.active.as_mut() {
         active.layout = layout.clone();
+        apply_camera_background_to_shared(state, &active.shared, layout);
     }
     let mut status = slot.status.clone();
     status.updated_at = Utc::now().to_rfc3339();
@@ -4297,6 +4357,7 @@ async fn poll_camera_metrics(
                 frame_store_stats: guard.frame_store.stats(),
                 capture_timings: guard.capture_timings.snapshot(),
                 system_effect: guard.system_effect,
+                camera_background: guard.effect.status(Instant::now()),
             }
         };
 
@@ -4309,6 +4370,7 @@ async fn poll_camera_metrics(
             slot.status.dropped_frames = snapshot.dropped_frames;
             slot.status.source_fps = snapshot.source_fps.or(Some(f64::from(target_fps)));
             slot.status.system_effect = snapshot.system_effect;
+            slot.status.camera_background = snapshot.camera_background;
             if let Some(frame) = snapshot.latest_frame {
                 if slot.status.state != PreviewCameraState::Disconnected {
                     slot.status.state = PreviewCameraState::Live;
@@ -4348,6 +4410,7 @@ async fn poll_camera_metrics(
 #[derive(Debug)]
 struct CameraSharedSnapshot {
     system_effect: Option<crate::protocol::CameraSystemEffect>,
+    camera_background: Option<crate::protocol::CameraBackgroundStatus>,
     frames_captured: u64,
     dropped_frames: u64,
     source_fps: Option<f64>,
@@ -4398,6 +4461,7 @@ fn idle_status(message: Option<String>) -> PreviewCameraStatus {
         message,
         no_video: None,
         system_effect: None,
+        camera_background: None,
     }
 }
 
@@ -4426,6 +4490,7 @@ fn status_for_missing_camera(camera_id: Option<String>, message: &str) -> Previe
         message: Some(message.to_string()),
         no_video: None,
         system_effect: None,
+        camera_background: None,
     }
 }
 
@@ -4459,6 +4524,7 @@ fn failed_status(
         message: Some(message),
         no_video: None,
         system_effect: None,
+        camera_background: None,
     }
 }
 
@@ -5426,6 +5492,22 @@ fn publish_bgra_frame(
         guard.window_started_at = Some(now);
     }
     let sequence = guard.frames_captured;
+    // Plan 258 S3 (D2): with an effect on, the stage takes the frame and the
+    // store only ever gets it processed or the cover.
+    if guard.effect.is_armed() {
+        let frame = effect_stage::EffectFrame {
+            width,
+            height,
+            pixels: effect_stage::EffectPixels::Bytes(bytes),
+        };
+        let pending = effect_stage::on_armed_capture(&mut guard, frame, sequence, now);
+        let next_buffer = guard.frame_store.checkout_overwrite_buffer(frame_len);
+        drop(guard);
+        if let Some(pending) = pending {
+            effect_stage::finish_cover(shared, pending);
+        }
+        return next_buffer;
+    }
     guard.frame_store.publish_with_metadata(
         sequence,
         width,
@@ -7509,7 +7591,9 @@ mod macos {
         let callback_started_at = Instant::now();
         let sample_pts_seconds =
             cm_time_seconds(unsafe { sample_buffer.presentation_time_stamp() });
-        {
+        // Plan 258 S3: read once here so an armed BGRA frame skips the CPU
+        // copy; the publish below checks again under the same lock as arming.
+        let effect_armed = {
             let mut guard = shared
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -7518,7 +7602,8 @@ mod macos {
                 .record_callback_at(callback_started_at);
             guard.capture_timings.record_sample_pts(sample_pts_seconds);
             guard.capture_callback_count = guard.capture_callback_count.saturating_add(1);
-        }
+            guard.effect.is_armed()
+        };
 
         let Some(pixel_buffer) = (unsafe { sample_buffer.image_buffer() }) else {
             let mut guard = shared
@@ -7561,7 +7646,10 @@ mod macos {
             } else {
                 None
             };
-        let skip_cpu_copy = should_skip_camera_capture_cpu_copy(source_pixel_buffer.is_some());
+        let raw_skip_cpu_copy = should_skip_camera_capture_cpu_copy(source_pixel_buffer.is_some());
+        // The stage reads a BGRA camera buffer in place (Vision and Metal).
+        let effect_takes_buffer = effect_armed && pixel_format == kCVPixelFormatType_32BGRA;
+        let skip_cpu_copy = raw_skip_cpu_copy || effect_takes_buffer;
         let (bytes, pixel_buffer_lock_ms, row_copy_ms) = if skip_cpu_copy {
             (Vec::new(), 0.0, 0.0)
         } else {
@@ -7635,6 +7723,37 @@ mod macos {
             guard.window_started_at = Some(now);
         }
         let sequence = guard.frames_captured;
+        // Plan 258 S3 (D2): with an effect on, the stage takes the frame and
+        // the store only ever gets it processed or the cover.
+        if guard.effect.is_armed() {
+            let pixels = if pixel_format == kCVPixelFormatType_32BGRA {
+                effect_stage::EffectPixels::PixelBuffer(
+                    crate::frame_store::RetainedPixelBuffer::new(pixel_buffer.clone()),
+                )
+            } else if !bytes.is_empty() {
+                effect_stage::EffectPixels::Bytes(bytes)
+            } else {
+                guard.dropped_frames = guard.dropped_frames.saturating_add(1);
+                return;
+            };
+            let frame = effect_stage::EffectFrame {
+                width,
+                height,
+                pixels,
+            };
+            let pending = effect_stage::on_armed_capture(&mut guard, frame, sequence, now);
+            drop(guard);
+            if let Some(pending) = pending {
+                effect_stage::finish_cover(shared, pending);
+            }
+            return;
+        }
+        if skip_cpu_copy && !raw_skip_cpu_copy {
+            // Armed when the callback began and Off now: this frame has no
+            // copied bytes for the raw path; the next one does.
+            guard.dropped_frames = guard.dropped_frames.saturating_add(1);
+            return;
+        }
         guard.frame_store.publish_with_source_handles(
             sequence,
             width,
@@ -7951,6 +8070,7 @@ mod tests {
             message: Some("Starting fake native camera.".to_string()),
             no_video: None,
             system_effect: None,
+            camera_background: None,
         }
     }
 
@@ -8145,6 +8265,7 @@ mod tests {
             message: Some("Fake native camera live.".to_string()),
             no_video: None,
             system_effect: None,
+            camera_background: None,
         };
         slot.active = Some(NativeCameraPreviewThread {
             stop_tx,
@@ -9733,6 +9854,7 @@ mod tests {
             message: Some("Live".to_string()),
             no_video: None,
             system_effect: None,
+            camera_background: None,
         };
         slot.active = Some(NativeCameraPreviewThread {
             stop_tx,
@@ -11926,6 +12048,7 @@ Error opening input file video=HP HD Camera."#;
             message: Some("Starting native camera preview.".to_string()),
             no_video: None,
             system_effect: None,
+            camera_background: None,
         };
 
         let lease = match begin_camera_start(&state, start_key, &layout, starting, None).await {
@@ -11990,6 +12113,7 @@ Error opening input file video=HP HD Camera."#;
                 message: Some("Live".to_string()),
                 no_video: None,
                 system_effect: None,
+                camera_background: None,
             };
             slot.start_generation = 1;
             slot.active_generation = Some(1);

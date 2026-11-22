@@ -2730,6 +2730,22 @@ const previewCameraStatusSchema = boundedSemanticValue(
           turnedOffByVideorc: booleanSchema
         })
       ),
+      // Plan 258 S3: strict, like systemEffect.
+      cameraBackground: optionalSchema(
+        objectSchema({
+          mode: enumSchema(['off', 'blur', 'image', 'video', 'cutout', 'green', 'blue']),
+          state: enumSchema(['running', 'cover', 'unavailable']),
+          maskAgeMs: optionalSchema(nonNegativeInteger),
+          segmentMsP95: optionalSchema(numberSchema({ min: 0 })),
+          composeMsP95: optionalSchema(numberSchema({ min: 0 })),
+          composeGpuMsP95: optionalSchema(numberSchema({ min: 0 })),
+          processedFrames: nonNegativeInteger,
+          coverFrames: nonNegativeInteger,
+          coverForMs: optionalSchema(nonNegativeInteger),
+          coverAfterMaskAgeMs: optionalSchema(nonNegativeInteger),
+          message: optionalSchema(stringSchema({ maxLength: 2000 }))
+        })
+      ),
       updatedAt: timestamp
     },
     { allowUnknown: true }

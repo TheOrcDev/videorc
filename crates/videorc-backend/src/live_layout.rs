@@ -2725,6 +2725,10 @@ async fn commit_scene_with_layout_at_time_with_policy(
     if idle_only && state.recording.lock().await.is_some() {
         return Err(IdleSceneReloadSuperseded.into());
     }
+    // Plan 258 S3: the camera's background is per camera (D3), so a commit
+    // that carries it reaches the live camera's stage now, before the
+    // compositor draws the new scene.
+    crate::preview_camera::apply_camera_background(state, &layout).await;
 
     {
         let mut guard = state.scene.lock().await;
@@ -4699,6 +4703,7 @@ mod tests {
             message: None,
             no_video: None,
             system_effect: None,
+            camera_background: None,
         }
     }
 
@@ -5201,6 +5206,7 @@ mod tests {
             message: None,
             no_video: None,
             system_effect: None,
+            camera_background: None,
         };
         assert!(camera_status_is_live(&camera));
         camera.frame_age_ms = Some(SOURCE_FRESH_FRAME_MAX_AGE_MS + 1);
@@ -5270,6 +5276,7 @@ mod tests {
             message: None,
             no_video: None,
             system_effect: None,
+            camera_background: None,
         };
         let mut target = sources(true, true);
         target.camera_id = Some("camera:b".to_string());
@@ -6324,6 +6331,7 @@ mod tests {
             message: None,
             no_video: None,
             system_effect: None,
+            camera_background: None,
         };
         let mut target = sources(true, true);
         target.camera_id = Some("camera:a".to_string());

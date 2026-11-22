@@ -4,11 +4,20 @@ import { describe, it } from 'node:test'
 import { EXPECT_ROOM_HIDDEN, EXPECT_ROOM_VISIBLE } from './camera-background-leak.mjs'
 import {
   CAMERA_BACKGROUND_OUTPUTS,
-  effectRequestToday,
+  IMAGE_ASSET_ID,
+  cameraBackgroundFor,
+  effectRequestFrom,
   expectationFor,
   finalVerdict,
-  parseSmokeArgs
+  isFullPass,
+  judgeStall,
+  neutralGroundFraction,
+  parseSmokeArgs,
+  passesFor,
+  stallCoverBudgetMs
 } from './camera-background-smoke-plan.mjs'
+
+const applied = { applied: true, reason: null }
 
 const ok = { ok: true, failures: [] }
 
@@ -42,6 +51,7 @@ describe('camera background smoke plan', () => {
     assert.deepEqual(parseSmokeArgs([]), { effect: 'off' })
     assert.deepEqual(parseSmokeArgs(['--', '--effect', 'strong-blur']), { effect: 'strong-blur' })
     assert.deepEqual(parseSmokeArgs(['--effect=image']), { effect: 'image' })
+    assert.deepEqual(parseSmokeArgs(['--effect', 'all']), { effect: 'all' })
     assert.throws(() => parseSmokeArgs(['--effect', 'green']), /unknown effect/)
     assert.throws(() => parseSmokeArgs(['--fast']), /unknown argument/)
   })
@@ -53,31 +63,115 @@ describe('camera background smoke plan', () => {
     }
   })
 
-  it('says today that no effect can be applied, and why', () => {
-    assert.equal(effectRequestToday('off').applied, true)
-    const blur = effectRequestToday('strong-blur')
-    assert.equal(blur.applied, false)
-    assert.match(blur.reason, /S1 adds the setting, S3 the macOS stage/)
+  it('runs Off then every effect-on pass for all, one pass otherwise', () => {
+    assert.deepEqual(passesFor('all'), [
+      'off',
+      'strong-blur',
+      'image',
+      'stall',
+      'camera-switch-record',
+      'relaunch'
+    ])
+    assert.deepEqual(passesFor('image'), ['image'])
+    assert.equal(isFullPass('strong-blur'), true)
+    assert.equal(isFullPass('stall'), false)
+  })
+
+  it('puts the renderer-shaped background on the layout for each pass', () => {
+    assert.equal(cameraBackgroundFor('off'), null)
+    assert.deepEqual(cameraBackgroundFor('strong-blur'), {
+      mode: 'blur',
+      blurPct: 70,
+      edges: 'balanced'
+    })
+    assert.equal(cameraBackgroundFor('slight-blur').blurPct, 30)
+    assert.equal(cameraBackgroundFor('image').assetId, IMAGE_ASSET_ID)
+    for (const pass of ['stall', 'camera-switch-record', 'relaunch']) {
+      assert.equal(cameraBackgroundFor(pass).mode, 'blur')
+    }
+    assert.throws(() => cameraBackgroundFor('sepia'), /unknown pass/)
+  })
+
+  it('reads whether the stage applied the background from the camera status', () => {
+    assert.equal(effectRequestFrom('off', {}).applied, true)
+    assert.match(
+      effectRequestFrom('off', { cameraBackground: { mode: 'blur' } }).reason,
+      /still runs blur/
+    )
+    assert.match(effectRequestFrom('strong-blur', {}).reason, /never armed/)
+    assert.match(
+      effectRequestFrom('image', { cameraBackground: { mode: 'blur', state: 'running' } }).reason,
+      /runs blur, not image/
+    )
+    assert.match(
+      effectRequestFrom('strong-blur', {
+        cameraBackground: { mode: 'blur', state: 'unavailable', message: 'no Vision' }
+      }).reason,
+      /unavailable: no Vision/
+    )
+    assert.equal(
+      effectRequestFrom('strong-blur', { cameraBackground: { mode: 'blur', state: 'cover' } })
+        .applied,
+      true
+    )
+  })
+
+  it('holds the stall to D6: the cover at the first capture past 100 ms, then back', () => {
+    assert.equal(stallCoverBudgetMs(30), 134)
+    assert.equal(stallCoverBudgetMs(60), 117)
+    const good = { coverSeen: true, coverAfterMaskAgeMs: 101, recovered: true, fps: 30 }
+    assert.equal(judgeStall(good).ok, true)
+    assert.match(
+      judgeStall({ ...good, coverAfterMaskAgeMs: 400 }).failures[0],
+      /400 ms old matte; D6 allows 134 ms/
+    )
+    assert.match(judgeStall({ ...good, coverAfterMaskAgeMs: 40 }).failures[0], /early/)
+    assert.match(judgeStall({ ...good, coverSeen: false }).failures[0], /never said cover/)
+    assert.match(judgeStall({ ...good, coverAfterMaskAgeMs: null }).failures[0], /matte age/)
+    assert.match(judgeStall({ ...good, recovered: false }).failures[0], /never came back/)
+  })
+
+  it('measures how much of a frame is the neutral ground', () => {
+    const rgb = new Uint8Array([0x1a, 0x1c, 0x1f, 200, 30, 30, 0x1b, 0x1d, 0x1e, 0, 0, 0])
+    assert.equal(neutralGroundFraction({ width: 2, height: 2, rgb }), 0.5)
+  })
+
+  it('judges a short pass on the outputs it makes only', () => {
+    const verdict = finalVerdict({
+      effect: 'stall',
+      effectRequest: applied,
+      outputs: { recording: ok, preview: ok, stall: ok },
+      outputIds: ['recording', 'preview', 'stall']
+    })
+    assert.equal(verdict.ok, true, verdict.failures.join('; '))
+    assert.equal(verdict.judged, 3)
+    const failed = finalVerdict({
+      effect: 'stall',
+      effectRequest: applied,
+      outputs: { recording: ok, preview: ok, stall: { ok: false, failures: ['late cover'] } },
+      outputIds: ['recording', 'preview', 'stall']
+    })
+    assert.deepEqual(failed.failures, ['stall: late cover'])
   })
 
   it('passes Off when every judged output passes, listing the pending ones', () => {
     const verdict = finalVerdict({
       effect: 'off',
-      effectRequest: effectRequestToday('off'),
+      effectRequest: applied,
       outputs: allOutputs()
     })
     assert.equal(verdict.ok, true, verdict.failures.join('; '))
     assert.equal(verdict.judged, 6)
     assert.match(
       verdict.lines.find((line) => line.startsWith('Videorc Camera')),
-      /^Videorc Camera: SKIP \(S3: /
+      /^Videorc Camera: SKIP \(S3: .*Owed by the owner/
     )
   })
 
   it('fails an effect that was not applied first, then each leaking output', () => {
     const verdict = finalVerdict({
       effect: 'strong-blur',
-      effectRequest: effectRequestToday('strong-blur'),
+      effectRequest: { applied: false, reason: 'the stage never armed' },
       outputs: allOutputs({
         recording: { ok: false, failures: ['the real room leaked: 20/20 frames'] }
       })
@@ -85,7 +179,7 @@ describe('camera background smoke plan', () => {
     assert.equal(verdict.ok, false)
     assert.match(
       verdict.failures[0],
-      /^strong-blur was requested but not applied: this build has no camera/
+      /^strong-blur was requested but not applied: the stage never armed/
     )
     assert.match(verdict.failures[1], /^Recording: the real room leaked/)
   })
@@ -94,8 +188,7 @@ describe('camera background smoke plan', () => {
     const missing = allOutputs()
     delete missing.clip
     assert.match(
-      finalVerdict({ effect: 'off', effectRequest: effectRequestToday('off'), outputs: missing })
-        .failures[0],
+      finalVerdict({ effect: 'off', effectRequest: applied, outputs: missing }).failures[0],
       /Clips save: never judged/
     )
     const skippedAll = Object.fromEntries(
@@ -105,8 +198,7 @@ describe('camera background smoke plan', () => {
       ])
     )
     assert.deepEqual(
-      finalVerdict({ effect: 'off', effectRequest: effectRequestToday('off'), outputs: skippedAll })
-        .failures,
+      finalVerdict({ effect: 'off', effectRequest: applied, outputs: skippedAll }).failures,
       ['no output was judged']
     )
   })

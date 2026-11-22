@@ -1,21 +1,25 @@
-// Plan 258 S2: the camera background leak smoke (skeleton).
+// Plan 258 S2/S3: the camera background leak smoke.
 //
 // The dev app runs with the fixture camera (`VIDEORC_FIXTURE_CAMERA`, a
-// figure over a magenta/cyan code "room") in an isolated profile. One
-// session records, streams to local FFmpeg RTMP sinks (horizontal and
-// vertical legs), keeps the Clips ring and saves a Clip, and, when a screen
-// is listed, writes the separate Camera file; meanwhile the Preview's pixels
+// figure over a magenta/cyan code "room") in an isolated profile. Each full
+// pass records, streams to local FFmpeg RTMP sinks (horizontal and vertical
+// legs), keeps the Clips ring and saves a Clip, and, when a screen is
+// listed, writes the separate Camera file; meanwhile the Preview's pixels
 // are sampled through the dev oracle. Every output is scanned with
 // `scripts/lib/camera-background-leak.mjs`:
 //   --effect off (default): the room MUST be found in every output. That
 //     proves the detector sees the fixture on each one, so a later clean
 //     scan means something.
-//   --effect strong-blur | slight-blur | image: the room must be found in
-//     NO output. Until S1 (the setting) and S3 (the macOS stage) land, the
-//     effect cannot be applied, so this fails and says why, naming every
-//     output that carried the room.
-// Videorc Camera (packaged app only) and the talk-show room (the renderer's
-// own camera) are named SKIPs that S3 and S8 fill in. Nothing goes live.
+//   --effect strong-blur | slight-blur | image: the camera's background is
+//     put on the layout as the renderer does (plan 258 S1), the macOS stage
+//     (S3) draws it, and the room must be found in NO output.
+//   --effect all (the S3 gate): Off, Strong blur and the picture on every
+//     output, then three short passes that scan every recorded frame:
+//     a segmentation stall mid-recording (the cover within D6's budget,
+//     `test.cameraBackground.segmentationStall`), a camera switch with
+//     Record pressed at once, and a relaunch on the same profile.
+// Videorc Camera (packaged app only, owed by the owner) and the talk-show
+// room (S8) are named SKIPs. Nothing goes live.
 //
 // Evidence: VIDEORC_SMOKE_OUTPUT_DIR (the artifacts, a PNG of each output's
 // worst frame and camera-background-report.json).
@@ -37,10 +41,16 @@ import {
 } from './lib/camera-background-leak.mjs'
 import {
   CAMERA_BACKGROUND_OUTPUTS,
-  effectRequestToday,
+  IMAGE_ASSET_ID,
+  cameraBackgroundFor,
+  effectRequestFrom,
   expectationFor,
   finalVerdict,
-  parseSmokeArgs
+  isFullPass,
+  judgeStall,
+  neutralGroundFraction,
+  parseSmokeArgs,
+  passesFor
 } from './lib/camera-background-smoke-plan.mjs'
 import { resolveFinalRecordingPath } from './lib/final-recording-path.mjs'
 import { waitForOwnedTcpListener } from './lib/live-control-recycle-smoke.mjs'
@@ -49,29 +59,34 @@ import { requestSmokeCommand } from './lib/smoke-command-client.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
 
 const { effect } = parseSmokeArgs(process.argv.slice(2))
-const expectation = expectationFor(effect)
+const passes = passesFor(effect)
 const spec = loadFixtureSpec()
-const outputDirectory = resolve(
+const outputRoot = resolve(
   process.env.VIDEORC_SMOKE_OUTPUT_DIR ??
     join(tmpdir(), `videorc-camera-background-smoke-${Date.now()}`)
 )
-const userDataDir = join(outputDirectory, 'user-data')
+const userDataDir = join(outputRoot, 'user-data')
 const ffmpegPath = process.env.VIDEORC_SMOKE_FFMPEG_PATH ?? 'ffmpeg'
 const ffprobePath = process.env.VIDEORC_SMOKE_FFPROBE_PATH ?? 'ffprobe'
 const timeoutMs = Number(process.env.VIDEORC_SMOKE_TIMEOUT_MS ?? 90_000)
-/** How long the session runs with the camera on every output. */
+/** How long a full pass's session runs with the camera on every output. */
 const SESSION_MS = Number(process.env.VIDEORC_CAMERA_BACKGROUND_SESSION_MS ?? 12_000)
-/** Preview samples taken across the session. */
+/** Preview samples taken across a full session. */
 const PREVIEW_SAMPLES = 8
-/** Frames per second decoded from each file. */
+/** Frames per second decoded from each file of a full pass. */
 const SCAN_FPS = 2
 const RTMP_PORT_BASE = Number(process.env.VIDEORC_SMOKE_RTMP_PORT ?? 13985)
 // 720p keeps four encoders light; the fixture's cells are then 13 px in the
 // camera's own raster and about 11 px on the 360x640 vertical leg.
 const VIDEO = { preset: 'custom', width: 1280, height: 720, fps: 30, bitrateKbps: 4000 }
 const VERTICAL_VIDEO = { preset: 'custom', width: 360, height: 640, fps: 30, bitrateKbps: 1500 }
+const BUNDLED_PICTURE = resolve(
+  import.meta.dirname,
+  '..',
+  'apps/desktop/src/renderer/src/assets/backgrounds/podcast.webp'
+)
 
-mkdirSync(outputDirectory, { recursive: true })
+mkdirSync(outputRoot, { recursive: true })
 mkdirSync(userDataDir, { recursive: true })
 const log = (line) => console.log(`[camera-background] ${line}`)
 
@@ -98,28 +113,79 @@ for (const tool of [ffmpegPath, ffprobePath]) {
   }
 }
 
-let stopApp = async () => {}
+let app = null
 const receivers = []
-const events = []
 const report = {
-  plan: '258 S2',
+  plan: '258 S3',
   effect,
-  expectation,
-  outputDirectory,
+  passes: {},
+  outputDirectory: outputRoot,
   fixture: FIXTURE_DIRECTORY,
   startedAt: new Date().toISOString()
 }
 let exitCode = 1
 
 try {
+  app = await launchApp()
+  const setup = await discover(app.ws)
+  report.camera = setup.camera
+  report.screen = setup.screen ? { id: setup.screen.id, name: setup.screen.name } : null
+  for (const pass of passes) {
+    if (pass === 'relaunch') {
+      log('relaunch: quitting the app and starting it again on the same profile')
+      await app.stop()
+      app = await launchApp()
+      setup.screenStarted = false
+    }
+    log(`--- pass ${pass} ---`)
+    const result = await runPass(pass, app, setup).catch((error) => ({
+      verdict: {
+        ok: false,
+        failures: [`${pass}: ${error?.message ?? error}`],
+        lines: [`${pass}: FAIL (${error?.message ?? error})`]
+      },
+      error: String(error?.stack ?? error)
+    }))
+    report.passes[pass] = result
+    for (const line of result.verdict.lines) log(`${pass} · ${line}`)
+  }
+  const failures = Object.entries(report.passes).flatMap(([pass, result]) =>
+    result.verdict.ok ? [] : result.verdict.failures.map((failure) => `${pass}: ${failure}`)
+  )
+  report.ok = failures.length === 0
+  report.finishedAt = new Date().toISOString()
+  if (report.ok) {
+    log(`PASS (${effect}): ${passes.join(', ')}`)
+    exitCode = 0
+  } else {
+    for (const failure of failures) console.error(`[camera-background] FAIL ${failure}`)
+  }
+} catch (error) {
+  report.error = String(error?.stack ?? error)
+  console.error(`[camera-background] FAIL ${error?.message ?? error}`)
+} finally {
+  for (const receiver of receivers) {
+    if (receiver.child.exitCode === null && receiver.child.signalCode === null)
+      receiver.child.kill('SIGTERM')
+  }
+  await app
+    ?.stop()
+    .catch((error) => console.error(`stopping the dev app: ${error?.message ?? error}`))
+  writeFileSync(join(outputRoot, 'camera-background-report.json'), JSON.stringify(report, null, 2))
+  log(`report: ${join(outputRoot, 'camera-background-report.json')}`)
+}
+process.exit(exitCode)
+
+/** The dev app on the isolated profile, its backend socket and its events. */
+async function launchApp() {
   const launch = await launchDevApp({
     env: {
       VIDEORC_FIXTURE_CAMERA: FIXTURE_DIRECTORY,
       VIDEORC_SMOKE_COMMAND_SERVER: '1',
       VIDEORC_SMOKE_PREVIEW_MOTION: '0',
       VIDEORC_NATIVE_PREVIEW_SURFACE: '1',
-      VIDEORC_SMOKE_STATE_DIR: outputDirectory,
-      VIDEORC_SMOKE_OUTPUT_DIR: outputDirectory,
+      VIDEORC_SMOKE_STATE_DIR: outputRoot,
+      VIDEORC_SMOKE_OUTPUT_DIR: outputRoot,
       VIDEORC_USER_DATA_DIR: userDataDir,
       VIDEORC_DATABASE_PATH: join(userDataDir, 'videorc.sqlite3')
     },
@@ -130,9 +196,8 @@ try {
         log(line.replace(/(token|capability).*$/i, '[handshake omitted]'))
     }
   })
-  stopApp = launch.stop
-  const smoke = launch.connections['preview-motion-ready']
   const ws = await connectBackend(launch.connections['backend-ready'], timeoutMs)
+  const events = []
   ws.addEventListener('message', (message) => {
     try {
       const parsed = JSON.parse(message.data)
@@ -142,7 +207,27 @@ try {
       // not JSON
     }
   })
+  // The image pass's picture: main registers the bundled set when the
+  // renderer asks for it; registering it here keeps the pass independent of
+  // that (a refusal is logged, and the pass then fails on a missing picture).
+  try {
+    await request(ws, 5000, 'resource.capability.register_background', {
+      assetId: IMAGE_ASSET_ID,
+      path: BUNDLED_PICTURE
+    })
+  } catch (error) {
+    log(`register_background ${IMAGE_ASSET_ID}: ${error?.message ?? error}`)
+  }
+  return {
+    ws,
+    events,
+    smoke: launch.connections['preview-motion-ready'],
+    stop: launch.stop
+  }
+}
 
+/** The fixture camera, a screen if one is listed, and the pass layout. */
+async function discover(ws) {
   // The fixture camera is listed, and a screen if this host lets the dev app
   // capture one (the Camera file needs a camera and a screen).
   const devices = (await request(ws, timeoutMs, 'devices.list', { ffmpegPath })).devices ?? []
@@ -155,10 +240,7 @@ try {
     )
   }
   const screen = devices.find((device) => device.kind === 'screen' && device.status === 'available')
-  report.camera = camera
-  report.screen = screen ? { id: screen.id, name: screen.name } : null
   log(`camera ${camera.id}; screen ${screen ? screen.id : 'none (the Camera file is a SKIP)'}`)
-
   // Side by side keeps the camera at its own scale in the right 30 % (the
   // fixture's room shows round the figure's head); camera-only when there is
   // no screen.
@@ -185,10 +267,36 @@ try {
     cameraOff: false,
     ...(screen ? { screenId: screen.id } : {})
   }
+  return { camera, screen, layout, cameraRect, sources, screenStarted: false }
+}
 
+/** One pass: the camera (re)started with the pass's background, then its session. */
+async function runPass(pass, appHandle, setup) {
+  const { ws } = appHandle
+  const outputDirectory = join(outputRoot, pass)
+  mkdirSync(outputDirectory, { recursive: true })
+  const background = cameraBackgroundFor(pass)
+  const layout = { ...setup.layout, ...(background ? { cameraBackground: background } : {}) }
+  const expectation = expectationFor(pass)
+  if (pass === 'camera-switch-record') {
+    // A camera switch: the session ends and a new camera store starts armed.
+    await request(ws, timeoutMs, 'preview.camera.stop')
+    await waitFor(
+      async () => {
+        const status = await request(ws, 5000, 'preview.camera.status')
+        return status.state !== 'live' ? status : null
+      },
+      'the camera to stop',
+      15_000
+    )
+  }
   // Warm the camera so the session's first frames already carry it.
-  await request(ws, timeoutMs, 'preview.camera.start', { sources, layout, video: VIDEO })
-  await waitFor(
+  await request(ws, timeoutMs, 'preview.camera.start', {
+    sources: setup.sources,
+    layout,
+    video: VIDEO
+  })
+  const live = await waitFor(
     async () => {
       const status = await request(ws, 5000, 'preview.camera.status')
       return status.state === 'live' && status.framesCaptured > 0 ? status : null
@@ -197,8 +305,8 @@ try {
     20_000
   )
   // And the screen: session.start refuses a screen source with no frames yet.
-  if (screen) {
-    await request(ws, timeoutMs, 'preview.screen.start', { sources, video: VIDEO })
+  if (setup.screen && !setup.screenStarted) {
+    await request(ws, timeoutMs, 'preview.screen.start', { sources: setup.sources, video: VIDEO })
     await waitFor(
       async () => {
         const status = await request(ws, 5000, 'preview.screen.status')
@@ -207,73 +315,225 @@ try {
       'the screen source live with frames',
       20_000
     )
+    setup.screenStarted = true
   }
-
-  const effectRequest = effectRequestToday(effect)
-  report.effectRequest = effectRequest
-  if (!effectRequest.applied) log(`effect ${effect} NOT applied: ${effectRequest.reason}`)
-
-  const outputs = {}
-  const files = await runSession({ ws, smoke, sources, layout, cameraRect, screen, outputs })
-  report.files = files
-
-  for (const output of CAMERA_BACKGROUND_OUTPUTS) {
-    if (output.pending) {
-      outputs[output.id] = { ok: true, skipped: true, reason: output.pending }
-      continue
+  let effectRequest = effectRequestFrom(pass, live)
+  if (!effectRequest.applied) {
+    // The stage arms with the start; give the status poll a beat to say so.
+    const settled = await waitFor(
+      async () => {
+        const status = await request(ws, 5000, 'preview.camera.status')
+        return effectRequestFrom(pass, status).applied ? status : null
+      },
+      `the camera status to show ${pass}`,
+      5_000
+    ).catch(() => null)
+    if (settled) effectRequest = effectRequestFrom(pass, settled)
+  }
+  if (!effectRequest.applied) log(`${pass} NOT applied: ${effectRequest.reason}`)
+  const context = { ...appHandle, setup, layout, expectation, outputDirectory, pass }
+  if (isFullPass(pass)) {
+    const outputs = {}
+    const files = await runSession({ ...context, outputs })
+    for (const output of CAMERA_BACKGROUND_OUTPUTS) {
+      if (output.pending) {
+        outputs[output.id] = { ok: true, skipped: true, reason: output.pending }
+        continue
+      }
+      if (outputs[output.id]) continue // judged during the session (Preview) or skipped
+      const file = files[output.id]
+      if (!file || !existsSync(file)) {
+        outputs[output.id] = { ok: false, failures: [`file missing: ${file}`], file }
+        continue
+      }
+      outputs[output.id] = await judgeFile(file, output.id, expectation, outputDirectory, {
+        fps: SCAN_FPS
+      })
+      log(`${pass} · ${output.label}: ${describe(outputs[output.id])}`)
     }
-    if (outputs[output.id]) continue // judged during the session (Preview) or skipped
-    const file = files[output.id]
-    if (!file || !existsSync(file)) {
-      outputs[output.id] = { ok: false, failures: [`file missing: ${file}`], file }
-      continue
+    const stage = await stageStatus(ws)
+    return {
+      effectRequest,
+      stage,
+      files,
+      outputs,
+      verdict: finalVerdict({ effect: pass, effectRequest, outputs })
     }
-    const scanned = await scanVideoFile(file, { ffmpegPath, ffprobePath, fps: SCAN_FPS, spec })
-    const judged = judgeOutput(scanned.summary, expectation)
-    const evidence = await saveEvidenceFrame(file, output.id, scanned.summary)
-    outputs[output.id] = { ...judged, file, size: [scanned.width, scanned.height], evidence }
-    log(
-      `${output.label}: room in ${judged.leakFrames}/${judged.frames} frames, figure in ${judged.personFrames}, max ${judged.maxPatternTiles} tiles → ${judged.ok ? 'PASS' : 'FAIL'}`
-    )
   }
-
-  const verdict = finalVerdict({ effect, effectRequest, outputs })
-  Object.assign(report, { outputs, verdict, finishedAt: new Date().toISOString() })
-  for (const line of verdict.lines) log(line)
-  if (verdict.ok) {
-    log(
-      `PASS (${effect}): the detector ${effect === 'off' ? 'found the room on' : 'found no room on'} ${verdict.judged} outputs`
-    )
-    exitCode = 0
-  } else {
-    for (const failure of verdict.failures) console.error(`[camera-background] FAIL ${failure}`)
+  const { outputs, stage, stall } = await runShortSession(context)
+  return {
+    effectRequest,
+    stage,
+    stall,
+    outputs,
+    verdict: finalVerdict({
+      effect: pass,
+      effectRequest,
+      outputs,
+      outputIds: Object.keys(outputs)
+    })
   }
-} catch (error) {
-  report.error = String(error?.stack ?? error)
-  console.error(`[camera-background] FAIL ${error?.message ?? error}`)
-} finally {
-  for (const receiver of receivers) {
-    if (receiver.child.exitCode === null && receiver.child.signalCode === null)
-      receiver.child.kill('SIGTERM')
-  }
-  await stopApp().catch((error) =>
-    console.error(`stopping the dev app: ${error?.message ?? error}`)
-  )
-  writeFileSync(
-    join(outputDirectory, 'camera-background-report.json'),
-    JSON.stringify(report, null, 2)
-  )
-  log(`report: ${join(outputDirectory, 'camera-background-report.json')}`)
 }
-process.exit(exitCode)
+
+async function stageStatus(ws) {
+  return (await request(ws, 5000, 'preview.camera.status')).cameraBackground ?? null
+}
+
+function describe(judged) {
+  return `room in ${judged.leakFrames}/${judged.frames} frames, figure in ${judged.personFrames}, max ${judged.maxPatternTiles} tiles → ${judged.ok ? 'PASS' : 'FAIL'}`
+}
+
+async function judgeFile(file, id, expectation, outputDirectory, { fps }) {
+  const scanned = await scanVideoFile(file, { ffmpegPath, ffprobePath, fps, spec })
+  const judged = judgeOutput(scanned.summary, expectation)
+  const evidence = await saveEvidenceFrame(file, id, scanned.summary, outputDirectory)
+  return { ...judged, file, size: [scanned.width, scanned.height], scanFps: fps, evidence }
+}
+
+/** Preview samples of the camera's rect, judged together. */
+async function samplePreview(ws, setup, count, everyMs, outputDirectory, expectation) {
+  const scans = []
+  const failures = []
+  let neutral = null
+  for (let i = 0; i < count; i += 1) {
+    if (everyMs) await sleep(everyMs)
+    try {
+      const sample = await request(ws, 5000, 'preview.debug.sample', {
+        rects: [setup.cameraRect],
+        crop: setup.cameraRect
+      })
+      const { width, height, rgbBase64 } = sample.crop
+      const rgb = new Uint8Array(Buffer.from(rgbBase64, 'base64'))
+      scans.push(scanFrame({ width, height, rgb }, { spec }))
+      neutral = neutralGroundFraction({ width, height, rgb })
+      if (i === count - 1) savePreviewPng(rgb, width, height, outputDirectory)
+    } catch (error) {
+      failures.push(String(error?.message ?? error))
+    }
+  }
+  const summary = summarizeScans(scans, {})
+  const judged = judgeOutput(summary, expectation)
+  return {
+    ...judged,
+    ok: judged.ok && failures.length === 0,
+    failures: [...judged.failures, ...failures.map((text) => `Preview sample failed: ${text}`)],
+    neutralGroundFraction: neutral,
+    evidence: join(outputDirectory, 'preview-last.png')
+  }
+}
+
+/**
+ * A record-only session with every recorded frame scanned: the stall, the
+ * camera switch with Record pressed at once, and the relaunch.
+ */
+async function runShortSession(context) {
+  const { ws, smoke, setup, layout, expectation, outputDirectory, pass } = context
+  const directory = await requestSmokeCommand(
+    smoke,
+    'authorize-smoke-resource',
+    { path: outputDirectory, kind: 'output-directory' },
+    { timeoutMs }
+  )
+  const started = await startSession(ws, {
+    sources: setup.sources,
+    layout,
+    background: null,
+    output: {
+      recordEnabled: true,
+      streamEnabled: false,
+      outputDirectoryCapability: directory.capabilityId,
+      video: VIDEO
+    }
+  })
+  log(`${pass}: session ${started.sessionId} ${started.state}`)
+  const outputs = {}
+  let stall = null
+  if (pass === 'stall') {
+    stall = await holdSegmentation(ws, setup, outputDirectory, expectation)
+    outputs.stall = { ok: stall.ok, failures: stall.failures }
+    outputs.preview = stall.preview
+  } else {
+    outputs.preview = await samplePreview(ws, setup, 6, 400, outputDirectory, expectation)
+  }
+  const stage = await stageStatus(ws)
+  const stopped = await request(ws, timeoutMs, 'session.stop')
+  const recording = await resolveFinalRecordingPath({ started, stopped, timeoutMs: 120_000 })
+  // Every frame, from the first: a raw first frame is the bug this pass hunts.
+  outputs.recording = await judgeFile(recording, 'recording', expectation, outputDirectory, {
+    fps: VIDEO.fps
+  })
+  log(`${pass} · Recording (every frame): ${describe(outputs.recording)}`)
+  return { outputs, stage, stall }
+}
+
+/** D6 in the running app: hold the segment worker, watch the cover take over, release it. */
+async function holdSegmentation(ws, setup, outputDirectory, expectation) {
+  const running = await waitFor(
+    async () => {
+      const stage = await stageStatus(ws)
+      return stage?.state === 'running' && stage.processedFrames > 30 ? stage : null
+    },
+    'processed frames before the stall',
+    15_000
+  )
+  log(
+    `stall: running (segment p95 ${running.segmentMsP95} ms, compose p95 ${running.composeMsP95} ms, GPU p95 ${running.composeGpuMsP95} ms)`
+  )
+  await request(ws, 5000, 'test.cameraBackground.segmentationStall', { stalled: true })
+  let covered = null
+  const preview = { scans: [] }
+  try {
+    covered = await waitFor(
+      async () => {
+        const stage = await stageStatus(ws)
+        return stage?.state === 'cover' ? stage : null
+      },
+      'the cover while the segmenter is held',
+      3_000
+    ).catch(() => null)
+    Object.assign(preview, await samplePreview(ws, setup, 5, 300, outputDirectory, expectation))
+  } finally {
+    await request(ws, 5000, 'test.cameraBackground.segmentationStall', { stalled: false })
+  }
+  const recovered = await waitFor(
+    async () => {
+      const stage = await stageStatus(ws)
+      return stage?.state === 'running' ? stage : null
+    },
+    'processed frames after the stall',
+    5_000
+  ).catch(() => null)
+  await sleep(1500)
+  const judged = judgeStall({
+    coverSeen: Boolean(covered),
+    coverAfterMaskAgeMs: (covered ?? recovered)?.coverAfterMaskAgeMs,
+    recovered: Boolean(recovered),
+    fps: VIDEO.fps
+  })
+  log(
+    `stall: cover took over with a ${(covered ?? recovered)?.coverAfterMaskAgeMs} ms old matte (budget ${judged.budgetMs} ms) → ${judged.ok ? 'PASS' : 'FAIL'}`
+  )
+  return { ...judged, running, covered, recovered, preview }
+}
 
 /**
  * One record + stream (both legs) session with the Clips ring, a Clip saved,
  * and the separate Camera file when a screen exists. Samples the Preview
  * while it runs (judged into `outputs.preview`). Returns each output's file.
  */
-async function runSession({ ws, smoke, sources, layout, cameraRect, screen, outputs }) {
+async function runSession({
+  ws,
+  smoke,
+  events,
+  setup,
+  layout,
+  expectation,
+  outputDirectory,
+  outputs
+}) {
+  const { sources, screen } = setup
   const targets = []
+  const sinks = []
   for (const orientation of ['horizontal', 'vertical']) {
     const port = await freeTcpPort(RTMP_PORT_BASE + targets.length * 20)
     const target = {
@@ -292,6 +552,7 @@ async function runSession({ ws, smoke, sources, layout, cameraRect, screen, outp
     }
     const receiver = startReceiver(target, join(outputDirectory, `stream-${orientation}.flv`))
     receivers.push(receiver)
+    sinks.push(receiver)
     await waitForOwnedTcpListener({
       child: receiver.child,
       port,
@@ -349,40 +610,23 @@ async function runSession({ ws, smoke, sources, layout, cameraRect, screen, outp
 
   // The Preview: full-resolution pixels of the camera's rect, spread over
   // the session (the Clip below needs the ring to fill anyway).
-  const previewScans = []
-  const previewFailures = []
-  const sampleEveryMs = SESSION_MS / PREVIEW_SAMPLES
-  for (let i = 0; i < PREVIEW_SAMPLES; i += 1) {
-    await sleep(sampleEveryMs)
-    try {
-      const sample = await request(ws, 5000, 'preview.debug.sample', {
-        rects: [cameraRect],
-        crop: cameraRect
-      })
-      const { width, height, rgbBase64 } = sample.crop
-      const rgb = new Uint8Array(Buffer.from(rgbBase64, 'base64'))
-      previewScans.push(scanFrame({ width, height, rgb }, { spec }))
-      if (i === PREVIEW_SAMPLES - 1) savePreviewPng(rgb, width, height)
-    } catch (error) {
-      previewFailures.push(String(error?.message ?? error))
-    }
-  }
-  const previewSummary = summarizeScans(previewScans, {
-    fps: PREVIEW_SAMPLES / (SESSION_MS / 1000)
-  })
-  const previewJudged = judgeOutput(previewSummary, expectation)
-  outputs.preview = {
-    ...previewJudged,
-    ok: previewJudged.ok && previewFailures.length === 0,
-    failures: [
-      ...previewJudged.failures,
-      ...previewFailures.map((text) => `Preview sample failed: ${text}`)
-    ],
-    evidence: join(outputDirectory, 'preview-last.png')
-  }
-  log(
-    `Preview: room in ${previewSummary.leakFrames}/${previewSummary.frames} samples, figure in ${previewSummary.personFrames}`
+  outputs.preview = await samplePreview(
+    ws,
+    setup,
+    PREVIEW_SAMPLES,
+    SESSION_MS / PREVIEW_SAMPLES,
+    outputDirectory,
+    expectation
   )
+  log(
+    `Preview: room in ${outputs.preview.leakFrames}/${outputs.preview.frames} samples, figure in ${outputs.preview.personFrames}`
+  )
+  if (layout.cameraBackground?.mode === 'image' && outputs.preview.neutralGroundFraction > 0.5) {
+    outputs.preview.ok = false
+    outputs.preview.failures.push(
+      `the picture never drew: ${Math.round(outputs.preview.neutralGroundFraction * 100)} % of the camera is the neutral ground`
+    )
+  }
 
   const accepted = await request(ws, timeoutMs, 'replay.save', { seconds: 30 })
   const saved = await waitFor(
@@ -399,7 +643,7 @@ async function runSession({ ws, smoke, sources, layout, cameraRect, screen, outp
     throw new Error(`the Clip save failed: ${JSON.stringify(saved.payload)}`)
   const stopped = await request(ws, timeoutMs, 'session.stop')
   const recording = await resolveFinalRecordingPath({ started, stopped, timeoutMs: 120_000 })
-  for (const receiver of receivers) await waitForExit(receiver, 20_000)
+  for (const receiver of sinks) await waitForExit(receiver, 20_000)
   if (!screen) {
     outputs['camera-file'] = {
       ok: true,
@@ -410,8 +654,8 @@ async function runSession({ ws, smoke, sources, layout, cameraRect, screen, outp
   }
   return {
     recording,
-    'stream-horizontal': receivers[0].path,
-    'stream-vertical': receivers[1].path,
+    'stream-horizontal': sinks[0].path,
+    'stream-vertical': sinks[1].path,
     clip: saved.payload.path,
     'camera-file': screen ? takeSiblingPaths(recording).camera : null
   }
@@ -434,7 +678,7 @@ async function startSession(ws, params) {
   }
 }
 
-async function saveEvidenceFrame(file, id, summary) {
+async function saveEvidenceFrame(file, id, summary, outputDirectory) {
   const seconds = summary.worstSeconds ?? 1
   try {
     return await saveFramePng(file, seconds, join(outputDirectory, `${id}-frame.png`), {
@@ -445,7 +689,7 @@ async function saveEvidenceFrame(file, id, summary) {
   }
 }
 
-function savePreviewPng(rgb, width, height) {
+function savePreviewPng(rgb, width, height, outputDirectory) {
   const child = spawn(
     ffmpegPath,
     [

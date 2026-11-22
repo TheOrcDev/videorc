@@ -4070,6 +4070,37 @@ describe('Camera system effect on the camera status (plan 258 S4)', () => {
   })
 })
 
+describe('Camera effect stage on the camera status (plan 258 S3)', () => {
+  const fixture = JSON.parse(
+    readFileSync(
+      new URL('../../../../protocol-fixtures/camera-background-status.json', import.meta.url),
+      'utf8'
+    )
+  )
+
+  it('accepts what the backend sends, field for field', () => {
+    for (const name of ['running', 'cover', 'unavailable']) {
+      expect(validateBackendEventPayload('preview.camera.status', fixture[name])).toEqual(
+        fixture[name]
+      )
+      expect(validateBackendRpcResult('preview.camera.status', fixture[name])).toEqual(
+        fixture[name]
+      )
+    }
+  })
+
+  it('rejects a stage status it does not know', () => {
+    for (const cameraBackground of fixture.rejectedCameraBackground) {
+      expect(() =>
+        validateBackendEventPayload('preview.camera.status', {
+          ...fixture.cover,
+          cameraBackground
+        })
+      ).toThrow()
+    }
+  })
+})
+
 describe('Camera low-light compensation wire contract (issue #1066)', () => {
   const fixture = JSON.parse(
     readFileSync(
