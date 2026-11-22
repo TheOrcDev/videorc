@@ -15159,12 +15159,16 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
       captionsStartAttemptedRef.current = true
       captionsStopAttemptedRef.current = false
       const language = captureConfig.captions.language
-      // The entry's Retry may run after a reconnect: it asks the Studio's
-      // current client, never the one this render had.
-      const start = (): void => {
-        void startCaptionsRef.current(language).catch((error: unknown) => {
-          withAppNotifications((app) => app.publishCaptionsStartFailure(error, start))
+      const start = (current = language): void => {
+        void startCaptionsRef.current(current).catch((error: unknown) => {
+          withAppNotifications((app) => app.publishCaptionsStartFailure(error, retry))
         })
+      }
+      // The entry's Retry may be pressed later: it asks the Studio's current
+      // client, in the language chosen now, and only while captions are on.
+      const retry = (): void => {
+        const { captions } = captureConfigRef.current
+        if (captions.enabled) start(captions.language)
       }
       start()
     } else if (action === 'stop') {
