@@ -40,11 +40,7 @@ import {
 } from '@/lib/camera-frame-rate'
 import type { CameraLowLightRequest } from '@/hooks/use-camera-low-light'
 import { cameraLookLayout, normalizeCameraLook, createCameraLookThrottle } from '@/lib/camera-look'
-import {
-  cameraBackgroundLayout,
-  cameraOutputLayout,
-  migrateCameraBackgrounds
-} from '@/lib/camera-background'
+import { cameraOutputLayout, migrateCameraBackgrounds } from '@/lib/camera-background'
 import type { ChatOverlayDriver } from '@/lib/chat-overlay'
 import type { MicrophonePermissionProof } from '@/lib/system-permission-orchestration'
 import { isReplacementPermissionClient } from '@/lib/permission-evidence'
@@ -11055,18 +11051,13 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
       }
       try {
         const adapter = await import('@/lib/cloud-scene-adapter')
-        const commit = plan(adapter, state)
         // Plan 258: a room's idle commit is an output boundary too, so the
-        // selected camera's background goes with it, as on a native switch.
-        const layout = cameraBackgroundLayout(
-          commit.params.layout,
-          commit.params.sources.cameraId,
-          settingsRef.current.cameraBackgrounds
+        // selected camera's look and background go with it, as on a native
+        // switch.
+        const snapshot = await adapter.commitSceneIdle(
+          client,
+          adapter.idleCommitOutput(plan(adapter, state), settingsRef.current)
         )
-        const snapshot = await adapter.commitSceneIdle(client, {
-          ...commit,
-          params: { ...commit.params, layout }
-        })
         applyCommittedScene(snapshot)
         applyLayoutTransactionState(snapshot)
         return true
