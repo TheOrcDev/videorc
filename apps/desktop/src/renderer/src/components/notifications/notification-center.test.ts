@@ -49,7 +49,8 @@ describe('NotificationCenter (plan 250, "The dropdown")', () => {
   beforeEach(() => {
     vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
     vi.clearAllMocks()
-    store = createNotificationStore()
+    // A recording with quiet off, so a pop-up would show (idle is the bell only).
+    store = createNotificationStore({ live: () => true, quiet: () => false })
     onClose = vi.fn()
     container = document.createElement('div')
     document.body.append(container)

@@ -52,10 +52,12 @@ function entry(patch: Partial<NotificationEntry>): NotificationEntry {
 
 describe('popUpDecision (plan 250, "What pops up")', () => {
   // The plan's table: tone by idle, recording or live with quiet on, quiet off.
+  // Idle is the bell only (the owner, 2026-11-22: "we said we are going to
+  // put everything inside of our notifications").
   const table: [NotificationTone, number | null, number | null, number | null][] = [
-    ['urgent', URGENT_POP_UP_MS, URGENT_POP_UP_MS, URGENT_POP_UP_MS],
-    ['warning', POP_UP_MS, null, POP_UP_MS],
-    ['done', POP_UP_MS, null, POP_UP_MS],
+    ['urgent', null, URGENT_POP_UP_MS, URGENT_POP_UP_MS],
+    ['warning', null, null, POP_UP_MS],
+    ['done', null, null, POP_UP_MS],
     ['news', null, null, null]
   ]
   it.each(table)('%s: idle, live and quiet, quiet off', (tone, idle, quietLive, loudLive) => {
@@ -63,6 +65,23 @@ describe('popUpDecision (plan 250, "What pops up")', () => {
     expect(popUpDecision(question({ tone, live: false, quiet: false }))).toBe(idle)
     expect(popUpDecision(question({ tone, live: true, quiet: true }))).toBe(quietLive)
     expect(popUpDecision(question({ tone, live: true, quiet: false }))).toBe(loudLive)
+  })
+
+  it('a recording or livestream that failed pops up although it ended: it is not "live" now', () => {
+    expect(popUpDecision(question({ tone: 'urgent', failedSession: true }))).toBe(URGENT_POP_UP_MS)
+    // An urgent report on a subject that may be urgent while idle (the
+    // engine, the microphone) waits behind the bell.
+    expect(popUpDecision(question({ tone: 'urgent' }))).toBeNull()
+    expect(popUpDecision(question({ tone: 'warning', failedSession: true }))).toBeNull()
+    // In the first minute, only after a press.
+    expect(
+      popUpDecision(question({ tone: 'urgent', failedSession: true, launching: true }))
+    ).toBeNull()
+    expect(
+      popUpDecision(
+        question({ tone: 'urgent', failedSession: true, launching: true, pressed: true })
+      )
+    ).toBe(URGENT_POP_UP_MS)
   })
 
   it('the late answer to a press pops up briefly, quiet or not', () => {
@@ -120,19 +139,22 @@ describe('popUpDecision (plan 250, "What pops up")', () => {
   it('coming back pops up only after five minutes of being fine', () => {
     const lastPop = { at: 0, tone: 'urgent' as const }
     const back = (fineForMs: number): number | null =>
-      popUpDecision(question({ tone: 'urgent', change: 'returned', lastPop, fineForMs }))
+      popUpDecision(
+        question({ tone: 'urgent', change: 'returned', live: true, lastPop, fineForMs })
+      )
     expect(back(REALERT_AFTER_MS - 1)).toBeNull()
     expect(back(REALERT_AFTER_MS)).toBe(URGENT_POP_UP_MS)
     // It never popped up before (it opened while quiet): the table decides.
-    expect(popUpDecision(question({ tone: 'urgent', change: 'returned', fineForMs: 90_000 }))).toBe(
-      URGENT_POP_UP_MS
-    )
+    expect(
+      popUpDecision(question({ tone: 'urgent', change: 'returned', live: true, fineForMs: 90_000 }))
+    ).toBe(URGENT_POP_UP_MS)
     // Back and worse than what popped up last time.
     expect(
       popUpDecision(
         question({
           tone: 'urgent',
           change: 'returned',
+          live: true,
           fineForMs: 90_000,
           lastPop: { at: 0, tone: 'warning' }
         })
@@ -143,7 +165,14 @@ describe('popUpDecision (plan 250, "What pops up")', () => {
   it('an event that repeats pops up again only five minutes after its last pop-up', () => {
     const repeat = (now: number): number | null =>
       popUpDecision(
-        question({ tone: 'warning', change: 'repeated', now, lastPop: { at: 0, tone: 'warning' } })
+        question({
+          tone: 'warning',
+          change: 'repeated',
+          live: true,
+          quiet: false,
+          now,
+          lastPop: { at: 0, tone: 'warning' }
+        })
       )
     expect(repeat(REALERT_AFTER_MS - 1)).toBeNull()
     expect(repeat(REALERT_AFTER_MS)).toBe(POP_UP_MS)
@@ -340,14 +369,6 @@ describe('popUpDecision at launch (the owner, 2026-11-22: no toasts when you ope
     }
   )
 
-  it('an announcement waits behind the bell at launch, and pops up after it', () => {
-    expect(popUpDecision(launch({ tone: 'news', announcement: true }))).toBeNull()
-    expect(popUpDecision(launch({ tone: 'news', announcement: true, pressed: true }))).toBeNull()
-    expect(popUpDecision(question({ tone: 'news', announcement: true }))).toBe(
-      PRESS_ANSWER_POP_UP_MS
-    )
-  })
-
   it('the answer to a press still pops up once the streamer has pressed something', () => {
     expect(popUpDecision(launch({ tone: 'done', answersAPress: true }))).toBeNull()
     expect(popUpDecision(launch({ tone: 'done', answersAPress: true, pressed: true }))).toBe(
@@ -379,7 +400,10 @@ describe('popUpDecision at launch (the owner, 2026-11-22: no toasts when you ope
     expect(popUpDecision(launch({ tone: 'done', pressed: true }))).toBeNull()
   })
 
-  it('after the first minute the plan 250 table applies again', () => {
-    expect(popUpDecision(question({ tone: 'warning', launching: false }))).toBe(POP_UP_MS)
+  it('after the first minute the plan 250 table applies again: idle stays behind the bell', () => {
+    expect(popUpDecision(question({ tone: 'warning', launching: false }))).toBeNull()
+    expect(
+      popUpDecision(question({ tone: 'warning', launching: false, live: true, quiet: false }))
+    ).toBe(POP_UP_MS)
   })
 })

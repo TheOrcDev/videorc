@@ -176,7 +176,7 @@ describe('Videorc Cloud as notifications (plan 250 S6)', () => {
     })
   })
 
-  it('"Videorc Cloud is on" pops up once, with the way to its section, and tells the backend', async () => {
+  it('"Videorc Cloud is on" waits behind the bell, counted, with the way to its section, and tells the backend', async () => {
     const requestTyped = vi.fn(async () => base)
     const commit = vi.fn()
     announceCloud({ requestTyped } as never, commit, store)
@@ -185,8 +185,8 @@ describe('Videorc Cloud as notifications (plan 250 S6)', () => {
       title: 'Videorc Cloud is on',
       actions: [{ label: 'Open Destinations', kind: 'door' }]
     })
-    expect(door.show).toHaveBeenCalledTimes(1)
-    expect(door.show.mock.calls[0][1]).toBe(8_000)
+    expect(door.show).not.toHaveBeenCalled()
+    expect(store.count().unread).toBe(1)
     await vi.waitFor(() => expect(commit).toHaveBeenCalledWith(base))
     expect(requestTyped).toHaveBeenCalledWith('cloud.announce.seen')
   })

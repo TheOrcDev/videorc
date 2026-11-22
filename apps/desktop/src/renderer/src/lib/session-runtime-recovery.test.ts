@@ -32,6 +32,11 @@ import {
   sourceFallbackTitle
 } from '@/lib/session-runtime-recovery'
 
+// These reports arrive while a recording runs, with "Quiet while recording or
+// live" off: the row of plan 250's table where a warning pops up, so the
+// tests see each pop-up's words. Idle is the bell only (store tests).
+notifications.configure({ live: () => true, quiet: () => false })
+
 function failedSession(mode: string): SessionSummary {
   return {
     id: 'failed-session',
